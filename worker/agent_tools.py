@@ -13963,8 +13963,16 @@ def remove_custom_filter(ctx, id):
     return ctx.write_edl(edl, f"removed custom filter '{name}' ({id})")
 
 
-# (lo, hi, neutral) per custom-grade axis — the neutral value IS the absence
-# of the control, so passing it clears the axis (schema normalizes the same).
+# (lo, hi, neutral) per stored custom-grade axis — the neutral value IS the
+# absence of the control, so passing it clears the axis (schema normalizes the
+# same).  The public tool is deliberately more forgiving for contrast and
+# saturation: every other axis uses 0 as neutral, and production agents kept
+# sending small deltas such as ``contrast=0.08`` / ``saturation=0.06``.  The
+# old implementation silently clamped the first to 0.5 and rendered the
+# second literally, turning a request for ORIGINAL colour almost monochrome.
+# Small signed values are therefore accepted as deltas around the 1.0 stored
+# multiplier; existing callers that pass an explicit multiplier >= 0.5 keep
+# the old contract.
 _GRADE_AXES = {"exposure": (-1.0, 1.0, 0.0), "contrast": (0.5, 1.6, 1.0),
                "shadows": (-1.0, 1.0, 0.0), "highlights": (-1.0, 1.0, 0.0),
                "saturation": (0.0, 2.0, 1.0), "temperature": (-1.0, 1.0, 0.0),
@@ -13981,8 +13989,9 @@ def set_grade_custom(ctx, exposure=None, contrast=None, saturation=None,
             "tint": tint, "shadows": shadows, "highlights": highlights}
     if all(v is None for v in vals.values()):
         return ("REJECTED: pass at least one axis — exposure -1..1, "
-                "contrast 0.5..1.6 (1.0 neutral), saturation 0..2 (1.0 "
-                "neutral), temperature -1 (cool)..1 (warm), tint -1 "
+                "contrast/saturation as a small signed delta (0 clears) "
+                "or an explicit >=0.5x multiplier, temperature -1 (cool)..1 "
+                "(warm), tint -1 "
                 "(green)..1 (magenta), shadows -1..1 (positive lifts the "
                 "darks), highlights -1..1 (negative recovers blown areas). "
                 "An axis's neutral value clears it.")
@@ -13998,15 +14007,37 @@ def set_grade_custom(ctx, exposure=None, contrast=None, saturation=None,
             continue                      # leave that axis alone
         lo, hi, neutral = _GRADE_AXES[axis]
         try:
-            fv = round(min(max(float(v), lo), hi), 3)
+            requested = float(v)
         except (TypeError, ValueError):
             return f"REJECTED: {axis} must be a number ({lo:g} to {hi:g})."
+        delta = False
+        if axis in ("contrast", "saturation") and requested < 0.5:
+            # 0 clears, +0.08 means a restrained 8% lift, -0.08 an 8% cut.
+            # Intentional monochrome belongs to the explicit 'bw' preset;
+            # this compatibility path prevents an accidental 0.08x render.
+            requested = 1.0 + requested
+            delta = True
+        if requested < lo or requested > hi:
+            if axis in ("contrast", "saturation"):
+                return (f"REJECTED: {axis} resolves to {requested:g}x but "
+                        f"must be {lo:g}x to {hi:g}x. Pass 0 to clear, a "
+                        "small signed delta such as +0.08/-0.08 for a "
+                        "natural adjustment, or an explicit multiplier "
+                        "from 0.5 upward. Use set_color_grade('bw') for "
+                        "monochrome.")
+            return f"REJECTED: {axis} must be a number ({lo:g} to {hi:g})."
+        fv = round(requested, 3)
         if abs(fv - neutral) < 1e-6:
             gc.pop(axis, None)
             bits.append(f"{axis} cleared")
         else:
             gc[axis] = fv
-            bits.append(f"{axis} {fv:+g}")
+            if axis in ("contrast", "saturation"):
+                detail = (f"{float(v):+g} delta -> {fv:g}x"
+                          if delta else f"{fv:g}x")
+                bits.append(f"{axis} {detail}")
+            else:
+                bits.append(f"{axis} {fv:+g}")
     fx["grade_custom"] = gc or None
     edl["effects"] = fx
     res = ctx.write_edl(edl, "custom grade: " + ", ".join(bits))
@@ -22555,8 +22586,14 @@ TOOLS = {
                          "all footage, applied AFTER the preset grade (the "
                          "two compose — 'cinematic but warmer' = preset "
                          "cinematic + temperature 0.2): exposure -1..1, "
-                         "contrast 0.5..1.6 (1.0 neutral), saturation 0..2 "
-                         "(1.0 neutral), temperature -1 (cool)..1 (warm), "
+                         "contrast and saturation accept either a SMALL "
+                         "SIGNED DELTA around neutral (preferred: +0.08 is "
+                         "a restrained lift, -0.08 a reduction, 0 clears) "
+                         "or an explicit final multiplier >=0.5 (1.0 is "
+                         "neutral; contrast max 1.6, saturation max 2.0). "
+                         "Never pass 0.06 intending 6% color: it is treated "
+                         "as +6% and stored as 1.06x. Use the explicit 'bw' "
+                         "preset for monochrome. Temperature -1 (cool)..1 (warm), "
                          "tint -1 (green)..1 (magenta), shadows -1..1 "
                          "(positive LIFTS the dark regions — the answer to "
                          "'brighten the shadows / too dark in the corners'), "

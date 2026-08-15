@@ -241,6 +241,40 @@ def test_shadows_neutral_clears_the_axis():
     assert not (ctx.written["effects"].get("grade_custom") or {})
 
 
+def test_grade_zero_clears_contrast_and_saturation_instead_of_desaturating():
+    """Production project 926 asked for ORIGINAL colour.  The model passed
+    zero for every axis, but zero used to clamp contrast to 0.5 and store
+    saturation 0.0, making the proof reel monochrome forever."""
+    ctx = _GradeCtx()
+    ctx._edl["json"]["effects"] = {
+        "grade_custom": {"contrast": 0.5, "saturation": 0.06,
+                         "temperature": 0.08}}
+    r = agent_tools.set_grade_custom(ctx, contrast=0, saturation=0,
+                                     temperature=0)
+    assert r.startswith("EDL v")
+    assert not (ctx.written["effects"].get("grade_custom") or {})
+
+
+def test_grade_small_contrast_and_saturation_values_are_natural_deltas():
+    """The agent naturally writes +0.08 for an eight-percent lift.  Preserve
+    that intent rather than silently clamping/near-monochroming the footage."""
+    ctx = _GradeCtx()
+    r = agent_tools.set_grade_custom(ctx, contrast=0.08, saturation=0.06)
+    assert r.startswith("EDL v")
+    gc = ctx.written["effects"]["grade_custom"]
+    assert gc["contrast"] == 1.08
+    assert gc["saturation"] == 1.06
+    assert "delta" in r
+
+
+def test_grade_explicit_multipliers_remain_backward_compatible():
+    ctx = _GradeCtx()
+    agent_tools.set_grade_custom(ctx, contrast=1.2, saturation=0.8)
+    gc = ctx.written["effects"]["grade_custom"]
+    assert gc["contrast"] == 1.2
+    assert gc["saturation"] == 0.8
+
+
 def test_grade_curve_points_stay_monotone_at_the_extremes():
     """The renderer's five curve points must be strictly increasing for every
     in-range value — ffmpeg rejects a non-monotone master curve, which would

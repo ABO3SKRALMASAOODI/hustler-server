@@ -78,7 +78,7 @@
       "emphasis-word tinting (add_captions emphasis, accent_color)",
       "whip/glitch junctions (set_transitions), flashes",
       "music bed + fades (add_music, set_fades, set_music_fit)",
-      "near-monochrome grade + accent (set_grade_custom saturation down)",
+      "near-monochrome grade + accent (set_color_grade bw; do not encode monochrome as a near-zero saturation delta)",
       "title cards / color screens for the CTA (add_title_card, add_color_screen)"
     ],
     "gaps": [
