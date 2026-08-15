@@ -522,21 +522,23 @@ def _on_shutdown(signum, _frame):
     """
     DRAINING.set()
     agent_loop.SHUTDOWN.set()
-    ids = dbx.active_job_ids()
+    ids = dbx.locally_owned_job_ids()
+    remote_ids = dbx.remote_owned_job_ids()
     try:
         n = dbx.Db().run(dbx.release_jobs, ids)
         print(f"[shutdown] signal {signum}: handed {n} of {len(ids)} in-flight "
-              "job(s) back to the queue", flush=True)
+              f"locally-owned job(s) back to the queue; preserving "
+              f"{len(remote_ids)} durable remote job(s)", flush=True)
     except Exception as e:
         # Best effort — if we can't reach the DB the reaper still cleans up,
         # just the slower, attempt-charging way.
         print(f"[shutdown] could not release jobs: {e}", flush=True)
     deadline = time.time() + config.SHUTDOWN_GRACE_S
-    while time.time() < deadline and dbx.active_job_ids():
+    while time.time() < deadline and dbx.locally_owned_job_ids():
         time.sleep(0.5)
-    left = len(dbx.active_job_ids())
+    left = len(dbx.locally_owned_job_ids())
     if left:
-        print(f"[shutdown] {left} job(s) still running at the wire — the "
+        print(f"[shutdown] {left} local job(s) still running at the wire — the "
               "reaper will surface them", flush=True)
     os._exit(0)
 

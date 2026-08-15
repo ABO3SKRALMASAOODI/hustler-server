@@ -21,6 +21,7 @@ import shutil
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import pytest
 
@@ -95,6 +96,23 @@ def test_claim_counts_a_claim_that_release_can_never_refund():
         "the deploy refund is deliberate and must survive"
     assert "total_claims" not in rel, \
         "refunding total_claims would restore exactly the bug this fixes"
+
+
+def test_durable_remote_job_stays_heartbeated_but_is_not_releaseable():
+    """A dispatcher deploy must not buy a second Modal call after spawn."""
+    job_id = 730073
+    try:
+        wdb.track_job(job_id)
+        wdb.mark_remote_owned(job_id)
+        assert job_id in wdb.active_job_ids()
+        assert job_id in wdb.remote_owned_job_ids()
+        assert job_id not in wdb.locally_owned_job_ids()
+    finally:
+        wdb.untrack_job(job_id)
+    assert job_id not in wdb.remote_owned_job_ids()
+
+    shutdown = (Path(__file__).resolve().parents[1] / "main.py").read_text()
+    assert "ids = dbx.locally_owned_job_ids()" in shutdown
 
 
 def test_queue_still_works_before_the_migration_has_run():

@@ -3,6 +3,8 @@
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 ".."))
 
@@ -82,12 +84,15 @@ def test_success_uses_durable_modal_function_and_marks_completion(monkeypatch):
     function = _Function(_Call({
         "result": {"render_asset_id": 99}, "job_completed": True}))
     monkeypatch.setattr(remote, "_modal_function", lambda name: function)
+    owned = []
+    monkeypatch.setattr(remote.dbx, "mark_remote_owned", owned.append)
 
     result = remote._run_remote(JOB)
 
     assert result["render_asset_id"] == 99
     assert result.pop("_remote_job_completed") is True
     assert function.jobs[0]["total_claims"] == 4
+    assert owned == [42]
 
 
 def test_prelaunch_failure_can_fall_back_to_cloud_run(monkeypatch):
@@ -104,6 +109,28 @@ def test_prelaunch_failure_can_fall_back_to_cloud_run(monkeypatch):
 
     assert remote._run_remote(JOB) == {"ok": True}
     assert seen == [42]
+
+
+def test_rejected_modal_launch_restores_local_shutdown_ownership(monkeypatch):
+    _enable(monkeypatch)
+
+    class Rejected:
+        @staticmethod
+        def spawn(_job):
+            raise RuntimeError("control plane rejected launch")
+
+    events = []
+    monkeypatch.setattr(remote, "_modal_function", lambda _name: Rejected())
+    monkeypatch.setattr(
+        remote.dbx, "mark_remote_owned",
+        lambda job_id: events.append(("mark", job_id)))
+    monkeypatch.setattr(
+        remote.dbx, "unmark_remote_owned",
+        lambda job_id: events.append(("unmark", job_id)))
+
+    with pytest.raises(remote.ModalLaunchUnavailable):
+        remote._run_modal(JOB)
+    assert events == [("mark", 42), ("unmark", 42)]
 
 
 def test_postlaunch_transport_failure_reconnects_without_cloud_fallback(

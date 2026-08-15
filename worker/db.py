@@ -775,6 +775,11 @@ def publish_mcp_catalog(conn, catalog):
 # ------------------------------------------------------------------ #
 
 ACTIVE_JOBS = set()
+# A successful Modal spawn transfers heartbeat + terminal-write ownership to
+# the durable remote function. Keep these jobs in ACTIVE_JOBS so this process
+# covers the cold-start gap, but do not hand them back to the queue when Render
+# SIGTERMs the dispatcher for a deploy: the Modal executor is still running.
+REMOTE_OWNED_JOBS = set()
 _ACTIVE_LOCK = threading.Lock()
 
 
@@ -783,9 +788,31 @@ def track_job(job_id):
         ACTIVE_JOBS.add(job_id)
 
 
+def mark_remote_owned(job_id):
+    with _ACTIVE_LOCK:
+        if job_id in ACTIVE_JOBS:
+            REMOTE_OWNED_JOBS.add(job_id)
+
+
+def unmark_remote_owned(job_id):
+    with _ACTIVE_LOCK:
+        REMOTE_OWNED_JOBS.discard(job_id)
+
+
 def untrack_job(job_id):
     with _ACTIVE_LOCK:
         ACTIVE_JOBS.discard(job_id)
+        REMOTE_OWNED_JOBS.discard(job_id)
+
+
+def remote_owned_job_ids():
+    with _ACTIVE_LOCK:
+        return list(REMOTE_OWNED_JOBS)
+
+
+def locally_owned_job_ids():
+    with _ACTIVE_LOCK:
+        return list(ACTIVE_JOBS - REMOTE_OWNED_JOBS)
 
 
 def heartbeat_forever():

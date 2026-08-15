@@ -538,9 +538,18 @@ def _run_modal(job, function_override=None):
         print(f"[dispatcher] Modal EU canary type={job.get('type')} "
               f"job={job.get('id')} project={job.get('project_id')} "
               f"function={name}", flush=True)
+    remote_handoff = job.get("id") is not None
+    if remote_handoff:
+        # Reserve ownership immediately before the launch request. This closes
+        # the narrow race where Render can SIGTERM between Modal accepting a
+        # call and this thread recording that acceptance. A rejected launch
+        # restores ordinary local ownership below.
+        dbx.mark_remote_owned(job["id"])
     try:
         call = function.spawn(_job_payload(job))
     except Exception as exc:
+        if remote_handoff:
+            dbx.unmark_remote_owned(job["id"])
         raise ModalLaunchUnavailable(
             f"Modal rejected {name} before launch: {exc}") from exc
     call_id = call.object_id
