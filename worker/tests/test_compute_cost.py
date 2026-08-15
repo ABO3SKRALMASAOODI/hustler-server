@@ -70,6 +70,7 @@ def test_modal_profiles_include_right_sized_memory_and_idle_tail(monkeypatch):
         < timings["gross_compute_usd_ceiling"]
     assert timings["gross_compute_usd_with_tail_ceiling"] \
         > timings["gross_compute_usd_ceiling"]
+    assert compute_cost.MODAL_PROFILES["egress"][1:3] == (2, 32)
 
 
 def test_eu_profile_uses_us_equivalent_shape_and_labels_region(monkeypatch):
