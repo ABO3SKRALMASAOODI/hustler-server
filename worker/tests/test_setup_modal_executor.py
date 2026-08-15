@@ -10,6 +10,11 @@ def _service(proxy_item):
         {"name": "S3_ACCESS_KEY_ID", "value": "access"},
         {"name": "S3_SECRET_ACCESS_KEY", "value": "secret"},
         {"name": "S3_BUCKET", "value": "bucket"},
+        {"name": "REMOTE_EXECUTOR_URL",
+         "value": "https://old-executor.example"},
+        {"name": "REMOTE_EXECUTOR_PREVIEW_URL",
+         "value": "https://old-preview.example"},
+        {"name": "MODAL_CLOUD_RUN_FALLBACK", "value": "1"},
         proxy_item,
     ]
     return {
@@ -44,7 +49,9 @@ def test_service_env_resolves_secret_manager_values(monkeypatch):
 
     assert env["YTDLP_PROXY"] == (
         "http://proxy-user:proxy-pass@proxy.example:8000")
-    assert env["REMOTE_EXECUTOR_URL"] == "https://executor.example"
+    assert env["REMOTE_EXECUTOR_URL"] == ""
+    assert env["MODAL_CLOUD_RUN_FALLBACK"] == "0"
+    assert "REMOTE_EXECUTOR_PREVIEW_URL" not in env
     assert len(calls) == 2
 
 

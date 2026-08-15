@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""Copy the proven Cloud Run runtime environment into a Modal Secret.
+"""Copy storage/database/egress settings into the Modal production Secret.
 
 Values are piped through a mode-0600 temporary JSON file and are never printed.
 Requires active ``gcloud`` and ``modal`` logins. Safe to rerun.
 
-Cloud Run may expose an environment variable through Secret Manager instead of
-an inline value. Resolve those references explicitly so an operator adding a
-secret such as ``YTDLP_PROXY`` does not silently leave Modal on direct egress.
+The retired Cloud Run service is currently the source of several shared
+storage/database secrets. It may expose an environment variable through Secret
+Manager instead of an inline value, so resolve those references explicitly.
+Executor URLs and rollback switches are deliberately excluded: refreshing the
+paid YouTube proxy must never reconnect Modal production to the retired Google
+executor.
 """
 
 import json
@@ -22,6 +25,14 @@ SERVICE = os.getenv("GCP_EXECUTOR_SERVICE", "valmera-executor")
 SECRET = os.getenv("MODAL_EXECUTOR_SECRET_NAME",
                    "valmera-executor-production")
 ENVIRONMENT = os.getenv("MODAL_ENVIRONMENT", "main")
+
+RETIRED_EXECUTOR_SETTINGS = {
+    "REMOTE_EXECUTOR_URL",
+    "REMOTE_EXECUTOR_PREVIEW_URL",
+    "REMOTE_EXECUTOR_BATCH_URL",
+    "REMOTE_AGENT_EXECUTOR_URL",
+    "MODAL_CLOUD_RUN_FALLBACK",
+}
 
 
 def _secret_ref_value(ref, env_name):
@@ -53,9 +64,10 @@ def _service_env():
     for item in containers[0].get("env", []):
         name = item.get("name")
         # Platform and role settings are owned by modal_app.py.
-        if not name or name in {"PORT", "K_SERVICE", "WORKER_ROLE",
-                                "EXECUTOR_PROVIDER",
-                                "MODAL_EXECUTOR_PROFILE"}:
+        if not name or name in ({"PORT", "K_SERVICE", "WORKER_ROLE",
+                                 "EXECUTOR_PROVIDER",
+                                 "MODAL_EXECUTOR_PROFILE"}
+                                | RETIRED_EXECUTOR_SETTINGS):
             continue
         if "value" in item:
             env[name] = str(item["value"])
@@ -64,12 +76,11 @@ def _service_env():
                       .get("secretKeyRef"))
         if secret_ref:
             env[name] = _secret_ref_value(secret_ref, name)
-    # Agent turns running on Modal can launch nested render-tool calls. Keep
-    # Cloud Run's public service URL available as a pre-launch fallback; the
-    # existing shared bearer secret still authenticates every request.
-    service_url = ((service.get("status") or {}).get("url") or "").strip()
-    if service_url:
-        env.setdefault("REMOTE_EXECUTOR_URL", service_url)
+    # These explicit values override config.py's legacy migration defaults.
+    # Modal agent turns launch nested Modal functions and have no production
+    # path back to Cloud Run.
+    env["REMOTE_EXECUTOR_URL"] = ""
+    env["MODAL_CLOUD_RUN_FALLBACK"] = "0"
     required = {"DATABASE_URL", "S3_ENDPOINT", "S3_ACCESS_KEY_ID",
                 "S3_SECRET_ACCESS_KEY", "S3_BUCKET"}
     missing = sorted(required - env.keys())
