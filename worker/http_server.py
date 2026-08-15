@@ -43,6 +43,19 @@ import version
 import webrecord
 import ytaccess
 
+
+def _run_mcp_media_job(worker_db, job):
+    """Executor entry point for MCP's video-handoff operation only.
+
+    Import lazily so ordinary render/function cold starts do not load the
+    entire editor tool registry. The strict tool check prevents this compute
+    surface from becoming a second general MCP dispatcher.
+    """
+    if (job.get("payload") or {}).get("tool") != "__media__":
+        raise ValueError("executor mcp_tool accepts __media__ only")
+    import mcp_exec
+    return mcp_exec.run_mcp_job(worker_db, job)
+
 # Only compute runners are exposed by the heavy executor. The separate
 # agent_executor role replaces this whole map with agent_turn only.
 #
@@ -61,6 +74,10 @@ COMPUTE_RUNNERS = {
     # to cross the Render dispatcher's 512-MiB ceiling, so Modal executes the
     # complete job and persists the same cached sheets/waveforms remotely.
     "filmstrip": filmstrip.run_filmstrip_job,
+    # watch_video normally returns an existing URL for free. Window/size
+    # requests encode a new copy; that ffmpeg belongs on Modal rather than in
+    # one of the two memory-sensitive MCP lanes on Render.
+    "mcp_tool": _run_mcp_media_job,
     "capture": webrecord.run_capture_job,
     # Same shape as capture (round 62): one tool call inside an agent turn,
     # moved here because decoding a user's 4K original for six jpegs is

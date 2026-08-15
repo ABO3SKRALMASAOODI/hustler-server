@@ -254,3 +254,35 @@ def test_filmstrip_is_forced_to_modal_without_cloud_run_fallback(monkeypatch):
 def test_modal_compute_image_exposes_the_filmstrip_runner():
     import http_server
     assert "filmstrip" in http_server.COMPUTE_RUNNERS
+
+
+def test_mcp_media_is_forced_to_modal_but_other_tools_are_rejected(monkeypatch):
+    monkeypatch.setattr(config, "MODAL_EXECUTOR_ENABLED", True)
+    seen = []
+    monkeypatch.setattr(
+        remote, "_run_modal",
+        lambda job, function_override=None: seen.append(
+            (job["payload"]["tool"], function_override)) or {"ok": True})
+    media_job = dict(JOB, type="mcp_tool",
+                     payload={"tool": "__media__", "args": {}})
+
+    assert remote.run_mcp_media_remote(None, media_job) == {"ok": True}
+    assert seen == [("__media__", "preview")]
+    try:
+        remote.run_mcp_media_remote(
+            None, dict(media_job, payload={"tool": "get_edl"}))
+        assert False, "non-media tools must stay on the dispatcher"
+    except ValueError as exc:
+        assert "__media__ only" in str(exc)
+
+
+def test_modal_compute_image_exposes_only_the_mcp_media_wrapper():
+    import http_server
+    assert http_server.COMPUTE_RUNNERS["mcp_tool"] is \
+        http_server._run_mcp_media_job
+    try:
+        http_server._run_mcp_media_job(
+            None, {"payload": {"tool": "apply_edit_recipe"}})
+        assert False, "general editing tools must not run on compute executor"
+    except ValueError as exc:
+        assert "__media__ only" in str(exc)
