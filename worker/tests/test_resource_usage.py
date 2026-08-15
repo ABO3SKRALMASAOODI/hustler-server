@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 ".."))
@@ -34,6 +35,17 @@ def test_missing_cgroup_files_are_nonfatal(tmp_path):
     assert resource_usage.usage_since({}, str(tmp_path)) == {}
 
 
+def test_sampler_captures_child_peak_when_kernel_has_no_peak_file(tmp_path):
+    current = tmp_path / "memory.current"
+    current.write_text(str(2 * 1024 * 1024))
+    sampler = resource_usage.MemorySampler(str(tmp_path), interval_s=0.01)
+    current.write_text(str(11 * 1024 * 1024))
+    time.sleep(0.12)
+    current.write_text(str(3 * 1024 * 1024))
+    assert sampler.finish() == 11.0
+    assert sampler.finish() == 11.0
+
+
 def test_synchronous_tools_emit_cost_and_whole_container_telemetry(
         monkeypatch, capsys):
     class FakeDb:
@@ -52,6 +64,14 @@ def test_synchronous_tools_emit_cost_and_whole_container_telemetry(
         executor_runtime.resource_usage, "usage_since",
         lambda _start: {"container_memory_peak_mib": 612.5,
                         "container_cpu_s": 3.25})
+
+    class Sampler:
+        @staticmethod
+        def finish():
+            return 700.0
+
+    monkeypatch.setattr(
+        executor_runtime.resource_usage, "MemorySampler", Sampler)
     monkeypatch.setenv("EXECUTOR_PROVIDER", "modal")
     monkeypatch.setenv("MODAL_EXECUTOR_PROFILE", "light")
     monkeypatch.setenv("MODAL_PRICING_MULTIPLIER", "1")
@@ -63,5 +83,6 @@ def test_synchronous_tools_emit_cost_and_whole_container_telemetry(
     assert response == {"result": {"ok": True}, "job_completed": False}
     output = capsys.readouterr().out
     assert '"container_memory_peak_mib":612.5' in output
+    assert '"container_memory_sampled_peak_mib":700.0' in output
     assert '"compute_profile":"modal-light-4core-8-32g-global"' in output
     assert '"job_id":null' in output

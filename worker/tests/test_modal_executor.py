@@ -216,6 +216,9 @@ def test_modal_memory_right_sizing_preserves_production_hard_limits():
     assert modal_app.BATCH_MEMORY == (8192, 16384)
     assert modal_app.LIGHT_MEMORY == (8192, 32768)
     assert modal_app.HEAVY_MEMORY == (16384, 32768)
+    assert modal_app.AGENT_MEMORY == (1024, 2048)
+    assert modal_app.PROBE_MEMORY == (1024, 4096)
+    assert modal_app.HEALTH_MEMORY == (512, 1024)
 
 
 def test_compute_fleet_is_global_but_latency_sensitive_egress_stays_us():

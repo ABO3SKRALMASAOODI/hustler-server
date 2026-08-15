@@ -74,6 +74,22 @@ def execute(job, runners):
     lease_claim = job.get("total_claims")
     t0 = time.monotonic()
     resource_start = resource_usage.snapshot()
+    try:
+        memory_sampler = resource_usage.MemorySampler()
+    except Exception:
+        # Observability never becomes a new reason a customer render can fail.
+        memory_sampler = None
+
+    def measured_resources():
+        measured = resource_usage.usage_since(resource_start)
+        try:
+            sampled_peak = memory_sampler.finish() if memory_sampler else None
+        except Exception:
+            sampled_peak = None
+        if sampled_peak is not None:
+            measured["container_memory_sampled_peak_mib"] = sampled_peak
+        return measured
+
     print(f"[executor] start {jtype} job={job_id} "
           f"project={job.get('project_id')} provider="
           f"{os.getenv('EXECUTOR_PROVIDER', 'cloud_run')}", flush=True)
@@ -88,7 +104,7 @@ def execute(job, runners):
         result = runner(db, job)
         dt = round(time.monotonic() - t0, 2)
         execution_timings = {"total_s": dt}
-        execution_timings.update(resource_usage.usage_since(resource_start))
+        execution_timings.update(measured_resources())
         compute_cost.annotate_request(
             execution_timings, dt, config.WORKER_ROLE,
             os.getenv("K_SERVICE", ""))
@@ -117,7 +133,7 @@ def execute(job, runners):
               flush=True)
         decision = failure_policy.classify(exc, jtype)
         failure_timings = {"total_s": dt}
-        failure_timings.update(resource_usage.usage_since(resource_start))
+        failure_timings.update(measured_resources())
         compute_cost.annotate_request(
             failure_timings, dt, config.WORKER_ROLE,
             os.getenv("K_SERVICE", ""))

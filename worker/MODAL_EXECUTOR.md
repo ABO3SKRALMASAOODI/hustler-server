@@ -38,7 +38,7 @@ same call and never buys a duplicate render.
 | `light` | 4 physical cores, 8→32 GiB | heavy fallback previously used |
 | `heavy` | 4 physical cores, 16→32 GiB | 8 vCPU, 32 GiB |
 | `egress` | 4 physical cores, 8→32 GiB, US pinned | heavy fallback previously used |
-| `agent` | 0.125 reserved / 1 core limit, 1 GiB, concurrency 4 | 1 vCPU, 2 GiB, concurrency 4 |
+| `agent` | 0.125 reserved / 1 core limit, 1→2 GiB, concurrency 4 | 1 vCPU, 2 GiB, concurrency 4 |
 
 An arrow is Modal's memory request→hard limit. Billing uses the greater of the
 request or actual memory, while the old maximum remains available for an

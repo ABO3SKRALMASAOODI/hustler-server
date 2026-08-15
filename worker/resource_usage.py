@@ -7,6 +7,7 @@ fail on a developer machine or a different cgroup layout.
 """
 
 import os
+import threading
 
 
 _MIB = 1024 * 1024
@@ -90,3 +91,52 @@ def usage_since(start, root="/sys/fs/cgroup"):
     if start_cpu is not None and end_cpu is not None:
         end["container_cpu_s"] = round(max(0.0, end_cpu - start_cpu), 3)
     return end
+
+
+class MemorySampler:
+    """Sample cgroup-wide working memory while child processes are alive.
+
+    Some Modal hosts expose ``memory.max`` but not the optional ``memory.peak``
+    file. Reading only after ffmpeg exits then reports Python's quiet RSS and
+    systematically under-sizes the lane. A cgroup file read four times a second
+    is negligible beside media work and captures the children the process RSS
+    heartbeat cannot see.
+    """
+
+    def __init__(self, root="/sys/fs/cgroup", interval_s=0.25):
+        self._root = root
+        self._interval_s = max(0.05, float(interval_s))
+        self._done = threading.Event()
+        self._peak_bytes = None
+        self._finished = False
+        self._finished_mib = None
+        self._sample()
+        self._thread = threading.Thread(
+            target=self._run, daemon=True, name="cgroup-memory-sampler")
+        self._thread.start()
+
+    def _current(self):
+        value = _read_int(os.path.join(self._root, "memory.current"))
+        if value is None:
+            value = _read_int(os.path.join(
+                self._root, "memory", "memory.usage_in_bytes"))
+        return value
+
+    def _sample(self):
+        value = self._current()
+        if value is not None:
+            self._peak_bytes = max(self._peak_bytes or 0, value)
+
+    def _run(self):
+        while not self._done.wait(self._interval_s):
+            self._sample()
+
+    def finish(self):
+        if self._finished:
+            return self._finished_mib
+        self._sample()
+        self._done.set()
+        self._thread.join(timeout=max(0.1, self._interval_s * 2))
+        self._finished_mib = _mib(self._peak_bytes)
+        self._finished = True
+        return self._finished_mib

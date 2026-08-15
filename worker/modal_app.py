@@ -76,6 +76,9 @@ PREVIEW_MEMORY = (2048, 4096)
 BATCH_MEMORY = (8192, 16384)
 LIGHT_MEMORY = (8192, 32768)
 HEAVY_MEMORY = (16384, 32768)
+AGENT_MEMORY = (1024, 2048)
+PROBE_MEMORY = (1024, 4096)
+HEALTH_MEMORY = (512, 1024)
 
 
 def _boot(profile, role="executor", pricing_multiplier=1.0):
@@ -170,7 +173,7 @@ def egress(job):
     name="probe", image=image, secrets=[secret], region="us",
     routing_region="us-east", min_containers=0, max_containers=1,
     scaledown_window=5, retries=0, timeout=600, startup_timeout=300,
-    cpu=(0.25, 0.5), memory=1024,
+    cpu=(0.25, 0.5), memory=PROBE_MEMORY,
 )
 def probe(job):
     """Run diagnostics without renting the 32-GiB heavy profile."""
@@ -181,7 +184,7 @@ def probe(job):
     name="agent", image=agent_image, secrets=[secret], region="us",
     routing_region="us-east", min_containers=0, max_containers=5,
     scaledown_window=30, retries=0, timeout=3600, startup_timeout=300,
-    cpu=(0.125, 1.0), memory=1024,
+    cpu=(0.125, 1.0), memory=AGENT_MEMORY,
 )
 # Agent turns spend most of their wall time waiting on the model, database, or
 # remote render functions. Share that idle I/O time inside one container before
@@ -193,7 +196,7 @@ def agent(job):
 
 @app.function(
     name="health", image=image, min_containers=0, max_containers=1,
-    cpu=0.125, memory=512, timeout=60, startup_timeout=300,
+    cpu=0.125, memory=HEALTH_MEMORY, timeout=60, startup_timeout=300,
     scaledown_window=5, retries=0, region="us", routing_region="us-east",
 )
 def health():

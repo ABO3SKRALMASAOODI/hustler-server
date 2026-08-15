@@ -271,7 +271,7 @@ def test_modal_lifecycle_is_short_and_diagnostics_use_probe():
     cloud = (ROOT / ".github/workflows/deploy-executor.yml").read_text()
     assert '"scaledown_window": 10' in source
     assert 'name="preview", cpu=PREVIEW_CPU, memory=PREVIEW_MEMORY' in source
-    assert 'cpu=(0.125, 1.0), memory=1024' in source
+    assert 'cpu=(0.125, 1.0), memory=AGENT_MEMORY' in source
     assert '@modal.concurrent(max_inputs=6, target_inputs=4)' in source
     assert 'name="probe"' in source
     assert remote._modal_function_name("ytprobe") == "probe"
