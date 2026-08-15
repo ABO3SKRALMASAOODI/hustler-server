@@ -98,14 +98,14 @@ class MemorySampler:
 
     Some Modal hosts expose ``memory.max`` but not the optional ``memory.peak``
     file. Reading only after ffmpeg exits then reports Python's quiet RSS and
-    systematically under-sizes the lane. A cgroup file read four times a second
-    is negligible beside media work and captures the children the process RSS
-    heartbeat cannot see.
+    systematically under-sizes the lane. A cgroup file read twenty times a
+    second is negligible beside media work and captures short child-process
+    spikes even while the executor's cores are busy.
     """
 
-    def __init__(self, root="/sys/fs/cgroup", interval_s=0.25):
+    def __init__(self, root="/sys/fs/cgroup", interval_s=0.05):
         self._root = root
-        self._interval_s = max(0.05, float(interval_s))
+        self._interval_s = max(0.01, float(interval_s))
         self._done = threading.Event()
         self._peak_bytes = None
         self._finished = False
