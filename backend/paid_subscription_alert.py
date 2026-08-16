@@ -9,9 +9,9 @@ Webhook safety rules:
 * Only ``transaction.completed`` with an amount above zero is eligible. A
   legacy trial's $0 opening transaction is not money, and Paddle's preceding
   ``paid`` lifecycle event is not yet the final ledger state.
-* ``subscription_id`` is required and is the primary business dedupe key, so renewals do not
-  announce an existing customer as new. ``transaction_id`` is independently
-  unique so paid + completed + webhook retries cannot double-send.
+* ``subscription_id`` is required and is the primary business dedupe key, so
+  renewals do not announce an existing customer as new. ``transaction_id`` is
+  independently unique so webhook retries cannot double-send.
 * The request only inserts a small queue row. Brevo runs off-request on a new
   DB connection. Failed sends remain durable and are retried by a small
   scheduler; no email error can roll back a customer's activation.
@@ -292,7 +292,15 @@ def deliver(key, conn=None):
     """Claim and send one row. Safe across concurrent gunicorn workers."""
     own = conn is None
     if own:
-        conn = _connect()
+        try:
+            conn = _connect()
+        except Exception as exc:
+            # The queue row already exists. A DB outage here is therefore a
+            # delayed email, not a lost alert or a failed payment webhook; the
+            # scheduler will try the pending row again when Postgres recovers.
+            print(f"⚠️ [paid_alert] database unavailable for {key}: {exc}",
+                  flush=True)
+            return False
     try:
         row = _claim(conn, key)
         if not row:
@@ -338,7 +346,12 @@ def kick(key):
 
 def retry_due(limit=MAX_BATCH):
     """Retry durable pending/failed rows. Each send claims atomically."""
-    conn = _connect()
+    try:
+        conn = _connect()
+    except Exception as exc:
+        print(f"⚠️ [paid_alert] retry database unavailable: {exc}",
+              flush=True)
+        return {"due": 0, "sent": 0, "error": str(exc)}
     try:
         cur = conn.cursor()
         try:

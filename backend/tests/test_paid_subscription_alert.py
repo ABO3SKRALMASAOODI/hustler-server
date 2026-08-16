@@ -302,6 +302,24 @@ def test_brevo_success_marks_the_row_sent(monkeypatch):
     assert finish_params == ("sub:sub_123", 1)
 
 
+def test_immediate_send_survives_database_outage(monkeypatch):
+    monkeypatch.setattr(
+        alerts, "_connect",
+        lambda: (_ for _ in ()).throw(RuntimeError("database offline")))
+    assert alerts.deliver("sub:sub_123") is False
+
+
+def test_retry_scan_reports_database_outage(monkeypatch):
+    monkeypatch.setattr(
+        alerts, "_connect",
+        lambda: (_ for _ in ()).throw(RuntimeError("database offline")))
+    assert alerts.retry_due() == {
+        "due": 0,
+        "sent": 0,
+        "error": "database offline",
+    }
+
+
 def test_migration_suppresses_existing_subscriptions_and_enforces_uniqueness():
     path = os.path.join(os.path.dirname(os.path.dirname(__file__)),
                         "migrations", "021_founder_subscription_alerts.sql")
@@ -314,3 +332,9 @@ def test_migration_suppresses_existing_subscriptions_and_enforces_uniqueness():
     assert "p.amount_cents > 0" in sql
     assert "WHERE u.subscription_id IS NOT NULL" not in sql
     assert "ON CONFLICT DO NOTHING" in sql
+
+    required_path = os.path.join(
+        os.path.dirname(os.path.dirname(__file__)), "migrations",
+        "022_founder_alert_subscription_required.sql")
+    required_sql = open(required_path, encoding="utf-8").read()
+    assert "ALTER COLUMN subscription_id SET NOT NULL" in required_sql
