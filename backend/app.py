@@ -116,6 +116,15 @@ def create_app():
     except Exception as e:
         app.logger.error("could not start billing sync scheduler: %s", e)
 
+    # New paid-subscriber alerts are persisted before Brevo is called. The
+    # fast path sends immediately; this small scheduler recovers a Render
+    # recycle or temporary email outage without touching billing state.
+    try:
+        from paid_subscription_alert import start_scheduler
+        start_scheduler(app)
+    except Exception as e:
+        app.logger.error("could not start paid alert scheduler: %s", e)
+
     return app
 
 

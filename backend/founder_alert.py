@@ -88,6 +88,16 @@ def send_founder_alert(subject, html):
               flush=True)
 
 
+def send_founder_alert_now(subject, html):
+    """Send synchronously and report whether Brevo accepted the email.
+
+    Durable callers use this after they have left the customer request and
+    recorded their own queue row. The original ``send_founder_alert`` remains
+    fire-and-forget for legacy trial notices.
+    """
+    return _send_now(subject, html)
+
+
 # ── Shared shell so every alert looks like it came from the same product ─────
 
 def render_alert(title, accent, lines, footer=None):

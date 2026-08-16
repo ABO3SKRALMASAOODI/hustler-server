@@ -11,6 +11,7 @@ from datetime import datetime
 import billing
 import credits as credits_mod
 import offers
+import paid_subscription_alert
 import trial_state
 
 paddle_webhook = Blueprint('paddle_webhook', __name__)
@@ -407,6 +408,17 @@ def handle_webhook():
                 trial_state.record_paid_conversion(
                     get_db(), user_id, data.get('subscription_id'))
                 print(f"💰 User {user_id} paid {cents / 100:.2f} on {plan}")
+                # The no-trial shopfront removed the old "trial started"
+                # founder email. Queue its honest replacement only after real
+                # money lands. The queue is unique by subscription AND
+                # transaction, so webhook retries and future renewals cannot
+                # spam the founder. The outbox itself accepts only Paddle's
+                # final transaction.completed event, not the preceding paid
+                # lifecycle event. It fails soft
+                # and sends off-request; billing never waits on Brevo.
+                if event_type == 'transaction.completed':
+                    paid_subscription_alert.enqueue_and_kick(
+                        get_db(), user_id, plan, data, event_type)
         elif sub_status:
             billing.set_status(get_db(), user_id, sub_status, plan)
 
