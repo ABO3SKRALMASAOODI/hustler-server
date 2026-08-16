@@ -206,6 +206,185 @@ def test_multi_window_budget_clips_text_ending_past_its_1272s_proof():
     schemas.validate_edl(window, duration=40.0)
 
 
+def test_proof_budget_clips_long_zoom_at_the_piece_edge():
+    """A contained zoom can be cut back by the final 25-second proof cap.
+
+    Production preview-check jobs 12935/12952/12968 all reached this shape:
+    the saved full EDL was valid, but the standalone proof retained the full
+    zoom end and failed validation before rendering.
+    """
+    edl = _edl(
+        keep=[[0.0, 40.0]],
+        effects={"zooms": [{
+            "id": "zm-proof", "start": 9.71, "end": 37.05,
+            "strength": 0.06,
+        }]},
+    )
+    window = stitch.window_edl(
+        edl, Timeline(edl["keep"]), 0.0, 25.0, keep_audio=True)
+    zoom = window["effects"]["zooms"][0]
+    assert zoom["start"] == 9.71
+    assert zoom["end"] == 25.0       # was 37.05 in a 25-second EDL
+    schemas.validate_edl(window, duration=40.0)
+
+
+def test_clipped_ease_zoom_preserves_its_boundary_strength():
+    """Clipping must not invent a new ease-out at the proof boundary."""
+    edl = _edl(
+        keep=[[0.0, 30.0]],
+        effects={"zooms": [{
+            "id": "zm-ease", "start": 2.0, "end": 20.0,
+            "strength": 0.4, "mode": "ease", "cx": 0.25, "cy": 0.7,
+        }]},
+    )
+    window = stitch.window_edl(
+        edl, Timeline(edl["keep"]), 5.0, 12.0, keep_audio=True)
+    zoom = window["effects"]["zooms"][0]
+    assert (zoom["start"], zoom["end"]) == (0.0, 7.0)
+    assert zoom["mode"] == "path"
+    assert zoom["path"][0]["s"] == pytest.approx(0.4)
+    assert zoom["path"][-1]["s"] == pytest.approx(0.4)
+    assert all(point["cx"] == pytest.approx(0.25)
+               for point in zoom["path"])
+    schemas.validate_edl(window, duration=30.0)
+
+
+@pytest.mark.parametrize("zoom,w0,w1,samples,tolerance", [
+    ({"id": "ease", "start": 2.0, "end": 4.0, "strength": 0.8,
+      "mode": "ease", "cx": 0.25, "cy": 0.7},
+     2.1, 3.0, [2.1, 2.25, 2.4, 2.7, 2.95], 0.002),
+    ({"id": "push", "start": 2.0, "end": 10.0, "strength": 0.8,
+      "mode": "push_in", "cx": 0.75, "cy": 0.3},
+     4.0, 8.0, [4.0, 4.5, 6.0, 7.25, 8.0], 0.002),
+    ({"id": "path", "start": 2.0, "end": 10.0, "strength": 0.25,
+      "mode": "path", "ease": "cubic_in_out",
+      "path": [
+          {"f": 0.0, "cx": 0.2, "cy": 0.4, "s": 0.0},
+          {"f": 0.5, "cx": 0.8, "cy": 0.7, "s": 0.8},
+          {"f": 1.0, "cx": 0.3, "cy": 0.2, "s": 0.1},
+      ]},
+     3.3, 8.4, [3.3, 3.55, 4.2, 5.85, 6.0, 6.8, 7.45, 8.1, 8.39],
+     0.006),
+])
+def test_clipped_zoom_matches_full_program_frames(
+        zoom, w0, w1, samples, tolerance):
+    """A proof window must show the same zoom state as the complete edit."""
+    edl = _edl(keep=[[0.0, 30.0]], effects={"zooms": [zoom]})
+    window = stitch.window_edl(
+        edl, Timeline(edl["keep"]), w0, w1, keep_audio=True)
+    clipped = window["effects"]["zooms"][0]
+    assert len(clipped.get("path") or []) <= 24
+    for absolute_t in samples:
+        expected = renderer.zoom_state_at([zoom], absolute_t, 30.0)
+        actual = renderer.zoom_state_at(
+            [clipped], absolute_t - w0, w1 - w0)
+        assert actual == pytest.approx(expected, abs=tolerance)
+    schemas.validate_edl(window, duration=30.0)
+
+
+def test_proof_window_rebases_carried_inserts_to_its_local_keep_boundary():
+    """Insert coordinates are pre-insert time, proof windows are final time."""
+    inserts = [
+        {"id": "ins1", "asset_key": "clips/9/a.mp4", "kind": "video",
+         "at_output_s": 2.73, "duration_s": 1.25},
+        {"id": "ins2", "asset_key": "clips/9/b.mp4", "kind": "video",
+         "at_output_s": 2.73, "duration_s": 0.72},
+        {"id": "ins3", "asset_key": "clips/9/c.mp4", "kind": "video",
+         "at_output_s": 2.73, "duration_s": 0.8},
+        {"id": "ins4", "asset_key": "clips/9/d.mp4", "kind": "video",
+         "at_output_s": 2.73, "duration_s": 0.8},
+    ]
+    edl = _edl(keep=[[0.0, 2.73]], inserts=inserts)
+    window = stitch.window_edl(
+        edl, Timeline(edl["keep"], inserts), 2.68, 6.3,
+        keep_audio=True)
+    assert window["keep"] == [[2.68, 2.73]]
+    assert [item["at_output_s"] for item in window["inserts"]] \
+        == [0.05, 0.05, 0.05, 0.05]
+    schemas.validate_edl(window, duration=20.0)
+
+
+def test_insert_proof_clears_baked_caption_mutes_and_keeps_030s_text():
+    """The second production insert proof reached two later clock traps."""
+    inserts = [
+        {"id": "ins1", "asset_key": "clips/9/a.mp4", "kind": "video",
+         "at_output_s": 2.73, "duration_s": 1.25},
+        {"id": "ins2", "asset_key": "clips/9/b.mp4", "kind": "video",
+         "at_output_s": 2.73, "duration_s": 0.72},
+        {"id": "ins3", "asset_key": "clips/9/c.mp4", "kind": "video",
+         "at_output_s": 2.73, "duration_s": 0.8},
+        {"id": "ins4", "asset_key": "clips/9/d.mp4", "kind": "video",
+         "at_output_s": 2.73, "duration_s": 0.8},
+    ]
+    edl = _edl(
+        keep=[[0.0, 2.73]], inserts=inserts,
+        texts=[{"id": "tx-water", "text": "WE NEED WATER.",
+                "start": 6.0, "end": 6.3, "template": "title"}],
+        caption_mutes=[[2.73, 6.3]],
+    )
+    window = stitch.window_edl(
+        edl, Timeline(edl["keep"], inserts), 2.625, 6.3,
+        keep_audio=True)
+    assert window["caption_mutes"] == []
+    assert window["texts"][0]["start"] == 3.37
+    assert window["texts"][0]["end"] == 3.675
+    schemas.validate_edl(window, duration=20.0)
+
+
+@pytest.mark.parametrize("duration,zooms,raw_ranges,expected_ranges", [
+    (457.56, [
+        {"id": "zm1", "start": 43.44, "end": 54.44,
+         "strength": 0.07, "mode": "ease"},
+        {"id": "zm2", "start": 118.12, "end": 133.82,
+         "strength": 0.06, "mode": "ease"},
+        {"id": "zm3", "start": 218.9, "end": 228.4,
+         "strength": 0.1, "mode": "push_in"},
+        {"id": "zm4", "start": 272.6, "end": 281.0,
+         "strength": 0.07, "mode": "ease"},
+    ], [[42.69, 45.69], [47.44, 50.44], [52.19, 55.19],
+        [117.37, 120.37], [124.47, 127.47], [131.57, 134.57]],
+     [[42.69, 55.19], [117.37, 129.87]]),
+    (91.02, [
+        {"id": "zm1", "start": 0.0, "end": 9.71, "strength": 0.05},
+        {"id": "zm2", "start": 9.71, "end": 67.05, "strength": 0.06},
+        {"id": "zm3", "start": 67.05, "end": 73.02, "strength": 0.07},
+        {"id": "zm4", "start": 88.01, "end": 91.02, "strength": 0.05},
+    ], [[0.0, 2.75], [3.61, 6.11], [35.01, 39.63],
+        [68.78, 73.77], [87.26, 91.02]], [[0.0, 25.0]]),
+    (43.54, [
+        {"id": "zm1", "start": 0.0, "end": 3.12,
+         "strength": 0.05, "mode": "ease"},
+        {"id": "zm4", "start": 3.84, "end": 8.56,
+         "strength": 0.05, "mode": "ease"},
+        {"id": "zm2", "start": 21.87, "end": 27.71,
+         "strength": 0.06, "mode": "ease"},
+        {"id": "zm5", "start": 27.73, "end": 29.23,
+         "strength": 0.05, "mode": "ease"},
+        {"id": "zm3", "start": 29.23, "end": 34.13,
+         "strength": 0.05, "mode": "ease"},
+        {"id": "zm7", "start": 36.26, "end": 42.73,
+         "strength": 0.05, "mode": "ease"},
+    ], [[0.31, 10.13], [26.98, 35.06], [36.445, 42.545]],
+     [[0.0, 10.13], [21.82, 35.06], [36.21, 37.84]]),
+])
+def test_exact_production_zoom_proofs_validate_after_budget_clipping(
+        duration, zooms, raw_ranges, expected_ranges):
+    """Re-run the three post-deploy failed EDL/range geometries exactly."""
+    edl = _edl(keep=[[0.0, duration]], effects={"zooms": zooms})
+    timeline = Timeline(edl["keep"])
+    ranges = renderer._validated_check_ranges(raw_ranges, duration)
+    ranges = renderer._contain_check_items(
+        edl, timeline, ranges, duration, {})
+    ranges = renderer._validated_check_ranges(ranges, duration)
+    assert len(ranges) == len(expected_ranges)
+    for actual, expected in zip(ranges, expected_ranges):
+        assert actual == pytest.approx(expected)
+    for start, end in ranges:
+        window = stitch.window_edl(
+            edl, timeline, start, end, keep_audio=True)
+        schemas.validate_edl(window, duration=duration)
+
+
 def test_proof_window_clips_graphic_edges_and_rebases_local_motion():
     motion = {
         "x": [

@@ -32,11 +32,13 @@ for a structural edit and costs nothing.
 """
 
 import json
+import math
 import os
 import re
 import subprocess
 
 import media
+import travel
 from schemas import MIN_SPAN_S, anim_value
 
 # Video-local layers a stitch may differ in. Everything else must be equal.
@@ -367,6 +369,15 @@ def _clip_program_graphics(items, w0, w1):
             "start": round(clipped_start - w0, 3),
             "end": round(clipped_end - w0, 3),
         }
+        # Text/vector timestamps canonicalize to centiseconds during schema
+        # validation. A valid exact 0.30s item shifted by a half-centisecond
+        # window boundary became 3.375-3.675, then rounded to 3.38-3.67 and
+        # was rejected as 0.29s. Expand only that rounding casualty outward
+        # on the left; authored spans longer than the minimum are untouched.
+        if round((round(shifted["end"], 2)
+                  - round(shifted["start"], 2)) * 100) < 30:
+            shifted["start"] = round(max(
+                0.0, math.floor((shifted["start"] + 1e-9) * 100) / 100), 3)
         if left_clipped and "entrance" in shifted:
             # For designed text, None means "use the template default";
             # explicit "none" is the animation-free value.
@@ -384,6 +395,159 @@ def _clip_program_graphics(items, w0, w1):
                     motion[prop] = _slice_local_anim(
                         motion[prop], local_start, local_end)
             shifted["motion"] = motion
+        out.append(shifted)
+    return out
+
+
+def _zoom_path_value(item, key, fraction, default):
+    """Evaluate one authored zoom-path axis at a window fraction."""
+    points = sorted((item.get("path") or []),
+                    key=lambda point: float(point.get("f") or 0.0))
+    if not points:
+        return float(default)
+    fraction = min(max(float(fraction), 0.0), 1.0)
+    if fraction <= float(points[0].get("f") or 0.0):
+        return float(points[0].get(key, default))
+    for left, right in zip(points, points[1:]):
+        f0 = float(left.get("f") or 0.0)
+        f1 = float(right.get("f") or 0.0)
+        if fraction <= f1 + 1e-9:
+            if f1 - f0 <= 1e-9:
+                return float(right.get(key, default))
+            u = (fraction - f0) / (f1 - f0)
+            u = travel.ease_value(u, item.get("ease"))
+            v0 = float(left.get(key, default))
+            v1 = float(right.get(key, default))
+            return v0 + (v1 - v0) * u
+    return float(points[-1].get(key, default))
+
+
+def _zoom_strength_at(item, absolute_t):
+    """Python mirror of the renderer's zoom-strength expressions."""
+    start, end = float(item["start"]), float(item["end"])
+    span = max(end - start, 1e-9)
+    fraction = min(max((absolute_t - start) / span, 0.0), 1.0)
+    strength = float(item.get("strength") or 0.25)
+    mode = item.get("mode") or "punch"
+    if mode == "path":
+        return _zoom_path_value(item, "s", fraction, strength)
+    if mode in ("ease", "follow"):
+        ramp = max(0.15, min(0.4, span / 4.0))
+        return strength * min(max((absolute_t - start) / ramp, 0.0), 1.0) \
+            * min(max((end - absolute_t) / ramp, 0.0), 1.0)
+    if mode == "push_in":
+        return strength * fraction
+    if mode == "pull_out":
+        return strength * (1.0 - fraction)
+    return strength
+
+
+def _clip_program_zooms(items, w0, w1):
+    """Clip/rebase zooms without changing their visible motion.
+
+    Changed-section containment grows a requested proof around whole zooms,
+    then its hard 25-second compute budget may cut the final window back
+    through one.  Keeping the original end timestamp in that shorter
+    standalone EDL makes schema validation reject the proof before ffmpeg can
+    render it.  Simple punch zooms can be clipped directly.  A partially cut
+    eased/drifting/travelling zoom is represented as a temporary linear
+    strength path sampled from the original curve, preserving the state at
+    the proof boundaries rather than inventing a fresh ramp there.  This is a
+    proof-only copy; the user's stored EDL is never rewritten.
+    """
+    out = []
+    for item in items or []:
+        original_start = float(item["start"])
+        original_end = float(item["end"])
+        clipped_start = max(original_start, w0)
+        clipped_end = min(original_end, w1)
+        clipped_duration = clipped_end - clipped_start
+        if clipped_duration < 0.2 - 1e-6:
+            continue
+
+        shifted = {**item,
+                   "start": round(clipped_start - w0, 3),
+                   "end": round(clipped_end - w0, 3)}
+        left_clipped = clipped_start > original_start + 0.001
+        right_clipped = clipped_end < original_end - 0.001
+        mode = item.get("mode") or "punch"
+        if not (left_clipped or right_clipped) or mode == "punch":
+            out.append(shifted)
+            continue
+
+        # Preserve all authored travel waypoints and the exact corners of the
+        # renderer's hidden ease/follow ramp.  Path-mode cubic pieces are
+        # sampled between anchors because a clipped subsection of a cubic is
+        # not another complete cubic with the same easing name.
+        sample_times = {clipped_start, clipped_end}
+        span = original_end - original_start
+        if mode in ("ease", "follow"):
+            ramp = max(0.15, min(0.4, span / 4.0))
+            sample_times.update((original_start + ramp,
+                                 original_end - ramp))
+        if mode in ("follow", "path"):
+            for point in item.get("path") or []:
+                sample_times.add(original_start
+                                 + float(point.get("f") or 0.0) * span)
+        sample_times = sorted(t for t in sample_times
+                              if clipped_start - 1e-9 <= t
+                              <= clipped_end + 1e-9)
+        if mode == "path" and item.get("ease") not in (None, "linear"):
+            # The clipped curve is emitted as a linear temporary path. Keep
+            # every authored anchor when practical, then repeatedly bisect
+            # the largest uncovered interval. Twenty-four samples bound the
+            # filtergraph while putting a cubic's linear approximation below
+            # a visible frame/strength delta in regression tests.
+            if len(sample_times) > 24:
+                sample_times = [
+                    clipped_start + clipped_duration * idx / 23.0
+                    for idx in range(24)
+                ]
+            else:
+                dense = list(sample_times)
+                while len(dense) < 24:
+                    left, right = max(
+                        zip(dense, dense[1:]), key=lambda pair: pair[1]
+                        - pair[0])
+                    if right - left <= 1e-6:
+                        break
+                    dense.append((left + right) / 2.0)
+                    dense.sort()
+                sample_times = dense
+
+        path = []
+        for absolute_t in sample_times:
+            original_fraction = min(max(
+                (absolute_t - original_start) / max(span, 1e-9), 0.0), 1.0)
+            local_fraction = ((absolute_t - clipped_start)
+                              / clipped_duration)
+            cx = (_zoom_path_value(item, "cx", original_fraction, 0.5)
+                  if mode in ("follow", "path")
+                  else float(item.get("cx") if item.get("cx") is not None
+                             else 0.5))
+            cy = (_zoom_path_value(item, "cy", original_fraction, 0.5)
+                  if mode in ("follow", "path")
+                  else float(item.get("cy") if item.get("cy") is not None
+                             else 0.5))
+            path.append({"f": round(local_fraction, 4),
+                         "cx": round(cx, 3), "cy": round(cy, 3),
+                         "s": round(_zoom_strength_at(item, absolute_t), 3)})
+        # Duplicate times can arise where a ramp corner is also an authored
+        # waypoint.  The schema accepts two or more strictly ordered path
+        # fractions; de-duplicate after centisecond/fraction rounding.
+        deduped = []
+        for point in path:
+            if deduped and point["f"] <= deduped[-1]["f"] + 1e-9:
+                deduped[-1] = point
+            else:
+                deduped.append(point)
+        if len(deduped) < 2:
+            out.append(shifted)
+            continue
+        deduped[0]["f"], deduped[-1]["f"] = 0.0, 1.0
+        shifted["mode"] = "path"
+        shifted["path"] = deduped
+        shifted["ease"] = "linear"
         out.append(shifted)
     return out
 
@@ -431,15 +595,6 @@ def window_edl(edl, tl, w0, w1, keep_audio=False):
     e["speed"] = speed
     fx = dict(e.get("effects") or {})
 
-    def _shift(items, get, put):
-        out = []
-        for it in items or []:
-            a, b = get(it)
-            if a >= w1 - 0.001 or b <= w0 + 0.001:
-                continue
-            out.append(put(it, a - w0, b - w0))
-        return out
-
     # Full-preview stitching normally expands windows to contain every
     # graphic.  Changed-section proofs re-apply a hard 25s budget after that
     # expansion, though, so the last of several windows can be truncated in
@@ -448,9 +603,7 @@ def window_edl(edl, tl, w0, w1, keep_audio=False):
     # standalone EDL's duration.
     e["texts"] = _clip_program_graphics(e.get("texts"), w0, w1)
     e["vectors"] = _clip_program_graphics(e.get("vectors"), w0, w1)
-    fx["zooms"] = _shift(fx.get("zooms"), lambda z: (z["start"], z["end"]),
-                         lambda z, a, b: {**z, "start": round(a, 3),
-                                          "end": round(b, 3)})
+    fx["zooms"] = _clip_program_zooms(fx.get("zooms"), w0, w1)
 
     def _shift_optional_window(items, clip=False):
         """Shift timed effects and preserve whole-program effects.
@@ -532,13 +685,31 @@ def window_edl(edl, tl, w0, w1, keep_audio=False):
     # source boundaries, so the windowed Timeline re-places them correctly.
     from timeline import insert_windows as _iw
     iw = _iw(e.get("inserts") or [], tl)
-    e["inserts"] = [i for i in (e.get("inserts") or [])
-                    if i.get("id") in iw
-                    and iw[i["id"]][0] >= w0 - 0.011
-                    and iw[i["id"]][1] <= w1 + 0.011]
+    inserts = [i for i in (e.get("inserts") or [])
+               if i.get("id") in iw
+               and iw[i["id"]][0] >= w0 - 0.011
+               and iw[i["id"]][1] <= w1 + 0.011]
+    # at_output_s is on the PRE-insert clock. The window boundaries above are
+    # on the FINAL clock, so merely retaining the original value strands a
+    # carried insert at a non-existent junction in the standalone EDL. This
+    # happened when a proof began 0.05s before four inserts at 2.73s: the new
+    # keep was 0.05s long but every insert still claimed the old 2.73s seam.
+    # Rebase from each insert's known final window, subtracting only inserts
+    # already carried into this proof piece.
+    consumed = 0.0
+    for item in sorted(inserts, key=lambda value: iw[value["id"]][0]):
+        final_start = float(iw[item["id"]][0])
+        item["at_output_s"] = round(
+            max(0.0, final_start - w0 - consumed), 3)
+        consumed += float(item.get("duration_s") or 0.0)
+    e["inserts"] = inserts
     # captions/graphics burn from the SHIFTED full-program ASS (see
     # shift_ass) — the windowed EDL itself must not rebuild them.
     e["captions"] = None
+    # Caption suppression has already been applied while building that full-
+    # program ASS. Retaining its absolute program spans in this standalone
+    # local EDL can only make validation fail after the clock was rebased.
+    e["caption_mutes"] = []
     # fades belong to the program's ends; plan() refused windows near them
     if isinstance(fx, dict):
         fx["fade_in_s"] = 0.0

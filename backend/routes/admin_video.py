@@ -76,6 +76,39 @@ UNSERVED_EXISTS = """NOT EXISTS (SELECT 1 FROM video_jobs vj
                       WHERE vj.type = 'agent_turn'
                         AND vj.payload->>'message_id' = cm.id::text)"""
 
+# A failed full preview can be superseded by a newer full preview or by the
+# stronger final deliverable.  A final can only be superseded by another
+# final.  In particular, an internal changed-section proof is never evidence
+# that a failed user-facing full render recovered.  This mapping generates the
+# production SQL below and is deliberately exported for a small regression
+# test: direction matters here.
+ATTENTION_ACTIONABLE_JOB_TYPES = (
+    "index", "preview", "final", "agent_turn", "shorts_plan")
+# Only a real scheduled attempt can replace the failed row.  Keep this
+# explicit even though these are the current schema's four allowed states, so
+# a future cancelled/superseded audit row cannot silently clear an incident.
+ATTENTION_REPLACEMENT_STATES = ("queued", "running", "done", "failed")
+
+ATTENTION_MEDIA_SUCCESSORS = {
+    "preview": ("preview", "final"),
+    "final": ("final",),
+}
+
+
+def _sql_string_list(values):
+    return ", ".join("'" + value + "'" for value in values)
+
+
+def _attention_media_supersession_sql(failed_alias="vj",
+                                       newer_alias="newer"):
+    clauses = []
+    for failed_type, successor_types in ATTENTION_MEDIA_SUCCESSORS.items():
+        quoted = _sql_string_list(successor_types)
+        clauses.append(
+            f"({failed_alias}.type = '{failed_type}' "
+            f"AND {newer_alias}.type IN ({quoted}))")
+    return "(" + " OR ".join(clauses) + ")"
+
 
 def _presign(key):
     if not storage.is_configured():
@@ -598,10 +631,16 @@ def video_overview():
         """)
         no_change = cur.fetchone()["n"]
 
-        # attention feed: only things a human can act on (failed/stuck jobs).
+        # Current attention feed, not a seven-day incident log.  Job rows are
+        # immutable attempts: a repair creates a newer row, so simply selecting
+        # state='failed' kept showing already-recovered proof/render failures as
+        # live incidents (and let internal preview_check noise crowd genuine
+        # user-facing failures out of the 40-row limit).  Internal proof/tool
+        # failures remain available in the project inspector; this card contains
+        # only user-facing jobs whose logical operation has no newer attempt.
         # Unserved messages are deliberately NOT here — with auto-resume live
         # they self-heal, and there is no admin action to take on old ones.
-        cur.execute("""
+        cur.execute(f"""
             SELECT * FROM (
                 SELECT 'failed_job' AS type, p.id AS project_id,
                        p.title AS project_title, u.email,
@@ -612,7 +651,57 @@ def video_overview():
                 JOIN projects p ON p.id = vj.project_id
                 JOIN users u ON u.id = vj.user_id
                 WHERE vj.state = 'failed'
+                  AND vj.type IN (
+                      {_sql_string_list(ATTENTION_ACTIONABLE_JOB_TYPES)}
+                  )
                   AND vj.updated_at > NOW() - INTERVAL '7 days'
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM video_jobs newer
+                      WHERE newer.project_id = vj.project_id
+                        AND newer.id > vj.id
+                        AND newer.state IN (
+                          {_sql_string_list(ATTENTION_REPLACEMENT_STATES)}
+                        )
+                        AND (
+                          -- Any same/newer EDL render attempt supersedes an
+                          -- older media failure.  If it later gets stuck it is
+                          -- represented by the stuck-job arm below; if it is
+                          -- done, there is nothing left for an operator to do.
+                          (
+                            {_attention_media_supersession_sql()}
+                            AND COALESCE(
+                              CASE WHEN
+                                (newer.payload->>'edl_version') ~ '^[0-9]+$'
+                              THEN (newer.payload->>'edl_version')::int END,
+                              -1
+                            ) >= COALESCE(
+                              CASE WHEN
+                                (vj.payload->>'edl_version') ~ '^[0-9]+$'
+                              THEN (vj.payload->>'edl_version')::int END,
+                              -1
+                            )
+                          )
+                          OR (
+                            vj.type = 'agent_turn'
+                            AND (vj.payload->>'message_id') IS NOT NULL
+                            AND newer.type = 'agent_turn'
+                            AND newer.payload->>'message_id' =
+                                vj.payload->>'message_id'
+                          )
+                          OR (
+                            vj.type = 'index'
+                            AND (vj.payload->>'asset_id') IS NOT NULL
+                            AND newer.type = 'index'
+                            AND newer.payload->>'asset_id' =
+                                vj.payload->>'asset_id'
+                          )
+                          OR (
+                            vj.type = 'shorts_plan'
+                            AND newer.type = 'shorts_plan'
+                          )
+                        )
+                  )
                 UNION ALL
                 SELECT 'stuck_job', p.id, p.title, u.email,
                        vj.type || ' stuck (' || vj.state || ')',
