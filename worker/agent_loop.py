@@ -3,6 +3,7 @@ chat message. Every tool call is persisted as an 'activity' chat message so
 the frontend shows live progress over the existing polling channel."""
 
 import difflib
+import hashlib
 import json
 import os
 import re
@@ -34,7 +35,7 @@ import story_critic
 import timeline
 import version as worker_version
 from agent_prompt import project_state_block, system_prompt
-from schemas import describe_edl, program_duration
+from schemas import describe_edl, edl_signature, program_duration
 
 # Set by main._on_shutdown when Render SIGTERMs the container (every deploy).
 # The turn loop checks it between iterations and finalizes honestly inside
@@ -1394,7 +1395,8 @@ def _compact_consumed_look_frames(messages, before_index=None):
     return removed
 
 
-def _compact_old_tool_results(messages, keep_latest=8, char_limit=900):
+def _compact_old_tool_results(messages, keep_latest=8, char_limit=900,
+                              plan_recorded=False):
     """Keep protocol-valid tool history without resending bulky old output."""
     call_names = {}
     for message in messages:
@@ -1415,7 +1417,7 @@ def _compact_old_tool_results(messages, keep_latest=8, char_limit=900):
         name = call_names.get(message.get("tool_call_id"), "tool")
         # Skill instructions and their exact constraints remain authoritative
         # for the whole turn; compact ordinary evidence and diffs only.
-        if name == "read_skill":
+        if name == "read_skill" and not plan_recorded:
             continue
         head = content[:max(300, char_limit - 380)].rstrip()
         tail = content[-180:].lstrip()
@@ -1689,8 +1691,29 @@ def run_agent_job(worker_db, job):
             "version": _turn_start["version"],
             "json": json.loads(json.dumps(_turn_start["json"])),
         }
+        payload = job.get("payload") or {}
+        baseline_digest = payload.get("turn_baseline_digest")
+        ctx.turn_baseline_from_death_resume = bool(
+            baseline_digest and payload.get("death_resume"))
+        if not baseline_digest:
+            baseline_digest = hashlib.sha256(
+                edl_signature(_turn_start["json"]).encode("utf-8")) \
+                .hexdigest()
+            try:
+                worker_db.run(
+                    dbx.record_agent_turn_baseline, job["id"],
+                    job.get("total_claims"), _turn_start["version"],
+                    baseline_digest)
+            except Exception as exc:
+                # Qualification remains user-favouring if this audit write is
+                # unavailable; it must never make the editor unavailable.
+                print(f"[job {job['id']}] could not persist turn baseline: "
+                      f"{exc}", flush=True)
+        ctx.turn_baseline_digest = baseline_digest
     except Exception:
         ctx.turn_start_edl = None
+        ctx.turn_baseline_digest = None
+        ctx.turn_baseline_from_death_resume = False
     # Do not pre-warm the preview fleet here. Agent planning routinely lasts
     # longer than the executor's short idle window, which made the warm-up
     # container disappear before rendering and charged for two cold starts.
@@ -1887,7 +1910,62 @@ def _recover_catastrophic_timeline_collapse(ctx, worker_db):
     return ctx.catastrophic_recovery
 
 
-def _auto_render_if_needed(ctx, worker_db, session_id, timings):
+def _restore_terminal_preview_failure(ctx, worker_db):
+    """Append the last usable EDL after a deterministic final preview failure.
+
+    The failed immutable version remains in history for diagnosis. The active
+    latest version becomes a copy of the newest version that rendered
+    successfully this turn, or the untouched turn baseline when none did.
+    Transient infrastructure failures are deliberately excluded: an outage is
+    not evidence that a valid edit should be undone.
+    """
+    failure = getattr(ctx, "last_preview_failure", None) or {}
+    if (getattr(ctx, "terminal_preview_recovery", None)
+            or not failure.get("agent_repairable")
+            or not getattr(ctx, "versions_written", None)):
+        return None
+    latest = ctx.latest_edl()
+    target = None
+    for version in sorted(getattr(ctx, "rendered_versions", None) or set(),
+                          reverse=True):
+        if int(version) >= int(latest["version"]):
+            continue
+        try:
+            target = worker_db.run(
+                dbx.get_edl_version, ctx.project_id, int(version))
+        except Exception:
+            target = None
+        if target:
+            break
+    if not target:
+        target = getattr(ctx, "turn_start_edl", None)
+    if not target or int(target.get("version") or 0) == int(latest["version"]):
+        return None
+
+    restored = json.loads(json.dumps(target["json"]))
+    version = worker_db.run(dbx.insert_edl, ctx.project_id, restored, "agent")
+    ctx.versions_written.append(version)
+    ctx.last_change = None
+    ctx.last_preview = None
+    ctx.last_preview_failure = None
+    ctx.last_visual_critic = None
+    ctx.last_story_review = None
+    ctx.last_audio_review = None
+    ctx.last_taste = []
+    ctx.terminal_preview_recovery = {
+        "failed_version": latest["version"],
+        "restored_from_version": target["version"],
+        "to_version": version,
+        "failure_kind": failure.get("kind"),
+    }
+    print(f"[honesty] job {ctx.job['id']}: deterministic preview failure on "
+          f"v{latest['version']} — restored last usable v{target['version']} "
+          f"as v{version}", flush=True)
+    return ctx.terminal_preview_recovery
+
+
+def _auto_render_if_needed(ctx, worker_db, session_id, timings,
+                           turn_deadline=None):
     """If the EDL changed this turn without a successful render_preview,
     render one now (logged + counted). Returns (latest_edl_row, fail_note)."""
     recovery = _recover_catastrophic_timeline_collapse(ctx, worker_db)
@@ -1909,7 +1987,11 @@ def _auto_render_if_needed(ctx, worker_db, session_id, timings):
         # here is that the USER gets a real preview of what was written.
         ctx.autorendering = True
         try:
-            result = agent_tools.render_preview(ctx)
+            preview_kwargs = {}
+            if turn_deadline is not None:
+                preview_kwargs["_wait_timeout_s"] = max(
+                    0.0, float(turn_deadline) - time.monotonic())
+            result = agent_tools.render_preview(ctx, **preview_kwargs)
         finally:
             ctx.autorendering = False
         timings["auto_render_s"] = round(time.monotonic() - t0, 2)
@@ -1925,10 +2007,15 @@ def _auto_render_if_needed(ctx, worker_db, session_id, timings):
             fail_note = (fail_note or "") + (
                 "\n\n(Heads up: the preview render failed — "
                 f"{result[:200]})")
+        elif result.startswith("Preview render is taking too long"):
+            fail_note = (fail_note or "") + (
+                "\n\n(The edit is saved. Its preview is still rendering and "
+                "will attach automatically when it finishes.)")
     return latest, fail_note
 
 
-def _preview_repair_pushback(ctx, messages, t_start, already_pushed):
+def _preview_repair_pushback(ctx, messages, t_start, already_pushed,
+                             turn_started=None):
     """Surface one failed immutable preview as repair evidence."""
     failure = getattr(ctx, "last_preview_failure", None) or {}
     if already_pushed or not failure.get("agent_repairable"):
@@ -1936,7 +2023,12 @@ def _preview_repair_pushback(ctx, messages, t_start, already_pushed):
     # A correction needs one model dispatch plus one proof render.  At the
     # wall, preserving the saved EDL and explaining honestly is safer than a
     # half-written repair that the user never sees.
-    if config.AGENT_TURN_TIMEOUT_S - (time.monotonic() - t_start) < 120:
+    now = time.monotonic()
+    turn_started = t_start if turn_started is None else turn_started
+    remaining = min(
+        config.AGENT_TURN_TIMEOUT_S - (now - t_start),
+        config.AGENT_TURN_TOTAL_TIMEOUT_S - (now - turn_started))
+    if remaining < 120:
         return False
     version = ctx.latest_edl()["version"]
     messages.append({
@@ -1957,7 +2049,8 @@ def _preview_repair_pushback(ctx, messages, t_start, already_pushed):
     return True
 
 
-def _quality_repair_pushback(ctx, messages, t_start, pushed_versions):
+def _quality_repair_pushback(ctx, messages, t_start, pushed_versions,
+                             turn_started=None):
     """Require one decision on each newly proven high-confidence defect.
 
     This is semantic, not a turn-count throttle: an immutable preview version
@@ -1986,7 +2079,12 @@ def _quality_repair_pushback(ctx, messages, t_start, pushed_versions):
         return False
     # Leave room for a targeted write plus one immutable proof. If there is
     # not enough clock, the finding is still disclosed in the final handoff.
-    if config.AGENT_TURN_TIMEOUT_S - (time.monotonic() - t_start) < 120:
+    now = time.monotonic()
+    turn_started = t_start if turn_started is None else turn_started
+    remaining = min(
+        config.AGENT_TURN_TIMEOUT_S - (now - t_start),
+        config.AGENT_TURN_TOTAL_TIMEOUT_S - (now - turn_started))
+    if remaining < 120:
         return False
     pushed_versions.add(int(version))
     messages.append({
@@ -2793,6 +2891,32 @@ def _turn_has_asset_progress(ctx):
         "stock_added"))
 
 
+def _turn_edl_changed(ctx):
+    """Whether the delivered latest timeline differs from the turn baseline."""
+    baseline = getattr(ctx, "turn_start_edl", None) or {}
+    try:
+        current_digest = hashlib.sha256(
+            edl_signature(ctx.latest_edl()["json"]).encode("utf-8")) \
+            .hexdigest()
+        durable_digest = getattr(ctx, "turn_baseline_digest", None)
+        if durable_digest and getattr(
+                ctx, "turn_baseline_from_death_resume", False):
+            # A reaper-created death resume starts from the already-modified
+            # latest EDL and may only need to preview/reply. Its durable digest
+            # still points at the original user-turn baseline, so that landed
+            # edit remains visible to billing/gate semantics.
+            return current_digest != durable_digest
+        baseline_digest = hashlib.sha256(
+            edl_signature(baseline["json"]).encode("utf-8")).hexdigest()
+        return (bool(getattr(ctx, "versions_written", None))
+                and current_digest != (durable_digest or baseline_digest))
+    except Exception:
+        # A missing baseline is a legacy/error path. Current ToolContexts set
+        # one before the first model call; retain user-favouring qualification
+        # semantics instead of turning version churn into a free-edit marker.
+        return False
+
+
 def _semantic_progress_marker(ctx):
     """Bounded evidence that this turn crossed a meaningful frontier.
 
@@ -2930,12 +3054,23 @@ def _repeated_tool_failure(ctx):
 
 def _turn_completion(ctx, status="replied", fail_note=None, truncated=False):
     """Return (outcome, billable) from value delivered, not job state."""
-    has_value = bool(ctx.versions_written or _turn_has_asset_progress(ctx)
-                     or ctx.last_preview)
+    # ``last_preview`` is not evidence that THIS turn delivered anything.  A
+    # context can carry the project's already-cached preview while a later
+    # edit attempt fails before its first write.  Only versions rendered by
+    # this ToolContext are current-turn preview value.
+    preview = getattr(ctx, "last_preview", None) or {}
+    rendered_now = bool(getattr(ctx, "rendered_versions", None)) \
+        and not bool(isinstance(preview, dict) and preview.get("cached"))
+    has_edit_deliverable = bool(ctx.versions_written or rendered_now)
+    has_value = bool(has_edit_deliverable or _turn_has_asset_progress(ctx))
     kinds = [row.get("kind") for row in ctx.turn_tool_outcomes]
     failed = "failed" in kinds
     refused = "refused" in kinds
-    attempted_edit = bool(ctx.write_attempts or getattr(ctx, "edit_plan", None))
+    # A durable plan is loaded on every later turn.  Its mere presence must
+    # not turn a useful read-only question into a failed edit attempt.
+    attempted_edit = bool(
+        ctx.write_attempts
+        or getattr(ctx, "plan_revised_this_turn", False))
 
     if not has_value and (failed or status in {"timeout", "shutdown"}):
         outcome = "internal_error"
@@ -2950,11 +3085,18 @@ def _turn_completion(ctx, status="replied", fail_note=None, truncated=False):
     # A read/analysis answer can be valuable without a timeline write. An
     # attempted EDIT that created nothing is not. Nor is a turn whose only
     # terminal fact is our own tool/infrastructure failure or truncation.
+    terminal_without_deliverable = (
+        not has_edit_deliverable
+        and (status in {"timeout", "shutdown", "budget", "awaiting_user",
+                        "no_index"}
+             or (attempted_edit and (failed or refused or truncated))))
     billable = not (
-        not has_value and (
+        terminal_without_deliverable
+        or (not has_value and (
             attempted_edit or failed or refused or truncated
-            or status in {"timeout", "shutdown", "budget", "no_index"}
-        )
+            or status in {"timeout", "shutdown", "budget", "awaiting_user",
+                          "no_index"}
+        ))
     )
     return outcome, billable
 
@@ -3248,13 +3390,13 @@ def _outcome_meta(ctx, outcome):
 
 
 def _finalize(ctx, worker_db, session_id, final_text, status, total_steps,
-              timings, honesty=None, extra_meta=None):
+              timings, honesty=None, extra_meta=None, turn_deadline=None):
     """Post a system-authored assistant reply (timeout/step-limit paths),
     auto-rendering first when the EDL changed without a preview. extra_meta is
     merged into the message meta so the studio can react to it (e.g. render an
     Upgrade CTA on the out-of-credits stop instead of a dead-end 402 later)."""
     latest, fail_note = _auto_render_if_needed(ctx, worker_db, session_id,
-                                               timings)
+                                               timings, turn_deadline)
     if fail_note:
         final_text += fail_note
     final_text = _disclose_outstanding_quality(ctx, final_text)
@@ -3268,7 +3410,8 @@ def _finalize(ctx, worker_db, session_id, final_text, status, total_steps,
     return {"status": status, "edl_version": latest["version"],
             "steps": total_steps, "auto_render": ctx.autorendered,
             "honesty": honesty, "timings": timings,
-            "outcome": outcome, "billable": billable}
+            "outcome": outcome, "billable": billable,
+            "edl_changed": _turn_edl_changed(ctx)}
 
 
 def _messages_for_record(messages):
@@ -3325,6 +3468,12 @@ _CONTINUATION_NOTE = (
     "already used during the earlier planning window and is not reattached "
     "to this continuation; use look_at/look_at_asset for exact pixels needed "
     "by any remaining visual decision.]")
+
+
+def _tool_schema_refresh_needed(ctx):
+    """Whether the next dispatch needs a newly routed tool catalog."""
+    return bool(getattr(ctx, "edit_plan", None) or ctx.versions_written
+                or getattr(ctx, "_expanded_tool_domains", None))
 
 
 def _run_loop(ctx, worker_db, job, session_id, user_message,
@@ -3406,19 +3555,23 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         # remain complete; compact mode removes repeated handbook prose only.
         compact=True,
         names=names)
+    if getattr(ctx, "_expanded_tool_domains", None):
+        ctx._expanded_tool_domains = set()
     ctx.editing_metrics["initial_tool_schemas"] = len(tools)
     ctx.editing_metrics["initial_tool_schema_chars"] = len(
         json.dumps(tools, separators=(",", ":")))
     total_steps = _cont.get("steps", 0)
     t_start = _cont.get("t_start") or time.monotonic()
     turn_started = _cont.get("turn_started") or time.monotonic()
+    turn_deadline = turn_started + config.AGENT_TURN_TOTAL_TIMEOUT_S
     seen_message_id = int(_cont.get("seen_message_id")
                           or user_message.get("id") or 0)
     timings = _cont.get("timings") or \
         {"llm_s": 0.0, "llm_calls": 0, "tools": {}}
     honesty = _cont.get("honesty") or \
         {"false_claims": 0, "corrective_note": False}
-    start_version = ctx.latest_edl()["version"]
+    start_version = int(_cont.get("start_version")
+                        or ctx.latest_edl()["version"])
     # Completion budget for this step, and how many times a truncated step has
     # already been retried with a bigger one. See _TRUNCATED_NUDGE.
     max_tokens = config.AGENT_MAX_TOKENS
@@ -3477,8 +3630,8 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 worker_db.run(dbx.add_message, session_id, "assistant",
                               "I had to stop mid-request for a moment of "
                               "maintenance on my side — the edits I finished "
-                              "are saved. Tell me to continue and I'll pick "
-                              "up exactly where I left off.",
+                              "are saved, but the remaining request was not "
+                              "completed.",
                               {"edl_version": latest["version"],
                                **_outcome_meta(ctx, outcome)})
             else:
@@ -3507,8 +3660,13 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 len(getattr(ctx, name, None) or []) for name in progress_lists)
             semantic_now = _semantic_progress_marker(ctx)
             _progressed = _semantic_progressed(semantic_start, semantic_now)
+            plan_state = director.status(
+                getattr(ctx, "edit_plan", None) or {}).get("state")
+            incomplete = plan_state in {
+                "in_progress", "needs_review", "needs_repair"}
             if _progressed and not ctx.over_budget() and not total_expired \
-                    and not SHUTDOWN.is_set():
+                    and not SHUTDOWN.is_set() and incomplete \
+                    and n_clock < 1:
                 print(f"[job {job['id']}] semantic progress window spent after "
                       f"{total_steps} step(s), but work is still landing — "
                       f"refreshing it (refresh {n_clock + 1})", flush=True)
@@ -3519,6 +3677,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                            "why": "turn clock", "steps": total_steps,
                            "t_start": time.monotonic(),
                            "turn_started": turn_started,
+                           "start_version": start_version,
                            "seen_message_id": seen_message_id,
                            "timings": timings, "honesty": honesty,
                            "preview_repair_pushed": preview_repair_pushed,
@@ -3552,9 +3711,9 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                     + "so I'm stopping here — the edits I finished are "
                     "saved "
                     "and previewed below. If part of your request isn't in "
-                    "them yet, it is NOT done — say \"continue\" and I'll "
-                    "pick up where I stopped.",
-                    "timeout", total_steps, timings, honesty)
+                    "them yet, it is not done.",
+                    "timeout", total_steps, timings, honesty,
+                    turn_deadline=turn_deadline)
             # "nothing was changed" is true of the EDL but not of the project:
             # a turn can time out after downloading a file, and telling the
             # user nothing happened would leave them re-pasting a link whose
@@ -3625,13 +3784,15 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                         "budget", total_steps, timings, honesty,
                         extra_meta={"credits_exhausted": True,
                                     "free_trial_exhausted": not subscribed,
-                                    "trial_cap_reached": trialing})
+                                    "trial_cap_reached": trialing},
+                        turn_deadline=turn_deadline)
                 return _finalize(
                     ctx, worker_db, session_id,
                     "I've hit my budget for this request, so I'm stopping "
                     "here — the edits I completed are saved and previewed "
                     "below. Send a follow-up to keep going.",
-                    "budget", total_steps, timings, honesty)
+                    "budget", total_steps, timings, honesty,
+                    turn_deadline=turn_deadline)
             if exhausted:
                 outcome, billable = _turn_completion(ctx, "budget")
                 worker_db.run(dbx.add_message, session_id, "assistant",
@@ -3997,9 +4158,11 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 continue
             # Auto-render first so the turn facts include the real preview.
             latest, fail_note = _auto_render_if_needed(ctx, worker_db,
-                                                       session_id, timings)
+                                                       session_id, timings,
+                                                       turn_deadline)
             if _preview_repair_pushback(
-                    ctx, messages, t_start, preview_repair_pushed):
+                    ctx, messages, t_start, preview_repair_pushed,
+                    turn_started=turn_started):
                 preview_repair_pushed = True
                 print(f"[job {job['id']}] preview v{latest['version']} "
                       "failed deterministically — requesting one corrected "
@@ -4007,8 +4170,24 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 if body:
                     messages.append({"role": "assistant", "content": body})
                 continue
+            terminal_recovery = _restore_terminal_preview_failure(
+                ctx, worker_db)
+            if terminal_recovery:
+                # Re-render the restored active version. Identical prior state
+                # normally hits the immutable render cache; either way the
+                # user receives a playable latest state, never the failed one.
+                latest, restored_note = _auto_render_if_needed(
+                    ctx, worker_db, session_id, timings, turn_deadline)
+                fail_note = (fail_note or "") + (
+                    "\n\n(The last attempted version failed deterministic "
+                    "preview safety checks, so I restored the last usable "
+                    f"edit from v{terminal_recovery['restored_from_version']} "
+                    "instead of leaving a broken version active.)")
+                if restored_note:
+                    fail_note += restored_note
             if _quality_repair_pushback(
-                    ctx, messages, t_start, quality_repair_versions):
+                    ctx, messages, t_start, quality_repair_versions,
+                    turn_started=turn_started):
                 print(f"[job {job['id']}] preview v{latest['version']} has "
                       "high-confidence craft defects — requesting a targeted "
                       "repair decision", flush=True)
@@ -4084,6 +4263,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                     # charge_turn_credits' "a turn that got nothing back costs
                     # nothing", one layer up where the reason is visible.
                     "billable": billable, "outcome": outcome,
+                    "edl_changed": _turn_edl_changed(ctx),
                     "truncated": truncated_out or None}
 
         messages.append({
@@ -4153,7 +4333,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                         _complete_adopted_steers(ctx, worker_db, job["id"])
                         return {"status": "awaiting_user",
                                 "steps": total_steps, "timings": timings,
-                                "outcome": "blocked"}
+                                "outcome": "blocked", "billable": False}
                 tt = timings["tools"].setdefault(name, {"n": 0, "s": 0.0})
                 tt["n"] += 1
                 tt["s"] = round(tt["s"] + time.monotonic() - t0, 2)
@@ -4237,7 +4417,8 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         if getattr(ctx, "_pending_visual_review_assets", None):
             ctx._pending_visual_review_assets.clear()
 
-        compacted = _compact_old_tool_results(messages)
+        compacted = _compact_old_tool_results(
+            messages, plan_recorded=bool(getattr(ctx, "edit_plan", None)))
         if compacted:
             ctx.editing_metrics["old_tool_results_compacted"] = (
                 ctx.editing_metrics.get("old_tool_results_compacted", 0)
@@ -4279,13 +4460,15 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             print(f"[job {job['id']}] execution checkpoint after "
                   f"{read_calls} read-only tools and zero writes", flush=True)
 
-        if getattr(ctx, "edit_plan", None) or ctx.versions_written:
+        if _tool_schema_refresh_needed(ctx):
             # Stage routing avoids resending 100+ schemas after every action.
             # Every capability remains name-visible and expand_toolset can
             # load any omitted domain; this changes context size, not power.
             names = agent_tools.compact_tool_names(ctx)
             tools = agent_tools.openai_tools(
                 model, compact=True, names=names)
+            if getattr(ctx, "_expanded_tool_domains", None):
+                ctx._expanded_tool_domains = set()
             ctx.editing_metrics["post_plan_tool_schemas"] = len(tools)
             ctx.editing_metrics["post_plan_tool_schema_chars"] = len(
                 json.dumps(tools, separators=(",", ":")))

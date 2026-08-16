@@ -907,7 +907,7 @@ def _speech_spans_out(index, tl):
 
 
 _BRAND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "brand")
-# v7 is a real motion signature. Keep the poster as a deliberate graceful
+# The card is a real motion signature. Keep the poster as a deliberate graceful
 # fallback: one missing binary asset should cost the animation, not every
 # customer's export.
 ENDCARD_PATH = os.path.join(_BRAND_DIR, "endcard.mp4")
@@ -1065,23 +1065,86 @@ def shaping_current(meta, edl):
     return ((meta or {}).get("gfx_shape_v") or 0) == config.GFX_SHAPING_VERSION
 
 
-def music_tail_ext(edl, out_duration):
-    """Round 79j — seconds of BLACK the program extends by, so unmuted music
-    past the last scene plays to its end instead of being cut off with the
-    picture. 0 for every timeline whose music fits inside the video, which
-    keeps all of those renders byte-identical."""
+def _music_overhang(edl, out_duration):
+    """Seconds authored music extends past the picture/program boundary."""
     ends = [float(m.get("end") or 0.0) for m in (edl or {}).get("music") or []
             if not m.get("mute")]
     end = max(ends) if ends else 0.0
     return max(0.0, min(end, out_duration + 3600.0) - out_duration)
 
 
-def music_tail_current(meta, edl, out_duration):
-    """Does this cached render predate the music-tail extension?
+def _music_program_span(item, out_duration):
+    """Audible portion of one music item without rewriting its EDL range."""
+    if item.get("mute"):
+        return None
+    start = max(0.0, min(float(item.get("start") or 0.0), out_duration))
+    end = max(0.0, min(float(item.get("end") or 0.0), out_duration))
+    return (start, end) if end - start > 0.001 else None
 
-    Same grandfathering discipline as transitions_current: only EDLs whose
-    music actually outlives the program are ever busted."""
-    if music_tail_ext(edl, out_duration) <= 0.05:
+
+def _music_on_final_frame(item, out_duration, fps=30.0):
+    """Whether an unmuted item overlaps the program's final video frame.
+
+    EDL music ranges are second-based while the picture has discrete frames.
+    Testing overlap with the final frame (rather than float equality with the
+    program boundary) keeps a two-decimal EDL honest at 24/30/60 fps.
+    """
+    span = _music_program_span(item, out_duration)
+    if not span or out_duration <= 0.0:
+        return False
+    frame_start = max(0.0, out_duration - 1.0 / max(float(fps), 1.0))
+    return span[0] < out_duration and span[1] > frame_start
+
+
+def _music_render_span(item, out_duration, outro_s=0.0, fps=30.0):
+    """Audio window needed for this render without changing the EDL.
+
+    Only music that is actually sounding on the program's final frame may
+    cross into a real end card. Its source phase stays continuous: the trim is
+    one uninterrupted window from the item's ordinary start through the far
+    edge of the card. Everything else remains clamped to picture time.
+    """
+    span = _music_program_span(item, out_duration)
+    if not span:
+        return None
+    if outro_s > 0.0 and _music_on_final_frame(item, out_duration, fps):
+        return span[0], out_duration + outro_s
+    return span
+
+
+def _music_carry_outro_s(edl, outro_s):
+    """Card seconds available to music after honoring a program fade-out.
+
+    A set_fades fade is an explicit whole-program instruction: picture and
+    sound must both reach silence at the authored program boundary. The
+    renderer's default card treatment may carry an ending score only when that
+    instruction is absent.
+    """
+    try:
+        fade_out = float(((edl or {}).get("effects") or {}).get(
+            "fade_out_s") or 0.0)
+    except (TypeError, ValueError):
+        fade_out = 0.0
+    return 0.0 if fade_out > 0.0 else max(0.0, float(outro_s or 0.0))
+
+
+def music_tail_ext(edl, out_duration):
+    """Rendered extension past picture time (intentionally always zero).
+
+    Music may remain parked past the program in the workbench, but export and
+    preview clocks are picture clocks.  The audio graph clamps its temporary
+    mix window while the persisted EDL remains untouched.
+    """
+    return 0.0
+
+
+def music_tail_current(meta, edl, out_duration):
+    """Does this cached render use the current music-overhang policy?
+
+    Only EDLs whose music outlives the program are busted: v1 rendered that
+    overhang over generated black, while v2 clamps the mix to picture time.
+    """
+    if _music_overhang(edl, out_duration) <= 0.05:
         return True
     return ((meta or {}).get("tail_v") or 0) == config.MUSIC_TAIL_VERSION
 
@@ -1344,12 +1407,9 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     holds and therefore what the user approved in the preview — trimming a keep
     span that lands in there would otherwise yield no picture at all.
     """
-    # Round 79j — the SEQUENCE is as long as its content: unmuted music past
-    # the last scene extends the render over BLACK to its own end, so a song
-    # laid on the workbench simply plays. 0 whenever music fits the video,
-    # which keeps every such graph byte-identical.
-    tail_ext = music_tail_ext(edl, tl.out_duration)
-    total_dur = tl.out_duration + tail_ext
+    # The program clock is the picture clock. Music can remain parked beyond
+    # this boundary in the EDL, but its temporary render window is clamped.
+    total_dur = tl.out_duration
     keep = [(max(0.0, s), min(e, src_dur)) for s, e in edl["keep"]]
     keep = [(s, e) for s, e in keep if e - s > 0.01]
     # focus_track is source-time composition state. A later word-safe cut can
@@ -2576,10 +2636,6 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         parts.append(f"[{plate_idx}:v]format=rgba[vsfpl]")
         parts.append("[vsfb][vsfpl]overlay=0:0:format=auto[vsf]")
         vlabel = "vsf"
-    if tail_ext > 0.05:
-        parts.append(f"[{vlabel}]tpad=stop_mode=add:"
-                     f"stop_duration={tail_ext:.3f}:color=black[vext]")
-        vlabel = "vext"
     fade_in = float(fx.get("fade_in_s") or 0.0)
     fade_out = float(fx.get("fade_out_s") or 0.0)
     if fade_in:
@@ -2594,9 +2650,9 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     # would be recoloured (GRADE_FILTERS['bw'] desaturates the brand red,
     # 'vintage' tints it); upstream of fade_out a user's fade-to-black would
     # swallow the branding instead of ending the programme. It is deliberately
-    # NOT routed through the music amix: that mix is `duration=first`, keyed to
-    # the programme stream, so appending the card's silence there would
-    # silently extend every music item's span.
+    # Video is concatenated independently from audio when a score reaches the
+    # last program frame. That lets exactly that music continue through the
+    # card without reviving speech, voiceover, sound effects, or room tone.
     #
     # The preview downscale happens AFTER the concat, not before. Doing it
     # first and then forcing the programme back to WxH for concat compatibility
@@ -2667,11 +2723,6 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
 
     # program audio: duck under active voiceover, then mix music + voiceover
     alabel = "ac"
-    if tail_ext > 0.05:
-        # The mix is duration=first keyed to the program audio — pad it with
-        # silence to the extended duration or every tail note is cut off.
-        parts.append(f"[ac]apad=pad_dur={tail_ext:.3f}[acx]")
-        alabel = "acx"
     duck_wins = merge_spans(
         [(max(0.0, float(vo["start_output_s"])),
           min(tl.out_duration, float(vo["start_output_s"]) + vd))
@@ -2683,6 +2734,24 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         alabel = "aduck"
 
     mix_labels = []
+    music_inputs = [entry for entry in (music_inputs or [])
+                    if _music_program_span(entry[1], total_dur)]
+    carry_outro_s = _music_carry_outro_s(edl, outro_s)
+    carry_js = {
+        j for j, (_i, item, _d) in enumerate(music_inputs)
+        if carry_outro_s > 0.0
+        and _music_on_final_frame(item, total_dur, fps)}
+    carry_music = bool(carry_js)
+    audio_dur = total_dur + carry_outro_s if carry_music else total_dur
+    if carry_music:
+        # Extend the FIRST input of amix with SILENCE so duration=first remains
+        # an exact program+card clock. Only qualifying music branches below
+        # contain sound in the extra window. Padding before asplit also gives
+        # smooth-duck sidechains a silent reference to release into instead of
+        # ending abruptly at the program/card junction.
+        parts.append(f"[{alabel}]apad,"
+                     f"atrim=end={audio_dur:.3f}[acard]")
+        alabel = "acard"
     # Smooth (sidechain) ducking: each opted-in music item compresses
     # against a copy of the program audio, so the bed dips WITH the voice
     # and swells back in the gaps instead of the legacy -12dB step. Split
@@ -2698,8 +2767,9 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     if music_inputs:
         speech = _speech_spans_out(index, tl)
         for j, (input_idx, item, track_dur) in enumerate(music_inputs):
-            m_start = max(0.0, min(item["start"], total_dur - 0.05))
-            m_end = max(m_start + 0.05, min(item["end"], total_dur))
+            m_start, m_end = _music_render_span(
+                item, total_dur,
+                outro_s=carry_outro_s if j in carry_js else 0.0, fps=fps)
             dur = m_end - m_start
             # Offset seeks INTO the track — start on the drop instead of the
             # intro. With -stream_loop the trim window runs straight across
@@ -2720,7 +2790,12 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             # half the span so a 2s sting can't fade in past its own end.
             fades = ""
             fi = min(max(0.0, float(item.get("fade_in_s") or 0.0)), dur / 2)
-            fo = min(max(0.0, float(item.get("fade_out_s") or 0.0)), dur / 2)
+            # A carried score is one continuous source window. Its authored
+            # item fade belongs to the old program edge and would turn the
+            # whole five-second card silent, so the renderer-owned final-mix
+            # fade below replaces it. Non-carried items remain untouched.
+            fo = 0.0 if j in carry_js else min(
+                max(0.0, float(item.get("fade_out_s") or 0.0)), dur / 2)
             if fi > 0.01:
                 fades += f",afade=t=in:st=0:d={fi:.2f}"
             if fo > 0.01:
@@ -2749,9 +2824,11 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         off = max(0.0, float(vo.get("source_offset_s") or 0.0))
         trim = (f"atrim=start={off:.3f}:end={off + vd:.3f},"
                 "asetpts=PTS-STARTPTS,")
+        tail_guard = (f",atrim=end={total_dur:.3f}"
+                      if carry_music else "")
         parts.append(f"[{input_idx}:a]{trim}"
                      f"volume={vo.get('gain_db', 0.0)}dB,"
-                     f"aresample=48000{delay}[vo{j}]")
+                     f"aresample=48000{delay}{tail_guard}[vo{j}]")
         mix_labels.append(f"[vo{j}]")
     for j, (input_idx, item, _sdur) in enumerate(sfx_inputs or []):
         at = max(0.0, min(float(item.get("at") or 0.0), tl.out_duration))
@@ -2762,9 +2839,11 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         # No ducking. A normal one-shot plays its full length; offset_s is an
         # explicit exception for taking the requested hit from inside a long
         # extracted audio track. amix still stops its tail at programme end.
+        tail_guard = (f",atrim=end={total_dur:.3f}"
+                      if carry_music else "")
         parts.append(f"[{input_idx}:a]{trim}"
                      f"volume={item.get('gain_db', -6.0)}dB,"
-                     f"aresample=48000{delay}[sfx{j}]")
+                     f"aresample=48000{delay}{tail_guard}[sfx{j}]")
         mix_labels.append(f"[sfx{j}]")
 
     outro_on = outro_here          # one predicate, so the video and audio
@@ -2790,7 +2869,17 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         chain = []
         if fade_in:
             chain.append(f"afade=t=in:st=0:d={fade_in:.2f}")
-        if fade_out:
+        if carry_music:
+            # The carried path has exactly one ending fade, on the completed
+            # mix at the far edge of the card. It replaces both the item's
+            # normal fade and the silent-card 0.25s program fade, preserving
+            # level and compressor release across the junction.
+            d = min(config.OUTRO_MUSIC_FADE_OUT_S, carry_outro_s,
+                    audio_dur / 2)
+            if d > 0.01:
+                chain.append(f"afade=t=out:st={audio_dur - d:.2f}"
+                             f":d={d:.2f}")
+        elif fade_out:
             st = max(0.0, total_dur - fade_out)
             chain.append(f"afade=t=out:st={st:.2f}:d={fade_out:.2f}")
         elif outro_on:
@@ -2809,10 +2898,10 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         # add inter-sample overs. A latency-compensated hard ceiling follows
         # it, so QC cannot report positive dBTP while picture/audio stay in
         # sync. The limiter does not auto-level back to 0 dBFS (`level=0`).
-        # Apply this to the PROGRAM only — the
-        # end card's silence must not drag the integrated measurement, and
-        # normalizing before the concat keeps it out. loudnorm internally
-        # resamples to 192k, so the format is pinned back after.
+        # Ordinarily this is the PROGRAM only (the silent card is concatenated
+        # afterward). A carried score is one continuous mix instead; measuring
+        # it as one stream avoids a gain discontinuity at the card junction.
+        # loudnorm internally resamples to 192k, so pin the format back after.
         nxt = "amst" if outro_on else "aout"
         parts.append(f"[{a_prog}]loudnorm=I=-14:TP=-2.0:LRA=11,"
                      "alimiter=limit=0.75:attack=5:release=50:level=0:"
@@ -2821,12 +2910,23 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         a_prog = nxt
 
     if outro_on:
-        parts.append(f"anullsrc=r=48000:cl=stereo:d={outro_s:.3f},"
-                     "aformat=sample_fmts=fltp:channel_layouts=stereo[osil]")
         shrink = preview and _needs_preview_downscale(H)
         cat_v = "vcat" if shrink else "vout"
-        parts.append(f"[{v_final}][{a_prog}][ovid][osil]"
-                     f"concat=n=2:v=1:a=1[{cat_v}][aout]")
+        if carry_music:
+            # Picture concatenates alone; [a_prog] already spans the exact
+            # program+card duration and contains only carried music after the
+            # program boundary. Never route VO/SFX/ambience into this tail.
+            parts.append(f"[{v_final}][ovid]"
+                         f"concat=n=2:v=1:a=0[{cat_v}]")
+            parts.append(f"[{a_prog}]anull[aout]")
+        else:
+            # Existing silent-card behavior, byte/graph-identical when no
+            # score reaches the final program frame.
+            parts.append(f"anullsrc=r=48000:cl=stereo:d={outro_s:.3f},"
+                         "aformat=sample_fmts=fltp:"
+                         "channel_layouts=stereo[osil]")
+            parts.append(f"[{v_final}][{a_prog}][ovid][osil]"
+                         f"concat=n=2:v=1:a=1[{cat_v}][aout]")
         if shrink:
             parts.append(rf"[vcat]scale=-2:min({config.PREVIEW_MAX_HEIGHT}\,"
                          r"floor(ih/2)*2),format=yuv420p[vout]")
@@ -2857,6 +2957,10 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
     voiceover = edl.get("voiceover") or []
     # keep=[] -> Timeline.out_duration == sum of insert durations (the program).
     tl = Timeline(edl["keep"], inserts)
+    # Resolve this before opening music inputs: a looped track may need five
+    # more seconds of source to stay phase-continuous across the real card.
+    outro_s = outro_seconds(preview)
+    music_outro_s = _music_carry_outro_s(edl, outro_s)
     ass_path = caplib.build_ass(edl, {}, tl,
                                 os.path.join(workdir, "captions.ass"),
                                 play_res=(W, H))
@@ -2865,7 +2969,7 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
                                       play_res=(W, H))
 
     def _fetch(key, tag, idx):
-        cached = _cached_source(key)
+        cached = _job_cached_source(key, workdir)
         if cached:
             return cached
         local = os.path.join(workdir, f"{tag}_{idx}"
@@ -2886,11 +2990,11 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
     next_idx += 1
 
     for item in edl.get("music", []):
-        # Round 79i — a MUTED piece is the other half of A/B listening:
-        # on the timeline, silent, skipped before it is fetched. (79j made
-        # the beyond-the-program skip obsolete: the render now EXTENDS to
-        # cover unmuted music, so those pieces play over black.)
-        if item.get("mute"):
+        # Muted and wholly out-of-program pieces stay on the workbench but do
+        # not need fetching or an ffmpeg input for this render.
+        audible = _music_render_span(
+            item, tl.out_duration, outro_s=music_outro_s, fps=fps)
+        if not audible:
             continue
         local = music_source(item["storage_key"],
                              lambda k: _fetch(k, "music", next_idx))
@@ -2903,8 +3007,7 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
             track_dur = media.probe_audio_duration(local)
         except Exception:
             track_dur = None
-        span = max(0.05, float(item.get("end") or 0.0)
-                   - float(item.get("start") or 0.0))
+        span = audible[1] - audible[0]
         offset = max(0.0, float(item.get("offset_s") or 0.0))
         if (item.get("loop") and track_dur
                 and (track_dur - offset) < span - 0.05):
@@ -2957,7 +3060,6 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
         overlay_inputs.append((next_idx, item))
         next_idx += 1
 
-    outro_s = outro_seconds(preview)
     card_idx = None
     if outro_s > 0.0:
         extra_inputs += _endcard_input_args(endcard_path(), outro_s, fps)
@@ -3219,6 +3321,11 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     inserts = edl.get("inserts") or []
     voiceover = edl.get("voiceover") or []
     tl = Timeline(edl["keep"], inserts, edl.get("speed"))
+    # A stitched piece suppresses the card entirely. Otherwise resolve the
+    # real card duration before opening music inputs, because a looped score
+    # may need additional demuxer source for its continuous carried tail.
+    outro_s = 0.0 if suppress_outro else outro_seconds(preview)
+    music_outro_s = _music_carry_outro_s(edl, outro_s)
     # A stitched-preview PIECE (round 93) burns captions from the FULL
     # program's ASS, time-shifted by the stitcher — the piece's own windowed
     # timeline would regroup caption lines at its edges. "" means the caller
@@ -3244,7 +3351,9 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                                       play_res=(W, H))
 
     def _fetch(key, tag, idx):
-        cached = _resolve_asset_local(key, asset_locals, _cached_source)
+        cached = _resolve_asset_local(
+            key, asset_locals,
+            lambda storage_key: _job_cached_source(storage_key, workdir))
         if cached:
             return cached
         local = os.path.join(workdir, f"{tag}_{idx}"
@@ -3304,11 +3413,11 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         next_idx += 1
 
     for item in edl.get("music", []):
-        # Round 79i — a MUTED piece is the other half of A/B listening:
-        # on the timeline, silent, skipped before it is fetched. (79j made
-        # the beyond-the-program skip obsolete: the render now EXTENDS to
-        # cover unmuted music, so those pieces play over black.)
-        if item.get("mute"):
+        # Muted and wholly out-of-program pieces stay on the workbench but do
+        # not need fetching or an ffmpeg input for this render.
+        audible = _music_render_span(
+            item, tl.out_duration, outro_s=music_outro_s, fps=fps)
+        if not audible:
             continue
         local = music_source(item["storage_key"],
                              lambda k: _fetch(k, "music", next_idx))
@@ -3321,8 +3430,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
             track_dur = media.probe_audio_duration(local)
         except Exception:
             track_dur = None      # unknown: never loop, just play what's there
-        span = max(0.05, float(item.get("end") or 0.0)
-                   - float(item.get("start") or 0.0))
+        span = audible[1] - audible[0]
         offset = max(0.0, float(item.get("offset_s") or 0.0))
         # -stream_loop repeats the file at the demuxer, so a short track can
         # fill a long span. Only ask for it when the track genuinely cannot
@@ -3408,7 +3516,6 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     # A stitched-preview piece suppresses it: the card belongs to the end of
     # the PROGRAM, and the tail that carries it is stream-copied from the
     # previous preview.
-    outro_s = 0.0 if suppress_outro else outro_seconds(preview)
     card_idx = None
     if outro_s > 0.0:
         extra_inputs += _endcard_input_args(endcard_path(), outro_s, fps)
@@ -3625,11 +3732,9 @@ def _verify_render(edl_json, out_path, out_dur, job_id, variant,
         keep = keep or edl_json["keep"]     # never let clamping empty it out
     program = Timeline(keep, edl_json.get("inserts") or [],
                        edl_json.get("speed")).out_duration
-    # Round 79j — the render legitimately extends past the scenes when
-    # unmuted music outlives them; the expectation must extend with it or
-    # the verifier rejects exactly the length the graph was asked to build.
-    tail = music_tail_ext(edl_json, program)
-    program += tail
+    # Authored music can remain beyond this boundary in the workbench, but
+    # rendered media is clamped to the program clock.
+    tail = 0.0
     # The rendered file is the programme PLUS the branded end card. The
     # tolerance does not absorb it: 2.5s exceeds max(0.75s, 3%) for anything
     # under ~83s, so without this every short export fails verification and
@@ -3656,8 +3761,6 @@ def _verify_render(edl_json, out_path, out_dur, job_id, variant,
         # Measure the PROGRAMME only. The end card is black by design, and the
         # source it is compared against has none, so counting it is pure
         # unmatched numerator in the out_black - src_black comparison below.
-        # The music tail is black BY DESIGN — measure the scenes only, or a
-        # short video under a long song reads as "the render looks broken".
         prog_dur = max(0.1, out_dur - outro - tail)
         out_black = min(1.0, max(
             0.0, media.black_seconds(out_path, prog_dur) / prog_dur))
@@ -3709,9 +3812,10 @@ def _prune_source_cache(cache_dir, protect=None):
 
     Cloud Run reuses an instance between unrelated customers.  That makes a
     source cache valuable, but it also means a huge file from the previous job
-    can consume the scratch reservation of the next one.  Concurrency is one,
-    so no other request can be using an unprotected cache entry while this
-    runs; ``protect`` keeps the file this call is about to return.
+    can consume the scratch reservation of the next one. ``protect`` covers
+    the narrow download/return window. Active jobs hold hardlinks in their own
+    workdirs, so unlinking a cache-directory entry cannot invalidate an input
+    between probe and ffmpeg open when the executor runs concurrent requests.
     """
     now = time.time()
     entries = []
@@ -3751,12 +3855,42 @@ def _prune_source_cache(cache_dir, protect=None):
             pass
 
 
+def _lease_cached_source(local, lease_dir, storage_key):
+    """Hardlink a cache hit into a job workdir before returning it.
+
+    Modal admits two render requests per container. A second request may prune
+    the cache path after the first request probes it but before ffmpeg opens it.
+    A hardlink gives the first job its own directory entry for the same inode:
+    pruning can reclaim the cache name, while the bytes remain valid until the
+    job's normal workdir cleanup. If a link cannot be made, callers fall back
+    to an ordinary job-owned download instead of accepting the race.
+    """
+    if not lease_dir:
+        return local
+    try:
+        os.makedirs(lease_dir, exist_ok=True)
+        suffix = os.path.splitext(local)[1].lower()
+        digest = hashlib.sha256(storage_key.encode()).hexdigest()[:32]
+        leased = os.path.join(lease_dir, f"cached_{digest}{suffix}")
+        try:
+            os.link(local, leased)
+        except FileExistsError:
+            if os.path.getsize(leased) <= 0:
+                return None
+        return leased
+    except OSError as exc:
+        print(f"[render] source cache lease failed ({exc}) — "
+              "downloading into the workdir", flush=True)
+        return None
+
+
 def _cached_source(storage_key):
     """A sha-keyed local copy of an IMMUTABLE storage object (proxies are
     content-addressed, originals/clean sources never change under a key), so
     the second and third render of an agent turn stop re-downloading the
-    same file. Returns a local path OUTSIDE any job workdir. Falls back to
-    None on any failure — the caller downloads into its workdir as before.
+    same file. Returns the shared cache path; production consumers immediately
+    acquire it through ``_job_cached_source`` before passing it to ffmpeg.
+    Falls back to None on any failure — the caller downloads into its workdir.
 
     Round 84: an agent turn typically renders 2-3 times (edit → check → fix
     → check); the source download was the fixed tax on every one of them.
@@ -3788,6 +3922,14 @@ def _cached_source(storage_key):
         return None
 
 
+def _job_cached_source(storage_key, workdir):
+    """Acquire a cache path as a job-owned hardlink or refuse the cache hit."""
+    local = _cached_source(storage_key)
+    if not local:
+        return None
+    return _lease_cached_source(local, workdir, storage_key)
+
+
 def _fetch_into(workdir, key, tag):
     """Plain download into the job workdir — the fallback when the sha cache
     is unavailable. Raises on failure; callers decide how loud to be."""
@@ -3812,9 +3954,6 @@ def _timeline_stitch(job_id, prev_edl, new_edl, tl_prev, tl_new, index,
     dur_out = tl_new.out_duration
     if outro_seconds(True) > 0:
         return None                    # previews with an end card: rare, out
-    if music_tail_ext(new_edl, dur_out) > 0 or \
-            music_tail_ext(prev_edl, tl_prev.out_duration) > 0:
-        return None                    # music outliving the program moves art
     if is_canvas_program(new_edl) or is_canvas_program(prev_edl):
         return None
 
@@ -3874,7 +4013,7 @@ def _timeline_stitch(job_id, prev_edl, new_edl, tl_prev, tl_new, index,
               "would not settle)", flush=True)
         return None
 
-    prev_local = _cached_source(prev_asset["storage_key"])
+    prev_local = _job_cached_source(prev_asset["storage_key"], workdir)
     if not prev_local:
         prev_local = _fetch_into(workdir, prev_asset["storage_key"], "prevpv")
     kfs = stitch.keyframe_times(prev_local)
@@ -4025,7 +4164,7 @@ def _stitched_preview(job_id, new_row, prev_row, prev_asset, index,
                   "not settle)", flush=True)
             return None
 
-        prev_local = _cached_source(prev_asset["storage_key"])
+        prev_local = _job_cached_source(prev_asset["storage_key"], workdir)
         if not prev_local:
             prev_local = _fetch_into(workdir, prev_asset["storage_key"],
                                      "prevpv")
@@ -4442,7 +4581,7 @@ def run_render_job(worker_db, job):
             if not _still_ours(5):
                 raise dbx.JobLeaseLost(
                     "job was cancelled or handed to another worker")
-            src_local = _cached_source(src_asset["storage_key"])
+            src_local = _job_cached_source(src_asset["storage_key"], workdir)
             if not src_local:
                 src_local = os.path.join(
                     workdir,
@@ -4490,7 +4629,8 @@ def run_render_job(worker_db, job):
                 continue
             try:
                 if variant == "preview":
-                    patch_locals[pt["id"]] = _cached_source(pt["asset_key"]) \
+                    patch_locals[pt["id"]] = _job_cached_source(
+                        pt["asset_key"], workdir) \
                         or _fetch_into(workdir, pt["asset_key"], pt["id"])
                 else:
                     fkey = pt.get("full_key") \
@@ -4507,7 +4647,8 @@ def run_render_job(worker_db, job):
                         storage.upload_file(flocal, fkey, "video/mp4")
                         patch_locals[pt["id"]] = flocal
                     else:
-                        patch_locals[pt["id"]] = _cached_source(fkey) \
+                        patch_locals[pt["id"]] = _job_cached_source(
+                            fkey, workdir) \
                             or _fetch_into(workdir, fkey, pt["id"])
             except Exception as pe_:
                 # A missing patch must not kill an export — but it must be

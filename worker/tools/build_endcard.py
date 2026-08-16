@@ -8,10 +8,11 @@ signature with one reading path:
                     [robot]  Valmera
                        www.valmera.io
 
-The three lines arrive in sequence over 0.75s, hold long enough to register,
-then fade to black. The exported MP4 is the production asset; the PNG is its
-fully-revealed poster and the renderer's graceful fallback if the animation is
-ever missing from a build.
+"Edited by" arrives first and holds alone for about half a second. The brand
+lockup and URL then resolve in sequence, hold long enough to register, and fade
+to black at five seconds. The exported MP4 is the production asset; the PNG is
+its fully-revealed poster and the renderer's graceful fallback if the animation
+is ever missing from a build.
 
 The robot is the existing white navbar mark. Only its antenna stalk is lifted
 to white so the red ball stays visibly attached on black; every other pixel is
@@ -33,7 +34,7 @@ BLACK_RGB = (0, 0, 0)
 # square-pixel master to fit any output without cropping it.
 CARD_W, CARD_H = 1080, 1920
 FPS = 30
-DURATION_S = 2.5
+DURATION_S = 5.0
 
 # The signature occupies about one fifth of a vertical reel instead of most of
 # the screen. "Edited by" is intentionally the largest element; the robot and
@@ -191,17 +192,17 @@ def frame_at(t, elements=None):
 
     # The final 0.36s resolves to black. This makes the MP4 itself complete;
     # the render pipeline also fades the segment as a codec-safe guard.
-    global_opacity = 1.0 - _progress(t, 2.10, 2.46)
+    global_opacity = 1.0 - _progress(t, 4.64, 5.0)
     frame = Image.new("RGBA", (CARD_W, CARD_H), (*BLACK_RGB, 255))
 
     _place(frame, headline[0], headline[1] + headline[0].height / 2,
            _progress(t, 0.05, 0.38), travel=28,
            global_opacity=global_opacity)
     _place(frame, lockup[0], lockup[1] + lockup[0].height / 2,
-           _progress(t, 0.25, 0.60), travel=20, scale_from=0.92,
+           _progress(t, 0.90, 1.25), travel=20, scale_from=0.92,
            global_opacity=global_opacity)
     _place(frame, url_line[0], url_line[1] + url_line[0].height / 2,
-           _progress(t, 0.48, 0.76), travel=14,
+           _progress(t, 1.05, 1.33), travel=14,
            global_opacity=global_opacity)
     return frame.convert("RGB")
 
@@ -209,7 +210,7 @@ def frame_at(t, elements=None):
 def build(poster_path, video_path=None):
     """Build the fully revealed PNG and, when requested, the animated MP4."""
     elements = _elements()
-    poster = frame_at(1.15, elements)
+    poster = frame_at(1.60, elements)
     poster.save(poster_path, optimize=True)
 
     if video_path:

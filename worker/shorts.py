@@ -911,12 +911,47 @@ def run_shorts_plan(worker_db, job):
         pending = (worker_db.run(dbx.pending_user_message,
                                  project_id, session_id)
                    if session_id else None)
-        if pending and worker_db.run(
-                dbx.user_credits_balance, job["user_id"]) >= 1.0:
-            worker_db.run(dbx.enqueue_job, project_id, job["user_id"],
-                          "agent_turn",
-                          {"message_id": pending["id"],
-                           "auto_resumed": True, "direct_short": True})
+        resolved = None
+        if pending:
+            resolved = worker_db.run(
+                dbx.resolve_pending_auto_resume, project_id, session_id,
+                job["user_id"], pending["id"], {"direct_short": True})
+        state = (resolved or {}).get("state")
+        if pending and state == "gated":
+            try:
+                worker_db.run(
+                    dbx.record_client_event, job["user_id"], project_id,
+                    "trial_gate_shown",
+                    {"subscribe_offer": True,
+                     "surface": "shorts_runner_auto_resume",
+                     "message_id": int(pending["id"]),
+                     "auto_resume_blocked": True})
+            except Exception as event_error:
+                print(f"[shorts] subscribe offer telemetry failed: "
+                      f"{event_error}", flush=True)
+            if session_id:
+                worker_db.run(
+                    dbx.add_message, session_id, "assistant",
+                    "I found the short-edit request you sent while this "
+                    "upload was being analyzed, but it did not run because "
+                    "this account has already used its free edit. Choose a "
+                    "plan, then send the request again once the plan is "
+                    "active.",
+                    {"kind": "direct_short", "auto_resume": False,
+                     "credits_exhausted": True,
+                     "free_trial_exhausted": True,
+                     "subscribe_gate": True})
+        elif pending and state == "no_credits" and session_id:
+            worker_db.run(
+                dbx.add_message, session_id, "assistant",
+                f"This {duration:.0f}-second upload already fits one short, "
+                "so I opened it in the Editor. Your brief is saved, but "
+                "you're out of credits; add credits and send it again.",
+                {"kind": "direct_short", "credits_exhausted": True})
+        elif pending:
+            # Enqueued (or already consumed by an idempotent retry). The
+            # agent reply is the next user-facing message.
+            pass
         elif session_id:
             worker_db.run(
                 dbx.add_message, session_id, "assistant",

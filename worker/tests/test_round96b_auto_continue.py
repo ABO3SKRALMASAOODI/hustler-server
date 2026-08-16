@@ -34,6 +34,12 @@ def test_real_external_boundaries_and_progress_refresh_remain():
     assert '"images_generated"' in source
     assert '"videos_generated"' in source
     assert '"assets0"' in source
+    assert config.AGENT_TURN_TOTAL_TIMEOUT_S - config.AGENT_TURN_TIMEOUT_S \
+        in range(120, 241)
+    assert 'and n_clock < 1' in source
+    assert '"start_version": start_version' in source
+    assert 'say \\"continue\\"' not in source.lower()
+    assert "tell me to continue" not in source.lower()
 
 
 def test_continuation_note_preserves_autonomy():

@@ -115,6 +115,19 @@ def test_new_user_request_inherits_style_but_not_old_completion():
     assert new["acceptance_checks"][0]["status"] == "pending"
 
 
+def test_bare_continue_does_not_replace_the_original_source_request():
+    old = director.create_blueprint(
+        steps=["build the story"], source_request="Make a premium launch reel")
+    resumed = director.create_blueprint(
+        steps=["finish the sound"], previous=old, source_request="Continue")
+    assert resumed["source_request"] == "Make a premium launch reel"
+
+    redirected = director.create_blueprint(
+        steps=["change the captions"], previous=old,
+        source_request="Make the captions smaller")
+    assert redirected["source_request"] == "Make the captions smaller"
+
+
 def test_same_turn_replan_can_preserve_matching_progress():
     old = director.update_progress(_blueprint(), completed_steps=[1],
                                    evidence="EDL v3")
@@ -408,6 +421,45 @@ def test_source_evidence_aliases_repair_only_to_real_ids():
     assert beats[0]["evidence_ids"] == ["1", "1", "s1", "invented"]
 
 
+def test_source_evidence_is_filled_from_exact_timed_window():
+    main = {
+        "sentences": [{"id": "s1", "t0": 0, "t1": 1.2},
+                      {"id": "s2", "t0": 1.2, "t1": 2.4}],
+        "shots": [{"id": "sh1", "start": 0, "end": 2.4}],
+    }
+    auxiliary = {
+        "shots": [{"id": "aux1", "start": 4, "end": 6}],
+    }
+    beats = [
+        {"source_start_s": .8, "source_end_s": 2.0,
+         "evidence_ids": []},
+        {"source_asset_key": "clip/a.mp4", "source_start_s": 4.2,
+         "source_end_s": 5.8, "evidence_ids": []},
+    ]
+    assert director.canonicalize_source_evidence_ids(
+        beats, main, asset_indexes={"clip/a.mp4": auxiliary}) == 4
+    assert beats[0]["evidence_ids"] == ["s1", "s2", "sh1"]
+    assert beats[1]["evidence_ids"] == ["aux1"]
+    assert director.source_evidence_violations(
+        beats, main, asset_indexes={"clip/a.mp4": auxiliary}) == []
+
+
+def test_source_evidence_fill_does_not_hide_unknown_or_missing_index():
+    index = {"shots": [{"id": "sh1", "start": 0, "end": 2}]}
+    beats = [{"source_start_s": 0, "source_end_s": 1,
+              "evidence_ids": ["invented"]}]
+    director.canonicalize_source_evidence_ids(beats, index)
+    assert beats[0]["evidence_ids"] == ["invented"]
+    assert "unknown id" in director.source_evidence_violations(
+        beats, index)[0]
+
+    absent = [{"source_start_s": 0, "source_end_s": 1,
+               "evidence_ids": []}]
+    assert director.canonicalize_source_evidence_ids(absent, {}) == 0
+    assert "no evidence_ids" in director.source_evidence_violations(
+        absent, {})[0]
+
+
 def test_set_plan_rejects_prose_only_motion_authoring():
     ctx, _fake = _tool_ctx()
     result = agent_tools.set_edit_plan(
@@ -662,7 +714,7 @@ def test_wrong_beat_motion_prevents_wasteful_readiness_encode():
     assert ctx.editing_metrics["motion_contract_gaps"] == 1
 
 
-def test_authored_department_plan_exposes_tools_without_expand_round_trip():
+def test_authored_department_plan_routes_only_the_current_step_domain():
     ctx, _fake = _tool_ctx()
     ctx.user_message = "make it great"
     ctx.edit_plan = director.create_blueprint(
@@ -677,10 +729,10 @@ def test_authored_department_plan_exposes_tools_without_expand_round_trip():
             "color": {"mode": "author", "purpose": "one product world"},
         })
     names = agent_tools.compact_tool_names(ctx)
-    for name in ("add_captions", "add_zoom", "research_broll",
-                 "research_music", "search_sfx", "set_color_grade",
-                 "showcase_demo"):
-        assert name in names
+    assert "add_captions" in names
+    for name in ("add_zoom", "research_broll", "research_music",
+                 "search_sfx", "set_color_grade"):
+        assert name not in names
 
 
 def test_timed_sequence_beats_reject_invented_or_unrelated_evidence_ids():

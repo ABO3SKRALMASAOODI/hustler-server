@@ -486,14 +486,19 @@ def source_evidence_ids_at(index, start, end=None, limit=8):
 
 def canonicalize_source_evidence_ids(sequence_map, index,
                                      asset_indexes=None):
-    """Repair common namespace spellings to exact indexed evidence ids.
+    """Repair/fill exact indexed evidence ids for a timed source beat.
 
     The evidence stays source-grounded: a value is changed only when its
     explicit namespace and number resolve to one id that really exists in the
     relevant main/auxiliary index. This turns ``shot-1`` into the actual ``1``
     and the common zero-based ``shot_0`` into the first shot when no literal
     zero id exists, without accepting an invented timestamp or arbitrary id.
-    Returns the number of repaired citations and mutates the normalized plan.
+    A model should choose editorial seconds, not spend another dispatch copying
+    machine provenance. Once a beat has a valid timed window, append the real
+    index rows overlapping that window when its citations are absent or do not
+    cover the whole window. Unknown citations are deliberately retained so
+    ``source_evidence_violations`` still rejects invented ids. Returns the
+    number of repaired/added citations and mutates the normalized plan.
     """
     repaired = 0
     for beat in sequence_map or []:
@@ -532,6 +537,29 @@ def canonicalize_source_evidence_ids(sequence_map, index,
                              if candidate in exact), None)
             values.append(resolved or value)
             repaired += int(bool(resolved))
+        try:
+            start = float(beat.get("source_start_s"))
+            end = float(beat.get("source_end_s"))
+        except (TypeError, ValueError):
+            start = end = None
+        if start is not None and end is not None and end > start:
+            # Cite every real sentence/shot needed to cover the selected
+            # source window, bounded by the blueprint schema's eight ids. An
+            # empty citation list is safe to fill mechanically. If the model
+            # did cite something, extend it only when at least one real cited
+            # row already overlaps the chosen window; this preserves the
+            # rejection for invented or unrelated-but-real provenance.
+            overlapping = source_evidence_ids_at(scoped, start, end, limit=8)
+            cited_overlap = any(
+                value in evidence
+                and evidence[value][1] > start
+                and evidence[value][0] < end
+                for value in values)
+            if not values or cited_overlap:
+                for evidence_id in overlapping:
+                    if evidence_id not in values and len(values) < 8:
+                        values.append(evidence_id)
+                        repaired += 1
         beat["evidence_ids"] = values
     return repaired
 
@@ -861,7 +889,11 @@ def create_blueprint(*, steps, previous=None, source_request=None,
         room = _LIST_LIMITS["acceptance_criteria"][0] - len(required_checks)
         raw["acceptance_criteria"] = custom[:max(0, room)] + required_checks
     raw["generation"] = int(old.get("generation") or 0) + 1
-    raw["source_request"] = source_request
+    continuation = re.sub(r"[^a-z]+", " ", str(source_request or "").lower()) \
+        .strip() in {"continue", "keep going", "go on", "resume", "carry on"}
+    raw["source_request"] = (old.get("source_request")
+                             if continuation and old.get("source_request")
+                             else source_request)
     # A new user request starts fresh execution even when it repeats similar
     # words; only an intentional same-turn replan carries progress forward.
     raw["step_states"] = ((old.get("step_states") or [])

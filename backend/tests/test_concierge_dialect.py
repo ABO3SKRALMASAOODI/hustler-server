@@ -106,6 +106,42 @@ def test_an_sdk_too_old_for_the_retry_still_answers(concierge):
     assert text == _REPLY
 
 
+def test_multiple_model_dialect_rejections_are_adapted_in_sequence(
+        monkeypatch):
+    """More than one mechanical token-cap rejection is not an outage."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    calls = []
+    response = types.SimpleNamespace(
+        choices=[types.SimpleNamespace(message=types.SimpleNamespace(
+            content='{"act": false, "reply": "%s"}' % _REPLY))],
+        usage=types.SimpleNamespace(prompt_tokens=10, completion_tokens=5))
+
+    def create(**kw):
+        calls.append(sorted(k for k in (
+            "temperature", "max_tokens", "max_completion_tokens") if k in kw))
+        if "max_tokens" in kw:
+            raise Exception("Unsupported parameter: 'max_tokens'; use "
+                            "'max_completion_tokens'")
+        if "max_completion_tokens" in kw:
+            raise Exception("Unsupported parameter: 'max_completion_tokens'")
+        return response
+
+    monkeypatch.setattr(v, "_concierge_client", types.SimpleNamespace(
+        chat=types.SimpleNamespace(
+            completions=types.SimpleNamespace(create=create))))
+    text, meta, _rec, _act = v._concierge_reply(
+        "no_video", [{"role": "user", "content": "مرحبا"}], [],
+        can_act=True)
+
+    assert calls == [
+        ["max_tokens"],
+        ["max_completion_tokens"],
+        [],
+    ]
+    assert meta["kind"] != "canned"
+    assert text == _REPLY
+
+
 def test_a_real_provider_failure_still_falls_back(monkeypatch):
     """The fallback is not being removed — only the case where WE were the
     thing that failed. A provider that genuinely refuses still gets the

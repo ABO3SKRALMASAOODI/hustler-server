@@ -467,45 +467,55 @@ def _concierge_reply(stage, history, attachments, index_error=None,
                      "content": (h["content"] or "")[:800]})
     req = {"model": CONCIERGE_MODEL, "messages": msgs}
     try:
+        # Concierge classification/copy does not need sampling. Reasoning
+        # models reject custom temperature, so omitting it avoids spending the
+        # first request of every pre-index conversation on a known 400.
         create_kwargs = dict(model=CONCIERGE_MODEL, messages=msgs,
-                             max_tokens=300, temperature=0.5)
+                             max_tokens=300)
         if want_act:
             # Force the {act, reply} object so a plain-prose answer to a real
             # create request can't be silently misread as chat (act=False) and
             # dropped with no agent turn.
             create_kwargs["response_format"] = {"type": "json_object"}
-        try:
-            resp = _concierge_llm().chat.completions.create(**create_kwargs)
-        except Exception as adapt_e:
-            # OpenAI's reasoning family (the Luna default) rejects the
-            # classic max_tokens and a non-default temperature. Mirror the
-            # worker's dialect adaptation in miniature: correct once, retry
-            # once — a real failure still lands in the outer except.
-            msg = str(adapt_e).lower()
-            adapted = False
-            if "max_tokens" in create_kwargs and "max_tokens" in msg:
-                create_kwargs["max_completion_tokens"] = \
-                    create_kwargs.pop("max_tokens")
-                adapted = True
-            if "temperature" in create_kwargs and "temperature" in msg:
-                create_kwargs.pop("temperature")
-                adapted = True
-            if not adapted:
-                raise
+        # A model can reject more than one field, one response at a time. Luna
+        # first rejected ``temperature`` in production and then rejected
+        # ``max_tokens`` on the retry; the old one-shot adapter treated that
+        # second, equally mechanical dialect error as an outage and returned
+        # the canned English fallback. Adapt each named field in a bounded
+        # loop, including an SDK that is too old to express the replacement
+        # cap. A non-dialect provider failure still escapes to the outer
+        # retry/fallback below.
+        for _dialect_attempt in range(4):
             try:
-                resp = _concierge_llm().chat.completions.create(**create_kwargs)
-            except TypeError:
-                # The RETRY itself was impossible: an installed SDK too old to
-                # know the parameter we just adapted TO. This is not a model
-                # saying no, it is our own client, and it used to kill the
-                # concierge outright — every pre-index reply in the product
-                # became the canned English template for two days (Aug 4-5
-                # 2026, 8/8 calls, openai==1.39.0 vs a reasoning model that
-                # rejects max_tokens). A token cap is a nicety; an answer in
-                # the user's own language is not. Drop the caps and ask again.
-                create_kwargs.pop("max_completion_tokens", None)
-                create_kwargs.pop("max_tokens", None)
-                resp = _concierge_llm().chat.completions.create(**create_kwargs)
+                resp = _concierge_llm().chat.completions.create(
+                    **create_kwargs)
+                break
+            except Exception as adapt_e:
+                msg = str(adapt_e).lower()
+                adapted = False
+                had_max_tokens = "max_tokens" in create_kwargs
+                had_max_completion = "max_completion_tokens" in create_kwargs
+                if "temperature" in create_kwargs and "temperature" in msg:
+                    create_kwargs.pop("temperature")
+                    adapted = True
+                if had_max_tokens and "max_tokens" in msg:
+                    create_kwargs["max_completion_tokens"] = \
+                        create_kwargs.pop("max_tokens")
+                    adapted = True
+                if (had_max_completion
+                        and "max_completion_tokens" in msg
+                        and (isinstance(adapt_e, TypeError)
+                             or "unsupported" in msg
+                             or "unexpected" in msg)):
+                    # A token cap is a nicety; an answer in the user's own
+                    # language is not. This also covers an older OpenAI SDK
+                    # rejecting the keyword before the request leaves us.
+                    create_kwargs.pop("max_completion_tokens", None)
+                    adapted = True
+                if not adapted:
+                    raise
+        else:
+            raise RuntimeError("concierge dialect adaptation did not settle")
         if not (resp.choices[0].message.content or "").strip():
             # One quiet retry on an empty completion — same class of
             # transient as the except below.
@@ -588,42 +598,68 @@ def _project_for_user(cur, project_id, user_id):
 
 def _subscribe_gate_applies(cur, user_id):
     """Conversion wall: an unsubscribed account that has already seen one
-    real edit (an agent turn that moved a timeline past v1, or a shorts run
-    that actually rendered clips) gets subscription cards on the NEXT
+    real edit (an agent turn that delivered a current-turn timeline change,
+    or a shorts run that actually rendered clips) gets subscription cards on the NEXT
     prompt. The first indexed turn still runs. Subscribers (a live trial
     still counts), the admin account, and accounts that have not seen an
     edit yet all pass. Fails OPEN like plan_gate: a lookup error must
     never eat a paying user's message."""
+    savepoint = False
     try:
-        cur.execute("SELECT is_subscribed, email FROM users WHERE id = %s",
+        # PostgreSQL leaves the whole transaction aborted after any statement
+        # error. A fail-open predicate therefore needs its own savepoint; just
+        # catching the exception would make the caller's next query a 500.
+        cur.execute("SAVEPOINT subscribe_gate_lookup")
+        savepoint = True
+        # Serialize this decision with worker qualification and subscription
+        # webhooks. Without the row lock, another project could finish its
+        # free edit between this SELECT and our enqueue and receive one extra
+        # accepted prompt (or a just-subscribed account could be blocked).
+        cur.execute("SELECT is_subscribed, email FROM users WHERE id = %s "
+                    "FOR UPDATE",
                     (int(user_id),))
         u = cur.fetchone()
         if not u or u["is_subscribed"]:
+            cur.execute("RELEASE SAVEPOINT subscribe_gate_lookup")
             return False
         from routes.admin import ADMIN_EMAIL
         if (u["email"] or "").lower() == ADMIN_EMAIL.lower():
+            cur.execute("RELEASE SAVEPOINT subscribe_gate_lookup")
             return False
         cur.execute("""
-            SELECT 1 FROM video_jobs
-            WHERE user_id = %s AND state = 'done'
-              AND ((type = 'agent_turn' AND
-                    result->>'status' = 'replied' AND
-                    result->>'outcome' IN ('fulfilled', 'partial') AND
-                    CASE WHEN result->>'edl_version' ~ '^[0-9]+$'
-                         THEN (result->>'edl_version')::int ELSE 1 END > 1)
-                   OR (type = 'shorts_plan' AND
-                       CASE
-                         WHEN result ? 'rendered_clips'
-                              AND result->>'rendered_clips' ~ '^[0-9]+$'
-                           THEN (result->>'rendered_clips')::int
-                         WHEN NOT (result ? 'rendered_clips')
-                              AND result->>'clips' ~ '^[0-9]+$'
-                           THEN (result->>'clips')::int
-                         ELSE 0
-                       END > 0))
-            LIMIT 1""", (int(user_id),))
-        return cur.fetchone() is not None
+            SELECT 1
+            WHERE EXISTS (
+                    SELECT 1 FROM client_events
+                    WHERE user_id = %s
+                      AND kind = 'subscribe_gate_qualified')
+               OR EXISTS (
+                    SELECT 1 FROM video_jobs
+                    WHERE user_id = %s AND state = 'done'
+                      AND ((type = 'agent_turn' AND
+                            result->>'status' = 'replied' AND
+                            result->>'outcome' IN ('fulfilled', 'partial') AND
+                            result->>'edl_changed' = 'true')
+                           OR (type = 'shorts_plan' AND
+                               CASE
+                                 WHEN result ? 'rendered_clips'
+                                      AND result->>'rendered_clips' ~ '^[0-9]+$'
+                                   THEN (result->>'rendered_clips')::int
+                                 WHEN NOT (result ? 'rendered_clips')
+                                      AND result->>'clips' ~ '^[0-9]+$'
+                                   THEN (result->>'clips')::int
+                                 ELSE 0
+                               END > 0)))
+            LIMIT 1""", (int(user_id), int(user_id)))
+        applies = cur.fetchone() is not None
+        cur.execute("RELEASE SAVEPOINT subscribe_gate_lookup")
+        return applies
     except Exception as e:                                  # pragma: no cover
+        if savepoint:
+            try:
+                cur.execute("ROLLBACK TO SAVEPOINT subscribe_gate_lookup")
+                cur.execute("RELEASE SAVEPOINT subscribe_gate_lookup")
+            except Exception:
+                pass
         print(f"[subscribe_gate] lookup failed for user {user_id}: {e}",
               flush=True)
         return False
@@ -1179,9 +1215,6 @@ def _delete_project_rows(cur, project_id, session_id):
                    WHERE project_id = %s AND kind = 'original'
                      AND sha256 IS NOT NULL""", (project_id,))
     shas = [r["sha256"] for r in cur.fetchall()]
-    cur.execute("SELECT id FROM video_jobs WHERE project_id = %s", (project_id,))
-    job_keys = [f"video:{r['id']}"[:16] for r in cur.fetchall()]
-
     # Re-point shared indexes to a surviving sharer BEFORE deleting this
     # project's assets/rows, so the ON DELETE CASCADE can't take a row another
     # project still needs.
@@ -1196,9 +1229,11 @@ def _delete_project_rows(cur, project_id, session_id):
                         (keeper["project_id"], sha, project_id))
 
     cur.execute("DELETE FROM llm_calls WHERE project_id = %s", (project_id,))
-    if job_keys:
-        cur.execute("DELETE FROM job_credits WHERE job_id = ANY(%s)",
-                    (job_keys,))
+    # job_credits is an account billing ledger and the durable exactly-once
+    # claim for a completed turn. Project deletion removes creative content,
+    # not financial audit history; account deletion still removes these rows.
+    # Keeping the claim also prevents a delayed executor response from ever
+    # manufacturing a second debit after the project rows disappear.
     cur.execute("DELETE FROM video_jobs WHERE project_id = %s", (project_id,))
     cur.execute("DELETE FROM edls WHERE project_id = %s", (project_id,))
     cur.execute("DELETE FROM assets WHERE project_id = %s", (project_id,))
@@ -1243,6 +1278,23 @@ def delete_project(user_id, project_id):
             return jsonify({"error": "This project has an operation in "
                                      "progress — try deleting it in a moment.",
                             "code": "busy"}), 409
+        # A completed edit can carry a short-lived durable accounting repair
+        # flag after a transient SQL/schema error. Deleting its project would
+        # erase the llm_calls needed to price the turn and the job fallback
+        # needed to materialize the subscribe marker. The worker janitor
+        # repairs these idempotently every minute; keep the project for that
+        # bounded window instead of turning a delete race into a free/unmarked
+        # terminal job.
+        cur.execute("""SELECT 1 FROM video_jobs
+                        WHERE project_id = ANY(%s) AND state = 'done'
+                          AND (result->>'billing_pending' = 'true'
+                               OR result->>'qualification_pending' = 'true')
+                        LIMIT 1""", (family_ids,))
+        if cur.fetchone():
+            return jsonify({"error": "This project just finished and its "
+                                     "accounting is being finalized — try "
+                                     "deleting it again in a moment.",
+                            "code": "accounting_pending"}), 409
         for c in children:
             _delete_project_rows(cur, c["id"], c["chat_session_id"])
         _delete_project_rows(cur, project_id, p["chat_session_id"])
@@ -1630,6 +1682,14 @@ def _register_deferred_original(user_id, project_id, key, filename, declared,
     record_client_event(user_id, project_id, "upload_proxy_first", detail={
         "filename": filename, "bytes": declared, "proxy_bytes": proxy_bytes,
         "duration_s": duration_s}, origin="server")
+    # This is the authoritative asset/index enqueue boundary for the optimized
+    # path, exactly equivalent to complete_upload_core's normal registration.
+    # The full original is intentionally still pending in the background.
+    record_client_event(user_id, project_id, "upload_landed", detail={
+        "asset_id": asset_id, "index_job_id": job_id, "kind": "original",
+        "staged": False, "bytes": declared, "original_pending": True,
+        "proxy_bytes": proxy_bytes,
+    }, origin="server")
     return {"asset_id": asset_id, "index_job_id": job_id, "kind": "original",
             "original_pending": True}, 200
 
@@ -1891,6 +1951,10 @@ def complete_upload_core(user_id, project_id, data):
             job_id = _enqueue(cur, project_id, user_id, "index",
                               {"asset_id": asset_id})
 
+    record_client_event(user_id, project_id, "upload_landed", detail={
+        "asset_id": asset_id, "index_job_id": job_id, "kind": asset_kind,
+        "staged": staged, "bytes": nbytes,
+    }, origin="server")
     return {"asset_id": asset_id, "index_job_id": job_id,
             "kind": asset_kind, "staged": staged}, 200
 
@@ -3139,12 +3203,15 @@ def post_message(user_id, project_id):
         # first indexed turn still launches. The blocked message is NOT
         # persisted: closing the cards and resending shows them again.
         # Active trials pass because they are subscribed. Hangs off
-        # `indexed` so a greeting on an empty project still gets the
-        # concierge.
-        if indexed and _subscribe_gate_applies(cur, user_id):
+        # This is account-wide and deliberately does not depend on THIS
+        # project's index. A qualified account used to post during upload,
+        # get auto-resumed after indexing, and receive another real edit before
+        # the gate ran. A true first-time account still passes the predicate.
+        if _subscribe_gate_applies(cur, user_id):
             record_client_event(user_id, project_id, "trial_gate_shown",
                                 detail={"message_chars": len(text),
-                                        "subscribe_offer": True},
+                                        "subscribe_offer": True,
+                                        "surface": "chat"},
                                 origin="server")
             return jsonify(_subscribe_offer_body()), 402
 
@@ -4583,7 +4650,7 @@ def user_edl_write(user_id, project_id):
 # enqueues a render, and the worker re-encodes with the card.
 #
 # Previews are exempt: they carry no card, so their absent stamp is correct.
-OUTRO_VERSION = 7      # v7: compact animated Edited-by signature
+OUTRO_VERSION = 9      # v9: ending score carries continuously through card
                        # (keep in step with worker/config.py OUTRO_VERSION —
                        # test_units checks the two match)
 
@@ -5206,7 +5273,7 @@ CLIENT_EVENT_KINDS = {"player_error", "player_error_probe",
                       # mode, retry count. The denominator's other half —
                       # upload_started says what was attempted, this says what
                       # the link actually delivered.
-                      "upload_transfer",
+                      "upload_transfer", "upload_landed",
                       # Complete edit-to-file funnel. Server-origin rows cover
                       # authoritative render/presign boundaries; client rows
                       # cover the final browser download handoff.
@@ -5220,7 +5287,12 @@ CLIENT_EVENT_KINDS = {"player_error", "player_error_probe",
                       # cards instead of a turn. Server-recorded on every 402,
                       # so admin can see who met the wall, how many times,
                       # and when — the resend count is intent, not noise.
-                      "trial_gate_shown"}
+                      "trial_gate_shown",
+                      # Browser-rendered conversion telemetry is distinct from
+                      # a server returning 402: the latter cannot prove that a
+                      # modal reached the DOM or that a person acted on it.
+                      "trial_gate_impression", "trial_gate_dismissed",
+                      "trial_gate_plan_selected"}
 
 # The kinds that mean "a user tried to give us a video and we did not take it".
 # Surfaced in admin on their own rather than mixed into the rest, because these
@@ -5370,6 +5442,10 @@ def start_shorts(user_id, project_id):
             })
         # Same walls as sending a message: story scouting is model time.
         if _subscribe_gate_applies(cur, user_id):
+            record_client_event(user_id, project_id, "trial_gate_shown",
+                                detail={"subscribe_offer": True,
+                                        "surface": "shorts"},
+                                origin="server")
             return jsonify(_subscribe_offer_body()), 402
         if plan_gate.needs_plan(conn, user_id):
             return plan_gate.gate_response(jsonify)
@@ -5536,6 +5612,11 @@ def start_short_editor(user_id, project_id, child_project_id):
         if not indexed:
             return jsonify({"error": "This reel is still preparing."}), 409
         if _subscribe_gate_applies(cur, user_id):
+            record_client_event(user_id, project_id, "trial_gate_shown",
+                                detail={"subscribe_offer": True,
+                                        "surface": "short_editor",
+                                        "child_project_id": child_project_id},
+                                origin="server")
             return jsonify(_subscribe_offer_body()), 402
         if plan_gate.needs_plan(conn, user_id):
             return plan_gate.gate_response(jsonify)

@@ -1243,7 +1243,7 @@ AGENT_REPLY_MAX_TOKENS = int(os.getenv("AGENT_REPLY_MAX_TOKENS", "4000"))
 # The hard max keeps a stale 900s production env from waiting fifteen minutes
 # before detecting an actually stuck turn.
 AGENT_TURN_TIMEOUT_S = min(
-    600.0, float(os.getenv("AGENT_TURN_TIMEOUT_S", "600")))
+    420.0, float(os.getenv("AGENT_TURN_TIMEOUT_S", "420")))
 # Absolute lifetime of one user turn, including productive continuations.
 # Production project 926 proved that a stream of tiny grade writes/previews
 # can remain "productive" for 17+ minutes while getting farther from the
@@ -1591,23 +1591,27 @@ RENDER_BLACK_MAX_RATIO = float(os.getenv("RENDER_BLACK_MAX_RATIO", "0.7"))
 #
 # FINALS ONLY, by default. Previews are program-time everywhere in the studio
 # (timeline ruler, playhead, scrub mapping, the "N s program" label), so a
-# preview that is 2.5s longer than its own timeline would put a permanent lie
+# preview that is 5s longer than its own timeline would put a permanent lie
 # in the scrubber. Finals are also the only artifact that leaves the platform:
 # downloads always go through a final render, previews never do. Set
 # OUTRO_ON_PREVIEW=1 to show it in previews too — the renderer supports it and
 # the tests cover both — but fix the studio's time base first.
-OUTRO_DURATION_S = float(os.getenv("OUTRO_DURATION_S", "2.5"))
+OUTRO_DURATION_S = float(os.getenv("OUTRO_DURATION_S", "5.0"))
 OUTRO_FADE_IN_S = 0.45
 OUTRO_FADE_OUT_S = 0.35
-# The program's last 0.25s is faded so music/speech does not cut dead into the
-# card's silence. Skipped when the EDL already sets its own fade_out.
+# Silent-card fallback: when no score reaches the program's final frame, fade
+# the program's last 0.25s so speech/room tone does not cut dead into silence.
 OUTRO_AUDIO_TAIL_FADE_S = 0.25
+# When a score does reach the final frame, that SAME music continues through
+# the card and the completed mix fades only at the card's far edge. This is a
+# renderer-owned export treatment, not an EDL music-item fade.
+OUTRO_MUSIC_FADE_OUT_S = 0.75
 OUTRO_ON_PREVIEW = os.getenv("OUTRO_ON_PREVIEW", "0") == "1"
-# Bumped whenever the card's LOOK changes. It is stored on every render asset
-# and busts the render cache, so an existing export re-encodes with the new
-# card instead of serving pre-outro bytes forever.
-OUTRO_VERSION = 7      # v7: compact three-beat motion signature — large
-                       # "Edited by", small robot + Valmera, URL below.
+# Bumped whenever the card's LOOK or its audio handoff changes. It is stored on
+# every render asset and busts the cache, so an existing export re-encodes with
+# the complete current outro treatment instead of serving stale bytes forever.
+OUTRO_VERSION = 9      # v9: carry an ending score continuously through the
+                       # five-second card, with one fade at the card's edge.
                        # See tools/build_endcard.py
 
 # ── Shorts mode (round 99) ───────────────────────────────────────────────
@@ -1641,12 +1645,11 @@ GFX_SHAPING_VERSION = 1
 # again.
 TRANSITION_VERSION = 2
 
-# Round 79j — the SEQUENCE is as long as its content: unmuted music past the
-# last scene extends the render over black instead of being cut off at the
-# picture's end. Renders made before this stamp are exactly program-length,
-# so an EDL whose music runs longer must not be served from that cache.
-# Bump if the extension semantics change.
-MUSIC_TAIL_VERSION = 1
+# Manual music remains editable past the last scene, but rendered media always
+# stops at the picture/program boundary.  v1 extended overhanging music across
+# generated black frames; v2 clamps only the render window (never the EDL) so
+# those known-bad cached previews/finals are rebuilt without the black tail.
+MUSIC_TAIL_VERSION = 2
 
 # ── Free-tier watermark (round 41) ────────────────────────────────────────
 # The site's robot in the top-left of the EXPORT, with "edited by valmera

@@ -37,7 +37,7 @@ import re
 import subprocess
 
 import media
-from schemas import MIN_SPAN_S
+from schemas import MIN_SPAN_S, anim_value
 
 # Video-local layers a stitch may differ in. Everything else must be equal.
 _CHANGEABLE_TOP = ("texts", "vectors", "patches", "overlays")
@@ -234,12 +234,167 @@ def expand(windows, all_item_spans, event_spans, junction_zones, fade_zones,
 
 # ------------------------------------------------------------------ pieces --
 
+def _slice_local_anim(value, local_start, local_end):
+    """Return the part of an element-local curve inside one proof window.
+
+    ``window_edl`` rebases an intersecting text/vector onto a standalone
+    piece.  Its keyframes are local to the *original* element start, so a
+    left-hand clip must move their clock as well as the element's program
+    timestamps.  A nonlinear easing segment cannot simply be shortened and
+    given the same easing name: the restricted part of (say) an ease-in curve
+    is not another full ease-in curve.  Boundary-cut nonlinear segments are
+    therefore sampled into a few linear subsegments.  Complete authored
+    segments retain their original easing, and all authored interior anchors
+    are retained when the 24-keyframe schema budget permits it.
+
+    Scalars need no work.  A wholly contained item never calls this helper,
+    which preserves its exact stored curve/signature.
+    """
+    if not isinstance(value, list) or not value:
+        return value
+    start = max(0.0, float(local_start))
+    end = max(start, float(local_end))
+    duration = end - start
+
+    def _key_dict(keyframe):
+        if isinstance(keyframe, dict):
+            return dict(keyframe)
+        return {"t": keyframe.t, "v": keyframe.v,
+                "ease": keyframe.ease}
+
+    def _time(keyframe):
+        raw = keyframe.get("t") if isinstance(keyframe, dict) \
+            else keyframe.t
+        return float(raw or 0.0)
+
+    if duration <= 1e-9:
+        return round(float(anim_value(value, start)), 4)
+
+    source = sorted((_key_dict(keyframe) for keyframe in value),
+                    key=lambda keyframe: _time(keyframe))
+    source_times = [_time(keyframe) for keyframe in source]
+    anchors = [start]
+    anchors.extend(when for when in source_times
+                   if start + 1e-9 < when < end - 1e-9)
+    anchors.append(end)
+
+    # A valid source curve has at most 24 keyframes. Two synthetic boundaries
+    # can still take a slice over that limit when the original first/last
+    # keyframes do not sit at the element edges. Keep the most evenly spaced
+    # authored anchors in that rare case; this is a temporary proof EDL, never
+    # a rewrite of the user's curve.
+    if len(anchors) > 24:
+        interior = anchors[1:-1]
+        slots = 22
+        picked = []
+        for i in range(slots):
+            pos = round(i * (len(interior) - 1) / max(1, slots - 1))
+            value_at = interior[int(pos)]
+            if value_at not in picked:
+                picked.append(value_at)
+        anchors = [start] + picked[:slots] + [end]
+
+    def _source_segment(a, b):
+        """(left, right, incoming ease) for one anchor interval."""
+        middle = (a + b) / 2.0
+        for i in range(1, len(source)):
+            if middle <= source_times[i] + 1e-9:
+                return (source_times[i - 1], source_times[i],
+                        source[i].get("ease"))
+        return None, None, None
+
+    # Add up to three exact samples inside each boundary-cut nonlinear
+    # segment. Allocate within the schema budget; dense authored curves already
+    # have close anchors and need fewer synthetic samples.
+    partial = []
+    for a, b in zip(anchors, anchors[1:]):
+        left, right, ease = _source_segment(a, b)
+        full = (left is not None and abs(a - left) <= 1e-9
+                and abs(b - right) <= 1e-9)
+        if ease in {"in", "out", "in_out"} and not full:
+            partial.append((a, b))
+    room = max(0, 24 - len(anchors))
+    allocations = [0] * len(partial)
+    for i in range(min(room, 3 * len(partial))):
+        allocations[i % len(partial)] += 1
+    samples = list(anchors)
+    for (a, b), count in zip(partial, allocations):
+        samples.extend(a + (b - a) * n / (count + 1)
+                       for n in range(1, count + 1))
+    samples.sort()
+
+    sliced = []
+    last_t = None
+    for absolute in samples:
+        shifted_t = round(absolute - start, 3)
+        if last_t is not None and shifted_t <= last_t + 1e-9:
+            continue
+        point = {"t": shifted_t,
+                 "v": round(float(anim_value(value, absolute)), 4)}
+        if sliced:
+            previous_absolute = start + sliced[-1]["t"]
+            left, right, ease = _source_segment(previous_absolute, absolute)
+            full = (left is not None
+                    and abs(previous_absolute - left) <= 1e-6
+                    and abs(absolute - right) <= 1e-6)
+            # An intact authored segment keeps its exact curve. A hold remains
+            # exact even when entered after its original left boundary.
+            if ease == "hold" or (full and ease not in (None, "linear")):
+                point["ease"] = ease
+        sliced.append(point)
+        last_t = shifted_t
+    return sliced[0]["v"] if len(sliced) == 1 else sliced
+
+
+def _clip_program_graphics(items, w0, w1):
+    """Clip/rebase text or vector items to a standalone proof window."""
+    out = []
+    for item in items or []:
+        original_start = float(item["start"])
+        original_end = float(item["end"])
+        clipped_start = max(original_start, w0)
+        clipped_end = min(original_end, w1)
+        clipped_duration = clipped_end - clipped_start
+        # Text/vector validation requires a useful 0.3s window.  A smaller
+        # boundary sliver cannot render as a valid standalone graphic.
+        if clipped_duration < 0.3 - 1e-6:
+            continue
+
+        left_clipped = clipped_start > original_start + 0.001
+        right_clipped = clipped_end < original_end - 0.001
+        shifted = {
+            **item,
+            "start": round(clipped_start - w0, 3),
+            "end": round(clipped_end - w0, 3),
+        }
+        if left_clipped and "entrance" in shifted:
+            # For designed text, None means "use the template default";
+            # explicit "none" is the animation-free value.
+            shifted["entrance"] = "none"
+        if right_clipped and "exit" in shifted:
+            shifted["exit"] = "none"
+
+        if (left_clipped or right_clipped) and isinstance(
+                shifted.get("motion"), dict):
+            motion = dict(shifted["motion"])
+            local_start = clipped_start - original_start
+            local_end = clipped_end - original_start
+            for prop in ("x", "y", "scale", "rotation", "opacity"):
+                if prop in motion:
+                    motion[prop] = _slice_local_anim(
+                        motion[prop], local_start, local_end)
+            shifted["motion"] = motion
+        out.append(shifted)
+    return out
+
+
 def window_edl(edl, tl, w0, w1, keep_audio=False):
     """The EDL that renders output [w0, w1] of `edl`, standalone.
 
-    Only called under plan()'s gate, and only with windows expand() grew to
-    CONTAIN every intersecting element — so items are carried whole (shifted
-    by -w0) or dropped whole, never clipped."""
+    Full-preview stitching calls this with windows expand() grew to contain
+    every intersecting element.  Changed-section proofs can subsequently
+    clamp that expansion to their physical render budget, so text/vector and
+    overlay items also support safe boundary clipping here."""
     e = json.loads(json.dumps(edl))
     keep, speed = [], []
     for (s0, s1), pcs, off, L in zip(tl.segs, tl.pieces, tl.offsets,
@@ -285,12 +440,14 @@ def window_edl(edl, tl, w0, w1, keep_audio=False):
             out.append(put(it, a - w0, b - w0))
         return out
 
-    e["texts"] = _shift(e.get("texts"), lambda t: (t["start"], t["end"]),
-                        lambda t, a, b: {**t, "start": round(a, 3),
-                                         "end": round(b, 3)})
-    e["vectors"] = _shift(
-        e.get("vectors"), lambda v: (v["start"], v["end"]),
-        lambda v, a, b: {**v, "start": round(a, 3), "end": round(b, 3)})
+    # Full-preview stitching normally expands windows to contain every
+    # graphic.  Changed-section proofs re-apply a hard 25s budget after that
+    # expansion, though, so the last of several windows can be truncated in
+    # the middle of a text/vector.  Clip those program windows and their
+    # element-local motion rather than leaving an end/keyframe beyond this
+    # standalone EDL's duration.
+    e["texts"] = _clip_program_graphics(e.get("texts"), w0, w1)
+    e["vectors"] = _clip_program_graphics(e.get("vectors"), w0, w1)
     fx["zooms"] = _shift(fx.get("zooms"), lambda z: (z["start"], z["end"]),
                          lambda z, a, b: {**z, "start": round(a, 3),
                                           "end": round(b, 3)})

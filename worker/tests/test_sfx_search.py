@@ -115,6 +115,86 @@ def test_failed_download_never_claims_success(monkeypatch):
     assert "Could not download" in out and "Do NOT claim" in out
 
 
+def test_sfx_candidate_is_normalized_before_listening_or_storage(
+        monkeypatch, tmp_path):
+    hit = _hit()
+    extracted = {}
+
+    def download(_hit, path):
+        # Provider bytes deliberately have no trustworthy extension.
+        with open(path, "wb") as output:
+            output.write(b"provider-aif-bytes")
+
+    def normalize(src, start, end, dst):
+        extracted.update(src=src, start=start, end=end, dst=dst)
+        with open(dst, "wb") as output:
+            output.write(b"canonical-mp3")
+
+    monkeypatch.setattr(sfx_search, "download", download)
+    monkeypatch.setattr(agent_tools.media, "extract_audio_clip", normalize)
+    monkeypatch.setattr(agent_tools.music_search, "probe_duration_s",
+                        lambda path: 1.2)
+    monkeypatch.setattr(agent_tools.perception, "analyze_transient",
+                        lambda path, max_s: {"duration_s": 1.2})
+
+    class Ctx(_Ctx):
+        workdir = str(tmp_path)
+
+    _hit_row, analysis, local, error = agent_tools._measure_sfx_candidate(
+        Ctx(), hit, need_file=True)
+
+    assert error is None and analysis["duration_s"] == 1.2
+    assert local.endswith(".mp3") and open(local, "rb").read() == b"canonical-mp3"
+    assert extracted["src"].endswith(".source")
+    assert not os.path.exists(extracted["src"])
+
+
+def test_selected_sfx_redownloads_full_source_for_production_storage(
+        monkeypatch, tmp_path):
+    audition = tmp_path / "candidate-audition.mp3"
+    audition.write_bytes(b"bounded-mono-48k")
+    hit = dict(_hit(), _audition_local=str(audition))
+    paths = {}
+
+    def download(_hit, path):
+        paths["raw"] = path
+        with open(path, "wb") as output:
+            output.write(b"complete-provider-source")
+
+    def normalize(source, destination):
+        paths.update(source=source, production=destination)
+        assert open(source, "rb").read() == b"complete-provider-source"
+        with open(destination, "wb") as output:
+            output.write(b"complete-stereo-192k")
+
+    uploaded = {}
+
+    def upload(path, key, content_type):
+        uploaded.update(path=path, key=key, content_type=content_type,
+                        payload=open(path, "rb").read())
+
+    monkeypatch.setattr(sfx_search, "download", download)
+    monkeypatch.setattr(agent_tools, "_normalize_sfx_for_storage", normalize)
+    monkeypatch.setattr(agent_tools.music_search, "probe_duration_s",
+                        lambda path: 1.2)
+    monkeypatch.setattr(agent_tools.storage, "upload_file", upload)
+
+    class Ctx(_Ctx):
+        workdir = str(tmp_path)
+
+    asset, error = agent_tools._download_sfx_hit(Ctx(), hit)
+
+    assert error is None and asset["duration_s"] == 1.2
+    assert paths["raw"].endswith(".source")
+    assert paths["source"] == paths["raw"]
+    assert uploaded["payload"] == b"complete-stereo-192k"
+    assert uploaded["payload"] != audition.read_bytes()
+    assert uploaded["content_type"] == "audio/mpeg"
+    assert audition.exists()                 # caller owns the audition proof
+    assert not os.path.exists(paths["raw"])
+    assert not os.path.exists(paths["production"])
+
+
 def test_search_hit_cache_survives_the_agent_turn():
     hit = _hit()
 

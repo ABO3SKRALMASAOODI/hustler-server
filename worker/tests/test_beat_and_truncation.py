@@ -254,6 +254,6 @@ check("a truncated turn is marked unbillable",
 _completion = open(os.path.join(os.path.dirname(__file__), "..",
                                 "job_completion.py")).read()
 check("and the charge site honours that",
-      'result.get("billable", True)' in _completion)
+      '_result_is_billable(job, result)' in _completion)
 
 print(f"\n{PASS} checks passed.")

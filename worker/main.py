@@ -482,6 +482,20 @@ def reaper():
             print(f"[reaper] tray rescue: {e}", flush=True)
             worker_db.reset()
 
+        # Terminal charging/qualification uses savepoints so a transient SQL
+        # failure never erases a completed edit. The failure is durable in the
+        # job result; repair the accounting itself here, without rerunning a
+        # model or touching the EDL.
+        try:
+            for repair in (
+                    worker_db.run(dbx.reconcile_pending_accounting) or []):
+                print(f"[reaper] repaired terminal accounting for job "
+                      f"{repair['job_id']}: "
+                      f"{','.join(repair['fixed'])}", flush=True)
+        except Exception as e:
+            print(f"[reaper] terminal accounting repair: {e}", flush=True)
+            worker_db.reset()
+
 
 def _sweep_tmp():
     """Delete work directories left by a previous process.

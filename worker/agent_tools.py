@@ -5446,14 +5446,27 @@ def _measure_sfx_candidate(ctx, hit, need_file=False):
     cached = _sfx_audition_cache(ctx).get(hit["id"])
     if cached and not need_file:
         return hit, cached, None, None
+    # Search providers return MP3, WAV, AIF and occasionally a container whose
+    # URL has no extension. Writing those arbitrary bytes to ``*.audio`` made
+    # llm.audio_part label every candidate WAV; the audio endpoint correctly
+    # rejected the mismatch. Decode into a canonical, bounded MP3 used only by
+    # deterministic measurement and model listening; storage re-acquires the
+    # full provider source at production quality below.
+    raw = os.path.join(ctx.workdir,
+                       f"sfxaudition_{uuid.uuid4().hex[:8]}.source")
     local = os.path.join(ctx.workdir,
-                         f"sfxaudition_{uuid.uuid4().hex[:8]}.audio")
+                         f"sfxaudition_{uuid.uuid4().hex[:8]}.mp3")
     keep_local = False
     try:
-        sfx_search.download(hit, local)
-        duration = music_search.probe_duration_s(local)
+        sfx_search.download(hit, raw)
+        duration = music_search.probe_duration_s(raw)
         if duration <= 0.05:
             raise perception.PerceptionError("download is not playable audio")
+        media.extract_audio_clip(raw, 0.0, min(60.0, duration), local)
+        duration = music_search.probe_duration_s(local)
+        if duration <= 0.05:
+            raise perception.PerceptionError(
+                "download could not be normalized to playable audio")
         analysis = cached or perception.analyze_transient(
             local, max_s=min(60.0, max(1.0, duration + .25)))
         _sfx_audition_cache(ctx)[hit["id"]] = analysis
@@ -5462,11 +5475,30 @@ def _measure_sfx_candidate(ctx, hit, need_file=False):
     except Exception as exc:
         return hit, None, None, str(exc)[:180]
     finally:
+        try:
+            os.remove(raw)
+        except OSError:
+            pass
         if not keep_local:
             try:
                 os.remove(local)
             except OSError:
                 pass
+
+
+def _normalize_sfx_for_storage(source, destination):
+    """Write the complete provider recording as a production-quality MP3.
+
+    The tiny mono audition made by ``_measure_sfx_candidate`` is deliberately
+    optimized for model listening and waveform ranking. It must never become
+    the asset mixed into a customer's render: that would discard stereo and
+    bandwidth from the selected recording.
+    """
+    media.run([
+        "ffmpeg", "-y", "-i", source, "-vn", "-map", "0:a:0",
+        "-ac", "2", "-ar", "44100", "-c:a", "libmp3lame",
+        "-b:a", "192k", destination,
+    ])
 
 
 def audition_sfx_candidates(ctx, ids, purpose):
@@ -5558,44 +5590,64 @@ def audition_sfx_candidates(ctx, ids, purpose):
 
 def _download_sfx_hit(ctx, hit):
     """Download/store one resolved SFX hit. Returns (asset, error_text)."""
-    lp = hit.get("_audition_local") or os.path.join(
-        ctx.workdir, f"sfxfetch_{uuid.uuid4().hex[:8]}.mp3")
-    if not hit.get("_audition_local"):
+    # Always acquire the provider source again. ``_audition_local`` is a
+    # bounded 22.05 kHz / 48 kbps mono proof artifact owned by the audition
+    # caller; reusing it here made every selected sound permanently low-fi.
+    raw = os.path.join(ctx.workdir,
+                       f"sfxfetch_{uuid.uuid4().hex[:8]}.source")
+    lp = os.path.join(ctx.workdir,
+                      f"sfxfetch_{uuid.uuid4().hex[:8]}.mp3")
+    try:
         try:
-            sfx_search.download(hit, lp)
-        except Exception as e:
-            return None, (f"Could not download that sound ({str(e)[:160]}). Try "
-                          "another result. Do NOT claim a sound was added.")
-    dur = music_search.probe_duration_s(lp)
-    if dur <= 0.05:
-        return None, ("REJECTED: the downloaded file is not playable audio — "
-                      "try another result. Do NOT claim a sound was added.")
-    key = f"sfx/{ctx.project_id}/{uuid.uuid4().hex[:12]}.mp3"
-    try:
-        storage.upload_file(lp, key, "audio/mpeg")
-    except Exception as e:
-        return None, (f"Downloaded but could not save it ({str(e)[:140]}) — "
-                      "try again. Do NOT claim a sound was added.")
-    title = (hit.get("title") or "sound").strip()
-    fname = title[:80] + ".mp3"
-    note = sfx_search.license_note(hit)
-    byte_count = os.path.getsize(lp)
-    ctx.db.run(dbx.insert_asset, ctx.project_id, "music", key,
-               bytes_=byte_count, duration_s=dur,
-               meta={"filename": fname, "source": hit.get("provider"),
-                     "source_url": hit.get("page_url") or hit.get("_url"),
-                     "license": hit.get("license"), "license_note": note,
-                     "author": hit.get("author"),
-                     "caption": "found online by search_sfx"})
-    if not hasattr(ctx, "audio_fetched"):
-        ctx.audio_fetched = []
-    ctx.audio_fetched.append(key)
-    try:
-        os.remove(lp)
-    except OSError:
-        pass
-    return {"title": title, "duration_s": dur, "storage_key": key,
-            "license_note": note, "hit": hit}, None
+            sfx_search.download(hit, raw)
+        except Exception as exc:
+            return None, (f"Could not download that sound ({str(exc)[:160]}). "
+                          "Try another result. Do NOT claim a sound was added.")
+        try:
+            source_dur = music_search.probe_duration_s(raw)
+            if source_dur <= 0.05:
+                raise perception.PerceptionError(
+                    "the downloaded file is not playable audio")
+            _normalize_sfx_for_storage(raw, lp)
+            dur = music_search.probe_duration_s(lp)
+            if dur <= 0.05:
+                raise perception.PerceptionError(
+                    "the normalized file is not playable audio")
+        except Exception as exc:
+            return None, (f"Could not prepare that sound at full quality "
+                          f"({str(exc)[:160]}). Try another result. Do NOT "
+                          "claim a sound was added.")
+
+        key = f"sfx/{ctx.project_id}/{uuid.uuid4().hex[:12]}.mp3"
+        try:
+            storage.upload_file(lp, key, "audio/mpeg")
+        except Exception as exc:
+            return None, (f"Downloaded but could not save it "
+                          f"({str(exc)[:140]}) — try again. Do NOT claim a "
+                          "sound was added.")
+        title = (hit.get("title") or "sound").strip()
+        fname = title[:80] + ".mp3"
+        note = sfx_search.license_note(hit)
+        byte_count = os.path.getsize(lp)
+        ctx.db.run(dbx.insert_asset, ctx.project_id, "music", key,
+                   bytes_=byte_count, duration_s=dur,
+                   meta={"filename": fname, "source": hit.get("provider"),
+                         "source_url": hit.get("page_url") or hit.get("_url"),
+                         "license": hit.get("license"), "license_note": note,
+                         "author": hit.get("author"),
+                         "caption": "found online by search_sfx",
+                         "audio_profile": "stereo-44.1k-192k"})
+        if not hasattr(ctx, "audio_fetched"):
+            ctx.audio_fetched = []
+        ctx.audio_fetched.append(key)
+        return {"title": title, "duration_s": dur, "storage_key": key,
+                "license_note": note, "hit": hit}, None
+    finally:
+        for path in (raw, lp):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
 
 
 def fetch_sfx(ctx, id):
@@ -6021,7 +6073,15 @@ def add_sfx(ctx, storage_key, at, gain_db=-6.0, purpose=None, offset_s=None):
         return "REJECTED: offset_s must be >= 0 seconds."
     edl = dict(ctx.latest_edl()["json"])
     prog = program_duration(edl)
-    if at < 0 or at > max(0.0, prog - 0.05):
+    latest_at = max(0.0, prog - 0.05)
+    at_note = ""
+    if at > latest_at and at <= prog + 0.25:
+        requested_at = at
+        at = latest_at
+        at_note = (f"\nNORMALIZED: requested at={requested_at:g}s was within "
+                   f"0.25s of the {prog:g}s program end; placed at "
+                   f"{at:.2f}s so the one-shot starts inside the program.")
+    if at < 0 or at > latest_at:
         return (f"REJECTED: at={at}s is outside the program "
                 f"(0 to {round(prog, 2)}s). Sound effects are placed in "
                 "program time — the edited timeline, not source time.")
@@ -6065,7 +6125,7 @@ def add_sfx(ctx, storage_key, at, gain_db=-6.0, purpose=None, offset_s=None):
             ctx, "sfx_placement", decision="use", asset_key=storage_key,
             element_id=sid, purpose=purpose_n, at=round(at, 2),
             review_stage="timeline")
-    return result + note
+    return result + at_note + note
 
 
 def remove_sfx(ctx, id):
@@ -16571,7 +16631,7 @@ def _render_signature(row, kind, ranges=None):
     return hashlib.sha256(raw).hexdigest()
 
 
-def render_preview(ctx, complete=False):
+def render_preview(ctx, complete=False, _wait_timeout_s=None):
     row = ctx.latest_edl()
     version = row["version"]
     requested_complete = bool(complete)
@@ -16661,14 +16721,25 @@ def render_preview(ctx, complete=False):
         job_id, _created = ctx.db.run(
             dbx.get_or_enqueue_preview_job, ctx.project_id,
             ctx.job["user_id"], payload)
-    deadline = time.time() + config.PREVIEW_WAIT_TIMEOUT_S
-    while time.time() < deadline:
-        time.sleep(1)
+    # Explicit/model tool calls retain the normal render wait. The terminal
+    # honesty pass can pass the turn's remaining absolute lifetime here: the
+    # render job is still enqueued, but a late encode must not turn a 10-minute
+    # agent ceiling into another independent 15-minute wait.
+    wait_s = (config.PREVIEW_WAIT_TIMEOUT_S if _wait_timeout_s is None else
+              min(config.PREVIEW_WAIT_TIMEOUT_S,
+                  max(0.0, float(_wait_timeout_s))))
+    deadline = time.monotonic() + wait_s
+    while time.monotonic() < deadline:
         j = ctx.db.run(dbx.get_job, job_id)
         if j["state"] == "done":
             result = j.get("result") or {}
             ctx.last_preview = result
             ctx.rendered_versions.add(version)
+            # A deterministic failure belongs to the exact older version that
+            # produced it. Once a repaired/latest version renders, it is the
+            # active evidence; leaving the old failure here made turn-end LKG
+            # recovery roll a successful repair back to the baseline.
+            ctx.last_preview_failure = None
             # Review state is evidence about one exact render.  Never let a
             # prior version's PASS/FIX survive when this reviewer is
             # unavailable or the new EDL no longer has designed audio.
@@ -16902,6 +16973,9 @@ def render_preview(ctx, complete=False):
             ctx.failed_preview_versions[version] = failure
             ctx.last_preview_failure = failure
             return _failed_preview_message(version, failure)
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(1.0, remaining))
     return ("Preview render is taking too long — it may still finish and "
             "attach to the chat. Summarize your edit for the user now.")
 
@@ -18167,30 +18241,36 @@ def expand_toolset(ctx, domains):
     if not isinstance(domains, (list, tuple)) or not domains:
         return ("REJECTED: domains must be a non-empty array from "
                 + ", ".join(sorted(TOOL_DOMAIN_NAMES)) + ".")
-    requested, bad = set(), []
+    requested, bad = [], []
     for raw in domains:
         name = str(raw or "").strip().lower()
         if name in TOOL_DOMAIN_NAMES:
-            requested.add(name)
+            if name not in requested:
+                requested.append(name)
         else:
             bad.append(name or "(empty)")
     if bad:
         return ("REJECTED: unknown tool domain(s): " + ", ".join(bad)
                 + ". Available: " + ", ".join(sorted(TOOL_DOMAIN_NAMES))
                 + ".")
-    loaded = getattr(ctx, "_expanded_tool_domains", None)
-    if loaded is None:
-        loaded = set()
-        ctx._expanded_tool_domains = loaded
-    before = set(loaded)
-    loaded.update(requested)
-    if loaded == before:
-        return ("NO CHANGE — those tool domains are already exposed: "
-                + ", ".join(sorted(loaded)) + ".")
-    names = sorted(set().union(*(TOOL_DOMAINS[d] for d in requested)))
-    return ("Tool domains exposed for the next step: "
-            + ", ".join(sorted(requested)) + ". Available functions include: "
-            + ", ".join(names) + ". Continue the edit now.")
+    # This is a one-dispatch escape hatch, not a permanent union. Persisting
+    # every requested domain made a broad turn grow from ~30 to 116 schemas
+    # and resend that catalog for the rest of the job. One active department
+    # plus the cross-domain atomic recipe is enough to make forward progress;
+    # later plan steps naturally route the next department.
+    active = requested[:1]
+    before = set(getattr(ctx, "_expanded_tool_domains", None) or set())
+    ctx._expanded_tool_domains = set(active)
+    if set(active) == before:
+        return ("NO CHANGE — that tool domain is already exposed for the "
+                "next step: " + ", ".join(active) + ".")
+    names = sorted(TOOL_DOMAINS[active[0]])
+    deferred = (" Only the first requested domain is loaded now; finish that "
+                "plan step before loading " + ", ".join(requested[1:]) + "."
+                if len(requested) > 1 else "")
+    return ("Tool domain exposed for the next step: "
+            + ", ".join(active) + ". Available functions include: "
+            + ", ".join(names) + ". Continue the edit now." + deferred)
 
 
 def set_edit_plan(ctx, steps, brief=None, treatment=None, format=None,
@@ -18636,6 +18716,43 @@ def _normalize_tool_call(name, args):
         args.pop("focus_x", None)
         args.pop("focus_y", None)
         notes.append("set_frame(mode=auto) -> auto_reframe")
+    if name == "add_text":
+        # An authored keyframe curve owns all animation. Models frequently
+        # repeat a named entrance/exit from the brief alongside that curve;
+        # keeping the explicit curve is the only unambiguous rendering.
+        motion = args.get("motion")
+        parsed_motion, motion_error = (None, None)
+        if motion is not None:
+            parsed_motion, motion_error = _parse_text_motion(motion)
+        # Scalar motion fields are static styling (for example a rotated
+        # label), not an animation curve. They must not silently erase a real
+        # named entrance/exit; the ordinary add_text validator will reject an
+        # unsupported combination honestly. Only an authored keyframe list
+        # can own the animation curve.
+        has_curve = bool(parsed_motion) and any(
+            isinstance(value, list) and bool(value)
+            for value in parsed_motion.values())
+        if has_curve and not motion_error:
+            for key in ("entrance", "exit"):
+                if args.pop(key, None) is not None:
+                    notes.append(f"{key} dropped; explicit motion owns curve")
+        elif isinstance(motion, dict) and not any(
+                motion.get(key) not in (None, [])
+                for key in _TEXT_MOTION_FIELDS):
+            # Empty motion is a common schema filler, not authored animation.
+            # Remove it so a real named entrance/exit can render (or the title
+            # can remain intentionally static) instead of rejecting the call.
+            args.pop("motion", None)
+            notes.append("empty motion dropped")
+        # A motif records provenance for actual movement; it is not itself a
+        # rendering command. Drop a stray annotation instead of aborting an
+        # otherwise valid static-title recipe.
+        if args.get("motion") is None \
+                and args.get("motion_motif") is not None and all(
+                args.get(key) in (None, "none")
+                for key in ("entrance", "exit")):
+            args.pop("motion_motif", None)
+            notes.append("static motion_motif dropped")
     return name, args, notes
 
 
@@ -22908,17 +23025,18 @@ TOOL_CORE = {
 # A fresh turn has not chosen its treatment yet. Production traces from the
 # Aug-13--15 cohort showed that none of 75 first model dispatches wrote the
 # EDL, yet request-keyword routing exposed up to 126 full schemas (63k chars
-# on average) on that planning call. Keep only read/plan/research tools until
-# set_edit_plan records the treatment; stage routing then exposes the relevant
-# write domains with no loss of capability.
-TOOL_PLANNING = (TOOL_CORE - {
-    "apply_edit_recipe", "complete_edit_plan_steps", "render_preview",
-}) | {
-    "find_silences", "find_repetitions", "suggest_segments",
-    "research_music", "search_music", "audition_music_candidates",
-    "search_sfx", "audition_sfx_candidates",
-    "search_stock", "research_broll", "find_footage", "find_song",
-    "find_burned_text", "suggest_emphasis",
+# on average) on that planning call. Those tokens consumed the shared TPM
+# budget before the editor had decided which departments it needed. Keep the
+# evidence and candidate-search tools that first dispatches actually use;
+# after set_edit_plan records the treatment, compact_tool_names exposes the
+# corresponding write domains with no loss of capability.
+TOOL_PLANNING = {
+    "set_edit_plan", "expand_toolset", "read_skill", "ask_user",
+    "get_video_info", "get_transcript", "get_kept_transcript",
+    "get_words", "search_transcript", "get_shots", "get_editorial_map",
+    "find_visual_moments", "find_silences", "find_burned_text",
+    "list_assets", "compare_uploaded_media", "look_at", "look_at_asset",
+    "get_audio_analysis",
 }
 
 # Once the current immutable EDL has passed every available finishing layer,
@@ -23009,9 +23127,16 @@ def compact_tool_names(ctx):
     states = plan.get("step_states") or []
     open_tasks = [str(row.get("task") or "") for row in states
                   if row.get("status") == "pending"]
-    text = " ".join(open_tasks + [str(getattr(ctx, "user_message", "") or "")])
-    domains = {name for name, pattern in _DOMAIN_HINTS.items()
-               if re.search(pattern, text, re.I)}
+    # Route one plan step, not the union of an entire broad request. The core
+    # atomic recipe remains available for coherent cross-department commits.
+    text = (open_tasks[0] if open_tasks
+            else str(getattr(ctx, "user_message", "") or ""))
+    matches = []
+    for order, (name, pattern) in enumerate(_DOMAIN_HINTS.items()):
+        match = re.search(pattern, text, re.I)
+        if match:
+            matches.append((match.start(), order, name))
+    domains = {min(matches)[2]} if matches else set()
     # A vague request can become specific only after set_edit_plan inspects
     # the evidence ("make it great" -> authored captions/music/B-roll/motion).
     # Routing from the original user words/open-step nouns alone hid those
@@ -23022,15 +23147,21 @@ def compact_tool_names(ctx):
         "captions": "captions", "motion": "motion", "broll": "media",
         "music": "audio", "sfx": "audio", "color": "motion",
     }
-    for department, row in (plan.get("department_plan") or {}).items():
-        if isinstance(row, dict) and row.get("mode") == "author":
-            domain = department_domains.get(department)
-            if domain:
-                domains.add(domain)
+    if not domains:
+        for department in ("captions", "motion", "broll", "music", "sfx",
+                           "color"):
+            row = (plan.get("department_plan") or {}).get(department)
+            if isinstance(row, dict) and row.get("mode") == "author":
+                domain = department_domains.get(department)
+                if domain:
+                    domains.add(domain)
+                    break
     family = str(plan.get("editorial_family") or "")
-    if family == "product_demo_explainer":
+    if family == "product_demo_explainer" and not domains:
         domains.add("screen")
-    domains.update(getattr(ctx, "_expanded_tool_domains", None) or set())
+    expanded = set(getattr(ctx, "_expanded_tool_domains", None) or set())
+    if expanded:
+        domains = expanded
     # A generic recorded plan with no recognizable vocabulary still needs an
     # executable lane. Story tools + the atomic recipe are the safest base;
     # expand_toolset makes every other lane one explicit step away.

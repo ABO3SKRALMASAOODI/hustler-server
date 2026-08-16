@@ -72,3 +72,38 @@ def test_cache_hit_does_not_issue_a_storage_size_request(tmp_path, monkeypatch):
     monkeypatch.setattr(renderer.storage, "object_bytes", unexpected)
 
     assert renderer._cached_source(key) == str(cached)
+
+
+def test_job_hardlink_survives_concurrent_prune_before_ffmpeg_open(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "TMP_DIR", str(tmp_path))
+    monkeypatch.setattr(config, "SOURCE_CACHE_MAX_ITEM_BYTES", 20)
+    monkeypatch.setattr(config, "SOURCE_CACHE_MAX_BYTES", 20)
+    key = "originals/source.mp4"
+    cache_dir = tmp_path / "srccache"
+    workdir = tmp_path / "render_101"
+    cache_dir.mkdir()
+    workdir.mkdir()
+    name = hashlib.sha256(key.encode()).hexdigest()[:32] + ".mp4"
+    cached = cache_dir / name
+    cached.write_bytes(b"active!!")
+
+    leased = renderer._job_cached_source(key, str(workdir))
+
+    assert leased != str(cached)
+    assert os.stat(leased).st_ino == os.stat(cached).st_ino
+
+    # Model the other concurrent request applying aggregate pressure after
+    # this request has its source but before ffmpeg opens it.
+    other = cache_dir / "other.mp4"
+    other.write_bytes(b"newest")
+    now = time.time()
+    os.utime(cached, (now - 100, now - 100))
+    os.utime(other, (now, now))
+    monkeypatch.setattr(config, "SOURCE_CACHE_MAX_BYTES", 8)
+    renderer._prune_source_cache(str(cache_dir))
+
+    assert not cached.exists()
+    assert os.path.exists(leased)
+    with open(leased, "rb") as handle:
+        assert handle.read() == b"active!!"

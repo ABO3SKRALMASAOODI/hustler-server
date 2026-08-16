@@ -72,16 +72,27 @@ def _graph(edl, music_inputs):
                              src_w=1280, src_h=720)
 
 
-def test_music_tail_extends_the_render_over_black():
+def test_music_overhang_is_clamped_to_picture_without_rewriting_edl():
     m = {"id": "mus1", "storage_key": "music/1/s.m4a", "start": 0.0,
          "end": 57.3, "gain_db": -4.0, "offset_s": 4.71, "duck": False}
     e = validate_edl(_edl([m]), SRC).model_dump()
     g = _graph(e, [(1, e["music"][0], 66.0)])
-    assert "tpad=stop_mode=add:stop_duration=29.300:color=black" in g
-    assert "apad=pad_dur=29.300" in g
-    # the music window is no longer clamped at the program's end
-    assert "atrim=start=4.710:end=62.010" in g       # 4.71 + 57.3
-    assert abs(music_tail_ext(e, 28.0) - 29.3) < 1e-6
+    assert e["music"][0]["end"] == 57.3       # EDL/workbench is untouched
+    assert "tpad=stop_mode=add" not in g
+    assert "apad=pad_dur" not in g
+    # Only the temporary audio trim is clamped: offset 4.71 + 28s program.
+    assert "atrim=start=4.710:end=32.710" in g
+    assert music_tail_ext(e, 28.0) == 0.0
+
+
+def test_music_wholly_beyond_picture_stays_in_edl_but_is_not_mixed():
+    m = {"id": "mus1", "storage_key": "music/1/s.m4a", "start": 40.0,
+         "end": 57.3, "gain_db": -4.0, "duck": False}
+    e = validate_edl(_edl([m]), SRC).model_dump()
+    g = _graph(e, [(1, e["music"][0], 66.0)])
+    assert e["music"][0]["start"] == 40.0
+    assert "[1:a]" not in g
+    assert "[mus0]" not in g
 
 
 def test_music_inside_the_video_renders_byte_identically():
@@ -111,4 +122,5 @@ def test_tail_gate_busts_only_outliving_music():
                                   "gain_db": -4.0}]), SRC).model_dump()
     assert music_tail_current({}, short_e, 28.0)           # grandfathered
     assert not music_tail_current({}, long_e, 28.0)        # must re-render
-    assert music_tail_current({"tail_v": 1}, long_e, 28.0)
+    assert not music_tail_current({"tail_v": 1}, long_e, 28.0)
+    assert music_tail_current({"tail_v": 2}, long_e, 28.0)

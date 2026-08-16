@@ -25,8 +25,9 @@ class _Ctx:
 def test_post_plan_catalog_is_stage_relevant_and_materially_smaller():
     ctx = _Ctx()
     names = agent_tools.compact_tool_names(ctx)
-    assert {"keep_segments", "add_captions", "render_preview",
+    assert {"keep_segments", "render_preview",
             "expand_toolset"} <= names
+    assert "add_captions" not in names
     assert "search_stock" not in names
 
     full = agent_tools.openai_tools(compact=True)
@@ -39,7 +40,8 @@ def test_post_plan_catalog_is_stage_relevant_and_materially_smaller():
 def test_fresh_planning_catalog_cannot_write_and_cuts_first_call_tpm():
     names = agent_tools.planning_tool_names()
     assert {"set_edit_plan", "look_at", "compare_uploaded_media",
-            "search_music", "find_silences", "read_skill"} <= names
+            "find_silences", "read_skill"} <= names
+    assert "search_music" not in names
     assert not (names & agent_tools.WRITE_TOOLS)
 
     full = agent_tools.openai_tools(compact=False)
@@ -52,9 +54,39 @@ def test_any_omitted_domain_can_be_loaded_without_changing_the_edit():
     out = agent_tools.expand_toolset(ctx, ["media", "motion"])
     names = agent_tools.compact_tool_names(ctx)
 
-    assert "Tool domains exposed" in out
-    assert {"research_broll", "generate_image", "add_zoom",
-            "set_color_grade"} <= names
+    assert "Tool domain exposed" in out
+    assert {"research_broll", "generate_image"} <= names
+    assert "add_zoom" not in names
+
+    # The loop consumes this one-shot set after building the next dispatch;
+    # a later stage can explicitly load another domain without permanent
+    # schema accumulation.
+    ctx._expanded_tool_domains = set()
+    agent_tools.expand_toolset(ctx, ["motion"])
+    names = agent_tools.compact_tool_names(ctx)
+    assert {"add_zoom", "set_color_grade"} <= names
+    assert "research_broll" not in names
+
+
+def test_duplicate_valid_domains_are_deduped_not_rejected():
+    ctx = _Ctx()
+    out = agent_tools.expand_toolset(ctx, ["media", "media", "motion"])
+
+    assert not out.startswith("REJECTED:")
+    assert ctx._expanded_tool_domains == {"media"}
+    assert "finish that plan step before loading motion" in out
+
+
+def test_preplan_expansion_forces_next_dispatch_schema_refresh():
+    class Fresh:
+        edit_plan = None
+        versions_written = []
+        _expanded_tool_domains = {"media"}
+
+    assert agent_loop._tool_schema_refresh_needed(Fresh()) is True
+
+    Fresh._expanded_tool_domains = set()
+    assert agent_loop._tool_schema_refresh_needed(Fresh()) is False
 
 
 def test_domain_union_covers_every_registered_tool():

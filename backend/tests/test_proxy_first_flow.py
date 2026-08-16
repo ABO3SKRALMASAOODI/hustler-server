@@ -167,9 +167,15 @@ def test_a_proxy_upload_creates_no_asset_and_returns_its_key(env):
     assert not env.enqueued, "and must not start indexing on its own"
 
 
-def test_a_deferred_original_registers_and_indexes_with_zero_bytes_uploaded(env):
+def test_a_deferred_original_registers_and_indexes_with_zero_bytes_uploaded(
+        env, monkeypatch):
     """The point of the whole path: indexing starts while the original is still
     in the browser."""
+    events = []
+    monkeypatch.setattr(
+        video, "record_client_event",
+        lambda *args, **kwargs: events.append((args, kwargs)))
+
     out, status = _defer(env)
     assert status == 200
     assert out["original_pending"] is True
@@ -186,6 +192,11 @@ def test_a_deferred_original_registers_and_indexes_with_zero_bytes_uploaded(env)
     job = env.enqueued[0]
     assert job["type"] == "index"
     assert job["payload"]["client_proxy_key"] == "clientproxies/5/p.mp4"
+    landed = next(event for event in events
+                  if event[0][2] == "upload_landed")
+    assert landed[1]["detail"]["asset_id"] == out["asset_id"]
+    assert landed[1]["detail"]["index_job_id"] == out["index_job_id"]
+    assert landed[1]["detail"]["original_pending"] is True
 
 
 def test_a_deferred_original_without_a_proxy_is_refused(env):

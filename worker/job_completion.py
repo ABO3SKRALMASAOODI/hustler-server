@@ -10,6 +10,42 @@ import config
 import db as dbx
 
 
+def _result_is_billable(job, result):
+    """Resolve rolling-deploy results without making absence mean "charge".
+
+    Current agent workers always send an explicit boolean.  A legacy worker
+    can omit it on an early/blocked return (notably ``awaiting_user``), so an
+    agent result without the field is billable only when it also contains the
+    affirmative terminal facts of a useful reply.  This retains billing for a
+    read-only Q&A while defaulting ambiguous/no-change results to the user's
+    favour.  Shorts keeps its historical default for rolling deploys.
+    """
+    if job["type"] != "agent_turn":
+        return bool(result.get("billable", True))
+    if "billable" in result:
+        # The worker contract is a JSON boolean.  Do not let a malformed
+        # truthy string such as "false" turn a safe default into a debit.
+        return result.get("billable") is True
+    return (result.get("status") == "replied"
+            and result.get("outcome") in {"fulfilled", "partial"})
+
+
+def _qualifies_subscribe_gate(job, result):
+    """Whether this committed result consumed the account's free real edit."""
+    if job["type"] == "agent_turn":
+        return (result.get("status") == "replied"
+                and result.get("outcome") in {"fulfilled", "partial"}
+                and result.get("edl_changed") is True)
+    if job["type"] == "shorts_plan":
+        rendered = result.get("rendered_clips")
+        clips = rendered if rendered is not None else result.get("clips")
+        try:
+            return int(clips or 0) > 0
+        except (TypeError, ValueError):
+            return False
+    return False
+
+
 def finalize_success(worker_db, job, result, lease_claim):
     """Charge (best effort) and atomically fence the terminal job write.
 
@@ -20,34 +56,41 @@ def finalize_success(worker_db, job, result, lease_claim):
         return worker_db.run(
             dbx.finish_job, job["id"], "done", None, result, lease_claim)
 
-    if job["type"] in ("agent_turn", "shorts_plan") \
-            and result.get("billable", True):
-        try:
-            # A shorts_plan now scouts and seeds LOCKED story cuts; it does
-            # not render or creatively edit them.  New workers report
-            # rendered_clips=0, so selection is charged only for its model
-            # turn.  Keep the old clips fallback for jobs completed by an
-            # older worker during a rolling deploy.
-            rendered = result.get("rendered_clips")
-            clip_count = (rendered if rendered is not None
-                          else result.get("clips"))
-            extra = (config.SHORTS_CLIP_CREDITS * int(clip_count or 0)
-                     if job["type"] == "shorts_plan" else 0.0)
-            charged = worker_db.run(
-                dbx.charge_turn_credits, job["user_id"], job["id"], extra)
-            result["credits_charged"] = charged
-        except Exception as exc:
-            # Billing must never erase a finished edit. charge_turn_credits is
-            # idempotent by job id, so a later reconciliation can repair it.
-            print(f"[job {job['id']}] credit charge failed: {exc}", flush=True)
-    elif job["type"] == "agent_turn":
+    accounted = job["type"] in ("agent_turn", "shorts_plan")
+    billable = accounted and _result_is_billable(job, result)
+    qualifies = accounted and _qualifies_subscribe_gate(job, result)
+    rendered = result.get("rendered_clips")
+    clip_count = rendered if rendered is not None else result.get("clips")
+    try:
+        clip_count = max(0, int(clip_count or 0))
+    except (TypeError, ValueError):
+        clip_count = 0
+    extra = (config.SHORTS_CLIP_CREDITS * clip_count
+             if job["type"] == "shorts_plan" else 0.0)
+    if job["type"] == "agent_turn" and not billable:
         result["credits_charged"] = 0.0
         print(f"[job {job['id']}] not charged — the turn produced nothing "
               f"usable ({result.get('truncated') and 'truncated'})",
               flush=True)
 
-    committed = worker_db.run(
-        dbx.finish_job, job["id"], "done", None, result, lease_claim)
+    if accounted:
+        terminal = worker_db.run(
+            dbx.finish_accounted_job, job["id"], result, lease_claim,
+            job["user_id"], billable, extra, qualifies)
+        committed = bool((terminal or {}).get("committed"))
+        if committed and (terminal or {}).get("charged") is not None:
+            result["credits_charged"] = terminal["charged"]
+        if (terminal or {}).get("billing_error"):
+            print(f"[job {job['id']}] credit charge failed: "
+                  f"{terminal['billing_error']}", flush=True)
+        if (terminal or {}).get("qualification_error"):
+            print(f"[job {job['id']}] subscribe qualification dropped: "
+                  f"{terminal['qualification_error']}", flush=True)
+    else:
+        committed = worker_db.run(
+            dbx.finish_job, job["id"], "done", None, result, lease_claim)
+    if not committed:
+        return False
     if committed and job["type"] == "final":
         try:
             asset_id = (result.get("render_asset_id")

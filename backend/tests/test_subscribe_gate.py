@@ -6,6 +6,7 @@ Active trials pass because they are subscribed.
 
 import os
 import sys
+import inspect
 
 os.environ.setdefault("SKIP_DB_INIT", "1")
 os.environ.setdefault("DATABASE_URL", "postgresql://stub/stub")
@@ -27,8 +28,14 @@ class _Cur:
         self._edited = edited
         self.sql = None
         self._step = 0
+        self.commands = []
 
     def execute(self, sql, *a, **kw):
+        command = " ".join(sql.split())
+        self.commands.append(command)
+        if command.startswith(("SAVEPOINT ", "RELEASE SAVEPOINT ",
+                               "ROLLBACK TO SAVEPOINT ")):
+            return
         self.sql = sql
         self._step += 1
 
@@ -47,8 +54,37 @@ def test_unsubscribed_user_is_gated_after_a_real_edit():
     cur = _Cur({"is_subscribed": 0, "email": "new@example.com"}, edited=True)
     assert video._subscribe_gate_applies(cur, 1) is True
     assert "video_jobs" in (cur.sql or "")
+    assert "subscribe_gate_qualified" in cur.sql
     assert "result->>'status' = 'replied'" in cur.sql
     assert "result->>'outcome' IN ('fulfilled', 'partial')" in cur.sql
+    assert "result->>'edl_changed' = 'true'" in cur.sql
+    user_lookup = next(command for command in cur.commands
+                       if "FROM users" in command)
+    assert "FOR UPDATE" in user_lookup
+
+
+def test_gate_lookup_error_rolls_back_savepoint_and_fails_open():
+    class Broken(_Cur):
+        def __init__(self):
+            super().__init__(
+                {"is_subscribed": 0, "email": "new@example.com"})
+            self.commands = []
+
+        def execute(self, sql, *args, **kwargs):
+            command = " ".join(sql.split())
+            self.commands.append(command)
+            if "FROM client_events" in command:
+                raise RuntimeError("temporary schema skew")
+            if command.startswith(("SAVEPOINT ", "RELEASE SAVEPOINT ",
+                                   "ROLLBACK TO SAVEPOINT ")):
+                return
+            self.sql = sql
+            self._step += 1
+
+    cur = Broken()
+    assert video._subscribe_gate_applies(cur, 1) is False
+    assert any(command.startswith("ROLLBACK TO SAVEPOINT")
+               for command in cur.commands)
 
 
 def test_deterministic_final_failure_requires_a_new_edit():
@@ -89,6 +125,28 @@ def test_offer_body_is_subscribe_not_trial():
     assert by_id["ai_max"]["monthly"] == 50
     assert by_id["ai_max"]["credits"] == 5000
     assert "trial" not in body["error"].lower()
+
+
+def test_qualification_migration_requires_positive_legacy_write_evidence():
+    migration = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "migrations", "019_subscribe_gate_qualification.sql")
+    sql = open(migration, encoding="utf-8").read()
+    assert "j.result ? 'edl_changed'" in sql
+    assert "NOT (j.result ? 'edl_changed')" in sql
+    assert "e.created_at >= j.created_at" in sql
+    assert "e.created_at <=" in sql
+    assert "j.result->>'edl_version' ~" not in sql
+    assert "ce.detail->>'origin' = 'migration_019'" in sql
+    assert "DELETE FROM client_events newer" in sql
+    assert "newer.user_id = older.user_id" in sql
+
+
+def test_project_delete_waits_for_durable_accounting_repair():
+    source = inspect.getsource(video.delete_project)
+    assert "billing_pending" in source
+    assert "qualification_pending" in source
+    assert '"code": "accounting_pending"' in source
 
 
 def test_shopfront_credits_are_half():

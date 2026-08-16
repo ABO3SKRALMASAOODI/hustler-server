@@ -703,6 +703,71 @@ def test_tool_dialect_normalizes_auto_frame_and_compact_ids():
     assert name == "move_sfx" and args["id"] == "sx1"
 
 
+def test_tool_dialect_prefers_explicit_text_motion_and_drops_static_motif():
+    name, args, notes = agent_tools._normalize_tool_call(
+        "add_text", {"text": "PROOF", "start": 1, "end": 3,
+                     "motion": {"opacity": [{"t": 0, "v": 0},
+                                              {"t": .2, "v": 1}]},
+                     "entrance": "fade", "exit": "fade",
+                     "motion_motif": "proof_lock"})
+    assert name == "add_text"
+    assert "entrance" not in args and "exit" not in args
+    assert args["motion_motif"] == "proof_lock"
+    assert len(notes) == 2
+
+    _name, static, static_notes = agent_tools._normalize_tool_call(
+        "add_text", {"text": "CALM", "start": 1, "end": 3,
+                     "motion_motif": "hold"})
+    assert "motion_motif" not in static
+    assert static_notes == ["static motion_motif dropped"]
+
+    _name, empty, empty_notes = agent_tools._normalize_tool_call(
+        "add_text", {"text": "REAL ENTRANCE", "start": 1, "end": 3,
+                     "motion": {}, "entrance": "fade"})
+    assert "motion" not in empty
+    assert empty["entrance"] == "fade"
+    assert empty_notes == ["empty motion dropped"]
+
+    _name, invalid, invalid_notes = agent_tools._normalize_tool_call(
+        "add_text", {"text": "HONEST ERROR", "start": 1, "end": 3,
+                     "motion": {"opacity": "fade"},
+                     "entrance": "fade"})
+    assert invalid["motion"] == {"opacity": "fade"}
+    assert invalid["entrance"] == "fade"
+    assert not invalid_notes
+
+    _name, scalar, scalar_notes = agent_tools._normalize_tool_call(
+        "add_text", {"text": "ROTATED POP", "start": 1, "end": 3,
+                     "motion": {"rotation": 5}, "entrance": "pop"})
+    assert scalar["motion"] == {"rotation": 5}
+    assert scalar["entrance"] == "pop"
+    assert not scalar_notes
+
+    _name, empty_curve, empty_curve_notes = agent_tools._normalize_tool_call(
+        "add_text", {"text": "REAL POP", "start": 1, "end": 3,
+                     "motion": {"opacity": []}, "entrance": "pop"})
+    assert "motion" not in empty_curve
+    assert empty_curve["entrance"] == "pop"
+    assert empty_curve_notes == ["empty motion dropped"]
+
+
+def test_sfx_tiny_end_drift_clamps_but_material_error_rejects(monkeypatch):
+    ctx, fake = _real_ctx()
+    monkeypatch.setattr(
+        agent_tools, "_resolve_sfx",
+        lambda _ctx, key: ({"name": "Click", "duration_s": .3,
+                            "storage_key": key}, None))
+    result = agent_tools.add_sfx(
+        ctx, "sfx/click.mp3", at=20.2, purpose="end punctuation")
+    assert result.startswith("EDL v1 -> v2")
+    assert "NORMALIZED" in result
+    assert fake.rows[-1]["json"]["sfx"][0]["at"] == 19.95
+
+    rejected = agent_tools.add_sfx(ctx, "sfx/click.mp3", at=20.26)
+    assert rejected.startswith("REJECTED:")
+    assert fake.inserts == 1
+
+
 def test_reset_edit_is_transaction_safe_inside_recipe():
     ctx, fake = _real_ctx()
     first = dict(ctx.latest_edl()["json"])

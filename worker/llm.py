@@ -482,6 +482,65 @@ def _chat_usage(raw):
     )
 
 
+def _responses_usage(raw):
+    """Map Responses API usage onto the chat-shaped accounting adapter."""
+    raw = raw or {}
+    prompt = raw.get("input_tokens") or 0
+    completion = raw.get("output_tokens") or 0
+    return SimpleNamespace(
+        prompt_tokens=prompt,
+        completion_tokens=completion,
+        total_tokens=raw.get("total_tokens") or prompt + completion,
+        prompt_tokens_details=raw.get("input_tokens_details") or {},
+        completion_tokens_details=raw.get("output_tokens_details") or {},
+    )
+
+
+def _responses_text(payload):
+    """Plain output text across the Responses API's compact/full shapes."""
+    direct = payload.get("output_text")
+    if isinstance(direct, str) and direct.strip():
+        return direct.strip()
+    chunks = []
+    for item in payload.get("output") or []:
+        if not isinstance(item, dict):
+            continue
+        for part in item.get("content") or []:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") in ("output_text", "text"):
+                value = part.get("text")
+                if isinstance(value, str) and value.strip():
+                    chunks.append(value.strip())
+    return "\n".join(chunks).strip()
+
+
+def _audio_responses_body(chat_body, content):
+    """Translate one bounded audio review from Chat Completions to Responses."""
+    parts = []
+    for part in content:
+        if part.get("type") == "text":
+            parts.append({"type": "input_text", "text": part.get("text", "")})
+        else:
+            parts.append(part)
+    return {
+        "model": chat_body["model"],
+        "max_output_tokens": chat_body["max_tokens"],
+        "input": [{"role": "user", "content": parts}],
+    }
+
+
+def _audio_chat_needs_responses(response):
+    """Whether this endpoint rejected the chat ``messages`` envelope."""
+    if response.status_code != 400:
+        return False
+    text = str(response.text or "").lower()
+    return "messages" in text and any(marker in text for marker in (
+        "unsupported", "unsupported_format", "unknown", "not supported",
+        "supported values", "invalid",
+    ))
+
+
 def _audio_answer_is_actionable(answer, purpose):
     value = str(answer or "").strip()
     if not value:
@@ -531,7 +590,7 @@ def ask_audio(prompt, audio_paths, labels=None, max_tokens=260,
         "max_tokens": int(max_tokens),
         "messages": [{"role": "user", "content": content}],
     }
-    url = config.AUDIO_REVIEW_BASE_URL.rstrip("/") + "/chat/completions"
+    base_url = config.AUDIO_REVIEW_BASE_URL.rstrip("/")
     try:
         headers = {
             "Authorization": f"Bearer {config.AUDIO_REVIEW_API_KEY}",
@@ -539,14 +598,39 @@ def ask_audio(prompt, audio_paths, labels=None, max_tokens=260,
         }
         retries_left, attempts = 2, 0
         used_dual_modality = False
+        use_responses = False
+        responses_without_cap = False
         answer, usage = "", None
         while True:
             attempts += 1
+            if use_responses:
+                request_body = _audio_responses_body(body, content)
+                if responses_without_cap:
+                    request_body.pop("max_output_tokens", None)
+                url = base_url + "/responses"
+            else:
+                request_body = body
+                url = base_url + "/chat/completions"
             response = requests.post(
-                url, json=body, timeout=config.AUDIO_REVIEW_TIMEOUT_S,
+                url, json=request_body,
+                timeout=config.AUDIO_REVIEW_TIMEOUT_S,
                 headers=headers)
             lowered = response.text.lower()
-            if response.status_code == 400 and "modalit" in lowered \
+            if not use_responses and _audio_chat_needs_responses(response):
+                # gpt-audio-1.5 deployments can expose audio through the
+                # Responses API while rejecting the Chat Completions
+                # ``messages`` envelope. This was 11/11 production reviews,
+                # so cross the supported endpoint instead of latching ears
+                # off for the process.
+                use_responses = True
+                continue
+            if (use_responses and response.status_code == 400
+                    and "max_output_tokens" in lowered
+                    and not responses_without_cap):
+                responses_without_cap = True
+                continue
+            if not use_responses and response.status_code == 400 \
+                    and "modalit" in lowered \
                     and not used_dual_modality:
                 body["modalities"] = ["text", "audio"]
                 body["audio"] = {"voice": "alloy", "format": "wav"}
@@ -558,12 +642,16 @@ def ask_audio(prompt, audio_paths, labels=None, max_tokens=260,
                 continue
             if response.status_code < 400:
                 payload = response.json()
-                message = ((payload.get("choices") or [{}])[0].get("message")
-                           or {})
-                answer = (message.get("content") or
-                          (message.get("audio") or {}).get("transcript")
-                          or "").strip()
-                usage = _chat_usage(payload.get("usage"))
+                if use_responses:
+                    answer = _responses_text(payload)
+                    usage = _responses_usage(payload.get("usage"))
+                else:
+                    message = ((payload.get("choices") or [{}])[0].get(
+                        "message") or {})
+                    answer = (message.get("content") or
+                              (message.get("audio") or {}).get("transcript")
+                              or "").strip()
+                    usage = _chat_usage(payload.get("usage"))
                 if not _audio_answer_is_actionable(answer, purpose) \
                         and retries_left > 0:
                     retries_left -= 1
@@ -582,7 +670,8 @@ def ask_audio(prompt, audio_paths, labels=None, max_tokens=260,
         record(purpose,
                {"model": config.AUDIO_REVIEW_MODEL, "question": prompt,
                 "clips": recorded},
-               {"answer": answer or None, "attempts": attempts}, usage)
+               {"answer": answer or None, "attempts": attempts,
+                "api": "responses" if use_responses else "chat"}, usage)
         return answer or None
     except Exception as exc:
         msg = str(exc)

@@ -427,6 +427,32 @@ def lease_is_current(conn, job_id, total_claims):
         return cur.fetchone() is not None
 
 
+def record_agent_turn_baseline(conn, job_id, total_claims, version, digest):
+    """Persist the original user-turn EDL identity for a death resume.
+
+    A reaper successor copies the payload but starts from any EDL writes the
+    dead worker already landed. Keeping this small SHA-256 identity lets the
+    successor report whether the original request changed the timeline without
+    storing a potentially huge EDL in the queue row.
+    """
+    with conn.cursor() as cur:
+        lease = " AND total_claims = %s" if total_claims is not None else ""
+        params = [str(digest), int(version), job_id]
+        if total_claims is not None:
+            params.append(total_claims)
+        cur.execute(f"""UPDATE video_jobs
+                        SET payload = COALESCE(payload, '{{}}'::jsonb)
+                            || jsonb_build_object(
+                                'turn_baseline_digest', %s,
+                                'turn_baseline_version', %s),
+                            updated_at = NOW()
+                        WHERE id = %s AND state = 'running'{lease}
+                          AND NOT (COALESCE(payload, '{{}}'::jsonb)
+                                   ? 'turn_baseline_digest')""",
+                    tuple(params))
+        return cur.rowcount > 0
+
+
 def finish_job(conn, job_id, state, error=None, result=None,
                total_claims=None):
     """Finish only the execution lease that produced this result.
@@ -449,6 +475,25 @@ def finish_job(conn, job_id, state, error=None, result=None,
                         WHERE id = %s AND state = 'running'{lease_where}""",
                     tuple(params))
         return cur.rowcount > 0
+
+
+def completed_job_lease_matches(conn, job_id, total_claims):
+    """Recognize a successful replay after a lost COMMIT acknowledgement.
+
+    ``Db.run`` retries once when psycopg2 reports an OperationalError, which
+    can happen after PostgreSQL committed but before the client received the
+    acknowledgement.  On that retry ``finish_job`` correctly updates zero
+    rows because the job is already done.  The same immutable lease generation
+    proves this is our committed result rather than a stale executor.
+    """
+    if total_claims is None:
+        return False
+    with conn.cursor() as cur:
+        cur.execute("""SELECT 1 FROM video_jobs
+                        WHERE id = %s AND state = 'done'
+                          AND total_claims = %s""",
+                    (job_id, total_claims))
+        return cur.fetchone() is not None
 
 
 def _json_safe(value):
@@ -1699,6 +1744,161 @@ def record_client_event(conn, user_id, project_id, kind, detail=None,
                      Json(payload)))
 
 
+def mark_subscribe_gate_qualified(conn, user_id, job_id):
+    """Durably mark that an account completed its free real edit.
+
+    ``project_id`` is intentionally NULL: deleting a project must not refund
+    the account-level free edit.  The NOT EXISTS check keeps this compatible
+    before migration 019 is applied; its partial unique index closes the
+    concurrent-insert race during and after rolling deploys.
+    """
+    with conn.cursor() as cur:
+        # Same row lock as every message/auto-resume decision. The marker and
+        # the next enqueue therefore have a real before/after order even when
+        # they happen on different projects and different services.
+        cur.execute("SELECT id FROM users WHERE id = %s FOR UPDATE",
+                    (int(user_id),))
+        if not cur.fetchone():
+            return False
+        cur.execute("""INSERT INTO client_events
+                            (user_id, project_id, kind, detail)
+                       SELECT %s, NULL, 'subscribe_gate_qualified', %s
+                       WHERE NOT EXISTS (
+                           SELECT 1 FROM client_events
+                            WHERE user_id = %s
+                              AND kind = 'subscribe_gate_qualified')
+                       ON CONFLICT DO NOTHING""",
+                    (user_id, Json({"origin": "worker",
+                                    "source_job_id": job_id}), user_id))
+        return bool(cur.rowcount)
+
+
+def subscribe_gate_applies(conn, user_id):
+    """Return whether an indexed-upload auto-resume must stop at the wall.
+
+    The HTTP message/Shorts routes check this predicate before accepting new
+    work.  An upload-time prompt is necessarily accepted *before* its source
+    is indexed, though, and another project can qualify the account while the
+    index job is still running.  The worker must re-check the same account-
+    wide rule immediately before it enqueues that saved prompt or the race
+    grants an extra free edit.
+
+    Keep the legacy completed-job fallback during rolling deploys; the
+    account marker is the durable fast path after migration 019.
+    """
+    with conn.cursor() as cur:
+        # Lock in a separate statement *before* reading the marker. A single
+        # SELECT ... EXISTS(...) FOR UPDATE may evaluate the subquery against
+        # its old statement snapshot before it waits on a concurrent writer.
+        cur.execute("""SELECT is_subscribed, email FROM users
+                        WHERE id = %s FOR UPDATE""", (int(user_id),))
+        user = cur.fetchone()
+        if not user or user.get("is_subscribed"):
+            return False
+        if (user.get("email") or "").lower() == "thevalmera@gmail.com":
+            return False
+        cur.execute("SAVEPOINT worker_subscribe_gate_lookup")
+        try:
+            cur.execute("""
+                SELECT 1
+                 WHERE EXISTS (
+                         SELECT 1 FROM client_events ce
+                          WHERE ce.user_id = %s
+                            AND ce.kind = 'subscribe_gate_qualified')
+                    OR EXISTS (
+                         SELECT 1 FROM video_jobs j
+                          WHERE j.user_id = %s AND j.state = 'done'
+                            AND (
+                              (j.type = 'agent_turn'
+                               AND j.result->>'status' = 'replied'
+                               AND j.result->>'outcome'
+                                     IN ('fulfilled', 'partial')
+                               AND j.result->>'edl_changed' = 'true')
+                              OR
+                              (j.type = 'shorts_plan' AND
+                               CASE
+                                 WHEN j.result ? 'rendered_clips'
+                                      AND j.result->>'rendered_clips'
+                                            ~ '^[0-9]+$'
+                                   THEN (j.result->>'rendered_clips')::int
+                                 WHEN NOT (j.result ? 'rendered_clips')
+                                      AND j.result->>'clips' ~ '^[0-9]+$'
+                                   THEN (j.result->>'clips')::int
+                                 ELSE 0
+                               END > 0)
+                            ))
+                 LIMIT 1
+            """, (int(user_id), int(user_id)))
+            applies = cur.fetchone() is not None
+            cur.execute("RELEASE SAVEPOINT worker_subscribe_gate_lookup")
+            return applies
+        except Exception as exc:                         # pragma: no cover
+            cur.execute("ROLLBACK TO SAVEPOINT worker_subscribe_gate_lookup")
+            cur.execute("RELEASE SAVEPOINT worker_subscribe_gate_lookup")
+            print(f"[subscribe_gate] worker lookup failed open for user "
+                  f"{user_id}: {exc}", flush=True)
+            return False
+
+
+def mark_message_subscribe_gated(conn, message_id):
+    """Retire one saved upload-time prompt without pretending it ran.
+
+    ``pending_user_message`` deliberately ignores this marker.  The user can
+    send the text again once subscribed, but a re-index or worker retry cannot
+    silently auto-run the blocked request merely because cards were shown.
+    """
+    with conn.cursor() as cur:
+        cur.execute("""UPDATE chat_messages
+                          SET meta = COALESCE(meta, '{}'::jsonb)
+                                     || jsonb_build_object(
+                                          'subscribe_gated', TRUE)
+                        WHERE id = %s AND role = 'user'""",
+                    (int(message_id),))
+        return bool(cur.rowcount)
+
+
+def resolve_pending_auto_resume(conn, project_id, session_id, user_id,
+                                message_id, payload=None):
+    """Gate-or-enqueue one saved upload brief in a single transaction.
+
+    Lock order is account then message. Qualification writers and checkout
+    updates also lock the account row, so a cross-project completion or plan
+    activation cannot land in the gap between eligibility lookup and enqueue.
+    The message lock/idempotency probe prevents two index retries from queuing
+    the same brief.
+    """
+    gated = subscribe_gate_applies(conn, user_id)  # locks the account row
+    with conn.cursor() as cur:
+        cur.execute("""SELECT m.id FROM chat_messages m
+                        WHERE m.id = %s AND m.session_id = %s
+                          AND m.role = 'user'
+                          AND COALESCE(m.meta->>'subscribe_gated', 'false')
+                                <> 'true'
+                          AND NOT EXISTS (
+                              SELECT 1 FROM video_jobs j
+                               WHERE j.project_id = %s
+                                 AND j.type = 'agent_turn'
+                                 AND j.payload->>'message_id' = m.id::text)
+                        FOR UPDATE OF m""",
+                    (int(message_id), session_id, int(project_id)))
+        if not cur.fetchone():
+            return {"state": "consumed", "job_id": None}
+
+    if gated:
+        mark_message_subscribe_gated(conn, message_id)
+        return {"state": "gated", "job_id": None}
+
+    if user_credits_balance(conn, user_id) < 1.0:
+        return {"state": "no_credits", "job_id": None}
+
+    job_payload = dict(payload or {})
+    job_payload["message_id"] = int(message_id)
+    job_payload["auto_resumed"] = True
+    job_id = enqueue_job(
+        conn, project_id, user_id, "agent_turn", job_payload)
+    return {"state": "enqueued", "job_id": job_id}
+
+
 def has_index_greet(conn, session_id, greet_key):
     """Has this chat already been greeted for this asset? The greet must be
     idempotent against the CHAT, not against job flags: an index job that is
@@ -1752,6 +1952,7 @@ def pending_user_message(conn, project_id, session_id):
         cur.execute("""
             SELECT m.id, m.content, m.meta FROM chat_messages m
             WHERE m.session_id = %s AND m.role = 'user'
+              AND COALESCE(m.meta->>'subscribe_gated', 'false') <> 'true'
               AND NOT EXISTS (
                   SELECT 1 FROM video_jobs j
                   WHERE j.project_id = %s AND j.type = 'agent_turn'
@@ -2013,8 +2214,9 @@ def user_is_paid(conn, user_id):
 
 def charge_turn_credits(conn, user_id, job_id, extra_credits=0.0):
     """Deduct this turn's model cost from the user's credit pools.
-    Returns the credits charged (float). Never raises the balance below 0
-    and never fails the turn — callers swallow exceptions.
+    Returns the credits claimed for this job/turn (float). Repeated calls
+    return the existing claim without another debit. Never raises the balance
+    below 0 and never fails the turn — callers swallow exceptions.
 
     extra_credits (round 99): a flat surcharge on top of the model cost —
     the shorts pipeline adds SHORTS_CLIP_CREDITS per finished clip for the
@@ -2070,6 +2272,42 @@ def charge_turn_credits(conn, user_id, job_id, extra_credits=0.0):
         u = cur.fetchone()
         if not u:
             return 0.0
+
+        # Claim the charge in the audit ledger BEFORE touching a balance.  The
+        # unique (job_id, turn) index from migration 020 is the durable fence:
+        # two executor responses for one job can race here, but only one may
+        # own the debit.  The transaction-scoped advisory lock + pre-check keep
+        # the same guarantee during the safe rolling-deploy window before the
+        # migration has been applied; ON CONFLICT without a target remains
+        # valid on both schemas.
+        ledger_job_id = f"video:{job_id}"[:16]
+        ledger_turn = 1
+        cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s), %s)",
+                    (ledger_job_id, ledger_turn))
+        cur.execute("""SELECT credits_used FROM job_credits
+                        WHERE job_id = %s AND turn = %s LIMIT 1""",
+                    (ledger_job_id, ledger_turn))
+        existing = cur.fetchone()
+        if existing:
+            return float(existing["credits_used"] or 0)
+        cur.execute("""INSERT INTO job_credits
+                            (job_id, user_id, turn, tokens_used, credits_used)
+                       VALUES (%s, %s, %s, %s, %s)
+                       ON CONFLICT DO NOTHING
+                       RETURNING credits_used""",
+                    (ledger_job_id, user_id, ledger_turn,
+                     int(row["tin"]) + int(row["tout"]), credits))
+        claimed = cur.fetchone()
+        if not claimed:
+            # The unique index settled a race after our pre-check. PostgreSQL
+            # waits for the winning transaction before reporting the conflict,
+            # so its committed audit amount is available now.
+            cur.execute("""SELECT credits_used FROM job_credits
+                            WHERE job_id = %s AND turn = %s LIMIT 1""",
+                        (ledger_job_id, ledger_turn))
+            existing = cur.fetchone()
+            return float((existing or {}).get("credits_used") or 0)
+
         daily = float(u["credits_daily"] or 0)
         bonus = float(u["credits_bonus"] or 0)
         monthly = float(u["credits_monthly"] or 0)
@@ -2087,16 +2325,175 @@ def charge_turn_credits(conn, user_id, job_id, extra_credits=0.0):
                        WHERE id = %s""",
                     (spend_daily, spend_bonus, spend_monthly,
                      spend_daily, spend_bonus, spend_monthly, user_id))
-        # Ledger row so admin usage stats cover the video lane too. The
-        # savepoint keeps a ledger hiccup from rolling back the charge.
-        cur.execute("SAVEPOINT ledger")
-        try:
-            cur.execute("""INSERT INTO job_credits (job_id, user_id, turn,
-                                                    tokens_used, credits_used)
-                           VALUES (%s, %s, 1, %s, %s)""",
-                        (f"video:{job_id}"[:16], user_id,
-                         int(row["tin"]) + int(row["tout"]), credits))
-        except Exception as e:
-            cur.execute("ROLLBACK TO SAVEPOINT ledger")
-            print(f"[credits] ledger insert failed: {e}", flush=True)
         return credits
+
+
+def patch_done_job_result(conn, job_id, patch=None, remove=()):
+    """Merge accounting state into a completed job under its row lock."""
+    with conn.cursor() as cur:
+        cur.execute("""SELECT result FROM video_jobs
+                        WHERE id = %s AND state = 'done' FOR UPDATE""",
+                    (job_id,))
+        row = cur.fetchone()
+        if not row:
+            return False
+        stored = dict(row.get("result") or {})
+        for key in remove or ():
+            stored.pop(str(key), None)
+        stored.update(dict(patch or {}))
+        cur.execute("UPDATE video_jobs SET result = %s WHERE id = %s",
+                    (Json(_json_safe(stored)), job_id))
+        return True
+
+
+def finish_accounted_job(conn, job_id, result, total_claims, user_id,
+                         billable=False, extra_credits=0.0,
+                         qualify_subscribe=False):
+    """Fence completion before charging, in one database transaction.
+
+    A remote executor can return after its lease was cancelled or replaced.
+    Charging before ``finish_job`` let that stale response debit a user even
+    though its result was correctly refused. This helper first wins the
+    execution lease, then performs the idempotent ledger/debit and durable
+    free-edit marker under the same transaction. Billing/telemetry failures
+    use savepoints so they never erase a completed edit.
+    """
+    committed = finish_job(conn, job_id, "done", None, result, total_claims)
+    if not committed:
+        committed = completed_job_lease_matches(
+            conn, job_id, total_claims)
+    outcome = {"committed": bool(committed), "charged": None,
+               "billing_error": None, "qualification_error": None}
+    if not committed:
+        return outcome
+
+    if billable:
+        with conn.cursor() as cur:
+            cur.execute("SAVEPOINT terminal_billing")
+        try:
+            charged = charge_turn_credits(
+                conn, user_id, job_id, extra_credits)
+            patch_done_job_result(
+                conn, job_id, {"credits_charged": charged},
+                remove=("billing_pending", "billing_error",
+                        "billing_extra_credits"))
+            with conn.cursor() as cur:
+                cur.execute("RELEASE SAVEPOINT terminal_billing")
+            outcome["charged"] = charged
+        except Exception as exc:
+            with conn.cursor() as cur:
+                cur.execute("ROLLBACK TO SAVEPOINT terminal_billing")
+                cur.execute("RELEASE SAVEPOINT terminal_billing")
+            error = str(exc)[:500]
+            # This write is deliberately outside the failed savepoint. If it
+            # cannot be persisted either, let the whole terminal transaction
+            # roll back so the job remains recoverable instead of becoming a
+            # completed, uncharged orphan.
+            patch_done_job_result(
+                conn, job_id,
+                {"billing_pending": True, "billing_error": error,
+                 "billing_extra_credits": max(
+                     0.0, float(extra_credits or 0.0))})
+            outcome["billing_error"] = error
+
+    if qualify_subscribe:
+        with conn.cursor() as cur:
+            cur.execute("SAVEPOINT terminal_qualification")
+        try:
+            mark_subscribe_gate_qualified(conn, user_id, job_id)
+            patch_done_job_result(
+                conn, job_id, {},
+                remove=("qualification_pending", "qualification_error"))
+            with conn.cursor() as cur:
+                cur.execute("RELEASE SAVEPOINT terminal_qualification")
+        except Exception as exc:
+            with conn.cursor() as cur:
+                cur.execute("ROLLBACK TO SAVEPOINT terminal_qualification")
+                cur.execute("RELEASE SAVEPOINT terminal_qualification")
+            error = str(exc)[:500]
+            patch_done_job_result(
+                conn, job_id,
+                {"qualification_pending": True,
+                 "qualification_error": error})
+            outcome["qualification_error"] = error
+    return outcome
+
+
+def reconcile_pending_accounting(conn, limit=50):
+    """Retry durable terminal accounting work without rerunning the edit.
+
+    A transient database/schema error after the lease is fenced must not make
+    the user repeat a completed creative turn. ``finish_accounted_job`` leaves
+    explicit flags in the job result; the worker janitor repairs those flags
+    idempotently. Project deletion blocks briefly while either flag exists so
+    the llm_calls needed to price the turn cannot disappear underneath this
+    repair.
+    """
+    limit = max(1, min(200, int(limit or 50)))
+    with conn.cursor() as cur:
+        cur.execute("""SELECT id, user_id, result
+                         FROM video_jobs
+                        WHERE state = 'done'
+                          AND (result->>'billing_pending' = 'true'
+                               OR result->>'qualification_pending' = 'true')
+                        ORDER BY id
+                        LIMIT %s
+                        FOR UPDATE SKIP LOCKED""", (limit,))
+        rows = cur.fetchall()
+
+    repaired = []
+    for row in rows:
+        job_id = row["id"]
+        result = dict(row.get("result") or {})
+        fixed = []
+        if result.get("billing_pending") is True:
+            with conn.cursor() as cur:
+                cur.execute("SAVEPOINT reconcile_terminal_billing")
+            try:
+                charged = charge_turn_credits(
+                    conn, row["user_id"], job_id,
+                    float(result.get("billing_extra_credits") or 0.0))
+                patch_done_job_result(
+                    conn, job_id, {"credits_charged": charged},
+                    remove=("billing_pending", "billing_error",
+                            "billing_extra_credits"))
+                with conn.cursor() as cur:
+                    cur.execute("RELEASE SAVEPOINT reconcile_terminal_billing")
+                fixed.append("billing")
+            except Exception as exc:
+                with conn.cursor() as cur:
+                    cur.execute("ROLLBACK TO SAVEPOINT reconcile_terminal_billing")
+                    cur.execute("RELEASE SAVEPOINT reconcile_terminal_billing")
+                patch_done_job_result(
+                    conn, job_id,
+                    {"billing_pending": True,
+                     "billing_error": str(exc)[:500]})
+
+        if result.get("qualification_pending") is True:
+            with conn.cursor() as cur:
+                cur.execute("SAVEPOINT reconcile_terminal_qualification")
+            try:
+                mark_subscribe_gate_qualified(
+                    conn, row["user_id"], job_id)
+                patch_done_job_result(
+                    conn, job_id, {},
+                    remove=("qualification_pending",
+                            "qualification_error"))
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "RELEASE SAVEPOINT reconcile_terminal_qualification")
+                fixed.append("qualification")
+            except Exception as exc:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "ROLLBACK TO SAVEPOINT reconcile_terminal_qualification")
+                    cur.execute(
+                        "RELEASE SAVEPOINT reconcile_terminal_qualification")
+                patch_done_job_result(
+                    conn, job_id,
+                    {"qualification_pending": True,
+                     "qualification_error": str(exc)[:500]})
+
+        if fixed:
+            repaired.append({"job_id": job_id, "fixed": fixed})
+    return repaired

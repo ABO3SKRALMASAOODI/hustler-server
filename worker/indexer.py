@@ -966,6 +966,47 @@ def _shorts_index_route(project_kind, duration, reindex=False):
     return "direct_edit" if float(duration or 0.0) < 60.0 else "await_brief"
 
 
+def _resolve_pending_auto_resume(worker_db, project_id, session_id, user_id,
+                                 message_id, surface, payload=None):
+    """Resolve gate + subscription + credits + enqueue atomically in DB."""
+    try:
+        resolved = worker_db.run(
+            dbx.resolve_pending_auto_resume, project_id, session_id, user_id,
+            message_id, payload or {})
+    except Exception as e:
+        print(f"[index] atomic auto-resume failed: {e}", flush=True)
+        return {"state": "error", "job_id": None}
+    if (resolved or {}).get("state") == "gated":
+        try:
+            worker_db.run(
+                dbx.record_client_event, user_id, project_id,
+                "trial_gate_shown",
+                {"subscribe_offer": True, "surface": surface,
+                 "message_id": int(message_id),
+                 "auto_resume_blocked": True})
+        except Exception as event_error:
+            print(f"[index] subscribe offer telemetry failed: "
+                  f"{event_error}", flush=True)
+    return resolved or {"state": "error", "job_id": None}
+
+
+def _subscribe_gate_message(subject="request"):
+    return (f"I found the {subject} you sent while this upload was being "
+            "analyzed, but it did not run because this account has already "
+            "used its free edit. Choose a plan, then send the request again "
+            "once the plan is active.")
+
+
+def _subscribe_gate_meta(kind="index_ready"):
+    # The Studio already renders this durable worker reply as its inline plan
+    # card.  ``subscribe_gate`` distinguishes it in audits from a zero-balance
+    # wall; the generic flags preserve compatibility with older frontends.
+    return {"kind": kind, "auto_resume": False,
+            "credits_exhausted": True,
+            "free_trial_exhausted": True,
+            "subscribe_gate": True}
+
+
 def _finish_setup(worker_db, project_id, session_id, info, index,
                   user_id=None, reindex=False, asset_id=None):
     """Seed EDL v1 (keep everything) if none exists, splice any staged tray
@@ -1046,17 +1087,23 @@ def _finish_setup(worker_db, project_id, session_id, info, index,
                 found = (worker_db.run(dbx.pending_user_message,
                                        project_id, session_id)
                          if session_id else None)
-                active = worker_db.run(dbx.has_active_agent_turn, project_id)
-                if found and not active:
-                    if worker_db.run(dbx.user_credits_balance, user_id) >= 1.0:
+                if found:
+                    resolved = _resolve_pending_auto_resume(
+                        worker_db, project_id, session_id, user_id,
+                        found["id"], "direct_short_auto_resume",
+                        {"direct_short": True})
+                    state = resolved.get("state")
+                    if state == "gated":
                         worker_db.run(
-                            dbx.enqueue_job, project_id, user_id, "agent_turn",
-                            {"message_id": found["id"], "auto_resumed": True,
-                             "direct_short": True})
+                            dbx.add_message, session_id, "assistant",
+                            _subscribe_gate_message("short-edit request"),
+                            _subscribe_gate_meta("direct_short"))
+                    elif state == "enqueued":
                         print(f"[index] project {project_id}: "
                               f"{info['duration']:.1f}s direct short — "
-                              f"auto-resumed brief {found['id']}", flush=True)
-                    else:
+                              f"auto-resumed brief {found['id']} as job "
+                              f"{resolved.get('job_id')}", flush=True)
+                    elif state == "no_credits":
                         worker_db.run(
                             dbx.add_message, session_id, "assistant",
                             "This upload already fits one short, so I opened "
@@ -1064,7 +1111,7 @@ def _finish_setup(worker_db, project_id, session_id, info, index,
                             "tool. Your brief is saved; add credits and send "
                             "it again to edit this video directly.",
                             {"kind": "direct_short", "credits_exhausted": True})
-                elif not active and session_id:
+                elif session_id:
                     worker_db.run(
                         dbx.add_message, session_id, "assistant",
                         f"This {info['duration']:.0f}-second upload already "
@@ -1079,19 +1126,23 @@ def _finish_setup(worker_db, project_id, session_id, info, index,
     except Exception as e:
         print(f"[index] shorts routing failed: {e}", flush=True)
 
-    pending, out_of_credits = None, False
+    pending, out_of_credits, subscribe_gated = None, False, False
+    pending_job_id = None
     if session_id and user_id and config.OPENAI_API_KEY:
         try:
             found = worker_db.run(dbx.pending_user_message,
                                   project_id, session_id)
-            if found and worker_db.run(dbx.has_active_agent_turn,
-                                       project_id):
-                found = None  # a turn is already working on this project
             if found:
-                if worker_db.run(dbx.user_credits_balance,
-                                 user_id) >= 1.0:
+                resolved = _resolve_pending_auto_resume(
+                    worker_db, project_id, session_id, user_id, found["id"],
+                    "index_auto_resume")
+                state = resolved.get("state")
+                if state == "gated":
+                    subscribe_gated = True
+                elif state == "enqueued":
                     pending = found
-                else:
+                    pending_job_id = resolved.get("job_id")
+                elif state == "no_credits":
                     # The canned reply promised an auto-start — don't break
                     # that promise silently; say why it can't happen.
                     out_of_credits = True
@@ -1119,6 +1170,8 @@ def _finish_setup(worker_db, project_id, session_id, info, index,
         if pending:
             summary += ("I'm starting on the Shorts direction you sent while "
                         "I was analyzing — give me a moment.")
+        elif subscribe_gated:
+            summary += _subscribe_gate_message("Shorts direction")
         elif out_of_credits:
             summary += ("I found the Shorts direction you sent while I was "
                         "analyzing, but you're out of credits. Start your "
@@ -1132,6 +1185,8 @@ def _finish_setup(worker_db, project_id, session_id, info, index,
         if pending:
             summary += ("I'm starting on the request you sent while I was "
                         "analyzing — give me a moment.")
+        elif subscribe_gated:
+            summary += _subscribe_gate_message()
         elif out_of_credits:
             summary += ("I found the request you sent while I was analyzing, "
                         "but you're out of credits. Start your trial and send "
@@ -1155,11 +1210,16 @@ def _finish_setup(worker_db, project_id, session_id, info, index,
                           {"kind": "index_ready", "auto_resume": False,
                            "reindex": True,
                            "credits_exhausted": True})
+        elif session_id and subscribe_gated:
+            meta = _subscribe_gate_meta()
+            meta["reindex"] = True
+            worker_db.run(dbx.add_message, session_id, "assistant",
+                          _subscribe_gate_message(), meta)
     else:
         # The Shorts greeting is product state, not creative copy: it must
         # explicitly ask for the missing brief. A generic LLM greeting can
         # accidentally sound as though clip selection already started.
-        drafted = (None if awaiting_shorts_brief else
+        drafted = (None if awaiting_shorts_brief or subscribe_gated else
                    _greet_via_llm(worker_db, project_id, stats, pending,
                                   out_of_credits, index))
         if drafted:
@@ -1174,6 +1234,8 @@ def _finish_setup(worker_db, project_id, session_id, info, index,
         if session_id:
             meta = {"kind": "index_ready", "auto_resume": bool(pending),
                     "llm_authored": bool(drafted)}
+            if subscribe_gated:
+                meta.update(_subscribe_gate_meta())
             if asset_id is not None:
                 try:
                     # ON CONFLICT against the partial unique index — two live
@@ -1194,10 +1256,5 @@ def _finish_setup(worker_db, project_id, session_id, info, index,
                 worker_db.run(dbx.add_message, session_id, "assistant",
                               summary, meta)
     if pending:
-        try:
-            worker_db.run(dbx.enqueue_job, project_id, user_id, "agent_turn",
-                          {"message_id": pending["id"], "auto_resumed": True})
-            print(f"[index] auto-resumed pending message {pending['id']} "
-                  f"(project {project_id})", flush=True)
-        except Exception as e:
-            print(f"[index] auto-resume enqueue failed: {e}", flush=True)
+        print(f"[index] auto-resumed pending message {pending['id']} "
+              f"(project {project_id}) as job {pending_job_id}", flush=True)

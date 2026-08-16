@@ -4334,6 +4334,123 @@ check("outro: the silence is concatenated, never mixed",
       "[osil]" in _g_out and "amix" not in _g_out.split("[osil]")[1])
 check("outro: the programme audio fades so it does not cut dead into silence",
       "afade=t=out:st=19.75" in _g_out)
+
+# A score that reaches the exact final program frame is different: it remains
+# one continuous source-phase stream through the card. Video concatenates by
+# itself; the already-complete audio mix owns the full program+card clock.
+_tail_music = {
+    "id": "mus-tail", "storage_key": "music/score.mp3",
+    "start": 2.0, "end": 20.0, "offset_s": 3.0,
+    "gain_db": -18.0, "duck": True, "duck_mode": "smooth",
+    "fade_out_s": 2.0,
+}
+_tail_vo = {"id": "vo-tail", "asset_key": "audio/vo.wav",
+            "start_output_s": 19.0, "source_offset_s": 0.0,
+            "gain_db": 0.0, "duck_others": False}
+_tail_sfx = {"id": "sfx-tail", "storage_key": "sfx/hit.wav",
+             "at": 19.0, "gain_db": -6.0}
+_g_tail = renderer.build_filtergraph(
+    {"keep": [[0.0, 20.0]], "music": [_tail_music],
+     "voiceover": [_tail_vo], "sfx": [_tail_sfx]},
+    20.0, True, _tl_o, None, [(1, _tail_music, 120.0)],
+    {"sentences": [{"t0": 19.2, "t1": 20.0}]}, False,
+    W=1080, H=1920, fps=30.0,
+    vo_inputs=[(2, _tail_vo, 5.0)],
+    sfx_inputs=[(3, _tail_sfx, None)],
+    outro_s=5.0, card_idx=7)
+check("outro music: video concatenates without manufacturing card audio",
+      "[vprog][ovid]concat=n=2:v=1:a=0[vout]" in _g_tail
+      and "concat=n=2:v=1:a=1" not in _g_tail
+      and "[osil]" not in _g_tail)
+check("outro music: the same source window reaches the card's exact edge",
+      "[1:a]atrim=start=3.000:end=26.000" in _g_tail)
+_tail_music_chain = _g_tail.split("[1:a]", 1)[1].split("[mus0]", 1)[0]
+check("outro music: the item's ordinary program-edge fade is ignored",
+      "afade=t=out" not in _tail_music_chain)
+check("outro music: only the completed mix fades over the final 0.75s",
+      "afade=t=out:st=24.25:d=0.75" in _g_tail
+      and "afade=t=out:st=19.75" not in _g_tail)
+check("outro music: smooth ducking releases into a silent reference",
+      "apad,atrim=end=25.000[acard]" in _g_tail
+      and "[acard]asplit=2[aduckm][dref0]" in _g_tail
+      and "[mus0][dref0]sidechaincompress=" in _g_tail
+      and "release=550" in _g_tail)
+_tail_vo_chain = _g_tail.split("[2:a]", 1)[1].split("[vo0]", 1)[0]
+_tail_sfx_chain = _g_tail.split("[3:a]", 1)[1].split("[sfx0]", 1)[0]
+check("outro music: voiceover and SFX are hard-bounded to program time",
+      "atrim=end=20.000" in _tail_vo_chain
+      and "atrim=end=20.000" in _tail_sfx_chain)
+
+# The normally-disabled OUTRO_ON_PREVIEW path uses the same tail semantics;
+# only its post-concat geometry differs.
+_g_tail_preview = renderer.build_filtergraph(
+    {"keep": [[0.0, 20.0]], "music": [_tail_music]},
+    20.0, True, _tl_o, None, [(1, _tail_music, 120.0)],
+    {"sentences": []}, True, W=1080, H=1920, fps=30.0,
+    outro_s=5.0, card_idx=7)
+check("outro music: an actual outro-bearing preview carries the same score",
+      "concat=n=2:v=1:a=0[vcat]" in _g_tail_preview
+      and "[vcat]scale=-2:min(480" in _g_tail_preview
+      and "afade=t=out:st=24.25:d=0.75" in _g_tail_preview)
+
+# A whole-program fade is authored intent, not the renderer's default music
+# treatment. It must land picture and sound in silence at the program edge;
+# carrying the score would otherwise discard the requested audio fade while
+# the picture still faded to black.
+_faded_tail_edl = {
+    "keep": [[0.0, 20.0]], "music": [_tail_music],
+    "effects": {"fade_out_s": 2.0},
+}
+_g_faded_tail = renderer.build_filtergraph(
+    _faded_tail_edl, 20.0, True, _tl_o, None,
+    [(1, _tail_music, 120.0)], {"sentences": []}, False,
+    W=1080, H=1920, fps=30.0, outro_s=5.0, card_idx=7)
+check("outro music: an explicit program fade disables score carry",
+      renderer._music_carry_outro_s(_faded_tail_edl, 5.0) == 0.0
+      and "[acard]" not in _g_faded_tail
+      and "concat=n=2:v=1:a=1[vout][aout]" in _g_faded_tail
+      and "afade=t=out:st=18.00:d=2.00" in _g_faded_tail)
+
+# A music item that has already stopped before the final frame must not be
+# revived. The renderer keeps the old silent card and 0.25s program fade.
+_early_music = {
+    "id": "mus-early", "storage_key": "music/early.mp3",
+    "start": 0.0, "end": 19.9, "gain_db": -18.0, "duck": False,
+    "fade_out_s": 1.0,
+}
+_g_early = renderer.build_filtergraph(
+    {"keep": [[0.0, 20.0]], "music": [_early_music]},
+    20.0, True, _tl_o, None, [(1, _early_music, 120.0)],
+    {"sentences": []}, False, W=1080, H=1920, fps=30.0,
+    outro_s=5.0, card_idx=7)
+check("outro music: a score ending before the last frame is not revived",
+      "[1:a]atrim=start=0.000:end=19.900" in _g_early
+      and "concat=n=2:v=1:a=1[vout][aout]" in _g_early
+      and "afade=t=out:st=19.75:d=0.25" in _g_early)
+_muted_tail = dict(_tail_music, mute=True)
+check("outro music: muted music can never qualify for a carried tail",
+      renderer._music_render_span(_muted_tail, 20.0, 5.0, 30.0) is None)
+
+# Audio-only stitched-preview work prunes the independent video concat cleanly
+# and retains the same continuous music graph the full render would mux.
+_g_tail_audio = renderer._prune_graph_to_audio(_g_tail)
+check("outro music: audio-only pruning retains music and drops card video",
+      "[1:a]" in _g_tail_audio and "[aout]" in _g_tail_audio
+      and "[7:v]" not in _g_tail_audio and "[ovid]" not in _g_tail_audio
+      and "v=1:a=0" not in _g_tail_audio)
+
+# With no actual outro, even end-aligned music keeps the historical graph:
+# program-length trim, its own fade, no padding/tail labels or extra concat.
+_g_no_outro_music = renderer.build_filtergraph(
+    {"keep": [[0.0, 20.0]], "music": [_tail_music]},
+    20.0, True, _tl_o, None, [(1, _tail_music, 120.0)],
+    {"sentences": []}, True, W=1080, H=1920, fps=30.0)
+check("outro music: a normal card-less preview graph is unchanged",
+      "[1:a]atrim=start=3.000:end=21.000" in _g_no_outro_music
+      and "afade=t=out:st=16.00:d=2.00" in _g_no_outro_music
+      and "[acard]" not in _g_no_outro_music
+      and "concat=n=2" not in _g_no_outro_music)
+
 # A graph with no outro must be byte-identical to what it always was.
 _g_none = renderer.build_filtergraph(
     {"keep": [[0.0, 20.0]]}, 20.0, True, _tl_o, None, [], {"words": []}, False,

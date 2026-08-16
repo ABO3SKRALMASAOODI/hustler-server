@@ -305,6 +305,76 @@ def test_successful_auto_preview_rubric_is_not_reported_as_render_failure(
     assert fail_note is None
 
 
+def test_terminal_auto_preview_uses_only_remaining_absolute_turn_time(
+        monkeypatch):
+    class Ctx:
+        versions_written = [2]
+        rendered_versions = set()
+        autorendered = False
+        autorendering = False
+        job = {"id": 99}
+
+        @staticmethod
+        def latest_edl():
+            return {"version": 2, "json": {}}
+
+    captured = {}
+
+    def render(_ctx, **kwargs):
+        captured.update(kwargs)
+        return ("Preview render is taking too long — it may still finish and "
+                "attach to the chat. Summarize your edit for the user now.")
+
+    monkeypatch.setattr(agent_loop.agent_tools, "render_preview", render)
+    monkeypatch.setattr(agent_loop, "_activity", lambda *_a, **_k: None)
+    deadline = agent_loop.time.monotonic() + 4.0
+
+    _latest, fail_note = agent_loop._auto_render_if_needed(
+        Ctx(), object(), 7, {}, turn_deadline=deadline)
+
+    assert 0 < captured["_wait_timeout_s"] <= 4.0
+    assert "still rendering" in fail_note
+
+
+def test_zero_terminal_preview_wait_keeps_the_queued_render(monkeypatch):
+    calls = []
+
+    class Db:
+        @staticmethod
+        def run(fn, *_args):
+            calls.append(fn)
+            if fn is agent_tools.dbx.get_or_enqueue_preview_job:
+                return 77, True
+            raise AssertionError("zero wait must not poll the queued job")
+
+    class Ctx:
+        autorendering = True
+        rendered_versions = set()
+        failed_preview_versions = {}
+        last_preview = None
+        spec_preview_jobs = {}
+        project_id = 12
+        job = {"id": 99, "user_id": 5}
+        db = Db()
+        edit_plan = None
+        has_main_video = True
+
+        @staticmethod
+        def latest_edl():
+            return {"version": 2, "json": {}}
+
+    monkeypatch.setattr(agent_tools, "_verify_plan_for",
+                        lambda *_args: None)
+    monkeypatch.setattr(agent_tools, "_sequence_screening_frames",
+                        lambda *_args: [])
+
+    result = agent_tools.render_preview(Ctx(), _wait_timeout_s=0)
+
+    assert calls == [agent_tools.dbx.get_or_enqueue_preview_job]
+    assert result.startswith("Preview render is taking too long")
+    assert Ctx.rendered_versions == set()
+
+
 def test_failed_edl_preview_gets_one_new_version_repair_pass():
     class Ctx:
         last_preview_failure = {

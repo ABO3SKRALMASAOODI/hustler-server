@@ -438,6 +438,48 @@ def test_indexed_shorts_wait_for_a_brief_before_planning():
     assert indexer._shorts_index_route("shorts", 1800.0, reindex=True) is None
 
 
+def test_index_auto_resume_rechecks_account_gate_and_retires_prompt():
+    """Qualification on another project cannot race a saved upload brief."""
+    import db as dbx
+    import indexer
+
+    calls = []
+
+    class FakeDb:
+        def run(self, fn, *args):
+            calls.append((fn, args))
+            if fn is dbx.resolve_pending_auto_resume:
+                return {"state": "gated", "job_id": None}
+            if fn is dbx.record_client_event:
+                return None
+            raise AssertionError(fn)
+
+    resolved = indexer._resolve_pending_auto_resume(
+        FakeDb(), 9, 10, 11, 12, "index_auto_resume")
+
+    assert resolved == {"state": "gated", "job_id": None}
+    assert [fn for fn, _args in calls] == [
+        dbx.resolve_pending_auto_resume,
+        dbx.record_client_event,
+    ]
+    assert calls[0][1] == (9, 10, 11, 12, {})
+    assert calls[1][1][0:3] == (11, 9, "trial_gate_shown")
+
+
+def test_index_auto_resume_gate_lookup_fails_open():
+    import db as dbx
+    import indexer
+
+    class FakeDb:
+        def run(self, fn, *_args):
+            assert fn is dbx.resolve_pending_auto_resume
+            raise RuntimeError("temporary database error")
+
+    assert indexer._resolve_pending_auto_resume(
+        FakeDb(), 9, 10, 11, 12, "index_auto_resume") == {
+            "state": "error", "job_id": None}
+
+
 def test_make_shorts_returns_the_background_job_id():
     """MCP has no Shorts board UI, so the caller needs the exact job to poll."""
     from types import SimpleNamespace
@@ -580,11 +622,11 @@ def test_locked_story_selection_has_no_render_surcharge():
 
     class FakeWorkerDb:
         def run(self, fn, *args):
-            if fn is dbx.charge_turn_credits:
-                seen["extra"] = args[2]
-                return 1.0
-            if fn is dbx.finish_job:
-                return True
+            if fn is dbx.finish_accounted_job:
+                seen["extra"] = args[5]
+                return {"committed": True, "charged": 1.0,
+                        "billing_error": None,
+                        "qualification_error": None}
             raise AssertionError(fn)
 
     result = {"clips": 6, "rendered_clips": 0, "billable": True}

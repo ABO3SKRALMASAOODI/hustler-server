@@ -96,6 +96,59 @@ def test_audio_reviewer_retries_non_answers_before_returning_evidence(
     assert "Answer NOW" in prompts[-1]
 
 
+def test_audio_reviewer_falls_back_from_chat_messages_to_responses(
+        monkeypatch, tmp_path):
+    clip = tmp_path / "mix.mp3"
+    clip.write_bytes(b"bounded-audio")
+    calls, recorded = [], {}
+
+    class Response:
+        def __init__(self, status, payload, text):
+            self.status_code = status
+            self._payload = payload
+            self.text = text
+
+        def json(self):
+            return self._payload
+
+    def post(url, **kwargs):
+        calls.append((url, kwargs["json"]))
+        if url.endswith("/chat/completions"):
+            return Response(400, {},
+                            "unsupported_format: parameter 'messages'")
+        return Response(200, {
+            "output": [{"type": "message", "content": [{
+                "type": "output_text",
+                "text": "PASS — speech and music are balanced.",
+            }]}],
+            "usage": {"input_tokens": 700, "output_tokens": 21,
+                      "input_tokens_details": {"audio_tokens": 600}},
+        }, "ok")
+
+    monkeypatch.setattr(config, "AUDIO_REVIEW_API_KEY", "test-key")
+    monkeypatch.setattr(config, "AUDIO_REVIEW_MODEL", "gpt-audio-1.5")
+    monkeypatch.setattr(llm, "_audio_review_dead", False)
+    monkeypatch.setattr(llm.requests, "post", post)
+    monkeypatch.setattr(
+        llm, "record",
+        lambda purpose, request, response, usage: recorded.update(
+            response=response, audio=llm.audio_token_counts(usage)))
+
+    answer = llm.ask_audio(
+        "Start with PASS or FIX.", [str(clip)],
+        purpose="audio_render_review")
+
+    assert answer.startswith("PASS")
+    assert [url.rsplit("/", 1)[-1] for url, _ in calls] == [
+        "completions", "responses"]
+    response_parts = calls[1][1]["input"][0]["content"]
+    assert response_parts[0]["type"] == "input_text"
+    assert any(part.get("type") == "input_audio"
+               for part in response_parts)
+    assert recorded["audio"] == (600, 0)
+    assert recorded["response"]["api"] == "responses"
+
+
 def test_review_audio_schema_is_honest_off(monkeypatch):
     monkeypatch.setattr(config, "AUDIO_REVIEW_API_KEY", "")
     monkeypatch.setattr(llm, "_audio_review_dead", False)

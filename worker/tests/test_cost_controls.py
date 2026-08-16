@@ -175,6 +175,98 @@ def test_proof_piece_clips_overlay_at_its_budget_edge():
     schemas.validate_edl(window, duration=20.0)
 
 
+def test_multi_window_budget_clips_text_ending_past_its_1272s_proof():
+    """The 25s proof cap can cut the last window after containment.
+
+    Production left a text ending at local 13.32s inside a 12.72s standalone
+    piece.  Validation rejected the proof before ffmpeg could render it.
+    """
+    edl = _edl(
+        keep=[[0.0, 40.0]],
+        texts=[{
+            "id": "tx-proof", "text": "THE RESULT", "start": 30.0,
+            "end": 33.32, "template": "title", "entrance": "pop",
+            "exit": "fade",
+        }],
+    )
+    tl = Timeline(edl["keep"])
+    ranges = renderer._validated_check_ranges(
+        [[0.0, 12.28], [20.0, 32.0]], 40.0)
+    ranges = renderer._contain_check_items(edl, tl, ranges, 40.0, {})
+    ranges = renderer._validated_check_ranges(ranges, 40.0)
+
+    assert ranges == [[0.0, 12.28], [20.0, 32.72]]
+    window = stitch.window_edl(
+        edl, tl, ranges[1][0], ranges[1][1], keep_audio=True)
+    text = window["texts"][0]
+    assert text["start"] == 10.0
+    assert text["end"] == 12.72       # was 13.32 in the 12.72s piece
+    assert text["entrance"] == "pop"
+    assert text["exit"] == "none"
+    schemas.validate_edl(window, duration=40.0)
+
+
+def test_proof_window_clips_graphic_edges_and_rebases_local_motion():
+    motion = {
+        "x": [
+            {"t": 0.0, "v": 0.1},
+            {"t": 4.0, "v": 0.9, "ease": "in"},
+            {"t": 8.0, "v": 0.3, "ease": "out"},
+        ],
+        "opacity": [
+            {"t": 0.0, "v": 0.2},
+            {"t": 8.0, "v": 1.0},
+        ],
+    }
+    edl = _edl(
+        texts=[
+            {"id": "left", "text": "LEFT", "start": 1.0, "end": 5.0,
+             "entrance": "slide_up", "exit": "fade"},
+            {"id": "right", "text": "RIGHT", "start": 5.0, "end": 9.0,
+             "entrance": "pop", "exit": "drop"},
+            {"id": "text-motion", "text": "MOVE", "start": 1.0,
+             "end": 9.0, "entrance": "none", "exit": "none",
+             "motion": motion},
+        ],
+        vectors=[{
+            "id": "vec-motion", "kind": "arrow", "start": 1.0,
+            "end": 9.0, "x": 0.5, "y": 0.5, "width": 0.25,
+            "height": 0.08, "color": "#FFFFFF", "motion": motion,
+        }],
+    )
+    window = stitch.window_edl(
+        edl, Timeline(edl["keep"]), 3.0, 7.0, keep_audio=True)
+    texts = {item["id"]: item for item in window["texts"]}
+    assert (texts["left"]["start"], texts["left"]["end"]) == (0.0, 2.0)
+    assert texts["left"]["entrance"] == "none"
+    assert texts["left"]["exit"] == "fade"
+    assert (texts["right"]["start"], texts["right"]["end"]) == (2.0, 4.0)
+    assert texts["right"]["entrance"] == "pop"
+    assert texts["right"]["exit"] == "none"
+
+    vector = window["vectors"][0]
+    for graphic in (texts["text-motion"], vector):
+        assert (graphic["start"], graphic["end"]) == (0.0, 4.0)
+        for prop in ("x", "opacity"):
+            curve = graphic["motion"][prop]
+            assert curve[0]["t"] == 0.0
+            assert curve[-1]["t"] == 4.0
+            assert curve[0]["v"] == pytest.approx(
+                schemas.anim_value(motion[prop], 2.0), abs=1e-4)
+            assert curve[-1]["v"] == pytest.approx(
+                schemas.anim_value(motion[prop], 6.0), abs=1e-4)
+            # The proof must show the same moving graphic between its sampled
+            # endpoints, not merely land at the same boundary values. Reusing
+            # a nonlinear ease name on a shortened segment changes the curve
+            # (the old ease-in path was 0.4375 here instead of 0.5625).
+            for local_t in (0.25, 0.75, 1.0, 1.25, 2.5, 3.0, 3.75):
+                assert schemas.anim_value(curve, local_t) == pytest.approx(
+                    schemas.anim_value(motion[prop], local_t + 2.0),
+                    abs=0.01)
+            assert len(curve) <= 24
+    schemas.validate_edl(window, duration=20.0)
+
+
 def test_proof_window_drops_subminimum_boundary_sliver():
     # A valid full EDL can intersect a preview-check window for only 0.03s at
     # one keep boundary. The temporary window must not turn that into an
