@@ -719,7 +719,7 @@ def _trial_offer_body():
 
 def _running_jobs_count(cur, user_id):
     # Only the LLM-spend jobs count toward the message cap. This used to
-    # count EVERY queued/running job, so a shorts run — 8 child finals plus
+    # count EVERY queued/running job, so a shorts run — many child finals plus
     # their filmstrips, all legitimate paid renders — pushed the count past
     # the cap and 429'd the user's next chat message for as long as the
     # renders drained (Aug 8: minutes of "requests are enqueued" right after
@@ -2800,7 +2800,7 @@ def project_state(user_id, project_id):
                 # Round 100 — a shorts child already rendered a FINAL of this
                 # exact version (finals fan out first there). Re-encoding a
                 # preview of the same programme was a second full render per
-                # short — 8 extra Cloud Run encodes per shorts run, all to
+                # short — one extra Cloud Run encode per selected story, all to
                 # show pixels the final already has. Adopt the final as the
                 # preview instead: same storage key, zero encode, playable
                 # the moment the board is opened. Scoped to 'short' projects

@@ -4096,7 +4096,7 @@ def _parse_partial_style(style):
                 '"outline_width":0-12,"shadow":0-12,'
                 '"background_color":"#RRGGBB","background_opacity":0-1,'
                 '"tracking":-8-24,"text_align":"left|center|right",'
-                '"anchor_y":0.05-0.95}')
+                '"anchor_y":0.05-0.95,"single_line":true|false}')
     # Mirrors captions.STYLE_KEYS (+ dynamic/uppercase, which are booleans
     # handled separately there). A field missing HERE is rejected outright;
     # a field missing from STYLE_KEYS is accepted and then silently ignored.
@@ -4107,15 +4107,19 @@ def _parse_partial_style(style):
                                    "emphasis_scale", "outline_color",
                                    "outline_width", "shadow",
                                    "background_color", "background_opacity",
-                                   "tracking", "text_align", "anchor_y"})
+                                   "tracking", "text_align", "anchor_y",
+                                   "single_line"})
     if unknown:
         return (f"ERR: unknown style field(s) {unknown} — the style fields are "
                 "preset, color, size, size_scale, position, uppercase, "
                 "dynamic, highlight_color, animation, font, effect, layout, "
                 "leading, emphasis, emphasis_scale, outline_color, "
                 "outline_width, shadow, background_color, "
-                "background_opacity, tracking, text_align and anchor_y. "
+                "background_opacity, tracking, text_align, anchor_y and "
+                "single_line. "
                 "anchor_y is the exact vertical output-frame fraction. "
+                "single_line=true makes every transcript-caption state one "
+                "rendered row even when the preset normally stacks. "
                 "preset picks "
                 "a look (clean/documentary/broadcast/retro/neon/podcast/"
                 "reels/beast/karaoke/elegant/stacked/iridescent/chrome/editorial/"
@@ -4189,7 +4193,7 @@ def merge_caption_style(captions, partial):
     # from_transcript captions — writing it into manual items would let the
     # reply claim an effect the renderer ignores.
     item_partial = {k: v for k, v in partial.items()
-                    if k not in ("dynamic", "highlight_color")}
+                    if k not in ("dynamic", "highlight_color", "single_line")}
     for it in captions:
         nit = dict(it)
         st = dict(it.get("style") or {})
@@ -4430,11 +4434,11 @@ def set_caption_style(ctx, style=None, emphasis_words=None,
     if cleared_adaptive_placement:
         result += ("\nCaption placement is locked for the whole video; the "
                    "previous shot-aware position changes were removed.")
-    if isinstance(caps, list) and ({"dynamic", "highlight_color"}
+    if isinstance(caps, list) and ({"dynamic", "highlight_color", "single_line"}
                                    & set(partial)):
-        result += ("\nNote: dynamic karaoke captions (and highlight_color) "
-                   "only apply to from_transcript captions — manual caption "
-                   "items ignore those fields.")
+        result += ("\nNote: dynamic karaoke captions, highlight_color and "
+                   "single_line only apply to from_transcript captions — "
+                   "manual caption items ignore those fields.")
     return result
 
 
@@ -16010,6 +16014,36 @@ def _ass_clock_seconds(value):
         return None
 
 
+_ASS_OVERRIDE_BLOCK_RE = re.compile(r"\{[^{}]*\}")
+
+
+def _ass_caption_rows(raw_text):
+    """Return auditable rendered rows from one ASS Dialogue payload.
+
+    Vector-only panel events carry ``\\p1`` drawing commands rather than
+    caption language and must not inflate density. Text effects, meanwhile,
+    intentionally repeat the same row on several layers. A stable row key
+    lets the audit collapse those copies while preserving genuinely distinct
+    stacked rows (their explicit y anchors differ).
+    """
+    text = str(raw_text or "")
+    if re.search(r"\\p[1-9][0-9]*", text):
+        return []
+    move = re.search(
+        r"\\move\([^,]+,[^,]+,[^,]+,\s*(-?[0-9]+(?:\.[0-9]+)?)", text)
+    pos = re.search(
+        r"\\pos\([^,]+,\s*(-?[0-9]+(?:\.[0-9]+)?)", text)
+    anchor = round(float((move or pos).group(1)), 1) if (move or pos) else None
+    rows = []
+    for row_index, raw_row in enumerate(re.split(r"\\[Nn]", text)):
+        plain = _ASS_OVERRIDE_BLOCK_RE.sub("", raw_row)
+        plain = plain.replace(r"\h", " ").replace(r"\\", "\\")
+        plain = re.sub(r"\s+", " ", plain).strip()
+        if plain:
+            rows.append(((anchor, row_index, plain), plain))
+    return rows
+
+
 def audit_captions(ctx, offset=0, limit=80):
     """Compile and mechanically audit the caption track before/after render.
 
@@ -16065,14 +16099,37 @@ def audit_captions(ctx, offset=0, limit=80):
                 layer = int(fields[0].split(":", 1)[1].strip())
             except (TypeError, ValueError, IndexError):
                 layer = 0
-            events.append({"start": start, "end": end, "layer": layer})
+            rows = _ass_caption_rows(fields[9].rstrip("\n"))
+            if not rows:
+                # Dedicated premium contrast panels are ASS vector drawings,
+                # not caption states. They neither cover a word nor count as
+                # an extra line in the density contract.
+                continue
+            events.append({"start": start, "end": end, "layer": layer,
+                           "rows": rows})
     grouped = {}
     for event in events:
         key = (event["start"], event["end"])
-        grouped.setdefault(key, []).append(event["layer"])
-    states = [{"start": s, "end": e, "duration_s": round(e - s, 3),
-               "layers": sorted(layers)}
-              for (s, e), layers in sorted(grouped.items())]
+        grouped.setdefault(key, []).append(event)
+    states = []
+    for (start, end), state_events in sorted(grouped.items()):
+        text_lines, seen_rows = [], set()
+        for event in state_events:
+            for row_key, plain in event["rows"]:
+                if row_key in seen_rows:
+                    continue
+                seen_rows.add(row_key)
+                text_lines.append(plain)
+        if not text_lines:
+            continue
+        states.append({
+            "start": start, "end": end,
+            "duration_s": round(end - start, 3),
+            "layers": sorted({e["layer"] for e in state_events}),
+            "text_lines": text_lines,
+            "word_count": sum(len(line.split()) for line in text_lines),
+            "line_count": len(text_lines),
+        })
     overlaps = []
     for previous, current in zip(states, states[1:]):
         amount = round(previous["end"] - current["start"], 3)
@@ -16084,7 +16141,17 @@ def audit_captions(ctx, offset=0, limit=80):
     warnings = []
     uncovered = []
     first_late = None
+    declared_max_words = None
+    single_line_contract = False
     if isinstance(caps, dict) and caps.get("mode") == "from_transcript":
+        try:
+            declared_max_words = (int(caps["max_words_per_caption"])
+                                  if caps.get("max_words_per_caption")
+                                  is not None else None)
+        except (TypeError, ValueError):
+            declared_max_words = None
+        single_line_contract = bool(
+            (caps.get("style") or {}).get("single_line"))
         words = [w for w in tl.kept_words(ctx.index.get("words") or [])
                  if not (w.get("filler") if isinstance(w, dict) else False)]
         mutes = [(float(a), float(b)) for a, b in
@@ -16105,6 +16172,30 @@ def audit_captions(ctx, offset=0, limit=80):
                     f"first caption starts {first_late:.3f}s after first kept word")
         if uncovered:
             warnings.append(f"{len(uncovered)} spoken word(s) lack caption coverage")
+    density_violations = [
+        {"start": state["start"], "end": state["end"],
+         "word_count": state["word_count"],
+         "declared_max_words": declared_max_words,
+         "text_lines": state["text_lines"]}
+        for state in states
+        if declared_max_words is not None
+        and state["word_count"] > declared_max_words
+    ]
+    wrap_violations = [
+        {"start": state["start"], "end": state["end"],
+         "line_count": state["line_count"],
+         "text_lines": state["text_lines"]}
+        for state in states
+        if single_line_contract and state["line_count"] > 1
+    ]
+    if density_violations:
+        warnings.append(
+            f"{len(density_violations)} caption state(s) exceed declared "
+            f"max_words_per_caption={declared_max_words}")
+    if wrap_violations:
+        warnings.append(
+            f"{len(wrap_violations)} caption state(s) violate "
+            "style.single_line=true")
     if overlaps:
         warnings.append(f"{len(overlaps)} distinct visual caption state overlap(s)")
     zero_or_negative = [s for s in states if s["duration_s"] <= 0.01]
@@ -16123,9 +16214,11 @@ def audit_captions(ctx, offset=0, limit=80):
                        for t in candidates})[:16]
     render_asset = ctx.db.run(dbx.find_render_asset, ctx.project_id,
                               "preview", row["version"])
+    contract_failed = bool(density_violations or wrap_violations)
     result = {
         "version": row["version"],
-        "status": "pass" if not warnings else "warnings",
+        "status": ("fail" if contract_failed else
+                   "pass" if not warnings else "warnings"),
         "compiler": "same ASS artifact used by ffmpeg",
         "caption_design_version": (caps.get("design_version")
                                    if isinstance(caps, dict) else None),
@@ -16133,6 +16226,14 @@ def audit_captions(ctx, offset=0, limit=80):
         "first_state": states[0] if states else None,
         "last_state": states[-1] if states else None,
         "first_caption_late_by_s": first_late,
+        "declared_max_words_per_caption": declared_max_words,
+        "single_line_contract": single_line_contract,
+        "max_words_seen": max((s["word_count"] for s in states), default=0),
+        "max_lines_seen": max((s["line_count"] for s in states), default=0),
+        "density_violation_count": len(density_violations),
+        "density_violations": density_violations[:20],
+        "wrap_violation_count": len(wrap_violations),
+        "wrap_violations": wrap_violations[:20],
         "uncovered_words": uncovered[:20],
         "uncovered_word_count": len(uncovered),
         "overlaps": overlaps[:20],
@@ -20080,12 +20181,20 @@ def _direct_short_clips(ctx, clips):
     chooses the story. The shorts worker only creates a child and seeds that
     exact source window. Creative direction belongs to whichever editor is
     explicitly opened afterwards, so this gate checks facts and boundaries,
-    not taste paperwork.
+    not taste paperwork. There is deliberately no fixed item quota here: the
+    ten-second minimum plus strict non-overlap supplies the source-dependent
+    natural bound, and the worker creates accepted children sequentially.
     """
     if not isinstance(clips, list) or not clips:
         return None, "clips must be a non-empty array"
-    if len(clips) > config.SHORTS_MAX_CLIPS:
-        return None, f"clips may contain at most {config.SHORTS_MAX_CLIPS} arcs"
+    min_clip_s = 10.0
+    source_duration = float(ctx.duration)
+    natural_max = max(1, int(math.floor((source_duration + .05) / min_clip_s)))
+    if len(clips) > natural_max:
+        return None, (
+            f"{source_duration:g}s of source can contain at most {natural_max} "
+            f"non-overlapping shorts at the {min_clip_s:g}s technical minimum; "
+            f"received {len(clips)} arcs")
 
     planned = []
     for i, raw in enumerate(clips, 1):
@@ -20095,7 +20204,7 @@ def _direct_short_clips(ctx, clips):
             start, end = float(raw["start"]), float(raw["end"])
         except (KeyError, TypeError, ValueError):
             return None, f"clip {i} needs numeric start and end source seconds"
-        if start < 0 or end > float(ctx.duration) + .05 or end <= start:
+        if start < 0 or end > source_duration + .05 or end <= start:
             return None, f"clip {i} range {start:g}-{end:g}s is outside the source"
         sentences = [row for row in (getattr(ctx, "index", {}) or {})
                      .get("sentences", []) if row.get("t0") is not None
@@ -20114,8 +20223,9 @@ def _direct_short_clips(ctx, clips):
                 return None, (f"clip {i} ends mid-thought at {end:g}s; use "
                               f"the sentence boundary {nearest_end:g}s")
             start, end = nearest_start, nearest_end
-        if end - start < 10 or end - start > 120:
-            return None, f"clip {i} must be 10-120 seconds, got {end-start:.1f}s"
+        if end - start < min_clip_s or end - start > 120:
+            return None, (f"clip {i} must be {min_clip_s:g}-120 seconds, "
+                          f"got {end-start:.1f}s")
 
         story = raw.get("story") or {}
         if not isinstance(story, dict):
@@ -20200,12 +20310,13 @@ def make_shorts(ctx, count=None, style_note=None, clips=None):
 
     payload = {"source": ("mcp_direct" if is_mcp else
                           "agent_direct" if planned else "agent")}
-    try:
-        if count:
-            payload["count"] = max(1, min(int(count),
-                                          config.SHORTS_MAX_CLIPS))
-    except (TypeError, ValueError):
-        pass
+    if not planned:
+        try:
+            if count:
+                payload["count"] = max(1, min(
+                    int(count), config.SHORTS_AUTO_MAX_CLIPS))
+        except (TypeError, ValueError):
+            pass
     if style_note:
         payload["style_note"] = str(style_note)[:400]
     if planned:
@@ -20453,6 +20564,7 @@ _STYLE_PROPS = {
     "text_align": {"type": "string",
                    "enum": ["left", "center", "right"]},
     "anchor_y": {"type": "number", "minimum": 0.05, "maximum": 0.95},
+    "single_line": {"type": "boolean"},
 }
 
 _ANIM_FLOAT_PROP = {
@@ -21064,7 +21176,10 @@ TOOLS = {
                      "animation fade|pop|slide_up|punch|blur_in|whip|flash|"
                      "rise|drop|elastic|bounce|swing|zoom_blur, or 'none' to turn a "
                      "preset's animation OFF (instant words), "
-                     "max_words_per_caption 1-16. Example — premium reel "
+                     "single_line:true to guarantee one rendered row per "
+                     "transcript-caption state regardless of the preset's "
+                     "normal flow/stack layout, max_words_per_caption 1-16. "
+                     "Example — premium reel "
                      "captions: {mode:'from_transcript', style:{preset:"
                      "'podcast'}, emphasis_words:['money','22','future',"
                      "'opportunities']}. Example — dictated title card: "
@@ -21355,6 +21470,9 @@ TOOLS = {
                           "can't hit pass size_scale (0.5-3.0; 1.5 = 50% "
                           "bigger). Outline, shadow, backing panel, tracking "
                           "and text alignment are independently editable. "
+                          "For transcript captions, single_line:true "
+                          "overrides any preset stack and guarantees one "
+                          "rendered row per state. "
                           "Works for from_transcript and manual "
                           "captions; errors helpfully if no captions exist "
                           "yet.",
@@ -22880,7 +22998,9 @@ TOOLS = {
                        "CURRENT caption track using the exact ASS artifact "
                        "ffmpeg burns. Reports first-caption lateness, missing "
                        "spoken-word coverage, true distinct-state overlaps, "
-                       "exact event pages and up to 16 high-information "
+                       "max_words_seen, max_lines_seen, declared-density and "
+                       "single-line wrap violations, exact event pages and "
+                       "up to 16 high-information "
                        "output times for rendered pixel QA. Call after adding "
                        "or restyling captions and after render_preview; this "
                        "is stronger timing evidence than a visual critic.",
@@ -22918,7 +23038,11 @@ TOOLS = {
                     "Edit on a card to boot a fresh editor. MCP callers open "
                     "each child and perform the edits directly. It returns "
                     "the scouting job ID; poll with wait_for_job or "
-                    "shorts_status. count caps how many; style_note is "
+                    "shorts_status. count bounds only Valmera's legacy "
+                    "one-call auto-scout. An explicit clips array keeps every "
+                    "valid non-overlapping story arc; total creation is "
+                    "naturally bounded by source duration, not an editorial "
+                    "quota. style_note is "
                     "reference context for the eventual child editor, not a "
                     "hard-coded recipe.",
                     {"count": {"type": "integer"},

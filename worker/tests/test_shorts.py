@@ -25,10 +25,11 @@ def _disable_independent_cast_by_default(monkeypatch):
 
 
 # ------------------------------------------------------------------ helpers
-def test_default_count_scales_with_duration_and_caps():
+def test_default_count_scales_with_duration_and_caps_auto_planner_only():
     assert shorts._default_count(120) == 1          # 2 min -> still 1
     assert shorts._default_count(1500) == 5         # 25 min -> 5
-    assert shorts._default_count(6 * 3600) == shorts.config.SHORTS_MAX_CLIPS
+    assert shorts._default_count(6 * 3600) == \
+        shorts.config.SHORTS_AUTO_MAX_CLIPS
 
 
 def test_json_from_tolerates_fences_and_prose():
@@ -566,6 +567,103 @@ def test_mcp_explicit_story_arcs_queue_locked_story_children():
     assert "broll" not in captured["payload"]["clips"][0]
     assert "visual_direction" not in captured["payload"]["clips"][0]
     assert "LOCKED child" in result
+
+
+def test_mcp_explicit_story_arcs_are_not_truncated_to_auto_planner_cap():
+    """A long podcast may have every one of 12 strong, distinct stories.
+
+    The eight-item response budget belongs only to Valmera's legacy one-call
+    planner. A caller that has already selected exact arcs keeps the complete
+    list; the worker creates their children sequentially inside one job.
+    """
+    from types import SimpleNamespace
+    import agent_tools
+    import db as dbx
+
+    captured = {}
+
+    class FakeDb:
+        def run(self, fn, *args):
+            if fn is dbx.has_active_job:
+                return False
+            if fn is dbx.enqueue_job:
+                captured["payload"] = args[3]
+                return 778
+            raise AssertionError(fn)
+
+    clips = [{
+        "start": i * 30.0, "end": i * 30.0 + 20.0,
+        "title": f"Complete story {i + 1}", "score": 95 - i,
+        "story": {"setup": "setup", "development": "development",
+                  "payoff": "payoff"},
+    } for i in range(12)]
+    ctx = SimpleNamespace(
+        project={}, has_main_video=True, duration=1800.0,
+        index={"words": [{"w": "hello"}]}, db=FakeDb(), project_id=7,
+        job={"user_id": 60, "type": "mcp_tool"})
+
+    result = agent_tools.make_shorts(ctx, clips=clips)
+
+    assert "job 778" in result
+    assert captured["payload"]["count"] == 12
+    assert len(captured["payload"]["clips"]) == 12
+    worker_clips = shorts._caller_planned_clips(
+        captured["payload"], ctx.index, ctx.duration)
+    assert len(worker_clips) == 12
+    clips_schema = agent_tools.TOOLS["make_shorts"][2]["clips"]
+    assert "maxItems" not in clips_schema
+
+
+def test_explicit_arc_count_has_only_source_duration_natural_bound():
+    from types import SimpleNamespace
+    import agent_tools
+    import db as dbx
+
+    class FakeDb:
+        def run(self, fn, *_args):
+            if fn is dbx.has_active_job:
+                return False
+            raise AssertionError("an impossible clip list must not enqueue")
+
+    ctx = SimpleNamespace(
+        project={}, has_main_video=True, duration=95.0,
+        index={"words": [{"w": "hello"}]}, db=FakeDb(), project_id=7,
+        job={"user_id": 60, "type": "mcp_tool"})
+    impossible = [{"start": 0, "end": 10, "title": f"Story {i}"}
+                  for i in range(10)]
+
+    result = agent_tools.make_shorts(ctx, clips=impossible)
+
+    assert result.startswith("REJECTED:")
+    assert "95s of source can contain at most 9 non-overlapping shorts" in result
+    assert "received 10 arcs" in result
+
+
+def test_legacy_auto_planner_count_remains_separately_bounded():
+    from types import SimpleNamespace
+    import agent_tools
+    import db as dbx
+
+    captured = {}
+
+    class FakeDb:
+        def run(self, fn, *args):
+            if fn is dbx.has_active_job:
+                return False
+            if fn is dbx.enqueue_job:
+                captured["payload"] = args[3]
+                return 779
+            raise AssertionError(fn)
+
+    ctx = SimpleNamespace(
+        project={}, has_main_video=True, duration=1800.0,
+        index={"words": [{"w": "hello"}]}, db=FakeDb(), project_id=7,
+        job={"user_id": 60})
+
+    agent_tools.make_shorts(ctx, count=999)
+
+    assert captured["payload"]["count"] == \
+        shorts.config.SHORTS_AUTO_MAX_CLIPS
 
 
 def test_parent_agent_cannot_boot_children_without_card_press():

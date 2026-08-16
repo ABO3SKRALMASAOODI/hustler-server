@@ -61,8 +61,8 @@ def _now_iso():
 
 
 def _default_count(duration_s):
-    """~1 clip per 5 minutes, always at least 1, capped in config."""
-    return max(1, min(config.SHORTS_MAX_CLIPS,
+    """~1 clip/5 minutes for the bounded in-house auto-planner only."""
+    return max(1, min(config.SHORTS_AUTO_MAX_CLIPS,
                       int(round(duration_s / 300.0)) or 1))
 
 
@@ -590,8 +590,10 @@ def _validated_clips(raw, duration, want, index=None, visual=False):
         clips.append(normalized)
     clips.sort(key=lambda c: -c["score"])
     chosen = []
+    selection_limit = (want if want is not None
+                       else config.SHORTS_AUTO_MAX_CLIPS)
     for c in clips:
-        if len(chosen) >= (want or config.SHORTS_MAX_CLIPS):
+        if len(chosen) >= max(1, int(selection_limit)):
             break
         overlap = any(min(c["end"], k["end"]) - max(c["start"], k["start"])
                       > 0.3 * (c["end"] - c["start"]) for k in chosen)
@@ -663,7 +665,8 @@ def _complete_conversation_arcs(raw, index, duration):
     return out
 
 
-def _visual_plan_clips(index, duration, n_target, want, note, workdir):
+def _visual_plan_clips(index, duration, n_target, selection_limit, note,
+                       workdir):
     """Vision fallback for gameplay, sports, training and music footage."""
     keys = list(index.get("tile_keys") or [])
     if not keys or not llm.vision_available():
@@ -689,7 +692,7 @@ def _visual_plan_clips(index, duration, n_target, want, note, workdir):
             "this video has no transcribed speech and its visual filmstrip "
             "could not be read")
     context = (f"Video duration: {duration:.1f}s. Select about {n_target} "
-               f"clips, never more than {config.SHORTS_MAX_CLIPS}; each "
+               f"clips, never more than {config.SHORTS_AUTO_MAX_CLIPS}; each "
                "should be 15-60 seconds."
                + (f" User direction: {note}" if note else ""))
     answer = llm.ask_vision(
@@ -697,8 +700,8 @@ def _visual_plan_clips(index, duration, n_target, want, note, workdir):
         max_tokens=1800, purpose="shorts_visual_plan",
         image_names=labels, reasoning_effort="low")
     out = _json_from(answer) if answer else None
-    return _validated_clips((out or {}).get("clips") or [], duration, want,
-                            index=index, visual=True)
+    return _validated_clips((out or {}).get("clips") or [], duration,
+                            selection_limit, index=index, visual=True)
 
 
 def _transcript_is_useful(index, duration):
@@ -741,8 +744,10 @@ def _plan_clips(worker_db, job, index, duration, style, payload,
         want = int(want) if want else None
     except (TypeError, ValueError):
         want = None
-    n_target = min(want, config.SHORTS_MAX_CLIPS) if want \
+    n_target = min(want, config.SHORTS_AUTO_MAX_CLIPS) if want \
         else _default_count(duration)
+    selection_limit = min(want, config.SHORTS_AUTO_MAX_CLIPS) if want \
+        else config.SHORTS_AUTO_MAX_CLIPS
 
     len_hint = ("Let each selected story use the time its complete arc needs "
                 "(often 25-90 seconds); completeness outranks runtime. The "
@@ -763,12 +768,14 @@ def _plan_clips(worker_db, job, index, duration, style, payload,
         wd = workdir or os.path.join(
             config.TMP_DIR, f"shorts_visual_{(job or {}).get('id', 'plan')}")
         os.makedirs(wd, exist_ok=True)
-        return _visual_plan_clips(index, duration, n_target, want, note, wd)
+        return _visual_plan_clips(index, duration, n_target, selection_limit,
+                                  note, wd)
     if not transcript.strip():
         wd = workdir or os.path.join(
             config.TMP_DIR, f"shorts_visual_{(job or {}).get('id', 'plan')}")
         os.makedirs(wd, exist_ok=True)
-        return _visual_plan_clips(index, duration, n_target, want, note, wd)
+        return _visual_plan_clips(index, duration, n_target, selection_limit,
+                                  note, wd)
     evidence_note = ""
     evidence_label = "TRANSCRIPT"
     if shortlist_meta:
@@ -783,7 +790,7 @@ def _plan_clips(worker_db, job, index, duration, style, payload,
             "unrelated arcs together.\n")
     user = (f"Video duration: {duration:.1f}s. "
             f"Aim for {n_target} clips (fewer if the material is thin, "
-            f"never more than {config.SHORTS_MAX_CLIPS}). {len_hint}\n"
+            f"never more than {config.SHORTS_AUTO_MAX_CLIPS}). {len_hint}\n"
             f"Detected speakers: {int(index.get('speakers') or 0)}. "
             "When there are multiple speakers, preserve complete nearby "
             "question-and-answer turns rather than isolated quotes.\n"
@@ -794,7 +801,7 @@ def _plan_clips(worker_db, job, index, duration, style, payload,
                     "shorts_plan", max_tokens=3500)
     raw_clips = _complete_conversation_arcs(
         (out or {}).get("clips") or [], index, duration)
-    clips = _validated_clips(raw_clips, duration, want, index=index)
+    clips = _validated_clips(raw_clips, duration, selection_limit, index=index)
     # One empty language-plan answer should not turn into a whole job retry
     # when the same job already has visual evidence. Fall through to vision in
     # this execution, preserving both time and the model tokens already spent.
@@ -802,7 +809,8 @@ def _plan_clips(worker_db, job, index, duration, style, payload,
         wd = workdir or os.path.join(
             config.TMP_DIR, f"shorts_visual_{(job or {}).get('id', 'plan')}")
         os.makedirs(wd, exist_ok=True)
-        return _visual_plan_clips(index, duration, n_target, want, note, wd)
+        return _visual_plan_clips(index, duration, n_target, selection_limit,
+                                  note, wd)
     if out is not None and not clips:
         raise NoWorthyStories(
             "the transcript contains no complete story strong enough to "

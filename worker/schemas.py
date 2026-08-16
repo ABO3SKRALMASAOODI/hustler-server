@@ -316,6 +316,11 @@ class CaptionStyle(BaseModel):
     # letterboxed 9:16 edit sit on the actual foreground picture rather than
     # in detached blurred padding. Users may also request a precise safe band.
     anchor_y: Optional[float] = None
+    # Transcript-caption production contract. When true, every visual state
+    # is composed as one rendered row even when the chosen preset normally
+    # uses a stacked/multi-line layout. Optional keeps every historical EDL's
+    # signature and render semantics unchanged.
+    single_line: Optional[bool] = None
 
     @field_validator("effect", mode="before")
     @classmethod
@@ -2977,6 +2982,8 @@ def _style_desc(style):
         bits.append("uppercase" if s["uppercase"] else "mixed-case")
     if s.get("dynamic"):
         bits.append("dynamic")
+    if s.get("single_line"):
+        bits.append("single-line")
     if s.get("animation"):
         bits.append(f"anim {s['animation']}")
     return f" ({', '.join(bits)})" if bits else ""

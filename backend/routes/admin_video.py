@@ -904,7 +904,7 @@ def video_projects():
     search = (request.args.get("search") or "").strip()
     with adb() as conn:
         cur = conn.cursor()
-        # PARENTS ONLY. A shorts run creates 8+ child projects, each with a
+        # PARENTS ONLY. A shorts run can create many child projects, each with a
         # chat that opens on an assistant greeting and an EDL seeded by the
         # pipeline — in this list they read as "a session with no upload
         # that somehow holds a fully edited video" (the Aug 9 confusion).

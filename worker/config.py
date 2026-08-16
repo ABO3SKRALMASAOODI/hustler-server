@@ -1615,9 +1615,14 @@ OUTRO_VERSION = 9      # v9: carry an ending score continuously through the
                        # See tools/build_endcard.py
 
 # ── Shorts mode (round 99) ───────────────────────────────────────────────
-# One shorts_plan job cuts a long video into at most this many child clips.
-# ~1 clip per 5 minutes of source is the planner's target below the cap.
-SHORTS_MAX_CLIPS = int(os.getenv("SHORTS_MAX_CLIPS", "8"))
+# The in-house one-call story scout needs a bounded response target. This is
+# ONLY its model-output safety limit; it is not an editorial quota. Explicit
+# caller-selected, non-overlapping arcs are all preserved and are naturally
+# bounded by source duration / the ten-second technical minimum instead.
+# Read the old env name as a deployment-compatible fallback while operators
+# migrate to the accurately scoped name.
+SHORTS_AUTO_MAX_CLIPS = max(1, int(os.getenv(
+    "SHORTS_AUTO_MAX_CLIPS", os.getenv("SHORTS_MAX_CLIPS", "8"))))
 # Flat credits per finished clip, charged on top of the run's model cost —
 # a shorts run fans out N final renders that a plain chat turn never does.
 SHORTS_CLIP_CREDITS = float(os.getenv("SHORTS_CLIP_CREDITS", "2.0"))

@@ -87,7 +87,7 @@ DEFAULT_STYLE = {"color": "#FFFFFF", "size": "m", "position": "bottom",
                  "outline_color": None, "outline_width": None,
                  "shadow": None, "background_color": None,
                  "background_opacity": None, "tracking": None,
-                 "text_align": None, "anchor_y": None}
+                 "text_align": None, "anchor_y": None, "single_line": None}
 
 # Every style key that flows from the EDL into a render. Kept as ONE tuple
 # because it has to be applied in three places (_norm_style, write_ass's
@@ -101,12 +101,16 @@ STYLE_KEYS = ("color", "size", "position", "highlight_color", "animation",
               "size_scale", "preset", "font", "effect", "layout", "leading",
               "emphasis", "emphasis_scale", "outline_color", "outline_width",
               "shadow", "background_color", "background_opacity", "tracking",
-              "text_align", "anchor_y")
+              "text_align", "anchor_y", "single_line")
 # Keys whose value is meaningful when falsy (0, 0.0) and so must NOT be copied
 # with a truthiness test.
 STYLE_KEYS_NUMERIC = ("leading", "emphasis_scale", "size_scale",
                       "outline_width", "shadow", "background_opacity",
                       "tracking", "anchor_y")
+# Fields where False is an authored value rather than an omission. Keeping
+# this separate from numeric fields makes partial restyles able to turn a
+# previously enabled contract off without changing any historical default.
+STYLE_KEYS_EXPLICIT = STYLE_KEYS_NUMERIC + ("single_line",)
 
 # ── Premium presets ──────────────────────────────────────────────────────
 # Every preset is one coherent, opinionated look. base_size is the 'm'
@@ -542,9 +546,9 @@ def _norm_style(style):
         d = style if isinstance(style, dict) else style.model_dump()
         for k in STYLE_KEYS:
             v = d.get(k)
-            # Numeric fields are meaningful at 0 (leading 0 = full overlap), so
-            # they are copied on presence, not truthiness.
-            if v is not None if k in STYLE_KEYS_NUMERIC else bool(v):
+            # Numeric fields are meaningful at 0 and contract booleans at
+            # False, so those fields are copied on presence, not truthiness.
+            if v is not None if k in STYLE_KEYS_EXPLICIT else bool(v):
                 s[k] = v
         if d.get("position"):
             # remember an EXPLICIT position so presets only apply their own
@@ -802,20 +806,24 @@ def _mark_insert_breaks(out_words, tl):
     return out_words
 
 
-def events_from_transcript(out_words, max_words=None, line_chars=MAX_LINE_CHARS):
+def events_from_transcript(out_words, max_words=None, line_chars=MAX_LINE_CHARS,
+                           single_line=False):
     """out_words: [{'w','t0','t1'}] already in OUTPUT time (kept words only).
     Groups words into events of at most 2 lines x line_chars chars — or at
-    most max_words words per event when set — timed to word boundaries."""
+    most max_words words per event when set — timed to word boundaries.
+    ``single_line`` is an explicit new contract; absent/false preserves the
+    historical two-line grouping and serialized ASS exactly."""
     events = []
     group, chars = [], 0
-    limit = line_chars * MAX_LINES
+    max_lines = 1 if single_line else MAX_LINES
+    limit = line_chars * max_lines
 
     def flush():
         nonlocal group, chars
         if not group:
             return
         text = " ".join(w["w"] for w in group)
-        lines = _wrap(text, line_chars)[:MAX_LINES]
+        lines = _wrap(text, line_chars)[:max_lines]
         start = group[0]["t0"]
         end = max(group[-1]["t1"], start + MIN_EVENT_S)
         events.append({"start": start, "end": end,
@@ -1669,6 +1677,29 @@ def _stack_mults(disp, treats, p, s, px, usable,
     return out
 
 
+def _fit_single_line_mults(disp, mults, p, px, usable):
+    """Scale one composed row to its measured horizontal budget.
+
+    ``single_line`` deliberately overrides a preset's authored stack. The
+    normal stack fitter constrains individual words, but several individually
+    valid words can still overflow as one row once emphasis sizes and spaces
+    are combined. Scale the complete row uniformly so libass has no reason to
+    add an implicit wrap behind the composer's back. No word is removed.
+    """
+    if not disp:
+        return mults
+    space = p["char_w"] * px * 0.4
+    spaces = max(0, len(disp) - 1) * space
+    widths = [max(1, len(t)) * p["char_w"] * px * mults[i]
+              for i, t in enumerate(disp)]
+    room = max(1.0, usable - spaces)
+    total = sum(widths)
+    if total <= room + 1e-6:
+        return mults
+    scale = room / max(total, 1e-6)
+    return [m * scale for m in mults]
+
+
 def _stack_layout(disp, mults, p, px, usable):
     """Break words into lines by REAL rendered width (per-word scale
     included), not by character count at the base size."""
@@ -1863,12 +1894,15 @@ def events_premium(out_words, style=None, max_words=None,
     max_w = min(int(max_words), MAX_WORDS_PER_CAPTION) if max_words \
         else p["max_words"]
     line_chars = _premium_line_chars(p, s, play_res)
+    single_line = bool(s.get("single_line"))
     modern = design_version == CAPTION_DESIGN_VERSION
     chunks = (_premium_chunks_v2(out_words, max_w,
-                                  line_chars * PREMIUM_MAX_LINES, p)
+                                  line_chars * (1 if single_line else
+                                                PREMIUM_MAX_LINES), p)
               if modern else
               _premium_chunks(out_words, max_w,
-                              line_chars * PREMIUM_MAX_LINES))
+                              line_chars * (1 if single_line else
+                                            PREMIUM_MAX_LINES)))
     base = _base_tags(p, s, px, f)
     mode = p["mode"]
     anim = _premium_anim_prefix(s.get("animation") or p.get("animation"), px) \
@@ -1878,7 +1912,11 @@ def events_premium(out_words, style=None, max_words=None,
     # presets keep the single-Dialogue emission they always had, so their
     # output is unchanged to the byte.
     layout = s.get("layout") or _pget(p, "layout")
-    stack = layout == "stack"
+    # The explicit production contract owns layout. Routing it through the
+    # measured stack compositor gives one independently positioned row for
+    # every preset, including presets whose authored default is multi-line
+    # flow or a composed stack.
+    stack = single_line or layout == "stack"
     global_effect = s.get("effect") or _pget(p, "effect")
     word_anim = s.get("animation") or _pget(p, "word_anim")
     motionless = s.get("animation") == "none"
@@ -1908,9 +1946,14 @@ def events_premium(out_words, style=None, max_words=None,
                 * play_res[0]
             mults = _stack_mults(disp, treats, p, s, px, usable,
                                   preserve_hierarchy=modern)
-            lines = (_stack_layout_v2(disp, mults, p, px, usable)
-                     if modern else
-                     _stack_layout(disp, mults, p, px, usable))
+            if single_line:
+                mults = _fit_single_line_mults(
+                    disp, mults, p, px, usable)
+                lines = [list(range(len(disp)))] if disp else []
+            else:
+                lines = (_stack_layout_v2(disp, mults, p, px, usable)
+                         if modern else
+                         _stack_layout(disp, mults, p, px, usable))
             geom = _stack_positions(p, s, play_res, lines, mults, px,
                                     word_anim)
         else:
@@ -2116,7 +2159,7 @@ def write_ass(events, path, global_style=None, play_res=BASE_PLAY_RES):
         d = ov if isinstance(ov, dict) else ov.model_dump()
         for k in STYLE_KEYS:
             v = d.get(k)
-            if v is not None if k in STYLE_KEYS_NUMERIC else bool(v):
+            if v is not None if k in STYLE_KEYS_EXPLICIT else bool(v):
                 merged[k] = v
         if d.get("uppercase") is not None:
             merged["uppercase"] = bool(d["uppercase"])
@@ -2350,7 +2393,8 @@ def _positioned_events(out_words, captions, global_style, play_res):
         else:
             made = events_from_transcript(
                 words, max_words=captions.get("max_words_per_caption"),
-                line_chars=line_chars_for(run_style, play_res))
+                line_chars=line_chars_for(run_style, play_res),
+                single_line=bool(_norm_style(run_style).get("single_line")))
             for ev in made:
                 ev["item_style"] = {"position": pos}
                 if anchor_y is not None:
@@ -2422,7 +2466,9 @@ def compiled_events(edl, index, tl, play_res=BASE_PLAY_RES):
         else:
             events = events_from_transcript(
                 out_words, max_words=captions.get("max_words_per_caption"),
-                line_chars=line_chars_for(global_style, play_res))
+                line_chars=line_chars_for(global_style, play_res),
+                single_line=bool(
+                    _norm_style(global_style).get("single_line")))
         # Make the opening frame carry a caption so a paused player isn't blank
         # (see FIRST_CAPTION_LEAD_IN_S). from_transcript only — dictated caption
         # items keep their authored timing. NOT when an inserted clip opens the
