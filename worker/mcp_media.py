@@ -133,7 +133,8 @@ def _preview_for_watching(ctx, render):
     # worker requests cannot both pass a check-then-insert gap.
     job_id, _created = ctx.db.run(
         dbx.get_or_enqueue_preview_job, ctx.project_id, ctx.job["user_id"],
-        {"edl_version": version})
+        {"edl_version": version,
+         "execution_policy": config.execution_policy_for(ctx.job)})
     deadline = time.time() + config.PREVIEW_WAIT_TIMEOUT_S
     while time.time() < deadline:
         time.sleep(1)

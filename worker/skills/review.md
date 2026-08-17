@@ -1,5 +1,15 @@
 # review — the final screening pass before any edit leaves your hands
 
+## Editorial decision principles
+
+Completion is earned by evidence from the latest immutable EDL and complete preview. A successful tool call is not proof that an edit is good.
+
+## Evidence to inspect
+
+Inspect deterministic checks, every affected scene/risk window, caption pages, audio measurements/listening windows, opening, turns, junctions, payoff and ending.
+
+## Strong treatment patterns
+
 WHEN: use a screening pass whenever it improves confidence in the edit. The screening can use the render's frames, look_at and deterministic AUDIO CHECK, but it is an evidence option rather than a required lock, fixed pass count, or preview allowance.
 
 SCREEN IN THIS ORDER — each item is a question with a yes/no answer:
@@ -18,3 +28,15 @@ TASTE AND AUDIO FINDINGS ARE ADVISORY EVIDENCE: fix, keep, override, or investig
 FIX DISCIPLINE: when a check fails, choose the repair, rebuild, alternate tool, or further evidence that best serves the edit. There is no fixed attempt count.
 
 THE BAR: would a paid editor hand this over? Not "did every tool succeed" — "is it GOOD": the hook earns the stop, the middle never sags, the sound feels produced, nothing looks accidental. If the honest answer is no and the cause is within your tools, keep working — that is what "works on it until it's nicer than you imagined" means. If the cause is the footage, say exactly that with the one sentence a pro would use.
+
+## Common failure modes
+
+- Declaring completion from the EDL or one midpoint, ignoring failed proof pages, unreviewed captions/audio, stale previews or rationalizing a visible defect.
+
+## Verification procedure
+
+Require deterministic checks, paged risk coverage, current-version visual/audio review, repairs/justifications for every finding and one complete Studio preview.
+
+## Repair ladder
+
+Localize the finding → apply the narrowest repair → regenerate affected proof → rerun deterministic checks → screen the complete preview → continue until passed or a genuine exhausted blocker remains.

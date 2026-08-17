@@ -1,8 +1,9 @@
 # Modal executor operations
 
-Modal is the primary, cheaper scale-to-zero executor. Cloud Run remains a
-launch-time fallback while the rollout is measured and can be restored as the
-primary by setting `MODAL_EXECUTOR_ENABLED=0` on Render.
+Modal is the scale-to-zero compute plane. Render is the PostgreSQL dispatcher,
+reaper, catalog publisher and health monitor; with Modal configured it never
+downloads or decodes customer media and never runs ffmpeg, OpenCV or Chromium.
+Cloud Run is an emergency launch fallback for legacy jobs only.
 
 ## One-time setup
 
@@ -10,24 +11,29 @@ primary by setting `MODAL_EXECUTOR_ENABLED=0` on Render.
 2. Create the `main` environment if it does not exist.
 3. Copy the current proven executor environment without printing secrets:
    `python worker/setup_modal_executor.py`
-4. Deploy: `modal deploy worker/modal_app.py --env main`
-5. Create a Modal deploy token and store it in GitHub secrets as
+4. Apply the additive durable-verification schema from a trusted shell:
+   `psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f backend/migrations/023_redesign_verification.sql`
+5. Deploy: `modal deploy worker/modal_app.py --env main`
+6. Create a Modal deploy token and store it in GitHub secrets as
    `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET`.
-6. Put the same invocation token on the Render worker, then set:
+7. Put the same invocation token on the Render worker, then set:
 
    ```text
    MODAL_EXECUTOR_ENABLED=1
-   MODAL_EXECUTOR_PERCENT=10
+   MODAL_EXECUTOR_PERCENT=100
    MODAL_EXECUTOR_APP=valmera-executor
    MODAL_EXECUTOR_ENVIRONMENT=main
-   MODAL_CLOUD_RUN_FALLBACK=1
+   MODAL_CLOUD_RUN_FALLBACK=0
+   EXECUTION_POLICY_MODE=legacy
    ```
 
-Raise the percentage only after live p95 runtime and failure rate meet the
-Cloud Run baseline. Selection is stable per job, so retries do not randomly
-switch providers. A Modal submission can fall back to Cloud Run only before a
-durable Modal call id exists; after that point the dispatcher reconnects to the
-same call and never buys a duplicate render.
+The deployment workflow validates all model-visible skills, verifies the code
+fingerprint, and warms/probes every US function and its promised runner set.
+Only after that gate is green, switch `EXECUTION_POLICY_MODE=redesign` on
+Render. Producers stamp the policy into every new root and child job; retries
+and continuations keep that immutable owner. A durable Modal call reconnects by
+call id and never silently falls back onto Render or launches duplicate paid
+work.
 
 ## Resource lanes
 
@@ -36,10 +42,12 @@ same call and never buys a duplicate render.
 | `preview` | 2 physical cores, 2→4 GiB | 4 vCPU, 8 GiB |
 | `batch` / `index` | 4 physical cores, 4→16 GiB | 8 vCPU, 16 GiB |
 | `final` | 4 physical cores, 4→16 GiB, 6h envelope | 8 vCPU, 16 GiB |
-| `light` | 4 physical cores, 2→32 GiB | heavy fallback previously used |
+| `light` | 1 physical core (2 burst limit), 1→4 GiB | lightweight frame inspection |
 | `heavy` | 4 physical cores, 16→32 GiB | 8 vCPU, 32 GiB |
-| `egress` | 4 physical cores, 2→32 GiB, US pinned | heavy fallback previously used |
+| `egress` | 1 physical core (2 burst limit), 1→4 GiB, US pinned | acquisition/streaming |
 | `agent` | 0.125 reserved / 1 core limit, 1→2 GiB, concurrency 2, 6h envelope | 1 vCPU, 2 GiB |
+| `mcp` | 0.125 reserved / 1 core limit, 1→2 GiB, concurrency 4, separate pool | none |
+| `shorts` | 0.125 reserved / 1 core limit, 1→2 GiB, concurrency 2, separate pool | none |
 
 An arrow is Modal's memory request→hard limit. Billing uses the greater of the
 request or actual memory, while the old maximum remains available for an
@@ -48,21 +56,28 @@ global-placement canary scheduled a customer final in `ap-northeast-2`, adding
 unacceptable network and latency variance. Savings never depend on moving a
 user's compute away from the proven data path.
 
-`frames` and `capture` use `light`; `fetch` and `search` use `egress`;
-tracking, matting, matching, cleanup, and stems retain `heavy`. Every completed
-or failed input logs one `[resources]` JSON record with cgroup-wide memory and
-CPU telemetry, including child ffmpeg/Chromium processes.
+Bounded `frames` uses `light`; browser `capture`, tracking, matting, matching,
+cleanup and stems use `heavy`; `fetch`, stock acquisition and search use
+`egress`. Studio agents, external MCP sessions and Shorts planning use three
+independent autoscaling functions so one audience cannot consume another's
+orchestration capacity. Every completed or failed input logs one `[resources]`
+JSON record with cgroup-wide peak memory, CPU, bytes transferred, cold-start,
+cache and cost telemetry, including child ffmpeg/Chromium processes.
 
-All functions have zero minimum containers, at most five containers, and no
-platform retries. Interactive compute retains the 3600-second limit. Durable
-`final` and `agent` calls have a six-hour platform envelope; the editor still
-uses its cost/no-progress guards, while final FFmpeg time scales from authored
-program duration and retains the stall, runaway-output, and lease watchdogs.
-The executor's fenced Postgres completion, progress, and retry classification
-are shared with Cloud Run through `executor_runtime.py`.
+All functions have zero minimum containers and no platform retries. Their
+different maximum-container values are account runaway-cost ceilings, not
+product concurrency slots: Modal queues temporary saturation. Interactive
+compute retains the 3600-second limit. Durable `final`, `agent`, `mcp` and
+`shorts` calls have six-hour platform envelopes and logical turns continue in
+durable slices. Final FFmpeg time scales from authored program duration and
+retains stall, runaway-output and lease watchdogs. Fenced PostgreSQL
+completion, progress and retry classification are shared through
+`executor_runtime.py`.
 
 ## Rollback
 
-Set `MODAL_EXECUTOR_ENABLED=0` on Render. No code deployment and no data
-migration are required; the existing `REMOTE_EXECUTOR_*` Cloud Run routes take
-over immediately after Render restarts the worker.
+Set `EXECUTION_POLICY_MODE=legacy` on Render. No code deployment, EDL rollback
+or data migration is required. Jobs already stamped `redesign` finish on the
+new fleet; jobs created after the switch use legacy ownership. Keep Modal
+enabled while redesign-stamped work drains. Disabling Modal is a separate
+emergency action only after no redesign work remains.

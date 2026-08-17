@@ -87,6 +87,8 @@ def test_modal_without_agent_turn_keeps_memory_safe_local_limit():
 def test_executor_never_polls_the_database_queue():
     assert set(_topology("executor").values()) == {0}
     assert set(_topology("agent_executor").values()) == {0}
+    assert set(_topology("mcp_executor").values()) == {0}
+    assert set(_topology("shorts_executor").values()) == {0}
     assert set(_topology("batch_executor").values()) == {0}
 
 

@@ -32,7 +32,7 @@ def test_clean_current_preview_is_export_ready():
     }
 
 
-def test_major_current_finding_is_advisory_and_export_stays_available():
+def test_major_current_finding_keeps_verification_and_export_open():
     report = {
         "verdict": "repair",
         "findings": [{
@@ -43,11 +43,11 @@ def test_major_current_finding_is_advisory_and_export_stays_available():
     }
     ctx = _ctx(last_visual_critic=report)
     quality = agent_loop._quality_handoff(ctx)
-    assert quality["quality_status"] == "advisory"
-    assert quality["export_ready"] is True
+    assert quality["quality_status"] == "repair_required"
+    assert quality["export_ready"] is False
     assert "move the crop left" in quality["quality_findings"][0]
     reply = agent_loop._disclose_outstanding_quality(ctx, "Done.")
-    assert "export remains available" in reply
+    assert "Verification remains open" in reply
 
 
 def test_stale_preview_is_unchecked_but_does_not_lock_export():
@@ -72,18 +72,18 @@ def test_plan_pushback_skips_once_the_edl_moved():
     assert not agent_loop._plan_without_write_pushback(ctx, messages, False)
 
 
-def test_audio_qc_finding_is_advisory_even_after_visual_pass():
+def test_audio_qc_finding_requires_repair_even_after_visual_pass():
     quality = agent_loop._quality_handoff(
         _ctx(last_audio_qc_findings=["integrated loudness is clipping"]))
-    assert quality["quality_status"] == "advisory"
-    assert quality["export_ready"] is True
+    assert quality["quality_status"] == "repair_required"
+    assert quality["export_ready"] is False
     assert quality["quality_findings"][0].startswith("audio QC:")
 
 
-def test_actual_audio_fix_is_disclosed_without_locking_export():
+def test_actual_audio_fix_keeps_completion_open():
     quality = agent_loop._quality_handoff(_ctx(last_audio_review={
         "edl_version": 3, "verdict": "fix",
         "text": "FIX — music masks the question; lower it 4 dB."}))
-    assert quality["quality_status"] == "advisory"
-    assert quality["export_ready"] is True
+    assert quality["quality_status"] == "repair_required"
+    assert quality["export_ready"] is False
     assert any("music masks" in line for line in quality["quality_findings"])

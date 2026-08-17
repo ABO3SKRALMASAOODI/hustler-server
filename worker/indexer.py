@@ -36,6 +36,7 @@ import spatial
 import storage
 import tiles as tilestrip
 import transcribe
+import visual_index
 from schemas import (VideoIndex, VideoInfo, clamp_word_times,
                      default_edl, edl_accepts_tray_autoplace,
                      is_canvas_program, keep_boundaries,
@@ -320,7 +321,8 @@ def run_index_job(worker_db, job):
             _finish_setup(worker_db, project_id, session_id, info,
                           cached["json"], job["user_id"],
                           reindex=bool(job["payload"].get("reindex")),
-                          asset_id=asset["id"])
+                          asset_id=asset["id"],
+                          execution_policy=config.execution_policy_for(job))
             try:
                 worker_db.run(
                     dbx.record_client_event, job["user_id"], project_id,
@@ -502,6 +504,18 @@ def run_index_job(worker_db, job):
         perception_sidecar = state.get("perception")
         spatial_sidecar = state.get("spatial")
         motion_sidecar = state.get("motion")
+        try:
+            visual_storyboard = visual_index.build(
+                proxy_local, info["duration"], shots, motion_sidecar,
+                spatial_sidecar, sentences, sha, workdir,
+                seek_ceiling=max(0.0, info["duration"] - 0.05))
+        except Exception as e:
+            visual_storyboard = None
+            warnings.append(
+                f"hierarchical visual evidence failed ({str(e)[:120]}) — "
+                "the diverse raw filmstrip remains available")
+            print(f"[index {job_id}] visual storyboard degraded: {e}",
+                  flush=True)
         # Lane timings for the admin views: the two lanes overlap, so the
         # old per-stage ladder is now picture/sound walls plus their split.
         t_lanes = time.monotonic() - _t
@@ -545,12 +559,14 @@ def run_index_job(worker_db, job):
             perception=perception_sidecar,
             motion=motion_sidecar,
             spatial=spatial_sidecar,
+            visual_storyboard=visual_storyboard,
         ).model_dump()
         worker_db.run(dbx.upsert_index, project_id, sha, index)
         _finish_setup(worker_db, project_id, session_id, info, index,
                       job["user_id"],
                       reindex=bool(job["payload"].get("reindex")),
-                      asset_id=asset["id"])
+                      asset_id=asset["id"],
+                      execution_policy=config.execution_policy_for(job))
         try:
             worker_db.run(
                 dbx.record_client_event, job["user_id"], project_id,
@@ -564,6 +580,8 @@ def run_index_job(worker_db, job):
         return {"sha256": sha, "cached": False, "shots": len(shots),
                 "from_client_proxy": from_client_proxy,
                 "tiles": len(tile_keys), "speakers": speakers,
+                "visual_clusters": int(
+                    (visual_storyboard or {}).get("distinct_clusters") or 0),
                 "words": len(words), "silences": len(silences),
                 "language": language, "warnings": warnings,
                 "timings": timings}
@@ -639,6 +657,7 @@ def _run_clip_index(worker_db, job, asset):
 
         shots, tile_keys, tile_step = [], [], None
         motion_sidecar = None
+        visual_storyboard = None
         if not is_music:
             try:
                 shots = scenes.detect_shots(src, info["duration"], warnings)
@@ -663,6 +682,15 @@ def _run_clip_index(worker_db, job, asset):
                 warnings.append(
                     f"motion profiling failed ({str(e)[:120]}) — "
                     "shot boundaries and filmstrip remain available")
+            try:
+                visual_storyboard = visual_index.build(
+                    src, info["duration"], shots, motion_sidecar,
+                    spatial_sidecar, sentences, sha, workdir,
+                    seek_ceiling=max(0.0, info["duration"] - 0.05))
+            except Exception as e:
+                warnings.append(
+                    f"hierarchical visual evidence failed ({str(e)[:120]}) "
+                    "— the diverse raw filmstrip remains available")
             _mark("tiles_s")
         else:
             spatial_sidecar = None
@@ -694,6 +722,7 @@ def _run_clip_index(worker_db, job, asset):
             perception=perception_sidecar,
             motion=motion_sidecar,
             spatial=spatial_sidecar,
+            visual_storyboard=visual_storyboard,
         ).model_dump()
         worker_db.run(dbx.upsert_index, project_id, sha, index)
         worker_db.run(dbx.update_asset_meta, asset["id"],
@@ -704,6 +733,8 @@ def _run_clip_index(worker_db, job, asset):
               f"{len(tile_keys)} tile(s)", flush=True)
         return {"sha256": sha, "cached": False, "kind": asset["kind"],
                 "words": len(words), "tiles": len(tile_keys),
+                "visual_clusters": int(
+                    (visual_storyboard or {}).get("distinct_clusters") or 0),
                 "language": language, "warnings": warnings,
                 "timings": timings}
     finally:
@@ -1008,7 +1039,8 @@ def _subscribe_gate_meta(kind="index_ready"):
 
 
 def _finish_setup(worker_db, project_id, session_id, info, index,
-                  user_id=None, reindex=False, asset_id=None):
+                  user_id=None, reindex=False, asset_id=None,
+                  execution_policy=None):
     """Seed EDL v1 (keep everything) if none exists, splice any staged tray
     items around it, greet in chat, and auto-start the agent on any request
     the user sent while indexing was still running.
@@ -1091,7 +1123,8 @@ def _finish_setup(worker_db, project_id, session_id, info, index,
                     resolved = _resolve_pending_auto_resume(
                         worker_db, project_id, session_id, user_id,
                         found["id"], "direct_short_auto_resume",
-                        {"direct_short": True})
+                        {"direct_short": True,
+                         "execution_policy": execution_policy or "legacy"})
                     state = resolved.get("state")
                     if state == "gated":
                         worker_db.run(
@@ -1135,7 +1168,8 @@ def _finish_setup(worker_db, project_id, session_id, info, index,
             if found:
                 resolved = _resolve_pending_auto_resume(
                     worker_db, project_id, session_id, user_id, found["id"],
-                    "index_auto_resume")
+                    "index_auto_resume",
+                    {"execution_policy": execution_policy or "legacy"})
                 state = resolved.get("state")
                 if state == "gated":
                     subscribe_gated = True

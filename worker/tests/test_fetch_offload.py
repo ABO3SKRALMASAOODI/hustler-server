@@ -152,6 +152,11 @@ def test_walled_youtube_routes_remote_without_a_doomed_local_attempt(
 
     assert "storage_key=fetched/7/song.mp3" in out
     assert ctx.urls_fetched[0]["fetch_provider"] == "modal"
+    insert = next(row for row in ctx.db.calls
+                  if row[0] is agent_tools.dbx.insert_asset)
+    meta = insert[2]["meta"]
+    assert "license_status" not in meta
+    assert "not assessed" in meta["license_note"]
 
 
 def test_non_youtube_music_never_enters_the_new_remote_path(

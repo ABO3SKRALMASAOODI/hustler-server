@@ -1,14 +1,24 @@
 # captions — presets, families, placement, composition, fixes, pre-captioned footage
 
+## Editorial decision principles
+
+Captions are a reading system: clean hierarchy, speech-rhythm phrasing, measured geometry and one coherent treatment. Accessibility and legibility outrank novelty.
+
+## Evidence to inspect
+
+Inspect complete surviving transcript coverage, script/font fallback, speech rhythm, safe width, faces/UI, burned-in text, densest phrases, distinct backgrounds and every placement/layout change.
+
+## Strong treatment patterns
+
 BASICS
 - add_captions("from_transcript") burns word-timed captions for everything that survives the cut — timing always from the real transcript, never invented. add_captions('off') removes captions WE added.
 - To change how EXISTING captions look ("make it red", "move to the top"), use set_caption_style with just the fields to change — never re-add.
 - Manual caption items are only for text the user dictates — and for translations.
 - Manual items render at their exact authored start/end. There is no hidden minimum hold; adjacent 50ms+ items do not get stretched over one another. Do not inflate word timings to compensate for an old renderer bug.
-- add_captions REPLACES the whole caption set in one call. NEVER call mode='off' first and re-add — that is two EDL versions, a wasted render, and the loop detector will flag the thrash (it did, 2026-08-10).
+- add_captions REPLACES the whole caption set in one call. NEVER call mode='off' first and re-add — that is two EDL versions, a wasted render, and the loop detector will flag the thrash.
 
-TRANSLATION CAPTIONS ("arabic subtitles", "translate the captions to X") — a real session's seams (2026-08-10):
-- Build manual items from get_kept_transcript: ONE item per transcript segment, the segment's own start/end, and a COMPLETE translation of every segment — count your items against the transcript segments before writing. Dropped or compressed lines are the first thing a bilingual viewer notices ("theres some missing words" was the user's literal complaint).
+TRANSLATION CAPTIONS ("arabic subtitles", "translate the captions to X"):
+- Build manual items from get_kept_transcript: ONE item per transcript segment, the segment's own start/end, and a COMPLETE translation of every segment — count your items against the transcript segments before writing. Dropped or compressed lines are immediately visible to a bilingual viewer.
 - Translate meaning faithfully and fully — filler sounds can drop, spoken content cannot.
 - These are subtitles, not hype captions: default to 'documentary' (translucent contrast panel, restrained Plus Jakarta Sans, bottom), never spotlight/beast. RTL scripts (Arabic, Hebrew, Farsi) render correctly through Noto fallback — write natural RTL text with its punctuation.
 - Style-only follow-ups ("smaller", "nicer font") → set_caption_style, one call, no items re-send. Text corrections → ONE add_captions(mode='items') call with the full corrected list, same timings.
@@ -38,7 +48,7 @@ COMPOSITION — every preset is a starting point you can override per field:
 
 SIZE COMPLAINTS: "too small" / "big TikTok captions" → with a preset go size 'l' or 'xl'; without one, size 'xl' + dynamic:true. If they say "too small" a second time they mean MUCH bigger. "Captions look basic/boring/cheap" → first diagnose the grammar: use 'clean' + emphasis 'big' for polish, 'stacked' for dramatic size hierarchy, or 'beast' only for explicit hype. Do not answer every taste complaint with yellow boxes or a size bump.
 
-COLOR COMPLAINTS — the rule a real session burned (2026-08-09, "remove that cringe blue colour"): when the user rejects a caption color/accent, the answer is NO accent — pure white, emphasis 'big' (size-only), highlight_color/effect off. NEVER swap the rejected color for a different color (cyan→gold repeats the mistake in a new hue); they are telling you colored captions are wrong for this video, not that you picked the wrong shade. Same when they ask for "clean", "minimal", "aesthetic" or a premium/insta look on calm or cinematic footage: all-white captions, emphasis by SIZE alone, mixed case, no glow/box — restraint reads expensive; color reads loud. Reserve colored accents for hype content or an explicit ask.
+COLOR COMPLAINTS: when the user rejects a caption color/accent, the answer is NO accent — pure white, emphasis 'big' (size-only), highlight_color/effect off. NEVER swap the rejected color for a different color (cyan→gold repeats the mistake in a new hue); they are telling you colored captions are wrong for this video, not that you picked the wrong shade. Same when they ask for "clean", "minimal", "aesthetic" or a premium/insta look on calm or cinematic footage: all-white captions, emphasis by SIZE alone, mixed case, no glow/box — restraint reads expensive; color reads loud. Reserve colored accents for hype content or an explicit ask.
 
 READABILITY IS THE CRAFT — the details that separate produced captions from burned subtitles:
 - SHORT GROUPS READ, SENTENCES DON'T: dynamic short-form runs 1-4 words; 'clean' holds a complete 4-6 word thought so a paused/muted viewer never sees an orphan connector. Full 8-12 word subtitles belong to 'documentary', not a hype preset.
@@ -53,5 +63,18 @@ CAPTIONS OFF FOR PART OF THE VIDEO: set_caption_mutes(spans=[[start,end],...]) i
 
 SPELLING: set_caption_fixes corrects the spelling/capitalization of burned captions without touching timing ('dios' → 'Dios', a misheard name → the right one). Always fix names in sermons/interviews.
 
-PRE-CAPTIONED FOOTAGE (the most common request on footage the user did not shoot): when the filmstrip shows captions burned into the source, or the user says so — NEVER silently burn new captions on top; stacked caption soup is the #1 "this looks broken" complaint. The answer is REMOVAL: erase_burned_text() finds every burned caption band and repaints those pixels, then add_captions puts your own on a clear frame. That is also the answer to "change the caption font" / "make the subtitles bigger" on burned-in text — you are removing theirs and writing new ones from the transcript; say exactly that. Fallbacks when the erase measurement says ink survived OR your eyes say it ghosts — animated/boxed caption bands can ghost even when ink measures gone, so always look_at(output_times=[...]) inside the erased window on the next preview: cover the band (blur_region), crop it out (auto_reframe / set_frame) if it hugs an edge, or place new captions elsewhere (position 'top'). Re-erasing the same band with a nudged rectangle never improves quality — escalate a rung instead. And style the NEW captions so they cannot be mistaken for the old ones: if the burned captions were yellow boxes, do not pick a yellow highlight — the user cannot tell your emphasis pops from the ghosts they asked you to remove (project 382, 2026-08-07).
+PRE-CAPTIONED FOOTAGE (the most common request on footage the user did not shoot): when the filmstrip shows captions burned into the source, or the user says so — NEVER silently burn new captions on top; stacked caption soup is the clearest way to make the frame look broken. The answer is REMOVAL: erase_burned_text() finds every burned caption band and repaints those pixels, then add_captions puts your own on a clear frame. That is also the answer to "change the caption font" / "make the subtitles bigger" on burned-in text — you are removing theirs and writing new ones from the transcript; say exactly that. Fallbacks when the erase measurement says ink survived OR your eyes say it ghosts — animated/boxed caption bands can ghost even when ink measures gone, so always look_at(output_times=[...]) inside the erased window on the next preview: cover the band (blur_region), crop it out (auto_reframe / set_frame) if it hugs an edge, or place new captions elsewhere (position 'top'). Re-erasing the same band with a nudged rectangle never improves quality — escalate a rung instead. Style the NEW captions so they cannot be mistaken for the old ones: if the burned captions were yellow boxes, do not pick a yellow highlight because emphasis pops then resemble the ghosts the user asked you to remove.
 "Remove the captions": get_edl FIRST and say which case theirs is — captions WE added turn off with add_captions('off') (or set_caption_mutes for stretches); captions burned into the footage are the erase_burned_text case.
+
+## Common failure modes
+
+- Corrupt glyphs, missing transcript, orphan connectors, overcrowded phrases, excessive simultaneous words or multi-level novelty hierarchy.
+- Face/UI/safe-band collisions, burned-caption stacking, or a panel whose bounds/fade/motion do not match its glyph layout.
+
+## Verification procedure
+
+Run caption audit, render all paged QA states across distinct layouts/backgrounds/placements plus density and font-fallback extremes, and inspect transcript coverage, timing, geometry and legibility.
+
+## Repair ladder
+
+Correct text/coverage → regroup by speech rhythm/read time → reduce hierarchy → reposition/resize → choose a clean/documentary treatment → erase or avoid burned text → render and audit again.

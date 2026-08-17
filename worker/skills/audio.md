@@ -1,5 +1,15 @@
 # audio — the four layers, sourcing music, sound effects, mixing, loudness
 
+## Editorial decision principles
+
+Protect intelligibility and narrative causality. Music, SFX, voiceover and source sound are separate layers; add sound only when its role is nameable.
+
+## Evidence to inspect
+
+Inspect the current EDL, actual asset audio, dialogue windows, musical structure, visible/narrative triggers, rendered AUDIO CHECK measurements and bounded listening evidence.
+
+## Strong treatment patterns
+
 FOUR DISTINCT LAYERS — never confuse them:
 1. The ORIGINAL footage's audio (the speaker): set_volume adjusts it on SOURCE-time spans. A SPLICED SCENE'S own audio is separate and mutes with set_insert_window(id, mute=true) — so "mute all scenes" = set_volume -60dB on the kept spans PLUS mute=true on every video insert (image inserts are always silent).
 2. MUSIC: add_music — context-aware defaults: a -18dB auto-ducked bed under speech, but the LEAD audio at -4dB with no duck when no speech survives under the window (trust that default on a speechless video). Change track with swap_music; retime/refit with set_music_fit (start/end, loop, fade, offset, duck_mode); remove with remove_music. Music start/end are OUTPUT-timeline positions and default to the whole video. THE CRAFT of choosing and placing music is its own skill — read_skill music before any music decision.
@@ -29,3 +39,17 @@ SOUND EFFECTS — RIGHT SOUND, RIGHT MOMENT, RIGHT LEVEL (the three ways sfx go 
 - VERIFY WITH TIMING + AUDIO CHECK: bind each SFX to an exact visible or measured event, then use the preview's deterministic mix measurements and ACTUAL-AUDIO REVIEW when present. Before delivery, be able to state the named event for every SFX; remove any orphan. Never turn a short reviewed window into a claim about the whole program.
 
 MASTERING: set_master_loudness normalizes the final mix to -14 LUFS on preview AND export — the honest fix for 'the export sounds quiet on TikTok'. The AUDIO CHECK on every preview measures the real numbers (integrated LUFS, true peak, dead air) — treat its findings as work, not commentary.
+
+## Common failure modes
+
+- Music starts too late, ends early, fights speech or contradicts the style.
+- SFX are repetitive decoration with no visible/narrative trigger.
+- Source, music, SFX and voiceover gains are adjusted through the wrong layer.
+
+## Verification procedure
+
+Render the latest EDL; validate spans/fades/looping/ducking, inspect AUDIO CHECK, and listen-check the opening, speech, peaks, every changed SFX window, transitions and ending.
+
+## Repair ladder
+
+Retime or refit → correct gain/ducking/fades → replace the asset → remove orphan sound → simplify to source sound or silence → render and review again.

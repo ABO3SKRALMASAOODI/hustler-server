@@ -75,7 +75,7 @@ MCP_TYPES = ("mcp_tool",)
 DRAINING = threading.Event()
 
 
-def _build_runners():
+def _build_runners(policy="redesign"):
     """Choose local runners or their request-based execution owners.
 
     Media/index use the heavy executor. Agent turns use their smaller sibling
@@ -94,8 +94,14 @@ def _build_runners():
                                    and "agent_turn" in
                                    config.MODAL_EXECUTOR_TYPES))
                            else agent_loop.run_agent_job),
-            "shorts_plan": shorts.run_shorts_plan,
-            "mcp_tool": mcp_exec.run_mcp_job,
+            "shorts_plan": (remote.run_shorts_remote
+                            if (policy == "redesign"
+                                and config.MODAL_EXECUTOR_ENABLED)
+                            else shorts.run_shorts_plan),
+            "mcp_tool": (remote.run_mcp_remote
+                         if (policy == "redesign"
+                             and config.MODAL_EXECUTOR_ENABLED)
+                         else mcp_exec.run_mcp_job),
             # A main strip is cheap, but inserted clips may be full-resolution
             # phone footage and are sampled concurrently. Keep those decoders
             # off the 512-MiB dispatcher whenever Modal is configured.
@@ -118,7 +124,18 @@ def _build_runners():
     }
 
 
-RUNNERS = _build_runners()
+RUNNERS_BY_POLICY = {
+    "legacy": _build_runners("legacy"),
+    "redesign": _build_runners("redesign"),
+}
+# Kept as a compatibility view for operational scripts/tests that inspect the
+# active deployment. Per-job dispatch below never consults it.
+RUNNERS = RUNNERS_BY_POLICY[config.EXECUTION_POLICY_MODE]
+
+
+def _runner_for_job(job):
+    policy = config.execution_policy_for(job)
+    return RUNNERS_BY_POLICY[policy][job["type"]], policy
 
 
 def process_one(worker_db, job):
@@ -131,9 +148,11 @@ def process_one(worker_db, job):
         queue_wait = round(max(0.0, (
             datetime.now(timezone.utc) - job["created_at"]).total_seconds()), 2)
     try:
+        runner, execution_policy = _runner_for_job(job)
         print(f"[job {job_id}] start {job['type']} project={job['project_id']} "
-              f"attempt={job['attempts']} queue_wait={queue_wait}s", flush=True)
-        result = RUNNERS[job["type"]](worker_db, job)
+              f"attempt={job['attempts']} queue_wait={queue_wait}s "
+              f"policy={execution_policy}", flush=True)
+        result = runner(worker_db, job)
         total = round(time.monotonic() - t0, 2)
         # A request-based executor owns its terminal write so a Render redeploy
         # cannot lose the result after Cloud Run completed it.
@@ -149,6 +168,10 @@ def process_one(worker_db, job):
             timings = result.setdefault("timings", {})
             timings["queue_wait_s"] = queue_wait
             timings["total_s"] = total
+            result.setdefault("execution", {}).update({
+                "policy": execution_policy,
+                "class": config.execution_class_for(job["type"]),
+            })
         finished = job_completion.finalize_success(
             worker_db, job, result, lease_claim)
         if finished is False:
@@ -431,16 +454,30 @@ def reaper():
                 # worker twice is a poison pill and stops with the honest
                 # note.
                 if row["type"] == "agent_turn" \
-                        and not (row.get("payload") or {}).get(
-                            "death_resume") \
+                        and int((row.get("payload") or {}).get(
+                            "death_resume_count") or 0) < 3 \
                         and row.get("user_id") is not None:
                     try:
+                        prior_payload = dict(row.get("payload") or {})
+                        count = int(prior_payload.get(
+                            "death_resume_count") or 0) + 1
+                        root_id = int(prior_payload.get(
+                            "root_agent_job_id") or row["id"])
+                        sequence = int(prior_payload.get(
+                            "continuation_sequence") or 0) + 1
+                        resume_payload = dict(
+                            prior_payload, death_resume=count,
+                            death_resume_count=count,
+                            root_agent_job_id=root_id,
+                            logical_turn_continuation=True,
+                            continuation_sequence=sequence)
                         nid = worker_db.run(
-                            dbx.enqueue_job, row["project_id"],
-                            row["user_id"], "agent_turn",
-                            dict(row.get("payload") or {}, death_resume=1))
+                            dbx.enqueue_agent_continuation,
+                            row["project_id"], row["user_id"], root_id,
+                            sequence, resume_payload)
                         print(f"[reaper] agent turn {row['id']} died "
-                              f"mid-request — resuming as job {nid}",
+                              f"mid-request — durable resume {count}/3 as "
+                              f"job {nid}",
                               flush=True)
                         continue
                     except Exception as e:
@@ -593,13 +630,25 @@ def main():
     # lands, so applying the migration after the deploy still ends up correct.
     publish_mcp_catalog(dbx.Db())
 
-    # Fetchability probe (ytaccess): one real --simulate extraction from
-    # THIS box, verdict to the log and app_kv. Threaded because it talks to
-    # YouTube; best-effort because a probe must never stop a boot. This is
-    # the only way an operator sees "does YouTube serve this IP" without
-    # the Render dashboard — the Aug 8-9 cookie chase was flown blind.
-    threading.Thread(target=ytaccess.boot_probe, daemon=True,
-                     name="ytdlp-probe").start()
+    # The dispatcher launches the egress probe but never performs it. Render's
+    # IP and 512-MiB process are control-plane resources; the verdict must
+    # describe the same Modal egress users actually receive.
+    def _egress_probe():
+        if config.YTDLP_BOOT_PROBE != "1":
+            return
+        try:
+            verdict = (remote.run_probe_remote()
+                       if config.MODAL_EXECUTOR_ENABLED
+                       else ytaccess.boot_probe())
+            if isinstance(verdict, dict):
+                print(f"[ytaccess] remote probe ok={verdict.get('ok')} "
+                      f"download_ok={verdict.get('download_ok')}", flush=True)
+        except Exception as exc:
+            print(f"[ytaccess] remote probe failed: {str(exc)[:200]}",
+                  flush=True)
+
+    threading.Thread(target=_egress_probe, daemon=True,
+                     name="ytdlp-probe-launcher").start()
 
     if config.REMOTE_EXECUTOR_URL and not config.REMOTE_EXECUTOR_SECRET:
         print("[dispatcher] WARNING: REMOTE_EXECUTOR_URL set but "
@@ -688,7 +737,8 @@ def main():
 if __name__ == "__main__":
     # One image, two roles. The executor is the stateless compute endpoint
     # (Cloud Run); the default "worker" is the always-on dispatcher.
-    if config.WORKER_ROLE in ("executor", "agent_executor"):
+    if config.WORKER_ROLE in ("executor", "agent_executor", "mcp_executor",
+                              "shorts_executor"):
         import http_server
         http_server.serve()
     else:

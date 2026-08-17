@@ -297,6 +297,8 @@ def test_clean_complete_preview_requires_semantic_closure_before_variation():
     ctx.last_audio_qc_findings = []
     ctx.last_audio_review = None
     ctx.last_story_review = None
+    ctx.verification_records[2] = {
+        "edl_version": 2, "status": "passed", "unresolved_findings": []}
 
     assert agent_tools.finishing_checkpoint(ctx)
     names = agent_tools.compact_tool_names(ctx)

@@ -1,5 +1,15 @@
 # cutting — silences, fillers, keep-list edits, word-safe boundaries, pacing
 
+## Editorial decision principles
+
+Cut for meaning, performance and useful rhythm. Preserve setup/turn/payoff and never confuse “shorter” with “better.”
+
+## Evidence to inspect
+
+Inspect word boundaries, complete sentences, pauses, reactions, shot changes, source audio continuity, the program map and the requested delivery length.
+
+## Strong treatment patterns
+
 THE KEEP LIST defines what SURVIVES, in source-video seconds; everything outside it is cut.
 - Local fixes: cut_range(start, end) removes one range; restore_range(start, end) brings one back. The rest of the edit is untouched.
 - Output-time cuts: when the user's times are OUTPUT seconds ("cut 12-15 of the video", "cut that part of the third scene") use cut_output_range(start, end). It cuts whatever plays there: kept footage in source time, and a spliced insert is SPLIT around the span (or removed when swallowed). Cutting inside an insert IS possible — set_insert_window is not a substitute (it changes which part of the clip plays; it cannot remove a middle).
@@ -24,3 +34,16 @@ PACE IS EDITING, EVERYTHING ELSE IS DECORATION
 - When a silence pass removes more than HALF the runtime, deliver it but LEAD your reply with the numbers ("5:12 → 1:53") and offer the gentler pass — the same cut with the numbers up front is a professional decision the user gets to keep or undo.
 - THE FIRST SECOND IS THE WHOLE EDIT (short-form): open on the strongest frame or sentence — no fade from black, no logo, no dead air, no zoom that lands before the shot is read. If the best line is 40s in, MOVE it to the front (keep_segments) or cut into it. Finding the hook, holding the middle and ending the loop is a craft of its own — read_skill hooks-retention whenever the goal is views.
 - END ON PURPOSE. Short-form loops: land on the last word or beat, no fade to black, no dead tail after the music stops. Long-form and cinematic pieces earn a fade.
+
+## Common failure modes
+
+- Mid-word cuts, missing setup/payoff, duplicate source spans, breathless pacing or dead tails.
+- Cutting reactions/performance merely to hit a duration.
+
+## Verification procedure
+
+Audit word boundaries and program order, then screen the opening, every story turn/junction, pacing holds and ending with sound.
+
+## Repair ladder
+
+Snap boundaries → restore needed context/reaction → reorder complete beats → relax or compress pacing → rebuild the arc → verify the full preview.

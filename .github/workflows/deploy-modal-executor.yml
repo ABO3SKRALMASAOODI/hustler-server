@@ -6,7 +6,7 @@ on:
     paths:
       - "worker/**"
       - "!worker/tests/**"
-      - "!worker/**/*.md"
+      - "!worker/MODAL_EXECUTOR.md"
   workflow_dispatch: {}
 
 concurrency:
@@ -66,6 +66,10 @@ jobs:
         if: env.skip_deploy != 'true'
         run: pip install "modal==1.5.4"
 
+      - name: validate model-visible skills and capabilities
+        if: env.skip_deploy != 'true'
+        run: python worker/skill_validator.py
+
       - name: deploy executor functions
         if: env.skip_deploy != 'true'
         run: modal deploy worker/modal_app.py --env main --tag "$GITHUB_SHA"
@@ -109,6 +113,65 @@ jobs:
             exit 1
           }
           echo "Modal executor code=$got adapter=$got_adapter provider=modal"
+
+      - name: probe complete redesign fleet
+        if: env.skip_deploy != 'true'
+        run: |
+          python - <<'PY'
+          import concurrent.futures
+          import hashlib
+          import json
+          import modal
+          import subprocess
+
+          want_code = subprocess.check_output(
+              ["python", "-c", "import sys; sys.path.insert(0, 'worker'); "
+               "import version; print(version.code_version())"],
+              text=True).strip()
+          want_adapter = hashlib.sha256(
+              open("worker/modal_app.py", "rb").read()).hexdigest()[:12]
+          expected = {
+              "preview": ("preview", {"preview", "preview_check"}),
+              "batch": ("batch", {"index", "final"}),
+              "final": ("final", {"final"}),
+              "index": ("index", {"index"}),
+              "light": ("light", {"frames"}),
+              "heavy": ("heavy", {"capture", "track", "matte", "clean", "stems"}),
+              "egress": ("egress", {"fetch", "search", "stock_acquire"}),
+              "agent": ("agent", {"agent_turn"}),
+              "mcp": ("mcp", {"mcp_tool"}),
+              "shorts": ("shorts", {"shorts_plan"}),
+          }
+
+          def warm(name):
+              result = modal.Function.from_name(
+                  "valmera-executor", name,
+                  environment_name="main").remote({"type": "__warm"})
+              return name, (result or {}).get("result") or {}
+
+          reports = {}
+          with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
+              futures = [pool.submit(warm, name) for name in expected]
+              for future in concurrent.futures.as_completed(futures):
+                  name, report = future.result()
+                  reports[name] = report
+
+          for name, (profile, required_runners) in expected.items():
+              report = reports[name]
+              assert report.get("warmed") is True, (name, report)
+              assert report.get("profile") == profile, (name, report)
+              assert report.get("code_version") == want_code, (name, report)
+              assert report.get("adapter_version") == want_adapter, (name, report)
+              runners = set(report.get("runners") or [])
+              assert required_runners <= runners, (name, required_runners, runners)
+              if name in {"agent", "mcp", "shorts"}:
+                  assert runners == required_runners, (name, runners)
+          print(json.dumps({name: {
+              "profile": reports[name].get("profile"),
+              "role": reports[name].get("role"),
+              "runners": reports[name].get("runners"),
+          } for name in sorted(reports)}, sort_keys=True))
+          PY
 
       - name: record Modal YouTube byte health
         if: env.skip_deploy != 'true'

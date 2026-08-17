@@ -15,12 +15,33 @@ import compute_cost
 import config
 import db as dbx
 import failure_policy
+import io_telemetry
 import job_completion
 import resource_usage
 
 
 _heartbeat_started = False
 _heartbeat_lock = threading.Lock()
+_container_ready_at = time.monotonic()
+_container_input_count = 0
+_container_input_lock = threading.Lock()
+
+
+def _input_observation(now):
+    global _container_input_count
+    with _container_input_lock:
+        _container_input_count += 1
+        sequence = _container_input_count
+    return {
+        "container_input_sequence": sequence,
+        "container_first_input": sequence == 1,
+        # This is the observable Python-image readiness portion of a cold
+        # start. Provider queue/cold-boot latency remains visible to the
+        # caller's durable launch timing and must not be guessed here.
+        "cold_start_observed_s": (
+            round(max(0.0, now - _container_ready_at), 3)
+            if sequence == 1 else 0.0),
+    }
 
 
 class LeasedDb:
@@ -73,6 +94,9 @@ def execute(job, runners):
     job_id = job.get("id")
     lease_claim = job.get("total_claims")
     t0 = time.monotonic()
+    input_observation = _input_observation(t0)
+    io_token = io_telemetry.begin()
+    io_finished = False
     resource_start = resource_usage.snapshot()
     try:
         memory_sampler = resource_usage.MemorySampler()
@@ -81,6 +105,7 @@ def execute(job, runners):
         memory_sampler = None
 
     def measured_resources():
+        nonlocal io_finished
         measured = resource_usage.usage_since(resource_start)
         try:
             sampled_peak = memory_sampler.finish() if memory_sampler else None
@@ -88,6 +113,9 @@ def execute(job, runners):
             sampled_peak = None
         if sampled_peak is not None:
             measured["container_memory_sampled_peak_mib"] = sampled_peak
+        if not io_finished:
+            measured.update(io_telemetry.finish(io_token))
+            io_finished = True
         return measured
 
     print(f"[executor] start {jtype} job={job_id} "
@@ -105,6 +133,16 @@ def execute(job, runners):
         dt = round(time.monotonic() - t0, 2)
         execution_timings = {"total_s": dt}
         execution_timings.update(measured_resources())
+        execution_timings.update(input_observation)
+        execution_timings.update({
+            "execution_class": config.execution_class_for(jtype),
+            "execution_policy": config.execution_policy_for(job),
+            "cache_hit": bool(
+                isinstance(result, dict) and (
+                    result.get("cached") or result.get("cache_hit")
+                    or any(str(key).endswith("cache_hit_s")
+                           for key in (result.get("timings") or {})))),
+        })
         compute_cost.annotate_request(
             execution_timings, dt, config.WORKER_ROLE,
             os.getenv("K_SERVICE", ""))
@@ -125,7 +163,8 @@ def execute(job, runners):
             **execution_timings,
         }, sort_keys=True, separators=(",", ":")), flush=True)
         print(f"[executor] done {jtype} job={job_id} in {dt}s", flush=True)
-        return {"result": result, "job_completed": bool(completed)}
+        return {"result": result, "job_completed": bool(completed),
+                "execution": execution_timings}
     except Exception as exc:
         traceback.print_exc()
         dt = round(time.monotonic() - t0, 2)
@@ -136,6 +175,12 @@ def execute(job, runners):
         failure_timings.update(
             dict(getattr(exc, "runner_timings", {}) or {}))
         failure_timings.update(measured_resources())
+        failure_timings.update(input_observation)
+        failure_timings.update({
+            "execution_class": config.execution_class_for(jtype),
+            "execution_policy": config.execution_policy_for(job),
+            "cache_hit": False,
+        })
         compute_cost.annotate_request(
             failure_timings, dt, config.WORKER_ROLE,
             os.getenv("K_SERVICE", ""))
@@ -151,6 +196,11 @@ def execute(job, runners):
             "lease_lost": isinstance(exc, dbx.JobLeaseLost),
         }
     finally:
+        if not io_finished:
+            try:
+                io_telemetry.finish(io_token)
+            except Exception:
+                pass
         if job_id is not None:
             dbx.untrack_job(job_id)
         db.reset()

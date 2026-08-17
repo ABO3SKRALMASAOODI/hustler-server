@@ -29,6 +29,26 @@ from credits import check_and_reserve, get_balance
 import plan_gate
 import mp4probe
 import storage
+from video_services.jobs import (
+    enqueue as _enqueue,
+    running_orchestration_jobs as _running_jobs_count,
+)
+from video_services.project_state import (
+    active_original as _active_original,
+    edl_at as _edl_at,
+    index_row as _index_row,
+    latest_edl as _latest_edl,
+    project_for_user as _project_for_user,
+)
+from video_services.upload import (
+    clean_dimension as _clean_dim,
+    serialize_asset as _asset_out,
+)
+from video_services.chat_jobs import parse_client_event as _event_request_args
+from video_services.render_export import (
+    deterministic_final_failure as _deterministic_final_failure,
+    export_edl_error as _service_export_edl_error,
+)
 
 # The EDL schema's single source of truth is worker/schemas.py (pure
 # pydantic, no worker-internal imports). Loaded under a unique module name so
@@ -590,12 +610,6 @@ def vdb():
         conn.close()
 
 
-def _project_for_user(cur, project_id, user_id):
-    cur.execute("SELECT * FROM projects WHERE id = %s AND user_id = %s",
-                (project_id, int(user_id)))
-    return cur.fetchone()
-
-
 def _subscribe_gate_applies(cur, user_id):
     """Conversion wall: an unsubscribed account that has already seen one
     real edit (an agent turn that delivered a current-turn timeline change,
@@ -669,36 +683,9 @@ def _subscribe_gate_applies(cur, user_id):
 _trial_gate_applies = _subscribe_gate_applies
 
 
-_DETERMINISTIC_FINAL_FAILURE_KINDS = frozenset({
-    "invalid_edl", "deterministic_input", "deterministic_ffmpeg",
-    "render_budget_exceeded",
-})
-_DETERMINISTIC_FINAL_ERROR_MARKERS = (
-    "black-frame check failed", "duration check failed",
-    "wrong duration", "wrong length", "invalid edl",
-)
-
-
-def _deterministic_final_failure(row):
-    """Whether re-running the same immutable EDL would repeat its failure."""
-    if not row:
-        return False
-    result = row.get("result") or {}
-    failure = result.get("failure") or {}
-    kind = str(failure.get("kind") or "").strip().lower()
-    if kind in _DETERMINISTIC_FINAL_FAILURE_KINDS:
-        return True
-    error = str(row.get("error") or failure.get("error") or "").lower()
-    return any(marker in error for marker in _DETERMINISTIC_FINAL_ERROR_MARKERS)
-
-
 def _export_edl_error(edl, source_duration=None):
-    """Return a deterministic timeline error before spending a render job."""
-    try:
-        wschemas.validate_edl(edl, source_duration)
-        return None
-    except Exception as exc:
-        return str(exc)[:500]
+    return _service_export_edl_error(
+        edl, wschemas.validate_edl, source_duration)
 
 
 def _subscribe_offer_body():
@@ -724,63 +711,6 @@ def _subscribe_offer_body():
 
 def _trial_offer_body():
     return _subscribe_offer_body()
-
-
-def _running_jobs_count(cur, user_id):
-    # Only the LLM-spend jobs count toward the message cap. This used to
-    # count EVERY queued/running job, so a shorts run — many child finals plus
-    # their filmstrips, all legitimate paid renders — pushed the count past
-    # the cap and 429'd the user's next chat message for as long as the
-    # renders drained (Aug 8: minutes of "requests are enqueued" right after
-    # the product's flagship feature ran). Renders never race a turn; the cap
-    # exists to bound model spend, so it counts the jobs that spend model.
-    cur.execute("""SELECT COUNT(*) AS n FROM video_jobs
-                   WHERE user_id = %s AND state IN ('queued','running')
-                     AND type IN ('agent_turn', 'shorts_plan', 'mcp_tool')""",
-                (int(user_id),))
-    return cur.fetchone()["n"]
-
-
-def _enqueue(cur, project_id, user_id, jtype, payload):
-    cur.execute("""INSERT INTO video_jobs (project_id, user_id, type, payload)
-                   VALUES (%s, %s, %s, %s) RETURNING id""",
-                (project_id, int(user_id), jtype, Json(payload)))
-    return cur.fetchone()["id"]
-
-
-def _active_original(cur, project_id):
-    """Latest uploaded original video — the video this project edits."""
-    cur.execute("""SELECT * FROM assets
-                   WHERE project_id = %s AND kind = 'original'
-                   ORDER BY id DESC LIMIT 1""", (project_id,))
-    return cur.fetchone()
-
-
-def _index_row(cur, sha256):
-    # v10: an index with no captions is NORMAL (the filmstrip tiles are the
-    # visual record), so the old vision_blind coverage test is gone — a
-    # stale pipeline_version is the one self-heal signal left, and it
-    # already catches every pre-v10 (including blind) row.
-    if not sha256:
-        return None
-    cur.execute("""SELECT id, created_at, pipeline_version
-                   FROM indexes
-                   WHERE video_sha256 = %s""", (sha256,))
-    return cur.fetchone()
-
-
-def _latest_edl(cur, project_id):
-    cur.execute("""SELECT version, json, created_by, created_at FROM edls
-                   WHERE project_id = %s ORDER BY version DESC LIMIT 1""",
-                (project_id,))
-    return cur.fetchone()
-
-
-def _edl_at(cur, project_id, version):
-    cur.execute("""SELECT version, json, created_by, created_at FROM edls
-                   WHERE project_id = %s AND version = %s""",
-                (project_id, version))
-    return cur.fetchone()
 
 
 # ── TWO EDL VERSIONS CAN BE THE SAME VIDEO ───────────────────────────────────
@@ -1060,16 +990,6 @@ def _should_heal_preview(edl, indexed, drafting, agent_orphaned=False):
     if edl["created_by"] != "user" and not agent_orphaned:
         return False
     return drafting != edl["version"]
-
-
-def _asset_out(a):
-    return {
-        "id": a["id"], "kind": a["kind"], "storage_key": a["storage_key"],
-        "bytes": a["bytes"], "duration_s": a["duration_s"],
-        "width": a["width"], "height": a["height"], "fps": a["fps"],
-        "sha256": a["sha256"], "meta": a.get("meta") or {},
-        "created_at": a["created_at"].isoformat() if a.get("created_at") else None,
-    }
 
 
 # ------------------------------------------------------------------ #
@@ -1626,14 +1546,6 @@ def relay_upload(user_id, project_id):
 # 30-second clip and a 3-hour one, and 2% of three hours is 3.6 minutes of
 # footage the edit would be measured against wrongly.
 _ORIGINAL_DRIFT_TOLERANCE_S = 5.0
-
-
-def _clean_dim(v, lo, hi):
-    try:
-        v = int(v)
-    except (TypeError, ValueError):
-        return None
-    return v if lo <= v <= hi else None
 
 
 def _register_deferred_original(user_id, project_id, key, filename, declared,
@@ -3215,19 +3127,16 @@ def post_message(user_id, project_id):
         # is enqueued and starts the moment the running one ends. The red
         # "still working on your previous request" banner — which locked a
         # real user out of chat for 14 minutes on Aug 8 while their queued
-        # turn starved — is gone. Only MCP keeps the refusal: that editor is
-        # an outside model we cannot stack work onto.
+        # turn starved — is gone. MCP mutations now share that same queue.
         cur.execute("""SELECT id, type, state FROM video_jobs
                        WHERE project_id = %s
                          AND type IN ('agent_turn', 'mcp_tool')
                          AND state IN ('queued','running')
                        ORDER BY id DESC LIMIT 1""", (project_id,))
         busy = cur.fetchone()
-        if busy and busy["type"] == "mcp_tool":
-            return jsonify({"error": (
-                "Another editing session is working on this project right "
-                "now — give it a moment.")}), 409
-        stack_on_job = (busy["id"] if busy and busy["state"] == "queued"
+        stack_on_job = (busy["id"] if busy
+                        and busy["type"] == "agent_turn"
+                        and busy["state"] == "queued"
                         else None)
         stacked = bool(busy)
 
@@ -5962,15 +5871,6 @@ def set_project_mode(user_id, project_id):
     return jsonify({"ok": True, "kind": kind})
 
 
-def _event_request_args(data):
-    kind = str(data.get("kind") or "")[:40]
-    try:
-        asset_id = int(data.get("asset_id"))
-    except (TypeError, ValueError):
-        asset_id = None
-    return kind, asset_id, data.get("detail")
-
-
 @video_bp.route("/projects/<int:project_id>/client-event", methods=["POST"])
 @token_required
 def client_event(user_id, project_id):
@@ -6178,7 +6078,11 @@ def filmstrip(user_id, project_id):
                            RETURNING id""",
                         (project_id, int(user_id),
                          Json({"sig": want_sig,
-                               "tm_v": str(TIMELINE_MEDIA_VERSION)})))
+                               "tm_v": str(TIMELINE_MEDIA_VERSION),
+                               "execution_policy": (
+                                   os.getenv("EXECUTION_POLICY_MODE", "legacy")
+                                   if os.getenv("EXECUTION_POLICY_MODE", "legacy")
+                                   in {"legacy", "redesign"} else "legacy")})))
             cur.fetchone()
             conn.commit()
         except Exception as e:

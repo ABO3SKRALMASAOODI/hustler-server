@@ -53,18 +53,39 @@ def skill_names():
     return [n for n, _ in _CATALOG]
 
 
-def read_skill_text(name):
-    """The skill file's full text, or None. Name is the bare filename
-    (no .md), validated against the catalog — never a path."""
+SKILL_SECTIONS = (
+    "editorial decision principles", "evidence to inspect",
+    "strong treatment patterns", "common failure modes",
+    "verification procedure", "repair ladder",
+)
+
+
+def read_skill_text(name, section=None):
+    """Read a full skill or one named section; paths are never accepted."""
     name = (name or "").strip().lower().replace(".md", "")
     if name not in skill_names():
         return None
     try:
         with open(os.path.join(SKILLS_DIR, name + ".md"),
                   encoding="utf-8") as f:
-            return f.read()
+            text = f.read()
     except OSError:
         return None
+    wanted = str(section or "").strip().lower()
+    if not wanted:
+        return text
+    if wanted not in SKILL_SECTIONS:
+        return None
+    lines = text.splitlines()
+    heading = "## " + wanted
+    start = next((i for i, line in enumerate(lines)
+                  if line.strip().lower() == heading), None)
+    if start is None:
+        return None
+    end = next((i for i in range(start + 1, len(lines))
+                if lines[i].startswith("## ")), len(lines))
+    title = lines[0] if lines and lines[0].startswith("# ") else f"# {name}"
+    return "\n".join([title, "", *lines[start:end]]).strip() + "\n"
 
 
 def _catalog_block():
@@ -74,12 +95,11 @@ def _catalog_block():
     if not _CATALOG:
         return ""
     lines = ["SKILLS — focused playbooks you load on demand with "
-             "read_skill(name). Read the matching skill BEFORE your first "
-             "edit of that kind in a session (they are short and they are "
-             "where the craft rules live); batch the read_skill call "
-             "together with your reading tools so it costs no extra step. "
-             "Choose at most FOUR relevant playbooks per turn, then execute; "
-             "do not load the catalog:"]
+             "read_skill(name), or read_skill(name, section) when only one "
+             "decision/verification section is relevant. Load every craft "
+             "area the treatment genuinely needs; section retrieval avoids "
+             "rereading unrelated material and is never a capability quota. "
+             "Batch skill reads with evidence reads when useful:"]
     for name, desc in _CATALOG:
         lines.append(f"- {name}: {desc}")
     return "\n".join(lines)
@@ -88,7 +108,7 @@ def _catalog_block():
 CORE_PROMPT = """You are Valmera, a professional video editor. You edit by modifying an Edit Decision List (EDL) through tools — you never touch pixels; the renderer does. The original file is never modified. All times are seconds as floats, and every timestamp you pass to a tool must come from a tool result or the labeled filmstrips — NEVER guess or invent timings.
 
 YOUR SENSES — refreshed every message, never stale:
-- FILMSTRIPS & STILLS: labeled frame tiles of the main footage, uploaded clips, and still images are attached right before project state. Current-message attachments are prioritized and the visual budget is spread across the library before any clip gets extra depth. Normal projects fit in full; when a very large library exceeds the stated attachment budget, the block labels the overflow as inventory-only—use list_assets for a storage key and look_at_asset to inspect it. The timestamp under each video frame is that video's own clock. Treat only attached pixels as seen; use look_at_asset for an omitted file or a closer look.
+- FILMSTRIPS & STILLS: the initial request receives deduplicated, high-information storyboard pages from distinct scenes/clusters plus current attachments. A compact storyboard names every omitted cluster and its evidence ID/time range. Provider-sized pages are transport only: open_visual_page, look_at and look_at_asset can reopen as many evidence pages as the edit requires. The timestamp under each video frame is that video's own clock. Treat only attached pixels as seen.
 - TRANSCRIPT: word-timed, with speaker labels (S0/S1 = more than one person talks — cut and reorder by speaker, not by guessing from the picture) and timestamped filler sounds.
 - THE PROGRAM MAP: the numbered scene map of the CURRENT edit in viewer order — each scene's output window and where its pixels come from (a source range, or an inserted clip by name). It updates with every write; a tool result's "After:" state is the new program.
 - YOUR EYES ON DEMAND: look_at(times=[...]) hands you actual frames of the source; look_at(output_times=[...]) frames of the ASSEMBLED program (inserts included, tiles labeled with their scene); look_at_asset for any uploaded clip, image or render. Use these whenever closer evidence will improve a zoom, crop, placement, or disputed visual judgment; they are aids, not permission gates. Every delivered frame carries a faint tenths grid ((0,0) = top-left), which can inform aim points, rects and positions.

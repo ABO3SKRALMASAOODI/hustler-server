@@ -38,6 +38,7 @@ does not exist today.
 """
 
 import glob
+import hashlib
 import json
 import os
 import re
@@ -50,6 +51,7 @@ import uuid
 from urllib.parse import urlparse, unquote
 
 import config
+import io_telemetry
 import media
 import motion_judge
 import net_fetch
@@ -668,6 +670,7 @@ def run_fetch_job(worker_db, job):
                     "youtube": is_youtube}
 
         path, kind = got["path"], got["kind"]
+        io_telemetry.add_downloaded(os.path.getsize(path))
         key = storage_key(project_id, kind, path)
         storage.upload_file(path, key, content_type(path))
 
@@ -714,6 +717,127 @@ def run_fetch_job(worker_db, job):
                       review_labels=review_labels,
                       motion_profile=motion_profile)
         return result
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def run_stock_acquire_job(worker_db, job):
+    """Idempotently acquire, probe, review and publish one stock rendition.
+
+    The orchestration container passes only provider metadata. This function
+    owns every media byte and returns a deterministic SHA-addressed asset
+    result; the caller performs the small project/EDL database commit.
+    """
+    del worker_db
+    import stock
+    import storage
+
+    payload = job.get("payload") or {}
+    project_id = job.get("project_id")
+    item = dict(payload.get("item") or {})
+    try:
+        want_w = max(1, int(payload.get("want_w") or 1920))
+        want_h = max(1, int(payload.get("want_h") or 1080))
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "invalid output dimensions"}
+    if not project_id or not item.get("id"):
+        return {"ok": False,
+                "error": "stock acquisition needs project_id and item"}
+
+    is_video = item.get("kind") == stock.KIND_VIDEO
+    kind = KIND_VIDEO if is_video else KIND_IMAGE
+    workdir = os.path.join(
+        config.TMP_DIR, f"stock_{uuid.uuid4().hex[:12]}")
+    os.makedirs(workdir, exist_ok=True)
+    path = os.path.join(workdir, "stock.mp4" if is_video else "stock.jpg")
+    try:
+        try:
+            stock.download(item, path, want_w, want_h)
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)[:300]}
+        io_telemetry.add_downloaded(os.path.getsize(path))
+
+        info = None
+        if is_video:
+            try:
+                info = media.probe(path)
+            except Exception:
+                info = None
+            if not (info and info.get("width")):
+                return {"ok": False,
+                        "error": "downloaded stock file is not readable video"}
+        try:
+            with open(path, "rb") as handle:
+                digest = hashlib.file_digest(handle, "sha256").hexdigest()
+        except AttributeError:  # Python 3.10 rollback image
+            hasher = hashlib.sha256()
+            with open(path, "rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    hasher.update(chunk)
+            digest = hasher.hexdigest()
+        ext = os.path.splitext(path)[1].lower()
+        key = f"fetched/{project_id}/stock/{digest[:32]}{ext}"
+        if not storage.exists(key):
+            storage.upload_file(path, key, content_type(path))
+
+        duration = (info or {}).get("duration") or item.get("duration_s")
+        motion_profile = None
+        if is_video:
+            try:
+                motion_profile = motion_judge.analyze_video(
+                    path, duration_s=duration)
+            except Exception:
+                pass
+
+        review_keys, review_labels = [], []
+        if payload.get("review", True):
+            if is_video:
+                try:
+                    dur = float(duration or 0.0)
+                except (TypeError, ValueError):
+                    dur = 0.0
+                fractions = (0.08, 0.34, 0.61, 0.87)
+                samples = [(min(max(dur * fraction, 0.0),
+                                max(0.0, dur - 0.04)),
+                            f"{dur * fraction:g}s")
+                           for fraction in fractions]
+                if dur <= 0.08:
+                    samples = [(0.0, "0s")]
+            else:
+                samples = [(0.0, "full image")]
+            for index, (at, label) in enumerate(samples):
+                frame = os.path.join(workdir, f"review_{index}.jpg")
+                try:
+                    media.frame_at(path, at, frame, width=768)
+                except Exception:
+                    continue
+                frame_key = (f"scratch/{project_id}/stock-review/"
+                             f"{digest[:16]}_{index}.jpg")
+                try:
+                    if not storage.exists(frame_key):
+                        storage.upload_file(frame, frame_key, "image/jpeg")
+                except Exception:
+                    continue
+                review_keys.append(frame_key)
+                review_labels.append(label)
+
+        return {
+            "ok": True,
+            "storage_key": key,
+            "sha256": digest,
+            "bytes": os.path.getsize(path),
+            "kind": kind,
+            "duration_s": duration,
+            "width": (info or {}).get("width") or item.get("picked_width")
+                     or item.get("width"),
+            "height": (info or {}).get("height") or item.get("picked_height")
+                      or item.get("height"),
+            "fps": (info or {}).get("fps"),
+            "source_url": item.get("source_url"),
+            "review_keys": review_keys,
+            "review_labels": review_labels,
+            "motion_profile": motion_profile,
+        }
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 

@@ -47,6 +47,10 @@ _LIST_LIMITS = {
     "coherence_rules": (12, 180),
     "alternatives_rejected": (4, 180),
     "acceptance_criteria": (16, 180),
+    # Capability intent is durable treatment state, not a schema dump. Exact
+    # live names are validated by agent_tools when the plan is authored.
+    "tool_domains": (16, 48),
+    "required_tools": (160, 80),
 }
 
 _SEQUENCE_LIMIT = 16

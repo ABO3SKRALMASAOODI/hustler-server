@@ -1,5 +1,15 @@
 # text-graphics — titles, text behind the subject, title cards, color/corrupt screens, freeze frames
 
+## Editorial decision principles
+
+Graphics clarify hierarchy, information or a real story beat. Use one type/motion system and let stillness win when movement has no explanatory role.
+
+## Evidence to inspect
+
+Inspect exact words/timing, clear space, face/UI geometry, target objects, caption collisions, reading time, path extremes, matte coverage and rendered settle frames.
+
+## Strong treatment patterns
+
 TEXT TEMPLATES (add_text / set_text_motion / remove_text) — designed text burned over program time: 'title' (opening card), 'subtitle' (support line), 'lower_third' (name/context bar), 'callout' (short pointed label), 'big_number' (a huge stat like '10x'), 'quote', 'chapter'. Entrances: typewriter (entrance only), pop, whip, blur_in — and 'none' for INSTANT text ("no effect", "just appear" mean entrance='none' / exit='none'). add_text draws OVER the footage — it does not clear the frame. Dictated titles/labels/stats → add_text; spoken-word captions stay with add_captions. Every designed text owns caption suppression for its live window: captions can be enabled before or after without stacking, and moving/resizing/removing the text carries or removes its mute automatically. Do not create a separate caption_mutes span for the same graphic.
 
 ONE TYPE SYSTEM PER VIDEO. A title in one template, a callout in another, a subtitle in a third, each with unrelated movement, reads as a slide deck. Choose one hierarchy, accent system and motion language, then vary energy only when meaning or music earns it. Keep words few and bind each graphic to the exact phrase, object, action, or beat it clarifies. Put words in the frame's CLEAR space (sky, wall, floor — read it off the filmstrip or look_at), never across a face. Text that simply arrives with a cut can be more confident than decorative movement.
@@ -28,3 +38,15 @@ CORRUPT / GLITCH SCREENS (add_corrupt_screen) — the promo/meme move where the 
 FREEZE FRAMES (add_freeze_frame) — the 'pearl' / power-phrase move: freeze the picture and hold it with big centred words over the blurred, darkened still. A real cut, so captions never land on it; mute captions under it is unnecessary. Right for the 2-3 strongest sentences of a sermon or motivational piece.
 
 KINETIC TEXT (add_kinetic_text) — transcript-timed phrase typography over a range. The default `motion_style='composed'` uses one restrained inward settle across the passage and reserves a controlled scale overshoot for `emphasis_words`; this is coherent choreography, not a roulette of entrances. Use `preset` only when the established edit already speaks that legacy animation language, or `still` when cutting and typography carry the energy. The pass places phrases from measured clear bands and mutes duplicate bottom captions only under the phrases it actually creates. Inspect the rendered sequence, not one still: the relevant test is whether each phrase arrives with its speech, avoids the subject, reads before it yields, and makes the next phrase feel intentional.
+
+## Common failure modes
+
+- Cheap mixed templates, too many words/levels, face/UI/caption collisions, arrows with no target, mismatched panel/text motion or paths that leave frame.
+
+## Verification procedure
+
+Review entry, knots/path extremes, settled state and exit on every distinct background; check reading time, geometry, hierarchy and caption suppression.
+
+## Repair ladder
+
+Shorten copy → unify hierarchy/type → align panel/vector geometry → reposition/reduce motion → remove unsupported decoration → rerender the complete window.

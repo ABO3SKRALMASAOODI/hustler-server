@@ -794,15 +794,15 @@ def test_recipe_schema_is_exposed_to_the_agent_as_one_write_tool():
     assert "apply_edit_recipe" in agent_tools.WRITE_TOOLS
 
 
-def test_routed_recipe_keeps_every_transaction_safe_operation_available():
+def test_routed_recipe_exposes_only_operations_with_visible_exact_schemas():
     visible = {"apply_edit_recipe", "set_caption_style", "set_color_grade"}
     tools = {t["function"]["name"]: t for t in agent_tools.openai_tools(
         compact=True, names=visible)}
-    assert set(agent_tools.RECIPE_TOOLS) <= set(tools)
+    assert set(tools) == visible
     operation_names = tools["apply_edit_recipe"]["function"]["parameters"] \
         ["properties"]["operations"]["items"]["properties"]["tool"]["enum"]
 
-    assert set(operation_names) == set(agent_tools.RECIPE_TOOLS)
+    assert set(operation_names) == {"set_caption_style", "set_color_grade"}
     args_help = tools["apply_edit_recipe"]["function"]["parameters"] \
         ["properties"]["operations"]["items"]["properties"]["args"] \
         ["description"]

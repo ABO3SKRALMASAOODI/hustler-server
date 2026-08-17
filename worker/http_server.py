@@ -108,16 +108,24 @@ COMPUTE_RUNNERS = {
     # here uses an independent Cloud Run/Modal exit, uploads the large media
     # directly to object storage, and returns only metadata + review frames.
     "fetch": url_media.run_fetch_job,
+    "stock_acquire": url_media.run_stock_acquire_job,
     "search": song_find.run_search_job,
     "ytprobe": ytaccess.run_probe_job,
 }
 
-# A separate Cloud Run service uses the same authenticated HTTP contract but
-# exposes only agent_turn. It scales independently from ffmpeg and cannot be
-# tricked into accepting a render job merely by changing the request body.
+# Orchestration roles expose exactly one job family each. They scale
+# independently and cannot be tricked into borrowing another pool merely by
+# changing the request body. Media tools invoked inside these roles still
+# route to the specialized Modal compute functions.
 if config.WORKER_ROLE == "agent_executor":
     import agent_loop
     RUNNERS = {"agent_turn": agent_loop.run_agent_job}
+elif config.WORKER_ROLE == "mcp_executor":
+    import mcp_exec
+    RUNNERS = {"mcp_tool": mcp_exec.run_mcp_job}
+elif config.WORKER_ROLE == "shorts_executor":
+    import shorts
+    RUNNERS = {"shorts_plan": shorts.run_shorts_plan}
 else:
     RUNNERS = COMPUTE_RUNNERS
 

@@ -1,5 +1,15 @@
 # broll-inserts — cutaways vs splices, inserting media, moving scenes, stock footage
 
+## Editorial decision principles
+
+B-roll is story evidence, not wallpaper. Decide whether speech should continue, prefer authentic user footage, and judge all candidates as one coherent sequence.
+
+## Evidence to inspect
+
+Inspect the kept transcript/program clock, source and downloaded frames, candidate authenticity, duplication, palette/motion compatibility, face-dependent payoffs and entry/exit junctions.
+
+## Strong treatment patterns
+
 THE CHOICE: does the voice keep going?
 - B-ROLL / CUTAWAY (the most human editing move): the speaker mentions something concrete — SHOW it while their voice keeps going. add_overlay(fit='cover', start, duration_s 2-6) switches the PICTURE while the program's audio and captions keep running. Placement: get_kept_transcript gives each sentence's PROGRAM time — start the cover ON the words that mention the thing.
 - SPLICE (insert_media): PAUSES the program and adds time. Right for "add this clip at the end", "put it between the scenes", a beat between sentences.
@@ -27,3 +37,16 @@ SOURCING B-ROLL THE EDIT NEEDS (when the tools are listed): the podcast-clip mov
 Fetched/stock media reach the video only when placed (cover overlay or insert); video overlays are SILENT. ALWAYS tell the user which shots were fetched and from where (title + channel/source) — never describe one as something they filmed. QUALITY ADVISORY: corporate-cheesy stock (staged handshakes, watermarked look, 2010 color) often weakens the edit, but it remains the editor's decision. The user's own footage, even rougher, usually beats generic stock; look_at_asset and preview are available to compare palette and junction quality, never prerequisites to placement.
 
 SOURCING ORDER for b-roll: the user's uploads first (list_assets), then whichever of record_website / fetch_url / generate_video / generate_image are in CAPABILITIES; if none fit, say so and ask for a clip instead of faking one. Offer b-roll when the user asks to "make it more engaging / professional".
+
+## Common failure modes
+
+- First-result, irrelevant, repeated, watermarked, corporate-cheap or palette-incompatible footage.
+- Covering a face-dependent payoff, using the wrong clock, or shipping bad entry/exit junctions.
+
+## Verification procedure
+
+Inspect actual downloaded frames and motion, compare the sequence for diversity, and review every insertion/cutaway from before entry through after exit with dialogue/captions.
+
+## Repair ladder
+
+Choose another source window → choose the next candidate → shorten/reposition → hold the face/use user footage → remove the cutaway → verify the whole sequence again.

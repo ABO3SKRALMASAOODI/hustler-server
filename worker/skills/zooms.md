@@ -1,5 +1,15 @@
 # zooms — aiming, travelling paths, screen-recording choreography, crops vs zooms
 
+## Editorial decision principles
+
+Every zoom needs a narrative purpose, measured target and safe temporal window. Camera motion directs attention; zero zooms is often the professional choice.
+
+## Evidence to inspect
+
+Inspect unzoomed target frames, evidence IDs, every shot boundary and path extreme, subject/face/UI geometry, target appearance timing and the full rendered window.
+
+## Strong treatment patterns
+
 AIMING — a coordinate is a MEASUREMENT, never an impression:
 - Every frame you look at carries a faint tenths grid ((0,0) = top-left, labels .2/.4/.6/.8). Read aim points, rects and positions off it.
 - To zoom INTO a thing (a message, a button, a panel): read its box off the grid and pass add_zoom rect=[x0,y0,x1,y1]. cx/cy pin a POINT in place and cannot bring an edge subject to centre — rect framing is the reliable way.
@@ -28,3 +38,15 @@ SCREEN-RECORDING CHOREOGRAPHY — what makes a travelling zoom over a UI read as
 - NEW SCENES DROPPED INSIDE YOUR MOVE PLAY WIDE. When new content lands mid-path, the remap re-anchors keyframes to their own scene and plays the new scene wide — aim it deliberately if it deserves a shot.
 
 A WIDE UI STRIP IS A CROP, NOT A ZOOM. "Show the full timeline, nothing else" is geometrically impossible for a zoom — a 16:9 viewport wide enough for a 2.6:1 strip must include what sits above it. set_insert_window(id, crop=[x0,y0,x1,y1]) makes a spliced scene show ONLY that region, letterboxed; keep the zoom wide across it. Split the insert first when only a stretch should be the detail shot. Read the region's bounds off a look_at_asset grid of THAT clip.
+
+## Common failure modes
+
+- Repetitive equally spaced pushes, missing purpose/evidence, empty-wall framing, clipped faces/UI, visible drift during holds or stale targeting across cuts.
+
+## Verification procedure
+
+Track/inspect the intended subject across the whole window, every shot boundary and path extreme; review motivation, repetition and the rendered landing/hold/exit.
+
+## Repair ladder
+
+Retarget from unzoomed evidence → add shot-specific path → split at boundary → widen/reduce strength → convert to crop where appropriate → remove the zoom → verify again.

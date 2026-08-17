@@ -88,11 +88,13 @@ def test_synchronous_tools_emit_cost_and_whole_container_telemetry(
         {"id": None, "type": "frames", "project_id": 9},
         {"frames": lambda _db, _job: {"ok": True}})
 
-    assert response == {"result": {"ok": True}, "job_completed": False}
+    assert response["result"] == {"ok": True}
+    assert response["job_completed"] is False
+    assert response["execution"]["execution_class"] == "light_media"
     output = capsys.readouterr().out
     assert '"container_memory_peak_mib":612.5' in output
     assert '"container_memory_sampled_peak_mib":700.0' in output
-    assert '"compute_profile":"modal-light-4core-2-32g-global"' in output
+    assert '"compute_profile":"modal-light-1core-1-4g-global"' in output
     assert '"job_id":null' in output
 
 

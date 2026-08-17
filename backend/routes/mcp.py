@@ -59,8 +59,13 @@ import storage
 import routes.mcp_oauth as mcp_oauth
 from routes.admin import ADMIN_EMAIL
 from routes.auth import token_required
-from routes.video import (complete_upload_core, vdb, _enqueue,
-                          _project_for_user, _active_original, _index_row)
+from routes.video import complete_upload_core, vdb
+from video_services.jobs import enqueue as _enqueue
+from video_services.project_state import (
+    active_original as _active_original,
+    index_row as _index_row,
+    project_for_user as _project_for_user,
+)
 
 mcp_bp = Blueprint("mcp", __name__)
 
@@ -769,18 +774,12 @@ def _run_tool_job(tok, name, args, raw=False, project_id=None):
         if not project:
             return _out(f"Project {project_id} does not exist on this account. "
                         "Call list_projects and copy the intended id.")
-        # Two editors on one timeline write conflicting EDL versions and each
-        # reads state the other is halfway through changing. The studio's own
-        # agent owns the project while its turn runs.
-        cur.execute("""SELECT id FROM video_jobs
-                       WHERE project_id = %s AND type = 'agent_turn'
-                         AND state IN ('queued','running')""", (project_id,))
-        if cur.fetchone():
-            return _out("Valmera's own agent is mid-turn on this project — "
-                        "wait for it to finish before editing, or the two of "
-                        "you will overwrite each other's edit.")
+        catalog = _catalog() or {}
+        mutation = name in set(catalog.get("write_tools") or []) or name in {
+            "set_edit_plan", "complete_edit_plan_steps", "reset_edit"}
         job_id = _enqueue(cur, project_id, tok["user_id"], "mcp_tool",
-                          {"tool": name, "args": args})
+                          {"tool": name, "args": args,
+                           "mutation": mutation})
     # The control calls are plumbing the model never asked for by name, so a
     # failure must not be reported as "__state__ failed".
     label = {"__state__": "Reading the project state",

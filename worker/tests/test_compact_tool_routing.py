@@ -12,22 +12,24 @@ import agent_loop                                              # noqa: E402
 
 class _Ctx:
     user_message = "make a coherent podcast reel with clean captions"
-    edit_plan = {"step_states": [
+    edit_plan = {"tool_domains": ["story", "captions"], "step_states": [
         {"task": "select and cut one complete exchange", "status": "pending"},
         {"task": "add clean captions", "status": "pending"},
         {"task": "add music", "status": "completed"},
     ]}
 
     def __init__(self):
-        self._expanded_tool_domains = set()
+        self._loaded_tool_domains = set()
+        self._loaded_tool_names = set()
 
 
-def test_post_plan_catalog_keeps_all_recipe_capability_and_routes_side_effects():
+def test_post_plan_catalog_routes_from_explicit_plan_not_request_regex():
     ctx = _Ctx()
     names = agent_tools.compact_tool_names(ctx)
     assert {"keep_segments", "render_preview",
             "expand_toolset"} <= names
-    assert set(agent_tools.RECIPE_TOOLS) <= names
+    assert {"set_caption_style", "add_captions"} <= names
+    assert "add_music" not in names
     assert "search_stock" not in names
 
     full = agent_tools.openai_tools(compact=True)
@@ -54,18 +56,15 @@ def test_any_omitted_domain_can_be_loaded_without_changing_the_edit():
     out = agent_tools.expand_toolset(ctx, ["media", "motion"])
     names = agent_tools.compact_tool_names(ctx)
 
-    assert "Tool domain exposed" in out
+    assert "Capabilities loaded" in out
     assert {"research_broll", "generate_image"} <= names
     assert {"add_zoom", "set_color_grade"} <= names
 
-    # The loop consumes this one-shot set after building the next dispatch;
-    # a later stage can explicitly load another domain without permanent
-    # schema accumulation.
-    ctx._expanded_tool_domains = set()
+    # Loading is additive and persists throughout the logical request.
     agent_tools.expand_toolset(ctx, ["motion"])
     names = agent_tools.compact_tool_names(ctx)
     assert {"add_zoom", "set_color_grade"} <= names
-    assert "research_broll" not in names
+    assert "research_broll" in names
 
 
 def test_duplicate_valid_domains_are_deduped_not_rejected():
@@ -73,7 +72,7 @@ def test_duplicate_valid_domains_are_deduped_not_rejected():
     out = agent_tools.expand_toolset(ctx, ["media", "media", "motion"])
 
     assert not out.startswith("REJECTED:")
-    assert ctx._expanded_tool_domains == {"media", "motion"}
+    assert ctx._loaded_tool_domains == {"media", "motion"}
     assert "finish that plan step" not in out
 
 
@@ -81,11 +80,12 @@ def test_preplan_expansion_forces_next_dispatch_schema_refresh():
     class Fresh:
         edit_plan = None
         versions_written = []
-        _expanded_tool_domains = {"media"}
+        _loaded_tool_domains = {"media"}
+        _loaded_tool_names = set()
 
     assert agent_loop._tool_schema_refresh_needed(Fresh()) is True
 
-    Fresh._expanded_tool_domains = set()
+    Fresh._loaded_tool_domains = set()
     assert agent_loop._tool_schema_refresh_needed(Fresh()) is False
 
 

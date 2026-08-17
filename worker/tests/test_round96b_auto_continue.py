@@ -24,16 +24,17 @@ def test_fixed_iteration_and_model_call_limits_are_gone():
     assert "only a few model calls remain" not in source
 
 
-def test_real_external_boundaries_and_progress_refresh_remain():
+def test_real_external_boundaries_create_durable_continuations():
     source = inspect.getsource(agent_loop._run_loop)
     assert "SHUTDOWN.is_set()" in source
     assert "ctx.over_budget()" in source
     assert "AGENT_TURN_TIMEOUT_S" in source
-    assert "_progressed and not ctx.over_budget()" in source
-    assert "refreshing it" in source
+    assert "_durable_continuation" in source
+    assert "enqueue_agent_continuation" in source
+    assert "execution slice boundary" in source
     assert '"images_generated"' in source
     assert '"videos_generated"' in source
-    assert '"assets0"' in source
+    assert '"root_agent_job_id"' in source
     assert config.AGENT_TURN_TOTAL_TIMEOUT_S - config.AGENT_TURN_TIMEOUT_S \
         >= 120
     assert 'and n_clock < 1' not in source

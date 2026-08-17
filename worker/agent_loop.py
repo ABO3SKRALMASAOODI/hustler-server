@@ -28,6 +28,7 @@ import preference_memory
 import reference_profile
 import remote
 import request_intent
+import visual_index
 import sfx_search
 import song_find
 import storage
@@ -276,7 +277,8 @@ def _strip_for(worker_db, sha, max_tiles):
     exactly the turn that should feel instant."""
     row = worker_db.run(dbx.get_index_by_sha, sha) if sha else None
     idx = (row or {}).get("json") or {}
-    keys = idx.get("tile_keys") or []
+    storyboard = idx.get("visual_storyboard") or {}
+    keys = storyboard.get("sheet_keys") or idx.get("tile_keys") or []
     if not keys:
         return [], idx
     if len(keys) > max_tiles > 0:
@@ -450,13 +452,27 @@ def filmstrip_parts(ctx, worker_db, priority_asset_ids=None):
         original = worker_db.run(dbx.latest_asset, ctx.project_id, "original")
         sha = original and original.get("sha256")
         if sha:
-            tiles, idx = _strip_for(worker_db, sha, config.TILES_MAIN_MAX)
+            tiles, idx = _strip_for(
+                worker_db, sha, config.VISUAL_REQUEST_SHEETS_PER_PAGE)
             if tiles:
                 v = idx.get("video") or {}
                 step = idx.get("tile_step_s")
+                storyboard = idx.get("visual_storyboard") or {}
+                if storyboard:
+                    selected_keys = {key for key, _local in tiles}
+                    for sheet in storyboard.get("sheets") or []:
+                        if sheet.get("key") in selected_keys:
+                            ctx._visual_pages_opened.add(
+                                int(sheet.get("page") or 0))
+                    sampling = (
+                        f"{storyboard.get('distinct_clusters', 0)} distinct "
+                        "visual clusters selected at shot/motion/layout/"
+                        "transcript boundaries; near-duplicates collapsed")
+                else:
+                    sampling = f"frames every {step or '?'}s"
                 strips.append((
-                    f"MAIN FOOTAGE — {v.get('duration', 0):.1f}s, frames "
-                    f"every {step or '?'}s, timestamps under each frame "
+                    f"MAIN FOOTAGE — {v.get('duration', 0):.1f}s, {sampling}, "
+                    "timestamps and evidence IDs under each frame "
                     "(SOURCE seconds)", tiles))
                 total += len(tiles)
 
@@ -470,7 +486,7 @@ def filmstrip_parts(ctx, worker_db, priority_asset_ids=None):
         clips = []
     # An attachment can sit beyond indexed_clips' broad library query on an
     # extreme project. Fetch those few explicit ids and prepend them if ready.
-    for aid in priority_asset_ids[:4]:
+    for aid in priority_asset_ids:
         try:
             attached = worker_db.run(dbx.get_asset, aid)
         except Exception:
@@ -522,7 +538,7 @@ def filmstrip_parts(ctx, worker_db, priority_asset_ids=None):
     except Exception:
         images = []
     priority_images = []
-    for aid in priority_asset_ids[:4]:
+    for aid in priority_asset_ids:
         try:
             attached = worker_db.run(dbx.get_asset, aid)
         except Exception:
@@ -567,10 +583,15 @@ def filmstrip_parts(ctx, worker_db, priority_asset_ids=None):
     omitted_note = ""
     if clips_omitted or images_omitted:
         omitted_note = (
-            f" This project exceeds the visual overview budget: "
+            f" The first provider-sized orientation page deduplicated "
             f"{clips_omitted} clip(s) and {images_omitted} image(s) are "
-            "inventory-only in this message. Use list_assets for their "
-            "storage keys, then look_at_asset for any one that matters.")
+            "represented by the complete inventory/storyboard instead of "
+            "duplicate pixels. Open every distinct asset relevant to the "
+            "treatment with look_at_asset; this is transport paging, not an "
+            "image allowance.")
+    main_storyboard = (getattr(ctx, "index", None) or {}).get(
+        "visual_storyboard") or {}
+    storyboard_text = visual_index.compact_text(main_storyboard)
     content = [{"type": "text", "text":
                 "FILMSTRIPS & STILLS — a current, labeled visual overview "
                 "of this project's footage and images. Current-message "
@@ -583,7 +604,10 @@ def filmstrip_parts(ctx, worker_db, priority_asset_ids=None):
                 "UI content, framing, where the action is. For a closer or "
                 "exact look at any moment, call look_at (main footage / "
                 "program) or look_at_asset (a clip or image) — look as "
-                "often as you need." + omitted_note}]
+                "often as you need. Storyboard contact sheets are transport-"
+                "paged; open_visual_page retrieves any/all remaining pages "
+                "without a logical image quota." + omitted_note
+                + (("\n\n" + storyboard_text) if storyboard_text else "")}]
     for label, tiles in strips:
         content.append({"type": "text", "text": f"[{label}]"})
         for _key, local in tiles:
@@ -691,7 +715,7 @@ def _attachment_context(worker_db, ctx, user_message):
     return ("\n\n" + "\n".join(notes)) if notes else ""
 
 
-def state_block(ctx, worker_db, denied_tools=()):
+def state_block(ctx, worker_db, denied_tools=(), include_blueprint=True):
     """The CURRENT PROJECT STATE message: the footage, its transcript/shots,
     the current EDL and what is available to place.
 
@@ -1022,7 +1046,7 @@ def state_block(ctx, worker_db, denied_tools=()):
         except Exception as e:
             print(f"[grammar] plan_block failed: {e}", flush=True)
     blueprint = director.prompt_block(getattr(ctx, "edit_plan", None))
-    if blueprint:
+    if blueprint and include_blueprint:
         block += "\n\n" + blueprint
     # Reference grammars suggest a skin; this contract states what must be
     # true for the chosen format to work. It is deliberately invariant-level
@@ -1064,15 +1088,16 @@ def capabilities_block():
     """The CAPABILITIES message — generated from the tool registry, so it can
     never advertise a tool this deployment turned off.
 
-    Names only (round 71f): the active stage's tools carry full contracts in
-    the request schemas. Omitted domains are loaded with expand_toolset. The
-    old first-sentence-per-tool digest was ~13k chars repeated every call;
-    MCP still gets the complete catalog from catalog()."""
-    return ("CAPABILITIES — the complete list of write operations that "
-            "exist this deployment. Your current stage has full schemas for "
-            "the relevant subset; if a listed capability is not callable, "
-            "use expand_toolset for its domain: "
-            + ", ".join(agent_tools.capability_names())
+    Exact names are grouped into a stable directory. Active tools carry full
+    schemas; any other listed capability can be loaded explicitly and remains
+    present for the logical turn. MCP still receives the full schema catalog."""
+    return ("CAPABILITIES — complete deployed directory, grouped by editorial "
+            "department. The current provider page has full schemas for its "
+            "active subset; use load_tools(names=[...]) or "
+            "load_tools(domains=[...]) to add any listed capability. Loaded "
+            "schemas persist for this user request and there is no numeric "
+            "tool allowance.\n"
+            + agent_tools.capability_directory()
             + ". Nothing else exists. If the user asks for anything not "
             "listed (motion-TRACKED stickers pinned to moving objects, "
             "true crossfades, custom font files, ...), say so plainly and "
@@ -1265,10 +1290,36 @@ def _reply_language_note(user_texts):
 
 def _build_messages(ctx, worker_db, user_message, attachment_note="",
                     include_visual_overview=True):
-    # system_prompt(), not the raw constant: it drops the built-in-library
-    # claims when this image shipped no tracks.
-    msgs = [{"role": "system", "content": system_prompt()},
-            {"role": "system", "content": capabilities_block()}]
+    def _component(name, value):
+        encoded = (value if isinstance(value, str) else json.dumps(
+            value, sort_keys=True, separators=(",", ":"), default=str))
+        components[name] = {
+            "chars": len(encoded),
+            "sha256": hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16],
+        }
+
+    components = {}
+    # Stable, content-addressed prefix. system_prompt(), not the raw constant:
+    # it drops built-in-library claims when this image shipped no tracks.
+    kernel = system_prompt()
+    capabilities = capabilities_block()
+    msgs = [{"role": "system", "content": kernel},
+            {"role": "system", "content": capabilities}]
+    _component("editor_kernel", kernel)
+    _component("capability_directory", capabilities)
+
+    storyboard_text = visual_index.compact_text(
+        (getattr(ctx, "index", None) or {}).get("visual_storyboard") or {})
+    if storyboard_text:
+        immutable_visual = (
+            "IMMUTABLE VISUAL INDEX / STORYBOARD DIGEST — every omitted "
+            "cluster remains reopenable by evidence ID:\n" + storyboard_text)
+        msgs.append({"role": "system", "content": immutable_visual})
+        _component("visual_index_digest", immutable_visual)
+    blueprint = director.prompt_block(getattr(ctx, "edit_plan", None))
+    if blueprint:
+        msgs.append({"role": "system", "content": blueprint})
+        _component("durable_blueprint", blueprint)
     # THE FILMSTRIPS — rebuilt fresh every turn for every video in the
     # project, so the agent's picture of the footage can never go stale. A
     # blind provider strips these on first rejection (_strip_image_parts)
@@ -1290,12 +1341,16 @@ def _build_messages(ctx, worker_db, user_message, attachment_note="",
                 item.get("id") if isinstance(item, dict) else item
                 for item in attachment_ids]
             parts = filmstrip_parts(
-                ctx, worker_db, priority_asset_ids=attachment_ids[:4])
+                ctx, worker_db, priority_asset_ids=attachment_ids)
             if parts:
                 msgs.append({"role": "user", "content": parts})
+                _component("selected_visual_evidence", parts)
         except Exception as e:
             print(f"[filmstrip] skipped ({e})", flush=True)
-    msgs.append({"role": "system", "content": state_block(ctx, worker_db)})
+    current_state = state_block(
+        ctx, worker_db, include_blueprint=False)
+    msgs.append({"role": "system", "content": current_state})
+    _component("current_project_edl_state", current_state)
     # The last few messages, not the last twenty (round 71f). Twenty was up
     # to 40k chars of stale conversation re-read on EVERY call of EVERY
     # turn, and it actively misled: superseded requests ("make the title
@@ -1315,12 +1370,22 @@ def _build_messages(ctx, worker_db, user_message, attachment_note="",
             if m["role"] == "user":
                 user_texts.append(content)
     user_texts.append(user_message["content"] or "")
-    msgs.append({"role": "system", "content":
-                 request_intent.request_contract(
-                     user_message["content"] or "")})
-    msgs.append({"role": "user",
-                 "content": user_message["content"][:4000] + attachment_note
-                 + _reply_language_note(user_texts)})
+    request_contract = request_intent.request_contract(
+        user_message["content"] or "")
+    msgs.append({"role": "system", "content": request_contract})
+    current_request = (user_message["content"][:4000] + attachment_note
+                       + _reply_language_note(user_texts))
+    msgs.append({"role": "user", "content": current_request})
+    _component("recent_conversation_and_request", [
+        row for row in msgs
+        if row.get("role") in {"user", "assistant"}
+        and isinstance(row.get("content"), str)])
+    _component("current_request_contract", request_contract)
+    metrics = getattr(ctx, "editing_metrics", None)
+    if isinstance(metrics, dict):
+        metrics["context_components"] = components
+        metrics["context_total_chars"] = sum(
+            row["chars"] for row in components.values())
     return msgs
 
 
@@ -1354,7 +1419,8 @@ def _compact_initial_filmstrip(messages):
         text_parts[0] = {
             "type": "text",
             "text": ("FILMSTRIPS & STILLS — inspected during the initial "
-                     "planning call. Their labels remain below. For any "
+                     "planning call. Exact evidence IDs, SOURCE clocks, "
+                     "covered ranges and descriptions remain below. For any "
                      "new visual decision, use look_at/look_at_asset at "
                      "exact measured moments; do not rely on memory."),
         }
@@ -1666,25 +1732,80 @@ def run_agent_job(worker_db, job):
     if not user_message:
         raise RuntimeError("No user message to respond to")
 
+    payload = job.get("payload") or {}
     original = worker_db.run(dbx.latest_asset, job["project_id"], "original")
     index_row = original and original["sha256"] and \
         worker_db.run(dbx.get_index_by_sha, original["sha256"])
     if original and not index_row:
-        # A main video WAS uploaded but hasn't finished indexing — wait. (With
-        # no original at all we run a canvas turn: the user is building from
-        # generated / uploaded images and clips, no main video required.)
-        worker_db.run(dbx.add_message, session_id, "assistant",
-                      "I can't edit yet — the video hasn't finished "
-                      "indexing. Give it a moment and resend your request.")
-        return {"status": "no_index", "outcome": "blocked",
-                "billable": False}
-
+        # claim_job normally holds this row behind its index dependency. If a
+        # deletion/race made the index disappear after claim, preserve the
+        # request as a continuation. The child is likewise dependency-gated;
+        # no busy loop and no "resend" burden reaches the user.
+        root_id = int(payload.get("root_agent_job_id") or job["id"])
+        sequence = int(payload.get("continuation_sequence") or 0) + 1
+        next_payload = dict(payload,
+                            message_id=int(user_message["id"]),
+                            root_agent_job_id=root_id,
+                            logical_turn_continuation=True,
+                            continuation_sequence=sequence,
+                            continuation_state={
+                                "durable_slice": True,
+                                "why": "waiting for visual index",
+                                "n": sequence})
+        next_id = worker_db.run(
+            dbx.enqueue_agent_continuation, job["project_id"], job["user_id"],
+            root_id, sequence, next_payload)
+        return {"status": "continued", "outcome": "in_progress",
+                "billable": False, "root_agent_job_id": root_id,
+                "continued_job_id": next_id,
+                "continuation_sequence": sequence}
+    continuation_state = (payload.get("continuation_state")
+                          if isinstance(payload.get("continuation_state"), dict)
+                          else {})
     workdir = os.path.join(config.TMP_DIR, f"agent_{job['id']}")
     os.makedirs(workdir, exist_ok=True)
 
     ctx = agent_tools.ToolContext(worker_db, job, project,
                                   index_row["json"] if index_row else None,
                                   workdir)
+    ctx._loaded_tool_domains = set(
+        continuation_state.get("loaded_tool_domains") or [])
+    ctx._loaded_tool_names = set(
+        continuation_state.get("loaded_tool_names") or [])
+    ctx.versions_written = [int(value) for value in
+                            continuation_state.get("versions_written") or []]
+    ctx.rendered_versions = {int(value) for value in
+                             continuation_state.get("rendered_versions") or []}
+    ctx.checked_versions = {int(value) for value in
+                            continuation_state.get("checked_versions") or []}
+    ctx.change_manifests = dict(
+        continuation_state.get("change_manifests") or {})
+    ctx.change_manifests = {int(key): value
+                            for key, value in ctx.change_manifests.items()}
+    ctx.verification_records = dict(
+        continuation_state.get("verification_records") or {})
+    ctx.verification_records = {int(key): value
+                                for key, value in ctx.verification_records.items()}
+    ctx._proof_ranges_by_version = {
+        int(key): value for key, value in
+        (continuation_state.get("proof_ranges_by_version") or {}).items()}
+    usage_state = continuation_state.get("usage") or {}
+    if isinstance(usage_state.get("model_usage"), dict):
+        ctx.model_usage = usage_state["model_usage"]
+        ctx.tokens_in = sum(int(row.get("in") or 0)
+                            for row in ctx.model_usage.values()
+                            if isinstance(row, dict))
+        ctx.tokens_out = sum(int(row.get("out") or 0)
+                             for row in ctx.model_usage.values()
+                             if isinstance(row, dict))
+        ctx.tokens_cached_in = sum(int(row.get("cached") or 0)
+                                   for row in ctx.model_usage.values()
+                                   if isinstance(row, dict))
+    try:
+        ctx.gen_extra_cost_usd = max(
+            0.0, float(usage_state.get("generation_cost_usd") or 0.0))
+    except (TypeError, ValueError):
+        ctx.gen_extra_cost_usd = 0.0
     try:
         ctx.edit_plan = director.normalize_blueprint(worker_db.run(
             dbx.latest_creative_blueprint, session_id))
@@ -1704,14 +1825,25 @@ def run_agent_job(worker_db, job):
     # out before rebuilding it. Recovery is append-only, so history is intact.
     try:
         _turn_start = ctx.latest_edl()
+        baseline_version = payload.get("turn_baseline_version")
+        if payload.get("logical_turn_continuation") and baseline_version:
+            try:
+                durable_start = worker_db.run(
+                    dbx.get_edl_version, job["project_id"],
+                    int(baseline_version))
+                if durable_start:
+                    _turn_start = durable_start
+            except Exception:
+                pass
         ctx.turn_start_edl = {
             "version": _turn_start["version"],
             "json": json.loads(json.dumps(_turn_start["json"])),
         }
-        payload = job.get("payload") or {}
         baseline_digest = payload.get("turn_baseline_digest")
         ctx.turn_baseline_from_death_resume = bool(
-            baseline_digest and payload.get("death_resume"))
+            baseline_digest and (payload.get("death_resume")
+                                 or payload.get(
+                                     "logical_turn_continuation")))
         if not baseline_digest:
             baseline_digest = hashlib.sha256(
                 edl_signature(_turn_start["json"]).encode("utf-8")) \
@@ -1859,14 +1991,73 @@ def run_agent_job(worker_db, job):
                 "is saved in the project state — do NOT redo it; finish "
                 "what remains of the request and reply.]")
         return _run_loop(ctx, worker_db, job, session_id, user_message,
-                         attachment_note)
+                         attachment_note,
+                         _cont=(continuation_state or None))
     except agent_tools.AskUser:
         raise   # never reaches here (handled in loop), but keep explicit
     except Exception as e:
-        # The full exception goes to the worker log (and llm_calls) — the chat
-        # gets a sentence the user can act on. See _user_facing_failure.
         print(f"[agent] job {job['id']} failed: {type(e).__name__}: {e}",
               flush=True)
+        # Unexpected runtime/provider faults are execution-slice failures,
+        # not user outcomes. Rebuild from durable EDL/blueprint state under
+        # the same root. Only the same normalized blocker three times may
+        # become a concrete user-visible blocker.
+        err_line = f"{type(e).__name__}: {str(e)[:500]}"
+        fingerprint = re.sub(r"\d+(?:\.\d+)?", "#", err_line)
+        previous = continuation_state.get("exception_fingerprint")
+        repeats = (int(continuation_state.get("exception_repeats") or 0) + 1
+                   if previous == fingerprint else 1)
+        if repeats < 3:
+            try:
+                root_id = int(payload.get("root_agent_job_id") or job["id"])
+                sequence = int(payload.get("continuation_sequence") or 0) + 1
+                next_payload = {
+                    key: value for key, value in payload.items()
+                    if key not in {"continuation_state", "death_resume",
+                                   "steered_into"}}
+                state = dict(continuation_state)
+                state.update({
+                    "durable_slice": True,
+                    "n": int(state.get("n") or 0) + 1,
+                    "why": "recoverable runtime failure",
+                    "exception_fingerprint": fingerprint,
+                    "exception_repeats": repeats,
+                    "versions_written": list(ctx.versions_written),
+                    "rendered_versions": sorted(ctx.rendered_versions),
+                    "checked_versions": sorted(ctx.checked_versions),
+                    "change_manifests": ctx.change_manifests,
+                    "verification_records": ctx.verification_records,
+                    "proof_ranges_by_version": ctx._proof_ranges_by_version,
+                    "loaded_tool_domains": sorted(
+                        getattr(ctx, "_loaded_tool_domains", None) or []),
+                    "loaded_tool_names": sorted(
+                        getattr(ctx, "_loaded_tool_names", None) or []),
+                    "usage": {"model_usage": ctx.model_usage,
+                              "generation_cost_usd": ctx.gen_extra_cost_usd},
+                })
+                next_payload.update({
+                    "message_id": int(user_message["id"]),
+                    "root_agent_job_id": root_id,
+                    "logical_turn_continuation": True,
+                    "continuation_sequence": sequence,
+                    "turn_baseline_digest": ctx.turn_baseline_digest,
+                    "turn_baseline_version": int(
+                        (ctx.turn_start_edl or {}).get("version")
+                        or ctx.latest_edl()["version"]),
+                    "continuation_state": state,
+                })
+                next_id = worker_db.run(
+                    dbx.enqueue_agent_continuation, job["project_id"],
+                    job["user_id"], root_id, sequence, next_payload)
+                print(f"[agent] recovered root {root_id} after {err_line}; "
+                      f"continuing as {next_id}", flush=True)
+                return {"status": "continued", "outcome": "in_progress",
+                        "billable": False, "root_agent_job_id": root_id,
+                        "continued_job_id": next_id,
+                        "continuation_sequence": sequence}
+            except Exception as checkpoint_error:
+                print(f"[agent] exception checkpoint failed: "
+                      f"{checkpoint_error}", flush=True)
         # Always stamped: an unstamped reply collapses the studio's version
         # stepper grouping (bounds come from message stamps), so even a
         # failed turn says which state it left the project in.
@@ -1878,7 +2069,10 @@ def run_agent_job(worker_db, job):
             except Exception:
                 fail_v = None
         worker_db.run(dbx.add_message, session_id, "assistant",
-                      _user_facing_failure(e),
+                      ("I couldn't complete the request because the same "
+                       "unresolved blocker repeated after all automatic "
+                       f"recovery attempts: {err_line}. Any saved edit "
+                       "versions remain intact."),
                       ({"edl_version": fail_v} if fail_v is not None
                        else None))
         raise
@@ -2024,7 +2218,8 @@ def _auto_render_if_needed(ctx, worker_db, session_id, timings,
             fail_note = (fail_note or "") + (
                 "\n\n(Heads up: the preview render failed — "
                 f"{result[:200]})")
-        elif result.startswith("Preview render is taking too long"):
+        elif result.startswith(("PREREQUISITE: the complete preview",
+                                "Preview render is taking too long")):
             fail_note = (fail_note or "") + (
                 "\n\n(The edit is saved. Its preview is still rendering and "
                 "will attach automatically when it finishes.)")
@@ -2036,16 +2231,6 @@ def _preview_repair_pushback(ctx, messages, t_start, already_pushed,
     """Surface one failed immutable preview as repair evidence."""
     failure = getattr(ctx, "last_preview_failure", None) or {}
     if already_pushed or not failure.get("agent_repairable"):
-        return False
-    # A correction needs one model dispatch plus one proof render.  At the
-    # wall, preserving the saved EDL and explaining honestly is safer than a
-    # half-written repair that the user never sees.
-    now = time.monotonic()
-    turn_started = t_start if turn_started is None else turn_started
-    remaining = min(
-        config.AGENT_TURN_TIMEOUT_S - (now - t_start),
-        config.AGENT_TURN_TOTAL_TIMEOUT_S - (now - turn_started))
-    if remaining < 120:
         return False
     version = ctx.latest_edl()["version"]
     messages.append({
@@ -2083,6 +2268,12 @@ def _quality_repair_pushback(ctx, messages, t_start, pushed_versions,
         findings.append(
             "independent actual-audio review: "
             + str(audio_review["text"])[:700])
+    _latest, verification = _latest_verification(ctx)
+    for row in verification.get("unresolved_findings") or []:
+        line = (f"{row.get('finding_id') or row.get('code')}: "
+                f"{row.get('message') or row}")
+        if line not in findings:
+            findings.append(line)
     if not findings:
         return False
     preview = getattr(ctx, "last_preview", None) or {}
@@ -2094,28 +2285,20 @@ def _quality_repair_pushback(ctx, messages, t_start, pushed_versions,
     if version is None or int(version) != int(latest) \
             or int(version) in pushed_versions:
         return False
-    # Leave room for a targeted write plus one immutable proof. If there is
-    # not enough clock, the finding is still disclosed in the final handoff.
-    now = time.monotonic()
-    turn_started = t_start if turn_started is None else turn_started
-    remaining = min(
-        config.AGENT_TURN_TIMEOUT_S - (now - t_start),
-        config.AGENT_TURN_TOTAL_TIMEOUT_S - (now - turn_started))
-    if remaining < 120:
-        return False
     pushed_versions.add(int(version))
     messages.append({
         "role": "system",
         "content": (
-            f"The independent finishing review found publish-blocking craft "
+            f"The durable finishing review found publish-blocking evidence "
             f"evidence in preview v{version}:\n- "
             + "\n- ".join(findings[:4])
             + "\nDo not hand this version off as world-class. Inspect the "
               "named exact moment if needed, then make a targeted repair and "
               "render the new version. If direct pixels prove a finding is a "
               "false positive or conflicts with the user's explicit choice, "
-              "keep the version and state that concrete evidence; do not add "
-              "random polish or repeat the same failed edit."
+              "use justify_verification_findings with the finding id and "
+              "concrete direct evidence. Do not add random polish or repeat "
+              "the same failed edit."
         ),
     })
     return True
@@ -2402,15 +2585,36 @@ def _assets_made_note(ctx):
             + " is saved to your project and ready to use")
 
 
+def _latest_verification(ctx):
+    try:
+        latest = int(ctx.latest_edl()["version"])
+    except Exception:
+        return None, {}
+    return latest, ((getattr(ctx, "verification_records", None) or {})
+                    .get(latest) or {})
+
+
+def _verification_complete(ctx):
+    latest, record = _latest_verification(ctx)
+    if latest is None:
+        return False
+    return (record.get("status") in {"passed", "justified"}
+            and not record.get("unresolved_findings"))
+
+
 def _quality_handoff(ctx):
-    """Expose quality evidence without withholding the studio export CTA."""
+    """Expose the durable quality gate for the exact immutable EDL version."""
     try:
         latest = ctx.latest_edl()["version"]
     except Exception:
-        return {"quality_status": "unchecked", "export_ready": True}
+        return {"quality_status": "unchecked", "export_ready": False}
     preview = getattr(ctx, "last_preview", None) or {}
     if preview.get("edl_version") != latest:
-        return {"quality_status": "unchecked", "export_ready": True}
+        return {"quality_status": "unchecked",
+                "export_ready": not bool(getattr(ctx, "versions_written", None))}
+
+    verification = ((getattr(ctx, "verification_records", None) or {})
+                    .get(int(latest)) or {})
 
     findings = []
     report = getattr(ctx, "last_visual_critic", None) or {}
@@ -2435,14 +2639,23 @@ def _quality_handoff(ctx):
             if len(findings) >= 4:
                 break
     findings = findings[:4]
+    for row in verification.get("unresolved_findings") or []:
+        message = str(row.get("message") or row)
+        if message not in findings:
+            findings.append(message)
+        if len(findings) >= 4:
+            break
     if findings:
-        return {"quality_status": "advisory", "quality_findings": findings,
-                "export_ready": True}
-    story_report = getattr(ctx, "last_story_review", None) or {}
-    status = ("pass" if report.get("verdict") == "pass" or
-              story_report.get("verdict") == "pass" else "unchecked")
+        return {"quality_status": "repair_required",
+                "quality_findings": findings, "export_ready": False}
+    if verification.get("status") in {"passed", "justified"}:
+        status = verification["status"]
+    else:
+        story_report = getattr(ctx, "last_story_review", None) or {}
+        status = ("pass" if report.get("verdict") == "pass" or
+                  story_report.get("verdict") == "pass" else "unchecked")
     return {"quality_status": status, "quality_findings": [],
-            "export_ready": True}
+            "export_ready": status in {"pass", "passed", "justified"}}
 
 
 def _unused_fetched_audio_note(ctx):
@@ -2463,13 +2676,13 @@ def _unused_fetched_audio_note(ctx):
 
 
 def _disclose_outstanding_quality(ctx, text):
-    """Disclose quality evidence without turning it into an export lock."""
+    """Disclose the concrete blocker on legitimate terminal boundaries."""
     quality = _quality_handoff(ctx)
-    if quality.get("quality_status") != "advisory":
+    if quality.get("quality_status") != "repair_required":
         return text
     first = quality.get("quality_findings", ["a quality issue remains"])[0]
     return (text.rstrip() +
-            "\n\nQuality advisory (export remains available): "
+            "\n\nVerification remains open: "
             + first[:360] + ".")
 
 
@@ -2988,6 +3201,11 @@ def _semantic_progress_marker(ctx):
     except Exception:
         department_gaps = None
         motion_gaps = None
+    _verification_version, verification = _latest_verification(ctx)
+    verification_rank = {
+        None: 0, "pending": 0, "repair_required": 1,
+        "justified": 2, "passed": 3,
+    }.get(verification.get("status"), 0)
     return {
         "has_write": bool(getattr(ctx, "versions_written", None)),
         "write_tools": frozenset(getattr(ctx, "write_calls", None) or []),
@@ -3001,6 +3219,9 @@ def _semantic_progress_marker(ctx):
         "review_findings": findings,
         "department_gaps": department_gaps,
         "motion_gaps": motion_gaps,
+        "verification_rank": verification_rank,
+        "verification_findings": len(
+            verification.get("unresolved_findings") or []),
     }
 
 
@@ -3025,6 +3246,14 @@ def _semantic_progressed(before, after):
     new_verdicts = tuple(after.get("review_verdicts") or ())
     if any(n > (old_verdicts[i] if i < len(old_verdicts) else 0)
            for i, n in enumerate(new_verdicts)):
+        return True
+    if int(after.get("verification_rank") or 0) > int(
+            before.get("verification_rank") or 0):
+        return True
+    old_verification = before.get("verification_findings")
+    new_verification = after.get("verification_findings")
+    if old_verification is not None and new_verification is not None \
+            and new_verification < old_verification:
         return True
     old_findings = tuple(before.get("review_findings") or ())
     new_findings = tuple(after.get("review_findings") or ())
@@ -3369,6 +3598,24 @@ def _outcome_meta(ctx, outcome):
                                if tokens_in else 0.0),
         "tokens_out": tokens_out,
         "estimated_model_cost_usd": estimated_model_cost_usd,
+        "tools_loaded": sorted(
+            getattr(ctx, "_loaded_tool_names", None) or []),
+        "tool_domains_loaded": sorted(
+            getattr(ctx, "_loaded_tool_domains", None) or []),
+        "visual_clusters_available": int(
+            ((getattr(ctx, "index", None) or {}).get(
+                "visual_storyboard") or {}).get("distinct_clusters") or 0),
+        "visual_pages_opened": len(
+            getattr(ctx, "_visual_pages_opened", None) or []),
+        "verification_records": len(
+            getattr(ctx, "verification_records", None) or {}),
+        "verification_findings": sum(len(
+            (row or {}).get("findings") or []) for row in
+            (getattr(ctx, "verification_records", None) or {}).values()),
+        "verification_repairs": sum(len(
+            (row or {}).get("repairs") or []) for row in
+            (getattr(ctx, "verification_records", None) or {}).values()),
+        "tool_outcomes": counts,
         "edit_shape": edit_shape,
         "quality_evidence": {
             "visual_critic_verdict": (
@@ -3493,7 +3740,8 @@ _CONTINUATION_NOTE = (
 def _tool_schema_refresh_needed(ctx):
     """Whether the next dispatch needs a newly routed tool catalog."""
     return bool(getattr(ctx, "edit_plan", None) or ctx.versions_written
-                or getattr(ctx, "_expanded_tool_domains", None))
+                or getattr(ctx, "_loaded_tool_domains", None)
+                or getattr(ctx, "_loaded_tool_names", None))
 
 
 def _run_loop(ctx, worker_db, job, session_id, user_message,
@@ -3524,13 +3772,22 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
     # restores the discarded internal conversation nor adds exact evidence.
     # The continuation note explicitly routes new visual decisions through
     # look_at/look_at_asset. Fresh user turns still receive the full overview.
+    # A continuation created only because the upload was still indexing has
+    # not seen any visual evidence yet. Treat its first ready slice as the
+    # orientation dispatch; ordinary execution-slice continuations keep the
+    # compact durable storyboard and reopen pixels by evidence ID as needed.
+    needs_visual_orientation = (
+        not bool(_cont)
+        or _cont.get("why") == "waiting for visual index")
     messages = _build_messages(
         ctx, worker_db, user_message, attachment_note,
-        include_visual_overview=not bool(_cont))
+        include_visual_overview=needs_visual_orientation)
     if _cont:
+        cont_timings = _cont.get("timings") or {"tools": {}}
         done = ", ".join(
             f"{name} x{t['n']}" if t["n"] > 1 else name
-            for name, t in sorted(_cont["timings"]["tools"].items())) or \
+            for name, t in sorted(
+                (cont_timings.get("tools") or {}).items())) or \
             "nothing yet"
         # The plan the earlier pass RECORDED (set_edit_plan) — what was
         # decided, not merely what ran. A resumed pass finishes the plan
@@ -3564,6 +3821,21 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                          "content": _CONTINUATION_NOTE.format(
                              done=done, plan=plan_note,
                              why=_cont.get("why", "step ceiling"))})
+        latest_verification = (getattr(ctx, "verification_records", None)
+                               or {}).get(ctx.latest_edl()["version"]) or {}
+        unresolved = latest_verification.get("unresolved_findings") or []
+        if unresolved:
+            messages.append({
+                "role": "system",
+                "content": (
+                    "Durable verification for the current immutable EDL is "
+                    "still REPAIR_REQUIRED:\n- "
+                    + "\n- ".join(str(row.get("message") or row)[:700]
+                                    for row in unresolved[:8])
+                    + "\nContinue the targeted repair and verify its new "
+                      "version before replying. This finding survived the "
+                      "execution-slice boundary; do not treat the boundary "
+                      "as completion.")})
     has_edit_state = bool(getattr(ctx, "edit_plan", None)
                           or ctx.versions_written)
     names = (agent_tools.compact_tool_names(ctx) if has_edit_state
@@ -3575,14 +3847,13 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         # remain complete; compact mode removes repeated handbook prose only.
         compact=True,
         names=names)
-    if getattr(ctx, "_expanded_tool_domains", None):
-        ctx._expanded_tool_domains = set()
     ctx.editing_metrics["initial_tool_schemas"] = len(tools)
     ctx.editing_metrics["initial_tool_schema_chars"] = len(
         json.dumps(tools, separators=(",", ":")))
     total_steps = _cont.get("steps", 0)
     t_start = _cont.get("t_start") or time.monotonic()
-    turn_started = _cont.get("turn_started") or time.monotonic()
+    turn_started = (time.monotonic() if _cont.get("durable_slice")
+                    else (_cont.get("turn_started") or time.monotonic()))
     turn_deadline = turn_started + config.AGENT_TURN_TOTAL_TIMEOUT_S
     seen_message_id = int(_cont.get("seen_message_id")
                           or user_message.get("id") or 0)
@@ -3621,6 +3892,101 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
     first_write_pushed = bool(_cont.get("first_write_pushed", False))
     _responses_warned = False      # say the lane fell back ONCE, not per step
 
+    def _durable_continuation(reason, blocker_fingerprint=None,
+                              blocker_repeats=0):
+        """Checkpoint consequences, enqueue the next slice, post no reply."""
+        payload = dict(job.get("payload") or {})
+        root_id = int(payload.get("root_agent_job_id") or job["id"])
+        sequence = int(payload.get("continuation_sequence") or 0) + 1
+        generation_cost = float(ctx.gen_extra_cost_usd or 0.0)
+        generation_cost += (len(ctx.images_generated)
+                            * config.IMAGE_PRICE_USD)
+        state = {
+            "durable_slice": True,
+            "n": int(_cont.get("n") or 0) + 1,
+            "clock": int(_cont.get("clock") or 0) + 1,
+            "why": reason,
+            "steps": total_steps,
+            "start_version": start_version,
+            "seen_message_id": seen_message_id,
+            "timings": timings,
+            "honesty": honesty,
+            "preview_repair_pushed": preview_repair_pushed,
+            "quality_repair_versions": sorted(quality_repair_versions),
+            "plan_write_pushed": plan_write_pushed,
+            "plan_close_pushed": plan_close_pushed,
+            "first_write_pushed": first_write_pushed,
+            "versions_written": list(ctx.versions_written),
+            "rendered_versions": sorted(ctx.rendered_versions),
+            "checked_versions": sorted(ctx.checked_versions),
+            "change_manifests": ctx.change_manifests,
+            "verification_records": ctx.verification_records,
+            "proof_ranges_by_version": ctx._proof_ranges_by_version,
+            "loaded_tool_domains": sorted(
+                getattr(ctx, "_loaded_tool_domains", None) or []),
+            "loaded_tool_names": sorted(
+                getattr(ctx, "_loaded_tool_names", None) or []),
+            "usage": {
+                "model_usage": ctx.model_usage,
+                "generation_cost_usd": generation_cost,
+            },
+            "blocker_fingerprint": blocker_fingerprint,
+            "blocker_repeats": int(blocker_repeats or 0),
+        }
+        next_payload = {
+            key: value for key, value in payload.items()
+            if key not in {"continuation_state", "death_resume",
+                           "steered_into"}
+        }
+        next_payload.update({
+            "message_id": int(user_message["id"]),
+            "root_agent_job_id": root_id,
+            "logical_turn_continuation": True,
+            "continuation_sequence": sequence,
+            "turn_baseline_digest": ctx.turn_baseline_digest,
+            "turn_baseline_version": int(
+                (ctx.turn_start_edl or {}).get("version") or start_version),
+            "continuation_state": state,
+        })
+        next_id = worker_db.run(
+            dbx.enqueue_agent_continuation, job["project_id"],
+            job["user_id"], root_id, sequence, next_payload)
+        print(f"[job {job['id']}] checkpointed logical root {root_id}; "
+              f"continuing as job {next_id} slice {sequence} ({reason})",
+              flush=True)
+        return {
+            "status": "continued", "outcome": "in_progress",
+            "billable": False, "root_agent_job_id": root_id,
+            "continued_job_id": next_id,
+            "continuation_sequence": sequence,
+            "steps": total_steps, "timings": timings,
+        }
+
+    def _no_progress_blocker():
+        plan = director.normalize_blueprint(
+            getattr(ctx, "edit_plan", None)) or {}
+        pending = [row.get("task") for row in plan.get("step_states") or []
+                   if row.get("status") == "pending"]
+        failed = [row.get("criterion")
+                  for row in plan.get("acceptance_checks") or []
+                  if row.get("status") in {"pending", "failed"}]
+        latest = ctx.latest_edl()["version"]
+        verification = ((getattr(ctx, "verification_records", None) or {})
+                        .get(int(latest)) or {})
+        verification_pending = [
+            row.get("message") or row.get("code")
+            for row in verification.get("unresolved_findings") or []
+        ]
+        recent = (ctx.turn_tool_outcomes or [])[-4:]
+        raw = json.dumps({"version": latest, "pending": pending,
+                          "checks": failed,
+                          "verification": verification_pending,
+                          "recent": recent},
+                         sort_keys=True, default=str)
+        fingerprint = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
+        return fingerprint, (pending[:3] or failed[:3]
+                             or verification_pending[:3])
+
     # TPM admission: the provider's tokens-per-minute ceiling is org-wide,
     # and a fresh turn's first call is the biggest single request we make
     # (~50K tokens of state + filmstrips). Starting it into a burst that is
@@ -3650,43 +4016,15 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
     while True:
         iteration = timings["llm_calls"]
         if SHUTDOWN.is_set():
-            # Render SIGTERMs the worker before every deploy, and an agent
-            # turn is deliberately never retried (replaying re-applies EDL
-            # writes) — so before this check an in-flight turn just DIED and
-            # the reaper told the user "I lost my connection", sometimes over
-            # an edit that had in fact landed (v266, Aug 1). Now the loop
-            # finalizes inside the grace window instead: honest reply, job
-            # marked done, nothing for the reaper to lie about.
-            print(f"[job {job['id']}] shutdown drain: finalizing after "
-                  f"{total_steps} step(s)", flush=True)
-            # No _finalize here: its auto-render waits on a preview encode,
-            # which cannot fit inside Render's grace window. The reply is
-            # written directly and the studio's next poll shows the state.
-            if ctx.versions_written:
-                latest = ctx.latest_edl()
-                outcome = "partial"
-                worker_db.run(dbx.add_message, session_id, "assistant",
-                              "I had to stop mid-request for a moment of "
-                              "maintenance on my side — the edits I finished "
-                              "are saved, but the remaining request was not "
-                              "completed.",
-                              {"edl_version": latest["version"],
-                               **_outcome_meta(ctx, outcome)})
-            else:
-                outcome = "internal_error"
-                worker_db.run(dbx.add_message, session_id, "assistant",
-                              "I had to pause for a moment of maintenance on "
-                              "my side before I could change anything — your "
-                              "edit is untouched. Please send that again.",
-                              {"edl_version": ctx.latest_edl()["version"],
-                               **_outcome_meta(ctx, outcome)})
-            return {"status": "shutdown", "steps": total_steps,
-                    "timings": timings, "billable": False,
-                    "outcome": outcome}
+            # Platform drains are execution-slice boundaries, not product
+            # outcomes. The next durable job rebuilds from the current EDL and
+            # blueprint; the user sees one final answer only when work closes.
+            return _durable_continuation("platform drain")
         total_expired = (time.monotonic() - turn_started
                          > config.AGENT_TURN_TOTAL_TIMEOUT_S)
-        if total_expired or \
-                time.monotonic() - t_start > config.AGENT_TURN_TIMEOUT_S:
+        if (total_expired or
+                time.monotonic() - t_start > config.AGENT_TURN_TIMEOUT_S) \
+                and not ctx.over_budget():
             # Productive work refreshes the inactivity window. The total wall
             # is only the durable execution-envelope backstop; tool calls are
             # synchronous, so a call already running is not killed halfway
@@ -3703,72 +4041,38 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 getattr(ctx, "edit_plan", None) or {}).get("state")
             incomplete = plan_state in {
                 "in_progress", "needs_review", "needs_repair"}
-            if (_progressed and not ctx.over_budget() and not total_expired
-                    and not SHUTDOWN.is_set() and incomplete):
-                print(f"[job {job['id']}] semantic progress window spent after "
-                      f"{total_steps} step(s), but work is still landing — "
-                      f"refreshing it (refresh {n_clock + 1})", flush=True)
-                return _run_loop(
-                    ctx, worker_db, job, session_id, user_message,
-                    attachment_note,
-                    _cont={"n": _cont.get("n", 0), "clock": n_clock + 1,
-                           "why": "turn clock", "steps": total_steps,
-                           "t_start": time.monotonic(),
-                           "turn_started": turn_started,
-                           "start_version": start_version,
-                           "seen_message_id": seen_message_id,
-                           "timings": timings, "honesty": honesty,
-                           "preview_repair_pushed": preview_repair_pushed,
-                           "quality_repair_versions": sorted(
-                               quality_repair_versions),
-                           "plan_write_pushed": plan_write_pushed,
-                           "plan_close_pushed": plan_close_pushed,
-                           "first_write_pushed": first_write_pushed,
-                           "semantic0": semantic_now,
-                           "writes0": len(ctx.versions_written),
-                           "renders0": len(ctx.rendered_versions),
-                           "assets0": asset_progress})
-            why = (f"absolute turn limit of "
-                   f"{config.AGENT_TURN_TOTAL_TIMEOUT_S:.0f}s reached"
-                   if total_expired else
-                   f"no editing/rendering progress for "
-                   f"{config.AGENT_TURN_TIMEOUT_S:.0f}s")
-            print(f"[job {job['id']}] {why}", flush=True)
+            if total_expired or _progressed:
+                return _durable_continuation(
+                    "execution slice boundary" if total_expired
+                    else "productive work remains")
+
+            fingerprint, unresolved = _no_progress_blocker()
+            previous = _cont.get("blocker_fingerprint")
+            repeats = (int(_cont.get("blocker_repeats") or 0) + 1
+                       if previous == fingerprint else 1)
+            if repeats < 3:
+                return _durable_continuation(
+                    "recovering unresolved work", fingerprint, repeats)
+
+            # Three durable slices reached the same normalized state without
+            # progress. This is a genuine blocker, not a time/step limit.
+            detail = "; ".join(str(row) for row in unresolved if row)
+            blocker = ("I couldn't complete the remaining work after all "
+                       "configured retries and fallbacks"
+                       + (f": {detail}" if detail else
+                          " because the same operation remained unavailable")
+                       + ". The successful changes are saved; this is the "
+                         "specific unresolved blocker.")
             if ctx.versions_written:
-                # Name the half-done state plainly. The old copy ("the edits
-                # I completed are saved") read as DONE to a user who wasn't
-                # counting their asks: a real request for "remove the TikTok
-                # UI + brighten it" timed out after the erases with the
-                # brightness never applied, the user read the stop as the
-                # finish, and left (Aug 3 2026, project 335).
                 return _finalize(
-                    ctx, worker_db, session_id,
-                    ("This edit reached this turn's safe processing limit, "
-                     if total_expired else
-                     "This edit stopped making progress on my side, ")
-                    + "so I'm stopping here — the edits I finished are "
-                    "saved "
-                    "and previewed below. If part of your request isn't in "
-                    "them yet, it is not done.",
-                    "timeout", total_steps, timings, honesty,
+                    ctx, worker_db, session_id, blocker, "blocked",
+                    total_steps, timings, honesty,
                     turn_deadline=turn_deadline)
-            # "nothing was changed" is true of the EDL but not of the project:
-            # a turn can time out after downloading a file, and telling the
-            # user nothing happened would leave them re-pasting a link whose
-            # media is already sitting in their media picker.
-            saved = _assets_made_note(ctx)
-            outcome, billable = _turn_completion(ctx, "timeout")
-            worker_db.run(dbx.add_message, session_id, "assistant",
-                          ("That request reached this turn's safe processing "
-                           "limit before I " if total_expired else
-                           "That request stopped making progress before I ")
-                          +
-                          "could finish anything — the edit itself was not changed"
-                          f"{saved}. Please try again, or break the request "
-                          "into smaller steps.",
-                          {"error": "turn_timeout",
+            outcome, billable = _turn_completion(ctx, "blocked")
+            worker_db.run(dbx.add_message, session_id, "assistant", blocker,
+                          {"error": "repeated_blocker",
                            **_outcome_meta(ctx, outcome)})
-            return {"status": "timeout", "steps": total_steps,
+            return {"status": "blocked", "steps": total_steps,
                     "timings": timings, "outcome": outcome,
                     "billable": billable}
 
@@ -4201,6 +4505,12 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             latest, fail_note = _auto_render_if_needed(ctx, worker_db,
                                                        session_id, timings,
                                                        turn_deadline)
+            if ctx.versions_written and latest["version"] not in \
+                    ctx.rendered_versions and not ctx.last_preview_failure:
+                # A platform/render wait boundary is not completion. Resume
+                # under the same root and reconnect to the idempotent preview
+                # job; never ship a "still rendering" technical stop.
+                return _durable_continuation("awaiting complete preview")
             if _preview_repair_pushback(
                     ctx, messages, t_start, preview_repair_pushed,
                     turn_started=turn_started):
@@ -4235,6 +4545,41 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 if body:
                     messages.append({"role": "assistant", "content": body})
                 continue
+            if ctx.versions_written and not _verification_complete(ctx):
+                # A model draft is not completion while the current immutable
+                # version still has an unresolved quality record. Checkpoint
+                # the consequences and resume; never make the user ask again
+                # because a provider/runtime slice ended between repair steps.
+                verification_version, verification = _latest_verification(ctx)
+                unresolved_rows = verification.get("unresolved_findings") or []
+                unresolved_ids = [
+                    row.get("finding_id") or row.get("code")
+                    for row in unresolved_rows
+                ]
+                raw = json.dumps({"version": verification_version,
+                                  "findings": unresolved_ids},
+                                 sort_keys=True, default=str)
+                fingerprint = hashlib.sha256(
+                    raw.encode("utf-8")).hexdigest()[:20]
+                previous = _cont.get("blocker_fingerprint")
+                repeats = (int(_cont.get("blocker_repeats") or 0) + 1
+                           if previous == fingerprint else 1)
+                if repeats < 3:
+                    return _durable_continuation(
+                        "verification repair remains", fingerprint, repeats)
+                detail = "; ".join(
+                    str(row.get("message") or row)[:260]
+                    for row in unresolved_rows[:4]) or \
+                    "the complete preview verification did not pass"
+                return _finalize(
+                    ctx, worker_db, session_id,
+                    "I couldn't close the current edit because the same "
+                    "verification findings remained after the repair and "
+                    "direct-evidence fallback passes: " + detail +
+                    ". The saved preview remains available, but I am not "
+                    "marking this version complete.",
+                    "blocked", total_steps, timings, honesty,
+                    turn_deadline=turn_deadline)
             if _plan_without_write_pushback(
                     ctx, messages, plan_write_pushed):
                 plan_write_pushed = True
@@ -4504,14 +4849,11 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
 
         if _tool_schema_refresh_needed(ctx):
             # Stage routing avoids resending unrelated schemas after every
-            # action. Every recipe operation remains present with its exact
-            # schema, and expand_toolset loads all requested extra domains in
-            # one dispatch; this changes context size, not power.
+            # action. Explicitly loaded capabilities remain additive across
+            # dispatches; this changes request size, never available power.
             names = agent_tools.compact_tool_names(ctx)
             tools = agent_tools.openai_tools(
                 model, compact=True, names=names)
-            if getattr(ctx, "_expanded_tool_domains", None):
-                ctx._expanded_tool_domains = set()
             ctx.editing_metrics["post_plan_tool_schemas"] = len(tools)
             ctx.editing_metrics["post_plan_tool_schema_chars"] = len(
                 json.dumps(tools, separators=(",", ":")))

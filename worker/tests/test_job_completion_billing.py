@@ -18,15 +18,15 @@ class _WorkerDb:
     def run(self, fn, *args):
         if fn is dbx.finish_accounted_job:
             (_job_id, _result, _lease, user_id, billable, extra,
-             qualifies) = args
+             qualifies, accounting_job_id) = args
             if not self.committed:
                 return {"committed": False, "charged": None}
             charged = None
             if billable:
-                self.charges.append((user_id, _job_id, extra))
+                self.charges.append((user_id, accounting_job_id, extra))
                 charged = 2.5
             if qualifies:
-                self.qualifications.append((user_id, _job_id))
+                self.qualifications.append((user_id, accounting_job_id))
             return {"committed": True, "charged": charged,
                     "billing_error": None, "qualification_error": None}
         if fn is dbx.finish_job:
@@ -114,6 +114,19 @@ def test_rendered_shorts_mark_account_qualification():
     result = {"rendered_clips": 2, "billable": False}
     job_completion.finalize_success(
         worker_db, _job(type="shorts_plan"), result, "lease")
+    assert worker_db.qualifications == [(8, 44)]
+
+
+def test_continuation_charges_and_qualifies_once_against_root_job():
+    worker_db = _WorkerDb()
+    result = {"status": "replied", "outcome": "fulfilled",
+              "edl_changed": True, "billable": True}
+    job = _job(id=47, payload={"root_agent_job_id": 44,
+                               "continuation_sequence": 2})
+
+    job_completion.finalize_success(worker_db, job, result, "lease")
+
+    assert worker_db.charges == [(8, 44, 0.0)]
     assert worker_db.qualifications == [(8, 44)]
 
 

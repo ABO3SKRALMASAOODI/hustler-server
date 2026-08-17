@@ -211,18 +211,24 @@ def claim_job(conn, types, max_attempts):
         # are the reaper's to bury, and a dead row must never wedge its
         # project's queue behind it.
         serial_where = """
-                  AND NOT EXISTS (
+                  AND (
+                    (video_jobs.type = 'mcp_tool'
+                     AND video_jobs.payload->>'mutation' = 'false')
+                    OR NOT EXISTS (
                       SELECT 1 FROM video_jobs live
                       WHERE live.project_id = video_jobs.project_id
                         AND live.id <> video_jobs.id
                         AND live.type IN ('agent_turn', 'shorts_plan',
                                           'mcp_tool')
+                        AND (live.type <> 'mcp_tool'
+                             OR COALESCE(live.payload->>'mutation', 'true')
+                                <> 'false')
                         AND ((live.state = 'running'
                               AND live.heartbeat_at >= NOW()
                                   - make_interval(secs => %s))
                              OR (live.state = 'queued'
                                  AND live.id < video_jobs.id
-                                 AND live.attempts < %s)))"""
+                                 AND live.attempts < %s))))"""
         params.extend([config.STALE_AFTER_S, max_attempts])
     if tuple(types) == ("index",):
         # The lower-id queued rows make the rank stable even while another
@@ -264,6 +270,18 @@ def claim_job(conn, types, max_attempts):
                 WHERE type = ANY(%s)
                   AND attempts < %s
                   {claims_where}
+                  AND (
+                    video_jobs.type <> 'agent_turn'
+                    OR NOT EXISTS (
+                      SELECT 1 FROM assets original_wait
+                      WHERE original_wait.project_id = video_jobs.project_id
+                        AND original_wait.kind = 'original')
+                    OR EXISTS (
+                      SELECT 1 FROM assets original_ready
+                      JOIN indexes ready_index
+                        ON ready_index.video_sha256 = original_ready.sha256
+                      WHERE original_ready.project_id = video_jobs.project_id
+                        AND original_ready.kind = 'original'))
                   AND (state = 'queued'
                        OR (state = 'running'
                            AND heartbeat_at < NOW() - make_interval(secs => %s)))
@@ -443,14 +461,46 @@ def record_agent_turn_baseline(conn, job_id, total_claims, version, digest):
         cur.execute(f"""UPDATE video_jobs
                         SET payload = COALESCE(payload, '{{}}'::jsonb)
                             || jsonb_build_object(
+                                'root_agent_job_id', %s,
                                 'turn_baseline_digest', %s,
                                 'turn_baseline_version', %s),
                             updated_at = NOW()
                         WHERE id = %s AND state = 'running'{lease}
                           AND NOT (COALESCE(payload, '{{}}'::jsonb)
                                    ? 'turn_baseline_digest')""",
-                    tuple(params))
+                    tuple([job_id] + params))
         return cur.rowcount > 0
+
+
+def enqueue_agent_continuation(conn, project_id, user_id, root_job_id,
+                               sequence, payload):
+    """Idempotently enqueue one physical slice of a logical agent request."""
+    root_job_id = int(root_job_id)
+    sequence = max(1, int(sequence))
+    body = dict(payload or {})
+    body.update(root_agent_job_id=root_job_id,
+                continuation_sequence=sequence,
+                logical_turn_continuation=True)
+    with conn.cursor() as cur:
+        # A function retry after enqueue but before its response must discover
+        # the same child instead of creating two physical continuations.
+        cur.execute("SELECT pg_advisory_xact_lock(%s, %s)",
+                    (root_job_id, sequence))
+        cur.execute("""SELECT id FROM video_jobs
+                       WHERE project_id = %s AND type = 'agent_turn'
+                         AND payload->>'root_agent_job_id' = %s
+                         AND payload->>'continuation_sequence' = %s
+                       ORDER BY id LIMIT 1""",
+                    (project_id, str(root_job_id), str(sequence)))
+        existing = cur.fetchone()
+        if existing:
+            return existing["id"]
+        cur.execute("""INSERT INTO video_jobs
+                            (project_id, user_id, type, payload)
+                       VALUES (%s, %s, 'agent_turn', %s)
+                       RETURNING id""",
+                    (project_id, user_id, Json(body)))
+        return cur.fetchone()["id"]
 
 
 def finish_job(conn, job_id, state, error=None, result=None,
@@ -593,11 +643,58 @@ def user_has_prior_agent_turn(conn, user_id, before_job_id):
 
 
 def enqueue_job(conn, project_id, user_id, jtype, payload):
+    payload = dict(payload or {})
+    payload.setdefault("execution_policy", config.EXECUTION_POLICY_MODE)
     with conn.cursor() as cur:
         cur.execute("""INSERT INTO video_jobs (project_id, user_id, type, payload)
                        VALUES (%s, %s, %s, %s) RETURNING id""",
                     (project_id, user_id, jtype, Json(payload)))
         return cur.fetchone()["id"]
+
+
+def upsert_change_manifest(conn, project_id, edl_version, manifest):
+    """Persist one immutable-version manifest when migration 023 is live."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT to_regclass('public.change_manifests') AS t")
+        if not (cur.fetchone() or {}).get("t"):
+            return False
+        cur.execute("""INSERT INTO change_manifests
+                          (project_id, edl_version, manifest)
+                       VALUES (%s, %s, %s)
+                       ON CONFLICT (project_id, edl_version) DO UPDATE
+                       SET manifest = EXCLUDED.manifest""",
+                    (project_id, int(edl_version), Json(manifest)))
+    return True
+
+
+def upsert_verification_record(conn, project_id, edl_version, record):
+    """Persist the newest repair/pass evidence for one immutable EDL."""
+    status = str((record or {}).get("status") or "pending")
+    with conn.cursor() as cur:
+        cur.execute("SELECT to_regclass('public.verification_records') AS t")
+        if not (cur.fetchone() or {}).get("t"):
+            return False
+        cur.execute("""INSERT INTO verification_records
+                          (project_id, edl_version, status, record)
+                       VALUES (%s, %s, %s, %s)
+                       ON CONFLICT (project_id, edl_version) DO UPDATE
+                       SET status = EXCLUDED.status,
+                           record = EXCLUDED.record,
+                           updated_at = NOW()""",
+                    (project_id, int(edl_version), status, Json(record)))
+    return True
+
+
+def get_verification_record(conn, project_id, edl_version):
+    with conn.cursor() as cur:
+        cur.execute("SELECT to_regclass('public.verification_records') AS t")
+        if not (cur.fetchone() or {}).get("t"):
+            return None
+        cur.execute("""SELECT status, record, updated_at
+                       FROM verification_records
+                       WHERE project_id = %s AND edl_version = %s""",
+                    (project_id, int(edl_version)))
+        return cur.fetchone()
 
 
 def pending_preview_job(conn, project_id, edl_version):
@@ -2240,7 +2337,13 @@ def charge_turn_credits(conn, user_id, job_id, extra_credits=0.0):
                                   FILTER (WHERE purpose IN
                                           ('sfx_gen','video_gen')), 0)
                                   AS gen_cost
-                       FROM llm_calls WHERE job_id = %s""", (job_id,))
+                       FROM llm_calls
+                       WHERE job_id IN (
+                           SELECT id FROM video_jobs
+                           WHERE id = %s
+                              OR (type = 'agent_turn'
+                                  AND payload->>'root_agent_job_id' = %s)
+                       )""", (job_id, str(job_id)))
         row = cur.fetchone()
         if not row["n"]:
             # A turn that never reached the model costs nothing.
@@ -2348,7 +2451,7 @@ def patch_done_job_result(conn, job_id, patch=None, remove=()):
 
 def finish_accounted_job(conn, job_id, result, total_claims, user_id,
                          billable=False, extra_credits=0.0,
-                         qualify_subscribe=False):
+                         qualify_subscribe=False, accounting_job_id=None):
     """Fence completion before charging, in one database transaction.
 
     A remote executor can return after its lease was cancelled or replaced.
@@ -2367,16 +2470,18 @@ def finish_accounted_job(conn, job_id, result, total_claims, user_id,
     if not committed:
         return outcome
 
+    accounting_job_id = int(accounting_job_id or job_id)
+
     if billable:
         with conn.cursor() as cur:
             cur.execute("SAVEPOINT terminal_billing")
         try:
             charged = charge_turn_credits(
-                conn, user_id, job_id, extra_credits)
+                conn, user_id, accounting_job_id, extra_credits)
             patch_done_job_result(
                 conn, job_id, {"credits_charged": charged},
                 remove=("billing_pending", "billing_error",
-                        "billing_extra_credits"))
+                        "billing_extra_credits", "billing_root_job_id"))
             with conn.cursor() as cur:
                 cur.execute("RELEASE SAVEPOINT terminal_billing")
             outcome["charged"] = charged
@@ -2392,6 +2497,7 @@ def finish_accounted_job(conn, job_id, result, total_claims, user_id,
             patch_done_job_result(
                 conn, job_id,
                 {"billing_pending": True, "billing_error": error,
+                 "billing_root_job_id": accounting_job_id,
                  "billing_extra_credits": max(
                      0.0, float(extra_credits or 0.0))})
             outcome["billing_error"] = error
@@ -2400,10 +2506,11 @@ def finish_accounted_job(conn, job_id, result, total_claims, user_id,
         with conn.cursor() as cur:
             cur.execute("SAVEPOINT terminal_qualification")
         try:
-            mark_subscribe_gate_qualified(conn, user_id, job_id)
+            mark_subscribe_gate_qualified(conn, user_id, accounting_job_id)
             patch_done_job_result(
                 conn, job_id, {},
-                remove=("qualification_pending", "qualification_error"))
+                remove=("qualification_pending", "qualification_error",
+                        "qualification_root_job_id"))
             with conn.cursor() as cur:
                 cur.execute("RELEASE SAVEPOINT terminal_qualification")
         except Exception as exc:
@@ -2414,6 +2521,7 @@ def finish_accounted_job(conn, job_id, result, total_claims, user_id,
             patch_done_job_result(
                 conn, job_id,
                 {"qualification_pending": True,
+                 "qualification_root_job_id": accounting_job_id,
                  "qualification_error": error})
             outcome["qualification_error"] = error
     return outcome
@@ -2451,12 +2559,14 @@ def reconcile_pending_accounting(conn, limit=50):
                 cur.execute("SAVEPOINT reconcile_terminal_billing")
             try:
                 charged = charge_turn_credits(
-                    conn, row["user_id"], job_id,
+                    conn, row["user_id"],
+                    int(result.get("billing_root_job_id") or job_id),
                     float(result.get("billing_extra_credits") or 0.0))
                 patch_done_job_result(
                     conn, job_id, {"credits_charged": charged},
                     remove=("billing_pending", "billing_error",
-                            "billing_extra_credits"))
+                            "billing_extra_credits",
+                            "billing_root_job_id"))
                 with conn.cursor() as cur:
                     cur.execute("RELEASE SAVEPOINT reconcile_terminal_billing")
                 fixed.append("billing")
@@ -2474,11 +2584,13 @@ def reconcile_pending_accounting(conn, limit=50):
                 cur.execute("SAVEPOINT reconcile_terminal_qualification")
             try:
                 mark_subscribe_gate_qualified(
-                    conn, row["user_id"], job_id)
+                    conn, row["user_id"],
+                    int(result.get("qualification_root_job_id") or job_id))
                 patch_done_job_result(
                     conn, job_id, {},
                     remove=("qualification_pending",
-                            "qualification_error"))
+                            "qualification_error",
+                            "qualification_root_job_id"))
                 with conn.cursor() as cur:
                     cur.execute(
                         "RELEASE SAVEPOINT reconcile_terminal_qualification")

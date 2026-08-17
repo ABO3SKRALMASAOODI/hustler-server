@@ -67,6 +67,19 @@ def test_documentary_preset_emits_one_vector_panel_behind_the_block():
     assert "\\1a&H47&" in panels[0]["text"]  # 72% opacity, reverse ASS alpha
 
 
+def test_caption_panel_and_glyphs_share_fade_geometry_clock():
+    evs = captions.events_premium(
+        _words("one coherent caption panel"),
+        style={"preset": "documentary", "animation": "fade"},
+        play_res=(1080, 1920),
+        design_version=captions.CAPTION_DESIGN_VERSION)
+    panel = next(event for event in evs if event.get("layer") == 0)
+    glyph = next(event for event in evs if event.get("layer") == 5)
+    assert (panel["start"], panel["end"]) == (glyph["start"], glyph["end"])
+    assert r"\fad(180,140)" in panel["text"]
+    assert r"\fad(180,140)" in glyph["text"]
+
+
 def test_explicit_emphasis_override_reaches_the_renderer():
     words = _words("make every caption feel impossible to ignore")
     evs = captions.events_premium(

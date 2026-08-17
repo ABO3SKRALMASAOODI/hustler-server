@@ -71,13 +71,60 @@ def caption_review_times(edl, index, workdir, duration, max_times=16):
         return []
     if not states:
         return []
-    count = min(max(1, int(max_times)), len(states))
-    if count == 1:
-        picks = [states[0]]
-    else:
-        indexes = sorted({round(i * (len(states) - 1) / (count - 1))
-                          for i in range(count)})
-        picks = [states[i] for i in indexes]
+    # Risk coverage rather than an even-N sample: include first/last, extreme
+    # duration states, every manual layout/placement change, and one active
+    # caption state over every distinct visual cluster/background. The caller
+    # may set max_times=0 to page all of this evidence into cheap contact
+    # sheets; a positive value remains a physical-request compatibility cap.
+    selected = {states[0], states[-1]}
+    by_duration = sorted(states, key=lambda pair: pair[1] - pair[0])
+    selected.update(by_duration[:3])
+    selected.update(by_duration[-3:])
+
+    def _active_at(output_t):
+        return next((pair for pair in states
+                     if pair[0] <= output_t <= pair[1]), None)
+
+    for item in (edl.get("captions") or []) \
+            if isinstance(edl.get("captions"), list) else []:
+        try:
+            pair = _active_at((float(item.get("start", 0))
+                               + float(item.get("end", 0))) / 2)
+        except (TypeError, ValueError):
+            pair = None
+        if pair:
+            selected.add(pair)
+    storyboard = (index or {}).get("visual_storyboard") or {}
+    for evidence in storyboard.get("evidence") or []:
+        ranges = evidence.get("covered_ranges") or []
+        if not ranges and evidence.get("covered_time_range"):
+            ranges = [evidence["covered_time_range"]]
+        for source_a, source_b in ranges:
+            try:
+                output_t = tl.src_to_out(
+                    (float(source_a) + float(source_b)) / 2)
+            except (TypeError, ValueError):
+                output_t = None
+            pair = _active_at(output_t) if output_t is not None else None
+            if pair:
+                selected.add(pair)
+                break
+    # Compatibility callers may ask for a provider-sized orientation page.
+    # Fill that page with diverse real caption states when the high-risk set
+    # alone is sparse. Production verification passes max_times=0 and pages
+    # the evidence selected above without treating this as a logical quota.
+    if max_times:
+        count = min(len(states), max(1, int(max_times)))
+        if len(selected) < count and count > 1:
+            indexes = {round(i * (len(states) - 1) / (count - 1))
+                       for i in range(count)}
+            selected.update(states[i] for i in indexes)
+    picks = sorted(selected)
+    if max_times and len(picks) > max(1, int(max_times)):
+        count = max(1, int(max_times))
+        indexes = sorted({round(i * (len(picks) - 1) / (count - 1))
+                          for i in range(count)}) if count > 1 else [0]
+        picks = [picks[i] for i in indexes]
     return [round(min(max(s + min(0.06, max(0.01, (e - s) / 2.0)), 0.0),
                       max(0.0, float(duration) - 0.01)), 3)
             for s, e in picks]
@@ -4508,6 +4555,10 @@ def run_render_job(worker_db, job):
                     "verify_sheet_key": cached_meta.get("verify_sheet_key"),
                     "screening_pages": cached_meta.get("screening_pages") or [],
                     "caption_sheet_key": cached_meta.get("caption_sheet_key"),
+                    "caption_pages": cached_meta.get("caption_pages") or (
+                        [{"key": cached_meta.get("caption_sheet_key"),
+                          "times": cached_meta.get("caption_review_times") or []}]
+                        if cached_meta.get("caption_sheet_key") else []),
                     "audio_qc": cached_meta.get("audio_qc"),
                     # New renders retain exact program windows. Historical
                     # metadata stored keys only; those clips are still valid
@@ -4882,20 +4933,27 @@ def run_render_job(worker_db, job):
             except Exception:
                 verify_local = None
         caption_local = None
+        caption_locals = []
         caption_times = []
         if not proof_only and variant == "preview" \
                 and edl_row["json"].get("captions"):
             try:
                 caption_times = caption_review_times(
-                    edl_row["json"], index, workdir, out_dur, max_times=16)
+                    edl_row["json"], index, workdir, out_dur, max_times=0)
                 if caption_times:
-                    caption_local = os.path.join(workdir,
-                                                 "caption_sheet.jpg")
-                    sheets.build_frames_sheet(
-                        out_local, caption_local, caption_times,
-                        cols=4, max_tiles=16)
+                    for offset in range(0, len(caption_times), 16):
+                        page_times = caption_times[offset:offset + 16]
+                        local = os.path.join(
+                            workdir, f"caption_sheet_{offset // 16 + 1}.jpg")
+                        sheets.build_frames_sheet(
+                            out_local, local, page_times, cols=4,
+                            max_tiles=len(page_times),
+                            parallelism=config.SCREENING_FRAME_PARALLELISM)
+                        caption_locals.append((local, page_times))
+                    caption_local = caption_locals[0][0]
             except Exception:
                 caption_local = None
+                caption_locals = []
                 caption_times = []
         _mark("sheet_s")
 
@@ -4917,10 +4975,15 @@ def run_render_job(worker_db, job):
         if verify_local and os.path.exists(verify_local):
             verify_sheet_key = f"media/{project_id}/{stamp}_vf.jpg"
             storage.upload_file(verify_local, verify_sheet_key, "image/jpeg")
-        caption_sheet_key = None
-        if caption_local and os.path.exists(caption_local):
-            caption_sheet_key = f"media/{project_id}/{stamp}_cap.jpg"
-            storage.upload_file(caption_local, caption_sheet_key, "image/jpeg")
+        caption_pages = []
+        for page_n, (local, page_times) in enumerate(caption_locals, 1):
+            if not os.path.exists(local):
+                continue
+            key = f"media/{project_id}/{stamp}_cap{page_n}.jpg"
+            storage.upload_file(local, key, "image/jpeg")
+            caption_pages.append({"key": key, "times": page_times})
+        caption_sheet_key = (caption_pages[0]["key"]
+                             if caption_pages else None)
         screening_pages = []
         for page_n, (local, page) in enumerate(screening_locals, 1):
             if not os.path.exists(local):
@@ -4929,8 +4992,8 @@ def run_render_job(worker_db, job):
             storage.upload_file(local, key, "image/jpeg")
             screening_pages.append({"key": key, "frames": page})
         if not _still_ours(96):
-            storage.delete_keys([render_key, sheet_key, verify_sheet_key,
-                                 caption_sheet_key] +
+            storage.delete_keys([render_key, sheet_key, verify_sheet_key] +
+                                [page["key"] for page in caption_pages] +
                                 [page["key"] for page in screening_pages])
             raise dbx.JobLeaseLost(
                 "job was cancelled or handed to another worker")
@@ -5004,7 +5067,8 @@ def run_render_job(worker_db, job):
                     listen_keys = []
         if not _still_ours(98):
             storage.delete_keys(
-                [render_key, sheet_key, verify_sheet_key, caption_sheet_key]
+                [render_key, sheet_key, verify_sheet_key]
+                + [page["key"] for page in caption_pages]
                 + [page["key"] for page in screening_pages]
                 + [item["key"] for item in listen_keys])
             raise dbx.JobLeaseLost(
@@ -5017,6 +5081,7 @@ def run_render_job(worker_db, job):
             meta={"variant": asset_variant, "edl_version": version,
                   "sheet_key": sheet_key, "verify_sheet_key": verify_sheet_key,
                   "caption_sheet_key": caption_sheet_key,
+                  "caption_pages": caption_pages,
                   "caption_review_times": caption_times,
                   "screening_pages": screening_pages,
                   "screening_frame_count": len(screening_frames),
@@ -5059,6 +5124,10 @@ def run_render_job(worker_db, job):
                     keys.append((a.get("meta") or {}).get("caption_sheet_key"))
                     keys.extend(page.get("key") for page in
                                 ((a.get("meta") or {}).get(
+                                    "caption_pages") or [])
+                                if isinstance(page, dict))
+                    keys.extend(page.get("key") for page in
+                                ((a.get("meta") or {}).get(
                                     "screening_pages") or [])
                                 if isinstance(page, dict))
                     keys.extend((a.get("meta") or {}).get("listen_keys")
@@ -5082,6 +5151,7 @@ def run_render_job(worker_db, job):
         return {"render_asset_id": asset_id, "sheet_key": sheet_key,
                 "verify_sheet_key": verify_sheet_key,
                 "caption_sheet_key": caption_sheet_key,
+                "caption_pages": caption_pages,
                 "caption_review_times": caption_times,
                 "screening_pages": screening_pages,
                 "screening_frame_count": len(screening_frames),

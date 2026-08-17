@@ -248,7 +248,8 @@ def test_direct_clip_upload_gets_perception_job_for_later_agent_turns(env):
     assert status == 200
     assert env.assets[out["asset_id"]]["kind"] == "video_clip"
     assert env.enqueued == [{
-        "type": "index", "payload": {"asset_id": out["asset_id"]}}]
+        "type": "index", "payload": {
+            "asset_id": out["asset_id"], "execution_policy": "legacy"}}]
     assert out["index_job_id"] is not None
 
 
@@ -261,7 +262,8 @@ def test_direct_audio_upload_gets_transcript_and_acoustic_index_job(env):
     assert status == 200
     assert env.assets[out["asset_id"]]["kind"] == "music"
     assert env.enqueued == [{
-        "type": "index", "payload": {"asset_id": out["asset_id"]}}]
+        "type": "index", "payload": {
+            "asset_id": out["asset_id"], "execution_policy": "legacy"}}]
     assert out["index_job_id"] is not None
 
 

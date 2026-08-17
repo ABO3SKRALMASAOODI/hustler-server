@@ -72,6 +72,9 @@ import url_media
 import remote
 import ytaccess
 import visual
+import visual_index
+import quality_verifier
+import tool_outcome as tool_outcome_mod
 import webrecord
 import version as worker_version
 from captions import CAPTION_DESIGN_VERSION, KARAOKE_HARD_MAX
@@ -188,6 +191,10 @@ class ToolContext:
         # image content perfectly well. sight_out says the caller takes the
         # pictures themselves, and mcp_exec drains them into the reply.
         self.pending_images = []
+        # Hierarchical storyboard pages actually delivered as pixels during
+        # this logical turn. The full textual inventory is always present;
+        # these sets distinguish "known to exist" from "visually opened".
+        self._visual_pages_opened = set()
         # Exact moments whose pixels were actually delivered this turn. These
         # remain useful provenance for quality notes, never tool permission.
         self._looked_source_times = set()
@@ -260,6 +267,8 @@ class ToolContext:
         # studio can flash the changed output ranges. Consumed (cleared) by
         # the loop the moment it is attached; never blocks a write.
         self.last_change = None
+        self.change_manifests = {}
+        self.verification_records = {}
         # Every EDL state visited this turn -> the version it was first seen
         # at. A write that lands on a state already in here is a CYCLE: the
         # turn has undone itself and is about to repeat the same attempt.
@@ -275,6 +284,7 @@ class ToolContext:
         # last complete preview. They are evidence for the editor and must not
         # masquerade as the complete preview the Studio player adopts.
         self.checked_versions = set()
+        self._proof_ranges_by_version = {}
         self.last_preview_check = None
         # A speculative changed-section proof may finish during the model's
         # next reasoning call. Keep its exact row so render_preview adopts it
@@ -487,7 +497,25 @@ class ToolContext:
                               "agent")
         self.versions_written.append(version)
         chg = edl_diff.change_ranges(prev["json"], normalized)
-        self.last_change = dict(chg, edl_version=version) if chg else None
+        manifest = quality_verifier.build_change_manifest(
+            self.project_id, version, prev["json"], normalized, chg,
+            description=change_desc,
+            # execute() installs the active tool before calling the handler.
+            # write_calls is appended by the outer loop only after this write
+            # returns, so consulting it here attributed the previous edit to
+            # the current immutable version.
+            tool=getattr(self, "_executing_tool", None))
+        self.change_manifests[version] = manifest
+        try:
+            self.db.run(dbx.upsert_change_manifest, self.project_id, version,
+                        manifest)
+        except Exception as exc:
+            # The EDL write is already durable. Verification state remains in
+            # this logical turn and migration 023 can deploy independently.
+            print(f"[quality] manifest persist deferred: {exc}", flush=True)
+        self.last_change = (dict(chg, edl_version=version,
+                                 manifest=manifest) if chg else
+                            {"edl_version": version, "manifest": manifest})
         before = describe_edl(prev["json"])
         after = describe_edl(normalized, self.duration)
         line = (f"EDL v{prev['version']} -> v{version}: {change_desc}. "
@@ -541,6 +569,17 @@ def _metric(ctx, key, amount=1):
         metrics = {}
         setattr(ctx, "editing_metrics", metrics)
     metrics[key] = metrics.get(key, 0) + amount
+
+
+def _execution_policy(ctx):
+    """Immutable compute ownership inherited by child work for this turn."""
+    return config.execution_policy_for(getattr(ctx, "job", None) or {})
+
+
+def _child_payload(ctx, payload=None):
+    body = dict(payload or {})
+    body.setdefault("execution_policy", _execution_policy(ctx))
+    return body
 
 
 _MOTION_MOTIF_ID = re.compile(r"^[a-z][a-z0-9_-]{0,47}$")
@@ -1775,6 +1814,71 @@ def _look_at_output(ctx, output_times, question):
         out += f"\n({missing} requested time(s) could not be decoded)"
     evidence.add(evidence_key)
     return _cap(out)
+
+
+def open_visual_page(ctx, pages=None):
+    """Open persisted storyboard contact-sheet pages by their stable number.
+
+    This is transport paging, never an evidence quota. A caller may request
+    any/all pages over as many dispatches as its provider envelope needs.
+    """
+    storyboard = (ctx.index or {}).get("visual_storyboard") or {}
+    sheets = storyboard.get("sheets") or []
+    if not sheets:
+        return ("PREREQUISITE: this index has no hierarchical storyboard. "
+                "Use look_at with exact SOURCE times from get_shots instead.")
+    if pages is None:
+        pages = [row.get("page") for row in sheets
+                 if int(row.get("page") or 0) not in ctx._visual_pages_opened]
+    if not isinstance(pages, (list, tuple)):
+        pages = [pages]
+    try:
+        wanted = list(dict.fromkeys(int(value) for value in pages))
+    except (TypeError, ValueError):
+        return "CORRECTION_NEEDED: pages must contain integer page numbers."
+    by_page = {int(row.get("page") or index + 1): row
+               for index, row in enumerate(sheets)}
+    unknown = [page for page in wanted if page not in by_page]
+    if unknown:
+        return (f"CORRECTION_NEEDED: storyboard page(s) {unknown} do not "
+                f"exist. Available pages are 1-{len(sheets)}.")
+    deferred = []
+    if getattr(ctx, "sight_out", False) and \
+            len(wanted) > config.MCP_IMAGE_PAGE_SIZE:
+        deferred = wanted[config.MCP_IMAGE_PAGE_SIZE:]
+        wanted = wanted[:config.MCP_IMAGE_PAGE_SIZE]
+    delivered = []
+    for page in wanted:
+        row = by_page[page]
+        key = row.get("key")
+        local = os.path.join(ctx.workdir,
+                             f"visual_page_{page:04d}_"
+                             f"{os.path.basename(key or 'sheet.jpg')}")
+        try:
+            if not os.path.exists(local):
+                storage.download_to(key, local)
+        except Exception as exc:
+            return ("TRANSIENT_FAILURE: storyboard page "
+                    f"{page} could not be fetched ({str(exc)[:180]}). "
+                    "Retry this same idempotent call.")
+        ids = list(row.get("evidence_ids") or [])
+        ctx.pending_images.append((
+            f"VISUAL STORYBOARD PAGE {page}/{len(sheets)} — evidence "
+            f"{', '.join(ids)}; SOURCE {row.get('t0', 0):.2f}-"
+            f"{row.get('t1', 0):.2f}s", local))
+        ctx._visual_pages_opened.add(page)
+        delivered.append(page)
+    remaining = sorted(set(by_page) - ctx._visual_pages_opened)
+    _metric(ctx, "visual_storyboard_pages_opened", len(delivered))
+    _metric(ctx, "visual_clusters_opened", sum(
+        len(by_page[page].get("evidence_ids") or []) for page in delivered))
+    return _cap(
+        f"SUCCESS: opened storyboard page(s) {delivered}. Every image is "
+        "labeled with its evidence_id and exact SOURCE clock. "
+        + ((f"Transport page full; call open_visual_page again for {deferred}. "
+            if deferred else ""))
+        + (f"Unopened pages: {remaining}." if remaining else
+           "All persisted storyboard pages have now been opened this turn."))
 
 
 def look_at(ctx, times=None, question="", start=None, end=None,
@@ -5903,13 +6007,18 @@ def add_music(ctx, storage_key, start=None, end=None, gain_db=None,
     # swells back in the gaps) instead of the legacy -12dB step. Written on
     # the item, never inferred at render, and never applied to existing music
     # items — their duck_mode stays whatever it was.
+    purpose_n = " ".join(str(purpose or "").split())[:300] or None
+    if not purpose_n:
+        plan = getattr(ctx, "edit_plan", None) or {}
+        purpose_n = " ".join(str(
+            plan.get("music_direction") or plan.get("treatment") or "")
+            .split())[:300] or None
     item = {"id": _next_item_id(music, "mus"), "storage_key": storage_key,
             "start": s, "end": e, "gain_db": g, "duck": bool(duck),
             "duck_mode": "smooth" if duck else None,
             "offset_s": off, "fade_in_s": fi or None,
             "fade_out_s": fo or None, "loop": True if loop else None,
-            "purpose": (" ".join(str(purpose).split())[:300]
-                        if purpose else None)}
+            "purpose": purpose_n}
     music.append(item)
     edl["music"] = music
     res = ctx.write_edl(
@@ -6098,6 +6207,32 @@ def add_sfx(ctx, storage_key, at, gain_db=-6.0, purpose=None, offset_s=None):
         n += 1
     sid = f"sx{n}"
     purpose_n = " ".join(str(purpose or "").split())[:180] or None
+    if not purpose_n:
+        for beat in (getattr(ctx, "edit_plan", None) or {}).get(
+                "sequence_map") or []:
+            if any(a - .12 <= at <= b + .12 for a, b in
+                   motion_contract.sequence_output_spans(edl, beat)):
+                purpose_n = " ".join(str(
+                    beat.get("sound") or beat.get("purpose") or
+                    beat.get("anchor") or "").split())[:180] or None
+                if purpose_n:
+                    break
+    if not purpose_n:
+        try:
+            timeline = Timeline(edl.get("keep") or [],
+                                edl.get("inserts") or [],
+                                edl.get("speed") or [])
+            source_t = timeline.out_to_src(at)
+            evidence = (((ctx.index or {}).get("visual_storyboard") or {})
+                        .get("evidence") or [])
+            if source_t is not None and evidence:
+                nearest = min(evidence, key=lambda row: abs(
+                    float(row.get("representative_t") or 0) - source_t))
+                desc = str(nearest.get("semantic_description") or "").strip()
+                if desc:
+                    purpose_n = ("punctuate visible event: " + desc)[:180]
+        except Exception:
+            pass
     dur = sound.get("duration_s")
     if dur and offset_s > max(0.0, dur - 0.05):
         return (f"REJECTED: offset_s={offset_s:g}s is past the usable end of "
@@ -7052,8 +7187,53 @@ def _parse_zoom_path(path):
     return out, None
 
 
+def _zoom_provenance(ctx, edl, start, end, purpose=None,
+                     target_evidence_ids=None):
+    """Resolve narrative purpose + visual evidence without a prerequisite call."""
+    purpose_n = " ".join(str(purpose or "").split())[:300] or None
+    known = {str(row.get("evidence_id")): row
+             for row in (((getattr(ctx, "index", None) or {}).get("visual_storyboard") or {})
+                         .get("evidence") or [])}
+    ids = [str(value) for value in (target_evidence_ids or [])
+           if str(value) in known]
+    if not ids and known:
+        try:
+            timeline = Timeline(edl.get("keep") or [],
+                                edl.get("inserts") or [],
+                                edl.get("speed") or [])
+            source_t = timeline.out_to_src((float(start) + float(end)) / 2)
+            if source_t is not None:
+                covering = [row for row in known.values()
+                            if any(float(a) - .2 <= source_t <= float(b) + .2
+                                   for a, b in row.get("covered_ranges") or [])]
+                if not covering:
+                    covering = list(known.values())
+                nearest = min(covering, key=lambda row: abs(
+                    float(row.get("representative_t") or 0) - source_t))
+                ids = [nearest["evidence_id"]]
+        except Exception:
+            pass
+    if not purpose_n:
+        for beat in (getattr(ctx, "edit_plan", None) or {}).get(
+                "sequence_map") or []:
+            spans = motion_contract.sequence_output_spans(edl, beat)
+            if any(min(float(end), b) - max(float(start), a) > .01
+                   for a, b in spans):
+                purpose_n = " ".join(str(
+                    beat.get("purpose") or beat.get("anchor") or
+                    beat.get("role") or "").split())[:300] or None
+                if purpose_n:
+                    break
+    if not purpose_n and ids:
+        description = known[ids[0]].get("semantic_description") or ""
+        purpose_n = ("emphasize " + description[:240]) if description else \
+            "emphasize the measured visual target"
+    return purpose_n, ids
+
+
 def add_zoom(ctx, start, end, strength=None, mode=None, cx=None, cy=None,
-             path=None, rect=None, motion_motif=None):
+             path=None, rect=None, motion_motif=None, purpose=None,
+             target_evidence_ids=None):
     # Round 67 default: 15% (was 25%) — a gentle push the viewer feels
     # rather than sees. Big snaps are opt-in, not the default grammar.
     edl = dict(ctx.latest_edl()["json"])
@@ -7163,6 +7343,12 @@ def add_zoom(ctx, start, end, strength=None, mode=None, cx=None, cy=None,
     zooms = [dict(z) for z in (fx.get("zooms") or [])]
     item = {"id": _next_item_id(zooms, "zm"), "start": s, "end": e,
             "strength": st}
+    purpose_n, evidence_ids = _zoom_provenance(
+        ctx, edl, s, e, purpose, target_evidence_ids)
+    if purpose_n:
+        item["purpose"] = purpose_n
+    if evidence_ids:
+        item["target_evidence_ids"] = evidence_ids
     if motif:
         item["motion_motif"] = motif
     if zmode != "punch":
@@ -7246,7 +7432,8 @@ def remove_zoom(ctx, id):
 # motion itself has nothing to do with where the footage came from, so it now
 # lives in worker/travel.py and BOTH tools call it.
 
-def add_zoom_path(ctx, keyframes, ease=None, motion_motif=None):
+def add_zoom_path(ctx, keyframes, ease=None, motion_motif=None, purpose=None,
+                  target_evidence_ids=None):
     """A zoom whose centre AND strength travel through a list of keyframes,
     interpolated, in output seconds."""
     if not isinstance(keyframes, list) or len(keyframes) < 2:
@@ -7369,6 +7556,12 @@ def add_zoom_path(ctx, keyframes, ease=None, motion_motif=None):
             # `s` values are what actually render.
             "strength": round(max(p["s"] for p in pts), 2) or ZOOM_STRENGTH_MIN,
             "mode": "path", "ease": ez, "path": pts}
+    purpose_n, evidence_ids = _zoom_provenance(
+        ctx, edl, start, end, purpose, target_evidence_ids)
+    if purpose_n:
+        item["purpose"] = purpose_n
+    if evidence_ids:
+        item["target_evidence_ids"] = evidence_ids
     if motif:
         item["motion_motif"] = motif
     zooms.append(item)
@@ -14653,8 +14846,9 @@ def fetch_url(ctx, url, as_kind=None):
         def _fetch_remote():
             result = remote.run_fetch_remote(
                 ctx.project_id,
-                {"url": url, "prefer": prefer,
-                 "review": _can_receive_images(ctx)},
+                _child_payload(ctx, {
+                    "url": url, "prefer": prefer,
+                    "review": _can_receive_images(ctx)}),
                 user_id=(getattr(ctx, "job", None) or {}).get("user_id"))
             if (not isinstance(result, dict) or not result.get("ok") or
                     not result.get("storage_key")):
@@ -14663,10 +14857,17 @@ def fetch_url(ctx, url, as_kind=None):
                         "the alternate fetch services could not acquire it"))
             return result
 
-        # A positive boot probe means local extraction is known to be doomed:
-        # skip several identical bot-wall attempts and use the independent
-        # egress immediately. Unknown/healthy keeps the proven local path.
-        if is_youtube and ytaccess.youtube_walled():
+        # Production orchestration is byte-free. All URL acquisition runs in
+        # the egress function; the historical local path survives only for a
+        # deliberately single-box development deployment.
+        if _execution_policy(ctx) == "redesign":
+            if not config.MODAL_EXECUTOR_ENABLED:
+                raise url_media.FetchMediaError(
+                    "the redesign egress function is not configured; no "
+                    "local media download was attempted")
+            got = _fetch_remote()
+            remote_fetch = True
+        elif is_youtube and ytaccess.youtube_walled():
             if remote.fetch_available() and remote.fetch_bytes_available():
                 got = _fetch_remote()
                 remote_fetch = True
@@ -14783,10 +14984,10 @@ def fetch_url(ctx, url, as_kind=None):
                      "uploader": got.get("uploader"),
                      "motion_profile": motion_profile,
                      "license": None,
-                     "license_status": "unverified",
-                     "license_note": ("No usage license was verified for "
-                                      "this URL; downloading does not grant "
-                                      "republication rights.")})
+                     "license_note": ("Usage rights were not assessed by "
+                                      "the fetch operation; downloading does "
+                                      "not by itself grant republication "
+                                      "rights.")})
     ctx.urls_fetched.append({"storage_key": key, "kind": kind,
                              "url": got["source_url"],
                              "filename": got["filename"],
@@ -14819,9 +15020,10 @@ def fetch_url(ctx, url, as_kind=None):
     return (f"Downloaded \"{got['filename']}\"{detail} as a "
             f"{url_media.KIND_LABEL[kind]}: storage_key={key}. It is saved to "
             f"the project but NOT in the video yet — {nxt}.{review} RIGHTS CHECK: "
-            "source title/uploader identify the file, but no usage license "
-            "was verified; downloading it does not grant republication "
-            "rights. Use it only when the user has the needed rights.")
+            "source title/uploader identify the file, but fetching does not "
+            "determine usage rights; downloading it does not by itself grant "
+            "republication rights. Use it only when the user has the needed "
+            "rights.")
 
 
 # ── Stock b-roll ─────────────────────────────────────────────────────────────
@@ -15258,61 +15460,86 @@ def add_stock_media(ctx, id):
     _, want_w, want_h = _project_frame(ctx)
     is_video = item.get("kind") == stock.KIND_VIDEO
     kind = url_media.KIND_VIDEO if is_video else url_media.KIND_IMAGE
-    workdir = os.path.join(ctx.workdir, f"stock_{uuid.uuid4().hex[:8]}")
-    os.makedirs(workdir, exist_ok=True)
-    path = os.path.join(workdir, f"stock.{'mp4' if is_video else 'jpg'}")
-    try:
-        stock.download(item, path, want_w, want_h)
-    except Exception as e:
-        shutil.rmtree(workdir, ignore_errors=True)
-        return (f"Could not download that stock clip ({str(e)[:180]}). Pick a "
-                "different result or tell the user it did not work. Do NOT "
-                "claim anything was added.")
-
-    # ffprobe decides what this file actually IS — a provider's promise of an
-    # mp4 is a hint, exactly as in url_media. A truncated download that still
-    # wrote bytes would otherwise reach the renderer as a valid asset.
-    try:
-        info = media.probe(path) if is_video else None
-    except Exception:
-        info = None
-    if is_video and not (info and info.get("width")):
-        shutil.rmtree(workdir, ignore_errors=True)
-        return ("That stock file downloaded but is not a readable video. Pick "
-                "a different result. Do NOT claim anything was added.")
-
-    key = url_media.storage_key(ctx.project_id, kind, path)
-    dur = (info or {}).get("duration") or item.get("duration_s")
     reviewed = 0
     ctx._last_download_motion_profile = None
-    try:
-        storage.upload_file(path, key, url_media.content_type(path))
-        reviewed = _queue_download_review(
-            ctx, path, kind, dur,
-            (item.get("description") or "stock media")[:60],
-            review_context={
-                "narrative_moment": item.get("_broll_moment"),
-                "search_route": item.get("_broll_query"),
-                "catalog_description": item.get("description"),
-                "provider": item.get("provider"),
-                "thumbnail_cast": item.get("_broll_cast")
-                or item.get("_broll_cast_abstain"),
-                "output_orientation": _project_frame(ctx)[0],
-            } if item.get("_broll_moment") else None)
-    except Exception as e:
-        return (f"Downloaded the stock clip but could not save it "
-                f"({str(e)[:160]}). Do NOT claim it was added; try again.")
-    finally:
-        shutil.rmtree(workdir, ignore_errors=True)
+    got = None
+    policy = _execution_policy(ctx)
+    if policy == "redesign":
+        if not config.MODAL_EXECUTOR_ENABLED:
+            return ("TRANSIENT_FAILURE: redesign stock acquisition requires "
+                    "the Modal egress function, but that function is not "
+                    "configured. Nothing was downloaded or added; retry "
+                    "after the executor health probe succeeds.")
+        try:
+            got = remote.run_stock_acquire_remote(
+                ctx.project_id,
+                _child_payload(ctx, {
+                    "item": item, "want_w": want_w, "want_h": want_h,
+                    "review": True}),
+                user_id=(getattr(ctx, "job", None) or {}).get("user_id"))
+        except Exception as exc:
+            return (f"Could not acquire that stock clip through the media "
+                    f"executor ({str(exc)[:180]}). Try the next researched "
+                    "candidate; nothing was added.")
+        if not isinstance(got, dict) or not got.get("ok"):
+            return ("Could not acquire that stock clip ("
+                    + str((got or {}).get("error") or "unknown media error")[:180]
+                    + "). Try the next researched candidate; nothing was added.")
+        info = got
+        key = got["storage_key"]
+        dur = got.get("duration_s") or item.get("duration_s")
+        reviewed = _queue_remote_download_review(
+            ctx, got, (item.get("description") or "stock media")[:60])
+    else:
+        # Backward-compatible single-box development path. Production Modal
+        # orchestration never downloads, decodes or uploads these bytes.
+        workdir = os.path.join(ctx.workdir,
+                               f"stock_{uuid.uuid4().hex[:8]}")
+        os.makedirs(workdir, exist_ok=True)
+        path = os.path.join(workdir,
+                            f"stock.{'mp4' if is_video else 'jpg'}")
+        try:
+            stock.download(item, path, want_w, want_h)
+            try:
+                info = media.probe(path) if is_video else None
+            except Exception:
+                info = None
+            if is_video and not (info and info.get("width")):
+                return ("That stock file downloaded but is not a readable "
+                        "video. Pick a different result; nothing was added.")
+            key = url_media.storage_key(ctx.project_id, kind, path)
+            dur = (info or {}).get("duration") or item.get("duration_s")
+            storage.upload_file(path, key, url_media.content_type(path))
+            reviewed = _queue_download_review(
+                ctx, path, kind, dur,
+                (item.get("description") or "stock media")[:60],
+                review_context={
+                    "narrative_moment": item.get("_broll_moment"),
+                    "search_route": item.get("_broll_query"),
+                    "catalog_description": item.get("description"),
+                    "provider": item.get("provider"),
+                    "thumbnail_cast": item.get("_broll_cast")
+                    or item.get("_broll_cast_abstain"),
+                    "output_orientation": _project_frame(ctx)[0],
+                } if item.get("_broll_moment") else None)
+        except Exception as exc:
+            return (f"Could not download/save that stock clip "
+                    f"({str(exc)[:180]}). Try a different result; nothing "
+                    "was added.")
+        finally:
+            shutil.rmtree(workdir, ignore_errors=True)
 
     w = (info or {}).get("width") or item.get("picked_width") or item.get("width")
     h = (info or {}).get("height") or item.get("picked_height") or item.get("height")
     desc = (item.get("description") or "stock clip")[:60]
     fname = f"{desc}.{'mp4' if is_video else 'jpg'}"
     motion_profile = getattr(ctx, "_last_download_motion_profile", None)
-    ctx.db.run(dbx.insert_asset, ctx.project_id, kind, key,
-               bytes_=None, duration_s=dur, width=w, height=h,
-               fps=(info or {}).get("fps"),
+    existing = ctx.db.run(dbx.asset_by_key, ctx.project_id, key)
+    if not existing:
+        ctx.db.run(dbx.insert_asset, ctx.project_id, kind, key,
+               bytes_=(got or {}).get("bytes"), duration_s=dur,
+               width=w, height=h, fps=(info or {}).get("fps"),
+               sha256=(got or {}).get("sha256"),
                meta={"filename": fname, "stock": True,
                      "provider": item.get("provider"),
                      "stock_id": item.get("_provider_result_id") or sid,
@@ -15321,7 +15548,8 @@ def add_stock_media(ctx, id):
                      "license": item.get("license"),
                      "license_note": item.get("license_note"),
                      "page_url": item.get("page_url"),
-                     "source_url": item.get("source_url"),
+                     "source_url": (got or {}).get("source_url")
+                     or item.get("source_url"),
                      "description": item.get("description"),
                      "motion_profile": motion_profile,
                      "broll_moment": item.get("_broll_moment"),
@@ -16497,8 +16725,10 @@ GRADE_ONLY_TOOLS = ("set_color_grade", "apply_look", "set_grade_custom")
 _CHANGE_CHECK_PAD_S = 0.75
 _CHANGE_CHECK_POINT_S = 2.5
 _CHANGE_CHECK_MAX_WINDOW_S = 8.0
-_CHANGE_CHECK_MAX_TOTAL_S = 24.0
-_CHANGE_CHECK_MAX_WINDOWS = 6
+# Physical proof jobs stay cheap; logical verification is transparently paged
+# across as many jobs as the affected scenes require.
+_CHANGE_CHECK_PAGE_TOTAL_S = 24.0
+_CHANGE_CHECK_PAGE_WINDOWS = 6
 
 
 def _preview_baseline(ctx, row):
@@ -16557,12 +16787,12 @@ def _sample_long_check_range(a, b):
 
 
 def _change_check_ranges(ctx, row, plan=None):
-    """Bounded NEW-output windows affected since the last complete preview.
+    """Every distinct NEW-output risk window since the last proof.
 
-    Global changes (caption style, grade, master settings) technically affect
-    the whole program; iteration still needs evidence, not another full file,
-    so sample representative windows plus any exact verify-plan moments. The
-    complete turn-end/readiness preview remains the exhaustive proof.
+    Each physical proof reel is bounded later by ``_proof_pages``. This
+    planner never truncates logical coverage: global captions/crops/grades
+    visit every distinct visual cluster, and broad local changes visit every
+    cluster inside their affected span.
     """
     prev = _preview_baseline(ctx, row)
     if not prev:
@@ -16584,94 +16814,136 @@ def _change_check_ranges(ctx, row, plan=None):
                 half = _CHANGE_CHECK_POINT_S / 2.0
                 raw.append([a - half, a + half])
             else:
-                raw.extend(_sample_long_check_range(
-                    a - _CHANGE_CHECK_PAD_S, b + _CHANGE_CHECK_PAD_S))
+                broad_a, broad_b = a - _CHANGE_CHECK_PAD_S, \
+                    b + _CHANGE_CHECK_PAD_S
+                raw.extend(_sample_long_check_range(broad_a, broad_b))
+                for evidence in (((getattr(ctx, "index", None) or {}).get(
+                                 "visual_storyboard") or {})
+                                 .get("evidence") or []):
+                    at = float(evidence.get("representative_t") or 0.0)
+                    if broad_a <= at <= broad_b:
+                        raw.append([at - .65, at + .65])
         if changed.get("global") or not raw:
             exact = [float(t) for t, _claim in (plan or [])]
+            distinct = [float(row.get("representative_t") or 0.0)
+                        for row in (((getattr(ctx, "index", None) or {}).get(
+                                    "visual_storyboard") or {})
+                                    .get("evidence") or [])]
+            if distinct:
+                exact.extend(distinct)
             if not exact:
                 n = min(4, max(1, int(round(duration / 6.0))))
                 exact = [duration * (i + 0.5) / n for i in range(n)]
             half = min(1.25, max(0.5, duration / 12.0))
             raw.extend([[t - half, t + half] for t in exact])
         merged = _merge_check_ranges(raw, duration)
-        # Prefer exact changed moments first and keep the proof reel bounded.
-        selected, spent = [], 0.0
+        expanded = []
         for a, b in merged:
-            if len(selected) >= _CHANGE_CHECK_MAX_WINDOWS:
-                break
-            room = _CHANGE_CHECK_MAX_TOTAL_S - spent
-            if room < 0.5:
-                break
-            if b - a > room:
-                mid = (a + b) / 2.0
-                a, b = max(0.0, mid - room / 2.0), \
-                    min(duration, mid + room / 2.0)
-            selected.append([round(a, 3), round(b, 3)])
-            spent += b - a
-        return selected, prev
+            if b - a <= _CHANGE_CHECK_MAX_WINDOW_S:
+                expanded.append([round(a, 3), round(b, 3)])
+                continue
+            cursor = a
+            while cursor < b - .05:
+                end = min(b, cursor + _CHANGE_CHECK_MAX_WINDOW_S)
+                expanded.append([round(cursor, 3), round(end, 3)])
+                cursor = end
+        return expanded, prev
     except Exception:
         return [], prev
 
 
+def _proof_pages(ranges):
+    """Pack complete risk coverage into inexpensive physical proof reels."""
+    pages, page, spent = [], [], 0.0
+    for a, b in ranges or []:
+        cursor = float(a)
+        end = float(b)
+        while cursor < end - .05:
+            room = _CHANGE_CHECK_PAGE_TOTAL_S - spent
+            if len(page) >= _CHANGE_CHECK_PAGE_WINDOWS or room < .1:
+                pages.append(page)
+                page, spent = [], 0.0
+                room = _CHANGE_CHECK_PAGE_TOTAL_S
+            piece_end = min(end, cursor + room,
+                            cursor + _CHANGE_CHECK_MAX_WINDOW_S)
+            page.append([round(cursor, 3), round(piece_end, 3)])
+            spent += piece_end - cursor
+            cursor = piece_end
+    if page:
+        pages.append(page)
+    return pages
+
+
 def _run_changed_preview_check(ctx, row, plan, ranges):
-    """Render/wait for a short proof reel without replacing Studio preview."""
+    """Render every paged proof reel without replacing Studio preview."""
     version = int(row["version"])
     if version in ctx.checked_versions:
         return (f"Changed sections of EDL v{version} were already rendered "
                 "and checked. Keep editing, or finish the edit; the complete "
                 "preview is automatic once.")
-    payload = {"edl_version": version, "check_ranges": ranges,
-               "source": "agent_preview_check",
-               "agent_job_id": ctx.job["id"],
-               "render_signature": _render_signature(row, "preview_check",
-                                                       ranges)}
-    if plan:
-        payload["verify_times"] = [t for t, _ in plan]
-    job_id = getattr(ctx, "spec_preview_check_jobs", {}).get(version)
-    if not job_id:
-        job_id, _created = ctx.db.run(
-            dbx.get_or_enqueue_preview_check_job, ctx.project_id,
-            ctx.job["user_id"], payload)
-    deadline = time.time() + min(config.PREVIEW_WAIT_TIMEOUT_S, 300.0)
-    while time.time() < deadline:
-        time.sleep(1)
-        job = ctx.db.run(dbx.get_job, job_id)
-        if job["state"] == "done":
-            result = job.get("result") or {}
-            if result.get("superseded_by"):
-                return ("Changed-section proof was superseded by a newer EDL "
-                        "version. Check that newer edit instead.")
-            ctx.last_preview_check = result
-            ctx.checked_versions.add(version)
-            delivered = _queue_check_frames(ctx, result, plan)
-            critic = _preview_critic_report(ctx, result, plan)
-            if critic is not None:
-                ctx.last_visual_critic = critic
-            covered = result.get("changed_ranges") or ranges
-            note = (f"Changed-section proof for EDL v{version} rendered "
-                    f"{result.get('duration_s')}s across {covered}. Only "
-                    "the affected seconds were encoded; this proof reel did "
-                    "NOT replace the complete Studio preview.")
-            if delivered:
-                note += (" Inspect the attached changed-moment frames now. "
-                         "If anything is wrong, repair the EDL and check the "
-                         "new version; do not repeat the unchanged render.")
-            if critic is not None:
-                note += preview_critic.summary_line(critic)
-            note += (" Continue iterating cheaply. When the edit is ready, "
-                     "finish the turn; the complete user preview is produced "
-                     "automatically exactly once.")
-            return note
-        if job["state"] == "failed":
-            failure = dict(((job.get("result") or {}).get("failure") or {}))
-            err = str(failure.get("error") or job.get("error")
-                      or "unknown check error")[:500]
-            return (f"Changed-section proof FAILED for v{version}: {err}. "
-                    "The EDL remains saved. Use another inspection route or "
-                    "repair a genuinely wrong edit; do not retry this same "
-                    "proof unchanged.")
-    return ("Changed-section proof is still running. Continue with work that "
-            "does not depend on it; do not enqueue the same proof again.")
+    pages = _proof_pages(ranges)
+    notes, all_covered, completed = [], [], 0
+    for page_index, page_ranges in enumerate(pages, start=1):
+        payload = _child_payload(ctx, {
+                   "edl_version": version, "check_ranges": page_ranges,
+                   "proof_page": page_index, "proof_pages": len(pages),
+                   "source": "agent_preview_check",
+                   "agent_job_id": ctx.job["id"],
+                   "render_signature": _render_signature(
+                       row, "preview_check", page_ranges)})
+        if plan:
+            payload["verify_times"] = [t for t, _ in plan
+                                       if any(a <= t <= b
+                                              for a, b in page_ranges)]
+        job_id = None
+        if page_index == 1:
+            job_id = getattr(ctx, "spec_preview_check_jobs", {}).get(version)
+        if not job_id:
+            job_id, _created = ctx.db.run(
+                dbx.get_or_enqueue_preview_check_job, ctx.project_id,
+                ctx.job["user_id"], payload)
+        deadline = time.time() + min(config.PREVIEW_WAIT_TIMEOUT_S, 300.0)
+        while time.time() < deadline:
+            time.sleep(1)
+            job = ctx.db.run(dbx.get_job, job_id)
+            if job["state"] == "done":
+                result = job.get("result") or {}
+                if result.get("superseded_by"):
+                    return ("Changed-section proof was superseded by a newer "
+                            "EDL version. Check that newer edit instead.")
+                ctx.last_preview_check = result
+                delivered = _queue_check_frames(ctx, result, plan)
+                critic = _preview_critic_report(ctx, result, plan)
+                if critic is not None:
+                    ctx.last_visual_critic = critic
+                covered = result.get("changed_ranges") or page_ranges
+                all_covered.extend(covered)
+                completed += 1
+                notes.append(
+                    f"page {page_index}/{len(pages)} rendered "
+                    f"{result.get('duration_s')}s"
+                    + (" and delivered review frames" if delivered else ""))
+                break
+            if job["state"] == "failed":
+                failure = dict(((job.get("result") or {}).get("failure") or {}))
+                err = str(failure.get("error") or job.get("error")
+                          or "unknown check error")[:500]
+                return (f"TRANSIENT_FAILURE: changed-section proof page "
+                        f"{page_index}/{len(pages)} failed for v{version}: "
+                        f"{err}. The EDL remains saved; retry/reconnect this "
+                        "idempotent proof page while unrelated work continues.")
+        else:
+            return (f"PREREQUISITE: proof page {page_index}/{len(pages)} is "
+                    "still running. Continue unrelated work; the logical "
+                    "verification remains open and will resume.")
+    if completed == len(pages):
+        ctx.checked_versions.add(version)
+        ctx._proof_ranges_by_version[version] = all_covered
+    return (f"Changed-section verification for EDL v{version} covered every "
+            f"planned risk window across {len(pages)} inexpensive proof "
+            f"page(s): {'; '.join(notes)}. Covered ranges: {all_covered}. "
+            "These proof reels do not replace the complete Studio preview; "
+            "repair any finding, otherwise continue to final verification.")
 
 
 def speculative_preview(ctx):
@@ -16696,11 +16968,12 @@ def speculative_preview(ctx):
     ranges, _baseline = _change_check_ranges(ctx, row, plan)
     if not ranges:
         return
-    payload = {"edl_version": version, "check_ranges": ranges,
+    payload = _child_payload(ctx, {
+               "edl_version": version, "check_ranges": ranges,
                "source": "agent_preview_check",
                "agent_job_id": ctx.job["id"],
                "render_signature": _render_signature(row, "preview_check",
-                                                       ranges)}
+                                                       ranges)})
     if plan:
         payload["verify_times"] = [t for t, _ in plan]
     job_id, _created = ctx.db.run(
@@ -16809,9 +17082,10 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None):
     # Adopt the speculative encode of this exact version when one is already
     # queued/running (round 98) — same payload shape, same verify plan,
     # half the wait and none of the double cost.
-    payload = {"edl_version": version, "source": "agent_preview",
+    payload = _child_payload(ctx, {
+               "edl_version": version, "source": "agent_preview",
                "agent_job_id": ctx.job["id"],
-               "render_signature": _render_signature(row, "preview")}
+               "render_signature": _render_signature(row, "preview")})
     if plan:
         payload["verify_times"] = [t for t, _ in plan]
     sequence_frames = _sequence_screening_frames(ctx, row)
@@ -17049,6 +17323,48 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None):
                     + ". Fulfill those authored/omitted promises or revise "
                       "the department decision with the real editorial "
                       "reason; do not close the blueprint by assertion.")
+            visual_record_findings = list(ctx.last_taste or [])
+            visual_record_findings += preview_critic.repair_lines(
+                ctx.last_visual_critic or {})
+            story_record_findings = story_critic.repair_lines(
+                ctx.last_story_review or {})
+            audio_record_findings = list(ctx.last_audio_qc_findings or [])
+            if (ctx.last_audio_review or {}).get("verdict") == "fix":
+                audio_record_findings.append(
+                    (ctx.last_audio_review or {}).get("text") or
+                    "actual-audio review requested a repair")
+            manifest = (getattr(ctx, "change_manifests", None) or {}).get(version) or \
+                quality_verifier.build_change_manifest(
+                    ctx.project_id, version, row["json"], row["json"], {},
+                    description="verification of existing immutable version")
+            verification = quality_verifier.build_verification_record(
+                ctx.project_id, version, manifest, row["json"], ctx.index,
+                preview=result,
+                proof_ranges=(getattr(ctx, "_proof_ranges_by_version", None)
+                              or {}).get(version) or [],
+                visual_findings=visual_record_findings,
+                audio_findings=audio_record_findings,
+                story_findings=story_record_findings)
+            if not hasattr(ctx, "verification_records"):
+                ctx.verification_records = {}
+            ctx.verification_records[version] = verification
+            try:
+                ctx.db.run(dbx.upsert_verification_record, ctx.project_id,
+                           version, verification)
+            except Exception as exc:
+                print(f"[quality] verification persist deferred: {exc}",
+                      flush=True)
+            if verification["unresolved_findings"]:
+                unresolved_rows = verification["unresolved_findings"][:8]
+                lines = [f"{row.get('finding_id') or row.get('code')}: "
+                         f"{row['message']}" for row in unresolved_rows]
+                for message in [row["message"] for row in unresolved_rows]:
+                    if message not in ctx.last_taste:
+                        ctx.last_taste.append(message)
+                note += (" VERSION VERIFICATION RECORD: repair required — "
+                         + "; ".join(lines)
+                         + ". Repair the concrete findings and verify the "
+                           "new EDL version; completion remains open.")
             if finishing_checkpoint(ctx):
                 if not getattr(ctx, "_finishing_checkpoint_announced", False):
                     ctx._finishing_checkpoint_announced = True
@@ -17077,8 +17393,57 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None):
         remaining = deadline - time.monotonic()
         if remaining > 0:
             time.sleep(min(1.0, remaining))
-    return ("Preview render is taking too long — it may still finish and "
-            "attach to the chat. Summarize your edit for the user now.")
+    return ("Preview render is taking too long — PREREQUISITE: the complete "
+            "preview is still running. The EDL is durable and the logical "
+            "turn must resume/reconnect to this render job; do not hand off "
+            "or ask the user to retry.")
+
+
+def justify_verification_findings(ctx, finding_ids, justification,
+                                  evidence_ids=None):
+    """Resolve genuine review false positives with durable direct evidence."""
+    version = int(ctx.latest_edl()["version"])
+    record = (getattr(ctx, "verification_records", None) or {}).get(version)
+    if not record:
+        try:
+            record = ctx.db.run(
+                dbx.get_verification_record, ctx.project_id, version)
+        except Exception:
+            record = None
+    if not record:
+        return ("PREREQUISITE: no complete verification record exists for "
+                f"EDL v{version}. Render and inspect the complete preview first.")
+    try:
+        updated = quality_verifier.justify_findings(
+            record, finding_ids, justification, evidence_ids=evidence_ids)
+    except ValueError as exc:
+        return ("CORRECTION NEEDED: " + str(exc) + ". Use the finding_id/code "
+                "from the latest VERSION VERIFICATION RECORD and cite what "
+                "the direct pixels/audio actually prove.")
+    try:
+        ctx.db.run(dbx.upsert_verification_record, ctx.project_id,
+                   version, updated)
+    except Exception as exc:
+        return ("TRANSIENT FAILURE: the justification was not persisted: "
+                f"{str(exc)[:240]}. Retry this idempotent verification call.")
+    ctx.verification_records[version] = updated
+    resolved = {row.get("finding_id") for row in updated.get("justifications")
+                or []}
+    resolved_messages = {
+        row.get("message") for row in record.get("findings") or []
+        if row.get("finding_id") in resolved
+    }
+    ctx.last_taste = [message for message in (ctx.last_taste or [])
+                      if message not in resolved_messages]
+    _metric(ctx, "verification_justifications",
+            len(updated.get("justifications") or []))
+    remaining = updated.get("unresolved_findings") or []
+    if remaining:
+        return (f"Verification justification recorded for EDL v{version}; "
+                f"{len(remaining)} finding(s) still require repair or direct-"
+                "evidence justification before completion.")
+    return (f"EDL v{version} verification is JUSTIFIED with durable evidence; "
+            "no unresolved findings remain.")
 
 
 def _audio_window_label(edl, plan, t0, t1):
@@ -17598,16 +17963,24 @@ def _queue_check_frames(ctx, result, plan=None):
             queued += 1
         except Exception as e:
             print(f"[render] verify sheet fetch failed: {e}", flush=True)
-    ckey = result.get("caption_sheet_key")
-    if ckey:
+    caption_pages = result.get("caption_pages") or (
+        [{"key": result.get("caption_sheet_key")}]
+        if result.get("caption_sheet_key") else [])
+    for page_n, page in enumerate(caption_pages, 1):
+        ckey = page.get("key") if isinstance(page, dict) else None
+        if not ckey:
+            continue
         clocal = os.path.join(ctx.workdir,
-                              f"caption_own_{uuid.uuid4().hex[:8]}.jpg")
+                              f"caption_own_{page_n}_"
+                              f"{uuid.uuid4().hex[:8]}.jpg")
         try:
             storage.download_to(ckey, clocal)
             ctx.pending_images.append(
-                ("CAPTION QA — up to 16 real rendered caption-state changes "
-                 "sampled across the edit; inspect timing, clipping, placement "
-                 "and missing/overlapping words", clocal))
+                (f"CAPTION QA PAGE {page_n}/{len(caption_pages)} — real "
+                 "rendered risk states spanning distinct visual backgrounds, "
+                 "layout/placement changes, density extremes and the program "
+                 "ends; inspect corruption, timing, clipping, hierarchy, "
+                 "panel alignment and collisions", clocal))
             queued += 1
         except Exception as e:
             print(f"[render] caption sheet fetch failed: {e}", flush=True)
@@ -17685,8 +18058,15 @@ def _independent_preview_review(ctx, result, plan=None,
     if plan:
         _download(result.get("verify_sheet_key"), "changed",
                   "EDITED RENDER changed moments, one numbered tile per claim")
-    _download(result.get("caption_sheet_key"), "captions",
-              "EDITED RENDER caption QA, up to 16 exact caption-state changes")
+    caption_pages = result.get("caption_pages") or (
+        [{"key": result.get("caption_sheet_key")}]
+        if result.get("caption_sheet_key") else [])
+    for page_n, page in enumerate(caption_pages, 1):
+        _download(
+            page.get("key") if isinstance(page, dict) else None,
+            f"captions{page_n}",
+            f"EDITED RENDER caption QA page {page_n}/{len(caption_pages)}, "
+            "risk-selected rendered caption states")
 
     # Compare changed moments to their corresponding RAW source tiles. First
     # and last tiles are useful for a generic overview, but on an 85-minute
@@ -18111,23 +18491,27 @@ def ask_user(ctx, question):
     raise AskUser(q[:600])
 
 
-def read_skill(ctx, name):
+def read_skill(ctx, name, section=None):
     """Load one of the on-demand playbooks (worker/skills/*.md) into the
     turn. The catalog in the system prompt names them; content arrives when
     it is relevant instead of riding in every request."""
     import agent_prompt
-    skill_key = str(name or "").strip().lower()
+    name_key = str(name or "").strip().lower().replace(".md", "")
+    section_key = str(section or "").strip().lower()
+    skill_key = name_key + (":" + section_key if section_key else ":*")
     skills = _loaded_skills(ctx)
-    if skill_key in skills:
+    if skill_key in skills or name_key + ":*" in skills:
         _metric(ctx, "skill_loads_reused")
         return (f"SKILL ALREADY LOADED — '{skill_key}' was returned earlier "
                 "in this turn and remains in the conversation. Apply it; do "
                 "not load it again unless a later turn starts.")
-    text = agent_prompt.read_skill_text(name)
+    text = agent_prompt.read_skill_text(name, section=section)
     if text is None:
         names = ", ".join(agent_prompt.skill_names()) or "(none installed)"
-        return (f"REJECTED: no skill named {name!r}. Available skills: "
-                f"{names}.")
+        sections = ", ".join(agent_prompt.SKILL_SECTIONS)
+        return (f"CORRECTION_NEEDED: no skill/section {name!r}/"
+                f"{section!r}. Available skills: {names}. Sections: "
+                f"{sections}.")
     skills.add(skill_key)
     return text
 
@@ -18326,16 +18710,23 @@ def _asset_audio_analysis(ctx, asset_key):
     return _cap(out)
 
 
-def expand_toolset(ctx, domains):
-    """Expose additional domain tools on the next reasoning dispatch.
+def load_tools(ctx, names=None, domains=None):
+    """Persist exact capabilities for the rest of this logical user turn.
 
-    Calls carry a stage-relevant catalog to avoid re-tokenizing 100+ schemas.
-    This escape hatch preserves capability: a new turn in the plan can request
-    any domain, with no fixed operation or call limit.
+    Provider requests are still paged to their envelope, but loading is an
+    additive agent decision: it never replaces an earlier department and has
+    no numeric tool allowance.
     """
-    if not isinstance(domains, (list, tuple)) or not domains:
-        return ("REJECTED: domains must be a non-empty array from "
+    names = names or []
+    domains = domains or []
+    if not isinstance(names, (list, tuple)) or \
+            not isinstance(domains, (list, tuple)):
+        return ("CORRECTION NEEDED: names and domains must be arrays. "
+                "Available domains: "
                 + ", ".join(sorted(TOOL_DOMAIN_NAMES)) + ".")
+    if not names and not domains:
+        return ("CORRECTION NEEDED: request at least one exact tool name or "
+                "department domain.")
     requested, bad = [], []
     for raw in domains:
         name = str(raw or "").strip().lower()
@@ -18345,25 +18736,44 @@ def expand_toolset(ctx, domains):
         else:
             bad.append(name or "(empty)")
     if bad:
-        return ("REJECTED: unknown tool domain(s): " + ", ".join(bad)
+        return ("CORRECTION NEEDED: unknown tool domain(s): " + ", ".join(bad)
                 + ". Available: " + ", ".join(sorted(TOOL_DOMAIN_NAMES))
                 + ".")
-    # This is a one-dispatch escape hatch, not a permanent union. Load every
-    # domain the editor asked for in this call: silently taking only the first
-    # made a correct cross-department plan require extra reasoning round trips
-    # and could strand later work at the turn clock. The loop consumes the set
-    # after constructing the next schema dispatch, so the larger catalog is
-    # paid for once rather than resent forever.
-    active = requested
-    before = set(getattr(ctx, "_expanded_tool_domains", None) or set())
-    ctx._expanded_tool_domains = set(active)
-    if set(active) == before:
-        return ("NO CHANGE — that tool domain is already exposed for the "
-                "next step: " + ", ".join(active) + ".")
-    names = sorted(set().union(*(TOOL_DOMAINS[name] for name in active)))
-    return ("Tool domain exposed for the next step: "
-            + ", ".join(active) + ". Available functions include: "
-            + ", ".join(names) + ". Continue the edit now.")
+    exact, bad_names = [], []
+    for raw in names:
+        tool = str(raw or "").strip()
+        if tool in TOOLS and not _tool_disabled(tool):
+            if tool not in exact:
+                exact.append(tool)
+        else:
+            bad_names.append(tool or "(empty)")
+    if bad_names:
+        return ("CORRECTION NEEDED: unknown or unavailable tool name(s): "
+                + ", ".join(bad_names)
+                + ". Use the capability directory's exact names.")
+    loaded_domains = set(getattr(ctx, "_loaded_tool_domains", None) or set())
+    loaded_names = set(getattr(ctx, "_loaded_tool_names", None) or set())
+    before = (set(loaded_domains), set(loaded_names))
+    loaded_domains.update(requested)
+    loaded_names.update(exact)
+    ctx._loaded_tool_domains = loaded_domains
+    ctx._loaded_tool_names = loaded_names
+    if before == (loaded_domains, loaded_names):
+        return "NO CHANGE — those capabilities are already loaded."
+    domain_tools = set().union(
+        *(TOOL_DOMAINS[name] for name in loaded_domains)) \
+        if loaded_domains else set()
+    available = sorted((domain_tools | loaded_names) & set(TOOLS))
+    return ("Capabilities loaded for the rest of this user request: "
+            + ("domains=" + ",".join(sorted(loaded_domains)) + "; "
+               if loaded_domains else "")
+            + "tools=" + ", ".join(available)
+            + ". Continue the edit now.")
+
+
+def expand_toolset(ctx, domains):
+    """Backward-compatible alias for clients that learned the old name."""
+    return load_tools(ctx, domains=domains)
 
 
 def set_edit_plan(ctx, steps, brief=None, treatment=None, format=None,
@@ -18379,14 +18789,44 @@ def set_edit_plan(ctx, steps, brief=None, treatment=None, format=None,
                   broll_direction=None,
                   music_direction=None, sfx_direction=None,
                   color_direction=None, department_plan=None,
-                  acceptance_criteria=None):
+                  acceptance_criteria=None, tool_domains=None,
+                  required_tools=None):
     """Author the durable creative blueprint, then execute it this turn."""
+    storyboard = (getattr(ctx, "index", None) or {}).get(
+        "visual_storyboard") or {}
+    semantic_status = str(storyboard.get("semantic_status") or "")
+    pages = {int(row.get("page") or index + 1)
+             for index, row in enumerate(storyboard.get("sheets") or [])}
+    unopened = sorted(pages - set(ctx._visual_pages_opened))
+    if "raw_contact_sheets_required" in semantic_status and unopened:
+        return (
+            "PREREQUISITE: semantic visual indexing degraded, so raw pixels "
+            "are the authoritative orientation evidence. Before committing "
+            f"the edit plan, call open_visual_page for remaining pages "
+            f"{unopened}. This is automatic evidence paging, not an image "
+            "quota; continue planning after every distinct cluster has been "
+            "seen.")
     if editorial_family is not None and \
             str(editorial_family).strip() not in editorial_contracts.FAMILIES:
         return ("REJECTED: editorial_family must be one of "
                 + ", ".join(editorial_contracts.FAMILIES)
                 + ". Choose the dominant storytelling driver from actual "
                   "evidence; use mixed_other only for a genuinely hybrid one.")
+    tool_domains = list(tool_domains or [])
+    required_tools = list(required_tools or [])
+    invalid_domains = [str(name) for name in tool_domains
+                       if str(name) not in TOOL_DOMAIN_NAMES]
+    invalid_tools = [str(name) for name in required_tools
+                     if str(name) not in TOOLS
+                     or _tool_disabled(str(name))]
+    if invalid_domains or invalid_tools:
+        details = []
+        if invalid_domains:
+            details.append("unknown domains " + ", ".join(invalid_domains))
+        if invalid_tools:
+            details.append("unknown/unavailable tools "
+                           + ", ".join(invalid_tools))
+        return "CORRECTION NEEDED: " + "; ".join(details) + "."
     try:
         motion_signal = motion_direction
         if motion_signal is None and isinstance(motion_language, dict):
@@ -18424,7 +18864,9 @@ def set_edit_plan(ctx, steps, brief=None, treatment=None, format=None,
             music_direction=music_direction, sfx_direction=sfx_direction,
             color_direction=color_direction,
             department_plan=department_plan,
-            acceptance_criteria=acceptance_criteria)
+            acceptance_criteria=acceptance_criteria,
+            tool_domains=tool_domains,
+            required_tools=required_tools)
     except ValueError as exc:
         return f"REJECTED: {exc}."
     if not plan:
@@ -18578,6 +19020,11 @@ def set_edit_plan(ctx, steps, brief=None, treatment=None, format=None,
                     "route. " + treatment_judge.summary(treatment_review))
     ctx.edit_plan = plan
     ctx.plan_revised_this_turn = True
+    # Plan-declared capabilities load immediately and remain additive for the
+    # logical turn. The next dispatch gets their exact schemas without a
+    # separate routing round trip.
+    if tool_domains or required_tools:
+        load_tools(ctx, names=required_tools, domains=tool_domains)
     head = (f" Brief: {ctx.edit_plan['brief']}."
             if ctx.edit_plan["brief"] else "")
     anchors = []
@@ -20334,8 +20781,9 @@ def make_shorts(ctx, count=None, style_note=None, clips=None):
         if plan_error:
             return "REJECTED: " + plan_error
 
-    payload = {"source": ("mcp_direct" if is_mcp else
-                          "agent_direct" if planned else "agent")}
+    payload = _child_payload(ctx, {
+        "source": ("mcp_direct" if is_mcp else
+                   "agent_direct" if planned else "agent")})
     if not planned:
         try:
             if count:
@@ -20517,10 +20965,10 @@ def edit_shorts(ctx, instruction, shorts=None):
                 queued = cur.fetchone() is not None
             jid = None
             if not queued:
-                jid = dbx.enqueue_job(conn, child_id, ctx.job["user_id"],
-                                      "agent_turn", {"message_id": mid,
-                                                     "from_parent":
-                                                     board_pid})
+                jid = dbx.enqueue_job(
+                    conn, child_id, ctx.job["user_id"], "agent_turn",
+                    _child_payload(ctx, {"message_id": mid,
+                                         "from_parent": board_pid}))
             sent.append((c.get("title") or f"short {child_id}", jid))
         return sent
 
@@ -20700,8 +21148,14 @@ TOOLS = {
                    "zooms, audio, transitions, ...) into this turn. The "
                    "SKILLS list in your instructions names them. Read the "
                    "matching skill before your first edit of that kind — "
-                   "batch it with your other reading calls.",
-                   {"name": {"type": "string"}}),
+                   "batch it with your other reading calls. Pass section to "
+                   "retrieve only the decision, evidence, pattern, failure, "
+                   "verification, or repair material needed now.",
+                   {"name": {"type": "string"},
+                    "section": {"type": "string", "enum": [
+                        "editorial decision principles", "evidence to inspect",
+                        "strong treatment patterns", "common failure modes",
+                        "verification procedure", "repair ladder"]}}),
     "set_edit_plan": (set_edit_plan, "Author the durable CREATIVE BLUEPRINT "
                       "for this project, then EXECUTE it in the SAME turn — "
                       "one short line per move, in order. This is direction "
@@ -20929,6 +21383,24 @@ TOOLS = {
                            },
                            "additionalProperties": False,
                        },
+                       "tool_domains": {
+                           "type": "array",
+                           "items": {"type": "string",
+                                     "enum": ["story", "captions", "audio",
+                                              "media", "motion", "screen",
+                                              "shorts"]},
+                           "description": (
+                               "Editorial capability departments required by "
+                               "this treatment. Their schemas load on the "
+                               "next dispatch and remain loaded for the "
+                               "logical user request.")},
+                       "required_tools": {
+                           "type": "array",
+                           "items": {"type": "string"},
+                           "description": (
+                               "Exact capabilities the treatment already "
+                               "knows it needs. This is additive and has no "
+                               "numeric allowance.")},
                        "acceptance_criteria": {
                            "type": "array", "items": {"type": "string"}}}),
     "complete_edit_plan_steps": (
@@ -20959,6 +21431,20 @@ TOOLS = {
         {"domains": {"type": "array", "items": {"type": "string",
           "enum": ["story", "captions", "audio", "media", "motion",
                    "screen", "shorts"]}}}),
+    "load_tools": (
+        load_tools,
+        "Load exact capabilities or complete editorial departments for the "
+        "rest of this logical user request. Loading is additive and may be "
+        "expanded at any time; there is no tool-count allowance. Prefer exact "
+        "names when only a few operations are needed and domains for broad "
+        "cross-department work.",
+        {"names": {"type": "array", "items": {"type": "string"}},
+         "domains": {"type": "array", "items": {"type": "string",
+                                                   "enum": [
+                                                       "story", "captions",
+                                                       "audio", "media",
+                                                       "motion", "screen",
+                                                       "shorts"]}}}),
     "apply_edit_recipe": (
         apply_edit_recipe,
         "Compile and atomically commit a multi-department EDL recipe; use "
@@ -21019,6 +21505,17 @@ TOOLS = {
          "question": {"type": "string"},
          "samples_per_asset": {"type": "integer", "minimum": 1,
                                "maximum": 12}}),
+    "open_visual_page": (
+        open_visual_page,
+        "Open one or more labeled pages from the main footage's persisted "
+        "hierarchical visual storyboard. The full text inventory names every "
+        "cluster; use this whenever you need the actual pixels for an "
+        "evidence_id not present in the initial orientation page. Pages are "
+        "transport batches, not an editorial allowance: call repeatedly and "
+        "open as many as the edit requires. With pages omitted, opens every "
+        "page not yet delivered in this logical turn.",
+        {"pages": {"type": "array", "items": {"type": "integer",
+                                                "minimum": 1}}}),
     "look_at": (look_at, "YOUR OWN EYES on the footage. Pass times=[...] "
                 "(1-8 exact source seconds of the MAIN video) and the "
                 "frames at those moments come back as ONE timestamp-labeled "
@@ -21943,6 +22440,10 @@ TOOLS = {
                   "cy": {"type": "number"},
                   "rect": {"type": "array",
                            "items": {"type": "number"}},
+                  "purpose": {"type": "string",
+                              "description": "The nameable narrative or visible reason for this zoom."},
+                  "target_evidence_ids": {"type": "array",
+                                          "items": {"type": "string"}},
                   "motion_motif": _MOTION_MOTIF_PROP}),
     "remove_zoom": (remove_zoom, "Remove one zoom by its id (see "
                     "get_edl).", {"id": {"type": "string"}}),
@@ -21974,6 +22475,9 @@ TOOLS = {
         "never strands it. Remove the whole move with remove_zoom_path.",
         {"keyframes": {"type": "array", "items": {"type": "object"}},
          "ease": {"type": "string", "enum": ["cubic_in_out", "linear"]},
+         "purpose": {"type": "string"},
+         "target_evidence_ids": {"type": "array",
+                                 "items": {"type": "string"}},
          "motion_motif": _MOTION_MOTIF_PROP}),
     "remove_zoom_path": (
         remove_zoom_path,
@@ -23047,6 +23551,18 @@ TOOLS = {
                        "readiness render still happens exactly once.",
                        {"complete": {"type": "boolean",
                                      "description": "False/default: changed sections only. True: mark ready; the one complete preview is still automatic at turn end."}}),
+    "justify_verification_findings": (
+        justify_verification_findings,
+        "Resolve a genuine verification false positive only after direct "
+        "pixel/audio evidence proves it. The finding and justification stay "
+        "in the immutable EDL version's durable record. Missing previews, "
+        "caption proof, corrupt glyphs and invalid music timing require "
+        "repair and cannot be justified.",
+        {"finding_ids": {"type": "array", "minItems": 1,
+                         "items": {"type": "string"}},
+         "justification": {"type": "string", "minLength": 20},
+         "evidence_ids": {"type": "array",
+                          "items": {"type": "string"}}}),
     "ask_user": (ask_user, "Ask the user a specific question and wait for "
                  "their reply (ends this turn). Use whenever a material "
                  "choice genuinely belongs to the user.",
@@ -23114,6 +23630,13 @@ def finishing_checkpoint(ctx):
         latest_version = int(ctx.latest_edl()["version"])
     except Exception:
         return False
+    verification = {}
+    if hasattr(ctx, "verification_records"):
+        verification = (ctx.verification_records or {}).get(
+            latest_version) or {}
+        if verification.get("status") not in {"passed", "justified"} \
+                or verification.get("unresolved_findings"):
+            return False
     written = {int(v) for v in (getattr(ctx, "versions_written", None) or [])}
     if latest_version not in written:
         return False
@@ -23123,22 +23646,26 @@ def finishing_checkpoint(ctx):
             return False
     except (TypeError, ValueError):
         return False
-    visual = getattr(ctx, "last_visual_critic", None) or {}
-    if visual.get("verdict") != "pass" or preview_critic.repair_lines(visual):
-        return False
-    if getattr(ctx, "last_taste_version", None) != latest_version or \
-            (getattr(ctx, "last_taste", None) or []):
-        return False
-    if getattr(ctx, "last_audio_qc_findings", None):
-        return False
-    audio = getattr(ctx, "last_audio_review", None) or {}
-    if audio.get("edl_version") == latest_version and \
-            audio.get("verdict") == "fix":
-        return False
-    story = getattr(ctx, "last_story_review", None) or {}
-    if story.get("edl_version") == latest_version and \
-            story_critic.repair_lines(story):
-        return False
+    # A justified record preserves each review finding plus its direct
+    # evidence. Do not re-block it through the transient critic fields that
+    # produced the same now-resolved findings.
+    if verification.get("status") != "justified":
+        visual = getattr(ctx, "last_visual_critic", None) or {}
+        if visual.get("verdict") != "pass" or preview_critic.repair_lines(visual):
+            return False
+        if getattr(ctx, "last_taste_version", None) != latest_version or \
+                (getattr(ctx, "last_taste", None) or []):
+            return False
+        if getattr(ctx, "last_audio_qc_findings", None):
+            return False
+        audio = getattr(ctx, "last_audio_review", None) or {}
+        if audio.get("edl_version") == latest_version and \
+                audio.get("verdict") == "fix":
+            return False
+        story = getattr(ctx, "last_story_review", None) or {}
+        if story.get("edl_version") == latest_version and \
+                story_critic.repair_lines(story):
+            return False
     try:
         department_gaps = director.department_execution_gaps(
             plan, ctx.latest_edl()["json"],
@@ -23162,14 +23689,16 @@ def finishing_checkpoint(ctx):
 TOOL_DOMAIN_NAMES = {
     "story", "captions", "audio", "media", "motion", "screen", "shorts"}
 TOOL_CORE = {
-    "set_edit_plan", "complete_edit_plan_steps", "expand_toolset",
-    "apply_edit_recipe", "get_edl", "list_assets", "compare_uploaded_media", "look_at",
+    "set_edit_plan", "complete_edit_plan_steps", "load_tools",
+    "expand_toolset",
+    "apply_edit_recipe", "get_edl", "list_assets", "compare_uploaded_media", "open_visual_page", "look_at",
     "look_at_asset", "render_preview", "read_skill", "ask_user",
     "get_transcript", "get_words", "search_transcript",
     "get_kept_transcript", "get_shots", "get_editorial_map",
     "find_visual_moments",
     "get_audio_analysis",
     "get_video_info", "audit_captions", "audit_audio_mix",
+    "justify_verification_findings",
 }
 
 # A fresh turn has not chosen its treatment yet. Production traces from the
@@ -23181,11 +23710,12 @@ TOOL_CORE = {
 # after set_edit_plan records the treatment, compact_tool_names exposes the
 # corresponding write domains with no loss of capability.
 TOOL_PLANNING = {
-    "set_edit_plan", "expand_toolset", "read_skill", "ask_user",
+    "set_edit_plan", "load_tools", "expand_toolset", "read_skill",
+    "ask_user",
     "get_video_info", "get_transcript", "get_kept_transcript",
     "get_words", "search_transcript", "get_shots", "get_editorial_map",
     "find_visual_moments", "find_silences", "find_burned_text",
-    "list_assets", "compare_uploaded_media", "look_at", "look_at_asset",
+    "list_assets", "compare_uploaded_media", "open_visual_page", "look_at", "look_at_asset",
     "get_audio_analysis",
 }
 
@@ -23194,10 +23724,11 @@ TOOL_PLANNING = {
 # tools let the editor inspect/justify the evidence or mark a criterion failed;
 # any failed criterion immediately restores its normal editing domains.
 FINISHING_CORE = {
-    "complete_edit_plan_steps", "get_edl", "look_at", "look_at_asset",
+    "complete_edit_plan_steps", "get_edl", "open_visual_page", "look_at", "look_at_asset",
     "get_kept_transcript", "get_transcript", "get_editorial_map",
     "audit_captions",
-    "audit_audio_mix", "render_preview", "ask_user",
+    "audit_audio_mix", "render_preview", "justify_verification_findings",
+    "ask_user",
 }
 TOOL_DOMAINS = {
     "story": {
@@ -23257,37 +23788,25 @@ TOOL_DOMAINS = {
                "open_short", "open_project", "wait_for_job"},
 }
 
-_DOMAIN_HINTS = {
-    "story": r"\b(cut|trim|story|hook|podcast|interview|silence|filler|segment|shorts?|reel|coheren)",
-    "captions": r"\b(caption|subtitle|typograph|text|title|font|karaoke|word)",
-    "audio": r"\b(audio|music|song|sound|sfx|voice|beat|mix|loud|duck)",
-    "media": r"\b(b.?roll|stock|footage|image|clip|overlay|cutaway|website|generate)",
-    "motion": r"\b(motion|zoom|transition|grade|color|frame|crop|effect|styl|speed)",
-    "screen": r"\b(screen|cursor|demo|ui|interface|takeover|blur|erase)",
-    "shorts": r"\b(shorts board|multiple shorts|several clips|all shorts)",
-}
-
-
 def compact_tool_names(ctx):
-    """Stage-relevant tool names, with user-expandable domain routing."""
+    """Schemas selected from durable plan intent and explicit agent loads.
+
+    No free-text/regex routing occurs here. Every deployed capability remains
+    named in the directory; this function only chooses which exact schemas
+    share the current provider request.
+    """
+    loaded_domains = set(getattr(ctx, "_loaded_tool_domains", None) or set())
+    loaded_names = set(getattr(ctx, "_loaded_tool_names", None) or set())
     if finishing_checkpoint(ctx):
-        return {name for name in FINISHING_CORE if name in TOOLS}
+        names = set(FINISHING_CORE) | loaded_names
+        for domain in loaded_domains:
+            names.update(TOOL_DOMAINS.get(domain, set()))
+        return {name for name in names if name in TOOLS}
     names = set(TOOL_CORE)
     plan = getattr(ctx, "edit_plan", None) or {}
-    states = plan.get("step_states") or []
-    open_tasks = [str(row.get("task") or "") for row in states
-                  if row.get("status") == "pending"]
-    # Route every domain implied by the still-open treatment. Choosing only
-    # the first matching task made later promised departments disappear until
-    # the model spent another call on expand_toolset. Routing still saves the
-    # unrelated catalog, but it is never an operation or department limit.
-    texts = (open_tasks or
-             [str(getattr(ctx, "user_message", "") or "")])
-    domains = set()
-    for text in texts:
-        for name, pattern in _DOMAIN_HINTS.items():
-            if re.search(pattern, text, re.I):
-                domains.add(name)
+    domains = set(plan.get("tool_domains") or []) | loaded_domains
+    names.update(plan.get("required_tools") or [])
+    names.update(loaded_names)
     # A vague request can become specific only after set_edit_plan inspects
     # the evidence ("make it great" -> authored captions/music/B-roll/motion).
     # Routing from the original user words/open-step nouns alone hid those
@@ -23305,25 +23824,14 @@ def compact_tool_names(ctx):
             domain = department_domains.get(department)
             if domain:
                 domains.add(domain)
-    family = str(plan.get("editorial_family") or "")
-    if family == "product_demo_explainer" and not domains:
-        domains.add("screen")
-    expanded = set(getattr(ctx, "_expanded_tool_domains", None) or set())
-    if expanded:
-        domains = expanded
-    # A generic recorded plan with no recognizable vocabulary still needs an
-    # executable lane. Story tools + the atomic recipe are the safest base;
-    # expand_toolset makes every other lane one explicit step away.
+    # A generic plan gets story operations as a useful base. The complete
+    # directory plus load_tools means this default never hides another lane.
     if not domains:
         domains.add("story")
     for domain in domains:
         names.update(TOOL_DOMAINS.get(domain, set()))
-    # Atomic recipes are a transaction mechanism, not a reduced capability
-    # surface. Keep every transaction-safe operation's exact top-level schema
-    # beside the recipe on every post-plan dispatch. This costs schema tokens,
-    # but prevents the recipe from taking tools away or forcing the model to
-    # guess a hidden argument dialect.
-    names.update(RECIPE_TOOLS)
+    if not (names & RECIPE_TOOLS):
+        names.discard("apply_edit_recipe")
     return {name for name in names if name in TOOLS}
 
 
@@ -23335,6 +23843,7 @@ REQUIRED_ARGS = {
     "search_transcript": ["query"],
     # times OR start/end — validated in the tool, so neither is "required".
     "look_at": [],
+    "open_visual_page": [],
     "find_visual_moments": ["query"],
     "look_at_asset": ["asset_key"],
     "compare_uploaded_media": ["asset_keys"],
@@ -23352,6 +23861,7 @@ REQUIRED_ARGS = {
     "fetch_music": ["id"],
     "set_edit_plan": ["steps"],
     "complete_edit_plan_steps": [],
+    "load_tools": [],
     "expand_toolset": ["domains"],
     "apply_edit_recipe": ["operations"],
     "extract_audio": ["asset_key"],
@@ -23425,6 +23935,7 @@ REQUIRED_ARGS = {
     "set_master_loudness": ["enabled"],
     "get_audio_analysis": [],
     "get_editorial_map": [],
+    "justify_verification_findings": ["finding_ids", "justification"],
     "review_audio": [],
     "punch_in_on_emphasis": [],
     "search_sfx": ["query"],
@@ -23555,6 +24066,22 @@ def capability_names():
     return [n for n in TOOLS if n in WRITE_TOOLS and not _tool_disabled(n)]
 
 
+def capability_directory():
+    """Stable, concise directory of every deployed capability by department."""
+    rows = []
+    assigned = set()
+    for domain in sorted(TOOL_DOMAINS):
+        names = sorted(name for name in TOOL_DOMAINS[domain]
+                       if name in TOOLS and not _tool_disabled(name))
+        assigned.update(names)
+        rows.append(f"{domain}: " + ", ".join(names))
+    core = sorted(name for name in TOOLS
+                  if name not in assigned and not _tool_disabled(name))
+    rows.append("evidence, planning, verification and utility: "
+                + ", ".join(core))
+    return "\n".join(rows)
+
+
 def _compact_description(description):
     """A post-plan reminder, not a second copy of the full handbook."""
     text = " ".join(str(description or "").split())
@@ -23569,14 +24096,10 @@ def openai_tools(model=None, compact=False, names=None):
     (a provider that has refused audio parts) can hide a tool the same way an
     unconfigured service does. Omitted by MCP and the tests, where the
     deployment-wide answer is the right one."""
-    # The atomic recipe is useful only when its operation dialects are present.
-    # Any caller that selects it therefore receives every transaction-safe
-    # operation's exact schema too; a hand-built `names` set cannot
-    # accidentally turn the recipe into a capability restriction.
+    selected_recipe_tools = set(RECIPE_TOOLS)
     if names is not None:
         names = set(names)
-        if "apply_edit_recipe" in names:
-            names.update(RECIPE_TOOLS)
+        selected_recipe_tools &= names
     out = []
     edits = llm.image_edit_available()
     # When THIS model reads frames itself (direct sight), look_at's `question`
@@ -23595,11 +24118,11 @@ def openai_tools(model=None, compact=False, names=None):
         if sees and name in ("look_at", "look_at_asset"):
             props = {k: v for k, v in props.items() if k != "question"}
         if name == "apply_edit_recipe":
-            # A recipe never narrows capability. compact_tool_names includes
-            # every transaction-safe operation's exact top-level schema, and
-            # this global enum remains complete for MCP/full-catalog callers.
+            # Full-catalog callers (MCP) receive the full recipe language.
+            # Compact calls receive exactly the transaction-safe operations
+            # whose top-level schemas are present in this provider request.
             props = copy.deepcopy(props)
-            exposed = set(RECIPE_TOOLS)
+            exposed = selected_recipe_tools
             op_props = props["operations"]["items"]["properties"]
             op_props["tool"]["enum"] = sorted(exposed)
             op_props["args"]["description"] = (
@@ -23663,13 +24186,14 @@ def tool_result_kind(result):
     text = result.strip()
     first = text.splitlines()[0] if text else ""
     low = first.lower()
-    if text.startswith(("REJECTED", "RECIPE ABORTED", "Unknown tool")):
+    if text.startswith(("REJECTED", "CORRECTION_NEEDED", "CORRECTION NEEDED",
+                        "RECIPE ABORTED", "UNAVAILABLE", "Unknown tool")):
         return "refused"
     # Tool failures are not written in one historical dialect: some begin
     # "Could not…", while others say "the image was generated but could not
     # be saved" or "audio analysis unavailable". Classify the first line by
     # meaning so those turns neither charge nor enter another blind retry.
-    if first.startswith(("Tool ", "FAILED")) or re.search(
+    if first.startswith(("Tool ", "FAILED", "TRANSIENT_FAILURE")) or re.search(
             r"\b(failed|could not|unavailable|errored)\b", low):
         return "failed"
     if text.startswith("NO CHANGE"):
@@ -23757,8 +24281,12 @@ def execute(ctx, name, args):
     entry = TOOLS.get(name)
     if not entry:
         _count_tool_outcome(ctx, "tool_refused")
-        return (f"Unknown tool '{name}'. Available: "
-                + ", ".join(TOOLS))
+        outcome = tool_outcome_mod.ToolOutcome(
+            status="unavailable",
+            message=(f"Unknown tool '{name}'. Available: " + ", ".join(TOOLS)),
+            safe_fallback="call load_tools with an advertised capability name")
+        ctx.last_structured_tool_outcome = outcome.to_dict()
+        return outcome.render_text()
     name, args, _repairs = _normalize_tool_call(name, args)
     # Normalization may route set_frame(mode=auto) to auto_reframe, so resolve
     # the registry entry after dialect repair rather than before it.
@@ -23805,17 +24333,58 @@ def execute(ctx, name, args):
         except Exception:
             replay_key = None
     fn = entry[0]
+    previous_executing_tool = getattr(ctx, "_executing_tool", None)
+    ctx._executing_tool = name
+    before_version = None
+    try:
+        before_version = int(ctx.latest_edl()["version"])
+    except Exception:
+        pass
     try:
         out = fn(ctx, **args)
     except AskUser:
+        ctx._executing_tool = previous_executing_tool
         raise
     except TypeError as e:
         _count_tool_outcome(ctx, "tool_refused")
-        return (f"REJECTED: bad arguments for {name}: {e}. "
-                "Check the tool's parameter names.")
+        outcome = tool_outcome_mod.ToolOutcome(
+            status="correction_needed",
+            message=f"Bad arguments for {name}: {e}.",
+            corrected_argument_guidance="Check the exact loaded JSON schema parameter names.")
+        ctx.last_structured_tool_outcome = outcome.to_dict()
+        ctx._executing_tool = previous_executing_tool
+        return outcome.render_text()
     except Exception as e:
-        _count_tool_outcome(ctx, "tool_failed")
-        return f"Tool {name} errored: {str(e)[:300]}. Try a different approach."
+        # Read/orchestration calls are state-free and idempotent. One
+        # immediate retry absorbs a dead pooled connection/provider blip; an
+        # EDL write is never blindly repeated after an exception because its
+        # commit may have landed before the response was lost.
+        if name not in WRITE_TOOLS:
+            try:
+                out = fn(ctx, **args)
+            except AskUser:
+                ctx._executing_tool = previous_executing_tool
+                raise
+            except Exception as retry_exc:
+                _count_tool_outcome(ctx, "tool_failed")
+                outcome = tool_outcome_mod.ToolOutcome(
+                    status="transient_failure",
+                    message=f"Tool {name} failed after an idempotent retry: {str(retry_exc)[:300]}.",
+                    retryable=True, idempotent=True,
+                    safe_fallback="continue unrelated work and retry or use the advertised provider fallback")
+                ctx.last_structured_tool_outcome = outcome.to_dict()
+                ctx._executing_tool = previous_executing_tool
+                return outcome.render_text()
+        else:
+            _count_tool_outcome(ctx, "tool_failed")
+            outcome = tool_outcome_mod.ToolOutcome(
+                status="transient_failure",
+                message=f"Tool {name} errored: {str(e)[:300]}.",
+                retryable=True, idempotent=False,
+                safe_fallback="read the current EDL/state before deciding whether to retry")
+            ctx.last_structured_tool_outcome = outcome.to_dict()
+            ctx._executing_tool = previous_executing_tool
+            return outcome.render_text()
     kind = tool_result_kind(out)
     if kind == "refused":
         _count_tool_outcome(ctx, "tool_refused")
@@ -23830,4 +24399,19 @@ def execute(ctx, name, args):
                 ctx._write_replay_results[replay_key] = footprint
         except Exception:
             pass
-    return out
+    after_version = before_version
+    try:
+        after_version = int(ctx.latest_edl()["version"])
+    except Exception:
+        pass
+    changed = (before_version is not None and after_version is not None
+               and after_version != before_version)
+    ranges = []
+    if changed and getattr(ctx, "last_change", None):
+        ranges = list(ctx.last_change.get("out_ranges") or [])
+    outcome = tool_outcome_mod.from_legacy(
+        out, state_changed=changed, idempotent=name not in WRITE_TOOLS,
+        affected_ranges=ranges)
+    ctx.last_structured_tool_outcome = outcome.to_dict()
+    ctx._executing_tool = previous_executing_tool
+    return outcome.render_text()

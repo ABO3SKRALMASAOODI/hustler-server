@@ -2602,3 +2602,150 @@ def video_reliability():
                  "survive project deletion; failed_jobs_by_type_30d is "
                  "computed over still-existing job rows only."),
     })
+
+
+@admin_video_bp.route("/admin/video/redesign-observability", methods=["GET"])
+@admin_required
+def redesign_observability():
+    """Execution ownership, right-sizing, context and verification evidence.
+
+    All values come from durable job/message records. Reading this endpoint
+    never cold-starts Modal and therefore cannot distort the cost/latency it
+    is intended to measure.
+    """
+    try:
+        days = max(1, min(90, int(request.args.get("days", 30))))
+    except (TypeError, ValueError):
+        days = 30
+    interval = f"{days} days"
+    with adb() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT type,
+                   COALESCE(payload->>'execution_policy', 'legacy') AS policy,
+                   CASE
+                     WHEN type IN ('agent_turn','mcp_tool','shorts_plan')
+                       THEN 'orchestration'
+                     WHEN type IN ('fetch','search','stock_acquire','ytprobe')
+                       THEN 'egress'
+                     WHEN type IN ('frames','filmstrip') THEN 'light_media'
+                     WHEN type IN ('preview','preview_check','final','index')
+                       THEN 'render'
+                     ELSE 'heavy_media'
+                   END AS execution_class,
+                   COUNT(*) AS jobs,
+                   COUNT(*) FILTER (WHERE state = 'done') AS done,
+                   COUNT(*) FILTER (WHERE state = 'failed') AS failed,
+                   ROUND(AVG(NULLIF(result->'timings'->>'queue_wait_s','')
+                       ::double precision)::numeric, 3) AS avg_queue_s,
+                   ROUND(AVG(NULLIF(result->'timings'->>'total_s','')
+                       ::double precision)::numeric, 3) AS avg_total_s,
+                   MAX(NULLIF(COALESCE(
+                       result->'timings'->>'container_memory_sampled_peak_mib',
+                       result->'timings'->>'container_memory_peak_mib'),'')
+                       ::double precision) AS peak_memory_mib,
+                   ROUND(AVG(NULLIF(result->'timings'->>'container_cpu_s','')
+                       ::double precision)::numeric, 3) AS avg_cpu_s,
+                   SUM(COALESCE(NULLIF(result->'timings'->>'downloaded_bytes','')
+                       ::bigint, 0)) AS downloaded_bytes,
+                   SUM(COALESCE(NULLIF(result->'timings'->>'uploaded_bytes','')
+                       ::bigint, 0)) AS uploaded_bytes,
+                   COUNT(*) FILTER (WHERE COALESCE(
+                       (result->'timings'->>'cache_hit')::boolean, false))
+                       AS cache_hits,
+                   ROUND(SUM(COALESCE(NULLIF(
+                       result->'timings'->>'gross_compute_usd_ceiling','')
+                       ::numeric, 0)), 6) AS compute_ceiling_usd,
+                   MAX(result->'timings'->>'compute_profile') AS profile_sample
+              FROM video_jobs
+             WHERE created_at >= NOW() - %s::interval
+             GROUP BY type, policy, execution_class
+             ORDER BY execution_class, type, policy
+        """, (interval,))
+        execution = [dict(row) for row in cur.fetchall()]
+
+        cur.execute("""
+            WITH roots AS (
+                SELECT COALESCE(payload->>'root_agent_job_id', id::text) root,
+                       COUNT(*) slices,
+                       COUNT(*) FILTER (WHERE state = 'done') done_slices,
+                       COUNT(*) FILTER (
+                           WHERE COALESCE((payload->>'logical_turn_continuation')
+                                          ::boolean, false)) continuations
+                  FROM video_jobs
+                 WHERE type = 'agent_turn'
+                   AND created_at >= NOW() - %s::interval
+                 GROUP BY 1
+            )
+            SELECT COUNT(*) AS logical_turns,
+                   SUM(slices) AS physical_slices,
+                   SUM(continuations) AS continuations,
+                   MAX(slices) AS max_slices_per_turn,
+                   ROUND(AVG(slices)::numeric, 3) AS avg_slices_per_turn
+              FROM roots
+        """, (interval,))
+        logical_turns = dict(cur.fetchone() or {})
+
+        cur.execute(f"""
+            WITH turns AS (
+                SELECT cm.created_at, p.id AS project_id,
+                       cm.meta->'editing_metrics' AS m,
+                       cm.meta->'tool_outcomes' AS outcomes
+                  FROM chat_messages cm
+                  JOIN chat_sessions cs ON cs.id = cm.session_id
+                  JOIN projects p ON p.chat_session_id = cs.id
+                  JOIN users u ON u.id = p.user_id
+                 WHERE cm.role = 'assistant'
+                   AND cm.meta ? 'editing_metrics'
+                   AND cm.created_at >= NOW() - %s::interval
+                   AND {_scope('u')}
+            )
+            SELECT COUNT(*) AS turns,
+                   ROUND(AVG(NULLIF(m->>'context_total_chars','')
+                       ::double precision)::numeric, 1) AS avg_context_chars,
+                   MAX(NULLIF(m->>'context_total_chars','')
+                       ::bigint) AS max_context_chars,
+                   ROUND(AVG(NULLIF(m->>'prompt_cache_ratio','')
+                       ::double precision)::numeric, 4) AS avg_cache_ratio,
+                   SUM(COALESCE(NULLIF(m->>'visual_clusters_opened','')
+                       ::bigint, 0)) AS visual_clusters_opened,
+                   SUM(COALESCE(NULLIF(m->>'visual_pages_opened','')
+                       ::bigint, 0)) AS visual_pages_opened,
+                   SUM(COALESCE(NULLIF(m->>'verification_findings','')
+                       ::bigint, 0)) AS verification_findings,
+                   SUM(COALESCE(NULLIF(m->>'verification_repairs','')
+                       ::bigint, 0)) AS verification_repairs,
+                   SUM(COALESCE(NULLIF(m->>'tool_calls','')::bigint, 0))
+                       AS tool_calls,
+                   SUM(COALESCE(NULLIF(outcomes->>'refused','')::bigint, 0))
+                       AS tool_corrections,
+                   SUM(COALESCE(NULLIF(outcomes->>'failed','')::bigint, 0))
+                       AS tool_failures
+              FROM turns
+        """, (interval,))
+        agent = dict(cur.fetchone() or {})
+
+        cur.execute(f"""
+            SELECT p.id AS project_id, cm.created_at,
+                   cm.meta->'editing_metrics'->'context_components'
+                       AS context_components,
+                   cm.meta->'editing_metrics'->'tools_loaded' AS tools_loaded,
+                   cm.meta->'editing_metrics'->'tool_domains_loaded'
+                       AS tool_domains_loaded,
+                   cm.meta->'editing_metrics'->'quality_evidence'
+                       AS quality_evidence
+              FROM chat_messages cm
+              JOIN chat_sessions cs ON cs.id = cm.session_id
+              JOIN projects p ON p.chat_session_id = cs.id
+              JOIN users u ON u.id = p.user_id
+             WHERE cm.role = 'assistant'
+               AND cm.meta ? 'editing_metrics'
+               AND cm.created_at >= NOW() - %s::interval
+               AND {_scope('u')}
+             ORDER BY cm.created_at DESC LIMIT 50
+        """, (interval,))
+        samples = [dict(row) for row in cur.fetchall()]
+
+    return jsonify({"days": days, "execution": execution,
+                    "logical_turns": logical_turns, "agent": agent,
+                    "recent_context_samples": samples})

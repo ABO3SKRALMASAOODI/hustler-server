@@ -1,5 +1,15 @@
 # beats-emphasis — audio analysis, beat-aligned cuts, punch-ins, sound design pass
 
+## Editorial decision principles
+
+Rhythm should reveal structure, not manufacture activity. A beat or stressed word is evidence for timing only after the picture/story gives the event a purpose.
+
+## Evidence to inspect
+
+Inspect measured tempo confidence, beat grids, vocal stress, energy changes, existing cut geometry, music placement and the rendered audiovisual result.
+
+## Strong treatment patterns
+
 MEASURE FIRST (get_audio_analysis): tempo with a confidence score, the beat grid, energy peaks/rises, the most vocally stressed words. Pass asset_key to measure a SONG instead; when that song is already in the edit it also prints beat times in PROGRAM seconds, ready for keep_segments / add_sfx / add_zoom.
 
 BEAT-ALIGNED CUTS (beat_align_cuts): snaps internal cut points to the beat — when the edit has music it cuts to the SONG the viewer hears, not the footage's own noise (that is what "cut to the beat" means). A low-confidence detected grid is committed with a quality advisory rather than used as a permission gate.
@@ -14,3 +24,16 @@ SOUND DESIGN BY HAND: fetch sounds (search_sfx/fetch_sfx — a whoosh for juncti
 Every one of these writes CONCRETE timestamps into the EDL — any number you quote must come from the tool result. That does NOT mean quoting them all: the timestamps are on the timeline where the user can see them; a reply that lists every sfx is a receipt, not a report.
 
 MUSIC-LED FORMATS: in a montage/gameplay/music piece the music IS the structure — cut on its beats, build to the peak, one slow-motion beat on the single best moment, HARD cuts (see the formats skill).
+
+## Common failure modes
+
+- Snapping to a weak/incorrect grid, punching every loud word, or repeating equal-strength motion mechanically.
+- Treating beat alignment as permission for cuts/SFX/zooms with no story event.
+
+## Verification procedure
+
+Compare authored timestamps to the measured grid and named event, then review changed windows in picture and sound for cadence, comprehension and repetition.
+
+## Repair ladder
+
+Correct the grid → move to the actual event → vary or remove weak accents → rebuild the cut structure → verify the complete rhythmic arc.

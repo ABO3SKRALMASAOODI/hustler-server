@@ -81,9 +81,11 @@ HEAVY_CPU = (4.0, 4.0)
 PREVIEW_MEMORY = (2048, 4096)
 BATCH_MEMORY = (4096, 16384)
 INDEX_MEMORY = (4096, 16384)
-LIGHT_MEMORY = (2048, 32768)
+LIGHT_MEMORY = (1024, 4096)
 HEAVY_MEMORY = (16384, 32768)
+EGRESS_MEMORY = (1024, 4096)
 AGENT_MEMORY = (1024, 2048)
+ORCHESTRATION_MEMORY = (1024, 2048)
 PROBE_MEMORY = (1024, 4096)
 HEALTH_MEMORY = (512, 1024)
 
@@ -96,7 +98,7 @@ def _boot(profile, role="executor", pricing_multiplier=1.5):
     # A Modal agent turn must offload any render tools to the compute
     # functions, exactly as the Render dispatcher does. Set this before
     # importing config/http_server so their module-level routing is correct.
-    if role == "agent_executor":
+    if role in {"agent_executor", "mcp_executor", "shorts_executor"}:
         os.environ["MODAL_EXECUTOR_ENABLED"] = "1"
         os.environ["MODAL_EXECUTOR_PERCENT"] = "100"
     os.environ.setdefault("WORKER_TMP_DIR", "/tmp/valmera")
@@ -173,9 +175,9 @@ def index(job):
     return _run(job, "index")
 
 
-@app.function(name="light", cpu=HEAVY_CPU, memory=LIGHT_MEMORY, **US_COMMON)
+@app.function(name="light", cpu=(1.0, 2.0), memory=LIGHT_MEMORY, **US_COMMON)
 def light(job):
-    """Short browser/frame tools keep full CPU and the old 32-GiB limit."""
+    """Bounded frame inspection gets a cheap, burstable media envelope."""
     return _run(job, "light")
 
 
@@ -184,7 +186,7 @@ def heavy(job):
     return _run(job, "heavy")
 
 
-@app.function(name="egress", cpu=HEAVY_CPU, memory=LIGHT_MEMORY,
+@app.function(name="egress", cpu=(1.0, 2.0), memory=EGRESS_MEMORY,
               **US_COMMON)
 def egress(job):
     """Keep URL acquisition on the proven US egress while right-sizing RAM."""
@@ -217,7 +219,7 @@ def index_eu(job):
     return _run(job, "index-eu")
 
 
-@app.function(name="light_eu", cpu=HEAVY_CPU, memory=LIGHT_MEMORY,
+@app.function(name="light_eu", cpu=(1.0, 2.0), memory=LIGHT_MEMORY,
               **EU_COMMON)
 def light_eu(job):
     return _run(job, "light-eu")
@@ -248,6 +250,35 @@ def probe(job):
 @modal.concurrent(max_inputs=2, target_inputs=1)
 def agent(job):
     return _run(job, "agent", role="agent_executor", pricing_multiplier=1.5)
+
+
+@app.function(
+    name="mcp", image=agent_image, secrets=[secret], region="us",
+    routing_region="us-east", min_containers=0, max_containers=12,
+    scaledown_window=20, retries=0,
+    timeout=int(os.getenv("MODAL_MCP_TIMEOUT_S", "21600")),
+    startup_timeout=300,
+    cpu=(0.125, 1.0), memory=ORCHESTRATION_MEMORY,
+)
+@modal.concurrent(max_inputs=4, target_inputs=1)
+def mcp(job):
+    """External MCP gets a pool independent from production Studio turns."""
+    return _run(job, "mcp", role="mcp_executor", pricing_multiplier=1.5)
+
+
+@app.function(
+    name="shorts", image=agent_image, secrets=[secret], region="us",
+    routing_region="us-east", min_containers=0, max_containers=8,
+    scaledown_window=20, retries=0,
+    timeout=int(os.getenv("MODAL_SHORTS_TIMEOUT_S", "21600")),
+    startup_timeout=300,
+    cpu=(0.125, 1.0), memory=ORCHESTRATION_MEMORY,
+)
+@modal.concurrent(max_inputs=2, target_inputs=1)
+def shorts(job):
+    """Long-form story planning cannot consume Studio or MCP capacity."""
+    return _run(job, "shorts", role="shorts_executor",
+                pricing_multiplier=1.5)
 
 
 @app.function(

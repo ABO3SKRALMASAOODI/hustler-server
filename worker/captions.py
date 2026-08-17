@@ -1498,7 +1498,7 @@ def _rounded_rect_path(x0, y0, x1, y1, radius):
 
 
 def _premium_panel(p, s, play_res, disp, treats, lines, px,
-                   design_version=None):
+                   design_version=None, animation=None):
     """One translucent vector rectangle behind the complete caption block.
 
     ASS BorderStyle 3 looks acceptable only when an event has no inline word
@@ -1547,8 +1547,25 @@ def _premium_panel(p, s, play_res, disp, treats, lines, px,
         # Frozen v1 geometry for historical EDL reproducibility.
         path = (f"m {round(x0)} {round(y0)} l {round(x1)} {round(y0)} "
                 f"l {round(x1)} {round(y1)} l {round(x0)} {round(y1)}")
+    panel_anim = ""
+    if animation in ("fade", "slide_up"):
+        # Same fade clock as _premium_anim_prefix. The panel and glyph block
+        # therefore enter/leave as one object instead of the rectangle
+        # appearing before its caption or lingering after it.
+        panel_anim = r"\fad(180,140)"
+    elif animation == "pop":
+        panel_anim = (
+            rf"\org({round((x0 + x1) / 2)},{round((y0 + y1) / 2)})"
+            r"\fscx70\fscy70\t(0,120,\fscx106\fscy106)"
+            r"\t(120,200,\fscx100\fscy100)")
+    elif animation in WORD_ANIMS:
+        tags = _word_anim_tags(animation, px)
+        if tags:
+            panel_anim = (rf"\org({round((x0 + x1) / 2)},"
+                          rf"{round((y0 + y1) / 2)})" + tags)
     return (rf"{{\an7\pos(0,0)\p1\1c{_inline_hl(bg)}"
-            rf"\1a&H{alpha:02X}&\bord0\shad0}}" + path)
+            + panel_anim
+            + rf"\1a&H{alpha:02X}&\bord0\shad0}}" + path)
 
 
 # \clip takes absolute frame coords. The composer only ever bands horizontally
@@ -1960,8 +1977,10 @@ def events_premium(out_words, style=None, max_words=None,
             mults = None
             lines = _premium_layout(disp, p["wpl"], line_chars)
             geom = _geom_prefix(p, s, play_res, lines, treats, px)
-        panel = _premium_panel(p, s, play_res, disp, treats, lines, px,
-                               design_version=design_version)
+        panel = _premium_panel(
+            p, s, play_res, disp, treats, lines, px,
+            design_version=design_version,
+            animation=s.get("animation") or p.get("animation"))
         ctx.append({"disp": disp, "treats": treats, "lines": lines,
                     "geom": geom, "mults": mults, "panel": panel})
         nxt_t0 = chunks[ci + 1][0]["t0"] if ci + 1 < len(chunks) else None
@@ -2115,7 +2134,8 @@ def events_from_items(items, tl, play_res=BASE_PLAY_RES):
             disp = [_display_word(x, upper) for x in text.split()]
             panel_lines = _premium_layout(disp, p["wpl"], item_chars)
             panel = _premium_panel(
-                p, ns, play_res, disp, [None] * len(disp), panel_lines, px)
+                p, ns, play_res, disp, [None] * len(disp), panel_lines, px,
+                animation=ns.get("animation") or p.get("animation"))
             if panel:
                 events.append({"start": start,
                                "end": end,

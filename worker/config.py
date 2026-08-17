@@ -760,6 +760,19 @@ MCP_MAX_SESSIONS = int(os.getenv("WORKER_MCP_MAX_SESSIONS", "2"))
 MCP_MEMORY_PRESSURE_RATIO = float(os.getenv(
     "WORKER_MCP_MEMORY_PRESSURE_RATIO", "0.82"))
 
+# Managed S3 transfers default to ten worker threads. Each owns multipart
+# buffers, so one stock upload beside a live ToolContext was enough to cross a
+# 512-MiB dispatcher. Media now uploads from Modal, and the transfer itself is
+# deliberately low-fan-out: bandwidth stays streaming while peak RSS becomes
+# predictable.
+STORAGE_MULTIPART_CONCURRENCY = max(1, int(os.getenv(
+    "STORAGE_MULTIPART_CONCURRENCY", "2")))
+STORAGE_MULTIPART_CHUNK_MB = max(5, int(os.getenv(
+    "STORAGE_MULTIPART_CHUNK_MB", "8")))
+STORAGE_MULTIPART_THRESHOLD_MB = max(
+    STORAGE_MULTIPART_CHUNK_MB, int(os.getenv(
+        "STORAGE_MULTIPART_THRESHOLD_MB", "16")))
+
 # ── Handing the model the VIDEO itself (round 83, mcp_media.py) ────────────
 # Some models on the other end of MCP can watch video, not just read our
 # description of it. watch_video hands them the real file. Re-encoding is the
@@ -819,7 +832,11 @@ MCP_AUDIO_MAX_KBPS = int(os.getenv("MCP_AUDIO_MAX_KBPS", "48"))
 # How many pictures one MCP tool call may hand back. A look tool assembles
 # its frames into ONE labeled sheet, so this is a runaway guard, not the
 # frame count — that is MCP_WATCH_FRAMES.
-MCP_MAX_IMAGES = int(os.getenv("MCP_MAX_IMAGES", "4"))
+# Physical MCP response envelope. It pages transport only: omitted images are
+# retained and/or reopened by evidence/page ID; no logical request loses them.
+MCP_IMAGE_PAGE_SIZE = int(os.getenv(
+    "MCP_IMAGE_PAGE_SIZE", os.getenv("MCP_MAX_IMAGES", "4")))
+MCP_MAX_IMAGES = MCP_IMAGE_PAGE_SIZE  # compatibility for old deployments
 # Frames watch_video lays out across the window it hands over. 12 tiles on a
 # 2-column sheet is the whole of a 30s program at ~2.5s apart — enough that
 # nothing between them is a surprise, few enough to stay one picture.
@@ -852,6 +869,9 @@ MCP_VIDEO_DOWNLOAD_MAX_MB = float(os.getenv("MCP_VIDEO_DOWNLOAD_MAX_MB",
 #   "agent_executor" — the same authenticated HTTP shell, exposing only one
 #              stateful agent_turn per request on a smaller scale-to-zero
 #              service. It owns credit charging and the terminal job write.
+#   "mcp_executor" / "shorts_executor" — isolated orchestration surfaces.
+#              They share no autoscaling capacity with Studio turns and
+#              launch media work onto the specialized compute functions.
 #   "batch_executor" — one Cloud Run Job execution. It receives exactly one
 #              final/index row, commits it itself, then exits. Platform retries
 #              stay at zero; the shared failure policy alone decides whether a
@@ -860,7 +880,8 @@ MCP_VIDEO_DOWNLOAD_MAX_MB = float(os.getenv("MCP_VIDEO_DOWNLOAD_MAX_MB",
 #              default worker remains backward compatible.
 WORKER_ROLE = os.getenv("WORKER_ROLE", "worker").strip().lower()
 WORKER_ROLES = frozenset(("worker", "dispatcher", "agent", "executor",
-                          "agent_executor", "batch_executor"))
+                          "agent_executor", "mcp_executor",
+                          "shorts_executor", "batch_executor"))
 
 
 def worker_lane_slots(role=None):
@@ -883,7 +904,8 @@ def worker_lane_slots(role=None):
             f"{', '.join(sorted(WORKER_ROLES))}")
     none = {"media": 0, "filmstrip": 0, "index": 0,
             "agent": 0, "shorts": 0, "mcp": 0}
-    if selected in ("executor", "agent_executor", "batch_executor"):
+    if selected in ("executor", "agent_executor", "mcp_executor",
+                    "shorts_executor", "batch_executor"):
         return none
     if selected == "dispatcher":
         return dict(none, media=max(0, MEDIA_SLOTS),
@@ -939,10 +961,60 @@ MODAL_EXECUTOR_TYPES = frozenset(
     part.strip() for part in os.getenv(
         "MODAL_EXECUTOR_TYPES",
         "preview,preview_check,final,index,capture,frames,track,matte,"
-        "smatch,clean,stems,fetch,search,ytprobe,agent_turn").split(",")
+        "smatch,clean,stems,fetch,search,stock_acquire,ytprobe,agent_turn,mcp_tool,"
+        "shorts_plan").split(",")
     if part.strip())
 MODAL_CLOUD_RUN_FALLBACK = os.getenv(
-    "MODAL_CLOUD_RUN_FALLBACK", "1") == "1"
+    "MODAL_CLOUD_RUN_FALLBACK", "0") == "1"
+
+# Atomic compute-ownership switch. Queue producers stamp this value into each
+# new job, and executors honor the stamp rather than the deployment's current
+# environment. Consequently a rollback affects only jobs created after the
+# switch; an in-flight edit, render, or index always finishes under the owner
+# that accepted it. Unstamped historical rows are legacy by definition.
+EXECUTION_POLICY_MODE = os.getenv(
+    "EXECUTION_POLICY_MODE", "legacy").strip().lower()
+if EXECUTION_POLICY_MODE not in {"legacy", "redesign"}:
+    raise RuntimeError(
+        "EXECUTION_POLICY_MODE must be 'legacy' or 'redesign'")
+
+
+def execution_policy_for(job_or_payload=None):
+    """Return the immutable execution owner stamped on a queue payload."""
+    value = job_or_payload or {}
+    if isinstance(value, dict) and isinstance(value.get("payload"), dict):
+        value = value["payload"]
+    mode = (value.get("execution_policy") if isinstance(value, dict)
+            else None)
+    mode = str(mode or "legacy").strip().lower()
+    return mode if mode in {"legacy", "redesign"} else "legacy"
+
+
+EXECUTION_CLASS_BY_JOB_TYPE = {
+    "agent_turn": "orchestration",
+    "mcp_tool": "orchestration",
+    "shorts_plan": "orchestration",
+    "stock_acquire": "egress",
+    "fetch": "egress",
+    "search": "egress",
+    "ytprobe": "egress",
+    "frames": "light_media",
+    "filmstrip": "light_media",
+    "preview": "render",
+    "preview_check": "render",
+    "final": "render",
+    "index": "render",
+    "capture": "heavy_media",
+    "track": "heavy_media",
+    "matte": "heavy_media",
+    "smatch": "heavy_media",
+    "clean": "heavy_media",
+    "stems": "heavy_media",
+}
+
+
+def execution_class_for(job_type):
+    return EXECUTION_CLASS_BY_JOB_TYPE.get(str(job_type), "database")
 
 
 def _sibling_preview_executor_url(main_url):
@@ -1544,6 +1616,16 @@ TILES_TURN_MAX = int(os.getenv("TILES_TURN_MAX", "60"))
 IMAGES_TURN_MAX = int(os.getenv("IMAGES_TURN_MAX", "20"))
 IMAGE_ATTACH_MAX_PX = int(os.getenv("IMAGE_ATTACH_MAX_PX", "960"))
 
+# Hierarchical visual evidence. These are request/container envelopes, not
+# editorial quotas: every distinct representative is persisted and sheets
+# are paged when one provider request cannot carry them all.
+VISUAL_SHEET_FRAMES = int(os.getenv("VISUAL_SHEET_FRAMES", "6"))
+VISUAL_SEMANTIC_SHEETS_PER_CALL = int(
+    os.getenv("VISUAL_SEMANTIC_SHEETS_PER_CALL", "8"))
+VISUAL_REQUEST_SHEETS_PER_PAGE = int(
+    os.getenv("VISUAL_REQUEST_SHEETS_PER_PAGE", "20"))
+VISUAL_FRAME_PARALLELISM = int(os.getenv("VISUAL_FRAME_PARALLELISM", "4"))
+
 # How often the index looks at the picture, in SOURCE seconds (round 69).
 #
 # The sampling unit used to be the SHOT, and 46% of real prod videos are a
@@ -1747,6 +1829,8 @@ FINAL_FFMPEG_TIMEOUT_MAX_S = int(os.getenv(
     "FINAL_FFMPEG_TIMEOUT_MAX_S", "20000"))
 MODAL_FINAL_TIMEOUT_S = int(os.getenv("MODAL_FINAL_TIMEOUT_S", "21600"))
 MODAL_AGENT_TIMEOUT_S = int(os.getenv("MODAL_AGENT_TIMEOUT_S", "21600"))
+MODAL_ORCHESTRATION_TIMEOUT_S = int(os.getenv(
+    "MODAL_ORCHESTRATION_TIMEOUT_S", "21600"))
 
 
 def modal_timeout_for(job_type):
@@ -1755,6 +1839,8 @@ def modal_timeout_for(job_type):
         return MODAL_FINAL_TIMEOUT_S
     if job_type == "agent_turn":
         return MODAL_AGENT_TIMEOUT_S
+    if job_type in ("mcp_tool", "shorts_plan"):
+        return MODAL_ORCHESTRATION_TIMEOUT_S
     return EXECUTOR_REQUEST_TIMEOUT_S
 
 
@@ -1787,8 +1873,24 @@ def require_core():
     }.items() if not v]
     if missing:
         raise SystemExit(f"Worker cannot start — missing env: {', '.join(missing)}")
-    if WORKER_ROLE in ("agent", "agent_executor") \
+    if EXECUTION_POLICY_MODE == "redesign":
+        required = {
+            "agent_turn", "mcp_tool", "shorts_plan", "preview",
+            "preview_check", "final", "index", "capture", "frames",
+            "track", "matte", "smatch", "clean", "stems", "fetch",
+            "search", "stock_acquire", "ytprobe",
+        }
+        absent = sorted(required - set(MODAL_EXECUTOR_TYPES))
+        if not MODAL_EXECUTOR_ENABLED or absent:
+            detail = ("Modal is disabled" if not MODAL_EXECUTOR_ENABLED else
+                      "missing Modal job types: " + ", ".join(absent))
+            raise SystemExit(
+                "Worker cannot enter EXECUTION_POLICY_MODE=redesign — "
+                + detail)
+    if WORKER_ROLE in ("agent", "agent_executor", "mcp_executor",
+                       "shorts_executor") \
             and not REMOTE_EXECUTOR_URL and not MODAL_EXECUTOR_ENABLED:
         raise SystemExit(
-            "Agent worker cannot start without REMOTE_EXECUTOR_URL — refusing "
-            "to pull render/index compute back onto the agent service")
+            "Orchestration worker cannot start without REMOTE_EXECUTOR_URL "
+            "or Modal remote compute — "
+            "refusing to pull media work onto the orchestration service")

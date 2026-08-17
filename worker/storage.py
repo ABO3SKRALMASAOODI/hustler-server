@@ -6,8 +6,18 @@ import shutil
 
 import boto3
 from botocore.config import Config
+from boto3.s3.transfer import TransferConfig
 
 import config
+import io_telemetry
+
+
+TRANSFER_CONFIG = TransferConfig(
+    multipart_threshold=config.STORAGE_MULTIPART_THRESHOLD_MB * 1024 * 1024,
+    multipart_chunksize=config.STORAGE_MULTIPART_CHUNK_MB * 1024 * 1024,
+    max_concurrency=config.STORAGE_MULTIPART_CONCURRENCY,
+    use_threads=config.STORAGE_MULTIPART_CONCURRENCY > 1,
+)
 
 
 def client():
@@ -144,12 +154,21 @@ def download_to(key, path, check_capacity=True):
     """Stream one object to local scratch, refusing up front if it cannot fit."""
     if check_capacity:
         check_workdir_capacity(object_bytes(key), os.path.dirname(path) or None)
-    client().download_file(config.S3_BUCKET, key, path)
+    client().download_file(config.S3_BUCKET, key, path, Config=TRANSFER_CONFIG)
+    try:
+        io_telemetry.add_downloaded(os.path.getsize(path))
+    except OSError:
+        pass
 
 
 def upload_file(path, key, content_type):
     client().upload_file(path, config.S3_BUCKET, key,
-                         ExtraArgs={"ContentType": content_type})
+                         ExtraArgs={"ContentType": content_type},
+                         Config=TRANSFER_CONFIG)
+    try:
+        io_telemetry.add_uploaded(os.path.getsize(path))
+    except OSError:
+        pass
 
 
 def presign_get(key, expires=3600):
@@ -169,7 +188,7 @@ def copy_object(src_key, dst_key):
     and the dedup path (round 67d) copies originals up to the 16 GB upload
     limit without the bytes ever leaving the bucket."""
     client().copy({"Bucket": config.S3_BUCKET, "Key": src_key},
-                  config.S3_BUCKET, dst_key)
+                  config.S3_BUCKET, dst_key, Config=TRANSFER_CONFIG)
 
 
 def exists(key):

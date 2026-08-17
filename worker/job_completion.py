@@ -74,9 +74,15 @@ def finalize_success(worker_db, job, result, lease_claim):
               flush=True)
 
     if accounted:
+        payload = job.get("payload") or {}
+        try:
+            accounting_job_id = int(
+                payload.get("root_agent_job_id") or job["id"])
+        except (TypeError, ValueError):
+            accounting_job_id = int(job["id"])
         terminal = worker_db.run(
             dbx.finish_accounted_job, job["id"], result, lease_claim,
-            job["user_id"], billable, extra, qualifies)
+            job["user_id"], billable, extra, qualifies, accounting_job_id)
         committed = bool((terminal or {}).get("committed"))
         if committed and (terminal or {}).get("charged") is not None:
             result["credits_charged"] = terminal["charged"]

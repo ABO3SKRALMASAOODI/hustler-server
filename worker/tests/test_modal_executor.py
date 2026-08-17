@@ -59,6 +59,42 @@ def test_rollout_selection_is_stable_per_job(monkeypatch):
     assert remote._modal_selected(JOB) is True
 
 
+def test_redesign_policy_bypasses_legacy_percentage_rollout(monkeypatch):
+    _enable(monkeypatch, percent=0)
+    job = dict(JOB, payload={"execution_policy": "redesign"})
+    assert remote._modal_selected(job) is True
+
+
+def test_unstamped_and_invalid_policy_are_safely_legacy():
+    assert config.execution_policy_for(JOB) == "legacy"
+    assert config.execution_policy_for(
+        dict(JOB, payload={"execution_policy": "redesign"})) == "redesign"
+    assert config.execution_policy_for(
+        dict(JOB, payload={"execution_policy": "future"})) == "legacy"
+
+
+def test_orchestration_job_families_have_isolated_functions():
+    assert remote._modal_function_name("agent_turn") == "agent"
+    assert remote._modal_function_name("mcp_tool") == "mcp"
+    assert remote._modal_function_name("shorts_plan") == "shorts"
+
+
+def test_mcp_orchestration_never_falls_back_to_dispatcher(monkeypatch):
+    _enable(monkeypatch)
+    function = _Function(_Call({"result": {"text": "ok"},
+                                "job_completed": True}))
+    selected = []
+    monkeypatch.setattr(
+        remote, "_modal_function",
+        lambda name: selected.append(name) or function)
+    mcp_job = dict(JOB, type="mcp_tool", payload={"tool": "get_edl"})
+
+    result = remote.run_mcp_remote(None, mcp_job)
+
+    assert result["text"] == "ok"
+    assert selected == ["mcp"]
+
+
 def test_eu_rollout_is_stable_and_limited_to_configured_media(monkeypatch):
     monkeypatch.setattr(config, "MODAL_EU_PERCENT", 37)
     monkeypatch.setattr(config, "MODAL_EU_TYPES", frozenset({
@@ -109,6 +145,24 @@ def test_prelaunch_failure_can_fall_back_to_cloud_run(monkeypatch):
 
     assert remote._run_remote(JOB) == {"ok": True}
     assert seen == [42]
+
+
+def test_redesign_prelaunch_failure_never_falls_back(monkeypatch):
+    _enable(monkeypatch, percent=0)
+    monkeypatch.setattr(config, "MODAL_CLOUD_RUN_FALLBACK", True)
+    job = dict(JOB, payload={"execution_policy": "redesign"})
+    monkeypatch.setattr(
+        remote, "_run_modal",
+        lambda job, function_override=None: (_ for _ in ()).throw(
+            remote.ModalLaunchUnavailable("temporary control-plane failure")))
+    cloud = []
+    monkeypatch.setattr(
+        remote, "_run_cloud",
+        lambda *args, **kwargs: cloud.append(True) or {"wrong": True})
+
+    with pytest.raises(remote.ModalLaunchUnavailable):
+        remote._run_remote(job)
+    assert cloud == []
 
 
 def test_rejected_modal_launch_restores_local_shutdown_ownership(monkeypatch):
@@ -263,7 +317,7 @@ def test_modal_memory_right_sizing_preserves_production_hard_limits():
     assert modal_app.PREVIEW_MEMORY == (2048, 4096)
     assert modal_app.BATCH_MEMORY == (4096, 16384)
     assert modal_app.INDEX_MEMORY == (4096, 16384)
-    assert modal_app.LIGHT_MEMORY == (2048, 32768)
+    assert modal_app.LIGHT_MEMORY == (1024, 4096)
     assert modal_app.HEAVY_MEMORY == (16384, 32768)
     assert modal_app.AGENT_MEMORY == (1024, 2048)
     assert modal_app.PROBE_MEMORY == (1024, 4096)
@@ -279,7 +333,7 @@ def test_compute_fleet_has_explicit_us_and_bounded_eu_envelopes():
     assert remote._modal_function_name("final") == "final"
     assert remote._modal_function_name("index") == "index"
     assert remote._modal_function_name("frames") == "light"
-    assert remote._modal_function_name("capture") == "light"
+    assert remote._modal_function_name("capture") == "heavy"
     assert remote._modal_function_name("filmstrip") == "preview"
     assert remote._modal_function_name("fetch") == "egress"
     assert remote._modal_function_name("search") == "egress"

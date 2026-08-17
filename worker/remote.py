@@ -92,6 +92,11 @@ def _modal_selected(job):
     jtype = str(job.get("type") or "")
     if jtype not in config.MODAL_EXECUTOR_TYPES:
         return False
+    # The percentage is a legacy rollout mechanism. A redesign-stamped job
+    # has already crossed the atomic ownership switch and must never drift
+    # back to Cloud Run because of a bucket assignment.
+    if config.execution_policy_for(job) == "redesign":
+        return True
     percent = config.MODAL_EXECUTOR_PERCENT
     if percent >= 100:
         return True
@@ -135,11 +140,17 @@ def _modal_function_name(job_type, override=None):
         return "index"
     if job_type == "agent_turn":
         return "agent"
+    if job_type == "mcp_tool":
+        return "mcp"
+    if job_type == "shorts_plan":
+        return "shorts"
     if job_type == "ytprobe":
         return "probe"
-    if job_type in ("capture", "frames"):
+    if job_type == "frames":
         return "light"
-    if job_type in ("fetch", "search"):
+    if job_type == "capture":
+        return "heavy"
+    if job_type in ("fetch", "search", "stock_acquire"):
         return "egress"
     return "heavy"
 
@@ -453,6 +464,11 @@ def _interpret_executor_data(data, job):
         raise failure_policy.attach(
             err, failure_policy.classify(err, job.get("type")), failure)
     result = data.get("result")
+    if isinstance(result, dict) and isinstance(data.get("execution"), dict):
+        # Queued jobs already persist these fields in result.timings. Direct
+        # frame/egress/tool calls have no job row, so carry the same evidence
+        # back to their orchestrator rather than leaving it only in logs.
+        result.setdefault("execution", data["execution"])
     if data.get("job_completed") and isinstance(result, dict):
         result["_remote_job_completed"] = True
     return result
@@ -621,7 +637,8 @@ def _run_remote(job, url_override=None, modal_function=None):
         try:
             return _run_modal(job, modal_function)
         except ModalLaunchUnavailable as exc:
-            if not config.MODAL_CLOUD_RUN_FALLBACK:
+            if (config.execution_policy_for(job) == "redesign"
+                    or not config.MODAL_CLOUD_RUN_FALLBACK):
                 raise
             print(f"[dispatcher] {exc}; using Cloud Run launch fallback",
                   flush=True)
@@ -696,7 +713,8 @@ def _run_across_media_egress(job):
     # Modal is production. Keep the old endpoint only as an explicitly
     # enabled rollback after Modal has failed; never pay its latency before a
     # healthy Modal fetch (and never touch it when fallback is disabled).
-    if config.REMOTE_EXECUTOR_URL and (
+    if config.REMOTE_EXECUTOR_URL \
+            and config.execution_policy_for(job) != "redesign" and (
             not config.MODAL_EXECUTOR_ENABLED
             or config.MODAL_CLOUD_RUN_FALLBACK):
         providers.append(("cloud_run", lambda: _run_cloud(job)))
@@ -739,6 +757,17 @@ def run_search_remote(project_id, payload, user_id=None):
     return _run_across_media_egress({
         "id": None, "type": "search", "project_id": project_id,
         "user_id": user_id, "attempts": 0, "payload": payload})
+
+
+def run_stock_acquire_remote(project_id, payload, user_id=None):
+    """Acquire/probe/review stock bytes in the idempotent egress lane."""
+    if not config.MODAL_EXECUTOR_ENABLED:
+        raise ModalLaunchUnavailable(
+            "Modal is required for stock-media acquisition")
+    return _run_modal({"id": None, "type": "stock_acquire",
+                       "project_id": project_id, "user_id": user_id,
+                       "attempts": 0, "payload": payload},
+                      function_override="egress")
 
 
 def frames_available():
@@ -957,3 +986,34 @@ def run_agent_remote(worker_db, job):       # signature matches run_agent_job
         except (TypeError, ValueError):
             remote_job["_queue_wait_s"] = None
     return _run_remote(remote_job)
+
+
+def run_mcp_remote(worker_db, job):         # signature matches run_mcp_job
+    """Run external MCP orchestration in its own scale-to-zero pool.
+
+    The queued job and monotonic lease make the launch durable. Any ffmpeg,
+    acquisition, vision or generation requested by the tool is launched by
+    that orchestrator onto the appropriate child function; none runs on the
+    Render dispatcher.
+    """
+    if not config.MODAL_EXECUTOR_ENABLED:
+        raise ModalLaunchUnavailable("Modal is required for MCP orchestration")
+    return _run_modal(job, function_override="mcp")
+
+
+def run_shorts_remote(worker_db, job):      # signature matches shorts runner
+    """Run story planning independently from Studio and MCP capacity."""
+    if not config.MODAL_EXECUTOR_ENABLED:
+        raise ModalLaunchUnavailable(
+            "Modal is required for Shorts orchestration")
+    return _run_modal(job, function_override="shorts")
+
+
+def run_probe_remote(payload=None):
+    """Launch the real-byte egress probe without using dispatcher network."""
+    if not config.MODAL_EXECUTOR_ENABLED:
+        raise ModalLaunchUnavailable("Modal is required for remote probing")
+    return _run_modal({"id": None, "type": "ytprobe", "project_id": None,
+                       "user_id": None, "attempts": 0,
+                       "payload": payload or {}},
+                      function_override="probe")

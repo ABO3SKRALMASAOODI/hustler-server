@@ -1,5 +1,15 @@
 # transitions — the seven styles and the scene-change law
 
+## Editorial decision principles
+
+A transition expresses a motivated relationship across a real boundary. Hard cuts are the default and zero authored transitions is a complete treatment.
+
+## Evidence to inspect
+
+Inspect adjacent shot content, motion direction, energy, semantic/chapter change, cut type, cadence and rendered junction frames with sound.
+
+## Strong treatment patterns
+
 STYLES (set_transitions — duration-preserving junction effects): dip_black (calm, universal), dip_white (soft, bright), whip_left/whip_right (fast directional smear — vlogs, reels), zoom_punch (the seamless zoom-through: an accelerating push whose momentum carries through the cut with motion blur peaking ON the junction — THE answer to "zoom into the next scene smoothly / so you can't see the cut"), glitch (RGB/noise burst — tech, gaming), flash (white pop ON the cut — beat-synced edits).
 - Fast-paced content: whip/zoom_punch at 0.15-0.3s. Calm or emotional: dip_black 0.3-0.5s.
 - True crossfades (overlapping footage) do not exist — say so when asked.
@@ -11,3 +21,15 @@ A TRANSITION MARKS A SCENE CHANGE. It does not decorate a cut.
 - If it reports NOTHING qualified, the honest answer is that this footage is one continuous shot with nowhere for a transition to go — offer clean jump cuts, or scope='every_cut' if they truly want one on every cut.
 
 CADENCE — rarely, even at scene changes. A montage of nine far-apart clips has nine real scene changes; a whip on all nine inside 30 seconds is a full-screen effect every 3.3s. A montage is carried by HARD cuts — they read as faster, not slower. Read the cadence the tool reports, not just the count.
+
+## Common failure modes
+
+- Decorating jump cuts, repeating one transition mechanically, mismatched direction/energy or using effects where a hard cut is clearer.
+
+## Verification procedure
+
+Review every authored junction with adjacent picture and sound, checking motivation, direction, legibility, cadence and whether the transition delays the story.
+
+## Repair ladder
+
+Shorten/subdue → change direction/style → scope to real scenes → replace with hard cut → rebuild the junction → rescreen the sequence cadence.

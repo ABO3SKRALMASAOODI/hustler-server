@@ -309,6 +309,7 @@ class _Region:
         self.escalated = False    # stroke repaint -> whole box
         self.plate = None
         self.plate_ok = None        # bool mask: plate is trustworthy here
+        self.static_fill_mask = None  # temporal text union, band coordinates
         self.static = False
 
     def set_box(self, bx0, by0, bx1, by1):
@@ -341,7 +342,7 @@ class _Region:
         """The PADDED band — what gets processed and written back."""
         return frame[self.y0:self.y1, self.x0:self.x1]
 
-    def mask_for(self, band, dilate=3):
+    def mask_for(self, band, dilate=6):
         """Mask in padded-band coordinates. Never marks a pixel outside the
         inner box: the margin is context to reconstruct FROM, and erasing ink
         the user did not point at (the next line of a two-line caption, a sign
@@ -360,6 +361,13 @@ class _Region:
             m[self.iy0:self.iy1, self.ix0:self.ix1] = ink_mask(inner,
                                                                dilate=dilate)
         return m
+
+    def repaint_mask(self, band):
+        """Current ink plus the repaired temporal union on a static shot."""
+        mask = self.mask_for(band)
+        if self.static_fill_mask is not None:
+            mask = np.maximum(mask, self.static_fill_mask)
+        return mask
 
 
 def _has_backing_bar(path, region, W, H, dur, samples=3):
@@ -536,6 +544,23 @@ def _build_plate(path, region, W, H, dur, samples=22):
     if region.plate is not None and region.plate.size:
         ghost = ink_mask(region.plate, dilate=2) > 0
         ok = ok & ~ghost
+    # On a static shot, the reliable pixels form an accurate photograph of
+    # the background while the complement is precisely the union of caption
+    # strokes seen over time. Reconstruct that union once on the plate and
+    # replace it on every frame. This removes changing words completely;
+    # repainting only the current threshold mask left black outlines and
+    # antialias ghosts, while blindly trusting the incomplete median pasted
+    # pieces of earlier words back into the picture.
+    if region.static:
+        scope = np.zeros(ok.shape, bool)
+        scope[region.iy0:region.iy1, region.ix0:region.ix1] = True
+        repair = (~ok) & scope
+        if repair.any() and (~repair).any():
+            region.plate = cv2.inpaint(
+                np.ascontiguousarray(region.plate),
+                repair.astype(np.uint8) * 255, 3, cv2.INPAINT_TELEA)
+            ok = ok | repair
+            region.static_fill_mask = repair.astype(np.uint8) * 255
     region.plate_ok = ok
 
 
@@ -619,7 +644,12 @@ def _repaint(band, mask, region, rng=None):
         # from the mask's own area (see config.INPAINT_MAX_PX).
         out = _telea(out, m)
         filled = m
-    sigma = _grain_sigma(band, mask)
+    # Thin text removal already inherits surrounding texture through TELEA
+    # and the final video encode. Adding fresh random grain to glyph holes was
+    # nondeterministic and the verification detector correctly read that new
+    # high-frequency noise as surviving ink. Large box/object fills still get
+    # matched grain because their smooth reconstructed area can reveal itself.
+    sigma = 0.0 if region.fill == "text" else _grain_sigma(band, mask)
     if sigma > 0.6 and filled.any():
         noise = (rng or np.random).normal(0.0, sigma, filled.shape)
         out = np.clip(out.astype(np.float32)
@@ -712,7 +742,7 @@ def clean_video(src, regions, out_full, out_proxy=None, *, progress_cb=None,
                 frame = frame.copy()
                 for r in active:
                     band = r.crop(frame)
-                    mask = r.mask_for(band)
+                    mask = r.repaint_mask(band)
                     if mask.any():
                         frame[r.y0:r.y1, r.x0:r.x1] = _repaint(band, mask, r)
                         touched += 1
@@ -865,7 +895,7 @@ def build_patch(src, regions, window, out_path, *, crf=23, preset="veryfast",
                 frame = np.frombuffer(buf, np.uint8).reshape(H, W, 3).copy()
                 for r in active:
                     band = r.crop(frame)
-                    mask = r.mask_for(band)
+                    mask = r.repaint_mask(band)
                     if mask.any():
                         frame[r.y0:r.y1, r.x0:r.x1] = _repaint(band, mask, r)
                         touched += 1

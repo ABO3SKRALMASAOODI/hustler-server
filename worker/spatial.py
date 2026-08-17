@@ -193,7 +193,48 @@ def _text_regions(cv2, gray):
                       max(hit[2], box[2]), max(hit[3], box[3])]
         else:
             merged.append(list(box))
-    return merged[:24]
+    if merged:
+        return merged[:24]
+
+    # MSER becomes overly conservative on small, high-contrast type with
+    # recent OpenCV builds (the same two clean caption lines can yield zero
+    # regions after the bounded 360px resize). A morphology fallback joins
+    # bright or dark glyphs horizontally, then retains only line-shaped runs.
+    # It is used only when the character-component path found nothing; video
+    # indexing still requires temporal persistence before calling anything a
+    # burned caption.
+    fallback = []
+    for threshold_mode in (cv2.THRESH_BINARY, cv2.THRESH_BINARY_INV):
+        _level, binary = cv2.threshold(
+            gray, 0, 255, threshold_mode + cv2.THRESH_OTSU)
+        joined = cv2.morphologyEx(
+            binary, cv2.MORPH_CLOSE,
+            cv2.getStructuringElement(
+                cv2.MORPH_RECT, (max(7, int(w * .02)), 3)))
+        contours, _ = cv2.findContours(
+            joined, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for contour in contours:
+            x, y, bw, bh = cv2.boundingRect(contour)
+            if not (max(6, int(h * .025)) <= bh <= int(h * .14)):
+                continue
+            if bw < w * .075 or bw / max(1.0, bh) < 2.2:
+                continue
+            density = float(binary[y:y + bh, x:x + bw].mean()) / 255.0
+            if not 0.05 <= density <= 0.72:
+                continue
+            pad_x, pad_y = int(w * .008), int(h * .008)
+            box = [round(max(0, x - pad_x) / w, 4),
+                   round(max(0, y - pad_y) / h, 4),
+                   round(min(w, x + bw + pad_x) / w, 4),
+                   round(min(h, y + bh + pad_y) / h, 4)]
+            if not any(_iou(
+                    (int(box[0] * w), int(box[1] * h),
+                     int(box[2] * w), int(box[3] * h)),
+                    (int(old[0] * w), int(old[1] * h),
+                     int(old[2] * w), int(old[3] * h))) > .7
+                    for old in fallback):
+                fallback.append(box)
+    return sorted(fallback, key=lambda box: (box[1], box[0]))[:24]
 
 
 def analyze_frame(path):

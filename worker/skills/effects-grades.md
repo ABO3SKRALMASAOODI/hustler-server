@@ -1,5 +1,15 @@
 # effects-grades — color, stylize, enhancement, speed, restraint
 
+## Editorial decision principles
+
+Treat effects and grade as a coherent visual language. Use them to clarify mood, hierarchy or a real story turn; restraint is a valid complete treatment.
+
+## Evidence to inspect
+
+Inspect representative frames across every scene, skin tones, white balance, exposure, palette, motion energy, source defects and the rendered result at effect boundaries.
+
+## Strong treatment patterns
+
 RESTRAINT OFTEN IS THE LOOK. Every device should earn a reason a viewer would notice. A single aggressive full-frame device and a small finishing palette are often enough, while grain + vignette + glow + chroma + shake can read as a fault. These are taste heuristics, not limits: use any number of devices or finishing passes when the brief and result support them.
 
 "MAKE IT PUNCHY / EXCITING / VIRAL" can be carried by pace, sound and framing: tighter cuts, punch-ins on emphasis, and bold caption rhythm. Aggressive devices are available whenever your judgment says they strengthen the edit; preview their combined result rather than following a fixed count.
@@ -26,7 +36,7 @@ WRITE YOUR OWN CHAIN (add_custom_filter) — when the user asks for a look NO pr
 - start/end are program seconds and the moment follows its footage through later cuts, exactly like stylize. Give it a short label ('CRT green') — that is what the user sees in the edit summary.
 - A chain that parses can still look wrong, and only your eyes can tell: after the next preview, look_at output frames inside the window before you describe the effect. Not the look you meant → remove_custom_filter and write a better chain.
 - A custom chain participates in the same visual palette as every other effect. Presets are a fast starting point, while custom chains remain available for combinations or looks they cannot express; judge the composite result instead of counting devices.
-- RECOLOR ONE THING ("make the leaves red", "turn the sky purple", "the car but in black") — a real ask an agent reverted out of on 2026-08-09; the recipe exists, use it: `huesaturation` rotates hue for ONE named color range and holds everything else. Greens toward red/purple: `huesaturation=hue=120:colors=g:strength=8` (hue -180..180 picks the target shade, colors is r/y/g/c/b/m, strength raises selectivity). Desaturate just the car's blues: `huesaturation=saturation=-1:colors=b:strength=10`. Iterate with your eyes as much as useful: apply → preview → look_at a frame WITH the object and one WITHOUT. If colors cannot be separated cleanly in this footage, say plainly what bleeds together instead of quietly reverting.
+- RECOLOR ONE THING ("make the leaves red", "turn the sky purple", "the car but in black") — the recipe exists, use it: `huesaturation` rotates hue for ONE named color range and holds everything else. Greens toward red/purple: `huesaturation=hue=120:colors=g:strength=8` (hue -180..180 picks the target shade, colors is r/y/g/c/b/m, strength raises selectivity). Desaturate just the car's blues: `huesaturation=saturation=-1:colors=b:strength=10`. Iterate with your eyes as much as useful: apply → preview → look_at a frame WITH the object and one WITHOUT. If colors cannot be separated cleanly in this footage, say plainly what bleeds together instead of quietly reverting.
 
 SPEED (set_speed / remove_speed): 0.25x-4x on a SOURCE range; audio keeps pitch; everything on the program timeline re-anchors automatically. Slow motion below 0.6x visibly steps (frames are duplicated, not synthesized) — prefer 0.6-0.8x and say the tradeoff. An overlapping span replaces the old one.
 
@@ -35,3 +45,15 @@ LOOKS (apply_look): one call composes a whole aesthetic and reports each compone
 FADES (set_fades): fade from/to black at the very start/end. A closing fade belongs on long-form and cinematic pieces only — on a reel it plays into the loop. A 1s fade-in on a reel is a second of black at the only moment retention is decided.
 
 RHYTHM (short-form): reserve pattern interrupts for meaningful changes in information, emotion, speaker energy, musical phrase or visual legibility. A punch-in, B-roll beat, freeze-frame or text card should make that change clearer—not merely reset a timer. Let strong faces, reactions and suspense hold; compress lists or escalations when their internal rhythm earns it. ONE dominant device at a time, chosen by what the moment is doing.
+
+## Common failure modes
+
+- Repetitive pattern interrupts, crushed highlights/blacks, damaged skin tones, scene-inconsistent grade or effects masking information.
+
+## Verification procedure
+
+Review representative frames from every distinct scene plus all effect boundaries and motion windows; compare subject, skin, text/UI and palette continuity.
+
+## Repair ladder
+
+Reduce intensity → scope to the intended scene/color → correct custom controls → choose a restrained preset → remove the effect → render every affected scene again.

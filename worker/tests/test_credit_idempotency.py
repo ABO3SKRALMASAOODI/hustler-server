@@ -259,6 +259,7 @@ def test_terminal_billing_failure_persists_repair_flag(monkeypatch):
     assert out["billing_error"] == "database busy"
     assert patches == [({"billing_pending": True,
                          "billing_error": "database busy",
+                         "billing_root_job_id": 9,
                          "billing_extra_credits": 2.0}, ())]
 
 
@@ -280,6 +281,7 @@ def test_terminal_qualification_failure_persists_repair_flag(monkeypatch):
     assert out["committed"] is True
     assert out["qualification_error"] == "event busy"
     assert patches == [({"qualification_pending": True,
+                         "qualification_root_job_id": 9,
                          "qualification_error": "event busy"}, ())]
 
 
@@ -324,10 +326,11 @@ def test_agent_turn_baseline_is_fenced_and_persisted_in_job_payload():
         conn, 44, 7, 3, "a" * 64) is True
     sql, params = conn.commands[-1]
     assert "turn_baseline_digest" in sql
+    assert "root_agent_job_id" in sql
     assert "turn_baseline_version" in sql
     assert "state = 'running'" in sql and "total_claims = %s" in sql
     assert "AND NOT (COALESCE(payload" in sql
-    assert params == ("a" * 64, 3, 44, 7)
+    assert params == (44, "a" * 64, 3, 44, 7)
 
 
 class _GateCursor:
@@ -453,7 +456,8 @@ def test_atomic_auto_resume_enqueues_once_before_releasing_account_lock():
                   if sql.startswith("INSERT INTO video_jobs"))
     payload = insert[1][3].adapted
     assert payload == {"direct_short": True, "message_id": 12,
-                       "auto_resumed": True}
+                       "auto_resumed": True,
+                       "execution_policy": "legacy"}
 
 
 def test_qualification_writer_uses_the_same_account_row_lock():

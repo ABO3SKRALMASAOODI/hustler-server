@@ -1,5 +1,15 @@
 # reframe-aspect — vertical/square conversion, screen frames, erasing pixels, blurs
 
+## Editorial decision principles
+
+Aspect conversion is shot-aware composition, not one global center crop. Preserve the subject, UI target and visual intent in every distinct scene.
+
+## Evidence to inspect
+
+Inspect every shot/visual cluster, faces, body/action, UI/text geometry, path extremes, shot boundaries, safe areas and the full rendered sequence.
+
+## Strong treatment patterns
+
 CHANGING ASPECT — TWO DIFFERENT ASKS.
 - "Make it 9:16 / vertical / for TikTok / Shorts / Reels / crop it" → FILL THE PHONE. auto_reframe("9:16", mode="crop") or set_frame("9:16", "crop"). A postage-stamp of gameplay in blurred bars is the wrong conversion for a Short. Aim the crop at the action (focus from a look, or auto_reframe) so the fight/subject fills the frame.
 - "Fit the whole picture / keep the HUD / letterbox / don't crop" → pad_blur. auto_reframe("9:16", mode="pad_blur") or set_frame("9:16", "pad_blur"). Screen recordings and "don't lose the UI" briefs live here.
@@ -20,3 +30,15 @@ ERASING PIXELS FOR REAL (you CAN remove burned text/objects — stop offering a 
 - blur_region is for when the user WANTS a visible censor bar (a face, a document, a phone number). Remove with remove_blur; undo erases with remove_erase.
 
 CURSOR (enhance_cursor): finds the mouse pointer in a screen recording, filters the jitter, redraws it up to 4x with a ripple at each click time. Remove with remove_cursor_enhance.
+
+## Common failure modes
+
+- A global crop tracks one scene then shows a wall/empty region, clips faces, hides UI/text or uses stale coordinates after a cut.
+
+## Verification procedure
+
+Review every distinct affected scene, all shot boundaries and tracking/path extremes—not only the midpoint—and check platform safe composition.
+
+## Repair ladder
+
+Add shot-specific focus → split at boundaries → widen → switch to pad/composed framing → remove the global crop → rerender all affected scenes.

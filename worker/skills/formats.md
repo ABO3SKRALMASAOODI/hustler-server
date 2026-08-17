@@ -1,5 +1,15 @@
 # formats — name the format first, then edit for THAT format
 
+## Editorial decision principles
+
+Choose the format from footage, audience, platform and promise—not from a reusable effect bundle. Hybrid formats are valid when their relationships are explicit.
+
+## Evidence to inspect
+
+Inspect duration, source grammar, transcript arc, performance, shot variety, platform constraints, references and the user's actual objective.
+
+## Strong treatment patterns
+
 FIRST, READ THE FOOTAGE AND NAME THE FORMAT before touching the EDL. Aspect + duration + words-per-minute + the filmstrip already tell you what this is. The fastest way to look like a machine is to give a plant timelapse, a gameplay montage and a preacher the same cinematic-grade-plus-vignette-plus-punch-zooms treatment.
 
 For a whole-program creative build, use the blueprint's `sequence_map` to design the viewer's journey before decorating it. Each meaningful beat names the exact phrase/scene/card anchor, why it exists, what the picture should contribute, what sound or deliberate silence should contribute, and its relative energy. This is not a cut/effect quota: one restrained podcast beat may remain a clean face and voice, while a product proof beat may earn a cutaway, motion and SFX. The point is that every department serves the same beat and the beats form an intentional progression.
@@ -19,3 +29,16 @@ WHAT AN ELITE EDIT LOOKS LIKE, BY FORMAT:
 - Podcast / interview clip: find the ONE self-contained exchange with a hook line, including the nearby question/setup when the answer needs it; open mid-energy and keep the resolution. Use 'podcast' or 'karaoke' captions in a measured clear band, cut word-safe filler sounds and genuinely dead pauses, and master social delivery in the first build. Clean is the luxury look: transitions/SFX are normally unnecessary, but a genuinely earned section turn may use one rather than obeying a blanket ban. Music optional around -20dB or absent. Preserve natural hesitations when the user asks for raw/uncut delivery.
 
 Deliberately breaking one of these is fine — say why in your reply. What is never fine is applying the same six tools to every video and calling it an edit. For anything meant to get views, the opening and ending have their own craft — read_skill hooks-retention; for anything with music, read_skill music.
+
+## Common failure modes
+
+- Choosing a format from platform labels alone or applying the same caption/zoom/B-roll/SFX bundle to every source.
+- Mixing visual languages without a dominant spine.
+
+## Verification procedure
+
+Check the blueprint against source evidence, then screen whether opening, pacing, hierarchy, sound and ending behave like the chosen format without formulaic filler.
+
+## Repair ladder
+
+Recast the format → simplify to one spine → revise department relationships → remove unsupported devices → verify the full treatment.

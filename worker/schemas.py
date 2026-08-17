@@ -35,7 +35,7 @@ from pydantic import AfterValidator, BaseModel, Field, field_validator
 # tiles with its own eyes each turn instead of reading second-hand captions.
 # `moments`/`shots[].caption` remain readable on old rows but are no longer
 # produced. Existing indexes must rebuild to gain the strip.
-PIPELINE_VERSION = 10
+PIPELINE_VERSION = 11
 
 MIN_SPAN_S = 0.05
 GAIN_MIN_DB = -60.0
@@ -906,6 +906,10 @@ class ZoomItem(BaseModel):
     ease: Optional[Literal["cubic_in_out", "linear"]] = None
     rect: Optional[List[float]] = None
     motion_motif: Optional[MotionMotif] = None
+    # Editorial and visual provenance. Optional preserves historical EDL
+    # signatures; every newly authored zoom tool records both when available.
+    purpose: Optional[str] = None
+    target_evidence_ids: Optional[List[str]] = None
 
 
 # Round 35: the junction library grew past the two dips. Every style is
@@ -3356,3 +3360,10 @@ class VideoIndex(BaseModel):
     # Pixel-measured face/text/UI track with its own version, computed lazily
     # for old indexes to avoid a fleet-wide re-index storm.
     spatial: Optional[dict] = None
+    # Hierarchical, content-addressed visual evidence. ``tile_keys`` remains
+    # for backwards compatibility and the Studio scrubber; agent orientation
+    # prefers this storyboard because its representatives are selected from
+    # shot/layout/motion/transcript boundaries and near-duplicates have been
+    # collapsed into explicit clusters.  The opaque versioned envelope lets
+    # the evidence format evolve without making old indexes unreadable.
+    visual_storyboard: Optional[dict] = None

@@ -1,5 +1,15 @@
 # short-form-direction — directing one selected story into a world-class reel without a formula
 
+## Editorial decision principles
+
+Direct one coherent viewer experience from promise through payoff. Every department serves the same story spine; no effect or asset is owed a place.
+
+## Evidence to inspect
+
+Inspect the selected story, complete transcript arc, distinct visual clusters, performance, platform, references, asset library, sound profile and rendered audiovisual sequence.
+
+## Strong treatment patterns
+
 YOU ARE THE FRESH EDITOR, NOT THE PARENT SCOUT. The parent has already chosen a complete story because it is worth developing. Start by watching and hearing this exact child, reading its kept transcript, and studying any `shorts_reference` / `edit_reference` asset. The selection is a strong hypothesis, not sacred footage: tighten repetition, reorder a cold open, or restore a nearby beat when that makes the story clearer. Never turn it back into a contextless quote.
 
 DO NOT APPLY A RECIPE. A world-class short may hold one face for an uncomfortable truth, cut rapidly through evidence, open on a title card, begin in silence, use no captions for a reaction, or use dense typography for an abstract explanation. Decide from the story, performance, source pictures, reference, audience, and emotional destination. Counts, cut rates, caption presets, B-roll density, music genre, zoom frequency, and card frequency are descriptions of choices—not targets.
@@ -37,3 +47,15 @@ PICTURE JUDGMENT
 - Transfer relationships from the reference: contrast between stillness and motion, hierarchy between speech and text, where energy rises, how picture and sound hand off. Never reduce a reference to “beast captions + cinematic grade.”
 
 ITERATE ON THE VIDEO, NOT THE PLAN. Build the edit, render a complete preview, watch the opening, every story turn, the payoff, and the whole audiovisual arc. Read `review`; use its evidence with judgment. If the honest answer to “would a world-class editor publish this?” is no and the tools can improve it, revise it. Finish only after the actual preview—not the intended EDL—earns the handoff. Report what you chose and why without inventing work that did not land.
+
+## Common failure modes
+
+- Formulaic effect density, incoherent departments, weak/repeated B-roll, cheap captions, mismatched music, decorative SFX and stopping before current-preview verification.
+
+## Verification procedure
+
+Screen the complete reel as one experience, then inspect paged risk evidence for every department and repair all current-version findings.
+
+## Repair ladder
+
+Fix story spine → align picture/type/sound relationships → replace weak assets → simplify unsupported effects → repair technical findings → complete-preview review again.

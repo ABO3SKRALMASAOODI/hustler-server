@@ -170,9 +170,14 @@ def _drain_images(ctx):
     result column is JSONB, and a permanent copy of every picture anyone ever
     looked at is not something a database should be carrying. The backend
     reads them back and emits them as MCP image content."""
-    pending, ctx.pending_images = list(ctx.pending_images or []), []
+    pending = list(ctx.pending_images or [])
+    page = pending[:config.MCP_IMAGE_PAGE_SIZE]
+    # Transport paging, not loss. A normal look/open call stays within one
+    # page; if a future tool produces more, the next MCP call carries the
+    # remainder instead of deleting evidence it never delivered.
+    ctx.pending_images = pending[config.MCP_IMAGE_PAGE_SIZE:]
     out = []
-    for label, path in pending[:config.MCP_MAX_IMAGES]:
+    for label, path in page:
         try:
             key = (f"media/{ctx.project_id}/look_"
                    f"{os.path.basename(path).rsplit('.', 1)[0]}_"
@@ -182,9 +187,6 @@ def _drain_images(ctx):
             print(f"[mcp] could not publish look frame ({ex})", flush=True)
             continue
         out.append({"storage_key": key, "label": label})
-    if len(pending) > config.MCP_MAX_IMAGES:
-        print(f"[mcp] {len(pending) - config.MCP_MAX_IMAGES} look frame(s) "
-              "not sent (per-call cap)", flush=True)
     return out
 
 
@@ -376,6 +378,13 @@ def run_mcp_job(worker_db, job):
             imgs = _drain_images(ctx)
             if imgs:
                 out["images"] = imgs
+            if ctx.pending_images:
+                out["images_remaining"] = len(ctx.pending_images)
+                out["text"] += (
+                    f"\n{len(ctx.pending_images)} additional visual evidence "
+                    "page(s) remain queued for transport; call the relevant "
+                    "visual evidence tool again to continue. Nothing was "
+                    "discarded.")
             if ctx.last_preview:
                 out["preview"] = {
                     "edl_version": ctx.last_preview.get("edl_version"),

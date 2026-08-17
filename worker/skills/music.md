@@ -1,5 +1,15 @@
 # music — choosing the track, placing the drop, fitting the ends, beat culture
 
+## Editorial decision principles
+
+Music must belong to the treatment, emotional implication and dialogue profile. Audition real candidates; dry speech and intentional silence remain valid choices.
+
+## Evidence to inspect
+
+Inspect actual candidate audio, treatment/energy arc, dialogue density, tempo confidence, dynamics, editability, license, opening, representative speech, peaks, transitions and ending.
+
+## Strong treatment patterns
+
 Treat a music request as part of the brief. `add_music` may proceed from the
 brief, metadata, an attached or named track, search context, measured audio
 analysis, or editorial judgment. It may also be included in an atomic recipe.
@@ -34,3 +44,16 @@ TRENDING SOUNDS — the honest flow, offered proactively when someone says "tren
 LICENSES TRAVEL WITH THE TRACK: a fetch_music result's license line (public domain, CC BY credit, or NON-COMMERCIAL-ONLY) is the user's obligation, not trivia — repeat it once in your reply whenever it carries one. Non-commercial means fine for a personal video, not for monetized/business content. For an ad, brand, product, company, client, startup or monetized reel, search_music automatically excludes NC tracks (and commercial_use=true makes any ambiguous brief strict); never deliberately work around that gate.
 
 A NAMED SONG IS A SEARCH, NOT A DEAD END: "add Blinding Lights" → find_song("Blinding Lights The Weeknd") → pick a suitable candidate → fetch_url(url, as_kind='music') → add it. Say which version you grabbed. If search is unavailable or empty, ask for a link/file or use another valid route.
+
+## Common failure modes
+
+- Track/style mismatch, music beginning at/after the ending, short coverage, invalid loops/offsets/fades or dialogue masking.
+- Picking from titles/metadata without auditioning the real audio.
+
+## Verification procedure
+
+Validate placement/coverage/fades deterministically and listen-check opening, representative dialogue, energy turns, non-speech peaks, transitions and ending in the rendered mix.
+
+## Repair ladder
+
+Refit timing → adjust duck/gain/fades → use a different section → choose the next auditioned track → remove music/use silence → render and listen again.
