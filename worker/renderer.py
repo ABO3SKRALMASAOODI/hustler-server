@@ -2001,40 +2001,31 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             #     (B = A*td_i/td_o): the apparent camera decelerates through
             #     the cut instead of changing speed exactly where the eye
             #     must not be given a reason to look.
-            #   * MOTION BLUR at the peak, from tmix frame-blending — the same
-            #     real blur the motion_blur stylize uses. Around the junction
-            #     the frames are moving fastest, so averaging them yields a
-            #     radial smear that peaks exactly ON the cut — and because
-            #     tmix's window spans the junction, the last outgoing and
-            #     first incoming frames blend INTO EACH OTHER: the content
-            #     switch happens inside the smear, which is the entire trick
-            #     of the professional zoom-through.
+            # Do not add tmix at the peak. On discontinuous concat junctions
+            # its five-frame history has produced large neon-green/blocky
+            # frames on otherwise valid H.264 sources in production. The
+            # accelerating zoom still supplies the transition movement; a
+            # clean cut at its peak is vastly safer than corrupting the user's
+            # footage. A future blur must reset history per block, not span a
+            # concat discontinuity.
             T = f"on/{fps:.3f}"
             A = 0.55
             zterms = []
-            blur_spans = []
             for c, td_o, td_i in juncs:
                 if td_o:
                     zterms.append(
                         f"{A}*pow(max(0,({T}-{c - td_o:.3f})"
                         f"/{td_o:.3f}),2)*{_win(T, c - td_o, c)}")
-                    blur_spans.append((c - min(td_o * 0.6, 0.25), c))
                 if td_i:
                     B = min(A * (td_i / td_o) if td_o else 0.35, 0.6)
                     zterms.append(
                         f"{B:.3f}*pow(max(0,1-({T}-{c:.3f})"
                         f"/{td_i:.3f}),2)*{_win(T, c, c + td_i)}")
-                    blur_spans.append((c, c + min(td_i * 0.5, 0.2)))
             if zterms:
                 parts.append(f"[{vlabel}]zoompan=z='1+{'+'.join(zterms)}'"
                              f":x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
                              f":d=1:s={W}x{H}:fps={fps:.3f}[vpunch]")
                 vlabel = "vpunch"
-                en = "+".join(f"between(t,{a:.3f},{b:.3f})"
-                              for a, b in merge_spans(blur_spans, gap=0.0))
-                parts.append(f"[{vlabel}]tmix=frames=5:enable='{en}'"
-                             f"[vpunchb]")
-                vlabel = "vpunchb"
     # effects: grade -> custom grade -> stylize -> zooms -> overlays ->
     # (captions burn) -> (graphics burn) -> fades. Zooms use one zoompan
     # whose z steps up inside each window; do_norm guarantees the frames
@@ -3112,7 +3103,8 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
            *encode, *_output_clock(fps), "-t", f"{expected_out_s:.3f}",
            "-movflags", "+faststart",
            "-progress", "pipe:1", "-nostats", out_path]
-    media.run(cmd, progress_cb=progress_cb,
+    media.run(cmd, timeout=_render_ffmpeg_timeout(preview, expected_out_s),
+              progress_cb=progress_cb,
               expected_out_s=expected_out_s,
               cancelled_cb=cancelled_cb)
     return media.duration_of(out_path)
@@ -3623,7 +3615,8 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                "-t", f"{expected_out_s:.3f}",
                "-movflags", "+faststart",
                "-progress", "pipe:1", "-nostats", out_path]
-        media.run(cmd, progress_cb=progress_cb,
+        media.run(cmd, timeout=_render_ffmpeg_timeout(preview, expected_out_s),
+                  progress_cb=progress_cb,
                   expected_out_s=expected_out_s,
                   cancelled_cb=cancelled_cb)
         return media.probe_audio_duration(out_path)
@@ -3650,7 +3643,8 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     # Progress is percent-of-expected, so it must be the RENDERED length. Left
     # at the programme duration the bar hits 99.9% at programme end and then
     # flatlines through the whole end card.
-    media.run(cmd, progress_cb=progress_cb,
+    media.run(cmd, timeout=_render_ffmpeg_timeout(preview, expected_out_s),
+              progress_cb=progress_cb,
               expected_out_s=expected_out_s,
               cancelled_cb=cancelled_cb)
     return media.duration_of(out_path)
@@ -3688,6 +3682,21 @@ def _output_clock(fps):
     datum this investigation did not have.
     """
     return ["-fps_mode", "cfr", "-r", f"{max(1.0, min(float(fps or 30.0), 120.0)):.3f}"]
+
+
+def _render_ffmpeg_timeout(preview, expected_out_s):
+    """Size healthy final time from authored duration, not a flat leash.
+
+    The exact output clock lets finals receive up to 2x realtime plus staging
+    margin under the durable Modal envelope. Broken graphs are still governed
+    by the much shorter no-progress and output-overrun watchdogs. Retired
+    Cloud Run and interactive preview paths retain the original sub-hour cap.
+    """
+    if preview or os.getenv("EXECUTOR_PROVIDER", "") != "modal":
+        return config.FFMPEG_TIMEOUT_S
+    requested = max(config.FFMPEG_TIMEOUT_S,
+                    int(float(expected_out_s or 0.0) * 2.0 + 600.0))
+    return min(config.FINAL_FFMPEG_TIMEOUT_MAX_S, requested)
 
 
 def _stream_report(path):
@@ -4545,11 +4554,19 @@ def run_render_job(worker_db, job):
     workdir = os.path.join(config.TMP_DIR, f"render_{job_id}")
     os.makedirs(workdir, exist_ok=True)
     timings, t0 = {}, time.monotonic()
+    active_stage = ["download_s"]
 
     def _mark(stage):
         nonlocal t0
         timings[stage] = round(time.monotonic() - t0, 2)
         t0 = time.monotonic()
+        active_stage[0] = {
+            "download_s": "encode_s",
+            "encode_s": "verify_s",
+            "verify_s": "sheet_s",
+            "sheet_s": "upload_s",
+            "upload_s": "register_s",
+        }.get(stage)
 
     # Set the moment a progress write reports the row is no longer ours. The
     # encode watchdog reads it every 2s (media.run cancelled_cb) and kills
@@ -5074,5 +5091,19 @@ def run_render_job(worker_db, job):
                     "scope": "changes"} if proof_only else {}),
                 "midword_audit": mw,
                 "audio_qc": audio_qc_res, "listen_keys": listen_keys}
+    except Exception as exc:
+        # Successful jobs have always returned stage timings. Failures used to
+        # discard them, leaving a 50-minute export with only `total_s`. Attach
+        # completed stages plus time spent in the active one so the
+        # provider-neutral executor can persist the same evidence on failure.
+        stage = active_stage[0] or "unknown_s"
+        if stage not in timings:
+            timings[stage] = round(time.monotonic() - t0, 2)
+        timings["failed_stage"] = stage
+        try:
+            exc.runner_timings = dict(timings)
+        except Exception:
+            pass
+        raise
     finally:
         shutil.rmtree(workdir, ignore_errors=True)

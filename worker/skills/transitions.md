@@ -5,6 +5,7 @@ STYLES (set_transitions — duration-preserving junction effects): dip_black (ca
 - True crossfades (overlapping footage) do not exist — say so when asked.
 
 A TRANSITION MARKS A SCENE CHANGE. It does not decorate a cut.
+- HARD CUT IS THE DEFAULT, INCLUDING BETWEEN REAL SCENES. Use a transition only when its direction/energy/meaning is motivated by adjacent action (for example matched movement for a whip, a singular reveal for a flash, or a chapter breath for a dip). "There is a junction" is not a reason. Zero authored transitions is a valid finished edit, never an incomplete department.
 - After cut_silences, a single talking-head take has one junction per removed pause — often 40+ — and every one is a JUMP CUT inside the same continuous shot. A jump cut is supposed to be invisible; decorating each with a full-screen effect looks broken.
 - set_transitions defaults to scope='scene' and lands only on real shot changes and insert boundaries. READ THE RESULT — it says how many junctions it used ("7 of 45"); tell the user that number, not the cut count.
 - If it reports NOTHING qualified, the honest answer is that this footage is one continuous shot with nowhere for a transition to go — offer clean jump cuts, or scope='every_cut' if they truly want one on every cut.

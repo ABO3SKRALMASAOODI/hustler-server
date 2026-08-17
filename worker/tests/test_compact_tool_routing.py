@@ -22,19 +22,19 @@ class _Ctx:
         self._expanded_tool_domains = set()
 
 
-def test_post_plan_catalog_is_stage_relevant_and_materially_smaller():
+def test_post_plan_catalog_keeps_all_recipe_capability_and_routes_side_effects():
     ctx = _Ctx()
     names = agent_tools.compact_tool_names(ctx)
     assert {"keep_segments", "render_preview",
             "expand_toolset"} <= names
-    assert "add_captions" not in names
+    assert set(agent_tools.RECIPE_TOOLS) <= names
     assert "search_stock" not in names
 
     full = agent_tools.openai_tools(compact=True)
     routed = agent_tools.openai_tools(compact=True, names=names)
     full_chars = len(json.dumps(full))
     routed_chars = len(json.dumps(routed))
-    assert routed_chars < full_chars * 0.6
+    assert routed_chars < full_chars
 
 
 def test_fresh_planning_catalog_cannot_write_and_cuts_first_call_tpm():
@@ -56,7 +56,7 @@ def test_any_omitted_domain_can_be_loaded_without_changing_the_edit():
 
     assert "Tool domain exposed" in out
     assert {"research_broll", "generate_image"} <= names
-    assert "add_zoom" not in names
+    assert {"add_zoom", "set_color_grade"} <= names
 
     # The loop consumes this one-shot set after building the next dispatch;
     # a later stage can explicitly load another domain without permanent
@@ -73,8 +73,8 @@ def test_duplicate_valid_domains_are_deduped_not_rejected():
     out = agent_tools.expand_toolset(ctx, ["media", "media", "motion"])
 
     assert not out.startswith("REJECTED:")
-    assert ctx._expanded_tool_domains == {"media"}
-    assert "finish that plan step before loading motion" in out
+    assert ctx._expanded_tool_domains == {"media", "motion"}
+    assert "finish that plan step" not in out
 
 
 def test_preplan_expansion_forces_next_dispatch_schema_refresh():
@@ -87,6 +87,15 @@ def test_preplan_expansion_forces_next_dispatch_schema_refresh():
 
     Fresh._expanded_tool_domains = set()
     assert agent_loop._tool_schema_refresh_needed(Fresh()) is False
+
+
+def test_loaded_skills_never_remove_access_to_another_relevant_playbook():
+    ctx = _Ctx()
+    ctx._skills_loaded = {"captions", "audio", "cutting", "zooms"}
+
+    names = agent_tools.compact_tool_names(ctx)
+
+    assert "read_skill" in names
 
 
 def test_domain_union_covers_every_registered_tool():

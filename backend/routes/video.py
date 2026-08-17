@@ -692,6 +692,15 @@ def _deterministic_final_failure(row):
     return any(marker in error for marker in _DETERMINISTIC_FINAL_ERROR_MARKERS)
 
 
+def _export_edl_error(edl, source_duration=None):
+    """Return a deterministic timeline error before spending a render job."""
+    try:
+        wschemas.validate_edl(edl, source_duration)
+        return None
+    except Exception as exc:
+        return str(exc)[:500]
+
+
 def _subscribe_offer_body():
     """The 402 the subscribe gate answers with. Carries the three live plans
     with server-quoted prices and credits so the studio's cards never
@@ -2091,6 +2100,21 @@ def _place_tray_now(cur, project_id, session_id, user_id):
     return version, added
 
 
+def _reference_only_tray_without_timeline(original, ordered, reference_ids):
+    """Whether submitting this new project's tray would strand every clip.
+
+    Video references are useful beside real footage, but they are explicitly
+    prohibited from entering the program. With no existing original and no
+    non-reference visual, submission would acknowledge/index the files while
+    leaving no EDL for the requested edit.
+    """
+    if original or not any(a["kind"] == "video_clip" for a in ordered):
+        return False
+    return not any(
+        a["kind"] in ("video_clip", "image_ref")
+        and a["id"] not in reference_ids for a in ordered)
+
+
 @video_bp.route("/projects/<int:project_id>/tray/order", methods=["POST"])
 @token_required
 def tray_order(user_id, project_id):
@@ -2187,6 +2211,20 @@ def tray_submit(user_id, project_id):
         ordered.extend(by_id.values())
 
         original = _active_original(cur, project_id)
+        if _reference_only_tray_without_timeline(
+                original, ordered, reference_ids):
+            # A reference is deliberately forbidden from appearing in the
+            # program. Accepting a brand-new project's entire video tray as
+            # references therefore creates no timeline, yet the UI says the
+            # uploads were submitted and the concierge cannot launch the
+            # requested edit. Keep the tray intact and make the corrective
+            # action explicit instead of stranding the project after indexing.
+            return jsonify({
+                "error": ("Choose at least one video as timeline footage — "
+                          "a project made only of Reference clips has nothing "
+                          "for the agent to edit."),
+                "code": "reference_only_no_timeline",
+            }), 400
         promoted, promoted_idx = None, -1
         main_index_job = None
         if not original:
@@ -4684,7 +4722,7 @@ def _final_is_current(meta):
 
 
 # Mirrors worker/config.TRANSITION_VERSION — a worker test asserts they match.
-TRANSITION_VERSION = 2
+TRANSITION_VERSION = 3  # v3: zoom_punch no longer tmix-blends across concat
 
 
 def _transitions_are_current(meta, edl_has_transition=True):
@@ -5039,9 +5077,11 @@ def render_final(user_id, project_id):
         cur = conn.cursor()
         if not _project_for_user(cur, project_id, user_id):
             return jsonify({"error": "Project not found"}), 404
-        cur.execute("SELECT version FROM edls WHERE project_id = %s AND version = %s",
+        cur.execute("SELECT version, json FROM edls "
+                    "WHERE project_id = %s AND version = %s",
                     (project_id, version))
-        if not cur.fetchone():
+        edl_row = cur.fetchone()
+        if not edl_row:
             return jsonify({"error": "That EDL version does not exist"}), 400
         # THE EXPORT IS THE ONE THING THAT GENUINELY NEEDS THE ORIGINAL.
         # Everything before it runs on the proxy, which is why a proxy-first
@@ -5051,6 +5091,19 @@ def render_final(user_id, project_id):
         # ready" on a video the user can see and has already edited reads as a
         # bug rather than as a transfer still in flight.
         original = _active_original(cur, project_id)
+        preflight_error = _export_edl_error(
+            edl_row["json"], (original or {}).get("duration_s"))
+        if preflight_error:
+            record_client_event(
+                user_id, project_id, "export_blocked",
+                detail={"code": "edit_required", "version": version,
+                        "reason": "invalid_timeline"}, origin="server")
+            return jsonify({
+                "error": ("This timeline has no renderable footage yet. Add "
+                          "at least one clip or image before exporting."),
+                "code": "edit_required",
+                "detail": preflight_error,
+            }), 409
         meta = (original or {}).get("meta") or {}
         if meta.get("upload_state") == "pending":
             pct = int(round(float(meta.get("upload_progress") or 0) * 100))

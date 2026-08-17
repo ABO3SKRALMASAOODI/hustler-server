@@ -186,6 +186,34 @@ def _lane_state(edl: Dict[str, Any], lane: str,
     raise KeyError(lane)
 
 
+def _audio_mix_preserved(previous: Dict[str, Any], proposed: Dict[str, Any],
+                         timeline_changed: bool) -> bool:
+    """Preserve authored sound without making picture deletion impossible.
+
+    An inserted video's own audio is structurally attached to that picture.
+    Removing the insert therefore removes its sound too; treating that as an
+    audio-mix violation made unwanted tray clips undeletable. Surviving insert
+    mute choices must remain exact, and a newly added insert may enter only
+    muted while the user has frozen the mix.
+    """
+    before = _lane_state(previous, "audio_mix", timeline_changed)
+    after = _lane_state(proposed, "audio_mix", timeline_changed)
+    before_inserts = {str(row.get("id")): bool(row.get("mute"))
+                      for row in before.pop("insert_audio", [])
+                      if row.get("id") is not None}
+    after_inserts = {str(row.get("id")): bool(row.get("mute"))
+                     for row in after.pop("insert_audio", [])
+                     if row.get("id") is not None}
+    if _canon(before) != _canon(after):
+        return False
+    for insert_id in set(before_inserts) & set(after_inserts):
+        if before_inserts[insert_id] != after_inserts[insert_id]:
+            return False
+    # Removing picture is allowed. Adding a new audible source is not.
+    return all(after_inserts[insert_id]
+               for insert_id in set(after_inserts) - set(before_inserts))
+
+
 def preservation_violations(previous: Dict[str, Any],
                             proposed: Dict[str, Any],
                             user_message: str = "") -> List[str]:
@@ -197,6 +225,11 @@ def preservation_violations(previous: Dict[str, Any],
         _program_structure(proposed)
     violations = []
     for lane in sorted(protected):
+        if lane == "audio_mix":
+            if not _audio_mix_preserved(previous, proposed,
+                                        timeline_changed):
+                violations.append(LANE_LABELS[lane])
+            continue
         before = _lane_state(previous, lane, timeline_changed)
         after = _lane_state(proposed, lane, timeline_changed)
         if _canon(before) != _canon(after):

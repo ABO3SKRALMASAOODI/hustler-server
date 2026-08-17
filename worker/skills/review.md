@@ -11,6 +11,7 @@ SCREEN IN THIS ORDER — each item is a question with a yes/no answer:
 6. THE END: last word/beat lands and stops clean — no tail silence, no mid-bar music stop, no fade on a reel?
 7. THE WHOLE (the 3x3 sheet): does it read as ONE video — consistent grade, inserts color-matched, no scene obviously rawer than the rest?
 8. THE BRIEF: reread the user's message once. Every named item delivered or honestly reported? Anything they forbade present anyway?
+9. MOTIVATION AUDIT: for every zoom, transition and SFX, can you point to the exact visible, spoken, musical or narrative event it serves? Remove any orphan rather than defending it as generic polish. An intentional omission is complete work, not a missing layer.
 
 TASTE AND AUDIO FINDINGS ARE ADVISORY EVIDENCE: fix, keep, override, or investigate them according to your judgment. Summarize material uncertainty honestly without treating a reviewer as a veto.
 

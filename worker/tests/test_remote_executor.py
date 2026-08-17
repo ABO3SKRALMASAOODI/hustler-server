@@ -35,6 +35,8 @@ class _StubDb:
             return True
         if fn is dbx.finish_job:
             return True
+        if fn is dbx.finish_accounted_job:
+            return {"committed": True, "charged": 0.0}
         if fn is dbx.charge_turn_credits:
             return 1.0
         return None

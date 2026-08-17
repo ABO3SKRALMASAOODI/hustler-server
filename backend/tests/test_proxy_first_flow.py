@@ -276,6 +276,26 @@ def test_staged_clip_waits_for_tray_submit_before_indexing(env):
     assert env.enqueued == []
 
 
+def test_new_project_cannot_submit_only_reference_video_clips():
+    clips = [
+        {"id": 11, "kind": "video_clip"},
+        {"id": 12, "kind": "video_clip"},
+    ]
+    assert video._reference_only_tray_without_timeline(
+        None, clips, {11, 12}) is True
+
+
+def test_reference_clips_are_valid_beside_real_timeline_footage():
+    clips = [
+        {"id": 11, "kind": "video_clip"},
+        {"id": 12, "kind": "video_clip"},
+    ]
+    assert video._reference_only_tray_without_timeline(
+        None, clips, {12}) is False
+    assert video._reference_only_tray_without_timeline(
+        {"id": 90}, clips, {11, 12}) is False
+
+
 # ── the original landing ────────────────────────────────────────────────────
 
 def _pending_asset(cur, duration=355.0):

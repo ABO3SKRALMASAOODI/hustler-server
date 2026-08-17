@@ -97,22 +97,16 @@ def test_render_preview_schema_reserves_complete_for_readiness():
     assert "complete" not in schema["function"]["parameters"]["required"]
 
 
-def test_agent_turn_revision_ceiling_stops_a_productive_write_loop():
-    """Project 926 wrote 30 color variants because every bad preview counted
-    as progress. The next write must stop before it can create version 31."""
-    ctx = SimpleNamespace(
-        versions_written=list(range(config.AGENT_MAX_EDL_WRITES)),
-        editing_metrics={},
-    )
-    result = agent_tools.execute(ctx, "set_color_grade", {"preset": "warm"})
-    assert result.startswith("REJECTED:")
-    assert "revision ceiling" in result
-    assert ctx.editing_metrics["revision_budget_stops"] == 1
+def test_agent_has_no_fixed_edl_revision_ceiling():
+    """Correct repairs are governed by semantic/cost evidence, not count."""
+    source = (WORKER / "agent_tools.py").read_text()
+    assert not hasattr(config, "AGENT_MAX_EDL_WRITES")
+    assert "revision_budget_stops" not in source
+    assert "revision ceiling" not in source
 
 
-def test_agent_absolute_turn_wall_is_ten_minutes_or_less():
-    assert 180 <= config.AGENT_TURN_TOTAL_TIMEOUT_S <= 600
-    assert 3 <= config.AGENT_MAX_EDL_WRITES <= 10
+def test_agent_technical_backstop_leaves_room_for_complex_edits():
+    assert 600 < config.AGENT_TURN_TOTAL_TIMEOUT_S <= 3000
 
 
 def test_preview_check_routes_to_right_sized_service(monkeypatch):

@@ -447,3 +447,17 @@ def test_speculative_preview_only_enqueues_changed_section_proof(monkeypatch):
     assert Ctx.spec_preview_check_jobs == {4: 77}
     assert Ctx.spec_enqueued == {4}
     assert Ctx.db.calls == [agent_tools.dbx.get_or_enqueue_preview_check_job]
+
+
+def test_provider_capacity_wait_does_not_spend_editing_or_finalize_clocks():
+    start, turn, deadline = agent_loop._shift_turn_clocks_for_provider_wait(
+        100.0, 80.0, 680.0, 137.5)
+
+    assert start == 237.5
+    assert turn == 217.5
+    assert deadline == 817.5
+
+
+def test_negative_provider_wait_cannot_move_clocks_backwards():
+    assert agent_loop._shift_turn_clocks_for_provider_wait(
+        100.0, 80.0, 680.0, -10.0) == (100.0, 80.0, 680.0)

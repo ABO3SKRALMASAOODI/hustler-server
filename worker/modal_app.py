@@ -158,6 +158,15 @@ def batch(job):
     return _run(job, "batch")
 
 
+@app.function(
+    name="final", cpu=BATCH_CPU, memory=BATCH_MEMORY,
+    **{**US_COMMON, "timeout": int(os.getenv("MODAL_FINAL_TIMEOUT_S", "21600"))}
+)
+def final(job):
+    """Long exports have their own autoscaling queue and execution envelope."""
+    return _run(job, "final")
+
+
 @app.function(name="index", cpu=BATCH_CPU, memory=INDEX_MEMORY, **US_COMMON)
 def index(job):
     """Reserve for local-Whisper spikes without paying the old 8-GiB floor."""
@@ -194,6 +203,14 @@ def batch_eu(job):
     return _run(job, "batch-eu")
 
 
+@app.function(
+    name="final_eu", cpu=BATCH_CPU, memory=BATCH_MEMORY,
+    **{**EU_COMMON, "timeout": int(os.getenv("MODAL_FINAL_TIMEOUT_S", "21600"))}
+)
+def final_eu(job):
+    return _run(job, "final-eu")
+
+
 @app.function(name="index_eu", cpu=BATCH_CPU, memory=INDEX_MEMORY,
               **EU_COMMON)
 def index_eu(job):
@@ -220,7 +237,9 @@ def probe(job):
 @app.function(
     name="agent", image=agent_image, secrets=[secret], region="us",
     routing_region="us-east", min_containers=0, max_containers=5,
-    scaledown_window=30, retries=0, timeout=3600, startup_timeout=300,
+    scaledown_window=30, retries=0,
+    timeout=int(os.getenv("MODAL_AGENT_TIMEOUT_S", "21600")),
+    startup_timeout=300,
     cpu=(0.125, 1.0), memory=AGENT_MEMORY,
 )
 # Agent turns spend most of their wall time waiting on the model, database, or

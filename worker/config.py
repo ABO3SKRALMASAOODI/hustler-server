@@ -1244,20 +1244,16 @@ AGENT_REPLY_MAX_TOKENS = int(os.getenv("AGENT_REPLY_MAX_TOKENS", "4000"))
 # before detecting an actually stuck turn.
 AGENT_TURN_TIMEOUT_S = min(
     420.0, float(os.getenv("AGENT_TURN_TIMEOUT_S", "420")))
-# Absolute lifetime of one user turn, including productive continuations.
-# Production project 926 proved that a stream of tiny grade writes/previews
-# can remain "productive" for 17+ minutes while getting farther from the
-# user's simple request. Ten minutes is the product ceiling; a synchronous
-# tool already in flight may finish just beyond it, but cannot start another
-# model/tool cycle.
+# Active-editing backstop for one user turn. The cost budget, no-progress
+# window, exact-call idempotency, repeated-state evidence and finishing
+# checkpoint are the primary loop controls. Ten minutes was too short for
+# legitimate multi-asset edits and stopped them mid-treatment; this value now
+# sits below the durable Modal function/dispatcher envelope and is technical
+# crash containment rather than an editorial/revision quota. Fleet/provider
+# capacity sleeps are recorded as wall latency but excluded from this clock.
 AGENT_TURN_TOTAL_TIMEOUT_S = min(
-    600.0, max(180.0, float(os.getenv("AGENT_TURN_TOTAL_TIMEOUT_S", "600"))))
-# A turn is an iteration on one request, not an unbounded editing session.
-# Eight committed versions is already far above the recent-user median and
-# enough for a broad multi-department edit plus repairs. Further revisions
-# wait for a fresh user instruction so a critic loop cannot spend forever.
-AGENT_MAX_EDL_WRITES = min(
-    10, max(3, int(os.getenv("AGENT_MAX_EDL_WRITES", "8"))))
+    3000.0,
+    max(600.0, float(os.getenv("AGENT_TURN_TOTAL_TIMEOUT_S", "3000"))))
 # Fresh turns yield while the fleet's last-60s token burn is above this —
 # leave room for the next ~50K first call under the org's 200K TPM tier.
 AGENT_TPM_SOFT_CAP = int(os.getenv("AGENT_TPM_SOFT_CAP", "140000"))
@@ -1648,7 +1644,7 @@ GFX_SHAPING_VERSION = 1
 # on EDL VERSION rather than content, so without this stamp she would keep
 # being served the broken file forever. Bump if junction selection changes
 # again.
-TRANSITION_VERSION = 2
+TRANSITION_VERSION = 3  # v3: zoom_punch no longer tmix-blends across concat
 
 # Manual music remains editable past the last scene, but rendered media always
 # stops at the picture/program boundary.  v1 extended overhanging music across
@@ -1737,9 +1733,31 @@ WATERMARK_OPACITY = float(os.getenv("WATERMARK_OPACITY", "0.92"))
 # MUST stay below the platform's own request timeout, or it is dead code: at
 # 5400 it sat ABOVE Cloud Run's 3600s, so Cloud Run always killed the request
 # first and this cap never once fired. That cost an hour of a pinned slot with
-# no honest error anywhere — the job just stopped existing. Keep it under
-# `gcloud run services describe valmera-executor --format='value(spec.template.spec.timeoutSeconds)'`.
+# no honest error anywhere — the job just stopped existing. Interactive and
+# Cloud Run paths keep this sub-hour cap; durable Modal finals receive a
+# duration-aware timeout below.
 FFMPEG_TIMEOUT_S = int(os.getenv("FFMPEG_TIMEOUT_S", "3000"))
+# Finals run as durable Modal Function calls, whose official execution limit
+# can extend to 24 hours. Size their healthy wall-clock from authored output
+# duration rather than forcing every legitimate long programme through the
+# interactive 3000s ffmpeg cap. The stall/runaway/lease watchdogs still kill
+# broken graphs quickly. Cloud Run fallback remains bound by its own 3600s
+# platform request and is not the production final path.
+FINAL_FFMPEG_TIMEOUT_MAX_S = int(os.getenv(
+    "FINAL_FFMPEG_TIMEOUT_MAX_S", "20000"))
+MODAL_FINAL_TIMEOUT_S = int(os.getenv("MODAL_FINAL_TIMEOUT_S", "21600"))
+MODAL_AGENT_TIMEOUT_S = int(os.getenv("MODAL_AGENT_TIMEOUT_S", "21600"))
+
+
+def modal_timeout_for(job_type):
+    """Execution envelope for durable Modal calls (not Cloud Run HTTP)."""
+    if job_type == "final":
+        return MODAL_FINAL_TIMEOUT_S
+    if job_type == "agent_turn":
+        return MODAL_AGENT_TIMEOUT_S
+    return EXECUTOR_REQUEST_TIMEOUT_S
+
+
 # A stalled encode stops emitting -progress lines but keeps its stdout pipe
 # open, so the progress reader would block forever (this once froze the only
 # media slot for hours). Kill an encode that goes this long with no progress,

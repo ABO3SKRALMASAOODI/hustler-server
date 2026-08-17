@@ -18123,12 +18123,6 @@ def read_skill(ctx, name):
         return (f"SKILL ALREADY LOADED — '{skill_key}' was returned earlier "
                 "in this turn and remains in the conversation. Apply it; do "
                 "not load it again unless a later turn starts.")
-    if len(skills) >= 4:
-        _metric(ctx, "skill_load_budget_rejections")
-        return ("SKILL BUDGET REACHED — four focused playbooks are already "
-                "loaded in this turn. They remain in context. Stop reading "
-                "more handbooks; record the blueprint and execute the edit "
-                "with the evidence and craft rules you have.")
     text = agent_prompt.read_skill_text(name)
     if text is None:
         names = ", ".join(agent_prompt.skill_names()) or "(none installed)"
@@ -18354,24 +18348,22 @@ def expand_toolset(ctx, domains):
         return ("REJECTED: unknown tool domain(s): " + ", ".join(bad)
                 + ". Available: " + ", ".join(sorted(TOOL_DOMAIN_NAMES))
                 + ".")
-    # This is a one-dispatch escape hatch, not a permanent union. Persisting
-    # every requested domain made a broad turn grow from ~30 to 116 schemas
-    # and resend that catalog for the rest of the job. One active department
-    # plus the cross-domain atomic recipe is enough to make forward progress;
-    # later plan steps naturally route the next department.
-    active = requested[:1]
+    # This is a one-dispatch escape hatch, not a permanent union. Load every
+    # domain the editor asked for in this call: silently taking only the first
+    # made a correct cross-department plan require extra reasoning round trips
+    # and could strand later work at the turn clock. The loop consumes the set
+    # after constructing the next schema dispatch, so the larger catalog is
+    # paid for once rather than resent forever.
+    active = requested
     before = set(getattr(ctx, "_expanded_tool_domains", None) or set())
     ctx._expanded_tool_domains = set(active)
     if set(active) == before:
         return ("NO CHANGE — that tool domain is already exposed for the "
                 "next step: " + ", ".join(active) + ".")
-    names = sorted(TOOL_DOMAINS[active[0]])
-    deferred = (" Only the first requested domain is loaded now; finish that "
-                "plan step before loading " + ", ".join(requested[1:]) + "."
-                if len(requested) > 1 else "")
+    names = sorted(set().union(*(TOOL_DOMAINS[name] for name in active)))
     return ("Tool domain exposed for the next step: "
             + ", ".join(active) + ". Available functions include: "
-            + ", ".join(names) + ". Continue the edit now." + deferred)
+            + ", ".join(names) + ". Continue the edit now.")
 
 
 def set_edit_plan(ctx, steps, brief=None, treatment=None, format=None,
@@ -18817,6 +18809,40 @@ def _normalize_tool_call(name, args):
         args.pop("focus_x", None)
         args.pop("focus_y", None)
         notes.append("set_frame(mode=auto) -> auto_reframe")
+    if name == "set_caption_style":
+        # The direct tool schema deliberately nests visual properties under
+        # ``style`` while keeping emphasis_words/motion_motif at the top.
+        # Recipe args used to be an untyped object, so the model repeatedly
+        # flattened preset/font/position and lost an entire atomic batch.  A
+        # flattened style key has exactly one destination; preserve an
+        # explicitly nested value when both spellings are present.
+        flattened = {key: args.pop(key) for key in tuple(args)
+                     if key in _STYLE_PROPS}
+        if flattened:
+            nested = dict(flattened)
+            nested.update(args.get("style") or {})
+            args["style"] = nested
+            notes.append("caption style fields nested under style")
+    if name == "set_master_loudness" and "enabled" not in args:
+        # Calling the setter without a boolean can only mean enabling it;
+        # disabling is always explicit. This was a common recipe-only reject.
+        args["enabled"] = True
+        notes.append("set_master_loudness enabled -> true")
+    if name == "set_color_grade":
+        # ``brightness`` is not a preset and has one precise continuous-grade
+        # equivalent. Do not guess when a real preset is also present; the two
+        # effects compose and should remain two explicit operations.
+        preset = str(args.get("preset") or "").strip().lower()
+        axes = {"exposure", "contrast", "saturation", "temperature", "tint",
+                "shadows", "highlights"}
+        if "brightness" in args and "exposure" not in args:
+            args["exposure"] = args.pop("brightness")
+            notes.append("brightness -> exposure")
+        custom = axes.intersection(args)
+        if custom and not preset:
+            name = "set_grade_custom"
+            args.pop("preset", None)
+            notes.append("continuous grade fields -> set_grade_custom")
     if name == "add_text":
         # An authored keyframe curve owns all animation. Models frequently
         # repeat a named entrance/exit from the brief alongside that curve;
@@ -23251,16 +23277,17 @@ def compact_tool_names(ctx):
     states = plan.get("step_states") or []
     open_tasks = [str(row.get("task") or "") for row in states
                   if row.get("status") == "pending"]
-    # Route one plan step, not the union of an entire broad request. The core
-    # atomic recipe remains available for coherent cross-department commits.
-    text = (open_tasks[0] if open_tasks
-            else str(getattr(ctx, "user_message", "") or ""))
-    matches = []
-    for order, (name, pattern) in enumerate(_DOMAIN_HINTS.items()):
-        match = re.search(pattern, text, re.I)
-        if match:
-            matches.append((match.start(), order, name))
-    domains = {min(matches)[2]} if matches else set()
+    # Route every domain implied by the still-open treatment. Choosing only
+    # the first matching task made later promised departments disappear until
+    # the model spent another call on expand_toolset. Routing still saves the
+    # unrelated catalog, but it is never an operation or department limit.
+    texts = (open_tasks or
+             [str(getattr(ctx, "user_message", "") or "")])
+    domains = set()
+    for text in texts:
+        for name, pattern in _DOMAIN_HINTS.items():
+            if re.search(pattern, text, re.I):
+                domains.add(name)
     # A vague request can become specific only after set_edit_plan inspects
     # the evidence ("make it great" -> authored captions/music/B-roll/motion).
     # Routing from the original user words/open-step nouns alone hid those
@@ -23271,15 +23298,13 @@ def compact_tool_names(ctx):
         "captions": "captions", "motion": "motion", "broll": "media",
         "music": "audio", "sfx": "audio", "color": "motion",
     }
-    if not domains:
-        for department in ("captions", "motion", "broll", "music", "sfx",
-                           "color"):
-            row = (plan.get("department_plan") or {}).get(department)
-            if isinstance(row, dict) and row.get("mode") == "author":
-                domain = department_domains.get(department)
-                if domain:
-                    domains.add(domain)
-                    break
+    for department in ("captions", "motion", "broll", "music", "sfx",
+                       "color"):
+        row = (plan.get("department_plan") or {}).get(department)
+        if isinstance(row, dict) and row.get("mode") == "author":
+            domain = department_domains.get(department)
+            if domain:
+                domains.add(domain)
     family = str(plan.get("editorial_family") or "")
     if family == "product_demo_explainer" and not domains:
         domains.add("screen")
@@ -23293,6 +23318,12 @@ def compact_tool_names(ctx):
         domains.add("story")
     for domain in domains:
         names.update(TOOL_DOMAINS.get(domain, set()))
+    # Atomic recipes are a transaction mechanism, not a reduced capability
+    # surface. Keep every transaction-safe operation's exact top-level schema
+    # beside the recipe on every post-plan dispatch. This costs schema tokens,
+    # but prevents the recipe from taking tools away or forcing the model to
+    # guess a hidden argument dialect.
+    names.update(RECIPE_TOOLS)
     return {name for name in names if name in TOOLS}
 
 
@@ -23538,6 +23569,14 @@ def openai_tools(model=None, compact=False, names=None):
     (a provider that has refused audio parts) can hide a tool the same way an
     unconfigured service does. Omitted by MCP and the tests, where the
     deployment-wide answer is the right one."""
+    # The atomic recipe is useful only when its operation dialects are present.
+    # Any caller that selects it therefore receives every transaction-safe
+    # operation's exact schema too; a hand-built `names` set cannot
+    # accidentally turn the recipe into a capability restriction.
+    if names is not None:
+        names = set(names)
+        if "apply_edit_recipe" in names:
+            names.update(RECIPE_TOOLS)
     out = []
     edits = llm.image_edit_available()
     # When THIS model reads frames itself (direct sight), look_at's `question`
@@ -23555,6 +23594,19 @@ def openai_tools(model=None, compact=False, names=None):
             continue
         if sees and name in ("look_at", "look_at_asset"):
             props = {k: v for k, v in props.items() if k != "question"}
+        if name == "apply_edit_recipe":
+            # A recipe never narrows capability. compact_tool_names includes
+            # every transaction-safe operation's exact top-level schema, and
+            # this global enum remains complete for MCP/full-catalog callers.
+            props = copy.deepcopy(props)
+            exposed = set(RECIPE_TOOLS)
+            op_props = props["operations"]["items"]["properties"]
+            op_props["tool"]["enum"] = sorted(exposed)
+            op_props["args"]["description"] = (
+                "Copy this operation tool's exact top-level argument schema "
+                "from the same request. Preserve nested objects (for example "
+                "set_caption_style uses args.style); never invent or flatten "
+                "fields.")
         # HONEST-OFF AT THE ARGUMENT LEVEL (round 101). generate_image was
         # the fourth most-rejected tool — 61 calls in a week asking it to
         # restyle a frame or an upload against an image model that can only
@@ -23577,6 +23629,10 @@ def openai_tools(model=None, compact=False, names=None):
                     "ratio.")
         if compact:
             desc = _compact_description(desc)
+            if name == "apply_edit_recipe":
+                desc = ("Atomically stage any transaction-safe EDL tool; "
+                        "copy each tool's exact shown arguments and nested "
+                        "objects.")
         out.append({
             "type": "function",
             "function": {
@@ -23721,17 +23777,6 @@ def execute(ctx, name, args):
     before_edl = None
     outer_write = name in WRITE_TOOLS and not isinstance(ctx, _RecipeContext)
     if outer_write:
-        committed = len(getattr(ctx, "versions_written", None) or [])
-        if committed >= config.AGENT_MAX_EDL_WRITES:
-            _metric(ctx, "revision_budget_stops")
-            return (
-                "REJECTED: this turn has already committed "
-                f"{committed} EDL revisions, reaching the safe revision "
-                "ceiling. Do not make another variation or call another "
-                "write tool. Render/inspect the current version if it has "
-                "not been checked, then finish honestly as partial if any "
-                "requested detail remains. A fresh user turn can continue "
-                "from the saved edit.")
         if finishing_checkpoint(ctx):
             state = director.status(getattr(ctx, "edit_plan", None))
             _metric(ctx, "post_pass_variations_prevented")

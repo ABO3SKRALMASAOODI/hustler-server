@@ -61,6 +61,23 @@ def _sleep_keeping_lease(worker_db, job_id, seconds, progress=5):
         time.sleep(min(15.0, left))
 
 
+def _shift_turn_clocks_for_provider_wait(t_start, turn_started,
+                                         turn_deadline, waited_s):
+    """Exclude provider-capacity sleeps from the user's editing clocks.
+
+    The inactivity and absolute limits exist to stop an editor that is
+    spending time without finishing the request.  A fleet TPM reservation or
+    a provider 429 is not editing time: no model or tool is running.  Counting
+    those sleeps killed healthy turns after only a few minutes of actual work
+    during bursts.  Wall-clock telemetry remains untouched; only the two
+    safety clocks (and the derived finalization deadline) move forward.
+    """
+    waited = max(0.0, float(waited_s or 0.0))
+    return (float(t_start) + waited,
+            float(turn_started) + waited,
+            float(turn_deadline) + waited)
+
+
 def _silence_line(index):
     sil = [s for s in index.get("silences", []) if s[1] - s[0] >= 0.7]
     return (f"SILENCES >=0.7s: {len(sil)}, "
@@ -3063,6 +3080,8 @@ def _turn_completion(ctx, status="replied", fail_note=None, truncated=False):
         and not bool(isinstance(preview, dict) and preview.get("cached"))
     has_edit_deliverable = bool(ctx.versions_written or rendered_now)
     has_value = bool(has_edit_deliverable or _turn_has_asset_progress(ctx))
+    blank_canvas_no_value = (
+        not has_value and getattr(ctx, "has_main_video", True) is False)
     kinds = [row.get("kind") for row in ctx.turn_tool_outcomes]
     failed = "failed" in kinds
     refused = "refused" in kinds
@@ -3074,7 +3093,7 @@ def _turn_completion(ctx, status="replied", fail_note=None, truncated=False):
 
     if not has_value and (failed or status in {"timeout", "shutdown"}):
         outcome = "internal_error"
-    elif not has_value and (refused or attempted_edit
+    elif not has_value and (blank_canvas_no_value or refused or attempted_edit
                             or status in {"budget", "awaiting_user"}):
         outcome = "blocked"
     elif has_value and (status != "replied" or fail_note or failed):
@@ -3093,7 +3112,8 @@ def _turn_completion(ctx, status="replied", fail_note=None, truncated=False):
     billable = not (
         terminal_without_deliverable
         or (not has_value and (
-            attempted_edit or failed or refused or truncated
+            blank_canvas_no_value or attempted_edit or failed or refused
+            or truncated
             or status in {"timeout", "shutdown", "budget", "awaiting_user",
                           "no_index"}
         ))
@@ -3480,9 +3500,9 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
               attachment_note="", _cont=None):
     """Run a quality-driven tool-calling loop over the request.
 
-    There is no arbitrary preview or write quota. Shutdown, available credits,
-    shared provider capacity, an inactivity window, and an absolute turn wall
-    bound runaway work. Productive work refreshes only the inactivity window.
+    There is no arbitrary preview, write, skill, or operation quota. Shutdown,
+    available credits, shared provider capacity, semantic no-progress and a
+    provider-sized technical backstop bound runaway work.
     """
     # Resolved from the user's plan in run_agent_job. _build_messages and the
     # tool schemas are model-agnostic and do not change with it.
@@ -3568,6 +3588,22 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                           or user_message.get("id") or 0)
     timings = _cont.get("timings") or \
         {"llm_s": 0.0, "llm_calls": 0, "tools": {}}
+
+    def _account_provider_wait(waited_s):
+        """Record capacity latency without spending either editing clock."""
+        nonlocal t_start, turn_started, turn_deadline
+        waited = max(0.0, float(waited_s or 0.0))
+        if not waited:
+            return
+        t_start, turn_started, turn_deadline = \
+            _shift_turn_clocks_for_provider_wait(
+                t_start, turn_started, turn_deadline, waited)
+        timings["tpm_wait_s"] = round(
+            timings.get("tpm_wait_s", 0.0) + waited, 2)
+        ctx.editing_metrics["provider_wait_excluded_s"] = round(
+            ctx.editing_metrics.get("provider_wait_excluded_s", 0.0)
+            + waited, 2)
+
     honesty = _cont.get("honesty") or \
         {"false_claims": 0, "corrective_note": False}
     start_version = int(_cont.get("start_version")
@@ -3607,7 +3643,9 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                   f"60s (yield under {yield_line}) — pausing 20s before the "
                   "first call instead of joining the burst",
                   flush=True)
+            wait_started = time.monotonic()
             _sleep_keeping_lease(worker_db, job["id"], 20, progress=5)
+            _account_provider_wait(time.monotonic() - wait_started)
 
     while True:
         iteration = timings["llm_calls"]
@@ -3649,9 +3687,10 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                          > config.AGENT_TURN_TOTAL_TIMEOUT_S)
         if total_expired or \
                 time.monotonic() - t_start > config.AGENT_TURN_TIMEOUT_S:
-            # Productive work may refresh the INACTIVITY window, but never the
-            # absolute turn wall. Tool calls are synchronous, so a call already
-            # running is not killed halfway through; its result is preserved.
+            # Productive work refreshes the inactivity window. The total wall
+            # is only the durable execution-envelope backstop; tool calls are
+            # synchronous, so a call already running is not killed halfway
+            # through and its result is preserved.
             n_clock = _cont.get("clock", 0)
             progress_lists = (
                 "images_generated", "videos_generated", "urls_fetched",
@@ -3664,9 +3703,8 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 getattr(ctx, "edit_plan", None) or {}).get("state")
             incomplete = plan_state in {
                 "in_progress", "needs_review", "needs_repair"}
-            if _progressed and not ctx.over_budget() and not total_expired \
-                    and not SHUTDOWN.is_set() and incomplete \
-                    and n_clock < 1:
+            if (_progressed and not ctx.over_budget() and not total_expired
+                    and not SHUTDOWN.is_set() and incomplete):
                 print(f"[job {job['id']}] semantic progress window spent after "
                       f"{total_steps} step(s), but work is still landing — "
                       f"refreshing it (refresh {n_clock + 1})", flush=True)
@@ -3850,7 +3888,6 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         # from simultaneously opening prompts that exceed the org TPM tier.
         estimate = _agent_request_token_estimate(messages, tools, max_tokens)
         capacity_expired = False
-        capacity_waited = 0.0
         reservation_id = (f"{job['id']}:{iteration}:"
                           f"{uuid.uuid4().hex[:10]}")
         while True:
@@ -3877,11 +3914,10 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             print(f"[agent {job['id']}] reserving {estimate} TPM tokens "
                   f"would exceed the fleet soft cap — waiting {nap:.1f}s",
                   flush=True)
-            time.sleep(nap)
-            capacity_waited += nap
-        if capacity_waited:
-            timings["tpm_wait_s"] = round(
-                timings.get("tpm_wait_s", 0.0) + capacity_waited, 2)
+            wait_started = time.monotonic()
+            _sleep_keeping_lease(
+                worker_db, job["id"], nap, progress=progress)
+            _account_provider_wait(time.monotonic() - wait_started)
         if capacity_expired:
             continue
         t0 = time.monotonic()
@@ -3932,7 +3968,9 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                       f"({_rl_waits}/20) — waiting {wait:.0f}s and retrying "
                       "instead of failing the turn",
                       flush=True)
+                wait_started = time.monotonic()
                 _sleep_keeping_lease(worker_db, job["id"], wait, progress)
+                _account_provider_wait(time.monotonic() - wait_started)
                 return True
 
             if llm.responses_available(model, config.OPENAI_BASE_URL):
@@ -3972,8 +4010,11 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                             print(f"[agent {job['id']}] transient responses "
                                   f"failure — retrying the same lane in "
                                   f"{retry_wait:.1f}s", flush=True)
+                            wait_started = time.monotonic()
                             _sleep_keeping_lease(
                                 worker_db, job["id"], retry_wait, progress)
+                            _account_provider_wait(
+                                time.monotonic() - wait_started)
                             continue
                         # Never duplicate a possibly accepted expensive call
                         # on chat/completions after a timeout/5xx.
@@ -4448,7 +4489,8 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 "content": (
                     f"[system: EXECUTION CHECKPOINT — {read_calls} read-only "
                     "tool calls have completed and no EDL write has landed. "
-                    "Do not reread the same evidence or load another skill. "
+                    "Do not reread the same evidence. Load another skill only "
+                    "when it materially informs the next concrete write. "
                     "If the current request is a concrete edit, the NEXT "
                     "step must record/finish the blueprint and perform the "
                     "first safe write (batch independent writes where useful), "
@@ -4461,9 +4503,10 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                   f"{read_calls} read-only tools and zero writes", flush=True)
 
         if _tool_schema_refresh_needed(ctx):
-            # Stage routing avoids resending 100+ schemas after every action.
-            # Every capability remains name-visible and expand_toolset can
-            # load any omitted domain; this changes context size, not power.
+            # Stage routing avoids resending unrelated schemas after every
+            # action. Every recipe operation remains present with its exact
+            # schema, and expand_toolset loads all requested extra domains in
+            # one dispatch; this changes context size, not power.
             names = agent_tools.compact_tool_names(ctx)
             tools = agent_tools.openai_tools(
                 model, compact=True, names=names)

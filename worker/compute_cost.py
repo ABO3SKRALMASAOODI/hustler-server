@@ -25,6 +25,7 @@ MODAL_US_MULTIPLIER = 1.5
 MODAL_PROFILES = {
     "preview": (2.0, 2, 4, 10),
     "batch": (4.0, 4, 16, 10),
+    "final": (4.0, 4, 16, 10),
     "index": (4.0, 4, 16, 10),
     "light": (4.0, 2, 32, 10),
     "heavy": (4.0, 16, 32, 10),

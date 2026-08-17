@@ -276,6 +276,7 @@ def test_compute_fleet_has_explicit_us_and_bounded_eu_envelopes():
     assert modal_app.US_COMMON["routing_region"] == "us-east"
     assert modal_app.EU_COMMON["routing_region"] == "us-east"
     assert remote._modal_function_name("preview") == "preview"
+    assert remote._modal_function_name("final") == "final"
     assert remote._modal_function_name("index") == "index"
     assert remote._modal_function_name("frames") == "light"
     assert remote._modal_function_name("capture") == "light"
@@ -283,6 +284,8 @@ def test_compute_fleet_has_explicit_us_and_bounded_eu_envelopes():
     assert remote._modal_function_name("fetch") == "egress"
     assert remote._modal_function_name("search") == "egress"
     assert remote._modal_function_name("clean") == "heavy"
+    assert config.MODAL_FINAL_TIMEOUT_S > config.EXECUTOR_REQUEST_TIMEOUT_S
+    assert config.MODAL_AGENT_TIMEOUT_S > config.EXECUTOR_REQUEST_TIMEOUT_S
 
 
 def test_eu_index_falls_back_to_us_then_legacy_batch_before_launch(

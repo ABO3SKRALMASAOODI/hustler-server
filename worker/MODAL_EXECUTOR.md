@@ -34,11 +34,12 @@ same call and never buys a duplicate render.
 | Function | Modal resources | Cloud Run equivalent |
 |---|---:|---:|
 | `preview` | 2 physical cores, 2→4 GiB | 4 vCPU, 8 GiB |
-| `batch` | 4 physical cores, 8→16 GiB | 8 vCPU, 16 GiB |
-| `light` | 4 physical cores, 8→32 GiB | heavy fallback previously used |
+| `batch` / `index` | 4 physical cores, 4→16 GiB | 8 vCPU, 16 GiB |
+| `final` | 4 physical cores, 4→16 GiB, 6h envelope | 8 vCPU, 16 GiB |
+| `light` | 4 physical cores, 2→32 GiB | heavy fallback previously used |
 | `heavy` | 4 physical cores, 16→32 GiB | 8 vCPU, 32 GiB |
-| `egress` | 4 physical cores, 8→32 GiB, US pinned | heavy fallback previously used |
-| `agent` | 0.125 reserved / 1 core limit, 1→2 GiB, concurrency 4 | 1 vCPU, 2 GiB, concurrency 4 |
+| `egress` | 4 physical cores, 2→32 GiB, US pinned | heavy fallback previously used |
+| `agent` | 0.125 reserved / 1 core limit, 1→2 GiB, concurrency 2, 6h envelope | 1 vCPU, 2 GiB |
 
 An arrow is Modal's memory request→hard limit. Billing uses the greater of the
 request or actual memory, while the old maximum remains available for an
@@ -52,10 +53,13 @@ tracking, matting, matching, cleanup, and stems retain `heavy`. Every completed
 or failed input logs one `[resources]` JSON record with cgroup-wide memory and
 CPU telemetry, including child ffmpeg/Chromium processes.
 
-All functions have zero minimum containers, at most five containers, no
-platform retries, and a 3600-second execution limit. The executor's existing
-fenced Postgres completion, progress, retry classification, and ffmpeg timeout
-logic are shared with Cloud Run through `executor_runtime.py`.
+All functions have zero minimum containers, at most five containers, and no
+platform retries. Interactive compute retains the 3600-second limit. Durable
+`final` and `agent` calls have a six-hour platform envelope; the editor still
+uses its cost/no-progress guards, while final FFmpeg time scales from authored
+program duration and retains the stall, runaway-output, and lease watchdogs.
+The executor's fenced Postgres completion, progress, and retry classification
+are shared with Cloud Run through `executor_runtime.py`.
 
 ## Rollback
 

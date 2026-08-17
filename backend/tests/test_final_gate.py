@@ -220,6 +220,16 @@ def test_the_probe_result_is_cached_not_queried_per_asset():
     assert len(calls) == 1
 
 
+def test_empty_canvas_is_blocked_before_a_final_render_job_is_spent():
+    empty = video.wschemas.canvas_edl()
+    assert "needs at least one insert" in video._export_edl_error(empty)
+
+
+def test_valid_main_timeline_passes_export_preflight():
+    edl = video.wschemas.default_edl(12.0)
+    assert video._export_edl_error(edl, 12.0) is None
+
+
 # ── the other two stamps still bite ─────────────────────────────────────────
 
 def test_a_stale_end_card_still_re_exports():

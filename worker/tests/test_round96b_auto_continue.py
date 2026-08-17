@@ -29,14 +29,14 @@ def test_real_external_boundaries_and_progress_refresh_remain():
     assert "SHUTDOWN.is_set()" in source
     assert "ctx.over_budget()" in source
     assert "AGENT_TURN_TIMEOUT_S" in source
-    assert "if _progressed and not ctx.over_budget()" in source
+    assert "_progressed and not ctx.over_budget()" in source
     assert "refreshing it" in source
     assert '"images_generated"' in source
     assert '"videos_generated"' in source
     assert '"assets0"' in source
     assert config.AGENT_TURN_TOTAL_TIMEOUT_S - config.AGENT_TURN_TIMEOUT_S \
-        in range(120, 241)
-    assert 'and n_clock < 1' in source
+        >= 120
+    assert 'and n_clock < 1' not in source
     assert '"start_version": start_version' in source
     assert 'say \\"continue\\"' not in source.lower()
     assert "tell me to continue" not in source.lower()

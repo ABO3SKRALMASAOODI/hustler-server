@@ -58,6 +58,7 @@ def run(cmd, timeout=None, progress_cb=None, expected_out_s=None,
         stall_s = config.FFMPEG_STALL_TIMEOUT_S
         last = [time.monotonic()]
         kill_reason = []
+        progress_state = {"out_s": 0.0, "speed": None}
         # How much output time is still explainable. Past this the graph is
         # producing video that the timeline says does not exist, which only
         # happens when something in it cannot end (a -loop input with no -t,
@@ -110,6 +111,7 @@ def run(cmd, timeout=None, progress_cb=None, expected_out_s=None,
                 if line.startswith("out_time_ms="):
                     try:
                         secs = int(line.split("=", 1)[1]) / 1_000_000.0
+                        progress_state["out_s"] = secs
                         # Check BEFORE clamping. The min(0.999, ...) below is
                         # what hid the watermark runaway for a full hour: it
                         # turned "this encode is 40x past the end of the video"
@@ -124,13 +126,22 @@ def run(cmd, timeout=None, progress_cb=None, expected_out_s=None,
                         progress_cb(min(0.999, secs / max(0.01, expected_out_s)))
                     except ValueError:
                         pass
+                elif line.startswith("speed="):
+                    progress_state["speed"] = line.split("=", 1)[1].strip()
                 elif line and not line.startswith(_noise):
                     tail.append(line)
             proc.wait()
         finally:
             wd.join(timeout=3)
         if kill_reason:
-            raise MediaError(f"ffmpeg killed: {kill_reason[0]}")
+            out_s = float(progress_state["out_s"] or 0.0)
+            progress = min(
+                100.0, out_s / max(0.01, expected_out_s) * 100.0)
+            speed = progress_state.get("speed") or "unknown"
+            raise MediaError(
+                f"ffmpeg killed: {kill_reason[0]}; last progress "
+                f"{out_s:.1f}/{expected_out_s:.1f}s ({progress:.1f}%), "
+                f"reported speed {speed}")
         if proc.returncode != 0:
             raise MediaError("ffmpeg failed: " + " | ".join(list(tail)[-12:]))
         return ""

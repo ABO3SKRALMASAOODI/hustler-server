@@ -133,6 +133,8 @@ def execute(job, runners):
               flush=True)
         decision = failure_policy.classify(exc, jtype)
         failure_timings = {"total_s": dt}
+        failure_timings.update(
+            dict(getattr(exc, "runner_timings", {}) or {}))
         failure_timings.update(measured_resources())
         compute_cost.annotate_request(
             failure_timings, dt, config.WORKER_ROLE,

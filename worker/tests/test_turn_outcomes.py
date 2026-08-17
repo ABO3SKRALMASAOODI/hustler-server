@@ -67,6 +67,13 @@ def test_read_only_analysis_answer_remains_billable():
     assert agent_loop._turn_completion(ctx) == ("fulfilled", True)
 
 
+def test_empty_canvas_answer_without_created_media_or_timeline_is_free():
+    ctx = _ctx(
+        has_main_video=False,
+        turn_tool_outcomes=[{"tool": "list_assets", "kind": "success"}])
+    assert agent_loop._turn_completion(ctx) == ("blocked", False)
+
+
 def test_cached_preview_is_not_current_turn_value():
     ctx = _ctx(
         last_preview={"url": "https://cached.example/preview.mp4",

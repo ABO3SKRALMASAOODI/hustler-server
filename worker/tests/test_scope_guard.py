@@ -75,6 +75,35 @@ def test_text_and_caption_guards_reject_creative_changes():
         == ["captions", "designed text overlays"]
 
 
+def test_preserved_audio_mix_does_not_make_deleted_picture_undeletable():
+    previous = default_edl(20.0)
+    previous["inserts"] = [
+        {"id": "ins1", "asset_key": "clips/unwanted.mp4", "kind": "video",
+         "at_output_s": 2.0, "duration_s": 5.0, "source_start_s": 0.0,
+         "mute": False},
+        {"id": "ins2", "asset_key": "clips/keeper.mp4", "kind": "video",
+         "at_output_s": 10.0, "duration_s": 3.0, "source_start_s": 0.0,
+         "mute": True},
+    ]
+    removed = {**previous, "inserts": [previous["inserts"][1]]}
+    assert scope_guard.preservation_violations(
+        previous, removed, "preserve the current audio mix") == []
+
+    unmuted = {**removed, "inserts": [
+        {**previous["inserts"][1], "mute": False}]}
+    assert scope_guard.preservation_violations(
+        previous, unmuted, "preserve the current audio mix") == [
+            "audio mix"]
+
+    added_audible = {**previous, "inserts": previous["inserts"] + [{
+        "id": "ins3", "asset_key": "clips/new.mp4", "kind": "video",
+        "at_output_s": 15.0, "duration_s": 2.0, "source_start_s": 0.0,
+        "mute": False}]}
+    assert scope_guard.preservation_violations(
+        previous, added_audible, "preserve the current audio mix") == [
+            "audio mix"]
+
+
 def test_text_timing_can_follow_a_real_cut_without_weakening_its_design():
     previous = default_edl(20.0)
     previous["texts"] = [{"id": "tx1", "text": "CHAPTER TWO",

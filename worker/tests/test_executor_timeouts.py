@@ -15,6 +15,7 @@ import os
 import re
 
 import config
+import renderer
 
 DOC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                    "DEPLOY_EXECUTOR.md")
@@ -65,6 +66,21 @@ def test_a_final_gets_room_for_an_hour_long_export():
     could not finish at all, and the refusal arrived only after the wait."""
     assert config.executor_timeout_for("final") >= 3000
     assert config.executor_timeout_for("index") >= 3000
+
+
+def test_modal_final_ffmpeg_budget_scales_with_authored_duration(monkeypatch):
+    monkeypatch.setenv("EXECUTOR_PROVIDER", "modal")
+    long_program = 4716.58
+    timeout = renderer._render_ffmpeg_timeout(False, long_program)
+    assert timeout == min(
+        config.FINAL_FFMPEG_TIMEOUT_MAX_S, int(long_program * 2 + 600))
+    assert timeout > config.FFMPEG_TIMEOUT_S
+    assert renderer._render_ffmpeg_timeout(True, long_program) == \
+        config.FFMPEG_TIMEOUT_S
+
+    monkeypatch.setenv("EXECUTOR_PROVIDER", "cloud_run")
+    assert renderer._render_ffmpeg_timeout(False, long_program) == \
+        config.FFMPEG_TIMEOUT_S
 
 
 def test_there_is_real_headroom_over_a_healthy_job():

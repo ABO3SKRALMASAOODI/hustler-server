@@ -40,7 +40,15 @@ def test_sampler_captures_child_peak_when_kernel_has_no_peak_file(tmp_path):
     current.write_text(str(2 * 1024 * 1024))
     sampler = resource_usage.MemorySampler(str(tmp_path), interval_s=0.01)
     current.write_text(str(11 * 1024 * 1024))
-    time.sleep(0.12)
+    # Under the full CPU-heavy worker suite the sampler thread can be starved
+    # for longer than an arbitrary 120 ms. Wait for the behavior this test is
+    # asserting (the background sampler observed the peak), with a real upper
+    # bound so a broken sampler still fails promptly.
+    deadline = time.monotonic() + 2.0
+    while sampler._peak_bytes != 11 * 1024 * 1024 \
+            and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert sampler._peak_bytes == 11 * 1024 * 1024
     current.write_text(str(3 * 1024 * 1024))
     assert sampler.finish() == 11.0
     assert sampler.finish() == 11.0
@@ -86,3 +94,40 @@ def test_synchronous_tools_emit_cost_and_whole_container_telemetry(
     assert '"container_memory_sampled_peak_mib":700.0' in output
     assert '"compute_profile":"modal-light-4core-2-32g-global"' in output
     assert '"job_id":null' in output
+
+
+def test_executor_failure_preserves_runner_stage_timings(monkeypatch):
+    class FakeDb:
+        @staticmethod
+        def reset():
+            pass
+
+    monkeypatch.setattr(
+        executor_runtime, "LeasedDb", lambda *_args: FakeDb())
+    monkeypatch.setattr(
+        executor_runtime.resource_usage, "snapshot", lambda: {})
+    monkeypatch.setattr(
+        executor_runtime.resource_usage, "usage_since", lambda _start: {})
+
+    class Sampler:
+        @staticmethod
+        def finish():
+            return None
+
+    monkeypatch.setattr(
+        executor_runtime.resource_usage, "MemorySampler", Sampler)
+
+    def fail(_db, _job):
+        error = RuntimeError("synthetic encode failure")
+        error.runner_timings = {
+            "download_s": 12.5, "encode_s": 3000.1,
+            "failed_stage": "encode_s"}
+        raise error
+
+    response = executor_runtime.execute(
+        {"id": None, "type": "final", "project_id": 9}, {"final": fail})
+
+    assert response["error"] == "synthetic encode failure"
+    assert response["timings"]["download_s"] == 12.5
+    assert response["timings"]["encode_s"] == 3000.1
+    assert response["timings"]["failed_stage"] == "encode_s"

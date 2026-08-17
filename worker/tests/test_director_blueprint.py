@@ -714,7 +714,7 @@ def test_wrong_beat_motion_prevents_wasteful_readiness_encode():
     assert ctx.editing_metrics["motion_contract_gaps"] == 1
 
 
-def test_authored_department_plan_routes_only_the_current_step_domain():
+def test_authored_department_plan_exposes_every_promised_department():
     ctx, _fake = _tool_ctx()
     ctx.user_message = "make it great"
     ctx.edit_plan = director.create_blueprint(
@@ -732,7 +732,7 @@ def test_authored_department_plan_routes_only_the_current_step_domain():
     assert "add_captions" in names
     for name in ("add_zoom", "research_broll", "research_music",
                  "search_sfx", "set_color_grade"):
-        assert name not in names
+        assert name in names
 
 
 def test_timed_sequence_beats_reject_invented_or_unrelated_evidence_ids():
@@ -998,13 +998,13 @@ def test_identical_skill_load_is_not_resent_into_the_same_context():
     assert second.startswith("SKILL ALREADY LOADED")
 
 
-def test_skill_loading_stops_after_four_playbooks():
+def test_skill_loading_allows_every_relevant_playbook():
     ctx, _fake = _tool_ctx()
     for name in ("captions", "audio", "cutting", "zooms"):
         assert len(agent_tools.read_skill(ctx, name)) > 100
-    refused = agent_tools.read_skill(ctx, "transitions")
-    assert refused.startswith("SKILL BUDGET REACHED")
-    assert len(ctx._skills_loaded) == 4
+    transitions = agent_tools.read_skill(ctx, "transitions")
+    assert len(transitions) > 100
+    assert len(ctx._skills_loaded) == 5
 
 
 def test_exact_additive_write_is_idempotent_across_unrelated_edl_changes():

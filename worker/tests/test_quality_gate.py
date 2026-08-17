@@ -794,6 +794,44 @@ def test_recipe_schema_is_exposed_to_the_agent_as_one_write_tool():
     assert "apply_edit_recipe" in agent_tools.WRITE_TOOLS
 
 
+def test_routed_recipe_keeps_every_transaction_safe_operation_available():
+    visible = {"apply_edit_recipe", "set_caption_style", "set_color_grade"}
+    tools = {t["function"]["name"]: t for t in agent_tools.openai_tools(
+        compact=True, names=visible)}
+    assert set(agent_tools.RECIPE_TOOLS) <= set(tools)
+    operation_names = tools["apply_edit_recipe"]["function"]["parameters"] \
+        ["properties"]["operations"]["items"]["properties"]["tool"]["enum"]
+
+    assert set(operation_names) == set(agent_tools.RECIPE_TOOLS)
+    args_help = tools["apply_edit_recipe"]["function"]["parameters"] \
+        ["properties"]["operations"]["items"]["properties"]["args"] \
+        ["description"]
+    assert "nested objects" in args_help
+
+
+def test_recipe_normalizes_unambiguous_flat_caption_and_audio_dialects():
+    name, args, notes = agent_tools._normalize_tool_call(
+        "set_caption_style", {"preset": "beast", "font": "Anton",
+                              "emphasis_words": ["NOW"]})
+    assert name == "set_caption_style"
+    assert args == {"style": {"preset": "beast", "font": "Anton"},
+                    "emphasis_words": ["NOW"]}
+    assert notes
+
+    name, args, notes = agent_tools._normalize_tool_call(
+        "set_master_loudness", {})
+    assert (name, args) == ("set_master_loudness", {"enabled": True})
+    assert notes
+
+
+def test_recipe_routes_brightness_without_a_preset_to_custom_grade():
+    name, args, notes = agent_tools._normalize_tool_call(
+        "set_color_grade", {"brightness": 0.08, "temperature": 0.1})
+    assert name == "set_grade_custom"
+    assert args == {"exposure": 0.08, "temperature": 0.1}
+    assert notes
+
+
 def test_severe_dimension_change_can_use_editor_chosen_center_crop():
     ctx, fake = _real_ctx("make this vertical")
     result = agent_tools.set_frame(ctx, "9:16", "crop")

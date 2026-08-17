@@ -130,7 +130,7 @@ def _modal_function_name(job_type, override=None):
     if job_type in ("preview", "preview_check", "filmstrip"):
         return "preview"
     if job_type == "final":
-        return "batch"
+        return "final"
     if job_type == "index":
         return "index"
     if job_type == "agent_turn":
@@ -512,7 +512,8 @@ def _modal_transport_error(exc):
 def _run_modal(job, function_override=None):
     base_name = _modal_function_name(job.get("type"), function_override)
     requested_name = (f"{base_name}_eu"
-                      if base_name in {"preview", "batch", "index", "light"}
+                      if base_name in {"preview", "batch", "final", "index",
+                                       "light"}
                       and _modal_eu_selected(job) else base_name)
     candidates = [requested_name]
     if requested_name.endswith("_eu"):
@@ -559,7 +560,7 @@ def _run_modal(job, function_override=None):
     # genuinely bad previews fail much earlier.
     deadline = time.monotonic() + max(
         config.executor_timeout_for(job.get("type")),
-        config.EXECUTOR_REQUEST_TIMEOUT_S) + 60
+        config.modal_timeout_for(job.get("type"))) + 60
     try:
         data = call.get(timeout=max(1, deadline - time.monotonic()))
     except TimeoutError as exc:

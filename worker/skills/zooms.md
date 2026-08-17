@@ -8,9 +8,14 @@ AIMING — a coordinate is a MEASUREMENT, never an impression:
 - Aim coordinates come only from UNZOOMED frames: a tile labeled as zoomed shows the magnified view's screen coordinates, not positions you can aim at.
 - To RETIME an existing zoom ("make it longer"): KEEP ITS AIM — copy rect (or cx/cy) from get_edl and change only start/end. Re-deriving a target you already had is how a correct zoom moves to the wrong place.
 
-GRAMMAR — gentle is the default:
+MOTIVATION COMES BEFORE GRAMMAR:
+- A zoom must answer "why does the camera move HERE?" with a named, evidenced event: a reveal that becomes visible, a face/subject that becomes important, a measured stressed word, a UI action the viewer must read, or an explicit user-requested beat. Bind its start/landing to that event and aim it from an unzoomed frame. A beat grid alone is cadence evidence, not permission to magnify an arbitrary picture.
+- No coverage targets and no polish quotas. Zero zooms is a finished professional choice when the footage, format, or user's restraint calls for a steady frame. Never add a zoom merely because the motion department exists, a minute has passed, or the edit feels "too simple."
+- Before delivery, name the event for every authored zoom. If one has no correlated visual/narrative action, remove it. Random camera motion is not harmless decoration; it competes with the story and makes intentional zooms weaker.
+
+GRAMMAR — gentle is the default after the move is motivated:
 - strength 0.08-0.18 (a push the viewer feels rather than sees), mode 'ease' or 'push_in'. A hard 'punch' above ~0.3 is a deliberate hype device for the single biggest peak or an explicit request — never the routine move.
-- 2-3 zooms a minute on the real turns of the argument; never on a filler word, never adjacent, never all the same size. One harder punch on the single peak reads as a hit; ten punches read as a nervous tic.
+- On longer talk-driven footage, 2-3 zooms a minute is an upper craft reference, never a minimum or a request to fill time. Use only the real turns of the argument; never on a filler word, never adjacent, never all the same size. One harder punch on the single peak reads as a hit; ten punches read as a nervous tic.
 
 TRAVELLING ZOOMS (add_zoom_path) — when the user asks a zoom to MOVE ("keep it, then move to my prompt, then the answer"): ONE add_zoom_path visiting each subject as a rect keyframe — never a chain of static zooms, never one wide zoom over everything.
 - Hold = the SAME keyframe repeated at the hold's start and end. THERE IS NO IMPLICIT HOLD: between two keyframes that disagree, the camera is IN MOTION the whole gap — to stay on a target, repeat its keyframe just before the next beat. The tool's DRIFT CHECK names any gap that glides — fix it, don't ship it.
