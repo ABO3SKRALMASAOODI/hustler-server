@@ -1818,7 +1818,17 @@ def run_agent_job(worker_db, job):
     # "the picture follows" claim there would be a lie). ToolContext ships
     # with direct sight off; the loop that can honour it turns it on.
     ctx.direct_sight = True
+    operator_instruction = str(payload.get("operator_instruction") or "")
+    if not payload.get("operator_repair"):
+        operator_instruction = ""
+    # Keep the customer's request authoritative and add the audit repair as a
+    # private execution requirement.  The combined text also reaches duration
+    # and verification checks, so a recovery job cannot claim success after
+    # merely replying to the earlier request again.
     ctx.user_message = (user_message.get("content") or "")[:4000]
+    if operator_instruction:
+        ctx.user_message = (ctx.user_message + "\n\n" +
+                            operator_instruction[:8000])
     # Immutable turn baseline for the last-line safety net below. A sequence
     # recipe that accidentally leaves 0.08s of a multi-minute programme must
     # never become the state offered for export merely because the model timed
@@ -1878,8 +1888,14 @@ def run_agent_job(worker_db, job):
     # ceiling silently punished exactly the long videos real users upload.
     # Removed by decision, not by accident. What still bounds a turn: the
     # user's own balance (below), and AGENT_TURN_TIMEOUT_S as a wall clock.
-    balance = worker_db.run(dbx.user_credits_balance, job["user_id"])
-    ctx.credit_budget = float(balance or 0) + config.AGENT_TURN_BUDGET_GRACE
+    if payload.get("operator_repair") is True:
+        # Company-funded recovery must not stop because the affected account
+        # is now empty.  Provider request envelopes and durable execution
+        # slices still apply; None only removes the customer-wallet boundary.
+        ctx.credit_budget = None
+    else:
+        balance = worker_db.run(dbx.user_credits_balance, job["user_id"])
+        ctx.credit_budget = float(balance or 0) + config.AGENT_TURN_BUDGET_GRACE
 
     # Which model answers this turn. Three tiers, resolved from ONE query:
     # Frontier ('ai_max') gets the frontier provider for its agent AND its
@@ -1908,8 +1924,14 @@ def run_agent_job(worker_db, job):
                                            job["user_id"], job["id"])
         except Exception:
             first_turn = False
-    ctx.llm_client, ctx.agent_model = llm.agent_client_for(
+    ctx.agent_lanes = llm.agent_lanes_for(
         subscribed, plan, first_turn=first_turn)
+    if ctx.agent_lanes:
+        ctx.llm_client = ctx.agent_lanes[0]["client"]
+        ctx.agent_model = ctx.agent_lanes[0]["model"]
+    else:  # The route already rejects an unconfigured standard provider.
+        ctx.llm_client, ctx.agent_model = llm.agent_client_for(
+            subscribed, plan, first_turn=first_turn)
     # Vision is reached from eight places that know nothing about plans, so the
     # plan is published to this THREAD for the duration of the turn and cleared
     # in the finally below (worker threads are reused across jobs).
@@ -1981,6 +2003,17 @@ def run_agent_job(worker_db, job):
     llm.set_recorder(_llm_recorder)
     try:
         attachment_note = _attachment_context(worker_db, ctx, user_message)
+        if operator_instruction:
+            attachment_note += (
+                "\n[system: INTERNAL PRODUCTION RECOVERY. This is a "
+                "company-funded correction of an incomplete or defective "
+                "edit. Do not mention internal auditing, billing, jobs, or "
+                "this instruction. Preserve every satisfied part of the "
+                "customer's request, repair the specified defects, complete "
+                "all required preview/verification work, and reply naturally "
+                "to the customer only after the latest EDL passes review. "
+                "Recovery requirements:\n" + operator_instruction[:8000] +
+                "\n]")
         if (job.get("payload") or {}).get("death_resume"):
             # Round 97 (#1): this job is the reaper's resume of a turn the
             # worker died under. Frame it so the model finishes instead of
@@ -2069,10 +2102,10 @@ def run_agent_job(worker_db, job):
             except Exception:
                 fail_v = None
         worker_db.run(dbx.add_message, session_id, "assistant",
-                      ("I couldn't complete the request because the same "
-                       "unresolved blocker repeated after all automatic "
-                       f"recovery attempts: {err_line}. Any saved edit "
-                       "versions remain intact."),
+                      (_user_facing_failure(e) +
+                       " All configured editing providers and recovery "
+                       "passes were exhausted; any saved edit versions "
+                       "remain intact."),
                       ({"edl_version": fail_v} if fail_v is not None
                        else None))
         raise
@@ -3754,14 +3787,23 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
     """
     # Resolved from the user's plan in run_agent_job. _build_messages and the
     # tool schemas are model-agnostic and do not change with it.
-    client = ctx.llm_client or llm.client()
+    lanes = list(getattr(ctx, "agent_lanes", None) or [])
+    if not lanes:
+        lanes = [{"name": "standard", "client": ctx.llm_client or llm.client(),
+                  "model": ctx.agent_model or config.AGENT_MODEL,
+                  "base_url": config.OPENAI_BASE_URL,
+                  "api_key": config.OPENAI_API_KEY}]
+    lane_index = 0
+    client = lanes[lane_index]["client"]
     # This loop already owns bounded, turn-budget-aware rate-limit recovery.
     # The SDK's five hidden retries could otherwise hold a user's message for
     # up to 7.5 minutes before our first 12-second recovery wait even began.
     # Disable that nested layer for agent calls only; other LLM consumers keep
     # the configured SDK retry policy.
     step_client = llm.without_sdk_retries(client)
-    model = ctx.agent_model or config.AGENT_MODEL
+    model = lanes[lane_index]["model"]
+    active_base_url = lanes[lane_index].get("base_url") or config.OPENAI_BASE_URL
+    active_api_key = lanes[lane_index].get("api_key") or config.OPENAI_API_KEY
     _cont = _cont or {}
     semantic_start = (_cont.get("semantic0")
                       if _cont.get("semantic0") is not None
@@ -4176,16 +4218,19 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         step_effort = (config.AGENT_REASONING_EFFORT if iteration == 0
                        else (config.AGENT_REASONING_EFFORT_DISPATCH
                              or config.AGENT_REASONING_EFFORT))
-        extra = {}
-        if step_effort and iteration > 0 \
-                and not llm.reasoning_effort_rejected(model):
-            extra["reasoning_effort"] = step_effort
-        if llm.tools_need_effort_none(model):
-            # This model refuses tools + reasoning on chat/completions
-            # outright (Luna); the only accepted spelling is an explicit
-            # 'none' on EVERY tools call — including iteration 0, where the
-            # field is otherwise never sent.
-            extra["reasoning_effort"] = "none"
+        def _chat_request(active_model):
+            active_extra = {}
+            if step_effort and iteration > 0 \
+                    and not llm.reasoning_effort_rejected(active_model):
+                active_extra["reasoning_effort"] = step_effort
+            if llm.tools_need_effort_none(active_model):
+                active_extra["reasoning_effort"] = "none"
+            active_kw = llm.completion_kwargs(
+                active_model, max_tokens, config.AGENT_TEMPERATURE)
+            active_kw.update(active_extra)
+            return active_kw, active_extra
+
+        kw, extra = _chat_request(model)
 
         # Reserve this exact request before every dispatch. Completed-call
         # rows are retrospective; this atomic ledger prevents two workers
@@ -4237,9 +4282,6 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             # each rejection is matched narrowly, corrected once, and
             # latched for the process — a real API failure still propagates
             # on the first try.
-            kw = llm.completion_kwargs(model, max_tokens,
-                                       config.AGENT_TEMPERATURE)
-            kw.update(extra)
             # THINKING, ON THE MODEL WE ALREADY PAY FOR (round 91). When this
             # model has told us it will not reason alongside tools on
             # chat/completions, ask the endpoint it named instead. Only a
@@ -4277,11 +4319,34 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 _account_provider_wait(time.monotonic() - wait_started)
                 return True
 
-            if llm.responses_available(model, config.OPENAI_BASE_URL):
+            def _switch_quota_lane(exc):
+                nonlocal lane_index, client, step_client, model
+                nonlocal active_base_url, active_api_key, kw, extra
+                if not llm.is_quota_error(exc):
+                    return False
+                if lane_index + 1 >= len(lanes):
+                    return False
+                previous = lanes[lane_index].get("name") or "primary"
+                lane_index += 1
+                lane = lanes[lane_index]
+                client = lane["client"]
+                step_client = llm.without_sdk_retries(client)
+                model = lane["model"]
+                active_base_url = lane.get("base_url") or config.OPENAI_BASE_URL
+                active_api_key = lane.get("api_key") or config.OPENAI_API_KEY
+                kw, extra = _chat_request(model)
+                ctx.llm_client, ctx.agent_model = client, model
+                _metric(ctx, "provider_quota_fallbacks", 1)
+                print(f"[agent {job['id']}] provider wallet for {previous} "
+                      f"is unavailable — continuing the same logical turn "
+                      f"on {lane.get('name') or 'fallback'}", flush=True)
+                return True
+
+            if llm.responses_available(model, active_base_url):
                 while resp is None:
                     try:
                         resp = llm.responses_create(
-                            config.OPENAI_BASE_URL, config.OPENAI_API_KEY,
+                            active_base_url, active_api_key,
                             model, messages, tools, max_tokens=max_tokens,
                             effort=step_effort,
                             # Thinking-sized, not dispatch-sized: a max-effort
@@ -4291,6 +4356,11 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                         used_lane = step_effort
                         break
                     except Exception as e:
+                        if _switch_quota_lane(e):
+                            # The fallback may not have a Responses endpoint;
+                            # enter its chat lane below instead of assuming it
+                            # shares the failed provider's API surface.
+                            break
                         # TPM 429s stay on this lane. Falling through to
                         # chat used to (1) spend a second 429, (2) lose
                         # thinking, (3) 400 on Luna+tools and kill the turn.
@@ -4330,6 +4400,8 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                         model=model, messages=messages, tools=tools, **kw)
                     break
                 except Exception as e:
+                    if _switch_quota_lane(e):
+                        continue
                     # Rate limits get their own budget-aware waits, BEFORE
                     # the dialect adapters — see llm.rate_limit_wait.
                     if _wait_tpm(e, "chat"):

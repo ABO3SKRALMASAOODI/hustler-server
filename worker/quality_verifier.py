@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 
 from schemas import program_duration
 from timeline import Timeline
@@ -21,6 +22,7 @@ VERIFICATION_VERSION = 1
 NON_JUSTIFIABLE_FINDINGS = {
     "complete_preview_missing", "caption_render_evidence_missing",
     "corrupt_glyph", "music_starts_after_program", "invalid_music_span",
+    "requested_duration_outside_target", "invisible_manual_caption",
 }
 
 
@@ -259,6 +261,54 @@ def _media_findings(edl):
     return findings
 
 
+def _cleanup_findings(edl):
+    findings = []
+    for patch in edl.get("patches") or []:
+        for region in patch.get("regions") or []:
+            try:
+                area = float(region.get("w") or 0) * float(region.get("h") or 0)
+            except (TypeError, ValueError):
+                continue
+            if area < .08:
+                continue
+            findings.append(_finding(
+                "destructive_cleanup_region", "cleanup",
+                (f"Cleanup region {region.get('id') or patch.get('id')} "
+                 f"reconstructs {area * 100:.1f}% of every covered frame; "
+                 "a region this large can replace the subject or scene."),
+                {"patch_id": patch.get("id"), "region": region,
+                 "frame_area_fraction": round(area, 4)},
+                ("remove or tightly remeasure the cleanup region, then inspect "
+                 "its full time span frame by frame")))
+    return findings
+
+
+def _caption_findings(edl):
+    captions = edl.get("captions")
+    if not isinstance(captions, list):
+        return []
+    timeline = Timeline(edl.get("keep") or [], edl.get("inserts") or [],
+                        edl.get("speed") or [])
+    findings = []
+    for index, item in enumerate(captions):
+        try:
+            visible = timeline.span_to_out(
+                float(item.get("start")), float(item.get("end")))
+        except (AttributeError, TypeError, ValueError):
+            visible = []
+        if visible:
+            continue
+        findings.append(_finding(
+            "invisible_manual_caption", "captions",
+            (f"Manual caption {index + 1} is entirely outside the kept "
+             "source ranges, so it compiles to no visible pixels."),
+            {"caption_index": index, "caption": item,
+             "kept_source_ranges": edl.get("keep") or []},
+            ("remove the phantom caption or remap its start/end to surviving "
+             "source seconds; use designed text for output-clock titles")))
+    return findings
+
+
 def _audio_findings(edl):
     findings = []
     duration = float(program_duration(edl) or 0.0)
@@ -306,20 +356,87 @@ def _audio_findings(edl):
     return findings
 
 
-def deterministic_findings(edl, index=None):
+_DURATION_RANGE_RE = re.compile(
+    r"\b(\d{1,4}(?:\.\d+)?)\s*(?:-|–|—|to)\s*"
+    r"(\d{1,4}(?:\.\d+)?)\s*(?:s|sec(?:ond)?s?)\b", re.I)
+_DURATION_TARGET_RES = (
+    re.compile(
+        r"\b(?:make|edit|cut|trim|shorten|turn)\b[^\n.!?]{0,90}?"
+        r"(?:video|reel|clip|short)?[^\n.!?]{0,40}?"
+        r"(?:to|of|about|around|roughly|approximately|like)?\s*"
+        r"(\d{1,4}(?:\.\d+)?)\s*(?:s|sec(?:ond)?s?)\b", re.I),
+    re.compile(
+        r"\b(\d{1,4}(?:\.\d+)?)\s*(?:s|sec(?:ond)?s?)\s*"
+        r"(?:video|reel|clip|short)\b", re.I),
+)
+
+
+def requested_duration_target(request_text):
+    """Return an explicit requested program-duration envelope, if present.
+
+    This intentionally ignores bare timestamps such as "at 18 seconds".  It
+    only recognizes a duration range or language that asks to make/cut a
+    video to a named length, so an effect placement does not become a false
+    whole-program constraint.
+    """
+    text = str(request_text or "")
+    ranges = list(_DURATION_RANGE_RE.finditer(text))
+    if ranges:
+        match = ranges[-1]
+        lo, hi = float(match.group(1)), float(match.group(2))
+        if 0.2 <= lo <= 86400 and 0.2 <= hi <= 86400:
+            return {"min_s": min(lo, hi), "max_s": max(lo, hi),
+                    "approximate": False, "request": match.group(0)}
+    matches = []
+    for pattern in _DURATION_TARGET_RES:
+        matches.extend(pattern.finditer(text))
+    if not matches:
+        return None
+    match = max(matches, key=lambda row: row.start())
+    target = float(match.group(1))
+    if not 0.2 <= target <= 86400:
+        return None
+    nearby = text[max(0, match.start() - 24):match.end() + 10].lower()
+    approximate = any(word in nearby for word in
+                      ("about", "around", "roughly", "approximately", "like"))
+    tolerance = max(1.5, target * 0.10) if approximate else max(0.35, target * .02)
+    return {"min_s": max(0.2, target - tolerance),
+            "max_s": target + tolerance, "target_s": target,
+            "approximate": approximate, "request": match.group(0)}
+
+
+def _request_findings(edl, request_text):
+    target = requested_duration_target(request_text)
+    if not target:
+        return []
+    actual = float(program_duration(edl) or 0.0)
+    if target["min_s"] - .02 <= actual <= target["max_s"] + .02:
+        return []
+    return [_finding(
+        "requested_duration_outside_target", "story",
+        (f"The program is {actual:.2f}s, outside the user's explicit "
+         f"duration target ({target['min_s']:.2f}-{target['max_s']:.2f}s)."),
+        {"actual_s": round(actual, 3), "target": target},
+        "rebuild the story to the requested duration and render-check it")]
+
+
+def deterministic_findings(edl, index=None, request_text=None):
     return (_text_corruption_findings(edl)
+            + _caption_findings(edl)
             + _zoom_findings(edl, index or {})
             + _reframe_findings(edl, index or {})
             + _media_findings(edl)
-            + _audio_findings(edl))
+            + _cleanup_findings(edl)
+            + _audio_findings(edl)
+            + _request_findings(edl, request_text))
 
 
 def build_verification_record(project_id, version, manifest, edl, index,
                               preview=None, proof_ranges=None,
                               visual_findings=None, audio_findings=None,
                               story_findings=None, repairs=None,
-                              justified=None):
-    findings = deterministic_findings(edl, index)
+                              justified=None, request_text=None):
+    findings = deterministic_findings(edl, index, request_text=request_text)
     for department, rows in (("visual_review", visual_findings or []),
                              ("audio_review", audio_findings or []),
                              ("story_review", story_findings or [])):
@@ -351,6 +468,18 @@ def build_verification_record(project_id, version, manifest, edl, index,
             "finding_id",
             "vf_" + hashlib.sha256(_canon(row).encode("utf-8")).hexdigest()[:16],
         )
+    # Independent critics can report the same concrete defect through more
+    # than one evidence path.  Keep one durable finding per stable ID so the
+    # agent repairs it once instead of spending continuation slices clearing
+    # duplicate copies of the same issue.
+    deduped = []
+    seen_finding_ids = set()
+    for row in findings:
+        if row["finding_id"] in seen_finding_ids:
+            continue
+        seen_finding_ids.add(row["finding_id"])
+        deduped.append(row)
+    findings = deduped
     justified_codes = {str(row.get("code")) for row in (justified or [])
                        if isinstance(row, dict)}
     justified_ids = {str(row.get("finding_id")) for row in (justified or [])

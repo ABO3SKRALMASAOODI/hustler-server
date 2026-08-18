@@ -3891,6 +3891,9 @@ def add_captions(ctx, mode=None, items=None, style=None,
         if not isinstance(items, list):
             return "REJECTED: items must be an array of {text,start,end}."
         norm = []
+        clock_repairs = []
+        tl = Timeline(edl.get("keep") or [], edl.get("inserts") or [],
+                      edl.get("speed") or [])
         for i, it in enumerate(items):
             if not isinstance(it, dict) or "text" not in it:
                 return f"REJECTED: items[{i}] must be {{text,start,end}}."
@@ -3898,10 +3901,42 @@ def add_captions(ctx, mode=None, items=None, style=None,
             if isinstance(item_style, str):
                 return f"REJECTED: items[{i}]: {item_style[5:]}"
             try:
+                raw_start = ctx.clamp(it.get("start", 0))
+                raw_end = ctx.clamp(it.get("end", 0))
                 item = {"text": str(it["text"]),
-                        "start": ctx.clamp(it.get("start", 0)),
-                        "end": ctx.clamp(it.get("end", 0)),
+                        "start": raw_start,
+                        "end": raw_end,
                         "style": item_style}
+                if raw_end <= raw_start:
+                    return (f"REJECTED: items[{i}] end must be after start "
+                            f"({raw_start:g}-{raw_end:g}s).")
+                # Manual captions are stored on the SOURCE clock. A common
+                # model error is to pass output seconds after a cut; those
+                # values validate numerically but compile to zero ASS events,
+                # creating a phantom caption layer that can never appear or
+                # produce QA pages. When the same span is valid on the output
+                # clock, repair it deterministically instead of committing an
+                # invisible layer or asking the user to understand clocks.
+                if not tl.span_to_out(raw_start, raw_end):
+                    mapped_start = (tl.out_to_src(raw_start)
+                                    if 0 <= raw_start <= tl.out_duration
+                                    else None)
+                    mapped_end = (tl.out_to_src(raw_end)
+                                  if 0 <= raw_end <= tl.out_duration
+                                  else None)
+                    if mapped_start is None or mapped_end is None \
+                            or mapped_end <= mapped_start:
+                        return (
+                            f"CORRECTION NEEDED: items[{i}] names source "
+                            f"{raw_start:g}-{raw_end:g}s, which is entirely "
+                            "cut from the current program and cannot render. "
+                            "Use source seconds that survive the EDL, or use "
+                            "add_text for an output-timeline title/card.")
+                    item["start"] = round(mapped_start, 3)
+                    item["end"] = round(mapped_end, 3)
+                    clock_repairs.append(
+                        f"item {i} output {raw_start:g}-{raw_end:g}s -> "
+                        f"source {mapped_start:.3f}-{mapped_end:.3f}s")
                 if motif and caplib.motion_enabled([item]):
                     item["motion_motif"] = motif
                 norm.append(item)
@@ -3915,6 +3950,9 @@ def add_captions(ctx, mode=None, items=None, style=None,
         result = ctx.write_edl(edl, f"{len(norm)} manual caption(s) set")
         if result.startswith("EDL v"):
             _trace_caption_state(ctx, norm, "manual_items")
+            if clock_repairs:
+                result += ("\nAUTO-CORRECTED CAPTION CLOCK: "
+                           + "; ".join(clock_repairs) + ".")
         return result
     if mode in (None, "", "from_transcript"):
         mw = None
@@ -17344,7 +17382,8 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None):
                               or {}).get(version) or [],
                 visual_findings=visual_record_findings,
                 audio_findings=audio_record_findings,
-                story_findings=story_record_findings)
+                story_findings=story_record_findings,
+                request_text=getattr(ctx, "user_message", ""))
             if not hasattr(ctx, "verification_records"):
                 ctx.verification_records = {}
             ctx.verification_records[version] = verification

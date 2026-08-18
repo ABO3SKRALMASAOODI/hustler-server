@@ -3399,6 +3399,7 @@ def post_message(user_id, project_id):
                                SET payload = payload
                                    || jsonb_build_object('message_id', %s)
                                WHERE id = %s AND state = 'queued'
+                                 AND NOT (payload ? 'steered_into')
                                RETURNING id""",
                             (message_id, stack_on_job))
                 row = cur.fetchone()

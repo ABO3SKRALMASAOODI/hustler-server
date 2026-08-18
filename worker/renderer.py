@@ -3344,6 +3344,22 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                        max(src_dur, max(e for _, e in render_dict["keep"]))
                        ).model_dump()
 
+    # Long-source edits often keep a short window hours into the file.  A
+    # plain ``-i source`` makes ffmpeg decode every 4K frame from zero before
+    # the first trim can emit anything; the progress pipe therefore remains
+    # at 0 while all CPUs are busy, and the stall watchdog correctly (but
+    # misleadingly) kills it.  Input seeking plus ``-copyts`` skips that dead
+    # decode while retaining the original source clock used by keep, volume,
+    # patches, captions and focus tracks.  One second of preroll is generous
+    # for decoder/keyframe state; ffmpeg's input seek itself backs up to the
+    # preceding keyframe as needed.
+    first_source_s = min(float(span[0]) for span in edl["keep"])
+    source_seek_s = max(0.0, first_source_s - 1.0)
+    seek_main_source = source_seek_s >= 5.0
+    main_input_args = (["-copyts", "-ss", f"{source_seek_s:.3f}",
+                        "-i", src_path]
+                       if seek_main_source else ["-i", src_path])
+
     frame = edl.get("frame") or None
     W, H = frame_dims(info["width"], info["height"],
                       (frame or {}).get("ratio"))
@@ -3429,7 +3445,10 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         try:
             v_local = _fetch(sm["vocals_key"], "stemv", next_idx)
             a_local = _fetch(sm["accomp_key"], "stema", next_idx + 1)
-            extra_inputs += ["-i", v_local, "-i", a_local]
+            stem_seek = (["-ss", f"{source_seek_s:.3f}"]
+                         if seek_main_source else [])
+            extra_inputs += [*stem_seek, "-i", v_local,
+                             *stem_seek, "-i", a_local]
             stem_inputs = (next_idx, next_idx + 1,
                            float(sm.get("voice_gain_db") or 0.0),
                            float(sm.get("music_gain_db") or 0.0))
@@ -3656,7 +3675,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         graph = _prune_graph_to_audio(graph)
         expected_out_s = (tl.out_duration
                           + music_tail_ext(edl, tl.out_duration) + outro_s)
-        cmd = ["ffmpeg", "-y", "-i", src_path, *extra_inputs,
+        cmd = ["ffmpeg", "-y", *main_input_args, *extra_inputs,
                "-filter_complex", graph, "-map", "[aout]",
                "-c:a", "aac", "-b:a", "128k" if preview else "192k",
                "-t", f"{expected_out_s:.3f}",
@@ -3682,7 +3701,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
 
     expected_out_s = (tl.out_duration
                       + music_tail_ext(edl, tl.out_duration) + outro_s)
-    cmd = ["ffmpeg", "-y", "-i", src_path, *extra_inputs,
+    cmd = ["ffmpeg", "-y", *main_input_args, *extra_inputs,
            "-filter_complex", graph, "-map", "[vout]", "-map", "[aout]",
            *encode, *_output_clock(fps), "-t", f"{expected_out_s:.3f}",
            "-movflags", "+faststart",

@@ -74,6 +74,30 @@ def test_duplicate_broll_window_is_not_rationalized():
     assert "duplicate_broll_window" in _codes(edl)
 
 
+def test_large_frame_reconstruction_requires_direct_review():
+    edl = default_edl(20)
+    edl["patches"] = [{
+        "id": "pa1", "asset_key": "patches/p.mp4", "src_start": 0,
+        "src_end": 20, "regions": [{"id": "er1", "x": .3, "y": .25,
+                                      "w": .4, "h": .35, "start": 0,
+                                      "end": 20, "fill": "box"}],
+    }]
+    assert "destructive_cleanup_region" in _codes(edl)
+
+
+def test_manual_caption_entirely_in_a_cut_is_not_allowed_to_look_verified():
+    edl = default_edl(20)
+    edl["keep"] = [[12, 20]]
+    edl["captions"] = [{"text": "HOOK", "start": 0, "end": 2}]
+
+    findings = quality_verifier.deterministic_findings(edl)
+
+    invisible = [row for row in findings
+                 if row["code"] == "invisible_manual_caption"]
+    assert len(invisible) == 1
+    assert invisible[0]["evidence"]["kept_source_ranges"] == [[12, 20]]
+
+
 def test_music_after_ending_and_missing_treatment_are_detected():
     edl = default_edl(10)
     edl["music"] = [{"id": "mus1", "storage_key": "music/a.mp3",
@@ -97,6 +121,44 @@ def test_verification_record_cannot_pass_without_complete_preview():
         1, 2, manifest, edl, {},
         preview={"edl_version": 2, "duration_s": 10, "storage_key": "p.mp4"})
     assert passed["status"] == "passed"
+
+
+def test_explicit_duration_request_blocks_wrong_length_program():
+    edl = default_edl(42.67)
+    target = quality_verifier.requested_duration_target(
+        "And edit as you like and make it of like 18 sec video")
+    assert target["min_s"] < 18 < target["max_s"]
+    record = quality_verifier.build_verification_record(
+        1, 2, {}, edl, {},
+        preview={"edl_version": 2, "duration_s": 42.67},
+        request_text="And edit as you like and make it of like 18 sec video")
+    assert "requested_duration_outside_target" in {
+        row["code"] for row in record["unresolved_findings"]}
+
+    repaired = default_edl(18.2)
+    record = quality_verifier.build_verification_record(
+        1, 3, {}, repaired, {},
+        preview={"edl_version": 3, "duration_s": 18.2},
+        request_text="And edit as you like and make it of like 18 sec video")
+    assert "requested_duration_outside_target" not in {
+        row["code"] for row in record["unresolved_findings"]}
+
+
+def test_effect_timestamp_is_not_mistaken_for_program_duration():
+    assert quality_verifier.requested_duration_target(
+        "Add a zoom at 18 seconds and fade it out") is None
+
+
+def test_duplicate_critic_findings_are_one_repair_record():
+    edl = default_edl(10)
+    record = quality_verifier.build_verification_record(
+        1, 2, {}, edl, {},
+        preview={"edl_version": 2, "duration_s": 10},
+        visual_findings=["caption overlaps the face",
+                         "caption overlaps the face"])
+    rows = [row for row in record["unresolved_findings"]
+            if row["department"] == "visual_review"]
+    assert len(rows) == 1
 
 
 def test_corrupt_caption_glyph_blocks_completion():

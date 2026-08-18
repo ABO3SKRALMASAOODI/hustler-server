@@ -130,6 +130,20 @@ def test_continuation_charges_and_qualifies_once_against_root_job():
     assert worker_db.qualifications == [(8, 44)]
 
 
+def test_operator_repair_is_never_charged_or_subscribe_qualified():
+    worker_db = _WorkerDb()
+    result = {"status": "replied", "outcome": "fulfilled",
+              "edl_changed": True, "billable": True}
+    job = _job(payload={"operator_repair": True,
+                        "operator_instruction": "repair the delivered cut"})
+
+    job_completion.finalize_success(worker_db, job, result, "lease")
+
+    assert worker_db.charges == []
+    assert worker_db.qualifications == []
+    assert result["credits_charged"] == 0.0
+
+
 def test_qualification_marker_is_account_scoped_and_idempotent_sql():
     class Cursor:
         rowcount = 1

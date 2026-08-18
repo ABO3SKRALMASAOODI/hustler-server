@@ -129,6 +129,26 @@ def test_retry_after_is_honoured_and_capped():
     assert llm.rate_limit_wait(_Tiny(), 3, 600) == 24.0
 
 
+def test_agent_lanes_offer_only_independently_funded_wallets(monkeypatch):
+    base_client, paid_client, frontier_client = object(), object(), object()
+    monkeypatch.setattr(llm, "client", lambda: base_client)
+    monkeypatch.setattr(llm, "paid_client", lambda: paid_client)
+    monkeypatch.setattr(llm, "frontier_client", lambda: frontier_client)
+    monkeypatch.setattr(llm.config, "OPENAI_API_KEY", "openai-wallet")
+    monkeypatch.setattr(llm.config, "OPENAI_BASE_URL", "https://openai.test/v1")
+    monkeypatch.setattr(llm.config, "PAID_API_KEY", "xai-wallet")
+    monkeypatch.setattr(llm.config, "PAID_BASE_URL", "https://xai.test/v1")
+    monkeypatch.setattr(llm.config, "PAID_AGENT_MODEL", "paid-model")
+    monkeypatch.setattr(llm.config, "FRONTIER_API_KEY", "xai-wallet")
+    monkeypatch.setattr(llm.config, "FRONTIER_BASE_URL", "https://xai.test/v1")
+    monkeypatch.setattr(llm.config, "FRONTIER_AGENT_MODEL", "frontier-model")
+
+    lanes = llm.agent_lanes_for(False, "free")
+    assert [row["name"] for row in lanes] == ["standard", "paid_fallback"]
+    assert lanes[0]["client"] is base_client
+    assert lanes[1]["client"] is paid_client
+
+
 def test_bounds():
     assert llm.rate_limit_wait(_RL(), 21, 600) is None, "wait-count cap"
     assert llm.rate_limit_wait(_RL(), 1, 14) is None, "turn nearly over"

@@ -222,6 +222,85 @@ def agent_client_for(subscribed, plan=None, first_turn=False):
     return client(), config.AGENT_MODEL
 
 
+def agent_lanes_for(subscribed, plan=None, first_turn=False):
+    """Ordered, independently funded agent lanes for one logical turn.
+
+    ``agent_client_for`` remains the product-tier selector.  This companion
+    keeps that exact primary choice, then exposes configured providers that
+    can finish the same turn if the primary provider's wallet is exhausted.
+    An ``insufficient_quota`` response is account/provider state, not a reason
+    to abandon a user's edit or ask them to retry it.
+
+    Lanes sharing the same base URL *and key* are deliberately collapsed:
+    changing models on an empty provider wallet is not a fallback.  Keys stay
+    in process memory and are never returned by config_report or logged.
+    """
+    primary_client, primary_model = agent_client_for(
+        subscribed, plan, first_turn=first_turn)
+
+    configured = []
+    if subscribed and is_frontier(plan) and frontier_available():
+        configured.append({
+            "name": "frontier", "client": frontier_client(),
+            "model": config.FRONTIER_AGENT_MODEL,
+            "base_url": config.FRONTIER_BASE_URL,
+            "api_key": config.FRONTIER_API_KEY,
+        })
+    elif subscribed and is_paid_tier(plan) and paid_available():
+        configured.append({
+            "name": "paid", "client": paid_client(),
+            "model": config.PAID_AGENT_MODEL,
+            "base_url": config.PAID_BASE_URL,
+            "api_key": config.PAID_API_KEY,
+        })
+    elif first_turn and not subscribed and first_turn_available():
+        configured.append({
+            "name": "first_turn", "client": first_turn_client(),
+            "model": config.FIRST_TURN_AGENT_MODEL,
+            "base_url": config.FIRST_TURN_BASE_URL,
+            "api_key": config.FIRST_TURN_API_KEY,
+        })
+    else:
+        configured.append({
+            "name": "standard", "client": primary_client,
+            "model": primary_model, "base_url": config.OPENAI_BASE_URL,
+            "api_key": config.OPENAI_API_KEY,
+        })
+
+    # Reliability fallbacks are not advertised product tiers.  Prefer the
+    # less expensive optional paid lane, then Frontier, then the standard
+    # lane.  The primary entry above always stays first.
+    if paid_available():
+        configured.append({
+            "name": "paid_fallback", "client": paid_client(),
+            "model": config.PAID_AGENT_MODEL,
+            "base_url": config.PAID_BASE_URL,
+            "api_key": config.PAID_API_KEY,
+        })
+    if frontier_available():
+        configured.append({
+            "name": "frontier_fallback", "client": frontier_client(),
+            "model": config.FRONTIER_AGENT_MODEL,
+            "base_url": config.FRONTIER_BASE_URL,
+            "api_key": config.FRONTIER_API_KEY,
+        })
+    configured.append({
+        "name": "standard_fallback", "client": client(),
+        "model": config.AGENT_MODEL, "base_url": config.OPENAI_BASE_URL,
+        "api_key": config.OPENAI_API_KEY,
+    })
+
+    out, provider_wallets = [], set()
+    for lane in configured:
+        wallet = (str(lane.get("base_url") or "").rstrip("/"),
+                  str(lane.get("api_key") or ""))
+        if not wallet[1] or wallet in provider_wallets:
+            continue
+        provider_wallets.add(wallet)
+        out.append(lane)
+    return out
+
+
 def vision_client():
     """Separate pooled client for vision — VISION_BASE_URL is configured
     independently of the chat provider (a text-only chat provider is normal),

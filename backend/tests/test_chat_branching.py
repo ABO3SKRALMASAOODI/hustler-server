@@ -103,3 +103,17 @@ def test_branch_without_an_existing_encode_still_branches():
     assert len(cur.sql_containing("INSERT INTO assets")) == 0
     # round 67: no chat announcement — see above
     assert len(cur.sql_containing("INSERT INTO chat_messages")) == 0
+
+
+def test_an_adopted_steering_job_cannot_be_retargeted_again():
+    """A third message needs a fresh durable row once the second was adopted.
+
+    Re-aiming the already-adopted row changes its message_id after the live
+    agent has read it, making the newer instruction invisible to both the
+    current turn and the queued fallback.
+    """
+    source = open(video.__file__, encoding="utf-8").read()
+    update = source[source.index("SET payload = payload\n"):
+                    source.index("row = cur.fetchone()",
+                                 source.index("SET payload = payload\n"))]
+    assert "NOT (payload ? 'steered_into')" in update
