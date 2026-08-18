@@ -64,11 +64,16 @@ def test_the_check_runs_before_the_clamp_that_hid_it():
         "the runaway check must read out_time BEFORE it is clamped to 0.999"
 
 
-def test_ffmpeg_nopts_progress_sentinel_is_not_a_runaway():
+@pytest.mark.parametrize("sentinel", [
+    9223372036854775807,
+    9223372036854775000,
+    -9223372036854775808,
+])
+def test_ffmpeg_nopts_progress_sentinel_is_not_a_runaway(sentinel):
     """AV_NOPTS_VALUE means the clock is unavailable, not years of output."""
     seen = []
     script = (
-        "print('out_time_ms=9223372036854775807', flush=True); "
+        f"print('out_time_ms={sentinel}', flush=True); "
         "print('out_time_ms=2000000', flush=True); "
         "print('progress=end', flush=True)"
     )

@@ -17,7 +17,11 @@ class MediaError(RuntimeError):
     pass
 
 
-_FFMPEG_NOPTS_US = 9223372036854775807
+# FFmpeg has emitted AV_NOPTS through `-progress` as INT64_MAX, INT64_MIN and
+# nearby decimal values after internal rescaling.  All are absurd as media
+# clocks (more than 146,000 years), so reserve the entire impossible range
+# instead of matching one serialization exactly.
+_FFMPEG_NOPTS_ABS_MIN_US = 1 << 62
 
 
 def run(cmd, timeout=None, progress_cb=None, expected_out_s=None,
@@ -120,7 +124,7 @@ def run(cmd, timeout=None, progress_cb=None, expected_out_s=None,
                         # 9.22 trillion seconds of encoded output.  Treating
                         # it as a real clock value falsely trips the runaway
                         # watchdog at the end of an otherwise healthy final.
-                        if out_time_us == _FFMPEG_NOPTS_US:
+                        if abs(out_time_us) >= _FFMPEG_NOPTS_ABS_MIN_US:
                             continue
                         secs = out_time_us / 1_000_000.0
                         progress_state["out_s"] = secs
