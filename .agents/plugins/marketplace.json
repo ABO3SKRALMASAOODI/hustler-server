@@ -1,0 +1,20 @@
+{
+  "name": "valmera",
+  "interface": {
+    "displayName": "Valmera"
+  },
+  "plugins": [
+    {
+      "name": "valmera",
+      "source": {
+        "source": "local",
+        "path": "./plugins/valmera"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "media"
+    }
+  ]
+}

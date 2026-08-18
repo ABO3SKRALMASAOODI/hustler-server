@@ -36,8 +36,12 @@ class _Ctx:
 
     def __init__(self, **asset):
         self.pending_images = []
-        row = {"storage_key": "media/3/prev.mp4", "duration_s": 60.0,
-               "height": 480, "fps": 30.0, "bytes": 4 * MB}
+        row = {"id": 41, "storage_key": "media/3/prev.mp4",
+               "duration_s": 60.0, "height": 480, "fps": 30.0,
+               "bytes": 4 * MB,
+               "meta": {"edl_version": 7,
+                        "audio_model_review": False,
+                        "render_job_id": 91}}
         row.update(asset)
         self.db = _Db(row)
 
@@ -130,16 +134,67 @@ def test_the_normal_call_re_encodes_nothing():
     out = mcp_media.prepare(_Ctx(), {}, 12 * MB)
     assert out["video"]["transcoded"] is False
     assert out["video"]["storage_key"] == "media/3/prev.mp4"
+    receipt = out["preview"]
+    assert receipt["asset_id"] == 41
+    assert receipt["render_job_id"] == 91
+    assert receipt["edl_version"] == 7
+    assert receipt["duration_s"] == 60.0
+    assert receipt["audio_model_review"] is False
+    assert receipt["listen_keys_count"] == 0
+    assert receipt["listen_clips_count"] == 0
+    assert receipt["audio_reviewer_findings_count"] == 0
+    assert len(receipt["meta_sha256"]) == 64
 
 
-def test_render_true_joins_an_identical_inflight_preview(monkeypatch):
-    """Studio self-heal and MCP watch can ask for the same immutable EDL
-    together. They must pay for one full encode and both wait on its row."""
+def test_listener_enabled_cached_preview_is_not_watch_evidence():
+    out = mcp_media.prepare(
+        _Ctx(meta={"edl_version": 7, "audio_model_review": True}),
+        {"render": False}, 12 * MB)
+    assert out["is_error"] is True
+    assert "deterministic-only" in out["text"]
+    assert "render=true" in out["text"]
+
+
+def test_false_flag_with_listener_artifacts_is_not_a_valid_receipt():
+    out = mcp_media.prepare(
+        _Ctx(meta={"edl_version": 7, "audio_model_review": False,
+                   "render_job_id": 91,
+                   "listen_keys": ["media/3/old-listener.mp3"]}),
+        {"render": False}, 12 * MB)
+    assert out["is_error"] is True
+    assert "deterministic-only" in out["text"]
+
+
+def test_false_legacy_preview_without_render_job_lineage_is_rejected():
+    out = mcp_media.prepare(
+        _Ctx(meta={"edl_version": 7, "audio_model_review": False}),
+        {"render": False}, 12 * MB)
+    assert out["is_error"] is True
+    assert "deterministic-only" in out["text"]
+
+
+@pytest.mark.parametrize("duration_s", [0, float("nan"), float("inf")])
+def test_preview_receipt_rejects_non_positive_or_non_finite_duration(
+        duration_s):
+    out = mcp_media.prepare(
+        _Ctx(duration_s=duration_s), {"render": False}, 12 * MB)
+    assert out["is_error"] is True
+    assert "deterministic-only" in out["text"]
+
+
+@pytest.mark.parametrize("created", [True, False], ids=["fresh", "adopted"])
+def test_render_true_creates_or_adopts_matching_false_policy_preview(
+        monkeypatch, created):
+    """Fresh and adopted jobs use the same deterministic-only contract.
+
+    A matching MCP render is adopted; a Studio/listener-policy render is not.
+    """
     calls = []
     rendered = {
         "storage_key": "media/3/joined.mp4", "duration_s": 60.0,
-        "height": 480, "fps": 30.0, "bytes": 4 * MB,
-        "meta": {"edl_version": 7},
+        "height": 480, "fps": 30.0, "bytes": 4 * MB, "id": 42,
+        "meta": {"edl_version": 7, "audio_model_review": False,
+                 "render_job_id": 92},
     }
 
     class JoinDb:
@@ -154,7 +209,7 @@ def test_render_true_joins_an_identical_inflight_preview(monkeypatch):
             if fn is mcp_media.dbx.latest_render:
                 return None
             if fn is mcp_media.dbx.get_or_enqueue_preview_job:
-                return 77, False
+                return 77, created
             if fn is mcp_media.dbx.get_job:
                 return {"id": 77, "state": "done"}
             raise AssertionError(f"unexpected DB call {fn}")
@@ -170,6 +225,42 @@ def test_render_true_joins_an_identical_inflight_preview(monkeypatch):
     assert any(fn is mcp_media.dbx.get_or_enqueue_preview_job
                for fn, _args in calls)
     assert not any(fn is mcp_media.dbx.enqueue_job for fn, _args in calls)
+    enqueue = next(args for fn, args in calls
+                   if fn is mcp_media.dbx.get_or_enqueue_preview_job)
+    assert enqueue[2]["audio_model_review"] is False
+    assert enqueue[2]["source"] == "mcp_watch"
+
+
+def test_adopted_preview_without_false_receipt_is_rejected(monkeypatch):
+    incompatible = {
+        "id": 43, "storage_key": "media/3/studio.mp4",
+        "duration_s": 60.0, "height": 480, "fps": 30.0,
+        "bytes": 4 * MB,
+        "meta": {"edl_version": 7, "audio_model_review": True},
+    }
+
+    class AdoptDb:
+        def __init__(self):
+            self.assets = 0
+
+        def run(self, fn, *_args):
+            if fn is mcp_media.dbx.find_render_asset:
+                self.assets += 1
+                return None if self.assets == 1 else incompatible
+            if fn is mcp_media.dbx.latest_render:
+                return None
+            if fn is mcp_media.dbx.get_or_enqueue_preview_job:
+                return 78, False
+            if fn is mcp_media.dbx.get_job:
+                return {"id": 78, "state": "done"}
+            raise AssertionError(fn)
+
+    ctx = _Ctx()
+    ctx.db = AdoptDb()
+    monkeypatch.setattr(mcp_media.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(mcp_media.Unavailable, match="cannot be used"):
+        mcp_media._preview_for_watching(ctx, render=True)
 
 
 def test_the_default_never_embeds_however_small_the_file():
@@ -261,6 +352,7 @@ def test_heavy_encode_is_offloaded_only_after_source_resolution(monkeypatch):
     assert (project_id, user_id, payload["tool"]) == (3, 1, "__media__")
     assert args["_resolved_asset"]["storage_key"] == "clips/3/source.mov"
     assert "preview render of EDL v7" in args["_resolved_what"]
+    assert args["_resolved_preview"]["audio_model_review"] is False
 
 
 def test_resolved_modal_encode_never_recurses_to_remote(monkeypatch):
@@ -395,6 +487,8 @@ def test_frames_can_be_turned_off_by_the_caller():
     out = mcp_media.prepare(ctx, {"frames": False}, 12 * MB)
     assert out["video"]["storage_key"] == "media/3/prev.mp4"
     assert ctx.pending_images == []
+    assert out["audio"] is None
+    assert out["preview"]["audio_model_review"] is False
 
 
 # ── the surface ──────────────────────────────────────────────────────

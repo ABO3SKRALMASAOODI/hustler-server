@@ -1,0 +1,272 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://valmera.local/schemas/pre-mutation-recast.schema.json",
+  "title": "Valmera pre-mutation treatment recast",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "assignment_schema_version",
+    "taxonomy_version",
+    "prompt_version",
+    "treatment_contract_version",
+    "reference_profile_version",
+    "assignment_id",
+    "assignment_input_fingerprint",
+    "recast_input_fingerprint",
+    "run_id",
+    "parent_project_id",
+    "child_project_id",
+    "status",
+    "mutation_performed",
+    "inspected_evidence_ids",
+    "candidate_assessments",
+    "recommended_candidate_id",
+    "approved_by",
+    "approved_candidate_id",
+    "approved_cast",
+    "approved_treatment_delta",
+    "contradiction_summary",
+    "outstanding_job_ids"
+  ],
+  "properties": {
+    "schema_version": {"const": "valmera-pre-mutation-recast-v2"},
+    "assignment_schema_version": {"const": "valmera-editorial-child-assignment-v2"},
+    "taxonomy_version": {"const": "valmera-editorial-taxonomy-v1"},
+    "prompt_version": {"const": "valmera-shorts-editor-v6"},
+    "treatment_contract_version": {"const": "2"},
+    "reference_profile_version": {
+      "oneOf": [{"const": "2"}, {"type": "null"}]
+    },
+    "assignment_id": {"type": "string", "minLength": 1},
+    "assignment_input_fingerprint": {
+      "type": "string",
+      "pattern": "^sha256:[A-Fa-f0-9]{64}$"
+    },
+    "recast_input_fingerprint": {"$ref": "#/$defs/prefixedSha256"},
+    "run_id": {"type": "string", "minLength": 1},
+    "parent_project_id": {"type": "integer", "minimum": 1},
+    "child_project_id": {"type": "integer", "minimum": 1},
+    "status": {"enum": ["awaiting_parent_approval", "approved", "blocked"]},
+    "mutation_performed": {"const": false},
+    "inspected_evidence_ids": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string", "minLength": 1},
+      "uniqueItems": true
+    },
+    "candidate_assessments": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {"$ref": "#/$defs/candidateAssessment"}
+    },
+    "recommended_candidate_id": {"type": ["string", "null"], "minLength": 1},
+    "approved_by": {"type": ["string", "null"], "minLength": 1},
+    "approved_candidate_id": {"type": ["string", "null"], "minLength": 1},
+    "approved_cast": {
+      "oneOf": [{"$ref": "#/$defs/approvedCast"}, {"type": "null"}]
+    },
+    "approved_treatment_delta": {
+      "oneOf": [{"$ref": "#/$defs/approvedTreatmentDelta"}, {"type": "null"}]
+    },
+    "contradiction_summary": {"type": ["string", "null"], "minLength": 1},
+    "outstanding_job_ids": {
+      "type": "array",
+      "maxItems": 0,
+      "items": {"type": ["string", "integer"]}
+    }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "status": {"const": "awaiting_parent_approval"},
+        "recommended_candidate_id": {"type": "string", "minLength": 1},
+        "approved_by": {"type": "null"},
+        "approved_candidate_id": {"type": "null"},
+        "approved_cast": {"type": "null"},
+        "approved_treatment_delta": {"type": "null"},
+        "contradiction_summary": {"type": "null"}
+      }
+    },
+    {
+      "properties": {
+        "status": {"const": "approved"},
+        "recommended_candidate_id": {"type": "string", "minLength": 1},
+        "approved_by": {"const": "coordinator"},
+        "approved_candidate_id": {"type": "string", "minLength": 1},
+        "approved_cast": {"$ref": "#/$defs/approvedCast"},
+        "approved_treatment_delta": {"$ref": "#/$defs/approvedTreatmentDelta"},
+        "contradiction_summary": {"type": "null"}
+      }
+    },
+    {
+      "properties": {
+        "status": {"const": "blocked"},
+        "recommended_candidate_id": {"type": ["string", "null"], "minLength": 1},
+        "approved_by": {"type": "null"},
+        "approved_candidate_id": {"type": "null"},
+        "approved_cast": {"type": "null"},
+        "approved_treatment_delta": {"type": "null"},
+        "contradiction_summary": {"type": "string", "minLength": 1}
+      }
+    }
+  ],
+  "$defs": {
+    "prefixedSha256": {
+      "type": "string",
+      "pattern": "^sha256:[A-Fa-f0-9]{64}$"
+    },
+    "narrativeMode": {
+      "enum": [
+        "conversation",
+        "explanation",
+        "retrospective_profile",
+        "breakthrough",
+        "prediction_vision",
+        "intimate_reflection",
+        "debate_tension",
+        "anecdote",
+        "comedy",
+        "demonstration"
+      ]
+    },
+    "candidateAssessment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "candidate_id",
+        "dominant_mode",
+        "secondary_mode",
+        "evidence_matches",
+        "supporting_evidence_ids",
+        "contradicting_evidence_ids",
+        "recommendation",
+        "rationale"
+      ],
+      "properties": {
+        "candidate_id": {
+          "type": "string",
+          "pattern": "^cast-[A-Za-z0-9][A-Za-z0-9_-]*$"
+        },
+        "dominant_mode": {"$ref": "#/$defs/narrativeMode"},
+        "secondary_mode": {
+          "oneOf": [{"$ref": "#/$defs/narrativeMode"}, {"type": "null"}]
+        },
+        "evidence_matches": {"type": "boolean"},
+        "supporting_evidence_ids": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        },
+        "contradicting_evidence_ids": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        },
+        "recommendation": {"enum": ["recommended", "viable", "rejected"]},
+        "rationale": {"type": "string", "minLength": 1}
+      }
+    },
+    "approvedCast": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["classification_status", "dominant_mode", "secondary_mode"],
+      "properties": {
+        "classification_status": {"enum": ["clear", "hybrid"]},
+        "dominant_mode": {"$ref": "#/$defs/narrativeMode"},
+        "secondary_mode": {
+          "oneOf": [{"$ref": "#/$defs/narrativeMode"}, {"type": "null"}]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "classification_status": {"const": "clear"},
+            "secondary_mode": {"type": "null"}
+          }
+        },
+        {
+          "properties": {
+            "classification_status": {"const": "hybrid"},
+            "secondary_mode": {"$ref": "#/$defs/narrativeMode"}
+          }
+        }
+      ]
+    },
+    "approvedTreatmentDelta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "visual_identity",
+        "visual_motifs",
+        "music_policy",
+        "music_brief",
+        "music_entry_policy",
+        "assigned_music_start_s",
+        "assigned_music_end_s",
+        "no_music_justification"
+      ],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "visual_identity": {"type": "string", "minLength": 1},
+        "visual_motifs": {
+          "type": "array",
+          "maxItems": 3,
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        },
+        "music_policy": {
+          "enum": ["none", "subtle_bed", "cinematic_build", "rhythmic_support"]
+        },
+        "music_brief": {"type": ["string", "null"], "minLength": 1},
+        "music_entry_policy": {
+          "enum": ["none", "hook", "whole_program", "delayed", "payoff_only"]
+        },
+        "assigned_music_start_s": {"type": ["number", "null"], "minimum": 0},
+        "assigned_music_end_s": {"type": ["number", "null"], "exclusiveMinimum": 0},
+        "no_music_justification": {"type": ["string", "null"], "minLength": 1}
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"music_policy": {"const": "none"}},
+            "required": ["music_policy"]
+          },
+          "then": {
+            "properties": {
+              "music_entry_policy": {"const": "none"},
+              "music_brief": {"type": "null"},
+              "assigned_music_start_s": {"type": "null"},
+              "assigned_music_end_s": {"type": "null"},
+              "no_music_justification": {"type": "string", "minLength": 1}
+            }
+          },
+          "else": {
+            "properties": {
+              "music_entry_policy": {
+                "enum": ["hook", "whole_program", "delayed", "payoff_only"]
+              },
+              "music_brief": {"type": "string", "minLength": 1},
+              "assigned_music_start_s": {"type": "number", "minimum": 0},
+              "assigned_music_end_s": {"type": "number", "exclusiveMinimum": 0},
+              "no_music_justification": {"type": "null"}
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "music_entry_policy": {"enum": ["hook", "whole_program"]}
+            },
+            "required": ["music_entry_policy"]
+          },
+          "then": {
+            "properties": {"assigned_music_start_s": {"const": 0}}
+          }
+        }
+      ]
+    }
+  }
+}

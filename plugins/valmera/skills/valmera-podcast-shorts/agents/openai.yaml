@@ -1,0 +1,7 @@
+interface:
+  display_name: "Valmera Podcast Shorts"
+  short_description: "Turn topics into verified story shorts"
+  default_prompt: "Use $valmera-podcast-shorts with @valmera on this topic: find a new long YouTube source and related viral Short reference, select every qualifying story yourself, assign story-specific visible child editors, and independently QC every finished render using dense sampled frames, full-stream ASR of the actual current preview, exhausted caption evidence, metadata, EDL facts, and deterministic aggregate audio evidence."
+
+policy:
+  allow_implicit_invocation: false

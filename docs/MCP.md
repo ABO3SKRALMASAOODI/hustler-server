@@ -171,8 +171,15 @@ The connected model reads the podcast and supplies non-overlapping source
 ranges with useful titles, hooks, and story context. The worker creates locked
 child projects and seeds only those source windows; it does not style, reframe,
 caption, add B-roll/music, render a creative edit, or ask Valmera's planner or
-agent to choose the arcs. On an existing normal long-video project the same
-explicit call starts the pipeline and returns its job id; poll that with
+agent to choose the arcs. Submitted array order, titles, hooks, and story beats
+are preserved exactly. Supplied ranges must already match transcript sentence
+boundaries; a misaligned range is rejected with the expected timestamps rather
+than silently rewritten. When the child EDL is seeded, its accepted range is
+mechanically snapped outward to measured word edges (including breath padding),
+but it is never expanded with surrounding conversation or re-ranked by score.
+On an existing normal
+long-video project the same explicit call starts the pipeline and returns its
+job id; poll that with
 `wait_for_job` or `shorts_status`. `list_projects` labels every generated short
 with its parent. A source under one minute is already one direct short and is
 edited normally rather than sent through the multi-clip extractor.
@@ -205,6 +212,12 @@ multipart (one ETag per part) — run the helper instead:
 export VALMERA_MCP_TOKEN=vlm_mcp_...     # a static token; mint one as in 3b
 python3 scripts/valmera_upload.py ~/Movies/talk.mp4 --project 3
 ```
+
+For a Shorts style reference, use `kind="clip"` with
+`role="shorts_reference"` and, when known, `duration_s` on `upload_start`.
+Its returned `upload_finish` instructions repeat those values; keep them on
+the finish call. This creates reference-only analysis input, never timeline or
+placeable media. The role is invalid with every other kind.
 
 (Or just upload it in the studio as usual and `open_project` it from Claude —
 the connector does not care how the footage arrived.)
@@ -350,13 +363,13 @@ encode settings, so asking for the same window twice encodes once.
   tools. Set `MCP_INSTRUCTIONS=brief` on the backend to drop the doctrine and
   keep only the capability list — that is the A/B for "how much of the quality
   is the prompt and how much is the model".
-- **Capacity.** The worker runs MCP on its own lane (`WORKER_MCP_SLOTS`, 2), so
+- **Capacity.** The worker runs MCP on its own lane (`WORKER_MCP_SLOTS`, 3), so
   a tool call never queues behind a customer's agent turn and never takes a
   slot from one. Renders still share the single media lane with everyone else.
-- **Before this gets real traffic**, move gunicorn to
-  `--worker-class gthread --threads 8` in `start.sh`. It deploys with 3 *sync*
-  workers today, so a 25s wait ties up a third of the API. That is fine for one
-  founder and not fine for customers — raise `MCP_SYNC_WAIT_S` only after.
+- **HTTP isolation.** Gunicorn runs 3 `gthread` workers with 8 threads each, so
+  bounded MCP waits do not consume the entire website API worker pool. This
+  protects HTTP responsiveness; renders still share media capacity, so the
+  topic-to-shorts skill keeps its stricter one-outstanding-Valmera-call rule.
 
 ## Revoking
 
@@ -391,7 +404,7 @@ encode settings, so asking for the same window twice encodes once.
 | `MCP_VIDEO_MAX_ENCODE_S` | worker | 1800 | longest window one call will re-encode |
 | `MCP_VIDEO_URL_MAX_MB` | worker | 512 | above this even a link gets a shrunk copy instead |
 | `MCP_VIDEO_DOWNLOAD_MAX_MB` | worker | 2048 | biggest file that may be pulled onto the box to shrink |
-| `WORKER_MCP_SLOTS` | worker | 2 | concurrent MCP tool calls |
+| `WORKER_MCP_SLOTS` | worker | 3 | concurrent MCP tool calls |
 | `WORKER_MCP_POLL_INTERVAL_S` | worker | 0.25 | queue poll for the MCP lane |
 | `WORKER_MCP_SESSION_TTL_S` | worker | 1800 | how long a project's cached context lives |
-| `WORKER_MCP_MAX_SESSIONS` | worker | 3 | projects holding a cached context |
+| `WORKER_MCP_MAX_SESSIONS` | worker | 2 | idle cached project contexts; live calls are never evicted |

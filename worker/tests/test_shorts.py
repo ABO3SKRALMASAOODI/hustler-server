@@ -389,14 +389,24 @@ def test_seed_child_only_keeps_the_selected_story(monkeypatch, tmp_path):
             raise AssertionError(fn)
 
     class FakeContext:
-        def latest_edl(self):
-            return {"version": 2}
+        duration = 180.0
 
+        def __init__(self):
+            self.row = {"version": 1, "json": {"keep": [[0.0, 180.0]]}}
+
+        def latest_edl(self):
+            return self.row
+
+    fake_ctx = FakeContext()
     monkeypatch.setattr(agent_tools, "ToolContext",
-                        lambda *_args, **_kwargs: FakeContext())
-    monkeypatch.setattr(
-        agent_tools, "execute",
-        lambda _ctx, name, args: calls.append((name, args)) or "kept story")
+                        lambda *_args, **_kwargs: fake_ctx)
+
+    def fake_execute(_ctx, name, args):
+        calls.append((name, args))
+        fake_ctx.row = {"version": 2, "json": {"keep": [[32, 88]]}}
+        return "kept story"
+
+    monkeypatch.setattr(agent_tools, "execute", fake_execute)
 
     version, note = shorts._seed_story_child(
         FakeDb(), {"id": 9}, 71, {}, {"start": 32, "end": 88},
@@ -406,6 +416,203 @@ def test_seed_child_only_keeps_the_selected_story(monkeypatch, tmp_path):
     assert calls == [("keep_segments", {
         "segments": [[32, 88]], "snap_to_words": True,
     })]
+
+
+def test_seed_retry_recovers_matching_word_snapped_edl(monkeypatch, tmp_path):
+    import agent_tools
+    import db as dbx
+
+    key = shorts._short_materialization_key(7, 777, 0)
+    words = [{"w": "ridiculous", "t0": 28.33, "t1": 29.21}]
+    # This real snap is 0.52s beyond the approved end, demonstrating why a
+    # registry must compare the deterministic function, not assume <=0.5s.
+    expected_keep = [[10.0, 29.33]]
+
+    class FakeDb:
+        def run(self, fn, *args):
+            if fn is dbx.get_project:
+                return {"id": args[0], "meta": {"shorts_editor": {
+                    "materialization_key": key}}}
+            raise AssertionError(fn)
+
+    class FakeContext:
+        duration = 60.0
+
+        @staticmethod
+        def latest_edl():
+            return {"version": 4, "json": {"keep": expected_keep}}
+
+    monkeypatch.setattr(agent_tools, "ToolContext",
+                        lambda *_args, **_kwargs: FakeContext())
+    monkeypatch.setattr(
+        agent_tools, "execute",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("a matching durable seed must not be rewritten")))
+
+    version, note = shorts._seed_story_child(
+        FakeDb(), {"id": 777}, 70, {"words": words},
+        {"start": 10.0, "end": 28.81}, str(tmp_path), key)
+
+    assert version == 4
+    assert note == "recovered existing word-snapped story seed"
+
+
+def test_partial_asset_share_retry_reuses_committed_child_rows(monkeypatch):
+    import db as dbx
+
+    state = {"assets": [], "locks": [], "next_id": 90}
+
+    class Cursor:
+        def __init__(self):
+            self.one = None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, sql, params=None):
+            statement = " ".join(sql.split())
+            params = params or ()
+            if statement.startswith("SELECT pg_advisory_xact_lock"):
+                state["locks"].append(params[0])
+                self.one = {"pg_advisory_xact_lock": None}
+            elif statement.startswith("SELECT id FROM assets"):
+                child_id, kind, storage_key, origin = params
+                self.one = next(({"id": row["id"]}
+                                 for row in state["assets"]
+                                 if row["project_id"] == child_id
+                                 and row["kind"] == kind
+                                 and row["storage_key"] == storage_key
+                                 and str(row["meta"]
+                                         ["shared_from_project"]) == origin),
+                                None)
+            else:  # pragma: no cover
+                raise AssertionError(statement)
+
+        def fetchone(self):
+            return self.one
+
+    class Conn:
+        @staticmethod
+        def cursor():
+            return Cursor()
+
+    def fake_insert(_conn, project_id, kind, storage_key, **kwargs):
+        asset_id = state["next_id"]
+        state["next_id"] += 1
+        state["assets"].append({
+            "id": asset_id, "project_id": project_id, "kind": kind,
+            "storage_key": storage_key, "meta": kwargs["meta"],
+        })
+        return asset_id
+
+    monkeypatch.setattr(dbx, "insert_asset", fake_insert)
+    original = {"kind": "original", "storage_key": "originals/7/a.mp4",
+                "meta": {"filename": "talk.mp4"}}
+    proxy = {"kind": "proxy", "storage_key": "proxies/7/a.mp4",
+             "meta": {}}
+
+    first_original = shorts._share_asset(Conn(), 70, original, 7)
+    # Crash here: retry repeats original before progressing to proxy.
+    second_original = shorts._share_asset(Conn(), 70, original, 7)
+    proxy_id = shorts._share_asset(Conn(), 70, proxy, 7)
+
+    assert first_original == second_original == 90
+    assert proxy_id == 91
+    assert len(state["assets"]) == 2
+
+
+def test_child_creation_adopts_same_arc_after_pre_checkpoint_crash():
+    """The child identity commits before parent-board reconciliation.
+
+    Calling creation again models a worker dying immediately after that
+    commit, before it can write ``clip.child_project_id`` to the parent.
+    """
+    state = {
+        "sessions": [], "projects": [], "locks": [],
+        "next_session": 40, "next_project": 70,
+    }
+
+    class Cursor:
+        def __init__(self):
+            self.one = None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, sql, params=None):
+            statement = " ".join(sql.split())
+            params = params or ()
+            if statement.startswith("SELECT pg_advisory_xact_lock"):
+                state["locks"].append(params[0])
+                self.one = {"pg_advisory_xact_lock": None}
+            elif statement.startswith(
+                    "SELECT id, chat_session_id, title, meta FROM projects"):
+                user_id, parent_id, key = params
+                self.one = next(({
+                    "id": row["id"],
+                    "chat_session_id": row["chat_session_id"],
+                    "title": row["title"], "meta": row["meta"],
+                } for row in state["projects"]
+                    if row["user_id"] == user_id
+                    and row["parent_project_id"] == parent_id
+                    and row["meta"]["shorts_editor"]
+                    ["materialization_key"] == key), None)
+            elif statement.startswith("INSERT INTO chat_sessions"):
+                sid = state["next_session"]
+                state["next_session"] += 1
+                state["sessions"].append({
+                    "id": sid, "user_id": params[0], "title": params[1]})
+                self.one = {"id": sid}
+            elif statement.startswith("INSERT INTO projects"):
+                pid = state["next_project"]
+                state["next_project"] += 1
+                state["projects"].append({
+                    "id": pid, "user_id": params[0], "title": params[1],
+                    "chat_session_id": params[2],
+                    "parent_project_id": params[3],
+                    "meta": params[4].adapted,
+                })
+                self.one = {"id": pid}
+            else:  # pragma: no cover - guards SQL drift in this unit fake
+                raise AssertionError(statement)
+
+        def fetchone(self):
+            return self.one
+
+    class Conn:
+        @staticmethod
+        def cursor():
+            return Cursor()
+
+    parent = {"id": 7}
+    clip = {
+        "order": 3, "start": 120.0, "end": 162.0,
+        "title": "The exact frozen title", "hook": "What went wrong?",
+        "score": 96,
+        "story": {"setup": "setup", "development": "development",
+                  "payoff": "payoff"},
+    }
+
+    first = shorts._create_child(Conn(), 60, parent, clip, 777)
+    # Parent state was never changed: the retry has only the same frozen arc.
+    second = shorts._create_child(Conn(), 60, parent, clip, 777)
+
+    assert first == second == (70, 40)
+    assert len(state["sessions"]) == 1
+    assert len(state["projects"]) == 1
+    key = shorts._short_materialization_key(7, 777, 3)
+    assert state["locks"] == [key, key]
+    assert state["projects"][0]["meta"]["shorts_editor"] == {
+        "status": "locked", "parent_project_id": 7,
+        "plan_job_id": 777, "arc_order": 3,
+        "materialization_key": key,
+    }
 
 
 def test_make_shorts_is_an_agent_tool():
@@ -569,6 +776,137 @@ def test_mcp_explicit_story_arcs_queue_locked_story_children():
     assert "LOCKED child" in result
 
 
+def test_aligned_caller_answer_window_stays_exact_without_question():
+    """An aligned explicit range is frozen; adding context is editorial.
+
+    The automatic scout may repair its own isolated answer, but an MCP caller
+    has already frozen the story range. The worker must not prepend the nearby
+    question after that range crosses the tool boundary.
+    """
+    from types import SimpleNamespace
+    import agent_tools
+    import db as dbx
+
+    captured = {}
+
+    class FakeDb:
+        def run(self, fn, *args):
+            if fn is dbx.has_active_job:
+                return False
+            if fn is dbx.enqueue_job:
+                captured["payload"] = args[3]
+                return 780
+            raise AssertionError(fn)
+
+    index = {
+        "words": [{"w": "because"}],
+        "sentences": [
+            {"t0": 10.0, "t1": 13.0, "speaker": 0,
+             "text": "Why did you decide to start?"},
+            {"t0": 13.4, "t1": 30.0, "speaker": 1,
+             "text": "Because the problem kept getting worse."},
+        ],
+    }
+    ctx = SimpleNamespace(
+        project={}, has_main_video=True, duration=180.0, index=index,
+        db=FakeDb(), project_id=7,
+        job={"user_id": 60, "type": "mcp_tool"})
+
+    result = agent_tools.make_shorts(ctx, clips=[{
+        "start": 13.4, "end": 30.0, "title": "The direct answer",
+        "score": 91,
+    }])
+
+    assert "job 780" in result
+    queued = captured["payload"]["clips"][0]
+    assert (queued["start"], queued["end"]) == (13.4, 30.0)
+    materialized = shorts._caller_planned_clips(
+        captured["payload"], index, ctx.duration)[0]
+    assert (materialized["start"], materialized["end"]) == (13.4, 30.0)
+    assert "context_restored" not in materialized
+
+
+def test_misaligned_caller_range_is_rejected_instead_of_rewritten():
+    from types import SimpleNamespace
+    import agent_tools
+    import db as dbx
+
+    class FakeDb:
+        def run(self, fn, *_args):
+            if fn is dbx.has_active_job:
+                return False
+            raise AssertionError("a misaligned range must not enqueue")
+
+    ctx = SimpleNamespace(
+        project={}, has_main_video=True, duration=180.0,
+        index={
+            "words": [{"w": "because"}],
+            "sentences": [
+                {"t0": 10.0, "t1": 13.0, "speaker": 0,
+                 "text": "Why did you decide to start?"},
+                {"t0": 13.4, "t1": 30.0, "speaker": 1,
+                 "text": "Because the problem kept getting worse."},
+            ],
+        },
+        db=FakeDb(), project_id=7,
+        job={"user_id": 60, "type": "mcp_tool"})
+
+    result = agent_tools.make_shorts(ctx, clips=[{
+        "start": 13.7, "end": 29.8, "title": "The direct answer",
+        "score": 91,
+    }])
+
+    assert result.startswith("REJECTED:")
+    assert "starts mid-thought at 13.7s" in result
+    assert "use the sentence boundary 13.4s" in result
+
+
+def test_caller_metadata_is_not_truncated_at_old_planner_boundaries():
+    """TEXT/JSONB storage supports metadata longer than scout prompt hints."""
+    from types import SimpleNamespace
+    import agent_tools
+    import db as dbx
+
+    captured = {}
+
+    class FakeDb:
+        def run(self, fn, *args):
+            if fn is dbx.has_active_job:
+                return False
+            if fn is dbx.enqueue_job:
+                captured["payload"] = args[3]
+                return 781
+            raise AssertionError(fn)
+
+    title = "T" * 56          # old internal scout limit + 1
+    hook = "H" * 161          # old hook limit + 1
+    story = {
+        "setup": "S" * 301,
+        "development": "D" * 301,
+        "payoff": "P" * 301,  # each old story-beat limit + 1
+    }
+    ctx = SimpleNamespace(
+        project={}, has_main_video=True, duration=180.0,
+        index={"words": [{"w": "hello"}]}, db=FakeDb(), project_id=7,
+        job={"user_id": 60, "type": "mcp_tool"})
+
+    result = agent_tools.make_shorts(ctx, clips=[{
+        "start": 30.0, "end": 50.0, "title": title, "hook": hook,
+        "score": 92, "story": story,
+    }])
+
+    assert "job 781" in result
+    queued = captured["payload"]["clips"][0]
+    assert queued["title"] == title
+    assert queued["hook"] == hook
+    assert queued["story"] == story
+    materialized = shorts._caller_planned_clips(
+        captured["payload"], ctx.index, ctx.duration)[0]
+    assert materialized["title"] == title
+    assert materialized["hook"] == hook
+    assert materialized["story"] == story
+
+
 def test_mcp_explicit_story_arcs_are_not_truncated_to_auto_planner_cap():
     """A long podcast may have every one of 12 strong, distinct stories.
 
@@ -593,7 +931,9 @@ def test_mcp_explicit_story_arcs_are_not_truncated_to_auto_planner_cap():
 
     clips = [{
         "start": i * 30.0, "end": i * 30.0 + 20.0,
-        "title": f"Complete story {i + 1}", "score": 95 - i,
+        "title": f"Complete story {i + 1}",
+        # Submitted rank deliberately disagrees with score rank.
+        "score": 80 if i == 0 else 100 - i,
         "story": {"setup": "setup", "development": "development",
                   "payoff": "payoff"},
     } for i in range(12)]
@@ -610,6 +950,11 @@ def test_mcp_explicit_story_arcs_are_not_truncated_to_auto_planner_cap():
     worker_clips = shorts._caller_planned_clips(
         captured["payload"], ctx.index, ctx.duration)
     assert len(worker_clips) == 12
+    assert [clip["title"] for clip in worker_clips] == [
+        clip["title"] for clip in clips]
+    assert worker_clips[0]["score"] == 80
+    assert worker_clips[1]["score"] == 99
+    assert [clip["order"] for clip in worker_clips] == list(range(12))
     clips_schema = agent_tools.TOOLS["make_shorts"][2]["clips"]
     assert "maxItems" not in clips_schema
 

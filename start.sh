@@ -71,4 +71,4 @@ else:
     print(f'  Total fixed: {fixed}')
 "
 
-exec gunicorn --workers 3 --timeout 600 --chdir backend "app:create_app()"
+exec gunicorn --workers 3 --worker-class gthread --threads 8 --timeout 600 --chdir backend "app:create_app()"

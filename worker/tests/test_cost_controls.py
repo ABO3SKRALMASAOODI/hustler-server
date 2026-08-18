@@ -598,6 +598,8 @@ def test_render_signature_is_exact_and_pipeline_scoped():
     assert first == agent_tools._render_signature(
         {"version": 99, "json": _edl()}, "preview")
     assert first != agent_tools._render_signature(row, "preview_check", [[0, 2]])
+    assert first != agent_tools._render_signature(
+        row, "preview", audio_model_review=False)
     assert len(first) == 64
 
 

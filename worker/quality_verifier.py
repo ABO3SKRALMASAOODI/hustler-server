@@ -501,7 +501,8 @@ def build_verification_record(project_id, version, manifest, edl, index,
         "proof_ranges": list(proof_ranges or []),
         "render_evidence": {key: preview.get(key) for key in (
             "asset_id", "storage_key", "edl_version", "duration_s", "audio_qc",
-            "verify_frames", "sheet_key", "caption_sheet_key", "caption_pages")
+            "audio_model_review", "verify_frames", "sheet_key",
+            "caption_sheet_key", "caption_pages")
             if preview.get(key) is not None},
         "findings": findings,
         "unresolved_findings": unresolved,

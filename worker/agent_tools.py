@@ -222,6 +222,12 @@ class ToolContext:
         self.plan_loaded = False
         self.plan_revised_this_turn = False
         self.last_audio_qc_findings = []
+        # Whether this editing owner permits a separate model to listen to
+        # bounded excerpts from a rendered preview. The in-house Studio
+        # editor keeps the historical default. MCP/Codex explicitly turns
+        # it off in mcp_exec: the outside Codex model remains the decision
+        # maker and receives deterministic mix measurements instead.
+        self.audio_model_review = True
         # Subjective evidence from bounded REAL audio clips.  It is advisory:
         # a reviewer outage cannot block a user's chosen track or a valid EDL.
         self.last_audio_review = None
@@ -1445,8 +1451,40 @@ def list_assets(ctx, kind=None):
         staged = (m.get("staged") is True or m.get("staged") == "true")
         if staged:
             place = " — STAGING TRAY (user has not pressed Submit)"
+        rights_bit = ""
+        if a["kind"] == "music":
+            evidence_input = dict(m)
+            evidence_input.setdefault("downloaded_sha256", a.get("sha256"))
+            rights = music_search.provenance(evidence_input)
+            rights["tool_normalized_license_note"] = (
+                m.get("tool_normalized_license_note") or
+                m.get("license_note") or music_search.license_note(
+                    evidence_input))
+            rights_bit = (" — MUSIC_PROVENANCE=" + json.dumps(
+                rights, sort_keys=True, separators=(",", ":")))
+            source_probe = {
+                "source_audio_stream_status": (
+                    m.get("source_audio_stream_status") or "not_exposed"),
+                "source_has_audio_stream": (
+                    m.get("source_has_audio_stream")
+                    if isinstance(m.get("source_has_audio_stream"), bool)
+                    else None),
+                "source_audio_stream_codec": (
+                    m.get("source_audio_stream_codec") or None),
+                "source_audio_stream_channels": (
+                    m.get("source_audio_stream_channels")
+                    if type(m.get("source_audio_stream_channels")) is int
+                    else None),
+                "source_audio_stream_probe_tool": (
+                    m.get("source_audio_stream_probe_tool") or None),
+                "source_audio_stream_probed_at": (
+                    m.get("source_audio_stream_probed_at") or None),
+            }
+            rights_bit += (" — MUSIC_SOURCE_PROBE=" + json.dumps(
+                source_probe, sort_keys=True, separators=(",", ":")))
         lines.append(f"[{a['kind']}] storage_key={a['storage_key']} "
-                     f"\"{m.get('filename', '?')}\"{dur}{cap}{role_bit}{place}")
+                     f"\"{m.get('filename', '?')}\"{dur}{cap}{role_bit}"
+                     f"{place}{rights_bit}")
     head = ""
     if unused_n:
         head = (f"{unused_n} file(s) are in the project and NOT on the "
@@ -4847,8 +4885,11 @@ def search_music(ctx, query, min_seconds=None, max_seconds=None,
             + "\n- ".join(music_search.describe(h) for h in hits)
             + "\nfetch_music(id) downloads one into the project. Then "
               "add_music lays it in — tell the user which track you "
-              "chose and its license line (a CC BY credit is theirs to "
-              "carry in the caption)." + duration_note + gate)
+              "chose and its license line (when attribution is required, "
+              "the credit is theirs to carry in the caption). Raw provider "
+              "rights and the canonical source page remain attached to the "
+              "candidate; unknown is never treated as CC BY."
+            + duration_note + gate)
 
 
 def audition_music_candidates(ctx, ids, brief=None):
@@ -5072,6 +5113,12 @@ def fetch_music(ctx, id):
         return ("REJECTED: that music result id could not be recovered"
                 + (f" ({recover_error})" if recover_error else "")
                 + ". Call search_music and choose one of its current ids.")
+    rights = music_search.provenance(hit)
+    if not music_search.usable(hit):
+        return ("REJECTED: that result has unknown or non-derivative music "
+                "rights. No permissive license was inferred. Choose a "
+                "search_music result whose provider-reported rights are "
+                "explicit.")
     lp = os.path.join(ctx.workdir, f"musicfetch_{uuid.uuid4().hex[:8]}.mp3")
     try:
         music_search.download(hit, lp)
@@ -5083,6 +5130,15 @@ def fetch_music(ctx, id):
         return ("REJECTED: the downloaded file is not playable audio "
                 "(or under 3s) — try another result. Do NOT claim music "
                 "was added.")
+    source_probe = music_search.probe_audio_stream(lp)
+    if source_probe["source_audio_stream_status"] != "complete":
+        return ("REJECTED: the downloaded file's audio-stream probe was "
+                "unavailable, so no playable music stream was assumed. Try "
+                "another result. Do NOT claim music was added.")
+    if source_probe["source_has_audio_stream"] is not True:
+        return ("REJECTED: the downloaded file has no audio stream. Try "
+                "another result. Do NOT claim music was added.")
+    downloaded_sha256 = media.sha256_file(lp)
     key = f"music/{ctx.project_id}/{uuid.uuid4().hex[:12]}.mp3"
     try:
         storage.upload_file(lp, key, "audio/mpeg")
@@ -5093,12 +5149,23 @@ def fetch_music(ctx, id):
     artist = hit.get("artist")
     fname = ((f"{title} — {artist}" if artist else title)[:80]) + ".mp3"
     note = music_search.license_note(hit)
+    persisted_provenance = dict(rights)
+    persisted_provenance["downloaded_sha256"] = downloaded_sha256
+    persisted_provenance["tool_normalized_license_note"] = note
     ctx.db.run(dbx.insert_asset, ctx.project_id, "music", key,
                bytes_=os.path.getsize(lp), duration_s=dur,
-               meta={"filename": fname, "source": hit.get("provider"),
-                     "source_url": hit.get("page_url") or hit.get("_url"),
-                     "license": hit.get("license"), "license_note": note,
+               sha256=downloaded_sha256,
+               meta={"filename": fname,
+                     # Legacy aliases retained for existing asset readers.
+                     "source": rights["provider"],
+                     "source_url": rights["source_url"],
+                     "license": hit.get("license"),
+                     "license_note": note,
                      "author": artist,
+                     **source_probe,
+                     # Truthful provider/raw rights evidence for Codex and
+                     # later audits. Null means not exposed, never CC-BY.
+                     **persisted_provenance,
                      "caption": "found online by search_music"})
     ctx.audio_fetched.append(key)
     listener = getattr(ctx, "_last_music_listener_choice", None) or {}
@@ -5114,6 +5181,11 @@ def fetch_music(ctx, id):
         provider=hit.get("provider"), review_stage="downloaded")
     return (f"Fetched \"{title}\"{' by ' + artist if artist else ''} — "
             f"{dur:.0f}s, saved as storage_key={key}. License: {note}. "
+            "MUSIC_PROVENANCE=" + json.dumps(
+                persisted_provenance, sort_keys=True,
+                separators=(",", ":")) + ". MUSIC_SOURCE_PROBE=" +
+            json.dumps(source_probe, sort_keys=True,
+                       separators=(",", ":")) + ". "
             f"Next: add_music(storage_key='{key}') — set_music_fit retimes it, "
             "get_audio_analysis(asset_key) measures its BPM/beats for "
             "beat_align_cuts.")
@@ -17024,7 +17096,7 @@ def speculative_preview(ctx):
 
 
 
-def _render_signature(row, kind, ranges=None):
+def _render_signature(row, kind, ranges=None, audio_model_review=True):
     """Identify the exact pixels requested under this deployed renderer.
 
     EDL versions are cheap history and two versions may contain identical
@@ -17036,6 +17108,10 @@ def _render_signature(row, kind, ranges=None):
         "kind": kind,
         "edl": (row or {}).get("json") or {},
         "ranges": ranges or [],
+        # Listening excerpts are ancillary evidence rather than video pixels,
+        # but a deterministic-only MCP preview must not join a failed/retried
+        # job whose evidence policy is different.
+        "audio_model_review": bool(audio_model_review),
         "code": worker_version.code_version(),
     }
     raw = json.dumps(material, sort_keys=True, separators=(",", ":"),
@@ -17120,10 +17196,14 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None):
     # Adopt the speculative encode of this exact version when one is already
     # queued/running (round 98) — same payload shape, same verify plan,
     # half the wait and none of the double cost.
+    audio_model_review = _audio_model_review_enabled(ctx)
     payload = _child_payload(ctx, {
                "edl_version": version, "source": "agent_preview",
                "agent_job_id": ctx.job["id"],
-               "render_signature": _render_signature(row, "preview")})
+               "audio_model_review": audio_model_review,
+               "render_signature": _render_signature(
+                   row, "preview",
+                   audio_model_review=audio_model_review)})
     if plan:
         payload["verify_times"] = [t for t, _ in plan]
     sequence_frames = _sequence_screening_frames(ctx, row)
@@ -17146,6 +17226,13 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None):
         j = ctx.db.run(dbx.get_job, job_id)
         if j["state"] == "done":
             result = j.get("result") or {}
+            # A deterministic-only owner may adopt an older/in-flight render
+            # that happened to include listener excerpts. Keep those opaque:
+            # they are not evidence for this workflow and must never reach
+            # the model-review or durable-verification paths below.
+            if not audio_model_review:
+                result = dict(result, listen_keys=[],
+                              audio_model_review=False)
             ctx.last_preview = result
             ctx.rendered_versions.add(version)
             # A deterministic failure belongs to the exact older version that
@@ -17366,11 +17453,7 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None):
                 ctx.last_visual_critic or {})
             story_record_findings = story_critic.repair_lines(
                 ctx.last_story_review or {})
-            audio_record_findings = list(ctx.last_audio_qc_findings or [])
-            if (ctx.last_audio_review or {}).get("verdict") == "fix":
-                audio_record_findings.append(
-                    (ctx.last_audio_review or {}).get("text") or
-                    "actual-audio review requested a repair")
+            audio_record_findings = _audio_verification_findings(ctx)
             manifest = (getattr(ctx, "change_manifests", None) or {}).get(version) or \
                 quality_verifier.build_change_manifest(
                     ctx.project_id, version, row["json"], row["json"], {},
@@ -17576,8 +17659,42 @@ def _audio_execution_context(edl, plan):
         " | ".join(rows))[:3200]
 
 
+def _audio_model_review_enabled(ctx):
+    """Whether this editing owner permits a separate listening model.
+
+    Missing means True for backward compatibility with Studio contexts and
+    small test doubles created before the policy existed. MCP sets an
+    explicit False; availability of a configured reviewer is checked only
+    after this ownership boundary.
+    """
+    return getattr(ctx, "audio_model_review", True) is not False
+
+
+def _audio_verification_findings(ctx):
+    """Durable audio findings, excluding forbidden model opinions.
+
+    Deterministic whole-mix QC remains valid for every workflow. A subjective
+    reviewer finding is eligible only for owners that explicitly retain that
+    legacy Studio lane.
+    """
+    findings = list(getattr(ctx, "last_audio_qc_findings", None) or [])
+    if _audio_model_review_enabled(ctx):
+        review = getattr(ctx, "last_audio_review", None) or {}
+        if review.get("verdict") == "fix":
+            findings.append(
+                review.get("text") or
+                "actual-audio review requested a repair")
+    return findings
+
+
 def _review_render_audio(ctx, row, result):
     """Listen to the final mix excerpts emitted by the executor, best effort."""
+    if not _audio_model_review_enabled(ctx):
+        # Clear any stale opinion if a context is deliberately narrowed after
+        # construction. This guarantees it cannot influence a later handoff
+        # or be copied into the immutable verification record.
+        ctx.last_audio_review = None
+        return None
     if not llm.audio_review_available():
         return None
     edl = row.get("json") or {}
@@ -19645,24 +19762,113 @@ def _declared_mix_state(ctx, edl):
     if not isinstance(edl, dict):
         return None
 
-    def asset_label(key):
+    def asset_record(key):
         try:
             asset = ctx.db.run(dbx.asset_by_key, ctx.project_id, key)
         except Exception:
             asset = None
         meta = (asset or {}).get("meta") or {}
-        return (meta.get("filename") or meta.get("title") or
-                os.path.basename(key or "?"))[:80]
+        label = (meta.get("filename") or meta.get("title") or
+                 os.path.basename(key or "?"))[:80]
+        return asset or {}, meta, label
+
+    def asset_label(key):
+        return asset_record(key)[2]
+
+    def music_record(item):
+        asset, meta, label = asset_record(item.get("storage_key"))
+        evidence_input = dict(meta)
+        evidence_input.setdefault("downloaded_sha256", asset.get("sha256"))
+        rights = music_search.provenance(evidence_input)
+        rights["tool_normalized_license_note"] = (
+            meta.get("tool_normalized_license_note") or
+            meta.get("license_note") or
+            music_search.license_note(evidence_input))
+        try:
+            source_duration = (float(asset["duration_s"])
+                               if asset.get("duration_s") is not None
+                               else None)
+            if (source_duration is not None and
+                    (not math.isfinite(source_duration) or
+                     source_duration < 0)):
+                source_duration = None
+        except (TypeError, ValueError):
+            source_duration = None
+        start = item.get("start")
+        end = item.get("end")
+        try:
+            start_f, end_f = float(start), float(end)
+            authored_span = (max(0.0, end_f - start_f)
+                             if math.isfinite(start_f) and math.isfinite(end_f)
+                             else None)
+        except (TypeError, ValueError):
+            authored_span = None
+        try:
+            source_offset = float(item.get("offset_s") or 0.0)
+            source_offset = (max(0.0, source_offset)
+                             if math.isfinite(source_offset) else 0.0)
+        except (TypeError, ValueError):
+            source_offset = 0.0
+        loop = bool(item.get("loop"))
+        mute = bool(item.get("mute"))
+        try:
+            gain_db = float(item.get("gain_db"))
+            gain_effectively_muted = (math.isfinite(gain_db) and
+                                       gain_db <= GAIN_MIN_DB)
+            if not math.isfinite(gain_db):
+                gain_db = None
+                gain_effectively_muted = None
+        except (TypeError, ValueError):
+            gain_db = None
+            gain_effectively_muted = None
+        source_available = (max(0.0, source_duration - source_offset)
+                            if source_duration is not None else None)
+        source_coverage = None
+        if authored_span is not None and source_available is not None:
+            source_coverage = (authored_span if loop and source_available > 0
+                               else min(authored_span, source_available))
+        effective_coverage = (0.0 if (mute or gain_effectively_muted is True)
+                              and authored_span is not None
+                              else source_coverage)
+        return {"id": item.get("id"),
+                "storage_key": item.get("storage_key"),
+                "file": label,
+                "window": [start, end],
+                "authored_span_s": authored_span,
+                "source_offset_s": source_offset,
+                "source_duration_s": source_duration,
+                "source_available_after_offset_s": source_available,
+                "source_coverage_s": source_coverage,
+                "effective_music_coverage_s": effective_coverage,
+                "gain_db": gain_db,
+                "gain_effectively_muted": gain_effectively_muted,
+                "duck": item.get("duck"),
+                "duck_mode": item.get("duck_mode"),
+                "loop": loop,
+                "mute": mute,
+                "fade_in_s": item.get("fade_in_s"),
+                "fade_out_s": item.get("fade_out_s"),
+                "purpose": item.get("purpose"),
+                "source_audio_stream_status": (
+                    meta.get("source_audio_stream_status") or "not_exposed"),
+                "source_has_audio_stream": (
+                    meta.get("source_has_audio_stream")
+                    if isinstance(meta.get("source_has_audio_stream"), bool)
+                    else None),
+                "source_audio_stream_codec": (
+                    meta.get("source_audio_stream_codec") or None),
+                "source_audio_stream_channels": (
+                    meta.get("source_audio_stream_channels")
+                    if type(meta.get("source_audio_stream_channels")) is int
+                    else None),
+                "source_audio_stream_probe_tool": (
+                    meta.get("source_audio_stream_probe_tool") or None),
+                "source_audio_stream_probed_at": (
+                    meta.get("source_audio_stream_probed_at") or None),
+                "provenance": rights}
 
     return {
-        "music": [{"id": item.get("id"),
-                   "file": asset_label(item.get("storage_key")),
-                   "window": [item.get("start"), item.get("end")],
-                   "source_offset_s": item.get("offset_s") or 0,
-                   "gain_db": item.get("gain_db"),
-                   "duck": item.get("duck"),
-                   "purpose": item.get("purpose")}
-                  for item in (edl.get("music") or [])],
+        "music": [music_record(item) for item in (edl.get("music") or [])],
         "voiceover": [{"id": item.get("id"),
                        "file": asset_label(item.get("asset_key")),
                        "start_output_s": item.get("start_output_s"),
@@ -19699,6 +19905,21 @@ def audit_audio_mix(ctx):
             "remove_voiceover and add_music instead—the roles mix differently")
     if not any(state.get(k) for k in ("music", "voiceover", "sfx")):
         warnings.append("no designed audio layers are authored")
+    for item in state.get("music") or []:
+        rights = item.get("provenance") or {}
+        if (rights.get("license_verification_status") !=
+                "provider_metadata_exposed"):
+            warnings.append(
+                f"music {item.get('id') or item.get('storage_key')} has "
+                "unknown rights; no permissive license may be inferred")
+        elif rights.get("derivatives_allowed") is not True:
+            warnings.append(
+                f"music {item.get('id') or item.get('storage_key')} does "
+                "not have a provider-reported derivative-use grant")
+        elif rights.get("commercial_use_allowed") is False:
+            warnings.append(
+                f"music {item.get('id') or item.get('storage_key')} is "
+                "provider-reported non-commercial only")
     preview = ctx.last_preview or {}
     result = {
         "version": row["version"],
@@ -20696,6 +20917,8 @@ def _direct_short_clips(ctx, clips):
     not taste paperwork. There is deliberately no fixed item quota here: the
     ten-second minimum plus strict non-overlap supplies the source-dependent
     natural bound, and the worker creates accepted children sequentially.
+    Caller order and descriptive metadata are part of the frozen selection:
+    validate them here, but never re-rank or silently truncate them.
     """
     if not isinstance(clips, list) or not clips:
         return None, "clips must be a non-empty array"
@@ -20728,35 +20951,57 @@ def _direct_short_clips(ctx, clips):
             nearest_end = min(
                 (float(row["t1"]) for row in sentences),
                 key=lambda value: abs(value - end))
-            if abs(nearest_start - start) > 1.5:
+            # An explicit caller range is frozen editorial input. Validate
+            # that it already names the transcript boundary instead of
+            # silently replacing it with a nearby time; only the later child
+            # seed is allowed to snap mechanically to measured word edges.
+            # Transcript/EDL times are rounded to 0.01s. Reuse the same
+            # strictly-inside epsilon as the word-boundary auditor instead of
+            # inventing a wider editorial snapping tolerance.
+            boundary_epsilon_s = audit.EPS
+            if abs(nearest_start - start) > boundary_epsilon_s:
                 return None, (f"clip {i} starts mid-thought at {start:g}s; "
                               f"use the sentence boundary {nearest_start:g}s")
-            if abs(nearest_end - end) > 1.5:
+            if abs(nearest_end - end) > boundary_epsilon_s:
                 return None, (f"clip {i} ends mid-thought at {end:g}s; use "
                               f"the sentence boundary {nearest_end:g}s")
-            start, end = nearest_start, nearest_end
         if end - start < min_clip_s or end - start > 120:
             return None, (f"clip {i} must be {min_clip_s:g}-120 seconds, "
                           f"got {end-start:.1f}s")
 
+        title = raw.get("title")
+        if not isinstance(title, str) or not title.strip():
+            return None, f"clip {i} title must be a non-empty string"
+        hook = raw.get("hook") or ""
+        if not isinstance(hook, str):
+            return None, f"clip {i} hook must be a string"
+
         story = raw.get("story") or {}
         if not isinstance(story, dict):
             return None, f"clip {i} story must be an object"
-        clean_story = {
-            stage: str(story.get(stage) or "").strip()[:300]
-            for stage in ("setup", "development", "payoff")
-            if str(story.get(stage) or "").strip()
-        }
+        clean_story = {}
+        for stage in ("setup", "development", "payoff"):
+            value = story.get(stage)
+            if value is None or value == "":
+                continue
+            if not isinstance(value, str):
+                return None, f"clip {i} story.{stage} must be a string"
+            clean_story[stage] = value
 
+        raw_score = raw.get("score", 80)
+        if raw_score is None:
+            raw_score = 80
         try:
-            score = int(raw.get("score") or 80)
+            score = int(raw_score)
         except (TypeError, ValueError):
+            return None, f"clip {i} score must be an integer from 0 to 100"
+        if score < 0 or score > 100:
             return None, f"clip {i} score must be an integer from 0 to 100"
         planned.append({
             "start": round(start, 2), "end": round(end, 2),
-            "title": str(raw.get("title") or f"Short {i}")[:55],
-            "hook": str(raw.get("hook") or "")[:160],
-            "score": max(0, min(100, score)),
+            "title": title,
+            "hook": hook,
+            "score": score,
             "story": clean_story,
         })
 
@@ -21768,9 +22013,13 @@ TOOLS = {
                      "genre/vibe words — 'dark phonk', 'lofi chill beat', "
                      "'cinematic piano', 'upbeat funk'. Search by what the "
                      "video IS, not a generic mood. Results carry title, "
-                     "artist, duration and the exact license terms (public "
-                     "domain, credit required, or NON-COMMERCIAL-ONLY) — "
-                     "relay the terms. Business/ad briefs automatically "
+                     "artist, duration, provider candidate id, raw provider "
+                     "license id/label/version/URL, canonical source page, "
+                     "and mechanically derived commercial-use, attribution "
+                     "and derivative-use signals. These are provider-reported "
+                     "metadata, not independent legal verification; unknown "
+                     "never falls back to CC BY. Relay the terms. Business/ad "
+                     "briefs automatically "
                      "exclude non-commercial tracks; set commercial_use "
                      "true when an ambiguous brief also needs that safety. "
                      "min_seconds/max_seconds filter length. For a "
@@ -21815,7 +22064,9 @@ TOOLS = {
          "brief": {"type": "string"}}),
     "fetch_music": (fetch_music, "Download ONE search_music result (by its "
                     "id) into the project as a normal music asset — "
-                    "returns the storage_key for add_music. Repeat the "
+                    "returns the storage_key for add_music and persists the "
+                    "raw provider provenance plus downloaded content SHA-256 "
+                    "so list_assets/audit_audio_mix can re-read it. Repeat the "
                     "license line to the user when it "
                     "carries an obligation (credit, or "
                     "non-commercial-only).",
@@ -23445,7 +23696,8 @@ TOOLS = {
                            "energy analysis of the source audio (cached "
                            "after the first call): tempo (BPM + confidence "
                            "— below 0.5 the pulse is unreliable and "
-                           "beat_align_cuts refuses), the beat grid, where "
+                           "beat_align_cuts refuses), beat count plus the "
+                           "first up-to-eight detected beat timestamps, where "
                            "the loudest/quietest sections and the biggest "
                            "energy rise sit, and the most vocally STRESSED "
                            "words with timestamps. Times are SOURCE "
@@ -23478,7 +23730,10 @@ TOOLS = {
     "audit_audio_mix": (audit_audio_mix, "Deterministic audit of the CURRENT "
                         "EDL's authored music, voiceover and SFX roles, files, "
                         "program windows, source offsets, gains, ducking and "
-                        "mastering. Detects the same asset playing twice or a "
+                        "mastering. Each music item includes its persisted raw "
+                        "provider provenance, rights-capability signals and "
+                        "downloaded SHA-256, with explicit null/unknown values. "
+                        "Detects the same asset playing twice or a "
                         "likely song misfiled as voiceover. This state is "
                         "ground truth; deterministic preview AUDIO CHECK can "
                         "measure the rendered mix without relabeling roles.",
@@ -23634,9 +23889,9 @@ TOOLS = {
                                "items": {"type": "object", "properties": {
                                    "start": {"type": "number", "description": "Source seconds; start on a complete setup/question boundary."},
                                    "end": {"type": "number", "description": "Source seconds; end after the payoff resolves."},
-                                   "title": {"type": "string"},
-                                   "hook": {"type": "string"},
-                                   "score": {"type": "integer"},
+                                   "title": {"type": "string", "description": "Preserved verbatim as the child project/card title."},
+                                   "hook": {"type": "string", "description": "Preserved verbatim as caller-authored story context."},
+                                   "score": {"type": "integer", "minimum": 0, "maximum": 100},
                                    "story": {"type": "object", "properties": {
                                        "setup": {"type": "string"},
                                        "development": {"type": "string"},
@@ -24041,7 +24296,7 @@ WRITE_TOOLS = {"apply_edit_recipe",
                "punch_in_on_emphasis", "fetch_sfx",
                "beat_align_cuts", "apply_look",
                "generate_image",
-               "generate_video", "fetch_url"}
+               "generate_video", "fetch_url", "fetch_music"}
 
 
 def _tool_disabled(name, model=None):

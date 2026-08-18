@@ -48,6 +48,7 @@ one env var, not a deploy.
 import base64
 import hashlib
 import json
+import math
 import os
 import secrets
 import time
@@ -462,7 +463,9 @@ SESSION_TOOLS = [
                     "Returns presigned URL(s) you upload the bytes to "
                     "yourself (curl), then call upload_finish. kind: "
                     "'original' the main video, 'clip' b-roll, 'music' audio, "
-                    "'image' a still.",
+                    "'image' a still. A clip may instead be marked "
+                    "role='shorts_reference' for reference-only Shorts style "
+                    "analysis.",
      "inputSchema": {"type": "object", "properties": {
          "filename": {"type": "string",
                       "description": "Name with extension, e.g. talk.mp4"},
@@ -470,6 +473,14 @@ SESSION_TOOLS = [
                         "description": "Exact size of the local file"},
          "kind": {"type": "string",
                   "enum": ["original", "clip", "music", "image"]},
+         "role": {"type": "string", "enum": ["shorts_reference"],
+                  "description": "Optional and valid only with kind='clip'. "
+                                 "Makes the upload reference-only Shorts "
+                                 "style input, not placeable media."},
+         "duration_s": {"type": "number", "exclusiveMinimum": 0,
+                        "description": "Optional locally probed media "
+                                       "duration in seconds; repeated in the "
+                                       "returned upload_finish contract."},
          "project_id": {"type": "integer"}},
          "required": ["project_id", "filename", "size_bytes"]}},
     {"name": "upload_finish",
@@ -481,6 +492,12 @@ SESSION_TOOLS = [
          "filename": {"type": "string"},
          "kind": {"type": "string",
                   "enum": ["original", "clip", "music", "image"]},
+         "role": {"type": "string", "enum": ["shorts_reference"],
+                  "description": "Optional and valid only with kind='clip'. "
+                                 "Marks a reference-only Shorts style clip."},
+         "duration_s": {"type": "number", "exclusiveMinimum": 0,
+                        "description": "Optional locally probed media "
+                                       "duration in seconds."},
          "upload_id": {"type": "string",
                        "description": "Multipart uploads only"},
          "parts": {"type": "array",
@@ -555,6 +572,12 @@ SESSION_TOOLS = [
          "max_height": {"type": "integer",
                         "description": "Cap the picture height (e.g. 360). "
                                        "Never up-scales."},
+         "frames": {"type": "boolean",
+                    "description": "Default true. False returns only the "
+                                   "video file/link and suppresses sampled "
+                                   "frame sheets plus their attached audio; "
+                                   "use false for clean external ASR "
+                                   "retrieval."},
          "render": {"type": "boolean",
                     "description": "kind='timeline': false watches the last "
                                   "render that exists instead of rendering "
@@ -641,16 +664,15 @@ Two things are different from a normal tool session, and both matter:
    you did, then watch_video/download_url so what you claim is something you
    have actually seen. Do not produce a complete preview after every edit.
 
-3. IF YOU CAN WATCH VIDEO, WATCH IT. The doctrine above tells you to look
-   before you claim, and describes look_at as your eyes — that is written for
-   a model that reads pictures, and look_at pays a SECOND model to describe
-   frames to you. watch_video hands you the file itself: the assembled
-   program with its audio, the raw footage, or one clip, embedded in the
-   reply or on a link you can fetch. Use it for anything about pace, timing,
-   music, delivery or "does this cut work", where stills cannot answer and a
-   description is someone else's judgement. look_at is still the better tool
-   for reading exact positions off a frame — it burns a tenths grid onto what
-   it captures, which is how zoom aims and text boxes get their coordinates.
+3. INSPECT PICTURE AND AUDIO EVIDENCE HONESTLY. look_at/look_at_asset return
+   sampled pixels for your own visual judgment; they do not prove continuous
+   playback and do not delegate that judgment to another model. watch_video
+   can return a stored file or URL, but an attached audio block does not prove
+   that the current client/model perceived it. For music and speech claims,
+   use visible track identity, factual ASR, deterministic measurements and
+   authored EDL timing. Never claim that you heard something unless the client
+   explicitly proves that capability. Use the tenths grid in look_at for exact
+   zoom and text-box coordinates.
 
 4. PODCAST TO SHORTS IS A DIRECT MCP WORKFLOW. Call create_project(title,
    kind="shorts"), upload the long main video, and poll index_status. Selection
@@ -670,10 +692,12 @@ Two things are different from a normal tool session, and both matter:
    payoff, reject the range even if one quote is catchy.
 
    Poll shorts_status to get every locked child project ID. Open each with
-   open_short(child_project_id=ID), watch and hear the actual selected story,
-   decide its visual and sonic treatment in context, and make all EDL edits
-   YOURSELF. Research B-roll as evidence rather than wallpaper; choose music,
-   captions, framing, cards, motion and sound by judgement instead of quotas.
+   open_short(child_project_id=ID), inspect the actual selected story's full
+   visual coverage and factual transcript, infer its treatment from that
+   evidence, and make all EDL edits YOURSELF. Research B-roll as evidence
+   rather than wallpaper; choose music from visible identity, rights metadata,
+   deterministic track facts and authored timing rather than invented hearing.
+   Choose captions, framing, cards and motion by story-specific judgment.
    Render_preview(complete=true) once the whole edit is coherent, then
    watch_video to verify it. That direct MCP edit advances and unlocks the
    Studio card; never press or emulate Studio's Edit-agent action. Final export is deliberately Studio-only.
@@ -751,6 +775,77 @@ def _still_running(row, what):
             f"wait_for_job(job_id={row['id']}) to pick the result up.")
 
 
+def _preview_policy_line(preview):
+    """Public, copyable provenance for an MCP preview result."""
+    if not isinstance(preview, dict) or \
+            "audio_model_review" not in preview:
+        return ""
+    raw = preview.get("audio_model_review")
+    if raw not in (True, False) or not isinstance(raw, bool):
+        return ("\n\nPREVIEW PROVENANCE ERROR: audio_model_review did "
+                "not contain a boolean; do not infer whether a separate "
+                "listening model was invoked.")
+    enabled = raw is True
+    value = "true" if enabled else "false"
+    detail = ("a separate listening model was permitted"
+              if enabled else
+              "no separate listening model was invoked; use deterministic "
+              "audio QC, transcript, track identity and authored EDL facts")
+    return (f"\n\nPREVIEW PROVENANCE: audio_model_review={value} — "
+            f"{detail}.")
+
+
+def _preview_asset_receipt(row, url=None):
+    """Server-authored receipt for one deterministic-only preview asset."""
+    meta = (row or {}).get("meta") or {}
+    listen_keys = meta.get("listen_keys") or []
+    listen_clips = meta.get("listen_clips") or []
+    if meta.get("audio_model_review") is not False or \
+            listen_keys or listen_clips:
+        return None
+    try:
+        asset_id = int(row.get("id"))
+        render_job_id = int(meta.get("render_job_id"))
+        edl_version = int(meta.get("edl_version"))
+        duration_s = float(row.get("duration_s"))
+    except (TypeError, ValueError):
+        # A receipt must be self-contained and version-pinned.  Treat a
+        # malformed legacy asset as incompatible instead of returning a 500
+        # or inventing provenance for it.
+        return None
+    if asset_id <= 0 or render_job_id <= 0 or edl_version < 0 or \
+            not math.isfinite(duration_s) or duration_s <= 0:
+        return None
+    canonical = json.dumps(meta, sort_keys=True, separators=(",", ":"),
+                           ensure_ascii=False, default=str)
+    receipt = {
+        "asset_id": asset_id,
+        "render_job_id": render_job_id,
+        "edl_version": edl_version,
+        "duration_s": duration_s,
+        "audio_model_review": False,
+        "listen_keys_count": 0,
+        "listen_clips_count": 0,
+        "audio_reviewer_findings_count": 0,
+        "meta_sha256": hashlib.sha256(
+            canonical.encode("utf-8")).hexdigest(),
+    }
+    if url:
+        receipt["url"] = url
+    return receipt
+
+
+def _editor_structured_content(result):
+    """Small machine-readable facts preserved across the public MCP hop."""
+    result = result or {}
+    out = {key: result[key] for key in ("edl_version", "edl_changed")
+           if key in result}
+    preview = result.get("preview")
+    if isinstance(preview, dict):
+        out["preview"] = preview
+    return out
+
+
 def _run_tool_job(tok, name, args, raw=False, project_id=None):
     """Enqueue one editor tool call for the worker and wait for its answer.
 
@@ -795,6 +890,7 @@ def _run_tool_job(tok, name, args, raw=False, project_id=None):
         return _out(identity + "\n" + _still_running(row, label))
     result = row.get("result") or {}
     text = identity + "\n" + (result.get("text") or json.dumps(result))
+    text += _preview_policy_line(result.get("preview"))
     if raw:
         result = dict(result)
         result.update(text=text, project_id=project_id,
@@ -1025,6 +1121,49 @@ def _t_project_state(tok, args):
     return _run_tool_job(tok, "__state__", {}, project_id=project_id)
 
 
+def _upload_contract(args, kind):
+    """Validate the optional metadata shared by upload_start/finish.
+
+    MCP clients usually honor the advertised JSON schema, but connected
+    clients cache tool definitions and can call us without validating them.
+    Keep the role constraint at the server boundary too: the upload core only
+    gives this role meaning for clips, so accepting it on anything else would
+    silently turn a promised reference into ordinary media.
+    """
+    role = args.get("role")
+    if role in (None, ""):
+        role = None
+    elif role != "shorts_reference":
+        return None, None, "role must be 'shorts_reference' when provided."
+    elif kind != "clip":
+        return None, None, (
+            "role='shorts_reference' is valid only with kind='clip'.")
+
+    # Leave normalization and the five-minute reference cap to the shared
+    # upload core, just like the Studio direct-upload path does.
+    return role, args.get("duration_s"), None
+
+
+def _upload_finish_call(project_id, key, filename, kind, role, duration_s,
+                        upload_id=None):
+    """Return the static finish arguments as prose and machine-readable JSON."""
+    finish_args = {
+        "project_id": project_id,
+        "storage_key": key,
+        "filename": filename,
+        "kind": kind,
+    }
+    if role:
+        finish_args["role"] = role
+    if duration_s is not None:
+        finish_args["duration_s"] = duration_s
+    if upload_id:
+        finish_args["upload_id"] = upload_id
+    call = ", ".join(
+        f"{name}={json.dumps(value)}" for name, value in finish_args.items())
+    return call, finish_args
+
+
 def _t_upload_start(tok, args):
     project_id, error = _required_project_id(args)
     if error:
@@ -1035,6 +1174,9 @@ def _t_upload_start(tok, args):
     kind = args.get("kind") or "original"
     if kind not in ("original", "music", "image", "clip"):
         return "kind must be one of: original, clip, music, image."
+    role, duration_s, error = _upload_contract(args, kind)
+    if error:
+        return error
     try:
         nbytes = int(args.get("size_bytes"))
     except (TypeError, ValueError):
@@ -1053,18 +1195,20 @@ def _t_upload_start(tok, args):
     except Exception as e:
         return f"Could not prepare the upload: {e}"
 
+    finish_call, finish_args = _upload_finish_call(
+        project_id, key, filename, kind, role, duration_s,
+        out.get("upload_id"))
     if out.get("mode") == "single":
         return (
             f"Upload the file with this exact command, then call "
-            f"upload_finish(project_id={project_id}, storage_key=\"{key}\", "
-            f"filename=\"{filename}\", "
-            f"kind=\"{kind}\").\n\n"
+            f"upload_finish({finish_call}).\n\n"
             f"curl -sS -f -X PUT -H 'Content-Type: {content_type}' "
             f"--upload-file '<LOCAL PATH>' '{out['url']}'\n\n"
             "The URL is valid for 12 hours and carries the whole upload — "
             "it is long, do not edit or wrap it.\n\n"
             + json.dumps({"mode": "single", "storage_key": key,
-                          "content_type": content_type, "url": out["url"]}))
+                          "content_type": content_type, "url": out["url"],
+                          "upload_finish_arguments": finish_args}))
 
     # Multipart. Every part but the last must be exactly part_size bytes, and
     # each PUT returns an ETag header that upload_finish needs back in order.
@@ -1077,28 +1221,44 @@ def _t_upload_start(tok, args):
         f"the repo — it does all of this, including the retries — or PUT each "
         f"part yourself with `curl -D-` and keep the ETag header from every "
         f"response.\n\n"
-        f"Then call upload_finish(project_id={project_id}, storage_key=\"{key}\", "
-        f"filename=\"{filename}\", kind=\"{kind}\", "
-        f"upload_id=\"{out.get('upload_id')}\", "
+        f"Then call upload_finish({finish_call}, "
         f"parts=[{{\"part_number\": 1, \"etag\": \"...\"}}, ...]).\n\n"
         + json.dumps({"mode": "multipart", "storage_key": key,
                       "upload_id": out.get("upload_id"),
-                      "part_size": out.get("part_size"), "parts": parts}))
+                      "part_size": out.get("part_size"), "parts": parts,
+                      "upload_finish_arguments": finish_args}))
 
 
 def _t_upload_finish(tok, args):
     project_id, error = _required_project_id(args)
     if error:
         return error
+    kind = args.get("kind") or "original"
+    role, duration_s, error = _upload_contract(args, kind)
+    if error:
+        return error
     payload, status = complete_upload_core(
         tok["user_id"], project_id,
         {"storage_key": args.get("storage_key"),
-         "kind": args.get("kind") or "original",
+         "kind": kind,
          "filename": args.get("filename") or "",
          "upload_id": args.get("upload_id"),
-         "parts": args.get("parts") or []})
+         "parts": args.get("parts") or [],
+         "role": role,
+         "duration_s": duration_s})
     if status >= 400:
         return f"Upload could not be finished: {payload.get('error')}"
+    if role == "shorts_reference":
+        analysis = ""
+        if payload.get("index_job_id"):
+            analysis = (f" Reference analysis started as job "
+                        f"{payload['index_job_id']}; use "
+                        f"wait_for_job(job_id={payload['index_job_id']}) "
+                        "to follow it.")
+        return (f"Uploaded Shorts style reference (asset "
+                f"{payload['asset_id']}).{analysis} This asset is "
+                "reference-only analysis input: it is not added to the "
+                "timeline or offered as placeable media.")
     if payload.get("index_job_id"):
         return (f"Uploaded (asset {payload['asset_id']}). Analysis started as "
                 f"job {payload['index_job_id']} — the transcript, shots and "
@@ -1115,7 +1275,8 @@ def _t_index_status(tok, args):
         return error
     with vdb() as conn:
         cur = conn.cursor()
-        if not _project_for_user(cur, project_id, tok["user_id"]):
+        project = _project_for_user(cur, project_id, tok["user_id"])
+        if not project:
             return f"Project {project_id} does not exist on this account."
         original = _active_original(cur, project_id)
         if not original:
@@ -1338,7 +1499,14 @@ def _t_wait_for_job(tok, args):
         return identity + _still_running(row, f"job {job_id} ({row['type']})")
     result = row.get("result") or {}
     if row["type"] == "mcp_tool":
-        return identity + (result.get("text") or json.dumps(result))
+        text = identity + (result.get("text") or json.dumps(result))
+        text += _preview_policy_line(result.get("preview"))
+        structured = _editor_structured_content(result)
+        if structured:
+            return {"content": [{"type": "text", "text": text}],
+                    "structuredContent": structured,
+                    "isError": bool(result.get("is_error"))}
+        return text
     if row["type"] == "final":
         return (identity + "The final export is rendered. Call "
                 f"download_url(project_id={row['project_id']}, "
@@ -1360,14 +1528,20 @@ def _t_download_url(tok, args):
         return "kind must be 'preview' or 'final'."
     with vdb() as conn:
         cur = conn.cursor()
-        if not _project_for_user(cur, project_id, tok["user_id"]):
+        project = _project_for_user(cur, project_id, tok["user_id"])
+        if not project:
             return f"Project {project_id} does not exist on this account."
         # Renders are assets of kind 'render'; the variant and the EDL version
         # they were made from live in meta.
-        sql = """SELECT storage_key, meta FROM assets
+        sql = """SELECT id, storage_key, duration_s, meta FROM assets
                  WHERE project_id = %s AND kind = 'render'
                    AND meta->>'variant' = %s"""
         params = [project_id, kind]
+        if kind == "preview":
+            # Codex preview evidence must carry an explicit deterministic-only
+            # receipt. Never hand it a legacy/Studio render whose listener
+            # policy cannot be proven from the asset itself.
+            sql += " AND meta->>'audio_model_review' = 'false'"
         if args.get("edl_version") is not None:
             sql += " AND (meta->>'edl_version')::int = %s"
             params.append(int(args["edl_version"]))
@@ -1376,13 +1550,37 @@ def _t_download_url(tok, args):
         row = cur.fetchone()
     if not row:
         return (f"No {kind} has been rendered yet"
-                + (" — call render_preview." if kind == "preview"
+                + (" with audio_model_review=false — call render_preview."
+                   if kind == "preview"
                    else " — final export is created in Valmera Studio."))
+    receipt = None
+    if kind == "preview":
+        # Validate provenance before minting a bearer URL.  An asset stamped
+        # false but still carrying listener excerpts is not deterministic-only
+        # evidence and should not escape through this endpoint.
+        receipt = _preview_asset_receipt(row)
+        if receipt is None:
+            return ("The matching preview lacks complete deterministic-only "
+                    "provenance or carries listener artifacts, so it cannot "
+                    "be used as Codex evidence. Call "
+                    "render_preview to create audio_model_review=false "
+                    "evidence with zero listener excerpts.")
     try:
         url = storage.presign_get(row["storage_key"])
     except Exception as e:
         return f"Could not mint a download link: {e}"
     ver = (row.get("meta") or {}).get("edl_version")
+    if kind == "preview":
+        receipt["url"] = url
+        identity = (f"PROJECT {project_id} — "
+                    f"\"{project.get('title') or 'Untitled'}\"")
+        text = (f"{identity}\npreview of EDL v{ver} (link valid a few "
+                f"hours):\n{url}\n\nPREVIEW RECEIPT: "
+                + json.dumps(receipt, sort_keys=True)
+                + _preview_policy_line(receipt))
+        return {"content": [{"type": "text", "text": text}],
+                "structuredContent": {"preview_receipt": receipt},
+                "isError": False}
     return (f"{kind} of EDL v{ver} (link valid a few hours, hand it to the "
             f"user as-is):\n{url}")
 
@@ -1467,7 +1665,11 @@ def _t_watch_video(tok, args):
         content.append({"type": "resource", "resource": {
             "uri": url, "mimeType": video.get("mime") or "video/mp4",
             "blob": blob}})
-    return {"content": content, "isError": False}
+    public = {"content": content, "isError": False}
+    structured = _editor_structured_content(result)
+    if structured:
+        public["structuredContent"] = structured
+    return public
 
 
 SESSION_IMPL = {
@@ -1643,8 +1845,12 @@ def _handle(tok, msg):
             body = out.get("text") or json.dumps(out)
             content = [{"type": "text", "text": body}] \
                 + _image_blocks(out.get("images"))
-            return _result(req_id, {"content": content,
-                                    "isError": bool(out.get("is_error"))})
+            public = {"content": content,
+                      "isError": bool(out.get("is_error"))}
+            structured = _editor_structured_content(out)
+            if structured:
+                public["structuredContent"] = structured
+            return _result(req_id, public)
         except Exception as e:
             current_app.logger.exception("mcp tool %s failed", name)
             return _result(req_id, _text(f"{name} errored: {e}", True))

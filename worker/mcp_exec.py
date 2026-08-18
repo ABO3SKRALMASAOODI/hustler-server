@@ -210,6 +210,10 @@ def _new_context(worker_db, job, project, index, sha):
                            f"mcp_{project['id']}_{int(time.time())}")
     os.makedirs(workdir, exist_ok=True)
     ctx = agent_tools.ToolContext(worker_db, job, project, index, workdir)
+    # Codex is the sole decision maker on MCP. Preview verification may use
+    # deterministic audio measurements, authored EDL facts and transcripts,
+    # but it must never send the rendered mix to a separate listening model.
+    ctx.audio_model_review = False
     try:
         ctx.edit_plan = director.normalize_blueprint(worker_db.run(
             dbx.latest_creative_blueprint, project["chat_session_id"]))
@@ -389,6 +393,8 @@ def run_mcp_job(worker_db, job):
                 out["preview"] = {
                     "edl_version": ctx.last_preview.get("edl_version"),
                     "duration_s": ctx.last_preview.get("duration_s"),
+                    "audio_model_review": ctx.last_preview.get(
+                        "audio_model_review", False),
                     # The render job's result names this render_asset_id
                     # (renderer.run_render_job); "asset_id" never existed,
                     # so this field was silently null since round 63.

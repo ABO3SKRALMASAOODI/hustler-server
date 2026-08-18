@@ -17,14 +17,14 @@ Both configured catalogs are searched concurrently. Results are quality
 ranked inside each source and interleaved, so one provider's latency, outage,
 or house style cannot silently decide the soundtrack.
 
-LICENSING IS INFORMATION, NOT A WALL. Every hit carries its license and
-author, and the line the agent reads states the obligation outright —
+KNOWN LICENSING IS INFORMATION, NOT A HIDDEN WALL. Every offered hit carries
+the provider's raw license metadata and a separate normalized obligation —
 public domain, credit-required, or NON-COMMERCIAL-ONLY — so the choice is
-made in the conversation, by the person whose video it is, instead of by a
-filter they cannot see. The one family still excluded is no-derivatives
-(ND): syncing music in timed relation with picture is itself an adaptation,
-so an ND track cannot be used in ANY edit, monetized or not — offering one
-would only manufacture a violation. For a SPECIFIC copyrighted song the
+made with visible evidence. Unrecognized/absent terms are excluded rather
+than silently rewritten as CC BY. No-derivatives (ND) is also excluded:
+syncing music in timed relation with picture is itself an adaptation, so an
+ND track cannot be used in ANY edit, monetized or not. For a SPECIFIC
+copyrighted song the
 path is the user's own file or link: fetch_url ingests anything a URL can
 reach, and the trending-sound flow (cut to the grid, platform adds the
 licensed audio in-app) stays the honest route for sounds the platforms
@@ -35,6 +35,8 @@ as ordinary project assets (kind 'music'), so add_music, swap_music,
 set_music_fit and get_audio_analysis all work on them unchanged.
 """
 
+import datetime as dt
+import json
 import re
 import subprocess
 import threading
@@ -160,30 +162,170 @@ def providers():
     return out
 
 
-# License handling: the terms are STATED per hit, never silently filtered.
-# The one exclusion is the no-derivatives family — syncing music under
-# picture is itself an adaptation, so an ND track is unusable in any edit.
+# License handling: provider claims and our interpretation stay separate.
+# Unknown provider text must never fall through to a permissive CC-BY label.
+# The one categorical exclusion is the no-derivatives family — syncing music
+# under picture is itself an adaptation, so an ND track is unusable in any
+# edit. Search also excludes unrecognized terms: without a known grant there
+# is no rights basis for the editor to use the track.
 _CC_LICENSE = re.compile(r"(cc0|pdm|publicdomain|zero|creativecommons|"
                          r"^by|/by)", re.I)
 
+_CC_FAMILY_CODE = r"by-nc-nd|by-nc-sa|by-nc|by-nd|by-sa|by"
+
+
+def _utc_now():
+    return dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _license_family(license_id):
+    """Return a narrow normalized family only for recognized CC/PD terms.
+
+    This is an interpretation used to derive simple capability signals. The
+    raw provider value remains separately preserved and is always the value a
+    caller should inspect when it needs provenance.
+    """
+    lid = str(license_id or "").strip().lower().replace("_", "-")
+    if not lid:
+        return None
+    # For URLs, accept only Creative Commons' own host/path vocabulary. A
+    # random URL with ``?by=...`` or prose containing the word "by" is not a
+    # license and must remain unknown.
+    if "://" in lid:
+        if not re.match(
+                r"^https?://(?:www\.)?creativecommons\.org/", lid):
+            return None
+        if ("/publicdomain/zero/" in lid or
+                "/publicdomain/mark/" in lid):
+            return "public-domain"
+        match = re.search(
+            rf"/licenses/({_CC_FAMILY_CODE})(?:/|$)", lid)
+        return match.group(1) if match else None
+
+    compact = re.sub(r"[\s]+", "-", lid).strip("-/")
+    if re.fullmatch(r"(?:cc-?)?0(?:[- ]?1(?:\.0)?)?|cc0(?:-1\.0)?|"
+                    r"pdm(?:-1\.0)?|public-domain-mark(?:-1\.0)?",
+                    compact):
+        return "public-domain"
+    match = re.fullmatch(
+        rf"(?:cc-)?({_CC_FAMILY_CODE})(?:-v?\d+(?:\.\d+)*)?",
+        compact)
+    return match.group(1) if match else None
+
+
+def _license_capabilities(license_id):
+    """Mechanical rights signals for a recognized provider license value.
+
+    ``None`` means unknown, not false and never a permissive default.
+    """
+    family = _license_family(license_id)
+    if not family:
+        return {
+            "normalized_license_family": None,
+            "commercial_use_allowed": None,
+            "attribution_required": None,
+            "derivatives_allowed": None,
+        }
+    public_domain = family == "public-domain"
+    return {
+        "normalized_license_family": family,
+        "commercial_use_allowed": (True if public_domain else
+                                   "nc" not in family),
+        "attribution_required": False if public_domain else True,
+        "derivatives_allowed": (True if public_domain else
+                                "nd" not in family),
+    }
+
+
+def provenance(item):
+    """Stable, JSON-safe provider provenance with explicit unknowns.
+
+    New catalog hits carry each raw field directly. Compatibility fallbacks
+    read older cached hits/assets without manufacturing a label or canonical
+    landing page that was never captured.
+    """
+    item = item or {}
+    provider = item.get("provider") or item.get("source") or None
+    result_id = item.get("id") or item.get("result_id") or None
+    candidate_id = item.get("provider_candidate_id")
+    if (candidate_id is None and provider and result_id
+            and str(result_id).startswith(f"{provider}:")):
+        candidate_id = str(result_id).split(":", 1)[1] or None
+    raw_id = item.get("provider_reported_license_id")
+    if raw_id is None:
+        # ``license`` is the compatibility field historically persisted from
+        # the catalog response. It is raw/composed provider text, not our note.
+        raw_id = item.get("license") or None
+    raw_label = item.get("provider_reported_license_label") or None
+    raw_version = item.get("provider_reported_license_version") or None
+    raw_url = item.get("provider_reported_license_url") or None
+    raw_license_basis = raw_id or raw_label or raw_url
+    interpreted = _license_capabilities(raw_license_basis)
+    provider_metadata_exposed = bool(
+        provider and raw_license_basis and
+        interpreted["normalized_license_family"])
+    if not provider_metadata_exposed:
+        interpreted = {
+            "normalized_license_family": None,
+            "commercial_use_allowed": None,
+            "attribution_required": None,
+            "derivatives_allowed": None,
+        }
+    canonical = (item.get("canonical_source_url") or
+                 item.get("page_url") or None)
+    return {
+        "provider": provider,
+        "provider_candidate_id": candidate_id,
+        "provider_reported_license_id": raw_id,
+        "provider_reported_license_label": raw_label,
+        "provider_reported_license_version": raw_version,
+        "provider_reported_license_url": raw_url,
+        "license_verification_status": (
+            "provider_metadata_exposed"
+            if provider_metadata_exposed else "unknown"),
+        **interpreted,
+        "canonical_source_url": canonical,
+        # A legacy source URL may be a landing page or a media endpoint. Keep
+        # it visible, but do not relabel it canonical without direct evidence.
+        "source_url": item.get("source_url") or canonical,
+        "creator": (item.get("creator") or item.get("artist") or
+                    item.get("author") or None),
+        "provider_retrieved_at": item.get("provider_retrieved_at") or None,
+        "downloaded_sha256": item.get("downloaded_sha256") or None,
+    }
+
+
+def usable(item, commercial_only=False):
+    """Whether a catalog item has a known grant usable for this edit."""
+    rights = provenance(item)
+    if rights["license_verification_status"] != "provider_metadata_exposed":
+        return False
+    if rights["derivatives_allowed"] is not True:
+        return False
+    if commercial_only and rights["commercial_use_allowed"] is not True:
+        return False
+    return True
+
 
 def _license_note(license_id, author):
-    lid = (license_id or "").lower()
-    # "cc0", never a bare "0": version suffixes ("by-4.0", ".../by/3.0/")
-    # contain zeros too, and matching them stamped "public domain — no
-    # obligations" onto BY tracks, suppressing the very credit line this
-    # function exists to deliver.
-    if any(x in lid for x in ("cc0", "pdm", "publicdomain", "zero")):
+    family = _license_family(license_id)
+    if family == "public-domain":
         return "public domain — no obligations"
+    if not family:
+        return ("license UNKNOWN — no use permission established; do not use "
+                "until the rights are verified")
     who = author or "the artist"
-    if "nc" in lid:
+    if "nd" in family:
+        return (f"CC {family.upper()} — NO DERIVATIVES: not usable for "
+                "syncing to video")
+    if "nc" in family:
         # Checked before by-sa: "by-nc-sa" is NC first — the commercial
         # restriction is the fact that changes what the user may do.
-        return (f"CC {lid.upper() if len(lid) <= 12 else 'BY-NC'} — "
+        return (f"CC {family.upper()} — "
                 "NON-COMMERCIAL USE ONLY: fine for a personal video, NOT "
                 f"for monetized/business content; credit {who} in the "
                 "caption/description")
-    if "by-sa" in lid:
+    if family == "by-sa":
         return (f"CC BY-SA — free for commercial use; credit {who} in the "
                 "caption/description")
     return (f"CC BY — free for commercial use; credit {who} in the "
@@ -215,23 +357,32 @@ def _jamendo_search(query, min_s, max_s, count, commercial_only=False):
                               timeout_s=API_TIMEOUT_S,
                               allowed_hosts=["api.jamendo.com"])
     out = []
+    retrieved_at = _utc_now()
     for t in (data.get("results") or []):
         lic = t.get("license_ccurl") or ""
-        if not (_CC_LICENSE.search(lic) and _license_ok(lic)):
-            continue
-        if commercial_only and "nc" in lic.lower():
-            continue
         url = t.get("audiodownload") or t.get("audio")
-        if not url:
+        candidate_id = t.get("id")
+        if not url or candidate_id is None:
             continue
-        out.append({
-            "provider": "jamendo", "id": f"jamendo:{t.get('id')}",
+        item = {
+            "provider": "jamendo", "id": f"jamendo:{candidate_id}",
+            "provider_candidate_id": str(candidate_id),
             "title": (t.get("name") or "").strip() or "untitled",
             "artist": (t.get("artist_name") or "").strip() or None,
             "duration_s": float(t.get("duration") or 0) or None,
-            "license": lic, "page_url": t.get("shareurl"),
+            "license": lic,
+            "provider_reported_license_id": lic or None,
+            "provider_reported_license_label": None,
+            "provider_reported_license_version": None,
+            "provider_reported_license_url": lic or None,
+            "page_url": t.get("shareurl"),
+            "canonical_source_url": t.get("shareurl"),
+            "source_url": t.get("shareurl"),
+            "provider_retrieved_at": retrieved_at,
             "_url": url,
-        })
+        }
+        if usable(item, commercial_only=commercial_only):
+            out.append(item)
     return out
 
 
@@ -246,15 +397,13 @@ def _openverse_search(query, min_s, max_s, count, commercial_only=False):
               "page_size": min(20, count * (3 if commercial_only else 1))}
     data = _openverse_get_json(OPENVERSE_API, params=params)
     out = []
+    retrieved_at = _utc_now()
     for t in (data.get("results") or []):
         lic = "-".join(x for x in (t.get("license"),
                                    t.get("license_version")) if x)
-        if not _license_ok(t.get("license") or ""):
-            continue
-        if commercial_only and "nc" in lic.lower():
-            continue
         url = t.get("url")
-        if not url:
+        candidate_id = t.get("id")
+        if not url or candidate_id is None:
             continue
         dur = None
         try:
@@ -263,14 +412,26 @@ def _openverse_search(query, min_s, max_s, count, commercial_only=False):
             dur = None
         if dur and ((min_s and dur < min_s) or (max_s and dur > max_s)):
             continue
-        out.append({
-            "provider": "openverse", "id": f"openverse:{t.get('id')}",
+        item = {
+            "provider": "openverse", "id": f"openverse:{candidate_id}",
+            "provider_candidate_id": str(candidate_id),
             "title": (t.get("title") or "").strip() or "untitled",
             "artist": (t.get("creator") or "").strip() or None,
-            "duration_s": dur, "license": lic,
+            "duration_s": dur,
+            "license": lic,
+            "provider_reported_license_id": t.get("license") or None,
+            "provider_reported_license_label": None,
+            "provider_reported_license_version": (
+                t.get("license_version") or None),
+            "provider_reported_license_url": t.get("license_url") or None,
             "page_url": t.get("foreign_landing_url"),
+            "canonical_source_url": t.get("foreign_landing_url"),
+            "source_url": t.get("foreign_landing_url"),
+            "provider_retrieved_at": retrieved_at,
             "_url": url,
-        })
+        }
+        if usable(item, commercial_only=commercial_only):
+            out.append(item)
     return out
 
 
@@ -283,7 +444,7 @@ def _quality_score(item, query, min_s=None, max_s=None):
     if query and query in title:
         score += 10.0
     score += 2.5 * sum(1 for word in words if word in title)
-    if "nc" in str(item.get("license") or "").casefold():
+    if provenance(item)["commercial_use_allowed"] is False:
         score -= 8.0
     try:
         duration = float(item.get("duration_s") or 0.0)
@@ -371,8 +532,6 @@ def resolve(result_id):
         data = _openverse_get_json(f"{OPENVERSE_API}{ident}/")
         lic = "-".join(x for x in (data.get("license"),
                                     data.get("license_version")) if x)
-        if not _license_ok(data.get("license") or ""):
-            raise MusicSearchError("that result has no usable remix license")
         try:
             dur = round(float(data.get("duration") or 0) / 1000.0, 1) or None
         except (TypeError, ValueError):
@@ -380,11 +539,27 @@ def resolve(result_id):
         url = data.get("url")
         if not url:
             raise MusicSearchError("that result no longer has downloadable audio")
-        return {"provider": "openverse", "id": raw,
-                "title": (data.get("title") or "").strip() or "untitled",
-                "artist": (data.get("creator") or "").strip() or None,
-                "duration_s": dur, "license": lic,
-                "page_url": data.get("foreign_landing_url"), "_url": url}
+        item = {
+            "provider": "openverse", "id": raw,
+            "provider_candidate_id": ident,
+            "title": (data.get("title") or "").strip() or "untitled",
+            "artist": (data.get("creator") or "").strip() or None,
+            "duration_s": dur, "license": lic,
+            "provider_reported_license_id": data.get("license") or None,
+            "provider_reported_license_label": None,
+            "provider_reported_license_version": (
+                data.get("license_version") or None),
+            "provider_reported_license_url": data.get("license_url") or None,
+            "page_url": data.get("foreign_landing_url"),
+            "canonical_source_url": data.get("foreign_landing_url"),
+            "source_url": data.get("foreign_landing_url"),
+            "provider_retrieved_at": _utc_now(),
+            "_url": url,
+        }
+        if not usable(item):
+            raise MusicSearchError(
+                "that result has no recognized usable remix license")
+        return item
     if provider == "jamendo":
         if not config.JAMENDO_CLIENT_ID or not ident.isdigit():
             raise MusicSearchError("that Jamendo result cannot be resolved")
@@ -399,13 +574,29 @@ def resolve(result_id):
         t = rows[0]
         lic = t.get("license_ccurl") or ""
         url = t.get("audiodownload") or t.get("audio")
-        if not (_CC_LICENSE.search(lic) and _license_ok(lic) and url):
+        if not url:
             raise MusicSearchError("that result is no longer downloadable")
-        return {"provider": "jamendo", "id": raw,
-                "title": (t.get("name") or "").strip() or "untitled",
-                "artist": (t.get("artist_name") or "").strip() or None,
-                "duration_s": float(t.get("duration") or 0) or None,
-                "license": lic, "page_url": t.get("shareurl"), "_url": url}
+        item = {
+            "provider": "jamendo", "id": raw,
+            "provider_candidate_id": ident,
+            "title": (t.get("name") or "").strip() or "untitled",
+            "artist": (t.get("artist_name") or "").strip() or None,
+            "duration_s": float(t.get("duration") or 0) or None,
+            "license": lic,
+            "provider_reported_license_id": lic or None,
+            "provider_reported_license_label": None,
+            "provider_reported_license_version": None,
+            "provider_reported_license_url": lic or None,
+            "page_url": t.get("shareurl"),
+            "canonical_source_url": t.get("shareurl"),
+            "source_url": t.get("shareurl"),
+            "provider_retrieved_at": _utc_now(),
+            "_url": url,
+        }
+        if not usable(item):
+            raise MusicSearchError(
+                "that result has no recognized usable remix license")
+        return item
     raise MusicSearchError(f"unsupported result provider '{provider}'")
 
 
@@ -432,6 +623,48 @@ def probe_duration_s(path):
         return 0.0
 
 
+def probe_audio_stream(path):
+    """Strict factual first-audio-stream probe for a fetched candidate.
+
+    Unlike the renderer's permissive playback fallback, a failed probe is
+    explicit ``unavailable`` and never becomes ``has_audio_stream=true``.
+    """
+    fact = {
+        "source_audio_stream_status": "unavailable",
+        "source_has_audio_stream": None,
+        "source_audio_stream_codec": None,
+        "source_audio_stream_channels": None,
+        "source_audio_stream_probe_tool": "ffprobe",
+        "source_audio_stream_probed_at": _utc_now(),
+    }
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "a:0",
+             "-show_entries", "stream=index,codec_name,channels",
+             "-of", "json", path], capture_output=True, timeout=30)
+        if result.returncode != 0:
+            return fact
+        payload = json.loads((result.stdout or b"").decode() or "{}")
+        streams = payload.get("streams") or []
+        if not isinstance(streams, list):
+            return fact
+        fact["source_audio_stream_status"] = "complete"
+        fact["source_has_audio_stream"] = bool(streams)
+        if streams:
+            stream = streams[0] if isinstance(streams[0], dict) else {}
+            fact["source_audio_stream_codec"] = (
+                str(stream.get("codec_name") or "").strip() or None)
+            try:
+                channels = int(stream.get("channels"))
+                fact["source_audio_stream_channels"] = (
+                    channels if channels > 0 else None)
+            except (TypeError, ValueError):
+                pass
+        return fact
+    except Exception:
+        return fact
+
+
 def describe(item):
     """One line per hit, license obligation included — what the agent reads
     and what it must pass on."""
@@ -440,9 +673,46 @@ def describe(item):
         bits.append(f"by {item['artist']}")
     if item.get("duration_s"):
         bits.append(f"{item['duration_s']:.0f}s")
-    bits.append(_license_note(item.get("license"), item.get("artist")))
-    return f"{item['id']} — \"{item['title']}\" ({', '.join(bits)})"
+    rights = provenance(item)
+    bits.append(
+        "tool_normalized_license_note=" +
+        _license_note(rights["provider_reported_license_id"] or
+                      rights["provider_reported_license_label"] or
+                      rights["provider_reported_license_url"],
+                      rights["creator"]))
+    truth = lambda value: ("true" if value is True else
+                           "false" if value is False else "unknown")
+    raw = lambda value: str(value) if value not in (None, "") else "unknown"
+    bits.extend([
+        f"provider={raw(rights['provider'])}",
+        f"provider_candidate_id={raw(rights['provider_candidate_id'])}",
+        ("provider_reported_license_id="
+         f"{raw(rights['provider_reported_license_id'])}"),
+        ("provider_reported_license_label="
+         f"{raw(rights['provider_reported_license_label'])}"),
+        ("provider_reported_license_version="
+         f"{raw(rights['provider_reported_license_version'])}"),
+        ("provider_reported_license_url="
+         f"{raw(rights['provider_reported_license_url'])}"),
+        ("license_verification_status="
+         f"{rights['license_verification_status']}"),
+        ("normalized_license_family="
+         f"{raw(rights['normalized_license_family'])}"),
+        f"commercial_use_allowed={truth(rights['commercial_use_allowed'])}",
+        f"attribution_required={truth(rights['attribution_required'])}",
+        f"derivatives_allowed={truth(rights['derivatives_allowed'])}",
+        f"canonical_source_url={raw(rights['canonical_source_url'])}",
+        f"source_url={raw(rights['source_url'])}",
+        f"creator={raw(rights['creator'])}",
+        f"provider_retrieved_at={raw(rights['provider_retrieved_at'])}",
+        f"downloaded_sha256={raw(rights['downloaded_sha256'])}",
+    ])
+    return f"{item['id']} — \"{item['title']}\" ({'; '.join(bits)})"
 
 
 def license_note(item):
-    return _license_note(item.get("license"), item.get("artist"))
+    rights = provenance(item)
+    return _license_note(rights["provider_reported_license_id"] or
+                         rights["provider_reported_license_label"] or
+                         rights["provider_reported_license_url"],
+                         rights["creator"])

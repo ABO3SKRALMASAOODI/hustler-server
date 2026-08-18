@@ -33,6 +33,7 @@ import time
 from datetime import datetime, timezone
 
 import agent_tools
+import audit
 import config
 import db as dbx
 import llm
@@ -512,8 +513,16 @@ def _shortlist_transcript_arcs(index, duration, n_target, direction=""):
         "source_duration_s": round(float(duration or 0.0), 1)}
 
 
-def _validated_clips(raw, duration, want, index=None, visual=False):
-    """Normalize one transcript or visual planner answer."""
+def _validated_clips(raw, duration, want, index=None, visual=False,
+                     caller_authored=False):
+    """Normalize one clip slate.
+
+    Automatic scout answers are ranked and defensively shortened below.
+    Explicit caller selections have already passed the tool boundary: their
+    array order and descriptive metadata are immutable, while numeric source
+    ranges still receive the same deterministic normalization used to seed a
+    child EDL.
+    """
     starts = [float(s.get("start")) for s in (index or {}).get("shots") or []
               if s.get("start") is not None]
     ends = [float(s.get("end")) for s in (index or {}).get("shots") or []
@@ -540,21 +549,42 @@ def _validated_clips(raw, duration, want, index=None, visual=False):
             continue
         if e - s > CLIP_MAX_S:
             e = s + CLIP_MAX_S
-        title = re.sub(r"\s+", " ", str(c.get("title") or "")).strip()[:55]
+        if caller_authored:
+            title = c.get("title")
+            if not isinstance(title, str) or not title.strip():
+                continue
+            hook = c.get("hook") or ""
+            if not isinstance(hook, str):
+                continue
+        else:
+            title = re.sub(r"\s+", " ", str(
+                c.get("title") or "")).strip()[:55]
+            hook = str(c.get("hook") or "").strip()[:160]
+        raw_score = c.get("score", 50)
+        if raw_score is None:
+            raw_score = 50
         normalized = {
             "start": round(s, 2), "end": round(e, 2),
             "title": title or f"Short from {s:.0f}s",
-            "hook": str(c.get("hook") or "").strip()[:160],
-            "score": max(0, min(100, int(c.get("score") or 50))),
+            "hook": hook,
+            "score": max(0, min(100, int(raw_score))),
             "music": bool(c.get("music")),
         }
         story = c.get("story") or {}
         if isinstance(story, dict):
-            clean_story = {
-                stage: re.sub(r"\s+", " ", str(story.get(stage) or ""))
-                .strip()[:300]
-                for stage in ("setup", "development", "payoff")
-            }
+            if caller_authored:
+                clean_story = {
+                    stage: story[stage]
+                    for stage in ("setup", "development", "payoff")
+                    if isinstance(story.get(stage), str)
+                    and story.get(stage) != ""
+                }
+            else:
+                clean_story = {
+                    stage: re.sub(r"\s+", " ", str(
+                        story.get(stage) or "")).strip()[:300]
+                    for stage in ("setup", "development", "payoff")
+                }
             if any(clean_story.values()):
                 normalized["story"] = clean_story
         visual_direction = re.sub(r"\s+", " ", str(
@@ -588,7 +618,8 @@ def _validated_clips(raw, duration, want, index=None, visual=False):
         if c.get("context_restored"):
             normalized["context_restored"] = str(c["context_restored"])[:80]
         clips.append(normalized)
-    clips.sort(key=lambda c: -c["score"])
+    if not caller_authored:
+        clips.sort(key=lambda c: -c["score"])
     chosen = []
     selection_limit = (want if want is not None
                        else config.SHORTS_AUTO_MAX_CLIPS)
@@ -605,12 +636,19 @@ def _validated_clips(raw, duration, want, index=None, visual=False):
 
 
 def _caller_planned_clips(payload, index, duration):
-    """Normalize explicit outside-model arcs, or None for automatic planning."""
+    """Validate frozen outside-model arcs, or None for automatic planning.
+
+    Caller selection is authoritative. In particular, do not run the
+    automatic scout's conversation-completion heuristic here: prepending a
+    question changes the exact source range the caller selected. Sentence
+    boundaries were validated without rewriting at the tool boundary; child
+    seeding may still snap the resulting range to actual word timings.
+    """
     raw = payload.get("clips")
     if raw is None:
         return None
-    restored = _complete_conversation_arcs(raw, index, duration)
-    return _validated_clips(restored, duration, len(raw), index=index)
+    return _validated_clips(raw, duration, len(raw), index=index,
+                            caller_authored=True)
 
 
 def _complete_conversation_arcs(raw, index, duration):
@@ -826,9 +864,60 @@ def _plan_clips(worker_db, job, index, duration, style, payload,
 
 
 # ------------------------------------------------------------------ children
-def _create_child(conn, user_id, parent, clip):
-    """Child project + shared-by-key assets, one transaction."""
+def _short_materialization_key(parent_id, plan_job_id, clip_order):
+    """Stable identity for one selected arc in one plan run."""
+    return (f"shorts:{int(parent_id)}:plan:{int(plan_job_id)}:"
+            f"arc:{int(clip_order)}")
+
+
+def _child_clip_meta(clip):
+    return {
+        key: clip.get(key) for key in (
+            "order", "start", "end", "score", "hook", "story",
+            "visual_direction", "broll", "selection_review")
+        if clip.get(key) is not None
+    }
+
+
+def _create_child(conn, user_id, parent, clip, plan_job_id):
+    """Create or recover one child project exactly once.
+
+    A worker can die after this transaction commits but before the parent
+    board records ``child_project_id``. The next claim therefore cannot use
+    parent JSON as its idempotency source. Store a deterministic per-run/arc
+    key inside the child at creation time, serialize creators with a Postgres
+    transaction advisory lock, and adopt that child on retry.
+    """
+    materialization_key = _short_materialization_key(
+        parent["id"], plan_job_id, clip["order"])
+    expected_clip_meta = _child_clip_meta(clip)
     with conn.cursor() as cur:
+        # hashtextextended keeps the SQL parameterized and yields a stable
+        # bigint lock id without imposing a new schema dependency. The lock is
+        # released by Db.run's commit/rollback.
+        cur.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+            (materialization_key,))
+        cur.execute("""SELECT id, chat_session_id, title, meta
+                       FROM projects
+                       WHERE user_id = %s AND parent_project_id = %s
+                         AND kind = 'short'
+                         AND meta->'shorts_editor'->>'materialization_key' = %s
+                       ORDER BY id LIMIT 1""",
+                    (user_id, parent["id"], materialization_key))
+        existing = cur.fetchone()
+        if existing:
+            existing_meta = existing.get("meta") or {}
+            recorded_clip = existing_meta.get("clip") or {}
+            matches = existing.get("title") == clip["title"] and all(
+                recorded_clip.get(key) == value
+                for key, value in expected_clip_meta.items())
+            if not matches:
+                raise RuntimeError(
+                    "short materialization identity collision: existing "
+                    "child does not match the frozen caller arc")
+            return existing["id"], existing["chat_session_id"]
+
         cur.execute("""INSERT INTO chat_sessions (user_id, title)
                        VALUES (%s, %s) RETURNING id""",
                     (user_id, clip["title"]))
@@ -838,25 +927,45 @@ def _create_child(conn, user_id, parent, clip):
                        VALUES (%s, %s, %s, 'short', %s, %s)
                        RETURNING id""",
                     (user_id, clip["title"], session_id, parent["id"],
-                     Json({"clip": {
-                         key: clip.get(key) for key in (
-                             "order", "start", "end", "score", "hook",
-                             "story", "visual_direction", "broll",
-                             "selection_review")
-                         if clip.get(key) is not None},
+                     Json({"clip": expected_clip_meta,
                            "shorts_editor": {
                                "status": "locked",
                                "parent_project_id": parent["id"],
+                               "plan_job_id": int(plan_job_id),
+                               "arc_order": int(clip["order"]),
+                               "materialization_key": materialization_key,
                            }})))
         child_id = cur.fetchone()["id"]
     return child_id, session_id
 
 
 def _share_asset(conn, child_id, src_asset, note):
+    """Share one parent asset into a child idempotently.
+
+    Child creation and each asset share commit separately. A retry after only
+    the original (or original + proxy) committed must adopt those rows rather
+    than append duplicate assets before continuing with the remaining share.
+    """
     meta = dict(src_asset.get("meta") or {})
     meta.pop("staged", None)
     meta.pop("tray_pos", None)
     meta["shared_from_project"] = note
+    share_key = (f"shorts-share:{int(child_id)}:{src_asset['kind']}:"
+                 f"{src_asset['storage_key']}:{note}")
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+            (share_key,))
+        cur.execute("""SELECT id FROM assets
+                       WHERE project_id = %s AND kind = %s
+                         AND storage_key = %s
+                         AND meta->>'shared_from_project' = %s
+                       ORDER BY id LIMIT 1""",
+                    (child_id, src_asset["kind"], src_asset["storage_key"],
+                     str(note)))
+        existing = cur.fetchone()
+        if existing:
+            return existing["id"]
     return dbx.insert_asset(
         conn, child_id, src_asset["kind"], src_asset["storage_key"],
         bytes_=src_asset.get("bytes"), duration_s=src_asset.get("duration_s"),
@@ -864,7 +973,29 @@ def _share_asset(conn, child_id, src_asset, note):
         fps=src_asset.get("fps"), sha256=src_asset.get("sha256"), meta=meta)
 
 
-def _seed_story_child(worker_db, job, child_id, index, clip, workdir):
+def _add_short_intro(conn, session_id, content, materialization_key):
+    """Write the locked-card introduction once across worker retries."""
+    intro_key = f"shorts-intro:{materialization_key}"
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+            (intro_key,))
+        cur.execute("""SELECT id FROM chat_messages
+                       WHERE session_id = %s
+                         AND meta->>'shorts_materialization_key' = %s
+                       ORDER BY id LIMIT 1""",
+                    (session_id, materialization_key))
+        existing = cur.fetchone()
+        if existing:
+            return existing["id"]
+    return dbx.add_message(
+        conn, session_id, "assistant", content,
+        {"kind": "short_intro",
+         "shorts_materialization_key": materialization_key})
+
+
+def _seed_story_child(worker_db, job, child_id, index, clip, workdir,
+                      materialization_key=None):
     """Cut the parent's chosen story and nothing else.
 
     This is intentionally small. The fresh agent started by the card's Edit
@@ -873,15 +1004,32 @@ def _seed_story_child(worker_db, job, child_id, index, clip, workdir):
     here would quietly restore the old one-recipe-for-everything product.
     """
     child = worker_db.run(dbx.get_project, child_id)
+    if materialization_key:
+        recorded_key = (((child.get("meta") or {}).get("shorts_editor") or {})
+                        .get("materialization_key"))
+        if recorded_key != materialization_key:
+            raise RuntimeError(
+                "short seed identity does not match its materialized child")
     wd = os.path.join(workdir, f"child_{child_id}")
     os.makedirs(wd, exist_ok=True)
     ctx = agent_tools.ToolContext(worker_db, job, child, index, wd)
     try:
+        expected_keep = audit.snap_keep_to_words(
+            [[clip["start"], clip["end"]]], index.get("words") or [],
+            ctx.duration)
+        before = ctx.latest_edl()
+        if (before.get("json") or {}).get("keep") == expected_keep:
+            return (before["version"],
+                    "recovered existing word-snapped story seed")
         result = agent_tools.execute(
             ctx, "keep_segments",
             {"segments": [[clip["start"], clip["end"]]],
              "snap_to_words": True})
         row = ctx.latest_edl()
+        if (row.get("json") or {}).get("keep") != expected_keep:
+            raise RuntimeError(
+                "story seed did not produce the deterministic word-snapped "
+                "source range")
         return row["version"], str(result).splitlines()[0][:200]
     finally:
         shutil.rmtree(wd, ignore_errors=True)
@@ -1082,9 +1230,11 @@ def run_shorts_plan(worker_db, job):
         # here. Each card stays locked until the user explicitly boots its
         # fresh editor.
         for position, clip in enumerate(clips, 1):
+            clip["materialization_key"] = _short_materialization_key(
+                project_id, job_id, clip["order"])
             if not clip.get("child_project_id"):
                 child_id, child_session = worker_db.run(
-                    _create_child, job["user_id"], project, clip)
+                    _create_child, job["user_id"], project, clip, job_id)
                 worker_db.run(_share_asset, child_id, original,
                               project_id)
                 if proxy:
@@ -1094,18 +1244,17 @@ def run_shorts_plan(worker_db, job):
                     # itself. A prose style summary is context, not eyesight.
                     worker_db.run(_share_asset, child_id, ref, project_id)
                 worker_db.run(
-                    dbx.add_message, child_session, "assistant",
+                    _add_short_intro, child_session,
                     f"“{clip['title']}” was selected from “{project['title']}” "
                     f"({clip['start']:.0f}s-{clip['end']:.0f}s) because it "
                     "contains a complete story worth developing. This is the "
                     "un-styled story cut; its fresh editor has not been "
-                    "started yet.",
-                    {"kind": "short_intro"})
+                    "started yet.", clip["materialization_key"])
                 clip["child_project_id"] = child_id
             if not clip.get("seed_edl_version"):
                 version, seed_note = _seed_story_child(
                     worker_db, job, clip["child_project_id"], index, clip,
-                    workdir)
+                    workdir, clip["materialization_key"])
                 clip["seed_edl_version"] = version
                 # edl_version remains for older clients; its meaning is now
                 # explicitly the raw selection boundary, not a styled edit.

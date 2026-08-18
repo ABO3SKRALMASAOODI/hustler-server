@@ -1,0 +1,714 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://valmera.local/schemas/editor-result.schema.json",
+  "title": "Valmera child editor terminal result v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "result_schema_version",
+    "result_fingerprint",
+    "assignment_schema_version",
+    "assignment_id",
+    "assignment_input_fingerprint",
+    "prompt_version",
+    "run_id",
+    "valmera_lease_id",
+    "valmera_lease_generation",
+    "attempt_purpose",
+    "repair_round",
+    "parent_project_id",
+    "child_project_id",
+    "card",
+    "source_lineage",
+    "status",
+    "starting_edl_version",
+    "final_edl_version",
+    "preview_edl_version",
+    "preview_current",
+    "editorial_duration_s",
+    "story",
+    "treatment",
+    "visuals",
+    "captions",
+    "audio",
+    "cta",
+    "preview_render_provenance",
+    "render_visual_inspection",
+    "program_speech_transcript",
+    "evidence_pagination",
+    "outstanding_job_ids",
+    "edits",
+    "issues"
+  ],
+  "properties": {
+    "result_schema_version": {"const": "valmera-child-editor-result-v2"},
+    "result_fingerprint": {"$ref": "#/$defs/prefixedSha256"},
+    "assignment_schema_version": {"const": "valmera-editorial-child-assignment-v2"},
+    "assignment_id": {"type": "string", "minLength": 1},
+    "assignment_input_fingerprint": {"$ref": "#/$defs/prefixedSha256"},
+    "prompt_version": {"const": "valmera-shorts-editor-v6"},
+    "run_id": {"type": "string", "minLength": 1},
+    "valmera_lease_id": {"type": "string", "minLength": 1},
+    "valmera_lease_generation": {"type": "integer", "minimum": 1},
+    "attempt_purpose": {"enum": ["edit", "repair"]},
+    "repair_round": {"type": "integer", "minimum": 0, "maximum": 2},
+    "parent_project_id": {"type": "integer", "minimum": 1},
+    "child_project_id": {"type": "integer", "minimum": 1},
+    "card": {"type": "integer", "minimum": 1},
+    "source_lineage": {"$ref": "#/$defs/sourceLineage"},
+    "status": {"enum": ["ready", "needs_repair", "blocked"]},
+    "starting_edl_version": {"type": "integer", "minimum": 0},
+    "final_edl_version": {"type": "integer", "minimum": 0},
+    "preview_edl_version": {"type": "integer", "minimum": 0},
+    "preview_current": {"type": "boolean"},
+    "editorial_duration_s": {"type": "number", "exclusiveMinimum": 0},
+    "story": {"$ref": "#/$defs/storyResult"},
+    "treatment": {"$ref": "#/$defs/treatmentResult"},
+    "visuals": {"$ref": "#/$defs/visualResult"},
+    "captions": {"$ref": "#/$defs/captionResult"},
+    "audio": {"$ref": "#/$defs/audioResult"},
+    "cta": {"$ref": "#/$defs/ctaResult"},
+    "preview_render_provenance": {"$ref": "#/$defs/previewRenderProvenance"},
+    "render_visual_inspection": {"$ref": "#/$defs/renderVisualInspection"},
+    "program_speech_transcript": {"$ref": "#/$defs/programSpeechTranscript"},
+    "evidence_pagination": {"$ref": "#/$defs/evidencePagination"},
+    "outstanding_job_ids": {"type": "array", "items": {"type": ["string", "integer"]}},
+    "edits": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "issues": {"type": "array", "items": {"$ref": "#/$defs/issue"}}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"attempt_purpose": {"const": "edit"}}, "required": ["attempt_purpose"]},
+      "then": {"properties": {"repair_round": {"const": 0}}},
+      "else": {"properties": {"repair_round": {"minimum": 1, "maximum": 2}}}
+    },
+    {
+      "if": {"properties": {"status": {"const": "ready"}}, "required": ["status"]},
+      "then": {
+        "properties": {
+          "preview_current": {"const": true},
+          "story": {"properties": {"hook": {"const": "PASS"}, "context": {"const": "PASS"}, "development": {"const": "PASS"}, "payoff": {"const": "PASS"}, "power_ending": {"const": "PASS"}}},
+          "treatment": {"properties": {"story_profile_matches_evidence": {"const": true}, "audience_promise_fulfilled": {"const": true}, "emotional_trajectory_fulfilled": {"const": true}, "transfer_honored": {"const": true}, "adapt_honored": {"const": true}, "reject_honored": {"const": true}, "generic_preset_used": {"const": false}}},
+          "visuals": {"properties": {"classification_status": {"enum": ["clear", "hybrid"]}, "longest_effective_broll_hold_s": {"maximum": 10}, "full_timeline_visual_map_complete": {"const": true}, "meaningless_visual_intervals": {"maxItems": 0}, "empty_wall_intervals": {"maxItems": 0}, "subject_loss_intervals": {"maxItems": 0}, "reframe_drift_intervals": {"maxItems": 0}, "mandatory_spans_covered": {"const": true}, "repeated_source_windows": {"const": 0}, "repeated_visual_concepts": {"const": 0}, "sibling_window_reuse": {"const": 0}, "assets_with_known_usage_restrictions": {"maxItems": 0}, "all_assets_visually_inspected": {"const": true}, "junction_frame_check": {"const": "PASS"}, "retention_pacing_check": {"const": "PASS"}}},
+          "captions": {"properties": {"max_words_seen": {"maximum": 2}, "max_lines_seen": {"const": 1}, "density_violations": {"const": 0}, "wrap_violations": {"const": 0}, "uncovered_words": {"const": 0}, "overlaps": {"const": 0}, "warnings": {"const": 0}, "first_caption_delay_s": {"maximum": 0.08}, "rendered_pixel_check": {"const": "PASS"}}},
+          "audio": {"properties": {"audit": {"const": "PASS"}, "mix_measurements": {"properties": {"status": {"const": "complete"}, "integrated_lufs": {"type": "number"}, "true_peak_dbtp": {"type": "number"}, "loudness_range_lu": {"type": "number", "minimum": 0}, "findings": {"maxItems": 0}, "warnings": {"maxItems": 0}}}, "music_fit_inference": {"properties": {"result": {"enum": ["fit", "not_applicable"]}}}}},
+          "cta": {"properties": {"duplicated_in_edl": {"const": false}, "preview_omits_cta": {"const": true}}},
+          "render_visual_inspection": {"properties": {"status": {"const": "complete"}, "gaps": {"maxItems": 0}, "max_sample_gap_s": {"type": "number", "maximum": 1.0}, "shot_boundaries_exhausted": {"const": true}, "junction_checks_exhausted": {"const": true}, "replacement_checks_exhausted": {"const": true}, "final_tail_checks_exhausted": {"const": true}}},
+          "program_speech_transcript": {"properties": {"status": {"const": "complete"}, "source": {"const": "render_asr"}, "processing_gaps": {"maxItems": 0}, "caption_word_coverage": {"properties": {"uncovered_word_count": {"const": 0}}}}},
+          "evidence_pagination": {"properties": {"project_state_exhausted": {"const": true}, "edl_exhausted": {"const": true}, "kept_transcript_exhausted": {"const": true}, "shots_exhausted": {"const": true}, "assets_exhausted": {"const": true}, "reference_evidence_exhausted": {"const": true}}},
+          "outstanding_job_ids": {"maxItems": 0},
+          "issues": {"maxItems": 0}
+        }
+      },
+      "else": {"properties": {"issues": {"minItems": 1}}}
+    },
+    {
+      "if": {"properties": {"status": {"const": "ready"}, "treatment": {"properties": {"reference_applicable": {"const": true}}, "required": ["reference_applicable"]}}, "required": ["status", "treatment"]},
+      "then": {"properties": {"treatment": {"properties": {"reference_evidence_status": {"const": "complete_visual_transcript_metadata"}}}}}
+    },
+    {
+      "if": {"properties": {"audio": {"properties": {"music_policy": {"const": "none"}}, "required": ["music_policy"]}}, "required": ["audio"]},
+      "then": {
+        "properties": {
+          "audio": {
+            "properties": {
+              "entry_policy": {"const": "none"},
+              "music_brief": {"type": "null"},
+              "assigned_start_s": {"type": "null"},
+              "assigned_end_s": {"type": "null"},
+              "no_music_justification": {"type": "string", "minLength": 1},
+              "music_identity": {"properties": {"status": {"const": "not_applicable"}}},
+              "selection_mode": {"const": "none"},
+              "candidate_metadata_shortlist": {"maxItems": 0},
+              "selected_track_analysis": {"properties": {"status": {"const": "not_applicable"}}},
+              "edl_facts": {
+                "properties": {
+                  "music_item_present": {"const": false},
+                  "music_item_id": {"type": "null"},
+                  "music_asset_id": {"type": "null"},
+                  "track_stable_id": {"type": "null"},
+                  "music_provenance": {"type": "null"},
+                  "user_supplied_license_evidence": {"type": "null"},
+                  "attribution": {"type": "null"},
+                  "output_start_s": {"type": "null"},
+                  "output_end_s": {"type": "null"},
+                  "source_offset_s": {"type": "null"},
+                  "source_duration_s": {"type": "null"},
+                  "source_has_audio_stream": {"type": "null"},
+                  "loop": {"const": false},
+                  "gain_db": {"type": "null"},
+                  "ducking_enabled": {"const": false},
+                  "ducking_amount_db": {"type": "null"},
+                  "fade_in_s": {"type": "null"},
+                  "fade_out_s": {"type": "null"},
+                  "program_overlap_s": {"const": 0},
+                  "speech_overlap_s": {"const": 0},
+                  "source_coverage_valid": {"type": "null"},
+                  "loop_coverage_valid": {"type": "null"},
+                  "timing_matches_assignment": {"type": "null"}
+                }
+              },
+              "music_fit_inference": {
+                "properties": {
+                  "result": {"const": "not_applicable"},
+                  "evidence_ids": {"maxItems": 0},
+                  "confidence": {"type": "null"}
+                }
+              }
+            },
+            "required": ["entry_policy", "assigned_start_s", "assigned_end_s", "no_music_justification", "music_identity", "candidate_metadata_shortlist", "selected_track_analysis", "edl_facts", "music_fit_inference"]
+          },
+          "cta": {
+            "properties": {
+            "tail_eligible": {"const": false},
+            "tail_configured": {"const": false},
+            "tail_music_item_id": {"type": "null"},
+            "tail_music_asset_id": {"type": "null"},
+            "tail_music_muted": {"type": "null"},
+            "tail_music_gain_db": {"type": "null"},
+            "program_duration_s": {"type": "number", "exclusiveMinimum": 0},
+            "cta_duration_s": {"const": 5},
+            "music_output_start_s": {"type": "null"},
+            "music_output_end_s": {"type": "null"},
+            "music_source_offset_s": {"type": "null"},
+            "music_source_duration_s": {"type": "null"},
+            "music_source_has_audio_stream": {"type": "null"},
+            "music_loop": {"type": "null"},
+            "renderer_outro_contract_version": {"const": "valmera-cta-tail-v1"},
+            "tail_music_item_fade_out_s": {"type": "null"},
+            "whole_program_fade_present": {"const": false},
+            "tail_overlapping_music_item_count": {"const": 0}
+            }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "audio": {
+            "properties": {
+              "entry_policy": {"enum": ["hook", "whole_program", "delayed", "payoff_only"]},
+              "music_brief": {"type": "string", "minLength": 1},
+              "assigned_start_s": {"type": "number", "minimum": 0},
+              "assigned_end_s": {"type": "number", "exclusiveMinimum": 0},
+              "no_music_justification": {"type": "null"},
+              "music_identity": {"properties": {"status": {"enum": ["identified", "not_identified", "ambiguous"]}}},
+              "selection_mode": {"enum": ["compared_catalog_slate", "user_supplied_exact"]},
+              "candidate_metadata_shortlist": {"minItems": 1, "maxItems": 3},
+              "selected_track_analysis": {"properties": {"status": {"enum": ["available", "not_available"]}}},
+              "music_fit_inference": {
+                "properties": {
+                  "result": {"enum": ["fit", "mismatch", "insufficient_evidence"]},
+                  "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                  "evidence_ids": {"minItems": 1}
+                }
+              }
+            },
+            "required": ["entry_policy", "assigned_start_s", "assigned_end_s", "no_music_justification", "music_identity", "candidate_metadata_shortlist", "selected_track_analysis", "music_fit_inference"]
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"audio": {"properties": {"selection_mode": {"enum": ["compared_catalog_slate", "user_supplied_exact"]}}, "required": ["selection_mode"]}}, "required": ["audio"]},
+      "then": {"properties": {"audio": {"properties": {"candidate_metadata_shortlist": {"contains": {"properties": {"selected": {"const": true}}, "required": ["selected"]}, "minContains": 1, "maxContains": 1}}}}}
+    },
+    {
+      "if": {"properties": {"audio": {"properties": {"entry_policy": {"enum": ["hook", "whole_program"]}}, "required": ["entry_policy"]}}, "required": ["audio"]},
+      "then": {"properties": {"audio": {"properties": {"assigned_start_s": {"const": 0}}}}}
+    },
+    {
+      "if": {"properties": {"audio": {"properties": {"selection_mode": {"const": "compared_catalog_slate"}}, "required": ["selection_mode"]}}, "required": ["audio"]},
+      "then": {"properties": {"audio": {"properties": {
+        "candidate_metadata_shortlist": {"items": {"properties": {"music_provenance": {"$ref": "#/$defs/musicProvenance"}, "user_supplied_license_evidence": {"type": "null"}}}},
+        "edl_facts": {"properties": {"music_provenance": {"$ref": "#/$defs/musicProvenance"}, "user_supplied_license_evidence": {"type": "null"}}}
+      }}}}
+    },
+    {
+      "if": {"properties": {"audio": {"properties": {"selection_mode": {"const": "user_supplied_exact"}}, "required": ["selection_mode"]}}, "required": ["audio"]},
+      "then": {"properties": {"audio": {"properties": {
+        "candidate_metadata_shortlist": {"items": {"properties": {"music_provenance": {"type": "null"}, "user_supplied_license_evidence": {"$ref": "#/$defs/userSuppliedLicenseEvidence"}}}},
+        "edl_facts": {"properties": {"music_provenance": {"type": "null"}, "user_supplied_license_evidence": {"$ref": "#/$defs/userSuppliedLicenseEvidence"}}}
+      }}}}
+    },
+    {
+      "if": {"properties": {"status": {"const": "ready"}, "audio": {"properties": {"music_policy": {"enum": ["subtle_bed", "cinematic_build", "rhythmic_support"]}}, "required": ["music_policy"]}}, "required": ["status", "audio"]},
+      "then": {
+        "properties": {
+          "audio": {
+            "properties": {
+              "music_identity": {"properties": {"status": {"const": "identified"}}},
+              "selected_track_analysis": {"properties": {"status": {"const": "available"}}},
+              "edl_facts": {
+                "properties": {
+                  "music_item_present": {"const": true},
+                  "music_item_id": {"type": "string", "minLength": 1},
+                  "music_asset_id": {"oneOf": [{"type": "integer", "minimum": 1}, {"type": "string", "minLength": 1}]},
+                  "track_stable_id": {"type": "string", "minLength": 1},
+                  "output_start_s": {"type": "number", "minimum": 0},
+                  "output_end_s": {"type": "number", "exclusiveMinimum": 0},
+                  "source_offset_s": {"type": "number", "minimum": 0},
+                  "source_duration_s": {"type": "number", "exclusiveMinimum": 0},
+                  "source_has_audio_stream": {"const": true},
+                  "gain_db": {"type": "number"},
+                  "fade_in_s": {"type": "number", "minimum": 0},
+                  "fade_out_s": {"type": "number", "minimum": 0},
+                  "source_coverage_valid": {"const": true},
+                  "loop_coverage_valid": {"const": true},
+                  "timing_matches_assignment": {"const": true}
+                }
+              },
+              "music_fit_inference": {"properties": {"result": {"const": "fit"}}}
+            }
+          },
+          "cta": {
+            "properties": {
+              "tail_eligible": {"const": true},
+              "tail_configured": {"const": true},
+              "tail_music_item_id": {"type": "string", "minLength": 1},
+              "tail_music_asset_id": {"oneOf": [{"type": "integer", "minimum": 1}, {"type": "string", "minLength": 1}]},
+              "tail_music_muted": {"const": false},
+              "tail_music_gain_db": {"type": "number"},
+              "program_duration_s": {"type": "number", "exclusiveMinimum": 0},
+              "cta_duration_s": {"const": 5},
+              "music_output_start_s": {"type": "number", "minimum": 0},
+              "music_output_end_s": {"type": "number", "exclusiveMinimum": 0},
+              "music_source_offset_s": {"type": "number", "minimum": 0},
+              "music_source_duration_s": {"type": "number", "exclusiveMinimum": 0},
+              "music_source_has_audio_stream": {"const": true},
+              "music_loop": {"type": "boolean"},
+              "renderer_outro_contract_version": {"const": "valmera-cta-tail-v1"},
+              "tail_music_item_fade_out_s": {"const": 0},
+              "whole_program_fade_present": {"const": false},
+              "tail_overlapping_music_item_count": {"const": 1}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"status": {"const": "ready"}, "audio": {"properties": {"selection_mode": {"const": "compared_catalog_slate"}}, "required": ["selection_mode"]}}, "required": ["status", "audio"]},
+      "then": {
+        "properties": {
+          "audio": {
+            "properties": {
+              "candidate_metadata_shortlist": {
+                "items": {"properties": {"music_provenance": {"properties": {"license_verification_status": {"const": "provider_metadata_exposed"}, "commercial_use_allowed": {"const": true}, "derivatives_allowed": {"const": true}, "attribution_required": {"type": "boolean"}}}}}
+              },
+              "edl_facts": {
+                "properties": {
+                  "music_provenance": {
+                    "properties": {
+                      "license_verification_status": {"const": "provider_metadata_exposed"},
+                      "commercial_use_allowed": {"const": true},
+                      "derivatives_allowed": {"const": true},
+                      "attribution_required": {"type": "boolean"},
+                      "downloaded_sha256": {"$ref": "#/$defs/sha256"},
+                      "source_audio_stream_status": {"const": "complete"},
+                      "source_has_audio_stream": {"const": true},
+                      "source_audio_stream_codec": {"type": "string", "minLength": 1},
+                      "source_audio_stream_channels": {"type": "integer", "minimum": 1},
+                      "source_audio_stream_probe_tool": {"const": "ffprobe"},
+                      "source_audio_stream_probed_at": {"type": "string", "format": "date-time"}
+                    },
+                    "anyOf": [
+                      {"required": ["provider_reported_license_id"], "properties": {"provider_reported_license_id": {"type": "string", "minLength": 1}}},
+                      {"required": ["provider_reported_license_label"], "properties": {"provider_reported_license_label": {"type": "string", "minLength": 1}}}
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "prefixedSha256": {"type": "string", "pattern": "^sha256:[A-Fa-f0-9]{64}$"},
+    "sha256": {"type": "string", "pattern": "^(?:sha256:)?[A-Fa-f0-9]{64}$"},
+    "interval": {"type": "array", "prefixItems": [{"type": "number", "minimum": 0}, {"type": "number", "exclusiveMinimum": 0}], "items": false, "minItems": 2, "maxItems": 2},
+    "sourceLineage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["youtube_video_id", "asset_id", "source_duration_s", "approved_start_s", "approved_end_s", "seeded_child_start_s", "seeded_child_end_s", "seed_snap_reason", "seed_range_verified_by", "seed_range_evidence_digest"],
+      "properties": {"youtube_video_id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{11}$"}, "asset_id": {"type": "integer", "minimum": 1}, "source_duration_s": {"type": "number", "exclusiveMinimum": 0}, "approved_start_s": {"type": "number", "minimum": 0}, "approved_end_s": {"type": "number", "exclusiveMinimum": 0}, "seeded_child_start_s": {"type": "number", "minimum": 0}, "seeded_child_end_s": {"type": "number", "exclusiveMinimum": 0}, "seed_snap_reason": {"enum": ["none", "word_boundary_snap"]}, "seed_range_verified_by": {"enum": ["authoritative_child_edl", "audit_snap_keep_to_words"]}, "seed_range_evidence_digest": {"$ref": "#/$defs/prefixedSha256"}}
+    },
+    "passFail": {"enum": ["PASS", "FAIL"]},
+    "storyResult": {"type": "object", "additionalProperties": false, "required": ["hook", "context", "development", "payoff", "power_ending", "final_spoken_line"], "properties": {"hook": {"$ref": "#/$defs/passFail"}, "context": {"$ref": "#/$defs/passFail"}, "development": {"$ref": "#/$defs/passFail"}, "payoff": {"$ref": "#/$defs/passFail"}, "power_ending": {"$ref": "#/$defs/passFail"}, "final_spoken_line": {"type": "string", "minLength": 1}}},
+    "treatmentResult": {
+      "type": "object", "additionalProperties": false,
+      "required": ["treatment_contract_version", "reference_profile_version", "name", "story_profile_matches_evidence", "audience_promise_fulfilled", "emotional_trajectory_fulfilled", "reference_status", "reference_applicable", "child_reference_asset_id", "reference_evidence_status", "transfer_honored", "adapt_honored", "reject_honored", "generic_preset_used"],
+      "properties": {"treatment_contract_version": {"const": "2"}, "reference_profile_version": {"type": ["string", "null"], "enum": ["2", null]}, "name": {"type": "string", "minLength": 1}, "story_profile_matches_evidence": {"type": "boolean"}, "audience_promise_fulfilled": {"type": "boolean"}, "emotional_trajectory_fulfilled": {"type": "boolean"}, "reference_status": {"enum": ["applicable", "partial", "inapplicable", "not_supplied"]}, "reference_applicable": {"type": "boolean"}, "child_reference_asset_id": {"type": ["integer", "null"], "minimum": 1}, "reference_evidence_status": {"enum": ["complete_visual_transcript_metadata", "incomplete", "not_applicable", "not_supplied"]}, "transfer_honored": {"type": "boolean"}, "adapt_honored": {"type": "boolean"}, "reject_honored": {"type": "boolean"}, "generic_preset_used": {"type": "boolean"}},
+      "oneOf": [
+        {"properties": {"reference_status": {"enum": ["applicable", "partial"]}, "reference_applicable": {"const": true}, "reference_profile_version": {"const": "2"}, "child_reference_asset_id": {"type": "integer", "minimum": 1}, "reference_evidence_status": {"enum": ["complete_visual_transcript_metadata", "incomplete"]}}},
+        {"properties": {"reference_status": {"const": "inapplicable"}, "reference_applicable": {"const": false}, "reference_profile_version": {"const": "2"}, "child_reference_asset_id": {"type": "null"}, "reference_evidence_status": {"const": "not_applicable"}}},
+        {"properties": {"reference_status": {"const": "not_supplied"}, "reference_applicable": {"const": false}, "reference_profile_version": {"type": "null"}, "child_reference_asset_id": {"type": "null"}, "reference_evidence_status": {"const": "not_supplied"}}}
+      ]
+    },
+    "narrativeMode": {"enum": ["conversation", "explanation", "retrospective_profile", "breakthrough", "prediction_vision", "intimate_reflection", "debate_tension", "anecdote", "comedy", "demonstration"]},
+    "visualProvenance": {
+      "type": "object", "additionalProperties": false,
+      "required": ["asset_key", "provider", "canonical_source_id", "sha256", "canonical_url", "title", "author_or_uploader", "output_start_s", "output_end_s", "source_start_s", "source_duration_s", "raw_automated_license_status", "available_usage_evidence", "usage_evidence_detail", "usage_evidence_source_url", "observed_at", "required_attribution", "known_usage_restriction", "visually_inspected"],
+      "properties": {"asset_key": {"type": "string", "minLength": 1}, "provider": {"enum": ["youtube", "pexels", "wikimedia", "primary_publisher", "archival_provider", "user_upload", "existing_valmera_asset"]}, "canonical_source_id": {"type": ["string", "null"], "minLength": 1}, "sha256": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]}, "canonical_url": {"oneOf": [{"type": "string", "format": "uri"}, {"type": "null"}]}, "title": {"type": "string", "minLength": 1}, "author_or_uploader": {"type": ["string", "null"]}, "output_start_s": {"type": "number", "minimum": 0}, "output_end_s": {"type": "number", "exclusiveMinimum": 0}, "source_start_s": {"type": "number", "minimum": 0}, "source_duration_s": {"type": "number", "exclusiveMinimum": 0}, "raw_automated_license_status": {"type": ["string", "null"]}, "available_usage_evidence": {"enum": ["not_assessed", "explicit_license", "publisher_statement", "user_supplied_permission", "provider_license", "known_restriction"]}, "usage_evidence_detail": {"type": ["string", "null"]}, "usage_evidence_source_url": {"oneOf": [{"type": "string", "format": "uri"}, {"type": "null"}]}, "observed_at": {"type": "string", "format": "date-time"}, "required_attribution": {"type": ["string", "null"]}, "known_usage_restriction": {"type": ["string", "null"]}, "visually_inspected": {"type": ["boolean", "null"]}},
+      "oneOf": [{"properties": {"canonical_source_id": {"type": "string", "minLength": 1}, "sha256": {"type": "null"}}}, {"properties": {"canonical_source_id": {"type": "null"}, "sha256": {"$ref": "#/$defs/sha256"}}}]
+    },
+    "inspectedYoutubeCandidate": {"type": "object", "additionalProperties": false, "required": ["canonical_url", "title", "uploader", "rejection_reasons", "reason_detail"], "properties": {"canonical_url": {"type": "string", "pattern": "^https://(?:www\\.)?(?:youtube\\.com/(?:watch\\?v=|shorts/)|youtu\\.be/)[A-Za-z0-9_-]{11}"}, "title": {"type": "string", "minLength": 1}, "uploader": {"type": "string", "minLength": 1}, "rejection_reasons": {"type": "array", "minItems": 1, "items": {"enum": ["relevance", "quality", "provenance", "known_usage_restriction", "watermark", "resolution", "not_topical", "fetch_failed"]}, "uniqueItems": true}, "reason_detail": {"type": "string", "minLength": 1}}},
+    "topicalPexelsException": {"type": "object", "additionalProperties": false, "required": ["output_start_s", "output_end_s", "pexels_asset_key", "spoken_beat", "inspected_youtube_candidates"], "properties": {"output_start_s": {"type": "number", "minimum": 0}, "output_end_s": {"type": "number", "exclusiveMinimum": 0}, "pexels_asset_key": {"type": "string", "minLength": 1}, "spoken_beat": {"type": "string", "minLength": 1}, "inspected_youtube_candidates": {"type": "array", "items": {"$ref": "#/$defs/inspectedYoutubeCandidate"}}}},
+    "visualResult": {
+      "type": "object", "additionalProperties": false,
+      "required": ["classification_status", "dominant_mode", "secondary_mode", "visual_identity", "motifs", "broll_coverage_percent", "longest_effective_broll_hold_s", "holds_over_5_25_s", "full_timeline_visual_map_complete", "meaningless_visual_intervals", "empty_wall_intervals", "subject_loss_intervals", "reframe_drift_intervals", "mandatory_spans_covered", "repeated_source_windows", "repeated_visual_concepts", "sibling_window_reuse", "youtube_asset_uses", "pexels_asset_uses", "topical_pexels_exceptions", "visual_provenance_records", "assets_with_known_usage_restrictions", "all_assets_visually_inspected", "junction_frame_check", "retention_pacing_check"],
+      "properties": {"classification_status": {"enum": ["clear", "hybrid", "ambiguous", "insufficient_evidence"]}, "dominant_mode": {"oneOf": [{"$ref": "#/$defs/narrativeMode"}, {"type": "null"}]}, "secondary_mode": {"oneOf": [{"$ref": "#/$defs/narrativeMode"}, {"type": "null"}]}, "visual_identity": {"type": "string", "minLength": 1}, "motifs": {"type": "array", "maxItems": 3, "items": {"type": "string", "minLength": 1}, "uniqueItems": true}, "broll_coverage_percent": {"type": "number", "minimum": 0, "maximum": 100}, "longest_effective_broll_hold_s": {"type": "number", "minimum": 0}, "holds_over_5_25_s": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["start_s", "end_s", "justification"], "properties": {"start_s": {"type": "number", "minimum": 0}, "end_s": {"type": "number", "exclusiveMinimum": 0}, "justification": {"type": "string", "minLength": 1}}}}, "full_timeline_visual_map_complete": {"type": "boolean"}, "meaningless_visual_intervals": {"type": "array", "items": {"$ref": "#/$defs/interval"}}, "empty_wall_intervals": {"type": "array", "items": {"$ref": "#/$defs/interval"}}, "subject_loss_intervals": {"type": "array", "items": {"$ref": "#/$defs/interval"}}, "reframe_drift_intervals": {"type": "array", "items": {"$ref": "#/$defs/interval"}}, "mandatory_spans_covered": {"type": "boolean"}, "repeated_source_windows": {"type": "integer", "minimum": 0}, "repeated_visual_concepts": {"type": "integer", "minimum": 0}, "sibling_window_reuse": {"type": "integer", "minimum": 0}, "youtube_asset_uses": {"type": "integer", "minimum": 0}, "pexels_asset_uses": {"type": "integer", "minimum": 0}, "topical_pexels_exceptions": {"type": "array", "items": {"$ref": "#/$defs/topicalPexelsException"}}, "visual_provenance_records": {"type": "array", "items": {"$ref": "#/$defs/visualProvenance"}}, "assets_with_known_usage_restrictions": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true}, "all_assets_visually_inspected": {"type": "boolean"}, "junction_frame_check": {"$ref": "#/$defs/passFail"}, "retention_pacing_check": {"$ref": "#/$defs/passFail"}},
+      "allOf": [{"if": {"properties": {"classification_status": {"const": "clear"}}, "required": ["classification_status"]}, "then": {"properties": {"dominant_mode": {"$ref": "#/$defs/narrativeMode"}, "secondary_mode": {"type": "null"}}}}, {"if": {"properties": {"classification_status": {"const": "hybrid"}}, "required": ["classification_status"]}, "then": {"properties": {"dominant_mode": {"$ref": "#/$defs/narrativeMode"}, "secondary_mode": {"$ref": "#/$defs/narrativeMode"}}}}, {"if": {"properties": {"classification_status": {"enum": ["ambiguous", "insufficient_evidence"]}}, "required": ["classification_status"]}, "then": {"properties": {"dominant_mode": {"type": "null"}, "secondary_mode": {"type": "null"}}}}]
+    },
+    "captionResult": {"type": "object", "additionalProperties": false, "required": ["max_words_seen", "max_lines_seen", "density_violations", "wrap_violations", "uncovered_words", "overlaps", "warnings", "first_caption_delay_s", "rendered_pixel_check"], "properties": {"max_words_seen": {"type": "integer", "minimum": 0}, "max_lines_seen": {"type": "integer", "minimum": 0}, "density_violations": {"type": "integer", "minimum": 0}, "wrap_violations": {"type": "integer", "minimum": 0}, "uncovered_words": {"type": "integer", "minimum": 0}, "overlaps": {"type": "integer", "minimum": 0}, "warnings": {"type": "integer", "minimum": 0}, "first_caption_delay_s": {"type": "number", "minimum": 0}, "rendered_pixel_check": {"$ref": "#/$defs/passFail"}}},
+    "musicIdentityEvidence": {"type": "object", "additionalProperties": false, "required": ["evidence_id", "source", "source_url", "detail", "observed_at"], "properties": {"evidence_id": {"type": "string", "pattern": "^music-meta-[A-Za-z0-9_-]+$"}, "source": {"enum": ["edl_asset_metadata", "visible_platform_label", "provider_metadata", "embedded_tags", "upload_manifest", "none_available"]}, "source_url": {"oneOf": [{"type": "string", "format": "uri"}, {"type": "null"}]}, "detail": {"type": "string", "minLength": 1, "pattern": "\\S"}, "observed_at": {"type": "string", "format": "date-time"}}},
+    "musicIdentity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "title", "artist", "evidence"],
+      "properties": {"status": {"enum": ["identified", "not_identified", "ambiguous", "not_applicable"]}, "title": {"type": ["string", "null"], "minLength": 1}, "artist": {"type": ["string", "null"], "minLength": 1}, "evidence": {"type": "array", "items": {"$ref": "#/$defs/musicIdentityEvidence"}}},
+      "allOf": [{"if": {"properties": {"status": {"const": "identified"}}, "required": ["status"]}, "then": {"properties": {"title": {"type": "string", "minLength": 1}, "artist": {"type": "string", "minLength": 1}, "evidence": {"minItems": 1}}}}, {"if": {"properties": {"status": {"enum": ["not_identified", "ambiguous"]}}, "required": ["status"]}, "then": {"properties": {"evidence": {"minItems": 1}}}}, {"if": {"properties": {"status": {"const": "not_applicable"}}, "required": ["status"]}, "then": {"properties": {"title": {"type": "null"}, "artist": {"type": "null"}, "evidence": {"maxItems": 0}}}}]
+    },
+    "edlFacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["music_item_present", "music_item_id", "music_asset_id", "track_stable_id", "music_provenance", "user_supplied_license_evidence", "attribution", "output_start_s", "output_end_s", "source_offset_s", "source_duration_s", "source_has_audio_stream", "loop", "gain_db", "ducking_enabled", "ducking_amount_db", "fade_in_s", "fade_out_s", "program_overlap_s", "speech_overlap_s", "source_coverage_valid", "loop_coverage_valid", "timing_matches_assignment"],
+      "properties": {
+        "music_item_present": {"type": "boolean"},
+        "music_item_id": {"type": ["string", "null"], "minLength": 1},
+        "music_asset_id": {"oneOf": [{"type": "integer", "minimum": 1}, {"type": "string", "minLength": 1}, {"type": "null"}]},
+        "track_stable_id": {"type": ["string", "null"], "minLength": 1},
+        "music_provenance": {"oneOf": [{"$ref": "#/$defs/musicProvenance"}, {"type": "null"}]},
+        "user_supplied_license_evidence": {"oneOf": [{"$ref": "#/$defs/userSuppliedLicenseEvidence"}, {"type": "null"}]},
+        "attribution": {"type": ["string", "null"]},
+        "output_start_s": {"type": ["number", "null"], "minimum": 0},
+        "output_end_s": {"type": ["number", "null"], "exclusiveMinimum": 0},
+        "source_offset_s": {"type": ["number", "null"], "minimum": 0},
+        "source_duration_s": {"type": ["number", "null"], "exclusiveMinimum": 0},
+        "source_has_audio_stream": {"type": ["boolean", "null"]},
+        "loop": {"type": "boolean"},
+        "gain_db": {"type": ["number", "null"]},
+        "ducking_enabled": {"type": "boolean"},
+        "ducking_amount_db": {"type": ["number", "null"], "minimum": 0},
+        "fade_in_s": {"type": ["number", "null"], "minimum": 0},
+        "fade_out_s": {"type": ["number", "null"], "minimum": 0},
+        "program_overlap_s": {"type": "number", "minimum": 0},
+        "speech_overlap_s": {"type": "number", "minimum": 0},
+        "source_coverage_valid": {"type": ["boolean", "null"]},
+        "loop_coverage_valid": {"type": ["boolean", "null"]},
+        "timing_matches_assignment": {"type": ["boolean", "null"]}
+      },
+      "allOf": [
+        {"if": {"properties": {"music_item_present": {"const": false}}, "required": ["music_item_present"]}, "then": {"properties": {"music_provenance": {"type": "null"}, "user_supplied_license_evidence": {"type": "null"}}}}
+      ]
+    },
+    "mixMeasurements": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "program_duration_s", "integrated_lufs", "true_peak_dbtp", "loudness_range_lu", "silences", "findings", "warnings", "clipping_sample_count", "clipping_evidence_source", "measurement_source", "evidence_digest", "measured_at"],
+      "properties": {"status": {"enum": ["complete", "partial", "unavailable"]}, "program_duration_s": {"type": ["number", "null"], "exclusiveMinimum": 0}, "integrated_lufs": {"type": ["number", "null"]}, "true_peak_dbtp": {"type": ["number", "null"]}, "loudness_range_lu": {"type": ["number", "null"], "minimum": 0}, "silences": {"type": "array", "items": {"$ref": "#/$defs/interval"}}, "findings": {"type": "array", "items": {"type": "string", "minLength": 1}}, "warnings": {"type": "array", "items": {"type": "string", "minLength": 1}}, "clipping_sample_count": {"type": ["integer", "null"], "minimum": 0}, "clipping_evidence_source": {"type": ["string", "null"], "enum": ["ffmpeg_astats", null]}, "measurement_source": {"type": ["string", "null"], "enum": ["valmera_audio_qc", "ffmpeg_loudnorm", "ffmpeg_astats", "combined_deterministic_audit", null]}, "evidence_digest": {"oneOf": [{"$ref": "#/$defs/prefixedSha256"}, {"type": "null"}]}, "measured_at": {"type": ["string", "null"], "format": "date-time"}},
+      "allOf": [{"if": {"properties": {"status": {"const": "complete"}}, "required": ["status"]}, "then": {"properties": {"program_duration_s": {"type": "number", "exclusiveMinimum": 0}, "measurement_source": {"type": "string"}, "evidence_digest": {"$ref": "#/$defs/prefixedSha256"}, "measured_at": {"type": "string", "format": "date-time"}}}}, {"if": {"properties": {"clipping_sample_count": {"type": "integer"}}, "required": ["clipping_sample_count"]}, "then": {"properties": {"clipping_evidence_source": {"const": "ffmpeg_astats"}}}, "else": {"properties": {"clipping_evidence_source": {"type": "null"}}}}]
+    },
+    "musicFitInference": {"type": "object", "additionalProperties": false, "required": ["decided_by", "decision_basis", "result", "evidence_ids", "rationale", "confidence", "limitations"], "properties": {"decided_by": {"const": "child_editor_codex"}, "decision_basis": {"const": "codex_visual_transcript_metadata_measurement_inference"}, "result": {"enum": ["fit", "mismatch", "not_applicable", "insufficient_evidence"]}, "evidence_ids": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true}, "rationale": {"type": "string", "minLength": 1, "pattern": "\\S"}, "confidence": {"type": ["number", "null"], "minimum": 0, "maximum": 1}, "limitations": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1, "pattern": "\\S"}, "uniqueItems": true}}},
+    "musicProvenance": {
+      "type": "object", "additionalProperties": false,
+      "required": ["provider", "provider_candidate_id", "provider_reported_license_id", "provider_reported_license_label", "provider_reported_license_version", "provider_reported_license_url", "license_verification_status", "normalized_license_family", "commercial_use_allowed", "attribution_required", "derivatives_allowed", "canonical_source_url", "source_url", "creator", "provider_retrieved_at", "downloaded_sha256", "tool_normalized_license_note", "source_audio_stream_status", "source_has_audio_stream", "source_audio_stream_codec", "source_audio_stream_channels", "source_audio_stream_probe_tool", "source_audio_stream_probed_at"],
+      "properties": {
+        "provider": {"type": ["string", "null"], "minLength": 1},
+        "provider_candidate_id": {"type": ["string", "null"], "minLength": 1},
+        "provider_reported_license_id": {"type": ["string", "null"], "minLength": 1},
+        "provider_reported_license_label": {"type": ["string", "null"], "minLength": 1},
+        "provider_reported_license_version": {"type": ["string", "null"], "minLength": 1},
+        "provider_reported_license_url": {"oneOf": [{"type": "string", "format": "uri"}, {"type": "null"}]},
+        "license_verification_status": {"enum": ["provider_metadata_exposed", "unknown"]},
+        "normalized_license_family": {"type": ["string", "null"], "minLength": 1},
+        "commercial_use_allowed": {"type": ["boolean", "null"]},
+        "attribution_required": {"type": ["boolean", "null"]},
+        "derivatives_allowed": {"type": ["boolean", "null"]},
+        "canonical_source_url": {"oneOf": [{"type": "string", "format": "uri"}, {"type": "null"}]},
+        "source_url": {"oneOf": [{"type": "string", "format": "uri"}, {"type": "null"}]},
+        "creator": {"type": ["string", "null"], "minLength": 1},
+        "provider_retrieved_at": {"type": ["string", "null"], "format": "date-time"},
+        "downloaded_sha256": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+        "tool_normalized_license_note": {"type": "string", "minLength": 1, "pattern": "\\S"}
+        ,"source_audio_stream_status": {"enum": ["complete", "unavailable", "not_exposed"]}
+        ,"source_has_audio_stream": {"type": ["boolean", "null"]}
+        ,"source_audio_stream_codec": {"type": ["string", "null"], "minLength": 1}
+        ,"source_audio_stream_channels": {"type": ["integer", "null"], "minimum": 1}
+        ,"source_audio_stream_probe_tool": {"type": ["string", "null"], "enum": ["ffprobe", null]}
+        ,"source_audio_stream_probed_at": {"type": ["string", "null"], "format": "date-time"}
+      },
+      "allOf": [
+        {"if": {"properties": {"license_verification_status": {"const": "provider_metadata_exposed"}}, "required": ["license_verification_status"]}, "then": {"properties": {"provider": {"type": "string", "minLength": 1}, "provider_candidate_id": {"type": "string", "minLength": 1}, "creator": {"type": "string", "minLength": 1}, "provider_retrieved_at": {"type": "string", "format": "date-time"}}}},
+        {"if": {"properties": {"source_audio_stream_status": {"const": "complete"}}, "required": ["source_audio_stream_status"]}, "then": {"properties": {"source_has_audio_stream": {"const": true}, "source_audio_stream_codec": {"type": "string", "minLength": 1}, "source_audio_stream_channels": {"type": "integer", "minimum": 1}, "source_audio_stream_probe_tool": {"const": "ffprobe"}, "source_audio_stream_probed_at": {"type": "string", "format": "date-time"}}}, "else": {"properties": {"source_has_audio_stream": {"type": ["boolean", "null"]}, "source_audio_stream_codec": {"type": "null"}, "source_audio_stream_channels": {"type": "null"}, "source_audio_stream_probe_tool": {"type": "null"}, "source_audio_stream_probed_at": {"type": "null"}}}}
+      ]
+    },
+    "userSuppliedLicenseEvidence": {
+      "type": "object", "additionalProperties": false,
+      "required": ["evidence_id", "manifest_sha256", "media_sha256", "license_label", "commercial_use_allowed", "derivatives_allowed", "attribution_required", "source_url", "recorded_at"],
+      "properties": {
+        "evidence_id": {"type": "string", "pattern": "^user-license-[A-Za-z0-9_-]+$"},
+        "manifest_sha256": {"$ref": "#/$defs/prefixedSha256"},
+        "media_sha256": {"$ref": "#/$defs/prefixedSha256"},
+        "license_label": {"type": "string", "minLength": 1, "pattern": "\\S"},
+        "commercial_use_allowed": {"const": true},
+        "derivatives_allowed": {"const": true},
+        "attribution_required": {"type": "boolean"},
+        "source_url": {"oneOf": [{"type": "string", "format": "uri"}, {"type": "null"}]},
+        "recorded_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "candidateTrackMetadata": {
+      "type": "object", "additionalProperties": false,
+      "required": ["candidate_id", "title", "artist", "music_provenance", "user_supplied_license_evidence", "identity_evidence_ids", "selected"],
+      "properties": {
+        "candidate_id": {"type": "string", "minLength": 1},
+        "title": {"type": "string", "minLength": 1},
+        "artist": {"type": "string", "minLength": 1},
+        "music_provenance": {"oneOf": [{"$ref": "#/$defs/musicProvenance"}, {"type": "null"}]},
+        "user_supplied_license_evidence": {"oneOf": [{"$ref": "#/$defs/userSuppliedLicenseEvidence"}, {"type": "null"}]},
+        "identity_evidence_ids": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+        "selected": {"type": "boolean"}
+      }
+    },
+    "selectedTrackAnalysis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "evidence_id", "analyzed_media_sha256", "scope", "tool_name", "tool_version_status", "tool_version", "evidence_digest", "tempo_status", "bpm", "bpm_confidence", "beat_count", "beat_time_sample_s", "beat_sample_scope", "energy_loudest_time_s", "energy_quietest_time_s", "energy_quietest_db_below_peak", "largest_rise_db", "largest_rise_end_s", "unexposed_facts", "unavailability_reason"],
+      "properties": {
+        "status": {"enum": ["available", "not_available", "not_applicable"]},
+        "evidence_id": {"type": ["string", "null"], "pattern": "^track-analysis-[A-Za-z0-9_-]+$"},
+        "analyzed_media_sha256": {"oneOf": [{"$ref": "#/$defs/prefixedSha256"}, {"type": "null"}]},
+        "scope": {"type": ["string", "null"], "enum": ["selected_track_deterministic_analysis", null]},
+        "tool_name": {"type": ["string", "null"], "minLength": 1},
+        "tool_version_status": {"enum": ["exposed", "not_exposed", "not_applicable"]},
+        "tool_version": {"type": ["string", "null"], "minLength": 1},
+        "evidence_digest": {"oneOf": [{"$ref": "#/$defs/prefixedSha256"}, {"type": "null"}]},
+        "tempo_status": {"enum": ["detected", "no_detectable_pulse", "not_evaluated", "not_applicable"]},
+        "bpm": {"type": ["number", "null"], "exclusiveMinimum": 0},
+        "bpm_confidence": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+        "beat_count": {"type": ["integer", "null"], "minimum": 0},
+        "beat_time_sample_s": {"type": "array", "maxItems": 8, "uniqueItems": true, "items": {"type": "number", "minimum": 0}},
+        "beat_sample_scope": {"type": ["string", "null"], "enum": ["first_up_to_8_detected_beats", null]},
+        "energy_loudest_time_s": {"type": ["number", "null"], "minimum": 0},
+        "energy_quietest_time_s": {"type": ["number", "null"], "minimum": 0},
+        "energy_quietest_db_below_peak": {"type": ["number", "null"], "minimum": 0},
+        "largest_rise_db": {"type": ["number", "null"]},
+        "largest_rise_end_s": {"type": ["number", "null"], "minimum": 0},
+        "unexposed_facts": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+        "unavailability_reason": {"type": ["string", "null"], "minLength": 1}
+      },
+      "allOf": [
+        {"if": {"properties": {"status": {"const": "available"}}, "required": ["status"]}, "then": {"properties": {"evidence_id": {"type": "string"}, "analyzed_media_sha256": {"$ref": "#/$defs/prefixedSha256"}, "scope": {"const": "selected_track_deterministic_analysis"}, "tool_name": {"type": "string"}, "evidence_digest": {"$ref": "#/$defs/prefixedSha256"}, "tempo_status": {"enum": ["detected", "no_detectable_pulse"]}, "beat_sample_scope": {"const": "first_up_to_8_detected_beats"}, "energy_loudest_time_s": {"type": "number", "minimum": 0}, "energy_quietest_time_s": {"type": "number", "minimum": 0}, "energy_quietest_db_below_peak": {"type": "number", "minimum": 0}, "unavailability_reason": {"type": "null"}}}},
+        {"if": {"properties": {"tempo_status": {"const": "detected"}}, "required": ["tempo_status"]}, "then": {"properties": {"bpm": {"type": "number", "exclusiveMinimum": 0}, "bpm_confidence": {"type": "number", "minimum": 0, "maximum": 1}, "beat_count": {"type": "integer", "minimum": 1}, "beat_time_sample_s": {"minItems": 1, "maxItems": 8}}}},
+        {"if": {"properties": {"tempo_status": {"const": "no_detectable_pulse"}}, "required": ["tempo_status"]}, "then": {"properties": {"bpm": {"type": "null"}, "bpm_confidence": {"type": "null"}, "beat_count": {"const": 0}, "beat_time_sample_s": {"maxItems": 0}}}},
+        {"if": {"properties": {"tempo_status": {"enum": ["not_evaluated", "not_applicable"]}}, "required": ["tempo_status"]}, "then": {"properties": {"bpm": {"type": "null"}, "bpm_confidence": {"type": "null"}, "beat_count": {"type": "null"}, "beat_time_sample_s": {"maxItems": 0}, "beat_sample_scope": {"type": "null"}}}},
+        {"if": {"properties": {"tool_version_status": {"const": "exposed"}}, "required": ["tool_version_status"]}, "then": {"properties": {"tool_version": {"type": "string", "minLength": 1}}}, "else": {"properties": {"tool_version": {"type": "null"}}}},
+        {"if": {"properties": {"status": {"const": "not_available"}}, "required": ["status"]}, "then": {"properties": {"evidence_id": {"type": "null"}, "analyzed_media_sha256": {"type": "null"}, "scope": {"type": "null"}, "tool_name": {"type": "null"}, "tool_version_status": {"const": "not_exposed"}, "tool_version": {"type": "null"}, "evidence_digest": {"type": "null"}, "tempo_status": {"const": "not_evaluated"}, "bpm": {"type": "null"}, "bpm_confidence": {"type": "null"}, "beat_count": {"type": "null"}, "beat_time_sample_s": {"maxItems": 0}, "beat_sample_scope": {"type": "null"}, "energy_loudest_time_s": {"type": "null"}, "energy_quietest_time_s": {"type": "null"}, "energy_quietest_db_below_peak": {"type": "null"}, "largest_rise_db": {"type": "null"}, "largest_rise_end_s": {"type": "null"}, "unavailability_reason": {"type": "string", "minLength": 1}}}},
+        {"if": {"properties": {"status": {"const": "not_applicable"}}, "required": ["status"]}, "then": {"properties": {"evidence_id": {"type": "null"}, "analyzed_media_sha256": {"type": "null"}, "scope": {"type": "null"}, "tool_name": {"type": "null"}, "tool_version_status": {"const": "not_applicable"}, "tool_version": {"type": "null"}, "evidence_digest": {"type": "null"}, "tempo_status": {"const": "not_applicable"}, "bpm": {"type": "null"}, "bpm_confidence": {"type": "null"}, "beat_count": {"type": "null"}, "beat_time_sample_s": {"maxItems": 0}, "beat_sample_scope": {"type": "null"}, "energy_loudest_time_s": {"type": "null"}, "energy_quietest_time_s": {"type": "null"}, "energy_quietest_db_below_peak": {"type": "null"}, "largest_rise_db": {"type": "null"}, "largest_rise_end_s": {"type": "null"}, "unexposed_facts": {"maxItems": 0}, "unavailability_reason": {"type": "null"}}}}
+      ]
+    },
+    "audioResult": {"type": "object", "additionalProperties": false, "required": ["music_policy", "music_brief", "entry_policy", "assigned_start_s", "assigned_end_s", "no_music_justification", "music_identity", "selection_mode", "candidate_metadata_shortlist", "selected_track_analysis", "edl_facts", "mix_measurements", "music_fit_inference", "audit"], "properties": {"music_policy": {"enum": ["none", "subtle_bed", "cinematic_build", "rhythmic_support"]}, "music_brief": {"type": ["string", "null"], "minLength": 1}, "entry_policy": {"enum": ["none", "hook", "whole_program", "delayed", "payoff_only"]}, "assigned_start_s": {"type": ["number", "null"], "minimum": 0}, "assigned_end_s": {"type": ["number", "null"], "exclusiveMinimum": 0}, "no_music_justification": {"type": ["string", "null"]}, "music_identity": {"$ref": "#/$defs/musicIdentity"}, "selection_mode": {"enum": ["none", "compared_catalog_slate", "user_supplied_exact"]}, "candidate_metadata_shortlist": {"type": "array", "items": {"$ref": "#/$defs/candidateTrackMetadata"}}, "selected_track_analysis": {"$ref": "#/$defs/selectedTrackAnalysis"}, "edl_facts": {"$ref": "#/$defs/edlFacts"}, "mix_measurements": {"$ref": "#/$defs/mixMeasurements"}, "music_fit_inference": {"$ref": "#/$defs/musicFitInference"}, "audit": {"$ref": "#/$defs/passFail"}}, "allOf": [{"if": {"properties": {"selection_mode": {"const": "none"}}, "required": ["selection_mode"]}, "then": {"properties": {"candidate_metadata_shortlist": {"maxItems": 0}}}}, {"if": {"properties": {"selection_mode": {"const": "compared_catalog_slate"}}, "required": ["selection_mode"]}, "then": {"properties": {"candidate_metadata_shortlist": {"minItems": 3, "maxItems": 3}}}}, {"if": {"properties": {"selection_mode": {"const": "user_supplied_exact"}}, "required": ["selection_mode"]}, "then": {"properties": {"candidate_metadata_shortlist": {"minItems": 1, "maxItems": 1}}}}]},
+    "ctaResult": {
+      "type": "object", "additionalProperties": false,
+      "required": ["duplicated_in_edl", "tail_eligible", "tail_configured", "preview_omits_cta", "tail_music_item_id", "tail_music_asset_id", "tail_music_muted", "tail_music_gain_db", "program_duration_s", "cta_duration_s", "music_output_start_s", "music_output_end_s", "music_source_offset_s", "music_source_duration_s", "music_source_has_audio_stream", "music_loop", "renderer_outro_contract_version", "tail_music_item_fade_out_s", "whole_program_fade_present", "tail_overlapping_music_item_count"],
+      "properties": {
+        "duplicated_in_edl": {"type": "boolean"},
+        "tail_eligible": {"type": "boolean"},
+        "tail_configured": {"type": "boolean"},
+        "preview_omits_cta": {"type": "boolean"},
+        "tail_music_item_id": {"type": ["string", "null"], "minLength": 1},
+        "tail_music_asset_id": {"oneOf": [{"type": "integer", "minimum": 1}, {"type": "string", "minLength": 1}, {"type": "null"}]},
+        "tail_music_muted": {"type": ["boolean", "null"]},
+        "tail_music_gain_db": {"type": ["number", "null"]},
+        "program_duration_s": {"type": "number", "exclusiveMinimum": 0},
+        "cta_duration_s": {"const": 5},
+        "music_output_start_s": {"type": ["number", "null"], "minimum": 0},
+        "music_output_end_s": {"type": ["number", "null"], "exclusiveMinimum": 0},
+        "music_source_offset_s": {"type": ["number", "null"], "minimum": 0},
+        "music_source_duration_s": {"type": ["number", "null"], "exclusiveMinimum": 0},
+        "music_source_has_audio_stream": {"type": ["boolean", "null"]},
+        "music_loop": {"type": ["boolean", "null"]},
+        "renderer_outro_contract_version": {"const": "valmera-cta-tail-v1"},
+        "tail_music_item_fade_out_s": {"type": ["number", "null"], "minimum": 0},
+        "whole_program_fade_present": {"type": "boolean"},
+        "tail_overlapping_music_item_count": {"type": "integer", "minimum": 0}
+      }
+    },
+    "renderVisualInspection": {"type": "object", "additionalProperties": false, "required": ["status", "evidence_id", "method", "surface", "duration_s", "coverage", "gaps", "sampled_frame_times", "max_sample_gap_s", "shot_boundaries_exhausted", "junction_checks_exhausted", "replacement_checks_exhausted", "final_tail_checks_exhausted", "evidence_digest", "completed_at"], "properties": {"status": {"enum": ["complete", "partial", "unavailable"]}, "evidence_id": {"const": "visual:render-inspection"}, "method": {"const": "timestamped_frame_sampling_and_frame_level_checks"}, "surface": {"enum": ["valmera_preview", "downloaded_preview"]}, "duration_s": {"type": "number", "exclusiveMinimum": 0}, "coverage": {"type": "array", "items": {"$ref": "#/$defs/interval"}}, "gaps": {"type": "array", "items": {"$ref": "#/$defs/interval"}}, "sampled_frame_times": {"type": "array", "items": {"type": "number", "minimum": 0}}, "max_sample_gap_s": {"type": ["number", "null"], "exclusiveMinimum": 0}, "shot_boundaries_exhausted": {"type": "boolean"}, "junction_checks_exhausted": {"type": "boolean"}, "replacement_checks_exhausted": {"type": "boolean"}, "final_tail_checks_exhausted": {"type": "boolean"}, "evidence_digest": {"oneOf": [{"$ref": "#/$defs/prefixedSha256"}, {"type": "null"}]}, "completed_at": {"type": ["string", "null"], "format": "date-time"}}},
+    "captionWordCoverage": {"type": "object", "additionalProperties": false, "required": ["transcribed_word_count", "captioned_word_count", "uncovered_word_count"], "properties": {"transcribed_word_count": {"type": "integer", "minimum": 0}, "captioned_word_count": {"type": "integer", "minimum": 0}, "uncovered_word_count": {"type": "integer", "minimum": 0}}},
+    "previewRenderProvenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["retrieval", "preview_receipt"],
+      "properties": {
+        "retrieval": {
+          "type": "object", "additionalProperties": false,
+          "required": ["source_tool", "render", "frames", "delivery", "windowed_or_transcoded", "retrieved_at"],
+          "properties": {
+            "source_tool": {"const": "watch_video"},
+            "render": {"const": true},
+            "frames": {"const": false},
+            "delivery": {"const": "url"},
+            "windowed_or_transcoded": {"const": false},
+            "retrieved_at": {"type": "string", "format": "date-time"}
+          }
+        },
+        "preview_receipt": {
+          "type": "object", "additionalProperties": false,
+          "required": ["asset_id", "render_job_id", "edl_version", "duration_s", "audio_model_review", "listen_keys_count", "listen_clips_count", "audio_reviewer_findings_count", "meta_sha256"],
+          "properties": {
+            "asset_id": {"oneOf": [{"type": "integer", "minimum": 1}, {"type": "string", "minLength": 1}]},
+            "render_job_id": {"oneOf": [{"type": "integer", "minimum": 1}, {"type": "string", "minLength": 1}]},
+            "edl_version": {"type": "integer", "minimum": 0},
+            "duration_s": {"type": "number", "exclusiveMinimum": 0},
+            "audio_model_review": {"const": false},
+            "listen_keys_count": {"const": 0},
+            "listen_clips_count": {"const": 0},
+            "audio_reviewer_findings_count": {"const": 0},
+            "meta_sha256": {"$ref": "#/$defs/sha256"}
+          }
+        }
+      }
+    },
+    "programSpeechTranscript": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "status", "evidence_id", "source", "status_semantics", "evidence_role", "creative_decision_made", "render_edl_version", "preview_media_sha256", "audio_pcm_sha256", "duration_s", "has_audio_stream", "audio_stream", "tool_lineage", "asr_engine", "asr_model", "asr_language", "timestamp_origin", "media_time_offset_s", "processed_coverage", "processing_gaps", "words", "sentences", "transcript_text_sha256", "warnings", "caption_word_coverage", "evidence_digest", "completed_at", "limitations", "claims_not_made"],
+      "properties": {
+        "schema_version": {"const": "valmera-local-transcript-v1"},
+        "status": {"enum": ["complete", "partial", "unavailable"]},
+        "evidence_id": {"type": ["string", "null"], "pattern": "^transcript-evidence:[a-f0-9]{64}$"},
+        "source": {"const": "render_asr"},
+        "status_semantics": {"const": "asr_completed_over_the_extracted_audio_stream_not_transcript_accuracy"},
+        "evidence_role": {"const": "factual_transcription_and_caption_timing_only"},
+        "creative_decision_made": {"const": false},
+        "render_edl_version": {"type": "integer", "minimum": 0},
+        "preview_media_sha256": {"oneOf": [{"$ref": "#/$defs/prefixedSha256"}, {"type": "null"}]},
+        "audio_pcm_sha256": {"oneOf": [{"$ref": "#/$defs/prefixedSha256"}, {"type": "null"}]},
+        "duration_s": {"type": "number", "exclusiveMinimum": 0},
+        "has_audio_stream": {"type": ["boolean", "null"]},
+        "audio_stream": {"oneOf": [{"$ref": "#/$defs/audioStreamEvidence"}, {"type": "null"}]},
+        "tool_lineage": {"oneOf": [{"$ref": "#/$defs/toolLineage"}, {"type": "null"}]},
+        "asr_engine": {"type": ["string", "null"], "enum": ["faster-whisper", null]},
+        "asr_model": {"type": ["string", "null"], "minLength": 1},
+        "asr_language": {"type": ["string", "null"], "minLength": 1},
+        "timestamp_origin": {"type": ["string", "null"], "enum": ["extracted_audio_stream_start", null]},
+        "media_time_offset_s": {"type": ["number", "null"], "minimum": 0},
+        "processed_coverage": {"type": "array", "items": {"$ref": "#/$defs/interval"}},
+        "processing_gaps": {"type": "array", "items": {"$ref": "#/$defs/interval"}},
+        "words": {"type": "array", "items": {"$ref": "#/$defs/transcriptSpan"}},
+        "sentences": {"type": "array", "items": {"$ref": "#/$defs/transcriptSpan"}},
+        "transcript_text_sha256": {"oneOf": [{"$ref": "#/$defs/prefixedSha256"}, {"type": "null"}]},
+        "warnings": {"type": "array", "items": {"type": "string", "minLength": 1, "pattern": "\\S"}},
+        "caption_word_coverage": {"$ref": "#/$defs/captionWordCoverage"},
+        "evidence_digest": {"oneOf": [{"$ref": "#/$defs/prefixedSha256"}, {"type": "null"}]},
+        "completed_at": {"type": ["string", "null"], "format": "date-time"},
+        "limitations": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1, "pattern": "\\S"}, "contains": {"const": "server_render_sha_not_exposed"}},
+        "claims_not_made": {"const": ["direct_audio_perception", "music_vibe", "music_quality", "subjective_intelligibility", "emotional_fit", "auditory_review"]}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"status": {"const": "complete"}}, "required": ["status"]},
+          "then": {"properties": {
+            "evidence_id": {"type": "string", "pattern": "^transcript-evidence:[a-f0-9]{64}$"},
+            "preview_media_sha256": {"$ref": "#/$defs/prefixedSha256"},
+            "audio_pcm_sha256": {"$ref": "#/$defs/prefixedSha256"},
+            "has_audio_stream": {"const": true},
+            "audio_stream": {"$ref": "#/$defs/audioStreamEvidence"},
+            "tool_lineage": {"$ref": "#/$defs/toolLineage"},
+            "asr_engine": {"const": "faster-whisper"},
+            "asr_model": {"type": "string", "minLength": 1},
+            "asr_language": {"type": "string", "minLength": 1},
+            "timestamp_origin": {"const": "extracted_audio_stream_start"},
+            "media_time_offset_s": {"type": "number", "minimum": 0},
+            "processed_coverage": {"minItems": 1},
+            "processing_gaps": {"maxItems": 0},
+            "transcript_text_sha256": {"$ref": "#/$defs/prefixedSha256"},
+            "evidence_digest": {"$ref": "#/$defs/prefixedSha256"},
+            "completed_at": {"type": "string", "format": "date-time"}
+          }}
+        },
+        {
+          "if": {"properties": {"status": {"const": "unavailable"}}, "required": ["status"]},
+          "then": {"properties": {
+            "evidence_id": {"type": "null"},
+            "preview_media_sha256": {"type": "null"},
+            "audio_pcm_sha256": {"type": "null"},
+            "has_audio_stream": {"type": "null"},
+            "audio_stream": {"type": "null"},
+            "tool_lineage": {"type": "null"},
+            "asr_engine": {"type": "null"},
+            "asr_model": {"type": "null"},
+            "asr_language": {"type": "null"},
+            "timestamp_origin": {"type": "null"},
+            "media_time_offset_s": {"type": "null"},
+            "processed_coverage": {"maxItems": 0},
+            "processing_gaps": {"minItems": 1},
+            "words": {"maxItems": 0},
+            "sentences": {"maxItems": 0},
+            "transcript_text_sha256": {"type": "null"},
+            "evidence_digest": {"type": "null"},
+            "completed_at": {"type": "null"}
+          }}
+        }
+      ]
+    },
+    "audioStreamEvidence": {
+      "type": "object", "additionalProperties": false,
+      "required": ["stream_index", "codec_name", "source_start_s", "declared_duration_s", "start_time_fallback", "extracted_pcm_duration_s", "media_timeline_coverage", "media_timeline_gaps"],
+      "properties": {
+        "stream_index": {"type": "integer", "minimum": 0},
+        "codec_name": {"type": "string", "minLength": 1, "pattern": "\\S"},
+        "source_start_s": {"type": ["number", "null"], "minimum": 0},
+        "declared_duration_s": {"type": ["number", "null"], "minimum": 0},
+        "start_time_fallback": {"oneOf": [{"const": "zero_when_ffprobe_unavailable"}, {"type": "null"}]},
+        "extracted_pcm_duration_s": {"type": "number", "exclusiveMinimum": 0},
+        "media_timeline_coverage": {"type": "array", "items": {"$ref": "#/$defs/interval"}},
+        "media_timeline_gaps": {"type": "array", "items": {"$ref": "#/$defs/interval"}}
+      },
+      "oneOf": [
+        {"properties": {"source_start_s": {"type": "number", "minimum": 0}, "start_time_fallback": {"type": "null"}}},
+        {"properties": {"source_start_s": {"type": "null"}, "start_time_fallback": {"const": "zero_when_ffprobe_unavailable"}}}
+      ]
+    },
+    "toolLineage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["helper_sha256", "worker_transcriber_sha256", "faster_whisper_version", "model_artifact_id", "model_revision", "model_revision_status", "decode_config", "decode_config_sha256"],
+      "properties": {
+        "helper_sha256": {"$ref": "#/$defs/prefixedSha256"},
+        "worker_transcriber_sha256": {"$ref": "#/$defs/prefixedSha256"},
+        "faster_whisper_version": {"type": "string", "minLength": 1, "pattern": "\\S"},
+        "model_artifact_id": {"type": "string", "minLength": 1, "pattern": "\\S"},
+        "model_revision": {"type": ["string", "null"], "minLength": 1},
+        "model_revision_status": {"enum": ["local_path_unhashed", "resolved_cache_ref", "alias_only_unpinned"]},
+        "decode_config": {"$ref": "#/$defs/decodeConfig"},
+        "decode_config_sha256": {"$ref": "#/$defs/prefixedSha256"}
+      }
+    },
+    "decodeConfig": {
+      "type": "object", "additionalProperties": false,
+      "required": ["model", "device", "compute_type", "beam_size", "temperature_ladder", "compression_ratio_threshold", "log_prob_threshold", "no_speech_threshold", "condition_on_previous_text", "vad_filter", "vad_parameters", "initial_prompt_sha256", "hotwords_sha256"],
+      "properties": {
+        "model": {"type": "string", "minLength": 1, "pattern": "\\S"},
+        "device": {"type": "string", "minLength": 1, "pattern": "\\S"},
+        "compute_type": {"type": "string", "minLength": 1, "pattern": "\\S"},
+        "beam_size": {"type": "integer", "minimum": 1},
+        "temperature_ladder": {"type": "array", "prefixItems": [{"const": 0.0}, {"const": 0.2}, {"const": 0.4}, {"const": 0.6}, {"const": 0.8}, {"const": 1.0}], "items": false, "minItems": 6, "maxItems": 6},
+        "compression_ratio_threshold": {"type": ["number", "null"]},
+        "log_prob_threshold": {"const": -1.0},
+        "no_speech_threshold": {"const": 0.6},
+        "condition_on_previous_text": {"const": false},
+        "vad_filter": {"const": true},
+        "vad_parameters": {"type": "object", "additionalProperties": false, "required": ["min_silence_duration_ms", "speech_pad_ms"], "properties": {"min_silence_duration_ms": {"const": 500}, "speech_pad_ms": {"const": 400}}},
+        "initial_prompt_sha256": {"$ref": "#/$defs/prefixedSha256"},
+        "hotwords_sha256": {"$ref": "#/$defs/prefixedSha256"}
+      }
+    },
+    "transcriptSpan": {
+      "type": "object", "additionalProperties": false,
+      "required": ["text", "start_s", "end_s"],
+      "properties": {"text": {"type": "string", "minLength": 1, "pattern": "\\S"}, "start_s": {"type": "number", "minimum": 0}, "end_s": {"type": "number", "minimum": 0}}
+    },
+    "evidencePagination": {"type": "object", "additionalProperties": false, "required": ["project_state_exhausted", "edl_exhausted", "kept_transcript_exhausted", "shots_exhausted", "assets_exhausted", "reference_evidence_exhausted"], "properties": {"project_state_exhausted": {"type": "boolean"}, "edl_exhausted": {"type": "boolean"}, "kept_transcript_exhausted": {"type": "boolean"}, "shots_exhausted": {"type": "boolean"}, "assets_exhausted": {"type": "boolean"}, "reference_evidence_exhausted": {"type": "boolean"}}},
+    "issue": {"type": "object", "additionalProperties": false, "required": ["gate", "reason_code", "start_s", "end_s", "evidence", "required_change"], "properties": {"gate": {"enum": ["story", "treatment", "reference", "picture", "broll", "captions", "music", "audio", "render"]}, "reason_code": {"enum": ["corrupt_render", "unplayable_render", "transcript_unavailable", "metadata_unavailable", "other"]}, "start_s": {"type": "number", "minimum": 0}, "end_s": {"type": "number", "minimum": 0}, "evidence": {"type": "string", "minLength": 1, "pattern": "\\S"}, "required_change": {"type": "string", "minLength": 1}}
+    }
+  }
+}

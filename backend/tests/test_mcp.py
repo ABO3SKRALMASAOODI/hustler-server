@@ -20,6 +20,7 @@ import contextlib
 import hashlib
 import json
 import os
+from pathlib import Path
 import re
 import sys
 from urllib.parse import urlsplit, parse_qs
@@ -78,6 +79,7 @@ def _reset():
     DB.update(clients={}, grants={}, codes={}, tokens={}, seq=0,
               static_project=3, expired_codes=set(), enqueued=[],
               job_result=None, created_project=None,
+              render_assets=[],
               project_rows={
                   3: {"id": 3, "title": "Long podcast", "kind": "shorts",
                       "parent_project_id": None,
@@ -214,6 +216,18 @@ class FakeCur:
                           "project_id": 3,
                           "result": DB.get("job_result")
                           or {"text": "12 sentences."}}]
+        elif "FROM assets" in s and "kind = 'render'" in s:
+            rows = [row for row in DB["render_assets"]
+                    if row["project_id"] == p[0]
+                    and (row.get("meta") or {}).get("variant") == p[1]]
+            if "audio_model_review' = 'false'" in s:
+                rows = [row for row in rows if
+                        (row.get("meta") or {}).get(
+                            "audio_model_review") is False]
+            if "meta->>'edl_version'" in s and len(p) > 2:
+                rows = [row for row in rows if int(
+                    (row.get("meta") or {}).get("edl_version")) == int(p[2])]
+            self.rows = sorted(rows, key=lambda row: row["id"], reverse=True)[:1]
 
     def fetchone(self):
         return self.rows[0] if self.rows else None
@@ -349,6 +363,106 @@ def test_podcast_shorts_are_first_class_session_tools(client):
                  "index_status", "shorts_status", "download_url",
                  "watch_video"):
         assert "project_id" in by_name[name]["inputSchema"]["required"]
+
+
+def test_upload_tools_advertise_the_shorts_reference_contract(client):
+    tools = rpc(client, "tools/list", STATIC_TOKEN).get_json()["result"]["tools"]
+    by_name = {t["name"]: t for t in tools}
+    for name in ("upload_start", "upload_finish"):
+        props = by_name[name]["inputSchema"]["properties"]
+        assert props["role"]["enum"] == ["shorts_reference"]
+        assert "only with kind='clip'" in props["role"]["description"]
+        assert props["duration_s"]["type"] == "number"
+        assert props["duration_s"]["exclusiveMinimum"] == 0
+
+
+@pytest.mark.parametrize("upload_plan", [
+    {"mode": "single", "url": "https://storage.example/put"},
+    {"mode": "multipart", "upload_id": "multi-7", "part_size": 64,
+     "part_urls": [{"part_number": 1,
+                     "url": "https://storage.example/part-1"}]},
+])
+def test_upload_start_preserves_reference_metadata_in_finish_instructions(
+        client, monkeypatch, upload_plan):
+    monkeypatch.setattr(mcpmod.storage, "is_configured", lambda: True)
+    monkeypatch.setattr(mcpmod.storage, "validate_upload",
+                        lambda filename, size, kind: ("mp4", "video/mp4"))
+    monkeypatch.setattr(mcpmod.storage, "new_original_key",
+                        lambda project_id, ext, kind: "clips/3/ref.mp4")
+    monkeypatch.setattr(mcpmod.storage, "presign_upload",
+                        lambda key, size, content_type: upload_plan)
+
+    body = text_of(rpc(client, "tools/call", STATIC_TOKEN, {
+        "name": "upload_start",
+        "arguments": {"project_id": 3, "filename": "reference.mp4",
+                      "size_bytes": 1234, "kind": "clip",
+                      "role": "shorts_reference", "duration_s": 42.5},
+    }))
+
+    assert 'role="shorts_reference"' in body
+    assert "duration_s=42.5" in body
+    plan = json.loads(body.rsplit("\n\n", 1)[-1])
+    finish = plan["upload_finish_arguments"]
+    assert finish["project_id"] == 3
+    assert finish["storage_key"] == "clips/3/ref.mp4"
+    assert finish["kind"] == "clip"
+    assert finish["role"] == "shorts_reference"
+    assert finish["duration_s"] == 42.5
+    if upload_plan["mode"] == "multipart":
+        assert finish["upload_id"] == "multi-7"
+        assert "parts=[" in body
+
+
+def test_shorts_reference_role_is_refused_for_non_clip_uploads(
+        client, monkeypatch):
+    completed = []
+    monkeypatch.setattr(mcpmod.storage, "is_configured", lambda: True)
+    monkeypatch.setattr(
+        mcpmod, "complete_upload_core",
+        lambda *args: completed.append(args) or ({"asset_id": 1}, 200))
+    bad = {"project_id": 3, "kind": "music",
+           "role": "shorts_reference"}
+
+    start = text_of(rpc(client, "tools/call", STATIC_TOKEN, {
+        "name": "upload_start",
+        "arguments": {**bad, "filename": "song.mp3", "size_bytes": 12},
+    }))
+    finish = text_of(rpc(client, "tools/call", STATIC_TOKEN, {
+        "name": "upload_finish",
+        "arguments": {**bad, "storage_key": "music/3/song.mp3"},
+    }))
+
+    assert "valid only with kind='clip'" in start
+    assert "valid only with kind='clip'" in finish
+    assert completed == []
+
+
+def test_upload_finish_passes_reference_metadata_and_says_it_is_not_media(
+        client, monkeypatch):
+    captured = {}
+
+    def complete(user_id, project_id, data):
+        captured.update(user_id=user_id, project_id=project_id, data=data)
+        return {"asset_id": 81, "index_job_id": 82,
+                "kind": "video_clip"}, 200
+
+    monkeypatch.setattr(mcpmod, "complete_upload_core", complete)
+    body = text_of(rpc(client, "tools/call", STATIC_TOKEN, {
+        "name": "upload_finish",
+        "arguments": {"project_id": 3,
+                      "storage_key": "clips/3/ref.mp4",
+                      "filename": "reference.mp4", "kind": "clip",
+                      "role": "shorts_reference", "duration_s": 42.5},
+    }))
+
+    assert captured["user_id"] == 60 and captured["project_id"] == 3
+    assert captured["data"]["role"] == "shorts_reference"
+    assert captured["data"]["duration_s"] == 42.5
+    assert "Shorts style reference (asset 81)" in body
+    assert "wait_for_job(job_id=82)" in body
+    assert "reference-only analysis input" in body
+    assert "not added to the timeline" in body
+    assert "or offered as placeable media" in body
 
 
 def test_create_podcast_shorts_project_persists_its_kind(client):
@@ -533,6 +647,59 @@ def test_unknown_method_is_a_jsonrpc_error(client):
         == -32601
 
 
+def test_render_preview_public_response_preserves_no_audio_model_provenance(
+        client, monkeypatch):
+    catalog = dict(CATALOG)
+    catalog["tools"] = list(CATALOG["tools"]) + [{
+        "type": "function", "function": {
+            "name": "render_preview",
+            "description": "Render deterministic preview evidence.",
+            "parameters": {"type": "object", "properties": {
+                "complete": {"type": "boolean"}}}}}]
+    monkeypatch.setattr(mcpmod, "_catalog", lambda: catalog)
+    DB["job_result"] = {
+        "text": "Preview v8 rendered: 61.2s.",
+        "edl_version": 8,
+        "edl_changed": False,
+        "preview": {"edl_version": 8, "duration_s": 61.2,
+                    "asset_id": 44, "audio_model_review": False},
+    }
+
+    public = rpc(client, "tools/call", STATIC_TOKEN, {
+        "name": "render_preview",
+        "arguments": {"project_id": 3, "complete": True},
+    }).get_json()["result"]
+
+    body = public["content"][0]["text"]
+    assert "PREVIEW PROVENANCE: audio_model_review=false" in body
+    assert "no separate listening model was invoked" in body
+    assert public["structuredContent"] == {
+        "edl_version": 8,
+        "edl_changed": False,
+        "preview": {"edl_version": 8, "duration_s": 61.2,
+                    "asset_id": 44, "audio_model_review": False},
+    }
+    assert "listen_keys" not in json.dumps(public)
+
+
+def test_wait_for_mcp_preview_preserves_the_same_public_provenance(client):
+    DB["job_result"] = {
+        "text": "Preview v8 rendered: 61.2s.",
+        "edl_version": 8,
+        "edl_changed": False,
+        "preview": {"edl_version": 8, "duration_s": 61.2,
+                    "asset_id": 44, "audio_model_review": False},
+    }
+
+    public = rpc(client, "tools/call", STATIC_TOKEN, {
+        "name": "wait_for_job", "arguments": {"job_id": 5},
+    }).get_json()["result"]
+
+    assert "audio_model_review=false" in public["content"][0]["text"]
+    assert public["structuredContent"]["preview"][
+        "audio_model_review"] is False
+
+
 # ── watch_video: the one tool whose answer is not a sentence ─────────
 #
 # Every other tool returns text. This one has to put a real MP4 into a
@@ -567,6 +734,159 @@ def test_watch_video_is_on_the_surface(client):
     names = [t["name"] for t in
              rpc(client, "tools/list", STATIC_TOKEN).get_json()["result"]["tools"]]
     assert "watch_video" in names
+
+
+def test_watch_video_schema_exposes_clean_asr_retrieval_switch(client):
+    tools = rpc(client, "tools/list", STATIC_TOKEN).get_json()["result"]["tools"]
+    watch = next(tool for tool in tools if tool["name"] == "watch_video")
+    frames = watch["inputSchema"]["properties"]["frames"]
+    assert frames["type"] == "boolean"
+    assert "external ASR" in frames["description"]
+
+
+def test_watch_video_public_result_preserves_false_preview_receipt(
+        client, monkeypatch):
+    _served(monkeypatch)
+    DB["job_result"]["preview"] = {
+        "asset_id": 44, "edl_version": 8, "duration_s": 61.2,
+        "audio_model_review": False}
+
+    public = _call_watch(client, frames=False)
+
+    assert DB["enqueued"][-1]["args"]["frames"] is False
+    assert "audio_model_review=false" in public["content"][0]["text"]
+    assert public["structuredContent"]["preview"][
+        "audio_model_review"] is False
+    assert [block["type"] for block in public["content"]] == ["text"]
+
+
+def test_version_pinned_preview_download_returns_server_receipt(
+        client, monkeypatch):
+    DB["render_assets"] = [{
+        "id": 44, "project_id": 3, "storage_key": "media/3/p8.mp4",
+        "duration_s": 61.2,
+        "meta": {"variant": "preview", "edl_version": 8,
+                 "audio_model_review": False, "render_job_id": 92},
+    }]
+    monkeypatch.setattr(
+        mcpmod.storage, "presign_get",
+        lambda key: f"https://cdn.example/{key}?sig=receipt")
+
+    public = rpc(client, "tools/call", STATIC_TOKEN, {
+        "name": "download_url", "arguments": {
+            "project_id": 3, "kind": "preview", "edl_version": 8},
+    }).get_json()["result"]
+
+    receipt = public["structuredContent"]["preview_receipt"]
+    assert receipt["asset_id"] == 44
+    assert receipt["render_job_id"] == 92
+    assert receipt["edl_version"] == 8
+    assert receipt["duration_s"] == 61.2
+    assert receipt["audio_model_review"] is False
+    assert receipt["listen_keys_count"] == 0
+    assert receipt["listen_clips_count"] == 0
+    assert receipt["audio_reviewer_findings_count"] == 0
+    assert len(receipt["meta_sha256"]) == 64
+    assert receipt["url"] == \
+        "https://cdn.example/media/3/p8.mp4?sig=receipt"
+    assert "PREVIEW RECEIPT:" in public["content"][0]["text"]
+    assert "audio_model_review=false" in public["content"][0]["text"]
+
+
+def test_preview_download_rejects_listener_enabled_cached_asset(
+        client, monkeypatch):
+    DB["render_assets"] = [{
+        "id": 45, "project_id": 3, "storage_key": "media/3/studio.mp4",
+        "duration_s": 61.2,
+        "meta": {"variant": "preview", "edl_version": 8,
+                 "audio_model_review": True},
+    }]
+    monkeypatch.setattr(
+        mcpmod.storage, "presign_get",
+        lambda _key: (_ for _ in ()).throw(
+            AssertionError("incompatible preview must not be signed")))
+
+    public = rpc(client, "tools/call", STATIC_TOKEN, {
+        "name": "download_url", "arguments": {
+            "project_id": 3, "kind": "preview", "edl_version": 8},
+    }).get_json()["result"]
+
+    assert "audio_model_review=false" in public["content"][0]["text"]
+    assert "call render_preview" in public["content"][0]["text"]
+    assert "structuredContent" not in public
+
+
+def test_preview_download_rejects_false_stamp_with_listener_artifacts(
+        client, monkeypatch):
+    DB["render_assets"] = [{
+        "id": 46, "project_id": 3, "storage_key": "media/3/leaked.mp4",
+        "duration_s": 61.2,
+        "meta": {"variant": "preview", "edl_version": 8,
+                 "audio_model_review": False,
+                 "render_job_id": 93,
+                 "listen_keys": ["listen/46-opening.mp3"]},
+    }]
+    monkeypatch.setattr(
+        mcpmod.storage, "presign_get",
+        lambda _key: (_ for _ in ()).throw(
+            AssertionError("listener-bearing preview must not be signed")))
+
+    public = rpc(client, "tools/call", STATIC_TOKEN, {
+        "name": "download_url", "arguments": {
+            "project_id": 3, "kind": "preview", "edl_version": 8},
+    }).get_json()["result"]
+
+    assert "listener artifacts" in public["content"][0]["text"]
+    assert "Call render_preview" in public["content"][0]["text"]
+    assert "structuredContent" not in public
+
+
+def test_preview_download_rejects_false_legacy_asset_without_job_lineage(
+        client, monkeypatch):
+    DB["render_assets"] = [{
+        "id": 47, "project_id": 3, "storage_key": "media/3/legacy.mp4",
+        "duration_s": 61.2,
+        "meta": {"variant": "preview", "edl_version": 8,
+                 "audio_model_review": False},
+    }]
+    monkeypatch.setattr(
+        mcpmod.storage, "presign_get",
+        lambda _key: (_ for _ in ()).throw(
+            AssertionError("lineage-free preview must not be signed")))
+
+    public = rpc(client, "tools/call", STATIC_TOKEN, {
+        "name": "download_url", "arguments": {
+            "project_id": 3, "kind": "preview", "edl_version": 8},
+    }).get_json()["result"]
+
+    assert "lacks complete deterministic-only provenance" in \
+        public["content"][0]["text"]
+    assert "Call render_preview" in public["content"][0]["text"]
+    assert "structuredContent" not in public
+
+
+@pytest.mark.parametrize("duration_s", [0, float("nan"), float("inf")])
+def test_preview_download_rejects_non_positive_or_non_finite_duration(
+        client, monkeypatch, duration_s):
+    DB["render_assets"] = [{
+        "id": 48, "project_id": 3, "storage_key": "media/3/bad-duration.mp4",
+        "duration_s": duration_s,
+        "meta": {"variant": "preview", "edl_version": 8,
+                 "audio_model_review": False, "render_job_id": 94},
+    }]
+    monkeypatch.setattr(
+        mcpmod.storage, "presign_get",
+        lambda _key: (_ for _ in ()).throw(
+            AssertionError("invalid-duration preview must not be signed")))
+
+    public = rpc(client, "tools/call", STATIC_TOKEN, {
+        "name": "download_url", "arguments": {
+            "project_id": 3, "kind": "preview", "edl_version": 8},
+    }).get_json()["result"]
+
+    assert "lacks complete deterministic-only provenance" in \
+        public["content"][0]["text"]
+    assert "structuredContent" not in public
 
 
 def test_a_small_video_comes_back_embedded_beside_its_link(client, monkeypatch):
@@ -933,3 +1253,10 @@ def test_a_get_probe_also_gets_the_challenge(client):
     r = client.get("/mcp")
     assert r.status_code == 401
     assert "resource_metadata=" in r.headers.get("WWW-Authenticate", "")
+
+
+def test_production_gunicorn_keeps_threaded_http_capacity_for_mcp_waits():
+    start = (Path(__file__).resolve().parents[2] / "start.sh").read_text()
+    assert "--workers 3" in start
+    assert "--worker-class gthread" in start
+    assert "--threads 8" in start

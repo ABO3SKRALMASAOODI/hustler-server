@@ -12,6 +12,7 @@ import agent_loop  # noqa: E402
 import config  # noqa: E402
 import db as dbx  # noqa: E402
 import llm  # noqa: E402
+import renderer  # noqa: E402
 
 
 def test_dedicated_reviewer_sends_audio_and_records_modality_tokens(
@@ -197,6 +198,74 @@ def test_render_mix_review_is_advisory_actual_audio(monkeypatch, tmp_path):
     assert heard["kwargs"]["purpose"] == "audio_render_review"
     assert "actual rendered program" in heard["prompt"].lower()
     assert "Return JSON only" in heard["prompt"]
+
+
+def test_deterministic_preview_owner_never_calls_or_persists_audio_model(
+        monkeypatch, tmp_path):
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("deterministic MCP preview touched audio model")
+
+    monkeypatch.setattr(llm, "audio_review_available", forbidden)
+    monkeypatch.setattr(llm, "ask_audio", forbidden)
+    stale = {"edl_version": 3, "verdict": "fix",
+             "text": "subjective reviewer wanted a different song"}
+    ctx = SimpleNamespace(
+        audio_model_review=False, workdir=str(tmp_path), edit_plan={},
+        editing_metrics={}, last_audio_review=stale,
+        last_audio_qc_findings=["integrated loudness is above target"],
+        audio_reviewed_versions=set())
+    row = {"version": 3, "json": {
+        "music": [{"id": "m1", "start": 0, "end": 8}]}}
+
+    report = agent_tools._review_render_audio(
+        ctx, row, {"listen_keys": [{"key": "must-not-download.mp3",
+                                      "t0": 0, "t1": 6}]})
+
+    assert report is None
+    assert ctx.last_audio_review is None
+    # This exact helper supplies build_verification_record(audio_findings=...).
+    # Deterministic QC remains; the stale model opinion cannot become a gate.
+    assert agent_tools._audio_verification_findings(ctx) == [
+        "integrated loudness is above target"]
+    record = agent_tools.quality_verifier.build_verification_record(
+        8, 3, {"manifest_id": "m"},
+        {"keep": [[0, 8]], "music": row["json"]["music"]},
+        {"video": {"duration": 8}, "words": []},
+        preview={"edl_version": 3, "duration_s": 8,
+                 "audio_model_review": False},
+        audio_findings=agent_tools._audio_verification_findings(ctx))
+    assert record["render_evidence"]["audio_model_review"] is False
+    messages = [finding["message"] for finding in record["findings"]]
+    assert not any("different song" in message for message in messages)
+
+
+def test_renderer_audio_review_policy_is_false_safe_and_legacy_compatible():
+    clips = [{"key": "mix.mp3", "t0": 0, "t1": 6}]
+    meta = {"listen_clips": clips, "audio_model_review": True}
+    edl = {"music": [{"id": "m1", "start": 0, "end": 8}]}
+
+    # Missing is the legacy Studio default; explicit false is authoritative,
+    # including defensive parsing of a JSON/string transport value.
+    assert renderer._audio_model_review_requested({}) is True
+    assert renderer._audio_model_review_requested(
+        {"audio_model_review": True}) is True
+    assert renderer._audio_model_review_requested(
+        {"audio_model_review": False}) is False
+    assert renderer._audio_model_review_requested(
+        {"audio_model_review": "false"}) is False
+    assert renderer._cached_listen_keys(meta, True) == clips
+    assert renderer._cached_listen_keys(meta, False) == []
+
+    # A later Studio request does not inherit a cache deliberately rendered
+    # without excerpts; old unstamped cache rows remain backward compatible.
+    assert not renderer._audio_model_review_cache_compatible(
+        True, edl, {"audio_model_review": False})
+    assert renderer._audio_model_review_cache_compatible(True, edl, {})
+    assert not renderer._audio_model_review_cache_compatible(
+        False, edl, {"audio_model_review": True})
+    assert not renderer._audio_model_review_cache_compatible(False, edl, {})
+    assert renderer._audio_model_review_cache_compatible(
+        False, edl, {"audio_model_review": False})
 
 
 def test_render_review_reuses_audio_evidence_when_only_picture_changes(

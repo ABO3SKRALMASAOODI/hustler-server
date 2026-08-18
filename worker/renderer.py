@@ -4491,6 +4491,39 @@ def _render_changed_sections(job_id, edl_row, index, src_local, workdir,
     return out_dur, ranges, mapped
 
 
+def _audio_model_review_requested(payload):
+    """Default-on for legacy Studio jobs; explicit false is authoritative."""
+    value = (payload or {}).get("audio_model_review", True)
+    if isinstance(value, str):
+        return value.strip().lower() not in {"0", "false", "no", "off"}
+    return value is not False
+
+
+def _cached_listen_keys(meta, audio_model_review):
+    """Never expose listening excerpts to a deterministic-only preview."""
+    if not audio_model_review:
+        return []
+    meta = meta or {}
+    return meta.get("listen_clips") or meta.get("listen_keys") or []
+
+
+def _audio_model_review_cache_compatible(requested, edl, meta):
+    """Never reuse a render created under the opposite review policy.
+
+    Old cache rows have no policy stamp and retain their historical behavior.
+    They remain compatible with legacy Studio requests, but MCP's explicit
+    deterministic-only request requires an explicit false receipt.
+    """
+    if not requested:
+        return (meta or {}).get("audio_model_review") is False
+    authored = edl or {}
+    has_designed_audio = bool(
+        authored.get("music") or authored.get("sfx") or
+        authored.get("voiceover"))
+    return not (has_designed_audio and
+                (meta or {}).get("audio_model_review") is False)
+
+
 def run_render_job(worker_db, job):
     job_id, project_id = job["id"], job["project_id"]
     # Which run of this job we are. The dispatcher ships it (remote._job_payload)
@@ -4503,6 +4536,9 @@ def run_render_job(worker_db, job):
         else "final"
     asset_variant = "preview_check" if proof_only else variant
     version = int(job["payload"].get("edl_version"))
+    # Missing preserves historical Studio behavior for queued jobs made
+    # before this flag existed. MCP/Codex always sends an explicit false.
+    audio_model_review = _audio_model_review_requested(job.get("payload"))
     # A render the USER could not play is the one case where re-encoding the
     # same EDL is the point: the stored object is what failed them, so serving
     # it back from cache makes every retry a guaranteed no-op. force=1 (set by
@@ -4567,7 +4603,9 @@ def run_render_job(worker_db, job):
                 and music_tail_current(cached.get("meta"), edl_row["json"],
                                        _tail_out) \
                 and watermark_current(cached.get("meta"), variant, is_paid,
-                                      wm_settings):
+                                      wm_settings) \
+                and _audio_model_review_cache_compatible(
+                    audio_model_review, edl_row["json"], cached.get("meta")):
             cached_meta = cached.get("meta") or {}
             return {"render_asset_id": cached["id"],
                     "sheet_key": cached_meta.get("sheet_key"),
@@ -4582,8 +4620,9 @@ def run_render_job(worker_db, job):
                     # New renders retain exact program windows. Historical
                     # metadata stored keys only; those clips are still valid
                     # heard evidence and get generic labels on reuse.
-                    "listen_keys": (cached_meta.get("listen_clips") or
-                                    cached_meta.get("listen_keys") or []),
+                    "listen_keys": _cached_listen_keys(
+                        cached_meta, audio_model_review),
+                    "audio_model_review": audio_model_review,
                     "duration_s": cached["duration_s"], "edl_version": version,
                     "variant": variant, "cached": True}
     if is_canvas:
@@ -5036,7 +5075,7 @@ def run_render_job(worker_db, job):
             has_designed_audio = bool(
                 authored.get("music") or authored.get("sfx") or
                 authored.get("voiceover"))
-            if has_designed_audio:
+            if has_designed_audio and audio_model_review:
                 review_times = list(vtimes or [])
                 # Ensure the bounded actual-audio listener hears the beginning,
                 # middle and end of the final mix even when all authored SFX
@@ -5098,6 +5137,7 @@ def run_render_job(worker_db, job):
             width=out_info["width"], height=out_info["height"],
             fps=out_info["fps"],
             meta={"variant": asset_variant, "edl_version": version,
+                  "render_job_id": job_id,
                   "sheet_key": sheet_key, "verify_sheet_key": verify_sheet_key,
                   "caption_sheet_key": caption_sheet_key,
                   "caption_pages": caption_pages,
@@ -5106,6 +5146,7 @@ def run_render_job(worker_db, job):
                   "screening_frame_count": len(screening_frames),
                   "listen_keys": [item["key"] for item in listen_keys],
                   "listen_clips": listen_keys,
+                  "audio_model_review": audio_model_review,
                   "audio_qc": audio_qc_res,
                   "src_sha256": src_sha,
                   **({"stitched_from": stitched_from}
@@ -5179,7 +5220,8 @@ def run_render_job(worker_db, job):
                 **({"changed_ranges": changed_ranges,
                     "scope": "changes"} if proof_only else {}),
                 "midword_audit": mw,
-                "audio_qc": audio_qc_res, "listen_keys": listen_keys}
+                "audio_qc": audio_qc_res, "listen_keys": listen_keys,
+                "audio_model_review": audio_model_review}
     except Exception as exc:
         # Successful jobs have always returned stage timings. Failures used to
         # discard them, leaving a 50-minute export with only `total_s`. Attach

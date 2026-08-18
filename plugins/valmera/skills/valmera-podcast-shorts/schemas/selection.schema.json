@@ -1,0 +1,192 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://valmera.local/schemas/selection.schema.json",
+  "title": "Valmera parent story selection",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "parent_project_id",
+    "selected_by",
+    "source_youtube_video_id",
+    "source_sha256",
+    "source_duration_s",
+    "source_visual_inspection",
+    "source_speech_transcript",
+    "clips",
+    "selection_fingerprint",
+    "coordinator_approved",
+    "abstained",
+    "abstain_reason"
+  ],
+  "properties": {
+    "schema_version": {"const": "2"},
+    "parent_project_id": {"type": "integer", "minimum": 1},
+    "selected_by": {"const": "coordinator"},
+    "source_youtube_video_id": {"$ref": "#/$defs/youtubeVideoId"},
+    "source_sha256": {"$ref": "#/$defs/sha256"},
+    "source_duration_s": {"type": "number", "exclusiveMinimum": 0},
+    "source_visual_inspection": {"$ref": "#/$defs/sourceVisualInspection"},
+    "source_speech_transcript": {"$ref": "#/$defs/sourceSpeechTranscript"},
+    "clips": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/clip"}
+    },
+    "selection_fingerprint": {"$ref": "#/$defs/prefixedSha256"},
+    "coordinator_approved": {"const": true},
+    "abstained": {"type": "boolean"},
+    "abstain_reason": {"type": "string"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"abstained": {"const": true}}, "required": ["abstained"]},
+      "then": {
+        "properties": {
+          "clips": {"maxItems": 0},
+          "abstain_reason": {"minLength": 1}
+        }
+      },
+      "else": {
+        "properties": {
+          "clips": {"minItems": 1},
+          "abstain_reason": {"const": ""}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "youtubeVideoId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{11}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^(?:sha256:)?[A-Fa-f0-9]{64}$"
+    },
+    "prefixedSha256": {
+      "type": "string",
+      "pattern": "^sha256:[A-Fa-f0-9]{64}$"
+    },
+    "interval": {
+      "type": "array",
+      "prefixItems": [
+        {"type": "number", "minimum": 0},
+        {"type": "number", "exclusiveMinimum": 0}
+      ],
+      "items": false,
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "sourceVisualInspection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "method",
+        "surface",
+        "media_sha256",
+        "duration_s",
+        "coverage",
+        "gaps",
+        "sampled_frame_times",
+        "configured_sample_step_s",
+        "max_sample_gap_s",
+        "shot_index_exhausted",
+        "page_cursors_exhausted",
+        "completed_at"
+      ],
+      "properties": {
+        "method": {"const": "indexed_filmstrip_and_shot_pages"},
+        "surface": {"const": "valmera_source_index"},
+        "media_sha256": {"$ref": "#/$defs/sha256"},
+        "duration_s": {"type": "number", "exclusiveMinimum": 0},
+        "coverage": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/interval"}
+        },
+        "gaps": {
+          "type": "array",
+          "maxItems": 0,
+          "items": {"$ref": "#/$defs/interval"}
+        },
+        "sampled_frame_times": {
+          "type": "array",
+          "minItems": 2,
+          "items": {"type": "number", "minimum": 0}
+        },
+        "configured_sample_step_s": {"type": "number", "exclusiveMinimum": 0},
+        "max_sample_gap_s": {"type": "number", "exclusiveMinimum": 0},
+        "shot_index_exhausted": {"const": true},
+        "page_cursors_exhausted": {"const": true},
+        "completed_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "sourceSpeechTranscript": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "media_sha256",
+        "duration_s",
+        "coverage",
+        "gaps",
+        "text_sha256",
+        "completed_at"
+      ],
+      "properties": {
+        "source": {"const": "valmera_indexed_transcript"},
+        "media_sha256": {"$ref": "#/$defs/sha256"},
+        "duration_s": {"type": "number", "exclusiveMinimum": 0},
+        "coverage": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/interval"}
+        },
+        "gaps": {
+          "type": "array",
+          "maxItems": 0,
+          "items": {"$ref": "#/$defs/interval"}
+        },
+        "text_sha256": {"$ref": "#/$defs/prefixedSha256"},
+        "completed_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "clip": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rank",
+        "start",
+        "end",
+        "title",
+        "hook",
+        "score",
+        "story",
+        "opening_line",
+        "closing_line",
+        "selection_reason"
+      ],
+      "properties": {
+        "rank": {"type": "integer", "minimum": 1},
+        "start": {"type": "number", "minimum": 0},
+        "end": {"type": "number", "exclusiveMinimum": 0},
+        "title": {"type": "string", "minLength": 1},
+        "hook": {"type": "string", "minLength": 1},
+        "score": {"type": "integer", "minimum": 80, "maximum": 100},
+        "story": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["setup", "development", "payoff"],
+          "properties": {
+            "setup": {"type": "string", "minLength": 1},
+            "development": {"type": "string", "minLength": 1},
+            "payoff": {"type": "string", "minLength": 1}
+          }
+        },
+        "opening_line": {"type": "string", "minLength": 1},
+        "closing_line": {"type": "string", "minLength": 1},
+        "selection_reason": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}

@@ -724,6 +724,8 @@ def get_or_enqueue_preview_job(conn, project_id, user_id, payload):
     Returns ``(job_id, created)``.
     """
     version = int((payload or {}).get("edl_version"))
+    audio_model_review = (payload or {}).get("audio_model_review", True) \
+        is not False
     with conn.cursor() as cur:
         # The two-int namespace keeps this lock separate from future project
         # locks while making the key stable across Python processes.
@@ -744,8 +746,11 @@ def get_or_enqueue_preview_job(conn, project_id, user_id, payload):
                        WHERE project_id = %s AND type = 'preview'
                          AND state IN ('queued', 'running')
                          AND payload->>'edl_version' = %s
+                         AND COALESCE(
+                               (payload->>'audio_model_review')::boolean,
+                               true) = %s
                        ORDER BY id DESC LIMIT 1""",
-                    (project_id, str(version)))
+                    (project_id, str(version), audio_model_review))
         row = cur.fetchone()
         if row:
             return row["id"], False

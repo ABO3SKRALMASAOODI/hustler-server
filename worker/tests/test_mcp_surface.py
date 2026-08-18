@@ -100,6 +100,30 @@ def test_control_tools_are_not_offered_to_the_model():
     assert mcp_exec.MEDIA_TOOL not in published
 
 
+def test_mcp_context_authoritatively_disables_audio_model_review(
+        monkeypatch, tmp_path):
+    class Db:
+        @staticmethod
+        def run(fn, *_args, **_kwargs):
+            if fn is mcp_exec.dbx.latest_creative_blueprint:
+                return None
+            if fn is mcp_exec.dbx.user_billing:
+                return False, "free", False
+            raise AssertionError(f"unexpected DB call: {fn.__name__}")
+
+    monkeypatch.setattr(mcp_exec.config, "TMP_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        mcp_exec.llm, "agent_client_for",
+        lambda _subscribed, _plan: (object(), "outside-codex"))
+    session = mcp_exec._new_context(
+        Db(), {"id": 91, "user_id": 4},
+        {"id": 12, "chat_session_id": 13},
+        {"video": {"duration": 10.0}}, "source-sha")
+
+    assert session.ctx.sight_out is True
+    assert session.ctx.audio_model_review is False
+
+
 def test_locked_card_agent_boot_is_not_published_or_executable_over_mcp():
     published = {t["function"]["name"]
                  for t in mcp_exec.catalog()["tools"]}

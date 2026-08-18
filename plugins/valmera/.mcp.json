@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "valmera": {
+      "type": "http",
+      "url": "https://entrepreneur-bot-backend.onrender.com/mcp",
+      "note": "Official Valmera editor MCP. Uses OAuth on first use and edits the authenticated user's Valmera projects."
+    }
+  }
+}

@@ -273,6 +273,7 @@ def test_manual_preview_defers_complete_encode_to_turn_end(
     assert result.startswith("Preview v22 rendered:")
     assert 22 in Ctx.rendered_versions
     assert PreviewDb.payload["edl_version"] == 22
+    assert PreviewDb.payload["audio_model_review"] is True
     assert len(PreviewDb.payload["render_signature"]) == 64
 
 

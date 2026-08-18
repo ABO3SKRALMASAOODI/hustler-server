@@ -38,6 +38,8 @@ how a model that can finally see the edit still cuts the wrong second out.
 """
 
 import hashlib
+import json
+import math
 import os
 import time
 
@@ -98,6 +100,53 @@ def _num(args, name):
 #  Which object                                                        #
 # ------------------------------------------------------------------ #
 
+def _deterministic_preview(asset):
+    """Only an explicitly stamped preview belongs to the MCP workflow."""
+    meta = (asset or {}).get("meta") or {}
+    if meta.get("audio_model_review") is not False or \
+            (meta.get("listen_keys") or []) or \
+            (meta.get("listen_clips") or []):
+        return False
+    try:
+        duration_s = float(asset.get("duration_s"))
+        return (int(asset.get("id")) > 0
+                and int(meta.get("render_job_id")) > 0
+                and int(meta.get("edl_version")) >= 0
+                and math.isfinite(duration_s)
+                and duration_s > 0)
+    except (TypeError, ValueError):
+        return False
+
+
+def _preview_receipt(asset, version):
+    if not _deterministic_preview(asset):
+        raise Unavailable(
+            "The available preview has no deterministic-only review receipt. "
+            "Render it through MCP before using it as Codex evidence.")
+    meta = asset.get("meta") or {}
+    meta_json = json.dumps(meta, sort_keys=True, separators=(",", ":"),
+                           ensure_ascii=False, default=str)
+    return {
+        "asset_id": int(asset.get("id")),
+        "render_job_id": int(meta.get("render_job_id")),
+        "edl_version": int(version),
+        "duration_s": float(asset.get("duration_s")),
+        "audio_model_review": False,
+        "listen_keys_count": 0,
+        "listen_clips_count": 0,
+        "audio_reviewer_findings_count": 0,
+        "meta_sha256": hashlib.sha256(
+            meta_json.encode("utf-8")).hexdigest(),
+    }
+
+
+def _attach_preview_receipt(answer, receipt):
+    if receipt and isinstance(answer, dict):
+        answer = dict(answer)
+        answer["preview"] = receipt
+    return answer
+
+
 def _preview_for_watching(ctx, render):
     """The preview render to hand over, rendering one if the current edit has
     never been rendered.
@@ -110,8 +159,14 @@ def _preview_for_watching(ctx, render):
     version = row["version"]
     asset = ctx.db.run(dbx.find_render_asset, ctx.project_id, "preview",
                        version)
-    if asset:
+    if asset and _deterministic_preview(asset):
         return asset, version, ""
+    if asset and not render:
+        raise Unavailable(
+            f"The preview of EDL v{version} was created without the MCP "
+            "deterministic-only receipt. Call watch_video again with "
+            "render=true (or call render_preview) to create a verified "
+            "audio_model_review=false preview.")
 
     stale = ctx.db.run(dbx.latest_render, ctx.project_id, "preview")
     if not render:
@@ -121,6 +176,11 @@ def _preview_for_watching(ctx, render):
                 "no program to watch. Call render_preview (or watch_video "
                 "again without render=false) and the current edit becomes a "
                 "file.")
+        if not _deterministic_preview(stale):
+            raise Unavailable(
+                "The last preview was not created under the MCP "
+                "deterministic-only policy. Call watch_video again with "
+                "render=true to create audio_model_review=false evidence.")
         old = (stale.get("meta") or {}).get("edl_version")
         return stale, old, (
             f" NOTE: this is the render of EDL v{old}, and the edit is now at "
@@ -134,6 +194,8 @@ def _preview_for_watching(ctx, render):
     job_id, _created = ctx.db.run(
         dbx.get_or_enqueue_preview_job, ctx.project_id, ctx.job["user_id"],
         {"edl_version": version,
+         "source": "mcp_watch",
+         "audio_model_review": False,
          "execution_policy": config.execution_policy_for(ctx.job)})
     deadline = time.time() + config.PREVIEW_WAIT_TIMEOUT_S
     while time.time() < deadline:
@@ -159,6 +221,12 @@ def _preview_for_watching(ctx, render):
         raise Unavailable(
             f"The render of v{version} finished but left no file to watch. "
             "Call render_preview and read what it says.")
+    if not _deterministic_preview(asset):
+        raise Unavailable(
+            f"The render of v{version} finished without the required "
+            "audio_model_review=false receipt. It cannot be used as MCP "
+            "evidence; call render_preview to create a deterministic-only "
+            "preview.")
     return asset, version, " (rendered just now for this call)"
 
 
@@ -302,18 +370,25 @@ def prepare(ctx, args, inline_max_bytes):
     # the Modal executor process that our dispatcher launched.
     resolved = (args.get("_resolved_asset")
                 if os.getenv("EXECUTOR_PROVIDER") == "modal" else None)
+    preview_receipt = None
     if isinstance(resolved, dict) and resolved.get("storage_key"):
         # The warm dispatcher already resolved the current preview/source and
         # waited for any prerequisite render. Modal receives only JSON-safe
         # file facts and goes straight to the encode.
         asset = resolved
         what = str(args.get("_resolved_what") or "the requested video")
+        if kind == "timeline":
+            candidate = args.get("_resolved_preview")
+            if isinstance(candidate, dict) and \
+                    candidate.get("audio_model_review") is False:
+                preview_receipt = candidate
     else:
         resolved = None
         try:
             if kind == "timeline":
                 asset, version, note = _preview_for_watching(
                     ctx, args.get("render") is not False)
+                preview_receipt = _preview_receipt(asset, version)
                 what = (f"the assembled program — preview render of EDL "
                         f"v{version}{note}")
             elif kind == "source":
@@ -368,10 +443,12 @@ def prepare(ctx, args, inline_max_bytes):
             and (untouched_ok or nbytes <= budget):
         seen, heard, note = (_look(ctx, key, nbytes, full_duration, 0.0,
                                    n_frames) if want_frames else (0, None, ""))
-        return _answer(ctx, kind, key, what, nbytes, full_duration, win_start,
-                       src_height, transcoded=False,
-                       inline_max_bytes=inline_max_bytes, delivery=delivery,
-                       extra=note, frames=seen, audio=heard)
+        answer = _answer(
+            ctx, kind, key, what, nbytes, full_duration, win_start,
+            src_height, transcoded=False,
+            inline_max_bytes=inline_max_bytes, delivery=delivery,
+            extra=note, frames=seen, audio=heard)
+        return _attach_preview_receipt(answer, preview_receipt)
 
     if not win_dur and full_duration:
         win_dur = full_duration - win_start
@@ -403,6 +480,8 @@ def prepare(ctx, args, inline_max_bytes):
                 ("storage_key", "bytes", "duration_s", "height", "fps")
             }
             remote_args["_resolved_what"] = what
+            if preview_receipt:
+                remote_args["_resolved_preview"] = preview_receipt
             return remote.run_mcp_media_remote(
                 ctx.project_id,
                 {"tool": "__media__", "args": remote_args},
@@ -479,10 +558,12 @@ def prepare(ctx, args, inline_max_bytes):
                                                and os.path.exists(local))
                          else _perceive(ctx, local, win_dur, win_start,
                                         n_frames, True, True))
-    return _answer(ctx, kind, out_key, what, nbytes, win_dur, win_start,
-                   height, transcoded=True, inline_max_bytes=inline_max_bytes,
-                   delivery=delivery, extra=extra + note, frames=seen,
-                   audio=heard)
+    answer = _answer(
+        ctx, kind, out_key, what, nbytes, win_dur, win_start,
+        height, transcoded=True, inline_max_bytes=inline_max_bytes,
+        delivery=delivery, extra=extra + note, frames=seen,
+        audio=heard)
+    return _attach_preview_receipt(answer, preview_receipt)
 
 
 def _filmstrip(ctx, local, duration, start, count):

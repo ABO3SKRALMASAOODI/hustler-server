@@ -1,0 +1,887 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://valmera.local/schemas/reference-profile.schema.json",
+  "title": "Valmera Shorts reference profile",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "reference_profile_version",
+    "parent_reference_asset_id",
+    "youtube_video_id",
+    "reference_sha256",
+    "reference_duration_s",
+    "preselection_visual_inspection",
+    "preselection_speech_transcript",
+    "music_identity",
+    "postupload_visual_inspection",
+    "postupload_speech_transcript",
+    "selected_at",
+    "selection_rationale",
+    "selection_decision",
+    "signal_analysis",
+    "engagement_observations",
+    "virality_qualification_rationale",
+    "observations"
+  ],
+  "properties": {
+    "reference_profile_version": {"const": "2"},
+    "parent_reference_asset_id": {"type": "integer", "minimum": 1},
+    "youtube_video_id": {"$ref": "#/$defs/youtubeVideoId"},
+    "reference_sha256": {"$ref": "#/$defs/sha256"},
+    "reference_duration_s": {"type": "number", "exclusiveMinimum": 0},
+    "preselection_visual_inspection": {"$ref": "#/$defs/preselectionVisualInspection"},
+    "preselection_speech_transcript": {"$ref": "#/$defs/localTranscriptEvidence"},
+    "music_identity": {"$ref": "#/$defs/musicIdentity"},
+    "postupload_visual_inspection": {"$ref": "#/$defs/postuploadVisualInspection"},
+    "postupload_speech_transcript": {"$ref": "#/$defs/postuploadSpeechTranscript"},
+    "selected_at": {"type": "string", "format": "date-time"},
+    "selection_rationale": {"type": "string", "minLength": 1, "pattern": "\\S"},
+    "selection_decision": {"$ref": "#/$defs/selectionDecision"},
+    "signal_analysis": {"$ref": "#/$defs/signalAnalysis"},
+    "engagement_observations": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/engagementObservation"}
+    },
+    "virality_qualification_rationale": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S"
+    },
+    "observations": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/observation"}
+    }
+  },
+  "$defs": {
+    "youtubeVideoId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{11}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^(?:sha256:)?[A-Fa-f0-9]{64}$"
+    },
+    "prefixedSha256": {
+      "type": "string",
+      "pattern": "^sha256:[A-Fa-f0-9]{64}$"
+    },
+    "interval": {
+      "type": "array",
+      "prefixItems": [
+        {"type": "number", "minimum": 0},
+        {"type": "number", "exclusiveMinimum": 0}
+      ],
+      "items": false,
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "selectionDecision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "selected_by",
+        "claim_type",
+        "decision_basis",
+        "evidence_ids",
+        "rationale",
+        "confidence",
+        "limitations"
+      ],
+      "properties": {
+        "selected_by": {"const": "coordinator_codex"},
+        "claim_type": {"const": "inference"},
+        "decision_basis": {
+          "const": "codex_visual_transcript_metadata_measurement_inference"
+        },
+        "evidence_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "pattern": "\\S"}
+        },
+        "rationale": {"type": "string", "minLength": 1, "pattern": "\\S"},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "limitations": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "pattern": "\\S"}
+        }
+      }
+    },
+    "signalAnalysis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "evidence_id",
+        "scope",
+        "method",
+        "tool_version",
+        "media_sha256",
+        "duration_s",
+        "aggregate_signal_present",
+        "integrated_lufs",
+        "true_peak_dbtp",
+        "silence_intervals",
+        "evidence_digest",
+        "completed_at",
+        "unavailable_reason"
+      ],
+      "properties": {
+        "status": {"enum": ["complete", "unavailable"]},
+        "evidence_id": {
+          "type": "string",
+          "pattern": "^reference-signal-[A-Za-z0-9][A-Za-z0-9_-]*$"
+        },
+        "scope": {"const": "full_mixed_soundtrack"},
+        "method": {
+          "type": ["string", "null"],
+          "enum": ["ffmpeg_loudnorm", "ffmpeg_ebur128_and_silencedetect", null]
+        },
+        "tool_version": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "media_sha256": {"$ref": "#/$defs/sha256"},
+        "duration_s": {"type": "number", "exclusiveMinimum": 0},
+        "aggregate_signal_present": {"type": ["boolean", "null"]},
+        "integrated_lufs": {"type": ["number", "null"]},
+        "true_peak_dbtp": {"type": ["number", "null"]},
+        "silence_intervals": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/interval"}
+        },
+        "evidence_digest": {
+          "oneOf": [
+            {"$ref": "#/$defs/prefixedSha256"},
+            {"type": "null"}
+          ]
+        },
+        "completed_at": {"type": "string", "format": "date-time"},
+        "unavailable_reason": {"type": ["string", "null"], "minLength": 1}
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "status": {"const": "complete"},
+            "method": {
+              "enum": ["ffmpeg_loudnorm", "ffmpeg_ebur128_and_silencedetect"]
+            },
+            "tool_version": {"type": "string", "minLength": 1, "pattern": "\\S"},
+            "aggregate_signal_present": {"type": "boolean"},
+            "evidence_digest": {"$ref": "#/$defs/prefixedSha256"},
+            "unavailable_reason": {"type": "null"}
+          }
+        },
+        {
+          "properties": {
+            "status": {"const": "unavailable"},
+            "method": {"type": "null"},
+            "tool_version": {"type": "null"},
+            "aggregate_signal_present": {"type": "null"},
+            "integrated_lufs": {"type": "null"},
+            "true_peak_dbtp": {"type": "null"},
+            "silence_intervals": {"maxItems": 0},
+            "evidence_digest": {"type": "null"},
+            "unavailable_reason": {"type": "string", "minLength": 1, "pattern": "\\S"}
+          }
+        }
+      ]
+    },
+    "preselectionVisualInspection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "youtube_video_id",
+        "evidence_id",
+        "method",
+        "surface",
+        "media_sha256",
+        "duration_s",
+        "coverage",
+        "gaps",
+        "sampled_frame_times",
+        "configured_sample_step_s",
+        "max_sample_gap_s",
+        "sample_schedule_complete",
+        "observed_boundary_checks_complete",
+        "completed_at"
+      ],
+      "properties": {
+        "youtube_video_id": {"$ref": "#/$defs/youtubeVideoId"},
+        "evidence_id": {
+          "type": "string",
+          "pattern": "^reference-visual-[A-Za-z0-9][A-Za-z0-9_-]*$"
+        },
+        "method": {"const": "frame_sampling"},
+        "surface": {"const": "youtube_ordinary_player"},
+        "media_sha256": {
+          "oneOf": [
+            {"$ref": "#/$defs/sha256"},
+            {"type": "null"}
+          ]
+        },
+        "duration_s": {"type": "number", "exclusiveMinimum": 0},
+        "coverage": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/interval"}
+        },
+        "gaps": {
+          "type": "array",
+          "maxItems": 0,
+          "items": {"$ref": "#/$defs/interval"}
+        },
+        "sampled_frame_times": {
+          "type": "array",
+          "minItems": 2,
+          "uniqueItems": true,
+          "items": {"type": "number", "minimum": 0}
+        },
+        "configured_sample_step_s": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1
+        },
+        "max_sample_gap_s": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1
+        },
+        "sample_schedule_complete": {"const": true},
+        "observed_boundary_checks_complete": {"const": true},
+        "completed_at": {"type": "string", "format": "date-time"}
+      },
+      "allOf": [
+        {"properties": {"media_sha256": {"type": "null"}}}
+      ]
+    },
+    "postuploadVisualInspection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "method",
+        "surface",
+        "evidence_id",
+        "parent_reference_asset_id",
+        "role",
+        "storage_key",
+        "media_sha256",
+        "duration_s",
+        "coverage",
+        "gaps",
+        "sampled_frame_times",
+        "configured_sample_step_s",
+        "max_sample_gap_s",
+        "sample_schedule_complete",
+        "observed_boundary_checks",
+        "unknown_boundaries_not_proven_absent",
+        "completed_at"
+      ],
+      "properties": {
+        "method": {"const": "frame_sampling"},
+        "surface": {"const": "valmera_reference_asset"},
+        "evidence_id": {
+          "type": "string",
+          "pattern": "^reference-visual-[A-Za-z0-9][A-Za-z0-9_-]*$"
+        },
+        "parent_reference_asset_id": {"type": "integer", "minimum": 1},
+        "role": {"const": "shorts_reference"},
+        "storage_key": {"type": "string", "minLength": 1, "pattern": "\\S"},
+        "media_sha256": {"$ref": "#/$defs/sha256"},
+        "duration_s": {"type": "number", "exclusiveMinimum": 0},
+        "coverage": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/interval"}
+        },
+        "gaps": {
+          "type": "array",
+          "maxItems": 0,
+          "items": {"$ref": "#/$defs/interval"}
+        },
+        "sampled_frame_times": {
+          "type": "array",
+          "minItems": 2,
+          "uniqueItems": true,
+          "items": {"type": "number", "minimum": 0}
+        },
+        "configured_sample_step_s": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1
+        },
+        "max_sample_gap_s": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1
+        },
+        "sample_schedule_complete": {"const": true},
+        "observed_boundary_checks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["boundary_time_s", "kind", "checked_frame_times", "result"],
+            "properties": {
+              "boundary_time_s": {"type": "number", "minimum": 0},
+              "kind": {"enum": ["visible_cut", "visible_transition", "sample_discontinuity"]},
+              "checked_frame_times": {"type": "array", "minItems": 2, "uniqueItems": true, "items": {"type": "number", "minimum": 0}},
+              "result": {"enum": ["no_visible_leak", "visible_issue_recorded"]}
+            }
+          }
+        },
+        "unknown_boundaries_not_proven_absent": {"const": true},
+        "completed_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "localTranscriptEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "status",
+        "evidence_id",
+        "status_semantics",
+        "evidence_role",
+        "creative_decision_made",
+        "media_filename",
+        "media_sha256",
+        "audio_pcm_sha256",
+        "duration_s",
+        "has_audio_stream",
+        "audio_stream",
+        "tool_lineage",
+        "asr",
+        "claims_not_made"
+      ],
+      "properties": {
+        "schema_version": {"const": "valmera-local-transcript-v1"},
+        "status": {"const": "complete"},
+        "evidence_id": {
+          "type": "string",
+          "pattern": "^transcript-evidence:[a-f0-9]{64}$"
+        },
+        "status_semantics": {
+          "const": "asr_completed_over_the_extracted_audio_stream_not_transcript_accuracy"
+        },
+        "evidence_role": {"const": "factual_transcription_only"},
+        "creative_decision_made": {"const": false},
+        "media_filename": {"type": "string", "minLength": 1, "pattern": "\\S"},
+        "media_sha256": {"$ref": "#/$defs/prefixedSha256"},
+        "audio_pcm_sha256": {"$ref": "#/$defs/prefixedSha256"},
+        "duration_s": {"type": "number", "exclusiveMinimum": 0},
+        "has_audio_stream": {"const": true},
+        "audio_stream": {"$ref": "#/$defs/audioStreamEvidence"},
+        "tool_lineage": {"$ref": "#/$defs/toolLineage"},
+        "asr": {"$ref": "#/$defs/asrEvidence"},
+        "claims_not_made": {
+          "type": "array",
+          "prefixItems": [
+            {"const": "direct_audio_perception"},
+            {"const": "music_vibe"},
+            {"const": "music_quality"},
+            {"const": "subjective_intelligibility"},
+            {"const": "emotional_fit"},
+            {"const": "auditory_review"}
+          ],
+          "items": false,
+          "minItems": 6,
+          "maxItems": 6
+        }
+      }
+    },
+    "asrEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "engine",
+        "model",
+        "language",
+        "timestamp_origin",
+        "media_time_offset_s",
+        "processed_coverage",
+        "processing_gaps",
+        "words",
+        "sentences",
+        "transcript_text_sha256",
+        "warnings",
+        "completed_at"
+      ],
+      "properties": {
+        "engine": {"const": "faster-whisper"},
+        "model": {"type": "string", "minLength": 1, "pattern": "\\S"},
+        "language": {"type": "string", "minLength": 1, "pattern": "\\S"},
+        "timestamp_origin": {"const": "extracted_audio_stream_start"},
+        "media_time_offset_s": {"type": "number", "minimum": 0},
+        "processed_coverage": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/interval"}
+        },
+        "processing_gaps": {
+          "type": "array",
+          "maxItems": 0,
+          "items": {"$ref": "#/$defs/interval"}
+        },
+        "words": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/transcriptSpan"}
+        },
+        "sentences": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/transcriptSpan"}
+        },
+        "transcript_text_sha256": {"$ref": "#/$defs/prefixedSha256"},
+        "warnings": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1, "pattern": "\\S"}
+        },
+        "completed_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "audioStreamEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stream_index",
+        "codec_name",
+        "source_start_s",
+        "declared_duration_s",
+        "start_time_fallback",
+        "extracted_pcm_duration_s",
+        "media_timeline_coverage",
+        "media_timeline_gaps"
+      ],
+      "properties": {
+        "stream_index": {"type": "integer", "minimum": 0},
+        "codec_name": {"type": "string", "minLength": 1, "pattern": "\\S"},
+        "source_start_s": {"type": ["number", "null"], "minimum": 0},
+        "declared_duration_s": {"type": ["number", "null"], "minimum": 0},
+        "start_time_fallback": {
+          "oneOf": [
+            {"const": "zero_when_ffprobe_unavailable"},
+            {"type": "null"}
+          ]
+        },
+        "extracted_pcm_duration_s": {"type": "number", "exclusiveMinimum": 0},
+        "media_timeline_coverage": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/interval"}
+        },
+        "media_timeline_gaps": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/interval"}
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "source_start_s": {"type": "number", "minimum": 0},
+            "start_time_fallback": {"type": "null"}
+          }
+        },
+        {
+          "properties": {
+            "source_start_s": {"type": "null"},
+            "start_time_fallback": {"const": "zero_when_ffprobe_unavailable"}
+          }
+        }
+      ]
+    },
+    "toolLineage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "helper_sha256",
+        "worker_transcriber_sha256",
+        "faster_whisper_version",
+        "model_artifact_id",
+        "model_revision",
+        "model_revision_status",
+        "decode_config",
+        "decode_config_sha256"
+      ],
+      "properties": {
+        "helper_sha256": {"$ref": "#/$defs/prefixedSha256"},
+        "worker_transcriber_sha256": {"$ref": "#/$defs/prefixedSha256"},
+        "faster_whisper_version": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "model_artifact_id": {"type": "string", "minLength": 1, "pattern": "\\S"},
+        "model_revision": {"type": ["string", "null"], "minLength": 1},
+        "model_revision_status": {
+          "enum": ["local_path_unhashed", "resolved_cache_ref", "alias_only_unpinned"]
+        },
+        "decode_config": {"$ref": "#/$defs/decodeConfig"},
+        "decode_config_sha256": {"$ref": "#/$defs/prefixedSha256"}
+      }
+    },
+    "decodeConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "model",
+        "device",
+        "compute_type",
+        "beam_size",
+        "temperature_ladder",
+        "compression_ratio_threshold",
+        "log_prob_threshold",
+        "no_speech_threshold",
+        "condition_on_previous_text",
+        "vad_filter",
+        "vad_parameters",
+        "initial_prompt_sha256",
+        "hotwords_sha256"
+      ],
+      "properties": {
+        "model": {"type": "string", "minLength": 1, "pattern": "\\S"},
+        "device": {"type": "string", "minLength": 1, "pattern": "\\S"},
+        "compute_type": {"type": "string", "minLength": 1, "pattern": "\\S"},
+        "beam_size": {"type": "integer", "minimum": 1},
+        "temperature_ladder": {
+          "type": "array",
+          "prefixItems": [
+            {"const": 0.0},
+            {"const": 0.2},
+            {"const": 0.4},
+            {"const": 0.6},
+            {"const": 0.8},
+            {"const": 1.0}
+          ],
+          "items": false,
+          "minItems": 6,
+          "maxItems": 6
+        },
+        "compression_ratio_threshold": {"type": ["number", "null"]},
+        "log_prob_threshold": {"const": -1.0},
+        "no_speech_threshold": {"const": 0.6},
+        "condition_on_previous_text": {"const": false},
+        "vad_filter": {"const": true},
+        "vad_parameters": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["min_silence_duration_ms", "speech_pad_ms"],
+          "properties": {
+            "min_silence_duration_ms": {"const": 500},
+            "speech_pad_ms": {"const": 400}
+          }
+        },
+        "initial_prompt_sha256": {"$ref": "#/$defs/prefixedSha256"},
+        "hotwords_sha256": {"$ref": "#/$defs/prefixedSha256"}
+      }
+    },
+    "transcriptSpan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["text", "start_s", "end_s"],
+      "properties": {
+        "text": {"type": "string", "minLength": 1, "pattern": "\\S"},
+        "start_s": {"type": "number", "minimum": 0},
+        "end_s": {"type": "number", "minimum": 0}
+      }
+    },
+    "postuploadSpeechTranscript": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "status",
+        "evidence_id",
+        "status_semantics",
+        "evidence_role",
+        "creative_decision_made",
+        "parent_reference_asset_id",
+        "role",
+        "storage_key",
+        "media_sha256",
+        "duration_s",
+        "processed_coverage",
+        "processing_gaps",
+        "transcript_text_sha256",
+        "completed_at",
+        "claims_not_made"
+      ],
+      "properties": {
+        "source": {"const": "valmera_indexed_transcript"},
+        "status": {"const": "complete"},
+        "evidence_id": {
+          "type": "string",
+          "pattern": "^transcript-evidence:[a-f0-9]{64}$"
+        },
+        "status_semantics": {
+          "const": "processing_complete_means_declared_coverage_not_accuracy_or_auditory_review"
+        },
+        "evidence_role": {"const": "factual_transcription_and_timing_only"},
+        "creative_decision_made": {"const": false},
+        "parent_reference_asset_id": {"type": "integer", "minimum": 1},
+        "role": {"const": "shorts_reference"},
+        "storage_key": {"type": "string", "minLength": 1, "pattern": "\\S"},
+        "media_sha256": {"$ref": "#/$defs/sha256"},
+        "duration_s": {"type": "number", "exclusiveMinimum": 0},
+        "processed_coverage": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/interval"}
+        },
+        "processing_gaps": {
+          "type": "array",
+          "maxItems": 0,
+          "items": {"$ref": "#/$defs/interval"}
+        },
+        "transcript_text_sha256": {"$ref": "#/$defs/prefixedSha256"},
+        "completed_at": {"type": "string", "format": "date-time"},
+        "claims_not_made": {"$ref": "#/$defs/audioClaimsNotMade"}
+      }
+    },
+    "audioClaimsNotMade": {
+      "type": "array",
+      "prefixItems": [
+        {"const": "direct_audio_perception"},
+        {"const": "music_vibe"},
+        {"const": "music_quality"},
+        {"const": "subjective_intelligibility"},
+        {"const": "emotional_fit"},
+        {"const": "auditory_review"}
+      ],
+      "items": false,
+      "minItems": 6,
+      "maxItems": 6
+    },
+    "musicIdentityEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["evidence_id", "source", "detail", "source_url", "observed_at"],
+      "properties": {
+        "evidence_id": {
+          "type": "string",
+          "pattern": "^music-evidence-[A-Za-z0-9][A-Za-z0-9_-]*$"
+        },
+        "source": {
+          "enum": [
+            "provider_metadata",
+            "source_page_metadata",
+            "file_tags",
+            "valmera_asset_metadata",
+            "user_supplied_metadata"
+          ]
+        },
+        "detail": {"type": "string", "minLength": 1, "pattern": "\\S"},
+        "source_url": {
+          "oneOf": [
+            {"type": "string", "format": "uri"},
+            {"type": "null"}
+          ]
+        },
+        "observed_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "musicIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "title",
+        "artist",
+        "evidence"
+      ],
+      "properties": {
+        "status": {
+          "enum": ["identified", "not_identified", "ambiguous", "not_applicable"]
+        },
+        "title": {"type": ["string", "null"], "minLength": 1, "pattern": "\\S"},
+        "artist": {"type": ["string", "null"], "minLength": 1, "pattern": "\\S"},
+        "evidence": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/musicIdentityEvidence"}
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "status": {"const": "identified"},
+            "title": {"type": "string", "minLength": 1, "pattern": "\\S"},
+            "artist": {"type": "string", "minLength": 1, "pattern": "\\S"},
+            "evidence": {"minItems": 1}
+          }
+        },
+        {
+          "properties": {
+            "status": {"const": "not_identified"},
+            "title": {"type": "null"},
+            "artist": {"type": "null"},
+            "evidence": {"minItems": 1}
+          }
+        },
+        {
+          "properties": {
+            "status": {"const": "ambiguous"},
+            "title": {"type": "null"},
+            "artist": {"type": "null"},
+            "evidence": {"minItems": 2}
+          }
+        },
+        {
+          "properties": {
+            "status": {"const": "not_applicable"},
+            "title": {"type": "null"},
+            "artist": {"type": "null"},
+            "evidence": {"maxItems": 0}
+          }
+        }
+      ]
+    },
+    "engagementObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evidence_id",
+        "metric",
+        "observed_value",
+        "observed_at",
+        "evidence_url"
+      ],
+      "properties": {
+        "evidence_id": {
+          "type": "string",
+          "pattern": "^engagement-evidence-[A-Za-z0-9][A-Za-z0-9_-]*$"
+        },
+        "metric": {
+          "enum": [
+            "views",
+            "likes",
+            "comments",
+            "shares",
+            "engagement_rate",
+            "platform_trending_rank",
+            "other_visible_metric"
+          ]
+        },
+        "observed_value": {"type": "string", "minLength": 1},
+        "observed_at": {"type": "string", "format": "date-time"},
+        "evidence_url": {"type": "string", "format": "uri"}
+      }
+    },
+    "observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "observation_id",
+        "dimension",
+        "start_s",
+        "end_s",
+        "statement",
+        "evidence_kind",
+        "evidence_ids",
+        "decision_basis",
+        "rationale",
+        "confidence"
+      ],
+      "properties": {
+        "observation_id": {
+          "type": "string",
+          "pattern": "^ref-[A-Za-z0-9][A-Za-z0-9_-]*$"
+        },
+        "dimension": {
+          "enum": [
+            "hook",
+            "picture",
+            "pace",
+            "caption",
+            "transition",
+            "music",
+            "energy"
+          ]
+        },
+        "start_s": {"type": ["number", "null"], "minimum": 0},
+        "end_s": {"type": ["number", "null"], "exclusiveMinimum": 0},
+        "statement": {"type": "string", "minLength": 1, "pattern": "\\S"},
+        "evidence_kind": {
+          "enum": ["visual", "transcript", "music_metadata_inference"]
+        },
+        "evidence_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "pattern": "\\S"}
+        },
+        "decision_basis": {
+          "enum": [
+            "sampled_frame_observation",
+            "speech_transcript_text",
+            "codex_visual_transcript_metadata_measurement_inference"
+          ]
+        },
+        "rationale": {"type": "string", "minLength": 1, "pattern": "\\S"},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"evidence_kind": {"const": "visual"}},
+            "required": ["evidence_kind"]
+          },
+          "then": {
+            "properties": {
+              "start_s": {"type": "number", "minimum": 0},
+              "end_s": {"type": "number", "exclusiveMinimum": 0},
+              "decision_basis": {"const": "sampled_frame_observation"}
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {"evidence_kind": {"const": "transcript"}},
+            "required": ["evidence_kind"]
+          },
+          "then": {
+            "properties": {
+              "start_s": {"type": "number", "minimum": 0},
+              "end_s": {"type": "number", "exclusiveMinimum": 0},
+              "decision_basis": {"const": "speech_transcript_text"}
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {"evidence_kind": {"const": "music_metadata_inference"}},
+            "required": ["evidence_kind"]
+          },
+          "then": {
+            "properties": {
+              "start_s": {"type": "null"},
+              "end_s": {"type": "null"},
+              "decision_basis": {
+                "const": "codex_visual_transcript_metadata_measurement_inference"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {"dimension": {"const": "music"}},
+            "required": ["dimension"]
+          },
+          "then": {
+            "properties": {
+              "evidence_kind": {"const": "music_metadata_inference"},
+              "start_s": {"type": "null"},
+              "end_s": {"type": "null"},
+              "decision_basis": {
+                "const": "codex_visual_transcript_metadata_measurement_inference"
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}
