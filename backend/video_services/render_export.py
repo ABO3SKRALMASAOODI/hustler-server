@@ -13,6 +13,11 @@ DETERMINISTIC_FINAL_ERROR_MARKERS = (
     "black-frame check failed", "duration check failed",
     "wrong duration", "wrong length", "invalid edl",
 )
+FFMPEG_NOPTS_FAILURE_MARKERS = (
+    "9223372036854775807",
+    "9223372036855s of output",
+    "last progress 9223372036854.6/",
+)
 
 
 def deterministic_final_failure(row):
@@ -21,10 +26,16 @@ def deterministic_final_failure(row):
         return False
     result = row.get("result") or {}
     failure = result.get("failure") or {}
+    error = str(row.get("error") or failure.get("error") or "").lower()
+    # Older workers interpreted FFmpeg's AV_NOPTS_VALUE progress sentinel as
+    # a multi-trillion-second encode and stored render_budget_exceeded.  The
+    # immutable EDL did not fail a safety check, so allow the same version to
+    # retry after the parser fix instead of permanently trapping the user.
+    if any(marker in error for marker in FFMPEG_NOPTS_FAILURE_MARKERS):
+        return False
     kind = str(failure.get("kind") or "").strip().lower()
     if kind in DETERMINISTIC_FINAL_FAILURE_KINDS:
         return True
-    error = str(row.get("error") or failure.get("error") or "").lower()
     return any(marker in error for marker in DETERMINISTIC_FINAL_ERROR_MARKERS)
 
 

@@ -64,6 +64,21 @@ def test_the_check_runs_before_the_clamp_that_hid_it():
         "the runaway check must read out_time BEFORE it is clamped to 0.999"
 
 
+def test_ffmpeg_nopts_progress_sentinel_is_not_a_runaway():
+    """AV_NOPTS_VALUE means the clock is unavailable, not years of output."""
+    seen = []
+    script = (
+        "print('out_time_ms=9223372036854775807', flush=True); "
+        "print('out_time_ms=2000000', flush=True); "
+        "print('progress=end', flush=True)"
+    )
+
+    media.run([sys.executable, "-c", script],
+              progress_cb=seen.append, expected_out_s=3.0)
+
+    assert seen == [pytest.approx(2.0 / 3.0)]
+
+
 @pytest.mark.skipif(not HAVE_FFMPEG, reason="needs a real ffmpeg")
 def test_a_runaway_graph_is_killed_in_seconds(tmp_path):
     png = str(tmp_path / "still.png")

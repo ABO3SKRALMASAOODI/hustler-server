@@ -97,6 +97,13 @@ def test_deterministic_final_failure_requires_a_new_edit():
                                 "retryable": True}},
         "error": "HTTP 503",
     }) is False
+    assert video._deterministic_final_failure({
+        "result": {"failure": {"kind": "render_budget_exceeded",
+                                "retryable": False}},
+        "error": ("ffmpeg killed: runaway encode: produced "
+                  "9223372036855s of output for a 56s timeline; last progress "
+                  "9223372036854.6/56.3s"),
+    }) is False
 
 
 def test_subscriber_and_trial_pass():

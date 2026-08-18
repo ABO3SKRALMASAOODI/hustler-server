@@ -17,6 +17,9 @@ class MediaError(RuntimeError):
     pass
 
 
+_FFMPEG_NOPTS_US = 9223372036854775807
+
+
 def run(cmd, timeout=None, progress_cb=None, expected_out_s=None,
         cancelled_cb=None):
     """Run ffmpeg/ffprobe. With progress_cb, parses -progress pipe:1 output
@@ -110,7 +113,16 @@ def run(cmd, timeout=None, progress_cb=None, expected_out_s=None,
                 line = line.strip()
                 if line.startswith("out_time_ms="):
                     try:
-                        secs = int(line.split("=", 1)[1]) / 1_000_000.0
+                        out_time_us = int(line.split("=", 1)[1])
+                        # FFmpeg sometimes writes AV_NOPTS_VALUE to its
+                        # progress stream while a muxer has no timestamp to
+                        # report.  This is metadata saying "unknown", not
+                        # 9.22 trillion seconds of encoded output.  Treating
+                        # it as a real clock value falsely trips the runaway
+                        # watchdog at the end of an otherwise healthy final.
+                        if out_time_us == _FFMPEG_NOPTS_US:
+                            continue
+                        secs = out_time_us / 1_000_000.0
                         progress_state["out_s"] = secs
                         # Check BEFORE clamping. The min(0.999, ...) below is
                         # what hid the watermark runaway for a full hour: it
