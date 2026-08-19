@@ -1,7 +1,6 @@
-"""Unsubscribed accounts see subscription cards AFTER one real edit.
+"""Unsubscribed accounts see subscription cards on the first send.
 
-The first indexed agent turn still runs. The next prompt is the wall.
-Active trials pass because they are subscribed.
+There is no free first edit. Active trials pass because they are subscribed.
 """
 
 import os
@@ -45,22 +44,18 @@ class _Cur:
         return {"?column?": 1} if self._edited else None
 
 
-def test_first_turn_is_not_gated():
+def test_unsubscribed_user_is_gated_immediately():
     cur = _Cur({"is_subscribed": 0, "email": "new@example.com"}, edited=False)
-    assert video._subscribe_gate_applies(cur, 1) is False
-
-
-def test_unsubscribed_user_is_gated_after_a_real_edit():
-    cur = _Cur({"is_subscribed": 0, "email": "new@example.com"}, edited=True)
     assert video._subscribe_gate_applies(cur, 1) is True
-    assert "video_jobs" in (cur.sql or "")
-    assert "subscribe_gate_qualified" in cur.sql
-    assert "result->>'status' = 'replied'" in cur.sql
-    assert "result->>'outcome' IN ('fulfilled', 'partial')" in cur.sql
-    assert "result->>'edl_changed' = 'true'" in cur.sql
     user_lookup = next(command for command in cur.commands
                        if "FROM users" in command)
     assert "FOR UPDATE" in user_lookup
+    assert not any("video_jobs" in command for command in cur.commands)
+
+
+def test_unsubscribed_user_is_gated_even_without_a_prior_edit():
+    cur = _Cur({"is_subscribed": 0, "email": "new@example.com"}, edited=True)
+    assert video._subscribe_gate_applies(cur, 1) is True
 
 
 def test_gate_lookup_error_rolls_back_savepoint_and_fails_open():
@@ -73,7 +68,7 @@ def test_gate_lookup_error_rolls_back_savepoint_and_fails_open():
         def execute(self, sql, *args, **kwargs):
             command = " ".join(sql.split())
             self.commands.append(command)
-            if "FROM client_events" in command:
+            if "FROM users" in command:
                 raise RuntimeError("temporary schema skew")
             if command.startswith(("SAVEPOINT ", "RELEASE SAVEPOINT ",
                                    "ROLLBACK TO SAVEPOINT ")):

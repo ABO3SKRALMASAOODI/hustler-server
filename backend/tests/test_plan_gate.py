@@ -56,10 +56,8 @@ def _user(subscribed, balance):
             "credits_balance": balance}
 
 
-def test_the_grant_is_fifty_and_spendable():
-    # The number itself, in the one place it is defined. A zero here is the
-    # round-49 state, where the credit bar was a promise nothing honoured.
-    assert credits.FREE_GRANT_CREDITS == 50
+def test_the_grant_is_zero():
+    assert credits.FREE_GRANT_CREDITS == 0
 
 
 def test_free_account_with_credits_passes():
@@ -99,10 +97,8 @@ def test_gate_response_carries_the_grant():
 
 
 def test_free_plan_limit_is_the_grant():
-    # The studio's meter denominator. It must be the grant, not 0 (an empty
-    # bar reads as a fault) and not a plan figure the account cannot spend.
     assert credits.PLAN_MONTHLY_LIMITS["free"] == 0
-    assert credits.FREE_GRANT_CREDITS > 0
+    assert credits.FREE_GRANT_CREDITS == 0
 
 
 if __name__ == "__main__":                              # pragma: no cover

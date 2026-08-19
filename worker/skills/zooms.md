@@ -1,4 +1,4 @@
-# zooms — aiming, travelling paths, screen-recording choreography, crops vs zooms
+# zooms — aiming, travelling paths, screen-recording choreography, crops vs zooms; do not punch in for no reason
 
 ## Editorial decision principles
 
@@ -18,13 +18,20 @@ AIMING — a coordinate is a MEASUREMENT, never an impression:
 - Aim coordinates come only from UNZOOMED frames: a tile labeled as zoomed shows the magnified view's screen coordinates, not positions you can aim at.
 - To RETIME an existing zoom ("make it longer"): KEEP ITS AIM — copy rect (or cx/cy) from get_edl and change only start/end. Re-deriving a target you already had is how a correct zoom moves to the wrong place.
 
+NO STUPID PUNCH-INS. This is the most common zoom failure. A talking-head, reel, "make it premium/high-retention", or "keep attention" brief is NOT a request to bump the camera every few seconds.
+- Do not sprinkle `punch` / `punch_in_on_emphasis` / tiny 0.05–0.15 punches on "important sentences." If the picture is already a face in frame, a punch-in that does not reveal new information is decoration. Hold the shot.
+- `punch` is a snap. Use it only for one real hit the viewer can name: a punchline, a reveal, a number landing, an explicit "punch in on this." Never as the default mode, never on three similar lines, never to "change the framing every 2–3 seconds."
+- "Subtle zooms" means one or two gentle `ease`/`push_in` moves on actual turns — or none. It does not mean many small punches.
+- `punch_in_on_emphasis` is a last-resort helper when the user asked for punch-ins on stressed words. It is not a finishing pass. If you cannot name why THIS word deserves a camera bump, do not call it.
+- If a zoom you already wrote has no new information at the landing, remove it. Three weak punches are worse than a locked-off frame.
+
 MOTIVATION COMES BEFORE GRAMMAR:
 - A zoom must answer "why does the camera move HERE?" with a named, evidenced event: a reveal that becomes visible, a face/subject that becomes important, a measured stressed word, a UI action the viewer must read, or an explicit user-requested beat. Bind its start/landing to that event and aim it from an unzoomed frame. A beat grid alone is cadence evidence, not permission to magnify an arbitrary picture.
 - No coverage targets and no polish quotas. Zero zooms is a finished professional choice when the footage, format, or user's restraint calls for a steady frame. Never add a zoom merely because the motion department exists, a minute has passed, or the edit feels "too simple."
 - Before delivery, name the event for every authored zoom. If one has no correlated visual/narrative action, remove it. Random camera motion is not harmless decoration; it competes with the story and makes intentional zooms weaker.
 
 GRAMMAR — gentle is the default after the move is motivated:
-- strength 0.08-0.18 (a push the viewer feels rather than sees), mode 'ease' or 'push_in'. A hard 'punch' above ~0.3 is a deliberate hype device for the single biggest peak or an explicit request — never the routine move.
+- Default mode is `ease`. strength 0.08-0.18 (a push the viewer feels rather than sees). `push_in` for a slow cinematic drift. A hard `punch` is a deliberate hype device for the single biggest peak or an explicit request — never the routine move, never the omitted-mode fallback in your head.
 - On longer talk-driven footage, 2-3 zooms a minute is an upper craft reference, never a minimum or a request to fill time. Use only the real turns of the argument; never on a filler word, never adjacent, never all the same size. One harder punch on the single peak reads as a hit; ten punches read as a nervous tic.
 
 TRAVELLING ZOOMS (add_zoom_path) — when the user asks a zoom to MOVE ("keep it, then move to my prompt, then the answer"): ONE add_zoom_path visiting each subject as a rect keyframe — never a chain of static zooms, never one wide zoom over everything.
@@ -41,6 +48,7 @@ A WIDE UI STRIP IS A CROP, NOT A ZOOM. "Show the full timeline, nothing else" is
 
 ## Common failure modes
 
+- Punch-ins with no reason: every-few-seconds bumps, `punch_in_on_emphasis` as a default pass, identical tiny punches on three "important" lines.
 - Repetitive equally spaced pushes, missing purpose/evidence, empty-wall framing, clipped faces/UI, visible drift during holds or stale targeting across cuts.
 
 ## Verification procedure
