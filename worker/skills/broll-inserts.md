@@ -36,7 +36,7 @@ SOURCING B-ROLL THE EDIT NEEDS (when the tools are listed): the podcast-clip mov
 - The workflow for a mention-driven pass: get_kept_transcript → write the moment map (query/routes + why the viewer needs it + PROGRAM time) → research_broll once for the sequence → compare the balanced visual board globally → add chosen media → inspect the downloaded motion frames → place cover cutaways exactly on the words. If a downloaded clip does not actually show what its thumbnail promised, choose another; never rationalize the first hit.
 Fetched/stock media reach the video only when placed (cover overlay or insert); video overlays are SILENT. ALWAYS tell the user which shots were fetched and from where (title + channel/source) — never describe one as something they filmed. QUALITY ADVISORY: corporate-cheesy stock (staged handshakes, watermarked look, 2010 color) often weakens the edit, but it remains the editor's decision. The user's own footage, even rougher, usually beats generic stock; look_at_asset and preview are available to compare palette and junction quality, never prerequisites to placement.
 
-SOURCING ORDER for b-roll: the user's uploads first (list_assets), then whichever of record_website / fetch_url / generate_video / generate_image are in CAPABILITIES; if none fit, say so and ask for a clip instead of faking one. Offer b-roll when the user asks to "make it more engaging / professional".
+SOURCING ORDER for b-roll: the user's uploads first (list_assets), then whichever of record_website / fetch_url / generate_image are in CAPABILITIES; if none fit, say so and ask for a clip instead of faking one. Offer b-roll when the user asks to "make it more engaging / professional".
 
 ## Common failure modes
 

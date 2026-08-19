@@ -303,7 +303,7 @@ def test_caption_direction_varies_by_editorial_format_not_randomly():
         Ctx("two-person interview", speakers=2), edl)
     assert sports["preset"] == "impact"
     assert luxury["preset"] == "luxe"
-    assert podcast["preset"] == "clean"
+    assert podcast["preset"] == "stacked"
     assert podcast["emphasis"] == "big"
     assert sports["highlight_color"] != luxury["highlight_color"]
 

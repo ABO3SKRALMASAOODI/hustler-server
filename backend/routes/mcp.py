@@ -871,7 +871,7 @@ def _run_tool_job(tok, name, args, raw=False, project_id=None):
                         "Call list_projects and copy the intended id.")
         catalog = _catalog() or {}
         mutation = name in set(catalog.get("write_tools") or []) or name in {
-            "set_edit_plan", "complete_edit_plan_steps", "reset_edit"}
+            "reset_edit"}
         job_id = _enqueue(cur, project_id, tok["user_id"], "mcp_tool",
                           {"tool": name, "args": args,
                            "mutation": mutation})

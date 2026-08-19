@@ -782,32 +782,20 @@ def test_reset_edit_is_transaction_safe_inside_recipe():
     assert fake.rows[-1]["json"]["effects"]["grade"] == "warm"
 
 
-def test_recipe_schema_is_exposed_to_the_agent_as_one_write_tool():
+def test_recipe_schema_is_not_exposed_to_the_agent():
     tools = {t["function"]["name"]: t for t in agent_tools.openai_tools()}
-    assert "apply_edit_recipe" in tools
-    schema = tools["apply_edit_recipe"]["function"]["parameters"]
-    assert schema["required"] == ["operations"]
-    names = schema["properties"]["operations"]["items"]["properties"] \
-        ["tool"]["enum"]
-    assert set(names) == set(agent_tools.RECIPE_TOOLS)
-    assert "save_as" in schema["properties"]["operations"]["items"][
-        "properties"]
-    assert "apply_edit_recipe" in agent_tools.WRITE_TOOLS
+    assert "apply_edit_recipe" not in tools
+    assert "set_edit_plan" not in tools
+    assert "complete_edit_plan_steps" not in tools
+    assert "generate_video" not in tools
+    assert "apply_edit_recipe" not in agent_tools.WRITE_TOOLS
 
 
-def test_routed_recipe_exposes_only_operations_with_visible_exact_schemas():
+def test_routed_catalog_does_not_revive_retired_recipe_tool():
     visible = {"apply_edit_recipe", "set_caption_style", "set_color_grade"}
     tools = {t["function"]["name"]: t for t in agent_tools.openai_tools(
         compact=True, names=visible)}
-    assert set(tools) == visible
-    operation_names = tools["apply_edit_recipe"]["function"]["parameters"] \
-        ["properties"]["operations"]["items"]["properties"]["tool"]["enum"]
-
-    assert set(operation_names) == {"set_caption_style", "set_color_grade"}
-    args_help = tools["apply_edit_recipe"]["function"]["parameters"] \
-        ["properties"]["operations"]["items"]["properties"]["args"] \
-        ["description"]
-    assert "nested objects" in args_help
+    assert set(tools) == {"set_caption_style", "set_color_grade"}
 
 
 def test_recipe_normalizes_unambiguous_flat_caption_and_audio_dialects():

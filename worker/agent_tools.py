@@ -728,9 +728,8 @@ def get_video_info(ctx):
         ins = edl["json"].get("inserts") or []
         prog = _program_map(ctx, edl["json"])
         return ("No main video in this project — this is a blank canvas. Build "
-                "the program from generated or uploaded images/clips: create "
-                "with generate_image / generate_video, then place with "
-                "insert_media. "
+                "the program from uploaded images/clips (and generate_image "
+                "if listed), then place with insert_media. "
                 f"Current EDL v{edl['version']}: {len(ins)} placed "
                 f"clip{'s' if len(ins) != 1 else ''}, "
                 f"{program_duration(edl['json'])}s total."
@@ -2658,13 +2657,12 @@ def compare_uploaded_media(ctx, asset_keys, question="", samples_per_asset=4):
         + ("Every supplied candidate has visual evidence; " if not failures
            else f"{len(failures)} supplied candidate(s) could not be seen and "
                 "are explicitly listed below; ")
-        + "A-labels and CLIP-second evidence for set_edit_plan:\n"
+        + "A-labels and CLIP-second evidence for the cut:\n"
         + "\n".join(catalog)
         + "\nThe comparison pages follow this tool result. Make ONE "
           "story-wide casting/order decision after reading all pages; a weak "
-          "asset may be deliberately unused. For an auxiliary sequence_map "
-          "beat, copy its storage_key into source_asset_key and its exact "
-          "evidence_ids above."
+          "asset may be deliberately unused. Place chosen clips with "
+          "insert_media using the exact storage_key."
     )
     if failures:
         result += ("\nINCOMPLETE DECODES (do not pretend these were seen): "
@@ -3447,8 +3445,9 @@ def _direct_caption_style(ctx, edl):
     if hit("plain captions", "simple captions", "minimal captions", "clean",
            "aesthetic", "premium", "nice captions", "good captions",
            "beautiful captions"):
-        return {"preset": "clean", "emphasis": "big"}, \
-            "the brief asks for restrained premium typography with size-only hierarchy"
+        return {"preset": "stacked", "emphasis": "big", "animation": "fade",
+                "layout": "stack"}, \
+            "the brief asks for modern stacked 1-2 word type with a fade"
     if hit("luxury", "luxurious", "premium brand", "expensive", "jewelry",
            "jewellery", "watch ad"):
         return {"preset": "luxe", "highlight_color": "#E2BE72"}, \
@@ -3469,20 +3468,22 @@ def _direct_caption_style(ctx, edl):
             "calm/cinematic footage needs air and a quiet serif hierarchy"
     if hit("tutorial", "screen recording", "software", "saas", "tech",
            "product demo", "explainer", "educational", "business"):
-        return {"preset": "clean", "emphasis": "big"}, \
-            "tutorial/business speech needs a restrained, highly legible hierarchy"
+        return {"preset": "stacked", "emphasis": "big", "animation": "fade",
+                "layout": "stack"}, \
+            "tutorial/business speech still reads as 1-2 stacked words, not a subtitle block"
     if hit("podcast", "interview", "talking head", "reel", "viral",
            "creator", "cool captions") or speakers >= 2:
-        preset = "clean" if wpm < 175 else "stacked"
-        return {"preset": preset, "emphasis": "big"}, \
-            "the talking-head format calls for readable white type and semantic hierarchy"
+        return {"preset": "stacked", "emphasis": "big", "animation": "fade",
+                "layout": "stack"}, \
+            "talking-head captions stay modern: 1-2 words, stacked, fade in"
     if short_form:
-        preset = "stacked" if wpm >= 165 else "clean"
-        return {"preset": preset, "emphasis": "big"}, \
+        return {"preset": "stacked", "emphasis": "big", "animation": "fade",
+                "layout": "stack"}, \
             f"the measured vertical short-form pace is {wpm:.0f} words/minute"
     if out_dur <= 90.0:
-        return {"preset": "clean", "emphasis": "big"}, \
-            "a short landscape piece benefits from clean, restrained typography"
+        return {"preset": "stacked", "emphasis": "big", "animation": "fade",
+                "layout": "stack"}, \
+            "a short piece uses stacked 1-2 word captions, not a sentence block"
     return {"preset": "documentary"}, \
         "long-form footage benefits from readable subtitles on a stable contrast panel"
 
@@ -4082,6 +4083,11 @@ def add_captions(ctx, mode=None, items=None, style=None,
                 for key in ("position", "anchor_y"))
         preset = (parsed_style or {}).get("preset")
         premium = preset and preset != "classic"
+        # Default modern captions to 1-2 words. Long-form subtitle families
+        # keep their own phrase length unless the caller set max_words.
+        if mw is None and preset not in (
+                "documentary", "broadcast", "elegant"):
+            mw = 2
         # Caption geometry is compiled from pixels, not guessed from a global
         # preset. This also catches an already-captioned source before a second
         # transcript layer is burned over it.
@@ -17131,33 +17137,6 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None):
     complete = autorendering or (
         requested_complete
         and version in getattr(ctx, "checked_versions", set()))
-    if requested_complete or autorendering:
-        department_gaps = director.department_execution_gaps(
-            getattr(ctx, "edit_plan", None), row.get("json") or {},
-            getattr(ctx, "has_main_video", True))
-        motion_gaps = motion_contract.execution_gaps(
-            getattr(ctx, "edit_plan", None), row.get("json") or {},
-            index=getattr(ctx, "index", None))
-        gaps = department_gaps + motion_gaps
-        if gaps:
-            ctx.last_department_gaps = gaps
-            _metric(ctx, "readiness_previews_prevented")
-            if department_gaps:
-                _metric(ctx, "department_execution_gaps",
-                        len(department_gaps))
-            if motion_gaps:
-                _metric(ctx, "motion_contract_gaps", len(motion_gaps))
-            return (
-                "REJECTED: READINESS PRECHECK — no complete preview was "
-                "encoded because "
-                "the current EDL contradicts its own executable treatment "
-                "contract: "
-                + "; ".join(row["message"] for row in gaps[:6])
-                + ". Fulfill/remove those layers, or revise their mode to "
-                  "preserve/omit with the evidence-backed editorial reason. "
-                  "A changed-section proof remains available with "
-                  "render_preview(complete=false), and the turn-end honesty "
-                  "render is never withheld.")
     if version in ctx.rendered_versions and \
             (ctx.last_preview or {}).get("edl_version") == version:
         return (f"Preview v{version} is already rendered and attached — "
@@ -21709,7 +21688,7 @@ TOOLS = {
     "expand_toolset": (
         expand_toolset,
         "Load additional tool schemas for the NEXT reasoning step when the "
-        "post-plan compact catalog does not expose a capability you need. "
+        "compact catalog does not expose a capability you need. "
         "This changes no media or EDL and is not a tool limit: request any "
         "relevant domains, then continue immediately.",
         {"domains": {"type": "array", "items": {"type": "string",
@@ -21986,17 +21965,20 @@ TOOLS = {
                      "single_line:true to guarantee one rendered row per "
                      "transcript-caption state regardless of the preset's "
                      "normal flow/stack layout, max_words_per_caption 1-16. "
-                     "Example — premium reel "
+                     "Default modern look is 1-2 words at a time, stacked "
+                     "levels, fade in (preset 'stacked', max_words_per_caption "
+                     "2) — not a sentence subtitle. Example — modern reel "
                      "captions: {mode:'from_transcript', style:{preset:"
-                     "'podcast'}, emphasis_words:['money','22','future',"
-                     "'opportunities']}. Example — dictated title card: "
+                     "'stacked', animation:'fade'}, max_words_per_caption:2}. "
+                     "Example — dictated title card: "
                      "{items:[{text:'CHAPTER ONE', start:0, end:2.5, "
                      "style:{preset:'beast'}}]}. Stack presets (stacked/"
                      "iridescent/chrome/fashion/luxe/editorial/impact) compose "
-                     "the phrase across lines of very different SIZES; font "
+                     "1-2 words across lines of very different SIZES; font "
                      "picks a bundled family, emphasis 'big' enlarges keywords "
                      "WITHOUT recolouring them, leading below 1.0 overlaps "
-                     "the lines, effect adds chroma/chrome/glow. Production "
+                     "the lines so a smaller word fades in behind the hero. "
+                     "Production "
                      "controls include outline_color/outline_width, shadow, "
                      "background_color/background_opacity, tracking and "
                      "text_align.",
@@ -23908,84 +23890,29 @@ TOOLS = {
                                 "items": {"type": "integer"}}}),
 }
 
-# A clean finishing checkpoint is evidence-derived, never a call/write count.
-# It exists only for the exact latest EDL authored this turn, after a complete
-# preview and every available independent layer has had its say.  Explicitly
-# failing an acceptance criterion returns the plan to ``needs_repair`` and
-# unlocks all normal tools, so a real defect can always be fixed.
+# Retired from the live agent/MCP catalog. Functions stay imported so leftover
+# tests and any in-flight payload that still names them can resolve; the model
+# never sees these names in schemas.
+for _retired_tool in (
+        "set_edit_plan", "complete_edit_plan_steps",
+        "apply_edit_recipe", "generate_video"):
+    TOOLS.pop(_retired_tool, None)
+
+# Blueprint close-out used to freeze writes after a clean preview. The editor
+# now edits, then may look at a render if it wants; it is never locked out.
 def finishing_checkpoint(ctx):
-    plan = getattr(ctx, "edit_plan", None)
-    # A carried-forward blueprint is still the execution authority. Requiring
-    # set_edit_plan to have rewritten it in this same turn let a fully clean
-    # preview reopen into eight more subjective versions in production.
-    if not plan:
-        return False
-    try:
-        latest_version = int(ctx.latest_edl()["version"])
-    except Exception:
-        return False
-    verification = {}
-    if hasattr(ctx, "verification_records"):
-        verification = (ctx.verification_records or {}).get(
-            latest_version) or {}
-        if verification.get("status") not in {"passed", "justified"} \
-                or verification.get("unresolved_findings"):
-            return False
-    written = {int(v) for v in (getattr(ctx, "versions_written", None) or [])}
-    if latest_version not in written:
-        return False
-    preview = getattr(ctx, "last_preview", None) or {}
-    try:
-        if int(preview.get("edl_version")) != latest_version:
-            return False
-    except (TypeError, ValueError):
-        return False
-    # A justified record preserves each review finding plus its direct
-    # evidence. Do not re-block it through the transient critic fields that
-    # produced the same now-resolved findings.
-    if verification.get("status") != "justified":
-        visual = getattr(ctx, "last_visual_critic", None) or {}
-        if visual.get("verdict") != "pass" or preview_critic.repair_lines(visual):
-            return False
-        if getattr(ctx, "last_taste_version", None) != latest_version or \
-                (getattr(ctx, "last_taste", None) or []):
-            return False
-        if getattr(ctx, "last_audio_qc_findings", None):
-            return False
-        audio = getattr(ctx, "last_audio_review", None) or {}
-        if audio.get("edl_version") == latest_version and \
-                audio.get("verdict") == "fix":
-            return False
-        story = getattr(ctx, "last_story_review", None) or {}
-        if story.get("edl_version") == latest_version and \
-                story_critic.repair_lines(story):
-            return False
-    try:
-        department_gaps = director.department_execution_gaps(
-            plan, ctx.latest_edl()["json"],
-            getattr(ctx, "has_main_video", True))
-        motion_gaps = motion_contract.execution_gaps(
-            plan, ctx.latest_edl()["json"],
-            index=getattr(ctx, "index", None))
-        gaps = department_gaps + motion_gaps
-    except Exception:
-        return False
-    if gaps:
-        return False
-    return director.status(plan)["state"] in {
-        "in_progress", "needs_review", "complete"}
+    return False
 
 
-# Schema routing keeps universal evidence/closure tools plus domains implied
-# by the request and still-open blueprint work. Every deployed write name is
-# still advertised in the capability block, and any omitted schema is
-# recoverable through expand_toolset, so this removes tokens—not capability.
+# Schema routing keeps evidence/utility tools plus the departments the editor
+# actually uses. Every deployed write name is still advertised in the
+# capability directory; omitted schemas (screen/shorts) load via expand_toolset.
 TOOL_DOMAIN_NAMES = {
     "story", "captions", "audio", "media", "motion", "screen", "shorts"}
 TOOL_CORE = {
-    "set_edit_plan", "complete_edit_plan_steps", "load_tools",
+    "load_tools",
     "expand_toolset",
-    "apply_edit_recipe", "get_edl", "list_assets", "compare_uploaded_media", "open_visual_page", "look_at",
+    "get_edl", "list_assets", "compare_uploaded_media", "open_visual_page", "look_at",
     "look_at_asset", "render_preview", "read_skill", "ask_user",
     "get_transcript", "get_words", "search_transcript",
     "get_kept_transcript", "get_shots", "get_editorial_map",
@@ -23995,30 +23922,16 @@ TOOL_CORE = {
     "justify_verification_findings",
 }
 
-# A fresh turn has not chosen its treatment yet. Production traces from the
-# Aug-13--15 cohort showed that none of 75 first model dispatches wrote the
-# EDL, yet request-keyword routing exposed up to 126 full schemas (63k chars
-# on average) on that planning call. Those tokens consumed the shared TPM
-# budget before the editor had decided which departments it needed. Keep the
-# evidence and candidate-search tools that first dispatches actually use;
-# after set_edit_plan records the treatment, compact_tool_names exposes the
-# corresponding write domains with no loss of capability.
-TOOL_PLANNING = {
-    "set_edit_plan", "load_tools", "expand_toolset", "read_skill",
-    "ask_user",
-    "get_video_info", "get_transcript", "get_kept_transcript",
-    "get_words", "search_transcript", "get_shots", "get_editorial_map",
-    "find_visual_moments", "find_silences", "find_burned_text",
-    "list_assets", "compare_uploaded_media", "open_visual_page", "look_at", "look_at_asset",
-    "get_audio_analysis",
-}
+# First dispatch used to be read-only until set_edit_plan. That gate is gone:
+# the first call may write. This alias keeps older tests/imports compiling.
+TOOL_PLANNING = set(TOOL_CORE)
 
-# Once the current immutable EDL has passed every available finishing layer,
-# the next decision is semantic closure, not another random variation.  These
-# tools let the editor inspect/justify the evidence or mark a criterion failed;
-# any failed criterion immediately restores its normal editing domains.
+# Screen/shorts stay opt-in; everything else is on from the first dispatch so
+# the model can cut, caption, grade and mix without a planning ritual.
+DEFAULT_EDIT_DOMAINS = ("story", "captions", "audio", "media", "motion")
+
 FINISHING_CORE = {
-    "complete_edit_plan_steps", "get_edl", "open_visual_page", "look_at", "look_at_asset",
+    "get_edl", "open_visual_page", "look_at", "look_at_asset",
     "get_kept_transcript", "get_transcript", "get_editorial_map",
     "audit_captions",
     "audit_audio_mix", "render_preview", "justify_verification_findings",
@@ -24052,7 +23965,7 @@ TOOL_DOMAINS = {
     },
     "media": {
         "compare_uploaded_media", "search_stock", "research_broll", "add_stock_media",
-        "find_footage", "fetch_url", "generate_image", "generate_video",
+        "find_footage", "fetch_url", "generate_image",
         "start_media_sequence", "insert_media", "set_insert_window",
         "move_insert", "remove_insert",
         "add_overlay", "move_overlay", "set_overlay_motion",
@@ -24091,47 +24004,24 @@ def compact_tool_names(ctx):
     """
     loaded_domains = set(getattr(ctx, "_loaded_tool_domains", None) or set())
     loaded_names = set(getattr(ctx, "_loaded_tool_names", None) or set())
-    if finishing_checkpoint(ctx):
-        names = set(FINISHING_CORE) | loaded_names
-        for domain in loaded_domains:
-            names.update(TOOL_DOMAINS.get(domain, set()))
-        return {name for name in names if name in TOOLS}
     names = set(TOOL_CORE)
     plan = getattr(ctx, "edit_plan", None) or {}
     domains = set(plan.get("tool_domains") or []) | loaded_domains
     names.update(plan.get("required_tools") or [])
     names.update(loaded_names)
-    # A vague request can become specific only after set_edit_plan inspects
-    # the evidence ("make it great" -> authored captions/music/B-roll/motion).
-    # Routing from the original user words/open-step nouns alone hid those
-    # newly chosen tools and cost another expand_toolset dispatch—or, worse,
-    # let a promised department disappear. The structured plan is the
-    # authoritative post-cast signal and exposes capability, never a quota.
-    department_domains = {
-        "captions": "captions", "motion": "motion", "broll": "media",
-        "music": "audio", "sfx": "audio", "color": "motion",
-    }
-    for department in ("captions", "motion", "broll", "music", "sfx",
-                       "color"):
-        row = (plan.get("department_plan") or {}).get(department)
-        if isinstance(row, dict) and row.get("mode") == "author":
-            domain = department_domains.get(department)
-            if domain:
-                domains.add(domain)
-    # A generic plan gets story operations as a useful base. The complete
-    # directory plus load_tools means this default never hides another lane.
-    if not domains:
-        domains.add("story")
+    domains.update(DEFAULT_EDIT_DOMAINS)
     for domain in domains:
         names.update(TOOL_DOMAINS.get(domain, set()))
-    if not (names & RECIPE_TOOLS):
-        names.discard("apply_edit_recipe")
     return {name for name in names if name in TOOLS}
 
 
 def planning_tool_names():
-    """Read/plan catalog for the first dispatch of a fresh editing turn."""
-    return {name for name in TOOL_PLANNING if name in TOOLS}
+    """First-dispatch catalog: same as compact routing (writes allowed)."""
+    class _Fresh:
+        edit_plan = None
+        _loaded_tool_domains = set()
+        _loaded_tool_names = set()
+    return compact_tool_names(_Fresh())
 
 REQUIRED_ARGS = {
     "search_transcript": ["query"],
@@ -24153,11 +24043,8 @@ REQUIRED_ARGS = {
     "audition_music_candidates": ["ids"],
     "find_song": ["query"],
     "fetch_music": ["id"],
-    "set_edit_plan": ["steps"],
-    "complete_edit_plan_steps": [],
     "load_tools": [],
     "expand_toolset": ["domains"],
-    "apply_edit_recipe": ["operations"],
     "extract_audio": ["asset_key"],
     "add_sfx": ["storage_key", "at"],
     "move_sfx": ["id", "at"],
@@ -24241,7 +24128,6 @@ REQUIRED_ARGS = {
     "suggest_emphasis": [],
     "apply_look": ["name"],
     "generate_image": ["prompt"],
-    "generate_video": ["prompt"],
     "fetch_url": ["url"],
     "ask_user": ["question"],
     "read_skill": ["name"],
@@ -24254,8 +24140,7 @@ REQUIRED_ARGS = {
 # generate_image and fetch_url are here for the capabilities digest; their
 # successes are tracked separately via ctx.images_generated / ctx.urls_fetched
 # (neither writes the EDL — they create an ASSET the agent then places).
-WRITE_TOOLS = {"apply_edit_recipe",
-               "keep_segments", "cut_range", "cut_output_range",
+WRITE_TOOLS = {"keep_segments", "cut_range", "cut_output_range",
                "restore_range",
                "cut_silences", "remove_filler_words", "add_captions",
                "add_kinetic_text",
@@ -24296,7 +24181,7 @@ WRITE_TOOLS = {"apply_edit_recipe",
                "punch_in_on_emphasis", "fetch_sfx",
                "beat_align_cuts", "apply_look",
                "generate_image",
-               "generate_video", "fetch_url", "fetch_music"}
+               "fetch_url", "fetch_music"}
 
 
 def _tool_disabled(name, model=None):
@@ -24308,7 +24193,7 @@ def _tool_disabled(name, model=None):
     if name == "generate_image":
         return not llm.image_available()
     if name == "generate_video":
-        return not videogen.video_gen_available()
+        return True
     if name == "fetch_url":
         return not config.URL_FETCH_ENABLED
     if name in ("record_website", "record_website_demo"):

@@ -23,8 +23,8 @@ TRANSLATION CAPTIONS ("arabic subtitles", "translate the captions to X"):
 - These are subtitles, not hype captions: default to 'documentary' (translucent contrast panel, restrained Plus Jakarta Sans, bottom), never spotlight/beast. RTL scripts (Arabic, Hebrew, Farsi) render correctly through Noto fallback — write natural RTL text with its punctuation.
 - Style-only follow-ups ("smaller", "nicer font") → set_caption_style, one call, no items re-send. Text corrections → ONE add_captions(mode='items') call with the full corrected list, same timings.
 
-PRESET FAMILIES — the safe default is 'clean', not a novelty effect. Choose one coherent visual grammar for the whole video:
-- General creator/talking head/tutorial/podcast, or "good/premium/clean/aesthetic captions" → 'clean': white mixed-case Plus Jakarta Sans, full short phrases, semantic words grow by SIZE only. This is the default when the brief is vague.
+PRESET FAMILIES — the safe default is modern stacked 1-2 word type, not a sentence subtitle. Choose one coherent visual grammar for the whole video:
+- General creator/talking head/tutorial/podcast, or "good/premium/clean/aesthetic/nice captions" → 'stacked': 1-2 words at a time, two size levels, the smaller word fades in behind the hero word. Pass max_words_per_caption=2 and animation fade. This is the default when the brief is vague.
 - Long-form interviews, accessibility, education, changing/bright backgrounds → 'documentary': restrained phrases on a translucent dark panel.
 - News, explainers, headlines, newsroom/B-roll → 'broadcast': left-aligned lower-third panel with sparse accent hierarchy.
 - Fast, punchy, hype, motivational → 'spotlight': ONE glowing word at a time, big caps, dead centre. Use only when that one-word rhythm is actually requested or clearly fits.
@@ -34,7 +34,7 @@ PRESET FAMILIES — the safe default is 'clean', not a novelty effect. Choose on
 - STACK presets compose the phrase across independently-placed lines whose SIZES differ hard (small connector above a huge hero word): 'stacked' (flagship, all-white, emphasis is pure SIZE), 'iridescent' (RGB fringe), 'chrome' (liquid metal), 'impact' (Bebas caps, sports/hype).
 - Visual genres → 'retro' (outlined condensed poster type) or 'neon' (two-word cool glow). 'classic' is the legacy subtitle renderer; choose it whenever that grammar best serves the edit.
 
-PLACEMENT LAW: multi-word captions sit in the BOTTOM area, never across the face (presets default there — do not pass position='middle' for them). Only 'spotlight' (one word at a time), 'lyric' (the mixed-face lyric edit — centre IS the look), or max_words_per_caption=1 may hold the centre.
+PLACEMENT LAW: 1-2 word stacked captions sit in the BOTTOM area, never across the face (presets default there — do not pass position='middle' for them). Only 'spotlight' (one word at a time), 'lyric' (the mixed-face lyric edit — centre IS the look), or max_words_per_caption=1 may hold the centre.
 
 EMPHASIS: the tool automatically selects sparse semantic emphasis from the KEPT transcript whenever a preset is enabled and emphasis_words is omitted. On short-form (or when analysis is already cached) measured vocal stress is the strongest non-numeric signal, so the typography lands where the speaker does; numbers, money, rare/outcome terms and phrase endings are the fallback. Hero treatment belongs on meaning-bearing or delivery-bearing words, with contrast between ordinary setup and true peaks—not at a fixed word interval. Pass emphasis_words whenever editorial judgment or the brief makes particular words important; use them VERBATIM. Pass [] whenever a flat hierarchy is the better choice. Words containing digits are emphasized automatically.
 
@@ -46,12 +46,12 @@ COMPOSITION — every preset is a starting point you can override per field:
 - Production controls: outline_color + outline_width 0-12, shadow 0-12, background_color + background_opacity 0-1 (real ASS backing panel), tracking -8..24, text_align left/center/right, and anchor_y 0.05..0.95 for an exact output-frame vertical anchor. They compose with presets and classic styles independently.
 - Other styling: color (#RRGGBB), size (s/m/l/xl), size_scale (0.5-3.0), position (bottom/top/middle), dynamic (legacy karaoke), max_words_per_caption (1-16).
 
-SIZE COMPLAINTS: "too small" / "big TikTok captions" → with a preset go size 'l' or 'xl'; without one, size 'xl' + dynamic:true. If they say "too small" a second time they mean MUCH bigger. "Captions look basic/boring/cheap" → first diagnose the grammar: use 'clean' + emphasis 'big' for polish, 'stacked' for dramatic size hierarchy, or 'beast' only for explicit hype. Do not answer every taste complaint with yellow boxes or a size bump.
+SIZE COMPLAINTS: "too small" / "big TikTok captions" → with a preset go size 'l' or 'xl'; without one, size 'xl' + dynamic:true. If they say "too small" a second time they mean MUCH bigger. "Captions look basic/boring/cheap" → first diagnose the grammar: use 'stacked' 1-2 words with fade and size hierarchy, or 'beast' only for explicit hype. Do not answer every taste complaint with yellow boxes or a size bump.
 
 COLOR COMPLAINTS: when the user rejects a caption color/accent, the answer is NO accent — pure white, emphasis 'big' (size-only), highlight_color/effect off. NEVER swap the rejected color for a different color (cyan→gold repeats the mistake in a new hue); they are telling you colored captions are wrong for this video, not that you picked the wrong shade. Same when they ask for "clean", "minimal", "aesthetic" or a premium/insta look on calm or cinematic footage: all-white captions, emphasis by SIZE alone, mixed case, no glow/box — restraint reads expensive; color reads loud. Reserve colored accents for hype content or an explicit ask.
 
 READABILITY IS THE CRAFT — the details that separate produced captions from burned subtitles:
-- SHORT GROUPS READ, SENTENCES DON'T: dynamic short-form runs 1-4 words; 'clean' holds a complete 4-6 word thought so a paused/muted viewer never sees an orphan connector. Full 8-12 word subtitles belong to 'documentary', not a hype preset.
+- SHORT GROUPS READ, SENTENCES DON'T: default short-form is 1-2 words on stacked levels with a fade. Full 8-12 word subtitles belong to 'documentary' or an explicit translation/subtitle ask, never a reel.
 - NEW tracks are phrase-directed automatically: breath pauses and sentence ends reset the card; the composer rebalances neighboring cards instead of ending on "the / because / of", clears completed thoughts promptly during silence, and optically balances stack lines instead of leaving an accidental one-word widow. Documentary/editorial families preserve full punctuation; creator families retain expressive ?/! without comma clutter.
 - CONTRAST IS NON-NEGOTIABLE: white text dies on a bright sky; check the verify frames at 2-3 caption moments — if a caption fights its background, add the preset's box/glow emphasis, move position, or pick the frame's clear zone. Never ship a caption you haven't seen against its actual background.
 - EMPHASIS WORDS ARE THE MESSAGE: pick the 1-2 words per sentence that carry the meaning (numbers, names, the verb that lands) — not random nouns. Wrong emphasis reads worse than none.
@@ -68,7 +68,7 @@ PRE-CAPTIONED FOOTAGE (the most common request on footage the user did not shoot
 
 ## Common failure modes
 
-- Corrupt glyphs, missing transcript, orphan connectors, overcrowded phrases, excessive simultaneous words or multi-level novelty hierarchy.
+- Corrupt glyphs, missing transcript, orphan connectors, overcrowded phrases, or more than 1-2 words on a reel card.
 - Face/UI/safe-band collisions, burned-caption stacking, or a panel whose bounds/fade/motion do not match its glyph layout.
 
 ## Verification procedure

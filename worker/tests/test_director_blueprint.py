@@ -300,17 +300,17 @@ def test_clean_complete_preview_requires_semantic_closure_before_variation():
     ctx.verification_records[2] = {
         "edl_version": 2, "status": "passed", "unresolved_findings": []}
 
-    assert agent_tools.finishing_checkpoint(ctx)
+    assert not agent_tools.finishing_checkpoint(ctx)
     names = agent_tools.compact_tool_names(ctx)
-    assert "complete_edit_plan_steps" in names
+    assert "complete_edit_plan_steps" not in names
     assert "get_edl" in names
     assert "apply_edit_recipe" not in names
-    assert not (names & agent_tools.WRITE_TOOLS)
+    assert names & agent_tools.WRITE_TOOLS
 
-    blocked = agent_tools.execute(
+    allowed = agent_tools.execute(
         ctx, "set_frame", {"ratio": "9:16", "mode": "crop"})
-    assert blocked.startswith("NO CHANGE — the current complete preview")
-    assert fake.rows[-1]["version"] == 2
+    assert allowed.startswith("EDL v2 -> v3")
+    assert fake.rows[-1]["version"] == 3
 
     # Direct evidence that an acceptance check failed is the semantic repair
     # path. It restores every normal tool without a count/cost override.
@@ -320,8 +320,8 @@ def test_clean_complete_preview_requires_semantic_closure_before_variation():
     assert director.status(ctx.edit_plan)["state"] == "needs_repair"
     assert not agent_tools.finishing_checkpoint(ctx)
     repaired = agent_tools.execute(
-        ctx, "set_frame", {"ratio": "9:16", "mode": "crop"})
-    assert repaired.startswith("EDL v2 -> v3")
+        ctx, "set_color_grade", {"preset": "cool"})
+    assert repaired.startswith("EDL v3 -> v4")
 
 
 def test_finish_checkpoint_never_hides_a_proven_quality_defect():
@@ -342,29 +342,12 @@ def test_finish_checkpoint_never_hides_a_proven_quality_defect():
     assert not agent_tools.finishing_checkpoint(ctx)
 
 
-def test_blueprint_tool_schema_exposes_direction_and_closure():
+def test_blueprint_tools_are_retired_from_the_agent_catalog():
     schemas = {row["function"]["name"]: row["function"]
                for row in agent_tools.openai_tools()}
-    plan_props = schemas["set_edit_plan"]["parameters"]["properties"]
-    for key in ("treatment", "decision_basis", "reference_transfer",
-                "coherence_rules", "alternatives_rejected", "narrative_arc",
-                "editorial_family",
-                "caption_direction", "motion_direction",
-                "motion_language",
-                "broll_direction", "music_direction", "sfx_direction",
-                "color_direction", "department_plan", "sequence_map",
-                "acceptance_criteria"):
-        assert key in plan_props
-    department_props = plan_props["department_plan"]["properties"]
-    assert set(department_props) == set(director.TREATMENT_DEPARTMENTS)
-    for row in department_props.values():
-        assert row["properties"]["mode"]["enum"] == \
-            list(director.DEPARTMENT_MODES)
-    beat_props = plan_props["sequence_map"]["items"]["properties"]
-    assert set(("role", "anchor", "purpose", "visual", "sound", "energy",
-                "source_start_s", "source_end_s", "source_asset_key",
-                "evidence_ids")) <= set(beat_props)
-    assert "complete_edit_plan_steps" in schemas
+    for name in ("set_edit_plan", "complete_edit_plan_steps",
+                 "apply_edit_recipe", "generate_video"):
+        assert name not in schemas
 
 
 def test_motion_authoring_requires_a_free_named_language_and_beat_bindings():
@@ -644,7 +627,7 @@ def test_blueprint_cannot_close_an_undelivered_department_promise():
     assert director.status(ctx.edit_plan)["state"] == "complete"
 
 
-def test_missing_department_promise_prevents_wasteful_readiness_encode():
+def test_missing_department_promise_does_not_block_preview():
     ctx, _fake = _tool_ctx()
     ctx.edit_plan = director.create_blueprint(
         steps=["author captions"],
@@ -652,11 +635,8 @@ def test_missing_department_promise_prevents_wasteful_readiness_encode():
             "captions": {"mode": "author", "purpose": "make speech readable"},
         })
     result = agent_tools.render_preview(ctx, complete=True)
-    assert result.startswith("REJECTED: READINESS PRECHECK")
-    assert "no complete preview was encoded" in result
-    assert "captions was promised" in result
-    assert ctx.rendered_versions == set()
-    assert ctx.editing_metrics["readiness_previews_prevented"] == 1
+    assert not str(result).startswith("REJECTED: READINESS PRECHECK")
+    assert ctx.editing_metrics.get("readiness_previews_prevented", 0) == 0
 
 
 def _motion_execution_plan():
@@ -700,7 +680,7 @@ def test_blueprint_cannot_close_when_motion_exists_on_the_wrong_beat():
     assert closed.startswith("Blueprint COMPLETE")
 
 
-def test_wrong_beat_motion_prevents_wasteful_readiness_encode():
+def test_wrong_beat_motion_does_not_block_preview():
     ctx, fake = _tool_ctx()
     ctx.edit_plan = _motion_execution_plan()
     fake.rows[-1]["json"]["effects"] = {"zooms": [{
@@ -710,10 +690,8 @@ def test_wrong_beat_motion_prevents_wasteful_readiness_encode():
     }]}
 
     result = agent_tools.render_preview(ctx, complete=True)
-    assert result.startswith("REJECTED: READINESS PRECHECK")
-    assert "motion beat 1" in result
-    assert ctx.rendered_versions == set()
-    assert ctx.editing_metrics["motion_contract_gaps"] == 1
+    assert not str(result).startswith("REJECTED: READINESS PRECHECK")
+    assert ctx.editing_metrics.get("motion_contract_gaps", 0) == 0
 
 
 def test_authored_department_plan_exposes_every_promised_department():

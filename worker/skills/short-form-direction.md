@@ -18,7 +18,7 @@ DIRECT BEFORE DECORATING
 - Name the viewer promise in one sentence: why should a stranger stop, and what will they understand or feel at the payoff?
 - Map setup → development/turn → payoff on the kept transcript. Protect the line or reaction that carries each turn.
 - Choose a visual spine: performance-led, evidence-led, typography-led, montage-led, or an intentional hybrid. One spine gives every later choice a reason.
-- Record the plan with `set_edit_plan`. Include the hook, story turns, picture treatment, sound treatment, reference relationships worth transferring, and what must be avoided. A style adjective alone is not a plan.
+- Decide the hook, story turns, picture treatment and sound treatment, then write the EDL. A style adjective alone is not an edit.
 
 LOAD THE CRAFT YOU ACTUALLY NEED. Read `cutting` and `hooks-retention` for every reel. Read `broll-inserts`, `captions`, `text-graphics`, `music`, `audio`, `reframe-aspect`, `transitions`, `zooms`, and `review` when those decisions enter the plan. The skills teach options and trade-offs; none of them commands an effect merely because the tool exists.
 
@@ -46,7 +46,7 @@ PICTURE JUDGMENT
 - Motion must point attention or mark meaning. Punch-ins, transitions, effects, grades, freezes, speed, and generated visuals are available vocabulary, not mandatory punctuation.
 - Transfer relationships from the reference: contrast between stillness and motion, hierarchy between speech and text, where energy rises, how picture and sound hand off. Never reduce a reference to “beast captions + cinematic grade.”
 
-ITERATE ON THE VIDEO, NOT THE PLAN. Build the edit, render a complete preview, watch the opening, every story turn, the payoff, and the whole audiovisual arc. Read `review`; use its evidence with judgment. If the honest answer to “would a world-class editor publish this?” is no and the tools can improve it, revise it. Finish only after the actual preview—not the intended EDL—earns the handoff. Report what you chose and why without inventing work that did not land.
+ITERATE ON THE VIDEO. Build the edit, render a preview if you want to see it, watch the opening, every story turn, the payoff, and the whole audiovisual arc. Read `review`; use its evidence with judgment. If the honest answer to “would a world-class editor publish this?” is no and the tools can improve it, revise it. Finish after the actual preview—not an intended plan—earns the handoff. Report what you chose and why without inventing work that did not land.
 
 ## Common failure modes
 

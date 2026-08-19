@@ -2347,11 +2347,11 @@ def _quality_repair_pushback(ctx, messages, t_start, pushed_versions,
 
 
 _PLAN_WITHOUT_WRITE_NUDGE = (
-    "You recorded an edit plan but have not written the EDL. A concrete "
-    "brief is permission to cut — execute the plan NOW in this same turn. "
-    "Do not ask the user to approve a clip order. Stop before writing only "
-    "if a required asset is missing or a listed capability does not exist; "
-    "otherwise apply_edit_recipe / the write tools and render_preview."
+    "You have not written the EDL. A concrete brief is permission to cut "
+    "— write NOW in this same turn. Do not ask the user to approve a clip "
+    "order. Stop before writing only if a required asset is missing or a "
+    "listed capability does not exist; otherwise use the write tools and "
+    "render_preview."
 )
 
 
@@ -3901,10 +3901,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                       "version before replying. This finding survived the "
                       "execution-slice boundary; do not treat the boundary "
                       "as completion.")})
-    has_edit_state = bool(getattr(ctx, "edit_plan", None)
-                          or ctx.versions_written)
-    names = (agent_tools.compact_tool_names(ctx) if has_edit_state
-             else agent_tools.planning_tool_names())
+    names = agent_tools.compact_tool_names(ctx)
     tools = agent_tools.openai_tools(
         model,
         # Full descriptions are most expensive on the first request, exactly
@@ -4696,23 +4693,6 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                     "marking this version complete.",
                     "blocked", total_steps, timings, honesty,
                     turn_deadline=turn_deadline, job=job)
-            if _plan_without_write_pushback(
-                    ctx, messages, plan_write_pushed):
-                plan_write_pushed = True
-                print(f"[job {job['id']}] plan recorded with no EDL write "
-                      "— requesting execution instead of a propose-only "
-                      "reply", flush=True)
-                if body:
-                    messages.append({"role": "assistant", "content": body})
-                continue
-            if _plan_completion_pushback(ctx, messages, plan_close_pushed):
-                plan_close_pushed = True
-                print(f"[job {job['id']}] creative blueprint still has open "
-                      "semantic work — requesting one evidence-based close "
-                      "pass", flush=True)
-                if body:
-                    messages.append({"role": "assistant", "content": body})
-                continue
             draft = body
             if not draft:
                 if ctx.versions_written or ctx.last_preview:
@@ -4855,9 +4835,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                                    if ctx.versions_written
                                    else start_version),
                       change=chg,
-                      creative_blueprint=(ctx.edit_plan if name in {
-                          "set_edit_plan", "complete_edit_plan_steps"}
-                          else None))
+                      creative_blueprint=None)
             messages.append({"role": "tool", "tool_call_id": tc.id,
                              "content": result})
 
@@ -4950,8 +4928,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                     "Do not reread the same evidence. Load another skill only "
                     "when it materially informs the next concrete write. "
                     "If the current request is a concrete edit, the NEXT "
-                    "step must record/finish the blueprint and perform the "
-                    "first safe write (batch independent writes where useful), "
+                    "step must perform the first safe write (batch independent writes where useful), "
                     "or ask_user only when a specific missing choice/asset "
                     "truly blocks every useful edit. For a long visual-event "
                     "hunt, use find_visual_moments once, verify its candidates "

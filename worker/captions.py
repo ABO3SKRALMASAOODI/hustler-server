@@ -354,19 +354,18 @@ PRESETS = {
     # per-line horizontal stagger possible. The four presets above keep the
     # original single-Dialogue emission byte-for-byte ("flow").
     "stacked": {
-        # THE reference reel look: one phrase broken into 2-3 lines whose
-        # sizes differ wildly ("Your" small / "VIDEOS" huge / "don't" small),
-        # set tight enough to interlock. All one colour — the emphasis is
-        # pure SCALE, which is why treatments had to stop implying colour.
+        # Default modern look: 1-2 words at a time, stacked levels, the
+        # support word fades in behind a larger hero word.
         "font": "Inter Display Black", "char_w": 0.56, "base_size": 46,
         "mode": "reveal", "align": "center", "uppercase": False,
-        "max_words": 4, "wpl": 2, "outline": 0.0, "shadow": 2.4,
+        "max_words": 2, "wpl": 1, "outline": 0.0, "shadow": 2.4,
         "emph_scale": 2.05, "num_scale": 2.2,
         "treatments": ("big",), "emphasis": "big",
         "number_treatment": "num_plain",
-        "active": "pop", "position": "bottom",
-        "layout": "stack", "leading": 0.86, "stagger": 0.055,
-        "word_anim": "punch",
+        "active": "fade", "position": "bottom",
+        "layout": "stack", "leading": 0.82, "stagger": 0.08,
+        "word_anim": "fade",
+        "target_words": 2,
     },
     "iridescent": {
         # Same architecture, with the RGB-split fringe of the reference

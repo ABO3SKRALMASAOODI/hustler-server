@@ -1984,14 +1984,13 @@ check("search_sfx appears when the capability is on",
               for t in at.openai_tools()))
 cfg.SFX_SEARCH_ENABLED = _saved_sfx_search
 
-check("generate_video hidden without a fal key",
-      not _videogen.video_gen_available()
-      and all(t["function"]["name"] != "generate_video"
-              for t in at.openai_tools()))
+check("generate_video is retired from the agent catalog",
+      all(t["function"]["name"] != "generate_video"
+          for t in at.openai_tools()))
 cfg.FAL_KEY = "test-key"
 cfg.VIDEO_PROVIDER = "fal"
-check("generate_video appears once the video provider is configured",
-      any(t["function"]["name"] == "generate_video"
+check("generate_video stays hidden even when a video provider is configured",
+      all(t["function"]["name"] != "generate_video"
           for t in at.openai_tools()))
 cfg.FAL_KEY = ""
 

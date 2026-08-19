@@ -23,32 +23,33 @@ class _Ctx:
         self._loaded_tool_names = set()
 
 
-def test_post_plan_catalog_routes_from_explicit_plan_not_request_regex():
+def test_post_plan_catalog_exposes_default_edit_domains():
     ctx = _Ctx()
     names = agent_tools.compact_tool_names(ctx)
     assert {"keep_segments", "render_preview",
             "expand_toolset"} <= names
-    assert {"set_caption_style", "add_captions"} <= names
-    assert "add_music" not in names
-    assert "search_stock" not in names
+    assert {"set_caption_style", "add_captions", "add_music",
+            "cut_range"} <= names
+    assert "set_edit_plan" not in names
+    assert "apply_edit_recipe" not in names
+    assert "generate_video" not in names
+    assert "edit_shorts" not in names
 
     full = agent_tools.openai_tools(compact=True)
     routed = agent_tools.openai_tools(compact=True, names=names)
     full_chars = len(json.dumps(full))
     routed_chars = len(json.dumps(routed))
-    assert routed_chars < full_chars
+    assert routed_chars <= full_chars
 
 
-def test_fresh_planning_catalog_cannot_write_and_cuts_first_call_tpm():
+def test_fresh_catalog_can_write_without_a_plan():
     names = agent_tools.planning_tool_names()
-    assert {"set_edit_plan", "look_at", "compare_uploaded_media",
-            "find_silences", "read_skill"} <= names
-    assert "search_music" not in names
-    assert not (names & agent_tools.WRITE_TOOLS)
-
-    full = agent_tools.openai_tools(compact=False)
-    planning = agent_tools.openai_tools(compact=True, names=names)
-    assert len(json.dumps(planning)) < len(json.dumps(full)) * 0.2
+    assert {"look_at", "compare_uploaded_media",
+            "find_silences", "read_skill", "add_captions"} <= names
+    assert "set_edit_plan" not in names
+    assert "apply_edit_recipe" not in names
+    assert "generate_video" not in names
+    assert names & agent_tools.WRITE_TOOLS
 
 
 def test_any_omitted_domain_can_be_loaded_without_changing_the_edit():

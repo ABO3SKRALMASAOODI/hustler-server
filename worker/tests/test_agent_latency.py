@@ -248,26 +248,21 @@ def test_progress_window_continuation_can_skip_the_broad_visual_overview(
     assert "not reattached" in agent_loop._CONTINUATION_NOTE
 
 
-def test_prompt_prefers_one_atomic_recipe_for_multi_move_edits():
+def test_prompt_tells_the_editor_to_write_instead_of_planning():
     p = agent_prompt.SYSTEM_PROMPT
-    assert "apply_edit_recipe" in p
-    assert "aborts the entire batch" in p
-    assert 'save_as' in p and '{"$ref":"that_alias"}' in p
-    assert "already-fetched SFX" in p
+    assert "apply_edit_recipe" not in p
+    assert "set_edit_plan" not in p
+    assert "Do not author a creative blueprint" in p
+    assert "1-2 words at a time" in p
+    assert "compare_uploaded_media ONCE" in p
 
 
-def test_first_planning_call_chooses_an_evidence_bound_treatment():
+def test_first_call_is_allowed_to_cut():
     p = agent_prompt.SYSTEM_PROMPT
     for phrase in (
-            "Do not accept the first plausible pile of techniques",
-            "use the FORMAT CAST as a candidate slate",
-            "choose the dominant editorial_family quality contract plus ONE specific treatment",
-            "record decision_basis, shared coherence_rules",
-            "MAKE DEPARTMENT CHOICES EXECUTABLE",
-            "silence, the base picture, stillness and natural color can win",
-            "exact transcript sentence and/or shot evidence_ids",
-            "compare_uploaded_media ONCE",
-            "DIRECT-SIGHT READS ARE SEQUENTIAL EVIDENCE"):
+            "A concrete brief (reel, short, captions, crop, music, zooms) is permission to write this turn",
+            "DIRECT-SIGHT READS ARE SEQUENTIAL EVIDENCE",
+            "Make the edit with batched write tools"):
         assert phrase in p
 
 

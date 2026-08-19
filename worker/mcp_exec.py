@@ -374,9 +374,7 @@ def run_mcp_job(worker_db, job):
             agent_loop._activity(worker_db, project["chat_session_id"],
                                  tool, args, text, source="mcp",
                                  edl_version=after,
-                                 creative_blueprint=(ctx.edit_plan if tool in {
-                                     "set_edit_plan",
-                                     "complete_edit_plan_steps"} else None))
+                                 creative_blueprint=None)
             out = {"text": text, "edl_version": after,
                    "edl_changed": after != before}
             imgs = _drain_images(ctx)
