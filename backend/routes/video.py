@@ -5064,13 +5064,13 @@ def render_final(user_id, project_id):
                 "code": "edit_required",
                 "failed_job_id": prior_failure["id"],
             }), 409
-        if _running_jobs_count(cur, user_id) >= MAX_CONCURRENT_JOBS_PER_USER:
-            record_client_event(
-                user_id, project_id, "export_blocked",
-                detail={"code": "capacity", "version": version},
-                origin="server")
-            return jsonify({"error": "Too many jobs running. "
-                                     "Wait for one to finish."}), 429
+        # Download is an explicit, user-confirmed durable request. Other work
+        # by this account may affect when a worker claims it, but must never
+        # refuse it before it reaches the queue: production project 1139 had
+        # several physical slices of one logical edit counted as independent
+        # capacity and the user's export simply disappeared behind a 429.
+        # The same-project final guard above prevents duplicate encodes; queue
+        # ordering and worker lanes own actual fleet capacity.
         job_id = _enqueue(cur, project_id, user_id, "final",
                           {"edl_version": version})
     record_client_event(

@@ -87,3 +87,34 @@ def test_actual_audio_fix_keeps_completion_open():
     assert quality["quality_status"] == "repair_required"
     assert quality["export_ready"] is False
     assert any("music masks" in line for line in quality["quality_findings"])
+
+
+def test_exact_durable_verification_clears_superseded_critic_findings():
+    """A repair proof is newer truth than the critic that requested it.
+
+    Production project 1144 passed/justified the flash-frame finding on the
+    exact immutable version, then appended that stale finding to the user's
+    final reply anyway.  Once durable verification closes every finding, old
+    critic snapshots are history rather than an outstanding blocker.
+    """
+    report = {
+        "verdict": "repair",
+        "findings": [{
+            "severity": "major", "category": "flash", "time_s": 5.2,
+            "evidence": "a bright frame appears at the cut",
+            "repair": "inspect the cut and remove the flash",
+            "confidence": 0.96,
+        }],
+    }
+    ctx = _ctx(
+        last_visual_critic=report,
+        verification_records={
+            3: {"status": "justified", "unresolved_findings": []},
+        },
+    )
+    assert agent_loop._quality_handoff(ctx) == {
+        "quality_status": "justified",
+        "quality_findings": [],
+        "export_ready": True,
+    }
+    assert agent_loop._disclose_outstanding_quality(ctx, "Done.") == "Done."

@@ -1563,9 +1563,11 @@ def _retryable_provider_rejection(exc):
 def _adopt_steering_messages(ctx, worker_db, job, session_id, messages,
                              after_message_id):
     """Append messages typed while this editor is running; return newest id."""
+    payload = job.get("payload") or {}
+    root_id = int(payload.get("root_agent_job_id") or job["id"])
     try:
         adopted = worker_db.run(
-            dbx.adopt_queued_agent_steers, job["project_id"], job["id"],
+            dbx.adopt_queued_agent_steers, job["project_id"], root_id,
             session_id, int(after_message_id or 0))
     except Exception as e:
         print(f"[agent {job['id']}] steering poll failed: {str(e)[:120]}",
@@ -1608,17 +1610,19 @@ def _adopt_steering_messages(ctx, worker_db, job, session_id, messages,
     return newest
 
 
-def _complete_adopted_steers(ctx, worker_db, active_job_id):
+def _complete_adopted_steers(ctx, worker_db, job):
     ids = sorted(getattr(ctx, "adopted_steer_job_ids", set()))
     if not ids:
         return
+    payload = job.get("payload") or {}
+    root_id = int(payload.get("root_agent_job_id") or job["id"])
     try:
-        worker_db.run(dbx.complete_adopted_agent_steers, ids, active_job_id)
+        worker_db.run(dbx.complete_adopted_agent_steers, ids, root_id)
         ctx.adopted_steer_job_ids = set()
     except Exception as e:
         # Leave the durable rows queued. A duplicate follow-up is safer than
         # losing a message the live turn already promised to handle.
-        print(f"[agent {active_job_id}] could not retire adopted steering "
+        print(f"[agent {job['id']}] could not retire adopted steering "
               f"jobs ({str(e)[:120]}); durable fallback remains queued",
               flush=True)
 
@@ -1789,6 +1793,9 @@ def run_agent_job(worker_db, job):
     ctx._proof_ranges_by_version = {
         int(key): value for key, value in
         (continuation_state.get("proof_ranges_by_version") or {}).items()}
+    ctx.adopted_steer_job_ids = {
+        int(value) for value in
+        (continuation_state.get("adopted_steer_job_ids") or [])}
     usage_state = continuation_state.get("usage") or {}
     if isinstance(usage_state.get("model_usage"), dict):
         ctx.model_usage = usage_state["model_usage"]
@@ -2061,6 +2068,8 @@ def run_agent_job(worker_db, job):
                     "change_manifests": ctx.change_manifests,
                     "verification_records": ctx.verification_records,
                     "proof_ranges_by_version": ctx._proof_ranges_by_version,
+                    "adopted_steer_job_ids": sorted(
+                        getattr(ctx, "adopted_steer_job_ids", set())),
                     "loaded_tool_domains": sorted(
                         getattr(ctx, "_loaded_tool_domains", None) or []),
                     "loaded_tool_names": sorted(
@@ -2648,6 +2657,17 @@ def _quality_handoff(ctx):
 
     verification = ((getattr(ctx, "verification_records", None) or {})
                     .get(int(latest)) or {})
+
+    # Durable verification is the final, exact-version adjudication. Critic,
+    # story, audio and taste snapshots are the inputs that requested a repair;
+    # after the repair is proved or explicitly justified they are historical
+    # evidence, not still-open findings. Production project 1144 otherwise
+    # passed its flash-frame proof and then contradicted itself in the reply by
+    # appending the superseded critic text.
+    if verification.get("status") in {"passed", "justified"} \
+            and not verification.get("unresolved_findings"):
+        return {"quality_status": verification["status"],
+                "quality_findings": [], "export_ready": True}
 
     findings = []
     report = getattr(ctx, "last_visual_critic", None) or {}
@@ -3690,7 +3710,8 @@ def _outcome_meta(ctx, outcome):
 
 
 def _finalize(ctx, worker_db, session_id, final_text, status, total_steps,
-              timings, honesty=None, extra_meta=None, turn_deadline=None):
+              timings, honesty=None, extra_meta=None, turn_deadline=None,
+              job=None):
     """Post a system-authored assistant reply (timeout/step-limit paths),
     auto-rendering first when the EDL changed without a preview. extra_meta is
     merged into the message meta so the studio can react to it (e.g. render an
@@ -3707,6 +3728,8 @@ def _finalize(ctx, worker_db, session_id, final_text, status, total_steps,
     if extra_meta:
         meta.update(extra_meta)
     worker_db.run(dbx.add_message, session_id, "assistant", final_text, meta)
+    if job is not None:
+        _complete_adopted_steers(ctx, worker_db, job)
     return {"status": status, "edl_version": latest["version"],
             "steps": total_steps, "auto_render": ctx.autorendered,
             "honesty": honesty, "timings": timings,
@@ -3964,6 +3987,8 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             "change_manifests": ctx.change_manifests,
             "verification_records": ctx.verification_records,
             "proof_ranges_by_version": ctx._proof_ranges_by_version,
+            "adopted_steer_job_ids": sorted(
+                getattr(ctx, "adopted_steer_job_ids", set())),
             "loaded_tool_domains": sorted(
                 getattr(ctx, "_loaded_tool_domains", None) or []),
             "loaded_tool_names": sorted(
@@ -4109,11 +4134,12 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 return _finalize(
                     ctx, worker_db, session_id, blocker, "blocked",
                     total_steps, timings, honesty,
-                    turn_deadline=turn_deadline)
+                    turn_deadline=turn_deadline, job=job)
             outcome, billable = _turn_completion(ctx, "blocked")
             worker_db.run(dbx.add_message, session_id, "assistant", blocker,
                           {"error": "repeated_blocker",
                            **_outcome_meta(ctx, outcome)})
+            _complete_adopted_steers(ctx, worker_db, job)
             return {"status": "blocked", "steps": total_steps,
                     "timings": timings, "outcome": outcome,
                     "billable": billable}
@@ -4169,14 +4195,14 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                         extra_meta={"credits_exhausted": True,
                                     "free_trial_exhausted": not subscribed,
                                     "trial_cap_reached": trialing},
-                        turn_deadline=turn_deadline)
+                        turn_deadline=turn_deadline, job=job)
                 return _finalize(
                     ctx, worker_db, session_id,
                     "I've hit my budget for this request, so I'm stopping "
                     "here — the edits I completed are saved and previewed "
-                    "below. Send a follow-up to keep going.",
+                    "below. No unfinished work is being reported as done.",
                     "budget", total_steps, timings, honesty,
-                    turn_deadline=turn_deadline)
+                    turn_deadline=turn_deadline, job=job)
             if exhausted:
                 outcome, billable = _turn_completion(ctx, "budget")
                 worker_db.run(dbx.add_message, session_id, "assistant",
@@ -4195,6 +4221,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                               "Try breaking it into smaller steps.",
                               {"error": "turn_budget",
                                **_outcome_meta(ctx, outcome)})
+            _complete_adopted_steers(ctx, worker_db, job)
             return {"status": "budget", "steps": total_steps,
                     "timings": timings, "outcome": outcome,
                     "billable": billable}
@@ -4525,7 +4552,10 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         # spends the budget deliberating and never reaches `content`. Treating
         # it as "the model chose to say nothing" is what posted "I only
         # reviewed the video" three times at a user asking for an edit. Give it
-        # more room and tell it to act; only after that give up, and honestly.
+        # more room and tell it to act. If a whole physical slice still cannot
+        # emit an action, checkpoint the logical turn and continue internally;
+        # never turn an implementation ceiling into "send it again" work for
+        # the user.
         if not msg.tool_calls and not (msg.content or "").strip() \
                 and finish == "length":
             if truncated_retries < 2:
@@ -4537,7 +4567,21 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                       flush=True)
                 messages.append({"role": "system", "content": _TRUNCATED_NUDGE})
                 continue
-            truncated_out = True
+            fingerprint = "empty_completion_at_token_ceiling"
+            previous = _cont.get("blocker_fingerprint")
+            repeats = (int(_cont.get("blocker_repeats") or 0) + 1
+                       if previous == fingerprint else 1)
+            if repeats < 3:
+                return _durable_continuation(
+                    "model output ceiling recovery", fingerprint, repeats)
+            return _finalize(
+                ctx, worker_db, session_id,
+                "I couldn't complete this edit because the editing model "
+                "repeatedly exhausted its response capacity before producing "
+                "an action. Nothing has been marked complete; any saved "
+                "timeline version remains available.",
+                "blocked", total_steps, timings, honesty,
+                turn_deadline=turn_deadline, job=job)
 
         if not msg.tool_calls:
             body = (msg.content or "").strip()
@@ -4651,7 +4695,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                     ". The saved preview remains available, but I am not "
                     "marking this version complete.",
                     "blocked", total_steps, timings, honesty,
-                    turn_deadline=turn_deadline)
+                    turn_deadline=turn_deadline, job=job)
             if _plan_without_write_pushback(
                     ctx, messages, plan_write_pushed):
                 plan_write_pushed = True
@@ -4674,14 +4718,11 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 if ctx.versions_written or ctx.last_preview:
                     draft = "Done — check the preview on the right."
                 elif truncated_out:
-                    # NOT "I only reviewed the video": nothing was reviewed and
-                    # nothing was decided. Say what actually happened, and
-                    # invite the one thing that fixes it — asking again.
-                    draft = ("Sorry — I ran out of room working that one out "
-                             "and never got to the edit itself. Nothing was "
-                             f"changed{_assets_made_note(ctx)}. Send it again "
-                             "(one instruction at a time helps) and I'll go "
-                             "straight at it.")
+                    # Kept for defensive compatibility with older continuation
+                    # payloads. New empty-ceiling cases continue durably above.
+                    draft = ("I couldn't produce an editing action before the "
+                             "model response ended. Nothing was marked "
+                             f"complete{_assets_made_note(ctx)}.")
                 else:
                     draft = ("I only reviewed the video — the edit was not "
                              f"changed{_assets_made_note(ctx)}.")
@@ -4711,7 +4752,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             }
             worker_db.run(dbx.add_message, session_id, "assistant", final,
                           message_meta)
-            _complete_adopted_steers(ctx, worker_db, job["id"])
+            _complete_adopted_steers(ctx, worker_db, job)
             return {"status": "replied", "edl_version": latest["version"],
                     "steps": total_steps, "auto_render": ctx.autorendered,
                     "honesty": honesty, "timings": timings,
@@ -4788,7 +4829,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                                       {"ask_user": True,
                                        "edl_version": _cur_v,
                                        "outcome": "blocked"})
-                        _complete_adopted_steers(ctx, worker_db, job["id"])
+                        _complete_adopted_steers(ctx, worker_db, job)
                         return {"status": "awaiting_user",
                                 "steps": total_steps, "timings": timings,
                                 "outcome": "blocked", "billable": False}

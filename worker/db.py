@@ -203,13 +203,14 @@ def claim_job(conn, types, max_attempts):
     params.append(config.STALE_AFTER_S)
     if serialize:
         # A sibling blocks this row when it is RUNNING with a fresh heartbeat
-        # (the live editor), or QUEUED with a lower id and attempts left (the
-        # row every lane would claim first — making the OLDEST live job the
-        # only claimable one is what closes the READ COMMITTED window where
-        # two lanes could each claim one of two queued turns of the same
-        # project). A stale-running or spent sibling blocks nothing: those
-        # are the reaper's to bury, and a dead row must never wedge its
-        # project's queue behind it.
+        # (the live editor), or QUEUED ahead of it in continuity priority.
+        # A durable continuation is physically newer than follow-ups typed
+        # while its root was running, but it is still the SAME logical turn:
+        # it keeps the project lane until it replies and retires any steering
+        # messages it adopted.  Within the same priority, lower id remains the
+        # READ COMMITTED/SKIP LOCKED race-closer. A stale-running or spent
+        # sibling blocks nothing: those are the reaper's to bury, and a dead
+        # row must never wedge its project's queue behind it.
         serial_where = """
                   AND (
                     (video_jobs.type = 'mcp_tool'
@@ -227,8 +228,32 @@ def claim_job(conn, types, max_attempts):
                               AND live.heartbeat_at >= NOW()
                                   - make_interval(secs => %s))
                              OR (live.state = 'queued'
-                                 AND live.id < video_jobs.id
-                                 AND live.attempts < %s))))"""
+                                 AND live.attempts < %s
+                                 AND (
+                                   CASE WHEN live.type = 'agent_turn'
+                                             AND COALESCE(
+                                               live.payload->>'logical_turn_continuation',
+                                               'false') = 'true'
+                                        THEN 0 ELSE 1 END
+                                   <
+                                   CASE WHEN video_jobs.type = 'agent_turn'
+                                             AND COALESCE(
+                                               video_jobs.payload->>'logical_turn_continuation',
+                                               'false') = 'true'
+                                        THEN 0 ELSE 1 END
+                                   OR (
+                                     CASE WHEN live.type = 'agent_turn'
+                                               AND COALESCE(
+                                                 live.payload->>'logical_turn_continuation',
+                                                 'false') = 'true'
+                                          THEN 0 ELSE 1 END
+                                     =
+                                     CASE WHEN video_jobs.type = 'agent_turn'
+                                               AND COALESCE(
+                                                 video_jobs.payload->>'logical_turn_continuation',
+                                                 'false') = 'true'
+                                          THEN 0 ELSE 1 END
+                                     AND live.id < video_jobs.id))))))"""
         params.extend([config.STALE_AFTER_S, max_attempts])
     if tuple(types) == ("index",):
         # The lower-id queued rows make the rank stable even while another
@@ -290,6 +315,13 @@ def claim_job(conn, types, max_attempts):
                 ORDER BY CASE type WHEN 'preview' THEN 0
                                    WHEN 'final' THEN 1 ELSE 2 END,
                          COALESCE(u.is_subscribed, 0) DESC,
+                         /* continuity priority: finish the logical request
+                            before starting its queued follow-up */
+                         CASE WHEN video_jobs.type = 'agent_turn'
+                                   AND COALESCE(
+                                     video_jobs.payload->>'logical_turn_continuation',
+                                     'false') = 'true'
+                              THEN 0 ELSE 1 END,
                          video_jobs.id
                 FOR UPDATE OF video_jobs SKIP LOCKED
                 LIMIT 1
@@ -2063,7 +2095,7 @@ def pending_user_message(conn, project_id, session_id):
         return cur.fetchone()
 
 
-def adopt_queued_agent_steers(conn, project_id, active_job_id, session_id,
+def adopt_queued_agent_steers(conn, project_id, active_root_id, session_id,
                               after_message_id):
     """Move mid-turn user messages into the live editor atomically.
 
@@ -2083,7 +2115,7 @@ def adopt_queued_agent_steers(conn, project_id, active_job_id, session_id,
                          AND (payload->>'message_id')::bigint > %s
                          AND NOT (payload ? 'steered_into')
                        ORDER BY id FOR UPDATE""",
-                    (project_id, active_job_id, int(after_message_id or 0)))
+                    (project_id, active_root_id, int(after_message_id or 0)))
         jobs = cur.fetchall()
         if not jobs:
             return []
@@ -2101,11 +2133,11 @@ def adopt_queued_agent_steers(conn, project_id, active_job_id, session_id,
         cur.execute("""UPDATE video_jobs
                        SET payload = payload || %s, updated_at = NOW()
                        WHERE id = ANY(%s) AND state = 'queued'""",
-                    (Json({"steered_into": int(active_job_id)}), ids))
+                    (Json({"steered_into": int(active_root_id)}), ids))
         return {"messages": messages, "job_ids": ids}
 
 
-def complete_adopted_agent_steers(conn, job_ids, active_job_id):
+def complete_adopted_agent_steers(conn, job_ids, active_root_id):
     if not job_ids:
         return 0
     with conn.cursor() as cur:
@@ -2115,9 +2147,9 @@ def complete_adopted_agent_steers(conn, job_ids, active_job_id):
                        WHERE id = ANY(%s) AND state = 'queued'
                          AND payload->>'steered_into' = %s
                        RETURNING id""",
-                    (Json({"steered_into": int(active_job_id),
+                    (Json({"steered_into": int(active_root_id),
                            "billable": False}), list(job_ids),
-                     str(active_job_id)))
+                     str(active_root_id)))
         return len(cur.fetchall())
 
 

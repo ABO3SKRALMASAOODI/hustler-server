@@ -173,6 +173,24 @@ def test_agent_claim_is_serialized_in_postgres_across_processes():
     assert "FOR UPDATE OF video_jobs SKIP LOCKED" in sql
 
 
+def test_agent_continuation_keeps_the_project_lane_ahead_of_followups():
+    """A physical slice boundary must not reorder one logical request.
+
+    A follow-up may have the lower id because it arrived while the root was
+    running.  The root's continuation is created later, but it still owns the
+    editor lane until it replies and retires any instructions it adopted.
+    """
+    _with_column(True)
+    c = _Conn(fetchone={"id": 12})
+    wdb.claim_job(c, ["agent_turn"], config.MAX_ATTEMPTS_AGENT)
+    sql, _params = c.sql[0]
+    assert "logical_turn_continuation" in sql
+    assert "continuity priority" in sql
+    compact = " ".join(sql.split())
+    assert "live.payload->>'logical_turn_continuation'" in compact
+    assert "video_jobs.payload->>'logical_turn_continuation'" in compact
+
+
 
 def test_a_ceilinged_job_fails_visibly_instead_of_sitting_queued():
     """claim_job stops selecting it, which makes it invisible rather than

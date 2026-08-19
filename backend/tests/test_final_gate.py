@@ -27,6 +27,7 @@ than merely fixed:
 
 import os
 import sys
+import inspect
 
 import pytest
 
@@ -43,6 +44,14 @@ CURRENT = {"outro_v": video.OUTRO_VERSION,
            "wm_v": 0}
 # What the stale executor image actually wrote: no trans_v at all.
 STALE_STAMP = {"outro_v": video.OUTRO_VERSION, "wm_v": 0}
+
+
+def test_confirmed_export_is_queued_even_when_other_user_jobs_are_running():
+    """The queue is the capacity control; Download must enter it durably."""
+    source = inspect.getsource(video.render_final)
+    assert "_running_jobs_count" not in source
+    assert '"code": "capacity"' not in source
+    assert '_enqueue(cur, project_id, user_id, "final"' in source
 
 
 class _Cur:

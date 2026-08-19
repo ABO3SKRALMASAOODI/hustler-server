@@ -41,6 +41,16 @@ def test_real_external_boundaries_create_durable_continuations():
     assert '"start_version": start_version' in source
     assert 'say \\"continue\\"' not in source.lower()
     assert "tell me to continue" not in source.lower()
+    assert "Send it again" not in source
+    assert "Send a follow-up to keep going" not in source
+    assert '"adopted_steer_job_ids"' in source
+
+
+def test_continuation_restores_adopted_followup_ownership():
+    source = inspect.getsource(agent_loop.run_agent_job)
+    assert "ctx.adopted_steer_job_ids" in source
+    assert 'continuation_state.get("adopted_steer_job_ids")' in source
+    assert 'payload.get("root_agent_job_id") or job["id"]' in source
 
 
 def test_continuation_note_preserves_autonomy():

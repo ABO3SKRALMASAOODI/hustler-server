@@ -682,8 +682,9 @@ def test_live_turn_adopts_mid_edit_messages(monkeypatch):
 
     class WorkerDb:
         @staticmethod
-        def run(fn, *_args):
+        def run(fn, *args):
             assert fn is dbx.adopt_queued_agent_steers
+            assert args[:2] == (3, 4)
             return {"messages": rows, "job_ids": [22]}
 
     class Ctx:
@@ -701,3 +702,37 @@ def test_live_turn_adopts_mid_edit_messages(monkeypatch):
     assert "newest user message wins" in messages[0]["content"]
     assert Ctx.editing_metrics["steering_messages_adopted"] == 1
     assert ctx.adopted_steer_job_ids == {22}
+
+
+def test_continuation_adopts_and_retires_steers_under_stable_root(monkeypatch):
+    calls = []
+
+    class WorkerDb:
+        @staticmethod
+        def run(fn, *args):
+            calls.append((fn, args))
+            if fn is dbx.adopt_queued_agent_steers:
+                return {"messages": [{"id": 14, "content": "add music",
+                                      "meta": None}],
+                        "job_ids": [31]}
+            if fn is dbx.complete_adopted_agent_steers:
+                return 1
+            raise AssertionError(fn)
+
+    ctx = type("Ctx", (), {"user_message": "make a montage",
+                            "editing_metrics": {}})()
+    monkeypatch.setattr(agent_loop, "_attachment_context",
+                        lambda *_args: "")
+    continuation = {
+        "id": 40, "project_id": 3,
+        "payload": {"root_agent_job_id": 4,
+                    "logical_turn_continuation": True},
+    }
+    messages = []
+    agent_loop._adopt_steering_messages(
+        ctx, WorkerDb(), continuation, 7, messages, 10)
+    agent_loop._complete_adopted_steers(ctx, WorkerDb(), continuation)
+
+    assert calls[0][1][:2] == (3, 4)
+    assert calls[1][1] == ([31], 4)
+    assert ctx.adopted_steer_job_ids == set()
