@@ -611,24 +611,14 @@ def vdb():
 
 
 def _subscribe_gate_applies(cur, user_id):
-    """Conversion wall: an unsubscribed account that has already seen one
-    real edit (an agent turn that delivered a current-turn timeline change,
-    or a shorts run that actually rendered clips) gets subscription cards on the NEXT
-    prompt. The first indexed turn still runs. Subscribers (a live trial
-    still counts), the admin account, and accounts that have not seen an
-    edit yet all pass. Fails OPEN like plan_gate: a lookup error must
-    never eat a paying user's message."""
+    """Conversion wall: unsubscribed accounts see subscription cards on
+    send/drop. There is no free first edit. Subscribers (a live trial still
+    counts) and the admin account pass. Fails OPEN like plan_gate: a lookup
+    error must never eat a paying user's message."""
     savepoint = False
     try:
-        # PostgreSQL leaves the whole transaction aborted after any statement
-        # error. A fail-open predicate therefore needs its own savepoint; just
-        # catching the exception would make the caller's next query a 500.
         cur.execute("SAVEPOINT subscribe_gate_lookup")
         savepoint = True
-        # Serialize this decision with worker qualification and subscription
-        # webhooks. Without the row lock, another project could finish its
-        # free edit between this SELECT and our enqueue and receive one extra
-        # accepted prompt (or a just-subscribed account could be blocked).
         cur.execute("SELECT is_subscribed, email FROM users WHERE id = %s "
                     "FOR UPDATE",
                     (int(user_id),))
@@ -640,33 +630,8 @@ def _subscribe_gate_applies(cur, user_id):
         if (u["email"] or "").lower() == ADMIN_EMAIL.lower():
             cur.execute("RELEASE SAVEPOINT subscribe_gate_lookup")
             return False
-        cur.execute("""
-            SELECT 1
-            WHERE EXISTS (
-                    SELECT 1 FROM client_events
-                    WHERE user_id = %s
-                      AND kind = 'subscribe_gate_qualified')
-               OR EXISTS (
-                    SELECT 1 FROM video_jobs
-                    WHERE user_id = %s AND state = 'done'
-                      AND ((type = 'agent_turn' AND
-                            result->>'status' = 'replied' AND
-                            result->>'outcome' IN ('fulfilled', 'partial') AND
-                            result->>'edl_changed' = 'true')
-                           OR (type = 'shorts_plan' AND
-                               CASE
-                                 WHEN result ? 'rendered_clips'
-                                      AND result->>'rendered_clips' ~ '^[0-9]+$'
-                                   THEN (result->>'rendered_clips')::int
-                                 WHEN NOT (result ? 'rendered_clips')
-                                      AND result->>'clips' ~ '^[0-9]+$'
-                                   THEN (result->>'clips')::int
-                                 ELSE 0
-                               END > 0)))
-            LIMIT 1""", (int(user_id), int(user_id)))
-        applies = cur.fetchone() is not None
         cur.execute("RELEASE SAVEPOINT subscribe_gate_lookup")
-        return applies
+        return True
     except Exception as e:                                  # pragma: no cover
         if savepoint:
             try:
@@ -689,24 +654,8 @@ def _export_edl_error(edl, source_duration=None):
 
 
 def _subscribe_offer_body():
-    """The 402 the subscribe gate answers with. Carries the three live plans
-    with server-quoted prices and credits so the studio's cards never
-    hardcode a number (the CLAUDE.md four-places rule)."""
-    import billing
-    from credits import PLAN_MONTHLY_LIMITS
-    names = {"ai": "Creator", "ai_pro": "Pro", "ai_max": "Frontier"}
-    plans = []
-    for pid in ("ai", "ai_pro", "ai_max"):
-        prices = billing.PLAN_PRICES_USD.get(pid) or {}
-        plans.append({
-            "id": pid, "name": names[pid],
-            "monthly": prices.get("monthly"),
-            "yearly": prices.get("yearly"),
-            "credits": PLAN_MONTHLY_LIMITS.get(pid)})
-    return {
-        "error": ("Subscribe to start editing. Cancel anytime."),
-        "code": "trial_offer", "trial_offer": True,
-        "subscribe_offer": True, "trial_days": 0, "plans": plans}
+    from credits import subscribe_offer_body
+    return subscribe_offer_body()
 
 
 def _trial_offer_body():
@@ -3143,17 +3092,10 @@ def post_message(user_id, project_id):
         original = _active_original(cur, project_id)
         indexed = bool(original and _index_row(cur, original["sha256"]))
 
-        # THE SUBSCRIBE GATE — one free edited video, then the ask. After
-        # this account has SEEN the product work (a completed agent turn that
-        # actually changed a timeline, or a finished shorts run), every next
-        # prompt answers with subscription cards instead of running. The
-        # first indexed turn still launches. The blocked message is NOT
-        # persisted: closing the cards and resending shows them again.
-        # Active trials pass because they are subscribed. Hangs off
-        # This is account-wide and deliberately does not depend on THIS
-        # project's index. A qualified account used to post during upload,
-        # get auto-resumed after indexing, and receive another real edit before
-        # the gate ran. A true first-time account still passes the predicate.
+        # THE SUBSCRIBE GATE — no free edit. Unsubscribed accounts get
+        # subscription cards on send. The blocked message is NOT persisted:
+        # closing the cards and resending shows them again. Active trials
+        # pass because they are subscribed.
         if _subscribe_gate_applies(cur, user_id):
             record_client_event(user_id, project_id, "trial_gate_shown",
                                 detail={"message_chars": len(text),

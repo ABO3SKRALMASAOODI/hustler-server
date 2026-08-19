@@ -2,7 +2,7 @@
 
 ROUND 50 — THE GATE IS THE FREE CREDITS RUNNING OUT, AND NOTHING ELSE.
 
-Every account, old or new, holds `credits.FREE_GRANT_CREDITS` (50) it can
+Every account, old or new, holds `credits.FREE_GRANT_CREDITS` (0) it can
 actually spend on real agent turns. While there is a credit left, there is no
 gate: the visitor edits their own footage, watches the preview come back, and
 decides what this product is worth from the thing itself. The moment the pool

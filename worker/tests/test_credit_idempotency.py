@@ -360,16 +360,12 @@ class _GateConn:
         return self.cur
 
 
-def test_worker_subscribe_gate_matches_current_turn_delivery_contract():
+def test_worker_subscribe_gate_blocks_unsubscribed_accounts_immediately():
     conn = _GateConn({"is_subscribed": False, "email": "user@example.com"})
 
     assert db.subscribe_gate_applies(conn, 81) is True
-    sql, params = next((sql, params) for sql, params in conn.cur.commands
-                       if "subscribe_gate_qualified" in sql)
-    assert "subscribe_gate_qualified" in sql
-    assert "j.result->>'edl_changed' = 'true'" in sql
-    assert "rendered_clips" in sql
-    assert params == (81, 81)
+    assert not any("subscribe_gate_qualified" in sql
+                   for sql, _params in conn.cur.commands)
     first_sql, first_params = conn.cur.commands[0]
     assert "FROM users" in first_sql and "FOR UPDATE" in first_sql
     assert first_params == (81,)
@@ -403,7 +399,8 @@ class _AutoResumeCursor:
         normalized = " ".join(sql.split())
         self.commands.append((normalized, params))
         if "SELECT is_subscribed, email FROM users" in normalized:
-            self.row = {"is_subscribed": False, "email": "user@example.com"}
+            self.row = {"is_subscribed": not self.gated,
+                        "email": "user@example.com"}
         elif "SELECT id FROM users" in normalized:
             self.row = {"id": params[0]}
         elif "SELECT 1 WHERE EXISTS" in normalized:

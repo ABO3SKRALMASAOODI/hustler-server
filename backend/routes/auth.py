@@ -356,10 +356,8 @@ def register():
             cursor.close(); conn.close()
             return jsonify({'error': 'User already exists'}), 409
 
-    # The grant is set HERE, not left to the table defaults: the defaults still
-    # say 20 daily + 150 bonus, and the free tier is now one flat
-    # FREE_GRANT_CREDITS allowance that never refills. Code is the authority so
-    # the two signup paths cannot drift from each other or from credits.py.
+    # New accounts get 0 credits. Code is the authority so email and Google
+    # signup cannot drift from credits.FREE_GRANT_CREDITS.
     cursor.execute(
         """INSERT INTO users (email, password, auth_provider,
                               credits_daily, credits_bonus, credits_monthly,

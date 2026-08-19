@@ -18,11 +18,11 @@ see the plan table in routes/paddle.py. It was 1:1 with cost until round 49,
 which left the annual tiers at 28-40% and made an intro discount on an annual
 plan a below-cost sale.
 
-Free users   : FREE_GRANT_CREDITS once, in the bonus pool, never refilled
-Subscribed   : 20 credits / day (resets daily) + monthly pool from plan + remaining bonus
+Free users   : no credits. Studio send/drop shows subscribe cards.
+Subscribed   : 20 credits / day (resets daily) + monthly pool from plan
 Spend order  : daily first → bonus → monthly pool
 Monthly pool : wiped and refreshed on each billing cycle (handled by webhook)
-Bonus pool   : the one-time free taste on registration, never refills
+Bonus pool   : leftover historical grants only; new signups get 0
 """
 
 import datetime
@@ -129,30 +129,31 @@ def trial_allowance(plan):
         return 0
     return max(1, int(math.ceil(full * TRIAL_CREDIT_FRACTION)))
 
-# THE FREE TASTE: 50 credits, once, and they are SPENDABLE (round 50).
-#
-# Round 49 set this to 0 for a good reason and a bad outcome. The reason was
-# real — a bar reading 120/120 on an account that could not spend a single one
-# of them is a number promising something the next click refuses. The outcome
-# was that nobody could try the editor at all: uploading and indexing were
-# free, but the first thing anyone actually came here to do cost a card.
-#
-# So the fix is not to hide the number, it is to make it TRUE. 50 credits is
-# 50 × USD_PER_CREDIT = $0.25 of model spend per signup — a few real agent
-# turns on their own footage — and `backend/plan_gate.py` now opens the gate
-# for exactly as long as this pool lasts. The bar can be full and green again
-# because every credit in it buys something.
-#
-# It does NOT refill. One grant, at registration (routes/auth.py and
-# routes/google_auth.py both write it explicitly), and when it is gone the ask
-# is a paid plan. Existing accounts were topped up to the same 50 by a data
-# migration (migrations/010_free_taste_credits.sql), so "all users" means all
-# users and not just the ones who arrived after the deploy.
-FREE_GRANT_CREDITS  = 50
-FREE_DAILY_CREDITS  = 0     # free credits do NOT refill — see FREE_GRANT_CREDITS
+# No free credits. New accounts get 0. Send and drop in Studio are the
+# conversion wall (subscription cards), not a spendable taste pool.
+FREE_GRANT_CREDITS  = 0
+FREE_DAILY_CREDITS  = 0
 SUB_DAILY_CREDITS   = 20    # subscribers keep their daily top-up on top of the
                             # monthly pool their plan buys
 INITIAL_BONUS       = FREE_GRANT_CREDITS   # legacy name, same number
+
+
+def subscribe_offer_body():
+    """402 / credits payload for the Studio upgrade cards."""
+    import billing
+    names = {"ai": "Creator", "ai_pro": "Pro", "ai_max": "Frontier"}
+    plans = []
+    for pid in ("ai", "ai_pro", "ai_max"):
+        prices = billing.PLAN_PRICES_USD.get(pid) or {}
+        plans.append({
+            "id": pid, "name": names[pid],
+            "monthly": prices.get("monthly"),
+            "yearly": prices.get("yearly"),
+            "credits": PLAN_MONTHLY_LIMITS.get(pid)})
+    return {
+        "error": "Subscribe to start editing. Cancel anytime.",
+        "code": "trial_offer", "trial_offer": True,
+        "subscribe_offer": True, "trial_days": 0, "plans": plans}
 
 # ── Core conversion (model-aware) ─────────────────────────────────────────────
 
@@ -292,7 +293,7 @@ def get_balance(conn, user_id: int) -> dict:
         try:
             cur.execute(
                 "SELECT credits_balance, is_subscribed, plan, "
-                "credits_monthly_limit FROM users WHERE id = %s",
+                "credits_monthly_limit, email FROM users WHERE id = %s",
                 (user_id,)
             )
         except Exception:
@@ -301,13 +302,14 @@ def get_balance(conn, user_id: int) -> dict:
             except Exception:
                 pass
             cur.execute(
-                "SELECT credits_balance, is_subscribed, plan FROM users "
+                "SELECT credits_balance, is_subscribed, plan, email FROM users "
                 "WHERE id = %s",
                 (user_id,)
             )
         row = cur.fetchone()
         if not row:
-            return {"balance": 0, "is_subscribed": False, "plan": "free", "plan_limit": 20}
+            return {"balance": 0, "is_subscribed": False, "plan": "free",
+                    "plan_limit": 0, "subscribe_gated": True}
 
     is_subscribed = bool(row["is_subscribed"])
     plan = row.get("plan") or "free"
@@ -334,9 +336,6 @@ def get_balance(conn, user_id: int) -> dict:
     elif is_subscribed:
         plan_limit = SUB_DAILY_CREDITS + monthly
     else:
-        # The free taste (round 50): the denominator is the one-time grant, so
-        # the studio's meter reads "37 / 50" and drains toward the wall the
-        # user is actually going to hit. See the note on FREE_GRANT_CREDITS.
         plan_limit = FREE_GRANT_CREDITS
 
     empty = float(balance or 0) < 1
@@ -346,23 +345,22 @@ def get_balance(conn, user_id: int) -> dict:
     # decline without a second request. Spreads {} when nothing is wrong, so no
     # existing client changes shape.
     import billing
-    return {
+    email = (row.get("email") or "").lower()
+    subscribe_gated = (not is_subscribed) and email != "thevalmera@gmail.com"
+    out = {
         **billing.payment_state(conn, user_id),
         "balance": balance,
         "is_subscribed": is_subscribed,
         "plan": plan,
         "plan_limit": plan_limit,
         "trialing": trialing,
-        # The free allowance is spent and does not come back — the studio uses
-        # this to offer the trial instead of telling people to wait for a
-        # refresh that will never arrive.
+        "subscribe_gated": subscribe_gated,
         "free_trial_exhausted": (not is_subscribed) and empty,
-        # Spent the trial slice. A DIFFERENT wall from both of the above: these
-        # users already entered a card, so the answer is not "start a trial"
-        # (they are in one) and not "wait for your cycle" (the rest of the plan
-        # is released by converting, not by waiting).
         "trial_cap_reached": trialing and empty,
     }
+    if subscribe_gated:
+        out["subscribe_offer"] = subscribe_offer_body()
+    return out
 
 
 # ── Check before job ──────────────────────────────────────────────────────────

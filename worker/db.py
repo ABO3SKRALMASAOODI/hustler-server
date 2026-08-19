@@ -1908,17 +1908,12 @@ def mark_subscribe_gate_qualified(conn, user_id, job_id):
 
 
 def subscribe_gate_applies(conn, user_id):
-    """Return whether an indexed-upload auto-resume must stop at the wall.
+    """Return whether an unsubscribed account must stop at the wall.
 
-    The HTTP message/Shorts routes check this predicate before accepting new
-    work.  An upload-time prompt is necessarily accepted *before* its source
-    is indexed, though, and another project can qualify the account while the
-    index job is still running.  The worker must re-check the same account-
-    wide rule immediately before it enqueues that saved prompt or the race
-    grants an extra free edit.
-
-    Keep the legacy completed-job fallback during rolling deploys; the
-    account marker is the durable fast path after migration 019.
+    There is no free first edit. The HTTP message/Shorts routes check this
+    before accepting new work. An upload-time prompt can be accepted before
+    index; the worker re-checks immediately before enqueueing that saved
+    prompt so a free account cannot auto-run after analysis.
     """
     with conn.cursor() as cur:
         # Lock in a separate statement *before* reading the marker. A single
@@ -1931,47 +1926,7 @@ def subscribe_gate_applies(conn, user_id):
             return False
         if (user.get("email") or "").lower() == "thevalmera@gmail.com":
             return False
-        cur.execute("SAVEPOINT worker_subscribe_gate_lookup")
-        try:
-            cur.execute("""
-                SELECT 1
-                 WHERE EXISTS (
-                         SELECT 1 FROM client_events ce
-                          WHERE ce.user_id = %s
-                            AND ce.kind = 'subscribe_gate_qualified')
-                    OR EXISTS (
-                         SELECT 1 FROM video_jobs j
-                          WHERE j.user_id = %s AND j.state = 'done'
-                            AND (
-                              (j.type = 'agent_turn'
-                               AND j.result->>'status' = 'replied'
-                               AND j.result->>'outcome'
-                                     IN ('fulfilled', 'partial')
-                               AND j.result->>'edl_changed' = 'true')
-                              OR
-                              (j.type = 'shorts_plan' AND
-                               CASE
-                                 WHEN j.result ? 'rendered_clips'
-                                      AND j.result->>'rendered_clips'
-                                            ~ '^[0-9]+$'
-                                   THEN (j.result->>'rendered_clips')::int
-                                 WHEN NOT (j.result ? 'rendered_clips')
-                                      AND j.result->>'clips' ~ '^[0-9]+$'
-                                   THEN (j.result->>'clips')::int
-                                 ELSE 0
-                               END > 0)
-                            ))
-                 LIMIT 1
-            """, (int(user_id), int(user_id)))
-            applies = cur.fetchone() is not None
-            cur.execute("RELEASE SAVEPOINT worker_subscribe_gate_lookup")
-            return applies
-        except Exception as exc:                         # pragma: no cover
-            cur.execute("ROLLBACK TO SAVEPOINT worker_subscribe_gate_lookup")
-            cur.execute("RELEASE SAVEPOINT worker_subscribe_gate_lookup")
-            print(f"[subscribe_gate] worker lookup failed open for user "
-                  f"{user_id}: {exc}", flush=True)
-            return False
+        return True
 
 
 def mark_message_subscribe_gated(conn, message_id):

@@ -7369,7 +7369,7 @@ def add_zoom(ctx, start, end, strength=None, mode=None, cx=None, cy=None,
     motif, motif_err = _motion_motif_value(ctx, motion_motif)
     if motif_err:
         return motif_err
-    zmode = (mode or "punch").strip().lower()
+    zmode = (mode or "ease").strip().lower()
     if zmode not in ZOOM_MODES:
         return (f"REJECTED: mode must be one of {', '.join(ZOOM_MODES)}. "
                 "punch = instant step in/out; ease = smooth ramp in and "
@@ -22671,13 +22671,15 @@ TOOLS = {
                                              "vintage", "cinematic",
                                              "none"]}}),
     "add_zoom": (add_zoom, "Zoom on a time range of the FINAL edited video "
-                 "(output seconds) — the standard retention effect for "
-                 "emphasis on a key line. strength 0.05-4.5 (default 0.15; "
+                 "(output seconds) only when a named event needs the camera "
+                 "to move: a reveal, a UI target, a punchline, an explicit "
+                 "user beat. A talking-head already in frame does NOT need "
+                 "a punch-in. strength 0.05-4.5 (default 0.15; "
                  "above 1.0 is a dramatic 2x+ punch). mode: "
-                 "'punch' (default, instant step), 'ease' (smoothly ramps "
-                 "in and out — use when the user wants it subtle/animated), "
-                 "'push_in' / 'pull_out' (continuous Ken Burns drift across "
-                 "the whole window — use for slow cinematic movement). TWO "
+                 "'ease' (default, smooth ramp — use this), "
+                 "'push_in' / 'pull_out' (continuous Ken Burns drift), "
+                 "'punch' (instant snap — ONLY the single biggest peak or "
+                 "an explicit punch-in request, never every few seconds). TWO "
                  "ways to aim, and they answer different requests: "
                  "rect=[x0,y0,x1,y1] (fractions of the output frame, read "
                  "off look_at's grid) FRAMES A REGION — the tool solves "
@@ -22695,10 +22697,10 @@ TOOLS = {
                  "Omitting all targets uses the frame center and returns a "
                  "quality advisory. Coordinates may come from look_at, the "
                  "filmstrip, user direction, or the editor's own judgment; "
-                 "no prior evidence call is required. Use as many zooms "
-                 "at emphatic moments, not wall-to-wall; for automatic "
-                 "zooms on the strongest spoken words use "
-                 "punch_in_on_emphasis. And if the zoom should MOVE while "
+                 "no prior evidence call is required. Zero zooms is often "
+                 "correct. Do not sprinkle punches on 'important sentences'. "
+                 "punch_in_on_emphasis is only for an explicit punch-in-on-"
+                 "stressed-words request. If the zoom should MOVE while "
                  "pushed in — 'then move it to X', 'keep it and go to the "
                  "next message', 'follow the cursor' — that is ONE "
                  "add_zoom_path (its keyframes take rect too), never a "
@@ -23720,22 +23722,21 @@ TOOLS = {
                         "ground truth; deterministic preview AUDIO CHECK can "
                         "measure the rendered mix without relabeling roles.",
                         {}),
-    "punch_in_on_emphasis": (punch_in_on_emphasis, "ONE-CALL emphasis "
-                             "zooms: writes a coherent, timeline-distributed "
-                             "motion pass on meaningful vocally STRESSED "
-                             "words that survive the "
-                             "current cut (stress measured from the audio, "
-                             "times from the real word timestamps — never "
-                             "guessed), in one EDL version. Omit count to "
-                             "derive non-clustered motion density from program "
-                             "length and the creative blueprint; omit strength "
-                             "to direct magnitude from the motion/style brief. "
-                             "Explicit count and strength remain authoritative. Face targets "
-                             "are used when detected; otherwise center "
-                             "fallbacks commit with advisories. The result lists "
-                             "each word + program time — report those to "
-                             "the user. THE tool for 'add zooms on the "
-                             "important moments'.",
+    "punch_in_on_emphasis": (punch_in_on_emphasis, "ONLY when the user "
+                             "explicitly asked for punch-ins on stressed / "
+                             "important spoken words. Not a default pass, "
+                             "not 'make it high-retention', not a talking-"
+                             "head finish. Writes a sparse, timeline-"
+                             "distributed motion pass on vocally STRESSED "
+                             "words that survive the current cut (stress "
+                             "from the audio, times from real word timestamps). "
+                             "Prefer zero or one hard punch over a sprinkle. "
+                             "Omit count to keep density sparse; omit strength "
+                             "to keep magnitude small. Face targets are used "
+                             "when detected. If you cannot name why a word "
+                             "deserves a camera bump, do not call this — "
+                             "hold the frame or use one add_zoom(mode='ease') "
+                             "on the actual turn.",
                              {"count": {"type": "integer"},
                               "strength": {"type": "number"}}),
     "beat_align_cuts": (beat_align_cuts, "THE tool for 'cut to the beat'. "
