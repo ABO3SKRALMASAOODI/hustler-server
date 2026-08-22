@@ -11,6 +11,7 @@ import math
 import os
 import threading
 import time
+from decimal import Decimal
 
 import psycopg2
 from psycopg2.extras import RealDictCursor, Json
@@ -649,6 +650,14 @@ def _json_safe(value):
     """
     if isinstance(value, float):
         return value if math.isfinite(value) else None
+    if isinstance(value, Decimal):
+        if not value.is_finite():
+            return None
+        # Preserve exact counters while making fractional database numerics
+        # consumable by Python's strict JSON encoder.
+        if value == value.to_integral_value():
+            return int(value)
+        return float(value)
     if isinstance(value, dict):
         return {key: _json_safe(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):

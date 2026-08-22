@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import sys
+from decimal import Decimal
 
 import pytest
 
@@ -70,6 +71,23 @@ def test_provider_choice_is_stamped_once_under_the_queue_lease(monkeypatch):
     assert calls[-1][1] == (
         42, 4, "cloudflare", {"total_bytes": 10, "max_duration_s": 20})
     assert job["payload"]["execution_shape"]["total_bytes"] == 10
+
+
+def test_provider_shape_database_numerics_are_strict_json_safe():
+    shape = {
+        "total_bytes": Decimal("500000000"),
+        "max_duration_s": Decimal("900.25"),
+        "unknown_duration_s": Decimal("NaN"),
+    }
+
+    safe = dbx._json_safe(shape)
+
+    assert safe == {
+        "total_bytes": 500000000,
+        "max_duration_s": 900.25,
+        "unknown_duration_s": None,
+    }
+    assert json.loads(json.dumps(safe)) == safe
 
 
 def test_stamped_provider_is_immune_to_rollout_percentage_changes(monkeypatch):
