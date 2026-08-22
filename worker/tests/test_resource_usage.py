@@ -172,10 +172,13 @@ def test_superseded_provider_call_stops_before_runner(monkeypatch):
         @staticmethod
         def run(fn, *_args):
             assert fn is dbx.confirm_remote_execution_ownership
-            return "superseded"
+            return ("superseded:state=failed;claim_match=True;"
+                    "provider_match=True;call_match=True")
 
     monkeypatch.setenv("EXECUTOR_PROVIDER", "cloudflare")
-    with pytest.raises(dbx.JobLeaseLost):
+    with pytest.raises(dbx.JobLeaseLost) as raised:
         executor_runtime._confirm_provider_ownership(FakeDb(), {
             "id": 42, "total_claims": 4, "provider_call_id": "cf-loser",
         })
+    assert "state=failed" in str(raised.value)
+    assert "call_match=True" in str(raised.value)

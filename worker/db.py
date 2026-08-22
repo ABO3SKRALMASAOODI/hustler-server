@@ -786,7 +786,18 @@ def confirm_remote_execution_ownership(conn, job_id, total_claims, provider,
         cur.execute("""SELECT total_claims, provider, call_id, state
                        FROM remote_executions WHERE job_id = %s""",
                     (job_id,))
-        return "superseded" if cur.fetchone() else "pending"
+        row = cur.fetchone()
+        if not row:
+            return "pending"
+        # Keep this diagnostic deliberately identity-only: it explains which
+        # fence rejected an executor without copying payload, user, or project
+        # data into provider logs.  The exact physical call id is already in
+        # the caller's error and is not repeated here.
+        return ("superseded:"
+                f"state={row.get('state')};"
+                f"claim_match={row.get('total_claims') == total_claims};"
+                f"provider_match={row.get('provider') == provider};"
+                f"call_match={str(row.get('call_id')) == str(call_id)}")
 
 
 def get_remote_execution(conn, job_id):

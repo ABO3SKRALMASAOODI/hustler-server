@@ -109,10 +109,12 @@ def _confirm_provider_ownership(db, job):
                   f"job {job_id}; using migration-compatible lease fencing",
                   flush=True)
             return
-        if status == "superseded":
+        if isinstance(status, str) and status.startswith("superseded"):
+            diagnostic = status.partition(":")[2]
+            suffix = f" [{diagnostic}]" if diagnostic else ""
             raise dbx.JobLeaseLost(
                 f"job {job_id} provider call {call_id} was superseded before "
-                "executor start")
+                f"executor start{suffix}")
         if time.monotonic() >= deadline:
             raise dbx.RemoteExecutionUnconfirmed(
                 f"job {job_id} provider call {call_id} ownership was not "
