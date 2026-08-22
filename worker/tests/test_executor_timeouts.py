@@ -68,6 +68,14 @@ def test_a_final_gets_room_for_an_hour_long_export():
     assert config.executor_timeout_for("index") >= 3000
 
 
+def test_modal_media_envelope_preserves_compute_after_handoff_recovery():
+    assert config.MODAL_EXECUTOR_TIMEOUT_S >= (
+        config.EXECUTOR_REQUEST_TIMEOUT_S
+        + config.REMOTE_HANDOFF_CONFIRM_S)
+    assert config.modal_timeout_for("index") \
+        == config.MODAL_EXECUTOR_TIMEOUT_S
+
+
 def test_modal_final_ffmpeg_budget_scales_with_authored_duration(monkeypatch):
     monkeypatch.setenv("EXECUTOR_PROVIDER", "modal")
     long_program = 4716.58

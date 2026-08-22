@@ -10,6 +10,7 @@ dispatcher reconnect instead of starting a duplicate paid render.
 """
 
 import hashlib
+import math
 import os
 import sys
 from pathlib import Path
@@ -44,6 +45,21 @@ agent_image = modal.Image.from_dockerfile(
 secret = modal.Secret.from_name(SECRET_NAME)
 app = modal.App(APP_NAME)
 
+# Keep this small deployment-only calculation in lockstep with config.py.
+# Importing config here is unsafe: _boot must set the executor role before
+# config's module-level routing is evaluated inside each Modal container.
+_handoff_persist_s = max(15.0, min(600.0, float(os.getenv(
+    "REMOTE_HANDOFF_PERSIST_S", "300"))))
+_handoff_confirm_s = max(
+    _handoff_persist_s + 15.0,
+    min(660.0, float(os.getenv("REMOTE_HANDOFF_CONFIRM_S", "330"))))
+_request_timeout_s = int(os.getenv("EXECUTOR_REQUEST_TIMEOUT_S", "3600"))
+MODAL_EXECUTOR_TIMEOUT_S = max(
+    _request_timeout_s + int(math.ceil(_handoff_confirm_s)),
+    min(86400, int(os.getenv(
+        "MODAL_EXECUTOR_TIMEOUT_S",
+        str(_request_timeout_s + int(math.ceil(_handoff_confirm_s)))))))
+
 COMMON = {
     "image": image,
     "secrets": [secret],
@@ -54,7 +70,7 @@ COMMON = {
     # The old two-minute tail was the largest source of paid idle time.
     "scaledown_window": 10,
     "retries": 0,
-    "timeout": 3600,
+    "timeout": MODAL_EXECUTOR_TIMEOUT_S,
     "startup_timeout": 300,
 }
 

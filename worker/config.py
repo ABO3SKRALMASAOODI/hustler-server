@@ -2,6 +2,7 @@
 re-pointed (different LLM provider, GPU whisper box, other bucket) with zero
 code changes."""
 
+import math
 import os
 
 DATABASE_URL = os.getenv("DATABASE_URL", "")
@@ -1879,6 +1880,18 @@ MODAL_FINAL_TIMEOUT_S = int(os.getenv("MODAL_FINAL_TIMEOUT_S", "21600"))
 MODAL_AGENT_TIMEOUT_S = int(os.getenv("MODAL_AGENT_TIMEOUT_S", "21600"))
 MODAL_ORCHESTRATION_TIMEOUT_S = int(os.getenv(
     "MODAL_ORCHESTRATION_TIMEOUT_S", "21600"))
+# Modal's ordinary media functions start their hard execution clock before
+# the executor can confirm the dispatcher-to-Postgres handoff. Preserve the
+# complete healthy compute budget even when that ownership fence spends its
+# full bounded recovery allowance waiting for Postgres to return. The
+# dispatcher adds another 60 seconds in remote._run_modal and therefore still
+# outlives (rather than prematurely abandoning) the physical FunctionCall.
+MODAL_EXECUTOR_TIMEOUT_S = max(
+    EXECUTOR_REQUEST_TIMEOUT_S + int(math.ceil(REMOTE_HANDOFF_CONFIRM_S)),
+    min(86400, int(os.getenv(
+        "MODAL_EXECUTOR_TIMEOUT_S",
+        str(EXECUTOR_REQUEST_TIMEOUT_S
+            + int(math.ceil(REMOTE_HANDOFF_CONFIRM_S)))))))
 
 
 def modal_timeout_for(job_type):
@@ -1889,7 +1902,7 @@ def modal_timeout_for(job_type):
         return MODAL_AGENT_TIMEOUT_S
     if job_type in ("mcp_tool", "shorts_plan"):
         return MODAL_ORCHESTRATION_TIMEOUT_S
-    return EXECUTOR_REQUEST_TIMEOUT_S
+    return MODAL_EXECUTOR_TIMEOUT_S
 
 
 # A stalled encode stops emitting -progress lines but keeps its stdout pipe

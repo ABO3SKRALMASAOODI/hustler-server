@@ -604,6 +604,7 @@ def test_compute_fleet_has_explicit_us_and_bounded_eu_envelopes():
     assert modal_app.EU_COMMON["region"] == "eu"
     assert modal_app.US_COMMON["routing_region"] == "us-east"
     assert modal_app.EU_COMMON["routing_region"] == "us-east"
+    assert modal_app.COMMON["timeout"] == config.MODAL_EXECUTOR_TIMEOUT_S
     assert remote._modal_function_name("preview") == "preview"
     assert remote._modal_function_name("final") == "final"
     assert remote._modal_function_name("index") == "index"
