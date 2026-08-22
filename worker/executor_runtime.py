@@ -120,6 +120,26 @@ def _confirm_provider_ownership(db, job):
         time.sleep(0.1)
 
 
+def _deployment_identity(job):
+    """Best-effort shared-source and provider-adapter fingerprints.
+
+    A canary result is not comparable when Modal and Cloudflare ran different
+    renderer bytes. Diagnostics must never fail a user's render, so an
+    unreadable fingerprint is recorded as ``unknown`` and the rollout gate
+    fails closed later instead of withholding the completed artifact.
+    """
+    try:
+        import version
+        code_version = version.code_version()
+    except Exception:
+        code_version = "unknown"
+    adapter_version = str(job.get("provider_adapter_version") or "unknown")
+    return {
+        "executor_code_version": code_version,
+        "executor_adapter_version": adapter_version,
+    }
+
+
 def execute(job, runners):
     """Execute one job and return the established executor JSON envelope."""
     jtype = job.get("type")
@@ -190,6 +210,7 @@ def execute(job, runners):
         execution_timings = {"total_s": dt}
         execution_timings.update(measured_resources())
         execution_timings.update(input_observation)
+        execution_timings.update(_deployment_identity(job))
         execution_timings.update({
             "execution_class": config.execution_class_for(jtype),
             "execution_policy": config.execution_policy_for(job),
@@ -259,6 +280,7 @@ def execute(job, runners):
             dict(getattr(exc, "runner_timings", {}) or {}))
         failure_timings.update(measured_resources())
         failure_timings.update(input_observation)
+        failure_timings.update(_deployment_identity(job))
         failure_timings.update({
             "execution_class": config.execution_class_for(jtype),
             "execution_policy": config.execution_policy_for(job),

@@ -18,6 +18,10 @@ The interactive image omits the baked multi-gigabyte Whisper model because
 its admitted job types never transcribe. The batch image retains that model
 for index fallback. Both still use the same Python renderer and source tree;
 this only removes irrelevant cold-start bytes from the user-facing lane.
+Terminal call envelopes remain reconnectable for seven days, then each shard
+prunes them in bounded batches after later completions. Active and ambiguous
+calls are never age-pruned; this prevents unbounded Durable Object storage
+growth without sacrificing restart recovery.
 
 ## Why the rollout is hybrid
 
@@ -51,9 +55,9 @@ never launch a duplicate on another provider.
    account ID, `CLOUDFLARE_EXECUTOR_URL`, `REMOTE_EXECUTOR_SECRET`, production
    database and S3/R2 values, plus OpenAI/vision values needed by indexing.
 4. Run the manual `deploy-cloudflare-executor` workflow. It type-checks the
-   Worker, builds both Container sizes, installs secrets, and verifies provider
-   identity plus the exact commit fingerprint. Publishing does not route any
-   production traffic.
+   Worker, refuses to publish unless migration 025 is complete, builds both
+   Container sizes, installs secrets, and verifies provider identity plus the
+   exact commit fingerprint. Publishing does not route any production traffic.
 5. On Render, configure the URL and start at zero percent:
 
    ```text
@@ -94,8 +98,9 @@ the remote ownership ledger is contradictory, or when reliability, artifact,
 warm/cold, p50/p95, runner, fallback, capacity or gross-cost gates fail. It
 never changes traffic itself. Its cost estimate uses measured active CPU plus
 provisioned memory/disk and uploaded-byte egress at Cloudflare's published
-list rates; included Workers Paid usage is ignored, so a pass does not depend
-on temporary free allowance.
+list rates, plus the mandatory $5 Workers Paid fee amortized over the observed
+successful-job rate. Included usage is ignored, so a pass does not depend on
+temporary allowance and is deliberately conservative.
 
 For an operator-side check using the same implementation:
 

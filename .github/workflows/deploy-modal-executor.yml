@@ -64,7 +64,13 @@ jobs:
 
       - name: install Modal CLI
         if: env.skip_deploy != 'true'
-        run: pip install "modal==1.5.4"
+        run: pip install "modal==1.5.4" "psycopg2-binary==2.9.10"
+
+      - name: require durable provider ownership schema
+        if: env.skip_deploy != 'true'
+        env:
+          PRODUCTION_DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+        run: python worker/remote_ledger_check.py
 
       - name: validate model-visible skills and capabilities
         if: env.skip_deploy != 'true'

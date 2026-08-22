@@ -246,6 +246,10 @@ def test_cloudflare_config_preserves_modal_heavy_fallback():
     assert "const SHARD_COUNTS = { interactive: 5, batch: 3 }" in adapter
     assert "storage.transaction" in adapter
     assert "provider_call_id: callId" in adapter
+    assert "provider_adapter_version: this.env.CODE_VERSION" in adapter
+    assert "const TERMINAL_RETENTION_MS = 7 * 24 * 60 * 60 * 1000" \
+        in adapter
+    assert "pruneTerminalCalls" in adapter
     assert 'sleepAfter = "60s"' in adapter
     assert "getByName(shardName" not in adapter  # computed once as `shard`
     assert "getByName(shard)" in adapter

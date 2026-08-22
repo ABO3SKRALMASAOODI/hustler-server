@@ -47,6 +47,13 @@ jobs:
       - name: validate Python capabilities
         run: python worker/skill_validator.py
 
+      - name: require durable provider ownership schema
+        env:
+          PRODUCTION_DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+        run: |
+          python -m pip install --disable-pip-version-check psycopg2-binary==2.9.10
+          python worker/remote_ledger_check.py
+
       - name: install and type-check Worker adapter
         working-directory: worker/cloudflare
         run: npm ci && npm run check

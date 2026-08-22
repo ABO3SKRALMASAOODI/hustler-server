@@ -22,6 +22,8 @@ def _sample(provider, *, cold, end_to_end=100, runner=80, cost=.01,
         "cache_hit": False, "cold": cold,
         "runner_s": runner, "end_to_end_s": end_to_end,
         "cost_usd": cost,
+        "code_version": "shared-code-v1",
+        "adapter_version": f"{provider}-adapter-v1",
     }
 
 
@@ -98,12 +100,43 @@ def test_sample_parser_requires_cold_start_and_artifact_evidence():
                                "dispatch_provider": "cloudflare",
                                "queue_wait_s": 2, "provider_start_s": 3,
                                "total_s": 5, "container_first_input": True,
+                               "executor_code_version": "shared-code-v1",
+                               "executor_adapter_version": "cf-adapter-v1",
                                "gross_compute_usd_with_tail_ceiling": .01}},
     }
     sample = gate.sample_from_row(row)
     assert sample["end_to_end_s"] == 10
     assert sample["cold"] is True
     assert sample["artifact_complete"] is True
+    assert sample["code_version"] == "shared-code-v1"
+
+
+def test_stale_or_mixed_deployments_fail_closed():
+    rows = _passing_samples()
+    rows[1]["code_version"] = "cloudflare-stale"
+    rows[3]["adapter_version"] = "cloudflare-adapter-v2"
+    report = gate.evaluate(
+        rows, job_types=("preview_check",), min_samples=2,
+        min_cohort_samples=1)
+    codes = {row["code"] for row in report["failures"]}
+    assert "executor_code_version_mismatch" in codes
+    assert "mixed_provider_adapter_versions" in codes
+
+
+def test_workers_paid_base_fee_blocks_false_low_volume_savings():
+    rows = _passing_samples()
+    for row in rows:
+        if row["provider"] == "cloudflare":
+            row["cost_usd"] = .019
+        else:
+            row["cost_usd"] = .02
+    report = gate.evaluate(
+        rows, job_types=("preview_check",), min_samples=2,
+        min_cohort_samples=1, observation_hours=24)
+    assert any(row["code"] == "cost_not_lower"
+               for row in report["failures"])
+    assert report["policy"]["fixed_base_fee_per_cloudflare_success_usd"] \
+        > 0
 
 
 def test_missing_or_contradictory_remote_ownership_blocks_advance():

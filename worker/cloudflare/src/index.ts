@@ -30,7 +30,7 @@ type Reservation =
   | { kind: "existing"; state: CallState }
   | { kind: "conflict" }
   | { kind: "busy" }
-  | { kind: "reset"; resetId: string };
+  | { kind: "reset"; resetId: string; expiredCallId: string };
 
 interface Env {
   INTERACTIVE: DurableObjectNamespace<ValmeraInteractive>;
@@ -54,6 +54,7 @@ const INTERACTIVE_TYPES = new Set(["preview", "preview_check", "filmstrip"]);
 const BATCH_TYPES = new Set(["index", "final"]);
 const CALL_ID = /^[a-zA-Z0-9_-]{8,96}$/;
 const SHARD_COUNTS = { interactive: 5, batch: 3 } as const;
+const TERMINAL_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
 function shardName(lane: "interactive" | "batch", callId: string): string {
   // Every novel Container ID cold-starts. A fixed pool reuses Python images
@@ -124,6 +125,10 @@ abstract class ValmeraContainer extends Container<Env> {
     return `call:${callId}`;
   }
 
+  private terminalKey(callId: string, at: number): string {
+    return `terminal:${String(at).padStart(13, "0")}:${callId}`;
+  }
+
   private async callState(callId: string): Promise<CallState | null> {
     return (await this.ctx.storage.get<CallState>(this.stateKey(callId))) ?? null;
   }
@@ -133,6 +138,34 @@ abstract class ValmeraContainer extends Container<Env> {
       const active = await txn.get<ActiveCall>("active");
       if (active?.callId === callId) await txn.delete("active");
     });
+  }
+
+  private async storeTerminal(
+    callId: string,
+    state: CallState,
+    at = Date.now(),
+  ): Promise<void> {
+    await this.ctx.storage.put({
+      [this.stateKey(callId)]: state,
+      [this.terminalKey(callId, at)]: callId,
+    });
+  }
+
+  private async pruneTerminalCalls(now = Date.now()): Promise<void> {
+    // Marker keys are ordered by completion time. Delete at most 64 calls per
+    // completion so cleanup remains bounded and the Storage API's 128-key
+    // delete limit is never crossed. Repeated jobs drain any backlog.
+    const markers = await this.ctx.storage.list<string>({
+      prefix: "terminal:", limit: 64,
+    });
+    const cutoff = now - TERMINAL_RETENTION_MS;
+    const keys: string[] = [];
+    for (const [marker, callId] of markers) {
+      const completedAt = Number(marker.split(":", 3)[1]);
+      if (!Number.isFinite(completedAt) || completedAt >= cutoff) break;
+      keys.push(marker, this.stateKey(callId));
+    }
+    if (keys.length) await this.ctx.storage.delete(keys);
   }
 
   private async reserve(
@@ -159,9 +192,14 @@ abstract class ValmeraContainer extends Container<Env> {
       if (active) {
         // Serialize the destructive container reset too. Other new calls see
         // this short reset lease as busy and may safely stay on Modal.
-        const resetId = `reset:${active.callId}`;
+        const expiredCallId = active.callId.startsWith("reset:")
+          ? active.callId.slice("reset:".length)
+          : active.callId;
+        const resetId = `reset:${expiredCallId}`;
         await txn.put("active", { callId: resetId, expiresAt: now + 120_000 });
-        return { kind: "reset", resetId };
+        return {
+          kind: "reset", resetId, expiredCallId,
+        };
       }
 
       const state: CallState = {
@@ -217,6 +255,12 @@ abstract class ValmeraContainer extends Container<Env> {
           safe_to_fallback: true,
         }, 503);
       }
+      const expiredAt = Date.now();
+      await this.storeTerminal(reservation.expiredCallId, {
+        status: "failed", jobType: "expired",
+        error: "Cloudflare execution lease expired before reconciliation",
+        updatedAt: new Date(expiredAt).toISOString(), activeUntil: expiredAt,
+      }, expiredAt);
       await this.release(reservation.resetId);
       reservation = await this.reserve(
         callId, job.type, Date.now(), activeUntil,
@@ -285,28 +329,45 @@ abstract class ValmeraContainer extends Container<Env> {
           authorization: `Bearer ${this.env.EXECUTOR_SECRET}`,
         },
         body: JSON.stringify({
-          job: { ...job, provider_call_id: callId },
+          job: {
+            ...job,
+            provider_call_id: callId,
+            provider_adapter_version: this.env.CODE_VERSION ?? "unknown",
+          },
         }),
       });
       const envelope = (await response.json()) as JsonObject;
       const status = envelope.error ? "failed" : "done";
-      await update({
+      const terminalAt = Date.now();
+      await this.storeTerminal(callId, {
         status, jobType: job.type, envelope,
-        updatedAt: new Date().toISOString(), activeUntil,
-      });
+        updatedAt: new Date(terminalAt).toISOString(), activeUntil,
+      }, terminalAt);
       await this.release(callId);
+      this.ctx.waitUntil(this.pruneTerminalCalls(terminalAt));
       return json(envelope);
     } catch (error) {
       // Once /run was sent, a lost Worker-side connection is ambiguous: the
       // Python process may still be encoding and will commit through Postgres.
       // Keep the named call recoverable; never authorize a second provider.
-      await update({
-        status: "unknown",
-        jobType: job.type,
-        error: String(error),
-        updatedAt: new Date().toISOString(),
-        activeUntil,
-      });
+      const failedAt = Date.now();
+      const active = await this.ctx.storage.get<ActiveCall>("active");
+      if (active?.callId === callId) {
+        await update({
+          status: "unknown",
+          jobType: job.type,
+          error: String(error),
+          updatedAt: new Date(failedAt).toISOString(),
+          activeUntil,
+        });
+      } else {
+        await this.storeTerminal(callId, {
+          status: "failed", jobType: job.type,
+          error: `container reset after ambiguous call: ${String(error)}`,
+          updatedAt: new Date(failedAt).toISOString(), activeUntil,
+        }, failedAt);
+        this.ctx.waitUntil(this.pruneTerminalCalls(failedAt));
+      }
       return json({ error: String(error), call_status: "unknown" }, 502);
     }
   }

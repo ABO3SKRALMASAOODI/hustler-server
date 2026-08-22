@@ -18,7 +18,9 @@ Cloud Run is an emergency launch fallback for legacy jobs only.
    `psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f backend/migrations/025_remote_executions.sql`
 6. Deploy: `modal deploy worker/modal_app.py --env main`
 7. Create a Modal deploy token and store it in GitHub secrets as
-   `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET`.
+   `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET`; also store the external
+   production database DSN as `PRODUCTION_DATABASE_URL` for the read-only
+   schema prerequisite.
 8. Put the same invocation token on the Render worker, then set:
 
    ```text
@@ -31,7 +33,8 @@ Cloud Run is an emergency launch fallback for legacy jobs only.
    ```
 
 The deployment workflow validates all model-visible skills, verifies the code
-fingerprint, and warms/probes every US function and its promised runner set.
+fingerprint, refuses to publish when migration 025 is absent or partial, and
+warms/probes every US function and its promised runner set.
 Only after that gate is green, switch `EXECUTION_POLICY_MODE=redesign` on
 Render. Producers stamp the policy into every new root and child job; retries
 and continuations keep that immutable owner. A durable Modal call reconnects by

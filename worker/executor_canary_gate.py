@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 
 DEFAULT_TYPES = ("preview_check", "filmstrip", "index")
 PROVIDERS = ("cloudflare", "modal")
+CLOUDFLARE_MONTHLY_BASE_USD = 5.0
 HAZARD_KINDS = {
     "executor_capacity", "lease_lost", "provider_budget_exhausted",
     "worker_died", "deadline_exceeded", "duplicate_execution",
@@ -131,6 +132,10 @@ def sample_from_row(row):
         "end_to_end_s": end_to_end,
         "cost_usd": _number(
             timings.get("gross_compute_usd_with_tail_ceiling")),
+        "code_version": str(
+            timings.get("executor_code_version") or "").strip(),
+        "adapter_version": str(
+            timings.get("executor_adapter_version") or "").strip(),
     }
 
 
@@ -156,6 +161,10 @@ def _provider_summary(rows):
         "gross_cost_per_success_usd": (
             sum(costs) / len(successes) if len(costs) == len(rows)
             and successes else None),
+        "code_versions": sorted({row["code_version"] for row in rows
+                                 if row.get("code_version")}),
+        "adapter_versions": sorted({row["adapter_version"] for row in rows
+                                    if row.get("adapter_version")}),
     }
 
 
@@ -167,13 +176,33 @@ def _ratio(candidate, baseline):
     return candidate / baseline
 
 
+def _cost_with_base(summary, provider, fixed_fee_per_success):
+    variable = summary.get("gross_cost_per_success_usd")
+    fixed = fixed_fee_per_success if provider == "cloudflare" else 0.0
+    summary["fixed_base_fee_per_success_usd"] = fixed
+    summary["cost_per_success_with_base_usd"] = (
+        variable + fixed if variable is not None else None)
+    return summary
+
+
 def evaluate(samples, *, job_types=DEFAULT_TYPES, min_samples=20,
              min_cohort_samples=3, max_slowdown=1.05,
-             expected_percent=None):
+             expected_percent=None, observation_hours=1.0,
+             cloudflare_monthly_base_usd=CLOUDFLARE_MONTHLY_BASE_USD):
     """Return a sanitized pass/fail report for one rollout observation."""
     job_types = tuple(dict.fromkeys(job_types))
     failures = []
     valid = [row for row in samples if row.get("type") in job_types]
+    observed_cloudflare_successes = sum(
+        1 for row in valid
+        if row.get("provider") == "cloudflare" and row.get("success"))
+    monthly_scale = 30 * 24 / max(.01, float(observation_hours))
+    projected_monthly_cloudflare_successes = (
+        observed_cloudflare_successes * monthly_scale)
+    fixed_fee_per_success = (
+        max(0.0, float(cloudflare_monthly_base_usd)) /
+        projected_monthly_cloudflare_successes
+        if projected_monthly_cloudflare_successes > 0 else None)
 
     invalid_provider = [row for row in valid
                         if row.get("provider") not in PROVIDERS]
@@ -181,6 +210,15 @@ def evaluate(samples, *, job_types=DEFAULT_TYPES, min_samples=20,
         failures.append({"code": "missing_or_invalid_provider_telemetry",
                          "count": len(invalid_provider)})
     valid = [row for row in valid if row.get("provider") in PROVIDERS]
+
+    missing_identity = [row for row in valid
+                        if not row.get("code_version")
+                        or row.get("code_version") == "unknown"
+                        or not row.get("adapter_version")
+                        or row.get("adapter_version") == "unknown"]
+    if missing_identity:
+        failures.append({"code": "missing_deployment_identity",
+                         "count": len(missing_identity)})
 
     fallbacks = [row for row in valid
                  if row.get("dispatch_provider") == "cloudflare"
@@ -207,8 +245,10 @@ def evaluate(samples, *, job_types=DEFAULT_TYPES, min_samples=20,
         providers = {provider: [row for row in typed
                                 if row["provider"] == provider]
                      for provider in PROVIDERS}
-        summaries = {provider: _provider_summary(rows)
-                     for provider, rows in providers.items()}
+        summaries = {
+            provider: _cost_with_base(
+                _provider_summary(rows), provider, fixed_fee_per_success)
+            for provider, rows in providers.items()}
         by_type[job_type] = {"providers": summaries, "cohorts": {}}
         for provider in PROVIDERS:
             if len(providers[provider]) < min_samples:
@@ -216,6 +256,19 @@ def evaluate(samples, *, job_types=DEFAULT_TYPES, min_samples=20,
                                  "type": job_type, "provider": provider,
                                  "actual": len(providers[provider]),
                                  "required": min_samples})
+            versions = summaries[provider]["adapter_versions"]
+            if len(versions) > 1:
+                failures.append({
+                    "code": "mixed_provider_adapter_versions",
+                    "type": job_type, "provider": provider,
+                    "count": len(versions)})
+        cloudflare_codes = set(summaries["cloudflare"]["code_versions"])
+        modal_codes = set(summaries["modal"]["code_versions"])
+        if cloudflare_codes and modal_codes and cloudflare_codes != modal_codes:
+            failures.append({"code": "executor_code_version_mismatch",
+                             "type": job_type,
+                             "cloudflare_count": len(cloudflare_codes),
+                             "modal_count": len(modal_codes)})
         cloudflare = providers["cloudflare"]
         if cloudflare and not any(row["cold"] for row in cloudflare):
             failures.append({"code": "missing_cold_sample", "type": job_type})
@@ -228,8 +281,12 @@ def evaluate(samples, *, job_types=DEFAULT_TYPES, min_samples=20,
             baseline = [row for row in providers["modal"]
                         if _cohort(row) == key]
             label = "|".join(key[1:])
-            csum, bsum = _provider_summary(candidate), \
-                _provider_summary(baseline)
+            csum = _cost_with_base(
+                _provider_summary(candidate), "cloudflare",
+                fixed_fee_per_success)
+            bsum = _cost_with_base(
+                _provider_summary(baseline), "modal",
+                fixed_fee_per_success)
             metrics = {
                 "cloudflare": csum,
                 "modal": bsum,
@@ -240,8 +297,8 @@ def evaluate(samples, *, job_types=DEFAULT_TYPES, min_samples=20,
                 "p95_runner_ratio": _ratio(
                     csum["p95_runner_s"], bsum["p95_runner_s"]),
                 "cost_per_success_ratio": _ratio(
-                    csum["gross_cost_per_success_usd"],
-                    bsum["gross_cost_per_success_usd"]),
+                    csum["cost_per_success_with_base_usd"],
+                    bsum["cost_per_success_with_base_usd"]),
             }
             by_type[job_type]["cohorts"][label] = metrics
             if len(candidate) < min_cohort_samples or \
@@ -303,7 +360,14 @@ def evaluate(samples, *, job_types=DEFAULT_TYPES, min_samples=20,
         "policy": {"job_types": list(job_types),
                    "min_samples": min_samples,
                    "min_cohort_samples": min_cohort_samples,
-                   "max_slowdown": max_slowdown},
+                   "max_slowdown": max_slowdown,
+                   "observation_hours": observation_hours,
+                   "cloudflare_monthly_base_usd":
+                       cloudflare_monthly_base_usd,
+                   "projected_monthly_cloudflare_successes":
+                       projected_monthly_cloudflare_successes,
+                   "fixed_base_fee_per_cloudflare_success_usd":
+                       fixed_fee_per_success},
     }
 
 
@@ -406,7 +470,8 @@ def main(argv=None):
         samples, job_types=job_types, min_samples=max(1, args.min_samples),
         min_cohort_samples=max(1, args.min_cohort_samples),
         max_slowdown=args.max_slowdown,
-        expected_percent=args.expected_percent)
+        expected_percent=args.expected_percent,
+        observation_hours=max(.01, args.hours))
     apply_remote_health(report, remote_health)
     report["window"] = {"start": since.isoformat(),
                         "end": until.isoformat()}

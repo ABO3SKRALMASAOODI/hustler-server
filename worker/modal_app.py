@@ -126,6 +126,7 @@ def _run(job, profile, role="executor", pricing_multiplier=1.5):
         # Local unit invocations have no provider context; queue lease fencing
         # remains unchanged there.
         pass
+    job["provider_adapter_version"] = adapter_version()
     import config
     import http_server
     import executor_runtime

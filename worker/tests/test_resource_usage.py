@@ -100,6 +100,8 @@ def test_synchronous_tools_emit_cost_and_whole_container_telemetry(
     assert response["execution"]["provider_start_s"] >= 1.9
     assert response["execution"]["dispatch_provider"] == "cloudflare"
     assert response["execution"]["provider_fallback"] is True
+    assert len(response["execution"]["executor_code_version"]) == 12
+    assert response["execution"]["executor_adapter_version"] == "unknown"
     output = capsys.readouterr().out
     assert '"container_memory_peak_mib":612.5' in output
     assert '"container_memory_sampled_peak_mib":700.0' in output
