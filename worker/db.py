@@ -608,7 +608,9 @@ def finish_job(conn, job_id, state, error=None, result=None,
     """
     with conn.cursor() as cur:
         lease_where = " AND total_claims = %s" if total_claims is not None else ""
-        params = [state, (error or None) and error_text.excerpt(error, 2000),
+        terminal_error = ((error or None)
+                          and error_text.excerpt(error, 2000))
+        params = [state, terminal_error,
                   Json(_json_safe(result)) if result is not None else None,
                   state, job_id]
         if total_claims is not None:
@@ -619,7 +621,22 @@ def finish_job(conn, job_id, state, error=None, result=None,
                             updated_at = NOW()
                         WHERE id = %s AND state = 'running'{lease_where}""",
                     tuple(params))
-        return cur.rowcount > 0
+        committed = cur.rowcount > 0
+    if (committed and total_claims is not None
+            and state in {"done", "failed"}
+            and remote_executions_table_ready(conn)):
+        # The executor can commit the queue result while its attached
+        # dispatcher is restarting or temporarily unable to reach Postgres.
+        # Close the provider ledger in the same transaction as the canonical
+        # job result so an already-finished call never looks indefinite.
+        with conn.cursor() as cur:
+            cur.execute("""UPDATE remote_executions
+                           SET state = %s, completed_at = NOW(),
+                               last_observed_at = NOW(), error = %s
+                           WHERE job_id = %s AND total_claims = %s
+                             AND state IN ('submitted', 'running')""",
+                        (state, terminal_error, job_id, total_claims))
+    return committed
 
 
 def completed_job_lease_matches(conn, job_id, total_claims):

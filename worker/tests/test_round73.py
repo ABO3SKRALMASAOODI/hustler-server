@@ -349,6 +349,20 @@ def test_terminal_result_strips_non_finite_metadata_without_mutating_runner():
         "the persistence guard must not rewrite the runner's live result"
 
 
+def test_terminal_job_atomically_closes_its_provider_ledger(monkeypatch):
+    monkeypatch.setattr(wdb, "remote_executions_table_ready", lambda _conn: True)
+    done = _Conn(rowcount=1)
+
+    assert wdb.finish_job(done, 42, "done", result={"ok": True},
+                          total_claims=7) is True
+
+    assert len(done.sql) == 2
+    ledger_sql, ledger_params = done.sql[1]
+    assert "UPDATE remote_executions" in ledger_sql
+    assert "state IN ('submitted', 'running')" in ledger_sql
+    assert ledger_params == ("done", None, 42, 7)
+
+
 @pytest.mark.skipif(not HAVE_FFMPEG, reason="needs ffmpeg")
 def test_cancellation_actually_kills_ffmpeg():
     """The point is the PROCESS dying, not an exception being raised.
