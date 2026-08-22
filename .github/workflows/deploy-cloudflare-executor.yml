@@ -1,8 +1,16 @@
 name: deploy-cloudflare-executor
 
-# Manual by design. Publishing the image does not route production traffic;
-# Render's CLOUDFLARE_EXECUTOR_PERCENT is the separate, reversible canary gate.
+# Keep the primary executor in lockstep with the dispatcher. Publishing does not
+# interrupt in-flight work; provider ownership is fenced in PostgreSQL and the
+# staged-rollout verifier waits for every Cloudflare lane to serve this source.
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - "worker/**"
+      - "backend/migrations/025_remote_executions.sql"
+      - ".github/workflows/deploy-cloudflare-executor.yml"
   workflow_dispatch: {}
 
 concurrency:

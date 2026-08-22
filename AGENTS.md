@@ -6,9 +6,9 @@ An **agentic AI video editor** (valmera.io). Users upload footage and chat with 
 - **Frontend** — Next.js 15 studio UI (chat + preview)
 - **Backend** — Flask API (auth, billing, credits, chat routes: `backend/routes/video.py`, `admin_video.py`)
 - **Worker** (`worker/`) — dispatcher: job queue, agent loop (LLM turns), faster-whisper indexing, credit charging (`worker/db.charge_turn_credits`)
-- **Executor** — Modal app `valmera-executor`; durable functions run the CPU-heavy ffmpeg index/preview/final renders and synchronous media tools, scale to zero. Cloud Run is an emergency launch fallback only.
+- **Executor** — Cloudflare Containers are primary for capacity-safe interactive, batch, agent, MCP, and Shorts lanes. Modal app `valmera-executor` is the fenced fallback for provider failures and synchronous operations that exceed Cloudflare's self-serve container limits. Cloud Run is an emergency launch fallback only.
 
-The old app-builder (`engine/AA.py`, `/auth/generate` routes) is retired but still deployed — never touch it.
+The retired app-builder has been removed. Do not recreate `engine/`, generated Vite-app jobs, template-clone flows, or `/auth/generate` compatibility routes.
 
 ## Hosting
 
@@ -16,7 +16,7 @@ The old app-builder (`engine/AA.py`, `/auth/generate` routes) is retired but sti
 |---|---|---|
 | Frontend | Vercel | `https://valmera.io` — auto-deploys on push to `main` |
 | Backend + Worker | Render | `https://entrepreneur-bot-backend.onrender.com` — auto-deploys on push to `main` (~3–5 min). Persistent 10GB disk at `/opt/render/project/src/outputs` |
-| Executor | Modal | app `valmera-executor`, environment `main`. Auto-deploys via `.github/workflows/deploy-modal-executor.yml` on pushes touching `worker/`; setup and verification are in `worker/MODAL_EXECUTOR.md`. Google Cloud Run is retained at min-instances 0 and deploys manually via `.github/workflows/deploy-executor.yml` only. |
+| Executor | Cloudflare + Modal fallback | Cloudflare Containers auto-deploy via `.github/workflows/deploy-cloudflare-executor.yml` on relevant `worker/` pushes and verify every lane's exact source fingerprint. Modal app `valmera-executor` auto-deploys in parallel as the fenced failure/heavy-operation fallback. Google Cloud Run is retained at min-instances 0 and deploys manually only. |
 | Database | Render managed PostgreSQL | via `$DATABASE_URL`; external URL at bottom of this file |
 | Email | Brevo | if emails stop: re-whitelist Render's IP (`74.220.48.3`) at `app.brevo.com/security/authorised_ips` |
 | Payments | Paddle | **live** (production mode) |
@@ -36,7 +36,7 @@ git config user.email "shmarymuslim@gmail.com"
 git add <files> && git commit -m "description" && git push origin main
 ```
 
-Frontend deploys via Vercel (~1–2 min — check the dashboard, SSR issues fail builds). Backend deploys via Render (~3–5 min). Modal executor functions deploy from `.github/workflows/deploy-modal-executor.yml` when `worker/` changes; the workflow verifies the deployed code fingerprint. Cloud Run fallback deploys manually only.
+Frontend deploys via Vercel (~1–2 min — check the dashboard, SSR issues fail builds). Backend deploys via Render (~3–5 min). Cloudflare and Modal executor workflows both deploy on relevant `worker/` changes and verify the exact deployed source fingerprint; Cloudflare remains primary and Modal remains the fenced failure/heavy-operation fallback. Cloud Run fallback deploys manually only.
 
 ## Database Access
 
