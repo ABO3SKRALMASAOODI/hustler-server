@@ -49,7 +49,7 @@ def test_unsubscribed_user_is_gated_immediately():
     assert video._subscribe_gate_applies(cur, 1) is True
     user_lookup = next(command for command in cur.commands
                        if "FROM users" in command)
-    assert "FOR UPDATE" in user_lookup
+    assert "FOR UPDATE" not in user_lookup
     assert not any("video_jobs" in command for command in cur.commands)
 
 
@@ -118,7 +118,7 @@ def test_offer_body_is_subscribe_not_trial():
     body = video._subscribe_offer_body()
     assert body["subscribe_offer"] is True
     assert body["trial_days"] == 0
-    assert body["code"] == "trial_offer"
+    assert body["code"] == "subscribe_required"
     by_id = {p["id"]: p for p in body["plans"]}
     assert by_id["ai"]["monthly"] == 15
     assert by_id["ai"]["credits"] == 1000

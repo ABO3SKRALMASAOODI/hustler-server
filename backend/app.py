@@ -21,18 +21,12 @@ from routes.admin_video import admin_video_bp
 from routes.onboarding import onboarding_bp
 from routes.mcp import mcp_bp
 from routes.mcp_oauth import mcp_oauth_bp
-from subscription_gate_hotfix import install_subscription_gate_hotfix
 
 load_dotenv()
 
 
 def create_app():
     app = Flask(__name__)
-
-    # Empty projects stay on the lightweight concierge path. The subscription
-    # wall begins once source media exists, while shorts and existing projects
-    # retain their current gate behavior.
-    install_subscription_gate_hotfix()
 
     CORS(app,
          origins="*",

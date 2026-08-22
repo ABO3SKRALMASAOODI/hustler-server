@@ -619,8 +619,13 @@ def _subscribe_gate_applies(cur, user_id):
     try:
         cur.execute("SAVEPOINT subscribe_gate_lookup")
         savepoint = True
-        cur.execute("SELECT is_subscribed, email FROM users WHERE id = %s "
-                    "FOR UPDATE",
+        # This predicate is also used by the Studio's read-only state poll.
+        # Do not lock the account row: the checkout/webhook path is the
+        # authority and a transient pre-commit read may safely return the
+        # wall once more, while a FOR UPDATE here made every 2-second poll
+        # contend with billing writes (and made event inserts on a second
+        # connection wait behind our own transaction).
+        cur.execute("SELECT is_subscribed, email FROM users WHERE id = %s",
                     (int(user_id),))
         u = cur.fetchone()
         if not u or u["is_subscribed"]:
@@ -646,6 +651,52 @@ def _subscribe_gate_applies(cur, user_id):
 
 # Older tests monkeypatch this name.
 _trial_gate_applies = _subscribe_gate_applies
+
+
+_UPLOAD_SUBSCRIPTION_MESSAGE = (
+    "I received your video. Upgrade to start editing it."
+)
+
+
+def _record_upload_subscription_lock(cur, session_id, asset_id):
+    """Persist one deterministic chat wall for one uploaded main video.
+
+    The project row is locked by every caller before this helper runs, so the
+    check/insert pair is idempotent across upload retries and overlapping tabs.
+    This is deliberately a database write only: no model or executor is
+    involved in acknowledging a free account's completed upload.
+    """
+    cur.execute("""SELECT id FROM chat_messages
+                   WHERE session_id = %s AND role = 'assistant'
+                     AND meta->>'kind' = 'subscription_required'
+                     AND meta->>'asset_id' = %s
+                   ORDER BY id DESC LIMIT 1""",
+                (session_id, str(asset_id)))
+    existing = cur.fetchone()
+    if existing:
+        return existing["id"]
+    cur.execute("""INSERT INTO chat_messages (session_id, role, content, meta)
+                   VALUES (%s, 'assistant', %s, %s) RETURNING id""",
+                (session_id, _UPLOAD_SUBSCRIPTION_MESSAGE,
+                 Json({"kind": "subscription_required",
+                       "subscribe_required": True,
+                       "subscribe_gate": True,
+                       "asset_id": str(asset_id)})))
+    return cur.fetchone()["id"]
+
+
+def _upload_subscription_payload(asset_id, message_id):
+    """Fields appended to a successful-but-locked upload response."""
+    offer = dict(_subscribe_offer_body())
+    offer.pop("error", None)
+    return {
+        "subscribe_gated": True,
+        "subscription_message_id": message_id,
+        "subscription_message": _UPLOAD_SUBSCRIPTION_MESSAGE,
+        "offer": offer,
+        "asset_id": asset_id,
+        "index_job_id": None,
+    }
 
 
 def _export_edl_error(edl, source_duration=None):
@@ -1257,12 +1308,22 @@ def create_upload(user_id, project_id):
 
     with vdb() as conn:
         cur = conn.cursor()
-        if not _project_for_user(cur, project_id, user_id):
+        project = _project_for_user(cur, project_id, user_id)
+        if not project:
             return jsonify({"error": "Project not found"}), 404
-        # DELIBERATELY UNGATED (round 49) — uploading and indexing are the
-        # demo. The cost of an index is ours to spend on someone deciding
-        # whether to buy; the cost of an agent turn is not, and that is where
-        # the gate now stands.
+        # The first source upload is the conversion proof: accept its bytes,
+        # persist it, and acknowledge it in chat without booting an executor.
+        # Once that proof exists, stop before minting another presigned URL.
+        # This makes a dismissed card cheap and idempotent instead of allowing
+        # repeated multi-GB transfers while the account remains locked.
+        cur.execute("""SELECT 1 FROM assets
+                       WHERE project_id = %s AND kind = 'original'
+                       LIMIT 1""", (project_id,))
+        if cur.fetchone() and _subscribe_gate_applies(cur, user_id):
+            body = dict(_subscribe_offer_body())
+            body["error"] = _UPLOAD_SUBSCRIPTION_MESSAGE
+            body["subscribe_gated"] = True
+            return jsonify(body), 402
 
     key = storage.new_original_key(project_id, ext, kind)
     try:
@@ -1357,6 +1418,11 @@ def dedup_upload(user_id, project_id):
             cur = conn.cursor()
             if not _project_for_user(cur, project_id, user_id):
                 return jsonify({"error": "Project not found"}), 404
+            # A dedup hit relies on the index worker to copy the old object to
+            # the new key. Free accounts intentionally start no worker jobs,
+            # so they must take the ordinary upload path and land real bytes.
+            if _subscribe_gate_applies(cur, user_id):
+                return jsonify({"dedup": False})
             cur.execute("""SELECT a.id, a.storage_key, a.bytes, a.duration_s,
                                   a.width, a.height, a.fps, a.meta
                            FROM assets a JOIN projects p ON p.id = a.project_id
@@ -1499,7 +1565,7 @@ _ORIGINAL_DRIFT_TOLERANCE_S = 5.0
 
 def _register_deferred_original(user_id, project_id, key, filename, declared,
                                 client_proxy_key, proxy_bytes, data):
-    """Create the original asset for a proxy-first upload and start indexing.
+    """Create the original asset for a proxy-first upload.
 
     The asset's `storage_key` points at an object that DOES NOT EXIST YET. That
     is the whole trick, and it is why `meta.upload_state` is load-bearing:
@@ -1519,8 +1585,10 @@ def _register_deferred_original(user_id, project_id, key, filename, declared,
 
     with vdb() as conn:
         cur = conn.cursor()
-        cur.execute("SELECT id FROM projects WHERE id = %s FOR UPDATE",
+        cur.execute("SELECT id, chat_session_id FROM projects "
+                    "WHERE id = %s FOR UPDATE",
                     (project_id,))
+        project = cur.fetchone()
         cur.execute("""SELECT id, kind FROM assets
                        WHERE project_id = %s AND storage_key = %s
                        ORDER BY id DESC LIMIT 1""", (project_id, key))
@@ -1546,9 +1614,16 @@ def _register_deferred_original(user_id, project_id, key, filename, declared,
                            "client_proxy_bytes": proxy_bytes,
                            "declared_bytes": declared})))
         asset_id = cur.fetchone()["id"]
-        job_id = _enqueue(cur, project_id, user_id, "index",
-                          {"asset_id": asset_id,
-                           "client_proxy_key": client_proxy_key})
+        subscribe_gated = _subscribe_gate_applies(cur, user_id)
+        message_id = None
+        if subscribe_gated:
+            message_id = _record_upload_subscription_lock(
+                cur, project["chat_session_id"], asset_id)
+            job_id = None
+        else:
+            job_id = _enqueue(cur, project_id, user_id, "index",
+                              {"asset_id": asset_id,
+                               "client_proxy_key": client_proxy_key})
     record_client_event(user_id, project_id, "upload_proxy_first", detail={
         "filename": filename, "bytes": declared, "proxy_bytes": proxy_bytes,
         "duration_s": duration_s}, origin="server")
@@ -1560,8 +1635,15 @@ def _register_deferred_original(user_id, project_id, key, filename, declared,
         "staged": False, "bytes": declared, "original_pending": True,
         "proxy_bytes": proxy_bytes,
     }, origin="server")
-    return {"asset_id": asset_id, "index_job_id": job_id, "kind": "original",
-            "original_pending": True}, 200
+    result = {"asset_id": asset_id, "index_job_id": job_id,
+              "kind": "original", "original_pending": True}
+    if subscribe_gated:
+        result.update(_upload_subscription_payload(asset_id, message_id))
+        record_client_event(
+            user_id, project_id, "subscription_upload_locked",
+            detail={"asset_id": asset_id, "surface": "upload",
+                    "original_pending": True}, origin="server")
+    return result, 200
 
 
 def complete_upload_core(user_id, project_id, data):
@@ -1625,8 +1707,11 @@ def complete_upload_core(user_id, project_id, data):
 
     with vdb() as conn:
         cur = conn.cursor()
-        if not _project_for_user(cur, project_id, user_id):
+        project = _project_for_user(cur, project_id, user_id)
+        if not project:
             return {"error": "Project not found"}, 404
+        cur.execute("SELECT id FROM projects WHERE id = %s FOR UPDATE",
+                    (project_id,))
 
         # Idempotency FIRST: this POST is the single point where a finished
         # multi-GB upload becomes a real asset, so the client retries it on
@@ -1645,11 +1730,18 @@ def complete_upload_core(user_id, project_id, data):
                            ORDER BY id DESC LIMIT 1""",
                         (project_id, dup["id"]))
             ij = cur.fetchone()
-            return {"asset_id": dup["id"],
-                    "index_job_id": ij["id"] if ij else None,
-                    "kind": dup["kind"], "duplicate": True}, 200
+            result = {"asset_id": dup["id"],
+                      "index_job_id": ij["id"] if ij else None,
+                      "kind": dup["kind"], "duplicate": True}
+            if (dup["kind"] == "original"
+                    and _subscribe_gate_applies(cur, user_id)):
+                message_id = _record_upload_subscription_lock(
+                    cur, project["chat_session_id"], dup["id"])
+                result.update(_upload_subscription_payload(
+                    dup["id"], message_id))
+            return result, 200
 
-        if kind == "original" and \
+        if kind == "original" and not _subscribe_gate_applies(cur, user_id) and \
                 _running_jobs_count(cur, user_id) >= MAX_CONCURRENT_JOBS_PER_USER:
             return {"error": "Too many jobs running. "
                              "Wait for one to finish."}, 429
@@ -1765,8 +1857,10 @@ def complete_upload_core(user_id, project_id, data):
         # storage_key to lean on, so serialize per project: lock the project
         # row and re-check under the lock before inserting — otherwise the
         # race lands a duplicate asset AND a duplicate 16-45 min index job.
-        cur.execute("SELECT id FROM projects WHERE id = %s FOR UPDATE",
+        cur.execute("SELECT id, chat_session_id FROM projects "
+                    "WHERE id = %s FOR UPDATE",
                     (project_id,))
+        project = cur.fetchone()
         cur.execute("""SELECT id, kind FROM assets
                        WHERE project_id = %s AND storage_key = %s
                        ORDER BY id DESC LIMIT 1""", (project_id, key))
@@ -1778,9 +1872,16 @@ def complete_upload_core(user_id, project_id, data):
                            ORDER BY id DESC LIMIT 1""",
                         (project_id, dup["id"]))
             ij = cur.fetchone()
-            return {"asset_id": dup["id"],
-                    "index_job_id": ij["id"] if ij else None,
-                    "kind": dup["kind"], "duplicate": True}, 200
+            result = {"asset_id": dup["id"],
+                      "index_job_id": ij["id"] if ij else None,
+                      "kind": dup["kind"], "duplicate": True}
+            if (dup["kind"] == "original"
+                    and _subscribe_gate_applies(cur, user_id)):
+                message_id = _record_upload_subscription_lock(
+                    cur, project["chat_session_id"], dup["id"])
+                result.update(_upload_subscription_payload(
+                    dup["id"], message_id))
+            return result, 200
         meta = {"filename": filename}
         if staged:
             meta["staged"] = True
@@ -1806,10 +1907,15 @@ def complete_upload_core(user_id, project_id, data):
                      Json(meta)))
         asset_id = cur.fetchone()["id"]
         job_id = None
-        if kind == "original" and not staged:
+        account_gated = _subscribe_gate_applies(cur, user_id)
+        message_id = None
+        if kind == "original" and not staged and account_gated:
+            message_id = _record_upload_subscription_lock(
+                cur, project["chat_session_id"], asset_id)
+        elif kind == "original" and not staged:
             job_id = _enqueue(cur, project_id, user_id, "index",
                               {"asset_id": asset_id})
-        elif not staged and kind in ("clip", "music"):
+        elif not staged and kind in ("clip", "music") and not account_gated:
             # Direct timeline/library drops do not pass through submit_tray,
             # but they need the same durable perception pass as submitted
             # attachments. Without this, a directly dropped clip stayed
@@ -1825,8 +1931,15 @@ def complete_upload_core(user_id, project_id, data):
         "asset_id": asset_id, "index_job_id": job_id, "kind": asset_kind,
         "staged": staged, "bytes": nbytes,
     }, origin="server")
-    return {"asset_id": asset_id, "index_job_id": job_id,
-            "kind": asset_kind, "staged": staged}, 200
+    result = {"asset_id": asset_id, "index_job_id": job_id,
+              "kind": asset_kind, "staged": staged}
+    if message_id is not None:
+        result.update(_upload_subscription_payload(asset_id, message_id))
+        record_client_event(
+            user_id, project_id, "subscription_upload_locked",
+            detail={"asset_id": asset_id, "surface": "upload"},
+            origin="server")
+    return result, 200
 
 
 @video_bp.route("/projects/<int:project_id>/uploads/complete", methods=["POST"])
@@ -2088,6 +2201,8 @@ def tray_submit(user_id, project_id):
             }), 400
         promoted, promoted_idx = None, -1
         main_index_job = None
+        locked_message_id = None
+        account_gated = _subscribe_gate_applies(cur, user_id)
         if not original:
             promoted_idx, promoted = next(
                 ((i, a) for i, a in enumerate(ordered)
@@ -2105,8 +2220,9 @@ def tray_submit(user_id, project_id):
                 _asset_meta_patch(cur, a["id"],
                                   {"staged": None, "tray_place": None,
                                    "placed": None, "role": "edit_reference"})
-                if a["kind"] == "video_clip" and not _index_job_for_asset(
-                        cur, project_id, a["id"]):
+                if (not account_gated and a["kind"] == "video_clip"
+                        and not _index_job_for_asset(
+                            cur, project_id, a["id"])):
                     jobs.append(_enqueue(cur, project_id, user_id, "index",
                                          {"asset_id": a["id"]}))
                 continue
@@ -2117,9 +2233,14 @@ def tray_submit(user_id, project_id):
                                WHERE id = %s""", (a["id"],))
                 _asset_meta_patch(cur, a["id"],
                                   {"staged": None, "tray_place": None})
-                main_index_job = _enqueue(cur, project_id, user_id, "index",
-                                          {"asset_id": a["id"]})
-                jobs.append(main_index_job)
+                if account_gated:
+                    locked_message_id = _record_upload_subscription_lock(
+                        cur, session_id, a["id"])
+                else:
+                    main_index_job = _enqueue(
+                        cur, project_id, user_id, "index",
+                        {"asset_id": a["id"]})
+                    jobs.append(main_index_job)
                 continue
             patch = {"staged": None}
             if a["kind"] in ("video_clip", "image_ref") and autoplace:
@@ -2128,7 +2249,7 @@ def tray_submit(user_id, project_id):
                     "order": i, "before_main": before_main,
                     "duration_s": a.get("duration_s")}
             _asset_meta_patch(cur, a["id"], patch)
-            if a["kind"] in ("video_clip", "music"):
+            if not account_gated and a["kind"] in ("video_clip", "music"):
                 # The same perception pass as the main footage — filmstrip
                 # + transcript, keyed by sha. Idempotent per asset.
                 if not _index_job_for_asset(cur, project_id, a["id"]):
@@ -2191,13 +2312,21 @@ def tray_submit(user_id, project_id):
                         (session_id,
                          "Got your uploads — " + what + ".",
                          Json({"kind": "tray_submitted"})))
-    return jsonify({"ok": True, "submitted": n,
-                    "references": len(reference_ids),
-                    "promoted_asset_id":
-                        promoted["id"] if promoted is not None else None,
-                    "main_index_job_id": main_index_job,
-                    "placed_version": placed_version,
-                    "index_jobs": jobs})
+    result = {"ok": True, "submitted": n,
+              "references": len(reference_ids),
+              "promoted_asset_id":
+                  promoted["id"] if promoted is not None else None,
+              "main_index_job_id": main_index_job,
+              "placed_version": placed_version,
+              "index_jobs": jobs}
+    if locked_message_id is not None:
+        result.update(_upload_subscription_payload(
+            promoted["id"], locked_message_id))
+        record_client_event(
+            user_id, project_id, "subscription_upload_locked",
+            detail={"asset_id": promoted["id"], "surface": "tray"},
+            origin="server")
+    return jsonify(result)
 
 
 def _pending_original(cur, project_id, asset_id):
@@ -2339,8 +2468,9 @@ def original_upload_ready(user_id, project_id):
         cur.execute("SELECT user_id, meta FROM projects WHERE id = %s",
                     (project_id,))
         prow = cur.fetchone()
+        account_gated = _subscribe_gate_applies(cur, user_id)
         shorts_meta = ((prow or {}).get("meta") or {}).get("shorts") or {}
-        if shorts_meta.get("finals_deferred"):
+        if not account_gated and shorts_meta.get("finals_deferred"):
             cur.execute("""UPDATE assets SET meta = meta || %s
                            WHERE kind = 'original' AND storage_key = %s
                              AND project_id IN (SELECT id FROM projects
@@ -2372,7 +2502,7 @@ def original_upload_ready(user_id, project_id):
                 print(f"[uploads] project {project_id}: original landed — "
                       f"released {released} deferred short export(s)",
                       flush=True)
-        if drift:
+        if drift and not account_gated:
             # Re-index from the ORIGINAL. No client_proxy_key on the payload,
             # so the indexer takes the ordinary trusted path — which is the
             # same self-healing rule the worker already applies whenever the
@@ -2392,7 +2522,9 @@ def original_upload_ready(user_id, project_id):
         origin="server")
     return jsonify({"asset_id": asset_id, "upload_state": "ready",
                     "bytes": nbytes,
-                    **({"reindexing": True} if drift else {})}), 200
+                    "subscribe_gated": account_gated,
+                    **({"reindexing": True}
+                       if drift and not account_gated else {})}), 200
 
 
 # ------------------------------------------------------------------ #
@@ -2623,6 +2755,8 @@ def project_state(user_id, project_id):
         original = _active_original(cur, project_id)
         idx_row = _index_row(cur, original["sha256"]) if original else None
         indexed = bool(idx_row)
+        subscription_locked = bool(
+            original and _subscribe_gate_applies(cur, user_id))
         edl = _latest_edl(cur, project_id)
 
         # SELF-HEAL: the current edit must always have a render on the way.
@@ -2677,7 +2811,9 @@ def project_state(user_id, project_id):
             agent_orphaned = _agent_version_orphaned(
                 lanes.get("agent_turn"), lanes.get("mcp_tool"),
                 bool(aged_row and aged_row["aged"]))
-        if _should_heal_preview(edl, indexed, drafting, agent_orphaned):
+        if (not subscription_locked
+                and _should_heal_preview(edl, indexed, drafting,
+                                         agent_orphaned)):
             cur.execute("""SELECT 1 FROM video_jobs
                            WHERE project_id = %s AND type = 'preview'
                              AND (payload->>'edl_version')::int = %s
@@ -2754,7 +2890,8 @@ def project_state(user_id, project_id):
         # have edits), while a heal of a never-successful index is the user's
         # FIRST analysis and should greet normally when it lands.
         is_reindex = False
-        if idx_row and idx_row.get("pipeline_version", 1) != PIPELINE_VERSION:
+        if (not subscription_locked and idx_row
+                and idx_row.get("pipeline_version", 1) != PIPELINE_VERSION):
             heal_reason = (f"pipeline v{idx_row.get('pipeline_version')} != "
                            f"v{PIPELINE_VERSION}")
             is_reindex = True
@@ -2763,9 +2900,11 @@ def project_state(user_id, project_id):
         # test would re-enqueue every healthy project forever — and every
         # genuinely blind pre-v10 row is already caught by the pipeline
         # mismatch above.
-        elif original and not idx_row and ij and ij["state"] == "failed":
+        elif (not subscription_locked and original and not idx_row
+              and ij and ij["state"] == "failed"):
             heal_reason = "last index job failed"
-        elif original and idx_row and ij and ij["state"] == "failed":
+        elif (not subscription_locked and original and idx_row
+              and ij and ij["state"] == "failed"):
             # A shared-sha index row (another project indexed the same file)
             # can exist while THIS project's setup died mid-cache-hit — sha
             # set, "indexed" true, but no proxy/EDL of its own, so its player
@@ -2777,6 +2916,12 @@ def project_state(user_id, project_id):
                         (project_id, original["sha256"]))
             if not cur.fetchone():
                 heal_reason = "index cache-hit setup incomplete (no proxy)"
+        elif (not subscription_locked and original and not idx_row
+              and not ij):
+            # Uploads made before checkout deliberately have no job. The first
+            # state poll after Paddle activates the account releases exactly
+            # one analysis job without asking the user to re-upload.
+            heal_reason = "subscription unlocked; analysis not started"
         if heal_reason and not idx_active:
             # Serialize with concurrent polls (two tabs on one project): both
             # could pass the checks above and burn the whole heal budget on
@@ -2922,6 +3067,9 @@ def project_state(user_id, project_id):
         "video": _asset_out(original) if original else None,
         "proxy_asset_id": proxy["id"] if proxy else None,
         "indexed": indexed,
+        "subscribe_gated": subscription_locked,
+        "subscription_offer": (_subscribe_offer_body()
+                               if subscription_locked else None),
         "jobs": jobs,
         "messages": [
             {"id": r["id"], "role": r["role"], "content": r["content"],
@@ -3092,17 +3240,40 @@ def post_message(user_id, project_id):
         original = _active_original(cur, project_id)
         indexed = bool(original and _index_row(cur, original["sha256"]))
 
-        # THE SUBSCRIBE GATE — no free edit. Unsubscribed accounts get
-        # subscription cards on send. The blocked message is NOT persisted:
-        # closing the cards and resending shows them again. Active trials
-        # pass because they are subscribed.
-        if _subscribe_gate_applies(cur, user_id):
+        # THE SUBSCRIBE GATE — empty projects keep the lightweight concierge;
+        # the wall becomes authoritative once a main upload exists. The
+        # blocked text is intentionally not persisted and no model or executor
+        # work is started. The upload acknowledgement itself was persisted by
+        # complete_upload_core, so chat still contains the honest next step.
+        if original and _subscribe_gate_applies(cur, user_id):
             record_client_event(user_id, project_id, "trial_gate_shown",
                                 detail={"message_chars": len(text),
                                         "subscribe_offer": True,
                                         "surface": "chat"},
                                 origin="server")
             return jsonify(_subscribe_offer_body()), 402
+
+        # The account may have upgraded after uploading. No index job existed
+        # while it was locked, so the first post-upgrade request becomes the
+        # durable auto-resume prompt and starts analysis exactly once.
+        if original and not indexed:
+            cur.execute("""SELECT id FROM video_jobs
+                           WHERE project_id = %s AND type = 'index'
+                             AND state IN ('queued','running')
+                           ORDER BY id DESC LIMIT 1""", (project_id,))
+            live_index = cur.fetchone()
+            if not live_index:
+                if (_running_jobs_count(cur, user_id)
+                        >= MAX_CONCURRENT_JOBS_PER_USER):
+                    return jsonify({
+                        "error": "You have a few jobs still processing — "
+                                 "I'll start this video as soon as one "
+                                 "finishes.",
+                        "code": "busy_capacity"}), 429
+                _enqueue(cur, project_id, user_id, "index",
+                         {"asset_id": original["id"],
+                          "subscription_unlocked": True})
+            defer_until_index = True
 
         # The plan gate — round 50: "this account has spent its 50 free
         # credits and holds no plan". It hangs off `indexed` for the SAME
@@ -5197,7 +5368,14 @@ CLIENT_EVENT_KINDS = {"player_error", "player_error_probe",
                       # a server returning 402: the latter cannot prove that a
                       # modal reached the DOM or that a person acted on it.
                       "trial_gate_impression", "trial_gate_dismissed",
-                      "trial_gate_plan_selected"}
+                      "trial_gate_plan_selected",
+                      # Authoritative no-spend upload wall. Unlike the legacy
+                      # trial_* events, this says the original landed but no
+                      # index/render/agent work was started.
+                      "subscription_upload_locked",
+                      "subscription_cards_impression",
+                      "subscription_cards_dismissed",
+                      "subscription_cards_plan_selected"}
 
 # The kinds that mean "a user tried to give us a video and we did not take it".
 # Surfaced in admin on their own rather than mixed into the rest, because these
@@ -5603,52 +5781,95 @@ def shorts_board(user_id, project_id):
         finals, renders, previews, alive = {}, {}, {}, {}
         editor_jobs, mcp_jobs, latest_versions = {}, {}, {}
         if child_ids:
-            cur.execute("""SELECT DISTINCT ON (project_id)
-                                  project_id, id, state, progress, error
-                           FROM video_jobs
-                           WHERE project_id = ANY(%s)
-                             AND type = 'agent_turn'
-                             AND payload->>'shorts_boot' = 'true'
-                           ORDER BY project_id, id DESC""", (child_ids,))
-            editor_jobs = {r["project_id"]: r for r in cur.fetchall()}
-            cur.execute("""SELECT DISTINCT ON (project_id)
-                                  project_id, id, state, progress, error
-                           FROM video_jobs
-                           WHERE project_id = ANY(%s) AND type = 'mcp_tool'
-                           ORDER BY project_id, id DESC""", (child_ids,))
-            mcp_jobs = {r["project_id"]: r for r in cur.fetchall()}
-            cur.execute("""SELECT DISTINCT ON (project_id)
-                                  project_id, version
-                           FROM edls WHERE project_id = ANY(%s)
-                           ORDER BY project_id, version DESC""", (child_ids,))
-            latest_versions = {r["project_id"]: int(r["version"])
-                               for r in cur.fetchall()}
-            cur.execute("""SELECT DISTINCT ON (project_id)
-                                  project_id, state, progress, error
-                           FROM video_jobs
-                           WHERE project_id = ANY(%s) AND type = 'final'
-                           ORDER BY project_id, id DESC""", (child_ids,))
-            finals = {r["project_id"]: r for r in cur.fetchall()}
-            cur.execute("""SELECT DISTINCT ON (project_id) project_id, id,
-                                  meta->>'sheet_key' AS sheet_key
-                           FROM assets
-                           WHERE project_id = ANY(%s) AND kind = 'render'
-                             AND meta->>'variant' = 'final'
-                           ORDER BY project_id, id DESC""", (child_ids,))
-            renders = {r["project_id"]: r for r in cur.fetchall()}
-            cur.execute("""SELECT DISTINCT ON (project_id) project_id, id,
-                                  meta->>'sheet_key' AS sheet_key,
-                                  CASE WHEN meta->>'edl_version' ~ '^[0-9]+$'
-                                       THEN (meta->>'edl_version')::int
-                                       ELSE NULL END AS edl_version
-                           FROM assets
-                           WHERE project_id = ANY(%s) AND kind = 'render'
-                             AND meta->>'variant' = 'preview'
-                           ORDER BY project_id, id DESC""", (child_ids,))
-            previews = {r["project_id"]: r for r in cur.fetchall()}
-            cur.execute("SELECT id, title FROM projects WHERE id = ANY(%s)",
-                        (child_ids,))
-            alive = {r["id"]: r["title"] for r in cur.fetchall()}
+            # One board poll used to issue seven sequential child queries.
+            # That made a forty-card Shorts rail pay seven database round trips
+            # every time the UI refreshed even though every lookup is simply
+            # "latest row for this child". Indexed lateral probes return the
+            # identical snapshot in one request and keep deleted children out.
+            cur.execute("""
+                SELECT c.id AS project_id, c.title,
+                       edl.version AS edl_version,
+                       boot.id AS boot_id, boot.state AS boot_state,
+                       boot.progress AS boot_progress,
+                       boot.error AS boot_error,
+                       mcp.id AS mcp_id, mcp.state AS mcp_state,
+                       mcp.progress AS mcp_progress,
+                       mcp.error AS mcp_error,
+                       fin.state AS final_state,
+                       fin.progress AS final_progress,
+                       fin.error AS final_error,
+                       final_render.id AS final_asset_id,
+                       final_render.sheet_key AS final_sheet_key,
+                       preview.id AS preview_asset_id,
+                       preview.sheet_key AS preview_sheet_key,
+                       preview.edl_version AS preview_edl_version
+                FROM projects c
+                LEFT JOIN LATERAL (
+                    SELECT version FROM edls
+                    WHERE project_id = c.id ORDER BY version DESC LIMIT 1
+                ) edl ON TRUE
+                LEFT JOIN LATERAL (
+                    SELECT id, state, progress, error FROM video_jobs
+                    WHERE project_id = c.id AND type = 'agent_turn'
+                      AND payload->>'shorts_boot' = 'true'
+                    ORDER BY id DESC LIMIT 1
+                ) boot ON TRUE
+                LEFT JOIN LATERAL (
+                    SELECT id, state, progress, error FROM video_jobs
+                    WHERE project_id = c.id AND type = 'mcp_tool'
+                    ORDER BY id DESC LIMIT 1
+                ) mcp ON TRUE
+                LEFT JOIN LATERAL (
+                    SELECT state, progress, error FROM video_jobs
+                    WHERE project_id = c.id AND type = 'final'
+                    ORDER BY id DESC LIMIT 1
+                ) fin ON TRUE
+                LEFT JOIN LATERAL (
+                    SELECT id, meta->>'sheet_key' AS sheet_key
+                    FROM assets WHERE project_id = c.id AND kind = 'render'
+                      AND meta->>'variant' = 'final'
+                    ORDER BY id DESC LIMIT 1
+                ) final_render ON TRUE
+                LEFT JOIN LATERAL (
+                    SELECT id, meta->>'sheet_key' AS sheet_key,
+                           CASE WHEN meta->>'edl_version' ~ '^[0-9]+$'
+                                THEN (meta->>'edl_version')::int
+                                ELSE NULL END AS edl_version
+                    FROM assets WHERE project_id = c.id AND kind = 'render'
+                      AND meta->>'variant' = 'preview'
+                    ORDER BY id DESC LIMIT 1
+                ) preview ON TRUE
+                WHERE c.id = ANY(%s)
+            """, (child_ids,))
+            for row in cur.fetchall():
+                cid = row["project_id"]
+                alive[cid] = row["title"]
+                if row.get("edl_version") is not None:
+                    latest_versions[cid] = int(row["edl_version"])
+                if row.get("boot_id") is not None:
+                    editor_jobs[cid] = {
+                        "id": row["boot_id"], "state": row["boot_state"],
+                        "progress": row["boot_progress"],
+                        "error": row["boot_error"]}
+                if row.get("mcp_id") is not None:
+                    mcp_jobs[cid] = {
+                        "id": row["mcp_id"], "state": row["mcp_state"],
+                        "progress": row["mcp_progress"],
+                        "error": row["mcp_error"]}
+                if row.get("final_state") is not None:
+                    finals[cid] = {
+                        "state": row["final_state"],
+                        "progress": row["final_progress"],
+                        "error": row["final_error"]}
+                if row.get("final_asset_id") is not None:
+                    renders[cid] = {
+                        "id": row["final_asset_id"],
+                        "sheet_key": row["final_sheet_key"]}
+                if row.get("preview_asset_id") is not None:
+                    previews[cid] = {
+                        "id": row["preview_asset_id"],
+                        "sheet_key": row["preview_sheet_key"],
+                        "edl_version": row["preview_edl_version"]}
 
         out = []
         for c in clips:
@@ -5744,18 +5965,22 @@ def shorts_board(user_id, project_id):
         # "don't show the original as a separate thing"): one card, clearly
         # badged Original, playable from the parent's newest preview render.
         original = None
-        orig_asset = _active_original(cur, project_id)
+        cur.execute("""SELECT a.duration_s,
+                              (SELECT id FROM assets pr
+                               WHERE pr.project_id = a.project_id
+                                 AND pr.kind = 'render'
+                                 AND pr.meta->>'variant' = 'preview'
+                               ORDER BY pr.id DESC LIMIT 1) AS preview_asset_id
+                       FROM assets a
+                       WHERE a.project_id = %s AND a.kind = 'original'
+                       ORDER BY a.id DESC LIMIT 1""", (project_id,))
+        orig_asset = cur.fetchone()
         if orig_asset:
-            cur.execute("""SELECT id FROM assets
-                           WHERE project_id = %s AND kind = 'render'
-                             AND meta->>'variant' = 'preview'
-                           ORDER BY id DESC LIMIT 1""", (project_id,))
-            prev = cur.fetchone()
             original = {
                 "title": p.get("title"),
                 "duration_s": (float(orig_asset.get("duration_s"))
                                if orig_asset.get("duration_s") else None),
-                "preview_asset_id": prev["id"] if prev else None,
+                "preview_asset_id": orig_asset.get("preview_asset_id"),
             }
         return jsonify({
             "status": status, "job": job, "clips": out,

@@ -152,7 +152,7 @@ def subscribe_offer_body():
             "credits": PLAN_MONTHLY_LIMITS.get(pid)})
     return {
         "error": "Subscribe to start editing. Cancel anytime.",
-        "code": "trial_offer", "trial_offer": True,
+        "code": "subscribe_required", "trial_offer": True,
         "subscribe_offer": True, "trial_days": 0, "plans": plans}
 
 # ── Core conversion (model-aware) ─────────────────────────────────────────────

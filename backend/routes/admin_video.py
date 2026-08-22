@@ -11,6 +11,7 @@ llm_calls payloads are capped + key-redacted by the worker before storage.
 """
 
 import os
+from contextlib import contextmanager
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -41,9 +42,26 @@ PRICE_FALLBACK = {"in": PRICE_IN_PER_M, "cached_in": PRICE_CACHED_IN_PER_M,
                   "out": PRICE_OUT_PER_M, "reasoning_separate": False}
 
 
+@contextmanager
 def adb():
-    return psycopg2.connect(current_app.config["DATABASE_URL"],
+    """Admin database transaction with deterministic connection cleanup.
+
+    psycopg2's connection context commits/rolls back but does not close. The
+    former `with adb() as conn` therefore depended on ref-counting after every
+    large dashboard request; slow/error paths accumulated idle backends while
+    the next refresh opened another. Mirror the video route's explicit vdb
+    lifecycle so reads and admin writes both release their slot immediately.
+    """
+    conn = psycopg2.connect(current_app.config["DATABASE_URL"],
                             cursor_factory=RealDictCursor)
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def _row_cost(alias=""):
@@ -519,55 +537,69 @@ def video_quality_scorecard():
 @admin_video_bp.route("/admin/video/overview", methods=["GET"])
 @admin_required
 def video_overview():
+    summary_only = request.args.get("summary") == "1"
     with adb() as conn:
         cur = conn.cursor()
 
-        cur.execute(f"""
-            SELECT u.id, u.email,
-                   COUNT(DISTINCT p.id) AS projects,
-                   COALESCE(m.msgs, 0) AS messages,
-                   COALESCE(j.done, 0) AS jobs_done,
-                   COALESCE(j.failed, 0) AS jobs_failed,
-                   COALESCE(j.active, 0) AS jobs_active,
-                   COALESCE(a.bytes, 0) AS storage_bytes,
-                   COALESCE(l.tokens_in, 0) AS tokens_in,
-                   COALESCE(l.tokens_out, 0) AS tokens_out,
-                   COALESCE(l.est_cost, 0) AS est_cost,
-                   GREATEST(COALESCE(j.last, to_timestamp(0)),
-                            COALESCE(m.last, to_timestamp(0))) AS last_active
-            FROM users u
-            JOIN projects p ON p.user_id = u.id
-            LEFT JOIN (SELECT p2.user_id, COUNT(*) AS msgs,
-                              MAX(cm.created_at) AS last
-                       FROM chat_messages cm
-                       JOIN projects p2 ON p2.chat_session_id = cm.session_id
-                       WHERE cm.role = 'user'
-                       GROUP BY p2.user_id) m ON m.user_id = u.id
-            LEFT JOIN (SELECT user_id,
-                              COUNT(*) FILTER (WHERE state='done') AS done,
-                              COUNT(*) FILTER (WHERE state='failed') AS failed,
-                              COUNT(*) FILTER (WHERE state IN
-                                               ('queued','running')) AS active,
-                              MAX(updated_at) AS last
-                       FROM video_jobs GROUP BY user_id) j ON j.user_id = u.id
-            LEFT JOIN (SELECT p3.user_id, SUM(ast.bytes)::bigint AS bytes
-                       FROM assets ast
-                       JOIN projects p3 ON p3.id = ast.project_id
-                       GROUP BY p3.user_id) a ON a.user_id = u.id
-            LEFT JOIN (SELECT p4.user_id,
-                              SUM(lc.prompt_tokens) AS tokens_in,
-                              SUM(lc.completion_tokens) AS tokens_out,
-                              """ + _cost_expr("lc") + """ AS est_cost
-                       FROM llm_calls lc
-                       JOIN projects p4 ON p4.id = lc.project_id
-                       GROUP BY p4.user_id) l ON l.user_id = u.id
-            GROUP BY u.id, u.email, m.msgs, j.done, j.failed, j.active,
-                     a.bytes, l.tokens_in, l.tokens_out, l.est_cost,
-                     j.last, m.last
-            ORDER BY last_active DESC NULLS LAST
-            LIMIT 200
-        """)
-        users = cur.fetchall()
+        # Paint the operator's first screen from one narrow scan. The detailed
+        # overview follows asynchronously in the Studio admin; making health
+        # wait behind model-cost JSON, stage percentiles and a 200-person table
+        # turned a liveness check into a 30-60 second blank page.
+        if summary_only:
+            cur.execute("""
+                SELECT
+                  (SELECT COUNT(*) FROM projects) AS projects,
+                  (SELECT COUNT(DISTINCT user_id) FROM projects) AS users,
+                  (SELECT COUNT(*) FROM assets WHERE kind='original') AS videos,
+                  (SELECT COUNT(*) FROM video_jobs
+                   WHERE type IN ('preview','final') AND state='done')
+                      AS renders_done,
+                  (SELECT COUNT(*) FROM video_jobs WHERE state='queued')
+                      AS queued_now,
+                  (SELECT COUNT(*) FROM video_jobs WHERE state='running')
+                      AS running_now,
+                  GREATEST(
+                    (SELECT updated_at FROM video_jobs WHERE state='done'
+                     ORDER BY id DESC LIMIT 1),
+                    (SELECT updated_at FROM video_jobs WHERE state='failed'
+                     ORDER BY id DESC LIMIT 1),
+                    (SELECT COALESCE(heartbeat_at, updated_at)
+                     FROM video_jobs WHERE state='running'
+                     ORDER BY id DESC LIMIT 1)
+                  ) AS last_worker_activity
+            """)
+            row = cur.fetchone() or {}
+            last = row.get("last_worker_activity")
+            return jsonify({
+                "summary": True,
+                "totals": {
+                    "users": int(row.get("users") or 0),
+                    "projects": int(row.get("projects") or 0),
+                    "videos": int(row.get("videos") or 0),
+                    "renders_done": int(row.get("renders_done") or 0),
+                    "queued_now": int(row.get("queued_now") or 0),
+                    "running_now": int(row.get("running_now") or 0),
+                    "last_worker_activity": last.isoformat() if last else None,
+                },
+                "health": {
+                    "storage_configured": bool(os.getenv("S3_ENDPOINT")
+                                               and os.getenv("S3_BUCKET")),
+                    "llm_configured": bool(os.getenv("OPENAI_API_KEY")),
+                    "vision_live": None,
+                },
+                "ops": {
+                    "turns_total": None,
+                    "job_failure_rate": None,
+                    "stage_medians": {},
+                },
+                "daily": [], "users": [], "attention": None,
+                "models": None,
+            })
+
+        # The dedicated People tab owns the account list. Keeping a second
+        # 200-person cost table here duplicated the heaviest admin query and
+        # forced the operational overview to read llm_calls' 695 MB TOAST.
+        users = []
 
         # global ops counters + 14-day trends
         cur.execute("""
@@ -595,41 +627,65 @@ def video_overview():
                     IS TRUE) AS fallback_replies,
               COUNT(*) FILTER (WHERE state='failed') AS failed,
               COUNT(*) FILTER (WHERE state IN ('done','failed')) AS finished,
+              COUNT(*) FILTER (WHERE type='mcp_tool' AND
+                UPPER(LTRIM(COALESCE(result->>'text', '')))
+                    LIKE 'NO CHANGE%%') AS no_change_count,
               PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY
                 (result->'timings'->>'queue_wait_s')::float)
                 FILTER (WHERE result->'timings'->>'queue_wait_s'
                         IS NOT NULL) AS median_queue_wait_s
             FROM video_jobs
+            WHERE updated_at >= NOW() - INTERVAL '24 hours'
         """)
         ops = cur.fetchone()
 
-        stage_medians = {}
-        for jtype, stages in (("index", ("whisper_s", "proxy_s", "shots_s",
-                                         "total_s")),
-                              ("preview", ("download_s", "encode_s",
-                                           "upload_s", "total_s")),
-                              ("final", ("download_s", "encode_s",
-                                         "upload_s", "total_s")),
-                              ("agent_turn", ("llm_s", "total_s"))):
-            row = {}
-            for st in stages:
-                cur.execute(f"""
-                    SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY
-                        (result->'timings'->>%s)::float) AS med
-                    FROM video_jobs
-                    WHERE type = %s AND state = 'done'
-                      AND result->'timings'->>%s IS NOT NULL
-                """, (st, jtype, st))
-                med = cur.fetchone()["med"]
-                if med is not None:
-                    row[st] = round(med, 2)
-            stage_medians[jtype] = row
-
         cur.execute("""
-            SELECT COUNT(*) AS n FROM chat_messages
-            WHERE role='activity' AND content LIKE '%NO CHANGE%'
+            SELECT type,
+              PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY
+                (result->'timings'->>'whisper_s')::float)
+                FILTER (WHERE result->'timings'->>'whisper_s' IS NOT NULL)
+                AS whisper_s,
+              PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY
+                (result->'timings'->>'proxy_s')::float)
+                FILTER (WHERE result->'timings'->>'proxy_s' IS NOT NULL)
+                AS proxy_s,
+              PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY
+                (result->'timings'->>'shots_s')::float)
+                FILTER (WHERE result->'timings'->>'shots_s' IS NOT NULL)
+                AS shots_s,
+              PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY
+                (result->'timings'->>'download_s')::float)
+                FILTER (WHERE result->'timings'->>'download_s' IS NOT NULL)
+                AS download_s,
+              PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY
+                (result->'timings'->>'encode_s')::float)
+                FILTER (WHERE result->'timings'->>'encode_s' IS NOT NULL)
+                AS encode_s,
+              PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY
+                (result->'timings'->>'upload_s')::float)
+                FILTER (WHERE result->'timings'->>'upload_s' IS NOT NULL)
+                AS upload_s,
+              PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY
+                (result->'timings'->>'llm_s')::float)
+                FILTER (WHERE result->'timings'->>'llm_s' IS NOT NULL) AS llm_s,
+              PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY
+                (result->'timings'->>'total_s')::float)
+                FILTER (WHERE result->'timings'->>'total_s' IS NOT NULL)
+                AS total_s
+            FROM video_jobs
+            WHERE type IN ('index','preview','final','agent_turn')
+              AND state = 'done'
+              AND updated_at >= NOW() - INTERVAL '24 hours'
+            GROUP BY type
         """)
-        no_change = cur.fetchone()["n"]
+        stage_medians = {
+            row["type"]: {key: round(float(value), 2)
+                          for key, value in row.items()
+                          if key != "type" and value is not None}
+            for row in cur.fetchall()
+        }
+
+        no_change = int(ops.get("no_change_count") or 0)
 
         # Current attention feed, not a seven-day incident log.  Job rows are
         # immutable attempts: a repair creates a newer row, so simply selecting
@@ -741,6 +797,7 @@ def video_overview():
         # headline totals + liveness — "is everything working" at a glance
         cur.execute("""
             SELECT
+              (SELECT COUNT(DISTINCT user_id) FROM projects) AS users,
               (SELECT COUNT(*) FROM projects) AS projects,
               (SELECT COUNT(*) FROM assets WHERE kind='original') AS videos,
               (SELECT COUNT(*) FROM video_jobs
@@ -806,7 +863,7 @@ def video_overview():
 
     return jsonify({
         "totals": {
-            "users": len(users),
+            "users": int(totals["users"] or 0),
             "projects": totals["projects"],
             "videos": totals["videos"],
             "renders_done": totals["renders_done"],
@@ -1018,6 +1075,24 @@ def video_projects():
                    (SELECT MAX(vf.updated_at) FROM video_jobs vf
                     WHERE vf.project_id = p.id AND vf.type='final'
                       AND vf.state='done') AS last_export,
+                   (SELECT COUNT(*) FROM video_jobs mt
+                    WHERE mt.project_id = p.id AND mt.type = 'mcp_tool')
+                       AS tool_calls,
+                   (SELECT COUNT(*) FROM video_jobs mt
+                    WHERE mt.project_id = p.id AND mt.type = 'mcp_tool'
+                      AND (mt.state = 'failed'
+                           OR COALESCE(mt.result->>'is_error', 'false') = 'true'
+                           OR mt.result ? 'failure')) AS tool_failed,
+                   (SELECT COUNT(*) FROM video_jobs mt
+                    WHERE mt.project_id = p.id AND mt.type = 'mcp_tool'
+                      AND (UPPER(LTRIM(COALESCE(mt.result->>'text', '')))
+                               LIKE 'REJECTED%%'
+                           OR UPPER(LTRIM(COALESCE(mt.result->>'text', '')))
+                               LIKE 'CORRECTION_NEEDED%%'
+                           OR UPPER(LTRIM(COALESCE(mt.result->>'text', '')))
+                               LIKE 'CORRECTION NEEDED%%'
+                           OR UPPER(LTRIM(COALESCE(mt.result->>'text', '')))
+                               LIKE 'RECIPE ABORTED%%')) AS tool_rejected,
                    (SELECT COUNT(*) FROM projects c
                     WHERE c.parent_project_id = p.id) AS shorts_count,
                    -- Round 101: how many times this project's owner met the
@@ -1027,10 +1102,14 @@ def video_projects():
                    -- resend re-raises the cards and re-records.
                    (SELECT COUNT(*) FROM client_events ce
                     WHERE ce.project_id = p.id
-                      AND ce.kind = 'trial_gate_shown') AS trial_walls,
+                      AND ce.kind IN ('trial_gate_shown',
+                                      'subscription_upload_locked'))
+                       AS trial_walls,
                    (SELECT MAX(ce.created_at) FROM client_events ce
                     WHERE ce.project_id = p.id
-                      AND ce.kind = 'trial_gate_shown') AS last_trial_wall,
+                      AND ce.kind IN ('trial_gate_shown',
+                                      'subscription_upload_locked'))
+                       AS last_trial_wall,
                    -- Funnel step immediately to the right of the wall in
                    -- admin: did this project's cards lead to a real Paddle
                    -- trial? Credit only the most recent wall before Paddle
@@ -1045,6 +1124,10 @@ def video_projects():
                        ORDER BY ce.created_at DESC, ce.id DESC
                        LIMIT 1
                    )) AS trial_started_after_wall,
+                   pay.paid_at,
+                   (pay.paid_at IS NOT NULL) AS customer_paid,
+                   (pay.paid_at IS NOT NULL
+                    AND conversion.project_id = p.id) AS converted_project,
                    -- User activity inside the children rolls up so a parent
                    -- whose owner refined short #3 by chat doesn't read as
                    -- untouched.
@@ -1055,6 +1138,31 @@ def video_projects():
                    """ + _TIMING_COLS + """
             FROM projects p JOIN users u ON u.id = p.user_id
             """ + _PROJECT_TIMINGS + """
+            LEFT JOIN LATERAL (
+                SELECT MIN(pa.occurred_at) AS paid_at
+                FROM payments pa
+                WHERE pa.user_id = u.id
+                  AND pa.status = 'completed' AND pa.amount_cents > 0
+            ) pay ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT COALESCE(
+                    (SELECT ce.project_id
+                     FROM client_events ce
+                     WHERE ce.user_id = u.id
+                       AND ce.project_id IS NOT NULL
+                       AND ce.kind IN ('trial_gate_shown',
+                                      'subscription_upload_locked')
+                       AND ce.created_at <= pay.paid_at
+                     ORDER BY ce.created_at DESC, ce.id DESC LIMIT 1),
+                    (SELECT p2.id
+                     FROM projects p2
+                     JOIN assets a2 ON a2.project_id = p2.id
+                                      AND a2.kind = 'original'
+                     WHERE p2.user_id = u.id
+                       AND p2.created_at <= pay.paid_at
+                     ORDER BY p2.created_at DESC, p2.id DESC LIMIT 1)
+                ) AS project_id
+            ) conversion ON TRUE
             WHERE p.parent_project_id IS NULL
               AND (u.email ILIKE %s OR p.title ILIKE %s)
             ORDER BY p.id DESC LIMIT 100
@@ -1065,6 +1173,12 @@ def video_projects():
          "kind": r["kind"],
          "messages": r["messages"], "versions": r["versions"],
          "exports": r["exports"],
+         "tool_calls": int(r["tool_calls"] or 0),
+         "tool_failed": int(r["tool_failed"] or 0),
+         "tool_rejected": int(r["tool_rejected"] or 0),
+         "customer_paid": bool(r["customer_paid"]),
+         "converted_project": bool(r["converted_project"]),
+         "paid_at": (r["paid_at"].isoformat() if r["paid_at"] else None),
          "shorts_count": r["shorts_count"],
          "shorts_messages": r["shorts_messages"],
          "trial_walls": r["trial_walls"],
@@ -1909,60 +2023,67 @@ def video_users():
     with adb() as conn:
         cur = conn.cursor()
         cur.execute(f"""
+            WITH active_users AS MATERIALIZED (
+                SELECT u.id, u.email, u.created_at, u.plan,
+                       u.credits_daily, u.credits_bonus, u.credits_monthly,
+                       u.credits_balance
+                FROM users u
+                WHERE u.email ILIKE %s
+                  AND EXISTS (SELECT 1 FROM projects p
+                              WHERE p.user_id = u.id)
+                ORDER BY COALESCE(u.last_seen_at,
+                                  u.created_at AT TIME ZONE 'UTC') DESC
+                LIMIT 200
+            ), project_agg AS (
+                SELECT p.user_id, COUNT(*) AS n
+                FROM projects p JOIN active_users au ON au.id = p.user_id
+                GROUP BY p.user_id
+            ), message_agg AS (
+                SELECT p.user_id,
+                       COUNT(*) FILTER (WHERE cm.role='user') AS msgs,
+                       MAX(cm.created_at) AS last
+                FROM active_users au
+                JOIN projects p ON p.user_id = au.id
+                JOIN chat_messages cm ON cm.session_id = p.chat_session_id
+                GROUP BY p.user_id
+            ), job_agg AS (
+                SELECT j.user_id,
+                       COUNT(*) FILTER (WHERE type='agent_turn') AS turns,
+                       COUNT(*) FILTER (WHERE type='final' AND state='done')
+                           AS exports,
+                       MAX(updated_at) AS last
+                FROM video_jobs j JOIN active_users au ON au.id = j.user_id
+                GROUP BY j.user_id
+            ), asset_agg AS (
+                SELECT p.user_id,
+                       COUNT(*) FILTER (WHERE ast.kind IN %s
+                           AND NOT {_machine_made('ast')}) AS uploads,
+                       COUNT(*) FILTER (WHERE {_machine_made('ast')})
+                           AS generated,
+                       SUM(ast.bytes)::bigint AS bytes,
+                       MAX(ast.created_at) AS last
+                FROM active_users au
+                JOIN projects p ON p.user_id = au.id
+                JOIN assets ast ON ast.project_id = p.id
+                GROUP BY p.user_id
+            )
             SELECT u.id, u.email, u.created_at, u.plan,
                    u.credits_daily, u.credits_bonus, u.credits_monthly,
-                   u.credits_balance,
-                   pr.n AS projects,
+                   u.credits_balance, pr.n AS projects,
                    COALESCE(m.msgs, 0) AS messages,
-                   COALESCE(m.unserved, 0) AS unserved,
                    COALESCE(j.turns, 0) AS turns,
                    COALESCE(j.exports, 0) AS exports,
                    COALESCE(a.uploads, 0) AS uploads,
                    COALESCE(a.generated, 0) AS generated,
                    COALESCE(a.bytes, 0) AS storage_bytes,
-                   COALESCE(l.tokens_in, 0) AS tokens_in,
-                   COALESCE(l.tokens_out, 0) AS tokens_out,
-                   COALESCE(l.est_cost, 0) AS est_cost,
                    GREATEST(m.last, j.last, a.last) AS last_active
-            FROM users u
-            JOIN (SELECT user_id, COUNT(*) AS n FROM projects
-                  GROUP BY user_id) pr ON pr.user_id = u.id
-            LEFT JOIN (SELECT p2.user_id,
-                              COUNT(*) FILTER (WHERE cm.role='user') AS msgs,
-                              COUNT(*) FILTER (WHERE cm.role='user'
-                                  AND {UNSERVED_EXISTS}) AS unserved,
-                              MAX(cm.created_at) AS last
-                       FROM chat_messages cm
-                       JOIN projects p2 ON p2.chat_session_id = cm.session_id
-                       GROUP BY p2.user_id) m ON m.user_id = u.id
-            LEFT JOIN (SELECT user_id,
-                              COUNT(*) FILTER (WHERE type='agent_turn')
-                                  AS turns,
-                              COUNT(*) FILTER (WHERE type='final'
-                                  AND state='done') AS exports,
-                              MAX(updated_at) AS last
-                       FROM video_jobs GROUP BY user_id) j ON j.user_id = u.id
-            LEFT JOIN (SELECT p3.user_id,
-                              COUNT(*) FILTER (WHERE ast.kind IN %s
-                                  AND NOT {_machine_made('ast')}) AS uploads,
-                              COUNT(*) FILTER (WHERE {_machine_made('ast')})
-                                  AS generated,
-                              SUM(ast.bytes)::bigint AS bytes,
-                              MAX(ast.created_at) AS last
-                       FROM assets ast
-                       JOIN projects p3 ON p3.id = ast.project_id
-                       GROUP BY p3.user_id) a ON a.user_id = u.id
-            LEFT JOIN (SELECT p4.user_id,
-                              SUM(lc.prompt_tokens) AS tokens_in,
-                              SUM(lc.completion_tokens) AS tokens_out,
-                              """ + _cost_expr("lc") + """ AS est_cost
-                       FROM llm_calls lc
-                       JOIN projects p4 ON p4.id = lc.project_id
-                       GROUP BY p4.user_id) l ON l.user_id = u.id
-            WHERE u.email ILIKE %s
+            FROM active_users u
+            JOIN project_agg pr ON pr.user_id = u.id
+            LEFT JOIN message_agg m ON m.user_id = u.id
+            LEFT JOIN job_agg j ON j.user_id = u.id
+            LEFT JOIN asset_agg a ON a.user_id = u.id
             ORDER BY last_active DESC NULLS LAST
-            LIMIT 200
-        """, (UPLOAD_KINDS, f"%{search}%"))
+        """, (f"%{search}%", UPLOAD_KINDS))
         rows = cur.fetchall()
     return jsonify({"users": [
         {"id": r["id"], "email": r["email"],
@@ -1974,13 +2095,9 @@ def video_users():
                      "balance": float(r["credits_balance"] or 0)},
          "projects": r["projects"], "messages": r["messages"],
          "turns": r["turns"], "exports": r["exports"],
-         "unserved": r["unserved"],
          "uploads": r["uploads"],
          "generated": r["generated"],
          "storage_bytes": int(r["storage_bytes"] or 0),
-         "tokens_in": int(r["tokens_in"] or 0),
-         "tokens_out": int(r["tokens_out"] or 0),
-         "est_cost": round(float(r["est_cost"] or 0), 4),
          "last_active": r["last_active"].isoformat()
              if r["last_active"] else None}
         for r in rows]})
@@ -2054,25 +2171,26 @@ def _attach_growth(cohorts):
 #   trial  ever started a trial. The demand signal — it is what the pricing
 #          page and the discount are optimising, and it is worth counting even
 #          for someone who cancelled on day one.
-#   paid   money actually moved: the trial ran its course and Paddle charged
-#          (trial_status='converted'), or the account subscribed without a
-#          trial at all (the grandfathered plans predate trials).
+#   paid   money actually moved. Subscription state is not payment evidence:
+#          Paddle can mark a legacy trial active before its card charge, and a
+#          canceled account remains a payer historically. The payments ledger
+#          is the only authoritative source.
 #
 # Both read `trial_status`, written from Paddle's own subscription status by
 # backend/trial_state.py — never inferred from a timer here.
 COHORT_TRIAL_SQL = "u.trial_started_at IS NOT NULL OR u.trial_status IS NOT NULL"
 COHORT_PAID_SQL = """
-    u.trial_status = 'converted'
-    OR (u.trial_started_at IS NULL
-        AND (COALESCE(u.is_subscribed, 0) = 1
-             OR COALESCE(u.plan, 'free') NOT IN ('free', '')))
+    EXISTS (
+        SELECT 1 FROM payments pay
+        WHERE pay.user_id = u.id
+          AND pay.status = 'completed'
+          AND pay.amount_cents > 0)
 """
 # Before the round-46 migration those columns do not exist. Falling back keeps
 # the tab rendering (with trial folded into paid, exactly as it read before)
 # instead of 500ing the whole page on a missing column.
 COHORT_TRIAL_FALLBACK = "FALSE"
-COHORT_PAID_FALLBACK = ("COALESCE(u.is_subscribed, 0) = 1 "
-                        "OR COALESCE(u.plan, 'free') NOT IN ('free', '')")
+COHORT_PAID_FALLBACK = COHORT_PAID_SQL
 
 
 def _trial_columns_exist(cur):
@@ -2500,107 +2618,123 @@ def _ensure_metrics_counters(cur):
 @admin_video_bp.route("/admin/video/reliability", methods=["GET"])
 @admin_required
 def video_reliability():
-    """The "how often does it break" panel, isolated by failure kind:
-    worker deaths, terminal job failures, tool refusals, tool errors, and
-    how many opened sessions never produced an export (count + percentage).
+    """Countable reliability evidence for the rolling past 24 hours.
 
-    The session ratio is computed live over projects that still exist.
-    Generated shorts children are excluded from it — they are system-made
-    and auto-rendered, so they would flatter the export rate — but a shorts
-    PARENT counts as exported when any of its clips carries a done final
-    (the run's clips ARE that session's deliverable). Account scope matches
-    every other admin metric (post-epoch, no test accounts)."""
+    The old panel mixed lifetime counters (starting on an arbitrary migration
+    day) with a 30-day session ratio. Neither number could answer "is today
+    broken?". Raw durable jobs are the numerator and denominator here, so each
+    card carries both a count and a percentage for one explicit window.
+    """
     with adb() as conn:
         cur = conn.cursor()
-        _ensure_metrics_counters(cur)
-        conn.commit()
-        cur.execute("SELECT name, count, updated_at FROM metrics_counters")
-        counters = {r["name"]: r for r in cur.fetchall()}
-
-        # Build the exported-project set once. The former three correlated
-        # EXISTS probes re-ran bitmap/index scans for every project and took
-        # >1.1s on only 761 sessions; under Render load the admin card appeared
-        # stuck on "Loading reliability…". This set-based form grows with the
-        # tables, not projects × tables, and preserves the shorts-parent rule.
         cur.execute(f"""
-            WITH exported_projects AS (
-                SELECT j.project_id
+            WITH scoped_jobs AS MATERIALIZED (
+                -- Keep the 24-hour working set narrow. payload is often a
+                -- multi-kilobyte tool/agent request and result can be TOASTed;
+                -- materializing j.* made a six-counter card copy both even
+                -- though only MCP outcomes need result at all.
+                SELECT j.type, j.state, j.error,
+                       CASE WHEN j.type = 'mcp_tool' THEN j.result END AS result
                 FROM video_jobs j
-                WHERE j.type = 'final' AND j.state = 'done'
-                UNION
-                SELECT a.project_id
-                FROM assets a
-                WHERE a.kind = 'render'
-                  AND a.meta->>'variant' = 'final'
-                UNION
-                SELECT c.parent_project_id
-                FROM projects c
-                JOIN video_jobs cj ON cj.project_id = c.id
-                WHERE c.parent_project_id IS NOT NULL
-                  AND cj.type = 'final' AND cj.state = 'done'
-            ), scoped_projects AS (
-                SELECT p.id, p.created_at,
-                       (e.project_id IS NOT NULL) AS exported
+                JOIN users u ON u.id = j.user_id
+                WHERE j.updated_at >= NOW() - INTERVAL '24 hours'
+                  AND {_scope('u')}
+            ), scoped_projects AS MATERIALIZED (
+                SELECT p.id
                 FROM projects p
                 JOIN users u ON u.id = p.user_id
-                LEFT JOIN exported_projects e ON e.project_id = p.id
                 WHERE COALESCE(p.kind, 'edit') != 'short'
+                  AND p.parent_project_id IS NULL
+                  AND p.created_at >= NOW() - INTERVAL '24 hours'
                   AND {_scope('u')}
+            ), job_rollup AS (
+              SELECT COUNT(*) AS jobs_total,
+                   COUNT(*) FILTER (WHERE state = 'failed') AS job_failed,
+                   COUNT(*) FILTER (
+                       WHERE COALESCE(error, '') ILIKE
+                             'Worker died%%') AS worker_died,
+                   COUNT(*) FILTER (WHERE type = 'mcp_tool') AS tools_total,
+                   COUNT(*) FILTER (
+                       WHERE type = 'mcp_tool' AND (
+                           state = 'failed'
+                           OR COALESCE(result->>'is_error', 'false') = 'true'
+                           OR result ? 'failure')) AS tool_failed,
+                   COUNT(*) FILTER (
+                       WHERE type = 'mcp_tool' AND (
+                           UPPER(LTRIM(COALESCE(result->>'text', '')))
+                               LIKE 'REJECTED%%'
+                           OR UPPER(LTRIM(COALESCE(result->>'text', '')))
+                               LIKE 'CORRECTION_NEEDED%%'
+                           OR UPPER(LTRIM(COALESCE(result->>'text', '')))
+                               LIKE 'CORRECTION NEEDED%%'
+                           OR UPPER(LTRIM(COALESCE(result->>'text', '')))
+                               LIKE 'RECIPE ABORTED%%')) AS tool_refused
+              FROM scoped_jobs
+            ), project_rollup AS (
+              SELECT COUNT(*) AS sessions_total,
+                   COUNT(*) FILTER (WHERE NOT (
+                       EXISTS (SELECT 1 FROM video_jobs j
+                               WHERE j.project_id = p.id
+                                 AND j.type = 'final' AND j.state = 'done')
+                       OR EXISTS (SELECT 1 FROM assets a
+                                  WHERE a.project_id = p.id
+                                    AND a.kind = 'render'
+                                    AND a.meta->>'variant' = 'final')
+                       OR EXISTS (SELECT 1
+                                  FROM projects c
+                                  JOIN video_jobs cj ON cj.project_id = c.id
+                                  WHERE c.parent_project_id = p.id
+                                    AND cj.type = 'final'
+                                    AND cj.state = 'done')
+                   )) AS no_export
+              FROM scoped_projects p
+            ), failed_types AS (
+              SELECT COALESCE(jsonb_agg(
+                       jsonb_build_object('type', f.type, 'n', f.n)
+                       ORDER BY f.n DESC), '[]'::jsonb) AS rows
+              FROM (
+                SELECT type, COUNT(*) AS n FROM scoped_jobs
+                WHERE state = 'failed' GROUP BY type
+              ) f
             )
-            SELECT COUNT(*) AS total,
-                   COUNT(*) FILTER (WHERE NOT exported) AS no_export,
-                   COUNT(*) FILTER (
-                       WHERE created_at >= NOW() - INTERVAL '30 days')
-                       AS total_30d,
-                   COUNT(*) FILTER (
-                       WHERE NOT exported
-                         AND created_at >= NOW() - INTERVAL '30 days')
-                       AS no_export_30d
-            FROM scoped_projects
+            SELECT NOW() - INTERVAL '24 hours' AS starts_at,
+                   NOW() AS ends_at, j.*, p.sessions_total, p.no_export,
+                   f.rows AS failed_by_type
+            FROM job_rollup j CROSS JOIN project_rollup p
+                 CROSS JOIN failed_types f
         """)
-        sess = cur.fetchone() or {}
+        rel = cur.fetchone() or {}
 
-        # Context beside the counter, not a replacement for it: what the
-        # still-existing job rows say, so a spike has a first place to look.
-        cur.execute("""
-            SELECT type, COUNT(*) AS n
-            FROM video_jobs
-            WHERE state = 'failed'
-              AND updated_at >= NOW() - INTERVAL '30 days'
-            GROUP BY type ORDER BY n DESC
-        """)
-        failed_by_type = [dict(r) for r in cur.fetchall()]
+    jobs_total = int(rel.get("jobs_total") or 0)
+    tools_total = int(rel.get("tools_total") or 0)
 
-    def _c(name):
-        row = counters.get(name) or {}
-        return {"count": int(row.get("count") or 0),
-                "updated_at": (row["updated_at"].isoformat()
-                               if row.get("updated_at") else None)}
+    def _metric(name, total):
+        count = int(rel.get(name) or 0)
+        return {"count": count, "total": total,
+                "pct": round(100.0 * count / total, 1) if total else 0.0}
 
-    total = int(sess.get("total") or 0)
-    no_export = int(sess.get("no_export") or 0)
-    total_30d = int(sess.get("total_30d") or 0)
-    no_export_30d = int(sess.get("no_export_30d") or 0)
+    total = int(rel.get("sessions_total") or 0)
+    no_export = int(rel.get("no_export") or 0)
+    failed_by_type = list(rel.get("failed_by_type") or [])
     return jsonify({
+        "window": {
+            "hours": 24,
+            "starts_at": rel["starts_at"].isoformat(),
+            "ends_at": rel["ends_at"].isoformat(),
+        },
         "counters": {
-            "worker_died": _c("worker_died"),
-            "job_failed": _c("job_failed"),
-            "tool_refused": _c("tool_refused"),
-            "tool_failed": _c("tool_failed"),
+            "worker_died": _metric("worker_died", jobs_total),
+            "job_failed": _metric("job_failed", jobs_total),
+            "tool_refused": _metric("tool_refused", tools_total),
+            "tool_failed": _metric("tool_failed", tools_total),
         },
         "sessions_without_export": {
             "total_sessions": total,
             "no_export": no_export,
             "pct": round(100.0 * no_export / total, 1) if total else 0.0,
-            "total_sessions_30d": total_30d,
-            "no_export_30d": no_export_30d,
-            "pct_30d": (round(100.0 * no_export_30d / total_30d, 1)
-                        if total_30d else 0.0),
         },
-        "failed_jobs_by_type_30d": failed_by_type,
-        "note": ("Counters accumulate from 2026-08-10 (migration 017) and "
-                 "survive project deletion; failed_jobs_by_type_30d is "
-                 "computed over still-existing job rows only."),
+        "failed_jobs_by_type_24h": failed_by_type,
+        "note": "All primary reliability values cover the rolling past 24 hours.",
     })
 
 

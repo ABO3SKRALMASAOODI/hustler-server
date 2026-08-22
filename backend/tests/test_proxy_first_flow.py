@@ -20,6 +20,7 @@ import sys
 import contextlib
 
 import pytest
+from flask import Flask
 
 os.environ.setdefault("SKIP_DB_INIT", "1")
 os.environ.setdefault("DATABASE_URL", "postgresql://stub/stub")
@@ -44,8 +45,9 @@ class _Cur:
     def execute(self, sql, params=None):
         s = " ".join(sql.split())
         p = params or ()
-        if s.startswith("SELECT id FROM projects WHERE id"):
-            self._one = {"id": p[0]}
+        if s.startswith(("SELECT id FROM projects WHERE id",
+                         "SELECT id, chat_session_id FROM projects WHERE id")):
+            self._one = {"id": p[0], "chat_session_id": 55}
         elif "SELECT user_id, meta FROM projects" in s:
             self._one = {"user_id": self.project_owner, "meta": {}}
         elif "SELECT user_id FROM projects" in s:
@@ -55,6 +57,11 @@ class _Cur:
         elif "FROM assets" in s and "storage_key" in s and s.startswith("SELECT id, kind"):
             self._one = next((a for a in self.assets.values()
                               if a["storage_key"] == p[1]), None)
+        elif s.startswith("SELECT 1 FROM assets"):
+            self._one = ({"?column?": 1}
+                         if any(a.get("project_id") == p[0]
+                                and a.get("kind") == "original"
+                                for a in self.assets.values()) else None)
         elif s.startswith("INSERT INTO assets"):
             # TWO shapes reach here — the deferred path names width/height
             # (the browser measured the original) and the ordinary path does
@@ -123,7 +130,10 @@ def env(monkeypatch):
         yield type("C", (), {"cursor": lambda self: cur})()
 
     monkeypatch.setattr(video, "vdb", fake_vdb)
-    monkeypatch.setattr(video, "_project_for_user", lambda c, p, u: {"id": p})
+    monkeypatch.setattr(video, "_project_for_user",
+                        lambda c, p, u: {"id": p, "chat_session_id": 55})
+    monkeypatch.setattr(video, "_subscribe_gate_applies",
+                        lambda c, u: False)
     monkeypatch.setattr(video, "_running_jobs_count", lambda c, u: 0)
     monkeypatch.setattr(video, "record_client_event",
                         lambda *a, **k: None)
@@ -199,6 +209,45 @@ def test_a_deferred_original_registers_and_indexes_with_zero_bytes_uploaded(
     assert landed[1]["detail"]["original_pending"] is True
 
 
+def test_a_locked_deferred_original_is_saved_without_executor_work(
+        env, monkeypatch):
+    monkeypatch.setattr(video, "_subscribe_gate_applies", lambda c, u: True)
+    monkeypatch.setattr(video, "_record_upload_subscription_lock",
+                        lambda c, session_id, asset_id: 701)
+
+    out, status = _defer(env)
+
+    assert status == 200
+    assert out["subscribe_gated"] is True
+    assert out["subscription_message_id"] == 701
+    assert out["index_job_id"] is None
+    assert not env.enqueued
+
+
+def test_a_locked_project_refuses_another_presign(env, monkeypatch):
+    """After the proof upload lands, dismissing the card cannot start a second
+    storage transfer. The boundary is before presigning, not after upload."""
+    env.assets[12] = {
+        "id": 12, "project_id": 5, "kind": "original",
+        "storage_key": "originals/5/first.mp4", "meta": {},
+    }
+    monkeypatch.setattr(video, "_subscribe_gate_applies", lambda c, u: True)
+    monkeypatch.setattr(video.storage, "validate_upload",
+                        lambda *a: (".mp4", "video/mp4"))
+    monkeypatch.setattr(
+        video.storage, "presign_upload",
+        lambda *a, **k: pytest.fail("locked project must not presign"))
+
+    app = Flask(__name__)
+    with app.test_request_context(json={
+            "filename": "second.mp4", "bytes": 10_000, "kind": "original"}):
+        response, status = video.create_upload.__wrapped__(7, 5)
+
+    assert status == 402
+    assert response.get_json()["code"] == "subscribe_required"
+    assert response.get_json()["subscribe_gated"] is True
+
+
 def test_a_deferred_original_without_a_proxy_is_refused(env):
     """Registering an asset whose bytes do not exist, with nothing to index
     instead, would leave a project that can never load."""
@@ -265,6 +314,22 @@ def test_direct_audio_upload_gets_transcript_and_acoustic_index_job(env):
         "type": "index", "payload": {
             "asset_id": out["asset_id"], "execution_policy": "legacy"}}]
     assert out["index_job_id"] is not None
+
+
+def test_locked_direct_original_persists_wall_without_indexing(env, monkeypatch):
+    monkeypatch.setattr(video, "_subscribe_gate_applies", lambda c, u: True)
+    monkeypatch.setattr(video, "_record_upload_subscription_lock",
+                        lambda c, session_id, asset_id: 702)
+    out, status = video.complete_upload_core(7, 5, {
+        "storage_key": "originals/5/source.mp4", "kind": "original",
+        "filename": "source.mp4", "bytes": 12_000_000,
+        "duration_s": 21.0,
+    })
+    assert status == 200
+    assert out["subscribe_gated"] is True
+    assert out["subscription_message_id"] == 702
+    assert out["index_job_id"] is None
+    assert not env.enqueued
 
 
 def test_staged_clip_waits_for_tray_submit_before_indexing(env):
@@ -338,6 +403,19 @@ def test_an_original_that_disagrees_with_the_browser_re_indexes(env, monkeypatch
     # No client_proxy_key: the re-index takes the ordinary trusted path.
     assert env.enqueued[0]["payload"].get("client_proxy_key") is None
     assert env.enqueued[0]["payload"]["reindex"] is True
+
+
+def test_locked_original_ready_never_reindexes_on_duration_drift(
+        env, monkeypatch, app_ctx):
+    aid = _pending_asset(env, duration=355.0)
+    monkeypatch.setattr(video, "_subscribe_gate_applies", lambda c, u: True)
+    monkeypatch.setattr(video.mp4probe, "duration_of_key",
+                        lambda s, k, n: 402.0)
+    body, status = app_ctx(aid)
+    assert status == 200
+    assert body["subscribe_gated"] is True
+    assert body.get("reindexing") is None
+    assert not env.enqueued
 
 
 def test_an_unreadable_header_fails_open(env, monkeypatch, app_ctx):
