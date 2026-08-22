@@ -33,6 +33,10 @@ def test_post_plan_catalog_exposes_default_edit_domains():
     assert "set_edit_plan" not in names
     assert "apply_edit_recipe" not in names
     assert "generate_video" not in names
+    assert "generate_image" not in names
+    assert "research_music" not in names
+    assert "search_stock" not in names
+    assert "record_website" not in names
     assert "edit_shorts" not in names
 
     full = agent_tools.openai_tools(compact=True)
@@ -54,12 +58,12 @@ def test_fresh_catalog_can_write_without_a_plan():
 
 def test_any_omitted_domain_can_be_loaded_without_changing_the_edit():
     ctx = _Ctx()
-    out = agent_tools.expand_toolset(ctx, ["media", "motion"])
+    out = agent_tools.expand_toolset(ctx, ["acquisition", "screen"])
     names = agent_tools.compact_tool_names(ctx)
 
     assert "Capabilities loaded" in out
-    assert {"research_broll", "generate_image"} <= names
-    assert {"add_zoom", "set_color_grade"} <= names
+    assert {"research_broll", "find_footage"} <= names
+    assert {"record_website", "showcase_demo"} <= names
 
     # Loading is additive and persists throughout the logical request.
     agent_tools.expand_toolset(ctx, ["motion"])
@@ -70,10 +74,11 @@ def test_any_omitted_domain_can_be_loaded_without_changing_the_edit():
 
 def test_duplicate_valid_domains_are_deduped_not_rejected():
     ctx = _Ctx()
-    out = agent_tools.expand_toolset(ctx, ["media", "media", "motion"])
+    out = agent_tools.expand_toolset(
+        ctx, ["acquisition", "acquisition", "motion"])
 
     assert not out.startswith("REJECTED:")
-    assert ctx._loaded_tool_domains == {"media", "motion"}
+    assert ctx._loaded_tool_domains == {"acquisition", "motion"}
     assert "finish that plan step" not in out
 
 

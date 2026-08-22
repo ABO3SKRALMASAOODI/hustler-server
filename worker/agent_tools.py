@@ -1409,16 +1409,14 @@ def list_assets(ctx, kind=None):
     rows = ctx.db.run(dbx.assets_by_kinds, ctx.project_id, sel)
     if not rows:
         if sel == kinds["music"]:
-            return ("No audio uploaded to this project — but you can FIND "
-                    "music yourself: search_music looks up tracks online "
-                    "(by vibe/genre) and fetch_music downloads one, ready "
-                    "for add_music; fetch_url ingests any music link the "
-                    "user pastes (song URL, YouTube, SoundCloud...); "
-                    "search_sfx finds one-shot sound effects. Only "
-                    "ask the user to attach a file (paperclip button in "
-                    "chat, mp3/wav/m4a) for a track the web cannot reach — "
-                    "e.g. a trending platform sound, which only they can "
-                    "provide.")
+            return ("No audio uploaded to this project. fetch_url ingests a "
+                    "music link the user pastes (song URL, YouTube, "
+                    "SoundCloud); for a SPECIFIC song they named, load the "
+                    "acquisition department and find_song can locate a link. "
+                    "For a generic genre/vibe or a trending platform sound, "
+                    "ask the user to attach the file (paperclip button in "
+                    "chat, mp3/wav/m4a) instead of repeatedly searching. "
+                    "search_sfx remains for one-shot sound effects.")
         return f"No {canonical} assets in this project."
     try:
         edl_row = ctx.latest_edl()
@@ -4672,8 +4670,8 @@ def _audio_from_clip(ctx, asset):
             return None, None, (
                 f"REJECTED: '{name}' has no sound in it at all — it is a "
                 "silent video, so there is no audio to take from it. Tell "
-                "the user that plainly and ask for the song itself, or "
-                "offer to find one (search_music).")
+                "the user that plainly and ask for the song itself or a "
+                "direct link.")
         return None, None, (
             f"Could not take the audio out of '{name}' ({str(e)[:140]}). Do "
             "NOT claim the sound was added.")
@@ -4770,8 +4768,8 @@ def _resolve_music(ctx, storage_key):
             "track (a transcription artifact), not background music — "
             "mixing it in would only double the speaker's voice under "
             "itself, near-inaudibly. Use a real music file instead: "
-            "search_music to find one online, or "
-            "list_assets(kind='music') for the user's own uploads.")
+            "list_assets(kind='music') for the user's own uploads, or "
+            "fetch_url for a link they supplied.")
     if asset and asset["kind"] == "video_clip":
         if getattr(ctx, "_recipe_staging", False):
             return None, (
@@ -4791,9 +4789,8 @@ def _resolve_music(ctx, storage_key):
         hint = ("Available music storage_keys: " +
                 "; ".join(a["storage_key"] for a in avail)
                 if avail else "No music uploaded to this project — "
-                              "search_music finds tracks online, "
-                              "fetch_music downloads one, and fetch_url "
-                              "ingests any music link the user pastes.")
+                              "fetch_url ingests a music link the user pastes; "
+                              "otherwise ask for an audio upload.")
         return None, f"REJECTED: '{storage_key}' is not a music asset here. {hint}"
     return {"name": _asset_name(asset),
             "duration_s": asset.get("duration_s"), "library": False,
@@ -22055,8 +22052,8 @@ TOOLS = {
                     {"id": {"type": "string"}}),
     "find_song": (find_song, "Find web links for a SPECIFIC song the user "
                   "NAMED ('add Blinding Lights by The Weeknd') — the case "
-                  "search_music cannot serve, because named commercial "
-                  "tracks are not in the open catalogs. Returns candidate "
+                  "a generic catalog cannot serve, because named commercial "
+                  "tracks need exact discovery. Returns candidate "
                   "links best-guess first; pick the real thing (artist's "
                   "own/'- Topic' channel or 'Official Audio'; no "
                   "lyric/sped-up/loop/cover versions unless asked; never "
@@ -22065,10 +22062,9 @@ TOOLS = {
                   "Always tell the user which version you grabbed. Search "
                   "can verify the likely recording, NOT a usage license; a "
                   "public/downloadable upload does not grant republication "
-                  "rights, so disclose that. For a "
-                  "genre/vibe request use search_music instead; for a "
-                  "trending platform sound only the user can provide the "
-                  "file.",
+                  "rights, so disclose that. For a genre/vibe request ask "
+                  "for a user-supplied file or link; a trending platform "
+                  "sound can only be provided by the user.",
                   {"query": {"type": "string"}}),
     "add_music": (add_music, "Mix music into the edit. The defaults are "
                   "CONTEXT-AWARE: under speech the track sits low as a bed "
@@ -22077,7 +22073,7 @@ TOOLS = {
                   "user actually hears it. Pass gain_db/duck only to "
                   "override that. storage_key is an exact key from "
                   "list_assets(kind='music') — the user's own uploads or a "
-                  "track fetch_music just downloaded — never invent one. "
+                  "track fetch_url just downloaded — never invent one. "
                   "Choose from the user's direction, metadata, context and "
                   "measured get_audio_analysis evidence. "
                   "start/end are OUTPUT-timeline seconds "
@@ -23896,7 +23892,15 @@ TOOLS = {
 # never sees these names in schemas.
 for _retired_tool in (
         "set_edit_plan", "complete_edit_plan_steps",
-        "apply_edit_recipe", "generate_video"):
+        "apply_edit_recipe", "generate_video",
+        # Four-day production evidence (2026-08-18..22): all 14 image calls
+        # returned "not available" even though the dispatcher advertised the
+        # tool. The open-catalog music chain spent 92 searches and then
+        # rejected all four download attempts, producing no music asset.
+        # Keep the implementations for focused tests and a future provider
+        # repair, but do not let the live editor burn turns on them.
+        "generate_image", "research_music", "search_music",
+        "audition_music_candidates", "fetch_music"):
     TOOLS.pop(_retired_tool, None)
 
 # Blueprint close-out used to freeze writes after a clean preview. The editor
@@ -23907,9 +23911,11 @@ def finishing_checkpoint(ctx):
 
 # Schema routing keeps evidence/utility tools plus the departments the editor
 # actually uses. Every deployed write name is still advertised in the
-# capability directory; omitted schemas (screen/shorts) load via expand_toolset.
+# capability directory; omitted schemas (acquisition/screen/shorts) load via
+# expand_toolset.
 TOOL_DOMAIN_NAMES = {
-    "story", "captions", "audio", "media", "motion", "screen", "shorts"}
+    "story", "captions", "audio", "media", "acquisition", "motion",
+    "screen", "shorts"}
 TOOL_CORE = {
     "load_tools",
     "expand_toolset",
@@ -23927,8 +23933,9 @@ TOOL_CORE = {
 # the first call may write. This alias keeps older tests/imports compiling.
 TOOL_PLANNING = set(TOOL_CORE)
 
-# Screen/shorts stay opt-in; everything else is on from the first dispatch so
-# the model can cut, caption, grade and mix without a planning ritual.
+# External acquisition, screen capture and shorts stay opt-in; the editing
+# departments are on from the first dispatch so the model can cut, caption,
+# grade and mix without a planning ritual.
 DEFAULT_EDIT_DOMAINS = ("story", "captions", "audio", "media", "motion")
 
 FINISHING_CORE = {
@@ -23955,9 +23962,7 @@ TOOL_DOMAINS = {
         "suggest_emphasis",
     },
     "audio": {
-        "review_audio", "research_music", "search_music",
-        "audition_music_candidates", "fetch_music",
-        "find_song", "extract_audio", "add_music", "remove_music",
+        "review_audio", "extract_audio", "add_music", "remove_music",
         "swap_music", "set_music_fit", "set_audio_gain", "set_volume",
         "search_sfx", "audition_sfx_candidates", "fetch_sfx",
         "add_web_sfx", "add_sfx", "move_sfx", "remove_sfx",
@@ -23965,13 +23970,20 @@ TOOL_DOMAINS = {
         "separate_music", "remove_stem_mix", "set_master_loudness",
     },
     "media": {
-        "compare_uploaded_media", "search_stock", "research_broll", "add_stock_media",
-        "find_footage", "fetch_url", "generate_image",
+        "compare_uploaded_media", "fetch_url",
         "start_media_sequence", "insert_media", "set_insert_window",
         "move_insert", "remove_insert",
         "add_overlay", "move_overlay", "set_overlay_motion",
         "remove_overlay", "compose_panels",
-        "add_freeze_frame", "record_website", "record_website_demo",
+        "add_freeze_frame",
+    },
+    # External discovery is useful only when the edit actually needs footage
+    # beyond the user's project. Keeping it out of the default media domain
+    # removes its schemas from ordinary cut/caption/grade turns; load_tools
+    # still exposes this exact department for an explicit acquisition pass.
+    "acquisition": {
+        "find_song", "find_footage", "search_stock", "research_broll",
+        "add_stock_media",
     },
     "motion": {
         "set_frame", "auto_reframe", "set_color_grade", "set_grade_custom",
@@ -23986,7 +23998,8 @@ TOOL_DOMAINS = {
         "remove_aspect_shift", "add_color_screen", "add_corrupt_screen",
     },
     "screen": {
-        "showcase_demo", "enhance_cursor", "remove_cursor_enhance",
+        "record_website", "record_website_demo", "showcase_demo",
+        "enhance_cursor", "remove_cursor_enhance",
         "set_screen_frame", "remove_screen_frame", "add_screen_takeover",
         "remove_screen_takeover", "blur_region", "remove_blur",
         "find_burned_text", "erase_burned_text", "erase_region",
@@ -24138,9 +24151,8 @@ REQUIRED_ARGS = {
 
 # The loop uses this to build TURN FACTS: a write "succeeded" when its result
 # is a version diff line (write_edl's "EDL vX -> vY: ..." format).
-# generate_image and fetch_url are here for the capabilities digest; their
-# successes are tracked separately via ctx.images_generated / ctx.urls_fetched
-# (neither writes the EDL — they create an ASSET the agent then places).
+# fetch_url is here for the capabilities digest; its success is tracked
+# separately via ctx.urls_fetched (it creates an asset the agent then places).
 WRITE_TOOLS = {"keep_segments", "cut_range", "cut_output_range",
                "restore_range",
                "cut_silences", "remove_filler_words", "add_captions",
@@ -24180,9 +24192,7 @@ WRITE_TOOLS = {"keep_segments", "cut_range", "cut_output_range",
                "set_grade_custom", "set_master_loudness",
                "separate_music", "remove_stem_mix",
                "punch_in_on_emphasis", "fetch_sfx",
-               "beat_align_cuts", "apply_look",
-               "generate_image",
-               "fetch_url", "fetch_music"}
+               "beat_align_cuts", "apply_look", "fetch_url"}
 
 
 def _tool_disabled(name, model=None):

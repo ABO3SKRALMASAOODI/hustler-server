@@ -1959,16 +1959,17 @@ check("2.x model gets 2.x sizes",
 check("unknown aspect -> None (model default)",
       llmmod.image_size_for("21:9", "qwen-image-plus") is None)
 
-# Tool visibility: generate_image is hidden everywhere when unavailable.
-check("digest advertises generate_image when available",
-      "generate_image" in at.capabilities_digest())
-check("openai_tools includes generate_image when available",
-      any(t["function"]["name"] == "generate_image"
+# Tool visibility: production evidence retired generate_image even when an
+# environment key makes the provider look configured.
+check("digest keeps generate_image retired when configured",
+      "generate_image" not in at.capabilities_digest())
+check("openai_tools keeps generate_image retired when configured",
+      all(t["function"]["name"] != "generate_image"
           for t in at.openai_tools()))
 cfg.IMAGE_GEN_MODEL = ""
-check("digest hides generate_image when disabled",
+check("digest keeps generate_image retired when disabled",
       "generate_image" not in at.capabilities_digest())
-check("openai_tools hides generate_image when disabled",
+check("openai_tools keeps generate_image retired when disabled",
       all(t["function"]["name"] != "generate_image"
           for t in at.openai_tools()))
 cfg.IMAGE_GEN_MODEL = "qwen-image-plus"
@@ -4140,10 +4141,9 @@ check("prompt: music no longer requires an upload",
 # advertise a library an image doesn't ship, in either direction.
 check("prompt: capability-neutral (no library claim baked in)",
       "list_music_library" not in agent_prompt.system_prompt())
-# Round 98: found music (search_music/fetch_music) replaced the bundled
-# library, and the library itself is now DELETED (2026-08-08; old EDLs
-# were migrated to plain legacy-music/ storage keys). The state block
-# offers search exactly when the capability is on, never the old library.
+# The bundled library is deleted and the generic open-catalog chain is retired
+# after producing no downloadable assets in the production window. The state
+# block offers only working upload/link/named-song paths.
 import config as _cfg                                         # noqa: E402
 import music_search                                           # noqa: E402
 _sb_kwargs = dict(keep_line=None, captions_line=None, program_lines=None)
@@ -4155,23 +4155,21 @@ try:
                                                **_sb_kwargs)
 finally:
     _cfg.MUSIC_SEARCH_ENABLED = _saved_ms
-check("state: music search offered exactly when enabled, library never",
-      ("search_music" in _sb_on) == bool(music_search.available())
-      and "list_music_library" not in _sb_on
+check("state: retired music search is never offered",
+      "search_music" not in _sb_on
       and "search_music" not in _sb_off
-      and "royalty-free" not in _sb_off)
-# The hint must track what this deployment can ACTUALLY do: offer found
-# music when search is on, uploads-only when it is off.
+      and "list_music_library" not in _sb_on)
+# The fallback hint must describe only working paths too.
 _hint = _nearest_alternative("add some background music")
-check("audio hint matches whether music search is on",
-      ("find online" in _hint.lower()) == bool(music_search.available()))
+check("audio hint does not revive generic music search",
+      "genre/vibe" not in _hint.lower()
+      and "find online" not in _hint.lower())
 check("the retired library tool is no longer registered",
       "list_music_library" not in agent_tools.TOOLS)
-check("music search tools hide exactly when the capability is off",
-      agent_tools._tool_disabled("search_music")
-      == (not music_search.available())
-      and agent_tools._tool_disabled("fetch_music")
-      == (not music_search.available()))
+check("music search tools stay retired even if their provider is enabled",
+      all(name not in agent_tools.TOOLS for name in
+          ("search_music", "research_music",
+           "audition_music_candidates", "fetch_music")))
 
 print("== Round-26: sound effects + the branded end card ==")
 

@@ -211,29 +211,22 @@ def project_state_block(video, index_summary, edl_line, history_lines,
             "request and measured/transcribed evidence; storage_key — "
             "name): " + "; ".join(music_assets))
     # A SEPARATE line, never merged with the uploads above: that one asserts
-    # the user gave us the file, and a found track must never inherit that
-    # claim. Gated on availability so an unwired deployment does not
-    # advertise music it cannot deliver. (Round 98: the bundled pack is
-    # retired — music is FOUND online at request time.)
-    import music_search
+    # the user gave us the file, and a fetched track must never inherit that
+    # claim. The generic open-catalog chain is retired after production showed
+    # it consuming search turns without producing an asset. Keep only paths
+    # that work: a user link/upload, or explicit named-song discovery.
     import sfx_search
     import song_find
-    if music_search.available():
-        named = ("A SPECIFIC song they NAME: find_song searches the web "
-                 "for its link, fetch_url downloads the pick. "
-                 if song_find.available() else "")
-        lines.append(
-            "Music: no bundled tracks — the web is the library. "
-            "research_music finds and acoustically compares a licensed "
-            "slate by genre/vibe ('dark phonk', 'lofi chill beat') in one "
-            "evidence pass; use search_music alone only for a quick lookup. "
-            "fetch_music downloads the deliberate winner ready for "
-            "add_music; every hit carries its license terms (public "
-            "domain, credit, or NON-COMMERCIAL-ONLY) — state them, the "
-            "user decides. " + named + "Any LINK they paste (song URL, "
-            "YouTube, SoundCloud...) fetch_url ingests as music. A "
-            "trending platform sound only they can provide (upload or a "
-            "clip carrying it).")
+    named = ("A SPECIFIC song they NAME: load acquisition, use find_song "
+             "for its link, then fetch_url downloads the pick. "
+             if song_find.available() else "")
+    lines.append(
+        "Music: no bundled tracks and no generic catalog search. " + named
+        + "Any LINK they paste (song URL, YouTube, SoundCloud...) fetch_url "
+          "ingests as music. For a genre/vibe request with no link, use a "
+          "music asset already in the project or ask for an upload; never "
+          "burn turns repeatedly searching. A trending platform sound only "
+          "they can provide (upload or a clip carrying it).")
     if sfx_search.available():
         lines.append(
             "Sound effects: REAL recorded one-shots found online — "

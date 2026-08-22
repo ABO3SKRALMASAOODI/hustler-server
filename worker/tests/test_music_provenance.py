@@ -344,4 +344,7 @@ def test_fetch_persists_content_hash_and_raw_provider_fields(
     assert meta["source_audio_stream_status"] == "complete"
     assert expected_sha in result
     assert "MUSIC_PROVENANCE=" in result
-    assert "fetch_music" in agent_tools.WRITE_TOOLS
+    # The implementation remains testable for a future provider repair, but
+    # production evidence retired it from both the catalog and write surface.
+    assert "fetch_music" not in agent_tools.WRITE_TOOLS
+    assert "fetch_music" not in agent_tools.TOOLS

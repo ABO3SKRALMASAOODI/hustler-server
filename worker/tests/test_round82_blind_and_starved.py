@@ -377,14 +377,15 @@ class _MusicCtx:
     job = {"user_id": 1}
 
 
-def test_music_search_tells_the_agent_not_to_substitute_silently():
+def test_broken_open_catalog_search_is_not_advertised_to_the_agent():
     """'i want techno hardcore' x3 -> hip-hop x3, undisclosed, user gone.
     The bundled listing that carried the honesty rule is deleted; the rule
-    now rides the search_music tool description the model reads on every
-    turn: substitution must be said, and a specific song's way in is a
-    link (fetch_url) or the user's own file."""
-    desc = agent_tools.TOOLS["search_music"][1].lower()
-    assert "substituting silently" in desc
+    The open-catalog chain is retained as implementation code for repair, but
+    production must not spend turns on it after four straight download
+    rejections. A specific named song still has the explicit find_song lane."""
+    assert "search_music" not in agent_tools.TOOLS
+    desc = agent_tools.TOOLS["find_song"][1].lower()
+    assert "specific song" in desc
     assert "fetch_url" in desc
 
 

@@ -2885,8 +2885,8 @@ ALTERNATIVE_HINTS = [
      "animations."),
     (re.compile(r"(?i)voice.?over|narrat|music|song|soundtrack|audio|volume"),
      "What I CAN do: score the edit with music on any time range — a "
-     "track I find online by genre/vibe, a specific song found by NAME "
-     "(find_song), any link they paste (a song URL, "
+     "specific song the user named (load acquisition, then find_song), "
+     "any link they paste (a song URL, "
      "YouTube, SoundCloud...), or the user's own "
      "upload — loop it to fill the video, fade it in and out, start it "
      "partway in, swap one track for another, make it louder or quieter, "
@@ -2896,9 +2896,7 @@ ALTERNATIVE_HINTS = [
                 r"generat|create|draw|ai.?(?:image|art)|hair|face|character"),
      "What I CAN do: splice an uploaded video clip or image in at ANY "
      "point — even mid-sentence (the take is split at a word edge) — and "
-     "generate images with AI (from a description, or by restyling a "
-     "frame of your video) that get spliced in as full-frame still "
-     "moments."),
+     "turn an uploaded still into a full-frame moment with local motion."),
     (re.compile(r"(?i)cut|trim|remove|shorten|tighten|silence|pause"),
      "What I CAN do: cut or restore any time range with word-accurate "
      "boundaries, and remove silences."),
@@ -2935,16 +2933,6 @@ def _nearest_alternative(user_text):
             if "What I CAN do with a link" in hint \
                     and not config.URL_FETCH_ENABLED:
                 continue
-            # A deployment with music search off must not offer to find
-            # tracks (round 98 — found music replaced the deleted bundled
-            # library).
-            if "track I find online" in hint \
-                    and not music_search.available():
-                return ("What I CAN do: mix music you upload under the edit "
-                        "on any time range, loop it to fill the video, fade "
-                        "it in and out, make it louder or quieter, or remove "
-                        "it. I can also lay an uploaded voiceover over the "
-                        "edit (other audio ducks while it speaks).")
             # Same honesty for named-song link finding, which gates
             # separately (it rides the fetch/extractor path).
             if "find_song" in hint and not song_find.available():
@@ -2956,12 +2944,6 @@ def _nearest_alternative(user_text):
                 return ("What I CAN do: place a sound file you upload at an "
                         "exact moment in the edit, set how loud it is, and "
                         "move or remove it afterwards.")
-            if ("generate images with AI" in hint
-                    and not llm.image_available()):
-                return ("What I CAN do: splice an uploaded video clip or "
-                        "image in at ANY point — even mid-sentence (the "
-                        "take is split at a word edge) — attach or upload "
-                        "it and tell me where.")
             return hint
     return None
 

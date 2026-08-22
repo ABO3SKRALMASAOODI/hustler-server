@@ -346,7 +346,9 @@ def test_blueprint_tools_are_retired_from_the_agent_catalog():
     schemas = {row["function"]["name"]: row["function"]
                for row in agent_tools.openai_tools()}
     for name in ("set_edit_plan", "complete_edit_plan_steps",
-                 "apply_edit_recipe", "generate_video"):
+                 "apply_edit_recipe", "generate_video", "generate_image",
+                 "research_music", "search_music",
+                 "audition_music_candidates", "fetch_music"):
         assert name not in schemas
 
 
@@ -710,9 +712,11 @@ def test_authored_department_plan_exposes_every_promised_department():
         })
     names = agent_tools.compact_tool_names(ctx)
     assert "add_captions" in names
-    for name in ("add_zoom", "research_broll", "research_music",
+    for name in ("add_zoom", "add_overlay", "add_music",
                  "search_sfx", "set_color_grade"):
         assert name in names
+    assert "research_broll" not in names
+    assert "research_music" not in names
 
 
 def test_timed_sequence_beats_reject_invented_or_unrelated_evidence_ids():

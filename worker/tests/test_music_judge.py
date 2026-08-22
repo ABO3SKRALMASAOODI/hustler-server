@@ -182,9 +182,9 @@ def test_music_purpose_survives_edl_schema_and_tool_contract():
     assert "purpose" in agent_tools.TOOLS["add_music"][2]
 
 
-def test_audition_is_a_measurement_tool_not_a_claim_that_model_heard_audio():
-    desc = agent_tools.TOOLS["audition_music_candidates"][1]
-    assert "does not hear" in desc
+def test_audition_implementation_remains_but_is_not_live_catalog_surface():
+    assert callable(agent_tools.audition_music_candidates)
+    assert "audition_music_candidates" not in agent_tools.TOOLS
     assert "listen_to" not in agent_tools.TOOLS
 
 
@@ -240,9 +240,6 @@ def test_research_music_never_auditions_stale_results_after_failed_search(
     assert ctx._music_hits == {}
 
 
-def test_research_music_is_registered_as_one_pass_editorial_evidence():
-    fn, desc, schema = agent_tools.TOOLS["research_music"]
-    assert fn is agent_tools.research_music
-    assert "single evidence pass" in desc
-    assert set(schema) >= {"query", "brief", "commercial_use"}
-    assert agent_tools.REQUIRED_ARGS["research_music"] == ["query"]
+def test_research_music_implementation_is_retained_but_retired_from_catalog():
+    assert callable(agent_tools.research_music)
+    assert "research_music" not in agent_tools.TOOLS
