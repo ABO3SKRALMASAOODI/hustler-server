@@ -1,0 +1,38 @@
+# Cloudflare Containers canary image: the proven provider-neutral Python
+# executor without Chromium, segmentation, or Demucs payloads that cannot fit
+# Cloudflare's 12-GiB self-serve ceiling. It serves preview/check/filmstrip and
+# bounded index/final jobs; heavy effects and orchestration remain on Modal.
+FROM python:3.11-slim-bookworm
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       ffmpeg fontconfig fonts-dejavu-core fonts-noto-core fonts-noto-cjk \
+       xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+ARG FFMPEG_STATIC=1
+RUN if [ "$FFMPEG_STATIC" = "1" ]; then \
+      python -c "import urllib.request; urllib.request.urlretrieve('https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-linux64-gpl-8.1.tar.xz', '/tmp/ff.tar.xz')" \
+      && tar -xJf /tmp/ff.tar.xz -C /tmp \
+      && install -m755 /tmp/ffmpeg-*/bin/ffmpeg /usr/local/bin/ffmpeg \
+      && install -m755 /tmp/ffmpeg-*/bin/ffprobe /usr/local/bin/ffprobe \
+      && rm -rf /tmp/ff.tar.xz /tmp/ffmpeg-*; \
+    fi
+
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+ENV HF_HOME=/opt/hf
+ARG WHISPER_MODEL=medium
+RUN python -c "from faster_whisper import download_model; download_model('${WHISPER_MODEL}')"
+
+COPY . .
+
+ENV PYTHONUNBUFFERED=1 \
+    WORKER_ROLE=executor \
+    EXECUTOR_PROVIDER=cloudflare \
+    WORKER_TMP_DIR=/tmp/valmera \
+    PORT=8080
+
+CMD ["python", "http_server.py"]

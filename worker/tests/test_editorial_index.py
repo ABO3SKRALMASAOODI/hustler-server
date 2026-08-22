@@ -126,7 +126,7 @@ def test_flat_energy_is_neutral_not_falsely_a_peak():
     assert all("energy_peak" not in row["tags"] for row in result["rows"])
 
 
-def test_agent_tool_is_bounded_honest_and_available_in_compact_catalog():
+def test_agent_tool_is_bounded_honest_and_available_in_story_catalog():
     ctx = agent_tools.ToolContext(
         None, {"id": 1}, {"id": 7, "chat_session_id": 9}, _index(), "/tmp")
     out = agent_tools.get_editorial_map(ctx, focus="peaks", limit=2)
@@ -135,6 +135,8 @@ def test_agent_tool_is_bounded_honest_and_available_in_compact_catalog():
     assert "does NOT recognize the full picture or prescribe effects" in out
     assert "scene change@3" in out
     assert "Continue with get_editorial_map" in out
+    assert "get_editorial_map" not in agent_tools.compact_tool_names(ctx)
+    ctx._loaded_tool_domains = {"story"}
     assert "get_editorial_map" in agent_tools.compact_tool_names(ctx)
     fn, description, schema = agent_tools.TOOLS["get_editorial_map"]
     assert fn is agent_tools.get_editorial_map

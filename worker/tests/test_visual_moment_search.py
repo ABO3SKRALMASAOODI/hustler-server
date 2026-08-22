@@ -66,6 +66,11 @@ def test_visual_search_scans_all_tiles_in_bounded_batches_and_caches(
     assert len(calls) == 2
 
 
-def test_visual_search_is_in_the_fresh_planning_catalog():
-    assert "find_visual_moments" in agent_tools.planning_tool_names()
-
+def test_visual_search_loads_with_story_instead_of_every_fresh_dispatch():
+    assert "find_visual_moments" not in agent_tools.planning_tool_names()
+    ctx = type("Ctx", (), {
+        "edit_plan": None,
+        "_loaded_tool_domains": {"story"},
+        "_loaded_tool_names": set(),
+    })()
+    assert "find_visual_moments" in agent_tools.compact_tool_names(ctx)

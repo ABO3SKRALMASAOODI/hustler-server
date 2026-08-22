@@ -15,6 +15,7 @@ So: one counter that is never refunded, and one signal that already existed
 (set_progress' rowcount) finally being read.
 """
 import json
+import inspect
 import math
 import os
 import shutil
@@ -64,6 +65,11 @@ def _with_column(ready):
     """Force db.claims_column_ready's cached answer for one test."""
     wdb._CLAIMS_COL["ok"] = bool(ready)
     wdb._CLAIMS_COL["checked_at"] = time.time() if not ready else 0.0
+    # These SQL-shape tests exercise the pre-025 fallback unless they opt in
+    # explicitly; suppress the migration probe so it is not mistaken for the
+    # claim statement under inspection.
+    wdb._REMOTE_EXEC_TABLE["ok"] = False
+    wdb._REMOTE_EXEC_TABLE["checked_at"] = time.time()
 
 
 # ------------------------------------------------------------------ #
@@ -98,8 +104,8 @@ def test_claim_counts_a_claim_that_release_can_never_refund():
         "refunding total_claims would restore exactly the bug this fixes"
 
 
-def test_durable_remote_job_stays_heartbeated_but_is_not_releaseable():
-    """A dispatcher deploy must not buy a second Modal call after spawn."""
+def test_durable_remote_job_is_not_falsely_heartbeated_or_releaseable():
+    """The provider ledger, not an unobserving dispatcher, protects a call."""
     job_id = 730073
     try:
         wdb.track_job(job_id)
@@ -113,6 +119,19 @@ def test_durable_remote_job_stays_heartbeated_but_is_not_releaseable():
 
     shutdown = (Path(__file__).resolve().parents[1] / "main.py").read_text()
     assert "ids = dbx.locally_owned_job_ids()" in shutdown
+    heartbeat = inspect.getsource(wdb.heartbeat_forever)
+    assert "ACTIVE_JOBS - REMOTE_OWNED_JOBS" in heartbeat
+
+
+def test_claim_does_not_duplicate_an_unexpired_durable_provider_call():
+    _with_column(True)
+    wdb._REMOTE_EXEC_TABLE["ok"] = True
+    c = _Conn(fetchone={"id": 7})
+    wdb.claim_job(c, ["preview"], config.MAX_ATTEMPTS_MEDIA)
+    sql, _params = c.sql[0]
+    assert "remote_executions remote_live" in sql
+    assert "remote_live.total_claims = video_jobs.total_claims" in sql
+    assert "remote_live.deadline_at > NOW()" in sql
 
 
 def test_queue_still_works_before_the_migration_has_run():

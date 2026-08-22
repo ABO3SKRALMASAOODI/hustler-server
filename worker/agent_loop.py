@@ -3267,9 +3267,19 @@ def _semantic_progressed(before, after):
     for key in ("has_write", "has_render", "has_plan"):
         if after.get(key) and not before.get(key):
             return True
+    def _hashable_rows(values):
+        # Continuation state passes through JSON, which turns decision tuples
+        # into lists.  Normalize both live and restored markers so a process
+        # boundary cannot manufacture progress from a representation change.
+        return {
+            tuple(value) if isinstance(value, list) else value
+            for value in (values or ())
+        }
+
     for key in ("write_tools", "resolved_steps", "resolved_checks",
                 "decisions"):
-        old, new = set(before.get(key) or ()), set(after.get(key) or ())
+        old, new = _hashable_rows(before.get(key)), \
+            _hashable_rows(after.get(key))
         if new - old:
             return True
     old_assets = tuple(before.get("assets") or ())
@@ -3304,6 +3314,89 @@ def _semantic_progressed(before, after):
     if new_gaps is not None and old_gaps is not None and new_gaps < old_gaps:
         return True
     return False
+
+
+def _serializable_progress_marker(marker):
+    """Return a stable JSON-safe logical-turn progress frontier."""
+    marker = marker or {}
+    out = {}
+    for key, value in marker.items():
+        if isinstance(value, (set, frozenset)):
+            value = sorted(value)
+        if key == "decisions":
+            value = [list(row) if isinstance(row, tuple) else row
+                     for row in (value or [])]
+            value = sorted(value, key=lambda row: json.dumps(
+                row, sort_keys=True, default=str))
+        elif isinstance(value, tuple):
+            value = list(value)
+        out[key] = value
+    return out
+
+
+def _normalized_blocker_text(value):
+    """Remove volatile counters/timestamps without hiding the blocker kind."""
+    text = " ".join(str(value or "").strip().lower().split())
+    # Immutable EDL versions, media seconds, retry counters and generated IDs
+    # used to make an unchanged quality finding look new forever.  The words,
+    # category and tool identity carry the structural meaning we need here.
+    return re.sub(r"\d+(?:\.\d+)?", "#", text)[:700]
+
+
+def _objective_blocker_fingerprint(plan, verification):
+    """Identity of unfinished work, deliberately independent of EDL version.
+
+    Attempts and timeline rows are consequences, not objectives.  Hashing
+    them let an agent renew an identical blocker merely by writing v541 after
+    v540.  Only the finite pending plan criteria and normalized independent
+    verification findings belong in this identity.
+    """
+    plan = director.normalize_blueprint(plan) or {}
+    pending = sorted(
+        _normalized_blocker_text(row.get("task"))
+        for row in (plan.get("step_states") or [])
+        if row.get("status") == "pending" and row.get("task"))
+    checks = sorted(
+        _normalized_blocker_text(row.get("criterion"))
+        for row in (plan.get("acceptance_checks") or [])
+        if row.get("status") in {"pending", "failed"}
+        and row.get("criterion"))
+    findings = []
+    for row in (verification or {}).get("unresolved_findings") or []:
+        if not isinstance(row, dict):
+            findings.append(["", "", _normalized_blocker_text(row)])
+            continue
+        findings.append([
+            _normalized_blocker_text(
+                row.get("code") or row.get("kind") or row.get("category")),
+            _normalized_blocker_text(row.get("category")),
+            _normalized_blocker_text(row.get("message") or row.get("detail")),
+        ])
+    state = {"pending": pending, "checks": checks,
+             "verification": sorted(findings)}
+    raw = json.dumps(state, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20], state
+
+
+def _slice_boundary_resolution(frontier, current, blocker_fingerprint,
+                               previous_fingerprint=None,
+                               previous_repeats=0):
+    """Choose continuation from objective progress, never elapsed time alone."""
+    if _semantic_progressed(frontier, current):
+        return {
+            "action": "continue_progress",
+            "frontier": _serializable_progress_marker(current),
+            "blocker_fingerprint": None,
+            "blocker_repeats": 0,
+        }
+    repeats = (int(previous_repeats or 0) + 1
+               if previous_fingerprint == blocker_fingerprint else 1)
+    return {
+        "action": "continue_recovery" if repeats < 3 else "block",
+        "frontier": _serializable_progress_marker(frontier),
+        "blocker_fingerprint": blocker_fingerprint,
+        "blocker_repeats": repeats,
+    }
 
 
 def _record_outer_tool_outcome(ctx, name, result):
@@ -3937,7 +4030,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
     _responses_warned = False      # say the lane fell back ONCE, not per step
 
     def _durable_continuation(reason, blocker_fingerprint=None,
-                              blocker_repeats=0):
+                              blocker_repeats=0, progress_frontier=None):
         """Checkpoint consequences, enqueue the next slice, post no reply."""
         payload = dict(job.get("payload") or {})
         root_id = int(payload.get("root_agent_job_id") or job["id"])
@@ -3945,6 +4038,10 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         generation_cost = float(ctx.gen_extra_cost_usd or 0.0)
         generation_cost += (len(ctx.images_generated)
                             * config.IMAGE_PRICE_USD)
+        if progress_frontier is None:
+            current_marker = _semantic_progress_marker(ctx)
+            progress_frontier = (current_marker if _semantic_progressed(
+                semantic_start, current_marker) else semantic_start)
         state = {
             "durable_slice": True,
             "n": int(_cont.get("n") or 0) + 1,
@@ -3978,6 +4075,11 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             },
             "blocker_fingerprint": blocker_fingerprint,
             "blocker_repeats": int(blocker_repeats or 0),
+            # This is the strongest objective frontier reached by the whole
+            # logical user turn, not merely this physical worker job.  Without
+            # it, every continuation compared itself only with its own start
+            # and 543 churned EDL rows could each buy another execution slice.
+            "semantic0": _serializable_progress_marker(progress_frontier),
         }
         next_payload = {
             key: value for key, value in payload.items()
@@ -4011,27 +4113,15 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
     def _no_progress_blocker():
         plan = director.normalize_blueprint(
             getattr(ctx, "edit_plan", None)) or {}
-        pending = [row.get("task") for row in plan.get("step_states") or []
-                   if row.get("status") == "pending"]
-        failed = [row.get("criterion")
-                  for row in plan.get("acceptance_checks") or []
-                  if row.get("status") in {"pending", "failed"}]
         latest = ctx.latest_edl()["version"]
         verification = ((getattr(ctx, "verification_records", None) or {})
                         .get(int(latest)) or {})
-        verification_pending = [
-            row.get("message") or row.get("code")
-            for row in verification.get("unresolved_findings") or []
-        ]
-        recent = (ctx.turn_tool_outcomes or [])[-4:]
-        raw = json.dumps({"version": latest, "pending": pending,
-                          "checks": failed,
-                          "verification": verification_pending,
-                          "recent": recent},
-                         sort_keys=True, default=str)
-        fingerprint = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
-        return fingerprint, (pending[:3] or failed[:3]
-                             or verification_pending[:3])
+        fingerprint, state = _objective_blocker_fingerprint(
+            plan, verification)
+        return fingerprint, (state["pending"][:3]
+                             or state["checks"][:3]
+                             or [row[-1] for row in
+                                 state["verification"][:3]])
 
     # TPM admission: the provider's tokens-per-minute ceiling is org-wide,
     # and a fresh turn's first call is the biggest single request we make
@@ -4075,30 +4165,23 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             # is only the durable execution-envelope backstop; tool calls are
             # synchronous, so a call already running is not killed halfway
             # through and its result is preserved.
-            n_clock = _cont.get("clock", 0)
-            progress_lists = (
-                "images_generated", "videos_generated", "urls_fetched",
-                "web_recordings", "audio_extracted", "stock_added")
-            asset_progress = sum(
-                len(getattr(ctx, name, None) or []) for name in progress_lists)
             semantic_now = _semantic_progress_marker(ctx)
-            _progressed = _semantic_progressed(semantic_start, semantic_now)
-            plan_state = director.status(
-                getattr(ctx, "edit_plan", None) or {}).get("state")
-            incomplete = plan_state in {
-                "in_progress", "needs_review", "needs_repair"}
-            if total_expired or _progressed:
+            fingerprint, unresolved = _no_progress_blocker()
+            resolution = _slice_boundary_resolution(
+                semantic_start, semantic_now, fingerprint,
+                _cont.get("blocker_fingerprint"),
+                _cont.get("blocker_repeats"))
+            if resolution["action"] == "continue_progress":
                 return _durable_continuation(
                     "execution slice boundary" if total_expired
-                    else "productive work remains")
-
-            fingerprint, unresolved = _no_progress_blocker()
-            previous = _cont.get("blocker_fingerprint")
-            repeats = (int(_cont.get("blocker_repeats") or 0) + 1
-                       if previous == fingerprint else 1)
-            if repeats < 3:
+                    else "productive work remains",
+                    progress_frontier=resolution["frontier"])
+            if resolution["action"] == "continue_recovery":
                 return _durable_continuation(
-                    "recovering unresolved work", fingerprint, repeats)
+                    "recovering unresolved work",
+                    resolution["blocker_fingerprint"],
+                    resolution["blocker_repeats"],
+                    progress_frontier=resolution["frontier"])
 
             # Three durable slices reached the same normalized state without
             # progress. This is a genuine blocker, not a time/step limit.
@@ -4645,17 +4728,11 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 # version still has an unresolved quality record. Checkpoint
                 # the consequences and resume; never make the user ask again
                 # because a provider/runtime slice ended between repair steps.
-                verification_version, verification = _latest_verification(ctx)
+                _verification_version, verification = _latest_verification(ctx)
                 unresolved_rows = verification.get("unresolved_findings") or []
-                unresolved_ids = [
-                    row.get("finding_id") or row.get("code")
-                    for row in unresolved_rows
-                ]
-                raw = json.dumps({"version": verification_version,
-                                  "findings": unresolved_ids},
-                                 sort_keys=True, default=str)
-                fingerprint = hashlib.sha256(
-                    raw.encode("utf-8")).hexdigest()[:20]
+                fingerprint, _blocker_state = \
+                    _objective_blocker_fingerprint(
+                        getattr(ctx, "edit_plan", None), verification)
                 previous = _cont.get("blocker_fingerprint")
                 repeats = (int(_cont.get("blocker_repeats") or 0) + 1
                            if previous == fingerprint else 1)

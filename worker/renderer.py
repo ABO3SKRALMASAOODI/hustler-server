@@ -4311,7 +4311,7 @@ def _render_stamp(job_id):
     return f"{job_id}-{uuid.uuid4().hex[:12]}"
 
 
-def _validated_check_ranges(raw, duration):
+def _validated_check_ranges(raw, duration, max_windows=6, budget=25.0):
     """Clamp an untrusted proof request to a small, ordered output budget."""
     ranges = []
     for pair in raw or []:
@@ -4335,9 +4335,10 @@ def _validated_check_ranges(raw, duration):
     # times in a week) and left the user staring at a dead editor for a
     # proof window the critic asked too generously. A shorter proof is a
     # real look; a failed job is nothing.
-    if len(merged) > 6:
-        merged = merged[:6]
-    budget = 25.0
+    max_windows = max(1, int(max_windows or 1))
+    if len(merged) > max_windows:
+        merged = merged[:max_windows]
+    budget = max(0.1, min(float(duration), float(budget)))
     kept = []
     used = 0.0
     for a, b in merged:
@@ -4415,7 +4416,7 @@ def _concat_check_pieces(pieces, out_path, workdir):
 
 def _render_changed_sections(job_id, edl_row, index, src_local, workdir,
                              patch_locals, out_path, raw_ranges,
-                             verify_times, progress_cb=None):
+                             verify_times, progress_cb=None, raw_pages=None):
     """Render only affected output windows into one short proof reel."""
     duration0 = float((index.get("video") or {}).get("duration") or 0.0)
     keep_end = max((float(e) for _s, e in
@@ -4424,12 +4425,26 @@ def _render_changed_sections(job_id, edl_row, index, src_local, workdir,
     tl = Timeline(edl.get("keep") or [], edl.get("inserts") or [],
                   edl.get("speed") or [])
     duration = float(tl.out_duration)
-    ranges = _validated_check_ranges(raw_ranges, duration)
+    pages = [page for page in (raw_pages or [])
+             if isinstance(page, (list, tuple))]
+    if not pages:
+        pages = [raw_ranges]
+    requested = [pair for page in pages for pair in page]
+    # One queue job now carries every already-bounded logical proof page. The
+    # source, captions and patch assets are downloaded/compiled once, then the
+    # finite windows render in the same container. This removes N cold starts
+    # and N dispatcher wait loops without truncating large-edit evidence.
+    page_count = max(1, len(pages))
+    ranges = _validated_check_ranges(
+        requested, duration, max_windows=page_count * 6,
+        budget=page_count * 25.0)
     ranges = _contain_check_items(edl, tl, ranges, duration, index)
     # Containment may grow a small requested window around a long overlay or
     # transition. Re-apply the physical budget after that expansion so one
     # oversized authored item cannot smuggle a full render into the cheap lane.
-    ranges = _validated_check_ranges(ranges, duration)
+    ranges = _validated_check_ranges(
+        ranges, duration, max_windows=page_count * 6,
+        budget=page_count * 25.0)
 
     if src_local:
         info = media.probe(src_local)
@@ -4835,7 +4850,8 @@ def run_render_job(worker_db, job):
                     patch_locals, out_local,
                     job["payload"].get("check_ranges") or [],
                     job["payload"].get("verify_times") or [],
-                    progress_cb=_prog)
+                    progress_cb=_prog,
+                    raw_pages=job["payload"].get("check_pages") or [])
         if not proof_only and variant == "preview" \
                 and not force and not want_wm \
                 and not is_canvas:

@@ -154,6 +154,15 @@ def test_proof_range_guard_clamps_full_length_abuse():
     assert sum(b - a for a, b in clamped) <= 25.0 + 1e-6
 
 
+def test_explicit_proof_pages_share_one_source_download_without_truncation():
+    raw = [[0.0, 8.0], [10.0, 18.0], [20.0, 28.0], [30.0, 38.0]]
+    ordinary = renderer._validated_check_ranges(raw, 40.0)
+    batched = renderer._validated_check_ranges(
+        raw, 40.0, max_windows=12, budget=50.0)
+    assert sum(b - a for a, b in ordinary) == pytest.approx(25.0)
+    assert sum(b - a for a, b in batched) == pytest.approx(32.0)
+
+
 def test_proof_piece_clips_overlay_at_its_budget_edge():
     edl = _edl(overlays=[{
         "id": "ov3", "asset_key": "clips/9/rocket.mp4", "kind": "video",

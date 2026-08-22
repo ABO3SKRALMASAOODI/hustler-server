@@ -2,6 +2,7 @@
 
 import os
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -9,6 +10,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 ".."))
 
 import config  # noqa: E402
+import db as dbx  # noqa: E402
 import modal_app  # noqa: E402
 import remote  # noqa: E402
 
@@ -39,6 +41,21 @@ class _Function:
     def spawn(self, job=None):
         self.jobs.append(job)
         return self.call
+
+
+@pytest.fixture(autouse=True)
+def _no_real_remote_ledger(monkeypatch):
+    """Unit Modal calls never contact the configured production database."""
+    class Ledger:
+        def run(self, fn, *args, **kwargs):
+            if fn is dbx.record_remote_execution:
+                return False
+            return True
+
+        def reset(self):
+            pass
+
+    monkeypatch.setattr(remote.dbx, "Db", Ledger)
 
 
 def _enable(monkeypatch, percent=100):
@@ -129,6 +146,78 @@ def test_success_uses_durable_modal_function_and_marks_completion(monkeypatch):
     assert result.pop("_remote_job_completed") is True
     assert function.jobs[0]["total_claims"] == 4
     assert owned == [42]
+
+
+def test_modal_call_id_is_persisted_before_waiting(monkeypatch):
+    _enable(monkeypatch)
+    events = []
+
+    class Ledger:
+        def run(self, fn, *args, **kwargs):
+            events.append((fn.__name__, args))
+            return True
+
+        def reset(self):
+            pass
+
+    function = _Function(_Call({
+        "result": {"render_asset_id": 99}, "job_completed": True}))
+    monkeypatch.setattr(remote, "_modal_function", lambda _name: function)
+    monkeypatch.setattr(remote.dbx, "Db", Ledger)
+
+    remote._run_modal(JOB)
+
+    record = next(row for row in events
+                  if row[0] == "record_remote_execution")
+    assert record[1][0:5] == (42, 4, "modal", "fc-durable-1", "preview")
+    assert any(row[0] == "finish_remote_execution" for row in events)
+
+
+def test_guardian_heartbeats_only_after_provider_proves_call_is_running(
+        monkeypatch):
+    class RunningCall:
+        def get(self, timeout=None):
+            raise TimeoutError("still running")
+
+    monkeypatch.setitem(sys.modules, "modal", SimpleNamespace(
+        FunctionCall=SimpleNamespace(from_id=lambda _call_id: RunningCall())))
+    calls = []
+
+    class WorkerDb:
+        def run(self, fn, *args):
+            calls.append((fn, args))
+            return True
+
+    row = {"provider": "modal", "call_id": "fc-1", "job_id": 42,
+           "total_claims": 4, "type": "preview", "project_id": 7,
+           "user_id": 3, "attempts": 1, "payload": {}}
+    event = remote.reconcile_remote_execution(WorkerDb(), row)
+    assert event["status"] == "running"
+    assert calls == [(dbx.heartbeat_remote_execution, (42, 4))]
+
+
+def test_guardian_terminal_budget_failure_is_not_requeued(monkeypatch):
+    class FailedCall:
+        def get(self, timeout=None):
+            raise RuntimeError("Modal workspace spending limit exceeded")
+
+    monkeypatch.setitem(sys.modules, "modal", SimpleNamespace(
+        FunctionCall=SimpleNamespace(from_id=lambda _call_id: FailedCall())))
+    calls = []
+
+    class WorkerDb:
+        def run(self, fn, *args):
+            calls.append((fn, args))
+            return True
+
+    row = {"provider": "modal", "call_id": "fc-1", "job_id": 42,
+           "total_claims": 4, "type": "preview", "project_id": 7,
+           "user_id": 3, "attempts": 1, "payload": {}}
+    event = remote.reconcile_remote_execution(WorkerDb(), row)
+    assert event["status"] == "failed"
+    assert any(fn is dbx.finish_remote_execution for fn, _ in calls)
+    assert any(fn is dbx.finish_job for fn, _ in calls)
+    assert not any(fn is dbx.requeue_job for fn, _ in calls)
 
 
 def test_prelaunch_failure_can_fall_back_to_cloud_run(monkeypatch):

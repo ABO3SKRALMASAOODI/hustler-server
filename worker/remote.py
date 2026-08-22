@@ -48,6 +48,10 @@ class ModalLaunchUnavailable(RemoteExecutorError):
     """Modal rejected the submission before returning a durable call id."""
 
 
+class CloudflareLaunchUnavailable(RemoteExecutorError):
+    """Cloudflare proved no call was accepted, so Modal fallback is safe."""
+
+
 # The last version skew observed against the executor, or "" when the two
 # services agree (or when we have not been able to ask). Written by
 # check_executor_version, read by _run_remote so that a job which fails on a
@@ -105,6 +109,80 @@ def _modal_selected(job):
     stable = f"{job.get('id')}:{job.get('project_id')}:{jtype}"
     bucket = int(hashlib.sha256(stable.encode("utf-8")).hexdigest()[:8], 16)
     return bucket % 100 < percent
+
+
+def _cloudflare_selected(job):
+    if not config.CLOUDFLARE_EXECUTOR_ENABLED \
+            or not config.CLOUDFLARE_EXECUTOR_URL:
+        return False
+    if job.get("id") is None:
+        return False
+    if str(job.get("type") or "") not in config.CLOUDFLARE_EXECUTOR_TYPES:
+        return False
+    percent = config.CLOUDFLARE_EXECUTOR_PERCENT
+    if percent <= 0:
+        return False
+    if percent < 100:
+        stable = (f"cloudflare:{job.get('id')}:{job.get('project_id')}:"
+                  f"{job.get('type')}")
+        bucket = int(hashlib.sha256(
+            stable.encode("utf-8")).hexdigest()[:8], 16)
+        if bucket % 100 >= percent:
+            return False
+    shape = job.get("_execution_shape") or {}
+    if not shape:
+        return False
+    try:
+        return (int(shape.get("total_bytes") or 0)
+                <= config.CLOUDFLARE_MAX_INPUT_BYTES
+                and float(shape.get("max_duration_s") or 0)
+                <= config.CLOUDFLARE_MAX_SOURCE_DURATION_S)
+    except (TypeError, ValueError):
+        return False
+
+
+def desired_execution_provider(job):
+    """Return the immutable provider choice for one queue-backed job."""
+    stamped = str(((job.get("payload") or {}).get(
+        "execution_provider") or "")).strip().lower()
+    if stamped in {"cloudflare", "modal", "cloud_run", "local"}:
+        return stamped
+    if _cloudflare_selected(job):
+        return "cloudflare"
+    if _modal_selected(job):
+        return "modal"
+    return "cloud_run" if _executor_url(job.get("type")) else "local"
+
+
+def stamp_execution_provider(worker_db, job):
+    """Fence rollout changes from moving an already-claimed job."""
+    if job.get("id") is None:
+        return desired_execution_provider(job)
+    stamped = str(((job.get("payload") or {}).get(
+        "execution_provider") or "")).strip().lower()
+    if not stamped and config.CLOUDFLARE_EXECUTOR_ENABLED \
+            and str(job.get("type") or "") in \
+            config.CLOUDFLARE_EXECUTOR_TYPES:
+        try:
+            job["_execution_shape"] = worker_db.run(
+                dbx.project_execution_shape, job.get("project_id"),
+                (job.get("payload") or {}).get("asset_id"))
+        except Exception as exc:
+            # Fail closed to the proven Modal owner when capacity cannot be
+            # established. Provider optimization never takes the product down.
+            print(f"[dispatcher] Cloudflare shape probe failed for job "
+                  f"{job.get('id')}: {str(exc)[:160]}; keeping Modal",
+                  flush=True)
+    provider = desired_execution_provider(job)
+    persisted = worker_db.run(
+        dbx.stamp_execution_provider, job["id"], job.get("total_claims"),
+        provider)
+    if persisted:
+        payload = dict(job.get("payload") or {})
+        payload["execution_provider"] = persisted
+        job["payload"] = payload
+        return persisted
+    return provider
 
 
 def _modal_eu_selected(job):
@@ -343,8 +421,8 @@ def executor_supports(feature, timeout=8):
 
 def _job_payload(job):
     """A JSON-safe subset of the claimed job row. The runners read only these
-    fields; created_at (a datetime) is used by the dispatcher's process_one for
-    queue-wait timing, not by the runner, so it is deliberately omitted."""
+    fields. Queue latency is computed once by the dispatcher and carried as a
+    number, avoiding datetime/clock skew across providers."""
     return {
         "id": job["id"],
         "type": job["type"],
@@ -525,6 +603,105 @@ def _modal_transport_error(exc):
     return isinstance(exc, (ConnectionError, OSError) + transient)
 
 
+def reconcile_remote_execution(worker_db, row):
+    """Observe one durable provider call after its dispatcher disappeared.
+
+    A timeout from ``get`` is positive evidence that Modal still owns the
+    call, so it earns a database heartbeat. A terminal function error follows
+    the same retry policy as an attached dispatcher. Transport uncertainty is
+    deliberately left alone until the persisted provider deadline; guessing
+    "dead" there is how duplicate paid renders are born.
+    """
+    provider = row.get("provider")
+    if provider not in {"modal", "cloudflare"}:
+        return {"status": "unsupported_provider", "row": row}
+    job_id = row["job_id"]
+    claim = row["total_claims"]
+    job = {
+        "id": job_id,
+        "type": row.get("type"),
+        "project_id": row.get("project_id"),
+        "user_id": row.get("user_id"),
+        "attempts": int(row.get("attempts") or 0),
+        "total_claims": claim,
+        "payload": row.get("payload") or {},
+    }
+    try:
+        if provider == "modal":
+            import modal
+            call = modal.FunctionCall.from_id(row["call_id"])
+            data = call.get(timeout=0.1)
+        else:
+            status = _cloudflare_status(
+                row["call_id"], row.get("function_name") or
+                _cloudflare_lane(row.get("type")), timeout=10)
+            state = status.get("status")
+            if state in {"submitted", "starting", "running", "unknown"}:
+                worker_db.run(
+                    dbx.heartbeat_remote_execution, job_id, claim)
+                return {"status": "running", "job": job}
+            if state == "missing":
+                return {"status": "unknown", "job": job}
+            data = status.get("envelope")
+            if not isinstance(data, dict):
+                raise RemoteExecutorError(
+                    f"Cloudflare call {row['call_id']} ended without an "
+                    "executor envelope")
+    except TimeoutError:
+        worker_db.run(dbx.heartbeat_remote_execution, job_id, claim)
+        return {"status": "running", "job": job}
+    except Exception as exc:
+        if ((provider == "modal" and _modal_transport_error(exc))
+                or (provider == "cloudflare"
+                    and isinstance(exc, requests.RequestException))):
+            return {"status": "unknown", "job": job, "error": exc}
+        decision = failure_policy.decision_for(exc, job.get("type"))
+        worker_db.run(dbx.finish_remote_execution, job_id, claim,
+                      "failed", exc)
+        if decision.retryable and job["attempts"] < decision.max_attempts:
+            requeued = worker_db.run(
+                dbx.requeue_job, job_id, exc, claim)
+            return {"status": "requeued" if requeued else "superseded",
+                    "job": job, "error": exc}
+        failure_result = {"failure": decision.payload(exc)}
+        finished = worker_db.run(
+            dbx.finish_job, job_id, "failed", exc, failure_result, claim)
+        return {"status": "failed" if finished is not False else "superseded",
+                "job": job, "error": exc}
+
+    try:
+        _interpret_executor_data(data, job)
+    except Exception as exc:
+        decision = failure_policy.decision_for(exc, job.get("type"))
+        worker_db.run(dbx.finish_remote_execution, job_id, claim,
+                      "failed", exc)
+        if decision.retryable and job["attempts"] < decision.max_attempts:
+            requeued = worker_db.run(dbx.requeue_job, job_id, exc, claim)
+            return {"status": "requeued" if requeued else "superseded",
+                    "job": job, "error": exc}
+        failure_result = {"failure": decision.payload(exc)}
+        finished = worker_db.run(
+            dbx.finish_job, job_id, "failed", exc, failure_result, claim)
+        return {"status": "failed" if finished is not False else "superseded",
+                "job": job, "error": exc}
+
+    current = worker_db.run(dbx.get_job, job_id)
+    if current and current.get("state") in {"done", "failed"}:
+        terminal = current["state"]
+        worker_db.run(dbx.finish_remote_execution, job_id, claim,
+                      terminal, current.get("error"))
+        return {"status": terminal, "job": job,
+                "error": (RuntimeError(current.get("error"))
+                          if terminal == "failed" else None)}
+
+    # execute() commits the queue result before returning the FunctionCall.
+    # If a provider says complete but the queue has not observed that commit,
+    # keep the lease protected and surface the contradiction in logs; never
+    # manufacture a second render or a success row without billing semantics.
+    worker_db.run(dbx.heartbeat_remote_execution, job_id, claim)
+    return {"status": "completion_pending", "job": job}
+
+
 def _run_modal(job, function_override=None):
     base_name = _modal_function_name(job.get("type"), function_override)
     requested_name = (f"{base_name}_eu"
@@ -555,6 +732,9 @@ def _run_modal(job, function_override=None):
         print(f"[dispatcher] Modal EU canary type={job.get('type')} "
               f"job={job.get('id')} project={job.get('project_id')} "
               f"function={name}", flush=True)
+    execution_timeout_s = max(
+        config.executor_timeout_for(job.get("type")),
+        config.modal_timeout_for(job.get("type"))) + 60
     remote_handoff = job.get("id") is not None
     if remote_handoff:
         # Reserve ownership immediately before the launch request. This closes
@@ -570,13 +750,35 @@ def _run_modal(job, function_override=None):
         raise ModalLaunchUnavailable(
             f"Modal rejected {name} before launch: {exc}") from exc
     call_id = call.object_id
+    if remote_handoff:
+        ledger = dbx.Db()
+        try:
+            persisted = ledger.run(
+                dbx.record_remote_execution, job["id"],
+                job.get("total_claims"), "modal", call_id, name,
+                execution_timeout_s, {
+                    "job_type": job.get("type"),
+                    "execution_policy": config.execution_policy_for(job),
+                    "queue_wait_s": job.get("_queue_wait_s"),
+                })
+            if not persisted:
+                print(f"[dispatcher] Modal call {call_id} launched but the "
+                      "durable remote ledger is not installed yet; remaining "
+                      "attached to preserve single execution", flush=True)
+        except Exception as exc:
+            # Submission already happened. Never launch a duplicate merely
+            # because the observability write failed; stay attached to this
+            # exact FunctionCall and let its fenced executor own completion.
+            print(f"[dispatcher] Modal call {call_id} launched; remote "
+                  f"ledger write failed ({str(exc)[:160]}), staying attached",
+                  flush=True)
+        finally:
+            ledger.reset()
     # Once a durable call id exists, timing out early and returning to the
     # queue would run the same paid render twice. Stay attached through the
     # provider's full function limit; inner ffmpeg/stall deadlines still make
     # genuinely bad previews fail much earlier.
-    deadline = time.monotonic() + max(
-        config.executor_timeout_for(job.get("type")),
-        config.modal_timeout_for(job.get("type"))) + 60
+    deadline = time.monotonic() + execution_timeout_s
     try:
         data = call.get(timeout=max(1, deadline - time.monotonic()))
     except TimeoutError as exc:
@@ -589,9 +791,237 @@ def _run_modal(job, function_override=None):
         # function failure is already terminal and must reach repair/reaper
         # policy immediately rather than being polled for the next hour.
         if not _modal_transport_error(exc):
+            if remote_handoff:
+                ledger = dbx.Db()
+                try:
+                    ledger.run(dbx.finish_remote_execution, job["id"],
+                               job.get("total_claims"), "failed", exc)
+                except Exception:
+                    pass
+                finally:
+                    ledger.reset()
             raise RemoteExecutorError(
                 f"Modal {name} call {call_id} failed: {exc}") from exc
         data = _recover_modal_result(call_id, job, deadline)
+    try:
+        result = _interpret_executor_data(data, job)
+    except Exception as exc:
+        if remote_handoff:
+            ledger = dbx.Db()
+            try:
+                ledger.run(dbx.finish_remote_execution, job["id"],
+                           job.get("total_claims"), "failed", exc)
+            except Exception:
+                pass
+            finally:
+                ledger.reset()
+        raise
+    if remote_handoff:
+        ledger = dbx.Db()
+        try:
+            ledger.run(dbx.finish_remote_execution, job["id"],
+                       job.get("total_claims"), "done")
+        except Exception:
+            pass
+        finally:
+            ledger.reset()
+    return result
+
+
+def _cloudflare_lane(job_type):
+    return "interactive" if job_type in {
+        "preview", "preview_check", "filmstrip"} else "batch"
+
+
+def _cloudflare_call_id(job):
+    raw = f"{job.get('type')}:{job.get('id')}:{job.get('total_claims')}"
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
+    return f"cf-{str(job.get('type') or 'job')[:18]}-{digest}"
+
+
+def _cloudflare_headers():
+    headers = {"Content-Type": "application/json"}
+    if config.REMOTE_EXECUTOR_SECRET:
+        headers["Authorization"] = f"Bearer {config.REMOTE_EXECUTOR_SECRET}"
+    return headers
+
+
+def _cloudflare_preflight(timeout=10):
+    """Authenticated positive readiness cache for the Container router.
+
+    The first eligible job validates provider identity and the shared secret.
+    Repeating that cross-region request on every proof reel adds latency but
+    no safety: a missing route is still proven by the named POST's 404. Only
+    successes are cached, and the URL is part of the key.
+    """
+    key = f"cloudflare:{config.CLOUDFLARE_EXECUTOR_URL}"
+    now = time.monotonic()
+    with _health_lock:
+        cached = _health_cache.get(key)
+        if cached and now - cached[0] < _HEALTH_CACHE_S:
+            return cached[1]
+        response = requests.get(
+            f"{config.CLOUDFLARE_EXECUTOR_URL}/health",
+            headers=_cloudflare_headers(), timeout=timeout)
+        if response.status_code != 200:
+            raise CloudflareLaunchUnavailable(
+                f"Cloudflare preflight returned {response.status_code}")
+        try:
+            body = response.json()
+        except ValueError as exc:
+            raise CloudflareLaunchUnavailable(
+                "Cloudflare preflight returned non-JSON") from exc
+        if body.get("provider") != "cloudflare":
+            raise CloudflareLaunchUnavailable(
+                "Cloudflare preflight reached the wrong service")
+        _health_cache[key] = (now, body)
+        return body
+
+
+def _cloudflare_status(call_id, lane, timeout=10):
+    response = requests.get(
+        f"{config.CLOUDFLARE_EXECUTOR_URL}/calls/{lane}/{call_id}",
+        headers=_cloudflare_headers(), timeout=timeout)
+    if response.status_code == 404:
+        return {"status": "missing"}
+    response.raise_for_status()
+    return response.json()
+
+
+def _recover_cloudflare_result(call_id, lane, job, deadline):
+    """Reconnect a named Container call without launching another instance."""
+    last = None
+    while time.monotonic() < deadline:
+        try:
+            status = _cloudflare_status(call_id, lane, timeout=10)
+            state = status.get("status")
+            if state in {"submitted", "starting", "running", "unknown"}:
+                if job.get("id") is not None:
+                    probe = dbx.Db()
+                    try:
+                        probe.run(dbx.heartbeat_remote_execution, job["id"],
+                                  job.get("total_claims"))
+                    except Exception:
+                        pass
+                    finally:
+                        probe.reset()
+            elif state in {"done", "failed"}:
+                envelope = status.get("envelope")
+                if isinstance(envelope, dict):
+                    return envelope
+                raise RemoteExecutorError(
+                    f"Cloudflare call {call_id} ended without an envelope")
+            elif state == "missing":
+                # This function is entered only after a launch POST became
+                # ambiguous. Even repeated missing reads cannot prove a lost
+                # request will not arrive later, so they NEVER authorize a
+                # second provider. The fenced lease expires only at the same
+                # outer deadline as the original call.
+                last = RemoteExecutorError(
+                    f"Cloudflare call {call_id} is not observable yet")
+            if job.get("id") is not None:
+                probe = dbx.Db()
+                try:
+                    current = probe.run(dbx.get_job, job["id"])
+                    if current and current.get("state") == "done":
+                        return {"result": current.get("result"),
+                                "job_completed": True}
+                    if current and current.get("state") == "failed":
+                        return {"error": current.get("error") or
+                                "Cloudflare executor failed",
+                                "retryable": False}
+                finally:
+                    probe.reset()
+        except Exception as exc:
+            last = exc
+        time.sleep(2)
+    raise RemoteExecutorError(
+        f"Cloudflare call {call_id} could not be recovered: {last}") from last
+
+
+def _run_cloudflare(job):
+    if job.get("id") is None or job.get("total_claims") is None:
+        raise CloudflareLaunchUnavailable(
+            "Cloudflare canary accepts queue-backed jobs only")
+    try:
+        _cloudflare_preflight(timeout=10)
+    except requests.RequestException as exc:
+        # No launch request was sent, so Modal fallback is unambiguous.
+        raise CloudflareLaunchUnavailable(
+            f"Cloudflare preflight failed before launch: {exc}") from exc
+
+    call_id = _cloudflare_call_id(job)
+    lane = _cloudflare_lane(job.get("type"))
+    timeout_s = config.executor_timeout_for(job.get("type")) + 60
+    dbx.mark_remote_owned(job["id"])
+    ledger = dbx.Db()
+    try:
+        ledger.run(dbx.record_remote_execution, job["id"],
+                   job.get("total_claims"), "cloudflare", call_id, lane,
+                   timeout_s, {"job_type": job.get("type"),
+                               "execution_policy":
+                                   config.execution_policy_for(job),
+                               "queue_wait_s": job.get("_queue_wait_s")})
+    except Exception as exc:
+        print(f"[dispatcher] Cloudflare call {call_id} ledger write failed "
+              f"({str(exc)[:160]}); deterministic call id still prevents a "
+              "second Container instance", flush=True)
+    finally:
+        ledger.reset()
+
+    deadline = time.monotonic() + timeout_s
+    try:
+        response = requests.post(
+            f"{config.CLOUDFLARE_EXECUTOR_URL}/calls/{lane}/{call_id}",
+            json={"job": _job_payload(job)}, headers=_cloudflare_headers(),
+            timeout=max(1, deadline - time.monotonic()))
+    except requests.RequestException:
+        data = _recover_cloudflare_result(call_id, lane, job, deadline)
+    else:
+        if response.status_code == 404:
+            ledger = dbx.Db()
+            try:
+                ledger.run(dbx.finish_remote_execution, job["id"],
+                           job.get("total_claims"), "cancelled",
+                           "Cloudflare route was not deployed")
+            except Exception:
+                pass
+            finally:
+                ledger.reset()
+            dbx.unmark_remote_owned(job["id"])
+            raise CloudflareLaunchUnavailable(
+                "Cloudflare Container route is not deployed")
+        if response.status_code != 200:
+            try:
+                response_body = response.json()
+            except ValueError:
+                response_body = {}
+            if response_body.get("safe_to_fallback"):
+                ledger = dbx.Db()
+                try:
+                    ledger.run(dbx.finish_remote_execution, job["id"],
+                               job.get("total_claims"), "cancelled",
+                               response_body.get("error") or
+                               "Cloudflare launch refused")
+                except Exception:
+                    pass
+                finally:
+                    ledger.reset()
+                dbx.unmark_remote_owned(job["id"])
+                raise CloudflareLaunchUnavailable(
+                    str(response_body.get("error") or
+                        "Cloudflare launch refused before /run"))
+            # The Worker may have lost its side of an already-running
+            # container request. Reconnect to the deterministic call before
+            # considering any physical retry.
+            return _interpret_executor_data(
+                _recover_cloudflare_result(call_id, lane, job, deadline),
+                job)
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise RemoteExecutorError(
+                "Cloudflare call returned non-JSON") from exc
     return _interpret_executor_data(data, job)
 
 
@@ -633,7 +1063,25 @@ def _run_cloud(job, url_override=None):
 
 
 def _run_remote(job, url_override=None, modal_function=None):
-    if url_override is None and _modal_selected(job):
+    provider = desired_execution_provider(job) if url_override is None \
+        else "cloud_run"
+    if provider == "cloudflare":
+        try:
+            return _run_cloudflare(job)
+        except CloudflareLaunchUnavailable as exc:
+            if not (config.CLOUDFLARE_MODAL_FALLBACK
+                    and config.MODAL_EXECUTOR_ENABLED
+                    and str(job.get("type") or "") in
+                    config.MODAL_EXECUTOR_TYPES):
+                raise
+            print(f"[dispatcher] {exc}; launching the same fenced job on "
+                  "Modal before any Cloudflare call was accepted",
+                  flush=True)
+            return _run_modal(job, modal_function)
+    if provider == "local":
+        raise RemoteExecutorError(
+            f"no remote executor is configured for {job.get('type')}")
+    if provider == "modal":
         try:
             return _run_modal(job, modal_function)
         except ModalLaunchUnavailable as exc:
@@ -905,7 +1353,7 @@ def run_render_remote(worker_db, job):      # signature matches run_render_job
 
 
 def run_filmstrip_remote(worker_db, job):
-    """Run timeline-art decoding on Modal, never on the retired executor.
+    """Run timeline-art decoding on a scale-to-zero provider.
 
     Filmstrip jobs are queue-backed and therefore use the same durable Modal
     launch/fenced completion contract as renders. This intentionally bypasses
@@ -913,8 +1361,12 @@ def run_filmstrip_remote(worker_db, job):
     workload that OOM-killed the 512-MiB dispatcher, and Google is no longer a
     production execution target.
     """
+    provider = desired_execution_provider(job)
+    if provider == "cloudflare":
+        return _run_remote(job)
     if not config.MODAL_EXECUTOR_ENABLED:
-        raise ModalLaunchUnavailable("Modal is required for filmstrip compute")
+        raise ModalLaunchUnavailable(
+            "Modal or Cloudflare is required for filmstrip compute")
     # The 2-core/2-GiB preview reservation is enough for two single-threaded
     # asset seeks while costing far less than the generic 8-GiB light lane.
     return _run_modal(job, function_override="preview")
@@ -961,7 +1413,9 @@ def _run_request_with_capacity_fallback(job):
         is_capacity = getattr(error, "failure_kind", "") == \
             "executor_capacity"
         definitely_missing = isinstance(error, RemoteServiceUnavailable)
-        modal_capacity = _modal_selected(job) and is_capacity
+        modal_capacity = (desired_execution_provider(job)
+                          in {"modal", "cloudflare"}
+                          and config.MODAL_EXECUTOR_ENABLED and is_capacity)
         cloud_sibling_fallback = primary \
             and primary != config.REMOTE_EXECUTOR_URL \
             and (is_capacity or definitely_missing)

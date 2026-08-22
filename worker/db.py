@@ -124,6 +124,7 @@ class Db:
 
 _CLAIMS_COL = {"ok": False, "checked_at": 0.0}
 _CLAIMS_RECHECK_S = 60.0
+_REMOTE_EXEC_TABLE = {"ok": False, "checked_at": 0.0}
 
 
 def claims_column_ready(conn):
@@ -159,6 +160,31 @@ def claims_column_ready(conn):
     return _CLAIMS_COL["ok"]
 
 
+def remote_executions_table_ready(conn):
+    """True once migration 025 has installed the provider handoff ledger."""
+    if _REMOTE_EXEC_TABLE["ok"]:
+        return True
+    if time.time() - _REMOTE_EXEC_TABLE["checked_at"] < _CLAIMS_RECHECK_S:
+        return False
+    _REMOTE_EXEC_TABLE["checked_at"] = time.time()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT to_regclass('remote_executions') AS name")
+            row = cur.fetchone()
+        name = ((row or {}).get("name") if isinstance(row, dict)
+                else ((row or [None])[0]))
+        _REMOTE_EXEC_TABLE["ok"] = bool(name)
+    except Exception as exc:                              # pragma: no cover
+        print(f"[db] remote execution ledger probe failed: {exc}",
+              flush=True)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return False
+    return _REMOTE_EXEC_TABLE["ok"]
+
+
 def claim_job(conn, types, max_attempts):
     # Previews (always a user or agent actively waiting) jump the queue over
     # finals, and both jump over indexing — a turn's render_preview never
@@ -191,8 +217,16 @@ def claim_job(conn, types, max_attempts):
     # one five-file upload from occupying all index threads for minutes while
     # a different user's tiny clip sits behind it.
     has_claims = claims_column_ready(conn)
+    has_remote_ledger = has_claims and remote_executions_table_ready(conn)
     claims_set = ", total_claims = COALESCE(total_claims, 0) + 1" if has_claims else ""
     claims_where = "AND COALESCE(total_claims, 0) < %s" if has_claims else ""
+    remote_where = "" if not has_remote_ledger else """
+                  AND NOT EXISTS (
+                    SELECT 1 FROM remote_executions remote_live
+                    WHERE remote_live.job_id = video_jobs.id
+                      AND remote_live.total_claims = video_jobs.total_claims
+                      AND remote_live.state IN ('submitted', 'running')
+                      AND remote_live.deadline_at > NOW())"""
     serialize = any(t in ("agent_turn", "shorts_plan", "mcp_tool")
                     for t in types)
     serial_where = ""
@@ -310,6 +344,7 @@ def claim_job(conn, types, max_attempts):
                   AND (state = 'queued'
                        OR (state = 'running'
                            AND heartbeat_at < NOW() - make_interval(secs => %s)))
+                  {remote_where}
                   {serial_where}
                   {index_fair_where}
                 ORDER BY CASE type WHEN 'preview' THEN 0
@@ -342,8 +377,15 @@ def fail_ceilinged_jobs(conn):
     """
     if not claims_column_ready(conn):
         return []
+    remote_where = "" if not remote_executions_table_ready(conn) else """
+              AND NOT EXISTS (
+                SELECT 1 FROM remote_executions remote_live
+                WHERE remote_live.job_id = video_jobs.id
+                  AND remote_live.total_claims = video_jobs.total_claims
+                  AND remote_live.state IN ('submitted', 'running')
+                  AND remote_live.deadline_at > NOW())"""
     with conn.cursor() as cur:
-        cur.execute("""
+        cur.execute(f"""
             UPDATE video_jobs
             SET state = 'failed', updated_at = NOW(),
                 error = COALESCE(error, 'This job was restarted too many times '
@@ -352,6 +394,7 @@ def fail_ceilinged_jobs(conn):
               AND (state = 'queued'
                    OR (state = 'running'
                        AND heartbeat_at < NOW() - make_interval(secs => %s)))
+              {remote_where}
             RETURNING id, type, project_id, user_id, error, payload
         """, (config.MAX_CLAIMS_ABSOLUTE, config.STALE_AFTER_S))
         return cur.fetchall()
@@ -360,8 +403,15 @@ def fail_ceilinged_jobs(conn):
 def fail_exhausted_jobs(conn):
     """Reaper: stale running jobs with no attempts left become failed.
     Returns the failed rows so the caller can surface each in chat."""
+    remote_where = "" if not remote_executions_table_ready(conn) else """
+              AND NOT EXISTS (
+                SELECT 1 FROM remote_executions remote_live
+                WHERE remote_live.job_id = video_jobs.id
+                  AND remote_live.total_claims = video_jobs.total_claims
+                  AND remote_live.state IN ('submitted', 'running')
+                  AND remote_live.deadline_at > NOW())"""
     with conn.cursor() as cur:
-        cur.execute("""
+        cur.execute(f"""
             UPDATE video_jobs
             SET state = 'failed', updated_at = NOW(),
                 error = COALESCE(error, 'Worker died and retries are exhausted')
@@ -369,6 +419,7 @@ def fail_exhausted_jobs(conn):
               AND heartbeat_at < NOW() - make_interval(secs => %s)
               AND attempts >= CASE WHEN type IN ('agent_turn', 'mcp_tool')
                                    THEN %s ELSE %s END
+              {remote_where}
             RETURNING id, type, project_id, user_id, error, payload
         """, (config.STALE_AFTER_S, config.MAX_ATTEMPTS_AGENT,
               config.MAX_ATTEMPTS_MEDIA))
@@ -621,6 +672,152 @@ def get_job(conn, job_id):
     with conn.cursor() as cur:
         cur.execute("SELECT * FROM video_jobs WHERE id = %s", (job_id,))
         return cur.fetchone()
+
+
+def stamp_execution_provider(conn, job_id, total_claims, provider):
+    """Persist a queue job's provider choice under its current lease."""
+    if provider not in {"modal", "cloudflare", "cloud_run", "local"}:
+        raise ValueError("invalid execution provider")
+    with conn.cursor() as cur:
+        cur.execute("""UPDATE video_jobs
+                       SET payload = CASE
+                         WHEN COALESCE(payload->>'execution_provider', '') = ''
+                         THEN jsonb_set(COALESCE(payload, '{}'::jsonb),
+                                        '{execution_provider}', to_jsonb(%s::text),
+                                        true)
+                         ELSE payload END,
+                           updated_at = NOW()
+                       WHERE id = %s AND state = 'running'
+                         AND (%s::integer IS NULL OR total_claims = %s)
+                       RETURNING payload->>'execution_provider' AS provider""",
+                    (provider, job_id, total_claims, total_claims))
+        row = cur.fetchone()
+        return row and row.get("provider")
+
+
+def project_execution_shape(conn, project_id, asset_id=None):
+    """Small capacity fingerprint used before a provider is selected."""
+    with conn.cursor() as cur:
+        if asset_id is not None:
+            cur.execute("""SELECT COALESCE(bytes, 0) AS total_bytes,
+                                  COALESCE(bytes, 0) AS max_bytes,
+                                  COALESCE(duration_s, 0) AS max_duration_s,
+                                  COALESCE(width, 0) AS max_width,
+                                  COALESCE(height, 0) AS max_height,
+                                  1 AS assets
+                           FROM assets WHERE id = %s AND project_id = %s""",
+                        (asset_id, project_id))
+        else:
+            cur.execute("""SELECT COALESCE(SUM(bytes), 0) AS total_bytes,
+                                  COALESCE(MAX(bytes), 0) AS max_bytes,
+                                  COALESCE(MAX(duration_s), 0) AS max_duration_s,
+                                  COALESCE(MAX(width), 0) AS max_width,
+                                  COALESCE(MAX(height), 0) AS max_height,
+                                  COUNT(*) AS assets
+                           FROM assets WHERE project_id = %s
+                             AND kind IN ('original', 'video_clip',
+                                          'image_ref', 'generated_video',
+                                          'generated_image')""",
+                        (project_id,))
+        return cur.fetchone() or {}
+
+
+def record_remote_execution(conn, job_id, total_claims, provider, call_id,
+                            function_name, timeout_s, meta=None):
+    """Persist a provider handoff before the dispatcher begins waiting."""
+    if job_id is None or total_claims is None \
+            or not remote_executions_table_ready(conn):
+        return False
+    with conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO remote_executions
+              (job_id, total_claims, provider, call_id, function_name,
+               state, deadline_at, meta)
+            VALUES (%s, %s, %s, %s, %s, 'submitted',
+                    NOW() + make_interval(secs => %s), %s)
+            ON CONFLICT (job_id) DO UPDATE SET
+              total_claims = EXCLUDED.total_claims,
+              provider = EXCLUDED.provider,
+              call_id = EXCLUDED.call_id,
+              function_name = EXCLUDED.function_name,
+              state = 'submitted', deadline_at = EXCLUDED.deadline_at,
+              submitted_at = NOW(), started_at = NULL,
+              last_observed_at = NOW(), completed_at = NULL,
+              error = NULL, meta = EXCLUDED.meta
+            WHERE remote_executions.total_claims <= EXCLUDED.total_claims
+        """, (job_id, total_claims, provider, str(call_id), function_name,
+              max(1, int(timeout_s)), Json(meta or {})))
+        return cur.rowcount > 0
+
+
+def mark_remote_execution_running(conn, job_id, total_claims):
+    if job_id is None or total_claims is None \
+            or not remote_executions_table_ready(conn):
+        return False
+    with conn.cursor() as cur:
+        cur.execute("""UPDATE remote_executions
+                       SET state = 'running',
+                           started_at = COALESCE(started_at, NOW()),
+                           last_observed_at = NOW()
+                       WHERE job_id = %s AND total_claims = %s
+                         AND state IN ('submitted', 'running')""",
+                    (job_id, total_claims))
+        return cur.rowcount > 0
+
+
+def heartbeat_remote_execution(conn, job_id, total_claims):
+    """Heartbeat only after the provider or executor proved the call alive."""
+    if job_id is None or total_claims is None \
+            or not remote_executions_table_ready(conn):
+        return False
+    with conn.cursor() as cur:
+        cur.execute("""UPDATE remote_executions
+                       SET last_observed_at = NOW()
+                       WHERE job_id = %s AND total_claims = %s
+                         AND state IN ('submitted', 'running')""",
+                    (job_id, total_claims))
+        if cur.rowcount <= 0:
+            return False
+        cur.execute("""UPDATE video_jobs
+                       SET heartbeat_at = NOW(), updated_at = NOW()
+                       WHERE id = %s AND total_claims = %s
+                         AND state = 'running'""",
+                    (job_id, total_claims))
+        return cur.rowcount > 0
+
+
+def finish_remote_execution(conn, job_id, total_claims, state, error=None):
+    if state not in {"done", "failed", "cancelled"}:
+        raise ValueError("remote execution terminal state is invalid")
+    if job_id is None or total_claims is None \
+            or not remote_executions_table_ready(conn):
+        return False
+    with conn.cursor() as cur:
+        cur.execute("""UPDATE remote_executions
+                       SET state = %s, completed_at = NOW(),
+                           last_observed_at = NOW(), error = %s
+                       WHERE job_id = %s AND total_claims = %s""",
+                    (state, error_text.excerpt(error, 2000) if error else None,
+                     job_id, total_claims))
+        return cur.rowcount > 0
+
+
+def active_remote_executions(conn):
+    """Provider calls whose queue lease is still current and unexpired."""
+    if not remote_executions_table_ready(conn):
+        return []
+    with conn.cursor() as cur:
+        cur.execute("""SELECT r.*, j.type, j.project_id, j.user_id,
+                              j.attempts, j.payload, j.state AS job_state,
+                              j.error AS job_error, j.result AS job_result
+                       FROM remote_executions r
+                       JOIN video_jobs j ON j.id = r.job_id
+                        AND j.total_claims = r.total_claims
+                       WHERE r.state IN ('submitted', 'running')
+                         AND r.deadline_at > NOW()
+                         AND j.state = 'running'
+                       ORDER BY r.last_observed_at ASC""")
+        return cur.fetchall()
 
 
 _metrics_table_ok = None
@@ -954,10 +1151,11 @@ def publish_mcp_catalog(conn, catalog):
 # ------------------------------------------------------------------ #
 
 ACTIVE_JOBS = set()
-# A successful Modal spawn transfers heartbeat + terminal-write ownership to
-# the durable remote function. Keep these jobs in ACTIVE_JOBS so this process
-# covers the cold-start gap, but do not hand them back to the queue when Render
-# SIGTERMs the dispatcher for a deploy: the Modal executor is still running.
+# A successful provider spawn transfers heartbeat + terminal-write ownership
+# to the durable remote function. The dispatcher keeps the id only for clean
+# shutdown bookkeeping; it must not heartbeat work it cannot observe. The
+# durable remote_executions row protects the cold-start gap, and the executor
+# itself begins heartbeating after it actually starts.
 REMOTE_OWNED_JOBS = set()
 _ACTIVE_LOCK = threading.Lock()
 
@@ -1097,7 +1295,10 @@ def heartbeat_forever():
     while True:
         time.sleep(config.HEARTBEAT_EVERY_S)
         with _ACTIVE_LOCK:
-            ids = list(ACTIVE_JOBS)
+            # A dispatcher waiting on Modal is not proof that ffmpeg or the
+            # agent is alive. Heartbeating REMOTE_OWNED_JOBS here is how a
+            # failed provider call looked healthy indefinitely.
+            ids = list(ACTIVE_JOBS - REMOTE_OWNED_JOBS)
         if not ids:
             last_ok = time.time()
             continue
@@ -1125,6 +1326,22 @@ def heartbeat_forever():
                                    SET heartbeat_at = NOW()
                                    WHERE id = ANY(%s) AND state = 'running'""",
                                 (ids,))
+                    if remote_executions_table_ready(conn):
+                        # On an executor process these ids have a matching
+                        # durable handoff row. A local Render job simply
+                        # updates zero rows here.
+                        cur.execute("""UPDATE remote_executions r
+                                       SET state = 'running',
+                                           started_at = COALESCE(
+                                               started_at, NOW()),
+                                           last_observed_at = NOW()
+                                       FROM video_jobs j
+                                       WHERE r.job_id = j.id
+                                         AND r.job_id = ANY(%s)
+                                         AND r.total_claims = j.total_claims
+                                         AND r.state IN
+                                             ('submitted', 'running')""",
+                                    (ids,))
             hdb.run(_beat)
             if fails:
                 print(f"[heartbeat] recovered after {fails} failed beat(s) — "

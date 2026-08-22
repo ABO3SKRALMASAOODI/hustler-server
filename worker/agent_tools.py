@@ -16988,75 +16988,68 @@ def _proof_pages(ranges):
 
 
 def _run_changed_preview_check(ctx, row, plan, ranges):
-    """Render every paged proof reel without replacing Studio preview."""
+    """Render every logical proof page in one source-reusing queue job."""
     version = int(row["version"])
     if version in ctx.checked_versions:
         return (f"Changed sections of EDL v{version} were already rendered "
                 "and checked. Keep editing, or finish the edit; the complete "
                 "preview is automatic once.")
     pages = _proof_pages(ranges)
-    notes, all_covered, completed = [], [], 0
-    for page_index, page_ranges in enumerate(pages, start=1):
-        payload = _child_payload(ctx, {
-                   "edl_version": version, "check_ranges": page_ranges,
-                   "proof_page": page_index, "proof_pages": len(pages),
-                   "source": "agent_preview_check",
-                   "agent_job_id": ctx.job["id"],
-                   "render_signature": _render_signature(
-                       row, "preview_check", page_ranges)})
-        if plan:
-            payload["verify_times"] = [t for t, _ in plan
-                                       if any(a <= t <= b
-                                              for a, b in page_ranges)]
-        job_id = None
-        if page_index == 1:
-            job_id = getattr(ctx, "spec_preview_check_jobs", {}).get(version)
-        if not job_id:
-            job_id, _created = ctx.db.run(
-                dbx.get_or_enqueue_preview_check_job, ctx.project_id,
-                ctx.job["user_id"], payload)
-        deadline = time.time() + min(config.PREVIEW_WAIT_TIMEOUT_S, 300.0)
-        while time.time() < deadline:
-            time.sleep(1)
-            job = ctx.db.run(dbx.get_job, job_id)
-            if job["state"] == "done":
-                result = job.get("result") or {}
-                if result.get("superseded_by"):
-                    return ("Changed-section proof was superseded by a newer "
-                            "EDL version. Check that newer edit instead.")
-                ctx.last_preview_check = result
-                delivered = _queue_check_frames(ctx, result, plan)
-                critic = _preview_critic_report(ctx, result, plan)
-                if critic is not None:
-                    ctx.last_visual_critic = critic
-                covered = result.get("changed_ranges") or page_ranges
-                all_covered.extend(covered)
-                completed += 1
-                notes.append(
-                    f"page {page_index}/{len(pages)} rendered "
-                    f"{result.get('duration_s')}s"
-                    + (" and delivered review frames" if delivered else ""))
-                break
-            if job["state"] == "failed":
-                failure = dict(((job.get("result") or {}).get("failure") or {}))
-                err = str(failure.get("error") or job.get("error")
-                          or "unknown check error")[:500]
-                return (f"TRANSIENT_FAILURE: changed-section proof page "
-                        f"{page_index}/{len(pages)} failed for v{version}: "
-                        f"{err}. The EDL remains saved; retry/reconnect this "
-                        "idempotent proof page while unrelated work continues.")
-        else:
-            return (f"PREREQUISITE: proof page {page_index}/{len(pages)} is "
-                    "still running. Continue unrelated work; the logical "
-                    "verification remains open and will resume.")
-    if completed == len(pages):
-        ctx.checked_versions.add(version)
-        ctx._proof_ranges_by_version[version] = all_covered
-    return (f"Changed-section verification for EDL v{version} covered every "
-            f"planned risk window across {len(pages)} inexpensive proof "
-            f"page(s): {'; '.join(notes)}. Covered ranges: {all_covered}. "
-            "These proof reels do not replace the complete Studio preview; "
-            "repair any finding, otherwise continue to final verification.")
+    all_requested = [pair for page in pages for pair in page]
+    payload = _child_payload(ctx, {
+               "edl_version": version,
+               "check_ranges": all_requested,
+               "check_pages": pages,
+               "proof_pages": len(pages),
+               "source": "agent_preview_check",
+               "agent_job_id": ctx.job["id"],
+               "render_signature": _render_signature(
+                   row, "preview_check", all_requested)})
+    if plan:
+        payload["verify_times"] = [
+            t for t, _ in plan
+            if any(a <= t <= b for a, b in all_requested)]
+    job_id = getattr(ctx, "spec_preview_check_jobs", {}).get(version)
+    if not job_id:
+        job_id, _created = ctx.db.run(
+            dbx.get_or_enqueue_preview_check_job, ctx.project_id,
+            ctx.job["user_id"], payload)
+    deadline = time.time() + min(config.PREVIEW_WAIT_TIMEOUT_S, 300.0)
+    while time.time() < deadline:
+        time.sleep(1)
+        job = ctx.db.run(dbx.get_job, job_id)
+        if job["state"] == "done":
+            result = job.get("result") or {}
+            if result.get("superseded_by"):
+                return ("Changed-section proof was superseded by a newer "
+                        "EDL version. Check that newer edit instead.")
+            ctx.last_preview_check = result
+            delivered = _queue_check_frames(ctx, result, plan)
+            critic = _preview_critic_report(ctx, result, plan)
+            if critic is not None:
+                ctx.last_visual_critic = critic
+            all_covered = result.get("changed_ranges") or all_requested
+            ctx.checked_versions.add(version)
+            ctx._proof_ranges_by_version[version] = all_covered
+            return (f"Changed-section verification for EDL v{version} "
+                    f"covered every planned risk window from {len(pages)} "
+                    f"logical proof page(s) in one source-reusing render "
+                    f"({result.get('duration_s')}s)"
+                    + (" and delivered review frames. " if delivered else ". ")
+                    + f"Covered ranges: {all_covered}. This proof does not "
+                      "replace the complete Studio preview; repair any "
+                      "finding, otherwise continue to final verification.")
+        if job["state"] == "failed":
+            failure = dict(((job.get("result") or {}).get("failure") or {}))
+            err = str(failure.get("error") or job.get("error")
+                      or "unknown check error")[:500]
+            return (f"TRANSIENT_FAILURE: changed-section proof batch failed "
+                    f"for v{version}: {err}. The EDL remains saved; "
+                    "retry/reconnect this idempotent proof while unrelated "
+                    "work continues.")
+    return (f"PREREQUISITE: the {len(pages)}-page changed-section proof batch "
+            "is still running. Continue unrelated work; logical verification "
+            "remains open and will resume.")
 
 
 def speculative_preview(ctx):
@@ -17081,12 +17074,15 @@ def speculative_preview(ctx):
     ranges, _baseline = _change_check_ranges(ctx, row, plan)
     if not ranges:
         return
+    pages = _proof_pages(ranges)
+    all_requested = [pair for page in pages for pair in page]
     payload = _child_payload(ctx, {
-               "edl_version": version, "check_ranges": ranges,
+               "edl_version": version, "check_ranges": all_requested,
+               "check_pages": pages, "proof_pages": len(pages),
                "source": "agent_preview_check",
                "agent_job_id": ctx.job["id"],
                "render_signature": _render_signature(row, "preview_check",
-                                                       ranges)})
+                                                       all_requested)})
     if plan:
         payload["verify_times"] = [t for t, _ in plan]
     job_id, _created = ctx.db.run(

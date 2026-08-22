@@ -20,7 +20,8 @@ def _topology(role, **values):
             "WORKER_MCP_SLOTS", "WORKER_MEDIA_SLOTS", "WORKER_INDEX_SLOTS",
             "REMOTE_EXECUTOR_URL", "REMOTE_AGENT_EXECUTOR_URL",
             "MODAL_EXECUTOR_ENABLED", "MODAL_EXECUTOR_TYPES",
-            "REMOTE_AGENT_DISPATCH_SLOTS"):
+            "REMOTE_AGENT_DISPATCH_SLOTS", "CLOUDFLARE_EXECUTOR_ENABLED",
+            "CLOUDFLARE_EXECUTOR_URL"):
         env.pop(key, None)
     env.update({
         "WORKER_ROLE": role,
@@ -82,6 +83,17 @@ def test_modal_without_agent_turn_keeps_memory_safe_local_limit():
         "worker", REMOTE_EXECUTOR_URL="", REMOTE_AGENT_EXECUTOR_URL="",
         MODAL_EXECUTOR_ENABLED="1", MODAL_EXECUTOR_TYPES="preview")
     assert lanes["agent"] == 2
+
+
+def test_cloudflare_only_media_plane_uses_remote_dispatch_capacity():
+    lanes = _topology(
+        "dispatcher", REMOTE_EXECUTOR_URL="", MODAL_EXECUTOR_ENABLED="0",
+        CLOUDFLARE_EXECUTOR_ENABLED="1",
+        CLOUDFLARE_EXECUTOR_URL="https://valmera-executor.example.workers.dev")
+    assert lanes == {
+        "agent": 0, "filmstrip": 1, "index": 4, "mcp": 0,
+        "media": 4, "shorts": 0,
+    }
 
 
 def test_executor_never_polls_the_database_queue():

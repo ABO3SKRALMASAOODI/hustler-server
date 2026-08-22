@@ -32,8 +32,13 @@ def test_real_external_boundaries_create_durable_continuations():
     assert "_durable_continuation" in source
     assert "enqueue_agent_continuation" in source
     assert "execution slice boundary" in source
-    assert '"images_generated"' in source
-    assert '"videos_generated"' in source
+    # Asset progress is part of the persisted semantic frontier; keeping a
+    # second ad-hoc counter in the physical loop caused the two definitions of
+    # "progress" to drift.
+    marker_source = inspect.getsource(agent_loop._semantic_progress_marker)
+    assert '"images_generated"' in marker_source
+    assert '"videos_generated"' in marker_source
+    assert '"semantic0"' in source
     assert '"root_agent_job_id"' in source
     assert config.AGENT_TURN_TOTAL_TIMEOUT_S - config.AGENT_TURN_TIMEOUT_S \
         >= 120

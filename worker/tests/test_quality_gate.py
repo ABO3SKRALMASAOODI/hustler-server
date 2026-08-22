@@ -336,6 +336,52 @@ def test_complete_preview_uses_changed_proof_before_reencoding_whole_program(
         raise AssertionError("proof-checked version did not reach full render")
 
 
+def test_many_proof_pages_enqueue_and_wait_for_one_batched_job(monkeypatch):
+    payloads = []
+
+    class Db:
+        @staticmethod
+        def run(fn, *args):
+            if fn is dbx.get_or_enqueue_preview_check_job:
+                payloads.append(args[-1])
+                return 81, True
+            if fn is dbx.get_job:
+                return {"state": "done", "result": {
+                    "duration_s": 32.0,
+                    "changed_ranges": [[0, 8], [10, 18],
+                                       [20, 28], [30, 38]],
+                }}
+            raise AssertionError(fn)
+
+    class Ctx:
+        checked_versions = set()
+        spec_preview_check_jobs = {}
+        project_id = 7
+        job = {"id": 9, "user_id": 3,
+               "payload": {"execution_policy": "redesign"}}
+        db = Db()
+        last_preview_check = None
+        last_visual_critic = None
+        _proof_ranges_by_version = {}
+
+    monkeypatch.setattr(agent_tools, "_proof_pages", lambda _ranges: [
+        [[0, 8], [10, 18]], [[20, 28], [30, 38]]])
+    monkeypatch.setattr(agent_tools, "_queue_check_frames",
+                        lambda *_args: False)
+    monkeypatch.setattr(agent_tools, "_preview_critic_report",
+                        lambda *_args: None)
+    monkeypatch.setattr(agent_tools.time, "sleep", lambda _seconds: None)
+    row = {"version": 2, "json": default_edl(40.0)}
+
+    result = agent_tools._run_changed_preview_check(
+        Ctx(), row, [], [[0, 38]])
+
+    assert len(payloads) == 1
+    assert payloads[0]["proof_pages"] == 2
+    assert len(payloads[0]["check_pages"]) == 2
+    assert "one source-reusing render" in result
+
+
 def test_sequence_screening_maps_kept_source_beats_and_omits_cut_regions():
     class Ctx:
         edit_plan = {

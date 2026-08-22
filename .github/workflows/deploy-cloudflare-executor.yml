@@ -1,0 +1,103 @@
+name: deploy-cloudflare-executor
+
+# Manual by design. Publishing the image does not route production traffic;
+# Render's CLOUDFLARE_EXECUTOR_PERCENT is the separate, reversible canary gate.
+on:
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-cloudflare-executor
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: worker/cloudflare/package-lock.json
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: validate required deployment secrets
+        env:
+          EXECUTOR_SECRET: ${{ secrets.REMOTE_EXECUTOR_SECRET }}
+          DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+          S3_ENDPOINT: ${{ secrets.S3_ENDPOINT }}
+          S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+          S3_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          EXECUTOR_URL: ${{ secrets.CLOUDFLARE_EXECUTOR_URL }}
+        run: |
+          for name in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID EXECUTOR_SECRET DATABASE_URL S3_ENDPOINT S3_ACCESS_KEY_ID S3_SECRET_ACCESS_KEY S3_BUCKET OPENAI_API_KEY EXECUTOR_URL; do
+            test -n "${!name}" || { echo "::error::missing GitHub secret $name"; exit 1; }
+          done
+
+      - name: validate Python capabilities
+        run: python worker/skill_validator.py
+
+      - name: install and type-check Worker adapter
+        working-directory: worker/cloudflare
+        run: npm ci && npm run check
+
+      - name: publish Worker and Container images
+        working-directory: worker/cloudflare
+        run: npx wrangler deploy --var CODE_VERSION:"$GITHUB_SHA"
+
+      - name: install runtime secrets
+        working-directory: worker/cloudflare
+        env:
+          EXECUTOR_SECRET: ${{ secrets.REMOTE_EXECUTOR_SECRET }}
+          DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+          S3_ENDPOINT: ${{ secrets.S3_ENDPOINT }}
+          S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+          S3_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+          S3_REGION: ${{ secrets.S3_REGION }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+          VISION_API_KEY: ${{ secrets.VISION_API_KEY }}
+          VISION_BASE_URL: ${{ secrets.VISION_BASE_URL }}
+          VISION_MODEL: ${{ secrets.VISION_MODEL }}
+        run: |
+          secret_file=$(mktemp /tmp/valmera-cloudflare-secrets.XXXXXX.json)
+          trap 'rm -f "$secret_file"' EXIT
+          jq -n \
+            --arg EXECUTOR_SECRET "$EXECUTOR_SECRET" \
+            --arg DATABASE_URL "$DATABASE_URL" \
+            --arg S3_ENDPOINT "$S3_ENDPOINT" \
+            --arg S3_ACCESS_KEY_ID "$S3_ACCESS_KEY_ID" \
+            --arg S3_SECRET_ACCESS_KEY "$S3_SECRET_ACCESS_KEY" \
+            --arg S3_BUCKET "$S3_BUCKET" \
+            --arg S3_REGION "${S3_REGION:-auto}" \
+            --arg OPENAI_API_KEY "$OPENAI_API_KEY" \
+            --arg OPENAI_BASE_URL "${OPENAI_BASE_URL:-https://api.openai.com/v1}" \
+            --arg VISION_API_KEY "$VISION_API_KEY" \
+            --arg VISION_BASE_URL "$VISION_BASE_URL" \
+            --arg VISION_MODEL "$VISION_MODEL" \
+            '{EXECUTOR_SECRET:$EXECUTOR_SECRET,DATABASE_URL:$DATABASE_URL,S3_ENDPOINT:$S3_ENDPOINT,S3_ACCESS_KEY_ID:$S3_ACCESS_KEY_ID,S3_SECRET_ACCESS_KEY:$S3_SECRET_ACCESS_KEY,S3_BUCKET:$S3_BUCKET,S3_REGION:$S3_REGION,OPENAI_API_KEY:$OPENAI_API_KEY,OPENAI_BASE_URL:$OPENAI_BASE_URL,VISION_API_KEY:$VISION_API_KEY,VISION_BASE_URL:$VISION_BASE_URL,VISION_MODEL:$VISION_MODEL}' \
+            > "$secret_file"
+          npx wrangler secret bulk "$secret_file"
+
+      - name: verify provider identity and code
+        env:
+          EXECUTOR_URL: ${{ secrets.CLOUDFLARE_EXECUTOR_URL }}
+          EXECUTOR_SECRET: ${{ secrets.REMOTE_EXECUTOR_SECRET }}
+        run: |
+          report=$(curl --fail --silent --show-error \
+            -H "Authorization: Bearer $EXECUTOR_SECRET" \
+            "$EXECUTOR_URL/health")
+          test "$(jq -r .provider <<<"$report")" = cloudflare
+          test "$(jq -r .code_version <<<"$report")" = "$GITHUB_SHA"
+          echo "Cloudflare executor code=$GITHUB_SHA provider=cloudflare"

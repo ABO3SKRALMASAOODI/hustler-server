@@ -74,3 +74,18 @@ def test_black_frame_safety_failure_is_deterministic():
         "final")
     assert d.kind == "invalid_edl"
     assert d.retryable is False
+
+
+def test_provider_budget_rejection_is_not_replayed_for_every_user():
+    d = failure_policy.classify(
+        RuntimeError(
+            "Modal workspace billing cycle spend limit reached"), "preview")
+    assert d.kind == "provider_budget_exhausted"
+    assert d.retryable is False
+    assert d.max_attempts == 0
+
+    llm = failure_policy.classify(
+        RuntimeError("insufficient_quota: you have no credits remaining"),
+        "agent_turn")
+    assert llm.kind == "provider_budget_exhausted"
+    assert llm.retryable is False

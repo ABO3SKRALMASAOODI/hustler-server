@@ -50,7 +50,9 @@ import ytaccess
 # durable launch at a time.
 # A failed one is deliberately absent from FAIL_NOTES/REAPER_NOTES — a missing
 # strip is a cosmetic degradation, not something to put in a user's chat.
-if config.REMOTE_EXECUTOR_URL or config.MODAL_EXECUTOR_ENABLED:
+if (config.REMOTE_EXECUTOR_URL or config.MODAL_EXECUTOR_ENABLED
+        or (config.CLOUDFLARE_EXECUTOR_ENABLED
+            and config.CLOUDFLARE_EXECUTOR_URL)):
     MEDIA_TYPES = ("preview", "preview_check", "final")
     FILMSTRIP_TYPES = ("filmstrip",)
 else:
@@ -75,6 +77,40 @@ MCP_TYPES = ("mcp_tool",)
 DRAINING = threading.Event()
 
 
+def _supervise(name, target, args=(), restart_delay_s=1.0):
+    """Keep one critical worker loop alive until a planned drain.
+
+    Queue lanes already catch ordinary Exceptions, but a library can still
+    terminate a thread with a BaseException or an accidental return. The
+    process used to stay healthy enough for Render while that queue family
+    silently stopped being served. Restarting the *thread* is safe: a job
+    that escaped process_one was untracked in its finally and remains owned by
+    its database execution lease (or the durable remote-execution ledger), so
+    this supervisor cannot immediately double-claim it.
+
+    The delay prevents a broken boot invariant from becoming a CPU/log storm.
+    DRAINING.wait makes the delay interruptible during deployment.
+    """
+    while not DRAINING.is_set():
+        failed = None
+        try:
+            target(*args)
+        except BaseException as exc:  # thread boundary; never reaches main
+            failed = exc
+            traceback.print_exc()
+        if DRAINING.is_set():
+            return
+        suffix = (f" after {type(failed).__name__}: {failed}"
+                  if failed is not None else " after an unexpected return")
+        print(f"[supervisor] {name} stopped{suffix}; restarting in "
+              f"{restart_delay_s:.1f}s", flush=True)
+        try:
+            dbx.Db().run(dbx.bump_metric, "worker_thread_restarted")
+        except Exception:
+            pass
+        DRAINING.wait(max(0.0, restart_delay_s))
+
+
 def _build_runners(policy="redesign"):
     """Choose local runners or their request-based execution owners.
 
@@ -82,7 +118,9 @@ def _build_runners(policy="redesign"):
     when discovered; that service exists for memory isolation and scale-out,
     not extra CPU. Explicit empty URLs restore the historical local paths.
     """
-    if config.REMOTE_EXECUTOR_URL or config.MODAL_EXECUTOR_ENABLED:
+    if (config.REMOTE_EXECUTOR_URL or config.MODAL_EXECUTOR_ENABLED
+            or (config.CLOUDFLARE_EXECUTOR_ENABLED
+                and config.CLOUDFLARE_EXECUTOR_URL)):
         return {
             "index": remote.run_index_remote,
             "preview": remote.run_render_remote,
@@ -106,7 +144,9 @@ def _build_runners(policy="redesign"):
             # phone footage and are sampled concurrently. Keep those decoders
             # off the 512-MiB dispatcher whenever Modal is configured.
             "filmstrip": (remote.run_filmstrip_remote
-                          if config.MODAL_EXECUTOR_ENABLED
+                          if (config.MODAL_EXECUTOR_ENABLED
+                              or (config.CLOUDFLARE_EXECUTOR_ENABLED
+                                  and config.CLOUDFLARE_EXECUTOR_URL))
                           else filmstrip.run_filmstrip_job),
         }
     return {
@@ -147,11 +187,17 @@ def process_one(worker_db, job):
     if job.get("created_at"):
         queue_wait = round(max(0.0, (
             datetime.now(timezone.utc) - job["created_at"]).total_seconds()), 2)
+    # Every provider receives the same queue observation. Previously only the
+    # dedicated agent wrapper recomputed it; media utilization therefore had
+    # execution time but no queue time, hiding whether a speed problem was
+    # cold compute or dispatcher contention.
+    job["_queue_wait_s"] = queue_wait
     try:
+        provider = remote.stamp_execution_provider(worker_db, job)
         runner, execution_policy = _runner_for_job(job)
         print(f"[job {job_id}] start {job['type']} project={job['project_id']} "
               f"attempt={job['attempts']} queue_wait={queue_wait}s "
-              f"policy={execution_policy}", flush=True)
+              f"policy={execution_policy} provider={provider}", flush=True)
         result = runner(worker_db, job)
         total = round(time.monotonic() - t0, 2)
         # A request-based executor owns its terminal write so a Render redeploy
@@ -534,6 +580,36 @@ def reaper():
             worker_db.reset()
 
 
+def remote_guardian():
+    """Reconnect durable calls whose original dispatcher may be gone."""
+    worker_db = dbx.Db()
+    while not DRAINING.is_set():
+        try:
+            rows = worker_db.run(dbx.active_remote_executions) or []
+            for row in rows:
+                event = remote.reconcile_remote_execution(worker_db, row)
+                status = event.get("status")
+                if status in {"failed", "completion_pending"}:
+                    print(f"[remote-guardian] job {row['job_id']} "
+                          f"provider={row['provider']} status={status}",
+                          flush=True)
+                if status == "failed":
+                    try:
+                        worker_db.run(dbx.bump_metric, "job_failed")
+                        _notify_failure(worker_db, event["job"],
+                                        event["error"])
+                    except Exception as notify_exc:
+                        print(f"[remote-guardian] failure notification "
+                              f"failed: {notify_exc}", flush=True)
+        except Exception as exc:
+            print(f"[remote-guardian] {str(exc)[:240]}", flush=True)
+            try:
+                worker_db.reset()
+            except Exception:
+                pass
+        DRAINING.wait(config.REMOTE_GUARDIAN_INTERVAL_S)
+
+
 def _sweep_tmp():
     """Delete work directories left by a previous process.
 
@@ -686,47 +762,67 @@ def main():
                          name="agent-version-probe").start()
 
     threads = [
-        threading.Thread(target=dbx.heartbeat_forever, daemon=True,
-                         name="heartbeat"),
-        threading.Thread(target=reaper, daemon=True, name="reaper"),
+        threading.Thread(
+            target=_supervise,
+            args=("remote-guardian", remote_guardian), daemon=True,
+            name="remote-guardian"),
+        threading.Thread(
+            target=_supervise,
+            args=("heartbeat", dbx.heartbeat_forever), daemon=True,
+            name="heartbeat"),
+        threading.Thread(
+            target=_supervise, args=("reaper", reaper), daemon=True,
+            name="reaper"),
     ]
     for i in range(slots["media"]):
+        lane_name = f"media{i}"
         threads.append(threading.Thread(
-            target=lane, args=(f"media{i}", MEDIA_TYPES,
-                               config.MAX_ATTEMPTS_MEDIA,
-                               config.MEDIA_POLL_INTERVAL_S),
+            target=_supervise,
+            args=(lane_name, lane, (lane_name, MEDIA_TYPES,
+                                    config.MAX_ATTEMPTS_MEDIA,
+                                    config.MEDIA_POLL_INTERVAL_S)),
             daemon=True, name=f"media{i}"))
     if slots["filmstrip"] and FILMSTRIP_TYPES:
         threads.append(threading.Thread(
-            target=lane, args=("filmstrip", FILMSTRIP_TYPES,
-                               config.MAX_ATTEMPTS_MEDIA),
+            target=_supervise,
+            args=("filmstrip", lane, ("filmstrip", FILMSTRIP_TYPES,
+                                       config.MAX_ATTEMPTS_MEDIA)),
             daemon=True, name="filmstrip"))
     for i in range(slots["index"]):
+        lane_name = f"index{i}"
         threads.append(threading.Thread(
-            target=lane, args=(f"index{i}", INDEX_TYPES,
-                               config.MAX_ATTEMPTS_MEDIA,
-                               config.MEDIA_POLL_INTERVAL_S),
+            target=_supervise,
+            args=(lane_name, lane, (lane_name, INDEX_TYPES,
+                                    config.MAX_ATTEMPTS_MEDIA,
+                                    config.MEDIA_POLL_INTERVAL_S)),
             daemon=True, name=f"index{i}"))
     for i in range(slots["agent"]):
+        lane_name = f"agent{i}"
         threads.append(threading.Thread(
-            target=lane, args=(f"agent{i}", AGENT_TYPES,
-                               config.MAX_ATTEMPTS_AGENT,
-                               config.AGENT_POLL_INTERVAL_S),
+            target=_supervise,
+            args=(lane_name, lane, (lane_name, AGENT_TYPES,
+                                    config.MAX_ATTEMPTS_AGENT,
+                                    config.AGENT_POLL_INTERVAL_S)),
             daemon=True, name=f"agent{i}"))
     # TWO shorts threads, deliberately: this was the only lane with a single
     # thread, so one silent thread death (Aug 9) left shorts_plan jobs
     # unclaimable for 108 minutes while every other lane worked. Per-project
     # claim serialization already prevents the pair double-running one plan.
     for i in range(slots["shorts"]):
+        lane_name = f"shorts{i}"
         threads.append(threading.Thread(
-            target=lane, args=(f"shorts{i}", SHORTS_TYPES,
-                               config.MAX_ATTEMPTS_MEDIA,
-                               config.AGENT_POLL_INTERVAL_S),
+            target=_supervise,
+            args=(lane_name, lane, (lane_name, SHORTS_TYPES,
+                                    config.MAX_ATTEMPTS_MEDIA,
+                                    config.AGENT_POLL_INTERVAL_S)),
             daemon=True, name=f"shorts{i}"))
     for i in range(slots["mcp"]):
+        lane_name = f"mcp{i}"
         threads.append(threading.Thread(
-            target=lane, args=(f"mcp{i}", MCP_TYPES, config.MAX_ATTEMPTS_MCP,
-                               config.MCP_POLL_INTERVAL_S),
+            target=_supervise,
+            args=(lane_name, lane, (lane_name, MCP_TYPES,
+                                    config.MAX_ATTEMPTS_MCP,
+                                    config.MCP_POLL_INTERVAL_S)),
             daemon=True, name=f"mcp{i}"))
     for t in threads:
         t.start()

@@ -5,7 +5,8 @@ backend/venv/
 outputs/
 outputs_template/.DS_Store
 *.DS_Store
-node_modules/ # in case no trailing newline
+# JavaScript dependencies are reproducible from package-lock files.
+node_modules/
 
 test_video.mp4
 test_music.wav

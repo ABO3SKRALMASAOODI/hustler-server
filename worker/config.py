@@ -691,8 +691,12 @@ POLL_INTERVAL_S = float(os.getenv("WORKER_POLL_INTERVAL_S", "2.0"))
 # where the encodes genuinely contend for this box's own CPU. The media/index
 # lanes also poll faster remotely — a claim is one indexed SKIP LOCKED query,
 # and 2s of claim latency was pure dead time on every render.
-_REMOTE_EXEC = bool(os.getenv("REMOTE_EXECUTOR_URL", "").strip()) \
-    or os.getenv("MODAL_EXECUTOR_ENABLED", "0") == "1"
+_CLOUDFLARE_REMOTE_EXEC = (
+    os.getenv("CLOUDFLARE_EXECUTOR_ENABLED", "0") == "1"
+    and bool(os.getenv("CLOUDFLARE_EXECUTOR_URL", "").strip()))
+_REMOTE_EXEC = (bool(os.getenv("REMOTE_EXECUTOR_URL", "").strip())
+                or os.getenv("MODAL_EXECUTOR_ENABLED", "0") == "1"
+                or _CLOUDFLARE_REMOTE_EXEC)
 MEDIA_SLOTS = int(os.getenv("WORKER_MEDIA_SLOTS", "3" if _REMOTE_EXEC else "1"))
 INDEX_SLOTS = int(os.getenv("WORKER_INDEX_SLOTS", "2" if _REMOTE_EXEC else "1"))
 # When projects compete for the index lane, at most this many of one
@@ -966,6 +970,30 @@ MODAL_EXECUTOR_TYPES = frozenset(
     if part.strip())
 MODAL_CLOUD_RUN_FALLBACK = os.getenv(
     "MODAL_CLOUD_RUN_FALLBACK", "0") == "1"
+REMOTE_GUARDIAN_INTERVAL_S = max(5.0, float(os.getenv(
+    "REMOTE_GUARDIAN_INTERVAL_S", "15")))
+
+# Cloudflare Containers canary. Only queue-backed, provider-neutral media
+# families are eligible; heavy 16-32 GiB effects and orchestration stay on
+# Modal because Cloudflare's self-serve ceiling is 4 vCPU / 12 GiB. A stable
+# percentage plus a payload stamp means a retry cannot drift providers when an
+# operator changes the rollout percentage.
+CLOUDFLARE_EXECUTOR_ENABLED = os.getenv(
+    "CLOUDFLARE_EXECUTOR_ENABLED", "0") == "1"
+CLOUDFLARE_EXECUTOR_URL = os.getenv(
+    "CLOUDFLARE_EXECUTOR_URL", "").strip().rstrip("/")
+CLOUDFLARE_EXECUTOR_PERCENT = max(0, min(100, int(os.getenv(
+    "CLOUDFLARE_EXECUTOR_PERCENT", "0"))))
+CLOUDFLARE_EXECUTOR_TYPES = frozenset(
+    part.strip() for part in os.getenv(
+        "CLOUDFLARE_EXECUTOR_TYPES",
+        "preview_check,filmstrip,index").split(",") if part.strip())
+CLOUDFLARE_MODAL_FALLBACK = os.getenv(
+    "CLOUDFLARE_MODAL_FALLBACK", "1") == "1"
+CLOUDFLARE_MAX_INPUT_BYTES = int(os.getenv(
+    "CLOUDFLARE_MAX_INPUT_BYTES", str(4 * 1024 ** 3)))
+CLOUDFLARE_MAX_SOURCE_DURATION_S = float(os.getenv(
+    "CLOUDFLARE_MAX_SOURCE_DURATION_S", "3600"))
 
 # Atomic compute-ownership switch. Queue producers stamp this value into each
 # new job, and executors honor the stamp rather than the deployment's current

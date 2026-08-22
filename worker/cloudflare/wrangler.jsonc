@@ -1,0 +1,43 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "valmera-executor",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-20",
+  "compatibility_flags": ["nodejs_compat"],
+  "containers": [
+    {
+      "class_name": "ValmeraInteractive",
+      "image": "../Dockerfile.cloudflare",
+      "max_instances": 5,
+      "instance_type": "standard-3",
+      "constraints": {"regions": ["WNAM"]},
+      "rollout_active_grace_period": 300,
+      "rollout_step_percentage": [10, 100]
+    },
+    {
+      "class_name": "ValmeraBatch",
+      "image": "../Dockerfile.cloudflare",
+      "max_instances": 3,
+      "instance_type": "standard-4",
+      "constraints": {"regions": ["WNAM"]},
+      "rollout_active_grace_period": 300,
+      "rollout_step_percentage": [10, 100]
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {"name": "INTERACTIVE", "class_name": "ValmeraInteractive"},
+      {"name": "BATCH", "class_name": "ValmeraBatch"}
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["ValmeraInteractive", "ValmeraBatch"]
+    }
+  ],
+  "vars": {
+    "CODE_VERSION": "set-by-deploy-workflow"
+  },
+  "observability": {"enabled": true}
+}

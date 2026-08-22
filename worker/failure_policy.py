@@ -54,6 +54,13 @@ _DETERMINISTIC_FFMPEG = (
     "unable to parse", "error parsing", "non-monotonous dts",
 )
 
+_PROVIDER_BUDGET = (
+    "budget exceeded", "spending limit", "spend limit",
+    "insufficient credits", "insufficient balance", "credit balance",
+    "billing limit", "payment required", "no credits remaining",
+    "insufficient_quota",
+)
+
 
 def _base_attempts(job_type):
     if job_type == "agent_turn":
@@ -81,6 +88,14 @@ def classify(error, job_type=None):
         return FailureDecision(
             "invalid_edl" if repairable else "deterministic_input",
             False, 0, repairable)
+
+    # Provider account capacity does not change when the same user job is
+    # replayed seconds later. Production used all three media attempts for
+    # every Modal budget rejection, multiplying errors and queue delay without
+    # one additional chance of success. A configured alternate provider is a
+    # dispatch decision; retrying this unchanged lane is never that fallback.
+    if any(value in text for value in _PROVIDER_BUDGET):
+        return FailureDecision("provider_budget_exhausted", False, 0, False)
 
     # The watchdog already proved the exact command cannot finish inside the
     # fleet's physical budget.  Buying the same 50 minutes again cannot make

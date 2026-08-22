@@ -205,18 +205,19 @@ def test_stale_sfx_scheme_gets_the_honest_web_first_rejection():
     assert sound is None and "search_sfx" in err
 
 
-def test_deleted_tools_are_unregistered_and_search_advertised():
+def test_unreliable_music_chain_is_retired_but_sfx_search_is_advertised():
     for gone in ("list_sfx_library", "sound_design_pass", "generate_sfx",
-                 "list_music_library"):
+                 "list_music_library", "search_music", "fetch_music",
+                 "research_music", "audition_music_candidates"):
         assert gone not in agent_tools.TOOLS
     assert "search_sfx" in agent_tools.TOOLS
     assert "fetch_sfx" in agent_tools.TOOLS
-    assert not agent_tools._tool_disabled("search_music")
     assert not agent_tools._tool_disabled("search_sfx")
     state = agent_prompt.project_state_block(
         "v", "idx", "edl", [], [])
     assert "sound-effects pack" not in state
-    assert "search_music" in state              # found music advertised
+    assert "no generic catalog search" in state
+    assert "search_music" not in state
     assert "search_sfx" in state                # found sounds advertised
     assert "music library" not in state
 

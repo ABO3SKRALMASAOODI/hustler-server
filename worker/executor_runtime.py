@@ -129,6 +129,15 @@ def execute(job, runners):
                 dbx.lease_is_current, job_id, lease_claim):
             raise dbx.JobLeaseLost(
                 f"job {job_id} execution lease {lease_claim} is no longer current")
+        if job_id is not None and lease_claim is not None:
+            try:
+                db.run(dbx.mark_remote_execution_running,
+                       job_id, lease_claim)
+            except Exception as exc:
+                # The queue lease remains the source of truth. A handoff
+                # telemetry write must never become a new render failure.
+                print(f"[executor] could not mark remote start for job "
+                      f"{job_id}: {str(exc)[:160]}", flush=True)
         result = runner(db, job)
         dt = round(time.monotonic() - t0, 2)
         execution_timings = {"total_s": dt}
@@ -158,6 +167,12 @@ def execute(job, runners):
                 raise dbx.JobLeaseLost(
                     f"job {job_id} execution lease {lease_claim} was "
                     "superseded before executor completion")
+            try:
+                db.run(dbx.finish_remote_execution, job_id, lease_claim,
+                       "done")
+            except Exception as exc:
+                print(f"[executor] could not close remote handoff for job "
+                      f"{job_id}: {str(exc)[:160]}", flush=True)
         print("[resources] " + json.dumps({
             "type": jtype, "job_id": job_id, "ok": True,
             **execution_timings,
@@ -171,6 +186,13 @@ def execute(job, runners):
         print(f"[executor] FAILED {jtype} job={job_id} after {dt}s: {exc}",
               flush=True)
         decision = failure_policy.classify(exc, jtype)
+        if job_id is not None and lease_claim is not None:
+            try:
+                db.run(dbx.finish_remote_execution, job_id, lease_claim,
+                       "failed", exc)
+            except Exception as ledger_exc:
+                print(f"[executor] could not record remote failure for job "
+                      f"{job_id}: {str(ledger_exc)[:160]}", flush=True)
         failure_timings = {"total_s": dt}
         failure_timings.update(
             dict(getattr(exc, "runner_timings", {}) or {}))
