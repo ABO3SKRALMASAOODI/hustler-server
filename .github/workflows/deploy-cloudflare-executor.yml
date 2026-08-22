@@ -137,9 +137,12 @@ jobs:
             report=$(curl --silent --show-error \
               -H "Authorization: Bearer $EXECUTOR_SECRET" \
               "$EXECUTOR_URL/health" || true)
-            if test "$(jq -r .provider <<<"${report:-{}}")" = cloudflare \
-                && test "$(jq -r .code_version <<<"${report:-{}}")" = "$GITHUB_SHA" \
-                && test "$(jq -r .source_version <<<"${report:-{}}")" = "$want_source"; then
+            provider=$(jq -r '.provider // empty' <<<"$report" 2>/dev/null || true)
+            code_version=$(jq -r '.code_version // empty' <<<"$report" 2>/dev/null || true)
+            source_version=$(jq -r '.source_version // empty' <<<"$report" 2>/dev/null || true)
+            if test "$provider" = cloudflare \
+                && test "$code_version" = "$GITHUB_SHA" \
+                && test "$source_version" = "$want_source"; then
               echo "Cloudflare executor code=$GITHUB_SHA source=$want_source provider=cloudflare"
               ready=1
               break
@@ -152,19 +155,37 @@ jobs:
             exit 1
           fi
 
-          # Starting each isolated lane proves that the image, secrets,
-          # Python entry point, source fingerprint, and role-specific runner
-          # all agree before Render is allowed to route customer work here.
+          # Container rollouts intentionally preserve active instances for a
+          # five-minute grace period. Probe more slowly than sleepAfter so an
+          # old deployment-probe container can stop and the rollout can reach
+          # 100%; three immediate curl retries only proved the old image three
+          # times and made healthy staged deploys fail red.
+          probe_file=$(mktemp /tmp/valmera-cloudflare-probe.XXXXXX.json)
+          trap 'rm -f "$probe_file"' EXIT
           for spec in interactive:executor batch:executor agent:agent_executor mcp:mcp_executor shorts:shorts_executor; do
             lane=${spec%%:*}
             role=${spec#*:}
-            probe=$(curl --silent --show-error --fail --max-time 300 \
-              --retry 2 --retry-all-errors \
-              -H "Authorization: Bearer $EXECUTOR_SECRET" \
-              "$EXECUTOR_URL/probes/$lane")
-            test "$(jq -r .status <<<"$probe")" = ok \
-              && test "$(jq -r .role <<<"$probe")" = "$role" \
-              && test "$(jq -r .code_version <<<"$probe")" = "$want_source" \
-              || { echo "::error::Cloudflare $lane container probe failed"; exit 1; }
-            echo "Cloudflare lane=$lane role=$role source=$want_source ready"
+            lane_ready=0
+            for attempt in $(seq 1 8); do
+              http_code=$(curl --silent --show-error --max-time 300 \
+                --output "$probe_file" --write-out '%{http_code}' \
+                -H "Authorization: Bearer $EXECUTOR_SECRET" \
+                "$EXECUTOR_URL/probes/$lane" || true)
+              probe=$(cat "$probe_file")
+              probe_status=$(jq -r '.status // empty' <<<"$probe" 2>/dev/null || true)
+              probe_role=$(jq -r '.role // empty' <<<"$probe" 2>/dev/null || true)
+              probe_source=$(jq -r '.code_version // empty' <<<"$probe" 2>/dev/null || true)
+              if test "$http_code" = 200 \
+                  && test "$probe_status" = ok \
+                  && test "$probe_role" = "$role" \
+                  && test "$probe_source" = "$want_source"; then
+                echo "Cloudflare lane=$lane role=$role source=$want_source ready"
+                lane_ready=1
+                break
+              fi
+              echo "Cloudflare lane=$lane rollout attempt $attempt/8 pending http=$http_code role=${probe_role:-unknown} source=${probe_source:-unknown}"
+              test "$attempt" = 8 || sleep 75
+            done
+            test "$lane_ready" = 1 \
+              || { echo "::error::Cloudflare $lane container probe did not converge"; exit 1; }
           done
