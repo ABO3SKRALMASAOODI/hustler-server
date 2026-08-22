@@ -607,7 +607,13 @@ def run_billing_tick(conn=None, dry_run=False):
 
     own = conn is None
     if own:
-        conn = psycopg2.connect(os.environ["DATABASE_URL"],
+        # Billing's scheduler lock is session-scoped.  Ordinary request and
+        # worker traffic may use Render's transaction-pooled PgBouncer URL,
+        # but this single hourly connection must remain direct until the lock
+        # is released.
+        conn = psycopg2.connect(
+            os.environ.get("DIRECT_DATABASE_URL")
+            or os.environ["DATABASE_URL"],
                                 cursor_factory=RealDictCursor)
     try:
         cur = conn.cursor()

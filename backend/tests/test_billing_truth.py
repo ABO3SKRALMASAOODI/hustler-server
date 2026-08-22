@@ -294,3 +294,51 @@ def test_the_locks_do_not_collide():
     shared advisory lock would make each silently skip the other's run."""
     from routes.newsletter import TICK_LOCK_ID as NEWSLETTER_LOCK
     assert billing_sync.TICK_LOCK_ID != NEWSLETTER_LOCK
+
+
+def test_billing_scheduler_keeps_session_lock_on_direct_database(
+        monkeypatch):
+    connected = []
+
+    class Cursor:
+        def execute(self, _sql, _params=None): pass
+        def fetchone(self): return {"got": False}
+        def close(self): pass
+
+    class Connection:
+        def cursor(self): return Cursor()
+        def close(self): pass
+
+    def connect(url, **_kwargs):
+        connected.append(url)
+        return Connection()
+
+    import psycopg2
+    monkeypatch.setattr(psycopg2, "connect", connect)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://pool")
+    monkeypatch.setenv("DIRECT_DATABASE_URL", "postgresql://direct")
+
+    assert billing_sync.run_billing_tick() == {
+        "skipped": "another worker holds the lock"}
+    assert connected == ["postgresql://direct"]
+
+
+def test_newsletter_scheduler_keeps_session_lock_on_direct_database(
+        monkeypatch):
+    from flask import Flask
+    from routes import newsletter
+
+    connected = []
+    sentinel = object()
+
+    def connect(url, **_kwargs):
+        connected.append(url)
+        return sentinel
+
+    monkeypatch.setattr(newsletter.psycopg2, "connect", connect)
+    monkeypatch.setenv("DIRECT_DATABASE_URL", "postgresql://direct")
+    app = Flask(__name__)
+    app.config["DATABASE_URL"] = "postgresql://pool"
+    with app.app_context():
+        assert newsletter.get_db() is sentinel
+    assert connected == ["postgresql://direct"]

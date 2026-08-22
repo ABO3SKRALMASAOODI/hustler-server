@@ -122,7 +122,14 @@ NOT_TODAY = (
 # ─────────────────────────────────────────────────────────────────────────────
 
 def get_db():
-    return psycopg2.connect(current_app.config['DATABASE_URL'], cursor_factory=RealDictCursor)
+    # The hourly scheduler deliberately uses a session-level advisory lock.
+    # When ordinary application traffic is routed through Render's
+    # transaction-pooled PgBouncer URL, keep this one low-volume connection on
+    # the direct URL so the lock cannot jump server sessions mid-tick.
+    direct_url = os.getenv("DIRECT_DATABASE_URL")
+    return psycopg2.connect(
+        direct_url or current_app.config['DATABASE_URL'],
+        cursor_factory=RealDictCursor)
 
 
 _nl_schema_ready = False
