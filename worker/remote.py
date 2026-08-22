@@ -68,6 +68,16 @@ _health_cache = {}
 _health_lock = threading.Lock()
 _HEALTH_CACHE_S = 300.0
 
+# Modal's newly-created FunctionCall can briefly answer 0 outputs / 0
+# unfinished inputs before the accepted input is visible to every control
+# plane replica.  The SDK exposes that observation as OutputExpiredError —
+# the same exception used for a genuinely expired old output.  Treating the
+# first observation as terminal races the durable ledger: the guardian marks
+# the exact call failed, then its container starts and correctly refuses the
+# now-terminal ownership row.  Keep the ambiguity bounded; a real missing
+# call fails after one minute rather than becoming an indefinite job.
+_MODAL_OUTPUT_VISIBILITY_GRACE_S = 60.0
+
 _modal_functions = {}
 _modal_lock = threading.Lock()
 
@@ -563,6 +573,7 @@ def _recover_modal_result(call_id, job, deadline):
     """Reconnect to a durable call after a transient SDK transport failure."""
     import modal
     last = None
+    output_missing_since = None
     while time.monotonic() < deadline:
         try:
             call = modal.FunctionCall.from_id(call_id)
@@ -570,11 +581,22 @@ def _recover_modal_result(call_id, job, deadline):
         except TimeoutError as exc:
             last = exc
         except Exception as exc:
-            if not _modal_transport_error(exc):
+            if _modal_output_expired(exc):
+                now = time.monotonic()
+                output_missing_since = output_missing_since or now
+                if now - output_missing_since >= \
+                        _MODAL_OUTPUT_VISIBILITY_GRACE_S:
+                    raise RemoteExecutorError(
+                        f"Modal call {call_id} remained invisible for "
+                        f"{_MODAL_OUTPUT_VISIBILITY_GRACE_S:.0f}s") from exc
+                last = exc
+                time.sleep(2)
+            elif not _modal_transport_error(exc):
                 raise RemoteExecutorError(
                     f"Modal call {call_id} failed: {exc}") from exc
-            last = exc
-            time.sleep(2)
+            else:
+                last = exc
+                time.sleep(2)
         if job.get("id") is not None:
             probe = dbx.Db()
             try:
@@ -608,6 +630,27 @@ def _modal_transport_error(exc):
     except Exception:
         transient = ()
     return isinstance(exc, (ConnectionError, OSError) + transient)
+
+
+def _modal_output_expired(exc):
+    """Whether Modal has not exposed an output/unfinished input for a call."""
+    try:
+        from modal import exception as modal_exc
+        return isinstance(exc, modal_exc.OutputExpiredError)
+    except Exception:
+        return False
+
+
+def _modal_visibility_grace_active(row, now=None):
+    """Bound the ambiguous just-spawned OutputExpiredError window."""
+    submitted = row.get("submitted_at")
+    if not isinstance(submitted, datetime):
+        return False
+    if submitted.tzinfo is None:
+        submitted = submitted.replace(tzinfo=timezone.utc)
+    now = now or datetime.now(timezone.utc)
+    return 0 <= (now - submitted).total_seconds() \
+        < _MODAL_OUTPUT_VISIBILITY_GRACE_S
 
 
 def reconcile_remote_execution(worker_db, row):
@@ -658,6 +701,14 @@ def reconcile_remote_execution(worker_db, row):
         worker_db.run(dbx.heartbeat_remote_execution, job_id, claim)
         return {"status": "running", "job": job}
     except Exception as exc:
+        if (provider == "modal" and _modal_output_expired(exc)
+                and _modal_visibility_grace_active(row)):
+            # No positive liveness proof yet, so do not heartbeat.  The
+            # submitted ledger + provider deadline protects the queue claim;
+            # the next guardian pass either observes the live call or, after
+            # the bounded grace, follows ordinary terminal failure policy.
+            return {"status": "visibility_pending", "job": job,
+                    "error": exc}
         if ((provider == "modal" and _modal_transport_error(exc))
                 or (provider == "cloudflare"
                     and isinstance(exc, requests.RequestException))):
@@ -818,7 +869,8 @@ def _run_modal(job, function_override=None):
         # duplicate render. Reconnect only for a transport failure; a remote
         # function failure is already terminal and must reach repair/reaper
         # policy immediately rather than being polled for the next hour.
-        if not _modal_transport_error(exc):
+        if not (_modal_transport_error(exc)
+                or _modal_output_expired(exc)):
             if remote_handoff:
                 ledger = dbx.Db()
                 try:

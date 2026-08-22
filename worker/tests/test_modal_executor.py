@@ -2,6 +2,7 @@
 
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -229,6 +230,73 @@ def test_guardian_heartbeats_only_after_provider_proves_call_is_running(
     event = remote.reconcile_remote_execution(WorkerDb(), row)
     assert event["status"] == "running"
     assert calls == [(dbx.heartbeat_remote_execution, (42, 4))]
+
+
+def test_guardian_does_not_kill_a_just_spawned_invisible_modal_call(
+        monkeypatch):
+    import modal
+
+    class NotVisibleYet:
+        def get(self, timeout=None):
+            raise modal.exception.OutputExpiredError()
+
+    monkeypatch.setattr(
+        modal.FunctionCall, "from_id",
+        staticmethod(lambda _call_id: NotVisibleYet()))
+    calls = []
+
+    class WorkerDb:
+        def run(self, fn, *args):
+            calls.append((fn, args))
+            return True
+
+    row = {"provider": "modal", "call_id": "fc-new", "job_id": 42,
+           "total_claims": 4, "type": "preview", "project_id": 7,
+           "user_id": 3, "attempts": 1, "payload": {},
+           "submitted_at": datetime.now(timezone.utc)}
+
+    event = remote.reconcile_remote_execution(WorkerDb(), row)
+
+    assert event["status"] == "visibility_pending"
+    assert calls == []
+
+
+def test_modal_attached_dispatcher_reconnects_visibility_race(monkeypatch):
+    import modal
+
+    _enable(monkeypatch)
+
+    class EventuallyVisible(_Call):
+        def __init__(self):
+            super().__init__()
+            self.polls = 0
+
+        def get(self, timeout=None):
+            self.polls += 1
+            if self.polls == 1:
+                raise modal.exception.OutputExpiredError()
+            return {"result": {"ok": True}, "job_completed": True}
+
+    call = EventuallyVisible()
+    function = _Function(call)
+    monkeypatch.setattr(remote, "_modal_function", lambda _name: function)
+    monkeypatch.setattr(
+        modal.FunctionCall, "from_id", staticmethod(lambda _call_id: call))
+    monkeypatch.setattr(remote.time, "sleep", lambda _seconds: None)
+
+    result = remote._run_modal(JOB)
+
+    assert result["ok"] is True
+    assert result.pop("_remote_job_completed") is True
+    assert call.polls == 2
+
+
+def test_modal_visibility_grace_is_bounded():
+    now = datetime.now(timezone.utc)
+    assert remote._modal_visibility_grace_active({
+        "submitted_at": now - timedelta(seconds=10)}, now)
+    assert not remote._modal_visibility_grace_active({
+        "submitted_at": now - timedelta(seconds=61)}, now)
 
 
 def test_guardian_terminal_budget_failure_is_not_requeued(monkeypatch):

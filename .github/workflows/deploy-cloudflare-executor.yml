@@ -102,9 +102,21 @@ jobs:
           EXECUTOR_URL: ${{ secrets.CLOUDFLARE_EXECUTOR_URL }}
           EXECUTOR_SECRET: ${{ secrets.REMOTE_EXECUTOR_SECRET }}
         run: |
-          report=$(curl --fail --silent --show-error \
-            -H "Authorization: Bearer $EXECUTOR_SECRET" \
-            "$EXECUTOR_URL/health")
-          test "$(jq -r .provider <<<"$report")" = cloudflare
-          test "$(jq -r .code_version <<<"$report")" = "$GITHUB_SHA"
-          echo "Cloudflare executor code=$GITHUB_SHA provider=cloudflare"
+          # A secret change publishes a second Worker version immediately
+          # after the image upload. workers.dev can briefly serve 404 while
+          # that version propagates, so verify the immutable identity with a
+          # bounded poll instead of turning a healthy deploy red once.
+          for attempt in $(seq 1 36); do
+            report=$(curl --silent --show-error \
+              -H "Authorization: Bearer $EXECUTOR_SECRET" \
+              "$EXECUTOR_URL/health" || true)
+            if test "$(jq -r .provider <<<"${report:-{}}")" = cloudflare \
+                && test "$(jq -r .code_version <<<"${report:-{}}")" = "$GITHUB_SHA"; then
+              echo "Cloudflare executor code=$GITHUB_SHA provider=cloudflare"
+              exit 0
+            fi
+            echo "Cloudflare health propagation attempt $attempt/36 pending"
+            sleep 5
+          done
+          echo "::error::Cloudflare health did not converge to code=$GITHUB_SHA"
+          exit 1
