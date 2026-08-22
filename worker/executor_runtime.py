@@ -11,6 +11,8 @@ import threading
 import time
 import traceback
 
+import psycopg2
+
 import compute_cost
 import config
 import db as dbx
@@ -82,7 +84,7 @@ def ensure_heartbeat():
 
 
 def _confirm_provider_ownership(db, job):
-    """Wait briefly for the spawn caller to durably publish this exact call.
+    """Wait boundedly for the spawn caller to publish this exact call.
 
     Modal returns a provider call id only after accepting the input, so the
     Postgres handoff necessarily follows by a few milliseconds. A dispatcher
@@ -97,11 +99,22 @@ def _confirm_provider_ownership(db, job):
     if job_id is None or claim is None or not call_id \
             or provider not in {"modal", "cloudflare"}:
         return
-    deadline = time.monotonic() + 15.0
+    deadline = time.monotonic() + config.REMOTE_HANDOFF_CONFIRM_S
     while True:
-        status = db.run(
-            dbx.confirm_remote_execution_ownership,
-            job_id, claim, provider, call_id)
+        try:
+            status = db.run(
+                dbx.confirm_remote_execution_ownership,
+                job_id, claim, provider, call_id)
+        except (psycopg2.OperationalError,
+                psycopg2.InterfaceError) as exc:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise dbx.RemoteExecutionUnconfirmed(
+                    f"job {job_id} provider call {call_id} ownership could "
+                    "not be confirmed before the bounded handoff deadline"
+                ) from exc
+            time.sleep(min(0.5, remaining))
+            continue
         if status == "owned":
             return
         if status == "unavailable":
@@ -118,7 +131,7 @@ def _confirm_provider_ownership(db, job):
         if time.monotonic() >= deadline:
             raise dbx.RemoteExecutionUnconfirmed(
                 f"job {job_id} provider call {call_id} ownership was not "
-                "recorded before the 15s handoff deadline")
+                "recorded before the bounded handoff deadline")
         time.sleep(0.1)
 
 

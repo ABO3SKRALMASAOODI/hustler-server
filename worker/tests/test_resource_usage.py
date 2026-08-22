@@ -3,6 +3,7 @@ import sys
 import time
 
 import pytest
+import psycopg2
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 ".."))
@@ -165,6 +166,36 @@ def test_remote_executor_waits_for_exact_durable_call_ownership(monkeypatch):
         (42, 4, "modal", "fc-owner"),
         (42, 4, "modal", "fc-owner"),
     ]
+    assert executor_runtime.config.REMOTE_HANDOFF_CONFIRM_S \
+        >= executor_runtime.config.REMOTE_HANDOFF_PERSIST_S + 15.0
+
+
+def test_remote_executor_waits_through_transient_database_recovery(
+        monkeypatch):
+    outcomes = iter([
+        psycopg2.OperationalError("database recovering"),
+        psycopg2.InterfaceError("connection closed"),
+        "owned",
+    ])
+    calls = []
+
+    class FakeDb:
+        def run(self, fn, *args):
+            assert fn is dbx.confirm_remote_execution_ownership
+            calls.append(args)
+            outcome = next(outcomes)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+    monkeypatch.setenv("EXECUTOR_PROVIDER", "modal")
+    monkeypatch.setattr(executor_runtime.time, "sleep", lambda _s: None)
+
+    executor_runtime._confirm_provider_ownership(FakeDb(), {
+        "id": 42, "total_claims": 4, "provider_call_id": "fc-owner",
+    })
+
+    assert calls == [(42, 4, "modal", "fc-owner")] * 3
 
 
 def test_superseded_provider_call_stops_before_runner(monkeypatch):

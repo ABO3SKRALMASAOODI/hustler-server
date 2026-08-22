@@ -19,6 +19,7 @@ import threading
 import time
 from datetime import datetime, timezone
 
+import psycopg2
 import requests
 
 import config
@@ -715,7 +716,7 @@ def reconcile_remote_execution(worker_db, row):
             return {"status": "unknown", "job": job, "error": exc}
         decision = failure_policy.decision_for(exc, job.get("type"))
         worker_db.run(dbx.finish_remote_execution, job_id, claim,
-                      "failed", exc)
+                      "failed", exc, provider, row.get("call_id"))
         if decision.retryable and job["attempts"] < decision.max_attempts:
             requeued = worker_db.run(
                 dbx.requeue_job, job_id, exc, claim)
@@ -732,7 +733,7 @@ def reconcile_remote_execution(worker_db, row):
     except Exception as exc:
         decision = failure_policy.decision_for(exc, job.get("type"))
         worker_db.run(dbx.finish_remote_execution, job_id, claim,
-                      "failed", exc)
+                      "failed", exc, provider, row.get("call_id"))
         if decision.retryable and job["attempts"] < decision.max_attempts:
             requeued = worker_db.run(dbx.requeue_job, job_id, exc, claim)
             return {"status": "requeued" if requeued else "superseded",
@@ -747,7 +748,8 @@ def reconcile_remote_execution(worker_db, row):
     if current and current.get("state") in {"done", "failed"}:
         terminal = current["state"]
         worker_db.run(dbx.finish_remote_execution, job_id, claim,
-                      terminal, current.get("error"))
+                      terminal, current.get("error"), provider,
+                      row.get("call_id"))
         return {"status": terminal, "job": job,
                 "error": (RuntimeError(current.get("error"))
                           if terminal == "failed" else None)}
@@ -815,14 +817,8 @@ def _run_modal(job, function_override=None):
     if remote_handoff:
         ledger = dbx.Db()
         try:
-            persisted = ledger.run(
-                dbx.record_remote_execution, job["id"],
-                job.get("total_claims"), "modal", call_id, name,
-                execution_timeout_s, {
-                    "job_type": job.get("type"),
-                    "execution_policy": config.execution_policy_for(job),
-                    "queue_wait_s": job.get("_queue_wait_s"),
-                })
+            persisted = _record_remote_execution_with_retry(
+                ledger, job, "modal", call_id, name, execution_timeout_s)
             if not persisted:
                 existing = ledger.run(
                     dbx.get_remote_execution, job["id"])
@@ -878,7 +874,8 @@ def _run_modal(job, function_override=None):
                 ledger = dbx.Db()
                 try:
                     ledger.run(dbx.finish_remote_execution, job["id"],
-                               job.get("total_claims"), "failed", exc)
+                               job.get("total_claims"), "failed", exc,
+                               "modal", call_id)
                 except Exception:
                     pass
                 finally:
@@ -893,7 +890,8 @@ def _run_modal(job, function_override=None):
             ledger = dbx.Db()
             try:
                 ledger.run(dbx.finish_remote_execution, job["id"],
-                           job.get("total_claims"), "failed", exc)
+                           job.get("total_claims"), "failed", exc,
+                           "modal", call_id)
             except Exception:
                 pass
             finally:
@@ -903,7 +901,8 @@ def _run_modal(job, function_override=None):
         ledger = dbx.Db()
         try:
             ledger.run(dbx.finish_remote_execution, job["id"],
-                       job.get("total_claims"), "done")
+                       job.get("total_claims"), "done", None,
+                       "modal", call_id)
         except Exception:
             pass
         finally:
@@ -914,6 +913,49 @@ def _run_modal(job, function_override=None):
 def _cloudflare_lane(job_type):
     return "interactive" if job_type in {
         "preview", "preview_check", "filmstrip"} else "batch"
+
+
+def _record_remote_execution_with_retry(ledger, job, provider, call_id,
+                                        function_name, timeout_s):
+    """Durably publish one provider call identity, boundedly.
+
+    Modal has accepted its call by this point; Cloudflare's deterministic call
+    identity is reserved just before submission. The id is immutable in both
+    cases, so retrying this database upsert survives a recovery without
+    submitting duplicate paid compute. The executor remains idle behind the
+    matching ownership fence until this succeeds or the bounded deadline.
+    """
+    started = time.monotonic()
+    deadline = started + config.REMOTE_HANDOFF_PERSIST_S
+    failures = 0
+    while True:
+        try:
+            persisted = ledger.run(
+                dbx.record_remote_execution, job["id"],
+                job.get("total_claims"), provider, call_id, function_name,
+                timeout_s, {
+                    "job_type": job.get("type"),
+                    "execution_policy": config.execution_policy_for(job),
+                    "queue_wait_s": job.get("_queue_wait_s"),
+                })
+            if failures:
+                elapsed = time.monotonic() - started
+                print(f"[dispatcher] {provider} call {call_id} handoff "
+                      f"recovered after {failures} database failures "
+                      f"({elapsed:.1f}s)", flush=True)
+            return persisted
+        except (psycopg2.OperationalError,
+                psycopg2.InterfaceError) as exc:
+            failures += 1
+            ledger.reset()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise
+            if failures == 1:
+                print(f"[dispatcher] {provider} call {call_id} database "
+                      "handoff failed and will retry the same call identity "
+                      f"boundedly ({str(exc)[:160]})", flush=True)
+            time.sleep(min(1.0, remaining))
 
 
 def _cloudflare_call_id(job):
@@ -1045,12 +1087,8 @@ def _run_cloudflare(job):
             "dispatcher shutdown began before Cloudflare submission")
     ledger = dbx.Db()
     try:
-        ledger.run(dbx.record_remote_execution, job["id"],
-                   job.get("total_claims"), "cloudflare", call_id, lane,
-                   timeout_s, {"job_type": job.get("type"),
-                               "execution_policy":
-                                   config.execution_policy_for(job),
-                               "queue_wait_s": job.get("_queue_wait_s")})
+        _record_remote_execution_with_retry(
+            ledger, job, "cloudflare", call_id, lane, timeout_s)
     except Exception as exc:
         print(f"[dispatcher] Cloudflare call {call_id} ledger write failed "
               f"({str(exc)[:160]}); deterministic call id still prevents a "
@@ -1075,7 +1113,8 @@ def _run_cloudflare(job):
             try:
                 ledger.run(dbx.finish_remote_execution, job["id"],
                            job.get("total_claims"), "cancelled",
-                           "Cloudflare route was not deployed")
+                           "Cloudflare route was not deployed",
+                           "cloudflare", call_id)
             except Exception:
                 pass
             finally:
@@ -1094,7 +1133,8 @@ def _run_cloudflare(job):
                     ledger.run(dbx.finish_remote_execution, job["id"],
                                job.get("total_claims"), "cancelled",
                                response_body.get("error") or
-                               "Cloudflare launch refused")
+                               "Cloudflare launch refused",
+                               "cloudflare", call_id)
                 except Exception:
                     pass
                 finally:

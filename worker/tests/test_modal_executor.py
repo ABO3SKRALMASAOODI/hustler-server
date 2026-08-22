@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
+import psycopg2
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 ".."))
@@ -176,6 +177,36 @@ def test_modal_call_id_is_persisted_before_waiting(monkeypatch):
     assert any(row[0] == "finish_remote_execution" for row in events)
 
 
+def test_accepted_modal_call_retries_same_handoff_during_db_recovery(
+        monkeypatch):
+    _enable(monkeypatch)
+    attempts = []
+
+    class Ledger:
+        def run(self, fn, *args, **kwargs):
+            if fn is dbx.record_remote_execution:
+                attempts.append(args)
+                if len(attempts) < 3:
+                    raise psycopg2.OperationalError("database recovering")
+            return True
+
+        def reset(self):
+            pass
+
+    function = _Function(_Call({
+        "result": {"render_asset_id": 99}, "job_completed": True}))
+    monkeypatch.setattr(remote, "_modal_function", lambda _name: function)
+    monkeypatch.setattr(remote.dbx, "Db", Ledger)
+    monkeypatch.setattr(config, "REMOTE_HANDOFF_PERSIST_S", 5.0)
+    monkeypatch.setattr(remote.time, "sleep", lambda _seconds: None)
+
+    result = remote._run_modal(JOB)
+
+    assert result["render_asset_id"] == 99
+    assert len(attempts) == 3
+    assert {row[3] for row in attempts} == {"fc-durable-1"}
+
+
 def test_duplicate_modal_spawn_reconnects_recorded_owner(monkeypatch):
     _enable(monkeypatch)
     duplicate = _Call({"error": "must not own", "job_completed": False})
@@ -207,6 +238,38 @@ def test_duplicate_modal_spawn_reconnects_recorded_owner(monkeypatch):
     assert result["render_asset_id"] == 77
     assert result.pop("_remote_job_completed") is True
     assert function.jobs  # the duplicate was accepted but never trusted
+
+
+def test_rejected_duplicate_cannot_close_the_recorded_modal_owner(
+        monkeypatch):
+    _enable(monkeypatch)
+    function = _Function(_Call(error=dbx.RemoteExecutionUnconfirmed(
+        "duplicate does not own this claim")))
+    terminal_writes = []
+
+    class Ledger:
+        def run(self, fn, *args, **kwargs):
+            if fn is dbx.record_remote_execution:
+                return False
+            if fn is dbx.get_remote_execution:
+                # Even if the best-effort owner lookup is interrupted, any
+                # cleanup for this rejected duplicate must stay call-scoped.
+                raise psycopg2.ProgrammingError("synthetic owner read error")
+            if fn is dbx.finish_remote_execution:
+                terminal_writes.append(args)
+            return True
+
+        def reset(self):
+            pass
+
+    monkeypatch.setattr(remote.dbx, "Db", Ledger)
+    monkeypatch.setattr(remote, "_modal_function", lambda _name: function)
+
+    with pytest.raises(remote.RemoteExecutorError):
+        remote._run_modal(JOB)
+
+    assert terminal_writes
+    assert terminal_writes[0][-2:] == ("modal", "fc-durable-1")
 
 
 def test_guardian_heartbeats_only_after_provider_proves_call_is_running(

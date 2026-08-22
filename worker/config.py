@@ -981,6 +981,17 @@ REMOTE_GUARDIAN_INTERVAL_S = max(5.0, float(os.getenv(
 # after this bounded grace instead of sitting indefinitely.
 REMOTE_GUARDIAN_ATTACH_GRACE_S = max(30.0, min(300.0, float(os.getenv(
     "REMOTE_GUARDIAN_ATTACH_GRACE_S", "90"))))
+# A provider accepts the physical call before its id can be written to
+# Postgres. During a brief database recovery the dispatcher must retry that
+# same idempotent handoff, while the accepted executor waits idle behind the
+# ownership fence. Both sides are deliberately bounded: this survives an
+# ordinary Render recovery without turning a missing ledger write into
+# indefinite work.
+REMOTE_HANDOFF_PERSIST_S = max(15.0, min(600.0, float(os.getenv(
+    "REMOTE_HANDOFF_PERSIST_S", "300"))))
+REMOTE_HANDOFF_CONFIRM_S = max(
+    REMOTE_HANDOFF_PERSIST_S + 15.0,
+    min(660.0, float(os.getenv("REMOTE_HANDOFF_CONFIRM_S", "330"))))
 
 # Cloudflare Containers canary. Only queue-backed, provider-neutral media
 # families are eligible; heavy 16-32 GiB effects and orchestration stay on
