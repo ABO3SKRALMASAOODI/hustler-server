@@ -48,7 +48,8 @@ def test_every_phase_of_the_connection_is_bounded():
     kw = dbx._CONNECT_KW
     assert kw["connect_timeout"] > 0          # the connect phase
     assert kw["keepalives"] == 1              # ...and the idle phase
-    assert "statement_timeout" in kw["options"]   # ...and the query phase
+    assert "options" not in kw                # PgBouncer rejects this at startup
+    assert dbx._STATEMENT_TIMEOUT_MS > 0       # ...and Db.run bounds queries
 
 
 def test_a_dead_socket_is_detected_before_the_reaper_acts():
@@ -67,12 +68,8 @@ def test_the_statement_backstop_clears_every_real_query():
     """Largest rows this worker writes in production (Aug 2026): a 448 kB
     index, a 3.6 kB EDL, a 103 kB llm_calls request — all single indexed
     writes. A query here that has run for a minute is wedged, not slow."""
-    ms = int(kw_opt(dbx._CONNECT_KW["options"]))
+    ms = dbx._STATEMENT_TIMEOUT_MS
     assert 10_000 <= ms <= 300_000
-
-
-def kw_opt(options):
-    return options.split("statement_timeout=")[1].split()[0]
 
 
 def test_connect_passes_the_hardening_through(monkeypatch):
@@ -86,8 +83,41 @@ def test_connect_passes_the_hardening_through(monkeypatch):
     monkeypatch.setattr(config, "DATABASE_URL", "postgresql://x/y")
     dbx.connect()
     for k in ("connect_timeout", "keepalives", "keepalives_idle",
-              "keepalives_interval", "keepalives_count", "options"):
+              "keepalives_interval", "keepalives_count"):
         assert k in seen, f"{k} was dropped on the way to psycopg2"
+    assert "options" not in seen
+
+
+def test_each_transaction_sets_a_pool_safe_local_statement_timeout(monkeypatch):
+    events = []
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, query, params):
+            events.append((query, params))
+
+    class Conn(_FakeConn):
+        def cursor(self):
+            return Cursor()
+
+        def commit(self):
+            events.append(("commit", None))
+
+    worker_db = dbx.Db()
+    worker_db._conn = Conn()
+
+    assert worker_db.run(lambda _conn: events.append(("work", None)) or 7) == 7
+    assert events == [
+        ("SELECT set_config('statement_timeout', %s, true)",
+         (str(dbx._STATEMENT_TIMEOUT_MS),)),
+        ("work", None),
+        ("commit", None),
+    ]
 
 
 # ── the heartbeat survives its own database ─────────────────────────────────

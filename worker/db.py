@@ -57,18 +57,19 @@ import model_prices
 #                      reconnects through) instead of blocking. Sized to
 #                      detect inside ~60s: comfortably under STALE_AFTER_S, so
 #                      a beat recovers before the reaper can act on its silence.
-#   statement_timeout — server-side backstop. Every query here is an indexed
-#                      single-row write or a small select; one that has run for
-#                      a minute is wedged, not slow.
+#   statement_timeout — server-side backstop. Every transaction is armed with
+#                      SET LOCAL before its real query. This cannot be a
+#                      libpq startup option: Render's transaction-mode
+#                      PgBouncer rejects arbitrary startup parameters, which
+#                      would otherwise take every worker lane offline.
 _CONNECT_KW = {
     "connect_timeout": int(os.getenv("PGCONNECT_TIMEOUT_S", "10")),
     "keepalives": 1,
     "keepalives_idle": int(os.getenv("PGKEEPALIVE_IDLE_S", "30")),
     "keepalives_interval": int(os.getenv("PGKEEPALIVE_INTERVAL_S", "10")),
     "keepalives_count": int(os.getenv("PGKEEPALIVE_COUNT", "3")),
-    "options": "-c statement_timeout=%d"
-               % (int(os.getenv("PGSTATEMENT_TIMEOUT_S", "60")) * 1000),
 }
+_STATEMENT_TIMEOUT_MS = int(os.getenv("PGSTATEMENT_TIMEOUT_S", "60")) * 1000
 
 
 def connect():
@@ -103,6 +104,16 @@ class Db:
         """Run fn(conn, ...) with one reconnect retry on connection errors."""
         for attempt in (1, 2):
             try:
+                # Transaction-local state is safe with PgBouncer transaction
+                # pooling: it is discarded by COMMIT/ROLLBACK before the
+                # physical server connection can be leased to another client.
+                # set_config is parameterized because PostgreSQL's SET syntax
+                # does not accept a bind parameter in every supported version.
+                with self.conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT set_config('statement_timeout', %s, true)",
+                        (str(_STATEMENT_TIMEOUT_MS),),
+                    )
                 out = fn(self.conn, *args, **kwargs)
                 self.conn.commit()
                 return out
