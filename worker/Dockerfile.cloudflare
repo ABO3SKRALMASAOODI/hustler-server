@@ -33,6 +33,14 @@ RUN if [ -n "$WHISPER_MODEL" ]; then \
       python -c "from faster_whisper import download_model; download_model('${WHISPER_MODEL}')"; \
     fi
 
+# Wrangler/BuildKit has reused a stale COPY layer during a production
+# Containers rollout even though the worker checkout changed.  The content
+# fingerprint is injected by the deploy workflow; changing it invalidates this
+# cheap marker and every following source layer without rebuilding ffmpeg,
+# Python dependencies, or Whisper.
+ARG SOURCE_VERSION=unknown
+RUN printf '%s\n' "$SOURCE_VERSION" > /opt/valmera-source-version
+
 COPY . .
 
 ENV PYTHONUNBUFFERED=1 \

@@ -461,8 +461,12 @@ def test_cloudflare_config_preserves_modal_heavy_fallback():
     assert '"instance_type": "standard-4"' in wrangler
     assert '"max_instances": 3' in wrangler
     assert '"WNAM"' in wrangler
-    assert '"image_vars": {"WHISPER_MODEL": ""}' in wrangler
-    assert '"image_vars": {"WHISPER_MODEL": "medium"}' in wrangler
+    assert '"WHISPER_MODEL": ""' in wrangler
+    assert '"WHISPER_MODEL": "medium"' in wrangler
+    wrangler_config = json.loads(wrangler)
+    assert all(container["image_vars"]["SOURCE_VERSION"]
+               == "set-by-deploy-workflow"
+               for container in wrangler_config["containers"])
     assert "interactive: 5, batch: 3, agent: 5, mcp: 12, shorts: 8" \
         in adapter
     assert "storage.transaction" in adapter
@@ -485,6 +489,8 @@ def test_cloudflare_config_preserves_modal_heavy_fallback():
     assert '"class_name": "ValmeraMcp"' in wrangler
     assert '"instance_type": "standard-1"' in wrangler
     assert "http_server.py" in dockerfile
+    assert "ARG SOURCE_VERSION=unknown" in dockerfile
+    assert "/opt/valmera-source-version" in dockerfile
     assert 'if [ -n "$WHISPER_MODEL" ]' in dockerfile
     assert "playwright install" not in dockerfile
     assert "pip install --no-cache-dir demucs" not in dockerfile.lower()

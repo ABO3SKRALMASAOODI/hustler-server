@@ -65,6 +65,19 @@ jobs:
         working-directory: worker/cloudflare
         run: |
           source_version=$(cd .. && python -c "import version; print(version.code_version())")
+          export SOURCE_VERSION="$source_version"
+          node <<'NODE'
+          const fs = require("fs");
+          const path = "wrangler.jsonc";
+          const config = JSON.parse(fs.readFileSync(path, "utf8"));
+          for (const container of config.containers) {
+            container.image_vars = {
+              ...(container.image_vars || {}),
+              SOURCE_VERSION: process.env.SOURCE_VERSION,
+            };
+          }
+          fs.writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`);
+          NODE
           npx wrangler deploy \
             --var CODE_VERSION:"$GITHUB_SHA" \
             --var SOURCE_VERSION:"$source_version"
