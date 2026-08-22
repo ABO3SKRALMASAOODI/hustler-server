@@ -129,6 +129,7 @@ jobs:
           import json
           import modal
           import subprocess
+          import time
 
           want_code = subprocess.check_output(
               ["python", "-c", "import sys; sys.path.insert(0, 'worker'); "
@@ -150,10 +151,24 @@ jobs:
           }
 
           def warm(name):
-              result = modal.Function.from_name(
-                  "valmera-executor", name,
-                  environment_name="main").remote({"type": "__warm"})
-              return name, (result or {}).get("result") or {}
+              # Modal updates function handles independently.  A newly
+              # deployed health function can therefore be visible a few
+              # seconds before a warm orchestration lane.  Require the exact
+              # release everywhere, but poll that propagation instead of
+              # failing a healthy rollout on one old container.
+              report = {}
+              for attempt in range(12):
+                  result = modal.Function.from_name(
+                      "valmera-executor", name,
+                      environment_name="main").remote({"type": "__warm"})
+                  report = (result or {}).get("result") or {}
+                  if (report.get("warmed") is True
+                          and report.get("code_version") == want_code
+                          and report.get("adapter_version") == want_adapter):
+                      return name, report
+                  if attempt < 11:
+                      time.sleep(5)
+              return name, report
 
           reports = {}
           with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:

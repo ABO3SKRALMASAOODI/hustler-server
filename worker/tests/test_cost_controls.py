@@ -626,6 +626,9 @@ def test_modal_lifecycle_is_short_and_diagnostics_use_probe():
     assert remote._modal_function_name("ytprobe") == "probe"
     assert '"valmera-executor", "probe"' in workflow
     assert "coalesce rapid worker pushes" in workflow
+    assert "for attempt in range(12):" in workflow
+    assert 'report.get("code_version") == want_code' in workflow
+    assert 'report.get("adapter_version") == want_adapter' in workflow
     assert "branches: [main]" not in cloud
 
 
