@@ -77,6 +77,10 @@ def classify(error, job_type=None):
 
     if isinstance(error, dbx.JobLeaseLost):
         return FailureDecision("lease_lost", False, 0, False)
+    if isinstance(error, dbx.RemoteExecutionUnconfirmed):
+        return FailureDecision(
+            "remote_ownership_unconfirmed", True,
+            min(_base_attempts(job_type), 2), False)
     if "job was cancelled or handed to another worker" in text:
         return FailureDecision("lease_lost", False, 0, False)
     if isinstance(error, WorkdirTooSmall):

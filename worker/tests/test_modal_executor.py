@@ -50,6 +50,8 @@ def _no_real_remote_ledger(monkeypatch):
         def run(self, fn, *args, **kwargs):
             if fn is dbx.record_remote_execution:
                 return False
+            if fn is dbx.get_remote_execution:
+                return None
             return True
 
         def reset(self):
@@ -171,6 +173,39 @@ def test_modal_call_id_is_persisted_before_waiting(monkeypatch):
                   if row[0] == "record_remote_execution")
     assert record[1][0:5] == (42, 4, "modal", "fc-durable-1", "preview")
     assert any(row[0] == "finish_remote_execution" for row in events)
+
+
+def test_duplicate_modal_spawn_reconnects_recorded_owner(monkeypatch):
+    _enable(monkeypatch)
+    duplicate = _Call({"error": "must not own", "job_completed": False})
+    function = _Function(duplicate)
+    owner = _Call({"result": {"render_asset_id": 77},
+                   "job_completed": True})
+
+    class Ledger:
+        def run(self, fn, *args, **kwargs):
+            if fn is dbx.record_remote_execution:
+                return False
+            if fn is dbx.get_remote_execution:
+                return {"job_id": 42, "total_claims": 4,
+                        "provider": "modal", "call_id": "fc-owner",
+                        "state": "running"}
+            return True
+
+        def reset(self):
+            pass
+
+    monkeypatch.setattr(remote.dbx, "Db", Ledger)
+    monkeypatch.setattr(remote, "_modal_function", lambda _name: function)
+    monkeypatch.setitem(sys.modules, "modal", SimpleNamespace(
+        FunctionCall=SimpleNamespace(
+            from_id=lambda call_id: owner if call_id == "fc-owner" else None)))
+
+    result = remote._run_modal(JOB)
+
+    assert result["render_asset_id"] == 77
+    assert result.pop("_remote_job_completed") is True
+    assert function.jobs  # the duplicate was accepted but never trusted
 
 
 def test_guardian_heartbeats_only_after_provider_proves_call_is_running(

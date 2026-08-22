@@ -13,10 +13,13 @@ Cloud Run is an emergency launch fallback for legacy jobs only.
    `python worker/setup_modal_executor.py`
 4. Apply the additive durable-verification schema from a trusted shell:
    `psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f backend/migrations/023_redesign_verification.sql`
-5. Deploy: `modal deploy worker/modal_app.py --env main`
-6. Create a Modal deploy token and store it in GitHub secrets as
+5. Apply the provider ownership ledger **before** deploying the matching
+   worker/executor code:
+   `psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f backend/migrations/025_remote_executions.sql`
+6. Deploy: `modal deploy worker/modal_app.py --env main`
+7. Create a Modal deploy token and store it in GitHub secrets as
    `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET`.
-7. Put the same invocation token on the Render worker, then set:
+8. Put the same invocation token on the Render worker, then set:
 
    ```text
    MODAL_EXECUTOR_ENABLED=1
@@ -33,7 +36,10 @@ Only after that gate is green, switch `EXECUTION_POLICY_MODE=redesign` on
 Render. Producers stamp the policy into every new root and child job; retries
 and continuations keep that immutable owner. A durable Modal call reconnects by
 call id and never silently falls back onto Render or launches duplicate paid
-work.
+work. The remote input also waits for its exact Modal call ID to appear in the
+ledger before downloading or encoding; if the dispatcher dies in the narrow
+spawn-to-Postgres handoff window, that orphan exits before expensive work and
+the ordinary queue lease can recover safely.
 
 ## Resource lanes
 

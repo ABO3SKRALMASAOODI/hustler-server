@@ -8,6 +8,8 @@
     {
       "class_name": "ValmeraInteractive",
       "image": "../Dockerfile.cloudflare",
+      "image_build_context": "..",
+      "image_vars": {"WHISPER_MODEL": ""},
       "max_instances": 5,
       "instance_type": "standard-3",
       "constraints": {"regions": ["WNAM"]},
@@ -17,6 +19,8 @@
     {
       "class_name": "ValmeraBatch",
       "image": "../Dockerfile.cloudflare",
+      "image_build_context": "..",
+      "image_vars": {"WHISPER_MODEL": "medium"},
       "max_instances": 3,
       "instance_type": "standard-4",
       "constraints": {"regions": ["WNAM"]},

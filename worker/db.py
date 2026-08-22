@@ -674,23 +674,27 @@ def get_job(conn, job_id):
         return cur.fetchone()
 
 
-def stamp_execution_provider(conn, job_id, total_claims, provider):
-    """Persist a queue job's provider choice under its current lease."""
+def stamp_execution_provider(conn, job_id, total_claims, provider,
+                             execution_shape=None):
+    """Persist provider + comparison shape under the current queue lease."""
     if provider not in {"modal", "cloudflare", "cloud_run", "local"}:
         raise ValueError("invalid execution provider")
     with conn.cursor() as cur:
         cur.execute("""UPDATE video_jobs
                        SET payload = CASE
                          WHEN COALESCE(payload->>'execution_provider', '') = ''
-                         THEN jsonb_set(COALESCE(payload, '{}'::jsonb),
-                                        '{execution_provider}', to_jsonb(%s::text),
-                                        true)
+                         THEN jsonb_set(
+                                jsonb_set(COALESCE(payload, '{}'::jsonb),
+                                          '{execution_provider}',
+                                          to_jsonb(%s::text), true),
+                                '{execution_shape}', %s, true)
                          ELSE payload END,
                            updated_at = NOW()
                        WHERE id = %s AND state = 'running'
                          AND (%s::integer IS NULL OR total_claims = %s)
                        RETURNING payload->>'execution_provider' AS provider""",
-                    (provider, job_id, total_claims, total_claims))
+                    (provider, Json(_json_safe(execution_shape or {})),
+                     job_id, total_claims, total_claims))
         row = cur.fetchone()
         return row and row.get("provider")
 
@@ -744,24 +748,76 @@ def record_remote_execution(conn, job_id, total_claims, provider, call_id,
               submitted_at = NOW(), started_at = NULL,
               last_observed_at = NOW(), completed_at = NULL,
               error = NULL, meta = EXCLUDED.meta
-            WHERE remote_executions.total_claims <= EXCLUDED.total_claims
+            WHERE remote_executions.total_claims < EXCLUDED.total_claims
+               OR (remote_executions.total_claims = EXCLUDED.total_claims
+                   AND remote_executions.provider = EXCLUDED.provider
+                   AND remote_executions.call_id = EXCLUDED.call_id)
+               OR (remote_executions.total_claims = EXCLUDED.total_claims
+                   AND remote_executions.state = 'cancelled')
         """, (job_id, total_claims, provider, str(call_id), function_name,
               max(1, int(timeout_s)), Json(meta or {})))
         return cur.rowcount > 0
 
 
-def mark_remote_execution_running(conn, job_id, total_claims):
-    if job_id is None or total_claims is None \
-            or not remote_executions_table_ready(conn):
-        return False
+def confirm_remote_execution_ownership(conn, job_id, total_claims, provider,
+                                       call_id):
+    """Fence expensive work to the exact provider call recorded for a lease.
+
+    ``pending`` is the normal few-millisecond Modal spawn-to-ledger window.
+    ``superseded`` means another physical call owns this queue claim and the
+    caller must exit before decoding media. ``unavailable`` preserves the
+    migration window only when the additive table genuinely is not installed;
+    database errors propagate and therefore fail closed before compute.
+    """
     with conn.cursor() as cur:
+        cur.execute("SELECT to_regclass('public.remote_executions') AS name")
+        if not (cur.fetchone() or {}).get("name"):
+            return "unavailable"
         cur.execute("""UPDATE remote_executions
                        SET state = 'running',
                            started_at = COALESCE(started_at, NOW()),
                            last_observed_at = NOW()
                        WHERE job_id = %s AND total_claims = %s
+                         AND provider = %s AND call_id = %s
                          AND state IN ('submitted', 'running')""",
-                    (job_id, total_claims))
+                    (job_id, total_claims, provider, str(call_id)))
+        if cur.rowcount > 0:
+            return "owned"
+        cur.execute("""SELECT total_claims, provider, call_id, state
+                       FROM remote_executions WHERE job_id = %s""",
+                    (job_id,))
+        return "superseded" if cur.fetchone() else "pending"
+
+
+def get_remote_execution(conn, job_id):
+    if job_id is None or not remote_executions_table_ready(conn):
+        return None
+    with conn.cursor() as cur:
+        cur.execute("""SELECT job_id, total_claims, provider, call_id,
+                              function_name, state, deadline_at
+                       FROM remote_executions WHERE job_id = %s""",
+                    (job_id,))
+        return cur.fetchone()
+
+
+def mark_remote_execution_running(conn, job_id, total_claims,
+                                  provider=None, call_id=None):
+    if job_id is None or total_claims is None \
+            or not remote_executions_table_ready(conn):
+        return False
+    with conn.cursor() as cur:
+        identity_where = "" if provider is None or call_id is None else \
+            " AND provider = %s AND call_id = %s"
+        params = [job_id, total_claims]
+        if identity_where:
+            params.extend([provider, str(call_id)])
+        cur.execute("""UPDATE remote_executions
+                       SET state = 'running',
+                           started_at = COALESCE(started_at, NOW()),
+                           last_observed_at = NOW()
+                       WHERE job_id = %s AND total_claims = %s
+                         AND state IN ('submitted', 'running')"""
+                    + identity_where, params)
         return cur.rowcount > 0
 
 
@@ -786,19 +842,26 @@ def heartbeat_remote_execution(conn, job_id, total_claims):
         return cur.rowcount > 0
 
 
-def finish_remote_execution(conn, job_id, total_claims, state, error=None):
+def finish_remote_execution(conn, job_id, total_claims, state, error=None,
+                            provider=None, call_id=None):
     if state not in {"done", "failed", "cancelled"}:
         raise ValueError("remote execution terminal state is invalid")
     if job_id is None or total_claims is None \
             or not remote_executions_table_ready(conn):
         return False
     with conn.cursor() as cur:
+        identity_where = "" if provider is None or call_id is None else \
+            " AND provider = %s AND call_id = %s"
+        params = [state,
+                  error_text.excerpt(error, 2000) if error else None,
+                  job_id, total_claims]
+        if identity_where:
+            params.extend([provider, str(call_id)])
         cur.execute("""UPDATE remote_executions
                        SET state = %s, completed_at = NOW(),
                            last_observed_at = NOW(), error = %s
-                       WHERE job_id = %s AND total_claims = %s""",
-                    (state, error_text.excerpt(error, 2000) if error else None,
-                     job_id, total_claims))
+                       WHERE job_id = %s AND total_claims = %s"""
+                    + identity_where, params)
         return cur.rowcount > 0
 
 
@@ -1860,6 +1923,10 @@ class PermanentJobError(RuntimeError):
 
 class JobLeaseLost(RuntimeError):
     """This physical run was replaced; continuing would bill for no result."""
+
+
+class RemoteExecutionUnconfirmed(RuntimeError):
+    """Provider launch never acquired its durable call-id ownership row."""
 
 
 def recent_llm_tokens(conn, seconds=60):

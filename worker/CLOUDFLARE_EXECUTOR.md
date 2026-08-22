@@ -6,6 +6,19 @@ lease checks, terminal database commit, storage path, retry classifier and
 resource telemetry. Provider selection is stamped into each claimed job, so a
 percentage change affects new work only.
 
+The Worker routes named calls over a fixed five-instance interactive pool and
+three-instance batch pool. A novel Container ID cold-starts on Cloudflare, so
+using a call ID as the instance ID would throw away Python/image/source-cache
+warmth on every job. Call state remains keyed by the deterministic call ID
+inside its shard. A busy shard refuses the new call before `/run`, allowing the
+proven Modal lane to keep that user moving; an accepted or ambiguous call can
+never switch providers.
+
+The interactive image omits the baked multi-gigabyte Whisper model because
+its admitted job types never transcribe. The batch image retains that model
+for index fallback. Both still use the same Python renderer and source tree;
+this only removes irrelevant cold-start bytes from the user-facing lane.
+
 ## Why the rollout is hybrid
 
 Cloudflare's self-serve maximum is 4 vCPU, 12 GiB RAM and 20 GB disk. Production
@@ -61,7 +74,8 @@ jobs to compare like-for-like media shapes. Advance only when all of these are
 true against Modal for the same job type and input-size/duration band:
 
 - terminal failure rate is not higher;
-- p50 and p95 `queue_wait_s + total_s` are no more than 5% slower;
+- p50 and p95 `queue_wait_s + provider_start_s + total_s` are no more than
+  5% slower;
 - p95 executor `total_s` is no more than 5% slower;
 - no Cloudflare OOM, disk-capacity, lost-lease, duplicate-call, or deadline
   event occurred;
@@ -72,6 +86,25 @@ Cold-start, queue, CPU, peak sampled memory, disk/bytes, provider and cache-hit
 evidence are already persisted in `video_jobs.result.timings` and emitted in
 `[resources]` logs. Do not compare an index to a preview or a 30-second proxy
 to a 4K hour-long source.
+
+Run the manual `gate-cloudflare-canary` workflow before every percentage
+increase. It queries production read-only and uploads an aggregate report; it
+fails closed when any job type or matched input cohort lacks evidence, when
+the remote ownership ledger is contradictory, or when reliability, artifact,
+warm/cold, p50/p95, runner, fallback, capacity or gross-cost gates fail. It
+never changes traffic itself. Its cost estimate uses measured active CPU plus
+provisioned memory/disk and uploaded-byte egress at Cloudflare's published
+list rates; included Workers Paid usage is ignored, so a pass does not depend
+on temporary free allowance.
+
+For an operator-side check using the same implementation:
+
+```bash
+DATABASE_URL="$PRODUCTION_DATABASE_URL" \
+python worker/executor_canary_gate.py \
+  --hours 24 --expected-percent 5 --min-samples 20 \
+  --report cloudflare-canary-gate.json
+```
 
 Only after the eligible set passes should `preview` be added. Add `final` only
 after a separate representative export benchmark passes the same gates; retain

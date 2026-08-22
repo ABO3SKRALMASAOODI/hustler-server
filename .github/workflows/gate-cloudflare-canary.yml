@@ -1,0 +1,62 @@
+name: gate-cloudflare-canary
+
+# Read-only production evidence gate. It never changes Render traffic or any
+# job/EDL/credit row; an operator advances the percentage only after this job
+# uploads a passing aggregate report.
+on:
+  workflow_dispatch:
+    inputs:
+      observation_hours:
+        description: Hours of terminal jobs to compare
+        required: true
+        default: "24"
+      expected_percent:
+        description: Current Render Cloudflare canary percentage
+        required: true
+        default: "5"
+      min_samples_per_provider:
+        description: Required terminal jobs per provider and job type
+        required: true
+        default: "20"
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: install read-only database driver
+        run: python -m pip install --disable-pip-version-check psycopg2-binary==2.9.10
+
+      - name: evaluate production canary evidence
+        id: gate
+        continue-on-error: true
+        env:
+          PRODUCTION_DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+        run: |
+          python worker/executor_canary_gate.py \
+            --database-env PRODUCTION_DATABASE_URL \
+            --hours "${{ inputs.observation_hours }}" \
+            --expected-percent "${{ inputs.expected_percent }}" \
+            --min-samples "${{ inputs.min_samples_per_provider }}" \
+            --report cloudflare-canary-gate.json
+
+      - name: upload aggregate evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloudflare-canary-gate
+          path: cloudflare-canary-gate.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: enforce gate
+        if: steps.gate.outcome != 'success'
+        run: |
+          echo "::error::Cloudflare canary may not advance; inspect the aggregate gate artifact"
+          exit 1

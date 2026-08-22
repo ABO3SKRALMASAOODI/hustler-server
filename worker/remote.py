@@ -176,10 +176,12 @@ def stamp_execution_provider(worker_db, job):
     provider = desired_execution_provider(job)
     persisted = worker_db.run(
         dbx.stamp_execution_provider, job["id"], job.get("total_claims"),
-        provider)
+        provider, job.get("_execution_shape") or {})
     if persisted:
         payload = dict(job.get("payload") or {})
         payload["execution_provider"] = persisted
+        if job.get("_execution_shape"):
+            payload["execution_shape"] = job["_execution_shape"]
         job["payload"] = payload
         return persisted
     return provider
@@ -438,6 +440,10 @@ def _job_payload(job):
         # request-based agent owner preserve the queue timing even though a
         # datetime is deliberately not serialized into this body.
         "_queue_wait_s": job.get("_queue_wait_s"),
+        # Wall-clock handoff boundary used by the remote executor to measure
+        # provider scheduling + image/container cold start. Monotonic clocks
+        # cannot be compared across hosts.
+        "dispatch_submitted_at": job.get("_dispatch_submitted_at"),
     }
 
 
@@ -457,6 +463,7 @@ def _launch_batch_and_wait(worker_db, job):
         if config.REMOTE_EXECUTOR_SECRET:
             headers["Authorization"] = f"Bearer {config.REMOTE_EXECUTOR_SECRET}"
         try:
+            job.setdefault("_dispatch_submitted_at", time.time())
             response = requests.post(
                 f"{launcher}/launch", json={"job": _job_payload(job)},
                 headers=headers, timeout=30)
@@ -743,6 +750,7 @@ def _run_modal(job, function_override=None):
         # restores ordinary local ownership below.
         dbx.mark_remote_owned(job["id"])
     try:
+        job.setdefault("_dispatch_submitted_at", time.time())
         call = function.spawn(_job_payload(job))
     except Exception as exc:
         if remote_handoff:
@@ -750,6 +758,7 @@ def _run_modal(job, function_override=None):
         raise ModalLaunchUnavailable(
             f"Modal rejected {name} before launch: {exc}") from exc
     call_id = call.object_id
+    reconnect_call_id = None
     if remote_handoff:
         ledger = dbx.Db()
         try:
@@ -762,9 +771,21 @@ def _run_modal(job, function_override=None):
                     "queue_wait_s": job.get("_queue_wait_s"),
                 })
             if not persisted:
-                print(f"[dispatcher] Modal call {call_id} launched but the "
-                      "durable remote ledger is not installed yet; remaining "
-                      "attached to preserve single execution", flush=True)
+                existing = ledger.run(
+                    dbx.get_remote_execution, job["id"])
+                if existing and int(existing.get("total_claims") or -1) \
+                        == int(job.get("total_claims") or -2) \
+                        and existing.get("provider") == "modal" \
+                        and existing.get("state") in {"submitted", "running"}:
+                    reconnect_call_id = str(existing["call_id"])
+                    print(f"[dispatcher] Modal claim already belongs to "
+                          f"{reconnect_call_id}; reconnecting it instead of "
+                          f"the duplicate accepted call {call_id}", flush=True)
+                else:
+                    print(f"[dispatcher] Modal call {call_id} launched but "
+                          "the durable remote ledger is not installed yet; "
+                          "remaining attached to preserve single execution",
+                          flush=True)
         except Exception as exc:
             # Submission already happened. Never launch a duplicate merely
             # because the observability write failed; stay attached to this
@@ -774,6 +795,13 @@ def _run_modal(job, function_override=None):
                   flush=True)
         finally:
             ledger.reset()
+    if reconnect_call_id and reconnect_call_id != call_id:
+        # The newly accepted input carries its own provider id and will fail
+        # the executor-side ownership handshake before expensive work. Follow
+        # the already-recorded physical call that actually owns this claim.
+        import modal
+        call = modal.FunctionCall.from_id(reconnect_call_id)
+        call_id = reconnect_call_id
     # Once a durable call id exists, timing out early and returning to the
     # queue would run the same paid render twice. Stay attached through the
     # provider's full function limit; inner ffmpeg/stall deadlines still make
@@ -943,6 +971,10 @@ def _run_cloudflare(job):
     if job.get("id") is None or job.get("total_claims") is None:
         raise CloudflareLaunchUnavailable(
             "Cloudflare canary accepts queue-backed jobs only")
+    # Include the first authenticated readiness request in user-observed
+    # provider startup. Successful readiness is cached, but its first cold
+    # network trip is still real latency and must not disappear from the gate.
+    job["_dispatch_submitted_at"] = time.time()
     try:
         _cloudflare_preflight(timeout=10)
     except requests.RequestException as exc:
@@ -973,7 +1005,8 @@ def _run_cloudflare(job):
     try:
         response = requests.post(
             f"{config.CLOUDFLARE_EXECUTOR_URL}/calls/{lane}/{call_id}",
-            json={"job": _job_payload(job)}, headers=_cloudflare_headers(),
+            json={"job": _job_payload(job), "timeout_s": timeout_s},
+            headers=_cloudflare_headers(),
             timeout=max(1, deadline - time.monotonic()))
     except requests.RequestException:
         data = _recover_cloudflare_result(call_id, lane, job, deadline)
@@ -1037,6 +1070,7 @@ def _run_cloud(job, url_override=None):
         # Per-kind: a preview is a user staring at a spinner, a final is an
         # hour-long export nobody wants refused at minute 25. One number for
         # both was sized for the short one.
+        job.setdefault("_dispatch_submitted_at", time.time())
         resp = requests.post(url, json={"job": _job_payload(job)},
                              headers=headers,
                              timeout=config.executor_timeout_for(

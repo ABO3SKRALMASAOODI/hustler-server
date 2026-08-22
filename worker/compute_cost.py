@@ -5,7 +5,8 @@ free tier/credits so they are a conservative per-job ceiling that can be summed
 from ``video_jobs.result`` immediately, without waiting for billing ingestion.
 Cloud Run unit prices are the us-central1 request/Jobs defaults retained by
 the fallback fleet; Modal uses its current base rates plus the explicit-region
-multiplier recorded by ``modal_app.py``.
+multiplier recorded by ``modal_app.py``; Cloudflare uses measured active CPU
+plus provisioned memory/disk and conservative outbound-byte cost.
 """
 
 import os
@@ -18,6 +19,20 @@ JOB_GIB_S = 0.000002
 MODAL_CORE_S = 0.0000131
 MODAL_GIB_S = 0.00000222
 MODAL_US_MULTIPLIER = 1.5
+
+# Cloudflare Containers public list rates (2026-04-21). CPU is billed from
+# measured active CPU time; memory and disk are billed from the provisioned
+# instance shape for every running wall-clock second. Included Workers Paid
+# usage is deliberately ignored so this remains a conservative gross estimate
+# comparable to the Modal estimate above.
+CLOUDFLARE_VCPU_S = 0.000020
+CLOUDFLARE_GIB_S = 0.0000025
+CLOUDFLARE_GB_DISK_S = 0.00000007
+CLOUDFLARE_EGRESS_GB = 0.025
+CLOUDFLARE_PROFILES = {
+    "standard-3": (2.0, 8.0, 16.0),
+    "standard-4": (4.0, 12.0, 20.0),
+}
 
 # cores, requested GiB, hard-limit GiB, idle tail seconds. The hard limits are
 # unchanged from the proven fleet; request/limit separation lets Modal bill
@@ -51,7 +66,50 @@ def request_profile(role=None, service=None):
 
 
 def annotate_request(timings, seconds, role=None, service=None):
-    if os.getenv("EXECUTOR_PROVIDER", "") == "modal":
+    provider = os.getenv("EXECUTOR_PROVIDER", "")
+    if provider == "cloudflare":
+        profile = os.getenv(
+            "CLOUDFLARE_CONTAINER_PROFILE", "standard-4")
+        cores, memory_gib, disk_gb = CLOUDFLARE_PROFILES.get(
+            profile, CLOUDFLARE_PROFILES["standard-4"])
+        wall_s = max(0.0, float(seconds))
+        try:
+            measured_cpu_s = max(
+                0.0, float(timings.get("container_cpu_s")))
+        except (TypeError, ValueError):
+            # Missing cgroup CPU evidence is not allowed to turn Cloudflare
+            # into an artificially cheap provider. Provisioned-vCPU wall time
+            # is the conservative ceiling until measurement is available.
+            measured_cpu_s = wall_s * cores
+        active_cost = measured_cpu_s * CLOUDFLARE_VCPU_S
+        memory_cost = wall_s * memory_gib * CLOUDFLARE_GIB_S
+        disk_cost = wall_s * disk_gb * CLOUDFLARE_GB_DISK_S
+        try:
+            egress_bytes = max(0, int(timings.get("uploaded_bytes") or 0))
+        except (TypeError, ValueError):
+            egress_bytes = 0
+        egress_cost = (egress_bytes / (1024 ** 3)) * CLOUDFLARE_EGRESS_GB
+        tail_s = 60
+        idle_unit = (memory_gib * CLOUDFLARE_GIB_S
+                     + disk_gb * CLOUDFLARE_GB_DISK_S)
+        gross = active_cost + memory_cost + disk_cost + egress_cost
+        timings.update({
+            "compute_provider": "cloudflare",
+            "compute_profile": (
+                f"cloudflare-{profile}-{cores:g}vcpu-"
+                f"{memory_gib:g}g-{disk_gb:g}gb"),
+            "compute_cpu_measured_s": round(measured_cpu_s, 3),
+            "compute_cpu_usd": round(active_cost, 6),
+            "compute_memory_usd": round(memory_cost, 6),
+            "compute_disk_usd": round(disk_cost, 6),
+            "compute_egress_usd_ceiling": round(egress_cost, 6),
+            "gross_compute_usd_ceiling": round(gross, 6),
+            "configured_idle_tail_s": tail_s,
+            "gross_compute_usd_with_tail_ceiling": round(
+                gross + tail_s * idle_unit, 6),
+        })
+        return timings
+    if provider == "modal":
         profile = os.getenv("MODAL_EXECUTOR_PROFILE", "heavy")
         priced_profile = (profile[:-3]
                           if profile.endswith("-eu") else profile)

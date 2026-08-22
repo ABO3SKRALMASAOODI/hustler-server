@@ -93,3 +93,28 @@ def test_unpinned_profile_avoids_us_region_surcharge(monkeypatch):
     assert global_profile["gross_compute_usd_reserved"] \
         == round(pinned["gross_compute_usd_reserved"] / 1.5, 6)
     assert global_profile["compute_region_class"] == "global"
+
+
+def test_cloudflare_cost_uses_measured_cpu_and_provisioned_memory_disk(
+        monkeypatch):
+    monkeypatch.setenv("EXECUTOR_PROVIDER", "cloudflare")
+    monkeypatch.setenv("CLOUDFLARE_CONTAINER_PROFILE", "standard-3")
+    timings = {"container_cpu_s": 40, "uploaded_bytes": 1024 ** 3}
+    compute_cost.annotate_request(timings, 100)
+
+    assert timings["compute_provider"] == "cloudflare"
+    assert timings["compute_profile"] == \
+        "cloudflare-standard-3-2vcpu-8g-16gb"
+    assert timings["compute_cpu_usd"] == round(
+        40 * compute_cost.CLOUDFLARE_VCPU_S, 6)
+    assert timings["compute_egress_usd_ceiling"] == .025
+    assert timings["gross_compute_usd_with_tail_ceiling"] \
+        > timings["gross_compute_usd_ceiling"]
+
+
+def test_cloudflare_missing_cpu_measurement_fails_closed_to_vcpu_wall(
+        monkeypatch):
+    monkeypatch.setenv("EXECUTOR_PROVIDER", "cloudflare")
+    monkeypatch.setenv("CLOUDFLARE_CONTAINER_PROFILE", "standard-4")
+    timings = compute_cost.annotate_request({}, 10)
+    assert timings["compute_cpu_measured_s"] == 40

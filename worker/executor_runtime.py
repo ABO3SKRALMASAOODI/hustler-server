@@ -81,6 +81,45 @@ def ensure_heartbeat():
         _heartbeat_started = True
 
 
+def _confirm_provider_ownership(db, job):
+    """Wait briefly for the spawn caller to durably publish this exact call.
+
+    Modal returns a provider call id only after accepting the input, so the
+    Postgres handoff necessarily follows by a few milliseconds. A dispatcher
+    crash in that gap used to leave an unobservable paid render. The executor
+    now waits for the exact id before expensive work; a genuinely missing or
+    superseded handoff exits without touching user media.
+    """
+    job_id = job.get("id")
+    claim = job.get("total_claims")
+    call_id = job.get("provider_call_id")
+    provider = os.getenv("EXECUTOR_PROVIDER", "cloud_run")
+    if job_id is None or claim is None or not call_id \
+            or provider not in {"modal", "cloudflare"}:
+        return
+    deadline = time.monotonic() + 15.0
+    while True:
+        status = db.run(
+            dbx.confirm_remote_execution_ownership,
+            job_id, claim, provider, call_id)
+        if status == "owned":
+            return
+        if status == "unavailable":
+            print(f"[executor] remote ownership ledger is not installed for "
+                  f"job {job_id}; using migration-compatible lease fencing",
+                  flush=True)
+            return
+        if status == "superseded":
+            raise dbx.JobLeaseLost(
+                f"job {job_id} provider call {call_id} was superseded before "
+                "executor start")
+        if time.monotonic() >= deadline:
+            raise dbx.RemoteExecutionUnconfirmed(
+                f"job {job_id} provider call {call_id} ownership was not "
+                "recorded before the 15s handoff deadline")
+        time.sleep(0.1)
+
+
 def execute(job, runners):
     """Execute one job and return the established executor JSON envelope."""
     jtype = job.get("type")
@@ -94,6 +133,11 @@ def execute(job, runners):
     job_id = job.get("id")
     lease_claim = job.get("total_claims")
     t0 = time.monotonic()
+    try:
+        provider_start_s = max(
+            0.0, time.time() - float(job.get("dispatch_submitted_at")))
+    except (TypeError, ValueError):
+        provider_start_s = None
     input_observation = _input_observation(t0)
     io_token = io_telemetry.begin()
     io_finished = False
@@ -125,6 +169,7 @@ def execute(job, runners):
     if job_id is not None:
         dbx.track_job(job_id)
     try:
+        _confirm_provider_ownership(db, job)
         if lease_claim is not None and not db.run(
                 dbx.lease_is_current, job_id, lease_claim):
             raise dbx.JobLeaseLost(
@@ -132,7 +177,9 @@ def execute(job, runners):
         if job_id is not None and lease_claim is not None:
             try:
                 db.run(dbx.mark_remote_execution_running,
-                       job_id, lease_claim)
+                       job_id, lease_claim,
+                       os.getenv("EXECUTOR_PROVIDER", "cloud_run"),
+                       job.get("provider_call_id"))
             except Exception as exc:
                 # The queue lease remains the source of truth. A handoff
                 # telemetry write must never become a new render failure.
@@ -152,6 +199,16 @@ def execute(job, runners):
                     or any(str(key).endswith("cache_hit_s")
                            for key in (result.get("timings") or {})))),
         })
+        if provider_start_s is not None:
+            execution_timings["provider_start_s"] = round(
+                provider_start_s, 3)
+        requested_provider = str(((job.get("payload") or {}).get(
+            "execution_provider") or "")).strip().lower()
+        actual_provider = os.getenv("EXECUTOR_PROVIDER", "cloud_run")
+        if requested_provider:
+            execution_timings["dispatch_provider"] = requested_provider
+            execution_timings["provider_fallback"] = (
+                requested_provider != actual_provider)
         compute_cost.annotate_request(
             execution_timings, dt, config.WORKER_ROLE,
             os.getenv("K_SERVICE", ""))
@@ -169,7 +226,9 @@ def execute(job, runners):
                     "superseded before executor completion")
             try:
                 db.run(dbx.finish_remote_execution, job_id, lease_claim,
-                       "done")
+                       "done", None,
+                       os.getenv("EXECUTOR_PROVIDER", "cloud_run"),
+                       job.get("provider_call_id"))
             except Exception as exc:
                 print(f"[executor] could not close remote handoff for job "
                       f"{job_id}: {str(exc)[:160]}", flush=True)
@@ -189,7 +248,9 @@ def execute(job, runners):
         if job_id is not None and lease_claim is not None:
             try:
                 db.run(dbx.finish_remote_execution, job_id, lease_claim,
-                       "failed", exc)
+                       "failed", exc,
+                       os.getenv("EXECUTOR_PROVIDER", "cloud_run"),
+                       job.get("provider_call_id"))
             except Exception as ledger_exc:
                 print(f"[executor] could not record remote failure for job "
                       f"{job_id}: {str(ledger_exc)[:160]}", flush=True)
@@ -203,6 +264,16 @@ def execute(job, runners):
             "execution_policy": config.execution_policy_for(job),
             "cache_hit": False,
         })
+        if provider_start_s is not None:
+            failure_timings["provider_start_s"] = round(
+                provider_start_s, 3)
+        requested_provider = str(((job.get("payload") or {}).get(
+            "execution_provider") or "")).strip().lower()
+        actual_provider = os.getenv("EXECUTOR_PROVIDER", "cloud_run")
+        if requested_provider:
+            failure_timings["dispatch_provider"] = requested_provider
+            failure_timings["provider_fallback"] = (
+                requested_provider != actual_provider)
         compute_cost.annotate_request(
             failure_timings, dt, config.WORKER_ROLE,
             os.getenv("K_SERVICE", ""))

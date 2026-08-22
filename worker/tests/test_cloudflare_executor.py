@@ -59,7 +59,7 @@ def test_provider_choice_is_stamped_once_under_the_queue_lease(monkeypatch):
             if fn is dbx.project_execution_shape:
                 return {"total_bytes": 10, "max_duration_s": 20}
             if fn is dbx.stamp_execution_provider:
-                return args[-1]
+                return args[2]
             raise AssertionError(fn)
 
     job = {key: value for key, value in JOB.items()
@@ -67,7 +67,9 @@ def test_provider_choice_is_stamped_once_under_the_queue_lease(monkeypatch):
     provider = remote.stamp_execution_provider(WorkerDb(), job)
     assert provider == "cloudflare"
     assert job["payload"]["execution_provider"] == "cloudflare"
-    assert calls[-1][1] == (42, 4, "cloudflare")
+    assert calls[-1][1] == (
+        42, 4, "cloudflare", {"total_bytes": 10, "max_duration_s": 20})
+    assert job["payload"]["execution_shape"]["total_bytes"] == 10
 
 
 def test_stamped_provider_is_immune_to_rollout_percentage_changes(monkeypatch):
@@ -127,6 +129,8 @@ def test_cloudflare_uses_deterministic_call_and_persists_before_wait(
     call_id = record[1][3]
     assert call_id == remote._cloudflare_call_id(job)
     assert f"/calls/interactive/{call_id}" in posted[0][0]
+    assert posted[0][1]["json"]["timeout_s"] > 0
+    assert posted[0][1]["json"]["job"]["dispatch_submitted_at"] > 0
 
 
 def test_cloudflare_authenticated_preflight_is_cached(monkeypatch):
@@ -232,10 +236,22 @@ def test_ambiguous_missing_status_never_authorizes_modal_fallback(monkeypatch):
 def test_cloudflare_config_preserves_modal_heavy_fallback():
     root = Path(__file__).resolve().parents[1]
     wrangler = (root / "cloudflare" / "wrangler.jsonc").read_text()
+    adapter = (root / "cloudflare" / "src" / "index.ts").read_text()
     dockerfile = (root / "Dockerfile.cloudflare").read_text()
     assert '"instance_type": "standard-4"' in wrangler
     assert '"max_instances": 3' in wrangler
     assert '"WNAM"' in wrangler
+    assert '"image_vars": {"WHISPER_MODEL": ""}' in wrangler
+    assert '"image_vars": {"WHISPER_MODEL": "medium"}' in wrangler
+    assert "const SHARD_COUNTS = { interactive: 5, batch: 3 }" in adapter
+    assert "storage.transaction" in adapter
+    assert "provider_call_id: callId" in adapter
+    assert 'sleepAfter = "60s"' in adapter
+    assert "getByName(shardName" not in adapter  # computed once as `shard`
+    assert "getByName(shard)" in adapter
+    assert "Cloudflare Container shard is busy" in adapter
+    assert "CLOUDFLARE_CONTAINER_PROFILE" in adapter
     assert "http_server.py" in dockerfile
+    assert 'if [ -n "$WHISPER_MODEL" ]' in dockerfile
     assert "playwright install" not in dockerfile
     assert "pip install --no-cache-dir demucs" not in dockerfile.lower()

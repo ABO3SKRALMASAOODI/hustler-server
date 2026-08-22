@@ -116,10 +116,20 @@ def adapter_version():
 
 def _run(job, profile, role="executor", pricing_multiplier=1.5):
     _boot(profile, role, pricing_multiplier)
+    job = dict(job or {})
+    # The executor must prove that this exact accepted Modal input owns the
+    # queue lease before it downloads or encodes. The ID is created by Modal,
+    # so it can only be attached inside the remote invocation.
+    try:
+        job["provider_call_id"] = modal.current_function_call_id()
+    except Exception:
+        # Local unit invocations have no provider context; queue lease fencing
+        # remains unchanged there.
+        pass
     import config
     import http_server
     import executor_runtime
-    if (job or {}).get("type") == "__warm":
+    if job.get("type") == "__warm":
         import resource_usage
         import subprocess
         import version
@@ -146,7 +156,7 @@ def _run(job, profile, role="executor", pricing_multiplier=1.5):
         }
     config.require_core()
     executor_runtime.ensure_heartbeat()
-    return executor_runtime.execute(job or {}, http_server.RUNNERS)
+    return executor_runtime.execute(job, http_server.RUNNERS)
 
 
 @app.function(name="preview", cpu=PREVIEW_CPU, memory=PREVIEW_MEMORY,

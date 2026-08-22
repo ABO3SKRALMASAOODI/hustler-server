@@ -14,9 +14,23 @@ interface CallState {
   status: "submitted" | "starting" | "running" | "unknown" | "done" | "failed";
   jobType: string;
   updatedAt: string;
+  activeUntil: number;
   envelope?: JsonObject;
   error?: string;
 }
+
+interface ActiveCall {
+  callId: string;
+  expiresAt: number;
+}
+
+type Reservation =
+  | { kind: "reserved" }
+  | { kind: "terminal"; state: CallState }
+  | { kind: "existing"; state: CallState }
+  | { kind: "conflict" }
+  | { kind: "busy" }
+  | { kind: "reset"; resetId: string };
 
 interface Env {
   INTERACTIVE: DurableObjectNamespace<ValmeraInteractive>;
@@ -39,6 +53,19 @@ interface Env {
 const INTERACTIVE_TYPES = new Set(["preview", "preview_check", "filmstrip"]);
 const BATCH_TYPES = new Set(["index", "final"]);
 const CALL_ID = /^[a-zA-Z0-9_-]{8,96}$/;
+const SHARD_COUNTS = { interactive: 5, batch: 3 } as const;
+
+function shardName(lane: "interactive" | "batch", callId: string): string {
+  // Every novel Container ID cold-starts. A fixed pool reuses Python images
+  // and their bounded immutable source cache, while this deterministic hash
+  // lets any later status request find the same durable call record.
+  let hash = 2166136261;
+  for (let i = 0; i < callId.length; i += 1) {
+    hash ^= callId.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `${lane}-${(hash >>> 0) % SHARD_COUNTS[lane]}`;
+}
 
 function json(value: unknown, status = 200): Response {
   return new Response(JSON.stringify(value), {
@@ -64,14 +91,16 @@ async function authorized(request: Request, expected: string): Promise<boolean> 
 
 abstract class ValmeraContainer extends Container<Env> {
   defaultPort = 8080;
-  sleepAfter = "10s";
+  sleepAfter = "60s";
   enableInternet = true;
+  protected abstract readonly containerProfile: "standard-3" | "standard-4";
 
   private environment(): Record<string, string> {
     const optional = (value: string | undefined): string => value ?? "";
     return {
       WORKER_ROLE: "executor",
       EXECUTOR_PROVIDER: "cloudflare",
+      CLOUDFLARE_CONTAINER_PROFILE: this.containerProfile,
       EXECUTION_POLICY_MODE: "legacy",
       PORT: "8080",
       PYTHONUNBUFFERED: "1",
@@ -91,45 +120,144 @@ abstract class ValmeraContainer extends Container<Env> {
     };
   }
 
-  private async callState(): Promise<CallState | null> {
-    return (await this.ctx.storage.get<CallState>("call")) ?? null;
+  private stateKey(callId: string): string {
+    return `call:${callId}`;
+  }
+
+  private async callState(callId: string): Promise<CallState | null> {
+    return (await this.ctx.storage.get<CallState>(this.stateKey(callId))) ?? null;
+  }
+
+  private async release(callId: string): Promise<void> {
+    await this.ctx.storage.transaction(async (txn) => {
+      const active = await txn.get<ActiveCall>("active");
+      if (active?.callId === callId) await txn.delete("active");
+    });
+  }
+
+  private async reserve(
+    callId: string,
+    jobType: string,
+    now: number,
+    activeUntil: number,
+  ): Promise<Reservation> {
+    // A Durable Object may interleave requests at await points. Keep the
+    // call-id check and per-shard admission lock in one storage transaction,
+    // otherwise two simultaneous edits could both observe an idle shard.
+    return this.ctx.storage.transaction(async (txn) => {
+      const existing = await txn.get<CallState>(this.stateKey(callId));
+      if (existing?.status === "done" || existing?.status === "failed") {
+        return { kind: "terminal", state: existing };
+      }
+      if (existing && existing.jobType !== jobType) {
+        return { kind: "conflict" };
+      }
+      if (existing) return { kind: "existing", state: existing };
+
+      const active = await txn.get<ActiveCall>("active");
+      if (active && active.expiresAt > now) return { kind: "busy" };
+      if (active) {
+        // Serialize the destructive container reset too. Other new calls see
+        // this short reset lease as busy and may safely stay on Modal.
+        const resetId = `reset:${active.callId}`;
+        await txn.put("active", { callId: resetId, expiresAt: now + 120_000 });
+        return { kind: "reset", resetId };
+      }
+
+      const state: CallState = {
+        status: "submitted", jobType,
+        updatedAt: new Date().toISOString(), activeUntil,
+      };
+      await txn.put({
+        [this.stateKey(callId)]: state,
+        active: { callId, expiresAt: activeUntil } satisfies ActiveCall,
+      });
+      return { kind: "reserved" };
+    });
   }
 
   override async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
-    if (request.method === "GET" && url.pathname === "/status") {
-      const state = await this.callState();
+    const statusMatch = url.pathname.match(/^\/status\/([^/]+)$/);
+    if (request.method === "GET" && statusMatch && CALL_ID.test(statusMatch[1])) {
+      const state = await this.callState(statusMatch[1]);
       return state ? json(state) : json({ status: "missing" }, 404);
     }
-    if (request.method !== "POST" || url.pathname !== "/execute") {
+    const executeMatch = url.pathname.match(/^\/execute\/([^/]+)$/);
+    if (request.method !== "POST" || !executeMatch || !CALL_ID.test(executeMatch[1])) {
       return json({ error: "not found" }, 404);
     }
+    const callId = executeMatch[1];
 
-    const body = (await request.json()) as { job?: ExecutorJob };
+    const body = (await request.json()) as { job?: ExecutorJob; timeout_s?: number };
     const job = body.job;
     if (!job || !Number.isInteger(job.id) || !Number.isInteger(job.total_claims)) {
-      return json({ error: "invalid queue job" }, 400);
+      return json({ error: "invalid queue job", safe_to_fallback: true }, 400);
     }
-    const existing = await this.callState();
-    if (existing?.status === "done" || existing?.status === "failed") {
-      return json(existing.envelope ?? { error: existing.error ?? "executor failed" });
+    const now = Date.now();
+    const requestedTimeout = Number(body.timeout_s ?? 3600);
+    const timeoutSeconds = Number.isFinite(requestedTimeout)
+      ? Math.max(60, Math.min(7200, requestedTimeout))
+      : 3600;
+    const activeUntil = now + timeoutSeconds * 1000;
+    let reservation = await this.reserve(
+      callId, job.type, now, activeUntil,
+    );
+    if (reservation.kind === "reset") {
+      // The prior dispatch lease has expired. Its /run may still occupy this
+      // shared container after an ambiguous Worker disconnect; starting a new
+      // ffmpeg beside it would exceed the instance shape. Stop the shard first
+      // and cold-restart it for the next call. No new /run has been sent yet,
+      // so a stop failure remains safe to handle on Modal.
+      try {
+        await this.stop();
+      } catch (error) {
+        return json({
+          error: `expired Cloudflare shard could not be reset: ${String(error)}`,
+          safe_to_fallback: true,
+        }, 503);
+      }
+      await this.release(reservation.resetId);
+      reservation = await this.reserve(
+        callId, job.type, Date.now(), activeUntil,
+      );
     }
-    if (existing && existing.jobType !== job.type) {
+    if (reservation.kind === "terminal") {
+      const existing = reservation.state;
+      return json(existing.envelope ?? {
+        error: existing.error ?? "executor failed",
+      });
+    }
+    if (reservation.kind === "conflict") {
       return json({ error: "call id already belongs to another job type" }, 409);
     }
-    if (existing) {
+    if (reservation.kind === "existing") {
       // A named call is at-most-one physical /run. Reconnectors use /status;
       // repeating POST while the first request is ambiguous must never start
       // another Python runner in the same container.
-      return json({ error: "call already accepted", call_status: existing.status }, 409);
+      return json({
+        error: "call already accepted",
+        call_status: reservation.state.status,
+      }, 409);
+    }
+    if (reservation.kind !== "reserved") {
+      // No /run request exists for this new call, so the dispatcher can keep
+      // the user moving on Modal rather than queueing behind a busy shard.
+      return json({
+        error: "Cloudflare Container shard is busy",
+        safe_to_fallback: true,
+      }, 429);
     }
 
+    const stateKey = this.stateKey(callId);
     const update = async (state: CallState): Promise<void> => {
-      await this.ctx.storage.put("call", state);
+      await this.ctx.storage.put(stateKey, state);
     };
-    await update({ status: "submitted", jobType: job.type, updatedAt: new Date().toISOString() });
     try {
-      await update({ status: "starting", jobType: job.type, updatedAt: new Date().toISOString() });
+      await update({
+        status: "starting", jobType: job.type,
+        updatedAt: new Date().toISOString(), activeUntil,
+      });
       await this.startAndWaitForPorts({
         ports: [8080],
         startOptions: { envVars: this.environment(), enableInternet: true },
@@ -137,14 +265,18 @@ abstract class ValmeraContainer extends Container<Env> {
       });
     } catch (error) {
       // No /run request was sent. The dispatcher may safely use Modal.
-      await this.ctx.storage.delete("call");
+      await this.ctx.storage.delete(stateKey);
+      await this.release(callId);
       return json({
         error: String(error),
         safe_to_fallback: true,
       }, 503);
     }
 
-    await update({ status: "running", jobType: job.type, updatedAt: new Date().toISOString() });
+    await update({
+      status: "running", jobType: job.type,
+      updatedAt: new Date().toISOString(), activeUntil,
+    });
     try {
       const response = await this.containerFetch("http://localhost:8080/run", {
         method: "POST",
@@ -152,11 +284,17 @@ abstract class ValmeraContainer extends Container<Env> {
           "content-type": "application/json",
           authorization: `Bearer ${this.env.EXECUTOR_SECRET}`,
         },
-        body: JSON.stringify({ job }),
+        body: JSON.stringify({
+          job: { ...job, provider_call_id: callId },
+        }),
       });
       const envelope = (await response.json()) as JsonObject;
       const status = envelope.error ? "failed" : "done";
-      await update({ status, jobType: job.type, envelope, updatedAt: new Date().toISOString() });
+      await update({
+        status, jobType: job.type, envelope,
+        updatedAt: new Date().toISOString(), activeUntil,
+      });
+      await this.release(callId);
       return json(envelope);
     } catch (error) {
       // Once /run was sent, a lost Worker-side connection is ambiguous: the
@@ -167,19 +305,18 @@ abstract class ValmeraContainer extends Container<Env> {
         jobType: job.type,
         error: String(error),
         updatedAt: new Date().toISOString(),
+        activeUntil,
       });
       return json({ error: String(error), call_status: "unknown" }, 502);
     }
   }
 }
 
-export class ValmeraInteractive extends ValmeraContainer {}
-export class ValmeraBatch extends ValmeraContainer {}
-
-function binding(env: Env, lane: string): DurableObjectNamespace<ValmeraContainer> | null {
-  if (lane === "interactive") return env.INTERACTIVE;
-  if (lane === "batch") return env.BATCH;
-  return null;
+export class ValmeraInteractive extends ValmeraContainer {
+  protected readonly containerProfile = "standard-3" as const;
+}
+export class ValmeraBatch extends ValmeraContainer {
+  protected readonly containerProfile = "standard-4" as const;
 }
 
 export default {
@@ -189,7 +326,11 @@ export default {
       if (!(await authorized(request, env.EXECUTOR_SECRET))) {
         return json({ error: "unauthorized", safe_to_fallback: true }, 401);
       }
-      return json({ status: "ok", provider: "cloudflare", code_version: env.CODE_VERSION ?? "unknown" });
+      return json({
+        status: "ok", provider: "cloudflare",
+        code_version: env.CODE_VERSION ?? "unknown",
+        shards: SHARD_COUNTS,
+      });
     }
     if (!(await authorized(request, env.EXECUTOR_SECRET))) {
       // Authentication happens before a Durable Object is resolved, so no
@@ -200,12 +341,14 @@ export default {
     if (!match || !CALL_ID.test(match[2])) {
       return json({ error: "not found", safe_to_fallback: true }, 404);
     }
-    const [, lane, callId] = match;
-    const namespace = binding(env, lane);
-    if (!namespace) return json({ error: "unknown lane" }, 404);
-    const stub = namespace.getByName(callId);
+    const [, rawLane, callId] = match;
+    const lane = rawLane as "interactive" | "batch";
+    const shard = shardName(lane, callId);
+    const stub = lane === "interactive"
+      ? env.INTERACTIVE.getByName(shard)
+      : env.BATCH.getByName(shard);
     if (request.method === "GET") {
-      return stub.fetch("https://container.internal/status");
+      return stub.fetch(`https://container.internal/status/${callId}`);
     }
     if (request.method !== "POST") return json({ error: "method not allowed" }, 405);
     const body = (await request.json()) as { job?: ExecutorJob };
@@ -214,7 +357,7 @@ export default {
     if (!allowed.has(jobType)) {
       return json({ error: `job type ${jobType} is not allowed on ${lane}`, safe_to_fallback: true }, 400);
     }
-    return stub.fetch("https://container.internal/execute", {
+    return stub.fetch(`https://container.internal/execute/${callId}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),

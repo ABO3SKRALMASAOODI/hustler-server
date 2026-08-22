@@ -136,7 +136,8 @@ def test_success_roundtrip():
         assert seen["job"]["payload"] == {"edl_version": 5}
         assert set(seen["job"]) == {"id", "type", "project_id", "user_id",
                                     "attempts", "total_claims", "payload",
-                                    "_queue_wait_s"}
+                                    "_queue_wait_s",
+                                    "dispatch_submitted_at"}
     finally:
         _teardown(srv, saved)
 

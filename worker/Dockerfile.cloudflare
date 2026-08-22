@@ -25,7 +25,13 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 ENV HF_HOME=/opt/hf
 ARG WHISPER_MODEL=medium
-RUN python -c "from faster_whisper import download_model; download_model('${WHISPER_MODEL}')"
+# Interactive proof and filmstrip jobs never transcribe. Wrangler passes an
+# empty build arg for that image so cold starts do not pull a multi-gigabyte
+# model through Cloudflare's scheduler. The batch image keeps the exact proven
+# local fallback used by index jobs.
+RUN if [ -n "$WHISPER_MODEL" ]; then \
+      python -c "from faster_whisper import download_model; download_model('${WHISPER_MODEL}')"; \
+    fi
 
 COPY . .
 

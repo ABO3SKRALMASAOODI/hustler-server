@@ -2,11 +2,14 @@ import os
 import sys
 import time
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 ".."))
 
 import resource_usage  # noqa: E402
 import executor_runtime  # noqa: E402
+import db as dbx  # noqa: E402
 
 
 def test_cgroup_v2_snapshot_and_delta_cover_child_process_boundary(tmp_path):
@@ -84,13 +87,19 @@ def test_synchronous_tools_emit_cost_and_whole_container_telemetry(
     monkeypatch.setenv("MODAL_EXECUTOR_PROFILE", "light")
     monkeypatch.setenv("MODAL_PRICING_MULTIPLIER", "1")
 
+    submitted_at = time.time() - 2
     response = executor_runtime.execute(
-        {"id": None, "type": "frames", "project_id": 9},
+        {"id": None, "type": "frames", "project_id": 9,
+         "dispatch_submitted_at": submitted_at,
+         "payload": {"execution_provider": "cloudflare"}},
         {"frames": lambda _db, _job: {"ok": True}})
 
     assert response["result"] == {"ok": True}
     assert response["job_completed"] is False
     assert response["execution"]["execution_class"] == "light_media"
+    assert response["execution"]["provider_start_s"] >= 1.9
+    assert response["execution"]["dispatch_provider"] == "cloudflare"
+    assert response["execution"]["provider_fallback"] is True
     output = capsys.readouterr().out
     assert '"container_memory_peak_mib":612.5' in output
     assert '"container_memory_sampled_peak_mib":700.0' in output
@@ -133,3 +142,38 @@ def test_executor_failure_preserves_runner_stage_timings(monkeypatch):
     assert response["timings"]["download_s"] == 12.5
     assert response["timings"]["encode_s"] == 3000.1
     assert response["timings"]["failed_stage"] == "encode_s"
+
+
+def test_remote_executor_waits_for_exact_durable_call_ownership(monkeypatch):
+    statuses = iter(["pending", "owned"])
+    calls = []
+
+    class FakeDb:
+        def run(self, fn, *args):
+            assert fn is dbx.confirm_remote_execution_ownership
+            calls.append(args)
+            return next(statuses)
+
+    monkeypatch.setenv("EXECUTOR_PROVIDER", "modal")
+    monkeypatch.setattr(executor_runtime.time, "sleep", lambda _s: None)
+    executor_runtime._confirm_provider_ownership(FakeDb(), {
+        "id": 42, "total_claims": 4, "provider_call_id": "fc-owner",
+    })
+    assert calls == [
+        (42, 4, "modal", "fc-owner"),
+        (42, 4, "modal", "fc-owner"),
+    ]
+
+
+def test_superseded_provider_call_stops_before_runner(monkeypatch):
+    class FakeDb:
+        @staticmethod
+        def run(fn, *_args):
+            assert fn is dbx.confirm_remote_execution_ownership
+            return "superseded"
+
+    monkeypatch.setenv("EXECUTOR_PROVIDER", "cloudflare")
+    with pytest.raises(dbx.JobLeaseLost):
+        executor_runtime._confirm_provider_ownership(FakeDb(), {
+            "id": 42, "total_claims": 4, "provider_call_id": "cf-loser",
+        })
