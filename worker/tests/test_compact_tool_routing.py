@@ -1,4 +1,4 @@
-"""Post-plan schema routing cuts repeated tokens without hiding capability."""
+"""Request-scoped schema routing cuts context without hiding capability."""
 
 import json
 import os
@@ -23,13 +23,14 @@ class _Ctx:
         self._loaded_tool_names = set()
 
 
-def test_post_plan_catalog_exposes_default_edit_domains():
+def test_post_plan_catalog_exposes_only_declared_edit_domains():
     ctx = _Ctx()
     names = agent_tools.compact_tool_names(ctx)
     assert {"keep_segments", "render_preview",
-            "expand_toolset"} <= names
-    assert {"set_caption_style", "add_captions", "add_music",
-            "cut_range"} <= names
+            "load_tools"} <= names
+    assert {"set_caption_style", "add_captions", "cut_range"} <= names
+    assert "add_music" not in names
+    assert "expand_toolset" not in names
     assert "set_edit_plan" not in names
     assert "apply_edit_recipe" not in names
     assert "generate_video" not in names
@@ -46,14 +47,45 @@ def test_post_plan_catalog_exposes_default_edit_domains():
     assert routed_chars <= full_chars
 
 
-def test_fresh_catalog_can_write_without_a_plan():
+def test_fresh_catalog_is_small_and_loads_writes_explicitly():
     names = agent_tools.planning_tool_names()
-    assert {"look_at", "compare_uploaded_media",
-            "find_silences", "read_skill", "add_captions"} <= names
+    assert {"look_at", "get_edl", "read_skill", "load_tools"} <= names
+    assert "list_assets" not in names
+    assert "get_video_info" not in names
+    assert "compare_uploaded_media" not in names
+    assert "find_silences" not in names
+    assert "add_captions" not in names
     assert "set_edit_plan" not in names
     assert "apply_edit_recipe" not in names
     assert "generate_video" not in names
-    assert names & agent_tools.WRITE_TOOLS
+    assert not (names & agent_tools.WRITE_TOOLS)
+
+    schemas = agent_tools.openai_tools(compact=True, names=names)
+    assert len(schemas) <= 10
+    assert len(json.dumps(schemas, separators=(",", ":"))) < 12_000
+
+
+def test_exact_load_adds_one_requested_write_without_its_whole_department():
+    ctx = _Ctx()
+    ctx.edit_plan = None
+    out = agent_tools.load_tools(ctx, names=["add_music"])
+    names = agent_tools.compact_tool_names(ctx)
+
+    assert "Capabilities loaded" in out
+    assert "add_music" in names
+    assert "search_sfx" not in names
+    assert "add_captions" not in names
+
+
+def test_retired_tools_are_absent_even_from_the_full_catalog():
+    retired = {
+        "search_music", "research_music", "audition_music_candidates",
+        "fetch_music", "set_edit_plan", "complete_edit_plan_steps",
+        "apply_edit_recipe", "generate_video", "generate_image",
+    }
+    assert not (retired & set(agent_tools.TOOLS))
+    names = {row["function"]["name"] for row in agent_tools.openai_tools()}
+    assert not (retired & names)
 
 
 def test_any_omitted_domain_can_be_loaded_without_changing_the_edit():
@@ -66,7 +98,7 @@ def test_any_omitted_domain_can_be_loaded_without_changing_the_edit():
     assert {"record_website", "showcase_demo"} <= names
 
     # Loading is additive and persists throughout the logical request.
-    agent_tools.expand_toolset(ctx, ["motion"])
+    agent_tools.expand_toolset(ctx, ["motion", "looks"])
     names = agent_tools.compact_tool_names(ctx)
     assert {"add_zoom", "set_color_grade"} <= names
     assert "research_broll" in names
@@ -108,7 +140,16 @@ def test_domain_union_covers_every_registered_tool():
     covered = set(agent_tools.TOOL_CORE)
     for names in agent_tools.TOOL_DOMAINS.values():
         covered.update(names)
-    assert set(agent_tools.TOOLS) <= covered
+    assert set(agent_tools.TOOLS) <= covered | agent_tools.AGENT_SCHEMA_HIDDEN
+
+
+def test_every_advertised_domain_is_accepted_by_load_tools_schema():
+    schema = next(row for row in agent_tools.openai_tools()
+                  if row["function"]["name"] == "load_tools")
+    allowed = set(schema["function"]["parameters"]["properties"]
+                  ["domains"]["items"]["enum"])
+    assert allowed == set(agent_tools.TOOL_DOMAINS)
+    assert {"acquisition", "graphics", "sfx", "looks"} <= allowed
 
 
 def test_visual_budget_covers_library_before_deep_sampling_and_prioritizes_upload():

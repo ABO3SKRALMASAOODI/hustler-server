@@ -728,8 +728,8 @@ def get_video_info(ctx):
         ins = edl["json"].get("inserts") or []
         prog = _program_map(ctx, edl["json"])
         return ("No main video in this project — this is a blank canvas. Build "
-                "the program from uploaded images/clips (and generate_image "
-                "if listed), then place with insert_media. "
+                "the program from uploaded images/clips, then place them "
+                "with insert_media. "
                 f"Current EDL v{edl['version']}: {len(ins)} placed "
                 f"clip{'s' if len(ins) != 1 else ''}, "
                 f"{program_duration(edl['json'])}s total."
@@ -21338,9 +21338,21 @@ _MOTION_MOTIF_PROP = {
                     "never 'hold'."),
 }
 
+# Stable provider-facing department names. Keep the schema enums and the
+# runtime router sourced from this one tuple; a previous split added the
+# acquisition department to the router but not to the load_tools schema, so
+# the model could see the department in the directory yet could not request it
+# as a domain.
+AGENT_TOOL_DOMAINS = (
+    "story", "captions", "graphics", "audio", "sfx", "media",
+    "acquisition", "motion", "looks", "screen", "shorts",
+)
+
+
 TOOLS = {
     "get_video_info": (get_video_info, "Video metadata plus index and EDL "
-                       "summary. Call this first.", {}),
+                       "summary. Use only when the supplied project state "
+                       "does not already answer the metadata question.", {}),
     "get_transcript": (get_transcript, "Sentence-level SOURCE transcript "
                        "with timestamps for a time range (source seconds). "
                        "For word-exact timing use get_words; for what the "
@@ -21646,9 +21658,7 @@ TOOLS = {
                        "tool_domains": {
                            "type": "array",
                            "items": {"type": "string",
-                                     "enum": ["story", "captions", "audio",
-                                              "media", "motion", "screen",
-                                              "shorts"]},
+                                     "enum": list(AGENT_TOOL_DOMAINS)},
                            "description": (
                                "Editorial capability departments required by "
                                "this treatment. Their schemas load on the "
@@ -21689,8 +21699,7 @@ TOOLS = {
         "This changes no media or EDL and is not a tool limit: request any "
         "relevant domains, then continue immediately.",
         {"domains": {"type": "array", "items": {"type": "string",
-          "enum": ["story", "captions", "audio", "media", "motion",
-                   "screen", "shorts"]}}}),
+          "enum": list(AGENT_TOOL_DOMAINS)}}}),
     "load_tools": (
         load_tools,
         "Load exact capabilities or complete editorial departments for the "
@@ -21700,11 +21709,8 @@ TOOLS = {
         "cross-department work.",
         {"names": {"type": "array", "items": {"type": "string"}},
          "domains": {"type": "array", "items": {"type": "string",
-                                                   "enum": [
-                                                       "story", "captions",
-                                                       "audio", "media",
-                                                       "motion", "screen",
-                                                       "shorts"]}}}),
+                                                   "enum": list(
+                                                       AGENT_TOOL_DOMAINS)}}}),
     "apply_edit_recipe": (
         apply_edit_recipe,
         "Compile and atomically commit a multi-department EDL recipe; use "
@@ -23909,34 +23915,31 @@ def finishing_checkpoint(ctx):
     return False
 
 
-# Schema routing keeps evidence/utility tools plus the departments the editor
-# actually uses. Every deployed write name is still advertised in the
-# capability directory; omitted schemas (acquisition/screen/shorts) load via
-# expand_toolset.
-TOOL_DOMAIN_NAMES = {
-    "story", "captions", "audio", "media", "acquisition", "motion",
-    "screen", "shorts"}
+# Schema routing keeps a small orientation/verification core. Every deployed
+# capability remains named in the directory and any department can be loaded
+# explicitly. The old router unioned five editing departments into every
+# provider request: 100 schemas / 51 KB even for a greeting or a one-tool
+# change. One intentional load_tools call is cheaper and more reliable than
+# making the model negotiate scores of unrelated write schemas on every step.
+TOOL_DOMAIN_NAMES = set(AGENT_TOOL_DOMAINS)
+AGENT_SCHEMA_HIDDEN = {"expand_toolset"}  # legacy MCP alias for load_tools
 TOOL_CORE = {
     "load_tools",
-    "expand_toolset",
-    "get_edl", "list_assets", "compare_uploaded_media", "open_visual_page", "look_at",
-    "look_at_asset", "render_preview", "read_skill", "ask_user",
-    "get_transcript", "get_words", "search_transcript",
-    "get_kept_transcript", "get_shots", "get_editorial_map",
-    "find_visual_moments",
-    "get_audio_analysis",
-    "get_video_info", "audit_captions", "audit_audio_mix",
+    "get_edl", "open_visual_page", "look_at",
+    "render_preview", "read_skill", "ask_user",
     "justify_verification_findings",
 }
 
-# First dispatch used to be read-only until set_edit_plan. That gate is gone:
-# the first call may write. This alias keeps older tests/imports compiling.
+# Compatibility alias for older tests/imports. First dispatch is deliberately
+# orientation plus explicit capability loading; it no longer pays for every
+# write schema before the request establishes which craft is relevant.
 TOOL_PLANNING = set(TOOL_CORE)
 
-# External acquisition, screen capture and shorts stay opt-in; the editing
-# departments are on from the first dispatch so the model can cut, caption,
-# grade and mix without a planning ritual.
-DEFAULT_EDIT_DOMAINS = ("story", "captions", "audio", "media", "motion")
+# No write department is universally relevant. The complete concise directory
+# is always in context, and load_tools persists requested schemas throughout
+# the logical turn. Durable blueprint departments below also load without an
+# extra routing call.
+DEFAULT_EDIT_DOMAINS = ()
 
 FINISHING_CORE = {
     "get_edl", "open_visual_page", "look_at", "look_at_asset",
@@ -23947,30 +23950,42 @@ FINISHING_CORE = {
 }
 TOOL_DOMAINS = {
     "story": {
+        "get_video_info",
+        "get_transcript", "get_words", "search_transcript",
+        "get_kept_transcript", "get_shots", "get_editorial_map",
+        "find_visual_moments",
         "find_silences", "find_repetitions", "suggest_segments",
         "keep_segments", "cut_range", "cut_output_range", "restore_range",
         "cut_silences", "remove_filler_words", "reset_edit", "set_speed",
-        "remove_speed", "make_shorts",
+        "remove_speed",
     },
     "captions": {
         "add_captions", "set_caption_style", "set_caption_fixes",
-        "set_caption_mutes", "add_kinetic_text", "add_text", "remove_text",
-        "set_text_motion", "add_text_behind", "add_title_card",
+        "set_caption_mutes", "audit_captions", "get_kept_transcript",
+        "get_words",
+    },
+    "graphics": {
+        "add_kinetic_text", "add_text", "remove_text", "set_text_motion",
+        "add_text_behind", "add_title_card",
         "add_vector_graphic", "set_vector_graphic",
         "remove_vector_graphic",
         "bind_motion_motif",
         "suggest_emphasis",
     },
     "audio": {
-        "review_audio", "extract_audio", "add_music", "remove_music",
+        "list_assets",
+        "get_audio_analysis", "audit_audio_mix", "review_audio",
+        "extract_audio", "add_music", "remove_music",
         "swap_music", "set_music_fit", "set_audio_gain", "set_volume",
-        "search_sfx", "audition_sfx_candidates", "fetch_sfx",
-        "add_web_sfx", "add_sfx", "move_sfx", "remove_sfx",
         "add_voiceover", "remove_voiceover", "beat_align_cuts",
         "separate_music", "remove_stem_mix", "set_master_loudness",
     },
+    "sfx": {
+        "search_sfx", "audition_sfx_candidates", "fetch_sfx",
+        "add_web_sfx", "add_sfx", "move_sfx", "remove_sfx",
+    },
     "media": {
-        "compare_uploaded_media", "fetch_url",
+        "list_assets", "compare_uploaded_media", "look_at_asset", "fetch_url",
         "start_media_sequence", "insert_media", "set_insert_window",
         "move_insert", "remove_insert",
         "add_overlay", "move_overlay", "set_overlay_motion",
@@ -23982,23 +23997,24 @@ TOOL_DOMAINS = {
     # removes its schemas from ordinary cut/caption/grade turns; load_tools
     # still exposes this exact department for an explicit acquisition pass.
     "acquisition": {
-        "find_song", "find_footage", "search_stock", "research_broll",
+        "list_assets", "find_song", "find_footage", "search_stock", "research_broll",
         "add_stock_media",
     },
     "motion": {
-        "set_frame", "auto_reframe", "set_color_grade", "set_grade_custom",
-        "apply_look", "add_zoom", "remove_zoom", "add_zoom_path",
+        "set_frame", "auto_reframe", "add_zoom", "remove_zoom", "add_zoom_path",
         "remove_zoom_path", "set_text_motion", "set_overlay_motion",
-        "add_vector_graphic", "set_vector_graphic",
-        "remove_vector_graphic",
         "punch_in_on_emphasis",
         "set_transitions",
-        "set_fades", "add_stylize", "remove_stylize", "add_custom_filter",
-        "remove_custom_filter", "bind_motion_motif", "enhance_video", "add_aspect_shift",
+        "set_fades", "bind_motion_motif", "add_aspect_shift",
         "remove_aspect_shift", "add_color_screen", "add_corrupt_screen",
     },
+    "looks": {
+        "set_color_grade", "set_grade_custom", "apply_look",
+        "add_stylize", "remove_stylize", "add_custom_filter",
+        "remove_custom_filter", "enhance_video",
+    },
     "screen": {
-        "record_website", "record_website_demo", "showcase_demo",
+        "list_assets", "record_website", "record_website_demo", "showcase_demo",
         "enhance_cursor", "remove_cursor_enhance",
         "set_screen_frame", "remove_screen_frame", "add_screen_takeover",
         "remove_screen_takeover", "blur_region", "remove_blur",
@@ -24007,6 +24023,19 @@ TOOL_DOMAINS = {
     },
     "shorts": {"make_shorts", "edit_shorts", "shorts_status",
                "open_short", "open_project", "wait_for_job"},
+}
+
+# Persisted creative blueprints predate this routing split. When they contain
+# an explicit AUTHOR decision, that is already semantic evidence that the
+# corresponding department is required; load it directly instead of asking
+# the model to spend a turn rediscovering its own durable plan.
+BLUEPRINT_DEPARTMENT_DOMAINS = {
+    "captions": {"captions"},
+    "motion": {"motion"},
+    "broll": {"media", "acquisition"},
+    "music": {"audio"},
+    "sfx": {"sfx"},
+    "color": {"looks"},
 }
 
 def compact_tool_names(ctx):
@@ -24021,6 +24050,12 @@ def compact_tool_names(ctx):
     names = set(TOOL_CORE)
     plan = getattr(ctx, "edit_plan", None) or {}
     domains = set(plan.get("tool_domains") or []) | loaded_domains
+    department_plan = plan.get("department_plan") or {}
+    if isinstance(department_plan, dict):
+        for department, decision in department_plan.items():
+            if isinstance(decision, dict) and decision.get("mode") == "author":
+                domains.update(BLUEPRINT_DEPARTMENT_DOMAINS.get(
+                    department, set()))
     names.update(plan.get("required_tools") or [])
     names.update(loaded_names)
     domains.update(DEFAULT_EDIT_DOMAINS)
@@ -24030,7 +24065,7 @@ def compact_tool_names(ctx):
 
 
 def planning_tool_names():
-    """First-dispatch catalog: same as compact routing (writes allowed)."""
+    """Small first-dispatch catalog: orient, then load relevant writes."""
     class _Fresh:
         edit_plan = None
         _loaded_tool_domains = set()
@@ -24052,11 +24087,7 @@ REQUIRED_ARGS = {
     # start/end default to the whole program, so "add some music" needs only
     # a track.
     "add_music": ["storage_key"],
-    "search_music": ["query"],
-    "research_music": ["query"],
-    "audition_music_candidates": ["ids"],
     "find_song": ["query"],
-    "fetch_music": ["id"],
     "load_tools": [],
     "expand_toolset": ["domains"],
     "extract_audio": ["asset_key"],
@@ -24141,7 +24172,6 @@ REQUIRED_ARGS = {
     "beat_align_cuts": [],
     "suggest_emphasis": [],
     "apply_look": ["name"],
-    "generate_image": ["prompt"],
     "fetch_url": ["url"],
     "ask_user": ["question"],
     "read_skill": ["name"],
@@ -24201,10 +24231,6 @@ def _tool_disabled(name, model=None):
     return 'unavailable'."""
     if name == "review_audio":
         return not llm.audio_review_available()
-    if name == "generate_image":
-        return not llm.image_available()
-    if name == "generate_video":
-        return True
     if name == "fetch_url":
         return not config.URL_FETCH_ENABLED
     if name in ("record_website", "record_website_demo"):
@@ -24217,9 +24243,6 @@ def _tool_disabled(name, model=None):
     # is not "no", and the call itself refuses gracefully.
     if name in ("separate_music", "remove_stem_mix"):
         return _stems_supported() is False
-    # Live music search (round 98) — the bundled library's replacement.
-    if name in ("research_music", "search_music", "fetch_music"):
-        return not music_search.available()
     # Named-song link finding rides the fetch/extractor path; per-ACCOUNT
     # narrowing happens inside the tool (schemas are per-deployment).
     if name == "find_song":
@@ -24262,11 +24285,13 @@ def capability_directory():
     assigned = set()
     for domain in sorted(TOOL_DOMAINS):
         names = sorted(name for name in TOOL_DOMAINS[domain]
-                       if name in TOOLS and not _tool_disabled(name))
+                       if name in TOOLS and name not in AGENT_SCHEMA_HIDDEN
+                       and not _tool_disabled(name))
         assigned.update(names)
         rows.append(f"{domain}: " + ", ".join(names))
     core = sorted(name for name in TOOLS
-                  if name not in assigned and not _tool_disabled(name))
+                  if name not in assigned and name not in AGENT_SCHEMA_HIDDEN
+                  and not _tool_disabled(name))
     rows.append("evidence, planning, verification and utility: "
                 + ", ".join(core))
     return "\n".join(rows)

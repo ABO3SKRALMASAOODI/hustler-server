@@ -301,6 +301,7 @@ def test_clean_complete_preview_requires_semantic_closure_before_variation():
         "edl_version": 2, "status": "passed", "unresolved_findings": []}
 
     assert not agent_tools.finishing_checkpoint(ctx)
+    ctx._loaded_tool_domains = {"motion"}
     names = agent_tools.compact_tool_names(ctx)
     assert "complete_edit_plan_steps" not in names
     assert "get_edl" in names
@@ -715,7 +716,7 @@ def test_authored_department_plan_exposes_every_promised_department():
     for name in ("add_zoom", "add_overlay", "add_music",
                  "search_sfx", "set_color_grade"):
         assert name in names
-    assert "research_broll" not in names
+    assert "research_broll" in names
     assert "research_music" not in names
 
 
