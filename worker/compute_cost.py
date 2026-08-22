@@ -30,6 +30,7 @@ CLOUDFLARE_GIB_S = 0.0000025
 CLOUDFLARE_GB_DISK_S = 0.00000007
 CLOUDFLARE_EGRESS_GB = 0.025
 CLOUDFLARE_PROFILES = {
+    "standard-1": (0.5, 4.0, 8.0),
     "standard-3": (2.0, 8.0, 16.0),
     "standard-4": (4.0, 12.0, 20.0),
 }

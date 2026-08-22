@@ -204,6 +204,7 @@ class _DB:
         self.rows = rows
         self.inserted_meta = None
         self.inserted_sha256 = None
+        self.preview = None
 
     def run(self, fn, *args, **kwargs):
         name = getattr(fn, "__name__", "")
@@ -217,6 +218,8 @@ class _DB:
             self.inserted_meta = kwargs["meta"]
             self.inserted_sha256 = kwargs["sha256"]
             return None
+        if name == "find_render_asset":
+            return self.preview
         raise AssertionError(name)
 
 
@@ -301,6 +304,24 @@ def test_legacy_or_uploaded_music_reports_unknown_instead_of_defaults(
     assert music["source_audio_stream_status"] == "not_exposed"
     assert music["source_has_audio_stream"] is None
     assert any("unknown rights" in warning for warning in audited["warnings"])
+
+
+def test_mix_audit_uses_current_version_asset_not_stale_session_memory(
+        tmp_path):
+    ctx = _Ctx([], {"music": [], "voiceover": [], "sfx": [], "master": {}},
+               tmp_path)
+    ctx.last_preview = {"edl_version": 2,
+                        "audio_qc": {"source": "stale-memory"}}
+    ctx.db.preview = {
+        "id": 71, "duration_s": 9.5,
+        "meta": {"variant": "preview", "edl_version": 3,
+                 "audio_qc": {"source": "asset-row"}},
+    }
+
+    audited = json.loads(agent_tools.audit_audio_mix(ctx))
+
+    assert audited["latest_preview_matches_version"] is True
+    assert audited["latest_preview_audio_qc"] == {"source": "asset-row"}
 
 
 def test_fetch_persists_content_hash_and_raw_provider_fields(

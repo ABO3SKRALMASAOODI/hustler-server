@@ -187,7 +187,7 @@ def _drain_images(ctx):
             print(f"[mcp] could not publish look frame ({ex})", flush=True)
             continue
         out.append({"storage_key": key, "label": label})
-    return out
+    return out, len(page)
 
 
 def _index_for(worker_db, project_id):
@@ -361,6 +361,7 @@ def run_mcp_job(worker_db, job):
                         "is_error": True}
 
             before = ctx.latest_edl()["version"]
+            pending_before = len(ctx.pending_images or [])
             try:
                 text = agent_tools.execute(ctx, tool, args)
             except agent_tools.AskUser as e:
@@ -377,9 +378,18 @@ def run_mcp_job(worker_db, job):
                                  creative_blueprint=None)
             out = {"text": text, "edl_version": after,
                    "edl_changed": after != before}
-            imgs = _drain_images(ctx)
+            pending_after_execute = len(ctx.pending_images or [])
+            imgs, publish_attempts = _drain_images(ctx)
             if imgs:
                 out["images"] = imgs
+            out["visual_evidence"] = {
+                "available_before": pending_before,
+                "created_this_call": max(
+                    0, pending_after_execute - pending_before),
+                "publish_attempts": publish_attempts,
+                "published_this_call": len(imgs),
+                "remaining": len(ctx.pending_images or []),
+            }
             if ctx.pending_images:
                 out["images_remaining"] = len(ctx.pending_images)
                 out["text"] += (
@@ -387,16 +397,19 @@ def run_mcp_job(worker_db, job):
                     "page(s) remain queued for transport; call the relevant "
                     "visual evidence tool again to continue. Nothing was "
                     "discarded.")
-            if ctx.last_preview:
+            try:
+                preview_asset = worker_db.run(
+                    dbx.find_render_asset, project["id"], "preview", after)
+            except Exception:
+                preview_asset = None
+            if preview_asset:
+                preview_meta = preview_asset.get("meta") or {}
                 out["preview"] = {
-                    "edl_version": ctx.last_preview.get("edl_version"),
-                    "duration_s": ctx.last_preview.get("duration_s"),
-                    "audio_model_review": ctx.last_preview.get(
+                    "edl_version": int(preview_meta.get("edl_version")),
+                    "duration_s": preview_asset.get("duration_s"),
+                    "audio_model_review": preview_meta.get(
                         "audio_model_review", False),
-                    # The render job's result names this render_asset_id
-                    # (renderer.run_render_job); "asset_id" never existed,
-                    # so this field was silently null since round 63.
-                    "asset_id": ctx.last_preview.get("render_asset_id"),
+                    "asset_id": preview_asset.get("id"),
                 }
             return out
         finally:

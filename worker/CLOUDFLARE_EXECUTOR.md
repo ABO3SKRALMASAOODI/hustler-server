@@ -1,18 +1,19 @@
 # Cloudflare Containers migration
 
-Cloudflare is a canary compute plane beside Modal, not a second rendering
+Cloudflare is the primary capacity-safe compute plane beside Modal, not a second rendering
 implementation. Both providers run `executor_runtime.py`, the same renderer,
 lease checks, terminal database commit, storage path, retry classifier and
 resource telemetry. Provider selection is stamped into each claimed job, so a
 percentage change affects new work only.
 
-The Worker routes named calls over a fixed five-instance interactive pool and
-three-instance batch pool. A novel Container ID cold-starts on Cloudflare, so
+The Worker routes named calls over fixed interactive, batch, Studio-agent,
+MCP, and Shorts pools. A novel Container ID cold-starts on Cloudflare, so
 using a call ID as the instance ID would throw away Python/image/source-cache
 warmth on every job. Call state remains keyed by the deterministic call ID
 inside its shard. A busy shard refuses the new call before `/run`, allowing the
-proven Modal lane to keep that user moving; an accepted or ambiguous call can
-never switch providers.
+proven Modal lane to keep that user moving. An ambiguous call never switches
+providers; a definitively terminal provider/capacity failure may hand the same
+still-running queue lease to Modal exactly once.
 
 The interactive image omits the baked multi-gigabyte Whisper model because
 its admitted job types never transcribe. The batch image retains that model
@@ -23,22 +24,22 @@ prunes them in bounded batches after later completions. Active and ambiguous
 calls are never age-pruned; this prevents unbounded Durable Object storage
 growth without sacrificing restart recovery.
 
-## Why the rollout is hybrid
+## Why Modal remains a capacity fallback
 
 Cloudflare's self-serve maximum is 4 vCPU, 12 GiB RAM and 20 GB disk. Production
-telemetry has already observed heavy effects above that memory envelope and
-Modal's 4-physical-core batch lane can be faster than 4 vCPU. Therefore the
-initial eligible set is `preview_check,filmstrip,index`, capacity-gated to at
-most 4 GiB of project input and one hour of source duration. Preview and final
-exist in the adapter for controlled benchmarks, but are not canary defaults.
-Agent, MCP, Shorts, capture, tracking, matting, cleanup, stems and acquisition
-remain on Modal.
+telemetry has already observed heavy effects above that memory envelope.
+Queue-backed preview, proof, final, index, filmstrip, agent, MCP, and Shorts
+jobs are Cloudflare eligible; byte-heavy render/index work is capacity-gated
+to at most 4 GiB of project input and one hour of source duration. Agent, MCP,
+and Shorts get isolated 4-GiB orchestration images and continue to offload
+their synchronous 16-32-GiB effects, capture, tracking, matting, cleanup,
+stems, and acquisition calls to Modal.
 
-This is how the migration guarantees that savings never come from silently
-giving a user fewer resources. A Cloudflare launch that is proven to have
-failed before `/run` may fall back to Modal. Once a named Container call may
-exist, the dispatcher and restart guardian reconnect to that exact call; they
-never launch a duplicate on another provider.
+This guarantees that savings never come from silently giving a user fewer
+resources. A Cloudflare launch that fails before `/run` falls back to Modal.
+Once a named call may exist, the dispatcher and restart guardian reconnect to
+that exact call. Only a terminal envelope with a still-current queue lease can
+replace the failed ownership record and run once on Modal.
 
 ## One-time setup
 
@@ -53,7 +54,8 @@ never launch a duplicate on another provider.
 3. Add GitHub secrets used by
    `.github/workflows/deploy-cloudflare-executor.yml`: Cloudflare API token and
    account ID, `CLOUDFLARE_EXECUTOR_URL`, `REMOTE_EXECUTOR_SECRET`, production
-   database and S3/R2 values, plus OpenAI/vision values needed by indexing.
+   database and S3/R2 values, OpenAI/vision/image keys, and Modal token values
+   needed by orchestration fallback.
 4. Run the manual `deploy-cloudflare-executor` workflow. It type-checks the
    Worker, refuses to publish unless migration 025 is complete, builds both
    Container sizes, installs secrets, and verifies provider identity plus the
@@ -64,7 +66,7 @@ never launch a duplicate on another provider.
    CLOUDFLARE_EXECUTOR_ENABLED=1
    CLOUDFLARE_EXECUTOR_URL=https://<worker>.workers.dev
    CLOUDFLARE_EXECUTOR_PERCENT=0
-   CLOUDFLARE_EXECUTOR_TYPES=preview_check,filmstrip,index
+   CLOUDFLARE_EXECUTOR_TYPES=preview,preview_check,final,index,filmstrip,agent_turn,mcp_tool,shorts_plan
    CLOUDFLARE_MODAL_FALLBACK=1
    CLOUDFLARE_MAX_INPUT_BYTES=4294967296
    CLOUDFLARE_MAX_SOURCE_DURATION_S=3600
@@ -111,11 +113,9 @@ python worker/executor_canary_gate.py \
   --report cloudflare-canary-gate.json
 ```
 
-Only after the eligible set passes should `preview` be added. Add `final` only
-after a separate representative export benchmark passes the same gates; retain
-Modal fallback for finals that cross Cloudflare's input/resource envelope.
-Never add heavy or orchestration families to the current self-serve Container
-sizes.
+Heavy synchronous operations with no queue identity remain Modal-only. Never
+force those operations into the current self-serve Container sizes merely to
+raise the Cloudflare percentage.
 
 ## Rollback
 

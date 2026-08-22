@@ -66,6 +66,7 @@ CATALOG = {
     ],
     "system_prompt": "DOCTRINE.",
     "capabilities": "CAPABILITIES — ...",
+    "write_tools": ["make_shorts"],
 }
 
 DB = {}
@@ -78,7 +79,8 @@ def _reset():
     # clears it explicitly.
     DB.update(clients={}, grants={}, codes={}, tokens={}, seq=0,
               static_project=3, expired_codes=set(), enqueued=[],
-              job_result=None, created_project=None,
+              job_result=None, job_row=None, current_version=6,
+              created_project=None,
               render_assets=[],
               project_rows={
                   3: {"id": 3, "title": "Long podcast", "kind": "shorts",
@@ -210,12 +212,15 @@ class FakeCur:
             self.rows = []
         elif s.startswith("INSERT INTO video_jobs"):
             self.rows = [{"id": 5}]
+        elif s.startswith("SELECT MAX(version) AS version FROM edls"):
+            self.rows = [{"version": DB["current_version"]}]
         elif "FROM video_jobs WHERE id" in s:
-            self.rows = [{"id": 5, "type": "mcp_tool", "state": "done",
-                          "progress": 100, "error": None, "payload": {},
-                          "project_id": 3,
-                          "result": DB.get("job_result")
-                          or {"text": "12 sentences."}}]
+            self.rows = [DB.get("job_row") or {
+                "id": 5, "type": "mcp_tool", "state": "done",
+                "progress": 100, "error": None, "payload": {},
+                "project_id": 3,
+                "result": DB.get("job_result")
+                or {"text": "12 sentences."}}]
         elif "FROM assets" in s and "kind = 'render'" in s:
             rows = [row for row in DB["render_assets"]
                     if row["project_id"] == p[0]
@@ -600,6 +605,64 @@ def test_an_unreadable_frame_never_costs_the_answer(client, monkeypatch):
     assert res.get("isError") is not True
 
 
+def test_visual_evidence_receipt_counts_actual_public_delivery(
+        client, monkeypatch):
+    DB["job_result"] = {
+        "text": "Captured evidence.",
+        "images": [{"storage_key": "media/3/good.jpg"},
+                   {"storage_key": "media/3/gone.jpg"}],
+        "visual_evidence": {
+            "created_this_call": 2, "publish_attempts": 2,
+            "published_this_call": 2, "remaining": 0},
+    }
+    monkeypatch.setattr(
+        mcpmod.storage, "get_object_whole",
+        lambda key, _cap: (b"\xff\xd8jpeg" if key.endswith("good.jpg")
+                           else None))
+    monkeypatch.setattr(
+        mcpmod.storage, "presign_get",
+        lambda key: f"https://evidence.example/{key}")
+
+    public = rpc(client, "tools/call", STATIC_TOKEN, {
+        "name": "get_transcript",
+        "arguments": {"project_id": 3},
+    }).get_json()["result"]
+
+    receipt = public["structuredContent"]["visual_evidence"]
+    assert receipt["published_this_call"] == 2
+    assert receipt["delivered_this_response"] == 1
+    assert receipt["delivery_status"] == "delivered"
+    assert len(receipt["retrievable_receipts"]) == 2
+    assert [block["type"] for block in public["content"]] == ["text", "image"]
+
+
+def test_visual_evidence_never_returns_plain_success_when_delivery_is_lost(
+        client, monkeypatch):
+    DB["job_result"] = {
+        "text": "Captured evidence.",
+        "images": [{"storage_key": "media/3/gone.jpg"}],
+        "visual_evidence": {
+            "created_this_call": 1, "publish_attempts": 1,
+            "published_this_call": 1, "remaining": 0},
+    }
+    monkeypatch.setattr(
+        mcpmod.storage, "get_object_whole", lambda *_args: None)
+    monkeypatch.setattr(
+        mcpmod.storage, "presign_get",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("storage down")))
+
+    public = rpc(client, "tools/call", STATIC_TOKEN, {
+        "name": "get_transcript",
+        "arguments": {"project_id": 3},
+    }).get_json()["result"]
+
+    assert public["isError"] is True
+    assert "VISUAL EVIDENCE DELIVERY FAILED" in public["content"][0]["text"]
+    receipt = public["structuredContent"]["visual_evidence"]
+    assert receipt["delivery_status"] == "missing"
+    assert receipt["retrievable_receipts"] == []
+
+
 def test_unknown_tool_explains_the_likely_reason(client):
     r = rpc(client, "tools/call", STATIC_TOKEN,
             {"name": "nope", "arguments": {}})
@@ -645,6 +708,86 @@ def test_editing_without_an_explicit_project_says_what_to_do(client):
 def test_unknown_method_is_a_jsonrpc_error(client):
     assert rpc(client, "nonsense", STATIC_TOKEN).get_json()["error"]["code"] \
         == -32601
+
+
+def _failed_mcp_row(payload):
+    return {"id": 5, "type": "mcp_tool", "state": "failed",
+            "progress": 40, "error": "response publication failed",
+            "payload": payload, "project_id": 3, "result": None}
+
+
+def test_failed_mcp_write_reports_a_durable_committed_receipt(client):
+    DB["job_row"] = _failed_mcp_row({
+        "tool": "make_shorts", "mutation": True,
+        "before_edl_version": 6, "mcp_call_id": "call-committed",
+        "mutation_receipt": {
+            "committed": True, "before_version": 6, "after_version": 7,
+            "tool": "make_shorts", "job_id": 5},
+    })
+
+    public = rpc(client, "tools/call", STATIC_TOKEN, {
+        "name": "make_shorts", "arguments": {
+            "project_id": 3, "clips": [{"start": 1, "end": 9}]},
+    }).get_json()["result"]
+
+    assert public["isError"] is True
+    assert "COMMITTED as EDL v7" in public["content"][0]["text"]
+    assert "Do not repeat" in public["content"][0]["text"]
+    assert public["structuredContent"]["mutation_status"]["state"] \
+        == "committed"
+    assert public["structuredContent"]["edl_changed"] is True
+
+
+def test_failed_mcp_write_only_says_unchanged_when_database_confirms_it(
+        client):
+    DB["current_version"] = 6
+    DB["job_row"] = _failed_mcp_row({
+        "tool": "make_shorts", "mutation": True,
+        "before_edl_version": 6, "mcp_call_id": "call-unchanged",
+    })
+
+    public = rpc(client, "tools/call", STATIC_TOKEN, {
+        "name": "make_shorts", "arguments": {
+            "project_id": 3, "clips": [{"start": 1, "end": 9}]},
+    }).get_json()["result"]
+
+    assert "Confirmed unchanged at v6" in public["content"][0]["text"]
+    assert public["structuredContent"]["mutation_status"]["state"] \
+        == "unchanged"
+    assert public["structuredContent"]["edl_changed"] is False
+
+
+def test_failed_mcp_write_reports_ambiguity_instead_of_a_false_noop(client):
+    DB["current_version"] = 8
+    DB["job_row"] = _failed_mcp_row({
+        "tool": "make_shorts", "mutation": True,
+        "before_edl_version": 6, "mcp_call_id": "call-ambiguous",
+    })
+
+    public = rpc(client, "tools/call", STATIC_TOKEN, {
+        "name": "make_shorts", "arguments": {
+            "project_id": 3, "clips": [{"start": 1, "end": 9}]},
+    }).get_json()["result"]
+
+    body = public["content"][0]["text"]
+    assert "could not be attributed safely" in body
+    assert "began at v6" in body and "now v8" in body
+    assert "Nothing was changed" not in body
+    assert public["structuredContent"]["mutation_status"]["state"] \
+        == "ambiguous"
+
+
+def test_unhandled_mcp_exception_returns_a_log_correlation_reference(
+        client, monkeypatch):
+    monkeypatch.setattr(
+        mcpmod, "_handle",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("secret detail")))
+
+    body = rpc(client, "ping", STATIC_TOKEN).get_json()
+
+    assert body["error"]["code"] == -32603
+    assert "reference" in body["error"]["message"]
+    assert "secret detail" not in body["error"]["message"]
 
 
 def test_render_preview_public_response_preserves_no_audio_model_provenance(

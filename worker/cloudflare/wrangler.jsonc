@@ -26,22 +26,60 @@
       "constraints": {"regions": ["WNAM"]},
       "rollout_active_grace_period": 300,
       "rollout_step_percentage": [10, 100]
+    },
+    {
+      "class_name": "ValmeraAgent",
+      "image": "../Dockerfile.agent-base",
+      "image_build_context": "..",
+      "max_instances": 5,
+      "instance_type": "standard-1",
+      "constraints": {"regions": ["WNAM"]},
+      "rollout_active_grace_period": 300,
+      "rollout_step_percentage": [10, 100]
+    },
+    {
+      "class_name": "ValmeraMcp",
+      "image": "../Dockerfile.agent-base",
+      "image_build_context": "..",
+      "max_instances": 12,
+      "instance_type": "standard-1",
+      "constraints": {"regions": ["WNAM"]},
+      "rollout_active_grace_period": 300,
+      "rollout_step_percentage": [10, 100]
+    },
+    {
+      "class_name": "ValmeraShorts",
+      "image": "../Dockerfile.agent-base",
+      "image_build_context": "..",
+      "max_instances": 8,
+      "instance_type": "standard-1",
+      "constraints": {"regions": ["WNAM"]},
+      "rollout_active_grace_period": 300,
+      "rollout_step_percentage": [10, 100]
     }
   ],
   "durable_objects": {
     "bindings": [
       {"name": "INTERACTIVE", "class_name": "ValmeraInteractive"},
-      {"name": "BATCH", "class_name": "ValmeraBatch"}
+      {"name": "BATCH", "class_name": "ValmeraBatch"},
+      {"name": "AGENT", "class_name": "ValmeraAgent"},
+      {"name": "MCP", "class_name": "ValmeraMcp"},
+      {"name": "SHORTS", "class_name": "ValmeraShorts"}
     ]
   },
   "migrations": [
     {
       "tag": "v1",
       "new_sqlite_classes": ["ValmeraInteractive", "ValmeraBatch"]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["ValmeraAgent", "ValmeraMcp", "ValmeraShorts"]
     }
   ],
   "vars": {
-    "CODE_VERSION": "set-by-deploy-workflow"
+    "CODE_VERSION": "set-by-deploy-workflow",
+    "SOURCE_VERSION": "set-by-deploy-workflow"
   },
   "observability": {"enabled": true}
 }

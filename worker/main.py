@@ -121,6 +121,9 @@ def _build_runners(policy="redesign"):
     if (config.REMOTE_EXECUTOR_URL or config.MODAL_EXECUTOR_ENABLED
             or (config.CLOUDFLARE_EXECUTOR_ENABLED
                 and config.CLOUDFLARE_EXECUTOR_URL)):
+        cloudflare_types = (config.CLOUDFLARE_EXECUTOR_TYPES
+                            if config.CLOUDFLARE_EXECUTOR_ENABLED and
+                            config.CLOUDFLARE_EXECUTOR_URL else frozenset())
         return {
             "index": remote.run_index_remote,
             "preview": remote.run_render_remote,
@@ -130,15 +133,18 @@ def _build_runners(policy="redesign"):
                            if (config.REMOTE_AGENT_EXECUTOR_URL
                                or (config.MODAL_EXECUTOR_ENABLED
                                    and "agent_turn" in
-                                   config.MODAL_EXECUTOR_TYPES))
+                                   config.MODAL_EXECUTOR_TYPES)
+                               or "agent_turn" in cloudflare_types)
                            else agent_loop.run_agent_job),
             "shorts_plan": (remote.run_shorts_remote
                             if (policy == "redesign"
-                                and config.MODAL_EXECUTOR_ENABLED)
+                                and (config.MODAL_EXECUTOR_ENABLED
+                                     or "shorts_plan" in cloudflare_types))
                             else shorts.run_shorts_plan),
             "mcp_tool": (remote.run_mcp_remote
                          if (policy == "redesign"
-                             and config.MODAL_EXECUTOR_ENABLED)
+                             and (config.MODAL_EXECUTOR_ENABLED
+                                  or "mcp_tool" in cloudflare_types))
                          else mcp_exec.run_mcp_job),
             # A main strip is cheap, but inserted clips may be full-resolution
             # phone footage and are sampled concurrently. Keep those decoders

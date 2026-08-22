@@ -917,7 +917,9 @@ def worker_lane_slots(role=None):
                     filmstrip=1 if _REMOTE_EXEC else 0,
                     index=max(0, INDEX_SLOTS))
     remote_agent = bool(REMOTE_AGENT_EXECUTOR_URL) or (
-        MODAL_EXECUTOR_ENABLED and "agent_turn" in MODAL_EXECUTOR_TYPES)
+        MODAL_EXECUTOR_ENABLED and "agent_turn" in MODAL_EXECUTOR_TYPES) or (
+        CLOUDFLARE_EXECUTOR_ENABLED and CLOUDFLARE_EXECUTOR_URL and
+        "agent_turn" in CLOUDFLARE_EXECUTOR_TYPES)
     if selected == "agent":
         return dict(none, agent=(REMOTE_AGENT_DISPATCH_SLOTS
                                 if remote_agent else AGENT_SLOTS),
@@ -994,11 +996,11 @@ REMOTE_HANDOFF_CONFIRM_S = max(
     REMOTE_HANDOFF_PERSIST_S + 15.0,
     min(660.0, float(os.getenv("REMOTE_HANDOFF_CONFIRM_S", "330"))))
 
-# Cloudflare Containers canary. Only queue-backed, provider-neutral media
-# families are eligible; heavy 16-32 GiB effects and orchestration stay on
-# Modal because Cloudflare's self-serve ceiling is 4 vCPU / 12 GiB. A stable
-# percentage plus a payload stamp means a retry cannot drift providers when an
-# operator changes the rollout percentage.
+# Cloudflare Containers primary. Queue-backed render/index work within the
+# 4-vCPU/12-GiB shape and the light orchestration roles are eligible. Heavy
+# 16-32-GiB synchronous effects stay on Modal because they cannot physically
+# fit Cloudflare's self-serve ceiling. A stable percentage plus a payload stamp
+# means a retry cannot drift providers when an operator changes the rollout.
 CLOUDFLARE_EXECUTOR_ENABLED = os.getenv(
     "CLOUDFLARE_EXECUTOR_ENABLED", "0") == "1"
 CLOUDFLARE_EXECUTOR_URL = os.getenv(
@@ -1008,7 +1010,8 @@ CLOUDFLARE_EXECUTOR_PERCENT = max(0, min(100, int(os.getenv(
 CLOUDFLARE_EXECUTOR_TYPES = frozenset(
     part.strip() for part in os.getenv(
         "CLOUDFLARE_EXECUTOR_TYPES",
-        "preview_check,filmstrip,index").split(",") if part.strip())
+        "preview,preview_check,final,index,filmstrip,agent_turn,mcp_tool,"
+        "shorts_plan").split(",") if part.strip())
 CLOUDFLARE_MODAL_FALLBACK = os.getenv(
     "CLOUDFLARE_MODAL_FALLBACK", "1") == "1"
 CLOUDFLARE_MAX_INPUT_BYTES = int(os.getenv(

@@ -499,8 +499,10 @@ class ToolContext:
                     "not be supported. Do NOT tell the user you changed "
                     "anything.")
         sig = edl_signature(normalized)
-        version = self.db.run(dbx.insert_edl, self.project_id, normalized,
-                              "agent")
+        version = self.db.run(
+            dbx.insert_edl, self.project_id, normalized, "agent",
+            (self.job or {}).get("id"),
+            getattr(self, "_executing_tool", None), prev["version"])
         self.versions_written.append(version)
         chg = edl_diff.change_ranges(prev["json"], normalized)
         manifest = quality_verifier.build_change_manifest(
@@ -4220,6 +4222,15 @@ def add_captions(ctx, mode=None, items=None, style=None,
                "max_words_per_caption": mw,
                "style": parsed_style,
                "placement_track": placement or None}
+        # Re-running add_captions to change the visual treatment must not
+        # silently erase spelling corrections already approved by the user.
+        # Production project 1056 lost "cooked" -> "got" this way even
+        # though set_caption_fixes itself had succeeded twice.
+        previous_captions = edl.get("captions")
+        if isinstance(previous_captions, dict) and \
+                previous_captions.get("mode") == "from_transcript" and \
+                previous_captions.get("text_fixes"):
+            cfg["text_fixes"] = previous_captions["text_fixes"]
         if emphasis_words:
             cfg["emphasis_words"] = emphasis_words
         if emphasis_mode:
@@ -19892,17 +19903,25 @@ def audit_audio_mix(ctx):
             warnings.append(
                 f"music {item.get('id') or item.get('storage_key')} is "
                 "provider-reported non-commercial only")
-    preview = ctx.last_preview or {}
+    # Session memory is not render truth: MCP contexts are evicted and a
+    # long-lived context can retain an older preview after another caller
+    # renders the current version. Resolve the exact immutable version from
+    # assets every time.
+    try:
+        preview_asset = ctx.db.run(
+            dbx.find_render_asset, ctx.project_id, "preview", row["version"])
+    except Exception:
+        preview_asset = None
+    preview_meta = (preview_asset or {}).get("meta") or {}
     result = {
         "version": row["version"],
         "authored_roles_are_ground_truth": True,
         "mix": state,
         "duplicate_cross_role_assets": doubled,
         "warnings": warnings,
-        "latest_preview_matches_version": preview.get("edl_version") == row["version"],
-        "latest_preview_audio_qc": (preview.get("audio_qc")
-                                    if preview.get("edl_version") == row["version"]
-                                    else None),
+        "latest_preview_matches_version": bool(preview_asset),
+        "latest_preview_audio_qc": (preview_meta.get("audio_qc")
+                                    if preview_asset else None),
         "next": ("Use render_preview for deterministic AUDIO CHECK evidence; "
                  "the authored role remains EDL ground truth."),
     }

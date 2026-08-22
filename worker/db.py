@@ -835,7 +835,7 @@ def record_remote_execution(conn, job_id, total_claims, provider, call_id,
                    AND remote_executions.provider = EXCLUDED.provider
                    AND remote_executions.call_id = EXCLUDED.call_id)
                OR (remote_executions.total_claims = EXCLUDED.total_claims
-                   AND remote_executions.state = 'cancelled')
+                   AND remote_executions.state IN ('cancelled', 'failed'))
         """, (job_id, total_claims, provider, str(call_id), function_name,
               max(1, int(timeout_s)), Json(meta or {})))
         return cur.rowcount > 0
@@ -1193,8 +1193,14 @@ def get_or_enqueue_preview_check_job(conn, project_id, user_id, payload):
     player should adopt.  The ranges are part of the identity so a broader
     later check of the same EDL cannot accidentally join a narrower one.
     """
-    version = int((payload or {}).get("edl_version"))
-    ranges = (payload or {}).get("check_ranges") or []
+    body = dict(payload or {})
+    version = int(body.get("edl_version"))
+    ranges = body.get("check_ranges") or []
+    # A proof set is the exact immutable EDL+ranges+renderer request. Retries
+    # of that set may replace their own scratch artifact, but an unrelated
+    # proof (including another active MCP/agent review) must remain intact.
+    body.setdefault("proof_set_id", str(body.get("render_signature") or
+                                        f"v{version}:{ranges}"))
     with conn.cursor() as cur:
         # Negative version gives proof jobs their own advisory-lock namespace
         # without introducing a schema migration.
@@ -1217,7 +1223,7 @@ def get_or_enqueue_preview_check_job(conn, project_id, user_id, payload):
         row = cur.fetchone()
         if row:
             return row["id"], False
-        signature = str((payload or {}).get("render_signature") or "")
+        signature = str(body.get("render_signature") or "")
         if signature:
             cur.execute("""SELECT id FROM video_jobs
                            WHERE project_id = %s AND type = 'preview_check'
@@ -1235,7 +1241,7 @@ def get_or_enqueue_preview_check_job(conn, project_id, user_id, payload):
         cur.execute("""INSERT INTO video_jobs
                           (project_id, user_id, type, payload)
                        VALUES (%s, %s, 'preview_check', %s) RETURNING id""",
-                    (project_id, user_id, Json(payload)))
+                    (project_id, user_id, Json(body)))
         return cur.fetchone()["id"], True
 
 
@@ -1878,20 +1884,23 @@ def superseded_renders(conn, project_id, variant, edl_version, keep_asset_id):
         return cur.fetchall()
 
 
-def stale_preview_checks(conn, project_id, keep_asset_id):
-    """Disposable proof reels older than the newest one for this project.
+def stale_preview_checks(conn, project_id, keep_asset_id, proof_set_id):
+    """Older retries belonging to the same immutable logical proof set.
 
     Complete previews are timeline history and must survive. A preview_check
-    is an editor's short-lived scratch proof, never linked by the Studio
-    player, so retaining one per EDL version would turn compute savings into
-    permanent object-storage churn.
+    is scratch evidence, but several editor/MCP calls may still be reviewing
+    different proof sets concurrently. Project-wide pruning used to delete
+    evidence another live call had not delivered yet. Only a retry of this
+    exact proof set is replaceable here; legacy rows without a set id are
+    retained rather than guessed away.
     """
     with conn.cursor() as cur:
         cur.execute("""SELECT id, storage_key, meta FROM assets
                        WHERE project_id = %s AND kind = 'render'
                          AND meta->>'variant' = 'preview_check'
+                         AND meta->>'proof_set_id' = %s
                          AND id < %s""",
-                    (project_id, int(keep_asset_id)))
+                    (project_id, str(proof_set_id), int(keep_asset_id)))
         return cur.fetchall()
 
 
@@ -2025,8 +2034,16 @@ def previous_edl_version(conn, project_id, before_version):
         return cur.fetchone()
 
 
-def insert_edl(conn, project_id, edl_json, created_by):
-    """Append-only: always a new version row."""
+def insert_edl(conn, project_id, edl_json, created_by, job_id=None,
+               mutation_tool=None, before_version=None):
+    """Append one immutable EDL version and its queue-job mutation receipt.
+
+    The receipt is written in the *same transaction* as the EDL. That makes
+    an MCP failure after the creative write recoverable: the public transport
+    can distinguish "the edit committed but its reply failed" from "nothing
+    changed" without guessing from a later project version another call may
+    have created.
+    """
     with conn.cursor() as cur:
         cur.execute("""
             INSERT INTO edls (project_id, version, json, created_by)
@@ -2036,7 +2053,33 @@ def insert_edl(conn, project_id, edl_json, created_by):
                     %s, %s)
             RETURNING version
         """, (project_id, project_id, Json(edl_json), created_by))
-        return cur.fetchone()["version"]
+        version = cur.fetchone()["version"]
+        if job_id is not None:
+            cur.execute("""SELECT payload->'mutation_receipt' AS receipt
+                           FROM video_jobs WHERE id = %s FOR UPDATE""",
+                        (int(job_id),))
+            row = cur.fetchone() or {}
+            existing = dict(row.get("receipt") or {})
+            original_before = (existing.get("before_version")
+                               if existing.get("before_version") is not None
+                               else before_version)
+            receipt = {
+                "job_id": int(job_id),
+                "before_version": (int(original_before)
+                                   if original_before is not None else None),
+                "after_version": int(version),
+                "tool": str(mutation_tool or existing.get("tool")
+                            or "unknown"),
+                "committed": True,
+            }
+            cur.execute("""UPDATE video_jobs
+                           SET payload = jsonb_set(
+                               COALESCE(payload, '{}'::jsonb),
+                               '{mutation_receipt}', %s, true),
+                               updated_at = NOW()
+                           WHERE id = %s""",
+                        (Json(receipt), int(job_id)))
+        return version
 
 
 def edl_history(conn, project_id, limit=8):

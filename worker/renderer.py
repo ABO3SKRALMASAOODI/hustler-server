@@ -4401,6 +4401,72 @@ def _contain_check_items(edl, tl, ranges, duration, index):
     return [(round(a, 3), round(b, 3)) for a, b in windows]
 
 
+def _budget_contained_check_ranges(requested, contained, duration,
+                                   max_windows=6, budget=25.0):
+    """Spend containment context without ever discarding requested evidence.
+
+    ``contained`` may expand a 12-second requested tail around a 42-second
+    overlay. Clamping that expanded interval from its left edge produced a
+    25-second reel that did not contain *any* of the requested tail. Start
+    from the already-bounded requests, then spend the remaining budget on
+    context inside their containment targets. Long authored items are clipped
+    at proof boundaries by ``stitch.window_edl``; requested pixels are never
+    the part sacrificed.
+    """
+    base = _validated_check_ranges(
+        requested, duration, max_windows=max_windows, budget=budget)
+    targets = []
+    for a, b in base:
+        overlapping = [(x, y) for x, y in contained
+                       if x < b + 0.001 and y > a - 0.001]
+        if overlapping:
+            targets.append([min(x for x, _y in overlapping),
+                            max(y for _x, y in overlapping)])
+        else:
+            targets.append([a, b])
+
+    windows = [list(pair) for pair in base]
+    remaining = max(0.0, float(budget) - sum(b - a for a, b in windows))
+    # Round-robin prevents the first risk window from consuming every second
+    # of context when several independent requested windows share one job.
+    while remaining > 0.0005:
+        expandable = []
+        for i, ((a, b), (ta, tb)) in enumerate(zip(windows, targets)):
+            left = max(0.0, a - ta)
+            right = max(0.0, tb - b)
+            if left > 0.0005 or right > 0.0005:
+                expandable.append((i, left, right))
+        if not expandable:
+            break
+        share = remaining / len(expandable)
+        spent = 0.0
+        for i, left, right in expandable:
+            allowance = min(share, left + right)
+            take_left = min(left, allowance / 2.0)
+            take_right = min(right, allowance - take_left)
+            # If one side hit its target, spend the unused half on the other.
+            spare = allowance - take_left - take_right
+            if spare > 0:
+                extra_left = min(left - take_left, spare)
+                take_left += extra_left
+                take_right += min(right - take_right, spare - extra_left)
+            windows[i][0] -= take_left
+            windows[i][1] += take_right
+            spent += take_left + take_right
+        if spent <= 0.0005:
+            break
+        remaining -= spent
+
+    merged = []
+    for a, b in sorted(windows):
+        if merged and a <= merged[-1][1] + 0.2:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b])
+    return [[round(max(0.0, a), 3), round(min(duration, b), 3)]
+            for a, b in merged]
+
+
 def _concat_check_pieces(pieces, out_path, workdir):
     if len(pieces) == 1:
         shutil.copy2(pieces[0], out_path)
@@ -4435,16 +4501,17 @@ def _render_changed_sections(job_id, edl_row, index, src_local, workdir,
     # finite windows render in the same container. This removes N cold starts
     # and N dispatcher wait loops without truncating large-edit evidence.
     page_count = max(1, len(pages))
-    ranges = _validated_check_ranges(
+    requested_ranges = _validated_check_ranges(
         requested, duration, max_windows=page_count * 6,
         budget=page_count * 25.0)
-    ranges = _contain_check_items(edl, tl, ranges, duration, index)
+    contained_ranges = _contain_check_items(
+        edl, tl, requested_ranges, duration, index)
     # Containment may grow a small requested window around a long overlay or
     # transition. Re-apply the physical budget after that expansion so one
     # oversized authored item cannot smuggle a full render into the cheap lane.
-    ranges = _validated_check_ranges(
-        ranges, duration, max_windows=page_count * 6,
-        budget=page_count * 25.0)
+    ranges = _budget_contained_check_ranges(
+        requested_ranges, contained_ranges, duration,
+        max_windows=page_count * 6, budget=page_count * 25.0)
 
     if src_local:
         info = media.probe(src_local)
@@ -4503,7 +4570,7 @@ def _render_changed_sections(job_id, edl_row, index, src_local, workdir,
                 mapped.append(round(offset + min(max(t - a, 0.01),
                                                  max(0.01, b - a - 0.01)), 3))
                 break
-    return out_dur, ranges, mapped
+    return out_dur, requested_ranges, ranges, mapped
 
 
 def _audio_model_review_requested(payload):
@@ -4550,6 +4617,8 @@ def run_render_job(worker_db, job):
     variant = "preview" if job["type"] in ("preview", "preview_check") \
         else "final"
     asset_variant = "preview_check" if proof_only else variant
+    proof_set_id = (str(job["payload"].get("proof_set_id") or
+                        f"job:{job_id}") if proof_only else None)
     version = int(job["payload"].get("edl_version"))
     # Missing preserves historical Studio behavior for queued jobs made
     # before this flag existed. MCP/Codex always sends an explicit false.
@@ -4829,6 +4898,7 @@ def run_render_job(worker_db, job):
         # guard agrees is still a true render of its EDL.
         out_dur = None
         stitched_from = None
+        requested_ranges = None
         changed_ranges = None
         mapped_verify_times = None
         # A tray upload can appear twice in assets under different storage
@@ -4844,7 +4914,7 @@ def run_render_job(worker_db, job):
                                      project_id, src_sha):
                 asset_locals[key] = src_local
         if proof_only:
-            out_dur, changed_ranges, mapped_verify_times = \
+            out_dur, requested_ranges, changed_ranges, mapped_verify_times = \
                 _render_changed_sections(
                     job_id, edl_row, index, src_local, workdir,
                     patch_locals, out_local,
@@ -5170,6 +5240,9 @@ def run_render_job(worker_db, job):
                   "caption_fp": _caption_index_fp(edl_row["json"], index),
                   **({"changed_ranges": changed_ranges}
                      if proof_only else {}),
+                  **({"requested_ranges": requested_ranges,
+                      "proof_set_id": proof_set_id}
+                     if proof_only else {}),
                   "outro_v": (config.OUTRO_VERSION
                               if not proof_only and
                               outro_seconds(variant == "preview") else 0),
@@ -5187,7 +5260,8 @@ def run_render_job(worker_db, job):
         # cleanup.
         try:
             old = worker_db.run(
-                dbx.stale_preview_checks, project_id, asset_id) \
+                dbx.stale_preview_checks, project_id, asset_id,
+                proof_set_id) \
                 if proof_only else worker_db.run(
                     dbx.superseded_renders, project_id, asset_variant,
                     version, asset_id)
@@ -5234,6 +5308,9 @@ def run_render_job(worker_db, job):
                 "duration_s": out_dur, "edl_version": version,
                 "variant": asset_variant, "timings": timings,
                 **({"changed_ranges": changed_ranges,
+                    "requested_ranges": requested_ranges,
+                    "effective_ranges": changed_ranges,
+                    "proof_set_id": proof_set_id,
                     "scope": "changes"} if proof_only else {}),
                 "midword_audit": mw,
                 "audio_qc": audio_qc_res, "listen_keys": listen_keys,

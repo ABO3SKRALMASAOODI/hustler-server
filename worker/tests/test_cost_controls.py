@@ -163,6 +163,22 @@ def test_explicit_proof_pages_share_one_source_download_without_truncation():
     assert sum(b - a for a, b in batched) == pytest.approx(32.0)
 
 
+def test_containment_budget_never_drops_the_requested_tail():
+    """Exact regression for project 1003's false proof receipt.
+
+    The requested 38.70-50.94s tail intersected a long authored item and grew
+    to 8.71-50.94s. Left-edge clamping returned 8.71-33.71s: a successful
+    proof that contained none of the requested tail.
+    """
+    requested = [[38.70, 50.94]]
+    effective = renderer._budget_contained_check_ranges(
+        requested, [[8.71, 50.94]], 116.12)
+
+    assert sum(b - a for a, b in effective) <= 25.0 + 1e-6
+    assert any(a <= 38.70 and b >= 50.94 for a, b in effective)
+    assert effective[-1][1] == pytest.approx(50.94)
+
+
 def test_proof_piece_clips_overlay_at_its_budget_edge():
     edl = _edl(overlays=[{
         "id": "ov3", "asset_key": "clips/9/rocket.mp4", "kind": "video",
@@ -481,13 +497,14 @@ def test_changed_section_renderer_outputs_only_requested_seconds(tmp_path):
         effects={"stylize": [{"id": "st1", "kind": "grain",
                                "start": 0.0, "end": 4.0,
                                "intensity": 0.25}]})
-    duration, ranges, mapped = renderer._render_changed_sections(
+    duration, requested, ranges, mapped = renderer._render_changed_sections(
         7, {"version": 2, "json": edl},
         {"video": {"duration": 4.0, "width": 320, "height": 180,
                    "fps": 24.0}, "words": []},
         str(source), str(tmp_path), {}, str(output), [[0.5, 2.5]], [1.5])
     assert output.exists()
     assert duration == pytest.approx(2.0, abs=0.15)
+    assert requested == [[0.5, 2.5]]
     assert ranges == [[0.5, 2.5]]
     assert mapped == [1.0]
 

@@ -53,6 +53,10 @@ class CloudflareLaunchUnavailable(RemoteExecutorError):
     """Cloudflare proved no call was accepted, so Modal fallback is safe."""
 
 
+class CloudflareTerminalFailure(RemoteExecutorError):
+    """A named Cloudflare call ended; an alternate provider is now safe."""
+
+
 # The last version skew observed against the executor, or "" when the two
 # services agree (or when we have not been able to ask). Written by
 # check_executor_version, read by _run_remote so that a job which fails on a
@@ -140,6 +144,12 @@ def _cloudflare_selected(job):
             stable.encode("utf-8")).hexdigest()[:8], 16)
         if bucket % 100 >= percent:
             return False
+    # Orchestration containers operate on database state and small proxies;
+    # they do not stage the project's original media. A 14-GB podcast must
+    # not force its otherwise-light MCP/agent control loop back to Modal.
+    if str(job.get("type") or "") in {
+            "agent_turn", "mcp_tool", "shorts_plan"}:
+        return True
     shape = job.get("_execution_shape") or {}
     if not shape:
         return False
@@ -911,8 +921,12 @@ def _run_modal(job, function_override=None):
 
 
 def _cloudflare_lane(job_type):
-    return "interactive" if job_type in {
-        "preview", "preview_check", "filmstrip"} else "batch"
+    if job_type in {"preview", "preview_check", "filmstrip"}:
+        return "interactive"
+    if job_type in {"agent_turn", "mcp_tool", "shorts_plan"}:
+        return {"agent_turn": "agent", "mcp_tool": "mcp",
+                "shorts_plan": "shorts"}[job_type]
+    return "batch"
 
 
 def _record_remote_execution_with_retry(ledger, job, provider, call_id,
@@ -964,6 +978,19 @@ def _cloudflare_call_id(job):
     return f"cf-{str(job.get('type') or 'job')[:18]}-{digest}"
 
 
+def _interpret_cloudflare_terminal(data, job):
+    """Mark a confirmed terminal envelope as safe for selective fallback."""
+    try:
+        return _interpret_executor_data(data, job)
+    except Exception as exc:
+        terminal = CloudflareTerminalFailure(str(exc))
+        for attr in ("failure_kind", "retryable", "max_attempts",
+                     "agent_repairable", "executor_timings"):
+            if hasattr(exc, attr):
+                setattr(terminal, attr, getattr(exc, attr))
+        raise terminal from exc
+
+
 def _cloudflare_headers():
     headers = {"Content-Type": "application/json"}
     if config.REMOTE_EXECUTOR_SECRET:
@@ -999,6 +1026,17 @@ def _cloudflare_preflight(timeout=10):
         if body.get("provider") != "cloudflare":
             raise CloudflareLaunchUnavailable(
                 "Cloudflare preflight reached the wrong service")
+        remote_source = str(body.get("source_version") or "unknown")
+        local_source = version.code_version()
+        if remote_source != "unknown" and local_source != "unknown" and \
+                remote_source != local_source:
+            # No call has been reserved yet. Refusing this provider here does
+            # not stop the user; _run_remote immediately uses Modal. It only
+            # closes the deploy-skew window in which a newer EDL reaches an
+            # older renderer/orchestrator.
+            raise CloudflareLaunchUnavailable(
+                "Cloudflare source version does not match the dispatcher "
+                f"({remote_source} != {local_source})")
         _health_cache[key] = (now, body)
         return body
 
@@ -1146,7 +1184,7 @@ def _run_cloudflare(job):
             # The Worker may have lost its side of an already-running
             # container request. Reconnect to the deterministic call before
             # considering any physical retry.
-            return _interpret_executor_data(
+            return _interpret_cloudflare_terminal(
                 _recover_cloudflare_result(call_id, lane, job, deadline),
                 job)
         try:
@@ -1154,7 +1192,7 @@ def _run_cloudflare(job):
         except ValueError as exc:
             raise RemoteExecutorError(
                 "Cloudflare call returned non-JSON") from exc
-    return _interpret_executor_data(data, job)
+    return _interpret_cloudflare_terminal(data, job)
 
 
 def _run_cloud(job, url_override=None):
@@ -1210,6 +1248,71 @@ def _run_remote(job, url_override=None, modal_function=None):
             print(f"[dispatcher] {exc}; launching the same fenced job on "
                   "Modal before any Cloudflare call was accepted",
                   flush=True)
+            return _run_modal(job, modal_function)
+        except CloudflareTerminalFailure as exc:
+            fallback_kinds = {
+                "executor_capacity", "provider_budget_exhausted",
+                "transient_infrastructure", "stalled_io", "media_command",
+                "unknown",
+            }
+            kind = str(getattr(exc, "failure_kind", "unknown"))
+            if not (config.CLOUDFLARE_MODAL_FALLBACK
+                    and config.MODAL_EXECUTOR_ENABLED
+                    and str(job.get("type") or "") in
+                    config.MODAL_EXECUTOR_TYPES
+                    and kind in fallback_kinds):
+                raise
+            # The Durable Object has a terminal envelope. Confirm the queue
+            # lease is still ours before replacing its terminal provider
+            # ledger with a Modal call on the same immutable claim.
+            probe = dbx.Db()
+            try:
+                current = probe.run(dbx.get_job, job.get("id"))
+                if not current or current.get("state") != "running" or \
+                        current.get("total_claims") != job.get("total_claims"):
+                    raise exc
+
+                # The executor normally closes this exact ledger identity
+                # before returning its terminal envelope. Do it again from
+                # the dispatcher and verify the terminal fence before Modal
+                # is allowed to reserve the same queue claim. This covers a
+                # database restart during the executor's best-effort close;
+                # without it Modal could be accepted but then correctly
+                # rejected by the still-active Cloudflare ownership row.
+                call_id = _cloudflare_call_id(job)
+                closed = probe.run(
+                    dbx.finish_remote_execution, job["id"],
+                    job.get("total_claims"), "failed", exc,
+                    "cloudflare", call_id)
+                existing = probe.run(dbx.get_remote_execution, job["id"])
+                if not closed and existing is None:
+                    # The original pre-launch ledger write can itself have
+                    # coincided with a database recovery. The named Durable
+                    # Object is now proven terminal, so materialize and close
+                    # that exact identity; no second compute is authorized by
+                    # this bookkeeping repair.
+                    recorded = _record_remote_execution_with_retry(
+                        probe, job, "cloudflare", call_id,
+                        _cloudflare_lane(job.get("type")),
+                        config.executor_timeout_for(job.get("type")) + 60)
+                    if recorded:
+                        closed = probe.run(
+                            dbx.finish_remote_execution, job["id"],
+                            job.get("total_claims"), "failed", exc,
+                            "cloudflare", call_id)
+                        existing = probe.run(
+                            dbx.get_remote_execution, job["id"])
+                terminal_identity = bool(existing) and \
+                    existing.get("total_claims") == job.get("total_claims") \
+                    and existing.get("provider") == "cloudflare" \
+                    and str(existing.get("call_id")) == call_id \
+                    and existing.get("state") in {"failed", "cancelled"}
+                if not (closed or terminal_identity):
+                    raise exc
+            finally:
+                probe.reset()
+            print(f"[dispatcher] Cloudflare call ended with {kind}; "
+                  "retrying the same fenced lease once on Modal", flush=True)
             return _run_modal(job, modal_function)
     if provider == "local":
         raise RemoteExecutorError(

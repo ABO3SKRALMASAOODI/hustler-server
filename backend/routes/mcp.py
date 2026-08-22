@@ -838,12 +838,83 @@ def _preview_asset_receipt(row, url=None):
 def _editor_structured_content(result):
     """Small machine-readable facts preserved across the public MCP hop."""
     result = result or {}
-    out = {key: result[key] for key in ("edl_version", "edl_changed")
+    out = {key: result[key] for key in (
+               "edl_version", "edl_changed", "mutation_status",
+               "visual_evidence")
            if key in result}
     preview = result.get("preview")
     if isinstance(preview, dict):
         out["preview"] = preview
     return out
+
+
+def _current_edl_version(project_id):
+    with vdb() as conn:
+        cur = conn.cursor()
+        cur.execute("""SELECT MAX(version) AS version FROM edls
+                       WHERE project_id = %s""", (int(project_id),))
+        row = cur.fetchone() or {}
+    return (int(row["version"]) if row.get("version") is not None else None)
+
+
+def _mutation_failure_result(row, project_id, label):
+    """Truthful recovery text for a failed queued MCP tool call."""
+    payload = dict((row or {}).get("payload") or {})
+    job_id = (row or {}).get("id")
+    error = (row or {}).get("error") or "unknown error"
+    call_ref = payload.get("mcp_call_id") or f"job-{job_id}"
+    mutation = payload.get("mutation") is True
+    if not mutation:
+        status = {"state": "not_applicable", "job_id": job_id,
+                  "reference": call_ref}
+        text = (f"{label} failed: {error}. This was a read-only call; no EDL "
+                f"edit was requested. Reference {call_ref}.")
+        return {"text": text, "is_error": True,
+                "mutation_status": status}
+
+    receipt = dict(payload.get("mutation_receipt") or {})
+    if receipt.get("committed") is True and \
+            receipt.get("after_version") is not None:
+        before = receipt.get("before_version")
+        after = int(receipt["after_version"])
+        status = {"state": "committed", "job_id": job_id,
+                  "reference": call_ref, "before_version": before,
+                  "after_version": after,
+                  "tool": receipt.get("tool") or payload.get("tool")}
+        text = (f"{label} failed after the edit itself COMMITTED as EDL "
+                f"v{after}" + (f" (from v{before})" if before is not None
+                               else "") + f": {error}. Do not repeat the "
+                f"edit blindly; inspect v{after} first. Reference {call_ref}.")
+        return {"text": text, "is_error": True,
+                "edl_version": after, "edl_changed": True,
+                "mutation_status": status}
+
+    before = payload.get("before_edl_version")
+    try:
+        current = _current_edl_version(project_id)
+    except Exception:
+        current = None
+    if before is not None and current is not None and int(before) == current:
+        status = {"state": "unchanged", "job_id": job_id,
+                  "reference": call_ref, "before_version": int(before),
+                  "current_version": current}
+        text = (f"{label} failed before any EDL mutation: {error}. Confirmed "
+                f"unchanged at v{current}. Reference {call_ref}.")
+        return {"text": text, "is_error": True,
+                "edl_version": current, "edl_changed": False,
+                "mutation_status": status}
+
+    status = {"state": "ambiguous", "job_id": job_id,
+              "reference": call_ref, "before_version": before,
+              "current_version": current}
+    text = (f"{label} failed: {error}. Whether this call changed the EDL "
+            "could not be attributed safely")
+    if before is not None and current is not None:
+        text += f" (it began at v{before}; the project is now v{current})"
+    text += (f". Inspect the current EDL before retrying. Reference "
+             f"{call_ref}.")
+    return {"text": text, "is_error": True,
+            "mutation_status": status}
 
 
 def _run_tool_job(tok, name, args, raw=False, project_id=None):
@@ -872,9 +943,16 @@ def _run_tool_job(tok, name, args, raw=False, project_id=None):
         catalog = _catalog() or {}
         mutation = name in set(catalog.get("write_tools") or []) or name in {
             "reset_edit"}
+        cur.execute("""SELECT MAX(version) AS version FROM edls
+                       WHERE project_id = %s""", (int(project_id),))
+        version_row = cur.fetchone() or {}
+        before_version = version_row.get("version")
+        call_ref = secrets.token_hex(8)
         job_id = _enqueue(cur, project_id, tok["user_id"], "mcp_tool",
                           {"tool": name, "args": args,
-                           "mutation": mutation})
+                           "mutation": mutation,
+                           "before_edl_version": before_version,
+                           "mcp_call_id": call_ref})
     # The control calls are plumbing the model never asked for by name, so a
     # failure must not be reported as "__state__ failed".
     label = {"__state__": "Reading the project state",
@@ -884,8 +962,9 @@ def _run_tool_job(tok, name, args, raw=False, project_id=None):
         return _out(f"Tool call {name} vanished from the queue — try it again.")
     identity = f"PROJECT {project_id} — \"{project.get('title') or 'Untitled'}\""
     if row["state"] == "failed":
-        return _out(f"{identity}\n{label} failed: {row.get('error') or 'unknown error'}. "
-                    "Nothing was changed by it.")
+        failed = _mutation_failure_result(row, project_id, label)
+        failed["text"] = identity + "\n" + failed["text"]
+        return _out(failed["text"], failed)
     if row["state"] in ("queued", "running"):
         return _out(identity + "\n" + _still_running(row, label))
     result = row.get("result") or {}
@@ -1376,6 +1455,7 @@ def _t_shorts_status(tok, args):
             mcp_jobs = {r["project_id"]: r for r in cur.fetchall()}
             cur.execute("""SELECT DISTINCT ON (project_id)
                                   project_id,
+                                  duration_s,
                                   CASE WHEN meta->>'edl_version' ~ '^[0-9]+$'
                                        THEN (meta->>'edl_version')::int
                                        ELSE NULL END AS edl_version
@@ -1409,8 +1489,6 @@ def _t_shorts_status(tok, args):
                     if start is not None and end is not None else None)
         bits = [f"card {card}, project [{child_id or 'building'}] "
                 f"{clip.get('title') or 'Untitled short'}"]
-        if duration is not None:
-            bits.append(f"{duration:.1f}s")
         seed_version = int(clip.get("seed_edl_version")
                            or clip.get("edl_version") or 1)
         live_version = int(latest_versions.get(child_id) or seed_version)
@@ -1422,7 +1500,11 @@ def _t_shorts_status(tok, args):
         preview = previews.get(child_id) or {}
         preview_current = bool(
             preview.get("edl_version") is not None
-            and int(preview["edl_version"]) >= live_version)
+            and int(preview["edl_version"]) == live_version)
+        if preview_current and preview.get("duration_s") is not None:
+            duration = float(preview["duration_s"])
+        if duration is not None:
+            bits.append(f"{duration:.1f}s")
         if active:
             who = "Studio child agent" if active is boot else "this MCP editor"
             bits.append(f"EDITING by {who}: {active['state']} "
@@ -1493,6 +1575,17 @@ def _t_wait_for_job(tok, args):
         identity = (f"PROJECT {row['project_id']} — "
                     f"\"{(project or {}).get('title') or 'Untitled'}\"\n")
     if row["state"] == "failed":
+        if row["type"] == "mcp_tool":
+            failed = _mutation_failure_result(
+                row, row.get("project_id"), f"Job {job_id} (mcp_tool)")
+            failed["text"] = identity + failed["text"]
+            structured = _editor_structured_content(failed)
+            public = {"content": [{"type": "text",
+                                    "text": failed["text"]}],
+                      "isError": True}
+            if structured:
+                public["structuredContent"] = structured
+            return public
         return (identity +
                 f"Job {job_id} ({row['type']}) FAILED: {row.get('error')}")
     if row["state"] in ("queued", "running"):
@@ -1843,17 +1936,66 @@ def _handle(tok, msg):
             out = _run_tool_job(tok, name, args, raw=True,
                                 project_id=project_id)
             body = out.get("text") or json.dumps(out)
-            content = [{"type": "text", "text": body}] \
-                + _image_blocks(out.get("images"))
+            public_error = False
+            image_content = _image_blocks(out.get("images"))
+            content = [{"type": "text", "text": body}] + image_content
+            if isinstance(out.get("visual_evidence"), dict):
+                out = dict(out)
+                evidence = dict(out["visual_evidence"])
+                delivered = sum(
+                    block.get("type") == "image" for block in image_content)
+                evidence["delivered_this_response"] = delivered
+                receipts = []
+                for captured in out.get("images") or []:
+                    key = (captured or {}).get("storage_key")
+                    if not key:
+                        continue
+                    try:
+                        url = storage.presign_get(key)
+                    except Exception:
+                        url = None
+                    if url:
+                        receipts.append({
+                            "label": captured.get("label"),
+                            "url": url,
+                        })
+                evidence["retrievable_receipts"] = receipts
+                attempted = int(evidence.get("publish_attempts") or 0)
+                if delivered:
+                    evidence["delivery_status"] = "delivered"
+                elif receipts:
+                    evidence["delivery_status"] = "retrievable"
+                    content[0]["text"] += (
+                        "\n\nVisual evidence was stored but the inline image "
+                        "block could not be assembled; use the signed receipt "
+                        "in structuredContent.visual_evidence.")
+                elif attempted:
+                    evidence["delivery_status"] = "missing"
+                    public_error = True
+                    content[0]["text"] += (
+                        "\n\nVISUAL EVIDENCE DELIVERY FAILED: no image block "
+                        "or retrievable receipt reached this response. Do not "
+                        "claim the visual check passed.")
+                else:
+                    evidence["delivery_status"] = "not_requested"
+                out["visual_evidence"] = evidence
             public = {"content": content,
-                      "isError": bool(out.get("is_error"))}
+                      "isError": bool(out.get("is_error")) or
+                                 public_error}
             structured = _editor_structured_content(out)
             if structured:
                 public["structuredContent"] = structured
             return _result(req_id, public)
         except Exception as e:
-            current_app.logger.exception("mcp tool %s failed", name)
-            return _result(req_id, _text(f"{name} errored: {e}", True))
+            trace_id = secrets.token_hex(8)
+            current_app.logger.exception(
+                "mcp tool %s project=%s failed reference=%s",
+                name, args.get("project_id"), trace_id)
+            return _result(req_id, _text(
+                f"{name} encountered an internal error. No completion can "
+                f"be inferred from this response; inspect the project or "
+                f"wait for its queued job before retrying. Reference "
+                f"{trace_id}.", True))
 
     return _error(req_id, -32601, f"method not found: {method}")
 
@@ -2006,7 +2148,19 @@ def mcp_endpoint():
 
     batch = isinstance(body, list)
     msgs = body if batch else [body]
-    out = [r for r in (_handle(tok, m) for m in msgs) if r is not None]
+    out = []
+    for msg in msgs:
+        try:
+            response = _handle(tok, msg)
+        except Exception:
+            trace_id = secrets.token_hex(8)
+            current_app.logger.exception(
+                "mcp request failed reference=%s", trace_id)
+            response = _error(
+                (msg or {}).get("id") if isinstance(msg, dict) else None,
+                -32603, f"internal error; reference {trace_id}")
+        if response is not None:
+            out.append(response)
     if not out:
         # A notification gets no reply, by protocol. 202 with an empty body.
         return "", 202

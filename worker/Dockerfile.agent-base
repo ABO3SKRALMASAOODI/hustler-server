@@ -44,3 +44,10 @@ ENV PYTHONUNBUFFERED=1 \
     HF_HOME=/tmp/hf \
     PLAYWRIGHT_BROWSERS_PATH=/tmp/no-local-browser \
     TORCH_HOME=/tmp/no-local-torch
+
+# Modal ignores this build-context copy and adds the source as a separate
+# layer; Cloudflare builds the same Dockerfile directly and needs the runtime
+# package plus the role-selecting HTTP entry point in the image.
+COPY . .
+
+CMD ["python", "http_server.py"]
