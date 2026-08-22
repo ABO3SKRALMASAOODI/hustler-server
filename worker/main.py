@@ -565,6 +565,28 @@ def reaper():
             print(f"[reaper] tray rescue: {e}", flush=True)
             worker_db.reset()
 
+        # A terminal queue row is authoritative.  Repair any older or
+        # crash-interrupted provider ledger that still says submitted/running
+        # for that exact immutable lease; this is bookkeeping only and never
+        # stops or restarts user work.
+        try:
+            reconciled = worker_db.run(
+                dbx.reconcile_terminal_remote_executions) or []
+            if reconciled:
+                states = {}
+                for row in reconciled:
+                    state = str(row.get("state") or "unknown")
+                    states[state] = states.get(state, 0) + 1
+                summary = ",".join(
+                    f"{state}={count}"
+                    for state, count in sorted(states.items()))
+                print(f"[reaper] closed {len(reconciled)} terminal remote "
+                      f"ledger row(s): {summary}", flush=True)
+        except Exception as e:
+            print(f"[reaper] terminal remote ledger repair: {e}",
+                  flush=True)
+            worker_db.reset()
+
         # Terminal charging/qualification uses savepoints so a transient SQL
         # failure never erases a completed edit. The failure is durable in the
         # job result; repair the accounting itself here, without rerunning a

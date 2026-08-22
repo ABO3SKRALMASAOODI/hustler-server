@@ -639,6 +639,51 @@ def finish_job(conn, job_id, state, error=None, result=None,
     return committed
 
 
+def reconcile_terminal_remote_executions(conn, limit=100):
+    """Close provider ledgers whose canonical queue job is already terminal.
+
+    ``finish_job`` closes both records atomically for every new terminal
+    transition.  Rows created before that invariant, and uncommon direct
+    terminal transitions such as preview supersession, can still survive a
+    database outage with the queue row terminal and the provider row active.
+    Those rows protect no live work: the immutable execution lease already
+    belongs to a done/failed job.  Reconcile only that exact lease generation
+    and never requeue, cancel, charge, or touch project state.
+    """
+    if not remote_executions_table_ready(conn):
+        return []
+    limit = max(1, min(500, int(limit or 100)))
+    with conn.cursor() as cur:
+        cur.execute("""WITH terminal AS (
+                         SELECT r.job_id, r.total_claims,
+                                j.state, j.error
+                           FROM remote_executions r
+                           JOIN video_jobs j
+                             ON j.id = r.job_id
+                            AND j.total_claims = r.total_claims
+                          WHERE r.state IN ('submitted', 'running')
+                            AND j.state IN ('done', 'failed')
+                          ORDER BY r.job_id
+                          LIMIT %s
+                          FOR UPDATE OF r SKIP LOCKED
+                       )
+                       UPDATE remote_executions r
+                          SET state = terminal.state,
+                              completed_at = NOW(),
+                              last_observed_at = NOW(),
+                              error = CASE
+                                WHEN terminal.state = 'failed'
+                                THEN LEFT(terminal.error, 2000)
+                                ELSE NULL
+                              END
+                         FROM terminal
+                        WHERE r.job_id = terminal.job_id
+                          AND r.total_claims = terminal.total_claims
+                          AND r.state IN ('submitted', 'running')
+                       RETURNING r.job_id, r.state""", (limit,))
+        return cur.fetchall()
+
+
 def completed_job_lease_matches(conn, job_id, total_claims):
     """Recognize a successful replay after a lost COMMIT acknowledgement.
 

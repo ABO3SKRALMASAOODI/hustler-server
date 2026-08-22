@@ -363,6 +363,26 @@ def test_terminal_job_atomically_closes_its_provider_ledger(monkeypatch):
     assert ledger_params == ("done", None, 42, 7)
 
 
+def test_reaper_closes_terminal_provider_ledgers_without_rerunning_work(
+        monkeypatch):
+    monkeypatch.setattr(wdb, "remote_executions_table_ready",
+                        lambda _conn: True)
+    rows = [{"job_id": 42, "state": "done"},
+            {"job_id": 43, "state": "failed"}]
+    conn = _Conn(fetchall=rows)
+
+    assert wdb.reconcile_terminal_remote_executions(conn, limit=25) == rows
+
+    sql, params = conn.sql[0]
+    assert "j.total_claims = r.total_claims" in sql
+    assert "j.state IN ('done', 'failed')" in sql
+    assert "r.state IN ('submitted', 'running')" in sql
+    assert "FOR UPDATE OF r SKIP LOCKED" in sql
+    assert "UPDATE remote_executions" in sql
+    assert "WHEN terminal.state = 'failed'" in sql
+    assert params == (25,)
+
+
 @pytest.mark.skipif(not HAVE_FFMPEG, reason="needs ffmpeg")
 def test_cancellation_actually_kills_ffmpeg():
     """The point is the PROCESS dying, not an exception being raised.
