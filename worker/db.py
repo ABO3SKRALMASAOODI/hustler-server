@@ -1220,6 +1220,8 @@ ACTIVE_JOBS = set()
 # durable remote_executions row protects the cold-start gap, and the executor
 # itself begins heartbeating after it actually starts.
 REMOTE_OWNED_JOBS = set()
+REMOTE_LAUNCHING_JOBS = set()
+_REMOTE_LAUNCHES_STOPPED = False
 _ACTIVE_LOCK = threading.Lock()
 
 
@@ -1229,25 +1231,59 @@ def track_job(job_id):
 
 
 def mark_remote_owned(job_id):
+    """Reserve one provider submission unless process draining already won.
+
+    The lock is shared with ``begin_remote_shutdown``.  Exactly one side can
+    win: either shutdown releases the still-local queue claim and all later
+    provider launches are refused, or the launch becomes remote-owned and
+    shutdown waits for its durable call id to be published.
+    """
+    global _REMOTE_LAUNCHES_STOPPED
     with _ACTIVE_LOCK:
+        if _REMOTE_LAUNCHES_STOPPED:
+            return False
         if job_id in ACTIVE_JOBS:
             REMOTE_OWNED_JOBS.add(job_id)
+            REMOTE_LAUNCHING_JOBS.add(job_id)
+        return True
+
+
+def remote_launch_recorded(job_id):
+    """Publish that an accepted/ambiguous provider launch is now durable."""
+    with _ACTIVE_LOCK:
+        REMOTE_LAUNCHING_JOBS.discard(job_id)
 
 
 def unmark_remote_owned(job_id):
     with _ACTIVE_LOCK:
         REMOTE_OWNED_JOBS.discard(job_id)
+        REMOTE_LAUNCHING_JOBS.discard(job_id)
 
 
 def untrack_job(job_id):
     with _ACTIVE_LOCK:
         ACTIVE_JOBS.discard(job_id)
         REMOTE_OWNED_JOBS.discard(job_id)
+        REMOTE_LAUNCHING_JOBS.discard(job_id)
+
+
+def begin_remote_shutdown():
+    """Atomically stop new handoffs and snapshot shutdown ownership."""
+    global _REMOTE_LAUNCHES_STOPPED
+    with _ACTIVE_LOCK:
+        _REMOTE_LAUNCHES_STOPPED = True
+        return (list(ACTIVE_JOBS - REMOTE_OWNED_JOBS),
+                list(REMOTE_OWNED_JOBS))
 
 
 def remote_owned_job_ids():
     with _ACTIVE_LOCK:
         return list(REMOTE_OWNED_JOBS)
+
+
+def remote_launching_job_ids():
+    with _ACTIVE_LOCK:
+        return list(REMOTE_LAUNCHING_JOBS)
 
 
 def locally_owned_job_ids():

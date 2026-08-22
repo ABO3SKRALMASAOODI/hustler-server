@@ -109,18 +109,45 @@ def test_durable_remote_job_is_not_falsely_heartbeated_or_releaseable():
     job_id = 730073
     try:
         wdb.track_job(job_id)
-        wdb.mark_remote_owned(job_id)
+        assert wdb.mark_remote_owned(job_id) is True
         assert job_id in wdb.active_job_ids()
         assert job_id in wdb.remote_owned_job_ids()
+        assert job_id in wdb.remote_launching_job_ids()
         assert job_id not in wdb.locally_owned_job_ids()
+        wdb.remote_launch_recorded(job_id)
+        assert job_id not in wdb.remote_launching_job_ids()
     finally:
         wdb.untrack_job(job_id)
     assert job_id not in wdb.remote_owned_job_ids()
 
     shutdown = (Path(__file__).resolve().parents[1] / "main.py").read_text()
-    assert "ids = dbx.locally_owned_job_ids()" in shutdown
+    assert "ids, remote_ids = dbx.begin_remote_shutdown()" in shutdown
+    assert "dbx.remote_launching_job_ids()" in shutdown
     heartbeat = inspect.getsource(wdb.heartbeat_forever)
     assert "ACTIVE_JOBS - REMOTE_OWNED_JOBS" in heartbeat
+
+
+def test_shutdown_and_remote_launch_reservation_are_atomic():
+    """A released claim can never be submitted after shutdown wins."""
+    first, second = 730074, 730075
+    with wdb._ACTIVE_LOCK:
+        before_stopped = wdb._REMOTE_LAUNCHES_STOPPED
+    try:
+        wdb.track_job(first)
+        assert wdb.mark_remote_owned(first) is True
+        wdb.track_job(second)
+
+        local, remote = wdb.begin_remote_shutdown()
+
+        assert second in local
+        assert first in remote
+        assert wdb.mark_remote_owned(second) is False
+        assert second not in wdb.remote_owned_job_ids()
+    finally:
+        wdb.untrack_job(first)
+        wdb.untrack_job(second)
+        with wdb._ACTIVE_LOCK:
+            wdb._REMOTE_LAUNCHES_STOPPED = before_stopped
 
 
 def test_claim_does_not_duplicate_an_unexpired_durable_provider_call():

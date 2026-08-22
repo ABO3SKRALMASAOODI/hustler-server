@@ -379,6 +379,21 @@ def test_rejected_modal_launch_restores_local_shutdown_ownership(monkeypatch):
     assert events == [("mark", 42), ("unmark", 42)]
 
 
+def test_shutdown_winner_refuses_modal_before_spawn(monkeypatch):
+    _enable(monkeypatch)
+
+    class MustNotSpawn:
+        @staticmethod
+        def spawn(_job):
+            raise AssertionError("shutdown-lost job must not reach Modal")
+
+    monkeypatch.setattr(remote, "_modal_function", lambda _name: MustNotSpawn())
+    monkeypatch.setattr(remote.dbx, "mark_remote_owned", lambda _job_id: False)
+
+    with pytest.raises(remote.ModalLaunchUnavailable, match="shutdown"):
+        remote._run_modal(JOB)
+
+
 def test_postlaunch_transport_failure_reconnects_without_cloud_fallback(
         monkeypatch):
     _enable(monkeypatch)

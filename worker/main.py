@@ -655,8 +655,11 @@ def _on_shutdown(signum, _frame):
     """
     DRAINING.set()
     agent_loop.SHUTDOWN.set()
-    ids = dbx.locally_owned_job_ids()
-    remote_ids = dbx.remote_owned_job_ids()
+    # This snapshot and the provider's pre-spawn reservation share one lock.
+    # A job is therefore either released for the replacement worker or kept
+    # remote-owned while this process waits for its accepted call id — never
+    # released and launched at the same time.
+    ids, remote_ids = dbx.begin_remote_shutdown()
     try:
         n = dbx.Db().run(dbx.release_jobs, ids)
         print(f"[shutdown] signal {signum}: handed {n} of {len(ids)} in-flight "
@@ -667,12 +670,19 @@ def _on_shutdown(signum, _frame):
         # just the slower, attempt-charging way.
         print(f"[shutdown] could not release jobs: {e}", flush=True)
     deadline = time.time() + config.SHUTDOWN_GRACE_S
-    while time.time() < deadline and dbx.locally_owned_job_ids():
+    while time.time() < deadline and (
+            dbx.locally_owned_job_ids()
+            or dbx.remote_launching_job_ids()):
         time.sleep(0.5)
     left = len(dbx.locally_owned_job_ids())
+    launching = len(dbx.remote_launching_job_ids())
     if left:
         print(f"[shutdown] {left} local job(s) still running at the wire — the "
               "reaper will surface them", flush=True)
+    if launching:
+        print(f"[shutdown] {launching} provider submission(s) remained "
+              "ambiguous at the wire — their durable ownership deadline "
+              "will bound recovery", flush=True)
     os._exit(0)
 
 

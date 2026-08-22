@@ -799,7 +799,9 @@ def _run_modal(job, function_override=None):
         # the narrow race where Render can SIGTERM between Modal accepting a
         # call and this thread recording that acceptance. A rejected launch
         # restores ordinary local ownership below.
-        dbx.mark_remote_owned(job["id"])
+        if dbx.mark_remote_owned(job["id"]) is False:
+            raise ModalLaunchUnavailable(
+                "dispatcher shutdown began before Modal submission")
     try:
         job.setdefault("_dispatch_submitted_at", time.time())
         call = function.spawn(_job_payload(job))
@@ -846,6 +848,7 @@ def _run_modal(job, function_override=None):
                   flush=True)
         finally:
             ledger.reset()
+            dbx.remote_launch_recorded(job["id"])
     if reconnect_call_id and reconnect_call_id != call_id:
         # The newly accepted input carries its own provider id and will fail
         # the executor-side ownership handshake before expensive work. Follow
@@ -1037,7 +1040,9 @@ def _run_cloudflare(job):
     call_id = _cloudflare_call_id(job)
     lane = _cloudflare_lane(job.get("type"))
     timeout_s = config.executor_timeout_for(job.get("type")) + 60
-    dbx.mark_remote_owned(job["id"])
+    if dbx.mark_remote_owned(job["id"]) is False:
+        raise CloudflareLaunchUnavailable(
+            "dispatcher shutdown began before Cloudflare submission")
     ledger = dbx.Db()
     try:
         ledger.run(dbx.record_remote_execution, job["id"],
@@ -1061,8 +1066,10 @@ def _run_cloudflare(job):
             headers=_cloudflare_headers(),
             timeout=max(1, deadline - time.monotonic()))
     except requests.RequestException:
+        dbx.remote_launch_recorded(job["id"])
         data = _recover_cloudflare_result(call_id, lane, job, deadline)
     else:
+        dbx.remote_launch_recorded(job["id"])
         if response.status_code == 404:
             ledger = dbx.Db()
             try:

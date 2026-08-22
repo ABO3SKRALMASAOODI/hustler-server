@@ -133,6 +133,22 @@ def test_cloudflare_uses_deterministic_call_and_persists_before_wait(
     assert posted[0][1]["json"]["job"]["dispatch_submitted_at"] > 0
 
 
+def test_shutdown_winner_refuses_cloudflare_before_launch(monkeypatch):
+    _enable(monkeypatch)
+    job = dict(JOB, payload={**JOB["payload"],
+                             "execution_provider": "cloudflare"})
+    monkeypatch.setattr(remote.requests, "get", lambda *a, **k: _Response({
+        "status": "ok", "provider": "cloudflare"}))
+    monkeypatch.setattr(remote.dbx, "mark_remote_owned", lambda _job_id: False)
+    monkeypatch.setattr(
+        remote.requests, "post",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("shutdown-lost job must not reach Cloudflare")))
+
+    with pytest.raises(remote.CloudflareLaunchUnavailable, match="shutdown"):
+        remote._run_cloudflare(job)
+
+
 def test_cloudflare_authenticated_preflight_is_cached(monkeypatch):
     _enable(monkeypatch)
     monkeypatch.setattr(config, "REMOTE_EXECUTOR_SECRET", "shared-secret")
