@@ -428,3 +428,44 @@ def test_requeue_cannot_resurrect_a_job_we_no_longer_hold():
 
     gone = _Conn(rowcount=0)
     assert wdb.requeue_job(gone, 7, RuntimeError("boom")) is False
+
+
+def test_remote_handoff_insert_between_update_and_select_is_pending():
+    """READ COMMITTED can reveal the exact insert on the second statement.
+
+    The ownership UPDATE legitimately matched nothing just before the
+    dispatcher committed.  Seeing that same active physical call in the
+    following SELECT means retry, not supersession.
+    """
+    class Cursor:
+        def __init__(self, row):
+            self.row = row
+            self.rowcount = 0
+            self.fetches = iter([
+                {"name": "remote_executions"},
+                row,
+            ])
+
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def execute(self, _sql, _params=None): pass
+        def fetchone(self): return next(self.fetches)
+
+    class Conn:
+        def __init__(self, row): self.cur = Cursor(row)
+        def cursor(self): return self.cur
+
+    exact = {
+        "total_claims": 4,
+        "provider": "modal",
+        "call_id": "fc-owner",
+        "state": "submitted",
+    }
+    assert wdb.confirm_remote_execution_ownership(
+        Conn(exact), 42, 4, "modal", "fc-owner") == "pending"
+
+    other = dict(exact, call_id="fc-other")
+    status = wdb.confirm_remote_execution_ownership(
+        Conn(other), 42, 4, "modal", "fc-owner")
+    assert status.startswith("superseded:")
+    assert "call_match=False" in status

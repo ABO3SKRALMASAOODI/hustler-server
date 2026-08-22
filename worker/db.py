@@ -789,6 +789,20 @@ def confirm_remote_execution_ownership(conn, job_id, total_claims, provider,
         row = cur.fetchone()
         if not row:
             return "pending"
+        exact_active_identity = (
+            row.get("total_claims") == total_claims
+            and row.get("provider") == provider
+            and str(row.get("call_id")) == str(call_id)
+            and row.get("state") in {"submitted", "running"}
+        )
+        if exact_active_identity:
+            # The dispatcher can commit the handoff between the UPDATE above
+            # and this SELECT.  READ COMMITTED gives each statement a fresh
+            # snapshot, so that legitimate insert is visible here even though
+            # the UPDATE matched zero rows.  It is our exact physical call,
+            # not a superseding one; let the executor's 100-ms loop acquire it
+            # on the next statement.
+            return "pending"
         # Keep this diagnostic deliberately identity-only: it explains which
         # fence rejected an executor without copying payload, user, or project
         # data into provider logs.  The exact physical call id is already in
