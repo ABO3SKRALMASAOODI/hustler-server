@@ -161,6 +161,19 @@ def test_claim_does_not_duplicate_an_unexpired_durable_provider_call():
     assert "remote_live.deadline_at > NOW()" in sql
 
 
+def test_guardian_never_competes_with_a_fresh_attached_dispatcher():
+    wdb._REMOTE_EXEC_TABLE["ok"] = True
+    c = _Conn(fetchall=[])
+
+    assert wdb.active_remote_executions(c) == []
+
+    sql, params = c.sql[0]
+    assert "r.submitted_at < NOW()" in sql
+    assert "make_interval(secs => %s)" in sql
+    assert params == (config.REMOTE_GUARDIAN_ATTACH_GRACE_S,)
+    assert config.REMOTE_GUARDIAN_ATTACH_GRACE_S >= 30
+
+
 def test_queue_still_works_before_the_migration_has_run():
     """Prod schema is applied by hand from the Render shell, so there is always
     a window where the deploy is live and the psql is not."""

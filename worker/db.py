@@ -866,7 +866,14 @@ def finish_remote_execution(conn, job_id, total_claims, state, error=None,
 
 
 def active_remote_executions(conn):
-    """Provider calls whose queue lease is still current and unexpired."""
+    """Orphan-takeover candidates whose queue lease remains current.
+
+    The submitting dispatcher is already attached to a fresh call and the
+    executor owns its terminal database write. Polling the same call from the
+    guardian during Modal's visibility window can turn an ambiguous lookup
+    into a false terminal state. Only take over after a bounded attachment
+    grace; real provider work continues throughout it.
+    """
     if not remote_executions_table_ready(conn):
         return []
     with conn.cursor() as cur:
@@ -878,8 +885,11 @@ def active_remote_executions(conn):
                         AND j.total_claims = r.total_claims
                        WHERE r.state IN ('submitted', 'running')
                          AND r.deadline_at > NOW()
+                         AND r.submitted_at < NOW()
+                             - make_interval(secs => %s)
                          AND j.state = 'running'
-                       ORDER BY r.last_observed_at ASC""")
+                       ORDER BY r.last_observed_at ASC""",
+                    (config.REMOTE_GUARDIAN_ATTACH_GRACE_S,))
         return cur.fetchall()
 
 

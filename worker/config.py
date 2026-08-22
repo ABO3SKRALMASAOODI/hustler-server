@@ -972,6 +972,15 @@ MODAL_CLOUD_RUN_FALLBACK = os.getenv(
     "MODAL_CLOUD_RUN_FALLBACK", "0") == "1"
 REMOTE_GUARDIAN_INTERVAL_S = max(5.0, float(os.getenv(
     "REMOTE_GUARDIAN_INTERVAL_S", "15")))
+# The original dispatcher remains attached to a newly accepted provider call.
+# Giving the orphan guardian fresh calls too creates two observers during the
+# provider's eventual-consistency window; a transient lookup can then be
+# mistaken for a terminal call and fence the real executor before it starts.
+# The executor commits directly through Postgres, so delaying guardian-only
+# takeover does not delay normal work. A genuinely orphaned call is recovered
+# after this bounded grace instead of sitting indefinitely.
+REMOTE_GUARDIAN_ATTACH_GRACE_S = max(30.0, min(300.0, float(os.getenv(
+    "REMOTE_GUARDIAN_ATTACH_GRACE_S", "90"))))
 
 # Cloudflare Containers canary. Only queue-backed, provider-neutral media
 # families are eligible; heavy 16-32 GiB effects and orchestration stay on

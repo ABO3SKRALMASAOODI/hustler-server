@@ -232,6 +232,11 @@ def test_guardian_heartbeats_only_after_provider_proves_call_is_running(
     assert calls == [(dbx.heartbeat_remote_execution, (42, 4))]
 
 
+def test_guardian_attachment_grace_exceeds_poll_interval():
+    assert config.REMOTE_GUARDIAN_ATTACH_GRACE_S \
+        > config.REMOTE_GUARDIAN_INTERVAL_S
+
+
 def test_guardian_does_not_kill_a_just_spawned_invisible_modal_call(
         monkeypatch):
     import modal
