@@ -17,6 +17,7 @@ import hashlib
 import json
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 
 import psycopg2
@@ -130,16 +131,21 @@ def _cloudflare_selected(job):
     if not config.CLOUDFLARE_EXECUTOR_ENABLED \
             or not config.CLOUDFLARE_EXECUTOR_URL:
         return False
-    if job.get("id") is None:
+    job_type = str(job.get("type") or "")
+    if job_type not in config.CLOUDFLARE_EXECUTOR_TYPES:
         return False
-    if str(job.get("type") or "") not in config.CLOUDFLARE_EXECUTOR_TYPES:
+    synchronous = job.get("id") is None
+    if synchronous and job_type not in config.CLOUDFLARE_SYNCHRONOUS_TYPES:
         return False
     percent = config.CLOUDFLARE_EXECUTOR_PERCENT
     if percent <= 0:
         return False
     if percent < 100:
         stable = (f"cloudflare:{job.get('id')}:{job.get('project_id')}:"
-                  f"{job.get('type')}")
+                  f"{job_type}:" + (json.dumps(
+                      job.get("payload") or {}, sort_keys=True,
+                      separators=(",", ":"), default=str)
+                      if synchronous else ""))
         bucket = int(hashlib.sha256(
             stable.encode("utf-8")).hexdigest()[:8], 16)
         if bucket % 100 >= percent:
@@ -149,6 +155,11 @@ def _cloudflare_selected(job):
     # not force its otherwise-light MCP/agent control loop back to Modal.
     if str(job.get("type") or "") in {
             "agent_turn", "mcp_tool", "shorts_plan"}:
+        return True
+    # A synchronous frame look has no queue row from which to probe a shape.
+    # It is bounded to twelve stills, runs in the 12-GiB interactive profile,
+    # and a provider-capacity terminal can safely fall back to Modal.
+    if synchronous:
         return True
     shape = job.get("_execution_shape") or {}
     if not shape:
@@ -927,7 +938,7 @@ def _run_modal(job, function_override=None):
 
 
 def _cloudflare_lane(job_type):
-    if job_type in {"preview", "preview_check", "filmstrip"}:
+    if job_type in {"preview", "preview_check", "filmstrip", "frames"}:
         return "interactive"
     if job_type in {"agent_turn", "mcp_tool", "shorts_plan"}:
         return {"agent_turn": "agent", "mcp_tool": "mcp",
@@ -979,7 +990,15 @@ def _record_remote_execution_with_retry(ledger, job, provider, call_id,
 
 
 def _cloudflare_call_id(job):
-    raw = f"{job.get('type')}:{job.get('id')}:{job.get('total_claims')}"
+    if job.get("id") is None:
+        # Scratch frame keys are consumed and deleted by the caller, so two
+        # later identical looks must not reuse a week-old terminal envelope.
+        # The nonce lives on this in-memory handoff: an ambiguous HTTP result
+        # reconnects the same named call, while a genuinely new look is new.
+        nonce = job.setdefault("_cloudflare_sync_nonce", uuid.uuid4().hex)
+        raw = f"{job.get('type')}:sync:{nonce}"
+    else:
+        raw = f"{job.get('type')}:{job.get('id')}:{job.get('total_claims')}"
     digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
     return f"cf-{str(job.get('type') or 'job')[:18]}-{digest}"
 
@@ -1109,9 +1128,12 @@ def _recover_cloudflare_result(call_id, lane, job, deadline):
 
 
 def _run_cloudflare(job):
-    if job.get("id") is None or job.get("total_claims") is None:
+    queue_backed = job.get("id") is not None
+    if (queue_backed and job.get("total_claims") is None) or (
+            not queue_backed and str(job.get("type") or "") not in
+            config.CLOUDFLARE_SYNCHRONOUS_TYPES):
         raise CloudflareLaunchUnavailable(
-            "Cloudflare canary accepts queue-backed jobs only")
+            "Cloudflare does not accept this unfenced synchronous call")
     # Include the first authenticated readiness request in user-observed
     # provider startup. Successful readiness is cached, but its first cold
     # network trip is still real latency and must not disappear from the gate.
@@ -1126,19 +1148,20 @@ def _run_cloudflare(job):
     call_id = _cloudflare_call_id(job)
     lane = _cloudflare_lane(job.get("type"))
     timeout_s = config.executor_timeout_for(job.get("type")) + 60
-    if dbx.mark_remote_owned(job["id"]) is False:
+    if queue_backed and dbx.mark_remote_owned(job["id"]) is False:
         raise CloudflareLaunchUnavailable(
             "dispatcher shutdown began before Cloudflare submission")
-    ledger = dbx.Db()
-    try:
-        _record_remote_execution_with_retry(
-            ledger, job, "cloudflare", call_id, lane, timeout_s)
-    except Exception as exc:
-        print(f"[dispatcher] Cloudflare call {call_id} ledger write failed "
-              f"({str(exc)[:160]}); deterministic call id still prevents a "
-              "second Container instance", flush=True)
-    finally:
-        ledger.reset()
+    if queue_backed:
+        ledger = dbx.Db()
+        try:
+            _record_remote_execution_with_retry(
+                ledger, job, "cloudflare", call_id, lane, timeout_s)
+        except Exception as exc:
+            print(f"[dispatcher] Cloudflare call {call_id} ledger write "
+                  f"failed ({str(exc)[:160]}); deterministic call id still "
+                  "prevents a second Container instance", flush=True)
+        finally:
+            ledger.reset()
 
     deadline = time.monotonic() + timeout_s
     try:
@@ -1148,22 +1171,25 @@ def _run_cloudflare(job):
             headers=_cloudflare_headers(),
             timeout=max(1, deadline - time.monotonic()))
     except requests.RequestException:
-        dbx.remote_launch_recorded(job["id"])
+        if queue_backed:
+            dbx.remote_launch_recorded(job["id"])
         data = _recover_cloudflare_result(call_id, lane, job, deadline)
     else:
-        dbx.remote_launch_recorded(job["id"])
+        if queue_backed:
+            dbx.remote_launch_recorded(job["id"])
         if response.status_code == 404:
-            ledger = dbx.Db()
-            try:
-                ledger.run(dbx.finish_remote_execution, job["id"],
-                           job.get("total_claims"), "cancelled",
-                           "Cloudflare route was not deployed",
-                           "cloudflare", call_id)
-            except Exception:
-                pass
-            finally:
-                ledger.reset()
-            dbx.unmark_remote_owned(job["id"])
+            if queue_backed:
+                ledger = dbx.Db()
+                try:
+                    ledger.run(dbx.finish_remote_execution, job["id"],
+                               job.get("total_claims"), "cancelled",
+                               "Cloudflare route was not deployed",
+                               "cloudflare", call_id)
+                except Exception:
+                    pass
+                finally:
+                    ledger.reset()
+                dbx.unmark_remote_owned(job["id"])
             raise CloudflareLaunchUnavailable(
                 "Cloudflare Container route is not deployed")
         if response.status_code != 200:
@@ -1172,18 +1198,19 @@ def _run_cloudflare(job):
             except ValueError:
                 response_body = {}
             if response_body.get("safe_to_fallback"):
-                ledger = dbx.Db()
-                try:
-                    ledger.run(dbx.finish_remote_execution, job["id"],
-                               job.get("total_claims"), "cancelled",
-                               response_body.get("error") or
-                               "Cloudflare launch refused",
-                               "cloudflare", call_id)
-                except Exception:
-                    pass
-                finally:
-                    ledger.reset()
-                dbx.unmark_remote_owned(job["id"])
+                if queue_backed:
+                    ledger = dbx.Db()
+                    try:
+                        ledger.run(dbx.finish_remote_execution, job["id"],
+                                   job.get("total_claims"), "cancelled",
+                                   response_body.get("error") or
+                                   "Cloudflare launch refused",
+                                   "cloudflare", call_id)
+                    except Exception:
+                        pass
+                    finally:
+                        ledger.reset()
+                    dbx.unmark_remote_owned(job["id"])
                 raise CloudflareLaunchUnavailable(
                     str(response_body.get("error") or
                         "Cloudflare launch refused before /run"))
@@ -1281,6 +1308,13 @@ def _run_remote(job, url_override=None, modal_function=None):
                     config.MODAL_EXECUTOR_TYPES
                     and fallback_allowed):
                 raise
+            # An id-less synchronous call has no queue lease to replace. The
+            # named Durable Object is already terminal, which is the complete
+            # proof needed before its one bounded Modal fallback.
+            if job.get("id") is None:
+                print(f"[dispatcher] synchronous Cloudflare call ended with "
+                      f"{kind}; retrying once on Modal", flush=True)
+                return _run_modal(job, modal_function)
             # The Durable Object has a terminal envelope. Confirm the queue
             # lease is still ours before replacing its terminal provider
             # ledger with a Modal call on the same immutable claim.

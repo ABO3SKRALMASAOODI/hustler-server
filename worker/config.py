@@ -1010,8 +1010,17 @@ CLOUDFLARE_EXECUTOR_PERCENT = max(0, min(100, int(os.getenv(
 CLOUDFLARE_EXECUTOR_TYPES = frozenset(
     part.strip() for part in os.getenv(
         "CLOUDFLARE_EXECUTOR_TYPES",
-        "preview,preview_check,final,index,filmstrip,agent_turn,mcp_tool,"
-        "shorts_plan").split(",") if part.strip())
+        "preview,preview_check,final,index,filmstrip,frames,agent_turn,"
+        "mcp_tool,shorts_plan").split(",") if part.strip())
+# Stateless synchronous tools do not own a video_jobs row. Keep this list
+# deliberately narrower than CLOUDFLARE_EXECUTOR_TYPES: every member must be
+# bounded, idempotent from the caller's perspective, and fit the self-serve
+# Container ceiling. Heavy 16-32-GiB effects remain an immediate Modal
+# capacity fallback rather than being slowed down for migration purity.
+CLOUDFLARE_SYNCHRONOUS_TYPES = frozenset(
+    part.strip() for part in os.getenv(
+        "CLOUDFLARE_SYNCHRONOUS_TYPES", "frames").split(",")
+    if part.strip())
 CLOUDFLARE_MODAL_FALLBACK = os.getenv(
     "CLOUDFLARE_MODAL_FALLBACK", "1") == "1"
 CLOUDFLARE_MAX_INPUT_BYTES = int(os.getenv(

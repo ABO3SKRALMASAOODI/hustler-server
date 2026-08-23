@@ -218,6 +218,82 @@ def test_orchestration_is_cloudflare_eligible_without_media_shape(
         assert remote._cloudflare_lane(job_type) == lane
 
 
+def test_synchronous_frames_use_unique_named_cloudflare_calls(monkeypatch):
+    _enable(monkeypatch)
+    monkeypatch.setattr(
+        config, "CLOUDFLARE_EXECUTOR_TYPES", frozenset({"frames"}))
+    monkeypatch.setattr(
+        config, "CLOUDFLARE_SYNCHRONOUS_TYPES", frozenset({"frames"}))
+    job = {"id": None, "type": "frames", "project_id": 7,
+           "total_claims": None,
+           "payload": {"storage_key": "clips/7/a.mp4", "times": [1.0]}}
+
+    assert remote._cloudflare_selected(job) is True
+    assert remote._cloudflare_lane("frames") == "interactive"
+    first = remote._cloudflare_call_id(job)
+    assert remote._cloudflare_call_id(job) == first
+    another = {key: value for key, value in job.items()
+               if key != "_cloudflare_sync_nonce"}
+    assert remote._cloudflare_call_id(another) != first
+
+
+def test_synchronous_frames_skip_queue_ledger_and_run_on_cloudflare(
+        monkeypatch):
+    _enable(monkeypatch)
+    monkeypatch.setattr(
+        config, "CLOUDFLARE_EXECUTOR_TYPES", frozenset({"frames"}))
+    monkeypatch.setattr(
+        config, "CLOUDFLARE_SYNCHRONOUS_TYPES", frozenset({"frames"}))
+    monkeypatch.setattr(remote.requests, "get", lambda *a, **k: _Response({
+        "status": "ok", "provider": "cloudflare"}))
+    posted = []
+    monkeypatch.setattr(
+        remote.requests, "post",
+        lambda url, **kwargs: posted.append((url, kwargs)) or _Response({
+            "result": {"keys": ["scratch/frame.jpg"]}}))
+    monkeypatch.setattr(
+        remote.dbx, "Db", lambda: (_ for _ in ()).throw(
+            AssertionError("id-less calls must not touch the queue ledger")))
+    job = {"id": None, "type": "frames", "project_id": 7,
+           "user_id": 3, "attempts": 0, "total_claims": None,
+           "payload": {"storage_key": "clips/7/a.mp4", "times": [1.0]}}
+
+    assert remote._run_remote(job)["keys"] == ["scratch/frame.jpg"]
+    assert "/calls/interactive/cf-frames-" in posted[0][0]
+    assert posted[0][1]["json"]["job"]["id"] is None
+
+
+def test_terminal_synchronous_capacity_failure_falls_back_without_queue_row(
+        monkeypatch):
+    _enable(monkeypatch)
+    monkeypatch.setattr(config, "CLOUDFLARE_MODAL_FALLBACK", True)
+    monkeypatch.setattr(config, "MODAL_EXECUTOR_ENABLED", True)
+    monkeypatch.setattr(config, "MODAL_EXECUTOR_TYPES", frozenset({"frames"}))
+    monkeypatch.setattr(
+        config, "CLOUDFLARE_EXECUTOR_TYPES", frozenset({"frames"}))
+    monkeypatch.setattr(
+        config, "CLOUDFLARE_SYNCHRONOUS_TYPES", frozenset({"frames"}))
+    failure = remote.CloudflareTerminalFailure("container out of capacity")
+    failure.failure_kind = "executor_capacity"
+    monkeypatch.setattr(
+        remote, "_run_cloudflare",
+        lambda _job: (_ for _ in ()).throw(failure))
+    monkeypatch.setattr(
+        remote.dbx, "Db", lambda: (_ for _ in ()).throw(
+            AssertionError("id-less fallback has no queue row to fence")))
+    modal = []
+    monkeypatch.setattr(
+        remote, "_run_modal",
+        lambda job, function_override=None: modal.append(job["type"])
+        or {"keys": []})
+    job = {"id": None, "type": "frames", "project_id": 7,
+           "user_id": 3, "attempts": 0, "total_claims": None,
+           "payload": {"storage_key": "clips/7/a.mp4", "times": [1.0]}}
+
+    assert remote._run_remote(job) == {"keys": []}
+    assert modal == ["frames"]
+
+
 def test_only_proven_prelaunch_failure_falls_back_to_modal(monkeypatch):
     _enable(monkeypatch)
     monkeypatch.setattr(config, "CLOUDFLARE_MODAL_FALLBACK", True)

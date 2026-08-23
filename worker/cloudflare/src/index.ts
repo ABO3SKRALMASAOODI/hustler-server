@@ -3,10 +3,10 @@ import { Container } from "@cloudflare/containers";
 type JsonObject = Record<string, unknown>;
 
 interface ExecutorJob extends JsonObject {
-  id: number;
+  id: number | null;
   type: string;
   project_id: number;
-  total_claims: number;
+  total_claims: number | null;
   payload: JsonObject;
 }
 
@@ -61,11 +61,12 @@ interface Env {
   MODAL_TOKEN_SECRET?: string;
   MODAL_EXECUTOR_APP?: string;
   MODAL_EXECUTOR_ENVIRONMENT?: string;
+  CLOUDFLARE_EXECUTOR_URL?: string;
   CODE_VERSION?: string;
   SOURCE_VERSION?: string;
 }
 
-const INTERACTIVE_TYPES = new Set(["preview", "preview_check", "filmstrip"]);
+const INTERACTIVE_TYPES = new Set(["preview", "preview_check", "filmstrip", "frames"]);
 const BATCH_TYPES = new Set(["index", "final"]);
 const AGENT_TYPES = new Set(["agent_turn"]);
 const MCP_TYPES = new Set(["mcp_tool"]);
@@ -142,6 +143,14 @@ abstract class ValmeraContainer extends Container<Env> {
       WORKER_ROLE: this.workerRole,
       EXECUTOR_PROVIDER: "cloudflare",
       CLOUDFLARE_CONTAINER_PROFILE: this.containerProfile,
+      // Orchestration containers call synchronous media tools. Route those
+      // child calls back through this Worker first; Modal stays the bounded
+      // launch/capacity fallback instead of silently remaining primary.
+      CLOUDFLARE_EXECUTOR_ENABLED: "1",
+      CLOUDFLARE_EXECUTOR_PERCENT: "100",
+      CLOUDFLARE_EXECUTOR_TYPES: "frames",
+      CLOUDFLARE_SYNCHRONOUS_TYPES: "frames",
+      CLOUDFLARE_EXECUTOR_URL: optional(this.env.CLOUDFLARE_EXECUTOR_URL),
       EXECUTION_POLICY_MODE: "redesign",
       PORT: "8080",
       PYTHONUNBUFFERED: "1",
@@ -319,8 +328,12 @@ abstract class ValmeraContainer extends Container<Env> {
 
     const body = (await request.json()) as { job?: ExecutorJob; timeout_s?: number };
     const job = body.job;
-    if (!job || !Number.isInteger(job.id) || !Number.isInteger(job.total_claims)) {
-      return json({ error: "invalid queue job", safe_to_fallback: true }, 400);
+    const queueBacked = Number.isInteger(job?.id)
+      && Number.isInteger(job?.total_claims);
+    const synchronous = job?.id == null && job?.total_claims == null
+      && job?.type === "frames";
+    if (!job || (!queueBacked && !synchronous)) {
+      return json({ error: "invalid executor job", safe_to_fallback: true }, 400);
     }
     const now = Date.now();
     const requestedTimeout = Number(body.timeout_s ?? 3600);
