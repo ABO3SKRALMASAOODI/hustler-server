@@ -2782,16 +2782,16 @@ def user_is_paid(conn, user_id):
 
 
 def charge_turn_credits(conn, user_id, job_id, extra_credits=0.0):
-    """Deduct this turn's model cost from the user's credit pools.
+    """Deduct this turn's model + executor cost from the user's credit pools.
     Returns the credits claimed for this job/turn (float). Repeated calls
     return the existing claim without another debit. Never raises the balance
     below 0 and never fails the turn — callers swallow exceptions.
 
-    extra_credits (round 99): a flat surcharge on top of the model cost —
-    the shorts pipeline adds SHORTS_CLIP_CREDITS per finished clip for the
-    render compute a plain chat turn never spends. Applied only when the
-    job had real model usage, so a run that produced nothing still charges
-    nothing."""
+    ``extra_credits`` is a rolling-deploy fallback for executor results that do
+    not yet carry cost telemetry. Current jobs charge their recorded Modal or
+    Cloud Run ceiling instead, so Shorts compute is never double-counted.
+    Applied only when the job had real model usage, so a run that produced
+    nothing still charges nothing."""
     with conn.cursor() as cur:
         # Token cost is summed PER ROW at that row's own model price (see
         # model_prices.row_cost_sql). Summing tokens first and multiplying once
@@ -2834,14 +2834,33 @@ def charge_turn_credits(conn, user_id, job_id, extra_credits=0.0):
         # from cache and 'reasoning_out' the thinking tokens some providers
         # report beside the completion. Both are clamped inside the SQL, so a
         # stale or oversized provider number can never make a charge negative.
-        cost = float(row["token_cost"] or 0)
-        cost += float(row["n_images"] or 0) * IMAGE_PRICE_USD
+        model_cost = float(row["token_cost"] or 0)
+        model_cost += float(row["n_images"] or 0) * IMAGE_PRICE_USD
         # Generated sound effects (flat) + AI video (per-second) — the real USD
         # cost is stored on each generation's llm_calls row by the worker tool.
-        cost += float(row["gen_cost"] or 0)
+        model_cost += float(row["gen_cost"] or 0)
+
+        # Every terminal executor annotates result.timings with a gross
+        # provider-cost ceiling. Sum the root plus all child slices/tools so a
+        # turn that renders, indexes, or calls a media tool is not priced as if
+        # it were only a text response. Older rows have no annotation and use
+        # the historical flat Shorts surcharge below.
+        cur.execute("""SELECT COALESCE(SUM(GREATEST(COALESCE(NULLIF(
+                                  result->'timings'->>
+                                      'gross_compute_usd_ceiling', '')::float,
+                                  0), 0)), 0) AS compute_cost
+                         FROM video_jobs
+                        WHERE id = %s
+                           OR payload->>'root_agent_job_id' = %s""",
+                    (job_id, str(job_id)))
+        compute_row = cur.fetchone() or {}
+        compute_cost = float(compute_row.get("compute_cost") or 0)
+        metered_cost = model_cost + compute_cost
         credits = max(MIN_TURN_CREDITS,
-                      model_prices.usd_to_credits(cost, ndigits=1))
-        credits = round(credits + max(0.0, float(extra_credits or 0.0)), 1)
+                      model_prices.usd_to_credits(metered_cost, ndigits=1))
+        if compute_cost <= 0:
+            credits += max(0.0, float(extra_credits or 0.0))
+        credits = round(credits, 1)
         cur.execute("""SELECT credits_daily, credits_bonus, credits_monthly
                        FROM users WHERE id = %s FOR UPDATE""", (user_id,))
         u = cur.fetchone()

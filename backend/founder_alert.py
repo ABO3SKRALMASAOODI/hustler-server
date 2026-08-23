@@ -27,9 +27,7 @@ spam-foldered even when the API returns 201).
 import os
 import threading
 
-import requests
-
-BREVO_SEND_URL = "https://api.brevo.com/v3/smtp/email"
+import brevo_delivery
 
 
 def founder_email():
@@ -37,12 +35,6 @@ def founder_email():
 
 
 def _send_now(subject, html):
-    api_key = os.getenv("BREVO_API_KEY")
-    if not api_key:
-        print(f"⚠️ [founder_alert] BREVO_API_KEY unset — not sent: {subject}",
-              flush=True)
-        return False
-
     to = founder_email()
     payload = {
         "sender": {
@@ -53,21 +45,7 @@ def _send_now(subject, html):
         "subject": subject,
         "htmlContent": html,
     }
-    headers = {
-        "accept": "application/json",
-        "api-key": api_key,
-        "content-type": "application/json",
-    }
-    try:
-        res = requests.post(BREVO_SEND_URL, json=payload, headers=headers,
-                            timeout=15)
-    except requests.RequestException as e:
-        print(f"⚠️ [founder_alert] send to {to} failed (network): {e}",
-              flush=True)
-        return False
-    if res.status_code != 201:
-        print(f"⚠️ [founder_alert] send to {to} failed: HTTP "
-              f"{res.status_code} {(res.text or '')[:400]}", flush=True)
+    if not brevo_delivery.send_email(payload, category="critical"):
         return False
     print(f"📧 [founder_alert] sent to {to}: {subject}", flush=True)
     return True

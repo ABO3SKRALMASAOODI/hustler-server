@@ -10,13 +10,14 @@ import db  # noqa: E402
 
 
 class _SharedLedger:
-    def __init__(self, barrier=None):
+    def __init__(self, barrier=None, compute_cost=0.004):
         self.lock = threading.Lock()
         self.barrier = barrier
         self.ledger = {}
         self.pools = {"daily": 10.0, "bonus": 5.0, "monthly": 20.0}
         self.updates = 0
         self.statements = []
+        self.compute_cost = compute_cost
 
 
 class _Cursor:
@@ -38,6 +39,9 @@ class _Cursor:
                 "n": 2, "tin": 20_000, "tout": 1_000,
                 "token_cost": 0.01, "n_images": 0, "gen_cost": 0,
             }
+            return
+        if "AS compute_cost FROM video_jobs" in normalized:
+            self._row = {"compute_cost": self.shared.compute_cost}
             return
         if "FROM users WHERE id = %s FOR UPDATE" in normalized:
             with self.shared.lock:
@@ -135,6 +139,16 @@ def test_ledger_claim_statement_precedes_balance_update():
     debit_at = next(i for i, sql in enumerate(shared.statements)
                     if sql.startswith("UPDATE users"))
     assert claim_at < debit_at
+
+
+def test_recorded_executor_cost_is_charged_and_replaces_flat_fallback():
+    with_compute = _SharedLedger(compute_cost=0.008)
+    charged = db.charge_turn_credits(
+        _Conn(with_compute), 5, 1001, extra_credits=99)
+
+    # $0.01 model + $0.008 executor at $0.004/credit = 4.5 credits. The old
+    # flat fallback must not be added when real telemetry exists.
+    assert charged == 4.5
 
 
 def test_migration_repairs_duplicates_then_enforces_unique_job_turn():

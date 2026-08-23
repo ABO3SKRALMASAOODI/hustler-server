@@ -18,6 +18,8 @@ from psycopg2.extras import RealDictCursor
 from flask import Blueprint, request, jsonify, current_app
 
 from routes.admin import admin_required, _scope, METRICS_EPOCH
+import billing
+import credits
 import model_prices
 import storage
 
@@ -1044,6 +1046,154 @@ def _timing_out(r):
     }
 
 
+@admin_video_bp.route("/admin/video/subscriber-projects", methods=["GET"])
+@admin_required
+def video_subscriber_projects():
+    """Parent projects belonging to current subscribers who actually paid.
+
+    ``is_subscribed`` alone includes legacy trials and Paddle states that have
+    not collected money. A completed positive payment is required as well, so
+    this page is the paid product's real work rather than a list dominated by
+    free accounts stopping at subscription walls.
+    """
+    search = (request.args.get("search") or "").strip()
+    page = max(1, request.args.get("page", type=int) or 1)
+    per_page = max(10, min(100, request.args.get("per_page", type=int) or 50))
+    offset = (page - 1) * per_page
+    like = f"%{search}%"
+    with adb() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            WITH paid_users AS MATERIALIZED (
+                SELECT u.id, u.email, u.plan, u.billing_plan,
+                       u.billing_status
+                  FROM users u
+                 WHERE COALESCE(u.is_subscribed, 0) = 1
+                   AND EXISTS (
+                       SELECT 1 FROM payments pay
+                        WHERE pay.user_id = u.id
+                          AND pay.status = 'completed'
+                          AND pay.amount_cents > 0)
+            ), payment_agg AS (
+                SELECT pay.user_id, MIN(pay.occurred_at) AS first_paid_at,
+                       MAX(pay.occurred_at) AS last_paid_at,
+                       SUM(pay.amount_cents) AS paid_cents
+                  FROM payments pay
+                  JOIN paid_users pu ON pu.id = pay.user_id
+                 WHERE pay.status = 'completed' AND pay.amount_cents > 0
+                 GROUP BY pay.user_id
+            ), candidates AS MATERIALIZED (
+                SELECT p.id, p.title, p.kind, p.created_at,
+                       p.chat_session_id, p.user_id,
+                       pu.email, pu.plan, pu.billing_plan, pu.billing_status,
+                       pa.first_paid_at, pa.last_paid_at, pa.paid_cents,
+                       COUNT(*) OVER () AS matched_projects
+                  FROM projects p
+                  JOIN paid_users pu ON pu.id = p.user_id
+                  JOIN payment_agg pa ON pa.user_id = p.user_id
+                 WHERE p.parent_project_id IS NULL
+                   AND (pu.email ILIKE %s OR p.title ILIKE %s)
+                 ORDER BY p.id DESC
+                 LIMIT %s OFFSET %s
+            ), message_agg AS (
+                SELECT c.id AS project_id,
+                       COUNT(*) FILTER (WHERE cm.role = 'user') AS messages,
+                       MAX(cm.created_at) AS last_message
+                  FROM candidates c
+                  LEFT JOIN chat_messages cm
+                    ON cm.session_id = c.chat_session_id
+                 GROUP BY c.id
+            ), job_agg AS (
+                SELECT c.id AS project_id,
+                       COUNT(*) FILTER (WHERE j.type = 'agent_turn') AS turns,
+                       COUNT(*) FILTER (
+                           WHERE j.type = 'final' AND j.state = 'done') AS exports,
+                       COUNT(*) FILTER (WHERE j.state = 'failed') AS failed_jobs,
+                       MAX(j.updated_at) AS last_job
+                  FROM candidates c
+                  LEFT JOIN video_jobs j ON j.project_id = c.id
+                 GROUP BY c.id
+            ), edl_agg AS (
+                SELECT c.id AS project_id, COUNT(e.id) AS versions
+                  FROM candidates c
+                  LEFT JOIN edls e ON e.project_id = c.id
+                 GROUP BY c.id
+            ), asset_agg AS (
+                SELECT c.id AS project_id,
+                       COALESCE(SUM(a.bytes), 0)::bigint AS storage_bytes,
+                       COUNT(a.id) FILTER (WHERE a.kind = 'original') AS uploads,
+                       MAX(a.duration_s) FILTER (WHERE a.kind = 'original')
+                           AS duration_s,
+                       MAX(a.created_at) AS last_asset
+                  FROM candidates c
+                  LEFT JOIN assets a ON a.project_id = c.id
+                 GROUP BY c.id
+            ), child_agg AS (
+                SELECT c.id AS project_id, COUNT(ch.id) AS shorts_count
+                  FROM candidates c
+                  LEFT JOIN projects ch ON ch.parent_project_id = c.id
+                 GROUP BY c.id
+            )
+            SELECT c.*, COALESCE(m.messages, 0) AS messages,
+                   COALESCE(j.turns, 0) AS turns,
+                   COALESCE(j.exports, 0) AS exports,
+                   COALESCE(j.failed_jobs, 0) AS failed_jobs,
+                   COALESCE(e.versions, 0) AS versions,
+                   COALESCE(a.storage_bytes, 0) AS storage_bytes,
+                   COALESCE(a.uploads, 0) AS uploads, a.duration_s,
+                   COALESCE(ch.shorts_count, 0) AS shorts_count,
+                   GREATEST(m.last_message, j.last_job, a.last_asset,
+                            c.created_at) AS last_activity
+              FROM candidates c
+              LEFT JOIN message_agg m ON m.project_id = c.id
+              LEFT JOIN job_agg j ON j.project_id = c.id
+              LEFT JOIN edl_agg e ON e.project_id = c.id
+              LEFT JOIN asset_agg a ON a.project_id = c.id
+              LEFT JOIN child_agg ch ON ch.project_id = c.id
+             ORDER BY c.id DESC
+        """, (like, like, per_page, offset))
+        rows = cur.fetchall()
+        cur.execute("""SELECT COUNT(DISTINCT u.id) AS n
+                         FROM users u JOIN projects p ON p.user_id = u.id
+                        WHERE COALESCE(u.is_subscribed, 0) = 1
+                          AND p.parent_project_id IS NULL
+                          AND (u.email ILIKE %s OR p.title ILIKE %s)
+                          AND EXISTS (
+                              SELECT 1 FROM payments pay
+                               WHERE pay.user_id = u.id
+                                 AND pay.status = 'completed'
+                                 AND pay.amount_cents > 0)""", (like, like))
+        subscriber_count = int((cur.fetchone() or {}).get("n") or 0)
+
+    total = int(rows[0]["matched_projects"] or 0) if rows else 0
+    return jsonify({
+        "page": page, "per_page": per_page, "total": total,
+        "subscriber_count": subscriber_count,
+        "projects": [{
+            "id": r["id"], "title": r["title"], "kind": r["kind"],
+            "email": r["email"], "plan": r["plan"],
+            "billing_plan": r["billing_plan"],
+            "billing_status": r["billing_status"],
+            "created_at": r["created_at"].isoformat(),
+            "first_paid_at": r["first_paid_at"].isoformat(),
+            "last_paid_at": r["last_paid_at"].isoformat(),
+            "paid_usd": round(float(r["paid_cents"] or 0) / 100.0, 2),
+            "messages": int(r["messages"] or 0),
+            "turns": int(r["turns"] or 0),
+            "versions": int(r["versions"] or 0),
+            "exports": int(r["exports"] or 0),
+            "failed_jobs": int(r["failed_jobs"] or 0),
+            "uploads": int(r["uploads"] or 0),
+            "shorts_count": int(r["shorts_count"] or 0),
+            "duration_s": (round(float(r["duration_s"]), 1)
+                           if r["duration_s"] else None),
+            "storage_bytes": int(r["storage_bytes"] or 0),
+            "last_activity": (r["last_activity"].isoformat()
+                              if r["last_activity"] else None),
+        } for r in rows],
+    })
+
+
 @admin_video_bp.route("/admin/video/projects", methods=["GET"])
 @admin_required
 def video_projects():
@@ -1058,6 +1208,13 @@ def video_projects():
         # and as a children list in the project detail, where their real
         # story (cut from the parent) is visible.
         cur.execute("""
+            WITH base_projects AS MATERIALIZED (
+                SELECT p.*
+                  FROM projects p JOIN users su ON su.id = p.user_id
+                 WHERE p.parent_project_id IS NULL
+                   AND (su.email ILIKE %s OR p.title ILIKE %s)
+                 ORDER BY p.id DESC LIMIT 100
+            )
             SELECT p.id, p.title, p.kind, p.created_at, u.email,
                    u.trial_status, u.trial_started_at, u.trial_plan,
                    (SELECT COUNT(*) FROM chat_messages cm
@@ -1136,7 +1293,7 @@ def video_projects():
                     WHERE c2.parent_project_id = p.id
                       AND cm2.role='user') AS shorts_messages,
                    """ + _TIMING_COLS + """
-            FROM projects p JOIN users u ON u.id = p.user_id
+            FROM base_projects p JOIN users u ON u.id = p.user_id
             """ + _PROJECT_TIMINGS + """
             LEFT JOIN LATERAL (
                 SELECT MIN(pa.occurred_at) AS paid_at
@@ -1163,9 +1320,7 @@ def video_projects():
                      ORDER BY p2.created_at DESC, p2.id DESC LIMIT 1)
                 ) AS project_id
             ) conversion ON TRUE
-            WHERE p.parent_project_id IS NULL
-              AND (u.email ILIKE %s OR p.title ILIKE %s)
-            ORDER BY p.id DESC LIMIT 100
+            ORDER BY p.id DESC
         """, (f"%{search}%", f"%{search}%"))
         rows = cur.fetchall()
     return jsonify({"projects": [
@@ -1888,6 +2043,17 @@ def video_project_llm_calls(project_id):
 @admin_video_bp.route("/admin/video/costs", methods=["GET"])
 @admin_required
 def video_costs():
+    storage_usd_per_gb_month = max(
+        0.0, float(os.getenv("R2_STORAGE_USD_PER_GB_MONTH", "0.015")))
+    database_storage_gb = max(
+        0.0, float(os.getenv("DATABASE_STORAGE_GB", "5")))
+    database_storage_rate = max(
+        0.0, float(os.getenv(
+            "RENDER_POSTGRES_STORAGE_USD_PER_GB_MONTH", "0.30")))
+    database_storage_usd = database_storage_gb * database_storage_rate
+    configured_fixed_usd = max(
+        0.0, float(os.getenv("PLATFORM_FIXED_COST_USD_MONTH", "0")))
+    fixed_monthly_usd = configured_fixed_usd + database_storage_usd
     with adb() as conn:
         cur = conn.cursor()
         cur.execute(f"""
@@ -1910,7 +2076,9 @@ def video_costs():
                    COALESCE(SUM(lc.prompt_tokens), 0) AS tokens_in,
                    COALESCE(SUM(lc.completion_tokens), 0) AS tokens_out,
                    {_cost_expr("lc")} AS est_cost
-            FROM llm_calls lc GROUP BY lc.purpose ORDER BY est_cost DESC
+            FROM llm_calls lc
+            WHERE lc.created_at > NOW() - INTERVAL '30 days'
+            GROUP BY lc.purpose ORDER BY est_cost DESC
         """)
         by_purpose = cur.fetchall()
         # Per MODEL, because that is the axis spend now splits on: free
@@ -1933,6 +2101,49 @@ def video_costs():
             GROUP BY 1 ORDER BY est_cost DESC
         """)
         by_model = cur.fetchall()
+        cur.execute("""SELECT COALESCE(SUM(GREATEST(COALESCE(NULLIF(
+                                   result->'timings'->>
+                                       'gross_compute_usd_ceiling', '')::numeric,
+                                   0), 0)), 0) AS usd
+                         FROM video_jobs
+                        WHERE created_at > NOW() - INTERVAL '30 days'""")
+        executor_30d = float((cur.fetchone() or {}).get("usd") or 0)
+        cur.execute("SELECT COALESCE(SUM(bytes), 0) AS bytes FROM assets")
+        storage_bytes = int((cur.fetchone() or {}).get("bytes") or 0)
+        cur.execute("""SELECT COALESCE(SUM(amount_cents), 0) AS cents
+                         FROM payments
+                        WHERE status = 'completed' AND amount_cents > 0
+                          AND occurred_at > NOW() - INTERVAL '30 days'""")
+        cash_30d = float((cur.fetchone() or {}).get("cents") or 0) / 100.0
+
+    model_30d = sum(float(r["est_cost"] or 0) for r in by_model)
+    storage_gb = storage_bytes / 1_000_000_000.0
+    storage_month = storage_gb * storage_usd_per_gb_month
+    provider_30d = model_30d + executor_30d + storage_month
+    total_30d = provider_30d + fixed_monthly_usd
+    cash_margin = ((cash_30d - total_30d) / cash_30d * 100.0
+                   if cash_30d > 0 else None)
+
+    plan_scenarios = []
+    storage_reserve = 5.0 * storage_usd_per_gb_month
+    labels = {"ai": "Creator", "ai_pro": "Pro", "ai_max": "Frontier"}
+    for plan in ("ai", "ai_pro", "ai_max"):
+        allowance = int(credits.PLAN_MONTHLY_LIMITS[plan])
+        metered = allowance * model_prices.USD_PER_CREDIT
+        prices = billing.PLAN_PRICES_USD[plan]
+        for cadence, monthly_revenue in (
+                ("monthly", float(prices["monthly"])),
+                ("annual", float(prices["yearly"]) / 12.0)):
+            total_cost = metered + storage_reserve
+            margin = ((monthly_revenue - total_cost) / monthly_revenue * 100.0)
+            plan_scenarios.append({
+                "plan": plan, "label": labels[plan], "cadence": cadence,
+                "credits": allowance,
+                "monthly_revenue_usd": round(monthly_revenue, 2),
+                "max_metered_cost_usd": round(metered, 2),
+                "storage_reserve_usd": round(storage_reserve, 3),
+                "gross_margin_pct": round(margin, 1),
+            })
     return jsonify({
         "pricing": {"in_per_m": PRICE_IN_PER_M, "out_per_m": PRICE_OUT_PER_M,
                     "cached_in_per_m": PRICE_CACHED_IN_PER_M,
@@ -1942,7 +2153,30 @@ def video_costs():
                             "for a model not in the table. Cache-hit input is "
                             "priced separately; reasoning tokens are charged "
                             "only where the provider bills them on top of "
-                            "completion_tokens."},
+                            "completion_tokens.",
+                    "provider_cost_usd_per_credit":
+                        model_prices.USD_PER_CREDIT,
+                    "r2_storage_usd_per_gb_month": storage_usd_per_gb_month},
+        "economics_30d": {
+            "cash_revenue_usd": round(cash_30d, 2),
+            "model_usd": round(model_30d, 4),
+            "executor_ceiling_usd": round(executor_30d, 4),
+            "storage_bytes": storage_bytes,
+            "storage_gb": round(storage_gb, 3),
+            "storage_usd": round(storage_month, 4),
+            "database_storage_gb": round(database_storage_gb, 2),
+            "database_storage_usd": round(database_storage_usd, 2),
+            "fixed_platform_usd": round(fixed_monthly_usd, 2),
+            "total_cost_usd": round(total_30d, 4),
+            "cash_gross_margin_pct": (round(cash_margin, 1)
+                                      if cash_margin is not None else None),
+            "note": "Cash revenue is completed positive payments in the last "
+                    "30 days. Executor is the conservative job telemetry "
+                    "ceiling. Render Postgres storage uses 5 GB at $0.30/GB "
+                    "by default. Set PLATFORM_FIXED_COST_USD_MONTH to include "
+                    "database compute and other fixed subscriptions.",
+        },
+        "plan_scenarios": plan_scenarios,
         "daily": [{**r, "day": r["day"].isoformat(),
                    "est_cost": round(float(r["est_cost"] or 0), 4)}
                   for r in rows],
@@ -2020,6 +2254,7 @@ def _asset_row(a):
 @admin_required
 def video_users():
     search = (request.args.get("search") or "").strip()
+    limit = max(10, min(100, request.args.get("limit", type=int) or 100))
     with adb() as conn:
         cur = conn.cursor()
         cur.execute(f"""
@@ -2033,7 +2268,7 @@ def video_users():
                               WHERE p.user_id = u.id)
                 ORDER BY COALESCE(u.last_seen_at,
                                   u.created_at AT TIME ZONE 'UTC') DESC
-                LIMIT 200
+                LIMIT %s
             ), project_agg AS (
                 SELECT p.user_id, COUNT(*) AS n
                 FROM projects p JOIN active_users au ON au.id = p.user_id
@@ -2083,7 +2318,7 @@ def video_users():
             LEFT JOIN job_agg j ON j.user_id = u.id
             LEFT JOIN asset_agg a ON a.user_id = u.id
             ORDER BY last_active DESC NULLS LAST
-        """, (f"%{search}%", UPLOAD_KINDS))
+        """, (f"%{search}%", limit, UPLOAD_KINDS))
         rows = cur.fetchall()
     return jsonify({"users": [
         {"id": r["id"], "email": r["email"],

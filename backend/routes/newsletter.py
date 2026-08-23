@@ -43,6 +43,7 @@ from flask import Blueprint, request, jsonify, current_app, Response
 
 import offers
 import trial_state
+import brevo_delivery
 from routes.newsletter_content import (
     DEFAULT_TEMPLATES, LIFECYCLE_ORDER, CAMPAIGN_LABELS, DEFAULT_CTA_URL,
     wrap_email, render_tokens,
@@ -300,7 +301,7 @@ def get_settings(conn):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _unsub_token(email):
-    key = (current_app.config.get('SECRET_KEY') or 'supersecretkey').encode()
+    key = current_app.config['SECRET_KEY'].encode()
     return hmac.new(key, (email or '').lower().encode(), hashlib.sha256).hexdigest()[:40]
 
 
@@ -332,16 +333,8 @@ def _send_one(email, subject, html, unsub_url):
             "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
         },
     }
-    try:
-        res = requests.post(f"{BREVO_BASE}/smtp/email", json=payload, headers=_brevo_headers(), timeout=15)
-    except requests.RequestException as e:
-        current_app.logger.error("Newsletter send to %s failed (network): %s", email, e)
-        return False
-    if res.status_code != 201:
-        current_app.logger.error("Newsletter send to %s failed: HTTP %s %s",
-                                 email, res.status_code, (res.text or "")[:400])
-        return False
-    return True
+    return brevo_delivery.send_email(
+        payload, category="bulk", logger=current_app.logger)
 
 
 def _render_for(tmpl, email, credits):
@@ -525,13 +518,18 @@ def run_daily_tick(force=False, dry_run=False):
 
             summary = {"dry_run": dry_run, "campaigns": {}, "recipients": {}}
             emailed = set()
+            quota_remaining = (None if dry_run else
+                               brevo_delivery.budget_status()["bulk_remaining"])
 
             def process(campaign, recips, tmpl):
+                nonlocal quota_remaining
                 sent = 0
                 who = []
                 for r in recips:
                     if r["id"] in emailed:
                         continue
+                    if quota_remaining is not None and quota_remaining <= 0:
+                        break
                     who.append(r["email"])
                     if dry_run:
                         sent += 1
@@ -553,6 +551,8 @@ def run_daily_tick(force=False, dry_run=False):
                     if ok:
                         emailed.add(r["id"])
                         sent += 1
+                        if quota_remaining is not None:
+                            quota_remaining -= 1
                 summary["campaigns"][campaign] = sent
                 summary["recipients"][campaign] = who
 
@@ -595,6 +595,8 @@ def run_daily_tick(force=False, dry_run=False):
                 conn.commit()
                 c2.close()
 
+            if not dry_run:
+                summary["budget"] = brevo_delivery.budget_status()
             return summary
         finally:
             cur = conn.cursor()
@@ -856,6 +858,7 @@ def recent_sends():
             "sends": [{"email": r["email"], "campaign": r["campaign"], "status": r["status"],
                        "sent_at": str(r["sent_at"])} for r in rows],
             "by_campaign": [dict(s) for s in stats],
+            "budget": brevo_delivery.budget_status(),
         }), 200
     finally:
         conn.close()
@@ -904,6 +907,11 @@ def send_newsletter():
         if not recips:
             return jsonify({'error': f'No recipients in segment "{segment}"'}), 400
 
+        budget = brevo_delivery.budget_status()
+        quota = budget["bulk_remaining"]
+        original_total = len(recips)
+        recips = recips[:quota]
+        deferred = original_total - len(recips)
         campaign = "manual-" + datetime.utcnow().strftime("%Y%m%d%H%M")
         sent = failed = 0
         for r in recips:
@@ -917,8 +925,9 @@ def send_newsletter():
             failed += 0 if ok else 1
 
         return jsonify({
-            'message': f'Sent to {sent} users' + (f' ({failed} failed)' if failed else '') + f' · segment: {segment}',
-            'sent': sent, 'failed': failed, 'total': len(recips),
+            'message': f'Sent to {sent} users' + (f' ({failed} failed)' if failed else '') + (f' · {deferred} deferred by daily reserve' if deferred else '') + f' · segment: {segment}',
+            'sent': sent, 'failed': failed, 'deferred': deferred,
+            'total': original_total, 'budget': brevo_delivery.budget_status(),
         }), 200
     finally:
         conn.close()

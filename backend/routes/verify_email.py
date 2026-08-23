@@ -1,6 +1,7 @@
 import os
 import random
 import requests
+import brevo_delivery
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from flask import Blueprint, request, jsonify, current_app
@@ -146,26 +147,8 @@ def send_code_to_email(email, code):
         "htmlContent": f"<p>Your code is: <strong>{code}</strong></p>"
     }
 
-    headers = {
-        "accept": "application/json",
-        "api-key": os.getenv("BREVO_API_KEY"),
-        "content-type": "application/json"
-    }
-
-    try:
-        res = requests.post("https://api.brevo.com/v3/smtp/email",
-                            json=payload, headers=headers, timeout=15)
-    except requests.RequestException as e:
-        current_app.logger.error("Brevo send to %s failed (network): %s", email, e)
-        return False
-
-    if res.status_code != 201:
-        current_app.logger.error(
-            "Brevo send to %s failed: HTTP %s %s",
-            email, res.status_code, (res.text or "")[:500])
-        return False
-
-    return True
+    return brevo_delivery.send_email(
+        payload, category="critical", logger=current_app.logger)
 
 @verify_bp.route('/cleanup-old-code-logs')
 def cleanup_old_code_logs():

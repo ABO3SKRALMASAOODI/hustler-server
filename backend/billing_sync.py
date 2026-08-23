@@ -37,6 +37,7 @@ import threading
 import requests
 
 import billing
+import brevo_delivery
 import trial_state
 
 try:                                    # pragma: no cover - optional dep
@@ -526,8 +527,7 @@ def _dunning_html(name, plan, reason, link):
 
 def send_dunning_email(conn, user_id, email, plan, reason, subscription_id):
     """One decline email. Returns True if Brevo accepted it."""
-    api_key = os.getenv("BREVO_API_KEY")
-    if not api_key or not email:
+    if not email:
         return False
     link, _txn = update_payment_method_link(subscription_id)
     payload = {
@@ -537,19 +537,7 @@ def send_dunning_email(conn, user_id, email, plan, reason, subscription_id):
         "subject": "Your Valmera payment didn't go through",
         "htmlContent": _dunning_html(email, plan, reason, link),
     }
-    try:
-        res = requests.post("https://api.brevo.com/v3/smtp/email",
-                            json=payload,
-                            headers={"accept": "application/json",
-                                     "api-key": api_key,
-                                     "content-type": "application/json"},
-                            timeout=15)
-    except requests.RequestException as e:
-        print(f"⚠️ [dunning] send to {email} failed (network): {e}", flush=True)
-        return False
-    if res.status_code != 201:
-        print(f"⚠️ [dunning] send to {email} failed: HTTP {res.status_code} "
-              f"{(res.text or '')[:300]}", flush=True)
+    if not brevo_delivery.send_email(payload, category="critical"):
         return False
     cur = conn.cursor()
     cur.execute("""UPDATE users
@@ -570,7 +558,7 @@ def run_dunning(conn):
     arrived at 3am.
     """
     cur = conn.cursor()
-    cur.execute(f"""
+    cur.execute("""
         SELECT id, email, billing_plan, plan, payment_failed_reason,
                subscription_id
           FROM users

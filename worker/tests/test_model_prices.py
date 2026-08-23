@@ -376,12 +376,10 @@ def test_reasoning_effort_never_applies_to_the_first_iteration():
 
 # ── the burn rate and what the plans are priced against ─────────────────────
 
-def test_a_credit_burns_at_twice_the_models_cost():
-    """This one constant IS the margin. At 0.01 (one credit, one cent of real
-    spend) the annual tiers sat at 28-40% and an intro discount on an annual
-    plan was a below-cost sale; at 0.005 every plan clears 40%."""
-    assert model_prices.USD_PER_CREDIT == 0.005
-    assert model_prices.usd_to_credits(1.00) == 200.0
+def test_a_credit_has_a_combined_provider_cost_budget():
+    """The divisor covers model and executor spend, with headroom for R2."""
+    assert model_prices.USD_PER_CREDIT == 0.004
+    assert model_prices.usd_to_credits(1.00) == 250.0
     assert model_prices.usd_to_credits(0.0) == 0.0
     # Junk in must not raise inside a charge.
     assert model_prices.usd_to_credits(None) == 0.0
@@ -398,15 +396,19 @@ def test_the_charge_and_the_in_turn_cap_use_the_SAME_divisor():
         assert "/ 0.01" not in src
 
 
-def test_every_live_plan_clears_a_forty_percent_margin():
-    """The plan table and the burn rate are set in different files and only
-    make sense together — this is the assertion that ties them."""
+def test_every_live_plan_keeps_a_fifty_to_seventyish_percent_margin():
+    """Worst-case full usage includes model + executor and 5 GB of R2.
+
+    R2 Standard is $0.015/GB-month. Five GB per subscriber is a deliberately
+    generous reserve; Cloudflare's shared 10 GB free tier is ignored.
+    """
     backend = _load_backend_copy()
     assert backend.USD_PER_CREDIT == model_prices.USD_PER_CREDIT
-    for plan, price, granted in (("ai", 15, 1000), ("ai_pro", 30, 2000),
-                                 ("ai_max", 50, 5000)):
-        cost = granted * model_prices.USD_PER_CREDIT
-        assert cost <= price * 0.60, (plan, cost, price)
-        # ...and the annual price (ten months of the monthly one) too, which is
-        # the one that used to go negative.
-        assert cost <= (price * 10 / 12.0) * 0.75, (plan, cost)
+    storage_reserve = 5 * 0.015
+    for plan, monthly, annual, granted in (
+            ("ai", 15, 150, 1000), ("ai_pro", 30, 300, 2000),
+            ("ai_max", 50, 500, 5000)):
+        metered_cost = granted * model_prices.USD_PER_CREDIT
+        for revenue in (monthly, annual / 12.0):
+            margin = (revenue - metered_cost - storage_reserve) / revenue
+            assert 0.50 <= margin <= 0.75, (plan, revenue, margin)
