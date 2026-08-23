@@ -397,6 +397,69 @@ def test_confirmed_deterministic_failure_does_not_buy_a_modal_rerun(
         remote._run_remote(job)
 
 
+def test_nonretryable_unknown_failure_does_not_buy_a_modal_rerun(
+        monkeypatch):
+    _enable(monkeypatch)
+    monkeypatch.setattr(config, "CLOUDFLARE_MODAL_FALLBACK", True)
+    monkeypatch.setattr(config, "MODAL_EXECUTOR_ENABLED", True)
+    monkeypatch.setattr(config, "MODAL_EXECUTOR_TYPES",
+                        frozenset({"mcp_tool"}))
+    job = dict(JOB, type="mcp_tool",
+               payload={**JOB["payload"],
+                        "execution_provider": "cloudflare"})
+    failure = remote.CloudflareTerminalFailure(
+        "project has not finished indexing")
+    failure.failure_kind = "unknown"
+    failure.retryable = False
+    monkeypatch.setattr(
+        remote, "_run_cloudflare",
+        lambda _job: (_ for _ in ()).throw(failure))
+    monkeypatch.setattr(
+        remote, "_run_modal",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            AssertionError("nonretryable failure must not rerun")))
+
+    with pytest.raises(remote.CloudflareTerminalFailure):
+        remote._run_remote(job)
+
+
+def test_nonretryable_provider_budget_can_switch_to_modal(monkeypatch):
+    _enable(monkeypatch)
+    monkeypatch.setattr(config, "CLOUDFLARE_MODAL_FALLBACK", True)
+    monkeypatch.setattr(config, "MODAL_EXECUTOR_ENABLED", True)
+    monkeypatch.setattr(config, "MODAL_EXECUTOR_TYPES",
+                        frozenset({"preview_check"}))
+    job = dict(JOB, payload={**JOB["payload"],
+                             "execution_provider": "cloudflare"})
+    failure = remote.CloudflareTerminalFailure("provider budget exceeded")
+    failure.failure_kind = "provider_budget_exhausted"
+    failure.retryable = False
+    monkeypatch.setattr(
+        remote, "_run_cloudflare",
+        lambda _job: (_ for _ in ()).throw(failure))
+
+    class Probe:
+        def run(self, fn, *_args):
+            if fn is dbx.get_job:
+                return {"state": "running", "total_claims": 4}
+            if fn is dbx.finish_remote_execution:
+                return True
+            if fn is dbx.get_remote_execution:
+                return {"state": "failed", "total_claims": 4,
+                        "provider": "cloudflare",
+                        "call_id": remote._cloudflare_call_id(job)}
+            raise AssertionError(fn)
+
+        def reset(self):
+            pass
+
+    monkeypatch.setattr(remote.dbx, "Db", Probe)
+    monkeypatch.setattr(remote, "_run_modal",
+                        lambda *_a, **_k: {"ok": True})
+
+    assert remote._run_remote(job) == {"ok": True}
+
+
 def test_ambiguous_post_disconnect_recovers_same_call_not_modal(monkeypatch):
     _enable(monkeypatch)
     job = dict(JOB, payload={**JOB["payload"],

@@ -1256,17 +1256,30 @@ def _run_remote(job, url_override=None, modal_function=None):
                   flush=True)
             return _run_modal(job, modal_function)
         except CloudflareTerminalFailure as exc:
-            fallback_kinds = {
+            # Capacity/budget failures are explicitly about this provider and
+            # can be solved by a differently sized/billed alternate even
+            # though replaying the same provider is non-retryable. Every other
+            # kind must also carry the executor's retryable=true decision.
+            # Without that second gate, an MCP precondition such as "wait for
+            # indexing" was classified unknown/non-retryable, then pointlessly
+            # replayed on Modal after Cloudflare had already given the correct
+            # deterministic answer.
+            provider_switch_kinds = {
                 "executor_capacity", "provider_budget_exhausted",
+            }
+            retryable_fallback_kinds = {
                 "transient_infrastructure", "stalled_io", "media_command",
                 "unknown",
             }
             kind = str(getattr(exc, "failure_kind", "unknown"))
+            fallback_allowed = kind in provider_switch_kinds or (
+                bool(getattr(exc, "retryable", True))
+                and kind in retryable_fallback_kinds)
             if not (config.CLOUDFLARE_MODAL_FALLBACK
                     and config.MODAL_EXECUTOR_ENABLED
                     and str(job.get("type") or "") in
                     config.MODAL_EXECUTOR_TYPES
-                    and kind in fallback_kinds):
+                    and fallback_allowed):
                 raise
             # The Durable Object has a terminal envelope. Confirm the queue
             # lease is still ours before replacing its terminal provider
