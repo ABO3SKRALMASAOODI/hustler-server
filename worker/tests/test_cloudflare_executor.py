@@ -299,6 +299,54 @@ def test_terminal_synchronous_capacity_failure_falls_back_without_queue_row(
     assert modal == ["frames"]
 
 
+def test_guardian_queues_modal_when_rollout_abandoned_before_run(monkeypatch):
+    _enable(monkeypatch)
+    monkeypatch.setattr(config, "CLOUDFLARE_MODAL_FALLBACK", True)
+    monkeypatch.setattr(config, "MODAL_EXECUTOR_ENABLED", True)
+    monkeypatch.setattr(config, "MODAL_EXECUTOR_TYPES",
+                        frozenset({"mcp_tool"}))
+    monkeypatch.setattr(remote, "_cloudflare_status", lambda *_a, **_k: {
+        "status": "failed",
+        "envelope": {
+            "error": "Cloudflare container startup was abandoned before /run",
+            "retryable": True,
+            "failure": {"kind": "provider_start_abandoned",
+                        "retryable": True},
+        },
+    })
+    monkeypatch.setattr(remote, "check_executor_version",
+                        lambda quiet=True: "")
+    calls = []
+
+    class WorkerDb:
+        def run(self, fn, *args):
+            calls.append((fn, args))
+            if fn is dbx.finish_remote_execution:
+                return True
+            if fn is dbx.requeue_provider_fallback:
+                return True
+            raise AssertionError(fn)
+
+    row = {
+        "provider": "cloudflare", "call_id": "cf-mcp-abandoned",
+        "function_name": "mcp", "job_id": 52, "total_claims": 1,
+        "type": "mcp_tool", "project_id": 7, "user_id": 3,
+        "attempts": 1, "payload": {"execution_provider": "cloudflare"},
+    }
+
+    event = remote.reconcile_remote_execution(WorkerDb(), row)
+
+    assert event["status"] == "provider_fallback_queued"
+    assert calls == [
+        (dbx.finish_remote_execution,
+         (52, 1, "failed", event["error"], "cloudflare",
+          "cf-mcp-abandoned")),
+        (dbx.requeue_provider_fallback,
+         (52, 1, "cloudflare", "cf-mcp-abandoned", "modal",
+          event["error"])),
+    ]
+
+
 def test_only_proven_prelaunch_failure_falls_back_to_modal(monkeypatch):
     _enable(monkeypatch)
     monkeypatch.setattr(config, "CLOUDFLARE_MODAL_FALLBACK", True)

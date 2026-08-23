@@ -750,6 +750,42 @@ def requeue_job(conn, job_id, error, total_claims=None):
         return cur.rowcount > 0
 
 
+def requeue_provider_fallback(conn, job_id, total_claims, from_provider,
+                              call_id, to_provider, error):
+    """Hand a provably pre-compute provider failure to the alternate lane.
+
+    This is deliberately narrower than an ordinary retry.  The old provider
+    call must already be terminal for this exact immutable claim and call id;
+    only then is the refundable attempt restored and the provider stamp moved
+    to the fallback.  If the attached dispatcher already launched the
+    alternate, its ledger no longer matches and this update loses harmlessly.
+    ``total_claims`` is not refunded: the next claim remains visible in the
+    absolute physical-handoff budget even though no /run occurred here.
+    """
+    if to_provider not in {"modal", "cloudflare", "cloud_run"}:
+        raise ValueError("invalid fallback provider")
+    with conn.cursor() as cur:
+        cur.execute("""UPDATE video_jobs j
+                          SET state = 'queued',
+                              attempts = GREATEST(j.attempts - 1, 0),
+                              payload = jsonb_set(
+                                COALESCE(j.payload, '{}'::jsonb),
+                                '{execution_provider}',
+                                to_jsonb(%s::text), true),
+                              error = %s,
+                              updated_at = NOW()
+                         FROM remote_executions r
+                        WHERE j.id = %s AND j.state = 'running'
+                          AND j.total_claims = %s
+                          AND r.job_id = j.id
+                          AND r.total_claims = j.total_claims
+                          AND r.provider = %s AND r.call_id = %s
+                          AND r.state = 'failed'""",
+                    (to_provider, error_text.excerpt(error, 2000), job_id,
+                     total_claims, from_provider, str(call_id)))
+        return cur.rowcount > 0
+
+
 def get_job(conn, job_id):
     with conn.cursor() as cur:
         cur.execute("SELECT * FROM video_jobs WHERE id = %s", (job_id,))

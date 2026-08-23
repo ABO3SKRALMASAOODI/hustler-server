@@ -464,6 +464,24 @@ def test_requeue_cannot_resurrect_a_job_we_no_longer_hold():
     assert wdb.requeue_job(gone, 7, RuntimeError("boom")) is False
 
 
+def test_provider_fallback_requeue_is_call_fenced_and_refunds_attempt():
+    held = _Conn(rowcount=1)
+    assert wdb.requeue_provider_fallback(
+        held, 7, 4, "cloudflare", "cf-old", "modal",
+        RuntimeError("startup abandoned")) is True
+    sql, params = held.sql[0]
+    assert "attempts = GREATEST(j.attempts - 1, 0)" in sql
+    assert "r.call_id = %s" in sql
+    assert "r.state = 'failed'" in sql
+    assert params == ("modal", "startup abandoned", 7, 4,
+                      "cloudflare", "cf-old")
+
+    superseded = _Conn(rowcount=0)
+    assert wdb.requeue_provider_fallback(
+        superseded, 7, 4, "cloudflare", "cf-old", "modal",
+        RuntimeError("startup abandoned")) is False
+
+
 def test_remote_handoff_insert_between_update_and_select_is_pending():
     """READ COMMITTED can reveal the exact insert on the second statement.
 

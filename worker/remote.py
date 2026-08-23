@@ -764,8 +764,31 @@ def reconcile_remote_execution(worker_db, row):
         _interpret_executor_data(data, job)
     except Exception as exc:
         decision = failure_policy.decision_for(exc, job.get("type"))
-        worker_db.run(dbx.finish_remote_execution, job_id, claim,
-                      "failed", exc, provider, row.get("call_id"))
+        closed = worker_db.run(
+            dbx.finish_remote_execution, job_id, claim,
+            "failed", exc, provider, row.get("call_id"))
+        # A rollout-abandoned `starting` state is positive proof that the
+        # executor never sent /run. The attached dispatcher normally switches
+        # providers itself; if the orphan guardian observes the terminal first,
+        # queue the exact job for Modal without consuming MCP's one real
+        # attempt. The call-scoped SQL fence loses harmlessly if the attached
+        # dispatcher already replaced this ledger with its Modal call.
+        if decision.kind == "provider_start_abandoned" \
+                and provider == "cloudflare" \
+                and config.CLOUDFLARE_MODAL_FALLBACK \
+                and config.MODAL_EXECUTOR_ENABLED \
+                and str(job.get("type") or "") in \
+                config.MODAL_EXECUTOR_TYPES:
+            if not closed:
+                return {"status": "superseded", "job": job, "error": exc}
+            queued = worker_db.run(
+                dbx.requeue_provider_fallback, job_id, claim,
+                "cloudflare", row.get("call_id"), "modal", exc)
+            return {
+                "status": ("provider_fallback_queued" if queued
+                           else "superseded"),
+                "job": job, "error": exc,
+            }
         if decision.retryable and job["attempts"] < decision.max_attempts:
             requeued = worker_db.run(dbx.requeue_job, job_id, exc, claim)
             return {"status": "requeued" if requeued else "superseded",
@@ -1303,6 +1326,7 @@ def _run_remote(job, url_override=None, modal_function=None):
             # deterministic answer.
             provider_switch_kinds = {
                 "executor_capacity", "provider_budget_exhausted",
+                "provider_start_abandoned",
             }
             retryable_fallback_kinds = {
                 "transient_infrastructure", "stalled_io", "media_command",

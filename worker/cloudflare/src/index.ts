@@ -241,7 +241,7 @@ abstract class ValmeraContainer extends Container<Env> {
         status: "failed", jobType: current.jobType,
         envelope: {
           error: message, retryable: true,
-          failure: { kind: "transient_infrastructure", retryable: true },
+          failure: { kind: "provider_start_abandoned", retryable: true },
         },
         error: message,
         updatedAt: new Date(now).toISOString(), activeUntil: now,
@@ -516,7 +516,7 @@ abstract class ValmeraContainer extends Container<Env> {
       return json(running?.envelope ?? {
         error: running?.error ?? "Cloudflare startup no longer owns this call",
         retryable: true,
-        failure: { kind: "transient_infrastructure", retryable: true },
+        failure: { kind: "provider_start_abandoned", retryable: true },
       });
     }
     try {
