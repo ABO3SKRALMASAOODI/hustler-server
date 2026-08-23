@@ -1174,7 +1174,12 @@ def _run_cloudflare(job):
             f"{config.CLOUDFLARE_EXECUTOR_URL}/calls/{lane}/{call_id}",
             json={"job": _job_payload(job), "timeout_s": timeout_s},
             headers=_cloudflare_headers(),
-            timeout=max(1, deadline - time.monotonic()))
+            # The named call remains recoverable after this observation
+            # request ends. Reconnect early enough to detect a rollout-
+            # abandoned `starting` state instead of waiting a full agent/MCP
+            # execution envelope before asking the Durable Object again.
+            timeout=max(1, min(config.CLOUDFLARE_START_OBSERVATION_S,
+                               deadline - time.monotonic())))
     except requests.RequestException:
         if queue_backed:
             dbx.remote_launch_recorded(job["id"])

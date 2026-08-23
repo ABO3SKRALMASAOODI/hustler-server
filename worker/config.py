@@ -1021,6 +1021,13 @@ CLOUDFLARE_SYNCHRONOUS_TYPES = frozenset(
     part.strip() for part in os.getenv(
         "CLOUDFLARE_SYNCHRONOUS_TYPES", "frames").split(",")
     if part.strip())
+# Observe an accepted call through its startup phase, then reconnect through
+# the named status route. A Worker deployment can abandon a Durable Object
+# handler after it records `starting` but before it sends `/run`; waiting the
+# full 25-minute MCP envelope for that provably pre-compute state made a
+# trivial get_edl appear hung. Long productive calls continue through status.
+CLOUDFLARE_START_OBSERVATION_S = max(30.0, min(300.0, float(os.getenv(
+    "CLOUDFLARE_START_OBSERVATION_S", "180"))))
 CLOUDFLARE_MODAL_FALLBACK = os.getenv(
     "CLOUDFLARE_MODAL_FALLBACK", "1") == "1"
 CLOUDFLARE_MAX_INPUT_BYTES = int(os.getenv(

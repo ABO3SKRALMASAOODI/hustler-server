@@ -155,6 +155,8 @@ def test_cloudflare_uses_deterministic_call_and_persists_before_wait(
     assert call_id == remote._cloudflare_call_id(job)
     assert f"/calls/interactive/{call_id}" in posted[0][0]
     assert posted[0][1]["json"]["timeout_s"] > 0
+    assert posted[0][1]["timeout"] == \
+        config.CLOUDFLARE_START_OBSERVATION_S
     assert posted[0][1]["json"]["job"]["dispatch_submitted_at"] > 0
 
 
@@ -634,6 +636,10 @@ def test_cloudflare_config_preserves_modal_heavy_fallback():
     assert 'storage.get<ActiveCall>("active")' in adapter
     assert "Idle timeout expired with no active provider lease" in adapter
     assert "await this.destroy()" in adapter
+    assert "const STARTING_STALE_MS = 180 * 1000" in adapter
+    assert "expireStaleStart" in adapter
+    assert "markRunning" in adapter
+    assert "startup was abandoned before /run" in adapter
     assert "getByName(shardName" not in adapter  # computed once as `shard`
     assert "getByName(shard)" in adapter
     assert "Cloudflare Container shard is busy" in adapter

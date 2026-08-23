@@ -77,6 +77,12 @@ const SHARD_COUNTS = {
 } as const;
 type Lane = keyof typeof SHARD_COUNTS;
 const TERMINAL_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+// startAndWaitForPorts normally returns inside its 120-second port-ready
+// bound. A Worker version replacement can instead abandon the handler after
+// it persisted `starting`. No Python /run can precede the awaited transition
+// to `running`, so this state is provably safe to fail over after three
+// minutes rather than occupying an MCP request for its full 26-minute lease.
+const STARTING_STALE_MS = 180 * 1000;
 
 function shardName(lane: Lane, callId: string): string {
   // Every novel Container ID cold-starts. A fixed pool reuses Python images
@@ -219,6 +225,63 @@ abstract class ValmeraContainer extends Container<Env> {
     return (await this.ctx.storage.get<CallState>(this.stateKey(callId))) ?? null;
   }
 
+  private async expireStaleStart(
+    callId: string, now = Date.now(),
+  ): Promise<CallState | null> {
+    const terminal = await this.ctx.storage.transaction(async (txn) => {
+      const key = this.stateKey(callId);
+      const current = (await txn.get<CallState>(key)) ?? null;
+      if (current?.status !== "starting") return current;
+      const updatedAt = Date.parse(current.updatedAt);
+      if (!Number.isFinite(updatedAt) || now - updatedAt < STARTING_STALE_MS) {
+        return current;
+      }
+      const message = "Cloudflare container startup was abandoned before /run";
+      const failed: CallState = {
+        status: "failed", jobType: current.jobType,
+        envelope: {
+          error: message, retryable: true,
+          failure: { kind: "transient_infrastructure", retryable: true },
+        },
+        error: message,
+        updatedAt: new Date(now).toISOString(), activeUntil: now,
+      };
+      const active = await txn.get<ActiveCall>("active");
+      await txn.put({
+        [key]: failed,
+        [this.terminalKey(callId, now)]: callId,
+      });
+      if (active?.callId === callId) await txn.delete("active");
+      return failed;
+    });
+    if (terminal?.status === "failed"
+        && terminal.error?.includes("abandoned before /run")) {
+      // Cleanup is asynchronous: the terminal state already proves no /run
+      // was sent, so a slow provider stop cannot delay safe Modal fallback.
+      this.ctx.waitUntil(this.stop().catch(() => undefined));
+    }
+    return terminal;
+  }
+
+  private async markRunning(
+    callId: string, jobType: string, activeUntil: number,
+  ): Promise<CallState | null> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const key = this.stateKey(callId);
+      const current = (await txn.get<CallState>(key)) ?? null;
+      const active = await txn.get<ActiveCall>("active");
+      if (current?.status !== "starting" || active?.callId !== callId) {
+        return current;
+      }
+      const running: CallState = {
+        status: "running", jobType,
+        updatedAt: new Date().toISOString(), activeUntil,
+      };
+      await txn.put(key, running);
+      return running;
+    });
+  }
+
   private async release(callId: string): Promise<void> {
     await this.ctx.storage.transaction(async (txn) => {
       const active = await txn.get<ActiveCall>("active");
@@ -317,7 +380,7 @@ abstract class ValmeraContainer extends Container<Env> {
     }
     const statusMatch = url.pathname.match(/^\/status\/([^/]+)$/);
     if (request.method === "GET" && statusMatch && CALL_ID.test(statusMatch[1])) {
-      const state = await this.callState(statusMatch[1]);
+      const state = await this.expireStaleStart(statusMatch[1]);
       return state ? json(state) : json({ status: "missing" }, 404);
     }
     const executeMatch = url.pathname.match(/^\/execute\/([^/]+)$/);
@@ -411,6 +474,12 @@ abstract class ValmeraContainer extends Container<Env> {
         cancellationOptions: { portReadyTimeoutMS: 120_000, instanceGetTimeoutMS: 30_000 },
       });
     } catch (error) {
+      const current = await this.callState(callId);
+      if (current?.status === "done" || current?.status === "failed") {
+        return json(current.envelope ?? {
+          error: current.error ?? "Cloudflare call ended during startup",
+        });
+      }
       // No /run request was sent. The dispatcher may safely use Modal.
       await this.ctx.storage.delete(stateKey);
       await this.release(callId);
@@ -439,10 +508,17 @@ abstract class ValmeraContainer extends Container<Env> {
       }, 503);
     }
 
-    await update({
-      status: "running", jobType: job.type,
-      updatedAt: new Date().toISOString(), activeUntil,
-    });
+    // Atomically prove the startup still owns the reservation. A status
+    // request may have terminalized an abandoned start while the provider API
+    // was returning; that late handler must never send /run after fallback.
+    const running = await this.markRunning(callId, job.type, activeUntil);
+    if (running?.status !== "running") {
+      return json(running?.envelope ?? {
+        error: running?.error ?? "Cloudflare startup no longer owns this call",
+        retryable: true,
+        failure: { kind: "transient_infrastructure", retryable: true },
+      });
+    }
     try {
       const response = await this.containerFetch("http://localhost:8080/run", {
         method: "POST",
