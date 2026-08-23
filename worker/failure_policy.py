@@ -93,6 +93,13 @@ def classify(error, job_type=None):
             "invalid_edl" if repairable else "deterministic_input",
             False, 0, repairable)
 
+    # Duration is measured only after the original reaches an executor, so an
+    # over-limit upload can legitimately arrive as a plain RuntimeError from
+    # the indexer.  Re-downloading and probing the identical bytes cannot make
+    # a 3.3-hour source fit a 3-hour product limit.
+    if text.startswith("video is ") and "the limit is " in text:
+        return FailureDecision("input_limit_exceeded", False, 0, False)
+
     # Provider account capacity does not change when the same user job is
     # replayed seconds later. Production used all three media attempts for
     # every Modal budget rejection, multiplying errors and queue delay without

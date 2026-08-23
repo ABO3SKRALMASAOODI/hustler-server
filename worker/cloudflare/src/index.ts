@@ -119,6 +119,23 @@ abstract class ValmeraContainer extends Container<Env> {
   protected abstract readonly workerRole:
     "executor" | "agent_executor" | "mcp_executor" | "shorts_executor";
 
+  override async onActivityExpired(): Promise<void> {
+    // Cloudflare's default hook sends SIGTERM.  The production Python
+    // executors remained Running for 6-12 hours after completed calls even
+    // though sleepAfter was 60s, continuing to bill provisioned memory and
+    // disk.  A forced destroy is safe only when no durable provider lease can
+    // still own work: an ambiguous disconnected /run keeps this row active
+    // until its bounded deadline, while ordinary completions release it
+    // before their response is returned.
+    const active = await this.ctx.storage.get<ActiveCall>("active");
+    if (active && active.expiresAt > Date.now()) {
+      this.renewActivityTimeout();
+      return;
+    }
+    console.log("Idle timeout expired with no active provider lease; destroying container");
+    await this.destroy();
+  }
+
   private environment(): Record<string, string> {
     const optional = (value: string | undefined): string => value ?? "";
     return {

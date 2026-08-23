@@ -58,7 +58,12 @@ def test_provider_choice_is_stamped_once_under_the_queue_lease(monkeypatch):
         def run(self, fn, *args):
             calls.append((fn, args))
             if fn is dbx.project_execution_shape:
-                return {"total_bytes": 10, "max_duration_s": 20}
+                # psycopg2 returns PostgreSQL numerics as Decimal.  The first
+                # provider request must receive the same strict-JSON shape as
+                # a retry reloaded from JSONB, otherwise only attempt one
+                # fails before Cloudflare sees it.
+                return {"total_bytes": Decimal("10"),
+                        "max_duration_s": Decimal("20.5")}
             if fn is dbx.stamp_execution_provider:
                 return args[2]
             raise AssertionError(fn)
@@ -69,8 +74,10 @@ def test_provider_choice_is_stamped_once_under_the_queue_lease(monkeypatch):
     assert provider == "cloudflare"
     assert job["payload"]["execution_provider"] == "cloudflare"
     assert calls[-1][1] == (
-        42, 4, "cloudflare", {"total_bytes": 10, "max_duration_s": 20})
+        42, 4, "cloudflare", {"total_bytes": 10,
+                               "max_duration_s": 20.5})
     assert job["payload"]["execution_shape"]["total_bytes"] == 10
+    assert json.loads(json.dumps(job["payload"])) == job["payload"]
 
 
 def test_provider_shape_database_numerics_are_strict_json_safe():
@@ -481,6 +488,10 @@ def test_cloudflare_config_preserves_modal_heavy_fallback():
         in adapter
     assert "pruneTerminalCalls" in adapter
     assert 'sleepAfter = "60s"' in adapter
+    assert "override async onActivityExpired" in adapter
+    assert 'storage.get<ActiveCall>("active")' in adapter
+    assert "Idle timeout expired with no active provider lease" in adapter
+    assert "await this.destroy()" in adapter
     assert "getByName(shardName" not in adapter  # computed once as `shard`
     assert "getByName(shard)" in adapter
     assert "Cloudflare Container shard is busy" in adapter

@@ -185,9 +185,15 @@ def stamp_execution_provider(worker_db, job):
             and str(job.get("type") or "") in \
             config.CLOUDFLARE_EXECUTOR_TYPES:
         try:
-            job["_execution_shape"] = worker_db.run(
+            shape = worker_db.run(
                 dbx.project_execution_shape, job.get("project_id"),
                 (job.get("payload") or {}).get("asset_id"))
+            # PostgreSQL NUMERIC values arrive as Decimal.  Normalize the
+            # in-memory copy before the first provider request, exactly as the
+            # JSONB persistence path does.  Otherwise attempt one fails in the
+            # HTTP JSON encoder while a retry mysteriously succeeds after
+            # reloading the already-normalized payload from PostgreSQL.
+            job["_execution_shape"] = dbx._json_safe(shape or {})
         except Exception as exc:
             # Fail closed to the proven Modal owner when capacity cannot be
             # established. Provider optimization never takes the product down.
@@ -1686,17 +1692,15 @@ def run_mcp_remote(worker_db, job):         # signature matches run_mcp_job
     that orchestrator onto the appropriate child function; none runs on the
     Render dispatcher.
     """
-    if not config.MODAL_EXECUTOR_ENABLED:
-        raise ModalLaunchUnavailable("Modal is required for MCP orchestration")
-    return _run_modal(job, function_override="mcp")
+    # The immutable execution_provider stamp owns this decision.  Calling
+    # Modal directly here made the queue log say Cloudflare while every MCP
+    # turn still ran on Modal and silently consumed fallback budget.
+    return _run_remote(job)
 
 
 def run_shorts_remote(worker_db, job):      # signature matches shorts runner
     """Run story planning independently from Studio and MCP capacity."""
-    if not config.MODAL_EXECUTOR_ENABLED:
-        raise ModalLaunchUnavailable(
-            "Modal is required for Shorts orchestration")
-    return _run_modal(job, function_override="shorts")
+    return _run_remote(job)
 
 
 def run_probe_remote(payload=None):

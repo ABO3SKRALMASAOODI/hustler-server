@@ -58,6 +58,14 @@ def test_lost_lease_never_resurrects_work():
     assert d.retryable is False
 
 
+def test_video_duration_limit_is_not_downloaded_and_probed_twice():
+    d = failure_policy.classify(
+        RuntimeError("Video is 3.3h — the limit is 3h"), "index")
+    assert d.kind == "input_limit_exceeded"
+    assert d.retryable is False
+    assert d.max_attempts == 0
+
+
 def test_attached_executor_decision_survives_exception_reclassification():
     original = failure_policy.FailureDecision(
         "invalid_edl", False, 0, True)

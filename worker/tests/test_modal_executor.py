@@ -100,20 +100,27 @@ def test_orchestration_job_families_have_isolated_functions():
     assert remote._modal_function_name("shorts_plan") == "shorts"
 
 
-def test_mcp_orchestration_never_falls_back_to_dispatcher(monkeypatch):
+@pytest.mark.parametrize("job_type", ["mcp_tool", "shorts_plan"])
+def test_orchestration_uses_provider_router_not_modal_directly(
+        monkeypatch, job_type):
     _enable(monkeypatch)
-    function = _Function(_Call({"result": {"text": "ok"},
-                                "job_completed": True}))
-    selected = []
+    routed = []
     monkeypatch.setattr(
-        remote, "_modal_function",
-        lambda name: selected.append(name) or function)
-    mcp_job = dict(JOB, type="mcp_tool", payload={"tool": "get_edl"})
+        remote, "_run_remote",
+        lambda job: routed.append(job["type"]) or {"text": "ok"})
+    monkeypatch.setattr(
+        remote, "_run_modal",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            AssertionError("orchestration must honor the stamped router")))
+    job = dict(JOB, type=job_type,
+               payload={"execution_provider": "cloudflare"})
 
-    result = remote.run_mcp_remote(None, mcp_job)
+    runner = (remote.run_mcp_remote if job_type == "mcp_tool"
+              else remote.run_shorts_remote)
+    result = runner(None, job)
 
     assert result["text"] == "ok"
-    assert selected == ["mcp"]
+    assert routed == [job_type]
 
 
 def test_eu_rollout_is_stable_and_limited_to_configured_media(monkeypatch):
