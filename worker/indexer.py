@@ -22,6 +22,7 @@ proxy encode/EDL/greeting — clips are perception-only.
 import os
 import re
 import shutil
+import threading
 import time
 from concurrent import futures
 
@@ -97,14 +98,16 @@ def _index_has_tiles(idx):
         return False
 
 
-def _transcribe_wav(job_id, wav_local, duration, warnings):
+def _transcribe_wav(job_id, wav_local, duration, warnings,
+                    progress_cb=None):
     """words, sentences, language — with one retry on a transient crash."""
     words, sentences, language = [], [], None
     if not wav_local:
         return words, sentences, language
     for attempt in range(2):
         try:
-            words, language = transcribe.transcribe(wav_local, warnings)
+            words, language = transcribe.transcribe(
+                wav_local, warnings, progress_cb=progress_cb)
             # ASR on music invents timings past the end of the file — clamp
             # before sentences inherit the bad spans.
             words = clamp_word_times(words, duration)
@@ -361,21 +364,47 @@ def run_index_job(worker_db, job):
         # the wall time is max(picture, sound), not the sum.
         #
         # THE DB STAYS ON THIS THREAD. Db is one-connection-per-thread by
-        # contract (db.py), so the lanes touch files and storage only; every
-        # set_progress / insert_asset below runs here. Progress during the
-        # lanes is a coarse main-thread ticker — the bar the user watches
-        # keeps moving, and no lane ever holds a psycopg cursor.
+        # contract (db.py), so the lanes touch files and storage only. Each
+        # lane publishes an in-memory 0..1 fraction; this job thread combines
+        # those fractions into monotone DB progress. The old two-second ticker
+        # reached 90% after 52 seconds regardless of source duration, leaving
+        # a legitimate multi-hour transcription looking frozen at 90% for
+        # tens of minutes.
         audio_key = None
-        state = {"proxy_info": proxy_info if from_client_proxy else None}
+        state = {
+            "proxy_info": proxy_info if from_client_proxy else None,
+            "lane_progress": {"picture": 0.0, "sound": 0.0},
+        }
+        progress_lock = threading.Lock()
+
+        def _lane_progress(lane, fraction):
+            try:
+                fraction = max(0.0, min(1.0, float(fraction)))
+            except (TypeError, ValueError):
+                return
+            with progress_lock:
+                state["lane_progress"][lane] = max(
+                    state["lane_progress"][lane], fraction)
+
+        def _combined_progress():
+            with progress_lock:
+                picture = state["lane_progress"]["picture"]
+                sound = state["lane_progress"]["sound"]
+            return min(
+                90, 12 + int(round(78 * (picture + sound) / 2.0)))
 
         def _picture_lane():
+            _lane_progress("picture", 0.02)
             if from_client_proxy:
                 proxy_local = src        # browser encoded it; adopted above
+                _lane_progress("picture", 0.60)
             else:
                 proxy_local = os.path.join(workdir, "proxy.mp4")
                 media.make_proxy(
                     src, proxy_local, info["fps"], info["vfr"],
                     info["has_audio"], duration=info["duration"],
+                    progress_cb=lambda frac: _lane_progress(
+                        "picture", 0.02 + 0.58 * frac),
                     cancelled_cb=lambda: _cancelled(worker_db))
                 # Probed here, not at upload time: tile extraction needs the
                 # proxy's REAL duration to keep frame seeks inside it.
@@ -395,6 +424,7 @@ def run_index_job(worker_db, job):
                     f"{info['duration']:.1f}s video has picture — the rest "
                     "has sound but no frames")
             state["proxy_done_at"] = time.monotonic()
+            _lane_progress("picture", 0.62)
             # Shots, tiles and the proxy upload all read the finished proxy
             # and nothing else — side by side.
             proxy_dur = p_info["duration"]
@@ -411,14 +441,17 @@ def run_index_job(worker_db, job):
                 f_up = sub.submit(storage.upload_file, proxy_local,
                                   proxy_key, "video/mp4")
                 state["shots"] = f_shots.result()
+                _lane_progress("picture", 0.72)
                 try:
                     state["motion"] = f_motion.result()
                 except Exception as e:
                     warnings.append(
                         f"motion profiling failed ({str(e)[:120]}) — "
                         "shot boundaries and filmstrip remain available")
+                _lane_progress("picture", 0.80)
                 (state["tile_keys"], state["tile_step"],
                  state["spatial"]) = f_tiles.result()
+                _lane_progress("picture", 0.90)
                 try:
                     state["spatial"] = spatial.augment_with_shot_frames(
                         proxy_local, info["duration"], workdir,
@@ -427,13 +460,16 @@ def run_index_job(worker_db, job):
                     warnings.append(
                         f"shot-boundary spatial supplement failed "
                         f"({str(e)[:120]}) — coarse face/text track kept")
+                _lane_progress("picture", 0.96)
                 try:
                     f_up.result()
                 except Exception:
                     print(f"[index {job_id}] proxy upload failed", flush=True)
                     raise
+            _lane_progress("picture", 1.0)
 
         def _sound_lane():
+            _lane_progress("sound", 0.02)
             wav_local = None
             if info["has_audio"]:
                 wav_local = os.path.join(workdir, "audio.wav")
@@ -442,6 +478,7 @@ def run_index_job(worker_db, job):
                     cancelled_cb=lambda: _cancelled(worker_db))
             state["wav_local"] = wav_local
             state["wav_done_at"] = time.monotonic()
+            _lane_progress("sound", 0.12)
             up = None
             if wav_local:
                 with futures.ThreadPoolExecutor(max_workers=1) as sub:
@@ -450,9 +487,13 @@ def run_index_job(worker_db, job):
                                     "audio/wav")
                     state["words"], state["sentences"], state["language"] = \
                         _transcribe_wav(job_id, wav_local, info["duration"],
-                                        warnings)
+                                        warnings,
+                                        progress_cb=lambda frac:
+                                        _lane_progress(
+                                            "sound", 0.12 + 0.70 * frac))
                     state["silences"] = _detect_silences(
                         job_id, wav_local, info["duration"], warnings)
+                    _lane_progress("sound", 0.88)
                     # Perception sidecar (round 35): beat grid / energy /
                     # speech stress from the wav that already exists.
                     # Non-fatal by the same contract as tiles: perception
@@ -466,6 +507,7 @@ def run_index_job(worker_db, job):
                             f"audio perception failed ({str(e)[:120]}) — "
                             "beat-synced and emphasis-driven edits will "
                             "analyze on first use")
+                    _lane_progress("sound", 0.96)
                     try:
                         up.result()
                     except Exception:
@@ -477,22 +519,26 @@ def run_index_job(worker_db, job):
                     _transcribe_wav(job_id, None, info["duration"], warnings)
                 state["silences"] = _detect_silences(
                     job_id, None, info["duration"], warnings)
+            _lane_progress("sound", 1.0)
 
         with futures.ThreadPoolExecutor(max_workers=2) as lanes:
             f_pic = lanes.submit(_picture_lane)
             f_snd = lanes.submit(_sound_lane)
-            # Coarse liveness ticker while the lanes work: 12 -> 90, a step
-            # every 2s, from THIS thread. set_progress also refreshes the
-            # job heartbeat, which is what keeps a long index claimable-safe.
+            # Persist the measured lane fractions from THIS thread. Progress
+            # writes remain both monotone and connection-safe.
             pct = 12
             while True:
                 done, _pending = futures.wait((f_pic, f_snd), timeout=2.0)
                 if len(done) == 2:
                     break
-                pct = min(90, pct + 3)
-                _set_progress(worker_db, job_id, pct)
+                measured = _combined_progress()
+                if measured > pct:
+                    pct = measured
+                    _set_progress(worker_db, job_id, pct)
             f_pic.result()                 # re-raise lane failures in order
             f_snd.result()
+            if pct < 90:
+                _set_progress(worker_db, job_id, 90)
 
         proxy_info = state["proxy_info"]
         proxy_local = state["proxy_local"]

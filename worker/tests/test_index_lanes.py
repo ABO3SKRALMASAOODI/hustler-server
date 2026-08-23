@@ -91,10 +91,13 @@ FAKE_WORDS = [types.SimpleNamespace(w="hello", t0=0.2, t1=0.6, speaker=0,
                                     model_dump=lambda: {})]
 
 
-def fake_transcribe(wav, warnings):
+def fake_transcribe(wav, warnings, progress_cb=None):
     # The REAL wav must exist and be a wav — proves the sound lane ran.
     assert os.path.exists(wav) and wav.endswith(".wav")
     from schemas import Word
+    if progress_cb:
+        progress_cb(0.5)
+        progress_cb(1.0)
     return ([Word(w="hello", t0=0.2, t1=0.6, speaker=0)], "en")
 
 

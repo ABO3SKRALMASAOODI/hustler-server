@@ -273,13 +273,36 @@ def _release_model():
     gc.collect()
 
 
-def transcribe(wav_path, warnings=None):
+def _report_progress(progress_cb, fraction):
+    """Report bounded ASR progress without making telemetry fatal."""
+    if not progress_cb:
+        return
+    try:
+        progress_cb(max(0.0, min(1.0, float(fraction))))
+    except Exception:
+        # A UI/heartbeat callback must never turn a valid transcript into a
+        # failed index. The executor's independent lease heartbeat remains the
+        # authority if progress reporting itself is unavailable.
+        pass
+
+
+def transcribe(wav_path, warnings=None, progress_cb=None):
     """Returns (words: [Word], language: str)."""
+    _report_progress(progress_cb, 0.0)
+
+    def transcribe_local():
+        # Preserve the historical one-argument call when progress is unused;
+        # downstream integrations and tests may wrap this seam.
+        if progress_cb is None:
+            return _transcribe_whisper(wav_path)
+        return _transcribe_whisper(wav_path, progress_cb=progress_cb)
+
     if config.TRANSCRIBER == "deepgram":
         try:
             words, lang = _transcribe_deepgram(wav_path)
             dur = _wav_duration_s(wav_path)
             if not _too_sparse(words, dur):
+                _report_progress(progress_cb, 1.0)
                 return words, lang
             # A 2xx with (near-)zero words on minutes of audio is not a
             # transcript, it is nova-3 meeting a language it does not
@@ -290,10 +313,11 @@ def transcribe(wav_path, warnings=None):
                   "unsupported language; re-running on local whisper",
                   flush=True)
             try:
-                w_words, w_lang = _transcribe_whisper(wav_path)
+                w_words, w_lang = transcribe_local()
             except Exception as e:
                 print(f"[transcribe] whisper retry failed ({str(e)[:160]}); "
                       "keeping the deepgram result", flush=True)
+                _report_progress(progress_cb, 1.0)
                 return words, lang
             finally:
                 _release_model()
@@ -326,13 +350,13 @@ def transcribe(wav_path, warnings=None):
         # holding the model resident afterwards buys nothing and can cost the
         # whole worker. See _release_model.
         try:
-            return _transcribe_whisper(wav_path)
+            return transcribe_local()
         finally:
             _release_model()
-    return _transcribe_whisper(wav_path)
+    return transcribe_local()
 
 
-def _transcribe_whisper(wav_path):
+def _transcribe_whisper(wav_path, progress_cb=None):
     """Returns (words: [Word], language: str)."""
     global _supports_hotwords
     model = get_model()
@@ -371,6 +395,8 @@ def _transcribe_whisper(wav_path):
     if hot and _supports_hotwords:
         kwargs["hotwords"] = hot
     segments, info = model.transcribe(wav_path, **kwargs)
+    duration = (_wav_duration_s(wav_path)
+                or float(getattr(info, "duration", 0.0) or 0.0))
     words = []
     for seg in segments:
         for w in (seg.words or []):
@@ -384,6 +410,11 @@ def _transcribe_whisper(wav_path):
                               t0=round(float(w.start), 3),
                               t1=round(float(w.end), 3),
                               filler=is_filler_token(token)))
+        if duration > 0:
+            _report_progress(
+                progress_cb, float(getattr(seg, "end", 0.0) or 0.0)
+                / duration)
+    _report_progress(progress_cb, 1.0)
     return words, getattr(info, "language", "en")
 
 
