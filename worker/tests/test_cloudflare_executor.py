@@ -220,8 +220,11 @@ def test_orchestration_is_cloudflare_eligible_without_media_shape(
 
 def test_synchronous_frames_use_unique_named_cloudflare_calls(monkeypatch):
     _enable(monkeypatch)
+    # Production may have an explicit queue-backed allowlist from an older
+    # deploy. The additive synchronous subset must not remain Modal-primary
+    # merely because that unrelated env value has not yet learned `frames`.
     monkeypatch.setattr(
-        config, "CLOUDFLARE_EXECUTOR_TYPES", frozenset({"frames"}))
+        config, "CLOUDFLARE_EXECUTOR_TYPES", frozenset({"preview_check"}))
     monkeypatch.setattr(
         config, "CLOUDFLARE_SYNCHRONOUS_TYPES", frozenset({"frames"}))
     job = {"id": None, "type": "frames", "project_id": 7,

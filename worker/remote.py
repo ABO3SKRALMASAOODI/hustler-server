@@ -132,7 +132,12 @@ def _cloudflare_selected(job):
             or not config.CLOUDFLARE_EXECUTOR_URL:
         return False
     job_type = str(job.get("type") or "")
-    if job_type not in config.CLOUDFLARE_EXECUTOR_TYPES:
+    # Synchronous child types are an additive safe subset.  Do not make a
+    # newly shipped child route depend on Render's older explicit queue-type
+    # allowlist being edited in the same rollout: that stale env value is how
+    # frames silently remained Modal-primary after the code was deployed.
+    if job_type not in config.CLOUDFLARE_EXECUTOR_TYPES and \
+            job_type not in config.CLOUDFLARE_SYNCHRONOUS_TYPES:
         return False
     synchronous = job.get("id") is None
     if synchronous and job_type not in config.CLOUDFLARE_SYNCHRONOUS_TYPES:
