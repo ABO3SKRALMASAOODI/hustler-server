@@ -344,6 +344,16 @@ def test_tools_list_is_session_tools_plus_the_worker_registry(client):
     assert "clips" in make_shorts["inputSchema"]["required"]
 
 
+def test_server_card_pricing_matches_the_public_shopfront(client):
+    card = client.get("/.well-known/mcp/server-card.json").get_json()
+
+    assert card["pricing"] == {
+        "free": "Account creation and upload are free; editing requires a subscription",
+        "paidFrom": "USD 15/month",
+        "url": "https://valmera.io/subscribe",
+    }
+
+
 def test_stale_child_agent_boot_call_is_refused_before_queueing(client):
     r = rpc(client, "tools/call", STATIC_TOKEN, {
         "name": "edit_shorts",

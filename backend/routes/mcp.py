@@ -2103,8 +2103,8 @@ def server_card():
             "AI music generation",
         ],
         "pricing": {
-            "free": "50 one-time credits, no credit card",
-            "paidFrom": "USD 30/month",
+            "free": "Account creation and upload are free; editing requires a subscription",
+            "paidFrom": "USD 15/month",
             "url": "https://valmera.io/subscribe",
         },
     })
