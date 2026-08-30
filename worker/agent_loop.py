@@ -4462,7 +4462,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 active_api_key = lane.get("api_key") or config.OPENAI_API_KEY
                 kw, extra = _chat_request(model)
                 ctx.llm_client, ctx.agent_model = client, model
-                _metric(ctx, "provider_quota_fallbacks", 1)
+                agent_tools._metric(ctx, "provider_quota_fallbacks", 1)
                 print(f"[agent {job['id']}] provider wallet for {previous} "
                       f"is unavailable — continuing the same logical turn "
                       f"on {lane.get('name') or 'fallback'}", flush=True)
@@ -4612,9 +4612,9 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 worker_db.run(
                     dbx.reconcile_llm_tokens, reservation_id, actual_tpm,
                     config.AGENT_TPM_WINDOW_S)
-                _metric = ctx.editing_metrics
-                _metric["tpm_reserved_tokens_avoided"] = (
-                    _metric.get("tpm_reserved_tokens_avoided", 0)
+                metrics = ctx.editing_metrics
+                metrics["tpm_reserved_tokens_avoided"] = (
+                    metrics.get("tpm_reserved_tokens_avoided", 0)
                     + max(0, estimate - actual_tpm))
             except Exception as exc:
                 print(f"[agent {job['id']}] TPM reconciliation unavailable "

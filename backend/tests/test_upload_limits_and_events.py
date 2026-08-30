@@ -101,9 +101,16 @@ def test_limits_are_reported_for_the_client_to_read():
     assert ".mp4" in lim["video_ext"]
 
 
-def test_attachment_caps_stay_below_the_main_video_cap():
+def test_video_clips_use_the_same_capacity_cap_as_main_footage():
     lim = storage.upload_limits()
-    assert lim["image_max_bytes"] < lim["clip_max_bytes"] < lim["max_bytes"]
+    assert lim["image_max_bytes"] < lim["clip_max_bytes"]
+    assert lim["music_max_bytes"] < lim["clip_max_bytes"]
+    assert lim["clip_max_bytes"] == lim["max_bytes"]
+
+    # Production incident 2026-08-29: the exact file was refused as a clip,
+    # then accepted when the UI retried it as main footage. File role must not
+    # change whether the bytes are valid video input.
+    storage.validate_upload("31675.mp4", 687_768_034, "clip")
 
 
 def test_high_resolution_reference_images_fit():

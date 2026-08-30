@@ -99,14 +99,13 @@ ALLOWED_IMAGE_EXT = {
     ".webp": "image/webp",
 }
 
-# Supporting assets stay bounded, but high-resolution campaign/product JPEGs
-# routinely land in the 20-40 MiB range before they are turned into video.
-# The old 10 MiB image cap rejected six legitimate fashion references in one
-# session before a byte moved. 50 MiB matches the audio attachment ceiling,
-# remains tiny beside the 500 MiB clip cap, and is still a firm abuse guard.
+# Audio and still-image attachments stay bounded, but high-resolution
+# campaign/product JPEGs routinely land in the 20-40 MiB range before they are
+# turned into video. The old 10 MiB image cap rejected six legitimate fashion
+# references in one session before a byte moved. 50 MiB matches the audio
+# attachment ceiling and remains a firm abuse guard.
 MUSIC_MAX_BYTES = 50 * 1024 * 1024
 IMAGE_MAX_BYTES = 50 * 1024 * 1024
-CLIP_MAX_BYTES = 500 * 1024 * 1024   # clips spliced into the edit
 
 # A browser-built 540p proxy. Our own proxies average 0.70 Mbps across 202
 # production files, so the 3-hour maximum lands near 950 MB even at the
@@ -201,6 +200,15 @@ MAX_DURATION_S = float(os.getenv("MAX_DURATION_S", str(3 * 3600)))
 
 def max_upload_bytes():
     return int(MAX_UPLOAD_GB * 1024 ** 3)
+
+
+# An extra video is still video footage. The old 500 MiB attachment ceiling
+# rejected a real 687,768,034-byte Shorts reference before a byte moved, even
+# though the same file was accepted moments later when staged as main footage.
+# That distinction protected nothing: both paths upload directly to object
+# storage, both are checked against executor disk capacity before download,
+# and both ultimately use the same renderer. Keep one truthful video ceiling.
+CLIP_MAX_BYTES = max_upload_bytes()
 
 
 def _size_label(nbytes):
