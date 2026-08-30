@@ -21,6 +21,7 @@ from routes.admin_video import admin_video_bp
 from routes.onboarding import onboarding_bp
 from routes.mcp import mcp_bp
 from routes.mcp_oauth import mcp_oauth_bp
+from routes.phone_status import phone_status_bp
 
 load_dotenv()
 
@@ -95,6 +96,8 @@ def create_app():
     # No url_prefix: RFC 9728/8414 discovery documents MUST sit at the domain
     # root, or the client never finds them.
     app.register_blueprint(mcp_oauth_bp)
+    # Founder-only read-only metrics for the signed Valmera iPhone widgets.
+    app.register_blueprint(phone_status_bp)
 
     # ── Automated newsletter / lifecycle emails ───────────────────────
     # Started once per gunicorn worker; the advisory lock inside the tick
