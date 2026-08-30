@@ -50,6 +50,21 @@ def test_canary_selection_is_stable_and_capacity_gated(monkeypatch):
                                "max_duration_s": 7200})) is False
 
 
+def test_raw_index_uses_long_lived_modal_lane(monkeypatch):
+    _enable(monkeypatch)
+    raw = dict(JOB, type="index",
+               payload={"asset_id": 9, "execution_policy": "redesign"},
+               _execution_shape={"total_bytes": 1_631_253_121,
+                                 "max_duration_s": 0})
+    assert remote._cloudflare_selected(raw) is False
+
+    prepared = dict(raw, payload={
+        **raw["payload"],
+        "client_proxy_key": "clientproxies/7/prepared.mp4",
+    })
+    assert remote._cloudflare_selected(prepared) is True
+
+
 def test_provider_choice_is_stamped_once_under_the_queue_lease(monkeypatch):
     _enable(monkeypatch)
     calls = []
@@ -652,6 +667,36 @@ def test_ambiguous_missing_status_never_authorizes_modal_fallback(monkeypatch):
     assert "could not be recovered" in str(caught.value)
 
 
+def test_recovery_preserves_unknown_call_error_at_deadline(monkeypatch):
+    _enable(monkeypatch)
+    job = dict(JOB, payload={**JOB["payload"],
+                             "execution_provider": "cloudflare"})
+    monkeypatch.setattr(remote, "_cloudflare_status", lambda *_a, **_k: {
+        "status": "unknown",
+        "error": "container connection closed before a response",
+    })
+
+    class Probe:
+        def run(self, fn, *_args, **_kwargs):
+            assert fn is dbx.get_job
+            return {"state": "running"}
+
+        def reset(self):
+            pass
+
+    monkeypatch.setattr(remote.dbx, "Db", Probe)
+    monkeypatch.setattr(remote.time, "sleep", lambda _seconds: None)
+    ticks = iter([0.0, 0.1, 1.1])
+    monkeypatch.setattr(remote.time, "monotonic", lambda: next(ticks, 1.1))
+
+    with pytest.raises(remote.RemoteExecutorError) as caught:
+        remote._recover_cloudflare_result(
+            remote._cloudflare_call_id(job), "interactive", job, 1.0)
+
+    assert "container connection closed before a response" in str(caught.value)
+    assert not str(caught.value).endswith(": None")
+
+
 def test_cloudflare_config_preserves_modal_heavy_fallback():
     root = Path(__file__).resolve().parents[1]
     wrangler = (root / "cloudflare" / "wrangler.jsonc").read_text()
@@ -686,6 +731,10 @@ def test_cloudflare_config_preserves_modal_heavy_fallback():
     assert "await this.destroy()" in adapter
     assert "const STARTING_STALE_MS = 180 * 1000" in adapter
     assert "expireStaleStart" in adapter
+    assert "expireExecutorLease" in adapter
+    assert 'status: "stopping"' in adapter
+    assert "exceeded its executor lease" in adapter
+    assert 'kind: "transient_infrastructure"' in adapter
     assert "markRunning" in adapter
     assert "startup was abandoned before /run" in adapter
     assert "getByName(shardName" not in adapter  # computed once as `shard`

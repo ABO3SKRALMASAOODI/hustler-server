@@ -94,9 +94,13 @@ ALLOWED_IMAGE_EXT = {
     ".webp": "image/webp",
 }
 
-# Chat attachments are small; only the main video gets the multi-GB budget.
+# Supporting assets stay bounded, but high-resolution campaign/product JPEGs
+# routinely land in the 20-40 MiB range before they are turned into video.
+# The old 10 MiB image cap rejected six legitimate fashion references in one
+# session before a byte moved. 50 MiB matches the audio attachment ceiling,
+# remains tiny beside the 500 MiB clip cap, and is still a firm abuse guard.
 MUSIC_MAX_BYTES = 50 * 1024 * 1024
-IMAGE_MAX_BYTES = 10 * 1024 * 1024
+IMAGE_MAX_BYTES = 50 * 1024 * 1024
 CLIP_MAX_BYTES = 500 * 1024 * 1024   # clips spliced into the edit
 
 # A browser-built 540p proxy. Our own proxies average 0.70 Mbps across 202

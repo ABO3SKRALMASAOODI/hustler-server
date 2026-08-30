@@ -169,6 +169,17 @@ def _cloudflare_selected(job):
     shape = job.get("_execution_shape") or {}
     if not shape:
         return False
+    # A raw index has to decode the original and build the 540p working proxy.
+    # That is the one media path whose duration is normally unknown until the
+    # executor probes it, and treating unknown as zero routed a 39.7-minute,
+    # 60-fps source onto Cloudflare's bounded request lane. It was still
+    # productively encoding after the 57-minute dispatcher lease expired, so
+    # two claims were spent and the user got no index. Browser-proxy indexes
+    # stay on Cloudflare: they only remux already-small prepared bytes. Raw
+    # originals use Modal's long-lived batch function instead.
+    if job_type == "index" and not str(
+            (job.get("payload") or {}).get("client_proxy_key") or "").strip():
+        return False
     try:
         return (int(shape.get("total_bytes") or 0)
                 <= config.CLOUDFLARE_MAX_INPUT_BYTES
@@ -1111,7 +1122,12 @@ def _recover_cloudflare_result(call_id, lane, job, deadline):
         try:
             status = _cloudflare_status(call_id, lane, timeout=10)
             state = status.get("status")
-            if state in {"submitted", "starting", "running", "unknown"}:
+            if state in {"submitted", "starting", "running", "unknown",
+                         "stopping"}:
+                if status.get("error"):
+                    last = RemoteExecutorError(
+                        f"Cloudflare call {call_id} remained {state}: "
+                        f"{status.get('error')}")
                 if job.get("id") is not None:
                     probe = dbx.Db()
                     try:
@@ -1151,6 +1167,29 @@ def _recover_cloudflare_result(call_id, lane, job, deadline):
         except Exception as exc:
             last = exc
         time.sleep(2)
+    # The Durable Object's lease uses the same timeout, but starts a few
+    # milliseconds before this local monotonic deadline. One final read lets
+    # it turn an expired running/unknown call into a stopped terminal envelope
+    # instead of leaving the user with the content-free suffix ``: None``.
+    try:
+        status = _cloudflare_status(call_id, lane, timeout=10)
+        state = status.get("status")
+        if state in {"done", "failed"}:
+            envelope = status.get("envelope")
+            if isinstance(envelope, dict):
+                return envelope
+            last = RemoteExecutorError(
+                f"Cloudflare call {call_id} ended without an envelope")
+        elif status.get("error"):
+            last = RemoteExecutorError(
+                f"Cloudflare call {call_id} remained {state}: "
+                f"{status.get('error')}")
+        elif state:
+            last = RemoteExecutorError(
+                f"Cloudflare call {call_id} remained {state} through its "
+                "executor deadline")
+    except Exception as exc:
+        last = exc
     raise RemoteExecutorError(
         f"Cloudflare call {call_id} could not be recovered: {last}") from last
 

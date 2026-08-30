@@ -106,6 +106,13 @@ def test_attachment_caps_stay_below_the_main_video_cap():
     assert lim["image_max_bytes"] < lim["clip_max_bytes"] < lim["max_bytes"]
 
 
+def test_high_resolution_reference_images_fit():
+    """Real campaign JPEGs are commonly 20-40 MiB before video placement."""
+    assert storage.IMAGE_MAX_BYTES >= 40 * 1024 * 1024
+    storage.validate_upload("campaign-reference.jpg", 40 * 1024 * 1024,
+                            "image")
+
+
 def test_validate_upload_labels_the_cap_it_enforced():
     """The refusal has to name the number it applied, or the user is guessing."""
     try:
