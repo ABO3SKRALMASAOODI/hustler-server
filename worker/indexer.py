@@ -325,7 +325,9 @@ def run_index_job(worker_db, job):
                           cached["json"], job["user_id"],
                           reindex=bool(job["payload"].get("reindex")),
                           asset_id=asset["id"],
-                          execution_policy=config.execution_policy_for(job))
+                          execution_policy=config.execution_policy_for(job),
+                          selection_pool=(job["payload"].get(
+                              "selection_pool") or 0))
             try:
                 worker_db.run(
                     dbx.record_client_event, job["user_id"], project_id,
@@ -612,7 +614,9 @@ def run_index_job(worker_db, job):
                       job["user_id"],
                       reindex=bool(job["payload"].get("reindex")),
                       asset_id=asset["id"],
-                      execution_policy=config.execution_policy_for(job))
+                      execution_policy=config.execution_policy_for(job),
+                      selection_pool=(job["payload"].get(
+                          "selection_pool") or 0))
         try:
             worker_db.run(
                 dbx.record_client_event, job["user_id"], project_id,
@@ -952,8 +956,10 @@ def _sweep_tray_placements(worker_db, project_id, defer_preview=False):
     if not row:
         return 0
     edl = row["json"]
-    if not edl_accepts_tray_autoplace(row.get("version"), edl):
-        # Mid-session leftovers: drop the place flag, keep the files.
+    if not edl_accepts_tray_autoplace(
+            row.get("version"), edl, len(pending)):
+        # Mid-session leftovers and large selection libraries: drop the place
+        # flag, keep the files indexed and available to the editor.
         for a in pending:
             try:
                 worker_db.run(dbx.update_asset_meta, a["id"],
@@ -1086,7 +1092,7 @@ def _subscribe_gate_meta(kind="index_ready"):
 
 def _finish_setup(worker_db, project_id, session_id, info, index,
                   user_id=None, reindex=False, asset_id=None,
-                  execution_policy=None):
+                  execution_policy=None, selection_pool=0):
     """Seed EDL v1 (keep everything) if none exists, splice any staged tray
     items around it, greet in chat, and auto-start the agent on any request
     the user sent while indexing was still running.
@@ -1245,6 +1251,10 @@ def _finish_setup(worker_db, project_id, session_id, info, index,
     if tray_added:
         stats += (f", plus {tray_added} more upload"
                   f"{'s' if tray_added != 1 else ''} placed on the timeline")
+    elif selection_pool:
+        stats += (f", plus {selection_pool} more upload"
+                  f"{'s' if selection_pool != 1 else ''} indexed for shot "
+                  "selection (not blindly added to the timeline)")
     if awaiting_shorts_brief:
         summary = f"Your video is ready to turn into shorts — {stats}. "
         if pending:

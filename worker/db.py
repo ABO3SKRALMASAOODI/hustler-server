@@ -19,6 +19,7 @@ from psycopg2.extras import RealDictCursor, Json
 import config
 import error_text
 import model_prices
+import schemas
 
 # ------------------------------------------------------------------ #
 #  Connections                                                         #
@@ -1757,6 +1758,13 @@ def rescue_abandoned_trays(conn):
                            if a["kind"] == "video_clip"), None)
             if main_i is None:
                 continue
+            visual_candidates = sum(
+                1 for i, a in enumerate(tray)
+                if i != main_i
+                and a["kind"] in ("video_clip", "image_ref"))
+            selection_pool = (visual_candidates
+                              if visual_candidates
+                              > schemas.MAX_TRAY_AUTOPLACE_VISUALS else 0)
             main_job = None
             for i, a in enumerate(tray):
                 if i == main_i:
@@ -1773,7 +1781,8 @@ def rescue_abandoned_trays(conn):
                         """INSERT INTO video_jobs (project_id, user_id, type,
                                                    payload)
                            VALUES (%s, %s, 'index', %s) RETURNING id""",
-                        (pid, uid, Json({"asset_id": a["id"]})))
+                        (pid, uid, Json({"asset_id": a["id"],
+                                       "selection_pool": selection_pool})))
                     main_job = cur.fetchone()["id"]
                     continue
                 patch = {"staged": None}

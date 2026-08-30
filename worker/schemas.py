@@ -1789,13 +1789,29 @@ def canvas_edl(ratio="16:9", fps=DEFAULT_CANVAS_FPS, bg_color="#000000"):
                                       bg_color=bg_color)).model_dump()
 
 
-def edl_accepts_tray_autoplace(version, edl=None):
+MAX_TRAY_AUTOPLACE_VISUALS = 12
+
+
+def edl_accepts_tray_autoplace(version, edl=None, visual_count=None):
     """True for the initial dump only.
 
     No EDL yet (index still running) and version-1 seed EDLs auto-splice
     tray files. Mid-session uploads after that stay in the tray so a refine
     pass cannot dump new source onto the end of an already-authored cut.
+
+    A large footage library is not an authored sequence either.  Blindly
+    turning 93 uploaded clips into 93 ffmpeg inputs produced a 20-minute setup
+    EDL and two failed renders before the editor could choose the requested
+    shots.  Twelve is the studio's existing per-batch boundary: deliberately
+    ordered batches at or below it keep the convenient splice behavior, while
+    larger collections remain indexed library media for the agent to select.
     """
+    if visual_count is not None:
+        try:
+            if int(visual_count) > MAX_TRAY_AUTOPLACE_VISUALS:
+                return False
+        except (TypeError, ValueError):
+            return False
     if version is None:
         return True
     try:

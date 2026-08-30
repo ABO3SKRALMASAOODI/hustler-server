@@ -221,15 +221,28 @@ def transaction_amount(data):
 def payment_error_code(data):
     """Why the card was refused, from the transaction's payment attempts.
 
-    Paddle appends an attempt per retry, so the LAST one is the current
-    reason — reading the first would pin the message to a decline that may
-    since have been superseded.
+    Paddle's API does not promise the attempts in chronological order (the
+    transaction detail response currently returns newest first, while some
+    webhook fixtures arrive oldest first).  The newest timestamped attempt is
+    the current truth.  In particular, a captured retry must clear an older
+    decline instead of leaving a completed payment labelled as refused.
     """
-    reason = None
-    for p in (data.get('payments') or []):
-        if (p.get('status') or '').lower() in ('error', 'failed', 'declined'):
-            reason = p.get('error_code') or reason
-    return reason
+    attempts = list(data.get('payments') or [])
+    if not attempts:
+        return None
+
+    dated = []
+    for index, attempt in enumerate(attempts):
+        stamp = (_naive_utc(attempt.get('created_at'))
+                 or _naive_utc(attempt.get('captured_at')))
+        if stamp is not None:
+            dated.append((stamp, index, attempt))
+    latest = max(dated, key=lambda item: (item[0], item[1]))[2] \
+        if dated else attempts[-1]
+    if (latest.get('status') or '').lower() in (
+            'error', 'failed', 'declined'):
+        return latest.get('error_code')
+    return None
 
 
 # ── The money ledger ─────────────────────────────────────────────────────────
@@ -266,6 +279,13 @@ def record_transaction(conn, user_id, data, status=None):
                 amount_cents = EXCLUDED.amount_cents,
                 currency     = EXCLUDED.currency,
                 error_code   = EXCLUDED.error_code,
+                -- The first failed checkout event can lack a subscription id;
+                -- Paddle fills it once the retry completes.  Keep that later
+                -- identity or renewal failures look like this customer never
+                -- paid when subscription_has_paid checks by subscription.
+                subscription_id = COALESCE(EXCLUDED.subscription_id,
+                                           payments.subscription_id),
+                origin       = COALESCE(EXCLUDED.origin, payments.origin),
                 occurred_at  = COALESCE(EXCLUDED.occurred_at,
                                         payments.occurred_at),
                 -- user_id is only ever FILLED IN, never blanked: an adjustment

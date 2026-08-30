@@ -79,6 +79,26 @@ def _shift_turn_clocks_for_provider_wait(t_start, turn_started,
             float(turn_deadline) + waited)
 
 
+_NON_PRODUCTIVE_CONTINUATION_REASONS = {
+    "platform drain",
+    "awaiting complete preview",
+}
+
+
+def _continuation_work_slices(state, reason):
+    """Count physical slices that performed or retried editorial work.
+
+    Platform handoffs and render reconnection waits are operational pauses;
+    counting them would make deployments or a slow render consume the user's
+    editing allowance. Every other continuation is evidence that another
+    physical slice was required to finish the same logical request.
+    """
+    previous = max(0, int((state or {}).get("work_slices") or 0))
+    if reason in _NON_PRODUCTIVE_CONTINUATION_REASONS:
+        return previous
+    return previous + 1
+
+
 def _silence_line(index):
     sil = [s for s in index.get("silences", []) if s[1] - s[0] >= 0.7]
     return (f"SILENCES >=0.7s: {len(sil)}, "
@@ -4035,6 +4055,22 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         payload = dict(job.get("payload") or {})
         root_id = int(payload.get("root_agent_job_id") or job["id"])
         sequence = int(payload.get("continuation_sequence") or 0) + 1
+        work_slices = _continuation_work_slices(_cont, reason)
+        if work_slices >= config.AGENT_MAX_PRODUCTIVE_SLICES:
+            print(f"[job {job['id']}] logical root {root_id} reached "
+                  f"{work_slices} productive execution slices — saving the "
+                  "latest preview and stopping the continuation chain",
+                  flush=True)
+            return _finalize(
+                ctx, worker_db, session_id,
+                "I reached the editing run limit before every remaining "
+                "detail could be completed. The successful changes and "
+                "latest saved preview are available; I stopped this run "
+                "instead of continuing to generate versions indefinitely.",
+                "blocked", total_steps, timings, honesty,
+                extra_meta={"error": "productive_slice_limit",
+                            "productive_slices": work_slices},
+                turn_deadline=turn_deadline, job=job)
         generation_cost = float(ctx.gen_extra_cost_usd or 0.0)
         generation_cost += (len(ctx.images_generated)
                             * config.IMAGE_PRICE_USD)
@@ -4080,6 +4116,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             # it, every continuation compared itself only with its own start
             # and 543 churned EDL rows could each buy another execution slice.
             "semantic0": _serializable_progress_marker(progress_frontier),
+            "work_slices": work_slices,
         }
         next_payload = {
             key: value for key, value in payload.items()

@@ -22,6 +22,7 @@ import shutil
 import subprocess
 import sys
 import time
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -381,6 +382,20 @@ def test_reaper_closes_terminal_provider_ledgers_without_rerunning_work(
     assert "UPDATE remote_executions" in sql
     assert "WHEN terminal.state = 'failed'" in sql
     assert params == (25,)
+
+
+def test_terminal_result_serializes_decimal_measurements():
+    """A completed proof render is not a failed job just because a media
+    measurement came back from Postgres or an analyzer as Decimal."""
+    result = {"cost": Decimal("0.0125"),
+              "nested": [Decimal("3.5"), Decimal("NaN")]}
+    done = _Conn(rowcount=1)
+
+    assert wdb.finish_job(done, 42, "done", result=result,
+                          total_claims=7) is True
+    adapted = done.sql[0][1][2].adapted
+    assert adapted == {"cost": 0.0125, "nested": [3.5, None]}
+    json.dumps(adapted, allow_nan=False)
 
 
 @pytest.mark.skipif(not HAVE_FFMPEG, reason="needs ffmpeg")

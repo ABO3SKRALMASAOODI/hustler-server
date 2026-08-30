@@ -1394,6 +1394,12 @@ AGENT_TURN_TIMEOUT_S = min(
 AGENT_TURN_TOTAL_TIMEOUT_S = min(
     3000.0,
     max(600.0, float(os.getenv("AGENT_TURN_TOTAL_TIMEOUT_S", "3000"))))
+# Durable continuations reset the physical execution clock, so the timeout
+# above cannot by itself stop one logical user turn from creating jobs for
+# many hours.  Permit several productive slices for genuinely large edits,
+# then hand the user the latest saved preview instead of iterating forever.
+AGENT_MAX_PRODUCTIVE_SLICES = min(
+    24, max(2, int(os.getenv("AGENT_MAX_PRODUCTIVE_SLICES", "8"))))
 # Fresh turns yield while the fleet's last-60s token burn is above this —
 # leave room for the next ~50K first call under the org's 200K TPM tier.
 AGENT_TPM_SOFT_CAP = int(os.getenv("AGENT_TPM_SOFT_CAP", "140000"))

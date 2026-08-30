@@ -1046,6 +1046,212 @@ def _timing_out(r):
     }
 
 
+SUBSCRIBER_STATE_SQL = """
+    CASE
+      WHEN u.billing_status IN ('past_due', 'paused') THEN 'past_due'
+      WHEN u.billing_status = 'not_in_paddle'
+           OR (u.billing_status = 'canceled'
+               AND COALESCE(u.is_subscribed, 0) = 1)
+           OR (u.billing_status IN ('active', 'trialing')
+               AND COALESCE(u.is_subscribed, 0) = 0)
+           OR (COALESCE(u.is_subscribed, 0) = 1
+               AND u.subscription_id IS NULL) THEN 'attention'
+      WHEN COALESCE(u.is_subscribed, 0) = 1
+           AND u.billing_status IN ('active', 'trialing') THEN 'active'
+      WHEN u.billing_status = 'canceled'
+           OR COALESCE(u.is_subscribed, 0) = 0 THEN 'canceled'
+      ELSE 'attention'
+    END
+"""
+
+
+@admin_video_bp.route("/admin/video/subscribers", methods=["GET"])
+@admin_required
+def video_subscribers():
+    """Every customer who has ever paid, including churned customers.
+
+    The paid-project view intentionally contains only current entitlements,
+    which made a canceled customer disappear from the admin.  This is the
+    durable subscriber ledger: positive completed payments define membership;
+    current entitlement and Paddle's billing status define the visible state.
+    Keeping both ``entitled_now`` and ``active`` in the summary is deliberate:
+    legacy ``not_in_paddle`` rows still have access but are not healthy live
+    subscriptions and must not be folded into the same reassuring number.
+    """
+    search = (request.args.get("search") or "").strip()
+    state = (request.args.get("status") or "all").strip().lower()
+    if state not in ("all", "active", "canceled", "past_due", "attention"):
+        state = "all"
+    page = max(1, request.args.get("page", type=int) or 1)
+    per_page = max(10, min(100, request.args.get("per_page", type=int) or 50))
+    offset = (page - 1) * per_page
+    like = f"%{search}%"
+    state_where = "" if state == "all" else "AND s.subscriber_state = %s"
+    params = [like]
+    if state != "all":
+        params.append(state)
+    params.extend([per_page, offset])
+
+    with adb() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            WITH payment_agg AS MATERIALIZED (
+                SELECT pay.user_id,
+                       COUNT(*) AS payment_count,
+                       MIN(COALESCE(pay.occurred_at, pay.created_at))
+                           AS first_paid_at,
+                       MAX(COALESCE(pay.occurred_at, pay.created_at))
+                           AS last_paid_at,
+                       SUM(pay.amount_cents) AS paid_cents
+                  FROM payments pay
+                 WHERE pay.status = 'completed' AND pay.amount_cents > 0
+                 GROUP BY pay.user_id
+            ), project_agg AS (
+                SELECT p.user_id,
+                       COUNT(*) FILTER (WHERE p.parent_project_id IS NULL)
+                           AS projects,
+                       COUNT(*) FILTER (WHERE p.parent_project_id IS NOT NULL)
+                           AS child_projects,
+                       MAX(p.id) FILTER (WHERE p.parent_project_id IS NULL)
+                           AS latest_project_id,
+                       MAX(p.created_at) AS last_project_at
+                  FROM projects p JOIN payment_agg pa ON pa.user_id = p.user_id
+                 GROUP BY p.user_id
+            ), asset_agg AS (
+                SELECT p.user_id,
+                       COUNT(*) FILTER (WHERE a.kind = 'original') AS uploads,
+                       COUNT(*) FILTER (WHERE a.kind = 'video_clip') AS clips,
+                       COUNT(*) FILTER (WHERE a.kind = 'render') AS renders,
+                       COALESCE(SUM(a.bytes), 0)::bigint AS storage_bytes,
+                       MAX(a.created_at) AS last_asset_at
+                  FROM projects p JOIN payment_agg pa ON pa.user_id = p.user_id
+                  JOIN assets a ON a.project_id = p.id
+                 GROUP BY p.user_id
+            ), job_agg AS (
+                SELECT j.user_id,
+                       COUNT(*) AS jobs,
+                       COUNT(*) FILTER (WHERE j.state = 'failed') AS failed_jobs,
+                       COUNT(*) FILTER (
+                           WHERE j.type = 'final' AND j.state = 'done')
+                           AS exports,
+                       MAX(j.updated_at) AS last_job_at
+                  FROM video_jobs j JOIN payment_agg pa ON pa.user_id = j.user_id
+                 GROUP BY j.user_id
+            ), subscribers AS MATERIALIZED (
+                SELECT u.id, u.email, u.created_at, u.is_subscribed, u.plan,
+                       u.subscription_expiry, u.billing_status, u.billing_plan,
+                       u.billing_period, u.billing_synced_at,
+                       u.payment_failed_at, u.payment_failed_reason,
+                       u.last_seen_at,
+                       """ + SUBSCRIBER_STATE_SQL + """ AS subscriber_state,
+                       pa.payment_count, pa.first_paid_at, pa.last_paid_at,
+                       pa.paid_cents,
+                       COALESCE(pr.projects, 0) AS projects,
+                       COALESCE(pr.child_projects, 0) AS child_projects,
+                       pr.latest_project_id,
+                       COALESCE(ast.uploads, 0) AS uploads,
+                       COALESCE(ast.clips, 0) AS clips,
+                       COALESCE(ast.renders, 0) AS renders,
+                       COALESCE(ast.storage_bytes, 0) AS storage_bytes,
+                       COALESCE(j.jobs, 0) AS jobs,
+                       COALESCE(j.failed_jobs, 0) AS failed_jobs,
+                       COALESCE(j.exports, 0) AS exports,
+                       GREATEST(u.last_seen_at, pr.last_project_at,
+                                ast.last_asset_at, j.last_job_at,
+                                pa.last_paid_at) AS last_activity
+                  FROM users u JOIN payment_agg pa ON pa.user_id = u.id
+                  LEFT JOIN project_agg pr ON pr.user_id = u.id
+                  LEFT JOIN asset_agg ast ON ast.user_id = u.id
+                  LEFT JOIN job_agg j ON j.user_id = u.id
+            )
+            SELECT s.*, COUNT(*) OVER () AS matched_subscribers
+              FROM subscribers s
+             WHERE s.email ILIKE %s
+               """ + state_where + """
+             ORDER BY CASE s.subscriber_state
+                        WHEN 'past_due' THEN 0 WHEN 'attention' THEN 1
+                        WHEN 'canceled' THEN 2 ELSE 3 END,
+                      s.last_paid_at DESC, s.id DESC
+             LIMIT %s OFFSET %s
+        """, params)
+        rows = cur.fetchall()
+
+        cur.execute("""
+            WITH paid_users AS (
+                SELECT u.*, """ + SUBSCRIBER_STATE_SQL + """
+                       AS subscriber_state
+                  FROM users u
+                 WHERE EXISTS (
+                       SELECT 1 FROM payments pay
+                        WHERE pay.user_id = u.id
+                          AND pay.status = 'completed'
+                          AND pay.amount_cents > 0)
+            )
+            SELECT COUNT(*) AS ever_paid,
+                   COUNT(*) FILTER (
+                       WHERE COALESCE(is_subscribed, 0) = 1) AS entitled_now,
+                   COUNT(*) FILTER (
+                       WHERE subscriber_state = 'active') AS active,
+                   COUNT(*) FILTER (
+                       WHERE subscriber_state = 'canceled') AS canceled,
+                   COUNT(*) FILTER (
+                       WHERE subscriber_state = 'past_due') AS past_due,
+                   COUNT(*) FILTER (
+                       WHERE subscriber_state = 'attention') AS attention,
+                   COUNT(*) FILTER (
+                       WHERE NOT EXISTS (SELECT 1 FROM projects p
+                                          WHERE p.user_id = paid_users.id))
+                       AS no_project
+              FROM paid_users
+        """)
+        summary = cur.fetchone() or {}
+
+    total = int(rows[0]["matched_subscribers"] or 0) if rows else 0
+    return jsonify({
+        "page": page, "per_page": per_page, "total": total,
+        "status": state,
+        "summary": {k: int(summary.get(k) or 0) for k in (
+            "ever_paid", "entitled_now", "active", "canceled", "past_due",
+            "attention", "no_project")},
+        "subscribers": [{
+            "id": r["id"], "email": r["email"],
+            "state": r["subscriber_state"],
+            "is_subscribed": bool(r["is_subscribed"]),
+            "plan": r["plan"], "billing_plan": r["billing_plan"],
+            "billing_status": r["billing_status"],
+            "billing_period": r["billing_period"],
+            "joined_at": r["created_at"].isoformat(),
+            "first_paid_at": r["first_paid_at"].isoformat(),
+            "last_paid_at": r["last_paid_at"].isoformat(),
+            "paid_usd": round(float(r["paid_cents"] or 0) / 100.0, 2),
+            "payment_count": int(r["payment_count"] or 0),
+            "subscription_expiry": (r["subscription_expiry"].isoformat()
+                                    if r["subscription_expiry"] else None),
+            # Normal cancellation time was not historically stored separately;
+            # billing_synced_at is the moment our DB recorded Paddle=canceled.
+            "canceled_recorded_at": (
+                r["billing_synced_at"].isoformat()
+                if r["billing_status"] == "canceled"
+                and r["billing_synced_at"] else None),
+            "payment_failed_at": (r["payment_failed_at"].isoformat()
+                                  if r["payment_failed_at"] else None),
+            "payment_failed_reason": r["payment_failed_reason"],
+            "projects": int(r["projects"] or 0),
+            "child_projects": int(r["child_projects"] or 0),
+            "latest_project_id": r["latest_project_id"],
+            "uploads": int(r["uploads"] or 0),
+            "clips": int(r["clips"] or 0),
+            "renders": int(r["renders"] or 0),
+            "storage_bytes": int(r["storage_bytes"] or 0),
+            "jobs": int(r["jobs"] or 0),
+            "failed_jobs": int(r["failed_jobs"] or 0),
+            "exports": int(r["exports"] or 0),
+            "last_activity": (r["last_activity"].isoformat()
+                              if r["last_activity"] else None),
+        } for r in rows],
+    })
+
+
 @admin_video_bp.route("/admin/video/subscriber-projects", methods=["GET"])
 @admin_required
 def video_subscriber_projects():

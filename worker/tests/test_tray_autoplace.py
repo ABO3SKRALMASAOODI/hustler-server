@@ -5,7 +5,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from schemas import default_edl, edl_accepts_tray_autoplace  # noqa: E402
+from schemas import (default_edl, edl_accepts_tray_autoplace,
+                     MAX_TRAY_AUTOPLACE_VISUALS)  # noqa: E402
 
 
 def test_no_edl_yet_is_the_initial_dump():
@@ -24,3 +25,10 @@ def test_v1_with_inserts_or_later_versions_do_not_autoplace():
     assert edl_accepts_tray_autoplace(1, seeded) is False
     assert edl_accepts_tray_autoplace(2, default_edl(17.7)) is False
     assert edl_accepts_tray_autoplace(39, default_edl(17.7)) is False
+
+
+def test_large_footage_library_is_not_blindly_rendered_as_one_sequence():
+    assert edl_accepts_tray_autoplace(
+        None, visual_count=MAX_TRAY_AUTOPLACE_VISUALS) is True
+    assert edl_accepts_tray_autoplace(
+        None, visual_count=MAX_TRAY_AUTOPLACE_VISUALS + 1) is False
