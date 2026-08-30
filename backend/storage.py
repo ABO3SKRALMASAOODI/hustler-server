@@ -53,15 +53,20 @@ SINGLE_PUT_LIMIT = 16 * 1024 * 1024
 # Parts are sized so PARALLELISM ARRIVES WHERE THE FILES ARE, not only on
 # multi-GB uploads. The old fixed 64 MB meant a 100 MB file was "multipart" in
 # name and two sockets in practice — six sockets only lit up past ~384 MB.
-# Small parts also make retries cheap (a blip resends 8 MB, not 64) at the
-# price of more presigned URLs, so the size scales with the file: aim for
-# TARGET_PARTS so every upload big enough to split keeps the pool busy, floor
-# at 8 MB (comfortably above R2/S3's 5 MB minimum), cap at 64 MB so a 14 GB
-# file still mints ~224 URLs rather than thousands. All parts but the last are
-# equal-sized, which R2 requires.
+#
+# The first adaptive version still grew back to 44-64 MiB for large files. A
+# production 2.39 GiB upload on 2026-08-30 proved why that is not resumable in
+# practice: Safari split the user's modest uplink over six 64 MiB requests,
+# no request finished before the browser's ~10-minute network timeout, and
+# every retry restarted an entire part. It failed at 617 seconds without
+# landing an asset. Keep parts in the 8-16 MiB range so the same link commits
+# durable progress every few minutes instead of losing 384 MiB of in-flight
+# work at once. The 14 GiB maximum now mints at most 896 URLs — a bounded
+# response, well below S3's 10,000-part protocol limit, and a worthwhile price
+# for uploads that actually finish on ordinary creator uplinks.
 MIN_PART_SIZE = 8 * 1024 * 1024
-MAX_PART_SIZE = 64 * 1024 * 1024
-TARGET_PARTS = 32
+MAX_PART_SIZE = 16 * 1024 * 1024
+TARGET_PARTS = 128
 
 
 def part_size_for(nbytes):

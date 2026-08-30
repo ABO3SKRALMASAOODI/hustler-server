@@ -274,8 +274,18 @@ def test_part_size_respects_the_protocol_and_the_url_budget():
         assert ps % (1024 * 1024) == 0, "whole MiB keeps ranges page-aligned"
         n_parts = (nbytes + ps - 1) // ps
         assert n_parts <= 10_000, "S3's hard cap on parts"
-        assert n_parts <= 300, f"{n_parts} URLs for {nbytes} bytes is a bloated presign response"
+        assert n_parts <= 1_000, f"{n_parts} URLs for {nbytes} bytes is a bloated presign response"
         assert n_parts * ps >= nbytes, "parts must cover the file"
+
+
+def test_slow_large_upload_uses_timeout_safe_parts():
+    """Aug 30: six 64 MiB requests shared one modest uplink and none
+    completed before Safari timed them out at 617 seconds. The same 2.39 GiB
+    source must make durable progress in substantially smaller units."""
+    nbytes = 2_561_209_004
+    ps = storage.part_size_for(nbytes)
+    assert ps <= 16 * 1024 * 1024
+    assert (nbytes + ps - 1) // ps >= 150
 
 
 def test_upload_presigns_outlive_a_slow_upload():
