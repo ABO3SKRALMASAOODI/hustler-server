@@ -75,9 +75,10 @@ COMPUTE_RUNNERS = {
     # complete job and persists the same cached sheets/waveforms remotely.
     "filmstrip": filmstrip.run_filmstrip_job,
     # watch_video normally returns an existing URL for free. Window/size
-    # requests encode a new copy; that ffmpeg belongs on Modal rather than in
-    # one of the two memory-sensitive MCP lanes on Render.
+    # requests encode a new copy; that ffmpeg belongs on a media container,
+    # rather than in a memory-sensitive MCP orchestration lane.
     "mcp_tool": _run_mcp_media_job,
+    "mcp_media": _run_mcp_media_job,
     "capture": webrecord.run_capture_job,
     # Same shape as capture (round 62): one tool call inside an agent turn,
     # moved here because decoding a user's 4K original for six jpegs is
@@ -115,8 +116,8 @@ COMPUTE_RUNNERS = {
 
 # Orchestration roles expose exactly one job family each. They scale
 # independently and cannot be tricked into borrowing another pool merely by
-# changing the request body. Media tools invoked inside these roles still
-# route to the specialized Modal compute functions.
+# changing the request body. Media tools invoked inside these roles route
+# back through the Cloudflare Worker to a specialized media lane.
 if config.WORKER_ROLE == "agent_executor":
     import agent_loop
     RUNNERS = {"agent_turn": agent_loop.run_agent_job}

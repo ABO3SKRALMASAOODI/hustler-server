@@ -817,6 +817,43 @@ def stamp_execution_provider(conn, job_id, total_claims, provider,
         return row and row.get("provider")
 
 
+def replace_execution_provider_before_launch(conn, job_id, total_claims,
+                                             from_provider, to_provider,
+                                             execution_shape=None):
+    """Move one current queue lease after its provider rejected submission.
+
+    This is narrower than an ordinary retry: no active physical call may
+    exist, and the stored provider must still be the one the caller observed.
+    It lets pre-migration Modal-stamped jobs survive a disabled/exhausted Modal
+    workspace once Cloudflare is ready, without weakening the immutable stamp
+    after compute has actually been accepted.
+    """
+    if from_provider not in {"modal", "cloudflare", "cloud_run"} or \
+            to_provider not in {"modal", "cloudflare", "cloud_run"}:
+        raise ValueError("invalid execution provider replacement")
+    with conn.cursor() as cur:
+        cur.execute("""UPDATE video_jobs j
+                       SET payload = jsonb_set(
+                             jsonb_set(COALESCE(j.payload, '{}'::jsonb),
+                                       '{execution_provider}',
+                                       to_jsonb(%s::text), true),
+                             '{execution_shape}', %s, true),
+                           updated_at = NOW()
+                       WHERE j.id = %s AND j.state = 'running'
+                         AND (%s::integer IS NULL OR j.total_claims = %s)
+                         AND COALESCE(j.payload->>'execution_provider', '') = %s
+                         AND NOT EXISTS (
+                           SELECT 1 FROM remote_executions r
+                            WHERE r.job_id = j.id
+                              AND r.total_claims = j.total_claims
+                              AND r.state IN ('submitted', 'running'))
+                       RETURNING payload->>'execution_provider' AS provider""",
+                    (to_provider, Json(_json_safe(execution_shape or {})),
+                     job_id, total_claims, total_claims, from_provider))
+        row = cur.fetchone()
+        return row and row.get("provider")
+
+
 def project_execution_shape(conn, project_id, asset_id=None):
     """Small capacity fingerprint used before a provider is selected."""
     with conn.cursor() as cur:

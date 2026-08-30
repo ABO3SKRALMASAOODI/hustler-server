@@ -166,14 +166,17 @@ def _cloudflare_selected(job):
     # and a provider-capacity terminal can safely fall back to Modal.
     if synchronous:
         return True
-    shape = job.get("_execution_shape") or {}
+    shape = (job.get("_execution_shape") or
+             (job.get("payload") or {}).get("execution_shape") or {})
     if not shape:
         return False
     try:
-        return (int(shape.get("total_bytes") or 0)
-                <= config.CLOUDFLARE_MAX_INPUT_BYTES
-                and float(shape.get("max_duration_s") or 0)
-                <= config.CLOUDFLARE_MAX_SOURCE_DURATION_S)
+        bytes_ok = (int(shape.get("total_bytes") or 0)
+                    <= config.CLOUDFLARE_MAX_INPUT_BYTES)
+        duration_limit = float(config.CLOUDFLARE_MAX_SOURCE_DURATION_S)
+        duration_ok = duration_limit <= 0 or (
+            float(shape.get("max_duration_s") or 0) <= duration_limit)
+        return bytes_ok and duration_ok
     except (TypeError, ValueError):
         return False
 
@@ -291,6 +294,12 @@ def _modal_health(timeout=20):
 
 def executor_health(timeout=20, job_type=None):
     """GET /health on the executor. Returns the parsed body, or raises."""
+    if config.CLOUDFLARE_EXECUTOR_ENABLED \
+            and config.CLOUDFLARE_EXECUTOR_URL \
+            and (job_type is None
+                 or job_type in config.CLOUDFLARE_EXECUTOR_TYPES
+                 or job_type in config.CLOUDFLARE_SYNCHRONOUS_TYPES):
+        return _cloudflare_preflight(timeout=timeout)
     # A generic capability/version probe uses the preview sibling. It runs the
     # same application image as the 32-GiB fallback, but costs a quarter of the
     # vCPU allocation to cold-start. Heavy capacity is tested by real heavy
@@ -355,7 +364,9 @@ def warm_executor():
     render_preview enqueues, the cold start is already paid. Every failure
     is swallowed: the worst case is exactly the old behavior."""
     global _warm_last
-    if not config.REMOTE_EXECUTOR_URL and not config.MODAL_EXECUTOR_ENABLED:
+    if not config.REMOTE_EXECUTOR_URL and not config.MODAL_EXECUTOR_ENABLED \
+            and not (config.CLOUDFLARE_EXECUTOR_ENABLED and
+                     config.CLOUDFLARE_EXECUTOR_URL):
         return
     now = time.monotonic()
     with _warm_lock:
@@ -363,6 +374,10 @@ def warm_executor():
             return
         _warm_last = now
     try:
+        if config.CLOUDFLARE_EXECUTOR_ENABLED \
+                and config.CLOUDFLARE_EXECUTOR_URL:
+            _cloudflare_preflight(timeout=10)
+            return
         if config.MODAL_EXECUTOR_ENABLED \
                 and "preview" in config.MODAL_EXECUTOR_TYPES:
             # A no-op input boots the actual 2-core preview image while the
@@ -420,7 +435,10 @@ def check_agent_executor_version(quiet=False):
     """Report agent-service skew without conflating it with render skew."""
     if not config.REMOTE_AGENT_EXECUTOR_URL and not (
             config.MODAL_EXECUTOR_ENABLED
-            and "agent_turn" in config.MODAL_EXECUTOR_TYPES):
+            and "agent_turn" in config.MODAL_EXECUTOR_TYPES) and not (
+            config.CLOUDFLARE_EXECUTOR_ENABLED
+            and config.CLOUDFLARE_EXECUTOR_URL
+            and "agent_turn" in config.CLOUDFLARE_EXECUTOR_TYPES):
         return ""
     mine = version.code_version()
     try:
@@ -455,7 +473,9 @@ def executor_supports(feature, timeout=8):
     round-53 rule — a diagnostic outage must never take a feature down), so
     callers treat None as permission plus a louder failure elsewhere.
     """
-    if not config.REMOTE_EXECUTOR_URL and not config.MODAL_EXECUTOR_ENABLED:
+    if not config.REMOTE_EXECUTOR_URL and not config.MODAL_EXECUTOR_ENABLED \
+            and not (config.CLOUDFLARE_EXECUTOR_ENABLED and
+                     config.CLOUDFLARE_EXECUTOR_URL):
         return True
     try:
         body = executor_health(timeout=timeout)
@@ -966,7 +986,8 @@ def _run_modal(job, function_override=None):
 
 
 def _cloudflare_lane(job_type):
-    if job_type in {"preview", "preview_check", "filmstrip", "frames"}:
+    if job_type in {"preview", "preview_check", "filmstrip", "frames",
+                    "mcp_media"}:
         return "interactive"
     if job_type in {"agent_turn", "mcp_tool", "shorts_plan"}:
         return {"agent_turn": "agent", "mcp_tool": "mcp",
@@ -1175,7 +1196,7 @@ def _run_cloudflare(job):
 
     call_id = _cloudflare_call_id(job)
     lane = _cloudflare_lane(job.get("type"))
-    timeout_s = config.executor_timeout_for(job.get("type")) + 60
+    timeout_s = config.cloudflare_timeout_for(job.get("type")) + 60
     if queue_backed and dbx.mark_remote_owned(job["id"]) is False:
         raise CloudflareLaunchUnavailable(
             "dispatcher shutdown began before Cloudflare submission")
@@ -1381,7 +1402,7 @@ def _run_remote(job, url_override=None, modal_function=None):
                     recorded = _record_remote_execution_with_retry(
                         probe, job, "cloudflare", call_id,
                         _cloudflare_lane(job.get("type")),
-                        config.executor_timeout_for(job.get("type")) + 60)
+                        config.cloudflare_timeout_for(job.get("type")) + 60)
                     if recorded:
                         closed = probe.run(
                             dbx.finish_remote_execution, job["id"],
@@ -1408,6 +1429,40 @@ def _run_remote(job, url_override=None, modal_function=None):
         try:
             return _run_modal(job, modal_function)
         except ModalLaunchUnavailable as exc:
+            # Submission was rejected before a Modal call id existed. A job
+            # stamped before the Cloudflare cutover can therefore move safely
+            # to Cloudflare under the same queue lease. Once either provider
+            # has an active ledger row this replacement fails closed.
+            if job.get("id") is not None \
+                    and config.CLOUDFLARE_EXECUTOR_ENABLED \
+                    and config.CLOUDFLARE_EXECUTOR_URL:
+                probe = dbx.Db()
+                try:
+                    shape = (job.get("_execution_shape") or
+                             (job.get("payload") or {}).get(
+                                 "execution_shape") or {})
+                    if not shape and str(job.get("type") or "") not in {
+                            "agent_turn", "mcp_tool", "shorts_plan"}:
+                        shape = dbx._json_safe(probe.run(
+                            dbx.project_execution_shape,
+                            job.get("project_id"),
+                            (job.get("payload") or {}).get("asset_id")) or {})
+                        job["_execution_shape"] = shape
+                    replaced = None
+                    if _cloudflare_selected(job):
+                        replaced = probe.run(
+                            dbx.replace_execution_provider_before_launch,
+                            job["id"], job.get("total_claims"), "modal",
+                            "cloudflare", shape)
+                finally:
+                    probe.reset()
+                if replaced == "cloudflare":
+                    payload = dict(job.get("payload") or {})
+                    payload["execution_provider"] = "cloudflare"
+                    job["payload"] = payload
+                    print(f"[dispatcher] {exc}; moving the unlaunched "
+                          "Modal-stamped lease to Cloudflare", flush=True)
+                    return _run_cloudflare(job)
             if (config.execution_policy_for(job) == "redesign"
                     or not config.MODAL_CLOUD_RUN_FALLBACK):
                 raise
@@ -1425,7 +1480,10 @@ def capture_available():
     single-box deployment; it is only the LARGE dispatcher-plus-executor
     deployment where the browser has to move.
     """
-    return bool(config.REMOTE_EXECUTOR_URL or config.MODAL_EXECUTOR_ENABLED)
+    return bool(config.REMOTE_EXECUTOR_URL or config.MODAL_EXECUTOR_ENABLED or
+                (config.CLOUDFLARE_EXECUTOR_ENABLED and
+                 config.CLOUDFLARE_EXECUTOR_URL and
+                 "capture" in config.CLOUDFLARE_SYNCHRONOUS_TYPES))
 
 
 def run_capture_remote(project_id, payload, user_id=None):
@@ -1443,7 +1501,11 @@ def run_capture_remote(project_id, payload, user_id=None):
 
 def fetch_available():
     """Whether a different executor egress can acquire a blocked URL."""
-    return bool(config.REMOTE_EXECUTOR_URL or config.MODAL_EXECUTOR_ENABLED)
+    return bool(config.REMOTE_EXECUTOR_URL or config.MODAL_EXECUTOR_ENABLED or
+                (config.CLOUDFLARE_EXECUTOR_ENABLED and
+                 config.CLOUDFLARE_EXECUTOR_URL and
+                 {"fetch", "search"}.issubset(
+                     config.CLOUDFLARE_SYNCHRONOUS_TYPES)))
 
 
 def fetch_bytes_available():
@@ -1457,6 +1519,9 @@ def fetch_bytes_available():
     import ytaccess
 
     states = []
+    if config.CLOUDFLARE_EXECUTOR_ENABLED \
+            and config.CLOUDFLARE_EXECUTOR_URL:
+        states.append(ytaccess.provider_youtube_ok("cloudflare"))
     if config.REMOTE_EXECUTOR_URL:
         states.append(ytaccess.provider_youtube_ok("cloud_run"))
     if config.MODAL_EXECUTOR_ENABLED:
@@ -1470,20 +1535,24 @@ def fetch_bytes_available():
 def _run_across_media_egress(job):
     """Run a safe stateless media operation through independent providers.
 
-    Cloud Run and Modal use the same stateless runner but leave the internet
-    through different networks. An explicit YouTube access wall advances to
-    the next provider; a content verdict such as private/removed does not.
+    Cloudflare, Cloud Run and the optional Modal rollback use the same
+    stateless runner but leave the internet through different networks. An
+    explicit YouTube access wall advances to the next configured provider; a
+    content verdict such as private/removed does not.
     Transport failure also earns the other provider, because no successful
     response means the caller has no usable storage key (a possible orphan is
     reclaimed with ordinary scratch/fetched-object lifecycle cleanup).
     """
     providers = []
-    if config.MODAL_EXECUTOR_ENABLED:
+    cloudflare_primary = _cloudflare_selected(job)
+    if cloudflare_primary:
+        providers.append(("cloudflare", lambda: _run_cloudflare(job)))
+    if config.MODAL_EXECUTOR_ENABLED and (
+            not cloudflare_primary or config.CLOUDFLARE_MODAL_FALLBACK):
         providers.append(("modal", lambda: _run_modal(
             job, function_override="egress")))
-    # Modal is production. Keep the old endpoint only as an explicitly
-    # enabled rollback after Modal has failed; never pay its latency before a
-    # healthy Modal fetch (and never touch it when fallback is disabled).
+    # Keep the old endpoint only as an explicitly enabled rollback; never pay
+    # its latency before the selected provider.
     if config.REMOTE_EXECUTOR_URL \
             and config.execution_policy_for(job) != "redesign" and (
             not config.MODAL_EXECUTOR_ENABLED
@@ -1530,15 +1599,18 @@ def run_search_remote(project_id, payload, user_id=None):
         "user_id": user_id, "attempts": 0, "payload": payload})
 
 
+def stock_acquire_available():
+    return bool(config.REMOTE_EXECUTOR_URL or config.MODAL_EXECUTOR_ENABLED or
+                (config.CLOUDFLARE_EXECUTOR_ENABLED and
+                 config.CLOUDFLARE_EXECUTOR_URL and
+                 "stock_acquire" in config.CLOUDFLARE_SYNCHRONOUS_TYPES))
+
+
 def run_stock_acquire_remote(project_id, payload, user_id=None):
     """Acquire/probe/review stock bytes in the idempotent egress lane."""
-    if not config.MODAL_EXECUTOR_ENABLED:
-        raise ModalLaunchUnavailable(
-            "Modal is required for stock-media acquisition")
-    return _run_modal({"id": None, "type": "stock_acquire",
-                       "project_id": project_id, "user_id": user_id,
-                       "attempts": 0, "payload": payload},
-                      function_override="egress")
+    return _run_across_media_egress({
+        "id": None, "type": "stock_acquire", "project_id": project_id,
+        "user_id": user_id, "attempts": 0, "payload": payload})
 
 
 def frames_available():
@@ -1549,7 +1621,10 @@ def frames_available():
     shipped before — correct for that deployment, fatal only beside a
     dispatcher whose job is to stay light.
     """
-    return bool(config.REMOTE_EXECUTOR_URL or config.MODAL_EXECUTOR_ENABLED)
+    return bool(config.REMOTE_EXECUTOR_URL or config.MODAL_EXECUTOR_ENABLED or
+                (config.CLOUDFLARE_EXECUTOR_ENABLED and
+                 config.CLOUDFLARE_EXECUTOR_URL and
+                 "frames" in config.CLOUDFLARE_SYNCHRONOUS_TYPES))
 
 
 def run_frames_remote(project_id, payload, user_id=None):
@@ -1569,7 +1644,10 @@ def track_available():
     window of what is usually a user's 4K original — the job class that has
     OOM-killed the dispatcher four times — so with no executor the caller
     keeps the static pin rather than attempting it locally."""
-    return bool(config.REMOTE_EXECUTOR_URL or config.MODAL_EXECUTOR_ENABLED)
+    return bool(config.REMOTE_EXECUTOR_URL or config.MODAL_EXECUTOR_ENABLED or
+                (config.CLOUDFLARE_EXECUTOR_ENABLED and
+                 config.CLOUDFLARE_EXECUTOR_URL and
+                 "track" in config.CLOUDFLARE_SYNCHRONOUS_TYPES))
 
 
 def run_track_remote(project_id, payload, user_id=None):
@@ -1588,7 +1666,10 @@ def matte_available():
     but the person model's forward passes are CPU compute the dispatcher
     cannot afford beside agent turns — with no executor the caller builds the
     photometric mask locally, which is exactly what shipped before."""
-    return bool(config.REMOTE_EXECUTOR_URL or config.MODAL_EXECUTOR_ENABLED)
+    return bool(config.REMOTE_EXECUTOR_URL or config.MODAL_EXECUTOR_ENABLED or
+                (config.CLOUDFLARE_EXECUTOR_ENABLED and
+                 config.CLOUDFLARE_EXECUTOR_URL and
+                 "matte" in config.CLOUDFLARE_SYNCHRONOUS_TYPES))
 
 
 def run_matte_remote(project_id, payload, user_id=None):
@@ -1606,7 +1687,10 @@ def smatch_available():
     (round 65d) Same contract as track_available — SIFT on 2048px frames of
     a user original OOM-killed the dispatcher the one time it ran there, so
     with no executor the caller refines on its small local frames only."""
-    return bool(config.REMOTE_EXECUTOR_URL or config.MODAL_EXECUTOR_ENABLED)
+    return bool(config.REMOTE_EXECUTOR_URL or config.MODAL_EXECUTOR_ENABLED or
+                (config.CLOUDFLARE_EXECUTOR_ENABLED and
+                 config.CLOUDFLARE_EXECUTOR_URL and
+                 "smatch" in config.CLOUDFLARE_SYNCHRONOUS_TYPES))
 
 
 def run_smatch_remote(project_id, payload, user_id=None):
@@ -1625,7 +1709,10 @@ def clean_available():
     of the job class that has OOM-killed the dispatcher repeatedly — so with
     an executor configured it never runs locally, and a remote failure is an
     honest refusal, never a local retry."""
-    return bool(config.REMOTE_EXECUTOR_URL or config.MODAL_EXECUTOR_ENABLED)
+    return bool(config.REMOTE_EXECUTOR_URL or config.MODAL_EXECUTOR_ENABLED or
+                (config.CLOUDFLARE_EXECUTOR_ENABLED and
+                 config.CLOUDFLARE_EXECUTOR_URL and
+                 "clean" in config.CLOUDFLARE_SYNCHRONOUS_TYPES))
 
 
 def run_clean_remote(project_id, payload, user_id=None):
@@ -1646,7 +1733,9 @@ def stems_available():
     answer comes from /health's features (executor_supports), or from this
     process's own import when there is no executor at all. None (executor
     unreachable) follows the round-53 rule: unknown is not "no"."""
-    if not config.REMOTE_EXECUTOR_URL and not config.MODAL_EXECUTOR_ENABLED:
+    if not config.REMOTE_EXECUTOR_URL and not config.MODAL_EXECUTOR_ENABLED \
+            and not (config.CLOUDFLARE_EXECUTOR_ENABLED and
+                     config.CLOUDFLARE_EXECUTOR_URL):
         import stems
         return stems.available()
     return executor_supports("stems")
@@ -1659,14 +1748,18 @@ def run_stems_remote(project_id, payload, user_id=None):
     Synchronous, no job row — the round-61 capture shape."""
     job = {"id": None, "type": "stems", "project_id": project_id,
            "user_id": user_id, "attempts": 0, "payload": payload}
-    if not config.REMOTE_EXECUTOR_URL and not config.MODAL_EXECUTOR_ENABLED:
+    if not config.REMOTE_EXECUTOR_URL and not config.MODAL_EXECUTOR_ENABLED \
+            and not (config.CLOUDFLARE_EXECUTOR_ENABLED and
+                     config.CLOUDFLARE_EXECUTOR_URL):
         import stems
         return stems.run_stems_job(None, job)
     return _run_remote(job)
 
 
 def run_render_remote(worker_db, job):      # signature matches run_render_job
-    if job.get("type") == "final" and not _modal_selected(job):
+    provider = desired_execution_provider(job)
+    if job.get("type") == "final" and provider not in {"cloudflare",
+                                                        "modal"}:
         try:
             return _launch_batch_and_wait(worker_db, job)
         except BatchUnavailable as exc:
@@ -1697,28 +1790,36 @@ def run_filmstrip_remote(worker_db, job):
 
 def mcp_media_available():
     """Whether video bytes can be encoded away from the dispatcher."""
-    return bool(config.MODAL_EXECUTOR_ENABLED)
+    return bool(config.MODAL_EXECUTOR_ENABLED or config.REMOTE_EXECUTOR_URL or
+                (config.CLOUDFLARE_EXECUTOR_ENABLED and
+                 config.CLOUDFLARE_EXECUTOR_URL and
+                 "mcp_media" in config.CLOUDFLARE_SYNCHRONOUS_TYPES))
 
 
 def run_mcp_media_remote(project_id, payload, user_id=None):
-    """Run only the resolved MCP video encode on Modal.
+    """Run only the resolved MCP video encode on remote media compute.
 
     The dispatcher resolves/waits for a timeline preview first, then sends a
-    stateless id-less call. Modal is consequently billed for the encode, not
-    for idling while another Modal function renders the preview source.
+    stateless id-less call. Cloudflare is primary; the optional legacy Modal
+    adapter remains usable only when Cloudflare is not selected.
     """
     if (payload or {}).get("tool") != "__media__":
-        raise ValueError("Modal MCP offload accepts __media__ only")
-    if not config.MODAL_EXECUTOR_ENABLED:
-        raise ModalLaunchUnavailable("Modal is required for MCP media encode")
-    return _run_modal({"id": None, "type": "mcp_tool",
-                       "project_id": project_id, "user_id": user_id,
-                       "attempts": 0, "payload": payload},
-                      function_override="preview")
+        raise ValueError("MCP media offload accepts __media__ only")
+    job = {"id": None, "type": "mcp_media", "project_id": project_id,
+           "user_id": user_id, "attempts": 0, "payload": payload}
+    if _cloudflare_selected(job):
+        return _run_remote(job)
+    if config.MODAL_EXECUTOR_ENABLED:
+        legacy = dict(job, type="mcp_tool")
+        return _run_modal(legacy, function_override="preview")
+    if config.REMOTE_EXECUTOR_URL:
+        return _run_cloud(dict(job, type="mcp_tool"))
+    raise RemoteExecutorError("no MCP media executor is configured")
 
 
 def run_index_remote(worker_db, job):       # signature matches run_index_job
-    if not _modal_selected(job):
+    provider = desired_execution_provider(job)
+    if provider not in {"cloudflare", "modal"}:
         try:
             return _launch_batch_and_wait(worker_db, job)
         except BatchUnavailable as exc:
@@ -1736,9 +1837,11 @@ def _run_request_with_capacity_fallback(job):
         is_capacity = getattr(error, "failure_kind", "") == \
             "executor_capacity"
         definitely_missing = isinstance(error, RemoteServiceUnavailable)
-        modal_capacity = (desired_execution_provider(job)
-                          in {"modal", "cloudflare"}
-                          and config.MODAL_EXECUTOR_ENABLED and is_capacity)
+        provider = desired_execution_provider(job)
+        modal_capacity = (config.MODAL_EXECUTOR_ENABLED and is_capacity and (
+            provider == "modal" or (
+                provider == "cloudflare"
+                and config.CLOUDFLARE_MODAL_FALLBACK)))
         cloud_sibling_fallback = primary \
             and primary != config.REMOTE_EXECUTOR_URL \
             and (is_capacity or definitely_missing)
@@ -1786,9 +1889,12 @@ def run_shorts_remote(worker_db, job):      # signature matches shorts runner
 
 def run_probe_remote(payload=None):
     """Launch the real-byte egress probe without using dispatcher network."""
-    if not config.MODAL_EXECUTOR_ENABLED:
-        raise ModalLaunchUnavailable("Modal is required for remote probing")
-    return _run_modal({"id": None, "type": "ytprobe", "project_id": None,
-                       "user_id": None, "attempts": 0,
-                       "payload": payload or {}},
-                      function_override="probe")
+    job = {"id": None, "type": "ytprobe", "project_id": None,
+           "user_id": None, "attempts": 0, "payload": payload or {}}
+    if _cloudflare_selected(job):
+        return _run_remote(job)
+    if config.MODAL_EXECUTOR_ENABLED:
+        return _run_modal(job, function_override="probe")
+    if config.REMOTE_EXECUTOR_URL:
+        return _run_cloud(job)
+    raise RemoteExecutorError("no remote egress probe is configured")

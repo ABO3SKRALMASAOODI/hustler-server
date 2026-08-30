@@ -686,20 +686,23 @@ POLL_INTERVAL_S = float(os.getenv("WORKER_POLL_INTERVAL_S", "2.0"))
 # on the PLATFORM behind a queue the compute never needed: two users editing
 # at once meant the second stared at a spinner for the whole of the first
 # user's render (preview queue_wait p50 was fine and the tail was 250s+).
-# Defaults: 3 media + 2 index remote (executor max-instances is 5, and the
-# in-turn synchronous calls — frames/clean/track/capture — share that
-# ceiling, so media+index must not be able to occupy all of it), 1 + 1 local
-# where the encodes genuinely contend for this box's own CPU. The media/index
-# lanes also poll faster remotely — a claim is one indexed SKIP LOCKED query,
-# and 2s of claim latency was pure dead time on every render.
+# Cloudflare uses separate 20-instance interactive and 8-instance batch pools,
+# so dispatcher waits can match those physical ceilings. The legacy remote
+# default remains 3 media + 2 index; local stays 1 + 1 where encodes genuinely
+# contend for this box's CPU. These slots wait on named remote calls and do not
+# run ffmpeg in the dispatcher.
 _CLOUDFLARE_REMOTE_EXEC = (
     os.getenv("CLOUDFLARE_EXECUTOR_ENABLED", "0") == "1"
     and bool(os.getenv("CLOUDFLARE_EXECUTOR_URL", "").strip()))
 _REMOTE_EXEC = (bool(os.getenv("REMOTE_EXECUTOR_URL", "").strip())
                 or os.getenv("MODAL_EXECUTOR_ENABLED", "0") == "1"
                 or _CLOUDFLARE_REMOTE_EXEC)
-MEDIA_SLOTS = int(os.getenv("WORKER_MEDIA_SLOTS", "3" if _REMOTE_EXEC else "1"))
-INDEX_SLOTS = int(os.getenv("WORKER_INDEX_SLOTS", "2" if _REMOTE_EXEC else "1"))
+MEDIA_SLOTS = int(os.getenv(
+    "WORKER_MEDIA_SLOTS",
+    "20" if _CLOUDFLARE_REMOTE_EXEC else ("3" if _REMOTE_EXEC else "1")))
+INDEX_SLOTS = int(os.getenv(
+    "WORKER_INDEX_SLOTS",
+    "8" if _CLOUDFLARE_REMOTE_EXEC else ("2" if _REMOTE_EXEC else "1")))
 # When projects compete for the index lane, at most this many of one
 # project's older/live jobs rank ahead of another project's first job. This
 # is a fairness share, not a hard concurrency cap: claim_job deliberately
@@ -731,7 +734,8 @@ AGENT_SLOTS = max(1, int(os.getenv("WORKER_AGENT_SLOTS", "2")))
 # turn, but it has its own lane so a long podcast plan cannot occupy chat
 # capacity. Keeping this configurable lets an agent-only service own it while
 # a dispatcher-only service leaves it at zero through worker_lane_slots().
-SHORTS_SLOTS = max(1, int(os.getenv("WORKER_SHORTS_SLOTS", "2")))
+SHORTS_SLOTS = max(1, int(os.getenv(
+    "WORKER_SHORTS_SLOTS", "8" if _CLOUDFLARE_REMOTE_EXEC else "2")))
 # The agent lane's claim poll is the gap between "user hit send" and "the
 # turn starts" — the first latency anyone feels, on every single message.
 # 0.5s, like the MCP lane: the claim is one indexed SKIP LOCKED query.
@@ -747,9 +751,11 @@ HEARTBEAT_EVERY_S = 20
 # The lane polls far faster than the others because a human is watching: at the
 # shared 2s interval, a 40-call editing session would spend over a minute
 # doing nothing but waiting for the next poll. The query is a single indexed
-# SKIP LOCKED update, so 4/s costs nothing. Three lanes match the admin MCP
-# session cap; project locks still prevent concurrent writes to one timeline.
-MCP_SLOTS = int(os.getenv("WORKER_MCP_SLOTS", "3"))
+# SKIP LOCKED update, so 4/s costs nothing. Cloudflare's isolated MCP pool has
+# twenty shards for multi-card editorial runs; project locks still prevent
+# concurrent writes to one timeline. The single-box default remains three.
+MCP_SLOTS = int(os.getenv(
+    "WORKER_MCP_SLOTS", "20" if _CLOUDFLARE_REMOTE_EXEC else "3"))
 MCP_POLL_INTERVAL_S = float(os.getenv("WORKER_MCP_POLL_INTERVAL_S", "0.25"))
 # An MCP call is never retried. Tools are not idempotent — a re-run of
 # add_music adds a SECOND track — and the caller is a live model that can
@@ -996,30 +1002,33 @@ REMOTE_HANDOFF_CONFIRM_S = max(
     REMOTE_HANDOFF_PERSIST_S + 15.0,
     min(660.0, float(os.getenv("REMOTE_HANDOFF_CONFIRM_S", "330"))))
 
-# Cloudflare Containers primary. Queue-backed render/index work within the
-# 4-vCPU/12-GiB shape and the light orchestration roles are eligible. Heavy
-# 16-32-GiB synchronous effects stay on Modal because they cannot physically
-# fit Cloudflare's self-serve ceiling. A stable percentage plus a payload stamp
-# means a retry cannot drift providers when an operator changes the rollout.
+# Cloudflare Containers primary. Queue-backed work is admitted by the bytes it
+# may have to stage, not by the source video's wall-clock duration: a short EDL
+# cut from a three-hour podcast is still a small render. A stable percentage
+# plus a payload stamp means a retry cannot drift providers when an operator
+# changes the rollout.
 CLOUDFLARE_EXECUTOR_ENABLED = os.getenv(
     "CLOUDFLARE_EXECUTOR_ENABLED", "0") == "1"
 CLOUDFLARE_EXECUTOR_URL = os.getenv(
     "CLOUDFLARE_EXECUTOR_URL", "").strip().rstrip("/")
 CLOUDFLARE_EXECUTOR_PERCENT = max(0, min(100, int(os.getenv(
-    "CLOUDFLARE_EXECUTOR_PERCENT", "0"))))
+    "CLOUDFLARE_EXECUTOR_PERCENT", "100"))))
 CLOUDFLARE_EXECUTOR_TYPES = frozenset(
     part.strip() for part in os.getenv(
         "CLOUDFLARE_EXECUTOR_TYPES",
-        "preview,preview_check,final,index,filmstrip,frames,agent_turn,"
-        "mcp_tool,shorts_plan").split(",") if part.strip())
-# Stateless synchronous tools do not own a video_jobs row. Keep this list
-# deliberately narrower than CLOUDFLARE_EXECUTOR_TYPES: every member must be
-# bounded, idempotent from the caller's perspective, and fit the self-serve
-# Container ceiling. Heavy 16-32-GiB effects remain an immediate Modal
-# capacity fallback rather than being slowed down for migration purity.
+        "preview,preview_check,final,index,filmstrip,agent_turn,mcp_tool,"
+        "shorts_plan,capture,frames,track,matte,smatch,clean,stems,fetch,"
+        "search,stock_acquire,ytprobe,mcp_media").split(",")
+    if part.strip())
+# Stateless synchronous tools do not own a video_jobs row. Every member is
+# idempotent from the caller's perspective and is routed to a right-sized
+# Cloudflare media lane rather than recursing from an orchestration container
+# into Modal.
 CLOUDFLARE_SYNCHRONOUS_TYPES = frozenset(
     part.strip() for part in os.getenv(
-        "CLOUDFLARE_SYNCHRONOUS_TYPES", "frames").split(",")
+        "CLOUDFLARE_SYNCHRONOUS_TYPES",
+        "capture,frames,track,matte,smatch,clean,stems,fetch,search,"
+        "stock_acquire,ytprobe,mcp_media").split(",")
     if part.strip())
 # Observe an accepted call through its startup phase, then reconnect through
 # the named status route. A Worker deployment can abandon a Durable Object
@@ -1029,11 +1038,19 @@ CLOUDFLARE_SYNCHRONOUS_TYPES = frozenset(
 CLOUDFLARE_START_OBSERVATION_S = max(30.0, min(300.0, float(os.getenv(
     "CLOUDFLARE_START_OBSERVATION_S", "180"))))
 CLOUDFLARE_MODAL_FALLBACK = os.getenv(
-    "CLOUDFLARE_MODAL_FALLBACK", "1") == "1"
+    "CLOUDFLARE_MODAL_FALLBACK", "0") == "1"
 CLOUDFLARE_MAX_INPUT_BYTES = int(os.getenv(
     "CLOUDFLARE_MAX_INPUT_BYTES", str(4 * 1024 ** 3)))
+# Long sources are usually edited into short, sparse output ranges. Feeding
+# ffmpeg a presigned R2 URL lets it range-read those windows instead of making
+# every parallel Container stage the same multi-hour proxy in full.
+CLOUDFLARE_STREAM_SOURCE_MIN_DURATION_S = max(0.0, float(os.getenv(
+    "CLOUDFLARE_STREAM_SOURCE_MIN_DURATION_S", "3600")))
+# Optional operator emergency brake. Zero means no duration gate. Cloudflare
+# has resource ceilings, not a one-hour media-duration limit; staged bytes and
+# the executor's own disk/memory checks are the meaningful admission signals.
 CLOUDFLARE_MAX_SOURCE_DURATION_S = float(os.getenv(
-    "CLOUDFLARE_MAX_SOURCE_DURATION_S", "3600"))
+    "CLOUDFLARE_MAX_SOURCE_DURATION_S", "0"))
 
 # Atomic compute-ownership switch. Queue producers stamp this value into each
 # new job, and executors honor the stamp rather than the deployment's current
@@ -1305,6 +1322,24 @@ REMOTE_EXECUTOR_TIMEOUTS = {
 def executor_timeout_for(job_type):
     """Dispatcher-side HTTP timeout for one job kind."""
     return REMOTE_EXECUTOR_TIMEOUTS.get(job_type, REMOTE_EXECUTOR_TIMEOUT_S)
+
+
+# Cloudflare's named Durable Object call remains reconnectable and its
+# HTTP-triggered Worker has no fixed wall-time limit. Keep interactive tools
+# impatient, while index/final/orchestration can legitimately outlive the
+# retired Cloud Run request ceiling.
+CLOUDFLARE_EXECUTOR_TIMEOUTS = {
+    "final": int(os.getenv("CLOUDFLARE_TIMEOUT_FINAL_S", "21600")),
+    "index": int(os.getenv("CLOUDFLARE_TIMEOUT_INDEX_S", "21600")),
+    "agent_turn": int(os.getenv("CLOUDFLARE_TIMEOUT_AGENT_S", "21600")),
+    "mcp_tool": int(os.getenv("CLOUDFLARE_TIMEOUT_MCP_S", "21600")),
+    "shorts_plan": int(os.getenv("CLOUDFLARE_TIMEOUT_SHORTS_S", "21600")),
+}
+
+
+def cloudflare_timeout_for(job_type):
+    return max(executor_timeout_for(job_type),
+               CLOUDFLARE_EXECUTOR_TIMEOUTS.get(job_type, 0))
 # Port the executor's HTTP server binds (Cloud Run injects $PORT, default 8080).
 EXECUTOR_PORT = int(os.getenv("PORT", "8080"))
 # How many index artifacts (proxy, wav, thumbnails, contact sheets) are PUT to
@@ -1958,19 +1993,28 @@ def require_core():
             "agent_turn", "mcp_tool", "shorts_plan", "preview",
             "preview_check", "final", "index", "capture", "frames",
             "track", "matte", "smatch", "clean", "stems", "fetch",
-            "search", "stock_acquire", "ytprobe",
+            "search", "stock_acquire", "ytprobe", "mcp_media",
         }
-        absent = sorted(required - set(MODAL_EXECUTOR_TYPES))
-        if not MODAL_EXECUTOR_ENABLED or absent:
-            detail = ("Modal is disabled" if not MODAL_EXECUTOR_ENABLED else
-                      "missing Modal job types: " + ", ".join(absent))
+        covered = set()
+        if CLOUDFLARE_EXECUTOR_ENABLED and CLOUDFLARE_EXECUTOR_URL:
+            covered.update(CLOUDFLARE_EXECUTOR_TYPES)
+            covered.update(CLOUDFLARE_SYNCHRONOUS_TYPES)
+        if MODAL_EXECUTOR_ENABLED:
+            covered.update(MODAL_EXECUTOR_TYPES)
+            if "mcp_tool" in MODAL_EXECUTOR_TYPES:
+                covered.add("mcp_media")
+        absent = sorted(required - covered)
+        if absent:
             raise SystemExit(
                 "Worker cannot enter EXECUTION_POLICY_MODE=redesign — "
-                + detail)
+                "no configured remote provider covers: "
+                + ", ".join(absent))
     if WORKER_ROLE in ("agent", "agent_executor", "mcp_executor",
                        "shorts_executor") \
-            and not REMOTE_EXECUTOR_URL and not MODAL_EXECUTOR_ENABLED:
+            and not REMOTE_EXECUTOR_URL and not MODAL_EXECUTOR_ENABLED \
+            and not (CLOUDFLARE_EXECUTOR_ENABLED and
+                     CLOUDFLARE_EXECUTOR_URL):
         raise SystemExit(
             "Orchestration worker cannot start without REMOTE_EXECUTOR_URL "
-            "or Modal remote compute — "
+            "or Cloudflare/Modal remote compute — "
             "refusing to pull media work onto the orchestration service")
