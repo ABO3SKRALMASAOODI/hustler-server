@@ -14985,9 +14985,9 @@ def fetch_url(ctx, url, as_kind=None):
         # the egress function; the historical local path survives only for a
         # deliberately single-box development deployment.
         if _execution_policy(ctx) == "redesign":
-            if not config.MODAL_EXECUTOR_ENABLED:
+            if not remote.fetch_available():
                 raise url_media.FetchMediaError(
-                    "the redesign egress function is not configured; no "
+                    "the redesign remote egress is not configured; no "
                     "local media download was attempted")
             got = _fetch_remote()
             remote_fetch = True
@@ -15589,10 +15589,10 @@ def add_stock_media(ctx, id):
     got = None
     policy = _execution_policy(ctx)
     if policy == "redesign":
-        if not config.MODAL_EXECUTOR_ENABLED:
+        if not remote.stock_acquire_available():
             return ("TRANSIENT_FAILURE: redesign stock acquisition requires "
-                    "the Modal egress function, but that function is not "
-                    "configured. Nothing was downloaded or added; retry "
+                    "remote egress, but no provider is configured. Nothing "
+                    "was downloaded or added; retry "
                     "after the executor health probe succeeds.")
         try:
             got = remote.run_stock_acquire_remote(
@@ -15615,7 +15615,7 @@ def add_stock_media(ctx, id):
         reviewed = _queue_remote_download_review(
             ctx, got, (item.get("description") or "stock media")[:60])
     else:
-        # Backward-compatible single-box development path. Production Modal
+        # Backward-compatible single-box development path. Production remote
         # orchestration never downloads, decodes or uploads these bytes.
         workdir = os.path.join(ctx.workdir,
                                f"stock_{uuid.uuid4().hex[:8]}")

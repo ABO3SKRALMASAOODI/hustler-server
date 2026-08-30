@@ -96,6 +96,36 @@ def test_cloudflare_only_media_plane_uses_remote_dispatch_capacity():
     }
 
 
+def test_cloudflare_defaults_match_parallel_container_pools():
+    env = dict(os.environ, PYTHONPATH=WORKER_DIR)
+    for key in (
+            "WORKER_ROLE", "WORKER_AGENT_SLOTS", "WORKER_SHORTS_SLOTS",
+            "WORKER_MCP_SLOTS", "WORKER_MEDIA_SLOTS", "WORKER_INDEX_SLOTS",
+            "REMOTE_EXECUTOR_URL", "REMOTE_AGENT_EXECUTOR_URL",
+            "MODAL_EXECUTOR_ENABLED", "MODAL_EXECUTOR_TYPES",
+            "REMOTE_AGENT_DISPATCH_SLOTS", "CLOUDFLARE_EXECUTOR_ENABLED",
+            "CLOUDFLARE_EXECUTOR_URL"):
+        env.pop(key, None)
+    env.update({
+        "WORKER_ROLE": "worker",
+        "REMOTE_EXECUTOR_URL": "",
+        "MODAL_EXECUTOR_ENABLED": "0",
+        "CLOUDFLARE_EXECUTOR_ENABLED": "1",
+        "CLOUDFLARE_EXECUTOR_URL":
+            "https://valmera-executor.example.workers.dev",
+    })
+    raw = subprocess.check_output(
+        [sys.executable, "-c",
+         "import json,config; print(json.dumps(config.worker_lane_slots(), "
+         "sort_keys=True))"],
+        cwd=WORKER_DIR, env=env, text=True)
+    lanes = json.loads(raw)
+    assert lanes["media"] == 20
+    assert lanes["index"] == 8
+    assert lanes["mcp"] == 20
+    assert lanes["shorts"] == 8
+
+
 def test_executor_never_polls_the_database_queue():
     assert set(_topology("executor").values()) == {0}
     assert set(_topology("agent_executor").values()) == {0}

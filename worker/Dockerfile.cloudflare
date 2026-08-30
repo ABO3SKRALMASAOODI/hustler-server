@@ -1,7 +1,7 @@
-# Cloudflare Containers canary image: the proven provider-neutral Python
-# executor without Chromium, segmentation, or Demucs payloads that cannot fit
-# Cloudflare's 12-GiB self-serve ceiling. It serves preview/check/filmstrip and
-# bounded index/final jobs; heavy effects and orchestration remain on Modal.
+# Cloudflare Containers image: the proven provider-neutral Python executor.
+# The interactive build stays slim; the standard-4 batch build sets
+# FULL_COMPUTE=1 and carries Chromium, segmentation, and Demucs so synchronous
+# editor children do not escape to another compute provider.
 FROM python:3.11-slim-bookworm
 
 RUN apt-get update \
@@ -22,6 +22,51 @@ RUN if [ "$FFMPEG_STATIC" = "1" ]; then \
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
+ARG FULL_COMPUTE=0
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
+RUN if [ "$FULL_COMPUTE" = "1" ]; then \
+      playwright install --with-deps chromium \
+      && rm -rf /var/lib/apt/lists/*; \
+    fi
+
+# URL acquisition needs the same anonymous YouTube challenge path as the full
+# executor: Deno plus the pinned bgutil provider. Keep both version halves in
+# the batch image so moving egress from Modal does not quietly reduce formats.
+ARG POT_VERSION=1.3.1
+RUN if [ "$FULL_COMPUTE" = "1" ]; then \
+      python -c "import urllib.request; urllib.request.urlretrieve('https://github.com/denoland/deno/releases/latest/download/deno-x86_64-unknown-linux-gnu.zip', '/tmp/deno.zip')" \
+      && python -c "import zipfile; zipfile.ZipFile('/tmp/deno.zip').extractall('/tmp/deno-bin')" \
+      && install -m755 /tmp/deno-bin/deno /usr/local/bin/deno \
+      && rm -rf /tmp/deno.zip /tmp/deno-bin \
+      && pip install --no-cache-dir bgutil-ytdlp-pot-provider==${POT_VERSION} \
+      && python -c "import urllib.request; urllib.request.urlretrieve('https://github.com/Brainicism/bgutil-ytdlp-pot-provider/archive/refs/tags/${POT_VERSION}.tar.gz', '/tmp/bgutil.tgz')" \
+      && mkdir -p /opt/bgutil-pot \
+      && tar -xzf /tmp/bgutil.tgz -C /opt/bgutil-pot --strip-components=1 \
+      && rm /tmp/bgutil.tgz \
+      && cd /opt/bgutil-pot/server \
+      && deno install --allow-scripts=npm:canvas --frozen; \
+    fi
+
+# The batch image carries the same two person-matte models as the proven full
+# executor. Model-backed code already falls back honestly when these are not
+# present, which is why the interactive image can omit them.
+RUN if [ "$FULL_COMPUTE" = "1" ]; then \
+      mkdir -p /app/models \
+      && python -c "import urllib.request, os; urllib.request.urlretrieve('https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net_human_seg.onnx', '/app/models/u2net_human_seg.onnx'); assert os.path.getsize('/app/models/u2net_human_seg.onnx') > 100_000_000" \
+      && python -c "import urllib.request, os; urllib.request.urlretrieve('https://github.com/PeterL1n/RobustVideoMatting/releases/download/v1.0.0/rvm_mobilenetv3_fp32.onnx', '/app/models/rvm_mobilenetv3_fp32.onnx'); assert os.path.getsize('/app/models/rvm_mobilenetv3_fp32.onnx') > 10_000_000"; \
+    fi
+
+# CPU-only stem separation fits the 12-GiB batch profile. Keeping it out of
+# the interactive image avoids adding its large Torch/model layers to preview
+# cold starts.
+ENV TORCH_HOME=/opt/torch
+RUN if [ "$FULL_COMPUTE" = "1" ]; then \
+      pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu \
+        torch==2.4.1 torchaudio==2.4.1 \
+      && pip install --no-cache-dir demucs==4.0.1 \
+      && python -c "from demucs.pretrained import get_model; get_model('htdemucs'); print('htdemucs weights baked')"; \
+    fi
 
 ENV HF_HOME=/opt/hf
 ARG WHISPER_MODEL=medium

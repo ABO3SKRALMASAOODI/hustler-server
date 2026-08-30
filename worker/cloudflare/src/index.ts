@@ -57,23 +57,28 @@ interface Env {
   DEEPGRAM_API_KEY?: string;
   PEXELS_API_KEY?: string;
   PIXABAY_API_KEY?: string;
-  MODAL_TOKEN_ID?: string;
-  MODAL_TOKEN_SECRET?: string;
-  MODAL_EXECUTOR_APP?: string;
-  MODAL_EXECUTOR_ENVIRONMENT?: string;
   CLOUDFLARE_EXECUTOR_URL?: string;
   CODE_VERSION?: string;
   SOURCE_VERSION?: string;
 }
 
-const INTERACTIVE_TYPES = new Set(["preview", "preview_check", "filmstrip", "frames"]);
-const BATCH_TYPES = new Set(["index", "final"]);
+const INTERACTIVE_TYPES = new Set([
+  "preview", "preview_check", "filmstrip", "frames", "mcp_media",
+]);
+const BATCH_TYPES = new Set([
+  "index", "final", "capture", "track", "matte", "smatch", "clean",
+  "stems", "fetch", "search", "stock_acquire", "ytprobe",
+]);
 const AGENT_TYPES = new Set(["agent_turn"]);
 const MCP_TYPES = new Set(["mcp_tool"]);
 const SHORTS_TYPES = new Set(["shorts_plan"]);
+const SYNCHRONOUS_TYPES = new Set([
+  "capture", "frames", "track", "matte", "smatch", "clean", "stems",
+  "fetch", "search", "stock_acquire", "ytprobe", "mcp_media",
+]);
 const CALL_ID = /^[a-zA-Z0-9_-]{8,96}$/;
 const SHARD_COUNTS = {
-  interactive: 5, batch: 3, agent: 5, mcp: 12, shorts: 8,
+  interactive: 20, batch: 8, agent: 5, mcp: 20, shorts: 8,
 } as const;
 type Lane = keyof typeof SHARD_COUNTS;
 const TERMINAL_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
@@ -149,14 +154,24 @@ abstract class ValmeraContainer extends Container<Env> {
       WORKER_ROLE: this.workerRole,
       EXECUTOR_PROVIDER: "cloudflare",
       CLOUDFLARE_CONTAINER_PROFILE: this.containerProfile,
-      // Orchestration containers call synchronous media tools. Route those
-      // child calls back through this Worker first; Modal stays the bounded
-      // launch/capacity fallback instead of silently remaining primary.
+      // Orchestration containers call synchronous media tools. Route every
+      // child back through this Worker so Cloudflare remains the physical
+      // compute owner all the way down the call tree.
       CLOUDFLARE_EXECUTOR_ENABLED: "1",
       CLOUDFLARE_EXECUTOR_PERCENT: "100",
-      CLOUDFLARE_EXECUTOR_TYPES: "frames",
-      CLOUDFLARE_SYNCHRONOUS_TYPES: "frames",
+      CLOUDFLARE_EXECUTOR_TYPES: [
+        "preview", "preview_check", "final", "index", "filmstrip",
+        "agent_turn", "mcp_tool", "shorts_plan", "capture", "frames",
+        "track", "matte", "smatch", "clean", "stems", "fetch", "search",
+        "stock_acquire", "ytprobe", "mcp_media",
+      ].join(","),
+      CLOUDFLARE_SYNCHRONOUS_TYPES: [
+        "capture", "frames", "track", "matte", "smatch", "clean", "stems",
+        "fetch", "search", "stock_acquire", "ytprobe", "mcp_media",
+      ].join(","),
       CLOUDFLARE_EXECUTOR_URL: optional(this.env.CLOUDFLARE_EXECUTOR_URL),
+      CLOUDFLARE_MODAL_FALLBACK: "0",
+      CLOUDFLARE_MAX_SOURCE_DURATION_S: "0",
       EXECUTION_POLICY_MODE: "redesign",
       PORT: "8080",
       PYTHONUNBUFFERED: "1",
@@ -180,12 +195,8 @@ abstract class ValmeraContainer extends Container<Env> {
       DEEPGRAM_API_KEY: optional(this.env.DEEPGRAM_API_KEY),
       PEXELS_API_KEY: optional(this.env.PEXELS_API_KEY),
       PIXABAY_API_KEY: optional(this.env.PIXABAY_API_KEY),
-      MODAL_TOKEN_ID: optional(this.env.MODAL_TOKEN_ID),
-      MODAL_TOKEN_SECRET: optional(this.env.MODAL_TOKEN_SECRET),
-      MODAL_EXECUTOR_ENABLED: "1",
-      MODAL_EXECUTOR_PERCENT: "100",
-      MODAL_EXECUTOR_APP: optional(this.env.MODAL_EXECUTOR_APP) || "valmera-executor",
-      MODAL_EXECUTOR_ENVIRONMENT: optional(this.env.MODAL_EXECUTOR_ENVIRONMENT) || "main",
+      MODAL_EXECUTOR_ENABLED: "0",
+      MODAL_EXECUTOR_PERCENT: "0",
     };
   }
 
@@ -394,14 +405,14 @@ abstract class ValmeraContainer extends Container<Env> {
     const queueBacked = Number.isInteger(job?.id)
       && Number.isInteger(job?.total_claims);
     const synchronous = job?.id == null && job?.total_claims == null
-      && job?.type === "frames";
+      && SYNCHRONOUS_TYPES.has(job?.type ?? "");
     if (!job || (!queueBacked && !synchronous)) {
       return json({ error: "invalid executor job", safe_to_fallback: true }, 400);
     }
     const now = Date.now();
     const requestedTimeout = Number(body.timeout_s ?? 3600);
     const timeoutSeconds = Number.isFinite(requestedTimeout)
-      ? Math.max(60, Math.min(7200, requestedTimeout))
+      ? Math.max(60, Math.min(21660, requestedTimeout))
       : 3600;
     const activeUntil = now + timeoutSeconds * 1000;
     let reservation = await this.reserve(
@@ -603,6 +614,11 @@ export default {
         status: "ok", provider: "cloudflare",
         code_version: env.CODE_VERSION ?? "unknown",
         source_version: env.SOURCE_VERSION ?? "unknown",
+        // Dispatcher feature gates consult the executor's root /health
+        // contract without starting a billed Container. custom_filter is in
+        // every image; stems is guaranteed by the FULL_COMPUTE batch build
+        // (the image build fails if Demucs or its weights cannot be baked).
+        features: ["custom_filter", "stems"],
         shards: SHARD_COUNTS,
       });
     }

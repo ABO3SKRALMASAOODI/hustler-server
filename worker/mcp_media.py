@@ -468,9 +468,10 @@ def prepare(ctx, args, inline_max_bytes):
             "max_mb — and you get a link to the original, or wait for the "
             "analysis to finish and watch the proxy."), "is_error": True}
 
-    # Resolve and wait on the always-on dispatcher, then rent Modal only for
-    # the byte-heavy part. Sending the whole queue job to Modal made a timeline
-    # watch pay for ~100 seconds of idle preview wait before a short encode.
+    # Resolve and wait on the orchestration lane, then send only the byte-heavy
+    # encode to a Cloudflare media container. Sending the whole queue job to a
+    # media lane would make a timeline watch pay for the preview wait before a
+    # short encode.
     if resolved is None:
         import remote
         if remote.mcp_media_available():

@@ -45,7 +45,7 @@ import ytaccess
 # With a REMOTE executor (round 91) the media lane is pure HTTP waiting and
 # runs several slots. Filmstrips originally remained local, but one project
 # with two concurrent 4K asset decoders crossed the dispatcher's 512-MiB
-# ceiling three times. Modal now owns filmstrip compute too; the dedicated
+# ceiling three times. Remote compute owns filmstrip work; the dedicated
 # lane remains useful because it bounds queued timeline-art requests to one
 # durable launch at a time.
 # A failed one is deliberately absent from FAIL_NOTES/REAPER_NOTES — a missing
@@ -721,13 +721,20 @@ def main():
     signal.signal(signal.SIGTERM, _on_shutdown)
     signal.signal(signal.SIGINT, _on_shutdown)
     slots = config.worker_lane_slots()
-    exec_mode = ((f"modal {config.MODAL_EXECUTOR_PERCENT}%" +
+    cloudflare_active = (config.CLOUDFLARE_EXECUTOR_ENABLED and
+                         config.CLOUDFLARE_EXECUTOR_URL)
+    exec_mode = ((f"cloudflare {config.CLOUDFLARE_EXECUTOR_PERCENT}%" +
+                  (" + modal emergency fallback"
+                   if (config.CLOUDFLARE_MODAL_FALLBACK and
+                       config.MODAL_EXECUTOR_ENABLED) else ""))
+                 if cloudflare_active else
+                 ((f"modal {config.MODAL_EXECUTOR_PERCENT}%" +
                   (" + retired-executor rollback"
                    if (config.MODAL_CLOUD_RUN_FALLBACK and
                        config.REMOTE_EXECUTOR_URL) else ""))
                  if config.MODAL_EXECUTOR_ENABLED else
                  ("remote executor " + config.REMOTE_EXECUTOR_URL
-                  if config.REMOTE_EXECUTOR_URL else "local"))
+                  if config.REMOTE_EXECUTOR_URL else "local")))
     print(f"valmera-worker ({config.WORKER_ROLE}) starting: "
           f"code={version.code_version()} media_slots={slots['media']} "
           f"filmstrip_slots={slots['filmstrip']} "
@@ -746,13 +753,15 @@ def main():
 
     # The dispatcher launches the egress probe but never performs it. Render's
     # IP and 512-MiB process are control-plane resources; the verdict must
-    # describe the same Modal egress users actually receive.
+    # describe the same remote egress users actually receive.
     def _egress_probe():
         if config.YTDLP_BOOT_PROBE != "1":
             return
         try:
             verdict = (remote.run_probe_remote()
-                       if config.MODAL_EXECUTOR_ENABLED
+                       if (cloudflare_active or
+                           config.MODAL_EXECUTOR_ENABLED or
+                           config.REMOTE_EXECUTOR_URL)
                        else ytaccess.boot_probe())
             if isinstance(verdict, dict):
                 print(f"[ytaccess] remote probe ok={verdict.get('ok')} "
@@ -769,7 +778,8 @@ def main():
               "REMOTE_EXECUTOR_SECRET is empty — calls will be unauthenticated.",
               flush=True)
 
-    if config.REMOTE_EXECUTOR_URL or config.MODAL_EXECUTOR_ENABLED:
+    if (config.REMOTE_EXECUTOR_URL or config.MODAL_EXECUTOR_ENABLED or
+            cloudflare_active):
         # Say, on every boot, whether the service that actually makes the
         # pixels is running this code. A push deploys the dispatcher
         # automatically and the executor not at all, so the moment a deploy is
@@ -788,7 +798,9 @@ def main():
 
     if config.REMOTE_AGENT_EXECUTOR_URL or (
             config.MODAL_EXECUTOR_ENABLED
-            and "agent_turn" in config.MODAL_EXECUTOR_TYPES):
+            and "agent_turn" in config.MODAL_EXECUTOR_TYPES) or (
+            cloudflare_active
+            and "agent_turn" in config.CLOUDFLARE_EXECUTOR_TYPES):
         def _agent_probe():
             try:
                 remote.check_agent_executor_version()

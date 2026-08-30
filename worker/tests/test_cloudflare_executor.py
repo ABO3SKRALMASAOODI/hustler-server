@@ -33,11 +33,11 @@ def _enable(monkeypatch, percent=100):
     monkeypatch.setattr(config, "CLOUDFLARE_EXECUTOR_TYPES", frozenset({
         "preview_check", "filmstrip", "index"}))
     monkeypatch.setattr(config, "CLOUDFLARE_MAX_INPUT_BYTES", 4 * 1024 ** 3)
-    monkeypatch.setattr(config, "CLOUDFLARE_MAX_SOURCE_DURATION_S", 3600)
+    monkeypatch.setattr(config, "CLOUDFLARE_MAX_SOURCE_DURATION_S", 0)
     remote._health_cache.clear()
 
 
-def test_canary_selection_is_stable_and_capacity_gated(monkeypatch):
+def test_canary_selection_is_stable_and_byte_capacity_gated(monkeypatch):
     _enable(monkeypatch, 37)
     first = remote._cloudflare_selected(JOB)
     assert all(remote._cloudflare_selected(dict(JOB)) == first
@@ -45,9 +45,26 @@ def test_canary_selection_is_stable_and_capacity_gated(monkeypatch):
     assert remote._cloudflare_selected(dict(
         JOB, _execution_shape={"total_bytes": 5 * 1024 ** 3,
                                "max_duration_s": 900})) is False
+    # A long source is not itself a Cloudflare capacity problem. This is the
+    # exact shape of a short EDL cut from a multi-hour podcast.
+    assert remote._cloudflare_selected(dict(
+        JOB, _execution_shape={"total_bytes": 500_000_000,
+                               "max_duration_s": 10_800})) is True
+
+
+def test_optional_duration_emergency_brake_still_fails_closed(monkeypatch):
+    _enable(monkeypatch)
+    monkeypatch.setattr(config, "CLOUDFLARE_MAX_SOURCE_DURATION_S", 3600)
     assert remote._cloudflare_selected(dict(
         JOB, _execution_shape={"total_bytes": 500_000_000,
                                "max_duration_s": 7200})) is False
+
+
+def test_cloudflare_long_jobs_outlive_retired_request_ceiling():
+    assert config.cloudflare_timeout_for("index") >= 21600
+    assert config.cloudflare_timeout_for("final") >= 21600
+    assert config.cloudflare_timeout_for("preview") == \
+        config.executor_timeout_for("preview")
 
 
 def test_provider_choice_is_stamped_once_under_the_queue_lease(monkeypatch):
@@ -102,6 +119,89 @@ def test_stamped_provider_is_immune_to_rollout_percentage_changes(monkeypatch):
     job = dict(JOB, payload={**JOB["payload"],
                              "execution_provider": "cloudflare"})
     assert remote.desired_execution_provider(job) == "cloudflare"
+
+
+def test_persisted_shape_can_admit_a_pre_cutover_stamped_job(monkeypatch):
+    _enable(monkeypatch)
+    job = {key: value for key, value in JOB.items()
+           if key != "_execution_shape"}
+    job["payload"] = {
+        **job["payload"], "execution_provider": "modal",
+        "execution_shape": {"total_bytes": 500_000_000,
+                            "max_duration_s": 10_800},
+    }
+    assert remote._cloudflare_selected(job) is True
+
+
+def test_modal_prelaunch_rejection_moves_current_lease_to_cloudflare(
+        monkeypatch):
+    _enable(monkeypatch)
+    monkeypatch.setattr(config, "MODAL_EXECUTOR_ENABLED", True)
+    job = {key: value for key, value in JOB.items()
+           if key != "_execution_shape"}
+    job["payload"] = {
+        **job["payload"], "execution_provider": "modal",
+        "execution_shape": {"total_bytes": 500_000_000,
+                            "max_duration_s": 10_800},
+    }
+    monkeypatch.setattr(
+        remote, "_run_modal",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            remote.ModalLaunchUnavailable("workspace spend limit")))
+    calls = []
+
+    class Probe:
+        def run(self, fn, *args):
+            calls.append((fn, args))
+            assert fn is dbx.replace_execution_provider_before_launch
+            return "cloudflare"
+
+        def reset(self):
+            pass
+
+    monkeypatch.setattr(remote.dbx, "Db", Probe)
+    monkeypatch.setattr(
+        remote, "_run_cloudflare",
+        lambda got: {"provider": got["payload"]["execution_provider"]})
+
+    assert remote._run_remote(job) == {"provider": "cloudflare"}
+    assert calls[0][1][:4] == (42, 4, "modal", "cloudflare")
+
+
+def test_modal_prelaunch_rejection_hydrates_missing_legacy_shape(monkeypatch):
+    _enable(monkeypatch)
+    monkeypatch.setattr(config, "MODAL_EXECUTOR_ENABLED", True)
+    job = {key: value for key, value in JOB.items()
+           if key != "_execution_shape"}
+    job["payload"] = {
+        **job["payload"], "execution_provider": "modal",
+    }
+    monkeypatch.setattr(
+        remote, "_run_modal",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            remote.ModalLaunchUnavailable("workspace spend limit")))
+    calls = []
+
+    class Probe:
+        def run(self, fn, *args):
+            calls.append(fn)
+            if fn is dbx.project_execution_shape:
+                return {"total_bytes": Decimal("500000000"),
+                        "max_duration_s": Decimal("10329.629")}
+            if fn is dbx.replace_execution_provider_before_launch:
+                assert args[-1]["max_duration_s"] == 10329.629
+                return "cloudflare"
+            raise AssertionError(fn)
+
+        def reset(self):
+            pass
+
+    monkeypatch.setattr(remote.dbx, "Db", Probe)
+    monkeypatch.setattr(remote, "_run_cloudflare", lambda _job: {"ok": True})
+
+    assert remote._run_remote(job) == {"ok": True}
+    assert calls == [dbx.project_execution_shape,
+                     dbx.replace_execution_provider_before_launch]
 
 
 class _Response:
@@ -240,6 +340,65 @@ def test_synchronous_frames_use_unique_named_cloudflare_calls(monkeypatch):
     another = {key: value for key, value in job.items()
                if key != "_cloudflare_sync_nonce"}
     assert remote._cloudflare_call_id(another) != first
+
+
+def test_all_synchronous_media_children_are_cloudflare_eligible(monkeypatch):
+    _enable(monkeypatch)
+    types = frozenset({
+        "capture", "frames", "track", "matte", "smatch", "clean", "stems",
+        "fetch", "search", "stock_acquire", "ytprobe", "mcp_media",
+    })
+    monkeypatch.setattr(config, "CLOUDFLARE_SYNCHRONOUS_TYPES", types)
+    monkeypatch.setattr(config, "CLOUDFLARE_EXECUTOR_TYPES", types)
+
+    for job_type in types:
+        job = {"id": None, "type": job_type, "project_id": 7,
+               "total_claims": None, "payload": {}}
+        assert remote._cloudflare_selected(job) is True
+        assert remote._cloudflare_lane(job_type) == (
+            "interactive" if job_type in {"frames", "mcp_media"}
+            else "batch")
+
+
+def test_mcp_media_encode_uses_cloudflare_interactive_lane(monkeypatch):
+    _enable(monkeypatch)
+    monkeypatch.setattr(
+        config, "CLOUDFLARE_SYNCHRONOUS_TYPES", frozenset({"mcp_media"}))
+    monkeypatch.setattr(
+        config, "CLOUDFLARE_EXECUTOR_TYPES", frozenset({"mcp_media"}))
+    seen = []
+    monkeypatch.setattr(
+        remote, "_run_remote",
+        lambda job: seen.append(job) or {"provider": "cloudflare"})
+
+    result = remote.run_mcp_media_remote(
+        7, {"tool": "__media__", "args": {}}, user_id=3)
+
+    assert result == {"provider": "cloudflare"}
+    assert seen[0]["type"] == "mcp_media"
+    assert remote._cloudflare_lane(seen[0]["type"]) == "interactive"
+
+
+def test_stock_acquisition_uses_cloudflare_egress_without_modal(monkeypatch):
+    _enable(monkeypatch)
+    monkeypatch.setattr(
+        config, "CLOUDFLARE_SYNCHRONOUS_TYPES",
+        frozenset({"stock_acquire"}))
+    monkeypatch.setattr(
+        config, "CLOUDFLARE_EXECUTOR_TYPES",
+        frozenset({"stock_acquire"}))
+    monkeypatch.setattr(config, "MODAL_EXECUTOR_ENABLED", False)
+    seen = []
+    monkeypatch.setattr(
+        remote, "_run_cloudflare",
+        lambda job: seen.append(job) or {"ok": True})
+
+    assert remote.stock_acquire_available() is True
+    result = remote.run_stock_acquire_remote(7, {"url": "https://x"}, 3)
+
+    assert result["ok"] is True
+    assert result["fetch_provider"] == "cloudflare"
+    assert seen[0]["type"] == "stock_acquire"
 
 
 def test_synchronous_frames_skip_queue_ledger_and_run_on_cloudflare(
@@ -652,13 +811,13 @@ def test_ambiguous_missing_status_never_authorizes_modal_fallback(monkeypatch):
     assert "could not be recovered" in str(caught.value)
 
 
-def test_cloudflare_config_preserves_modal_heavy_fallback():
+def test_cloudflare_config_is_provider_complete_without_modal():
     root = Path(__file__).resolve().parents[1]
     wrangler = (root / "cloudflare" / "wrangler.jsonc").read_text()
     adapter = (root / "cloudflare" / "src" / "index.ts").read_text()
     dockerfile = (root / "Dockerfile.cloudflare").read_text()
     assert '"instance_type": "standard-4"' in wrangler
-    assert '"max_instances": 3' in wrangler
+    assert '"max_instances": 8' in wrangler
     assert '"WNAM"' in wrangler
     assert '"WHISPER_MODEL": ""' in wrangler
     assert '"WHISPER_MODEL": "medium"' in wrangler
@@ -666,7 +825,7 @@ def test_cloudflare_config_preserves_modal_heavy_fallback():
     assert all(container["image_vars"]["SOURCE_VERSION"]
                == "set-by-deploy-workflow"
                for container in wrangler_config["containers"])
-    assert "interactive: 5, batch: 3, agent: 5, mcp: 12, shorts: 8" \
+    assert "interactive: 20, batch: 8, agent: 5, mcp: 20, shorts: 8" \
         in adapter
     assert "storage.transaction" in adapter
     assert "provider_call_id: callId" in adapter
@@ -693,11 +852,24 @@ def test_cloudflare_config_preserves_modal_heavy_fallback():
     assert "Cloudflare Container shard is busy" in adapter
     assert "CLOUDFLARE_CONTAINER_PROFILE" in adapter
     assert 'protected readonly workerRole = "mcp_executor"' in adapter
+    assert '"mcp_media"' in adapter
+    assert '"stock_acquire"' in adapter
+    assert 'MODAL_EXECUTOR_ENABLED: "0"' in adapter
+    assert 'features: ["custom_filter", "stems"]' in adapter
+    assert "SYNCHRONOUS_TYPES.has" in adapter
+    assert "Math.min(21660, requestedTimeout)" in adapter
+    assert "MODAL_TOKEN_ID" not in adapter
+    assert "MODAL_TOKEN_SECRET" not in adapter
     assert '"class_name": "ValmeraMcp"' in wrangler
     assert '"instance_type": "standard-1"' in wrangler
+    assert '"FULL_COMPUTE": "0"' in wrangler
+    assert '"FULL_COMPUTE": "1"' in wrangler
     assert "http_server.py" in dockerfile
     assert "ARG SOURCE_VERSION=unknown" in dockerfile
     assert "/opt/valmera-source-version" in dockerfile
     assert 'if [ -n "$WHISPER_MODEL" ]' in dockerfile
-    assert "playwright install" not in dockerfile
-    assert "pip install --no-cache-dir demucs" not in dockerfile.lower()
+    assert 'if [ "$FULL_COMPUTE" = "1" ]' in dockerfile
+    assert "playwright install --with-deps chromium" in dockerfile
+    assert "pip install --no-cache-dir demucs" in dockerfile.lower()
+    assert "bgutil-ytdlp-pot-provider" in dockerfile
+    assert "deno install --allow-scripts=npm:canvas" in dockerfile

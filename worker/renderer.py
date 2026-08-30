@@ -4005,6 +4005,24 @@ def _job_cached_source(storage_key, workdir):
     return _lease_cached_source(local, workdir, storage_key)
 
 
+def _stream_cloudflare_source(asset):
+    """Use sparse R2 ranged reads for long sources on Cloudflare.
+
+    Generated Shorts share a multi-hour source while keeping only a few
+    seconds. Parallel Containers downloading that proxy in full is pure
+    startup tax; every consumer on this path is ffmpeg-family and already
+    supports the presigned-URL fallback used for oversized workdirs.
+    """
+    if os.getenv("EXECUTOR_PROVIDER") != "cloudflare":
+        return False
+    try:
+        duration = float((asset or {}).get("duration_s") or 0)
+    except (TypeError, ValueError):
+        return False
+    threshold = config.CLOUDFLARE_STREAM_SOURCE_MIN_DURATION_S
+    return threshold > 0 and duration >= threshold
+
+
 def _fetch_into(workdir, key, tag):
     """Plain download into the job workdir — the fallback when the sha cache
     is unavailable. Raises on failure; callers decide how loud to be."""
@@ -4791,7 +4809,14 @@ def run_render_job(worker_db, job):
             if not _still_ours(5):
                 raise dbx.JobLeaseLost(
                     "job was cancelled or handed to another worker")
-            src_local = _job_cached_source(src_asset["storage_key"], workdir)
+            if _stream_cloudflare_source(src_asset):
+                src_local = storage.presign_get(
+                    src_asset["storage_key"], expires=21600)
+                print(f"[render {job_id}] range-reading long source from "
+                      "R2 instead of staging it", flush=True)
+            else:
+                src_local = _job_cached_source(
+                    src_asset["storage_key"], workdir)
             if not src_local:
                 src_local = os.path.join(
                     workdir,
