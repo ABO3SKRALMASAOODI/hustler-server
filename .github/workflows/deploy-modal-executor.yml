@@ -1,12 +1,9 @@
 name: deploy-modal-executor
 
+# Cloudflare is the production executor. Keep this workflow only as an
+# operator-invoked disaster-recovery path; ordinary worker pushes must never
+# publish or warm Modal again.
 on:
-  push:
-    branches: [main]
-    paths:
-      - "worker/**"
-      - "!worker/tests/**"
-      - "!worker/MODAL_EXECUTOR.md"
   workflow_dispatch: {}
 
 concurrency:
