@@ -64,6 +64,28 @@ def test_matching_versions_report_no_skew(monkeypatch):
     assert remote.check_executor_version(quiet=True) == ""
 
 
+def test_cloudflare_source_version_avoids_commit_metadata_skew(monkeypatch):
+    _health(monkeypatch, {
+        "provider": "cloudflare",
+        "code_version": "metadata-only-deploy-commit",
+        "source_version": version.code_version(),
+    })
+    assert remote.check_executor_version(quiet=True) == ""
+
+
+def test_cloudflare_agent_uses_shared_source_fingerprint(monkeypatch):
+    monkeypatch.setattr(remote.config, "REMOTE_AGENT_EXECUTOR_URL",
+                        "https://agent-executor.example")
+    monkeypatch.setattr(
+        remote, "executor_health",
+        lambda timeout=20, job_type=None: {
+            "provider": "cloudflare",
+            "code_version": "metadata-only-deploy-commit",
+            "source_version": version.code_version(),
+        })
+    assert remote.check_agent_executor_version(quiet=True) == ""
+
+
 def test_different_version_is_named_with_both_sides(monkeypatch):
     _health(monkeypatch, {"code_version": "deadbeef1234"})
     note = remote.check_executor_version(quiet=True)

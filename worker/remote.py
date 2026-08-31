@@ -414,7 +414,11 @@ def check_executor_version(quiet=False):
             print(f"[dispatcher] executor version check failed: "
                   f"{str(e)[:200]}", flush=True)
         return ""
-    remote_v = str(theirs.get("code_version") or "unknown")
+    # Cloudflare reports both the deployment commit and the shared worker
+    # source fingerprint. The dispatcher runs from that shared source tree,
+    # so compare source-to-source; a metadata-only deploy commit is not skew.
+    remote_v = str(theirs.get("source_version") or
+                   theirs.get("code_version") or "unknown")
     note = ""
     if mine != "unknown" and remote_v != "unknown" and mine != remote_v:
         note = (f"the render executor is running DIFFERENT code than this "
@@ -448,7 +452,8 @@ def check_agent_executor_version(quiet=False):
             print(f"[dispatcher] agent executor version check failed: "
                   f"{str(e)[:200]}", flush=True)
         return ""
-    remote_v = str(theirs.get("code_version") or "unknown")
+    remote_v = str(theirs.get("source_version") or
+                   theirs.get("code_version") or "unknown")
     if mine != "unknown" and remote_v != "unknown" and mine != remote_v:
         note = (f"the agent executor is running DIFFERENT code than this "
                 f"dispatcher (executor {remote_v}, dispatcher {mine})")
