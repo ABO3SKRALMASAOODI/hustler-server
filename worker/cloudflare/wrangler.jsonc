@@ -14,7 +14,7 @@
       "instance_type": "standard-3",
       "constraints": {"regions": ["WNAM"]},
       "rollout_active_grace_period": 300,
-      "rollout_step_percentage": [10, 100]
+      "rollout_step_percentage": [100]
     },
     {
       "class_name": "ValmeraBatch",
@@ -25,7 +25,7 @@
       "instance_type": "standard-4",
       "constraints": {"regions": ["WNAM"]},
       "rollout_active_grace_period": 300,
-      "rollout_step_percentage": [10, 100]
+      "rollout_step_percentage": [100]
     },
     {
       "class_name": "ValmeraAgent",
@@ -36,7 +36,7 @@
       "instance_type": "standard-1",
       "constraints": {"regions": ["WNAM"]},
       "rollout_active_grace_period": 300,
-      "rollout_step_percentage": [10, 100]
+      "rollout_step_percentage": [100]
     },
     {
       "class_name": "ValmeraMcp",
@@ -47,7 +47,7 @@
       "instance_type": "standard-1",
       "constraints": {"regions": ["WNAM"]},
       "rollout_active_grace_period": 300,
-      "rollout_step_percentage": [10, 100]
+      "rollout_step_percentage": [100]
     },
     {
       "class_name": "ValmeraShorts",
@@ -58,7 +58,7 @@
       "instance_type": "standard-1",
       "constraints": {"regions": ["WNAM"]},
       "rollout_active_grace_period": 300,
-      "rollout_step_percentage": [10, 100]
+      "rollout_step_percentage": [100]
     }
   ],
   "durable_objects": {

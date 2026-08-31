@@ -825,6 +825,11 @@ def test_cloudflare_config_is_provider_complete_without_modal():
     assert all(container["image_vars"]["SOURCE_VERSION"]
                == "set-by-deploy-workflow"
                for container in wrangler_config["containers"])
+    # The provider contract changes atomically. A canary rollout can leave a
+    # Durable Object pinned to a Modal-dependent image after Modal secrets are
+    # deliberately removed from the Cloudflare runtime.
+    assert all(container["rollout_step_percentage"] == [100]
+               for container in wrangler_config["containers"])
     assert "interactive: 20, batch: 8, agent: 5, mcp: 20, shorts: 8" \
         in adapter
     assert "storage.transaction" in adapter
