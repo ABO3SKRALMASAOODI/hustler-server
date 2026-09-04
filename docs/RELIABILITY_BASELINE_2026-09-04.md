@@ -200,7 +200,8 @@ whose terminal rows remain in the database.
 - Synchronous checkout, plan-change, resume, cancellation, subscription-state,
   and Brevo statistics calls have bounded connect/read deadlines. Provider
   stalls return an explicit retryable response instead of occupying a web
-  worker indefinitely; the hosted checkout defaults to the live Creator plan.
+  worker indefinitely; the hosted checkout defaults to the live Creator plan
+  and logs only provider status, never Paddle's customer/transaction body.
 
 ## Verification completed before release
 

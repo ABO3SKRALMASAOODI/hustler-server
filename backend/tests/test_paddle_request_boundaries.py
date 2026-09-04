@@ -24,7 +24,7 @@ class _OfferDb:
 
 class _CheckoutResponse:
     status_code = 201
-    text = "created"
+    text = "private-provider-response-marker"
 
     @staticmethod
     def json():
@@ -41,7 +41,7 @@ def _app():
 
 
 def test_hosted_checkout_defaults_to_live_creator_and_has_a_deadline(
-        monkeypatch):
+        monkeypatch, capsys):
     seen = {}
     monkeypatch.setattr(
         paddle, "decode_token", lambda _header: (7, "buyer@example.com"))
@@ -63,6 +63,7 @@ def test_hosted_checkout_defaults_to_live_creator_and_has_a_deadline(
         "price_id": paddle.PLANS["ai"]["price_id"], "quantity": 1}]
     assert seen["json"]["custom_data"]["billing"] == "monthly"
     assert seen["timeout"] == paddle.PADDLE_API_TIMEOUT
+    assert "private-provider-response-marker" not in capsys.readouterr().out
 
 
 def test_checkout_provider_timeout_is_explicitly_retryable(monkeypatch):

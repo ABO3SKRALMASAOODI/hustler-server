@@ -291,7 +291,11 @@ def create_checkout_session():
         )
     except requests.RequestException as error:
         return _paddle_unavailable("checkout creation", error)
-    print("🔁 Paddle API Response:", response.text)
+    # Paddle transaction responses can contain customer and checkout details.
+    # A status code is enough for operations; never copy the provider body into
+    # shared application logs.
+    print(f"🔁 Paddle checkout response status={response.status_code}",
+          flush=True)
 
     if response.status_code != 201:
         return jsonify({"error": "Failed to create checkout session",
