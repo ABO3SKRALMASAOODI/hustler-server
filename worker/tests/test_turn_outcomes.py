@@ -45,6 +45,25 @@ def test_failure_classifier_catches_mid_sentence_save_failures():
         == "failed"
     assert tool_result_kind("REJECTED: asset could not be recovered") \
         == "refused"
+    assert tool_result_kind(
+        "Preview render is taking too long — PREREQUISITE: still running") \
+        == "prerequisite"
+    assert tool_result_kind(
+        "TRANSIENT FAILURE: verification could not be persisted") == "failed"
+    assert tool_result_kind("UNSAFE: asset escaped project scope") == "refused"
+
+
+def test_prerequisite_only_reply_is_blocked_and_free():
+    ctx = _ctx(turn_tool_outcomes=[
+        {"tool": "render_preview", "kind": "prerequisite"}])
+    assert agent_loop._turn_completion(ctx) == ("blocked", False)
+
+
+def test_saved_edit_with_pending_prerequisite_is_partial_but_billable():
+    ctx = _ctx(versions_written=[2], turn_tool_outcomes=[
+        {"tool": "render_preview", "kind": "prerequisite"}],
+        write_attempts=1)
+    assert agent_loop._turn_completion(ctx) == ("partial", True)
 
 
 def test_fetched_audio_is_delivered_value():

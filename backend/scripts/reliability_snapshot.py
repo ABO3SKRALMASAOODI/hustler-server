@@ -443,12 +443,18 @@ def build_snapshot(conn, days=7):
                            'CORRECTION NEEDED%%', 'RECIPE ABORTED%%'])
                          THEN 'correction_needed'
                        WHEN UPPER(LTRIM(COALESCE(result->>'text', '')))
-                         LIKE 'PREREQUISITE%%'
+                              LIKE 'PREREQUISITE%%'
+                         OR UPPER(LTRIM(COALESCE(result->>'text', '')))
+                              LIKE '%%PREREQUISITE:%%'
                          THEN 'prerequisite'
-                       WHEN UPPER(LTRIM(COALESCE(result->>'text', '')))
+                       WHEN (UPPER(LTRIM(COALESCE(result->>'text', '')))
                          LIKE ANY (ARRAY[
-                           'TRANSIENT_FAILURE%%', 'TOOL %%', 'FAILED%%',
-                           'COULD NOT%%'])
+                           'TRANSIENT_FAILURE%%', 'TRANSIENT FAILURE%%',
+                           'TOOL %%', 'FAILED%%', 'COULD NOT%%'])
+                         OR SPLIT_PART(UPPER(LTRIM(COALESCE(
+                              result->>'text', ''))), CHR(10), 1) ~
+                            '(^|[^A-Z])(FAILED|COULD NOT|UNAVAILABLE|ERRORED)'
+                            '([^A-Z]|$)')
                          THEN 'transient_failure'
                        WHEN UPPER(LTRIM(COALESCE(result->>'text', '')))
                          LIKE ANY (ARRAY['UNAVAILABLE%%', 'UNKNOWN TOOL%%'])
@@ -493,8 +499,15 @@ def build_snapshot(conn, days=7):
                              'REJECTED%%', 'CORRECTION_NEEDED%%',
                              'CORRECTION NEEDED%%', 'RECIPE ABORTED%%',
                              'PREREQUISITE%%', 'TRANSIENT_FAILURE%%',
-                             'TOOL %%', 'FAILED%%', 'COULD NOT%%',
+                             'TRANSIENT FAILURE%%', 'TOOL %%', 'FAILED%%',
+                             'COULD NOT%%',
                              'UNAVAILABLE%%', 'UNKNOWN TOOL%%', 'UNSAFE%%'])
+                         OR UPPER(LTRIM(COALESCE(result->>'text', '')))
+                              LIKE '%%PREREQUISITE:%%'
+                         OR SPLIT_PART(UPPER(LTRIM(COALESCE(
+                              result->>'text', ''))), CHR(10), 1) ~
+                            '(^|[^A-Z])(FAILED|COULD NOT|UNAVAILABLE|ERRORED)'
+                            '([^A-Z]|$)'
                          OR COALESCE(result->>'is_error', 'false') = 'true'
                          OR result ? 'failure')) AS non_success
                 FROM video_jobs
@@ -515,6 +528,21 @@ def build_snapshot(conn, days=7):
             "successful": int(done) - int(non_success),
         } for tool, total, done, failed, refused, non_success
             in cur.fetchall()]
+
+        # This is the public tools/call error boundary, including session and
+        # control failures that never create video_jobs. New deployments
+        # record only the tool name; no arguments, response text, project id,
+        # file name, URL, or provider error enters this report.
+        cur.execute("""
+            SELECT COALESCE(detail->>'tool', 'unknown'), COUNT(*)
+              FROM client_events
+             WHERE kind = 'mcp_error_response'
+               AND created_at >= NOW() - %s::interval
+             GROUP BY detail->>'tool' ORDER BY COUNT(*) DESC,
+                      detail->>'tool'
+        """, (interval,))
+        result["mcp_error_responses"] = {
+            str(tool): int(count) for tool, count in cur.fetchall()}
 
         cur.execute("""
             SELECT type, state, COUNT(*),

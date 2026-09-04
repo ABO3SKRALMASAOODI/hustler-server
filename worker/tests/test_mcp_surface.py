@@ -124,7 +124,7 @@ def test_mcp_context_authoritatively_disables_audio_model_review(
     assert session.ctx.audio_model_review is False
 
 
-def test_locked_card_agent_boot_is_not_published_or_executable_over_mcp():
+def test_orchestration_tools_are_not_published_or_executable_over_mcp():
     published = {t["function"]["name"]
                  for t in mcp_exec.catalog()["tools"]}
     assert "edit_shorts" not in published
@@ -138,12 +138,17 @@ def test_locked_card_agent_boot_is_not_published_or_executable_over_mcp():
         def run(self, *_args, **_kwargs):
             raise AssertionError("denied MCP tool must not touch the database")
 
-    out = mcp_exec.run_mcp_job(NoDb(), {
-        "payload": {"tool": "edit_shorts", "args": {"instruction": "x"}},
-    })
-    assert out["is_error"] is True
-    assert "explicit locked-card action" in out["text"]
-    assert "Edit each child yourself" in out["text"]
+    for denied in mcp_exec.MCP_DENIED_TOOLS:
+        assert denied not in published
+        out = mcp_exec.run_mcp_job(NoDb(), {
+            "payload": {"tool": denied, "args": {"instruction": "x"}},
+        })
+        assert out["is_error"] is True
+        assert denied in out["text"] or denied == "export_final"
+    assert "explicit locked-card action" in \
+        mcp_exec.MCP_DENIED_MESSAGES["edit_shorts"]
+    assert "Edit each child yourself" in \
+        mcp_exec.MCP_DENIED_MESSAGES["edit_shorts"]
 
 
 def test_refused_editor_call_is_an_mcp_error_with_structured_outcome():
@@ -161,10 +166,23 @@ def test_refused_editor_call_is_an_mcp_error_with_structured_outcome():
 
     assert refused["is_error"] is True
     assert refused["tool_outcome"]["status"] == "correction_needed"
-    assert success == {
-        "is_error": False,
-        "tool_outcome": {"status": "success"},
+    assert success["is_error"] is False
+    assert success["tool_outcome"]["status"] == "success"
+
+
+def test_every_editor_non_success_is_an_mcp_error():
+    empty = type("Ctx", (), {"last_structured_tool_outcome": None})()
+    cases = {
+        "Preview render is taking too long — PREREQUISITE: still running":
+            "prerequisite",
+        "TRANSIENT FAILURE: database disconnected": "transient_failure",
+        "UNAVAILABLE: provider budget exhausted": "unavailable",
+        "UNSAFE: asset escaped project scope": "unsafe",
     }
+    for message, status in cases.items():
+        result = mcp_exec._tool_result_contract(empty, message)
+        assert result["is_error"] is True
+        assert result["tool_outcome"]["status"] == status
 
 
 def test_stock_search_handle_survives_a_new_mcp_process():

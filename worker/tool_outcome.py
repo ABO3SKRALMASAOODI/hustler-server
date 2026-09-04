@@ -1,6 +1,7 @@
 """Structured internal tool results with backwards-compatible text rendering."""
 
 from dataclasses import asdict, dataclass, field
+import re
 from typing import Any, Dict, List, Optional
 
 
@@ -41,7 +42,8 @@ class ToolOutcome:
         # byte-shaped until the public protocol is versioned.
         if self.message.strip().upper().startswith(
                 ("REJECTED", "RECIPE ABORTED", "PREREQUISITE",
-                 "TRANSIENT_FAILURE", "UNAVAILABLE", "UNSAFE",
+                 "TRANSIENT_FAILURE", "TRANSIENT FAILURE", "UNAVAILABLE",
+                 "UNSAFE",
                  "CORRECTION_NEEDED", "CORRECTION NEEDED")):
             return self.message
         prefix = self.status.upper()
@@ -64,6 +66,7 @@ def from_legacy(result, *, state_changed=False, idempotent=False,
                 affected_ranges=None):
     text = str(result if result is not None else "")
     upper = text.strip().upper()
+    first = upper.splitlines()[0] if upper else ""
     status = "success"
     retryable = False
     guidance = None
@@ -73,17 +76,19 @@ def from_legacy(result, *, state_changed=False, idempotent=False,
                          "RECIPE ABORTED")):
         status = "correction_needed"
         guidance = text.splitlines()[0][:500]
-    elif upper.startswith("PREREQUISITE"):
+    elif upper.startswith("PREREQUISITE") or "PREREQUISITE:" in first:
         status = "prerequisite"
-        retryable = True
-    elif upper.startswith(("TRANSIENT_FAILURE", "TOOL ", "FAILED", "COULD NOT")):
-        status = "transient_failure"
         retryable = True
     elif upper.startswith(("UNAVAILABLE", "UNKNOWN TOOL")):
         status = "unavailable"
         fallback = "load_tools/list the current capability directory"
     elif upper.startswith("UNSAFE"):
         status = "unsafe"
+    elif upper.startswith(("TRANSIENT_FAILURE", "TRANSIENT FAILURE",
+                           "TOOL ", "FAILED", "COULD NOT")) or re.search(
+            r"\b(?:FAILED|COULD NOT|UNAVAILABLE|ERRORED)\b", first):
+        status = "transient_failure"
+        retryable = True
     if status == "prerequisite":
         # Common repair paths remain explicit while arbitrary prerequisite
         # prose is preserved in message.

@@ -21,16 +21,17 @@ The audit immediately before this release found:
   outcome monitor also reports correction/recipe, prerequisite, transient,
   unavailable, unsafe, and structured-error results separately; do not treat
   a transport-level `done` row as a successful tool action. On the same final
-  snapshot, the 4,084 `done` rows decomposed into 3,804 actual successes, 218
-  correction/refusal outcomes, 53 transient-failure outcomes, and 9 remaining
-  structured errors: 280 agent-visible non-successes in total. Cloudflare
+  snapshot, the 4,084 `done` rows decomposed into 3,798 actual successes, 218
+  correction/refusal outcomes, 64 transient-failure outcomes, and 4 remaining
+  structured errors: 286 agent-visible non-successes in total. Cloudflare
   capacity accounted for 244 failed calls and Modal billing/capacity for 13.
 - Stock-media continuity was broken across process boundaries: 129 chosen IDs
   were unknown when used later, and only 3 of 140 observed `add_stock_media`
   calls completed successfully.
-- Of the newly-visible MCP non-successes, 53 were transient results: 35 URL
-  fetches, 14 preview renders, three frame inspections, and one asset-frame
-  inspection. Twenty-eight of the URL fetches named a Cloudflare anti-bot
+- Of the newly-visible MCP non-successes, 64 were transient results: 35 URL
+  fetches, 14 preview renders, six stock searches, five media deliveries,
+  three frame inspections, and one asset-frame inspection. Twenty-eight of
+  the URL fetches named a Cloudflare anti-bot
   challenge and yt-dlp's missing browser-impersonation dependency; the worker
   image now installs the dependency version pinned by the deployed yt-dlp
   release. Nineteen calls also wasted a round on the internal `load_tools`
@@ -89,6 +90,15 @@ whose terminal rows remain in the database.
 
 - Tool refusals and failures surface as MCP errors with a structured
   `tool_outcome`; a nominally successful transport may not hide a rejected edit.
+- Prerequisites, unsafe operations, provider unavailability, and both legacy
+  transient-failure spellings are non-successes too. They remain structured,
+  are never reported as fulfilled work, and a prerequisite-only in-house turn
+  is not billed.
+- Backend and session MCP tools now set `isError` on handled validation,
+  lookup, upload, artifact, stale-tool, and denial failures. Every public MCP
+  error response records a bounded `mcp_error_response` event containing only
+  the tool name; the pre-release historical count is unavailable by
+  construction.
 - Search-result handles are project-scoped, durable across processes, merged
   transactionally, and bounded.
 - MCP calls for one project route consistently to one Cloudflare shard while
@@ -133,10 +143,11 @@ whose terminal rows remain in the database.
 
 ## Verification completed before release
 
-- Worker pytest suite: 1,730 passed, 3 skipped.
-- Legacy worker executable checks: all 11 harnesses passed, including 1,038
+- Worker pytest suite: 1,735 passed, 3 skipped.
+- Legacy worker executable checks: all 20 harnesses passed, including 1,038
   unit checks, 22 patch checks, and 30 text-behind-subject tests.
-- Backend pytest suite: 326 passed, including the snapshot classification tests.
+- Backend pytest suite: 333 passed, 4 skipped, including MCP protocol and
+  snapshot classification tests.
 - Modal executor tests: 38 passed.
 - Cloudflare adapter TypeScript check: passed.
 - Frontend library suite on the current production base: 63 passed.

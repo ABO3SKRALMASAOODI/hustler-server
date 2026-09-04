@@ -41,7 +41,9 @@ def test_snapshot_source_counts_every_public_mcp_non_success_dialect():
     for prefix in (
             "REJECTED%%", "CORRECTION_NEEDED%%", "CORRECTION NEEDED%%",
             "RECIPE ABORTED%%", "PREREQUISITE%%", "TRANSIENT_FAILURE%%",
-            "UNAVAILABLE%%", "UNKNOWN TOOL%%", "UNSAFE%%"):
+            "TRANSIENT FAILURE%%", "UNAVAILABLE%%", "UNKNOWN TOOL%%",
+            "UNSAFE%%", "%%PREREQUISITE:%%"):
         assert prefix in source
     assert "mcp_done_non_success" in source
+    assert "mcp_error_responses" in source
     assert 'result ? \'failure\'' in source

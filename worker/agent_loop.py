@@ -3462,6 +3462,7 @@ def _turn_completion(ctx, status="replied", fail_note=None, truncated=False):
     kinds = [row.get("kind") for row in ctx.turn_tool_outcomes]
     failed = "failed" in kinds
     refused = "refused" in kinds
+    prerequisite = "prerequisite" in kinds
     # A durable plan is loaded on every later turn.  Its mere presence must
     # not turn a useful read-only question into a failed edit attempt.
     attempted_edit = bool(
@@ -3470,10 +3471,12 @@ def _turn_completion(ctx, status="replied", fail_note=None, truncated=False):
 
     if not has_value and (failed or status in {"timeout", "shutdown"}):
         outcome = "internal_error"
-    elif not has_value and (blank_canvas_no_value or refused or attempted_edit
+    elif not has_value and (blank_canvas_no_value or refused or prerequisite
+                            or attempted_edit
                             or status in {"budget", "awaiting_user"}):
         outcome = "blocked"
-    elif has_value and (status != "replied" or fail_note or failed):
+    elif has_value and (status != "replied" or fail_note or failed
+                        or prerequisite):
         outcome = "partial"
     else:
         outcome = "fulfilled"
@@ -3490,6 +3493,7 @@ def _turn_completion(ctx, status="replied", fail_note=None, truncated=False):
         terminal_without_deliverable
         or (not has_value and (
             blank_canvas_no_value or attempted_edit or failed or refused
+            or prerequisite
             or truncated
             or status in {"timeout", "shutdown", "budget", "awaiting_user",
                           "no_index"}

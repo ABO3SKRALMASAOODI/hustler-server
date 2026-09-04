@@ -60,7 +60,7 @@ import storage
 import routes.mcp_oauth as mcp_oauth
 from routes.admin import ADMIN_EMAIL
 from routes.auth import token_required
-from routes.video import complete_upload_core, vdb
+from routes.video import complete_upload_core, record_client_event, vdb
 from video_services.jobs import enqueue as _enqueue
 from video_services.project_state import (
     active_original as _active_original,
@@ -748,6 +748,14 @@ def _instructions(catalog):
 #  Jobs                                                                #
 # ------------------------------------------------------------------ #
 
+
+class _SessionToolError(str):
+    """A handled session-tool failure that must set MCP ``isError``."""
+
+
+def _session_error(message):
+    return _SessionToolError(str(message))
+
 def _job_row(job_id, user_id):
     with vdb() as conn:
         cur = conn.cursor()
@@ -928,22 +936,30 @@ def _run_tool_job(tok, name, args, raw=False, project_id=None):
     text — only watch_video needs it, because the file it produced has to
     become an MCP content block and a string cannot carry one."""
     def _out(text, result=None):
-        return (result if raw and result is not None
-                else ({"text": text} if raw else text))
+        if raw:
+            if result is not None:
+                return result
+            return {"text": text,
+                    "is_error": isinstance(text, _SessionToolError)}
+        if isinstance(result, dict) and result.get("is_error"):
+            return _session_error(text)
+        return text
 
     # Internal callers must also be explicit. Keeping an active-pointer
     # fallback here would let one future session tool accidentally reopen the
     # exact wrong-project class this layer is meant to eliminate.
     if not project_id:
-        return _out("No explicit project_id was supplied. Call list_projects "
-                    "and copy the intended id; Valmera will not guess from "
-                    "the active project.")
+        return _out(_session_error(
+            "No explicit project_id was supplied. Call list_projects and "
+            "copy the intended id; Valmera will not guess from the active "
+            "project."))
     with vdb() as conn:
         cur = conn.cursor()
         project = _project_for_user(cur, project_id, tok["user_id"])
         if not project:
-            return _out(f"Project {project_id} does not exist on this account. "
-                        "Call list_projects and copy the intended id.")
+            return _out(_session_error(
+                f"Project {project_id} does not exist on this account. Call "
+                "list_projects and copy the intended id."))
         catalog = _catalog() or {}
         mutation = name in set(catalog.get("write_tools") or []) or name in {
             "reset_edit"}
@@ -963,7 +979,8 @@ def _run_tool_job(tok, name, args, raw=False, project_id=None):
              "__media__": "Fetching the video"}.get(name, name)
     row = _wait(job_id, tok["user_id"])
     if not row:
-        return _out(f"Tool call {name} vanished from the queue — try it again.")
+        return _out(_session_error(
+            f"Tool call {name} vanished from the queue — try it again."))
     identity = f"PROJECT {project_id} — \"{project.get('title') or 'Untitled'}\""
     if row["state"] == "failed":
         failed = _mutation_failure_result(row, project_id, label)
@@ -1065,14 +1082,20 @@ def _t_open_project(tok, args):
     try:
         project_id = int(args.get("project_id"))
     except (TypeError, ValueError):
-        return "project_id must be an integer — see list_projects."
+        return _session_error(
+            "project_id must be an integer — see list_projects.")
     with vdb() as conn:
         cur = conn.cursor()
         p = _project_for_user(cur, project_id, tok["user_id"])
         if not p:
-            return f"Project {project_id} does not exist on this account."
+            return _session_error(
+                f"Project {project_id} does not exist on this account.")
     _set_active_project(tok, project_id)
     state = _run_tool_job(tok, "__state__", {}, project_id=project_id)
+    if isinstance(state, _SessionToolError):
+        return _session_error(
+            f"Opened project {project_id}, but its state could not be read. "
+            f"{state}")
     return f"Opened project {project_id} — \"{p['title']}\".\n\n{state}"
 
 
@@ -1087,13 +1110,15 @@ def _t_open_short(tok, args):
     raw_parent = args.get("parent_project_id")
     raw_child = args.get("child_project_id")
     if raw_parent is None and raw_child is None:
-        return ("card selection requires parent_project_id. Alternatively "
-                "pass child_project_id directly; open_short never guesses a "
-                "board from the active-project pointer.")
+        return _session_error(
+            "card selection requires parent_project_id. Alternatively pass "
+            "child_project_id directly; open_short never guesses a board "
+            "from the active-project pointer.")
     try:
         lookup_id = int(raw_parent if raw_parent is not None else raw_child)
     except (TypeError, ValueError):
-        return "parent_project_id/child_project_id must be an integer."
+        return _session_error(
+            "parent_project_id/child_project_id must be an integer.")
 
     with vdb() as conn:
         cur = conn.cursor()
@@ -1103,7 +1128,8 @@ def _t_open_short(tok, args):
                     (lookup_id, int(tok["user_id"])))
         selected = cur.fetchone()
         if not selected:
-            return f"Project {lookup_id} does not exist on this account."
+            return _session_error(
+                f"Project {lookup_id} does not exist on this account.")
         if raw_parent is None and selected.get("parent_project_id"):
             cur.execute("""SELECT id, title, kind, parent_project_id, meta
                            FROM projects
@@ -1113,7 +1139,8 @@ def _t_open_short(tok, args):
         else:
             parent = selected
         if not parent:
-            return "The generated short's parent board no longer exists."
+            return _session_error(
+                "The generated short's parent board no longer exists.")
 
         clips = sorted(
             ((((parent.get("meta") or {}).get("shorts") or {}).get("clips"))
@@ -1122,43 +1149,55 @@ def _t_open_short(tok, args):
                            c.get("child_project_id") or 10 ** 12))
         live = [c for c in clips if c.get("child_project_id")]
         if not clips or not live:
-            return (f"Project {parent['id']} has no ready generated shorts. "
-                    "Call shorts_status to check the planner.")
+            return _session_error(
+                f"Project {parent['id']} has no ready generated shorts. "
+                "Call shorts_status to check the planner.")
 
         raw_card = args.get("card")
         if (raw_card is None) == (raw_child is None):
-            return ("Pass exactly one selector: card (the 1-based number from "
-                    "shorts_status) or child_project_id.")
+            return _session_error(
+                "Pass exactly one selector: card (the 1-based number from "
+                "shorts_status) or child_project_id.")
         if raw_card is not None:
             try:
                 card = int(raw_card)
             except (TypeError, ValueError):
-                return "card must be a 1-based integer from shorts_status."
+                return _session_error(
+                    "card must be a 1-based integer from shorts_status.")
             if card < 1 or card > len(clips):
-                return (f"Card {card} does not exist on parent {parent['id']} "
-                        f"— choose 1-{len(clips)}.")
+                return _session_error(
+                    f"Card {card} does not exist on parent {parent['id']} — "
+                    f"choose 1-{len(clips)}.")
             clip = clips[card - 1]
             if not clip.get("child_project_id"):
-                return (f"Card {card} is still building and has no child EDL "
-                        "to open yet. Poll shorts_status and try again.")
+                return _session_error(
+                    f"Card {card} is still building and has no child EDL to "
+                    "open yet. Poll shorts_status and try again.")
         else:
             try:
                 child_id = int(raw_child)
             except (TypeError, ValueError):
-                return "child_project_id must be an integer from shorts_status."
+                return _session_error(
+                    "child_project_id must be an integer from shorts_status.")
             clip = next((c for c in live
                          if int(c["child_project_id"]) == child_id), None)
             if not clip:
-                return (f"Project {child_id} is not a generated short on "
-                        f"parent {parent['id']}.")
+                return _session_error(
+                    f"Project {child_id} is not a generated short on parent "
+                    f"{parent['id']}.")
 
         child_id = int(clip["child_project_id"])
         child = _project_for_user(cur, child_id, tok["user_id"])
         if not child:
-            return f"Generated short project {child_id} no longer exists."
+            return _session_error(
+                f"Generated short project {child_id} no longer exists.")
 
     _set_active_project(tok, child_id)
     state = _run_tool_job(tok, "__state__", {}, project_id=child_id)
+    if isinstance(state, _SessionToolError):
+        return _session_error(
+            f"Opened short project {child_id}, but its state could not be "
+            f"read. {state}")
     return (f"Opened short project {child_id} — "
             f"\"{clip.get('title') or child.get('title') or 'Untitled short'}\" "
             f"from board {parent['id']} for DIRECT MCP editing. No Valmera "
@@ -1171,7 +1210,7 @@ def _t_create_project(tok, args):
     title = (args.get("title") or "").strip() or "Untitled project"
     kind = (args.get("kind") or "edit").strip().lower()
     if kind not in ("edit", "shorts"):
-        return "kind must be 'edit' or 'shorts'."
+        return _session_error("kind must be 'edit' or 'shorts'.")
     with vdb() as conn:
         cur = conn.cursor()
         cur.execute("""INSERT INTO chat_sessions (user_id, title)
@@ -1200,7 +1239,7 @@ def _t_create_project(tok, args):
 def _t_project_state(tok, args):
     project_id, error = _required_project_id(args)
     if error:
-        return error
+        return _session_error(error)
     return _run_tool_job(tok, "__state__", {}, project_id=project_id)
 
 
@@ -1250,33 +1289,36 @@ def _upload_finish_call(project_id, key, filename, kind, role, duration_s,
 def _t_upload_start(tok, args):
     project_id, error = _required_project_id(args)
     if error:
-        return error
+        return _session_error(error)
     if not storage.is_configured():
-        return "Storage is not configured on this deployment."
+        return _session_error("Storage is not configured on this deployment.")
     filename = args.get("filename") or ""
     kind = args.get("kind") or "original"
     if kind not in ("original", "music", "image", "clip"):
-        return "kind must be one of: original, clip, music, image."
+        return _session_error(
+            "kind must be one of: original, clip, music, image.")
     role, duration_s, error = _upload_contract(args, kind)
     if error:
-        return error
+        return _session_error(error)
     try:
         nbytes = int(args.get("size_bytes"))
     except (TypeError, ValueError):
-        return ("size_bytes must be the exact byte size of the local file "
-                "(stat -f%z on macOS, stat -c%s on Linux).")
+        return _session_error(
+            "size_bytes must be the exact byte size of the local file "
+            "(stat -f%z on macOS, stat -c%s on Linux).")
     try:
         ext, content_type = storage.validate_upload(filename, nbytes, kind)
     except ValueError as e:
-        return str(e)
+        return _session_error(str(e))
     with vdb() as conn:
         if not _project_for_user(conn.cursor(), project_id, tok["user_id"]):
-            return f"Project {project_id} does not exist on this account."
+            return _session_error(
+                f"Project {project_id} does not exist on this account.")
     key = storage.new_original_key(project_id, ext, kind)
     try:
         out = storage.presign_upload(key, nbytes, content_type)
     except Exception as e:
-        return f"Could not prepare the upload: {e}"
+        return _session_error(f"Could not prepare the upload: {e}")
 
     finish_call, finish_args = _upload_finish_call(
         project_id, key, filename, kind, role, duration_s,
@@ -1315,11 +1357,11 @@ def _t_upload_start(tok, args):
 def _t_upload_finish(tok, args):
     project_id, error = _required_project_id(args)
     if error:
-        return error
+        return _session_error(error)
     kind = args.get("kind") or "original"
     role, duration_s, error = _upload_contract(args, kind)
     if error:
-        return error
+        return _session_error(error)
     payload, status = complete_upload_core(
         tok["user_id"], project_id,
         {"storage_key": args.get("storage_key"),
@@ -1330,7 +1372,8 @@ def _t_upload_finish(tok, args):
          "role": role,
          "duration_s": duration_s})
     if status >= 400:
-        return f"Upload could not be finished: {payload.get('error')}"
+        return _session_error(
+            f"Upload could not be finished: {payload.get('error')}")
     if role == "shorts_reference":
         analysis = ""
         if payload.get("index_job_id"):
@@ -1355,12 +1398,13 @@ def _t_upload_finish(tok, args):
 def _t_index_status(tok, args):
     project_id, error = _required_project_id(args)
     if error:
-        return error
+        return _session_error(error)
     with vdb() as conn:
         cur = conn.cursor()
         project = _project_for_user(cur, project_id, tok["user_id"])
         if not project:
-            return f"Project {project_id} does not exist on this account."
+            return _session_error(
+                f"Project {project_id} does not exist on this account.")
         original = _active_original(cur, project_id)
         if not original:
             return ("No main video in this project — it is a canvas program. "
@@ -1386,7 +1430,7 @@ def _t_shorts_status(tok, args):
     """Return the Shorts board in words, including IDs an MCP model can open."""
     project_id, error = _required_project_id(args)
     if error:
-        return error
+        return _session_error(error)
 
     with vdb() as conn:
         cur = conn.cursor()
@@ -1396,7 +1440,8 @@ def _t_shorts_status(tok, args):
                     (project_id, int(tok["user_id"])))
         selected = cur.fetchone()
         if not selected:
-            return f"Project {project_id} does not exist on this account."
+            return _session_error(
+                f"Project {project_id} does not exist on this account.")
 
         parent_note = ""
         parent = selected
@@ -1567,10 +1612,10 @@ def _t_wait_for_job(tok, args):
     try:
         job_id = int(args.get("job_id"))
     except (TypeError, ValueError):
-        return "job_id must be an integer."
+        return _session_error("job_id must be an integer.")
     row = _wait(job_id, tok["user_id"])
     if not row:
-        return f"No job {job_id} on this account."
+        return _session_error(f"No job {job_id} on this account.")
     identity = ""
     if row.get("project_id") is not None:
         with vdb() as conn:
@@ -1590,8 +1635,9 @@ def _t_wait_for_job(tok, args):
             if structured:
                 public["structuredContent"] = structured
             return public
-        return (identity +
-                f"Job {job_id} ({row['type']}) FAILED: {row.get('error')}")
+        return _session_error(
+            identity +
+            f"Job {job_id} ({row['type']}) FAILED: {row.get('error')}")
     if row["state"] in ("queued", "running"):
         return identity + _still_running(row, f"job {job_id} ({row['type']})")
     result = row.get("result") or {}
@@ -1619,15 +1665,16 @@ def _t_wait_for_job(tok, args):
 def _t_download_url(tok, args):
     project_id, error = _required_project_id(args)
     if error:
-        return error
+        return _session_error(error)
     kind = args.get("kind") or "preview"
     if kind not in ("preview", "final"):
-        return "kind must be 'preview' or 'final'."
+        return _session_error("kind must be 'preview' or 'final'.")
     with vdb() as conn:
         cur = conn.cursor()
         project = _project_for_user(cur, project_id, tok["user_id"])
         if not project:
-            return f"Project {project_id} does not exist on this account."
+            return _session_error(
+                f"Project {project_id} does not exist on this account.")
         # Renders are assets of kind 'render'; the variant and the EDL version
         # they were made from live in meta.
         sql = """SELECT id, storage_key, duration_s, meta FROM assets
@@ -1640,16 +1687,21 @@ def _t_download_url(tok, args):
             # policy cannot be proven from the asset itself.
             sql += " AND meta->>'audio_model_review' = 'false'"
         if args.get("edl_version") is not None:
+            try:
+                version = int(args["edl_version"])
+            except (TypeError, ValueError):
+                return _session_error("edl_version must be an integer.")
             sql += " AND (meta->>'edl_version')::int = %s"
-            params.append(int(args["edl_version"]))
+            params.append(version)
         sql += " ORDER BY id DESC LIMIT 1"
         cur.execute(sql, params)
         row = cur.fetchone()
     if not row:
-        return (f"No {kind} has been rendered yet"
-                + (" with audio_model_review=false — call render_preview."
-                   if kind == "preview"
-                   else " — final export is created in Valmera Studio."))
+        return _session_error(
+            f"No {kind} has been rendered yet"
+            + (" with audio_model_review=false — call render_preview."
+               if kind == "preview"
+               else " — final export is created in Valmera Studio."))
     receipt = None
     if kind == "preview":
         # Validate provenance before minting a bearer URL.  An asset stamped
@@ -1657,15 +1709,16 @@ def _t_download_url(tok, args):
         # evidence and should not escape through this endpoint.
         receipt = _preview_asset_receipt(row)
         if receipt is None:
-            return ("The matching preview lacks complete deterministic-only "
-                    "provenance or carries listener artifacts, so it cannot "
-                    "be used as Codex evidence. Call "
-                    "render_preview to create audio_model_review=false "
-                    "evidence with zero listener excerpts.")
+            return _session_error(
+                "The matching preview lacks complete deterministic-only "
+                "provenance or carries listener artifacts, so it cannot be "
+                "used as Codex evidence. Call render_preview to create "
+                "audio_model_review=false evidence with zero listener "
+                "excerpts.")
     try:
         url = storage.presign_get(row["storage_key"])
     except Exception as e:
-        return f"Could not mint a download link: {e}"
+        return _session_error(f"Could not mint a download link: {e}")
     ver = (row.get("meta") or {}).get("edl_version")
     if kind == "preview":
         receipt["url"] = url
@@ -1802,6 +1855,21 @@ def _text(s, is_error=False):
     return {"content": [{"type": "text", "text": s}], "isError": is_error}
 
 
+def _tool_call_result(req_id, tok, name, result):
+    """Return a tools/call result and count every public MCP error response.
+
+    Queue-backed editor failures remain in ``video_jobs``. This deliberately
+    records the public boundary too: it covers validation, stale/denied tools,
+    session helpers, artifact delivery, and internal exceptions that never
+    create a job. Only the bounded tool name is retained.
+    """
+    if isinstance(result, dict) and bool(result.get("isError")):
+        record_client_event(
+            tok["user_id"], None, "mcp_error_response",
+            detail={"tool": str(name or "unknown")[:100]}, origin="mcp")
+    return _result(req_id, result)
+
+
 # Biggest picture to carry in a reply. A contact sheet is a few hundred KB;
 # this is a sanity bound, not a budget the caller ever notices.
 IMAGE_MAX_BYTES = int(float(os.getenv("MCP_IMAGE_MAX_MB", "6")) * 1048576)
@@ -1860,9 +1928,14 @@ def _image_blocks(images):
 def _handle(tok, msg):
     """One JSON-RPC message. Returns a response dict, or None for a
     notification (which by protocol gets no reply)."""
+    if not isinstance(msg, dict):
+        return _error(None, -32600, "invalid request: expected an object")
     method = msg.get("method")
     req_id = msg.get("id")
-    params = msg.get("params") or {}
+    raw_params = msg.get("params")
+    if raw_params is not None and not isinstance(raw_params, dict):
+        return _error(req_id, -32602, "invalid params: expected an object")
+    params = raw_params or {}
 
     if method == "initialize":
         catalog = _catalog()
@@ -1894,12 +1967,17 @@ def _handle(tok, msg):
         name = params.get("name") or ""
         args = params.get("arguments") or {}
         if not isinstance(args, dict):
-            return _result(req_id, _text("arguments must be an object.", True))
+            return _tool_call_result(
+                req_id, tok, name,
+                _text("arguments must be an object.", True))
         if name in MCP_DENIED_TOOLS:
-            return _result(req_id, _text(MCP_DENIED_MESSAGES[name], True))
+            return _tool_call_result(
+                req_id, tok, name, _text(MCP_DENIED_MESSAGES[name], True))
         try:
             if name in SESSION_IMPL:
                 out = SESSION_IMPL[name](tok, args)
+                session_error = isinstance(out, _SessionToolError) or (
+                    isinstance(out, dict) and bool(out.get("isError")))
                 # Almost every session tool answers with a string. watch_video
                 # answers with a whole tools/call result, because a video
                 # cannot be a sentence.
@@ -1911,8 +1989,9 @@ def _handle(tok, msg):
                         tok, args.get("project_id"))
                     if identity:
                         out = identity + "\n" + out
-                return _result(req_id, out if isinstance(out, dict)
-                               else _text(out))
+                return _tool_call_result(
+                    req_id, tok, name, out if isinstance(out, dict)
+                    else _text(str(out), session_error))
             catalog = _catalog()
             known = {t["name"] for t in _editor_tools(catalog)}
             if name not in known:
@@ -1920,7 +1999,7 @@ def _handle(tok, msg):
                 # tool exists but this deployment has it switched off (no key
                 # for its backing service), and "unknown tool" alone would
                 # send the model looking for a typo.
-                return _result(req_id, _text(
+                return _tool_call_result(req_id, tok, name, _text(
                     f"There is no tool called '{name}' on this deployment. "
                     "Call tools/list for what is actually available — a tool "
                     "whose backing service is unconfigured is hidden rather "
@@ -1929,7 +2008,7 @@ def _handle(tok, msg):
             try:
                 project_id = int(raw_project_id)
             except (TypeError, ValueError):
-                return _result(req_id, _text(
+                return _tool_call_result(req_id, tok, name, _text(
                     f"{name} requires an explicit integer project_id. Call "
                     "list_projects/open_project, then pass that same id on "
                     "every editor tool call; Valmera will not guess from the "
@@ -1989,13 +2068,13 @@ def _handle(tok, msg):
             structured = _editor_structured_content(out)
             if structured:
                 public["structuredContent"] = structured
-            return _result(req_id, public)
+            return _tool_call_result(req_id, tok, name, public)
         except Exception as e:
             trace_id = secrets.token_hex(8)
             current_app.logger.exception(
                 "mcp tool %s project=%s failed reference=%s",
                 name, args.get("project_id"), trace_id)
-            return _result(req_id, _text(
+            return _tool_call_result(req_id, tok, name, _text(
                 f"{name} encountered an internal error. No completion can "
                 f"be inferred from this response; inspect the project or "
                 f"wait for its queued job before retrying. Reference "
@@ -2151,6 +2230,8 @@ def mcp_endpoint():
         return jsonify(_error(None, -32700, "parse error")), 400
 
     batch = isinstance(body, list)
+    if batch and not body:
+        return _respond(_error(None, -32600, "invalid request: empty batch"))
     msgs = body if batch else [body]
     out = []
     for msg in msgs:

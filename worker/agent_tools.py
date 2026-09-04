@@ -19703,7 +19703,8 @@ def apply_edit_recipe(ctx, operations, brief=None, completes_steps=None):
         ids_before = _edl_object_ids(stage._edl) if save_as else None
         result = execute(stage, name, args)
         result_kind = tool_result_kind(result)
-        if not isinstance(result, str) or result_kind in {"refused", "failed"}:
+        if not isinstance(result, str) or result_kind not in {
+                "success", "no_change"}:
             # Removing an object is idempotent inside an atomic repair batch.
             # A stale id must not discard eleven valid sibling operations; the
             # requested end state (that object absent) is already true.
@@ -24461,21 +24462,16 @@ def tool_result_kind(result):
     if not isinstance(result, str):
         return "success"
     text = result.strip()
-    first = text.splitlines()[0] if text else ""
-    low = first.lower()
-    if text.startswith(("REJECTED", "CORRECTION_NEEDED", "CORRECTION NEEDED",
-                        "RECIPE ABORTED", "UNAVAILABLE", "Unknown tool")):
-        return "refused"
-    # Tool failures are not written in one historical dialect: some begin
-    # "Could not…", while others say "the image was generated but could not
-    # be saved" or "audio analysis unavailable". Classify the first line by
-    # meaning so those turns neither charge nor enter another blind retry.
-    if first.startswith(("Tool ", "FAILED", "TRANSIENT_FAILURE")) or re.search(
-            r"\b(failed|could not|unavailable|errored)\b", low):
-        return "failed"
     if text.startswith("NO CHANGE"):
         return "no_change"
-    return "success"
+    status = tool_outcome_mod.from_legacy(text).status
+    return {
+        "correction_needed": "refused",
+        "prerequisite": "prerequisite",
+        "transient_failure": "failed",
+        "unavailable": "failed",
+        "unsafe": "refused",
+    }.get(status, "success")
 
 
 def _without_object_id(value):
@@ -24667,6 +24663,8 @@ def execute(ctx, name, args):
         _count_tool_outcome(ctx, "tool_refused")
     elif kind == "failed":
         _count_tool_outcome(ctx, "tool_failed")
+    elif kind == "prerequisite":
+        _count_tool_outcome(ctx, "tool_prerequisite")
     if replay_key is not None and isinstance(out, str) \
             and out.startswith("EDL v"):
         try:

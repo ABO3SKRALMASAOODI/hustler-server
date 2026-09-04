@@ -45,6 +45,7 @@ import llm
 import mcp_media
 import resource_usage
 import storage
+import tool_outcome
 from agent_prompt import system_prompt
 
 # Control calls the backend makes on the model's behalf — not editor tools, so
@@ -58,12 +59,21 @@ MEDIA_TOOL = "__media__"        # watch_video — see mcp_media.py
 # lifecycle reserves in-house child-agent boot for an explicit Studio press.
 # The model on the other end of MCP is already the editor, so it opens a child
 # and edits that EDL directly.
-MCP_DENIED_TOOLS = frozenset({"edit_shorts"})
-MCP_DENIED_MESSAGE = (
-    "edit_shorts is unavailable over MCP. Studio's child-agent boot is an "
-    "explicit locked-card action. Edit each child yourself: call "
-    "shorts_status, open_short, then use the normal EDL editing and preview "
-    "tools.")
+MCP_DENIED_MESSAGES = {
+    "export_final": (
+        "Final export is deliberately unavailable over MCP. Finish and "
+        "verify the edit with render_preview/watch_video, then ask the user "
+        "to export it from Valmera Studio."),
+    "edit_shorts": (
+        "edit_shorts is unavailable over MCP. Studio's child-agent boot is "
+        "an explicit locked-card action. Edit each child yourself: call "
+        "shorts_status, open_short, then use the normal EDL editing and "
+        "preview tools."),
+    "load_tools": (
+        "load_tools is internal context paging for Valmera's own agent and "
+        "is not meaningful over MCP. Use the complete tools/list catalog."),
+}
+MCP_DENIED_TOOLS = frozenset(MCP_DENIED_MESSAGES)
 
 
 class _Session:
@@ -198,12 +208,12 @@ def _tool_result_contract(ctx, text):
     success for that text caused callers and dashboards to count 192 refused
     operations as wins and encouraged models to continue from a false premise.
     """
-    kind = agent_tools.tool_result_kind(text)
     structured = getattr(ctx, "last_structured_tool_outcome", None)
-    if not isinstance(structured, dict):
-        structured = {"status": kind}
+    if not isinstance(structured, dict) or \
+            structured.get("status") not in tool_outcome.STATUSES:
+        structured = tool_outcome.from_legacy(text).to_dict()
     return {
-        "is_error": kind in {"refused", "failed"},
+        "is_error": structured["status"] != "success",
         "tool_outcome": structured,
     }
 
@@ -310,7 +320,7 @@ def run_mcp_job(worker_db, job):
     # The backend also refuses this before queueing, but the worker is the
     # authority that would otherwise enqueue the agent turns.
     if tool in MCP_DENIED_TOOLS:
-        return {"text": MCP_DENIED_MESSAGE, "is_error": True}
+        return {"text": MCP_DENIED_MESSAGES[tool], "is_error": True}
 
     project = worker_db.run(dbx.get_project, job["project_id"])
     if not project:
@@ -389,7 +399,8 @@ def run_mcp_job(worker_db, job):
                 # ask_user exists to suspend the in-house loop. Over MCP the
                 # model IS talking to the user already, so the honest answer
                 # is to hand the question back rather than pretend to wait.
-                text = (f"ASK THE USER YOURSELF — nothing was changed. "
+                text = (f"PREREQUISITE: ASK THE USER YOURSELF — nothing was "
+                        "changed. "
                         f"Question: {e.question}")
             after = ctx.latest_edl()["version"]
 

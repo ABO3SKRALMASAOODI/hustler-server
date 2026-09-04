@@ -327,6 +327,30 @@ def test_notification_gets_no_reply(client):
     assert r.status_code == 202 and not r.data
 
 
+@pytest.mark.parametrize("body", ["not-an-object", 7, []])
+def test_malformed_jsonrpc_envelopes_are_invalid_requests(client, body):
+    response = client.post(
+        "/mcp",
+        headers={"Authorization": f"Bearer {STATIC_TOKEN}",
+                 "Content-Type": "application/json"},
+        data=json.dumps(body))
+    error = response.get_json()["error"]
+    assert error["code"] == -32600
+    assert "invalid request" in error["message"]
+
+
+def test_non_object_params_are_invalid_params(client):
+    response = client.post(
+        "/mcp",
+        headers={"Authorization": f"Bearer {STATIC_TOKEN}",
+                 "Content-Type": "application/json"},
+        data=json.dumps({"jsonrpc": "2.0", "id": 4,
+                         "method": "tools/list", "params": []}))
+    error = response.get_json()["error"]
+    assert error["code"] == -32602
+    assert "invalid params" in error["message"]
+
+
 def test_tools_list_is_session_tools_plus_the_worker_registry(client):
     tools = rpc(client, "tools/list", STATIC_TOKEN).get_json()["result"]["tools"]
     names = [t["name"] for t in tools]
@@ -365,6 +389,54 @@ def test_stale_child_agent_boot_call_is_refused_before_queueing(client):
         r["content"][0]["text"]
     assert "You are the editor" in r["content"][0]["text"]
     assert DB["enqueued"] == []
+
+
+def test_every_public_tool_error_records_only_its_name(client, monkeypatch):
+    events = []
+
+    def capture(user_id, project_id, kind, asset_id=None, detail=None,
+                origin="client"):
+        events.append({"user_id": user_id, "project_id": project_id,
+                       "kind": kind, "asset_id": asset_id,
+                       "detail": detail, "origin": origin})
+        return True
+
+    monkeypatch.setattr(mcpmod, "record_client_event", capture)
+    bad_arguments = rpc(client, "tools/call", STATIC_TOKEN, {
+        "name": "get_transcript", "arguments": ["not", "an", "object"],
+    }).get_json()["result"]
+    denied = rpc(client, "tools/call", STATIC_TOKEN, {
+        "name": "load_tools", "arguments": {},
+    }).get_json()["result"]
+    bad_session = rpc(client, "tools/call", STATIC_TOKEN, {
+        "name": "create_project", "arguments": {"kind": "mystery"},
+    }).get_json()["result"]
+    unknown = rpc(client, "tools/call", STATIC_TOKEN, {
+        "name": "stale_tool_name", "arguments": {},
+    }).get_json()["result"]
+
+    assert all(result["isError"] is True for result in (
+        bad_arguments, denied, bad_session, unknown))
+    assert [event["detail"] for event in events] == [
+        {"tool": "get_transcript"}, {"tool": "load_tools"},
+        {"tool": "create_project"}, {"tool": "stale_tool_name"},
+    ]
+    assert all(set(event["detail"]) == {"tool"} for event in events)
+    assert all(event["kind"] == "mcp_error_response" for event in events)
+    assert all(event["project_id"] is None and event["asset_id"] is None
+               and event["origin"] == "mcp" for event in events)
+
+    rpc(client, "tools/call", STATIC_TOKEN, {
+        "name": "get_transcript", "arguments": {"project_id": 3},
+    })
+    assert len(events) == 4
+
+
+def test_raw_worker_boundary_failure_keeps_its_error_bit():
+    out = mcpmod._run_tool_job(
+        {"user_id": 60}, "get_transcript", {}, raw=True, project_id=None)
+    assert out["is_error"] is True
+    assert "will not guess" in out["text"]
 
 
 def test_podcast_shorts_are_first_class_session_tools(client):
@@ -530,20 +602,24 @@ def test_open_short_resolves_an_explicit_child_without_active_pointer(client):
 
 
 def test_open_short_rejects_an_unknown_explicit_child(client):
-    body = text_of(rpc(client, "tools/call", STATIC_TOKEN,
-                       {"name": "open_short",
-                        "arguments": {"child_project_id": 999}}))
+    response = rpc(client, "tools/call", STATIC_TOKEN,
+                   {"name": "open_short",
+                    "arguments": {"child_project_id": 999}})
+    body = text_of(response)
     assert DB["static_project"] == 3
     assert "does not exist on this account" in body
+    assert response.get_json()["result"]["isError"] is True
 
 
 def test_open_short_card_numbers_match_status_while_earlier_card_builds(client):
     DB["project_rows"][3]["meta"]["shorts"]["clips"].insert(
         0, {"order": -1, "title": "Building", "start": 0, "end": 20})
-    waiting = text_of(rpc(client, "tools/call", STATIC_TOKEN,
-                          {"name": "open_short", "arguments": {
-                              "parent_project_id": 3, "card": 1}}))
+    waiting_response = rpc(client, "tools/call", STATIC_TOKEN,
+                           {"name": "open_short", "arguments": {
+                               "parent_project_id": 3, "card": 1}})
+    waiting = text_of(waiting_response)
     assert "still building" in waiting
+    assert waiting_response.get_json()["result"]["isError"] is True
     body = text_of(rpc(client, "tools/call", STATIC_TOKEN,
                        {"name": "open_short", "arguments": {
                            "parent_project_id": 3, "card": 2}}))
@@ -993,6 +1069,7 @@ def test_preview_download_rejects_listener_enabled_cached_asset(
     assert "audio_model_review=false" in public["content"][0]["text"]
     assert "call render_preview" in public["content"][0]["text"]
     assert "structuredContent" not in public
+    assert public["isError"] is True
 
 
 def test_preview_download_rejects_false_stamp_with_listener_artifacts(
@@ -1018,6 +1095,7 @@ def test_preview_download_rejects_false_stamp_with_listener_artifacts(
     assert "listener artifacts" in public["content"][0]["text"]
     assert "Call render_preview" in public["content"][0]["text"]
     assert "structuredContent" not in public
+    assert public["isError"] is True
 
 
 def test_preview_download_rejects_false_legacy_asset_without_job_lineage(
@@ -1042,6 +1120,7 @@ def test_preview_download_rejects_false_legacy_asset_without_job_lineage(
         public["content"][0]["text"]
     assert "Call render_preview" in public["content"][0]["text"]
     assert "structuredContent" not in public
+    assert public["isError"] is True
 
 
 @pytest.mark.parametrize("duration_s", [0, float("nan"), float("inf")])
@@ -1066,6 +1145,7 @@ def test_preview_download_rejects_non_positive_or_non_finite_duration(
     assert "lacks complete deterministic-only provenance" in \
         public["content"][0]["text"]
     assert "structuredContent" not in public
+    assert public["isError"] is True
 
 
 def test_a_small_video_comes_back_embedded_beside_its_link(client, monkeypatch):

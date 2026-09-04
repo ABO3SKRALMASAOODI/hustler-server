@@ -5449,7 +5449,12 @@ CLIENT_EVENT_KINDS = {"player_error", "player_error_probe",
                       "subscription_upload_locked",
                       "subscription_cards_impression",
                       "subscription_cards_dismissed",
-                      "subscription_cards_plan_selected"}
+                      "subscription_cards_plan_selected",
+                      # Backend-only MCP session tools do not create a
+                      # video_jobs row. Store only their tool name when they
+                      # refuse/fail so operations can count the otherwise
+                      # invisible error surface without retaining arguments.
+                      "mcp_error_response"}
 
 # The kinds that mean "a user tried to give us a video and we did not take it".
 # Surfaced in admin on their own rather than mixed into the rest, because these
@@ -5502,8 +5507,9 @@ def record_client_event(user_id, project_id, kind, asset_id=None, detail=None,
             # are cheap to call in a loop from a page the user controls.
             cur.execute("""SELECT COUNT(*) AS n FROM client_events
                            WHERE user_id = %s
+                             AND COALESCE(detail->>'origin', 'client') = %s
                              AND created_at > NOW() - INTERVAL '1 hour'""",
-                        (int(user_id),))
+                        (int(user_id), str(origin or "client")[:40]))
             if (cur.fetchone() or {}).get("n", 0) >= MAX_CLIENT_EVENTS_PER_HOUR:
                 return False
             # An asset_id from the client is a claim, not a fact. Storing an
