@@ -1,0 +1,105 @@
+name: verify-production-release
+
+# Render deploys main asynchronously. A green push is not proof that production
+# is serving it, so keep a commit status pending until /healthz reports the
+# exact source revision. Cloudflare has its own stricter staged-rollout gate.
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "backend/**"
+      - "worker/**"
+      - "start.sh"
+      - "requirements.txt"
+      - ".github/workflows/verify-production-release.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  statuses: write
+
+concurrency:
+  group: verify-production-release
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Mark production verification pending
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --method POST \
+            "repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            -f state=pending \
+            -f context=render-production \
+            -f description='Waiting for this exact commit on Render'
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Reject Python syntax regressions before waiting for Render
+        run: python -m compileall -q backend worker
+
+      - name: Confirm this exact commit is healthy on Render
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected="${GITHUB_SHA:0:12}"
+          for attempt in $(seq 1 90); do
+            response="$(curl --fail --silent --show-error --max-time 30 \
+              https://entrepreneur-bot-backend.onrender.com/healthz || true)"
+            if RESPONSE="$response" EXPECTED="$expected" python - <<'PY'
+          import json
+          import os
+          import sys
+
+          try:
+              payload = json.loads(os.environ.get("RESPONSE") or "{}")
+          except Exception:
+              sys.exit(1)
+          expected = os.environ["EXPECTED"]
+          healthy = (
+              payload.get("status") == "ok"
+              and payload.get("role") == "backend"
+              and str(payload.get("commit") or "").startswith(expected)
+          )
+          print(json.dumps(payload, sort_keys=True))
+          sys.exit(0 if healthy else 1)
+          PY
+            then
+              exit 0
+            fi
+            echo "Render has not published ${expected} yet (${attempt}/90)"
+            sleep 10
+          done
+          echo "::error::Render did not report healthy commit ${expected}" >&2
+          exit 1
+
+      - name: Mark production verified
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --method POST \
+            "repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            -f state=success \
+            -f context=render-production \
+            -f description='This exact commit is healthy on Render'
+
+      - name: Mark production verification failed
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --method POST \
+            "repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            -f state=failure \
+            -f context=render-production \
+            -f description='Syntax check failed or Render did not publish this commit'
