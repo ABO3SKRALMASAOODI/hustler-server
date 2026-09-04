@@ -1,9 +1,10 @@
 # Emergency Cloud Run fallback deployment.
 #
-# Modal is the primary executor. Building five Cloud Run services after every
-# worker edit created hundreds of unused revisions and images, so the fallback
-# is now deployed deliberately from the Actions UI only. The workflow still
-# verifies its code fingerprint before calling the release healthy.
+# Cloudflare is the primary executor. Building five Cloud Run services after
+# every worker edit created hundreds of unused revisions and images, so this
+# emergency fallback is deployed deliberately from the Actions UI only. The
+# workflow still verifies its code fingerprint before calling the release
+# healthy.
 #
 # Setup (once): a GCP service account with run.admin +
 # cloudbuild.builds.editor + storage.admin project roles, serviceAccountUser
@@ -45,7 +46,7 @@ jobs:
     needs: gate
     if: needs.gate.outputs.have_key == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
@@ -72,6 +73,26 @@ jobs:
             echo "should_deploy=false" >> "$GITHUB_OUTPUT"
             echo "A newer worker tree at $latest supersedes $GITHUB_SHA; skipping this deployment"
           fi
+
+      - uses: actions/setup-python@v5
+        if: steps.coalesce.outputs.should_deploy == 'true'
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: worker/requirements.txt
+
+      - name: test executor before building release images
+        if: steps.coalesce.outputs.should_deploy == 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            ffmpeg fontconfig fonts-dejavu-core fonts-noto-core fonts-noto-cjk
+          python backend/scripts/scan_tracked_secrets.py
+          python -m pip install --disable-pip-version-check \
+            -r worker/requirements.txt pytest
+          python -m compileall -q worker
+          python worker/skill_validator.py
+          PYTHONPATH=. python -m pytest -q worker/tests
 
       - uses: google-github-actions/auth@v2
         if: steps.coalesce.outputs.should_deploy == 'true'

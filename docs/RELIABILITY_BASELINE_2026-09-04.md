@@ -239,8 +239,10 @@ whose terminal rows remain in the database.
 - Cloudflare's staged rollout must pass its source-fingerprint verifier for all
   lanes. Agent-facing repository guidance names Cloudflare as primary and
   Modal/Cloud Run as manual fallbacks; do not deploy either fallback as part of
-  an ordinary worker release. Worker Python must compile and the adapter must
-  type-check before Cloudflare publishes.
+  an ordinary worker release. Every Cloudflare, Modal, or Cloud Run executor
+  deployment runs the complete worker test suite and capability validator
+  before publishing; worker Python must compile and the Cloudflare adapter must
+  type-check too.
 - No production database migration is required by this release.
 - During the first 24 hours, compare newly-created subscriber and MCP work with
   this baseline. Notify on a new root-cause cluster, a stalled logical request,
