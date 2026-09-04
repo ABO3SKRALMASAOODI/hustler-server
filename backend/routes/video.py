@@ -36,6 +36,7 @@ from video_services.jobs import (
 from video_services.project_state import (
     active_original as _active_original,
     edl_at as _edl_at,
+    index_job_state as _index_job_state,
     index_row as _index_row,
     latest_edl as _latest_edl,
     project_for_user as _project_for_user,
@@ -2928,8 +2929,14 @@ def project_state(user_id, project_id):
         #     and nothing would ever retry it. The failure note tells users
         #     "re-open the project to try again"; this makes that true —
         #     before, a failed analysis left the project dead forever.
-        ij = jobs.get("index")
-        idx_active = bool(ij and ij["state"] in ("queued", "running"))
+        # The index lane also handles uploaded clips and music.  Recovery is
+        # about the ACTIVE ORIGINAL only: a later successful attachment job
+        # must not mask its failed analysis, block its retry, or spend its
+        # bounded retry allowance.
+        main_index = _index_job_state(
+            cur, project_id, original["id"] if original else None)
+        ij = main_index if main_index["id"] is not None else None
+        idx_active = main_index["active"]
         heal_reason = None
         # is_reindex distinguishes the cases for the worker: a stale-pipeline
         # refresh must stay QUIET in chat (the project already greeted and may
@@ -2974,19 +2981,15 @@ def project_state(user_id, project_id):
             # duplicate enqueues. Lock the project row, re-check under it.
             cur.execute("SELECT id FROM projects WHERE id = %s FOR UPDATE",
                         (project_id,))
-            cur.execute("""SELECT 1 FROM video_jobs
-                           WHERE project_id = %s AND type = 'index'
-                             AND state IN ('queued','running') LIMIT 1""",
-                        (project_id,))
-            still_idle = cur.fetchone() is None
-            cur.execute("""SELECT COUNT(*) AS n FROM video_jobs
-                           WHERE project_id = %s AND type = 'index'
-                             AND created_at > NOW() - INTERVAL '6 hours'""",
-                        (project_id,))
+            # Re-read under the project lock: concurrent polls can both have
+            # observed the same failed main upload before either enqueues.
+            main_index = _index_job_state(cur, project_id, original["id"])
+            still_idle = not main_index["active"]
             # < 3: the upload's own index job counts too, so this allows the
             # original attempt plus two heals per 6h — bounded, but "re-open
-            # the project to try again" stays true on the first re-open.
-            if still_idle and cur.fetchone()["n"] < 3:
+            # the project to try again" stays true on the first re-open. Clip
+            # and music perception jobs do not consume this asset's budget.
+            if still_idle and main_index["recent_count"] < 3:
                 current_app.logger.info("project %s: re-indexing (%s)",
                                         project_id, heal_reason)
                 _enqueue(cur, project_id, user_id, "index",

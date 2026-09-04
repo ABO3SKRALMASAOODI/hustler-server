@@ -206,6 +206,194 @@ def build_snapshot(conn, days=7):
             "no_reply_and_no_later_request": int(abandoned or 0),
         }
 
+        # Score every parent project in the exact subscriber ledger cohort:
+        # an ever-completed positive payment is required.  Child shorts roll
+        # up to their parent in the product and are not independent customer
+        # projects.  These are counts only; no identity, title, content, or
+        # project/session identifier leaves this process.
+        cur.execute("""
+            WITH paid AS MATERIALIZED (
+              SELECT DISTINCT user_id FROM payments
+               WHERE status = 'completed' AND amount_cents > 0
+            ), subscriber_projects AS MATERIALIZED (
+              SELECT p.*,
+                     CASE
+                       WHEN u.billing_status IN ('past_due', 'paused')
+                         THEN 'past_due'
+                       WHEN u.billing_status = 'not_in_paddle'
+                         OR (u.billing_status = 'canceled'
+                             AND COALESCE(u.is_subscribed, 0) = 1)
+                         OR (u.billing_status IN ('active', 'trialing')
+                             AND COALESCE(u.is_subscribed, 0) = 0)
+                         OR (COALESCE(u.is_subscribed, 0) = 1
+                             AND u.subscription_id IS NULL)
+                         THEN 'attention'
+                       WHEN COALESCE(u.is_subscribed, 0) = 1
+                         AND u.billing_status IN ('active', 'trialing')
+                         THEN 'active'
+                       WHEN u.billing_status = 'canceled'
+                         OR COALESCE(u.is_subscribed, 0) = 0
+                         THEN 'canceled'
+                       ELSE 'attention'
+                     END AS cohort
+                FROM projects p
+                JOIN users u ON u.id = p.user_id
+                JOIN paid ON paid.user_id = u.id
+               WHERE p.parent_project_id IS NULL
+            ), scored AS (
+              SELECT p.id, COALESCE(p.kind, 'edit') AS kind, p.cohort,
+                     original.id AS original_id,
+                     (idx.id IS NOT NULL) AS indexed,
+                     COALESCE(proxy.present, FALSE) AS active_proxy,
+                     edl.version AS edl_version,
+                     COALESCE(render.current, FALSE) AS current_render,
+                     verification.status AS verification_status,
+                     main_index.state AS main_index_state,
+                     (all_index.asset_id IS NOT NULL
+                       AND all_index.asset_id <> original.id)
+                       AS latest_index_is_other_asset,
+                     CASE
+                       WHEN last_user.id IS NULL THEN 'none'
+                       WHEN EXISTS (
+                         SELECT 1 FROM chat_messages reply
+                          WHERE reply.session_id = p.chat_session_id
+                            AND reply.role = 'assistant'
+                            AND reply.id > last_user.id)
+                         THEN 'replied'
+                       ELSE 'unanswered'
+                     END AS last_user_state,
+                     GREATEST(
+                       p.created_at,
+                       COALESCE(activity.last_asset, p.created_at),
+                       COALESCE(activity.last_edl, p.created_at),
+                       COALESCE(activity.last_job, p.created_at),
+                       COALESCE(activity.last_message, p.created_at))
+                       AS last_activity,
+                     COALESCE(activity.open_jobs, 0) AS open_jobs
+                FROM subscriber_projects p
+                LEFT JOIN LATERAL (
+                  SELECT id, sha256 FROM assets
+                   WHERE project_id = p.id AND kind = 'original'
+                   ORDER BY id DESC LIMIT 1
+                ) original ON TRUE
+                LEFT JOIN LATERAL (
+                  SELECT id FROM indexes
+                   WHERE video_sha256 = original.sha256 LIMIT 1
+                ) idx ON TRUE
+                LEFT JOIN LATERAL (
+                  SELECT TRUE AS present FROM assets
+                   WHERE project_id = p.id AND kind = 'proxy'
+                     AND sha256 = original.sha256 LIMIT 1
+                ) proxy ON TRUE
+                LEFT JOIN LATERAL (
+                  SELECT version FROM edls
+                   WHERE project_id = p.id ORDER BY version DESC LIMIT 1
+                ) edl ON TRUE
+                LEFT JOIN LATERAL (
+                  SELECT TRUE AS current FROM assets
+                   WHERE project_id = p.id AND kind = 'render'
+                     AND meta->>'edl_version' ~ '^[0-9]+$'
+                     AND (meta->>'edl_version')::int = edl.version
+                     AND (meta->>'variant' = 'preview'
+                       OR (p.kind = 'short'
+                           AND meta->>'variant' = 'final'))
+                   LIMIT 1
+                ) render ON TRUE
+                LEFT JOIN verification_records verification
+                  ON verification.project_id = p.id
+                 AND verification.edl_version = edl.version
+                LEFT JOIN LATERAL (
+                  SELECT state FROM video_jobs
+                   WHERE project_id = p.id AND type = 'index'
+                     AND payload->>'asset_id' = original.id::text
+                   ORDER BY id DESC LIMIT 1
+                ) main_index ON TRUE
+                LEFT JOIN LATERAL (
+                  SELECT NULLIF(payload->>'asset_id', '')::bigint AS asset_id
+                    FROM video_jobs
+                   WHERE project_id = p.id AND type = 'index'
+                     AND payload->>'asset_id' ~ '^[0-9]+$'
+                   ORDER BY id DESC LIMIT 1
+                ) all_index ON TRUE
+                LEFT JOIN LATERAL (
+                  SELECT id FROM chat_messages
+                   WHERE session_id = p.chat_session_id AND role = 'user'
+                   ORDER BY id DESC LIMIT 1
+                ) last_user ON TRUE
+                LEFT JOIN LATERAL (
+                  SELECT
+                    (SELECT MAX(a.created_at) FROM assets a
+                      WHERE a.project_id = p.id) AS last_asset,
+                    (SELECT MAX(e.created_at) FROM edls e
+                      WHERE e.project_id = p.id) AS last_edl,
+                    (SELECT MAX(j.updated_at) FROM video_jobs j
+                      WHERE j.project_id = p.id) AS last_job,
+                    (SELECT MAX(m.created_at) FROM chat_messages m
+                      WHERE m.session_id = p.chat_session_id) AS last_message,
+                    (SELECT COUNT(*) FROM video_jobs j
+                      WHERE j.project_id = p.id
+                        AND j.state IN ('queued', 'running')) AS open_jobs
+                ) activity ON TRUE
+            )
+            SELECT cohort, kind, COUNT(*) AS projects,
+                   COUNT(*) FILTER (
+                     WHERE last_activity >= NOW() - %s::interval) AS active,
+                   COUNT(*) FILTER (
+                     WHERE original_id IS NULL) AS no_source,
+                   COUNT(*) FILTER (
+                     WHERE original_id IS NOT NULL AND NOT indexed)
+                     AS source_unindexed,
+                   COUNT(*) FILTER (
+                     WHERE main_index_state = 'failed')
+                     AS latest_main_index_failed,
+                   COUNT(*) FILTER (
+                     WHERE original_id IS NOT NULL AND NOT indexed
+                       AND main_index_state = 'failed'
+                       AND latest_index_is_other_asset)
+                     AS main_index_failure_masked_by_other_asset,
+                   COUNT(*) FILTER (
+                     WHERE original_id IS NOT NULL AND indexed
+                       AND NOT active_proxy) AS indexed_no_active_proxy,
+                   COUNT(*) FILTER (
+                     WHERE indexed AND edl_version IS NULL)
+                     AS indexed_no_edl,
+                   COUNT(*) FILTER (
+                     WHERE edl_version IS NOT NULL AND NOT current_render)
+                     AS latest_edl_no_current_render,
+                   COUNT(*) FILTER (
+                     WHERE verification_status = 'repair_required')
+                     AS latest_repair_required,
+                   COUNT(*) FILTER (
+                     WHERE verification_status IN ('passed', 'justified'))
+                     AS latest_verified,
+                   COUNT(*) FILTER (
+                     WHERE edl_version IS NOT NULL
+                       AND verification_status IS NULL)
+                     AS latest_no_verification,
+                   COUNT(*) FILTER (
+                     WHERE last_user_state = 'unanswered')
+                     AS unanswered_last_user,
+                   COUNT(*) FILTER (WHERE open_jobs > 0)
+                     AS projects_with_open_jobs
+              FROM scored
+             GROUP BY cohort, kind ORDER BY cohort, kind
+        """, (interval,))
+        result["subscriber_projects"] = [{
+            "cohort": row[0], "kind": row[1],
+            "projects": int(row[2]), "active_in_window": int(row[3]),
+            "no_source": int(row[4]), "source_unindexed": int(row[5]),
+            "latest_main_index_failed": int(row[6]),
+            "main_index_failure_masked_by_other_asset": int(row[7]),
+            "indexed_no_active_proxy": int(row[8]),
+            "indexed_no_edl": int(row[9]),
+            "latest_edl_no_current_render": int(row[10]),
+            "latest_repair_required": int(row[11]),
+            "latest_verified": int(row[12]),
+            "latest_no_verification": int(row[13]),
+            "unanswered_last_user": int(row[14]),
+            "projects_with_open_jobs": int(row[15]),
+        } for row in cur.fetchall()]
+
         cur.execute("""
             SELECT state, COUNT(*)
               FROM video_jobs

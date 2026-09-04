@@ -31,6 +31,15 @@ The audit immediately before this release found:
   path. One of those subscribers sent no later request and was left waiting.
   Future snapshots must report this reply coverage rather than relying on the
   queue state alone.
+- The exact paid-subscriber ledger contained 14 ever-paid customers and 23
+  parent projects: 21 active, one billing-attention, and one canceled. Three
+  active projects ended on an unanswered user message; two newest EDLs were
+  still marked `repair_required`; one untouched seed EDL had no preview yet;
+  and two main-video index paths were terminal failures. One of those main
+  failures was invisible to the studio's self-heal because a later successful
+  attachment index became the project's nominal "latest index". Project
+  health must stay asset-scoped: clips and music cannot mask or spend the
+  retry budget for the active original.
 - The provider ledger briefly exposed one expired Modal preview as `running`
   for more than four days even though its canonical queue job was already
   `failed`. The live reaper closed it during the read-only audit without manual
