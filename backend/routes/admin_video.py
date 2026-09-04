@@ -172,6 +172,14 @@ def _mcp_refusal_sql(alias=""):
              'RECIPE ABORTED%%', 'UNSAFE%%']))"""
 
 
+def _project_family_job_sql(job_alias="mt", parent_alias="p"):
+    """Scope a job to a visible parent row or one of its Shorts children."""
+    return f"""({job_alias}.project_id = {parent_alias}.id OR EXISTS (
+        SELECT 1 FROM projects family_child
+         WHERE family_child.id = {job_alias}.project_id
+           AND family_child.parent_project_id = {parent_alias}.id))"""
+
+
 def _presign(key):
     if not storage.is_configured():
         return None
@@ -1464,7 +1472,7 @@ def video_projects():
         # The child projects still exist; they surface as shorts_count here
         # and as a children list in the project detail, where their real
         # story (cut from the parent) is visible.
-        cur.execute("""
+        cur.execute(f"""
             WITH base_projects AS MATERIALIZED (
                 SELECT p.*
                   FROM projects p JOIN users su ON su.id = p.user_id
@@ -1489,15 +1497,9 @@ def video_projects():
                    (SELECT MAX(vf.updated_at) FROM video_jobs vf
                     WHERE vf.project_id = p.id AND vf.type='final'
                       AND vf.state='done') AS last_export,
-                   (SELECT COUNT(*) FROM video_jobs mt
-                    WHERE mt.project_id = p.id AND mt.type = 'mcp_tool')
-                       AS tool_calls,
-                   (SELECT COUNT(*) FROM video_jobs mt
-                    WHERE mt.project_id = p.id AND mt.type = 'mcp_tool'
-                      AND {_mcp_non_success_sql('mt')}) AS tool_failed,
-                   (SELECT COUNT(*) FROM video_jobs mt
-                    WHERE mt.project_id = p.id AND mt.type = 'mcp_tool'
-                      AND {_mcp_refusal_sql('mt')}) AS tool_rejected,
+                   tool_activity.tool_calls,
+                   tool_activity.tool_failed,
+                   tool_activity.tool_rejected,
                    (SELECT COUNT(*) FROM projects c
                     WHERE c.parent_project_id = p.id) AS shorts_count,
                    -- Round 101: how many times this project's owner met the
@@ -1542,7 +1544,17 @@ def video_projects():
                       AND cm2.role='user') AS shorts_messages,
                    """ + _TIMING_COLS + """
             FROM base_projects p JOIN users u ON u.id = p.user_id
-            """ + _PROJECT_TIMINGS + """
+            """ + _PROJECT_TIMINGS + f"""
+            LEFT JOIN LATERAL (
+                SELECT COUNT(*) AS tool_calls,
+                       COUNT(*) FILTER (
+                         WHERE {_mcp_non_success_sql('mt')}) AS tool_failed,
+                       COUNT(*) FILTER (
+                         WHERE {_mcp_refusal_sql('mt')}) AS tool_rejected
+                  FROM video_jobs mt
+                 WHERE mt.type = 'mcp_tool'
+                   AND {_project_family_job_sql('mt', 'p')}
+            ) tool_activity ON TRUE
             LEFT JOIN LATERAL (
                 SELECT MIN(pa.occurred_at) AS paid_at
                 FROM payments pa

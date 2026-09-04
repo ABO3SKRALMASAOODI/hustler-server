@@ -105,6 +105,10 @@ whose terminal rows remain in the database.
   whose agent-visible result was not successful. The 218 correction/unsafe
   refusals remain visible as their own subset, and public `isError` responses
   are shown separately because they can overlap queue-backed calls.
+- Generated Shorts children carried 4,230 of those 4,344 MCP jobs. The
+  parent-only admin table previously omitted them; its tool totals now roll up
+  the parent and every child in one aggregate while keeping child projects out
+  of the top-level project list.
 - Search-result handles are project-scoped, durable across processes, merged
   transactionally, and bounded.
 - MCP calls for one project route consistently to one Cloudflare shard while

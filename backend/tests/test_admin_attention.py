@@ -15,6 +15,7 @@ from routes.admin_video import (  # noqa: E402
     _attention_media_supersession_sql,
     _mcp_non_success_sql,
     _mcp_refusal_sql,
+    _project_family_job_sql,
     video_projects,
     video_reliability,
 )
@@ -69,6 +70,17 @@ def test_project_rows_expose_conversion_and_tool_outcomes():
     assert "pa.status = 'completed'" in source
     assert "pa.amount_cents > 0" in source
     assert "subscription_upload_locked" in source
+    assert "tool_activity.tool_calls" in source
+    assert "_project_family_job_sql('mt', 'p')" in source
+    assert 'cur.execute(f"""' in source
+    assert '+ _PROJECT_TIMINGS + f"""' in source
+
+
+def test_project_tool_rollup_includes_generated_short_children():
+    scope = _project_family_job_sql("mt", "p")
+    assert "mt.project_id = p.id" in scope
+    assert "family_child.id = mt.project_id" in scope
+    assert "family_child.parent_project_id = p.id" in scope
 
 
 def test_admin_mcp_outcomes_cover_every_public_failure_dialect():
