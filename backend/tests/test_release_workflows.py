@@ -24,3 +24,12 @@ def test_render_release_gate_covers_full_suite_health_and_public_mcp():
     assert "/healthz" in source
     assert "payload.get(\"commit\")" in source
     assert "verify_public_mcp.py" in source
+
+
+def test_render_startup_has_no_retired_app_builder_recovery_side_effects():
+    source = (ROOT / "start.sh").read_text(encoding="utf-8")
+
+    assert "set -euo pipefail" in source
+    assert "exec gunicorn" in source
+    assert "os.listdir(OUTPUTS)" not in source
+    assert "UPDATE jobs SET state" not in source

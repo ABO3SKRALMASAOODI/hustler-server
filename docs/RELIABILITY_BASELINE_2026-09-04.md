@@ -280,6 +280,10 @@ whose terminal rows remain in the database.
   old public literal, so misconfiguration is disruptive but never silently
   forgeable. Degraded health returns HTTP 503 so hosting and release checks
   cannot mistake unsafe configuration for a healthy rollout.
+- Render startup now starts only the current Gunicorn application. The retired
+  app-builder's pre-boot filesystem scan and legacy `jobs` table rewrite were
+  removed; video recovery remains in the durable video worker/remote ledger,
+  where ownership and terminal-state rules are tested.
 - Frontend pushes are not considered live until `/api/health` reports
   `status=ok`, `role=frontend`, and the exact Vercel Git commit SHA with
   `Cache-Control: no-store`.
