@@ -162,6 +162,19 @@ def test_payment_transition_is_claimed_once_without_an_early_commit():
     assert duplicate.committed == 0
 
 
+def test_paid_transaction_counts_as_collected_before_processing_completes():
+    """Paddle's `paid` state means payment was captured successfully. The
+    later `completed` state only means Paddle finished its internal processing,
+    so grace and recovery must recognize both successful states."""
+    billing._schema["ok"] = True
+    conn = _Conn([(1,)])
+
+    assert billing.subscription_has_paid(conn, "sub_paid") is True
+    sql, params = conn._cur.executed[-1]
+    assert "status IN ('paid', 'completed')" in sql
+    assert params == ("sub_paid",)
+
+
 def test_successful_payment_cannot_be_downgraded_by_late_event():
     billing._schema["ok"] = True
     conn = _Conn([{"status": "completed", "amount_cents": 1500}])
@@ -321,6 +334,87 @@ def test_no_subscription_id_is_not_an_error():
     rep = billing_sync.reconcile_user(
         conn, {"id": 1, "email": "a@b.c", "subscription_id": None})
     assert "error" not in rep and rep["changes"] == []
+
+
+def _active_reconcile(monkeypatch, *, newly_paid, price_plan="ai_pro"):
+    data = {
+        "status": "active",
+        "next_billed_at": "2026-10-01T00:00:00Z",
+        "items": [{"price": {"id": "pri_paid"}}],
+    }
+    transaction_calls = []
+    activations = []
+
+    class Conn:
+        rolled_back = 0
+
+        def rollback(self):
+            self.rolled_back += 1
+
+    conn = Conn()
+    paid_checks = iter((False, True))
+    monkeypatch.setattr(
+        billing_sync, "fetch_subscription", lambda _sub: (data, None))
+    monkeypatch.setattr(
+        billing_sync, "fetch_transactions", lambda _sub: [{
+            "id": "txn_backfilled", "status": "completed",
+            "subscription_id": "sub_123",
+            "details": {"totals": {"grand_total": "3000"}},
+        }])
+    monkeypatch.setattr(
+        billing_sync, "_plan_from_items", lambda _data: price_plan)
+    monkeypatch.setattr(
+        billing, "subscription_has_paid", lambda *_args: next(paid_checks))
+    monkeypatch.setattr(
+        billing, "record_transaction",
+        lambda *_args, **kwargs: (
+            transaction_calls.append(kwargs)
+            or {"recorded": True, "newly_paid": newly_paid,
+                "amount_cents": 3000}))
+    monkeypatch.setattr(billing, "set_status", lambda *_args: None)
+    monkeypatch.setattr(billing, "record_recovery", lambda *_args: None)
+    monkeypatch.setattr(
+        billing_sync.trial_state, "record_paid_conversion", lambda *_args: None)
+    monkeypatch.setattr(
+        billing_sync, "_activate",
+        lambda *_args, **kwargs: activations.append((_args, kwargs)))
+
+    report = billing_sync.reconcile_user(conn, {
+        "id": 7, "email": "buyer@example.test",
+        "subscription_id": "sub_123", "plan": "ai_pro",
+        "is_subscribed": 1, "billing_status": "active",
+    })
+    return conn, report, transaction_calls, activations
+
+
+def test_reconciler_releases_a_backfilled_payment_even_if_already_subscribed(
+        monkeypatch):
+    _conn, report, transaction_calls, activations = _active_reconcile(
+        monkeypatch, newly_paid=True)
+
+    assert transaction_calls == [{
+        "report_transition": True, "commit": False}]
+    assert len(activations) == 1
+    assert activations[0][0][2] == "ai_pro"
+    assert report["changes"] == [
+        "credits refreshed (new paid transaction backfilled)"]
+
+
+def test_reconciler_does_not_refill_an_already_recorded_payment(monkeypatch):
+    _conn, report, _transaction_calls, activations = _active_reconcile(
+        monkeypatch, newly_paid=False)
+
+    assert activations == []
+    assert report["changes"] == []
+
+
+def test_reconciler_rolls_back_new_payment_when_price_is_unknown(monkeypatch):
+    conn, report, _transaction_calls, activations = _active_reconcile(
+        monkeypatch, newly_paid=True, price_plan=None)
+
+    assert activations == []
+    assert conn.rolled_back == 1
+    assert report["error"] == "unrecognized_price"
 
 
 # ── Billing period ──────────────────────────────────────────────────────────

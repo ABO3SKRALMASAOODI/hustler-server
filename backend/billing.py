@@ -392,13 +392,13 @@ def subscription_has_paid(conn, subscription_id=None, user_id=None):
         if subscription_id:
             cur.execute("""SELECT 1 FROM payments
                             WHERE subscription_id = %s
-                              AND status = 'completed'
+                              AND status IN ('paid', 'completed')
                               AND amount_cents > 0 LIMIT 1""",
                         (subscription_id,))
         else:
             cur.execute("""SELECT 1 FROM payments
                             WHERE user_id = %s
-                              AND status = 'completed'
+                              AND status IN ('paid', 'completed')
                               AND amount_cents > 0 LIMIT 1""", (user_id,))
         found = cur.fetchone() is not None
         cur.close()

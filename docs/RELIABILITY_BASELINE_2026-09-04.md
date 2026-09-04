@@ -167,6 +167,10 @@ whose terminal rows remain in the database.
   renewal; a late failure snapshot cannot downgrade confirmed paid/completed
   truth. Unknown prices and paid events without a subscription id fail closed
   for provider retry instead of creating a zero-credit subscription.
+- The hourly Paddle reconciler uses the same paid-transition claim. If an
+  active-subscription webhook lands but its transaction webhook is lost, the
+  backfilled payment and credit refresh commit together exactly once; an
+  unknown price rolls both back for the next tick instead of losing the grant.
 - The shared request-scoped database connection is explicitly rolled back and
   closed at Flask context teardown. Partial webhook work cannot linger until
   interpreter garbage collection or escape into a reused database session.
@@ -189,7 +193,7 @@ whose terminal rows remain in the database.
 - Worker pytest suite: 1,735 passed, 3 skipped.
 - Legacy worker executable checks: all 20 harnesses passed, including 1,038
   unit checks, 22 patch checks, and 30 text-behind-subject tests.
-- Backend pytest suite: 369 passed, 4 skipped, including MCP protocol, billing
+- Backend pytest suite: 373 passed, 4 skipped, including MCP protocol, billing
   trust-boundary, secure-health, and
   snapshot classification tests.
 - Modal executor tests: 38 passed.

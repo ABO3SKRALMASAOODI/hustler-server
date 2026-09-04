@@ -219,7 +219,8 @@ def reconcile_user(conn, row, fetch_all_transactions=False):
         return report
 
     status = (data.get("status") or "").lower()
-    plan = _plan_from_items(data) or row.get("plan")
+    price_plan = _plan_from_items(data)
+    plan = price_plan or row.get("plan")
     period = _billing_period(data)
     report.update({"paddle_status": status, "plan": plan, "period": period})
 
@@ -227,11 +228,21 @@ def reconcile_user(conn, row, fetch_all_transactions=False):
     # recorded payment and a healthy status, webhooks keep it current and this
     # call is pure cost. Problem accounts and never-paid ones get it every tick,
     # which is exactly where the truth is in question.
+    newly_paid = False
     if (fetch_all_transactions
             or status in billing.FAILING_STATUSES
             or not billing.subscription_has_paid(conn, sub_id)):
         for txn in fetch_transactions(sub_id):
-            billing.record_transaction(conn, user_id, txn)
+            if status == "active":
+                receipt = billing.record_transaction(
+                    conn, user_id, txn, report_transition=True, commit=False)
+                if not receipt or not receipt.get("recorded"):
+                    conn.rollback()
+                    report["error"] = "payment_ledger_unavailable"
+                    return report
+                newly_paid = newly_paid or bool(receipt.get("newly_paid"))
+            else:
+                billing.record_transaction(conn, user_id, txn)
 
     was = (row.get("billing_status") or "")
     if was != status:
@@ -279,8 +290,29 @@ def reconcile_user(conn, row, fetch_all_transactions=False):
 
     # ── Active ──────────────────────────────────────────────────────────────
     if status == "active":
-        billing.set_status(conn, user_id, status, plan, period)
         paid = billing.subscription_has_paid(conn, sub_id, user_id)
+        should_activate = paid and (
+            newly_paid or not row.get("is_subscribed"))
+        if should_activate and not price_plan:
+            # A new payment is waiting in this same transaction. Do not commit
+            # it as "handled" until this release can derive the entitlement
+            # from Paddle's own price. The next hourly tick retries both.
+            conn.rollback()
+            report["error"] = "unrecognized_price"
+            return report
+        if should_activate:
+            # When `newly_paid` is true, this commit atomically persists the
+            # backfilled payment and releases its credits. A webhook racing
+            # this tick is serialized by record_transaction's transaction
+            # lock and will observe that the paid transition is already used.
+            _activate(conn, user_id, price_plan, sub_id,
+                      _parse(data.get("next_billed_at")),
+                      price_id=_price_id_from_items(data))
+            report["changes"].append(
+                "credits refreshed (new paid transaction backfilled)"
+                if newly_paid else
+                "re-subscribed (Paddle says active, payment on record)")
+        billing.set_status(conn, user_id, status, plan, period)
         if paid:
             billing.record_recovery(conn, user_id, plan)
             trial_state.record_paid_conversion(conn, user_id, sub_id)
@@ -289,16 +321,6 @@ def reconcile_user(conn, row, fetch_all_transactions=False):
             # (seconds old); if it stays this way the next tick's transaction
             # backfill will have found the failure and this becomes past_due.
             report["note"] = "active but no payment recorded yet"
-        if paid and not row.get("is_subscribed"):
-            # Paddle says active AND the ledger shows money — restore the plan.
-            # Gated on `paid` on purpose: "active but nothing collected yet" is
-            # the exact state that produced the round-59 bug, and re-granting
-            # a full pool from it would rebuild it here.
-            _activate(conn, user_id, plan, sub_id,
-                      _parse(data.get("next_billed_at")),
-                      price_id=_price_id_from_items(data))
-            report["changes"].append("re-subscribed (Paddle says active, "
-                                     "payment on record)")
     return report
 
 
