@@ -201,7 +201,7 @@ whose terminal rows remain in the database.
 - Worker pytest suite: 1,735 passed, 3 skipped.
 - Legacy worker executable checks: all 20 harnesses passed, including 1,038
   unit checks, 22 patch checks, and 30 text-behind-subject tests.
-- Backend pytest suite: 379 passed, 4 skipped, including MCP protocol, billing
+- Backend pytest suite: 382 passed, 4 skipped, including MCP protocol, billing
   trust-boundary, secure-health, and
   snapshot classification tests.
 - Modal executor tests: 38 passed.
@@ -261,6 +261,16 @@ whose terminal rows remain in the database.
   before publishing; worker Python must compile and the Cloudflare adapter must
   type-check too. The executor workflows also reject the exposed database
   credential before contacting a provider.
+- Python runtime manifests pin versions with no known PyPI advisories at
+  release time. Their release workflows rerun a pinned `pip-audit` before
+  certification or publish so a newly disclosed vulnerable dependency blocks
+  rollout instead of silently entering production.
+- The Cloudflare adapter lockfile has no known OSV advisories across its 94
+  resolved npm packages. Its deployment gate runs a bounded, dependency-free
+  OSV audit before the TypeScript check and publish step.
+- The frontend is migrated to Next.js 16.3.4 and its exact lock has no known
+  OSV advisories across 509 unique npm package versions. The release gate
+  repeats that bounded audit and requires zero ESLint errors before building.
 - No production database migration is required by this release.
 - During the first 24 hours, compare newly-created subscriber and MCP work with
   this baseline. Notify on a new root-cause cluster, a stalled logical request,

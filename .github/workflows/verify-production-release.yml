@@ -53,7 +53,9 @@ jobs:
         run: |
           python backend/scripts/scan_tracked_secrets.py
           python -m pip install --disable-pip-version-check \
-            -r backend/requirements.txt pytest
+            -r backend/requirements.txt pytest pip-audit==2.9.0
+          python -m pip_audit -r backend/requirements.txt -r requirements.txt \
+            --progress-spinner off
           python -m compileall -q backend worker
           PYTHONPATH=backend python -m pytest -q backend/tests
 

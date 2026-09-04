@@ -10,8 +10,8 @@ numpy<2
 # 64). CPU provider only — the executor is the box that runs the forward
 # passes. The model file itself is baked by the Dockerfile, not pip.
 onnxruntime==1.19.2
-pillow==10.4.0
-requests==2.32.3
+pillow==12.3.0
+requests==2.34.2
 # Durable scale-to-zero executor client. Only the Render dispatcher calls the
 # SDK; executor containers receive ordinary Python dicts from Modal Functions.
 modal==1.5.4

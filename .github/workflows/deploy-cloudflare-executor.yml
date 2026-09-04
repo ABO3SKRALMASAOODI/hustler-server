@@ -65,7 +65,9 @@ jobs:
           python backend/scripts/scan_tracked_secrets.py
           python backend/scripts/security_release_preflight.py --database-only
           python -m pip install --disable-pip-version-check \
-            -r worker/requirements.txt pytest
+            -r worker/requirements.txt pytest pip-audit==2.9.0
+          python -m pip_audit -r worker/requirements.txt \
+            --progress-spinner off
           python -m compileall -q worker
           python worker/skill_validator.py
           PYTHONPATH=. python -m pytest -q worker/tests
@@ -79,7 +81,10 @@ jobs:
 
       - name: install and type-check Worker adapter
         working-directory: worker/cloudflare
-        run: npm ci && npm run check
+        run: |
+          python ../../backend/scripts/audit_npm_lock.py package-lock.json
+          npm ci
+          npm run check
 
       - name: publish Worker and Container images
         working-directory: worker/cloudflare

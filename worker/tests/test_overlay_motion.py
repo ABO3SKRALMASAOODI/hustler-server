@@ -89,7 +89,7 @@ def test_overlay_motion_compiles_and_changes_real_pixels(tmp_path):
         frames.append(Image.open(path).convert("RGB"))
 
     def red_pixels(image):
-        return sum(1 for r, g, b in image.getdata()
+        return sum(1 for r, g, b in image.get_flattened_data()
                    if r > g + 70 and r > b + 70)
 
     # The overlay begins off-frame and transparent, then lands visibly at a
