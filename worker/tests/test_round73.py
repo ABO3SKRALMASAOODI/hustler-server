@@ -454,12 +454,15 @@ def test_reaper_closes_terminal_provider_ledgers_without_rerunning_work(
     assert wdb.reconcile_terminal_remote_executions(conn, limit=25) == rows
 
     sql, params = conn.sql[0]
+    assert "JOIN video_jobs j ON j.id = r.job_id" in sql
     assert "j.total_claims = r.total_claims" in sql
+    assert "ELSE 'cancelled'" in sql
+    assert "superseded by a newer execution lease" in sql
     assert "j.state IN ('done', 'failed')" in sql
     assert "r.state IN ('submitted', 'running')" in sql
     assert "FOR UPDATE OF r SKIP LOCKED" in sql
     assert "UPDATE remote_executions" in sql
-    assert "WHEN terminal.state = 'failed'" in sql
+    assert "state = terminal.ledger_state" in sql
     assert params == (25,)
 
 

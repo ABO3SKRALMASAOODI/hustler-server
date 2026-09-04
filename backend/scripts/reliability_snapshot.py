@@ -599,9 +599,7 @@ def build_snapshot(conn, days=7):
                          (NOW() - COALESCE(r.last_observed_at, r.started_at,
                                            r.submitted_at))) / 60))::int
                   FROM remote_executions r
-                  JOIN video_jobs j
-                    ON j.id = r.job_id
-                   AND j.total_claims = r.total_claims
+                  JOIN video_jobs j ON j.id = r.job_id
                  WHERE r.state IN ('submitted', 'running')
                    AND j.state IN ('done', 'failed')
             """)

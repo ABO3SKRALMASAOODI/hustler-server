@@ -112,6 +112,10 @@ whose terminal rows remain in the database.
 - Remote ownership and executor leases are fenced durably. An expired executor
   is stopped and recorded as a terminal transient-infrastructure failure.
 - Unknown or ambiguous provider state never authorizes duplicate execution.
+- The snapshot found one old Modal ledger row still marked running after a
+  newer queue lease had already finished. Reconciliation now closes both
+  exact terminal leases and superseded terminal leases; the latter are marked
+  cancelled without rerunning work or contacting the provider.
 - Cloudflare remains the production executor. Modal remains an explicitly
   invoked disaster-recovery path.
 

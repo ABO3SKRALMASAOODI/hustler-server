@@ -654,8 +654,9 @@ def reconcile_terminal_remote_executions(conn, limit=100):
     terminal transitions such as preview supersession, can still survive a
     database outage with the queue row terminal and the provider row active.
     Those rows protect no live work: the immutable execution lease already
-    belongs to a done/failed job.  Reconcile only that exact lease generation
-    and never requeue, cancel, charge, or touch project state.
+    belongs to a done/failed job. An exact lease inherits the queue outcome;
+    an older lease is recorded as cancelled because a newer execution won.
+    Never requeue, charge, invoke a provider, or touch project state here.
     """
     if not remote_executions_table_ready(conn):
         return []
@@ -663,11 +664,21 @@ def reconcile_terminal_remote_executions(conn, limit=100):
     with conn.cursor() as cur:
         cur.execute("""WITH terminal AS (
                          SELECT r.job_id, r.total_claims,
-                                j.state, j.error
+                                CASE
+                                  WHEN j.total_claims = r.total_claims
+                                  THEN j.state
+                                  ELSE 'cancelled'
+                                END AS ledger_state,
+                                CASE
+                                  WHEN j.total_claims = r.total_claims
+                                   AND j.state = 'failed'
+                                  THEN LEFT(j.error, 2000)
+                                  WHEN j.total_claims <> r.total_claims
+                                  THEN 'superseded by a newer execution lease'
+                                  ELSE NULL
+                                END AS ledger_error
                            FROM remote_executions r
-                           JOIN video_jobs j
-                             ON j.id = r.job_id
-                            AND j.total_claims = r.total_claims
+                           JOIN video_jobs j ON j.id = r.job_id
                           WHERE r.state IN ('submitted', 'running')
                             AND j.state IN ('done', 'failed')
                           ORDER BY r.job_id
@@ -675,14 +686,10 @@ def reconcile_terminal_remote_executions(conn, limit=100):
                           FOR UPDATE OF r SKIP LOCKED
                        )
                        UPDATE remote_executions r
-                          SET state = terminal.state,
+                          SET state = terminal.ledger_state,
                               completed_at = NOW(),
                               last_observed_at = NOW(),
-                              error = CASE
-                                WHEN terminal.state = 'failed'
-                                THEN LEFT(terminal.error, 2000)
-                                ELSE NULL
-                              END
+                              error = terminal.ledger_error
                          FROM terminal
                         WHERE r.job_id = terminal.job_id
                           AND r.total_claims = terminal.total_claims
