@@ -1037,6 +1037,15 @@ CLOUDFLARE_SYNCHRONOUS_TYPES = frozenset(
 # trivial get_edl appear hung. Long productive calls continue through status.
 CLOUDFLARE_START_OBSERVATION_S = max(30.0, min(300.0, float(os.getenv(
     "CLOUDFLARE_START_OBSERVATION_S", "180"))))
+# A capacity refusal occurs before Cloudflare accepts the call, so it is safe
+# to return the queue item and try a different deterministic claim identity.
+# Delay the new claim so a burst does not spin through every identity while
+# the original shard pool is still full. The absolute-claim ceiling remains
+# the final bound even if an operator raises this value.
+CLOUDFLARE_BUSY_RETRY_DELAY_S = max(1.0, min(120.0, float(os.getenv(
+    "CLOUDFLARE_BUSY_RETRY_DELAY_S", "20"))))
+CLOUDFLARE_BUSY_MAX_DEFERRALS = max(1, min(
+    10, int(os.getenv("CLOUDFLARE_BUSY_MAX_DEFERRALS", "5"))))
 CLOUDFLARE_MODAL_FALLBACK = os.getenv(
     "CLOUDFLARE_MODAL_FALLBACK", "0") == "1"
 CLOUDFLARE_MAX_INPUT_BYTES = int(os.getenv(
@@ -1429,6 +1438,12 @@ AGENT_TURN_TIMEOUT_S = min(
 AGENT_TURN_TOTAL_TIMEOUT_S = min(
     3000.0,
     max(600.0, float(os.getenv("AGENT_TURN_TOTAL_TIMEOUT_S", "3000"))))
+# Durable continuations reset the physical execution clock, so the timeout
+# above cannot by itself stop one logical user turn from creating jobs for
+# many hours. Permit several productive slices for genuinely large edits,
+# then hand the user the latest saved preview instead of iterating forever.
+AGENT_MAX_PRODUCTIVE_SLICES = min(
+    24, max(2, int(os.getenv("AGENT_MAX_PRODUCTIVE_SLICES", "8"))))
 # Fresh turns yield while the fleet's last-60s token burn is above this —
 # leave room for the next ~50K first call under the org's 200K TPM tier.
 AGENT_TPM_SOFT_CAP = int(os.getenv("AGENT_TPM_SOFT_CAP", "140000"))

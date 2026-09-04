@@ -190,6 +190,24 @@ def _drain_images(ctx):
     return out, len(page)
 
 
+def _tool_result_contract(ctx, text):
+    """Expose deterministic refusals/failures as MCP errors.
+
+    A tool can execute successfully at the queue/infrastructure layer while
+    correctly refusing invalid arguments or stale state. Returning HTTP/MCP
+    success for that text caused callers and dashboards to count 192 refused
+    operations as wins and encouraged models to continue from a false premise.
+    """
+    kind = agent_tools.tool_result_kind(text)
+    structured = getattr(ctx, "last_structured_tool_outcome", None)
+    if not isinstance(structured, dict):
+        structured = {"status": kind}
+    return {
+        "is_error": kind in {"refused", "failed"},
+        "tool_outcome": structured,
+    }
+
+
 def _index_for(worker_db, project_id):
     """(index_json, sha, has_original) for the project's main video. index is
     None for a canvas program (no original at all) AND for a video that is
@@ -362,6 +380,9 @@ def run_mcp_job(worker_db, job):
 
             before = ctx.latest_edl()["version"]
             pending_before = len(ctx.pending_images or [])
+            # A cached MCP context outlives individual calls. Never let one
+            # call inherit the preceding tool's structured refusal metadata.
+            ctx.last_structured_tool_outcome = None
             try:
                 text = agent_tools.execute(ctx, tool, args)
             except agent_tools.AskUser as e:
@@ -378,6 +399,7 @@ def run_mcp_job(worker_db, job):
                                  creative_blueprint=None)
             out = {"text": text, "edl_version": after,
                    "edl_changed": after != before}
+            out.update(_tool_result_contract(ctx, text))
             pending_after_execute = len(ctx.pending_images or [])
             imgs, publish_attempts = _drain_images(ctx)
             if imgs:

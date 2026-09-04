@@ -11,7 +11,7 @@ interface ExecutorJob extends JsonObject {
 }
 
 interface CallState {
-  status: "submitted" | "starting" | "running" | "unknown" | "done" | "failed";
+  status: "submitted" | "starting" | "running" | "unknown" | "stopping" | "done" | "failed";
   jobType: string;
   updatedAt: string;
   activeUntil: number;
@@ -93,9 +93,17 @@ function shardName(lane: Lane, callId: string): string {
   // Every novel Container ID cold-starts. A fixed pool reuses Python images
   // and their bounded immutable source cache, while this deterministic hash
   // lets any later status request find the same durable call record.
+  // MCP ToolContext contains project-scoped caches that deliberately survive
+  // from one tool call to the next. New call ids carry an explicit project
+  // routing key; legacy ids retain their original placement so an in-flight
+  // call remains observable across this rollout.
+  const mcpProject = lane === "mcp"
+    ? callId.match(/^cf-mcp-p([0-9]+)-/)
+    : null;
+  const routingKey = mcpProject ? `project:${mcpProject[1]}` : callId;
   let hash = 2166136261;
-  for (let i = 0; i < callId.length; i += 1) {
-    hash ^= callId.charCodeAt(i);
+  for (let i = 0; i < routingKey.length; i += 1) {
+    hash ^= routingKey.charCodeAt(i);
     hash = Math.imul(hash, 16777619);
   }
   return `${lane}-${(hash >>> 0) % SHARD_COUNTS[lane]}`;
@@ -274,6 +282,80 @@ abstract class ValmeraContainer extends Container<Env> {
     return terminal;
   }
 
+  private async expireExecutorLease(
+    callId: string, now = Date.now(),
+  ): Promise<CallState | null> {
+    const state = await this.ctx.storage.transaction(async (txn) => {
+      const key = this.stateKey(callId);
+      const current = (await txn.get<CallState>(key)) ?? null;
+      if (!current || current.status === "done" || current.status === "failed"
+          || current.activeUntil > now) return current;
+      if (current.status === "stopping") return current;
+
+      // Fence the expired identity before stopping its container. This keeps
+      // a retry from running beside media work that outlived its lease.
+      const prior = current.error ? ` (${current.error})` : "";
+      const error = `Cloudflare ${current.jobType} call exceeded its executor lease while ${current.status}${prior}`;
+      const stopping: CallState = {
+        ...current,
+        status: "stopping",
+        error,
+        updatedAt: new Date(now).toISOString(),
+        activeUntil: now,
+      };
+      const active = await txn.get<ActiveCall>("active");
+      await txn.put(key, stopping);
+      if (active?.callId === callId) {
+        await txn.put("active", {
+          callId: `reset:${callId}`, expiresAt: now + 120_000,
+        } satisfies ActiveCall);
+      }
+      return stopping;
+    });
+    if (state?.status !== "stopping") return state;
+
+    try {
+      await this.stop();
+    } catch (error) {
+      const stopped = {
+        ...state,
+        error: `${state.error}; container stop failed: ${String(error)}`,
+        updatedAt: new Date().toISOString(),
+      } satisfies CallState;
+      await this.ctx.storage.put(this.stateKey(callId), stopped);
+      return stopped;
+    }
+
+    const terminalAt = Date.now();
+    return this.ctx.storage.transaction(async (txn) => {
+      const key = this.stateKey(callId);
+      const current = (await txn.get<CallState>(key)) ?? state;
+      if (current.status !== "stopping") return current;
+      const error = current.error
+        ?? `Cloudflare ${current.jobType} call exceeded its executor lease`;
+      const failed: CallState = {
+        ...current,
+        status: "failed",
+        envelope: {
+          error,
+          retryable: true,
+          failure: { kind: "transient_infrastructure", retryable: true },
+        },
+        error,
+        updatedAt: new Date(terminalAt).toISOString(),
+        activeUntil: terminalAt,
+      };
+      const active = await txn.get<ActiveCall>("active");
+      await txn.put({
+        [key]: failed,
+        [this.terminalKey(callId, terminalAt)]: callId,
+      });
+      if (active?.callId === callId
+          || active?.callId === `reset:${callId}`) await txn.delete("active");
+      return failed;
+    });
+  }
+
   private async markRunning(
     callId: string, jobType: string, activeUntil: number,
   ): Promise<CallState | null> {
@@ -391,7 +473,10 @@ abstract class ValmeraContainer extends Container<Env> {
     }
     const statusMatch = url.pathname.match(/^\/status\/([^/]+)$/);
     if (request.method === "GET" && statusMatch && CALL_ID.test(statusMatch[1])) {
-      const state = await this.expireStaleStart(statusMatch[1]);
+      let state = await this.expireStaleStart(statusMatch[1]);
+      if (state?.status !== "done" && state?.status !== "failed") {
+        state = await this.expireExecutorLease(statusMatch[1]);
+      }
       return state ? json(state) : json({ status: "missing" }, 404);
     }
     const executeMatch = url.pathname.match(/^\/execute\/([^/]+)$/);

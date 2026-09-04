@@ -243,6 +243,16 @@ def process_one(worker_db, job):
             print(f"[job {job_id}] detached from batch execution: {e}",
                   flush=True)
             return
+        if isinstance(e, remote.CloudflareCapacityBusy):
+            deferred = worker_db.run(
+                dbx.defer_unlaunched_cloudflare_busy, job_id, lease_claim, e,
+                config.CLOUDFLARE_BUSY_MAX_DEFERRALS)
+            if deferred:
+                worker_db.run(dbx.bump_metric, "cloudflare_busy_deferred")
+                print(f"[job {job_id}] Cloudflare was busy before launch; "
+                      "returned to the queue without consuming its retry "
+                      f"budget ({e})", flush=True)
+                return
         traceback.print_exc()
         decision = failure_policy.decision_for(e, job["type"])
         if decision.retryable and job["attempts"] < decision.max_attempts:
@@ -347,6 +357,14 @@ def _notify_failure(worker_db, job, err):
                     "transcript ({err}). Ask me in chat to build one short "
                     "around the specific idea you want instead.")
     payload = job.get("payload") or {}
+    if not note and job["type"] == "agent_turn" and isinstance(
+            err, remote.CloudflareLaunchUnavailable):
+        # An agent that never launched cannot post the apology normally owned
+        # by run_agent_job. Without this branch, a continuation could exhaust
+        # capacity deferrals and leave the user's request with no reply.
+        note = ("I couldn't start the editing engine because every editing "
+                "server stayed busy. Your request and saved edit are safe — "
+                "send Continue and I'll resume from the latest version.")
     if not note and job["type"] == "preview":
         if payload.get("force"):
             note = FORCED_PREVIEW_FAIL_NOTE

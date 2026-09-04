@@ -22,6 +22,7 @@ import shutil
 import subprocess
 import sys
 import time
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -61,6 +62,41 @@ class _Conn:
     def rollback(self): pass
 
 
+class _KvMergeCur:
+    def __init__(self, conn):
+        self.conn, self._one = conn, None
+
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+
+    def execute(self, sql, params=None):
+        normalized = " ".join(sql.split())
+        params = params or ()
+        if "to_regclass('public.app_kv')" in normalized:
+            self._one = {"t": "app_kv"}
+        elif normalized.startswith("SELECT pg_advisory_xact_lock"):
+            self._one = {"pg_advisory_xact_lock": None}
+        elif normalized.startswith("SELECT value FROM app_kv"):
+            value = self.conn.cache.get(params[0])
+            self._one = {"value": value} if value is not None else None
+        elif normalized.startswith("INSERT INTO app_kv"):
+            self.conn.cache[params[0]] = params[1]
+            self._one = None
+        else:  # pragma: no cover
+            raise AssertionError(normalized)
+
+    def fetchone(self):
+        return self._one
+
+
+class _KvMergeConn:
+    def __init__(self):
+        self.cache = {}
+
+    def cursor(self):
+        return _KvMergeCur(self)
+
+
 def _with_column(ready):
     """Force db.claims_column_ready's cached answer for one test."""
     wdb._CLAIMS_COL["ok"] = bool(ready)
@@ -83,6 +119,19 @@ def test_the_absolute_ceiling_sits_above_the_refundable_budget():
     assert config.MAX_CLAIMS_ABSOLUTE > config.MAX_ATTEMPTS_MEDIA
 
 
+def test_search_handle_cache_merges_pages_and_evicts_only_the_oldest():
+    conn = _KvMergeConn()
+    wdb.kv_merge_json_map(conn, "search_hits:stock:project:7",
+                          json.dumps({"old": {"id": "old"},
+                                      "middle": {"id": "middle"}}), 3)
+    wdb.kv_merge_json_map(conn, "search_hits:stock:project:7",
+                          json.dumps({"new": {"id": "new"},
+                                      "newest": {"id": "newest"}}), 3)
+
+    saved = json.loads(conn.cache["search_hits:stock:project:7"])
+    assert list(saved) == ["middle", "new", "newest"]
+
+
 def test_claim_counts_a_claim_that_release_can_never_refund():
     _with_column(True)
     c = _Conn(fetchone={"id": 7})
@@ -102,6 +151,25 @@ def test_claim_counts_a_claim_that_release_can_never_refund():
         "the deploy refund is deliberate and must survive"
     assert "total_claims" not in rel, \
         "refunding total_claims would restore exactly the bug this fixes"
+
+
+def test_proven_cloudflare_busy_defers_without_spending_retry_attempt():
+    deferred = _Conn(rowcount=1)
+
+    assert wdb.defer_unlaunched_cloudflare_busy(
+        deferred, 42, 6, RuntimeError("shard is busy"), 5) is True
+    sql, params = deferred.sql[0]
+    assert "attempts = GREATEST(0, attempts - 1)" in sql
+    assert "cloudflare_busy_deferrals" in sql
+    assert "total_claims = %s" in sql
+    assert params[1:] == (42, 6, 5)
+
+    claim = _Conn(fetchone={"id": 42})
+    _with_column(True)
+    wdb.claim_job(claim, ["mcp_tool"], config.MAX_ATTEMPTS_MCP)
+    claim_sql = claim.sql[0][0]
+    assert "cloudflare_busy_deferred" in claim_sql
+    assert "CLOUDFLARE_BUSY_RETRY_DELAY_S" not in claim_sql
 
 
 def test_durable_remote_job_is_not_falsely_heartbeated_or_releaseable():
@@ -347,6 +415,18 @@ def test_terminal_result_strips_non_finite_metadata_without_mutating_runner():
     json.dumps(adapted, allow_nan=False)
     assert math.isinf(result["audio_qc"]["i"]), \
         "the persistence guard must not rewrite the runner's live result"
+
+
+def test_terminal_result_serializes_decimal_measurements():
+    result = {"cost": Decimal("0.0125"),
+              "nested": [Decimal("3.5"), Decimal("NaN")]}
+    done = _Conn(rowcount=1)
+
+    assert wdb.finish_job(done, 42, "done", result=result,
+                          total_claims=7) is True
+    adapted = done.sql[0][1][2].adapted
+    assert adapted == {"cost": 0.0125, "nested": [3.5, None]}
+    json.dumps(adapted, allow_nan=False)
 
 
 def test_terminal_job_atomically_closes_its_provider_ledger(monkeypatch):

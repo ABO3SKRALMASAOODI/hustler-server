@@ -934,6 +934,44 @@ def _preview_plan(twin, defer):
     return "defer" if defer else "enqueue"
 
 
+def _obsolete_failed_preview_retry(requested_version, latest_version,
+                                   failed_before, newer_render_exists):
+    """Reject a retry of old failed media once a newer render exists."""
+    try:
+        older = int(requested_version) < int(latest_version)
+    except (TypeError, ValueError):
+        return False
+    return bool(older and failed_before and newer_render_exists)
+
+
+def _obsolete_failed_render_version(cur, project_id, version):
+    """Return the current version when an old failed render must stay dead."""
+    cur.execute("""SELECT MAX(version) AS version FROM edls
+                   WHERE project_id = %s""", (project_id,))
+    latest_version = (cur.fetchone() or {}).get("version") or version
+    if version >= latest_version:
+        return None
+    cur.execute("""SELECT 1 FROM video_jobs
+                   WHERE project_id = %s
+                     AND type IN ('preview', 'final')
+                     AND state = 'failed'
+                     AND payload->>'edl_version' ~ '^[0-9]+$'
+                     AND (payload->>'edl_version')::int = %s
+                   LIMIT 1""", (project_id, version))
+    failed_before = cur.fetchone() is not None
+    cur.execute("""SELECT 1 FROM assets
+                   WHERE project_id = %s AND kind = 'render'
+                     AND meta->>'variant' IN ('preview', 'final')
+                     AND meta->>'edl_version' ~ '^[0-9]+$'
+                     AND (meta->>'edl_version')::int > %s
+                   LIMIT 1""", (project_id, version))
+    newer_render_exists = cur.fetchone() is not None
+    if _obsolete_failed_preview_retry(
+            version, latest_version, failed_before, newer_render_exists):
+        return latest_version
+    return None
+
+
 def _agent_version_orphaned(turn_state, mcp_state, edl_aged):
     """Is an agent-made newest version ORPHANED — nothing left that will ever
     render it? (round 94)
@@ -2210,9 +2248,14 @@ def tray_submit(user_id, project_id):
                  and a["id"] not in reference_ids), (-1, None))
         jobs = []
         edl_now = _latest_edl(cur, project_id)
+        visual_candidates = sum(
+            1 for a in ordered
+            if a["kind"] in ("video_clip", "image_ref")
+            and a["id"] not in reference_ids
+            and (promoted is None or a["id"] != promoted["id"]))
         autoplace = wschemas.edl_accepts_tray_autoplace(
             (edl_now or {}).get("version"),
-            (edl_now or {}).get("json"))
+            (edl_now or {}).get("json"), visual_candidates)
         for i, a in enumerate(ordered):
             if a["id"] in reference_ids:
                 # Reference footage remains available to the agent's eyes and
@@ -2239,7 +2282,9 @@ def tray_submit(user_id, project_id):
                 else:
                     main_index_job = _enqueue(
                         cur, project_id, user_id, "index",
-                        {"asset_id": a["id"]})
+                        {"asset_id": a["id"],
+                         "selection_pool": (visual_candidates
+                                            if not autoplace else 0)})
                     jobs.append(main_index_job)
                 continue
             patch = {"staged": None}
@@ -2314,6 +2359,7 @@ def tray_submit(user_id, project_id):
                          Json({"kind": "tray_submitted"})))
     result = {"ok": True, "submitted": n,
               "references": len(reference_ids),
+              "selection_pool": visual_candidates if not autoplace else 0,
               "promoted_asset_id":
                   promoted["id"] if promoted is not None else None,
               "main_index_job_id": main_index_job,
@@ -5106,6 +5152,21 @@ def render_final(user_id, project_id):
         edl_row = cur.fetchone()
         if not edl_row:
             return jsonify({"error": "That EDL version does not exist"}), 400
+        current_version = _obsolete_failed_render_version(
+            cur, project_id, version)
+        if current_version is not None:
+            record_client_event(
+                user_id, project_id, "export_blocked",
+                detail={"code": "obsolete_failed_render",
+                        "version": version,
+                        "latest_version": current_version}, origin="server")
+            return jsonify({
+                "error": ("That older edit already failed to render, and a "
+                          "newer working version is available. Export the "
+                          "current version instead."),
+                "code": "obsolete_failed_render",
+                "latest_version": current_version,
+            }), 409
         # THE EXPORT IS THE ONE THING THAT GENUINELY NEEDS THE ORIGINAL.
         # Everything before it runs on the proxy, which is why a proxy-first
         # upload can start editing within seconds. Finals render from the
@@ -5218,6 +5279,16 @@ def render_preview_endpoint(user_id, project_id):
         want = cur.fetchone()
         if not want:
             return jsonify({"error": "That EDL version does not exist"}), 400
+        latest_version = _obsolete_failed_render_version(
+            cur, project_id, version)
+        if latest_version is not None:
+            return jsonify({
+                "error": ("That older version already failed to render, and "
+                          "a newer working edit is available. Open the current "
+                          "version instead of retrying obsolete media."),
+                "code": "obsolete_failed_preview",
+                "latest_version": latest_version,
+            }), 409
         # STEPPING BACK THROUGH THE HISTORY MUST NOT COST AN ENCODE.
         #
         # The studio renders on demand when a version has no preview of its

@@ -100,9 +100,10 @@ graph = build_filtergraph(
     patch_inputs=[(1, {"id": "pa1", "src_start": 2.0, "src_end": 5.0})])
 check("patch input shifts onto the source clock",
       "setpts=PTS+2.000/TB" in graph)
-check("patch pinned to the main stream's size", "scale2ref" in graph)
+check("patch pinned to the main stream's size", "scale=320:180" in graph)
 check("overlay bounded to the window",
-      "overlay=eof_action=pass:enable='between(t,2.000,5.000)'" in graph)
+      "overlay=eof_action=pass:shortest=0:repeatlast=0:"
+      "enable='between(t,2.000,5.000)'" in graph)
 
 if not HAVE_FFMPEG:
     print("== 4-6 skipped (no ffmpeg) ==")

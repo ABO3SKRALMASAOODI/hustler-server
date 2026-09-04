@@ -330,7 +330,7 @@ def test_the_subject_stays_protected_ACROSS_the_window(rendered, shot, frac):
 
 
 @needs_ffmpeg
-def test_the_control_case_fails_the_same_assertion(shot, workdir):
+def test_the_control_case_fails_the_same_assertion(rendered, shot, workdir):
     """The negative control, without which none of the above proves anything.
 
     Burn the SAME words with no mask composite — an ordinary front title — and
@@ -362,9 +362,17 @@ def test_the_control_case_fails_the_same_assertion(shot, workdir):
     band, cols = _subject_cols(src)
     x0, x1 = int(np.argmax(cols)), int(W - np.argmax(cols[::-1]))
     on_subject = _changed(frame, src)[band, x0 + 8:x1 - 8]
-    assert on_subject.mean() > 0.10, (
+    behind = _changed(_frame_at(rendered, t), src)[band, x0 + 8:x1 - 8]
+    # Font rasterization differs across the supported FFmpeg/libass builds,
+    # so the area of the glyphs is not a stable absolute 10% of this narrow
+    # moving subject.  The scientific control is the paired comparison: the
+    # same text rendered in front must alter materially more subject pixels
+    # than the behind composite, while still covering a non-trivial area.
+    assert on_subject.mean() > 0.025 and \
+            on_subject.mean() > behind.mean() + 0.01, (
         "a plain front title did not print on the subject either, so the "
-        "behind-test's assertion cannot distinguish the two")
+        "behind-test's assertion cannot distinguish the two "
+        f"(front={on_subject.mean():.3f}, behind={behind.mean():.3f})")
 
 
 @needs_ffmpeg

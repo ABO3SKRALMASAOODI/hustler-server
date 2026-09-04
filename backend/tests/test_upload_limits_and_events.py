@@ -106,6 +106,13 @@ def test_attachment_caps_stay_below_the_main_video_cap():
     assert lim["image_max_bytes"] < lim["clip_max_bytes"] < lim["max_bytes"]
 
 
+def test_high_resolution_reference_images_fit():
+    """Real campaign JPEGs are commonly 20-40 MiB before video placement."""
+    assert storage.IMAGE_MAX_BYTES >= 40 * 1024 * 1024
+    storage.validate_upload("campaign-reference.jpg", 40 * 1024 * 1024,
+                            "image")
+
+
 def test_validate_upload_labels_the_cap_it_enforced():
     """The refusal has to name the number it applied, or the user is guessing."""
     try:
@@ -267,8 +274,16 @@ def test_part_size_respects_the_protocol_and_the_url_budget():
         assert ps % (1024 * 1024) == 0, "whole MiB keeps ranges page-aligned"
         n_parts = (nbytes + ps - 1) // ps
         assert n_parts <= 10_000, "S3's hard cap on parts"
-        assert n_parts <= 300, f"{n_parts} URLs for {nbytes} bytes is a bloated presign response"
+        assert n_parts <= 1_000, f"{n_parts} URLs for {nbytes} bytes is a bloated presign response"
         assert n_parts * ps >= nbytes, "parts must cover the file"
+
+
+def test_slow_large_upload_uses_timeout_safe_parts():
+    """A large upload must commit progress before browser request timeouts."""
+    nbytes = 2_561_209_004
+    ps = storage.part_size_for(nbytes)
+    assert ps <= 16 * 1024 * 1024
+    assert (nbytes + ps - 1) // ps >= 150
 
 
 def test_upload_presigns_outlive_a_slow_upload():

@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import json
+import shutil
 import sys
 from types import SimpleNamespace
 
@@ -507,6 +508,45 @@ def test_changed_section_renderer_outputs_only_requested_seconds(tmp_path):
     assert requested == [[0.5, 2.5]]
     assert ranges == [[0.5, 2.5]]
     assert mapped == [1.0]
+
+
+def test_changed_section_renderer_handles_a_window_wholly_inside_broll(
+        monkeypatch, tmp_path):
+    """A bounded proof may cut through a long insert with no A-roll at all."""
+    source = tmp_path / "source.mp4"
+    insert = tmp_path / "insert.mp4"
+    output = tmp_path / "proof.mp4"
+    for path, color, duration in (
+            (source, "red", 2), (insert, "blue", 40)):
+        media.run([
+            "ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i",
+            f"color=c={color}:size=320x180:rate=12:duration={duration}",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", str(path),
+        ], timeout=60)
+
+    def fake_download(key, destination):
+        assert key == "clips/long-broll.mp4"
+        shutil.copy2(insert, destination)
+
+    monkeypatch.setattr(renderer.storage, "download_to", fake_download)
+    edl = _edl(
+        keep=[[0.0, 2.0]],
+        inserts=[{
+            "id": "ins1", "asset_key": "clips/long-broll.mp4",
+            "kind": "video", "at_output_s": 0.0,
+            "duration_s": 40.0, "source_start_s": 0.0,
+        }])
+    duration, requested, ranges, mapped = renderer._render_changed_sections(
+        8, {"version": 2, "json": edl},
+        {"video": {"duration": 2.0, "width": 320, "height": 180,
+                   "fps": 12.0}, "words": []},
+        str(source), str(tmp_path), {}, str(output), [[20.0, 22.0]], [21.0])
+
+    assert output.exists()
+    assert requested == [[20.0, 22.0]]
+    assert ranges[0][0] > 0.0 and ranges[0][1] < 40.0
+    assert duration == pytest.approx(25.0, abs=0.25)
+    assert mapped == [pytest.approx(12.5, abs=0.1)]
 
 
 def test_windowed_proof_keeps_and_shifts_program_audio():

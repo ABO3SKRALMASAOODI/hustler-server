@@ -112,6 +112,23 @@ check("vector inside the window shifted",
       we3["vectors"] and we3["vectors"][0]["id"] == "vec1"
       and abs(we3["vectors"][0]["start"] - 1.0) < 0.01)
 
+inserted = schemas.validate_edl({
+    "keep": [[0.0, 2.0], [2.0, 4.0]],
+    "inserts": [{"id": "ins1", "asset_key": "clips/broll.mp4",
+                 "kind": "video", "at_output_s": 2.0,
+                 "duration_s": 6.0, "source_start_s": 10.0,
+                 "rate": 1.5}],
+}, 4.0).model_dump()
+inside_insert = stitch.window_edl(
+    inserted, tl_of(inserted), 4.0, 7.0, keep_audio=True)
+check("proof wholly inside an insert keeps the visible clip",
+      not inside_insert["keep"]
+      and len(inside_insert["inserts"]) == 1
+      and abs(inside_insert["inserts"][0]["duration_s"] - 3.0) < 0.01)
+check("left-clipped insert advances its source by playback rate",
+      abs(inside_insert["inserts"][0]["source_start_s"] - 13.0) < 0.01
+      and inside_insert["inserts"][0]["at_output_s"] == 0.0)
+
 print("== 3. ass shifting and snapping ==")
 
 d = tempfile.mkdtemp(prefix="stitch_")

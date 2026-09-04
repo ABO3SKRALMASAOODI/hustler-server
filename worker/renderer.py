@@ -1705,8 +1705,23 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             pps = float(pit["src_start"])
             ppe = float(pit["src_end"])
             parts.append(f"[{pidx}:v]setpts=PTS+{pps:.3f}/TB[ptc{pj}]")
-            parts.append(f"[ptc{pj}][{vsrc}]scale2ref[pts{pj}][pref{pj}]")
-            parts.append(f"[pref{pj}][pts{pj}]overlay=eof_action=pass"
+            # The patch builder records display-sized, square-pixel frames.
+            # Scale them back to the decoded source's pixel grid before the
+            # source is normalized.  scale2ref looked convenient here, but
+            # on FFmpeg 5/7 its reference output ends with the short patch and
+            # truncates the entire programme.  The probed source dimensions
+            # already include autorotation; scale also restores anamorphic SAR.
+            patch_w = max(2, int(src_w or W or 1920))
+            patch_h = max(2, int(src_h or H or 1080))
+            parts.append(
+                f"[ptc{pj}]scale={patch_w}:{patch_h}[pts{pj}]")
+            # Spell out both framesync flags.  FFmpeg 7 (and the Debian
+            # fallback build) can otherwise end the entire composed video
+            # when this short secondary reaches EOF despite eof_action=pass;
+            # with the renderer's output -shortest that truncated an 8s
+            # programme to the patch window.  The primary must always run on.
+            parts.append(f"[{vsrc}][pts{pj}]overlay=eof_action=pass:"
+                         "shortest=0:repeatlast=0"
                          f":enable='between(t,{pps:.3f},{ppe:.3f})'"
                          f"[vptc{pj}]")
             vsrc = f"vptc{pj}"
@@ -3340,9 +3355,10 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     info = media.probe(src_path)
     src_dur = info["duration"]
     render_dict = _repair_legacy_insert_boundaries(edl_dict)
-    edl = validate_edl(render_dict,
-                       max(src_dur, max(e for _, e in render_dict["keep"]))
-                       ).model_dump()
+    keep_end = max(
+        (float(e) for _s, e in (render_dict.get("keep") or [])),
+        default=0.0)
+    edl = validate_edl(render_dict, max(src_dur, keep_end)).model_dump()
 
     # Long-source edits often keep a short window hours into the file.  A
     # plain ``-i source`` makes ffmpeg decode every 4K frame from zero before
@@ -4178,11 +4194,15 @@ def _stitched_preview(job_id, new_row, prev_row, prev_asset, index,
         duration0 = float((index.get("video") or {}).get("duration") or 0.0)
         new_edl = validate_edl(
             new_row["json"],
-            max(duration0, max(e for _, e in new_row["json"]["keep"]))
+            max(duration0, max(
+                (float(e) for _s, e in
+                 (new_row["json"].get("keep") or [])), default=0.0))
         ).model_dump()
         prev_edl = validate_edl(
             prev_row["json"],
-            max(duration0, max(e for _, e in prev_row["json"]["keep"]))
+            max(duration0, max(
+                (float(e) for _s, e in
+                 (prev_row["json"].get("keep") or [])), default=0.0))
         ).model_dump()
         tl_new = Timeline(new_edl["keep"], new_edl.get("inserts") or [],
                           new_edl.get("speed") or [])
@@ -4548,6 +4568,15 @@ def _render_changed_sections(job_id, edl_row, index, src_local, workdir,
     elapsed = 0.0
     for i, (a, b) in enumerate(ranges):
         window = stitch.window_edl(edl, tl, a, b, keep_audio=True)
+        if not window.get("keep") and window.get("inserts") \
+                and not window.get("canvas"):
+            # A proof window entirely inside B-roll has no main-source span.
+            # Render it through the existing insert-only canvas path instead
+            # of asking the main-video path to max() an empty keep list.
+            window["canvas"] = {
+                "width": int(W), "height": int(H), "fps": float(_fps),
+                "bg_color": "#000000",
+            }
         # Fades belong to the actual program ends. window_edl clears them for
         # stitched pieces; restore only the end a proof window truly contains.
         wfx = dict(window.get("effects") or {})

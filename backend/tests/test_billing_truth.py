@@ -110,6 +110,32 @@ def test_a_successful_payment_has_no_decline_reason():
         {"payments": [{"status": "captured", "error_code": None}]}) is None
 
 
+def test_a_captured_retry_clears_an_older_decline_in_any_api_order():
+    captured = {"status": "captured", "error_code": None,
+                "created_at": "2026-08-26T09:26:30Z"}
+    refused = {"status": "error", "error_code": "transaction_not_permitted",
+               "created_at": "2026-08-26T09:24:08Z"}
+    assert billing.payment_error_code(
+        {"payments": [captured, refused]}) is None
+    assert billing.payment_error_code(
+        {"payments": [refused, captured]}) is None
+
+
+def test_transaction_upsert_backfills_subscription_identity():
+    billing._schema["ok"] = True
+    conn = _Conn([])
+    billing.record_transaction(conn, 7, {
+        "id": "txn_retry", "status": "completed",
+        "subscription_id": "sub_now_known", "origin": "web",
+        "details": {"totals": {"grand_total": "1500",
+                                "currency_code": "USD"}},
+    })
+    sql, params = conn._cur.executed[-1]
+    assert "subscription_id = COALESCE(EXCLUDED.subscription_id" in sql
+    assert "origin = COALESCE(EXCLUDED.origin" in sql
+    assert params[2] == "sub_now_known"
+
+
 def test_the_real_decline_is_said_in_words():
     """`not_enough_balance` is the decline this whole round was built around."""
     assert "balance" in billing.decline_message("not_enough_balance").lower()

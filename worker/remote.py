@@ -54,6 +54,14 @@ class CloudflareLaunchUnavailable(RemoteExecutorError):
     """Cloudflare proved no call was accepted, so Modal fallback is safe."""
 
 
+class CloudflareCapacityBusy(CloudflareLaunchUnavailable):
+    """No Cloudflare call was accepted because its selected shard was busy.
+
+    This is distinct from an ambiguous launch. Queue-backed callers may
+    safely defer the unchanged job and obtain a new fenced claim identity.
+    """
+
+
 class CloudflareTerminalFailure(RemoteExecutorError):
     """A named Cloudflare call ended; an alternate provider is now safe."""
 
@@ -744,7 +752,8 @@ def reconcile_remote_execution(worker_db, row):
                 row["call_id"], row.get("function_name") or
                 _cloudflare_lane(row.get("type")), timeout=10)
             state = status.get("status")
-            if state in {"submitted", "starting", "running", "unknown"}:
+            if state in {"submitted", "starting", "running", "unknown",
+                         "stopping"}:
                 worker_db.run(
                     dbx.heartbeat_remote_execution, job_id, claim)
                 return {"status": "running", "job": job}
@@ -1054,7 +1063,19 @@ def _cloudflare_call_id(job):
     else:
         raw = f"{job.get('type')}:{job.get('id')}:{job.get('total_claims')}"
     digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
-    return f"cf-{str(job.get('type') or 'job')[:18]}-{digest}"
+    job_type = str(job.get("type") or "job")
+    if job_type == "mcp_tool":
+        # Cloudflare recognizes this stable prefix and sends every call for a
+        # project to the same MCP shard. ToolContext intentionally caches
+        # search handles (notably stock ids) between calls; call-id sharding
+        # sent search_stock and add_stock_media to different processes and
+        # made 129 valid ids look unknown.
+        try:
+            project_id = max(0, int(job.get("project_id")))
+        except (TypeError, ValueError):
+            project_id = 0
+        return f"cf-mcp-p{project_id}-{digest}"
+    return f"cf-{job_type[:18]}-{digest}"
 
 
 def _interpret_cloudflare_terminal(data, job):
@@ -1177,6 +1198,28 @@ def _recover_cloudflare_result(call_id, lane, job, deadline):
         except Exception as exc:
             last = exc
         time.sleep(2)
+    # The provider lease starts just before this local deadline. One final
+    # status read lets an expired execution become a terminal envelope and
+    # preserves the actual provider error instead of reporting ``: None``.
+    try:
+        status = _cloudflare_status(call_id, lane, timeout=10)
+        state = status.get("status")
+        if state in {"done", "failed"}:
+            envelope = status.get("envelope")
+            if isinstance(envelope, dict):
+                return envelope
+            last = RemoteExecutorError(
+                f"Cloudflare call {call_id} ended without an envelope")
+        elif status.get("error"):
+            last = RemoteExecutorError(
+                f"Cloudflare call {call_id} remained {state}: "
+                f"{status.get('error')}")
+        elif state:
+            last = RemoteExecutorError(
+                f"Cloudflare call {call_id} remained {state} through its "
+                "executor deadline")
+    except Exception as exc:
+        last = exc
     raise RemoteExecutorError(
         f"Cloudflare call {call_id} could not be recovered: {last}") from last
 
@@ -1270,9 +1313,12 @@ def _run_cloudflare(job):
                     finally:
                         ledger.reset()
                     dbx.unmark_remote_owned(job["id"])
-                raise CloudflareLaunchUnavailable(
-                    str(response_body.get("error") or
-                        "Cloudflare launch refused before /run"))
+                launch_error = str(response_body.get("error") or
+                                   "Cloudflare launch refused before /run")
+                if response.status_code == 429 and \
+                        "shard is busy" in launch_error.lower():
+                    raise CloudflareCapacityBusy(launch_error)
+                raise CloudflareLaunchUnavailable(launch_error)
             # The Worker may have lost its side of an already-running
             # container request. Reconnect to the deterministic call before
             # considering any physical retry.

@@ -89,6 +89,13 @@ def test_no_signature_means_no_reuse():
     assert video._preview_twin(cur, 1, {"keep": [["x", "y"]]}) is None
 
 
+def test_failed_historical_preview_is_not_retried_over_a_newer_render():
+    assert video._obsolete_failed_preview_retry(2, 15, True, True) is True
+    assert video._obsolete_failed_preview_retry(15, 15, True, True) is False
+    assert video._obsolete_failed_preview_retry(2, 15, False, True) is False
+    assert video._obsolete_failed_preview_retry(2, 15, True, False) is False
+
+
 # ── finding the twin ────────────────────────────────────────────────────────
 
 class _Cur:

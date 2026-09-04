@@ -335,6 +335,18 @@ def test_broll_research_is_exposed_and_honestly_disabled(monkeypatch):
     assert "COHERENT STORY SEQUENCE" in desc
     assert props["moments"]["items"]["required"] == ["query", "purpose"]
     assert "query_variants" in props["moments"]["items"]["properties"]
+    assert props["moments"]["maxItems"] == 128
     assert agent_tools.REQUIRED_ARGS["research_broll"] == ["moments"]
     monkeypatch.setattr(agent_tools.stock, "available", lambda: False)
     assert agent_tools._tool_disabled("research_broll")
+
+
+def test_broll_research_rejects_an_unreviewable_oversized_board(monkeypatch):
+    monkeypatch.setattr(agent_tools.stock, "available", lambda: True)
+    ctx = _Ctx()
+    out = agent_tools.research_broll(
+        ctx, [{"query": f"beat {i}", "purpose": "proof"}
+              for i in range(129)])
+
+    assert out.startswith("REJECTED:")
+    assert "at most 128" in out

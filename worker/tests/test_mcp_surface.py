@@ -146,6 +146,62 @@ def test_locked_card_agent_boot_is_not_published_or_executable_over_mcp():
     assert "Edit each child yourself" in out["text"]
 
 
+def test_refused_editor_call_is_an_mcp_error_with_structured_outcome():
+    class Ctx:
+        last_structured_tool_outcome = {
+            "status": "correction_needed",
+            "message": "use a current stock id",
+        }
+
+    refused = mcp_exec._tool_result_contract(
+        Ctx(), "REJECTED: unknown stock id")
+    success = mcp_exec._tool_result_contract(
+        type("SuccessCtx", (), {"last_structured_tool_outcome": None})(),
+        "EDL v2 -> v3: inserted stock clip")
+
+    assert refused["is_error"] is True
+    assert refused["tool_outcome"]["status"] == "correction_needed"
+    assert success == {
+        "is_error": False,
+        "tool_outcome": {"status": "success"},
+    }
+
+
+def test_stock_search_handle_survives_a_new_mcp_process():
+    cache = {}
+
+    class Db:
+        @staticmethod
+        def run(fn, *args):
+            if fn is mcp_exec.dbx.kv_merge_json_map:
+                existing = json.loads(cache.get(args[0], "{}"))
+                existing.update(json.loads(args[1]))
+                cache[args[0]] = json.dumps(existing)
+                return None
+            if fn is mcp_exec.dbx.kv_get:
+                return cache.get(args[0])
+            raise AssertionError(fn)
+
+    first = type("Ctx", (), {
+        "db": Db(), "project_id": 1970, "stock_results": {},
+    })()
+    hit = {"id": "pexels:123", "kind": "video",
+           "description": "fusion reactor"}
+    agent_tools._remember_search_hits(first, "stock", [hit], limit=512)
+    second = {"id": "pixabay:456", "kind": "video",
+              "description": "fusion control room"}
+    agent_tools._remember_search_hits(first, "stock", [second], limit=512)
+
+    cold = type("Ctx", (), {
+        "db": Db(), "project_id": 1970, "stock_results": {},
+    })()
+    recovered, error = agent_tools._recover_search_hit(
+        cold, "stock", "pexels:123", resolver=None)
+
+    assert error is None
+    assert recovered == hit
+
+
 def test_mcp_project_state_routes_batch_edits_to_direct_child_tools(monkeypatch):
     class Ctx:
         index = None

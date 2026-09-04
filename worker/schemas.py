@@ -1789,13 +1789,26 @@ def canvas_edl(ratio="16:9", fps=DEFAULT_CANVAS_FPS, bg_color="#000000"):
                                       bg_color=bg_color)).model_dump()
 
 
-def edl_accepts_tray_autoplace(version, edl=None):
+MAX_TRAY_AUTOPLACE_VISUALS = 12
+
+
+def edl_accepts_tray_autoplace(version, edl=None, visual_count=None):
     """True for the initial dump only.
 
     No EDL yet (index still running) and version-1 seed EDLs auto-splice
     tray files. Mid-session uploads after that stay in the tray so a refine
     pass cannot dump new source onto the end of an already-authored cut.
+
+    Large libraries are selection pools, not authored sequences. Blindly
+    splicing dozens of inputs makes the first preview expensive or unrenderable
+    before the editor can choose the useful shots.
     """
+    if visual_count is not None:
+        try:
+            if int(visual_count) > MAX_TRAY_AUTOPLACE_VISUALS:
+                return False
+        except (TypeError, ValueError):
+            return False
     if version is None:
         return True
     try:

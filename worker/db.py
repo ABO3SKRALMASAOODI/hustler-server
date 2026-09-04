@@ -19,6 +19,7 @@ from psycopg2.extras import RealDictCursor, Json
 import config
 import error_text
 import model_prices
+import schemas
 
 # ------------------------------------------------------------------ #
 #  Connections                                                         #
@@ -246,7 +247,8 @@ def claim_job(conn, types, max_attempts):
     params = [list(types), max_attempts]
     if has_claims:
         params.append(config.MAX_CLAIMS_ABSOLUTE)
-    params.append(config.STALE_AFTER_S)
+    params.extend([config.CLOUDFLARE_BUSY_RETRY_DELAY_S,
+                   config.STALE_AFTER_S])
     if serialize:
         # A sibling blocks this row when it is RUNNING with a fresh heartbeat
         # (the live editor), or QUEUED ahead of it in continuity priority.
@@ -341,6 +343,11 @@ def claim_job(conn, types, max_attempts):
                 WHERE type = ANY(%s)
                   AND attempts < %s
                   {claims_where}
+                  AND (COALESCE(
+                         video_jobs.payload->>'cloudflare_busy_deferred',
+                         'false') <> 'true'
+                       OR video_jobs.updated_at <= NOW()
+                          - make_interval(secs => %s))
                   AND (
                     video_jobs.type <> 'agent_turn'
                     OR NOT EXISTS (
@@ -747,6 +754,46 @@ def requeue_job(conn, job_id, error, total_claims=None):
                         SET state = 'queued', error = %s, updated_at = NOW()
                         WHERE id = %s AND state = 'running'{lease_where}""",
                     tuple(params))
+        return cur.rowcount > 0
+
+
+def defer_unlaunched_cloudflare_busy(conn, job_id, total_claims, error,
+                                     max_deferrals):
+    """Return a provably unlaunched capacity refusal to the queue.
+
+    The ordinary attempt counter is refunded because Cloudflare explicitly
+    proved that no /run was accepted. ``total_claims`` is never refunded: it
+    provides the hard bound and gives the next claim a different idempotency
+    identity/shard. A payload counter prevents a permanently saturated fleet
+    from cycling forever before the absolute ceiling notices it.
+    """
+    with conn.cursor() as cur:
+        cur.execute("""UPDATE video_jobs
+                       SET state = 'queued',
+                           attempts = GREATEST(0, attempts - 1),
+                           error = %s,
+                           payload = jsonb_set(
+                             jsonb_set(COALESCE(payload, '{}'::jsonb),
+                               '{cloudflare_busy_deferred}', 'true'::jsonb,
+                               true),
+                             '{cloudflare_busy_deferrals}',
+                             to_jsonb(CASE
+                               WHEN payload->>'cloudflare_busy_deferrals'
+                                      ~ '^[0-9]+$'
+                               THEN (payload->>
+                                      'cloudflare_busy_deferrals')::int + 1
+                               ELSE 1 END), true),
+                           updated_at = NOW()
+                       WHERE id = %s AND state = 'running'
+                         AND total_claims = %s
+                         AND CASE
+                               WHEN payload->>'cloudflare_busy_deferrals'
+                                      ~ '^[0-9]+$'
+                               THEN (payload->>
+                                      'cloudflare_busy_deferrals')::int
+                               ELSE 0 END < %s""",
+                    (error_text.excerpt(error, 2000), job_id, total_claims,
+                     max(0, int(max_deferrals))))
         return cur.rowcount > 0
 
 
@@ -1389,6 +1436,60 @@ def kv_put(conn, key, value):
                     (key, value))
 
 
+def kv_merge_json_map(conn, key, value, limit=512):
+    """Atomically merge a bounded JSON-object cache into ``app_kv``.
+
+    Search results are short-lived handles handed to an agent.  A later MCP
+    call can land in another process, and two searches for the same project
+    can overlap.  A read followed by ``kv_put`` in Python would let the last
+    writer silently erase the other result page, so the row is locked for the
+    whole merge transaction here.  New/updated handles are retained first;
+    the oldest entries are evicted only when the generous safety bound is
+    exceeded.
+    """
+    limit = max(1, min(2048, int(limit or 512)))
+    try:
+        incoming = json.loads(value or "{}")
+        if not isinstance(incoming, dict):
+            incoming = {}
+    except (TypeError, ValueError):
+        incoming = {}
+    with conn.cursor() as cur:
+        cur.execute("SELECT to_regclass('public.app_kv') AS t")
+        table = cur.fetchone()
+        table = table.get("t") if isinstance(table, dict) else table[0]
+        if not table:
+            return
+        # The advisory lock closes the missing-row race that SELECT FOR UPDATE
+        # alone cannot cover during the first two concurrent searches.
+        cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (key,))
+        cur.execute("SELECT value FROM app_kv WHERE key = %s FOR UPDATE",
+                    (key,))
+        row = cur.fetchone()
+        raw = (row.get("value") if isinstance(row, dict) else row[0]) \
+            if row else None
+        try:
+            merged = json.loads(raw or "{}")
+            if not isinstance(merged, dict):
+                merged = {}
+        except (TypeError, ValueError):
+            merged = {}
+        for result_id, hit in incoming.items():
+            if not isinstance(hit, dict):
+                continue
+            # Reinsert so the dict's order is a simple recency ledger.
+            merged.pop(str(result_id), None)
+            merged[str(result_id)] = hit
+        if len(merged) > limit:
+            merged = dict(list(merged.items())[-limit:])
+        payload = json.dumps(merged, separators=(",", ":"))
+        cur.execute("""INSERT INTO app_kv (key, value, updated_at)
+                       VALUES (%s, %s, NOW())
+                       ON CONFLICT (key) DO UPDATE
+                       SET value = EXCLUDED.value, updated_at = NOW()""",
+                    (key, payload))
+
+
 def publish_mcp_catalog(conn, catalog):
     """Publish the tool catalog the MCP surface serves (see mcp_exec.catalog).
 
@@ -1794,6 +1895,13 @@ def rescue_abandoned_trays(conn):
                            if a["kind"] == "video_clip"), None)
             if main_i is None:
                 continue
+            visual_candidates = sum(
+                1 for i, a in enumerate(tray)
+                if i != main_i
+                and a["kind"] in ("video_clip", "image_ref"))
+            selection_pool = (visual_candidates
+                              if visual_candidates
+                              > schemas.MAX_TRAY_AUTOPLACE_VISUALS else 0)
             main_job = None
             for i, a in enumerate(tray):
                 if i == main_i:
@@ -1810,7 +1918,8 @@ def rescue_abandoned_trays(conn):
                         """INSERT INTO video_jobs (project_id, user_id, type,
                                                    payload)
                            VALUES (%s, %s, 'index', %s) RETURNING id""",
-                        (pid, uid, Json({"asset_id": a["id"]})))
+                        (pid, uid, Json({"asset_id": a["id"],
+                                       "selection_pool": selection_pool})))
                     main_job = cur.fetchone()["id"]
                     continue
                 patch = {"staged": None}

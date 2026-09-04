@@ -53,15 +53,12 @@ SINGLE_PUT_LIMIT = 16 * 1024 * 1024
 # Parts are sized so PARALLELISM ARRIVES WHERE THE FILES ARE, not only on
 # multi-GB uploads. The old fixed 64 MB meant a 100 MB file was "multipart" in
 # name and two sockets in practice — six sockets only lit up past ~384 MB.
-# Small parts also make retries cheap (a blip resends 8 MB, not 64) at the
-# price of more presigned URLs, so the size scales with the file: aim for
-# TARGET_PARTS so every upload big enough to split keeps the pool busy, floor
-# at 8 MB (comfortably above R2/S3's 5 MB minimum), cap at 64 MB so a 14 GB
-# file still mints ~224 URLs rather than thousands. All parts but the last are
-# equal-sized, which R2 requires.
+# Keep parts in the 8-16 MiB range so modest uplinks commit durable progress
+# before a browser request timeout. Even the 14 GiB maximum remains below
+# S3's 10,000-part protocol limit.
 MIN_PART_SIZE = 8 * 1024 * 1024
-MAX_PART_SIZE = 64 * 1024 * 1024
-TARGET_PARTS = 32
+MAX_PART_SIZE = 16 * 1024 * 1024
+TARGET_PARTS = 128
 
 
 def part_size_for(nbytes):
@@ -94,9 +91,10 @@ ALLOWED_IMAGE_EXT = {
     ".webp": "image/webp",
 }
 
-# Chat attachments are small; only the main video gets the multi-GB budget.
+# High-resolution campaign/product JPEGs routinely land in the 20-40 MiB
+# range. This remains bounded well below clip and original-video uploads.
 MUSIC_MAX_BYTES = 50 * 1024 * 1024
-IMAGE_MAX_BYTES = 10 * 1024 * 1024
+IMAGE_MAX_BYTES = 50 * 1024 * 1024
 CLIP_MAX_BYTES = 500 * 1024 * 1024   # clips spliced into the edit
 
 # A browser-built 540p proxy. Our own proxies average 0.70 Mbps across 202

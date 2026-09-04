@@ -678,17 +678,31 @@ def window_edl(edl, tl, w0, w1, keep_audio=False):
     e["patches"] = [p for p in (e.get("patches") or [])
                     if any(s0 < p["src_end"] and s1 > p["src_start"]
                            for s0, s1 in keep)]
-    # Inserts are carried only when FULLY inside the window (their output
-    # spans are containment zones in the planner, exactly like items — the
-    # first prod attempt with inserts carried a program's every insert into
-    # a 7.7s window and rendered 14.3s). Their at_src anchors sit on kept
-    # source boundaries, so the windowed Timeline re-places them correctly.
+    # Carry only inserts that overlap this proof window. Containment normally
+    # keeps them whole, but the bounded proof budget may cut a long insert at
+    # either edge. Dropping that partial insert made the proof render only a
+    # tiny adjacent A-roll sliver (0.77s instead of 21.95s) or produce an
+    # empty keep list that crashed max(). Clip its source and duration instead.
     from timeline import insert_windows as _iw
     iw = _iw(e.get("inserts") or [], tl)
-    inserts = [i for i in (e.get("inserts") or [])
-               if i.get("id") in iw
-               and iw[i["id"]][0] >= w0 - 0.011
-               and iw[i["id"]][1] <= w1 + 0.011]
+    inserts = []
+    for original in e.get("inserts") or []:
+        if original.get("id") not in iw:
+            continue
+        final_start, final_end = iw[original["id"]]
+        clipped_start = max(float(final_start), w0)
+        clipped_end = min(float(final_end), w1)
+        if clipped_end - clipped_start < 0.05:
+            continue
+        item = dict(original)
+        left_trim = max(0.0, clipped_start - float(final_start))
+        item["duration_s"] = round(clipped_end - clipped_start, 3)
+        if left_trim and item.get("kind") != "image":
+            rate = float(item.get("rate") or 1.0)
+            item["source_start_s"] = round(
+                float(item.get("source_start_s") or 0.0)
+                + left_trim * rate, 3)
+        inserts.append(item)
     # at_output_s is on the PRE-insert clock. The window boundaries above are
     # on the FINAL clock, so merely retaining the original value strands a
     # carried insert at a non-existent junction in the standalone EDL. This
@@ -698,7 +712,7 @@ def window_edl(edl, tl, w0, w1, keep_audio=False):
     # already carried into this proof piece.
     consumed = 0.0
     for item in sorted(inserts, key=lambda value: iw[value["id"]][0]):
-        final_start = float(iw[item["id"]][0])
+        final_start = max(float(iw[item["id"]][0]), w0)
         item["at_output_s"] = round(
             max(0.0, final_start - w0 - consumed), 3)
         consumed += float(item.get("duration_s") or 0.0)

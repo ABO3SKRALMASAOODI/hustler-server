@@ -4812,18 +4812,21 @@ def _search_hit_cache_key(ctx, lane):
     return f"search_hits:{lane}:project:{ctx.project_id}"
 
 
-def _remember_search_hits(ctx, lane, hits):
-    """Keep the latest small result page across agent turns, best effort."""
+def _remember_search_hits(ctx, lane, hits, limit=12):
+    """Keep a bounded, atomic result-handle ledger across agent processes."""
     try:
-        ctx.db.run(dbx.kv_put, _search_hit_cache_key(ctx, lane),
-                   json.dumps({h["id"]: h for h in hits[:12]}))
+        payload = {h["id"]: h for h in hits if h.get("id")}
+        ctx.db.run(dbx.kv_merge_json_map, _search_hit_cache_key(ctx, lane),
+                   json.dumps(payload), limit)
     except Exception:
         pass
 
 
 def _recover_search_hit(ctx, lane, result_id, resolver):
     rid = str(result_id or "").strip()
-    current = (getattr(ctx, f"_{lane}_hits", None) or {}).get(rid)
+    memory = (ctx.stock_results if lane == "stock"
+              else getattr(ctx, f"_{lane}_hits", None))
+    current = (memory or {}).get(rid)
     if current:
         return current, None
     try:
@@ -4833,6 +4836,8 @@ def _recover_search_hit(ctx, lane, result_id, resolver):
             return cached[rid], None
     except Exception:
         pass
+    if resolver is None:
+        return None, None
     try:
         return resolver(rid), None
     except Exception as exc:
@@ -15216,6 +15221,11 @@ def search_stock(ctx, query, kind="video", orientation=None, count=6):
     # rather than whatever a second identical query happens to return.
     for h in hits:
         ctx.stock_results[h["id"]] = h
+    # MCP calls may run in a different process or after a scale-to-zero cold
+    # start. Persist the exact provider payload the model saw so the chosen id
+    # remains valid without re-searching and silently selecting different
+    # footage.
+    _remember_search_hits(ctx, "stock", hits, limit=512)
     seen = _queue_candidate_thumbs(ctx, hits)
     eye = ("\n\nTheir thumbnails are attached below, labeled by id — pick "
            "by LOOKING at them, the way an editor scans a results grid: "
@@ -15381,6 +15391,11 @@ def research_broll(ctx, moments, orientation=None):
     if not isinstance(moments, (list, tuple)) or not moments:
         return ("REJECTED: moments must be an array of {id, query, purpose, "
                 "at, duration_s, kind} objects.")
+    if len(moments) > 128:
+        return ("REJECTED: research_broll accepts at most 128 story moments "
+                "per call. Split this unusually long programme into "
+                "chronological sections so every returned candidate remains "
+                "addressable and visually reviewable.")
     if orientation is None:
         orientation = _project_frame(ctx)[0]
     orientation = str(orientation).strip().lower()
@@ -15516,6 +15531,8 @@ def research_broll(ctx, moments, orientation=None):
                                all(hit.get("kind") == stock.KIND_PHOTO
                                    for hit in chosen))
         groups.append((spec, chosen, err, used_photo_fallback))
+    _remember_search_hits(
+        ctx, "stock", list(ctx.stock_results.values()), limit=512)
     board_n = _queue_broll_research_sheet(ctx, labeled)
     _metric(ctx, "broll_moments_researched", len(specs))
     _metric(ctx, "broll_query_routes_searched", len(work))
@@ -15567,10 +15584,13 @@ def add_stock_media(ctx, id):
     if not stock.available():
         return "REJECTED: stock footage is not available on this deployment."
     sid = (id or "").strip()
-    item = ctx.stock_results.get(sid)
+    item, _recovery_error = _recover_search_hit(
+        ctx, "stock", sid, resolver=None)
     if not item:
-        return ("REJECTED: unknown stock id. Call search_stock first and pass "
-                "an id exactly as it appears in those results.")
+        return ("REJECTED: unknown stock id for this project. Call "
+                "search_stock or research_broll and pass an id exactly as it "
+                "appears in those saved results.")
+    ctx.stock_results[sid] = item
     if not (item.get("description") or "").strip() and \
             not item.get("_thumbnail_delivered"):
         return (
@@ -22582,6 +22602,7 @@ TOOLS = {
         "people/products/places when topical video is unavailable.",
         {"moments": {
             "type": "array",
+            "maxItems": 128,
             "items": {
                 "type": "object",
                 "properties": {
@@ -22597,9 +22618,11 @@ TOOLS = {
                 "required": ["query", "purpose"]}},
          "orientation": {"type": "string",
                          "enum": ["landscape", "portrait", "square"]}}),
-    "add_stock_media": (add_stock_media, "DOWNLOAD one search_stock result "
-                        "and save it as a project asset. `id` must be an id "
-                        "from a search_stock result in THIS turn. The clip "
+    "add_stock_media": (add_stock_media, "DOWNLOAD one saved search_stock or "
+                        "research_broll result and save it as a project asset. "
+                        "`id` must exactly match a result returned for THIS "
+                        "PROJECT; handles survive later turns and MCP worker "
+                        "processes. The clip "
                         "is SILENT and is NOT in the video yet — place it "
                         "with add_overlay(fit='cover') for a cutaway that "
                         "keeps the speech running, or insert_media to splice "

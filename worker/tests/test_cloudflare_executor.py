@@ -260,6 +260,51 @@ def test_cloudflare_uses_deterministic_call_and_persists_before_wait(
     assert posted[0][1]["json"]["job"]["dispatch_submitted_at"] > 0
 
 
+def test_mcp_call_identity_keeps_project_session_on_one_shard():
+    first = remote._cloudflare_call_id(dict(
+        JOB, id=91, type="mcp_tool", project_id=1970, total_claims=1))
+    second = remote._cloudflare_call_id(dict(
+        JOB, id=92, type="mcp_tool", project_id=1970, total_claims=1))
+    other = remote._cloudflare_call_id(dict(
+        JOB, id=93, type="mcp_tool", project_id=1987, total_claims=1))
+
+    assert first.startswith("cf-mcp-p1970-")
+    assert second.startswith("cf-mcp-p1970-")
+    assert other.startswith("cf-mcp-p1987-")
+    assert len({first, second, other}) == 3
+    adapter = (Path(__file__).resolve().parents[1]
+               / "cloudflare" / "src" / "index.ts").read_text()
+    assert 'callId.match(/^cf-mcp-p([0-9]+)-/)' in adapter
+    assert 'project:${mcpProject[1]}' in adapter
+
+
+def test_busy_response_is_distinct_proven_unlaunched_capacity(monkeypatch):
+    _enable(monkeypatch)
+    job = dict(JOB, payload={**JOB["payload"],
+                             "execution_provider": "cloudflare"})
+
+    class Ledger:
+        def run(self, *_args, **_kwargs):
+            return True
+
+        def reset(self):
+            pass
+
+    monkeypatch.setattr(remote.dbx, "Db", Ledger)
+    monkeypatch.setattr(remote.dbx, "mark_remote_owned", lambda _id: True)
+    monkeypatch.setattr(remote.dbx, "remote_launch_recorded", lambda _id: None)
+    monkeypatch.setattr(remote.dbx, "unmark_remote_owned", lambda _id: None)
+    monkeypatch.setattr(remote.requests, "get", lambda *_a, **_k: _Response({
+        "status": "ok", "provider": "cloudflare"}))
+    monkeypatch.setattr(remote.requests, "post", lambda *_a, **_k: _Response({
+        "error": "Cloudflare Container shard is busy",
+        "safe_to_fallback": True,
+    }, 429))
+
+    with pytest.raises(remote.CloudflareCapacityBusy, match="shard is busy"):
+        remote._run_cloudflare(job)
+
+
 def test_shutdown_winner_refuses_cloudflare_before_launch(monkeypatch):
     _enable(monkeypatch)
     job = dict(JOB, payload={**JOB["payload"],
@@ -811,6 +856,36 @@ def test_ambiguous_missing_status_never_authorizes_modal_fallback(monkeypatch):
     assert "could not be recovered" in str(caught.value)
 
 
+def test_recovery_preserves_unknown_call_error_at_deadline(monkeypatch):
+    _enable(monkeypatch)
+    job = dict(JOB, payload={**JOB["payload"],
+                             "execution_provider": "cloudflare"})
+    monkeypatch.setattr(remote, "_cloudflare_status", lambda *_a, **_k: {
+        "status": "unknown",
+        "error": "container connection closed before a response",
+    })
+
+    class Probe:
+        def run(self, fn, *_args, **_kwargs):
+            assert fn is dbx.get_job
+            return {"state": "running"}
+
+        def reset(self):
+            pass
+
+    monkeypatch.setattr(remote.dbx, "Db", Probe)
+    monkeypatch.setattr(remote.time, "sleep", lambda _seconds: None)
+    ticks = iter([0.0, 0.1, 1.1])
+    monkeypatch.setattr(remote.time, "monotonic", lambda: next(ticks, 1.1))
+
+    with pytest.raises(remote.RemoteExecutorError) as caught:
+        remote._recover_cloudflare_result(
+            remote._cloudflare_call_id(job), "interactive", job, 1.0)
+
+    assert "container connection closed before a response" in str(caught.value)
+    assert not str(caught.value).endswith(": None")
+
+
 def test_cloudflare_config_is_provider_complete_without_modal():
     root = Path(__file__).resolve().parents[1]
     wrangler = (root / "cloudflare" / "wrangler.jsonc").read_text()
@@ -850,6 +925,10 @@ def test_cloudflare_config_is_provider_complete_without_modal():
     assert "await this.destroy()" in adapter
     assert "const STARTING_STALE_MS = 180 * 1000" in adapter
     assert "expireStaleStart" in adapter
+    assert "expireExecutorLease" in adapter
+    assert 'status: "stopping"' in adapter
+    assert "exceeded its executor lease" in adapter
+    assert 'kind: "transient_infrastructure"' in adapter
     assert "markRunning" in adapter
     assert "startup was abandoned before /run" in adapter
     assert "getByName(shardName" not in adapter  # computed once as `shard`
