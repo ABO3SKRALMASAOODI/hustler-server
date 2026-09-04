@@ -195,6 +195,7 @@ def test_webhook_wires_the_alert_only_after_real_money(
     monkeypatch.setattr(webhook, "PADDLE_WEBHOOK_SECRET", "configured")
     monkeypatch.setattr(webhook, "_verify_paddle_signature", lambda _req: True)
     monkeypatch.setattr(webhook, "get_db", lambda: db)
+    monkeypatch.setattr(webhook, "_user_id_by_subscription", lambda _: None)
     monkeypatch.setattr(webhook, "_user_id_by_customer_email", lambda _: 7)
     monkeypatch.setattr(webhook, "_plan_from_data", lambda _: "ai_pro")
     monkeypatch.setattr(
@@ -276,6 +277,49 @@ def test_signature_verification_rejects_stale_or_malformed_headers(
                 "/webhook/paddle", method="POST", data=b"{}",
                 headers={"Paddle-Signature": header}):
             assert webhook._verify_paddle_signature(request) is False
+
+
+@pytest.mark.parametrize("resolution", [None, "unavailable"])
+def test_webhook_never_trusts_browser_claim_when_payer_is_unverified(
+        monkeypatch, resolution):
+    from flask import Flask
+
+    monkeypatch.setattr(webhook, "PADDLE_WEBHOOK_SECRET", "configured")
+    monkeypatch.setattr(webhook, "_verify_paddle_signature", lambda _req: True)
+    monkeypatch.setattr(webhook, "_user_id_by_subscription", lambda _: None)
+    if resolution == "unavailable":
+        def lookup(_customer_id):
+            raise webhook._PayerIdentityUnavailable("provider timeout")
+    else:
+        lookup = lambda _customer_id: None
+    monkeypatch.setattr(webhook, "_user_id_by_customer_email", lookup)
+    monkeypatch.setattr(
+        webhook.billing, "record_transaction",
+        lambda *_args: pytest.fail("unverified identity must not be recorded"))
+
+    app = Flask(__name__)
+    app.register_blueprint(webhook.paddle_webhook)
+    response = app.test_client().post("/webhook/paddle", json={
+        "event_type": "transaction.completed",
+        "data": {
+            **_transaction("3000"),
+            "customer_id": "ctm_attacker",
+            "custom_data": {"user_id": "999"},
+        },
+    })
+
+    assert response.status_code == 503
+
+
+def test_known_subscription_resolves_without_paddle_customer_round_trip(
+        monkeypatch):
+    monkeypatch.setattr(webhook, "_user_id_by_subscription", lambda _: 7)
+    monkeypatch.setattr(
+        webhook, "_user_id_by_customer_email",
+        lambda _: pytest.fail("known renewals need no customer API call"))
+
+    assert webhook._verified_payer_user_id(
+        {"customer_id": "ctm_123"}, "sub_123") == 7
 
 
 def test_alert_content_escapes_database_and_paddle_values():

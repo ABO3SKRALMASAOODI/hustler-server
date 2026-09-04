@@ -157,14 +157,18 @@ _PADDLE_BASE = ("https://sandbox-api.paddle.com"
                 else "https://api.paddle.com")
 
 
+class _PayerIdentityUnavailable(RuntimeError):
+    """Paddle could not prove which local account owns this payment."""
+
+
 def _user_id_by_customer_email(customer_id):
     """The account that owns the email Paddle billed, or None.
 
     One Paddle API call on a rare event (an activation), which is cheap next
     to letting a forged custom_data.user_id decide who gets a paid plan.
-    Returns None on ANY failure so a Paddle hiccup degrades to the previous
-    behaviour (trust custom_data) rather than silently dropping a real
-    customer's activation.
+    A provider/network failure is distinct from a verified customer whose
+    email has no local account. The caller retries the former and refuses to
+    trust browser-controlled ``custom_data.user_id`` for either case.
     """
     if not customer_id:
         return None
@@ -172,15 +176,23 @@ def _user_id_by_customer_email(customer_id):
         r = requests.get(
             f"{_PADDLE_BASE}/customers/{customer_id}",
             headers={"Authorization": f"Bearer {os.environ['PADDLE_API_KEY']}"},
-            timeout=10)
+            # Paddle expects a webhook response inside five seconds. Leave
+            # room for the local transaction and return 503 for provider
+            # retry instead of occupying the entire delivery deadline here.
+            timeout=3)
         if r.status_code != 200:
-            return None
+            raise _PayerIdentityUnavailable(
+                f"customer lookup returned HTTP {r.status_code}")
         email = ((r.json().get('data') or {}).get('email') or '').strip()
         if not email:
-            return None
+            raise _PayerIdentityUnavailable(
+                "customer lookup returned no email")
     except Exception as e:
         print(f"⚠️ customer lookup failed for {customer_id}: {e}")
-        return None
+        if isinstance(e, _PayerIdentityUnavailable):
+            raise
+        raise _PayerIdentityUnavailable(
+            "customer lookup was unavailable") from e
     # NEVER close this connection. get_db() caches one per REQUEST on flask.g
     # and hands the same object to every caller, so closing it here killed the
     # connection that update_user_subscription_status then tried to use — the
@@ -215,6 +227,14 @@ def _stored_subscription_id(user_id):
     row = cur.fetchone()
     cur.close()
     return row[0] if row else None
+
+
+def _verified_payer_user_id(data, subscription_id):
+    """Resolve a billing event without trusting browser custom data."""
+    stored = _user_id_by_subscription(subscription_id)
+    if stored:
+        return stored
+    return _user_id_by_customer_email(data.get('customer_id'))
 
 # Paddle signs every webhook (Paddle-Signature: "ts=...;h1=...", where h1 is
 # HMAC-SHA256 of "ts:raw_body" with the endpoint's secret key from
@@ -333,25 +353,27 @@ def handle_webhook():
 
     # ── Identity, resolved ONCE for every branch ────────────────────────────
     # custom_data arrives from Paddle.js (the browser creates the transaction
-    # so it can render inline), so user_id is no longer server-set and must not
-    # be trusted on its own. The BUYER'S EMAIL is the authoritative identity:
-    # resolve the account from Paddle's customer record and prefer it whenever
-    # the two disagree. Without this, editing customData in devtools would
-    # activate a plan on someone else's account.
+    # so it can render inline), so user_id is no longer server-set and must
+    # never be trusted as identity. An already-stored subscription is the
+    # cheapest authoritative path for renewals/refunds. Otherwise the BUYER'S
+    # EMAIL from Paddle's API must resolve the account. A provider outage gets
+    # a 503 so Paddle retries; it does not turn attacker-controlled metadata
+    # into authority.
     #
     # It is resolved here rather than inside each branch because it costs a
     # Paddle API round trip, and round 59 added branches that all need it.
-    user_id = _user_id_by_customer_email(data.get('customer_id'))
+    try:
+        user_id = _verified_payer_user_id(data, subscription_id)
+    except _PayerIdentityUnavailable:
+        return 'Payer identity temporarily unavailable', 503
     claimed = custom_data.get('user_id')
     if user_id and claimed and str(claimed) != str(user_id):
         print(f"⛔ custom_data claimed user {claimed} but the paying "
               f"customer is user {user_id} — using the payer")
     if not user_id:
-        # Unknown email (first purchase) -> the claim; then the subscription we
-        # stored at activation, which is the only handle a refund/adjustment
-        # event carries.
-        user_id = claimed or _user_id_by_subscription(
-            data.get('subscription_id') or subscription_id)
+        print("⛔ Paddle event did not resolve to a verified local account; "
+              "browser custom_data was ignored")
+        return 'Payer identity could not be verified', 503
 
     # Every transaction Paddle mentions goes in the ledger, successful or not,
     # BEFORE any branch decides what it means. `payments.amount_cents` is the
