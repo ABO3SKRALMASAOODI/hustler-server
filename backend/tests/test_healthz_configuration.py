@@ -21,7 +21,7 @@ def test_healthz_refuses_to_certify_missing_security_configuration(
     response = app.test_client().get("/healthz")
     body = response.get_json()
 
-    assert response.status_code == 200
+    assert response.status_code == 503
     assert body == {
         "status": "degraded",
         "role": "backend",
@@ -64,7 +64,9 @@ def test_public_or_short_application_keys_are_never_used(monkeypatch):
     for unsafe in ("supersecretkey", "devsecret", "too-short"):
         monkeypatch.setenv("SECRET_KEY", unsafe)
         app = create_app()
-        body = app.test_client().get("/healthz").get_json()
+        response = app.test_client().get("/healthz")
+        body = response.get_json()
+        assert response.status_code == 503
         assert body["status"] == "degraded"
         assert body["checks"]["secret_key"] == "missing"
         assert app.config["SECRET_KEY"] != unsafe

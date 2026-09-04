@@ -112,13 +112,11 @@ PLANS = PLANS_SANDBOX if os.environ.get('PADDLE_MODE') == 'sandbox' else PLANS_L
 # webhook) so grandfathered subscribers keep working — they must NOT be
 # reachable via a hand-crafted checkout/change-plan call that mints their live
 # price IDs.
-# 'mcp' is deliberately NOT here: the MCP server does not exist yet, so a buyer
-# would pay, correctly receive 0 credits (they bring their own model) and have
-# nothing to connect to. The Paddle product and prices are already live and
-# the plan stays in PLANS, so the one existing MCP subscription keeps
-# renewing and resolving — this only blocks NEW checkouts, including
-# hand-crafted ones that bypass the pricing page. Add 'mcp' back the day the
-# server ships.
+# 'mcp' is deliberately NOT here even though the MCP server is live: it is not
+# offered on the public pricing page, so a hand-crafted checkout must not make
+# it newly purchasable. The Paddle product and prices stay in PLANS so the
+# existing MCP subscription keeps renewing and resolving. Add it here only as
+# an explicit product/pricing decision, not merely because the server exists.
 PURCHASABLE_PLANS = {'ai', 'ai_pro', 'ai_max'}
 
 

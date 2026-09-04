@@ -70,7 +70,7 @@ def create_app():
                 "configured" if _os.environ.get("PADDLE_API_KEY")
                 else "missing"),
         }
-        return {
+        payload = {
             "status": ("ok" if all(value == "configured"
                                    for value in checks.values())
                        else "degraded"),
@@ -79,6 +79,7 @@ def create_app():
                        or "unknown")[:12],
             "checks": checks,
         }
+        return payload, (200 if payload["status"] == "ok" else 503)
 
     @app.before_request
     def handle_options():

@@ -206,7 +206,8 @@ whose terminal rows remain in the database.
   Paddle webhook signing secret, or Paddle API key is absent. A missing
   application key uses an unpredictable process-local fallback rather than the
   old public literal, so misconfiguration is disruptive but never silently
-  forgeable.
+  forgeable. Degraded health returns HTTP 503 so hosting and release checks
+  cannot mistake unsafe configuration for a healthy rollout.
 - Frontend pushes are not considered live until `/api/health` reports
   `status=ok`, `role=frontend`, and the exact Vercel Git commit SHA with
   `Cache-Control: no-store`.
