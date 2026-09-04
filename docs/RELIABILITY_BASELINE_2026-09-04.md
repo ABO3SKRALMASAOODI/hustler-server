@@ -264,6 +264,9 @@ whose terminal rows remain in the database.
 - Backend pushes are not considered live until `/healthz` reports `status=ok`,
   `role=backend`, and the exact pushed commit prefix. The same commit's release
   status also runs the complete backend test suite before it can turn green.
+  This comprehensive workflow is the sole writer of the `render-production`
+  commit status; the obsolete one-test lock-flow hotfix gate was removed so it
+  cannot race or falsely certify a release.
   Once that exact commit is live, the gate immediately certifies the public MCP
   server card, tool-count integrity, all four OAuth metadata aliases, endpoint
   coherence, PKCE support, and unauthenticated Bearer challenge. The periodic
