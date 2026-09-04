@@ -699,6 +699,9 @@ def test_partial_visual_evidence_is_an_error_even_if_one_frame_survives(
         "text": "Captured evidence.",
         "images": [{"storage_key": "media/3/good.jpg"},
                    {"storage_key": "media/3/gone.jpg"}],
+        "tool_outcome": {
+            "status": "success", "state_changed": True,
+            "message": "The edit was applied."},
         "visual_evidence": {
             "created_this_call": 2, "publish_attempts": 2,
             "published_this_call": 2, "remaining": 0},
@@ -724,6 +727,15 @@ def test_partial_visual_evidence_is_an_error_even_if_one_frame_survives(
     assert evidence["delivered_this_response"] == 1
     assert len(evidence["retrievable_receipts"]) == 1
     assert "only 1 of 2" in public["content"][0]["text"]
+    # The edit and its public evidence hop are separate facts.  A caller must
+    # not repeat a state-changing edit merely because the attachment failed.
+    assert public["structuredContent"]["tool_outcome"]["status"] == "success"
+    delivery = public["structuredContent"]["delivery_outcome"]
+    assert delivery["status"] == "transient_failure"
+    assert delivery["retryable"] is True
+    assert delivery["idempotent"] is False
+    assert delivery["evidence"] == {
+        "expected": 2, "accessible": 1, "delivery_status": "partial"}
 
 
 def test_visual_evidence_receipt_counts_actual_public_delivery(
@@ -755,6 +767,38 @@ def test_visual_evidence_receipt_counts_actual_public_delivery(
     assert receipt["delivery_status"] == "delivered"
     assert len(receipt["retrievable_receipts"]) == 2
     assert [block["type"] for block in public["content"]] == ["text", "image"]
+
+
+def test_disjoint_inline_and_receipt_evidence_count_as_complete(
+        client, monkeypatch):
+    DB["job_result"] = {
+        "text": "Captured evidence.",
+        "images": [{"storage_key": "media/3/inline.jpg"},
+                   {"storage_key": "media/3/receipt.jpg"}],
+        "visual_evidence": {
+            "created_this_call": 2, "publish_attempts": 2,
+            "published_this_call": 2, "remaining": 0},
+    }
+    monkeypatch.setattr(
+        mcpmod.storage, "get_object_whole",
+        lambda key, _cap: (b"\xff\xd8jpeg" if key.endswith("inline.jpg")
+                           else None))
+
+    def disjoint_receipt(key):
+        if key.endswith("inline.jpg"):
+            raise RuntimeError("inline object cannot also be signed")
+        return f"https://evidence.example/{key}"
+
+    monkeypatch.setattr(mcpmod.storage, "presign_get", disjoint_receipt)
+    public = rpc(client, "tools/call", STATIC_TOKEN, {
+        "name": "get_transcript", "arguments": {"project_id": 3},
+    }).get_json()["result"]
+
+    evidence = public["structuredContent"]["visual_evidence"]
+    assert public.get("isError") is not True
+    assert evidence["delivered_this_response"] == 1
+    assert len(evidence["retrievable_receipts"]) == 1
+    assert evidence["delivery_status"] == "delivered"
 
 
 def test_visual_evidence_never_returns_plain_success_when_delivery_is_lost(
@@ -1283,6 +1327,10 @@ def test_missing_promised_audio_preserves_link_but_marks_the_call_failed(
     assert "promised audio attachment" in res["content"][0]["text"]
     assert "https://cdn.example/" in res["content"][0]["text"]
     assert "audio" not in [block["type"] for block in res["content"]]
+    delivery = res["structuredContent"]["delivery_outcome"]
+    assert delivery["status"] == "transient_failure"
+    assert delivery["idempotent"] is True
+    assert delivery["evidence"]["download_url_available"] is True
 
 
 def test_failed_explicit_inline_delivery_preserves_link_and_is_an_error(
@@ -1298,6 +1346,8 @@ def test_failed_explicit_inline_delivery_preserves_link_and_is_an_error(
     assert "explicitly requested inline video" in res["content"][0]["text"]
     assert "https://cdn.example/" in res["content"][0]["text"]
     assert "resource" not in [block["type"] for block in res["content"]]
+    assert res["structuredContent"]["delivery_outcome"]["status"] == \
+        "transient_failure"
 
 
 def test_a_silent_programme_simply_has_no_audio_block(client, monkeypatch):

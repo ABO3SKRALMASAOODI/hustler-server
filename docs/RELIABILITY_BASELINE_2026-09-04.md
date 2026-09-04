@@ -103,7 +103,10 @@ whose terminal rows remain in the database.
   cannot erase an otherwise usable text/link response, but missing promised
   frames, audio, or an explicitly requested inline video sets `isError` and
   enters the public-response counter. Partial visual-evidence batches are no
-  longer reported as complete.
+  longer reported as complete. The public payload keeps the worker's
+  `tool_outcome` (including whether an edit already changed state) and reports
+  the later attachment failure separately as `delivery_outcome`, preventing a
+  caller from blindly repeating a successful mutation.
 - The operator dashboard uses the same complete outcome vocabulary as the
   snapshot. On the final read-only seven-day check it showed 546 non-successes
   across 4,344 MCP jobs: 260 terminal queue failures plus 286 completed calls

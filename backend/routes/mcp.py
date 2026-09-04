@@ -860,6 +860,31 @@ def _editor_structured_content(result):
     return out
 
 
+def _delivery_failure(message, *, idempotent=False, evidence=None):
+    """Machine-readable failure for the public attachment-delivery hop.
+
+    ``tool_outcome`` describes what the worker did.  It must not be replaced
+    when a later object-store read fails: an edit may already have changed
+    state.  Keeping delivery separate lets a caller recover the attachment
+    without interpreting ``isError`` as proof that the edit itself failed.
+    """
+    return {
+        "status": "transient_failure",
+        "message": message,
+        "state_changed": False,
+        "retryable": True,
+        "idempotent": bool(idempotent),
+        "corrected_argument_guidance": None,
+        "prerequisite_tool": None,
+        "safe_fallback": (
+            "Keep any usable text or download URL, inspect the current "
+            "project state, and request the missing evidence without "
+            "blindly repeating a state-changing edit."),
+        "evidence": dict(evidence or {}),
+        "affected_ranges": [],
+    }
+
+
 def _current_edl_version(project_id):
     with vdb() as conn:
         cur = conn.cursor()
@@ -1842,6 +1867,12 @@ def _t_watch_video(tok, args):
             "blob": blob}})
     public = {"content": content, "isError": bool(missing)}
     structured = _editor_structured_content(result)
+    if missing:
+        structured["delivery_outcome"] = _delivery_failure(
+            "One or more promised watch_video attachments were not "
+            "delivered. The download URL remains usable.",
+            idempotent=True,
+            evidence={"missing": missing, "download_url_available": True})
     if structured:
         public["structuredContent"] = structured
     return public
@@ -1927,7 +1958,7 @@ def _audio_block(audio):
              "mimeType": audio.get("mime") or "audio/mpeg"}]
 
 
-def _image_blocks(images):
+def _image_blocks(images, delivered_indexes=None):
     """The worker's captured frames -> MCP image content.
 
     IMAGE IS THE ONE NON-TEXT BLOCK WORTH TRUSTING. Video as a resource blob
@@ -1937,7 +1968,7 @@ def _image_blocks(images):
     rather than four million characters. A client that drops them still has
     the text and the link, so the downside is the behaviour we had before."""
     out = []
-    for img in images or []:
+    for index, img in enumerate(images or []):
         key = (img or {}).get("storage_key")
         if not key:
             continue
@@ -1947,6 +1978,8 @@ def _image_blocks(images):
             continue
         if not raw:
             continue
+        if delivered_indexes is not None:
+            delivered_indexes.add(index)
         label = img.get("label")
         if label:
             out.append({"type": "text", "text": f"[{label}]"})
@@ -2051,7 +2084,9 @@ def _handle(tok, msg):
                                 project_id=project_id)
             body = out.get("text") or json.dumps(out)
             public_error = False
-            image_content = _image_blocks(out.get("images"))
+            delivered_indexes = set()
+            image_content = _image_blocks(
+                out.get("images"), delivered_indexes)
             content = [{"type": "text", "text": body}] + image_content
             if isinstance(out.get("visual_evidence"), dict):
                 out = dict(out)
@@ -2060,7 +2095,8 @@ def _handle(tok, msg):
                     block.get("type") == "image" for block in image_content)
                 evidence["delivered_this_response"] = delivered
                 receipts = []
-                for captured in out.get("images") or []:
+                receipt_indexes = set()
+                for index, captured in enumerate(out.get("images") or []):
                     key = (captured or {}).get("storage_key")
                     if not key:
                         continue
@@ -2069,6 +2105,7 @@ def _handle(tok, msg):
                     except Exception:
                         url = None
                     if url:
+                        receipt_indexes.add(index)
                         receipts.append({
                             "label": captured.get("label"),
                             "url": url,
@@ -2079,7 +2116,10 @@ def _handle(tok, msg):
                     attempted,
                     sum(bool((captured or {}).get("storage_key"))
                         for captured in (out.get("images") or [])))
-                accessible = max(delivered, len(receipts))
+                # A response can carry artifact A inline while only artifact B
+                # gets a signed receipt. Count their union, not max(counts),
+                # or a completely accessible mixed delivery looks partial.
+                accessible = len(delivered_indexes | receipt_indexes)
                 if expected and accessible < expected:
                     evidence["delivery_status"] = (
                         "partial" if accessible else "missing")
@@ -2111,6 +2151,20 @@ def _handle(tok, msg):
                       "isError": bool(out.get("is_error")) or
                                  public_error}
             structured = _editor_structured_content(out)
+            if public_error:
+                operation = structured.get("tool_outcome")
+                operation_changed = (
+                    bool(operation.get("state_changed"))
+                    if isinstance(operation, dict)
+                    else bool(out.get("edl_changed")))
+                structured["delivery_outcome"] = _delivery_failure(
+                    "Captured visual evidence was not completely delivered.",
+                    idempotent=not operation_changed,
+                    evidence={
+                        "expected": expected,
+                        "accessible": accessible,
+                        "delivery_status": evidence["delivery_status"],
+                    })
             if structured:
                 public["structuredContent"] = structured
             return _tool_call_result(req_id, tok, name, public)
