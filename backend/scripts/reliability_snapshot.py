@@ -74,6 +74,51 @@ def build_snapshot(conn, days=7):
         cur.execute("SELECT NOW()")
         result["generated_at"] = _iso(cur.fetchone()[0])
 
+        # Keep customer and project populations explicit. The historical
+        # reliability cohort includes canceled customers who previously paid,
+        # while the admin subscriber-projects working view intentionally shows
+        # only currently entitled customers. Without both denominators, the
+        # intentionally different project totals can look like drift.
+        cur.execute("""
+            WITH paid_users AS MATERIALIZED (
+              SELECT u.id,
+                     COALESCE(u.is_subscribed, 0) = 1 AS currently_entitled
+                FROM users u
+               WHERE EXISTS (
+                 SELECT 1 FROM payments pay
+                  WHERE pay.user_id = u.id
+                    AND pay.status = 'completed'
+                    AND pay.amount_cents > 0
+               )
+            ), populations AS (
+              SELECT pu.*,
+                     EXISTS (
+                       SELECT 1 FROM projects p
+                        WHERE p.user_id = pu.id
+                          AND p.parent_project_id IS NULL
+                     ) AS has_parent_project
+                FROM paid_users pu
+            )
+            SELECT COUNT(*),
+                   COUNT(*) FILTER (WHERE currently_entitled),
+                   COUNT(*) FILTER (WHERE has_parent_project),
+                   COUNT(*) FILTER (
+                     WHERE currently_entitled AND has_parent_project),
+                   COUNT(*) FILTER (WHERE NOT has_parent_project)
+              FROM populations
+        """)
+        (ever_paid, currently_entitled, ever_paid_project_owners,
+         current_project_owners, no_parent_project) = cur.fetchone()
+        result["subscriber_population"] = {
+            "ever_paid": int(ever_paid or 0),
+            "currently_entitled": int(currently_entitled or 0),
+            "ever_paid_with_parent_project": int(
+                ever_paid_project_owners or 0),
+            "currently_entitled_with_parent_project": int(
+                current_project_owners or 0),
+            "ever_paid_without_parent_project": int(no_parent_project or 0),
+        }
+
         cur.execute("""
             WITH paid_users AS (
               SELECT DISTINCT user_id FROM payments

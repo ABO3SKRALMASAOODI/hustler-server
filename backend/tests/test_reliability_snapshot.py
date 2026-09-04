@@ -54,3 +54,14 @@ def test_snapshot_source_counts_every_public_mcp_non_success_dialect():
     assert "mcp_done_structured_errors" not in source
     assert "mcp_error_responses" in source
     assert 'result ? \'failure\'' in source
+
+
+def test_snapshot_names_historical_and_current_subscriber_populations():
+    source = open(snapshot.__file__, encoding="utf-8").read()
+    for population in (
+            '"ever_paid"',
+            '"currently_entitled"',
+            '"ever_paid_with_parent_project"',
+            '"currently_entitled_with_parent_project"',
+            '"ever_paid_without_parent_project"'):
+        assert population in source

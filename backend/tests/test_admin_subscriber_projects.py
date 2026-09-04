@@ -65,6 +65,7 @@ def test_subscriber_projects_requires_real_payment_and_is_bounded(monkeypatch):
     assert "pay.amount_cents > 0" in first_sql
     assert "LIMIT %s OFFSET %s" in first_sql
     assert first_params[-2:] == (100, 0)
+    assert body["scope"] == "currently_entitled_and_ever_paid"
     assert body["subscriber_count"] == 1
     assert body["projects"][0]["title"] == "Real edit"
     assert body["projects"][0]["paid_usd"] == 15.0

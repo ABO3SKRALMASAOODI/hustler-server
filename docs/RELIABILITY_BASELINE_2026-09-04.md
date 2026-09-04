@@ -55,8 +55,12 @@ The audit immediately before this release found:
   path. One of those subscribers sent no later request and was left waiting.
   Future snapshots must report this reply coverage rather than relying on the
   queue state alone.
-- The exact paid-subscriber ledger contained 14 ever-paid customers and 23
-  parent projects: 21 active, one billing-attention, and one canceled. Three
+- The exact paid-subscriber ledger contained 14 ever-paid customers: 11 had
+  parent projects and three had none. Those 11 owned 23 historical parent
+  projects: 21 active, one billing-attention, and one canceled. The current-
+  entitlement subscriber-project admin view therefore correctly contained 22
+  projects owned by 10 customers; it intentionally excluded the one canceled
+  customer's project. Three
   active projects ended on an unanswered user message; two newest EDLs were
   still marked `repair_required`; one untouched seed EDL had no preview yet;
   and two main-video index paths were terminal failures. One of those main

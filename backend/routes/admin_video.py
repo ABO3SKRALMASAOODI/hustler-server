@@ -1314,12 +1314,14 @@ def video_subscribers():
 @admin_video_bp.route("/admin/video/subscriber-projects", methods=["GET"])
 @admin_required
 def video_subscriber_projects():
-    """Parent projects belonging to current subscribers who actually paid.
+    """Parent projects belonging to entitled customers who previously paid.
 
     ``is_subscribed`` alone includes legacy trials and Paddle states that have
     not collected money. A completed positive payment is required as well, so
     this page is the paid product's real work rather than a list dominated by
-    free accounts stopping at subscription walls.
+    free accounts stopping at subscription walls. Canceled former customers
+    remain in ``/admin/video/subscribers`` and in the historical reliability
+    snapshot, but are intentionally outside this current-work view.
     """
     search = (request.args.get("search") or "").strip()
     page = max(1, request.args.get("page", type=int) or 1)
@@ -1433,6 +1435,7 @@ def video_subscriber_projects():
     total = int(rows[0]["matched_projects"] or 0) if rows else 0
     return jsonify({
         "page": page, "per_page": per_page, "total": total,
+        "scope": "currently_entitled_and_ever_paid",
         "subscriber_count": subscriber_count,
         "projects": [{
             "id": r["id"], "title": r["title"], "kind": r["kind"],
