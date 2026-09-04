@@ -416,7 +416,8 @@ def start_scheduler(app):
         scheduler.add_job(
             job, "interval", minutes=5, id="paid_subscription_alerts",
             replace_existing=True,
-            next_run_time=datetime.datetime.utcnow() + datetime.timedelta(minutes=1))
+            next_run_time=(datetime.datetime.now(datetime.timezone.utc)
+                           + datetime.timedelta(minutes=1)))
         scheduler.start()
         _scheduler = scheduler
         app.logger.info("paid subscription alert scheduler started")

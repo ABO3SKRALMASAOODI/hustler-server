@@ -659,7 +659,8 @@ def start_billing_scheduler(app):
         sched = BackgroundScheduler(daemon=True, timezone="UTC")
         sched.add_job(job, "interval", hours=1,
                       id="billing_sync", replace_existing=True,
-                      next_run_time=datetime.datetime.utcnow()
+                      next_run_time=datetime.datetime.now(
+                          datetime.timezone.utc)
                       + datetime.timedelta(minutes=2))
         sched.start()
         _scheduler = sched

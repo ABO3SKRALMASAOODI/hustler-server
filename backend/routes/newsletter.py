@@ -37,7 +37,7 @@ import requests
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from functools import wraps
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import jwt
 from flask import Blueprint, request, jsonify, current_app, Response
 
@@ -638,7 +638,8 @@ def start_newsletter_scheduler(app):
 
     sched = BackgroundScheduler(daemon=True, timezone="UTC")
     sched.add_job(job, "interval", hours=1,
-                  next_run_time=datetime.utcnow() + timedelta(seconds=60),
+                  next_run_time=(datetime.now(timezone.utc)
+                                 + timedelta(seconds=60)),
                   id="nl_tick", max_instances=1, coalesce=True)
     sched.start()
     _scheduler = sched
