@@ -33,12 +33,13 @@ here is graded by whether this account has EVER collected a payment
     "grace" — it was right about the paying customer and wrong about everyone
     else.
 
-FAILS SOFT, ALWAYS. Every function here runs inside the Paddle webhook, where
-an exception means Paddle retries the event and a real activation is at stake.
-A bookkeeping failure logs and returns; the worst case is a stale badge, never
-a lost plan. `columns_ready()` makes the whole module a no-op until
-migrations/012_billing_truth.sql has run, so this deploys before the schema and
-starts working the minute it lands, with no restart.
+READS FAIL SAFE; PAYMENT WRITES FAIL CLOSED. Reporting/reconciliation helpers
+degrade without inventing revenue or entitlements. The webhook, however, does
+not acknowledge a transaction when its ledger write fails: returning 503 lets
+Paddle retry instead of losing a real activation. `columns_ready()` keeps read
+paths compatible before migrations/012_billing_truth.sql lands, while payment
+deliveries wait for the durable ledger rather than mutating only half the
+account state.
 """
 
 import datetime
@@ -243,7 +244,8 @@ def payment_error_code(data):
 
 # ── The money ledger ─────────────────────────────────────────────────────────
 
-def record_transaction(conn, user_id, data, status=None):
+def record_transaction(conn, user_id, data, status=None, *,
+                       report_transition=False, commit=True):
     """Write (or update) one Paddle transaction in `payments`. Never raises.
 
     Upsert on transaction_id because Paddle retries webhooks and a transaction
@@ -251,30 +253,78 @@ def record_transaction(conn, user_id, data, status=None):
     `completed` when a retry succeeds). A ledger that appended a row per event
     would count one $30 charge three times.
 
-    Returns the amount in cents that this transaction represents, or None if
-    nothing was written.
+    By default returns the amount in cents, preserving the historical API.
+    ``report_transition`` returns a bounded dict including whether this write
+    is the transaction's first observed paid/completed state. The webhook uses
+    that transition to refresh credits exactly once. With ``commit=False`` its
+    payment row and the subsequent user grant share one database transaction:
+    a crash can commit both or neither, never record payment and lose renewal.
     """
     try:
         if not columns_ready(conn):
-            return None
+            return ({"recorded": False, "newly_paid": False,
+                     "amount_cents": None}
+                    if report_transition else None)
         txn_id = data.get('id')
         if not txn_id:
-            return None
+            return ({"recorded": False, "newly_paid": False,
+                     "amount_cents": None}
+                    if report_transition else None)
         cents, currency = transaction_amount(data)
         status = (status or data.get('status') or 'unknown').lower()
         occurred = (_naive_utc(data.get('billed_at'))
                     or _naive_utc(data.get('created_at')))
         cur = conn.cursor()
+        # Duplicate Paddle deliveries may run on different gunicorn workers.
+        # Serialize one transaction id until the payment row and entitlement
+        # update commit together.
+        cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                    (f"payment:{txn_id}",))
+        cur.execute("""SELECT status, amount_cents FROM payments
+                        WHERE transaction_id = %s""", (txn_id,))
+        prior = cur.fetchone()
+        if isinstance(prior, dict):
+            prior_status = (prior.get("status") or "").lower()
+            prior_amount = int(prior.get("amount_cents") or 0)
+        elif prior:
+            prior_status = (prior[0] or "").lower()
+            prior_amount = int(prior[1] or 0)
+        else:
+            prior_status, prior_amount = "", 0
+        prior_paid = prior_status in ("paid", "completed") \
+            and prior_amount > 0
+        current_paid = status in ("paid", "completed") and cents > 0
         cur.execute("""
             INSERT INTO payments (user_id, transaction_id, subscription_id,
                                   plan, status, amount_cents, currency,
                                   origin, error_code, occurred_at)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (transaction_id) DO UPDATE SET
-                status       = EXCLUDED.status,
-                amount_cents = EXCLUDED.amount_cents,
+                -- A confirmed success cannot be downgraded by a late
+                -- billed/past_due/failed snapshot. Completed outranks paid,
+                -- so the normal paid -> completed transition still lands.
+                status       = CASE
+                  WHEN payments.status IN ('paid', 'completed')
+                   AND (EXCLUDED.status NOT IN ('paid', 'completed')
+                        OR (payments.status = 'completed'
+                            AND EXCLUDED.status = 'paid'))
+                    THEN payments.status
+                  ELSE EXCLUDED.status END,
+                amount_cents = CASE
+                  WHEN payments.status IN ('paid', 'completed')
+                   AND (EXCLUDED.status NOT IN ('paid', 'completed')
+                        OR (payments.status = 'completed'
+                            AND EXCLUDED.status = 'paid'))
+                    THEN payments.amount_cents
+                  ELSE EXCLUDED.amount_cents END,
                 currency     = EXCLUDED.currency,
-                error_code   = EXCLUDED.error_code,
+                error_code   = CASE
+                  WHEN payments.status IN ('paid', 'completed')
+                   AND (EXCLUDED.status NOT IN ('paid', 'completed')
+                        OR (payments.status = 'completed'
+                            AND EXCLUDED.status = 'paid'))
+                    THEN payments.error_code
+                  ELSE EXCLUDED.error_code END,
                 subscription_id = COALESCE(EXCLUDED.subscription_id,
                                            payments.subscription_id),
                 origin       = COALESCE(EXCLUDED.origin, payments.origin),
@@ -289,14 +339,21 @@ def record_transaction(conn, user_id, data, status=None):
         """, (user_id, txn_id, data.get('subscription_id'),
               _plan_hint(data), status, cents, currency,
               data.get('origin'), payment_error_code(data), occurred))
-        conn.commit()
+        if commit:
+            conn.commit()
         cur.close()
+        if report_transition:
+            return {"recorded": True,
+                    "newly_paid": current_paid and not prior_paid,
+                    "amount_cents": cents}
         return cents
     except Exception as e:                                  # pragma: no cover
         _safe_rollback(conn)
         print(f"⚠️ [billing] could not record transaction "
               f"{data.get('id')}: {e}", flush=True)
-        return None
+        return ({"recorded": False, "newly_paid": False,
+                 "amount_cents": None}
+                if report_transition else None)
 
 
 def _plan_hint(data):

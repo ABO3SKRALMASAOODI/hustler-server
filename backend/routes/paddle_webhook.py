@@ -23,7 +23,8 @@ SUB_DAILY_CREDITS = 20
 TRIAL_DAILY_CREDITS = 0
 
 
-def _trial_aware_grant(user_id, plan, subscription_id, event_type, data):
+def _trial_aware_grant(user_id, plan, subscription_id, event_type, data,
+                       payment_grant=False):
     """How many credits this grant event should leave the user holding.
 
     Returns (credits, daily_top_up, preserve_existing_balance, reason).
@@ -49,17 +50,17 @@ def _trial_aware_grant(user_id, plan, subscription_id, event_type, data):
     happens BEFORE trial_state.sync_from_subscription records the trial. So on
     the very first subscription.created the recorded-trial check is False, the
     trial is granted fresh (not preserved), and every event after it preserves.
-    That also self-heals the race where a transaction event arrives first and
-    wrongly grants the full pool: the subscription.created that follows sets it
-    back down to the trial slice, seconds later.
+    A zero-dollar opening transaction is never a payment grant; only a positive
+    transaction's first paid/completed transition can release the full pool.
     """
     full = credits_for_price(_price_id_from_data(data), plan)
     status = (data.get('status') or '').lower()
     if not event_type.startswith('subscription.'):
         status = ''             # not the subscription's status — see above
-    if status == 'active':
-        # Paddle charged. Release the plan in full; this is also the event that
-        # ends a trial, so the pool must be reset rather than preserved.
+    if payment_grant:
+        # A specific transaction crossed into paid/completed for the first
+        # time. This, not subscription status, is the one event that refreshes
+        # the pool for a purchase or renewal.
         return full, SUB_DAILY_CREDITS, False, 'paid'
     try:
         already = trial_state.is_recorded_trial(get_db(), user_id,
@@ -72,7 +73,11 @@ def _trial_aware_grant(user_id, plan, subscription_id, event_type, data):
         if already:
             return allowance, TRIAL_DAILY_CREDITS, True, 'trial (unchanged)'
         return allowance, TRIAL_DAILY_CREDITS, False, 'trial allowance'
-    return full, SUB_DAILY_CREDITS, False, 'full plan'
+    # Paddle can emit active subscription.created/updated before the charge
+    # completes, and can repeat those events throughout a billing period.
+    # Update entitlement facts and limits but never refill spent credits until
+    # a concrete transaction crosses into a paid state.
+    return full, SUB_DAILY_CREDITS, True, 'subscription facts (credits unchanged)'
 
 PLAN_CREDITS = {
     # The three live tiers. Keep in step with PLANS in paddle.py (the checkout)
@@ -349,7 +354,12 @@ def handle_webhook():
         return 'OK', 200
 
     custom_data = data.get('custom_data') or {}
-    subscription_id = data.get('subscription_id') or data.get('id')
+    # A subscription object's id identifies the subscription; a transaction or
+    # adjustment must carry subscription_id explicitly. Falling back to a
+    # transaction id made a standalone charge look like a recurring contract.
+    subscription_id = (data.get('id')
+                       if event_type.startswith('subscription.')
+                       else data.get('subscription_id'))
 
     # ── Identity, resolved ONCE for every branch ────────────────────────────
     # custom_data arrives from Paddle.js (the browser creates the transaction
@@ -375,13 +385,34 @@ def handle_webhook():
               "browser custom_data was ignored")
         return 'Payer identity could not be verified', 503
 
-    # Every transaction Paddle mentions goes in the ledger, successful or not,
-    # BEFORE any branch decides what it means. `payments.amount_cents` is the
+    # A subscriber grant must be attributable to both a recurring contract and
+    # a server-known Paddle price. Retrying is safer than acknowledging a paid
+    # event whose entitlement this release cannot represent correctly.
+    grant_plan = None
+    if event_type in GRANT_EVENTS:
+        if (event_type.startswith('transaction.') and
+                not subscription_id):
+            print("⛔ Paid grant event has no subscription_id")
+            return 'Subscription identity is missing', 503
+        grant_plan = _plan_from_data(data)
+        if not grant_plan:
+            print("⛔ Grant event has no server-known Paddle price id")
+            return 'Billing price is not recognized', 503
+
+    # Every recognized transaction Paddle mentions goes in the ledger,
+    # successful or not, BEFORE any branch decides what it means.
+    # `payments.amount_cents` is the
     # only thing on this system that is revenue: a trial opens with a genuine,
     # signed, `completed` transaction whose grand_total is $0.00, so counting
     # completed transactions has never once been counting money.
+    payment_record = None
     if event_type.startswith('transaction.'):
-        billing.record_transaction(get_db(), user_id, data)
+        payment_record = billing.record_transaction(
+            get_db(), user_id, data, report_transition=True, commit=False)
+        if not payment_record or not payment_record.get("recorded"):
+            # Do not acknowledge a payment event whose durable row was not
+            # written. Paddle will retry, and no entitlement mutation has run.
+            return 'Payment ledger temporarily unavailable', 503
 
     if not user_id:
         return 'OK', 200
@@ -407,10 +438,7 @@ def handle_webhook():
 
     if event_type in GRANT_EVENTS:
         # Plan/credits come from the PAID price, never from custom_data.plan.
-        plan = _plan_from_data(data)
-        if not plan:
-            print("⛔ Grant event with no known price id — granting 0 credits")
-            plan = 'free'
+        plan = grant_plan
         # NB: a local named `billing` lived here (the monthly/yearly label) and
         # would now shadow the billing module imported at the top of the file.
         period = custom_data.get('billing', 'monthly')
@@ -423,7 +451,9 @@ def handle_webhook():
             except Exception as e:
                 print(f"⚠️ Date parse error: {e}")
         grant, daily, preserve, why = _trial_aware_grant(
-            user_id, plan, subscription_id, event_type, data)
+            user_id, plan, subscription_id, event_type, data,
+            payment_grant=bool(
+                payment_record and payment_record.get("newly_paid")))
         update_user_subscription_status(
             user_id, True, expiry_date, subscription_id, plan, grant,
             daily_credits=daily, preserve_credits=preserve)
@@ -519,6 +549,11 @@ def _handle_failure(user_id, subscription_id, data, event_type,
     # over a payment that had nothing to do with their subscription.
     if (event_type.startswith('transaction.')
             and not data.get('subscription_id')):
+        # record_transaction joined this request transaction with commit=False
+        # so a later entitlement update could commit atomically. There is no
+        # entitlement update for a standalone failure, but its payment ledger
+        # row is still durable evidence and must be committed explicitly.
+        get_db().commit()
         print(f"ℹ️ {event_type} with no subscription for user {user_id} "
               f"— recorded, no entitlement change")
         return

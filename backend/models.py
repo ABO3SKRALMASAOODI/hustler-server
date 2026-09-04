@@ -33,12 +33,10 @@ def update_user_subscription_status(user_id, is_subscribed, expiry_date=None, su
     wrong.
 
     `preserve_credits` leaves the balance completely alone and updates only the
-    subscription facts. The grant here is a SET rather than an add, which is
-    what makes repeated Paddle events idempotent — but during a trial that same
-    property refills a pool the user has been spending, so a trial could be
-    reset indefinitely by ordinary subscription.updated traffic. The caller
-    (paddle_webhook._grant_credits) passes True exactly when this event is a
-    repeat for a trial that is already running.
+    subscription facts. The grant here is a SET rather than an add. The caller
+    preserves on repeated subscription lifecycle events and resets only when a
+    specific positive Paddle transaction first crosses into paid/completed, so
+    webhook retries cannot refill a pool the user has already spent.
     """
     conn = get_db()
     cursor = conn.cursor()

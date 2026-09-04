@@ -136,6 +136,45 @@ def test_transaction_upsert_backfills_subscription_identity():
     assert params[2] == "sub_now_known"
 
 
+def test_payment_transition_is_claimed_once_without_an_early_commit():
+    billing._schema["ok"] = True
+    first = _Conn([None])
+    result = billing.record_transaction(first, 7, {
+        "id": "txn_once", "status": "completed",
+        "subscription_id": "sub_once",
+        "details": {"totals": {"grand_total": "1500",
+                                "currency_code": "USD"}},
+    }, report_transition=True, commit=False)
+
+    assert result == {
+        "recorded": True, "newly_paid": True, "amount_cents": 1500}
+    assert first.committed == 0
+    assert "pg_advisory_xact_lock" in first._cur.executed[0][0]
+
+    duplicate = _Conn([{"status": "completed", "amount_cents": 1500}])
+    result = billing.record_transaction(duplicate, 7, {
+        "id": "txn_once", "status": "completed",
+        "subscription_id": "sub_once",
+        "details": {"totals": {"grand_total": "1500",
+                                "currency_code": "USD"}},
+    }, report_transition=True, commit=False)
+    assert result["newly_paid"] is False
+    assert duplicate.committed == 0
+
+
+def test_successful_payment_cannot_be_downgraded_by_late_event():
+    billing._schema["ok"] = True
+    conn = _Conn([{"status": "completed", "amount_cents": 1500}])
+    billing.record_transaction(conn, 7, {
+        "id": "txn_order", "status": "past_due",
+        "details": {"totals": {"grand_total": "1500",
+                                "currency_code": "USD"}},
+    })
+    upsert = conn._cur.executed[-1][0]
+    assert "payments.status IN ('paid', 'completed')" in upsert
+    assert "EXCLUDED.status NOT IN ('paid', 'completed')" in upsert
+
+
 def test_the_real_decline_is_said_in_words():
     """`not_enough_balance` is the decline this whole round was built around."""
     assert "balance" in billing.decline_message("not_enough_balance").lower()

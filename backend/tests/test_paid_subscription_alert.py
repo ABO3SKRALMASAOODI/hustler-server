@@ -192,6 +192,7 @@ def test_webhook_wires_the_alert_only_after_real_money(
 
     db = object()
     calls = []
+    grant_calls = []
     monkeypatch.setattr(webhook, "PADDLE_WEBHOOK_SECRET", "configured")
     monkeypatch.setattr(webhook, "_verify_paddle_signature", lambda _req: True)
     monkeypatch.setattr(webhook, "get_db", lambda: db)
@@ -200,9 +201,15 @@ def test_webhook_wires_the_alert_only_after_real_money(
     monkeypatch.setattr(webhook, "_plan_from_data", lambda _: "ai_pro")
     monkeypatch.setattr(
         webhook, "_trial_aware_grant",
-        lambda *_: (2000, 20, False, "paid"))
+        lambda *_, **kw: (
+            grant_calls.append(kw["payment_grant"])
+            or (2000, 20, False, "paid")))
     monkeypatch.setattr(webhook, "update_user_subscription_status", lambda *_a, **_k: None)
-    monkeypatch.setattr(webhook.billing, "record_transaction", lambda *_: None)
+    monkeypatch.setattr(
+        webhook.billing, "record_transaction",
+        lambda *_args, **_kwargs: {
+            "recorded": True, "newly_paid": int(amount) > 0,
+            "amount_cents": int(amount)})
     monkeypatch.setattr(webhook.billing, "record_recovery", lambda *_: None)
     monkeypatch.setattr(webhook.trial_state, "record_paid_conversion", lambda *_: None)
     monkeypatch.setattr(webhook, "_record_discount_use", lambda *_: None)
@@ -217,6 +224,7 @@ def test_webhook_wires_the_alert_only_after_real_money(
         "data": _transaction(amount),
     })
     assert response.status_code == 200
+    assert grant_calls == [int(amount) > 0]
     assert bool(calls) is alerted
     if alerted:
         assert calls[0][0] is db
@@ -320,6 +328,100 @@ def test_known_subscription_resolves_without_paddle_customer_round_trip(
 
     assert webhook._verified_payer_user_id(
         {"customer_id": "ctm_123"}, "sub_123") == 7
+
+
+def test_active_subscription_event_preserves_spent_credits(monkeypatch):
+    monkeypatch.setattr(webhook, "get_db", lambda: object())
+    monkeypatch.setattr(
+        webhook.trial_state, "is_recorded_trial", lambda *_args: False)
+
+    grant = webhook._trial_aware_grant(
+        7, "ai_pro", "sub_123", "subscription.updated",
+        {"status": "active", "items": [{"price": PRICE}]})
+
+    assert grant[0] == 2000
+    assert grant[2] is True
+    assert "unchanged" in grant[3]
+
+
+def test_first_paid_transaction_refreshes_the_pool(monkeypatch):
+    monkeypatch.setattr(webhook, "get_db", lambda: object())
+    monkeypatch.setattr(
+        webhook.trial_state, "is_recorded_trial", lambda *_args: True)
+
+    grant = webhook._trial_aware_grant(
+        7, "ai_pro", "sub_123", "transaction.completed",
+        {"items": [{"price": PRICE}]}, payment_grant=True)
+
+    assert grant[:3] == (2000, webhook.SUB_DAILY_CREDITS, False)
+
+
+@pytest.mark.parametrize("missing", ["price", "subscription"])
+def test_unrepresentable_paid_grant_is_retried_without_mutation(
+        monkeypatch, missing):
+    from flask import Flask
+
+    data = _transaction()
+    if missing == "price":
+        data["items"] = [{"price": {"id": "pri_not_in_release"}}]
+    else:
+        data.pop("subscription_id")
+    monkeypatch.setattr(webhook, "PADDLE_WEBHOOK_SECRET", "configured")
+    monkeypatch.setattr(webhook, "_verify_paddle_signature", lambda _req: True)
+    monkeypatch.setattr(webhook, "_verified_payer_user_id", lambda *_: 7)
+    monkeypatch.setattr(
+        webhook.billing, "record_transaction",
+        lambda *_args, **_kwargs: pytest.fail(
+            "an unrepresentable grant must not consume its paid transition"))
+    monkeypatch.setattr(
+        webhook, "update_user_subscription_status",
+        lambda *_args, **_kwargs: pytest.fail(
+            "an unrepresentable grant must not mutate entitlement"))
+
+    app = Flask(__name__)
+    app.register_blueprint(webhook.paddle_webhook)
+    response = app.test_client().post("/webhook/paddle", json={
+        "event_type": "transaction.completed", "data": data})
+
+    assert response.status_code == 503
+
+
+def test_standalone_failed_transaction_commits_only_its_ledger(monkeypatch):
+    from flask import Flask
+
+    class Db:
+        committed = 0
+
+        def commit(self):
+            self.committed += 1
+
+    db = Db()
+    record_calls = []
+    monkeypatch.setattr(webhook, "PADDLE_WEBHOOK_SECRET", "configured")
+    monkeypatch.setattr(webhook, "_verify_paddle_signature", lambda _req: True)
+    monkeypatch.setattr(webhook, "_verified_payer_user_id", lambda *_: 7)
+    monkeypatch.setattr(webhook, "get_db", lambda: db)
+    monkeypatch.setattr(
+        webhook.billing, "record_transaction",
+        lambda *_args, **kwargs: (
+            record_calls.append(kwargs)
+            or {"recorded": True, "newly_paid": False,
+                "amount_cents": 3000}))
+    monkeypatch.setattr(
+        webhook.billing, "record_failure",
+        lambda *_args, **_kwargs: pytest.fail(
+            "a standalone charge must not alter subscription entitlement"))
+
+    data = _transaction(subscription=None)
+    data["status"] = "past_due"
+    app = Flask(__name__)
+    app.register_blueprint(webhook.paddle_webhook)
+    response = app.test_client().post("/webhook/paddle", json={
+        "event_type": "transaction.payment_failed", "data": data})
+
+    assert response.status_code == 200
+    assert record_calls == [{"report_transition": True, "commit": False}]
+    assert db.committed == 1
 
 
 def test_alert_content_escapes_database_and_paddle_values():

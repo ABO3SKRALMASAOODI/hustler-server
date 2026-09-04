@@ -157,6 +157,14 @@ whose terminal rows remain in the database.
 
 ### Billing
 
+- Only the first paid/completed state of a specific Paddle transaction refreshes
+  the monthly pool. Repeated `subscription.updated`, `transaction.paid`, or
+  `transaction.completed` deliveries preserve spent credits. The payment row
+  and entitlement update commit together under a transaction-scoped lock, so
+  concurrent delivery or a process crash cannot double-refill or lose a
+  renewal; a late failure snapshot cannot downgrade confirmed paid/completed
+  truth. Unknown prices and paid events without a subscription id fail closed
+  for provider retry instead of creating a zero-credit subscription.
 - Paddle webhooks fail closed before parsing or account access when the signing
   secret is absent, allowing provider retries without accepting forged plan or
   credit mutations. Raw request bodies are authenticated against every `h1`
@@ -176,7 +184,7 @@ whose terminal rows remain in the database.
 - Worker pytest suite: 1,735 passed, 3 skipped.
 - Legacy worker executable checks: all 20 harnesses passed, including 1,038
   unit checks, 22 patch checks, and 30 text-behind-subject tests.
-- Backend pytest suite: 356 passed, 4 skipped, including MCP protocol, billing
+- Backend pytest suite: 363 passed, 4 skipped, including MCP protocol, billing
   trust-boundary, secure-health, and
   snapshot classification tests.
 - Modal executor tests: 38 passed.
