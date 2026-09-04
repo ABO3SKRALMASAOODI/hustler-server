@@ -99,6 +99,11 @@ whose terminal rows remain in the database.
   error response records a bounded `mcp_error_response` event containing only
   the tool name; the pre-release historical count is unavailable by
   construction.
+- Attachment transport is independently verified: an object-store read error
+  cannot erase an otherwise usable text/link response, but missing promised
+  frames, audio, or an explicitly requested inline video sets `isError` and
+  enters the public-response counter. Partial visual-evidence batches are no
+  longer reported as complete.
 - The operator dashboard uses the same complete outcome vocabulary as the
   snapshot. On the final read-only seven-day check it showed 546 non-successes
   across 4,344 MCP jobs: 260 terminal queue failures plus 286 completed calls
@@ -160,7 +165,7 @@ whose terminal rows remain in the database.
 - Worker pytest suite: 1,735 passed, 3 skipped.
 - Legacy worker executable checks: all 20 harnesses passed, including 1,038
   unit checks, 22 patch checks, and 30 text-behind-subject tests.
-- Backend pytest suite: 335 passed, 4 skipped, including MCP protocol and
+- Backend pytest suite: 339 passed, 4 skipped, including MCP protocol and
   snapshot classification tests.
 - Modal executor tests: 38 passed.
 - Cloudflare adapter TypeScript check: passed.

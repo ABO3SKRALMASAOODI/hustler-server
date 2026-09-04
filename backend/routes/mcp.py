@@ -1796,8 +1796,12 @@ def _t_watch_video(tok, args):
                  "request or with the file.)")
 
     blob = None
+    inline_failed = False
     if video.get("inline") and delivery == "inline" and VIDEO_ALLOW_INLINE:
-        raw = storage.get_object_whole(video["storage_key"], inline_max)
+        try:
+            raw = storage.get_object_whole(video["storage_key"], inline_max)
+        except Exception:
+            raw = None
         if raw:
             blob = base64.b64encode(raw).decode("ascii")
         else:
@@ -1806,16 +1810,37 @@ def _t_watch_video(tok, args):
             # expect an attachment beside.
             text += ("\n\n(The embedded copy could not be read back from "
                      "storage — use the link.)")
+            inline_failed = True
+    image_content = _image_blocks(result.get("images"))
+    audio_content = _audio_block(result.get("audio"))
+    expected_images = sum(
+        bool((captured or {}).get("storage_key"))
+        for captured in (result.get("images") or []))
+    delivered_images = sum(
+        block.get("type") == "image" for block in image_content)
+    missing = []
+    if delivered_images < expected_images:
+        missing.append(
+            f"frames ({delivered_images} of {expected_images} delivered)")
+    if result.get("audio") and not audio_content:
+        missing.append("the promised audio attachment")
+    if inline_failed:
+        missing.append("the explicitly requested inline video")
+    if missing:
+        text += ("\n\nATTACHMENT DELIVERY FAILED: " + ", ".join(missing)
+                 + ". The download link in this response remains usable, "
+                   "but do not "
+                   "claim the missing attachment was received.")
     # Text FIRST: it is what orients the model — which clock the video runs
     # on, what is in it, what to do next — and it says the pictures follow.
     content = [{"type": "text", "text": f"{text}\n\nDownload: {url}"}]
-    content += _image_blocks(result.get("images"))
-    content += _audio_block(result.get("audio"))
+    content += image_content
+    content += audio_content
     if blob:
         content.append({"type": "resource", "resource": {
             "uri": url, "mimeType": video.get("mime") or "video/mp4",
             "blob": blob}})
-    public = {"content": content, "isError": False}
+    public = {"content": content, "isError": bool(missing)}
     structured = _editor_structured_content(result)
     if structured:
         public["structuredContent"] = structured
@@ -1892,7 +1917,10 @@ def _audio_block(audio):
     key = (audio or {}).get("storage_key")
     if not key:
         return []
-    raw = storage.get_object_whole(key, AUDIO_MAX_BYTES)
+    try:
+        raw = storage.get_object_whole(key, AUDIO_MAX_BYTES)
+    except Exception:
+        return []
     if not raw:
         return []
     return [{"type": "audio", "data": base64.b64encode(raw).decode("ascii"),
@@ -1913,7 +1941,10 @@ def _image_blocks(images):
         key = (img or {}).get("storage_key")
         if not key:
             continue
-        raw = storage.get_object_whole(key, IMAGE_MAX_BYTES)
+        try:
+            raw = storage.get_object_whole(key, IMAGE_MAX_BYTES)
+        except Exception:
+            continue
         if not raw:
             continue
         label = img.get("label")
@@ -2044,7 +2075,21 @@ def _handle(tok, msg):
                         })
                 evidence["retrievable_receipts"] = receipts
                 attempted = int(evidence.get("publish_attempts") or 0)
-                if delivered:
+                expected = max(
+                    attempted,
+                    sum(bool((captured or {}).get("storage_key"))
+                        for captured in (out.get("images") or [])))
+                accessible = max(delivered, len(receipts))
+                if expected and accessible < expected:
+                    evidence["delivery_status"] = (
+                        "partial" if accessible else "missing")
+                    public_error = True
+                    content[0]["text"] += (
+                        "\n\nVISUAL EVIDENCE DELIVERY FAILED: only "
+                        f"{accessible} of {expected} captured artifact(s) "
+                        "reached this response or a retrievable receipt. Do "
+                        "not claim the complete visual check passed.")
+                elif delivered:
                     evidence["delivery_status"] = "delivered"
                 elif receipts:
                     evidence["delivery_status"] = "retrievable"
@@ -2052,7 +2097,7 @@ def _handle(tok, msg):
                         "\n\nVisual evidence was stored but the inline image "
                         "block could not be assembled; use the signed receipt "
                         "in structuredContent.visual_evidence.")
-                elif attempted:
+                elif expected:
                     evidence["delivery_status"] = "missing"
                     public_error = True
                     content[0]["text"] += (

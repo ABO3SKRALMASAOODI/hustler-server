@@ -684,12 +684,46 @@ def test_an_unreadable_frame_never_costs_the_answer(client, monkeypatch):
     DB["job_result"] = {"text": "Captured 3 frames.",
                         "images": [{"storage_key": "media/3/gone.jpg"}]}
     monkeypatch.setattr(mcpmod.storage, "get_object_whole",
-                        lambda key, cap: None)
+                        lambda *_args: (_ for _ in ()).throw(
+                            RuntimeError("temporary object read failure")))
     res = rpc(client, "tools/call", STATIC_TOKEN,
               {"name": "get_transcript",
                "arguments": {"project_id": 3}}).get_json()["result"]
     assert [c["type"] for c in res["content"]] == ["text"]
     assert res.get("isError") is not True
+
+
+def test_partial_visual_evidence_is_an_error_even_if_one_frame_survives(
+        client, monkeypatch):
+    DB["job_result"] = {
+        "text": "Captured evidence.",
+        "images": [{"storage_key": "media/3/good.jpg"},
+                   {"storage_key": "media/3/gone.jpg"}],
+        "visual_evidence": {
+            "created_this_call": 2, "publish_attempts": 2,
+            "published_this_call": 2, "remaining": 0},
+    }
+    monkeypatch.setattr(
+        mcpmod.storage, "get_object_whole",
+        lambda key, _cap: (b"\xff\xd8jpeg" if key.endswith("good.jpg")
+                           else None))
+
+    def one_receipt(key):
+        if key.endswith("gone.jpg"):
+            raise RuntimeError("receipt unavailable")
+        return f"https://evidence.example/{key}"
+
+    monkeypatch.setattr(mcpmod.storage, "presign_get", one_receipt)
+    public = rpc(client, "tools/call", STATIC_TOKEN, {
+        "name": "get_transcript", "arguments": {"project_id": 3},
+    }).get_json()["result"]
+
+    evidence = public["structuredContent"]["visual_evidence"]
+    assert public["isError"] is True
+    assert evidence["delivery_status"] == "partial"
+    assert evidence["delivered_this_response"] == 1
+    assert len(evidence["retrievable_receipts"]) == 1
+    assert "only 1 of 2" in public["content"][0]["text"]
 
 
 def test_visual_evidence_receipt_counts_actual_public_delivery(
@@ -1231,6 +1265,39 @@ def test_the_sound_comes_back_as_audio_content(client, monkeypatch):
     blk = res["content"][kinds.index("audio")]
     assert blk["mimeType"] == "audio/mpeg"
     assert base64.b64decode(blk["data"]) == b"ID3mp3bytes"
+
+
+def test_missing_promised_audio_preserves_link_but_marks_the_call_failed(
+        client, monkeypatch):
+    _served(monkeypatch)
+    DB["job_result"]["audio"] = {
+        "storage_key": "media/3/aud_x.mp3", "mime": "audio/mpeg",
+        "bytes": 180000, "seconds": 28.7, "kbps": 48}
+    monkeypatch.setattr(
+        mcpmod.storage, "get_object_whole",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("storage down")))
+
+    res = _call_watch(client)
+
+    assert res["isError"] is True
+    assert "promised audio attachment" in res["content"][0]["text"]
+    assert "https://cdn.example/" in res["content"][0]["text"]
+    assert "audio" not in [block["type"] for block in res["content"]]
+
+
+def test_failed_explicit_inline_delivery_preserves_link_and_is_an_error(
+        client, monkeypatch):
+    _served(monkeypatch)
+    monkeypatch.setattr(mcpmod, "VIDEO_ALLOW_INLINE", True)
+    monkeypatch.setattr(mcpmod.storage, "get_object_whole",
+                        lambda *_args: None)
+
+    res = _call_watch(client, delivery="inline")
+
+    assert res["isError"] is True
+    assert "explicitly requested inline video" in res["content"][0]["text"]
+    assert "https://cdn.example/" in res["content"][0]["text"]
+    assert "resource" not in [block["type"] for block in res["content"]]
 
 
 def test_a_silent_programme_simply_has_no_audio_block(client, monkeypatch):
