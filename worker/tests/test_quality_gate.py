@@ -382,6 +382,56 @@ def test_many_proof_pages_enqueue_and_wait_for_one_batched_job(monkeypatch):
     assert "one source-reusing render" in result
 
 
+def test_changed_proof_failure_reports_the_actionable_outcome(monkeypatch):
+    class Db:
+        failure = None
+
+        @classmethod
+        def run(cls, fn, *_args):
+            if fn is dbx.get_job:
+                return {"state": "failed", "result": {
+                    "failure": dict(cls.failure)}}
+            raise AssertionError(fn)
+
+    class Ctx:
+        checked_versions = set()
+        spec_preview_check_jobs = {2: 81}
+        project_id = 7
+        job = {"id": 9, "user_id": 3,
+               "payload": {"execution_policy": "redesign"}}
+        db = Db()
+
+    monkeypatch.setattr(agent_tools.time, "sleep", lambda _seconds: None)
+    row = {"version": 2, "json": default_edl(40.0)}
+
+    Db.failure = {
+        "error": "Canvas program needs at least one insert",
+        "kind": "invalid_edl", "retryable": False,
+        "agent_repairable": True,
+    }
+    correction = agent_tools._run_changed_preview_check(
+        Ctx(), row, [], [[0, 8]])
+    assert correction.startswith("CORRECTION_NEEDED:")
+    assert "NEW EDL version" in correction
+
+    Db.failure = {
+        "error": "Modal workspace billing cycle spend limit reached",
+    }
+    unavailable = agent_tools._run_changed_preview_check(
+        Ctx(), row, [], [[0, 8]])
+    assert unavailable.startswith("UNAVAILABLE:")
+    assert "retry blindly" in unavailable
+
+    Db.failure = {
+        "error": "upstream connection reset by peer",
+        "kind": "transient_infrastructure", "retryable": True,
+        "agent_repairable": False,
+    }
+    transient = agent_tools._run_changed_preview_check(
+        Ctx(), row, [], [[0, 8]])
+    assert transient.startswith("TRANSIENT_FAILURE:")
+
+
 def test_sequence_screening_maps_kept_source_beats_and_omits_cut_regions():
     class Ctx:
         edit_plan = {

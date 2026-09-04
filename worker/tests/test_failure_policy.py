@@ -44,6 +44,16 @@ def test_wrong_render_length_gets_new_edl_repair_not_same_bytes_retry():
     assert d.agent_repairable is True
 
 
+def test_empty_canvas_gets_new_edl_repair_not_same_proof_retry():
+    d = failure_policy.classify(
+        RuntimeError("Canvas program needs at least one insert"),
+        "preview_check")
+    assert d.kind == "invalid_edl"
+    assert d.retryable is False
+    assert d.max_attempts == 0
+    assert d.agent_repairable is True
+
+
 def test_transient_connection_gets_exactly_one_second_run():
     d = failure_policy.classify(
         RuntimeError("upstream connection reset by peer"), "preview")

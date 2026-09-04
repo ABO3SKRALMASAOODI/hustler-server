@@ -25,6 +25,7 @@ import db as dbx
 import director
 import editorial_contracts
 import editorial_index
+import failure_policy
 import grammar
 import inpaint
 import llm
@@ -17074,10 +17075,33 @@ def _run_changed_preview_check(ctx, row, plan, ranges):
             failure = dict(((job.get("result") or {}).get("failure") or {}))
             err = str(failure.get("error") or job.get("error")
                       or "unknown check error")[:500]
-            return (f"TRANSIENT_FAILURE: changed-section proof batch failed "
-                    f"for v{version}: {err}. The EDL remains saved; "
-                    "retry/reconnect this idempotent proof while unrelated "
-                    "work continues.")
+            # New executors persist this decision.  Reclassify legacy rows
+            # locally when it is absent so an invalid EDL or exhausted
+            # provider budget is never advertised to the agent as a useful
+            # retry merely because the job predates structured failures.
+            if not any(key in failure for key in
+                       ("kind", "retryable", "agent_repairable")):
+                failure.update(failure_policy.classify(
+                    RuntimeError(err), "preview_check").payload(err))
+            if failure.get("agent_repairable"):
+                return (
+                    "CORRECTION_NEEDED: changed-section proof batch failed "
+                    f"for v{version}: {err}. This version will NOT be "
+                    "retried unchanged. Inspect it with get_edl, correct "
+                    "the invalid or too-expensive part in a NEW EDL version, "
+                    "then verify that new version once.")
+            if failure.get("retryable"):
+                return (
+                    "TRANSIENT_FAILURE: changed-section proof batch failed "
+                    f"for v{version}: {err}. The EDL remains saved; retry/"
+                    "reconnect this idempotent proof while unrelated work "
+                    "continues.")
+            return (
+                "UNAVAILABLE: changed-section proof batch failed "
+                f"for v{version}: {err}. The EDL remains saved, but this "
+                "unchanged proof is not retryable. Do not rewrite the edit "
+                "or retry blindly; tell the user the exact failure and that "
+                "proof cannot complete from the unchanged inputs.")
     return (f"PREREQUISITE: the {len(pages)}-page changed-section proof batch "
             "is still running. Continue unrelated work; logical verification "
             "remains open and will resume.")

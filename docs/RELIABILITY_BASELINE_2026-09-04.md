@@ -37,6 +37,12 @@ The audit immediately before this release found:
   pager even though MCP already receives the complete catalog and each MCP
   tool call has an isolated worker context; that pager is no longer exposed
   over MCP.
+- The 14 nominally transient preview results included deterministic empty-
+  canvas EDL failures and exhausted Modal account capacity. Changed-section
+  proof failures now preserve the executor's structured decision: repairable
+  EDL defects request a new version, genuinely transient infrastructure may
+  retry, and non-retryable provider capacity is reported unavailable without
+  inviting a blind render or edit rewrite.
 - The audited Shorts batch accepted 3 of 26 candidates. Rejections clustered
   around framing, caption, B-roll, and quality-control evidence.
 - One subscriber project reached EDL version 27 through repeated continuation
@@ -103,6 +109,9 @@ whose terminal rows remain in the database.
 
 - Insert-only proof windows clip and rebase inserted media correctly, including
   windows containing no A-roll.
+- Changed-section proof failures retain their retry policy when presented to
+  the editing agent; deterministic EDL defects, transient infrastructure, and
+  provider unavailability are distinct outcomes.
 - A short repaint patch cannot truncate the main output when its own input ends.
 - Empty range collections never reach `max()` without a default or guard.
 - Failed obsolete preview/final retries are rejected once a newer render exists.

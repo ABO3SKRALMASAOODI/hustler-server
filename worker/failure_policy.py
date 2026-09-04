@@ -43,6 +43,7 @@ _TRANSIENT = (
 _INVALID_EDL = (
     "edl version", "edl validation", "invalid edl", "invalid keep",
     "invalid speed", "invalid frame", "invalid transition",
+    "canvas program needs at least one insert",
     "render duration check failed", "render is the wrong length",
     "render black-frame check failed",
 )
