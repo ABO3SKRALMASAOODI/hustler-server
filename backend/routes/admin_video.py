@@ -130,6 +130,48 @@ def _attention_media_supersession_sql(failed_alias="vj",
     return "(" + " OR ".join(clauses) + ")"
 
 
+def _mcp_non_success_sql(alias=""):
+    """One exhaustive MCP failure predicate for every admin surface.
+
+    New worker rows carry a structured outcome and ``is_error``. Historical
+    rows used several text dialects, including failures embedded in otherwise
+    explanatory prose, so relying on the transport job state alone hides real
+    agent-visible failures.
+    """
+    p = (alias + ".") if alias else ""
+    result = p + "result"
+    state = p + "state"
+    text = f"COALESCE({result}->>'text', '')"
+    first = f"SPLIT_PART(UPPER(LTRIM({text})), CHR(10), 1)"
+    return f"""({state} = 'failed'
+        OR COALESCE({result}->'tool_outcome'->>'status', 'success')
+             <> 'success'
+        OR UPPER(LTRIM({text})) LIKE ANY (ARRAY[
+             'REJECTED%%', 'CORRECTION_NEEDED%%', 'CORRECTION NEEDED%%',
+             'RECIPE ABORTED%%', 'PREREQUISITE%%',
+             'TRANSIENT_FAILURE%%', 'TRANSIENT FAILURE%%', 'TOOL %%',
+             'FAILED%%', 'COULD NOT%%', 'UNAVAILABLE%%',
+             'UNKNOWN TOOL%%', 'UNSAFE%%'])
+        OR UPPER(LTRIM({text})) LIKE '%%PREREQUISITE:%%'
+        OR {first} ~
+             '(^|[^A-Z])(FAILED|COULD NOT|UNAVAILABLE|ERRORED)([^A-Z]|$)'
+        OR COALESCE({result}->>'is_error', 'false') = 'true'
+        OR {result} ? 'failure')"""
+
+
+def _mcp_refusal_sql(alias=""):
+    """Correctable/unsafe MCP refusals, separate from infrastructure loss."""
+    p = (alias + ".") if alias else ""
+    result = p + "result"
+    text = f"UPPER(LTRIM(COALESCE({result}->>'text', '')))"
+    return f"""(COALESCE(
+          {result}->'tool_outcome'->>'status', '')
+            IN ('correction_needed', 'unsafe')
+        OR {text} LIKE ANY (ARRAY[
+             'REJECTED%%', 'CORRECTION_NEEDED%%', 'CORRECTION NEEDED%%',
+             'RECIPE ABORTED%%', 'UNSAFE%%']))"""
+
+
 def _presign(key):
     if not storage.is_configured():
         return None
@@ -1452,19 +1494,10 @@ def video_projects():
                        AS tool_calls,
                    (SELECT COUNT(*) FROM video_jobs mt
                     WHERE mt.project_id = p.id AND mt.type = 'mcp_tool'
-                      AND (mt.state = 'failed'
-                           OR COALESCE(mt.result->>'is_error', 'false') = 'true'
-                           OR mt.result ? 'failure')) AS tool_failed,
+                      AND {_mcp_non_success_sql('mt')}) AS tool_failed,
                    (SELECT COUNT(*) FROM video_jobs mt
                     WHERE mt.project_id = p.id AND mt.type = 'mcp_tool'
-                      AND (UPPER(LTRIM(COALESCE(mt.result->>'text', '')))
-                               LIKE 'REJECTED%%'
-                           OR UPPER(LTRIM(COALESCE(mt.result->>'text', '')))
-                               LIKE 'CORRECTION_NEEDED%%'
-                           OR UPPER(LTRIM(COALESCE(mt.result->>'text', '')))
-                               LIKE 'CORRECTION NEEDED%%'
-                           OR UPPER(LTRIM(COALESCE(mt.result->>'text', '')))
-                               LIKE 'RECIPE ABORTED%%')) AS tool_rejected,
+                      AND {_mcp_refusal_sql('mt')}) AS tool_rejected,
                    (SELECT COUNT(*) FROM projects c
                     WHERE c.parent_project_id = p.id) AS shorts_count,
                    -- Round 101: how many times this project's owner met the
@@ -1545,6 +1578,7 @@ def video_projects():
          "exports": r["exports"],
          "tool_calls": int(r["tool_calls"] or 0),
          "tool_failed": int(r["tool_failed"] or 0),
+         "tool_non_success": int(r["tool_failed"] or 0),
          "tool_rejected": int(r["tool_rejected"] or 0),
          "customer_paid": bool(r["customer_paid"]),
          "converted_project": bool(r["converted_project"]),
@@ -3105,20 +3139,11 @@ def video_reliability():
                              'Worker died%%') AS worker_died,
                    COUNT(*) FILTER (WHERE type = 'mcp_tool') AS tools_total,
                    COUNT(*) FILTER (
-                       WHERE type = 'mcp_tool' AND (
-                           state = 'failed'
-                           OR COALESCE(result->>'is_error', 'false') = 'true'
-                           OR result ? 'failure')) AS tool_failed,
+                       WHERE type = 'mcp_tool'
+                         AND {_mcp_non_success_sql()}) AS tool_failed,
                    COUNT(*) FILTER (
-                       WHERE type = 'mcp_tool' AND (
-                           UPPER(LTRIM(COALESCE(result->>'text', '')))
-                               LIKE 'REJECTED%%'
-                           OR UPPER(LTRIM(COALESCE(result->>'text', '')))
-                               LIKE 'CORRECTION_NEEDED%%'
-                           OR UPPER(LTRIM(COALESCE(result->>'text', '')))
-                               LIKE 'CORRECTION NEEDED%%'
-                           OR UPPER(LTRIM(COALESCE(result->>'text', '')))
-                               LIKE 'RECIPE ABORTED%%')) AS tool_refused
+                       WHERE type = 'mcp_tool'
+                         AND {_mcp_refusal_sql()}) AS tool_refused
               FROM scoped_jobs
             ), project_rollup AS (
               SELECT COUNT(*) AS sessions_total,
@@ -3138,6 +3163,13 @@ def video_reliability():
                                     AND cj.state = 'done')
                    )) AS no_export
               FROM scoped_projects p
+            ), mcp_response_rollup AS (
+              SELECT COUNT(*) AS mcp_error_responses
+                FROM client_events ce
+                JOIN users u ON u.id = ce.user_id
+               WHERE ce.kind = 'mcp_error_response'
+                 AND ce.created_at >= NOW() - INTERVAL '24 hours'
+                 AND {_scope('u')}
             ), failed_types AS (
               SELECT COALESCE(jsonb_agg(
                        jsonb_build_object('type', f.type, 'n', f.n)
@@ -3149,9 +3181,9 @@ def video_reliability():
             )
             SELECT NOW() - INTERVAL '24 hours' AS starts_at,
                    NOW() AS ends_at, j.*, p.sessions_total, p.no_export,
-                   f.rows AS failed_by_type
+                   m.mcp_error_responses, f.rows AS failed_by_type
             FROM job_rollup j CROSS JOIN project_rollup p
-                 CROSS JOIN failed_types f
+                 CROSS JOIN mcp_response_rollup m CROSS JOIN failed_types f
         """)
         rel = cur.fetchone() or {}
 
@@ -3177,6 +3209,11 @@ def video_reliability():
             "job_failed": _metric("job_failed", jobs_total),
             "tool_refused": _metric("tool_refused", tools_total),
             "tool_failed": _metric("tool_failed", tools_total),
+            "tool_non_success": _metric("tool_failed", tools_total),
+            # Public isError responses include synchronous validation and
+            # delivery failures, and can overlap queue-backed failures above.
+            "mcp_error_responses": {
+                "count": int(rel.get("mcp_error_responses") or 0)},
         },
         "sessions_without_export": {
             "total_sessions": total,

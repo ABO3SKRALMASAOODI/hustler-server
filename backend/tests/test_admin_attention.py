@@ -13,6 +13,8 @@ from routes.admin_video import (  # noqa: E402
     ATTENTION_MEDIA_SUCCESSORS,
     ATTENTION_REPLACEMENT_STATES,
     _attention_media_supersession_sql,
+    _mcp_non_success_sql,
+    _mcp_refusal_sql,
     video_projects,
     video_reliability,
 )
@@ -60,12 +62,33 @@ def test_reliability_is_one_explicit_rolling_day_query():
 
 def test_project_rows_expose_conversion_and_tool_outcomes():
     source = inspect.getsource(inspect.unwrap(video_projects))
-    for field in ("tool_calls", "tool_failed", "tool_rejected",
+    for field in ("tool_calls", "tool_failed", "tool_non_success",
+                  "tool_rejected",
                   "customer_paid", "converted_project"):
         assert field in source
     assert "pa.status = 'completed'" in source
     assert "pa.amount_cents > 0" in source
     assert "subscription_upload_locked" in source
+
+
+def test_admin_mcp_outcomes_cover_every_public_failure_dialect():
+    non_success = _mcp_non_success_sql("mt")
+    for marker in (
+            "tool_outcome", "is_error", "? 'failure'", "REJECTED%%",
+            "CORRECTION_NEEDED%%", "RECIPE ABORTED%%", "PREREQUISITE%%",
+            "%%PREREQUISITE:%%", "TRANSIENT_FAILURE%%",
+            "TRANSIENT FAILURE%%", "UNAVAILABLE%%", "UNKNOWN TOOL%%",
+            "UNSAFE%%", "FAILED|COULD NOT|UNAVAILABLE|ERRORED"):
+        assert marker in non_success
+    refusal = _mcp_refusal_sql("mt")
+    assert "correction_needed" in refusal and "UNSAFE%%" in refusal
+
+
+def test_reliability_exposes_queue_and_public_mcp_error_views():
+    source = inspect.getsource(inspect.unwrap(video_reliability))
+    assert '"tool_non_success"' in source
+    assert '"mcp_error_responses"' in source
+    assert "ce.kind = 'mcp_error_response'" in source
 
 
 def test_shorts_board_uses_one_child_snapshot_query():
