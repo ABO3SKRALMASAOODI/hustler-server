@@ -33,7 +33,8 @@ class _Cursor:
             "projects": 1, "child_projects": 0, "latest_project_id": 99,
             "uploads": 1, "clips": 3, "renders": 2,
             "storage_bytes": 1234, "jobs": 5, "failed_jobs": 1,
-            "exports": 1, "last_activity": now,
+            "exports": 1, "feedback_up": 4, "feedback_down": 1,
+            "last_activity": now,
             "matched_subscribers": 1,
         }]
 
@@ -73,6 +74,8 @@ def test_subscribers_keeps_churn_and_distinguishes_access_from_health(
     assert "s.subscriber_state = %s" in row_sql
     assert row_params[-3:] == ["canceled", 100, 0]
     assert "billing_status = 'canceled'" in summary_sql
+    assert "m.meta->>'feedback' = 'up'" in row_sql
+    assert "m.meta->>'feedback' = 'down'" in row_sql
     assert body["summary"] == {
         "ever_paid": 10, "entitled_now": 9, "active": 6,
         "canceled": 1, "past_due": 0, "attention": 3,
@@ -80,3 +83,5 @@ def test_subscribers_keeps_churn_and_distinguishes_access_from_health(
     }
     assert body["subscribers"][0]["state"] == "canceled"
     assert body["subscribers"][0]["canceled_recorded_at"] is not None
+    assert body["subscribers"][0]["feedback_up"] == 4
+    assert body["subscribers"][0]["feedback_down"] == 1

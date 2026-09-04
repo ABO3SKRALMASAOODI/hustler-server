@@ -1127,6 +1127,21 @@ def video_subscribers():
                        MAX(j.updated_at) AS last_job_at
                   FROM video_jobs j JOIN payment_agg pa ON pa.user_id = j.user_id
                  GROUP BY j.user_id
+            ), feedback_agg AS (
+                SELECT cs.user_id,
+                       COUNT(*) FILTER (
+                           WHERE m.meta->>'feedback' = 'up') AS feedback_up,
+                       COUNT(*) FILTER (
+                           WHERE m.meta->>'feedback' = 'down') AS feedback_down,
+                       MAX(m.created_at) FILTER (
+                           WHERE m.meta->>'feedback' IN ('up', 'down'))
+                           AS last_feedback_at
+                  FROM chat_sessions cs
+                  JOIN payment_agg pa ON pa.user_id = cs.user_id
+                  JOIN chat_messages m ON m.session_id = cs.id
+                 WHERE m.role = 'assistant'
+                   AND m.meta->>'feedback' IN ('up', 'down')
+                 GROUP BY cs.user_id
             ), subscribers AS MATERIALIZED (
                 SELECT u.id, u.email, u.created_at, u.is_subscribed, u.plan,
                        u.subscription_expiry, u.billing_status, u.billing_plan,
@@ -1146,13 +1161,17 @@ def video_subscribers():
                        COALESCE(j.jobs, 0) AS jobs,
                        COALESCE(j.failed_jobs, 0) AS failed_jobs,
                        COALESCE(j.exports, 0) AS exports,
+                       COALESCE(fb.feedback_up, 0) AS feedback_up,
+                       COALESCE(fb.feedback_down, 0) AS feedback_down,
                        GREATEST(u.last_seen_at, pr.last_project_at,
                                 ast.last_asset_at, j.last_job_at,
-                                pa.last_paid_at) AS last_activity
+                                pa.last_paid_at, fb.last_feedback_at)
+                           AS last_activity
                   FROM users u JOIN payment_agg pa ON pa.user_id = u.id
                   LEFT JOIN project_agg pr ON pr.user_id = u.id
                   LEFT JOIN asset_agg ast ON ast.user_id = u.id
                   LEFT JOIN job_agg j ON j.user_id = u.id
+                  LEFT JOIN feedback_agg fb ON fb.user_id = u.id
             )
             SELECT s.*, COUNT(*) OVER () AS matched_subscribers
               FROM subscribers s
@@ -1234,6 +1253,8 @@ def video_subscribers():
             "jobs": int(r["jobs"] or 0),
             "failed_jobs": int(r["failed_jobs"] or 0),
             "exports": int(r["exports"] or 0),
+            "feedback_up": int(r["feedback_up"] or 0),
+            "feedback_down": int(r["feedback_down"] or 0),
             "last_activity": (r["last_activity"].isoformat()
                               if r["last_activity"] else None),
         } for r in rows],
