@@ -62,7 +62,9 @@ jobs:
           set -euo pipefail
           expected="${GITHUB_SHA:0:12}"
           for attempt in $(seq 1 90); do
-            response="$(curl --fail --silent --show-error --max-time 30 \
+            # Keep a 503 JSON body: it names the missing non-secret health
+            # check and is more actionable than treating it as no response.
+            response="$(curl --silent --show-error --max-time 30 \
               https://entrepreneur-bot-backend.onrender.com/healthz || true)"
             if RESPONSE="$response" EXPECTED="$expected" python - <<'PY'
           import json
