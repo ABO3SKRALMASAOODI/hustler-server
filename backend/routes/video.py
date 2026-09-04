@@ -1327,9 +1327,9 @@ def create_upload(user_id, project_id):
         # the indexer is not yet deployed to understand.
         return jsonify({"error": "Prepared uploads are not enabled"}), 400
 
-    # A STAGED video (round 84's tray) may become the project's MAIN footage
-    # at submit, so it validates against the full original cap — the 500MB
-    # clip cap is for mid-edit b-roll attachments, not for someone's footage.
+    # A STAGED video (round 84's tray) may become the project's MAIN footage.
+    # Both lanes intentionally share the full video-file cap; keep this alias
+    # for compatibility with servers deployed before that contract unified.
     staged = bool(data.get("staged"))
     try:
         ext, content_type = storage.validate_upload(

@@ -92,10 +92,9 @@ ALLOWED_IMAGE_EXT = {
 }
 
 # High-resolution campaign/product JPEGs routinely land in the 20-40 MiB
-# range. This remains bounded well below clip and original-video uploads.
+# range. This remains bounded well below video uploads.
 MUSIC_MAX_BYTES = 50 * 1024 * 1024
 IMAGE_MAX_BYTES = 50 * 1024 * 1024
-CLIP_MAX_BYTES = 500 * 1024 * 1024   # clips spliced into the edit
 
 # A browser-built 540p proxy. Our own proxies average 0.70 Mbps across 202
 # production files, so the 3-hour maximum lands near 950 MB even at the
@@ -190,6 +189,13 @@ MAX_DURATION_S = float(os.getenv("MAX_DURATION_S", str(3 * 3600)))
 
 def max_upload_bytes():
     return int(MAX_UPLOAD_GB * 1024 ** 3)
+
+
+# A video remains the same storage/compute shape whether it starts the project
+# or is attached later as B-roll. The studio and public docs advertise one
+# 14-GB video-file ceiling; keeping a hidden 500-MB clip cap made the browser
+# accept a large attachment only for the presign endpoint to refuse it.
+CLIP_MAX_BYTES = max_upload_bytes()
 
 
 def _size_label(nbytes):

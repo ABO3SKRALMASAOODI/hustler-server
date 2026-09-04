@@ -19,6 +19,8 @@ formatting nicety.
 import os
 import sys
 
+import pytest
+
 os.environ.setdefault("SKIP_DB_INIT", "1")
 os.environ.setdefault("DATABASE_URL", "postgresql://stub/stub")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -101,9 +103,10 @@ def test_limits_are_reported_for_the_client_to_read():
     assert ".mp4" in lim["video_ext"]
 
 
-def test_attachment_caps_stay_below_the_main_video_cap():
+def test_attachment_caps_match_the_public_file_contract():
     lim = storage.upload_limits()
-    assert lim["image_max_bytes"] < lim["clip_max_bytes"] < lim["max_bytes"]
+    assert lim["image_max_bytes"] < lim["clip_max_bytes"]
+    assert lim["clip_max_bytes"] == lim["max_bytes"]
 
 
 def test_high_resolution_reference_images_fit():
@@ -111,6 +114,15 @@ def test_high_resolution_reference_images_fit():
     assert storage.IMAGE_MAX_BYTES >= 40 * 1024 * 1024
     storage.validate_upload("campaign-reference.jpg", 40 * 1024 * 1024,
                             "image")
+
+
+def test_large_video_attachments_share_the_advertised_video_limit():
+    almost_the_limit = storage.max_upload_bytes() - 1
+    assert storage.validate_upload(
+        "campaign-broll.mov", almost_the_limit, "clip")[0] == ".mov"
+    with pytest.raises(ValueError, match="limit"):
+        storage.validate_upload(
+            "campaign-broll.mov", storage.max_upload_bytes() + 1, "clip")
 
 
 def test_validate_upload_labels_the_cap_it_enforced():
