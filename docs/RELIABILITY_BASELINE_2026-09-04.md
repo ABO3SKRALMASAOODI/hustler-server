@@ -24,6 +24,10 @@ The audit immediately before this release found:
   around framing, caption, B-roll, and quality-control evidence.
 - One subscriber project reached EDL version 27 through repeated continuation
   slices, remained `repair_required`, and never received a terminal reply.
+- The provider ledger retained one expired Modal preview as `running` for more
+  than four days even though its canonical queue job was already `failed`.
+  The release reaper must close this crash-interrupted contradiction after
+  deployment.
 
 These are historical measurements, not permanent thresholds. The watcher must
 use a comparable time window and distinguish newly-created work from old jobs
