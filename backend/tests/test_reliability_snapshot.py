@@ -34,3 +34,14 @@ def test_mcp_failure_categories_separate_actionable_root_causes():
 def test_unknown_errors_remain_visible_instead_of_being_called_success():
     assert snapshot.subscriber_failure_category("new failure") == "other"
     assert snapshot.mcp_failure_category("new failure") == "other"
+
+
+def test_snapshot_source_counts_every_public_mcp_non_success_dialect():
+    source = open(snapshot.__file__, encoding="utf-8").read()
+    for prefix in (
+            "REJECTED%%", "CORRECTION_NEEDED%%", "CORRECTION NEEDED%%",
+            "RECIPE ABORTED%%", "PREREQUISITE%%", "TRANSIENT_FAILURE%%",
+            "UNAVAILABLE%%", "UNKNOWN TOOL%%", "UNSAFE%%"):
+        assert prefix in source
+    assert "mcp_done_non_success" in source
+    assert 'result ? \'failure\'' in source

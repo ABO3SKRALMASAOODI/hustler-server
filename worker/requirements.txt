@@ -21,6 +21,11 @@ modal==1.5.4
 # A failure here is honest (the tool reports the extractor's own reason) but it
 # is still a broken feature, so treat a stale pin as a bug, not as drift.
 yt-dlp==2026.7.4
+# yt-dlp's recommended browser-impersonation transport. Production generic
+# page fetches were otherwise rejected by TLS-fingerprinting bot walls, and
+# yt-dlp itself reported this exact dependency as the missing recovery path.
+# 0.15.0 is the pin published by yt-dlp 2026.7.4's pin-curl-cffi extra.
+curl-cffi==0.15.0
 # Headless-Chromium website capture for worker/webrecord.py (record_website
 # tool). The BROWSER itself is baked by the Dockerfile's
 # `playwright install --with-deps chromium` — keep that line and this pin in

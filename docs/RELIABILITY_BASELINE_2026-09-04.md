@@ -17,11 +17,26 @@ The audit immediately before this release found:
 - MCP jobs: 4,084 done and 260 failed. The initial broad audit classified 192
   nominally-done calls as refusals; the reproducible strict metric finds 186
   results beginning with `REJECTED:`. Use the strict metric for future trend
-  comparisons rather than silently changing the denominator. Cloudflare
+  comparisons rather than silently changing the denominator. The complete
+  outcome monitor also reports correction/recipe, prerequisite, transient,
+  unavailable, unsafe, and structured-error results separately; do not treat
+  a transport-level `done` row as a successful tool action. On the same final
+  snapshot, the 4,084 `done` rows decomposed into 3,804 actual successes, 218
+  correction/refusal outcomes, 53 transient-failure outcomes, and 9 remaining
+  structured errors: 280 agent-visible non-successes in total. Cloudflare
   capacity accounted for 244 failed calls and Modal billing/capacity for 13.
 - Stock-media continuity was broken across process boundaries: 129 chosen IDs
   were unknown when used later, and only 3 of 140 observed `add_stock_media`
   calls completed successfully.
+- Of the newly-visible MCP non-successes, 53 were transient results: 35 URL
+  fetches, 14 preview renders, three frame inspections, and one asset-frame
+  inspection. Twenty-eight of the URL fetches named a Cloudflare anti-bot
+  challenge and yt-dlp's missing browser-impersonation dependency; the worker
+  image now installs the dependency version pinned by the deployed yt-dlp
+  release. Nineteen calls also wasted a round on the internal `load_tools`
+  pager even though MCP already receives the complete catalog and each MCP
+  tool call has an isolated worker context; that pager is no longer exposed
+  over MCP.
 - The audited Shorts batch accepted 3 of 26 candidates. Rejections clustered
   around framing, caption, B-roll, and quality-control evidence.
 - One subscriber project reached EDL version 27 through repeated continuation

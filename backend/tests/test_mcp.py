@@ -333,6 +333,7 @@ def test_tools_list_is_session_tools_plus_the_worker_registry(client):
     assert "open_project" in names and "get_transcript" in names
     assert "export_final" not in names
     assert "edit_shorts" not in names
+    assert "load_tools" not in names
     assert "make_shorts" in names
     editor = [t for t in tools if t["name"] == "get_transcript"][0]
     # MCP adds only its transport-level immutable project scope; the worker's
@@ -705,6 +706,31 @@ def test_worker_catalog_cannot_reintroduce_final_export(client, monkeypatch):
     names = [t["name"] for t in
              rpc(client, "tools/list", STATIC_TOKEN).get_json()["result"]["tools"]]
     assert "export_final" not in names
+
+
+def test_worker_catalog_cannot_expose_internal_tool_paging(client, monkeypatch):
+    """Every MCP call is a separate worker job, while tools/list already
+    exposes the full catalog. Internal load state cannot persist over this
+    boundary, so advertising load_tools only creates guaranteed wasted calls.
+    """
+    stale = dict(CATALOG)
+    stale["tools"] = list(CATALOG["tools"]) + [{
+        "type": "function", "function": {
+            "name": "load_tools", "description": "internal pager",
+            "parameters": {"type": "object", "properties": {
+                "names": {"type": "array"}}}}}]
+    monkeypatch.setattr(mcpmod, "_catalog", lambda: stale)
+
+    names = [t["name"] for t in
+             rpc(client, "tools/list", STATIC_TOKEN).get_json()["result"]["tools"]]
+    assert "load_tools" not in names
+
+    denied = rpc(client, "tools/call", STATIC_TOKEN, {
+        "name": "load_tools", "arguments": {"names": ["watch_video"]},
+    }).get_json()["result"]
+    assert denied["isError"] is True
+    assert "complete tool catalog" in denied["content"][0]["text"]
+    assert DB["enqueued"] == []
 
 
 def test_editing_without_an_explicit_project_says_what_to_do(client):

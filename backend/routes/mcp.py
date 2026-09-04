@@ -301,7 +301,7 @@ _TITLE_OVERRIDES = {
 # deliverable. Keep this filter even though export_final is not currently an
 # editor-registry tool: it prevents a future worker catalog or a stale client
 # from silently restoring the expensive capability.
-MCP_DENIED_TOOLS = frozenset({"export_final", "edit_shorts"})
+MCP_DENIED_TOOLS = frozenset({"export_final", "edit_shorts", "load_tools"})
 MCP_DENIED_MESSAGES = {
     "export_final": (
         "Final export is deliberately unavailable over MCP. Finish and "
@@ -312,6 +312,10 @@ MCP_DENIED_MESSAGES = {
         "reserved for an explicit locked-card Edit press. You are the editor: "
         "call shorts_status, open_short for each child, then use the normal "
         "EDL editing, preview, and watch tools yourself."),
+    "load_tools": (
+        "load_tools is an internal Valmera-agent context pager and is not "
+        "meaningful over MCP. Your MCP client already receives the complete "
+        "tool catalog from tools/list; call the capability you need directly."),
 }
 
 

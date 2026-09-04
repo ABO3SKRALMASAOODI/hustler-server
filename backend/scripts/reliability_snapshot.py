@@ -427,6 +427,54 @@ def build_snapshot(conn, days=7):
         result["mcp_done_refusals"] = int(refused or 0)
         result["mcp_done_structured_errors"] = int(structured or 0)
 
+        # The strict REJECTED count above is retained as the historical trend
+        # denominator.  It is not the complete public outcome vocabulary:
+        # recipe/correction guidance, prerequisites, transient failures,
+        # unavailable/unsafe results, and structured MCP errors are all
+        # non-successes an outside agent must see and act on.
+        cur.execute("""
+            WITH outcomes AS (
+              SELECT CASE
+                       WHEN result->'tool_outcome'->>'status' IS NOT NULL
+                         THEN result->'tool_outcome'->>'status'
+                       WHEN UPPER(LTRIM(COALESCE(result->>'text', '')))
+                         LIKE ANY (ARRAY[
+                           'REJECTED%%', 'CORRECTION_NEEDED%%',
+                           'CORRECTION NEEDED%%', 'RECIPE ABORTED%%'])
+                         THEN 'correction_needed'
+                       WHEN UPPER(LTRIM(COALESCE(result->>'text', '')))
+                         LIKE 'PREREQUISITE%%'
+                         THEN 'prerequisite'
+                       WHEN UPPER(LTRIM(COALESCE(result->>'text', '')))
+                         LIKE ANY (ARRAY[
+                           'TRANSIENT_FAILURE%%', 'TOOL %%', 'FAILED%%',
+                           'COULD NOT%%'])
+                         THEN 'transient_failure'
+                       WHEN UPPER(LTRIM(COALESCE(result->>'text', '')))
+                         LIKE ANY (ARRAY['UNAVAILABLE%%', 'UNKNOWN TOOL%%'])
+                         THEN 'unavailable'
+                       WHEN UPPER(LTRIM(COALESCE(result->>'text', '')))
+                         LIKE 'UNSAFE%%'
+                         THEN 'unsafe'
+                       WHEN COALESCE(result->>'is_error', 'false') = 'true'
+                         OR result ? 'failure'
+                         THEN 'structured_error'
+                       ELSE 'success'
+                     END AS outcome
+                FROM video_jobs
+               WHERE type = 'mcp_tool' AND state = 'done'
+                 AND created_at >= NOW() - %s::interval
+            )
+            SELECT outcome, COUNT(*) FROM outcomes
+             GROUP BY outcome ORDER BY outcome
+        """, (interval,))
+        result["mcp_done_outcomes"] = {
+            str(outcome): int(count)
+            for outcome, count in cur.fetchall()}
+        result["mcp_done_non_success"] = sum(
+            count for outcome, count in result["mcp_done_outcomes"].items()
+            if outcome != "success")
+
         cur.execute("""
             WITH stats AS (
               SELECT payload->>'tool' AS tool,
@@ -436,22 +484,37 @@ def build_snapshot(conn, days=7):
                      COUNT(*) FILTER (
                        WHERE state = 'done'
                          AND result->>'text' ~* '^\\s*REJECTED:') AS refused
+                     ,COUNT(*) FILTER (
+                       WHERE state = 'done' AND (
+                         COALESCE(result->'tool_outcome'->>'status', 'success')
+                           <> 'success'
+                         OR UPPER(LTRIM(COALESCE(result->>'text', '')))
+                           LIKE ANY (ARRAY[
+                             'REJECTED%%', 'CORRECTION_NEEDED%%',
+                             'CORRECTION NEEDED%%', 'RECIPE ABORTED%%',
+                             'PREREQUISITE%%', 'TRANSIENT_FAILURE%%',
+                             'TOOL %%', 'FAILED%%', 'COULD NOT%%',
+                             'UNAVAILABLE%%', 'UNKNOWN TOOL%%', 'UNSAFE%%'])
+                         OR COALESCE(result->>'is_error', 'false') = 'true'
+                         OR result ? 'failure')) AS non_success
                 FROM video_jobs
                WHERE type = 'mcp_tool'
                  AND created_at >= NOW() - %s::interval
                GROUP BY payload->>'tool'
             )
-            SELECT tool, total, done, failed, refused
+            SELECT tool, total, done, failed, refused, non_success
               FROM stats
-             WHERE failed > 0 OR refused > 0
-             ORDER BY failed + refused DESC, tool
+             WHERE failed > 0 OR non_success > 0
+             ORDER BY failed + non_success DESC, tool
         """, (interval,))
         result["mcp_problem_tools"] = [{
             "tool": tool or "unknown",
             "total": int(total), "done": int(done),
             "failed": int(failed), "refused": int(refused),
-            "successful": int(done) - int(refused),
-        } for tool, total, done, failed, refused in cur.fetchall()]
+            "non_success": int(non_success),
+            "successful": int(done) - int(non_success),
+        } for tool, total, done, failed, refused, non_success
+            in cur.fetchall()]
 
         cur.execute("""
             SELECT type, state, COUNT(*),
