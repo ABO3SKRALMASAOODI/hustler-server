@@ -176,7 +176,8 @@ whose terminal rows remain in the database.
 - Worker pytest suite: 1,735 passed, 3 skipped.
 - Legacy worker executable checks: all 20 harnesses passed, including 1,038
   unit checks, 22 patch checks, and 30 text-behind-subject tests.
-- Backend pytest suite: 339 passed, 4 skipped, including MCP protocol and
+- Backend pytest suite: 349 passed, 4 skipped, including MCP protocol, billing
+  trust-boundary, secure-health, and
   snapshot classification tests.
 - Modal executor tests: 38 passed.
 - Cloudflare adapter TypeScript check: passed.
