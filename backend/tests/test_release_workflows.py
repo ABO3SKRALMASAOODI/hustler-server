@@ -23,6 +23,8 @@ def test_render_release_gate_covers_full_suite_health_and_public_mcp():
     assert "python -m pytest -q backend/tests" in source
     assert "/healthz" in source
     assert "payload.get(\"commit\")" in source
+    assert '"no-store" in os.environ.get("CACHE_CONTROL"' in source
+    assert "--header 'Cache-Control: no-cache'" in source
     assert "verify_public_mcp.py" in source
     assert "image: postgres:16" in source
     assert source.count("python backend/apply_migrations.py") == 2

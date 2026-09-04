@@ -113,12 +113,23 @@ jobs:
         run: |
           set -euo pipefail
           expected="${GITHUB_SHA:0:12}"
+          headers_file="$(mktemp)"
+          body_file="$(mktemp)"
+          trap 'rm -f "$headers_file" "$body_file"' EXIT
           for attempt in $(seq 1 90); do
             # Keep a 503 JSON body: it names the missing non-secret health
             # check and is more actionable than treating it as no response.
-            response="$(curl --silent --show-error --max-time 30 \
-              https://entrepreneur-bot-backend.onrender.com/healthz || true)"
-            if RESPONSE="$response" EXPECTED="$expected" python - <<'PY'
+            : > "$headers_file"
+            : > "$body_file"
+            curl --silent --show-error --max-time 30 \
+              --header 'Cache-Control: no-cache' \
+              --dump-header "$headers_file" \
+              --output "$body_file" \
+              https://entrepreneur-bot-backend.onrender.com/healthz || true
+            response="$(<"$body_file")"
+            cache_control="$(awk 'BEGIN { IGNORECASE=1 } /^cache-control:/ { sub(/^[^:]*:[[:space:]]*/, ""); sub(/\r$/, ""); value=$0 } END { print value }' "$headers_file")"
+            if RESPONSE="$response" EXPECTED="$expected" \
+              CACHE_CONTROL="$cache_control" python - <<'PY'
           import json
           import os
           import sys
@@ -132,6 +143,7 @@ jobs:
               payload.get("status") == "ok"
               and payload.get("role") == "backend"
               and str(payload.get("commit") or "").startswith(expected)
+              and "no-store" in os.environ.get("CACHE_CONTROL", "").lower()
           )
           print(json.dumps(payload, sort_keys=True))
           sys.exit(0 if healthy else 1)
