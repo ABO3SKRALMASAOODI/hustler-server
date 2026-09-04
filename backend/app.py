@@ -18,8 +18,6 @@ from routes.paddle_webhook import paddle_webhook
 from routes.admin import admin_bp
 from routes.google_auth import google_auth_bp
 from models import close_db, init_db
-import os
-from dotenv import load_dotenv
 from routes.github import github_bp
 from routes.deploy import deploy_bp
 from routes.supabase_mgmt import supabase_bp
@@ -33,16 +31,12 @@ from routes.onboarding import onboarding_bp
 from routes.mcp import mcp_bp
 from routes.mcp_oauth import mcp_oauth_bp
 from routes.phone_status import phone_status_bp
-
-
-_PUBLIC_OR_WEAK_APP_KEYS = {"supersecretkey", "devsecret", "changeme"}
+from security_config import database_credential_status, secret_ok
 
 
 def _configured_app_secret():
     value = (os.environ.get("SECRET_KEY") or "").strip()
-    if len(value) < 32 or value.lower() in _PUBLIC_OR_WEAK_APP_KEYS:
-        return None
-    return value
+    return value if secret_ok(value, 32) else None
 
 
 def create_app():
@@ -64,15 +58,22 @@ def create_app():
             "secret_key": "configured" if _configured_app_secret()
                           else "missing",
             "paddle_webhook_signing": (
-                "configured" if _os.environ.get("PADDLE_WEBHOOK_SECRET")
+                "configured" if secret_ok(
+                    _os.environ.get("PADDLE_WEBHOOK_SECRET"), 16)
                 else "missing"),
             "paddle_api": (
-                "configured" if _os.environ.get("PADDLE_API_KEY")
+                "configured" if secret_ok(
+                    _os.environ.get("PADDLE_API_KEY"), 16)
                 else "missing"),
+            "database_credential": database_credential_status(
+                _os.environ.get("DATABASE_URL")),
         }
         payload = {
-            "status": ("ok" if all(value == "configured"
-                                   for value in checks.values())
+            "status": ("ok" if (
+                           checks["secret_key"] == "configured"
+                           and checks["paddle_webhook_signing"] == "configured"
+                           and checks["paddle_api"] == "configured"
+                           and checks["database_credential"] == "rotated")
                        else "degraded"),
             "role": "backend",
             "commit": (_os.environ.get("RENDER_GIT_COMMIT")

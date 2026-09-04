@@ -187,7 +187,7 @@ whose terminal rows remain in the database.
 - Worker pytest suite: 1,735 passed, 3 skipped.
 - Legacy worker executable checks: all 20 harnesses passed, including 1,038
   unit checks, 22 patch checks, and 30 text-behind-subject tests.
-- Backend pytest suite: 364 passed, 4 skipped, including MCP protocol, billing
+- Backend pytest suite: 367 passed, 4 skipped, including MCP protocol, billing
   trust-boundary, secure-health, and
   snapshot classification tests.
 - Modal executor tests: 38 passed.
@@ -228,7 +228,9 @@ whose terminal rows remain in the database.
   `role=backend`, and the exact pushed commit prefix. The same commit's release
   status also runs the complete backend test suite before it can turn green.
 - Backend health remains `degraded` when the stable application signing key,
-  Paddle webhook signing secret, or Paddle API key is absent. A missing
+  Paddle webhook signing secret, or Paddle API key is absent, or when the
+  database URL is missing, malformed, local, or still matches the exposed
+  credential. A missing
   application key uses an unpredictable process-local fallback rather than the
   old public literal, so misconfiguration is disruptive but never silently
   forgeable. Degraded health returns HTTP 503 so hosting and release checks
@@ -242,7 +244,8 @@ whose terminal rows remain in the database.
   an ordinary worker release. Every Cloudflare, Modal, or Cloud Run executor
   deployment runs the complete worker test suite and capability validator
   before publishing; worker Python must compile and the Cloudflare adapter must
-  type-check too.
+  type-check too. The executor workflows also reject the exposed database
+  credential before contacting a provider.
 - No production database migration is required by this release.
 - During the first 24 hours, compare newly-created subscriber and MCP work with
   this baseline. Notify on a new root-cause cluster, a stalled logical request,

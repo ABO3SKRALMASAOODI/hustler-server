@@ -59,3 +59,14 @@ def test_cli_never_prints_secret_values(monkeypatch, capsys):
     assert "PADDLE_WEBHOOK_SECRET" in output
     for value in config.values():
         assert value not in output
+
+
+def test_database_only_cli_ignores_unrelated_application_secrets(
+        monkeypatch, capsys):
+    config = {"DATABASE_URL": _safe_config()["DATABASE_URL"]}
+    monkeypatch.setattr(preflight, "_configuration", lambda _path: config)
+
+    assert preflight.main(["--database-only"]) == 0
+    output = capsys.readouterr().out
+    assert "database credential is rotated" in output
+    assert config["DATABASE_URL"] not in output

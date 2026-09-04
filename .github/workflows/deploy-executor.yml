@@ -83,11 +83,14 @@ jobs:
 
       - name: test executor before building release images
         if: steps.coalesce.outputs.should_deploy == 'true'
+        env:
+          DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             ffmpeg fontconfig fonts-dejavu-core fonts-noto-core fonts-noto-cjk
           python backend/scripts/scan_tracked_secrets.py
+          python backend/scripts/security_release_preflight.py --database-only
           python -m pip install --disable-pip-version-check \
             -r worker/requirements.txt pytest
           python -m compileall -q worker

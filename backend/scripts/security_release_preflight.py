@@ -6,69 +6,40 @@ hosts, usernames, and paths from the connection URL never leave this process.
 """
 
 import argparse
-import hashlib
 import os
+import sys
 from pathlib import Path
-from urllib.parse import urlsplit
 
 from dotenv import dotenv_values
 
-
-# SHA-256 of the database URL that was committed to operator guidance. Keeping
-# its one-way fingerprint lets release operators prove they rotated it without
-# copying the compromised credential into another file or command.
-COMPROMISED_DATABASE_URL_SHA256 = (
-    "3fd20182a59ab5fe43f4729c05a24b14656f510ac8654e7c6e4fdf821fb81519"
-)
-_PLACEHOLDERS = {
-    "", "changeme", "change-me", "devsecret", "example", "placeholder",
-    "secret", "supersecretkey", "test", "todo",
-}
-
-
-def _secret_ok(value, minimum):
-    value = str(value or "").strip()
-    return len(value) >= minimum and value.lower() not in _PLACEHOLDERS
-
-
-def _database_url_issue(value, compromised_hash=None):
-    value = str(value or "").strip()
-    if not value:
-        return "is missing"
-    if hashlib.sha256(value.encode()).hexdigest() == (
-            compromised_hash or COMPROMISED_DATABASE_URL_SHA256):
-        return "still matches the credential exposed in Git; rotate it"
-    try:
-        parsed = urlsplit(value)
-        password = parsed.password
-    except ValueError:
-        return "is not a valid PostgreSQL URL"
-    if parsed.scheme not in ("postgres", "postgresql") \
-            or not parsed.hostname or not parsed.username or not password:
-        return "must include a PostgreSQL host, username, and password"
-    if parsed.hostname.lower() in ("localhost", "127.0.0.1", "postgres"):
-        return "points at a local database, not production"
-    if str(password).lower() in _PLACEHOLDERS:
-        return "uses a placeholder password"
-    return None
+# Running this file directly puts backend/scripts, not backend, on sys.path.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import security_config  # noqa: E402
 
 
 def validate(config, compromised_hash=None):
     """Return bounded, non-secret failure descriptions."""
     failures = []
-    if not _secret_ok(config.get("SECRET_KEY"), 32):
+    if not security_config.secret_ok(config.get("SECRET_KEY"), 32):
         failures.append(("SECRET_KEY", "must be at least 32 non-placeholder characters"))
-    if not _secret_ok(config.get("PADDLE_API_KEY"), 16):
+    if not security_config.secret_ok(config.get("PADDLE_API_KEY"), 16):
         failures.append(("PADDLE_API_KEY", "is missing or looks like a placeholder"))
-    if not _secret_ok(config.get("PADDLE_WEBHOOK_SECRET"), 16):
+    if not security_config.secret_ok(
+            config.get("PADDLE_WEBHOOK_SECRET"), 16):
         failures.append(("PADDLE_WEBHOOK_SECRET", "is missing or looks like a placeholder"))
     if str(config.get("PADDLE_MODE") or "").strip().lower() == "sandbox":
         failures.append(("PADDLE_MODE", "is sandbox for a production release"))
-    database_issue = _database_url_issue(
+    database_issue = security_config.database_url_issue(
         config.get("DATABASE_URL"), compromised_hash=compromised_hash)
     if database_issue:
         failures.append(("DATABASE_URL", database_issue))
     return failures
+
+
+def validate_database(config, compromised_hash=None):
+    issue = security_config.database_url_issue(
+        config.get("DATABASE_URL"), compromised_hash=compromised_hash)
+    return [("DATABASE_URL", issue)] if issue else []
 
 
 def _configuration(env_file=None):
@@ -87,15 +58,24 @@ def main(argv=None):
         description="Validate production security settings without printing them.")
     parser.add_argument(
         "--env-file", help="optional dotenv file to check (process env wins)")
+    parser.add_argument(
+        "--database-only", action="store_true",
+        help="validate only DATABASE_URL for executor deployment gates")
     args = parser.parse_args(argv)
-    failures = validate(_configuration(args.env_file))
+    config = _configuration(args.env_file)
+    failures = (validate_database(config) if args.database_only
+                else validate(config))
     if failures:
         print("RELEASE PREFLIGHT FAILED")
         for name, reason in failures:
             print(f"- {name}: {reason}")
         return 1
-    print("RELEASE PREFLIGHT PASSED: required secrets are present, the "
-          "database credential is rotated, and production mode is selected.")
+    if args.database_only:
+        print("RELEASE PREFLIGHT PASSED: the database credential is rotated "
+              "and production-shaped.")
+    else:
+        print("RELEASE PREFLIGHT PASSED: required secrets are present, the "
+              "database credential is rotated, and production mode is selected.")
     return 0
 
 
