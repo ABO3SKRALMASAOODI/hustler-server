@@ -3,7 +3,7 @@
 ## What It Is
 An **agentic AI video editor** (valmera.io). Users upload footage and chat with an agent that edits it by rewriting an EDL; ffmpeg renders it. Four services:
 
-- **Frontend** — Next.js 15 studio UI (chat + preview)
+- **Frontend** — Next.js 16 studio UI (chat + preview)
 - **Backend** — Flask API (auth, billing, credits, chat routes: `backend/routes/video.py`, `admin_video.py`)
 - **Worker** (`worker/`) — dispatcher: job queue, agent loop (LLM turns), faster-whisper indexing, credit charging (`worker/db.charge_turn_credits`)
 - **Executor** — Cloudflare Containers are primary for capacity-safe interactive, batch, agent, MCP, and Shorts lanes. Modal app `valmera-executor` is the fenced fallback for provider failures and synchronous operations that exceed Cloudflare's self-serve container limits. Cloud Run is an emergency launch fallback only.
@@ -25,9 +25,9 @@ work through it.
 
 ## Repos
 
-- **Frontend** — `~/Documents/Startup/frontend-next/` → `github.com/ABO3SKRALMASAOODI/startup_frontend` (Next.js 15 App Router, Tailwind v3). All API calls go through the `/api-backend/` proxy in `next.config.js` — never call the Render URL directly from frontend code.
-- **Backend/Worker** — `~/Documents/hustler-server/` → `github.com/ABO3SKRALMASAOODI/hustler-server` (Flask + Gunicorn).
-- **DEAD — never edit:** `~/Documents/Startup/frontend/` (old CRA) and `~/Documents/Startup/backend/`.
+- **Frontend** — `~/Documents/Valmera/frontend-next/` → `github.com/ABO3SKRALMASAOODI/startup_frontend` (Next.js 16 App Router, Tailwind v3). All API calls go through the `/api-backend/` proxy in `next.config.mjs` — never call the Render URL directly from frontend code.
+- **Backend/Worker** — `~/Documents/Valmera/hustler-server/` → `github.com/ABO3SKRALMASAOODI/hustler-server` (Flask + Gunicorn).
+- **DEAD — never edit:** any surviving old CRA/app-builder checkout outside these two current repositories.
 
 ## How to Push
 
@@ -118,10 +118,10 @@ bot"). `worker/ytaccess.py` is the whole story; the operator-facing facts:
 
 1. **CORS is manual** in `app.py` (`before_request`/`after_request`) — don't remove.
 2. **SSR**: no `localStorage`/`window`/`document` outside `useEffect` or without a `typeof window` guard — #1 cause of Vercel build failures. Pages using `useSearchParams()` must be wrapped in `<Suspense>`. Interactive components need `"use client"`.
-3. **Auth tokens**: always `setToken()`/`removeToken()` from `@/utils/auth` (sets localStorage + cookie; the cookie drives `src/middleware.js` route protection for `/studio`, `/account`, `/admin`).
+3. **Auth tokens**: always `setToken()`/`removeToken()` from `@/utils/auth` (sets localStorage + cookie; the cookie drives the Next.js 16 `src/proxy.js` route protection for `/studio`, `/account`, `/admin`, and `/cancel`).
 4. **OAuth**: never pass tokens/codes as query params (Safari ITP blocks them) — use path segments (`/google-callback/{code}`, one-time codes in `google_auth_codes`). Google OAuth redirect URI points at the backend; JS origins include both `valmera.io` and `www.valmera.io`.
 5. **Admin** is gated to `thevalmera@gmail.com`.
-6. Only `next.config.js` may exist — delete any `next.config.ts` immediately.
+6. `next.config.mjs` is authoritative. Do not reintroduce a competing `.js` or `.ts` config.
 7. Render shell is ephemeral; only the persistent disk and repo survive redeploys.
 8. Old domain `thehustlerbot.com` is dead — everything is `valmera.io`.
 

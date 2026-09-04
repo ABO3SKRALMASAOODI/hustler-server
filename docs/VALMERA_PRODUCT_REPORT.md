@@ -89,7 +89,7 @@ The third is the **war-story codebase**: there are almost no TODO comments anywh
 
 | Piece | Where | What it does |
 |---|---|---|
-| **Frontend** | Vercel — `https://valmera.io` | Next.js 15 App Router. Landing/SEO/docs pages + the studio. All API calls proxied through a `/api-backend/` rewrite in `next.config.js` (never calls Render directly, except direct browser↔R2 media traffic). |
+| **Frontend** | Vercel — `https://valmera.io` | Next.js 16 App Router. Landing/SEO/docs pages + the studio. All API calls proxied through a `/api-backend/` rewrite in `next.config.mjs` (never calls Render directly, except direct browser↔R2 media traffic). |
 | **Backend API** | Render Web Service — `entrepreneur-bot-backend.onrender.com` | Flask + Gunicorn (**3 sync workers**, timeout 600). Stores pointers and JSON, enqueues jobs, presigns URLs. **Never touches media bytes, never runs ffmpeg or the agent loop.** Also still hosts the legacy app-builder routes. |
 | **Worker** | Render Background Worker (Docker, `worker/Dockerfile`) | A pure poller (no HTTP server). Runs everything heavy: indexing (ffmpeg + Deepgram/whisper + PySceneDetect + vision), the agent loop, preview renders, final renders. python:3.11-slim + ffmpeg + fontconfig + DejaVu/Noto/Noto-CJK fonts. The faster-whisper `medium` model (~0.5 GB) is **baked into the Docker image at build time** (`ARG WHISPER_MODEL=medium`, downloaded into `HF_HOME=/opt/hf`) so it isn't re-downloaded on container start. |
 | **Data plane** | Render managed PostgreSQL + Cloudflare R2 (S3-compatible; MinIO/moto in dev) | One Postgres DB shared by API and worker (the job queue IS a Postgres table). All media in R2, always via presigned URLs. |
