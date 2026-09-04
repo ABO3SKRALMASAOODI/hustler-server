@@ -3,6 +3,7 @@ import os
 import secrets
 import threading
 import time
+from urllib.parse import urlsplit
 
 import psycopg2
 from dotenv import load_dotenv
@@ -46,6 +47,34 @@ DATABASE_REQUIRED_RELATIONS = (
 _DATABASE_HEALTH_TTL_S = 30
 _database_health_cache = {}
 _database_health_lock = threading.Lock()
+
+_DEFAULT_CORS_ORIGINS = (
+    "https://valmera.io",
+    "https://www.valmera.io",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+)
+
+
+def cors_allowed_origins():
+    """Return explicit browser origins; never turn a typo into a wildcard."""
+    configured = (os.environ.get("CORS_ALLOWED_ORIGINS") or "").split(",")
+    candidates = [*_DEFAULT_CORS_ORIGINS, os.environ.get("FRONTEND_URL"),
+                  *configured]
+    origins = []
+    for candidate in candidates:
+        value = str(candidate or "").strip().rstrip("/")
+        if not value or value == "*":
+            continue
+        parsed = urlsplit(value)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc or \
+                parsed.username or parsed.password or parsed.query or \
+                parsed.fragment or parsed.path:
+            continue
+        origin = f"{parsed.scheme}://{parsed.netloc}"
+        if origin not in origins:
+            origins.append(origin)
+    return origins
 
 
 def database_runtime_status(dsn):
@@ -102,9 +131,12 @@ def create_app():
     app = Flask(__name__)
 
     CORS(app,
-         origins="*",
+         origins=cors_allowed_origins(),
          allow_headers=["Content-Type", "Authorization"],
-         methods=["GET", "POST", "OPTIONS", "PUT", "DELETE", "PATCH"])
+         methods=["GET", "POST", "OPTIONS", "PUT", "DELETE", "PATCH"],
+         send_wildcard=False,
+         always_send=False,
+         vary_header=True)
 
     # Round 79 — which code is this service actually running? The worker and
     # executor answer that (/health carries code_version); this service could
@@ -174,23 +206,6 @@ def create_app():
                 "Expires": "0",
             },
         )
-
-    @app.before_request
-    def handle_options():
-        from flask import request, Response
-        if request.method == "OPTIONS":
-            r = Response()
-            r.headers["Access-Control-Allow-Origin"] = "*"
-            r.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
-            r.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS, PUT, DELETE, PATCH"
-            return r
-
-    @app.after_request
-    def add_cors_headers(response):
-        response.headers["Access-Control-Allow-Origin"] = "*"
-        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
-        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS, PUT, DELETE, PATCH"
-        return response
 
     configured_secret = _configured_app_secret()
     # A fixed fallback made every JWT/session forgeable on a misconfigured

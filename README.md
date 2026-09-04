@@ -68,9 +68,10 @@ frontend repo.
 | `FINAL_PRESET` / `FINAL_CRF` | worker | default `veryfast` / `20` — visually transparent for this content and several times faster than the old medium/CRF18 |
 | `LLM_PRICE_IN_PER_M` / `LLM_PRICE_OUT_PER_M` | api | $/1M tokens for the admin cost view (defaults 0.4 / 1.2, qwen-plus ballpark) |
 | `PIPELINE_VERSION` | api, worker | default `2`. Bumped when the index pipeline output changes; older cached indexes re-build automatically on next project open |
-| `MAX_UPLOAD_GB` | api, worker | default `2` (chat attachments: images 10 MB, audio 50 MB) |
+| `MAX_UPLOAD_GB` | api, worker | default `14` (chat attachments: images 50 MB, audio 50 MB) |
 | `MAX_DURATION_S` | worker | default 3h |
 | `PUBLIC_APP_URL` | (reserved) | `https://valmera.io` |
+| `CORS_ALLOWED_ORIGINS` | api | Optional comma-separated extra browser origins. Production defaults to `https://valmera.io` and `https://www.valmera.io`; local development also permits port 3000. Wildcards and malformed origins are ignored. |
 | `MESSAGES_PER_HOUR` | api | default 20 per project |
 | `MAX_CONCURRENT_JOBS_PER_USER` | api | default 3 |
 | `WORKER_MEDIA_SLOTS` / `WORKER_AGENT_SLOTS` | worker | default 1 / 2 |
