@@ -60,6 +60,7 @@ def test_healthz_refuses_to_certify_missing_security_configuration(
             "database_runtime": "not_checked",
             "direct_database_credential": "not_configured",
             "direct_database_runtime": "not_configured",
+            "active_database_route": "primary",
             "paddle_environment": "production",
         },
     }
@@ -92,6 +93,7 @@ def test_healthz_certifies_configured_security(monkeypatch):
         "database_runtime": "ready",
         "direct_database_credential": "not_configured",
         "direct_database_runtime": "not_configured",
+        "active_database_route": "primary",
         "paddle_environment": "production",
     }
     assert app.config["SECRET_KEY"] == secret
@@ -204,6 +206,34 @@ def test_unreachable_or_incomplete_database_cannot_certify_health(monkeypatch):
         assert response.status_code == 503
         assert body["status"] == "degraded"
         assert body["checks"]["database_runtime"] == database_status
+
+
+def test_healthy_direct_route_keeps_service_ready_during_pool_outage(
+        monkeypatch):
+    import app as app_module
+
+    primary = _safe_database_url("pool-password")
+    direct = _safe_database_url("direct-password")
+    monkeypatch.setenv("SECRET_KEY", "s" * 64)
+    monkeypatch.setenv("PADDLE_WEBHOOK_SECRET", "pdl_ntfset_" + "w" * 32)
+    monkeypatch.setenv("PADDLE_API_KEY", "pdl_live_" + "a" * 32)
+    monkeypatch.setenv("DATABASE_URL", primary)
+    monkeypatch.setenv("DIRECT_DATABASE_URL", direct)
+    monkeypatch.setenv("PADDLE_MODE", "production")
+    monkeypatch.setattr(
+        app_module, "database_runtime_status",
+        lambda dsn: "ready" if dsn == direct else "unreachable")
+
+    application = app_module.create_app()
+    response = application.test_client().get("/healthz")
+    body = response.get_json()
+
+    assert response.status_code == 200
+    assert body["status"] == "ok"
+    assert body["checks"]["database_runtime"] == "unreachable"
+    assert body["checks"]["direct_database_runtime"] == "ready"
+    assert body["checks"]["active_database_route"] == "direct"
+    assert application.config["DATABASE_URL"] == direct
 
 
 def test_database_runtime_probe_is_read_only_bounded_and_cached(

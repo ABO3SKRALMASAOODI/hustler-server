@@ -11,6 +11,8 @@ import os
 import psycopg2
 import requests
 
+from database_config import preferred_database_url
+
 
 BREVO_SEND_URL = "https://api.brevo.com/v3/smtp/email"
 DAILY_LIMIT = max(1, int(os.getenv("BREVO_DAILY_LIMIT", "300")))
@@ -23,7 +25,7 @@ BULK_LIMIT = min(
 
 
 def _connect():
-    return psycopg2.connect(os.environ["DATABASE_URL"])
+    return psycopg2.connect(preferred_database_url())
 
 
 def _ensure_schema(cur):

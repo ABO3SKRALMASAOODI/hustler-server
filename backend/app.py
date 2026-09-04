@@ -36,6 +36,7 @@ from routes.onboarding import onboarding_bp
 from routes.mcp import mcp_bp
 from routes.mcp_oauth import mcp_oauth_bp
 from routes.phone_status import phone_status_bp
+from database_config import preferred_database_route, preferred_database_url
 from schema_contract import DATABASE_REQUIRED_RELATIONS
 from security_config import database_credential_status, secret_ok
 
@@ -143,6 +144,7 @@ def create_app():
         import os as _os
         database_url = _os.environ.get("DATABASE_URL")
         direct_database_url = (_os.environ.get("DIRECT_DATABASE_URL") or "")
+        active_database_route = preferred_database_route(_os.environ)
         paddle_mode = (_os.environ.get("PADDLE_MODE") or "").strip().lower()
         database_credential = database_credential_status(database_url)
         direct_database_credential = (
@@ -170,6 +172,7 @@ def create_app():
                 else ("not_configured"
                       if direct_database_credential == "not_configured"
                       else "not_checked")),
+            "active_database_route": active_database_route,
             "paddle_environment": (
                 "sandbox" if paddle_mode == "sandbox" else "production"),
         }
@@ -179,7 +182,11 @@ def create_app():
                            and checks["paddle_webhook_signing"] == "configured"
                            and checks["paddle_api"] == "configured"
                            and checks["database_credential"] == "rotated"
-                           and checks["database_runtime"] == "ready"
+                           and ((active_database_route == "direct"
+                                 and checks["direct_database_runtime"]
+                                     == "ready")
+                                or (active_database_route == "primary"
+                                    and checks["database_runtime"] == "ready"))
                            and checks["direct_database_credential"]
                                in ("rotated", "not_configured")
                            and checks["direct_database_runtime"]
@@ -209,7 +216,7 @@ def create_app():
     # is degraded and sessions do not survive workers/restarts) but never
     # silently grants an attacker a known signing key.
     app.config['SECRET_KEY'] = configured_secret or secrets.token_urlsafe(48)
-    app.config['DATABASE_URL'] = os.getenv("DATABASE_URL")
+    app.config['DATABASE_URL'] = preferred_database_url()
     app.teardown_appcontext(close_db)
 
     # ── Blueprints ────────────────────────────────────────────────────

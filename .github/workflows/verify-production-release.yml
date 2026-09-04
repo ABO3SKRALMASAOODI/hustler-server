@@ -127,14 +127,15 @@ jobs:
               https://entrepreneur-bot-backend.onrender.com/healthz || true
             response="$(<"$body_file")"
             cache_control="$(awk 'BEGIN { IGNORECASE=1 } /^cache-control:/ { sub(/^[^:]*:[[:space:]]*/, ""); sub(/\r$/, ""); value=$0 } END { print value }' "$headers_file")"
-            if RESPONSE="$response" EXPECTED="$expected" \
-              CACHE_CONTROL="$cache_control" python - <<'PY'
+            if EXPECTED="$expected" CACHE_CONTROL="$cache_control" \
+              python - "$body_file" <<'PY'
           import json
           import os
+          from pathlib import Path
           import sys
 
           try:
-              payload = json.loads(os.environ.get("RESPONSE") or "{}")
+              payload = json.loads(Path(sys.argv[1]).read_text() or "{}")
           except Exception:
               sys.exit(1)
           expected = os.environ["EXPECTED"]

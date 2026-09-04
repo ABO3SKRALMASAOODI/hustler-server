@@ -225,7 +225,8 @@ def enqueue_and_kick(conn, user_id, plan, data, event_type):
 def _connect():
     import psycopg2
     from psycopg2.extras import RealDictCursor
-    return psycopg2.connect(os.environ["DATABASE_URL"],
+    from database_config import preferred_database_url
+    return psycopg2.connect(preferred_database_url(),
                             cursor_factory=RealDictCursor)
 
 
