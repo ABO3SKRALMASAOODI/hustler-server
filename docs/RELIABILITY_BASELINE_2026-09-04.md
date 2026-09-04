@@ -181,6 +181,11 @@ whose terminal rows remain in the database.
 
 ## Deployment and observation
 
+- A production database credential was present in tracked operator guidance
+  before this release. The plaintext value has been removed from the working
+  tree, but deletion does not revoke copies in Git history. Rotate that
+  database credential and update every legitimate deployment secret before
+  release; do not consider repository cleanup alone sufficient containment.
 - Generate comparable aggregate telemetry with
   `python backend/scripts/reliability_snapshot.py --days 7` in an environment
   that supplies `DATABASE_URL`. The command forces a read-only database session

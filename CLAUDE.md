@@ -17,7 +17,7 @@ The old app-builder (`engine/AA.py`, `/auth/generate` routes) is retired but sti
 | Frontend | Vercel | `https://valmera.io` — auto-deploys on push to `main` |
 | Backend + Worker | Render | `https://entrepreneur-bot-backend.onrender.com` — auto-deploys on push to `main` (~3–5 min). Persistent 10GB disk at `/opt/render/project/src/outputs` |
 | Executor | Modal | app `valmera-executor`, environment `main`. Auto-deploys via `.github/workflows/deploy-modal-executor.yml` on pushes touching `worker/`; setup and verification are in `worker/MODAL_EXECUTOR.md`. Google Cloud Run is retained at min-instances 0 and deploys manually via `.github/workflows/deploy-executor.yml` only. |
-| Database | Render managed PostgreSQL | via `$DATABASE_URL`; external URL at bottom of this file |
+| Database | Render managed PostgreSQL | via `$DATABASE_URL`; never store the URL in the repository |
 | Email | Brevo | if emails stop: re-whitelist Render's IP (`74.220.48.3`) at `app.brevo.com/security/authorised_ips` |
 | Payments | Paddle | **live** (production mode) |
 
@@ -119,4 +119,5 @@ bot"). `worker/ytaccess.py` is the whole story; the operator-facing facts:
 
 ---
 
-render external url: postgresql://the_hustler_bot_user:ajcmtxLo05sonfhqiTjA4kRAegN099DO@dpg-d0vgraggjchc7385l1u0-a.oregon-postgres.render.com/the_hustler_bot
+Retrieve production database access from the deployment secret store. Never
+paste credentials into tracked files, issues, logs, or agent context.
