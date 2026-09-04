@@ -24,6 +24,9 @@ def test_render_release_gate_covers_full_suite_health_and_public_mcp():
     assert "/healthz" in source
     assert "payload.get(\"commit\")" in source
     assert "verify_public_mcp.py" in source
+    assert "image: postgres:16" in source
+    assert source.count("python backend/apply_migrations.py") == 2
+    assert "SELECT COUNT(*) FROM schema_migrations" in source
 
 
 def test_render_startup_has_no_retired_app_builder_recovery_side_effects():

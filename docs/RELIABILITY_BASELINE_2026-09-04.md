@@ -297,6 +297,11 @@ whose terminal rows remain in the database.
   files, so the convenience runner explicitly must not be replayed there.
   This candidate adds no new production schema requirement; the migration
   changes only consolidate already-applied historical definitions.
+- The backend release workflow creates a disposable PostgreSQL 16 service,
+  applies the full migration chain to an empty database, runs the ledgered
+  migration command a second time, and verifies the migration count plus all
+  13 runtime-required relations. Unit tests alone are not accepted as evidence
+  that a clean deployment can construct its schema.
 - Frontend pushes are not considered live until `/api/health` reports
   `status=ok`, `role=frontend`, and the exact Vercel Git commit SHA with
   `Cache-Control: no-store`.

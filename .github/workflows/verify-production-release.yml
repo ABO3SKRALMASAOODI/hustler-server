@@ -27,6 +27,20 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: valmera
+          POSTGRES_PASSWORD: valmera
+          POSTGRES_DB: valmera_migration_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U valmera -d valmera_migration_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - name: Mark production verification pending
         env:
@@ -57,6 +71,42 @@ jobs:
             --progress-spinner off
           python -m compileall -q backend worker
           PYTHONPATH=backend python -m pytest -q backend/tests
+
+      - name: Verify migrations from empty database and ledger replay
+        env:
+          DATABASE_URL: postgresql://valmera:valmera@localhost:5432/valmera_migration_test
+        run: |
+          python backend/apply_migrations.py
+          python backend/apply_migrations.py
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          import psycopg2
+
+          expected = len(list(Path("backend/migrations").glob("*.sql")))
+          required = (
+              "users", "projects", "assets", "indexes", "edls",
+              "video_jobs", "payments", "client_events",
+              "remote_executions", "mcp_tokens", "mcp_oauth_clients",
+              "mcp_oauth_tokens", "mcp_catalog",
+          )
+          conn = psycopg2.connect(os.environ["DATABASE_URL"])
+          try:
+              with conn.cursor() as cur:
+                  cur.execute("SELECT COUNT(*) FROM schema_migrations")
+                  applied = cur.fetchone()[0]
+                  cur.execute(
+                      "SELECT " + ", ".join(
+                          "to_regclass(%s)" for _ in required),
+                      tuple("public." + name for name in required),
+                  )
+                  relations = cur.fetchone()
+          finally:
+              conn.close()
+          assert applied == expected, (applied, expected)
+          assert all(relation is not None for relation in relations), relations
+          print(f"verified {applied} migrations and {len(required)} relations")
+          PY
 
       - name: Confirm this exact commit is healthy on Render
         shell: bash
