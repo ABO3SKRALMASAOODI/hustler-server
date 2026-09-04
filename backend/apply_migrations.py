@@ -19,6 +19,7 @@ import psycopg2
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 LOCAL_DATABASE_HOSTS = {"localhost", "127.0.0.1", "::1", "postgres"}
+NO_TRANSACTION_MARKER = "-- migrate: no-transaction"
 
 
 def is_local_database_url(dsn):
@@ -26,6 +27,25 @@ def is_local_database_url(dsn):
         return (urlsplit(dsn).hostname or "").lower() in LOCAL_DATABASE_HOSTS
     except (TypeError, ValueError):
         return False
+
+
+def migration_requires_autocommit(source):
+    """Whether a migration contains commands forbidden in a transaction."""
+    return any(line.strip().lower() == NO_TRANSACTION_MARKER
+               for line in source.splitlines()[:10])
+
+
+def nontransactional_statements(source):
+    """Split the deliberately-simple concurrent-index migration format.
+
+    These files contain only line comments and top-level CREATE INDEX
+    statements. Sending the whole file as one PostgreSQL query would still
+    create an implicit transaction even with psycopg2 autocommit enabled.
+    """
+    sql = "\n".join(line for line in source.splitlines()
+                    if not line.lstrip().startswith("--"))
+    return [statement.strip() for statement in sql.split(";")
+            if statement.strip()]
 
 
 def main(*, allow_remote=False):
@@ -52,10 +72,28 @@ def main(*, allow_remote=False):
         if name in applied:
             print(f"skip {name} (already applied)")
             continue
-        with conn, conn.cursor() as cur:
-            cur.execute(open(os.path.join(mig_dir, name)).read())
-            cur.execute("INSERT INTO schema_migrations (name) VALUES (%s) "
-                        "ON CONFLICT (name) DO NOTHING", (name,))
+        with open(os.path.join(mig_dir, name), encoding="utf-8") as handle:
+            source = handle.read()
+        if migration_requires_autocommit(source):
+            # CREATE INDEX CONCURRENTLY is forbidden inside a transaction.
+            # Each statement is idempotent, so a crash before the separate
+            # ledger insert safely resumes the same file on the next run.
+            conn.commit()
+            conn.autocommit = True
+            try:
+                with conn.cursor() as cur:
+                    for statement in nontransactional_statements(source):
+                        cur.execute(statement)
+            finally:
+                conn.autocommit = False
+            with conn, conn.cursor() as cur:
+                cur.execute("INSERT INTO schema_migrations (name) VALUES (%s) "
+                            "ON CONFLICT (name) DO NOTHING", (name,))
+        else:
+            with conn, conn.cursor() as cur:
+                cur.execute(source)
+                cur.execute("INSERT INTO schema_migrations (name) VALUES (%s) "
+                            "ON CONFLICT (name) DO NOTHING", (name,))
         print(f"applied {name}")
     conn.close()
     print("migrations applied")

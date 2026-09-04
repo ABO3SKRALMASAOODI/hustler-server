@@ -23,6 +23,7 @@ from flask import Blueprint, request, jsonify, current_app
 from psycopg2.extras import RealDictCursor
 
 import plan_gate
+from plan_catalog import PURCHASABLE_PLANS
 
 onboarding_bp = Blueprint("onboarding", __name__)
 
@@ -237,9 +238,10 @@ def plan_intent():
     """
     data = request.get_json(silent=True) or {}
     plan = (data.get("plan") or "").strip().lower()
-    # 'mcp' is off the pricing page but stays accepted: historic rows use it,
-    # and rejecting it would only lose a press we could still learn from.
-    if plan not in ("ai", "ai_pro", "mcp"):
+    # 'mcp' is off the pricing page but stays accepted for historic clients.
+    # Every current checkout tier comes from the same catalog Paddle accepts;
+    # this previously forgot Frontier and silently dropped its demand signal.
+    if plan not in PURCHASABLE_PLANS | {"mcp"}:
         return jsonify({"error": "unknown plan"}), 400
     billing = "annual" if (data.get("billing") == "annual") else "monthly"
 

@@ -8,7 +8,13 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from apply_migrations import is_local_database_url, main  # noqa: E402
+from apply_migrations import (  # noqa: E402
+    is_local_database_url,
+    main,
+    migration_requires_autocommit,
+    nontransactional_statements,
+)
+from schema_contract import DATABASE_REQUIRED_RELATIONS  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -47,6 +53,30 @@ def test_relocated_constraint_migration_is_replay_safe():
     source = (MIGRATIONS / "015_shorts_mode.sql").read_text(encoding="utf-8")
 
     assert "DROP CONSTRAINT IF EXISTS video_jobs_type_check" in source
+
+
+def test_base_migration_owns_legacy_runtime_relations():
+    source = (MIGRATIONS / "000_legacy_base.sql").read_text(encoding="utf-8")
+
+    for relation in ("job_credits", "page_visits", "onboarding_responses",
+                     "plan_intents", "google_auth_codes"):
+        assert f"CREATE TABLE IF NOT EXISTS {relation}" in source
+
+    migration_sources = "\n".join(
+        path.read_text(encoding="utf-8") for path in MIGRATIONS.glob("*.sql"))
+    for relation in DATABASE_REQUIRED_RELATIONS:
+        assert f"CREATE TABLE IF NOT EXISTS {relation}" in migration_sources
+
+
+def test_concurrent_index_migrations_run_as_individual_autocommit_statements():
+    for name, count in (("024_admin_observability_indexes.sql", 4),
+                        ("025_hot_path_indexes.sql", 15)):
+        source = (MIGRATIONS / name).read_text(encoding="utf-8")
+        assert migration_requires_autocommit(source)
+        statements = nontransactional_statements(source)
+        assert len(statements) == count
+        assert all(statement.startswith("CREATE INDEX CONCURRENTLY")
+                   for statement in statements)
 
 
 @pytest.mark.parametrize("dsn", (

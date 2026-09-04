@@ -36,14 +36,10 @@ from routes.onboarding import onboarding_bp
 from routes.mcp import mcp_bp
 from routes.mcp_oauth import mcp_oauth_bp
 from routes.phone_status import phone_status_bp
+from schema_contract import DATABASE_REQUIRED_RELATIONS
 from security_config import database_credential_status, secret_ok
 
 
-DATABASE_REQUIRED_RELATIONS = (
-    "users", "projects", "assets", "indexes", "edls", "video_jobs",
-    "payments", "client_events", "remote_executions", "mcp_tokens",
-    "mcp_oauth_clients", "mcp_oauth_tokens", "mcp_catalog",
-)
 _DATABASE_HEALTH_TTL_S = 30
 _database_health_cache = {}
 _database_health_lock = threading.Lock()

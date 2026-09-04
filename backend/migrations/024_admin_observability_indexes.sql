@@ -1,3 +1,4 @@
+-- migrate: no-transaction
 -- Admin observability reads rolling 24-hour/14-day windows on every refresh.
 -- Without time-leading indexes PostgreSQL scans the full wide heaps; this was
 -- especially costly after llm_calls' TOAST reached ~695 MB. Run each statement

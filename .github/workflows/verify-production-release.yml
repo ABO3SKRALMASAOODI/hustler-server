@@ -80,16 +80,15 @@ jobs:
           python backend/apply_migrations.py
           python - <<'PY'
           import os
+          import sys
           from pathlib import Path
           import psycopg2
 
           expected = len(list(Path("backend/migrations").glob("*.sql")))
-          required = (
-              "users", "projects", "assets", "indexes", "edls",
-              "video_jobs", "payments", "client_events",
-              "remote_executions", "mcp_tokens", "mcp_oauth_clients",
-              "mcp_oauth_tokens", "mcp_catalog",
-          )
+          sys.path.insert(0, "backend")
+          from schema_contract import DATABASE_REQUIRED_RELATIONS
+
+          required = DATABASE_REQUIRED_RELATIONS
           conn = psycopg2.connect(os.environ["DATABASE_URL"])
           try:
               with conn.cursor() as cur:
