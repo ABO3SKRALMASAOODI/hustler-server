@@ -80,17 +80,16 @@ def wait_job(job_id, timeout, label, poll_s=1.0):
 
 
 def main():
-    from app import create_app                       # real Flask app
-    app = create_app()                               # also creates base tables
-    client = app.test_client()
-
-    # migrations (idempotent, in order)
-    mig_dir = os.path.join(ROOT, "backend/migrations")
-    for name in sorted(os.listdir(mig_dir)):
-        if name.endswith(".sql"):
-            with db() as conn, conn.cursor() as cur:
-                cur.execute(open(os.path.join(mig_dir, name)).read())
+    # Schema is ready before the app and its background schedulers exist. The
+    # ledgered runner skips files already applied by the API container boot;
+    # it never replays one-time data migrations on every acceptance run.
+    from apply_migrations import main as apply_migrations
+    apply_migrations()
     ok("schema ready")
+
+    from app import create_app                       # real Flask app
+    app = create_app()
+    client = app.test_client()
 
     # bucket
     import boto3

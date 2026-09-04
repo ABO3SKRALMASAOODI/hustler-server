@@ -26,7 +26,7 @@ ALTER TABLE projects
 CREATE INDEX IF NOT EXISTS idx_projects_parent
     ON projects (parent_project_id) WHERE parent_project_id IS NOT NULL;
 
-ALTER TABLE video_jobs DROP CONSTRAINT video_jobs_type_check;
+ALTER TABLE video_jobs DROP CONSTRAINT IF EXISTS video_jobs_type_check;
 ALTER TABLE video_jobs ADD CONSTRAINT video_jobs_type_check
     CHECK (type::text = ANY (ARRAY[
         'index'::character varying, 'preview'::character varying,

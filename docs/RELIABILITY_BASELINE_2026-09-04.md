@@ -284,6 +284,14 @@ whose terminal rows remain in the database.
   app-builder's pre-boot filesystem scan and legacy `jobs` table rewrite were
   removed; video recovery remains in the durable video worker/remote ledger,
   where ownership and terminal-state rules are tested.
+- Flask app construction no longer creates or alters tables in each Gunicorn
+  worker. The inherited base tables and migrations 013–018 now live with every
+  other numbered file in `backend/migrations/`, so the Docker/local runner can
+  construct a complete fresh schema before starting the app. Production still
+  uses controlled manual SQL: its migration ledger predates most historical
+  files, so the convenience runner explicitly must not be replayed there.
+  This candidate adds no new production schema requirement; the migration
+  changes only consolidate already-applied historical definitions.
 - Frontend pushes are not considered live until `/api/health` reports
   `status=ok`, `role=frontend`, and the exact Vercel Git commit SHA with
   `Cache-Control: no-store`.

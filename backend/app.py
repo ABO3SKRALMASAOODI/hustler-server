@@ -17,7 +17,7 @@ from routes.paddle import paddle_bp as paddle_checkout_bp
 from routes.paddle_webhook import paddle_webhook
 from routes.admin import admin_bp
 from routes.google_auth import google_auth_bp
-from models import close_db, init_db
+from models import close_db
 from routes.github import github_bp
 from routes.deploy import deploy_bp
 from routes.supabase_mgmt import supabase_bp
@@ -117,11 +117,6 @@ def create_app():
     app.config['SECRET_KEY'] = configured_secret or secrets.token_urlsafe(48)
     app.config['DATABASE_URL'] = os.getenv("DATABASE_URL")
     app.teardown_appcontext(close_db)
-
-    if os.getenv("SKIP_DB_INIT") == "1":
-        print("⚠️  Skipping DB init (SKIP_DB_INIT=1)")
-    else:
-        init_db(app)
 
     # ── Blueprints ────────────────────────────────────────────────────
     app.register_blueprint(auth_bp,             url_prefix='/auth')

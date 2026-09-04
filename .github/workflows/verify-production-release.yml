@@ -48,7 +48,6 @@ jobs:
 
       - name: Verify backend behavior before certifying Render
         env:
-          SKIP_DB_INIT: "1"
           DATABASE_URL: postgresql://stub/stub
         run: |
           python backend/scripts/scan_tracked_secrets.py

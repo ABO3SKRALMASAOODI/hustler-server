@@ -46,7 +46,7 @@ Frontend deploys via Vercel (~1–2 min — check the dashboard, SSR issues fail
 psql $DATABASE_URL -c "SQL"   # from the Render Shell tab, or use the external URL below locally
 ```
 
-- **Never modify `models.py` for schema changes** — schema is managed directly via psql. Use `models.py` only for its helpers (`get_db()`, `update_user_subscription_status`).
+- **`models.py` never owns schema** — web startup must not run DDL. All numbered SQL lives in `backend/migrations/`; run it directly against production PostgreSQL in controlled order. `backend/apply_migrations.py` is the complete local/CI convenience runner, not a production replay tool.
 - Backend routes use `token_required` and `get_db()` — not `jwt_required`/`get_db_connection()`.
 - Deleting a user: delete child rows first (`job_credits`, `jobs`, `email_codes`, `code_request_logs`, `google_auth_codes`) then `users`.
 

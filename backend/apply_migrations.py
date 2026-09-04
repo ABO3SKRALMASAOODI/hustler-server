@@ -1,30 +1,44 @@
-"""Apply the video-editor migration (idempotent). Used by docker-compose dev
-and CI; production schema is managed manually via psql per project
-convention.
+"""Apply the complete local/CI schema in deterministic filename order.
+
+Production schema remains managed manually via psql per project convention;
+do not point this convenience runner at a production database. Historical
+production migrations predate the ledger and include one-time data backfills.
 
     python apply_migrations.py
+
+For an explicitly disposable remote development database only:
+
+    python apply_migrations.py --allow-remote-development-database
 """
 
+import argparse
 import os
+from urllib.parse import urlsplit
 
 import psycopg2
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+LOCAL_DATABASE_HOSTS = {"localhost", "127.0.0.1", "::1", "postgres"}
 
 
-def main():
-    # Base tables first (users, chat_sessions, ...) via the app's own init.
-    from app import create_app
-    create_app()
+def is_local_database_url(dsn):
+    try:
+        return (urlsplit(dsn).hostname or "").lower() in LOCAL_DATABASE_HOSTS
+    except (TypeError, ValueError):
+        return False
 
+
+def main(*, allow_remote=False):
+    dsn = os.environ["DATABASE_URL"]
+    if not is_local_database_url(dsn) and not allow_remote:
+        raise RuntimeError(
+            "refusing to replay the convenience migration runner against a "
+            "remote database; apply reviewed SQL manually in production")
     mig_dir = os.path.join(HERE, "migrations")
-    conn = psycopg2.connect(os.environ["DATABASE_URL"])
+    conn = psycopg2.connect(dsn)
 
-    # Migration ledger: record which files have run so re-applying is a no-op
-    # and drift is auditable (SELECT * FROM schema_migrations). The .sql files
-    # are still idempotent, so this is a safety net + record, not the only
-    # guard. Production is applied manually via psql; run this on prod once to
-    # backfill the ledger for the already-applied 001-005.
+    # Migration ledger: record which files have run so local re-application is
+    # a no-op and drift is auditable (SELECT * FROM schema_migrations).
     with conn, conn.cursor() as cur:
         cur.execute("""CREATE TABLE IF NOT EXISTS schema_migrations (
                            name        TEXT PRIMARY KEY,
@@ -47,5 +61,18 @@ def main():
     print("migrations applied")
 
 
+def cli():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--allow-remote-development-database", action="store_true",
+        help="allow only an explicitly disposable remote development database",
+    )
+    args = parser.parse_args()
+    try:
+        main(allow_remote=args.allow_remote_development_database)
+    except RuntimeError as exc:
+        parser.error(str(exc))
+
+
 if __name__ == "__main__":
-    main()
+    cli()
