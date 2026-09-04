@@ -176,7 +176,7 @@ whose terminal rows remain in the database.
 - Worker pytest suite: 1,735 passed, 3 skipped.
 - Legacy worker executable checks: all 20 harnesses passed, including 1,038
   unit checks, 22 patch checks, and 30 text-behind-subject tests.
-- Backend pytest suite: 349 passed, 4 skipped, including MCP protocol, billing
+- Backend pytest suite: 353 passed, 4 skipped, including MCP protocol, billing
   trust-boundary, secure-health, and
   snapshot classification tests.
 - Modal executor tests: 38 passed.
@@ -195,6 +195,11 @@ whose terminal rows remain in the database.
   tree, but deletion does not revoke copies in Git history. Rotate that
   database credential and update every legitimate deployment secret before
   release; do not consider repository cleanup alone sufficient containment.
+- Before pushing, run
+  `python backend/scripts/security_release_preflight.py --env-file <authorized-env>`.
+  It prints only setting names and bounded reasons, rejects the one-way
+  fingerprint of the exposed database URL, and fails until the application,
+  Paddle API, and Paddle webhook secrets are production-safe.
 - Generate comparable aggregate telemetry with
   `python backend/scripts/reliability_snapshot.py --days 7` in an environment
   that supplies `DATABASE_URL`. The command forces a read-only database session
