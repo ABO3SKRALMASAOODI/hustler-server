@@ -25,6 +25,8 @@ The audit immediately before this release found:
   correction/refusal outcomes, 64 transient-failure outcomes, and 4 remaining
   structured errors: 286 agent-visible non-successes in total. Cloudflare
   capacity accounted for 244 failed calls and Modal billing/capacity for 13.
+  Ten completed rows carried `is_error=true`; that overlapping flag count is
+  reported as `mcp_done_is_error_flagged`, not another structured-error bucket.
 - Stock-media continuity was broken across process boundaries: 129 chosen IDs
   were unknown when used later, and only 3 of 140 observed `add_stock_media`
   calls completed successfully.

@@ -1,5 +1,10 @@
 """The production reliability snapshot stays privacy-safe and deterministic."""
 
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from scripts import reliability_snapshot as snapshot
 
 
@@ -45,5 +50,7 @@ def test_snapshot_source_counts_every_public_mcp_non_success_dialect():
             "UNSAFE%%", "%%PREREQUISITE:%%"):
         assert prefix in source
     assert "mcp_done_non_success" in source
+    assert "mcp_done_is_error_flagged" in source
+    assert "mcp_done_structured_errors" not in source
     assert "mcp_error_responses" in source
     assert 'result ? \'failure\'' in source

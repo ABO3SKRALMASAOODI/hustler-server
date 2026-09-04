@@ -425,7 +425,11 @@ def build_snapshot(conn, days=7):
         """, (interval,))
         refused, structured = cur.fetchone()
         result["mcp_done_refusals"] = int(refused or 0)
-        result["mcp_done_structured_errors"] = int(structured or 0)
+        # This flag overlaps the classified outcomes below: a correction or
+        # transient response may correctly carry is_error=true. Name it as a
+        # flag count so operators never add it to structured_error or mistake
+        # the two differently scoped numbers for a contradiction.
+        result["mcp_done_is_error_flagged"] = int(structured or 0)
 
         # The strict REJECTED count above is retained as the historical trend
         # denominator.  It is not the complete public outcome vocabulary:
