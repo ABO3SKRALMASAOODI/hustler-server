@@ -199,7 +199,8 @@ whose terminal rows remain in the database.
   that supplies `DATABASE_URL`. The command forces a read-only database session
   and emits no user, project, message, raw-error, or credential values.
 - Backend pushes are not considered live until `/healthz` reports `status=ok`,
-  `role=backend`, and the exact pushed commit prefix.
+  `role=backend`, and the exact pushed commit prefix. The same commit's release
+  status also runs the complete backend test suite before it can turn green.
 - Backend health remains `degraded` when the stable application signing key,
   Paddle webhook signing secret, or Paddle API key is absent. A missing
   application key uses an unpredictable process-local fallback rather than the
@@ -211,7 +212,8 @@ whose terminal rows remain in the database.
 - Cloudflare's staged rollout must pass its source-fingerprint verifier for all
   lanes. Agent-facing repository guidance names Cloudflare as primary and
   Modal/Cloud Run as manual fallbacks; do not deploy either fallback as part of
-  an ordinary worker release.
+  an ordinary worker release. Worker Python must compile and the adapter must
+  type-check before Cloudflare publishes.
 - No production database migration is required by this release.
 - During the first 24 hours, compare newly-created subscriber and MCP work with
   this baseline. Notify on a new root-cause cluster, a stalled logical request,

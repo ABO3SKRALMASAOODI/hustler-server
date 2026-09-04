@@ -43,9 +43,18 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
 
-      - name: Reject Python syntax regressions before waiting for Render
-        run: python -m compileall -q backend worker
+      - name: Verify backend behavior before certifying Render
+        env:
+          SKIP_DB_INIT: "1"
+          DATABASE_URL: postgresql://stub/stub
+        run: |
+          python -m pip install --disable-pip-version-check \
+            -r backend/requirements.txt pytest
+          python -m compileall -q backend worker
+          PYTHONPATH=backend python -m pytest -q backend/tests
 
       - name: Confirm this exact commit is healthy on Render
         shell: bash
@@ -102,4 +111,4 @@ jobs:
             "repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
             -f state=failure \
             -f context=render-production \
-            -f description='Syntax check failed or Render did not publish this commit'
+            -f description='Tests failed or Render did not publish this commit'

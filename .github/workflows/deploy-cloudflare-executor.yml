@@ -54,7 +54,9 @@ jobs:
           done
 
       - name: validate Python capabilities
-        run: python worker/skill_validator.py
+        run: |
+          python -m compileall -q worker
+          python worker/skill_validator.py
 
       - name: require durable provider ownership schema
         env:
