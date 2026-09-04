@@ -208,6 +208,9 @@ whose terminal rows remain in the database.
 - Cloudflare adapter TypeScript check: passed.
 - Frontend library suite on the current production base: 66 passed.
 - Next.js production build: 266 static/dynamic routes generated successfully.
+- Frontend production-runtime smoke: passed for exact health identity and
+  no-cache headers, public pages, signed-out protection redirects, and the
+  authenticated Studio request boundary.
 - Plugin-v7 tests in the preserved user worktree: 65 passed. Those uncommitted
   plugin files are not part of this release.
 - Release diff audit: no binary files, credential-pattern matches, whitespace
@@ -231,9 +234,10 @@ whose terminal rows remain in the database.
   blocks credentialed production database URLs, private keys, and common live
   token shapes while allowing explicit local integration fixtures.
 - The frontend release verifier runs its equivalent dependency-free tracked
-  secret scan before package installation, tests, build, and Vercel revision
-  verification. Frontend agent guidance uses the same Cloudflare-primary,
-  manual-fallback deployment model as the backend repository.
+  secret scan before package installation, tests, build, production-runtime
+  smoke, and Vercel revision verification. Frontend agent guidance uses the
+  same Cloudflare-primary, manual-fallback deployment model as the backend
+  repository.
 - Generate comparable aggregate telemetry with
   `python backend/scripts/reliability_snapshot.py --days 7` in an environment
   that supplies `DATABASE_URL`. The command forces a read-only database session
