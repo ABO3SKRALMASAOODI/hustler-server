@@ -197,13 +197,17 @@ whose terminal rows remain in the database.
 - A captured retry clears an older decline.
 - Transaction upserts backfill subscription identity and origin when Paddle
   supplies them after an initial failure.
+- Synchronous checkout, plan-change, resume, cancellation, subscription-state,
+  and Brevo statistics calls have bounded connect/read deadlines. Provider
+  stalls return an explicit retryable response instead of occupying a web
+  worker indefinitely; the hosted checkout defaults to the live Creator plan.
 
 ## Verification completed before release
 
 - Worker pytest suite: 1,735 passed, 3 skipped.
 - Legacy worker executable checks: all 20 harnesses passed, including 1,038
   unit checks, 22 patch checks, and 30 text-behind-subject tests.
-- Backend pytest suite: 384 passed, 4 skipped, including MCP protocol, billing
+- Backend pytest suite: 387 passed, 4 skipped, including MCP protocol, billing
   trust-boundary, secure-health, and
   snapshot classification tests.
 - Modal executor tests: 38 passed.

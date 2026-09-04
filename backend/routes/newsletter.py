@@ -58,6 +58,7 @@ newsletter_bp = Blueprint('newsletter', __name__)
 
 ADMIN_EMAIL = "thevalmera@gmail.com"
 BREVO_BASE = "https://api.brevo.com/v3"
+BREVO_API_TIMEOUT = (3.05, 15)
 TICK_LOCK_ID = 918273645  # arbitrary constant for pg_try_advisory_lock
 
 # Backend's own public URL — unsubscribe links must hit the BACKEND directly.
@@ -937,8 +938,30 @@ def send_newsletter():
 @newsletter_bp.route('/campaigns', methods=['GET'])
 @admin_required
 def get_campaigns():
-    res = requests.get(f"{BREVO_BASE}/smtp/statistics/aggregatedReport", headers=_brevo_headers())
-    stats = res.json() if res.status_code == 200 else {}
+    try:
+        res = requests.get(
+            f"{BREVO_BASE}/smtp/statistics/aggregatedReport",
+            headers=_brevo_headers(), timeout=BREVO_API_TIMEOUT)
+    except requests.RequestException as error:
+        print(f"⚠️ Brevo campaign statistics unavailable: {error}",
+              flush=True)
+        return jsonify({"error": "Email statistics are temporarily "
+                                 "unavailable.",
+                        "retryable": True}), 503
+    if res.status_code != 200:
+        return jsonify({"error": "Email statistics provider rejected the "
+                                 "request.",
+                        "retryable": res.status_code >= 500}), 502
+    try:
+        stats = res.json()
+    except (TypeError, ValueError):
+        return jsonify({"error": "Email statistics provider returned an "
+                                 "invalid response.",
+                        "retryable": True}), 502
+    if not isinstance(stats, dict):
+        return jsonify({"error": "Email statistics provider returned an "
+                                 "invalid response.",
+                        "retryable": True}), 502
     return jsonify({'stats': {
         'delivered': stats.get('delivered', 0),
         'opens': stats.get('uniqueOpens', 0),

@@ -11,6 +11,21 @@ import offers
 
 paddle_bp = Blueprint('paddle', __name__)
 
+# User-facing billing requests run on synchronous web workers. A provider
+# socket without a deadline can occupy one forever and eventually starve every
+# checkout/account request. Keep connection failure short and allow enough
+# time for Paddle to finish a normal control-plane mutation.
+PADDLE_API_TIMEOUT = (3.05, 12)
+
+
+def _paddle_unavailable(action, error):
+    print(f"⚠️ Paddle {action} unavailable: {error}", flush=True)
+    return jsonify({
+        "error": "The payment service is temporarily unavailable. Please "
+                 "try again.",
+        "retryable": True,
+    }), 503
+
 
 def get_offers_db():
     """A short-lived connection for offer bookkeeping.
@@ -219,8 +234,8 @@ def create_checkout_session():
         return jsonify({"error": "Missing token"}), 401
 
     data = request.json or {}
-    plan = data.get('plan', 'plus')
-    billing = data.get('billing', 'monthly')  # 'monthly' or 'yearly'
+    plan = data.get('plan', 'ai')
+    billing = 'yearly' if data.get('billing') == 'yearly' else 'monthly'
 
     if plan not in PLANS:
         return jsonify({"error": "Invalid plan"}), 400
@@ -267,24 +282,37 @@ def create_checkout_session():
 
     print(f'🎯 Checkout: plan={plan}, billing={billing}')
 
-    response = requests.post(
-        f"{get_paddle_base()}/transactions",
-        headers=paddle_headers(),
-        json=body
-    )
+    try:
+        response = requests.post(
+            f"{get_paddle_base()}/transactions",
+            headers=paddle_headers(),
+            json=body,
+            timeout=PADDLE_API_TIMEOUT,
+        )
+    except requests.RequestException as error:
+        return _paddle_unavailable("checkout creation", error)
     print("🔁 Paddle API Response:", response.text)
 
     if response.status_code != 201:
-        return jsonify({"error": "Failed to create checkout session", "details": response.text}), 500
+        return jsonify({"error": "Failed to create checkout session",
+                        "details": response.text[:300]}), 502
 
-    resp_data = response.json()
-    checkout_url = resp_data["data"]["checkout"]["url"]
+    try:
+        resp_data = response.json()
+        checkout_url = resp_data["data"]["checkout"]["url"]
+        transaction_id = resp_data["data"]["id"]
+    except (KeyError, TypeError, ValueError) as error:
+        print(f"⚠️ Paddle checkout returned an invalid response: {error}",
+              flush=True)
+        return jsonify({"error": "The payment service returned an invalid "
+                               "checkout response. Please try again.",
+                        "retryable": True}), 502
     # The transaction id is what lets the frontend open Paddle.js INLINE, on
     # our own dark page, instead of sending the user to Paddle's hosted white
     # two-column page. checkout_url is still returned so any older client (and
     # the fallback path when Paddle.js fails to load) keeps working.
     return jsonify({"checkout_url": checkout_url,
-                    "txn_id": resp_data["data"]["id"],
+                    "txn_id": transaction_id,
                     "plan": plan, "billing": billing})
 
 
@@ -354,7 +382,7 @@ def change_plan():
 
     data = request.json or {}
     new_plan = data.get('plan')
-    billing = data.get('billing', 'monthly')
+    billing = 'yearly' if data.get('billing') == 'yearly' else 'monthly'
 
     if new_plan not in PLANS:
         return jsonify({"error": "Invalid plan"}), 400
@@ -365,14 +393,6 @@ def change_plan():
     subscription_id = get_user_subscription_id(user_id)
     if not subscription_id:
         return jsonify({"error": "No active subscription"}), 400
-
-    # Get current subscription to find item id
-    sub_res = requests.get(
-        f"{get_paddle_base()}/subscriptions/{subscription_id}",
-        headers=paddle_headers()
-    )
-    if sub_res.status_code != 200:
-        return jsonify({"error": "Could not fetch subscription"}), 500
 
     # Pick the right price ID
     if billing == 'yearly':
@@ -388,13 +408,16 @@ def change_plan():
         "custom_data": {"user_id": user_id, "plan": new_plan, "billing": billing},
         "proration_billing_mode": "do_not_bill"
     }
-    res = requests.patch(
-        f"{get_paddle_base()}/subscriptions/{subscription_id}",
-        headers=paddle_headers(),
-        json=body
-    )
+    try:
+        res = requests.patch(
+            f"{get_paddle_base()}/subscriptions/{subscription_id}",
+            headers=paddle_headers(), json=body,
+            timeout=PADDLE_API_TIMEOUT)
+    except requests.RequestException as error:
+        return _paddle_unavailable("plan change", error)
     if res.status_code not in (200, 202):
-        return jsonify({"error": "Failed to change plan", "details": res.text}), 500
+        return jsonify({"error": "Failed to change plan",
+                        "details": res.text[:300]}), 502
 
     return jsonify({"message": f"Plan will change to {new_plan} at next billing cycle."})
 
@@ -505,7 +528,8 @@ def subscription_state():
 
     try:
         r = requests.get(f"{get_paddle_base()}/subscriptions/{sub_id}",
-                         headers=paddle_headers(), timeout=12)
+                         headers=paddle_headers(),
+                         timeout=PADDLE_API_TIMEOUT)
         if r.status_code != 200:
             return jsonify(out)
         d = r.json().get("data") or {}
@@ -549,13 +573,16 @@ def resume_subscription():
     if not subscription_id:
         return jsonify({"error": "No subscription found"}), 400
 
-    res = requests.patch(
-        f"{get_paddle_base()}/subscriptions/{subscription_id}",
-        headers=paddle_headers(),
-        json={"scheduled_change": None})
+    try:
+        res = requests.patch(
+            f"{get_paddle_base()}/subscriptions/{subscription_id}",
+            headers=paddle_headers(), json={"scheduled_change": None},
+            timeout=PADDLE_API_TIMEOUT)
+    except requests.RequestException as error:
+        return _paddle_unavailable("subscription resume", error)
     if res.status_code not in (200, 204):
         return jsonify({"error": "Could not resume the subscription",
-                        "details": res.text[:300]}), 500
+                        "details": res.text[:300]}), 502
     return jsonify({"message": "Your subscription will continue as normal."})
 
 
@@ -672,7 +699,8 @@ def accept_offer():
     try:
         requests.patch(f"{get_paddle_base()}/subscriptions/{subscription_id}",
                        headers=paddle_headers(),
-                       json={"scheduled_change": None}, timeout=12)
+                       json={"scheduled_change": None},
+                       timeout=PADDLE_API_TIMEOUT)
     except Exception as e:
         print(f"⚠️ accept-offer resume failed: {e}")
 
@@ -692,12 +720,16 @@ def cancel_subscription():
     if not subscription_id:
         return jsonify({"error": "No active subscription found"}), 400
 
-    res = requests.post(
-        f"{get_paddle_base()}/subscriptions/{subscription_id}/cancel",
-        headers=paddle_headers(),
-        json={"effective_from": "next_billing_period"}
-    )
+    try:
+        res = requests.post(
+            f"{get_paddle_base()}/subscriptions/{subscription_id}/cancel",
+            headers=paddle_headers(),
+            json={"effective_from": "next_billing_period"},
+            timeout=PADDLE_API_TIMEOUT)
+    except requests.RequestException as error:
+        return _paddle_unavailable("subscription cancellation", error)
     if res.status_code not in (200, 204):
-        return jsonify({"error": "Failed to cancel", "details": res.text}), 500
+        return jsonify({"error": "Failed to cancel",
+                        "details": res.text[:300]}), 502
 
     return jsonify({"message": "Subscription will cancel at end of billing period."})
