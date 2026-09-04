@@ -14,9 +14,11 @@ The audit immediately before this release found:
   (14), an `agent_loop` metric-closure crash (15), Cloudflare capacity-busy
   launches (10), empty-sequence `max()` crashes (6), and unrecovered
   Cloudflare calls (6).
-- MCP jobs: 4,084 done and 260 failed, plus 192 nominally-done tool refusals.
-  Counting explicit refusals, 452 of 4,344 calls (10.4%) were non-successful.
-  Cloudflare capacity accounted for 244 calls and Modal billing/capacity for 13.
+- MCP jobs: 4,084 done and 260 failed. The initial broad audit classified 192
+  nominally-done calls as refusals; the reproducible strict metric finds 186
+  results beginning with `REJECTED:`. Use the strict metric for future trend
+  comparisons rather than silently changing the denominator. Cloudflare
+  capacity accounted for 244 failed calls and Modal billing/capacity for 13.
 - Stock-media continuity was broken across process boundaries: 129 chosen IDs
   were unknown when used later, and only 3 of 140 observed `add_stock_media`
   calls completed successfully.
@@ -24,10 +26,16 @@ The audit immediately before this release found:
   around framing, caption, B-roll, and quality-control evidence.
 - One subscriber project reached EDL version 27 through repeated continuation
   slices, remained `repair_required`, and never received a terminal reply.
-- The provider ledger retained one expired Modal preview as `running` for more
-  than four days even though its canonical queue job was already `failed`.
-  The release reaper must close this crash-interrupted contradiction after
-  deployment.
+- Four of 20 failed subscriber logical requests had no assistant reply before
+  the subscriber's next request; all four ended in the old Cloudflare-busy
+  path. One of those subscribers sent no later request and was left waiting.
+  Future snapshots must report this reply coverage rather than relying on the
+  queue state alone.
+- The provider ledger briefly exposed one expired Modal preview as `running`
+  for more than four days even though its canonical queue job was already
+  `failed`. The live reaper closed it during the read-only audit without manual
+  mutation, confirming the existing crash-reconciliation path works; this
+  release preserves the invariant and its regression coverage.
 
 These are historical measurements, not permanent thresholds. The watcher must
 use a comparable time window and distinguish newly-created work from old jobs
@@ -95,7 +103,7 @@ whose terminal rows remain in the database.
 - Worker pytest suite: 1,710 passed, 3 skipped.
 - Legacy worker executable checks: all 11 harnesses passed, including 1,038
   unit checks, 22 patch checks, and 30 text-behind-subject tests.
-- Backend pytest suite: 323 passed.
+- Backend pytest suite: 326 passed, including the snapshot classification tests.
 - Modal executor tests: 38 passed.
 - Cloudflare adapter TypeScript check: passed.
 - Frontend library suite on the current production base: 63 passed.
@@ -107,6 +115,10 @@ whose terminal rows remain in the database.
 
 ## Deployment and observation
 
+- Generate comparable aggregate telemetry with
+  `python backend/scripts/reliability_snapshot.py --days 7` in an environment
+  that supplies `DATABASE_URL`. The command forces a read-only database session
+  and emits no user, project, message, raw-error, or credential values.
 - Backend pushes are not considered live until `/healthz` reports `status=ok`,
   `role=backend`, and the exact pushed commit prefix.
 - Frontend pushes are not considered live until `/api/health` reports
