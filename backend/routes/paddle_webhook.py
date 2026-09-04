@@ -453,6 +453,19 @@ def handle_webhook():
             # written. Paddle will retry, and no entitlement mutation has run.
             return 'Payment ledger temporarily unavailable', 503
 
+    # Paddle emits a completed zero-dollar transaction when opening a trial.
+    # It proves neither payment nor the subscription's current lifecycle state.
+    # Persist it as accounting evidence, but let the signed subscription event
+    # establish the trial allowance and daily-credit policy. Otherwise event
+    # reordering could briefly install paid daily credits before the trial row
+    # exists, and a missing subscription delivery could leave that state stuck.
+    if (event_type in ('transaction.completed', 'transaction.paid')
+            and int(payment_record.get('amount_cents') or 0) <= 0):
+        get_db().commit()
+        print(f"ℹ️ {event_type} carried no payment; ledgered without "
+              "entitlement mutation")
+        return 'OK', 200
+
     if not user_id:
         return 'OK', 200
 

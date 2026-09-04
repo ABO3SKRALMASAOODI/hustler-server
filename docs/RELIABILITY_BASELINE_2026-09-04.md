@@ -178,7 +178,9 @@ whose terminal rows remain in the database.
   deliberately left unclaimed until Paddle's completed event attaches the
   recurring contract. Completed one-time charges are recorded as revenue
   without creating subscription entitlement, while malformed completed
-  recurring charges remain retryable.
+  recurring charges remain retryable. Linked zero-dollar transactions are
+  ledger-only: the signed subscription lifecycle event, not event arrival
+  order, establishes trial allowance and daily-credit state.
 - The shared request-scoped database connection is explicitly rolled back and
   closed at Flask context teardown. Partial webhook work cannot linger until
   interpreter garbage collection or escape into a reused database session.
@@ -201,7 +203,7 @@ whose terminal rows remain in the database.
 - Worker pytest suite: 1,735 passed, 3 skipped.
 - Legacy worker executable checks: all 20 harnesses passed, including 1,038
   unit checks, 22 patch checks, and 30 text-behind-subject tests.
-- Backend pytest suite: 382 passed, 4 skipped, including MCP protocol, billing
+- Backend pytest suite: 384 passed, 4 skipped, including MCP protocol, billing
   trust-boundary, secure-health, and
   snapshot classification tests.
 - Modal executor tests: 38 passed.

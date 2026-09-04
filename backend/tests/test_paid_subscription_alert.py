@@ -180,17 +180,21 @@ def test_disabled_alerts_neither_queue_nor_start_a_thread(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("event_type", "amount", "alerted"),
-    [("transaction.completed", "3000", True),
-     ("transaction.completed", "0", False),
-     ("transaction.paid", "3000", False)],
+    ("event_type", "amount", "alerted", "granted"),
+    [("transaction.completed", "3000", True, True),
+     ("transaction.completed", "0", False, False),
+     ("transaction.paid", "3000", False, True)],
 )
 def test_webhook_wires_the_alert_only_after_real_money(
-        monkeypatch, event_type, amount, alerted):
+        monkeypatch, event_type, amount, alerted, granted):
     """Protect the route wiring, not just the outbox helper in isolation."""
     from flask import Flask
 
-    db = object()
+    class Db:
+        def commit(self):
+            pass
+
+    db = Db()
     calls = []
     grant_calls = []
     monkeypatch.setattr(webhook, "PADDLE_WEBHOOK_SECRET", "configured")
@@ -224,7 +228,7 @@ def test_webhook_wires_the_alert_only_after_real_money(
         "data": _transaction(amount),
     })
     assert response.status_code == 200
-    assert grant_calls == [int(amount) > 0]
+    assert grant_calls == ([True] if granted else [])
     assert bool(calls) is alerted
     if alerted:
         assert calls[0][0] is db
@@ -439,6 +443,49 @@ def test_completed_one_time_charge_is_ledgered_without_subscription_grant(
 
     assert response.status_code == 200
     assert ledger_calls == [{"report_transition": True}]
+
+
+@pytest.mark.parametrize("event_type", [
+    "transaction.paid", "transaction.completed",
+])
+def test_zero_dollar_subscription_transaction_is_ledger_only(
+        monkeypatch, event_type):
+    """The subscription event, not its $0 transaction, installs trial state."""
+    from flask import Flask
+
+    class Db:
+        committed = 0
+
+        def commit(self):
+            self.committed += 1
+
+    db = Db()
+    data = _transaction(amount="0")
+    monkeypatch.setattr(webhook, "PADDLE_WEBHOOK_SECRET", "configured")
+    monkeypatch.setattr(webhook, "_verify_paddle_signature", lambda _req: True)
+    monkeypatch.setattr(webhook, "_verified_payer_user_id", lambda *_args: 7)
+    monkeypatch.setattr(webhook, "get_db", lambda: db)
+    monkeypatch.setattr(webhook, "_plan_from_data", lambda _: "ai_pro")
+    monkeypatch.setattr(
+        webhook.billing, "record_transaction",
+        lambda *_args, **_kwargs: {
+            "recorded": True, "newly_paid": False, "amount_cents": 0})
+    monkeypatch.setattr(
+        webhook, "_trial_aware_grant",
+        lambda *_args, **_kwargs: pytest.fail(
+            "a zero-dollar transaction must not define entitlement"))
+    monkeypatch.setattr(
+        webhook, "update_user_subscription_status",
+        lambda *_args, **_kwargs: pytest.fail(
+            "a zero-dollar transaction must not mutate subscriber state"))
+
+    app = Flask(__name__)
+    app.register_blueprint(webhook.paddle_webhook)
+    response = app.test_client().post("/webhook/paddle", json={
+        "event_type": event_type, "data": data})
+
+    assert response.status_code == 200
+    assert db.committed == 1
 
 
 def test_standalone_failed_transaction_commits_only_its_ledger(monkeypatch):
