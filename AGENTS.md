@@ -86,9 +86,10 @@ Retired but grandfathered: Plus 800 / Pro-legacy 2,400 / Ultra 5,000 / Titan 10,
   Paddle retries after configuration is restored.
 - **`PADDLE_API_KEY`** — required to verify the payer identity for first
   purchases; provider lookup failures return 503 and never trust browser data.
-- **`SECRET_KEY`** — required for stable JWT/session signing. If absent, the
-  process uses an unpredictable ephemeral key and `/healthz` stays degraded,
-  so the release verifier cannot certify the deployment.
+- **`SECRET_KEY`** — required for stable JWT/session signing and must contain
+  at least 32 non-placeholder characters. If absent or weak, the process uses
+  an unpredictable ephemeral key and `/healthz` stays degraded, so the release
+  verifier cannot certify the deployment.
 
 ## YouTube fetch from the worker (bot wall)
 

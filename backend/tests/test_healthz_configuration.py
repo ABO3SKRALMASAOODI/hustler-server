@@ -39,7 +39,8 @@ def test_healthz_refuses_to_certify_missing_security_configuration(
 def test_healthz_certifies_configured_security(monkeypatch):
     from app import create_app
 
-    monkeypatch.setenv("SECRET_KEY", "test-secret-that-is-not-public")
+    secret = "test-secret-that-is-not-public-and-is-long-enough"
+    monkeypatch.setenv("SECRET_KEY", secret)
     monkeypatch.setenv("PADDLE_WEBHOOK_SECRET", "test-paddle-secret")
     monkeypatch.setenv("PADDLE_API_KEY", "test-paddle-api-key")
     app = create_app()
@@ -52,4 +53,18 @@ def test_healthz_certifies_configured_security(monkeypatch):
         "paddle_webhook_signing": "configured",
         "paddle_api": "configured",
     }
-    assert app.config["SECRET_KEY"] == "test-secret-that-is-not-public"
+    assert app.config["SECRET_KEY"] == secret
+
+
+def test_public_or_short_application_keys_are_never_used(monkeypatch):
+    from app import create_app
+
+    monkeypatch.setenv("PADDLE_WEBHOOK_SECRET", "test-paddle-secret")
+    monkeypatch.setenv("PADDLE_API_KEY", "test-paddle-api-key")
+    for unsafe in ("supersecretkey", "devsecret", "too-short"):
+        monkeypatch.setenv("SECRET_KEY", unsafe)
+        app = create_app()
+        body = app.test_client().get("/healthz").get_json()
+        assert body["status"] == "degraded"
+        assert body["checks"]["secret_key"] == "missing"
+        assert app.config["SECRET_KEY"] != unsafe

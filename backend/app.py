@@ -35,6 +35,16 @@ from routes.mcp_oauth import mcp_oauth_bp
 from routes.phone_status import phone_status_bp
 
 
+_PUBLIC_OR_WEAK_APP_KEYS = {"supersecretkey", "devsecret", "changeme"}
+
+
+def _configured_app_secret():
+    value = (os.environ.get("SECRET_KEY") or "").strip()
+    if len(value) < 32 or value.lower() in _PUBLIC_OR_WEAK_APP_KEYS:
+        return None
+    return value
+
+
 def create_app():
     app = Flask(__name__)
 
@@ -51,7 +61,7 @@ def create_app():
     def healthz():
         import os as _os
         checks = {
-            "secret_key": "configured" if _os.environ.get("SECRET_KEY")
+            "secret_key": "configured" if _configured_app_secret()
                           else "missing",
             "paddle_webhook_signing": (
                 "configured" if _os.environ.get("PADDLE_WEBHOOK_SECRET")
@@ -87,7 +97,7 @@ def create_app():
         response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS, PUT, DELETE, PATCH"
         return response
 
-    configured_secret = os.getenv("SECRET_KEY")
+    configured_secret = _configured_app_secret()
     # A fixed fallback made every JWT/session forgeable on a misconfigured
     # deployment. A random process-local key makes the mistake noisy (healthz
     # is degraded and sessions do not survive workers/restarts) but never
