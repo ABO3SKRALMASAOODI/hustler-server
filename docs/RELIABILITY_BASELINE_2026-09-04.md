@@ -9,8 +9,8 @@ an improvement; do not treat silence or a missing row as success.
 
 The audit immediately before this release found:
 
-- Subscriber jobs over the inspected seven-day window: 214 done and 51 failed
-  (19.2% failed). The largest concrete clusters were preview duration mismatch
+- Subscriber jobs over the inspected seven-day window: 216 done and 51 failed
+  (19.1% failed). The largest concrete clusters were preview duration mismatch
   (14), an `agent_loop` metric-closure crash (15), Cloudflare capacity-busy
   launches (10), empty-sequence `max()` crashes (6), and unrecovered
   Cloudflare calls (6).
