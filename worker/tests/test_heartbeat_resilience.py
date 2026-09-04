@@ -210,9 +210,24 @@ def test_the_loop_keeps_beating_after_a_failure(monkeypatch):
 def test_the_silence_is_announced_with_its_consequence(monkeypatch):
     """The eight users lost on Aug 8 were lost invisibly. A stopped heartbeat
     now says what it will cost, in the log, on the first failed beat."""
+    # Linux workers emit a memory diagnostic before attempting the database
+    # heartbeat.  Keep that platform-specific line in the test so selecting
+    # the failure remains deterministic on every CI runner.
+    monkeypatch.setattr(
+        dbx,
+        "_linux_memory_snapshot_kb",
+        lambda: {
+            "self": 1,
+            "tree": 1,
+            "children": 0,
+            "cgroup": None,
+            "limit": None,
+        },
+    )
     _, logs = _run_beats(monkeypatch, [OSError("timeout")])
-    line = next(x for x in logs if "[heartbeat]" in x)
-    assert "FAILED" in line
+    line = next(
+        x for x in logs if "[heartbeat]" in x and "FAILED" in x
+    )
     assert "Worker died" in line and "2 running job(s)" in line
 
 
