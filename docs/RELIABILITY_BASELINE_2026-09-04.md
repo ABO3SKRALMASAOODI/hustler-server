@@ -64,11 +64,19 @@ The audit immediately before this release found:
   attachment index became the project's nominal "latest index". Project
   health must stay asset-scoped: clips and music cannot mask or spend the
   retry budget for the active original.
-- The provider ledger briefly exposed one expired Modal preview as `running`
+- The provider ledger still exposed one expired Modal preview as `running`
   for more than four days even though its canonical queue job was already
-  `failed`. The live reaper closed it during the read-only audit without manual
-  mutation, confirming the existing crash-reconciliation path works; this
-  release preserves the invariant and its regression coverage.
+  `failed`. The audit was intentionally read-only and did not alter it. This
+  release adds an idempotent reaper repair that will inherit the exact terminal
+  queue state after deployment; future snapshots must show the contradiction
+  disappearing rather than silently accepting it as baseline noise.
+- The public MCP boundary returned its server card with identity
+  `io.valmera/video-editor`, 135 currently deployed tools, and all 12 session
+  tools. An unauthenticated JSON-RPC call returned 401 with the required
+  `resource_metadata` challenge, and both OAuth metadata documents returned
+  coherent HTTPS endpoints. Tool-count changes are valid only when explained
+  by the exact deployed release (this candidate intentionally removes the
+  internal `load_tools` pager from the public catalog).
 
 These are historical measurements, not permanent thresholds. The watcher must
 use a comparable time window and distinguish newly-created work from old jobs
