@@ -205,7 +205,9 @@ whose terminal rows remain in the database.
   `status=ok`, `role=frontend`, and the exact Vercel Git commit SHA with
   `Cache-Control: no-store`.
 - Cloudflare's staged rollout must pass its source-fingerprint verifier for all
-  lanes. Do not deploy Modal as part of an ordinary worker release.
+  lanes. Agent-facing repository guidance names Cloudflare as primary and
+  Modal/Cloud Run as manual fallbacks; do not deploy either fallback as part of
+  an ordinary worker release.
 - No production database migration is required by this release.
 - During the first 24 hours, compare newly-created subscriber and MCP work with
   this baseline. Notify on a new root-cause cluster, a stalled logical request,

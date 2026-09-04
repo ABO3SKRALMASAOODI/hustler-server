@@ -8,7 +8,9 @@ An **agentic AI video editor** (valmera.io). Users upload footage and chat with 
 - **Worker** (`worker/`) — dispatcher: job queue, agent loop (LLM turns), faster-whisper indexing, credit charging (`worker/db.charge_turn_credits`)
 - **Executor** — Cloudflare Containers are primary for capacity-safe interactive, batch, agent, MCP, and Shorts lanes. Modal app `valmera-executor` is the fenced fallback for provider failures and synchronous operations that exceed Cloudflare's self-serve container limits. Cloud Run is an emergency launch fallback only.
 
-The retired app-builder has been removed. Do not recreate `engine/`, generated Vite-app jobs, template-clone flows, or `/auth/generate` compatibility routes.
+The old app-builder (`engine/AA.py`, `/auth/generate` routes) is retired but
+still present for legacy compatibility. Do not modify, restore, or route new
+work through it.
 
 ## Hosting
 
@@ -16,7 +18,7 @@ The retired app-builder has been removed. Do not recreate `engine/`, generated V
 |---|---|---|
 | Frontend | Vercel | `https://valmera.io` — auto-deploys on push to `main` |
 | Backend + Worker | Render | `https://entrepreneur-bot-backend.onrender.com` — auto-deploys on push to `main` (~3–5 min). Persistent 10GB disk at `/opt/render/project/src/outputs` |
-| Executor | Cloudflare + Modal fallback | Cloudflare Containers auto-deploy via `.github/workflows/deploy-cloudflare-executor.yml` on relevant `worker/` pushes and verify every lane's exact source fingerprint. Modal app `valmera-executor` auto-deploys in parallel as the fenced failure/heavy-operation fallback. Google Cloud Run is retained at min-instances 0 and deploys manually only. |
+| Executor | Cloudflare + Modal fallback | Cloudflare Containers auto-deploy via `.github/workflows/deploy-cloudflare-executor.yml` on relevant `worker/` pushes and verify every lane's exact source fingerprint. Modal app `valmera-executor` is an operator-invoked, fenced disaster-recovery fallback. Google Cloud Run is retained at min-instances 0 and deploys manually only. |
 | Database | Render managed PostgreSQL | via `$DATABASE_URL`; never store the URL in the repository |
 | Email | Brevo | if emails stop: re-whitelist Render's IP (`74.220.48.3`) at `app.brevo.com/security/authorised_ips` |
 | Payments | Paddle | **live** (production mode) |
@@ -36,7 +38,7 @@ git config user.email "shmarymuslim@gmail.com"
 git add <files> && git commit -m "description" && git push origin main
 ```
 
-Frontend deploys via Vercel (~1–2 min — check the dashboard, SSR issues fail builds). Backend deploys via Render (~3–5 min). Cloudflare and Modal executor workflows both deploy on relevant `worker/` changes and verify the exact deployed source fingerprint; Cloudflare remains primary and Modal remains the fenced failure/heavy-operation fallback. Cloud Run fallback deploys manually only.
+Frontend deploys via Vercel (~1–2 min — check the dashboard, SSR issues fail builds). Backend deploys via Render (~3–5 min). Cloudflare deploys on relevant `worker/` changes and verifies every lane's exact deployed source fingerprint. Modal and Cloud Run are manual fallback workflows only; ordinary releases must not publish or warm them.
 
 ## Database Access
 
