@@ -198,11 +198,11 @@ def _user_id_by_customer_email(customer_id):
             raise
         raise _PayerIdentityUnavailable(
             "customer lookup was unavailable") from e
-    # NEVER close this connection. get_db() caches one per REQUEST on flask.g
-    # and hands the same object to every caller, so closing it here killed the
-    # connection that update_user_subscription_status then tried to use — the
-    # whole activation 500'd and Paddle retried forever. _user_id_by_subscription
-    # right below has always followed the same rule.
+    # NEVER close this connection here. get_db() caches one per REQUEST on
+    # flask.g and hands the same object to every caller, so closing it here
+    # killed the connection that update_user_subscription_status then tried to
+    # use — the whole activation 500'd and Paddle retried forever. The app
+    # teardown closes it after the complete request instead.
     cur = get_db().cursor()
     cur.execute("SELECT id FROM users WHERE LOWER(email) = LOWER(%s) LIMIT 1",
                 (email,))

@@ -10,6 +10,22 @@ def get_db():
     return db
 
 
+def close_db(_error=None):
+    """Roll back unfinished request work and release the cached connection."""
+    db = g.pop('_database', None)
+    if db is None:
+        return
+    try:
+        # Commits in this module are explicit. Anything still pending when the
+        # request/app context ends is necessarily partial work and must not
+        # depend on interpreter finalization for its rollback.
+        db.rollback()
+    except Exception:
+        pass
+    finally:
+        db.close()
+
+
 def upgrade_user_to_premium(user_id, expiry_date=None):
     """Set user as subscribed and optionally set subscription expiry."""
     conn = get_db()

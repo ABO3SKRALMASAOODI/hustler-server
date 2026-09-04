@@ -17,7 +17,7 @@ from routes.paddle import paddle_bp as paddle_checkout_bp
 from routes.paddle_webhook import paddle_webhook
 from routes.admin import admin_bp
 from routes.google_auth import google_auth_bp
-from models import init_db
+from models import close_db, init_db
 import os
 from dotenv import load_dotenv
 from routes.github import github_bp
@@ -105,6 +105,7 @@ def create_app():
     # silently grants an attacker a known signing key.
     app.config['SECRET_KEY'] = configured_secret or secrets.token_urlsafe(48)
     app.config['DATABASE_URL'] = os.getenv("DATABASE_URL")
+    app.teardown_appcontext(close_db)
 
     if os.getenv("SKIP_DB_INIT") == "1":
         print("⚠️  Skipping DB init (SKIP_DB_INIT=1)")

@@ -165,6 +165,9 @@ whose terminal rows remain in the database.
   renewal; a late failure snapshot cannot downgrade confirmed paid/completed
   truth. Unknown prices and paid events without a subscription id fail closed
   for provider retry instead of creating a zero-credit subscription.
+- The shared request-scoped database connection is explicitly rolled back and
+  closed at Flask context teardown. Partial webhook work cannot linger until
+  interpreter garbage collection or escape into a reused database session.
 - Paddle webhooks fail closed before parsing or account access when the signing
   secret is absent, allowing provider retries without accepting forged plan or
   credit mutations. Raw request bodies are authenticated against every `h1`
@@ -184,7 +187,7 @@ whose terminal rows remain in the database.
 - Worker pytest suite: 1,735 passed, 3 skipped.
 - Legacy worker executable checks: all 20 harnesses passed, including 1,038
   unit checks, 22 patch checks, and 30 text-behind-subject tests.
-- Backend pytest suite: 363 passed, 4 skipped, including MCP protocol, billing
+- Backend pytest suite: 364 passed, 4 skipped, including MCP protocol, billing
   trust-boundary, secure-health, and
   snapshot classification tests.
 - Modal executor tests: 38 passed.
