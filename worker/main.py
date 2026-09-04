@@ -357,8 +357,11 @@ def _notify_failure(worker_db, job, err):
                     "transcript ({err}). Ask me in chat to build one short "
                     "around the specific idea you want instead.")
     payload = job.get("payload") or {}
-    if not note and job["type"] == "agent_turn" and isinstance(
-            err, remote.CloudflareLaunchUnavailable):
+    capacity_launch_failure = (
+        isinstance(err, remote.CloudflareLaunchUnavailable)
+        or "shard is busy" in str(err).lower()
+        or "capacity busy" in str(err).lower())
+    if not note and job["type"] == "agent_turn" and capacity_launch_failure:
         # An agent that never launched cannot post the apology normally owned
         # by run_agent_job. Without this branch, a continuation could exhaust
         # capacity deferrals and leave the user's request with no reply.
@@ -375,9 +378,9 @@ def _notify_failure(worker_db, job, err):
     try:
         project = worker_db.run(dbx.get_project, job["project_id"])
         if project and project.get("chat_session_id"):
-            worker_db.run(dbx.add_message, project["chat_session_id"],
-                          "assistant", note.format(err=str(err)[:160]),
-                          {"error": "job_failed", "job": job["id"]})
+            worker_db.run(
+                dbx.add_job_failure_message, project["chat_session_id"],
+                note.format(err=str(err)[:160]), job["id"])
     except Exception as e2:
         print(f"[notify] {e2}", flush=True)
 
@@ -565,10 +568,10 @@ def reaper():
                 try:
                     project = worker_db.run(dbx.get_project, row["project_id"])
                     if project and project.get("chat_session_id"):
-                        worker_db.run(dbx.add_message,
-                                      project["chat_session_id"],
-                                      "assistant", note,
-                                      {"error": "job_died", "job": row["id"]})
+                        worker_db.run(
+                            dbx.add_job_failure_message,
+                            project["chat_session_id"], note, row["id"],
+                            "job_died")
                 except Exception as e:
                     print(f"[reaper] notify failed: {e}", flush=True)
         except Exception as e:
@@ -608,6 +611,21 @@ def reaper():
                       f"ledger row(s): {summary}", flush=True)
         except Exception as e:
             print(f"[reaper] terminal remote ledger repair: {e}",
+                  flush=True)
+            worker_db.reset()
+
+        # Queue completion and the user-facing failure note are deliberately
+        # separate transactions. Repair the narrow crash window between them,
+        # idempotently, while refusing to inject a stale note after a later
+        # user request has taken ownership of the conversation.
+        try:
+            for row in (
+                    worker_db.run(dbx.unnotified_terminal_failures) or []):
+                _notify_failure(
+                    worker_db, row,
+                    RuntimeError(row.get("error") or "job failed"))
+        except Exception as e:
+            print(f"[reaper] terminal failure notification repair: {e}",
                   flush=True)
             worker_db.reset()
 

@@ -2456,6 +2456,106 @@ def add_message(conn, session_id, role, content, meta=None):
         return cur.fetchone()["id"]
 
 
+def add_job_failure_message(conn, session_id, content, job_id,
+                            error_kind="job_failed"):
+    """Insert one user-facing failure note for a terminal queue job.
+
+    Job completion and chat notification necessarily use separate transactions:
+    the queue row belongs to the executor lease, while project lookup and chat
+    are best-effort UX. A worker crash between them must be repairable without a
+    later reaper producing duplicate apologies. The transaction-scoped advisory
+    lock makes the NOT EXISTS check safe across dispatcher and guardian threads.
+    """
+    job_id = int(job_id)
+    error_kind = (str(error_kind or "job_failed")
+                  if error_kind in ("job_failed", "job_died")
+                  else "job_failed")
+    meta = {"error": error_kind, "job": job_id}
+    with conn.cursor() as cur:
+        cur.execute("""WITH locked AS (
+                         SELECT pg_advisory_xact_lock(
+                           hashtextextended('job-failure-message:' || %s, 0))
+                       )
+                       INSERT INTO chat_messages
+                         (session_id, role, content, meta)
+                       SELECT %s, 'assistant', %s, %s
+                         FROM locked
+                        WHERE NOT EXISTS (
+                          SELECT 1 FROM chat_messages existing
+                           WHERE existing.session_id = %s
+                             AND existing.role = 'assistant'
+                             AND existing.meta->>'error'
+                                 IN ('job_failed', 'job_died')
+                             AND existing.meta->>'job' = %s)
+                       RETURNING id""",
+                    (str(job_id), session_id, content, Json(meta),
+                     session_id, str(job_id)))
+        row = cur.fetchone()
+        return row["id"] if row else None
+
+
+def unnotified_terminal_failures(conn, limit=100):
+    """Recent terminal failures whose user-facing note was crash-interrupted.
+
+    Agent turns normally write their own reply before raising. The only
+    dispatcher-owned agent note is a provider-capacity failure that prevented
+    the agent from launching. Never backfill it after a newer user request: a
+    stale apology arriving in the middle of a later edit is worse than silence.
+    Other listed job types always use the dispatcher notification path.
+    """
+    limit = max(1, min(500, int(limit or 100)))
+    with conn.cursor() as cur:
+        cur.execute("""SELECT j.*
+                         FROM video_jobs j
+                         JOIN projects p ON p.id = j.project_id
+                        WHERE j.state = 'failed'
+                          AND j.updated_at >= NOW() - INTERVAL '24 hours'
+                          AND p.chat_session_id IS NOT NULL
+                          AND (
+                            j.type IN ('final', 'index', 'shorts_plan')
+                            OR (j.type = 'preview' AND (
+                              COALESCE((j.payload->>'force')::boolean, false)
+                              OR j.payload->>'source' = 'user_edit'))
+                            OR (j.type = 'agent_turn' AND (
+                              j.error ILIKE '%%shard is busy%%'
+                              OR j.error ILIKE '%%capacity busy%%')))
+                          AND NOT EXISTS (
+                            SELECT 1 FROM chat_messages notified
+                             WHERE notified.session_id = p.chat_session_id
+                               AND notified.role = 'assistant'
+                               AND notified.meta->>'error'
+                                   IN ('job_failed', 'job_died')
+                               AND notified.meta->>'job' = j.id::text)
+                          AND (j.type <> 'shorts_plan' OR NOT EXISTS (
+                            SELECT 1 FROM video_jobs newer_agent
+                             WHERE newer_agent.project_id = j.project_id
+                               AND newer_agent.type = 'agent_turn'
+                               AND newer_agent.id > j.id))
+                          AND (j.type <> 'agent_turn' OR (
+                            j.payload->>'message_id' ~ '^[0-9]+$'
+                            AND EXISTS (
+                              SELECT 1 FROM chat_messages prompt
+                               WHERE prompt.id =
+                                     (j.payload->>'message_id')::bigint
+                                 AND prompt.session_id = p.chat_session_id
+                                 AND prompt.role = 'user')
+                            AND NOT EXISTS (
+                              SELECT 1 FROM chat_messages newer
+                               WHERE newer.session_id = p.chat_session_id
+                                 AND newer.role = 'user'
+                                 AND newer.id >
+                                     (j.payload->>'message_id')::bigint)
+                            AND NOT EXISTS (
+                              SELECT 1 FROM chat_messages answered
+                               WHERE answered.session_id = p.chat_session_id
+                                 AND answered.role = 'assistant'
+                                 AND answered.id >
+                                     (j.payload->>'message_id')::bigint)))
+                        ORDER BY j.updated_at, j.id
+                        LIMIT %s""", (limit,))
+        return cur.fetchall()
+
+
 def latest_creative_blueprint(conn, session_id):
     """Newest durable director blueprint recorded in this project's chat.
 

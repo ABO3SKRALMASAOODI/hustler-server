@@ -100,7 +100,7 @@ whose terminal rows remain in the database.
 
 ## Verification completed before release
 
-- Worker pytest suite: 1,710 passed, 3 skipped.
+- Worker pytest suite: 1,730 passed, 3 skipped.
 - Legacy worker executable checks: all 11 harnesses passed, including 1,038
   unit checks, 22 patch checks, and 30 text-behind-subject tests.
 - Backend pytest suite: 326 passed, including the snapshot classification tests.
