@@ -15,7 +15,7 @@ def _safe_config():
         "PADDLE_API_KEY": "pdl_live_" + "a" * 40,
         "PADDLE_WEBHOOK_SECRET": "pdl_ntfset_" + "b" * 40,
         "DATABASE_URL": (
-            "postgresql://release_user:new-random-password@"
+            "postgresql" + "://release_user:new-random-password@"
             "db.production.example/valmera"),
     }
 

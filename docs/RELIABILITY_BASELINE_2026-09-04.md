@@ -176,7 +176,7 @@ whose terminal rows remain in the database.
 - Worker pytest suite: 1,735 passed, 3 skipped.
 - Legacy worker executable checks: all 20 harnesses passed, including 1,038
   unit checks, 22 patch checks, and 30 text-behind-subject tests.
-- Backend pytest suite: 353 passed, 4 skipped, including MCP protocol, billing
+- Backend pytest suite: 356 passed, 4 skipped, including MCP protocol, billing
   trust-boundary, secure-health, and
   snapshot classification tests.
 - Modal executor tests: 38 passed.
@@ -200,6 +200,11 @@ whose terminal rows remain in the database.
   It prints only setting names and bounded reasons, rejects the one-way
   fingerprint of the exposed database URL, and fails until the application,
   Paddle API, and Paddle webhook secrets are production-safe.
+- Backend and Cloudflare release gates run
+  `backend/scripts/scan_tracked_secrets.py` before certification or publish.
+  It scans every Git-tracked text file, reports only path/line/category, and
+  blocks credentialed production database URLs, private keys, and common live
+  token shapes while allowing explicit local integration fixtures.
 - Generate comparable aggregate telemetry with
   `python backend/scripts/reliability_snapshot.py --days 7` in an environment
   that supplies `DATABASE_URL`. The command forces a read-only database session

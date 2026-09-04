@@ -55,6 +55,7 @@ jobs:
 
       - name: validate Python capabilities
         run: |
+          python backend/scripts/scan_tracked_secrets.py
           python -m compileall -q worker
           python worker/skill_validator.py
 
