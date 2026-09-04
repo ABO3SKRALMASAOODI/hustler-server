@@ -171,6 +171,8 @@ whose terminal rows remain in the database.
   active-subscription webhook lands but its transaction webhook is lost, the
   backfilled payment and credit refresh commit together exactly once; an
   unknown price rolls both back for the next tick instead of losing the grant.
+  A failed or malformed transaction-history response is reported as provider
+  uncertainty and cannot downgrade access or classify a customer as never-paid.
 - The shared request-scoped database connection is explicitly rolled back and
   closed at Flask context teardown. Partial webhook work cannot linger until
   interpreter garbage collection or escape into a reused database session.
@@ -193,7 +195,7 @@ whose terminal rows remain in the database.
 - Worker pytest suite: 1,735 passed, 3 skipped.
 - Legacy worker executable checks: all 20 harnesses passed, including 1,038
   unit checks, 22 patch checks, and 30 text-behind-subject tests.
-- Backend pytest suite: 373 passed, 4 skipped, including MCP protocol, billing
+- Backend pytest suite: 377 passed, 4 skipped, including MCP protocol, billing
   trust-boundary, secure-health, and
   snapshot classification tests.
 - Modal executor tests: 38 passed.

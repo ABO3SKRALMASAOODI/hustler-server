@@ -336,6 +336,104 @@ def test_no_subscription_id_is_not_an_error():
     assert "error" not in rep and rep["changes"] == []
 
 
+def test_transaction_api_failure_never_changes_subscription_state(monkeypatch):
+    """A successful subscription read does not make a failed payment-history
+    read evidence that the customer never paid."""
+    monkeypatch.setattr(
+        billing_sync, "fetch_subscription", lambda _sub: ({
+            "status": "past_due",
+            "items": [{"price": {"id": "pri_paid"}}],
+        }, None))
+    monkeypatch.setattr(
+        billing_sync, "fetch_transactions",
+        lambda _sub: (None, "unreachable: timed out"))
+    monkeypatch.setattr(
+        billing_sync, "_plan_from_items", lambda _data: "ai_pro")
+    monkeypatch.setattr(
+        billing, "subscription_has_paid", lambda *_args: False)
+    failures = []
+    monkeypatch.setattr(
+        billing, "record_failure",
+        lambda *_args, **_kwargs: failures.append(True))
+    conn = _Conn([])
+
+    report = billing_sync.reconcile_user(conn, {
+        "id": 7, "email": "buyer@example.test",
+        "subscription_id": "sub_123", "plan": "ai_pro",
+        "is_subscribed": 1, "billing_status": "active",
+    })
+
+    assert failures == []
+    assert report["error"] == "transactions_unreachable: timed out"
+    assert report["changes"] == []
+
+
+def test_reconciler_never_downgrades_after_a_ledger_write_failure(monkeypatch):
+    monkeypatch.setattr(
+        billing_sync, "fetch_subscription", lambda _sub: ({
+            "status": "past_due",
+            "items": [{"price": {"id": "pri_paid"}}],
+        }, None))
+    monkeypatch.setattr(
+        billing_sync, "fetch_transactions", lambda _sub: ([{
+            "id": "txn_history", "status": "completed",
+            "subscription_id": "sub_123",
+            "details": {"totals": {"grand_total": "3000"}},
+        }], None))
+    monkeypatch.setattr(
+        billing_sync, "_plan_from_items", lambda _data: "ai_pro")
+    monkeypatch.setattr(
+        billing, "subscription_has_paid", lambda *_args: False)
+    monkeypatch.setattr(
+        billing, "record_transaction",
+        lambda *_args, **_kwargs: {"recorded": False, "newly_paid": False})
+    failures = []
+    monkeypatch.setattr(
+        billing, "record_failure",
+        lambda *_args, **_kwargs: failures.append(True))
+
+    report = billing_sync.reconcile_user(_Conn([]), {
+        "id": 7, "email": "buyer@example.test",
+        "subscription_id": "sub_123", "plan": "ai_pro",
+        "is_subscribed": 1, "billing_status": "active",
+    })
+
+    assert failures == []
+    assert report["error"] == "payment_ledger_unavailable"
+
+
+def test_malformed_transaction_api_response_is_reported(monkeypatch):
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"data": {"not": "a list"}}
+
+    monkeypatch.setenv("PADDLE_API_KEY", "test_key")
+    monkeypatch.setattr(
+        billing_sync.requests, "get", lambda *_args, **_kwargs: Response())
+
+    assert billing_sync.fetch_transactions("sub_123") == (
+        None, "invalid_response")
+
+
+def test_malformed_subscription_api_response_is_reported(monkeypatch):
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"data": None}
+
+    monkeypatch.setenv("PADDLE_API_KEY", "test_key")
+    monkeypatch.setattr(
+        billing_sync.requests, "get", lambda *_args, **_kwargs: Response())
+
+    assert billing_sync.fetch_subscription("sub_123") == (
+        None, "invalid_response")
+
+
 def _active_reconcile(monkeypatch, *, newly_paid, price_plan="ai_pro"):
     data = {
         "status": "active",
@@ -356,11 +454,11 @@ def _active_reconcile(monkeypatch, *, newly_paid, price_plan="ai_pro"):
     monkeypatch.setattr(
         billing_sync, "fetch_subscription", lambda _sub: (data, None))
     monkeypatch.setattr(
-        billing_sync, "fetch_transactions", lambda _sub: [{
+        billing_sync, "fetch_transactions", lambda _sub: ([{
             "id": "txn_backfilled", "status": "completed",
             "subscription_id": "sub_123",
             "details": {"totals": {"grand_total": "3000"}},
-        }])
+        }], None))
     monkeypatch.setattr(
         billing_sync, "_plan_from_items", lambda _data: price_plan)
     monkeypatch.setattr(

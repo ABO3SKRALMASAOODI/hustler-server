@@ -87,23 +87,37 @@ def fetch_subscription(subscription_id):
         return None, "not_found"
     if r.status_code != 200:
         return None, f"http_{r.status_code}"
-    return (r.json().get("data") or {}), None
+    try:
+        payload = r.json()
+    except (TypeError, ValueError):
+        return None, "invalid_response"
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, dict) or not data:
+        return None, "invalid_response"
+    return data, None
 
 
 def fetch_transactions(subscription_id, limit=30):
     h = _headers()
     if not h:
-        return []
+        return None, "no_api_key"
     try:
         r = requests.get(f"{_base()}/transactions",
                          params={"subscription_id": subscription_id,
                                  "per_page": limit},
                          headers=h, timeout=SYNC_TIMEOUT)
         if r.status_code != 200:
-            return []
-        return r.json().get("data") or []
-    except requests.RequestException:
-        return []
+            return None, f"http_{r.status_code}"
+        try:
+            payload = r.json()
+        except (TypeError, ValueError):
+            return None, "invalid_response"
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(data, list):
+            return None, "invalid_response"
+        return data, None
+    except requests.RequestException as e:
+        return None, f"unreachable: {e}"
 
 
 def update_payment_method_link(subscription_id):
@@ -232,17 +246,24 @@ def reconcile_user(conn, row, fetch_all_transactions=False):
     if (fetch_all_transactions
             or status in billing.FAILING_STATUSES
             or not billing.subscription_has_paid(conn, sub_id)):
-        for txn in fetch_transactions(sub_id):
+        transactions, txn_err = fetch_transactions(sub_id)
+        if txn_err:
+            conn.rollback()
+            report["error"] = f"transactions_{txn_err}"
+            return report
+        for txn in transactions:
             if status == "active":
                 receipt = billing.record_transaction(
                     conn, user_id, txn, report_transition=True, commit=False)
-                if not receipt or not receipt.get("recorded"):
-                    conn.rollback()
-                    report["error"] = "payment_ledger_unavailable"
-                    return report
-                newly_paid = newly_paid or bool(receipt.get("newly_paid"))
             else:
-                billing.record_transaction(conn, user_id, txn)
+                receipt = billing.record_transaction(
+                    conn, user_id, txn, report_transition=True)
+            if not receipt or not receipt.get("recorded"):
+                conn.rollback()
+                report["error"] = "payment_ledger_unavailable"
+                return report
+            if status == "active":
+                newly_paid = newly_paid or bool(receipt.get("newly_paid"))
 
     was = (row.get("billing_status") or "")
     if was != status:
