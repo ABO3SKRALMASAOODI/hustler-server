@@ -157,6 +157,20 @@ def _plan_from_data(data):
     return None
 
 
+def _has_recurring_items(data):
+    """Whether this transaction describes a recurring price.
+
+    Paddle's interim ``paid`` event may not have ``subscription_id`` yet. Its
+    item billing cycle still tells us that a completed event without that id
+    is malformed rather than a legitimate one-time charge.
+    """
+    for item in (data.get('items') or []):
+        price = item.get('price') or {}
+        if price.get('billing_cycle'):
+            return True
+    return False
+
+
 _PADDLE_BASE = ("https://sandbox-api.paddle.com"
                 if os.environ.get('PADDLE_MODE') == 'sandbox'
                 else "https://api.paddle.com")
@@ -361,6 +375,17 @@ def handle_webhook():
                        if event_type.startswith('subscription.')
                        else data.get('subscription_id'))
 
+    # `transaction.paid` is an intentionally brief state while Paddle is
+    # still processing a successful payment. For automatically collected
+    # recurring transactions, Paddle documents that subscription_id may not
+    # exist until the following `transaction.completed` event. A 503 here
+    # only creates a retry storm using the same incomplete payload. Do not
+    # consume the paid transition; completed (or the hourly reconciler) will
+    # durably record it and grant the entitlement once it can be linked.
+    if event_type == 'transaction.paid' and not subscription_id:
+        print("ℹ️ Deferring unlinked transaction.paid until completed")
+        return 'OK', 200
+
     # ── Identity, resolved ONCE for every branch ────────────────────────────
     # custom_data arrives from Paddle.js (the browser creates the transaction
     # so it can render inline), so user_id is no longer server-set and must
@@ -384,6 +409,20 @@ def handle_webhook():
         print("⛔ Paddle event did not resolve to a verified local account; "
               "browser custom_data was ignored")
         return 'Payer identity could not be verified', 503
+
+    # A completed one-time charge is revenue but not a subscription grant.
+    # Record it without trying to invent recurring entitlement. Conversely, a
+    # recurring price that somehow reaches completed without a subscription id
+    # is malformed and must remain retryable.
+    if event_type == 'transaction.completed' and not subscription_id:
+        if _has_recurring_items(data):
+            print("⛔ Completed recurring transaction has no subscription_id")
+            return 'Subscription identity is missing', 503
+        receipt = billing.record_transaction(
+            get_db(), user_id, data, report_transition=True)
+        if not receipt or not receipt.get("recorded"):
+            return 'Payment ledger temporarily unavailable', 503
+        return 'OK', 200
 
     # A subscriber grant must be attributable to both a recurring contract and
     # a server-known Paddle price. Retrying is safer than acknowledging a paid

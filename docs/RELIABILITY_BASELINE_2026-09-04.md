@@ -165,14 +165,20 @@ whose terminal rows remain in the database.
   and entitlement update commit together under a transaction-scoped lock, so
   concurrent delivery or a process crash cannot double-refill or lose a
   renewal; a late failure snapshot cannot downgrade confirmed paid/completed
-  truth. Unknown prices and paid events without a subscription id fail closed
-  for provider retry instead of creating a zero-credit subscription.
+  truth. Unknown prices and completed recurring events without a subscription
+  id fail closed for provider retry instead of creating a zero-credit
+  subscription.
 - The hourly Paddle reconciler uses the same paid-transition claim. If an
   active-subscription webhook lands but its transaction webhook is lost, the
   backfilled payment and credit refresh commit together exactly once; an
   unknown price rolls both back for the next tick instead of losing the grant.
   A failed or malformed transaction-history response is reported as provider
   uncertainty and cannot downgrade access or classify a customer as never-paid.
+- An interim `transaction.paid` without `subscription_id` is acknowledged but
+  deliberately left unclaimed until Paddle's completed event attaches the
+  recurring contract. Completed one-time charges are recorded as revenue
+  without creating subscription entitlement, while malformed completed
+  recurring charges remain retryable.
 - The shared request-scoped database connection is explicitly rolled back and
   closed at Flask context teardown. Partial webhook work cannot linger until
   interpreter garbage collection or escape into a reused database session.
@@ -195,7 +201,7 @@ whose terminal rows remain in the database.
 - Worker pytest suite: 1,735 passed, 3 skipped.
 - Legacy worker executable checks: all 20 harnesses passed, including 1,038
   unit checks, 22 patch checks, and 30 text-behind-subject tests.
-- Backend pytest suite: 377 passed, 4 skipped, including MCP protocol, billing
+- Backend pytest suite: 379 passed, 4 skipped, including MCP protocol, billing
   trust-boundary, secure-health, and
   snapshot classification tests.
 - Modal executor tests: 38 passed.

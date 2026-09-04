@@ -386,6 +386,61 @@ def test_unrepresentable_paid_grant_is_retried_without_mutation(
     assert response.status_code == 503
 
 
+def test_unlinked_interim_paid_event_waits_without_retry_storm(monkeypatch):
+    """Paddle may omit subscription_id until completed processing finishes.
+    The interim event must not consume the paid transition or return 503."""
+    from flask import Flask
+
+    data = _transaction(subscription=None)
+    data["status"] = "paid"
+    monkeypatch.setattr(webhook, "PADDLE_WEBHOOK_SECRET", "configured")
+    monkeypatch.setattr(webhook, "_verify_paddle_signature", lambda _req: True)
+    monkeypatch.setattr(
+        webhook, "_verified_payer_user_id",
+        lambda *_args: pytest.fail("an unlinked interim event is deferred"))
+    monkeypatch.setattr(
+        webhook.billing, "record_transaction",
+        lambda *_args, **_kwargs: pytest.fail(
+            "the transition must remain unconsumed until completed"))
+
+    app = Flask(__name__)
+    app.register_blueprint(webhook.paddle_webhook)
+    response = app.test_client().post("/webhook/paddle", json={
+        "event_type": "transaction.paid", "data": data})
+
+    assert response.status_code == 200
+
+
+def test_completed_one_time_charge_is_ledgered_without_subscription_grant(
+        monkeypatch):
+    from flask import Flask
+
+    data = _transaction(subscription=None, cycle=None, origin="api")
+    ledger_calls = []
+    monkeypatch.setattr(webhook, "PADDLE_WEBHOOK_SECRET", "configured")
+    monkeypatch.setattr(webhook, "_verify_paddle_signature", lambda _req: True)
+    monkeypatch.setattr(webhook, "_verified_payer_user_id", lambda *_args: 7)
+    monkeypatch.setattr(webhook, "get_db", lambda: object())
+    monkeypatch.setattr(
+        webhook.billing, "record_transaction",
+        lambda *_args, **kwargs: (
+            ledger_calls.append(kwargs)
+            or {"recorded": True, "newly_paid": True,
+                "amount_cents": 3000}))
+    monkeypatch.setattr(
+        webhook, "update_user_subscription_status",
+        lambda *_args, **_kwargs: pytest.fail(
+            "a one-time charge cannot grant a subscription"))
+
+    app = Flask(__name__)
+    app.register_blueprint(webhook.paddle_webhook)
+    response = app.test_client().post("/webhook/paddle", json={
+        "event_type": "transaction.completed", "data": data})
+
+    assert response.status_code == 200
+    assert ledger_calls == [{"report_transition": True}]
+
+
 def test_standalone_failed_transaction_commits_only_its_ledger(monkeypatch):
     from flask import Flask
 
