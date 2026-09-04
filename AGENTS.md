@@ -84,6 +84,8 @@ Retired but grandfathered: Plus 800 / Pro-legacy 2,400 / Ultra 5,000 / Titan 10,
 
 - **`PADDLE_WEBHOOK_SECRET`** — the webhook fails closed with 503 without it;
   Paddle retries after configuration is restored.
+- **`PADDLE_API_KEY`** — required to verify the payer identity for first
+  purchases; provider lookup failures return 503 and never trust browser data.
 - **`SECRET_KEY`** — required for stable JWT/session signing. If absent, the
   process uses an unpredictable ephemeral key and `/healthz` stays degraded,
   so the release verifier cannot certify the deployment.

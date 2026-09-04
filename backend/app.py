@@ -56,6 +56,9 @@ def create_app():
             "paddle_webhook_signing": (
                 "configured" if _os.environ.get("PADDLE_WEBHOOK_SECRET")
                 else "missing"),
+            "paddle_api": (
+                "configured" if _os.environ.get("PADDLE_API_KEY")
+                else "missing"),
         }
         return {
             "status": ("ok" if all(value == "configured"

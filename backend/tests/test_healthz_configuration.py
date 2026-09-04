@@ -14,6 +14,7 @@ def test_healthz_refuses_to_certify_missing_security_configuration(
 
     monkeypatch.delenv("SECRET_KEY", raising=False)
     monkeypatch.delenv("PADDLE_WEBHOOK_SECRET", raising=False)
+    monkeypatch.delenv("PADDLE_API_KEY", raising=False)
     monkeypatch.setenv("RENDER_GIT_COMMIT", "0123456789abcdef")
     app = create_app()
 
@@ -28,6 +29,7 @@ def test_healthz_refuses_to_certify_missing_security_configuration(
         "checks": {
             "secret_key": "missing",
             "paddle_webhook_signing": "missing",
+            "paddle_api": "missing",
         },
     }
     assert app.config["SECRET_KEY"]
@@ -39,6 +41,7 @@ def test_healthz_certifies_configured_security(monkeypatch):
 
     monkeypatch.setenv("SECRET_KEY", "test-secret-that-is-not-public")
     monkeypatch.setenv("PADDLE_WEBHOOK_SECRET", "test-paddle-secret")
+    monkeypatch.setenv("PADDLE_API_KEY", "test-paddle-api-key")
     app = create_app()
 
     body = app.test_client().get("/healthz").get_json()
@@ -47,5 +50,6 @@ def test_healthz_certifies_configured_security(monkeypatch):
     assert body["checks"] == {
         "secret_key": "configured",
         "paddle_webhook_signing": "configured",
+        "paddle_api": "configured",
     }
     assert app.config["SECRET_KEY"] == "test-secret-that-is-not-public"
