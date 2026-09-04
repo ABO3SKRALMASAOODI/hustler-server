@@ -264,6 +264,10 @@ whose terminal rows remain in the database.
 - Backend pushes are not considered live until `/healthz` reports `status=ok`,
   `role=backend`, and the exact pushed commit prefix. The same commit's release
   status also runs the complete backend test suite before it can turn green.
+  Once that exact commit is live, the gate immediately certifies the public MCP
+  server card, tool-count integrity, all four OAuth metadata aliases, endpoint
+  coherence, PKCE support, and unauthenticated Bearer challenge. The periodic
+  watcher remains the later drift detector rather than the first release test.
 - Backend health remains `degraded` when the stable application signing key,
   Paddle webhook signing secret, or Paddle API key is absent, or when the
   database URL is missing, malformed, local, or still matches the exposed
