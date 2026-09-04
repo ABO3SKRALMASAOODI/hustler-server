@@ -70,3 +70,16 @@ def test_database_only_cli_ignores_unrelated_application_secrets(
     output = capsys.readouterr().out
     assert "database credential is rotated" in output
     assert config["DATABASE_URL"] not in output
+
+
+def test_optional_direct_database_url_is_checked_too():
+    config = _safe_config()
+    config["DIRECT_DATABASE_URL"] = (
+        "postgresql" + "://direct-user:old-password@db.example/valmera")
+    fingerprint = hashlib.sha256(
+        config["DIRECT_DATABASE_URL"].encode()).hexdigest()
+
+    assert preflight.validate_database(
+        config, compromised_hash=fingerprint) == [
+            ("DIRECT_DATABASE_URL",
+             "still matches the credential exposed in Git; rotate it")]

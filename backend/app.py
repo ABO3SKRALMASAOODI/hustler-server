@@ -54,6 +54,8 @@ def create_app():
     @app.route("/healthz")
     def healthz():
         import os as _os
+        direct_database_url = (_os.environ.get("DIRECT_DATABASE_URL") or "")
+        paddle_mode = (_os.environ.get("PADDLE_MODE") or "").strip().lower()
         checks = {
             "secret_key": "configured" if _configured_app_secret()
                           else "missing",
@@ -67,13 +69,21 @@ def create_app():
                 else "missing"),
             "database_credential": database_credential_status(
                 _os.environ.get("DATABASE_URL")),
+            "direct_database_credential": (
+                database_credential_status(direct_database_url)
+                if direct_database_url.strip() else "not_configured"),
+            "paddle_environment": (
+                "sandbox" if paddle_mode == "sandbox" else "production"),
         }
         payload = {
             "status": ("ok" if (
                            checks["secret_key"] == "configured"
                            and checks["paddle_webhook_signing"] == "configured"
                            and checks["paddle_api"] == "configured"
-                           and checks["database_credential"] == "rotated")
+                           and checks["database_credential"] == "rotated"
+                           and checks["direct_database_credential"]
+                               in ("rotated", "not_configured")
+                           and checks["paddle_environment"] == "production")
                        else "degraded"),
             "role": "backend",
             "commit": (_os.environ.get("RENDER_GIT_COMMIT")

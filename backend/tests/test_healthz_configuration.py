@@ -24,6 +24,8 @@ def test_healthz_refuses_to_certify_missing_security_configuration(
     monkeypatch.delenv("PADDLE_WEBHOOK_SECRET", raising=False)
     monkeypatch.delenv("PADDLE_API_KEY", raising=False)
     monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("DIRECT_DATABASE_URL", raising=False)
+    monkeypatch.setenv("PADDLE_MODE", "production")
     monkeypatch.setenv("RENDER_GIT_COMMIT", "0123456789abcdef")
     app = create_app()
 
@@ -40,6 +42,8 @@ def test_healthz_refuses_to_certify_missing_security_configuration(
             "paddle_webhook_signing": "missing",
             "paddle_api": "missing",
             "database_credential": "missing",
+            "direct_database_credential": "not_configured",
+            "paddle_environment": "production",
         },
     }
     assert app.config["SECRET_KEY"]
@@ -54,6 +58,8 @@ def test_healthz_certifies_configured_security(monkeypatch):
     monkeypatch.setenv("PADDLE_WEBHOOK_SECRET", "test-paddle-secret")
     monkeypatch.setenv("PADDLE_API_KEY", "test-paddle-api-key")
     monkeypatch.setenv("DATABASE_URL", _safe_database_url())
+    monkeypatch.delenv("DIRECT_DATABASE_URL", raising=False)
+    monkeypatch.setenv("PADDLE_MODE", "production")
     app = create_app()
 
     body = app.test_client().get("/healthz").get_json()
@@ -64,6 +70,8 @@ def test_healthz_certifies_configured_security(monkeypatch):
         "paddle_webhook_signing": "configured",
         "paddle_api": "configured",
         "database_credential": "rotated",
+        "direct_database_credential": "not_configured",
+        "paddle_environment": "production",
     }
     assert app.config["SECRET_KEY"] == secret
 
@@ -74,6 +82,8 @@ def test_public_or_short_application_keys_are_never_used(monkeypatch):
     monkeypatch.setenv("PADDLE_WEBHOOK_SECRET", "test-paddle-secret")
     monkeypatch.setenv("PADDLE_API_KEY", "test-paddle-api-key")
     monkeypatch.setenv("DATABASE_URL", _safe_database_url())
+    monkeypatch.delenv("DIRECT_DATABASE_URL", raising=False)
+    monkeypatch.setenv("PADDLE_MODE", "production")
     for unsafe in ("supersecretkey", "devsecret", "too-short"):
         monkeypatch.setenv("SECRET_KEY", unsafe)
         app = create_app()
@@ -126,3 +136,28 @@ def test_short_billing_secrets_cannot_certify_runtime_health(monkeypatch):
         assert response.status_code == 503
         assert body["status"] == "degraded"
         assert body["checks"][check_name] == "missing"
+
+
+def test_sandbox_or_exposed_direct_database_cannot_certify_health(
+        monkeypatch):
+    import security_config
+    from app import create_app
+
+    monkeypatch.setenv("SECRET_KEY", "s" * 64)
+    monkeypatch.setenv("PADDLE_WEBHOOK_SECRET", "pdl_ntfset_" + "w" * 32)
+    monkeypatch.setenv("PADDLE_API_KEY", "pdl_live_" + "a" * 32)
+    monkeypatch.setenv("DATABASE_URL", _safe_database_url())
+    monkeypatch.setenv("PADDLE_MODE", "sandbox")
+    body = create_app().test_client().get("/healthz").get_json()
+    assert body["status"] == "degraded"
+    assert body["checks"]["paddle_environment"] == "sandbox"
+
+    direct_url = _safe_database_url("direct-old-password")
+    monkeypatch.setattr(
+        security_config, "COMPROMISED_DATABASE_URL_SHA256",
+        hashlib.sha256(direct_url.encode()).hexdigest())
+    monkeypatch.setenv("PADDLE_MODE", "production")
+    monkeypatch.setenv("DIRECT_DATABASE_URL", direct_url)
+    body = create_app().test_client().get("/healthz").get_json()
+    assert body["status"] == "degraded"
+    assert body["checks"]["direct_database_credential"] == "exposed"

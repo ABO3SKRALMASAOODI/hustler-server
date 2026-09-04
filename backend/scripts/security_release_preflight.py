@@ -31,13 +31,26 @@ def validate(config, compromised_hash=None):
         config.get("DATABASE_URL"), compromised_hash=compromised_hash)
     if database_issue:
         failures.append(("DATABASE_URL", database_issue))
+    direct_url = str(config.get("DIRECT_DATABASE_URL") or "").strip()
+    if direct_url:
+        direct_issue = security_config.database_url_issue(
+            direct_url, compromised_hash=compromised_hash)
+        if direct_issue:
+            failures.append(("DIRECT_DATABASE_URL", direct_issue))
     return failures
 
 
 def validate_database(config, compromised_hash=None):
-    issue = security_config.database_url_issue(
-        config.get("DATABASE_URL"), compromised_hash=compromised_hash)
-    return [("DATABASE_URL", issue)] if issue else []
+    failures = []
+    for name in ("DATABASE_URL", "DIRECT_DATABASE_URL"):
+        value = str(config.get(name) or "").strip()
+        if name == "DIRECT_DATABASE_URL" and not value:
+            continue
+        issue = security_config.database_url_issue(
+            value, compromised_hash=compromised_hash)
+        if issue:
+            failures.append((name, issue))
+    return failures
 
 
 def _configuration(env_file=None):

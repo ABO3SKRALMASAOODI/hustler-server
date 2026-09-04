@@ -189,7 +189,7 @@ whose terminal rows remain in the database.
 - Worker pytest suite: 1,735 passed, 3 skipped.
 - Legacy worker executable checks: all 20 harnesses passed, including 1,038
   unit checks, 22 patch checks, and 30 text-behind-subject tests.
-- Backend pytest suite: 367 passed, 4 skipped, including MCP protocol, billing
+- Backend pytest suite: 369 passed, 4 skipped, including MCP protocol, billing
   trust-boundary, secure-health, and
   snapshot classification tests.
 - Modal executor tests: 38 passed.
@@ -232,7 +232,8 @@ whose terminal rows remain in the database.
 - Backend health remains `degraded` when the stable application signing key,
   Paddle webhook signing secret, or Paddle API key is absent, or when the
   database URL is missing, malformed, local, or still matches the exposed
-  credential. A missing
+  credential. An optional direct scheduler URL is checked the same way, and
+  production health also rejects Paddle sandbox mode. A missing
   application key uses an unpredictable process-local fallback rather than the
   old public literal, so misconfiguration is disruptive but never silently
   forgeable. Degraded health returns HTTP 503 so hosting and release checks
