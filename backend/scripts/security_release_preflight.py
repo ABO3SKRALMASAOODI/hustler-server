@@ -10,8 +10,6 @@ import os
 import sys
 from pathlib import Path
 
-from dotenv import dotenv_values
-
 # Running this file directly puts backend/scripts, not backend, on sys.path.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import security_config  # noqa: E402
@@ -45,6 +43,10 @@ def validate_database(config, compromised_hash=None):
 def _configuration(env_file=None):
     config = {}
     if env_file:
+        # Executor workflows use process environment only and run this check
+        # before Python dependencies are installed. Keep that path stdlib-only;
+        # dotenv is needed solely for an explicitly requested local env file.
+        from dotenv import dotenv_values
         config.update({key: value for key, value in
                        dotenv_values(Path(env_file)).items()
                        if value is not None})
