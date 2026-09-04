@@ -219,9 +219,10 @@ def _stored_subscription_id(user_id):
 # Paddle signs every webhook (Paddle-Signature: "ts=...;h1=...", where h1 is
 # HMAC-SHA256 of "ts:raw_body" with the endpoint's secret key from
 # Paddle > Developer tools > Notifications). Without verification anyone who
-# reads the URL can grant themselves any plan. Enforced when
-# PADDLE_WEBHOOK_SECRET is set; until then requests pass with a loud warning
-# so payments don't break before the env var is configured.
+# reads the URL can grant themselves any plan. A missing secret is an operator
+# outage, never permission to trust an unsigned request: fail closed before
+# parsing or touching account state and let Paddle retry after configuration is
+# repaired.
 PADDLE_WEBHOOK_SECRET = os.getenv("PADDLE_WEBHOOK_SECRET", "")
 
 
@@ -266,9 +267,18 @@ def _record_discount_use(user_id, data):
 
 def _verify_paddle_signature(req):
     header = req.headers.get("Paddle-Signature", "")
-    parts = dict(p.split("=", 1) for p in header.split(";") if "=" in p)
-    ts, h1 = parts.get("ts"), parts.get("h1")
-    if not ts or not h1:
+    parts = []
+    for part in header.split(";"):
+        if "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        parts.append((key.strip(), value.strip()))
+    ts = next((value for key, value in parts if key == "ts"), None)
+    # Paddle documents at least one h1 and may send several while rotating a
+    # destination secret.  Accept any matching signature instead of silently
+    # discarding all but the last one through a dict conversion.
+    signatures = [value for key, value in parts if key == "h1" and value]
+    if not ts or not signatures:
         return False
     try:
         if abs(time.time() - int(ts)) > 300:   # stale/replayed event
@@ -278,18 +288,19 @@ def _verify_paddle_signature(req):
     signed = f"{ts}:".encode() + req.get_data()
     expected = hmac.new(PADDLE_WEBHOOK_SECRET.encode(), signed,
                         hashlib.sha256).hexdigest()
-    return hmac.compare_digest(expected, h1)
+    return any(hmac.compare_digest(expected, signature)
+               for signature in signatures)
 
 
 @paddle_webhook.route('/webhook/paddle', methods=['POST'])
 def handle_webhook():
-    if PADDLE_WEBHOOK_SECRET:
-        if not _verify_paddle_signature(request):
-            print("⛔ Paddle webhook rejected: bad or missing signature")
-            return 'Invalid signature', 403
-    else:
-        print("⚠️  PADDLE_WEBHOOK_SECRET is not set — webhook signature "
-              "NOT verified. Set it in the Render env ASAP.")
+    if not PADDLE_WEBHOOK_SECRET:
+        print("⛔ Paddle webhook unavailable: PADDLE_WEBHOOK_SECRET is not "
+              "configured")
+        return 'Webhook signing is not configured', 503
+    if not _verify_paddle_signature(request):
+        print("⛔ Paddle webhook rejected: bad or missing signature")
+        return 'Invalid signature', 403
     payload = request.get_json(force=True)
     print("🔔 Webhook received:", payload.get('event_type'))
 

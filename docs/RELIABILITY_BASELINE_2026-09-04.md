@@ -157,6 +157,11 @@ whose terminal rows remain in the database.
 
 ### Billing
 
+- Paddle webhooks fail closed before parsing or account access when the signing
+  secret is absent, allowing provider retries without accepting forged plan or
+  credit mutations. Raw request bodies are authenticated against every `h1`
+  supplied during Paddle secret rotation rather than only the final header
+  value.
 - Payment truth comes from the newest timestamped payment attempt, independent
   of provider response order.
 - A captured retry clears an older decline.

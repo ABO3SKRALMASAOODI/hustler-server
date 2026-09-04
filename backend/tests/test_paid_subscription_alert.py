@@ -5,8 +5,11 @@ the failure/retry state machine. Brevo itself is mocked; a provider outage must
 never turn a Paddle webhook into a failed activation.
 """
 
+import hashlib
+import hmac
 import os
 import sys
+import time
 
 import pytest
 
@@ -189,7 +192,8 @@ def test_webhook_wires_the_alert_only_after_real_money(
 
     db = object()
     calls = []
-    monkeypatch.setattr(webhook, "PADDLE_WEBHOOK_SECRET", "")
+    monkeypatch.setattr(webhook, "PADDLE_WEBHOOK_SECRET", "configured")
+    monkeypatch.setattr(webhook, "_verify_paddle_signature", lambda _req: True)
     monkeypatch.setattr(webhook, "get_db", lambda: db)
     monkeypatch.setattr(webhook, "_user_id_by_customer_email", lambda _: 7)
     monkeypatch.setattr(webhook, "_plan_from_data", lambda _: "ai_pro")
@@ -217,6 +221,61 @@ def test_webhook_wires_the_alert_only_after_real_money(
         assert calls[0][0] is db
         assert calls[0][1:3] == (7, "ai_pro")
         assert calls[0][4] == "transaction.completed"
+
+
+def test_webhook_fails_closed_when_signature_secret_is_missing(monkeypatch):
+    from flask import Flask
+
+    monkeypatch.setattr(webhook, "PADDLE_WEBHOOK_SECRET", "")
+    monkeypatch.setattr(
+        webhook, "get_db",
+        lambda: pytest.fail("an unsigned webhook must not touch the database"))
+
+    app = Flask(__name__)
+    app.register_blueprint(webhook.paddle_webhook)
+    response = app.test_client().post("/webhook/paddle", json={
+        "event_type": "transaction.completed",
+        "data": _transaction("3000"),
+    })
+
+    assert response.status_code == 503
+    assert b"signing is not configured" in response.data
+
+
+def test_signature_verification_accepts_any_rotation_signature(monkeypatch):
+    from flask import Flask, request
+
+    secret = "pdl_ntfset_test_secret"
+    raw = b'{"event_type":"transaction.completed"}'
+    ts = str(int(time.time()))
+    valid = hmac.new(secret.encode(), f"{ts}:".encode() + raw,
+                     hashlib.sha256).hexdigest()
+    monkeypatch.setattr(webhook, "PADDLE_WEBHOOK_SECRET", secret)
+
+    app = Flask(__name__)
+    with app.test_request_context(
+            "/webhook/paddle", method="POST", data=raw,
+            headers={"Paddle-Signature":
+                     f"ts={ts};h1={valid};h1={'0' * 64}"}):
+        assert webhook._verify_paddle_signature(request) is True
+
+
+def test_signature_verification_rejects_stale_or_malformed_headers(
+        monkeypatch):
+    from flask import Flask, request
+
+    monkeypatch.setattr(webhook, "PADDLE_WEBHOOK_SECRET", "configured")
+    app = Flask(__name__)
+    headers = [
+        "not-a-signature",
+        f"ts={int(time.time()) - 301};h1={'0' * 64}",
+        f"ts=not-an-integer;h1={'0' * 64}",
+    ]
+    for header in headers:
+        with app.test_request_context(
+                "/webhook/paddle", method="POST", data=b"{}",
+                headers={"Paddle-Signature": header}):
+            assert webhook._verify_paddle_signature(request) is False
 
 
 def test_alert_content_escapes_database_and_paddle_values():
