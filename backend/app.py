@@ -1,6 +1,10 @@
+import hashlib
 import os
 import secrets
+import threading
+import time
 
+import psycopg2
 from dotenv import load_dotenv
 
 # Load local development configuration before importing route modules that
@@ -34,6 +38,61 @@ from routes.phone_status import phone_status_bp
 from security_config import database_credential_status, secret_ok
 
 
+DATABASE_REQUIRED_RELATIONS = (
+    "users", "projects", "assets", "indexes", "edls", "video_jobs",
+    "payments", "client_events", "remote_executions", "mcp_tokens",
+    "mcp_oauth_clients", "mcp_oauth_tokens", "mcp_catalog",
+)
+_DATABASE_HEALTH_TTL_S = 30
+_database_health_cache = {}
+_database_health_lock = threading.Lock()
+
+
+def database_runtime_status(dsn):
+    """Bounded, cached reachability/schema status with no error disclosure."""
+    fingerprint = hashlib.sha256(str(dsn or "").encode()).hexdigest()
+    now = time.monotonic()
+    cached = _database_health_cache.get(fingerprint)
+    if cached and now - cached[0] < _DATABASE_HEALTH_TTL_S:
+        return cached[1]
+
+    with _database_health_lock:
+        now = time.monotonic()
+        cached = _database_health_cache.get(fingerprint)
+        if cached and now - cached[0] < _DATABASE_HEALTH_TTL_S:
+            return cached[1]
+        conn = None
+        try:
+            conn = psycopg2.connect(
+                dsn,
+                connect_timeout=3,
+                options=("-c default_transaction_read_only=on "
+                         "-c statement_timeout=3000"),
+            )
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT " + ", ".join(
+                        "to_regclass(%s)" for _ in DATABASE_REQUIRED_RELATIONS),
+                    tuple("public." + name
+                          for name in DATABASE_REQUIRED_RELATIONS),
+                )
+                relations = cur.fetchone()
+            status = ("ready" if relations
+                      and all(relation is not None for relation in relations)
+                      else "schema_incomplete")
+        except Exception:
+            status = "unreachable"
+        finally:
+            if conn is not None:
+                conn.close()
+        if len(_database_health_cache) >= 4:
+            oldest = min(_database_health_cache,
+                         key=lambda key: _database_health_cache[key][0])
+            _database_health_cache.pop(oldest, None)
+        _database_health_cache[fingerprint] = (time.monotonic(), status)
+        return status
+
+
 def _configured_app_secret():
     value = (os.environ.get("SECRET_KEY") or "").strip()
     return value if secret_ok(value, 32) else None
@@ -54,8 +113,13 @@ def create_app():
     @app.route("/healthz")
     def healthz():
         import os as _os
+        database_url = _os.environ.get("DATABASE_URL")
         direct_database_url = (_os.environ.get("DIRECT_DATABASE_URL") or "")
         paddle_mode = (_os.environ.get("PADDLE_MODE") or "").strip().lower()
+        database_credential = database_credential_status(database_url)
+        direct_database_credential = (
+            database_credential_status(direct_database_url)
+            if direct_database_url.strip() else "not_configured")
         checks = {
             "secret_key": "configured" if _configured_app_secret()
                           else "missing",
@@ -67,11 +131,17 @@ def create_app():
                 "configured" if secret_ok(
                     _os.environ.get("PADDLE_API_KEY"), 16)
                 else "missing"),
-            "database_credential": database_credential_status(
-                _os.environ.get("DATABASE_URL")),
-            "direct_database_credential": (
-                database_credential_status(direct_database_url)
-                if direct_database_url.strip() else "not_configured"),
+            "database_credential": database_credential,
+            "database_runtime": (
+                database_runtime_status(database_url)
+                if database_credential == "rotated" else "not_checked"),
+            "direct_database_credential": direct_database_credential,
+            "direct_database_runtime": (
+                database_runtime_status(direct_database_url)
+                if direct_database_credential == "rotated"
+                else ("not_configured"
+                      if direct_database_credential == "not_configured"
+                      else "not_checked")),
             "paddle_environment": (
                 "sandbox" if paddle_mode == "sandbox" else "production"),
         }
@@ -81,8 +151,11 @@ def create_app():
                            and checks["paddle_webhook_signing"] == "configured"
                            and checks["paddle_api"] == "configured"
                            and checks["database_credential"] == "rotated"
+                           and checks["database_runtime"] == "ready"
                            and checks["direct_database_credential"]
                                in ("rotated", "not_configured")
+                           and checks["direct_database_runtime"]
+                               in ("ready", "not_configured")
                            and checks["paddle_environment"] == "production")
                        else "degraded"),
             "role": "backend",

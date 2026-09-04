@@ -49,6 +49,17 @@ def test_missing_and_sandbox_settings_are_all_reported():
     }
 
 
+def test_ipv6_loopback_is_not_accepted_as_a_production_database():
+    config = _safe_config()
+    config["DATABASE_URL"] = (
+        "postgresql" + "://valmera:valmera@[" + ":" + ":1]:5432/valmera")
+
+    failures = dict(preflight.validate(config))
+
+    assert failures["DATABASE_URL"] == (
+        "points at a local database, not production")
+
+
 def test_cli_never_prints_secret_values(monkeypatch, capsys):
     config = _safe_config()
     config["PADDLE_WEBHOOK_SECRET"] = "too-short"

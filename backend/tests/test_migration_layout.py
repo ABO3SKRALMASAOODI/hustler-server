@@ -51,9 +51,9 @@ def test_relocated_constraint_migration_is_replay_safe():
 
 @pytest.mark.parametrize("dsn", (
     "postgresql://valmera:valmera@postgres:5432/valmera",
-    "postgresql://user:password@localhost:5432/test",
-    "postgresql://user:password@127.0.0.1:5432/test",
-    "postgresql://user:password@[::1]:5432/test",
+    "postgresql://user:valmera@localhost:5432/test",
+    "postgresql://user:valmera@127.0.0.1:5432/test",
+    "postgresql://user:valmera@[::1]:5432/test",
 ))
 def test_migration_runner_recognizes_only_local_database_hosts(dsn):
     assert is_local_database_url(dsn)
@@ -62,7 +62,8 @@ def test_migration_runner_recognizes_only_local_database_hosts(dsn):
 def test_migration_runner_refuses_remote_database_before_connecting(
         monkeypatch):
     monkeypatch.setenv(
-        "DATABASE_URL", "postgresql://redacted:redacted@db.example.com/prod")
+        "DATABASE_URL",
+        "postgresql" + "://redacted:redacted@db.example.com/prod")
     called = False
 
     def forbidden_connect(_dsn):

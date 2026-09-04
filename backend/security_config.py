@@ -36,7 +36,7 @@ def database_url_issue(value, compromised_hash=None):
     if parsed.scheme not in ("postgres", "postgresql") \
             or not parsed.hostname or not parsed.username or not password:
         return "must include a PostgreSQL host, username, and password"
-    if parsed.hostname.lower() in ("localhost", "127.0.0.1", "postgres"):
+    if parsed.hostname.lower() in ("localhost", "127.0.0.1", "::1", "postgres"):
         return "points at a local database, not production"
     if str(password).lower() in PLACEHOLDERS:
         return "uses a placeholder password"

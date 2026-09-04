@@ -19,7 +19,7 @@ _TOKEN_PATTERNS = (
 )
 _DATABASE_URL = re.compile(
     rb"postgres(?:ql)?://[^\s<>`\"']+", re.IGNORECASE)
-_LOCAL_HOSTS = {"localhost", "127.0.0.1", "postgres"}
+_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "postgres"}
 _LOCAL_PASSWORDS = {"postgres", "stub", "test", "valmera"}
 
 

@@ -275,7 +275,12 @@ whose terminal rows remain in the database.
   Paddle webhook signing secret, or Paddle API key is absent, or when the
   database URL is missing, malformed, local, or still matches the exposed
   credential. An optional direct scheduler URL is checked the same way, and
-  production health also rejects Paddle sandbox mode. A missing
+  production health also rejects Paddle sandbox mode. Valid-looking database
+  URLs are probed with three-second connection and statement timeouts in a
+  read-only session; both reachability and the 13 required video, billing,
+  remote-execution, and MCP relations must be present. Results are cached for
+  30 seconds so hosting probes cannot create connection churn, and failures
+  expose only `unreachable` or `schema_incomplete`, never provider details. A missing
   application key uses an unpredictable process-local fallback rather than the
   old public literal, so misconfiguration is disruptive but never silently
   forgeable. Degraded health returns HTTP 503 so hosting and release checks
