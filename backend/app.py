@@ -1,3 +1,14 @@
+import os
+import secrets
+
+from dotenv import load_dotenv
+
+# Load local development configuration before importing route modules that
+# intentionally snapshot deployment settings at import time. Render injects
+# environment variables directly, but the previous order made the same valid
+# settings in backend/.env look absent to Paddle and other integrations.
+load_dotenv()
+
 from flask import Flask
 from flask_cors import CORS
 from routes.auth import auth_bp
@@ -23,8 +34,6 @@ from routes.mcp import mcp_bp
 from routes.mcp_oauth import mcp_oauth_bp
 from routes.phone_status import phone_status_bp
 
-load_dotenv()
-
 
 def create_app():
     app = Flask(__name__)
@@ -41,9 +50,22 @@ def create_app():
     @app.route("/healthz")
     def healthz():
         import os as _os
-        return {"status": "ok", "role": "backend",
-                "commit": (_os.environ.get("RENDER_GIT_COMMIT")
-                           or "unknown")[:12]}
+        checks = {
+            "secret_key": "configured" if _os.environ.get("SECRET_KEY")
+                          else "missing",
+            "paddle_webhook_signing": (
+                "configured" if _os.environ.get("PADDLE_WEBHOOK_SECRET")
+                else "missing"),
+        }
+        return {
+            "status": ("ok" if all(value == "configured"
+                                   for value in checks.values())
+                       else "degraded"),
+            "role": "backend",
+            "commit": (_os.environ.get("RENDER_GIT_COMMIT")
+                       or "unknown")[:12],
+            "checks": checks,
+        }
 
     @app.before_request
     def handle_options():
@@ -62,7 +84,12 @@ def create_app():
         response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS, PUT, DELETE, PATCH"
         return response
 
-    app.config['SECRET_KEY'] = os.getenv("SECRET_KEY", "supersecretkey")
+    configured_secret = os.getenv("SECRET_KEY")
+    # A fixed fallback made every JWT/session forgeable on a misconfigured
+    # deployment. A random process-local key makes the mistake noisy (healthz
+    # is degraded and sessions do not survive workers/restarts) but never
+    # silently grants an attacker a known signing key.
+    app.config['SECRET_KEY'] = configured_secret or secrets.token_urlsafe(48)
     app.config['DATABASE_URL'] = os.getenv("DATABASE_URL")
 
     if os.getenv("SKIP_DB_INIT") == "1":
