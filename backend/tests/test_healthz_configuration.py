@@ -45,6 +45,9 @@ def test_healthz_refuses_to_certify_missing_security_configuration(
     body = response.get_json()
 
     assert response.status_code == 503
+    assert response.headers["Cache-Control"] == "no-store, max-age=0"
+    assert response.headers["Pragma"] == "no-cache"
+    assert response.headers["Expires"] == "0"
     assert body == {
         "status": "degraded",
         "role": "backend",
@@ -76,8 +79,10 @@ def test_healthz_certifies_configured_security(monkeypatch):
     monkeypatch.setenv("PADDLE_MODE", "production")
     app = create_app()
 
-    body = app.test_client().get("/healthz").get_json()
+    response = app.test_client().get("/healthz")
+    body = response.get_json()
 
+    assert response.headers["Cache-Control"] == "no-store, max-age=0"
     assert body["status"] == "ok"
     assert body["checks"] == {
         "secret_key": "configured",

@@ -163,7 +163,17 @@ def create_app():
                        or "unknown")[:12],
             "checks": checks,
         }
-        return payload, (200 if payload["status"] == "ok" else 503)
+        # Release certification must observe this process and this database,
+        # not a stale edge/proxy response from before a deploy or outage.
+        return (
+            payload,
+            200 if payload["status"] == "ok" else 503,
+            {
+                "Cache-Control": "no-store, max-age=0",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            },
+        )
 
     @app.before_request
     def handle_options():
