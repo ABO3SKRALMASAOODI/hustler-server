@@ -13,6 +13,7 @@ import credits as credits_mod
 import offers
 import paid_subscription_alert
 import trial_state
+from plan_catalog import PLAN_MONTHLY_CREDITS
 
 paddle_webhook = Blueprint('paddle_webhook', __name__)
 
@@ -79,27 +80,9 @@ def _trial_aware_grant(user_id, plan, subscription_id, event_type, data,
     # a concrete transaction crosses into a paid state.
     return full, SUB_DAILY_CREDITS, True, 'subscription facts (credits unchanged)'
 
-PLAN_CREDITS = {
-    # The three live tiers. Keep in step with PLANS in paddle.py (the checkout)
-    # and PLAN_MONTHLY_LIMITS in credits.py (the denominator the studio shows).
-    # Shopfront grants. Legacy $30/$50/$100 prices grant the old amounts via
-    # PRICE_CREDITS so an in-flight trial converting on the old price still
-    # receives what they bought.
-    'ai':     1000,     # Creator  $15  -> $5 of model cost, 67% margin
-    'ai_pro': 2000,     # Pro      $30  -> $10 of model cost, 67% margin
-    'ai_max': 5000,     # Frontier $50  -> $25 of model cost, 50% margin
-    # 'mcp' grants 0 ON PURPOSE. Credits meter OUR model spend, and on the
-    # MCP plan the customer's own key pays for the model — topping up a pool
-    # they never draw from would be meaningless, and metering their key as
-    # ours would overcharge them. Keep at 0 unless MCP starts using our LLM.
-    'mcp':   0,
-    'plus':  800,
-    'pro':   2400,
-    'ultra': 5000,
-    'titan': 10000,
-    'ace':   30000,
-    'free':  0,
-}
+# Compatibility name used throughout the webhook and existing tests. The
+# values themselves live in plan_catalog beside the Paddle prices that buy them.
+PLAN_CREDITS = PLAN_MONTHLY_CREDITS
 
 # The plan/credits granted MUST be derived from the price the user actually
 # paid, never from client-supplied custom_data.plan. Paddle.js lets a visitor

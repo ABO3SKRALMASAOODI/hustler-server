@@ -34,6 +34,7 @@ import math
 # charges video turns through this same constant (worker/db.charge_turn_credits,
 # via the byte-identical worker/model_prices.py).
 from model_prices import USD_PER_CREDIT
+from plan_catalog import PLAN_MONTHLY_CREDITS
 
 # ── Per-model pricing (per million tokens) ────────────────────────────────────
 
@@ -77,26 +78,8 @@ PLAN_MODELS = {
 
 # ── Plan → monthly credit limits ──────────────────────────────────────────────
 
-# Keep in sync with routes/paddle_webhook.py PLAN_CREDITS — the webhook is
-# what actually grants the monthly pool on renewal.
-PLAN_MONTHLY_LIMITS = {
-    "free":  0,
-    # The three live plans. Keep in step with PLAN_CREDITS in paddle_webhook.py
-    # — that one GRANTS the credits, this one is the denominator the studio
-    # shows. They were missing here, so an 'ai' subscriber paying $30 would have
-    # seen a limit of 20 (the daily top-up alone) even while holding 2,400.
-    "ai":     1000,     # Creator  $15
-    "ai_pro": 2000,     # Pro      $30
-    "ai_max": 5000,     # Frontier $50
-    # 'mcp' is 0 on purpose: that plan brings its own model, so it never draws
-    # on our metered pool.
-    "mcp":   0,
-    "plus":  800,
-    "pro":   2400,
-    "ultra": 5000,
-    "titan": 10000,
-    "ace":   30000,
-}
+# Compatibility name for callers that display the allowance denominator.
+PLAN_MONTHLY_LIMITS = PLAN_MONTHLY_CREDITS
 
 DOLLARS_PER_CREDIT  = USD_PER_CREDIT
 MARKUP              = 1.0   # No markup — the margin is in the burn rate above

@@ -45,34 +45,7 @@ account state.
 import datetime
 import time
 
-# ── Prices ───────────────────────────────────────────────────────────────────
-# THE SINGLE SOURCE OF TRUTH FOR WHAT A PLAN IS WORTH, in whole USD.
-#
-# There was no such thing before, which is the other half of the "revenue is
-# zero" bug: `routes/admin.py` carried its OWN literal
-# `{'plus': 20, 'pro': 50, 'ultra': 100}` in three separate places — three
-# RETIRED plans. Nobody has been on any of them since the relaunch, so MRR
-# summed to 0 for every real customer no matter how much they paid. Anything
-# that needs a price imports it from here.
-#
-# Yearly is ten months of the monthly price (see the margin table in
-# routes/paddle.py); `monthly_value` amortises it so a yearly customer shows up
-# in MRR as what they are worth per month rather than as a lump or a zero.
-PLAN_PRICES_USD = {
-    # live
-    'ai':     {'monthly': 15,  'yearly': 150},
-    'ai_pro': {'monthly': 30,  'yearly': 300},
-    'ai_max': {'monthly': 50,  'yearly': 500},
-    # off the shopfront, one grandfathered subscription
-    'mcp':    {'monthly': 15,  'yearly': 150},
-    # retired, grandfathered only
-    'plus':   {'monthly': 20,  'yearly': 200},
-    'pro':    {'monthly': 50,  'yearly': 500},
-    'ultra':  {'monthly': 100, 'yearly': 1000},
-    'titan':  {'monthly': 200, 'yearly': 2000},
-    'ace':    {'monthly': 500, 'yearly': 5000},
-    'free':   {'monthly': 0,   'yearly': 0},
-}
+from plan_catalog import PLAN_PRICES_USD
 
 
 def monthly_value(plan, period='monthly'):

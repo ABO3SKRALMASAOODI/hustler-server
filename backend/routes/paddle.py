@@ -8,6 +8,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 
 import offers
+from plan_catalog import PLANS_LIVE, PLANS_SANDBOX, PURCHASABLE_PLANS
 
 paddle_bp = Blueprint('paddle', __name__)
 
@@ -39,100 +40,7 @@ def get_offers_db():
     return psycopg2.connect(os.environ['DATABASE_URL'],
                             cursor_factory=RealDictCursor)
 
-# ── Plan definitions ──────────────────────────────────────────────────────────
-
-PLANS_LIVE = {
-    # ── The three live plans ────────────────────────────────────────────
-    # Shopfront (Aug 2026): no trial on new checkouts. The price IDs below
-    # have no trial_period — Paddle creates the subscription as `active` and
-    # charges immediately. Existing subscriptions on the previous $30/$50/$100
-    # 3-day-trial prices stay on those prices; they are listed in
-    # `legacy_prices` so the webhook still resolves them and grants the
-    # credits those customers actually bought.
-    #
-    # The pricing page sells ONE product at THREE volumes:
-    #   'ai'     Creator  $15/mo,  $150/yr —  1,000 credits
-    #   'ai_pro' Pro      $30/mo,  $300/yr —  2,000 credits
-    #   'ai_max' Frontier $50/mo,  $500/yr —  5,000 credits
-    #
-    # THE MARGIN IS IN THE BURN RATE, NOT THE GRANT (round 49). A credit is
-    # spent at TWICE the model's real cost — credits.USD_PER_CREDIT is $0.005,
-    # so 1,000 credits is $5 of API spend. That one constant is what makes
-    # these numbers work:
-    #
-    #        plan      price   credits   real cost   margin
-    #        Creator    $15     1,000      $5         67%
-    #        Pro        $30     2,000     $10         67%
-    #        Frontier   $50     5,000     $25         50%
-    #
-    # The annual prices are ten months of the monthly one.
-    #
-    # Change the number here and PLAN_CREDITS in paddle_webhook.py and
-    # PLAN_MONTHLY_LIMITS in credits.py together — three places, one truth.
-    'ai': {
-        'price_id': 'pri_01m00w4aa9nqj2r3x30jkagbq0',
-        'yearly_price_id': 'pri_01m00w4ahg1q4m56km4nb46a27',
-        'monthly_credits': 1000,
-        # Previous $30 / $300 3-day-trial prices. Live trials keep these.
-        'legacy_prices': {
-            'pri_01kyde25cwqf7t2bk1ekky2pyp': 2000,
-            'pri_01kyde25n7rxrhajg5xvxxka7y': 2000,
-        },
-    },
-    'ai_pro': {
-        'price_id': 'pri_01m00w4as67k67tmbxgs8kab8j',
-        'yearly_price_id': 'pri_01m00w4b14hkwr6y3zp8wjksm9',
-        'monthly_credits': 2000,
-        'legacy_prices': {
-            'pri_01kye15m5262nbs7hjmazrej7j': 4000,
-            'pri_01kye15mdacm7wzqp740g3rvy4': 4000,
-        },
-    },
-    # Frontier runs the agent AND vision on the frontier model (worker/llm.py
-    # routes 'ai_max' to FRONTIER_BASE_URL). Product pro_01kyg21hq9mbaj7pk3y1ewmzxp.
-    'ai_max': {
-        'price_id': 'pri_01m00w4bakj10vypkqqg8b7jse',
-        'yearly_price_id': 'pri_01m00w4bpedjqatvn0f640ngzz',
-        'monthly_credits': 5000,
-        'legacy_prices': {
-            'pri_01kyg21hzbbz360kn0ptjnpdar': 10000,
-            'pri_01kyg21j78jk6tpkkcpkrysvc4': 10000,
-        },
-    },
-    # ── MCP: off the pricing page, kept so the one live subscription resolves.
-    # monthly_credits 0 is deliberate — that customer supplies their own model
-    # through their own MCP client, so the pool (which meters OUR model spend)
-    # must not be topped up.
-    'mcp':   {'price_id': 'pri_01kyde24w5s63hgzh7wzn4zwnt', 'yearly_price_id': 'pri_01kyde254pd3z24zqd8mzav861', 'monthly_credits': 0},
-    # ── Retired tiers, kept so grandfathered subscribers keep working ────
-    'plus':  {'price_id': 'pri_01jxj6smtjkfsf22hdr4swyr9j', 'yearly_price_id': 'pri_01kkekq1hcvzvyhh3ffk3nk291', 'monthly_credits': 800},
-    'pro':   {'price_id': 'pri_01kk4k4y8c3ygxd620vcxg6ph1', 'yearly_price_id': 'pri_01kkeksjv9pf2nc1gphj67m8ae', 'monthly_credits': 2400},
-    'ultra': {'price_id': 'pri_01kk4k83cwpmf1jsctgdvhm0n6', 'yearly_price_id': 'pri_01kkektygjg89gywskyj1dycx2', 'monthly_credits': 5000},
-    'titan': {'price_id': 'pri_01kkekbegh2q5x3kxn28afbw5d', 'yearly_price_id': 'pri_01kkekf5ksjq5dqbfpxakf1g23', 'monthly_credits': 10000},
-    'ace':   {'price_id': 'pri_01kkekgt4zv65t59yw7ybz8w01', 'yearly_price_id': 'pri_01kkekj0am5yfqxx933c6d4tck', 'monthly_credits': 30000},
-}
-
-PLANS_SANDBOX = {
-    'plus':  {'price_id': 'pri_01jw8722trngfyz12kq158vrz7', 'yearly_price_id': 'SANDBOX_PLUS_YEARLY_TODO',  'monthly_credits': 800},
-    'pro':   {'price_id': 'pri_01kk4wvnbxb7nbh426bnk62xa2', 'yearly_price_id': 'SANDBOX_PRO_YEARLY_TODO',   'monthly_credits': 2400},
-    'ultra': {'price_id': 'pri_01kk4wwr07ce0xp8x4kvdgt8kg', 'yearly_price_id': 'SANDBOX_ULTRA_YEARLY_TODO', 'monthly_credits': 5000},
-    'titan': {'price_id': 'SANDBOX_TITAN_MONTHLY_TODO',      'yearly_price_id': 'SANDBOX_TITAN_YEARLY_TODO', 'monthly_credits': 10000},
-    'ace':   {'price_id': 'SANDBOX_ACE_MONTHLY_TODO',        'yearly_price_id': 'SANDBOX_ACE_YEARLY_TODO',   'monthly_credits': 30000},
-}
-
 PLANS = PLANS_SANDBOX if os.environ.get('PADDLE_MODE') == 'sandbox' else PLANS_LIVE
-
-# Only these tiers can be NEWLY purchased or switched to. plus/pro/ultra/titan/
-# ace are retired from the product but stay in PLANS (and PLAN_CREDITS in the
-# webhook) so grandfathered subscribers keep working — they must NOT be
-# reachable via a hand-crafted checkout/change-plan call that mints their live
-# price IDs.
-# 'mcp' is deliberately NOT here even though the MCP server is live: it is not
-# offered on the public pricing page, so a hand-crafted checkout must not make
-# it newly purchasable. The Paddle product and prices stay in PLANS so the
-# existing MCP subscription keeps renewing and resolving. Add it here only as
-# an explicit product/pricing decision, not merely because the server exists.
-PURCHASABLE_PLANS = {'ai', 'ai_pro', 'ai_max'}
 
 
 def get_paddle_base():
