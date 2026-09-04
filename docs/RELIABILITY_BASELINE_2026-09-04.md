@@ -181,7 +181,7 @@ whose terminal rows remain in the database.
   snapshot classification tests.
 - Modal executor tests: 38 passed.
 - Cloudflare adapter TypeScript check: passed.
-- Frontend library suite on the current production base: 63 passed.
+- Frontend library suite on the current production base: 66 passed.
 - Next.js production build: 266 static/dynamic routes generated successfully.
 - Plugin-v7 tests in the preserved user worktree: 65 passed. Those uncommitted
   plugin files are not part of this release.
@@ -205,6 +205,10 @@ whose terminal rows remain in the database.
   It scans every Git-tracked text file, reports only path/line/category, and
   blocks credentialed production database URLs, private keys, and common live
   token shapes while allowing explicit local integration fixtures.
+- The frontend release verifier runs its equivalent dependency-free tracked
+  secret scan before package installation, tests, build, and Vercel revision
+  verification. Frontend agent guidance uses the same Cloudflare-primary,
+  manual-fallback deployment model as the backend repository.
 - Generate comparable aggregate telemetry with
   `python backend/scripts/reliability_snapshot.py --days 7` in an environment
   that supplies `DATABASE_URL`. The command forces a read-only database session
