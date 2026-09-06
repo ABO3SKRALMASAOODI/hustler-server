@@ -1173,6 +1173,16 @@ def remap_program_items(edl, old_tl, new_tl):
 
         for ov in edl["overlays"]:
             ov = dict(ov)
+            if ov.get("kind") == "video" and not ov.get("screen"):
+                start = float(ov.get("start", 0))
+                end = start + float(ov.get("duration_s", 0))
+                probes = [start + (end-start)*fraction for fraction in (.01, .5, .99)]
+                if any(old_tl.out_to_src(t) != new_tl.out_to_src(t) for t in probes):
+                    region_notes.append(
+                        f"SYNC REVIEW REQUIRED: video overlay {ov.get('id')} remains "
+                        "anchored to program time, but its underlying source changed. "
+                        "An externally cropped program may now be out of sync; inspect "
+                        "or replace it with source-time frame.focus_track crops.")
             if ov.get("screen"):
                 old_arr = float(ov["start"]) + float(ov["duration_s"])
                 # The handoff is found by the OLD windows first (round 75):

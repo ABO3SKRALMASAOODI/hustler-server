@@ -8,10 +8,11 @@ at src/types/edl.ts — keep the two in sync.
 
 import hashlib
 import json
+import math
 import re
 from typing import Annotated, List, Literal, Optional, Union
 
-from pydantic import AfterValidator, BaseModel, Field, field_validator
+from pydantic import AfterValidator, BaseModel, Field, field_validator, model_validator
 
 # SINGLE source of truth for the index pipeline version — bump it HERE, by
 # commit, whenever index OUTPUT changes (transcriber switch, segmentation
@@ -475,6 +476,15 @@ class CaptionItem(BaseModel):
     _style = field_validator("style", mode="before")(_coerce_style)
 
 
+class CaptionCorrection(BaseModel):
+    # Output seconds: use both bounds to target one occurrence.
+    model_config = {"populate_by_name": True, "extra": "forbid", "allow_inf_nan": False}
+    from_text: str = Field(alias="from", min_length=1, max_length=1000)
+    to: str = Field(min_length=1, max_length=1000)
+    start: Optional[float] = Field(default=None, ge=0)
+    end: Optional[float] = Field(default=None, ge=0)
+
+
 class CaptionsFromTranscript(BaseModel):
     mode: Literal["from_transcript"] = "from_transcript"
     # Caption composition is versioned independently from the EDL schema.
@@ -486,6 +496,7 @@ class CaptionsFromTranscript(BaseModel):
     # Chunk word-timed captions into groups of at most N words. Timing always
     # comes from the real word timestamps in the index — never invented.
     max_words_per_caption: Optional[int] = None
+    min_words_per_caption: Optional[int] = Field(default=None, ge=1, le=16)
     # Karaoke (legacy-dynamic) group size, BAKED at write time. The renderer
     # historically clamped dynamic grouping at 4 regardless of
     # max_words_per_caption; 3 stored prod EDLs (proj 13 v3-5, mw=6) rely on
@@ -511,6 +522,7 @@ class CaptionsFromTranscript(BaseModel):
     # cannot desync a karaoke preset. None (never []) so an EDL written before
     # this existed keeps its exact signature and its cached render.
     text_fixes: Optional[List[List[str]]] = None
+    corrections: Optional[List[dict]] = None
     # Source-time spans chosen from measured face/text boxes. Render-time
     # caption placement follows this deterministic track rather than assuming
     # one global bottom/middle position fits every shot.
@@ -519,6 +531,22 @@ class CaptionsFromTranscript(BaseModel):
     motion_motif: Optional[MotionMotif] = None
 
     _style = field_validator("style", mode="before")(_coerce_style)
+
+    @field_validator("corrections")
+    @classmethod
+    def _corrections_norm(cls, value):
+        result = []
+        for row in value or []:
+            row = CaptionCorrection.model_validate(row).model_dump(by_alias=True, exclude_none=True)
+            if not row["from"].strip() or not row["to"].strip():
+                raise ValueError("caption correction text cannot be blank")
+            if ("start" in row) != ("end" in row) or (
+                    "start" in row and row["end"] <= row["start"]):
+                raise ValueError("caption correction requires start < end")
+            result.append(row)
+        if len(result) > 80:
+            raise ValueError("at most 80 caption corrections are supported")
+        return result or None
 
     @field_validator("text_fixes")
     @classmethod
@@ -667,6 +695,12 @@ class FocusSpan(BaseModel):
     # frame's global mode for every legacy track.
     mode: Optional[Literal["crop", "pad", "pad_blur"]] = None
 
+    @model_validator(mode="after")
+    def _valid_span(self):
+        if not math.isfinite(self.t0) or not math.isfinite(self.t1) or self.t0 < 0 or self.t1 <= self.t0:
+            raise ValueError("focus spans require finite source times 0 <= t0 < t1")
+        return self
+
     @field_validator("x", "y")
     @classmethod
     def _clamp_xy(cls, v):
@@ -698,6 +732,14 @@ class Frame(BaseModel):
     focus_x: Optional[float] = None
     focus_y: Optional[float] = None
     focus_track: Optional[List[FocusSpan]] = None
+
+    @field_validator("focus_track")
+    @classmethod
+    def _ordered_focus_track(cls, value):
+        spans = sorted(value or [], key=lambda span: span.t0)
+        if any(b.t0 < a.t1 - .001 for a,b in zip(spans, spans[1:])):
+            raise ValueError("focus_track spans must not overlap")
+        return spans or None
 
     @field_validator("focus_x", "focus_y")
     @classmethod
@@ -3237,6 +3279,7 @@ class Word(BaseModel):
     # "everything is speaker 0" and "nobody knows who spoke" are different
     # facts and only one of them can be acted on.
     speaker: Optional[int] = None
+    confidence: Optional[float] = Field(default=None, ge=0, le=1)
     # Hesitation sound rather than a word. In the index so remove_filler_words
     # has real spans to cut; excluded from burned-in caption text so the
     # default look is not "So, um, uh, yeah".

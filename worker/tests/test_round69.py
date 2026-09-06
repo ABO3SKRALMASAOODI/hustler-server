@@ -289,15 +289,14 @@ def test_captions_never_burn_filler_words():
         "build_ass must filter fillers out of the caption source words"
 
     class _TL:
+        out_duration = 10.0
+
         def kept_words(self, words):
             return [{"w": w["w"], "t0": w["t0"], "t1": w["t1"]}
                     for w in words]
 
         def insert_positions(self):
             return []
-
-        def out_duration(self):
-            return 10.0
 
     index = {"words": [
         {"w": "So,", "t0": 0.0, "t1": 0.3, "filler": False},

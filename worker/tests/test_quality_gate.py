@@ -202,7 +202,7 @@ def test_additional_writes_do_not_need_reviewer_permission():
     assert fake.inserts == 2
 
 
-def test_manual_preview_defers_complete_encode_to_turn_end(
+def test_explicit_complete_preview_encodes_immediately_and_turn_end_reuses_it(
         monkeypatch, tmp_path):
     class PreviewDb:
         payload = None
@@ -213,7 +213,8 @@ def test_manual_preview_defers_complete_encode_to_turn_end(
                 return 71, True
             if fn is dbx.get_job:
                 return {"state": "done", "result": {
-                    "duration_s": 20.0, "audio_qc": {}}}
+                    "duration_s": 20.0, "audio_qc": {}, "edl_version": 22,
+                    "render_asset_id": 81}}
             raise AssertionError(f"unexpected DB call: {fn}")
 
     class Ctx:
@@ -264,20 +265,19 @@ def test_manual_preview_defers_complete_encode_to_turn_end(
     monkeypatch.setattr(agent_tools.time, "sleep", lambda *_args: None)
 
     result = agent_tools.render_preview(Ctx(), complete=True)
-    assert "rendered automatically once" in result
-    assert 22 not in Ctx.rendered_versions
-    assert PreviewDb.payload is None
-
-    Ctx.autorendering = True
-    result = agent_tools.render_preview(Ctx())
     assert result.startswith("Preview v22 rendered:")
     assert 22 in Ctx.rendered_versions
     assert PreviewDb.payload["edl_version"] == 22
     assert PreviewDb.payload["audio_model_review"] is True
     assert len(PreviewDb.payload["render_signature"]) == 64
 
+    ctx = Ctx()
+    ctx.last_preview = {"edl_version": 22}
+    ctx.autorendering = True
+    assert "already rendered and attached" in agent_tools.render_preview(ctx)
 
-def test_complete_preview_uses_changed_proof_before_reencoding_whole_program(
+
+def test_default_preview_uses_changed_proof_and_explicit_complete_renders_whole_program(
         monkeypatch):
     calls = []
 
@@ -304,13 +304,12 @@ def test_complete_preview_uses_changed_proof_before_reencoding_whole_program(
         lambda _ctx, _row, _plan, ranges: (
             calls.append(ranges) or "changed proof"))
 
-    assert agent_tools.render_preview(Ctx(), complete=True) == "changed proof"
+    assert agent_tools.render_preview(Ctx()) == "changed proof"
     assert calls == [[[4.0, 7.0]]]
-    assert Ctx.editing_metrics["complete_previews_routed_to_proof"] == 1
+    assert Ctx.editing_metrics.get("complete_previews_routed_to_proof", 0) == 0
 
-    # The exact proof-checked version can still be explicitly rendered whole;
-    # there is no per-turn preview ceiling.
-    Ctx.checked_versions.add(2)
+    # An explicit complete request must reach the full render even when
+    # this caller has no previous changed-section verification.
     monkeypatch.setattr(
         agent_tools, "_run_changed_preview_check",
         lambda *_args: (_ for _ in ()).throw(

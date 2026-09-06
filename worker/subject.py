@@ -140,9 +140,8 @@ def points_from_frames(paths, max_width=640):
         except Exception:
             continue
         faces = _faces_in(cv2, cascades, gray) if cascades else []
-        if faces:
-            # The biggest face is the subject. Several faces in one frame is a
-            # group shot, and framing on the largest is what a human does.
+        if len(faces) == 1:
+            # Face size alone cannot identify the speaker in a group shot.
             x, y, fw, fh = faces[0]
             px = (x + fw / 2.0) / w
             py = (y + fh / 2.0 - fh * _EYELINE_LIFT) / h

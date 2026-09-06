@@ -989,6 +989,9 @@ def get_words(ctx, start=0, end=None):
            + (f" [S{w['speaker']}]" if multi and w.get("speaker") is not None
               else "")
            + (" [filler]" if w.get("filler") else "")
+           + (f" [confidence={w['confidence']:.3f}" +
+              (", REVIEW]" if w['confidence'] < .8 else "]")
+              if w.get("confidence") is not None else "")
            for w in shown]
     tail = ""
     if len(rows) > len(shown):
@@ -999,7 +1002,11 @@ def get_words(ctx, start=0, end=None):
         tail = (f"\n...{len(rows) - len(shown)} more words (up to {end}s) "
                 f"not shown — narrow the range and call again "
                 f"(e.g. get_words({int(shown[-1]['t1'])}, {end:g})).")
-    return _cap("\n".join(out) + tail)
+    unknown = sum(w.get("confidence") is None for w in shown)
+    confidence_note = (f"\nConfidence unavailable for {unknown} displayed token(s)."
+                       if unknown else "")
+    return _cap("\n".join(out) + confidence_note + tail,
+                budget=config.TRANSCRIPT_CHAR_BUDGET)
 
 
 def search_transcript(ctx, query):
@@ -1517,7 +1524,7 @@ def list_assets(ctx, kind=None):
     return result
 
 
-def _deliver_frames(ctx, frames, labels, question, subject_line):
+def _deliver_frames(ctx, frames, labels, question, subject_line, provenance=None):
     """The round-67 direct-sight tail shared by look_at / look_at_asset.
 
     When the agent model itself reads images (llm.agent_sees), the captured
@@ -1558,6 +1565,12 @@ def _deliver_frames(ctx, frames, labels, question, subject_line):
                                              sheet)
             ctx.pending_images.append(
                 (f"{subject_line} — {', '.join(labels)}", sheet))
+            if provenance is not None:
+                if not hasattr(ctx, "_pending_image_metadata"):
+                    ctx._pending_image_metadata = {}
+                ctx._pending_image_metadata[sheet] = dict(
+                    provenance, capture_job_id=getattr(ctx, "job", {}).get("id"),
+                    timestamp_labels=list(labels))
             return (f"Captured {len(frames)} frame(s): {', '.join(labels)}. "
                     "The picture follows this message — LOOK AT IT YOURSELF "
                     "and answer from what you see"
@@ -1920,7 +1933,7 @@ def open_visual_page(ctx, pages=None):
 
 
 def look_at(ctx, times=None, question="", start=None, end=None,
-            output_times=None, rendered=False):
+            output_times=None, rendered=False, native_resolution=False):
     """Round 67: the agent's own eyes. Pass any source `times` and
     the exact frames at those moments come back as ONE labeled picture in the
     agent's own context. start/end still work as a range and sample evenly.
@@ -1945,10 +1958,13 @@ def look_at(ctx, times=None, question="", start=None, end=None,
                 return "REJECTED: output_times must be an array of seconds."
             return look_at_asset(
                 ctx, asset["storage_key"], question=question,
-                times=list(wants))
+                times=list(wants), native_resolution=native_resolution)
         return look_at_asset(
             ctx, asset["storage_key"], question=question,
-            start=0 if start is None else start, end=end)
+            start=0 if start is None else start, end=end,
+            native_resolution=native_resolution)
+    if native_resolution:
+        return "REJECTED: native_resolution requires rendered=true; use look_at_asset for original media."
 
     # An empty array is "not asked", not a request: the model fills every
     # schema field, and `times=[2, 6], output_times=[]` burned nine straight
@@ -2331,7 +2347,8 @@ def _asset_frames(ctx, asset, times, width=640, tag="alook",
     return pairs, (None if pairs else (last_err or "unknown error"))
 
 
-def look_at_asset(ctx, asset_key, question="", start=0, end=None, times=None):
+def look_at_asset(ctx, asset_key, question="", start=0, end=None, times=None,
+                  native_resolution=False):
     """Frames from an UPLOADED clip or image (not the main video) — THE way
     to pick which moment of a long clip to splice in with insert_media.
     Round 67: the frames land in the agent's own context (see
@@ -2396,6 +2413,8 @@ def look_at_asset(ctx, asset_key, question="", start=0, end=None, times=None):
         times = [s + (e - s) * (i + 0.5) / n for i in range(n)]
     evidence_key = ("look_asset", str(asset_key),
                     tuple(round(float(t), 3) for t in times))
+    if native_resolution:
+        evidence_key += ("native",)
     evidence = _evidence_cache(ctx)
     if evidence_key in evidence:
         _metric(ctx, "visual_decodes_reused")
@@ -2419,7 +2438,8 @@ def look_at_asset(ctx, asset_key, question="", start=0, end=None, times=None):
     motion_profile = ((asset.get("meta") or {}).get("motion_profile") or
                       (asset_index or {}).get("motion"))
     pairs, err = _asset_frames(
-        ctx, asset, times, width=640, tag="alook",
+        ctx, asset, times, width=(min(1920, int(asset.get("width") or 1920))
+                                 if native_resolution else 640), tag="alook",
         measure_motion=(asset.get("kind") == "video_clip" and
                         (motion_profile or {}).get("version") !=
                         motion_judge.MOTION_PROFILE_VERSION))
@@ -2443,7 +2463,10 @@ def look_at_asset(ctx, asset_key, question="", start=0, end=None, times=None):
         float(times[i]) for i, _fp in pairs)
     out = _deliver_frames(
         ctx, frames, frame_names, question,
-        f"Frames from '{name}' ({asset['kind']}, {dur:.0f}s long)")
+        f"Frames from '{name}' ({asset['kind']}, {dur:.0f}s long)",
+        provenance={"asset_id": asset["id"],
+                    "edl_version": (asset.get("meta") or {}).get("edl_version"),
+                    "clock": "output" if asset["kind"] == "render" else "asset"})
     evidence.add(evidence_key)
     measured = motion_judge.describe(motion_profile)
     ref_grammar = ""
@@ -3904,7 +3927,7 @@ def _auto_caption_emphasis(ctx, edl, limit=25):
 
 def add_captions(ctx, mode=None, items=None, style=None,
                  max_words_per_caption=None, emphasis_words=None,
-                 motion_motif=None):
+                 motion_motif=None, min_words_per_caption=None):
     edl = dict(ctx.latest_edl()["json"])
     motif, motif_err = _motion_motif_value(ctx, motion_motif)
     if motif_err:
@@ -4223,6 +4246,16 @@ def add_captions(ctx, mode=None, items=None, style=None,
                "max_words_per_caption": mw,
                "style": parsed_style,
                "placement_track": placement or None}
+        if min_words_per_caption is not None:
+            try:
+                minimum = int(min_words_per_caption)
+            except (TypeError, ValueError):
+                return "REJECTED: min_words_per_caption must be an integer."
+            if not premium or caplib._preset_of(caplib._norm_style(parsed_style))["mode"] != "static":
+                return "REJECTED: a phrase minimum requires a static phrase preset such as clean."
+            if not 1 <= minimum <= (mw or 16):
+                return "REJECTED: minimum must be between 1 and max_words_per_caption."
+            cfg["min_words_per_caption"] = minimum
         # Re-running add_captions to change the visual treatment must not
         # silently erase spelling corrections already approved by the user.
         # Production project 1056 lost "cooked" -> "got" this way even
@@ -4232,6 +4265,8 @@ def add_captions(ctx, mode=None, items=None, style=None,
                 previous_captions.get("mode") == "from_transcript" and \
                 previous_captions.get("text_fixes"):
             cfg["text_fixes"] = previous_captions["text_fixes"]
+        if isinstance(previous_captions, dict) and previous_captions.get("corrections"):
+            cfg["corrections"] = previous_captions["corrections"]
         if emphasis_words:
             cfg["emphasis_words"] = emphasis_words
         if emphasis_mode:
@@ -4259,6 +4294,13 @@ def add_captions(ctx, mode=None, items=None, style=None,
         result = ctx.write_edl(edl, desc)
         if result.startswith("EDL v"):
             _trace_caption_state(ctx, edl["captions"], caption_source)
+            low = [w for w in ctx.index.get("words") or []
+                   if w.get("confidence") is not None and w["confidence"] < .8
+                   and any(a <= (w["t0"] + w["t1"])/2 <= b for a,b in edl.get("keep") or [])]
+            if low:
+                result += "\nASR REVIEW: " + json.dumps([
+                    {key:w.get(key) for key in ("w","t0","t1","confidence")}
+                    for w in low[:40]]) + " — inspect the surrounding sentence/audio and correct before rendering."
         return (result + karaoke_note + directed_style_note
                 + "".join(spatial_notes))
     if mode == "off":
@@ -4401,75 +4443,57 @@ def merge_caption_style(captions, partial):
     return out
 
 
-def set_caption_fixes(ctx, replacements=None, clear=False):
-    """Correct the SPELLING of burned captions without touching their timing.
-
-    "En el subtítulo tienes que escribir Dios, Ecuador, Jesús." Two users asked
-    for this on the same day — one twice, in two different projects — and the
-    answer was that captions burn the transcript's own words and their case
-    could not be changed. It is the single most visible thing on the screen and
-    the transcriber gets names wrong by design: it writes what it heard, in
-    lower case, with no idea that Dios is a name.
-
-    Timings are never touched, so word-by-word presets stay frame-accurate.
-    """
+def set_caption_fixes(ctx, replacements=None, clear=False, operation="replace"):
+    """Replace the full correction set, append/upsert, clear, or inspect it."""
     edl = dict(ctx.latest_edl()["json"])
     caps = edl.get("captions")
     if not isinstance(caps, dict) or caps.get("mode") != "from_transcript":
-        return ("REJECTED: text fixes apply to from_transcript captions "
-                "only — call add_captions('from_transcript') first. For "
-                "captions you dictated yourself, edit the item's text.")
+        return "REJECTED: enable from_transcript captions first."
     if clear:
-        merged = dict(caps)
-        merged["text_fixes"] = None
-        edl["captions"] = merged
-        return ctx.write_edl(edl, "cleared caption text fixes")
-    if not isinstance(replacements, list) or not replacements:
-        return ("REJECTED: replacements must be a non-empty array of "
-                "[wrong, right] pairs, e.g. "
-                "[[\"dios\",\"Dios\"],[\"ushula\",\"Ujjwala\"]]. Pass "
-                "clear=true to remove all fixes.")
-    pairs, bad = [], []
-    for r in replacements:
+        operation = "clear"
+    if operation not in ("replace", "append", "clear", "list"):
+        return "REJECTED: operation must be replace, append, clear, or list."
+    existing = list(caps.get("corrections") or [])
+    legacy = list(caps.get("text_fixes") or [])
+    if operation == "list" or (replacements is None and operation == "replace"):
+        return json.dumps({"active_corrections": existing,
+                           "legacy_global_fixes": legacy,
+                           "preview": json.loads(audit_captions(ctx))}, indent=1)
+    rules = []
+    if operation != "clear":
+        if not isinstance(replacements, list):
+            return "REJECTED: replacements must be an array of pairs or {from,to,start,end} objects."
         try:
-            src, dst = ((r.get("from"), r.get("to")) if isinstance(r, dict)
-                        else (r[0], r[1]))
-            src, dst = str(src).strip(), str(dst).strip()
-        except (IndexError, KeyError, TypeError, ValueError):
-            bad.append(str(r)[:40])
-            continue
-        if not src or not dst:
-            bad.append(str(r)[:40])
-        elif len(src.split()) != len(dst.split()):
-            bad.append(f"'{src}' -> '{dst}'")
-        else:
-            pairs.append([src, dst])
-    if not pairs:
-        return ("REJECTED: no usable pairs. Each must be [wrong, right] with "
-                "the SAME number of words on both sides (a replacement that "
-                "changes the word count would have to delete a word that "
-                "still has time on the clock). Rejected: "
-                + "; ".join(bad[:5]) + ".")
-    existing = [list(p) for p in (caps.get("text_fixes") or [])]
-    by_src = {p[0].casefold(): p for p in existing}
-    for p in pairs:
-        by_src[p[0].casefold()] = p
-    merged = dict(caps)
-    merged["text_fixes"] = list(by_src.values())
-    edl["captions"] = merged
-    shown = ", ".join(f"'{s}'->'{d}'" for s, d in pairs[:6])
-    res = ctx.write_edl(edl, f"caption text fixes: {shown}"
-                             + (f" (+{len(pairs) - 6} more)"
-                                if len(pairs) > 6 else ""))
-    if res.startswith("EDL v"):
-        res += ("\nOnly the burned TEXT changes — word timings, the audio and "
-                "the cut are untouched, so word-by-word presets stay in sync. "
-                "Matching ignores case and punctuation, so one pair fixes "
-                "every occurrence.")
-        if bad:
-            res += ("\nSkipped (both sides must have the same word count): "
-                    + "; ".join(bad[:4]) + ".")
-    return res
+            from schemas import CaptionsFromTranscript
+            for item in replacements:
+                if not isinstance(item, dict) and (
+                        not isinstance(item, (list, tuple)) or len(item) != 2):
+                    raise ValueError("corrections must be two-element pairs or objects")
+                rule = dict(item) if isinstance(item, dict) else {"from": item[0], "to": item[1]}
+                rules.append(rule)
+            rules = CaptionsFromTranscript(corrections=rules).corrections or []
+        except (ValueError, TypeError, IndexError, KeyError) as exc:
+            return "REJECTED: invalid correction: " + str(exc)[:300]
+    if operation == "append":
+        def key(rule):
+            return (" ".join(caplib._norm_word(t) for t in rule["from"].split()),
+                    rule.get("start"), rule.get("end"))
+        replaced = {key(rule) for rule in rules}
+        legacy = [[a, b] for a, b in legacy
+                  if key({"from": a}) not in replaced]
+        merged = {key(rule): rule for rule in existing}
+        for rule in rules:
+            merged[key(rule)] = rule
+        rules = list(merged.values())
+    if len(rules) + (len(legacy) if operation == "append" else 0) > 80:
+        return "REJECTED: at most 80 active corrections are supported."
+    edl["captions"] = dict(caps, text_fixes=(legacy or None) if operation == "append" else None,
+                           corrections=rules or None)
+    result = ctx.write_edl(edl, f"caption corrections {operation}: {len(rules)} active")
+    if result.startswith("EDL v"):
+        result += "\nACTIVE CORRECTIONS: " + json.dumps(rules)
+        result += "\nCAPTION PREVIEW: " + audit_captions(ctx)
+    return result
 
 
 def set_caption_style(ctx, style=None, emphasis_words=None,
@@ -6613,8 +6637,10 @@ def set_volume(ctx, start, end, gain_db):
 
 
 def set_frame(ctx, ratio, mode="crop", focus_x=None, focus_y=None,
-              _measured=False):
+              _measured=False, focus_track=None):
     payload = {"ratio": str(ratio), "mode": str(mode or "crop")}
+    if focus_track is not None:
+        payload["focus_track"] = focus_track
     for k, v in (("focus_x", focus_x), ("focus_y", focus_y)):
         if v is not None:
             try:
@@ -6626,10 +6652,11 @@ def set_frame(ctx, ratio, mode="crop", focus_x=None, focus_y=None,
                         "auto_reframe to find the subject.")
     try:
         frame = Frame.model_validate(payload)
-    except Exception:
+    except Exception as exc:
         return ('REJECTED: ratio must be one of source, 16:9, 9:16, 1:1, 4:5 '
-                'and mode one of crop, pad, pad_blur. Example: '
-                'set_frame("9:16", "crop") for TikTok.')
+                'and mode one of crop, pad, pad_blur. focus_track needs '
+                'non-overlapping source spans t0<t1 and x/y from 0 to 1. '
+                + str(exc)[:220])
     edl = dict(ctx.latest_edl()["json"])
     if frame.ratio == "source":
         edl["frame"] = None
@@ -6696,9 +6723,8 @@ CROP_DETAIL_KEEP_MIN = 0.55
 def _spatial_face_points(sidecar, windows):
     """Face centres measured across a set of source-time windows.
 
-    One largest face per sample avoids averaging two people visible in the
-    same two-shot into the wall between them. The sidecar covers up to 96
-    real frames, so a long video is no longer represented by five guesses.
+    Only unambiguous single-face samples qualify. A larger face is not
+    evidence of who is speaking when two people share the frame.
     Returns (points, sample_coverage).
     """
     samples = []
@@ -6712,7 +6738,7 @@ def _spatial_face_points(sidecar, windows):
     points = []
     for sample in samples:
         boxes = sample.get("faces") or []
-        if not boxes:
+        if len(boxes) != 1:
             continue
         try:
             box = max(boxes, key=lambda b: (float(b[2]) - float(b[0])) *
@@ -6735,15 +6761,13 @@ def _reframe_with_track(ctx, ratio, global_pt, preserve_unmeasured=True):
     measure a face PER SHOT inside the kept footage, split the keep spans at
     the shot boundaries where the aim genuinely changes (a reframe on a cut
     reads as an edit; mid-shot it reads as a slide), and write the aims as
-    frame.focus_track. Never with a transition style set — those fire on
-    scene junctions, which is exactly where this splits.
+    frame.focus_track. The renderer owns composition splits, including on
+    timelines with authored transitions; the keep list is unchanged.
     """
     shots = (ctx.index or {}).get("shots") or []
     if len(shots) < 2:
         return None
     edl = dict(ctx.latest_edl()["json"])
-    if ((edl.get("effects") or {}).get("transition")):
-        return None
     keep = [(float(s), float(e)) for s, e in (edl.get("keep") or [])]
     if not keep:
         return None
@@ -6788,15 +6812,17 @@ def _reframe_with_track(ctx, ratio, global_pt, preserve_unmeasured=True):
                     spatial_samples.append(sample)
             except (TypeError, ValueError):
                 continue
+        ambiguous = any(len(sample.get("faces") or []) > 1
+                        for sample in spatial_samples)
         # Repeated temporal evidence beats a fresh one-frame detector. If the
         # index saw >=2 moments in this shot and found no repeatable face,
         # auto mode must fit it; asking Haar once more reintroduced the exact
         # false positive the 96-frame sidecar was built to eliminate.
-        if spatial_pts and (len(spatial_samples) < 2 or
+        if not ambiguous and spatial_pts and (len(spatial_samples) < 2 or
                             len(spatial_pts) >= 2):
             pt = subject.median_point(spatial_pts)
         try:
-            if pt is None and proxy and len(spatial_samples) < 2:
+            if not ambiguous and pt is None and proxy and len(spatial_samples) < 2:
                 media.frame_at(proxy, (w[0] + w[1]) / 2.0, fp)
                 pts, method = subject.points_from_frames([fp])
                 if method == "faces" and pts:
@@ -6859,10 +6885,11 @@ def _reframe_with_track(ctx, ratio, global_pt, preserve_unmeasured=True):
     res += (f"\nMeasured per shot: the subject sits in different places in "
             f"different shots (e.g. two speakers), so ONE fixed crop would "
             f"frame the wall between them. The crop re-aims at {len(spans)} "
-            "shot boundaries instead — each cut lands on the person "
-            "speaking's side of the frame.")
+            "shot boundaries. Face location does not establish who is "
+            "speaking; inspect the shots against the dialogue and override "
+            "individual source-time spans with set_frame(focus_track=...).")
     if fitted:
-        res += (f" {fitted} shot span(s) had no measured face, so those "
+        res += (f" REVIEW REQUIRED: {fitted} shot span(s) had no unambiguous measured face, so those "
                 "specific spans fit the whole picture over a blurred "
                 "background instead of inheriting a previous crop and "
                 "showing empty/irrelevant space.")
@@ -6938,11 +6965,13 @@ def auto_reframe(ctx, ratio="9:16", mode="auto"):
 
         keep = current.get("keep") or [[0.0, ctx.duration]]
         if coverage and all(_covered(start, end) for start, end in keep):
-            return ("NO CHANGE — the current frame already has a measured "
+            return ("NO CHANGE — the current frame already has an authored "
                     f"per-shot focus_track covering every kept interval at "
                     f"{ratio}. Preserved that mixed composition instead of "
                     "downgrading it to one global crop/fit; change the mode "
-                    "or ratio explicitly if uniform framing is intended.")
+                    "or ratio explicitly if uniform framing is intended. "
+                    "Track coverage alone does not verify active-speaker identity; "
+                    "inspect frames and dialogue when that identity is uncertain.")
     if mode in ("pad", "pad_blur"):
         # pad modes never discard picture, so there is nothing to aim.
         return set_frame(ctx, ratio, mode, _measured=True)
@@ -7037,6 +7066,15 @@ def auto_reframe(ctx, ratio="9:16", mode="auto"):
         if track_res is not None:
             return track_res
 
+    ambiguous = [sample for sample in sidecar.get("samples") or []
+                 if len(sample.get("faces") or []) > 1 and
+                 any(s <= float(sample.get("t", -1)) <= e for s, e in keep)]
+    if mode == "auto" and ambiguous:
+        res = set_frame(ctx, ratio, "pad_blur", _measured=True)
+        return res + ("\nREVIEW REQUIRED: multiple people are visible; face size "
+                      "does not identify the active speaker. Inspect source frames "
+                      "and dialogue, then set_frame with source-time focus_track overrides.")
+
     def _kept(focus):
         """Share of the picture's detail the crop window would keep."""
         try:
@@ -7104,7 +7142,8 @@ def auto_reframe(ctx, ratio="9:16", mode="auto"):
                     f"{len(pts)} of {measured_total} sampled frames, sitting at "
                     f"({pt[0]:.2f}, {pt[1]:.2f}) of the source frame — the "
                     "crop follows it instead of the frame center. No vision "
-                    "model was needed.")
+                    "model was needed. Face position alone does not establish "
+                    "active-speaker identity; inspect dialogue and frames when uncertain.")
             if drift > 0.18:
                 res += (f" The subject MOVES across the samples (spread "
                         f"{drift:.2f} of the frame), and the focus is one "
@@ -7117,15 +7156,10 @@ def auto_reframe(ctx, ratio="9:16", mode="auto"):
     # and the branch that used to truncate two thirds of it away.
     energy_pt = subject.median_point(pts) if pts else None
     if mode == "auto":
-        keep = _kept(energy_pt or (0.5, 0.5))
-        if keep is not None and keep < CROP_DETAIL_KEEP_MIN:
-            return _fit_instead(
-                energy_pt,
-                f"No face is in this footage, and a {ratio} crop of it would "
-                f"keep only {keep * 100:.0f}% of the picture's detail — the "
-                "content runs to the edges of the frame (a game HUD, a screen "
-                "recording, a wide scene), so cropping would cut off things "
-                "the viewer needs rather than reframe them.")
+        return _fit_instead(energy_pt,
+            "REVIEW REQUIRED: no unambiguous face target was measured. "
+            "Image detail alone cannot establish a safe speaker crop; "
+            "inspect and author a source-time focus_track to override.")
 
     if not llm.vision_available():
         # No face and no vision: the gradient-energy centroid is still a
@@ -16525,10 +16559,11 @@ def audit_captions(ctx, offset=0, limit=80):
             declared_max_words = None
         single_line_contract = bool(
             (caps.get("style") or {}).get("single_line"))
-        words = [w for w in tl.kept_words(ctx.index.get("words") or [])
-                 if not (w.get("filler") if isinstance(w, dict) else False)]
-        mutes = [(float(a), float(b)) for a, b in
-                 (edl.get("caption_mutes") or [])]
+        words = tl.kept_words([w for w in ctx.index.get("words") or []
+                               if not w.get("filler")])
+        mutes = caplib.effective_caption_mutes(edl)
+        words = [w for w in words if not any(a <= (w["t0"] + w["t1"])/2 <= b
+                                             for a, b in mutes)]
         for word in words:
             mid = (float(word["t0"]) + float(word["t1"])) / 2.0
             if any(a <= mid <= b for a, b in mutes):
@@ -16587,6 +16622,31 @@ def audit_captions(ctx, offset=0, limit=80):
                        for t in candidates})[:16]
     render_asset = ctx.db.run(dbx.find_render_asset, ctx.project_id,
                               "preview", row["version"])
+    fragment_states = []
+    if isinstance(caps, dict):
+        preset = caplib._preset_of(caplib._norm_style(caps.get("style")))
+        if preset and preset.get("mode") == "static" and (declared_max_words or 4) > 1:
+            minimum = caps.get("min_words_per_caption") or 2
+            fragment_states = [state for state in states if state["word_count"] < minimum]
+            if fragment_states and (caps.get("min_words_per_caption") or
+                                    len(fragment_states) / max(1, len(states)) > .15):
+                warnings.append(f"{len(fragment_states)} short phrase state(s) need cadence review")
+            if (declared_max_words or 4) >= 4 and states and sum(
+                    state["word_count"] <= 2 for state in states) / len(states) > .6:
+                warnings.append("Most phrase states have only one or two words; review reading cadence")
+    unbacked_mutes = []
+    for start, end in caplib.effective_caption_mutes(edl):
+        cursor = start
+        for text in sorted(edl.get("texts") or [], key=lambda t: t.get("start", 0)):
+            if not str(text.get("text") or "").strip():
+                continue
+            left, right = float(text.get("start", 0)), float(text.get("end", 0))
+            if left <= cursor + .01 and right > cursor:
+                cursor = right
+        if cursor < end - .01:
+            unbacked_mutes.append([start, end])
+    if unbacked_mutes:
+        warnings.append("Authored caption mute windows without continuous text coverage need review")
     contract_failed = bool(density_violations or wrap_violations)
     result = {
         "version": row["version"],
@@ -16595,6 +16655,11 @@ def audit_captions(ctx, offset=0, limit=80):
         "compiler": "same ASS artifact used by ffmpeg",
         "caption_design_version": (caps.get("design_version")
                                    if isinstance(caps, dict) else None),
+        "program_duration_s": tl.out_duration,
+        "active_corrections": caps.get("corrections") if isinstance(caps, dict) else None,
+        "legacy_global_fixes": caps.get("text_fixes") if isinstance(caps, dict) else None,
+        "authored_mute_windows": caplib.effective_caption_mutes(edl),
+        "caption_past_program_end": [s for s in states if s["end"] > tl.out_duration + .001],
         "visual_state_count": len(states),
         "first_state": states[0] if states else None,
         "last_state": states[-1] if states else None,
@@ -16611,6 +16676,11 @@ def audit_captions(ctx, offset=0, limit=80):
         "uncovered_word_count": len(uncovered),
         "overlaps": overlaps[:20],
         "warnings": warnings,
+        "short_phrase_states": fragment_states,
+        "short_phrase_count": len(fragment_states),
+        "one_word_state_count": sum(s["word_count"] == 1 for s in states),
+        "two_word_state_count": sum(s["word_count"] == 2 for s in states),
+        "mute_windows_without_text_coverage": unbacked_mutes,
         "qa_output_times": qa_times,
         "rendered_preview_available": bool(render_asset),
         "next": ("Call look_at(rendered=true, output_times=qa_output_times) "
@@ -17025,7 +17095,7 @@ def _run_changed_preview_check(ctx, row, plan, ranges):
     if version in ctx.checked_versions:
         return (f"Changed sections of EDL v{version} were already rendered "
                 "and checked. Keep editing, or finish the edit; the complete "
-                "preview is automatic once.")
+                "preview requires render_preview(complete=true).")
     pages = _proof_pages(ranges)
     all_requested = [pair for page in pages for pair in page]
     payload = _child_payload(ctx, {
@@ -17055,7 +17125,8 @@ def _run_changed_preview_check(ctx, row, plan, ranges):
             if result.get("superseded_by"):
                 return ("Changed-section proof was superseded by a newer "
                         "EDL version. Check that newer edit instead.")
-            ctx.last_preview_check = result
+            ctx.last_preview_check = dict(result, render_job_id=job_id)
+            ctx.last_preview_checks = [ctx.last_preview_check]
             delivered = _queue_check_frames(ctx, result, plan)
             critic = _preview_critic_report(ctx, result, plan)
             if critic is not None:
@@ -17066,7 +17137,7 @@ def _run_changed_preview_check(ctx, row, plan, ranges):
             return (f"Changed-section verification for EDL v{version} "
                     f"covered every planned risk window from {len(pages)} "
                     f"logical proof page(s) in one source-reusing render "
-                    f"({result.get('duration_s')}s)"
+                    f"({result.get('duration_s')}s; job {job_id}, asset {result.get('render_asset_id')})"
                     + (" and delivered review frames. " if delivered else ". ")
                     + f"Covered ranges: {all_covered}. This proof does not "
                       "replace the complete Studio preview; repair any "
@@ -17103,8 +17174,7 @@ def _run_changed_preview_check(ctx, row, plan, ranges):
                 "or retry blindly; tell the user the exact failure and that "
                 "proof cannot complete from the unchanged inputs.")
     return (f"PREREQUISITE: the {len(pages)}-page changed-section proof batch "
-            "is still running. Continue unrelated work; logical verification "
-            "remains open and will resume.")
+            f"is still running as job {job_id}. Call wait_for_job(job_id={job_id}).")
 
 
 def speculative_preview(ctx):
@@ -17150,7 +17220,7 @@ def speculative_preview(ctx):
 
 
 
-def _render_signature(row, kind, ranges=None, audio_model_review=True):
+def _render_signature(row, kind, ranges=None, audio_model_review=True, quality="draft"):
     """Identify the exact pixels requested under this deployed renderer.
 
     EDL versions are cheap history and two versions may contain identical
@@ -17166,6 +17236,7 @@ def _render_signature(row, kind, ranges=None, audio_model_review=True):
         # but a deterministic-only MCP preview must not join a failed/retried
         # job whose evidence policy is different.
         "audio_model_review": bool(audio_model_review),
+        "quality": quality,
         "code": worker_version.code_version(),
     }
     raw = json.dumps(material, sort_keys=True, separators=(",", ":"),
@@ -17173,20 +17244,21 @@ def _render_signature(row, kind, ranges=None, audio_model_review=True):
     return hashlib.sha256(raw).hexdigest()
 
 
-def render_preview(ctx, complete=False, _wait_timeout_s=None):
+def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft"):
+    if quality not in ("draft", "approval"):
+        return "REJECTED: quality must be draft or approval."
+    if quality == "approval":
+        complete = True
     row = ctx.latest_edl()
     version = row["version"]
     requested_complete = bool(complete)
     autorendering = bool(getattr(ctx, "autorendering", False))
-    # The honesty pass always produces the complete player preview. An explicit
-    # complete=true may do so only after this exact version's bounded changed-
-    # section proof has already run; this preserves a useful manual escape hatch
-    # without repeatedly encoding the whole programme during experimentation.
-    complete = autorendering or (
-        requested_complete
-        and version in getattr(ctx, "checked_versions", set()))
+    # A caller explicitly asking for a complete preview needs a stored video.
+    # MCP has no turn-end autorender to fulfill a deferred readiness hint.
+    complete = autorendering or requested_complete
     if version in ctx.rendered_versions and \
-            (ctx.last_preview or {}).get("edl_version") == version:
+            (ctx.last_preview or {}).get("edl_version") == version and \
+            (quality == "draft" or (ctx.last_preview or {}).get("quality") == "approval"):
         return (f"Preview v{version} is already rendered and attached — "
                 "no need to render again.")
     prior_failure = ctx.failed_preview_versions.get(version)
@@ -17202,41 +17274,34 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None):
     plan = _verify_plan_for(ctx, row)
     if not complete:
         ranges, _baseline = _change_check_ranges(ctx, row, plan)
-        # Once a complete immutable baseline exists, the first look at a new
-        # version is the bounded changed-section proof—even when the editor
-        # reflexively asks for complete=true. This is stage routing, not a
-        # preview allowance: after that exact version has been proof-checked,
-        # another explicit complete call renders it in full, and the turn-end
-        # autorender always renders the user-facing complete file. Production
-        # previously encoded a 15s program 17 times while changing one caption
-        # or grade at a time; those inner-loop encodes carried no extra whole-
-        # program evidence.
+        # Default iterative calls retain the cheaper changed-section proof.
         if ranges:
             if requested_complete:
                 _metric(ctx, "complete_previews_routed_to_proof")
             return _run_changed_preview_check(ctx, row, plan, ranges)
         if requested_complete:
             _metric(ctx, "full_preview_requests_deferred")
-        return (f"EDL v{version} is marked ready. The complete Studio preview "
-                "is rendered automatically once, after editing finishes. "
-                "No full encode was started by this intermediate tool call.")
+        return (f"EDL v{version} has no changed-section render to return. "
+                "No full encode was started. Call render_preview(complete=true) "
+                "to create a watchable complete preview.")
     # Adopt the speculative encode of this exact version when one is already
     # queued/running (round 98) — same payload shape, same verify plan,
     # half the wait and none of the double cost.
     audio_model_review = _audio_model_review_enabled(ctx)
     payload = _child_payload(ctx, {
                "edl_version": version, "source": "agent_preview",
+               "quality": quality,
                "agent_job_id": ctx.job["id"],
                "audio_model_review": audio_model_review,
                "render_signature": _render_signature(
                    row, "preview",
-                   audio_model_review=audio_model_review)})
+                   audio_model_review=audio_model_review, quality=quality)})
     if plan:
         payload["verify_times"] = [t for t, _ in plan]
     sequence_frames = _sequence_screening_frames(ctx, row)
     if sequence_frames:
         payload["screening_frames"] = sequence_frames
-    job_id = ctx.spec_preview_jobs.get(version)
+    job_id = ctx.spec_preview_jobs.get(version) if quality == "draft" else None
     if not job_id:
         job_id, _created = ctx.db.run(
             dbx.get_or_enqueue_preview_job, ctx.project_id,
@@ -17542,10 +17607,9 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None):
         remaining = deadline - time.monotonic()
         if remaining > 0:
             time.sleep(min(1.0, remaining))
-    return ("Preview render is taking too long — PREREQUISITE: the complete "
-            "preview is still running. The EDL is durable and the logical "
-            "turn must resume/reconnect to this render job; do not hand off "
-            "or ask the user to retry.")
+    return (f"Preview render is taking too long — complete preview for EDL v{version} "
+            f"is still running as job {job_id}. "
+            f"Call wait_for_job(job_id={job_id}), then watch_video(render=false).")
 
 
 def justify_verification_findings(ctx, finding_ids, justification,
@@ -17562,16 +17626,20 @@ def justify_verification_findings(ctx, finding_ids, justification,
     if not record:
         return ("PREREQUISITE: no complete verification record exists for "
                 f"EDL v{version}. Render and inspect the complete preview first.")
+    if isinstance(record.get("record"), dict):
+        record = record["record"]
     try:
         updated = quality_verifier.justify_findings(
             record, finding_ids, justification, evidence_ids=evidence_ids)
-    except ValueError as exc:
+    except (ValueError, TypeError) as exc:
         return ("CORRECTION NEEDED: " + str(exc) + ". Use the finding_id/code "
                 "from the latest VERSION VERIFICATION RECORD and cite what "
                 "the direct pixels/audio actually prove.")
     try:
-        ctx.db.run(dbx.upsert_verification_record, ctx.project_id,
-                   version, updated)
+        persisted = ctx.db.run(dbx.upsert_verification_record, ctx.project_id,
+                               version, updated)
+        if persisted is False:
+            raise RuntimeError("verification storage is unavailable")
     except Exception as exc:
         return ("TRANSIENT FAILURE: the justification was not persisted: "
                 f"{str(exc)[:240]}. Retry this idempotent verification call.")
@@ -21867,8 +21935,8 @@ TOOLS = {
                 "several times rather than a string of separate calls. The "
                 "filmstrips already gave you the whole video at a glance — "
                 "use look_at for the CLOSER look: exact framing, small "
-                "text, a precise instant. The transcript is accurate, so "
-                "read speech from "
+                "text, a precise instant. The transcript is ASR and can be wrong; "
+                "inspect confidence and sentence context using "
                 "get_words / the transcript — never look to lip-read or "
                 "guess a word. IMPORTANT: the assembled geometry view omits "
                 "burn-ins. Set rendered=true after render_preview to inspect "
@@ -21882,7 +21950,8 @@ TOOLS = {
                  "question": {"type": "string"},
                  "start": {"type": "number"},
                  "end": {"type": "number"},
-                 "rendered": {"type": "boolean"}}),
+                 "rendered": {"type": "boolean"},
+                 "native_resolution": {"type": "boolean", "description": "With rendered=true, preserve image width up to 1920px; request one time for full-detail approval pixels without another encode."}}),
     "look_at_asset": (look_at_asset, "YOUR OWN EYES on an UPLOADED clip or "
                       "image, or a finished RENDER (storage_key from "
                       "list_assets; kind='render' lists past previews/"
@@ -21906,7 +21975,8 @@ TOOLS = {
                                  "items": {"type": "number"}},
                        "question": {"type": "string"},
                        "start": {"type": "number"},
-                       "end": {"type": "number"}}),
+                       "end": {"type": "number"},
+                       "native_resolution": {"type": "boolean", "description": "Preserve image width up to 1920px; one requested time avoids contact-sheet downscaling."}}),
     "keep_segments": (keep_segments, "REPLACE the whole keep list: the parts "
                       "of the SOURCE video that survive, [[start,end],...] "
                       "in seconds. Everything else is cut. Use only for "
@@ -22049,6 +22119,7 @@ TOOLS = {
                       "style": {"type": "object",
                                  "properties": _STYLE_PROPS},
                       "max_words_per_caption": {"type": "integer"},
+                      "min_words_per_caption": {"type": "integer", "description": "Preferred minimum for static phrase presets such as clean; QA flags unavoidable fragments."},
                       "emphasis_words": {"type": "array",
                                          "items": {"type": "string"}},
                       "items": {"type": "array",
@@ -22354,14 +22425,21 @@ TOOLS = {
                   "chops an off-center speaker. For 'make it 9:16' on real "
                   "footage PREFER auto_reframe, which measures the subject "
                   "and sets the focus for you. Never upscales beyond the "
-                  "source's pixels.",
+                  "source's pixels. focus_track replaces the complete per-shot track: "
+                  "[{t0,t1,x,y,mode}] in SOURCE seconds. Read get_edl(frame) first; "
+                  "change only the desired spans. Tracks survive trims and speed changes.",
                   {"ratio": {"type": "string",
                              "enum": ["source", "16:9", "9:16", "1:1",
                                       "4:5"]},
                    "mode": {"type": "string",
                             "enum": ["crop", "pad", "pad_blur"]},
                    "focus_x": {"type": "number"},
-                   "focus_y": {"type": "number"}}),
+                   "focus_y": {"type": "number"},
+                   "focus_track": {"type": "array", "items": {"type": "object",
+                     "properties": {"t0": {"type": "number"}, "t1": {"type": "number"},
+                       "x": {"type": "number"}, "y": {"type": "number"},
+                       "mode": {"type": "string", "enum": ["crop", "pad", "pad_blur"]}},
+                     "required": ["t0", "t1"]}}}),
     "auto_reframe": (auto_reframe, "THE tool for 'make it 9:16 / vertical / "
                      "for TikTok'. It samples frames across the kept footage "
                      "and MEASURES two things before writing the frame: where "
@@ -23545,22 +23623,20 @@ TOOLS = {
                           {"spans": {"type": "array",
                                      "items": {"type": "array",
                                                "items": {"type": "number"}}}}),
-    "set_caption_fixes": (set_caption_fixes, "Correct the SPELLING or "
-                          "capitalization of burned captions: replacements is "
-                          "an array of [wrong, right] pairs, e.g. "
-                          "[[\"dios\",\"Dios\"],[\"ushula\",\"Ujjwala\"]]. "
-                          "Use it whenever a user says a caption spells a "
-                          "name wrong, or when the transcript lower-cases "
-                          "names that must be capitalized (people, places, "
-                          "brands, religious names). Matching ignores case "
-                          "and punctuation and fixes every occurrence; both "
-                          "sides must have the SAME word count. Word timings "
-                          "are never touched. clear=true removes all fixes.",
-                          {"replacements": {"type": "array",
-                                            "items": {"type": "array",
-                                                      "items": {"type":
-                                                                "string"}}},
-                           "clear": {"type": "boolean"}}),
+    "set_caption_fixes": (set_caption_fixes,
+        "Edit displayed captions. Default operation=replace replaces the COMPLETE active set. "
+        "append upserts by matching text and scope; clear removes all; list returns active fixes "
+        "and compiled caption preview. replacements accepts [from,to] pairs or objects with "
+        "from,to and optional start,end in OUTPUT seconds to target one occurrence. "
+        "Word-count changes, punctuation and capitalization are supported; replacement text "
+        "is exact. Audio/cuts remain unchanged. A preview is returned without video encoding.",
+        {"replacements": {"type": "array", "items": {"anyOf": [
+            {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 2},
+            {"type": "object", "properties": {"from": {"type": "string"},
+             "to": {"type": "string"}, "start": {"type": "number"},
+             "end": {"type": "number"}}, "required": ["from", "to"]}]}},
+         "operation": {"type": "string", "enum": ["replace", "append", "clear", "list"]},
+         "clear": {"type": "boolean"}}),
     "add_freeze_frame": (add_freeze_frame, "FREEZE the picture on a moment "
                          "and hold it, optionally with a line of text over "
                          "the held frame — the 'pearl' / power-phrase move: "
@@ -23878,21 +23954,15 @@ TOOLS = {
                        "is stronger timing evidence than a visual critic.",
                        {"offset": {"type": "integer"},
                         "limit": {"type": "integer"}}),
-    "render_preview": (render_preview, "Verify the current EDL efficiently. "
-                       "During iteration (default complete=false), render "
-                       "only the output seconds affected since the last "
-                       "complete preview and inspect their proof frames; the "
-                       "short proof reel never replaces the Studio player. "
-                       "When the edit is ready, complete=true is only a "
-                       "readiness hint: the in-house loop, not this tool call, "
-                       "renders and attaches exactly one complete 480p preview "
-                       "at turn end. When only COLOR changed "
-                       "since the last render, this returns a ~2s grade "
-                       "contact strip instead of re-encoding the program — "
-                       "iterate the look against the strip; the complete "
-                       "readiness render still happens exactly once.",
-                       {"complete": {"type": "boolean",
-                                     "description": "False/default: changed sections only. True: mark ready; the one complete preview is still automatic at turn end."}}),
+    "render_preview": (render_preview,
+        "Render evidence for the current immutable EDL. complete=false makes changed-section "
+        "proof only; this does not create a watchable complete preview. complete=true creates "
+        "the complete stored video, even on the first call. quality=approval implies complete=true "
+        "and renders from the original at up to 720x1280 portrait using the final composition "
+        "and typography path; draft is the inexpensive 480px preview. Use watch_video(render=false) "
+        "or download_url to retrieve it; wait_for_job reports the render job and durable asset.",
+        {"complete": {"type": "boolean"},
+         "quality": {"type": "string", "enum": ["draft", "approval"]}}),
     "justify_verification_findings": (
         justify_verification_findings,
         "Resolve a genuine verification false positive only after direct "

@@ -473,7 +473,7 @@ def test_reframe_track_marks_no_face_shots_as_safe_fit(tmp_path):
     assert result.startswith("EDL v1 -> v2")
     assert [span["mode"] for span in ctx.edl["frame"]["focus_track"]] == [
         "crop", "pad_blur", "crop"]
-    assert "had no measured face" in result
+    assert "had no unambiguous measured face" in result
 
 
 def test_reframe_track_handles_one_face_then_unmeasured_broll(tmp_path):

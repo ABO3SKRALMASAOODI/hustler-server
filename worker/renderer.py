@@ -15,6 +15,7 @@ Every render also emits a 3x3 contact sheet for the agent's self-check.
 """
 
 import hashlib
+from contextvars import ContextVar
 import json
 import math
 import os
@@ -616,10 +617,13 @@ def _needs_preview_downscale(H):
     that was needed ships a full-resolution file as the "preview" — slower to
     encode and larger than the final it stands in for.
     """
-    cap = config.PREVIEW_MAX_HEIGHT
+    cap = 1280 if _PREVIEW_QUALITY.get() == "approval" else config.PREVIEW_MAX_HEIGHT
     if not cap:
         return False
     return H is None or H > cap
+
+
+_PREVIEW_QUALITY = ContextVar("preview_quality", default="draft")
 
 
 def preview_geometry(W, H, fps):
@@ -653,11 +657,11 @@ def preview_geometry(W, H, fps):
     burned at 480 is text rendered at 480, not text rendered at 540 and then
     resampled.
     """
-    cap = config.PREVIEW_MAX_LONG_EDGE
+    cap = 1280 if _PREVIEW_QUALITY.get() == "approval" else config.PREVIEW_MAX_LONG_EDGE
     if cap and max(W, H) > cap:
         k = cap / float(max(W, H))
         W, H = _even(W * k), _even(H * k)
-    hcap = config.PREVIEW_MAX_HEIGHT
+    hcap = 1280 if _PREVIEW_QUALITY.get() == "approval" else config.PREVIEW_MAX_HEIGHT
     if hcap and H > hcap:
         k = hcap / float(H)
         W, H = _even(W * k), _even(H * k)
@@ -3892,6 +3896,7 @@ def _caption_index_fp(edl_json, index):
     if not (isinstance(caps, dict) and caps.get("mode") == "from_transcript"):
         return None
     h = hashlib.sha256()
+    h.update(b"caption-compiler:program-end-clamp-v1;")
     for w in (index.get("words") or []):
         h.update(f"{w.get('w', '')}|{w.get('t0')}|{w.get('t1')};"
                  .encode("utf-8"))
@@ -4654,6 +4659,17 @@ def _audio_model_review_cache_compatible(requested, edl, meta):
 
 
 def run_render_job(worker_db, job):
+    quality = (job.get("payload") or {}).get("quality", "draft")
+    if quality not in ("draft", "approval"):
+        raise dbx.PermanentJobError("Unknown preview quality")
+    token = _PREVIEW_QUALITY.set(quality)
+    try:
+        return _run_render_job(worker_db, job)
+    finally:
+        _PREVIEW_QUALITY.reset(token)
+
+
+def _run_render_job(worker_db, job):
     job_id, project_id = job["id"], job["project_id"]
     # Which run of this job we are. The dispatcher ships it (remote._job_payload)
     # so an abandoned executor can tell "still mine" from "the retry has already
@@ -4703,7 +4719,9 @@ def run_render_job(worker_db, job):
     # is served forever after the transcript gains words.
     cached = (None if force or proof_only else
               worker_db.run(dbx.find_render_asset, project_id, variant, version))
-    if cached and (cached.get("meta") or {}).get("src_sha256") == \
+    if cached and (_PREVIEW_QUALITY.get() != "approval" or
+                   (cached.get("meta") or {}).get("quality") == "approval") and \
+            (cached.get("meta") or {}).get("src_sha256") == \
             src_sha and storage.exists(cached["storage_key"]):
         caps = edl_row["json"].get("captions")
         needs_fp = isinstance(caps, dict) and caps.get("mode") == "from_transcript"
@@ -4755,7 +4773,9 @@ def run_render_job(worker_db, job):
                         cached_meta, audio_model_review),
                     "audio_model_review": audio_model_review,
                     "duration_s": cached["duration_s"], "edl_version": version,
-                    "variant": variant, "cached": True}
+                    "variant": variant, "render_job_id": cached_meta.get("render_job_id"),
+                    "quality": cached_meta.get("quality", "draft"),
+                    "sha256": cached.get("sha256"), "cached": True}
     if is_canvas:
         index = {}
         src_asset = None
@@ -4766,7 +4786,7 @@ def run_render_job(worker_db, job):
         index = index_row["json"]
 
         src_asset = original
-        if variant == "preview":
+        if variant == "preview" and _PREVIEW_QUALITY.get() != "approval":
             proxy = worker_db.run(dbx.latest_asset, project_id, "proxy")
             if proxy:
                 src_asset = proxy
@@ -4782,7 +4802,9 @@ def run_render_job(worker_db, job):
                 "Exports render from the full-resolution original, which is "
                 f"still uploading ({pct}% done). The edit is saved — export "
                 "again once it lands.")
-        clean_key = clean_source_key(edl_row["json"], variant, src_sha)
+        clean_key = clean_source_key(edl_row["json"],
+                                     "final" if _PREVIEW_QUALITY.get() == "approval" else variant,
+                                     src_sha)
         if clean_key:
             if not storage.exists(clean_key):
                 raise RuntimeError(
@@ -4892,7 +4914,7 @@ def run_render_job(worker_db, job):
                       flush=True)
                 continue
             try:
-                if variant == "preview":
+                if variant == "preview" and _PREVIEW_QUALITY.get() != "approval":
                     patch_locals[pt["id"]] = _job_cached_source(
                         pt["asset_key"], workdir) \
                         or _fetch_into(workdir, pt["asset_key"], pt["id"])
@@ -4976,7 +4998,7 @@ def run_render_job(worker_db, job):
                     job["payload"].get("verify_times") or [],
                     progress_cb=_prog,
                     raw_pages=job["payload"].get("check_pages") or [])
-        if not proof_only and variant == "preview" \
+        if not proof_only and variant == "preview" and _PREVIEW_QUALITY.get() != "approval" \
                 and not force and not want_wm \
                 and not is_canvas:
             try:
@@ -5271,13 +5293,21 @@ def run_render_job(worker_db, job):
                 + [item["key"] for item in listen_keys])
             raise dbx.JobLeaseLost(
                 "job was cancelled or handed to another worker")
+        digest = hashlib.sha256()
+        with open(out_local, "rb") as rendered_file:
+            for block in iter(lambda: rendered_file.read(1024 * 1024), b""):
+                digest.update(block)
+        render_sha = digest.hexdigest()
         asset_id = worker_db.run(
             dbx.insert_asset, project_id, "render", render_key,
+            sha256=render_sha,
             bytes_=os.path.getsize(out_local), duration_s=out_dur,
             width=out_info["width"], height=out_info["height"],
             fps=out_info["fps"],
             meta={"variant": asset_variant, "edl_version": version,
                   "render_job_id": job_id,
+                  "quality": _PREVIEW_QUALITY.get(),
+                  "sha256": render_sha,
                   "sheet_key": sheet_key, "verify_sheet_key": verify_sheet_key,
                   "caption_sheet_key": caption_sheet_key,
                   "caption_pages": caption_pages,
@@ -5307,41 +5337,8 @@ def run_render_job(worker_db, job):
                            watermark_version(variant, is_paid, wm_settings)),
                   "wm_p": (watermark_position(wm_settings)
                            if want_wm else None)})
-        # Reclaim the renders this one just replaced. Unique-per-render keys
-        # made recovery possible but left every superseded object in the bucket
-        # forever; only this exact (variant, version) is pruned, so pinned older
-        # VERSIONS still play. Best-effort — never fail a finished render over
-        # cleanup.
-        try:
-            old = worker_db.run(
-                dbx.stale_preview_checks, project_id, asset_id,
-                proof_set_id) \
-                if proof_only else worker_db.run(
-                    dbx.superseded_renders, project_id, asset_variant,
-                    version, asset_id)
-            if old:
-                keys = []
-                for a in old:
-                    keys.append(a["storage_key"])
-                    keys.append((a.get("meta") or {}).get("sheet_key"))
-                    keys.append((a.get("meta") or {}).get("verify_sheet_key"))
-                    keys.append((a.get("meta") or {}).get("caption_sheet_key"))
-                    keys.extend(page.get("key") for page in
-                                ((a.get("meta") or {}).get(
-                                    "caption_pages") or [])
-                                if isinstance(page, dict))
-                    keys.extend(page.get("key") for page in
-                                ((a.get("meta") or {}).get(
-                                    "screening_pages") or [])
-                                if isinstance(page, dict))
-                    keys.extend((a.get("meta") or {}).get("listen_keys")
-                                or [])
-                storage.delete_keys(keys)
-                worker_db.run(dbx.delete_assets, [a["id"] for a in old])
-                print(f"[render {job_id}] pruned {len(old)} superseded "
-                      f"render(s) for v{version}", flush=True)
-        except Exception as e:
-            print(f"[render {job_id}] prune skipped: {e}", flush=True)
+        # Completed renders, including proof reels, remain recoverable history.
+        # Never delete an asset referenced by an issued receipt.
         # Deterministic mid-word audit: keep boundaries that clip a word,
         # computed straight from the index — visible in logs and to the
         # agent even if it ignored the write-time warnings. Meaningless (and
@@ -5353,6 +5350,8 @@ def run_render_job(worker_db, job):
             print(f"[render {job_id}] MID-WORD AUDIT: {'; '.join(mw)}",
                   flush=True)
         return {"render_asset_id": asset_id, "sheet_key": sheet_key,
+                "render_job_id": job_id, "quality": _PREVIEW_QUALITY.get(),
+                "sha256": render_sha,
                 "verify_sheet_key": verify_sheet_key,
                 "caption_sheet_key": caption_sheet_key,
                 "caption_pages": caption_pages,

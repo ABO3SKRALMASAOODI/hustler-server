@@ -166,7 +166,8 @@ def _parse_deepgram(payload):
         except (TypeError, ValueError):
             spk = None
         words.append(Word(w=token, t0=round(t0, 3), t1=round(t1, 3),
-                          speaker=spk, filler=is_filler_token(token)))
+                          speaker=spk, confidence=w.get("confidence"),
+                          filler=is_filler_token(token)))
     lang = ch.get("detected_language") or alts[0].get("language") or "en"
     return words, str(lang)
 
@@ -409,6 +410,7 @@ def _transcribe_whisper(wav_path, progress_cb=None):
             words.append(Word(w=token,
                               t0=round(float(w.start), 3),
                               t1=round(float(w.end), 3),
+                              confidence=getattr(w, "probability", None),
                               filler=is_filler_token(token)))
         if duration > 0:
             _report_progress(

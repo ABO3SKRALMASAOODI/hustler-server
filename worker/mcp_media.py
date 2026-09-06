@@ -129,6 +129,9 @@ def _preview_receipt(asset, version):
     return {
         "asset_id": int(asset.get("id")),
         "render_job_id": int(meta.get("render_job_id")),
+        "render_type": "complete_preview",
+        "quality": meta.get("quality", "draft"),
+        "sha256": asset.get("sha256") or meta.get("sha256"),
         "edl_version": int(version),
         "duration_s": float(asset.get("duration_s")),
         "audio_model_review": False,
@@ -171,11 +174,21 @@ def _preview_for_watching(ctx, render):
     stale = ctx.db.run(dbx.latest_render, ctx.project_id, "preview")
     if not render:
         if not stale:
+            available = []
+            for variant, label in (("preview_check", "changed-section preview"),
+                                   ("final", "final export")):
+                other = ctx.db.run(dbx.latest_render, ctx.project_id, variant)
+                if other:
+                    meta = other.get("meta") or {}
+                    available.append(
+                        f"{label}: asset {other['id']}, EDL v{meta.get('edl_version')}; "
+                        f"download_url(project_id={ctx.project_id}, kind=\"{variant}\", "
+                        f"asset_id={other['id']})")
             raise Unavailable(
-                "Nothing has been rendered in this project yet, so there is "
-                "no program to watch. Call render_preview (or watch_video "
-                "again without render=false) and the current edit becomes a "
-                "file.")
+                "No complete preview exists to watch. "
+                + ("Available renders: " + "; ".join(available) + ". " if available else "")
+                + "Call render_preview(complete=true) or watch_video(render=true) "
+                "to create the complete program preview.")
         if not _deterministic_preview(stale):
             raise Unavailable(
                 "The last preview was not created under the MCP "

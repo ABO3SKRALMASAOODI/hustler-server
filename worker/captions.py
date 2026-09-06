@@ -25,6 +25,7 @@ relative to the 1280x720 the base numbers were tuned on.
 """
 
 import os
+import math
 import re
 
 from schemas import MAX_WORDS_PER_CAPTION
@@ -1009,6 +1010,56 @@ def apply_text_fixes(words, fixes):
     return out
 
 
+def apply_scoped_fixes(words, fixes):
+    """Apply explicit text edits once, inside optional output-time windows.
+
+    Unequal word counts divide the original spoken span between display
+    tokens. This changes caption timing within that span, never audio/cuts.
+    """
+    # A scoped edit beats a global one; within a scope, prefer a whole phrase.
+    # Last-authored rules win ties without feeding replacements into each other.
+    rules = sorted(reversed(fixes or []), key=lambda r:
+                   (r.get("start") is None, -len(r["from"].split())))
+    out, i = [], 0
+    while i < len(words):
+        matched = False
+        for rule in rules:
+            source = rule["from"].split()
+            group = words[i:i + len(source)]
+            if len(group) != len(source) or any(w.get("brk") for w in group[1:]):
+                continue
+            if not all(_norm_word(w["w"]) == _norm_word(t)
+                       for w, t in zip(group, source)):
+                continue
+            if rule.get("start") is not None and group[0]["t0"] < rule["start"] - .001:
+                continue
+            if rule.get("end") is not None and group[-1]["t1"] > rule["end"] + .001:
+                continue
+            tokens = rule["to"].split()
+            start, end = group[0]["t0"], group[-1]["t1"]
+            for j, token in enumerate(tokens):
+                if len(tokens) == len(group):
+                    if rule.get("preserve_affixes"):
+                        lead, _, trail = _split_affixes(group[j]["w"])
+                        token = lead + token + trail
+                    word = dict(group[j], w=token)
+                else:
+                    word = dict(group[0], w=token,
+                                t0=start + (end-start)*j/len(tokens),
+                                t1=start + (end-start)*(j+1)/len(tokens),
+                                src_t1=group[-1].get("src_t1"))
+                    if j:
+                        word.pop("brk", None)
+                out.append(word)
+            i += len(group)
+            matched = True
+            break
+        if not matched:
+            out.append(dict(words[i]))
+            i += 1
+    return out
+
+
 def _display_word(w, upper):
     """Presentation form: captions in the premium looks drop trailing
     sentence punctuation (the reference style shows none)."""
@@ -1375,6 +1426,8 @@ def _chunk_region_v2(words, max_w, chunk_chars, p):
             # Prefer the authored target, but make a one-word card expensive
             # unless the preset itself is one-word (spotlight).
             cost = 0.34 * (count - target) ** 2
+            if p.get("min_words") and count < min(int(p["min_words"]), max_w):
+                cost += 20 * (min(int(p["min_words"]), max_w) - count)
             if count == 1 and max_w > 1:
                 cost += 2.4
             # Very short multi-word flashes read as flicker; excessively long
@@ -1417,7 +1470,11 @@ def _premium_chunks_v2(out_words, max_w, chunk_chars, p):
     """Prosody-aware caption cards for design_version 2."""
     regions, current = [], []
     for word in out_words:
-        if current and _hard_phrase_break(current[-1], word):
+        if current and _hard_phrase_break(current[-1], word) and not (
+                p.get("min_words") and len(current) < int(p["min_words"])
+                and not word.get("brk")
+                and str(current[-1].get("w") or "").rstrip("\"'”’ ")[-1:] not in _STRONG_END
+                and float(word["t0"]) - float(current[-1]["t1"]) < 1.2):
             regions.append(current)
             current = []
         current.append(word)
@@ -1890,12 +1947,14 @@ def _stack_state_events(disp, treats, mults, lines, geoms, p, s, px, accent, bas
 
 def events_premium(out_words, style=None, max_words=None,
                    play_res=BASE_PLAY_RES, emphasis_words=None,
-                   design_version=None):
+                   design_version=None, min_words=None):
     """from_transcript events for a premium preset. Timing comes ONLY from
     the real word timestamps; layout and treatments are deterministic, so
     the same EDL always renders the same frame."""
     s = _norm_style(style)
-    p = _preset_of(s)
+    p = dict(_preset_of(s))
+    if min_words is not None:
+        p["min_words"] = int(min_words)
     fx = play_res[0] / BASE_PLAY_RES[0]
     fy = play_res[1] / BASE_PLAY_RES[1]
     f = max(fx, fy)
@@ -2398,7 +2457,8 @@ def _positioned_events(out_words, captions, global_style, play_res):
                 max_words=captions.get("max_words_per_caption"),
                 play_res=play_res,
                 emphasis_words=captions.get("emphasis_words"),
-                design_version=captions.get("design_version"))
+                design_version=captions.get("design_version"),
+                min_words=captions.get("min_words_per_caption"))
         elif _norm_style(run_style)["dynamic"]:
             made = events_dynamic(
                 words, style=run_style,
@@ -2460,7 +2520,12 @@ def compiled_events(edl, index, tl, play_res=BASE_PLAY_RES):
         # Text corrections (round 52) are applied to the DISPLAYED words only,
         # before any grouping, so every preset family inherits them and the
         # timings they were grouped by never move.
-        out_words = apply_text_fixes(out_words, captions.get("text_fixes"))
+        if captions.get("corrections"):
+            legacy = [{"from": a, "to": b, "preserve_affixes": True}
+                      for a, b in captions.get("text_fixes") or []]
+            out_words = apply_scoped_fixes(out_words, legacy + captions["corrections"])
+        else:
+            out_words = apply_text_fixes(out_words, captions.get("text_fixes"))
         # Mutes at the WORD level, same stage (round 96c): grouping then
         # builds events around the gap, so captions resume at the window's
         # edge instead of one whole block late.
@@ -2475,7 +2540,8 @@ def compiled_events(edl, index, tl, play_res=BASE_PLAY_RES):
                 max_words=captions.get("max_words_per_caption"),
                 play_res=play_res,
                 emphasis_words=captions.get("emphasis_words"),
-                design_version=captions.get("design_version"))
+                design_version=captions.get("design_version"),
+                min_words=captions.get("min_words_per_caption"))
         elif _norm_style(global_style)["dynamic"]:
             events = events_dynamic(
                 out_words, style=global_style,
@@ -2516,6 +2582,12 @@ def compiled_events(edl, index, tl, play_res=BASE_PLAY_RES):
         events = _clamp_event_ends_to_mutes(events, mutes)
     else:
         events = apply_mutes(events, mutes)
+    # Display holds must never outlive the program (or spill into the outro).
+    # ASS has centisecond precision; floor the endpoint to stay inside it.
+    program_end = math.floor(float(tl.out_duration) * 100 + 1e-7) / 100
+    events = [dict(ev, start=max(0.0, ev["start"]),
+                   end=min(ev["end"], program_end)) for ev in events
+              if min(ev["end"], program_end) > max(0.0, ev["start"]) + .01]
     if not events:
         return [], global_style
     return events, global_style

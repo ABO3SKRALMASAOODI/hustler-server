@@ -263,6 +263,21 @@ def test_adopted_preview_without_false_receipt_is_rejected(monkeypatch):
         mcp_media._preview_for_watching(ctx, render=True)
 
 
+def test_watch_reports_changed_section_asset_without_claiming_complete_preview():
+    ctx = _Ctx()
+    class CheckOnlyDb:
+        def run(self, fn, *args):
+            if fn is mcp_media.dbx.latest_render and args[1] == "preview_check":
+                return {"id": 52, "meta": {"edl_version": 7}}
+            return None
+    ctx.db = CheckOnlyDb()
+    result = mcp_media.prepare(ctx, {"render": False}, 12 * MB)
+    assert result["is_error"]
+    assert "No complete preview" in result["text"]
+    assert "changed-section preview: asset 52" in result["text"]
+    assert "render_preview(complete=true)" in result["text"]
+
+
 def test_the_default_never_embeds_however_small_the_file():
     """THE BUG THIS EXISTS FOR (Aug 3 2026). Embedding whenever the file fit
     assumed a client that cannot render a video block would ignore it. Grok

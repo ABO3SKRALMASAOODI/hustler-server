@@ -1205,6 +1205,8 @@ def upsert_change_manifest(conn, project_id, edl_version, manifest):
 
 def upsert_verification_record(conn, project_id, edl_version, record):
     """Persist the newest repair/pass evidence for one immutable EDL."""
+    from quality_verifier import json_record
+    record = json_record(record)
     status = str((record or {}).get("status") or "pending")
     with conn.cursor() as cur:
         cur.execute("SELECT to_regclass('public.verification_records') AS t")
@@ -1285,8 +1287,10 @@ def get_or_enqueue_preview_job(conn, project_id, user_id, payload):
                          AND COALESCE(
                                (payload->>'audio_model_review')::boolean,
                                true) = %s
+                         AND COALESCE(payload->>'quality', 'draft') = %s
                        ORDER BY id DESC LIMIT 1""",
-                    (project_id, str(version), audio_model_review))
+                    (project_id, str(version), audio_model_review,
+                     (payload or {}).get("quality", "draft")))
         row = cur.fetchone()
         if row:
             return row["id"], False

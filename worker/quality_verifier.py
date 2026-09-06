@@ -12,6 +12,7 @@ import hashlib
 import json
 import math
 import re
+from datetime import date, datetime
 
 from schemas import program_duration
 from timeline import Timeline
@@ -39,6 +40,15 @@ _DEPARTMENTS = {
 def _canon(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"),
                       default=str, ensure_ascii=False)
+
+
+def json_record(value):
+    """Copy durable evidence without losing database timestamp types."""
+    def encode(item):
+        if isinstance(item, (datetime, date)):
+            return item.isoformat()
+        raise TypeError(f"Unsupported verification value: {type(item).__name__}")
+    return json.loads(json.dumps(value, default=encode))
 
 
 def _new_items(before, after, key):
@@ -144,6 +154,8 @@ def _text_corruption_findings(edl):
     elif isinstance(captions, dict):
         texts += [value for pair in captions.get("text_fixes") or []
                   for value in pair]
+        texts += [value for rule in captions.get("corrections") or []
+                  for value in (rule.get("from"), rule.get("to"))]
     for text in texts:
         value = str(text or "")
         if "\ufffd" in value or "\x00" in value:
@@ -221,19 +233,55 @@ def _reframe_findings(edl, index):
         return []
     shots = list((index or {}).get("shots") or [])
     track = list(frame.get("focus_track") or [])
-    if len(shots) <= 1:
+    timeline = Timeline(edl.get("keep") or [], edl.get("inserts") or [],
+                        edl.get("speed") or [])
+    active = [(shot, max(float(shot.get("start", 0)), s),
+               min(float(shot.get("end", 0)), e))
+              for shot in shots for s, e in timeline.segs
+              if min(float(shot.get("end", 0)), e) >
+              max(float(shot.get("start", 0)), s) + .001]
+    if len({(sh.get("start"), sh.get("end")) for sh, _, _ in active}) <= 1:
         return []
+    # Only ordinary, stationary covers hide the source for their entire span.
+    # PNG alpha, screen pins, animation and rotation can expose the source.
+    covers = sorted((float(ov.get("start", 0)), float(ov.get("start", 0)) +
+                     float(ov.get("duration_s", 0))) for ov in edl.get("overlays") or []
+                    if ov.get("fit") == "cover" and ov.get("kind") == "video"
+                    and ov.get("opacity") in (None, 1, 1.0)
+                    and ov.get("x", .5) == .5 and ov.get("y", .5) == .5
+                    and not any(ov.get(key) for key in
+                                ("entrance", "exit", "screen", "rotation", "motion_motif")))
+
+    def hidden(a, b):
+        cursor = a
+        for left, right in covers:
+            if left > cursor + .001:
+                break
+            cursor = max(cursor, right)
+        return cursor >= b - .001
+
     uncovered = []
-    for shot in shots:
-        mid = (float(shot.get("start", 0)) + float(shot.get("end", 0))) / 2
-        if not any(float(row.get("t0", 0)) <= mid <= float(row.get("t1", 0))
-                   for row in track):
-            uncovered.append(shot.get("id"))
+    for shot, start, end in active:
+        visible_ranges = timeline.span_to_out(start, end)
+        if visible_ranges and all(hidden(a, b) for a, b in visible_ranges):
+            continue
+        cursor = start
+        for row in sorted(track, key=lambda row: float(row.get("t0", 0))):
+            left, right = float(row.get("t0", 0)), float(row.get("t1", 0))
+            if left > cursor + .001:
+                break
+            if right > cursor:
+                cursor = right
+        if cursor < end - .001:
+            uncovered.append({"shot_id": shot.get("id"),
+                              "source_range": [start, end],
+                              "timeline_ranges": timeline.span_to_out(start, end)})
     if uncovered:
         return [_finding(
             "scene_unaware_reframe", "reframe",
             f"Global crop lacks shot-specific focus evidence for {len(uncovered)} scene(s).",
-            {"shot_ids": uncovered[:40]},
+            {"shot_ids": list(dict.fromkeys(r["shot_id"] for r in uncovered)),
+             "intervals": uncovered},
             "measure every scene and author focus_track spans or use a safe fit mode")]
     return []
 
@@ -517,7 +565,11 @@ def justify_findings(record, finding_ids, justification, evidence_ids=None):
     original finding plus who/what justified it, so repairs remain preferable
     and reviewable.
     """
-    updated = json.loads(json.dumps(record or {}))
+    record = record or {}
+    # Database reads wrap the actual document with status/updated_at.
+    if isinstance(record.get("record"), dict):
+        record = record["record"]
+    updated = json_record(record)
     requested = {str(value).strip() for value in (finding_ids or [])
                  if str(value).strip()}
     reason = str(justification or "").strip()
@@ -530,6 +582,11 @@ def justify_findings(record, finding_ids, justification, evidence_ids=None):
                if str(row.get("finding_id")) in requested
                or str(row.get("code")) in requested]
     if not matches:
+        already = updated.get("justifications") or []
+        if all(any((value == str(row.get("finding_id")) or value == str(row.get("code")))
+                   and row.get("justification") == reason[:1200]
+                   for row in already) for value in requested):
+            return updated
         raise ValueError("none of those findings are unresolved on this EDL version")
     required_repairs = sorted({row.get("code") for row in matches
                                if row.get("code") in NON_JUSTIFIABLE_FINDINGS})

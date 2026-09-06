@@ -229,9 +229,13 @@ class FakeCur:
                 rows = [row for row in rows if
                         (row.get("meta") or {}).get(
                             "audio_model_review") is False]
-            if "meta->>'edl_version'" in s and len(p) > 2:
+            extra = 2
+            if "AND id = %s" in s:
+                rows = [row for row in rows if row["id"] == p[extra]]
+                extra += 1
+            if "(meta->>'edl_version')::int = %s" in s:
                 rows = [row for row in rows if int(
-                    (row.get("meta") or {}).get("edl_version")) == int(p[2])]
+                    (row.get("meta") or {}).get("edl_version")) == int(p[extra])]
             self.rows = sorted(rows, key=lambda row: row["id"], reverse=True)[:1]
 
     def fetchone(self):
@@ -689,7 +693,8 @@ def test_an_unreadable_frame_never_costs_the_answer(client, monkeypatch):
     res = rpc(client, "tools/call", STATIC_TOKEN,
               {"name": "get_transcript",
                "arguments": {"project_id": 3}}).get_json()["result"]
-    assert [c["type"] for c in res["content"]] == ["text"]
+    assert all(c["type"] == "text" for c in res["content"])
+    assert any("FRAME EMBED FAILED" in c["text"] for c in res["content"])
     assert res.get("isError") is not True
 
 
@@ -766,7 +771,8 @@ def test_visual_evidence_receipt_counts_actual_public_delivery(
     assert receipt["delivered_this_response"] == 1
     assert receipt["delivery_status"] == "delivered"
     assert len(receipt["retrievable_receipts"]) == 2
-    assert [block["type"] for block in public["content"]] == ["text", "image"]
+    assert sum(block["type"] == "image" for block in public["content"]) == 1
+    assert any("FRAME EMBED FAILED" in block.get("text", "") for block in public["content"])
 
 
 def test_disjoint_inline_and_receipt_evidence_count_as_complete(
@@ -1636,3 +1642,57 @@ def test_production_gunicorn_keeps_threaded_http_capacity_for_mcp_waits():
     assert "--workers 3" in start
     assert "--worker-class gthread" in start
     assert "--threads 8" in start
+
+
+def test_wait_for_job_delivers_captured_images(client, monkeypatch):
+    DB["job_result"] = {"text":"Captured frame at 1.2s", "edl_version":8,
+                        "images":[{"storage_key":"media/3/frame.png", "label":"output 1.2s",
+                                   "edl_version":8,"mime_type":"image/png"}]}
+    monkeypatch.setattr(mcpmod.storage,"get_object_whole",lambda *_: b"png-image")
+    monkeypatch.setattr(mcpmod.storage,"presign_get",lambda *_: "https://cdn.example/frame.png")
+    result=rpc(client,"tools/call",STATIC_TOKEN,{"name":"wait_for_job",
+                "arguments":{"job_id":5}}).get_json()["result"]
+    assert any(block["type"]=="image" and block["mimeType"]=="image/png" for block in result["content"])
+    assert any("https://cdn.example/frame.png" in block.get("text","") for block in result["content"])
+    assert result["structuredContent"]["images"][0]["edl_version"] == 8
+
+
+
+def test_wait_recovers_download_receipt_with_its_durable_job_id(client):
+    DB["job_result"] = {"download_receipt": {"asset_id": 44, "edl_version": 8,
+                        "download_status": "link_issued"}}
+    result = rpc(client, "tools/call", STATIC_TOKEN, {"name": "wait_for_job",
+                  "arguments": {"job_id": 5}}).get_json()["result"]
+    assert result["structuredContent"]["download_receipt"]["download_job_id"] == 5
+
+
+
+@pytest.mark.parametrize("state", ["queued", "running", "failed", "done"])
+def test_render_status_distinguishes_changed_section_jobs(client, monkeypatch, state):
+    monkeypatch.setattr(mcpmod, "_wait", lambda *_: {
+        "id": 8, "type": "preview_check", "state": state, "project_id": 3,
+        "payload": {"edl_version": 12}, "progress": 100,
+        "result": {"edl_version": 12, "render_asset_id": 55}})
+    result = rpc(client, "tools/call", STATIC_TOKEN, {"name": "wait_for_job",
+                  "arguments": {"job_id": 8}}).get_json()["result"]
+    assert result["structuredContent"]["job"]["state"] == state
+    assert result["isError"] == (state == "failed")
+    if state == "done":
+        assert result["structuredContent"]["render"]["render_type"] == "changed_section_preview"
+
+
+
+@pytest.mark.parametrize("kind", ["preview_check", "final"])
+def test_download_exact_historical_changed_section_asset(client, monkeypatch, kind):
+    DB["render_assets"] = [{"id": n, "project_id": 3, "storage_key": f"p/{n}.mp4",
+        "duration_s": 3, "sha256": "a" * 64, "meta": {"variant": kind,
+            "edl_version": 8, "audio_model_review": False, "render_job_id": 92}}
+        for n in [44, 45]]
+    monkeypatch.setattr(mcpmod.storage, "presign_get", lambda key: "https://cdn.example/" + key)
+    result = rpc(client, "tools/call", STATIC_TOKEN, {"name": "download_url",
+        "arguments": {"project_id": 3, "kind": kind, "asset_id": 44,
+                      "edl_version": 8}}).get_json()["result"]
+    receipt = result["structuredContent"]["preview_receipt" if kind == "preview_check" else "download_receipt"]
+    assert receipt["asset_id"] == 44
+    assert receipt["render_type"] == ("changed_section_preview" if kind == "preview_check" else "final_export")
+    assert receipt["sha256"] == "a" * 64

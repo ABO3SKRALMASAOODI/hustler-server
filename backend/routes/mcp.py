@@ -52,6 +52,7 @@ import math
 import os
 import secrets
 import time
+from datetime import datetime, timezone
 
 import psycopg2
 from flask import Blueprint, request, jsonify, current_app, Response
@@ -536,12 +537,14 @@ SESSION_TOOLS = [
          "job_id": {"type": "integer"}}, "required": ["job_id"]}},
     {"name": "download_url",
      "description": "A temporary URL for watching or downloading a render of "
-                    "an explicit project. kind 'preview' (fast, 540p) or "
+                    "an explicit project, with a durable receipt. asset_id recovers a historical render. "
+                    "kind 'preview' (complete draft/approval), 'preview_check' (changed sections), or "
                     "'final' (an existing Studio or Shorts export). This tool "
                     "cannot create a final export.",
      "inputSchema": {"type": "object", "properties": {
          "project_id": {"type": "integer"},
-         "kind": {"type": "string", "enum": ["preview", "final"]},
+         "kind": {"type": "string", "enum": ["preview", "preview_check", "final"]},
+         "asset_id": {"type": "integer"},
          "edl_version": {"type": "integer"}},
          "required": ["project_id"]}},
     {"name": "watch_video",
@@ -833,6 +836,11 @@ def _preview_asset_receipt(row, url=None):
     receipt = {
         "asset_id": asset_id,
         "render_job_id": render_job_id,
+        "render_type": ("changed_section_preview" if meta.get("variant") == "preview_check"
+                        else "complete_preview"),
+        "quality": meta.get("quality", "draft"),
+        "sha256": row.get("sha256") or meta.get("sha256"),
+        "timeline_ranges": meta.get("changed_ranges"),
         "edl_version": edl_version,
         "duration_s": duration_s,
         "audio_model_review": False,
@@ -857,6 +865,10 @@ def _editor_structured_content(result):
     preview = result.get("preview")
     if isinstance(preview, dict):
         out["preview"] = preview
+    for key in ("changed_section_preview", "changed_section_previews",
+                "images", "images_remaining", "error", "download_receipt"):
+        if key in result:
+            out[key] = result[key]
     return out
 
 
@@ -1641,6 +1653,9 @@ def _t_wait_for_job(tok, args):
     row = _wait(job_id, tok["user_id"])
     if not row:
         return _session_error(f"No job {job_id} on this account.")
+    job_status = {"job_id": job_id, "state": row["state"], "type": row["type"],
+                  "project_id": row.get("project_id"), "progress": row.get("progress"),
+                  "edl_version": (row.get("payload") or {}).get("edl_version")}
     identity = ""
     if row.get("project_id") is not None:
         with vdb() as conn:
@@ -1654,31 +1669,55 @@ def _t_wait_for_job(tok, args):
                 row, row.get("project_id"), f"Job {job_id} (mcp_tool)")
             failed["text"] = identity + failed["text"]
             structured = _editor_structured_content(failed)
+            structured["job"] = job_status
             public = {"content": [{"type": "text",
                                     "text": failed["text"]}],
                       "isError": True}
             if structured:
                 public["structuredContent"] = structured
             return public
-        return _session_error(
-            identity +
-            f"Job {job_id} ({row['type']}) FAILED: {row.get('error')}")
+        return {"content": [{"type": "text", "text": identity +
+                f"Job {job_id} ({row['type']}) FAILED: {row.get('error')}"}],
+                "structuredContent": {"job": job_status,
+                    "failure": (row.get("result") or {}).get("failure")}, "isError": True}
     if row["state"] in ("queued", "running"):
-        return identity + _still_running(row, f"job {job_id} ({row['type']})")
+        return {"content": [{"type": "text", "text": identity +
+                _still_running(row, f"job {job_id} ({row['type']})")}],
+                "structuredContent": {"job": job_status}, "isError": False}
     result = row.get("result") or {}
     if row["type"] == "mcp_tool":
+        if isinstance(result.get("download_receipt"), dict):
+            result = dict(result, download_receipt={
+                **result["download_receipt"], "download_job_id": job_id})
         text = identity + (result.get("text") or json.dumps(result))
         text += _preview_policy_line(result.get("preview"))
         structured = _editor_structured_content(result)
-        if structured:
-            return {"content": [{"type": "text", "text": text}],
-                    "structuredContent": structured,
-                    "isError": bool(result.get("is_error"))}
-        return text
-    if row["type"] == "final":
-        return (identity + "The final export is rendered. Call "
-                f"download_url(project_id={row['project_id']}, "
-                "kind=\"final\") for the link.")
+        structured["job"] = job_status
+        image_content = _image_blocks(result.get("images"))
+        delivery_failed = any("FRAME DELIVERY FAILED" in b.get("text", "") or
+                              ("FRAME EMBED FAILED" in b.get("text", "") and
+                               "FRAME LINK FAILED" in b.get("text", "")) for b in image_content)
+        if delivery_failed:
+            structured["delivery_outcome"] = _delivery_failure(
+                "Review frames could not be delivered. Request the missing evidence again.",
+                idempotent=True)
+        return {"content": [{"type": "text", "text": text}] + image_content,
+                "structuredContent": structured,
+                "isError": bool(result.get("is_error")) or delivery_failed}
+    if row["type"] in ("preview", "preview_check", "final"):
+        render_type = {"preview": "complete_preview", "preview_check": "changed_section_preview",
+                       "final": "final_export"}[row["type"]]
+        receipt = {"job_id": job_id, "state": row["state"], "render_type": render_type,
+                   "edl_version": result.get("edl_version"),
+                   "asset_id": result.get("render_asset_id"),
+                   "quality": result.get("quality"), "sha256": result.get("sha256"),
+                   "timeline_ranges": result.get("changed_ranges")}
+        if result.get("superseded_by"):
+            receipt.update(state="superseded", superseded_by=result["superseded_by"])
+        elif not receipt["asset_id"]:
+            receipt["state"] = "asset_unavailable"
+        return {"content": [{"type": "text", "text": identity + json.dumps(receipt)}],
+                "structuredContent": {"job": job_status, "render": receipt}, "isError": False}
     if row["type"] == "index":
         return (identity +
                 "Analysis finished — the transcript, shots and silences are "
@@ -1687,13 +1726,36 @@ def _t_wait_for_job(tok, args):
             f"Job {job_id} ({row['type']}) finished: {json.dumps(result)[:800]}")
 
 
+def _record_download_receipt(tok, project_id, receipt):
+    """Persist link issuance, not an unobservable client transfer completion."""
+    saved = {key: value for key, value in receipt.items() if key != "url"}
+    saved["download_status"] = "link_issued"
+    saved["expires_at"] = datetime.fromtimestamp(
+        time.time() + storage.PRESIGN_GET_EXPIRY, timezone.utc).isoformat()
+    with vdb() as conn:
+        cur = conn.cursor()
+        cur.execute("""INSERT INTO video_jobs
+            (project_id, user_id, type, state, progress, payload, result)
+            VALUES (%s, %s, 'mcp_tool', 'done', 100, %s::jsonb, %s::jsonb)
+            RETURNING id""", (project_id, tok["user_id"],
+            json.dumps({"tool": "download_url", "asset_id": receipt.get("asset_id")}),
+            json.dumps({"download_receipt": saved})))
+        saved["download_job_id"] = cur.fetchone()["id"]
+    return saved
+
+
+
 def _t_download_url(tok, args):
     project_id, error = _required_project_id(args)
     if error:
         return _session_error(error)
     kind = args.get("kind") or "preview"
-    if kind not in ("preview", "final"):
-        return _session_error("kind must be 'preview' or 'final'.")
+    if kind not in ("preview", "preview_check", "final"):
+        return _session_error("kind must be preview, preview_check, or final.")
+    try:
+        asset_id = int(args["asset_id"]) if args.get("asset_id") is not None else None
+    except (TypeError, ValueError):
+        return _session_error("asset_id must be an integer.")
     with vdb() as conn:
         cur = conn.cursor()
         project = _project_for_user(cur, project_id, tok["user_id"])
@@ -1702,15 +1764,18 @@ def _t_download_url(tok, args):
                 f"Project {project_id} does not exist on this account.")
         # Renders are assets of kind 'render'; the variant and the EDL version
         # they were made from live in meta.
-        sql = """SELECT id, storage_key, duration_s, meta FROM assets
+        sql = """SELECT id, storage_key, duration_s, sha256, meta FROM assets
                  WHERE project_id = %s AND kind = 'render'
                    AND meta->>'variant' = %s"""
         params = [project_id, kind]
-        if kind == "preview":
+        if kind in ("preview", "preview_check"):
             # Codex preview evidence must carry an explicit deterministic-only
             # receipt. Never hand it a legacy/Studio render whose listener
             # policy cannot be proven from the asset itself.
             sql += " AND meta->>'audio_model_review' = 'false'"
+        if asset_id is not None:
+            sql += " AND id = %s"
+            params.append(asset_id)
         if args.get("edl_version") is not None:
             try:
                 version = int(args["edl_version"])
@@ -1725,10 +1790,10 @@ def _t_download_url(tok, args):
         return _session_error(
             f"No {kind} has been rendered yet"
             + (" with audio_model_review=false — call render_preview."
-               if kind == "preview"
+               if kind in ("preview", "preview_check")
                else " — final export is created in Valmera Studio."))
     receipt = None
-    if kind == "preview":
+    if kind in ("preview", "preview_check"):
         # Validate provenance before minting a bearer URL.  An asset stamped
         # false but still carrying listener excerpts is not deterministic-only
         # evidence and should not escape through this endpoint.
@@ -1745,19 +1810,29 @@ def _t_download_url(tok, args):
     except Exception as e:
         return _session_error(f"Could not mint a download link: {e}")
     ver = (row.get("meta") or {}).get("edl_version")
-    if kind == "preview":
+    if receipt is None:
+        meta = row.get("meta") or {}
+        receipt = {"asset_id": row["id"], "edl_version": ver,
+                   "render_job_id": meta.get("render_job_id"),
+                   "render_type": "final_export", "sha256": row.get("sha256") or meta.get("sha256")}
+    try:
+        receipt.update(_record_download_receipt(tok, project_id, receipt))
+    except Exception:
+        return _text("The asset exists, but the download receipt could not be saved. Retry download_url.", True)
+    if kind in ("preview", "preview_check"):
         receipt["url"] = url
         identity = (f"PROJECT {project_id} — "
                     f"\"{project.get('title') or 'Untitled'}\"")
-        text = (f"{identity}\npreview of EDL v{ver} (link valid a few "
+        text = (f"{identity}\n{kind} of EDL v{ver} (link valid a few "
                 f"hours):\n{url}\n\nPREVIEW RECEIPT: "
                 + json.dumps(receipt, sort_keys=True)
                 + _preview_policy_line(receipt))
         return {"content": [{"type": "text", "text": text}],
                 "structuredContent": {"preview_receipt": receipt},
                 "isError": False}
-    return (f"{kind} of EDL v{ver} (link valid a few hours, hand it to the "
-            f"user as-is):\n{url}")
+    receipt["url"] = url
+    return {"content": [{"type": "text", "text": f"{kind} of EDL v{ver}:\n{url}"}],
+            "structuredContent": {"download_receipt": receipt}, "isError": False}
 
 
 def _t_watch_video(tok, args):
@@ -1867,6 +1942,12 @@ def _t_watch_video(tok, args):
             "blob": blob}})
     public = {"content": content, "isError": bool(missing)}
     structured = _editor_structured_content(result)
+    if isinstance(result.get("preview"), dict):
+        try:
+            structured["download_receipt"] = _record_download_receipt(
+                tok, project_id, result["preview"])
+        except Exception:
+            structured["download_receipt_error"] = "receipt_persistence_failed"
     if missing:
         structured["delivery_outcome"] = _delivery_failure(
             "One or more promised watch_video attachments were not "
@@ -1971,21 +2052,28 @@ def _image_blocks(images, delivered_indexes=None):
     for index, img in enumerate(images or []):
         key = (img or {}).get("storage_key")
         if not key:
+            out.append({"type": "text", "text": "FRAME DELIVERY FAILED: " +
+                        str((img or {}).get("error") or "missing image asset")})
             continue
+        label = img.get("label")
+        text = f"[{label or 'Review frame'}] EDL v{img.get('edl_version', 'unknown')}"
+        try:
+            text += "\nImage URL (use if your client hides image content): " + storage.presign_get(key)
+        except Exception:
+            text += "\nFRAME LINK FAILED: a fresh image link could not be created."
         try:
             raw = storage.get_object_whole(key, IMAGE_MAX_BYTES)
         except Exception:
-            continue
+            raw = None
         if not raw:
-            continue
-        if delivered_indexes is not None:
-            delivered_indexes.add(index)
-        label = img.get("label")
-        if label:
-            out.append({"type": "text", "text": f"[{label}]"})
-        out.append({"type": "image",
-                    "data": base64.b64encode(raw).decode("ascii"),
-                    "mimeType": "image/jpeg"})
+            text += "\nFRAME EMBED FAILED: image bytes are unavailable or exceed the transport limit; use the image URL."
+        out.append({"type": "text", "text": text})
+        if raw:
+            if delivered_indexes is not None:
+                delivered_indexes.add(index)
+            out.append({"type": "image",
+                        "data": base64.b64encode(raw).decode("ascii"),
+                        "mimeType": img.get("mime_type") or "image/jpeg"})
     return out
 
 

@@ -216,7 +216,7 @@ print("== 6b. a stitched preview that fails verification falls back "
       "IN-JOB ==")
 
 import inspect                                                  # noqa: E402
-_src = inspect.getsource(renderer.run_render_job)
+_src = inspect.getsource(renderer._run_render_job)
 check("the verify call is guarded", "except media.MediaError as ve" in _src)
 check("...only a STITCH gets the second chance",
       "if stitched_from is None:" in _src and "raise" in _src)

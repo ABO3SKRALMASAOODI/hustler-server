@@ -637,7 +637,7 @@ def test_missing_department_promise_does_not_block_preview():
         department_plan={
             "captions": {"mode": "author", "purpose": "make speech readable"},
         })
-    result = agent_tools.render_preview(ctx, complete=True)
+    result = agent_tools.render_preview(ctx, complete=False)
     assert not str(result).startswith("REJECTED: READINESS PRECHECK")
     assert ctx.editing_metrics.get("readiness_previews_prevented", 0) == 0
 
@@ -692,7 +692,7 @@ def test_wrong_beat_motion_does_not_block_preview():
         "motion_motif": "earned_push",
     }]}
 
-    result = agent_tools.render_preview(ctx, complete=True)
+    result = agent_tools.render_preview(ctx, complete=False)
     assert not str(result).startswith("REJECTED: READINESS PRECHECK")
     assert ctx.editing_metrics.get("motion_contract_gaps", 0) == 0
 

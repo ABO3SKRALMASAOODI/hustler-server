@@ -30,6 +30,7 @@ surface is sold (see docs/MCP.md).
 """
 
 import ctypes
+import uuid
 import gc
 import os
 import shutil
@@ -181,6 +182,12 @@ def _drain_images(ctx):
     looked at is not something a database should be carrying. The backend
     reads them back and emits them as MCP image content."""
     pending = list(ctx.pending_images or [])
+    metadata = getattr(ctx, "_pending_image_metadata", None)
+    if metadata is None:
+        metadata = ctx._pending_image_metadata = {}
+    for _label, path in pending:
+        metadata.setdefault(path, {"edl_version": ctx.latest_edl()["version"],
+                                   "capture_job_id": ctx.job.get("id")})
     page = pending[:config.MCP_IMAGE_PAGE_SIZE]
     # Transport paging, not loss. A normal look/open call stays within one
     # page; if a future tool produces more, the next MCP call carries the
@@ -189,14 +196,23 @@ def _drain_images(ctx):
     out = []
     for label, path in page:
         try:
-            key = (f"media/{ctx.project_id}/look_"
-                   f"{os.path.basename(path).rsplit('.', 1)[0]}_"
-                   f"{int(os.path.getsize(path))}.jpg")
-            storage.upload_file(path, key, "image/jpeg")
+            with open(path, "rb") as handle:
+                is_png = handle.read(8) == b"\x89PNG\r\n\x1a\n"
+            mime = "image/png" if is_png else "image/jpeg"
+            key = f"media/{ctx.project_id}/look_{uuid.uuid4().hex}." + ("png" if is_png else "jpg")
+            storage.upload_file(path, key, mime)
         except Exception as ex:
             print(f"[mcp] could not publish look frame ({ex})", flush=True)
+            out.append({"label": label, "error": "frame_upload_failed",
+                        **metadata[path]})
+            ctx.pending_images.append((label, path))
             continue
-        out.append({"storage_key": key, "label": label})
+        out.append({"storage_key": key, "label": label, "mime_type": mime,
+                    **metadata[path]})
+    still_pending = {path for _label, path in ctx.pending_images}
+    for _label, path in page:
+        if path not in still_pending:
+            metadata.pop(path, None)
     return out, len(page)
 
 
@@ -411,6 +427,11 @@ def run_mcp_job(worker_db, job):
             out = {"text": text, "edl_version": after,
                    "edl_changed": after != before}
             out.update(_tool_result_contract(ctx, text))
+            if tool == "justify_verification_findings" and text.startswith(
+                    ("CORRECTION NEEDED:", "TRANSIENT FAILURE:", "PREREQUISITE:")):
+                out["is_error"] = True
+                out["error"] = {"code": "verification_justification_failed",
+                                "persisted": False, "edl_version": after}
             pending_after_execute = len(ctx.pending_images or [])
             imgs, publish_attempts = _drain_images(ctx)
             if imgs:
@@ -420,7 +441,7 @@ def run_mcp_job(worker_db, job):
                 "created_this_call": max(
                     0, pending_after_execute - pending_before),
                 "publish_attempts": publish_attempts,
-                "published_this_call": len(imgs),
+                "published_this_call": sum(bool(img.get("storage_key")) for img in imgs),
                 "remaining": len(ctx.pending_images or []),
             }
             if ctx.pending_images:
@@ -438,12 +459,32 @@ def run_mcp_job(worker_db, job):
             if preview_asset:
                 preview_meta = preview_asset.get("meta") or {}
                 out["preview"] = {
+                    "render_type": "complete_preview",
+                    "render_job_id": preview_meta.get("render_job_id"),
+                    "quality": preview_meta.get("quality", "draft"),
+                    "sha256": preview_asset.get("sha256") or preview_meta.get("sha256"),
                     "edl_version": int(preview_meta.get("edl_version")),
                     "duration_s": preview_asset.get("duration_s"),
                     "audio_model_review": preview_meta.get(
                         "audio_model_review", False),
                     "asset_id": preview_asset.get("id"),
                 }
+            check = getattr(ctx, "last_preview_check", None)
+            if check:
+                out["changed_section_preview"] = {
+                    "render_type": "changed_section_preview",
+                    "edl_version": check.get("edl_version"),
+                    "asset_id": check.get("render_asset_id"),
+                    "render_job_id": check.get("render_job_id"),
+                    "timeline_ranges": check.get("changed_ranges"),
+                }
+                out["changed_section_previews"] = [
+                    {"render_type": "changed_section_preview",
+                     "edl_version": item.get("edl_version"),
+                     "asset_id": item.get("render_asset_id"),
+                     "render_job_id": item.get("render_job_id"),
+                     "timeline_ranges": item.get("changed_ranges")}
+                    for item in getattr(ctx, "last_preview_checks", [])]
             return out
         finally:
             llm.set_recorder(None)
