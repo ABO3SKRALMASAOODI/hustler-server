@@ -228,9 +228,11 @@ li{margin:4px 0}
 __ERROR__
 <ul>
 <li>Read your projects, footage and transcripts</li>
-<li>Cut, caption, score and render them</li>
-<li>Export finished videos</li>
+<li>Edit footage, captions and audio; render previews</li>
+<li>Retrieve finished videos</li>
 </ul>
+<p>Review your timeline and preview before final delivery. You can create
+the final export in Valmera Studio.</p>
 <p>Sign in to allow it. It cannot see your password, your card, or anything
 outside your video projects.</p>
 <form method="POST">
