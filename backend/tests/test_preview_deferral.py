@@ -103,6 +103,15 @@ def test_nothing_is_healed_before_the_video_is_indexed_or_without_an_edl():
     assert video._should_heal_preview(None, True, None) is False
 
 
+def test_empty_canvas_waits_for_visual_content_before_healing():
+    row = edl_row()
+    row["json"] = {"canvas": {"width": 1920, "height": 1080},
+                   "keep": [], "inserts": [], "music": [{"id": "m1"}]}
+    assert not video._should_heal_preview(row, True, None, agent_orphaned=True)
+    row["json"]["inserts"] = [{"id": "clip1", "duration_s": 3}]
+    assert video._should_heal_preview(row, True, None)
+
+
 def test_drafting_zero_is_not_confused_with_absent():
     """Version numbers start at 1, so 0 can only be a malformed claim — it must
     behave like no claim, not like a match. (`if drafting:` would have been the

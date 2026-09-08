@@ -1026,9 +1026,15 @@ def _should_heal_preview(edl, indexed, drafting, agent_orphaned=False):
     """
     if not edl or not indexed:
         return False
+    if _empty_canvas(edl.get("json") or {}):
+        return False
     if edl["created_by"] != "user" and not agent_orphaned:
         return False
     return drafting != edl["version"]
+
+
+def _empty_canvas(edl):
+    return wschemas.is_canvas_program(edl) and not edl.get("inserts")
 
 
 # ------------------------------------------------------------------ #
@@ -5282,6 +5288,11 @@ def render_preview_endpoint(user_id, project_id):
         want = cur.fetchone()
         if not want:
             return jsonify({"error": "That EDL version does not exist"}), 400
+        if _empty_canvas(want["json"]):
+            return jsonify({
+                "error": "Add a clip or image to the timeline to see a preview.",
+                "code": "empty_timeline",
+            }), 409
         latest_version = _obsolete_failed_render_version(
             cur, project_id, version)
         if latest_version is not None:
@@ -5404,7 +5415,7 @@ CLIENT_EVENT_KINDS = {"player_error", "player_error_probe",
                       # between the fast path and the legacy whole-file path is
                       # countable — without it, "did the browser transcode
                       # actually work for real users" has no answer.
-                      "upload_proxy_first", "upload_proxy_failed",
+                      "upload_proxy_first", "upload_proxy_failed", "upload_proxy_skipped",
                       "upload_original_ready",
                       # The direct PUT to storage died in the browser and the
                       # bytes came through our own servers instead (round 61).

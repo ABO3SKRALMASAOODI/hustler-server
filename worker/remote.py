@@ -179,8 +179,19 @@ def _cloudflare_selected(job):
     if not shape:
         return False
     try:
-        bytes_ok = (int(shape.get("total_bytes") or 0)
-                    <= config.CLOUDFLARE_MAX_INPUT_BYTES)
+        staged_bytes = int(shape.get("total_bytes") or 0)
+        original_bytes = int(shape.get("original_bytes") or 0)
+        # Render sources above this threshold are range-read by the renderer.
+        # Counting their full size rejected a 3.2-GB original plus 1.4 GB of
+        # inserts even though only the inserts needed local disk (2166).
+        if job_type in {"preview", "preview_check", "final"} \
+                and config.CLOUDFLARE_STREAM_SOURCE_MIN_BYTES > 0 \
+                and original_bytes >= config.CLOUDFLARE_STREAM_SOURCE_MIN_BYTES:
+            staged_bytes = max(0, staged_bytes - original_bytes)
+        elif job_type == "filmstrip" and shape.get("proxy_bytes"):
+            # Filmstrips stage the completed proxy, never its unused original.
+            staged_bytes = max(0, staged_bytes - original_bytes) + int(shape["proxy_bytes"])
+        bytes_ok = staged_bytes <= config.CLOUDFLARE_MAX_INPUT_BYTES
         duration_limit = float(config.CLOUDFLARE_MAX_SOURCE_DURATION_S)
         duration_ok = duration_limit <= 0 or (
             float(shape.get("max_duration_s") or 0) <= duration_limit)
@@ -1371,12 +1382,43 @@ def _run_cloud(job, url_override=None):
     return _interpret_executor_data(data, job)
 
 
+def _run_cloudflare_with_capacity_wait(job):
+    """Wait only after a provider proves this fenced call was not accepted.
+
+    Ambiguous launches still reconnect in _run_cloudflare. Never repeat them,
+    never wait after a terminal compute failure, and never wait on a paid
+    synchronous executor. Dispatcher heartbeats continue during admission.
+    """
+    wait_s = config.CLOUDFLARE_BUSY_WAIT_S if job.get("id") is not None else 0
+    if config.CLOUDFLARE_MODAL_FALLBACK and config.MODAL_EXECUTOR_ENABLED \
+            and job.get("type") in config.MODAL_EXECUTOR_TYPES:
+        wait_s = 0  # A configured alternate can serve it immediately.
+    deadline = time.monotonic() + wait_s
+    delay = 2.0
+    while True:
+        try:
+            return _run_cloudflare(job)
+        except CloudflareCapacityBusy:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise
+            time.sleep(min(delay, remaining))
+            delay = min(delay * 2, 20.0)
+            probe = dbx.Db()
+            try:
+                if not probe.run(dbx.lease_is_current, job["id"],
+                                 job.get("total_claims")):
+                    raise dbx.JobLeaseLost("job lease changed during capacity wait")
+            finally:
+                probe.reset()
+
+
 def _run_remote(job, url_override=None, modal_function=None):
     provider = desired_execution_provider(job) if url_override is None \
         else "cloud_run"
     if provider == "cloudflare":
         try:
-            return _run_cloudflare(job)
+            return _run_cloudflare_with_capacity_wait(job)
         except CloudflareLaunchUnavailable as exc:
             if not (config.CLOUDFLARE_MODAL_FALLBACK
                     and config.MODAL_EXECUTOR_ENABLED

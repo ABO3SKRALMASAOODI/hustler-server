@@ -232,23 +232,10 @@ def create_checkout_session():
 
 @paddle_bp.route('/billing/offer', methods=['GET'])
 def billing_offer():
-    """This account's live discount, if it has one.
+    """Compatibility endpoint for retired discounts; pricing stays at list price.
 
-    READ-ONLY since round 49. It used to mint a welcome offer as a side effect,
-    so merely LOADING the pricing page started a 24-hour countdown and struck
-    through the price for someone who had not yet seen the product work. The
-    pricing page now opens at full price for everyone; a discount exists only
-    if it was earned by one of the two moments that mint one:
-
-      * 24 hours after signing up having started no trial — the offer_50
-        campaign in routes/newsletter.py.
-      * pressing cancel during a trial — /paddle/cancel-offer below.
-
-    So an `active: false` here is the normal answer, not a failure.
-
-    Always 200 with a body — the pricing page renders at list price when
-    `active` is false, and an offer lookup must never be the reason someone
-    cannot see the plans.
+    Always return a body, including when an old client has expired credentials.
+    Offer history is retained for billing audit and delayed Paddle webhooks.
     """
     try:
         user_id, _ = decode_token(request.headers.get('Authorization'))

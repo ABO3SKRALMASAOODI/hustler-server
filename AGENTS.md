@@ -78,7 +78,7 @@ Retired but grandfathered: Plus 800 / Pro-legacy 2,400 / Ultra 5,000 / Titan 10,
 - Grace on failed payment is graded by history: never paid → pool lifted immediately; has paid → `PAID_GRACE_DAYS` (3). `lift_paid_credits` strips credits but keeps `subscription_id` so later retry events still find the user.
 - `billing_sync.py` reconciles against Paddle hourly (`POST /admin/billing/sync`); it never downgrades on silence, and a Paddle 404 goes to the admin contradiction list, not auto-action.
 - **Subscribe gate** (`routes/video._subscribe_gate_applies`): one free real edit, then the ask. After an unsubscribed account has a done `agent_turn` that moved the timeline past v1 (or a shorts run that rendered clips), the next prompt shows subscription cards — not a new trial. The first indexed turn still runs. Active trials pass because they are subscribed. **Plan gate** (`plan_gate.needs_plan`) remains the credits-empty wall. Both fail open on DB errors. Credit numbers always quoted from the server, never hardcoded in the frontend.
-- **Offers** (`backend/offers.py`): one 50%-off per account ever (`UNIQUE (user_id, kind)` on `user_offers` + `mint()` refuses after any `used_at`), monthly plans only, first period only, Frontier never discountable. `used_at` is set only by the Paddle webhook.
+- **Offers** (`backend/offers.py`): introductory and retention discounts were retired on September 8, 2026. Do not mint offers, send discount emails, attach cached discount IDs, or recreate retired Paddle codes. Preserve historical redemption stamps for delayed Paddle webhooks.
 
 ## Required production env (Render)
 

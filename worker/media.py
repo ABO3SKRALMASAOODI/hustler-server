@@ -159,7 +159,8 @@ def run(cmd, timeout=None, progress_cb=None, expected_out_s=None,
                 f"{out_s:.1f}/{expected_out_s:.1f}s ({progress:.1f}%), "
                 f"reported speed {speed}")
         if proc.returncode != 0:
-            raise MediaError("ffmpeg failed: " + " | ".join(list(tail)[-12:]))
+            raise MediaError(f"ffmpeg failed (exit {proc.returncode}): "
+                             + " | ".join(list(tail)[-12:]))
         return ""
     if cancelled_cb:
         p = subprocess.Popen(cmd, stdout=subprocess.PIPE,

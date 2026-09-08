@@ -430,7 +430,7 @@ DEFAULT_TEMPLATES = {
     "offer_50": {
         "subject": "{{OFFER_PERCENT}}% off — yours for the next {{OFFER_HOURS}} hours",
         "preheader": "Start your 3-day trial in the next {{OFFER_HOURS}} hours and your first month is half price.",
-        "enabled": True,
+        "enabled": False,
         "body_html": (
             eyebrow("{{OFFER_HOURS}} hours left")
             + h1("{{OFFER_PERCENT}}% off<br>your first month.")
@@ -467,7 +467,7 @@ DEFAULT_TEMPLATES = {
 # offer_50 runs FIRST: it is the only campaign with an expiry attached, so if a
 # user is eligible for it and for something else on the same tick, the one with
 # a clock on it is the one that should land (NOT_TODAY caps them at one).
-LIFECYCLE_ORDER = ["offer_50", "welcome_activation", "export_nudge", "dormant",
+LIFECYCLE_ORDER = ["welcome_activation", "export_nudge", "dormant",
                    "winback"]
 
 # Human labels for the admin UI.

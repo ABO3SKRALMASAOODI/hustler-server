@@ -580,6 +580,11 @@ def enqueue_agent_continuation(conn, project_id, user_id, root_job_id,
     root_job_id = int(root_job_id)
     sequence = max(1, int(sequence))
     body = dict(payload or {})
+    # These counters describe admission of the previous physical job, not
+    # progress of the logical edit. Inheriting five busy refusals made a new
+    # continuation fail on its first capacity collision (production 36295).
+    body.pop("cloudflare_busy_deferred", None)
+    body.pop("cloudflare_busy_deferrals", None)
     body.update(root_agent_job_id=root_job_id,
                 continuation_sequence=sequence,
                 logical_turn_continuation=True)
@@ -922,6 +927,11 @@ def project_execution_shape(conn, project_id, asset_id=None):
                         (asset_id, project_id))
         else:
             cur.execute("""SELECT COALESCE(SUM(bytes), 0) AS total_bytes,
+                                  COALESCE(SUM(bytes) FILTER
+                                    (WHERE kind = 'original'), 0) AS original_bytes,
+                                  COALESCE((SELECT a.bytes FROM assets a
+                                            WHERE a.project_id = %s AND a.kind = 'proxy'
+                                            ORDER BY a.id DESC LIMIT 1), 0) AS proxy_bytes,
                                   COALESCE(MAX(bytes), 0) AS max_bytes,
                                   COALESCE(MAX(duration_s), 0) AS max_duration_s,
                                   COALESCE(MAX(width), 0) AS max_width,
@@ -931,7 +941,7 @@ def project_execution_shape(conn, project_id, asset_id=None):
                              AND kind IN ('original', 'video_clip',
                                           'image_ref', 'generated_video',
                                           'generated_image')""",
-                        (project_id,))
+                        (project_id, project_id))
         return cur.fetchone() or {}
 
 

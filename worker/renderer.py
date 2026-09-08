@@ -3164,7 +3164,7 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
 
     expected_out_s = (tl.out_duration
                       + music_tail_ext(edl, tl.out_duration) + outro_s)
-    cmd = ["ffmpeg", "-y", *extra_inputs,
+    cmd = ["ffmpeg", "-y", *_stable_video_inputs(extra_inputs),
            "-filter_complex", graph, "-map", "[vout]", "-map", "[aout]",
            *encode, *_output_clock(fps), "-t", f"{expected_out_s:.3f}",
            "-movflags", "+faststart",
@@ -3721,7 +3721,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
 
     expected_out_s = (tl.out_duration
                       + music_tail_ext(edl, tl.out_duration) + outro_s)
-    cmd = ["ffmpeg", "-y", *main_input_args, *extra_inputs,
+    cmd = ["ffmpeg", "-y", *_stable_video_inputs(main_input_args + extra_inputs),
            "-filter_complex", graph, "-map", "[vout]", "-map", "[aout]",
            *encode, *_output_clock(fps), "-t", f"{expected_out_s:.3f}",
            "-movflags", "+faststart",
@@ -3739,6 +3739,23 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
 # ------------------------------------------------------------------ #
 #  Job entrypoint (types: preview | final)                             #
 # ------------------------------------------------------------------ #
+
+def _stable_video_inputs(args):
+    """Preserve the program clock when a clip changes pixel/color properties.
+
+    FFmpeg normally restarts the entire filtergraph on a changed input frame,
+    discarding buffered frames and resetting concat, trim and audio clocks.
+    Mixed-format B-roll reproduced 13s output from a 26s edit (2144/2182).
+    Our scale/format stages handle those frames without restarting the graph;
+    duration and visual verification still reject an invalid rendition.
+    """
+    stable = []
+    for arg in args:
+        if arg == "-i":
+            stable.extend(["-reinit_filter:v", "0"])
+        stable.append(arg)
+    return stable
+
 
 def _output_clock(fps):
     """Output timing options for every render.
@@ -4041,7 +4058,13 @@ def _stream_cloudflare_source(asset):
     except (TypeError, ValueError):
         return False
     threshold = config.CLOUDFLARE_STREAM_SOURCE_MIN_DURATION_S
-    return threshold > 0 and duration >= threshold
+    byte_threshold = config.CLOUDFLARE_STREAM_SOURCE_MIN_BYTES
+    try:
+        size = int((asset or {}).get("bytes") or 0)
+    except (TypeError, ValueError):
+        size = 0
+    return ((threshold > 0 and duration >= threshold)
+            or (byte_threshold > 0 and size >= byte_threshold))
 
 
 def _fetch_into(workdir, key, tag):
@@ -4664,7 +4687,25 @@ def run_render_job(worker_db, job):
         raise dbx.PermanentJobError("Unknown preview quality")
     token = _PREVIEW_QUALITY.set(quality)
     try:
-        return _run_render_job(worker_db, job)
+        try:
+            return _run_render_job(worker_db, job)
+        except (media.MediaError, RenderVerificationError) as exc:
+            # A high-resolution approval preview may exceed its container's
+            # memory even though the exact edit renders from the proxy. Keep
+            # the request alive and verify one draft rendition in this job.
+            # A final export must never silently lose resolution.
+            if job.get("type") not in {"preview", "preview_check"} \
+                    or _PREVIEW_QUALITY.get() != "approval":
+                raise
+            prior_timings = dict(getattr(exc, "runner_timings", {}) or {})
+            print(f"[render {job['id']}] approval preview failed; "
+                  "rendering and verifying a draft from the proxy", flush=True)
+            _PREVIEW_QUALITY.set("draft")
+            result = _run_render_job(worker_db, job)
+            result["quality"] = "draft"
+            result["recovered_from"] = "approval_render_failed"
+            result["approval_attempt_timings"] = prior_timings
+            return result
     finally:
         _PREVIEW_QUALITY.reset(token)
 
@@ -4703,6 +4744,14 @@ def _run_render_job(worker_db, job):
     if not edl_row:
         raise dbx.PermanentJobError(f"EDL version {version} not found")
     original = worker_db.run(dbx.latest_asset, project_id, "original")
+    if variant == "preview" and original \
+            and (original.get("meta") or {}).get("upload_state") == "pending" \
+            and _PREVIEW_QUALITY.get() == "approval" \
+            and worker_db.run(dbx.latest_asset, project_id, "proxy"):
+        # Editing can continue against the completed proxy during a large
+        # background upload. Persist this as draft so the original must still
+        # be used for a later approval render or final export.
+        _PREVIEW_QUALITY.set("draft")
     # A canvas program (no main video) renders purely from its inserts on the
     # canvas — there is no original/proxy/index to require or download.
     is_canvas = is_canvas_program(edl_row["json"])

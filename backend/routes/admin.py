@@ -130,12 +130,12 @@ def _live_mrr(cur, scope, alias=''):
 
 
 def _collected(cur, since_days=None):
-    """Money actually captured, in whole USD. {} when the ledger is absent."""
+    """Captured USD for the same customer cohort used by MRR."""
     try:
         cur.execute("SELECT to_regclass('public.payments') AS t")
         if not cur.fetchone()['t']:
             return {}
-        window = (f"AND occurred_at >= NOW() - INTERVAL '{int(since_days)} days'"
+        window = (f"AND p.occurred_at >= NOW() - INTERVAL '{int(since_days)} days'"
                   if since_days else "")
         # amount_cents is Paddle's grand_total in MINOR units — "3000" is
         # $30.00. The `> 0` is not an optimisation: a trial opens with a real
@@ -144,22 +144,28 @@ def _collected(cur, since_days=None):
         cur.execute(f"""
             SELECT COALESCE(SUM(amount_cents), 0) AS cents,
                    COUNT(*) AS n
-              FROM payments
-             WHERE status = 'completed' AND amount_cents > 0 {window}
+              FROM payments p JOIN users u ON u.id = p.user_id
+             WHERE p.status IN ('completed', 'paid') AND p.amount_cents > 0
+               AND p.currency = 'USD' AND {_scope('u')} {window}
         """)
         row = cur.fetchone()
-        cur.execute("""
+        cur.execute(f"""
             SELECT COUNT(*) AS n,
                    COALESCE(SUM(amount_cents), 0) AS cents
-              FROM payments
-             WHERE status IN ('past_due', 'canceled') AND amount_cents > 0
+              FROM payments p JOIN users u ON u.id = p.user_id
+             WHERE (p.status = 'past_due' OR
+                    (p.status = 'ready' AND p.error_code IS NOT NULL))
+               AND p.amount_cents > 0 AND p.currency = 'USD'
+               AND {_scope('u')} {window}
         """)
         failed = cur.fetchone()
         return {
-            'collected_usd': round((row['cents'] or 0) / 100.0, 2),
+            'collected_usd': round(float(row['cents'] or 0) / 100.0, 2),
             'collected_payments': row['n'] or 0,
-            'failed_usd': round((failed['cents'] or 0) / 100.0, 2),
+            'failed_usd': round(float(failed['cents'] or 0) / 100.0, 2),
             'failed_payments': failed['n'] or 0,
+            'currency': 'USD',
+            'metrics_epoch': METRICS_EPOCH,
         }
     except Exception:
         return {}

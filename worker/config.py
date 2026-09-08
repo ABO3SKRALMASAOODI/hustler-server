@@ -1046,6 +1046,11 @@ CLOUDFLARE_BUSY_RETRY_DELAY_S = max(1.0, min(120.0, float(os.getenv(
     "CLOUDFLARE_BUSY_RETRY_DELAY_S", "20"))))
 CLOUDFLARE_BUSY_MAX_DEFERRALS = max(1, min(
     10, int(os.getenv("CLOUDFLARE_BUSY_MAX_DEFERRALS", "5"))))
+# A refused admission has done no editing or media work. Wait within the
+# existing fenced claim before spending another queue admission; MCP calls
+# deliberately share a project shard and a new claim cannot move that shard.
+CLOUDFLARE_BUSY_WAIT_S = max(0.0, min(300.0, float(os.getenv(
+    "CLOUDFLARE_BUSY_WAIT_S", "120"))))
 CLOUDFLARE_MODAL_FALLBACK = os.getenv(
     "CLOUDFLARE_MODAL_FALLBACK", "0") == "1"
 CLOUDFLARE_MAX_INPUT_BYTES = int(os.getenv(
@@ -1055,6 +1060,8 @@ CLOUDFLARE_MAX_INPUT_BYTES = int(os.getenv(
 # every parallel Container stage the same multi-hour proxy in full.
 CLOUDFLARE_STREAM_SOURCE_MIN_DURATION_S = max(0.0, float(os.getenv(
     "CLOUDFLARE_STREAM_SOURCE_MIN_DURATION_S", "3600")))
+CLOUDFLARE_STREAM_SOURCE_MIN_BYTES = max(0, int(os.getenv(
+    "CLOUDFLARE_STREAM_SOURCE_MIN_BYTES", str(512 * 1024 ** 2))))
 # Optional operator emergency brake. Zero means no duration gate. Cloudflare
 # has resource ceilings, not a one-hour media-duration limit; staged bytes and
 # the executor's own disk/memory checks are the meaningful admission signals.

@@ -390,42 +390,7 @@ def _eligible(conn, campaign, weekly_key=None):
     """Recipients (id, email, credits_balance) eligible for a lifecycle campaign."""
     cols = "SELECT u.id, u.email, u.credits_balance FROM users u WHERE "
     if campaign == "offer_50":
-        # THE ONLY PLACE A DISCOUNT IS OFFERED UNPROMPTED (round 49).
-        #
-        # It used to be minted at signup as well, so every new account saw a
-        # struck-through price and a countdown on the first screen it ever
-        # reached. That sells the discount before the product: the visitor has
-        # not seen an edit yet, so 50% off is not an incentive, it is just a
-        # cheaper unknown — and it spends the one discount this account will
-        # ever get (offers.mint refuses a second) at the moment it is worth
-        # least. Now the pricing page opens at full price, and the discount is
-        # held back for the two moments where it answers a real hesitation:
-        # here, and on the cancel screen.
-        #
-        # WHO GETS IT: verified, 24 hours past registration, and did nothing —
-        #
-        #   is_subscribed = 0     not on a plan. A TRIALLING user is
-        #                         is_subscribed (Paddle creates the
-        #                         subscription at checkout), so this clause
-        #                         alone keeps the mail away from live trials.
-        #   never trialled        starting a trial IS taking action, and
-        #                         someone who trialled and cancelled has seen
-        #                         the product and priced it. They are offered
-        #                         the save discount at the cancel screen
-        #                         instead — one 50% per account, ever.
-        #   never redeemed        the account-level guarantee.
-        #
-        # `newsletter_sends` makes it once-per-account forever, so re-running
-        # the tick sends nothing new — which is what "one time" has to mean
-        # when the tick fires daily.
-        sql = cols + f"""{BASE_FILTER}
-            AND COALESCE(u.is_subscribed, 0) = 0
-            AND u.created_at <= NOW() - INTERVAL '1 day'
-            AND {_never_trialled(conn)}
-            AND {offers.sql_no_live_offer(conn)}
-            AND {offers.sql_never_used(conn)}
-            AND NOT EXISTS (SELECT 1 FROM newsletter_sends s WHERE s.user_id=u.id AND s.campaign='offer_50' AND s.status='sent')
-            AND {NOT_TODAY}"""
+        return []  # Retired: manual/forced runs cannot revive the campaign.
     elif campaign == "welcome_activation":
         sql = cols + f"""{BASE_FILTER}
             AND u.created_at >= NOW() - INTERVAL '4 days'
