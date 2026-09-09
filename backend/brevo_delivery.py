@@ -15,6 +15,7 @@ from database_config import preferred_database_url
 
 
 BREVO_SEND_URL = "https://api.brevo.com/v3/smtp/email"
+BREVO_ACCOUNT_URL = "https://api.brevo.com/v3/account"
 DAILY_LIMIT = max(1, int(os.getenv("BREVO_DAILY_LIMIT", "300")))
 CRITICAL_RESERVE = min(
     DAILY_LIMIT, max(0, int(os.getenv("BREVO_CRITICAL_RESERVE", "20"))))
@@ -22,6 +23,32 @@ BULK_LIMIT = min(
     DAILY_LIMIT - CRITICAL_RESERVE,
     max(0, int(os.getenv("BREVO_BULK_LIMIT", "280"))),
 )
+
+
+def provider_capacity():
+    """Read Brevo's real credits; the local UTC counter cannot see its queue.
+
+    Brevo can accept SMTP API requests with 201 while holding the messages for
+    tomorrow's credits. Admission must therefore precede sending, not infer
+    available credits from successful local requests. No account PII is logged.
+    """
+    key = os.getenv("BREVO_API_KEY")
+    if not key:
+        return {"remaining": None, "error": "Email provider is not configured"}
+    try:
+        response = requests.get(
+            BREVO_ACCOUNT_URL, headers={"api-key": key, "accept": "application/json"},
+            timeout=(3.05, 10))
+        if response.status_code != 200:
+            return {"remaining": None, "error": f"Email capacity lookup returned HTTP {response.status_code}"}
+        plans = response.json().get("plan") or []
+        credits = [max(0, int(plan["credits"])) for plan in plans
+                   if plan.get("creditsType") == "sendLimit" and "credits" in plan]
+        if not credits:
+            return {"remaining": None, "error": "Email provider did not report a send allowance"}
+        return {"remaining": sum(credits), "error": None}
+    except (requests.RequestException, ValueError, TypeError, AttributeError) as exc:
+        return {"remaining": None, "error": f"Email capacity lookup unavailable ({type(exc).__name__})"}
 
 
 def _connect():
@@ -133,6 +160,17 @@ def send_email(payload, category="critical", logger=None):
                 payload.get("subject", "(no subject)"))
         return False
 
+    capacity = provider_capacity()
+    provider_remaining = capacity["remaining"]
+    required = CRITICAL_RESERVE if category == "bulk" else 0
+    if provider_remaining is not None and provider_remaining <= required:
+        _report(logger, "send deferred: Brevo has %s credits; %s reserve for %s",
+                provider_remaining, required, category)
+        return False
+    if provider_remaining is None and category == "bulk":
+        _report(logger, "bulk send deferred: %s", capacity["error"])
+        return False
+
     reserved = False
     budget_unavailable = False
     try:
@@ -183,7 +221,7 @@ def send_email(payload, category="critical", logger=None):
 
 
 def budget_status():
-    """Current UTC-day counters for the admin newsletter page."""
+    """Usable capacity is the smaller of local limits and Brevo's allowance."""
     row = {"bulk_sent": 0, "critical_sent": 0}
     conn = _connect()
     try:
@@ -200,12 +238,22 @@ def budget_status():
     finally:
         conn.close()
     total = row["bulk_sent"] + row["critical_sent"]
+    provider = provider_capacity()
+    available = provider["remaining"]
+    local_total_remaining = max(0, DAILY_LIMIT - total)
+    local_bulk_remaining = min(max(0, BULK_LIMIT - row["bulk_sent"]), local_total_remaining)
+    bulk_remaining = (0 if available is None else
+                      min(local_bulk_remaining, max(0, available - CRITICAL_RESERVE)))
     return {
         **row,
         "total_sent": total,
         "bulk_limit": BULK_LIMIT,
         "daily_limit": DAILY_LIMIT,
         "critical_reserve": CRITICAL_RESERVE,
-        "bulk_remaining": max(0, BULK_LIMIT - row["bulk_sent"]),
-        "total_remaining": max(0, DAILY_LIMIT - total),
+        "bulk_remaining": bulk_remaining,
+        "total_remaining": (local_total_remaining if available is None else
+                            min(local_total_remaining, available)),
+        "provider_remaining": available,
+        "provider_capacity_error": provider["error"],
+        "local_bulk_remaining": local_bulk_remaining,
     }

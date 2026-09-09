@@ -28,6 +28,7 @@ import os
 import threading
 
 import brevo_delivery
+from routes.newsletter_content import plain_text
 
 
 def founder_email():
@@ -44,10 +45,11 @@ def _send_now(subject, html):
         "to": [{"email": to}],
         "subject": subject,
         "htmlContent": html,
+        "textContent": plain_text(html),
     }
     if not brevo_delivery.send_email(payload, category="critical"):
         return False
-    print(f"📧 [founder_alert] sent to {to}: {subject}", flush=True)
+    print(f"📧 [founder_alert] accepted by Brevo for {to}: {subject}", flush=True)
     return True
 
 

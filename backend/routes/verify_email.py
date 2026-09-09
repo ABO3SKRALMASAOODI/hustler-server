@@ -2,6 +2,7 @@ import os
 import random
 import requests
 import brevo_delivery
+from routes.newsletter_content import verification_email
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from flask import Blueprint, request, jsonify, current_app
@@ -67,8 +68,6 @@ def verify_code():
     email = data.get('email')
     code = data.get('code')
 
-    print("🔍 Received verification attempt for:", email, "with code:", code)
-
     if not email or not code:
         return jsonify({'error': 'Email and code are required'}), 400
 
@@ -76,8 +75,6 @@ def verify_code():
     cursor = conn.cursor()
     cursor.execute("SELECT code, created_at FROM email_codes WHERE email = %s", (email,))
     row = cursor.fetchone()
-
-    print("🧠 Code found in DB:", row['code'] if row else "None")
 
     if not row:
         cursor.close()
@@ -103,18 +100,7 @@ def verify_code():
     new_user = cursor.fetchone()
     cursor.close()
 
-    # The account is real from this moment, so this is where its 24-hour
-    # discount starts and where the email announcing it goes out.
-    #
-    # NO WELCOME DISCOUNT HERE (round 49). A new account used to be minted a
-    # 24-hour 50% offer at this exact line, which meant the very first pricing
-    # page a visitor ever saw was already discounted. That sells the discount
-    # before the product — the visitor has not seen an edit yet, so half price
-    # is not an incentive, just a cheaper unknown — and it burns the one offer
-    # this account will ever get at the moment it is worth least.
-    #
-    # The offer now waits 24 hours and only reaches people who did nothing with
-    # it: routes/newsletter._eligible('offer_50'). See backend/offers.py.
+    # Introductory discounts remain retired; verification only verifies.
 
     conn.close()
     return jsonify({'message': 'Email verified successfully'}), 200
@@ -143,8 +129,7 @@ def send_code_to_email(email, code):
             "email": os.getenv("FROM_EMAIL", "support@valmera.io")
         },
         "to": [{"email": email}],
-        "subject": "Your Verification Code",
-        "htmlContent": f"<p>Your code is: <strong>{code}</strong></p>"
+        **verification_email(code),
     }
 
     return brevo_delivery.send_email(

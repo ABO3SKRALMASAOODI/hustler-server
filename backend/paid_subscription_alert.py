@@ -259,8 +259,8 @@ def _claim(conn, key):
 
 
 def _retry_seconds(attempt):
-    """5m, 15m, 1h, 6h, then daily until Brevo recovers."""
-    schedule = (300, 900, 3600, 21600, 86400)
+    """Retry promptly when provider credits return; never wait another day."""
+    schedule = (60, 120, 300, 600, 900)
     return schedule[min(max(int(attempt or 1) - 1, 0), len(schedule) - 1)]
 
 
@@ -393,7 +393,7 @@ _scheduler_lock = threading.Lock()
 
 
 def start_scheduler(app):
-    """Retry every five minutes; claims make N gunicorn schedulers safe."""
+    """Retry every minute; claims make N gunicorn schedulers safe."""
     global _scheduler
     if not enabled():
         app.logger.info("paid subscription alerts disabled by env")
@@ -415,7 +415,7 @@ def start_scheduler(app):
 
         scheduler = BackgroundScheduler(daemon=True, timezone="UTC")
         scheduler.add_job(
-            job, "interval", minutes=5, id="paid_subscription_alerts",
+            job, "interval", minutes=1, id="paid_subscription_alerts",
             replace_existing=True,
             next_run_time=(datetime.datetime.now(datetime.timezone.utc)
                            + datetime.timedelta(minutes=1)))

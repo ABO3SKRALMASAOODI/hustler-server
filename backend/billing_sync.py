@@ -535,37 +535,17 @@ def _frontend():
     return os.getenv("FRONTEND_URL", "https://valmera.io").rstrip("/")
 
 
-def _dunning_html(name, plan, reason, link):
-    """The decline email. Design language of the round-49 lifecycle mail:
-    #0b0b0b surfaces, #1e1e1e hairlines, a WHITE pill CTA.
-
-    Deliberately NOT sent through routes/newsletter.py: that path attaches a
-    List-Unsubscribe header and respects the marketing opt-out. This is a
-    transactional service message about money the customer owes on a
-    subscription they asked for — suppressing it because they unsubscribed from
-    product news would mean silently letting their account lapse.
-    """
+def _dunning_content(plan, reason, link):
     from billing import decline_message
-    said = decline_message(reason)
-    label = trial_state.plan_label(plan)
-    cta = link or f"{_frontend()}/account"
-    return f"""
-<div style="background:#000;padding:32px 0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;">
-  <div style="max-width:520px;margin:0 auto;background:#0b0b0b;border:1px solid #1e1e1e;border-radius:14px;padding:32px;">
-    <div style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:#8a8a8a;margin-bottom:18px;">Valmera · Billing</div>
-    <h1 style="color:#fff;font-size:22px;line-height:1.3;margin:0 0 14px;">Your payment didn't go through</h1>
-    <p style="color:#c9c9c9;font-size:15px;line-height:1.6;margin:0 0 14px;">
-      {said} We couldn't collect for your {label} plan, so your editing credits are on hold.
-    </p>
-    <p style="color:#c9c9c9;font-size:15px;line-height:1.6;margin:0 0 22px;">
-      Your bank will be tried again automatically over the next few days — but the fastest fix is to update your card. It takes about thirty seconds, and everything picks up exactly where you left it.
-    </p>
-    <a href="{cta}" style="display:inline-block;background:#fff;color:#000;text-decoration:none;font-weight:600;font-size:15px;padding:13px 26px;border-radius:999px;">Update payment method</a>
-    <p style="color:#6e6e6e;font-size:13px;line-height:1.6;margin:24px 0 0;border-top:1px solid #1e1e1e;padding-top:18px;">
-      Didn't mean to subscribe? Ignore this and the subscription cancels itself — you won't be charged.
-    </p>
-  </div>
-</div>"""
+    from routes.newsletter_content import payment_email
+    account_url = f"{_frontend()}/account"
+    return payment_email(trial_state.plan_label(plan), decline_message(reason),
+                         link or account_url, account_url)
+
+
+def _dunning_html(name, plan, reason, link):
+    """Compatibility helper for the account-service email preview."""
+    return _dunning_content(plan, reason, link)["htmlContent"]
 
 
 def send_dunning_email(conn, user_id, email, plan, reason, subscription_id):
@@ -577,8 +557,8 @@ def send_dunning_email(conn, user_id, email, plan, reason, subscription_id):
         "sender": {"name": os.getenv("FROM_NAME", "Valmera"),
                    "email": os.getenv("FROM_EMAIL", "support@valmera.io")},
         "to": [{"email": email}],
-        "subject": "Your Valmera payment didn't go through",
-        "htmlContent": _dunning_html(email, plan, reason, link),
+        **_dunning_content(plan, reason, link),
+        "replyTo": {"email": os.getenv("FROM_EMAIL", "support@valmera.io"), "name": "Valmera"},
     }
     if not brevo_delivery.send_email(payload, category="critical"):
         return False

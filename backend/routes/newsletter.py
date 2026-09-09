@@ -1,33 +1,13 @@
-"""
-Valmera newsletter + behavioral lifecycle email engine.
+"""Valmera marketing email engine.
 
-What this does
---------------
-1. MANUAL broadcasts (unchanged surface): the admin composes a subject + HTML and
-   sends it to a chosen segment of verified users.
-2. AUTOMATED behavioral lifecycle emails, evaluated once a day by an in-process
-   scheduler, targeting the RIGHT segment at the RIGHT moment to reduce churn:
-       welcome_activation  new signup, no project yet          -> "make your first edit"
-       export_nudge        has edits, never exported           -> "go get your video"   (the churn cliff)
-       dormant             active before, idle 5-21 days       -> "your credits are waiting + what's new"
-       winback             gone 30+ days                       -> "we shipped a lot"
-       weekly_value        active/dormant, once a week         -> one genuinely useful tip
-3. A real, working UNSUBSCRIBE (token-signed, one-click compatible) — a legal +
-   deliverability requirement for recurring mail.
+Twenty-seven distinct messages are selected by real editing progress and send
+history. Recent signups receive priority within a shared daily budget; older
+customers retain a reserved share. Hidden pre-relaunch/test accounts are out
+of the marketing audience, with the owner's main admin account retained.
 
-Correctness / safety
----------------------
-* The daily tick is wrapped in a Postgres advisory lock, so even though all 3
-  gunicorn workers each run a scheduler, only ONE actually sends on any fire.
-* Every automated send is logged to `newsletter_sends`; eligibility queries read
-  that log, so the tick is fully IDEMPOTENT — re-running it never double-sends,
-  and each user is capped (one lifecycle email per day, per-campaign cooldowns).
-* A send that Brevo rejects is logged (status='failed') and NOT counted as sent,
-  so it is retried on the next tick instead of being silently swallowed.
-
-Schema is self-provisioned idempotently (ensure_newsletter_schema) — additive
-CREATE TABLE / ADD COLUMN IF NOT EXISTS only, never touching models.py. The exact
-DDL is also documented for the owner to run by hand if preferred.
+Automation respects unsubscribe, a 48-hour minimum gap, three marketing emails
+per rolling week, one send per lifecycle topic and rotating weekly lessons.
+Brevo acceptance is recorded as sent; it is not proof of inbox delivery.
 """
 
 import os
@@ -41,12 +21,12 @@ from datetime import datetime, timedelta, timezone
 import jwt
 from flask import Blueprint, request, jsonify, current_app, Response
 
-import offers
-import trial_state
 import brevo_delivery
+from routes.admin import _scope as customer_scope
 from routes.newsletter_content import (
     DEFAULT_TEMPLATES, LIFECYCLE_ORDER, CAMPAIGN_LABELS, DEFAULT_CTA_URL,
-    wrap_email, render_tokens,
+    LIFECYCLE_FAMILIES, CAMPAIGN_FAMILY, WEEKLY_ORDER, CONTENT_VERSION,
+    wrap_email, render_tokens, plain_text,
 )
 
 try:
@@ -69,28 +49,19 @@ BACKEND_PUBLIC_URL = os.getenv(
 # Successful "final export" states seen in video_jobs.
 EXPORT_STATES = "('done','succeeded','success','completed','ready')"
 
-# ── Cadence ──────────────────────────────────────────────────────────────
-# These are what actually decide how often a user hears from us, and they
-# were far too slow: with a 14-day export nudge and a 21-day dormant cooldown
-# a typical user got ONE email a fortnight, which is why the whole programme
-# felt dead even though the scheduler was firing every day.
-#
-# The per-user-per-day cap (NOT_TODAY) is deliberately KEPT. It is not what
-# made things slow — it only stops three campaigns landing in the same inbox
-# in the same minute, which reads as spam and costs deliverability. The
-# frequency comes from the cooldowns below, and the ceiling is now roughly
-# 2-3 emails a week per active user instead of 2 a month.
-#
-# All tunable without a deploy-time code change; raise them again if Brevo
-# complaint rates climb.
-EXPORT_NUDGE_COOLDOWN_D = int(os.getenv("NL_EXPORT_NUDGE_COOLDOWN_D", "4"))
-DORMANT_AFTER_D = int(os.getenv("NL_DORMANT_AFTER_D", "3"))
+# Lifecycle steps are finite. Family cooldowns also honor historical sends;
+# the shared 48-hour / three-per-week ceiling applies across all topics.
+EXPORT_NUDGE_COOLDOWN_D = max(3, int(os.getenv("NL_EXPORT_NUDGE_COOLDOWN_D", "4")))
+DORMANT_AFTER_D = max(3, int(os.getenv("NL_DORMANT_AFTER_D", "5")))
 DORMANT_COOLDOWN_D = int(os.getenv("NL_DORMANT_COOLDOWN_D", "7"))
 WINBACK_AFTER_D = int(os.getenv("NL_WINBACK_AFTER_D", "21"))
-WINBACK_COOLDOWN_D = int(os.getenv("NL_WINBACK_COOLDOWN_D", "21"))
-# Weekly tips now go out on TWO weekdays (Mon + Thu by default) rather than
-# one, so the steady drumbeat is twice a week. weekly_weekday from settings
-# stays the primary day; this is the extra one.
+WINBACK_COOLDOWN_D = max(7, int(os.getenv("NL_WINBACK_COOLDOWN_D", "14")))
+FAMILY_COOLDOWN_D = {
+    "welcome_activation": 3, "first_cut": 3,
+    "export_nudge": EXPORT_NUDGE_COOLDOWN_D, "first_export": 3,
+    "dormant": max(3, DORMANT_COOLDOWN_D), "winback": WINBACK_COOLDOWN_D,
+}
+# The configured primary day (Tuesday by default) plus Thursday.
 WEEKLY_EXTRA_WEEKDAY = int(os.getenv("NL_WEEKLY_EXTRA_WEEKDAY", "3"))
 
 # last-activity per user across every signal we have.
@@ -108,17 +79,26 @@ HAS_EXPORT = (
 )
 HAS_PROJECT = "EXISTS (SELECT 1 FROM projects p WHERE p.user_id=u.id)"
 HAS_CHAT = "EXISTS (SELECT 1 FROM chat_sessions cs WHERE cs.user_id=u.id)"
+HAS_EDIT = (
+    "EXISTS (SELECT 1 FROM edls e JOIN projects p ON p.id=e.project_id "
+    "WHERE p.user_id=u.id AND e.version > 1)"
+)
 
 BASE_FILTER = (
     "u.is_verified=1 AND u.email IS NOT NULL AND u.email <> '' "
-    "AND u.unsubscribed_at IS NULL"
+    "AND u.unsubscribed_at IS NULL "
+    f"AND (({customer_scope('u')}) OR lower(u.email)='thevalmera@gmail.com')"
 )
 NOT_TODAY = (
     "NOT EXISTS (SELECT 1 FROM newsletter_sends s WHERE s.user_id=u.id "
     "AND s.status='sent' AND s.sent_at::date = CURRENT_DATE)"
 )
-
-
+CONTACT_CADENCE = (
+    "NOT EXISTS (SELECT 1 FROM newsletter_sends s WHERE s.user_id=u.id "
+    "AND s.status='sent' AND s.sent_at >= NOW() - INTERVAL '48 hours') "
+    "AND (SELECT COUNT(*) FROM newsletter_sends s WHERE s.user_id=u.id "
+    "AND s.status='sent' AND s.sent_at >= NOW() - INTERVAL '7 days') < 3"
+)
 # ─────────────────────────────────────────────────────────────────────────────
 #  DB helpers
 # ─────────────────────────────────────────────────────────────────────────────
@@ -216,11 +196,6 @@ def ensure_newsletter_schema(conn):
     # must leave this False so the next request retries rather than assuming a
     # half-built schema is finished.
     _nl_schema_ready = True
-    # user_offers, same additive contract. Provisioned from here as well as
-    # lazily from offers.py so the table exists before the first tick queries
-    # it — its eligibility clauses degrade to TRUE without it, which would send
-    # the offer email to people who already hold an offer.
-    offers.ensure_schema(conn)
 
 
 def _brevo_headers():
@@ -261,11 +236,21 @@ def admin_required(f):
 
 def get_template(conn, key):
     """Merge a DB override (if any) over the code default for `key`."""
-    default = DEFAULT_TEMPLATES.get(key, {})
     cur = conn.cursor()
     cur.execute("SELECT subject, preheader, body_html, enabled FROM newsletter_templates WHERE key=%s", (key,))
     row = cur.fetchone()
     cur.close()
+    return _resolved_template(key, row)
+
+
+def get_all_templates(conn):
+    rows = _fetch(conn, "SELECT key, subject, preheader, body_html, enabled FROM newsletter_templates")
+    overrides = {row["key"]: row for row in rows}
+    return {key: _resolved_template(key, overrides.get(key)) for key in DEFAULT_TEMPLATES}
+
+
+def _resolved_template(key, row):
+    default = DEFAULT_TEMPLATES.get(key, {})
     if not row:
         return {
             "key": key,
@@ -281,7 +266,7 @@ def get_template(conn, key):
         "subject": row.get("subject") or default.get("subject", ""),
         "preheader": row.get("preheader") if row.get("preheader") is not None else default.get("preheader", ""),
         "body_html": row.get("body_html") or default.get("body_html", ""),
-        "enabled": bool(row.get("enabled")),
+        "enabled": bool(row.get("enabled")) and key != "offer_50",
         "is_default": row.get("body_html") is None,
     }
 
@@ -315,7 +300,7 @@ def _unsub_url(email):
 #  Sending
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _send_one(email, subject, html, unsub_url):
+def _send_one(email, subject, html, unsub_url, campaign=None):
     """Send one transactional email via Brevo. Returns True on success (HTTP 201).
 
     Logs the real Brevo status+body on failure (same honesty discipline as the
@@ -329,11 +314,16 @@ def _send_one(email, subject, html, unsub_url):
         "to": [{"email": email}],
         "subject": subject,
         "htmlContent": html,
+        "textContent": plain_text(html),
+        "replyTo": {"email": os.getenv("FROM_EMAIL", "support@valmera.io"),
+                    "name": os.getenv("FROM_NAME", "Valmera")},
         "headers": {
             "List-Unsubscribe": f"<{unsub_url}>",
             "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
         },
     }
+    if campaign:
+        payload["tags"] = ["valmera-lifecycle", campaign, CONTENT_VERSION]
     return brevo_delivery.send_email(
         payload, category="bulk", logger=current_app.logger)
 
@@ -341,7 +331,14 @@ def _send_one(email, subject, html, unsub_url):
 def _render_for(tmpl, email, credits):
     """Render a template into a full email for one recipient."""
     unsub = _unsub_url(email)
-    body = render_tokens(tmpl["body_html"], cta_url=DEFAULT_CTA_URL, credits=credits, unsub_url=unsub)
+    from urllib.parse import urlencode
+    cta_url = DEFAULT_CTA_URL + "?" + urlencode({
+        "utm_source": "valmera", "utm_medium": "email",
+        "utm_campaign": tmpl.get("key", "newsletter"),
+        "utm_content": CONTENT_VERSION,
+    })
+    body = render_tokens(tmpl["body_html"], cta_url=cta_url,
+                         credits=credits, unsub_url=unsub, html=True)
     preheader = render_tokens(tmpl.get("preheader", ""), credits=credits, unsub_url=unsub)
     subject = render_tokens(tmpl["subject"], credits=credits)
     html = wrap_email(body, unsub, preheader=preheader)
@@ -370,67 +367,110 @@ def _fetch(conn, sql, params=None):
     return rows
 
 
-def _never_trialled(conn, alias="u"):
-    """SQL predicate: this account has never started a trial.
+def _utc_naive(value):
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if value.tzinfo is not None:
+        value = value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value
 
-    Degrades to TRUE when the trial columns are absent (they are added by hand
-    in the Render shell — see trial_state.py), so the campaign keeps working on
-    a database that has not had the migration yet. The is_subscribed clause
-    beside it already excludes anyone trialling RIGHT NOW; this additionally
-    excludes someone who trialled and let it lapse, because they have seen the
-    product and had their chance to buy — the cancel screen is where they are
-    offered a discount, and there is only one per account.
-    """
-    if not trial_state.columns_ready(conn):
-        return "TRUE"
-    return alias + ".trial_started_at IS NULL"
+
+def _campaign_audience(conn):
+    """Read progress once, rather than rescan activity for every email topic."""
+    rows = _fetch(conn, f"""
+        SELECT u.id, u.email, u.credits_balance, u.created_at,
+            {LAST_ACTIVE} AS last_active,
+            {HAS_PROJECT} AS has_project, {HAS_EDIT} AS has_edit,
+            {HAS_EXPORT} AS has_export, {HAS_CHAT} AS has_chat,
+            (SELECT MIN(vj.updated_at) FROM video_jobs vj
+             WHERE vj.user_id=u.id AND vj.type ILIKE '%%final%%'
+                 AND vj.state IN {EXPORT_STATES}) AS first_export_at
+        FROM users u WHERE {BASE_FILTER} AND {NOT_TODAY} AND {CONTACT_CADENCE}
+        ORDER BY u.id
+    """)
+    if not rows:
+        return []
+    rows = [dict(row, sent_history={}) for row in rows]
+    by_id = {row["id"]: row for row in rows}
+    history = _fetch(conn, """
+        SELECT user_id, campaign, MAX(sent_at) AS sent_at FROM newsletter_sends
+        WHERE user_id=ANY(%s) AND status='sent' GROUP BY user_id, campaign
+    """, (list(by_id),))
+    for item in history:
+        by_id[item["user_id"]]["sent_history"][item["campaign"]] = _utc_naive(item["sent_at"])
+    for row in rows:
+        for key in ("created_at", "last_active", "first_export_at"):
+            row[key] = _utc_naive(row.get(key))
+        row["last_contact_at"] = max(row["sent_history"].values(), default=None)
+    return rows
+
+
+def _matches_campaign(row, campaign, now, weekly_key=None):
+    history = row["sent_history"]
+    if campaign == "weekly_value":
+        return (row["last_active"] >= now - timedelta(days=30)
+                and not any(key == weekly_key or key.startswith((weekly_key or "weekly") + ":")
+                            for key in history))
+    family = CAMPAIGN_FAMILY.get(campaign)
+    if not family or campaign in history:
+        return False
+    last_family = max((history[key] for key in LIFECYCLE_FAMILIES[family] if key in history), default=datetime.min)
+    if last_family >= now - timedelta(days=FAMILY_COOLDOWN_D[family]):
+        return False
+    if family == "welcome_activation":
+        return (now - timedelta(days=10) <= row["created_at"] <= now - timedelta(hours=1)
+                and not row["has_project"])
+    if family == "first_cut":
+        return (row["has_project"] and not row["has_edit"] and not row["has_export"]
+                and row["last_active"] >= now - timedelta(days=7)
+                and row["created_at"] <= now - timedelta(days=1))
+    if family == "export_nudge":
+        return (row["has_edit"] and not row["has_export"]
+                and row["last_active"] >= now - timedelta(days=DORMANT_AFTER_D)
+                and row["created_at"] <= now - timedelta(days=1))
+    if family == "first_export":
+        return bool(row["first_export_at"] and row["first_export_at"] >= now - timedelta(days=7))
+    if family == "dormant":
+        return (now - timedelta(days=WINBACK_AFTER_D) < row["last_active"] <= now - timedelta(days=DORMANT_AFTER_D)
+                and (row["has_project"] or row["has_chat"]))
+    return row["last_active"] <= now - timedelta(days=WINBACK_AFTER_D)
 
 
 def _eligible(conn, campaign, weekly_key=None):
-    """Recipients (id, email, credits_balance) eligible for a lifecycle campaign."""
-    cols = "SELECT u.id, u.email, u.credits_balance FROM users u WHERE "
-    if campaign == "offer_50":
-        return []  # Retired: manual/forced runs cannot revive the campaign.
-    elif campaign == "welcome_activation":
-        sql = cols + f"""{BASE_FILTER}
-            AND u.created_at >= NOW() - INTERVAL '4 days'
-            AND NOT {HAS_PROJECT}
-            AND NOT EXISTS (SELECT 1 FROM newsletter_sends s WHERE s.user_id=u.id AND s.campaign='welcome_activation' AND s.status='sent')
-            AND {NOT_TODAY}"""
-    elif campaign == "export_nudge":
-        sql = cols + f"""{BASE_FILTER}
-            AND {HAS_PROJECT}
-            AND NOT {HAS_EXPORT}
-            AND {LAST_ACTIVE} >= NOW() - INTERVAL '21 days'
-            AND u.created_at <= NOW() - INTERVAL '1 day'
-            AND NOT EXISTS (SELECT 1 FROM newsletter_sends s WHERE s.user_id=u.id AND s.campaign='export_nudge' AND s.status='sent' AND s.sent_at >= NOW() - INTERVAL '{EXPORT_NUDGE_COOLDOWN_D} days')
-            AND {NOT_TODAY}"""
-    elif campaign == "dormant":
-        sql = cols + f"""{BASE_FILTER}
-            AND {LAST_ACTIVE} <= NOW() - INTERVAL '{DORMANT_AFTER_D} days'
-            AND {LAST_ACTIVE} > NOW() - INTERVAL '{WINBACK_AFTER_D} days'
-            AND ({HAS_PROJECT} OR {HAS_CHAT})
-            AND NOT EXISTS (SELECT 1 FROM newsletter_sends s WHERE s.user_id=u.id AND s.campaign='dormant' AND s.status='sent' AND s.sent_at >= NOW() - INTERVAL '{DORMANT_COOLDOWN_D} days')
-            AND {NOT_TODAY}"""
-    elif campaign == "winback":
-        sql = cols + f"""{BASE_FILTER}
-            AND {LAST_ACTIVE} <= NOW() - INTERVAL '{WINBACK_AFTER_D} days'
-            AND NOT EXISTS (SELECT 1 FROM newsletter_sends s WHERE s.user_id=u.id AND s.campaign='winback' AND s.status='sent' AND s.sent_at >= NOW() - INTERVAL '{WINBACK_COOLDOWN_D} days')
-            AND {NOT_TODAY}"""
-    elif campaign == "weekly_value":
-        sql = cols + f"""{BASE_FILTER}
-            AND {LAST_ACTIVE} >= NOW() - INTERVAL '30 days'
-            AND NOT EXISTS (SELECT 1 FROM newsletter_sends s WHERE s.user_id=u.id AND s.campaign=%s AND s.status='sent')
-            AND {NOT_TODAY}"""
-        return _fetch(conn, sql, (weekly_key,))
-    else:
+    """Compatibility entry point; retired offers never query the database."""
+    if campaign == "offer_50" or (campaign not in CAMPAIGN_FAMILY and campaign != "weekly_value"):
         return []
-    return _fetch(conn, sql)
+    now = datetime.utcnow()
+    return [row for row in _campaign_audience(conn)
+            if _matches_campaign(row, campaign, now, weekly_key)]
+
+
+def _weekly_choices(conn, recips, templates, now=None):
+    """Choose an unseen lesson before repeating one, no sooner than six weeks."""
+    now = now or datetime.utcnow()
+    choices = []
+    for recipient in recips:
+        last = {}
+        for campaign, stamp in recipient["sent_history"].items():
+            if campaign.startswith("weekly-"):
+                topic = campaign.partition(":")[2]
+                if topic in WEEKLY_ORDER:
+                    last[topic] = max(last.get(topic, datetime.min), stamp)
+        available = [key for key in WEEKLY_ORDER if key in templates]
+        available.sort(key=lambda key: (last.get(key, datetime.min), WEEKLY_ORDER.index(key)))
+        if available and last.get(available[0], datetime.min) <= now - timedelta(days=42):
+            choices.append((recipient, available[0]))
+    return choices
 
 
 def _segment_recipients(conn, segment):
     """Recipients for a MANUAL broadcast segment."""
-    cols = "SELECT u.id, u.email, u.credits_balance FROM users u WHERE "
+    cols = """SELECT u.id, u.email, u.credits_balance, u.created_at,
+        (SELECT MAX(s.sent_at) FROM newsletter_sends s
+         WHERE s.user_id=u.id AND s.status='sent') AS last_contact_at
+        FROM users u WHERE """
     seg = (segment or "all").lower()
     if seg == "active":
         sql = cols + f"{BASE_FILTER} AND {LAST_ACTIVE} >= NOW() - INTERVAL '3 days'"
@@ -444,125 +484,143 @@ def _segment_recipients(conn, segment):
         sql = cols + f"{BASE_FILTER} AND u.plan IS NOT NULL AND u.plan <> 'free'"
     else:  # all
         sql = cols + BASE_FILTER
-    return _fetch(conn, sql)
+    return _fetch(conn, sql + f" AND {CONTACT_CADENCE}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  The daily tick — the heart of the automation
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_daily_tick(force=False, dry_run=False):
-    """Evaluate every lifecycle campaign and send. Idempotent + advisory-locked.
+def _prioritize_recipients(plan, quota, now):
+    """Give recent signups 75% of capacity and older users at least 25%.
 
-    force=True   ignore the once-a-day / send-hour gate (manual admin trigger).
-    dry_run=True compute who WOULD receive each campaign, send nothing.
+    Unused shares flow to the other group. Older users are ordered by their
+    last successful contact so a fixed handful cannot monopolize that share.
+    """
+    cutoff = now - timedelta(days=30)
+    recent = [item for item in plan if item["recipient"]["created_at"] >= cutoff]
+    older = [item for item in plan if item["recipient"]["created_at"] < cutoff]
+    recent.sort(key=lambda item: (item["recipient"]["created_at"], item["recipient"]["id"]), reverse=True)
+    older.sort(key=lambda item: (item["recipient"].get("last_contact_at") or datetime.min,
+                                 item["recipient"]["id"]))
+    quota = max(0, int(quota))
+    older_share = max(1, quota // 4) if older and quota > 1 else 0
+    recent_take = min(len(recent), quota - older_share)
+    older_take = min(len(older), quota - recent_take)
+    selected = recent[:recent_take] + older[:older_take]
+    spare = quota - len(selected)
+    selected += recent[recent_take:recent_take + spare]
+    return selected
+
+
+def _campaign_plan(conn, now, settings):
+    """Plan once, deduplicate across campaigns, then allocate the daily quota."""
+    templates = get_all_templates(conn)
+    audience = _campaign_audience(conn)
+    plan, assigned = [], set()
+    def add(recipient, topic, campaign=None):
+        if recipient["id"] not in assigned:
+            assigned.add(recipient["id"])
+            plan.append({"recipient": recipient, "topic": topic,
+                         "campaign": campaign or topic, "template": templates[topic]})
+
+    def lifecycle(keys):
+        for key in keys:
+            if templates[key]["enabled"]:
+                for recipient in audience:
+                    if _matches_campaign(recipient, key, now):
+                        add(recipient, key)
+
+    early = [key for key in LIFECYCLE_ORDER
+             if CAMPAIGN_FAMILY[key] not in ("dormant", "winback")]
+    lifecycle(early)
+    primary = settings.get("weekly_weekday")
+    primary = int(primary if primary is not None else 1)
+    extra = WEEKLY_EXTRA_WEEKDAY >= 0 and WEEKLY_EXTRA_WEEKDAY != primary
+    weekly_due = now.weekday() == primary or (extra and now.weekday() == WEEKLY_EXTRA_WEEKDAY)
+    weekly_key = None
+    if settings.get("weekly_enabled") and weekly_due:
+        iso = now.isocalendar()
+        weekly_key = f"weekly-{iso[0]}-W{iso[1]:02d}"
+        if now.weekday() != primary:
+            weekly_key += "-b"
+        topics = {key: templates[key] for key in WEEKLY_ORDER if templates[key]["enabled"]}
+        recips = [r for r in audience if r["id"] not in assigned
+                  and _matches_campaign(r, "weekly_value", now, weekly_key)]
+        for recipient, topic in _weekly_choices(conn, recips, topics, now):
+            add(recipient, topic, f"{weekly_key}:{topic}")
+    lifecycle([key for key in LIFECYCLE_ORDER if key not in early])
+    return plan, weekly_due, weekly_key
+
+
+def run_daily_tick(force=False, dry_run=False):
+    """Send the quota-limited plan; a dry run uses the identical allocation.
+
+    Force only bypasses timing. It never revives retired templates, overrides
+    the master pause, ignores opt-outs, or increases the account's send budget.
     """
     conn = get_db()
     try:
         ensure_newsletter_schema(conn)
-
-        # Advisory lock: only one worker/instance runs the body at a time.
         cur = conn.cursor()
         cur.execute("SELECT pg_try_advisory_lock(%s) AS got", (TICK_LOCK_ID,))
         got_lock = cur.fetchone()["got"]
         cur.close()
         if not got_lock:
             return {"skipped": "locked"}
-
         try:
             settings = get_settings(conn)
-            if not settings.get("master_enabled") and not force:
+            if not settings.get("master_enabled"):
                 return {"skipped": "disabled"}
-
             now = datetime.utcnow()
             today = now.date()
             if not force and not dry_run:
                 if settings.get("last_daily_run") == today:
                     return {"skipped": "already_ran_today"}
-                if now.hour < int(settings.get("send_hour_utc") or 15):
+                hour = settings.get("send_hour_utc")
+                if now.hour < int(hour if hour is not None else 15):
                     return {"skipped": "before_send_hour"}
-
-            summary = {"dry_run": dry_run, "campaigns": {}, "recipients": {}}
-            emailed = set()
-            quota_remaining = (None if dry_run else
-                               brevo_delivery.budget_status()["bulk_remaining"])
-
-            def process(campaign, recips, tmpl):
-                nonlocal quota_remaining
-                sent = 0
-                who = []
-                for r in recips:
-                    if r["id"] in emailed:
-                        continue
-                    if quota_remaining is not None and quota_remaining <= 0:
-                        break
-                    who.append(r["email"])
-                    if dry_run:
-                        sent += 1
-                        continue
-                    if campaign == "offer_50":
-                        # The offer has to EXIST before the email describing it
-                        # goes out, and the email's countdown is filled from
-                        # that row — so the hours in the inbox and the seconds
-                        # on the pricing page are the same number. A mint that
-                        # returns None means the user turned out to be
-                        # ineligible between the query and here; send nothing.
-                        offer = offers.mint(conn, r["id"], offers.WINBACK)
-                        ok = bool(offer) and offers.send_offer_email(
-                            conn, r["id"], r["email"], offers.WINBACK)
-                    else:
-                        subject, html, unsub = _render_for(tmpl, r["email"], r["credits_balance"])
-                        ok = _send_one(r["email"], subject, html, unsub)
-                    _record_send(conn, r["id"], r["email"], campaign, "sent" if ok else "failed")
-                    if ok:
-                        emailed.add(r["id"])
-                        sent += 1
-                        if quota_remaining is not None:
-                            quota_remaining -= 1
-                summary["campaigns"][campaign] = sent
-                summary["recipients"][campaign] = who
-
-            # Lifecycle, in priority order (each user gets at most one per tick).
-            for campaign in LIFECYCLE_ORDER:
-                tmpl = get_template(conn, campaign)
-                if not tmpl["enabled"]:
-                    summary["campaigns"][campaign] = "disabled"
+            budget = brevo_delivery.budget_status()
+            # A zero/unknown provider allowance must not create another Brevo
+            # backlog. Leave the daily marker open so an hourly tick can resume.
+            if budget["bulk_remaining"] <= 0 and not dry_run:
+                return {"skipped": "email_capacity", "budget": budget}
+            plan, weekly_due, weekly_key = _campaign_plan(conn, now, settings)
+            selected = _prioritize_recipients(plan, budget["bulk_remaining"], now)
+            summary = {
+                "dry_run": dry_run, "content_version": CONTENT_VERSION,
+                "campaigns": {key: 0 for key in DEFAULT_TEMPLATES if key != "offer_50"},
+                "recipients": {}, "eligible_total": len(plan),
+                "scheduled_total": len(selected), "deferred": len(plan) - len(selected),
+                "weekly_due": weekly_due, "weekly_key": weekly_key,
+                "recent_selected": sum(item["recipient"]["created_at"] >= now - timedelta(days=30)
+                                       for item in selected),
+                "older_selected": sum(item["recipient"]["created_at"] < now - timedelta(days=30)
+                                      for item in selected),
+                "budget": budget,
+            }
+            for item in selected:
+                r, topic, campaign = item["recipient"], item["topic"], item["campaign"]
+                summary["recipients"].setdefault(topic, []).append(r["email"])
+                if dry_run:
+                    summary["campaigns"][topic] += 1
                     continue
-                process(campaign, _eligible(conn, campaign), tmpl)
-
-            # Weekly value — on its configured weekday AND on the extra one,
-            # so the steady drumbeat is twice a week (dry-run previews anytime).
-            #
-            # The two runs need DIFFERENT dedup keys. The key is what
-            # _eligible checks to decide "already had this one", so reusing a
-            # single per-ISO-week key would make the second day a guaranteed
-            # no-op — the send would look scheduled and quietly do nothing.
-            weekly_day = int(settings.get("weekly_weekday") if settings.get("weekly_weekday") is not None else 1)
-            is_primary = (now.weekday() == weekly_day)
-            is_extra = (WEEKLY_EXTRA_WEEKDAY >= 0
-                        and now.weekday() == WEEKLY_EXTRA_WEEKDAY
-                        and WEEKLY_EXTRA_WEEKDAY != weekly_day)
-            weekly_due = is_primary or is_extra
-            if settings.get("weekly_enabled") and (weekly_due or dry_run):
-                tmpl = get_template(conn, "weekly_value")
-                if tmpl["enabled"]:
-                    iso = now.isocalendar()
-                    weekly_key = f"weekly-{iso[0]}-W{iso[1]:02d}"
-                    if is_extra:
-                        weekly_key += "-b"
-                    process(weekly_key, _eligible(conn, "weekly_value", weekly_key=weekly_key), tmpl)
-                    summary["weekly_key"] = weekly_key
-                    summary["weekly_due"] = weekly_due
-
-            # Mark the automatic run done for today (not on manual force / dry).
+                subject, html, unsub = _render_for(item["template"], r["email"], r["credits_balance"])
+                ok = _send_one(r["email"], subject, html, unsub, campaign=topic)
+                _record_send(conn, r["id"], r["email"], campaign, "sent" if ok else "failed")
+                if ok:
+                    summary["campaigns"][topic] += 1
+                else:
+                    summary["failed"] = summary.get("failed", 0) + 1
+                    # A provider outage or depleted allowance must not burn
+                    # through the rest of the audience with futile sends.
+                    if brevo_delivery.budget_status()["bulk_remaining"] <= 0:
+                        break
             if not force and not dry_run:
                 c2 = conn.cursor()
                 c2.execute("UPDATE newsletter_settings SET last_daily_run=%s, updated_at=NOW() WHERE id=1", (today,))
                 conn.commit()
                 c2.close()
-
-            if not dry_run:
-                summary["budget"] = brevo_delivery.budget_status()
             return summary
         finally:
             cur = conn.cursor()
@@ -651,8 +709,7 @@ def list_templates():
     try:
         ensure_newsletter_schema(conn)
         out = []
-        for key in list(DEFAULT_TEMPLATES.keys()):
-            t = get_template(conn, key)
+        for key, t in get_all_templates(conn).items():
             out.append({
                 "key": key,
                 "label": CAMPAIGN_LABELS.get(key, key),
@@ -661,7 +718,7 @@ def list_templates():
                 "enabled": t["enabled"],
                 "is_default": t["is_default"],
             })
-        return jsonify({"templates": out}), 200
+        return jsonify({"templates": out, "content_version": CONTENT_VERSION}), 200
     finally:
         conn.close()
 
@@ -697,6 +754,8 @@ def get_one_template(key):
 def update_template(key):
     if key not in DEFAULT_TEMPLATES:
         return jsonify({"error": "Unknown template"}), 404
+    if key == "offer_50":
+        return jsonify({"error": "This discount campaign is permanently retired."}), 410
     data = request.get_json(silent=True) or {}
     conn = get_db()
     try:
@@ -783,6 +842,8 @@ def test_send():
     key = data.get("key")
     if key not in DEFAULT_TEMPLATES:
         return jsonify({"error": "Unknown template"}), 404
+    if key == "offer_50":
+        return jsonify({"error": "This discount campaign is permanently retired."}), 410
     to = (data.get("email") or _token_email() or ADMIN_EMAIL).strip()
     conn = get_db()
     try:
@@ -877,13 +938,14 @@ def send_newsletter():
         budget = brevo_delivery.budget_status()
         quota = budget["bulk_remaining"]
         original_total = len(recips)
-        recips = recips[:quota]
+        recips = [item["recipient"] for item in _prioritize_recipients(
+            [{"recipient": row} for row in recips], quota, datetime.utcnow())]
         deferred = original_total - len(recips)
         campaign = "manual-" + datetime.utcnow().strftime("%Y%m%d%H%M")
         sent = failed = 0
         for r in recips:
             unsub = _unsub_url(r["email"])
-            body = render_tokens(html_content, credits=r["credits_balance"], unsub_url=unsub)
+            body = render_tokens(html_content, credits=r["credits_balance"], unsub_url=unsub, html=True)
             html = wrap_email(body, unsub, preheader=render_tokens(subject, credits=r["credits_balance"]))
             subj = render_tokens(subject, credits=r["credits_balance"])
             ok = _send_one(r["email"], subj, html, unsub)
@@ -978,7 +1040,7 @@ def unsubscribe():
     if request.method == 'POST':  # one-click (List-Unsubscribe-Post)
         return ('', 200)
     return _unsub_page("You're unsubscribed",
-                       "You won't receive any more emails from Valmera. Sorry to see you go.",
+                       "You won't receive Valmera product emails or editing tips. Essential verification and billing emails remain active.",
                        show_resub=True, email=email)
 
 

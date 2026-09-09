@@ -1,50 +1,20 @@
+"""Client-safe email presentation and the September 2026 editorial library.
+
+Code defaults can be overridden per template in newsletter_templates. Marketing
+and account-service messages share presentation, but only marketing includes
+unsubscribe controls. Copy lives in newsletter_campaigns as escaped plain text.
 """
-Valmera lifecycle / newsletter email content.
 
-This module holds:
-  • the branded email SKELETON (dark, red-accent, email-client-safe tables)
-  • a set of DESIGN BLOCKS that build the body fragments
-  • token substitution ({{CTA_URL}}, {{CREDITS}}, {{UNSUB_URL}})
-  • the DEFAULT hand-crafted templates for every behavioral campaign
+from html import escape
+from html.parser import HTMLParser
+import re
 
-The templates here are the *code defaults*. The admin can override any of them
-from the dashboard (stored in the `newsletter_templates` table); a "reset"
-deletes the DB row and falls back to the default below. So editing copy is a
-DB edit — no redeploy — while the defaults remain the honest, on-brand baseline.
+from routes.newsletter_campaigns import (
+    LIFECYCLE_COPY, WEEKLY_COPY, LIFECYCLE_ORDER, CAMPAIGN_LABELS,
+    LIFECYCLE_FAMILIES, CAMPAIGN_FAMILY, WEEKLY_ORDER,
+)
 
-WHY THE BODIES ARE GENERATED, NOT TYPED (round 49)
---------------------------------------------------
-Every template used to be one enormous hand-written HTML string. Six of them,
-each repeating the same table scaffolding inline, which meant a design change
-was six careful find-and-replaces and a check-row in one email drifted from the
-check-row in the next. The blocks below emit that scaffolding once. The stored
-default is still a plain HTML string — `DEFAULT_TEMPLATES` is built at import
-— so the admin editor keeps working exactly as before.
-
-THE DESIGN IS THE PRICING CARDS
--------------------------------
-Same language as /subscribe and the studio's ModelSelector: #0b0b0b surfaces,
-hairline #1e1e1e borders, monospace micro-labels in wide uppercase tracking, a
-red accent, and a WHITE pill as the primary button. The site's main CTA has been
-white-on-black for a long time; the emails were using a red button, so arriving
-on the pricing page from an email looked like arriving at a different product.
-
-EMAIL-CLIENT RULES THESE BLOCKS FOLLOW
---------------------------------------
-  * tables + inline styles only — no flex, no grid, no <style> block that
-    Gmail can strip
-  * `bgcolor` beside every background colour, for Outlook
-  * hex colours, never rgba() — Outlook drops the whole declaration
-  * no web fonts: Arial for copy, a monospace stack for micro-labels. The
-    brand font cannot load in Gmail, so pretending otherwise just yields
-    Times New Roman
-  * border-radius degrades to square in Outlook, which is fine and expected
-
-Honesty rule (see CLAUDE.md / memory): every claim below maps to a REAL shipped
-Valmera capability. Do not add features that don't exist. Note in particular
-that a free account now has NO credits (round 49) — nothing here may promise
-"you've got N credits waiting", which is what these templates used to open with.
-"""
+CONTENT_VERSION = "2026-09-09"
 
 # Where the CTA buttons point by default (the studio, on the frontend).
 DEFAULT_CTA_URL = "https://valmera.io/studio"
@@ -207,25 +177,36 @@ def divider():
 #  SKELETON — wraps a body fragment into a full, client-safe HTML email
 # ─────────────────────────────────────────────────────────────────────────────
 
-def wrap_email(body_html: str, unsubscribe_url: str, preheader: str = "") -> str:
+def wrap_email(body_html: str, unsubscribe_url: str = "", preheader: str = "") -> str:
     """Wrap an inner body fragment in the branded Valmera email shell.
 
     The shell owns the header + the footer with the unsubscribe link, so
     individual templates only ever author the middle.
     """
+    footer = (
+        "You're receiving Valmera editing ideas and product emails because you have an account."
+        if unsubscribe_url else
+        "This is an account-service email from Valmera."
+    )
+    unsubscribe = (
+        f'<a href="{escape(unsubscribe_url, quote=True)}" style="color:#b4b4b4;text-decoration:underline;">'
+        'Unsubscribe from product emails</a> &nbsp;&middot;&nbsp; '
+        if unsubscribe_url else ""
+    )
     return f"""<!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="color-scheme" content="dark only">
 <meta name="supported-color-schemes" content="dark only">
+<meta name="valmera-email-version" content="{CONTENT_VERSION}">
 <title>Valmera</title>
 </head>
 <body style="margin:0;padding:0;background:{BG};-webkit-text-size-adjust:100%;" bgcolor="{BG}">
-<div style="display:none;max-height:0;overflow:hidden;opacity:0;color:{BG};font-size:1px;line-height:1px;">{preheader}</div>
+<div data-email-preheader="true" style="display:none;max-height:0;overflow:hidden;opacity:0;color:{BG};font-size:1px;line-height:1px;">{escape(preheader)}</div>
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:{BG};" bgcolor="{BG}">
 <tr><td align="center" style="padding:30px 14px 40px;">
-<table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="width:600px;max-width:600px;background:{CARD};border:1px solid {LINE};border-radius:20px;" bgcolor="{CARD}">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:600px;background:{CARD};border:1px solid {LINE};border-radius:20px;" bgcolor="{CARD}">
 
 <tr><td style="padding:26px 32px 4px;">
   <table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>
@@ -244,8 +225,8 @@ def wrap_email(body_html: str, unsubscribe_url: str, preheader: str = "") -> str
 </td></tr>
 
 <tr><td style="padding:20px 32px 28px;border-top:1px solid {LINE};">
-<p style="margin:0 0 6px;font:400 12px/1.55 {SANS};color:{MUTED};">You're receiving this because you have a Valmera account. We only send things worth your time.</p>
-<p style="margin:0;font:400 12px/1.55 {SANS};color:{MUTED};"><a href="{unsubscribe_url}" style="color:#999999;text-decoration:underline;">Unsubscribe</a> &nbsp;&middot;&nbsp; <a href="https://valmera.io" style="color:#999999;text-decoration:underline;">valmera.io</a></p>
+<p style="margin:0 0 8px;font:400 12px/1.55 {SANS};color:{MUTED};">{footer}</p>
+<p style="margin:0;font:400 12px/1.55 {SANS};color:{MUTED};">{unsubscribe}<a href="mailto:support@valmera.io" style="color:#b4b4b4;text-decoration:underline;">Contact support</a> &nbsp;&middot;&nbsp; <a href="https://valmera.io" style="color:#b4b4b4;text-decoration:underline;">valmera.io</a></p>
 </td></tr>
 
 </table>
@@ -255,12 +236,17 @@ def wrap_email(body_html: str, unsubscribe_url: str, preheader: str = "") -> str
 
 
 def render_tokens(text: str, *, cta_url: str = DEFAULT_CTA_URL, credits=None,
-                  unsub_url: str = "") -> str:
+                  unsub_url: str = "", html: bool = False) -> str:
     """Substitute the small, fixed set of tokens allowed in subjects/bodies."""
     if text is None:
         return ""
-    out = text.replace("{{CTA_URL}}", cta_url or DEFAULT_CTA_URL)
-    out = out.replace("{{UNSUB_URL}}", unsub_url or "")
+    cta_value = cta_url or DEFAULT_CTA_URL
+    unsub_value = unsub_url or ""
+    if html:
+        cta_value = escape(cta_value, quote=True)
+        unsub_value = escape(unsub_value, quote=True)
+    out = text.replace("{{CTA_URL}}", cta_value)
+    out = out.replace("{{UNSUB_URL}}", unsub_value)
     try:
         credits_str = str(int(round(float(credits)))) if credits is not None else "0"
     except (TypeError, ValueError):
@@ -269,213 +255,93 @@ def render_tokens(text: str, *, cta_url: str = DEFAULT_CTA_URL, credits=None,
     return out
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  DEFAULT TEMPLATES  (key -> subject / preheader / body_html / enabled)
-# ─────────────────────────────────────────────────────────────────────────────
-#
-# NOTE ON CREDITS: these used to close with "you've got {{CREDITS}} credits
-# waiting". A free account has none as of round 49, so that line would have
-# been a lie told to precisely the people being asked to come back. What is
-# free now — uploading, the full index, the transcript, asking the agent about
-# it — is real and is what these say instead. {{CREDITS}} still renders for any
-# admin-stored template that uses it.
+def _campaign_template(item):
+    key, label, subject, preheader, heading, opening, prompt, closing, button = item
+    body = eyebrow("An editing idea from Valmera") + h1(escape(heading))
+    body += "".join(p(escape(paragraph)) for paragraph in opening)
+    if prompt:
+        body += card(eyebrow("Try this in chat") + p(escape(prompt), color=WHITE, bottom=0))
+    body += "".join(p(escape(paragraph)) for paragraph in closing)
+    body += cta(escape(button))
+    return {"subject": subject, "preheader": preheader, "body_html": body, "enabled": True}
+
 
 DEFAULT_TEMPLATES = {
-    # new signup, no project yet
-    "welcome_activation": {
-        "subject": "Your first edit takes a sentence, not an afternoon",
-        "preheader": "Upload a clip, tell it what you want, and it's done — no timeline, no scrubbing.",
-        "enabled": True,
-        "body_html": (
-            eyebrow("Start here")
-            + h1("Hand Valmera your video.<br>It does the editing.")
-            + p("No timeline. No scrubbing. No lost afternoon. You upload a clip, "
-                "type what you want in plain English, and the agent actually does "
-                "the work.")
-            + card(
-                f'<p style="margin:0 0 14px;font:700 13px/1.4 {MONO};color:{WHITE};'
-                'letter-spacing:0.08em;text-transform:uppercase;">Just type it</p>'
-                + feature("&ldquo;<strong style=\"color:#fff;\">Cut the boring parts</strong>&rdquo; &mdash; it trims silences and filler like <em>um</em> and <em>uh</em> in one message.")
-                + feature("&ldquo;<strong style=\"color:#fff;\">Add captions</strong>&rdquo; &mdash; pick a premium animated preset: Podcast, Beast, Karaoke or Elegant.")
-                + feature("&ldquo;<strong style=\"color:#fff;\">Make it vertical</strong>&rdquo; &mdash; reframe to 9:16 for Reels, TikTok and Shorts.")
-            )
-            + p("Uploading your video and having it analysed &mdash; transcript, "
-                "shots, silences, the lot &mdash; is <strong style=\"color:#fff;\">"
-                "free</strong>. You can look at everything it found before you "
-                "decide anything.")
-            + cta("Upload your first clip &rarr;")
-            + small("One clip, one sentence. See how much time you just got back.")
-        ),
-    },
-
-    # has a project, never exported
-    "export_nudge": {
-        "subject": "You're one click from a finished video",
-        "preheader": "You did the hard part. Give it a last pass, hit export, and it's a branded MP4 on your drive.",
-        "enabled": True,
-        "body_html": (
-            eyebrow("Almost there")
-            + h1("You did the hard part.")
-            + p("You started the project. You made the edits. The only thing between "
-                "you and a finished, branded video is one click: <strong "
-                "style=\"color:#fff;\">Export</strong>.")
-            + p("Don't let this one die in your drafts. Give it a last pass, hit "
-                "export, and the agent renders it, brands it, and hands it back "
-                "downloaded.")
-            + card(
-                f'<p style="margin:0 0 14px;font:700 13px/1.4 {MONO};color:{WHITE};'
-                'letter-spacing:0.08em;text-transform:uppercase;">Finish it in three asks</p>'
-                + numbered(1, "<strong style=\"color:#fff;\">Add captions</strong> &mdash; Podcast, Beast, Karaoke or Elegant. One message.")
-                + numbered(2, "<strong style=\"color:#fff;\">Drop in music</strong> &mdash; a track from the built-in library, or paste a link to a song. Ducked under your voice automatically.")
-                + numbered(3, "<strong style=\"color:#fff;\">Export</strong> &mdash; one click, branded end card, downloaded to your device.")
-            )
-            + cta("Finish your video &rarr;")
-            + small("Each of those is one message. The agent does the rest.")
-        ),
-    },
-
-    # was active, went quiet
-    "dormant": {
-        "subject": "Still spending your night editing?",
-        "preheader": "Hand it to the agent — one message cuts silences, filler, and adds captions.",
-        "enabled": True,
-        "body_html": (
-            eyebrow("It got faster")
-            + h1("Back to editing the slow way?")
-            + p("Scrubbing the timeline. Hunting for dead air. Deleting every "
-                "&ldquo;um&rdquo; one by one, then fighting with caption styles past "
-                "midnight. You already know how that ends.")
-            + p("There's a faster path. Hand the agent your video, describe the edit "
-                "in one message, and go do literally anything else.")
-            + card(
-                f'<p style="margin:0 0 14px;font:700 13px/1.4 {MONO};color:{WHITE};'
-                'letter-spacing:0.08em;text-transform:uppercase;">One message, the boring parts gone</p>'
-                + feature("<strong style=\"color:#fff;\">Cut the silences</strong> &mdash; dead air trimmed automatically, no scrubbing.")
-                + feature("<strong style=\"color:#fff;\">Kill the filler</strong> &mdash; every &ldquo;um&rdquo; and &ldquo;uh&rdquo; removed in one pass.")
-                + feature("<strong style=\"color:#fff;\">Add captions</strong> &mdash; premium animated presets, styled word by word.")
-            )
-            + p("That's the tight, punchy cut of your video &mdash; the hours you'd "
-                "normally burn, handed straight to the agent.")
-            + cta("Hand one to the agent &rarr;")
-            + small("Drop in one video, type one message. See what comes back.")
-        ),
-    },
-
-    # long gone
-    "winback": {
-        "subject": "Make a cinematic cut just by describing it 🎬",
-        "preheader": "Color grades, Ken Burns zooms, animated captions, sound effects — all from chat.",
-        "enabled": True,
-        "body_html": (
-            eyebrow("What's new")
-            + h1("Cinematic edits,<br>from one sentence.")
-            + p("You remember a rougher version. It grew up. You still just describe "
-                "the edit in plain English &mdash; but now it delivers the kind of cut "
-                "that used to take a pro hours in a timeline.")
-            + card(
-                f'<p style="margin:0 0 14px;font:700 13px/1.4 {MONO};color:{WHITE};'
-                'letter-spacing:0.08em;text-transform:uppercase;">Here&rsquo;s what it makes today</p>'
-                + feature("<strong style=\"color:#fff;\">A cinematic look</strong> &mdash; color grades, Ken Burns zooms on your stills, smooth fades and dip-to-black transitions.")
-                + feature("<strong style=\"color:#fff;\">Premium animated captions</strong> &mdash; Podcast, Beast, Karaoke word-pop, Elegant. Pick a preset, it styles every word.")
-                + feature("<strong style=\"color:#fff;\">Sound design, handled</strong> &mdash; sound effects to punctuate a moment, scored from the built-in library or a song you paste in.")
-                + feature("<strong style=\"color:#fff;\">Paste a URL, it lands in your edit</strong> &mdash; any clip, song or image pulled straight in. Then export in one click.")
-            )
-            + cta("See what it makes now &rarr;")
-            + small("Same deal as before: hand it your video, describe the edit, it does it.")
-        ),
-    },
-
-    # weekly value (active + dormant)
-    "weekly_value": {
-        "subject": "An hour of editing, done in 3 messages",
-        "preheader": "The exact chat lines that turn a long take into a punchy vertical short.",
-        "enabled": True,
-        "body_html": (
-            eyebrow("This week's recipe")
-            + h1("An hour of editing.<br>Three messages.")
-            + p("You shot a long talking-head take. Normally that's an hour of "
-                "scrubbing, cutting and captioning. This week, hand it over instead "
-                "&mdash; type these three messages, then export.")
-            + card(
-                numbered(1, "&ldquo;<strong style=\"color:#fff;\">Cut all the silences and filler words</strong>&rdquo; &mdash; dead air and every &ldquo;um&rdquo; gone. Your take gets tight in one pass.")
-                + numbered(2, "&ldquo;<strong style=\"color:#fff;\">Add Beast-style captions</strong>&rdquo; &mdash; bold, animated word-pop captions that hold attention all the way through.")
-                + numbered(3, "&ldquo;<strong style=\"color:#fff;\">Make it 9:16 and add a subtle zoom</strong>&rdquo; &mdash; reframed for Reels, TikTok and Shorts with a slow cinematic push.")
-            )
-            + p("Then one word: <strong style=\"color:#fff;\">&ldquo;export&rdquo;</strong> "
-                "&mdash; and you download the finished vertical short, branded end "
-                "card and all.")
-            + cta("Open Valmera &rarr;")
-            + small("Try it on your next long take. It's done before your coffee's cold.")
-        ),
-    },
-
-    # ── the 50%-off intro offer ──────────────────────────────────────────
-    # ONE send, at ONE moment (round 49): 24 hours after an account registers,
-    # if it never started a trial. It used to also go out the instant an
-    # account existed, which meant the discount arrived before the product had
-    # done anything — see the docstring in backend/offers.py for why that was
-    # the wrong trade. The segment is routes/newsletter._eligible('offer_50'),
-    # and a live trial can never match it (a trialling user is is_subscribed).
-    #
-    # The struck-through prices below cover Creator and Pro only. Frontier is
-    # deliberately not discountable (offers.DISCOUNTABLE_PLANS) — do not add it
-    # to this copy, because Paddle's restrict_to would refuse the checkout the
-    # email had just promised.
-    #
-    # {{OFFER_PERCENT}} and {{OFFER_HOURS}} are substituted by offers._fill,
-    # from the offer ROW — so the number of hours in the email is the real time
-    # left on the real discount, not a hardcoded "24" that keeps being true
-    # for about a minute. If the copy is edited in the admin, keep both tokens:
-    # dropping them turns a countdown into a claim nobody is checking.
-    "offer_50": {
-        "subject": "{{OFFER_PERCENT}}% off — yours for the next {{OFFER_HOURS}} hours",
-        "preheader": "Start your 3-day trial in the next {{OFFER_HOURS}} hours and your first month is half price.",
-        "enabled": False,
-        "body_html": (
-            eyebrow("{{OFFER_HOURS}} hours left")
-            + h1("{{OFFER_PERCENT}}% off<br>your first month.")
-            + p("Start your <strong style=\"color:#fff;\">3-day free trial</strong> in "
-                "the next <strong style=\"color:#fff;\">{{OFFER_HOURS}} hours</strong> "
-                "and the first month after it is half price. You're not charged "
-                "during the trial at all, and cancelling inside it costs nothing.")
-            + card(
-                f'<p style="margin:0 0 14px;font:700 11px/1.4 {MONO};color:{MICRO};'
-                'letter-spacing:0.16em;text-transform:uppercase;">First month</p>'
-                + price_row("Creator", 30, 15)
-                + price_row("Pro", 50, 25)
-                + f'<p style="margin:12px 0 0;font:400 13px/1.5 {SANS};color:{MUTED};">'
-                  "Then the usual price. Cancel any time.</p>",
-                accent=True,
-            )
-            + h2("What you get for it")
-            + feature("<strong style=\"color:#fff;\">An editor you talk to</strong> &mdash; cuts, silences, filler words, captions, music, b-roll. You describe it, the agent does it.")
-            + feature("<strong style=\"color:#fff;\">The AI model included</strong> &mdash; no API key, no second bill.")
-            + feature("<strong style=\"color:#fff;\">Clean exports</strong> &mdash; no watermark, and a priority place in the render queue.")
-            + cta("Claim {{OFFER_PERCENT}}% off &rarr;", url="https://valmera.io/subscribe")
-            + divider()
-            + small("The discount applies to your first month only, and it's one per "
-                    "account. After {{OFFER_HOURS}} hours it's gone and the plans go "
-                    "back to full price.")
-        ),
-    },
+    item[0]: _campaign_template(item) for item in LIFECYCLE_COPY + WEEKLY_COPY
+}
+# Preserve the historical key without retaining a stale offer or trial promise.
+DEFAULT_TEMPLATES["offer_50"] = {
+    "subject": "Retired introductory offer",
+    "preheader": "This campaign is no longer sent.",
+    "body_html": p("The introductory discount campaign has been retired."),
+    "enabled": False,
 }
 
 
-# The lifecycle campaigns the daily engine evaluates, in PRIORITY order.
-# (weekly_value is handled separately, only on its scheduled weekday.)
-#
-# offer_50 runs FIRST: it is the only campaign with an expiry attached, so if a
-# user is eligible for it and for something else on the same tick, the one with
-# a clock on it is the one that should land (NOT_TODAY caps them at one).
-LIFECYCLE_ORDER = ["welcome_activation", "export_nudge", "dormant",
-                   "winback"]
+class _EmailText(HTMLParser):
+    """Readable MIME alternative, including working links and opt-out URL."""
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts = []
+        self.hidden = 0
+        self.link = None
 
-# Human labels for the admin UI.
-CAMPAIGN_LABELS = {
-    "offer_50": "50% intro offer (24h after signup, no trial started)",
-    "welcome_activation": "Welcome / Activation",
-    "export_nudge": "Export nudge",
-    "dormant": "Dormant win-back",
-    "winback": "Long-gone win-back",
-    "weekly_value": "Weekly value",
-}
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag in ("head", "style", "script") or attrs.get("data-email-preheader"):
+            self.hidden += 1
+        if self.hidden:
+            return
+        if tag in ("p", "h1", "h2", "tr", "br", "div"):
+            self.parts.append("\n")
+        if tag == "a":
+            self.link = attrs.get("href", "")
+
+    def handle_endtag(self, tag):
+        if self.hidden:
+            if tag in ("head", "style", "script", "div"):
+                self.hidden -= 1
+            return
+        if tag == "a" and self.link:
+            self.parts.append(f" ({self.link})")
+            self.link = None
+        if tag in ("p", "h1", "h2", "tr", "div"):
+            self.parts.append("\n")
+
+    def handle_data(self, data):
+        if not self.hidden:
+            self.parts.append(data)
+
+
+def plain_text(html):
+    parser = _EmailText()
+    parser.feed(html or "")
+    lines = [re.sub(r"[ \t\xa0]+", " ", line).strip()
+             for line in "".join(parser.parts).splitlines()]
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
+
+
+def verification_email(code):
+    """Keep the requested code prominent; authentication is not an upsell."""
+    safe_code = escape(str(code))
+    body = (eyebrow("Confirm your email") + h1("Your next step is six digits.")
+            + p("Enter this code in the Valmera tab where you requested it.")
+            + card(f'<p style="margin:0;font:700 36px/1.4 {MONO};letter-spacing:0.12em;color:{WHITE};">{safe_code}</p>')
+            + p("The code expires in 5 minutes. Keep it private; Valmera support will never ask you to share it.")
+            + small("If you didn't request this code, you can ignore this email."))
+    html = wrap_email(body, preheader="Your verification code expires in 5 minutes.")
+    return {"subject": "Your Valmera verification code", "htmlContent": html,
+            "textContent": plain_text(html)}
+
+
+def payment_email(plan_label, decline_text, payment_url, account_url):
+    body = (eyebrow("Payment update") + h1("Let's get your payment sorted.")
+            + p(f"We couldn't complete the payment for your {escape(plan_label)} plan. {escape(decline_text)}")
+            + p("Open the secure billing page to review the payment and update your details if needed. Your account shows the current status of your subscription and editing access.")
+            + cta("Review my payment", escape(payment_url or account_url, quote=True))
+            + p("Payment retries may still occur while the subscription is active. If you want to stop future renewals, manage or cancel your subscription from your account.")
+            + p(f'<a href="{escape(account_url, quote=True)}" style="color:{WHITE};text-decoration:underline;">Manage my subscription</a>')
+            + small("Need help understanding the payment? Reply to this email or contact support@valmera.io."))
+    html = wrap_email(body, preheader="Review your payment details and subscription status securely.")
+    return {"subject": "Action needed: your Valmera payment", "htmlContent": html,
+            "textContent": plain_text(html)}

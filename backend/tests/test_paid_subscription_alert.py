@@ -560,9 +560,9 @@ def test_claim_is_atomic_and_can_recover_a_crashed_sender():
 
 @pytest.mark.parametrize(
     ("attempt", "seconds"),
-    [(1, 300), (2, 900), (3, 3600), (4, 21600), (5, 86400), (50, 86400)],
+    [(1, 60), (2, 120), (3, 300), (4, 600), (5, 900), (50, 900)],
 )
-def test_retry_backoff_is_bounded_to_daily(attempt, seconds):
+def test_retry_backoff_resumes_within_fifteen_minutes(attempt, seconds):
     assert alerts._retry_seconds(attempt) == seconds
 
 
@@ -582,7 +582,7 @@ def test_brevo_failure_is_recorded_for_retry_not_raised(monkeypatch):
     assert "status = 'failed'" in finish_sql
     assert "next_attempt_at" in finish_sql
     assert "attempt_count = %s" in finish_sql
-    assert finish_params == (300, "sub:sub_123", 1)
+    assert finish_params == (60, "sub:sub_123", 1)
     assert conn.committed == 2
 
 
