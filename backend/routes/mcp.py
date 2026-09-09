@@ -2288,6 +2288,19 @@ def _unauthorized(err):
     return resp, 401
 
 
+@mcp_bp.route("/.well-known/glama.json")
+def glama_connector_claim():
+    """Public ownership proof for Valmera's existing Glama connector.
+
+    Glama requires this account-bound marker to remain publicly available.
+    It is verification metadata, not an MCP access credential.
+    """
+    return jsonify({
+        "$schema": "https://glama.ai/mcp/schemas/connector.json",
+        "claim": "glama_claim_q3dc-m9kQbozKQWLO1vXMfkthFqbgcCm",
+    })
+
+
 @mcp_bp.route("/.well-known/mcp/server-card.json")
 def server_card():
     """A PUBLIC description of this server, for machines that cannot log in.
