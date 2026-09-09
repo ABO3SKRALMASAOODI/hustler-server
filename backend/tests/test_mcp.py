@@ -373,6 +373,47 @@ def test_tools_list_is_session_tools_plus_the_worker_registry(client):
     assert "clips" in make_shorts["inputSchema"]["required"]
 
 
+def test_public_server_card_matches_authenticated_discovery(client):
+    response = client.get("/.well-known/mcp/server-card.json")
+    assert response.status_code == 200
+    card = response.get_json()
+    initialized = rpc(client, "initialize", STATIC_TOKEN).get_json()["result"]
+    tools = rpc(client, "tools/list", STATIC_TOKEN).get_json()["result"]["tools"]
+
+    assert card["serverInfo"] == initialized["serverInfo"]
+    assert card["tools"] == tools
+    assert card["toolCount"] == len(tools)
+    assert card["authentication"]["required"] is True
+    assert card["authentication"]["schemes"] == ["oauth2"]
+    assert card["resources"] == card["prompts"] == []
+    assert "DOCTRINE." not in response.get_data(as_text=True)
+    assert "CAPABILITIES —" not in response.get_data(as_text=True)
+
+    # Publishing input schemas must not create an anonymous execution path.
+    assert rpc(client, "tools/list").status_code == 401
+    assert rpc(client, "tools/call", params={
+        "name": "create_project", "arguments": {"title": "Anonymous"},
+    }).status_code == 401
+    assert DB["created_project"] is None
+    assert DB["enqueued"] == []
+
+
+def test_public_server_card_filters_stale_and_internal_tools(client, monkeypatch):
+    stale = dict(CATALOG)
+    stale["tools"] = [CATALOG["tools"][0]] + [
+        {"type": "function", "function": {
+            "name": name, "description": "Stale internal tool",
+            "parameters": {"type": "object", "properties": {}}}}
+        for name in [*mcpmod.MCP_DENIED_TOOLS, "make_shorts"]
+    ]
+    monkeypatch.setattr(mcpmod, "_catalog", lambda: stale)
+    card = client.get("/.well-known/mcp/server-card.json").get_json()
+    names = {tool["name"] for tool in card["tools"]}
+    assert "get_transcript" in names
+    assert not names.intersection(mcpmod.MCP_DENIED_TOOLS | {"make_shorts"})
+    assert card["toolCount"] == len(names)
+
+
 def test_server_card_pricing_matches_the_public_shopfront(client):
     card = client.get("/.well-known/mcp/server-card.json").get_json()
 

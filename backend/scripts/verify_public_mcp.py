@@ -85,6 +85,11 @@ def verify_public_mcp(base_url, request_json=_request_json, timeout_s=30):
              "server card identity does not match the Valmera MCP server")
     _require(isinstance(card.get("version"), str) and card["version"],
              "server card has no version")
+    server_info = card.get("serverInfo") or {}
+    _require(isinstance(server_info, dict)
+             and server_info.get("name") == "valmera"
+             and server_info.get("version") == card["version"],
+             "server card has no valid standard serverInfo")
 
     groups = card.get("toolGroups")
     session_tools = card.get("sessionTools")
@@ -107,6 +112,26 @@ def verify_public_mcp(base_url, request_json=_request_json, timeout_s=30):
              "server card is missing a required session tool")
     _require(card.get("toolCount") == len(published_tools),
              "server card toolCount disagrees with its published tool names")
+    tools = card.get("tools")
+    _require(isinstance(tools, list),
+             "server card has no standard tool definitions")
+    schema_names = []
+    for tool in tools:
+        _require(isinstance(tool, dict), "invalid standard tool definition")
+        schema = tool.get("inputSchema") or {}
+        _require(isinstance(tool.get("name"), str) and tool["name"]
+                 and isinstance(tool.get("description"), str)
+                 and tool["description"]
+                 and isinstance(schema, dict) and schema.get("type") == "object"
+                 and isinstance(schema.get("properties"), dict),
+                 "invalid standard tool definition")
+        schema_names.append(tool["name"])
+    _require(sorted(schema_names) == sorted(published_tools),
+             "standard tool definitions disagree with published tool names")
+    _require(not {"export_final", "edit_shorts", "load_tools"}.intersection(schema_names),
+             "server card exposes an internal or denied tool")
+    _require(card.get("resources") == [] and card.get("prompts") == [],
+             "server card advertises unsupported resources or prompts")
 
     mcp_url = base + "/mcp"
     remotes = card.get("remotes") or []
@@ -160,6 +185,9 @@ def verify_public_mcp(base_url, request_json=_request_json, timeout_s=30):
     _require(authentication.get("type") == "oauth2"
              and authentication.get("metadata") == auth_url,
              "server card OAuth metadata pointer is inconsistent")
+    _require(authentication.get("required") is True
+             and authentication.get("schemes") == ["oauth2"],
+             "server card does not declare required OAuth authentication")
 
     rpc_status, rpc_headers, rpc = request_json(
         mcp_url,

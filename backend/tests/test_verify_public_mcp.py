@@ -13,20 +13,30 @@ from scripts import verify_public_mcp as probe  # noqa: E402
 BASE = "https://api.example.com"
 
 
-def _responses(*, tool_count=14, challenge=True):
+def _responses(*, tool_count=14, challenge=True, mutate_card=None):
     session_tools = sorted(probe.REQUIRED_SESSION_TOOLS)
     card = {
         "name": probe.SERVER_NAME,
         "version": "0.1.0",
+        "serverInfo": {"name": "valmera", "version": "0.1.0"},
+        "tools": [{"name": name, "description": "Public tool description",
+                   "inputSchema": {"type": "object", "properties": {}}}
+                  for name in session_tools + ["get_edl", "set_frame"]],
+        "resources": [],
+        "prompts": [],
         "toolCount": tool_count,
         "toolGroups": {"inspect": ["get_edl"], "edit": ["set_frame"]},
         "sessionTools": session_tools,
         "remotes": [{"type": "streamable-http", "url": BASE + "/mcp"}],
         "authentication": {
+            "required": True,
+            "schemes": ["oauth2"],
             "type": "oauth2",
             "metadata": BASE + "/.well-known/oauth-authorization-server",
         },
     }
+    if mutate_card:
+        mutate_card(card)
     protected = {
         "resource": BASE + "/mcp",
         "authorization_servers": [BASE],
@@ -87,3 +97,15 @@ def test_public_mcp_probe_requires_resource_metadata_challenge():
     with pytest.raises(probe.VerificationError,
                        match="does not point to protected-resource"):
         probe.verify_public_mcp(BASE, request_json=_responses(challenge=False))
+
+
+@pytest.mark.parametrize("mutate_card, message", [
+    (lambda card: card.pop("serverInfo"), "standard serverInfo"),
+    (lambda card: card.pop("tools"), "standard tool definitions"),
+    (lambda card: card["tools"].pop(), "disagree with published"),
+    (lambda card: card["tools"][0].pop("inputSchema"), "invalid standard tool"),
+    (lambda card: card["authentication"].update(required=False), "required OAuth"),
+])
+def test_public_mcp_probe_rejects_directory_contract_drift(mutate_card, message):
+    with pytest.raises(probe.VerificationError, match=message):
+        probe.verify_public_mcp(BASE, request_json=_responses(mutate_card=mutate_card))

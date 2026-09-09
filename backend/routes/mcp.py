@@ -2292,24 +2292,11 @@ def _unauthorized(err):
 def server_card():
     """A PUBLIC description of this server, for machines that cannot log in.
 
-    Every directory that lists MCP servers — Smithery, Glama, the mirrors that
-    rank for "video editing mcp" — discovers a server by connecting to it and
-    calling tools/list. Ours answers 401, correctly: the tool registry is behind
-    the same OAuth that everything else is behind. So the automatic scan finds
-    nothing and the listing is a name and a URL, on the one channel where
-    Valmera's actual advantage is the size and shape of its toolset.
-
-    This file is the documented fallback for exactly that case. It carries what
-    a directory needs to write an accurate card — what the server is, what it
-    can do, how to authenticate, what it refuses — and no user data, no tokens,
-    and no per-account state. Nothing here is a secret; the same facts are on
-    valmera.io in prose. Tool NAMES are published too, since a capability list
-    that cannot be read is a capability list that cannot be recommended.
-
-    Deliberately hand-written rather than derived from the live catalog: this is
-    marketing-facing copy with a stable shape, and a directory re-scraping it
-    should not see it churn every time the worker restarts. The tool COUNT is
-    read from the catalog, because a number that drifts is worse than no number.
+    Smithery's documented static-card fallback reads serverInfo and MCP tool
+    definitions without an authenticated tools/list call. Publish the same
+    filtered definitions as that call, never the raw catalog's system prompt,
+    account state, or tool results. Execution still requires authentication.
+    Keep the existing descriptive fields for consumers of the original card.
     """
     catalog = _catalog()
     editor = _editor_tools(catalog)
@@ -2317,6 +2304,10 @@ def server_card():
     for t in editor:
         groups.setdefault(_group_of(t["name"]), []).append(t["name"])
     return jsonify({
+        "serverInfo": SERVER_INFO,
+        "tools": SESSION_TOOLS + editor,
+        "resources": [],
+        "prompts": [],
         "name": "io.valmera/video-editor",
         "title": "Valmera — agentic AI video editor",
         "description":
@@ -2336,6 +2327,8 @@ def server_card():
         "remotes": [{"type": "streamable-http",
                      "url": f"{mcp_oauth.base_url()}/mcp"}],
         "authentication": {
+            "required": True,
+            "schemes": ["oauth2"],
             "type": "oauth2",
             "dynamicClientRegistration": True,
             "pkce": "S256",
