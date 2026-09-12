@@ -172,12 +172,17 @@ def _mcp_refusal_sql(alias=""):
              'RECIPE ABORTED%%', 'UNSAFE%%']))"""
 
 
-def _project_family_job_sql(job_alias="mt", parent_alias="p"):
-    """Scope a job to a visible parent row or one of its Shorts children."""
-    return f"""({job_alias}.project_id = {parent_alias}.id OR EXISTS (
-        SELECT 1 FROM projects family_child
-         WHERE family_child.id = {job_alias}.project_id
-           AND family_child.parent_project_id = {parent_alias}.id))"""
+def _project_family_ids_sql(parent_alias="p"):
+    """Enumerate a parent and its children before looking up indexed jobs.
+
+    An OR against a correlated EXISTS scanned every MCP job for each parent
+    in the dashboard. Joining this small family to video_jobs lets Postgres
+    use the project_id index, including the children's outcomes exactly once.
+    """
+    return f"""SELECT {parent_alias}.id
+        UNION ALL
+        SELECT family_child.id FROM projects family_child
+         WHERE family_child.parent_project_id = {parent_alias}.id"""
 
 
 def _presign(key):
@@ -1554,9 +1559,9 @@ def video_projects():
                          WHERE {_mcp_non_success_sql('mt')}) AS tool_failed,
                        COUNT(*) FILTER (
                          WHERE {_mcp_refusal_sql('mt')}) AS tool_rejected
-                  FROM video_jobs mt
+                  FROM ({_project_family_ids_sql('p')}) family
+                  JOIN video_jobs mt ON mt.project_id = family.id
                  WHERE mt.type = 'mcp_tool'
-                   AND {_project_family_job_sql('mt', 'p')}
             ) tool_activity ON TRUE
             LEFT JOIN LATERAL (
                 SELECT MIN(pa.occurred_at) AS paid_at

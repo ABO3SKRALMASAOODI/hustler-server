@@ -39,10 +39,9 @@ the OAuth route in routes/mcp_oauth.py: it reads the 401 challenge below,
 registers itself, and sends the user through a login. Both end up as the same
 session dict here, and everything past _authenticate is identical.
 
-VISIBILITY. There is no UI, no marketing and no way in without either a token
-the admin minted or a login by an address on MCP_ALLOWED_EMAILS (default: the
-admin's alone) — re-checked on every single request, so revoking is a row or
-one env var, not a deploy.
+ACCESS. Verified subscribers can connect through OAuth or their own static
+token. Existing MCP_ALLOWED_EMAILS operator grants remain valid. Entitlement
+and project ownership are checked on every authenticated request.
 """
 
 import base64
@@ -71,9 +70,8 @@ from video_services.project_state import (
 
 mcp_bp = Blueprint("mcp", __name__)
 
-# Who may hold a token at all. The token itself is the credential; this is the
-# second lock, so pulling access is an env var away and does not need a token
-# hunt. Default: nobody but the founder.
+# Existing operator access remains valid alongside subscriber entitlement.
+# Do not remove these grants when rolling MCP out to paying customers.
 ALLOWED_EMAILS = {e.strip().lower()
                   for e in os.getenv("MCP_ALLOWED_EMAILS",
                                      ADMIN_EMAIL).split(",") if e.strip()}
@@ -157,6 +155,19 @@ def _bearer():
     return h[7:].strip() if h.startswith("Bearer ") else ""
 
 
+def account_has_mcp_access(user):
+    """Existing operator grants or a verified, currently entitled subscriber.
+
+    Read the durable entitlement on every authorization and authenticated call
+    so new subscribers work immediately and expired access is not cached.
+    """
+    if not user:
+        return False
+    return ((user.get("email") or "").strip().lower() in ALLOWED_EMAILS
+            or (user.get("is_verified") in (True, 1)
+                and user.get("is_subscribed") in (True, 1)))
+
+
 def _authenticate():
     """(session, error_message). Two credential types reach this endpoint and
     the rest of the file must not be able to tell them apart:
@@ -173,14 +184,14 @@ def _authenticate():
     with vdb() as conn:
         cur = conn.cursor()
         cur.execute("""SELECT t.id, t.user_id, t.active_project_id,
-                              t.revoked_at, u.email
+                              t.revoked_at, u.email, u.is_verified, u.is_subscribed
                        FROM mcp_tokens t JOIN users u ON u.id = t.user_id
                        WHERE t.token_sha256 = %s""", (_sha(raw),))
         row = cur.fetchone()
         if row:
             if row["revoked_at"]:
                 return None, "unknown or revoked token"
-            if (row["email"] or "").lower() not in ALLOWED_EMAILS:
+            if not account_has_mcp_access(row):
                 # The account lost access after the token was minted.
                 return None, "this account is not enabled for MCP access"
             cur.execute("""UPDATE mcp_tokens
@@ -2490,10 +2501,10 @@ def mcp_stream():
 def _admin_email(user_id):
     with vdb() as conn:
         cur = conn.cursor()
-        cur.execute("SELECT email FROM users WHERE id = %s", (int(user_id),))
+        cur.execute("SELECT email, is_verified, is_subscribed FROM users WHERE id = %s", (int(user_id),))
         row = cur.fetchone()
     email = (row["email"] if row else "").lower()
-    return email if email in ALLOWED_EMAILS else None
+    return email if account_has_mcp_access(row) else None
 
 
 @mcp_bp.route("/mcp/tokens", methods=["POST"])

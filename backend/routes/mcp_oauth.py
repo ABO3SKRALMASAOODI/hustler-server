@@ -23,9 +23,8 @@ Every credential (code, access token, refresh token) is stored as sha256 only.
 
 OPEN REGISTRATION IS SAFE HERE, and it has to be open — the client registers
 before any human is involved. Registering grants nothing: authorization still
-needs a real password login AND an email on MCP_ALLOWED_EMAILS, which today is
-one address. A stranger who registers a client gets a login screen that will
-never say yes to them.
+needs a verified password login AND current subscription access (or an
+existing operator allowlist grant). Client registration grants no user access.
 
 WHAT THIS DELIBERATELY IS NOT: a general-purpose IdP. It issues tokens for one
 resource (the MCP endpoint) and one scope. Anything else it is asked for is
@@ -69,11 +68,9 @@ def _sha(s):
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
 
-def _allowed_emails():
-    # Read through routes.mcp so there is ONE allowlist, not two that can
-    # disagree about who may connect.
-    from routes.mcp import ALLOWED_EMAILS
-    return ALLOWED_EMAILS
+def _account_allowed(user):
+    from routes.mcp import account_has_mcp_access
+    return account_has_mcp_access(user)
 
 
 # ------------------------------------------------------------------ #
@@ -363,7 +360,7 @@ def authorize():
 
     with vdb() as conn:
         cur = conn.cursor()
-        cur.execute("SELECT id, email, password, is_verified FROM users "
+        cur.execute("SELECT id, email, password, is_verified, is_subscribed FROM users "
                     "WHERE LOWER(email) = %s", (email,))
         user = cur.fetchone()
     ok = bool(user) and user["is_verified"] and \
@@ -373,12 +370,12 @@ def authorize():
         time.sleep(0.4)
         return Response(_page(params, name, "Wrong email or password.", email),
                         status=401, mimetype="text/html")
-    if email not in _allowed_emails():
+    if not _account_allowed(user):
         # Honest and specific: the credentials were right, the feature is not
         # open. Telling them it was the password would be a lie.
         return Response(_page(params, name,
                               "Connecting apps to Valmera is not enabled for "
-                              "this account yet.", email),
+                              "this account. An active Valmera subscription is required.", email),
                         status=403, mimetype="text/html")
 
     code = secrets.token_urlsafe(32)
@@ -533,7 +530,7 @@ def verify_access_token(raw):
                               NOW() > t.expires_at AS expired,
                               g.id AS grant_id, g.user_id, g.revoked_at
                                   AS grant_revoked, g.active_project_id,
-                              u.email
+                              u.email, u.is_verified, u.is_subscribed
                        FROM mcp_oauth_tokens t
                        JOIN mcp_oauth_grants g ON g.id = t.grant_id
                        JOIN users u ON u.id = g.user_id
@@ -548,7 +545,7 @@ def verify_access_token(raw):
             # Named exactly, because the client's correct response is to
             # refresh rather than to ask the user to reconnect.
             return None, "access token expired"
-        if (row["email"] or "").lower() not in _allowed_emails():
+        if not _account_allowed(row):
             return None, "this account is not enabled for MCP access"
         cur.execute("""UPDATE mcp_oauth_grants
                        SET last_used_at = NOW(), calls = calls + 1
