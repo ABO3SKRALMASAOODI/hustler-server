@@ -156,7 +156,7 @@ def _bearer():
 
 
 def account_has_mcp_access(user):
-    """Existing operator grants or a verified, currently entitled subscriber.
+    """Existing operator grants or a verified, active Pro/Frontier subscriber.
 
     Read the durable entitlement on every authorization and authenticated call
     so new subscribers work immediately and expired access is not cached.
@@ -165,7 +165,8 @@ def account_has_mcp_access(user):
         return False
     return ((user.get("email") or "").strip().lower() in ALLOWED_EMAILS
             or (user.get("is_verified") in (True, 1)
-                and user.get("is_subscribed") in (True, 1)))
+                and user.get("is_subscribed") in (True, 1)
+                and user.get("plan") in {"ai_pro", "ai_max"}))
 
 
 def _authenticate():
@@ -184,7 +185,7 @@ def _authenticate():
     with vdb() as conn:
         cur = conn.cursor()
         cur.execute("""SELECT t.id, t.user_id, t.active_project_id,
-                              t.revoked_at, u.email, u.is_verified, u.is_subscribed
+                              t.revoked_at, u.email, u.is_verified, u.is_subscribed, u.plan
                        FROM mcp_tokens t JOIN users u ON u.id = t.user_id
                        WHERE t.token_sha256 = %s""", (_sha(raw),))
         row = cur.fetchone()
@@ -2501,7 +2502,7 @@ def mcp_stream():
 def _admin_email(user_id):
     with vdb() as conn:
         cur = conn.cursor()
-        cur.execute("SELECT email, is_verified, is_subscribed FROM users WHERE id = %s", (int(user_id),))
+        cur.execute("SELECT email, is_verified, is_subscribed, plan FROM users WHERE id = %s", (int(user_id),))
         row = cur.fetchone()
     email = (row["email"] if row else "").lower()
     return email if account_has_mcp_access(row) else None

@@ -134,7 +134,7 @@ class FakeCur:
         elif "FROM users WHERE LOWER(email)" in s:
             self.rows = ([{"id": 60, "email": EMAIL,
                            "password": generate_password_hash(PASSWORD),
-                           "is_verified": 1, "is_subscribed": DB.get("subscribed", 0)}] if p[0] == EMAIL else [])
+                           "is_verified": 1, "plan": DB.get("plan", "free"), "is_subscribed": DB.get("subscribed", 0)}] if p[0] == EMAIL else [])
         elif s.startswith("INSERT INTO mcp_oauth_grants"):
             gid = _next_id()
             DB["grants"][gid] = {"id": gid, "user_id": p[0], "client_id": p[1],
@@ -170,7 +170,7 @@ class FakeCur:
                               "grant_revoked": g["revoked_at"],
                               "active_project_id": g["active_project_id"],
                               "email": EMAIL, "is_verified": 1,
-                              "is_subscribed": DB.get("subscribed", 0)}]
+                              "plan": DB.get("plan", "free"), "is_subscribed": DB.get("subscribed", 0)}]
         elif s.startswith("UPDATE mcp_oauth_tokens SET revoked_at") \
                 and "id = %s" in s:
             for t in DB["tokens"].values():
@@ -188,7 +188,7 @@ class FakeCur:
             want = hashlib.sha256(STATIC_TOKEN.encode()).hexdigest()
             self.rows = ([{"id": 1, "user_id": 60, "email": EMAIL,
                            "revoked_at": None, "is_verified": 1,
-                           "is_subscribed": DB.get("subscribed", 0),
+                           "plan": DB.get("plan", "free"), "is_subscribed": DB.get("subscribed", 0),
                            "active_project_id": DB["static_project"]}]
                          if p[0] == want else [])
         elif s.startswith("UPDATE mcp_tokens SET active_project_id"):
@@ -1741,9 +1741,11 @@ def test_download_exact_historical_changed_section_asset(client, monkeypatch, ki
     assert receipt["sha256"] == "a" * 64
 
 
-def test_subscriber_without_allowlist_can_authorize_and_use_mcp(client, monkeypatch):
+@pytest.mark.parametrize("plan", ["ai_pro", "ai_max"])
+def test_subscriber_without_allowlist_can_authorize_and_use_mcp(client, monkeypatch, plan):
     monkeypatch.setattr(mcpmod, "ALLOWED_EMAILS", set())
     DB["subscribed"] = 1
+    DB["plan"] = plan
     # Exercise the complete discovery, PKCE, token, tools and refresh contract
     # as an entitled customer without any manually configured email grant.
     cid = _registered(client)
@@ -1763,6 +1765,11 @@ def test_subscriber_without_allowlist_can_authorize_and_use_mcp(client, monkeypa
         "grant_type": "refresh_token", "refresh_token": token["refresh_token"],
         "client_id": cid}).get_json()
     assert rpc(client, "tools/list", refreshed["access_token"]).status_code == 200
+    DB["plan"] = "ai"
+    assert rpc(client, "tools/list", refreshed["access_token"]).status_code == 401
+    assert rpc(client, "tools/list", STATIC_TOKEN).status_code == 401
+    DB["plan"] = plan
+    assert rpc(client, "tools/list", refreshed["access_token"]).status_code == 200
     DB["subscribed"] = 0
     assert rpc(client, "tools/list", refreshed["access_token"]).status_code == 401
     assert rpc(client, "tools/list", STATIC_TOKEN).status_code == 401
@@ -1774,4 +1781,25 @@ def test_subscriber_without_allowlist_can_authorize_and_use_mcp(client, monkeypa
 def test_mcp_access_requires_verified_subscription(monkeypatch, verified, subscribed, expected):
     monkeypatch.setattr(mcpmod, "ALLOWED_EMAILS", set())
     assert mcpmod.account_has_mcp_access({"email": "subscriber@example.com",
-        "is_verified": verified, "is_subscribed": subscribed}) is expected
+        "is_verified": verified, "is_subscribed": subscribed, "plan": "ai_pro"}) is expected
+
+
+@pytest.mark.parametrize("plan", ["ai", "free", "mcp", "plus", None, "unknown"])
+def test_lower_or_unknown_plan_cannot_authorize_mcp(client, monkeypatch, plan):
+    monkeypatch.setattr(mcpmod, "ALLOWED_EMAILS", set())
+    DB["subscribed"] = 1
+    DB["plan"] = plan
+    cid = _registered(client)
+    _, challenge = _pkce()
+    response = client.post("/mcp/oauth/authorize", data={
+        **_q(cid, code_challenge=challenge), "action": "allow",
+        "email": EMAIL, "password": PASSWORD})
+    assert response.status_code == 403
+    assert b"Pro or Frontier" in response.data
+    assert rpc(client, "tools/list", STATIC_TOKEN).status_code == 401
+
+
+def test_operator_grant_survives_plan_restriction(monkeypatch):
+    monkeypatch.setattr(mcpmod, "ALLOWED_EMAILS", {EMAIL})
+    assert mcpmod.account_has_mcp_access({"email": EMAIL, "plan": "free",
+        "is_verified": 1, "is_subscribed": 0})

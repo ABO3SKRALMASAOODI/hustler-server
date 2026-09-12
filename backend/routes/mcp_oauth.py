@@ -360,7 +360,7 @@ def authorize():
 
     with vdb() as conn:
         cur = conn.cursor()
-        cur.execute("SELECT id, email, password, is_verified, is_subscribed FROM users "
+        cur.execute("SELECT id, email, password, is_verified, is_subscribed, plan FROM users "
                     "WHERE LOWER(email) = %s", (email,))
         user = cur.fetchone()
     ok = bool(user) and user["is_verified"] and \
@@ -375,7 +375,7 @@ def authorize():
         # open. Telling them it was the password would be a lie.
         return Response(_page(params, name,
                               "Connecting apps to Valmera is not enabled for "
-                              "this account. An active Valmera subscription is required.", email),
+                              "this account. An active Pro or Frontier subscription is required.", email),
                         status=403, mimetype="text/html")
 
     code = secrets.token_urlsafe(32)
@@ -530,7 +530,7 @@ def verify_access_token(raw):
                               NOW() > t.expires_at AS expired,
                               g.id AS grant_id, g.user_id, g.revoked_at
                                   AS grant_revoked, g.active_project_id,
-                              u.email, u.is_verified, u.is_subscribed
+                              u.email, u.is_verified, u.is_subscribed, u.plan
                        FROM mcp_oauth_tokens t
                        JOIN mcp_oauth_grants g ON g.id = t.grant_id
                        JOIN users u ON u.id = g.user_id
