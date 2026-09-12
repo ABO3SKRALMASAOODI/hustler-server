@@ -3,12 +3,18 @@ import requests
 import os
 import jwt
 import datetime
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
 import offers
-from plan_catalog import PLANS_LIVE, PLANS_SANDBOX, PURCHASABLE_PLANS
+from plan_catalog import (
+    PLAN_PRICES_USD,
+    PLANS_LIVE,
+    PLANS_SANDBOX,
+    PURCHASABLE_PLANS,
+)
 
 paddle_bp = Blueprint('paddle', __name__)
 
@@ -41,6 +47,22 @@ def get_offers_db():
                             cursor_factory=RealDictCursor)
 
 PLANS = PLANS_SANDBOX if os.environ.get('PADDLE_MODE') == 'sandbox' else PLANS_LIVE
+
+
+def _subscription_snapshot(user_id):
+    """The account facts used to guard checkout and price a plan change."""
+    conn = get_offers_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT plan, is_subscribed, subscription_id,
+                       credits_monthly, credits_monthly_limit
+                  FROM users
+                 WHERE id = %s
+            """, (int(user_id),))
+            return cur.fetchone() or {}
+    finally:
+        conn.close()
 
 
 def get_paddle_base():
@@ -100,6 +122,13 @@ def checkout_config():
     out = {"price_id": price_id, "email": user_email,
            "user_id": str(user_id), "plan": plan, "billing": billing}
 
+    upgrade, error = _upgrade_checkout_context(user_id, plan, billing)
+    if error:
+        body, status = error
+        return jsonify(body), status
+    if upgrade:
+        out.update(upgrade)
+
     # The intro discount is decided HERE, by the server, from the user's own
     # offer row — never from a flag the browser sends. The client cannot ask
     # for a discount it has not been granted, and cannot keep one past its
@@ -112,7 +141,8 @@ def checkout_config():
     # offers.DISCOUNTABLE_PLANS is the list, and Paddle enforces the same thing
     # via the discount's restrict_to — so a checkout that slipped past this
     # branch would still be refused rather than honoured.
-    if billing == 'monthly' and plan in offers.DISCOUNTABLE_PLANS:
+    if (not upgrade and billing == 'monthly'
+            and plan in offers.DISCOUNTABLE_PLANS):
         conn = get_offers_db()
         try:
             offer = offers.live_offer(conn, user_id)
@@ -156,19 +186,30 @@ def create_checkout_session():
     else:
         price_id = PLANS[plan]['price_id']
 
+    upgrade, error = _upgrade_checkout_context(user_id, plan, billing)
+    if error:
+        response_body, status = error
+        return jsonify(response_body), status
+
+    custom_data = {"user_id": user_id, "plan": plan, "billing": billing}
+    if upgrade:
+        custom_data["upgrade_token"] = upgrade["upgrade_token"]
     body = {
         "items": [{"price_id": price_id, "quantity": 1}],
         "customer": {"email": user_email} if user_email else {},
-        "custom_data": {"user_id": user_id, "plan": plan, "billing": billing},
+        "custom_data": custom_data,
         "collection_mode": "automatic",
         "checkout": {"success_url": "https://valmera.io/purchase-success"}
     }
+    if upgrade and upgrade.get("discount_id"):
+        body["discount_id"] = upgrade["discount_id"]
 
     # The intro discount, on the HOSTED fallback path. Eligibility is the
     # server's call from the user's own offer row — `use_promo` from the client
     # is not consulted at all, because a discount a browser can ask for is a
     # discount anyone can take. Monthly + entry tiers only (offers.py).
-    if billing == 'monthly' and plan in offers.DISCOUNTABLE_PLANS:
+    if (not upgrade and billing == 'monthly'
+            and plan in offers.DISCOUNTABLE_PLANS):
         conn = None
         try:
             conn = get_offers_db()
@@ -272,6 +313,246 @@ def promo_status():
 
 # ── Upgrade / downgrade ───────────────────────────────────────────────────────
 
+def _price_id(plan, billing):
+    key = "yearly_price_id" if billing == "yearly" else "price_id"
+    return PLANS[plan][key]
+
+
+def _subscription_item(subscription):
+    items = subscription.get("items") or []
+    return items[0] if items else {}
+
+
+def _subscription_period(subscription):
+    cycle = (subscription.get("billing_cycle") or
+             ((_subscription_item(subscription).get("price") or {})
+              .get("billing_cycle") or {}))
+    return "yearly" if cycle.get("interval") == "year" else "monthly"
+
+
+def _minor_units(value, fallback=0):
+    try:
+        return int(Decimal(str(value)).quantize(Decimal("1"),
+                                                rounding=ROUND_HALF_UP))
+    except (InvalidOperation, TypeError, ValueError):
+        return fallback
+
+
+def _current_price_minor(subscription, current_plan, current_billing):
+    price = (_subscription_item(subscription).get("price") or {})
+    amount = (price.get("unit_price") or {}).get("amount")
+    fallback = int(PLAN_PRICES_USD.get(current_plan, {})
+                   .get(current_billing, 0) * 100)
+    return _minor_units(amount, fallback)
+
+
+def _upgrade_credit(current_price_minor, target_price_minor,
+                    remaining_credits, current_limit):
+    """Return (credit minor units, discount percent) for unused plan credits.
+
+    Daily top-ups and bonus credits are deliberately excluded: the customer
+    keeps those balances. Only the unspent monthly pool was bought with the
+    plan being replaced, so only that pool offsets the upgrade charge.
+    """
+    try:
+        remaining = max(Decimal("0"), Decimal(str(remaining_credits or 0)))
+        limit = max(Decimal("0"), Decimal(str(current_limit or 0)))
+    except InvalidOperation:
+        remaining, limit = Decimal("0"), Decimal("0")
+    if not current_price_minor or not target_price_minor or limit <= 0:
+        return 0, Decimal("0")
+    fraction = min(Decimal("1"), remaining / limit)
+    credit = (Decimal(current_price_minor) * fraction).quantize(
+        Decimal("1"), rounding=ROUND_HALF_UP)
+    credit = min(credit, Decimal(target_price_minor))
+    percent = (credit * Decimal("100") / Decimal(target_price_minor)).quantize(
+        Decimal("0.000001"), rounding=ROUND_HALF_UP)
+    if credit > 0:
+        percent = max(Decimal("0.01"), percent)
+    return int(credit), percent
+
+
+def _upgrade_checkout_quote(snapshot, subscription, new_plan, billing):
+    current_item = _subscription_item(subscription)
+    current_price_id = (current_item.get("price") or {}).get("id")
+    current_plan = _plan_from_price(current_price_id) or snapshot.get("plan")
+    current_billing = _subscription_period(subscription)
+    current_credits = (PLANS.get(current_plan) or {}).get(
+        "monthly_credits", snapshot.get("credits_monthly_limit") or 0)
+    target_credits = PLANS[new_plan]["monthly_credits"]
+    if target_credits <= current_credits:
+        return None
+
+    current_pool_value = _current_price_minor(
+        subscription, current_plan, current_billing)
+    if current_billing == "yearly":
+        # The stored balance is one month's credit pool even when access was
+        # prepaid annually, so value that pool at one twelfth of the localized
+        # annual price rather than treating it as an entire year's purchase.
+        current_pool_value = _minor_units(
+            Decimal(current_pool_value) / Decimal("12"))
+    target_catalog_minor = int(PLAN_PRICES_USD[new_plan][billing] * 100)
+    try:
+        eligible_remaining = max(
+            Decimal("0"), Decimal(str(snapshot.get("credits_monthly") or 0)))
+    except InvalidOperation:
+        eligible_remaining = Decimal("0")
+    if subscription.get("status") == "trialing":
+        eligible_remaining = Decimal("0")
+    catalog_credit, percent = _upgrade_credit(
+        current_pool_value,
+        target_catalog_minor,
+        eligible_remaining,
+        snapshot.get("credits_monthly_limit"),
+    )
+    return {
+        "is_upgrade": True,
+        "from_plan": current_plan,
+        "to_plan": new_plan,
+        "billing": billing,
+        "from_subscription_id": snapshot.get("subscription_id"),
+        "remaining_plan_credits": float(eligible_remaining),
+        "credit_value_minor": catalog_credit,
+        "full_charge_minor": target_catalog_minor,
+        "charge_minor": max(0, target_catalog_minor - catalog_credit),
+        "currency": "USD",
+        "discount_percent": float(percent),
+    }
+
+
+def _create_upgrade_discount(user_id, quote, new_price_id):
+    percent = Decimal(str(quote["discount_percent"]))
+    if percent <= 0:
+        return None
+    amount = format(percent, "f").rstrip("0").rstrip(".")
+    expires = (datetime.datetime.now(datetime.timezone.utc)
+               + datetime.timedelta(minutes=20)).isoformat().replace(
+                   "+00:00", "Z")
+    body = {
+        "description": ("Unused-credit upgrade "
+                        f"{quote['from_subscription_id']}"),
+        "type": "percentage",
+        "mode": "custom",
+        "amount": amount,
+        # Paddle rejects a discount ID at checkout when this is false. The
+        # random generated code is still single-use, short-lived, and limited
+        # to the exact upgrade price below.
+        "enabled_for_checkout": True,
+        "recur": False,
+        "usage_limit": 1,
+        "restrict_to": [new_price_id],
+        "expires_at": expires,
+        "custom_data": {
+            "kind": "unused_credit_upgrade",
+            "user_id": str(user_id),
+            "subscription_id": quote["from_subscription_id"],
+            "from_plan": quote["from_plan"],
+            "to_plan": quote["to_plan"],
+            "remaining_plan_credits": quote["remaining_plan_credits"],
+        },
+    }
+    response = requests.post(
+        f"{get_paddle_base()}/discounts", headers=paddle_headers(), json=body,
+        timeout=PADDLE_API_TIMEOUT)
+    if response.status_code != 201:
+        raise RuntimeError("Paddle could not create the upgrade credit")
+    discount_id = (response.json().get("data") or {}).get("id")
+    if not discount_id:
+        raise RuntimeError("Paddle returned no upgrade-credit discount")
+    return discount_id
+
+
+def _upgrade_token(user_id, quote, discount_id):
+    now = datetime.datetime.now(datetime.timezone.utc)
+    return jwt.encode({
+        "purpose": "subscription_upgrade",
+        "sub": str(user_id),
+        "from_subscription_id": quote["from_subscription_id"],
+        "from_plan": quote["from_plan"],
+        "to_plan": quote["to_plan"],
+        "billing": quote["billing"],
+        "discount_id": discount_id,
+        "iat": now,
+        # Paddle retries webhooks for days. Keep the signed correlation valid
+        # through those retries; the actual discount still expires in 20 min.
+        "exp": now + datetime.timedelta(days=7),
+    }, os.environ["SECRET_KEY"], algorithm="HS256")
+
+
+def _upgrade_checkout_context(user_id, new_plan, billing):
+    """Return the server-issued upgrade discount and signed correlation.
+
+    An upgrade intentionally starts a second checkout. The existing contract
+    is left alone until Paddle confirms payment; the signed token then lets the
+    webhook retire that old contract without trusting browser custom data.
+    """
+    try:
+        snapshot = _subscription_snapshot(user_id)
+    except Exception as error:
+        print(f"⚠️ Subscription checkout lookup failed: {error}", flush=True)
+        return None, ({
+            "error": "We couldn't verify your current subscription. Please "
+                     "try again.", "retryable": True,
+        }, 503)
+
+    subscription_id = snapshot.get("subscription_id")
+    if not subscription_id:
+        return None, None
+    if not snapshot.get("is_subscribed"):
+        return None, ({
+            "error": "Your existing subscription needs attention before "
+                     "starting another checkout.",
+            "code": "existing_subscription",
+        }, 409)
+
+    try:
+        response = requests.get(
+            f"{get_paddle_base()}/subscriptions/{subscription_id}",
+            headers=paddle_headers(),
+            timeout=PADDLE_API_TIMEOUT)
+    except requests.RequestException as error:
+        print(f"⚠️ Paddle upgrade lookup unavailable: {error}", flush=True)
+        return None, ({
+            "error": "The payment service is temporarily unavailable. Please "
+                     "try again.", "retryable": True,
+        }, 503)
+    if response.status_code != 200:
+        return None, ({"error": "Could not verify the existing subscription."},
+                      502)
+    subscription = response.json().get("data") or {}
+    if subscription.get("status") not in ("active", "trialing"):
+        return None, ({
+            "error": "Your existing subscription needs attention before "
+                     "starting another checkout.",
+            "code": "existing_subscription",
+        }, 409)
+
+    quote = _upgrade_checkout_quote(
+        snapshot, subscription, new_plan, billing)
+    if not quote:
+        return None, ({
+            "error": "Use Change plan for this switch; checkout is only for "
+                     "upgrades.",
+            "code": "plan_change_required",
+        }, 409)
+    discount_id = None
+    try:
+        discount_id = _create_upgrade_discount(
+            user_id, quote, _price_id(new_plan, billing))
+    except (requests.RequestException, RuntimeError, KeyError, ValueError) as error:
+        print(f"⚠️ Could not create unused-credit discount: {error}",
+              flush=True)
+        return None, ({
+            "error": "Could not apply your unused-credit value. Nothing was "
+                     "charged.", "retryable": True,
+        }, 502)
+    return {
+        **quote,
+        "discount_id": discount_id,
+        "upgrade_token": _upgrade_token(user_id, quote, discount_id),
+    }, None
+
+
 @paddle_bp.route('/paddle/change-plan', methods=['POST'])
 def change_plan():
     try:
@@ -288,24 +569,51 @@ def change_plan():
     if new_plan not in PURCHASABLE_PLANS:
         return jsonify({"error": "That plan is no longer available."}), 400
 
-    from models import get_user_subscription_id
-    subscription_id = get_user_subscription_id(user_id)
+    try:
+        snapshot = _subscription_snapshot(user_id)
+    except Exception as error:
+        print(f"⚠️ Plan-change account lookup failed: {error}", flush=True)
+        return jsonify({"error": "Could not verify your subscription."}), 503
+    subscription_id = snapshot.get("subscription_id")
     if not subscription_id:
         return jsonify({"error": "No active subscription"}), 400
 
-    # Pick the right price ID
-    if billing == 'yearly':
-        new_price_id = PLANS[new_plan]['yearly_price_id']
-    else:
-        new_price_id = PLANS[new_plan]['price_id']
+    try:
+        sub_res = requests.get(
+            f"{get_paddle_base()}/subscriptions/{subscription_id}",
+            headers=paddle_headers(), timeout=PADDLE_API_TIMEOUT)
+    except requests.RequestException as error:
+        return _paddle_unavailable("subscription lookup", error)
+    if sub_res.status_code != 200:
+        return jsonify({"error": "Could not fetch subscription"}), 502
+    subscription = sub_res.json().get("data") or {}
+    if subscription.get("status") != "active":
+        return jsonify({"error": "Only active subscriptions can change plan."}), 409
 
+    current_price_id = ((_subscription_item(subscription).get("price") or {})
+                        .get("id"))
+    current_plan = _plan_from_price(current_price_id) or snapshot.get("plan")
+    current_billing = _subscription_period(subscription)
+    if current_plan == new_plan and current_billing == billing:
+        return jsonify({"error": "That is already your current plan."}), 409
+
+    # Upgrades deliberately use a second checkout. That is where the customer
+    # sees and pays the new charge, with unused old-plan credits applied as a
+    # one-time discount. This endpoint remains the no-checkout path for tier
+    # reductions and billing-period changes.
+    if _upgrade_checkout_quote(snapshot, subscription, new_plan, billing):
+        return jsonify({
+            "error": "Upgrades continue through checkout so your unused "
+                     "plan credits can reduce the charge.",
+            "code": "upgrade_requires_checkout",
+        }), 409
+
+    new_price_id = _price_id(new_plan, billing)
     body = {
         "items": [{"price_id": new_price_id, "quantity": 1}],
-        # Keep the subscription's custom_data.plan in sync with the new price so
-        # it isn't misleading (the webhook now grants off the price, but other
-        # tooling reads this field).
-        "custom_data": {"user_id": user_id, "plan": new_plan, "billing": billing},
-        "proration_billing_mode": "do_not_bill"
+        "custom_data": {"user_id": user_id, "plan": new_plan,
+                        "billing": billing},
+        "proration_billing_mode": "do_not_bill",
     }
     try:
         res = requests.patch(
@@ -318,7 +626,8 @@ def change_plan():
         return jsonify({"error": "Failed to change plan",
                         "details": res.text[:300]}), 502
 
-    return jsonify({"message": f"Plan will change to {new_plan} at next billing cycle."})
+    return jsonify({"message": f"Plan will change to {new_plan} at next "
+                               "billing cycle."})
 
 
 # ── Cancel subscription ───────────────────────────────────────────────────────
@@ -409,7 +718,8 @@ def subscription_state():
     conn = psycopg2.connect(os.environ['DATABASE_URL'], cursor_factory=RealDictCursor)
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT plan, is_subscribed, subscription_id "
+            cur.execute("SELECT plan, is_subscribed, subscription_id, "
+                        "credits_monthly_limit "
                         "FROM users WHERE id = %s", (int(user_id),))
             row = cur.fetchone() or {}
     finally:
@@ -420,6 +730,8 @@ def subscription_state():
         "is_subscribed": bool(row.get("is_subscribed")),
         "status": None, "scheduled_cancel_at": None,
         "ends_at": None, "trialing": False, "source": "db",
+        "monthly_credit_limit": float(
+            row.get("credits_monthly_limit") or 0),
     }
     sub_id = row.get("subscription_id")
     if not sub_id:

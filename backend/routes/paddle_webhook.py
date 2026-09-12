@@ -3,6 +3,7 @@ import hmac
 import os
 import time
 
+import jwt
 import requests
 from flask import Blueprint, request
 from models import get_db, update_user_subscription_status
@@ -237,6 +238,67 @@ def _verified_payer_user_id(data, subscription_id):
     if stored:
         return stored
     return _user_id_by_customer_email(data.get('customer_id'))
+
+
+def _retire_upgrade_source(user_id, new_subscription_id, paid_plan, data):
+    """Schedule the old contract to end after a signed upgrade checkout.
+
+    The browser can carry this token but cannot forge it. We act only on the
+    final paid transaction and only when its verified payer and paid price
+    match the server-issued upgrade intent. Abandoned checkouts therefore
+    never disturb the current subscription.
+    """
+    token = (data.get('custom_data') or {}).get('upgrade_token')
+    if not token:
+        return True
+    try:
+        intent = jwt.decode(
+            token, os.environ['SECRET_KEY'], algorithms=['HS256'],
+            options={'require': ['exp', 'iat', 'sub']})
+    except Exception as error:
+        print(f"⛔ Invalid subscription-upgrade token: {error}", flush=True)
+        return True
+    if (intent.get('purpose') != 'subscription_upgrade'
+            or str(intent.get('sub')) != str(user_id)
+            or intent.get('to_plan') != paid_plan):
+        print("⛔ Upgrade token did not match the verified payment", flush=True)
+        return True
+
+    old_subscription_id = intent.get('from_subscription_id')
+    if (not old_subscription_id
+            or old_subscription_id == new_subscription_id):
+        return True
+    endpoint = f"{_PADDLE_BASE}/subscriptions/{old_subscription_id}"
+    headers = {
+        "Authorization": f"Bearer {os.environ['PADDLE_API_KEY']}",
+        "Content-Type": "application/json",
+    }
+    try:
+        response = requests.post(
+            f"{endpoint}/cancel", headers=headers,
+            json={"effective_from": "next_billing_period"}, timeout=2)
+        if response.status_code in (200, 204, 404):
+            print(f"✅ Upgrade retired old subscription "
+                  f"{old_subscription_id}", flush=True)
+            return True
+
+        # Paddle can answer with a conflict when cancellation was already
+        # scheduled by this webhook's earlier delivery. Confirm that state so
+        # an idempotent retry does not become a permanent retry loop.
+        current = requests.get(endpoint, headers=headers, timeout=2)
+        old = (current.json().get('data') or {}) if current.status_code == 200 else {}
+        scheduled = old.get('scheduled_change') or {}
+        if (old.get('status') == 'canceled'
+                or scheduled.get('action') == 'cancel'):
+            return True
+        print(f"⚠️ Could not retire upgraded subscription "
+              f"{old_subscription_id}: HTTP {response.status_code}",
+              flush=True)
+        return False
+    except requests.RequestException as error:
+        print(f"⚠️ Could not retire upgraded subscription "
+              f"{old_subscription_id}: {error}", flush=True)
+        return False
 
 # Paddle signs every webhook (Paddle-Signature: "ts=...;h1=...", where h1 is
 # HMAC-SHA256 of "ts:raw_body" with the endpoint's secret key from
@@ -503,9 +565,18 @@ def handle_webhook():
             cents, _cur = billing.transaction_amount(data)
             if cents > 0:
                 billing.record_recovery(get_db(), user_id, plan)
+                billing.set_status(
+                    get_db(), user_id, 'active', plan, period)
                 trial_state.record_paid_conversion(
                     get_db(), user_id, data.get('subscription_id'))
                 print(f"💰 User {user_id} paid {cents / 100:.2f} on {plan}")
+                if (event_type == 'transaction.completed'
+                        and not _retire_upgrade_source(
+                            user_id, subscription_id, plan, data)):
+                    # The paid plan is already safe and idempotent. Ask Paddle
+                    # to retry only so the old contract cannot be left renewing
+                    # after a transient cancellation API failure.
+                    return 'Old subscription cancellation unavailable', 503
                 # The no-trial shopfront removed the old "trial started"
                 # founder email. Queue its honest replacement only after real
                 # money lands. The queue is unique by subscription AND

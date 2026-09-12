@@ -45,6 +45,7 @@ def test_hosted_checkout_defaults_to_live_creator_and_has_a_deadline(
     seen = {}
     monkeypatch.setattr(
         paddle, "decode_token", lambda _header: (7, "buyer@example.com"))
+    monkeypatch.setattr(paddle, "_subscription_snapshot", lambda _uid: {})
     monkeypatch.setattr(paddle, "get_offers_db", lambda: _OfferDb())
     monkeypatch.setattr(paddle.offers, "live_offer", lambda *_args: None)
 
@@ -69,6 +70,7 @@ def test_hosted_checkout_defaults_to_live_creator_and_has_a_deadline(
 def test_checkout_provider_timeout_is_explicitly_retryable(monkeypatch):
     monkeypatch.setattr(
         paddle, "decode_token", lambda _header: (7, "buyer@example.com"))
+    monkeypatch.setattr(paddle, "_subscription_snapshot", lambda _uid: {})
     monkeypatch.setattr(
         paddle.requests, "post",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
