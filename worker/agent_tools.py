@@ -293,6 +293,11 @@ class ToolContext:
         self.checked_versions = set()
         self._proof_ranges_by_version = {}
         self.last_preview_check = None
+        # A changed-section proof can be useful evidence for repairing the
+        # named window, but it is not a review of the complete programme. Keep
+        # its critic separate so a 12-second proof reel can never become the
+        # quality verdict for a 90-second deliverable.
+        self.last_preview_check_critic = None
         # A speculative changed-section proof may finish during the model's
         # next reasoning call. Keep its exact row so render_preview adopts it
         # instead of paying for the same proof twice.
@@ -6624,16 +6629,50 @@ def _music_assets(conn, project_id):
 def set_volume(ctx, start, end, gain_db):
     try:
         s, e = ctx.clamp(start), ctx.clamp(end)
-        g = float(gain_db)
+        g = round(float(gain_db), 1)
     except (TypeError, ValueError) as err:
         return f"REJECTED: {err}"
     if e <= s:
         return "REJECTED: end must be greater than start."
+    g = min(max(g, GAIN_MIN_DB), GAIN_MAX_DB)
     edl = dict(ctx.latest_edl()["json"])
-    vol = list(edl.get("volume") or [])
-    vol.append({"start": s, "end": e, "gain_db": g})
-    edl["volume"] = vol
-    return ctx.write_edl(edl, f"volume {g:+.1f}dB on {s}-{e}s (source time)")
+    # `set` means absolute automation, not another gain stage. The renderer
+    # necessarily chains entries, so appending the same full-range request
+    # made retries add together (+4, -2, -6, +10 => +6dB) and could clip a
+    # preview while the agent believed it had replaced the level. Overwrite
+    # this interval, preserving only non-overlapping pieces of older spans.
+    vol, replaced = [], 0
+    for raw in (edl.get("volume") or []):
+        if not isinstance(raw, dict):
+            continue
+        try:
+            row = dict(raw)
+            a, b = float(row["start"]), float(row["end"])
+        except (TypeError, ValueError, KeyError):
+            continue
+        if b <= s or a >= e:
+            vol.append(row)
+            continue
+        replaced += 1
+        if a < s:
+            vol.append({**row, "end": s})
+        if b > e:
+            vol.append({**row, "start": e})
+    # 0dB is the base source level, so setting it clears automation in the
+    # requested interval instead of storing a redundant filter.
+    if abs(g) >= 0.05:
+        vol.append({"start": s, "end": e, "gain_db": g})
+    edl["volume"] = sorted(
+        vol, key=lambda row: (float(row.get("start", 0)),
+                              float(row.get("end", 0))))
+    action = (f"volume {g:+.1f}dB on {s}-{e}s (source time)"
+              if abs(g) >= 0.05 else
+              f"volume automation cleared on {s}-{e}s (source time)")
+    if replaced:
+        action += f"; replaced {replaced} overlapping setting"
+        if replaced != 1:
+            action += "s"
+    return ctx.write_edl(edl, action)
 
 
 def set_frame(ctx, ratio, mode="crop", focus_x=None, focus_y=None,
@@ -7854,7 +7893,7 @@ def _split_keeps_at_shot_boundaries(keep, index):
 
 
 def set_transitions(ctx, style, duration_s=0.3, scope="scene",
-                    motion_motif=None):
+                    motion_motif=None, max_transitions=None):
     p = (style or "").strip().lower()
     sc = (scope or "scene").strip().lower()
     if sc not in TRANSITION_SCOPES:
@@ -7888,6 +7927,14 @@ def set_transitions(ctx, style, duration_s=0.3, scope="scene",
     except (TypeError, ValueError):
         return ("REJECTED: duration_s must be a number of seconds "
                 f"({TRANSITION_MIN_S:g}-{TRANSITION_MAX_S:g}).")
+    limit = None
+    if max_transitions is not None:
+        try:
+            limit = int(max_transitions)
+        except (TypeError, ValueError):
+            return "REJECTED: max_transitions must be a positive integer."
+        if limit < 1 or limit > 1000:
+            return "REJECTED: max_transitions must be between 1 and 1000."
     previous = fx.get("transition") or {}
     motif = previous.get("motion_motif") if motion_motif is None else None
     if motion_motif is not None:
@@ -7917,10 +7964,12 @@ def set_transitions(ctx, style, duration_s=0.3, scope="scene",
     # renderer uses — so the sentence the user reads and the video they watch
     # cannot disagree.
     try:
-        hit = len(timeline_mod.transition_junctions(edl, ctx.index))
+        eligible = set(timeline_mod.transition_junctions(edl, ctx.index))
     except Exception:
-        hit = n_cuts
-    skipped = max(0, n_cuts - hit)
+        eligible = set(range(n_cuts))
+    hit = len(eligible)
+    eligible_count = hit
+    jump_skipped = max(0, n_cuts - hit)
 
     if sc == "scene" and hit == 0 and n_cuts > 0:
         # Every junction is a jump cut inside one shot. Applying the transition
@@ -7936,14 +7985,43 @@ def set_transitions(ctx, style, duration_s=0.3, scope="scene",
                 "are meant to be invisible), or set_transitions(scope="
                 "'every_cut') if they really do want one on every cut.")
 
-    note = ""
-    if sc == "scene" and skipped:
-        note = (f" — the other {skipped} junction"
-                f"{'s are' if skipped != 1 else ' is'} a jump cut inside one "
+    prog = program_duration(edl)
+    if sc == "scene" and limit is None and hit >= 3 and prog > 0 \
+            and prog / hit < TRANSITION_MIN_SPACING_S:
+        safe_max = max(1, int(prog / TRANSITION_MIN_SPACING_S))
+        return (f"NOT APPLIED: {hit} eligible scene changes across {prog:.0f}s "
+                f"would put a full-screen {p} transition every "
+                f"{prog / hit:.1f}s, which is too often and reads as an "
+                "automated effect pass. The EDL was NOT changed. Use hard "
+                "cuts, or call set_transitions again with max_transitions="
+                f"{safe_max} or fewer to mark only selected changes.")
+
+    if limit is not None and hit > limit:
+        ordered = sorted(eligible)
+        if limit == 1:
+            chosen = [ordered[len(ordered) // 2]]
+        else:
+            chosen = sorted({ordered[round(i * (len(ordered) - 1)
+                                             / (limit - 1))]
+                             for i in range(limit)})
+        transition["junctions"] = chosen
+        fx["transition"] = transition
+        edl["effects"] = fx
+        hit = len(chosen)
+
+    notes = []
+    if sc == "scene" and jump_skipped:
+        notes.append(f"the other {jump_skipped} junction"
+                f"{'s are' if jump_skipped != 1 else ' is'} a jump cut inside one "
                 "continuous shot (left by cut_silences) and deliberately got "
                 "NO transition; those are meant to be invisible. Use "
                 "scope='every_cut' whenever the editor intends one on every "
-                "cut.")
+                "cut")
+    unselected = max(0, eligible_count - hit)
+    if unselected:
+        notes.append(f"{unselected} additional eligible scene changes use "
+                     "clean hard cuts to respect max_transitions")
+    note = (" — " + "; ".join(notes)) if notes else ""
     where = ("every cut" if sc == "every_cut" else "scene changes")
     res = ctx.write_edl(
         edl, f"transitions: {d}s {p} ({TRANSITION_DESC[p]}) at {where} — "
@@ -7961,7 +8039,6 @@ def set_transitions(ctx, style, duration_s=0.3, scope="scene",
     # alone ("9 of 9") reads like success; the interval is the number that
     # shows it is not.
     if res.startswith("EDL v") and hit >= 3:
-        prog = program_duration(edl)
         if prog > 0:
             every = prog / hit
             res += (f"\nCadence: {hit} transitions across {prog:.0f}s of "
@@ -17130,7 +17207,7 @@ def _run_changed_preview_check(ctx, row, plan, ranges):
             delivered = _queue_check_frames(ctx, result, plan)
             critic = _preview_critic_report(ctx, result, plan)
             if critic is not None:
-                ctx.last_visual_critic = critic
+                ctx.last_preview_check_critic = critic
             all_covered = result.get("changed_ranges") or all_requested
             ctx.checked_versions.add(version)
             ctx._proof_ranges_by_version[version] = all_covered
@@ -23019,6 +23096,14 @@ TOOLS = {
                                    "enum": list(TRANSITION_STYLES)
                                    + ["none"]},
                          "duration_s": {"type": "number"},
+                         "max_transitions": {
+                             "type": "integer", "minimum": 1,
+                             "description":
+                                 "Optional cap for a restrained treatment. "
+                                 "The tool distributes the effect across at "
+                                 "most this many eligible scene changes; use "
+                                 "2-4 when the user asks for subtle or not "
+                                 "excessive transitions."},
                          "scope": {"type": "string",
                                    "enum": list(TRANSITION_SCOPES),
                                    "description":

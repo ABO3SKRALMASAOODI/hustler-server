@@ -5161,6 +5161,57 @@ def render_final(user_id, project_id):
         edl_row = cur.fetchone()
         if not edl_row:
             return jsonify({"error": "That EDL version does not exist"}), 400
+        cur.execute("""SELECT id FROM video_jobs
+                       WHERE project_id = %s AND type = 'agent_turn'
+                         AND state IN ('queued','running')
+                       ORDER BY id DESC LIMIT 1""", (project_id,))
+        active_agent = cur.fetchone()
+        if active_agent:
+            record_client_event(
+                user_id, project_id, "export_blocked",
+                detail={"code": "edit_in_progress", "version": version,
+                        "agent_job_id": active_agent["id"]}, origin="server")
+            return jsonify({
+                "error": ("The edit is still being finished. Wait for the "
+                          "latest preview before exporting so you do not "
+                          "lock in an older, unfinished version."),
+                "code": "edit_in_progress",
+                "agent_job_id": active_agent["id"],
+            }), 409
+        cur.execute("""SELECT cm.meta
+                       FROM projects p
+                       JOIN LATERAL (
+                           SELECT meta FROM chat_messages
+                           WHERE session_id = p.chat_session_id
+                             AND role = 'assistant'
+                             AND meta->>'edl_version' = %s
+                           ORDER BY id DESC LIMIT 1
+                       ) cm ON TRUE
+                       WHERE p.id = %s""",
+                    (str(version), project_id))
+        latest_assistant = cur.fetchone() or {}
+        assistant_meta = latest_assistant.get("meta") or {}
+        try:
+            reviewed_version = int(assistant_meta.get("edl_version"))
+        except (TypeError, ValueError):
+            reviewed_version = None
+        repair_required = (
+            reviewed_version == version
+            and (assistant_meta.get("quality_status") == "repair_required"
+                 or assistant_meta.get("export_ready") is False))
+        if repair_required:
+            findings = list(assistant_meta.get("quality_findings") or [])[:4]
+            record_client_event(
+                user_id, project_id, "export_blocked",
+                detail={"code": "repair_required", "version": version,
+                        "findings": findings}, origin="server")
+            return jsonify({
+                "error": ("This version still has an open verification "
+                          "repair. Finish the repair and review the new "
+                          "preview before exporting."),
+                "code": "repair_required",
+                "quality_findings": findings,
+            }), 409
         current_version = _obsolete_failed_render_version(
             cur, project_id, version)
         if current_version is not None:

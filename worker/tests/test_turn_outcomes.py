@@ -80,6 +80,25 @@ def test_successful_edit_remains_billable_even_after_a_repairable_refusal():
     assert agent_loop._turn_completion(ctx) == ("fulfilled", True)
 
 
+def test_edit_that_fails_its_own_approval_gate_is_partial_and_free():
+    ctx = _ctx(
+        versions_written=[2], rendered_versions={2},
+        last_preview={"edl_version": 2, "cached": False},
+        last_visual_critic={"verdict": "repair", "findings": [{
+            "severity": "major", "category": "story",
+            "evidence": "the section contains no visible action",
+            "repair": "replace the empty section", "confidence": .98,
+        }]},
+        last_audio_qc_findings=[], last_audio_review=None,
+        last_taste=[], last_taste_version=2,
+        verification_records={2: {
+            "status": "repair_required", "unresolved_findings": [{
+                "message": "replace the empty section"}]}}
+    )
+    ctx.latest_edl = lambda: {"version": 2}
+    assert agent_loop._turn_completion(ctx) == ("partial", False)
+
+
 def test_read_only_analysis_answer_remains_billable():
     ctx = _ctx(turn_tool_outcomes=[
         {"tool": "get_transcript", "kind": "success"}])

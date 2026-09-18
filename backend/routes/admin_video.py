@@ -18,6 +18,7 @@ from psycopg2.extras import RealDictCursor
 from flask import Blueprint, request, jsonify, current_app
 
 from routes.admin import admin_required, _scope, METRICS_EPOCH
+from video_services.jobs import enqueue as _enqueue
 import billing
 import credits
 import model_prices
@@ -826,6 +827,27 @@ def video_overview():
                   AND ((vj.heartbeat_at IS NULL
                         AND vj.created_at < NOW() - INTERVAL '10 minutes')
                        OR vj.heartbeat_at < NOW() - INTERVAL '10 minutes')
+                UNION ALL
+                SELECT 'repair_required', p.id, p.title, u.email,
+                       'agent edit needs repair: ' || LEFT(COALESCE(
+                           latest.meta->'quality_findings'->>0,
+                           'complete approval did not pass'), 180),
+                       latest.created_at
+                FROM projects p
+                JOIN users u ON u.id = p.user_id
+                JOIN LATERAL (
+                    SELECT cm.meta, cm.created_at
+                    FROM chat_messages cm
+                    WHERE cm.session_id = p.chat_session_id
+                      AND cm.role = 'assistant'
+                    ORDER BY cm.id DESC LIMIT 1
+                ) latest ON TRUE
+                WHERE latest.meta->>'quality_status' = 'repair_required'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM video_jobs active
+                      WHERE active.project_id = p.id
+                        AND active.type = 'agent_turn'
+                        AND active.state IN ('queued', 'running'))
                 UNION ALL
                 SELECT 'upload_failed', ce.project_id, p.title, u.email,
                        -- Every JSON accessor is parenthesised on purpose:
@@ -3047,6 +3069,54 @@ def video_settings_get():
         "updated_at": (row.get("updated_at").isoformat()
                        if row.get("updated_at") else None),
     })
+
+
+@admin_video_bp.route("/admin/video/projects/<int:project_id>/repair",
+                      methods=["POST"])
+@admin_required
+def repair_project_edit(project_id):
+    """Queue a company-funded completion pass for an affected customer."""
+    body = request.get_json(silent=True) or {}
+    instruction = str(body.get("instruction") or "").strip()
+    if len(instruction) > 8000:
+        return jsonify({"error": "instruction is too long"}), 400
+    with adb() as conn:
+        cur = conn.cursor()
+        cur.execute("""SELECT id, user_id, chat_session_id FROM projects
+                       WHERE id = %s""", (project_id,))
+        project = cur.fetchone()
+        if not project:
+            return jsonify({"error": "project not found"}), 404
+        cur.execute("""SELECT id FROM video_jobs
+                       WHERE project_id = %s AND type = 'agent_turn'
+                         AND state IN ('queued','running')
+                       ORDER BY id DESC LIMIT 1""", (project_id,))
+        active = cur.fetchone()
+        if active:
+            return jsonify({"error": "an edit is already active",
+                            "job_id": active["id"]}), 409
+        cur.execute("""SELECT id FROM chat_messages
+                       WHERE session_id = %s AND role = 'user'
+                       ORDER BY id DESC LIMIT 1""",
+                    (project["chat_session_id"],))
+        message = cur.fetchone()
+        if not message:
+            return jsonify({"error": "project has no customer request"}), 409
+        if not instruction:
+            instruction = (
+                "Company-funded completion repair. Inspect the customer's "
+                "original request and the latest complete preview. Repair "
+                "every open verification finding, preserve already-correct "
+                "work, and do not reply until the exact latest EDL has a "
+                "complete preview with export_ready=true."
+            )
+        job_id = _enqueue(cur, project_id, project["user_id"], "agent_turn", {
+            "message_id": int(message["id"]),
+            "operator_repair": True,
+            "operator_instruction": instruction,
+            "operator_source": "admin_repair",
+        })
+    return jsonify({"ok": True, "job_id": job_id, "project_id": project_id})
 
 
 @admin_video_bp.route("/admin/video/settings", methods=["POST"])

@@ -24,6 +24,7 @@ NON_JUSTIFIABLE_FINDINGS = {
     "complete_preview_missing", "caption_render_evidence_missing",
     "corrupt_glyph", "music_starts_after_program", "invalid_music_span",
     "requested_duration_outside_target", "invisible_manual_caption",
+    "requested_transitions_missing",
 }
 
 
@@ -454,18 +455,39 @@ def requested_duration_target(request_text):
 
 
 def _request_findings(edl, request_text):
+    findings = []
     target = requested_duration_target(request_text)
-    if not target:
-        return []
-    actual = float(program_duration(edl) or 0.0)
-    if target["min_s"] - .02 <= actual <= target["max_s"] + .02:
-        return []
-    return [_finding(
-        "requested_duration_outside_target", "story",
-        (f"The program is {actual:.2f}s, outside the user's explicit "
-         f"duration target ({target['min_s']:.2f}-{target['max_s']:.2f}s)."),
-        {"actual_s": round(actual, 3), "target": target},
-        "rebuild the story to the requested duration and render-check it")]
+    if target:
+        actual = float(program_duration(edl) or 0.0)
+        if not target["min_s"] - .02 <= actual <= target["max_s"] + .02:
+            findings.append(_finding(
+                "requested_duration_outside_target", "story",
+                (f"The program is {actual:.2f}s, outside the user's explicit "
+                 f"duration target ({target['min_s']:.2f}-"
+                 f"{target['max_s']:.2f}s)."),
+                {"actual_s": round(actual, 3), "target": target},
+                "rebuild the story to the requested duration and render-check it"))
+
+    # A visual pass can say a montage looks clean while a concrete requested
+    # treatment is simply absent. This happened on a paid user's ferry edit:
+    # the complete preview passed even though the EDL contained no transition
+    # at all. Keep the detector deliberately narrow and honor explicit
+    # negation; this is contract fulfillment, not style preference.
+    ask = str(request_text or "").lower()
+    asks_transition = bool(re.search(r"\btransitions?\b", ask))
+    rejects_transition = bool(
+        re.search(r"\b(?:no|without|remove|do\s+not|don't)\b"
+                  r"(?:\s+\w+){0,3}\s+transitions?\b", ask)
+        or re.search(r"\bavoid\s+(?:all\s+)?transitions?\b", ask))
+    if asks_transition and not rejects_transition \
+            and not ((edl.get("effects") or {}).get("transition")):
+        findings.append(_finding(
+            "requested_transitions_missing", "motion",
+            "The user explicitly requested transitions, but the latest EDL "
+            "contains no transition treatment.",
+            {"request_excerpt": ask[:500]},
+            "add a restrained transition treatment and render-check it"))
+    return findings
 
 
 def deterministic_findings(edl, index=None, request_text=None):

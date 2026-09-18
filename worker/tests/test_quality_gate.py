@@ -361,24 +361,32 @@ def test_many_proof_pages_enqueue_and_wait_for_one_batched_job(monkeypatch):
         db = Db()
         last_preview_check = None
         last_visual_critic = None
+        last_preview_check_critic = None
         _proof_ranges_by_version = {}
 
     monkeypatch.setattr(agent_tools, "_proof_pages", lambda _ranges: [
         [[0, 8], [10, 18]], [[20, 28], [30, 38]]])
     monkeypatch.setattr(agent_tools, "_queue_check_frames",
                         lambda *_args: False)
+    proof_critic = {"verdict": "repair", "findings": [{
+        "severity": "major", "category": "story",
+        "repair": "tighten this proof window",
+    }]}
     monkeypatch.setattr(agent_tools, "_preview_critic_report",
-                        lambda *_args: None)
+                        lambda *_args: proof_critic)
     monkeypatch.setattr(agent_tools.time, "sleep", lambda _seconds: None)
     row = {"version": 2, "json": default_edl(40.0)}
 
+    ctx = Ctx()
     result = agent_tools._run_changed_preview_check(
-        Ctx(), row, [], [[0, 38]])
+        ctx, row, [], [[0, 38]])
 
     assert len(payloads) == 1
     assert payloads[0]["proof_pages"] == 2
     assert len(payloads[0]["check_pages"]) == 2
     assert "one source-reusing render" in result
+    assert ctx.last_preview_check_critic is proof_critic
+    assert ctx.last_visual_critic is None
 
 
 def test_changed_proof_failure_reports_the_actionable_outcome(monkeypatch):

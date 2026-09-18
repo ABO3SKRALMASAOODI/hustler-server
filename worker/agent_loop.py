@@ -3468,6 +3468,11 @@ def _turn_completion(ctx, status="replied", fail_note=None, truncated=False):
     attempted_edit = bool(
         ctx.write_attempts
         or getattr(ctx, "plan_revised_this_turn", False))
+    quality = (_quality_handoff(ctx) if has_edit_deliverable else {})
+    unfinished_edit = bool(
+        has_edit_deliverable and getattr(ctx, "versions_written", None)
+        and callable(getattr(ctx, "latest_edl", None))
+        and quality.get("export_ready") is not True)
 
     if not has_value and (failed or status in {"timeout", "shutdown"}):
         outcome = "internal_error"
@@ -3476,7 +3481,7 @@ def _turn_completion(ctx, status="replied", fail_note=None, truncated=False):
                             or status in {"budget", "awaiting_user"}):
         outcome = "blocked"
     elif has_value and (status != "replied" or fail_note or failed
-                        or prerequisite):
+                        or prerequisite or unfinished_edit):
         outcome = "partial"
     else:
         outcome = "fulfilled"
@@ -3490,6 +3495,8 @@ def _turn_completion(ctx, status="replied", fail_note=None, truncated=False):
                         "no_index"}
              or (attempted_edit and (failed or refused or truncated))))
     billable = not (
+        unfinished_edit
+        or
         terminal_without_deliverable
         or (not has_value and (
             blank_canvas_no_value or attempted_edit or failed or refused
@@ -3821,9 +3828,10 @@ def _finalize(ctx, worker_db, session_id, final_text, status, total_steps,
         final_text += fail_note
     final_text = _disclose_outstanding_quality(ctx, final_text)
     final_text += _unused_fetched_audio_note(ctx)
+    quality = _quality_handoff(ctx)
     outcome, billable = _turn_completion(ctx, status, fail_note=fail_note)
     meta = {"edl_version": latest["version"], "preview": ctx.last_preview,
-            **_quality_handoff(ctx), **_outcome_meta(ctx, outcome)}
+            **quality, **_outcome_meta(ctx, outcome)}
     if extra_meta:
         meta.update(extra_meta)
     worker_db.run(dbx.add_message, session_id, "assistant", final_text, meta)
@@ -3833,6 +3841,7 @@ def _finalize(ctx, worker_db, session_id, final_text, status, total_steps,
             "steps": total_steps, "auto_render": ctx.autorendered,
             "honesty": honesty, "timings": timings,
             "outcome": outcome, "billable": billable,
+            **quality,
             "edl_changed": _turn_edl_changed(ctx)}
 
 
@@ -3907,6 +3916,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
     available credits, shared provider capacity, semantic no-progress and a
     provider-sized technical backstop bound runaway work.
     """
+    payload = dict(job.get("payload") or {})
     # Resolved from the user's plan in run_agent_job. _build_messages and the
     # tool schemas are model-agnostic and do not change with it.
     lanes = list(getattr(ctx, "agent_lanes", None) or [])
@@ -4054,27 +4064,57 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
     _responses_warned = False      # say the lane fell back ONCE, not per step
 
     def _durable_continuation(reason, blocker_fingerprint=None,
-                              blocker_repeats=0, progress_frontier=None):
+                              blocker_repeats=0, progress_frontier=None,
+                              company_repair=False):
         """Checkpoint consequences, enqueue the next slice, post no reply."""
-        payload = dict(job.get("payload") or {})
         root_id = int(payload.get("root_agent_job_id") or job["id"])
         sequence = int(payload.get("continuation_sequence") or 0) + 1
         work_slices = _continuation_work_slices(_cont, reason)
         if work_slices >= config.AGENT_MAX_PRODUCTIVE_SLICES:
-            print(f"[job {job['id']}] logical root {root_id} reached "
-                  f"{work_slices} productive execution slices — saving the "
-                  "latest preview and stopping the continuation chain",
-                  flush=True)
-            return _finalize(
-                ctx, worker_db, session_id,
-                "I reached the editing run limit before every remaining "
-                "detail could be completed. The successful changes and "
-                "latest saved preview are available; I stopped this run "
-                "instead of continuing to generate versions indefinitely.",
-                "blocked", total_steps, timings, honesty,
-                extra_meta={"error": "productive_slice_limit",
-                            "productive_slices": work_slices},
-                turn_deadline=turn_deadline, job=job)
+            quality = _quality_handoff(ctx)
+            company_repair = bool(
+                company_repair
+                or (not payload.get("operator_repair")
+                    and getattr(ctx, "versions_written", None)
+                    and quality.get("export_ready") is not True))
+            if company_repair and not payload.get("operator_repair"):
+                # A customer asked for an edit, not for an internal execution
+                # limit. Once the product has produced a version that still
+                # fails its own approval gate, finishing it is Valmera's cost.
+                # Start one separately bounded repair chain and keep the chat
+                # silent until that chain either passes or reaches a genuine
+                # repeated blocker.
+                print(f"[job {job['id']}] logical root {root_id} reached "
+                      f"{work_slices} slices with export_ready=false — "
+                      "handing off to company-funded repair", flush=True)
+                work_slices = 0
+                reason = "company-funded quality repair"
+                blocker_fingerprint = None
+                blocker_repeats = 0
+            else:
+                print(f"[job {job['id']}] logical root {root_id} reached "
+                      f"{work_slices} productive execution slices — saving "
+                      "the latest preview and stopping the continuation "
+                      "chain", flush=True)
+                return _finalize(
+                    ctx, worker_db, session_id,
+                    "I reached the editing run limit before every remaining "
+                    "detail could be completed. The successful changes and "
+                    "latest saved preview are available; I stopped this run "
+                    "instead of continuing to generate versions indefinitely.",
+                    "blocked", total_steps, timings, honesty,
+                    extra_meta={"error": "productive_slice_limit",
+                                "productive_slices": work_slices},
+                    turn_deadline=turn_deadline, job=job)
+        if company_repair and not payload.get("operator_repair") \
+                and reason != "company-funded quality repair":
+            print(f"[job {job['id']}] logical root {root_id} reached a "
+                  "repeated unfinished blocker — handing off to "
+                  "company-funded repair", flush=True)
+            work_slices = 0
+            reason = "company-funded quality repair"
+            blocker_fingerprint = None
+            blocker_repeats = 0
         generation_cost = float(ctx.gen_extra_cost_usd or 0.0)
         generation_cost += (len(ctx.images_generated)
                             * config.IMAGE_PRICE_USD)
@@ -4137,6 +4177,25 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 (ctx.turn_start_edl or {}).get("version") or start_version),
             "continuation_state": state,
         })
+        if company_repair and not payload.get("operator_repair"):
+            quality = _quality_handoff(ctx)
+            findings = quality.get("quality_findings") or []
+            next_payload.update({
+                "operator_repair": True,
+                "auto_quality_repair": True,
+                "operator_instruction": (
+                    "Company-funded completion repair. Do not merely explain "
+                    "or disclose the unfinished state. Repair the current "
+                    "latest EDL until a complete preview passes verification "
+                    "and export_ready is true. Preserve the customer's "
+                    "original intent and already-correct work. Current "
+                    "blocking evidence: "
+                    + ("; ".join(str(row) for row in findings[:6])
+                       if findings else
+                       "the latest edited version has not passed the complete "
+                       "preview approval gate")
+                )[:8000],
+            })
         next_id = worker_db.run(
             dbx.enqueue_agent_continuation, job["project_id"],
             job["user_id"], root_id, sequence, next_payload)
@@ -4234,6 +4293,12 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                        + ". The successful changes are saved; this is the "
                          "specific unresolved blocker.")
             if ctx.versions_written:
+                if not payload.get("operator_repair") \
+                        and _quality_handoff(ctx).get("export_ready") is not True:
+                    return _durable_continuation(
+                        "company-funded blocker repair",
+                        progress_frontier=resolution["frontier"],
+                        company_repair=True)
                 return _finalize(
                     ctx, worker_db, session_id, blocker, "blocked",
                     total_steps, timings, honesty,
@@ -4780,6 +4845,10 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 if repeats < 3:
                     return _durable_continuation(
                         "verification repair remains", fingerprint, repeats)
+                if not payload.get("operator_repair"):
+                    return _durable_continuation(
+                        "company-funded verification repair", fingerprint,
+                        repeats, company_repair=True)
                 detail = "; ".join(
                     str(row.get("message") or row)[:260]
                     for row in unresolved_rows[:4]) or \
@@ -4824,10 +4893,11 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             outcome, billable = _turn_completion(
                 ctx, "replied", fail_note=fail_note,
                 truncated=truncated_out)
+            quality = _quality_handoff(ctx)
             message_meta = {
                 "edl_version": latest["version"],
                 "preview": ctx.last_preview,
-                **_quality_handoff(ctx),
+                **quality,
                 **_outcome_meta(ctx, outcome),
             }
             worker_db.run(dbx.add_message, session_id, "assistant", final,
@@ -4841,7 +4911,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                     # the provider; the user must not. Same principle as
                     # charge_turn_credits' "a turn that got nothing back costs
                     # nothing", one layer up where the reason is visible.
-                    "billable": billable, "outcome": outcome,
+                    "billable": billable, "outcome": outcome, **quality,
                     "edl_changed": _turn_edl_changed(ctx),
                     "truncated": truncated_out or None}
 

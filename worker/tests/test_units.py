@@ -789,7 +789,7 @@ print("== Round-6 music tools ==")
 import json                                                   # noqa: E402
 import schemas                                                # noqa: E402
 from agent_tools import (set_audio_gain, remove_music,        # noqa: E402
-                         add_music, _frame_context)
+                         add_music, set_volume, _frame_context)
 
 
 class ToolCtx:
@@ -808,6 +808,9 @@ class ToolCtx:
 
     def latest_edl(self):
         return self._edl
+
+    def clamp(self, value):
+        return round(float(value), 3)
 
     def write_edl(self, edl, desc):
         self.written = edl
@@ -840,6 +843,30 @@ check("unknown id rejected listing existing ids",
 check("bad kind rejected",
       set_audio_gain(ToolCtx({}), "speech", "x", -6)
       .startswith("REJECTED"))
+
+volume_ctx = ToolCtx({"keep": [[0.0, 30.0]], "volume": [
+    {"start": 0.0, "end": 30.0, "gain_db": -4.0},
+]})
+set_volume(volume_ctx, 0, 30, 2)
+check("set_volume replaces an exact range instead of stacking gain",
+      volume_ctx.written["volume"] == [
+          {"start": 0.0, "end": 30.0, "gain_db": 2.0}])
+
+volume_ctx = ToolCtx({"keep": [[0.0, 30.0]], "volume": [
+    {"start": 0.0, "end": 30.0, "gain_db": -4.0},
+]})
+set_volume(volume_ctx, 10, 20, -8)
+check("set_volume splits older automation around the replaced window",
+      volume_ctx.written["volume"] == [
+          {"start": 0.0, "end": 10.0, "gain_db": -4.0},
+          {"start": 10.0, "end": 20.0, "gain_db": -8.0},
+          {"start": 20.0, "end": 30.0, "gain_db": -4.0}])
+
+set_volume(volume_ctx, 8, 22, 0)
+check("set_volume 0dB clears automation inside the requested window",
+      volume_ctx.written["volume"] == [
+          {"start": 0.0, "end": 8.0, "gain_db": -4.0},
+          {"start": 22.0, "end": 30.0, "gain_db": -4.0}])
 
 tctx = ToolCtx(json.loads(json.dumps(MUS_EDL)))
 r = remove_music(tctx, "mus1")
@@ -1469,6 +1496,7 @@ check("transition survives validation",
       tr_edl["effects"]["transition"] == {"style": "dip_black",
                                           "duration_s": 0.3,
                                           "scope": "scene",
+                                          "junctions": None,
                                           "motion_motif": None})
 # Round 48: an EDL written before `scope` existed reads as 'scene'. Every one
 # of those carries the every-cut defect, so defaulting them to the fixed
@@ -1607,6 +1635,20 @@ _ctxe.index = _shots2
 _re = agent_tools.set_transitions(_ctxe, "whip_left", 0.2, scope="every_cut")
 check("explicit every_cut is honoured", "5 of 5 junctions" in _re and
       _ctxe.written["effects"]["transition"]["scope"] == "every_cut")
+_dense = ToolCtx({"keep": [[i * 3.0, i * 3.0 + 2.0]
+                            for i in range(10)]})
+_dense_result = agent_tools.set_transitions(_dense, "dip_black", 0.2)
+check("dense scene transitions are refused before writing",
+      _dense_result.startswith("NOT APPLIED") and _dense.written is None)
+_dense_capped = ToolCtx({"keep": [[i * 3.0, i * 3.0 + 2.0]
+                                   for i in range(10)]})
+_capped_result = agent_tools.set_transitions(
+    _dense_capped, "dip_black", 0.2, max_transitions=3)
+check("max_transitions writes a selective junction treatment",
+      len(_dense_capped.written["effects"]["transition"]["junctions"]) == 3
+      and len(timeline_mod.transition_junctions(
+          _dense_capped.written, _dense_capped.index)) == 3
+      and "3 of 9 junctions" in _capped_result)
 check("an unknown scope is rejected with guidance",
       agent_tools.set_transitions(ToolCtx({"keep": [[0, 5], [6, 9]]}),
                                   "dip_black",

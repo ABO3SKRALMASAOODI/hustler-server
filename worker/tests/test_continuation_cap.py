@@ -7,6 +7,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import agent_loop  # noqa: E402
 import config  # noqa: E402
+import inspect  # noqa: E402
 
 
 def test_productive_continuations_increment_the_durable_slice_count():
@@ -25,3 +26,10 @@ def test_operational_handoffs_do_not_consume_productive_slices():
 
 def test_productive_slice_limit_is_bounded_but_allows_large_edits():
     assert 2 <= config.AGENT_MAX_PRODUCTIVE_SLICES <= 24
+
+
+def test_unfinished_edit_hands_off_to_one_company_funded_repair_chain():
+    source = inspect.getsource(agent_loop._run_loop)
+    assert '"operator_repair": True' in source
+    assert '"auto_quality_repair": True' in source
+    assert "company-funded quality repair" in source

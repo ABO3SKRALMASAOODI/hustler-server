@@ -1504,8 +1504,18 @@ def transition_junctions(edl, index, n_blocks=None):
     keep = [(float(k[0]), float(k[1])) for k in (edl.get("keep") or [])
             if k is not None and len(k) >= 2]
     inserts = list(edl.get("inserts") or [])
-    scope = ((edl.get("effects") or {}).get("transition") or {}).get("scope") \
-        or "scene"
+    transition = ((edl.get("effects") or {}).get("transition") or {})
+    scope = transition.get("scope") or "scene"
+
+    def selected(rows):
+        requested = transition.get("junctions")
+        if requested is None:
+            return set(rows)
+        try:
+            exact = {int(value) for value in requested if int(value) >= 0}
+        except (TypeError, ValueError):
+            return set(rows)
+        return set(rows) & exact
 
     # Rebuild the block order build_filtergraph uses: inserts splice in at
     # their keep boundary, before the segment that starts there. Segment
@@ -1534,7 +1544,7 @@ def transition_junctions(edl, index, n_blocks=None):
         # The renderer is authoritative about its own block count. If the two
         # ever disagree, fall back to every junction rather than dropping
         # transitions the user asked for at the wrong places.
-        return set(range(max(0, n_blocks - 1)))
+        return selected(range(max(0, n_blocks - 1)))
 
     n_junctions = max(0, len(blocks) - 1)
 
@@ -1567,11 +1577,11 @@ def transition_junctions(edl, index, n_blocks=None):
                 protected.add(k)
 
     if scope == "every_cut":
-        return set(range(n_junctions)) - protected
+        return selected(set(range(n_junctions)) - protected)
 
     shots = (index or {}).get("shots") or []
     if not shots:
-        return set(range(n_junctions)) - protected
+        return selected(set(range(n_junctions)) - protected)
 
     out = set()
     for k in range(n_junctions):
@@ -1590,7 +1600,7 @@ def transition_junctions(edl, index, n_blocks=None):
         # silently dropping one at a real scene boundary.
         if sa is None or sb is None or sa != sb:
             out.add(k)
-    return out
+    return selected(out)
 
 
 def merge_spans(spans, gap=0.3):

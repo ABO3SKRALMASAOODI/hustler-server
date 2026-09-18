@@ -1005,6 +1005,10 @@ class TransitionSpec(BaseModel):
     # grandfathering a bug. Already-rendered outputs are untouched — renders
     # are cached by EDL fingerprint and the stored JSON does not change.
     scope: Literal["scene", "every_cut"] = "scene"
+    # Optional exact subset of eligible junction indexes. This lets a subtle
+    # treatment mark two or three meaningful changes without forcing the same
+    # full-screen effect onto every scene change in a dense montage.
+    junctions: Optional[List[int]] = None
     motion_motif: Optional[MotionMotif] = None
 
 

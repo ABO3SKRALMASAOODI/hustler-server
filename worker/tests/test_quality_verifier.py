@@ -149,6 +149,40 @@ def test_effect_timestamp_is_not_mistaken_for_program_duration():
         "Add a zoom at 18 seconds and fade it out") is None
 
 
+def test_explicit_transition_request_cannot_pass_with_no_transition():
+    edl = default_edl(29)
+    record = quality_verifier.build_verification_record(
+        1, 2, {}, edl, {},
+        preview={"edl_version": 2, "duration_s": 29},
+        request_text="Add subtle cinematic transitions between the clips")
+    assert "requested_transitions_missing" in {
+        row["code"] for row in record["unresolved_findings"]}
+
+    edl["effects"] = {"transition": {
+        "style": "dip_black", "duration_s": .2, "scope": "scene",
+        "junctions": [1, 4]}}
+    repaired = quality_verifier.build_verification_record(
+        1, 3, {}, edl, {},
+        preview={"edl_version": 3, "duration_s": 29},
+        request_text="Add subtle cinematic transitions between the clips")
+    assert "requested_transitions_missing" not in {
+        row["code"] for row in repaired["unresolved_findings"]}
+
+
+def test_explicit_no_transitions_is_not_misread_as_a_missing_request():
+    edl = default_edl(10)
+    assert "requested_transitions_missing" not in {
+        row["code"] for row in quality_verifier.deterministic_findings(
+            edl, request_text="Do not add transitions; use hard cuts")}
+
+
+def test_avoid_excessive_transitions_still_requires_a_restrained_treatment():
+    edl = default_edl(10)
+    assert "requested_transitions_missing" in {
+        row["code"] for row in quality_verifier.deterministic_findings(
+            edl, request_text="Add transitions, but avoid excessive transitions")}
+
+
 def test_duplicate_critic_findings_are_one_repair_record():
     edl = default_edl(10)
     record = quality_verifier.build_verification_record(
