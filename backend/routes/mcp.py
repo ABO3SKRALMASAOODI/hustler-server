@@ -60,7 +60,8 @@ import storage
 import routes.mcp_oauth as mcp_oauth
 from routes.admin import ADMIN_EMAIL
 from routes.auth import token_required
-from routes.video import complete_upload_core, record_client_event, vdb
+from routes.video import complete_upload_core, record_client_event, vdb, wschemas
+from video_services.mcp_reads import read_metadata
 from video_services.jobs import enqueue as _enqueue
 from video_services.project_state import (
     active_original as _active_original,
@@ -1010,6 +1011,11 @@ def _run_tool_job(tok, name, args, raw=False, project_id=None):
                 f"Project {project_id} does not exist on this account. Call "
                 "list_projects and copy the intended id."))
         catalog = _catalog() or {}
+        immediate = read_metadata(cur, project_id, name, args, wschemas)
+        if immediate is not None:
+            identity = f"PROJECT {project_id} — \"{project.get('title') or 'Untitled'}\""
+            result = {"text": identity + "\n" + immediate, "is_error": False}
+            return _out(result["text"], result)
         mutation = name in set(catalog.get("write_tools") or []) or name in {
             "reset_edit"}
         cur.execute("""SELECT MAX(version) AS version FROM edls

@@ -285,7 +285,7 @@ def _modal_function_name(job_type, override=None):
         return "index"
     if job_type == "agent_turn":
         return "agent"
-    if job_type == "mcp_tool":
+    if job_type in {"mcp_tool", "preview", "preview_check"}:
         return "mcp"
     if job_type == "shorts_plan":
         return "shorts"
@@ -1085,7 +1085,8 @@ def _cloudflare_call_id(job):
             project_id = max(0, int(job.get("project_id")))
         except (TypeError, ValueError):
             project_id = 0
-        return f"cf-mcp-p{project_id}-{digest}"
+        prefix = "mcp" if job_type == "mcp_tool" else "preview"
+        return f"cf-{prefix}-p{project_id}-{digest}"
     return f"cf-{job_type[:18]}-{digest}"
 
 

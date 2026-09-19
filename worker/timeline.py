@@ -157,7 +157,10 @@ class Timeline:
         """[(final_start, duration)] for each insert, in program order."""
         out, consumed = [], 0.0
         for at, d in self.ins:
-            out.append((at + consumed, d))
+            # Canvas positions already describe the gapless clip order.
+            # Adding their authored position a second time invents gaps
+            # that the renderer's concat never plays.
+            out.append((at + consumed if self.segs else consumed, d))
             consumed += d
         return out
 

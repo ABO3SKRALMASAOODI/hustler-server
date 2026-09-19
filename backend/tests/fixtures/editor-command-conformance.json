@@ -1,0 +1,502 @@
+[
+  {
+    "name": "split source",
+    "before": {
+      "keep": [
+        [
+          0.0,
+          30.0
+        ]
+      ],
+      "split_keep_boundaries": null,
+      "canvas": null,
+      "captions": null,
+      "music": [],
+      "sfx": [],
+      "volume": [],
+      "frame": null,
+      "inserts": [],
+      "voiceover": [],
+      "effects": null,
+      "overlays": [],
+      "texts": [],
+      "vectors": [],
+      "speed": [],
+      "master": null,
+      "stem_mix": null,
+      "caption_mutes": [],
+      "source_clean": null,
+      "patches": []
+    },
+    "op": "split_keep",
+    "args": {
+      "at_program_s": 10
+    },
+    "sourceDuration": 30,
+    "after": {
+      "keep": [
+        [
+          0.0,
+          10.0
+        ],
+        [
+          10.0,
+          30.0
+        ]
+      ],
+      "split_keep_boundaries": [
+        10.0
+      ],
+      "canvas": null,
+      "captions": null,
+      "music": [],
+      "sfx": [],
+      "volume": [],
+      "frame": null,
+      "inserts": [],
+      "voiceover": [],
+      "effects": null,
+      "overlays": [],
+      "texts": [],
+      "vectors": [],
+      "speed": [],
+      "master": null,
+      "stem_mix": null,
+      "caption_mutes": [],
+      "source_clean": null,
+      "patches": []
+    }
+  },
+  {
+    "name": "split with transition",
+    "before": {
+      "keep": [
+        [
+          0.0,
+          30.0
+        ]
+      ],
+      "split_keep_boundaries": null,
+      "canvas": null,
+      "captions": null,
+      "music": [],
+      "sfx": [],
+      "volume": [],
+      "frame": null,
+      "inserts": [],
+      "voiceover": [],
+      "effects": {
+        "grade": null,
+        "zooms": [],
+        "fade_in_s": null,
+        "fade_out_s": null,
+        "transition": {
+          "style": "dip_black",
+          "duration_s": 0.3,
+          "scope": "every_cut",
+          "junctions": null,
+          "motion_motif": null
+        },
+        "regions": null,
+        "stylize": null,
+        "grade_custom": null,
+        "screen_frame": null,
+        "frame_shifts": null,
+        "custom": null
+      },
+      "overlays": [],
+      "texts": [],
+      "vectors": [],
+      "speed": [],
+      "master": null,
+      "stem_mix": null,
+      "caption_mutes": [],
+      "source_clean": null,
+      "patches": []
+    },
+    "op": "split_keep",
+    "args": {
+      "at_program_s": 10
+    },
+    "sourceDuration": 30,
+    "after": {
+      "keep": [
+        [
+          0.0,
+          10.0
+        ],
+        [
+          10.0,
+          30.0
+        ]
+      ],
+      "split_keep_boundaries": [
+        10.0
+      ],
+      "canvas": null,
+      "captions": null,
+      "music": [],
+      "sfx": [],
+      "volume": [],
+      "frame": null,
+      "inserts": [],
+      "voiceover": [],
+      "effects": {
+        "grade": null,
+        "zooms": [],
+        "fade_in_s": null,
+        "fade_out_s": null,
+        "transition": {
+          "style": "dip_black",
+          "duration_s": 0.3,
+          "scope": "every_cut",
+          "junctions": null,
+          "motion_motif": null
+        },
+        "regions": null,
+        "stylize": null,
+        "grade_custom": null,
+        "screen_frame": null,
+        "frame_shifts": null,
+        "custom": null
+      },
+      "overlays": [],
+      "texts": [],
+      "vectors": [],
+      "speed": [],
+      "master": null,
+      "stem_mix": null,
+      "caption_mutes": [],
+      "source_clean": null,
+      "patches": []
+    }
+  },
+  {
+    "name": "split moving sped-up insert",
+    "before": {
+      "keep": [],
+      "split_keep_boundaries": null,
+      "canvas": {
+        "width": 1920,
+        "height": 1080,
+        "fps": 30.0,
+        "bg_color": "#000000"
+      },
+      "captions": null,
+      "music": [],
+      "sfx": [],
+      "volume": [],
+      "frame": null,
+      "inserts": [
+        {
+          "id": "ins1",
+          "asset_key": "clip.mp4",
+          "kind": "video",
+          "at_output_s": 0.0,
+          "duration_s": 10.0,
+          "source_start_s": 40.0,
+          "split_parent": null,
+          "motion": "zoom_in",
+          "motion_motif": null,
+          "rate": 2.0,
+          "crop": null,
+          "mute": null,
+          "fit": null,
+          "rotation": null
+        }
+      ],
+      "voiceover": [],
+      "effects": null,
+      "overlays": [],
+      "texts": [],
+      "vectors": [],
+      "speed": [],
+      "master": null,
+      "stem_mix": null,
+      "caption_mutes": [],
+      "source_clean": null,
+      "patches": []
+    },
+    "op": "split_keep",
+    "args": {
+      "at_program_s": 4
+    },
+    "sourceDuration": 30,
+    "after": {
+      "keep": [],
+      "split_keep_boundaries": null,
+      "canvas": {
+        "width": 1920,
+        "height": 1080,
+        "fps": 30.0,
+        "bg_color": "#000000"
+      },
+      "captions": null,
+      "music": [],
+      "sfx": [],
+      "volume": [],
+      "frame": null,
+      "inserts": [
+        {
+          "id": "ins1",
+          "asset_key": "clip.mp4",
+          "kind": "video",
+          "at_output_s": 0.0,
+          "duration_s": 4.0,
+          "source_start_s": 40.0,
+          "split_parent": "ins1",
+          "motion": "zoom_in",
+          "motion_motif": null,
+          "rate": 2.0,
+          "crop": null,
+          "mute": null,
+          "fit": null,
+          "rotation": null
+        },
+        {
+          "id": "ins2",
+          "asset_key": "clip.mp4",
+          "kind": "video",
+          "at_output_s": 4.0,
+          "duration_s": 6.0,
+          "source_start_s": 48.0,
+          "split_parent": "ins1",
+          "motion": "zoom_in",
+          "motion_motif": null,
+          "rate": 2.0,
+          "crop": null,
+          "mute": null,
+          "fit": null,
+          "rotation": null
+        }
+      ],
+      "voiceover": [],
+      "effects": null,
+      "overlays": [],
+      "texts": [],
+      "vectors": [],
+      "speed": [],
+      "master": null,
+      "stem_mix": null,
+      "caption_mutes": [],
+      "source_clean": null,
+      "patches": []
+    }
+  },
+  {
+    "name": "delete source segment",
+    "before": {
+      "keep": [
+        [
+          0.0,
+          10.0
+        ],
+        [
+          15.0,
+          30.0
+        ]
+      ],
+      "split_keep_boundaries": null,
+      "canvas": null,
+      "captions": null,
+      "music": [],
+      "sfx": [],
+      "volume": [],
+      "frame": null,
+      "inserts": [],
+      "voiceover": [],
+      "effects": null,
+      "overlays": [],
+      "texts": [],
+      "vectors": [],
+      "speed": [],
+      "master": null,
+      "stem_mix": null,
+      "caption_mutes": [],
+      "source_clean": null,
+      "patches": []
+    },
+    "op": "remove_keep_segment",
+    "args": {
+      "index": 0
+    },
+    "sourceDuration": 30,
+    "after": {
+      "keep": [
+        [
+          15.0,
+          30.0
+        ]
+      ],
+      "split_keep_boundaries": null,
+      "canvas": null,
+      "captions": null,
+      "music": [],
+      "sfx": [],
+      "volume": [],
+      "frame": null,
+      "inserts": [],
+      "voiceover": [],
+      "effects": null,
+      "overlays": [],
+      "texts": [],
+      "vectors": [],
+      "speed": [],
+      "master": null,
+      "stem_mix": null,
+      "caption_mutes": [],
+      "source_clean": null,
+      "patches": []
+    }
+  },
+  {
+    "name": "trim source segment",
+    "before": {
+      "keep": [
+        [
+          0.0,
+          10.0
+        ],
+        [
+          15.0,
+          30.0
+        ]
+      ],
+      "split_keep_boundaries": null,
+      "canvas": null,
+      "captions": null,
+      "music": [],
+      "sfx": [],
+      "volume": [],
+      "frame": null,
+      "inserts": [],
+      "voiceover": [],
+      "effects": null,
+      "overlays": [],
+      "texts": [],
+      "vectors": [],
+      "speed": [],
+      "master": null,
+      "stem_mix": null,
+      "caption_mutes": [],
+      "source_clean": null,
+      "patches": []
+    },
+    "op": "trim_keep_segment",
+    "args": {
+      "index": 1,
+      "edge": "start",
+      "delta_s": 2
+    },
+    "sourceDuration": 30,
+    "after": {
+      "keep": [
+        [
+          0.0,
+          10.0
+        ],
+        [
+          17.0,
+          30.0
+        ]
+      ],
+      "split_keep_boundaries": null,
+      "canvas": null,
+      "captions": null,
+      "music": [],
+      "sfx": [],
+      "volume": [],
+      "frame": null,
+      "inserts": [],
+      "voiceover": [],
+      "effects": null,
+      "overlays": [],
+      "texts": [],
+      "vectors": [],
+      "speed": [],
+      "master": null,
+      "stem_mix": null,
+      "caption_mutes": [],
+      "source_clean": null,
+      "patches": []
+    }
+  },
+  {
+    "name": "frame immediately",
+    "before": {
+      "keep": [
+        [
+          0.0,
+          10.0
+        ],
+        [
+          15.0,
+          30.0
+        ]
+      ],
+      "split_keep_boundaries": null,
+      "canvas": null,
+      "captions": null,
+      "music": [],
+      "sfx": [],
+      "volume": [],
+      "frame": null,
+      "inserts": [],
+      "voiceover": [],
+      "effects": null,
+      "overlays": [],
+      "texts": [],
+      "vectors": [],
+      "speed": [],
+      "master": null,
+      "stem_mix": null,
+      "caption_mutes": [],
+      "source_clean": null,
+      "patches": []
+    },
+    "op": "set_frame",
+    "args": {
+      "ratio": "9:16",
+      "mode": "crop",
+      "focus_x": 0.4
+    },
+    "sourceDuration": 30,
+    "after": {
+      "keep": [
+        [
+          0.0,
+          10.0
+        ],
+        [
+          15.0,
+          30.0
+        ]
+      ],
+      "split_keep_boundaries": null,
+      "canvas": null,
+      "captions": null,
+      "music": [],
+      "sfx": [],
+      "volume": [],
+      "frame": {
+        "ratio": "9:16",
+        "mode": "crop",
+        "focus_x": 0.4,
+        "focus_y": null,
+        "focus_track": null
+      },
+      "inserts": [],
+      "voiceover": [],
+      "effects": null,
+      "overlays": [],
+      "texts": [],
+      "vectors": [],
+      "speed": [],
+      "master": null,
+      "stem_mix": null,
+      "caption_mutes": [],
+      "source_clean": null,
+      "patches": []
+    }
+  }
+]
