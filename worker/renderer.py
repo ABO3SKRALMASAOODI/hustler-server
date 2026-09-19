@@ -4777,6 +4777,21 @@ def _audio_model_review_cache_compatible(requested, edl, meta):
                 (meta or {}).get("audio_model_review") is False)
 
 
+def _matching_evidence_pages(previous, expected, field):
+    """Reuse immutable visual pages only for the identical evidence plan.
+
+    The caller has already proved that the encoded picture is unchanged.
+    A new requested moment or page layout still needs new evidence. Like the
+    complete-render cache, these keys are protected by retained asset history.
+    """
+    if not previous or len(previous) != len(expected):
+        return []
+    if any(not page.get("key") or page.get(field) != wanted
+           for page, wanted in zip(previous, expected)):
+        return []
+    return previous
+
+
 def run_render_job(worker_db, job):
     quality = (job.get("payload") or {}).get("quality", "draft")
     if quality not in ("draft", "approval"):
@@ -5121,6 +5136,7 @@ def _run_render_job(worker_db, job):
         # guard agrees is still a true render of its EDL.
         out_dur = None
         stitched_from = None
+        reused_visual_meta = {}
         requested_ranges = None
         changed_ranges = None
         mapped_verify_times = None
@@ -5182,6 +5198,8 @@ def _run_render_job(worker_db, job):
                             preview=(variant == "preview"), progress_cb=_prog,
                             cancelled_cb=lambda: _abandoned[0],
                             asset_locals=asset_locals)
+                        if out_dur is not None:
+                            reused_visual_meta = pm
                         if (out_dur is None and variant == "preview"
                                 and _PREVIEW_QUALITY.get() != "approval"
                                 and not want_wm and not is_canvas):
@@ -5234,6 +5252,7 @@ def _run_render_job(worker_db, job):
                   f"({str(ve)[:160]}) — running the full render in-job",
                   flush=True)
             stitched_from = None
+            reused_visual_meta = {}
             out_dur = render_edl(edl_row["json"], index, src_local,
                                  out_local, workdir,
                                  preview=(variant == "preview"),
@@ -5246,7 +5265,8 @@ def _run_render_job(worker_db, job):
                            variant, src_path=src_local, src_dur=src_dur)
         _mark("verify_s")
 
-        sheet_local = os.path.join(workdir, "result_sheet.jpg")
+        sheet_key = reused_visual_meta.get("sheet_key")
+        sheet_local = None if sheet_key else os.path.join(workdir, "result_sheet.jpg")
         try:
             # The PROGRAMME duration, not the file duration. build_result_sheet
             # samples at duration*(i+0.5)/9, so with the file duration the last
@@ -5254,10 +5274,11 @@ def _run_render_job(worker_db, job):
             # vision self-check that reads this sheet is told to flag
             # unexpected black frames. It would report the branding as a defect
             # and the agent would tell the user their video is broken.
-            sheets.build_result_sheet(
-                out_local, sheet_local,
-                max(0.1, out_dur - (0.0 if proof_only else
-                                    outro_seconds(variant == "preview"))))
+            if sheet_local:
+                sheets.build_result_sheet(
+                    out_local, sheet_local,
+                    max(0.1, out_dur - (0.0 if proof_only else
+                                        outro_seconds(variant == "preview"))))
         except Exception:
             sheet_local = None
         # A complete preview deserves more than nine clock samples. Build a
@@ -5267,6 +5288,7 @@ def _run_render_job(worker_db, job):
         # duplicating whole-program evidence would add latency and vision cost.
         screening_locals = []
         screening_frames = []
+        screening_pages = []
         if variant == "preview" and not proof_only:
             try:
                 program_dur = max(
@@ -5277,8 +5299,13 @@ def _run_render_job(worker_db, job):
                     base_frames=config.SCREENING_BASE_FRAMES,
                     extra_frames=(job["payload"].get("screening_frames")
                                   or []), index=index)
-                for page_n, page in enumerate(screening.pages(
-                        screening_frames, config.SCREENING_PAGE_TILES), 1):
+                planned_pages = list(screening.pages(
+                    screening_frames, config.SCREENING_PAGE_TILES))
+                screening_pages = _matching_evidence_pages(
+                    reused_visual_meta.get("screening_pages"),
+                    planned_pages, "frames")
+                for page_n, page in enumerate(
+                        [] if screening_pages else planned_pages, 1):
                     local = os.path.join(
                         workdir, f"screening_sheet_{page_n}.jpg")
                     sheets.build_frames_sheet(
@@ -5292,6 +5319,7 @@ def _run_render_job(worker_db, job):
                       f"{str(exc)[:160]}", flush=True)
                 screening_locals = []
                 screening_frames = []
+                screening_pages = []
         # Round 81: the dispatcher may name the exact output seconds its edit
         # changed (edl_diff.verify_plan); frames pulled HERE cost a few seeks
         # on a file we already hold, where pulling them dispatcher-side would
@@ -5311,26 +5339,36 @@ def _run_render_job(worker_db, job):
         caption_local = None
         caption_locals = []
         caption_times = []
+        caption_pages = []
         if not proof_only and variant == "preview" \
                 and edl_row["json"].get("captions"):
             try:
                 caption_times = caption_review_times(
                     edl_row["json"], index, workdir, out_dur, max_times=0)
                 if caption_times:
-                    for offset in range(0, len(caption_times), 16):
-                        page_times = caption_times[offset:offset + 16]
+                    planned_pages = [caption_times[offset:offset + 16]
+                                     for offset in range(0, len(caption_times), 16)]
+                    caption_pages = _matching_evidence_pages(
+                        reused_visual_meta.get("caption_pages"),
+                        planned_pages, "times")
+                    for page_n, page_times in enumerate(
+                            [] if caption_pages else planned_pages, 1):
                         local = os.path.join(
-                            workdir, f"caption_sheet_{offset // 16 + 1}.jpg")
+                            workdir, f"caption_sheet_{page_n}.jpg")
                         sheets.build_frames_sheet(
                             out_local, local, page_times, cols=4,
                             max_tiles=len(page_times),
                             parallelism=config.SCREENING_FRAME_PARALLELISM)
                         caption_locals.append((local, page_times))
-                    caption_local = caption_locals[0][0]
+                    caption_local = caption_locals[0][0] if caption_locals else None
             except Exception:
                 caption_local = None
                 caption_locals = []
                 caption_times = []
+                caption_pages = []
+        if reused_visual_meta:
+            detail["reused_visual_evidence_pages"] = (
+                int(bool(sheet_key)) + len(screening_pages) + len(caption_pages))
         _mark("sheet_s")
 
         # The render itself can finish in the narrow window between progress
@@ -5342,35 +5380,38 @@ def _run_render_job(worker_db, job):
 
         stamp = _render_stamp(job_id)
         render_key = f"media/{project_id}/{stamp}.mp4"
-        storage.upload_file(out_local, render_key, "video/mp4")
-        sheet_key = None
+        # Cancellation may remove only this job's objects. Reused evidence is
+        # still owned by earlier completed renders and their issued receipts.
+        uploaded_keys = []
+
+        def upload_output(local, key, mime):
+            storage.upload_file(local, key, mime)
+            uploaded_keys.append(key)
+
+        upload_output(out_local, render_key, "video/mp4")
         if sheet_local and os.path.exists(sheet_local):
             sheet_key = f"media/{project_id}/{stamp}_s.jpg"
-            storage.upload_file(sheet_local, sheet_key, "image/jpeg")
+            upload_output(sheet_local, sheet_key, "image/jpeg")
         verify_sheet_key = None
         if verify_local and os.path.exists(verify_local):
             verify_sheet_key = f"media/{project_id}/{stamp}_vf.jpg"
-            storage.upload_file(verify_local, verify_sheet_key, "image/jpeg")
-        caption_pages = []
+            upload_output(verify_local, verify_sheet_key, "image/jpeg")
         for page_n, (local, page_times) in enumerate(caption_locals, 1):
             if not os.path.exists(local):
                 continue
             key = f"media/{project_id}/{stamp}_cap{page_n}.jpg"
-            storage.upload_file(local, key, "image/jpeg")
+            upload_output(local, key, "image/jpeg")
             caption_pages.append({"key": key, "times": page_times})
         caption_sheet_key = (caption_pages[0]["key"]
                              if caption_pages else None)
-        screening_pages = []
         for page_n, (local, page) in enumerate(screening_locals, 1):
             if not os.path.exists(local):
                 continue
             key = f"media/{project_id}/{stamp}_scr{page_n}.jpg"
-            storage.upload_file(local, key, "image/jpeg")
+            upload_output(local, key, "image/jpeg")
             screening_pages.append({"key": key, "frames": page})
         if not _still_ours(96):
-            storage.delete_keys([render_key, sheet_key, verify_sheet_key] +
-                                [page["key"] for page in caption_pages] +
-                                [page["key"] for page in screening_pages])
+            storage.delete_keys(uploaded_keys)
             raise dbx.JobLeaseLost(
                 "job was cancelled or handed to another worker")
         _mark("upload_s")
@@ -5428,7 +5469,7 @@ def _run_render_job(worker_db, job):
                         local = os.path.join(workdir, f"listen_{i}.mp3")
                         media.extract_audio_clip(out_local, ls, le, local)
                         key = f"media/{project_id}/{stamp}_l{i}.mp3"
-                        storage.upload_file(local, key, "audio/mpeg")
+                        upload_output(local, key, "audio/mpeg")
                         listen_keys.append({
                             "key": key, "t0": round(ls, 2),
                             "t1": round(le, 2)})
@@ -5442,11 +5483,7 @@ def _run_render_job(worker_db, job):
                         pass
                     listen_keys = []
         if not _still_ours(98):
-            storage.delete_keys(
-                [render_key, sheet_key, verify_sheet_key]
-                + [page["key"] for page in caption_pages]
-                + [page["key"] for page in screening_pages]
-                + [item["key"] for item in listen_keys])
+            storage.delete_keys(uploaded_keys)
             raise dbx.JobLeaseLost(
                 "job was cancelled or handed to another worker")
         digest = hashlib.sha256()
