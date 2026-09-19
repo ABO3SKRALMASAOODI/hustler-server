@@ -15,6 +15,7 @@ Every render also emits a 3x3 contact sheet for the agent's self-check.
 """
 
 import hashlib
+from contextlib import contextmanager
 from contextvars import ContextVar
 import json
 import math
@@ -32,6 +33,7 @@ import db as dbx
 import gradelut
 import graphics
 import media
+import render_plan
 import screenframe
 import screening
 import sheets
@@ -47,6 +49,30 @@ from timeline import Timeline, merge_spans, transition_junctions
 DUCK_DB = -12.0            # music under speech AND program audio under voiceover
 MAX_ENABLE_SPANS = 80
 AUDIO_NORM = "aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo"
+_RENDER_DETAIL = ContextVar("render_detail", default=None)
+
+
+@contextmanager
+def _measure_render_detail(name):
+    started = time.monotonic()
+    try:
+        yield
+    finally:
+        detail = _RENDER_DETAIL.get()
+        if detail is not None:
+            detail[name] = round(detail.get(name, 0) + time.monotonic() - started, 4)
+
+
+def _render_media_run(cmd, **kwargs):
+    # Includes ranged network reads made inside FFmpeg; never call this
+    # "codec time". These detail counters are subsets of the stage walls.
+    with _measure_render_detail("ffmpeg_read_and_render_s"):
+        return media.run(cmd, **kwargs)
+
+
+def _render_probe(path):
+    with _measure_render_detail("input_probe_s"):
+        return media.probe(path)
 
 
 class RenderVerificationError(media.MediaError, dbx.PermanentJobError):
@@ -2995,7 +3021,8 @@ IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp")
 
 
 def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
-                       want_wm=False, wm_settings=None, cancelled_cb=None):
+                       want_wm=False, wm_settings=None, cancelled_cb=None,
+                       audio_only=False, asset_locals=None, suppress_outro=False):
     """Render a canvas program (round 34): a timeline with NO main video, where
     the ordered inserts (clips/images) are concatenated on the canvas, plus
     music / sfx / voiceover / manual captions / effects. Mirrors render_edl but
@@ -3016,7 +3043,7 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
     tl = Timeline(edl["keep"], inserts)
     # Resolve this before opening music inputs: a looped track may need five
     # more seconds of source to stay phase-continuous across the real card.
-    outro_s = outro_seconds(preview)
+    outro_s = 0.0 if suppress_outro else outro_seconds(preview)
     music_outro_s = _music_carry_outro_s(edl, outro_s)
     ass_path = caplib.build_ass(edl, {}, tl,
                                 os.path.join(workdir, "captions.ass"),
@@ -3026,13 +3053,7 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
                                       play_res=(W, H))
 
     def _fetch(key, tag, idx):
-        cached = _job_cached_source(key, workdir)
-        if cached:
-            return cached
-        local = os.path.join(workdir, f"{tag}_{idx}"
-                             + os.path.splitext(key)[1].lower())
-        storage.download_to(key, local)
-        return local
+        return _render_asset_source(key, tag, idx, workdir, asset_locals)
 
     music_inputs, insert_inputs, vo_inputs, sfx_inputs = [], [], [], []
     extra_inputs = []
@@ -3080,20 +3101,19 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
         sfx_inputs.append((next_idx, item, None))
         next_idx += 1
 
-    for item in inserts:               # sorted by validate_edl = tl.ins order
+    for item in inserts:
+        if audio_only and (item["kind"] == "image" or item.get("mute")):
+            # The pruned graph only needs the silence branch. Do not open a
+            # large visual source whose pixels and sound are both unused.
+            insert_inputs.append((silence_idx, item, False))
+            continue
         local = _fetch(item["asset_key"], "insert", next_idx)
-        if item["kind"] == "image" or local.endswith(IMAGE_EXTS):
-            extra_inputs += ["-loop", "1", "-t", f"{item['duration_s']:.3f}",
-                             "-r", f"{fps:.3f}", "-i", local]
-            has_ins_audio = False
-        else:
-            extra_inputs += ["-i", local]
-            # mute (round 78): a muted scene takes the silence branch, as if
-            # the clip never had a track. anullsrc is guaranteed whenever any
-            # insert exists, on both program paths.
-            has_ins_audio = media.probe(local)["has_audio"] \
-                and not item.get("mute")
-        insert_inputs.append((next_idx, item, has_ins_audio))
+        input_args, graph_item = render_plan.insert_input(
+            item, local, fps, copy_timestamps=False)
+        extra_inputs += input_args
+        has_ins_audio = (item["kind"] != "image" and not item.get("mute")
+                         and _render_probe(local)["has_audio"])
+        insert_inputs.append((next_idx, graph_item, has_ins_audio))
         next_idx += 1
 
     for item in voiceover:
@@ -3153,6 +3173,20 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
                               wm_anchor_y=wm_anchor_y,
                               plate_idx=plate_idx, plate_box=plate_box)
 
+    if audio_only:
+        graph = _prune_graph_to_audio(graph)
+        expected_out_s = (tl.out_duration
+                          + music_tail_ext(edl, tl.out_duration) + outro_s)
+        cmd = ["ffmpeg", "-y", *extra_inputs,
+               "-filter_complex", graph, "-map", "[aout]",
+               "-c:a", "aac", "-b:a", "128k" if preview else "192k",
+               "-t", f"{expected_out_s:.3f}", "-movflags", "+faststart",
+               "-progress", "pipe:1", "-nostats", out_path]
+        _render_media_run(cmd, timeout=_render_ffmpeg_timeout(preview, expected_out_s),
+                  progress_cb=progress_cb, expected_out_s=expected_out_s,
+                  cancelled_cb=cancelled_cb)
+        return media.probe_audio_duration(out_path)
+
     if preview:
         encode = ["-c:v", "libx264", "-preset", config.PREVIEW_PRESET,
                   "-crf", "27", "-g", "48", "-keyint_min", "24",
@@ -3169,7 +3203,7 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
            *encode, *_output_clock(fps), "-t", f"{expected_out_s:.3f}",
            "-movflags", "+faststart",
            "-progress", "pipe:1", "-nostats", out_path]
-    media.run(cmd, timeout=_render_ffmpeg_timeout(preview, expected_out_s),
+    _render_media_run(cmd, timeout=_render_ffmpeg_timeout(preview, expected_out_s),
               progress_cb=progress_cb,
               expected_out_s=expected_out_s,
               cancelled_cb=cancelled_cb)
@@ -3285,6 +3319,40 @@ def _resolve_asset_local(key, asset_locals, fallback):
     return fallback(key)
 
 
+def _render_asset_source(key, tag, idx, workdir, asset_locals=None):
+    with _measure_render_detail("input_fetch_s"):
+        return _render_asset_source_impl(key, tag, idx, workdir, asset_locals)
+
+
+def _render_asset_source_impl(key, tag, idx, workdir, asset_locals=None):
+    """Use resident bytes first, then range-read large inserted video.
+
+    A cache miss must not download an entire multi-GB original just to read
+    three seconds. Both timeline representations use this same policy.
+    Images and audio retain their existing cached download path.
+    """
+    known = (asset_locals or {}).get(key)
+    if known and os.path.exists(known):
+        return known
+    name = hashlib.sha256(key.encode()).hexdigest()[:32] + os.path.splitext(key)[1]
+    resident = os.path.join(config.TMP_DIR, "srccache", name)
+    if os.path.isfile(resident) and os.path.getsize(resident) > 0:
+        leased = _lease_cached_source(resident, workdir, key)
+        if leased:
+            os.utime(leased, None)
+            return leased
+    if (os.getenv("EXECUTOR_PROVIDER") == "cloudflare"
+            and tag in ("insert", "overlay")
+            and os.path.splitext(key)[1].lower() not in IMAGE_EXTS):
+        size = storage.object_bytes(key)
+        if size and size >= 32 * 1024 * 1024:
+            return storage.presign_get(key, expires=21600)
+    cached = _job_cached_source(key, workdir)
+    if cached:
+        return cached
+    return _fetch_into(workdir, key, f"{tag}_{idx}")
+
+
 def _repair_legacy_insert_boundaries(edl_dict):
     """Snap only legacy off-boundary inserts so an old broken EDL can render.
 
@@ -3350,12 +3418,15 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     clean AAC cut points). Same inputs, same filters, same order: the track
     is the one the full render would have produced, by construction.
     """
+    edl_dict = render_plan.canonical_program(edl_dict)
     if is_canvas_program(edl_dict):
         # No main video: the program is built on the canvas from inserts alone.
         return _render_canvas_edl(edl_dict, out_path, workdir, preview,
                                   progress_cb, want_wm=want_wm,
                                   wm_settings=wm_settings,
-                                  cancelled_cb=cancelled_cb)
+                                  cancelled_cb=cancelled_cb,
+                                  audio_only=audio_only, asset_locals=asset_locals,
+                                  suppress_outro=suppress_outro)
     info = media.probe(src_path)
     src_dur = info["duration"]
     render_dict = _repair_legacy_insert_boundaries(edl_dict)
@@ -3426,15 +3497,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                                       play_res=(W, H))
 
     def _fetch(key, tag, idx):
-        cached = _resolve_asset_local(
-            key, asset_locals,
-            lambda storage_key: _job_cached_source(storage_key, workdir))
-        if cached:
-            return cached
-        local = os.path.join(workdir, f"{tag}_{idx}"
-                             + os.path.splitext(key)[1].lower())
-        storage.download_to(key, local)
-        return local
+        return _render_asset_source(key, tag, idx, workdir, asset_locals)
 
     music_inputs, insert_inputs, vo_inputs, sfx_inputs = [], [], [], []
     extra_inputs = []
@@ -3540,20 +3603,19 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         sfx_inputs.append((next_idx, item, None))
         next_idx += 1
 
-    for item in inserts:                      # sorted by validate_edl = tl.ins order
+    for item in inserts:
+        if audio_only and (item["kind"] == "image" or item.get("mute")):
+            # The pruned graph only needs the silence branch. Do not open a
+            # large visual source whose pixels and sound are both unused.
+            insert_inputs.append((silence_idx, item, False))
+            continue
         local = _fetch(item["asset_key"], "insert", next_idx)
-        if item["kind"] == "image" or local.endswith(IMAGE_EXTS):
-            extra_inputs += ["-loop", "1", "-t", f"{item['duration_s']:.3f}",
-                             "-r", f"{fps:.3f}", "-i", local]
-            has_ins_audio = False
-        else:
-            extra_inputs += ["-i", local]
-            # mute (round 78): a muted scene takes the silence branch, as if
-            # the clip never had a track. anullsrc is guaranteed whenever any
-            # insert exists, on both program paths.
-            has_ins_audio = media.probe(local)["has_audio"] \
-                and not item.get("mute")
-        insert_inputs.append((next_idx, item, has_ins_audio))
+        input_args, graph_item = render_plan.insert_input(
+            item, local, fps, copy_timestamps=seek_main_source)
+        extra_inputs += input_args
+        has_ins_audio = (item["kind"] != "image" and not item.get("mute")
+                         and _render_probe(local)["has_audio"])
+        insert_inputs.append((next_idx, graph_item, has_ins_audio))
         next_idx += 1
 
     for item in voiceover:
@@ -3701,7 +3763,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                "-t", f"{expected_out_s:.3f}",
                "-movflags", "+faststart",
                "-progress", "pipe:1", "-nostats", out_path]
-        media.run(cmd, timeout=_render_ffmpeg_timeout(preview, expected_out_s),
+        _render_media_run(cmd, timeout=_render_ffmpeg_timeout(preview, expected_out_s),
                   progress_cb=progress_cb,
                   expected_out_s=expected_out_s,
                   cancelled_cb=cancelled_cb)
@@ -3729,7 +3791,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     # Progress is percent-of-expected, so it must be the RENDERED length. Left
     # at the programme duration the bar hits 99.9% at programme end and then
     # flatlines through the whole end card.
-    media.run(cmd, timeout=_render_ffmpeg_timeout(preview, expected_out_s),
+    _render_media_run(cmd, timeout=_render_ffmpeg_timeout(preview, expected_out_s),
               progress_cb=progress_cb,
               expected_out_s=expected_out_s,
               cancelled_cb=cancelled_cb)
@@ -4074,6 +4136,40 @@ def _fetch_into(workdir, key, tag):
                          + os.path.splitext(key)[1].lower())
     storage.download_to(key, local)
     return local
+
+
+def _reuse_picture_with_new_audio(previous, current, prev_asset, index,
+                                  src_local, workdir, out_local, *, preview,
+                                  progress_cb=None, cancelled_cb=None,
+                                  asset_locals=None):
+    """Reuse all encoded video when only the audio dependencies changed.
+
+    Caller validates quality, source and renderer stamps. A duration change
+    (including a music tail) refuses reuse; final packaging is never cut with
+    -shortest, which could silently remove the end of an export.
+    """
+    if not render_plan.can_reuse_picture(previous, current):
+        return None
+    tl = Timeline(current.get("keep") or [], current.get("inserts") or [],
+                  current.get("speed"))
+    if abs(music_tail_ext(previous, tl.out_duration)
+           - music_tail_ext(current, tl.out_duration)) > 1e-6:
+        return None
+    picture = _render_asset_source(prev_asset["storage_key"], "picture", 0,
+                                   workdir)
+    track = os.path.join(workdir, "replacement-audio.m4a")
+    duration = render_edl(current, index, src_local, track, workdir,
+                          preview=preview, audio_only=True,
+                          progress_cb=progress_cb, cancelled_cb=cancelled_cb,
+                          asset_locals=asset_locals)
+    if abs(float(prev_asset.get("duration_s") or 0) - duration) > 0.08:
+        return None
+    media.run(["ffmpeg", "-y", "-i", picture, "-i", track,
+               "-map", "0:v:0", "-map", "1:a:0", "-c", "copy",
+               "-movflags", "+faststart", out_local],
+              timeout=_render_ffmpeg_timeout(preview, duration),
+              cancelled_cb=cancelled_cb)
+    return media.duration_of(out_local)
 
 
 def _timeline_stitch(job_id, prev_edl, new_edl, tl_prev, tl_new, index,
@@ -4865,6 +4961,8 @@ def _run_render_job(worker_db, job):
     workdir = os.path.join(config.TMP_DIR, f"render_{job_id}")
     os.makedirs(workdir, exist_ok=True)
     timings, t0 = {}, time.monotonic()
+    detail = {}
+    detail_token = _RENDER_DETAIL.set(detail)
     active_stage = ["download_s"]
 
     def _mark(stage):
@@ -5047,17 +5145,17 @@ def _run_render_job(worker_db, job):
                     job["payload"].get("verify_times") or [],
                     progress_cb=_prog,
                     raw_pages=job["payload"].get("check_pages") or [])
-        if not proof_only and variant == "preview" and _PREVIEW_QUALITY.get() != "approval" \
-                and not force and not want_wm \
-                and not is_canvas:
+        if not proof_only and not force:
             try:
                 prev_asset = worker_db.run(dbx.latest_render_asset,
-                                           project_id, "preview")
+                                           project_id, variant)
                 pm = (prev_asset or {}).get("meta") or {}
                 prev_v = pm.get("edl_version")
                 if prev_asset and prev_v is not None \
                         and int(prev_v) != version \
                         and pm.get("src_sha256") == src_sha \
+                        and (variant != "preview" or
+                             pm.get("quality", "draft") == _PREVIEW_QUALITY.get()) \
                         and storage.exists(prev_asset["storage_key"]):
                     prev_row = worker_db.run(dbx.get_edl_version, project_id,
                                              int(prev_v))
@@ -5069,18 +5167,27 @@ def _run_render_job(worker_db, job):
                     fp_now = _caption_index_fp(prev_row["json"], index) \
                         if prev_row else None
                     if prev_row \
-                            and outro_current(pm, "preview") \
+                            and outro_current(pm, variant) \
                             and shaping_current(pm, prev_row["json"]) \
                             and transitions_current(pm, prev_row["json"]) \
                             and music_tail_current(pm, prev_row["json"],
                                                    _pout) \
-                            and watermark_current(pm, "preview", is_paid,
+                            and watermark_current(pm, variant, is_paid,
                                                   wm_settings) \
                             and (fp_now is None
                                  or pm.get("caption_fp") == fp_now):
-                        out_dur = _stitched_preview(
-                            job_id, edl_row, prev_row, prev_asset, index,
-                            src_local, workdir, patch_locals, out_local)
+                        out_dur = _reuse_picture_with_new_audio(
+                            prev_row["json"], edl_row["json"], prev_asset,
+                            index, src_local, workdir, out_local,
+                            preview=(variant == "preview"), progress_cb=_prog,
+                            cancelled_cb=lambda: _abandoned[0],
+                            asset_locals=asset_locals)
+                        if (out_dur is None and variant == "preview"
+                                and _PREVIEW_QUALITY.get() != "approval"
+                                and not want_wm and not is_canvas):
+                            out_dur = _stitched_preview(
+                                job_id, edl_row, prev_row, prev_asset, index,
+                                src_local, workdir, patch_locals, out_local)
                         if out_dur is not None:
                             stitched_from = int(prev_v)
             except Exception as se:
@@ -5426,10 +5533,13 @@ def _run_render_job(worker_db, job):
         if stage not in timings:
             timings[stage] = round(time.monotonic() - t0, 2)
         timings["failed_stage"] = stage
+        timings.update(detail)
         try:
             exc.runner_timings = dict(timings)
         except Exception:
             pass
         raise
     finally:
+        timings.update(detail)
+        _RENDER_DETAIL.reset(detail_token)
         shutil.rmtree(workdir, ignore_errors=True)

@@ -780,6 +780,9 @@ class InsertItem(BaseModel):
     at_output_s: float
     duration_s: float
     source_start_s: Optional[float] = None
+    # UI subdivisions retain one physical clip until either side is edited.
+    # Compilation joins these pieces before transitions and camera motion.
+    split_parent: Optional[str] = None
     motion: Optional[Literal["zoom_in", "zoom_out",
                              "pan_left", "pan_right"]] = None
     motion_motif: Optional[MotionMotif] = None
@@ -1781,6 +1784,7 @@ class EDL(BaseModel):
     # keep is empty ONLY for a canvas program (image/clip-only, no main video);
     # otherwise it is the non-empty cut list of the one main video.
     keep: List[List[float]]
+    split_keep_boundaries: Optional[List[float]] = None
     canvas: Optional[Canvas] = None
     captions: Optional[Union[CaptionsFromTranscript, List[CaptionItem]]] = None
     music: List[MusicItem] = Field(default_factory=list)

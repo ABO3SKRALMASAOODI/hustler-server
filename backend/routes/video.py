@@ -24,6 +24,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor, Json
 from flask import Blueprint, request, jsonify, current_app
 
+from video_services.direct_edits import command_identity, read_receipt, receipt_meta
 from routes.auth import token_required
 from credits import check_and_reserve, get_balance
 import plan_gate
@@ -73,6 +74,12 @@ _tl_spec = importlib.util.spec_from_file_location(
     "worker_timeline", os.path.abspath(_tl_path))
 wtimeline = importlib.util.module_from_spec(_tl_spec)
 _tl_spec.loader.exec_module(wtimeline)
+
+_plan_spec = importlib.util.spec_from_file_location(
+    "worker_render_plan", os.path.join(os.path.dirname(_schemas_path),
+                                       "render_plan.py"))
+wplan = importlib.util.module_from_spec(_plan_spec)
+_plan_spec.loader.exec_module(wplan)
 
 video_bp = Blueprint("video", __name__)
 
@@ -740,7 +747,7 @@ def _program_signature(edl):
     """Canonical form of what this EDL renders, ignoring differences that the
     renderer cannot express (currently: where the keep list is subdivided)."""
     try:
-        e = json.loads(json.dumps(edl))
+        e = wplan.canonical_program(edl)
     except (TypeError, ValueError):
         return None
     effects = e.get("effects") or {}
@@ -2864,7 +2871,20 @@ def project_state(user_id, project_id):
             agent_orphaned = _agent_version_orphaned(
                 lanes.get("agent_turn"), lanes.get("mcp_tool"),
                 bool(aged_row and aged_row["aged"]))
-        if (not subscription_locked
+        # An explicitly playable edit is a document, not a missing MP4.
+        # Its intent survives reloads and closed tabs; explicit preview/export
+        # requests remain available and keep their normal recovery behavior.
+        on_demand = False
+        if edl and edl.get("created_by") == "user":
+            cur.execute("""SELECT 1 FROM chat_messages
+                           WHERE session_id = %s AND role = 'activity'
+                             AND meta->>'edl_version' = %s
+                             AND meta->>'preview_mode' = 'on_demand' LIMIT 1""",
+                        (p["chat_session_id"], str(edl["version"])))
+            on_demand = cur.fetchone() is not None
+        if edl:
+            edl["preview_on_demand"] = on_demand
+        if (not subscription_locked and not on_demand
                 and _should_heal_preview(edl, indexed, drafting,
                                          agent_orphaned)):
             cur.execute("""SELECT 1 FROM video_jobs
@@ -3853,13 +3873,14 @@ def _split_insert(edl, tl, at):
     n = 1
     while f"ins{n}" in taken:
         n += 1
+    hit["split_parent"] = hit.get("split_parent") or hit["id"]
     second = dict(hit)
     second["id"] = f"ins{n}"
     second["duration_s"] = tail
     # Where the tail starts IN THE CLIP — the head's own offset plus the head's
     # length. Without this the second half replays the beginning of the clip,
     # which is the bug that makes "split" look like "duplicate".
-    second["source_start_s"] = round(src0 + head, 3)
+    second["source_start_s"] = round(src0 + head * (hit.get("rate") or 1), 3)
     hit["duration_s"] = head
     # Directly AFTER its own head in the list: list order is what decides
     # program order at a shared boundary, so appending it would play the tail
@@ -3933,6 +3954,8 @@ def _apply_edl_op(edl, op, args, assets_by_id, src_dur=None,
                 cut = round(float(src), 3)
                 keep[i:i + 1] = [[s, cut], [cut, e]]
                 edl["keep"] = keep
+                edl["split_keep_boundaries"] = sorted(set(
+                    (edl.get("split_keep_boundaries") or []) + [cut]))
                 return edl, f"split the clip at {round(at, 2)}s"
         raise ValueError("That point is already a clip edge — nothing to "
                          "split.")
@@ -4598,13 +4621,33 @@ def user_edl_write(user_id, project_id):
         base_version = int(data["base_version"])
     except (KeyError, TypeError, ValueError):
         base_version = None
+    try:
+        operation_id, operation_fingerprint = command_identity(data)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
     with vdb() as conn:
         cur = conn.cursor()
         p = _project_for_user(cur, project_id, user_id)
         if not p:
             return jsonify({"error": "Project not found"}), 404
+        # One durable command at a time per project, including retries from
+        # another tab or a replacement API process.
+        cur.execute("SELECT pg_advisory_xact_lock(%s)", (project_id,))
+        try:
+            acknowledgement = read_receipt(cur, p["chat_session_id"],
+                                           operation_id, operation_fingerprint)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 409
+        if acknowledgement:
+            saved = _edl_at(cur, project_id, acknowledgement["version"])
+            return jsonify({**acknowledgement, "edl": saved["json"],
+                            "replayed": True})
+        latest_row = _latest_edl(cur, project_id)
         original = _active_original(cur, project_id)
-        if not original or not original["duration_s"]:
+        canvas = bool(latest_row and latest_row["json"].get("canvas")
+                      and not latest_row["json"].get("keep"))
+        source_duration = float((original or {}).get("duration_s") or 0) or None
+        if not canvas and not source_duration:
             return jsonify({"error": "Upload a video first"}), 400
         # EDL writes must not race the agent
         cur.execute("""SELECT id FROM video_jobs
@@ -4613,7 +4656,6 @@ def user_edl_write(user_id, project_id):
         if cur.fetchone():
             return jsonify({"error": "The editor is working on a request — "
                                      "try again when it finishes."}), 409
-        latest_row = _latest_edl(cur, project_id)
         if not latest_row:
             cur.execute("""INSERT INTO edls (project_id, version, json,
                                              created_by)
@@ -4653,20 +4695,27 @@ def user_edl_write(user_id, project_id):
         try:
             new_edl, desc = _apply_edl_op(edl_row["json"], op, args,
                                           assets_by_id,
-                                          src_dur=float(
-                                              original["duration_s"]),
+                                          src_dur=source_duration,
                                           speech_spans=speech_spans)
-            new_edl, desc = _reanchor_after_op(edl_row["json"], new_edl, desc)
+            if op != "split_keep":
+                new_edl, desc = _reanchor_after_op(edl_row["json"], new_edl, desc)
             normalized = wschemas.validate_edl(
-                new_edl, float(original["duration_s"])).model_dump()
+                new_edl, source_duration).model_dump()
         except (ValueError, wschemas.EDLValidationError) as e:
             return jsonify({"error": str(e)[:300]}), 400
 
         if wschemas.edl_signature(normalized) == \
                 wschemas.edl_signature(edl_row["json"]):
-            return jsonify({"version": edl_row["version"],
-                            "no_change": True,
-                            "edl": edl_row["json"]})
+            acknowledgement = {"version": edl_row["version"], "no_change": True}
+            if operation_id:
+                cur.execute("""INSERT INTO chat_messages
+                            (session_id, role, content, meta)
+                            VALUES (%s, 'activity', %s, %s)""",
+                            (p["chat_session_id"], "you → " + desc,
+                             Json({"tool": "user_edit", "op": op,
+                                   **receipt_meta(operation_id,
+                                       operation_fingerprint, acknowledgement)})))
+            return jsonify({**acknowledgement, "edl": edl_row["json"]})
 
         cur.execute("""INSERT INTO edls (project_id, version, json, created_by)
                        VALUES (%s, (SELECT COALESCE(MAX(version), 0) + 1
@@ -4697,8 +4746,9 @@ def user_edl_write(user_id, project_id):
                           SET state = 'done', result = %s, updated_at = NOW()
                         WHERE project_id = %s AND type = 'preview'
                           AND state IN ('queued', 'running')
+                          AND %s <> 'split_keep'
                           AND (payload->>'edl_version')::int < %s""",
-                    (Json({"superseded_by": version}), project_id, version))
+                    (Json({"superseded_by": version}), project_id, op, version))
         superseded = cur.rowcount
 
         # Enqueued UNCONDITIONALLY, and that is safe because of the sweep
@@ -4723,7 +4773,10 @@ def user_edl_write(user_id, project_id):
         # An older studio sends nothing and renders immediately, as before.
         twin = _preview_twin(cur, project_id, normalized,
                              exclude_version=version)
-        plan = _preview_plan(twin, bool(data.get("defer_preview")))
+        on_demand = (op == "split_keep" or
+                     (data.get("preview_mode") == "on_demand"
+                      and bool(data.get("defer_preview"))))
+        plan = _preview_plan(twin, on_demand or bool(data.get("defer_preview")))
         preview_job, reused = None, None
         if plan == "defer":
             pass
@@ -4733,6 +4786,11 @@ def user_edl_write(user_id, project_id):
             preview_job = _enqueue(cur, project_id, user_id, "preview",
                                    {"edl_version": version,
                                     "source": "user_edit"})
+        acknowledgement = {"version": version, "preview_job_id": preview_job,
+                           "reused_preview_asset_id": reused,
+                           "preview_deferred": not on_demand and preview_job is None and reused is None,
+                           "preview_on_demand": on_demand and reused is None,
+                           "branched_from": branched_from, "desc": desc}
         cur.execute("""INSERT INTO chat_messages (session_id, role, content,
                                                   meta)
                        VALUES (%s, 'activity', %s, %s)""",
@@ -4741,16 +4799,14 @@ def user_edl_write(user_id, project_id):
                      # edl_version is what lets the studio roll the chat back
                      # in step with the version stepper.
                      Json({"tool": "user_edit", "op": op,
+                           **receipt_meta(operation_id, operation_fingerprint,
+                                          acknowledgement),
                            "edl_version": version,
+                           "preview_mode": "on_demand" if on_demand else "automatic",
                            **({"branched_from": branched_from}
                               if branched_from is not None else {})})))
 
-    return jsonify({"version": version, "preview_job_id": preview_job,
-                    "reused_preview_asset_id": reused,
-                    "preview_deferred": bool(preview_job is None
-                                             and reused is None),
-                    "branched_from": branched_from,
-                    "desc": desc, "edl": normalized})
+    return jsonify({**acknowledgement, "edl": normalized})
 
 
 # ------------------------------------------------------------------ #
