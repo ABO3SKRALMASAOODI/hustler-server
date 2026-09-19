@@ -1075,12 +1075,13 @@ def _cloudflare_call_id(job):
         raw = f"{job.get('type')}:{job.get('id')}:{job.get('total_claims')}"
     digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
     job_type = str(job.get("type") or "job")
-    if job_type == "mcp_tool":
+    if job_type in {"mcp_tool", "preview", "preview_check"}:
         # Cloudflare recognizes this stable prefix and sends every call for a
         # project to the same MCP shard. ToolContext intentionally caches
         # search handles (notably stock ids) between calls; call-id sharding
         # sent search_stock and add_stock_media to different processes and
-        # made 129 valid ids look unknown.
+        # made 129 valid ids look unknown. Preview jobs likewise need a
+        # stable project key so successive revisions reuse resident media.
         try:
             project_id = max(0, int(job.get("project_id")))
         except (TypeError, ValueError):
