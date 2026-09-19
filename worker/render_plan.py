@@ -48,9 +48,10 @@ def canonical_program(edl):
                 and previous.get("split_parent") == item["split_parent"]
                 and all(previous.get(k) == item.get(k)
                         for k in (set(previous) | set(item)) - ignore)
-                and abs(float(item.get("source_start_s") or 0)
-                        - float(previous.get("source_start_s") or 0)
-                        - previous["duration_s"] * (previous.get("rate") or 1)) < 1e-3):
+                and round(float(item.get("source_start_s") or 0), 2)
+                    == round(float(previous.get("source_start_s") or 0)
+                             + previous["duration_s"]
+                             * (previous.get("rate") or 1), 2)):
             previous["duration_s"] = round(previous["duration_s"]
                                            + item["duration_s"], 3)
         else:
