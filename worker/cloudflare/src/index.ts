@@ -29,7 +29,7 @@ type Reservation =
   | { kind: "terminal"; state: CallState }
   | { kind: "existing"; state: CallState }
   | { kind: "conflict" }
-  | { kind: "busy" }
+  | { kind: "busy"; activeCallId: string }
   | { kind: "reset"; resetId: string; expiredCallId: string };
 
 interface Env {
@@ -133,6 +133,22 @@ async function authorized(request: Request, expected: string): Promise<boolean> 
   let different = a.length ^ b.length;
   for (let i = 0; i < Math.min(a.length, b.length); i += 1) different |= a[i] ^ b[i];
   return different === 0;
+}
+
+async function matchesCompletedJob(callId: string, job: ExecutorJob): Promise<boolean> {
+  if (!Number.isInteger(job.id) || !Number.isInteger(job.total_claims)
+      || !Number.isInteger(job.project_id)) return false;
+  const raw = `${job.type}:${job.id}:${job.total_claims}`;
+  const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(raw));
+  const digest = Array.from(new Uint8Array(bytes))
+    .map((byte) => byte.toString(16).padStart(2, "0")).join("").slice(0, 20);
+  const prefix = job.type === "mcp_tool" ? `mcp-p${job.project_id}`
+    : ["preview", "preview_check"].includes(job.type) ? `preview-p${job.project_id}`
+    : job.type.slice(0, 18);
+  // Earlier preview calls did not include the project routing key. Their
+  // deterministic identity still proves the exact completed claim.
+  return callId === `cf-${prefix}-${digest}`
+    || callId === `cf-${job.type.slice(0, 18)}-${digest}`;
 }
 
 abstract class ValmeraContainer extends Container<Env> {
@@ -391,9 +407,50 @@ abstract class ValmeraContainer extends Container<Env> {
     state: CallState,
     at = Date.now(),
   ): Promise<void> {
-    await this.ctx.storage.put({
-      [this.stateKey(callId)]: state,
-      [this.terminalKey(callId, at)]: callId,
+    await this.ctx.storage.transaction(async (txn) => {
+      const current = await txn.get<CallState>(this.stateKey(callId));
+      // A late disconnected handler must not replace a durable success
+      // acknowledged by the dispatcher with a transport error.
+      if (current?.status !== "done") {
+        await txn.put({
+          [this.stateKey(callId)]: state,
+          [this.terminalKey(callId, at)]: callId,
+        });
+      }
+      const active = await txn.get<ActiveCall>("active");
+      if (active?.callId === callId) await txn.delete("active");
+    });
+  }
+
+  private async acknowledgeCompleted(
+    callId: string, job: ExecutorJob, envelope: JsonObject,
+  ): Promise<boolean> {
+    if (!await matchesCompletedJob(callId, job)
+        || envelope.job_completed !== true || envelope.error) return false;
+    const terminalAt = Date.now();
+    return this.ctx.storage.transaction(async (txn) => {
+      const key = this.stateKey(callId);
+      const current = await txn.get<CallState>(key);
+      if (!current || current.jobType !== job.type) return false;
+      const active = await txn.get<ActiveCall>("active");
+      if (current.status === "done") {
+        if (active?.callId === callId) await txn.delete("active");
+        return true;
+      }
+      if (!["running", "unknown"].includes(current.status)
+          || active?.callId !== callId) return false;
+      // The authenticated dispatcher checked PostgreSQL's completed queue
+      // and provider records for this exact claim. Work is already finished;
+      // retain the warm container and atomically close only its reservation.
+      await txn.put({
+        [key]: {
+          status: "done", jobType: job.type, envelope,
+          updatedAt: new Date(terminalAt).toISOString(), activeUntil: terminalAt,
+        } satisfies CallState,
+        [this.terminalKey(callId, terminalAt)]: callId,
+      });
+      await txn.delete("active");
+      return true;
     });
   }
 
@@ -434,7 +491,9 @@ abstract class ValmeraContainer extends Container<Env> {
       if (existing) return { kind: "existing", state: existing };
 
       const active = await txn.get<ActiveCall>("active");
-      if (active && active.expiresAt > now) return { kind: "busy" };
+      if (active && active.expiresAt > now) {
+        return { kind: "busy", activeCallId: active.callId };
+      }
       if (active) {
         // Serialize the destructive container reset too. Other new calls see
         // this short reset lease as busy and may safely stay on Modal.
@@ -482,6 +541,14 @@ abstract class ValmeraContainer extends Container<Env> {
         state = await this.expireExecutorLease(statusMatch[1]);
       }
       return state ? json(state) : json({ status: "missing" }, 404);
+    }
+    const completeMatch = url.pathname.match(/^\/complete\/([^/]+)$/);
+    if (request.method === "POST" && completeMatch && CALL_ID.test(completeMatch[1])) {
+      const body = await request.json() as { job?: ExecutorJob; envelope?: JsonObject };
+      const acknowledged = body.job && body.envelope && await this.acknowledgeCompleted(
+        completeMatch[1], body.job, body.envelope,
+      );
+      return json({ acknowledged: !!acknowledged }, acknowledged ? 200 : 409);
     }
     const executeMatch = url.pathname.match(/^\/execute\/([^/]+)$/);
     if (request.method !== "POST" || !executeMatch || !CALL_ID.test(executeMatch[1])) {
@@ -555,6 +622,7 @@ abstract class ValmeraContainer extends Container<Env> {
       // the user moving on Modal rather than queueing behind a busy shard.
       return json({
         error: "Cloudflare Container shard is busy",
+        active_call_id: reservation.kind === "busy" ? reservation.activeCallId : undefined,
         safe_to_fallback: true,
       }, 429);
     }
@@ -641,7 +709,6 @@ abstract class ValmeraContainer extends Container<Env> {
         status, jobType: job.type, envelope,
         updatedAt: new Date(terminalAt).toISOString(), activeUntil,
       }, terminalAt);
-      await this.release(callId);
       this.ctx.waitUntil(this.pruneTerminalCalls(terminalAt));
       return json(envelope);
     } catch (error) {
@@ -649,16 +716,21 @@ abstract class ValmeraContainer extends Container<Env> {
       // Python process may still be encoding and will commit through Postgres.
       // Keep the named call recoverable; never authorize a second provider.
       const failedAt = Date.now();
-      const active = await this.ctx.storage.get<ActiveCall>("active");
-      if (active?.callId === callId) {
-        await update({
+      const keptActive = await this.ctx.storage.transaction(async (txn) => {
+        const current = await txn.get<CallState>(stateKey);
+        if (current?.status === "done") return true;
+        const active = await txn.get<ActiveCall>("active");
+        if (active?.callId !== callId) return false;
+        await txn.put(stateKey, {
           status: "unknown",
           jobType: job.type,
           error: String(error),
           updatedAt: new Date(failedAt).toISOString(),
           activeUntil,
-        });
-      } else {
+        } satisfies CallState);
+        return true;
+      });
+      if (!keptActive) {
         await this.storeTerminal(callId, {
           status: "failed", jobType: job.type,
           error: `container reset after ambiguous call: ${String(error)}`,
@@ -733,7 +805,7 @@ export default {
         .fetch("https://container.internal/probe");
     }
     const match = url.pathname.match(
-      /^\/calls\/(interactive|batch|agent|mcp|shorts)\/([^/]+)$/,
+      /^\/calls\/(interactive|batch|agent|mcp|shorts)\/([^/]+)(\/complete)?$/,
     );
     if (!match || !CALL_ID.test(match[2])) {
       return json({ error: "not found", safe_to_fallback: true }, 404);
@@ -749,7 +821,8 @@ export default {
       shorts: env.SHORTS,
     };
     const stub = namespaces[lane].getByName(shard);
-    if (request.method === "GET") {
+    const completion = match[3] === "/complete";
+    if (request.method === "GET" && !completion) {
       return stub.fetch(`https://container.internal/status/${callId}`);
     }
     if (request.method !== "POST") return json({ error: "method not allowed" }, 405);
@@ -766,7 +839,7 @@ export default {
     if (!allowed.has(jobType)) {
       return json({ error: `job type ${jobType} is not allowed on ${lane}`, safe_to_fallback: true }, 400);
     }
-    return stub.fetch(`https://container.internal/execute/${callId}`, {
+    return stub.fetch(`https://container.internal/${completion ? "complete" : "execute"}/${callId}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
