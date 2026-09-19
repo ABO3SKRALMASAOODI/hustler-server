@@ -278,6 +278,23 @@ def test_mcp_call_identity_keeps_project_session_on_one_shard():
     assert 'project:${mcpProject[1]}' in adapter
 
 
+@pytest.mark.parametrize("job_type", ["preview", "preview_check"])
+def test_preview_call_identity_routes_revisions_to_the_project_shard(job_type):
+    jobs = [
+        dict(JOB, id=91, type=job_type, project_id=1970, total_claims=1),
+        dict(JOB, id=92, type=job_type, project_id=1970, total_claims=1),
+        dict(JOB, id=93, type=job_type, project_id=1987, total_claims=1),
+    ]
+    first, second, other = map(remote._cloudflare_call_id, jobs)
+
+    assert first.startswith("cf-preview-p1970-")
+    assert second.startswith("cf-preview-p1970-")
+    assert other.startswith("cf-preview-p1987-")
+    assert len({first, second, other}) == 3
+    assert remote._cloudflare_call_id(jobs[0]) == first
+    assert remote._cloudflare_call_id(dict(jobs[0], total_claims=2)) != first
+
+
 def test_busy_response_is_distinct_proven_unlaunched_capacity(monkeypatch):
     _enable(monkeypatch)
     job = dict(JOB, payload={**JOB["payload"],
