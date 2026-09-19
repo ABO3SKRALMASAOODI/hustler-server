@@ -1044,6 +1044,28 @@ def get_remote_execution(conn, job_id):
         return cur.fetchone()
 
 
+def completed_remote_call(conn, provider, call_id, lane):
+    """Proof for releasing one provider reservation after durable success.
+
+    A terminal queue row alone is insufficient: a newer claim/provider may
+    have finished after an old executor lost its lease. Match both records'
+    immutable identity, and never acknowledge failures or live work.
+    """
+    if not remote_executions_table_ready(conn):
+        return None
+    with conn.cursor() as cur:
+        cur.execute("""SELECT j.id, j.type, j.project_id, j.total_claims,
+                              j.result
+                         FROM remote_executions r
+                         JOIN video_jobs j ON j.id = r.job_id
+                          AND j.total_claims = r.total_claims
+                        WHERE r.provider = %s AND r.call_id = %s
+                          AND r.function_name = %s
+                          AND r.state = 'done' AND j.state = 'done'""",
+                    (provider, call_id, lane))
+        return cur.fetchone()
+
+
 def mark_remote_execution_running(conn, job_id, total_claims,
                                   provider=None, call_id=None):
     if job_id is None or total_claims is None \

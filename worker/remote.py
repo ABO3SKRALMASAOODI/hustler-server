@@ -15,6 +15,7 @@ we POST is only what the runner needs to identify the work — never asset bytes
 
 import hashlib
 import json
+import re
 import threading
 import time
 import uuid
@@ -1164,6 +1165,39 @@ def _cloudflare_status(call_id, lane, timeout=10):
     return response.json()
 
 
+def _reconcile_completed_cloudflare_call(call_id, lane):
+    """Release only a named call whose exact execution durably succeeded.
+
+    The provider's HTTP handler can disappear after Python commits success.
+    That must not occupy a warm shard for the remainder of its six-hour
+    lease. This acknowledgement neither reruns work nor stops a container.
+    A missing proof, database outage or provider refusal leaves it reserved.
+    """
+    if not isinstance(call_id, str) or not re.fullmatch(
+            r"[a-zA-Z0-9_-]{8,96}", call_id):
+        return False
+    probe = dbx.Db()
+    try:
+        completed = probe.run(dbx.completed_remote_call,
+                              "cloudflare", call_id, lane)
+        if not isinstance(completed, dict):
+            return False
+        response = requests.post(
+            f"{config.CLOUDFLARE_EXECUTOR_URL}/calls/{lane}/{call_id}/complete",
+            json={"job": {key: completed[key] for key in
+                          ("id", "type", "project_id", "total_claims")},
+                  "envelope": {"result": dbx._json_safe(completed["result"]),
+                               "job_completed": True}},
+            headers=_cloudflare_headers(), timeout=10)
+        return response.status_code == 200
+    except Exception as exc:
+        print(f"[dispatcher] Cloudflare completion acknowledgement for "
+              f"{call_id} deferred ({type(exc).__name__})", flush=True)
+        return False
+    finally:
+        probe.reset()
+
+
 def _recover_cloudflare_result(call_id, lane, job, deadline):
     """Reconnect a named Container call without launching another instance."""
     last = None
@@ -1200,6 +1234,7 @@ def _recover_cloudflare_result(call_id, lane, job, deadline):
                 try:
                     current = probe.run(dbx.get_job, job["id"])
                     if current and current.get("state") == "done":
+                        _reconcile_completed_cloudflare_call(call_id, lane)
                         return {"result": current.get("result"),
                                 "job_completed": True}
                     if current and current.get("state") == "failed":
@@ -1330,6 +1365,8 @@ def _run_cloudflare(job):
                                    "Cloudflare launch refused before /run")
                 if response.status_code == 429 and \
                         "shard is busy" in launch_error.lower():
+                    _reconcile_completed_cloudflare_call(
+                        response_body.get("active_call_id"), lane)
                     raise CloudflareCapacityBusy(launch_error)
                 raise CloudflareLaunchUnavailable(launch_error)
             # The Worker may have lost its side of an already-running
