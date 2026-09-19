@@ -3863,8 +3863,10 @@ def _split_insert(edl, tl, at):
                          "to change how long it shows instead.")
     # Same guard the footage branch uses: a cut 0.05s from an edge is not a
     # cut, it is a second block nobody can see or grab.
-    head = round(at - start, 3)
-    tail = round(end - at, 3)
+    # Persisted durations use centiseconds. Derive the tail's source clock
+    # from that same head length, especially at non-integer playback rates.
+    head = round(at - start, 2)
+    tail = round(float(hit["duration_s"]) - head, 2)
     if head < 0.05 or tail < 0.05:
         raise ValueError("That point is already a clip edge — nothing to "
                          "split.")
@@ -3880,7 +3882,7 @@ def _split_insert(edl, tl, at):
     # Where the tail starts IN THE CLIP — the head's own offset plus the head's
     # length. Without this the second half replays the beginning of the clip,
     # which is the bug that makes "split" look like "duplicate".
-    second["source_start_s"] = round(src0 + head * (hit.get("rate") or 1), 3)
+    second["source_start_s"] = round(src0 + head * (hit.get("rate") or 1), 2)
     hit["duration_s"] = head
     # Directly AFTER its own head in the list: list order is what decides
     # program order at a shared boundary, so appending it would play the tail

@@ -15,7 +15,11 @@ def canonical_program(edl):
     an intervening insert or a changed clip property prevents joining.
     """
     result = copy.deepcopy(edl)
-    boundaries = set(result.pop("split_keep_boundaries", None) or [])
+    # Schema validation rounds source spans to centiseconds. Receipts may
+    # retain the millisecond playhead (e.g. 8.318 -> 8.32); compare on the
+    # same clock so that persistence cannot turn a split into a real cut.
+    boundaries = {round(float(t), 2) for t in
+                  (result.pop("split_keep_boundaries", None) or [])}
     keep, pre = [], 0.0
     # Imported here to keep source-window planning independent of schemas.
     try:
@@ -25,7 +29,7 @@ def canonical_program(edl):
     insert_at = [float(i["at_output_s"]) for i in result.get("inserts") or []]
     for start, end in result.get("keep") or []:
         occupied = any(abs(at - pre) < 1e-6 for at in insert_at)
-        if (keep and start in boundaries and not occupied
+        if (keep and round(float(start), 2) in boundaries and not occupied
                 and abs(keep[-1][1] - start) < 1e-6):
             keep[-1][1] = end
         else:
@@ -35,6 +39,7 @@ def canonical_program(edl):
     result["keep"] = keep
     inserts = []
     canvas = not keep and bool(result.get("canvas"))
+    previous_piece_end = None
     for item in result.get("inserts") or []:
         previous = inserts[-1] if inserts else None
         ignore = {"id", "duration_s", "source_start_s"}
@@ -44,13 +49,18 @@ def canonical_program(edl):
                 and previous.get("split_parent") == item["split_parent"]
                 and all(previous.get(k) == item.get(k)
                         for k in (set(previous) | set(item)) - ignore)
-                and abs(float(item.get("source_start_s") or 0)
-                        - float(previous.get("source_start_s") or 0)
-                        - previous["duration_s"] * (previous.get("rate") or 1)) < 1e-3):
+                and round(float(item.get("source_start_s") or 0), 2)
+                    == previous_piece_end):
             previous["duration_s"] = round(previous["duration_s"]
                                            + item["duration_s"], 3)
         else:
             inserts.append(item)
+        # Compare each persisted adjacent piece, not a growing merged span:
+        # repeated fractional-rate splits can round their source edges by a
+        # centisecond without creating a real authored gap.
+        previous_piece_end = round(float(item.get("source_start_s") or 0)
+                                   + item["duration_s"]
+                                   * (item.get("rate") or 1), 2)
     cursor = 0.0
     for item in inserts:
         item.pop("split_parent", None)

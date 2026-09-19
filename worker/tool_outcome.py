@@ -84,6 +84,13 @@ def from_legacy(result, *, state_changed=False, idempotent=False,
         fallback = "load_tools/list the current capability directory"
     elif upper.startswith("UNSAFE"):
         status = "unsafe"
+    elif re.match(r"^PREVIEW V\d+ (?:RENDERED:|(?:WAS |IS )?ALREADY RENDERED\b)", upper):
+        # This receipt means the media operation succeeded. Its review prose
+        # can say "never repeat the exact call that just failed", or report
+        # editorial findings. Neither makes the completed render a transient
+        # executor failure. Findings remain in the verification record and
+        # message; they still prevent falsely declaring the edit finished.
+        pass
     elif upper.startswith(("TRANSIENT_FAILURE", "TRANSIENT FAILURE",
                            "TOOL ", "FAILED", "COULD NOT")) or re.search(
             r"\b(?:FAILED|COULD NOT|UNAVAILABLE|ERRORED)\b", first):

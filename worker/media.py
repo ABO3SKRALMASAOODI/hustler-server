@@ -76,10 +76,11 @@ def run(cmd, timeout=None, progress_cb=None, expected_out_s=None,
         # will wait (the wall-clock cap is an hour out).
         overrun_at = (expected_out_s * config.FFMPEG_OVERRUN_FACTOR
                       + config.FFMPEG_OVERRUN_FLOOR_S)
+        finished = threading.Event()
 
         def _watchdog():
             start = time.monotonic()
-            while proc.poll() is None:
+            while not finished.is_set() and proc.poll() is None:
                 now = time.monotonic()
                 if now - start > timeout:
                     kill_reason.append(f"wall-clock {timeout}s exceeded")
@@ -101,7 +102,10 @@ def run(cmd, timeout=None, progress_cb=None, expected_out_s=None,
                         return
                 except Exception:
                     pass
-                time.sleep(2)
+                # Preserve the watchdog cadence, but wake immediately when
+                # the media process finishes. Sleeping unconditionally made
+                # every short render wait for the next two-second tick.
+                finished.wait(2)
 
         wd = threading.Thread(target=_watchdog, daemon=True)
         wd.start()
@@ -148,6 +152,12 @@ def run(cmd, timeout=None, progress_cb=None, expected_out_s=None,
                     tail.append(line)
             proc.wait()
         finally:
+            # A failing progress callback must not leave an encoder running
+            # after its owner has unwound or stop its watchdog prematurely.
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+            finished.set()
             wd.join(timeout=3)
         if kill_reason:
             out_s = float(progress_state["out_s"] or 0.0)
