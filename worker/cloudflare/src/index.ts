@@ -103,7 +103,9 @@ function shardName(lane: Lane, callId: string): string {
   const previewProject = lane === "interactive"
     ? callId.match(/^cf-preview-p([0-9]+)-/)
     : null;
-  const routingKey = mcpProject ? `project:${mcpProject[1]}`
+  const renderGroup = (lane === "batch" || lane === "interactive")
+    ? callId.match(/^cf-render-g([0-9]+-[01])-/) : null;
+  const routingKey = renderGroup ? `render-group:${renderGroup[1]}` : mcpProject ? `project:${mcpProject[1]}`
     : previewProject ? `project:${previewProject[1]}` : callId;
   let hash = 2166136261;
   for (let i = 0; i < routingKey.length; i += 1) {

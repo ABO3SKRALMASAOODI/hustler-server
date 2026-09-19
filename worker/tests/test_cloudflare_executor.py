@@ -974,3 +974,10 @@ def test_cloudflare_config_is_provider_complete_without_modal():
     assert "pip install --no-cache-dir demucs" in dockerfile.lower()
     assert "bgutil-ytdlp-pot-provider" in dockerfile
     assert "deno install --allow-scripts=npm:canvas" in dockerfile
+
+
+def test_short_batch_render_identity_shares_only_two_stable_source_pools():
+    ids=[remote._cloudflare_call_id({'type':'final','id':i,'total_claims':1,'project_id':i,'payload':{'render_group':f'7-{i % 2}'}}) for i in range(10,40)]
+    assert len(set(ids))==30
+    assert {name.rsplit('-',1)[0] for name in ids}=={'cf-render-g7-0','cf-render-g7-1'}
+    assert 'render-g' not in remote._cloudflare_call_id({'type':'mcp_tool','id':99,'project_id':22,'total_claims':1,'payload':{'render_group':'7-0'}})

@@ -277,7 +277,8 @@ def test_non_index_lanes_do_not_receive_index_fair_share_clause():
     c = _Conn(fetchone={"id": 8})
     wdb.claim_job(c, ["preview", "final"], config.MAX_ATTEMPTS_MEDIA)
     sql, params = c.sql[0]
-    assert "video_jobs ahead" not in sql
+    assert "SELECT COUNT(*) FROM video_jobs ahead" not in sql
+    assert "render_group" in sql
     assert config.INDEX_FAIR_SHARE_PER_PROJECT not in params
 
 
