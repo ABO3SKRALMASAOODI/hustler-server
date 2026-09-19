@@ -1151,7 +1151,9 @@ def active_remote_executions(conn):
     executor owns its terminal database write. Polling the same call from the
     guardian during Modal's visibility window can turn an ambiguous lookup
     into a false terminal state. Only take over after a bounded attachment
-    grace; real provider work continues throughout it.
+    grace; real provider work continues throughout it. Include queued leases
+    left behind by a failed terminal-ledger write: observe the provider before
+    releasing their reservation, never assume that queued means unlaunched.
     """
     if not remote_executions_table_ready(conn):
         return []
@@ -1166,7 +1168,7 @@ def active_remote_executions(conn):
                          AND r.deadline_at > NOW()
                          AND r.submitted_at < NOW()
                              - make_interval(secs => %s)
-                         AND j.state = 'running'
+                         AND j.state IN ('running', 'queued')
                        ORDER BY r.last_observed_at ASC""",
                     (config.REMOTE_GUARDIAN_ATTACH_GRACE_S,))
         return cur.fetchall()

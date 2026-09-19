@@ -568,6 +568,48 @@ def test_guardian_queues_modal_when_rollout_abandoned_before_run(monkeypatch):
     ]
 
 
+def test_terminal_startup_failure_releases_its_lease_without_modal(monkeypatch):
+    monkeypatch.setattr(config, "CLOUDFLARE_MODAL_FALLBACK", False)
+    monkeypatch.setattr(remote, "check_executor_version", lambda quiet=True: "")
+    calls = []
+
+    class Ledger:
+        def run(self, fn, *args):
+            calls.append((fn, args))
+            return True
+
+        def reset(self):
+            pass
+
+    monkeypatch.setattr(dbx, "Db", Ledger)
+    envelope = {
+        "error": "Cloudflare container startup was abandoned before /run",
+        "retryable": True,
+        "failure": {"kind": "provider_start_abandoned", "retryable": True},
+    }
+    with pytest.raises(remote.CloudflareTerminalFailure) as caught:
+        remote._interpret_cloudflare_terminal(envelope, dict(JOB))
+    assert caught.value.failure_kind == "provider_start_abandoned"
+    assert caught.value.retryable is True
+    assert len(calls) == 1
+    fn, args = calls[0]
+    assert fn is dbx.finish_remote_execution
+    assert args[:3] == (42, 4, "failed")
+    assert args[4:] == ("cloudflare", remote._cloudflare_call_id(JOB))
+
+
+@pytest.mark.parametrize("envelope,job", [
+    (None, dict(JOB)),
+    ({"error": "failed before launch"}, dict(JOB, id=None, total_claims=None)),
+])
+def test_unproven_or_unqueued_envelopes_never_release_a_queue_lease(
+        monkeypatch, envelope, job):
+    monkeypatch.setattr(remote, "check_executor_version", lambda quiet=True: "")
+    monkeypatch.setattr(dbx, "Db", lambda: pytest.fail("no proven queue lease"))
+    with pytest.raises(remote.CloudflareTerminalFailure):
+        remote._interpret_cloudflare_terminal(envelope, job)
+
+
 def test_only_proven_prelaunch_failure_falls_back_to_modal(monkeypatch):
     _enable(monkeypatch)
     monkeypatch.setattr(config, "CLOUDFLARE_MODAL_FALLBACK", True)

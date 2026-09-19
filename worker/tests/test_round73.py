@@ -238,6 +238,8 @@ def test_guardian_never_competes_with_a_fresh_attached_dispatcher():
     sql, params = c.sql[0]
     assert "r.submitted_at < NOW()" in sql
     assert "make_interval(secs => %s)" in sql
+    assert "j.state IN ('running', 'queued')" in sql
+    assert "j.total_claims = r.total_claims" in sql
     assert params == (config.REMOTE_GUARDIAN_ATTACH_GRACE_S,)
     assert config.REMOTE_GUARDIAN_ATTACH_GRACE_S >= 30
 
