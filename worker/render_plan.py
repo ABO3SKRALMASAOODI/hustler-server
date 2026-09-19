@@ -15,7 +15,11 @@ def canonical_program(edl):
     an intervening insert or a changed clip property prevents joining.
     """
     result = copy.deepcopy(edl)
-    boundaries = set(result.pop("split_keep_boundaries", None) or [])
+    # Schema validation rounds source spans to centiseconds. Receipts may
+    # retain the millisecond playhead (e.g. 8.318 -> 8.32); compare on the
+    # same clock so that persistence cannot turn a split into a real cut.
+    boundaries = {round(float(t), 2) for t in
+                  (result.pop("split_keep_boundaries", None) or [])}
     keep, pre = [], 0.0
     # Imported here to keep source-window planning independent of schemas.
     try:
@@ -25,7 +29,7 @@ def canonical_program(edl):
     insert_at = [float(i["at_output_s"]) for i in result.get("inserts") or []]
     for start, end in result.get("keep") or []:
         occupied = any(abs(at - pre) < 1e-6 for at in insert_at)
-        if (keep and start in boundaries and not occupied
+        if (keep and round(float(start), 2) in boundaries and not occupied
                 and abs(keep[-1][1] - start) < 1e-6):
             keep[-1][1] = end
         else:

@@ -36,6 +36,17 @@ def test_a_real_gap_or_intervening_insert_keeps_the_cut():
     assert len(render_plan.canonical_program(edl)["keep"]) == 2
 
 
+def test_saved_fractional_split_keeps_the_original_picture_dependencies():
+    from schemas import validate_edl
+    original = default_edl(30)
+    split = copy.deepcopy(original)
+    split['keep'] = [[0, 8.318], [8.318, 30]]
+    split['split_keep_boundaries'] = [8.318]
+    saved = validate_edl(split, 30).model_dump()
+    assert saved['keep'][1][0] == 8.32
+    assert render_plan.can_reuse_picture(original, saved)
+
+
 def test_picture_dependencies_preserve_every_visual_change():
     old = default_edl(30)
     changed = copy.deepcopy(old)
