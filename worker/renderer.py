@@ -3022,7 +3022,8 @@ IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp")
 
 def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
                        want_wm=False, wm_settings=None, cancelled_cb=None,
-                       audio_only=False, asset_locals=None, suppress_outro=False):
+                       audio_only=False, asset_locals=None, suppress_outro=False,
+                       cap_ass_override=None, cap_burn_offset=None):
     """Render a canvas program (round 34): a timeline with NO main video, where
     the ordered inserts (clips/images) are concatenated on the canvas, plus
     music / sfx / voiceover / manual captions / effects. Mirrors render_edl but
@@ -3045,7 +3046,7 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
     # more seconds of source to stay phase-continuous across the real card.
     outro_s = 0.0 if suppress_outro else outro_seconds(preview)
     music_outro_s = _music_carry_outro_s(edl, outro_s)
-    ass_path = caplib.build_ass(edl, {}, tl,
+    ass_path = cap_ass_override if cap_ass_override is not None else caplib.build_ass(edl, {}, tl,
                                 os.path.join(workdir, "captions.ass"),
                                 play_res=(W, H))
     gfx_path = graphics.build_gfx_ass(edl, tl.out_duration,
@@ -3171,7 +3172,8 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
                               gfx_ass_path=gfx_path, robot_idx=robot_idx,
                               wm_ass_path=wm_ass_path,
                               wm_anchor_y=wm_anchor_y,
-                              plate_idx=plate_idx, plate_box=plate_box)
+                              plate_idx=plate_idx, plate_box=plate_box,
+                              cap_burn_offset=cap_burn_offset)
 
     if audio_only:
         graph = _prune_graph_to_audio(graph)
@@ -3269,33 +3271,38 @@ def _prune_graph_to_audio(graph, target="aout"):
         return keep, need
 
     parsed = _parse(graph)
-    keep, need = _reach(parsed)
-
-    rewritten = []
-    for i, (chain, ins, outs, body) in enumerate(parsed):
-        if not keep[i]:
-            rewritten.append(chain)                 # dropped on second pass
-            continue
-        m = re.match(r"^concat(?:=(\S*))?$", body)
-        if m:
-            args = dict(kv.split("=", 1) for kv in (m.group(1) or "").split(
-                ":") if "=" in kv)
-            n = int(args.get("n", 2))
-            nv = int(args.get("v", 1))
-            na = int(args.get("a", 0))
-            v_outs, a_outs = outs[:nv], outs[nv:nv + na]
-            if na > 0 and nv > 0 and not any(o in need for o in v_outs):
-                a_ins = []
-                for seg in range(n):
-                    base = seg * (nv + na)
-                    a_ins += ins[base + nv:base + nv + na]
-                rewritten.append(
-                    "".join(f"[{x}]" for x in a_ins)
-                    + f"concat=n={n}:v=0:a={na}"
-                    + "".join(f"[{x}]" for x in a_outs))
+    # A card concat can retain a program concat's video on the first reach
+    # pass. Remove coupled outputs to a fixed point before checking sinks.
+    for _ in range(len(parsed) + 1):
+        keep, need = _reach(parsed)
+        rewritten = []
+        for i, (chain, ins, outs, body) in enumerate(parsed):
+            if not keep[i]:
+                rewritten.append(chain)                 # dropped on second pass
                 continue
-        rewritten.append(chain)
-    parsed = _parse(";".join(rewritten))
+            m = re.match(r"^concat(?:=(\S*))?$", body)
+            if m:
+                args = dict(kv.split("=", 1) for kv in (m.group(1) or "").split(
+                    ":") if "=" in kv)
+                n = int(args.get("n", 2))
+                nv = int(args.get("v", 1))
+                na = int(args.get("a", 0))
+                v_outs, a_outs = outs[:nv], outs[nv:nv + na]
+                if na > 0 and nv > 0 and not any(o in need for o in v_outs):
+                    a_ins = []
+                    for seg in range(n):
+                        base = seg * (nv + na)
+                        a_ins += ins[base + nv:base + nv + na]
+                    rewritten.append(
+                        "".join(f"[{x}]" for x in a_ins)
+                        + f"concat=n={n}:v=0:a={na}"
+                        + "".join(f"[{x}]" for x in a_outs))
+                    continue
+            rewritten.append(chain)
+        revised = _parse(";".join(rewritten))
+        if revised == parsed:
+            break
+        parsed = revised
     keep, need = _reach(parsed)
     kept = [p for i, p in enumerate(parsed) if keep[i]]
     if not kept:
@@ -3426,7 +3433,9 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                                   wm_settings=wm_settings,
                                   cancelled_cb=cancelled_cb,
                                   audio_only=audio_only, asset_locals=asset_locals,
-                                  suppress_outro=suppress_outro)
+                                  suppress_outro=suppress_outro,
+                                  cap_ass_override=cap_ass_override,
+                                  cap_burn_offset=cap_burn_offset)
     info = media.probe(src_path)
     src_dur = info["duration"]
     render_dict = _repair_legacy_insert_boundaries(edl_dict)
@@ -4172,9 +4181,28 @@ def _reuse_picture_with_new_audio(previous, current, prev_asset, index,
     return media.duration_of(out_local)
 
 
+def _composition_geometry(edl, src_local, preview):
+    if is_canvas_program(edl):
+        info = edl["canvas"]
+        W, H = info["width"], info["height"]
+    else:
+        info = media.probe(src_local)
+        W, H = frame_dims(info["width"], info["height"], (edl.get("frame") or {}).get("ratio"))
+    fps = max(1., min(float(info.get("fps") or 30.), 60.))
+    return preview_geometry(W, H, fps) if preview else (W, H, fps)
+
+
+def _stitch_window(edl, tl, a, b, geometry):
+    window = stitch.window_edl(edl, tl, a, b)
+    if not window.get("keep") and window.get("inserts") and not window.get("canvas"):
+        W, H, fps = geometry
+        window["canvas"] = dict(width=int(W), height=int(H), fps=float(fps), bg_color="#000000")
+    return window
+
+
 def _timeline_stitch(job_id, prev_edl, new_edl, tl_prev, tl_new, index,
                      src_local, workdir, patch_locals, out_path, prev_asset,
-                     duration):
+                     duration, preview=True):
     """Timeline-mode stitch (round 97): the edit users make MOST — a trim, a
     cut, a splice, a music change — used to force the full re-render every
     time (round 96c: 134-206s per preview, 13 times in one real session).
@@ -4185,16 +4213,15 @@ def _timeline_stitch(job_id, prev_edl, new_edl, tl_prev, tl_new, index,
     spliced; rebuilding it costs seconds). Returns the output duration or
     None — the caller then runs the full render, which is always correct."""
     dur_out = tl_new.out_duration
-    if outro_seconds(True) > 0:
+    if preview and outro_seconds(True) > 0:
         return None                    # previews with an end card: rare, out
-    if is_canvas_program(new_edl) or is_canvas_program(prev_edl):
+    if is_canvas_program(new_edl) != is_canvas_program(prev_edl):
         return None
-
-    info = media.probe(src_local)
-    W, H = frame_dims(info["width"], info["height"],
-                      (new_edl.get("frame") or {}).get("ratio"))
-    fps = max(1.0, min(float(info["fps"]) or 30.0, 60.0))
-    W, H, fps = preview_geometry(W, H, fps)
+    if music_tail_ext(new_edl, dur_out) or music_tail_ext(prev_edl, tl_prev.out_duration):
+        return None
+    if not preview and outro_seconds(False) and abs(tl_prev.out_duration-dur_out) > .001:
+        return None
+    W, H, fps = _composition_geometry(new_edl, src_local, preview)
 
     # Both programs' burned captions, with payloads: plan_timeline PAIRS the
     # events modulo each run's shift and re-encodes any span where the two
@@ -4258,16 +4285,26 @@ def _timeline_stitch(job_id, prev_edl, new_edl, tl_prev, tl_new, index,
               "up)", flush=True)
         return None
 
+    # A final's last unchanged run includes the already verified brand card.
+    # Never cut/copy the card at an arbitrary non-keyframe boundary, or omit
+    # it when the changed window reaches the programme's end.
+    if not preview and outro_seconds(False):
+        if not parts or parts[-1][0] != "copy" or abs(parts[-1][3]) > .001:
+            return None
+        k, a, b, offset = parts[-1]
+        parts[-1] = (k, a, b + outro_seconds(False), offset)
+        dur_out += outro_seconds(False)
+
     pinfo = media.probe(prev_local)
     pieces = []
     for i, part in enumerate(parts):
         if part[0] != "win":
             continue
         _k, a, b = part
-        wedl = stitch.window_edl(new_edl, tl_new, a, b)
+        wedl = _stitch_window(new_edl, tl_new, a, b, (W, H, fps))
         piece = os.path.join(workdir, f"stitch_tp_{i}.mp4")
         pdur = render_edl(wedl, index, src_local, piece, workdir,
-                          preview=True, want_wm=False,
+                          preview=preview, want_wm=False,
                           patch_locals=patch_locals,
                           cap_ass_override=(cap_new or ""),
                           cap_burn_offset=(a if cap_new else None),
@@ -4287,8 +4324,8 @@ def _timeline_stitch(job_id, prev_edl, new_edl, tl_prev, tl_new, index,
 
     audio_path = os.path.join(workdir, "stitch_audio.m4a")
     render_edl(new_edl, index, src_local, audio_path, workdir,
-               preview=True, want_wm=False, patch_locals=patch_locals,
-               cap_ass_override="", suppress_outro=True, audio_only=True)
+               preview=preview, want_wm=False, patch_locals=patch_locals,
+               cap_ass_override="", suppress_outro=preview, audio_only=True)
 
     out_dur = stitch.assemble_offset(prev_local, parts, pieces, audio_path,
                                      dur_out, workdir, out_path)
@@ -4303,7 +4340,7 @@ def _timeline_stitch(job_id, prev_edl, new_edl, tl_prev, tl_new, index,
 
 
 def _stitched_preview(job_id, new_row, prev_row, prev_asset, index,
-                      src_local, workdir, patch_locals, out_path):
+                      src_local, workdir, patch_locals, out_path, preview=True):
     """Try to build this preview by re-encoding only the changed windows and
     stream-copying the rest from the previous preview (round 93 — see
     worker/stitch.py). Returns the output duration, or None for ANY reason
@@ -4344,17 +4381,13 @@ def _stitched_preview(job_id, new_row, prev_row, prev_asset, index,
             out2 = _timeline_stitch(job_id, prev_edl, new_edl, tl_prev,
                                     tl_new, index, src_local, workdir,
                                     patch_locals, out_path, prev_asset,
-                                    duration)
+                                    duration, preview=preview)
             if out2 is None:
                 print(f"[render {job_id}] stitch: full render ({why})",
                       flush=True)
             return out2
 
-        info = media.probe(src_local)
-        W, H = frame_dims(info["width"], info["height"],
-                          (new_edl.get("frame") or {}).get("ratio"))
-        fps = max(1.0, min(float(info["fps"]) or 30.0, 60.0))
-        W, H, fps = preview_geometry(W, H, fps)
+        W, H, fps = _composition_geometry(new_edl, src_local, preview)
 
         # Zones a window boundary must never land in: every item span (old
         # and new), every caption event, every junction's transition zone,
@@ -4422,12 +4455,16 @@ def _stitched_preview(job_id, new_row, prev_row, prev_asset, index,
                   "gave up)", flush=True)
             return None
 
+        # A window suppresses the card; never copy a final with its ending
+        # missing when a keyframe snap extends a patch into that card.
+        if any(b > tl_new.out_duration + .001 for a, b in snapped):
+            return None
         pieces = []
         for i, (a, b) in enumerate(snapped):
-            wedl = stitch.window_edl(new_edl, tl_new, a, b)
+            wedl = _stitch_window(new_edl, tl_new, a, b, (W, H, fps))
             piece = os.path.join(workdir, f"stitch_piece_{i}.mp4")
             pdur = render_edl(wedl, index, src_local, piece, workdir,
-                              preview=True, want_wm=False,
+                              preview=preview, want_wm=False,
                               patch_locals=patch_locals,
                               cap_ass_override=(full_cap or ""),
                               cap_burn_offset=(a if full_cap else None),
@@ -4436,6 +4473,10 @@ def _stitched_preview(job_id, new_row, prev_row, prev_asset, index,
                 print(f"[render {job_id}] stitch: full render (piece {i} "
                       f"came out {pdur:.3f}s for a {b - a:.3f}s window)",
                       flush=True)
+                return None
+            pi, old = media.probe(piece), media.probe(prev_local)
+            if (pi["width"], pi["height"], round(float(pi["fps"]), 3)) != (
+                    old["width"], old["height"], round(float(old["fps"]), 3)):
                 return None
             pieces.append(piece)
 
@@ -4629,14 +4670,16 @@ def _budget_contained_check_ranges(requested, contained, duration,
             for a, b in merged]
 
 
-def _concat_check_pieces(pieces, out_path, workdir):
+def _concat_check_pieces(pieces, out_path, workdir, durations=None):
     if len(pieces) == 1:
         shutil.copy2(pieces[0], out_path)
         return
     listing = os.path.join(workdir, "check_concat.txt")
     with open(listing, "w", encoding="utf-8") as handle:
-        for piece in pieces:
+        for i, piece in enumerate(pieces):
             handle.write(f"file '{piece}'\n")
+            if durations is not None:
+                handle.write(f"duration {durations[i]:.6f}\n")
     media.run(["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe",
                "0", "-i", listing, "-c", "copy", "-movflags",
                "+faststart", out_path], timeout=180)
@@ -4644,7 +4687,7 @@ def _concat_check_pieces(pieces, out_path, workdir):
 
 def _render_changed_sections(job_id, edl_row, index, src_local, workdir,
                              patch_locals, out_path, raw_ranges,
-                             verify_times, progress_cb=None, raw_pages=None):
+                             verify_times, progress_cb=None, raw_pages=None, proof_segments=None):
     """Render only affected output windows into one short proof reel."""
     duration0 = float((index.get("video") or {}).get("duration") or 0.0)
     keep_end = max((float(e) for _s, e in
@@ -4722,9 +4765,13 @@ def _render_changed_sections(job_id, edl_row, index, src_local, workdir,
                 f"changed-section piece {i} rendered {pdur:.2f}s, expected "
                 f"{expected:.2f}s")
         offsets.append((a, b, elapsed))
-        elapsed += pdur
+        elapsed += expected
         pieces.append(piece)
-    _concat_check_pieces(pieces, out_path, workdir)
+    _concat_check_pieces(pieces, out_path, workdir,
+                         [b-a for a,b,_offset in offsets])
+    if proof_segments is not None:
+        proof_segments.extend(dict(start=a, end=b, reel_start=offset)
+                              for a,b,offset in offsets)
     out_dur = media.duration_of(out_path)
     if abs(out_dur - elapsed) > max(0.25, elapsed * 0.03):
         raise RenderVerificationError(
@@ -5126,18 +5173,20 @@ def _run_render_job(worker_db, job):
             print(f"[render {job_id}] BRAND CARD MISSING at {ENDCARD_PATH} — "
                   "exporting WITHOUT the Valmera end card", flush=True)
 
-        # STITCHED PREVIEW (round 93): when only video-local layers changed
+        # INCREMENTAL RENDER: when only video-local layers changed
         # since the last rendered preview, re-encode those windows and
-        # stream-copy the rest. Gated hard: never for finals (they render
-        # from the original at full fidelity), never on force (that path
+        # stream-copy the rest. Gated hard: never on force (that path
         # exists to produce genuinely fresh bytes), never for the
         # watermarked free tier (pieces would need the mark reproduced
         # seam-exactly), and only from a previous render that every cache
-        # guard agrees is still a true render of its EDL.
+        # guard agrees is still a true render of its EDL. Approval and final
+        # reuse stays within the SAME quality/variant and source identity;
+        # every assembled output still passes the full verification below.
         out_dur = None
         stitched_from = None
         reused_visual_meta = {}
         requested_ranges = None
+        proof_segments = []
         changed_ranges = None
         mapped_verify_times = None
         # A tray upload can appear twice in assets under different storage
@@ -5160,7 +5209,8 @@ def _run_render_job(worker_db, job):
                     job["payload"].get("check_ranges") or [],
                     job["payload"].get("verify_times") or [],
                     progress_cb=_prog,
-                    raw_pages=job["payload"].get("check_pages") or [])
+                    raw_pages=job["payload"].get("check_pages") or [],
+                    proof_segments=proof_segments)
         if not proof_only and not force:
             try:
                 prev_asset = worker_db.run(dbx.latest_render_asset,
@@ -5200,12 +5250,11 @@ def _run_render_job(worker_db, job):
                             asset_locals=asset_locals)
                         if out_dur is not None:
                             reused_visual_meta = pm
-                        if (out_dur is None and variant == "preview"
-                                and _PREVIEW_QUALITY.get() != "approval"
-                                and not want_wm and not is_canvas):
+                        if out_dur is None and not want_wm:
                             out_dur = _stitched_preview(
                                 job_id, edl_row, prev_row, prev_asset, index,
-                                src_local, workdir, patch_locals, out_local)
+                                src_local, workdir, patch_locals, out_local,
+                                preview=(variant == "preview"))
                         if out_dur is not None:
                             stitched_from = int(prev_v)
             except Exception as se:
@@ -5515,7 +5564,7 @@ def _run_render_job(worker_db, job):
                   **({"stitched_from": stitched_from}
                      if stitched_from is not None else {}),
                   "caption_fp": _caption_index_fp(edl_row["json"], index),
-                  **({"changed_ranges": changed_ranges}
+                  **({"changed_ranges": changed_ranges, "proof_segments": proof_segments}
                      if proof_only else {}),
                   **({"requested_ranges": requested_ranges,
                       "proof_set_id": proof_set_id}
@@ -5553,7 +5602,7 @@ def _run_render_job(worker_db, job):
                 "screening_frame_count": len(screening_frames),
                 "duration_s": out_dur, "edl_version": version,
                 "variant": asset_variant, "timings": timings,
-                **({"changed_ranges": changed_ranges,
+                **({"changed_ranges": changed_ranges, "proof_segments": proof_segments,
                     "requested_ranges": requested_ranges,
                     "effective_ranges": changed_ranges,
                     "proof_set_id": proof_set_id,

@@ -514,3 +514,31 @@ def test_actual_audio_fix_gets_one_targeted_repair_decision():
     assert pushed == {6}
     assert not agent_loop._quality_repair_pushback(
         ctx, messages, time.monotonic(), pushed)
+
+
+def test_review_program_audio_reuses_current_proof_without_full_render(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    calls, extracted = [], []
+    def run(fn, project, variant, version):
+        calls.append((variant, version))
+        assert project == 77 and version == 4
+        return None if variant == 'preview' else {
+            'id': 42, 'duration_s': 6, 'meta': {'proof_segments': [
+                {'start': 0, 'end': 2, 'reel_start': 0},
+                {'start': 10, 'end': 14, 'reel_start': 2}]}}
+    ctx = SimpleNamespace(db=SimpleNamespace(run=run), project_id=77,
+        workdir=str(tmp_path), latest_edl=lambda: {'version':4,'json':{'keep':[[0,20]]}},
+        editing_metrics={}, edit_plan={})
+    monkeypatch.setattr(llm, 'audio_review_available', lambda: True)
+    monkeypatch.setattr(agent_tools, '_asset_local_path', lambda *a: 'proof.mp4')
+    monkeypatch.setattr(agent_tools.media, 'extract_audio_clip',
+        lambda path,start,end,out: extracted.append((path,start,end)))
+    monkeypatch.setattr(llm, 'ask_audio', lambda *a,**k: 'Tone is audible.')
+    result = agent_tools.review_audio(ctx, output_times=[12], span_s=2)
+    assert 'SECTION PROOF v4 11.0-13.0s' in result
+    assert extracted == [('proof.mp4',3,5)]
+    assert calls == [('preview',4),('preview_check',4)]
+    # A gap or a boundary-crossing window must never become false evidence.
+    extracted.clear()
+    result = agent_tools.review_audio(ctx, output_times=[8], span_s=2)
+    assert result.startswith('REJECTED:') and not extracted

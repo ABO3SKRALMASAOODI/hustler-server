@@ -1,6 +1,7 @@
 """An EDL commit and its job attribution are one database transaction."""
 
 import db as dbx
+import pytest
 
 
 class _Cursor:
@@ -17,7 +18,9 @@ class _Cursor:
     def execute(self, sql, params=()):
         compact = " ".join(sql.split())
         self.queries.append((compact, params))
-        if compact.startswith("INSERT INTO edls"):
+        if compact.startswith("SELECT MAX(version)"):
+            self._next.append({"version": 7})
+        elif compact.startswith("INSERT INTO edls"):
             self._next.append({"version": 8})
         elif compact.startswith("SELECT payload->'mutation_receipt'"):
             self._next.append({"receipt": None})
@@ -50,3 +53,10 @@ def test_insert_edl_persists_job_receipt_before_returning():
         "tool": "set_caption_fixes", "committed": True,
     }
     assert update[1][1] == 91
+
+
+def test_stale_worker_cannot_overwrite_a_newer_direct_edit():
+    conn = _Conn()
+    with pytest.raises(ValueError, match="version changed"):
+        dbx.insert_edl(conn, 14, {"keep": [[0, 5]]}, "agent", before_version=6)
+    assert not any(sql.startswith("INSERT") for sql, _ in conn.cur.queries)

@@ -1076,6 +1076,9 @@ def _cloudflare_call_id(job):
         raw = f"{job.get('type')}:{job.get('id')}:{job.get('total_claims')}"
     digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
     job_type = str(job.get("type") or "job")
+    group = str((job.get("payload") or {}).get("render_group") or "")
+    if job_type in {"final", "preview", "preview_check"} and re.fullmatch(r"[0-9]+-[01]", group):
+        return f"cf-render-g{group}-{digest}"
     if job_type in {"mcp_tool", "preview", "preview_check"}:
         # Cloudflare recognizes this stable prefix and sends every call for a
         # project to the same MCP shard. ToolContext intentionally caches

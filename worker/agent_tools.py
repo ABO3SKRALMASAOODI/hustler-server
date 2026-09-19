@@ -593,6 +593,9 @@ def _execution_policy(ctx):
 def _child_payload(ctx, payload=None):
     body = dict(payload or {})
     body.setdefault("execution_policy", _execution_policy(ctx))
+    parent = (getattr(ctx, "project", None) or {}).get("parent_project_id")
+    if parent and body.get("source") in {"agent_preview", "agent_preview_check"}:
+        body["render_group"] = f"{int(parent)}-{int(ctx.project_id) % 2}"
     return body
 
 
@@ -16795,110 +16798,21 @@ _EDL_ALL_ALIASES = {"all", "everything", "full"}
 
 
 def get_edl(ctx, sections=None, compact=False, offset=0, limit=100):
-    """Current EDL without ever returning amputated/invalid JSON.
-
-    Large timelines default to a compact index. Callers can then request one
-    or more top-level sections, with list pagination. This replaces the old
-    character slice that often cut the JSON in the middle of the exact
-    captions/overlays collection an MCP caller needed to repair.
-    """
+    from edl_read import read_edl
     row = ctx.latest_edl()
-    edl = row["json"]
-    try:
-        off = max(0, int(offset or 0))
-        lim = min(200, max(1, int(limit or 100)))
-    except (TypeError, ValueError):
-        return "REJECTED: offset and limit must be integers."
-    if sections is not None and not isinstance(sections, (list, tuple, str)):
-        return ("REJECTED: sections must be a section name or array of names "
-                f"from {sorted(edl.keys())}.")
-    requested = ([sections] if isinstance(sections, str)
-                 else list(sections or []))
-    wanted, resolved = [], {}
-    overview = False
-    unknown = []
-    canonical_lc = {str(key).lower(): key for key in edl}
-    for raw in requested:
-        label = str(raw).strip()
-        low = label.lower()
-        if low in canonical_lc:
-            names = (canonical_lc[low],)
-        elif low in _EDL_SECTION_ALIASES:
-            names = tuple(n for n in _EDL_SECTION_ALIASES[low] if n in edl)
-            resolved[label] = list(names)
-        elif low in _EDL_OVERVIEW_ALIASES:
-            overview = True
-            resolved[label] = ["compact_overview"]
-            continue
-        elif low in _EDL_ALL_ALIASES:
-            names = tuple(edl.keys())
-            resolved[label] = list(names)
-        else:
-            unknown.append(label)
-            continue
-        for name in names:
-            if name not in wanted:
-                wanted.append(name)
-    unknown = sorted(set(unknown))
-    if unknown:
-        return (f"REJECTED: unknown EDL section(s) {unknown}. Available: "
-                f"{sorted(edl.keys())}. Accepted aliases: "
-                f"{sorted(set(_EDL_SECTION_ALIASES) | _EDL_OVERVIEW_ALIASES | _EDL_ALL_ALIASES)}.")
-    evidence_key = ("get_edl", row["version"], tuple(wanted), overview,
-                    bool(compact), off, lim)
+    key = ("get_edl", row["version"], json.dumps([sections, compact, offset, limit], sort_keys=True))
     evidence = _evidence_cache(ctx)
-    if evidence_key in evidence:
+    if key in evidence:
         _metric(ctx, "evidence_reads_reused")
         return (f"UNCHANGED EDL — v{row['version']} and these exact sections "
                 "were already returned earlier in this turn. The earlier "
                 "JSON remains authoritative; call again after a write or "
                 "request different sections/page.")
-    evidence.add(evidence_key)
-    if compact:
-        return json.dumps(_compact_edl(row, ctx), indent=1)
-    if wanted or overview:
-        selected, pages = {}, {}
-        for raw_name in wanted:
-            name = str(raw_name)
-            value = edl.get(name)
-            if isinstance(value, list):
-                selected[name] = value[off:off + lim]
-                pages[name] = {"offset": off,
-                               "returned": len(selected[name]),
-                               "total": len(value),
-                               "next_offset": (off + len(selected[name])
-                                               if off + len(selected[name]) < len(value)
-                                               else None)}
-            else:
-                selected[name] = value
-        payload = {"version": row["version"], "sections": selected,
-                   "pagination": pages}
-        if overview:
-            payload["overview"] = _compact_edl(row, ctx)
-        if resolved:
-            payload["aliases_resolved"] = resolved
-        rendered = json.dumps(payload, indent=1)
-        if len(rendered) > 21000:
-            return json.dumps({
-                "version": row["version"],
-                "error": ("Requested page is too large for a reliable tool "
-                          "response; request fewer sections or a smaller limit."),
-                "requested_sections": wanted,
-                "suggested_limit": max(1, lim // 2),
-            }, indent=1)
-        return rendered
-    rendered = json.dumps(edl, indent=1)
-    if len(rendered) <= 19000:
-        header = {"version": row["version"],
-                  "description": describe_edl(edl, ctx.duration),
-                  "edl": edl}
-        return json.dumps(header, indent=1)
-    compact_payload = _compact_edl(row, ctx)
-    compact_payload["notice"] = (
-        "Full EDL is large, so this is a complete compact index—not truncated "
-        "JSON. Call get_edl(sections=['captions']) or another named section; "
-        "use offset/limit for long list sections.")
-    return json.dumps(compact_payload, indent=1)
+    result = read_edl(row, ctx.duration, _program_map(ctx, row["json"]),
+                      sections, compact, offset, limit)
+    if not result.startswith("REJECTED"):
+        evidence.add(key)
+    return result
 
 
 def _grade_chain_of(edl_json):
@@ -20158,6 +20072,23 @@ def get_audio_analysis(ctx, asset_key=None):
                 + "\n- ".join(lines))
 
 
+def _proof_audio_spans(spans, segments):
+    """Only reuse a fully contained listening window in the same-version reel.
+
+    Crossing a proof splice could hide missing program audio. Refuse it rather
+    than presenting joined, noncontiguous sound as one continuous moment.
+    """
+    mapped = []
+    for start, end in spans:
+        segment = next((s for s in segments
+                        if s["start"] <= start and end <= s["end"]), None)
+        if segment is None:
+            return None
+        offset = segment["reel_start"] - segment["start"]
+        mapped.append((start+offset, end+offset))
+    return mapped
+
+
 def review_audio(ctx, asset_key=None, times=None, output_times=None,
                  span_s=6.0, question=None):
     """Bounded actual listening for uploads, source sound or rendered mix.
@@ -20199,6 +20130,7 @@ def review_audio(ctx, asset_key=None, times=None, output_times=None,
         return out, None
 
     source = label = None
+    proof_segments = None
     duration = 0.0
     if asset_key:
         asset, error = _resolve_media_asset(
@@ -20219,14 +20151,21 @@ def review_audio(ctx, asset_key=None, times=None, output_times=None,
         asset = ctx.db.run(dbx.find_render_asset, ctx.project_id, "preview",
                            row["version"])
         if not asset:
-            return (f"REJECTED: current EDL v{row['version']} has no completed "
-                    "preview. Render it before reviewing program sound.")
+            asset = ctx.db.run(dbx.find_render_asset, ctx.project_id, "preview_check",
+                               row["version"])
+            proof_segments = ((asset or {}).get("meta") or {}).get("proof_segments")
+            if not proof_segments:
+                return (f"REJECTED: current EDL v{row['version']} has no completed "
+                        "preview or mapped section proof. Render the requested "
+                        "sections before reviewing program sound.")
         try:
-            duration = float(asset.get("duration_s") or 0.0)
+            duration = (float(Timeline(row["json"].get("keep") or [],
+                        row["json"].get("inserts") or [], row["json"].get("speed") or []).out_duration)
+                        if proof_segments else float(asset.get("duration_s") or 0.0))
             source = _asset_local_path(ctx, asset)
         except Exception as exc:
             return f"Audio review could not load the preview ({str(exc)[:160]})."
-        label = f"rendered PROGRAM v{row['version']}"
+        label = f"rendered {'SECTION PROOF' if proof_segments else 'PROGRAM'} v{row['version']}"
         wants, clock = output_times, "output_times"
     else:
         if not ctx.has_main_video:
@@ -20247,12 +20186,19 @@ def review_audio(ctx, asset_key=None, times=None, output_times=None,
     spans, error = windows(wants, duration, clock)
     if error:
         return error
+    extraction_spans = spans
+    if proof_segments:
+        extraction_spans = _proof_audio_spans(spans, proof_segments)
+        if extraction_spans is None:
+            return ("REJECTED: the current section proof does not fully cover "
+                    "the requested listening windows. Render those sections or "
+                    "a complete preview; no missing audio was substituted.")
     clips, labels = [], []
     try:
-        for i, (start, end) in enumerate(spans):
+        for i, ((start, end), (extract_start, extract_end)) in enumerate(zip(spans, extraction_spans)):
             local = os.path.join(
                 ctx.workdir, f"audio_review_{uuid.uuid4().hex[:8]}_{i}.mp3")
-            media.extract_audio_clip(source, start, end, local)
+            media.extract_audio_clip(source, extract_start, extract_end, local)
             clips.append(local)
             labels.append(f"{label} {start:.1f}-{end:.1f}s")
     except Exception as exc:
@@ -21554,7 +21500,44 @@ AGENT_TOOL_DOMAINS = (
 )
 
 
+def apply_edit_batch(ctx, base_version, operations, operation_id):
+    """Validate all changes before the single fenced ToolContext write."""
+    import edit_batch
+    import playback_plan
+    row = ctx.latest_edl()
+    if row["version"] != base_version:
+        return f"REJECTED: current EDL is v{row['version']}; read it before rebuilding this batch."
+    try:
+        keys = ctx.db.run(edit_batch.project_media_keys, ctx.project_id)
+        updated = edit_batch.apply_batch(row["json"], operations, ctx.duration or None, keys)
+    except (ValueError, TypeError) as exc:
+        return f"REJECTED: no batch changes were saved: {exc}"
+    result = ctx.write_edl(updated, f"applied {len(operations)} edits as one batch")
+    if result.startswith("EDL v"):
+        result += "\nReview scope: " + json.dumps(playback_plan.changed_work(row["json"], updated))
+        result += "\nThe edit is saved; supported layers play directly in Studio. Inspect changed moments before a full approval preview; this receipt is not visual or audio proof."
+    return result
+
+
 TOOLS = {
+    "apply_edit_batch": (apply_edit_batch,
+        "Apply a complete group of ordinary edits atomically, with no render wait. "
+        "Read get_edl first; base_version must be current. operation_id is a unique "
+        "16-80 character retry id (letters/digits/hyphens/underscores); reuse it on transport retry. "
+        "Each operation is {action,layer,value?,id?}. set replaces one complete layer; "
+        "upsert patches or adds a named item; remove deletes a named item; reorder accepts "
+        "all insert ids for a canvas sequence. Layers: keep,speed,inserts,frame,captions,"
+        "caption_mutes,texts,vectors,music,sfx,voiceover,volume,master,effects,overlays,canvas. Use existing EDL "
+        "field shapes and project media keys. All times describe the RESULTING timeline: "
+        "include dependent caption/music/text timing changes in the same batch. "
+        "Unknown fields or invalid media reject the whole batch. This saves an edit; "
+        "it does not certify picture/audio quality. Review changed moments, then the finished edit.",
+        {"base_version": {"type": "integer"}, "operation_id": {"type": "string"},
+         "operations": {"type": "array", "minItems": 1, "maxItems": 64,
+            "items": {"type": "object", "properties": {
+                "action": {"type": "string", "enum": ["set", "upsert", "remove", "reorder"]},
+                "layer": {"type": "string"}, "id": {"type": "string"}, "value": {}},
+                "required": ["action", "layer"]}}}),
     "get_video_info": (get_video_info, "Video metadata plus index and EDL "
                        "summary. Use only when the supplied project state "
                        "does not already answer the metadata question.", {}),
@@ -24243,6 +24226,11 @@ TOOL_DOMAINS = {
                "open_short", "open_project", "wait_for_job"},
 }
 
+# Once a writing department is loaded, combine its ordinary document
+# operations into one validated revision instead of many round trips.
+for _batch_domain in ("story", "captions", "graphics", "audio", "sfx", "media", "motion", "looks", "screen"):
+    TOOL_DOMAINS[_batch_domain].add("apply_edit_batch")
+
 # Persisted creative blueprints predate this routing split. When they contain
 # an explicit AUTHOR decision, that is already semantic evidence that the
 # corresponding department is required; load it directly instead of asking
@@ -24298,6 +24286,7 @@ REQUIRED_ARGS = {
     "find_visual_moments": ["query"],
     "look_at_asset": ["asset_key"],
     "compare_uploaded_media": ["asset_keys"],
+    "apply_edit_batch": ["base_version", "operations", "operation_id"],
     "keep_segments": ["segments"],
     "cut_range": ["start", "end"],
     "restore_range": ["start", "end"],
@@ -24401,7 +24390,7 @@ REQUIRED_ARGS = {
 # is a version diff line (write_edl's "EDL vX -> vY: ..." format).
 # fetch_url is here for the capabilities digest; its success is tracked
 # separately via ctx.urls_fetched (it creates an asset the agent then places).
-WRITE_TOOLS = {"keep_segments", "cut_range", "cut_output_range",
+WRITE_TOOLS = {"apply_edit_batch", "keep_segments", "cut_range", "cut_output_range",
                "restore_range",
                "cut_silences", "remove_filler_words", "add_captions",
                "add_kinetic_text",

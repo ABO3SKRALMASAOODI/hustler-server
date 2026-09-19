@@ -823,7 +823,13 @@ def ass_events(path, animated_only=False, with_payload=False):
     if not path or not os.path.exists(path):
         return []
     out = []
-    for line in open(path, encoding="utf-8-sig"):
+    with open(path, encoding="utf-8-sig") as handle:
+        lines = handle.readlines()
+    # A Dialogue line names a style; changing its definition changes pixels
+    # even when the text and timing remain identical.
+    style_signature = "\n".join(line.strip() for line in lines
+                                if line.startswith(("Style:", "PlayRes", "ScaledBorderAndShadow:")))
+    for line in lines:
         if not line.startswith("Dialogue:"):
             continue
         if animated_only and not (_ANIM_TAG.search(line)
@@ -833,7 +839,7 @@ def ass_events(path, animated_only=False, with_payload=False):
         if len(m) >= 2:
             if with_payload:
                 out.append((_ass_t(m[0]), _ass_t(m[1]),
-                            _TS.sub("<t>", line.strip(), count=2)))
+                            style_signature + "\n" + _TS.sub("<t>", line.strip(), count=2)))
             else:
                 out.append((_ass_t(m[0]), _ass_t(m[1])))
     return out
@@ -956,7 +962,7 @@ def _strip_timeline(edl):
     """Structural dump with the timeline (keep/speed) and the audio layers
     removed as well — what MUST still be equal for timeline mode."""
     s, _changeable = _strip(edl)
-    for k in ("keep", "speed") + AUDIO_FIELDS:
+    for k in ("keep", "speed", "inserts", "captions", "caption_mutes") + AUDIO_FIELDS:
         s.pop(k, None)
     return s
 
@@ -975,8 +981,13 @@ def timeline_atoms(edl, tl):
                 atoms.append((acc, acc + plen, ("src", ps, pe, f)))
             acc += plen
     from timeline import insert_windows as _iw
+    items = {item["id"]: item for item in edl.get("inserts") or []}
     for iid, (a, b) in _iw(edl.get("inserts") or [], tl).items():
-        atoms.append((a, b, ("ins", iid)))
+        # A name alone is not content: a replaced clip can retain its id.
+        # Programme placement and mute do not change this clip's picture.
+        content = {k: v for k, v in items[iid].items()
+                   if k not in ("id", "at_output_s", "mute")}
+        atoms.append((a, b, ("ins", json.dumps(_canon(content), sort_keys=True))))
     return sorted(atoms)
 
 
@@ -1075,6 +1086,13 @@ def plan_timeline(prev_edl, new_edl, tl_prev, tl_new, out_duration,
     cap_events_*: [(start, end, payload)] caption events of each program's
     full ASS (renderer builds both — captions burn on the output clock, so
     equality has to be CHECKED, never assumed)."""
+    if ((prev_edl.get("frame") or {}).get("focus_track")
+            and prev_edl.get("keep") != new_edl.get("keep")):
+        return None, None, "changed segment midpoint can select a different tracked crop"
+    if ((prev_edl.get("captions") != new_edl.get("captions")
+         or prev_edl.get("caption_mutes") != new_edl.get("caption_mutes"))
+            and (cap_events_prev is None or cap_events_new is None)):
+        return None, None, "caption changes need compiled evidence from both versions"
     if json.dumps(_strip_timeline(prev_edl), sort_keys=True) != \
             json.dumps(_strip_timeline(new_edl), sort_keys=True):
         return None, None, "non-timeline structural change"
@@ -1371,8 +1389,8 @@ def assemble_offset(prev_local, parts, piece_paths, audio_path,
         ts_files.append(ts)
     lst = os.path.join(workdir, "stitch_list.txt")
     with open(lst, "w") as f:
-        for ts in ts_files:
-            f.write(f"file '{ts}'\n")
+        for ts, part in zip(ts_files, parts):
+            f.write(f"file '{ts}'\nduration {part[2]-part[1]:.6f}\n")
     vcat = os.path.join(workdir, "stitched_v.ts")
     media.run(["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0",
                "-i", lst, "-c", "copy", vcat])
@@ -1455,45 +1473,14 @@ def snap_windows(windows, kfs, file_dur, forbidden=()):
 
 
 def assemble(prev_local, piece_paths, windows, file_dur, workdir, out_path):
-    """Copy the gaps from prev_local, drop in the re-encoded pieces, concat,
-    and mux with prev_local's untouched audio."""
-    parts = []                                # (kind, a, b) | (piece, path)
-    cursor = 0.0
-    for (a, b), piece in zip(windows, piece_paths):
-        if a - cursor > 0.01:
-            parts.append(("copy", cursor, a))
-        parts.append(("piece", piece))
+    """Reuse the same assembly clock for patches and moved source windows."""
+    parts, cursor = [], 0.0
+    for a, b in windows:
+        if a - cursor > .01:
+            parts.append(("copy", cursor, a, 0.0))
+        parts.append(("win", a, b))
         cursor = b
-    if file_dur - cursor > 0.01:
-        parts.append(("copy", cursor, file_dur))
-
-    ts_files = []
-    for i, part in enumerate(parts):
-        ts = os.path.join(workdir, f"st_{i}.ts")
-        if part[0] == "copy":
-            _k, a, b = part
-            media.run(["ffmpeg", "-y", "-v", "error",
-                       "-ss", f"{a:.5f}", "-i", prev_local,
-                       "-t", f"{b - a:.5f}", "-map", "0:v:0", "-c", "copy",
-                       "-avoid_negative_ts", "make_zero",
-                       "-f", "mpegts", ts])
-        else:
-            media.run(["ffmpeg", "-y", "-v", "error", "-i", part[1],
-                       "-map", "0:v:0", "-c", "copy",
-                       "-f", "mpegts", ts])
-        ts_files.append(ts)
-    lst = os.path.join(workdir, "stitch_list.txt")
-    with open(lst, "w") as f:
-        for ts in ts_files:
-            f.write(f"file '{ts}'\n")
-    vcat = os.path.join(workdir, "stitched_v.ts")
-    media.run(["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0",
-               "-i", lst, "-c", "copy", vcat])
-    media.run(["ffmpeg", "-y", "-v", "error", "-i", vcat, "-i", prev_local,
-               "-map", "0:v:0", "-map", "1:a:0?", "-c", "copy",
-               "-movflags", "+faststart", out_path])
-    out_dur = media.duration_of(out_path)
-    if abs(out_dur - file_dur) > 0.25:
-        raise media.MediaError(
-            f"stitched length {out_dur:.2f}s vs expected {file_dur:.2f}s")
-    return out_dur
+    if file_dur - cursor > .01:
+        parts.append(("copy", cursor, file_dur, 0.0))
+    return assemble_offset(prev_local, parts, piece_paths, prev_local,
+                           file_dur, workdir, out_path)

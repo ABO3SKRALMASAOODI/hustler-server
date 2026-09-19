@@ -60,7 +60,7 @@ import storage
 import routes.mcp_oauth as mcp_oauth
 from routes.admin import ADMIN_EMAIL
 from routes.auth import token_required
-from routes.video import complete_upload_core, record_client_event, vdb, wschemas
+from routes.video import complete_upload_core, record_client_event, vdb, wschemas, apply_edit_batch_core
 from video_services.mcp_reads import read_metadata
 from video_services.jobs import enqueue as _enqueue
 from video_services.project_state import (
@@ -420,6 +420,21 @@ def _editor_tools(catalog):
 _NO_ARGS = {"type": "object", "properties": {}}
 
 SESSION_TOOLS = [
+    {"name": "apply_short_edit_batches",
+     "description": "Save caller-authored edits for up to 30 shorts in one request, without running another model or rendering. project_id is the parent; every child must belong to it. Each batch uses apply_edit_batch's operations and current base_version, and has its own unique retry operation_id. Each child is atomic; results explicitly report partial failures. All times describe that child's resulting timeline. Read and inspect each short first. Saved edits still require changed-moment and final quality review. This tool never exports finals.",
+     "inputSchema": {"type": "object", "properties": {
+       "project_id": {"type": "integer"},
+       "batches": {"type": "array", "minItems": 1, "maxItems": 30,
+         "items": {"type": "object", "properties": {
+           "project_id": {"type": "integer"}, "base_version": {"type": "integer"},
+           "operation_id": {"type": "string"},
+           "operations": {"type": "array", "minItems": 1, "maxItems": 64,
+             "items": {"type": "object", "properties": {
+               "action": {"type": "string", "enum": ["set","upsert","remove","reorder"]},
+               "layer": {"type": "string"}, "id": {"type": "string"}, "value": {}},
+               "required": ["action","layer"]}}},
+           "required": ["project_id","base_version","operation_id","operations"]}}},
+       "required": ["project_id","batches"]}},
     {"name": "list_projects",
      "description": "List this account's video projects, newest first, with "
                     "whether each has a video, its project kind, its podcast-"
@@ -616,6 +631,7 @@ SESSION_TOOLS = [
 # this connection's own active-project pointer — no project content changes,
 # and calling it twice with the same id lands the same state.
 _SESSION_META = {
+    "apply_short_edit_batches": ("Apply edits to selected shorts", False, True),
     #  name: (title, readOnlyHint, idempotentHint)
     "list_projects":  ("List this account's projects", True, False),
     "open_project":   ("Open a project for navigation", True, True),
@@ -1003,6 +1019,13 @@ def _run_tool_job(tok, name, args, raw=False, project_id=None):
             "No explicit project_id was supplied. Call list_projects and "
             "copy the intended id; Valmera will not guess from the active "
             "project."))
+    if name == "apply_edit_batch":
+        result, status = apply_edit_batch_core(tok["user_id"], project_id, args, origin="mcp")
+        changed = status == 200 and not result.get("no_change")
+        result.update(project_id=project_id, is_error=status != 200,
+                      edl_changed=changed, edl_version=result.get("version"))
+        result["text"] = json.dumps({k:v for k,v in result.items() if k != "edl"}, separators=(",", ":"))
+        return _out(result["text"], result)
     with vdb() as conn:
         cur = conn.cursor()
         project = _project_for_user(cur, project_id, tok["user_id"])
@@ -1076,7 +1099,7 @@ def _required_project_id(args):
 
 _PROJECT_SCOPED_SESSION_TOOLS = {
     "project_state", "upload_start", "upload_finish", "index_status",
-    "shorts_status", "download_url", "watch_video",
+    "shorts_status", "download_url", "watch_video", "apply_short_edit_batches",
 }
 
 
@@ -1977,7 +2000,38 @@ def _t_watch_video(tok, args):
     return public
 
 
+def _t_apply_short_edit_batches(tok, args):
+    parent_id, batches = args.get("project_id"), args.get("batches")
+    if (type(parent_id) is not int or not isinstance(batches, list)
+            or not 1 <= len(batches) <= 30
+            or any(not isinstance(b, dict) or type(b.get("project_id")) is not int for b in batches)
+            or len({b["project_id"] for b in batches}) != len(batches)):
+        return _session_error("Supply a parent project_id and 1–30 distinct child edit batches.")
+    try:
+        if len(json.dumps(batches, allow_nan=False)) > 500_000:
+            return _session_error("Split this request into smaller batches (500 KB maximum).")
+    except (ValueError, TypeError):
+        return _session_error("Batches must contain finite JSON values.")
+    with vdb() as conn:
+        cur = conn.cursor()
+        if not _project_for_user(cur, parent_id, tok["user_id"]):
+            return _session_error("Parent project not found on this account.")
+        for batch in batches:
+            child = _project_for_user(cur, batch["project_id"], tok["user_id"])
+            if not child or child.get("parent_project_id") != parent_id:
+                return _session_error("Every child must belong to this parent and account; no edits were saved.")
+    results = []
+    for batch in batches:
+        result, status = apply_edit_batch_core(tok["user_id"], batch["project_id"], batch, origin="mcp")
+        results.append(dict(project_id=batch["project_id"], status=status,
+                            **{k:v for k,v in result.items() if k != "edl"}))
+    text = json.dumps(dict(project_id=parent_id, batches=results,
+        review="Receipts are saved edits, not visual/audio evidence. Review each changed short before final approval."))
+    return text if any(r["status"] == 200 for r in results) else _session_error(text)
+
+
 SESSION_IMPL = {
+    "apply_short_edit_batches": _t_apply_short_edit_batches,
     "list_projects": _t_list_projects,
     "open_project": _t_open_project,
     "open_short": _t_open_short,

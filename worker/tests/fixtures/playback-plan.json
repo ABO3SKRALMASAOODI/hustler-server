@@ -1,0 +1,533 @@
+[
+  {
+    "name": "distant source cuts",
+    "edl": {
+      "keep": [
+        [
+          1,
+          3
+        ],
+        [
+          81,
+          83
+        ]
+      ]
+    },
+    "expected": {
+      "schema": 1,
+      "clips": [
+        {
+          "id": "source:0:1",
+          "kind": "video",
+          "source": "source",
+          "start": 0.0,
+          "end": 2.0,
+          "source_start": 1,
+          "source_end": 3,
+          "rate": 1.0,
+          "mute": false,
+          "frame": {},
+          "source_footage": true
+        },
+        {
+          "id": "source:1:81",
+          "kind": "video",
+          "source": "source",
+          "start": 2.0,
+          "end": 4.0,
+          "source_start": 81,
+          "source_end": 83,
+          "rate": 1.0,
+          "mute": false,
+          "frame": {},
+          "source_footage": true
+        }
+      ],
+      "duration": 4.0,
+      "picture_duration": 4.0,
+      "canvas": null,
+      "frame": null,
+      "audio": {
+        "music": null,
+        "sfx": null,
+        "voiceover": null,
+        "volume": null,
+        "master": null,
+        "stem_mix": null
+      },
+      "captions": null,
+      "caption_mutes": [],
+      "texts": [],
+      "vectors": [],
+      "effects": {},
+      "overlays": []
+    }
+  },
+  {
+    "name": "speed pieces and insert ties",
+    "edl": {
+      "keep": [
+        [
+          0,
+          4
+        ],
+        [
+          10,
+          14
+        ]
+      ],
+      "speed": [
+        {
+          "start": 2,
+          "end": 4,
+          "factor": 2
+        }
+      ],
+      "inserts": [
+        {
+          "id": "a",
+          "kind": "video",
+          "asset_key": "a.mp4",
+          "at_output_s": 3,
+          "duration_s": 2
+        },
+        {
+          "id": "b",
+          "kind": "video",
+          "asset_key": "b.mp4",
+          "at_output_s": 3,
+          "duration_s": 1
+        }
+      ]
+    },
+    "expected": {
+      "schema": 1,
+      "clips": [
+        {
+          "id": "source:0:0",
+          "kind": "video",
+          "source": "source",
+          "start": 0.0,
+          "end": 2.0,
+          "source_start": 0,
+          "source_end": 2.0,
+          "rate": 1.0,
+          "mute": false,
+          "frame": {},
+          "source_footage": true
+        },
+        {
+          "id": "source:0:2",
+          "kind": "video",
+          "source": "source",
+          "start": 2.0,
+          "end": 3.0,
+          "source_start": 2.0,
+          "source_end": 4,
+          "rate": 2.0,
+          "mute": false,
+          "frame": {},
+          "source_footage": true
+        },
+        {
+          "id": "a",
+          "kind": "video",
+          "source": "a.mp4",
+          "start": 3.0,
+          "end": 5.0,
+          "source_start": 0.0,
+          "source_end": 2.0,
+          "rate": 1.0,
+          "mute": false,
+          "frame": {
+            "mode": "crop",
+            "crop": null,
+            "rotation": 0,
+            "motion": null,
+            "motion_motif": null
+          }
+        },
+        {
+          "id": "b",
+          "kind": "video",
+          "source": "b.mp4",
+          "start": 5.0,
+          "end": 6.0,
+          "source_start": 0.0,
+          "source_end": 1.0,
+          "rate": 1.0,
+          "mute": false,
+          "frame": {
+            "mode": "crop",
+            "crop": null,
+            "rotation": 0,
+            "motion": null,
+            "motion_motif": null
+          }
+        },
+        {
+          "id": "source:1:10",
+          "kind": "video",
+          "source": "source",
+          "start": 6.0,
+          "end": 10.0,
+          "source_start": 10,
+          "source_end": 14,
+          "rate": 1.0,
+          "mute": false,
+          "frame": {},
+          "source_footage": true
+        }
+      ],
+      "duration": 10.0,
+      "picture_duration": 10.0,
+      "canvas": null,
+      "frame": null,
+      "audio": {
+        "music": null,
+        "sfx": null,
+        "voiceover": null,
+        "volume": null,
+        "master": null,
+        "stem_mix": null
+      },
+      "captions": null,
+      "caption_mutes": [],
+      "texts": [],
+      "vectors": [],
+      "effects": {},
+      "overlays": []
+    }
+  },
+  {
+    "name": "canvas reordered clips",
+    "edl": {
+      "keep": [],
+      "canvas": {
+        "width": 1080,
+        "height": 1920
+      },
+      "inserts": [
+        {
+          "id": "b",
+          "kind": "video",
+          "asset_key": "b.mp4",
+          "at_output_s": 0,
+          "duration_s": 3,
+          "source_start_s": 5,
+          "rate": 1.5,
+          "mute": true
+        },
+        {
+          "id": "a",
+          "kind": "image",
+          "asset_key": "a.png",
+          "at_output_s": 3,
+          "duration_s": 2,
+          "fit": "pad"
+        }
+      ]
+    },
+    "expected": {
+      "schema": 1,
+      "clips": [
+        {
+          "id": "b",
+          "kind": "video",
+          "source": "b.mp4",
+          "start": 0.0,
+          "end": 3.0,
+          "source_start": 5.0,
+          "source_end": 9.5,
+          "rate": 1.5,
+          "mute": true,
+          "frame": {
+            "mode": "crop",
+            "crop": null,
+            "rotation": 0,
+            "motion": null,
+            "motion_motif": null
+          }
+        },
+        {
+          "id": "a",
+          "kind": "image",
+          "source": "a.png",
+          "start": 3.0,
+          "end": 5.0,
+          "source_start": 0.0,
+          "source_end": 2.0,
+          "rate": 1.0,
+          "mute": false,
+          "frame": {
+            "mode": "pad",
+            "crop": null,
+            "rotation": 0,
+            "motion": null,
+            "motion_motif": null
+          }
+        }
+      ],
+      "duration": 5.0,
+      "picture_duration": 5.0,
+      "canvas": {
+        "width": 1080,
+        "height": 1920
+      },
+      "frame": null,
+      "audio": {
+        "music": null,
+        "sfx": null,
+        "voiceover": null,
+        "volume": null,
+        "master": null,
+        "stem_mix": null
+      },
+      "captions": null,
+      "caption_mutes": [],
+      "texts": [],
+      "vectors": [],
+      "effects": {},
+      "overlays": []
+    }
+  },
+  {
+    "name": "organizational split stays continuous",
+    "edl": {
+      "keep": [
+        [
+          0,
+          8.32
+        ],
+        [
+          8.32,
+          30
+        ]
+      ],
+      "split_keep_boundaries": [
+        8.318
+      ]
+    },
+    "expected": {
+      "schema": 1,
+      "clips": [
+        {
+          "id": "source:0:0",
+          "kind": "video",
+          "source": "source",
+          "start": 0.0,
+          "end": 30.0,
+          "source_start": 0,
+          "source_end": 30,
+          "rate": 1.0,
+          "mute": false,
+          "frame": {},
+          "source_footage": true
+        }
+      ],
+      "duration": 30.0,
+      "picture_duration": 30.0,
+      "canvas": null,
+      "frame": null,
+      "audio": {
+        "music": null,
+        "sfx": null,
+        "voiceover": null,
+        "volume": null,
+        "master": null,
+        "stem_mix": null
+      },
+      "captions": null,
+      "caption_mutes": [],
+      "texts": [],
+      "vectors": [],
+      "effects": {},
+      "overlays": []
+    }
+  },
+  {
+    "name": "focus selection stays per authored scene",
+    "edl": {
+      "keep": [
+        [
+          0,
+          4
+        ],
+        [
+          6,
+          10
+        ]
+      ],
+      "frame": {
+        "ratio": "9:16",
+        "mode": "crop",
+        "focus_track": [
+          {
+            "t0": 0,
+            "t1": 5,
+            "x": 0.2,
+            "y": 0.4
+          },
+          {
+            "t0": 5,
+            "t1": 10,
+            "x": 0.8,
+            "y": 0.5
+          }
+        ]
+      }
+    },
+    "expected": {
+      "schema": 1,
+      "clips": [
+        {
+          "id": "source:0:0",
+          "kind": "video",
+          "source": "source",
+          "start": 0.0,
+          "end": 4.0,
+          "source_start": 0,
+          "source_end": 4,
+          "rate": 1.0,
+          "mute": false,
+          "frame": {
+            "ratio": "9:16",
+            "mode": "crop",
+            "focus_x": 0.2,
+            "focus_y": 0.4
+          },
+          "source_footage": true
+        },
+        {
+          "id": "source:1:6",
+          "kind": "video",
+          "source": "source",
+          "start": 4.0,
+          "end": 8.0,
+          "source_start": 6,
+          "source_end": 10,
+          "rate": 1.0,
+          "mute": false,
+          "frame": {
+            "ratio": "9:16",
+            "mode": "crop",
+            "focus_x": 0.8,
+            "focus_y": 0.5
+          },
+          "source_footage": true
+        }
+      ],
+      "duration": 8.0,
+      "picture_duration": 8.0,
+      "canvas": null,
+      "frame": {
+        "ratio": "9:16",
+        "mode": "crop",
+        "focus_track": [
+          {
+            "t0": 0,
+            "t1": 5,
+            "x": 0.2,
+            "y": 0.4
+          },
+          {
+            "t0": 5,
+            "t1": 10,
+            "x": 0.8,
+            "y": 0.5
+          }
+        ]
+      },
+      "audio": {
+        "music": null,
+        "sfx": null,
+        "voiceover": null,
+        "volume": null,
+        "master": null,
+        "stem_mix": null
+      },
+      "captions": null,
+      "caption_mutes": [],
+      "texts": [],
+      "vectors": [],
+      "effects": {},
+      "overlays": []
+    }
+  },
+  {
+    "name": "music tail and muted alternative",
+    "edl": {
+      "keep": [
+        [
+          0,
+          4
+        ]
+      ],
+      "music": [
+        {
+          "id": "one",
+          "start": 0,
+          "end": 8,
+          "storage_key": "a.mp3"
+        },
+        {
+          "id": "two",
+          "start": 0,
+          "end": 16,
+          "storage_key": "b.mp3",
+          "mute": true
+        }
+      ]
+    },
+    "expected": {
+      "schema": 1,
+      "clips": [
+        {
+          "id": "source:0:0",
+          "kind": "video",
+          "source": "source",
+          "start": 0.0,
+          "end": 4.0,
+          "source_start": 0,
+          "source_end": 4,
+          "rate": 1.0,
+          "mute": false,
+          "frame": {},
+          "source_footage": true
+        }
+      ],
+      "duration": 4.0,
+      "picture_duration": 4.0,
+      "canvas": null,
+      "frame": null,
+      "audio": {
+        "music": [
+          {
+            "id": "one",
+            "start": 0,
+            "end": 8,
+            "storage_key": "a.mp3"
+          },
+          {
+            "id": "two",
+            "start": 0,
+            "end": 16,
+            "storage_key": "b.mp3",
+            "mute": true
+          }
+        ],
+        "sfx": null,
+        "voiceover": null,
+        "volume": null,
+        "master": null,
+        "stem_mix": null
+      },
+      "captions": null,
+      "caption_mutes": [],
+      "texts": [],
+      "vectors": [],
+      "effects": {},
+      "overlays": []
+    }
+  }
+]

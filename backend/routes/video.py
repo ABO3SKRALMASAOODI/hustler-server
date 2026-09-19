@@ -79,7 +79,18 @@ _plan_spec = importlib.util.spec_from_file_location(
     "worker_render_plan", os.path.join(os.path.dirname(_schemas_path),
                                        "render_plan.py"))
 wplan = importlib.util.module_from_spec(_plan_spec)
+sys.modules.setdefault("worker_render_plan", wplan)
 _plan_spec.loader.exec_module(wplan)
+
+def _pure_worker_module(name):
+    spec = importlib.util.spec_from_file_location("worker_" + name,
+        os.path.join(os.path.dirname(_schemas_path), name + ".py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+wplayback = _pure_worker_module("playback_plan")
+wbatch = _pure_worker_module("edit_batch")
 
 video_bp = Blueprint("video", __name__)
 
@@ -2875,7 +2886,7 @@ def project_state(user_id, project_id):
         # Its intent survives reloads and closed tabs; explicit preview/export
         # requests remain available and keep their normal recovery behavior.
         on_demand = False
-        if edl and edl.get("created_by") == "user":
+        if edl:
             cur.execute("""SELECT 1 FROM chat_messages
                            WHERE session_id = %s AND role = 'activity'
                              AND meta->>'edl_version' = %s
@@ -3152,7 +3163,8 @@ def project_state(user_id, project_id):
             for r in msgs],
         "last_message_id": msgs[-1]["id"] if msgs else after_id,
         "latest_edl": ({"version": edl["version"], "json": edl["json"],
-                        "created_by": edl["created_by"]} if edl else None),
+                        "created_by": edl["created_by"],
+                        "preview_on_demand": edl.get("preview_on_demand", False)} if edl else None),
         "edl_versions": [
             {"version": v["version"], "created_by": v["created_by"],
              "created_at": v["created_at"].isoformat(),
@@ -4596,6 +4608,148 @@ def _reanchor_after_op(old_j, new_edl, desc):
     return new_edl, desc
 
 
+def apply_edit_batch_core(user_id, project_id, data, *, origin="user"):
+    """Authenticated caller, one transaction, one revision, no compute job."""
+    try:
+        base = data["base_version"]
+        if isinstance(base, bool) or not isinstance(base, int) or base < 1:
+            raise ValueError("base_version must be a positive integer.")
+        identity_data = dict(op="apply_edit_batch", args=data.get("operations"),
+                             base_version=base, operation_id=data.get("operation_id"))
+        operation_id, fingerprint = command_identity(identity_data)
+        if operation_id is None:
+            raise ValueError("Supply an operation_id so a retry cannot duplicate this edit.")
+    except (ValueError, KeyError) as exc:
+        return {"error": str(exc)}, 400
+    with vdb() as conn:
+        cur = conn.cursor()
+        project = _project_for_user(cur, project_id, user_id)
+        if not project:
+            return {"error": "Project not found"}, 404
+        cur.execute("SELECT pg_advisory_xact_lock(%s)", (project_id,))
+        try:
+            receipt = read_receipt(cur, project["chat_session_id"], operation_id, fingerprint)
+        except ValueError as exc:
+            return {"error": str(exc)}, 409
+        if receipt:
+            saved = _edl_at(cur, project_id, receipt["version"])
+            return {**receipt, "edl": saved["json"], "replayed": True}, 200
+        if _subscribe_gate_applies(cur, user_id):
+            return {"error": "A subscription is required to edit this project."}, 402
+        latest = _latest_edl(cur, project_id)
+        if not latest or latest["version"] != base:
+            return {"error": "The edit changed. Read the current version before applying this batch.",
+                    "current_version": latest["version"] if latest else None}, 409
+        cur.execute("""SELECT id FROM video_jobs WHERE project_id=%s
+                       AND type IN ('agent_turn','mcp_tool')
+                       AND state IN ('queued','running') LIMIT 1""", (project_id,))
+        if cur.fetchone():
+            return {"error": "Another editor is working on this project. Wait for it to finish before applying this batch."}, 409
+        cur.execute("SELECT storage_key,duration_s FROM assets WHERE project_id=%s", (project_id,))
+        keys = {row["storage_key"]: row for row in cur.fetchall()}
+        original = _active_original(cur, project_id)
+        try:
+            normalized = wbatch.apply_batch(latest["json"], data.get("operations"),
+                (original or {}).get("duration_s") or None, keys)
+        except (ValueError, TypeError, wschemas.EDLValidationError) as exc:
+            return {"error": str(exc)[:500]}, 400
+        work = wplayback.changed_work(latest["json"], normalized)
+        changed = wschemas.edl_signature(latest["json"]) != wschemas.edl_signature(normalized)
+        version = base
+        if changed:
+            cur.execute("""INSERT INTO edls (project_id,version,json,created_by)
+                           VALUES (%s,%s,%s,%s) RETURNING version""",
+                        (project_id, base + 1, Json(normalized), "agent" if origin == "mcp" else "user"))
+            version = cur.fetchone()["version"]
+            # Stop obsolete compute at the receipt boundary, even when this
+            # version will play directly and no replacement render is queued.
+            cur.execute("""UPDATE video_jobs SET state='done', result=%s, updated_at=NOW()
+                           WHERE project_id=%s AND type IN ('preview','preview_check')
+                             AND state IN ('queued','running')
+                             AND payload->>'edl_version' ~ '^[0-9]+$'
+                             AND (payload->>'edl_version')::int < %s""",
+                        (Json({"superseded_by": version}), project_id, version))
+        result = dict(version=version, no_change=not changed, preview_on_demand=True,
+                      work=work, review_status="pending" if changed else "unchanged")
+        cur.execute("""INSERT INTO chat_messages (session_id,role,content,meta)
+                       VALUES (%s,'activity',%s,%s)""",
+                    (project["chat_session_id"], f"{origin} → EDL v{version}: applied edit batch",
+                     Json(dict(tool="apply_edit_batch", edl_version=version,
+                               preview_mode="on_demand", change=work,
+                               **receipt_meta(operation_id, fingerprint, result)))))
+        return {**result, "edl": normalized}, 200
+
+
+@video_bp.route("/projects/<int:project_id>/edl/batch", methods=["POST"])
+@token_required
+def edit_batch_endpoint(user_id, project_id):
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify(error="Expected an edit batch object."), 400
+    result, status = apply_edit_batch_core(user_id, project_id, body)
+    return jsonify(result), status
+
+
+@video_bp.route("/projects/<int:project_id>/edit-head", methods=["GET"])
+@token_required
+def edit_head(user_id, project_id):
+    """Small active-editor heartbeat: no presigning, healing or job queries."""
+    since = request.args.get("since", default=0, type=int)
+    with vdb() as conn:
+        cur = conn.cursor()
+        cur.execute("""SELECT e.version, e.json, e.created_by
+                       FROM projects p JOIN LATERAL (
+                         SELECT version,json,created_by FROM edls
+                         WHERE project_id=p.id ORDER BY version DESC LIMIT 1
+                       ) e ON TRUE WHERE p.id=%s AND p.user_id=%s""",
+                    (project_id, int(user_id)))
+        row = cur.fetchone()
+    # Never disclose an unowned project's existence or current revision.
+    if not row:
+        return jsonify(error="Project or edit not found"), 404
+    return jsonify(version=row["version"],
+                   edl=dict(row) if row["version"] != since else None)
+
+
+@video_bp.route("/projects/<int:project_id>/playback", methods=["GET"])
+@token_required
+def playback_endpoint(user_id, project_id):
+    """One bounded metadata response; media remains browser-to-object-storage."""
+    with vdb() as conn:
+        cur = conn.cursor()
+        if not _project_for_user(cur, project_id, user_id):
+            return jsonify(error="Project not found"), 404
+        version = request.args.get("version", type=int)
+        row = _edl_at(cur, project_id, version) if version else _latest_edl(cur, project_id)
+        if not row:
+            return jsonify(error="This project has no edit yet."), 404
+        cur.execute("""SELECT id,kind,storage_key,duration_s,width,height,meta,sha256
+                       FROM assets WHERE project_id=%s ORDER BY id""", (project_id,))
+        assets = cur.fetchall()
+        lookup = {a["storage_key"]: a for a in assets}
+        original = _active_original(cur, project_id)
+        proxies = [a for a in assets if a["kind"] == "proxy"]
+        # Proxy rows carry the ORIGINAL's sha256. Never select an unbound
+        # or stale proxy after a source replacement.
+        proxy = next((a for a in reversed(proxies) if original and
+            original.get("sha256") and a.get("sha256") == original["sha256"]), None)
+        source = proxy or original
+        plan = wplayback.compile_plan(row["json"])
+        keys = set(wbatch.media_keys(row["json"]))
+        if any(c["source"] == "source" for c in plan["clips"]):
+            keys.add("source")
+        sources = {}
+        for key in sorted(keys):
+            asset = source if key == "source" else lookup.get(key)
+            if not asset:
+                continue
+            sources[key] = dict(asset_id=asset["id"], url=storage.presign_get(asset["storage_key"]),
+                                duration=asset.get("duration_s"), width=asset.get("width"),
+                                height=asset.get("height"), kind=asset["kind"],
+                                identity=f"{asset['storage_key']}:{asset.get('sha256') or ''}")
+    return jsonify(version=row["version"], plan=plan, sources=sources)
+
+
 @video_bp.route("/projects/<int:project_id>/edl", methods=["POST"])
 @token_required
 def user_edl_write(user_id, project_id):
@@ -5199,6 +5353,177 @@ def get_edl_version(user_id, project_id, version):
                             "created_by": row["created_by"]}})
 
 
+def _request_final(cur, user_id, project_id, version, render_group=None):
+    """One export gate shared by individual and explicit batch requests."""
+    if not _project_for_user(cur, project_id, user_id):
+        return jsonify({"error": "Project not found"}), 404
+    cur.execute("SELECT pg_advisory_xact_lock(%s)", (project_id,))
+    cur.execute("SELECT version, json FROM edls "
+                "WHERE project_id = %s AND version = %s",
+                (project_id, version))
+    edl_row = cur.fetchone()
+    if not edl_row:
+        return jsonify({"error": "That EDL version does not exist"}), 400
+    cur.execute("""SELECT id FROM video_jobs
+                   WHERE project_id = %s AND type = 'agent_turn'
+                     AND state IN ('queued','running')
+                   ORDER BY id DESC LIMIT 1""", (project_id,))
+    active_agent = cur.fetchone()
+    if active_agent:
+        record_client_event(
+            user_id, project_id, "export_blocked",
+            detail={"code": "edit_in_progress", "version": version,
+                    "agent_job_id": active_agent["id"]}, origin="server")
+        return jsonify({
+            "error": ("The edit is still being finished. Wait for the "
+                      "latest preview before exporting so you do not "
+                      "lock in an older, unfinished version."),
+            "code": "edit_in_progress",
+            "agent_job_id": active_agent["id"],
+        }), 409
+    cur.execute("""SELECT cm.meta
+                   FROM projects p
+                   JOIN LATERAL (
+                       SELECT meta FROM chat_messages
+                       WHERE session_id = p.chat_session_id
+                         AND role = 'assistant'
+                         AND meta->>'edl_version' = %s
+                       ORDER BY id DESC LIMIT 1
+                   ) cm ON TRUE
+                   WHERE p.id = %s""",
+                (str(version), project_id))
+    latest_assistant = cur.fetchone() or {}
+    assistant_meta = latest_assistant.get("meta") or {}
+    try:
+        reviewed_version = int(assistant_meta.get("edl_version"))
+    except (TypeError, ValueError):
+        reviewed_version = None
+    repair_required = (
+        reviewed_version == version
+        and (assistant_meta.get("quality_status") == "repair_required"
+             or assistant_meta.get("export_ready") is False))
+    if repair_required:
+        findings = list(assistant_meta.get("quality_findings") or [])[:4]
+        record_client_event(
+            user_id, project_id, "export_blocked",
+            detail={"code": "repair_required", "version": version,
+                    "findings": findings}, origin="server")
+        return jsonify({
+            "error": ("This version still has an open verification "
+                      "repair. Finish the repair and review the new "
+                      "preview before exporting."),
+            "code": "repair_required",
+            "quality_findings": findings,
+        }), 409
+    current_version = _obsolete_failed_render_version(
+        cur, project_id, version)
+    if current_version is not None:
+        record_client_event(
+            user_id, project_id, "export_blocked",
+            detail={"code": "obsolete_failed_render",
+                    "version": version,
+                    "latest_version": current_version}, origin="server")
+        return jsonify({
+            "error": ("That older edit already failed to render, and a "
+                      "newer working version is available. Export the "
+                      "current version instead."),
+            "code": "obsolete_failed_render",
+            "latest_version": current_version,
+        }), 409
+    # THE EXPORT IS THE ONE THING THAT GENUINELY NEEDS THE ORIGINAL.
+    # Everything before it runs on the proxy, which is why a proxy-first
+    # upload can start editing within seconds. Finals render from the
+    # source file at full resolution, so if the background upload has not
+    # landed yet, say exactly that and how far along it is — a bare "not
+    # ready" on a video the user can see and has already edited reads as a
+    # bug rather than as a transfer still in flight.
+    original = _active_original(cur, project_id)
+    preflight_error = _export_edl_error(
+        edl_row["json"], (original or {}).get("duration_s"))
+    if preflight_error:
+        record_client_event(
+            user_id, project_id, "export_blocked",
+            detail={"code": "edit_required", "version": version,
+                    "reason": "invalid_timeline"}, origin="server")
+        return jsonify({
+            "error": ("This timeline has no renderable footage yet. Add "
+                      "at least one clip or image before exporting."),
+            "code": "edit_required",
+            "detail": preflight_error,
+        }), 409
+    meta = (original or {}).get("meta") or {}
+    if meta.get("upload_state") == "pending":
+        pct = int(round(float(meta.get("upload_progress") or 0) * 100))
+        record_client_event(
+            user_id, project_id, "export_blocked",
+            detail={"code": "original_uploading", "version": version,
+                    "upload_progress": pct}, origin="server")
+        return jsonify({
+            "error": "Your original video is still uploading in the "
+                     f"background ({pct}% done). Exports render from the "
+                     "full-resolution file, so this needs to finish "
+                     "first — your edit is saved and nothing is lost.",
+            "code": "original_uploading",
+            "upload_progress": pct}), 409
+    if render_group:
+        cur.execute("""SELECT id, meta FROM assets WHERE project_id=%s AND kind='render'
+                       AND meta->>'variant'='final' AND meta->>'edl_version'=%s
+                       ORDER BY id DESC LIMIT 1""", (project_id, str(version)))
+        existing = cur.fetchone()
+        if existing and _final_gate(cur, project_id, user_id)(
+                existing["id"], existing.get("meta") or {}, version):
+            return jsonify(asset_id=existing["id"], reused=True)
+    cur.execute("""SELECT id FROM video_jobs
+                   WHERE project_id = %s AND type = 'final'
+                     AND state IN ('queued','running')""", (project_id,))
+    if cur.fetchone():
+        record_client_event(
+            user_id, project_id, "export_blocked",
+            detail={"code": "already_running", "version": version},
+            origin="server")
+        return jsonify({"error": "A final render is already in progress",
+                        "code": "already_running"}), 409
+    # A final renders an immutable EDL. Re-enqueueing the exact version
+    # after a deterministic safety failure (black frames, invalid timing,
+    # impossible duration) cannot improve it; it only repeats a long
+    # encode and teaches the user to hammer Download. Require a new edit.
+    cur.execute("""SELECT id, error, result FROM video_jobs
+                   WHERE project_id = %s AND type = 'final'
+                     AND state = 'failed'
+                     AND CASE WHEN payload->>'edl_version' ~ '^[0-9]+$'
+                              THEN (payload->>'edl_version')::int
+                              ELSE -1 END = %s
+                   ORDER BY id DESC LIMIT 1""", (project_id, version))
+    prior_failure = cur.fetchone()
+    if _deterministic_final_failure(prior_failure):
+        record_client_event(
+            user_id, project_id, "export_blocked",
+            detail={"code": "edit_required", "version": version,
+                    "failed_job_id": prior_failure["id"]},
+            origin="server")
+        return jsonify({
+            "error": "This edit did not pass the export safety check. "
+                     "The timeline needs to be repaired before exporting; "
+                     "pressing Download again on the same version will "
+                     "not fix it.",
+            "code": "edit_required",
+            "failed_job_id": prior_failure["id"],
+        }), 409
+    # Download is an explicit, user-confirmed durable request. Other work
+    # by this account may affect when a worker claims it, but must never
+    # refuse it before it reaches the queue: production project 1139 had
+    # several physical slices of one logical edit counted as independent
+    # capacity and the user's export simply disappeared behind a 429.
+    # The same-project final guard above prevents duplicate encodes; queue
+    # ordering and worker lanes own actual fleet capacity.
+    job_id = _enqueue(cur, project_id, user_id, "final",
+                      {"edl_version": version, **({"render_group": render_group} if render_group else {})})
+    record_client_event(
+        user_id, project_id, "export_job_started",
+        detail={"job_id": job_id, "version": version}, origin="server")
+    return jsonify({"job_id": job_id})
+
+
 @video_bp.route("/projects/<int:project_id>/render/final", methods=["POST"])
 @token_required
 def render_final(user_id, project_id):
@@ -5210,165 +5535,46 @@ def render_final(user_id, project_id):
     except (TypeError, ValueError):
         return jsonify({"error": "edl_version must be an integer"}), 400
     with vdb() as conn:
+        return _request_final(conn.cursor(), user_id, project_id, version)
+
+
+@video_bp.route("/projects/<int:project_id>/shorts/export", methods=["POST"])
+@token_required
+def export_shorts(user_id, project_id):
+    """An explicit Studio batch action; MCP cannot invoke final export."""
+    body = request.get_json(silent=True) or {}
+    items = body.get("clips") if isinstance(body, dict) else None
+    if (not isinstance(items, list) or not 1 <= len(items) <= 30
+            or any(not isinstance(i, dict) or type(i.get("project_id")) is not int
+                   or type(i.get("edl_version")) is not int
+                   or i["edl_version"] < 1 for i in items)
+            or len({i["project_id"] for i in items}) != len(items)):
+        return jsonify(error="Choose 1–30 distinct shorts with their current edit versions."), 400
+    with vdb() as conn:
         cur = conn.cursor()
         if not _project_for_user(cur, project_id, user_id):
-            return jsonify({"error": "Project not found"}), 404
-        cur.execute("SELECT version, json FROM edls "
-                    "WHERE project_id = %s AND version = %s",
-                    (project_id, version))
-        edl_row = cur.fetchone()
-        if not edl_row:
-            return jsonify({"error": "That EDL version does not exist"}), 400
-        cur.execute("""SELECT id FROM video_jobs
-                       WHERE project_id = %s AND type = 'agent_turn'
-                         AND state IN ('queued','running')
-                       ORDER BY id DESC LIMIT 1""", (project_id,))
-        active_agent = cur.fetchone()
-        if active_agent:
-            record_client_event(
-                user_id, project_id, "export_blocked",
-                detail={"code": "edit_in_progress", "version": version,
-                        "agent_job_id": active_agent["id"]}, origin="server")
-            return jsonify({
-                "error": ("The edit is still being finished. Wait for the "
-                          "latest preview before exporting so you do not "
-                          "lock in an older, unfinished version."),
-                "code": "edit_in_progress",
-                "agent_job_id": active_agent["id"],
-            }), 409
-        cur.execute("""SELECT cm.meta
-                       FROM projects p
-                       JOIN LATERAL (
-                           SELECT meta FROM chat_messages
-                           WHERE session_id = p.chat_session_id
-                             AND role = 'assistant'
-                             AND meta->>'edl_version' = %s
-                           ORDER BY id DESC LIMIT 1
-                       ) cm ON TRUE
-                       WHERE p.id = %s""",
-                    (str(version), project_id))
-        latest_assistant = cur.fetchone() or {}
-        assistant_meta = latest_assistant.get("meta") or {}
-        try:
-            reviewed_version = int(assistant_meta.get("edl_version"))
-        except (TypeError, ValueError):
-            reviewed_version = None
-        repair_required = (
-            reviewed_version == version
-            and (assistant_meta.get("quality_status") == "repair_required"
-                 or assistant_meta.get("export_ready") is False))
-        if repair_required:
-            findings = list(assistant_meta.get("quality_findings") or [])[:4]
-            record_client_event(
-                user_id, project_id, "export_blocked",
-                detail={"code": "repair_required", "version": version,
-                        "findings": findings}, origin="server")
-            return jsonify({
-                "error": ("This version still has an open verification "
-                          "repair. Finish the repair and review the new "
-                          "preview before exporting."),
-                "code": "repair_required",
-                "quality_findings": findings,
-            }), 409
-        current_version = _obsolete_failed_render_version(
-            cur, project_id, version)
-        if current_version is not None:
-            record_client_event(
-                user_id, project_id, "export_blocked",
-                detail={"code": "obsolete_failed_render",
-                        "version": version,
-                        "latest_version": current_version}, origin="server")
-            return jsonify({
-                "error": ("That older edit already failed to render, and a "
-                          "newer working version is available. Export the "
-                          "current version instead."),
-                "code": "obsolete_failed_render",
-                "latest_version": current_version,
-            }), 409
-        # THE EXPORT IS THE ONE THING THAT GENUINELY NEEDS THE ORIGINAL.
-        # Everything before it runs on the proxy, which is why a proxy-first
-        # upload can start editing within seconds. Finals render from the
-        # source file at full resolution, so if the background upload has not
-        # landed yet, say exactly that and how far along it is — a bare "not
-        # ready" on a video the user can see and has already edited reads as a
-        # bug rather than as a transfer still in flight.
-        original = _active_original(cur, project_id)
-        preflight_error = _export_edl_error(
-            edl_row["json"], (original or {}).get("duration_s"))
-        if preflight_error:
-            record_client_event(
-                user_id, project_id, "export_blocked",
-                detail={"code": "edit_required", "version": version,
-                        "reason": "invalid_timeline"}, origin="server")
-            return jsonify({
-                "error": ("This timeline has no renderable footage yet. Add "
-                          "at least one clip or image before exporting."),
-                "code": "edit_required",
-                "detail": preflight_error,
-            }), 409
-        meta = (original or {}).get("meta") or {}
-        if meta.get("upload_state") == "pending":
-            pct = int(round(float(meta.get("upload_progress") or 0) * 100))
-            record_client_event(
-                user_id, project_id, "export_blocked",
-                detail={"code": "original_uploading", "version": version,
-                        "upload_progress": pct}, origin="server")
-            return jsonify({
-                "error": "Your original video is still uploading in the "
-                         f"background ({pct}% done). Exports render from the "
-                         "full-resolution file, so this needs to finish "
-                         "first — your edit is saved and nothing is lost.",
-                "code": "original_uploading",
-                "upload_progress": pct}), 409
-        cur.execute("""SELECT id FROM video_jobs
-                       WHERE project_id = %s AND type = 'final'
-                         AND state IN ('queued','running')""", (project_id,))
-        if cur.fetchone():
-            record_client_event(
-                user_id, project_id, "export_blocked",
-                detail={"code": "already_running", "version": version},
-                origin="server")
-            return jsonify({"error": "A final render is already in progress",
-                            "code": "already_running"}), 409
-        # A final renders an immutable EDL. Re-enqueueing the exact version
-        # after a deterministic safety failure (black frames, invalid timing,
-        # impossible duration) cannot improve it; it only repeats a long
-        # encode and teaches the user to hammer Download. Require a new edit.
-        cur.execute("""SELECT id, error, result FROM video_jobs
-                       WHERE project_id = %s AND type = 'final'
-                         AND state = 'failed'
-                         AND CASE WHEN payload->>'edl_version' ~ '^[0-9]+$'
-                                  THEN (payload->>'edl_version')::int
-                                  ELSE -1 END = %s
-                       ORDER BY id DESC LIMIT 1""", (project_id, version))
-        prior_failure = cur.fetchone()
-        if _deterministic_final_failure(prior_failure):
-            record_client_event(
-                user_id, project_id, "export_blocked",
-                detail={"code": "edit_required", "version": version,
-                        "failed_job_id": prior_failure["id"]},
-                origin="server")
-            return jsonify({
-                "error": "This edit did not pass the export safety check. "
-                         "The timeline needs to be repaired before exporting; "
-                         "pressing Download again on the same version will "
-                         "not fix it.",
-                "code": "edit_required",
-                "failed_job_id": prior_failure["id"],
-            }), 409
-        # Download is an explicit, user-confirmed durable request. Other work
-        # by this account may affect when a worker claims it, but must never
-        # refuse it before it reaches the queue: production project 1139 had
-        # several physical slices of one logical edit counted as independent
-        # capacity and the user's export simply disappeared behind a 429.
-        # The same-project final guard above prevents duplicate encodes; queue
-        # ordering and worker lanes own actual fleet capacity.
-        job_id = _enqueue(cur, project_id, user_id, "final",
-                          {"edl_version": version})
-    record_client_event(
-        user_id, project_id, "export_job_started",
-        detail={"job_id": job_id, "version": version}, origin="server")
-    return jsonify({"job_id": job_id})
+            return jsonify(error="Project not found"), 404
+        # Validate the ENTIRE membership before enqueuing any work.
+        for item in items:
+            child = _project_for_user(cur, item["project_id"], user_id)
+            if not child or child.get("parent_project_id") != project_id:
+                return jsonify(error="Every short must belong to this project."), 404
+        results = []
+        # Stable lock order also makes overlapping batch submissions safe.
+        for item in sorted(items, key=lambda i: i["project_id"]):
+            cid, version = item["project_id"], item["edl_version"]
+            cur.execute("SELECT pg_advisory_xact_lock(%s)", (cid,))
+            latest = _latest_edl(cur, cid)
+            if not latest or latest["version"] != version:
+                results.append(dict(project_id=cid, status=409, code="stale_version",
+                                    error="This short changed; review its current version."))
+                continue
+            response = _request_final(cur, user_id, cid, version,
+                                      render_group=f"{project_id}-{cid % 2}")
+            response, status = response if isinstance(response, tuple) else (response, 200)
+            results.append(dict(project_id=cid, edl_version=version,
+                                status=status, **response.get_json()))
+    return jsonify(clips=results, max_parallel=2)
 
 
 @video_bp.route("/projects/<int:project_id>/render/preview", methods=["POST"])
@@ -5515,7 +5721,7 @@ def render_preview_endpoint(user_id, project_id):
 #               fires before a project even exists, so those users were
 #               indistinguishable from someone who signed up and walked away —
 #               65 of 214 accounts sit in that bucket.
-CLIENT_EVENT_KINDS = {"player_error", "player_error_probe",
+CLIENT_EVENT_KINDS = {"player_error", "player_error_probe", "player_composition_fallback", "player_composition_ready",
                       "player_recovered", "attach_failed",
                       "upload_started", "upload_rejected", "upload_failed",
                       "upload_deduped",
@@ -6028,6 +6234,7 @@ def shorts_board(user_id, project_id):
                     SELECT id, meta->>'sheet_key' AS sheet_key
                     FROM assets WHERE project_id = c.id AND kind = 'render'
                       AND meta->>'variant' = 'final'
+                      AND meta->>'edl_version' = edl.version::text
                     ORDER BY id DESC LIMIT 1
                 ) final_render ON TRUE
                 LEFT JOIN LATERAL (

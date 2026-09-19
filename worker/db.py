@@ -332,6 +332,18 @@ def claim_job(conn, types, max_attempts):
                        < %s)"""
         params.extend([max_attempts, config.STALE_AFTER_S, max_attempts,
                        config.INDEX_FAIR_SHARE_PER_PROJECT])
+    render_group_where = """
+                  AND (video_jobs.payload->>'render_group' IS NULL OR NOT EXISTS (
+                    SELECT 1 FROM video_jobs ahead
+                    WHERE ahead.user_id = video_jobs.user_id
+                      AND ahead.type = video_jobs.type
+                      AND ahead.payload->>'render_group' = video_jobs.payload->>'render_group'
+                      AND ahead.id <> video_jobs.id
+                      AND ((ahead.state = 'running' AND ahead.heartbeat_at >= NOW()
+                            - make_interval(secs => %s))
+                           OR (ahead.state = 'queued' AND ahead.id < video_jobs.id
+                               AND ahead.attempts < %s))))"""
+    params.extend([config.STALE_AFTER_S, max_attempts])
     with conn.cursor() as cur:
         cur.execute(f"""
             UPDATE video_jobs
@@ -366,6 +378,7 @@ def claim_job(conn, types, max_attempts):
                   {remote_where}
                   {serial_where}
                   {index_fair_where}
+                  {render_group_where}
                 ORDER BY CASE type WHEN 'preview' THEN 0
                                    WHEN 'final' THEN 1 ELSE 2 END,
                          COALESCE(u.is_subscribed, 0) DESC,
@@ -2270,6 +2283,14 @@ def insert_edl(conn, project_id, edl_json, created_by, job_id=None,
     have created.
     """
     with conn.cursor() as cur:
+        # The API batch writer takes this same lock. A worker that read an
+        # older document must not silently overwrite a newer manual/MCP edit.
+        cur.execute("SELECT pg_advisory_xact_lock(%s)", (project_id,))
+        if before_version is not None:
+            cur.execute("SELECT MAX(version) AS version FROM edls WHERE project_id=%s", (project_id,))
+            current = (cur.fetchone() or {}).get("version")
+            if current != before_version:
+                raise ValueError(f"Edit version changed from {before_version} to {current}; read the current edit before retrying.")
         cur.execute("""
             INSERT INTO edls (project_id, version, json, created_by)
             VALUES (%s,
