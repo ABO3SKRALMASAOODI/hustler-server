@@ -1100,6 +1100,26 @@ def _interpret_cloudflare_terminal(data, job):
     try:
         return _interpret_executor_data(data, job)
     except Exception as exc:
+        # A failed startup can end in the router before Python ever runs and
+        # closes its ledger. Release only this positively terminal identity,
+        # including when provider fallback is disabled; otherwise requeueing
+        # leaves the retry fenced out until the old provider deadline.
+        if isinstance(data, dict) and data.get("error") \
+                and job.get("id") is not None \
+                and job.get("total_claims") is not None:
+            ledger = dbx.Db()
+            try:
+                ledger.run(dbx.finish_remote_execution, job["id"],
+                           job["total_claims"], "failed", exc,
+                           "cloudflare", _cloudflare_call_id(job))
+            except Exception as close_error:
+                # The guardian observes queued leases too, so a failed
+                # bookkeeping write can recover without launching twice.
+                print(f"[dispatcher] terminal Cloudflare ledger close for "
+                      f"{job['id']} deferred ({type(close_error).__name__})",
+                      flush=True)
+            finally:
+                ledger.reset()
         terminal = CloudflareTerminalFailure(str(exc))
         for attr in ("failure_kind", "retryable", "max_attempts",
                      "agent_repairable", "executor_timings"):
