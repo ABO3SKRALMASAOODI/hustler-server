@@ -1,6 +1,6 @@
 {
   "name": "valmera",
-  "version": "0.1.0",
+  "version": "0.1.0+codex.20260919185204",
   "description": "Direct Valmera video editing with a durable topic-to-shorts coordinator workflow.",
   "author": {
     "name": "Valmera"
@@ -9,10 +9,13 @@
   "interface": {
     "displayName": "Valmera",
     "shortDescription": "Create story-led shorts with Valmera",
-    "longDescription": "Connect to Valmera's direct editor tools and coordinate a topic-to-shorts workflow: source acquisition, story selection, reference research, child editing, factual preview verification, repair, and Studio-ready handoff.",
+    "longDescription": "Connect to Valmera's direct editor tools and coordinate a topic-to-shorts workflow: taste calibration, source acquisition, story selection, bounded parallel editing, factual preview verification, repair, final export, and a publisher-ready handoff manifest.",
     "developerName": "Valmera",
     "category": "Productivity",
-    "capabilities": ["Interactive", "Write"],
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
     "websiteURL": "https://valmera.io",
     "privacyPolicyURL": "https://valmera.io/privacy",
     "termsOfServiceURL": "https://valmera.io/terms",

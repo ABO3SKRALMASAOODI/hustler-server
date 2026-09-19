@@ -1,7 +1,7 @@
 interface:
   display_name: "Valmera Podcast Shorts"
-  short_description: "Turn topics into verified story shorts"
-  default_prompt: "Use $valmera-podcast-shorts with @valmera on this topic: find a new long YouTube source and related viral Short reference, select every qualifying story yourself, assign story-specific visible child editors, and independently QC every finished render using dense sampled frames, full-stream ASR of the actual current preview, exhausted caption evidence, metadata, EDL facts, and deterministic aggregate audio evidence."
+  short_description: "Make polished story shorts in parallel"
+  default_prompt: "Use $valmera-podcast-shorts with @valmera to calibrate my editing taste, turn this podcast into the strongest coherent shorts with three parallel editors, verify every current preview, and export the approved finals with a CRM handoff manifest."
 
 policy:
   allow_implicit_invocation: false
