@@ -48,6 +48,10 @@ def test_fractional_rate_split_remains_one_physical_clip_after_persistence():
                                     {'at_program_s':8.318}, {})
     saved = video.wschemas.validate_edl(changed, None).model_dump()
     assert video._program_signature(saved) == video._program_signature(original)
+    changed, _ = video._apply_edl_op(saved, 'split_keep',
+                                    {'at_program_s':14.77}, {})
+    saved = video.wschemas.validate_edl(changed, None).model_dump()
+    assert video._program_signature(saved) == video._program_signature(original)
     # A genuine one-centisecond gap is a different edit, not a subdivision.
     saved['inserts'][1]['source_start_s'] += .01
     assert video._program_signature(saved) != video._program_signature(original)

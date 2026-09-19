@@ -39,6 +39,7 @@ def canonical_program(edl):
     result["keep"] = keep
     inserts = []
     canvas = not keep and bool(result.get("canvas"))
+    previous_piece_end = None
     for item in result.get("inserts") or []:
         previous = inserts[-1] if inserts else None
         ignore = {"id", "duration_s", "source_start_s"}
@@ -49,13 +50,17 @@ def canonical_program(edl):
                 and all(previous.get(k) == item.get(k)
                         for k in (set(previous) | set(item)) - ignore)
                 and round(float(item.get("source_start_s") or 0), 2)
-                    == round(float(previous.get("source_start_s") or 0)
-                             + previous["duration_s"]
-                             * (previous.get("rate") or 1), 2)):
+                    == previous_piece_end):
             previous["duration_s"] = round(previous["duration_s"]
                                            + item["duration_s"], 3)
         else:
             inserts.append(item)
+        # Compare each persisted adjacent piece, not a growing merged span:
+        # repeated fractional-rate splits can round their source edges by a
+        # centisecond without creating a real authored gap.
+        previous_piece_end = round(float(item.get("source_start_s") or 0)
+                                   + item["duration_s"]
+                                   * (item.get("rate") or 1), 2)
     cursor = 0.0
     for item in inserts:
         item.pop("split_parent", None)
