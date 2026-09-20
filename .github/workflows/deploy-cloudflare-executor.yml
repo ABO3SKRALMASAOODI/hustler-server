@@ -70,7 +70,10 @@ jobs:
             --progress-spinner off
           python -m compileall -q worker
           python worker/skill_validator.py
-          PYTHONPATH=. python -m pytest -q worker/tests
+          # Production credentials are needed by the schema preflight above,
+          # never by unit/media tests or provider-health lookups inside them.
+          SKIP_DB_INIT=1 DATABASE_URL=postgresql://stub/stub PYTHONPATH=worker \
+            python -m pytest -q worker/tests
 
       - name: require durable provider ownership schema
         env:
