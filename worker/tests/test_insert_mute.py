@@ -133,7 +133,7 @@ def test_mute_toggles_and_survives_other_edits():
     assert "audio back ON" in res2
 
 
-def test_mute_accepts_the_stale_mcp_string_and_rejects_images():
+def test_mute_accepts_stale_mcp_string_and_preserves_image_edits():
     e = default_edl(SRC)
     e["keep"] = [[113.7, 117.25]]
     e["inserts"] = [{"id": "ins1", "kind": "video", "asset_key": REC,
@@ -146,6 +146,9 @@ def test_mute_accepts_the_stale_mcp_string_and_rejects_images():
     res = agent_tools.set_insert_window(ctx, "ins1", mute="true")
     assert res.startswith("EDL v"), res
     assert ctx.latest_edl()["json"]["inserts"][0]["mute"] is True
-    assert "REJECTED" in agent_tools.set_insert_window(ctx, "im1", mute=True)
+    result = agent_tools.set_insert_window(ctx, "im1", mute=True, duration_s=2.5)
+    assert result.startswith("EDL v"), result
+    assert ctx.latest_edl()["json"]["inserts"][1]["duration_s"] == 2.5
+    assert not ctx.latest_edl()["json"]["inserts"][1].get("mute")
     assert "REJECTED" in agent_tools.set_insert_window(ctx, "ins1",
                                                        mute="maybe")

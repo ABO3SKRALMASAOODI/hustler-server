@@ -43,12 +43,23 @@ def apply_batch(before, operations, duration, allowed_keys):
     if len(json.dumps(operations, allow_nan=False)) > 256_000:
         raise ValueError("This edit batch is too large; split it into smaller batches.")
     edl = copy.deepcopy(before)
+    operations = copy.deepcopy(operations)
     for op in operations:
         if not isinstance(op, dict) or set(op) - {"action", "layer", "value", "id"}:
             raise ValueError("An operation accepts action, layer, value and id only.")
         action, layer = op.get("action"), op.get("layer")
+        if layer == "text":
+            layer = op["layer"] = "texts"
+        # An explicitly named object is an item patch, never a replacement
+        # for its entire list. Preserve its siblings and still validate the
+        # resulting EDL atomically below.
+        if action == "set" and layer in ITEM_LAYERS and op.get("id") \
+                and isinstance(op.get("value"), dict):
+            action = op["action"] = "upsert"
         if not isinstance(layer, str) or layer not in LAYERS:
-            raise ValueError(f"Unsupported batch layer: {layer}.")
+            raise ValueError(f"Unsupported batch layer: {layer}. "
+                             "Use get_edl for exact layer shapes; transitions "
+                             "are inside effects, or call set_transitions.")
         if action == "set":
             if "value" not in op:
                 raise ValueError("A set operation requires value.")

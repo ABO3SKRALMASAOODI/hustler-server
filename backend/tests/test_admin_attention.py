@@ -109,3 +109,12 @@ def test_shorts_board_uses_one_child_snapshot_query():
     assert source.count("cur.execute(") == 3
     assert "LEFT JOIN LATERAL" in source
     assert "boot_id" in source and "preview_asset_id" in source
+
+
+def test_reliability_includes_agent_tools_without_double_counting_mcp_activity():
+    source = inspect.getsource(inspect.unwrap(video_reliability))
+    assert "FROM chat_messages cm" in source
+    assert "COALESCE(cm.meta->>'source', 'agent') != 'mcp'" in source
+    assert 'mcp_tools_total + agent_tools_total' in source
+    assert '"logical_agent_runs"' in source
+    assert "latest_status = 'continued'" in source

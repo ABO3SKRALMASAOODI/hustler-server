@@ -588,7 +588,7 @@ def record_agent_turn_baseline(conn, job_id, total_claims, version, digest):
 
 
 def enqueue_agent_continuation(conn, project_id, user_id, root_job_id,
-                               sequence, payload):
+                               sequence, payload, parent_job_id=None, parent_claim=None):
     """Idempotently enqueue one physical slice of a logical agent request."""
     root_job_id = int(root_job_id)
     sequence = max(1, int(sequence))
@@ -602,6 +602,14 @@ def enqueue_agent_continuation(conn, project_id, user_id, root_job_id,
                 continuation_sequence=sequence,
                 logical_turn_continuation=True)
     with conn.cursor() as cur:
+        if parent_job_id is not None:
+            # Hold the parent lease through insertion. Operator stops/reaper
+            # replacements cannot race a stale executor into another child.
+            cur.execute("""SELECT id FROM video_jobs WHERE id = %s
+                           AND state = 'running' AND total_claims = %s
+                           FOR UPDATE""", (parent_job_id, parent_claim))
+            if cur.fetchone() is None:
+                raise JobLeaseLost("Parent execution lease ended before continuation")
         # A function retry after enqueue but before its response must discover
         # the same child instead of creating two physical continuations.
         cur.execute("SELECT pg_advisory_xact_lock(%s, %s)",
@@ -2275,7 +2283,7 @@ def previous_edl_version(conn, project_id, before_version):
 
 
 def insert_edl(conn, project_id, edl_json, created_by, job_id=None,
-               mutation_tool=None, before_version=None):
+               mutation_tool=None, before_version=None, total_claims=None):
     """Append one immutable EDL version and its queue-job mutation receipt.
 
     The receipt is written in the *same transaction* as the EDL. That makes
@@ -2288,6 +2296,12 @@ def insert_edl(conn, project_id, edl_json, created_by, job_id=None,
         # The API batch writer takes this same lock. A worker that read an
         # older document must not silently overwrite a newer manual/MCP edit.
         cur.execute("SELECT pg_advisory_xact_lock(%s)", (project_id,))
+        if job_id is not None and total_claims is not None:
+            cur.execute("""SELECT id FROM video_jobs WHERE id = %s
+                           AND state = 'running' AND total_claims = %s
+                           FOR UPDATE""", (job_id, total_claims))
+            if cur.fetchone() is None:
+                raise JobLeaseLost("Execution lease ended before timeline write")
         if before_version is not None:
             cur.execute("SELECT MAX(version) AS version FROM edls WHERE project_id=%s", (project_id,))
             current = (cur.fetchone() or {}).get("version")

@@ -251,3 +251,26 @@ def test_failed_justification_write_does_not_mutate_live_verification_state():
     assert result.startswith("TRANSIENT FAILURE")
     assert ctx.verification_records[2] is record
     assert ctx.verification_records[2]["status"] == "repair_required"
+
+
+def test_program_length_ignores_later_scene_and_reveal_ranges():
+    prompt = ('Create a 30–40 second vertical 9:16 Instagram Story/Reel ad for JAPAN APPAREL. '
+              'Keep shots 3–5 seconds. By around 8–10 seconds, the viewer '
+              'should clearly understand this is an ad for a premium T-shirt.')
+    target = quality_verifier.requested_duration_target(prompt)
+    assert (target['min_s'], target['max_s']) == (30, 40)
+
+
+def test_ambiguous_ranges_do_not_become_whole_program_constraints():
+    for text in ['By 8–10 seconds show the T-shirt.',
+                 'Hold each shot 3–5 seconds.', 'Add text at 12–15 seconds.',
+                 'Make the title last 2 seconds.',
+                 'By around 8–10 seconds the ad should be clear.']:
+        assert quality_verifier.requested_duration_target(text) is None
+
+
+def test_latest_explicit_whole_program_target_wins():
+    target = quality_verifier.requested_duration_target(
+        'Make a 30–40 second ad. Actually make it 25 seconds. '
+        'Show branding at 8–10 seconds.')
+    assert target['target_s'] == 25

@@ -574,6 +574,28 @@ def audio_stream_of(path):
     return {"codec": (s.get("codec_name") or "").lower(), "channels": ch}
 
 
+def audio_has_signal(path):
+    """Distinguish an audio stream from actual sound, across the whole file.
+
+    A video can contain an AAC stream made entirely of zeros. Stream presence
+    alone previously created 'music' assets from four silent customer clips.
+    Decode only audio; do not sample just the opening (which may be silent).
+    """
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-nostats", "-i", path,
+             "-map", "0:a:0", "-vn", "-sn", "-af", "volumedetect",
+             "-f", "null", "-"], capture_output=True, text=True, timeout=180)
+    except subprocess.TimeoutExpired as exc:
+        raise MediaError("audio presence analysis timed out") from exc
+    peaks = re.findall(r"max_volume:\s*(-?[\d.]+|[-+]?inf)\s*dB", proc.stderr)
+    if proc.returncode or not peaks:
+        raise MediaError("could not measure audio presence")
+    # volumedetect's 16-bit silence floor is -91 dB. Preserve quiet but real
+    # audio; gain/mastering decisions belong to the editor and audio review.
+    return float(peaks[-1]) > -90.9
+
+
 def extract_audio_track(src, dst):
     """Write a video's audio to a standalone .m4a and return its duration.
 
@@ -603,6 +625,9 @@ def extract_audio_track(src, dst):
             last_err = str(e)
             continue
         if os.path.isfile(dst) and os.path.getsize(dst) > 0:
+            if not audio_has_signal(dst):
+                os.unlink(dst)
+                raise MediaError("no audio stream with audible signal (silent samples)")
             return probe_audio_duration(dst)
         last_err = "ffmpeg reported success but wrote no audio"
         try:
