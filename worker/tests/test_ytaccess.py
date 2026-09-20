@@ -104,6 +104,9 @@ def test_door5_secrets_scan_prefers_cookie_named_files(monkeypatch,
 
 
 def test_door1_db_row_with_ttl_cache(monkeypatch):
+    # A fresh host can have monotonic uptime below the cache TTL. An empty
+    # cache must still read its first value, even at monotonic zero.
+    monkeypatch.setattr(ytaccess.time, "monotonic", lambda: 0.0)
     monkeypatch.setattr(config, "DATABASE_URL", "postgres://x")
     monkeypatch.setattr(config, "YTDLP_COOKIES_KV_KEY", "ytdlp_cookies")
     calls = {"n": 0}
@@ -140,6 +143,7 @@ def test_the_psql_row_overrides_a_mounted_file(monkeypatch, tmp_path):
 
 
 def test_youtube_walled_reads_the_probe_row(monkeypatch):
+    monkeypatch.setattr(ytaccess.time, "monotonic", lambda: 0.0)
     monkeypatch.setattr(config, "DATABASE_URL", "postgres://x")
     ytaccess._health_cache_reset()
     state = {"row": None}
