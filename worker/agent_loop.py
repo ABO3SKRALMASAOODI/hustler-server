@@ -25,6 +25,7 @@ import motion_judge
 import music_search
 import preview_critic
 import preference_memory
+import quality_verifier
 import reference_profile
 import remote
 import request_intent
@@ -1620,6 +1621,9 @@ def _adopt_steering_messages(ctx, worker_db, job, session_id, messages,
         joined.append(content)
         newest = max(newest, int(row["id"]))
     if joined:
+        ctx.verification_request = (
+            str(quality_verifier.request_text_for(ctx)) + "\n" +
+            "\n".join(joined))[-8000:]
         ctx.user_message = (str(getattr(ctx, "user_message", "")) + "\n" +
                             "\n".join(joined))[-8000:]
         ctx.editing_metrics["steering_messages_adopted"] = (
@@ -1852,11 +1856,11 @@ def run_agent_job(worker_db, job):
     operator_instruction = str(payload.get("operator_instruction") or "")
     if not payload.get("operator_repair"):
         operator_instruction = ""
-    # Keep the customer's request authoritative and add the audit repair as a
-    # private execution requirement.  The combined text also reaches duration
-    # and verification checks, so a recovery job cannot claim success after
-    # merely replying to the earlier request again.
+    # Keep verbatim customer constraints separate from private repair prose.
+    # A recovery note can discuss a wrong duration; it is not a new target.
     ctx.user_message = (user_message.get("content") or "")[:4000]
+    ctx.verification_request = continuation_state.get(
+        "verification_request", ctx.user_message)
     if operator_instruction:
         ctx.user_message = (ctx.user_message + "\n\n" +
                             operator_instruction[:8000])
@@ -2097,6 +2101,7 @@ def run_agent_job(worker_db, job):
                     "adopted_steer_job_ids": sorted(
                         getattr(ctx, "adopted_steer_job_ids", set())),
                     "tool_failure_memory": getattr(ctx, "tool_failure_memory", {}),
+                    "verification_request": ctx.verification_request,
                     "turn_tool_outcomes": ctx.turn_tool_outcomes[-500:],
                     "loaded_tool_domains": sorted(
                         getattr(ctx, "_loaded_tool_domains", None) or []),
@@ -4198,6 +4203,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             "adopted_steer_job_ids": sorted(
                 getattr(ctx, "adopted_steer_job_ids", set())),
             "tool_failure_memory": getattr(ctx, "tool_failure_memory", {}),
+            "verification_request": ctx.verification_request,
             "turn_tool_outcomes": ctx.turn_tool_outcomes[-500:],
             "loaded_tool_domains": sorted(
                 getattr(ctx, "_loaded_tool_domains", None) or []),

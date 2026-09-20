@@ -1051,6 +1051,11 @@ CLOUDFLARE_BUSY_MAX_DEFERRALS = max(1, min(
 # deliberately share a project shard and a new claim cannot move that shard.
 CLOUDFLARE_BUSY_WAIT_S = max(0.0, min(300.0, float(os.getenv(
     "CLOUDFLARE_BUSY_WAIT_S", "120"))))
+# Render and Cloudflare publish independently. Source/image mismatch is
+# proven pre-compute admission, so retain the same heartbeated queue lease
+# across a bounded rollout window instead of burning retries/reuploads.
+CLOUDFLARE_ROLLOUT_WAIT_S = max(0.0, min(1800.0, float(os.getenv(
+    "CLOUDFLARE_ROLLOUT_WAIT_S", "1800"))))
 CLOUDFLARE_MODAL_FALLBACK = os.getenv(
     "CLOUDFLARE_MODAL_FALLBACK", "0") == "1"
 CLOUDFLARE_MAX_INPUT_BYTES = int(os.getenv(

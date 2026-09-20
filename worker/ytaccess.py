@@ -174,14 +174,14 @@ def _scan_secrets_dir():
 # then a download in the same turn), and a jar update landing within five
 # minutes is prompt enough for an operator working over psql.
 _KV_TTL_S = 300.0
-_kv_cache = {"at": 0.0, "content": None}
+_kv_cache = {"at": None, "content": None}
 
 
 def _kv_cookies():
     if not config.DATABASE_URL or not config.YTDLP_COOKIES_KV_KEY:
         return None
     now = time.monotonic()
-    if now - _kv_cache["at"] < _KV_TTL_S:
+    if _kv_cache["at"] is not None and now - _kv_cache["at"] < _KV_TTL_S:
         return _kv_cache["content"]
     content = None
     try:
@@ -195,13 +195,13 @@ def _kv_cookies():
 
 
 def _kv_cache_reset():
-    _kv_cache.update(at=0.0, content=None)
+    _kv_cache.update(at=None, content=None)
 
 
 # The boot probe's verdict, read back so callers can ROUTE on it. find_song
 # uses this to lead with SoundCloud when YouTube is blocking this box —
 # there is no point recommending a source the datacenter IP cannot reach.
-_health_cache = {"at": 0.0, "walled": None}
+_health_cache = {"at": None, "walled": None}
 
 
 def youtube_walled():
@@ -215,7 +215,7 @@ def youtube_walled():
     if not config.DATABASE_URL:
         return False
     now = time.monotonic()
-    if now - _health_cache["at"] < _KV_TTL_S:
+    if _health_cache["at"] is not None and now - _health_cache["at"] < _KV_TTL_S:
         return bool(_health_cache["walled"])
     walled = False
     try:
@@ -242,7 +242,7 @@ def youtube_walled():
 
 
 def _health_cache_reset():
-    _health_cache.update(at=0.0, walled=None)
+    _health_cache.update(at=None, walled=None)
 
 
 def provider_youtube_ok(provider):

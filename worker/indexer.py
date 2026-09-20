@@ -219,7 +219,11 @@ def run_index_job(worker_db, job):
     # and idempotent — a reaped retry that finds the object copied skips
     # straight through. A missing source is an honest failure the studio
     # surfaces, and the user can simply upload normally.
-    dedup_src = (job["payload"].get("dedup_src") or "").strip()
+    # Self-heal jobs can carry only asset_id. Upload provenance is durable
+    # on the asset, so recovering a failed job must not lose its source.
+    upload_meta = asset.get("meta") or {}
+    dedup_src = (job["payload"].get("dedup_src") or
+                 upload_meta.get("dedup_src") or "").strip()
     if dedup_src:
         if not storage.exists(asset["storage_key"]):
             if not storage.exists(dedup_src):
@@ -239,7 +243,8 @@ def run_index_job(worker_db, job):
     # what makes every retry self-healing: a re-index that runs after the
     # background upload lands takes the full, trusted path with no special
     # case, and a client proxy is only ever used while there is no alternative.
-    client_proxy_key = (job["payload"].get("client_proxy_key") or "").strip()
+    client_proxy_key = (job["payload"].get("client_proxy_key") or
+                        upload_meta.get("client_proxy_key") or "").strip()
     from_client_proxy = bool(client_proxy_key) and \
         not storage.exists(asset["storage_key"])
     if client_proxy_key and not from_client_proxy:

@@ -11,6 +11,28 @@ def _codes(edl, index=None):
             quality_verifier.deterministic_findings(edl, index or {})}
 
 
+def test_internal_repair_text_cannot_replace_customer_duration_constraint():
+    ctx = SimpleNamespace(
+        verification_request="Make a 30–40 second ad",
+        user_message="Make a 30–40 second ad\nOperator: make a 10 second video")
+    for duration, wrong_length in ((32, False), (10, True)):
+        record = quality_verifier.build_verification_record(
+            1, 2, {}, default_edl(duration), {},
+            preview={"edl_version": 2, "duration_s": duration},
+            request_text=quality_verifier.request_text_for(ctx))
+        codes = {row["code"] for row in record["unresolved_findings"]}
+        assert ("requested_duration_outside_target" in codes) is wrong_length
+
+
+def test_verification_request_preserves_empty_customer_text_and_mcp_fallback():
+    assert quality_verifier.request_text_for(SimpleNamespace(
+        verification_request="", user_message="Operator: make a 10s video")) == ""
+    assert quality_verifier.request_text_for(SimpleNamespace(
+        verification_request=None, user_message="Make a 20s video")) == "Make a 20s video"
+    assert quality_verifier.request_text_for(SimpleNamespace(
+        user_message="Make a 20s video")) == "Make a 20s video"
+
+
 def test_manifest_names_departments_ranges_and_required_evidence():
     before = default_edl(20)
     after = deepcopy(before)
@@ -296,3 +318,16 @@ def test_latest_explicit_whole_program_target_wins():
         'Make a 30–40 second ad. Actually make it 25 seconds. '
         'Show branding at 8–10 seconds.')
     assert target['target_s'] == 25
+
+
+def test_negated_duration_in_repair_direction_never_replaces_customer_target():
+    for prohibition in (
+            "Do not reset the EDL, rebuild the montage, or shorten it to 10 seconds.",
+            "Don't make it 10 seconds.",
+            "Never cut it to 10 seconds.",
+            "Avoid a 10 second video.",
+            "No 10 second video."):
+        target = quality_verifier.requested_duration_target(
+            "Create a 30–40 second vertical 9:16 Instagram Story/Reel ad. " + prohibition)
+        assert (target['min_s'], target['max_s']) == (30, 40)
+        assert quality_verifier.requested_duration_target(prohibition) is None

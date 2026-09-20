@@ -63,6 +63,19 @@ class CloudflareCapacityBusy(CloudflareLaunchUnavailable):
     """
 
 
+class CloudflareRolloutPending(CloudflareLaunchUnavailable):
+    """A source/role readiness gate proved that no compute was accepted.
+
+    Queue-backed calls wait within their existing lease. Once that bounded
+    admission window ends, ordinary media retries must not start it again.
+    """
+
+    failure_kind = "provider_rollout_pending"
+    retryable = False
+    max_attempts = 0
+    agent_repairable = False
+
+
 class CloudflareTerminalFailure(RemoteExecutorError):
     """A named Cloudflare call ended; an alternate provider is now safe."""
 
@@ -1167,11 +1180,10 @@ def _cloudflare_preflight(timeout=10):
         local_source = version.code_version()
         if remote_source != "unknown" and local_source != "unknown" and \
                 remote_source != local_source:
-            # No call has been reserved yet. Refusing this provider here does
-            # not stop the user; _run_remote immediately uses Modal. It only
-            # closes the deploy-skew window in which a newer EDL reaches an
-            # older renderer/orchestrator.
-            raise CloudflareLaunchUnavailable(
+            # No call has been reserved. Wait for this rollout when there is
+            # no configured alternate; failing ordinary jobs here makes
+            # every deployment consume the customer's retry allowance.
+            raise CloudflareRolloutPending(
                 "Cloudflare source version does not match the dispatcher "
                 f"({remote_source} != {local_source})")
         _health_cache[key] = (now, body)
@@ -1391,6 +1403,11 @@ def _run_cloudflare(job):
                     _reconcile_completed_cloudflare_call(
                         response_body.get("active_call_id"), lane)
                     raise CloudflareCapacityBusy(launch_error)
+                if response.status_code == 503 and launch_error.startswith((
+                        "container readiness mismatch ",
+                        "container readiness failed:",
+                        "Cloudflare container image is not ready")):
+                    raise CloudflareRolloutPending(launch_error)
                 raise CloudflareLaunchUnavailable(launch_error)
             # The Worker may have lost its side of an already-running
             # container request. Reconnect to the deterministic call before
@@ -1451,26 +1468,36 @@ def _run_cloudflare_with_capacity_wait(job):
     never wait after a terminal compute failure, and never wait on a paid
     synchronous executor. Dispatcher heartbeats continue during admission.
     """
-    wait_s = config.CLOUDFLARE_BUSY_WAIT_S if job.get("id") is not None else 0
+    queued = job.get("id") is not None
+    wait_s = config.CLOUDFLARE_BUSY_WAIT_S if queued else 0
+    rollout_wait_s = config.CLOUDFLARE_ROLLOUT_WAIT_S if queued else 0
     if config.CLOUDFLARE_MODAL_FALLBACK and config.MODAL_EXECUTOR_ENABLED \
             and job.get("type") in config.MODAL_EXECUTOR_TYPES:
         wait_s = 0  # A configured alternate can serve it immediately.
-    deadline = time.monotonic() + wait_s
+        rollout_wait_s = 0
+    started = time.monotonic()
+    deadline = started + wait_s
+    rollout_deadline = started + rollout_wait_s
     delay = 2.0
     while True:
         try:
             return _run_cloudflare(job)
-        except CloudflareCapacityBusy:
-            remaining = deadline - time.monotonic()
+        except (CloudflareCapacityBusy, CloudflareRolloutPending) as exc:
+            rollout = isinstance(exc, CloudflareRolloutPending)
+            remaining = (rollout_deadline if rollout else deadline) - time.monotonic()
             if remaining <= 0:
                 raise
+            if rollout:
+                # Give staged containers time to retire, rather than waking
+                # the old image continuously during its rollout grace.
+                delay = max(delay, 15.0)
             time.sleep(min(delay, remaining))
-            delay = min(delay * 2, 20.0)
+            delay = min(delay * 2, 60.0 if rollout else 20.0)
             probe = dbx.Db()
             try:
                 if not probe.run(dbx.lease_is_current, job["id"],
                                  job.get("total_claims")):
-                    raise dbx.JobLeaseLost("job lease changed during capacity wait")
+                    raise dbx.JobLeaseLost("job lease changed during admission wait")
             finally:
                 probe.reset()
 

@@ -410,6 +410,12 @@ _PROGRAM_DURATION_RE = re.compile(
     r"(\d{1,4}(?:\.\d+)?))?\s*[-–]?\s*(?:s|sec(?:ond)?s?)\b", re.I)
 
 
+def request_text_for(ctx):
+    """Hard request constraints come from the customer, not repair prose."""
+    customer = getattr(ctx, "verification_request", None)
+    return customer if customer is not None else getattr(ctx, "user_message", "")
+
+
 def _program_duration_context(text, match):
     """Require a program-length instruction, not a scene/placement cue.
 
@@ -418,6 +424,13 @@ def _program_duration_context(text, match):
     """
     before = re.split(r"[\n.!?;]", text[:match.start()])[-1].lower()
     after = re.split(r"[\n.!?;]", text[match.end():])[0].lower()
+    # Recovery instructions and user briefs often explicitly prohibit an
+    # earlier bad duration: "Do not reset, rebuild, or shorten it to 10s."
+    # Keep the negation across commas/list items. Ambiguous mixed clauses
+    # belong to the editorial reviewer, never a fabricated hard constraint.
+    if re.search(r"\b(?:do not|don't|never|avoid|must not|should not|cannot)\b", before) \
+            or re.search(r"\bno\s*$", before):
+        return False
     if re.search(r"\b(?:at|by|after|before|from|first|last|within)\s+"
                  r"(?:(?:around|about|roughly|the)\s+)*$", before):
         return False
