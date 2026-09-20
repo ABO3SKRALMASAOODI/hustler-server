@@ -466,6 +466,35 @@ def requested_duration_target(request_text):
             "approximate": approximate, "request": match.group(0)}
 
 
+def _requested_transitions(request_text):
+    """Require affirmative intent before imposing a transition presence gate.
+
+    A mention in an avoidance list is not a request. Keep this deliberately
+    narrow; the visual reviewer still receives the full editorial brief.
+    Later blanket refusals supersede an earlier request, while avoiding a
+    particular style does not cancel an explicit request for another style.
+    """
+    requested = False
+    clauses = re.split(r"[.!?;\n,]+|\b(?:but|however)\b",
+                       str(request_text or "").lower())
+    for clause in clauses:
+        if not re.search(r"\btransitions?\b", clause):
+            continue
+        if re.search(
+                r"\b(?:no|without|remove|avoid)\s+"
+                r"(?:(?:any|all|the)\s+)?transitions?\b|"
+                r"\b(?:do not|don't|never)\s+(?:add|use|include|apply)\s+"
+                r"(?:(?:any|all|the)\s+)?transitions?\b", clause):
+            requested = False
+            continue
+        if re.search(r"\b(?:avoid|no|not|without|don't|never)\b", clause):
+            continue
+        if re.search(r"\b(?:add|use|include|apply|want|need|with)\s+"
+                     r"(?:[a-z-]+\s+){0,5}transitions?\b", clause):
+            requested = True
+    return requested
+
+
 def _request_findings(edl, request_text):
     findings = []
     target = requested_duration_target(request_text)
@@ -486,12 +515,7 @@ def _request_findings(edl, request_text):
     # at all. Keep the detector deliberately narrow and honor explicit
     # negation; this is contract fulfillment, not style preference.
     ask = str(request_text or "").lower()
-    asks_transition = bool(re.search(r"\btransitions?\b", ask))
-    rejects_transition = bool(
-        re.search(r"\b(?:no|without|remove|do\s+not|don't)\b"
-                  r"(?:\s+\w+){0,3}\s+transitions?\b", ask)
-        or re.search(r"\bavoid\s+(?:all\s+)?transitions?\b", ask))
-    if asks_transition and not rejects_transition \
+    if _requested_transitions(ask) \
             and not ((edl.get("effects") or {}).get("transition")):
         findings.append(_finding(
             "requested_transitions_missing", "motion",

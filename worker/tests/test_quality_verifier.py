@@ -183,6 +183,28 @@ def test_avoid_excessive_transitions_still_requires_a_restrained_treatment():
             edl, request_text="Add transitions, but avoid excessive transitions")}
 
 
+def test_transition_avoidance_lists_do_not_invent_positive_requirements():
+    for request in (
+            "Use hard cuts, movement-based cuts, and occasional match cuts.\n"
+            "Avoid:\n- cheesy transitions\n- glitch effects\n- excessive zoom effects",
+            "Avoid cheesy transitions.",
+            "Transitions should not be flashy.",
+            "No stock footage. No cheesy transitions. Keep it editorial."):
+        assert "requested_transitions_missing" not in {
+            row["code"] for row in quality_verifier.deterministic_findings(
+                default_edl(32), request_text=request)}
+
+
+def test_transition_request_respects_later_blanket_refusal():
+    for request in ("Add smooth transitions. Actually use no transitions.",
+                    "Use transitions. Do not add any transitions after all."):
+        assert not quality_verifier._requested_transitions(request)
+    assert quality_verifier._requested_transitions(
+        "No transitions. Actually add subtle transitions between shots.")
+    assert quality_verifier._requested_transitions(
+        "Add subtle transitions. No cheesy transitions.")
+
+
 def test_duplicate_critic_findings_are_one_repair_record():
     edl = default_edl(10)
     record = quality_verifier.build_verification_record(
