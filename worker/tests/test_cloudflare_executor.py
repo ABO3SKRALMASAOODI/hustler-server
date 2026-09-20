@@ -362,9 +362,60 @@ def test_cloudflare_preflight_rejects_source_skew_before_launch(monkeypatch):
             "status": "ok", "provider": "cloudflare",
             "source_version": "stale-source"}))
 
-    with pytest.raises(remote.CloudflareLaunchUnavailable,
+    with pytest.raises(remote.CloudflareRolloutPending,
                        match="does not match"):
         remote._cloudflare_preflight()
+
+
+@pytest.mark.parametrize("message", [
+    "container readiness mismatch role=executor source=old-source",
+    "container readiness failed: connection refused",
+    "Cloudflare container image is not ready",
+])
+def test_proven_unlaunched_image_readiness_is_rollout_pending(monkeypatch, message):
+    _enable(monkeypatch)
+    events = []
+
+    class Ledger:
+        def run(self, fn, *args):
+            events.append((fn, args))
+            return True
+        def reset(self): pass
+
+    monkeypatch.setattr(remote.dbx, "Db", Ledger)
+    monkeypatch.setattr(remote.dbx, "mark_remote_owned", lambda _id: True)
+    monkeypatch.setattr(remote.dbx, "remote_launch_recorded", lambda _id: None)
+    monkeypatch.setattr(remote.dbx, "unmark_remote_owned", lambda _id: None)
+    monkeypatch.setattr(remote.requests, "get", lambda *_a, **_k: _Response({
+        "status": "ok", "provider": "cloudflare"}))
+    monkeypatch.setattr(remote.requests, "post", lambda *_a, **_k: _Response({
+        "error": message, "safe_to_fallback": True,
+    }, 503))
+    with pytest.raises(remote.CloudflareRolloutPending):
+        remote._run_cloudflare(dict(JOB))
+    assert any(fn is remote.dbx.finish_remote_execution and args[2] == "cancelled"
+               for fn, args in events)
+
+
+def test_readiness_error_without_no_acceptance_proof_reconnects(monkeypatch):
+    _enable(monkeypatch)
+    class Ledger:
+        def run(self, *_args, **_kwargs): return True
+        def reset(self): pass
+    monkeypatch.setattr(remote.dbx, "Db", Ledger)
+    monkeypatch.setattr(remote.dbx, "mark_remote_owned", lambda _id: True)
+    monkeypatch.setattr(remote.dbx, "remote_launch_recorded", lambda _id: None)
+    monkeypatch.setattr(remote.requests, "get", lambda *_a, **_k: _Response({
+        "status": "ok", "provider": "cloudflare"}))
+    monkeypatch.setattr(remote.requests, "post", lambda *_a, **_k: _Response({
+        "error": "container readiness mismatch role=executor source=old-source",
+    }, 503))
+    recovered = []
+    monkeypatch.setattr(remote, "_recover_cloudflare_result",
+                        lambda *args: recovered.append(args) or {"sentinel": True})
+    monkeypatch.setattr(remote, "_interpret_cloudflare_terminal", lambda data, job: data)
+    assert remote._run_cloudflare(dict(JOB)) == {"sentinel": True}
+    assert len(recovered) == 1
 
 
 def test_orchestration_is_cloudflare_eligible_without_media_shape(

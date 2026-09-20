@@ -90,6 +90,58 @@ def test_capacity_wait_is_bounded_and_stops_on_lost_ownership(monkeypatch, lease
     assert len(calls) == (3 if lease else 1)
 
 
+@pytest.mark.parametrize("outcome", ["ready", "timeout", "lease_lost"])
+def test_rollout_wait_keeps_one_claim_and_has_a_hard_deadline(monkeypatch, outcome):
+    import failure_policy
+    now, calls = [0.0], []
+    monkeypatch.setattr(remote.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(remote.time, "sleep", lambda delay: now.__setitem__(0, now[0] + delay))
+    monkeypatch.setattr(config, "CLOUDFLARE_MODAL_FALLBACK", False)
+    monkeypatch.setattr(config, "CLOUDFLARE_BUSY_WAIT_S", 1)
+    monkeypatch.setattr(config, "CLOUDFLARE_ROLLOUT_WAIT_S", 50)
+    class Probe:
+        def run(self, fn, *_args):
+            assert fn is db.lease_is_current
+            return outcome != "lease_lost"
+        def reset(self): pass
+    monkeypatch.setattr(db, "Db", Probe)
+    def launch(job):
+        calls.append(remote._cloudflare_call_id(job))
+        if outcome == "ready" and len(calls) == 3:
+            return {"done": True}
+        raise remote.CloudflareRolloutPending("deployment is not ready")
+    monkeypatch.setattr(remote, "_run_cloudflare", launch)
+    job = {"id": 42, "project_id": 7, "type": "preview", "total_claims": 2}
+    if outcome == "ready":
+        assert remote._run_cloudflare_with_capacity_wait(job) == {"done": True}
+        assert now[0] == 45
+    else:
+        expected = db.JobLeaseLost if outcome == "lease_lost" else remote.CloudflareRolloutPending
+        with pytest.raises(expected) as error:
+            remote._run_cloudflare_with_capacity_wait(job)
+        assert now[0] == (15 if outcome == "lease_lost" else 50)
+        assert not failure_policy.decision_for(error.value, "preview").retryable
+    assert len(set(calls)) == 1
+    assert job["total_claims"] == 2
+
+
+@pytest.mark.parametrize("synchronous,fallback", [(True, False), (False, True)])
+def test_rollout_wait_does_not_block_children_or_configured_alternate(monkeypatch, synchronous, fallback):
+    calls = []
+    monkeypatch.setattr(config, "CLOUDFLARE_MODAL_FALLBACK", fallback)
+    monkeypatch.setattr(config, "MODAL_EXECUTOR_ENABLED", True)
+    monkeypatch.setattr(config, "MODAL_EXECUTOR_TYPES", {"preview", "frames"})
+    def launch(job):
+        calls.append(job)
+        raise remote.CloudflareRolloutPending("deployment is not ready")
+    monkeypatch.setattr(remote, "_run_cloudflare", launch)
+    monkeypatch.setattr(remote.time, "sleep", lambda _delay: pytest.fail("must not wait"))
+    with pytest.raises(remote.CloudflareRolloutPending):
+        remote._run_cloudflare_with_capacity_wait(
+            {"id": None if synchronous else 42, "type": "frames" if synchronous else "preview"})
+    assert len(calls) == 1
+
+
 def test_canvas_proof_keeps_the_partially_visible_fourth_insert():
     import stitch
     from timeline import Timeline
