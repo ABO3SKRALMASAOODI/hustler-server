@@ -410,6 +410,12 @@ _PROGRAM_DURATION_RE = re.compile(
     r"(\d{1,4}(?:\.\d+)?))?\s*[-–]?\s*(?:s|sec(?:ond)?s?)\b", re.I)
 
 
+def request_text_for(ctx):
+    """Hard request constraints come from the customer, not repair prose."""
+    customer = getattr(ctx, "verification_request", None)
+    return customer if customer is not None else getattr(ctx, "user_message", "")
+
+
 def _program_duration_context(text, match):
     """Require a program-length instruction, not a scene/placement cue.
 

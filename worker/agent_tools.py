@@ -268,6 +268,10 @@ class ToolContext:
         # right up until the moment somebody asks for one, and a critic that
         # argues with an explicit instruction is worse than no critic.
         self.user_message = ""
+        # Agent recovery guidance is useful to the editor/reviewers but must
+        # not invent customer duration or transition constraints. None keeps
+        # the existing MCP context behavior when no separate request is set.
+        self.verification_request = None
         self.versions_written = []    # EDL versions created this turn
         # The last write's structural diff (edl_diff.change_ranges) plus the
         # version it produced — attached to that write's activity row so the
@@ -17597,7 +17601,7 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft"):
                 visual_findings=visual_record_findings,
                 audio_findings=audio_record_findings,
                 story_findings=story_record_findings,
-                request_text=getattr(ctx, "user_message", ""))
+                request_text=quality_verifier.request_text_for(ctx))
             if not hasattr(ctx, "verification_records"):
                 ctx.verification_records = {}
             ctx.verification_records[version] = verification

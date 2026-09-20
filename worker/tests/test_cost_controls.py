@@ -757,7 +757,8 @@ def test_live_turn_adopts_mid_edit_messages(monkeypatch):
             return {"messages": rows, "job_ids": [22]}
 
     class Ctx:
-        user_message = "trim the intro"
+        user_message = "trim the intro\nOperator: verify a 10 second video"
+        verification_request = "trim the intro"
         editing_metrics = {}
 
     monkeypatch.setattr(agent_loop, "_attachment_context",
@@ -771,6 +772,8 @@ def test_live_turn_adopts_mid_edit_messages(monkeypatch):
     assert "newest user message wins" in messages[0]["content"]
     assert Ctx.editing_metrics["steering_messages_adopted"] == 1
     assert ctx.adopted_steer_job_ids == {22}
+    assert ctx.verification_request == "trim the intro\nalso make it vertical"
+    assert "Operator:" in ctx.user_message
 
 
 def test_continuation_adopts_and_retires_steers_under_stable_root(monkeypatch):
