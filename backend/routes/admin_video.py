@@ -3107,8 +3107,10 @@ def repair_project_edit(project_id):
                 "Company-funded completion repair. Inspect the customer's "
                 "original request and the latest complete preview. Repair "
                 "every open verification finding, preserve already-correct "
-                "work, and do not reply until the exact latest EDL has a "
-                "complete preview with export_ready=true."
+                "work, and verify the exact latest EDL with a complete preview. "
+                "Only claim completion when export_ready=true. If a required "
+                "input or service is unavailable, preserve the edit and report "
+                "the specific blocker; do not repeat unchanged failed attempts."
             )
         job_id = _enqueue(cur, project_id, project["user_id"], "agent_turn", {
             "message_id": int(message["id"]),
@@ -3235,6 +3237,41 @@ def video_reliability():
                        WHERE type = 'mcp_tool'
                          AND {_mcp_refusal_sql()}) AS tool_refused
               FROM scoped_jobs
+            ), agent_calls AS MATERIALIZED (
+              SELECT 'done' AS state,
+                     jsonb_build_object(
+                       'text', SPLIT_PART(cm.content, ' → ', 2),
+                       'tool_outcome', cm.meta->'tool_outcome') AS result
+              FROM chat_messages cm
+              WHERE cm.role = 'activity' AND cm.meta ? 'tool'
+                AND COALESCE(cm.meta->>'source', 'agent') != 'mcp'
+                AND cm.created_at >= (NOW() AT TIME ZONE 'UTC') - INTERVAL '24 hours'
+                AND EXISTS (
+                    SELECT 1 FROM projects p JOIN users u ON u.id = p.user_id
+                    WHERE p.chat_session_id = cm.session_id AND {_scope('u')})
+            ), agent_call_rollup AS (
+              SELECT COUNT(*) AS agent_tools_total,
+                     COUNT(*) FILTER (WHERE {_mcp_non_success_sql()}) AS agent_tool_failed,
+                     COUNT(*) FILTER (WHERE {_mcp_refusal_sql()}) AS agent_tool_refused
+              FROM agent_calls
+            ), logical_runs AS (
+              SELECT COALESCE(j.payload->>'root_agent_job_id', j.id::text) AS root,
+                     (ARRAY_AGG(j.state ORDER BY j.id DESC))[1] AS latest_state,
+                     (ARRAY_AGG(j.result->>'status' ORDER BY j.id DESC))[1] AS latest_status,
+                     COUNT(*) FILTER (WHERE j.result->>'status' = 'continued') AS continuations
+              FROM video_jobs j JOIN users u ON u.id = j.user_id
+              WHERE j.type = 'agent_turn' AND j.updated_at >= NOW() - INTERVAL '24 hours'
+                AND NOT (COALESCE(j.payload, '{{}}'::jsonb) ? 'steered_into')
+                AND {_scope('u')}
+              GROUP BY COALESCE(j.payload->>'root_agent_job_id', j.id::text)
+            ), logical_rollup AS (
+              SELECT COUNT(*) AS logical_total,
+                     COUNT(*) FILTER (WHERE latest_state IN ('queued', 'running')
+                       OR latest_status = 'continued') AS logical_in_progress,
+                     COUNT(*) FILTER (WHERE latest_status = 'blocked'
+                       OR latest_state = 'failed') AS logical_blocked,
+                     COALESCE(SUM(continuations), 0) AS continued_slices
+              FROM logical_runs
             ), project_rollup AS (
               SELECT COUNT(*) AS sessions_total,
                    COUNT(*) FILTER (WHERE NOT (
@@ -3271,14 +3308,19 @@ def video_reliability():
             )
             SELECT NOW() - INTERVAL '24 hours' AS starts_at,
                    NOW() AS ends_at, j.*, p.sessions_total, p.no_export,
-                   m.mcp_error_responses, f.rows AS failed_by_type
+                   m.mcp_error_responses, f.rows AS failed_by_type, a.*, l.*
             FROM job_rollup j CROSS JOIN project_rollup p
                  CROSS JOIN mcp_response_rollup m CROSS JOIN failed_types f
+                 CROSS JOIN agent_call_rollup a CROSS JOIN logical_rollup l
         """)
         rel = cur.fetchone() or {}
 
     jobs_total = int(rel.get("jobs_total") or 0)
-    tools_total = int(rel.get("tools_total") or 0)
+    mcp_tools_total = int(rel.get("tools_total") or 0)
+    agent_tools_total = int(rel.get("agent_tools_total") or 0)
+    tools_total = mcp_tools_total + agent_tools_total
+    for name in ("tool_failed", "tool_refused"):
+        rel[name] = int(rel.get(name) or 0) + int(rel.get("agent_" + name) or 0)
 
     def _metric(name, total):
         count = int(rel.get(name) or 0)
@@ -3304,6 +3346,13 @@ def video_reliability():
             # delivery failures, and can overlap queue-backed failures above.
             "mcp_error_responses": {
                 "count": int(rel.get("mcp_error_responses") or 0)},
+        },
+        "tool_sources": {"agent": agent_tools_total, "mcp": mcp_tools_total},
+        "logical_agent_runs": {
+            "total": int(rel.get("logical_total") or 0),
+            "in_progress": int(rel.get("logical_in_progress") or 0),
+            "blocked": int(rel.get("logical_blocked") or 0),
+            "continued_slices": int(rel.get("continued_slices") or 0),
         },
         "sessions_without_export": {
             "total_sessions": total,

@@ -95,3 +95,33 @@ def test_independent_review_improvement_renews_but_repeated_defects_do_not():
         rendered_versions={2, 3},
         last_visual_critic={"verdict": "pass", "findings": []}))
     assert agent_loop._semantic_progressed(before, cleaner)
+
+
+def test_repair_requires_quality_progress_not_new_tools_or_assets():
+    before = {'verification_rank': 1, 'verification_findings': 2,
+              'write_tools': ['add_text'], 'assets': [0]}
+    after = dict(before, write_tools=['add_text', 'set_text_motion'], assets=[5])
+    assert not agent_loop._semantic_progressed(before, after)
+    assert agent_loop._semantic_progressed(before, dict(after, verification_findings=1))
+
+
+def test_progress_frontier_cannot_oscillate_to_buy_new_slices():
+    before = {'review_verdicts': [3, 1, 1], 'review_findings': [0, 3, 2],
+              'verification_rank': 1, 'verification_findings': 2}
+    current = {'review_verdicts': [1, 3, 1], 'review_findings': [3, 0, 2],
+               'verification_rank': 1, 'verification_findings': 2}
+    frontier = agent_loop._slice_boundary_resolution(before, current, 'a')['frontier']
+    assert frontier['review_verdicts'] == [3, 3, 1]
+    assert not agent_loop._semantic_progressed(frontier, before)
+    assert not agent_loop._semantic_progressed(frontier, current)
+
+
+def test_rewording_blocker_does_not_reset_stagnation():
+    result = agent_loop._slice_boundary_resolution({}, {}, 'different', 'old', 2)
+    assert result['action'] == 'block'
+
+
+def test_failed_plan_criteria_are_not_completed_work():
+    before = agent_loop._semantic_progress_marker(_ctx(edit_plan=_plan()))
+    after = agent_loop._semantic_progress_marker(_ctx(edit_plan=_plan('blocked', 'failed')))
+    assert not agent_loop._semantic_progressed(before, after)

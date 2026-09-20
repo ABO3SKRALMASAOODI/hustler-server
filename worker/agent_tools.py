@@ -376,6 +376,7 @@ class ToolContext:
         # staged operation) and uses these facts to avoid charging a turn that
         # attempted an edit but produced no edit, asset, or proof.
         self.turn_tool_outcomes = []
+        self.tool_failure_memory = {}
         self.write_attempts = 0
 
     def add_usage(self, model, tokens_in, tokens_out, cached_in=0,
@@ -508,7 +509,8 @@ class ToolContext:
         version = self.db.run(
             dbx.insert_edl, self.project_id, normalized, "agent",
             (self.job or {}).get("id"),
-            getattr(self, "_executing_tool", None), prev["version"])
+            getattr(self, "_executing_tool", None), prev["version"],
+            (self.job or {}).get("total_claims"))
         self.versions_written.append(version)
         chg = edl_diff.change_ranges(prev["json"], normalized)
         manifest = quality_verifier.build_change_manifest(
@@ -4696,9 +4698,33 @@ def _audio_from_clip(ctx, asset):
     of the same bytes costs none.
     """
     name = _asset_name(asset)
+    memory = getattr(ctx, "tool_failure_memory", {})
+    # Evidence belongs to the immutable source, independent of timeline
+    # versions and which audio tool asks for it. Replacing the source clears
+    # this key; transient download/extraction errors are never cached here.
+    failure_key = "silent_asset:" + str(asset["id"]) + ":" + str(
+        asset.get("sha256") or asset["storage_key"])
+    if failure_key in memory:
+        return None, None, memory[failure_key]
     cached = ctx.db.run(dbx.extracted_audio_asset, ctx.project_id,
                         asset["storage_key"], asset.get("sha256"))
     if cached:
+        checked_key = "audible_asset:" + str(cached["id"])
+        if not (cached.get("meta") or {}).get("audio_presence_checked") \
+                and not memory.get(checked_key):
+            try:
+                audible = media.audio_has_signal(_asset_local_path(ctx, cached))
+            except Exception:
+                return None, None, "Could not verify the cached soundtrack; retry after checking the source."
+            if not audible:
+                error = (f"REJECTED: '{name}' has a silent audio stream. "
+                         "It contains no sound to extract or amplify. Use a "
+                         "different audible source; do not retry this source.")
+                memory[failure_key] = error
+                ctx.tool_failure_memory = dict(list(memory.items())[-64:])
+                return None, None, error
+            memory[checked_key] = True
+            ctx.tool_failure_memory = dict(list(memory.items())[-64:])
         return cached, _sound_only_note(name, cached), None
     try:
         local = _asset_local_path(ctx, asset)
@@ -4711,11 +4737,14 @@ def _audio_from_clip(ctx, asset):
         dur = media.extract_audio_track(local, out)
     except media.MediaError as e:
         if "no audio stream" in str(e):
-            return None, None, (
+            error = (
                 f"REJECTED: '{name}' has no sound in it at all — it is a "
                 "silent video, so there is no audio to take from it. Tell "
                 "the user that plainly and ask for the song itself or a "
                 "direct link.")
+            memory[failure_key] = error
+            ctx.tool_failure_memory = dict(list(memory.items())[-64:])
+            return None, None, error
         return None, None, (
             f"Could not take the audio out of '{name}' ({str(e)[:140]}). Do "
             "NOT claim the sound was added.")
@@ -4734,6 +4763,7 @@ def _audio_from_clip(ctx, asset):
                                   "from_asset_key": asset["storage_key"],
                                   "from_sha256": asset.get("sha256"),
                                   "extracted_from_video": True,
+                                  "audio_presence_checked": True,
                                   "caption": f"sound only, taken from the "
                                              f"uploaded video '{name}'"}),
            "kind": "music", "storage_key": key, "duration_s": dur,
@@ -5637,9 +5667,26 @@ def search_sfx(ctx, query, max_seconds=None):
         mx = float(max_seconds) if max_seconds is not None else None
     except (TypeError, ValueError):
         return "REJECTED: max_seconds must be a number."
+    memory = getattr(ctx, "tool_failure_memory", {})
+    unavailable_until = memory.get("sfx_auth_retry_at", 0)
     try:
-        hits = sfx_search.search(query, max_s=mx)
+        if time.time() < unavailable_until:
+            hits = sfx_search._outage_hits(query, min(mx or sfx_search.DEFAULT_MAX_S,
+                                                    sfx_search.HARD_MAX_S), 12)
+            if not hits:
+                return ("UNAVAILABLE: sound search authentication is failing. "
+                        "Changing the query will not fix it. Use uploaded audio "
+                        "or continue the edit; do not claim sound was added.")
+        else:
+            hits = sfx_search.search(query, max_s=mx)
     except sfx_search.SfxSearchError as e:
+        if re.search(r"\b(?:401|403)\b", str(e)):
+            memory["sfx_auth_retry_at"] = time.time() + 900
+            ctx.tool_failure_memory = dict(list(memory.items())[-64:])
+            return ("UNAVAILABLE: sound search authentication failed (401/403). "
+                    "Changing the query cannot fix authentication. Use an uploaded "
+                    "sound or the verified outage catalog for common effects; "
+                    "continue other work and disclose any missing required sound.")
         return (f"Sound search failed ({str(e)[:180]}). Try a simpler "
                 "query ('whoosh', 'camera shutter', 'pop').")
     except Exception as e:
@@ -9720,8 +9767,9 @@ def set_insert_window(ctx, id, duration_s=None, clip_start_s=None,
         else:
             mute_val = bool(mute)
         if hit.get("kind") == "image" and mute_val:
-            return ("REJECTED: an image insert has no audio to mute — "
-                    "stills always play silent.")
+            # Stills are intrinsically silent. Do not discard useful timing,
+            # crop or motion changes bundled with this harmless flag.
+            mute_val = None
     # crop (round 77): the scene shows ONE REGION of the clip, letterboxed.
     # "The full timeline visible, static, with no player and no chat" is
     # geometrically impossible for a zoom — a 16:9 window that spans a 2.6:1
@@ -19569,6 +19617,11 @@ def _normalize_tool_call(name, args):
                 for key in ("entrance", "exit")):
             args.pop("motion_motif", None)
             notes.append("static motion_motif dropped")
+    if name == "set_text_motion" and args.get("motion_motif") is not None:
+        parsed, error = _parse_text_motion(args.get("motion"))
+        if not error and not any(isinstance(v, list) and v for v in (parsed or {}).values()):
+            args.pop("motion_motif", None)
+            notes.append("static motion_motif dropped")
     return name, args, notes
 
 
@@ -21536,7 +21589,12 @@ TOOLS = {
          "operations": {"type": "array", "minItems": 1, "maxItems": 64,
             "items": {"type": "object", "properties": {
                 "action": {"type": "string", "enum": ["set", "upsert", "remove", "reorder"]},
-                "layer": {"type": "string"}, "id": {"type": "string"}, "value": {}},
+                "layer": {"type": "string", "enum": [
+                    "keep", "speed", "inserts", "frame", "captions",
+                    "caption_mutes", "texts", "vectors", "music", "sfx",
+                    "voiceover", "volume", "master", "effects", "overlays", "canvas"]},
+                "id": {"type": "string", "description": "Existing item id for upsert/remove; omit for whole-layer set."},
+                "value": {"description": "set: complete layer value (array for texts/inserts/music). upsert: one item object merged by id. reorder: all insert ids. Read get_edl for exact shapes."}},
                 "required": ["action", "layer"]}}}),
     "get_video_info": (get_video_info, "Video metadata plus index and EDL "
                        "summary. Use only when the supplied project state "
@@ -24513,6 +24571,46 @@ def _compact_description(description):
     return first[:93].rsplit(" ", 1)[0] + "..."
 
 
+_COMPACT_CONTRACTS = {
+    "apply_edit_batch": (
+        "Atomic edits, no render wait. Read get_edl; use current base_version. "
+        "set replaces one complete layer; upsert patches one object by id; "
+        "remove deletes by id; reorder takes all insert ids. Preserve existing "
+        "field shapes. Times describe the resulting timeline. Review changed "
+        "moments, then the complete edit."),
+    "add_text": (
+        "Add text in OUTPUT seconds within current program length. Explicit "
+        "motion keyframes use seconds relative to text start, bounded by end-start; "
+        "omit entrance/exit when using them. motion_motif labels actual movement; "
+        "omit it for static text."),
+    "set_text_motion": (
+        "Update text motion by id. Keyframes are relative to the text start "
+        "and must fit its duration. Scalars are static styling; omit motion_motif "
+        "without changing keyframes. Read texts in get_edl for ids and timing."),
+    "set_insert_window": (
+        "Change an existing insert by id. source_start_s is SOURCE time; "
+        "duration_s is OUTPUT duration; rate scales source consumption. "
+        "mute affects only the clip's audio; still images are already silent. "
+        "Read inserts in get_edl first."),
+    "look_at": (
+        "Inspect rendered OUTPUT frames. Requires render_preview for the latest "
+        "EDL first. Use look_at_asset for original uploaded pictures; a saved "
+        "timeline alone is not a rendered preview."),
+    "look_at_asset": (
+        "Inspect an uploaded IMAGE or VIDEO by its exact asset_key from list_assets. "
+        "Times are relative to that source. For audio use get_audio_analysis; "
+        "for edited output use render_preview then look_at."),
+    "extract_audio": (
+        "Extract sound from an uploaded video_clip by exact asset_key. Returns "
+        "a music storage_key to place with add_music/add_sfx. Silent sources "
+        "cannot yield sound. Main-video audio is already in the edit; use set_volume."),
+    "get_edl": (
+        "Read current version and exact EDL shapes. sections accepts layer names "
+        "or an array; compact=true gives an index; offset/limit page long lists. "
+        "Use texts for titles, frame for framing, effects for transitions/grades."),
+}
+
+
 def openai_tools(model=None, compact=False, names=None):
     """`model` is the agent model this schema is for, so per-model honest-off
     (a provider that has refused audio parts) can hide a tool the same way an
@@ -24574,6 +24672,11 @@ def openai_tools(model=None, compact=False, names=None):
                     "ratio.")
         if compact:
             desc = _compact_description(desc)
+            if name in _COMPACT_CONTRACTS:
+                # These contracts contain rendering and state prerequisites,
+                # not optional handbook prose. A first-sentence truncation
+                # taught the model an incomplete API on every single call.
+                desc = _COMPACT_CONTRACTS[name]
             if name == "apply_edit_recipe":
                 desc = ("Atomically stage any transaction-safe EDL tool; "
                         "copy each tool's exact shown arguments and nested "
@@ -24759,6 +24862,9 @@ def execute(ctx, name, args):
         pass
     try:
         out = fn(ctx, **args)
+    except dbx.JobLeaseLost:
+        ctx._executing_tool = previous_executing_tool
+        raise
     except AskUser:
         ctx._executing_tool = previous_executing_tool
         raise

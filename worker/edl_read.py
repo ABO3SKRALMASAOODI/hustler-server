@@ -55,6 +55,7 @@ _EDL_SECTION_ALIASES = {
     "color": ("effects",), "grade": ("effects",), "grades": ("effects",),
     "stylize": ("effects",), "effects": ("effects",),
     "fades": ("effects",),
+    "look": ("effects", "master"), "frames": ("frame",),
     "audio": ("music", "volume", "voiceover", "sfx", "stem_mix",
               "master"),
     "media": ("inserts", "overlays", "music", "voiceover", "sfx"),
@@ -62,7 +63,7 @@ _EDL_SECTION_ALIASES = {
                  "effects"),
     "erases": ("source_clean", "patches"),
 }
-_EDL_OVERVIEW_ALIASES = {"program", "overview", "summary", "video"}
+_EDL_OVERVIEW_ALIASES = {"program", "program_map", "overview", "summary", "video"}
 _EDL_ALL_ALIASES = {"all", "everything", "full"}
 
 def read_edl(row, duration, program_map, sections=None, compact=False, offset=0, limit=100):
@@ -82,7 +83,7 @@ def read_edl(row, duration, program_map, sections=None, compact=False, offset=0,
     if sections is not None and not isinstance(sections, (list, tuple, str)):
         return ("REJECTED: sections must be a section name or array of names "
                 f"from {sorted(edl.keys())}.")
-    requested = ([sections] if isinstance(sections, str)
+    requested = (sections.split(",") if isinstance(sections, str)
                  else list(sections or []))
     wanted, resolved = [], {}
     overview = False
@@ -159,4 +160,3 @@ def read_edl(row, duration, program_map, sections=None, compact=False, offset=0,
         "JSON. Call get_edl(sections=['captions']) or another named section; "
         "use offset/limit for long list sections.")
     return json.dumps(compact_payload, indent=1)
-

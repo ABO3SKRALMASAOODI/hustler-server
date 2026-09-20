@@ -1664,7 +1664,8 @@ def _activity(worker_db, session_id, name, args, result, source=None,
         if len(arg_str) > 160:
             arg_str = arg_str[:160] + "…"
         label = f"{name}{arg_str if arg_str != '{}' else '()'}"
-    meta = {"tool": name, "args": args}
+    meta = {"tool": name, "args": args, "source": source or "agent",
+            "tool_outcome": {"status": agent_tools.tool_outcome_mod.from_legacy(result).status}}
     if edl_version is not None:
         # The EDL version current when this call ran — lets the studio roll
         # the activity feed back in step with the version stepper.
@@ -1778,7 +1779,7 @@ def run_agent_job(worker_db, job):
                                 "n": sequence})
         next_id = worker_db.run(
             dbx.enqueue_agent_continuation, job["project_id"], job["user_id"],
-            root_id, sequence, next_payload)
+            root_id, sequence, next_payload, job["id"], job.get("total_claims"))
         return {"status": "continued", "outcome": "in_progress",
                 "billable": False, "root_agent_job_id": root_id,
                 "continued_job_id": next_id,
@@ -1796,6 +1797,9 @@ def run_agent_job(worker_db, job):
         continuation_state.get("loaded_tool_domains") or [])
     ctx._loaded_tool_names = set(
         continuation_state.get("loaded_tool_names") or [])
+    ctx.tool_failure_memory = dict(
+        list((continuation_state.get("tool_failure_memory") or {}).items())[-64:])
+    ctx.turn_tool_outcomes = list(continuation_state.get("turn_tool_outcomes") or [])[-500:]
     ctx.versions_written = [int(value) for value in
                             continuation_state.get("versions_written") or []]
     ctx.rendered_versions = {int(value) for value in
@@ -2053,6 +2057,8 @@ def run_agent_job(worker_db, job):
         return _run_loop(ctx, worker_db, job, session_id, user_message,
                          attachment_note,
                          _cont=(continuation_state or None))
+    except dbx.JobLeaseLost:
+        raise  # A stopped/replaced execution must never create another slice.
     except agent_tools.AskUser:
         raise   # never reaches here (handled in loop), but keep explicit
     except Exception as e:
@@ -2090,6 +2096,8 @@ def run_agent_job(worker_db, job):
                     "proof_ranges_by_version": ctx._proof_ranges_by_version,
                     "adopted_steer_job_ids": sorted(
                         getattr(ctx, "adopted_steer_job_ids", set())),
+                    "tool_failure_memory": getattr(ctx, "tool_failure_memory", {}),
+                    "turn_tool_outcomes": ctx.turn_tool_outcomes[-500:],
                     "loaded_tool_domains": sorted(
                         getattr(ctx, "_loaded_tool_domains", None) or []),
                     "loaded_tool_names": sorted(
@@ -2110,7 +2118,7 @@ def run_agent_job(worker_db, job):
                 })
                 next_id = worker_db.run(
                     dbx.enqueue_agent_continuation, job["project_id"],
-                    job["user_id"], root_id, sequence, next_payload)
+                    job["user_id"], root_id, sequence, next_payload, job["id"], job.get("total_claims"))
                 print(f"[agent] recovered root {root_id} after {err_line}; "
                       f"continuing as {next_id}", flush=True)
                 return {"status": "continued", "outcome": "in_progress",
@@ -3216,10 +3224,10 @@ def _semantic_progress_marker(ctx):
     plan = director.normalize_blueprint(getattr(ctx, "edit_plan", None)) or {}
     steps = frozenset(
         int(row["id"]) for row in (plan.get("step_states") or [])
-        if row.get("status") in {"completed", "blocked"})
+        if row.get("status") == "completed")
     checks = frozenset(
         int(row["id"]) for row in (plan.get("acceptance_checks") or [])
-        if row.get("status") in {"passed", "failed"})
+        if row.get("status") == "passed")
     decision_rows = ((getattr(ctx, "editing_metrics", None) or {}).get(
         "editorial_decisions") or [])
     decisions = frozenset(
@@ -3275,8 +3283,10 @@ def _semantic_progress_marker(ctx):
         "department_gaps": department_gaps,
         "motion_gaps": motion_gaps,
         "verification_rank": verification_rank,
-        "verification_findings": len(
-            verification.get("unresolved_findings") or []),
+        "verification_findings": (len(
+            verification.get("unresolved_findings") or [])
+            if verification.get("status") in {"repair_required", "justified", "passed"}
+            else None),
     }
 
 
@@ -3296,15 +3306,20 @@ def _semantic_progressed(before, after):
             for value in (values or ())
         }
 
-    for key in ("write_tools", "resolved_steps", "resolved_checks",
-                "decisions"):
+    # Once a preview has been evaluated, repairs earn more time by closing
+    # criteria or improving measured evidence. Trying another setter, making
+    # another decision or collecting another asset isn't completion progress.
+    repairing = int(before.get("verification_rank") or 0) > 0
+    keys = (("resolved_steps", "resolved_checks") if repairing else
+            ("write_tools", "resolved_steps", "resolved_checks", "decisions"))
+    for key in keys:
         old, new = _hashable_rows(before.get(key)), \
             _hashable_rows(after.get(key))
         if new - old:
             return True
     old_assets = tuple(before.get("assets") or ())
     new_assets = tuple(after.get("assets") or ())
-    if any(n > (old_assets[i] if i < len(old_assets) else 0)
+    if not repairing and any(n > (old_assets[i] if i < len(old_assets) else 0)
            for i, n in enumerate(new_assets)):
         return True
     old_verdicts = tuple(before.get("review_verdicts") or ())
@@ -3398,6 +3413,33 @@ def _objective_blocker_fingerprint(plan, verification):
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20], state
 
 
+def _merge_progress_frontier(before, after):
+    """Keep the best evidence on every axis; regressions cannot renew it."""
+    out = dict(before or {})
+    for key, value in (after or {}).items():
+        old = out.get(key)
+        if key in {"write_tools", "resolved_steps", "resolved_checks", "decisions"}:
+            rows = list(old or []) + list(value or [])
+            out[key] = list({json.dumps(row, sort_keys=True): row for row in rows}.values())
+        elif key in {"assets", "review_verdicts", "review_findings"}:
+            old = list(old or [])
+            merged = []
+            for i in range(max(len(old), len(value or []))):
+                candidates = [seq[i] for seq in (old, value or [])
+                              if i < len(seq) and seq[i] is not None]
+                merged.append((min(candidates) if key == "review_findings" else max(candidates))
+                              if candidates else None)
+            out[key] = merged
+        elif value is not None:
+            if old is None:
+                out[key] = value
+            elif key in {"department_gaps", "motion_gaps", "verification_findings"}:
+                out[key] = min(old, value)
+            else:
+                out[key] = max(old, value)
+    return _serializable_progress_marker(out)
+
+
 def _slice_boundary_resolution(frontier, current, blocker_fingerprint,
                                previous_fingerprint=None,
                                previous_repeats=0):
@@ -3405,12 +3447,12 @@ def _slice_boundary_resolution(frontier, current, blocker_fingerprint,
     if _semantic_progressed(frontier, current):
         return {
             "action": "continue_progress",
-            "frontier": _serializable_progress_marker(current),
+            "frontier": _merge_progress_frontier(frontier, current),
             "blocker_fingerprint": None,
             "blocker_repeats": 0,
         }
-    repeats = (int(previous_repeats or 0) + 1
-               if previous_fingerprint == blocker_fingerprint else 1)
+    # A rephrased finding or alternating defect must not reset stagnation.
+    repeats = int(previous_repeats or 0) + 1
     return {
         "action": "continue_recovery" if repeats < 3 else "block",
         "frontier": _serializable_progress_marker(frontier),
@@ -4010,6 +4052,17 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                       "version before replying. This finding survived the "
                       "execution-slice boundary; do not treat the boundary "
                       "as completion.")})
+        failures = [row for row in ctx.turn_tool_outcomes
+                    if row.get("kind") in {"refused", "failed", "prerequisite"}]
+        if failures or ctx.tool_failure_memory:
+            messages.append({"role": "system", "content": (
+                "Known failed attempts from this same logical edit. Do not repeat "
+                "unchanged arguments or re-extract a source already proven silent. "
+                "Resolve the stated prerequisite, change the approach, or report a "
+                "specific unavailable requirement while preserving completed work.\n"
+                + json.dumps({"recent_failures": failures[-12:],
+                              "source_and_provider_facts": ctx.tool_failure_memory},
+                             ensure_ascii=False))})
     names = agent_tools.compact_tool_names(ctx)
     tools = agent_tools.openai_tools(
         model,
@@ -4120,8 +4173,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                             * config.IMAGE_PRICE_USD)
         if progress_frontier is None:
             current_marker = _semantic_progress_marker(ctx)
-            progress_frontier = (current_marker if _semantic_progressed(
-                semantic_start, current_marker) else semantic_start)
+            progress_frontier = _merge_progress_frontier(semantic_start, current_marker)
         state = {
             "durable_slice": True,
             "n": int(_cont.get("n") or 0) + 1,
@@ -4145,6 +4197,8 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             "proof_ranges_by_version": ctx._proof_ranges_by_version,
             "adopted_steer_job_ids": sorted(
                 getattr(ctx, "adopted_steer_job_ids", set())),
+            "tool_failure_memory": getattr(ctx, "tool_failure_memory", {}),
+            "turn_tool_outcomes": ctx.turn_tool_outcomes[-500:],
             "loaded_tool_domains": sorted(
                 getattr(ctx, "_loaded_tool_domains", None) or []),
             "loaded_tool_names": sorted(
@@ -4186,8 +4240,11 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 "operator_instruction": (
                     "Company-funded completion repair. Do not merely explain "
                     "or disclose the unfinished state. Repair the current "
-                    "latest EDL until a complete preview passes verification "
-                    "and export_ready is true. Preserve the customer's "
+                    "latest EDL toward a complete preview that passes verification "
+                    "and export_ready is true. Do not repeat unchanged failures or "
+                    "make cosmetic variations to buy more time. If a required "
+                    "asset or service is unavailable, preserve the best edit "
+                    "and report that concrete blocker. Preserve the customer's "
                     "original intent and already-correct work. Current "
                     "blocking evidence: "
                     + ("; ".join(str(row) for row in findings[:6])
@@ -4198,7 +4255,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             })
         next_id = worker_db.run(
             dbx.enqueue_agent_continuation, job["project_id"],
-            job["user_id"], root_id, sequence, next_payload)
+            job["user_id"], root_id, sequence, next_payload, job["id"], job.get("total_claims"))
         print(f"[job {job['id']}] checkpointed logical root {root_id}; "
               f"continuing as job {next_id} slice {sequence} ({reason})",
               flush=True)
@@ -4251,6 +4308,9 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
 
     while True:
         iteration = timings["llm_calls"]
+        if job.get("total_claims") is not None and not worker_db.run(
+                dbx.lease_is_current, job["id"], job["total_claims"]):
+            raise dbx.JobLeaseLost("Agent execution was stopped or replaced")
         if SHUTDOWN.is_set():
             # Platform drains are execution-slice boundaries, not product
             # outcomes. The next durable job rebuilds from the current EDL and
@@ -4932,6 +4992,9 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         batch_committed_edl = False
 
         for tc in msg.tool_calls:
+            if job.get("total_claims") is not None and not worker_db.run(
+                    dbx.lease_is_current, job["id"], job["total_claims"]):
+                raise dbx.JobLeaseLost("Agent execution ended before tool dispatch")
             name = tc.function.name
             try:
                 args = json.loads(tc.function.arguments or "{}")

@@ -405,19 +405,33 @@ def _audio_findings(edl):
     return findings
 
 
-_DURATION_RANGE_RE = re.compile(
-    r"\b(\d{1,4}(?:\.\d+)?)\s*(?:-|–|—|to)\s*"
-    r"(\d{1,4}(?:\.\d+)?)\s*(?:s|sec(?:ond)?s?)\b", re.I)
-_DURATION_TARGET_RES = (
-    re.compile(
-        r"\b(?:make|edit|cut|trim|shorten|turn)\b[^\n.!?]{0,90}?"
-        r"(?:video|reel|clip|short)?[^\n.!?]{0,40}?"
-        r"(?:to|of|about|around|roughly|approximately|like)?\s*"
-        r"(\d{1,4}(?:\.\d+)?)\s*(?:s|sec(?:ond)?s?)\b", re.I),
-    re.compile(
-        r"\b(\d{1,4}(?:\.\d+)?)\s*(?:s|sec(?:ond)?s?)\s*"
-        r"(?:video|reel|clip|short)\b", re.I),
-)
+_PROGRAM_DURATION_RE = re.compile(
+    r"\b(\d{1,4}(?:\.\d+)?)(?:\s*(?:-|–|—|to)\s*"
+    r"(\d{1,4}(?:\.\d+)?))?\s*[-–]?\s*(?:s|sec(?:ond)?s?)\b", re.I)
+
+
+def _program_duration_context(text, match):
+    """Require a program-length instruction, not a scene/placement cue.
+
+    Deliberately prefer no deterministic constraint over inventing one from
+    ambiguous prose. The editorial reviewer still receives the full brief.
+    """
+    before = re.split(r"[\n.!?;]", text[:match.start()])[-1].lower()
+    after = re.split(r"[\n.!?;]", text[match.end():])[0].lower()
+    if re.search(r"\b(?:at|by|after|before|from|first|last|within)\s+"
+                 r"(?:(?:around|about|roughly|the)\s+)*$", before):
+        return False
+    program = r"(?:video|reel|ad|advertisement|film|montage|short|edit|program|runtime|duration)"
+    if re.match(r"\s*[-–]?\s*(?:(?:vertical|horizontal|final|total|long|instagram|tiktok|youtube|story/reel|story|9:16|16:9)\s+){0,6}"
+                + program + r"\b", after):
+        return True
+    if re.search(r"\b" + program + r"\b[^,;]{0,35}"
+                 r"(?:to|of|is|be|last|length|:|=)\s*"
+                 r"(?:(?:about|around|roughly|approximately)\s+)?$", before):
+        return True
+    return bool(re.search(
+        r"\b(?:make|cut|trim|shorten|keep)\s+(?:it|this|the whole thing)\s*"
+        r"(?:to\s+)?(?:(?:about|around|roughly|approximately)\s+)?$", before))
 
 
 def requested_duration_target(request_text):
@@ -429,19 +443,17 @@ def requested_duration_target(request_text):
     whole-program constraint.
     """
     text = str(request_text or "")
-    ranges = list(_DURATION_RANGE_RE.finditer(text))
-    if ranges:
-        match = ranges[-1]
+    matches = [m for m in _PROGRAM_DURATION_RE.finditer(text)
+               if _program_duration_context(text, m)]
+    if not matches:
+        return None
+    match = matches[-1]
+    if match.group(2):
         lo, hi = float(match.group(1)), float(match.group(2))
         if 0.2 <= lo <= 86400 and 0.2 <= hi <= 86400:
             return {"min_s": min(lo, hi), "max_s": max(lo, hi),
                     "approximate": False, "request": match.group(0)}
-    matches = []
-    for pattern in _DURATION_TARGET_RES:
-        matches.extend(pattern.finditer(text))
-    if not matches:
         return None
-    match = max(matches, key=lambda row: row.start())
     target = float(match.group(1))
     if not 0.2 <= target <= 86400:
         return None
