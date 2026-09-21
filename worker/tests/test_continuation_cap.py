@@ -28,8 +28,8 @@ def test_productive_slice_limit_is_bounded_but_allows_large_edits():
     assert 2 <= config.AGENT_MAX_PRODUCTIVE_SLICES <= 24
 
 
-def test_unfinished_edit_hands_off_to_one_company_funded_repair_chain():
+def test_unfinished_edit_cannot_create_a_company_funded_repair_chain():
     source = inspect.getsource(agent_loop._run_loop)
-    assert '"operator_repair": True' in source
-    assert '"auto_quality_repair": True' in source
-    assert "company-funded quality repair" in source
+    assert '"operator_repair": True' not in source
+    assert '"auto_quality_repair": True' not in source
+    assert "company-funded quality repair" not in source

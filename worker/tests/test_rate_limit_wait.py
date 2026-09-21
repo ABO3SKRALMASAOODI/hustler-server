@@ -129,7 +129,7 @@ def test_retry_after_is_honoured_and_capped():
     assert llm.rate_limit_wait(_Tiny(), 3, 600) == 24.0
 
 
-def test_agent_lanes_offer_only_independently_funded_wallets(monkeypatch):
+def test_agent_lanes_do_not_fall_back_to_legacy_xai_wallets(monkeypatch):
     base_client, paid_client, frontier_client = object(), object(), object()
     monkeypatch.setattr(llm, "client", lambda: base_client)
     monkeypatch.setattr(llm, "paid_client", lambda: paid_client)
@@ -144,9 +144,8 @@ def test_agent_lanes_offer_only_independently_funded_wallets(monkeypatch):
     monkeypatch.setattr(llm.config, "FRONTIER_AGENT_MODEL", "frontier-model")
 
     lanes = llm.agent_lanes_for(False, "free")
-    assert [row["name"] for row in lanes] == ["standard", "paid_fallback"]
+    assert [row["name"] for row in lanes] == ["standard"]
     assert lanes[0]["client"] is base_client
-    assert lanes[1]["client"] is paid_client
 
 
 def test_bounds():

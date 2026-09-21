@@ -3571,9 +3571,9 @@ def _turn_completion(ctx, status="replied", fail_note=None, truncated=False):
         and (status in {"timeout", "shutdown", "budget", "awaiting_user",
                         "no_index"}
              or (attempted_edit and (failed or refused or truncated))))
+    # Saved editing work uses normal metered billing even when its quality
+    # review remains open. Quality status must not silently waive API usage.
     billable = not (
-        unfinished_edit
-        or
         terminal_without_deliverable
         or (not has_value and (
             blank_canvas_no_value or attempted_edit or failed or refused
@@ -4170,56 +4170,21 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
     visual_handoff = False
 
     def _durable_continuation(reason, blocker_fingerprint=None,
-                              blocker_repeats=0, progress_frontier=None,
-                              company_repair=False):
+                              blocker_repeats=0, progress_frontier=None):
         """Checkpoint consequences, enqueue the next slice, post no reply."""
         root_id = int(payload.get("root_agent_job_id") or job["id"])
         sequence = int(payload.get("continuation_sequence") or 0) + 1
         work_slices = _continuation_work_slices(_cont, reason)
         if work_slices >= config.AGENT_MAX_PRODUCTIVE_SLICES:
-            quality = _quality_handoff(ctx)
-            company_repair = bool(
-                company_repair
-                or (not payload.get("operator_repair")
-                    and getattr(ctx, "versions_written", None)
-                    and quality.get("export_ready") is not True))
-            if company_repair and not payload.get("operator_repair"):
-                # A customer asked for an edit, not for an internal execution
-                # limit. Once the product has produced a version that still
-                # fails its own approval gate, finishing it is Valmera's cost.
-                # Start one separately bounded repair chain and keep the chat
-                # silent until that chain either passes or reaches a genuine
-                # repeated blocker.
-                print(f"[job {job['id']}] logical root {root_id} reached "
-                      f"{work_slices} slices with export_ready=false — "
-                      "handing off to company-funded repair", flush=True)
-                work_slices = 0
-                reason = "company-funded quality repair"
-                blocker_fingerprint = None
-                blocker_repeats = 0
-            else:
-                print(f"[job {job['id']}] logical root {root_id} reached "
-                      f"{work_slices} productive execution slices — saving "
-                      "the latest preview and stopping the continuation "
-                      "chain", flush=True)
-                return _finalize(
-                    ctx, worker_db, session_id,
-                    "Your draft and latest preview are saved, but I couldn't "
-                    "finish the remaining quality repairs. This repair "
-                    "attempt has stopped; the draft is not marked complete.",
-                    "blocked", total_steps, timings, honesty,
-                    extra_meta={"error": "productive_slice_limit",
-                                "productive_slices": work_slices},
-                    turn_deadline=turn_deadline, job=job)
-        if company_repair and not payload.get("operator_repair") \
-                and reason != "company-funded quality repair":
-            print(f"[job {job['id']}] logical root {root_id} reached a "
-                  "repeated unfinished blocker — handing off to "
-                  "company-funded repair", flush=True)
-            work_slices = 0
-            reason = "company-funded quality repair"
-            blocker_fingerprint = None
-            blocker_repeats = 0
+            return _finalize(
+                ctx, worker_db, session_id,
+                "Your draft and latest preview are saved, but I couldn't "
+                "finish the remaining quality repairs. This editing run "
+                "has stopped; the draft is not marked complete.",
+                "blocked", total_steps, timings, honesty,
+                extra_meta={"error": "productive_slice_limit",
+                            "productive_slices": work_slices},
+                turn_deadline=turn_deadline, job=job)
         generation_cost = float(ctx.gen_extra_cost_usd or 0.0)
         generation_cost += (len(ctx.images_generated)
                             * config.IMAGE_PRICE_USD)
@@ -4286,28 +4251,6 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 (ctx.turn_start_edl or {}).get("version") or start_version),
             "continuation_state": state,
         })
-        if company_repair and not payload.get("operator_repair"):
-            quality = _quality_handoff(ctx)
-            findings = quality.get("quality_findings") or []
-            next_payload.update({
-                "operator_repair": True,
-                "auto_quality_repair": True,
-                "operator_instruction": (
-                    "Company-funded completion repair. Do not merely explain "
-                    "or disclose the unfinished state. Repair the current "
-                    "latest EDL toward a complete preview that passes verification "
-                    "and export_ready is true. Do not repeat unchanged failures or "
-                    "make cosmetic variations to buy more time. If a required "
-                    "asset or service is unavailable, preserve the best edit "
-                    "and report that concrete blocker. Preserve the customer's "
-                    "original intent and already-correct work. Current "
-                    "blocking evidence: "
-                    + ("; ".join(str(row) for row in findings[:6])
-                       if findings else
-                       "the latest edited version has not passed the complete "
-                       "preview approval gate")
-                )[:8000],
-            })
         next_id = worker_db.run(
             dbx.enqueue_agent_continuation, job["project_id"],
             job["user_id"], root_id, sequence, next_payload, job["id"], job.get("total_claims"))
@@ -4425,12 +4368,6 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                        + ". Any successful changes are saved. The remaining work "
                          "is unfinished; this run will not keep repeating it.")
             if ctx.versions_written:
-                if not payload.get("operator_repair") \
-                        and _quality_handoff(ctx).get("export_ready") is not True:
-                    return _durable_continuation(
-                        "company-funded blocker repair",
-                        progress_frontier=resolution["frontier"],
-                        company_repair=True)
                 return _finalize(
                     ctx, worker_db, session_id, blocker, "blocked",
                     total_steps, timings, honesty,
@@ -5004,10 +4941,6 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 if repeats < 3:
                     return _durable_continuation(
                         "verification repair remains", fingerprint, repeats)
-                if not payload.get("operator_repair"):
-                    return _durable_continuation(
-                        "company-funded verification repair", fingerprint,
-                        repeats, company_repair=True)
                 detail = "; ".join(
                     str(row.get("message") or row)[:260]
                     for row in unresolved_rows[:4]) or \

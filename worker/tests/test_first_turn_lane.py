@@ -21,7 +21,7 @@ import llm                                                  # noqa: E402
 @pytest.fixture(autouse=True)
 def _fresh_pool(monkeypatch):
     monkeypatch.setattr(llm, "_first_turn_client", None)
-    monkeypatch.setattr(llm, "paid_editor_lanes", lambda: [dict(client=object(), model="grok-4.6")])
+    monkeypatch.setattr(llm, "paid_editor_lanes", lambda: [dict(client=object(), model="gpt-5.6-luna")])
 
 
 def _lane_on(monkeypatch, model="test-strong-model"):
@@ -55,15 +55,15 @@ def test_a_subscriber_is_never_an_experiment(monkeypatch):
     touch it even on a first turn."""
     _lane_on(monkeypatch)
     _, model = llm.agent_client_for(True, "ai", first_turn=True)
-    assert model == "grok-4.6"
+    assert model == "gpt-5.6-luna"
 
 
-def test_frontier_still_outranks_everything(monkeypatch):
+def test_frontier_uses_luna_despite_legacy_override(monkeypatch):
     _lane_on(monkeypatch)
     monkeypatch.setattr(llm, "frontier_available", lambda: True)
     monkeypatch.setattr(config, "FRONTIER_AGENT_MODEL", "frontier-model")
     _, model = llm.agent_client_for(True, "ai_max", first_turn=True)
-    assert model == "grok-4.6"
+    assert model == "gpt-5.6-luna"
 
 
 def test_a_missing_key_degrades_to_the_free_model(monkeypatch):

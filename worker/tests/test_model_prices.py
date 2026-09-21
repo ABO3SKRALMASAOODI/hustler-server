@@ -244,28 +244,38 @@ def _frontier_on(monkeypatch, key="xai-test-key"):
 
 
 @pytest.mark.parametrize("plan", ["ai", "ai_pro", "ai_max", "plus", "mcp"])
-def test_every_paid_plan_and_trial_uses_same_editor(monkeypatch, plan):
+def test_every_paid_plan_and_trial_uses_luna(monkeypatch, plan):
     _frontier_on(monkeypatch)
-    assert llm.agent_client_for(True, plan)[1] == "grok-4.6"
-    assert llm.vision_client_for(plan)[1] == "grok-4.6"
-    assert all(lane["model"] == "grok-4.6" for lane in llm.agent_lanes_for(True, plan))
+    _paid_on(monkeypatch)
+    monkeypatch.setattr(config, "OPENAI_API_KEY", "openai-test-key")
+    monkeypatch.setattr(llm, "client", lambda: "luna-client")
+    assert llm.agent_client_for(True, plan) == ("luna-client", "gpt-5.6-luna")
+    assert llm.vision_client_for(plan) == ("luna-client", "gpt-5.6-luna")
+    lanes = llm.agent_lanes_for(True, plan)
+    assert len(lanes) == 1
+    assert lanes[0]["model"] == "gpt-5.6-luna"
+    assert lanes[0]["api_key"] == "openai-test-key"
 
 
-def test_missing_paid_credentials_never_silently_downgrades(monkeypatch):
-    _paid_on(monkeypatch, key="")
-    monkeypatch.setattr(config, "FRONTIER_API_KEY", "")
+def test_missing_luna_credentials_never_falls_back_to_xai(monkeypatch):
+    _paid_on(monkeypatch)
+    _frontier_on(monkeypatch)
+    monkeypatch.setattr(config, "OPENAI_API_KEY", "")
     with pytest.raises(RuntimeError, match="not configured"):
         llm.agent_client_for(True, "ai")
     assert not llm.vision_available("ai")
+    assert llm.agent_lanes_for(True, "ai") == []
 
 
-def test_paid_wallets_are_deduplicated_and_keep_quality(monkeypatch):
+def test_legacy_xai_wallets_are_not_free_agent_fallbacks(monkeypatch):
     _paid_on(monkeypatch)
-    _frontier_on(monkeypatch)
-    assert len(llm.agent_lanes_for(True, "ai")) == 1
-    _paid_on(monkeypatch, key="second-wallet")
-    assert len(llm.agent_lanes_for(True, "ai")) == 2
-    assert llm.agent_client_for(False, "free")[1] == config.AGENT_MODEL
+    _frontier_on(monkeypatch, key="second-wallet")
+    monkeypatch.setattr(config, "OPENAI_API_KEY", "openai-test-key")
+    monkeypatch.setattr(llm, "client", lambda: "luna-client")
+    lanes = llm.agent_lanes_for(False, "free")
+    assert len(lanes) == 1
+    assert lanes[0]["client"] == "luna-client"
+    assert lanes[0]["model"] == config.AGENT_MODEL
 
 
 def test_the_paid_model_is_priced():
