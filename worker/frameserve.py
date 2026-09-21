@@ -32,6 +32,7 @@ import shutil
 import uuid
 
 import config
+import execution_inputs
 import media
 import motion_judge
 import storage
@@ -65,8 +66,15 @@ def run_frames_job(worker_db, job):
     workdir = os.path.join(config.TMP_DIR, f"frm_{uuid.uuid4().hex[:8]}")
     os.makedirs(workdir, exist_ok=True)
     try:
-        local = os.path.join(workdir, "src" + os.path.splitext(key)[1])
-        storage.download_to(key, local)
+        # A sparse look needs a few seeks, not a fresh download of an entire
+        # 4K upload. Use the same range-reading policy as inserted video renders.
+        # Motion analysis scans the clip and retains the staged-file path.
+        if (not payload.get("motion_profile")
+                and execution_inputs.streams_asset(key, storage.object_bytes(key))):
+            local = storage.presign_get(key)
+        else:
+            local = os.path.join(workdir, "src" + os.path.splitext(key)[1])
+            storage.download_to(key, local)
         out_keys, errors = [], []
         for i, t in enumerate(times):
             fp = os.path.join(workdir, f"f{i}.jpg")

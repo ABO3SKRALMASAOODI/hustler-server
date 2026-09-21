@@ -1490,7 +1490,8 @@ def ask_vision(prompt, image_paths, max_tokens=1500, purpose="vision",
         return None
 
 
-def ask_text(system, user, max_tokens=300, temperature=0.5, purpose="text"):
+def ask_text(system, user, max_tokens=300, temperature=0.5, purpose="text",
+             reasoning_effort=None, retry_empty=False):
     """One plain-text completion against AGENT_MODEL. Returns
     {"text", "model", "prompt_tokens", "completion_tokens"} or None on any
     failure — callers must keep a non-LLM fallback."""
@@ -1499,20 +1500,33 @@ def ask_text(system, user, max_tokens=300, temperature=0.5, purpose="text"):
     messages = [{"role": "system", "content": system},
                 {"role": "user", "content": user}]
     try:
-        resp = create_with_dialect(
-            client(), config.AGENT_MODEL, messages,
-            max_tokens=max_tokens, temperature=temperature)
-        text = (resp.choices[0].message.content or "").strip()
-        usage = getattr(resp, "usage", None)
-        record(purpose,
-               {"model": config.AGENT_MODEL, "system": system, "user": user},
-               {"text": text}, usage)
-        if not text:
-            return None
-        return {"text": text, "model": config.AGENT_MODEL,
-                "prompt_tokens": getattr(usage, "prompt_tokens", None),
-                "completion_tokens": getattr(usage, "completion_tokens",
-                                             None)}
+        extra = {}
+        if reasoning_effort and not reasoning_effort_rejected(config.AGENT_MODEL):
+            extra["reasoning_effort"] = reasoning_effort
+        cap = int(max_tokens)
+        for attempt in (1, 2):
+            resp = create_with_dialect(
+                client(), config.AGENT_MODEL, messages,
+                max_tokens=cap, temperature=temperature, **extra)
+            text = (resp.choices[0].message.content or "").strip()
+            usage = getattr(resp, "usage", None)
+            spent = max(reasoning_tokens(usage),
+                        int(getattr(usage, "completion_tokens", 0) or 0))
+            starved = not text and spent >= cap * 0.9
+            record(purpose,
+                   {"model": config.AGENT_MODEL, "system": system, "user": user},
+                   {"text": text, **({"starved_at_max_tokens": cap} if starved else {})}, usage)
+            # A reasoning-only response is not a completed assessment. Retry
+            # once only when this bounded caller opted in and the budget was
+            # actually exhausted. Refusals and outages do not get retried here.
+            if retry_empty and starved and attempt == 1:
+                cap *= 3
+                continue
+            if not text:
+                return None
+            return {"text": text, "model": config.AGENT_MODEL,
+                    "prompt_tokens": getattr(usage, "prompt_tokens", None),
+                    "completion_tokens": getattr(usage, "completion_tokens", None)}
     except Exception as e:
         print(f"[llm] ask_text failed: {e}", flush=True)
         _note_error(e)

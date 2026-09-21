@@ -17,6 +17,7 @@ import config
 import db as dbx
 import director
 import editorial_contracts
+import finishing_review
 import grammar
 import llm
 import model_prices
@@ -4202,10 +4203,9 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                       "chain", flush=True)
                 return _finalize(
                     ctx, worker_db, session_id,
-                    "I reached the editing run limit before every remaining "
-                    "detail could be completed. The successful changes and "
-                    "latest saved preview are available; I stopped this run "
-                    "instead of continuing to generate versions indefinitely.",
+                    "Your draft and latest preview are saved, but I couldn't "
+                    "finish the remaining quality repairs. This repair "
+                    "attempt has stopped; the draft is not marked complete.",
                     "blocked", total_steps, timings, honesty,
                     extra_meta={"error": "productive_slice_limit",
                                 "productive_slices": work_slices},
@@ -4525,6 +4525,11 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                     "timings": timings, "outcome": outcome,
                     "billable": billable}
 
+        # Keep exact-current repair evidence in the next decision, including
+        # after an unrelated write invalidated the last rendered version.
+        # This neither locks tools nor treats old pixels as a current pass.
+        if not visual_handoff:
+            finishing_review.refresh(ctx, messages)
         progress = (85 if ctx.rendered_versions else
                     55 if ctx.versions_written else
                     20 if getattr(ctx, "edit_plan", None) else 5)

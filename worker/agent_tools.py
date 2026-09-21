@@ -2288,6 +2288,13 @@ def _touch_job_heartbeat(ctx, progress=None):
 
 def _asset_frames(ctx, asset, times, width=640, tag="alook",
                   measure_motion=False):
+    import visual_frame_cache
+    return visual_frame_cache.frames(ctx, asset, times, width, tag,
+                                     measure_motion, _extract_asset_frames)
+
+
+def _extract_asset_frames(ctx, asset, times, width=640, tag="alook",
+                          measure_motion=False):
     """Local jpeg paths for `times` of an UPLOADED asset — [(i, path)], err.
 
     Decoded on the EXECUTOR when one is configured (round 62). An uploaded
@@ -17620,7 +17627,11 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft"):
                     + ". Fulfill those authored/omitted promises or revise "
                       "the department decision with the real editorial "
                       "reason; do not close the blueprint by assertion.")
-            visual_record_findings = list(ctx.last_taste or [])
+            # Audio QC is also shown in the combined editor feedback, but
+            # belongs to one audio finding in the durable record, not a
+            # second visual defect with a different stable ID.
+            visual_record_findings = [line for line in ctx.last_taste or []
+                                      if not str(line).startswith("audio QC: ")]
             visual_record_findings += preview_critic.repair_lines(
                 ctx.last_visual_critic or {})
             story_record_findings = story_critic.repair_lines(
@@ -18405,11 +18416,18 @@ def _independent_preview_review(ctx, result, plan=None,
     # that let the authoring model share its own mistaken assumption with the
     # old reviewer. Keep this bounded to four cached JPEGs.
     raw_keys = list((ctx.index or {}).get("tile_keys") or [])
-    if raw_keys:
+    try:
+        edl_now = ctx.latest_edl()["json"]
+    except Exception:
+        edl_now = {}
+    # An uploaded-clip-only sequence does not use the old primary source at
+    # all. Sending that unrelated filmstrip made the critic demand omitted
+    # shots and diagnose a crop in footage absent from the actual edit.
+    if raw_keys and edl_now.get("keep"):
         pick_indexes = []
+        step = 0.0
         try:
             step = float((ctx.index or {}).get("tile_step_s") or 0.0)
-            edl_now = ctx.latest_edl()["json"]
             tl_now = Timeline(edl_now.get("keep") or [],
                               edl_now.get("inserts") or [],
                               edl_now.get("speed") or [])
@@ -18424,15 +18442,19 @@ def _independent_preview_review(ctx, result, plan=None,
                         pick_indexes.append(idx)
         except Exception:
             pick_indexes = []
-        if not pick_indexes:
-            pick_indexes = [0]
-            if len(raw_keys) > 1:
-                pick_indexes.append(len(raw_keys) - 1)
+        if not pick_indexes and step > 0:
+            # Compare selected source windows, never an arbitrary unused
+            # opening/ending from the original upload.
+            for start, end in edl_now.get("keep") or []:
+                idx = min(max(int(((start + end) / 2) / (step * 4)), 0),
+                          len(raw_keys) - 1)
+                if idx not in pick_indexes:
+                    pick_indexes.append(idx)
         for i, idx in enumerate(pick_indexes[:4], 1):
             key = raw_keys[idx]
             _download(key, f"raw{i}",
-                      f"RAW SOURCE filmstrip around changed moment {i}, "
-                      "with timestamped source frames")
+                      f"RAW SOURCE selected-window comparison {i}, "
+                      "source timestamps; NOT an additional required shot")
     if not images:
         return None
 
@@ -18451,6 +18473,11 @@ def _independent_preview_review(ctx, result, plan=None,
         f"Output duration: {result.get('duration_s')}s; raw source: "
         f"{getattr(ctx, 'duration', None)}s.",
         _frame_context(edl),
+        "Authored edge fades (intentional black at their endpoints is not "
+        "missing footage): " + json.dumps({key: (edl.get("effects") or {}).get(key, 0)
+            for key in ("fade_in_s", "fade_out_s")}) +
+        ". Report a black-frame defect only if the images establish an "
+        "unexpected gap or excessive dead hold beyond this authored fade.",
     ]
     lines = []
     if convergence_context:
