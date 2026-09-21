@@ -3104,7 +3104,6 @@ LLM_PRICE_CACHED_IN_PER_M = config.LLM_PRICE_CACHED_IN_PER_M
 # reported for those calls, so they are priced per image). MUST match
 # config.IMAGE_PRICE_USD — 0.055 tracks grok-imagine-image-quality.
 IMAGE_PRICE_USD = float(os.getenv("IMAGE_PRICE_USD", "0.055"))
-MIN_TURN_CREDITS = 1.0
 
 # Built once at import: a per-row USD cost expression that reads each llm_calls
 # row's own `model` column. Contains no percent sign — psycopg2 scans the whole
@@ -3221,7 +3220,7 @@ def charge_turn_credits(conn, user_id, job_id, extra_credits=0.0):
         # ...and neither does a turn that reached it and got nothing back. The
         # test is real USAGE, not row count: failed calls now leave llm_calls
         # rows too (so an outage is visible in admin), and counting those as
-        # "n" would have MIN_TURN_CREDITS bill 1 credit for a turn that produced
+        # "n" alone would mistake provider failures for work that produced
         # no tokens, no image and no audio — while the chat tells the user it
         # didn't cost them anything. That message has to stay true.
         if not (float(row["tin"] or 0) or float(row["tout"] or 0)
@@ -3254,11 +3253,10 @@ def charge_turn_credits(conn, user_id, job_id, extra_credits=0.0):
         compute_row = cur.fetchone() or {}
         compute_cost = float(compute_row.get("compute_cost") or 0)
         metered_cost = model_cost + compute_cost
-        credits = max(MIN_TURN_CREDITS,
-                      model_prices.usd_to_credits(metered_cost, ndigits=1))
+        credits = model_prices.usd_to_credits(metered_cost, ndigits=2)
         if compute_cost <= 0:
             credits += max(0.0, float(extra_credits or 0.0))
-        credits = round(credits, 1)
+        credits = round(credits, 2)
         cur.execute("""SELECT credits_daily, credits_bonus, credits_monthly
                        FROM users WHERE id = %s FOR UPDATE""", (user_id,))
         u = cur.fetchone()

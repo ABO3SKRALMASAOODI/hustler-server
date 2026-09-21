@@ -243,77 +243,33 @@ def _frontier_on(monkeypatch, key="xai-test-key"):
     monkeypatch.setattr(llm, "_frontier_client", None)
 
 
-def test_a_half_configured_paid_provider_is_treated_as_off(monkeypatch):
-    """A base URL with no key would 401 every turn — for paying customers
-    specifically. Off is the only safe reading of a partial config."""
-    _paid_on(monkeypatch, key="")
-    assert not llm.paid_available()
-    assert llm.agent_client_for(True, "ai_pro")[1] == config.AGENT_MODEL
-
-
-def test_only_frontier_changes_the_model_as_shipped(monkeypatch):
-    """The shipped lineup is TWO volume steps and ONE model step.
-
-    Pro shipped for an afternoon badged "MORE INTELLIGENCE" while resolving to
-    the same model id as Frontier — grok-4.5 is the strongest model anything in
-    this stack points at, so "stronger than Creator" and "the strongest we
-    have" were the same string, and the $100 card's argument was false. Pro
-    went back to selling room. This asserts the routing matches the cards.
-    """
+@pytest.mark.parametrize("plan", ["ai", "ai_pro", "ai_max", "plus", "mcp"])
+def test_every_paid_plan_and_trial_uses_same_editor(monkeypatch, plan):
     _frontier_on(monkeypatch)
-    try:
-        assert config.PAID_PLANS == set(), \
-            "PAID_PLANS must ship empty — see the config comment"
-        for plan in ("free", "ai", "ai_pro"):
-            assert llm.agent_client_for(plan != "free", plan)[1] == \
-                config.AGENT_MODEL, plan
-        assert llm.agent_client_for(True, "ai_max")[1] == "grok-4.5"
-    finally:
-        llm._frontier_client = None
+    assert llm.agent_client_for(True, plan)[1] == "grok-4.6"
+    assert llm.vision_client_for(plan)[1] == "grok-4.6"
+    assert all(lane["model"] == "grok-4.6" for lane in llm.agent_lanes_for(True, plan))
 
 
-def test_promoting_pro_to_a_model_tier_is_one_env_var(monkeypatch):
-    """The lane stays wired so Pro can become a model tier the day there IS
-    something between the standard and frontier models."""
-    _paid_on(monkeypatch)
-    monkeypatch.setattr(config, "PAID_PLANS", {"ai_pro"})
-    try:
-        assert llm.agent_client_for(True, "ai_pro")[1] == "grok-4.5"
-        # ...and Creator must NOT come with it.
-        assert llm.agent_client_for(True, "ai")[1] == config.AGENT_MODEL
-    finally:
-        llm._paid_client = None
-
-
-def test_a_trial_previews_its_own_plans_model(monkeypatch):
-    """A Creator trial must NOT be served a better plan's model. Previewing a
-    model the customer stops getting the moment they pay is the bait-and-switch
-    that per-plan routing exists to prevent."""
-    _paid_on(monkeypatch)
-    monkeypatch.setattr(config, "PAID_PLANS", {"ai_pro"})
-    _frontier_on(monkeypatch)
-    try:
-        assert llm.agent_client_for(True, "ai")[1] == config.AGENT_MODEL
-        assert llm.frontier_client() is not llm.paid_client()
-    finally:
-        llm._paid_client = None
-        llm._frontier_client = None
-
-
-def test_an_unconfigured_tier_degrades_instead_of_401ing(monkeypatch):
-    """No key anywhere: every plan falls back to the base model. A worse edit
-    is recoverable; a 401 on every turn of a $100 plan is not."""
+def test_missing_paid_credentials_never_silently_downgrades(monkeypatch):
     _paid_on(monkeypatch, key="")
     monkeypatch.setattr(config, "FRONTIER_API_KEY", "")
-    for plan in ("ai", "ai_pro", "ai_max"):
-        assert llm.agent_client_for(True, plan)[1] == config.AGENT_MODEL
+    with pytest.raises(RuntimeError, match="not configured"):
+        llm.agent_client_for(True, "ai")
+    assert not llm.vision_available("ai")
+
+
+def test_paid_wallets_are_deduplicated_and_keep_quality(monkeypatch):
+    _paid_on(monkeypatch)
+    _frontier_on(monkeypatch)
+    assert len(llm.agent_lanes_for(True, "ai")) == 1
+    _paid_on(monkeypatch, key="second-wallet")
+    assert len(llm.agent_lanes_for(True, "ai")) == 2
+    assert llm.agent_client_for(False, "free")[1] == config.AGENT_MODEL
 
 
 def test_the_paid_model_is_priced():
-    """Routing a customer onto a model with no price entry would charge them
-    the fallback rate silently. Whatever PAID_AGENT_MODEL is set to must be in
-    the table — this asserts it for the model we intend to use."""
-    assert "grok-4.5" in model_prices.MODEL_PRICES
+    assert config.EDITOR_MODEL in model_prices.MODEL_PRICES
 
 
 def test_reasoning_effort_is_high_and_rejection_is_survivable():
@@ -378,8 +334,8 @@ def test_reasoning_effort_never_applies_to_the_first_iteration():
 
 def test_a_credit_has_a_combined_provider_cost_budget():
     """The divisor covers model and executor spend, with headroom for R2."""
-    assert model_prices.USD_PER_CREDIT == 0.004
-    assert model_prices.usd_to_credits(1.00) == 250.0
+    assert model_prices.USD_PER_CREDIT == 0.005
+    assert model_prices.usd_to_credits(1.00) == 200.0
     assert model_prices.usd_to_credits(0.0) == 0.0
     # Junk in must not raise inside a charge.
     assert model_prices.usd_to_credits(None) == 0.0
@@ -396,7 +352,7 @@ def test_the_charge_and_the_in_turn_cap_use_the_SAME_divisor():
         assert "/ 0.01" not in src
 
 
-def test_every_live_plan_keeps_a_fifty_to_seventyish_percent_margin():
+def test_full_allowance_cost_and_discounted_plan_margin_are_explicit():
     """Worst-case full usage includes model + executor and 5 GB of R2.
 
     R2 Standard is $0.015/GB-month. Five GB per subscriber is a deliberately
@@ -405,10 +361,11 @@ def test_every_live_plan_keeps_a_fifty_to_seventyish_percent_margin():
     backend = _load_backend_copy()
     assert backend.USD_PER_CREDIT == model_prices.USD_PER_CREDIT
     storage_reserve = 5 * 0.015
-    for plan, monthly, annual, granted in (
-            ("ai", 15, 150, 1000), ("ai_pro", 30, 300, 2000),
-            ("ai_max", 50, 500, 5000)):
+    for plan, monthly, annual, granted, expected_cost in (
+            ("ai", 15, 150, 1000, 5), ("ai_pro", 30, 300, 2000, 10),
+            ("ai_max", 50, 500, 5000, 25)):
         metered_cost = granted * model_prices.USD_PER_CREDIT
+        assert metered_cost == expected_cost
         for revenue in (monthly, annual / 12.0):
             margin = (revenue - metered_cost - storage_reserve) / revenue
-            assert 0.50 <= margin <= 0.75, (plan, revenue, margin)
+            assert 0.39 <= margin <= 0.67, (plan, revenue, margin)

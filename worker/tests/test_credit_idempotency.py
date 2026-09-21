@@ -10,7 +10,7 @@ import db  # noqa: E402
 
 
 class _SharedLedger:
-    def __init__(self, barrier=None, compute_cost=0.004):
+    def __init__(self, barrier=None, compute_cost=0.004, token_cost=0.01):
         self.lock = threading.Lock()
         self.barrier = barrier
         self.ledger = {}
@@ -18,6 +18,7 @@ class _SharedLedger:
         self.updates = 0
         self.statements = []
         self.compute_cost = compute_cost
+        self.token_cost = token_cost
 
 
 class _Cursor:
@@ -37,7 +38,7 @@ class _Cursor:
         if "FROM llm_calls WHERE job_id" in normalized:
             self._row = {
                 "n": 2, "tin": 20_000, "tout": 1_000,
-                "token_cost": 0.01, "n_images": 0, "gen_cost": 0,
+                "token_cost": self.shared.token_cost, "n_images": 0, "gen_cost": 0,
             }
             return
         if "AS compute_cost FROM video_jobs" in normalized:
@@ -146,9 +147,9 @@ def test_recorded_executor_cost_is_charged_and_replaces_flat_fallback():
     charged = db.charge_turn_credits(
         _Conn(with_compute), 5, 1001, extra_credits=99)
 
-    # $0.01 model + $0.008 executor at $0.004/credit = 4.5 credits. The old
+    # $0.01 model + $0.008 executor at $0.005/credit = 3.6 credits. The old
     # flat fallback must not be added when real telemetry exists.
-    assert charged == 4.5
+    assert charged == 3.6
 
 
 def test_migration_repairs_duplicates_then_enforces_unique_job_turn():
@@ -478,3 +479,9 @@ def test_qualification_writer_uses_the_same_account_row_lock():
     commands = [sql for sql, _params in conn.cur.commands]
     assert "FROM users" in commands[0] and "FOR UPDATE" in commands[0]
     assert commands[1].startswith("INSERT INTO client_events")
+
+
+def test_small_real_usage_is_not_inflated_to_a_minimum_credit():
+    shared = _SharedLedger(compute_cost=0, token_cost=0.0002)
+    assert db.charge_turn_credits(_Conn(shared), 5, 1003) == 0.04
+    assert shared.pools["daily"] == 9.96

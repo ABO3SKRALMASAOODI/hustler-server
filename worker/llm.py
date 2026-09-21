@@ -14,6 +14,7 @@ Editing is unavailable on the OpenAI/xAI backend."""
 import base64
 import json
 import mimetypes
+import math
 import re
 import threading
 from types import SimpleNamespace
@@ -66,11 +67,32 @@ def _note_error(e):
     _tls.last_error = f"{type(e).__name__}: {str(e)[:400]}"
 
 
+def provider_cost_usd(usage, model):
+    """Authoritative xAI per-request bill (one USD = 10^10 ticks)."""
+    if not str(model or "").startswith("grok-") or str(model).startswith("grok-imagine-"):
+        return None
+    raw = usage.get("cost_in_usd_ticks") if isinstance(usage, dict) else getattr(usage, "cost_in_usd_ticks", None)
+    try:
+        value = float(raw)
+        return value / 1e10 if math.isfinite(value) and value >= 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def cached_assistant_message(message, model):
+    """Retain provider reasoning payload privately for multi-turn cache reuse."""
+    value = getattr(message, "reasoning_content", None)
+    return {"reasoning_content": value} if str(model).startswith("grok-") and isinstance(value, str) and value else {}
+
+
 def record(purpose, request, response, usage=None):
     fn = get_recorder()
     if not fn:
         return
     try:
+        actual = provider_cost_usd(usage, (request or {}).get("model"))
+        if actual is not None and isinstance(response, dict):
+            response = dict(response, provider_cost_usd=actual)
         fn(purpose, request, response, usage)
     except Exception as e:
         print(f"[llm] recorder failed: {e}", flush=True)
@@ -189,34 +211,36 @@ def is_frontier(plan):
     return (plan or "") in config.FRONTIER_PLANS
 
 
+def paid_editor_lanes():
+    """Configured Grok wallets; never silently downgrade a subscriber to Luna."""
+    lanes, wallets = [], set()
+    for name, base, key, factory in (
+            ("frontier", config.FRONTIER_BASE_URL, config.FRONTIER_API_KEY, frontier_client),
+            ("paid_fallback", config.PAID_BASE_URL, config.PAID_API_KEY, paid_client)):
+        wallet = (str(base).rstrip("/"), key)
+        if not base or not key or wallet in wallets:
+            continue
+        wallets.add(wallet)
+        lanes.append(dict(name=name, client=factory(), model=config.EDITOR_MODEL,
+                          base_url=base, api_key=key))
+    return lanes
+
+
+def paid_editor_plan(plan):
+    return bool(plan and plan != "free")
+
+
 def agent_client_for(subscribed, plan=None, first_turn=False):
-    """(client, model) for one agent turn.
+    """All subscribed plans/trials use the same paid editor model.
 
-    One tier per plan, most specific first — this IS the "more intelligence" /
-    "frontier intelligence" the pricing page sells, so the mapping is the
-    product, not an optimisation:
-
-      Frontier 'ai_max'   FRONTIER_* — strongest, and vision too.
-      Pro      'ai_pro'   PAID_*     — the stronger agent model.
-      Creator / free      AGENT_MODEL.
-
-    A trial runs its OWN plan's model, because a trial that previews a better
-    model than the plan delivers is the bait-and-switch it was meant to avoid.
-
-    first_turn (round 81) is the A/B lever, not a tier: a FREE account's
-    first-ever agent turn runs FIRST_TURN_AGENT_MODEL when that lane is
-    configured. Free accounts only — a subscriber's model is a promise their
-    plan already resolved above, and boosting a trial is the same
-    bait-and-switch the trial rule exists to avoid.
-
-    Every branch falls through to the next when its provider is not configured,
-    so a missing key degrades the model rather than 401ing the turn. `plan`
-    defaults to None so any two-tier caller keeps working unchanged.
+    Free first-turn experiments remain separate. Missing paid credentials are
+    an operational failure, never permission to silently downgrade quality.
     """
-    if subscribed and is_frontier(plan) and frontier_available():
-        return frontier_client(), config.FRONTIER_AGENT_MODEL
-    if subscribed and is_paid_tier(plan) and paid_available():
-        return paid_client(), config.PAID_AGENT_MODEL
+    if subscribed:
+        lanes = paid_editor_lanes()
+        if not lanes:
+            raise RuntimeError("The subscribed editing provider is not configured; restore its credentials.")
+        return lanes[0]["client"], lanes[0]["model"]
     if first_turn and not subscribed and first_turn_available():
         return first_turn_client(), config.FIRST_TURN_AGENT_MODEL
     return client(), config.AGENT_MODEL
@@ -235,6 +259,8 @@ def agent_lanes_for(subscribed, plan=None, first_turn=False):
     changing models on an empty provider wallet is not a fallback.  Keys stay
     in process memory and are never returned by config_report or logged.
     """
+    if subscribed:
+        return paid_editor_lanes()
     primary_client, primary_model = agent_client_for(
         subscribed, plan, first_turn=first_turn)
 
@@ -419,17 +445,11 @@ def config_report():
 
 
 def vision_client_for(plan):
-    """(client, model) for one vision call.
-
-    Frontier buys the frontier model for LOOKING at the footage as well as for
-    reasoning about it — which is the half of that promise that would be
-    easiest to quietly not deliver, since vision has always had its own
-    provider and nobody would see the difference in the chat. Everyone else
-    gets the shared VISION_* provider, or — when there isn't one — the agent's
-    own eyes (see vision_fallback).
+    """Paid visual reviews use the same Grok editor as paid reasoning.
+    Free uploads retain their configured shared vision/fallback provider.
     """
-    if is_frontier(plan) and frontier_available() and config.FRONTIER_VISION_MODEL:
-        return frontier_client(), config.FRONTIER_VISION_MODEL
+    if paid_editor_plan(plan):
+        return agent_client_for(True, plan)
     if shared_vision_configured():
         return vision_client(), config.VISION_MODEL
     return vision_fallback() or (vision_client(), config.VISION_MODEL)
@@ -449,15 +469,22 @@ def vision_client_for(plan):
 _turn = threading.local()
 
 
-def set_turn_plan(plan):
+def set_turn_plan(plan, project_id=None):
     """Called once at the top of an agent turn. Pair with clear_turn_plan() in
     a finally — worker threads are reused, so a plan left behind would apply to
     the next job that lands on this thread."""
     _turn.plan = plan or ""
+    _turn.cache_key = f"valmera-project-{int(project_id)}" if project_id is not None else None
 
 
 def clear_turn_plan():
     _turn.plan = ""
+    _turn.cache_key = None
+
+
+def cache_affinity(model):
+    key = getattr(_turn, "cache_key", None)
+    return {"x-grok-conv-id": key} if key and str(model).startswith("grok-") else {}
 
 
 def turn_plan():
@@ -874,7 +901,7 @@ def completion_kwargs(model, max_tokens=None, temperature=None):
     # Priority processing (round 94): OpenAI-only — another provider behind
     # OPENAI_BASE_URL would 400 on the unknown parameter, so the tier is
     # gated on the host, same rule responses_available uses.
-    if config.OPENAI_SERVICE_TIER and \
+    if not str(model).startswith("grok-") and config.OPENAI_SERVICE_TIER and \
             "api.openai.com" in (config.OPENAI_BASE_URL or ""):
         kw["service_tier"] = config.OPENAI_SERVICE_TIER
     return kw
@@ -939,6 +966,7 @@ class _RespUsage:
         self.prompt_tokens = raw.get("input_tokens") or 0
         self.completion_tokens = raw.get("output_tokens") or 0
         self.total_tokens = raw.get("total_tokens") or 0
+        self.cost_in_usd_ticks = raw.get("cost_in_usd_ticks")
         det = raw.get("output_tokens_details") or {}
         # The number this whole lane exists to make non-zero. Named to match
         # what reasoning_tokens() already looks for, so the recorder writes
@@ -1227,11 +1255,13 @@ def responses_create(base_url, api_key, model, messages, tools,
     body = {"model": model,
             "input": _to_responses_input(messages),
             "tools": _to_responses_tools(tools)}
+    if cache_affinity(model):
+        body["prompt_cache_key"] = cache_affinity(model)["x-grok-conv-id"]
     if max_tokens:
         body["max_output_tokens"] = int(max_tokens)
     if effort:
         body["reasoning"] = {"effort": effort}
-    if config.OPENAI_SERVICE_TIER:
+    if config.OPENAI_SERVICE_TIER and "api.openai.com" in (base_url or ""):
         body["service_tier"] = config.OPENAI_SERVICE_TIER
     r = requests.post(url, json=body,
                       timeout=timeout or config.LLM_TIMEOUT_S,
@@ -1270,6 +1300,9 @@ def create_with_dialect(client_obj, model, messages, max_tokens=None,
     agent loop integrates the same helpers into its richer retry chain."""
     kw = completion_kwargs(model, max_tokens, temperature)
     kw.update(extra)
+    headers = cache_affinity(model)
+    if headers:
+        kw["extra_headers"] = {**headers, **kw.get("extra_headers", {})}
     if "tools" in kw and tools_need_effort_none(model):
         kw["reasoning_effort"] = "none"
     attempts = 0
@@ -1320,9 +1353,8 @@ def vision_available(plan=None):
     blind, because it is a different endpoint with a different key.
     """
     plan = turn_plan() if plan is None else plan
-    if (is_frontier(plan) and frontier_available()
-            and config.FRONTIER_VISION_MODEL):
-        return True
+    if paid_editor_plan(plan):
+        return bool(paid_editor_lanes())
     # ...and when the shared VISION_* provider is unconfigured or has latched
     # blind, the agent's own eyes still count as vision (see vision_fallback).
     return shared_vision_configured() or vision_fallback() is not None
@@ -1492,21 +1524,23 @@ def ask_vision(prompt, image_paths, max_tokens=1500, purpose="vision",
 
 def ask_text(system, user, max_tokens=300, temperature=0.5, purpose="text",
              reasoning_effort=None, retry_empty=False):
-    """One plain-text completion against AGENT_MODEL. Returns
+    """One plain-text completion using the current plan’s editor model. Returns
     {"text", "model", "prompt_tokens", "completion_tokens"} or None on any
     failure — callers must keep a non-LLM fallback."""
-    if not config.OPENAI_API_KEY:
+    if not config.OPENAI_API_KEY and not paid_editor_plan(turn_plan()):
         return None
     messages = [{"role": "system", "content": system},
                 {"role": "user", "content": user}]
+    model = config.EDITOR_MODEL if paid_editor_plan(turn_plan()) else config.AGENT_MODEL
     try:
+        text_client, model = agent_client_for(True, turn_plan()) if paid_editor_plan(turn_plan()) else (client(), model)
         extra = {}
-        if reasoning_effort and not reasoning_effort_rejected(config.AGENT_MODEL):
+        if reasoning_effort and not reasoning_effort_rejected(model):
             extra["reasoning_effort"] = reasoning_effort
         cap = int(max_tokens)
         for attempt in (1, 2):
             resp = create_with_dialect(
-                client(), config.AGENT_MODEL, messages,
+                text_client, model, messages,
                 max_tokens=cap, temperature=temperature, **extra)
             text = (resp.choices[0].message.content or "").strip()
             usage = getattr(resp, "usage", None)
@@ -1514,7 +1548,7 @@ def ask_text(system, user, max_tokens=300, temperature=0.5, purpose="text",
                         int(getattr(usage, "completion_tokens", 0) or 0))
             starved = not text and spent >= cap * 0.9
             record(purpose,
-                   {"model": config.AGENT_MODEL, "system": system, "user": user},
+                   {"model": model, "system": system, "user": user},
                    {"text": text, **({"starved_at_max_tokens": cap} if starved else {})}, usage)
             # A reasoning-only response is not a completed assessment. Retry
             # once only when this bounded caller opted in and the budget was
@@ -1524,14 +1558,14 @@ def ask_text(system, user, max_tokens=300, temperature=0.5, purpose="text",
                 continue
             if not text:
                 return None
-            return {"text": text, "model": config.AGENT_MODEL,
+            return {"text": text, "model": model,
                     "prompt_tokens": getattr(usage, "prompt_tokens", None),
                     "completion_tokens": getattr(usage, "completion_tokens", None)}
     except Exception as e:
         print(f"[llm] ask_text failed: {e}", flush=True)
         _note_error(e)
         record(purpose,
-               {"model": config.AGENT_MODEL, "system": system, "user": user},
+               {"model": model, "system": system, "user": user},
                {"error": str(e)[:300]}, None)
         return None
 

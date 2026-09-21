@@ -1976,7 +1976,7 @@ def run_agent_job(worker_db, job):
     # Vision is reached from eight places that know nothing about plans, so the
     # plan is published to this THREAD for the duration of the turn and cleared
     # in the finally below (worker threads are reused across jobs).
-    llm.set_turn_plan(plan if subscribed else "")
+    llm.set_turn_plan(plan if subscribed else "", project_id=ctx.project_id)
     if ctx.agent_model != config.AGENT_MODEL:
         print(f"[agent] job {job['id']}: plan {plan} -> {ctx.agent_model}",
               flush=True)
@@ -2012,7 +2012,8 @@ def run_agent_job(worker_db, job):
             ctx.add_usage(model,
                           getattr(usage, "prompt_tokens", 0) or 0,
                           getattr(usage, "completion_tokens", 0) or 0,
-                          cached_in, reasoning, audio_in, audio_out)
+                          cached_in, reasoning, audio_in, audio_out,
+                          provider_cost_usd=llm.provider_cost_usd(usage, model))
         # The cache-hit slice and the reasoning count ride in the response
         # payload rather than in new columns: charge_turn_credits reads them
         # back with response->>'cached_in' / ->>'reasoning_out' and prices each
@@ -4529,7 +4530,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         # after an unrelated write invalidated the last rendered version.
         # This neither locks tools nor treats old pixels as a current pass.
         if not visual_handoff:
-            finishing_review.refresh(ctx, messages)
+            finishing_review.refresh(ctx, messages, preserve_prefix=model.startswith("grok-"))
         progress = (85 if ctx.rendered_versions else
                     55 if ctx.versions_written else
                     20 if getattr(ctx, "edit_plan", None) else 5)
@@ -4559,6 +4560,9 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             active_kw = llm.completion_kwargs(
                 active_model, max_tokens, config.AGENT_TEMPERATURE)
             active_kw.update(active_extra)
+            affinity = llm.cache_affinity(active_model)
+            if affinity:
+                active_kw["extra_headers"] = affinity
             return active_kw, active_extra
 
         kw, extra = _chat_request(model)
@@ -4567,6 +4571,18 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         # rows are retrospective; this atomic ledger prevents two workers
         # from simultaneously opening prompts that exceed the org TPM tier.
         estimate = _agent_request_token_estimate(messages, tools, max_tokens)
+        # Continue with durable edit state before Grok's 200k prompt-price
+        # boundary. Reserve generous headroom for image/tokenizer variance.
+        # A fresh slice uses saved plans, observations and exact EDL state;
+        # never throw away unread tool images before the editor sees them.
+        if model.startswith("grok-") and estimate >= 150000 and not unread_tool_images:
+            if iteration > 0:
+                return _durable_continuation("prompt context checkpoint")
+            return _finalize(ctx, worker_db, session_id,
+                "Your work is saved, but the editing context is too large to process safely. "
+                "I couldn't finish this request.", "blocked", total_steps, timings, honesty,
+                extra_meta={"error": "prompt_context_too_large"},
+                turn_deadline=turn_deadline, job=job)
         capacity_expired = False
         reservation_id = (f"{job['id']}:{iteration}:"
                           f"{uuid.uuid4().hex[:10]}")
@@ -5066,6 +5082,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 "function": {"name": tc.function.name,
                              "arguments": tc.function.arguments or "{}"},
             } for tc in msg.tool_calls],
+            **llm.cached_assistant_message(msg, model),
         })
 
         # Everything before this boundary was visible to the model when it
@@ -5195,7 +5212,12 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             ctx._pending_looked_output_times = set()
             ctx._pending_looked_asset_times = {}
 
-        if batch_committed_edl:
+        # Keep the growing Grok prefix byte-stable while it is comfortably
+        # below the pricing boundary. Editing earlier messages on every step
+        # discards cache hits; compact in larger batches under real pressure.
+        compact_history = (not model.startswith("grok-") or
+            _agent_request_token_estimate(messages, tools, max_tokens) >= 100000)
+        if batch_committed_edl and compact_history:
             released = _compact_consumed_look_frames(
                 messages, before_index=visible_message_boundary)
             if released:
@@ -5211,8 +5233,9 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         if getattr(ctx, "_pending_visual_review_assets", None):
             ctx._pending_visual_review_assets.clear()
 
-        compacted = _compact_old_tool_results(
+        compacted = (_compact_old_tool_results(
             messages, plan_recorded=bool(getattr(ctx, "edit_plan", None)))
+            if compact_history else 0)
         if compacted:
             ctx.editing_metrics["old_tool_results_compacted"] = (
                 ctx.editing_metrics.get("old_tool_results_compacted", 0)

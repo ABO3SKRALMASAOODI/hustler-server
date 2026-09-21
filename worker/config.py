@@ -156,34 +156,9 @@ VISION_API_KEY = (
     or (OPENAI_API_KEY if VISION_BASE_URL == OPENAI_BASE_URL else "")
     or (IMAGE_API_KEY if VISION_BASE_URL == IMAGE_BASE_URL else ""))
 
-# ── The optional middle model tier (OFF by default) ──────────────────────────
-#
-# TWO MODEL TIERS SHIP, NOT THREE (round 49):
-#
-#   free / Creator 'ai' / Pro 'ai_pro'   AGENT_MODEL  — DeepSeek V4 Pro
-#   Frontier 'ai_max'                    FRONTIER_*   — the frontier model
-#
-# Pro is a VOLUME break, not a model break: the same editor and the same model
-# as Creator, with double the credits. That is what its card says ("more room"),
-# and the two have to agree — a badge claiming a better model on a tier running
-# the identical one is exactly what customers find out.
-#
-# This lane exists so Pro CAN become a model tier with one env var
-# (PAID_PLANS=ai_pro) and no code change. It ships OFF because the only model
-# worth promoting Pro to is the same one Frontier runs, and a middle tier
-# indistinguishable from the top tier is worse than no middle tier: it makes the
-# $100 card's entire argument false. Give Frontier something genuinely stronger
-# FIRST, then promote Pro into the gap that opens up.
-#
-# A trial always runs its OWN plan's model. A trial previewing a model the
-# customer stops getting the moment they pay is the bait-and-switch, not the fix
-# for it.
-#
-# Credits stay correct across any split automatically: the charge prices each
-# llm_calls row from its own `model` column (model_prices.py), which is the
-# entire reason that indirection exists. Whatever PAID_AGENT_MODEL is set to
-# MUST be listed in model_prices.MODEL_PRICES, or it silently bills at the
-# LLM_PRICE_* fallback.
+# Paid editing uses EDITOR_MODEL for every plan, including existing trials.
+# Keep both credential lanes for wallet failover and free-lane compatibility;
+# historical PAID_PLANS/FRONTIER_* model overrides do not downgrade subscribers.
 PAID_BASE_URL = os.getenv("PAID_BASE_URL", "https://api.x.ai/v1").strip()
 PAID_AGENT_MODEL = os.getenv("PAID_AGENT_MODEL", "grok-4.5").strip()
 PAID_API_KEY = (
@@ -222,24 +197,8 @@ FIRST_TURN_API_KEY = (
     or (OPENAI_API_KEY if FIRST_TURN_BASE_URL == OPENAI_BASE_URL else "")
     or (VISION_API_KEY if FIRST_TURN_BASE_URL == VISION_BASE_URL else "")
     or (IMAGE_API_KEY if FIRST_TURN_BASE_URL == IMAGE_BASE_URL else ""))
-# ── The model the FRONTIER plan gets ─────────────────────────────────────────
-#
-# 'ai_max' ($100/mo) is sold on the model, not on the credit count: every agent
-# turn AND every look at the footage runs on the frontier provider. That is the
-# only plan where the model is the product, so unlike PAID_* above it is not a
-# cost optimisation with a fallback — it is a promise attached to a price.
-#
-# Which is why the defaults here are NOT empty. PAID_* defaults off because
-# shipping it must be a no-op; this defaults ON (xAI + grok-4.5) because a
-# Frontier subscriber silently served DeepSeek is a refund, and because the key
-# is usually already present: VISION_API_KEY has to be an xAI key for vision to
-# work at all (no DeepSeek V4 tier accepts images), and it inherits from there.
-#
-# The inheritance follows the same rule as IMAGE_API_KEY and VISION_API_KEY —
-# a key is only ever taken from a provider on the SAME base URL, never handed
-# across providers. With no key on any of them, llm.frontier_available() is
-# False and Frontier falls back to the PAID_* tier and then to AGENT_MODEL, and
-# says so loudly in the log on every turn rather than 401ing the customer.
+# Primary paid provider credentials. Historical model settings remain for
+# compatibility; EDITOR_MODEL is authoritative for all subscribed editing.
 FRONTIER_BASE_URL = os.getenv("FRONTIER_BASE_URL", "https://api.x.ai/v1").strip()
 FRONTIER_AGENT_MODEL = os.getenv("FRONTIER_AGENT_MODEL", "grok-4.5").strip()
 FRONTIER_VISION_MODEL = os.getenv("FRONTIER_VISION_MODEL", "grok-4.5").strip()
@@ -253,6 +212,11 @@ FRONTIER_API_KEY = (
 # Plans that route to the frontier provider. A set, so adding a higher tier
 # later is one edit and no new branch.
 FRONTIER_PLANS = {"ai_max"}
+
+# All subscribing editors share the same model. Plan tiers buy allowance and
+# MCP access, not different editorial quality. Existing provider credentials
+# remain valid; this deliberately supersedes historical per-plan model IDs.
+EDITOR_MODEL = os.getenv("EDITOR_MODEL", "grok-4.6").strip()
 
 # reasoning_effort for the agent's tool-dispatch steps.
 #
