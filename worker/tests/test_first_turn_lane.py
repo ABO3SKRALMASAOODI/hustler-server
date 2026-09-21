@@ -21,6 +21,7 @@ import llm                                                  # noqa: E402
 @pytest.fixture(autouse=True)
 def _fresh_pool(monkeypatch):
     monkeypatch.setattr(llm, "_first_turn_client", None)
+    monkeypatch.setattr(llm, "paid_editor_lanes", lambda: [dict(client=object(), model="grok-4.6")])
 
 
 def _lane_on(monkeypatch, model="test-strong-model"):
@@ -54,7 +55,7 @@ def test_a_subscriber_is_never_an_experiment(monkeypatch):
     touch it even on a first turn."""
     _lane_on(monkeypatch)
     _, model = llm.agent_client_for(True, "ai", first_turn=True)
-    assert model == config.AGENT_MODEL
+    assert model == "grok-4.6"
 
 
 def test_frontier_still_outranks_everything(monkeypatch):
@@ -62,7 +63,7 @@ def test_frontier_still_outranks_everything(monkeypatch):
     monkeypatch.setattr(llm, "frontier_available", lambda: True)
     monkeypatch.setattr(config, "FRONTIER_AGENT_MODEL", "frontier-model")
     _, model = llm.agent_client_for(True, "ai_max", first_turn=True)
-    assert model == "frontier-model"
+    assert model == "grok-4.6"
 
 
 def test_a_missing_key_degrades_to_the_free_model(monkeypatch):

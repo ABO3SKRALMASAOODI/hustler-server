@@ -111,10 +111,11 @@ def read_edl(row, duration, program_map, sections=None, compact=False, offset=0,
             if name not in wanted:
                 wanted.append(name)
     unknown = sorted(set(unknown))
+    # A misspelled read is a discovery request, not an unsafe edit. Return
+    # the real index and any valid requested sections together, so the agent
+    # can act without guessing 20 more feature names in separate calls.
     if unknown:
-        return (f"REJECTED: unknown EDL section(s) {unknown}. Available: "
-                f"{sorted(edl.keys())}. Accepted aliases: "
-                f"{sorted(set(_EDL_SECTION_ALIASES) | _EDL_OVERVIEW_ALIASES | _EDL_ALL_ALIASES)}.")
+        overview = True
     if compact:
         return json.dumps(compact_edl(row, duration, program_map), indent=1)
     if wanted or overview:
@@ -138,6 +139,12 @@ def read_edl(row, duration, program_map, sections=None, compact=False, offset=0,
             payload["overview"] = compact_edl(row, duration, program_map)
         if resolved:
             payload["aliases_resolved"] = resolved
+        if unknown:
+            payload["unknown_sections"] = unknown
+            payload["notice"] = (
+                "These names are not EDL sections. Use overview.available_sections "
+                "for exact fields; feature settings live inside effects, texts or "
+                "captions. Read the creative plan with get_edit_plan. No state changed.")
         rendered = json.dumps(payload, indent=1)
         if len(rendered) > 21000:
             return json.dumps({

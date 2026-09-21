@@ -361,7 +361,8 @@ def run_mcp_job(worker_db, job):
                 ctx.add_usage(model,
                               getattr(usage, "prompt_tokens", 0) or 0,
                               getattr(usage, "completion_tokens", 0) or 0,
-                              cached_in, reasoning, audio_in, audio_out)
+                              cached_in, reasoning, audio_in, audio_out,
+                          provider_cost_usd=llm.provider_cost_usd(usage, model))
             if isinstance(response, dict) and (
                     cached_in or reasoning or audio_in or audio_out):
                 extra = {}
@@ -380,7 +381,7 @@ def run_mcp_job(worker_db, job):
                           getattr(usage, "completion_tokens", None) if usage else None)
 
         llm.set_recorder(_recorder)
-        llm.set_turn_plan(ctx.plan if ctx.subscribed else "")
+        llm.set_turn_plan(ctx.plan if ctx.subscribed else "", project_id=ctx.project_id)
         try:
             if tool == STATE_TOOL:
                 return {"text": agent_loop.state_block(

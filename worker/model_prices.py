@@ -97,7 +97,7 @@ MODEL_PRICES = {
         "in": 1.74, "cached_in": 0.003625, "out": 3.48,
         "reasoning_separate": False,
     },
-    # Grok 4.5 -- what trial and paid users get once PAID_AGENT_MODEL is set.
+    # Grok 4.5 remains priced for historical calls and legacy free-lane fallback.
     #
     # cached_in is 0.30, NOT 2.0. The comment this replaces said to set the
     # cached price equal to the miss price for Grok, i.e. "Grok has no prompt
@@ -107,10 +107,17 @@ MODEL_PRICES = {
     # failure that was just fixed for DeepSeek.
     "grok-4.5": {
         "in": 2.00, "cached_in": 0.30, "out": 6.00,
+        "long_context_tokens": 200000, "long_context_multiplier": 2,
         # xAI reports reasoning tokens separately from completion_tokens.
         # Verify with the query in this module's docstring before trusting it
         # on a new xAI tier -- see also AGENT_REASONING_EFFORT, which is what
         # actually shrinks this line.
+        "reasoning_separate": True,
+    },
+    # https://docs.x.ai/developers/pricing (verified 2026-09-21).
+    "grok-4.6": {
+        "in": 2.00, "cached_in": 0.50, "out": 6.00,
+        "long_context_tokens": 200000, "long_context_multiplier": 2,
         "reasoning_separate": True,
     },
 }
@@ -142,18 +149,30 @@ def price_for(model, fallback):
 # ---------------------------------------------------------------------------
 #  What a credit is worth
 # ---------------------------------------------------------------------------
-# A credit represents at most $0.004 of metered provider cost. The worker
-# converts BOTH model and executor cost through this divisor; storage is held
-# inside the remaining plan headroom (see the plan-margin regression).
-#
-# Everything downstream reads this, so it must never be duplicated as a literal:
-#   worker/db.charge_turn_credits       what the user is actually charged
-#   worker/agent_tools.running_credits  the in-turn cap, same units
-# and PLAN_CREDITS / PLAN_MONTHLY_LIMITS are chosen against it (see the margin
-# table in backend/routes/paddle.py). At $0.004 the worst live case (annual
-# Frontier, all credits spent) retains about 52% before the deliberately
-# conservative 5 GB storage reserve; Creator and Pro sit near 68-73%.
-USD_PER_CREDIT = 0.004
+# All plans spend the same units: $0.01 of metered usage value per credit,
+# billed at 2x provider cost. Subscription allowances/discounts determine the
+# customer's purchase price; this is not a promise of 50% cash margin per plan.
+# Worker settlement, running caps and backend estimates share this divisor.
+CREDIT_USAGE_VALUE_USD = 0.01
+PROVIDER_COST_MARKUP = 2.0
+USD_PER_CREDIT = CREDIT_USAGE_VALUE_USD / PROVIDER_COST_MARKUP
+
+
+def context_multiplier(model, prompt_tokens):
+    p = MODEL_PRICES.get(normalize(model)) or {}
+    threshold = p.get("long_context_tokens")
+    return p.get("long_context_multiplier", 1) if threshold and prompt_tokens >= threshold else 1
+
+
+def base_usage_cost(model, tokens_in, tokens_out, cached=0, reasoning=0,
+                    audio_in=0, audio_out=0, fallback=None):
+    p = price_for(model, fallback or {})
+    tin, tout = max(tokens_in or 0, 0), max(tokens_out or 0, 0)
+    ain, aout = min(max(audio_in or 0, 0), tin), min(max(audio_out or 0, 0), tout)
+    cached = min(max(cached or 0, 0), tin - ain)
+    reason = max(reasoning or 0, 0) if p.get("reasoning_separate") else 0
+    return ((tin-ain-cached)*p["in"] + cached*p["cached_in"] + ain*p["audio_in"]
+            + (tout-aout+reason)*p["out"] + aout*p["audio_out"]) / 1e6
 
 
 def usd_to_credits(usd, ndigits=2):
@@ -240,17 +259,28 @@ def row_cost_sql(fallback, model_col="model", response_col="response",
     ).format(response_col, total_in, audio_in)
     reasoning = ("GREATEST(COALESCE(({}->>'reasoning_out')::float, 0), 0) * {}"
                  ).format(response_col, _reasoning_case(model_col))
-    return (
+    context = "(CASE " + " ".join(
+        f"WHEN lower(COALESCE({model_col}, '')) = {_lit(mid)} AND {total_in} >= {int(p['long_context_tokens'])} THEN {float(p['long_context_multiplier'])}"
+        for mid, p in sorted(MODEL_PRICES.items()) if p.get("long_context_tokens")) + " ELSE 1.0 END)"
+    estimated = (
         "((GREATEST({total_in} - {audio_in} - {cached}, 0) * {p_in}"
         " + {cached} * {p_cached}"
         " + {audio_in} * {p_audio_in}"
         " + (GREATEST({total_out} - {audio_out}, 0) + {reason}) * {p_out}"
-        " + {audio_out} * {p_audio_out}) / 1000000.0)"
+        " + {audio_out} * {p_audio_out}) / 1000000.0 * {context})"
     ).format(total_in=total_in, total_out=total_out,
              audio_in=audio_in, audio_out=audio_out,
-             cached=cached, reason=reasoning,
+             cached=cached, reason=reasoning, context=context,
              p_in=_case("in", model_col, fallback),
              p_cached=_case("cached_in", model_col, fallback),
              p_out=_case("out", model_col, fallback),
              p_audio_in=_case("audio_in", model_col, fallback),
              p_audio_out=_case("audio_out", model_col, fallback))
+
+    # Prefer the provider's actual invoice amount, including cache/tier/context
+    # discounts. Historical rows without it retain deterministic token pricing.
+    return (f"(CASE WHEN left(lower(COALESCE({model_col}, '')), 5) = 'grok-' "
+            f"AND jsonb_typeof({response_col}->'provider_cost_usd') = 'number' "
+            f"THEN CASE WHEN ({response_col}->>'provider_cost_usd')::float >= 0 "
+            f"THEN ({response_col}->>'provider_cost_usd')::float ELSE {estimated} END "
+            f"ELSE {estimated} END)")

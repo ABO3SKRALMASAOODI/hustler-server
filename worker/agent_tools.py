@@ -385,7 +385,7 @@ class ToolContext:
         self.write_attempts = 0
 
     def add_usage(self, model, tokens_in, tokens_out, cached_in=0,
-                  reasoning=0, audio_in=0, audio_out=0):
+                  reasoning=0, audio_in=0, audio_out=0, provider_cost_usd=None):
         """Record one model call's usage, for the in-turn spend cap."""
         self.tokens_in += tokens_in or 0
         self.tokens_out += tokens_out or 0
@@ -394,6 +394,12 @@ class ToolContext:
             (model or "").strip().lower(),
             {"in": 0, "out": 0, "cached": 0, "reasoning": 0,
              "audio_in": 0, "audio_out": 0})
+        base = model_prices.base_usage_cost(
+            model, tokens_in, tokens_out, cached_in, reasoning, audio_in, audio_out,
+            fallback=config.PRICE_FALLBACK)
+        actual = (provider_cost_usd if provider_cost_usd is not None else
+                  base * model_prices.context_multiplier(model, tokens_in or 0))
+        slot["cost_adjustment_usd"] = float(slot.get("cost_adjustment_usd") or 0) + actual - base
         slot["in"] += tokens_in or 0
         slot["out"] += tokens_out or 0
         slot["cached"] += cached_in or 0
@@ -425,6 +431,7 @@ class ToolContext:
                          + audio_in * p["audio_in"]
                          + out * p["out"]
                          + audio_out * p["audio_out"]) / 1e6
+                cost += float(u.get("cost_adjustment_usd") or 0)
         else:
             cached_in = min(max(self.tokens_cached_in, 0), self.tokens_in)
             cost = ((self.tokens_in - cached_in) * config.LLM_PRICE_IN_PER_M +
@@ -1419,7 +1426,7 @@ def list_assets(ctx, kind=None):
              "clip": ["video_clip"], "render": ["render"],
              "all": ["music", "image_ref", "video_clip",
                      "render", "original"]}
-    requested = (kind or "music").strip().lower()
+    requested = _tool_identifier(kind or "music").lower()
     aliases = {
         "video": "clip", "videos": "clip", "clips": "clip",
         "images": "image", "photo": "image", "photos": "image",
@@ -18849,6 +18856,14 @@ def ask_user(ctx, question):
     raise AskUser(q[:600])
 
 
+def _tool_identifier(value):
+    """Normalize one double-encoded identifier, never arbitrary tool text."""
+    value = str(value or "").strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'`":
+        value = value[1:-1].strip()
+    return value
+
+
 def read_skill(ctx, name, section=None):
     """Load one of the on-demand playbooks (worker/skills/*.md) into the
     turn. The catalog in the system prompt names them; content arrives when
@@ -18857,14 +18872,11 @@ def read_skill(ctx, name, section=None):
     # Some providers double-encode string values inside otherwise valid
     # function arguments. Unwrap one quoted identifier, then use the same
     # explicit skill catalog; never fuzzy-match or invent a playbook.
-    def identifier(value):
-        value = str(value or "").strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'`":
-            value = value[1:-1].strip()
-        return value
-    name = identifier(name)
-    section = identifier(section) or None
+    name = _tool_identifier(name)
+    section = _tool_identifier(section) or None
     name_key = str(name or "").strip().lower().replace(".md", "")
+    if name_key in {"sfx", "sound effects"}:
+        name = name_key = "audio"
     section_key = str(section or "").strip().lower()
     skill_key = name_key + (":" + section_key if section_key else ":*")
     skills = _loaded_skills(ctx)
@@ -20233,9 +20245,9 @@ def review_audio(ctx, asset_key=None, times=None, output_times=None,
                 "deployment. Use get_audio_analysis plus the preview AUDIO "
                 "CHECK measurements; do not claim subjective listening.")
     try:
-        span = min(max(float(span_s or 6.0), 2.0), 12.0)
+        span = min(max(float(span_s or 6.0), 0.1), 12.0)
     except (TypeError, ValueError):
-        return "REJECTED: span_s must be a number between 2 and 12 seconds."
+        return "REJECTED: span_s must be a number between 0.1 and 12 seconds."
 
     def windows(raw_times, duration, label):
         if not raw_times:
@@ -20251,10 +20263,14 @@ def review_audio(ctx, asset_key=None, times=None, output_times=None,
             if value < 0 or value > duration + 0.05:
                 continue
             start = max(0.0, min(value - span / 2,
-                                 max(0.0, duration - 0.5)))
+                                 max(0.0, duration - min(span, 0.5))))
             end = min(duration, start + span)
-            if end - start >= 0.5:
-                out.append((round(start, 2), round(end, 2)))
+            # Short whooshes/clicks are real listening evidence too. The old
+            # half-second minimum rejected every timestamp on a 0.3s SFX.
+            if end - start >= 0.1:
+                window = (round(start, 3), round(end, 3))
+                if window not in out:
+                    out.append(window)
         if not out:
             return None, (f"REJECTED: no requested {label} falls inside the "
                           f"{duration:.1f}s audio duration.")
@@ -22079,7 +22095,8 @@ TOOLS = {
                     "insert_media); 'render' past renders; 'all' everything. "
                     "UNUSED files are marked AVAILABLE and can be placed "
                     "without asking the user to re-upload.",
-                    {"kind": {"type": "string"}}),
+                    {"kind": {"type": "string",
+                              "enum": ["music", "image", "clip", "render", "all"]}}),
     "compare_uploaded_media": (
         compare_uploaded_media,
         "YOUR OWN EYES on SEVERAL uploaded clips/images in ONE story-wide "
@@ -24716,6 +24733,10 @@ def openai_tools(model=None, compact=False, names=None):
             continue
         if sees and name in ("look_at", "look_at_asset"):
             props = {k: v for k, v in props.items() if k != "question"}
+        if name == "read_skill":
+            import agent_prompt
+            props = copy.deepcopy(props)
+            props["name"]["enum"] = agent_prompt.skill_names()
         if name == "apply_edit_recipe":
             # Full-catalog callers (MCP) receive the full recipe language.
             # Compact calls receive exactly the transaction-safe operations

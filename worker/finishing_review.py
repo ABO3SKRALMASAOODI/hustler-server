@@ -71,17 +71,28 @@ def directive(ctx):
     return None
 
 
-def refresh(ctx, messages):
-    # Exactly one current directive. Stale versions must not accumulate in
-    # context or survive as new constraints after a repair or user steer.
-    messages[:] = [m for m in messages if not (
+def refresh(ctx, messages, preserve_prefix=False):
+    # Grok keeps an append-only prefix for caching. Each changed status
+    # explicitly supersedes prior versions; unchanged status adds no tokens.
+    previous = [m["content"] for m in messages if (
         m.get("role") == "system" and isinstance(m.get("content"), str)
         and m["content"].startswith(DIRECTIVE_PREFIX))]
+    if not preserve_prefix:
+        messages[:] = [m for m in messages if not (
+            m.get("role") == "system" and isinstance(m.get("content"), str)
+            and m["content"].startswith(DIRECTIVE_PREFIX))]
     try:
         note = directive(ctx)
     except Exception as exc:
         # The real immutable render/verification gate remains authoritative.
         print(f"[finishing] preflight unavailable: {type(exc).__name__}", flush=True)
         return
+    if preserve_prefix:
+        if note is None and not previous:
+            return
+        note = (note or DIRECTIVE_PREFIX + " No current preflight findings. Current render verification still applies.")
+        note += "\nThis current status supersedes every earlier finishing status in this conversation."
+        if previous and previous[-1] == note:
+            return
     if note:
         messages.append({"role": "system", "content": note})
