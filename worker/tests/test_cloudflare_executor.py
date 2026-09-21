@@ -63,8 +63,9 @@ def test_optional_duration_emergency_brake_still_fails_closed(monkeypatch):
 def test_cloudflare_long_jobs_outlive_retired_request_ceiling():
     assert config.cloudflare_timeout_for("index") >= 21600
     assert config.cloudflare_timeout_for("final") >= 21600
-    assert config.cloudflare_timeout_for("preview") == \
-        config.executor_timeout_for("preview")
+    assert config.cloudflare_timeout_for("preview") >= 3600
+    assert config.cloudflare_timeout_for("preview_check") == \
+        config.executor_timeout_for("preview_check")
 
 
 def test_provider_choice_is_stamped_once_under_the_queue_lease(monkeypatch):

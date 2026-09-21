@@ -1314,6 +1314,13 @@ def executor_timeout_for(job_type):
 # impatient, while index/final/orchestration can legitimately outlive the
 # retired Cloud Run request ceiling.
 CLOUDFLARE_EXECUTOR_TIMEOUTS = {
+    # Canvas previews prepare selected windows from original clips, unlike
+    # main-source previews that can use an existing proxy. A progressing
+    # ten-minute 4K assembly exceeded the old 25-minute admission budget.
+    # Keep a finite one-hour lease; per-encoder stall and overrun watchdogs
+    # still stop unproductive work much earlier. Proof reels keep their short
+    # preview_check budget.
+    "preview": int(os.getenv("CLOUDFLARE_TIMEOUT_PREVIEW_S", "3600")),
     "final": int(os.getenv("CLOUDFLARE_TIMEOUT_FINAL_S", "21600")),
     "index": int(os.getenv("CLOUDFLARE_TIMEOUT_INDEX_S", "21600")),
     "agent_turn": int(os.getenv("CLOUDFLARE_TIMEOUT_AGENT_S", "21600")),
