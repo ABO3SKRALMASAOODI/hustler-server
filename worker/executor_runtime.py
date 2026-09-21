@@ -177,6 +177,8 @@ def execute(job, runners):
     io_token = io_telemetry.begin()
     io_finished = False
     resource_start = resource_usage.snapshot()
+    vm_start = (resource_usage.vm_snapshot()
+                if os.getenv("EXECUTOR_PROVIDER") == "cloudflare" else None)
     try:
         memory_sampler = resource_usage.MemorySampler()
     except Exception:
@@ -186,6 +188,8 @@ def execute(job, runners):
     def measured_resources():
         nonlocal io_finished
         measured = resource_usage.usage_since(resource_start)
+        if vm_start is not None:
+            measured.update(resource_usage.vm_usage_since(vm_start))
         try:
             sampled_peak = memory_sampler.finish() if memory_sampler else None
         except Exception:

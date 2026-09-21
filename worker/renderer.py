@@ -51,6 +51,7 @@ DUCK_DB = -12.0            # music under speech AND program audio under voiceove
 MAX_ENABLE_SPANS = 80
 AUDIO_NORM = "aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo"
 _RENDER_DETAIL = ContextVar("render_detail", default=None)
+CANVAS_MAX_DIRECT_INPUTS = 8
 
 
 @contextmanager
@@ -3025,7 +3026,8 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
                        want_wm=False, wm_settings=None, cancelled_cb=None,
                        audio_only=False, asset_locals=None, suppress_outro=False,
                        cap_ass_override=None, cap_burn_offset=None,
-                       render_fragment=False):
+                       render_fragment=False, _base_stage=False,
+                       _batch_window=None):
     """Render a canvas program (round 34): a timeline with NO main video, where
     the ordered inserts (clips/images) are concatenated on the canvas, plus
     music / sfx / voiceover / manual captions / effects. Mirrors render_edl but
@@ -3054,6 +3056,21 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
     gfx_path = graphics.build_gfx_ass(edl, tl.out_duration,
                                       os.path.join(workdir, "graphics.ass"),
                                       play_res=(W, H))
+
+    # A single graph opened all 62 inputs for a repeatedly failing 4K assembly.
+    # Bound decoder and remote-connection fanout: assemble the base program with at
+    # most six source decoders, then compose/mix/master against one local input.
+    # This is an execution plan only: the saved timeline and its IDs stay intact.
+    if len(inserts) > CANVAS_MAX_DIRECT_INPUTS and not audio_only and not _base_stage:
+        original_progress = progress_cb
+        edl, asset_locals = _bounded_canvas_program(
+            edl, workdir, preview, asset_locals, cancelled_cb,
+            (lambda f: original_progress(f * 0.8))
+            if original_progress else None)
+        inserts = edl["inserts"]
+        tl = Timeline(edl["keep"], inserts)
+        if original_progress:
+            progress_cb = lambda f: original_progress(0.8 + f * 0.2)
 
     def _fetch(key, tag, idx):
         return _render_asset_source(key, tag, idx, workdir, asset_locals)
@@ -3191,7 +3208,12 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
                   cancelled_cb=cancelled_cb)
         return media.probe_audio_duration(out_path)
 
-    if preview:
+    if _base_stage:
+        # Lossless audio keeps clip boundaries sample-continuous. The final pass alone
+        # applies the authored score, loudness normalization and delivery codec.
+        encode = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "16",
+                  "-threads:v", "2", "-c:a", "pcm_s16le"]
+    elif preview:
         encode = ["-c:v", "libx264", "-preset", config.PREVIEW_PRESET,
                   "-crf", "27", "-g", "48", "-keyint_min", "24",
                   "-c:a", "aac", "-b:a", "128k"]
@@ -3202,16 +3224,96 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
 
     expected_out_s = (tl.out_duration
                       + music_tail_ext(edl, tl.out_duration) + outro_s)
-    cmd = ["ffmpeg", "-y", *_stable_video_inputs(extra_inputs),
+    keyframes = []
+    if _batch_window is not None:
+        start, span = _batch_window
+        start = math.ceil((start - 1e-8) * fps) / fps
+        keyframes = ["-force_key_frames", f"{start:.6f},{start + span:.6f}"]
+    cmd = ["ffmpeg", "-y",
+           *(["-filter_complex_threads", "2"] if _base_stage else []),
+           *_stable_video_inputs(extra_inputs, decoder_threads=1 if _base_stage else None),
            "-filter_complex", graph, "-map", "[vout]", "-map", "[aout]",
-           *encode, *_output_clock(fps), "-t", f"{expected_out_s:.3f}",
-           "-movflags", "+faststart",
+           *encode, *keyframes, *_output_clock(fps),
+           "-t", f"{expected_out_s:.6f}",
+           *([] if _base_stage else ["-movflags", "+faststart"]),
            "-progress", "pipe:1", "-nostats", out_path]
     _render_media_run(cmd, timeout=_render_ffmpeg_timeout(preview, expected_out_s),
               progress_cb=progress_cb,
               expected_out_s=expected_out_s,
               cancelled_cb=cancelled_cb)
     return media.duration_of(out_path)
+
+
+def _bounded_canvas_program(edl, workdir, preview, asset_locals,
+                            cancelled_cb, progress_cb):
+    """Materialize a large clip assembly without parallel remote decoders.
+
+    Neighbor clips give transitions their original context. Global effects and
+    sound layers are applied once by the caller on the full program clock.
+    """
+    duration = sum(float(item["duration_s"]) for item in edl["inserts"])
+    canvas = edl["canvas"]
+    fps = float(canvas["fps"])
+    if preview:
+        _w, _h, fps = preview_geometry(canvas["width"], canvas["height"], fps)
+    stage_dir = os.path.join(workdir, "canvas_base_" + uuid.uuid4().hex[:12])
+    os.makedirs(stage_dir)
+    pieces, durations = [], []
+    for i, batch in enumerate(render_plan.canvas_batches(edl)):
+        if cancelled_cb and cancelled_cb():
+            raise dbx.JobLeaseLost("Canvas assembly execution lease ended")
+        part_dir = os.path.join(stage_dir, str(i))
+        os.makedirs(part_dir)
+        context_path = os.path.join(part_dir, "context.nut")
+        path = os.path.join(part_dir, "base.nut")
+        span = batch["end"] - batch["start"]
+        def progress(frac, start=batch["start"], length=span):
+            if progress_cb:
+                progress_cb((start + frac * length) / duration)
+        _render_canvas_edl(
+            batch["edl"], context_path, part_dir, preview, progress,
+            cancelled_cb=cancelled_cb, asset_locals=asset_locals,
+            suppress_outro=True, render_fragment=True, _base_stage=True,
+            _batch_window=(batch["trim_start"], span))
+        # Finish the bounded graph before trimming. Terminating a concat graph
+        # at a speed-adjusted audio boundary can leave atempo spinning on EOF.
+        # Forced keyframes let this local extraction copy picture losslessly;
+        # PCM retains sample-accurate audio at the seam, without AAC priming.
+        video_start = math.ceil((batch["trim_start"] - 1e-8) * fps) / fps
+        media.run(["ffmpeg", "-y", "-v", "error", "-ss",
+                   f"{video_start:.6f}", "-i", context_path,
+                   "-ss", f"{batch['trim_start']:.6f}", "-i", context_path,
+                   "-t", f"{span:.6f}", "-map", "0:v:0", "-map", "1:a:0",
+                   "-af", f"asetpts=N/SR/TB,apad=whole_dur={span:.6f},atrim=duration={span:.6f}",
+                   "-c:v", "copy", "-c:a", "pcm_s16le", path],
+                  timeout=180, cancelled_cb=cancelled_cb)
+        actual = media.duration_of(path)
+        if abs(actual - span) > max(0.15, 2.0 / float(edl["canvas"]["fps"])):
+            raise RenderVerificationError(
+                f"Canvas batch {i} produced {actual:.3f}s, expected {span:.3f}s")
+        pieces.append(path)
+        durations.append(span)
+        os.remove(context_path)
+    program = os.path.join(stage_dir, "program.nut")
+    listing = os.path.join(stage_dir, "concat.txt")
+    with open(listing, "w", encoding="utf-8") as handle:
+        for path, span in zip(pieces, durations):
+            handle.write(f"file '{path}'\nduration {span:.6f}\n")
+    media.run(["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0",
+               "-i", listing, "-map", "0:v:0", "-map", "0:a:0", "-c", "copy",
+               program], timeout=180, cancelled_cb=cancelled_cb)
+    # Joining succeeds before any owned intermediate is removed.
+    for path in pieces:
+        os.remove(path)
+    key = "internal-canvas-program-" + uuid.uuid4().hex + ".nut"
+    composed = json.loads(json.dumps(edl))
+    composed["inserts"] = [{"id": "ins_base", "asset_key": key, "kind": "video",
+                            "at_output_s": 0.0, "source_start_s": 0.0,
+                            "duration_s": duration}]
+    composed["effects"] = {**(composed.get("effects") or {}), "transition": None}
+    print(f"[render] assembled {len(edl['inserts'])} clips in {len(pieces)} "
+          "bounded batches; composing from one local program", flush=True)
+    return composed, {**(asset_locals or {}), key: program}
 
 
 def _prune_graph_to_audio(graph, target="aout"):
@@ -3815,7 +3917,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
 #  Job entrypoint (types: preview | final)                             #
 # ------------------------------------------------------------------ #
 
-def _stable_video_inputs(args):
+def _stable_video_inputs(args, decoder_threads=None):
     """Preserve the program clock when a clip changes pixel/color properties.
 
     FFmpeg normally restarts the entire filtergraph on a changed input frame,
@@ -3827,6 +3929,8 @@ def _stable_video_inputs(args):
     stable = []
     for arg in args:
         if arg == "-i":
+            if decoder_threads is not None:
+                stable.extend(["-threads:v", str(decoder_threads)])
             stable.extend(["-reinit_filter:v", "0"])
         stable.append(arg)
     return stable

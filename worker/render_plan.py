@@ -7,6 +7,36 @@ import copy
 import json
 
 
+def canvas_batches(edl, batch_size=4):
+    """Bound source decoders while retaining both sides of every transition.
+
+    Each batch owns whole clips and includes one context clip on either side.
+    Only its owned interval is emitted. Global overlays, scoring and mastering
+    belong to the final composition, after the base program is joined.
+    """
+    from timeline import transition_junctions
+    inserts = edl.get("inserts") or []
+    offsets = [0.0]
+    for item in inserts:
+        offsets.append(round(offsets[-1] + float(item["duration_s"]), 6))
+    transition = (edl.get("effects") or {}).get("transition")
+    junctions = transition_junctions(edl, {}, len(inserts)) if transition else set()
+    for first in range(0, len(inserts), batch_size):
+        last = min(len(inserts), first + batch_size)
+        left, right = max(0, first - 1), min(len(inserts), last + 1)
+        items = copy.deepcopy(inserts[left:right])
+        for item in items:
+            item["at_output_s"] = 0.0
+        chunk = {"keep": [], "canvas": copy.deepcopy(edl["canvas"]),
+                 "inserts": items}
+        if transition:
+            chunk["effects"] = {"transition": {
+                **transition, "junctions": sorted(
+                    j - left for j in junctions if left <= j < right - 1)}}
+        yield {"edl": chunk, "start": offsets[first], "end": offsets[last],
+               "trim_start": offsets[first] - offsets[left]}
+
+
 def canonical_program(edl):
     """Remove organizational cuts before compiling media dependencies.
 

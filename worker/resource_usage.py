@@ -93,6 +93,37 @@ def usage_since(start, root="/sys/fs/cgroup"):
     return end
 
 
+def vm_snapshot(proc_root="/proc"):
+    """Cloudflare micro-VM evidence when the cgroup memory files are hidden.
+
+    These are VM-wide counters, deliberately named separately from per-cgroup
+    measurements. Never infer OOM from an encoder's SIGKILL alone.
+    """
+    result = {}
+    try:
+        with open(os.path.join(proc_root, "meminfo")) as handle:
+            for line in handle:
+                fields = line.split()
+                name = {"MemTotal:": "vm_memory_total_mib",
+                        "MemAvailable:": "vm_memory_available_mib"}.get(fields[0])
+                if name:
+                    result[name] = round(int(fields[1]) / 1024, 2)
+    except (OSError, ValueError, IndexError):
+        pass
+    kills = _read_kv(os.path.join(proc_root, "vmstat")).get("oom_kill")
+    if kills is not None:
+        result["vm_oom_kills"] = kills
+    return result
+
+
+def vm_usage_since(start, proc_root="/proc"):
+    end = vm_snapshot(proc_root)
+    before, after = (start or {}).get("vm_oom_kills"), end.pop("vm_oom_kills", None)
+    if before is not None and after is not None:
+        end["vm_oom_kills_during_job"] = max(0, after - before)
+    return end
+
+
 class MemorySampler:
     """Sample cgroup-wide working memory while child processes are alive.
 
