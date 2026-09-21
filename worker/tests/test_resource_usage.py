@@ -39,6 +39,22 @@ def test_missing_cgroup_files_are_nonfatal(tmp_path):
     assert resource_usage.usage_since({}, str(tmp_path)) == {}
 
 
+def test_vm_oom_evidence_counts_only_new_kernel_events(tmp_path):
+    (tmp_path / "meminfo").write_text("MemTotal: 8388608 kB\nMemAvailable: 2097152 kB\n")
+    (tmp_path / "vmstat").write_text("oom_kill 4\n")
+    start = resource_usage.vm_snapshot(str(tmp_path))
+    assert start["vm_memory_total_mib"] == 8192
+    assert resource_usage.vm_usage_since(start, str(tmp_path))["vm_oom_kills_during_job"] == 0
+    (tmp_path / "vmstat").write_text("oom_kill 5\n")
+    assert resource_usage.vm_usage_since(start, str(tmp_path))["vm_oom_kills_during_job"] == 1
+    assert resource_usage.vm_usage_since({}, str(tmp_path)).get("vm_oom_kills_during_job") is None
+
+
+def test_vm_telemetry_missing_files_are_nonfatal(tmp_path):
+    assert resource_usage.vm_snapshot(str(tmp_path)) == {}
+    assert resource_usage.vm_usage_since({}, str(tmp_path)) == {}
+
+
 def test_sampler_captures_child_peak_when_kernel_has_no_peak_file(tmp_path):
     current = tmp_path / "memory.current"
     current.write_text(str(2 * 1024 * 1024))
