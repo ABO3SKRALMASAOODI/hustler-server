@@ -174,6 +174,15 @@ text on existing text. Look specifically for:
 - broken continuity, duplicate frames, unexpected black frames, harsh or
   cheap-looking effects, and visual clutter.
 
+A raw-source image is not the edited output and is not a required shot list.
+Never demand a shot merely because it exists in an upload or appears in a raw
+comparison. A crop defect must identify the EDITED tile that loses a subject
+relative to the SAME source moment. Uploaded clips chosen for a montage are
+valid project footage; they need not reproduce the original primary upload.
+Respect authored edge fades: black at the endpoint of a fade is expected,
+not an accidental black gap. Only request a repair for an actual visible
+contradiction of the customer's brief or a defect in the edited output.
+
 This is also a CRAFT review, not just damage detection. Across the sampled
 sequence judge whether the visual language is coherent, every cutaway visibly
 supports its recorded narrative purpose rather than acting as generic stock

@@ -109,7 +109,7 @@ def test_independent_review_sees_edited_output_and_raw_source(monkeypatch,
 
     class Ctx:
         workdir = str(tmp_path)
-        index = {"tile_keys": ["raw/first.jpg", "raw/last.jpg"]}
+        index = {"tile_keys": ["raw/first.jpg", "raw/last.jpg"], "tile_step_s": 4}
         user_message = "make a clean vertical reel"
         duration = 30.0
         edit_plan = {"brief": "talking-head reel", "steps": ["reframe"],
@@ -151,7 +151,8 @@ def test_independent_review_sees_edited_output_and_raw_source(monkeypatch,
     assert report["verdict"] == "pass"
     assert any("EDITED RENDER overview" in x for x in seen["labels"])
     assert any("EDITED RENDER changed" in x for x in seen["labels"])
-    assert sum("RAW SOURCE" in x for x in seen["labels"]) == 2
+    assert sum("RAW SOURCE" in x for x in seen["labels"]) == 1
+    assert any("NOT an additional required shot" in x for x in seen["labels"])
     assert "talking-head reel" in seen["context"]
     assert "format=social interview" in seen["context"]
     assert "must avoid=burned text collision" in seen["context"]
@@ -208,6 +209,32 @@ def test_independent_review_prefers_event_screening_over_redundant_overview(
     assert "critic_screening1" in seen["paths"][0]
     assert all("overview" not in label.lower() for label in seen["labels"])
     assert "tile 2=18.20s (B-roll 3 body)" in seen["labels"][0]
+
+
+def test_clip_only_review_never_attaches_unused_primary_source(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    seen = {}
+    monkeypatch.setattr(agent_tools.llm, "vision_available", lambda: True)
+    def download(key, path):
+        assert not key.startswith('unused-main/'), 'critic received footage absent from edit'
+        open(path, 'wb').write(key.encode())
+    monkeypatch.setattr(agent_tools.storage, 'download_to', download)
+    monkeypatch.setattr(agent_tools.preview_critic, 'review', lambda paths, labels, context:
+        seen.update(labels=labels, context=context) or {'verdict': 'pass', 'findings': []})
+    edl = {'keep': [], 'canvas': {'width': 1920, 'height': 1080},
+           'inserts': [{'id': 'wedding', 'asset_key': 'selected/wedding.mp4',
+                        'at_output_s': 0, 'duration_s': 40, 'source_start_s': 12}],
+           'effects': {'fade_in_s': .15, 'fade_out_s': .5}}
+    ctx = SimpleNamespace(workdir=str(tmp_path), project_id=9, duration=9.5,
+        user_message='make a wedding film', edit_plan={},
+        index={'tile_keys': ['unused-main/first.jpg'], 'tile_step_s': 1},
+        latest_edl=lambda: {'version': 72, 'json': edl})
+    report = agent_tools._independent_preview_review(ctx,
+        {'sheet_key': 'render/current.jpg', 'duration_s': 40}, [(.5, 'opening')])
+    assert report['verdict'] == 'pass'
+    assert not any('RAW SOURCE' in label for label in seen['labels'])
+    assert '"fade_out_s": 0.5' in seen['context']
+    assert 'intentional black' in seen['context']
 
 
 def test_mcp_render_frames_skip_valmera_funded_second_critic(monkeypatch):

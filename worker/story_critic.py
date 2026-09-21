@@ -814,7 +814,8 @@ def review(edl, index, family, user_request="", plan=None,
         _SYSTEM, json.dumps(
             packed_evidence, ensure_ascii=False, separators=(",", ":")),
         max_tokens=1100, temperature=0.2,
-        purpose="independent_story_critic")
+        purpose="independent_story_critic", reasoning_effort="low",
+        retry_empty=True)
     report = parse_report((answer or {}).get("text")) if answer else None
     if report is not None:
         report = _ground_repair_targets(report, packed_evidence)
