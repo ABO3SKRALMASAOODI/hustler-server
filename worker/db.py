@@ -934,8 +934,44 @@ def replace_execution_provider_before_launch(conn, job_id, total_claims,
         return row and row.get("provider")
 
 
-def project_execution_shape(conn, project_id, asset_id=None):
+def project_execution_shape(conn, project_id, asset_id=None, job_type=None, payload=None,
+                            resolve_unknown=False):
     """Small capacity fingerprint used before a provider is selected."""
+    if job_type in {'preview', 'preview_check', 'final', 'filmstrip'}:
+        import execution_inputs
+        payload = payload or {}
+        edl_row = (get_edl_version(conn, project_id, int(payload['edl_version']))
+                   if payload.get('edl_version') is not None else latest_edl(conn, project_id))
+        if not edl_row:
+            raise PermanentJobError('EDL version is unavailable for capacity admission')
+        with conn.cursor() as cur:
+            cur.execute('''SELECT id, kind, storage_key, bytes, duration_s
+                           FROM assets WHERE project_id = %s ORDER BY id DESC''',
+                        (project_id,))
+            rows = cur.fetchall()
+        if resolve_unknown:
+            # Clean sources, masks and legacy music can be stored directly in
+            # the EDL without an assets row. HEAD only those real dependencies;
+            # never scan/download the unused library or guess their size.
+            import storage
+            from concurrent.futures import ThreadPoolExecutor
+            by_key = {r['storage_key']: r for r in reversed(rows)}
+            refs = set(execution_inputs.render_references(edl_row['json']))
+            if job_type == 'filmstrip':
+                refs = {r['storage_key'] for r in execution_inputs.filmstrip_inputs(rows, edl_row['json'])}
+            for kind in ('proxy', 'original'):
+                source = next((r for r in rows if r['kind'] == kind), None)
+                if source:
+                    refs.add(source['storage_key'])
+            missing = [k for k in refs if k not in by_key or by_key[k].get('bytes') is None]
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                sizes = list(pool.map(storage.object_bytes, missing))
+            for key, size in zip(missing, sizes):
+                if key in by_key:
+                    by_key[key]['bytes'] = size
+                else:
+                    rows.append({'storage_key': key, 'kind': 'derived', 'bytes': size})
+        return execution_inputs.job_shape(rows, edl_row['json'], job_type, payload)
     with conn.cursor() as cur:
         if asset_id is not None:
             cur.execute("""SELECT COALESCE(bytes, 0) AS total_bytes,

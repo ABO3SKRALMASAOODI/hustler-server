@@ -55,6 +55,7 @@ import os
 import shutil
 
 import config
+import execution_inputs
 import media
 import storage
 
@@ -83,7 +84,7 @@ MIN_INTERVAL_S = 0.5
 # How many assets one job will look at. A project with 40 b-roll clips is real,
 # and decoding all of them would turn a few seconds of decoration into minutes
 # of the media lane — which is the lane people are waiting on for previews.
-MAX_ASSETS = 14
+MAX_ASSETS = execution_inputs.FILMSTRIP_ASSETS
 # An inserted clip is normally a few seconds. Past this it is a second FEATURE,
 # not an insert, and a linear decode of it is not worth a timeline block's
 # background: those get a single poster frame from one seek instead.
@@ -95,7 +96,7 @@ ASSET_MAX_TILES = 16
 # must cost this and then be skipped, not hold the media lane the previews
 # people are waiting on share with it.
 ASSET_FFMPEG_TIMEOUT_S = 90
-ASSET_WORKERS = max(1, min(3, int(os.getenv("FILMSTRIP_ASSET_WORKERS", "2"))))
+ASSET_WORKERS = execution_inputs.FILMSTRIP_WORKERS
 
 # Waveform resolution. The envelope is drawn into a lane 16-26px tall and at
 # most ~1400px wide at 8x zoom, so more points than this cannot be seen; fewer
@@ -374,6 +375,9 @@ def _local_for_ref(ref, workdir, tag):
     ext = os.path.splitext(ref)[1].lower()[:6] or ".bin"
     local = os.path.join(workdir, f"{tag}{ext}")
     try:
+        if (os.getenv('EXECUTOR_PROVIDER') == 'cloudflare'
+                and execution_inputs.streams_asset(ref, storage.object_bytes(ref))):
+            return storage.presign_get(ref, expires=21600)
         storage.download_to(ref, local)
     except Exception:
         return None
@@ -433,7 +437,7 @@ def _asset_artifacts(project_id, ref, kind, duration_s, workdir, tag):
         return out if out.get("wave") else None
 
     local = _local_for_ref(ref, workdir, tag)
-    if not local or not os.path.exists(local):
+    if not local or not (local.startswith('https://') or os.path.exists(local)):
         # A cached sheet still beats nothing when the file itself is gone.
         return out if out.get("key") or out.get("wave") else None
     try:
@@ -516,10 +520,10 @@ def _asset_artifacts(project_id, ref, kind, duration_s, workdir, tag):
 # 2 (round 61): asset sheets are sampled by seek at mid-tile rather than by a
 # linear decode at tile-start, and the projects that most need the new sampler
 # are exactly the ones whose two builds died under the old one.
-TIMELINE_MEDIA_VERSION = 2
+# 3: job-scoped admission and ranged reads recover large upload libraries.
+TIMELINE_MEDIA_VERSION = 3
 
-_KIND_MAP = {"video_clip": "video", "image_ref": "image",
-             "music": "audio", "audio": "audio"}
+_KIND_MAP = execution_inputs.FILMSTRIP_KINDS
 
 
 def run_filmstrip_job(worker_db, job):
@@ -604,7 +608,11 @@ def run_filmstrip_job(worker_db, job):
         have_local = False
         if not cached or not main_wave_hit:
             try:
-                storage.download_to(row["storage_key"], local)
+                if (os.getenv('EXECUTOR_PROVIDER') == 'cloudflare'
+                        and execution_inputs.streams_source(row)):
+                    local = storage.presign_get(row['storage_key'], expires=21600)
+                else:
+                    storage.download_to(row["storage_key"], local)
                 have_local = True
             except Exception as e:
                 # A cached sheet remains useful even when a waveform refresh
@@ -645,7 +653,8 @@ def run_filmstrip_job(worker_db, job):
     finally:
         for p in (local, out):
             try:
-                os.remove(p)
+                if not p.startswith('https://'):
+                    os.remove(p)
             except OSError:
                 pass
 
@@ -656,27 +665,15 @@ def run_filmstrip_job(worker_db, job):
                               list(_KIND_MAP), limit=MAX_ASSETS * 3) or []
     except Exception:
         rows_ = []
-    todo = []
-    seen = set()
-    for a in rows_:
-        ref = a.get("storage_key")
-        if not ref or ref in seen:
-            continue
-        seen.add(ref)
-        todo.append((ref, _KIND_MAP.get(a.get("kind"), "video"),
-                     a.get("duration_s")))
     # Bundled tracks are not assets, so nothing above finds the library music
     # that is sitting on the user's timeline right now. Read the live EDL for
     # them — it is the only place a `library:` reference exists.
     try:
         edl = (worker_db.run(dbx.latest_edl, project_id) or {}).get("json") or {}
-        for m in (edl.get("music") or []):
-            ref = m.get("storage_key")
-            if ref and ref not in seen:
-                seen.add(ref)
-                todo.append((ref, "audio", None))
     except Exception:
-        pass
+        edl = {}
+    todo = [(a['storage_key'], _KIND_MAP[a['kind']], a.get('duration_s'))
+            for a in execution_inputs.filmstrip_inputs(rows_, edl, limit=None)]
 
     def _one_asset(i, ref, kind, adur):
         asset_dir = os.path.join(workdir, f"asset_{i}")
