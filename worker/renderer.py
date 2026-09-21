@@ -3024,14 +3024,15 @@ IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp")
 def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
                        want_wm=False, wm_settings=None, cancelled_cb=None,
                        audio_only=False, asset_locals=None, suppress_outro=False,
-                       cap_ass_override=None, cap_burn_offset=None):
+                       cap_ass_override=None, cap_burn_offset=None,
+                       render_fragment=False):
     """Render a canvas program (round 34): a timeline with NO main video, where
     the ordered inserts (clips/images) are concatenated on the canvas, plus
     music / sfx / voiceover / manual captions / effects. Mirrors render_edl but
     assembles the ffmpeg inputs with NO input [0] main video — every input
     (silence, music, sfx, inserts, voiceover, end card) starts at index 0 — and
     takes the output geometry from the canvas rather than probing a source."""
-    edl = validate_edl(edl_dict).model_dump()
+    edl = validate_edl(edl_dict, render_fragment=render_fragment).model_dump()
     canvas = edl["canvas"]
     W, H = int(canvas["width"]), int(canvas["height"])
     fps = max(1.0, min(float(canvas.get("fps") or 30.0), 60.0))
@@ -3408,7 +3409,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                cancelled_cb=None,
                patch_locals=None, cap_ass_override=None,
                suppress_outro=False, cap_burn_offset=None,
-               audio_only=False, asset_locals=None):
+               audio_only=False, asset_locals=None, render_fragment=False):
     """Render an EDL against a source file. Returns output duration (s).
 
     patch_locals (round 92): {patch id: local file} for the EDL's `patches` —
@@ -3436,14 +3437,16 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                                   audio_only=audio_only, asset_locals=asset_locals,
                                   suppress_outro=suppress_outro,
                                   cap_ass_override=cap_ass_override,
-                                  cap_burn_offset=cap_burn_offset)
+                                  cap_burn_offset=cap_burn_offset,
+                                  render_fragment=render_fragment)
     info = media.probe(src_path)
     src_dur = info["duration"]
     render_dict = _repair_legacy_insert_boundaries(edl_dict)
     keep_end = max(
         (float(e) for _s, e in (render_dict.get("keep") or [])),
         default=0.0)
-    edl = validate_edl(render_dict, max(src_dur, keep_end)).model_dump()
+    edl = validate_edl(render_dict, max(src_dur, keep_end),
+                       render_fragment=render_fragment).model_dump()
 
     # Long-source edits often keep a short window hours into the file.  A
     # plain ``-i source`` makes ffmpeg decode every 4K frame from zero before
@@ -4298,7 +4301,7 @@ def _timeline_stitch(job_id, prev_edl, new_edl, tl_prev, tl_new, index,
                           patch_locals=patch_locals,
                           cap_ass_override=(cap_new or ""),
                           cap_burn_offset=(a if cap_new else None),
-                          suppress_outro=True)
+                          suppress_outro=True, render_fragment=True)
         if abs(pdur - (b - a)) > max(0.15, 2.0 / fps):
             print(f"[render {job_id}] stitch(timeline): full render (piece "
                   f"{i} came out {pdur:.3f}s for a {b - a:.3f}s window)",
@@ -4458,7 +4461,7 @@ def _stitched_preview(job_id, new_row, prev_row, prev_asset, index,
                               patch_locals=patch_locals,
                               cap_ass_override=(full_cap or ""),
                               cap_burn_offset=(a if full_cap else None),
-                              suppress_outro=True)
+                              suppress_outro=True, render_fragment=True)
             if abs(pdur - (b - a)) > max(0.15, 2.0 / fps):
                 print(f"[render {job_id}] stitch: full render (piece {i} "
                       f"came out {pdur:.3f}s for a {b - a:.3f}s window)",
@@ -4748,7 +4751,8 @@ def _render_changed_sections(job_id, edl_row, index, src_local, workdir,
             window, index, src_local, piece, workdir, preview=True,
             progress_cb=progress_cb, want_wm=False,
             patch_locals=patch_locals, cap_ass_override=(cap_path or ""),
-            cap_burn_offset=(a if cap_path else None), suppress_outro=True)
+            cap_burn_offset=(a if cap_path else None), suppress_outro=True,
+            render_fragment=True)
         expected = b - a
         if abs(pdur - expected) > max(0.2, expected * 0.03):
             raise RenderVerificationError(

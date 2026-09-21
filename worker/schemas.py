@@ -2093,7 +2093,7 @@ def _check_screen_lock(lock, name, window_s):
             "second reads as a cut, over five it stalls.")
 
 
-def validate_edl(data, duration=None):
+def validate_edl(data, duration=None, *, render_fragment=False):
     """Parse + validate an EDL dict.
 
     Two shapes are valid: a MAIN-VIDEO program (non-empty `keep`, validated
@@ -2101,6 +2101,11 @@ def validate_edl(data, duration=None):
     `keep` + a `canvas`, for an image/clip-only timeline with no main video —
     `duration` is then ignored). Returns a normalized EDL (times rounded to
     0.01s). Raises EDLValidationError with a message the agent can act on.
+
+    Internal render windows may intersect an otherwise valid insert for less
+    than 0.2s. Keep those pixels and their timing in the derived fragment;
+    saved edits still use the ordinary minimum. This flag is a call-site
+    capability, never read from the EDL supplied by a client or model.
     """
     try:
         edl = EDL.model_validate(data)
@@ -2273,9 +2278,10 @@ def validate_edl(data, duration=None):
         seen_ids.add(ins.id)
         if not ins.asset_key:
             raise EDLValidationError(f"inserts[{i}].asset_key is empty.")
-        if ins.duration_s < 0.2:
+        minimum_insert_s = 0.01 if render_fragment else 0.2
+        if ins.duration_s < minimum_insert_s:
             raise EDLValidationError(
-                f"inserts[{i}].duration_s {ins.duration_s} is below 0.2.")
+                f"inserts[{i}].duration_s {ins.duration_s} is below {minimum_insert_s}.")
         if ins.source_start_s is not None:
             ins.source_start_s = _r(ins.source_start_s)
             if ins.source_start_s < 0:

@@ -692,7 +692,12 @@ def window_edl(edl, tl, w0, w1, keep_audio=False):
         final_start, final_end = iw[original["id"]]
         clipped_start = max(float(final_start), w0)
         clipped_end = min(float(final_end), w1)
-        if clipped_end - clipped_start < 0.05:
+        # Preserve even a short boundary fragment: dropping it shifts every
+        # following frame away from the proof's advertised program clock.
+        # EDL times normalize to hundredths, so only sub-resolution overlap
+        # can be omitted. The renderer validates this trusted derived window
+        # with render_fragment=True, after validating the full saved edit.
+        if round(clipped_end - clipped_start, 2) < 0.01:
             continue
         item = dict(original)
         left_trim = max(0.0, clipped_start - float(final_start))
