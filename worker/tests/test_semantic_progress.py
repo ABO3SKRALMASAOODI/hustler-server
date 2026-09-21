@@ -10,6 +10,19 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import agent_loop  # noqa: E402
 
 
+def test_editorial_observations_survive_handoff_without_becoming_progress_or_pixels():
+    ctx = _ctx(_editorial_observations=['clip/a @2.25: groom by window'])
+    before = agent_loop._semantic_progress_marker(ctx)
+    for i in range(8):
+        agent_loop._observation_checkpoint(ctx, f'clip/{i}: ' + 'x' * 7000)
+    notes = json.loads(json.dumps(agent_loop._observation_checkpoint(ctx)))
+    assert len(notes) == 4
+    assert all(len(note) <= 6000 for note in notes)
+    assert 'clip/7' in notes[-1]
+    assert agent_loop._semantic_progress_marker(ctx) == before
+    assert not hasattr(ctx, '_looked_asset_times')
+
+
 def test_inspected_footage_survives_three_productive_slices_then_stops():
     frontier, state = {}, {}
     for i in range(3):
