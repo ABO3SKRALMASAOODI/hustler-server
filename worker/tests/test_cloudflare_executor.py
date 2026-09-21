@@ -371,6 +371,7 @@ def test_cloudflare_preflight_rejects_source_skew_before_launch(monkeypatch):
     "container readiness mismatch role=executor source=old-source",
     "container readiness failed: connection refused",
     "Cloudflare container image is not ready",
+    "Error: Container sidecar is shutting down",
 ])
 def test_proven_unlaunched_image_readiness_is_rollout_pending(monkeypatch, message):
     _enable(monkeypatch)
@@ -397,7 +398,11 @@ def test_proven_unlaunched_image_readiness_is_rollout_pending(monkeypatch, messa
                for fn, args in events)
 
 
-def test_readiness_error_without_no_acceptance_proof_reconnects(monkeypatch):
+@pytest.mark.parametrize("message", [
+    "container readiness mismatch role=executor source=old-source",
+    "Error: Container sidecar is shutting down",
+])
+def test_readiness_error_without_no_acceptance_proof_reconnects(monkeypatch, message):
     _enable(monkeypatch)
     class Ledger:
         def run(self, *_args, **_kwargs): return True
@@ -408,7 +413,7 @@ def test_readiness_error_without_no_acceptance_proof_reconnects(monkeypatch):
     monkeypatch.setattr(remote.requests, "get", lambda *_a, **_k: _Response({
         "status": "ok", "provider": "cloudflare"}))
     monkeypatch.setattr(remote.requests, "post", lambda *_a, **_k: _Response({
-        "error": "container readiness mismatch role=executor source=old-source",
+        "error": message,
     }, 503))
     recovered = []
     monkeypatch.setattr(remote, "_recover_cloudflare_result",

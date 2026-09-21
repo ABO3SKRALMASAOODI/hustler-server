@@ -1409,7 +1409,11 @@ def _run_cloudflare(job):
                 if response.status_code == 503 and launch_error.startswith((
                         "container readiness mismatch ",
                         "container readiness failed:",
-                        "Cloudflare container image is not ready")):
+                        "Cloudflare container image is not ready",
+                        "Error: Container sidecar is shutting down")):
+                    # A retiring sidecar can reject startAndWaitForPorts.
+                    # Only this 503 + no-acceptance proof is safe to wait on;
+                    # an ambiguous /run failure below must reconnect instead.
                     raise CloudflareRolloutPending(launch_error)
                 raise CloudflareLaunchUnavailable(launch_error)
             # The Worker may have lost its side of an already-running
