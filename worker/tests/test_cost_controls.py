@@ -483,6 +483,59 @@ def test_canvas_proof_geometry_respects_output_ratio():
     assert height > width
 
 
+@pytest.mark.parametrize("fragment_s", [0.03, 0.13, 0.19])
+def test_insert_boundary_fragment_preserves_evidence_and_saved_edit_minimum(fragment_s):
+    full = schemas.validate_edl({
+        "keep": [], "canvas": {"width": 320, "height": 180, "fps": 24},
+        "inserts": [
+            {"id": "a", "asset_key": "a.mp4", "kind": "video",
+             "at_output_s": 0, "duration_s": 20, "source_start_s": 7},
+            {"id": "b", "asset_key": "b.mp4", "kind": "video",
+             "at_output_s": 0, "duration_s": 40},
+        ],
+    }).model_dump()
+    window = stitch.window_edl(
+        full, Timeline([], full["inserts"]), 20-fragment_s, 25-fragment_s)
+    assert len(window["inserts"]) == 2
+    assert window["inserts"][0]["duration_s"] == pytest.approx(fragment_s)
+    assert window["inserts"][0]["source_start_s"] == pytest.approx(27-fragment_s)
+    assert sum(x["duration_s"] for x in window["inserts"]) == pytest.approx(5)
+    # A client cannot opt out of the saved-edit minimum through EDL JSON.
+    with pytest.raises(schemas.EDLValidationError, match="below 0.2"):
+        schemas.validate_edl({**window, "render_fragment": True})
+    schemas.validate_edl(window, render_fragment=True)
+
+
+def test_changed_section_renders_short_insert_boundary_without_editing_timeline(
+        monkeypatch, tmp_path):
+    paths = {}
+    for name, color, duration in (("a", "red", 20), ("b", "blue", 40)):
+        path = tmp_path / f"{name}.mp4"
+        media.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i",
+                   f"color=c={color}:size=320x180:rate=24:duration={duration}",
+                   "-c:v", "libx264", "-pix_fmt", "yuv420p", str(path)], timeout=60)
+        paths[f"clips/{name}.mp4"] = path
+    monkeypatch.setattr(renderer.storage, "download_to",
+                        lambda key, dst: shutil.copy2(paths[key], dst))
+    full = {"keep": [], "canvas": {"width": 320, "height": 180, "fps": 24},
+            "inserts": [
+                {"id": "a", "asset_key": "clips/a.mp4", "kind": "video",
+                 "at_output_s": 0, "duration_s": 20},
+                {"id": "b", "asset_key": "clips/b.mp4", "kind": "video",
+                 "at_output_s": 0, "duration_s": 40},
+            ]}
+    before = json.dumps(full, sort_keys=True)
+    output = tmp_path / "proof.mp4"
+    duration, requested, ranges, mapped = renderer._render_changed_sections(
+        8, {"version": 2, "json": full}, {"video": {}}, None,
+        str(tmp_path), {}, str(output), [[19.87, 44.87]], [20.0])
+    assert output.exists()
+    assert duration == pytest.approx(25.0, abs=0.15)
+    assert ranges == requested == [[19.87, 44.87]]
+    assert mapped == [0.13]
+    assert json.dumps(full, sort_keys=True) == before
+
+
 def test_changed_section_renderer_outputs_only_requested_seconds(tmp_path):
     source = tmp_path / "source.mp4"
     output = tmp_path / "proof.mp4"
