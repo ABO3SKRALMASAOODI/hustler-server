@@ -111,3 +111,25 @@ test('completion API is authenticated before resolving any container', async () 
     }), { EXECUTOR_SECRET: 'test-secret' });
   assert.equal(response.status, 401);
 });
+
+test('expired renders stop their container before reporting a non-retryable budget failure', async () => {
+  for (const jobType of ['preview', 'preview_check', 'final']) {
+    const { adapter, values } = fixture();
+    const now = Date.now();
+    values.set(`call:${callId}`, { status: 'running', jobType, activeUntil: now - 1 });
+    let stopped = false;
+    adapter.stop = async () => {
+      assert.equal(values.get(`call:${callId}`).status, 'stopping');
+      assert.equal(values.get('active').callId, `reset:${callId}`);
+      stopped = true;
+    };
+    const result = await adapter.expireExecutorLease(callId, now);
+    assert.equal(stopped, true);
+    assert.equal(result.status, 'failed');
+    assert.equal(result.envelope.retryable, false);
+    assert.equal(result.envelope.failure.kind, 'render_budget_exceeded');
+    assert.equal(result.envelope.failure.max_attempts, 0);
+    assert.equal(result.envelope.failure.agent_repairable, false);
+    assert.equal(values.has('active'), false);
+  }
+});

@@ -20,6 +20,20 @@ def test_wall_clock_timeout_is_not_retried_unchanged():
     assert d.max_attempts == 0
 
 
+def test_provider_render_deadline_never_buys_an_identical_second_render():
+    for message in (
+        "Cloudflare preview call exceeded its executor lease while running",
+        "Cloudflare call cf-preview-p2443-test could not be recovered: "
+        "Cloudflare call cf-preview-p2443-test remained running through its executor deadline",
+    ):
+        for kind in ("preview", "preview_check", "final"):
+            d = failure_policy.decision_for(RuntimeError(message), kind)
+            assert d.kind == "render_budget_exceeded"
+            assert not d.retryable
+            assert d.max_attempts == 0
+            assert not d.agent_repairable
+
+
 def test_preview_timeout_can_be_repaired_on_a_new_edl_version():
     d = failure_policy.classify(
         media.MediaError("ffmpeg killed: wall-clock 1500s exceeded"),

@@ -3236,7 +3236,8 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
         keyframes = ["-force_key_frames", f"{start:.6f},{start + span:.6f}"]
     cmd = ["ffmpeg", "-y",
            *(["-filter_complex_threads", "2"] if _base_stage else []),
-           *_stable_video_inputs(extra_inputs, decoder_threads=1 if _base_stage else None),
+           *_stable_video_inputs(extra_inputs, decoder_threads=(
+               4 if _source_stage else 1 if _base_stage else None)),
            "-filter_complex", graph, "-map", "[vout]", "-map", "[aout]",
            *encode, *keyframes, *_output_clock(fps),
            "-t", f"{expected_out_s:.6f}",

@@ -113,6 +113,13 @@ def classify(error, job_type=None):
             or 'modal or cloudflare is required' in text):
         return FailureDecision('executor_unavailable', False, 0, False)
 
+    # A provider lease expiring is the same exhausted physical budget as
+    # an encoder wall timeout. Do not buy an identical render again, or ask
+    # the editor to shorten a valid customer timeline to repair infrastructure.
+    if media_edit and ("exceeded its executor lease" in text
+                       or "through its executor deadline" in text):
+        return FailureDecision("render_budget_exceeded", False, 0, False)
+
     # The watchdog already proved the exact command cannot finish inside the
     # fleet's physical budget.  Buying the same 50 minutes again cannot make
     # it shorter; a new/simpler EDL or a different execution shape can.

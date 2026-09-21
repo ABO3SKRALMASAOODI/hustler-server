@@ -98,6 +98,9 @@ def test_real_batched_video_keeps_frames_audio_effects_and_global_master(
     source_commands = [c for c in commands if "ffv1" in c]
     assert len(source_commands) == len(edl["inserts"])
     assert all(c.count("-i") == 2 for c in source_commands)  # source + silence
+    # Parallelize decoding only after isolating the single original source;
+    # local multi-input composition retains its smaller per-input budget.
+    assert all(c[c.index("-threads:v") + 1] == "4" for c in source_commands)
     originals = set(assets.values())
     assert all(sum(arg in originals for arg in c) <= 1 for c in commands)
     # The final compositor opens one local program; each local batch has <=6 clips.
