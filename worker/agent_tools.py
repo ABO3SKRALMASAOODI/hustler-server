@@ -21,6 +21,7 @@ import broll_judge
 import caption_judge
 import captions as caplib
 import config
+import comparison_evidence
 import db as dbx
 import director
 import editorial_contracts
@@ -2537,7 +2538,7 @@ def compare_uploaded_media(ctx, asset_keys, question="", samples_per_asset=4):
 
     This is the story-wide counterpart to ``look_at_asset``.  The caller names
     every relevant candidate; none is silently shortlisted.  Representative
-    real frames are decoded in parallel on the executor, placed on dynamic
+    real frames reuse upload storyboards or decode on the executor, placed on dynamic
     readable pages, and labeled with file-local times plus exact index IDs so
     the resulting sequence_map can be submitted without another lookup.
     """
@@ -2606,6 +2607,15 @@ def compare_uploaded_media(ctx, asset_keys, question="", samples_per_asset=4):
 
     def decode(plan):
         asset = plan["asset"]
+        if asset["kind"] == "video_clip":
+            indexed = comparison_evidence.indexed_frames(
+                plan["index"], plan["times"], os.path.join(
+                    ctx.workdir, 'comparison_' + hashlib.sha256(
+                        asset['storage_key'].encode()).hexdigest()[:16]))
+            if indexed:
+                plan["times"] = [row[0] for row in indexed]
+                plan["indexed_evidence_ids"] = [row[2] for row in indexed]
+                return plan, [(i, row[1]) for i, row in enumerate(indexed)], None
         cache_key = (asset['storage_key'], tuple(plan['times']))
         cached = comparison_cache.get(cache_key)
         if cached and all(os.path.isfile(path) for _, path in cached):
@@ -2659,7 +2669,9 @@ def compare_uploaded_media(ctx, asset_keys, question="", samples_per_asset=4):
         samples = []
         for pair_index, path in pairs:
             sample_t = float(times[pair_index])
-            ids = director.source_evidence_ids_at(idx, sample_t)
+            ids = ([plan["indexed_evidence_ids"][pair_index]]
+                   if plan.get("indexed_evidence_ids") else
+                   director.source_evidence_ids_at(idx, sample_t))
             id_label = ",".join(ids[:3]) or "no-index-id"
             label = f"A{number} @{sample_t:.2f}s ids={id_label}"
             frames.append(path)
@@ -2708,9 +2720,15 @@ def compare_uploaded_media(ctx, asset_keys, question="", samples_per_asset=4):
     _metric(ctx, "uploaded_media_assets_compared", len(assets) - len(failures))
     _metric(ctx, "uploaded_media_frames_compared", len(frames))
     _metric(ctx, "uploaded_media_comparison_pages", page_count)
+    indexed_assets = sum(bool(plan.get("indexed_evidence_ids"))
+                         for plan, pairs, err in decoded if pairs)
+    _metric(ctx, "uploaded_media_indexed_assets_reused", indexed_assets)
     result = (
         f"Compared {len(assets)} uploaded asset(s) from {len(frames)} real "
         f"frame(s) on {page_count} page(s). "
+        + (f"{indexed_assets} asset(s) reused upload storyboard pixels at "
+           "their labeled actual times; use look_at_asset for exact-time "
+           "or higher-resolution inspection. " if indexed_assets else "")
         + ("Every supplied candidate has visual evidence; " if not failures
            else f"{len(failures)} supplied candidate(s) could not be seen and "
                 "are explicitly listed below; ")
@@ -18809,6 +18827,16 @@ def read_skill(ctx, name, section=None):
     turn. The catalog in the system prompt names them; content arrives when
     it is relevant instead of riding in every request."""
     import agent_prompt
+    # Some providers double-encode string values inside otherwise valid
+    # function arguments. Unwrap one quoted identifier, then use the same
+    # explicit skill catalog; never fuzzy-match or invent a playbook.
+    def identifier(value):
+        value = str(value or "").strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'`":
+            value = value[1:-1].strip()
+        return value
+    name = identifier(name)
+    section = identifier(section) or None
     name_key = str(name or "").strip().lower().replace(".md", "")
     section_key = str(section or "").strip().lower()
     skill_key = name_key + (":" + section_key if section_key else ":*")

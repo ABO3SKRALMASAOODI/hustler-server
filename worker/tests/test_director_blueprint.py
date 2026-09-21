@@ -1024,6 +1024,87 @@ def test_skill_loading_allows_every_relevant_playbook():
     assert len(ctx._skills_loaded) == 5
 
 
+def test_double_encoded_skill_identifier_uses_the_existing_catalog():
+    ctx, _fake = _tool_ctx()
+    assert len(agent_tools.read_skill(ctx, '"broll-inserts"')) > 100
+    assert agent_tools.read_skill(ctx, 'broll-inserts').startswith('SKILL ALREADY LOADED')
+    assert agent_tools.read_skill(ctx, '"invented-skill"').startswith('CORRECTION_NEEDED')
+
+
+def test_indexed_comparison_does_not_decode_source_or_invent_timestamps(monkeypatch, tmp_path):
+    from PIL import Image
+    ctx, fake = _tool_ctx()
+    ctx.workdir, ctx.sight_out = str(tmp_path), True
+    key = 'clips/wedding.mov'
+    _add_indexed_clip(fake, key, 'wedding-sha', 10, [{'id': '1', 'start': 0, 'end': 10}])
+    frame = tmp_path / 'indexed.jpg'
+    Image.new('RGB', (400, 225), (40, 80, 120)).save(frame)
+    monkeypatch.setattr(agent_tools.comparison_evidence, 'indexed_frames',
+                        lambda *args: [(2.25, str(frame), 've_real')])
+    monkeypatch.setattr(agent_tools, '_asset_frames', lambda *a, **k: pytest.fail('decoded cached source'))
+    result = agent_tools.compare_uploaded_media(ctx, [key], samples_per_asset=1)
+    assert '"time_s":2.25,"evidence_ids":["ve_real"]' in result
+    assert ctx._looked_asset_times[key] == {2.25}
+    assert ctx.editing_metrics['uploaded_media_indexed_assets_reused'] == 1
+
+
+def test_slow_visual_tool_is_read_once_before_durable_handoff(monkeypatch, tmp_path):
+    import agent_loop
+    from types import SimpleNamespace as NS
+    from PIL import Image
+
+    ctx, fake = _tool_ctx()
+    ctx.workdir = str(tmp_path)
+    ctx.turn_baseline_digest = 'unchanged'
+    ctx.turn_start_edl = ctx.latest_edl()
+    ctx.verification_request = 'edit wedding'
+    ctx._proof_ranges_by_version = {}
+    ctx.adopted_steer_job_ids = set()
+    ctx.over_budget = lambda: False
+    clock = [100.0]
+    monkeypatch.setattr(agent_loop.time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(agent_loop.config, 'AGENT_TURN_TIMEOUT_S', 420)
+    monkeypatch.setattr(agent_loop.config, 'AGENT_TURN_TOTAL_TIMEOUT_S', 3000)
+    monkeypatch.setattr(agent_loop, '_build_messages', lambda *a, **k: [{'role': 'user', 'content': 'edit wedding'}])
+    monkeypatch.setattr(agent_loop, '_adopt_steering_messages', lambda *a: 1)
+    monkeypatch.setattr(agent_loop, '_activity', lambda *a, **k: None)
+    monkeypatch.setattr(agent_loop.llm, 'responses_available', lambda *a: False)
+    monkeypatch.setattr(agent_loop.llm, 'record', lambda *a: None)
+    frame = tmp_path / 'look.jpg'
+    Image.new('RGB', (40, 30), (70, 90, 110)).save(frame)
+    def execute(*args):
+        clock[0] += 500
+        ctx.pending_images.append(('clip/a @2.25 groom', str(frame)))
+        ctx._pending_looked_asset_times = {'clip/a': {2.25}}
+        return 'Real comparison pixels follow: clip/a @2.25'
+    monkeypatch.setattr(agent_tools, 'execute', execute)
+    calls = []
+    def create(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            msg = NS(content='Reviewing the footage', tool_calls=[NS(id='call1', function=NS(name='compare_uploaded_media', arguments='{}'))])
+        else:
+            assert len(calls) == 2
+            assert kwargs['tools'] == []
+            assert any(isinstance(m.get('content'), list) and any(p.get('type') == 'image_url' for p in m['content']) for m in kwargs['messages'])
+            msg = NS(content='clip/a @2.25: groom by window; use as opening.', tool_calls=[])
+        return NS(choices=[NS(message=msg, finish_reason='stop')], usage=None)
+    ctx.llm_client = NS(chat=NS(completions=NS(create=create)))
+    checkpoint = {}
+    original_run = fake.run
+    def run(fn, *args):
+        if fn is dbx.enqueue_agent_continuation:
+            checkpoint.update(args[4]['continuation_state'])
+            return 99
+        return original_run(fn, *args) or 0
+    fake.run = run
+    result = agent_loop._run_loop(ctx, fake, {'id': 3, 'project_id': 9, 'user_id': 8, 'payload': {'operator_repair': True}}, 2, {'id': 1, 'content': 'edit wedding'})
+    assert result['status'] == 'continued'
+    assert checkpoint['editorial_observations'][-1] == 'clip/a @2.25: groom by window; use as opening.'
+    assert checkpoint['work_slices'] == 1
+    assert len(calls) == 2
+
+
 def test_exact_additive_write_is_idempotent_across_unrelated_edl_changes():
     ctx, fake = _tool_ctx()
     args = {"text": "ONE IDEA", "start": 1.0, "end": 3.0,

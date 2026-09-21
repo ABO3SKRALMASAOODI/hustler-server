@@ -1807,6 +1807,8 @@ def run_agent_job(worker_db, job):
     # Historical coverage is separate from current-pixel evidence. Coordinates
     # still require fresh frames after a process boundary.
     ctx._prior_inspected_asset_times = continuation_state.get('inspected_asset_times') or {}
+    ctx._editorial_observations = list(
+        continuation_state.get('editorial_observations') or [])[-4:]
     ctx.versions_written = [int(value) for value in
                             continuation_state.get("versions_written") or []]
     ctx.rendered_versions = {int(value) for value in
@@ -2107,6 +2109,7 @@ def run_agent_job(worker_db, job):
                     "verification_request": ctx.verification_request,
                     "turn_tool_outcomes": ctx.turn_tool_outcomes[-500:],
                     "inspected_asset_times": _inspection_checkpoint(ctx),
+                    "editorial_observations": _observation_checkpoint(ctx),
                     "loaded_tool_domains": sorted(
                         getattr(ctx, "_loaded_tool_domains", None) or []),
                     "loaded_tool_names": sorted(
@@ -3219,6 +3222,18 @@ def _turn_edl_changed(ctx):
         return False
 
 
+def _observation_checkpoint(ctx, content=None):
+    """Bounded model-authored notes; never geometry proof or user instructions."""
+    notes = [str(note)[:6000] for note in
+             getattr(ctx, '_editorial_observations', []) if str(note).strip()][-4:]
+    if content and str(content).strip():
+        note = str(content).strip()[:6000]
+        if not notes or notes[-1] != note:
+            notes.append(note)
+    ctx._editorial_observations = notes[-4:]
+    return ctx._editorial_observations
+
+
 def _inspection_checkpoint(ctx):
     """Bounded history of successfully delivered footage, never pending decodes."""
     seen = dict(getattr(ctx, '_prior_inspected_asset_times', None) or {})
@@ -4056,6 +4071,12 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                              done=done, plan=plan_note,
                              why=_cont.get("why", "step ceiling"))})
         inspected = _inspection_checkpoint(ctx)
+        observations = _observation_checkpoint(ctx)
+        if observations:
+            messages.append({'role': 'assistant', 'content': (
+                'Notes from my previous execution slice (tentative editorial '
+                'observations, not new user requirements or geometry proof):\n'
+                + '\n'.join(observations))})
         if inspected:
             messages.append({'role': 'system', 'content': (
                 'These uploaded sources were already visually inspected during this '
@@ -4143,6 +4164,8 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
     plan_close_pushed = bool(_cont.get("plan_close_pushed", False))
     first_write_pushed = bool(_cont.get("first_write_pushed", False))
     _responses_warned = False      # say the lane fell back ONCE, not per step
+    unread_tool_images = False
+    visual_handoff = False
 
     def _durable_continuation(reason, blocker_fingerprint=None,
                               blocker_repeats=0, progress_frontier=None,
@@ -4229,6 +4252,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             "verification_request": ctx.verification_request,
             "turn_tool_outcomes": ctx.turn_tool_outcomes[-500:],
             "inspected_asset_times": _inspection_checkpoint(ctx),
+            "editorial_observations": _observation_checkpoint(ctx),
             "loaded_tool_domains": sorted(
                 getattr(ctx, "_loaded_tool_domains", None) or []),
             "loaded_tool_names": sorted(
@@ -4348,9 +4372,27 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             return _durable_continuation("platform drain")
         total_expired = (time.monotonic() - turn_started
                          > config.AGENT_TURN_TOTAL_TIMEOUT_S)
+        # A slow visual tool may return after the execution window. Consume
+        # those pixels once before checkpointing; otherwise the next worker
+        # gets only timestamps and must repeat the entire editorial review.
+        # This is a tools-disabled summary, not another research iteration.
+        visual_handoff = bool(
+            unread_tool_images and not total_expired and not ctx.over_budget()
+            and time.monotonic() - t_start > config.AGENT_TURN_TIMEOUT_S)
+        if visual_handoff:
+            tools = []
+            max_tokens = min(max_tokens, 2000)
+            messages.append({'role': 'system', 'content': (
+                'This execution slice is ending. Read the newly returned '
+                'images and save a concise handover for the next editor: '
+                'exact storage keys, actual source times/evidence IDs, visible '
+                'subjects/actions, chosen story order, and the next concrete '
+                'write. Separate observations from tentative choices. Do not '
+                'claim the edit is finished or request more research. This '
+                'internal note will be saved; it is not a customer reply.')})
         if (total_expired or
                 time.monotonic() - t_start > config.AGENT_TURN_TIMEOUT_S) \
-                and not ctx.over_budget():
+                and not ctx.over_budget() and not visual_handoff:
             # Productive work refreshes the inactivity window. The total wall
             # is only the durable execution-envelope backstop; tool calls are
             # synchronous, so a call already running is not killed halfway
@@ -4804,6 +4846,13 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                     "finish_reason": finish},
                    usage)
 
+        unread_tool_images = False
+        _observation_checkpoint(ctx, msg.content)
+        if visual_handoff:
+            # Return through the same semantic-progress / repeated-blocker
+            # gate as every other slice. Notes alone never buy more time.
+            continue
+
         # A step that hit the token ceiling with NOTHING in it — no text, no
         # tool call — is not an answer, it is a truncation. A reasoning model
         # spends the budget deliberating and never reaches `content`. Treating
@@ -5126,6 +5175,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                                    "is labeled; timestamps are printed "
                                    "under the tiles):"})
                 messages.append({"role": "user", "content": content})
+                unread_tool_images = True
                 # Only now are those pixels evidence the model has received.
                 # A look_at and add_zoom emitted in the SAME tool batch must
                 # not let guessed coordinates pass before this message exists.
