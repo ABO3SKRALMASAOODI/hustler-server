@@ -13,6 +13,7 @@ import datetime as dt
 import fcntl
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -33,6 +34,8 @@ CHILD_STATES = {
     *TERMINAL,
 }
 STYLE_LANE_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
+HEX_COLOR_RE = re.compile(r"#[0-9A-Fa-f]{6}\Z")
+EPSILON = 0.02
 
 
 class StateError(RuntimeError):
@@ -120,6 +123,98 @@ def assignment_style_lane(assignment: Path) -> str:
     if not isinstance(lane, str) or not STYLE_LANE_RE.fullmatch(lane):
         raise StateError("assignment style_lane must be a lowercase slug")
     return lane
+
+
+def finite_number(value: object, label: str, *, minimum: float = 0.0) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise StateError(f"{label} must be a number")
+    number = float(value)
+    if not math.isfinite(number) or number < minimum:
+        raise StateError(f"{label} must be at least {minimum:g}")
+    return number
+
+
+def validate_candidate_contract(payload: dict, style_lane: str) -> None:
+    """Reject v7 candidates that omit the user's measurable edit rules."""
+    editorial_duration = finite_number(
+        payload.get("editorial_duration_s"),
+        "candidate editorial_duration_s", minimum=EPSILON)
+
+    captions = payload.get("caption_treatment")
+    if not isinstance(captions, dict):
+        raise StateError("candidate caption_treatment must be an object")
+    if captions.get("spoken_word_highlighting") is not True:
+        raise StateError("candidate captions must highlight the spoken word")
+    max_words = captions.get("max_words_visible")
+    if isinstance(max_words, bool) or not isinstance(max_words, int) \
+            or not 1 <= max_words <= 4:
+        raise StateError(
+            "candidate captions may show at most four words at once")
+    if not isinstance(captions.get("active_word_color"), str) \
+            or not HEX_COLOR_RE.fullmatch(captions["active_word_color"]):
+        raise StateError("candidate active_word_color must be #RRGGBB")
+    if captions.get("rendered_active_word_check") != "pass":
+        raise StateError(
+            "candidate must pass a rendered active-word color check")
+
+    shots = payload.get("broll_shots")
+    if not isinstance(shots, list):
+        raise StateError("candidate broll_shots must be a list")
+    if payload.get("duplicate_broll_within_short") is not False:
+        raise StateError(
+            "candidate must declare no duplicate B-roll within the short")
+    if style_lane == "hook-to-silent-montage" and not shots:
+        raise StateError("hook-to-silent-montage requires B-roll shots")
+
+    source_windows: dict[str, list[tuple[float, float]]] = {}
+    for index, shot in enumerate(shots):
+        label = f"candidate broll_shots[{index}]"
+        if not isinstance(shot, dict):
+            raise StateError(f"{label} must be an object")
+        asset_key = shot.get("asset_key")
+        if not isinstance(asset_key, str) or not asset_key.strip():
+            raise StateError(f"{label}.asset_key must be non-empty")
+        source_start = finite_number(
+            shot.get("source_start_s"), f"{label}.source_start_s")
+        source_end = finite_number(
+            shot.get("source_end_s"), f"{label}.source_end_s")
+        output_start = finite_number(
+            shot.get("output_start_s"), f"{label}.output_start_s")
+        output_end = finite_number(
+            shot.get("output_end_s"), f"{label}.output_end_s")
+        if source_end < source_start:
+            raise StateError(f"{label} source window is reversed")
+        if output_end <= output_start:
+            raise StateError(f"{label} output window must have duration")
+        if output_end > editorial_duration + EPSILON:
+            raise StateError(f"{label} extends past editorial duration")
+        for prior_start, prior_end in source_windows.setdefault(
+                asset_key.strip(), []):
+            both_stills = source_start == source_end == prior_start == prior_end
+            overlap = min(source_end, prior_end) - max(source_start, prior_start)
+            if both_stills or overlap > EPSILON:
+                raise StateError(
+                    f"candidate repeats B-roll source material for {asset_key}")
+        source_windows[asset_key.strip()].append((source_start, source_end))
+
+    if style_lane == "hook-to-silent-montage":
+        if editorial_duration > 25.0 + EPSILON:
+            raise StateError(
+                "hook-to-silent-montage editorial duration exceeds 25 seconds")
+        montage = payload.get("montage_timing")
+        if not isinstance(montage, dict):
+            raise StateError("hook-to-silent-montage requires montage_timing")
+        start = finite_number(montage.get("start_s"), "montage start_s")
+        end = finite_number(montage.get("end_s"), "montage end_s")
+        duration = finite_number(
+            montage.get("duration_s"), "montage duration_s", minimum=EPSILON)
+        if end <= start or not math.isclose(
+                end - start, duration, abs_tol=EPSILON):
+            raise StateError("montage timing is internally inconsistent")
+        if end > editorial_duration + EPSILON:
+            raise StateError("montage extends past editorial duration")
+        if duration > 15.0 + EPSILON:
+            raise StateError("hook-to-silent-montage exceeds 15 seconds")
 
 
 def require_status(item: dict, allowed: set[str], action: str) -> None:
@@ -302,6 +397,7 @@ def cmd_candidate(args: argparse.Namespace) -> dict:
         for key, value in expected.items():
             if payload.get(key) != value:
                 raise StateError(f"candidate bundle {key} does not match")
+        validate_candidate_contract(payload, item["style_lane"])
         declared_path = Path(payload.get("preview_path") or "").expanduser()
         if declared_path.resolve() != preview:
             raise StateError("candidate bundle preview_path does not match")
@@ -348,6 +444,16 @@ def cmd_qc(args: argparse.Namespace) -> dict:
             raise StateError("QC report score does not match")
         if args.verdict == "ready" and args.score < 90:
             raise StateError("ready requires a QC score of at least 90")
+        if args.verdict == "ready":
+            if payload.get("active_word_caption_check") != "pass":
+                raise StateError(
+                    "ready requires an active-word caption QC pass")
+            if payload.get("within_short_broll_uniqueness_check") != "pass":
+                raise StateError(
+                    "ready requires a within-short B-roll uniqueness QC pass")
+            if item.get("style_lane") == "hook-to-silent-montage" and \
+                    payload.get("style2_timing_check") != "pass":
+                raise StateError("ready Style 2 requires a timing QC pass")
         if args.verdict == "repair" and item["repair_rounds"] >= 2:
             raise StateError("two editor repair rounds are already used")
         item["qc"] = {

@@ -36,7 +36,9 @@ native Valmera ending for the current brief.
   video B-roll insert may exceed 5 seconds in this brief; this is
   not a maximum hold for the main conversation.
 - `hook-to-silent-montage`: a complete approximately 5–10-second spoken hook,
-  then a montage until the editorial ending. Inspect the ENTIRE post-hook
+  then a montage until the editorial ending. The montage must be no more than
+  15 seconds and the complete editorial program must be no more than 25 seconds;
+  both exclude the separate native Valmera ending. Inspect the ENTIRE post-hook
   editorial interval for
   speech, inserted-clip audio, dialogue captions, or a return to the podcast
   scene. Any of those is a blocker even if the edit is otherwise polished.
@@ -80,6 +82,13 @@ date/place/interview-location line. Reject incidental metadata decoration.
 When chronology or location is essential to the story, it belongs in the
 primary headline or intelligible dialogue, not an automatic subheadline.
 
+Inspect the entire B-roll ledger and every rendered shot boundary. Within one
+short, reject a repeated still, repeated source-time window, or near-identical
+visual moment, including repetitions disguised by crop, zoom, mirroring,
+speed, grade, or text. Distinct moments from one longer source are acceptable.
+Across different shorts, repetition is allowed but should be avoided when an
+equally relevant fresh shot exists; cross-short reuse alone is not a blocker.
+
 Preserve and check both Valmera brand elements using `style-lanes-v7.md`:
 the complete native ending and a legible corner watermark using the appropriate
 admin choice: Current corner, Lower corner, or Scene top. Pass suitable native
@@ -103,6 +112,13 @@ Use the same current preview for every check. Inspect:
 - every two seconds through otherwise uncovered intervals;
 - the last two seconds at 0.25-second spacing;
 - the complete speech/caption stream once.
+
+During that caption pass, verify several actual word transitions—not just
+static frames. The word currently audible must visibly take the accent color,
+normally inside a three-to-four-word group, and no group may show more than
+four words. Check the opening, densest phrase, shot/speaker changes, and final
+caption. A static accent keyword, highlight lag, unreadable accent, or a style
+setting that does not produce visible active-word coloring is a blocker.
 
 If a defect is suspected, inspect that local window at frame-level density.
 Do not create frame-level evidence for the whole render by default. Contact
@@ -148,6 +164,9 @@ meaning, absent payoff, irrelevant or misleading B-roll, unwanted third-party wa
 text, wrong-speaker leaks, unreadable or incorrect captions, face/caption
 collisions, accidental black/frozen/silent sections, stale renders, or a final
 tail without intentional content.
+Repeated B-roll within one short, missing active-word caption coloring, more
+than four simultaneously visible caption words, or Style 2 exceeding its
+15-second montage or 25-second editorial limits are also blockers.
 For the current brief, required Valmera branding is exempt from those asset
 and tail exclusions; missing, obscured, or truncated Valmera branding still
 needs repair. An authorized native placement adjustment is not brand removal.

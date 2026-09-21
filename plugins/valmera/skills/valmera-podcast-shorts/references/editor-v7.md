@@ -48,6 +48,8 @@ that requires private background knowledge. For a person-centered story,
 prioritize verified footage of that person and identifiable real work or
 accomplishments; use truthful before/after contrast when the story calls for
 it. If direct assets are insufficient, report the gap or change the lane.
+Keep the montage at no more than 15 seconds and the entire editorial program
+at no more than 25 seconds, both measured before the separate native ending.
 
 For `headline-conversation`, read `headline-conversation-references-v7.md`.
 Use no B-roll, preserve the full-duration topic headline above the picture,
@@ -77,10 +79,20 @@ longer speaker holds must not be mistaken for slow B-roll or replaced by cutaway
   clear of captions. Check all speaker changes and cut boundaries for a
   one-frame leak of the wrong person.
 - Captions must follow the spoken words exactly enough to preserve meaning.
-  Break on semantic phrases, normally 2–6 words and no more than two lines.
-  Do not force a two-word maximum; it creates frantic, fragile caption states.
-- Use emphasis selectively. Avoid duplicate words, broken punctuation,
+  For this brief, use word-timed active-word coloring and normally group three
+  or four visible words, with a hard maximum of four. Shorter groups are valid
+  at natural boundaries or for legibility. Verify that the currently spoken
+  word—not merely a preselected keyword—changes to the accent color in the
+  rendered output. Use an active-word-capable preset or `dynamic:true` with a
+  deliberate `highlight_color`; configuration alone is not proof.
+- Avoid duplicate words, broken punctuation,
   unreadable single-frame captions, face collisions, and inconsistent casing.
+- Inventory every external B-roll still or video shot by stable asset identity,
+  source-time window, and output-time window before rendering. Within one
+  short, never repeat the same or near-identical visual moment. Cropping,
+  mirroring, zooming, speeding, recoloring, or adding text does not create a
+  new shot. Distinct non-overlapping moments from one longer source are valid.
+  Cross-short reuse is permitted, but prefer a fresh equally relevant asset.
 - For speech-emphasis word/name cards, follow the word-card synchronization
   contract in `style-lanes-v7.md`: the first readable frame lands on the actual
   spoken word in final output time. Preserve speech underneath, recalculate
@@ -130,8 +142,21 @@ video. If one region looks suspicious, inspect that region densely.
   "edl_version": 7,
   "preview_path": "absolute/path.mp4",
   "preview_sha256": "...",
-  "duration_s": 48.2,
-  "story_beats": {"setup": [0, 8], "development": [8, 30], "payoff": [30, 48.2]},
+  "duration_s": 23.0,
+  "editorial_duration_s": 23.0,
+  "story_beats": {"setup": [0, 8], "development": [8, 17], "payoff": [17, 23]},
+  "caption_treatment": {
+    "spoken_word_highlighting": true,
+    "active_word_color": "#FFD54A",
+    "max_words_visible": 4,
+    "rendered_active_word_check": "pass"
+  },
+  "broll_shots": [
+    {"asset_key": "subject-early", "source_start_s": 2.0, "source_end_s": 3.5, "output_start_s": 8.0, "output_end_s": 9.5},
+    {"asset_key": "subject-later", "source_start_s": 12.0, "source_end_s": 14.0, "output_start_s": 9.5, "output_end_s": 11.5}
+  ],
+  "duplicate_broll_within_short": false,
+  "montage_timing": {"start_s": 8.0, "end_s": 23.0, "duration_s": 15.0},
   "checks": {"media_probe": "pass", "captions": "pass", "assets": "pass"},
   "known_issues": [],
   "outstanding_job_ids": []
@@ -156,6 +181,13 @@ QC verify actual synchronization instead of trusting approximate placement.
 For `hook-to-silent-montage`, include `montage_shot_relevance` with the
 shot-by-shot ledger described above. The coordinator must be able to verify
 each connection against the rendered shot, not merely the asset filename.
+Also include `montage_timing` with `start_s`, `end_s`, and `duration_s`, all in
+editorial-program seconds. `editorial_duration_s` excludes the native ending.
+For every lane, include `caption_treatment` as shown above and a `broll_shots`
+entry for every external still/video use with `asset_key`, `source_start_s`,
+`source_end_s`, `output_start_s`, and `output_end_s`. Images use `0` for both
+source times. Set `duplicate_broll_within_short` only after comparing the
+ledger and rendered pixels; any repetition makes the candidate incomplete.
 
 For the current four-style brief, retain `style_choice_reason` and
 `closest_alternative`. Include `branding` with the chosen admin mode, corner anchor, and

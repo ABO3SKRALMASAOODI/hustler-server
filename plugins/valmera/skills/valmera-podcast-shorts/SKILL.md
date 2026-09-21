@@ -81,6 +81,11 @@ them for a v7 run. They remain only so an interrupted v6 run can be audited.
     shots during coordinator QC. The detailed gates are in
     `references/style-lanes-v7.md`, `references/qc-v7.md`, and
     `references/export-v7.md`.
+12. Every spoken caption treatment must visibly color the word being spoken,
+    normally inside a three-to-four-word group. No B-roll visual may repeat
+    within one short. For `hook-to-silent-montage`, the editorial program is
+    at most 25 seconds and the post-hook montage is at most 15 seconds; the
+    separate native Valmera ending is excluded from those limits.
 
 ## Create the run
 

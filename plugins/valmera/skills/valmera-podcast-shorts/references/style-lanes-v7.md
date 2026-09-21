@@ -64,6 +64,13 @@ show only a continuous full-frame montage; never return to the podcast scene
 or resume dialogue. The montage should occupy most of the short and provide
 a relevant visual payoff without inventing facts or associations.
 
+Keep this lane compact. The montage should normally run 10–15 seconds and
+must never exceed 15 seconds. The complete editorial program—the spoken hook
+plus montage, before the separate native Valmera ending—must never exceed
+25 seconds. Aim for a 20–25-second editorial program when the idea genuinely
+supports it, but never pad a resolved story or repeat a visual to reach that
+range. The native Valmera ending is outside both measurements.
+
 Build the montage around the **person and the actual premise**, not a broad
 topic cloud. For each proposed shot, record the visible subject, its verified
 identity/provenance, the exact hook or payoff beat it serves, and why a viewer
@@ -90,6 +97,14 @@ seconds, and video moments roughly 0.7–3 seconds. A video can comfortably hold
 2–3 seconds when its action earns it; no video B-roll insert may exceed
 5 seconds. Use bursts and occasional anchor shots, with readable typography
 and a deliberate ending. Avoid a uniform slideshow and single-frame flashes.
+
+Every montage shot must be visually new within that short. Do not reuse the
+same still, the same source-time window, or a near-identical moment later in
+the montage; a crop, zoom, mirror, speed change, color treatment, or text layer
+does not make repeated footage unique. Different, clearly distinct moments
+from one source video are allowed when each advances the sequence. Reuse in a
+different short is allowed, but prefer a fresh equally relevant shot across
+the batch. Never sacrifice direct relevance merely to avoid cross-short reuse.
 
 For a no-music brief, the entire montage is intentionally silent: no podcast
 voice, clip audio, voiceover, music, or SFX. The user adds a track later. Record
@@ -161,6 +176,25 @@ above thick captions fails this brief. Select an actual bold/heavy font face
 and verify the rendered glyphs: a requested weight may fall back to a lighter
 font, especially when text is generated as an image. Preserve existing caption
 placement and timing; do not fix the hierarchy by making captions unreadable.
+
+## Spoken-word caption highlighting
+
+Across all four lanes, every interval containing speech uses word-timed
+captions whose currently spoken word is visibly colored while the neighboring
+words stay neutral. Normally show three or four words at a time; shorter groups
+are valid at sentence boundaries, pauses, or when needed for legibility, but
+never show more than four. The accent must move on the real word timings, not
+on a sentence estimate, and must have enough contrast to be obvious at phone
+size. Keep the accent palette coherent within a short instead of changing to
+random colors on every word.
+
+Use Valmera's real word-state renderer: a preset whose rendered output colors
+the active spoken word, or legacy `dynamic:true` with `highlight_color`.
+`max_words_per_caption` is at most 4. A static colored keyword, a caption card
+that merely reveals words, or a configured color that is not visible in the
+render does not satisfy this rule. Inspect multiple rendered states, including
+the first caption, the densest phrase, a speaker or shot change, and the last
+caption. Silent openings and Style 2's silent montage remain caption-free.
 
 ## Preserve Valmera branding and match its placement to the picture
 
@@ -297,6 +331,9 @@ schema and final file, and review every speaker change and B-roll crop.
 - A 15–45-second brief applies to the entire final, including opener, montage,
   cards, and any export-added tail. Do not exceed the user's limit to preserve
   a generic story template or a tool default.
+- For Style 2, the newer lane-specific limit supersedes that generic range:
+  no more than 25 seconds of editorial program, no more than 15 seconds of
+  montage, followed by the complete separate native Valmera ending.
 - Preserve speaker meaning, clear identity, quality assets, consistent type,
   and intentional content at every moment. Do not use unmotivated punch zooms
   to simulate pace. Evaluate all lane-specific blockers before scoring polish.
