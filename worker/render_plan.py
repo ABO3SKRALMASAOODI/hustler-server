@@ -34,7 +34,8 @@ def canvas_batches(edl, batch_size=4):
                 **transition, "junctions": sorted(
                     j - left for j in junctions if left <= j < right - 1)}}
         yield {"edl": chunk, "start": offsets[first], "end": offsets[last],
-               "trim_start": offsets[first] - offsets[left]}
+               "trim_start": offsets[first] - offsets[left],
+               "input_first": left, "input_last": right, "owned_last": last}
 
 
 def canonical_program(edl):

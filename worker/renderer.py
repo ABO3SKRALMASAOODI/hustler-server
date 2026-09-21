@@ -3027,7 +3027,7 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
                        audio_only=False, asset_locals=None, suppress_outro=False,
                        cap_ass_override=None, cap_burn_offset=None,
                        render_fragment=False, _base_stage=False,
-                       _batch_window=None):
+                       _batch_window=None, _source_stage=False):
     """Render a canvas program (round 34): a timeline with NO main video, where
     the ordered inserts (clips/images) are concatenated on the canvas, plus
     music / sfx / voiceover / manual captions / effects. Mirrors render_edl but
@@ -3058,8 +3058,8 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
                                       play_res=(W, H))
 
     # A single graph opened all 62 inputs for a repeatedly failing 4K assembly.
-    # Bound decoder and remote-connection fanout: assemble the base program with at
-    # most six source decoders, then compose/mix/master against one local input.
+    # Normalize one remote source at a time, assemble at most six local clips,
+    # then compose/mix/master against one local input.
     # This is an execution plan only: the saved timeline and its IDs stay intact.
     if len(inserts) > CANVAS_MAX_DIRECT_INPUTS and not audio_only and not _base_stage:
         original_progress = progress_cb
@@ -3208,7 +3208,12 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
                   cancelled_cb=cancelled_cb)
         return media.probe_audio_duration(out_path)
 
-    if _base_stage:
+    if _source_stage:
+        # Lossless, delivery-sized staging prevents remote A/V skew from
+        # queueing multiple 4K decoders behind the concat filter.
+        encode = ["-c:v", "ffv1", "-level", "3", "-threads:v", "2",
+                  "-c:a", "pcm_s16le"]
+    elif _base_stage:
         # Lossless audio keeps clip boundaries sample-continuous. The final pass alone
         # applies the authored score, loudness normalization and delivery codec.
         encode = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "16",
@@ -3259,6 +3264,7 @@ def _bounded_canvas_program(edl, workdir, preview, asset_locals,
     stage_dir = os.path.join(workdir, "canvas_base_" + uuid.uuid4().hex[:12])
     os.makedirs(stage_dir)
     pieces, durations = [], []
+    normalized = {}
     for i, batch in enumerate(render_plan.canvas_batches(edl)):
         if cancelled_cb and cancelled_cb():
             raise dbx.JobLeaseLost("Canvas assembly execution lease ended")
@@ -3270,9 +3276,38 @@ def _bounded_canvas_program(edl, workdir, preview, asset_locals,
         def progress(frac, start=batch["start"], length=span):
             if progress_cb:
                 progress_cb((start + frac * length) / duration)
+        batch_edl = batch["edl"]
+        indexes = range(batch["input_first"], batch["input_last"])
+        missing = [j for j in indexes if j not in normalized]
+        for n, j in enumerate(missing):
+            if cancelled_cb and cancelled_cb():
+                raise dbx.JobLeaseLost("Canvas source preparation lease ended")
+            clip_dir = os.path.join(stage_dir, f"clip_{j}")
+            os.makedirs(clip_dir)
+            clip_path = os.path.join(clip_dir, "normalized.nut")
+            clip = json.loads(json.dumps(edl["inserts"][j]))
+            clip["at_output_s"] = 0.0
+            source_edl = {"keep": [], "canvas": canvas, "inserts": [clip]}
+            _render_canvas_edl(
+                source_edl, clip_path, clip_dir, preview,
+                lambda f, n=n: progress(.85 * (n + f) / len(missing)),
+                cancelled_cb=cancelled_cb, asset_locals=asset_locals,
+                suppress_outro=True, render_fragment=True, _base_stage=True,
+                _source_stage=True)
+            normalized[j] = clip_path
+        local_inputs = {}
+        for item, j in zip(batch_edl["inserts"], indexes):
+            key = f"normalized-canvas-clip-{j}.nut"
+            local_inputs[key] = normalized[j]
+            # The source pass already applied every per-clip transform.
+            item.clear()
+            item.update(id=f"ins_normalized_{j}", asset_key=key, kind="video",
+                        at_output_s=0.0, source_start_s=0.0,
+                        duration_s=edl["inserts"][j]["duration_s"])
         _render_canvas_edl(
-            batch["edl"], context_path, part_dir, preview, progress,
-            cancelled_cb=cancelled_cb, asset_locals=asset_locals,
+            batch_edl, context_path, part_dir, preview,
+            lambda f: progress(.85 + .15 * f),
+            cancelled_cb=cancelled_cb, asset_locals=local_inputs,
             suppress_outro=True, render_fragment=True, _base_stage=True,
             _batch_window=(batch["trim_start"], span))
         # Finish the bounded graph before trimming. Terminating a concat graph
@@ -3294,6 +3329,10 @@ def _bounded_canvas_program(edl, workdir, preview, asset_locals,
         pieces.append(path)
         durations.append(span)
         os.remove(context_path)
+        # Retain only the two clips that can be reused as next-batch context.
+        for j in list(normalized):
+            if j < batch["owned_last"] - 1:
+                os.remove(normalized.pop(j))
     program = os.path.join(stage_dir, "program.nut")
     listing = os.path.join(stage_dir, "concat.txt")
     with open(listing, "w", encoding="utf-8") as handle:
@@ -3304,6 +3343,8 @@ def _bounded_canvas_program(edl, workdir, preview, asset_locals,
                program], timeout=180, cancelled_cb=cancelled_cb)
     # Joining succeeds before any owned intermediate is removed.
     for path in pieces:
+        os.remove(path)
+    for path in normalized.values():
         os.remove(path)
     key = "internal-canvas-program-" + uuid.uuid4().hex + ".nut"
     composed = json.loads(json.dumps(edl))

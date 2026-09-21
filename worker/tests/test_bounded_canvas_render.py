@@ -91,9 +91,16 @@ def test_real_batched_video_keeps_frames_audio_effects_and_global_master(
     assert abs(media.duration_of(ref) - media.duration_of(actual)) < 0.06
     assert progress == sorted(progress)
     graphs = [c[c.index("-filter_complex")+1] for c in commands if "-filter_complex" in c]
-    assert len(graphs) == 4
+    assert len(graphs) == len(edl["inserts"]) + 4
     assert sum("loudnorm=" in g for g in graphs) == 1
-    # The final compositor opens one local program; each base batch has <=6 clips.
+    # Each original is prepared once and never shares a graph with another
+    # remote source. The batch and final graphs consume only local media.
+    source_commands = [c for c in commands if "ffv1" in c]
+    assert len(source_commands) == len(edl["inserts"])
+    assert all(c.count("-i") == 2 for c in source_commands)  # source + silence
+    originals = set(assets.values())
+    assert all(sum(arg in originals for arg in c) <= 1 for c in commands)
+    # The final compositor opens one local program; each local batch has <=6 clips.
     assert max(c.count("-i") for c in commands if "-filter_complex" in c) <= 7
     def video(path):
         return np.frombuffer(ff(["-i", str(path), "-map", "0:v:0", "-pix_fmt",
