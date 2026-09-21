@@ -355,13 +355,17 @@ abstract class ValmeraContainer extends Container<Env> {
       if (current.status !== "stopping") return current;
       const error = current.error
         ?? `Cloudflare ${current.jobType} call exceeded its executor lease`;
+      const render = ["preview", "preview_check", "final"].includes(current.jobType);
       const failed: CallState = {
         ...current,
         status: "failed",
         envelope: {
           error,
-          retryable: true,
-          failure: { kind: "transient_infrastructure", retryable: true },
+          retryable: !render,
+          failure: render
+            ? { kind: "render_budget_exceeded", retryable: false,
+                max_attempts: 0, agent_repairable: false }
+            : { kind: "transient_infrastructure", retryable: true },
         },
         error,
         updatedAt: new Date(terminalAt).toISOString(),
