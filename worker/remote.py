@@ -198,7 +198,9 @@ def _cloudflare_selected(job):
         # Render sources above this threshold are range-read by the renderer.
         # Counting their full size rejected a 3.2-GB original plus 1.4 GB of
         # inserts even though only the inserts needed local disk (2166).
-        if job_type in {"preview", "preview_check", "final"} \
+        if shape.get('shape_version') == 2:
+            staged_bytes = int(shape['staged_bytes'])
+        elif job_type in {"preview", "preview_check", "final"} \
                 and config.CLOUDFLARE_STREAM_SOURCE_MIN_BYTES > 0 \
                 and original_bytes >= config.CLOUDFLARE_STREAM_SOURCE_MIN_BYTES:
             staged_bytes = max(0, staged_bytes - original_bytes)
@@ -239,7 +241,8 @@ def stamp_execution_provider(worker_db, job):
         try:
             shape = worker_db.run(
                 dbx.project_execution_shape, job.get("project_id"),
-                (job.get("payload") or {}).get("asset_id"))
+                (job.get("payload") or {}).get("asset_id"),
+                job.get("type"), job.get("payload") or {}, True)
             # PostgreSQL NUMERIC values arrive as Decimal.  Normalize the
             # in-memory copy before the first provider request, exactly as the
             # JSONB persistence path does.  Otherwise attempt one fails in the
@@ -247,10 +250,10 @@ def stamp_execution_provider(worker_db, job):
             # reloading the already-normalized payload from PostgreSQL.
             job["_execution_shape"] = dbx._json_safe(shape or {})
         except Exception as exc:
-            # Fail closed to the proven Modal owner when capacity cannot be
-            # established. Provider optimization never takes the product down.
+            # Unknown capacity must not bypass the container limit. Only a
+            # configured alternate provider can accept this job instead.
             print(f"[dispatcher] Cloudflare shape probe failed for job "
-                  f"{job.get('id')}: {str(exc)[:160]}; keeping Modal",
+                  f"{job.get('id')}: {str(exc)[:160]}; checking configured alternatives",
                   flush=True)
     provider = desired_execution_provider(job)
     persisted = worker_db.run(

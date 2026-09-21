@@ -29,6 +29,7 @@ import audio_qc
 import audit
 import captions as caplib
 import config
+import execution_inputs
 import db as dbx
 import gradelut
 import graphics
@@ -3352,7 +3353,7 @@ def _render_asset_source_impl(key, tag, idx, workdir, asset_locals=None):
             and tag in ("insert", "overlay")
             and os.path.splitext(key)[1].lower() not in IMAGE_EXTS):
         size = storage.object_bytes(key)
-        if size and size >= 32 * 1024 * 1024:
+        if size and execution_inputs.streams_asset(key, size):
             return storage.presign_get(key, expires=21600)
     cached = _job_cached_source(key, workdir)
     if cached:
@@ -4124,18 +4125,7 @@ def _stream_cloudflare_source(asset):
     """
     if os.getenv("EXECUTOR_PROVIDER") != "cloudflare":
         return False
-    try:
-        duration = float((asset or {}).get("duration_s") or 0)
-    except (TypeError, ValueError):
-        return False
-    threshold = config.CLOUDFLARE_STREAM_SOURCE_MIN_DURATION_S
-    byte_threshold = config.CLOUDFLARE_STREAM_SOURCE_MIN_BYTES
-    try:
-        size = int((asset or {}).get("bytes") or 0)
-    except (TypeError, ValueError):
-        size = 0
-    return ((threshold > 0 and duration >= threshold)
-            or (byte_threshold > 0 and size >= byte_threshold))
+    return execution_inputs.streams_source(asset)
 
 
 def _fetch_into(workdir, key, tag):

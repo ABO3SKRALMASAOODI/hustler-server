@@ -2,11 +2,39 @@
 
 import os
 import sys
+import json
 from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import agent_loop  # noqa: E402
+
+
+def test_inspected_footage_survives_three_productive_slices_then_stops():
+    frontier, state = {}, {}
+    for i in range(3):
+        ctx = _ctx(_prior_inspected_asset_times=state,
+                   _looked_asset_times={f'clip/{i}.mp4': {1.0, 2.0}})
+        current = agent_loop._semantic_progress_marker(ctx)
+        result = agent_loop._slice_boundary_resolution(frontier, current, 'empty-plan')
+        assert result['action'] == 'continue_progress'
+        frontier = json.loads(json.dumps(result['frontier']))
+        state = json.loads(json.dumps(agent_loop._inspection_checkpoint(ctx)))
+    # Another timestamp in the same clip is not an unlimited new frontier.
+    ctx = _ctx(_prior_inspected_asset_times=state,
+               _looked_asset_times={'clip/2.mp4': {3.0}},
+               _pending_looked_asset_times={'never-delivered.mp4': {1.0}})
+    marker = agent_loop._semantic_progress_marker(ctx)
+    assert len(marker['inspected_assets']) == 3
+    assert agent_loop._slice_boundary_resolution(frontier, marker, 'same', previous_repeats=2)['action'] == 'block'
+    # Coverage history does not substitute for newly visible geometry evidence.
+    assert 'clip/0.mp4' not in ctx._looked_asset_times
+
+
+def test_more_footage_cannot_renew_a_failed_quality_repair():
+    before = {'verification_rank': 1, 'inspected_assets': ['a.mp4']}
+    after = dict(before, inspected_assets=['a.mp4', 'b.mp4'])
+    assert not agent_loop._semantic_progressed(before, after)
 
 
 def _ctx(**updates):

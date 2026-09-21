@@ -109,6 +109,10 @@ def classify(error, job_type=None):
     if any(value in text for value in _PROVIDER_BUDGET):
         return FailureDecision("provider_budget_exhausted", False, 0, False)
 
+    if ('no remote executor is configured' in text
+            or 'modal or cloudflare is required' in text):
+        return FailureDecision('executor_unavailable', False, 0, False)
+
     # The watchdog already proved the exact command cannot finish inside the
     # fleet's physical budget.  Buying the same 50 minutes again cannot make
     # it shorter; a new/simpler EDL or a different execution shape can.

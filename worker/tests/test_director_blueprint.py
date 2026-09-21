@@ -941,6 +941,38 @@ def test_uploaded_media_comparison_never_calls_failed_decode_seen(
     assert ctx.editing_metrics["uploaded_media_assets_compared"] == 1
 
 
+def test_busy_comparison_retries_only_missing_clip_and_keeps_partial_evidence(monkeypatch, tmp_path):
+    from PIL import Image
+    from collections import Counter
+
+    ctx, fake = _tool_ctx()
+    ctx.workdir = str(tmp_path)
+    ctx.sight_out = True
+    keys = ['projects/9/good.mov', 'projects/9/busy.mov']
+    for i, key in enumerate(keys):
+        _add_indexed_clip(fake, key, f'busy-{i}', 4.0,
+                          [{'id': f'shot-{i}', 'start': 0.0, 'end': 4.0}])
+    calls = Counter()
+
+    def frames(_ctx, asset, times, **kwargs):
+        key = asset['storage_key']
+        calls[key] += 1
+        if key == keys[1] and calls[key] <= 2:
+            return [], 'Cloudflare shard busy'
+        path = tmp_path / ('good.jpg' if key == keys[0] else 'recovered.jpg')
+        Image.new('RGB', (40, 30), (40, 50, 60)).save(path)
+        return [(0, str(path))], None
+
+    monkeypatch.setattr(agent_tools.remote, 'frames_available', lambda: False)
+    monkeypatch.setattr(agent_tools, '_asset_frames', frames)
+    first = agent_tools.compare_uploaded_media(ctx, keys, samples_per_asset=1)
+    assert 'INCOMPLETE DECODES' in first
+    assert calls == {keys[0]: 1, keys[1]: 2}
+    second = agent_tools.compare_uploaded_media(ctx, keys, samples_per_asset=1)
+    assert 'Every supplied candidate has visual evidence' in second
+    assert calls == {keys[0]: 1, keys[1]: 3}
+
+
 def test_narrow_refinement_can_inherit_a_legacy_unbound_sequence():
     ctx, _fake = _tool_ctx()
     ctx.edit_plan = director.create_blueprint(

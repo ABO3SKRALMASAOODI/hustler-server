@@ -6485,7 +6485,7 @@ def client_event_no_project(user_id):
 # That is the round-53 lesson applied before it could bite again — a version
 # gate that hides finished work until some other service catches up is how
 # Download became a platform-wide no-op.
-TIMELINE_MEDIA_VERSION = 2
+TIMELINE_MEDIA_VERSION = 3
 
 # Builds this route will ever run for ONE asset set. Any gate that asks for a
 # rebuild must be able to give up: if a worker somehow never writes the stamp,

@@ -1804,6 +1804,9 @@ def run_agent_job(worker_db, job):
     ctx.tool_failure_memory = dict(
         list((continuation_state.get("tool_failure_memory") or {}).items())[-64:])
     ctx.turn_tool_outcomes = list(continuation_state.get("turn_tool_outcomes") or [])[-500:]
+    # Historical coverage is separate from current-pixel evidence. Coordinates
+    # still require fresh frames after a process boundary.
+    ctx._prior_inspected_asset_times = continuation_state.get('inspected_asset_times') or {}
     ctx.versions_written = [int(value) for value in
                             continuation_state.get("versions_written") or []]
     ctx.rendered_versions = {int(value) for value in
@@ -2103,6 +2106,7 @@ def run_agent_job(worker_db, job):
                     "tool_failure_memory": getattr(ctx, "tool_failure_memory", {}),
                     "verification_request": ctx.verification_request,
                     "turn_tool_outcomes": ctx.turn_tool_outcomes[-500:],
+                    "inspected_asset_times": _inspection_checkpoint(ctx),
                     "loaded_tool_domains": sorted(
                         getattr(ctx, "_loaded_tool_domains", None) or []),
                     "loaded_tool_names": sorted(
@@ -3215,6 +3219,14 @@ def _turn_edl_changed(ctx):
         return False
 
 
+def _inspection_checkpoint(ctx):
+    """Bounded history of successfully delivered footage, never pending decodes."""
+    seen = dict(getattr(ctx, '_prior_inspected_asset_times', None) or {})
+    for key, times in (getattr(ctx, '_looked_asset_times', None) or {}).items():
+        seen[key] = sorted(set(seen.get(key) or []) | set(times))[:12]
+    return {key: list(times)[:12] for key, times in list(seen.items())[:256] if times}
+
+
 def _semantic_progress_marker(ctx):
     """Bounded evidence that this turn crossed a meaningful frontier.
 
@@ -3283,6 +3295,7 @@ def _semantic_progress_marker(ctx):
         "resolved_checks": checks,
         "decisions": decisions,
         "assets": assets,
+        "inspected_assets": frozenset(_inspection_checkpoint(ctx)),
         "review_verdicts": verdicts,
         "review_findings": findings,
         "department_gaps": department_gaps,
@@ -3316,7 +3329,7 @@ def _semantic_progressed(before, after):
     # another decision or collecting another asset isn't completion progress.
     repairing = int(before.get("verification_rank") or 0) > 0
     keys = (("resolved_steps", "resolved_checks") if repairing else
-            ("write_tools", "resolved_steps", "resolved_checks", "decisions"))
+            ("write_tools", "resolved_steps", "resolved_checks", "decisions", "inspected_assets"))
     for key in keys:
         old, new = _hashable_rows(before.get(key)), \
             _hashable_rows(after.get(key))
@@ -3423,7 +3436,7 @@ def _merge_progress_frontier(before, after):
     out = dict(before or {})
     for key, value in (after or {}).items():
         old = out.get(key)
-        if key in {"write_tools", "resolved_steps", "resolved_checks", "decisions"}:
+        if key in {"write_tools", "resolved_steps", "resolved_checks", "decisions", "inspected_assets"}:
             rows = list(old or []) + list(value or [])
             out[key] = list({json.dumps(row, sort_keys=True): row for row in rows}.values())
         elif key in {"assets", "review_verdicts", "review_findings"}:
@@ -4042,6 +4055,16 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                          "content": _CONTINUATION_NOTE.format(
                              done=done, plan=plan_note,
                              why=_cont.get("why", "step ceiling"))})
+        inspected = _inspection_checkpoint(ctx)
+        if inspected:
+            messages.append({'role': 'system', 'content': (
+                'These uploaded sources were already visually inspected during this '
+                'logical edit. This is coverage history, not reattached pixels. '
+                'Use the saved plan and exact evidence IDs to build the sequence; '
+                'reopen only the specific frames needed for an unresolved decision. '
+                'If no plan has been saved, record a concrete sequence and begin '
+                'editing before another broad library review.\n'
+                + json.dumps(inspected, separators=(',', ':')))})
         latest_verification = (getattr(ctx, "verification_records", None)
                                or {}).get(ctx.latest_edl()["version"]) or {}
         unresolved = latest_verification.get("unresolved_findings") or []
@@ -4205,6 +4228,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             "tool_failure_memory": getattr(ctx, "tool_failure_memory", {}),
             "verification_request": ctx.verification_request,
             "turn_tool_outcomes": ctx.turn_tool_outcomes[-500:],
+            "inspected_asset_times": _inspection_checkpoint(ctx),
             "loaded_tool_domains": sorted(
                 getattr(ctx, "_loaded_tool_domains", None) or []),
             "loaded_tool_names": sorted(
@@ -4352,12 +4376,11 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             # Three durable slices reached the same normalized state without
             # progress. This is a genuine blocker, not a time/step limit.
             detail = "; ".join(str(row) for row in unresolved if row)
-            blocker = ("I couldn't complete the remaining work after all "
-                       "configured retries and fallbacks"
+            blocker = ("I stopped because the edit was no longer making progress"
                        + (f": {detail}" if detail else
-                          " because the same operation remained unavailable")
-                       + ". The successful changes are saved; this is the "
-                         "specific unresolved blocker.")
+                          " toward a finished video")
+                       + ". Any successful changes are saved. The remaining work "
+                         "is unfinished; this run will not keep repeating it.")
             if ctx.versions_written:
                 if not payload.get("operator_repair") \
                         and _quality_handoff(ctx).get("export_ready") is not True:

@@ -2599,8 +2599,17 @@ def compare_uploaded_media(ctx, asset_keys, question="", samples_per_asset=4):
         plans.append({"number": number, "asset": asset, "index": idx,
                       "times": times})
 
+    comparison_cache = getattr(ctx, '_comparison_frame_cache', None)
+    if comparison_cache is None:
+        comparison_cache = {}
+        ctx._comparison_frame_cache = comparison_cache
+
     def decode(plan):
         asset = plan["asset"]
+        cache_key = (asset['storage_key'], tuple(plan['times']))
+        cached = comparison_cache.get(cache_key)
+        if cached and all(os.path.isfile(path) for _, path in cached):
+            return plan, cached, None
         if asset["kind"] == "image_ref":
             try:
                 return plan, [(0, _asset_local_path(ctx, asset))], None
@@ -2608,7 +2617,10 @@ def compare_uploaded_media(ctx, asset_keys, question="", samples_per_asset=4):
                 return plan, [], str(exc)
         pairs, err = _asset_frames(
             ctx, asset, plan["times"], width=640,
-            tag=f"compare{plan['number']}", measure_motion=False)
+            tag='compare' + hashlib.sha256(json.dumps(cache_key).encode()).hexdigest()[:12],
+            measure_motion=False)
+        if pairs and len(pairs) == len(plan['times']) and not err:
+            comparison_cache[cache_key] = pairs
         return plan, pairs, err
 
     decoded = []
@@ -2616,13 +2628,19 @@ def compare_uploaded_media(ctx, asset_keys, question="", samples_per_asset=4):
         # Each executor request decodes one source once for all its frames.
         # Parallel files collapse wall time without placing simultaneous 4K
         # decodes on the small dispatcher (the local path stays sequential).
-        with ThreadPoolExecutor(max_workers=min(4, len(plans))) as pool:
+        with ThreadPoolExecutor(max_workers=min(2, len(plans))) as pool:
             futures = [pool.submit(decode, plan) for plan in plans]
             for future in as_completed(futures):
                 decoded.append(future.result())
         decoded.sort(key=lambda row: row[0]["number"])
     else:
         decoded = [decode(plan) for plan in plans]
+
+    # A rejected shard reservation did no compute. Retry just that candidate
+    # once after the concurrent batch has released its slots; keep all real
+    # evidence already decoded. Persistent failures remain explicit below.
+    decoded = [decode(plan) if not pairs and err and 'busy' in str(err).lower()
+               else (plan, pairs, err) for plan, pairs, err in decoded]
 
     frames, frame_labels, catalog, failures = [], [], [], []
     seen_bucket = ("_pending_looked_asset_times"
@@ -2683,7 +2701,8 @@ def compare_uploaded_media(ctx, asset_keys, question="", samples_per_asset=4):
             visual_answers.append(
                 f"Page {page_number}/{page_count} vision: {response}")
 
-    evidence.add(fingerprint)
+    if not failures:
+        evidence.add(fingerprint)
     _metric(ctx, "uploaded_media_comparisons")
     _metric(ctx, "uploaded_media_assets_requested", len(assets))
     _metric(ctx, "uploaded_media_assets_compared", len(assets) - len(failures))
@@ -24068,6 +24087,7 @@ TOOLS = {
                 "summary -> the compact program overview. compact=true "
                 "always returns counts, caption state and duplicate assets.",
                 {"sections": {"type": ["array", "string"],
+                              "description": "Use exact top-level fields: keep, split_keep_boundaries, canvas, captions, music, sfx, volume, frame, inserts, voiceover, effects, overlays, texts, vectors, speed, master, stem_mix, caption_mutes, source_clean, patches; or overview. Feature/tool names are not sections. Read the creative plan with get_edit_plan.",
                               "items": {"type": "string"}},
                  "compact": {"type": "boolean"},
                  "offset": {"type": "integer"},
