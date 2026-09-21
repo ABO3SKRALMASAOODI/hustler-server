@@ -139,6 +139,12 @@ _CLAIMS_COL = {"ok": False, "checked_at": 0.0}
 _CLAIMS_RECHECK_S = 60.0
 _REMOTE_EXEC_TABLE = {"ok": False, "checked_at": 0.0}
 
+# Cache only completed schema observations. Publishing checked_at before the
+# query returned let another startup thread interpret an in-flight probe as
+# a missing column/table and claim jobs without their durable ownership fence.
+# A failed query is not evidence of a missing schema: propagate it so Db.run
+# reconnects or the poll waits, instead of silently weakening the queue.
+
 
 def claims_column_ready(conn):
     """True once 014_total_claims.sql has run. Cached once True.
@@ -153,7 +159,6 @@ def claims_column_ready(conn):
         return True
     if time.time() - _CLAIMS_COL["checked_at"] < _CLAIMS_RECHECK_S:
         return False
-    _CLAIMS_COL["checked_at"] = time.time()
     try:
         with conn.cursor() as cur:
             cur.execute("""
@@ -163,13 +168,14 @@ def claims_column_ready(conn):
             row = cur.fetchone()
         n = (row or {}).get("n") if isinstance(row, dict) else (row or [0])[0]
         _CLAIMS_COL["ok"] = bool(n)
+        _CLAIMS_COL["checked_at"] = time.time()
     except Exception as e:                                  # pragma: no cover
         print(f"[db] total_claims probe failed: {e}", flush=True)
         try:
             conn.rollback()
         except Exception:
             pass
-        return False
+        raise
     return _CLAIMS_COL["ok"]
 
 
@@ -179,7 +185,6 @@ def remote_executions_table_ready(conn):
         return True
     if time.time() - _REMOTE_EXEC_TABLE["checked_at"] < _CLAIMS_RECHECK_S:
         return False
-    _REMOTE_EXEC_TABLE["checked_at"] = time.time()
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT to_regclass('remote_executions') AS name")
@@ -187,6 +192,7 @@ def remote_executions_table_ready(conn):
         name = ((row or {}).get("name") if isinstance(row, dict)
                 else ((row or [None])[0]))
         _REMOTE_EXEC_TABLE["ok"] = bool(name)
+        _REMOTE_EXEC_TABLE["checked_at"] = time.time()
     except Exception as exc:                              # pragma: no cover
         print(f"[db] remote execution ledger probe failed: {exc}",
               flush=True)
@@ -194,7 +200,7 @@ def remote_executions_table_ready(conn):
             conn.rollback()
         except Exception:
             pass
-        return False
+        raise
     return _REMOTE_EXEC_TABLE["ok"]
 
 
