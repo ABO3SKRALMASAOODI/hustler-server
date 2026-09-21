@@ -80,7 +80,7 @@ def test_successful_edit_remains_billable_even_after_a_repairable_refusal():
     assert agent_loop._turn_completion(ctx) == ("fulfilled", True)
 
 
-def test_edit_that_fails_its_own_approval_gate_is_partial_and_free():
+def test_saved_edit_with_open_quality_review_is_partial_and_metered():
     ctx = _ctx(
         versions_written=[2], rendered_versions={2},
         last_preview={"edl_version": 2, "cached": False},
@@ -96,7 +96,7 @@ def test_edit_that_fails_its_own_approval_gate_is_partial_and_free():
                 "message": "replace the empty section"}]}}
     )
     ctx.latest_edl = lambda: {"version": 2}
-    assert agent_loop._turn_completion(ctx) == ("partial", False)
+    assert agent_loop._turn_completion(ctx) == ("partial", True)
 
 
 def test_read_only_analysis_answer_remains_billable():

@@ -156,9 +156,8 @@ VISION_API_KEY = (
     or (OPENAI_API_KEY if VISION_BASE_URL == OPENAI_BASE_URL else "")
     or (IMAGE_API_KEY if VISION_BASE_URL == IMAGE_BASE_URL else ""))
 
-# Paid editing uses EDITOR_MODEL for every plan, including existing trials.
-# Keep both credential lanes for wallet failover and free-lane compatibility;
-# historical PAID_PLANS/FRONTIER_* model overrides do not downgrade subscribers.
+# Historical provider settings remain readable for compatibility. Editing
+# no longer uses these xAI credentials, including as an automatic fallback.
 PAID_BASE_URL = os.getenv("PAID_BASE_URL", "https://api.x.ai/v1").strip()
 PAID_AGENT_MODEL = os.getenv("PAID_AGENT_MODEL", "grok-4.5").strip()
 PAID_API_KEY = (
@@ -213,10 +212,10 @@ FRONTIER_API_KEY = (
 # later is one edit and no new branch.
 FRONTIER_PLANS = {"ai_max"}
 
-# All subscribing editors share the same model. Plan tiers buy allowance and
-# MCP access, not different editorial quality. Existing provider credentials
-# remain valid; this deliberately supersedes historical per-plan model IDs.
-EDITOR_MODEL = os.getenv("EDITOR_MODEL", "grok-4.6").strip()
+# All subscribing editors use Luna on the standard OpenAI client. Keep the
+# rollback explicit: stale EDITOR_MODEL / PAID_* / FRONTIER_* environment
+# settings must not silently put paid editing back onto Grok.
+EDITOR_MODEL = "gpt-5.6-luna"
 
 # reasoning_effort for the agent's tool-dispatch steps.
 #

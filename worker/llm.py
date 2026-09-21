@@ -212,18 +212,12 @@ def is_frontier(plan):
 
 
 def paid_editor_lanes():
-    """Configured Grok wallets; never silently downgrade a subscriber to Luna."""
-    lanes, wallets = [], set()
-    for name, base, key, factory in (
-            ("frontier", config.FRONTIER_BASE_URL, config.FRONTIER_API_KEY, frontier_client),
-            ("paid_fallback", config.PAID_BASE_URL, config.PAID_API_KEY, paid_client)):
-        wallet = (str(base).rstrip("/"), key)
-        if not base or not key or wallet in wallets:
-            continue
-        wallets.add(wallet)
-        lanes.append(dict(name=name, client=factory(), model=config.EDITOR_MODEL,
-                          base_url=base, api_key=key))
-    return lanes
+    """Luna is the only subscribed editing lane, including Frontier/trials."""
+    if not config.OPENAI_API_KEY:
+        return []
+    return [dict(name="standard", client=client(), model=config.EDITOR_MODEL,
+                 base_url=config.OPENAI_BASE_URL,
+                 api_key=config.OPENAI_API_KEY)]
 
 
 def paid_editor_plan(plan):
@@ -293,23 +287,8 @@ def agent_lanes_for(subscribed, plan=None, first_turn=False):
             "api_key": config.OPENAI_API_KEY,
         })
 
-    # Reliability fallbacks are not advertised product tiers.  Prefer the
-    # less expensive optional paid lane, then Frontier, then the standard
-    # lane.  The primary entry above always stays first.
-    if paid_available():
-        configured.append({
-            "name": "paid_fallback", "client": paid_client(),
-            "model": config.PAID_AGENT_MODEL,
-            "base_url": config.PAID_BASE_URL,
-            "api_key": config.PAID_API_KEY,
-        })
-    if frontier_available():
-        configured.append({
-            "name": "frontier_fallback", "client": frontier_client(),
-            "model": config.FRONTIER_AGENT_MODEL,
-            "base_url": config.FRONTIER_BASE_URL,
-            "api_key": config.FRONTIER_API_KEY,
-        })
+    # Keep the standard Luna lane available to a first-turn experiment.
+    # Never use the old xAI wallets as automatic spending fallbacks.
     configured.append({
         "name": "standard_fallback", "client": client(),
         "model": config.AGENT_MODEL, "base_url": config.OPENAI_BASE_URL,
@@ -445,7 +424,7 @@ def config_report():
 
 
 def vision_client_for(plan):
-    """Paid visual reviews use the same Grok editor as paid reasoning.
+    """Paid visual reviews use the same Luna editor as paid reasoning.
     Free uploads retain their configured shared vision/fallback provider.
     """
     if paid_editor_plan(plan):
