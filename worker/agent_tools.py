@@ -17216,12 +17216,16 @@ def _run_changed_preview_check(ctx, row, plan, ranges):
         job_id, _created = ctx.db.run(
             dbx.get_or_enqueue_preview_check_job, ctx.project_id,
             ctx.job["user_id"], payload)
+        if not hasattr(ctx, 'spec_preview_check_jobs'):
+            ctx.spec_preview_check_jobs = {}
+        ctx.spec_preview_check_jobs[version] = job_id
     deadline = time.time() + min(config.PREVIEW_WAIT_TIMEOUT_S, 300.0)
     while time.time() < deadline:
         time.sleep(1)
         job = ctx.db.run(dbx.get_job, job_id)
         if job["state"] == "done":
             result = job.get("result") or {}
+            _resolve_job_waits(ctx, job_id)
             if result.get("superseded_by"):
                 return ("Changed-section proof was superseded by a newer "
                         "EDL version. Check that newer edit instead.")
@@ -17338,6 +17342,13 @@ def _render_signature(row, kind, ranges=None, audio_model_review=True, quality="
     return hashlib.sha256(raw).hexdigest()
 
 
+def _resolve_job_waits(ctx, job_id):
+    """Resolve only pending receipts for this exact completed background job."""
+    for receipt in getattr(ctx, 'turn_tool_outcomes', None) or []:
+        if receipt.get('kind') == 'prerequisite' and receipt.get('pending_job_id') == job_id:
+            receipt['resolved'] = True
+
+
 def wait_for_job(ctx, job_id):
     """Observe one existing project job; never enqueue or replay its work."""
     if isinstance(job_id, bool) or not isinstance(job_id, int) or job_id <= 0:
@@ -17358,6 +17369,7 @@ def wait_for_job(ctx, job_id):
         state = job.get('state')
         if state == 'done':
             result = job.get('result') or {}
+            _resolve_job_waits(ctx, job_id)
             if result.get('superseded_by'):
                 return (f"Job {job_id} was superseded by EDL v{result['superseded_by']}; "
                         "it did not produce a preview. Inspect the current EDL and "
@@ -17483,6 +17495,7 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft"):
         j = ctx.db.run(dbx.get_job, job_id)
         if j["state"] == "done":
             result = j.get("result") or {}
+            _resolve_job_waits(ctx, job_id)
             # A deterministic-only owner may adopt an older/in-flight render
             # that happened to include listener excerpts. Keep those opaque:
             # they are not evidence for this workflow and must never reach

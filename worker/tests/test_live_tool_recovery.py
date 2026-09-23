@@ -104,6 +104,9 @@ def test_agent_can_wait_for_its_existing_render_without_enqueueing(monkeypatch):
     states = iter(['running', 'done'])
     calls = []
     ctx = context()
+    ctx.turn_tool_outcomes = [
+        {'tool': 'render_preview', 'kind': 'prerequisite', 'pending_job_id': 11},
+        {'tool': 'wait_for_job', 'kind': 'prerequisite', 'pending_job_id': 12}]
 
     def run(fn, *args):
         calls.append(fn)
@@ -120,6 +123,8 @@ def test_agent_can_wait_for_its_existing_render_without_enqueueing(monkeypatch):
     assert len(calls) == 2
     assert 'wait_for_job' in tools.planning_tool_names()
     assert ctx.spec_preview_jobs == {3: 11}
+    assert ctx.turn_tool_outcomes[0]['resolved'] is True
+    assert 'resolved' not in ctx.turn_tool_outcomes[1]
 
 
 def test_superseded_job_is_never_claimed_as_rendered():

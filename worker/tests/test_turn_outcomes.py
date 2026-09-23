@@ -3,6 +3,7 @@
 import os
 import sys
 import hashlib
+import pytest
 from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -64,6 +65,27 @@ def test_saved_edit_with_pending_prerequisite_is_partial_but_billable():
         {"tool": "render_preview", "kind": "prerequisite"}],
         write_attempts=1)
     assert agent_loop._turn_completion(ctx) == ("partial", True)
+
+
+@pytest.mark.parametrize('ready,other_pending,expected', [
+    (True, False, 'fulfilled'), (False, False, 'partial'),
+    (True, True, 'partial'),
+])
+def test_finished_job_resolves_only_its_wait_and_keeps_quality_gate(
+        monkeypatch, ready, other_pending, expected):
+    ctx = _ctx(versions_written=[2], rendered_versions={2},
+               last_preview={'edl_version': 2}, write_attempts=1)
+    ctx.latest_edl = lambda: {'version': 2, 'json': {}}
+    agent_loop._record_outer_tool_outcome(
+        ctx, 'render_preview', 'PREREQUISITE: complete preview is running as job 77.')
+    if other_pending:
+        agent_loop._record_outer_tool_outcome(
+            ctx, 'wait_for_job', 'PREREQUISITE: job 88 is still running.')
+    agent_loop.agent_tools._resolve_job_waits(ctx, 77)
+    monkeypatch.setattr(agent_loop, '_quality_handoff',
+                        lambda *_: {'export_ready': ready})
+    assert agent_loop._turn_completion(ctx) == (expected, True)
+    assert ctx.turn_tool_outcomes[0]['kind'] == 'prerequisite'  # preserve history
 
 
 def test_fetched_audio_is_delivered_value():

@@ -3516,9 +3516,13 @@ def _record_outer_tool_outcome(ctx, name, result):
     # tool identity that distinguish different recovery attempts.
     fingerprint = name + "|" + re.sub(r"\d+(?:\.\d+)?", "#", first)
     ctx.last_tool_result = first
-    ctx.turn_tool_outcomes.append(
-        {"tool": name, "kind": kind, "fingerprint": fingerprint,
-         "writes": len(ctx.versions_written)})
+    receipt = {"tool": name, "kind": kind, "fingerprint": fingerprint,
+               "writes": len(ctx.versions_written)}
+    if kind == "prerequisite" and name in {"render_preview", "wait_for_job"}:
+        pending = re.search(r"\bjob(?:_id=| )(\d+)\b", str(result))
+        if pending:
+            receipt["pending_job_id"] = int(pending.group(1))
+    ctx.turn_tool_outcomes.append(receipt)
     if name in agent_tools.WRITE_TOOLS:
         ctx.write_attempts += 1
 
@@ -3547,7 +3551,8 @@ def _turn_completion(ctx, status="replied", fail_note=None, truncated=False):
     has_value = bool(has_edit_deliverable or _turn_has_asset_progress(ctx))
     blank_canvas_no_value = (
         not has_value and getattr(ctx, "has_main_video", True) is False)
-    kinds = [row.get("kind") for row in ctx.turn_tool_outcomes]
+    kinds = [row.get("kind") for row in ctx.turn_tool_outcomes
+             if not row.get("resolved")]
     failed = "failed" in kinds
     refused = "refused" in kinds
     prerequisite = "prerequisite" in kinds
@@ -4123,7 +4128,8 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                       "execution-slice boundary; do not treat the boundary "
                       "as completion.")})
         failures = [row for row in ctx.turn_tool_outcomes
-                    if row.get("kind") in {"refused", "failed", "prerequisite"}]
+                    if row.get("kind") in {"refused", "failed", "prerequisite"}
+                    and not row.get("resolved")]
         if failures or ctx.tool_failure_memory:
             messages.append({"role": "system", "content": (
                 "Known failed attempts from this same logical edit. Do not repeat "
