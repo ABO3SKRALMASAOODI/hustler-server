@@ -698,6 +698,84 @@ def cmd_export_start(args: argparse.Namespace) -> dict:
         return item
 
 
+def cmd_reject_final(args: argparse.Namespace) -> dict:
+    """Reopen a reviewed candidate after an actual downloaded final fails QC."""
+    media = absolute_existing(args.file, "rejected final")
+    report = absolute_existing(args.report, "final rejection report")
+    payload = read_object(report, "final rejection report")
+    digest = sha256(media)
+    receipt_path = absolute_existing(
+        payload.get("final_receipt") or "", "final receipt")
+    receipt_payload = read_object(receipt_path, "final receipt")
+    structured = receipt_payload.get("structuredContent")
+    receipt = (structured if isinstance(structured, dict) else {}).get(
+        "download_receipt", receipt_payload.get("download_receipt", receipt_payload))
+    if not isinstance(receipt, dict) or receipt.get("render_type") != "final_export":
+        raise StateError("final receipt must identify a final_export")
+    if receipt.get("edl_version") != args.edl_version or \
+            receipt.get("sha256") != digest:
+        raise StateError("final receipt EDL version or SHA does not match")
+    with locked(args.run_dir) as state:
+        item = child(state, args.short_id)
+        require_status(item, {"ready", "exporting"}, "reject final")
+        candidate = item.get("candidate") or {}
+        if candidate.get("edl_version") != args.edl_version:
+            raise StateError("rejected final EDL version differs from candidate")
+        for key in ("project_id", "child_project_id"):
+            if key in receipt and receipt[key] != item["child_project_id"]:
+                raise StateError(f"final receipt {key} does not match")
+        expected = {
+            "run_id": state["run_id"], "short_id": args.short_id,
+            "child_project_id": item["child_project_id"],
+            "edl_version": args.edl_version, "verdict": "repair",
+            "final_sha256": digest,
+        }
+        if item.get("style_lane"):
+            expected["style_lane"] = item["style_lane"]
+        for key, value in expected.items():
+            if payload.get(key) != value:
+                raise StateError(f"final rejection report {key} does not match")
+        if any(job["state"] in {"queued", "running"} for job in item["jobs"]):
+            raise StateError("cannot reject final with queued or running jobs")
+        export = item.get("export") or {}
+        if export.get("state") in {"queued", "running"} and not any(
+                job["job_id"] == export.get("job_id") and
+                job["state"] in {"done", "failed"} for job in item["jobs"]):
+            raise StateError("record the export job as terminal before rejecting final")
+        if item["repair_rounds"] >= 2:
+            raise StateError("two editor repair rounds are already used")
+        prior_qc_report = None
+        qc_path = (item.get("qc") or {}).get("report")
+        if qc_path and Path(qc_path).is_file():
+            prior_qc_report = {
+                "file": str(Path(qc_path).resolve()),
+                "sha256": sha256(Path(qc_path)),
+                "payload": read_object(Path(qc_path), "prior QC report"),
+            }
+        stamp = now()
+        item.setdefault("rejected_finals", []).append({
+            "rejected_at": stamp, "previous_status": item["status"],
+            "file": str(media), "sha256": digest, "bytes": media.stat().st_size,
+            "edl_version": args.edl_version,
+            "candidate": candidate, "qc": item.get("qc"),
+            "qc_report": prior_qc_report,
+            "export": item.get("export"),
+            "report": {"file": str(report), "sha256": sha256(report),
+                       "payload": payload},
+            "final_receipt": {"file": str(receipt_path),
+                              "sha256": sha256(receipt_path),
+                              "payload": receipt_payload},
+        })
+        item["repair_rounds"] += 1
+        item.update(status="repair", worker=None, qc=None, export=None,
+                    updated_at=stamp)
+        state["events"].append({
+            "at": stamp, "type": "final_rejected", "short_id": args.short_id,
+            "edl_version": args.edl_version, "sha256": digest,
+        })
+        return item
+
+
 def cmd_export(args: argparse.Namespace) -> dict:
     media = absolute_existing(args.file, "export file")
     with locked(args.run_dir) as state:
@@ -890,6 +968,14 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--short-id", required=True)
     p.add_argument("--job-id", required=True, type=int)
     p.set_defaults(func=cmd_export_start)
+
+    p = commands.add_parser("reject-final")
+    p.add_argument("--run-dir", required=True)
+    p.add_argument("--short-id", required=True)
+    p.add_argument("--file", required=True)
+    p.add_argument("--edl-version", required=True, type=int)
+    p.add_argument("--report", required=True)
+    p.set_defaults(func=cmd_reject_final)
 
     p = commands.add_parser("rescue")
     p.add_argument("--run-dir", required=True)

@@ -51,6 +51,136 @@ def quality_fields(style_lane: str, *, editorial_duration_s: float = 23.0):
     return value
 
 
+@pytest.fixture
+def ready_final(tmp_path):
+    run_dir = tmp_path / "run"
+    call("init", "--run-dir", str(run_dir), "--run-id", "reject-test",
+         "--source", "topic")
+    assignment = run_dir / "assignments" / "s.json"
+    write_json(assignment, {"short_id": "s", "style_lane": "fast-conversation"})
+    call("add-short", "--run-dir", str(run_dir), "--short-id", "s",
+         "--project-id", "123", "--title", "s", "--assignment", str(assignment))
+    call("claim", "--run-dir", str(run_dir), "--short-id", "s", "--worker", "e")
+    preview = run_dir / "candidates" / "preview.mp4"
+    preview.write_bytes(b"preview")
+    bundle = preview.with_suffix(".json")
+    identity = {"run_id": "reject-test", "short_id": "s", "child_project_id": 123,
+                "edl_version": 3, "style_lane": "fast-conversation"}
+    write_json(bundle, {**identity, **quality_fields("fast-conversation"),
+                        "preview_path": str(preview), "outstanding_job_ids": []})
+    call("candidate", "--run-dir", str(run_dir), "--short-id", "s",
+         "--worker", "e", "--bundle", str(bundle), "--preview", str(preview),
+         "--edl-version", "3")
+    qc = preview.parent / "qc.json"
+    write_json(qc, {**identity, "score": 94, "verdict": "ready",
+                    "active_word_caption_check": "pass",
+                    "within_short_broll_uniqueness_check": "pass"})
+    call("qc", "--run-dir", str(run_dir), "--short-id", "s", "--score", "94",
+         "--verdict", "ready", "--report", str(qc))
+    final = run_dir / "exports" / "fast-conversation__s.mp4"
+    final.write_bytes(b"actual final with bad tail frames")
+    receipt = final.with_suffix(".json")
+    write_json(receipt, {"structuredContent": {"download_receipt": {
+        "render_type": "final_export", "edl_version": 3,
+        "sha256": run_state.sha256(final), "render_job_id": 456}}})
+    report = preview.parent / "reject-final.json"
+    write_json(report, {**identity, "verdict": "repair",
+                        "final_sha256": run_state.sha256(final),
+                        "final_receipt": str(receipt),
+                        "observations": "Two raw-source frames before branding."})
+    args = ["reject-final", "--run-dir", str(run_dir), "--short-id", "s",
+            "--file", str(final), "--edl-version", "3", "--report", str(report)]
+    return run_dir, final, receipt, report, args
+
+
+@pytest.mark.parametrize("exporting", [False, True])
+def test_reject_final_preserves_evidence_then_allows_claim(ready_final, exporting):
+    run_dir, final, receipt, report, args = ready_final
+    if exporting:
+        call("export-start", "--run-dir", str(run_dir), "--short-id", "s",
+             "--job-id", "456")
+        call("job", "--run-dir", str(run_dir), "--short-id", "s",
+             "--job-id", "456", "--kind", "final", "--state", "done")
+    before = json.loads((run_dir / "run.json").read_text())["shorts"]["s"]
+    call(*args)
+    state = json.loads((run_dir / "run.json").read_text())
+    item = state["shorts"]["s"]
+    assert item["status"] == "repair" and item["repair_rounds"] == 1
+    assert item["qc"] is None and item["export"] is None
+    history = item["rejected_finals"][0]
+    assert history["qc"] == before["qc"]
+    assert history["qc_report"]["payload"] == json.loads(
+        Path(before["qc"]["report"]).read_text())
+    assert history["export"] == before["export"]
+    assert history["candidate"] == before["candidate"]
+    assert history["sha256"] == run_state.sha256(final)
+    assert history["final_receipt"]["payload"] == json.loads(receipt.read_text())
+    assert history["report"]["payload"] == json.loads(report.read_text())
+    assert state["events"][-1]["type"] == "final_rejected"
+    call("claim", "--run-dir", str(run_dir), "--short-id", "s", "--worker", "e2")
+    after = json.loads((run_dir / "run.json").read_text())["shorts"]["s"]
+    assert after["status"] == "editing" and after["edit_round"] == 2
+    assert after["rejected_finals"][0] == history
+
+
+@pytest.mark.parametrize("key,value", [
+    ("run_id", "other"), ("short_id", "other"), ("child_project_id", 124),
+    ("style_lane", "headline-conversation"), ("edl_version", 2),
+    ("verdict", "ready"), ("final_sha256", "0" * 64),
+])
+def test_reject_final_refuses_unbound_report_without_mutation(ready_final, key, value):
+    run_dir, _, _, report, args = ready_final
+    payload = json.loads(report.read_text())
+    payload[key] = value
+    write_json(report, payload)
+    before = (run_dir / "run.json").read_bytes()
+    assert run_state.main(args) == 2
+    assert (run_dir / "run.json").read_bytes() == before
+
+
+@pytest.mark.parametrize("key", ["project_id", "child_project_id"])
+def test_reject_final_binds_receipt_project_when_present(ready_final, key):
+    run_dir, _, receipt, _, args = ready_final
+    payload = json.loads(receipt.read_text())
+    payload["structuredContent"]["download_receipt"][key] = 999
+    write_json(receipt, payload)
+    before = (run_dir / "run.json").read_bytes()
+    assert run_state.main(args) == 2
+    assert (run_dir / "run.json").read_bytes() == before
+
+
+@pytest.mark.parametrize("problem", [
+    "stale_candidate", "changed_final", "wrong_receipt", "preview_receipt",
+    "queued", "running", "untracked_export", "repair_limit", "already_exported",
+])
+def test_reject_final_refuses_stale_or_active_work(ready_final, problem):
+    run_dir, final, receipt, _, args = ready_final
+    if problem == "changed_final":
+        final.write_bytes(b"different actual media")
+    elif problem in {"wrong_receipt", "preview_receipt"}:
+        payload = json.loads(receipt.read_text())
+        record = payload["structuredContent"]["download_receipt"]
+        record.update({"sha256": "0" * 64} if problem == "wrong_receipt"
+                      else {"render_type": "preview"})
+        write_json(receipt, payload)
+    else:
+        with run_state.locked(str(run_dir)) as state:
+            item = state["shorts"]["s"]
+            if problem == "stale_candidate":
+                item["candidate"]["edl_version"] = 4
+            elif problem in {"queued", "running"}:
+                item["jobs"].append({"job_id": 789, "kind": "preview", "state": problem})
+            elif problem == "untracked_export":
+                item.update(status="exporting", export={"job_id": 456, "state": "running"})
+            elif problem == "repair_limit":
+                item["repair_rounds"] = 2
+            elif problem == "already_exported":
+                item["status"] = "exported"
+    before = (run_dir / "run.json").read_bytes()
+    assert run_state.main(args) == 2
+    assert (run_dir / "run.json").read_bytes() == before
+
+
 def test_happy_path_and_manifest(tmp_path):
     run_dir = tmp_path / "run"
     call("init", "--run-dir", str(run_dir), "--run-id", "r1",

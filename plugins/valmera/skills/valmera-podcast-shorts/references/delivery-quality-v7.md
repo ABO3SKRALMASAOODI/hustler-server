@@ -185,3 +185,31 @@ actual final checksum. Pass its path to `run_state.py export --quality-review
 file, recording exact EDL, dimensions, original/crop detail, typography
 settings, evidence, and checksum in candidate/QC/final records. Recheck a new
 font, renderer, source, or materially different layout before repeating it.
+
+## Reject a failed actual final before delivery
+
+Decode and inspect the last actual editorial frames through the first branding
+frames, plus the final decoded frame. Fractional cut durations can expose one
+or two raw-source frames after a picture overlay ends; a duration total or
+preview pass does not prove that the actual final has a clean transition.
+
+If the downloaded final fails, keep it and its native download receipt. A
+coordinator may reopen a `ready` or `exporting` short with:
+
+```bash
+python <skill-root>/scripts/run_state.py reject-final \
+  --run-dir <run> --short-id <id> --file <actual-failed-final.mp4> \
+  --edl-version <version> --report <final-rejection.json>
+```
+
+The rejection JSON must bind `run_id`, `short_id`, `child_project_id`,
+`style_lane`, `edl_version`, `verdict:"repair"`, and `final_sha256` to that
+candidate and file. Set `final_receipt` to the absolute native download JSON
+path (containing a `final_export` receipt with matching version and SHA), and
+record concrete observations and evidence paths. Finish and record all
+queued/running jobs first, including an export started with `export-start`.
+The command snapshots prior candidate/QC/export and the rejection/receipt in
+`rejected_finals`, clears current QC/export approval, and consumes one of the
+existing two repair rounds. The editor then `claim`s the short and returns a
+fresh candidate for coordinator QC and a newly inspected actual final. It
+does not reopen delivered or terminal shorts or waive the repair limit.
