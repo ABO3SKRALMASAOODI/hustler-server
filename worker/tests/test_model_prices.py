@@ -249,11 +249,11 @@ def test_every_paid_plan_and_trial_uses_luna(monkeypatch, plan):
     _paid_on(monkeypatch)
     monkeypatch.setattr(config, "OPENAI_API_KEY", "openai-test-key")
     monkeypatch.setattr(llm, "client", lambda: "luna-client")
-    assert llm.agent_client_for(True, plan) == ("luna-client", "gpt-5.6-luna")
-    assert llm.vision_client_for(plan) == ("luna-client", "gpt-5.6-luna")
+    assert llm.agent_client_for(True, plan) == ("luna-client", "gpt-6-luna")
+    assert llm.vision_client_for(plan) == ("luna-client", "gpt-6-luna")
     lanes = llm.agent_lanes_for(True, plan)
     assert len(lanes) == 1
-    assert lanes[0]["model"] == "gpt-5.6-luna"
+    assert lanes[0]["model"] == "gpt-6-luna"
     assert lanes[0]["api_key"] == "openai-test-key"
 
 

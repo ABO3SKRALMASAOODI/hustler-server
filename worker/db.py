@@ -948,8 +948,11 @@ def project_execution_shape(conn, project_id, asset_id=None, job_type=None, payl
         payload = payload or {}
         edl_row = (get_edl_version(conn, project_id, int(payload['edl_version']))
                    if payload.get('edl_version') is not None else latest_edl(conn, project_id))
-        if not edl_row:
+        if not edl_row and job_type != 'filmstrip':
             raise PermanentJobError('EDL version is unavailable for capacity admission')
+        # Timeline art can be queued as uploads finish, before the first EDL.
+        # Its dependency set is the uploaded media and does not require one.
+        edl_row = edl_row or {'json': {}}
         with conn.cursor() as cur:
             cur.execute('''SELECT id, kind, storage_key, bytes, duration_s
                            FROM assets WHERE project_id = %s ORDER BY id DESC''',

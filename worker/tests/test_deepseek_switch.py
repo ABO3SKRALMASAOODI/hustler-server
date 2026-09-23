@@ -37,10 +37,10 @@ import model_prices                                            # noqa: E402
 # ── the model actually configured ──────────────────────────────────────
 
 def test_agent_runs_on_luna():
-    """Round 67: the default agent model is OpenAI GPT-5.6 Luna. The exact id
-    matters — the bare "gpt-5.6" alias routes to Sol, a different (pricier)
+    """Round 67: the default agent model is OpenAI GPT-6 Luna. The exact id
+    matters — the bare "gpt-6" alias routes to Sol, a different (pricier)
     model."""
-    assert config.AGENT_MODEL == "gpt-5.6-luna"
+    assert config.AGENT_MODEL == "gpt-6-luna"
     assert config.OPENAI_BASE_URL == "https://api.openai.com/v1"
     # Luna takes images, which is what powers the round-67 direct-sight
     # look_at. A deployment pointed back at a blind provider must flip this
@@ -125,11 +125,11 @@ def test_a_provider_that_rejects_images_turns_vision_off():
 
 def test_prices_match_the_configured_model():
     """CLAUDE.md's standing rule: change AGENT_MODEL, change these, or credits
-    drift from real cost. Luna's list price (OpenAI model page, Jul 31 2026):
-    $0.20 in / $0.02 cached / $1.20 out per 1M."""
-    assert config.LLM_PRICE_IN_PER_M == 0.20
-    assert config.LLM_PRICE_OUT_PER_M == 1.20
-    assert config.LLM_PRICE_CACHED_IN_PER_M == 0.02
+    drift from real cost. Luna's list price (OpenAI model page, Sep 23 2026):
+    $0.10 in / $0.01 cached / $0.50 out per 1M."""
+    assert config.LLM_PRICE_IN_PER_M == 0.10
+    assert config.LLM_PRICE_OUT_PER_M == 0.50
+    assert config.LLM_PRICE_CACHED_IN_PER_M == 0.01
     assert config.LLM_PRICE_CACHED_IN_PER_M < config.LLM_PRICE_IN_PER_M
     # ...and the model is in the per-row table with the SAME numbers, so a
     # listed-model turn and a fallback-priced turn cannot disagree.

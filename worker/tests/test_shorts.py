@@ -635,6 +635,16 @@ def test_sub_minute_shorts_route_to_direct_edit():
     assert "REJECTED" not in result
 
 
+def test_multiple_requested_videos_are_not_silently_reduced_to_one():
+    from types import SimpleNamespace
+    import agent_tools
+    ctx = SimpleNamespace(has_main_video=True, duration=6.3)
+    result = agent_tools.make_shorts(ctx,count=5)
+    assert result.startswith('UNAVAILABLE:')
+    assert 'undelivered videos' in result
+    assert agent_tools.tool_result_kind(result) != 'success'
+
+
 def test_indexed_shorts_wait_for_a_brief_before_planning():
     """Mode selection alone must not make the creative decisions."""
     import indexer
@@ -1017,7 +1027,7 @@ def test_parent_agent_cannot_boot_children_without_card_press():
 
     result = agent_tools.edit_shorts(
         SimpleNamespace(), "make all of these cinematic")
-    assert result.startswith("LOCKED CARD BOUNDARY")
+    assert result.startswith("PREREQUISITE: LOCKED CARD BOUNDARY")
     assert "Edit button" in result
 
 

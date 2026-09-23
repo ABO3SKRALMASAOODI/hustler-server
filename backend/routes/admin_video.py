@@ -27,19 +27,19 @@ import storage
 admin_video_bp = Blueprint("admin_video", __name__)
 
 # FALLBACK $ per 1M tokens, for a model model_prices.py does not list (default =
-# DeepSeek V4 Pro, $1.74 in / $3.48 out). Every listed model is priced from its
+# GPT-6 Luna, $0.10 in / $0.50 out). Every listed model is priced from its
 # OWN row's `model` column instead, because a turn can run on DeepSeek for a
 # free user and Grok for a subscriber and one blended rate is then wrong for
 # both. MUST match worker/config.py or the admin spend view disagrees with what
 # users were actually charged.
-PRICE_IN_PER_M = float(os.getenv("LLM_PRICE_IN_PER_M", "1.74"))
-PRICE_OUT_PER_M = float(os.getenv("LLM_PRICE_OUT_PER_M", "3.48"))
+PRICE_IN_PER_M = float(os.getenv("LLM_PRICE_IN_PER_M", "0.10"))
+PRICE_OUT_PER_M = float(os.getenv("LLM_PRICE_OUT_PER_M", "0.50"))
 # Cache-hit input price — see worker/config.LLM_PRICE_CACHED_IN_PER_M. Rows
 # carry their cache-hit slice in response->>'cached_in' and their reasoning
 # tokens (charged only where the provider bills them separately) in
 # response->>'reasoning_out'.
 PRICE_CACHED_IN_PER_M = float(
-    os.getenv("LLM_PRICE_CACHED_IN_PER_M", "0.003625"))
+    os.getenv("LLM_PRICE_CACHED_IN_PER_M", "0.01"))
 
 PRICE_FALLBACK = {"in": PRICE_IN_PER_M, "cached_in": PRICE_CACHED_IN_PER_M,
                   "out": PRICE_OUT_PER_M, "reasoning_separate": False}

@@ -14,7 +14,7 @@ S3_SECRET_ACCESS_KEY = os.getenv("S3_SECRET_ACCESS_KEY", "")
 S3_BUCKET = os.getenv("S3_BUCKET", "")
 S3_REGION = os.getenv("S3_REGION", "auto")
 
-# LLM — OpenAI-compatible only. Default: OpenAI GPT-5.6 Luna
+# LLM — OpenAI-compatible only. Default: OpenAI GPT-6 Luna
 # (api.openai.com), the owner's chosen agent model since Jul 31 2026 (round
 # 67). The whole stack (agent tool-calling, vision, concierge) is
 # OpenAI-compatible, so pointing OPENAI_BASE_URL + OPENAI_API_KEY at any
@@ -29,11 +29,13 @@ S3_REGION = os.getenv("S3_REGION", "auto")
 # of through a separate vision model. AGENT_MULTIMODAL below gates that path;
 # a deployment pointed back at DeepSeek must set it to 0 (or eat one latched
 # 400 — the runtime downgrade catches it either way, see llm.mark_agent_blind).
-# Model id: use the exact "gpt-5.6-luna" — the bare "gpt-5.6" alias routes to
+# Model id: use the exact "gpt-6-luna" — unqualified family aliases route to
 # Sol, a different (pricier) model.
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-AGENT_MODEL = os.getenv("AGENT_MODEL", "gpt-5.6-luna")
+AGENT_MODEL = os.getenv("AGENT_MODEL", "gpt-6-luna")
+if AGENT_MODEL == "gpt-5.6-luna":
+    AGENT_MODEL = "gpt-6-luna"  # migrate the former deployed default too
 # Whether AGENT_MODEL accepts image content parts. Default 1 (Luna does).
 # When on, look_at / look_at_asset hand captured frames DIRECTLY to the
 # editing agent — its own eyes — instead of asking the separate VISION_*
@@ -139,7 +141,7 @@ IMAGE_API_KEY = os.getenv("IMAGE_API_KEY", "") or (
 # image_url part (see the block at the top), which blinded the agent for hours
 # on Jul 26 2026 because vision silently inherited AGENT_MODEL.
 #
-# Defaults to OpenAI gpt-5.6-luna (round 67) — the agent model is multimodal
+# Defaults to OpenAI gpt-6-luna — the agent model is multimodal
 # now, so the indexing contact sheets, the preview self-check and any legacy
 # vision call run on the same provider and key as the agent. The key follows
 # the SAME inheritance rule as IMAGE_API_KEY: taken from whichever configured
@@ -150,7 +152,9 @@ IMAGE_API_KEY = os.getenv("IMAGE_API_KEY", "") or (
 # of failing — the honest-off contract. Empty VISION_MODEL disables vision
 # the same graceful way.
 VISION_BASE_URL = os.getenv("VISION_BASE_URL", "https://api.openai.com/v1")
-VISION_MODEL = os.getenv("VISION_MODEL", "gpt-5.6-luna")
+VISION_MODEL = os.getenv("VISION_MODEL", "gpt-6-luna")
+if VISION_MODEL == "gpt-5.6-luna":
+    VISION_MODEL = "gpt-6-luna"
 VISION_API_KEY = (
     os.getenv("VISION_API_KEY", "")
     or (OPENAI_API_KEY if VISION_BASE_URL == OPENAI_BASE_URL else "")
@@ -215,7 +219,7 @@ FRONTIER_PLANS = {"ai_max"}
 # All subscribing editors use Luna on the standard OpenAI client. Keep the
 # rollback explicit: stale EDITOR_MODEL / PAID_* / FRONTIER_* environment
 # settings must not silently put paid editing back onto Grok.
-EDITOR_MODEL = "gpt-5.6-luna"
+EDITOR_MODEL = "gpt-6-luna"
 
 # reasoning_effort for the agent's tool-dispatch steps.
 #
@@ -309,12 +313,9 @@ AGENT_RESPONSES_LANE = os.getenv("AGENT_RESPONSES_LANE", "1") == "1"
 # -> 138 tok/s (+22%); the documented bigger win is queue/latency
 # CONSISTENCY at peak hours. Empty = default tier (off).
 #
-# FLIP THE PRICES WITH THE TIER or the credit charge silently halves the
-# LLM margin: setting OPENAI_SERVICE_TIER=priority on Render requires
-# LLM_PRICE_IN_PER_M=0.40, LLM_PRICE_CACHED_IN_PER_M=0.04,
-# LLM_PRICE_OUT_PER_M=2.40 beside it (worker AND any other service reading
-# them) — users then burn credits ~2x faster on the LLM share of a turn,
-# which is the honest cost of the faster pool.
+# GPT-6 Luna records the returned service tier and prices each request using
+# its reported token categories. Do not double the fallback constants when
+# selecting priority; Luna's recorded cost already includes the tier multiplier.
 OPENAI_SERVICE_TIER = os.getenv("OPENAI_SERVICE_TIER", "").strip()
 # Vision (look_at) is the slowest thing the agent does, so it gets a MORE
 # generous per-call timeout than the text agent (grok multimodal latency is
@@ -1467,11 +1468,9 @@ AGENT_TURN_BUDGET_GRACE = float(os.getenv("AGENT_TURN_BUDGET_GRACE", "3"))
 # silently wrong for Grok, and a silent constant-factor billing error is the bug
 # class this whole area keeps producing.
 #
-# Default = OpenAI GPT-5.6 Luna ($0.20 in / $1.20 out, list price from
-# OpenAI's own model page Jul 31 2026) — ~9x cheaper in and ~3x cheaper out
-# than the DeepSeek V4 Pro it replaced.
-LLM_PRICE_IN_PER_M = float(os.getenv("LLM_PRICE_IN_PER_M", "0.20"))
-LLM_PRICE_OUT_PER_M = float(os.getenv("LLM_PRICE_OUT_PER_M", "1.20"))
+# Default = GPT-6 Luna standard pricing, verified September 23, 2026.
+LLM_PRICE_IN_PER_M = float(os.getenv("LLM_PRICE_IN_PER_M", "0.10"))
+LLM_PRICE_OUT_PER_M = float(os.getenv("LLM_PRICE_OUT_PER_M", "0.50"))
 # Cached input ($/1M). A provider that serves a repeated prompt PREFIX from
 # cache charges a fraction of a miss for it — DeepSeek $0.003625/1M (480x
 # cheaper), Grok $0.30/1M (6.7x cheaper). An agent turn re-sends the same system
@@ -1487,10 +1486,10 @@ LLM_PRICE_OUT_PER_M = float(os.getenv("LLM_PRICE_OUT_PER_M", "1.20"))
 # model_prices.MODEL_PRICES; this constant only covers unlisted models, and for
 # one that genuinely has no caching the reported hit count is 0, which makes the
 # rate inert anyway.
-# Default tracks Luna's cached-input list price ($0.02/1M — 10x cheaper
+# Default tracks Luna's cached-input list price ($0.01/1M — 10x cheaper
 # than a miss).
 LLM_PRICE_CACHED_IN_PER_M = float(
-    os.getenv("LLM_PRICE_CACHED_IN_PER_M", "0.02"))
+    os.getenv("LLM_PRICE_CACHED_IN_PER_M", "0.01"))
 
 # What price_for() falls back to for a model that is not in MODEL_PRICES.
 PRICE_FALLBACK = {"in": LLM_PRICE_IN_PER_M,

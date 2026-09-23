@@ -6,6 +6,7 @@ import remote
 import config
 import db
 import storage
+import pytest
 
 
 def asset(key, size, kind='video_clip', duration=20):
@@ -96,3 +97,18 @@ def test_admission_resolves_only_used_unregistered_objects(monkeypatch):
                                       payload={'edl_version': 4}, resolve_unknown=True)
     assert shape['staged_bytes'] == 418633 + 8_000_000
     assert looked_up == ['legacy-music/track.mp3']
+
+
+def test_filmstrip_before_first_edl_still_accounts_uploaded_media(monkeypatch):
+    from contextlib import nullcontext
+    class Cursor:
+        def execute(self,*args): pass
+        def fetchall(self): return library()
+    class Conn:
+        def cursor(self): return nullcontext(Cursor())
+    monkeypatch.setattr(db,'latest_edl',lambda *a: None)
+    shape=db.project_execution_shape(Conn(),2463,job_type='filmstrip')
+    assert shape['assets'] == 15
+    assert shape['staged_bytes'] == 418633
+    with pytest.raises(db.PermanentJobError):
+        db.project_execution_shape(Conn(),2463,job_type='preview')

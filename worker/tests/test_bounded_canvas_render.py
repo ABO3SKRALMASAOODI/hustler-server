@@ -52,6 +52,30 @@ def ff(args):
 
 
 @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="FFmpeg required")
+def test_phone_frame_rate_batches_do_not_repeat_the_context_clip(tmp_path):
+    # Customer 2463: seeking/copying the second batch at 21.43 fps started
+    # from the preceding keyframe and emitted 33.411s instead of 26.800s.
+    source = tmp_path / "phone.mp4"
+    ff(["-f", "lavfi", "-i", "testsrc2=s=160x90:r=21.43:d=11",
+        "-f", "lavfi", "-i", "sine=frequency=400:duration=11",
+        "-c:v", "libx264", "-threads", "2", "-c:a", "aac", str(source)])
+    edl = canvas_edl(fps=21.43)
+    edl["canvas"].update(width=160, height=90)
+    edl["inserts"] = [dict(id=f"ins{i}", asset_key="phone.mp4", kind="video",
+        at_output_s=0, duration_s=d) for i,d in enumerate(
+            [5.7,5.5,10.1,6.6,7.5,4.8,8.4,6.1,8.4])]
+    original = copy.deepcopy(edl)
+    composed, local = renderer._bounded_canvas_program(
+        edl, str(tmp_path), True, {"phone.mp4": str(source)}, None, None)
+    program = local[composed['inserts'][0]['asset_key']]
+    assert edl == original
+    assert abs(media.duration_of(program) - 63.1) < .15
+    samples = ff(["-i", program, "-map", "0:a:0", "-ar", "48000",
+                  "-ac", "1", "-f", "s16le", "-"])
+    assert abs(len(samples) // 2 - round(63.1 * 48000)) <= 1
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="FFmpeg required")
 @pytest.mark.parametrize("style,fractional", [
     ("dip_black", False), ("whip_left", False), ("dip_black", True)])
 def test_real_batched_video_keeps_frames_audio_effects_and_global_master(

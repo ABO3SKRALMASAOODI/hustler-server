@@ -119,11 +119,12 @@ VIDEO_KINDS = ("original", "proxy", "audio", "thumb", "sheet", "render",
 # model call fails. Calls are recorded to llm_calls with job_id NULL:
 # visible in admin, never charged (credit charging sums per agent-turn
 # job).
-# Round 67: defaults follow the worker onto OpenAI GPT-5.6 Luna. Use the
-# exact "-luna" id — the bare "gpt-5.6" alias routes to Sol.
+# Defaults follow the worker onto OpenAI GPT-6 Luna. Use the exact model id.
 CONCIERGE_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
 CONCIERGE_MODEL = os.getenv("CONCIERGE_MODEL",
-                            os.getenv("AGENT_MODEL", "gpt-5.6-luna"))
+                            os.getenv("AGENT_MODEL", "gpt-6-luna"))
+if CONCIERGE_MODEL == "gpt-5.6-luna":
+    CONCIERGE_MODEL = "gpt-6-luna"
 CONCIERGE_TIMEOUT_S = float(os.getenv("CONCIERGE_TIMEOUT_S", "14"))
 
 _concierge_client = None

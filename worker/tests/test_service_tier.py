@@ -67,10 +67,9 @@ def test_tier_reaches_the_responses_body(monkeypatch):
 
 
 def test_priority_prices_are_exactly_double_standard():
-    """The pairing rule: OPENAI_SERVICE_TIER=priority must ship with
-    LLM_PRICE_*=2x. Standard luna prices are pinned by
-    test_prices_match_the_configured_model; this pins the 2x the config
-    comment promises (pricing page, Aug 7 2026)."""
-    assert round(config.LLM_PRICE_IN_PER_M * 2, 2) == 0.40
-    assert round(config.LLM_PRICE_CACHED_IN_PER_M * 2, 2) == 0.04
-    assert round(config.LLM_PRICE_OUT_PER_M * 2, 2) == 2.40
+    """Luna 6 prices the reported tier without an environment price override."""
+    import model_prices
+    standard = model_prices.luna6_usage_cost(10000, 2000, 4000, 1000)
+    priority = model_prices.luna6_usage_cost(
+        10000, 2000, 4000, 1000, service_tier='priority')
+    assert priority == 2 * standard

@@ -1070,6 +1070,16 @@ def state_block(ctx, worker_db, denied_tools=(), include_blueprint=True):
     blueprint = director.prompt_block(getattr(ctx, "edit_plan", None))
     if blueprint and include_blueprint:
         block += "\n\n" + blueprint
+    import fulfillment
+    requested_count = fulfillment.requested_video_count(
+        getattr(ctx, 'verification_request', None) or getattr(ctx, 'user_message', ''))
+    if requested_count > 1:
+        block += (f"\n\nDELIVERY REQUIREMENT: the user requested {requested_count} "
+                  "separate videos. One assembled timeline is only one video. "
+                  "Confirm the tool can create the required separate projects "
+                  "before rebuilding the timeline. Do not repeatedly reset "
+                  "saved work or call a disabled batch tool. A partial edit "
+                  "must be reported as partial with its missing deliverables.")
     # Reference grammars suggest a skin; this contract states what must be
     # true for the chosen format to work. It is deliberately invariant-level
     # (no fixed cut/B-roll/effect density), so a novel style remains possible
@@ -3550,6 +3560,11 @@ def _turn_completion(ctx, status="replied", fail_note=None, truncated=False):
         has_edit_deliverable and getattr(ctx, "versions_written", None)
         and callable(getattr(ctx, "latest_edl", None))
         and quality.get("export_ready") is not True)
+    import fulfillment
+    delivery = fulfillment.delivery_requirement(ctx) if has_edit_deliverable else None
+    ctx.delivery_requirement = delivery
+    if delivery and not delivery['complete']:
+        unfinished_edit = True
 
     if not has_value and (failed or status in {"timeout", "shutdown"}):
         outcome = "internal_error"
@@ -3887,6 +3902,7 @@ def _outcome_meta(ctx, outcome):
         },
     })
     return {"outcome": outcome,
+            "delivery_requirement": getattr(ctx, 'delivery_requirement', None),
             "tool_outcomes": counts,
             "write_attempts": ctx.write_attempts,
             "editing_metrics": metrics}
@@ -3907,6 +3923,8 @@ def _finalize(ctx, worker_db, session_id, final_text, status, total_steps,
     final_text += _unused_fetched_audio_note(ctx)
     quality = _quality_handoff(ctx)
     outcome, billable = _turn_completion(ctx, status, fail_note=fail_note)
+    import fulfillment
+    final_text = fulfillment.disclose(ctx, final_text)
     meta = {"edl_version": latest["version"], "preview": ctx.last_preview,
             **quality, **_outcome_meta(ctx, outcome)}
     if extra_meta:
@@ -4985,6 +5003,8 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             outcome, billable = _turn_completion(
                 ctx, "replied", fail_note=fail_note,
                 truncated=truncated_out)
+            import fulfillment
+            final = fulfillment.disclose(ctx, final)
             quality = _quality_handoff(ctx)
             message_meta = {
                 "edl_version": latest["version"],

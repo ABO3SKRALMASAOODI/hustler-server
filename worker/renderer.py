@@ -3313,15 +3313,19 @@ def _bounded_canvas_program(edl, workdir, preview, asset_locals,
             _batch_window=(batch["trim_start"], span))
         # Finish the bounded graph before trimming. Terminating a concat graph
         # at a speed-adjusted audio boundary can leave atempo spinning on EOF.
-        # Forced keyframes let this local extraction copy picture losslessly;
+        # Decode the bounded LOCAL batch when extracting its owned interval.
+        # Stream-copy seeks can snap behind the forced keyframe at fractional
+        # phone frame rates (21.43 fps repeated the 6.6s context clip). Trim on
+        # decoded timestamps and reset the output clock instead.
         # PCM retains sample-accurate audio at the seam, without AAC priming.
         video_start = math.ceil((batch["trim_start"] - 1e-8) * fps) / fps
-        media.run(["ffmpeg", "-y", "-v", "error", "-ss",
-                   f"{video_start:.6f}", "-i", context_path,
-                   "-ss", f"{batch['trim_start']:.6f}", "-i", context_path,
-                   "-t", f"{span:.6f}", "-map", "0:v:0", "-map", "1:a:0",
-                   "-af", f"asetpts=N/SR/TB,apad=whole_dur={span:.6f},atrim=duration={span:.6f}",
-                   "-c:v", "copy", "-c:a", "pcm_s16le", path],
+        media.run(["ffmpeg", "-y", "-v", "error", "-i", context_path,
+                   "-t", f"{span:.6f}", "-map", "0:v:0", "-map", "0:a:0",
+                   "-vf", f"trim=start={video_start:.6f}:duration={span:.6f},setpts=PTS-STARTPTS",
+                   "-af", f"atrim=start={batch['trim_start']:.6f}:duration={span:.6f},asetpts=N/SR/TB,apad=whole_dur={span:.6f},atrim=duration={span:.6f}",
+                   "-c:v", "libx264", "-preset", "ultrafast", "-crf", "16",
+                   "-threads:v", "2", *_output_clock(fps),
+                   "-c:a", "pcm_s16le", path],
                   timeout=180, cancelled_cb=cancelled_cb)
         actual = media.duration_of(path)
         if abs(actual - span) > max(0.15, 2.0 / float(edl["canvas"]["fps"])):
