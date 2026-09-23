@@ -434,9 +434,10 @@ def test_changed_proof_failure_reports_the_actionable_outcome(monkeypatch):
         "kind": "transient_infrastructure", "retryable": True,
         "agent_repairable": False,
     }
-    transient = agent_tools._run_changed_preview_check(
+    exhausted = agent_tools._run_changed_preview_check(
         Ctx(), row, [], [[0, 8]])
-    assert transient.startswith("TRANSIENT_FAILURE:")
+    assert exhausted.startswith("UNAVAILABLE:")
+    assert "exhausted its safe attempts" in exhausted
 
 
 def test_sequence_screening_maps_kept_source_beats_and_omits_cut_regions():

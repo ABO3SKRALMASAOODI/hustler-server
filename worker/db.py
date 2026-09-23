@@ -1350,6 +1350,27 @@ def pending_preview_job(conn, project_id, edl_version):
         return row["id"] if row else None
 
 
+def _failed_render_for_request(cur, project_id, job_type, payload):
+    """A terminal queue job already spent this request's physical retries.
+
+    Continuations keep the logical root. Identical pixels must not acquire a
+    fresh retry allowance simply by moving to another agent slice. A new
+    request or changed EDL/renderer signature is a separate decision.
+    """
+    signature = str((payload or {}).get('render_signature') or '')
+    root = (payload or {}).get('root_agent_job_id')
+    if not root or not signature:
+        return None
+    cur.execute("""SELECT id FROM video_jobs
+                   WHERE project_id = %s AND type = %s AND state = 'failed'
+                     AND payload->>'root_agent_job_id' = %s
+                     AND payload->>'render_signature' = %s
+                   ORDER BY id DESC LIMIT 1""",
+                (project_id, job_type, str(root), signature))
+    row = cur.fetchone()
+    return row['id'] if row else None
+
+
 def get_or_enqueue_preview_job(conn, project_id, user_id, payload):
     """Atomically join or enqueue one live preview for an EDL version.
 
@@ -1394,13 +1415,16 @@ def get_or_enqueue_preview_job(conn, project_id, user_id, payload):
         row = cur.fetchone()
         if row:
             return row["id"], False
+        failed = _failed_render_for_request(cur, project_id, 'preview', payload)
+        if failed is not None:
+            return failed, False
         signature = str((payload or {}).get("render_signature") or "")
         if signature and not (payload or {}).get("force"):
             cur.execute("""SELECT id FROM video_jobs
                            WHERE project_id = %s AND type = 'preview'
                              AND state = 'failed'
                              AND payload->>'render_signature' = %s
-                             AND created_at > NOW() - INTERVAL '30 minutes'
+                             AND updated_at > NOW() - INTERVAL '30 minutes'
                              AND COALESCE(
                                  (result->'failure'->>'retryable')::boolean,
                                  false) = false
@@ -1454,13 +1478,16 @@ def get_or_enqueue_preview_check_job(conn, project_id, user_id, payload):
         row = cur.fetchone()
         if row:
             return row["id"], False
+        failed = _failed_render_for_request(cur, project_id, 'preview_check', body)
+        if failed is not None:
+            return failed, False
         signature = str(body.get("render_signature") or "")
         if signature:
             cur.execute("""SELECT id FROM video_jobs
                            WHERE project_id = %s AND type = 'preview_check'
                              AND state = 'failed'
                              AND payload->>'render_signature' = %s
-                             AND created_at > NOW() - INTERVAL '30 minutes'
+                             AND updated_at > NOW() - INTERVAL '30 minutes'
                              AND COALESCE(
                                  (result->'failure'->>'retryable')::boolean,
                                  false) = false

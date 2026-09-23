@@ -75,6 +75,9 @@ MCP_DENIED_MESSAGES = {
         "is not meaningful over MCP. Use the complete tools/list catalog."),
 }
 MCP_DENIED_TOOLS = frozenset(MCP_DENIED_MESSAGES)
+# These names have existing project-scoped implementations at the MCP server.
+# The internal agent implementation must never shadow that public session API.
+MCP_SESSION_OVERRIDES = frozenset({"wait_for_job"})
 
 
 class _Session:
@@ -100,7 +103,7 @@ def catalog():
     """
     tools = [t for t in agent_tools.openai_tools()
              if (t.get("function") or {}).get("name")
-             not in MCP_DENIED_TOOLS]
+             not in MCP_DENIED_TOOLS | MCP_SESSION_OVERRIDES]
     return {
         "tools": tools,
         "system_prompt": system_prompt(),

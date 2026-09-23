@@ -963,14 +963,13 @@ def state_block(ctx, worker_db, denied_tools=(), include_blueprint=True):
         else:
             lines.append(
                 "When the user asks for a change to THE SHORTS — 'all of "
-                "them', 'the shorts', 'short 3', 'add music to them' — use "
-                "edit_shorts(instruction, shorts). That request is NEVER an "
-                "edit of this parent timeline (the original long video); "
-                "only edit here when they explicitly ask about the "
-                "original/full video. Prepare anything the instruction needs "
-                "first (e.g. fetch the track HERE with find_song/fetch_url), "
-                "then name it in the instruction — edit_shorts shares this "
-                "project's music/clips/images into every short.")
+                "them', 'the shorts', 'short 3', 'add music to them' — the "
+                "cards each require the user's Edit action to start their "
+                "own editor. This internal agent cannot switch child "
+                "projects or delegate their editing. Explain that boundary "
+                "immediately, preserving the saved work. Do not reset or "
+                "edit the long parent timeline to substitute for the shorts. "
+                "Only edit the original when the user asks for that video.")
         block += "\n" + "\n".join(lines)
     elif (ctx.project.get("kind") == "shorts"
           and not ctx.project.get("parent_project_id")
@@ -1015,9 +1014,11 @@ def state_block(ctx, worker_db, denied_tools=(), include_blueprint=True):
                     "sibling, then make the changes yourself with the normal "
                     "editor tools; do not delegate to Valmera's agent."
                     if "edit_shorts" in denied_tools else
-                    "Call edit_shorts(instruction, shorts) right from here — "
-                    "it reaches the parent board automatically; never claim "
-                    "the parent must be opened first.")
+                    "Edit this clip with the normal tools. The sibling "
+                    "cards need their own Edit actions; this internal "
+                    "agent cannot switch projects or start those editors. "
+                    "Disclose that boundary immediately and do not repeatedly "
+                    "reset this clip to substitute for the other outputs.")
                 block += (
                     f"\n\nTHIS PROJECT IS A GENERATED SHORT — {card} on "
                     f"the Shorts board of parent project {parent['id']} "
@@ -2308,12 +2309,12 @@ def _auto_render_if_needed(ctx, worker_db, session_id, timings,
         # an encode failure and appended a false warning even though the v4
         # preview was attached. Only the render tool's actual failure prefix
         # means failure.
-        if result.startswith("Preview render FAILED:"):
+        render_status = agent_tools.tool_outcome_mod.from_legacy(result).status
+        if render_status in {"correction_needed", "transient_failure", "unavailable"}:
             fail_note = (fail_note or "") + (
                 "\n\n(Heads up: the preview render failed — "
                 f"{result[:200]})")
-        elif result.startswith(("PREREQUISITE: the complete preview",
-                                "Preview render is taking too long")):
+        elif render_status == "prerequisite" or result.startswith("Preview render is taking too long"):
             fail_note = (fail_note or "") + (
                 "\n\n(The edit is saved. Its preview is still rendering and "
                 "will attach automatically when it finishes.)")

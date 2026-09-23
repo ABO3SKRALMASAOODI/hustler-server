@@ -51,7 +51,7 @@ def test_catalog_is_the_live_registry():
     # The outside model must do the edit itself, never enqueue our agent.
     enabled = [n for n in agent_tools.TOOLS
                if not agent_tools._tool_disabled(n)
-               and n not in mcp_exec.MCP_DENIED_TOOLS]
+               and n not in mcp_exec.MCP_DENIED_TOOLS | mcp_exec.MCP_SESSION_OVERRIDES]
     assert sorted(names) == sorted(enabled)
 
 
@@ -76,7 +76,10 @@ def test_every_tool_has_a_schema_the_client_can_read():
 def test_session_tools_never_shadow_an_editor_tool():
     """A collision would silently replace a real editing tool with the
     backend's own — the model would call cut_range and get project plumbing."""
-    assert not (_session_tool_names() & set(agent_tools.TOOLS))
+    published = {t['function']['name'] for t in mcp_exec.catalog()['tools']}
+    assert not (_session_tool_names() & published)
+    assert (_session_tool_names() & set(agent_tools.TOOLS)) == \
+        mcp_exec.MCP_SESSION_OVERRIDES
 
 
 def test_migration_allows_the_job_type():
@@ -129,10 +132,11 @@ def test_orchestration_tools_are_not_published_or_executable_over_mcp():
                  for t in mcp_exec.catalog()["tools"]}
     assert "edit_shorts" not in published
     assert "make_shorts" in published
-    # The restriction is an MCP boundary, never a removal from Valmera's
-    # internal agent registry.
+    # Keep the old handler for in-flight calls, but do not advertise a
+    # permanently disabled operation to either editor.
     assert "edit_shorts" in agent_tools.TOOLS
-    assert not agent_tools._tool_disabled("edit_shorts")
+    assert agent_tools._tool_disabled("edit_shorts")
+    assert "wait_for_job" not in published  # MCP owns the existing session tool.
 
     class NoDb:
         def run(self, *_args, **_kwargs):
@@ -248,4 +252,6 @@ def test_mcp_project_state_routes_batch_edits_to_direct_child_tools(monkeypatch)
     assert "edit_shorts" not in direct
     assert "open_short" in direct
     assert "make every requested change yourself" in direct
-    assert "edit_shorts" in internal
+    assert "edit_shorts" not in internal
+    assert "open_short" not in internal
+    assert "Edit action" in internal

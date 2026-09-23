@@ -77,6 +77,7 @@ import visual
 import visual_index
 import quality_verifier
 import tool_outcome as tool_outcome_mod
+import tool_retry
 import webrecord
 import version as worker_version
 from captions import CAPTION_DESIGN_VERSION, KARAOKE_HARD_MAX
@@ -607,6 +608,11 @@ def _execution_policy(ctx):
 def _child_payload(ctx, payload=None):
     body = dict(payload or {})
     body.setdefault("execution_policy", _execution_policy(ctx))
+    job = getattr(ctx, 'job', None) or {}
+    if (job.get('type') == 'agent_turn' and job.get('id') is not None
+            and body.get('source') in {'agent_preview', 'agent_preview_check'}):
+        body.setdefault('root_agent_job_id',
+                        (job.get('payload') or {}).get('root_agent_job_id') or job['id'])
     parent = (getattr(ctx, "project", None) or {}).get("parent_project_id")
     if parent and body.get("source") in {"agent_preview", "agent_preview_check"}:
         body["render_group"] = f"{int(parent)}-{int(ctx.project_id) % 2}"
@@ -17255,16 +17261,10 @@ def _run_changed_preview_check(ctx, row, plan, ranges):
                     "retried unchanged. Inspect it with get_edl, correct "
                     "the invalid or too-expensive part in a NEW EDL version, "
                     "then verify that new version once.")
-            if failure.get("retryable"):
-                return (
-                    "TRANSIENT_FAILURE: changed-section proof batch failed "
-                    f"for v{version}: {err}. The EDL remains saved; retry/"
-                    "reconnect this idempotent proof while unrelated work "
-                    "continues.")
             return (
                 "UNAVAILABLE: changed-section proof batch failed "
                 f"for v{version}: {err}. The EDL remains saved, but this "
-                "unchanged proof is not retryable. Do not rewrite the edit "
+                "job has exhausted its safe attempts. Do not rewrite the edit "
                 "or retry blindly; tell the user the exact failure and that "
                 "proof cannot complete from the unchanged inputs.")
     return (f"PREREQUISITE: the {len(pages)}-page changed-section proof batch "
@@ -17338,6 +17338,75 @@ def _render_signature(row, kind, ranges=None, audio_model_review=True, quality="
     return hashlib.sha256(raw).hexdigest()
 
 
+def wait_for_job(ctx, job_id):
+    """Observe one existing project job; never enqueue or replay its work."""
+    if isinstance(job_id, bool) or not isinstance(job_id, int) or job_id <= 0:
+        return "CORRECTION_NEEDED: job_id must be a positive integer from this project's tool receipt."
+    owner = ctx.project.get('user_id') or ctx.job.get('user_id')
+    if not owner:
+        return "UNSAFE: the current project owner could not be verified."
+    if job_id == ctx.job.get('id'):
+        return "CORRECTION_NEEDED: this is the current editing job; wait only for its background work."
+    deadline = time.monotonic() + 45.0
+    while True:
+        if ctx.job.get('total_claims') is not None and not ctx.db.run(
+                dbx.lease_is_current, ctx.job['id'], ctx.job['total_claims']):
+            raise dbx.JobLeaseLost('Agent execution ended while waiting for its background job')
+        job = ctx.db.run(dbx.get_job, job_id)
+        if not job or job.get('project_id') != ctx.project_id or job.get('user_id') != owner:
+            return "UNSAFE: that job is not available in this project's owner scope."
+        state = job.get('state')
+        if state == 'done':
+            result = job.get('result') or {}
+            if result.get('superseded_by'):
+                return (f"Job {job_id} was superseded by EDL v{result['superseded_by']}; "
+                        "it did not produce a preview. Inspect the current EDL and "
+                        "call render_preview(complete=true) for that version.")
+            note = f"Job {job_id} finished ({job.get('type')})."
+            if job.get('type') in {'preview', 'preview_check', 'final'}:
+                # Keep the exact completed draft available for its evidence
+                # review, including when the original enqueue reply was lost.
+                body = job.get('payload') or {}
+                version = result.get('edl_version')
+                if (job.get('type') == 'preview' and result.get('render_asset_id')
+                        and body.get('quality', 'draft') == 'draft'
+                        and version == ctx.latest_edl()['version']):
+                    if not hasattr(ctx, 'spec_preview_jobs'):
+                        ctx.spec_preview_jobs = {}
+                    ctx.spec_preview_jobs[version] = job_id
+                note += (f" EDL v{result.get('edl_version')}, asset "
+                         f"{result.get('render_asset_id')}. Call render_preview(complete=true) "
+                         "to adopt the current saved preview and review its evidence before finishing. "
+                         "It reconnects/reuses existing work; do not reset the timeline.")
+            elif job.get('type') == 'shorts_plan':
+                fresh = ctx.db.run(dbx.get_project, ctx.project_id)
+                if fresh and fresh.get('user_id') == owner:
+                    ctx.project = fresh
+                note += (" The source-story cards are ready; they are not finished edits. "
+                         "Each card's Edit action starts its own editor.")
+            return note
+        if state == 'failed':
+            failure = dict((job.get('result') or {}).get('failure') or {})
+            error = failure.get('error') or job.get('error') or 'unknown job error'
+            if not failure:
+                failure = failure_policy.classify(RuntimeError(error), job.get('type')).payload(error)
+            failure.setdefault('error', error)
+            version = (job.get('payload') or {}).get('edl_version')
+            if job.get('type') in {'preview', 'preview_check', 'final'}:
+                return _failed_preview_message(version, failure)
+            prefix = 'CORRECTION_NEEDED' if failure.get('agent_repairable') else 'UNAVAILABLE'
+            return (f"{prefix}: job {job_id} ended: {str(error)[:400]}. "
+                    "The queue exhausted its safe attempts; do not repeat unchanged.")
+        if state not in {'running', 'queued'}:
+            return f"UNAVAILABLE: job {job_id} is {state}; it was not restarted."
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return (f"PREREQUISITE: job {job_id} is still {state} ({job.get('progress') or 0}%). "
+                    "Continue independent work or call wait_for_job with this same ID. "
+                    "Do not enqueue a duplicate or tell the user to resend the request.")
+        time.sleep(min(1.0, remaining))
+
+
 def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft"):
     if quality not in ("draft", "approval"):
         return "REJECTED: quality must be draft or approval."
@@ -17400,6 +17469,8 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft"):
         job_id, _created = ctx.db.run(
             dbx.get_or_enqueue_preview_job, ctx.project_id,
             ctx.job["user_id"], payload)
+        if quality == "draft":
+            ctx.spec_preview_jobs[version] = job_id
     # Explicit/model tool calls retain the normal render wait. The terminal
     # honesty pass can pass the turn's remaining absolute lifetime here: the
     # render job is still enqueued, but a late encode must not turn a 10-minute
@@ -17705,9 +17776,10 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft"):
         remaining = deadline - time.monotonic()
         if remaining > 0:
             time.sleep(min(1.0, remaining))
-    return (f"Preview render is taking too long — complete preview for EDL v{version} "
+    return (f"PREREQUISITE: complete preview for EDL v{version} "
             f"is still running as job {job_id}. "
-            f"Call wait_for_job(job_id={job_id}), then watch_video(render=false).")
+            f"Call wait_for_job(job_id={job_id}), then render_preview(complete=true) "
+            "to adopt and review the existing result. Do not restart the edit.")
 
 
 def justify_verification_findings(ctx, finding_ids, justification,
@@ -18175,16 +18247,17 @@ def _failed_preview_message(version, failure, repeated=False):
         lead = "The same failed version was NOT re-enqueued" if repeated else \
             "This version will NOT be retried unchanged"
         return (
-            f"Preview render FAILED: v{version}: {err}. {lead}. "
+            f"CORRECTION_NEEDED: preview render FAILED: v{version}: {err}. {lead}. "
             f"Inspect v{version} with get_edl, correct the invalid or too-"
             "expensive part with an editing tool so it creates a NEW EDL "
             f"version (v{version + 1} or later), then render that new version "
             "once. Do not call render_preview on this unchanged version.")
     return (
-        f"Preview render FAILED: v{version}: {err}. The failure is not "
+        f"UNAVAILABLE: preview render FAILED: v{version}: {err}. The failure is not "
         "classified as an EDL defect, so do not rewrite the user's edit or "
-        "blindly re-enqueue it. Tell the user the edit is saved and the "
-        "render service needs another attempt later.")
+        "blindly re-enqueue it. This job has exhausted its safe attempts. "
+        "Tell the user the edit is saved and the "
+        "exact render prerequisite could not be satisfied.")
 
 
 def _frame_context(edl):
@@ -19143,7 +19216,8 @@ def load_tools(ctx, names=None, domains=None):
     domain_tools = set().union(
         *(TOOL_DOMAINS[name] for name in loaded_domains)) \
         if loaded_domains else set()
-    available = sorted((domain_tools | loaded_names) & set(TOOLS))
+    available = sorted(name for name in (domain_tools | loaded_names) & set(TOOLS)
+                       if not _tool_disabled(name))
     return ("Capabilities loaded for the rest of this user request: "
             + ("domains=" + ",".join(sorted(loaded_domains)) + "; "
                if loaded_domains else "")
@@ -21291,12 +21365,14 @@ def make_shorts(ctx, count=None, style_note=None, clips=None):
     the studio's Make shorts button. The heavy work runs as its own
     shorts_plan job so this turn can answer immediately; the board on the
     project shows the clips as they land."""
+    if count is not None and (isinstance(count, bool) or not isinstance(count, int) or count < 1):
+        return "CORRECTION_NEEDED: count must be a positive integer."
     if getattr(ctx, "project", {}).get("parent_project_id"):
         return (f"REJECTED: this project IS a generated short (from the "
                 f"board of project {ctx.project['parent_project_id']}) — do "
                 "not cut shorts from a short. Edit THIS clip with the "
-                "normal tools, or use edit_shorts to change several "
-                "siblings at once (it reaches the parent board from here).")
+                "normal tools. Sibling cards require their own editing "
+                "sessions; do not substitute this clip for all of them.")
     if not ctx.has_main_video:
         return ("REJECTED: shorts are cut from the MAIN video and this "
                 "project has none yet — ask the user to upload their long "
@@ -24188,8 +24264,9 @@ TOOLS = {
         "proof only; this does not create a watchable complete preview. complete=true creates "
         "the complete stored video, even on the first call. quality=approval implies complete=true "
         "and renders from the original at up to 720x1280 portrait using the final composition "
-        "and typography path; draft is the inexpensive 480px preview. Use watch_video(render=false) "
-        "or download_url to retrieve it; wait_for_job reports the render job and durable asset.",
+        "and typography path; draft is the inexpensive 480px preview. The Studio attaches "
+        "the complete preview. wait_for_job observes pending work; call render_preview again "
+        "to review its existing result. MCP clients can retrieve it with watch_video or download_url.",
         {"complete": {"type": "boolean"},
          "quality": {"type": "string", "enum": ["draft", "approval"]}}),
     "justify_verification_findings": (
@@ -24208,6 +24285,11 @@ TOOLS = {
                  "their reply (ends this turn). Use whenever a material "
                  "choice genuinely belongs to the user.",
                  {"question": {"type": "string"}}),
+    "wait_for_job": (wait_for_job, "Wait up to 45 seconds for an existing job in this project. "
+                     "Use the exact job ID from a pending render/scout receipt. Never creates "
+                     "or retries work. After a preview finishes, call render_preview(complete=true) "
+                     "to adopt and verify its existing result.",
+                     {"job_id": {"type": "integer", "minimum": 1}}),
     "make_shorts": (make_shorts, "Scout this LONG podcast/video for multiple "
                     "complete story arcs and create LOCKED child projects. "
                     "Valmera's internal agent may let the background scout "
@@ -24287,6 +24369,7 @@ TOOL_DOMAIN_NAMES = set(AGENT_TOOL_DOMAINS)
 AGENT_SCHEMA_HIDDEN = {"expand_toolset"}  # legacy MCP alias for load_tools
 TOOL_CORE = {
     "load_tools",
+    "wait_for_job",
     "get_edl", "open_visual_page", "look_at",
     "render_preview", "read_skill", "ask_user",
     "justify_verification_findings",
@@ -24543,6 +24626,7 @@ REQUIRED_ARGS = {
     "fetch_url": ["url"],
     "ask_user": ["question"],
     "read_skill": ["name"],
+    "wait_for_job": ["job_id"],
     "make_shorts": [],
     "edit_shorts": ["instruction"],
 }
@@ -24597,6 +24681,8 @@ def _tool_disabled(name, model=None):
     """Tools whose backing service is not configured are hidden entirely —
     the model must never see (or advertise) a capability that would only
     return 'unavailable'."""
+    if name == "edit_shorts":
+        return True
     if name == "review_audio":
         return not llm.audio_review_available()
     if name == "fetch_url":
@@ -24905,12 +24991,19 @@ def _footprint_satisfied(edl, footprint):
 def execute(ctx, name, args):
     """Dispatch one tool call. Returns a string for the model (AskUser
     propagates)."""
+    if name == 'edit_shorts':
+        outcome = tool_outcome_mod.ToolOutcome(
+            status='unavailable',
+            message="Batch agent delegation is disabled. Each short must be started with its own Edit button; preserve the parent timeline.")
+        ctx.last_structured_tool_outcome = outcome.to_dict()
+        return outcome.render_text()
     entry = TOOLS.get(name)
     if not entry:
         _count_tool_outcome(ctx, "tool_refused")
         outcome = tool_outcome_mod.ToolOutcome(
             status="unavailable",
-            message=(f"Unknown tool '{name}'. Available: " + ", ".join(TOOLS)),
+            message=(f"Unknown tool '{name}'. Available: " +
+                     ", ".join(t for t in TOOLS if not _tool_disabled(t))),
             safe_fallback="call load_tools with an advertised capability name")
         ctx.last_structured_tool_outcome = outcome.to_dict()
         return outcome.render_text()
@@ -24921,7 +25014,7 @@ def execute(ctx, name, args):
     if not entry:
         _count_tool_outcome(ctx, "tool_refused")
         return (f"Unknown tool '{name}'. Available: "
-                + ", ".join(TOOLS))
+                + ", ".join(t for t in TOOLS if not _tool_disabled(t)))
     # Exactly replaying an already-successful additive write against the EDL
     # it produced is never a creative alternative; it is how duplicate title
     # layers, SFX and B-roll entered real edits. Idempotency is state-based,
@@ -24985,33 +25078,23 @@ def execute(ctx, name, args):
         ctx._executing_tool = previous_executing_tool
         return outcome.render_text()
     except Exception as e:
-        # Read/orchestration calls are state-free and idempotent. One
-        # immediate retry absorbs a dead pooled connection/provider blip; an
-        # EDL write is never blindly repeated after an exception because its
-        # commit may have landed before the response was lost.
-        if name not in WRITE_TOOLS:
+        # Only proven reads may retry immediately. Non-EDL tools can still
+        # enqueue work, buy provider calls or register assets before a lost reply.
+        if tool_retry.may_retry(name, e):
             try:
                 out = fn(ctx, **args)
-            except AskUser:
+            except (AskUser, dbx.JobLeaseLost):
                 ctx._executing_tool = previous_executing_tool
                 raise
             except Exception as retry_exc:
                 _count_tool_outcome(ctx, "tool_failed")
-                outcome = tool_outcome_mod.ToolOutcome(
-                    status="transient_failure",
-                    message=f"Tool {name} failed after an idempotent retry: {str(retry_exc)[:300]}.",
-                    retryable=True, idempotent=True,
-                    safe_fallback="continue unrelated work and retry or use the advertised provider fallback")
+                outcome = tool_retry.outcome(name, retry_exc, retried=True)
                 ctx.last_structured_tool_outcome = outcome.to_dict()
                 ctx._executing_tool = previous_executing_tool
                 return outcome.render_text()
         else:
             _count_tool_outcome(ctx, "tool_failed")
-            outcome = tool_outcome_mod.ToolOutcome(
-                status="transient_failure",
-                message=f"Tool {name} errored: {str(e)[:300]}.",
-                retryable=True, idempotent=False,
-                safe_fallback="read the current EDL/state before deciding whether to retry")
+            outcome = tool_retry.outcome(name, e)
             ctx.last_structured_tool_outcome = outcome.to_dict()
             ctx._executing_tool = previous_executing_tool
             return outcome.render_text()
@@ -25042,7 +25125,7 @@ def execute(ctx, name, args):
     if changed and getattr(ctx, "last_change", None):
         ranges = list(ctx.last_change.get("out_ranges") or [])
     outcome = tool_outcome_mod.from_legacy(
-        out, state_changed=changed, idempotent=name not in WRITE_TOOLS,
+        out, state_changed=changed, idempotent=name in tool_retry.SAFE_READS,
         affected_ranges=ranges)
     ctx.last_structured_tool_outcome = outcome.to_dict()
     ctx._executing_tool = previous_executing_tool
