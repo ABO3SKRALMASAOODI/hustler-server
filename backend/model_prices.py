@@ -66,6 +66,12 @@ separate and the flag must be True.
 # Keep every number sourced from the provider's own price page or a real
 # invoice. A guessed price is a silent, permanent billing error.
 MODEL_PRICES = {
+    # https://developers.openai.com/api/docs/models/gpt-6-luna (2026-09-23).
+    # Cache writes replace ordinary input pricing; they are not additive.
+    "gpt-6-luna": {
+        "in": 0.10, "cached_in": 0.01, "cache_write_in": 0.125, "out": 0.50,
+        "reasoning_separate": False,
+    },
     # OpenAI GPT-5.6 Luna -- the default agent AND vision model since Jul 31
     # 2026 (round 67). List prices from OpenAI's own model page (developers.
     # openai.com/api/docs/models/gpt-5.6-luna, checked Jul 31 2026): $0.20 in,
@@ -175,6 +181,23 @@ def base_usage_cost(model, tokens_in, tokens_out, cached=0, reasoning=0,
             + (tout-aout+reason)*p["out"] + aout*p["audio_out"]) / 1e6
 
 
+def luna6_usage_cost(tokens_in, tokens_out, cached=0, cache_write=0,
+                     service_tier="default"):
+    """GPT-6 Luna metering from reported tokens, including tier and context."""
+    tin, tout = max(tokens_in or 0, 0), max(tokens_out or 0, 0)
+    cached = min(max(cached or 0, 0), tin)
+    written = min(max(cache_write or 0, 0), tin - cached)
+    p = MODEL_PRICES['gpt-6-luna']
+    input_cost = ((tin - cached - written) * p['in']
+                  + cached * p['cached_in'] + written * p['cache_write_in'])
+    output_cost = tout * p['out']  # includes reasoning tokens
+    if tin > 272000:
+        input_cost *= 2
+        output_cost *= 1.5
+    tier = {'priority': 2, 'fast': 2, 'flex': .5, 'batch': .5}.get(service_tier, 1)
+    return (input_cost + output_cost) * tier / 1e6
+
+
 def usd_to_credits(usd, ndigits=2):
     """Metered provider spend in dollars -> credits. The one conversion, used by the
     charge and by every projection shown to a user, so a quote and an invoice
@@ -277,9 +300,10 @@ def row_cost_sql(fallback, model_col="model", response_col="response",
              p_audio_in=_case("audio_in", model_col, fallback),
              p_audio_out=_case("audio_out", model_col, fallback))
 
-    # Prefer the provider's actual invoice amount, including cache/tier/context
-    # discounts. Historical rows without it retain deterministic token pricing.
-    return (f"(CASE WHEN left(lower(COALESCE({model_col}, '')), 5) = 'grok-' "
+    # Prefer the recorded per-request cost, including cache/tier/context
+    # rates (provider invoice for xAI, reported tokens at official Luna rates). Historical rows without it retain deterministic token pricing.
+    return (f"(CASE WHEN (left(lower(COALESCE({model_col}, '')), 5) = 'grok-' "
+            f"OR lower(COALESCE({model_col}, '')) = 'gpt-6-luna') "
             f"AND jsonb_typeof({response_col}->'provider_cost_usd') = 'number' "
             f"THEN CASE WHEN ({response_col}->>'provider_cost_usd')::float >= 0 "
             f"THEN ({response_col}->>'provider_cost_usd')::float ELSE {estimated} END "

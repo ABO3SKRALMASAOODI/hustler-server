@@ -21302,6 +21302,13 @@ def make_shorts(ctx, count=None, style_note=None, clips=None):
                 "project has none yet — ask the user to upload their long "
                 "video first.")
     if ctx.duration < 60.0:
+        if count is not None and int(count) > 1:
+            return ("UNAVAILABLE: make_shorts extracts ranges from the main "
+                    "source only; it cannot create multiple separate edits "
+                    "from this short source and the uploaded insert library. "
+                    "Do not replace the requested video count with one edit "
+                    "or repeatedly reset this timeline. Preserve saved work "
+                    "and clearly report the undelivered videos.")
         return (f"DIRECT SHORT: this {ctx.duration:.0f}s source already fits "
                 "one short, so do not start the multi-clip extractor. "
                 "Continue THIS turn and edit it directly from the user's "
@@ -21421,7 +21428,7 @@ def edit_shorts(ctx, instruction, shorts=None):
     # press on that card may boot its fresh in-house editor. Keeping the old
     # fan-out implementation below makes rolling back old queued calls safe,
     # but no new turn is allowed to cross that consent boundary.
-    return ("LOCKED CARD BOUNDARY: batch agent delegation is disabled. "
+    return ("PREREQUISITE: LOCKED CARD BOUNDARY: batch agent delegation is disabled. "
             "Each reel must be started with its own Edit button in the "
             "podcast chat. Do not edit the long parent timeline instead.")
 

@@ -150,7 +150,10 @@ async function matchesCompletedJob(callId: string, job: ExecutorJob): Promise<bo
   // Earlier preview calls did not include the project routing key. Their
   // deterministic identity still proves the exact completed claim.
   return callId === `cf-${prefix}-${digest}`
-    || callId === `cf-${job.type.slice(0, 18)}-${digest}`;
+    || callId === `cf-${job.type.slice(0, 18)}-${digest}`
+    || (["preview", "preview_check", "filmstrip"].includes(job.type)
+      && [1, 2].some((slot) => callId ===
+        `cf-alt${slot}-${job.type}-p${job.project_id}-${digest}`));
 }
 
 abstract class ValmeraContainer extends Container<Env> {

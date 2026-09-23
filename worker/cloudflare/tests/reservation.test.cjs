@@ -104,6 +104,28 @@ test('ordinary terminal storage also releases its reservation in the same transa
   assert.equal(values.get(`call:${callId}`).status, 'done');
 });
 
+test('alternate media identities acknowledge only their exact claim', async () => {
+  for (const type of ['preview', 'preview_check', 'filmstrip']) {
+    const mediaJob = { ...job, type };
+    const hash = createHash('sha256').update(`${type}:${job.id}:${job.total_claims}`)
+      .digest('hex').slice(0, 20);
+    const ids = [1, 2].map(slot => `cf-alt${slot}-${type}-p${job.project_id}-${hash}`);
+    for (const id of ids) {
+      const { adapter, values } = fixture();
+      values.set(`call:${id}`, { status: 'unknown', jobType: type, activeUntil: Date.now()+10000 });
+      values.set('active', { callId: id, expiresAt: Date.now()+10000 });
+      const send = j => adapter.fetch(new Request(`https://container.internal/complete/${id}`, {
+        method: 'POST', body: JSON.stringify({ job: j, envelope }),
+      }));
+      assert.equal((await send({ ...mediaJob, total_claims: 2 })).status, 409);
+      assert.equal(values.get('active').callId, id);
+      assert.equal((await send({ ...mediaJob, project_id: job.project_id + 1 })).status, 409);
+      assert.equal((await send(mediaJob)).status, 200);
+      assert.equal(values.has('active'), false);
+    }
+  }
+});
+
 test('completion API is authenticated before resolving any container', async () => {
   const response = await exportsObject.default.fetch(new Request(
     `https://executor.example/calls/mcp/${callId}/complete`, {

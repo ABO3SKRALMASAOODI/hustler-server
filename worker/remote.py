@@ -1092,6 +1092,10 @@ def _cloudflare_call_id(job):
         raw = f"{job.get('type')}:{job.get('id')}:{job.get('total_claims')}"
     digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
     job_type = str(job.get("type") or "job")
+    admission_slot = job.get('_cloudflare_admission_slot', 0)
+    if admission_slot in (1, 2) and job_type in {
+            'preview', 'preview_check', 'filmstrip'}:
+        return f"cf-alt{admission_slot}-{job_type}-p{int(job['project_id'])}-{digest}"
     group = str((job.get("payload") or {}).get("render_group") or "")
     if job_type in {"final", "preview", "preview_check"} and re.fullmatch(r"[0-9]+-[01]", group):
         return f"cf-render-g{group}-{digest}"
@@ -1491,6 +1495,15 @@ def _run_cloudflare_with_capacity_wait(job):
             return _run_cloudflare(job)
         except (CloudflareCapacityBusy, CloudflareRolloutPending) as exc:
             rollout = isinstance(exc, CloudflareRolloutPending)
+            # Only an explicit pre-launch busy refusal permits a different
+            # slot. Accepted/ambiguous calls keep their identity and lease.
+            # Preserve project affinity on the first try, but don't make one
+            # occupied shard strand a short preview while the pool is idle.
+            slot = job.get('_cloudflare_admission_slot', 0)
+            if (not rollout and queued and slot < 2
+                    and job.get('type') in {'preview', 'preview_check', 'filmstrip'}):
+                job['_cloudflare_admission_slot'] = slot + 1
+                continue
             remaining = (rollout_deadline if rollout else deadline) - time.monotonic()
             if remaining <= 0:
                 raise

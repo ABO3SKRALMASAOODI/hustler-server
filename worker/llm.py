@@ -68,7 +68,18 @@ def _note_error(e):
 
 
 def provider_cost_usd(usage, model):
-    """Authoritative xAI per-request bill (one USD = 10^10 ticks)."""
+    """xAI invoice ticks, or Luna 6 cost from reported token categories."""
+    if model == 'gpt-6-luna' and usage is not None:
+        import model_prices
+        get = lambda obj, key, default=None: (obj.get(key, default)
+            if isinstance(obj, dict) else getattr(obj, key, default))
+        details = (get(usage, 'prompt_tokens_details')
+                   or get(usage, 'input_tokens_details') or {})
+        return model_prices.luna6_usage_cost(
+            get(usage, 'prompt_tokens', get(usage, 'input_tokens', 0)),
+            get(usage, 'completion_tokens', get(usage, 'output_tokens', 0)),
+            get(details, 'cached_tokens', 0), get(details, 'cache_write_tokens', 0),
+            get(usage, 'service_tier') or config.OPENAI_SERVICE_TIER or 'default')
     if not str(model or "").startswith("grok-") or str(model).startswith("grok-imagine-"):
         return None
     raw = usage.get("cost_in_usd_ticks") if isinstance(usage, dict) else getattr(usage, "cost_in_usd_ticks", None)
@@ -93,6 +104,13 @@ def record(purpose, request, response, usage=None):
         actual = provider_cost_usd(usage, (request or {}).get("model"))
         if actual is not None and isinstance(response, dict):
             response = dict(response, provider_cost_usd=actual)
+            if (request or {}).get('model') == 'gpt-6-luna':
+                details = getattr(usage, 'prompt_tokens_details', {}) or {}
+                response['cache_write_in'] = (details.get('cache_write_tokens', 0)
+                    if isinstance(details, dict) else getattr(details, 'cache_write_tokens', 0))
+                response['service_tier'] = (getattr(usage, 'service_tier', None)
+                    or config.OPENAI_SERVICE_TIER or 'default')
+                response['cost_basis'] = 'reported_tokens_official_rates'
         fn(purpose, request, response, usage)
     except Exception as e:
         print(f"[llm] recorder failed: {e}", flush=True)
@@ -856,7 +874,8 @@ def _seed_known_dialects():
     reasoning family — xAI/DeepSeek keep their own measured dialects."""
     if "api.openai.com" not in (config.OPENAI_BASE_URL or ""):
         return
-    for m in {config.AGENT_MODEL, config.FIRST_TURN_AGENT_MODEL}:
+    for m in {config.AGENT_MODEL, config.FIRST_TURN_AGENT_MODEL,
+              config.EDITOR_MODEL, config.VISION_MODEL}:
         if m and re.match(r"gpt-[5-9]", m):
             _use_max_completion_tokens.add(m)
             _no_temperature.add(m)
@@ -956,10 +975,8 @@ class _RespUsage:
         # prompt_tokens_details.cached_tokens, so present it under that name
         # rather than the Responses spelling, or every cached turn would be
         # billed at the full input price.
-        self.prompt_tokens_details = {
-            "cached_tokens":
-                (raw.get("input_tokens_details") or {}).get("cached_tokens")
-                or 0}
+        self.prompt_tokens_details = dict(raw.get("input_tokens_details") or {})
+        self.service_tier = raw.get('service_tier')
 
 
 class _RespCompletion:
@@ -1248,7 +1265,10 @@ def responses_create(base_url, api_key, model, messages, tools,
                                "Content-Type": "application/json"})
     if r.status_code >= 400:
         raise RuntimeError(f"responses HTTP {r.status_code}: {r.text[:300]}")
-    return _from_responses(r.json())
+    payload = r.json()
+    result = _from_responses(payload)
+    result.usage.service_tier = payload.get('service_tier')
+    return result
 
 
 def adapt_completion_kwargs(exc, model, kw):
