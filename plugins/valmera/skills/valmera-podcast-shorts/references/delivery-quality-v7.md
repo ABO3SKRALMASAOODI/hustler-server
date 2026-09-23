@@ -193,6 +193,13 @@ frames, plus the final decoded frame. Fractional cut durations can expose one
 or two raw-source frames after a picture overlay ends; a duration total or
 preview pass does not prove that the actual final has a clean transition.
 
+Inspect every authored B-roll card boundary in the actual final at native size:
+one frame before, at, and after each boundary, and every intervening frame in
+small gaps between adjacent cards. Valid timings can still expose distracting
+one-to-four-frame interview flashes. Close accidental gaps by extending the
+preceding card to the next card's onset, preserving the next card's word cue,
+audio, and keeps. Render and inspect the repaired final again before approving it.
+
 If the downloaded final fails, keep it and its native download receipt. A
 coordinator may reopen a `ready` or `exporting` short with:
 
