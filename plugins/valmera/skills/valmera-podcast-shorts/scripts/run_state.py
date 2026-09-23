@@ -256,8 +256,14 @@ def require_quality_pass(report: dict) -> None:
 
 def quality_review(path: Path, final_digest: str | None = None) -> dict:
     review = read_object(path, "quality review")
-    for key in ("source_detail", "typography", "stable_word_size",
-                "active_word_color", "reference_comparison"):
+    version = review.get("version")
+    if version is not None and version != "delivery-review-v2":
+        raise StateError("unknown quality review version")
+    keys = (("source_detail", "typography", "caption_timing", "caption_motion",
+             "style_fit") if version else
+            ("source_detail", "typography", "stable_word_size",
+             "active_word_color", "reference_comparison"))
+    for key in keys:
         if review.get(key) != "pass":
             raise StateError(f"delivery quality review requires {key} pass")
     if not isinstance(review.get("observations"), str) or not review["observations"].strip():
@@ -270,6 +276,40 @@ def quality_review(path: Path, final_digest: str | None = None) -> dict:
     if final_digest is not None and review.get("final_sha256") != final_digest:
         raise StateError("quality review must bind the exact final checksum")
     return {"file": str(path), "sha256": sha256(path)}
+
+
+def validate_caption_treatment(captions: dict, requirements: dict | None = None) -> None:
+    """Check reviewed execution without prescribing a permanent visual recipe."""
+    if captions.get("version") != "caption-treatment-v2":
+        raise StateError("unknown caption treatment version")
+    highlighted = captions.get("spoken_word_highlighting")
+    if not isinstance(highlighted, bool):
+        raise StateError("spoken_word_highlighting must be a boolean")
+    words = captions.get("max_words_visible")
+    if isinstance(words, bool) or not isinstance(words, int) or words < 1:
+        raise StateError("max_words_visible must be a positive integer")
+    for key in ("style_intent", "animation", "emphasis"):
+        if not isinstance(captions.get(key), str) or not captions[key].strip():
+            raise StateError(f"caption treatment needs explicit {key}")
+    for key in ("rendered_readability_check", "rendered_timing_check",
+                "rendered_motion_check"):
+        if captions.get(key) != "pass":
+            raise StateError(f"caption treatment requires {key} pass")
+    if highlighted:
+        if not isinstance(captions.get("active_word_color"), str) or \
+                not HEX_COLOR_RE.fullmatch(captions["active_word_color"]):
+            raise StateError("candidate active_word_color must be #RRGGBB")
+        if captions.get("rendered_active_word_check") != "pass":
+            raise StateError("candidate must pass a rendered active-word color check")
+    if requirements is not None and not isinstance(requirements, dict):
+        raise StateError("assignment captions must be an object")
+    if requirements:
+        requested = requirements.get("word_timed_active_word_color")
+        if isinstance(requested, bool) and highlighted != requested:
+            raise StateError("caption highlighting conflicts with the assignment")
+        limit = requirements.get("max_words_visible")
+        if isinstance(limit, int) and not isinstance(limit, bool) and words > limit:
+            raise StateError("caption word count exceeds the assignment limit")
 
 
 def cmd_quality_check(args: argparse.Namespace) -> dict:
@@ -292,19 +332,19 @@ def validate_candidate_contract(payload: dict, style_lane: str) -> None:
     captions = payload.get("caption_treatment")
     if not isinstance(captions, dict):
         raise StateError("candidate caption_treatment must be an object")
-    if captions.get("spoken_word_highlighting") is not True:
-        raise StateError("candidate captions must highlight the spoken word")
-    max_words = captions.get("max_words_visible")
-    if isinstance(max_words, bool) or not isinstance(max_words, int) \
-            or not 1 <= max_words <= 4:
-        raise StateError(
-            "candidate captions may show at most four words at once")
-    if not isinstance(captions.get("active_word_color"), str) \
-            or not HEX_COLOR_RE.fullmatch(captions["active_word_color"]):
-        raise StateError("candidate active_word_color must be #RRGGBB")
-    if captions.get("rendered_active_word_check") != "pass":
-        raise StateError(
-            "candidate must pass a rendered active-word color check")
+    if captions.get("version") is not None:
+        validate_caption_treatment(captions)
+    else:
+        # Preserve the original rules for historical, unversioned records.
+        if captions.get("spoken_word_highlighting") is not True:
+            raise StateError("candidate captions must highlight the spoken word")
+        max_words = captions.get("max_words_visible")
+        if isinstance(max_words, bool) or not isinstance(max_words, int) or not 1 <= max_words <= 4:
+            raise StateError("candidate captions may show at most four words at once")
+        if not isinstance(captions.get("active_word_color"), str) or not HEX_COLOR_RE.fullmatch(captions["active_word_color"]):
+            raise StateError("candidate active_word_color must be #RRGGBB")
+        if captions.get("rendered_active_word_check") != "pass":
+            raise StateError("candidate must pass a rendered active-word color check")
 
     shots = payload.get("broll_shots")
     if not isinstance(shots, list):
@@ -562,6 +602,10 @@ def cmd_candidate(args: argparse.Namespace) -> dict:
             if payload.get(key) != value:
                 raise StateError(f"candidate bundle {key} does not match")
         validate_candidate_contract(payload, item["style_lane"])
+        captions = payload["caption_treatment"]
+        if captions.get("version") == "caption-treatment-v2":
+            assignment = read_object(Path(item["assignment"]), "assignment")
+            validate_caption_treatment(captions, assignment.get("captions"))
         declared_path = Path(payload.get("preview_path") or "").expanduser()
         if declared_path.resolve() != preview:
             raise StateError("candidate bundle preview_path does not match")
@@ -583,9 +627,9 @@ def cmd_candidate(args: argparse.Namespace) -> dict:
             measured = measure_quality(policy, evidence)
             require_quality_pass(measured)
             captions = payload["caption_treatment"]
-            if captions.get("animation") != "none" or \
+            if captions.get("version") is None and (captions.get("animation") != "none" or \
                     captions.get("emphasis") != "none" or \
-                    captions.get("rendered_stable_size_check") != "pass":
+                    captions.get("rendered_stable_size_check") != "pass"):
                 raise StateError("quality captions require stable size and explicit no animation/emphasis")
             quality = {"evidence_file": str(evidence_file),
                        "evidence_sha256": sha256(evidence_file),
@@ -595,6 +639,9 @@ def cmd_candidate(args: argparse.Namespace) -> dict:
             "sha256": digest, "edl_version": args.edl_version,
             "recorded_at": now(),
         }
+        if captions.get("version") == "caption-treatment-v2":
+            item["candidate"]["caption_contract_version"] = captions["version"]
+            item["candidate"]["spoken_word_highlighting"] = captions["spoken_word_highlighting"]
         if quality:
             item["candidate"]["quality"] = quality
         item["status"] = "candidate"
@@ -627,7 +674,11 @@ def cmd_qc(args: argparse.Namespace) -> dict:
         if args.verdict == "ready" and args.score < 90:
             raise StateError("ready requires a QC score of at least 90")
         if args.verdict == "ready":
-            if payload.get("active_word_caption_check") != "pass":
+            flexible = item["candidate"].get("caption_contract_version") == "caption-treatment-v2"
+            if flexible and payload.get("caption_quality_check") != "pass":
+                raise StateError("ready requires a caption quality QC pass")
+            if (not flexible or item["candidate"].get("spoken_word_highlighting")) and \
+                    payload.get("active_word_caption_check") != "pass":
                 raise StateError(
                     "ready requires an active-word caption QC pass")
             if payload.get("within_short_broll_uniqueness_check") != "pass":

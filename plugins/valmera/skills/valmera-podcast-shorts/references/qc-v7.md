@@ -3,9 +3,9 @@
 ## Acceptance order
 
 Apply `delivery-quality-v7.md` independently: source/crop detail, output
-resolution, stable glyph size with active-word color, and full-size reference
-comparison are quality gates. Save its `delivery_quality_review`; a score
-cannot waive a failed gate, and a tiny contact sheet cannot establish detail.
+resolution, caption readability/timing/motion, and fit to the current brief
+are quality gates. The style may vary; execution quality must remain high.
+Save its `delivery_quality_review`; a score cannot waive a failed gate, and a tiny contact sheet cannot establish detail.
 
 Review in this order. A later strength never cancels an earlier blocker.
 
@@ -118,12 +118,14 @@ Use the same current preview for every check. Inspect:
 - the last two seconds at 0.25-second spacing;
 - the complete speech/caption stream once.
 
-During that caption pass, verify several actual word transitions—not just
-static frames. The word currently audible must visibly take the accent color,
-normally inside a three-to-four-word group, and no group may show more than
-four words. Check the opening, densest phrase, shot/speaker changes, and final
-caption. A static accent keyword, highlight lag, unreadable accent, or a style
-setting that does not produce visible active-word coloring is a blocker.
+During that caption pass, inspect rendered transitions as well as still frames.
+Check reading comfort, accurate timing, coherent typography, deliberate motion,
+and safe composition in the opening, densest phrase, shot/speaker changes, and
+final caption. Test the selected treatment rather than enforcing a universal
+font, palette, word count, or animation ban. Where spoken-word highlighting is
+requested, its color must visibly follow the actual word; highlight lag or an
+unreadable accent needs repair. Record `caption_quality_check` and, when used,
+`active_word_caption_check` in the coordinator report.
 
 If a defect is suspected, inspect that local window at frame-level density.
 Do not create frame-level evidence for the whole render by default. Contact
@@ -169,9 +171,9 @@ meaning, absent payoff, irrelevant or misleading B-roll, unwanted third-party wa
 text, wrong-speaker leaks, unreadable or incorrect captions, face/caption
 collisions, accidental black/frozen/silent sections, stale renders, or a final
 tail without intentional content.
-Repeated B-roll within one short, missing active-word caption coloring, more
-than four simultaneously visible caption words, or Style 2 exceeding its
-15-second montage or 25-second editorial limits are also blockers.
+Repeated B-roll within one short, failure to implement an explicit caption
+requirement, or Style 2 exceeding its 15-second montage or 25-second editorial
+limits are also blockers. A different well-executed caption style is not a defect.
 For the current brief, required Valmera branding is exempt from those asset
 and tail exclusions; missing, obscured, or truncated Valmera branding still
 needs repair. An authorized native placement adjustment is not brand removal.
