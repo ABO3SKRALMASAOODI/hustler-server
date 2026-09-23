@@ -60,9 +60,9 @@ longer speaker holds must not be mistaken for slow B-roll or replaced by cutaway
 
 ## Editorial choices
 
-Apply `delivery-quality-v7.md` to source/crop detail, stable active-word
-typography, and the candidate's `quality_evidence`. Its concrete approved
-relationship overrides generic large/popping/stacked preset suggestions.
+Apply `delivery-quality-v7.md` to source/crop detail, premium caption execution,
+and the candidate's `quality_evidence`. Select the visual treatment from this
+brief and story; a past repair or tool preset does not dictate future styling.
 
 - Follow the assigned opening structure. Add visual material when it supports
   evidence, memory, contrast, location, stakes, consequence, or the requested
@@ -83,12 +83,11 @@ relationship overrides generic large/popping/stacked preset suggestions.
   clear of captions. Check all speaker changes and cut boundaries for a
   one-frame leak of the wrong person.
 - Captions must follow the spoken words exactly enough to preserve meaning.
-  For this brief, use word-timed active-word coloring and normally group three
-  or four visible words, with a hard maximum of four. Shorter groups are valid
-  at natural boundaries or for legibility. Verify that the currently spoken
-  word—not merely a preselected keyword—changes to the accent color in the
-  rendered output. Use an active-word-capable preset or `dynamic:true` with a
-  deliberate `highlight_color`; configuration alone is not proof.
+  Choose phrase length, line breaks, font, color, placement, and motion for
+  legibility and the selected treatment. When the brief requests spoken-word
+  highlighting, verify the active word against real timings in the render.
+  Record any brief-specific limits in the assignment. Explicitly choose
+  animation/emphasis and inspect their effect; configuration alone is not proof.
 - Avoid duplicate words, broken punctuation,
   unreadable single-frame captions, face collisions, and inconsistent casing.
 - Inventory every external B-roll still or video shot by stable asset identity,
@@ -150,6 +149,13 @@ video. If one region looks suspicious, inspect that region densely.
   "editorial_duration_s": 23.0,
   "story_beats": {"setup": [0, 8], "development": [8, 17], "payoff": [17, 23]},
   "caption_treatment": {
+    "version": "caption-treatment-v2",
+    "style_intent": "Describe the treatment selected for this story and why it fits.",
+    "animation": "none",
+    "emphasis": "none",
+    "rendered_readability_check": "pass",
+    "rendered_timing_check": "pass",
+    "rendered_motion_check": "pass",
     "spoken_word_highlighting": true,
     "active_word_color": "#FFD54A",
     "max_words_visible": 4,
@@ -166,6 +172,9 @@ video. If one region looks suspicious, inspect that region densely.
   "outstanding_job_ids": []
 }
 ```
+
+The caption values above illustrate the evidence format, not a required style.
+Replace them with the chosen treatment and observed checks.
 
 Use absolute local paths. The coordinator rejects a missing file, mismatched
 checksum, stale EDL version, or outstanding mutation/render job.

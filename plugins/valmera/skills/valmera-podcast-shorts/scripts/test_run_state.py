@@ -510,7 +510,8 @@ def test_oversized_crop_and_changed_source_are_rejected(delivery_evidence):
         run_state.measure_quality(policy, evidence)
 
 
-def test_quality_policy_gates_batch_and_actual_export(tmp_path, delivery_evidence):
+@pytest.mark.parametrize("treatment", ["legacy", "animated", "plain"])
+def test_quality_policy_gates_batch_and_actual_export(tmp_path, delivery_evidence, treatment):
     policy, evidence, probes = delivery_evidence
     run_dir = tmp_path / "quality-run"
     policy_file = tmp_path / "policy.json"
@@ -519,7 +520,8 @@ def test_quality_policy_gates_batch_and_actual_export(tmp_path, delivery_evidenc
          "--source", "topic", "--quality-policy", str(policy_file))
     for index in (1, 2):
         assignment = run_dir / "assignments" / f"s{index}.json"
-        write_json(assignment, {"style_lane": "headline-conversation"})
+        write_json(assignment, {"style_lane": "headline-conversation",
+                               "captions": {"word_timed_active_word_color": treatment != "plain"}})
         call("add-short", "--run-dir", str(run_dir), "--short-id", f"s{index}",
              "--project-id", str(index), "--title", "Story", "--assignment", str(assignment))
     call("claim", "--run-dir", str(run_dir), "--short-id", "s1", "--worker", "e1")
@@ -539,10 +541,16 @@ def test_quality_policy_gates_batch_and_actual_export(tmp_path, delivery_evidenc
     candidate_args = ["candidate", "--run-dir", str(run_dir), "--short-id", "s1",
                       "--worker", "e1", "--bundle", str(bundle), "--preview", str(preview),
                       "--edl-version", "7"]
+    if treatment != "legacy":
+        payload["caption_treatment"] = flexible_captions(treatment)
+        payload["caption_treatment"].pop("rendered_motion_check")
     write_json(bundle, payload)
-    assert run_state.main(candidate_args) == 2  # Missing stable-size evidence.
-    payload["caption_treatment"].update(animation="none", emphasis="none",
-                                         rendered_stable_size_check="pass")
+    assert run_state.main(candidate_args) == 2  # Missing rendered execution evidence.
+    if treatment == "legacy":
+        payload["caption_treatment"].update(animation="none", emphasis="none",
+                                             rendered_stable_size_check="pass")
+    else:
+        payload["caption_treatment"]["rendered_motion_check"] = "pass"
     write_json(bundle, payload)
     call(*candidate_args)
     review_file = run_dir / "candidates" / "review.json"
@@ -552,6 +560,12 @@ def test_quality_policy_gates_batch_and_actual_export(tmp_path, delivery_evidenc
         "observations": "Measured full-size comparison fixture.",
         "evidence_files": [str(preview)],
     }
+    if treatment != "legacy":
+        review = {"version": "delivery-review-v2", "source_detail": "pass",
+                  "typography": "pass", "caption_timing": "pass",
+                  "caption_motion": "pass", "style_fit": "pass",
+                  "observations": "Legible phrases and intended motion in native fixture frames.",
+                  "evidence_files": [str(preview)]}
     write_json(review_file, review)
     qc = run_dir / "candidates" / "qc.json"
     qc_payload = {
@@ -566,6 +580,12 @@ def test_quality_policy_gates_batch_and_actual_export(tmp_path, delivery_evidenc
     assert run_state.main(qc_args) == 2  # Perfect score cannot waive review.
     qc_payload["delivery_quality_review"] = str(review_file)
     write_json(qc, qc_payload)
+    if treatment != "legacy":
+        assert run_state.main(qc_args) == 2  # A color-only check cannot waive caption QC.
+        qc_payload["caption_quality_check"] = "pass"
+        if treatment == "plain":
+            qc_payload.pop("active_word_caption_check")
+        write_json(qc, qc_payload)
     call(*qc_args)
     assert run_state.main(claim_second) == 2  # Preview approval is not a final pilot.
     final = run_dir / "exports" / "headline-conversation__s1.mp4"
@@ -596,3 +616,66 @@ def test_quality_policy_cannot_change_silently(tmp_path, delivery_evidence):
     write_json(policy_file, policy)
     with pytest.raises(run_state.StateError, match="changed after initialization"):
         run_state.run_quality_policy(record)
+
+
+def flexible_captions(treatment="animated"):
+    highlighted = treatment == "animated"
+    result = {
+        "version": "caption-treatment-v2",
+        "style_intent": "Energetic phrase entrances with readable emphasis." if highlighted else
+                        "Quiet, legible sentence captions for a reflective interview.",
+        "animation": "fade-up" if highlighted else "none",
+        "emphasis": "color" if highlighted else "none",
+        "max_words_visible": 6 if highlighted else 8,
+        "spoken_word_highlighting": highlighted,
+        "rendered_readability_check": "pass",
+        "rendered_timing_check": "pass",
+        "rendered_motion_check": "pass",
+    }
+    if highlighted:
+        result.update(active_word_color="#25DDFF", rendered_active_word_check="pass")
+    return result
+
+
+@pytest.mark.parametrize("treatment", ["animated", "plain"])
+def test_distinct_caption_treatments_can_meet_same_quality_standard(treatment):
+    payload = quality_fields("headline-conversation")
+    payload["caption_treatment"] = flexible_captions(treatment)
+    run_state.validate_candidate_contract(payload, "headline-conversation")
+
+
+@pytest.mark.parametrize("check", ["rendered_readability_check", "rendered_timing_check",
+                                    "rendered_motion_check"])
+def test_flexible_style_never_waives_execution_quality(check):
+    payload = quality_fields("headline-conversation")
+    payload["caption_treatment"] = flexible_captions()
+    payload["caption_treatment"][check] = "fail"
+    with pytest.raises(run_state.StateError, match=check):
+        run_state.validate_candidate_contract(payload, "headline-conversation")
+
+
+def test_flexible_style_honors_explicit_assignment_requirements():
+    with pytest.raises(run_state.StateError, match="conflicts with the assignment"):
+        run_state.validate_caption_treatment(flexible_captions("plain"),
+                                            {"word_timed_active_word_color": True})
+    with pytest.raises(run_state.StateError, match="assignment limit"):
+        run_state.validate_caption_treatment(flexible_captions(), {"max_words_visible": 4})
+    run_state.validate_caption_treatment(flexible_captions(), {"max_words_visible": 6})
+
+
+def test_style_neutral_review_requires_motion_evidence_and_exact_final(tmp_path):
+    evidence = tmp_path / "frame.png"
+    evidence.write_bytes(b"fixture")
+    review = tmp_path / "review.json"
+    payload = {"version": "delivery-review-v2", "source_detail": "pass", "typography": "pass",
+               "caption_timing": "pass", "caption_motion": "fail", "style_fit": "pass",
+               "observations": "Unintended motion conceals the last word.",
+               "evidence_files": [str(evidence)], "final_sha256": "actual-final"}
+    write_json(review, payload)
+    with pytest.raises(run_state.StateError, match="caption_motion"):
+        run_state.quality_review(review, "actual-final")
+    payload.update(caption_motion="pass", observations="The intended entrance keeps words readable.")
+    write_json(review, payload)
+    with pytest.raises(run_state.StateError, match="exact final checksum"):
+        run_state.quality_review(review, "different-final")
+    run_state.quality_review(review, "actual-final")

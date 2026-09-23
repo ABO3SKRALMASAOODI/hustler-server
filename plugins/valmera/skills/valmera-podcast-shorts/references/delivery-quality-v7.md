@@ -1,190 +1,168 @@
 # Source, typography, and delivery quality v7
 
-Read before acquisition, the first edit, and final approval. The September 23
-correction preserves the user's intentionally added **current spoken word
-color** while restoring sharp video and restrained, stable phrase typography.
-For this user's current four-style brief, apply the defaults below. A different
-brief may specify another ratio, typography, or quality policy; do not turn
-this example into a universal visual template.
+Read before acquisition, caption design, and final approval. High production
+quality is a standing requirement. The visual treatment is a creative decision
+for the current story, audience, platform, and brief.
 
-## Establish real detail before editing
+## Keep quality consistent and design flexible
 
-Target 1080×1920 portrait delivery. Native 1012×1800 is acceptable without
-forced enlargement. For this brief the minimum is 720×1280 unless the user has
-explicitly accepted a documented source limitation. A minimum is a floor, not
-an acquisition target: obtain the highest practical clean source and inspect
-its actual detail, compression, and cropped face at intended viewing size.
+Aim for premium, deliberate work: clear source detail, coherent composition,
+well-crafted typography, readable captions, precise timing, and clean delivery.
+Choose the font, palette, scale, weight, phrase length, line breaks, placement,
+headline treatment, and motion together. Different shorts may use different
+caption styles when the story and approved direction support them. Premium
+quality does not mean a particular font, minimalism, more effects, bigger text,
+or copying the last successful render.
 
-Save format discovery, each attempted format/client, the actual successful
-download selection, its probe, and checksum in `source/`. Discovery JSON can
-list a 4K stream that was never downloaded; only the actual media proves what
-was acquired. A 403 for one rendition/client is an access failure, not proof
-that only 360p exists. Make a bounded acquisition repair: try other advertised
-compatible high-resolution formats/clients, refresh extraction, or use an
-available authorized original. Record failures and the next action if usable
-source quality remains unavailable. Never bypass access controls.
+Do not promote a one-off repair, reference, or renderer setting into a permanent
+preset. A liked reference establishes useful quality evidence; identify which
+traits fit this project instead of reproducing its exact recipe. Honor explicit
+current requests such as spoken-word highlighting, while choosing its execution
+for the brief. The September repair's font, gold color, scale, static sizing,
+and canvas dimensions are historical choices, not defaults for future work.
 
-A low-resolution proxy can support transcription and selection, but must not
-become the production original silently. Resolve a below-floor source before
-materializing the batch. If resolution is adequate but the recording itself
-is soft, compare actual pixels and disclose that limit; bitrate and dimension
-labels cannot establish detail. Do not claim a better recording is required
-until distinguishing access failure from inherent recording quality.
+The failure to prevent is accepting a weak source, inheriting an unintended
+caption effect, or approving small previews without checking the real export.
+Changing a preset alone does not solve those process failures.
 
-Valmera's native `frame_dims` caps the canvas using the **original project
-source**: a 640×338 source can deliver only about 338×600 at 9:16. A 720×1280
-overlay or enlarged local asset does not raise that native export ceiling or
-recover face detail. Repair the genuine original/project lineage, then render
-again; do not deliver a resized low-resolution final as the quality fix.
+## Preserve real picture detail
 
-Record each main-source crop in original/native pixels and its destination
-rectangle in expected final pixels. Check source detail **after** the crop,
-not merely the width of the uncropped original. Avoid magnifying a small
-speaker crop into a large panel. Loosen/reposition the crop, use a better
-original, or flag the unresolved detail limitation. Check each camera shot.
+Before editing, establish the delivery format and a high-quality target suited
+to the destination. Obtain the highest practical clean original, and check its
+actual sharpness, compression, motion, and detail after each intended crop.
+Choose measurable source/crop and export thresholds for this run; do not reuse
+another video's dimensions as an aesthetic rule. Larger encoded dimensions,
+higher bitrate, sharpening, or a successful render do not prove genuine detail.
 
-## Stable phrase captions with moving color
+Record format discovery, attempted acquisition routes, actual successful format,
+media probe, and checksum in `source/`. An access failure for one advertised
+rendition is not proof that only a low-quality source exists. Make bounded
+repairs using other advertised compatible formats, a refreshed supported
+extractor, or an authorized original; never bypass access controls. A proxy may
+support selection but must not silently become the production master. Resolve
+unacceptable source quality before multiplying the problem across a batch.
 
-The approved relationship is a dominant concise headline, a clean picture,
-and smaller readable speech phrases. The September 19 affordability short is
-a concrete reference for that relationship; its static all-white words are
-superseded by the user's later active-word-color instruction. Preserve that
-color. Generic tool/playbook suggestions for stacked, large, popping reels
-captions do not override this explicit preference.
+Valmera's native export canvas is constrained by the original project source.
+An enlarged overlay or resized final cannot restore detail or raise that source's
+native export ceiling. Repair the source/project lineage and rebuild derived
+picture layers when necessary. Minimize avoidable resampling and re-encoding.
 
-Start this brief with these transcript-caption style values, passed through
-the live tool's supported `style` object:
+Record native crop coordinates and destination rectangles. Check each camera
+shot, B-roll asset, and graphic at its actual delivered size. Loosen an excessive
+crop, obtain a better asset, or make another composition choice when enlargement
+exposes softness. Distinguish acquisition/encoding failures from detail missing
+in the original recording. If a limitation cannot be resolved, disclose it and
+record the user's accepted exception instead of calling it premium quality.
 
-```json
-{
-  "preset": "classic", "dynamic": true,
-  "animation": "none", "emphasis": "none",
-  "font": "Inter Display Black", "size": "m", "size_scale": 0.82,
-  "color": "#FFFFFF", "highlight_color": "#F5D35A",
-  "outline_color": "#000000", "outline_width": 2,
-  "shadow": 1, "uppercase": false
-}
-```
+## Design captions, then verify their execution
 
-These are starting values, not a claim of a fixed rendered point size.
-Confirm the actual font and readable stroke weight at delivery scale. Use
-semantic groups normally containing three or four words, hard maximum four,
-and at most two balanced rows. Prefer shorter natural groups over shrinking
-type or clipping a long phrase. Keep neighboring words the same size and
-stationary while **only the currently spoken word changes to gold**. Set
-`animation:none` explicitly: an omitted value in legacy dynamic captions can
-invoke a 62%→114%→106% word-pop even though coloring was the only intent.
-Do not disable `dynamic` just to remove the pop. Verify current production
-pixels; an accepted option is not proof the active renderer implements it.
+- **Readability:** choose clear letterforms, sufficient contrast and weight,
+  useful spacing, natural phrase breaks, and reading time suited to the speech.
+  Inspect dense and long phrases at phone size as well as native resolution.
+  Avoid blurry glyphs, clipped strokes, cramped lines, and excessive outlines.
+- **Hierarchy and composition:** balance captions with the face, headline,
+  graphics, and important action. Maintain safe margins across camera changes;
+  emphasize the intended information without hiding the speaker or creating
+  competing layers. Do not solve poor layout by making words too small.
+- **Accuracy and timing:** preserve meaning, punctuation, speaker changes,
+  word boundaries, and complete endings. If spoken-word highlighting is
+  requested, verify that it follows the actual word timings and remains legible.
+- **Motion:** choose static or animated typography deliberately. Motion and
+  size changes are allowed when they support the selected style and remain
+  readable. Accidental bouncing, inconsistent scale/baselines, distracting
+  movement, or animation that conceals words are defects. Set animation and
+  emphasis explicitly so a renderer's implicit defaults cannot choose the style.
+- **Coherence:** use a consistent visual language within each treatment. Vary
+  styles for a reason; do not change colors or effects randomly to signal effort.
 
-The legacy dynamic renderer may keep whole groups on one row; do not promise
-two-row semantic control without verifying the tool path. Shorten/regroup
-instead of widening or oversizing the line. Manual caption items do not
-automatically inherit transcript active-word coloring. If authored phrases
-are needed, preserve real word timing and explicitly verify color transitions.
+Inspect actual rendered transitions. A tool accepting a font, line-wrap option,
+color, or animation setting does not prove that production implements it.
+Legacy dynamic captions can animate words when animation is omitted; request
+no animation when that is the chosen treatment, and inspect any intentional
+animation just as carefully. Do not disable a requested highlight merely to
+remove an unwanted effect. Use supported renderer capabilities and honest
+word timing; configuration names and static screenshots are not enough.
 
-Place speech relative to the visible picture and faces, following the lane.
-Keep a headline visually dominant, usually by shortening it to two lines;
-omit redundant identity prefixes such as “ELON MUSK:” when the image/context
-already identifies him. Do not shrink the title merely to fit verbose copy.
-Preserve each lane's timing, required branding, and the separate native ending.
+## Record and enforce a per-run quality policy
 
-## Opt-in durable quality gate
+Every new production run writes `taste/quality-policy.json` and supplies it to
+`run_state.py init --quality-policy <absolute-policy-path>`. The existing
+`delivery-quality-v1` schema uses these configurable fields:
 
-For new runs under this brief, write `taste/quality-policy.json` and supply it
-to `run_state.py init --quality-policy <absolute-policy-path>`:
+- `min_final_dimensions` and `target_final_dimensions`: width/height pairs chosen
+  for this destination and aspect ratio. The minimum is a floor, not a target.
+- `min_native_short_edge`: required genuine source detail before enlargement.
+- `max_picture_upscale`: maximum acceptable enlargement of the native crop.
 
-```json
-{
-  "version": "delivery-quality-v1",
-  "min_final_dimensions": [720, 1280],
-  "target_final_dimensions": [1080, 1920],
-  "min_native_short_edge": 720,
-  "max_picture_upscale": 1.1
-}
-```
+Use appropriately demanding values and inspect the pixels; numbers cannot
+approve an aesthetically weak result. Do not lower thresholds merely to pass a
+failed source. Record explicit user exceptions. The policy is checksummed at
+initialization. Historic runs keep their original evidence and rules.
 
-The small resampling allowance is a ceiling, not permission to accept visibly
-soft faces. A different ratio/brief needs appropriate dimensions. Preserve
-explicit user exceptions in the profile; never lower a policy to make a
-failed render pass. The policy is checksummed at initialization. Historic
-completed runs remain auditable without invented evidence or retroactive
-policy changes. Repair work can use a new run referencing existing project
-IDs and reviewed versions, preserving previous deliverables.
+Each candidate's `quality_evidence` links a JSON file containing `source_path`,
+`source_sha256`, `acquisition_record`, `native_dimensions`,
+`expected_final_dimensions`, and `picture_regions`. Each region records
+`source_crop_native` and `output_rect` as `[x, y, width, height]`. Cover every
+distinct crop. Native dimensions describe real pre-enlargement detail, not an
+upscaled intermediate; the helper checks consistency, not the truth of an
+uploader's provenance claim.
 
-Each candidate's `quality_evidence` points to a JSON file like:
+Run `run_state.py quality-check --policy <policy.json> --evidence <evidence.json>
+--output <measurement.json>` before editing, and add `--final <actual.mp4>` for
+delivery. Candidate registration repeats preflight; final registration probes
+the downloaded file. Exit 2 is failure. FFprobe must be on PATH. Draft-preview
+resolution is not delivery resolution.
 
-```json
-{
-  "source_path": "/run/source/original.mp4",
-  "source_sha256": "actual-sha256",
-  "acquisition_record": "/run/source/acquisition.json",
-  "native_dimensions": [1920, 1012],
-  "expected_final_dimensions": [1012, 1800],
-  "picture_regions": [
-    {"source_crop_native": [0, 0, 1100, 824],
-     "output_rect": [0, 519, 1012, 760]}
-  ]
-}
-```
+For new candidates, use `caption_treatment.version: "caption-treatment-v2"`:
 
-`native_dimensions` records the real source detail before any enlargement,
-not an upscaled intermediate. Keep the genuine original when available. The
-helper can reject geometry/provenance inconsistencies but cannot detect an
-uploader's pre-upscaled recording or independently prove asserted provenance;
-inspect source pixels and the acquisition record. Cover every distinct crop.
-Evaluate external B-roll detail under the existing asset contract.
+- Record a concrete `style_intent`, explicit `animation` and `emphasis`, the
+  measured `max_words_visible`, and boolean `spoken_word_highlighting`.
+- Require `rendered_readability_check`, `rendered_timing_check`, and
+  `rendered_motion_check` to pass based on actual frames and timing evidence.
+- When highlighting is enabled, also record the chosen `active_word_color`
+  (`#RRGGBB`) and a passed `rendered_active_word_check`.
+- Put any actual brief-specific word limit or highlighting requirement in the
+  assignment's `captions.max_words_visible` and
+  `captions.word_timed_active_word_color`. Do not invent a permanent word limit.
 
-Run the same deterministic check before editing and on the downloaded final:
+The helper checks these assignment constraints without choosing the aesthetic.
+Old unversioned candidate/review records remain compatible with their original
+rules; use the new evidence format for new work rather than copying old recipes.
 
-```bash
-python <skill-root>/scripts/run_state.py quality-check \
-  --policy <policy.json> --evidence <quality-evidence.json> \
-  --final <actual-final.mp4> --output <quality-measurement.json>
-```
+## Judge the actual final before repeating a treatment
 
-Omit `--final` for preflight; that checks expected geometry without confusing
-a 270×480 draft preview with delivery. Exit 2 means failure. The helper needs
-FFprobe on PATH and Python's standard library. Candidate registration repeats
-preflight, and final registration probes the actual file. Upscaled low-detail
-source and undersized exports fail independently. The policy does not force
-an unnecessary upscale to its target dimensions.
+Complete one representative short through native final export before batch
+editing. Compare it with the chosen quality reference at the same intended
+viewing size. Inspect source detail, glyph edges, reading comfort, hierarchy,
+caption transitions, framing, cut boundaries, payoff, audio measurements, and
+the entire ending. Use playback where available and describe the evidence
+honestly. A tiny contact sheet, a score, or a checksum cannot waive a visible
+quality defect. When the renderer, source, or treatment changes materially,
+verify the new behavior before repeating it.
 
-## Inspect one actual final before the batch
-
-Complete one representative short through native final export and compare it
-beside the user-liked reference at the **same intended display size**. Inspect
-original-resolution frames and playback of the opening, dense phrases,
-active-word changes, camera cuts, and payoff. Check face detail, clean glyph
-edges, uniform word size/baseline, readable gold, title hierarchy, and picture
-placement. A 270×480 contact sheet alone cannot approve sharpness. Neither a
-94/100 score nor a valid checksum can waive an unresolved quality defect.
-
-For opted-in runs, `claim` holds subsequent shorts until the first actual final
-passes `export`; a failed pilot is repaired or recorded as an exception.
-Candidates add `animation:"none"`, `emphasis:"none"`, and
-`rendered_stable_size_check:"pass"` to existing `caption_treatment` evidence.
-QC records `delivery_quality_review`, an absolute path to a JSON review:
+`claim` holds subsequent shorts until the pilot passes `export`. Coordinator QC
+records `caption_quality_check: "pass"`, and also `active_word_caption_check`
+when highlighting is used. `delivery_quality_review` points to an independent
+JSON review with these fields:
 
 ```json
 {
+  "version": "delivery-review-v2",
   "source_detail": "pass", "typography": "pass",
-  "stable_word_size": "pass", "active_word_color": "pass",
-  "reference_comparison": "pass",
-  "observations": "Specific observed frames, phrase transitions, and reference comparison.",
-  "evidence_files": ["/run/candidates/short-01/full-size-comparison.png"],
+  "caption_timing": "pass", "caption_motion": "pass", "style_fit": "pass",
+  "observations": "Concrete observed results and their fit to this brief.",
+  "evidence_files": ["/run/candidates/short/full-size-evidence.png"],
   "final_sha256": "required-for-final-review-only"
 }
 ```
 
-Use genuine observations, not the sample sentence. A review is the independent
-coordinator's visual judgment; the script validates evidence linkage, not
-image aesthetics. Preview QC can precede export; final review must name the
-actual final checksum. Pass its path to `run_state.py export --quality-review
-<review.json>`. Repeat quality and existing final checks for every delivered
-file, recording exact EDL, dimensions, original/crop detail, typography
-settings, evidence, and checksum in candidate/QC/final records. Recheck a new
-font, renderer, source, or materially different layout before repeating it.
+The review judges intended animation, deliberate static styling, or another
+supported treatment on its execution. Its observations must identify real
+frames and timing evidence; the script validates linkage, not aesthetics.
+Pass the review to `run_state.py export --quality-review <review.json>`.
+Repeat actual-file review for every final, retaining its EDL, checksum, dimensions,
+source/crop detail, and visual/timing evidence. Repair visible defects before
+delivery even when previews, technical checks, or review scores passed.
 
 ## Reject a failed actual final before delivery
 

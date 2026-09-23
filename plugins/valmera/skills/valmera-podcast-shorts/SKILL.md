@@ -22,8 +22,8 @@ Read these files completely before acting:
 - `references/qc-v7.md` before accepting or repairing a candidate.
 - `references/export-v7.md` before requesting or downloading final exports.
 - `references/delivery-quality-v7.md` before source acquisition, typography,
-  and approval; it defines the current brief's source/detail floor, stable
-  captions with active-word color, and opt-in durable delivery quality gate.
+  and approval; it defines durable picture/caption quality standards and a
+  per-run quality gate without prescribing a permanent visual style.
 
 When the brief requests fast conversational B-roll, a spoken hook followed by
 a silent montage, a silent action opening, or persistent-headline conversation,
@@ -84,9 +84,10 @@ them for a v7 run. They remain only so an interrupted v6 run can be audited.
     shots during coordinator QC. The detailed gates are in
     `references/style-lanes-v7.md`, `references/qc-v7.md`, and
     `references/export-v7.md`.
-12. Every spoken caption treatment must visibly color the word being spoken,
-    normally inside a three-to-four-word group. No B-roll visual may repeat
-    within one short. For `hook-to-silent-montage`, the editorial program is
+12. Captions must be accurate, readable, well-composed, and intentionally styled.
+    Choose their treatment for the brief; preserve requested spoken-word
+    highlighting without fixing a permanent font, palette, or motion preset.
+    No B-roll visual may repeat within one short. For `hook-to-silent-montage`, the editorial program is
     at most 25 seconds and the post-hook montage is at most 15 seconds; the
     separate native Valmera ending is excluded from those limits.
 
@@ -117,7 +118,7 @@ python <skill-root>/scripts/run_state.py init \
   --run-dir <run-dir> --run-id <run-id> --source <source-or-topic>
 ```
 
-For new runs under the user's current four-style brief, also supply
+For every new production run, also supply
 `--quality-policy <run-dir>/taste/quality-policy.json` using
 `references/delivery-quality-v7.md`. Approve one actual native final before
 batch editing; small selection proxies never establish delivery quality.
@@ -129,6 +130,11 @@ At the start of each stage, advance exactly once with `run_state.py phase
 backward transitions.
 
 ## Calibrate taste before the batch
+
+High picture and caption quality is a standing requirement; font, palette,
+scale, phrase length, layout, and animation are chosen for each brief and story.
+Aim for premium execution and verify what that means in actual pixels and timing.
+Do not turn the last successful short or repair into a permanent template.
 
 Taste cannot be communicated reliably by adjectives alone. Accept any useful
 number of user-liked short-form examples plus optional disliked examples; do

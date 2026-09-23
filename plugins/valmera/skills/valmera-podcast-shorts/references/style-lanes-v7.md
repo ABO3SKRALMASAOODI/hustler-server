@@ -181,17 +181,19 @@ placement and timing; do not fix the hierarchy by making captions unreadable.
 
 Across all four lanes, every interval containing speech uses word-timed
 captions whose currently spoken word is visibly colored while the neighboring
-words stay neutral. Normally show three or four words at a time; shorter groups
-are valid at sentence boundaries, pauses, or when needed for legibility, but
-never show more than four. The accent must move on the real word timings, not
-on a sentence estimate, and must have enough contrast to be obvious at phone
+words stay neutral when applying the current brief's highlighting request.
+This is a scoped user preference, not a universal caption template. Choose phrase
+length, line breaks, font, palette, scale, and motion for the story and reading
+comfort; apply a numeric word limit only when the brief specifies one.
+The accent must move on the real word timings, not a sentence estimate,
+and must have enough contrast to be obvious at phone
 size. Keep the accent palette coherent within a short instead of changing to
 random colors on every word.
 
 Use Valmera's real word-state renderer: a preset whose rendered output colors
 the active spoken word, or legacy `dynamic:true` with `highlight_color`.
-`max_words_per_caption` is at most 4. A static colored keyword, a caption card
-that merely reveals words, or a configured color that is not visible in the
+Set supported grouping options to the chosen treatment. A static colored keyword,
+a caption card that merely reveals words, or a configured color not visible in the
 render does not satisfy this rule. Inspect multiple rendered states, including
 the first caption, the densest phrase, a speaker or shot change, and the last
 caption. Silent openings and Style 2's silent montage remain caption-free.

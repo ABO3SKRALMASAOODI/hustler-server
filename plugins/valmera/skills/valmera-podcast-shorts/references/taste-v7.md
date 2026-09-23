@@ -159,8 +159,12 @@ profile ID or require the user's explicit request to replace the prior profile.
 Attach the run copy with `run_state.py taste` so later tasks verify its SHA-256
 rather than trusting a familiar filename.
 
-Invariants must be testable. Prefer “captions never cover a face and remain
-inside the assigned picture area” over “captions look premium.”
+Keep production-quality invariants separate from creative choices. Translate
+“premium” into observed source detail, clean glyph rendering, reading comfort,
+accurate timing, coherent hierarchy, and intentional motion. Check safe placement
+against the actual composition. Font, palette, scale, phrase length, layout, and
+animation belong to the selected treatment; they may differ between stories and
+must not become permanent requirements merely because a previous repair worked.
 
 Use two to five style lanes so a batch varies without becoming random. Choose
 the lane from the story, not round-robin decoration. Useful lane families are:
