@@ -963,14 +963,13 @@ def state_block(ctx, worker_db, denied_tools=(), include_blueprint=True):
         else:
             lines.append(
                 "When the user asks for a change to THE SHORTS — 'all of "
-                "them', 'the shorts', 'short 3', 'add music to them' — use "
-                "edit_shorts(instruction, shorts). That request is NEVER an "
-                "edit of this parent timeline (the original long video); "
-                "only edit here when they explicitly ask about the "
-                "original/full video. Prepare anything the instruction needs "
-                "first (e.g. fetch the track HERE with find_song/fetch_url), "
-                "then name it in the instruction — edit_shorts shares this "
-                "project's music/clips/images into every short.")
+                "them', 'the shorts', 'short 3', 'add music to them' — the "
+                "cards each require the user's Edit action to start their "
+                "own editor. This internal agent cannot switch child "
+                "projects or delegate their editing. Explain that boundary "
+                "immediately, preserving the saved work. Do not reset or "
+                "edit the long parent timeline to substitute for the shorts. "
+                "Only edit the original when the user asks for that video.")
         block += "\n" + "\n".join(lines)
     elif (ctx.project.get("kind") == "shorts"
           and not ctx.project.get("parent_project_id")
@@ -1015,9 +1014,11 @@ def state_block(ctx, worker_db, denied_tools=(), include_blueprint=True):
                     "sibling, then make the changes yourself with the normal "
                     "editor tools; do not delegate to Valmera's agent."
                     if "edit_shorts" in denied_tools else
-                    "Call edit_shorts(instruction, shorts) right from here — "
-                    "it reaches the parent board automatically; never claim "
-                    "the parent must be opened first.")
+                    "Edit this clip with the normal tools. The sibling "
+                    "cards need their own Edit actions; this internal "
+                    "agent cannot switch projects or start those editors. "
+                    "Disclose that boundary immediately and do not repeatedly "
+                    "reset this clip to substitute for the other outputs.")
                 block += (
                     f"\n\nTHIS PROJECT IS A GENERATED SHORT — {card} on "
                     f"the Shorts board of parent project {parent['id']} "
@@ -2308,12 +2309,12 @@ def _auto_render_if_needed(ctx, worker_db, session_id, timings,
         # an encode failure and appended a false warning even though the v4
         # preview was attached. Only the render tool's actual failure prefix
         # means failure.
-        if result.startswith("Preview render FAILED:"):
+        render_status = agent_tools.tool_outcome_mod.from_legacy(result).status
+        if render_status in {"correction_needed", "transient_failure", "unavailable"}:
             fail_note = (fail_note or "") + (
                 "\n\n(Heads up: the preview render failed — "
                 f"{result[:200]})")
-        elif result.startswith(("PREREQUISITE: the complete preview",
-                                "Preview render is taking too long")):
+        elif render_status == "prerequisite" or result.startswith("Preview render is taking too long"):
             fail_note = (fail_note or "") + (
                 "\n\n(The edit is saved. Its preview is still rendering and "
                 "will attach automatically when it finishes.)")
@@ -3515,9 +3516,13 @@ def _record_outer_tool_outcome(ctx, name, result):
     # tool identity that distinguish different recovery attempts.
     fingerprint = name + "|" + re.sub(r"\d+(?:\.\d+)?", "#", first)
     ctx.last_tool_result = first
-    ctx.turn_tool_outcomes.append(
-        {"tool": name, "kind": kind, "fingerprint": fingerprint,
-         "writes": len(ctx.versions_written)})
+    receipt = {"tool": name, "kind": kind, "fingerprint": fingerprint,
+               "writes": len(ctx.versions_written)}
+    if kind == "prerequisite" and name in {"render_preview", "wait_for_job"}:
+        pending = re.search(r"\bjob(?:_id=| )(\d+)\b", str(result))
+        if pending:
+            receipt["pending_job_id"] = int(pending.group(1))
+    ctx.turn_tool_outcomes.append(receipt)
     if name in agent_tools.WRITE_TOOLS:
         ctx.write_attempts += 1
 
@@ -3546,7 +3551,8 @@ def _turn_completion(ctx, status="replied", fail_note=None, truncated=False):
     has_value = bool(has_edit_deliverable or _turn_has_asset_progress(ctx))
     blank_canvas_no_value = (
         not has_value and getattr(ctx, "has_main_video", True) is False)
-    kinds = [row.get("kind") for row in ctx.turn_tool_outcomes]
+    kinds = [row.get("kind") for row in ctx.turn_tool_outcomes
+             if not row.get("resolved")]
     failed = "failed" in kinds
     refused = "refused" in kinds
     prerequisite = "prerequisite" in kinds
@@ -4122,7 +4128,8 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                       "execution-slice boundary; do not treat the boundary "
                       "as completion.")})
         failures = [row for row in ctx.turn_tool_outcomes
-                    if row.get("kind") in {"refused", "failed", "prerequisite"}]
+                    if row.get("kind") in {"refused", "failed", "prerequisite"}
+                    and not row.get("resolved")]
         if failures or ctx.tool_failure_memory:
             messages.append({"role": "system", "content": (
                 "Known failed attempts from this same logical edit. Do not repeat "

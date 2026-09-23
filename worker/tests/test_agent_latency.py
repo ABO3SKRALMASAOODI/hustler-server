@@ -366,7 +366,9 @@ def test_zero_terminal_preview_wait_keeps_the_queued_render(monkeypatch):
     result = agent_tools.render_preview(Ctx(), _wait_timeout_s=0)
 
     assert calls == [agent_tools.dbx.get_or_enqueue_preview_job]
-    assert result.startswith("Preview render is taking too long")
+    assert result.startswith("PREREQUISITE: complete preview")
+    assert "wait_for_job" in result
+    assert Ctx.spec_preview_jobs == {2: 77}
     assert Ctx.rendered_versions == set()
 
 
@@ -401,7 +403,7 @@ def test_same_failed_preview_version_is_not_enqueued_again():
             return {"version": 4, "json": {}}
 
     result = agent_tools.render_preview(Ctx())
-    assert result.startswith("Preview render FAILED:")
+    assert result.startswith("CORRECTION_NEEDED: preview render FAILED:")
     assert "NOT re-enqueued" in result
     assert "NEW EDL version" in result
 
