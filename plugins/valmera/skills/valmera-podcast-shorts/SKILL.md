@@ -21,6 +21,9 @@ Read these files completely before acting:
 - `references/editor-v7.md` before selecting stories or assigning an editor.
 - `references/qc-v7.md` before accepting or repairing a candidate.
 - `references/export-v7.md` before requesting or downloading final exports.
+- `references/delivery-quality-v7.md` before source acquisition, typography,
+  and approval; it defines the current brief's source/detail floor, stable
+  captions with active-word color, and opt-in durable delivery quality gate.
 
 When the brief requests fast conversational B-roll, a spoken hook followed by
 a silent montage, a silent action opening, or persistent-headline conversation,
@@ -113,6 +116,11 @@ Initialize it once:
 python <skill-root>/scripts/run_state.py init \
   --run-dir <run-dir> --run-id <run-id> --source <source-or-topic>
 ```
+
+For new runs under the user's current four-style brief, also supply
+`--quality-policy <run-dir>/taste/quality-policy.json` using
+`references/delivery-quality-v7.md`. Approve one actual native final before
+batch editing; small selection proxies never establish delivery quality.
 
 On resume, run `status`, reconcile only recorded nonterminal Valmera job IDs,
 and continue the next unfinished stage. Never infer progress from task prose.

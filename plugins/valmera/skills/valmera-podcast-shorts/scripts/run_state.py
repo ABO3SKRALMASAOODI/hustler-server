@@ -17,6 +17,7 @@ import math
 import os
 from pathlib import Path
 import re
+import subprocess
 import sys
 import tempfile
 
@@ -134,6 +135,154 @@ def finite_number(value: object, label: str, *, minimum: float = 0.0) -> float:
     return number
 
 
+def dimensions(value: object, label: str) -> list[int]:
+    if not isinstance(value, list) or len(value) != 2 or any(
+            isinstance(x, bool) or not isinstance(x, int) or x < 2 for x in value):
+        raise StateError(f"{label} must contain two positive integer dimensions")
+    return value
+
+
+def read_object(path: Path, label: str) -> dict:
+    with path.open(encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if not isinstance(payload, dict):
+        raise StateError(f"{label} must be an object")
+    return payload
+
+
+def quality_policy(path: Path) -> dict:
+    value = read_object(path, "quality policy")
+    if value.get("version") != "delivery-quality-v1":
+        raise StateError("quality policy version must be delivery-quality-v1")
+    floor = dimensions(value.get("min_final_dimensions"), "minimum final")
+    target = dimensions(value.get("target_final_dimensions"), "target final")
+    if any(a > b for a, b in zip(floor, target)):
+        raise StateError("minimum final cannot exceed target final")
+    finite_number(value.get("min_native_short_edge"),
+                  "min_native_short_edge", minimum=2)
+    finite_number(value.get("max_picture_upscale"),
+                  "max_picture_upscale", minimum=1)
+    return value
+
+
+def video_dimensions(path: Path) -> list[int]:
+    try:
+        result = subprocess.run([
+            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "stream=width,height", "-of", "json", str(path),
+        ], capture_output=True, text=True, timeout=60, check=True)
+        streams = json.loads(result.stdout).get("streams", [])
+        if not streams:
+            raise StateError(f"no video stream in {path}")
+        return dimensions([streams[0].get("width"), streams[0].get("height")],
+                          "probed video")
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+        raise StateError(f"cannot probe video {path}: {exc}") from exc
+
+
+def measure_quality(policy: dict, evidence: dict,
+                    final: Path | None = None) -> dict:
+    """Check genuine-source/crop budgets; file dimensions alone cannot prove detail."""
+    source = absolute_existing(evidence.get("source_path") or "", "quality source")
+    digest = sha256(source)
+    if evidence.get("source_sha256") != digest:
+        raise StateError("quality source checksum does not match")
+    original = dimensions(evidence.get("native_dimensions"), "native source")
+    probed = video_dimensions(source)
+    if any(a > b for a, b in zip(original, probed)):
+        raise StateError("native dimensions cannot exceed the probed source")
+    provenance = absolute_existing(evidence.get("acquisition_record") or "",
+                                   "source acquisition record")
+    expected = dimensions(evidence.get("expected_final_dimensions"),
+                          "expected final")
+    actual = video_dimensions(final) if final else expected
+    violations = []
+    floor = policy["min_final_dimensions"]
+    if any(a < b for a, b in zip(actual, floor)):
+        violations.append("final_below_minimum")
+    if final and actual != expected:
+        violations.append("final_differs_from_expected")
+    if min(original) < policy["min_native_short_edge"]:
+        violations.append("native_source_below_minimum")
+    if min(expected) > min(original) or max(expected) > max(original):
+        violations.append("expected_canvas_exceeds_native_source")
+    regions = evidence.get("picture_regions")
+    if not isinstance(regions, list) or not regions:
+        raise StateError("quality evidence needs picture_regions")
+    measured = []
+    for index, region in enumerate(regions):
+        if not isinstance(region, dict):
+            raise StateError("picture region must be an object")
+        crop, output = region.get("source_crop_native"), region.get("output_rect")
+        for label, rect, canvas in (("source crop", crop, original),
+                                    ("output rectangle", output, expected)):
+            if not isinstance(rect, list) or len(rect) != 4:
+                raise StateError(f"{label} must be [x, y, width, height]")
+            for i, number in enumerate(rect):
+                finite_number(number, label, minimum=0 if i < 2 else 1)
+            if any(rect[i] + rect[i + 2] > canvas[i] + EPSILON for i in (0, 1)):
+                raise StateError(f"{label} extends outside its native canvas")
+        upscale = max(output[2] / crop[2], output[3] / crop[3])
+        if upscale > policy["max_picture_upscale"] + 1e-6:
+            violations.append(f"picture_region_{index}_exceeds_native_detail")
+        measured.append({"source_crop_native": crop, "output_rect": output,
+                         "upscale": round(upscale, 6)})
+    return {
+        "verdict": "fail" if violations else "pass", "violations": violations,
+        "source_path": str(source), "source_sha256": digest,
+        "source_dimensions": probed, "native_dimensions": original,
+        "acquisition_record": str(provenance),
+        "expected_final_dimensions": expected, "measured_dimensions": actual,
+        "picture_regions": measured,
+        "final_path": str(final) if final else None,
+        "final_sha256": sha256(final) if final else None,
+    }
+
+
+def run_quality_policy(state: dict) -> dict | None:
+    record = state.get("quality_policy")
+    if not record:
+        return None  # Interrupted/historic runs do not acquire new requirements.
+    path = absolute_existing(record["file"], "quality policy")
+    if sha256(path) != record["sha256"]:
+        raise StateError("run quality policy changed after initialization")
+    return quality_policy(path)
+
+
+def require_quality_pass(report: dict) -> None:
+    if report["verdict"] != "pass":
+        raise StateError("delivery quality blocked: " + ", ".join(report["violations"]))
+
+
+def quality_review(path: Path, final_digest: str | None = None) -> dict:
+    review = read_object(path, "quality review")
+    for key in ("source_detail", "typography", "stable_word_size",
+                "active_word_color", "reference_comparison"):
+        if review.get(key) != "pass":
+            raise StateError(f"delivery quality review requires {key} pass")
+    if not isinstance(review.get("observations"), str) or not review["observations"].strip():
+        raise StateError("quality review needs concrete visual observations")
+    files = review.get("evidence_files")
+    if not isinstance(files, list) or not files:
+        raise StateError("quality review needs full-size visual evidence files")
+    for file in files:
+        absolute_existing(file, "quality review evidence")
+    if final_digest is not None and review.get("final_sha256") != final_digest:
+        raise StateError("quality review must bind the exact final checksum")
+    return {"file": str(path), "sha256": sha256(path)}
+
+
+def cmd_quality_check(args: argparse.Namespace) -> dict:
+    policy = quality_policy(absolute_existing(args.policy, "quality policy"))
+    evidence = read_object(absolute_existing(args.evidence, "quality evidence"),
+                           "quality evidence")
+    final = absolute_existing(args.final, "final") if args.final else None
+    report = measure_quality(policy, evidence, final)
+    if args.output:
+        write_atomic(Path(args.output).expanduser().resolve(), report)
+    return report
+
+
 def validate_candidate_contract(payload: dict, style_lane: str) -> None:
     """Reject v7 candidates that omit the user's measurable edit rules."""
     editorial_duration = finite_number(
@@ -235,6 +384,10 @@ def cmd_init(args: argparse.Namespace) -> dict:
             existing = json.load(handle)
         if existing.get("version") == VERSION and \
                 existing.get("run_id") == args.run_id:
+            if args.quality_policy:
+                requested = absolute_existing(args.quality_policy, "quality policy")
+                if (existing.get("quality_policy") or {}).get("sha256") != sha256(requested):
+                    raise StateError("existing run has a different or absent quality policy; use a new run")
             return existing
         raise StateError(f"run.json already exists at {path}")
     stamp = now()
@@ -250,6 +403,11 @@ def cmd_init(args: argparse.Namespace) -> dict:
         "shorts": {},
         "events": [{"at": stamp, "type": "run_initialized"}],
     }
+    if args.quality_policy:
+        policy_file = absolute_existing(args.quality_policy, "quality policy")
+        quality_policy(policy_file)
+        value["quality_policy"] = {
+            "file": str(policy_file), "sha256": sha256(policy_file)}
     write_atomic(path, value)
     return value
 
@@ -345,6 +503,12 @@ def cmd_claim(args: argparse.Namespace) -> dict:
     with locked(args.run_dir) as state:
         item = child(state, args.short_id)
         require_status(item, {"queued", "repair"}, "claim")
+        if run_quality_policy(state) and not state.get("quality_pilot"):
+            pilot_id = state.get("quality_pilot_short_id")
+            if pilot_id and pilot_id != args.short_id and \
+                    state["shorts"][pilot_id]["status"] not in TERMINAL:
+                raise StateError("verify the first actual final before batch editing")
+            state["quality_pilot_short_id"] = args.short_id
         active = sum(1 for value in state["shorts"].values()
                      if value["status"] in ACTIVE)
         if active >= int(state.get("max_editors") or MAX_EDITORS):
@@ -410,11 +574,29 @@ def cmd_candidate(args: argparse.Namespace) -> dict:
         declared = payload.get("preview_sha256")
         if declared and declared != digest:
             raise StateError("preview checksum does not match candidate bundle")
+        quality = None
+        policy = run_quality_policy(state)
+        if policy:
+            evidence_file = absolute_existing(
+                payload.get("quality_evidence") or "", "quality evidence")
+            evidence = read_object(evidence_file, "quality evidence")
+            measured = measure_quality(policy, evidence)
+            require_quality_pass(measured)
+            captions = payload["caption_treatment"]
+            if captions.get("animation") != "none" or \
+                    captions.get("emphasis") != "none" or \
+                    captions.get("rendered_stable_size_check") != "pass":
+                raise StateError("quality captions require stable size and explicit no animation/emphasis")
+            quality = {"evidence_file": str(evidence_file),
+                       "evidence_sha256": sha256(evidence_file),
+                       "measurement": measured}
         item["candidate"] = {
             "bundle": str(bundle), "preview": str(preview),
             "sha256": digest, "edl_version": args.edl_version,
             "recorded_at": now(),
         }
+        if quality:
+            item["candidate"]["quality"] = quality
         item["status"] = "candidate"
         item["worker"] = None
         item["updated_at"] = now()
@@ -454,6 +636,9 @@ def cmd_qc(args: argparse.Namespace) -> dict:
             if item.get("style_lane") == "hook-to-silent-montage" and \
                     payload.get("style2_timing_check") != "pass":
                 raise StateError("ready Style 2 requires a timing QC pass")
+            if run_quality_policy(state):
+                quality_review(absolute_existing(
+                    payload.get("delivery_quality_review") or "", "quality review"))
         if args.verdict == "repair" and item["repair_rounds"] >= 2:
             raise StateError("two editor repair rounds are already used")
         item["qc"] = {
@@ -513,6 +698,84 @@ def cmd_export_start(args: argparse.Namespace) -> dict:
         return item
 
 
+def cmd_reject_final(args: argparse.Namespace) -> dict:
+    """Reopen a reviewed candidate after an actual downloaded final fails QC."""
+    media = absolute_existing(args.file, "rejected final")
+    report = absolute_existing(args.report, "final rejection report")
+    payload = read_object(report, "final rejection report")
+    digest = sha256(media)
+    receipt_path = absolute_existing(
+        payload.get("final_receipt") or "", "final receipt")
+    receipt_payload = read_object(receipt_path, "final receipt")
+    structured = receipt_payload.get("structuredContent")
+    receipt = (structured if isinstance(structured, dict) else {}).get(
+        "download_receipt", receipt_payload.get("download_receipt", receipt_payload))
+    if not isinstance(receipt, dict) or receipt.get("render_type") != "final_export":
+        raise StateError("final receipt must identify a final_export")
+    if receipt.get("edl_version") != args.edl_version or \
+            receipt.get("sha256") != digest:
+        raise StateError("final receipt EDL version or SHA does not match")
+    with locked(args.run_dir) as state:
+        item = child(state, args.short_id)
+        require_status(item, {"ready", "exporting"}, "reject final")
+        candidate = item.get("candidate") or {}
+        if candidate.get("edl_version") != args.edl_version:
+            raise StateError("rejected final EDL version differs from candidate")
+        for key in ("project_id", "child_project_id"):
+            if key in receipt and receipt[key] != item["child_project_id"]:
+                raise StateError(f"final receipt {key} does not match")
+        expected = {
+            "run_id": state["run_id"], "short_id": args.short_id,
+            "child_project_id": item["child_project_id"],
+            "edl_version": args.edl_version, "verdict": "repair",
+            "final_sha256": digest,
+        }
+        if item.get("style_lane"):
+            expected["style_lane"] = item["style_lane"]
+        for key, value in expected.items():
+            if payload.get(key) != value:
+                raise StateError(f"final rejection report {key} does not match")
+        if any(job["state"] in {"queued", "running"} for job in item["jobs"]):
+            raise StateError("cannot reject final with queued or running jobs")
+        export = item.get("export") or {}
+        if export.get("state") in {"queued", "running"} and not any(
+                job["job_id"] == export.get("job_id") and
+                job["state"] in {"done", "failed"} for job in item["jobs"]):
+            raise StateError("record the export job as terminal before rejecting final")
+        if item["repair_rounds"] >= 2:
+            raise StateError("two editor repair rounds are already used")
+        prior_qc_report = None
+        qc_path = (item.get("qc") or {}).get("report")
+        if qc_path and Path(qc_path).is_file():
+            prior_qc_report = {
+                "file": str(Path(qc_path).resolve()),
+                "sha256": sha256(Path(qc_path)),
+                "payload": read_object(Path(qc_path), "prior QC report"),
+            }
+        stamp = now()
+        item.setdefault("rejected_finals", []).append({
+            "rejected_at": stamp, "previous_status": item["status"],
+            "file": str(media), "sha256": digest, "bytes": media.stat().st_size,
+            "edl_version": args.edl_version,
+            "candidate": candidate, "qc": item.get("qc"),
+            "qc_report": prior_qc_report,
+            "export": item.get("export"),
+            "report": {"file": str(report), "sha256": sha256(report),
+                       "payload": payload},
+            "final_receipt": {"file": str(receipt_path),
+                              "sha256": sha256(receipt_path),
+                              "payload": receipt_payload},
+        })
+        item["repair_rounds"] += 1
+        item.update(status="repair", worker=None, qc=None, export=None,
+                    updated_at=stamp)
+        state["events"].append({
+            "at": stamp, "type": "final_rejected", "short_id": args.short_id,
+            "edl_version": args.edl_version, "sha256": digest,
+        })
+        return item
+
+
 def cmd_export(args: argparse.Namespace) -> dict:
     media = absolute_existing(args.file, "export file")
     with locked(args.run_dir) as state:
@@ -527,6 +790,25 @@ def cmd_export(args: argparse.Namespace) -> dict:
                 media.suffix.lower() != ".mp4":
             raise StateError(
                 f"export filename must start with {style_lane}__ and end in .mp4")
+        quality = None
+        policy = run_quality_policy(state)
+        if policy:
+            record = candidate.get("quality") or {}
+            evidence_file = absolute_existing(
+                record.get("evidence_file") or "", "candidate quality evidence")
+            if sha256(evidence_file) != record.get("evidence_sha256"):
+                raise StateError("candidate quality evidence changed after review")
+            quality = measure_quality(policy, read_object(
+                evidence_file, "quality evidence"), media)
+            require_quality_pass(quality)
+            review = quality_review(absolute_existing(
+                args.quality_review or "", "final quality review"),
+                quality["final_sha256"])
+            quality["review"] = review
+            if not state.get("quality_pilot"):
+                state["quality_pilot"] = {
+                    "short_id": args.short_id, "edl_version": args.edl_version,
+                    "sha256": quality["final_sha256"], "review": review}
         item["style_lane"] = style_lane
         item["status"] = "exported"
         item["export"] = {
@@ -535,6 +817,8 @@ def cmd_export(args: argparse.Namespace) -> dict:
             "bytes": media.stat().st_size, "duration_s": args.duration,
             "edl_version": args.edl_version, "finished_at": now(),
         }
+        if quality:
+            item["export"]["quality"] = quality
         item["updated_at"] = now()
         return item
 
@@ -589,6 +873,8 @@ def cmd_finalize(args: argparse.Namespace) -> dict:
                     "sha256": exp["sha256"],
                     "duration_s": exp["duration_s"], "status": "exported",
                 })
+                if exp.get("quality"):
+                    items[-1]["delivery_quality"] = exp["quality"]
             else:
                 exceptions.append({
                     "short_id": item["short_id"],
@@ -621,6 +907,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--run-dir", required=True)
     p.add_argument("--run-id", required=True)
     p.add_argument("--source", required=True)
+    p.add_argument("--quality-policy")
     p.set_defaults(func=cmd_init)
 
     p = commands.add_parser("phase")
@@ -682,6 +969,14 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--job-id", required=True, type=int)
     p.set_defaults(func=cmd_export_start)
 
+    p = commands.add_parser("reject-final")
+    p.add_argument("--run-dir", required=True)
+    p.add_argument("--short-id", required=True)
+    p.add_argument("--file", required=True)
+    p.add_argument("--edl-version", required=True, type=int)
+    p.add_argument("--report", required=True)
+    p.set_defaults(func=cmd_reject_final)
+
     p = commands.add_parser("rescue")
     p.add_argument("--run-dir", required=True)
     p.add_argument("--short-id", required=True)
@@ -701,7 +996,15 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--file", required=True)
     p.add_argument("--edl-version", required=True, type=int)
     p.add_argument("--duration", required=True, type=float)
+    p.add_argument("--quality-review")
     p.set_defaults(func=cmd_export)
+
+    p = commands.add_parser("quality-check")
+    p.add_argument("--policy", required=True)
+    p.add_argument("--evidence", required=True)
+    p.add_argument("--final")
+    p.add_argument("--output")
+    p.set_defaults(func=cmd_quality_check)
 
     p = commands.add_parser("status")
     p.add_argument("--run-dir", required=True)
@@ -726,6 +1029,8 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(value, indent=2, sort_keys=True))
     else:
         print(json.dumps(value, sort_keys=True))
+    if args.command == "quality-check" and value["verdict"] != "pass":
+        return 2
     return 0
 
 

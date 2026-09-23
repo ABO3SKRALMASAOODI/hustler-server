@@ -2,6 +2,11 @@
 
 ## Acceptance order
 
+Apply `delivery-quality-v7.md` independently: source/crop detail, output
+resolution, stable glyph size with active-word color, and full-size reference
+comparison are quality gates. Save its `delivery_quality_review`; a score
+cannot waive a failed gate, and a tiny contact sheet cannot establish detail.
+
 Review in this order. A later strength never cancels an earlier blocker.
 
 1. **Identity:** correct run, child project, EDL version, preview, and checksum.

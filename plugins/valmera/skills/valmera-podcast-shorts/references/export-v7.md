@@ -30,6 +30,11 @@ is a final export.
 
 ## File verification
 
+Apply `delivery-quality-v7.md` to actual final pixels and source/crop detail.
+For a quality-policy run, register each file with `--quality-review` pointing
+to the independent review bound to that final's checksum. The first passed
+actual final unlocks batch editing; an upscaled proxy does not qualify.
+
 For the user's current four-style brief, apply the branding contract in
 `style-lanes-v7.md`. The native Valmera corner watermark and complete native
 "Edited by Valmera AI" ending are required deliverable content. Budget the

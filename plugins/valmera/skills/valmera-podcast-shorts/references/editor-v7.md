@@ -60,6 +60,10 @@ longer speaker holds must not be mistaken for slow B-roll or replaced by cutaway
 
 ## Editorial choices
 
+Apply `delivery-quality-v7.md` to source/crop detail, stable active-word
+typography, and the candidate's `quality_evidence`. Its concrete approved
+relationship overrides generic large/popping/stacked preset suggestions.
+
 - Follow the assigned opening structure. Add visual material when it supports
   evidence, memory, contrast, location, stakes, consequence, or the requested
   montage's emotional direction without implying false facts.

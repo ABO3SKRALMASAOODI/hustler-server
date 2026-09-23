@@ -51,6 +51,136 @@ def quality_fields(style_lane: str, *, editorial_duration_s: float = 23.0):
     return value
 
 
+@pytest.fixture
+def ready_final(tmp_path):
+    run_dir = tmp_path / "run"
+    call("init", "--run-dir", str(run_dir), "--run-id", "reject-test",
+         "--source", "topic")
+    assignment = run_dir / "assignments" / "s.json"
+    write_json(assignment, {"short_id": "s", "style_lane": "fast-conversation"})
+    call("add-short", "--run-dir", str(run_dir), "--short-id", "s",
+         "--project-id", "123", "--title", "s", "--assignment", str(assignment))
+    call("claim", "--run-dir", str(run_dir), "--short-id", "s", "--worker", "e")
+    preview = run_dir / "candidates" / "preview.mp4"
+    preview.write_bytes(b"preview")
+    bundle = preview.with_suffix(".json")
+    identity = {"run_id": "reject-test", "short_id": "s", "child_project_id": 123,
+                "edl_version": 3, "style_lane": "fast-conversation"}
+    write_json(bundle, {**identity, **quality_fields("fast-conversation"),
+                        "preview_path": str(preview), "outstanding_job_ids": []})
+    call("candidate", "--run-dir", str(run_dir), "--short-id", "s",
+         "--worker", "e", "--bundle", str(bundle), "--preview", str(preview),
+         "--edl-version", "3")
+    qc = preview.parent / "qc.json"
+    write_json(qc, {**identity, "score": 94, "verdict": "ready",
+                    "active_word_caption_check": "pass",
+                    "within_short_broll_uniqueness_check": "pass"})
+    call("qc", "--run-dir", str(run_dir), "--short-id", "s", "--score", "94",
+         "--verdict", "ready", "--report", str(qc))
+    final = run_dir / "exports" / "fast-conversation__s.mp4"
+    final.write_bytes(b"actual final with bad tail frames")
+    receipt = final.with_suffix(".json")
+    write_json(receipt, {"structuredContent": {"download_receipt": {
+        "render_type": "final_export", "edl_version": 3,
+        "sha256": run_state.sha256(final), "render_job_id": 456}}})
+    report = preview.parent / "reject-final.json"
+    write_json(report, {**identity, "verdict": "repair",
+                        "final_sha256": run_state.sha256(final),
+                        "final_receipt": str(receipt),
+                        "observations": "Two raw-source frames before branding."})
+    args = ["reject-final", "--run-dir", str(run_dir), "--short-id", "s",
+            "--file", str(final), "--edl-version", "3", "--report", str(report)]
+    return run_dir, final, receipt, report, args
+
+
+@pytest.mark.parametrize("exporting", [False, True])
+def test_reject_final_preserves_evidence_then_allows_claim(ready_final, exporting):
+    run_dir, final, receipt, report, args = ready_final
+    if exporting:
+        call("export-start", "--run-dir", str(run_dir), "--short-id", "s",
+             "--job-id", "456")
+        call("job", "--run-dir", str(run_dir), "--short-id", "s",
+             "--job-id", "456", "--kind", "final", "--state", "done")
+    before = json.loads((run_dir / "run.json").read_text())["shorts"]["s"]
+    call(*args)
+    state = json.loads((run_dir / "run.json").read_text())
+    item = state["shorts"]["s"]
+    assert item["status"] == "repair" and item["repair_rounds"] == 1
+    assert item["qc"] is None and item["export"] is None
+    history = item["rejected_finals"][0]
+    assert history["qc"] == before["qc"]
+    assert history["qc_report"]["payload"] == json.loads(
+        Path(before["qc"]["report"]).read_text())
+    assert history["export"] == before["export"]
+    assert history["candidate"] == before["candidate"]
+    assert history["sha256"] == run_state.sha256(final)
+    assert history["final_receipt"]["payload"] == json.loads(receipt.read_text())
+    assert history["report"]["payload"] == json.loads(report.read_text())
+    assert state["events"][-1]["type"] == "final_rejected"
+    call("claim", "--run-dir", str(run_dir), "--short-id", "s", "--worker", "e2")
+    after = json.loads((run_dir / "run.json").read_text())["shorts"]["s"]
+    assert after["status"] == "editing" and after["edit_round"] == 2
+    assert after["rejected_finals"][0] == history
+
+
+@pytest.mark.parametrize("key,value", [
+    ("run_id", "other"), ("short_id", "other"), ("child_project_id", 124),
+    ("style_lane", "headline-conversation"), ("edl_version", 2),
+    ("verdict", "ready"), ("final_sha256", "0" * 64),
+])
+def test_reject_final_refuses_unbound_report_without_mutation(ready_final, key, value):
+    run_dir, _, _, report, args = ready_final
+    payload = json.loads(report.read_text())
+    payload[key] = value
+    write_json(report, payload)
+    before = (run_dir / "run.json").read_bytes()
+    assert run_state.main(args) == 2
+    assert (run_dir / "run.json").read_bytes() == before
+
+
+@pytest.mark.parametrize("key", ["project_id", "child_project_id"])
+def test_reject_final_binds_receipt_project_when_present(ready_final, key):
+    run_dir, _, receipt, _, args = ready_final
+    payload = json.loads(receipt.read_text())
+    payload["structuredContent"]["download_receipt"][key] = 999
+    write_json(receipt, payload)
+    before = (run_dir / "run.json").read_bytes()
+    assert run_state.main(args) == 2
+    assert (run_dir / "run.json").read_bytes() == before
+
+
+@pytest.mark.parametrize("problem", [
+    "stale_candidate", "changed_final", "wrong_receipt", "preview_receipt",
+    "queued", "running", "untracked_export", "repair_limit", "already_exported",
+])
+def test_reject_final_refuses_stale_or_active_work(ready_final, problem):
+    run_dir, final, receipt, _, args = ready_final
+    if problem == "changed_final":
+        final.write_bytes(b"different actual media")
+    elif problem in {"wrong_receipt", "preview_receipt"}:
+        payload = json.loads(receipt.read_text())
+        record = payload["structuredContent"]["download_receipt"]
+        record.update({"sha256": "0" * 64} if problem == "wrong_receipt"
+                      else {"render_type": "preview"})
+        write_json(receipt, payload)
+    else:
+        with run_state.locked(str(run_dir)) as state:
+            item = state["shorts"]["s"]
+            if problem == "stale_candidate":
+                item["candidate"]["edl_version"] = 4
+            elif problem in {"queued", "running"}:
+                item["jobs"].append({"job_id": 789, "kind": "preview", "state": problem})
+            elif problem == "untracked_export":
+                item.update(status="exporting", export={"job_id": 456, "state": "running"})
+            elif problem == "repair_limit":
+                item["repair_rounds"] = 2
+            elif problem == "already_exported":
+                item["status"] = "exported"
+    before = (run_dir / "run.json").read_bytes()
+    assert run_state.main(args) == 2
+    assert (run_dir / "run.json").read_bytes() == before
+
+
 def test_happy_path_and_manifest(tmp_path):
     run_dir = tmp_path / "run"
     call("init", "--run-dir", str(run_dir), "--run-id", "r1",
@@ -311,3 +441,158 @@ def test_candidate_rejects_repeated_broll_source_window():
     ]
     with pytest.raises(run_state.StateError, match="repeats B-roll"):
         run_state.validate_candidate_contract(payload, "fast-conversation")
+
+
+@pytest.fixture
+def delivery_evidence(tmp_path, monkeypatch):
+    source = tmp_path / "original.mp4"
+    source.write_bytes(b"original source fixture")
+    acquisition = tmp_path / "acquisition.json"
+    write_json(acquisition, {"selected_format": "137", "width": 1920, "height": 1012})
+    policy = {
+        "version": "delivery-quality-v1",
+        "min_final_dimensions": [720, 1280],
+        "target_final_dimensions": [1080, 1920],
+        "min_native_short_edge": 720,
+        "max_picture_upscale": 1.1,
+    }
+    evidence = {
+        "source_path": str(source), "source_sha256": run_state.sha256(source),
+        "acquisition_record": str(acquisition), "native_dimensions": [1920, 1012],
+        "expected_final_dimensions": [1012, 1800],
+        "picture_regions": [{"source_crop_native": [0, 0, 1100, 824],
+                             "output_rect": [0, 519, 1012, 760]}],
+    }
+    probes = {str(source): [1920, 1012]}
+    monkeypatch.setattr(run_state, "video_dimensions", lambda p: probes[str(p)])
+    return policy, evidence, probes
+
+
+def test_native_1012_final_passes_without_forcing_1080(tmp_path, delivery_evidence):
+    policy, evidence, probes = delivery_evidence
+    final = tmp_path / "final.mp4"
+    final.write_bytes(b"native final")
+    probes[str(final)] = [1012, 1800]
+    result = run_state.measure_quality(policy, evidence, final)
+    assert result["verdict"] == "pass"
+    assert result["measured_dimensions"] == [1012, 1800]
+    assert result["final_sha256"] == run_state.sha256(final)
+
+
+def test_small_final_fails_despite_hd_source(tmp_path, delivery_evidence):
+    policy, evidence, probes = delivery_evidence
+    final = tmp_path / "bad-final.mp4"
+    final.write_bytes(b"small canvas")
+    probes[str(final)] = [338, 600]
+    result = run_state.measure_quality(policy, evidence, final)
+    assert "final_below_minimum" in result["violations"]
+    assert "final_differs_from_expected" in result["violations"]
+
+
+def test_upscaled_source_cannot_pass_native_detail_gate(delivery_evidence):
+    policy, evidence, probes = delivery_evidence
+    # Encoded dimensions look HD, but the acquisition/crop is only 640x338.
+    evidence["native_dimensions"] = [640, 338]
+    evidence["picture_regions"][0]["source_crop_native"] = [0, 0, 380, 285]
+    result = run_state.measure_quality(policy, evidence)
+    assert "native_source_below_minimum" in result["violations"]
+    assert "expected_canvas_exceeds_native_source" in result["violations"]
+    assert "picture_region_0_exceeds_native_detail" in result["violations"]
+
+
+def test_oversized_crop_and_changed_source_are_rejected(delivery_evidence):
+    policy, evidence, probes = delivery_evidence
+    evidence["picture_regions"][0]["source_crop_native"] = [1500, 0, 1100, 824]
+    with pytest.raises(run_state.StateError, match="outside its native canvas"):
+        run_state.measure_quality(policy, evidence)
+    evidence["source_sha256"] = "wrong"
+    with pytest.raises(run_state.StateError, match="checksum"):
+        run_state.measure_quality(policy, evidence)
+
+
+def test_quality_policy_gates_batch_and_actual_export(tmp_path, delivery_evidence):
+    policy, evidence, probes = delivery_evidence
+    run_dir = tmp_path / "quality-run"
+    policy_file = tmp_path / "policy.json"
+    write_json(policy_file, policy)
+    call("init", "--run-dir", str(run_dir), "--run-id", "quality",
+         "--source", "topic", "--quality-policy", str(policy_file))
+    for index in (1, 2):
+        assignment = run_dir / "assignments" / f"s{index}.json"
+        write_json(assignment, {"style_lane": "headline-conversation"})
+        call("add-short", "--run-dir", str(run_dir), "--short-id", f"s{index}",
+             "--project-id", str(index), "--title", "Story", "--assignment", str(assignment))
+    call("claim", "--run-dir", str(run_dir), "--short-id", "s1", "--worker", "e1")
+    claim_second = ["claim", "--run-dir", str(run_dir), "--short-id", "s2", "--worker", "e2"]
+    assert run_state.main(claim_second) == 2
+    preview = run_dir / "candidates" / "preview.mp4"
+    preview.write_bytes(b"small draft is allowed")
+    evidence_file = run_dir / "candidates" / "quality.json"
+    write_json(evidence_file, evidence)
+    bundle = run_dir / "candidates" / "candidate.json"
+    payload = {
+        "run_id": "quality", "short_id": "s1", "child_project_id": 1,
+        "style_lane": "headline-conversation", "edl_version": 7,
+        "preview_path": str(preview), "outstanding_job_ids": [],
+        "quality_evidence": str(evidence_file), **quality_fields("headline-conversation"),
+    }
+    candidate_args = ["candidate", "--run-dir", str(run_dir), "--short-id", "s1",
+                      "--worker", "e1", "--bundle", str(bundle), "--preview", str(preview),
+                      "--edl-version", "7"]
+    write_json(bundle, payload)
+    assert run_state.main(candidate_args) == 2  # Missing stable-size evidence.
+    payload["caption_treatment"].update(animation="none", emphasis="none",
+                                         rendered_stable_size_check="pass")
+    write_json(bundle, payload)
+    call(*candidate_args)
+    review_file = run_dir / "candidates" / "review.json"
+    review = {
+        "source_detail": "pass", "typography": "pass", "stable_word_size": "pass",
+        "active_word_color": "pass", "reference_comparison": "pass",
+        "observations": "Measured full-size comparison fixture.",
+        "evidence_files": [str(preview)],
+    }
+    write_json(review_file, review)
+    qc = run_dir / "candidates" / "qc.json"
+    qc_payload = {
+        "run_id": "quality", "short_id": "s1", "child_project_id": 1,
+        "style_lane": "headline-conversation", "edl_version": 7,
+        "verdict": "ready", "score": 100,
+        "active_word_caption_check": "pass", "within_short_broll_uniqueness_check": "pass",
+    }
+    qc_args = ["qc", "--run-dir", str(run_dir), "--short-id", "s1",
+               "--verdict", "ready", "--score", "100", "--report", str(qc)]
+    write_json(qc, qc_payload)
+    assert run_state.main(qc_args) == 2  # Perfect score cannot waive review.
+    qc_payload["delivery_quality_review"] = str(review_file)
+    write_json(qc, qc_payload)
+    call(*qc_args)
+    assert run_state.main(claim_second) == 2  # Preview approval is not a final pilot.
+    final = run_dir / "exports" / "headline-conversation__s1.mp4"
+    final.write_bytes(b"actual final")
+    probes[str(final)] = [338, 600]
+    export_args = ["export", "--run-dir", str(run_dir), "--short-id", "s1",
+                   "--file", str(final), "--edl-version", "7", "--duration", "28",
+                   "--quality-review", str(review_file)]
+    assert run_state.main(export_args) == 2
+    probes[str(final)] = [1012, 1800]
+    assert run_state.main(export_args) == 2  # Review must bind actual final hash.
+    review["final_sha256"] = run_state.sha256(final)
+    write_json(review_file, review)
+    call(*export_args)
+    call(*claim_second)
+    state = json.loads((run_dir / "run.json").read_text())
+    assert state["quality_pilot"]["sha256"] == run_state.sha256(final)
+    assert state["shorts"]["s1"]["export"]["quality"]["verdict"] == "pass"
+
+
+def test_quality_policy_cannot_change_silently(tmp_path, delivery_evidence):
+    policy, _, _ = delivery_evidence
+    policy_file = tmp_path / "policy.json"
+    write_json(policy_file, policy)
+    record = {"quality_policy": {"file": str(policy_file),
+                                "sha256": run_state.sha256(policy_file)}}
+    policy["min_final_dimensions"] = [338, 600]
+    write_json(policy_file, policy)
+    with pytest.raises(run_state.StateError, match="changed after initialization"):
+        run_state.run_quality_policy(record)
