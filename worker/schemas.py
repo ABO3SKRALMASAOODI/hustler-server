@@ -36,7 +36,10 @@ from pydantic import AfterValidator, BaseModel, Field, field_validator, model_va
 # tiles with its own eyes each turn instead of reading second-hand captions.
 # `moments`/`shots[].caption` remain readable on old rows but are no longer
 # produced. Existing indexes must rebuild to gain the strip.
-PIPELINE_VERSION = 11
+# v12: transcription/silence WAVs preserve the media clock through AAC joins,
+# timestamp gaps and delayed audio starts. v11 sample-packed WAVs can drift
+# from renderer PTS; do not reuse their word times for a new indexing job.
+PIPELINE_VERSION = 12
 
 MIN_SPAN_S = 0.05
 GAIN_MIN_DB = -60.0

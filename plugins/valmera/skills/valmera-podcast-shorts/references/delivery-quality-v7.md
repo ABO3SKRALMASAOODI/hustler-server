@@ -54,6 +54,41 @@ exposes softness. Distinguish acquisition/encoding failures from detail missing
 in the original recording. If a limitation cannot be resolved, disclose it and
 record the user's accepted exception instead of calling it premium quality.
 
+## Preserve one picture, speech, and caption clock
+
+Treat source preparation as a timing change until verified. Joining compressed
+clips, decoding frames for enhancement, changing frame rates, and remuxing audio
+can preserve nominal duration while changing when content is presented. Keep
+the original media and source-to-master time map; verify the prepared master
+against them before upload. When assembling excerpts, normalize both streams
+onto the intended timeline and verify joins rather than assuming stream-copy
+concatenation or a new FPS label is timing-safe.
+
+Check anchors near the beginning, middle, and end of the prepared source, and
+on both sides of joins. A pilot from the beginning cannot rule out cumulative
+drift in later stories. Compare picture timing, speech timing, and word timing
+separately. Audio stream start/end metadata alone is insufficient: decoded
+sample duration can differ from the presentation timeline when packets overlap
+or have gaps. WAV extraction for timing evidence must honor those timestamps,
+including delayed starts; simply packing decoded samples can shift every later
+caption. Preserve this evidence with the source checksum.
+
+For every actual final, verify that displayed phrases and any active-word
+highlight match its own speech at the opening, across edits, and near the payoff.
+Use synchronized playback when available or timestamped waveform/word-alignment
+evidence against that exact file. Record the method, checked output intervals,
+measured lead/lag where available, and evidence paths in the quality review.
+Reading the same source transcript that generated the captions is not an
+independent sync check. Still frames establish appearance, not synchronization;
+never mark timing passed using only screenshots or copied pass labels.
+
+If a common mismatch appears across a batch, compare original, prepared master,
+transcription audio, preview, and final before choosing the repair. Distinguish
+a constant offset from accumulating drift or a jump at an edit. Correct the
+faulty stage and re-check affected timings; do not hide varying drift with one
+global offset. Keep already delivered media intact unless the user asks for
+revised deliverables. These checks do not prescribe any caption style.
+
 ## Design captions, then verify their execution
 
 - **Readability:** choose clear letterforms, sufficient contrast and weight,

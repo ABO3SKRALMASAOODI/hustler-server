@@ -118,6 +118,13 @@ Use the same current preview for every check. Inspect:
 - the last two seconds at 0.25-second spacing;
 - the complete speech/caption stream once.
 
+Apply the independent synchronization check in `delivery-quality-v7.md` to the
+actual audio, picture, and caption clocks. Save its method and time-specific
+evidence. A source transcript, still-frame contact sheet, clean container probe,
+or editor's `rendered_timing_check: "pass"` alone cannot approve synchronization.
+If the source was assembled or enhanced, also inspect later source sections:
+errors at joins can accumulate after an otherwise successful opening pilot.
+
 During that caption pass, inspect rendered transitions as well as still frames.
 Check reading comfort, accurate timing, coherent typography, deliberate motion,
 and safe composition in the opening, densest phrase, shot/speaker changes, and
