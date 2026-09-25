@@ -492,8 +492,20 @@ def adopt_client_proxy(src, dst, warnings=None):
 
 
 def extract_wav(src, dst, cancelled_cb=None):
+    """Decode the ASR waveform on the media clock, including gaps/overlaps.
+
+    WAV has no packet timestamps. Plain decoding packs every AAC frame next
+    to the previous one, so concatenated encoder padding becomes cumulative
+    caption drift even though the renderer trims by PTS. Reconcile samples
+    with PTS before discarding timestamps, and retain a delayed audio start.
+    A 1 ms hard-compensation threshold catches sub-frame joins; the default
+    100 ms threshold still leaves visible word-highlight errors. async=1
+    fills/trims discontinuities without stretching ordinary speech.
+    """
     cancel_kw = ({"cancelled_cb": cancelled_cb} if cancelled_cb else {})
-    run(["ffmpeg", "-y", "-i", src, "-vn", "-ac", "1", "-ar", "16000",
+    run(["ffmpeg", "-y", "-i", src, "-map", "0:a:0", "-vn",
+         "-af", "aresample=async=1:min_hard_comp=0.001:first_pts=0",
+         "-ac", "1", "-ar", "16000",
          "-c:a", "pcm_s16le", dst], **cancel_kw)
 
 

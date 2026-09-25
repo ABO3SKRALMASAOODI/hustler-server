@@ -172,6 +172,10 @@ If given a topic, find one suitable long-form source. If given a URL or an
 existing Valmera project, use that source. Hash downloaded media and do not
 redownload or reupload an identical file within the same run.
 
+Verify picture, speech, and caption timing after source preparation, including
+later source sections and joins; use `delivery-quality-v7.md`. A successful
+opening pilot cannot establish that the entire source remains synchronized.
+
 Read the full transcript before selecting. Select complete micro-stories, not
 isolated quotes. Each must have an immediate hook, enough context to understand
 the claim, development or evidence, and a payoff. Preserve meaning and speaker
