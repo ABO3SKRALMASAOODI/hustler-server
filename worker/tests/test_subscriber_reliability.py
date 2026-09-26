@@ -164,6 +164,9 @@ def test_large_short_original_is_streamed_only_on_cloudflare(monkeypatch):
 
 
 def test_large_project_admission_counts_staged_assets(monkeypatch):
+    # Explicitly constrain indexing here to distinguish staged bytes from
+    # streamed preview inputs; the batch index default is tested separately.
+    monkeypatch.setattr(config, "CLOUDFLARE_MAX_INDEX_INPUT_BYTES", 4 * 1024 ** 3)
     monkeypatch.setattr(config, "CLOUDFLARE_EXECUTOR_ENABLED", True)
     monkeypatch.setattr(config, "CLOUDFLARE_EXECUTOR_URL", "https://example.com")
     monkeypatch.setattr(config, "CLOUDFLARE_EXECUTOR_TYPES", {"preview", "index", "filmstrip"})

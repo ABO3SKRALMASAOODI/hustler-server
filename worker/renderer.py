@@ -51,6 +51,7 @@ DUCK_DB = -12.0            # music under speech AND program audio under voiceove
 MAX_ENABLE_SPANS = 80
 AUDIO_NORM = "aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo"
 _RENDER_DETAIL = ContextVar("render_detail", default=None)
+_RENDER_JOB_TYPE = ContextVar("render_job_type", default=None)
 CANVAS_MAX_DIRECT_INPUTS = 8
 
 
@@ -4013,18 +4014,24 @@ def _output_clock(fps):
 
 
 def _render_ffmpeg_timeout(preview, expected_out_s):
-    """Size healthy final time from authored duration, not a flat leash.
+    """Budget healthy encodes by output duration within the provider lease.
 
-    The exact output clock lets finals receive up to 2x realtime plus staging
-    margin under the durable Modal envelope. Broken graphs are still governed
-    by the much shorter no-progress and output-overrun watchdogs. Retired
-    Cloud Run and interactive preview paths retain the original sub-hour cap.
+    Cloudflare and Modal durable renders can outlive the old HTTP ceiling.
+    Reserve up to ten minutes for staging, verification and publication;
+    proof jobs retain their shorter envelope. Stall, overrun and lost-lease watchdogs
+    continue to stop unproductive work independently of this ceiling.
     """
-    if preview or os.getenv("EXECUTOR_PROVIDER", "") != "modal":
+    provider = os.getenv("EXECUTOR_PROVIDER", "")
+    if provider not in {"cloudflare", "modal"} or (preview and provider == "modal"):
         return config.FFMPEG_TIMEOUT_S
+    kind = _RENDER_JOB_TYPE.get() or ("preview" if preview else "final")
+    envelope = (config.cloudflare_timeout_for(kind) if provider == "cloudflare"
+                else config.modal_timeout_for(kind))
     requested = max(config.FFMPEG_TIMEOUT_S,
                     int(float(expected_out_s or 0.0) * 2.0 + 600.0))
-    return min(config.FINAL_FFMPEG_TIMEOUT_MAX_S, requested)
+    margin = min(600, max(30, int(envelope * .2)))
+    return max(1, min(config.FINAL_FFMPEG_TIMEOUT_MAX_S, requested,
+                      envelope - margin))
 
 
 def _stream_report(path):
@@ -4988,6 +4995,7 @@ def run_render_job(worker_db, job):
     if quality not in ("draft", "approval"):
         raise dbx.PermanentJobError("Unknown preview quality")
     token = _PREVIEW_QUALITY.set(quality)
+    job_type_token = _RENDER_JOB_TYPE.set(job.get("type"))
     try:
         try:
             return _run_render_job(worker_db, job)
@@ -5010,6 +5018,7 @@ def run_render_job(worker_db, job):
             return result
     finally:
         _PREVIEW_QUALITY.reset(token)
+        _RENDER_JOB_TYPE.reset(job_type_token)
 
 
 def _run_render_job(worker_db, job):

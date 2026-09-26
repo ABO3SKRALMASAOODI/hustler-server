@@ -331,3 +331,32 @@ def test_negated_duration_in_repair_direction_never_replaces_customer_target():
             "Create a 30–40 second vertical 9:16 Instagram Story/Reel ad. " + prohibition)
         assert (target['min_s'], target['max_s']) == (30, 40)
         assert quality_verifier.requested_duration_target(prohibition) is None
+
+
+def test_subscriber_long_form_targets_use_minutes_and_hours():
+    for prompt, low, high in (
+        ('Make the final video a cohesive 15–20 minute YouTube gaming video.', 900, 1200),
+        ("Yiou can't make this video 10 minutes long?", 588, 612),
+        ('Make it 1.5 hours.', 5292, 5508),
+    ):
+        target = quality_verifier.requested_duration_target(prompt)
+        assert target is not None
+        assert (target['min_s'], target['max_s']) == (low, high)
+
+
+def test_minute_effect_positions_and_negation_are_not_program_targets():
+    for prompt in ('Add a zoom at 10 minutes.', 'Show a title after 2–3 minutes.',
+                   'Do not make a 10 minute video.', 'Hold each shot 1–2 minutes.'):
+        assert quality_verifier.requested_duration_target(prompt) is None
+
+
+def test_later_duration_instruction_invalidates_a_cached_quality_pass():
+    import agent_loop
+    ctx = SimpleNamespace(verification_request='Make it 12 seconds. Make this video 10 minutes long.',
+        latest_edl=lambda: {'version': 7, 'json': default_edl(12)},
+        last_preview={'edl_version': 7, 'duration_s': 12}, versions_written=[7],
+        verification_records={7: {'status': 'passed', 'unresolved_findings': []}})
+    assert agent_loop._verification_complete(ctx) is False
+    result = agent_loop._quality_handoff(ctx)
+    assert result['export_ready'] is False
+    assert 'duration target' in result['quality_findings'][0]

@@ -124,6 +124,11 @@ def version_report():
         "transition_version": config.TRANSITION_VERSION,
         "timeline_media_version": filmstrip.TIMELINE_MEDIA_VERSION,
         "features": feats,
+        "processing_limits": {
+            "cloudflare_index_input_bytes": config.CLOUDFLARE_MAX_INDEX_INPUT_BYTES,
+            "cloudflare_preview_lease_s": config.cloudflare_timeout_for("preview"),
+            "cloudflare_final_lease_s": config.cloudflare_timeout_for("final"),
+        },
     }
 
 

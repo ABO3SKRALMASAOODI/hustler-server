@@ -207,7 +207,12 @@ def _cloudflare_selected(job):
         elif job_type == "filmstrip" and shape.get("proxy_bytes"):
             # Filmstrips stage the completed proxy, never its unused original.
             staged_bytes = max(0, staged_bytes - original_bytes) + int(shape["proxy_bytes"])
-        bytes_ok = staged_bytes <= config.CLOUDFLARE_MAX_INPUT_BYTES
+        byte_limit = (config.CLOUDFLARE_MAX_INDEX_INPUT_BYTES
+                      if job_type == "index" else config.CLOUDFLARE_MAX_INPUT_BYTES)
+        # Indexing downloads one source. Unknown/zero metadata cannot prove
+        # it will fit; unlike a streamed render, zero is not a valid shape.
+        bytes_ok = (0 < staged_bytes <= byte_limit if job_type == "index"
+                    else 0 <= staged_bytes <= byte_limit)
         duration_limit = float(config.CLOUDFLARE_MAX_SOURCE_DURATION_S)
         duration_ok = duration_limit <= 0 or (
             float(shape.get("max_duration_s") or 0) <= duration_limit)

@@ -1024,6 +1024,12 @@ CLOUDFLARE_MODAL_FALLBACK = os.getenv(
     "CLOUDFLARE_MODAL_FALLBACK", "0") == "1"
 CLOUDFLARE_MAX_INPUT_BYTES = int(os.getenv(
     "CLOUDFLARE_MAX_INPUT_BYTES", str(4 * 1024 ** 3)))
+# Indexing uses standard-4 (20 GiB disk), not the interactive render tier.
+# Keep a bounded admission ceiling and the download-time free-space check
+# (including WORKDIR_HEADROOM); accepting a 4.86-GB recording must not require
+# enabling an otherwise retired provider or moving compute onto Render.
+CLOUDFLARE_MAX_INDEX_INPUT_BYTES = max(1, int(os.getenv(
+    "CLOUDFLARE_MAX_INDEX_INPUT_BYTES", str(8 * 1024 ** 3))))
 # Long sources are usually edited into short, sparse output ranges. Feeding
 # ffmpeg a presigned R2 URL lets it range-read those windows instead of making
 # every parallel Container stage the same multi-hour proxy in full.
@@ -1317,10 +1323,10 @@ CLOUDFLARE_EXECUTOR_TIMEOUTS = {
     # Canvas previews prepare selected windows from original clips, unlike
     # main-source previews that can use an existing proxy. A progressing
     # ten-minute 4K assembly exceeded the old 25-minute admission budget.
-    # Keep a finite one-hour lease; per-encoder stall and overrun watchdogs
-    # still stop unproductive work much earlier. Proof reels keep their short
-    # preview_check budget.
-    "preview": int(os.getenv("CLOUDFLARE_TIMEOUT_PREVIEW_S", "3600")),
+    # A complete long-form preview needs the same durable envelope as a final.
+    # Each encoder has a duration-aware budget, with stall, overrun and lease
+    # watchdogs; proof reels retain their short preview_check budget.
+    "preview": int(os.getenv("CLOUDFLARE_TIMEOUT_PREVIEW_S", "21600")),
     "final": int(os.getenv("CLOUDFLARE_TIMEOUT_FINAL_S", "21600")),
     "index": int(os.getenv("CLOUDFLARE_TIMEOUT_INDEX_S", "21600")),
     "agent_turn": int(os.getenv("CLOUDFLARE_TIMEOUT_AGENT_S", "21600")),

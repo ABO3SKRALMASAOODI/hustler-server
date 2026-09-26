@@ -2693,6 +2693,10 @@ def _verification_complete(ctx):
     latest, record = _latest_verification(ctx)
     if latest is None:
         return False
+    latest_row = ctx.latest_edl()
+    if isinstance(latest_row.get("json"), dict) and quality_verifier._request_findings(
+            latest_row["json"], quality_verifier.request_text_for(ctx)):
+        return False
     return (record.get("status") in {"passed", "justified"}
             and not record.get("unresolved_findings"))
 
@@ -2700,9 +2704,19 @@ def _verification_complete(ctx):
 def _quality_handoff(ctx):
     """Expose the durable quality gate for the exact immutable EDL version."""
     try:
-        latest = ctx.latest_edl()["version"]
+        latest_row = ctx.latest_edl()
+        latest = latest_row["version"]
     except Exception:
         return {"quality_status": "unchecked", "export_ready": False}
+    # A passed version can predate a new instruction adopted into this turn.
+    # Recheck explicit customer constraints before trusting its cached pass;
+    # the pixels are unchanged, but what the user requested may have changed.
+    if isinstance(latest_row.get("json"), dict):
+        request_findings = quality_verifier._request_findings(
+            latest_row["json"], quality_verifier.request_text_for(ctx))
+        if request_findings:
+            return {"quality_status": "repair_required", "export_ready": False,
+                    "quality_findings": [r["message"] for r in request_findings]}
     preview = getattr(ctx, "last_preview", None) or {}
     if preview.get("edl_version") != latest:
         return {"quality_status": "unchecked",
