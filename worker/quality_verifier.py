@@ -407,7 +407,7 @@ def _audio_findings(edl):
 
 _PROGRAM_DURATION_RE = re.compile(
     r"\b(\d{1,4}(?:\.\d+)?)(?:\s*(?:-|–|—|to)\s*"
-    r"(\d{1,4}(?:\.\d+)?))?\s*[-–]?\s*(?:s|sec(?:ond)?s?)\b", re.I)
+    r"(\d{1,4}(?:\.\d+)?))?\s*[-–]?\s*(s|sec(?:ond)?s?|min(?:ute)?s?|h|hr?s?|hours?)\b", re.I)
 
 
 def request_text_for(ctx):
@@ -435,12 +435,15 @@ def _program_duration_context(text, match):
                  r"(?:(?:around|about|roughly|the)\s+)*$", before):
         return False
     program = r"(?:video|reel|ad|advertisement|film|montage|short|edit|program|runtime|duration)"
-    if re.match(r"\s*[-–]?\s*(?:(?:vertical|horizontal|final|total|long|instagram|tiktok|youtube|story/reel|story|9:16|16:9)\s+){0,6}"
+    if re.match(r"\s*[-–]?\s*(?:(?:vertical|horizontal|final|total|long|instagram|tiktok|youtube|gaming|wedding|podcast|story/reel|story|9:16|16:9)\s+){0,6}"
                 + program + r"\b", after):
         return True
     if re.search(r"\b" + program + r"\b[^,;]{0,35}"
                  r"(?:to|of|is|be|last|length|:|=)\s*"
                  r"(?:(?:about|around|roughly|approximately)\s+)?$", before):
+        return True
+    if re.search(r"\b(?:make|cut|trim|shorten|keep)\s+"
+                 r"(?:(?:this|the|my|a)\s+)?" + program + r"\s*$", before):
         return True
     return bool(re.search(
         r"\b(?:make|cut|trim|shorten|keep)\s+(?:it|this|the whole thing)\s*"
@@ -461,13 +464,15 @@ def requested_duration_target(request_text):
     if not matches:
         return None
     match = matches[-1]
+    unit = match.group(3).lower()
+    multiplier = 3600 if unit.startswith('h') else 60 if unit.startswith('min') else 1
     if match.group(2):
-        lo, hi = float(match.group(1)), float(match.group(2))
+        lo, hi = float(match.group(1)) * multiplier, float(match.group(2)) * multiplier
         if 0.2 <= lo <= 86400 and 0.2 <= hi <= 86400:
             return {"min_s": min(lo, hi), "max_s": max(lo, hi),
                     "approximate": False, "request": match.group(0)}
         return None
-    target = float(match.group(1))
+    target = float(match.group(1)) * multiplier
     if not 0.2 <= target <= 86400:
         return None
     nearby = text[max(0, match.start() - 24):match.end() + 10].lower()

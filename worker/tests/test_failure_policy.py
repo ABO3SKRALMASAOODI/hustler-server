@@ -34,12 +34,12 @@ def test_provider_render_deadline_never_buys_an_identical_second_render():
             assert not d.agent_repairable
 
 
-def test_preview_timeout_can_be_repaired_on_a_new_edl_version():
+def test_preview_timeout_does_not_authorize_changing_the_edit():
     d = failure_policy.classify(
         media.MediaError("ffmpeg killed: wall-clock 1500s exceeded"),
         "preview")
     assert d.retryable is False
-    assert d.agent_repairable is True
+    assert d.agent_repairable is False
 
 
 def test_invalid_edl_gets_agent_repair_not_same_job_retry():

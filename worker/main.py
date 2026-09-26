@@ -373,6 +373,19 @@ def _notify_failure(worker_db, job, err):
             note = FORCED_PREVIEW_FAIL_NOTE
         elif payload.get("source") == "user_edit":
             note = USER_PREVIEW_FAIL_NOTE
+    decision = failure_policy.decision_for(err, job["type"])
+    if job["type"] == "index" and decision.kind in {
+            "executor_unavailable", "executor_capacity", "provider_budget_exhausted"}:
+        note = ("Your upload is saved, but our processing service could not "
+                "analyze it. This needs a service-side fix; uploading the same "
+                "file again or changing its format will not resolve it.")
+    elif note and job["type"] in {"preview", "preview_check", "final"} and (
+            decision.kind == "render_budget_exceeded" and not decision.agent_repairable
+            or decision.kind in {"executor_unavailable", "executor_capacity",
+                                 "provider_budget_exhausted"}):
+        note = ("Your edit is saved, but our rendering service could not "
+                "finish this version within its processing limits. This needs "
+                "a service-side fix; it does not mean your timeline is invalid.")
     if not note:
         return
     try:

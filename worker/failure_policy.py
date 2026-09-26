@@ -120,12 +120,13 @@ def classify(error, job_type=None):
                        or "through its executor deadline" in text):
         return FailureDecision("render_budget_exceeded", False, 0, False)
 
-    # The watchdog already proved the exact command cannot finish inside the
-    # fleet's physical budget.  Buying the same 50 minutes again cannot make
-    # it shorter; a new/simpler EDL or a different execution shape can.
+    # A clock budget is an infrastructure limit, not permission to shorten
+    # or otherwise rewrite a customer's valid edit. Runaway output is a
+    # distinct graph defect that the editor may repair on a new version.
     if re.search(r"wall-clock\s+[0-9.]+s\s+exceeded", text) \
-            or "runaway encode" in text \
             or re.search(r"timed out after\s+[0-9.]+s", text):
+        return FailureDecision("render_budget_exceeded", False, 0, False)
+    if "runaway encode" in text:
         return FailureDecision("render_budget_exceeded", False, 0,
                                job_type in ("preview", "preview_check"))
 
