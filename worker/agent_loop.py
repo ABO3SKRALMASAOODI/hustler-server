@@ -2693,6 +2693,10 @@ def _verification_complete(ctx):
     latest, record = _latest_verification(ctx)
     if latest is None:
         return False
+    latest_row = ctx.latest_edl()
+    if isinstance(latest_row.get("json"), dict) and quality_verifier._request_findings(
+            latest_row["json"], quality_verifier.request_text_for(ctx)):
+        return False
     return (record.get("status") in {"passed", "justified"}
             and not record.get("unresolved_findings"))
 

@@ -356,6 +356,7 @@ def test_later_duration_instruction_invalidates_a_cached_quality_pass():
         latest_edl=lambda: {'version': 7, 'json': default_edl(12)},
         last_preview={'edl_version': 7, 'duration_s': 12}, versions_written=[7],
         verification_records={7: {'status': 'passed', 'unresolved_findings': []}})
+    assert agent_loop._verification_complete(ctx) is False
     result = agent_loop._quality_handoff(ctx)
     assert result['export_ready'] is False
     assert 'duration target' in result['quality_findings'][0]
