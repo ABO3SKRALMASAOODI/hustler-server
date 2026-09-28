@@ -1402,6 +1402,7 @@ def list_users():
             cur.execute(f"""
                 SELECT
                     u.id, u.email, u.plan, u.is_subscribed,
+                    to_jsonb(u)->>'billing_period' AS billing_period,
                     u.is_verified, u.auth_provider,
                     {trial_cols}
                     u.credits_balance, u.credits_daily, u.credits_monthly,

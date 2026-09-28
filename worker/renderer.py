@@ -1132,6 +1132,13 @@ def edl_has_shaped_text(edl):
                for t in ((edl or {}).get("texts") or []))
 
 
+def audio_peak_current(meta, edl):
+    # Social mastering already had a limiter. Only previously unmastered
+    # mixes need their cached render rebuilt on the next render request.
+    return ((edl.get("master") or {}).get("loudness") == "social"
+            or (meta or {}).get("audio_peak_v") == 1)
+
+
 def shaping_current(meta, edl):
     """Does this cached render predate the complex-script text fix?
 
@@ -5112,6 +5119,7 @@ def _run_render_job(worker_db, job):
                              edl_row["json"].get("inserts") or [],
                              edl_row["json"].get("speed")).out_duration
         if fp_ok and outro_current(cached.get("meta"), variant) \
+                and audio_peak_current(cached.get("meta"), edl_row["json"]) \
                 and shaping_current(cached.get("meta"), edl_row["json"]) \
                 and transitions_current(cached.get("meta"), edl_row["json"]) \
                 and music_tail_current(cached.get("meta"), edl_row["json"],
@@ -5392,6 +5400,7 @@ def _run_render_job(worker_db, job):
                         if prev_row else None
                     if prev_row \
                             and outro_current(pm, variant) \
+                            and audio_peak_current(pm, prev_row["json"]) \
                             and shaping_current(pm, prev_row["json"]) \
                             and transitions_current(pm, prev_row["json"]) \
                             and music_tail_current(pm, prev_row["json"],
@@ -5733,6 +5742,7 @@ def _run_render_job(worker_db, job):
                   "gfx_shape_v": config.GFX_SHAPING_VERSION,
                   "trans_v": config.TRANSITION_VERSION,
                   "tail_v": config.MUSIC_TAIL_VERSION,
+                  "audio_peak_v": 1,
                   "wm_v": (0 if proof_only else
                            watermark_version(variant, is_paid, wm_settings)),
                   "wm_p": (watermark_position(wm_settings)

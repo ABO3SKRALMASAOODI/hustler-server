@@ -68,3 +68,10 @@ def test_unmastered_audio_still_has_a_codec_safe_peak_ceiling(tmp_path):
     raw=subprocess.run(['ffmpeg','-v','error','-i',str(target),'-map','0:a:0','-f','f32le','-'],check=True,capture_output=True).stdout
     peak=float(np.abs(np.frombuffer(raw,dtype=np.float32)).max())
     assert .5 < peak < .86
+
+
+def test_only_old_unmastered_audio_invalidates_render_cache():
+    import renderer
+    assert renderer.audio_peak_current({}, {'master':{'loudness':'social'}})
+    assert not renderer.audio_peak_current({}, {'master':None})
+    assert renderer.audio_peak_current({'audio_peak_v':1}, {'master':None})

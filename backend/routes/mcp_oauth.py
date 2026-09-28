@@ -279,6 +279,7 @@ def _fail_page(message, code=400):
     body = (PAGE.replace("__CLIENT__", "This app")
             .replace("__ERROR__", f'<div class="err">{_esc(message)}</div>')
             .replace("__HIDDEN__", "").replace("__EMAIL__", "")
+            .replace("__SESSION_URL__", "https://valmera.io/mcp/connect")
             .replace("__REDIRECT_HOST__", "nowhere"))
     body = body[:body.index("<form")] + "</div></body></html>"
     return Response(body, status=code, mimetype="text/html")
