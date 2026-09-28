@@ -37,3 +37,31 @@ def test_mcp_only_blocks_hosted_ai_but_legacy_is_untouched(plan,blocked):
         result=video._studio_ai_gate(Cursor(),1)
         assert bool(result) is blocked
         if blocked: assert result[0].get_json()['connect_url']=='/mcp/connect'
+
+
+@pytest.mark.parametrize('endpoint', ['/paddle/checkout-config', '/paddle/create-checkout-session', '/paddle/change-plan'])
+@pytest.mark.parametrize('current,target', [('mcp_connect','advanced'), ('advanced','mcp_connect')])
+def test_new_annual_switch_preserves_prepaid_term_before_provider_mutation(monkeypatch, endpoint, current, target):
+    monkeypatch.setattr(paddle,'paddle_headers',lambda: {})
+    monkeypatch.setattr(paddle,'decode_token',lambda _: (7,'buyer@example.com'))
+    monkeypatch.setattr(paddle,'_subscription_snapshot',lambda _: {'plan':current,'is_subscribed':True,'subscription_id':'sub_annual'})
+    monkeypatch.setattr(paddle,'_new_plan_readiness',lambda _: None)
+    class Response:
+        status_code=200
+        def json(self):
+            return {'data': {'status':'active','billing_cycle':{'interval':'year'},
+                'items':[{'price':{'id':paddle.PLANS[current]['yearly_price_id'], 'billing_cycle':{'interval':'year'}}}]}}
+    monkeypatch.setattr(paddle.requests,'get',lambda *a,**k: Response())
+    monkeypatch.setattr(paddle.requests,'post',lambda *a,**k: pytest.fail('must not create checkout or discount'))
+    monkeypatch.setattr(paddle.requests,'patch',lambda *a,**k: pytest.fail('must not replace prepaid annual price'))
+    app=Flask(__name__);app.register_blueprint(paddle.paddle_bp)
+    result=app.test_client().post(endpoint,json={'plan':target,'billing':'yearly'},headers={'Authorization':'Bearer test'})
+    assert result.status_code==409
+    assert result.get_json()['code']=='annual_term_protected'
+
+
+@pytest.mark.parametrize('plan,period', [('ai','yearly'),('ai_pro','yearly'),('ai_max','yearly'),('advanced','monthly'),('mcp_connect','monthly')])
+def test_annual_guard_does_not_change_legacy_or_monthly_switches(plan,period):
+    price=paddle.PLANS[plan]['yearly_price_id' if period=='yearly' else 'price_id']
+    sub={'billing_cycle':{'interval':'year' if period=='yearly' else 'month'},'items':[{'price':{'id':price}}]}
+    assert paddle._annual_contract_change_error({'plan':plan},sub) is None
