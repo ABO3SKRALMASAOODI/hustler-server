@@ -13,7 +13,7 @@ from plan_catalog import (
     PLAN_PRICES_USD,
     PLANS_LIVE,
     PLANS_SANDBOX,
-    PURCHASABLE_PLANS, available_plans,
+    PURCHASABLE_PLANS, NEW_PLANS, available_plans,
 )
 
 paddle_bp = Blueprint('paddle', __name__)
@@ -488,6 +488,21 @@ def _upgrade_token(user_id, quote, discount_id):
     }, os.environ["SECRET_KEY"], algorithm="HS256")
 
 
+def _annual_contract_change_error(snapshot, subscription):
+    """Keep prepaid new contracts intact until a term-aware switch exists."""
+    price_id = ((_subscription_item(subscription).get("price") or {}).get("id"))
+    plan = _plan_from_price(price_id) or snapshot.get("plan")
+    if plan in NEW_PLANS and _subscription_period(subscription) == "yearly":
+        return {
+            "error": "Your annual plan and monthly credits stay active for the "
+                     "full paid year. To choose a different plan or billing "
+                     "period, cancel renewal and subscribe after that term "
+                     "ends. Nothing has changed or been charged.",
+            "code": "annual_term_protected",
+        }
+    return None
+
+
 def _upgrade_checkout_context(user_id, new_plan, billing):
     """Return the server-issued upgrade discount and signed correlation.
 
@@ -546,6 +561,9 @@ def _upgrade_checkout_context(user_id, new_plan, billing):
             "code": "existing_subscription",
         }, 409)
 
+    annual_error = _annual_contract_change_error(snapshot, subscription)
+    if annual_error:
+        return None, (annual_error, 409)
     quote = _upgrade_checkout_quote(
         snapshot, subscription, new_plan, billing)
     if not quote:
@@ -617,6 +635,10 @@ def change_plan():
     current_billing = _subscription_period(subscription)
     if current_plan == new_plan and current_billing == billing:
         return jsonify({"error": "That is already your current plan."}), 409
+
+    annual_error = _annual_contract_change_error(snapshot, subscription)
+    if annual_error:
+        return jsonify(annual_error), 409
 
     # Upgrades deliberately use a second checkout. That is where the customer
     # sees and pays the new charge, with unused old-plan credits applied as a
