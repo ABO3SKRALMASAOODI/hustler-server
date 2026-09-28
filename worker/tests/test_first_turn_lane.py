@@ -21,7 +21,7 @@ import llm                                                  # noqa: E402
 @pytest.fixture(autouse=True)
 def _fresh_pool(monkeypatch):
     monkeypatch.setattr(llm, "_first_turn_client", None)
-    monkeypatch.setattr(llm, "paid_editor_lanes", lambda: [dict(client=object(), model="gpt-5.6-luna")])
+    monkeypatch.setattr(llm, "paid_editor_lanes", lambda plan=None: [dict(client=object(), model="gpt-5.6-luna")])
 
 
 def _lane_on(monkeypatch, model="test-strong-model"):

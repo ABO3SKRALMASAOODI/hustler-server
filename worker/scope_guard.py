@@ -214,16 +214,39 @@ def _audio_mix_preserved(previous: Dict[str, Any], proposed: Dict[str, Any],
                for insert_id in set(after_inserts) - set(before_inserts))
 
 
+def audio_revision_only(message):
+    """Conservative audio-only follow-ups, including the audited Czech request.
+
+    Structural instructions always win. Unknown languages remain unrestricted;
+    this is a bounded protection, not a claim to understand every creative brief.
+    """
+    text = _normalise_message(message)
+    if not text or len(text) > 700:
+        return False
+    if not re.search(r"\b(?:music|soundtrack|song|chorus|hudb\w*|refrén\w*|zene\w*)\b", text):
+        return False
+    if re.search(r"\b(?:cut|cuts|trim|shorten|lengthen|extend|rebuild|reorder|montage|pacing|tempo|beat|sync|shots?|captions?|subtitles?|zoom|effects?|transition\w*|b-roll|duration|seconds?|minutes?|zkrať|zkrátit|střih\w*|efekty|titulky|vteřin\w*)\b", text):
+        return False
+    return bool(re.search(r"\b(?:add|replace|change|swap|use|put|set|lower|louder|quieter|remove|adjust|chci|dej|přidej|nahraď)\b", text))
+
+
+def picture_timing(edl):
+    return {"structure": _program_structure(edl), "speed": edl.get("speed") or []}
+
+
 def preservation_violations(previous: Dict[str, Any],
                             proposed: Dict[str, Any],
                             user_message: str = "") -> List[str]:
     """Human labels for explicitly protected lanes changed by a proposal."""
     protected = protected_lanes(user_message)
-    if not protected:
+    audio_only = audio_revision_only(user_message)
+    if not protected and not audio_only:
         return []
     timeline_changed = _program_structure(previous) != \
         _program_structure(proposed)
     violations = []
+    if audio_only and _canon(picture_timing(previous)) != _canon(picture_timing(proposed)):
+        violations.append("picture timing and duration during an audio-only revision")
     for lane in sorted(protected):
         if lane == "audio_mix":
             if not _audio_mix_preserved(previous, proposed,
@@ -242,7 +265,7 @@ def rejection_message(version: int, violations: Iterable[str]) -> str:
     return (
         f"REJECTED (EDL v{version} unchanged): this proposal changes "
         + ", ".join(labels)
-        + ", which the user explicitly asked to preserve in this turn. "
+        + ", which this request leaves protected. "
           "Use a narrower edit that leaves those lanes intact. If changing "
           "one is genuinely necessary, explain the conflict and ask the user "
           "before doing it."

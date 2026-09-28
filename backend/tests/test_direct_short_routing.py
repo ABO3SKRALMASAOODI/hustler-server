@@ -14,6 +14,9 @@ from routes import video                                      # noqa: E402
 
 
 class _Cursor:
+    def fetchone(self):
+        return {"plan": "ai", "is_subscribed": True}
+
     def __init__(self):
         self.queries = []
 

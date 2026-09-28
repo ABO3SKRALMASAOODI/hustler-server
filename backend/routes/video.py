@@ -630,6 +630,15 @@ def vdb():
         conn.close()
 
 
+def _studio_ai_gate(cur, user_id):
+    cur.execute("SELECT plan, is_subscribed FROM users WHERE id = %s", (user_id,))
+    account = cur.fetchone() or {}
+    if account.get("plan") == "mcp_connect" and account.get("is_subscribed"):
+        return jsonify({"error": "MCP Connect edits through your connected AI assistant. Connect it to this project, then preview and export here.",
+                        "code": "mcp_only", "connect_url": "/mcp/connect"}), 403
+    return None
+
+
 def _subscribe_gate_applies(cur, user_id):
     """Conversion wall: unsubscribed accounts see subscription cards on
     send/drop. There is no free first edit. Subscribers (a live trial still
@@ -3275,6 +3284,9 @@ def post_message(user_id, project_id):
         p = _project_for_user(cur, project_id, user_id)
         if not p:
             return jsonify({"error": "Project not found"}), 404
+        ai_gate = _studio_ai_gate(cur, user_id)
+        if ai_gate:
+            return ai_gate
 
         # Idempotency FIRST: a retransmit of a message we already accepted
         # returns the original row — before rate limits or the busy check,
@@ -5883,6 +5895,9 @@ def start_shorts(user_id, project_id):
         p = _project_for_user(cur, project_id, user_id)
         if not p:
             return jsonify({"error": "Project not found"}), 404
+        ai_gate = _studio_ai_gate(cur, user_id)
+        if ai_gate:
+            return ai_gate
         if (p.get("kind") or "edit") == "short":
             return jsonify({"error": "This already is a short — open the "
                                      "project it was cut from to make "

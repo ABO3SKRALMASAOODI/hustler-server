@@ -211,7 +211,8 @@ def test_pending_original_serves_proxy_draft_but_keeps_final_blocked(monkeypatch
                         "meta": {"upload_state": "pending", "upload_progress": .4}}
             if fn is db.find_render_asset:
                 return {"id": 123, "storage_key": "draft", "duration_s": 10,
-                        "meta": {"quality": "draft", "src_sha256": "source"}}
+                        "meta": {"quality": "draft", "src_sha256": "source",
+                                 "audio_peak_v": 1}}
             if fn is db.get_index_by_sha: return {"json": {}}
             raise AssertionError(fn)
     monkeypatch.setattr(renderer.storage, "exists", lambda _: True)

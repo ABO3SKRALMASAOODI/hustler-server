@@ -131,6 +131,8 @@ class FakeCur:
         elif "FROM mcp_oauth_clients" in s:
             c = DB["clients"].get(p[0])
             self.rows = [c] if c else []
+        elif "FROM users WHERE id =" in s:
+            self.rows = [{"id": 60, "email": EMAIL, "is_verified": 1, "plan": DB.get("plan", "free"), "is_subscribed": DB.get("subscribed", 0)}] if int(p[0]) == 60 else []
         elif "FROM users WHERE LOWER(email)" in s:
             self.rows = ([{"id": 60, "email": EMAIL,
                            "password": generate_password_hash(PASSWORD),
@@ -1803,3 +1805,38 @@ def test_operator_grant_survives_plan_restriction(monkeypatch):
     monkeypatch.setattr(mcpmod, "ALLOWED_EMAILS", {EMAIL})
     assert mcpmod.account_has_mcp_access({"email": EMAIL, "plan": "free",
         "is_verified": 1, "is_subscribed": 0})
+
+
+def test_session_oauth_requires_consent_and_registered_callback(client):
+    import jwt
+    cid = _registered(client)
+    _, challenge = _pkce()
+    params = _q(cid, code_challenge=challenge)
+    token = jwt.encode({"sub": "60"}, client.application.config["SECRET_KEY"], algorithm="HS256")
+    headers = {"Authorization": "Bearer " + token}
+    result = client.get("/mcp/oauth/session-consent", query_string=params, headers=headers)
+    assert result.status_code == 200
+    assert result.get_json()["email"] == EMAIL
+    assert not DB["grants"]
+    result = client.post("/mcp/oauth/session-consent", json=params, headers=headers)
+    assert result.status_code == 400
+    assert not DB["grants"]
+    result = client.post("/mcp/oauth/session-consent", json={**params,"action":"allow","redirect_uri":"https://unregistered.example/callback"}, headers=headers)
+    assert result.status_code == 400
+    assert not DB["grants"]
+    result = client.post("/mcp/oauth/session-consent", json={**params,"action":"allow"}, headers=headers)
+    assert result.status_code == 200
+    assert "code=" in result.get_json()["redirect_url"]
+    assert len(DB["grants"]) == 1
+
+
+def test_session_oauth_does_not_authorize_expired_plan(client, monkeypatch):
+    import jwt
+    cid = _registered(client)
+    _, challenge = _pkce()
+    monkeypatch.setattr(mcpmod,"ALLOWED_EMAILS",set())
+    DB["plan"]="mcp_connect"; DB["subscribed"]=0
+    token=jwt.encode({"sub":"60"},client.application.config["SECRET_KEY"],algorithm="HS256")
+    response=client.post("/mcp/oauth/session-consent",json={**_q(cid,code_challenge=challenge),"action":"allow"},headers={"Authorization":"Bearer "+token})
+    assert response.status_code == 403
+    assert not DB["grants"]

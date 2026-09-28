@@ -65,7 +65,9 @@ def finalize_success(worker_db, job, result, lease_claim):
         return worker_db.run(
             dbx.finish_job, job["id"], "done", None, result, lease_claim)
 
-    accounted = job["type"] in ("agent_turn", "shorts_plan")
+    accounted = (job["type"] in ("agent_turn", "shorts_plan") or
+                 (job["type"] == "mcp_tool" and
+                  result.get("metered_contract") is True))
     billable = accounted and _result_is_billable(job, result)
     qualifies = accounted and _qualifies_subscribe_gate(job, result)
     rendered = result.get("rendered_clips")

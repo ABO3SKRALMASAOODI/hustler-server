@@ -9747,7 +9747,7 @@ def insert_media(ctx, asset_key, at_output_s, duration_s=None,
 
 def set_insert_window(ctx, id, duration_s=None, clip_start_s=None,
                       rate=None, crop=None, mute=None, fit=None,
-                      rotation=None, motion_motif=None):
+                      rotation=None, motion_motif=None, motion=None):
     """Change WHICH PART of an already-spliced clip plays, in place.
 
     Round 61. Nothing could edit an insert once it existed — there was
@@ -9778,10 +9778,22 @@ def set_insert_window(ctx, id, duration_s=None, clip_start_s=None,
                 f"{have}. Call get_edl to see them.")
     if duration_s is None and clip_start_s is None and rate is None \
             and crop is None and mute is None and fit is None \
-            and rotation is None and motion_motif is None:
+            and rotation is None and motion_motif is None and motion is None:
         return ("REJECTED: give duration_s, clip_start_s, rate, crop, mute "
-                "fit, rotation and/or motion_motif — otherwise there is "
+                "fit, rotation, motion and/or motion_motif — otherwise there is "
                 "nothing to change.")
+    # Fitting the full source does not cancel the later zoompan stage. A
+    # framing repair must be able to disable that crop without re-inserting.
+    old_motion = hit.get("motion")
+    if motion is not None:
+        motion = str(motion).strip().lower()
+        if motion not in {"none", "zoom_in", "zoom_out", "pan_left", "pan_right"}:
+            return "REJECTED: motion must be none, zoom_in, zoom_out, pan_left or pan_right."
+        if motion == "none":
+            hit.pop("motion", None)
+            hit.pop("motion_motif", None)
+        else:
+            hit["motion"] = motion
     motif = hit.get("motion_motif")
     if motion_motif is not None:
         motif, motif_err = _motion_motif_value(
@@ -9974,7 +9986,7 @@ def set_insert_window(ctx, id, duration_s=None, clip_start_s=None,
     old_rotation = int(hit.get("rotation") or 0)
     old_motif = hit.get("motion_motif")
     prev = (float(hit["duration_s"]), float(hit.get("source_start_s") or 0.0),
-            old_rate, old_crop, old_mute, old_fit, old_rotation, old_motif)
+            old_rate, old_crop, old_mute, old_fit, old_rotation, old_motif, old_motion)
     hit["duration_s"] = dur
     hit["source_start_s"] = round(off, 2) or None
     if hit["source_start_s"] is None:
@@ -10039,9 +10051,14 @@ def set_insert_window(ctx, id, duration_s=None, clip_start_s=None,
         reg += ", its own audio MUTED"
     elif mute_val is False and old_mute:
         reg += ", its own audio back ON"
+    if hit.get("motion"):
+        reg += (f", local motion {hit['motion']} still zooms/crops AFTER fitting; "
+                "use motion='none' when repairing clipped edges")
+    elif old_motion:
+        reg += ", local camera motion removed"
     new_motif = hit.get("motion_motif")
     if (dur, off, r, new_crop, new_mute, new_fit, new_rotation,
-            new_motif) == prev:
+            new_motif, hit.get("motion")) == prev:
         return (f"NO CHANGE — insert {id} already plays "
                 f"{off}-{round(off + span, 2)}s{at_rate}{reg}.")
     edl["inserts"] = inserts
@@ -20262,9 +20279,21 @@ def audit_audio_mix(ctx):
     return json.dumps(result, indent=1)
 
 
+def _is_main_audio_reference(ctx, asset_key):
+    """Resolve source aliases without downloading or re-mixing the original."""
+    if not asset_key or not getattr(ctx, "has_main_video", False):
+        return False
+    if asset_key == "main":
+        return True
+    asset = ctx.db.run(dbx.asset_by_key, ctx.project_id, asset_key)
+    return bool(asset and asset.get("kind") in {"original", "proxy"})
+
+
 def get_audio_analysis(ctx, asset_key=None):
     """READ: the measured musical/energy structure of the source audio (or
     of a music asset when asset_key is passed)."""
+    if _is_main_audio_reference(ctx, asset_key):
+        asset_key = None
     if asset_key:
         return _asset_audio_analysis(ctx, asset_key)
     if not ctx.has_main_video:
@@ -20363,6 +20392,10 @@ def review_audio(ctx, asset_key=None, times=None, output_times=None,
                           f"{duration:.1f}s audio duration.")
         return out, None
 
+    if _is_main_audio_reference(ctx, asset_key):
+        if output_times:
+            return "REJECTED: main source audio uses times, not output_times; omit asset_key to review the rendered mix."
+        asset_key = None
     source = label = None
     proof_segments = None
     duration = 0.0
@@ -22890,7 +22923,8 @@ TOOLS = {
                           "rotation repairs THIS scene clockwise by "
                           "0/90/180/270 degrees — use it for one sideways "
                           "phone clip instead of a whole-program custom "
-                          "filter.",
+                          "filter. motion=none removes local zoom/pan, which otherwise "
+                          "still crops the picture AFTER pad/pad_blur fitting.",
                           {"id": {"type": "string"},
                            "duration_s": {"type": "number"},
                            "clip_start_s": {"type": "number"},
@@ -22902,6 +22936,7 @@ TOOLS = {
                                    "enum": ["pad", "pad_blur", "crop",
                                             "auto"]},
                            "rotation": {"type": ["integer", "string"]},
+                           "motion": {"type": "string", "enum": ["none", "zoom_in", "zoom_out", "pan_left", "pan_right"]},
                            "motion_motif": _MOTION_MOTIF_PROP}),
     "move_insert": (move_insert, "MOVE A SPLICED SCENE — reorder an inserted "
                     "clip between any other scenes, in place. after_id is "

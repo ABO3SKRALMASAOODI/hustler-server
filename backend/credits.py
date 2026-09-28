@@ -124,9 +124,9 @@ INITIAL_BONUS       = FREE_GRANT_CREDITS   # legacy name, same number
 def subscribe_offer_body():
     """402 / credits payload for the Studio upgrade cards."""
     import billing
-    names = {"ai": "Creator", "ai_pro": "Pro", "ai_max": "Frontier"}
+    names = {"mcp_connect": "MCP Connect", "advanced": "Advanced Editor"}
     plans = []
-    for pid in ("ai", "ai_pro", "ai_max"):
+    for pid in ("mcp_connect", "advanced"):
         prices = billing.PLAN_PRICES_USD.get(pid) or {}
         plans.append({
             "id": pid, "name": names[pid],
@@ -296,6 +296,9 @@ def get_balance(conn, user_id: int) -> dict:
 
     is_subscribed = bool(row["is_subscribed"])
     plan = row.get("plan") or "free"
+    if is_subscribed and plan in {"mcp_connect", "advanced"}:
+        import contract_credits
+        contract_credits.refresh(conn, user_id)
     trialing = is_subscribed and _trial_status(conn, user_id) == "trialing"
     # A trial gets no daily top-up — otherwise three days of 20 lands 30% on
     # top of the 10% cap the paywall quotes.

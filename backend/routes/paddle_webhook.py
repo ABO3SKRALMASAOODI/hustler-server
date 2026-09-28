@@ -112,6 +112,26 @@ for _name, _cfg in (_PADDLE_PLANS or {}).items():
             PRICE_CREDITS[_legacy_id] = _legacy_credits
 
 
+def _record_new_annual_period(user_id, plan, subscription_id, data):
+    """A verified paid annual price funds a calendar-month refill schedule."""
+    cfg = _PADDLE_PLANS.get(plan) or {}
+    if plan not in {'mcp_connect', 'advanced'} or \
+            _price_id_from_data(data) != cfg.get('yearly_price_id'):
+        return
+    period = data.get('billing_period') or {}
+    if not period.get('starts_at') or not period.get('ends_at'):
+        from routes.paddle import get_paddle_base, paddle_headers, PADDLE_API_TIMEOUT
+        response = requests.get(f'{get_paddle_base()}/subscriptions/{subscription_id}',
+            headers=paddle_headers(), timeout=PADDLE_API_TIMEOUT)
+        response.raise_for_status()
+        period = (response.json().get('data') or {}).get('current_billing_period') or {}
+    import contract_credits
+    contract_credits.record_paid_year(get_db(), user_id, subscription_id,
+        data.get('id'), plan, period.get('starts_at'), period.get('ends_at'),
+        cfg['monthly_credits'])
+    get_db().commit()
+
+
 def _price_id_from_data(data):
     for it in (data.get('items') or []):
         price = it.get('price') or {}
@@ -539,6 +559,9 @@ def handle_webhook():
         # NB: a local named `billing` lived here (the monthly/yearly label) and
         # would now shadow the billing module imported at the top of the file.
         period = custom_data.get('billing', 'monthly')
+        if plan in {'mcp_connect', 'advanced'}:
+            period = ('yearly' if _price_id_from_data(data) ==
+                      _PADDLE_PLANS[plan].get('yearly_price_id') else 'monthly')
         expiry_date_str = data.get('next_billed_at')
         expiry_date = None
         if expiry_date_str:
@@ -564,6 +587,13 @@ def handle_webhook():
         if event_type in ('transaction.completed', 'transaction.paid'):
             cents, _cur = billing.transaction_amount(data)
             if cents > 0:
+                try:
+                    _record_new_annual_period(user_id, plan, subscription_id, data)
+                except Exception:
+                    get_db().rollback()
+                    # Paid ledger/grant may already be committed. Retrying
+                    # seeds the schedule without refilling the spent pool.
+                    return 'Annual allowance schedule unavailable', 503
                 billing.record_recovery(get_db(), user_id, plan)
                 billing.set_status(
                     get_db(), user_id, 'active', plan, period)

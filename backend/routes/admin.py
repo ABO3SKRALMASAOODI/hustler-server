@@ -502,7 +502,7 @@ def overview():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  CHARTS — Registrations (30d)
+#  CHARTS — Registrations (all video-era time, UTC days)
 # ─────────────────────────────────────────────────────────────────────────────
 
 @admin_bp.route('/charts/registrations', methods=['GET'])
@@ -511,21 +511,22 @@ def chart_registrations():
     conn = get_db()
     try:
         with conn.cursor() as cur:
+            cur.execute("SET LOCAL TIME ZONE 'UTC'")
             cur.execute("""
                 SELECT
                     TO_CHAR(d::date, 'YYYY-MM-DD') AS day,
                     COALESCE(c.count, 0) AS count
-                FROM generate_series(NOW() - INTERVAL '30 days', NOW(), '1 day') AS d
+                FROM generate_series(DATE '{epoch}', CURRENT_DATE, '1 day') AS d
                 LEFT JOIN (
                     SELECT created_at::date AS dt, COUNT(*) AS count
                     FROM users WHERE is_verified = 1 AND {scope}
-                      AND created_at >= NOW() - INTERVAL '30 days'
                     GROUP BY created_at::date
                 ) c ON c.dt = d::date
                 ORDER BY d
-            """.format(scope=_scope('')))
+            """.format(epoch=METRICS_EPOCH, scope=_scope('')))
             rows = cur.fetchall()
-        return jsonify({'data': [dict(r) for r in rows]}), 200
+        return jsonify({'data': [dict(r) for r in rows],
+                        'scope_start': METRICS_EPOCH, 'timezone': 'UTC'}), 200
     finally:
         conn.close()
 
@@ -1401,6 +1402,7 @@ def list_users():
             cur.execute(f"""
                 SELECT
                     u.id, u.email, u.plan, u.is_subscribed,
+                    to_jsonb(u)->>'billing_period' AS billing_period,
                     u.is_verified, u.auth_provider,
                     {trial_cols}
                     u.credits_balance, u.credits_daily, u.credits_monthly,
@@ -1873,3 +1875,12 @@ def job_conversation(job_id):
         "preview_url": preview_url,
         "has_preview": has_preview,
     }), 200
+
+
+@admin_bp.route('/editing-provider-readiness', methods=['POST'])
+@admin_required
+def editing_provider_readiness():
+    """Verify the model required by new Advanced checkouts, without a project."""
+    from provider_readiness import advanced_readiness
+    result = advanced_readiness()
+    return jsonify(result), (200 if result['ready'] else 503)

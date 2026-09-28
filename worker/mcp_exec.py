@@ -319,6 +319,25 @@ def _session(worker_db, job, project):
     return s
 
 
+def _refresh_contract_budget(ctx, worker_db, job):
+    """Fresh usage/balance for new MCP contracts; legacy billing is unchanged."""
+    previous_plan = ctx.plan
+    ctx.subscribed, ctx.plan, ctx.trialing = worker_db.run(dbx.user_billing, job["user_id"])
+    if ctx.plan != previous_plan:
+        ctx.llm_client, ctx.agent_model = llm.agent_client_for(ctx.subscribed, ctx.plan)
+    if ctx.plan in {"mcp_connect", "advanced"}:
+        ctx.model_usage = {}
+        ctx.tokens_in = ctx.tokens_out = ctx.tokens_cached_in = 0
+        ctx.images_generated = []
+        ctx.gen_extra_cost_usd = 0.0
+        ctx.credit_budget = (worker_db.run(dbx.user_credits_balance, job["user_id"])
+                             if ctx.subscribed else 0.0)
+    elif previous_plan in {"mcp_connect", "advanced"}:
+        # An already-queued call must not keep a prepaid generation budget
+        # after cancellation, even if its project context remains cached.
+        ctx.credit_budget = 0.0
+
+
 def run_mcp_job(worker_db, job):
     """One MCP tool call. Returns {"text": ..., ...} — stored on the job row
     and handed back to the model verbatim by the backend.
@@ -354,6 +373,7 @@ def run_mcp_job(worker_db, job):
         ctx.db = worker_db
         ctx.job = job
         s.used = time.time()
+        _refresh_contract_budget(ctx, worker_db, job)
 
         def _recorder(purpose, request, response, usage):
             cached_in = llm.cached_input_tokens(usage)
@@ -430,6 +450,8 @@ def run_mcp_job(worker_db, job):
                                  creative_blueprint=None)
             out = {"text": text, "edl_version": after,
                    "edl_changed": after != before}
+            if ctx.plan in {"mcp_connect", "advanced"}:
+                out["metered_contract"] = True
             out.update(_tool_result_contract(ctx, text))
             if tool == "justify_verification_findings" and text.startswith(
                     ("CORRECTION NEEDED:", "TRANSIENT FAILURE:", "PREREQUISITE:")):
