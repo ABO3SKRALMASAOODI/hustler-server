@@ -442,7 +442,7 @@ def config_report():
 
 
 def vision_client_for(plan):
-    """Paid visual reviews use the same Luna editor as paid reasoning.
+    """Paid visual reviews use the account’s contracted editing model.
     Free uploads retain their configured shared vision/fallback provider.
     """
     if paid_editor_plan(plan):
@@ -875,7 +875,7 @@ def _seed_known_dialects():
     if "api.openai.com" not in (config.OPENAI_BASE_URL or ""):
         return
     for m in {config.AGENT_MODEL, config.FIRST_TURN_AGENT_MODEL,
-              config.EDITOR_MODEL, config.VISION_MODEL}:
+              config.EDITOR_MODEL, "gpt-6-sol", config.VISION_MODEL}:
         if m and re.match(r"gpt-[5-9]", m):
             _use_max_completion_tokens.add(m)
             _no_temperature.add(m)
