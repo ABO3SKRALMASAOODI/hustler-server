@@ -248,9 +248,10 @@ def test_a_concrete_brief_is_permission_to_cut():
     assert "A CONCRETE BRIEF IS PERMISSION TO CUT" in p
     assert "Never end by asking them to approve a clip order" in p
     assert "REFERENCE ≠ FOOTAGE" in p
-    assert "FILLS THE PHONE" in p
+    assert "REFRAME FOR THE CONTENT" in p
+    assert "Preserve required information" in p
     assert "A FAILED FETCH IS NOT A STOP" in p
-    assert "NEVER tell the user a preview is not export-ready" in p
+    assert "Never promise export readiness without a usable current preview" in p
 
 
 def test_the_prompt_forbids_ending_on_a_bare_refusal():

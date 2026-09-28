@@ -145,7 +145,7 @@ def test_live_loop_repairs_known_metadata_before_render_then_finishes(monkeypatc
     monkeypatch.setattr(agent_loop, '_build_messages', lambda *a, **k: [{'role': 'user', 'content': ctx.user_message}])
     monkeypatch.setattr(agent_loop, '_adopt_steering_messages', lambda *a: 1)
     monkeypatch.setattr(agent_loop, '_activity', lambda *a, **k: None)
-    monkeypatch.setattr(agent_loop.llm, 'responses_available', lambda *a: False)
+    monkeypatch.setattr(agent_loop.llm, 'responses_available', lambda *a, **k: False)
     monkeypatch.setattr(agent_loop.llm, 'record', lambda *a: None)
     monkeypatch.setattr(agent_loop, '_auto_render_if_needed', lambda *a: (ctx.latest_edl(), ''))
     monkeypatch.setattr(agent_loop, '_enforce_honesty', lambda _ctx, _client, _messages, _tools, draft, *a, **k: draft)
