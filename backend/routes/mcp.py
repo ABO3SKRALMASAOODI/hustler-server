@@ -167,7 +167,7 @@ def account_has_mcp_access(user):
     return ((user.get("email") or "").strip().lower() in ALLOWED_EMAILS
             or (user.get("is_verified") in (True, 1)
                 and user.get("is_subscribed") in (True, 1)
-                and user.get("plan") in {"ai_pro", "ai_max"}))
+                and user.get("plan") in {"ai_pro", "ai_max", "mcp_connect", "advanced"}))
 
 
 def _authenticate():
@@ -2627,3 +2627,37 @@ def revoke_token(user_id, token_id):
                     (token_id, int(user_id)))
         n = cur.rowcount
     return jsonify({"revoked": bool(n)})
+
+
+@mcp_bp.route("/mcp/connections", methods=["GET"])
+@token_required
+def connection_status(user_id):
+    """Account-owned connection receipts; never return tokens or hashes."""
+    if not _admin_email(user_id):
+        return jsonify({"error": "An active MCP-enabled plan is required.", "code": "mcp_plan_required"}), 403
+    with vdb() as conn:
+        cur = conn.cursor()
+        cur.execute("""SELECT g.id, c.client_name AS label, g.calls, g.created_at,
+                              g.last_used_at, 'oauth' AS kind
+                         FROM mcp_oauth_grants g
+                         LEFT JOIN mcp_oauth_clients c ON c.client_id = g.client_id
+                        WHERE g.user_id = %s AND g.revoked_at IS NULL
+                        UNION ALL
+                       SELECT id, label, calls, created_at, last_used_at, 'token' AS kind
+                         FROM mcp_tokens WHERE user_id = %s AND revoked_at IS NULL
+                        ORDER BY created_at DESC""", (int(user_id), int(user_id)))
+        rows = cur.fetchall()
+    return jsonify({"connections": [{"id": row["id"], "kind": row["kind"],
+        "label": row["label"] or "AI assistant", "calls": row["calls"],
+        "last_used_at": row["last_used_at"].isoformat() if row["last_used_at"] else None}
+        for row in rows]})
+
+
+@mcp_bp.route("/mcp/connections/oauth/<int:grant_id>", methods=["DELETE"])
+@token_required
+def disconnect_oauth(user_id, grant_id):
+    # Revocation stays available even after the subscription ends.
+    with vdb() as conn:
+        cur = conn.cursor()
+        cur.execute("UPDATE mcp_oauth_grants SET revoked_at = NOW() WHERE id = %s AND user_id = %s AND revoked_at IS NULL", (grant_id, int(user_id)))
+    return "", 204

@@ -66,6 +66,8 @@ separate and the flag must be True.
 # Keep every number sourced from the provider's own price page or a real
 # invoice. A guessed price is a silent, permanent billing error.
 MODEL_PRICES = {
+    # https://developers.openai.com/api/docs/models/gpt-6-sol (2026-09-28).
+    "gpt-6-sol": {"in": 2.0, "cached_in": 0.2, "cache_write_in": 2.5, "out": 10.0, "reasoning_separate": False},
     # https://developers.openai.com/api/docs/models/gpt-6-luna (2026-09-23).
     # Cache writes replace ordinary input pricing; they are not additive.
     "gpt-6-luna": {
@@ -182,12 +184,12 @@ def base_usage_cost(model, tokens_in, tokens_out, cached=0, reasoning=0,
 
 
 def luna6_usage_cost(tokens_in, tokens_out, cached=0, cache_write=0,
-                     service_tier="default"):
+                     service_tier="default", model="gpt-6-luna"):
     """GPT-6 Luna metering from reported tokens, including tier and context."""
     tin, tout = max(tokens_in or 0, 0), max(tokens_out or 0, 0)
     cached = min(max(cached or 0, 0), tin)
     written = min(max(cache_write or 0, 0), tin - cached)
-    p = MODEL_PRICES['gpt-6-luna']
+    p = MODEL_PRICES[model]
     input_cost = ((tin - cached - written) * p['in']
                   + cached * p['cached_in'] + written * p['cache_write_in'])
     output_cost = tout * p['out']  # includes reasoning tokens
@@ -303,7 +305,7 @@ def row_cost_sql(fallback, model_col="model", response_col="response",
     # Prefer the recorded per-request cost, including cache/tier/context
     # rates (provider invoice for xAI, reported tokens at official Luna rates). Historical rows without it retain deterministic token pricing.
     return (f"(CASE WHEN (left(lower(COALESCE({model_col}, '')), 5) = 'grok-' "
-            f"OR lower(COALESCE({model_col}, '')) = 'gpt-6-luna') "
+            f"OR lower(COALESCE({model_col}, '')) IN ('gpt-6-luna', 'gpt-6-sol')) "
             f"AND jsonb_typeof({response_col}->'provider_cost_usd') = 'number' "
             f"THEN CASE WHEN ({response_col}->>'provider_cost_usd')::float >= 0 "
             f"THEN ({response_col}->>'provider_cost_usd')::float ELSE {estimated} END "

@@ -343,3 +343,23 @@ def test_gfx_ass_uses_the_ttf_family_name():
     # "Plus Jakarta Sans ExtraBold" (verified with fontTools; the bare
     # family is only nameID 16, and requesting it renders the fallback).
     assert "Plus Jakarta Sans ExtraBold," in ass
+
+
+def test_full_frame_repair_can_remove_post_fit_zoom_in_place():
+    e = default_edl(SRC)
+    e['keep'] = [[0, 10]]
+    item = _img_ins(at_output_s=10)
+    item.update(motion='zoom_out', motion_motif='opening', fit='pad_blur')
+    e['inserts'] = [item]
+    ctx = _Ctx(e)
+    unchanged = agent_tools.set_insert_window(ctx, 'ins13', fit='pad_blur')
+    assert 'still zooms/crops AFTER fitting' in unchanged
+    result = agent_tools.set_insert_window(ctx, 'ins13', motion='none')
+    assert result.startswith('EDL v'), result
+    current = ctx.latest_edl()['json']['inserts'][0]
+    assert current['motion'] is None and current['motion_motif'] is None
+    assert current['fit'] == 'pad_blur'
+    assert current['duration_s'] == item['duration_s']
+    assert current['at_output_s'] == item['at_output_s']
+    assert len(ctx.written) == 1
+    assert agent_tools.set_insert_window(ctx, 'ins13', motion='none').startswith('NO CHANGE')

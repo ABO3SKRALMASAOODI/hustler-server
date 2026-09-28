@@ -124,9 +124,9 @@ INITIAL_BONUS       = FREE_GRANT_CREDITS   # legacy name, same number
 def subscribe_offer_body():
     """402 / credits payload for the Studio upgrade cards."""
     import billing
-    names = {"ai": "Creator", "ai_pro": "Pro", "ai_max": "Frontier"}
+    names = {"mcp_connect": "MCP Connect", "advanced": "Advanced Editor"}
     plans = []
-    for pid in ("ai", "ai_pro", "ai_max"):
+    for pid in ("mcp_connect", "advanced"):
         prices = billing.PLAN_PRICES_USD.get(pid) or {}
         plans.append({
             "id": pid, "name": names[pid],

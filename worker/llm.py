@@ -69,7 +69,7 @@ def _note_error(e):
 
 def provider_cost_usd(usage, model):
     """xAI invoice ticks, or Luna 6 cost from reported token categories."""
-    if model == 'gpt-6-luna' and usage is not None:
+    if model in ('gpt-6-luna', 'gpt-6-sol') and usage is not None:
         import model_prices
         get = lambda obj, key, default=None: (obj.get(key, default)
             if isinstance(obj, dict) else getattr(obj, key, default))
@@ -79,7 +79,7 @@ def provider_cost_usd(usage, model):
             get(usage, 'prompt_tokens', get(usage, 'input_tokens', 0)),
             get(usage, 'completion_tokens', get(usage, 'output_tokens', 0)),
             get(details, 'cached_tokens', 0), get(details, 'cache_write_tokens', 0),
-            get(usage, 'service_tier') or config.OPENAI_SERVICE_TIER or 'default')
+            get(usage, 'service_tier') or config.OPENAI_SERVICE_TIER or 'default', model=model)
     if not str(model or "").startswith("grok-") or str(model).startswith("grok-imagine-"):
         return None
     raw = usage.get("cost_in_usd_ticks") if isinstance(usage, dict) else getattr(usage, "cost_in_usd_ticks", None)
@@ -104,7 +104,7 @@ def record(purpose, request, response, usage=None):
         actual = provider_cost_usd(usage, (request or {}).get("model"))
         if actual is not None and isinstance(response, dict):
             response = dict(response, provider_cost_usd=actual)
-            if (request or {}).get('model') == 'gpt-6-luna':
+            if (request or {}).get('model') in ('gpt-6-luna', 'gpt-6-sol'):
                 details = getattr(usage, 'prompt_tokens_details', {}) or {}
                 response['cache_write_in'] = (details.get('cache_write_tokens', 0)
                     if isinstance(details, dict) else getattr(details, 'cache_write_tokens', 0))
@@ -229,11 +229,11 @@ def is_frontier(plan):
     return (plan or "") in config.FRONTIER_PLANS
 
 
-def paid_editor_lanes():
-    """Luna is the only subscribed editing lane, including Frontier/trials."""
+def paid_editor_lanes(plan=None):
+    """New Advanced contracts use Sol; all grandfathered routes stay unchanged."""
     if not config.OPENAI_API_KEY:
         return []
-    return [dict(name="standard", client=client(), model=config.EDITOR_MODEL,
+    return [dict(name="standard", client=client(), model=("gpt-6-sol" if plan == "advanced" else config.EDITOR_MODEL),
                  base_url=config.OPENAI_BASE_URL,
                  api_key=config.OPENAI_API_KEY)]
 
@@ -243,13 +243,13 @@ def paid_editor_plan(plan):
 
 
 def agent_client_for(subscribed, plan=None, first_turn=False):
-    """All subscribed plans/trials use the same paid editor model.
+    """Resolve the contracted model without changing grandfathered subscribers.
 
     Free first-turn experiments remain separate. Missing paid credentials are
     an operational failure, never permission to silently downgrade quality.
     """
     if subscribed:
-        lanes = paid_editor_lanes()
+        lanes = paid_editor_lanes(plan)
         if not lanes:
             raise RuntimeError("The subscribed editing provider is not configured; restore its credentials.")
         return lanes[0]["client"], lanes[0]["model"]
@@ -272,7 +272,7 @@ def agent_lanes_for(subscribed, plan=None, first_turn=False):
     in process memory and are never returned by config_report or logged.
     """
     if subscribed:
-        return paid_editor_lanes()
+        return paid_editor_lanes(plan)
     primary_client, primary_model = agent_client_for(
         subscribed, plan, first_turn=first_turn)
 

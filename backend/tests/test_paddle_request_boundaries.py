@@ -40,8 +40,9 @@ def _app():
     return app
 
 
-def test_hosted_checkout_defaults_to_live_creator_and_has_a_deadline(
+def test_hosted_checkout_defaults_to_live_advanced_and_has_a_deadline(
         monkeypatch, capsys):
+    monkeypatch.setattr(paddle, "_new_plan_readiness", lambda _plan: None)
     seen = {}
     monkeypatch.setattr(
         paddle, "decode_token", lambda _header: (7, "buyer@example.com"))
@@ -59,15 +60,16 @@ def test_hosted_checkout_defaults_to_live_creator_and_has_a_deadline(
         headers={"Authorization": "Bearer test"})
 
     assert response.status_code == 200
-    assert response.get_json()["plan"] == "ai"
+    assert response.get_json()["plan"] == "advanced"
     assert seen["json"]["items"] == [{
-        "price_id": paddle.PLANS["ai"]["price_id"], "quantity": 1}]
+        "price_id": paddle.PLANS["advanced"]["price_id"], "quantity": 1}]
     assert seen["json"]["custom_data"]["billing"] == "monthly"
     assert seen["timeout"] == paddle.PADDLE_API_TIMEOUT
     assert "private-provider-response-marker" not in capsys.readouterr().out
 
 
 def test_checkout_provider_timeout_is_explicitly_retryable(monkeypatch):
+    monkeypatch.setattr(paddle, "_new_plan_readiness", lambda _plan: None)
     monkeypatch.setattr(
         paddle, "decode_token", lambda _header: (7, "buyer@example.com"))
     monkeypatch.setattr(paddle, "_subscription_snapshot", lambda _uid: {})
@@ -78,7 +80,7 @@ def test_checkout_provider_timeout_is_explicitly_retryable(monkeypatch):
 
     response = _app().test_client().post(
         "/paddle/create-checkout-session",
-        json={"plan": "ai_max", "billing": "monthly"},
+        json={"plan": "advanced", "billing": "monthly"},
         headers={"Authorization": "Bearer test"})
 
     assert response.status_code == 503

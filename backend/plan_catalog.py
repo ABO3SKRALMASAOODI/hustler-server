@@ -8,6 +8,10 @@ wrong allowance.
 """
 
 PLANS_LIVE = {
+    # September 2026 contracts: never reuse a grandfathered price/plan ID.
+    "mcp_connect": {'monthly_credits': 1500, 'price_id': 'pri_01m3krftttqgfsfzeyepww17c5', 'yearly_price_id': 'pri_01m3krfv2zr89215s1k6dbac2z'},
+    "advanced": {'monthly_credits': 8000, 'price_id': 'pri_01m3krfvxd8fq4397hwzr071g7', 'yearly_price_id': 'pri_01m3krfw57nk3y15pv083aesw0'},
+
     # Current shopfront: no trial; annual prices are ten monthly payments.
     "ai": {
         "price_id": "pri_01m00w4aa9nqj2r3x30jkagbq0",
@@ -100,7 +104,16 @@ PLANS_SANDBOX = {
 
 # Only these tiers can be newly purchased or switched to. Retired and MCP
 # definitions above are present solely to keep existing contracts resolvable.
-PURCHASABLE_PLANS = {"ai", "ai_pro", "ai_max"}
+NEW_PLANS = frozenset({"mcp_connect", "advanced"})
+LEGACY_SHOPFRONT_PLANS = frozenset({"ai", "ai_pro", "ai_max"})
+PURCHASABLE_PLANS = NEW_PLANS | LEGACY_SHOPFRONT_PLANS
+
+def available_plans(snapshot):
+    """Grandfather until access ends, including scheduled cancellation/grace."""
+    if snapshot.get("is_subscribed") and snapshot.get("plan") not in NEW_PLANS:
+        return LEGACY_SHOPFRONT_PLANS | {snapshot.get("plan")}
+    return NEW_PLANS
+
 
 PLAN_MONTHLY_CREDITS = {
     "free": 0,
@@ -109,6 +122,8 @@ PLAN_MONTHLY_CREDITS = {
 }
 
 PLAN_PRICES_USD = {
+    "mcp_connect": {"monthly": 25, "yearly": 250},
+    "advanced": {"monthly": 100, "yearly": 1000},
     "ai": {"monthly": 15, "yearly": 150},
     "ai_pro": {"monthly": 30, "yearly": 300},
     "ai_max": {"monthly": 50, "yearly": 500},

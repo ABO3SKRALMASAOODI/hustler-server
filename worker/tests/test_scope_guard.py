@@ -163,3 +163,14 @@ def test_real_commit_boundary_rejects_an_atomic_recipe_scope_violation():
     assert "designed text overlays" in result
     assert fake.inserts == 0
     assert fake.rows[-1]["version"] == 7
+
+
+def test_music_revision_cannot_collapse_picture_like_audited_project():
+    from scope_guard import preservation_violations
+    before = {"keep": [[0, 26.75]], "music": []}
+    after = {"keep": [[0, 9.4]], "music": [{"asset_key": "song", "start": 0, "end": 9.4}]}
+    for request in ["Add this song, use only the chorus.", "chci abys do tohoto videa dal tuto hudbu [URL] a dej tam pouze refrén."]:
+        assert preservation_violations(before, after, request)
+        assert not preservation_violations(before, {**before, "music": after["music"]}, request)
+    assert not preservation_violations(before, after, "Cut the video shorter and add music.")
+    assert not preservation_violations(before, after, "Sync the picture cuts to the music beat.")

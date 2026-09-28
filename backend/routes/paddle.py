@@ -13,7 +13,7 @@ from plan_catalog import (
     PLAN_PRICES_USD,
     PLANS_LIVE,
     PLANS_SANDBOX,
-    PURCHASABLE_PLANS,
+    PURCHASABLE_PLANS, available_plans,
 )
 
 paddle_bp = Blueprint('paddle', __name__)
@@ -85,6 +85,15 @@ def decode_token(auth_header):
     return payload.get('sub'), payload.get('email')
 
 
+def _new_plan_readiness(plan):
+    if plan != "advanced":
+        return None
+    from provider_readiness import advanced_readiness
+    if not advanced_readiness()["ready"]:
+        return jsonify({"error": "Advanced editing is temporarily unavailable. No checkout was created and you have not been charged. Please try again later.", "code": "advanced_unavailable", "retryable": True}), 503
+    return None
+
+
 @paddle_bp.route('/paddle/checkout-config', methods=['POST'])
 def checkout_config():
     """What the browser needs to open an INLINE Paddle checkout itself.
@@ -110,7 +119,7 @@ def checkout_config():
         return jsonify({"error": "Missing token"}), 401
 
     data = request.json or {}
-    plan = data.get('plan', 'ai')
+    plan = data.get('plan', 'advanced')
     billing = 'yearly' if data.get('billing') == 'yearly' else 'monthly'
     if plan not in PLANS:
         return jsonify({"error": "Invalid plan"}), 400
@@ -172,7 +181,7 @@ def create_checkout_session():
         return jsonify({"error": "Missing token"}), 401
 
     data = request.json or {}
-    plan = data.get('plan', 'ai')
+    plan = data.get('plan', 'advanced')
     billing = 'yearly' if data.get('billing') == 'yearly' else 'monthly'
 
     if plan not in PLANS:
@@ -497,6 +506,11 @@ def _upgrade_checkout_context(user_id, new_plan, billing):
 
     subscription_id = snapshot.get("subscription_id")
     if not subscription_id:
+        if new_plan not in available_plans(snapshot):
+            return None, ({"error": "This offer is no longer available. See current plans.", "code": "plan_not_available"}, 409)
+        readiness = _new_plan_readiness(new_plan)
+        if readiness:
+            return None, (readiness[0].get_json(), readiness[1])
         return None, None
     if not snapshot.get("is_subscribed"):
         return None, ({
@@ -505,6 +519,11 @@ def _upgrade_checkout_context(user_id, new_plan, billing):
             "code": "existing_subscription",
         }, 409)
 
+    if new_plan not in available_plans(snapshot):
+        return None, ({"error": "This offer is not available for your subscription. Your existing plan remains unchanged.", "code": "plan_not_available"}, 409)
+    readiness = _new_plan_readiness(new_plan)
+    if readiness:
+        return None, (readiness[0].get_json(), readiness[1])
     try:
         response = requests.get(
             f"{get_paddle_base()}/subscriptions/{subscription_id}",
@@ -574,6 +593,8 @@ def change_plan():
     except Exception as error:
         print(f"⚠️ Plan-change account lookup failed: {error}", flush=True)
         return jsonify({"error": "Could not verify your subscription."}), 503
+    if new_plan not in available_plans(snapshot):
+        return jsonify({"error": "Your existing subscription keeps its current offers until it ends.", "code": "plan_not_available"}), 409
     subscription_id = snapshot.get("subscription_id")
     if not subscription_id:
         return jsonify({"error": "No active subscription"}), 400
@@ -719,7 +740,7 @@ def subscription_state():
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT plan, is_subscribed, subscription_id, "
-                        "credits_monthly_limit "
+                        "credits_monthly_limit, billing_period "
                         "FROM users WHERE id = %s", (int(user_id),))
             row = cur.fetchone() or {}
     finally:
@@ -728,6 +749,7 @@ def subscription_state():
     out = {
         "plan": row.get("plan") or "free",
         "is_subscribed": bool(row.get("is_subscribed")),
+        "billing_period": row.get("billing_period"),
         "status": None, "scheduled_cancel_at": None,
         "ends_at": None, "trialing": False, "source": "db",
         "monthly_credit_limit": float(
@@ -752,6 +774,7 @@ def subscription_state():
     items = d.get("items") or [{}]
     price_id = ((items[0].get("price") or {}).get("id"))
     out.update({
+        "billing_period": _subscription_period(d),
         "status": d.get("status"),
         "trialing": d.get("status") == "trialing",
         "scheduled_cancel_at": (sched.get("effective_at")

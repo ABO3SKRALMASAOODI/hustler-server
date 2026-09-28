@@ -120,12 +120,11 @@ def test_offer_body_is_subscribe_not_trial():
     assert body["trial_days"] == 0
     assert body["code"] == "subscribe_required"
     by_id = {p["id"]: p for p in body["plans"]}
-    assert by_id["ai"]["monthly"] == 15
-    assert by_id["ai"]["credits"] == 1000
-    assert by_id["ai_pro"]["monthly"] == 30
-    assert by_id["ai_pro"]["credits"] == 2000
-    assert by_id["ai_max"]["monthly"] == 50
-    assert by_id["ai_max"]["credits"] == 5000
+    assert set(by_id) == {"mcp_connect", "advanced"}
+    assert by_id["mcp_connect"]["monthly"] == 25
+    assert by_id["mcp_connect"]["credits"] == 1500
+    assert by_id["advanced"]["monthly"] == 100
+    assert by_id["advanced"]["credits"] == 8000
     assert "trial" not in body["error"].lower()
 
 

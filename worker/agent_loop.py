@@ -1835,6 +1835,7 @@ def run_agent_job(worker_db, job):
         continuation_state.get("verification_records") or {})
     ctx.verification_records = {int(key): value
                                 for key, value in ctx.verification_records.items()}
+    _restore_preview_checkpoint(ctx, continuation_state)
     ctx._proof_ranges_by_version = {
         int(key): value for key, value in
         (continuation_state.get("proof_ranges_by_version") or {}).items()}
@@ -2112,6 +2113,7 @@ def run_agent_job(worker_db, job):
                     "exception_repeats": repeats,
                     "versions_written": list(ctx.versions_written),
                     "rendered_versions": sorted(ctx.rendered_versions),
+                    **_preview_checkpoint(ctx),
                     "checked_versions": sorted(ctx.checked_versions),
                     "change_manifests": ctx.change_manifests,
                     "verification_records": ctx.verification_records,
@@ -2182,6 +2184,26 @@ def run_agent_job(worker_db, job):
 _EXPLICIT_MICRO_EDIT = re.compile(
     r"\b0?\.\d+\s*(?:s|sec(?:ond)?s?)\b|\bmillisecond(?:s)?\b|"
     r"\b\d+\s*frames?\b", re.I)
+
+
+# A continuation is still the same logical request. Keep the durable render
+# receipt alongside rendered_versions; otherwise auto-render skips the file
+# and the final handoff has neither a preview attachment nor its review.
+_PREVIEW_CHECKPOINT_FIELDS = (
+    "last_preview", "last_visual_critic", "last_story_review",
+    "last_audio_review", "last_audio_qc_findings", "last_taste",
+    "last_taste_version",
+)
+
+
+def _preview_checkpoint(ctx):
+    return {name: getattr(ctx, name, None) for name in _PREVIEW_CHECKPOINT_FIELDS}
+
+
+def _restore_preview_checkpoint(ctx, state):
+    for name in _PREVIEW_CHECKPOINT_FIELDS:
+        if name in state:
+            setattr(ctx, name, state[name])
 
 
 def _recover_catastrophic_timeline_collapse(ctx, worker_db):
@@ -2282,7 +2304,10 @@ def _auto_render_if_needed(ctx, worker_db, session_id, timings,
                      f"({recovery['collapsed_duration_s']:.2f}s) and restored "
                      "the last usable edit before preview/export. The broken "
                      "intermediate version was not delivered.)")
-    if ctx.versions_written and latest["version"] not in ctx.rendered_versions:
+    if ctx.versions_written and (
+            latest["version"] not in ctx.rendered_versions
+            or (getattr(ctx, "last_preview", None) or {}).get("edl_version")
+            != latest["version"]):
         ctx.autorendered = True
         print(f"[honesty] job {ctx.job['id']}: model ended the turn without "
               f"render_preview after writing v{latest['version']} — "
@@ -4247,6 +4272,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             "first_write_pushed": first_write_pushed,
             "versions_written": list(ctx.versions_written),
             "rendered_versions": sorted(ctx.rendered_versions),
+            **_preview_checkpoint(ctx),
             "checked_versions": sorted(ctx.checked_versions),
             "change_manifests": ctx.change_manifests,
             "verification_records": ctx.verification_records,

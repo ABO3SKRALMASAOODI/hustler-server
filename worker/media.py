@@ -745,13 +745,18 @@ def frame_at(src, t, dst, width=None, quality=4, timeout=120):
     # frame has nothing to parallelise: single-threaded is 240 MB and, on the
     # input-seek path, actually FASTER (0.51s of CPU against 1.12s).
     th = ["-threads", "1"]
+    # JPEG requires full-range YUV on strict/newer ffmpeg builds. Decoder
+    # thread options before -i do not constrain the MJPEG output encoder.
+    jpeg = (["-pix_fmt", "yuvj420p", "-threads:v", "1"]
+            if os.path.splitext(str(dst))[1].lower() in {".jpg", ".jpeg"}
+            else [])
     attempts = (
         ["ffmpeg", "-y", *th, "-ss", ts, "-i", src,
-         "-frames:v", "1", *vf, "-q:v", str(quality), dst],
+         "-frames:v", "1", *vf, *jpeg, "-q:v", str(quality), dst],
         ["ffmpeg", "-y", *th, "-i", src, "-ss", ts,
-         "-frames:v", "1", *vf, "-q:v", str(quality), dst],
+         "-frames:v", "1", *vf, *jpeg, "-q:v", str(quality), dst],
         ["ffmpeg", "-y", *th, "-i", src, "-ss", ts, "-map", "0:v:0",
-         "-an", "-sn", "-dn", "-frames:v", "1", *vf, "-q:v", str(quality),
+         "-an", "-sn", "-dn", "-frames:v", "1", *vf, *jpeg, "-q:v", str(quality),
          "-f", "image2", "-update", "1", dst],
     )
     last_err = None

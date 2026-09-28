@@ -2934,7 +2934,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
 
     outro_on = outro_here          # one predicate, so the video and audio
     loud = (master or {}).get("loudness") == "social"
-    a_prog = "aprog" if (outro_on or loud) else "aout"
+    a_prog = "aprog"
     a_final = "apre" if (fade_in or fade_out or outro_on) else a_prog
     if mix_labels:
         parts.append(f"[{alabel}]" + "".join(mix_labels) +
@@ -2993,6 +2993,11 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                      "alimiter=limit=0.75:attack=5:release=50:level=0:"
                      "latency=1,"
                      f"{AUDIO_NORM}[{nxt}]")
+        a_prog = nxt
+    else:
+        nxt = "amst" if outro_on else "aout"
+        parts.append(f"[{a_prog}]alimiter=limit=0.75:attack=5:release=50:"
+                     f"level=0:latency=1,{AUDIO_NORM}[{nxt}]")
         a_prog = nxt
 
     if outro_on:

@@ -43,6 +43,7 @@ from flask import Blueprint, request, jsonify, redirect, Response
 from werkzeug.security import check_password_hash
 
 from routes.video import vdb
+from routes.auth import token_required
 
 mcp_oauth_bp = Blueprint("mcp_oauth", __name__)
 
@@ -232,6 +233,7 @@ __ERROR__
 the final export in Valmera Studio.</p>
 <p>Sign in to allow it. It cannot see your password, your card, or anything
 outside your video projects.</p>
+<p><a href="__SESSION_URL__" style="color:#86efac;font-weight:600">Continue with your Valmera account (including Google) →</a></p>
 <form method="POST">
 __HIDDEN__
 <label for="email">Email</label>
@@ -246,8 +248,7 @@ __HIDDEN__
 </div>
 </form>
 <p class="note">Redirects to <b>__REDIRECT_HOST__</b> when you allow.
-Signed up with Google? You have no password yet — set one with
-&ldquo;Forgot password&rdquo; on valmera.io, then come back.</p>
+Signed up with Google? Use “Continue with your Valmera account” above.</p>
 </div></body></html>"""
 
 
@@ -262,6 +263,7 @@ def _page(params, client_name, error=None, email=""):
         for k, v in params.items() if v)
     return (PAGE
             .replace("__CLIENT__", _esc(client_name))
+            .replace("__SESSION_URL__", _esc("https://valmera.io/mcp/authorize?" + urlencode(params)))
             .replace("__HIDDEN__", hidden)
             .replace("__EMAIL__", _esc(email))
             .replace("__REDIRECT_HOST__",
@@ -375,9 +377,14 @@ def authorize():
         # open. Telling them it was the password would be a lie.
         return Response(_page(params, name,
                               "Connecting apps to Valmera is not enabled for "
-                              "this account. An active Pro or Frontier subscription is required.", email),
+                              "this account. An active MCP Connect, Advanced, Pro or Frontier subscription is required.", email),
                         status=403, mimetype="text/html")
 
+    return redirect(_grant_redirect(params, client, user))
+
+
+def _grant_redirect(params, client, user):
+    uri, state = params["redirect_uri"], params.get("state", "")
     code = secrets.token_urlsafe(32)
     with vdb() as conn:
         cur = conn.cursor()
@@ -397,7 +404,7 @@ def authorize():
     if state:
         q["state"] = state
     sep = "&" if urlsplit(uri).query else "?"
-    return redirect(f"{uri}{sep}{urlencode(q)}")
+    return f"{uri}{sep}{urlencode(q)}"
 
 
 # ------------------------------------------------------------------ #
@@ -560,3 +567,31 @@ def set_active_project(grant_id, project_id):
         conn.cursor().execute(
             "UPDATE mcp_oauth_grants SET active_project_id = %s WHERE id = %s",
             (project_id, grant_id))
+
+
+@mcp_oauth_bp.route("/mcp/oauth/session-consent", methods=["GET", "POST"])
+@token_required
+def session_consent(user_id):
+    """Reuse a Valmera login, including Google, with explicit app consent."""
+    src = request.args if request.method == "GET" else (request.get_json(silent=True) or {})
+    keys = ("client_id", "redirect_uri", "response_type", "scope", "state",
+            "code_challenge", "code_challenge_method", "resource")
+    params = {key: str(src.get(key) or "") for key in keys}
+    client = _client(params["client_id"]) if params["client_id"] else None
+    if not client or params["redirect_uri"] not in (client["redirect_uris"] or []):
+        return jsonify({"error": "This app or redirect address is not registered."}), 400
+    if params["response_type"] != "code" or not params["code_challenge"] or params["code_challenge_method"] not in ("S256", ""):
+        return jsonify({"error": "An authorization code flow with S256 PKCE is required."}), 400
+    if params["scope"] not in ("", SCOPE):
+        return jsonify({"error": "Unsupported permission scope."}), 400
+    with vdb() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT id, email, is_verified, is_subscribed, plan FROM users WHERE id = %s", (int(user_id),))
+        user = cur.fetchone()
+    if not _account_allowed(user):
+        return jsonify({"error": "A verified account with an active MCP-enabled subscription is required."}), 403
+    if request.method == "GET":
+        return jsonify({"client_name": client["client_name"] or "AI assistant", "redirect_uri": params["redirect_uri"], "email": user["email"]})
+    if src.get("action") != "allow":
+        return jsonify({"error": "Explicit approval is required to connect this app."}), 400
+    return jsonify({"redirect_url": _grant_redirect(params, client, user)})
