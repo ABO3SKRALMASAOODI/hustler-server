@@ -3862,7 +3862,8 @@ class _FakeDB:
             return {"id": 248, "storage_key": "media/51/252-deadbeef.mp4",
                     "duration_s": 56.8,
                     "meta": {"src_sha256": "abc123", "variant": "preview",
-                             "edl_version": 2, "sheet_key": None}}
+                             "edl_version": 2, "sheet_key": None,
+                             "audio_peak_v": 1}}
         if name == "get_index_by_sha":
             return None          # forces the post-cache RuntimeError
         return None
@@ -4349,10 +4350,10 @@ _g_sfx_offset = renderer.build_filtergraph(
                      "offset_s": 148.0}, 171.0)])
 check("sfx: a requested source offset trims and resets its audio clock",
       "atrim=start=148.000,asetpts=PTS-STARTPTS" in _g_sfx_offset)
-# No limiter: alimiter's 5ms lookahead would delay the whole programme audio
-# against the picture, measured by differencing two renders.
-check("sfx: no limiter is inserted (it would shift A/V by its lookahead)",
-      "alimiter" not in _g_sfx)
+# Peak protection must compensate its lookahead so it cannot shift SFX
+# against the picture while preventing clipping in unmastered mixes.
+check("sfx: peak protection compensates its lookahead",
+      "alimiter=limit=0.75" in _g_sfx and "latency=1" in _g_sfx)
 
 print("== Round-26: the end card ==")
 _tl_o = Timeline([[0.0, 20.0]], [])
