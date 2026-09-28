@@ -253,7 +253,8 @@ def test_prompt_tells_the_editor_to_write_instead_of_planning():
     assert "apply_edit_recipe" not in p
     assert "set_edit_plan" not in p
     assert "Do not author a creative blueprint" in p
-    assert "1-2 words at a time" in p
+    assert "not as a universal recipe" in p
+    assert "restrained readable typography" in p
     assert "compare_uploaded_media ONCE" in p
 
 

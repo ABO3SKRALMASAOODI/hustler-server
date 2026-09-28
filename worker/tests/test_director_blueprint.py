@@ -1068,7 +1068,7 @@ def test_slow_visual_tool_is_read_once_before_durable_handoff(monkeypatch, tmp_p
     monkeypatch.setattr(agent_loop, '_build_messages', lambda *a, **k: [{'role': 'user', 'content': 'edit wedding'}])
     monkeypatch.setattr(agent_loop, '_adopt_steering_messages', lambda *a: 1)
     monkeypatch.setattr(agent_loop, '_activity', lambda *a, **k: None)
-    monkeypatch.setattr(agent_loop.llm, 'responses_available', lambda *a: False)
+    monkeypatch.setattr(agent_loop.llm, 'responses_available', lambda *a, **k: False)
     monkeypatch.setattr(agent_loop.llm, 'record', lambda *a: None)
     frame = tmp_path / 'look.jpg'
     Image.new('RGB', (40, 30), (70, 90, 110)).save(frame)

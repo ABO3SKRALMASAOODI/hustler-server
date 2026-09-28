@@ -23,8 +23,8 @@ TRANSLATION CAPTIONS ("arabic subtitles", "translate the captions to X"):
 - These are subtitles, not hype captions: default to 'documentary' (translucent contrast panel, restrained Plus Jakarta Sans, bottom), never spotlight/beast. RTL scripts (Arabic, Hebrew, Farsi) render correctly through Noto fallback — write natural RTL text with its punctuation.
 - Style-only follow-ups ("smaller", "nicer font") → set_caption_style, one call, no items re-send. Text corrections → ONE add_captions(mode='items') call with the full corrected list, same timings.
 
-PRESET FAMILIES — the safe default is modern stacked 1-2 word type, not a sentence subtitle. Choose one coherent visual grammar for the whole video:
-- General creator/talking head/tutorial/podcast, or "good/premium/clean/aesthetic/nice captions" → 'stacked': 1-2 words at a time, two size levels, the smaller word fades in behind the hero word. Pass max_words_per_caption=2 and animation fade. This is the default when the brief is vague.
+PRESET FAMILIES — prioritize readable, coherent typography over a fixed word count. Choose one coherent visual grammar for the whole video:
+- For a vague clean-edit brief, choose restrained phrase captions that preserve meaning and reading time. Use documentary for subtitles; stacked 1-2 word type with fade can suit punchy delivery. Choose from actual speech pace and composition, not the adjective “premium.”
 - Long-form interviews, accessibility, education, changing/bright backgrounds → 'documentary': restrained phrases on a translucent dark panel.
 - News, explainers, headlines, newsroom/B-roll → 'broadcast': left-aligned lower-third panel with sparse accent hierarchy.
 - Fast, punchy, hype, motivational → 'spotlight': ONE glowing word at a time, big caps, dead centre. Use only when that one-word rhythm is actually requested or clearly fits.
@@ -51,7 +51,7 @@ SIZE COMPLAINTS: "too small" / "big TikTok captions" → with a preset go size '
 COLOR COMPLAINTS: when the user rejects a caption color/accent, the answer is NO accent — pure white, emphasis 'big' (size-only), highlight_color/effect off. NEVER swap the rejected color for a different color (cyan→gold repeats the mistake in a new hue); they are telling you colored captions are wrong for this video, not that you picked the wrong shade. Same when they ask for "clean", "minimal", "aesthetic" or a premium/insta look on calm or cinematic footage: all-white captions, emphasis by SIZE alone, mixed case, no glow/box — restraint reads expensive; color reads loud. Reserve colored accents for hype content or an explicit ask.
 
 READABILITY IS THE CRAFT — the details that separate produced captions from burned subtitles:
-- SHORT GROUPS READ, SENTENCES DON'T: default short-form is 1-2 words on stacked levels with a fade. Full 8-12 word subtitles belong to 'documentary' or an explicit translation/subtitle ask, never a reel.
+- PHRASES MUST READ: group words by meaning and reading time. Avoid both overcrowded sentences and rapid isolated words that make the message harder to follow. Check real rendered timing, including the opening and dense passages.
 - NEW tracks are phrase-directed automatically: breath pauses and sentence ends reset the card; the composer rebalances neighboring cards instead of ending on "the / because / of", clears completed thoughts promptly during silence, and optically balances stack lines instead of leaving an accidental one-word widow. Documentary/editorial families preserve full punctuation; creator families retain expressive ?/! without comma clutter.
 - CONTRAST IS NON-NEGOTIABLE: white text dies on a bright sky; check the verify frames at 2-3 caption moments — if a caption fights its background, add the preset's box/glow emphasis, move position, or pick the frame's clear zone. Never ship a caption you haven't seen against its actual background.
 - EMPHASIS WORDS ARE THE MESSAGE: pick the 1-2 words per sentence that carry the meaning (numbers, names, the verb that lands) — not random nouns. Wrong emphasis reads worse than none.
@@ -70,7 +70,7 @@ PRE-CAPTIONED FOOTAGE (the most common request on footage the user did not shoot
 
 ## Common failure modes
 
-- Corrupt glyphs, missing transcript, orphan connectors, overcrowded phrases, or more than 1-2 words on a reel card.
+- Corrupt glyphs, missing transcript, orphan connectors, overcrowded phrases, or phrase timing too fast to read.
 - Face/UI/safe-band collisions, burned-caption stacking, or a panel whose bounds/fade/motion do not match its glyph layout.
 
 ## Verification procedure

@@ -10,7 +10,7 @@ Inspect deterministic checks, every affected scene/risk window, caption pages, a
 
 ## Strong treatment patterns
 
-WHEN: use a screening pass whenever it improves confidence in the edit. The screening can use the render's frames, look_at and deterministic AUDIO CHECK, but it is an evidence option rather than a required lock, fixed pass count, or preview allowance.
+WHEN: verify changed pictures and sound before claiming the edit is complete. Use the render's frames, look_at and AUDIO CHECK for the relevant risks; distinguish sampled evidence from continuous listening. There is no fixed pass count. Taste observations require judgment, while deterministic failures and unresolved current-version checks require repair or an honest limitation.
 
 SCREEN IN THIS ORDER — each item is a question with a yes/no answer:
 1. THE OPEN (look_at output_times=[0.2, 1.5]): is frame one sharp, composed, captioned, hook-forward? No black, no dead air, no half-faded anything?

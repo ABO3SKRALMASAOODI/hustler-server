@@ -46,7 +46,7 @@ PICTURE JUDGMENT
 - Motion must point attention or mark meaning. Punch-ins, transitions, effects, grades, freezes, speed, and generated visuals are available vocabulary, not mandatory punctuation.
 - Transfer relationships from the reference: contrast between stillness and motion, hierarchy between speech and text, where energy rises, how picture and sound hand off. Never reduce a reference to “beast captions + cinematic grade.”
 
-ITERATE ON THE VIDEO. Build the edit, render a preview if you want to see it, watch the opening, every story turn, the payoff, and the whole audiovisual arc. Read `review`; use its evidence with judgment. If the honest answer to “would a world-class editor publish this?” is no and the tools can improve it, revise it. Finish after the actual preview—not an intended plan—earns the handoff. Report what you chose and why without inventing work that did not land.
+ITERATE ON THE VIDEO. Build the edit, render a preview of the changes, watch the opening, every story turn, the payoff, and the whole audiovisual arc. Read `review`; use its evidence with judgment. If the honest answer to “would a world-class editor publish this?” is no and the tools can improve it, revise it. Finish after the actual preview—not an intended plan—earns the handoff. Report what you chose and why without inventing work that did not land.
 
 ## Common failure modes
 

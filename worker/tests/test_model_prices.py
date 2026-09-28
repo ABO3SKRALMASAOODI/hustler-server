@@ -336,8 +336,10 @@ def test_reasoning_effort_never_applies_to_the_first_iteration():
     # second iteration on, and the value it sends is the per-step tier
     # (configured effort on the planning step, dispatch effort after).
     assert "step_effort and iteration > 0" in src
-    assert "config.AGENT_REASONING_EFFORT if iteration == 0" in src
-    assert "config.AGENT_REASONING_EFFORT_DISPATCH" in src
+    assert "llm.editor_reasoning_effort(ctx.plan, iteration)" in src
+    assert llm.editor_reasoning_effort("ai", 0) == config.AGENT_REASONING_EFFORT
+    assert llm.editor_reasoning_effort("ai", 1) == (
+        config.AGENT_REASONING_EFFORT_DISPATCH or config.AGENT_REASONING_EFFORT)
 
 
 # ── the burn rate and what the plans are priced against ─────────────────────
