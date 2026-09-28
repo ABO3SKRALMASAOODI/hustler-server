@@ -423,7 +423,7 @@ def test_server_card_pricing_matches_the_public_shopfront(client):
 
     assert card["pricing"] == {
         "free": "Account creation and upload are free; editing requires a subscription",
-        "paidFrom": "USD 15/month",
+        "paidFrom": "USD 25/month",
         "url": "https://valmera.io/subscribe",
     }
 
@@ -1840,3 +1840,36 @@ def test_session_oauth_does_not_authorize_expired_plan(client, monkeypatch):
     response=client.post("/mcp/oauth/session-consent",json={**_q(cid,code_challenge=challenge),"action":"allow"},headers={"Authorization":"Bearer "+token})
     assert response.status_code == 403
     assert not DB["grants"]
+
+
+@pytest.mark.parametrize("prefix,origin,resource", [
+    ("", "https://api.example.com", "https://api.example.com/mcp"),
+    ("/public-mcp", "https://valmera.io", "https://valmera.io/mcp/server"),
+])
+def test_branded_mount_preserves_discovery_and_oauth_flow(client, prefix, origin, resource, monkeypatch):
+    monkeypatch.setenv("BACKEND_URL", "https://api.example.com")
+    headers = {"X-Forwarded-Host": "attacker.example", "Host": "attacker.example"}
+    response = client.post(prefix + "/mcp", json={"jsonrpc":"2.0","id":1,"method":"initialize"}, headers=headers)
+    assert response.status_code == 401
+    assert origin + "/.well-known/oauth-protected-resource" in response.headers["WWW-Authenticate"]
+    metadata = client.get(prefix + "/.well-known/oauth-protected-resource/mcp/server", headers=headers).get_json()
+    assert metadata["resource"] == resource
+    assert metadata["authorization_servers"] == [origin]
+    discovery = client.get(prefix + "/.well-known/oauth-authorization-server", headers=headers).get_json()
+    assert discovery["issuer"] == origin
+    assert discovery["token_endpoint"] == origin + "/mcp/oauth/token"
+    card = client.get(prefix + "/.well-known/mcp/server-card.json").get_json()
+    assert card["remotes"][0]["url"] == resource
+    cid = client.post(prefix + "/mcp/oauth/register", json={"client_name":"Valmera test", "redirect_uris":[CALLBACK]}).get_json()["client_id"]
+    verifier, challenge = _pkce()
+    import jwt
+    session = jwt.encode({"sub":"60"}, client.application.config["SECRET_KEY"], algorithm="HS256")
+    consent = client.post(prefix + "/mcp/oauth/session-consent", json={**_q(cid, code_challenge=challenge), "action":"allow"}, headers={"Authorization":"Bearer " + session})
+    assert consent.status_code == 200
+    code = parse_qs(urlsplit(consent.get_json()["redirect_url"]).query)["code"][0]
+    exchange = client.post(prefix + "/mcp/oauth/token", data={"grant_type":"authorization_code","code":code,"client_id":cid,"redirect_uri":CALLBACK,"code_verifier":verifier})
+    assert exchange.status_code == 200
+    token = exchange.get_json()["access_token"]
+    result = client.post(prefix + "/mcp", json={"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}, headers={"Authorization":"Bearer " + token})
+    assert result.status_code == 200
+    assert result.get_json()["result"]["serverInfo"]["name"]

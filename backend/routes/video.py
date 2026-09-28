@@ -634,8 +634,9 @@ def _studio_ai_gate(cur, user_id):
     cur.execute("SELECT plan, is_subscribed FROM users WHERE id = %s", (user_id,))
     account = cur.fetchone() or {}
     if account.get("plan") == "mcp_connect" and account.get("is_subscribed"):
-        return jsonify({"error": "MCP Connect edits through your connected AI assistant. Connect it to this project, then preview and export here.",
-                        "code": "mcp_only", "connect_url": "/mcp/connect"}), 403
+        return jsonify({"error": "You’re on the MCP plan. Upgrade to use the Valmera AI editor.",
+                        "code": "mcp_only", "connect_url": "/mcp/connect",
+                        "upgrade_url": "/subscribe"}), 403
     return None
 
 
@@ -6048,6 +6049,9 @@ def start_short_editor(user_id, project_id, child_project_id):
     """
     with vdb() as conn:
         cur = conn.cursor()
+        ai_gate = _studio_ai_gate(cur, user_id)
+        if ai_gate:
+            return ai_gate
         parent = _project_for_user(cur, project_id, user_id)
         child = _project_for_user(cur, child_project_id, user_id)
         if not parent or not child \

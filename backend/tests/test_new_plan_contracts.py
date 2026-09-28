@@ -65,3 +65,28 @@ def test_annual_guard_does_not_change_legacy_or_monthly_switches(plan,period):
     price=paddle.PLANS[plan]['yearly_price_id' if period=='yearly' else 'price_id']
     sub={'billing_cycle':{'interval':'year' if period=='yearly' else 'month'},'items':[{'price':{'id':price}}]}
     assert paddle._annual_contract_change_error({'plan':plan},sub) is None
+
+
+@pytest.mark.parametrize("route,args", [
+    (video.post_message, {"project_id":3}),
+    (video.start_shorts, {"project_id":3}),
+    (video.start_short_editor, {"project_id":3,"child_project_id":4}),
+])
+def test_mcp_hosted_ai_routes_refuse_before_project_or_queue_mutation(monkeypatch, route, args):
+    from contextlib import contextmanager
+    class Cursor:
+        def execute(self, sql, *args):
+            assert "SELECT plan, is_subscribed FROM users" in sql
+        def fetchone(self): return {"plan":"mcp_connect","is_subscribed":True}
+    class Connection:
+        def cursor(self): return Cursor()
+    @contextmanager
+    def database(): yield Connection()
+    monkeypatch.setattr(video, "vdb", database)
+    monkeypatch.setattr(video, "_project_for_user", lambda *args: {"id":3})
+    app=Flask(__name__)
+    with app.test_request_context(json={"text":"Make an edit"}):
+        response, status = route.__wrapped__(user_id=7, **args)
+        assert status == 403
+        assert response.get_json()["upgrade_url"] == "/subscribe"
+        assert response.get_json()["code"] == "mcp_only"

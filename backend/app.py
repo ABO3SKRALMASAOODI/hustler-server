@@ -245,6 +245,11 @@ def create_app():
     # No url_prefix: RFC 9728/8414 discovery documents MUST sit at the domain
     # root, or the client never finds them.
     app.register_blueprint(mcp_oauth_bp)
+    # The Valmera-domain proxy uses a separate mount so discovery has a
+    # deterministic issuer without trusting Host/X-Forwarded-Host headers.
+    # Existing connections on the Render origin retain their original issuer.
+    app.register_blueprint(mcp_bp, url_prefix='/public-mcp', name='mcp_public')
+    app.register_blueprint(mcp_oauth_bp, url_prefix='/public-mcp', name='mcp_oauth_public')
     # Founder-only read-only metrics for the signed Valmera iPhone widgets.
     app.register_blueprint(phone_status_bp)
 
