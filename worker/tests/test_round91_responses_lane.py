@@ -239,7 +239,8 @@ check("reasoning effort is MAX (gpt-5.6: none|low|medium|high|xhigh|max)",
 check("...and the per-step effort is what the lane sends",
       "effort=step_effort" in _src)
 check("...planning keeps the configured effort",
-      "config.AGENT_REASONING_EFFORT if iteration == 0" in _src)
+      "llm.editor_reasoning_effort(ctx.plan, iteration)" in _src
+      and llm.editor_reasoning_effort("ai", 0) == config.AGENT_REASONING_EFFORT)
 check("...and dispatch defaults below the planning effort",
       config.AGENT_REASONING_EFFORT_DISPATCH == "medium")
 check("the lane call gets the thinking-sized timeout, not the 90s dispatch "

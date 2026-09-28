@@ -4540,18 +4540,9 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         t0 = time.monotonic()
         # TIERED reasoning (round 100). Iteration 0 is where the model reads
         # the project state and plans the edit — that is the thinking worth
-        # paying for, and it runs at AGENT_REASONING_EFFORT. Every iteration
-        # after is tool dispatch: the plan exists, the step is "call the next
-        # tool and read its result", and running THAT at 'max' is what made
-        # one turn burn 49k reasoning tokens over 21 calls and hold another
-        # user's queued message hostage for 14 minutes (job 3211). Dispatch
-        # steps run at AGENT_REASONING_EFFORT_DISPATCH ('low' by default) —
-        # on both the responses lane and the chat path. Empty config sends no
-        # field at all, so a provider that would reject an unknown parameter
-        # is untouched until someone opts in.
-        step_effort = (config.AGENT_REASONING_EFFORT if iteration == 0
-                       else (config.AGENT_REASONING_EFFORT_DISPATCH
-                             or config.AGENT_REASONING_EFFORT))
+        # paying for. New Advanced contracts use high on every editing step;
+        # existing contracts retain their configured planning/dispatch split.
+        step_effort = llm.editor_reasoning_effort(ctx.plan, iteration)
         def _chat_request(active_model):
             active_extra = {}
             if step_effort and iteration > 0 \
@@ -4691,7 +4682,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                       f"on {lane.get('name') or 'fallback'}", flush=True)
                 return True
 
-            if llm.responses_available(model, active_base_url):
+            if llm.responses_available(model, active_base_url, effort=step_effort):
                 while resp is None:
                     try:
                         resp = llm.responses_create(
@@ -4824,8 +4815,9 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             raise
         timings["llm_s"] = round(timings["llm_s"] + time.monotonic() - t0, 2)
         timings["llm_calls"] += 1
-        msg = resp.choices[0].message
-        finish = getattr(resp.choices[0], "finish_reason", None)
+        choice = llm.agent_response_choice(resp)
+        msg = choice.message
+        finish = getattr(choice, "finish_reason", None)
         usage = getattr(resp, "usage", None)
         actual_tpm = (
             int(getattr(usage, "prompt_tokens", 0) or 0)
@@ -4885,28 +4877,27 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         # emit an action, checkpoint the logical turn and continue internally;
         # never turn an implementation ceiling into "send it again" work for
         # the user.
-        if not msg.tool_calls and not (msg.content or "").strip() \
-                and finish == "length":
+        if llm.empty_agent_response(msg, finish):
             if truncated_retries < 2:
                 truncated_retries += 1
                 max_tokens = min(max_tokens * 2,
                                  config.AGENT_MAX_TOKENS_CEILING)
-                print(f"[job {job['id']}] step truncated at the token ceiling "
-                      f"with no output — retrying with max_tokens={max_tokens}",
+                print(f"[job {job['id']}] model returned no usable output "
+                      f"— retrying with max_tokens={max_tokens}",
                       flush=True)
                 messages.append({"role": "system", "content": _TRUNCATED_NUDGE})
                 continue
-            fingerprint = "empty_completion_at_token_ceiling"
+            fingerprint = "empty_model_completion"
             previous = _cont.get("blocker_fingerprint")
             repeats = (int(_cont.get("blocker_repeats") or 0) + 1
                        if previous == fingerprint else 1)
             if repeats < 3:
                 return _durable_continuation(
-                    "model output ceiling recovery", fingerprint, repeats)
+                    "empty model response recovery", fingerprint, repeats)
             return _finalize(
                 ctx, worker_db, session_id,
                 "I couldn't complete this edit because the editing model "
-                "repeatedly exhausted its response capacity before producing "
+                "repeatedly returned no usable response before producing "
                 "an action. Nothing has been marked complete; any saved "
                 "timeline version remains available.",
                 "blocked", total_steps, timings, honesty,
@@ -5097,10 +5088,8 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 raise dbx.JobLeaseLost("Agent execution ended before tool dispatch")
             name = tc.function.name
             try:
-                args = json.loads(tc.function.arguments or "{}")
-                if not isinstance(args, dict):
-                    args = {}
-            except json.JSONDecodeError:
+                args = agent_tools.parse_tool_arguments(tc.function.arguments)
+            except (ValueError, TypeError):
                 args = None
             if args is None:
                 result = ("REJECTED: arguments were not valid JSON. "

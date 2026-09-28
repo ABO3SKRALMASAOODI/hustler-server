@@ -238,6 +238,34 @@ def paid_editor_lanes(plan=None):
                  api_key=config.OPENAI_API_KEY)]
 
 
+def editor_reasoning_effort(plan, iteration=0):
+    """New Advanced contracts reason at high; preserve legacy configuration."""
+    if plan == "advanced":
+        return "high"
+    return (config.AGENT_REASONING_EFFORT if iteration == 0 else
+            (config.AGENT_REASONING_EFFORT_DISPATCH or config.AGENT_REASONING_EFFORT))
+
+
+def agent_response_choice(response):
+    """Normalize an empty transport envelope without hiding an explicit refusal.
+
+    The loop records usage and retries an empty response through its bounded
+    continuation path. Never fabricate a tool call or replay a previous one.
+    """
+    choices = getattr(response, "choices", None)
+    if choices and getattr(choices[0], "message", None) is not None:
+        return choices[0]
+    return SimpleNamespace(finish_reason=None, message=SimpleNamespace(
+        content="", tool_calls=[], refusal=None))
+
+
+def empty_agent_response(message, finish):
+    return (not getattr(message, "tool_calls", None)
+            and not (getattr(message, "content", None) or "").strip()
+            and not getattr(message, "refusal", None)
+            and finish != "content_filter")
+
+
 def paid_editor_plan(plan):
     return bool(plan and plan != "free")
 
@@ -948,9 +976,10 @@ class _RespMessage:
     """A chat-completions-shaped message, so the agent loop needs no new
     branch to read one."""
 
-    def __init__(self, content, tool_calls):
+    def __init__(self, content, tool_calls, refusal=None):
         self.content = content
         self.tool_calls = tool_calls
+        self.refusal = refusal
 
 
 class _RespChoice:
@@ -1059,13 +1088,15 @@ def _from_responses(payload):
     """
     if not isinstance(payload, dict) or "output" not in payload:
         raise ValueError("no output in the responses payload")
-    text_bits, calls = [], []
+    text_bits, calls, refusals = [], [], []
     for item in payload.get("output") or []:
         kind = item.get("type")
         if kind == "message":
             for c in item.get("content") or []:
                 if c.get("type") in ("output_text", "text") and c.get("text"):
                     text_bits.append(c["text"])
+                elif c.get("type") == "refusal" and c.get("refusal"):
+                    refusals.append(c["refusal"])
         elif kind == "function_call":
             calls.append(_RespToolCall(item.get("call_id") or item.get("id"),
                                        item.get("name"),
@@ -1076,7 +1107,16 @@ def _from_responses(payload):
         # wrong while unable to test against the live API would be worse than
         # the model thinking afresh on each step — which is already the entire
         # difference between this lane and reasoning_effort='none'.
+    if refusals:
+        refusal = "\n".join(refusals)
+        return _RespCompletion(
+            [_RespChoice(_RespMessage("\n".join(text_bits) or refusal, None, refusal), "stop")],
+            _RespUsage(payload.get("usage") or {}))
     if not text_bits and not calls:
+        if payload.get("status") == "completed":
+            return _RespCompletion(
+                [_RespChoice(_RespMessage(None, None), "stop")],
+                _RespUsage(payload.get("usage") or {}))
         if payload.get("status") == "incomplete":
             # The model spent the whole max_output_tokens budget REASONING and
             # never reached content — routine at high/max effort, and exactly
@@ -1108,7 +1148,7 @@ def mark_responses_dead(model):
     _responses_dead.add(model)
 
 
-def responses_available(model, base_url):
+def responses_available(model, base_url, effort=None):
     """Is the Responses lane worth trying for this model?
 
     Gated on configuration and on the endpoint being one that serves
@@ -1128,7 +1168,8 @@ def responses_available(model, base_url):
     (mark_responses_dead) so a doomed request is paid once per process, not
     once per step.
     """
-    if not config.AGENT_RESPONSES_LANE or not config.AGENT_REASONING_EFFORT:
+    if not config.AGENT_RESPONSES_LANE or not (
+            config.AGENT_REASONING_EFFORT if effort is None else effort):
         return False
     if model in _responses_dead:
         return False

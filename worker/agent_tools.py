@@ -25036,9 +25036,24 @@ def _footprint_satisfied(edl, footprint):
     return True
 
 
+def parse_tool_arguments(raw):
+    """Never reinterpret a malformed call as permission to use tool defaults."""
+    args = json.loads(raw if raw is not None else "{}")
+    if not isinstance(args, dict):
+        raise ValueError("Tool arguments must be a JSON object")
+    return args
+
+
 def execute(ctx, name, args):
     """Dispatch one tool call. Returns a string for the model (AskUser
     propagates)."""
+    if not isinstance(args, dict):
+        outcome = tool_outcome_mod.ToolOutcome(
+            status="correction_needed",
+            message="Tool arguments must be a JSON object. No operation was run.",
+            safe_fallback="send the same tool with named arguments in a JSON object")
+        ctx.last_structured_tool_outcome = outcome.to_dict()
+        return outcome.render_text()
     if name == 'edit_shorts':
         outcome = tool_outcome_mod.ToolOutcome(
             status='unavailable',
@@ -25055,7 +25070,15 @@ def execute(ctx, name, args):
             safe_fallback="call load_tools with an advertised capability name")
         ctx.last_structured_tool_outcome = outcome.to_dict()
         return outcome.render_text()
-    name, args, _repairs = _normalize_tool_call(name, args)
+    try:
+        name, args, _repairs = _normalize_tool_call(name, args)
+    except (TypeError, ValueError, AttributeError) as exc:
+        outcome = tool_outcome_mod.ToolOutcome(
+            status="correction_needed",
+            message=f"Invalid tool arguments: {str(exc)[:200]}. No operation was run.",
+            safe_fallback="inspect the tool schema and correct the argument types")
+        ctx.last_structured_tool_outcome = outcome.to_dict()
+        return outcome.render_text()
     # Normalization may route set_frame(mode=auto) to auto_reframe, so resolve
     # the registry entry after dialect repair rather than before it.
     entry = TOOLS.get(name)
