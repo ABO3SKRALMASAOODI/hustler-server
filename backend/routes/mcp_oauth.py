@@ -39,7 +39,7 @@ import time
 from base64 import urlsafe_b64encode
 from urllib.parse import urlencode, urlsplit
 
-from flask import Blueprint, request, jsonify, redirect, Response
+from flask import Blueprint, request, jsonify, redirect, Response, has_request_context
 from werkzeug.security import check_password_hash
 
 from routes.video import vdb
@@ -57,11 +57,15 @@ def base_url():
     """This server's public origin. It is the OAuth `issuer`, so it has to be
     byte-identical everywhere it appears or a strict client rejects the
     metadata it just fetched."""
+    if has_request_context() and request.blueprint in ('mcp_public', 'mcp_oauth_public'):
+        return "https://valmera.io"
     return os.getenv("BACKEND_URL",
                      "https://entrepreneur-bot-backend.onrender.com").rstrip("/")
 
 
 def resource_url():
+    if has_request_context() and request.blueprint in ('mcp_public', 'mcp_oauth_public'):
+        return "https://valmera.io/mcp/server"
     return f"{base_url()}/mcp"
 
 
@@ -80,6 +84,7 @@ def _account_allowed(user):
 
 @mcp_oauth_bp.route("/.well-known/oauth-protected-resource")
 @mcp_oauth_bp.route("/.well-known/oauth-protected-resource/mcp")
+@mcp_oauth_bp.route("/.well-known/oauth-protected-resource/mcp/server")
 def protected_resource_metadata():
     """RFC 9728. The client reads this off the 401 to learn which
     authorization server guards the MCP endpoint. Both paths are served
@@ -96,6 +101,7 @@ def protected_resource_metadata():
 
 @mcp_oauth_bp.route("/.well-known/oauth-authorization-server")
 @mcp_oauth_bp.route("/.well-known/oauth-authorization-server/mcp")
+@mcp_oauth_bp.route("/.well-known/oauth-authorization-server/mcp/server")
 @mcp_oauth_bp.route("/.well-known/openid-configuration")
 def authorization_server_metadata():
     """RFC 8414. token_endpoint_auth_methods_supported is ["none"] on purpose:

@@ -2410,7 +2410,7 @@ def server_card():
         "toolReferenceUrl": "https://valmera.io/mcp/tools",
         "iconUrl": "https://valmera.io/icon-512.png",
         "remotes": [{"type": "streamable-http",
-                     "url": f"{mcp_oauth.base_url()}/mcp"}],
+                     "url": mcp_oauth.resource_url()}],
         "authentication": {
             "required": True,
             "schemes": ["oauth2"],
@@ -2452,7 +2452,7 @@ def server_card():
         ],
         "pricing": {
             "free": "Account creation and upload are free; editing requires a subscription",
-            "paidFrom": "USD 15/month",
+            "paidFrom": "USD 25/month",
             "url": "https://valmera.io/subscribe",
         },
     })

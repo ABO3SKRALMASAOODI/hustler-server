@@ -22,7 +22,9 @@ class _Cursor:
     def execute(self, sql, params=None):
         statement = " ".join(sql.split())
         params = params or ()
-        if statement.startswith("SELECT id, state, progress, error"):
+        if statement.startswith("SELECT plan, is_subscribed FROM users"):
+            self.one = {"plan":"advanced","is_subscribed":True}
+        elif statement.startswith("SELECT id, state, progress, error"):
             self.one = None
         elif statement.startswith("SELECT id, type, state"):
             self.one = None
