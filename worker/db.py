@@ -3061,6 +3061,8 @@ def has_active_job(conn, project_id, jtype):
 
 
 def user_credits_balance(conn, user_id):
+    import contract_credits
+    contract_credits.refresh(conn, user_id)
     with conn.cursor() as cur:
         cur.execute("SELECT credits_balance FROM users WHERE id = %s",
                     (user_id,))

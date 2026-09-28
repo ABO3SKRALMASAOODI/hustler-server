@@ -180,3 +180,14 @@ def test_qualification_marker_is_account_scoped_and_idempotent_sql():
     assert "FOR UPDATE" in conn.cur.commands[0][0]
     assert conn.cur.params[0] == conn.cur.params[2] == 8
     assert conn.cur.params[1].adapted["source_job_id"] == 44
+
+
+def test_new_mcp_contract_meters_provider_work_but_legacy_result_is_unchanged():
+    worker_db = _WorkerDb()
+    result = {'text':'image created', 'metered_contract':True}
+    assert job_completion.finalize_success(worker_db,_job(type='mcp_tool'),result,'lease')
+    assert len(worker_db.charges)==1 and result['credits_charged']==2.5
+    assert worker_db.qualifications==[]
+    legacy_db=_WorkerDb()
+    assert job_completion.finalize_success(legacy_db,_job(type='mcp_tool'),{'text':'image created'},'lease')
+    assert legacy_db.charges==[]

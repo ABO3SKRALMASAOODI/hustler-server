@@ -296,6 +296,9 @@ def get_balance(conn, user_id: int) -> dict:
 
     is_subscribed = bool(row["is_subscribed"])
     plan = row.get("plan") or "free"
+    if is_subscribed and plan in {"mcp_connect", "advanced"}:
+        import contract_credits
+        contract_credits.refresh(conn, user_id)
     trialing = is_subscribed and _trial_status(conn, user_id) == "trialing"
     # A trial gets no daily top-up — otherwise three days of 20 lands 30% on
     # top of the 10% cap the paywall quotes.
