@@ -4,10 +4,19 @@
 # "queued -> editing" cold starts are shorter without buying an idle instance.
 FROM python:3.11-slim-bookworm
 
+# Separate media dependencies and large Noto families into smaller layers
+# so the registry can upload and retry each package group independently.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-       ffmpeg fontconfig fonts-dejavu-core fonts-noto-core fonts-noto-cjk \
-       xz-utils \
+       ffmpeg fontconfig fonts-dejavu-core xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends fonts-noto-core \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/*
 
 ARG FFMPEG_STATIC=1
