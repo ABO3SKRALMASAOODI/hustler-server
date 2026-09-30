@@ -69,7 +69,7 @@ def _note_error(e):
 
 def provider_cost_usd(usage, model):
     """xAI invoice ticks, or Luna 6 cost from reported token categories."""
-    if model in ('gpt-6-luna', 'gpt-6-sol') and usage is not None:
+    if model in ('gpt-6-luna', 'gpt-6-sol', 'gpt-6.1-sol') and usage is not None:
         import model_prices
         get = lambda obj, key, default=None: (obj.get(key, default)
             if isinstance(obj, dict) else getattr(obj, key, default))
@@ -104,7 +104,7 @@ def record(purpose, request, response, usage=None):
         actual = provider_cost_usd(usage, (request or {}).get("model"))
         if actual is not None and isinstance(response, dict):
             response = dict(response, provider_cost_usd=actual)
-            if (request or {}).get('model') in ('gpt-6-luna', 'gpt-6-sol'):
+            if (request or {}).get('model') in ('gpt-6-luna', 'gpt-6-sol', 'gpt-6.1-sol'):
                 details = getattr(usage, 'prompt_tokens_details', {}) or {}
                 response['cache_write_in'] = (details.get('cache_write_tokens', 0)
                     if isinstance(details, dict) else getattr(details, 'cache_write_tokens', 0))
@@ -233,7 +233,7 @@ def paid_editor_lanes(plan=None):
     """New Advanced contracts use Sol; all grandfathered routes stay unchanged."""
     if not config.OPENAI_API_KEY:
         return []
-    return [dict(name="standard", client=client(), model=("gpt-6-sol" if plan == "advanced" else config.EDITOR_MODEL),
+    return [dict(name="standard", client=client(), model=("gpt-6.1-sol" if plan == "advanced" else config.EDITOR_MODEL),
                  base_url=config.OPENAI_BASE_URL,
                  api_key=config.OPENAI_API_KEY)]
 
@@ -903,11 +903,12 @@ def _seed_known_dialects():
     if "api.openai.com" not in (config.OPENAI_BASE_URL or ""):
         return
     for m in {config.AGENT_MODEL, config.FIRST_TURN_AGENT_MODEL,
-              config.EDITOR_MODEL, "gpt-6-sol", config.VISION_MODEL}:
+              config.EDITOR_MODEL, "gpt-6-sol", "gpt-6.1-sol", config.VISION_MODEL}:
         if m and re.match(r"gpt-[5-9]", m):
             _use_max_completion_tokens.add(m)
             _no_temperature.add(m)
-            _tools_effort_none.add(m)
+            if m != "gpt-6.1-sol":
+                _tools_effort_none.add(m)
 
 
 _seed_known_dialects()
@@ -1168,6 +1169,9 @@ def responses_available(model, base_url, effort=None):
     (mark_responses_dead) so a doomed request is paid once per process, not
     once per step.
     """
+    if model == "gpt-6.1-sol":
+        # Tool calls have no Chat Completions fallback on this model.
+        return True
     if not config.AGENT_RESPONSES_LANE or not (
             config.AGENT_REASONING_EFFORT if effort is None else effort):
         return False
@@ -1281,7 +1285,7 @@ def looks_like_responses_unsupported(exc):
 
 
 def responses_create(base_url, api_key, model, messages, tools,
-                     max_tokens=None, effort=None, timeout=None):
+                     max_tokens=None, effort=None, timeout=None, tool_choice=None):
     """One /v1/responses call, in and out in chat-completions shape.
 
     Raises on ANY problem — transport, HTTP status, or a body this does not
@@ -1294,6 +1298,15 @@ def responses_create(base_url, api_key, model, messages, tools,
             "tools": _to_responses_tools(tools)}
     if cache_affinity(model):
         body["prompt_cache_key"] = cache_affinity(model)["x-grok-conv-id"]
+    if model == "gpt-6.1-sol":
+        body["prompt_cache_options"] = {"ttl": "30m"}
+        key = getattr(_turn, "cache_key", None)
+        if key:
+            body["prompt_cache_key"] = key
+        if effort in (None, "", "none", "minimal"):
+            effort = "low"
+    if tool_choice is not None:
+        body["tool_choice"] = tool_choice
     if max_tokens:
         body["max_output_tokens"] = int(max_tokens)
     if effort:
@@ -1338,8 +1351,17 @@ def create_with_dialect(client_obj, model, messages, max_tokens=None,
     """chat.completions.create with automatic parameter-dialect adaptation.
     For the simple one-shot callers (ask_text / ask_vision / regen); the
     agent loop integrates the same helpers into its richer retry chain."""
+    if model == "gpt-6.1-sol" and "tools" in extra:
+        return responses_create(
+            str(client_obj.base_url), client_obj.api_key, model, messages,
+            extra["tools"], max_tokens=max_tokens,
+            effort=extra.get("reasoning_effort") or "high",
+            timeout=config.AGENT_LANE_TIMEOUT_S,
+            tool_choice=extra.get("tool_choice"))
     kw = completion_kwargs(model, max_tokens, temperature)
     kw.update(extra)
+    if model == "gpt-6.1-sol" and kw.get("reasoning_effort") in ("none", "minimal"):
+        kw["reasoning_effort"] = "low"
     headers = cache_affinity(model)
     if headers:
         kw["extra_headers"] = {**headers, **kw.get("extra_headers", {})}

@@ -66,6 +66,9 @@ separate and the flag must be True.
 # Keep every number sourced from the provider's own price page or a real
 # invoice. A guessed price is a silent, permanent billing error.
 MODEL_PRICES = {
+    # https://developers.openai.com/api/docs/models/gpt-6.1-sol (2026-09-30).
+    # Preserve GPT-6 Sol below for historical usage; its cache rate differs.
+    "gpt-6.1-sol": {"in": 2.0, "cached_in": 0.1, "cache_write_in": 2.5, "out": 10.0, "reasoning_separate": False},
     # https://developers.openai.com/api/docs/models/gpt-6-sol (2026-09-28).
     "gpt-6-sol": {"in": 2.0, "cached_in": 0.2, "cache_write_in": 2.5, "out": 10.0, "reasoning_separate": False},
     # https://developers.openai.com/api/docs/models/gpt-6-luna (2026-09-23).
@@ -305,7 +308,7 @@ def row_cost_sql(fallback, model_col="model", response_col="response",
     # Prefer the recorded per-request cost, including cache/tier/context
     # rates (provider invoice for xAI, reported tokens at official Luna rates). Historical rows without it retain deterministic token pricing.
     return (f"(CASE WHEN (left(lower(COALESCE({model_col}, '')), 5) = 'grok-' "
-            f"OR lower(COALESCE({model_col}, '')) IN ('gpt-6-luna', 'gpt-6-sol')) "
+            f"OR lower(COALESCE({model_col}, '')) IN ('gpt-6-luna', 'gpt-6-sol', 'gpt-6.1-sol')) "
             f"AND jsonb_typeof({response_col}->'provider_cost_usd') = 'number' "
             f"THEN CASE WHEN ({response_col}->>'provider_cost_usd')::float >= 0 "
             f"THEN ({response_col}->>'provider_cost_usd')::float ELSE {estimated} END "

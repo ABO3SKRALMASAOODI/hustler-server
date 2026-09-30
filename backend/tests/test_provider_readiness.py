@@ -16,7 +16,7 @@ class Response:
 
 def test_no_checkout_when_contracted_provider_has_no_funds(monkeypatch):
     monkeypatch.setattr(readiness.requests,'post',lambda *a,**k: Response())
-    assert readiness.advanced_readiness() == {'ready':False,'model':'gpt-6-sol','reason':'provider_funding'}
+    assert readiness.advanced_readiness() == {'ready':False,'model':'gpt-6.1-sol','reason':'provider_funding'}
     app=Flask(__name__)
     with app.app_context():
         result=paddle._new_plan_readiness('advanced')
@@ -37,4 +37,6 @@ def test_ready_check_is_bounded_and_cached(monkeypatch):
     assert readiness.advanced_readiness()['ready']
     assert len(calls)==1
     assert calls[0]['timeout']==(3.05,12)
-    assert calls[0]['json']['model']=='gpt-6-sol'
+    assert calls[0]['json']['model']=='gpt-6.1-sol'
+    assert calls[0]['json']['reasoning'] == {'effort':'low'}
+    assert calls[0]['json']['max_output_tokens'] == 512
