@@ -18,13 +18,13 @@ def advanced_readiness():
         if _cache and now < _cache['expires']:
             return dict(_cache['result'])
         key = os.getenv('OPENAI_API_KEY', '')
-        result = {'ready': False, 'model': 'gpt-6-sol', 'reason': 'provider_unavailable'}
+        result = {'ready': False, 'model': 'gpt-6.1-sol', 'reason': 'provider_unavailable'}
         if key:
             try:
                 r = requests.post(os.getenv('OPENAI_BASE_URL', 'https://api.openai.com/v1').rstrip('/') + '/responses',
                     headers={'Authorization': 'Bearer ' + key},
-                    json={'model': 'gpt-6-sol', 'input': 'Reply OK.', 'reasoning': {'effort': 'none'},
-                          'max_output_tokens': 16, 'store': False}, timeout=(3.05, 12))
+                    json={'model': 'gpt-6.1-sol', 'input': 'Reply OK.', 'reasoning': {'effort': 'low'},
+                          'max_output_tokens': 512, 'store': False}, timeout=(3.05, 12))
                 body = r.json()
                 if r.ok and body.get('status') == 'completed' and body.get('output'):
                     result.update(ready=True, reason=None)

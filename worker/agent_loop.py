@@ -4707,6 +4707,9 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                         if _wait_tpm(e, "responses"):
                             continue
                         permanent = llm.looks_like_responses_unsupported(e)
+                        if permanent and model == "gpt-6.1-sol":
+                            # This model cannot execute tools on Chat Completions.
+                            raise
                         if permanent:
                             llm.mark_responses_dead(model)
                             if not _responses_warned:

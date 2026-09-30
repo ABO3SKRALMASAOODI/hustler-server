@@ -21,7 +21,7 @@ def test_explicit_reasoning_opens_responses_even_with_empty_legacy_effort(monkey
     monkeypatch.setattr(config, "AGENT_REASONING_EFFORT", "")
     monkeypatch.setattr(config, "AGENT_RESPONSES_LANE", True)
     monkeypatch.setattr(llm, "_responses_dead", set())
-    assert llm.responses_available("gpt-6-sol", "https://api.openai.com/v1", effort="high")
+    assert llm.responses_available("gpt-6.1-sol", "https://api.openai.com/v1", effort="high")
     assert not llm.responses_available("legacy", "https://api.openai.com/v1")
 
 
