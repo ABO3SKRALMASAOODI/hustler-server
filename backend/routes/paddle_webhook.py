@@ -562,7 +562,12 @@ def handle_webhook():
         if plan in {'mcp_connect', 'advanced'}:
             period = ('yearly' if _price_id_from_data(data) ==
                       _PADDLE_PLANS[plan].get('yearly_price_id') else 'monthly')
-        expiry_date_str = data.get('next_billed_at')
+        # Transactions carry the paid term in billing_period, not
+        # next_billed_at. The completed event must not erase the renewal date
+        # supplied by the preceding subscription event.
+        expiry_date_str = (data.get('next_billed_at')
+                           or (data.get('billing_period') or {}).get('ends_at')
+                           or (data.get('current_billing_period') or {}).get('ends_at'))
         expiry_date = None
         if expiry_date_str:
             try:

@@ -185,8 +185,10 @@ def test_disabled_alerts_neither_queue_nor_start_a_thread(monkeypatch):
      ("transaction.completed", "0", False, False),
      ("transaction.paid", "3000", False, True)],
 )
+@pytest.mark.parametrize("plan", ["ai_pro", "mcp_connect", "advanced"])
+@pytest.mark.parametrize("period_field", ["next_billed_at", "billing_period", "current_billing_period"])
 def test_webhook_wires_the_alert_only_after_real_money(
-        monkeypatch, event_type, amount, alerted, granted):
+        monkeypatch, event_type, amount, alerted, granted, plan, period_field):
     """Protect the route wiring, not just the outbox helper in isolation."""
     from flask import Flask
 
@@ -197,18 +199,19 @@ def test_webhook_wires_the_alert_only_after_real_money(
     db = Db()
     calls = []
     grant_calls = []
+    activation_calls = []
     monkeypatch.setattr(webhook, "PADDLE_WEBHOOK_SECRET", "configured")
     monkeypatch.setattr(webhook, "_verify_paddle_signature", lambda _req: True)
     monkeypatch.setattr(webhook, "get_db", lambda: db)
     monkeypatch.setattr(webhook, "_user_id_by_subscription", lambda _: None)
     monkeypatch.setattr(webhook, "_user_id_by_customer_email", lambda _: 7)
-    monkeypatch.setattr(webhook, "_plan_from_data", lambda _: "ai_pro")
+    monkeypatch.setattr(webhook, "_plan_from_data", lambda _: plan)
     monkeypatch.setattr(
         webhook, "_trial_aware_grant",
         lambda *_, **kw: (
             grant_calls.append(kw["payment_grant"])
             or (2000, 20, False, "paid")))
-    monkeypatch.setattr(webhook, "update_user_subscription_status", lambda *_a, **_k: None)
+    monkeypatch.setattr(webhook, "update_user_subscription_status", lambda *a, **k: activation_calls.append(a))
     monkeypatch.setattr(
         webhook.billing, "record_transaction",
         lambda *_args, **_kwargs: {
@@ -223,16 +226,21 @@ def test_webhook_wires_the_alert_only_after_real_money(
 
     app = Flask(__name__)
     app.register_blueprint(webhook.paddle_webhook)
+    data = _transaction(amount)
+    term_end = "2026-10-30T13:36:17.676884Z"
+    data[period_field] = term_end if period_field == "next_billed_at" else {"ends_at": term_end}
     response = app.test_client().post("/webhook/paddle", json={
         "event_type": event_type,
-        "data": _transaction(amount),
+        "data": data,
     })
     assert response.status_code == 200
     assert grant_calls == ([True] if granted else [])
     assert bool(calls) is alerted
+    if granted:
+        assert activation_calls[0][2].isoformat() == term_end.replace("Z", "+00:00")
     if alerted:
         assert calls[0][0] is db
-        assert calls[0][1:3] == (7, "ai_pro")
+        assert calls[0][1:3] == (7, plan)
         assert calls[0][4] == "transaction.completed"
 
 
