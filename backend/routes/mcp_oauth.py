@@ -116,6 +116,7 @@ def authorization_server_metadata():
         "scopes_supported": [SCOPE],
         "response_types_supported": ["code"],
         "response_modes_supported": ["query"],
+        "authorization_response_iss_parameter_supported": True,
         "grant_types_supported": ["authorization_code", "refresh_token"],
         "code_challenge_methods_supported": ["S256"],
         "token_endpoint_auth_methods_supported": ["none"],
@@ -292,7 +293,7 @@ def _fail_page(message, code=400):
 
 
 def _redirect_err(uri, state, error, desc):
-    q = {"error": error, "error_description": desc}
+    q = {"error": error, "error_description": desc, "iss": base_url()}
     if state:
         q["state"] = state
     sep = "&" if urlsplit(uri).query else "?"
@@ -407,7 +408,7 @@ def _grant_redirect(params, client, user):
                     (_sha(code), grant_id, client["client_id"], uri,
                      params["code_challenge"], params["resource"] or None,
                      CODE_TTL_S))
-    q = {"code": code}
+    q = {"code": code, "iss": base_url()}
     if state:
         q["state"] = state
     sep = "&" if urlsplit(uri).query else "?"

@@ -1857,6 +1857,7 @@ def test_branded_mount_preserves_discovery_and_oauth_flow(client, prefix, origin
     assert metadata["authorization_servers"] == [origin]
     discovery = client.get(prefix + "/.well-known/oauth-authorization-server", headers=headers).get_json()
     assert discovery["issuer"] == origin
+    assert discovery["authorization_response_iss_parameter_supported"] is True
     assert discovery["token_endpoint"] == origin + "/mcp/oauth/token"
     card = client.get(prefix + "/.well-known/mcp/server-card.json").get_json()
     assert card["remotes"][0]["url"] == resource
@@ -1866,10 +1867,22 @@ def test_branded_mount_preserves_discovery_and_oauth_flow(client, prefix, origin
     session = jwt.encode({"sub":"60"}, client.application.config["SECRET_KEY"], algorithm="HS256")
     consent = client.post(prefix + "/mcp/oauth/session-consent", json={**_q(cid, code_challenge=challenge), "action":"allow"}, headers={"Authorization":"Bearer " + session})
     assert consent.status_code == 200
-    code = parse_qs(urlsplit(consent.get_json()["redirect_url"]).query)["code"][0]
+    callback_params = parse_qs(urlsplit(consent.get_json()["redirect_url"]).query)
+    assert callback_params["iss"] == [origin]
+    code = callback_params["code"][0]
     exchange = client.post(prefix + "/mcp/oauth/token", data={"grant_type":"authorization_code","code":code,"client_id":cid,"redirect_uri":CALLBACK,"code_verifier":verifier})
     assert exchange.status_code == 200
     token = exchange.get_json()["access_token"]
     result = client.post(prefix + "/mcp", json={"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}, headers={"Authorization":"Bearer " + token})
     assert result.status_code == 200
     assert result.get_json()["result"]["serverInfo"]["name"]
+
+
+@pytest.mark.parametrize("prefix,origin", [("", "https://api.example.com"), ("/public-mcp", "https://valmera.io")])
+def test_oauth_denial_includes_issuer(client, monkeypatch, prefix, origin):
+    monkeypatch.setenv("BACKEND_URL", "https://api.example.com")
+    cid = client.post(prefix + "/mcp/oauth/register", json={"redirect_uris":[CALLBACK]}).get_json()["client_id"]
+    response = client.post(prefix + "/mcp/oauth/authorize", data={**_q(cid), "action":"deny"})
+    query = parse_qs(urlsplit(response.headers["Location"]).query)
+    assert query["error"] == ["access_denied"]
+    assert query["iss"] == [origin]
