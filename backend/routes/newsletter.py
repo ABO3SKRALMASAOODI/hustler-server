@@ -693,24 +693,14 @@ def segments():
     conn = get_db()
     try:
         ensure_newsletter_schema(conn)
-        counts = _fetch(conn, f"""
-            SELECT
-              COUNT(*) FILTER (WHERE {BASE_FILTER}) AS verified,
-              COUNT(*) FILTER (WHERE u.is_verified=1 AND u.unsubscribed_at IS NOT NULL) AS unsubscribed,
-              COUNT(*) FILTER (WHERE {BASE_FILTER} AND u.created_at >= NOW() - INTERVAL '7 days') AS new_7d,
-              COUNT(*) FILTER (WHERE {BASE_FILTER} AND {LAST_ACTIVE} >= NOW() - INTERVAL '3 days') AS active,
-              COUNT(*) FILTER (WHERE {BASE_FILTER} AND {LAST_ACTIVE} <= NOW() - INTERVAL '3 days' AND {LAST_ACTIVE} > NOW() - INTERVAL '30 days') AS dormant,
-              COUNT(*) FILTER (WHERE {BASE_FILTER} AND {LAST_ACTIVE} <= NOW() - INTERVAL '30 days') AS inactive,
-              COUNT(*) FILTER (WHERE {BASE_FILTER} AND u.plan IS NOT NULL AND u.plan <> 'free') AS paid,
-              COUNT(*) FILTER (WHERE {BASE_FILTER} AND {HAS_PROJECT} AND NOT {HAS_EXPORT}) AS never_exported
-            FROM users u
-        """)[0]
-
-        # Live eligibility counts for each automated campaign right now (dry-run).
-        preview = run_daily_tick(dry_run=True)
-        eligible = {k: (v if isinstance(v, int) else 0) for k, v in (preview.get("campaigns") or {}).items()}
-
-        return jsonify({"counts": dict(counts), "eligible_now": eligible}), 200
+        from video_services.newsletter_metrics import read_counts
+        with conn.cursor() as cur:
+            cur.execute("SET LOCAL statement_timeout = '12s'")
+            counts = read_counts(cur, BASE_FILTER, EXPORT_STATES)
+        # The explicit “Preview who's due” action runs the full send planner.
+        # Loading a dashboard must not acquire its lock or query Brevo again.
+        return jsonify({"counts": counts, "eligible_now": {},
+                        "eligibility_on_demand": True}), 200
     finally:
         conn.close()
 
