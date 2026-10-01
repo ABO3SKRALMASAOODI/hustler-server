@@ -326,12 +326,6 @@ def register():
 
     conn   = get_db()
     cursor = conn.cursor()
-    cursor.execute("""
-        DELETE FROM users
-        WHERE email = %s AND is_verified = 0 AND created_at < NOW() - INTERVAL '5 minute'
-    """, (email,))
-    conn.commit()
-
     cursor.execute("SELECT * FROM users WHERE email = %s", (email,))
     user      = cursor.fetchone()
     hashed_pw = generate_password_hash(password)
@@ -342,9 +336,9 @@ def register():
             conn.commit()
             code = str(random.randint(100000, 999999))
             cursor.execute("""
-                INSERT INTO email_codes (email, code)
-                VALUES (%s, %s)
-                ON CONFLICT (email) DO UPDATE SET code = EXCLUDED.code
+                INSERT INTO email_codes (email, code, created_at)
+                VALUES (%s, %s, NOW())
+                ON CONFLICT (email) DO UPDATE SET code = EXCLUDED.code, created_at = NOW()
             """, (email, code))
             conn.commit()
             ok = send_code_to_email(email, code)
@@ -367,9 +361,9 @@ def register():
     conn.commit()
     code = str(random.randint(100000, 999999))
     cursor.execute("""
-        INSERT INTO email_codes (email, code)
-        VALUES (%s, %s)
-        ON CONFLICT (email) DO UPDATE SET code = EXCLUDED.code
+        INSERT INTO email_codes (email, code, created_at)
+        VALUES (%s, %s, NOW())
+        ON CONFLICT (email) DO UPDATE SET code = EXCLUDED.code, created_at = NOW()
     """, (email, code))
     conn.commit()
     ok = send_code_to_email(email, code)
