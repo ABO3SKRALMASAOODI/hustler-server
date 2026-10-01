@@ -14,7 +14,7 @@ from routes.newsletter_campaigns import (
     LIFECYCLE_FAMILIES, CAMPAIGN_FAMILY, WEEKLY_ORDER,
 )
 
-CONTENT_VERSION = "2026-09-09"
+CONTENT_VERSION = "2026-10-01"
 
 # Where the CTA buttons point by default (the studio, on the frontend).
 DEFAULT_CTA_URL = "https://valmera.io/studio"
@@ -45,8 +45,8 @@ LINE      = "#1e1e1e"   # hairline borders
 LINE_SOFT = "#161616"   # internal dividers
 WHITE     = "#ffffff"
 TEXT      = "#b4b4b4"   # body copy
-MUTED     = "#7a7a7a"   # footnotes
-MICRO     = "#5a5a5a"   # mono micro-labels
+MUTED     = "#a0a0a0"   # footnotes
+MICRO     = "#c08f89"   # mono micro-labels
 ACCENT    = "#cc0000"
 
 MONO = "'JetBrains Mono',Menlo,Consolas,'Courier New',monospace"
@@ -66,7 +66,7 @@ def eyebrow(text):
 
 
 def h1(text):
-    return (f'<h1 style="margin:0 0 14px;font:800 27px/1.22 {SANS};'
+    return (f'<h1 style="margin:0 0 14px;font:800 36px/1.12 {SANS};'
             f'color:{WHITE};letter-spacing:-0.02em;">{text}</h1>')
 
 
@@ -85,18 +85,16 @@ def small(text):
 
 
 def cta(label, url="{{CTA_URL}}"):
-    """The primary button: a WHITE pill with black text, like every CTA on the
-    site. bgcolor is set on the cell as well as in CSS because Outlook ignores
-    the CSS background on a table cell."""
+    """A large, high-contrast action that works with images disabled."""
     return (
         '<table role="presentation" cellpadding="0" cellspacing="0" border="0" '
-        'style="margin:22px 0 10px;"><tr>'
-        f'<td align="center" bgcolor="{WHITE}" '
-        f'style="background:{WHITE};border-radius:999px;">'
-        f'<a href="{url}" style="display:inline-block;padding:15px 34px;'
-        f'font:800 15px/1 {SANS};color:#000000;text-decoration:none;'
-        'border-radius:999px;letter-spacing:-0.01em;">'
-        f'{label}</a></td></tr></table>')
+        'style="margin:26px 0 24px;"><tr>'
+        '<td align="center" bgcolor="#f08075" '
+        'style="background:#f08075;border-radius:8px;">'
+        f'<a href="{url}" style="display:inline-block;padding:18px 28px;'
+        f'font:700 16px/1.2 {SANS};color:#100c0b;text-decoration:none;'
+        'border:1px solid #f08075;border-radius:8px;">'
+        f'{label} &#8594;</a></td></tr></table>')
 
 
 def feature(text):
@@ -208,23 +206,23 @@ def wrap_email(body_html: str, unsubscribe_url: str = "", preheader: str = "") -
 <tr><td align="center" style="padding:30px 14px 40px;">
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:600px;background:{CARD};border:1px solid {LINE};border-radius:20px;" bgcolor="{CARD}">
 
-<tr><td style="padding:26px 32px 4px;">
+<tr><td style="padding:32px 28px 26px;border-bottom:1px solid #272727;">
   <table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>
     <td valign="middle" style="padding-right:11px;">
       <img src="{EMAIL_ROBOT_URL}" width="30" height="44" alt="" style="display:block;border:0;outline:none;text-decoration:none;width:30px;height:44px;">
     </td>
     <td valign="middle">
-      <span style="font:800 21px/1 {SANS};color:{WHITE};letter-spacing:-0.02em;">Valmera</span>
-      <div style="margin-top:4px;font:700 9px/1.2 {MONO};color:{MICRO};letter-spacing:0.18em;text-transform:uppercase;">Agentic video editor</div>
+      <span style="font:800 23px/1 {SANS};color:{WHITE};letter-spacing:0.13em;">VALMERA</span>
+      <div style="margin-top:4px;font:700 9px/1.2 {MONO};color:{MICRO};letter-spacing:0.18em;text-transform:uppercase;">Your footage. Your direction.</div>
     </td>
   </tr></table>
 </td></tr>
 
-<tr><td style="padding:18px 32px 6px;">
+<tr><td style="padding:32px 28px 14px;">
 {body_html}
 </td></tr>
 
-<tr><td style="padding:20px 32px 28px;border-top:1px solid {LINE};">
+<tr><td style="padding:22px 28px 28px;border-top:1px solid {LINE};">
 <p style="margin:0 0 8px;font:400 12px/1.55 {SANS};color:{MUTED};">{footer}</p>
 <p style="margin:0;font:400 12px/1.55 {SANS};color:{MUTED};">{unsubscribe}<a href="mailto:support@valmera.io" style="color:#b4b4b4;text-decoration:underline;">Contact support</a> &nbsp;&middot;&nbsp; <a href="https://valmera.io" style="color:#b4b4b4;text-decoration:underline;">valmera.io</a></p>
 </td></tr>
@@ -257,12 +255,24 @@ def render_tokens(text: str, *, cta_url: str = DEFAULT_CTA_URL, credits=None,
 
 def _campaign_template(item):
     key, label, subject, preheader, heading, opening, prompt, closing, button = item
-    body = eyebrow("An editing idea from Valmera") + h1(escape(heading))
-    body += "".join(p(escape(paragraph)) for paragraph in opening)
+    family = CAMPAIGN_FAMILY.get(key)
+    stage = {"welcome_activation": "Your first edit", "first_cut": "Move your project forward",
+             "export_nudge": "From draft to done", "first_export": "Your next video",
+             "dormant": "Pick up where you left off", "winback": "An idea worth coming back for"}.get(family, "The editing notebook")
+    body = eyebrow(escape(stage)) + h1(escape(heading))
+    # One opening, one concrete example, one action. The full lesson stays in
+    # the product; the inbox should make the next step easy to understand.
+    body += p(escape(opening[0]))
     if prompt:
-        body += card(eyebrow("Try this in chat") + p(escape(prompt), color=WHITE, bottom=0))
-    body += "".join(p(escape(paragraph)) for paragraph in closing)
+        body += ('<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" '
+                 'style="margin:24px 0 0;background:#181313;border-left:3px solid #f08075;" bgcolor="#181313">'
+                 '<tr><td style="padding:20px;">' + eyebrow("An instruction to try")
+                 + p(escape(prompt), color=WHITE, size=18, bottom=0) + '</td></tr></table>')
+    elif len(opening) > 1:
+        body += p(escape(opening[1]))
     body += cta(escape(button))
+    if closing:
+        body += p(escape(closing[0]), color=MUTED, size=14)
     return {"subject": subject, "preheader": preheader, "body_html": body, "enabled": True}
 
 

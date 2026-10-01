@@ -58,7 +58,7 @@ def test_mime_text_preserves_links_without_html_or_hidden_preview():
                               "https://example.com/unsubscribe?a=1&b=2", "Hidden inbox preview")
     text = content.plain_text(html)
     assert "Hidden inbox preview" not in text
-    assert "Open studio (https://valmera.io/studio?a=1&b=2)" in text
+    assert "Open studio → (https://valmera.io/studio?a=1&b=2)" in text
     assert "https://example.com/unsubscribe?a=1&b=2" in text
     assert "<table" not in text
 
@@ -177,3 +177,24 @@ def test_planner_assigns_only_one_relevant_message_per_person(monkeypatch):
 
 def test_stale_database_override_cannot_revive_discount():
     assert not n._resolved_template("offer_50", {"enabled": True, "body_html": "old offer"})["enabled"]
+
+
+def test_recent_quota_prioritizes_unfinished_edits_then_started_projects():
+    fresh = planned(person(1, age=1))
+    started = planned(person(2, age=4, has_project=True))
+    edited = planned(person(3, age=10, has_project=True, has_edit=True))
+    older = planned(person(4, age=60))
+    selected = n._prioritize_recipients([fresh, started, edited, older], 3, NOW)
+    assert [x["recipient"]["id"] for x in selected] == [3, 2, 4]
+
+
+def test_unpaid_email_explains_the_paid_editing_step_without_discount():
+    app = Flask(__name__)
+    app.config["SECRET_KEY"] = "preview-only-secret"
+    template = {"key": "welcome_activation", **content.DEFAULT_TEMPLATES["welcome_activation"]}
+    with app.app_context():
+        _, unpaid, _ = n._render_for(template, "test@example.com", 0, subscribed=False)
+        _, paid, _ = n._render_for(template, "test@example.com", 100, subscribed=True)
+    assert "AI editing requires a subscription" in unpaid
+    assert "AI editing requires a subscription" not in paid
+    assert "utm_content=2026-10-01" in unpaid

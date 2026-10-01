@@ -849,7 +849,7 @@ def video_overview():
                         AND active.type = 'agent_turn'
                         AND active.state IN ('queued', 'running'))
                 UNION ALL
-                SELECT 'upload_failed', ce.project_id, p.title, u.email,
+                SELECT ce.kind, ce.project_id, p.title, u.email,
                        -- Every JSON accessor is parenthesised on purpose:
                        -- `||` binds tighter than `->>`, so the unparenthesised
                        -- form parses as (' - ' || ce.detail) ->> 'filename'
