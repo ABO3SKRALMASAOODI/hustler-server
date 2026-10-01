@@ -20,6 +20,7 @@ import config
 import error_text
 import model_prices
 import schemas
+import queue_admission
 
 # ------------------------------------------------------------------ #
 #  Connections                                                         #
@@ -350,7 +351,12 @@ def claim_job(conn, types, max_attempts):
                            OR (ahead.state = 'queued' AND ahead.id < video_jobs.id
                                AND ahead.attempts < %s))))"""
     params.extend([config.STALE_AFTER_S, max_attempts])
+    admission_where, admission_params = queue_admission.claim_filter(
+        types, has_remote_ledger)
+    params.extend(admission_params)
     with conn.cursor() as cur:
+        if admission_where and not queue_admission.lock_claim(cur):
+            return None
         cur.execute(f"""
             UPDATE video_jobs
             SET state = 'running', attempts = attempts + 1{claims_set},
@@ -385,6 +391,7 @@ def claim_job(conn, types, max_attempts):
                   {serial_where}
                   {index_fair_where}
                   {render_group_where}
+                  {admission_where}
                 ORDER BY CASE type WHEN 'preview' THEN 0
                                    WHEN 'final' THEN 1 ELSE 2 END,
                          COALESCE(u.is_subscribed, 0) DESC,

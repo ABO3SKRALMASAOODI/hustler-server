@@ -15,6 +15,19 @@ jobs:
       fail-fast: false
       matrix:
         service: [backend, worker]
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: valmera_test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: valmera_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U valmera_test -d valmera_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -42,4 +55,5 @@ jobs:
           DATABASE_URL: postgresql://stub/stub
           SKIP_DB_INIT: '1'
           PYTHONPATH: '${{ matrix.service }}'
+          QUEUE_TEST_DATABASE_URL: postgresql://valmera_test:test@localhost:5432/valmera_test
         run: python -m pytest -q '${{ matrix.service }}/tests'

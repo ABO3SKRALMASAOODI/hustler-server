@@ -1039,6 +1039,28 @@ def _run_tool_job(tok, name, args, raw=False, project_id=None):
             identity = f"PROJECT {project_id} — \"{project.get('title') or 'Untitled'}\""
             result = {"text": identity + "\n" + immediate, "is_error": False}
             return _out(result["text"], result)
+        # An index-dependent call cannot succeed by cold-starting an editor
+        # before its transcript exists. Return the authoritative analysis job
+        # to wait on, without spending a tool attempt or a compute slot.
+        original = _active_original(cur, project_id)
+        if original and not (original.get("sha256") and
+                             _index_row(cur, original["sha256"])):
+            cur.execute("""SELECT id, state FROM video_jobs
+                           WHERE project_id = %s AND type = 'index'
+                           ORDER BY id DESC LIMIT 1""", (project_id,))
+            analysis = cur.fetchone() or {}
+            waiting = analysis.get("state") in ("queued", "running")
+            guidance = (f"Call wait_for_job(job_id={analysis['id']}) and then "
+                        "index_status before retrying this tool."
+                        if waiting else
+                        "Call index_status to inspect the analysis failure or "
+                        "missing upload, then resolve it before editing.")
+            result = {"text": f"PROJECT {project_id} — video analysis is not "
+                      f"ready. No editing job was started. {guidance}",
+                      "is_error": True, "code": "index_not_ready",
+                      "index_job_id": analysis.get("id"),
+                      "retryable": waiting, "edl_changed": False}
+            return _out(_session_error(result["text"]), result)
         mutation = name in set(catalog.get("write_tools") or []) or name in {
             "reset_edit"}
         cur.execute("""SELECT MAX(version) AS version FROM edls

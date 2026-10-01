@@ -5794,7 +5794,7 @@ CLIENT_EVENT_KINDS = {"player_error", "player_error_probe", "player_composition_
                       # video_jobs row. Store only their tool name when they
                       # refuse/fail so operations can count the otherwise
                       # invisible error surface without retaining arguments.
-                      "mcp_error_response", "checkout_stage"}
+                      "mcp_error_response", "checkout_stage", "campaign_visit"}
 
 # The kinds that mean "a user tried to give us a video and we did not take it".
 # Surfaced in admin on their own rather than mixed into the rest, because these
