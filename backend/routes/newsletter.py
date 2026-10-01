@@ -328,7 +328,7 @@ def _send_one(email, subject, html, unsub_url, campaign=None):
         payload, category="bulk", logger=current_app.logger)
 
 
-def _render_for(tmpl, email, credits):
+def _render_for(tmpl, email, credits, *, subscribed=None):
     """Render a template into a full email for one recipient."""
     unsub = _unsub_url(email)
     from urllib.parse import urlencode
@@ -339,6 +339,12 @@ def _render_for(tmpl, email, credits):
     })
     body = render_tokens(tmpl["body_html"], cta_url=cta_url,
                          credits=credits, unsub_url=unsub, html=True)
+    if subscribed is not True:
+        body += ('<p style="margin:12px 0 20px;font:400 13px/1.6 Arial,Helvetica,sans-serif;color:#aaa;">'
+                 'You can create an account and upload footage before choosing a plan. '
+                 'AI editing requires a subscription. '
+                 '<a href="https://valmera.io/subscribe?utm_source=valmera&amp;utm_medium=email&amp;utm_campaign=plan_details" '
+                 'style="color:#f08075;">See what each plan includes</a>.</p>')
     preheader = render_tokens(tmpl.get("preheader", ""), credits=credits, unsub_url=unsub)
     subject = render_tokens(tmpl["subject"], credits=credits)
     html = wrap_email(body, unsub, preheader=preheader)
@@ -380,7 +386,7 @@ def _utc_naive(value):
 def _campaign_audience(conn):
     """Read progress once, rather than rescan activity for every email topic."""
     rows = _fetch(conn, f"""
-        SELECT u.id, u.email, u.credits_balance, u.created_at,
+        SELECT u.id, u.email, u.credits_balance, u.created_at, u.is_subscribed,
             {LAST_ACTIVE} AS last_active,
             {HAS_PROJECT} AS has_project, {HAS_EDIT} AS has_edit,
             {HAS_EXPORT} AS has_export, {HAS_CHAT} AS has_chat,
@@ -500,7 +506,14 @@ def _prioritize_recipients(plan, quota, now):
     cutoff = now - timedelta(days=30)
     recent = [item for item in plan if item["recipient"]["created_at"] >= cutoff]
     older = [item for item in plan if item["recipient"]["created_at"] < cutoff]
-    recent.sort(key=lambda item: (item["recipient"]["created_at"], item["recipient"]["id"]), reverse=True)
+    # Spend the recent cohort's scarce slots on people closest to finishing
+    # something. Never take away the older cohort's reserved share.
+    def intent(item):
+        row = item["recipient"]
+        unfinished_edit = bool(row.get("has_edit") and not row.get("has_export"))
+        started = bool(row.get("has_project") or row.get("has_chat"))
+        return (unfinished_edit, started, row["created_at"], row["id"])
+    recent.sort(key=intent, reverse=True)
     older.sort(key=lambda item: (item["recipient"].get("last_contact_at") or datetime.min,
                                  item["recipient"]["id"]))
     quota = max(0, int(quota))
@@ -605,7 +618,7 @@ def run_daily_tick(force=False, dry_run=False):
                 if dry_run:
                     summary["campaigns"][topic] += 1
                     continue
-                subject, html, unsub = _render_for(item["template"], r["email"], r["credits_balance"])
+                subject, html, unsub = _render_for(item["template"], r["email"], r["credits_balance"], subscribed=bool(r.get("is_subscribed")))
                 ok = _send_one(r["email"], subject, html, unsub, campaign=topic)
                 _record_send(conn, r["id"], r["email"], campaign, "sent" if ok else "failed")
                 if ok:
