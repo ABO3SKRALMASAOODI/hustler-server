@@ -65,14 +65,23 @@ warm without creating 8–26 sidebar tasks and avoids task-registration drift.
 
 ## Pool algorithm
 
-1. Spawn up to three editors, never more than the number of queued children.
-2. Assign one child to each and mark it `editing`.
+1. Use one representative child as the delivery-quality pilot when that gate
+   applies. It is the only intentional serial edit. Do not turn the pilot into
+   a multi-short wave.
+2. As soon as the pilot passes, spawn or reuse exactly three editors when at
+   least three independent children are claimable; otherwise use every
+   claimable child. Assign one distinct child to each and mark it `editing`.
+   `run_state.py` rejects two active children owned by the same worker.
 3. Wait for whichever editor returns first. Use direct agent waiting; do not
    create a timer, cron job, or heartbeat.
-4. Validate the editor's local evidence bundle.
-5. Review the candidate:
-   - pass: mark `ready`, then give that editor the next queued child;
-   - fail: mark `repair`, send one consolidated repair packet to that editor;
+4. Record and identity-check the returned candidate. If independent work is
+   queued, refill the newly idle slot before optional deep review. The state
+   machine exposes `parallelism.dispatch_required` and rejects normal candidate
+   acceptance/QC while a fillable slot remains idle.
+5. Review the candidate while the refilled editor works:
+   - pass: mark `ready`;
+   - fail: mark `repair`, then send one consolidated repair packet when its
+     owning editor is next free;
    - tool failure: reconcile its recorded job ID before retrying anything.
 6. Continue until no child is queued, editing, candidate, or repair.
 7. Reconcile live EDL versions once, then export ready children with at most
@@ -80,7 +89,9 @@ warm without creating 8–26 sidebar tasks and avoids task-registration drift.
 
 An editor waiting on a Valmera job is active. A stopped, failed, or completed
 editor is not active. Never count a database row, lease, or sidebar task as
-actual compute capacity.
+actual compute capacity. Keep three slots occupied only when independent work
+exists; do not invent filler work, split a coherent operation, or bypass a real
+dependency merely to satisfy a utilization number.
 
 ## Polling and recovery
 
@@ -102,6 +113,15 @@ QA output must be bounded. Keep the current candidate, current evidence bundle,
 and at most one failed predecessor per child. A full run should not create
 thousands of frame files. Contact sheets are preferred over individual stills;
 targeted stills are created only around suspected defects.
+
+The normal evidence path is one current preview, one boundary/contact-sheet
+review, one caption/audio review when speech exists, one deterministic media
+probe, and one coordinator report. Reuse checksum-matched evidence. Do not add
+bespoke ASR/CTC, PCM, PSNR, or frame-by-frame pipelines unless a concrete
+defect or failed deterministic check requires that specific measurement. After
+a scoped repair, recheck the changed window and adjacent boundaries, then the
+final probe/tail; do not rerun unrelated passing analyses. Final manifest
+verification is one pass over filenames, hashes, terminal states, and receipts.
 
 Default flow-control caps:
 

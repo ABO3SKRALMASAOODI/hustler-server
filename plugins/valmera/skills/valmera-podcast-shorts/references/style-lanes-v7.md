@@ -83,11 +83,20 @@ with identifiable later accomplishments. Do not use generic poverty imagery
 as if it depicts the person, or imply that footage from one period depicts
 another.
 
-Reject indirect association: generic astronauts are not an Elon Musk shot
-merely because they might have ridden a SpaceX vehicle. If the visual link
-needs an explanatory sentence or several inferred hops, it is too remote for
-this fast montage. A verified SpaceX launch or a recognizable Elon shot may
-serve a SpaceX-related payoff; a random rocket or astronaut may not. If enough
+Anchor the montage with at least one unmistakable shot of the featured person,
+normally immediately after the hook or at the payoff. Let the person recur when
+the available material supports the story, and use only directly attributable
+work/results between those anchors. This is not a mandated percentage, number
+of shots, or universal sequence: the story chooses the pattern, but an
+all-product, all-interface, or all-adjacent-topic montage fails a person-led
+podcast short. If no honest person anchor is available, choose another lane.
+
+Reject indirect association: anonymous staff or passengers are not a shot of
+the featured person merely because they used that person's product or worked
+near their company. If the visual link needs an explanatory sentence or
+several inferred hops, it is too remote for this fast montage. Recognizable
+person footage or a clearly identified result named by the premise may serve
+the payoff; generic adjacent stock may not. If enough
 direct, rights-usable visual material is unavailable, search specifically for
 it, then change lanes or surface the asset gap rather than filling the
 montage with adjacent stock. Fast cutting cannot rescue weak relevance.
@@ -119,9 +128,9 @@ doing something: walking, entering, working, or another recognizable action.
 The subject must be identifiable and not visibly speaking. A still picture or
 muted talking-head clip does not qualify. Mute the entire opening clip.
 
-Put a readable headline near the top inside the safe picture area. For the
-Elon brief it begins exactly `Elon Musk:`; for another subject use the name
-specified in that brief. The headline promises the idea that the following
+Put a readable headline near the top inside the safe picture area. Use the
+actual subject identity and naming format specified in the current brief; do
+not carry a name or prefix from another run. The headline promises the idea that the following
 podcast passage explains. Transition into a complete, clean conversation,
 remove the opening headline, and use premium restrained dialogue captions.
 Record the exact dialogue-start cue for later music placement.
@@ -258,7 +267,7 @@ app. Reserve its actual duration and inspect its presence in the download.
 ## Word-card synchronization
 
 Whenever a word/name card emphasizes something being said, synchronize it
-with that exact spoken occurrence, whether the interviewer or guest says it.
+with that exact spoken occurrence, whichever speaker says it.
 The first readable frame should coincide with the word's audible onset,
 rounded to the nearest output frame. Any entrance animation must make the
 word readable at that cue, rather than beginning a slow reveal there. Use

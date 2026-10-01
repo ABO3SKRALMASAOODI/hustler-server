@@ -48,6 +48,26 @@ def quality_fields(style_lane: str, *, editorial_duration_s: float = 23.0):
                 "output_end_s": 12.0,
             },
         ]
+        value["montage_shot_relevance"] = [
+            {
+                "asset_key": "subject-early",
+                "visible_subject": "The featured speaker at an earlier stage",
+                "identity_provenance": "Verified source metadata and face match",
+                "beat_served": "Personal origin",
+                "viewer_visible_link": "The same recognizable person appears",
+                "relationship": "person",
+                "viewer_can_understand_without_context": True,
+            },
+            {
+                "asset_key": "subject-later",
+                "visible_subject": "A named result of the speaker's work",
+                "identity_provenance": "Verified official project footage",
+                "beat_served": "Payoff",
+                "viewer_visible_link": "The named result directly resolves the premise",
+                "relationship": "direct-premise",
+                "viewer_can_understand_without_context": True,
+            },
+        ]
     return value
 
 
@@ -228,6 +248,7 @@ def test_happy_path_and_manifest(tmp_path):
         "active_word_caption_check": "pass",
         "within_short_broll_uniqueness_check": "pass",
         "style2_timing_check": "pass",
+        "person_premise_montage_check": "pass",
     })
     call("qc", "--run-dir", str(run_dir), "--short-id", "short-01",
          "--verdict", "ready", "--score", "94", "--report", str(report))
@@ -272,6 +293,85 @@ def test_fourth_parallel_editor_is_rejected(tmp_path):
         "claim", "--run-dir", str(run_dir), "--short-id", "short-3",
         "--worker", "editor-3",
     ]) == 2
+
+
+def test_one_worker_cannot_occupy_multiple_editor_slots(tmp_path):
+    run_dir = tmp_path / "run"
+    call("init", "--run-dir", str(run_dir), "--run-id", "worker-slots",
+         "--source", "topic")
+    for index in range(2):
+        short_id = f"short-{index}"
+        assignment = run_dir / "assignments" / f"{short_id}.json"
+        write_json(assignment, {
+            "short_id": short_id, "style_lane": "fast-conversation",
+        })
+        call("add-short", "--run-dir", str(run_dir), "--short-id", short_id,
+             "--project-id", str(300 + index), "--title", short_id,
+             "--assignment", str(assignment))
+    call("claim", "--run-dir", str(run_dir), "--short-id", "short-0",
+         "--worker", "editor-1")
+    assert run_state.main([
+        "claim", "--run-dir", str(run_dir), "--short-id", "short-1",
+        "--worker", "editor-1",
+    ]) == 2
+
+
+def test_candidate_and_qc_require_backfilling_available_slots(tmp_path):
+    run_dir = tmp_path / "run"
+    call("init", "--run-dir", str(run_dir), "--run-id", "pool",
+         "--source", "topic")
+    for index in range(4):
+        short_id = f"short-{index}"
+        assignment = run_dir / "assignments" / f"{short_id}.json"
+        write_json(assignment, {
+            "short_id": short_id, "style_lane": "fast-conversation",
+        })
+        call("add-short", "--run-dir", str(run_dir), "--short-id", short_id,
+             "--project-id", str(400 + index), "--title", short_id,
+             "--assignment", str(assignment))
+
+    call("claim", "--run-dir", str(run_dir), "--short-id", "short-0",
+         "--worker", "editor-1")
+    preview = run_dir / "candidates" / "short-0.mp4"
+    preview.write_bytes(b"preview")
+    bundle = preview.with_suffix(".json")
+    write_json(bundle, {
+        "run_id": "pool", "short_id": "short-0", "child_project_id": 400,
+        "style_lane": "fast-conversation", "edl_version": 1,
+        "preview_path": str(preview), "outstanding_job_ids": [],
+        **quality_fields("fast-conversation"),
+    })
+    candidate = [
+        "candidate", "--run-dir", str(run_dir), "--short-id", "short-0",
+        "--worker", "editor-1", "--bundle", str(bundle), "--preview",
+        str(preview), "--edl-version", "1",
+    ]
+    assert run_state.main(candidate) == 2
+    call("claim", "--run-dir", str(run_dir), "--short-id", "short-1",
+         "--worker", "editor-2")
+    call("claim", "--run-dir", str(run_dir), "--short-id", "short-2",
+         "--worker", "editor-3")
+    call(*candidate)
+
+    qc = run_dir / "candidates" / "qc.json"
+    write_json(qc, {
+        "run_id": "pool", "short_id": "short-0", "child_project_id": 400,
+        "style_lane": "fast-conversation", "edl_version": 1,
+        "verdict": "ready", "score": 95,
+        "active_word_caption_check": "pass",
+        "within_short_broll_uniqueness_check": "pass",
+    })
+    qc_args = [
+        "qc", "--run-dir", str(run_dir), "--short-id", "short-0",
+        "--verdict", "ready", "--score", "95", "--report", str(qc),
+    ]
+    assert run_state.main(qc_args) == 2
+    call("claim", "--run-dir", str(run_dir), "--short-id", "short-3",
+         "--worker", "editor-1")
+    call(*qc_args)
+    status = run_state.summary(json.loads((run_dir / "run.json").read_text()))
+    assert status["parallelism"]["active_editors"] == 3
+    assert status["parallelism"]["dispatch_required"] is False
 
 
 def test_ready_requires_high_score(tmp_path):
@@ -411,6 +511,28 @@ def test_style2_candidate_timing_limits_are_enforced():
     with pytest.raises(run_state.StateError, match="exceeds 15 seconds"):
         run_state.validate_candidate_contract(
             montage_too_long, "hook-to-silent-montage")
+
+
+def test_style2_requires_direct_relevance_and_a_person_anchor():
+    payload = quality_fields("hook-to-silent-montage")
+    payload["montage_shot_relevance"] = None
+    with pytest.raises(run_state.StateError, match="one relevance record"):
+        run_state.validate_candidate_contract(
+            payload, "hook-to-silent-montage")
+
+    payload = quality_fields("hook-to-silent-montage")
+    for record in payload["montage_shot_relevance"]:
+        record["relationship"] = "direct-premise"
+    with pytest.raises(run_state.StateError, match="person anchor"):
+        run_state.validate_candidate_contract(
+            payload, "hook-to-silent-montage")
+
+    payload = quality_fields("hook-to-silent-montage")
+    payload["montage_shot_relevance"][1][
+        "viewer_can_understand_without_context"] = False
+    with pytest.raises(run_state.StateError, match="viewer-visible direct"):
+        run_state.validate_candidate_contract(
+            payload, "hook-to-silent-montage")
 
 
 def test_candidate_requires_rendered_active_word_caption_coloring():

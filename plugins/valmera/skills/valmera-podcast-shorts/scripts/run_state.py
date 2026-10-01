@@ -114,6 +114,44 @@ def child(state: dict, short_id: str) -> dict:
     return value
 
 
+def parallelism(state: dict) -> dict:
+    """Describe real editor occupancy without inventing leases or timers."""
+    active_items = [item for item in state["shorts"].values()
+                    if item["status"] in ACTIVE]
+    claimable = [item for item in state["shorts"].values()
+                 if item["status"] in {"queued", "repair"}]
+    pilot_gate = bool(state.get("quality_policy")) and not state.get(
+        "quality_pilot")
+    active = len(active_items)
+    if pilot_gate:
+        # The one representative delivery-quality pilot is a real dependency.
+        # It must never be mistaken for permission to serialize the later batch.
+        target = active
+    else:
+        target = min(int(state.get("max_editors") or MAX_EDITORS),
+                     active + len(claimable))
+    idle_slots = max(0, target - active)
+    return {
+        "active_editors": active,
+        "target_active_editors": target,
+        "claimable_shorts": len(claimable),
+        "idle_slots_with_claimable_work": idle_slots,
+        "dispatch_required": idle_slots > 0,
+        "pilot_gate": pilot_gate,
+        "active_workers": sorted(
+            item["worker"] for item in active_items if item.get("worker")),
+    }
+
+
+def require_full_editor_pool(state: dict, action: str) -> None:
+    """Stop normal batch work from drifting into accidental serialization."""
+    status = parallelism(state)
+    if status["dispatch_required"]:
+        raise StateError(
+            f"dispatch {status['idle_slots_with_claimable_work']} idle editor "
+            f"slot(s) before {action}; independent queued work is available")
+
+
 def assignment_style_lane(assignment: Path) -> str:
     try:
         with assignment.open(encoding="utf-8") as handle:
@@ -405,6 +443,33 @@ def validate_candidate_contract(payload: dict, style_lane: str) -> None:
         if duration > 15.0 + EPSILON:
             raise StateError("hook-to-silent-montage exceeds 15 seconds")
 
+        relevance = payload.get("montage_shot_relevance")
+        if not isinstance(relevance, list) or len(relevance) != len(shots):
+            raise StateError(
+                "hook-to-silent-montage requires one relevance record per B-roll shot")
+        person_anchors = 0
+        for index, (record, shot) in enumerate(zip(relevance, shots)):
+            label = f"candidate montage_shot_relevance[{index}]"
+            if not isinstance(record, dict):
+                raise StateError(f"{label} must be an object")
+            if record.get("asset_key") != shot.get("asset_key"):
+                raise StateError(f"{label}.asset_key must match its B-roll shot")
+            for key in ("visible_subject", "identity_provenance", "beat_served",
+                        "viewer_visible_link"):
+                if not isinstance(record.get(key), str) or not record[key].strip():
+                    raise StateError(f"{label}.{key} must be non-empty")
+            relationship = record.get("relationship")
+            if relationship not in {"person", "direct-premise"}:
+                raise StateError(
+                    f"{label}.relationship must be person or direct-premise")
+            if record.get("viewer_can_understand_without_context") is not True:
+                raise StateError(
+                    f"{label} must have a viewer-visible direct connection")
+            person_anchors += relationship == "person"
+        if person_anchors < 1:
+            raise StateError(
+                "hook-to-silent-montage requires a recognizable person anchor")
+
 
 def require_status(item: dict, allowed: set[str], action: str) -> None:
     if item["status"] not in allowed:
@@ -553,13 +618,20 @@ def cmd_claim(args: argparse.Namespace) -> dict:
                      if value["status"] in ACTIVE)
         if active >= int(state.get("max_editors") or MAX_EDITORS):
             raise StateError(f"editor limit reached ({active}/{MAX_EDITORS})")
+        worker = args.worker.strip()
+        if not worker:
+            raise StateError("worker must be non-empty")
+        if any(value.get("worker") == worker and value["status"] in ACTIVE
+               for value in state["shorts"].values()):
+            raise StateError(
+                f"worker {worker!r} already owns an active short")
         item["status"] = "editing"
-        item["worker"] = args.worker
+        item["worker"] = worker
         item["edit_round"] += 1
         item["updated_at"] = now()
         state["events"].append({"at": now(), "type": "short_claimed",
                                 "short_id": args.short_id,
-                                "worker": args.worker})
+                                "worker": worker})
         return item
 
 
@@ -590,6 +662,7 @@ def cmd_candidate(args: argparse.Namespace) -> dict:
         require_status(item, {"editing"}, "record candidate")
         if item.get("worker") != args.worker:
             raise StateError("candidate worker does not own this short")
+        require_full_editor_pool(state, "accepting a batch candidate")
         expected = {
             "run_id": state["run_id"],
             "short_id": args.short_id,
@@ -657,6 +730,7 @@ def cmd_qc(args: argparse.Namespace) -> dict:
     with locked(args.run_dir) as state:
         item = child(state, args.short_id)
         require_status(item, {"candidate"}, "record QC")
+        require_full_editor_pool(state, "reviewing a batch candidate")
         expected = {
             "run_id": state["run_id"],
             "short_id": args.short_id,
@@ -687,6 +761,10 @@ def cmd_qc(args: argparse.Namespace) -> dict:
             if item.get("style_lane") == "hook-to-silent-montage" and \
                     payload.get("style2_timing_check") != "pass":
                 raise StateError("ready Style 2 requires a timing QC pass")
+            if item.get("style_lane") == "hook-to-silent-montage" and \
+                    payload.get("person_premise_montage_check") != "pass":
+                raise StateError(
+                    "ready Style 2 requires a person/premise montage QC pass")
             if run_quality_policy(state):
                 quality_review(absolute_existing(
                     payload.get("delivery_quality_review") or "", "quality review"))
@@ -892,6 +970,7 @@ def summary(state: dict) -> dict:
         "stage": state["stage"], "selected": len(state["shorts"]),
         "counts": {key: value for key, value in counts.items() if value},
         "outstanding_jobs": outstanding,
+        "parallelism": parallelism(state),
     }
 
 

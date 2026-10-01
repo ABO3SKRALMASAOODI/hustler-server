@@ -51,8 +51,12 @@ native Valmera ending for the current brief.
   The viewer should immediately recognize the person, the specific work,
   or a direct visual consequence of the spoken premise. Generic adjacent
   subjects and multi-hop associations fail even if factually connected in a
-  research note; e.g. anonymous astronauts do not automatically communicate
-  Elon Musk or his personal arc. Check that archival/current material is not
+  research note; e.g. anonymous staff, astronauts, or a product interface do
+  not automatically communicate the featured person or their personal arc.
+  Require a recognizable person anchor and record
+  `person_premise_montage_check: pass`; supporting product/work shots must be
+  attributable and understandable directly from the edit. This is not a
+  fixed shot-count quota. Check that archival/current material is not
   misrepresented as footage of another time or event. When a personal
   struggle-to-success premise is used, the montage should build that visible
   contrast with attributable material, not unrelated spectacle.
@@ -108,15 +112,11 @@ final is checked; a preview pass alone never proves this part of delivery.
 
 ## Evidence schedule
 
-Use the same current preview for every check. Inspect:
-
-- 0.00, 0.25, 0.50, 1.00, and 2.00 seconds;
-- every shot, crop, overlay, B-roll, caption-style, and transition boundary,
-  with frames immediately before and after;
-- each story-beat boundary and the payoff;
-- every two seconds through otherwise uncovered intervals;
-- the last two seconds at 0.25-second spacing;
-- the complete speech/caption stream once.
+Use the same current preview for every check. The baseline evidence is one
+end-to-end playback, a compact contact sheet covering the opening, story beats,
+shot/overlay/caption-style boundaries, payoff and tail, one complete
+speech/caption timing pass, and one deterministic media probe. This is a
+coverage model, not a fixed timestamp quota. If all gates pass, stop.
 
 Apply the independent synchronization check in `delivery-quality-v7.md` to the
 actual audio, picture, and caption clocks. Save its method and time-specific
@@ -138,9 +138,16 @@ If a defect is suspected, inspect that local window at frame-level density.
 Do not create frame-level evidence for the whole render by default. Contact
 sheets should cover regular samples and separate boundary close-ups.
 
+After a scoped repair, inspect the changed window and its adjacent boundaries,
+then replay the opening/payoff/tail and rerun the final media probe. Reuse
+checksum-matched evidence for every unchanged region. Do not repeat full ASR,
+CTC, PCM, PSNR, downloads, renders, or broad frame audits merely because a new
+candidate version exists; use one only when it answers a concrete unresolved
+question.
+
 For every speech-emphasis word/name card, check the cue against synchronized
-picture and audio in the current render. Confirm that the intended interviewer
-or guest says the word as its card first becomes readable, using the final
+picture and audio in the current render. Confirm that the intended speaker
+says the word as its card first becomes readable, using the final
 output timeline and the matching occurrence. Inspect locally at frame-level
 density when alignment is uncertain. A perceptibly early or late card,
 especially one appearing seconds after the word, blocks approval until fixed.

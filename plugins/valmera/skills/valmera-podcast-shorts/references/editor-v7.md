@@ -50,6 +50,10 @@ accomplishments; use truthful before/after contrast when the story calls for
 it. If direct assets are insufficient, report the gap or change the lane.
 Keep the montage at no more than 15 seconds and the entire editorial program
 at no more than 25 seconds, both measured before the separate native ending.
+Use a recognizable shot of the featured person as an anchor, normally the
+first post-hook image or the payoff, then support it with more person footage
+or directly understandable results of the premise. This is an identity and
+relevance gate, not a prescribed shot ratio or cut pattern.
 
 For `headline-conversation`, read `headline-conversation-references-v7.md`.
 Use no B-roll, preserve the full-duration topic headline above the picture,
@@ -122,14 +126,18 @@ brief and story; a past repair or tool preset does not dictate future styling.
 3. Make structural cuts and reframing.
 4. Add captions and only the purposeful overlays/B-roll.
 5. Run deterministic EDL/caption/asset checks before rendering.
-6. Render one rough preview after the composition is substantially complete.
-7. Review it end to end using the adaptive QC schedule. Consolidate every
-   issue into one repair pass.
+6. If composition still has a genuine visual uncertainty, render one rough
+   preview after it is substantially complete; otherwise go directly to the
+   candidate.
+7. Review the current preview end to end. Consolidate every issue into one
+   repair pass and stop adding checks when the contract is proven.
 8. Render the current candidate once, verify its EDL version, and build the
    evidence bundle.
 
-Do not render after every small mutation. Do not generate every frame of the
-video. If one region looks suspicious, inspect that region densely.
+Do not render after every small mutation, redownload an unchanged EDL, or
+generate every frame of the video. If one region looks suspicious, inspect
+that region densely. After a repair, reuse unchanged passing evidence and
+recheck only the changed window, its adjacent boundaries, and final integrity.
 
 ## Candidate bundle
 
@@ -165,6 +173,10 @@ video. If one region looks suspicious, inspect that region densely.
     {"asset_key": "subject-early", "source_start_s": 2.0, "source_end_s": 3.5, "output_start_s": 8.0, "output_end_s": 9.5},
     {"asset_key": "subject-later", "source_start_s": 12.0, "source_end_s": 14.0, "output_start_s": 9.5, "output_end_s": 11.5}
   ],
+  "montage_shot_relevance": [
+    {"asset_key": "subject-early", "visible_subject": "featured person", "identity_provenance": "verified source", "beat_served": "origin", "viewer_visible_link": "recognizable person shown directly", "relationship": "person", "viewer_can_understand_without_context": true},
+    {"asset_key": "subject-later", "visible_subject": "named result", "identity_provenance": "verified official footage", "beat_served": "payoff", "viewer_visible_link": "result directly resolves the premise", "relationship": "direct-premise", "viewer_can_understand_without_context": true}
+  ],
   "duplicate_broll_within_short": false,
   "montage_timing": {"start_s": 8.0, "end_s": 23.0, "duration_s": 15.0},
   "checks": {"media_probe": "pass", "captions": "pass", "assets": "pass"},
@@ -194,6 +206,12 @@ QC verify actual synchronization instead of trusting approximate placement.
 For `hook-to-silent-montage`, include `montage_shot_relevance` with the
 shot-by-shot ledger described above. The coordinator must be able to verify
 each connection against the rendered shot, not merely the asset filename.
+Every B-roll shot needs a matching ledger entry. Set `relationship` to
+`person` only when the featured person is recognizable in the pixels, or to
+`direct-premise` for an immediately understandable attributable result. At
+least one shot must be a person anchor, and every entry must truthfully set
+`viewer_can_understand_without_context` to `true`; otherwise change the asset
+or lane.
 Also include `montage_timing` with `start_s`, `end_s`, and `duration_s`, all in
 editorial-program seconds. `editorial_duration_s` excludes the native ending.
 For every lane, include `caption_treatment` as shown above and a `broll_shots`

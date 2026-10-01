@@ -90,6 +90,11 @@ them for a v7 run. They remain only so an interrupted v6 run can be audited.
     No B-roll visual may repeat within one short. For `hook-to-silent-montage`, the editorial program is
     at most 25 seconds and the post-hook montage is at most 15 seconds; the
     separate native Valmera ending is excluded from those limits.
+13. The delivery-quality pilot serializes exactly one representative short.
+    Once that actual final passes, fill all three editor slots whenever at least
+    three independent children are claimable. If only one or two are claimable,
+    use all of them. A real dependency or technical blocker is an exception;
+    preference, optional research, or more QC on another child is not.
 
 ## Create the run
 
@@ -214,22 +219,27 @@ weight and required Valmera branding geometry/runtime in assignments.
 
 ## Edit with a three-worker pool
 
-Spawn no more than three editor subagents. Give each the editor and QC
-contracts plus exactly one assignment. An editor must:
+After the single delivery-quality pilot passes, spawn or reuse three editor
+subagents when the queue has at least three independent children. Claim three
+different children with three different worker IDs before accepting the first
+batch candidate. Give each editor the editor and QC contracts plus exactly one
+assignment. An editor must:
 
 - open only its immutable child project;
 - inspect source words and visuals before mutating;
 - build the story in a small number of deliberate editing passes;
-- render one rough preview when composition is established;
+- render a rough preview only when composition has a real unresolved risk;
 - consolidate findings into one repair pass;
-- render one current candidate preview;
+- render one current candidate preview after the edit is established;
 - save a local candidate evidence bundle and return its path, EDL version, and
   outstanding job IDs.
 
-When an editor returns, the coordinator reviews that candidate immediately.
-If it passes, assign the same idle editor the next queued short. If it fails,
-send one timestamped, consolidated repair packet to the same editor. Do not
-create a replacement agent for ordinary repair work.
+When an editor returns, record and identity-check the candidate, then refill
+that editor's slot before optional deep review if independent queued work
+exists. Review can proceed while the next edit runs. If the candidate fails,
+queue one timestamped, consolidated repair packet for its editor's next free
+slot; do not stop the other editors or create a replacement agent for ordinary
+repair work. Never give one editor two active children at once.
 
 Use direct agent waits, preferably a long bounded wait that wakes when any
 editor finishes. Never schedule a future wakeup. If a tool or agent genuinely
@@ -239,11 +249,11 @@ working.
 ## Accept, repair, and export
 
 Apply `references/qc-v7.md` independently to every candidate. Verify story and
-taste before pixel polish. Use adaptive evidence rather than generating every
-frame of every render: inspect the opening, every shot/overlay/caption boundary,
-every story beat, the payoff, the final tail, regular coverage through the
-remaining timeline, and the complete speech/caption stream. Increase density
-only around a suspected defect.
+taste before pixel polish. Use the smallest evidence set that proves the gates
+on the current preview: one end-to-end review, boundary/beat coverage, caption
+timing review, a contact sheet, and deterministic media probe. Stop when they
+pass. Increase density or add a specialist measurement only around a concrete
+suspected defect; do not repeat unchanged checks after a targeted repair.
 
 Allow at most two editor repair rounds. If a candidate still misses a blocker,
 the coordinator performs one bounded rescue pass or marks it
