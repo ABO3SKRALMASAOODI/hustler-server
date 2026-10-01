@@ -258,7 +258,7 @@ def test_approval_render_real_pixels_and_branding(tmp_path):
     info=media.probe(output)
     assert (info['width'],info['height']) == (720,1280)
     assert abs(duration - (2+renderer.outro_seconds(True))) < .15
-    assert renderer.outro_seconds(False) == 5
+    assert renderer.outro_seconds(False) == 2
 
 
 def test_explicit_complete_preview_is_not_routed_to_changed_section(tmp_path,monkeypatch):

@@ -5536,25 +5536,20 @@ try:
 except ImportError:
     pass
 
-# The ASS layer: the product line has two events per cycle (out-and-back), and
-# the URL fills the old empty interval until the next cycle starts.
+# One steady attribution and address span the program, without cycling.
 _ass_p = os.path.join(tempfile.mkdtemp(), "wm.ass")
 _res = renderer.build_watermark_ass(_ass_p, 25.0, 1080, 1920)
 _body = open(_ass_p).read()
 _dialogs = [l for l in _body.splitlines() if l.startswith("Dialogue:")]
-_primary_dialogs = [l for l in _dialogs if wconfig.WATERMARK_TEXT in l]
-_url_dialogs = [l for l in _dialogs if wconfig.WATERMARK_URL_TEXT in l]
-_cycles = int(25.0 // wconfig.WATERMARK_PERIOD_S) + 1
 check("watermark: the ass layer is written", _res == _ass_p)
-check("watermark: the product line says VALMERA AI AGENT",
-      "VALMERA AI AGENT" in wconfig.WATERMARK_TEXT
-      and wconfig.WATERMARK_TEXT in _body)
-check("watermark: two product events per cycle (slide out, slide back)",
-      len(_primary_dialogs) == 2 * _cycles)
-check("watermark: valmera.io fills the former empty interval",
-      bool(_url_dialogs) and wconfig.WATERMARK_URL_TEXT == "valmera.io")
-check("watermark: it slides BOTH ways", _body.count("\\move") == len(_dialogs))
-check("watermark: it fades in and out", "\\fad(" in _body)
+check("watermark: agreed attribution and address stay visible together",
+      wconfig.WATERMARK_TEXT == "Edited using Valmera AI"
+      and wconfig.WATERMARK_URL_TEXT == "valmera.io"
+      and "Edited using Valmera AI\\Nvalmera.io" in _body)
+check("watermark: one steady event covers the program",
+      len(_dialogs) == 1 and ",0:00:00.00,0:00:25.00," in _dialogs[0])
+check("watermark: no recurring movement, fades or text swaps",
+      "\\move" not in _body and "\\fad(" not in _body and "\\pos(" in _body)
 check("watermark: it is anchored top-left", "\\an7" in _body)
 check("watermark: it uses the site's wordmark face",
       wconfig.WATERMARK_FONT_NAME in _body)
@@ -5569,7 +5564,7 @@ check("watermark: no event runs past the end of the program",
       max(_ends) <= 25.0 + 1e-6)
 check("watermark: events are ordered and non-overlapping",
       all(_starts[i] >= _ends[i - 1] - 1e-6 for i in range(1, len(_dialogs))))
-check("watermark: there is no textless gap between alternating events",
+check("watermark: there is no textless gap",
       all(_starts[i] <= _ends[i - 1] + 0.02
           for i in range(1, len(_dialogs))))
 # The overlay MUST end with the programme. The robot is a looped still, so
