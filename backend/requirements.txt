@@ -40,7 +40,7 @@ propcache==0.4.1
 psycopg2-binary==2.9.10
 pydantic==2.9.2
 pydantic_core==2.23.4
-PyJWT==2.14.0
+PyJWT==2.15.0
 python-dotenv==1.2.3
 replicate==1.0.7
 requests==2.34.2
@@ -51,7 +51,7 @@ tqdm==4.67.1
 # >=4.11 is openai 1.59.9's floor (4.9.0 made the SDK bump unresolvable and
 # would have failed the Render build). Nothing else here needs more than 4.7.
 typing_extensions==4.12.2
-urllib3==2.7.0
+urllib3==2.8.0
 websockets==16.0
 Werkzeug==3.1.8
 yarl==1.20.0
