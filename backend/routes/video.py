@@ -4992,7 +4992,7 @@ def user_edl_write(user_id, project_id):
 # enqueues a render, and the worker re-encodes with the card.
 #
 # Previews are exempt: they carry no card, so their absent stamp is correct.
-OUTRO_VERSION = 9      # v9: ending score carries continuously through card
+OUTRO_VERSION = 10     # v10: two-second Edited using card and branded URL
                        # (keep in step with worker/config.py OUTRO_VERSION —
                        # test_units checks the two match)
 
@@ -5167,7 +5167,7 @@ def _worker_confirmed_current(cur, project_id):
 # Mirrors worker/config.WATERMARK_VERSION — a worker test asserts they match.
 # The free-tier mark is burned into FINAL renders only (see the worker's
 # renderer.wants_watermark), so this is the backend half of the same rule.
-WATERMARK_VERSION = 4
+WATERMARK_VERSION = 5
 
 
 def _user_is_paid(cur, user_id):

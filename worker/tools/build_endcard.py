@@ -1,18 +1,9 @@
 """Build the compact animated Valmera end card used by every export.
 
-Round 102 — v7. The previous card asked a reel viewer to read five stacked
-elements and made the robot a third of the screen. This version is a compact
-signature with one reading path:
-
-                         Edited by
-                    [robot]  Valmera
-                       www.valmera.io
-
-"Edited by" arrives first and holds alone for about half a second. The brand
-lockup and URL then resolve in sequence, hold long enough to register, and fade
-to black at five seconds. The exported MP4 is the production asset; the PNG is
-its fully-revealed poster and the renderer's graceful fallback if the animation
-is ever missing from a build.
+The two-second signature reads "Edited using Valmera AI" and "valmera.io".
+The address uses the site's bold brand face. Elements appear together within
+0.36 seconds and hold until the final 0.2-second fade. The exported MP4 is the
+production asset; the PNG is the fully revealed fallback poster.
 
 The robot is the existing white navbar mark. Only its antenna stalk is lifted
 to white so the red ball stays visibly attached on black; every other pixel is
@@ -34,15 +25,15 @@ BLACK_RGB = (0, 0, 0)
 # square-pixel master to fit any output without cropping it.
 CARD_W, CARD_H = 1080, 1920
 FPS = 30
-DURATION_S = 5.0
+DURATION_S = 2.0
 
 # The signature occupies about one fifth of a vertical reel instead of most of
-# the screen. "Edited by" is intentionally the largest element; the robot and
+# the screen. "Edited using" is intentionally the largest element; the robot and
 # product name are supporting attribution, and the URL is the quiet final read.
-HEADLINE_SIZE = 138
+HEADLINE_SIZE = 106
 ROBOT_H = 148
 NAME_SIZE = 82
-URL_SIZE = 36
+URL_SIZE = 44
 GAP_HEADLINE = 36
 GAP_LOCKUP = 30
 LOCKUP_GAP = 28
@@ -133,12 +124,12 @@ def _brand_name(name, ai):
 def _elements():
     headline_font = ImageFont.truetype(JAKARTA_XB, HEADLINE_SIZE)
     name_font = ImageFont.truetype(INTER_BLACK, NAME_SIZE)
-    url_font = ImageFont.truetype(INTER_BOLD, URL_SIZE)
+    url_font = ImageFont.truetype(JAKARTA_XB, URL_SIZE)
 
-    headline = _text("Edited by", headline_font, WHITE, -3.0)
+    headline = _text("Edited using", headline_font, WHITE, -2.0)
     name = _brand_name(_text("Valmera", name_font, WHITE, -2.0),
                        _text("AI", name_font, WHITE, -2.0))
-    url_line = _text("www.valmera.io", url_font, SOFT_WHITE, 0.0)
+    url_line = _text("valmera.io", url_font, WHITE, 1.0)
     lockup = _lockup(_robot(ROBOT_H), name)
 
     block_h = (headline.height + GAP_HEADLINE + lockup.height
@@ -190,19 +181,19 @@ def frame_at(t, elements=None):
     elements = elements or _elements()
     headline, lockup, url_line = elements
 
-    # The final 0.36s resolves to black. This makes the MP4 itself complete;
+    # The final 0.2s resolves to black. This makes the MP4 itself complete;
     # the render pipeline also fades the segment as a codec-safe guard.
-    global_opacity = 1.0 - _progress(t, 4.64, 5.0)
+    global_opacity = 1.0 - _progress(t, 1.8, 2.0)
     frame = Image.new("RGBA", (CARD_W, CARD_H), (*BLACK_RGB, 255))
 
     _place(frame, headline[0], headline[1] + headline[0].height / 2,
-           _progress(t, 0.05, 0.38), travel=28,
+           _progress(t, 0.0, 0.18), travel=28,
            global_opacity=global_opacity)
     _place(frame, lockup[0], lockup[1] + lockup[0].height / 2,
-           _progress(t, 0.90, 1.25), travel=20, scale_from=0.92,
+           _progress(t, 0.08, 0.28), travel=20, scale_from=0.92,
            global_opacity=global_opacity)
     _place(frame, url_line[0], url_line[1] + url_line[0].height / 2,
-           _progress(t, 1.05, 1.33), travel=14,
+           _progress(t, 0.16, 0.36), travel=14,
            global_opacity=global_opacity)
     return frame.convert("RGB")
 

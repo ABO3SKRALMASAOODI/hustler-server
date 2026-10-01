@@ -1197,47 +1197,15 @@ WATERMARK_STYLE = "WM"
 def build_watermark_ass(path, out_duration_s, play_res, text, alternate_text,
                         x_in, x_out, y, fontsize, font, period_s, show_s,
                         fade_s):
-    """Write the watermark's text layer: it slides out from beside the robot,
-    holds, then slides back. The site address replaces it for the rest of the
-    cycle, so the robot is never left beside an empty space.
+    """A steady two-line signature, without recurring animation or text swaps.
 
-    The product line uses two events per cycle because \\move is a single
-    linear tween — out-and-back needs one event each way. The pair is
-    seamless; the alternate line is a third event filling the former gap.
-
-    Returns path, or None when the program is too short to show the mark
-    once (an empty .ass would still cost a subtitles pass for nothing).
+    Retain the call signature for executor compatibility. Animation parameters
+    are ignored: both attribution and address stay in the same corner.
     """
     if not out_duration_s or out_duration_s <= 0.6:
         return None
-    fade_ms = max(80, int(round(fade_s * 1000)))
-    hold_end = max(fade_s + 0.05, show_s - fade_s)   # when the slide back starts
-    events = []
-    t = 0.0
-    while t < out_duration_s - 0.3:
-        a0, a1 = t, min(t + hold_end, out_duration_s)
-        if a1 - a0 > 0.05:
-            events.append(
-                (a0, a1, rf"{{\an7\move({x_in},{y},{x_out},{y},0,{fade_ms})"
-                         rf"\fad({fade_ms},0)}}{text}"))
-        b0, b1 = t + hold_end, min(t + show_s, out_duration_s)
-        if b1 - b0 > 0.05:
-            events.append(
-                (b0, b1, rf"{{\an7\move({x_out},{y},{x_in},{y},0,{fade_ms})"
-                         rf"\fad(0,{fade_ms})}}{text}"))
-        c0, c1 = t + show_s, min(t + period_s, out_duration_s)
-        if alternate_text and c1 - c0 > 0.05:
-            # Keep very short tail fragments visible: an ASS fade longer than
-            # half the event would make the replacement effectively vanish.
-            alt_fade_ms = min(
-                fade_ms, max(40, int(round((c1 - c0) * 500))))
-            events.append(
-                (c0, c1, rf"{{\an7\move({x_in},{y},{x_out},{y},0,{alt_fade_ms})"
-                         rf"\fad({alt_fade_ms},{alt_fade_ms})}}"
-                         f"{alternate_text}"))
-        t += period_s
-    if not events:
-        return None
+    label = text + (rf"\N{alternate_text}" if alternate_text else "")
+    events = [(0.0, out_duration_s, rf"{{\an7\pos({x_in},{y})}}{label}")]
 
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(GFX_HEADER.format(resx=int(play_res[0]),

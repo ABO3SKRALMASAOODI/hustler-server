@@ -1402,7 +1402,7 @@ def watermark_geometry(W, H, anchor_y=None):
             # tucked against the robot, then slid clear
             "x_in": margin_x + rw + gap,
             "x_out": margin_x + rw + gap + slide,
-            "y": margin_y + max(0, (rh - fs) // 2)}
+            "y": margin_y + max(0, (rh - 2 * fs) // 2)}
 
 
 def build_watermark_ass(path, out_duration_s, W, H, anchor_y=None):
