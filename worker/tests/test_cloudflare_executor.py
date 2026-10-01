@@ -372,6 +372,7 @@ def test_cloudflare_preflight_rejects_source_skew_before_launch(monkeypatch):
     "container readiness mismatch role=executor source=old-source",
     "container readiness failed: connection refused",
     "Cloudflare container image is not ready",
+    "Error: Internal error hitting the containers service, try again later",
     "Error: Container sidecar is shutting down",
 ])
 def test_proven_unlaunched_image_readiness_is_rollout_pending(monkeypatch, message):
@@ -422,6 +423,29 @@ def test_readiness_error_without_no_acceptance_proof_reconnects(monkeypatch, mes
     monkeypatch.setattr(remote, "_interpret_cloudflare_terminal", lambda data, job: data)
     assert remote._run_cloudflare(dict(JOB)) == {"sentinel": True}
     assert len(recovered) == 1
+
+
+def test_non_json_success_recovers_the_same_mcp_call(monkeypatch):
+    _enable(monkeypatch)
+    class Ledger:
+        def run(self, *_args, **_kwargs): return True
+        def reset(self): pass
+    class BrokenResponse:
+        status_code = 200
+        def json(self): raise ValueError('Error proxying request')
+    monkeypatch.setattr(remote.dbx, 'Db', Ledger)
+    monkeypatch.setattr(remote.dbx, 'mark_remote_owned', lambda _id: True)
+    monkeypatch.setattr(remote.dbx, 'remote_launch_recorded', lambda _id: None)
+    monkeypatch.setattr(remote, '_cloudflare_preflight', lambda **kw: None)
+    posted = []
+    monkeypatch.setattr(remote.requests, 'post', lambda *a, **kw: posted.append(a[0]) or BrokenResponse())
+    recovered = []
+    monkeypatch.setattr(remote, '_recover_cloudflare_result', lambda *a: recovered.append(a) or {'safe':True})
+    monkeypatch.setattr(remote, '_interpret_cloudflare_terminal', lambda data, job: data)
+    job = dict(JOB, type='mcp_tool')
+    assert remote._run_cloudflare(job) == {'safe':True}
+    assert len(posted) == len(recovered) == 1
+    assert recovered[0][:2] == (remote._cloudflare_call_id(job), 'mcp')
 
 
 def test_orchestration_is_cloudflare_eligible_without_media_shape(

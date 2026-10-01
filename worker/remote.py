@@ -1419,6 +1419,7 @@ def _run_cloudflare(job):
                         "container readiness mismatch ",
                         "container readiness failed:",
                         "Cloudflare container image is not ready",
+                        "Error: Internal error hitting the containers service",
                         "Error: Container sidecar is shutting down")):
                     # A retiring sidecar can reject startAndWaitForPorts.
                     # Only this 503 + no-acceptance proof is safe to wait on;
@@ -1433,9 +1434,11 @@ def _run_cloudflare(job):
                 job)
         try:
             data = response.json()
-        except ValueError as exc:
-            raise RemoteExecutorError(
-                "Cloudflare call returned non-JSON") from exc
+        except ValueError:
+            # A proxy can replace a successful response with a non-JSON
+            # body after /run was accepted. Recover the same named call;
+            # never fail the edit or replay a mutation from this alone.
+            data = _recover_cloudflare_result(call_id, lane, job, deadline)
     return _interpret_cloudflare_terminal(data, job)
 
 

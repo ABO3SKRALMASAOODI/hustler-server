@@ -1884,3 +1884,19 @@ def editing_provider_readiness():
     from provider_readiness import advanced_readiness
     result = advanced_readiness()
     return jsonify(result), (200 if result['ready'] else 503)
+
+
+@admin_bp.route('/conversion', methods=['GET'])
+@admin_required
+def conversion_report():
+    from video_services.conversion_report import read_report
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SET LOCAL statement_timeout = '15s'")
+            return jsonify(read_report(cur, _scope('u')))
+    except Exception:
+        current_app.logger.exception('Conversion report unavailable')
+        return jsonify({'error': 'Conversion data is temporarily unavailable. Retry shortly.'}), 503
+    finally:
+        conn.close()
