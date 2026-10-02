@@ -1,7 +1,7 @@
 """Build the compact animated Valmera end card used by every export.
 
-The two-second signature reads "Edited using Valmera AI" and "valmera.io".
-The address uses the site's bold brand face. Elements appear together within
+The five-second signature reads "Edited using Valmera AI" and "VALMERA.IO".
+The address uses the bold, spaced uppercase reference wordmark. Elements appear within
 0.36 seconds and hold until the final 0.2-second fade. The exported MP4 is the
 production asset; the PNG is the fully revealed fallback poster.
 
@@ -25,7 +25,7 @@ BLACK_RGB = (0, 0, 0)
 # square-pixel master to fit any output without cropping it.
 CARD_W, CARD_H = 1080, 1920
 FPS = 30
-DURATION_S = 2.0
+DURATION_S = 5.0
 
 # The signature occupies about one fifth of a vertical reel instead of most of
 # the screen. "Edited using" is intentionally the largest element; the robot and
@@ -124,12 +124,12 @@ def _brand_name(name, ai):
 def _elements():
     headline_font = ImageFont.truetype(JAKARTA_XB, HEADLINE_SIZE)
     name_font = ImageFont.truetype(INTER_BLACK, NAME_SIZE)
-    url_font = ImageFont.truetype(JAKARTA_XB, URL_SIZE)
+    url_font = ImageFont.truetype(INTER_BLACK, URL_SIZE)
 
     headline = _text("Edited using", headline_font, WHITE, -2.0)
     name = _brand_name(_text("Valmera", name_font, WHITE, -2.0),
                        _text("AI", name_font, WHITE, -2.0))
-    url_line = _text("valmera.io", url_font, WHITE, 1.0)
+    url_line = _text("VALMERA.IO", url_font, WHITE, URL_SIZE * 0.12)
     lockup = _lockup(_robot(ROBOT_H), name)
 
     block_h = (headline.height + GAP_HEADLINE + lockup.height
@@ -183,7 +183,7 @@ def frame_at(t, elements=None):
 
     # The final 0.2s resolves to black. This makes the MP4 itself complete;
     # the render pipeline also fades the segment as a codec-safe guard.
-    global_opacity = 1.0 - _progress(t, 1.8, 2.0)
+    global_opacity = 1.0 - _progress(t, DURATION_S - 0.2, DURATION_S)
     frame = Image.new("RGBA", (CARD_W, CARD_H), (*BLACK_RGB, 255))
 
     _place(frame, headline[0], headline[1] + headline[0].height / 2,

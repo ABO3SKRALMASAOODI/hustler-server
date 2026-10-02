@@ -105,6 +105,11 @@ PLANS_SANDBOX = {
 # Only these tiers can be newly purchased or switched to. Retired and MCP
 # definitions above are present solely to keep existing contracts resolvable.
 NEW_PLANS = frozenset({"mcp_connect", "advanced"})
+# Display-only comparisons never enter the checkout or entitlement catalogs.
+COMPARISON_ONLY_PLANS = ({
+    "id": "ultimate", "name": "Ultimate Editor", "monthly": 200,
+    "yearly": 2000, "credits": 16000, "sold_out": True,
+},)
 LEGACY_SHOPFRONT_PLANS = frozenset({"ai", "ai_pro", "ai_max"})
 PURCHASABLE_PLANS = NEW_PLANS | LEGACY_SHOPFRONT_PLANS
 

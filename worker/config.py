@@ -1779,7 +1779,7 @@ RENDER_BLACK_MAX_RATIO = float(os.getenv("RENDER_BLACK_MAX_RATIO", "0.7"))
 # downloads always go through a final render, previews never do. Set
 # OUTRO_ON_PREVIEW=1 to show it in previews too — the renderer supports it and
 # the tests cover both — but fix the studio's time base first.
-OUTRO_DURATION_S = float(os.getenv("OUTRO_DURATION_S", "2.0"))
+OUTRO_DURATION_S = float(os.getenv("OUTRO_DURATION_S", "5.0"))
 OUTRO_FADE_IN_S = 0.45
 OUTRO_FADE_OUT_S = 0.35
 # Silent-card fallback: when no score reaches the program's final frame, fade
@@ -1793,7 +1793,7 @@ OUTRO_ON_PREVIEW = os.getenv("OUTRO_ON_PREVIEW", "0") == "1"
 # Bumped whenever the card's LOOK or its audio handoff changes. It is stored on
 # every render asset and busts the cache, so an existing export re-encodes with
 # the complete current outro treatment instead of serving stale bytes forever.
-OUTRO_VERSION = 10     # v10: two-second Edited using card and branded URL.
+OUTRO_VERSION = 11     # v11: five-second hold and uppercase, spaced brand URL.
                       # See tools/build_endcard.py
 
 # ── Shorts mode (round 99) ───────────────────────────────────────────────
