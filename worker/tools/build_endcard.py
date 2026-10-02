@@ -101,12 +101,17 @@ def _text(text, font, fill, tracking=0.0):
 
 
 def _lockup(robot, name):
-    """Build the small horizontal robot + Valmera attribution row."""
+    """Center the name itself, with the robot beside it as a side ornament.
+
+    Reserve the same space on the right as the robot occupies on the left so
+    all three text lines share a center even though only one has an icon.
+    """
     height = max(robot.height, name.height)
-    width = robot.width + LOCKUP_GAP + name.width
+    side_space = robot.width + LOCKUP_GAP
+    width = 2 * side_space + name.width
     row = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     row.alpha_composite(robot, (0, (height - robot.height) // 2))
-    row.alpha_composite(name, (robot.width + LOCKUP_GAP,
+    row.alpha_composite(name, (side_space,
                                (height - name.height) // 2))
     return row
 

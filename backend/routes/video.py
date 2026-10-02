@@ -4992,7 +4992,7 @@ def user_edl_write(user_id, project_id):
 # enqueues a render, and the worker re-encodes with the card.
 #
 # Previews are exempt: they carry no card, so their absent stamp is correct.
-OUTRO_VERSION = 11     # v11: five-second hold and uppercase, spaced brand URL
+OUTRO_VERSION = 12     # v12: shared text center with the robot beside the brand line
                        # (keep in step with worker/config.py OUTRO_VERSION —
                        # test_units checks the two match)
 
