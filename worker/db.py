@@ -2954,6 +2954,24 @@ def recent_chat(conn, session_id, limit=24):
         return list(reversed(cur.fetchall()))
 
 
+def customer_request_before_repair(conn, session_id, message_id, repair_prefix):
+    """Find the customer's request behind consecutive generated repair notes.
+
+    Bound by session and message id so a later steer or another project can
+    never replace the brief of the repair currently being executed.
+    """
+    with conn.cursor() as cur:
+        cur.execute("""SELECT id, content FROM chat_messages
+            WHERE session_id = %s AND id < %s AND role = 'user'
+              AND BTRIM(COALESCE(content, '')) <> ''
+              AND BTRIM(content) NOT LIKE %s
+              AND LOWER(BTRIM(content, ' .!')) NOT IN
+                  ('continue', 'keep going', 'go on', 'resume', 'carry on')
+            ORDER BY id DESC LIMIT 1""",
+                    (session_id, message_id, repair_prefix + '%'))
+        return cur.fetchone()
+
+
 def pending_user_message(conn, project_id, session_id):
     """Latest user message that never got an agent turn. A message sent
     while indexing was still running lands here — the index job replays it
