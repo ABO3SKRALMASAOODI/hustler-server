@@ -124,6 +124,7 @@ INITIAL_BONUS       = FREE_GRANT_CREDITS   # legacy name, same number
 def subscribe_offer_body():
     """402 / credits payload for the Studio upgrade cards."""
     import billing
+    from plan_catalog import COMPARISON_ONLY_PLANS
     names = {"mcp_connect": "MCP Connect", "advanced": "Advanced Editor"}
     plans = []
     for pid in ("mcp_connect", "advanced"):
@@ -136,7 +137,9 @@ def subscribe_offer_body():
     return {
         "error": "Subscribe to start editing. Cancel anytime.",
         "code": "subscribe_required", "trial_offer": True,
-        "subscribe_offer": True, "trial_days": 0, "plans": plans}
+        "subscribe_offer": True, "trial_days": 0, "plans": plans,
+        # Old clients only read plans and must never offer unavailable checkout.
+        "comparison_plans": [dict(plan) for plan in COMPARISON_ONLY_PLANS]}
 
 # ── Core conversion (model-aware) ─────────────────────────────────────────────
 
