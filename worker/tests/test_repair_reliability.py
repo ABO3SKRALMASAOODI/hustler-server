@@ -14,6 +14,57 @@ import edit_batch
 from schemas import default_edl
 
 
+def test_repair_reuses_customer_brief_for_both_model_and_verification(monkeypatch):
+    brief = 'Make a vertical stage reel. Keep the video under 15 seconds.'
+    repair = {'id': 99, 'content': 'Fix the remaining quality issues before export: '
+              'crop at 59 seconds; extend the ending to finish the thought.'}
+    calls = []
+
+    class Db:
+        @staticmethod
+        def run(fn, *args):
+            if fn is db.customer_request_before_repair:
+                calls.append(args)
+                return {'id': 42, 'content': brief}
+            if fn is db.recent_chat:
+                return []
+            raise AssertionError(fn)
+
+    request = agent_loop._customer_verification_request(Db(), 7, repair, {})
+    assert request == brief
+    assert calls[0][:2] == (7, 99)
+    ctx = SimpleNamespace(direct_sight=False, session_id=7,
+                          verification_request=request,
+                          latest_edl=lambda: {'version': 8, 'json': default_edl(67.48)},
+                          last_preview={'edl_version': 8},
+                          versions_written=[8],
+                          verification_records={8: {'status': 'passed', 'unresolved_findings': []}})
+    monkeypatch.setattr(agent_loop, 'state_block', lambda *_a, **_k: 'STATE')
+    messages = agent_loop._build_messages(ctx, Db(), repair)
+    assert any(brief in str(m['content']) for m in messages)
+    assert messages[-1]['role'] == 'user'
+    assert repair['content'] in messages[-1]['content']
+    assert agent_loop._quality_handoff(ctx)['export_ready'] is False
+    assert agent_loop._verification_complete(ctx) is False
+    ctx.latest_edl = lambda: {'version': 8, 'json': default_edl(12)}
+    assert agent_loop._verification_complete(ctx) is True
+
+
+def test_real_new_request_and_durable_continuation_do_not_recover_stale_briefs():
+    class Db:
+        @staticmethod
+        def run(*_args):
+            pytest.fail('A normal request or durable continuation owns its own brief')
+
+    changed = {'id': 99, 'content': 'Change this to a 45 second video instead.'}
+    assert agent_loop._customer_verification_request(Db(), 7, changed, {}) == changed['content']
+    repair = {'id': 100, 'content': 'Fix the remaining quality issues before export: crop at 5s'}
+    assert agent_loop._customer_verification_request(
+        Db(), 7, repair, {'verification_request': changed['content']}) == changed['content']
+    assert agent_loop._customer_verification_request(
+        Db(), 7, repair, {'verification_request': ''}) == ''
+
+
 def test_compact_catalog_keeps_batch_and_animation_contracts(monkeypatch):
     monkeypatch.setattr(agent_tools, '_tool_disabled', lambda *a: False)
     schemas = {s['function']['name']: s['function'] for s in

@@ -19329,7 +19329,7 @@ def set_edit_plan(ctx, steps, brief=None, treatment=None, format=None,
             })
         plan = director.create_blueprint(
             steps=steps, previous=ctx.edit_plan,
-            source_request=getattr(ctx, "user_message", None),
+            source_request=quality_verifier.request_text_for(ctx),
             preserve_progress=bool(ctx.plan_revised_this_turn),
             brief=brief, treatment=treatment, format=format, intent=intent,
             style_family=style_family, editorial_family=editorial_family,

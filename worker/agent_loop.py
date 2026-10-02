@@ -1403,6 +1403,16 @@ def _build_messages(ctx, worker_db, user_message, attachment_note="",
             if m["role"] == "user":
                 user_texts.append(content)
     user_texts.append(user_message["content"] or "")
+    if request_intent.is_review_repair(user_message.get("content")):
+        brief = quality_verifier.request_text_for(ctx)
+        if brief and brief != user_message.get("content"):
+            msgs.append({"role": "user", "content": "Customer request being repaired:\n" + brief})
+            msgs.append({"role": "system", "content": (
+                "The final message is Studio's Repair edit action. Fix the "
+                "listed defects while preserving the customer request above. "
+                "Times and durations in review findings describe evidence, "
+                "not new requested output lengths. Do not expand a short "
+                "into a longer video merely to resolve a cut or crop.")})
     request_contract = request_intent.request_contract(
         user_message["content"] or "")
     msgs.append({"role": "system", "content": request_contract})
@@ -1751,6 +1761,19 @@ def _user_facing_failure(e):
             "edit history are safe — try sending that again.")
 
 
+def _customer_verification_request(worker_db, session_id, message, continuation):
+    if "verification_request" in continuation:
+        return continuation["verification_request"]
+    text = str(message.get("content") or "")[:4000]
+    if request_intent.is_review_repair(text):
+        original = worker_db.run(
+            dbx.customer_request_before_repair, session_id,
+            message["id"], request_intent.REVIEW_REPAIR_PREFIX)
+        if original:
+            return str(original["content"])[:4000]
+    return text
+
+
 def run_agent_job(worker_db, job):
     project = worker_db.run(dbx.get_project, job["project_id"])
     session_id = project["chat_session_id"]
@@ -1877,8 +1900,8 @@ def run_agent_job(worker_db, job):
     # Keep verbatim customer constraints separate from private repair prose.
     # A recovery note can discuss a wrong duration; it is not a new target.
     ctx.user_message = (user_message.get("content") or "")[:4000]
-    ctx.verification_request = continuation_state.get(
-        "verification_request", ctx.user_message)
+    ctx.verification_request = _customer_verification_request(
+        worker_db, session_id, user_message, continuation_state)
     if operator_instruction:
         ctx.user_message = (ctx.user_message + "\n\n" +
                             operator_instruction[:8000])

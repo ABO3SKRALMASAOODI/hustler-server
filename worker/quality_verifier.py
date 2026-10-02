@@ -408,6 +408,7 @@ def _audio_findings(edl):
 _PROGRAM_DURATION_RE = re.compile(
     r"\b(\d{1,4}(?:\.\d+)?)(?:\s*(?:-|–|—|to)\s*"
     r"(\d{1,4}(?:\.\d+)?))?\s*[-–]?\s*(s|sec(?:ond)?s?|min(?:ute)?s?|h|hr?s?|hours?)\b", re.I)
+_DURATION_CEILING = r"(?:max(?:imum)?(?: of)?|at most|no more than|no longer than|up to|under|less than)"
 
 
 def request_text_for(ctx):
@@ -440,14 +441,19 @@ def _program_duration_context(text, match):
         return True
     if re.search(r"\b" + program + r"\b[^,;]{0,35}"
                  r"(?:to|of|is|be|last|length|:|=)\s*"
-                 r"(?:(?:about|around|roughly|approximately)\s+)?$", before):
+                 r"(?:(?:about|around|roughly|approximately)\s+)?"
+                 r"(?:" + _DURATION_CEILING + r"\s+)?$", before):
         return True
     if re.search(r"\b(?:make|cut|trim|shorten|keep)\s+"
-                 r"(?:(?:this|the|my|a)\s+)?" + program + r"\s*$", before):
+                 r"(?:(?:this|the|my|a)\s+)?" + program + r"\s*"
+                 r"(?:" + _DURATION_CEILING + r"\s+)?$", before):
+        return True
+    if re.search(r"\b" + program + r"\s+" + _DURATION_CEILING + r"\s+$", before):
         return True
     return bool(re.search(
         r"\b(?:make|cut|trim|shorten|keep)\s+(?:it|this|the whole thing)\s*"
-        r"(?:to\s+)?(?:(?:about|around|roughly|approximately)\s+)?$", before))
+        r"(?:to\s+)?(?:(?:about|around|roughly|approximately)\s+)?"
+        r"(?:" + _DURATION_CEILING + r"\s+)?$", before))
 
 
 def requested_duration_target(request_text):
@@ -475,6 +481,13 @@ def requested_duration_target(request_text):
     target = float(match.group(1)) * multiplier
     if not 0.2 <= target <= 86400:
         return None
+    if re.search(r"\b" + _DURATION_CEILING + r"\s*$",
+                 text[:match.start()], re.I):
+        # A maximum is a ceiling, not a request to pad a shorter complete
+        # thought up to the limit. Only frame-rounding tolerance applies in
+        # _request_findings, never the +/- 2% exact-target envelope below.
+        return {"min_s": 0.2, "max_s": target,
+                "approximate": False, "request": match.group(0)}
     nearby = text[max(0, match.start() - 24):match.end() + 10].lower()
     approximate = any(word in nearby for word in
                       ("about", "around", "roughly", "approximately", "like"))

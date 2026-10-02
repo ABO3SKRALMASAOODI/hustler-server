@@ -350,6 +350,33 @@ def test_minute_effect_positions_and_negation_are_not_program_targets():
         assert quality_verifier.requested_duration_target(prompt) is None
 
 
+def test_explicit_maximum_runtime_is_a_ceiling_not_an_exact_length():
+    for prompt in (
+        'I want the video to be max 15 seconds and show the speaker on stage.',
+        'Keep the video under 15 seconds.',
+        'Make a maximum 15 second reel.',
+        'Keep it no longer than 15 seconds.',
+        'Make this video at most 15 seconds.',
+    ):
+        target = quality_verifier.requested_duration_target(prompt)
+        assert target['max_s'] == 15, prompt
+        assert target['min_s'] == .2, prompt
+        assert not quality_verifier._request_findings(default_edl(12), prompt)
+        assert quality_verifier._request_findings(default_edl(67.48), prompt)[0][
+            'code'] == 'requested_duration_outside_target'
+
+
+def test_maximum_effect_length_does_not_become_a_program_limit():
+    for prompt in (
+        'Keep each shot under 15 seconds.',
+        'Hold the title for at most 3 seconds.',
+        'In this video keep the intro under 5 seconds.',
+        'Do not make a max 15 second video.',
+        'Add a zoom at 15 seconds.',
+    ):
+        assert quality_verifier.requested_duration_target(prompt) is None, prompt
+
+
 def test_later_duration_instruction_invalidates_a_cached_quality_pass():
     import agent_loop
     ctx = SimpleNamespace(verification_request='Make it 12 seconds. Make this video 10 minutes long.',
