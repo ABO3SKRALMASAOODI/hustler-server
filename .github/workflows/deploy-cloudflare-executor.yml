@@ -114,6 +114,9 @@ jobs:
           # Container updates can partially apply before Cloudflare returns
           # an internal error. Reapplying this same revision is idempotent.
           # Retry only that transient provider failure; keep all other errors loud.
+          # GitHub's default run shell uses bash -e, without pipefail. Keep
+          # Wrangler's exit status when tee successfully writes its log.
+          set -o pipefail
           deploy_log=$(mktemp)
           trap 'rm -f "$deploy_log"' EXIT
           for attempt in 1 2 3; do
