@@ -4992,7 +4992,7 @@ def user_edl_write(user_id, project_id):
 # enqueues a render, and the worker re-encodes with the card.
 #
 # Previews are exempt: they carry no card, so their absent stamp is correct.
-OUTRO_VERSION = 9      # v9: ending score carries continuously through card
+OUTRO_VERSION = 11     # v11: five-second hold and uppercase, spaced brand URL
                        # (keep in step with worker/config.py OUTRO_VERSION —
                        # test_units checks the two match)
 
@@ -5167,7 +5167,7 @@ def _worker_confirmed_current(cur, project_id):
 # Mirrors worker/config.WATERMARK_VERSION — a worker test asserts they match.
 # The free-tier mark is burned into FINAL renders only (see the worker's
 # renderer.wants_watermark), so this is the backend half of the same rule.
-WATERMARK_VERSION = 4
+WATERMARK_VERSION = 5
 
 
 def _user_is_paid(cur, user_id):
@@ -5794,7 +5794,7 @@ CLIENT_EVENT_KINDS = {"player_error", "player_error_probe", "player_composition_
                       # video_jobs row. Store only their tool name when they
                       # refuse/fail so operations can count the otherwise
                       # invisible error surface without retaining arguments.
-                      "mcp_error_response", "checkout_stage"}
+                      "mcp_error_response", "checkout_stage", "campaign_visit"}
 
 # The kinds that mean "a user tried to give us a video and we did not take it".
 # Surfaced in admin on their own rather than mixed into the rest, because these

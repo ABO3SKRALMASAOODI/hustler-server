@@ -1793,9 +1793,8 @@ OUTRO_ON_PREVIEW = os.getenv("OUTRO_ON_PREVIEW", "0") == "1"
 # Bumped whenever the card's LOOK or its audio handoff changes. It is stored on
 # every render asset and busts the cache, so an existing export re-encodes with
 # the complete current outro treatment instead of serving stale bytes forever.
-OUTRO_VERSION = 9      # v9: carry an ending score continuously through the
-                       # five-second card, with one fade at the card's edge.
-                       # See tools/build_endcard.py
+OUTRO_VERSION = 11     # v11: five-second hold and uppercase, spaced brand URL.
+                      # See tools/build_endcard.py
 
 # ── Shorts mode (round 99) ───────────────────────────────────────────────
 # The in-house one-call story scout needs a bounded response target. This is
@@ -1863,7 +1862,8 @@ MUSIC_TAIL_VERSION = 2
 # re-encodes every cached free-tier final at the new position.
 # 4 = the copy alternates continuously between the fuller product name and
 # valmera.io. The bump re-encodes cached marked finals with the new text.
-WATERMARK_VERSION = 4
+# 5 = steady two-line "Edited using Valmera AI" / "valmera.io" signature.
+WATERMARK_VERSION = 5
 # ON by owner's decision (the tradeoff was raised and taken deliberately).
 #
 # KNOWN OUTSTANDING: 44 public pages (58 occurrences) plus public/llms.txt and
@@ -1878,7 +1878,7 @@ WATERMARK_ENABLED = os.getenv("WATERMARK_ENABLED", "1") == "1"
 # at render time so an operator overriding WATERMARK_TEXT gets exactly the
 # casing they typed instead of having it silently rewritten.
 WATERMARK_TEXT = os.getenv("WATERMARK_TEXT",
-                           "EDITED BY VALMERA AI AGENT")
+                           "Edited using Valmera AI")
 WATERMARK_URL_TEXT = os.getenv("WATERMARK_URL_TEXT", "valmera.io")
 # The site's wordmark face (frontend navbar uses Plus Jakarta Sans 800), so
 # the mark on the video and the logo on the page are the same type. This is

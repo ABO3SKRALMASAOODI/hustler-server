@@ -6,6 +6,17 @@ contextual editing request authorizes a tool.  This module therefore supplies
 only the ordering rule the loop needs and leaves interpretation to the agent.
 """
 
+REVIEW_REPAIR_PREFIX = "Fix the remaining quality issues before export:"
+
+
+def is_review_repair(text):
+    """Identify the literal request emitted by Studio's Repair edit button.
+
+    This identifies product-generated review prose; it does not decide which
+    tools a customer's natural-language request permits.
+    """
+    return str(text or "").strip().startswith(REVIEW_REPAIR_PREFIX)
+
 
 def request_contract(_text):
     """Stable system anchor beside the latest user message."""

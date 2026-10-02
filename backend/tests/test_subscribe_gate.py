@@ -125,6 +125,14 @@ def test_offer_body_is_subscribe_not_trial():
     assert by_id["mcp_connect"]["credits"] == 1500
     assert by_id["advanced"]["monthly"] == 100
     assert by_id["advanced"]["credits"] == 8000
+    comparison = body["comparison_plans"]
+    assert comparison == [{"id": "ultimate", "name": "Ultimate Editor",
+                           "monthly": 200, "yearly": 2000,
+                           "credits": 16000, "sold_out": True}]
+    from plan_catalog import PLANS_LIVE, PURCHASABLE_PLANS, available_plans
+    assert "ultimate" not in PLANS_LIVE
+    assert "ultimate" not in PURCHASABLE_PLANS
+    assert "ultimate" not in available_plans({"is_subscribed": False})
     assert "trial" not in body["error"].lower()
 
 

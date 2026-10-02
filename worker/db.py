@@ -20,6 +20,7 @@ import config
 import error_text
 import model_prices
 import schemas
+import queue_admission
 
 # ------------------------------------------------------------------ #
 #  Connections                                                         #
@@ -350,7 +351,12 @@ def claim_job(conn, types, max_attempts):
                            OR (ahead.state = 'queued' AND ahead.id < video_jobs.id
                                AND ahead.attempts < %s))))"""
     params.extend([config.STALE_AFTER_S, max_attempts])
+    admission_where, admission_params = queue_admission.claim_filter(
+        types, has_remote_ledger)
+    params.extend(admission_params)
     with conn.cursor() as cur:
+        if admission_where and not queue_admission.lock_claim(cur):
+            return None
         cur.execute(f"""
             UPDATE video_jobs
             SET state = 'running', attempts = attempts + 1{claims_set},
@@ -385,6 +391,7 @@ def claim_job(conn, types, max_attempts):
                   {serial_where}
                   {index_fair_where}
                   {render_group_where}
+                  {admission_where}
                 ORDER BY CASE type WHEN 'preview' THEN 0
                                    WHEN 'final' THEN 1 ELSE 2 END,
                          COALESCE(u.is_subscribed, 0) DESC,
@@ -2945,6 +2952,24 @@ def recent_chat(conn, session_id, limit=24):
             ORDER BY id DESC LIMIT %s
         """, (session_id, limit))
         return list(reversed(cur.fetchall()))
+
+
+def customer_request_before_repair(conn, session_id, message_id, repair_prefix):
+    """Find the customer's request behind consecutive generated repair notes.
+
+    Bound by session and message id so a later steer or another project can
+    never replace the brief of the repair currently being executed.
+    """
+    with conn.cursor() as cur:
+        cur.execute("""SELECT id, content FROM chat_messages
+            WHERE session_id = %s AND id < %s AND role = 'user'
+              AND BTRIM(COALESCE(content, '')) <> ''
+              AND BTRIM(content) NOT LIKE %s
+              AND LOWER(BTRIM(content, ' .!')) NOT IN
+                  ('continue', 'keep going', 'go on', 'resume', 'carry on')
+            ORDER BY id DESC LIMIT 1""",
+                    (session_id, message_id, repair_prefix + '%'))
+        return cur.fetchone()
 
 
 def pending_user_message(conn, project_id, session_id):

@@ -488,6 +488,17 @@ def test_raw_worker_boundary_failure_keeps_its_error_bit():
     assert "will not guess" in out["text"]
 
 
+def test_tool_before_analysis_does_not_start_an_editor(client, monkeypatch):
+    monkeypatch.setattr(mcpmod, '_active_original', lambda *a: {'sha256':'not-indexed'})
+    monkeypatch.setattr(mcpmod, '_index_row', lambda *a: None)
+    result = rpc(client, 'tools/call', STATIC_TOKEN, {
+        'name':'get_transcript', 'arguments':{'project_id':3},
+    }).get_json()['result']
+    assert result['isError'] is True
+    assert 'No editing job was started' in str(result)
+    assert DB['enqueued'] == []
+
+
 def test_podcast_shorts_are_first_class_session_tools(client):
     tools = rpc(client, "tools/list", STATIC_TOKEN).get_json()["result"]["tools"]
     by_name = {t["name"]: t for t in tools}

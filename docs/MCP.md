@@ -1,10 +1,11 @@
-# Valmera over MCP — edit video from your own Claude session
+# Valmera over MCP — edit video from your own AI client
 
-**Status: private.** No UI, no marketing, no signup path. Two ways in — an
-OAuth login from claude.ai, or a static token only the admin account can mint —
-and BOTH re-check the account's email against `MCP_ALLOWED_EMAILS` (default:
-`thevalmera@gmail.com` alone) on every single request. Anyone else who finds
-the URL reaches a login screen that will never say yes.
+**Status: available to eligible subscribers and existing operator grants.**
+OAuth and static tokens recheck durable access on every authenticated call:
+verified active Pro, Frontier, MCP Connect and Advanced accounts are eligible;
+`MCP_ALLOWED_EMAILS` preserves operator access. The public connection page is
+https://valmera.io/mcp and the canonical MCP endpoint is
+https://valmera.io/mcp/server. Direct-origin `/mcp` remains supported.
 
 ## What it is
 
@@ -26,7 +27,7 @@ the worker, in the same `ToolContext` an
 agent turn uses. There is no capability copy to keep in sync —
 `worker/tests/test_mcp_surface.py` fails if one appears.
 
-On top of that, twelve **session tools** the studio UI normally covers and a
+On top of that, **session tools** the studio UI normally covers and a
 headless model cannot: `list_projects`, `open_project`, `open_short`,
 `create_project`, `project_state`, `upload_start`, `upload_finish`,
 `index_status`, `shorts_status`, `wait_for_job`, `download_url`, `watch_video`.
@@ -114,9 +115,8 @@ Properties worth knowing:
 
 - **PKCE (S256) is mandatory.** These are public clients holding no secret.
 - **Registration is open, and grants nothing.** The client registers before any
-  human is involved; authorization still needs your password *and* an address
-  on `MCP_ALLOWED_EMAILS`. A stranger who registers gets a login that will
-  never say yes.
+  human is involved; authorization still requires an authenticated account
+  with a current eligible subscription or an existing operator grant.
 - **An unregistered `redirect_uri` dead-ends on our own page** rather than
   redirecting — an authorization server that bounces errors to an unvalidated
   URI is an open redirector.
@@ -342,21 +342,18 @@ encode settings, so asking for the same window twice encodes once.
 - **Slow tools answer with a ticket, not a lie.** A render or a burned-text
   erase outruns `MCP_SYNC_WAIT_S` (25s), so the reply is `STILL RUNNING — job
   N` and the model calls `wait_for_job(N)`. It is never reported as failed.
-- **Two editors are refused, both ways.** An MCP call is rejected while an
-  in-house agent turn is live on that project, and a studio chat message is
-  rejected while an MCP call is in flight. Racing EDL writes are how you get
-  an edit that contains half of each idea.
+- **One timeline mutation at a time.** MCP and in-house agent jobs share the
+  same project serialization. Durable queue claims serialize
+  timeline mutations per project; parallel editors should use separate child
+  projects so their changes cannot overwrite one another.
 - **Editor calls are immutable-project scoped.** Every catalog schema requires
   `project_id`, ownership is checked before enqueueing, and every result starts
   with `PROJECT <id> — <title>`. A stale active-project pointer cannot redirect
   a caption, cut, render, or read call.
-- **Nothing is charged.** An MCP call runs none of our agent model, so no
-  credits are deducted. But vision (`look_at`), image/video generation and
-  stock fetches are real money on real providers, recorded to `llm_calls`
-  under the MCP job id — visible in admin, billed to nobody. **Decide this
-  before the surface is ever sold**, not after. `watch_video` costs no
-  provider anything, but a shrunk copy is CPU on the dispatcher and every
-  fetch of the link is R2 egress — cheap per call, unbounded per session.
+- **The outside client supplies the editor model.** New MCP Connect and
+  Advanced contracts enforce server-side tool/generation budgets; older
+  contracts retain their own policy. Never infer free provider usage from
+  an MCP connection. Media work executes remotely, not on Render.
 - **The instructions are the whole doctrine.** `initialize` returns the agent's
   44 KB system prompt + the generated capability list + an MCP workflow note,
   so your model edits the way Valmera edits rather than merely reaching its
@@ -371,20 +368,42 @@ encode settings, so asking for the same window twice encodes once.
   protects HTTP responsiveness; renders still share media capacity, so the
   topic-to-shorts skill keeps its stricter one-outstanding-Valmera-call rule.
 
+## Concurrency and large marketing batches
+
+The Cloudflare dispatcher admits at most six running MCP tools per account
+within the twenty-slot fleet. Three editors on distinct projects fit this
+budget; thirty requested editors queue rather than obtaining thirty compute
+slots. Waiting jobs do not spend attempts. Per-account limits also cover
+agent work (2 of 5), Shorts planning (2 of 8), combined indexing/final renders
+(2 of 8), and interactive previews/filmstrips (6 of 20).
+
+These are queue admission limits, not a dedicated marketing infrastructure.
+Synchronous tools, storage, database and external providers remain shared.
+For ten podcasts: index each source once, create separate child projects,
+submit bounded work and poll the returned job IDs. Never resubmit a mutation
+whose outcome is unknown. Index-dependent tools return the analysis job to
+wait for instead of starting a doomed editor.
+
+Before increasing simultaneous compute, size all dependent pools together,
+set a hosting budget and measure queue delay, per-clip compute cost, provider
+throttling and customer latency. Increasing the two-context resident cache
+does not increase MCP concurrency. Claim caps must stay aligned with the
+Cloudflare container ceilings; a regression test enforces that relationship.
+
 ## Revoking
 
 - **claude.ai**: disconnect the connector (it calls `/mcp/oauth/revoke`), or
   `UPDATE mcp_oauth_grants SET revoked_at = NOW()` for a specific connection.
 - **Claude Code**: `curl -X DELETE .../mcp/tokens/1 -H "Authorization: Bearer $VALMERA_JWT"`
-- **Everything at once**: set `MCP_ALLOWED_EMAILS` to an address nobody holds.
-  It is re-checked per request, so every live session dies on its next call —
-  no deploy, no token hunt.
+- **Operator access**: remove the operator address from `MCP_ALLOWED_EMAILS`.
+  This does not revoke eligible paid subscriptions. Revoke the account's
+  specific tokens/grants through its connection controls when required.
 
 ## Env
 
 | Var | Where | Default | What |
 |---|---|---|---|
-| `MCP_ALLOWED_EMAILS` | backend | admin email | who may connect at all |
+| `MCP_ALLOWED_EMAILS` | backend | admin email | operator grants in addition to eligible subscribers |
 | `BACKEND_URL` | backend | the onrender URL | the OAuth `issuer` — must be this server's real public origin |
 | `MCP_ACCESS_TTL_S` | backend | 28800 | access-token lifetime |
 | `MCP_REFRESH_TTL_S` | backend | 7776000 | refresh-token lifetime |
@@ -404,7 +423,7 @@ encode settings, so asking for the same window twice encodes once.
 | `MCP_VIDEO_MAX_ENCODE_S` | worker | 1800 | longest window one call will re-encode |
 | `MCP_VIDEO_URL_MAX_MB` | worker | 512 | above this even a link gets a shrunk copy instead |
 | `MCP_VIDEO_DOWNLOAD_MAX_MB` | worker | 2048 | biggest file that may be pulled onto the box to shrink |
-| `WORKER_MCP_SLOTS` | worker | 3 | concurrent MCP tool calls |
+| `WORKER_MCP_SLOTS` | worker | 20 on Cloudflare, otherwise 3 | dispatcher MCP slots; account admission cap still applies |
 | `WORKER_MCP_POLL_INTERVAL_S` | worker | 0.25 | queue poll for the MCP lane |
-| `WORKER_MCP_SESSION_TTL_S` | worker | 1800 | how long a project's cached context lives |
+| `WORKER_MCP_SESSION_TTL_S` | worker | 300 | how long a project's cached context lives |
 | `WORKER_MCP_MAX_SESSIONS` | worker | 2 | idle cached project contexts; live calls are never evicted |
