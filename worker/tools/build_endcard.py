@@ -27,15 +27,15 @@ CARD_W, CARD_H = 1080, 1920
 FPS = 30
 DURATION_S = 5.0
 
-# The signature occupies about one fifth of a vertical reel instead of most of
-# the screen. "Edited using" is intentionally the largest element; the robot and
-# product name are supporting attribution, and the URL is the quiet final read.
+# "Edited using" leads the size hierarchy. The centered robot/name row supports
+# the attribution, while the address has its own space lower in the frame.
 HEADLINE_SIZE = 128
 ROBOT_H = 148
 NAME_SIZE = 82
 URL_SIZE = 44
 GAP_HEADLINE = 36
 GAP_LOCKUP = 30
+URL_CENTER_Y = round(CARD_H * 0.75)
 LOCKUP_GAP = 28
 AI_GAP = 16
 
@@ -138,8 +138,9 @@ def _elements():
     return (
         (headline, top),
         (lockup, top + headline.height + GAP_HEADLINE),
-        (url_line, top + headline.height + GAP_HEADLINE + lockup.height
-         + GAP_LOCKUP),
+        # Give the address its own quiet space below the attribution. Keep
+        # the headline/robot composition fixed while lowering only this line.
+        (url_line, URL_CENTER_Y - url_line.height // 2),
     )
 
 
