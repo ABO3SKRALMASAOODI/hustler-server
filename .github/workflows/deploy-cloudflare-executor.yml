@@ -111,9 +111,23 @@ jobs:
           }
           fs.writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`);
           NODE
-          npx wrangler deploy \
-            --var CODE_VERSION:"$GITHUB_SHA" \
-            --var SOURCE_VERSION:"$source_version"
+          # Container updates can partially apply before Cloudflare returns
+          # an internal error. Reapplying this same revision is idempotent.
+          # Retry only that transient provider failure; keep all other errors loud.
+          deploy_log=$(mktemp)
+          trap 'rm -f "$deploy_log"' EXIT
+          for attempt in 1 2 3; do
+            if npx wrangler deploy \
+                --var CODE_VERSION:"$GITHUB_SHA" \
+                --var SOURCE_VERSION:"$source_version" 2>&1 | tee "$deploy_log"; then
+              break
+            fi
+            if ! grep -Fq "Internal Server Error" "$deploy_log" || test "$attempt" = 3; then
+              exit 1
+            fi
+            echo "Cloudflare returned an internal error; retrying this revision ($attempt/3)."
+            sleep 30
+          done
 
       - name: install runtime secrets
         working-directory: worker/cloudflare
