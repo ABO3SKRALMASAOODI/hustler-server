@@ -120,16 +120,11 @@ def parallelism(state: dict) -> dict:
                     if item["status"] in ACTIVE]
     claimable = [item for item in state["shorts"].values()
                  if item["status"] in {"queued", "repair"}]
-    pilot_gate = bool(state.get("quality_policy")) and not state.get(
+    quality_pilot_pending = bool(state.get("quality_policy")) and not state.get(
         "quality_pilot")
     active = len(active_items)
-    if pilot_gate:
-        # The one representative delivery-quality pilot is a real dependency.
-        # It must never be mistaken for permission to serialize the later batch.
-        target = active
-    else:
-        target = min(int(state.get("max_editors") or MAX_EDITORS),
-                     active + len(claimable))
+    target = min(int(state.get("max_editors") or MAX_EDITORS),
+                 active + len(claimable))
     idle_slots = max(0, target - active)
     return {
         "active_editors": active,
@@ -137,7 +132,7 @@ def parallelism(state: dict) -> dict:
         "claimable_shorts": len(claimable),
         "idle_slots_with_claimable_work": idle_slots,
         "dispatch_required": idle_slots > 0,
-        "pilot_gate": pilot_gate,
+        "quality_pilot_pending": quality_pilot_pending,
         "active_workers": sorted(
             item["worker"] for item in active_items if item.get("worker")),
     }
@@ -610,10 +605,10 @@ def cmd_claim(args: argparse.Namespace) -> dict:
         require_status(item, {"queued", "repair"}, "claim")
         if run_quality_policy(state) and not state.get("quality_pilot"):
             pilot_id = state.get("quality_pilot_short_id")
-            if pilot_id and pilot_id != args.short_id and \
-                    state["shorts"][pilot_id]["status"] not in TERMINAL:
-                raise StateError("verify the first actual final before batch editing")
-            state["quality_pilot_short_id"] = args.short_id
+            if not pilot_id or state["shorts"][pilot_id]["status"] in TERMINAL:
+                # Designate an early representative final, but never make it a
+                # global editing lock. Independent children remain claimable.
+                state["quality_pilot_short_id"] = args.short_id
         active = sum(1 for value in state["shorts"].values()
                      if value["status"] in ACTIVE)
         if active >= int(state.get("max_editors") or MAX_EDITORS):

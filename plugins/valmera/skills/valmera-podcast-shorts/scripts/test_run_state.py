@@ -633,7 +633,8 @@ def test_oversized_crop_and_changed_source_are_rejected(delivery_evidence):
 
 
 @pytest.mark.parametrize("treatment", ["legacy", "animated", "plain"])
-def test_quality_policy_gates_batch_and_actual_export(tmp_path, delivery_evidence, treatment):
+def test_quality_policy_checks_actual_export_without_serializing_editors(
+        tmp_path, delivery_evidence, treatment):
     policy, evidence, probes = delivery_evidence
     run_dir = tmp_path / "quality-run"
     policy_file = tmp_path / "policy.json"
@@ -648,7 +649,13 @@ def test_quality_policy_gates_batch_and_actual_export(tmp_path, delivery_evidenc
              "--project-id", str(index), "--title", "Story", "--assignment", str(assignment))
     call("claim", "--run-dir", str(run_dir), "--short-id", "s1", "--worker", "e1")
     claim_second = ["claim", "--run-dir", str(run_dir), "--short-id", "s2", "--worker", "e2"]
-    assert run_state.main(claim_second) == 2
+    call(*claim_second)
+    state = json.loads((run_dir / "run.json").read_text())
+    pool = run_state.summary(state)["parallelism"]
+    assert state["quality_pilot_short_id"] == "s1"
+    assert pool["active_editors"] == pool["target_active_editors"] == 2
+    assert pool["quality_pilot_pending"] is True
+    assert pool["dispatch_required"] is False
     preview = run_dir / "candidates" / "preview.mp4"
     preview.write_bytes(b"small draft is allowed")
     evidence_file = run_dir / "candidates" / "quality.json"
@@ -709,7 +716,6 @@ def test_quality_policy_gates_batch_and_actual_export(tmp_path, delivery_evidenc
             qc_payload.pop("active_word_caption_check")
         write_json(qc, qc_payload)
     call(*qc_args)
-    assert run_state.main(claim_second) == 2  # Preview approval is not a final pilot.
     final = run_dir / "exports" / "headline-conversation__s1.mp4"
     final.write_bytes(b"actual final")
     probes[str(final)] = [338, 600]
@@ -722,10 +728,11 @@ def test_quality_policy_gates_batch_and_actual_export(tmp_path, delivery_evidenc
     review["final_sha256"] = run_state.sha256(final)
     write_json(review_file, review)
     call(*export_args)
-    call(*claim_second)
     state = json.loads((run_dir / "run.json").read_text())
     assert state["quality_pilot"]["sha256"] == run_state.sha256(final)
     assert state["shorts"]["s1"]["export"]["quality"]["verdict"] == "pass"
+    assert run_state.summary(state)["parallelism"][
+        "quality_pilot_pending"] is False
 
 
 def test_quality_policy_cannot_change_silently(tmp_path, delivery_evidence):

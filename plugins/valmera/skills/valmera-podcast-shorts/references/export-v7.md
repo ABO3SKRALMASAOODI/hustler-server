@@ -32,8 +32,9 @@ is a final export.
 
 Apply `delivery-quality-v7.md` to actual final pixels and source/crop detail.
 For a quality-policy run, register each file with `--quality-review` pointing
-to the independent review bound to that final's checksum. The first passed
-actual final unlocks batch editing; an upscaled proxy does not qualify.
+to the independent review bound to that final's checksum. Verify a representative
+actual final early, but never use that verification to lock independent editing
+or candidate QC. An upscaled proxy does not qualify as final-quality evidence.
 
 For the user's current four-style brief, apply the branding contract in
 `style-lanes-v7.md`. The native Valmera corner watermark and complete native

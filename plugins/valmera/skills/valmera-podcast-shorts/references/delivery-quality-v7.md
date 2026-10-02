@@ -164,21 +164,24 @@ The helper checks these assignment constraints without choosing the aesthetic.
 Old unversioned candidate/review records remain compatible with their original
 rules; use the new evidence format for new work rather than copying old recipes.
 
-## Judge the actual final before repeating a treatment
+## Judge an actual final early without serializing editing
 
-Complete one representative short through native final export before batch
-editing. Compare it with the chosen quality reference at the same intended
-viewing size. Inspect source detail, glyph edges, reading comfort, hierarchy,
-caption transitions, framing, cut boundaries, payoff, audio measurements, and
-the entire ending. Use playback where available and describe the evidence
-honestly. A tiny contact sheet, a score, or a checksum cannot waive a visible
-quality defect. When the renderer, source, or treatment changes materially,
-verify the new behavior before repeating it.
+Designate one of the first concurrently edited children as the representative
+delivery-quality pilot and move it through native final export early. The other
+editors continue independent editing and candidate QC while it renders,
+downloads, or undergoes final review. Compare the pilot with the chosen quality
+reference at the same intended viewing size. Inspect source detail, glyph
+edges, reading comfort, hierarchy, caption transitions, framing, cut
+boundaries, payoff, audio measurements, and the entire ending. Use playback
+where available and describe the evidence honestly. A tiny contact sheet, a
+score, or a checksum cannot waive a visible quality defect. When the renderer,
+source, or treatment changes materially, verify the new behavior early without
+turning that verification into a global editor lock.
 
-`claim` holds subsequent shorts until the pilot passes `export`. Coordinator QC
-records `caption_quality_check: "pass"`, and also `active_word_caption_check`
-when highlighting is used. `delivery_quality_review` points to an independent
-JSON review with these fields:
+`claim` never waits for this pilot. Coordinator QC records
+`caption_quality_check: "pass"`, and also `active_word_caption_check` when
+highlighting is used. `delivery_quality_review` points to an independent JSON
+review with these fields:
 
 ```json
 {

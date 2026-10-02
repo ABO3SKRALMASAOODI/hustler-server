@@ -65,13 +65,14 @@ warm without creating 8–26 sidebar tasks and avoids task-registration drift.
 
 ## Pool algorithm
 
-1. Use one representative child as the delivery-quality pilot when that gate
-   applies. It is the only intentional serial edit. Do not turn the pilot into
-   a multi-short wave.
-2. As soon as the pilot passes, spawn or reuse exactly three editors when at
-   least three independent children are claimable; otherwise use every
-   claimable child. Assign one distinct child to each and mark it `editing`.
-   `run_state.py` rejects two active children owned by the same worker.
+1. Spawn or reuse exactly three editors immediately when at least three
+   independent children are claimable; otherwise use every claimable child.
+   Assign one distinct child to each and mark it `editing`. `run_state.py`
+   rejects two active children owned by the same worker.
+2. Designate one of those active children as the early delivery-quality pilot.
+   Its final validates delivery settings; it does not gate editing, candidate
+   recording, or QC on the other children. Browser/export trouble on the pilot
+   is local to that child while the pool continues.
 3. Wait for whichever editor returns first. Use direct agent waiting; do not
    create a timer, cron job, or heartbeat.
 4. Record and identity-check the returned candidate. If independent work is

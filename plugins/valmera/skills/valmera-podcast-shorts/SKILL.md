@@ -90,11 +90,12 @@ them for a v7 run. They remain only so an interrupted v6 run can be audited.
     No B-roll visual may repeat within one short. For `hook-to-silent-montage`, the editorial program is
     at most 25 seconds and the post-hook montage is at most 15 seconds; the
     separate native Valmera ending is excluded from those limits.
-13. The delivery-quality pilot serializes exactly one representative short.
-    Once that actual final passes, fill all three editor slots whenever at least
-    three independent children are claimable. If only one or two are claimable,
-    use all of them. A real dependency or technical blocker is an exception;
-    preference, optional research, or more QC on another child is not.
+13. Fill all three editor slots immediately whenever at least three independent
+    children are claimable; if only one or two are claimable, use all of them.
+    Designate one early final for delivery-quality verification, but never make
+    that pilot, its export, browser access, or final review a gate on independent
+    editing or candidate QC. A real child-specific dependency or technical
+    blocker is an exception; preference or optional analysis is not.
 
 ## Create the run
 
@@ -125,8 +126,9 @@ python <skill-root>/scripts/run_state.py init \
 
 For every new production run, also supply
 `--quality-policy <run-dir>/taste/quality-policy.json` using
-`references/delivery-quality-v7.md`. Approve one actual native final before
-batch editing; small selection proxies never establish delivery quality.
+`references/delivery-quality-v7.md`. Verify one actual native final early enough
+to catch delivery defects, while the other editors continue independent work;
+small selection proxies never establish delivery quality.
 
 On resume, run `status`, reconcile only recorded nonterminal Valmera job IDs,
 and continue the next unfinished stage. Never infer progress from task prose.
@@ -219,11 +221,12 @@ weight and required Valmera branding geometry/runtime in assignments.
 
 ## Edit with a three-worker pool
 
-After the single delivery-quality pilot passes, spawn or reuse three editor
-subagents when the queue has at least three independent children. Claim three
-different children with three different worker IDs before accepting the first
-batch candidate. Give each editor the editor and QC contracts plus exactly one
-assignment. An editor must:
+Spawn or reuse three editor subagents immediately when the queue has at least
+three independent children. Claim three different children with three different
+worker IDs before accepting the first batch candidate. One can produce the
+early delivery-quality final while the other two keep editing; export or browser
+delay on that child does not idle them. Give each editor the editor and QC
+contracts plus exactly one assignment. An editor must:
 
 - open only its immutable child project;
 - inspect source words and visuals before mutating;
