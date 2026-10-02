@@ -30,7 +30,7 @@ DURATION_S = 5.0
 # The signature occupies about one fifth of a vertical reel instead of most of
 # the screen. "Edited using" is intentionally the largest element; the robot and
 # product name are supporting attribution, and the URL is the quiet final read.
-HEADLINE_SIZE = 106
+HEADLINE_SIZE = 128
 ROBOT_H = 148
 NAME_SIZE = 82
 URL_SIZE = 44
@@ -101,17 +101,12 @@ def _text(text, font, fill, tracking=0.0):
 
 
 def _lockup(robot, name):
-    """Center the name itself, with the robot beside it as a side ornament.
-
-    Reserve the same space on the right as the robot occupies on the left so
-    all three text lines share a center even though only one has an icon.
-    """
+    """Build the small horizontal robot + Valmera attribution row."""
     height = max(robot.height, name.height)
-    side_space = robot.width + LOCKUP_GAP
-    width = 2 * side_space + name.width
+    width = robot.width + LOCKUP_GAP + name.width
     row = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     row.alpha_composite(robot, (0, (height - robot.height) // 2))
-    row.alpha_composite(name, (side_space,
+    row.alpha_composite(name, (robot.width + LOCKUP_GAP,
                                (height - name.height) // 2))
     return row
 
