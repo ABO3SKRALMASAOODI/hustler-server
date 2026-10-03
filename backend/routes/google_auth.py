@@ -12,14 +12,16 @@ Flow:
 import os
 import jwt
 import secrets
-import datetime
+import base64
+import hashlib
+from urllib.parse import urlencode
+from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
+from routes.email_signin import verified_account, auth_token
 import requests
 from flask import Blueprint, redirect, request, current_app, jsonify
-from werkzeug.security import generate_password_hash
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
-from credits import FREE_GRANT_CREDITS
 
 google_auth_bp = Blueprint("google_auth", __name__)
 
@@ -37,27 +39,39 @@ def get_db():
 
 
 def _get_redirect_uri():
-    """Build the callback URI — matches what's registered in Google Console."""
-    base = os.getenv("BACKEND_URL", "https://entrepreneur-bot-backend.onrender.com")
-    return f"{base}/auth/google/callback"
+    """The exact owned-domain URI registered for the existing Google client."""
+    return os.getenv("GOOGLE_REDIRECT_URI", "https://valmera.io/api-backend/auth/google/callback")
 
 
-# ── Step 1: Redirect to Google ────────────────────────────────────────────────
+def _state_signer():
+    return URLSafeTimedSerializer(current_app.config["SECRET_KEY"], salt="google-login")
+
+
+@google_auth_bp.after_request
+def no_cache(response):
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    if request.endpoint == "google_auth.google_callback":
+        response.delete_cookie("__Host-valmera-google", secure=True, httponly=True, samesite="Lax", path="/")
+    return response
+
 
 @google_auth_bp.route("/google/login")
 def google_login():
-    client_id    = os.getenv("GOOGLE_CLIENT_ID")
-    redirect_uri = _get_redirect_uri()
-
-    params = (
-        f"?client_id={client_id}"
-        f"&redirect_uri={redirect_uri}"
-        f"&response_type=code"
-        f"&scope=openid%20email%20profile"
-        f"&access_type=offline"
-        f"&prompt=select_account"
-    )
-    return redirect(GOOGLE_AUTH_URL + params)
+    client_id = os.getenv("GOOGLE_CLIENT_ID")
+    if not client_id:
+        return redirect("https://valmera.io/login?error=google_failed")
+    state = secrets.token_urlsafe(32)
+    verifier = secrets.token_urlsafe(48)
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    params = {"client_id": client_id, "redirect_uri": _get_redirect_uri(),
+              "response_type": "code", "scope": "openid email profile",
+              "prompt": "select_account", "state": state,
+              "code_challenge": challenge, "code_challenge_method": "S256"}
+    response = redirect(GOOGLE_AUTH_URL + "?" + urlencode(params))
+    response.set_cookie("__Host-valmera-google", _state_signer().dumps({"state": state, "verifier": verifier}),
+                        secure=True, httponly=True, samesite="Lax", max_age=600, path="/")
+    return response
 
 
 # ── Step 2: Google calls us back ──────────────────────────────────────────────
@@ -68,109 +82,46 @@ def google_callback():
     error_redirect = f"{frontend_url}/login?error=google_failed"
 
     code = request.args.get("code")
-    if not code:
+    state = request.args.get("state", "")
+    try:
+        saved = _state_signer().loads(request.cookies.get("__Host-valmera-google", ""), max_age=600)
+        if not code or not state or not secrets.compare_digest(state, saved["state"]):
+            return redirect(error_redirect)
+    except (BadSignature, SignatureExpired, KeyError, TypeError):
         return redirect(error_redirect)
 
-    # Exchange code for access token
-    client_id     = os.getenv("GOOGLE_CLIENT_ID")
-    client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
-    redirect_uri  = _get_redirect_uri()
-
-    token_resp = requests.post(GOOGLE_TOKEN_URL, data={
-        "code":          code,
-        "client_id":     client_id,
-        "client_secret": client_secret,
-        "redirect_uri":  redirect_uri,
-        "grant_type":    "authorization_code",
-    }, timeout=10)
-
-    if not token_resp.ok:
-        print(f"[google] token exchange failed: {token_resp.text}")
-        return redirect(error_redirect)
-
-    access_token = token_resp.json().get("access_token")
-    if not access_token:
-        return redirect(error_redirect)
-
-    # Fetch user profile
-    user_resp = requests.get(
-        GOOGLE_USER_URL,
-        headers={"Authorization": f"Bearer {access_token}"},
-        timeout=10
-    )
-    if not user_resp.ok:
-        return redirect(error_redirect)
-
-    profile = user_resp.json()
-    email   = profile.get("email")
-    name    = profile.get("name", "")
-
-    if not email:
+    try:
+        token_resp = requests.post(GOOGLE_TOKEN_URL, data={
+            "code": code, "client_id": os.getenv("GOOGLE_CLIENT_ID"),
+            "client_secret": os.getenv("GOOGLE_CLIENT_SECRET"),
+            "redirect_uri": _get_redirect_uri(), "grant_type": "authorization_code",
+            "code_verifier": saved["verifier"],
+        }, timeout=10)
+        token_resp.raise_for_status()
+        access_token = token_resp.json().get("access_token")
+        if not access_token:
+            return redirect(error_redirect)
+        user_resp = requests.get(GOOGLE_USER_URL, headers={"Authorization": f"Bearer {access_token}"}, timeout=10)
+        user_resp.raise_for_status()
+        profile = user_resp.json()
+        email = profile.get("email")
+        if not email or profile.get("verified_email") is not True:
+            return redirect(error_redirect)
+    except (requests.RequestException, ValueError, TypeError):
+        current_app.logger.warning("Google identity exchange failed")
         return redirect(error_redirect)
 
     # Create or find user in DB
-    conn = get_db()
+    conn = None
     try:
+        conn = get_db()
         with conn.cursor() as cur:
-            cur.execute("SELECT * FROM users WHERE email = %s", (email,))
-            user = cur.fetchone()
-
-            is_signup = not user or user["is_verified"] == 0
-            if user:
-                if user["is_verified"] == 0:
-                    cur.execute(
-                        "UPDATE users SET is_verified = 1 WHERE email = %s",
-                        (email,)
-                    )
-                    conn.commit()
-                user_id = user["id"]
-                plan    = user.get("plan", "free") or "free"
-            else:
-                dummy_pw = generate_password_hash(os.urandom(32).hex())
-                # Grant the free allowance explicitly, exactly as the email
-                # signup does. The table defaults still describe the retired
-                # 20-daily + 150-bonus scheme, and a Google user landing on a
-                # different number than an email user is the kind of drift
-                # nobody notices until someone complains about their balance.
-                cur.execute(
-                    """
-                    INSERT INTO users (email, password, is_verified, auth_provider,
-                                       credits_daily, credits_bonus,
-                                       credits_monthly, credits_balance)
-                    VALUES (%s, %s, 1, 'google', 0, %s, 0, %s)
-                    RETURNING id
-                    """,
-                    (email, dummy_pw, FREE_GRANT_CREDITS, FREE_GRANT_CREDITS)
-                )
-                row     = cur.fetchone()
-                user_id = row["id"]
-                plan    = "free"
-                conn.commit()
-                # No welcome discount on this branch either (round 49) — see
-                # the note in routes/verify_email.py. A new Google account now
-                # sees the plans at full price, and the 50% offer reaches it
-                # only if 24 hours pass with no trial started.
-
-        # Issue JWT
-        token = jwt.encode({
-            "sub":   str(user_id),
-            "email": email,
-            "exp":   datetime.datetime.utcnow() + datetime.timedelta(days=7),
-        }, current_app.config["SECRET_KEY"], algorithm="HS256")
+            user_id, email, plan, is_signup = verified_account(cur, email, "google")
+        token = auth_token(user_id, email)
 
         # Store token with a short-lived one-time code
         one_time_code = secrets.token_urlsafe(32)
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS google_auth_codes (
-                    code TEXT PRIMARY KEY,
-                    token TEXT NOT NULL,
-                    plan TEXT DEFAULT 'free',
-                    email TEXT NOT NULL,
-                    created_at TIMESTAMP DEFAULT NOW()
-                )
-                """)
             cur.execute("DELETE FROM google_auth_codes WHERE created_at < NOW() - INTERVAL '5 minutes'")
             cur.execute(
                 "INSERT INTO google_auth_codes (code, token, plan, email, is_signup) VALUES (%s, %s, %s, %s, %s)",
@@ -182,11 +133,13 @@ def google_callback():
         return redirect(f"{frontend_url}/google-callback/{one_time_code}")
 
     except Exception as e:
-        print(f"[google] DB error: {e}")
-        conn.rollback()
+        current_app.logger.error("Google account completion failed (%s)", type(e).__name__)
+        if conn:
+            conn.rollback()
         return redirect(error_redirect)
     finally:
-        conn.close()
+        if conn:
+            conn.close()
 
 
 # ── Step 3: Frontend exchanges one-time code for token ────────────────────────
@@ -222,7 +175,8 @@ def google_exchange():
                 "email": row["email"],
             })
     except Exception as e:
-        print(f"[google] exchange error: {e}")
+        current_app.logger.error("Google code exchange failed (%s)", type(e).__name__)
         return jsonify({"error": "Server error"}), 500
     finally:
-        conn.close()
+        if conn:
+            conn.close()
