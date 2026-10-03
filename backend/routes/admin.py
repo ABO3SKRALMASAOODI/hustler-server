@@ -209,10 +209,13 @@ def track_visit():
         except Exception:
             data = {}
 
-    page = data.get('page', '/')
+    if not isinstance(data, dict):
+        return jsonify({'error': 'invalid payload'}), 400
+    from website_analytics import safe_path, bounded_number
+    page = safe_path(data.get('page', '/'))
     referrer = data.get('referrer', '')[:500]
     session_id = data.get('session_id', '')[:64]
-    time_on_page = int(data.get('time_on_page', 0))
+    time_on_page = bounded_number(data.get('time_on_page', 0), 86400)
     device_id = (data.get('device_id', '') or '')[:64]
     ip = request.headers.get('X-Forwarded-For', request.remote_addr).split(',')[0].strip()
     user_agent = request.headers.get('User-Agent', '')[:300]
@@ -262,7 +265,7 @@ def track_visit():
             'vercel-screenshot', 'googlebot', 'bingbot', 'slurp', 'duckduckbot',
             'baiduspider', 'yandexbot', 'sogou', 'exabot', 'facebot',
             'ia_archiver', 'semrushbot', 'ahrefsbot', 'mj12bot', 'dotbot',
-            'petalbot', 'bytespider', 'gptbot', 'claudebot', 'ccbot',
+            'bot', 'crawler', 'spider', 'headless', 'notebooklm',
         ]
         ua_lower = user_agent.lower()
         if any(bot in ua_lower for bot in bot_signatures):
@@ -399,25 +402,25 @@ def overview():
             cur.execute(f"""
                 SELECT COUNT(*) AS total,
                        COUNT(DISTINCT {UNIQUE_VISITOR}) AS unique_total
-                FROM page_visits WHERE visited_at::date = CURRENT_DATE
+                FROM analytics_page_visits WHERE visited_at::date = CURRENT_DATE
             """)
             _r = cur.fetchone(); visits_today = _r['total']; unique_today = _r['unique_total']
 
             cur.execute(f"""
                 SELECT COUNT(*) AS total,
                        COUNT(DISTINCT {UNIQUE_VISITOR}) AS unique_total
-                FROM page_visits WHERE visited_at >= NOW() - INTERVAL '7 days'
+                FROM analytics_page_visits WHERE visited_at >= NOW() - INTERVAL '7 days'
             """)
             _r = cur.fetchone(); visits_week = _r['total']; unique_week = _r['unique_total']
 
             cur.execute(f"""
                 SELECT COUNT(*) AS total,
                        COUNT(DISTINCT {UNIQUE_VISITOR}) AS unique_total
-                FROM page_visits WHERE visited_at >= NOW() - INTERVAL '30 days'
+                FROM analytics_page_visits WHERE visited_at >= NOW() - INTERVAL '30 days'
             """)
             _r = cur.fetchone(); visits_month = _r['total']; unique_month = _r['unique_total']
 
-            cur.execute("SELECT COUNT(*) AS total FROM page_visits WHERE visited_at >= NOW() - INTERVAL '14 days' AND visited_at < NOW() - INTERVAL '7 days'")
+            cur.execute("SELECT COUNT(*) AS total FROM analytics_page_visits WHERE visited_at >= NOW() - INTERVAL '14 days' AND visited_at < NOW() - INTERVAL '7 days'")
             prev_week_visits = cur.fetchone()['total']
 
             # ── Credits ──
@@ -607,28 +610,45 @@ def chart_jobs():
 @admin_bp.route('/charts/visits', methods=['GET'])
 @admin_required
 def chart_visits():
+    from website_reports import visits_report
     conn = get_db()
     try:
         with conn.cursor() as cur:
-            cur.execute(f"""
-                SELECT
-                    TO_CHAR(d::date, 'YYYY-MM-DD') AS day,
-                    COALESCE(v.total, 0) AS count,
-                    COALESCE(v.unique_visitors, 0) AS unique_visitors
-                FROM generate_series(NOW() - INTERVAL '30 days', NOW(), '1 day') AS d
-                LEFT JOIN (
-                    SELECT visited_at::date AS dt,
-                        COUNT(*) AS total,
-                        COUNT(DISTINCT {UNIQUE_VISITOR}) AS unique_visitors
-                    FROM page_visits WHERE visited_at >= NOW() - INTERVAL '30 days'
-                    GROUP BY visited_at::date
-                ) v ON v.dt = d::date
-                ORDER BY d
-            """)
-            rows = cur.fetchall()
-        return jsonify({'data': [dict(r) for r in rows]}), 200
+            cur.execute("SET LOCAL TIME ZONE 'UTC'")
+            return jsonify(visits_report(cur, _scope(), METRICS_EPOCH)), 200
     finally:
         conn.close()
+
+
+@admin_bp.route('/journeys', methods=['GET'])
+@admin_required
+def website_journeys():
+    from website_reports import journey_report
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SET LOCAL statement_timeout='8s'")
+            return jsonify(journey_report(cur, _scope('u'))), 200
+    finally:
+        conn.close()
+
+
+@admin_bp.route('/journey', methods=['POST'])
+def track_journey():
+    from website_analytics import save_visit
+    if request.content_length and request.content_length > 16384:
+        return jsonify({'error': 'payload too large'}), 413
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'error': 'invalid payload'}), 400
+    try:
+        stored = save_visit(data, request.headers.get('User-Agent',''))
+        return jsonify({'stored': stored}), 200
+    except ValueError:
+        return jsonify({'error': 'invalid tracking fields'}), 400
+    except Exception:
+        current_app.logger.warning('Website measurement temporarily unavailable')
+        return jsonify({'stored': False}), 503
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -767,7 +787,7 @@ def revenue_analytics():
             collected = _collected(cur)
             collected_30d = _collected(cur, since_days=30)
 
-            cur.execute(f"SELECT COUNT(DISTINCT ip) AS total FROM page_visits WHERE visited_at >= NOW() - INTERVAL '30 days'")
+            cur.execute(f"SELECT COUNT(DISTINCT ip) AS total FROM analytics_page_visits WHERE visited_at >= NOW() - INTERVAL '30 days'")
             unique_visitors_30d = cur.fetchone()['total']
 
             cur.execute(f"SELECT COUNT(*) AS total FROM users WHERE is_verified = 1 AND {scope} AND created_at >= NOW() - INTERVAL '30 days'")
@@ -1244,7 +1264,7 @@ def page_analytics():
                 SELECT page,
                     COUNT(*) AS views,
                     COUNT(DISTINCT {UNIQUE_VISITOR}) AS unique_visitors
-                FROM page_visits
+                FROM analytics_page_visits
                 WHERE visited_at >= NOW() - INTERVAL '30 days'
                 GROUP BY page
                 ORDER BY views DESC
@@ -1263,7 +1283,7 @@ def page_analytics():
                         visited_at::date AS dt,
                         COUNT(DISTINCT {UNIQUE_VISITOR}) AS unique_visitors,
                         COUNT(*) AS total_views
-                    FROM page_visits WHERE visited_at >= NOW() - INTERVAL '30 days'
+                    FROM analytics_page_visits WHERE visited_at >= NOW() - INTERVAL '30 days'
                     GROUP BY visited_at::date
                 ) v ON v.dt = d::date
                 ORDER BY d
@@ -1274,7 +1294,7 @@ def page_analytics():
                 SELECT
                     EXTRACT(HOUR FROM visited_at) AS hour,
                     COUNT(*) AS views
-                FROM page_visits
+                FROM analytics_page_visits
                 WHERE visited_at >= NOW() - INTERVAL '7 days'
                 GROUP BY hour
                 ORDER BY hour
@@ -1302,14 +1322,14 @@ def realtime():
         with conn.cursor() as cur:
             cur.execute(f"""
                 SELECT COUNT(DISTINCT {UNIQUE_VISITOR}) AS active_now
-                FROM page_visits
+                FROM analytics_page_visits
                 WHERE visited_at >= NOW() - INTERVAL '5 minutes'
             """)
             active_now = cur.fetchone()['active_now']
 
             cur.execute(f"""
                 SELECT COUNT(DISTINCT {UNIQUE_VISITOR}) AS active_15m
-                FROM page_visits
+                FROM analytics_page_visits
                 WHERE visited_at >= NOW() - INTERVAL '15 minutes'
             """)
             active_15m = cur.fetchone()['active_15m']
@@ -1326,7 +1346,7 @@ def realtime():
 
             cur.execute("""
                 SELECT page, ip, visited_at, user_agent, country
-                FROM page_visits
+                FROM analytics_page_visits
                 WHERE visited_at >= NOW() - INTERVAL '2 minutes'
                 ORDER BY visited_at DESC
                 LIMIT 20
@@ -1622,7 +1642,7 @@ def country_stats():
                 SELECT country,
                     COUNT(*) as visits,
                     COUNT(DISTINCT {UNIQUE_VISITOR}) as unique_visitors
-                FROM page_visits
+                FROM analytics_page_visits
                 WHERE country IS NOT NULL AND country != 'Unknown'
                   AND visited_at >= NOW() - INTERVAL '30 days'
                 GROUP BY country
@@ -1649,7 +1669,7 @@ def session_stats():
                 SELECT referrer_source,
                     COUNT(*) AS visits,
                     COUNT(DISTINCT {UNIQUE_VISITOR}) AS unique_visitors
-                FROM page_visits
+                FROM analytics_page_visits
                 WHERE visited_at >= NOW() - INTERVAL '30 days'
                   AND referrer_source IS NOT NULL
                 GROUP BY referrer_source
@@ -1660,7 +1680,7 @@ def session_stats():
             cur.execute(f"""
                 SELECT device_type,
                     COUNT(DISTINCT {UNIQUE_VISITOR}) AS unique_devices
-                FROM page_visits
+                FROM analytics_page_visits
                 WHERE visited_at >= NOW() - INTERVAL '30 days'
                   AND device_type IS NOT NULL
                 GROUP BY device_type
@@ -1672,7 +1692,7 @@ def session_stats():
                 SELECT browser,
                     COUNT(*) AS visits,
                     COUNT(DISTINCT {UNIQUE_VISITOR}) AS unique_visitors
-                FROM page_visits
+                FROM analytics_page_visits
                 WHERE visited_at >= NOW() - INTERVAL '30 days'
                   AND browser IS NOT NULL
                 GROUP BY browser
@@ -1687,7 +1707,7 @@ def session_stats():
                     SELECT session_id,
                         EXTRACT(EPOCH FROM (MAX(visited_at) - MIN(visited_at))) AS duration,
                         COUNT(*) AS pages
-                    FROM page_visits
+                    FROM analytics_page_visits
                     WHERE session_id IS NOT NULL AND session_id != ''
                       AND visited_at >= NOW() - INTERVAL '30 days'
                     GROUP BY session_id
@@ -1698,7 +1718,7 @@ def session_stats():
 
             cur.execute("""
                 SELECT page, ROUND(AVG(time_on_page)) AS avg_time, COUNT(*) AS visits
-                FROM page_visits
+                FROM analytics_page_visits
                 WHERE time_on_page > 2
                   AND visited_at >= NOW() - INTERVAL '30 days'
                 GROUP BY page

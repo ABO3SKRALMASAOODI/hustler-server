@@ -440,7 +440,7 @@ def test_stale_child_agent_boot_call_is_refused_before_queueing(client):
     assert DB["enqueued"] == []
 
 
-def test_every_public_tool_error_records_only_its_name(client, monkeypatch):
+def test_every_public_tool_error_records_bounded_diagnostics(client, monkeypatch):
     events = []
 
     def capture(user_id, project_id, kind, asset_id=None, detail=None,
@@ -466,11 +466,12 @@ def test_every_public_tool_error_records_only_its_name(client, monkeypatch):
 
     assert all(result["isError"] is True for result in (
         bad_arguments, denied, bad_session, unknown))
-    assert [event["detail"] for event in events] == [
+    assert [{"tool": event["detail"]["tool"]} for event in events] == [
         {"tool": "get_transcript"}, {"tool": "load_tools"},
         {"tool": "create_project"}, {"tool": "stale_tool_name"},
     ]
-    assert all(set(event["detail"]) == {"tool"} for event in events)
+    assert all(set(event["detail"]) == {"tool", "category", "error_fingerprint"} for event in events)
+    assert all(len(event["detail"]["error_fingerprint"]) == 16 for event in events)
     assert all(event["kind"] == "mcp_error_response" for event in events)
     assert all(event["project_id"] is None and event["asset_id"] is None
                and event["origin"] == "mcp" for event in events)
@@ -1966,3 +1967,12 @@ def test_mcp_doctrine_allows_requested_export_without_changing_studio_prompt():
     assert "You cannot render the final full-resolution export" not in instructions
     assert "use export_final for the reviewed version" in instructions
     assert "You cannot render the final" in catalog["system_prompt"]
+
+
+def test_error_diagnostics_do_not_retain_customer_contents():
+    result = mcpmod._text("REJECTED: private transcript secret@example.com https://private/path?token=secret", True)
+    detail = mcpmod._public_error_detail("apply_edit_batch", result)
+    assert detail["category"] == "invalid_request"
+    assert not any(word in str(detail) for word in ("transcript", "secret@", "https://"))
+    internal = mcpmod._public_error_detail("upload_finish", mcpmod._text("internal error. Reference abcdef0123456789.", True))
+    assert internal["reference"] == "abcdef0123456789"

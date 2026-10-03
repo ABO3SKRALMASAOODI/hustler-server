@@ -254,11 +254,38 @@ abstract class ValmeraContainer extends Container<Env> {
       return {
         ok: false,
         body,
-        error: `container readiness mismatch role=${String(body.role)} source=${String(body.code_version)}`,
+        error: `container readiness mismatch role=${String(body.role)} source=${String(body.code_version)} expected_role=${this.workerRole} expected_source=${expectedSource}`,
       };
     } catch (error) {
       return { ok: false, error: `container readiness failed: ${String(error)}` };
     }
+  }
+
+  private async retireUnreadyContainer(callId: string): Promise<void> {
+    // stop() only signals SIGTERM in SDK 0.3.7. Await actual destruction of
+    // a rejected image before admitting its replacement. Keep an exclusive
+    // reset reservation throughout; never destroy another accepted /run.
+    const resetId = `reset:${callId}`;
+    const owns = await this.ctx.storage.transaction(async (txn) => {
+      const state = await txn.get<CallState>(this.stateKey(callId));
+      const active = await txn.get<ActiveCall>("active");
+      if (state?.status !== "starting" || active?.callId !== callId) return false;
+      await txn.put({
+        [this.stateKey(callId)]: { ...state, status: "stopping" },
+        active: { callId: resetId, expiresAt: Date.now() + 120_000 },
+      });
+      return true;
+    });
+    if (!owns) return;
+    let destroyed = false;
+    try { await this.destroy(); destroyed = true; }
+    catch { /* Retain the reset lease until cleanup can be retried. */ }
+    await this.ctx.storage.transaction(async (txn) => {
+      const active = await txn.get<ActiveCall>("active");
+      if (active?.callId !== resetId) return;
+      await txn.delete(this.stateKey(callId));
+      if (destroyed) await txn.delete("active");
+    });
   }
 
   private terminalKey(callId: string, at: number): string {
@@ -298,12 +325,9 @@ abstract class ValmeraContainer extends Container<Env> {
       if (active?.callId === callId) await txn.delete("active");
       return failed;
     });
-    if (terminal?.status === "failed"
-        && terminal.error?.includes("abandoned before /run")) {
-      // Cleanup is asynchronous: the terminal state already proves no /run
-      // was sent, so a slow provider stop cannot delay safe Modal fallback.
-      this.ctx.waitUntil(this.stop().catch(() => undefined));
-    }
+    // No /run was sent. Do not schedule an unfenced asynchronous stop after
+    // releasing admission: it can kill the next customer's healthy call.
+    // The next owner checks readiness; normal idle expiry reclaims unused VMs.
     return terminal;
   }
 
@@ -672,13 +696,7 @@ abstract class ValmeraContainer extends Container<Env> {
     // Modal fallback instead of an older renderer touching a current EDL.
     const readiness = await this.containerReadiness();
     if (!readiness.ok) {
-      try {
-        await this.stop();
-      } catch {
-        // No /run was sent, so fallback remains safe even if cleanup fails.
-      }
-      await this.ctx.storage.delete(stateKey);
-      await this.release(callId);
+      await this.retireUnreadyContainer(callId);
       return json({
         error: readiness.error ?? "Cloudflare container image is not ready",
         safe_to_fallback: true,

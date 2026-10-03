@@ -25,7 +25,7 @@ def test_all_historical_migrations_are_in_the_canonical_directory():
     names = sorted(path.name for path in MIGRATIONS.glob("*.sql"))
     numbers = {int(name.split("_", 1)[0]) for name in names}
 
-    assert numbers == set(range(28))
+    assert numbers == set(range(29))
     assert not list((ROOT / "migrations").glob("*.sql"))
     assert "013_index_greet_unique.sql" in names
     assert "018_preview_check.sql" in names

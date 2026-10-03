@@ -47,6 +47,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import secrets
 import time
 from datetime import datetime, timezone
@@ -2126,18 +2127,50 @@ def _text(s, is_error=False):
     return {"content": [{"type": "text", "text": s}], "isError": is_error}
 
 
+def _public_error_detail(name, result):
+    """Persist diagnostic categories, never tool arguments or raw response text."""
+    text = "\n".join(str(b.get("text", "")) for b in result.get("content", []) if isinstance(b, dict) and b.get("type") == "text")
+    lower = text.lower()
+    category = "unclassified"
+    for markers, value in (
+        (("internal error",), "internal_error"),
+        (("readiness mismatch",), "executor_version_mismatch"),
+        (("stale", "base version", "version conflict"), "version_conflict"),
+        (("prerequisite", "hasn't finished analyzing", "no complete preview"), "prerequisite"),
+        (("rejected", "correction_needed", "must be", "requires", "supply "), "invalid_request"),
+        (("no tool called", "not enabled", "reserved for"), "unavailable_tool"),
+        (("upload", "size cap"), "upload_error"),
+        (("timeout", "timed out"), "timeout"),
+    ):
+        if any(marker in lower for marker in markers):
+            category = value
+            break
+    detail = {"tool": str(name or "unknown")[:100], "category": category,
+              "error_fingerprint": hashlib.sha256(text.encode()).hexdigest()[:16]}
+    structured = result.get("structuredContent") or {}
+    outcome = structured.get("tool_outcome") if isinstance(structured, dict) else None
+    if isinstance(outcome, dict) and outcome.get("status") in {
+            "correction_needed", "prerequisite", "transient_failure", "unavailable", "unsafe"}:
+        detail["outcome"] = outcome["status"]
+        detail["retryable"] = bool(outcome.get("retryable"))
+    reference = re.search(r"Reference ([a-f0-9]{16})\.", text)
+    if reference:
+        detail["reference"] = reference.group(1)
+    return detail
+
+
 def _tool_call_result(req_id, tok, name, result):
     """Return a tools/call result and count every public MCP error response.
 
     Queue-backed editor failures remain in ``video_jobs``. This deliberately
     records the public boundary too: it covers validation, stale/denied tools,
     session helpers, artifact delivery, and internal exceptions that never
-    create a job. Only the bounded tool name is retained.
+    create a job. Only bounded diagnostic categories and a response fingerprint are retained.
     """
     if isinstance(result, dict) and bool(result.get("isError")):
         record_client_event(
             tok["user_id"], None, "mcp_error_response",
-            detail={"tool": str(name or "unknown")[:100]}, origin="mcp")
+            detail=_public_error_detail(name, result), origin="mcp")
     return _result(req_id, result)
 
 
