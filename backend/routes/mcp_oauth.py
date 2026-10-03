@@ -234,10 +234,10 @@ __ERROR__
 <ul>
 <li>Read your projects, footage and transcripts</li>
 <li>Edit footage, captions and audio; render previews</li>
-<li>Retrieve finished videos</li>
+<li>Export and download finished videos</li>
 </ul>
 <p>Review your timeline and preview before final delivery. You can create
-the final export in Valmera Studio.</p>
+the final export with your assistant or in Valmera Studio.</p>
 <p>Sign in to allow it. It cannot see your password, your card, or anything
 outside your video projects.</p>
 <p><a href="__SESSION_URL__" style="color:#86efac;font-weight:600">Continue with your Valmera account (including Google) →</a></p>
@@ -270,13 +270,35 @@ def _page(params, client_name, error=None, email=""):
         for k, v in params.items() if v)
     return (PAGE
             .replace("__CLIENT__", _esc(client_name))
-            .replace("__SESSION_URL__", _esc("https://valmera.io/mcp/authorize?" + urlencode(params)))
+            .replace("__SESSION_URL__", _esc(_session_url(params)))
             .replace("__HIDDEN__", hidden)
             .replace("__EMAIL__", _esc(email))
             .replace("__REDIRECT_HOST__",
                      _esc(urlsplit(params.get("redirect_uri", "")).netloc))
             .replace("__ERROR__",
                      f'<div class="err">{_esc(error)}</div>' if error else ""))
+
+
+def _session_url(params):
+    # Consent travels through the frontend's /api-backend proxy, a different
+    # blueprint from branded discovery. Carry the original issuer explicitly;
+    # deriving it from that later request broke ChatGPT's issuer validation.
+    return "https://valmera.io/mcp/authorize?" + urlencode(
+        {**params, "issuer": base_url()})
+
+
+def _session_issuer(params):
+    backend = os.getenv("BACKEND_URL",
+                        "https://entrepreneur-bot-backend.onrender.com").rstrip("/")
+    resource_issuers = {"https://valmera.io/mcp/server": "https://valmera.io",
+                        f"{backend}/mcp": backend}
+    resource_issuer = resource_issuers.get(params.get("resource"))
+    issuer = params.get("issuer") or resource_issuer or base_url()
+    if issuer not in {"https://valmera.io", backend}:
+        raise ValueError("Unknown authorization server. Restart connection from your assistant.")
+    if resource_issuer and resource_issuer != issuer:
+        raise ValueError("Authorization server mismatch. Restart connection from your assistant.")
+    return issuer
 
 
 def _fail_page(message, code=400):
@@ -344,7 +366,9 @@ def authorize():
 
     name = client["client_name"] or "An app"
     if request.method == "GET":
-        return Response(_page(params, name), mimetype="text/html")
+        # One normal login flow supports both password and Google accounts.
+        # Access is still granted only by the explicit session-consent POST.
+        return redirect(_session_url(params))
 
     action = src.get("action") or ""
     if action == "deny":
@@ -391,7 +415,7 @@ def authorize():
     return redirect(_grant_redirect(params, client, user))
 
 
-def _grant_redirect(params, client, user):
+def _grant_redirect(params, client, user, *, issuer=None):
     uri, state = params["redirect_uri"], params.get("state", "")
     code = secrets.token_urlsafe(32)
     with vdb() as conn:
@@ -408,7 +432,7 @@ def _grant_redirect(params, client, user):
                     (_sha(code), grant_id, client["client_id"], uri,
                      params["code_challenge"], params["resource"] or None,
                      CODE_TTL_S))
-    q = {"code": code, "iss": base_url()}
+    q = {"code": code, "iss": issuer or base_url()}
     if state:
         q["state"] = state
     sep = "&" if urlsplit(uri).query else "?"
@@ -583,8 +607,12 @@ def session_consent(user_id):
     """Reuse a Valmera login, including Google, with explicit app consent."""
     src = request.args if request.method == "GET" else (request.get_json(silent=True) or {})
     keys = ("client_id", "redirect_uri", "response_type", "scope", "state",
-            "code_challenge", "code_challenge_method", "resource")
+            "code_challenge", "code_challenge_method", "resource", "issuer")
     params = {key: str(src.get(key) or "") for key in keys}
+    try:
+        issuer = _session_issuer(params)
+    except ValueError as exc:
+        return jsonify(error=str(exc)), 400
     client = _client(params["client_id"]) if params["client_id"] else None
     if not client or params["redirect_uri"] not in (client["redirect_uris"] or []):
         return jsonify({"error": "This app or redirect address is not registered."}), 400
@@ -602,4 +630,4 @@ def session_consent(user_id):
         return jsonify({"client_name": client["client_name"] or "AI assistant", "redirect_uri": params["redirect_uri"], "email": user["email"]})
     if src.get("action") != "allow":
         return jsonify({"error": "Explicit approval is required to connect this app."}), 400
-    return jsonify({"redirect_url": _grant_redirect(params, client, user)})
+    return jsonify({"redirect_url": _grant_redirect(params, client, user, issuer=issuer)})

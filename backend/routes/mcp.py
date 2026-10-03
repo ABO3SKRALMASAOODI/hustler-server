@@ -4,9 +4,8 @@ WHAT THIS IS. A Model Context Protocol endpoint at POST /mcp that hands the
 the editor tool registry to whatever model the caller is running —
 Claude Opus or Fable inside the user's own Claude Code session, paid for by
 their Anthropic subscription, not by our credits. The model does the thinking;
-Valmera does the editing. Final exports are deliberately not part of this
-surface: MCP prepares and verifies the edit, while the user creates the
-deliverable in Valmera Studio. It is the same trade the `mcp` plan was always
+Valmera does the editing. MCP can prepare, review and export the finished
+video through the same export queue and safety checks as Valmera Studio. It is the same trade the `mcp` plan was always
 written around ("brings its own model").
 
 THE ONE INVARIANT: NO SECOND EDITOR. The tools are not re-declared here. The
@@ -17,9 +16,8 @@ call edit_shorts, which would enqueue Valmera agent turns instead of editing
 the EDL. Execution runs in the worker, in the same ToolContext the agent uses.
 
 WHAT IS DECLARED HERE: only the things a headless model needs to prepare and
-review an edit — pick a project, upload a file, watch a preview, download an
-existing render. Those are session tools; the 80 editing tools are not. Final
-export stays behind the Studio's explicit user action.
+review and deliver an edit — pick a project, upload a file, watch a preview,
+request a final export and download the result. These are session tools.
 
 HOW A CALL FLOWS.
     Claude Code --HTTP JSON-RPC--> this endpoint
@@ -60,7 +58,7 @@ import storage
 import routes.mcp_oauth as mcp_oauth
 from routes.admin import ADMIN_EMAIL
 from routes.auth import token_required
-from routes.video import complete_upload_core, record_client_event, vdb, wschemas, apply_edit_batch_core
+from routes.video import complete_upload_core, record_client_event, vdb, wschemas, apply_edit_batch_core, _request_final, _final_gate
 from video_services.mcp_reads import read_metadata
 from video_services.jobs import enqueue as _enqueue
 from video_services.project_state import (
@@ -310,17 +308,10 @@ _TITLE_OVERRIDES = {
     "make_shorts": "Build podcast shorts from explicit story arcs",
 }
 
-# A delivery boundary, not ordinary feature gating. The outside model may
-# prepare and verify an edit, but it must never create the full-resolution
-# deliverable. Keep this filter even though export_final is not currently an
-# editor-registry tool: it prevents a future worker catalog or a stale client
-# from silently restoring the expensive capability.
-MCP_DENIED_TOOLS = frozenset({"export_final", "edit_shorts", "load_tools"})
+# Internal agent orchestration remains unavailable; final export is a session
+# capability backed by the shared Studio export gate, never a worker tool.
+MCP_DENIED_TOOLS = frozenset({"edit_shorts", "load_tools"})
 MCP_DENIED_MESSAGES = {
-    "export_final": (
-        "Final export is deliberately unavailable over MCP. Finish and "
-        "verify the edit with render_preview/watch_video, then ask the user "
-        "to export it from Valmera Studio."),
     "edit_shorts": (
         "edit_shorts is unavailable over MCP. Studio's child-agent boot is "
         "reserved for an explicit locked-card Edit press. You are the editor: "
@@ -368,7 +359,7 @@ def _editor_tools(catalog):
     for t in (catalog or {}).get("tools", []):
         fn = t.get("function") or {}
         name = fn.get("name")
-        if name in MCP_DENIED_TOOLS:
+        if name in MCP_DENIED_TOOLS or name in SESSION_TOOL_NAMES:
             continue
         # Never let a mutable connection-wide pointer choose the timeline for
         # an editor call. Long MCP sessions hop among a parent and many shorts;
@@ -420,6 +411,12 @@ def _editor_tools(catalog):
 _NO_ARGS = {"type": "object", "properties": {}}
 
 SESSION_TOOLS = [
+    {"name": "export_final",
+     "description": "Export a reviewed edit as a full-resolution MP4 when the user asks for the finished video. Pass the explicit project_id and reviewed edl_version. Uses the same ownership, upload, timeline, quality and watermark checks as Studio. Repeated requests reuse an existing current export or its running job. A queued job is NOT a finished video: call wait_for_job, then download_url(kind='final', edl_version=...) to deliver the file. Never claim delivery until a download link is returned.",
+     "inputSchema": {"type": "object", "properties": {
+         "project_id": {"type": "integer", "minimum": 1},
+         "edl_version": {"type": "integer", "minimum": 1}},
+         "required": ["project_id", "edl_version"]}},
     {"name": "apply_short_edit_batches",
      "description": "Save caller-authored edits for up to 30 shorts in one request, without running another model or rendering. project_id is the parent; every child must belong to it. Each batch uses apply_edit_batch's operations and current base_version, and has its own unique retry operation_id. Each child is atomic; results explicitly report partial failures. All times describe that child's resulting timeline. Read and inspect each short first. Saved edits still require changed-moment and final quality review. This tool never exports finals.",
      "inputSchema": {"type": "object", "properties": {
@@ -567,7 +564,7 @@ SESSION_TOOLS = [
      "description": "A temporary URL for watching or downloading a render of "
                     "an explicit project, with a durable receipt. asset_id recovers a historical render. "
                     "kind 'preview' (complete draft/approval), 'preview_check' (changed sections), or "
-                    "'final' (an existing Studio or Shorts export). This tool "
+                    "'final' (a completed export). This tool "
                     "cannot create a final export.",
      "inputSchema": {"type": "object", "properties": {
          "project_id": {"type": "integer"},
@@ -631,6 +628,7 @@ SESSION_TOOLS = [
 # this connection's own active-project pointer — no project content changes,
 # and calling it twice with the same id lands the same state.
 _SESSION_META = {
+    "export_final": ("Export the finished video", False, True),
     "apply_short_edit_batches": ("Apply edits to selected shorts", False, True),
     #  name: (title, readOnlyHint, idempotentHint)
     "list_projects":  ("List this account's projects", True, False),
@@ -736,7 +734,15 @@ Two things are different from a normal tool session, and both matter:
    Choose captions, framing, cards and motion by story-specific judgment.
    Render_preview(complete=true) once the whole edit is coherent, then
    watch_video to verify it. That direct MCP edit advances and unlocks the
-   Studio card; never press or emulate Studio's Edit-agent action. Final export is deliberately Studio-only.
+   Studio card; never press or emulate Studio's Edit-agent action.
+
+5. DELIVER THE FINISHED VIDEO. When the user requests an export, call
+   export_final(project_id=ID, edl_version=REVIEWED_VERSION). It uses the same
+   export checks, queue and plan watermark as Studio. Poll wait_for_job until
+   done, then call download_url(project_id=ID, kind="final",
+   edl_version=REVIEWED_VERSION) and share the returned download link. A job
+   id or preview is not a final MP4. If tools are cached, reconnect to refresh
+   the catalog; Studio Export remains available too.
    A source under one minute is already one direct short: edit that project
    normally instead of starting the multi-clip workflow.
 
@@ -770,8 +776,14 @@ INSTRUCTIONS_MODE = os.getenv("MCP_INSTRUCTIONS", "full").strip().lower()
 def _instructions(catalog):
     if not catalog:
         return CATALOG_MISSING
+    # Studio's in-house agent cannot export; an authorized MCP caller can.
+    # Adapt only that surface-specific rule in the shared editing doctrine.
+    doctrine = catalog.get("system_prompt", "").replace(
+        "You cannot render the final full-resolution export — only the user can, from the app.",
+        "When the user asks for the finished video, use export_final for the reviewed version, "
+        "wait for completion and retrieve the final download link.")
     parts = ([] if INSTRUCTIONS_MODE == "brief"
-             else [catalog.get("system_prompt", "")])
+             else [doctrine])
     parts += [catalog.get("capabilities", ""), WORKFLOW]
     return "\n\n".join(p for p in parts if p)
 
@@ -1700,7 +1712,7 @@ def _t_shorts_status(tok, args):
             f"open_short(parent_project_id={parent_id}, card=N) or "
             "open_short(child_project_id=ID), use the "
             "normal editor tools on that child EDL, render_preview and "
-            "watch_video to verify it. Final export is Studio-only; tell the "
+            "watch_video to verify it. Call export_final for the reviewed version, or tell the "
             "user when the edit is ready to export. Valmera's in-house agent "
             "is not callable over MCP; this MCP model must make every child "
             "edit itself.")
@@ -1808,6 +1820,30 @@ def _record_download_receipt(tok, project_id, receipt):
 
 
 
+def _t_export_final(tok, args):
+    project_id, version = args.get("project_id"), args.get("edl_version")
+    if type(project_id) is not int or project_id < 1 or type(version) is not int or version < 1:
+        return _text("Supply positive integer project_id and reviewed edl_version.", True)
+    with vdb() as conn:
+        response = _request_final(conn.cursor(), int(tok["user_id"]),
+                                  project_id, version, reuse_existing=True)
+        response, status = response if isinstance(response, tuple) else (response, 200)
+        data = response.get_json()
+    receipt = {"project_id": project_id, "edl_version": version, **data}
+    if status >= 400:
+        return {"content": [{"type": "text", "text": data.get("error", "Export could not start.")}],
+                "structuredContent": {"export": receipt}, "isError": True}
+    if data.get("asset_id"):
+        return _t_download_url(tok, {"project_id": project_id, "edl_version": version,
+                                    "kind": "final", "asset_id": data["asset_id"]})
+    text = (f"PROJECT {project_id}: export of EDL v{version} is job {data['job_id']}. "
+            f"Call wait_for_job(job_id={data['job_id']}) until done, then "
+            f"download_url(project_id={project_id}, kind='final', edl_version={version}). "
+            "The MP4 is not ready yet; do not submit another export.")
+    return {"content": [{"type": "text", "text": text}],
+            "structuredContent": {"export": receipt}, "isError": False}
+
+
 def _t_download_url(tok, args):
     project_id, error = _required_project_id(args)
     if error:
@@ -1849,12 +1885,15 @@ def _t_download_url(tok, args):
         sql += " ORDER BY id DESC LIMIT 1"
         cur.execute(sql, params)
         row = cur.fetchone()
+        if row and kind == "final" and not _final_gate(cur, project_id, tok["user_id"])(
+                row["id"], row.get("meta") or {}, (row.get("meta") or {}).get("edl_version")):
+            return _session_error("This export needs refreshing. Call export_final with this project_id and reviewed edl_version.")
     if not row:
         return _session_error(
             f"No {kind} has been rendered yet"
             + (" with audio_model_review=false — call render_preview."
                if kind in ("preview", "preview_check")
-               else " — final export is created in Valmera Studio."))
+               else " — call export_final with project_id and reviewed edl_version."))
     receipt = None
     if kind in ("preview", "preview_check"):
         # Validate provenance before minting a bearer URL.  An asset stamped
@@ -2053,6 +2092,7 @@ def _t_apply_short_edit_batches(tok, args):
 
 
 SESSION_IMPL = {
+    "export_final": _t_export_final,
     "apply_short_edit_batches": _t_apply_short_edit_batches,
     "list_projects": _t_list_projects,
     "open_project": _t_open_project,
@@ -2460,7 +2500,6 @@ def server_card():
             "time is refused in both directions.",
         ],
         "notSupported": [
-            "creating final exports (final delivery is Studio-only)",
             "delegating edits to Valmera's in-house agent",
             "text-to-video generation of a whole video",
             "SRT/VTT import or export (captions are burned in)",
@@ -2660,19 +2699,31 @@ def connection_status(user_id):
     with vdb() as conn:
         cur = conn.cursor()
         cur.execute("""SELECT g.id, c.client_name AS label, g.calls, g.created_at,
-                              g.last_used_at, 'oauth' AS kind
+                              g.last_used_at, 'oauth' AS kind,
+                              EXISTS (SELECT 1 FROM mcp_oauth_tokens t
+                                      WHERE t.grant_id = g.id AND t.revoked_at IS NULL
+                                        AND t.expires_at > NOW()) AS has_token,
+                              g.created_at < NOW() - INTERVAL '5 minutes' AS expired
                          FROM mcp_oauth_grants g
                          LEFT JOIN mcp_oauth_clients c ON c.client_id = g.client_id
                         WHERE g.user_id = %s AND g.revoked_at IS NULL
                         UNION ALL
-                       SELECT id, label, calls, created_at, last_used_at, 'token' AS kind
+                       SELECT id, label, calls, created_at, last_used_at, 'token' AS kind,
+                              TRUE AS has_token, FALSE AS expired
                          FROM mcp_tokens WHERE user_id = %s AND revoked_at IS NULL
                         ORDER BY created_at DESC""", (int(user_id), int(user_id)))
         rows = cur.fetchall()
     return jsonify({"connections": [{"id": row["id"], "kind": row["kind"],
         "label": row["label"] or "AI assistant", "calls": row["calls"],
+        "status": _connection_state(row),
         "last_used_at": row["last_used_at"].isoformat() if row["last_used_at"] else None}
         for row in rows]})
+
+
+def _connection_state(row):
+    if not row["has_token"]:
+        return "needs_reconnect" if row["expired"] else "pending"
+    return "connected" if row["calls"] else "ready"
 
 
 @mcp_bp.route("/mcp/connections/oauth/<int:grant_id>", methods=["DELETE"])

@@ -18,6 +18,7 @@ SERVER_NAME = "io.valmera/video-editor"
 REQUIRED_SESSION_TOOLS = {
     "create_project",
     "download_url",
+    "export_final",
     "index_status",
     "list_projects",
     "open_project",
@@ -128,7 +129,7 @@ def verify_public_mcp(base_url, request_json=_request_json, timeout_s=30):
         schema_names.append(tool["name"])
     _require(sorted(schema_names) == sorted(published_tools),
              "standard tool definitions disagree with published tool names")
-    _require(not {"export_final", "edit_shorts", "load_tools"}.intersection(schema_names),
+    _require(not {"edit_shorts", "load_tools"}.intersection(schema_names),
              "server card exposes an internal or denied tool")
     _require(card.get("resources") == [] and card.get("prompts") == [],
              "server card advertises unsupported resources or prompts")
