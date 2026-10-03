@@ -849,7 +849,8 @@ def video_overview():
                         AND active.type = 'agent_turn'
                         AND active.state IN ('queued', 'running'))
                 UNION ALL
-                SELECT ce.kind, ce.project_id, p.title, u.email,
+                SELECT CASE WHEN followup.id IS NOT NULL THEN 'upload_followup'
+                            ELSE ce.kind END, ce.project_id, p.title, u.email,
                        -- Every JSON accessor is parenthesised on purpose:
                        -- `||` binds tighter than `->>`, so the unparenthesised
                        -- form parses as (' - ' || ce.detail) ->> 'filename'
@@ -860,11 +861,24 @@ def video_overview():
                          || COALESCE(' (' || ROUND(
                               (CASE WHEN (ce.detail->>'bytes') ~ '^[0-9]+$'
                                     THEN (ce.detail->>'bytes')::numeric
-                               END) / 1073741824.0, 2) || ' GB)', ''),
+                               END) / 1073741824.0, 2) || ' GB)', '')
+                         || CASE WHEN followup.id IS NOT NULL
+                              THEN ' — later upload succeeded: ' || COALESCE(
+                                followup.detail->>'filename', 'project #' || followup.project_id::text,
+                                'another upload')
+                              ELSE '' END,
                        ce.created_at
                 FROM client_events ce
                 LEFT JOIN projects p ON p.id = ce.project_id
                 LEFT JOIN users u ON u.id = ce.user_id
+                LEFT JOIN LATERAL (
+                    SELECT landed.id, landed.project_id, landed.detail
+                    FROM client_events landed
+                    WHERE landed.user_id = ce.user_id AND landed.kind = 'upload_landed'
+                      AND landed.created_at > ce.created_at
+                      AND landed.created_at < ce.created_at + INTERVAL '1 hour'
+                    ORDER BY landed.created_at LIMIT 1
+                ) followup ON TRUE
                 WHERE ce.kind IN ('upload_rejected', 'upload_failed')
                   AND ce.created_at > NOW() - INTERVAL '7 days'
             ) t

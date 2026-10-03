@@ -314,7 +314,7 @@ def test_initialize_carries_the_editing_doctrine(client):
     assert "A SHORT IS A MICRO-STORY" in b["result"]["instructions"]
     assert "make_shorts(project_id, clips=[...]" in \
         b["result"]["instructions"]
-    assert "Final export is deliberately Studio-only" in \
+    assert "export_final(project_id=ID, edl_version=REVIEWED_VERSION)" in \
         b["result"]["instructions"]
     assert "render_preview(complete=false)" in b["result"]["instructions"]
     assert "render_preview(complete=true) exactly once" in \
@@ -363,7 +363,7 @@ def test_tools_list_is_session_tools_plus_the_worker_registry(client):
     tools = rpc(client, "tools/list", STATIC_TOKEN).get_json()["result"]["tools"]
     names = [t["name"] for t in tools]
     assert "open_project" in names and "get_transcript" in names
-    assert "export_final" not in names
+    assert names.count("export_final") == 1
     assert "edit_shorts" not in names
     assert "load_tools" not in names
     assert "make_shorts" in names
@@ -638,7 +638,7 @@ def test_shorts_status_returns_children_ready_for_follow_up_edits(client):
     assert "story: A risky launch -> Evidence was ignored -> The team changed course" in body
     assert "design: Clean evidence-led design" in body
     assert "B-roll plan: 20s failed product launch" in body
-    assert "Final export is Studio-only" in body
+    assert "Call export_final for the reviewed version" in body
 
 
 def test_open_short_puts_the_child_edl_under_direct_mcp_control(client):
@@ -897,20 +897,38 @@ def test_unknown_tool_explains_the_likely_reason(client):
     assert "hidden rather than failing" in text_of(r)
 
 
-def test_stale_client_cannot_call_final_export(client):
-    """Removing a tool from tools/list is not a security boundary: connected
-    clients cache schemas. The server must refuse the old name before it can
-    reach either a session implementation or the worker queue."""
-    r = rpc(client, "tools/call", STATIC_TOKEN,
-            {"name": "export_final",
-             "arguments": {"project_id": 3, "edl_version": 9}})
-    assert r.get_json()["result"]["isError"] is True
-    assert "unavailable over MCP" in text_of(r)
-    assert "Valmera Studio" in text_of(r)
-    assert not DB["enqueued"]
+def test_mcp_final_export_uses_studio_gate_and_returns_a_pollable_job(client, monkeypatch):
+    from flask import jsonify
+    calls=[]
+    def request_final(cur, user_id, project_id, version, **kwargs):
+        calls.append((user_id,project_id,version,kwargs))
+        return jsonify(job_id=555)
+    monkeypatch.setattr(mcpmod,"_request_final",request_final)
+    result=rpc(client,"tools/call",STATIC_TOKEN,{"name":"export_final","arguments":{"project_id":3,"edl_version":9}}).get_json()["result"]
+    assert result["isError"] is False
+    assert calls == [(60,3,9,{"reuse_existing":True})]
+    assert result["structuredContent"]["export"]["job_id"] == 555
+    assert "wait_for_job" in result["content"][0]["text"]
+    assert "not ready yet" in result["content"][0]["text"]
+    assert not DB["enqueued"]  # Never launches an internal editor tool.
 
 
-def test_worker_catalog_cannot_reintroduce_final_export(client, monkeypatch):
+@pytest.mark.parametrize("args", [{}, {"project_id":3}, {"project_id":True,"edl_version":1}, {"project_id":3,"edl_version":0}])
+def test_export_requires_explicit_project_and_reviewed_version(client, monkeypatch, args):
+    monkeypatch.setattr(mcpmod,"_request_final",lambda *a,**k: pytest.fail("invalid export reached queue"))
+    assert rpc(client,"tools/call",STATIC_TOKEN,{"name":"export_final","arguments":args}).get_json()["result"]["isError"]
+
+
+@pytest.mark.parametrize("status,code", [(404,"not_found"),(409,"repair_required"),(409,"original_uploading")])
+def test_export_preserves_studio_refusals(client, monkeypatch, status, code):
+    from flask import jsonify
+    monkeypatch.setattr(mcpmod,"_request_final",lambda *a,**k:(jsonify(error="Blocked",code=code),status))
+    result=rpc(client,"tools/call",STATIC_TOKEN,{"name":"export_final","arguments":{"project_id":3,"edl_version":9}}).get_json()["result"]
+    assert result["isError"]
+    assert result["structuredContent"]["export"]["code"] == code
+
+
+def test_worker_catalog_cannot_duplicate_session_export(client, monkeypatch):
     """A future editor-registry change must not punch through the explicit
     MCP delivery boundary."""
     stale = dict(CATALOG)
@@ -921,7 +939,7 @@ def test_worker_catalog_cannot_reintroduce_final_export(client, monkeypatch):
     monkeypatch.setattr(mcpmod, "_catalog", lambda: stale)
     names = [t["name"] for t in
              rpc(client, "tools/list", STATIC_TOKEN).get_json()["result"]["tools"]]
-    assert "export_final" not in names
+    assert names.count("export_final") == 1
 
 
 def test_worker_catalog_cannot_expose_internal_tool_paging(client, monkeypatch):
@@ -1519,9 +1537,9 @@ def test_claude_ai_connector_flow(client):
          "code_challenge": challenge, "code_challenge_method": "S256",
          "resource": "https://api.example.com/mcp"}
     page = client.get("/mcp/oauth/authorize", query_string=q)
-    assert page.status_code == 200
-    assert b"wants to edit your videos" in page.data
-    assert b"Claude" in page.data and b'value="xyz123"' in page.data
+    assert page.status_code == 302
+    assert page.headers["Location"].startswith("https://valmera.io/mcp/authorize?")
+    assert parse_qs(urlsplit(page.headers["Location"]).query)["issuer"] == ["https://api.example.com"]
 
     r = client.post("/mcp/oauth/authorize",
                     data={**q, "action": "allow", "email": EMAIL,
@@ -1652,8 +1670,7 @@ def test_pressing_enter_in_the_form_means_ALLOW(client):
     The default submit button must therefore be Allow. This asserts the
     MARKUP order, because that is what the browser reads — the on-screen
     order is CSS, and the two are deliberately opposite."""
-    body = client.get("/mcp/oauth/authorize", query_string=_q(
-        _registered(client))).get_data(as_text=True)
+    body = oauth._page(_q(_registered(client)), "Claude")
     form = body[body.index("<form"):]
     assert form.index('value="allow"') < form.index('value="deny"')
 
@@ -1740,6 +1757,7 @@ def test_render_status_distinguishes_changed_section_jobs(client, monkeypatch, s
 
 @pytest.mark.parametrize("kind", ["preview_check", "final"])
 def test_download_exact_historical_changed_section_asset(client, monkeypatch, kind):
+    monkeypatch.setattr(mcpmod, "_final_gate", lambda *a: lambda *a: True)
     DB["render_assets"] = [{"id": n, "project_id": 3, "storage_key": f"p/{n}.mp4",
         "duration_s": 3, "sha256": "a" * 64, "meta": {"variant": kind,
             "edl_version": 8, "audio_model_review": False, "render_job_id": 92}}
@@ -1897,3 +1915,54 @@ def test_oauth_denial_includes_issuer(client, monkeypatch, prefix, origin):
     query = parse_qs(urlsplit(response.headers["Location"]).query)
     assert query["error"] == ["access_denied"]
     assert query["iss"] == [origin]
+
+
+@pytest.mark.parametrize('prefix,issuer,resource', [
+    ('/public-mcp','https://valmera.io','https://valmera.io/mcp/server'),
+    ('','https://api.example.com','https://api.example.com/mcp'),
+])
+def test_oauth_issuer_survives_frontend_session_proxy(client,monkeypatch,prefix,issuer,resource):
+    import jwt
+    monkeypatch.setenv('BACKEND_URL','https://api.example.com')
+    cid=_registered(client)
+    verifier,challenge=_pkce()
+    response=client.get(prefix+'/mcp/oauth/authorize',query_string=_q(cid,code_challenge=challenge,resource=resource))
+    assert response.status_code==302
+    params={k:v[0] for k,v in parse_qs(urlsplit(response.headers['Location']).query).items()}
+    assert params['issuer']==issuer
+    session=jwt.encode({'sub':'60'},client.application.config['SECRET_KEY'],algorithm='HS256')
+    # The browser's API proxy always uses the UNBRANDED backend route.
+    consent=client.post('/mcp/oauth/session-consent',json={**params,'action':'allow'},headers={'Authorization':'Bearer '+session})
+    assert consent.status_code==200
+    callback=parse_qs(urlsplit(consent.get_json()['redirect_url']).query)
+    assert callback['iss']==[issuer]
+    exchange=client.post(prefix+'/mcp/oauth/token',data={'grant_type':'authorization_code','code':callback['code'][0],'client_id':cid,'redirect_uri':CALLBACK,'code_verifier':verifier})
+    assert exchange.status_code==200
+    assert rpc(client,'tools/list',exchange.get_json()['access_token']).status_code==200
+
+
+def test_session_rejects_unknown_issuer_without_creating_grant(client):
+    import jwt
+    session=jwt.encode({'sub':'60'},client.application.config['SECRET_KEY'],algorithm='HS256')
+    r=client.post('/mcp/oauth/session-consent',json={**_q(_registered(client)),'issuer':'https://attacker.example','action':'allow'},headers={'Authorization':'Bearer '+session})
+    assert r.status_code==400
+    assert not DB['grants']
+
+
+@pytest.mark.parametrize('row,status',[
+    ({'has_token':False,'expired':False,'calls':0},'pending'),
+    ({'has_token':False,'expired':True,'calls':0},'needs_reconnect'),
+    ({'has_token':False,'expired':True,'calls':20},'needs_reconnect'),
+    ({'has_token':True,'expired':True,'calls':0},'ready'),
+    ({'has_token':True,'expired':True,'calls':3},'connected'),
+])
+def test_connection_status_distinguishes_incomplete_authorization(row,status):
+    assert mcpmod._connection_state(row)==status
+
+
+def test_mcp_doctrine_allows_requested_export_without_changing_studio_prompt():
+    catalog = {"system_prompt": "Keep evidence honest.\nYou cannot render the final full-resolution export — only the user can, from the app.", "capabilities": "DIRECT TOOLS"}
+    instructions = mcpmod._instructions(catalog)
+    assert "You cannot render the final full-resolution export" not in instructions
+    assert "use export_final for the reviewed version" in instructions
+    assert "You cannot render the final" in catalog["system_prompt"]

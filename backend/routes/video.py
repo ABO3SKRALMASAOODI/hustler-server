@@ -5367,7 +5367,8 @@ def get_edl_version(user_id, project_id, version):
                             "created_by": row["created_by"]}})
 
 
-def _request_final(cur, user_id, project_id, version, render_group=None):
+def _request_final(cur, user_id, project_id, version, render_group=None,
+                   reuse_existing=False):
     """One export gate shared by individual and explicit batch requests."""
     if not _project_for_user(cur, project_id, user_id):
         return jsonify({"error": "Project not found"}), 404
@@ -5479,7 +5480,7 @@ def _request_final(cur, user_id, project_id, version, render_group=None):
                      "first — your edit is saved and nothing is lost.",
             "code": "original_uploading",
             "upload_progress": pct}), 409
-    if render_group:
+    if render_group or reuse_existing:
         cur.execute("""SELECT id, meta FROM assets WHERE project_id=%s AND kind='render'
                        AND meta->>'variant'='final' AND meta->>'edl_version'=%s
                        ORDER BY id DESC LIMIT 1""", (project_id, str(version)))
@@ -5487,10 +5488,13 @@ def _request_final(cur, user_id, project_id, version, render_group=None):
         if existing and _final_gate(cur, project_id, user_id)(
                 existing["id"], existing.get("meta") or {}, version):
             return jsonify(asset_id=existing["id"], reused=True)
-    cur.execute("""SELECT id FROM video_jobs
+    cur.execute("""SELECT id, payload FROM video_jobs
                    WHERE project_id = %s AND type = 'final'
                      AND state IN ('queued','running')""", (project_id,))
-    if cur.fetchone():
+    running = cur.fetchone()
+    if running:
+        if reuse_existing and (running.get("payload") or {}).get("edl_version") == version:
+            return jsonify(job_id=running["id"], reused=True)
         record_client_event(
             user_id, project_id, "export_blocked",
             detail={"code": "already_running", "version": version},
@@ -5555,7 +5559,7 @@ def render_final(user_id, project_id):
 @video_bp.route("/projects/<int:project_id>/shorts/export", methods=["POST"])
 @token_required
 def export_shorts(user_id, project_id):
-    """An explicit Studio batch action; MCP cannot invoke final export."""
+    """An explicit Studio batch action using the shared final-export gate."""
     body = request.get_json(silent=True) or {}
     items = body.get("clips") if isinstance(body, dict) else None
     if (not isinstance(items, list) or not 1 <= len(items) <= 30

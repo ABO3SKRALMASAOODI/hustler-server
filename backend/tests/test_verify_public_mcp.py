@@ -13,7 +13,7 @@ from scripts import verify_public_mcp as probe  # noqa: E402
 BASE = "https://api.example.com"
 
 
-def _responses(*, tool_count=14, challenge=True, mutate_card=None):
+def _responses(*, tool_count=15, challenge=True, mutate_card=None):
     session_tools = sorted(probe.REQUIRED_SESSION_TOOLS)
     card = {
         "name": probe.SERVER_NAME,
@@ -81,8 +81,8 @@ def test_public_mcp_probe_certifies_discovery_and_authentication():
         "status": "ok",
         "name": probe.SERVER_NAME,
         "version": "0.1.0",
-        "tool_count": 14,
-        "session_tool_count": 12,
+        "tool_count": 15,
+        "session_tool_count": 13,
         "oauth_metadata_aliases": 4,
         "unauthenticated_status": 401,
     }
