@@ -5292,8 +5292,26 @@ def _final_gate(cur, project_id, user_id):
     stamps_transitions = _pipeline_emits(cur, "trans_v")
     with_transition = (_versions_with_transition(cur, project_id)
                        if stamps_transitions else set())
+    small_finals = set()
+    if _pipeline_emits(cur, "delivery_v"):
+        # Only replace measured, source-limited historical finals. Deliberately
+        # sized canvas projects and existing HD/4K exports remain available.
+        cur.execute("""SELECT a.id FROM assets a
+                       JOIN edls e ON e.project_id=a.project_id
+                         AND e.version::text=a.meta->>'edl_version'
+                       WHERE a.project_id=%s AND a.kind='render'
+                         AND a.meta->>'variant'='final'
+                         AND COALESCE(a.meta->>'delivery_v','0') <> '1'
+                         AND a.width > 0 AND a.height > 0
+                         AND LEAST(a.width,a.height) < 1080
+                         AND GREATEST(a.width,a.height) < 1920
+                         AND (e.json->'canvas' IS NULL OR e.json->'canvas'='null'::jsonb)
+                    """, (project_id,))
+        small_finals = {r["id"] for r in cur.fetchall()}
 
     def ok(asset_id, meta, version):
+        if asset_id in small_finals:
+            return False
         if asset_id in confirmed:
             return True           # the worker has already declined to re-render
         return (_final_is_current(meta)
