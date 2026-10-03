@@ -615,7 +615,7 @@ def chart_visits():
     try:
         with conn.cursor() as cur:
             cur.execute("SET LOCAL TIME ZONE 'UTC'")
-            return jsonify(visits_report(cur, _scope())), 200
+            return jsonify(visits_report(cur, _scope(), METRICS_EPOCH)), 200
     finally:
         conn.close()
 

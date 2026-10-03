@@ -1,6 +1,6 @@
 """Admin-only aggregate reports; anonymous session journeys contain no customer text."""
 
-def visits_report(cur, scope):
+def visits_report(cur, scope, signup_start="2026-07-06"):
     cur.execute(f'''WITH visits AS (
       SELECT visited_at::date AS day, count(*) views,
              count(DISTINCT COALESCE(NULLIF(device_id,''),ip)) visitors
@@ -12,19 +12,22 @@ def visits_report(cur, scope):
       SELECT LEAST((SELECT min(day) FROM visits),(SELECT min(day) FROM signups),CURRENT_DATE) start
     )
     SELECT to_char(d::date,'YYYY-MM-DD') AS day,coalesce(v.views,0) count,
-           coalesce(v.visitors,0) unique_visitors,coalesce(s.signups,0) signups,
-           CASE WHEN v.visitors>0 THEN round(100.0*coalesce(s.signups,0)/v.visitors,1) ELSE NULL END conversion_rate
+           coalesce(v.visitors,0) unique_visitors,
+           CASE WHEN d::date >= %s::date THEN coalesce(s.signups,0) ELSE NULL END signups,
+           CASE WHEN v.visitors>0 AND d::date >= %s::date THEN round(100.0*coalesce(s.signups,0)/v.visitors,1) ELSE NULL END conversion_rate
     FROM bounds,generate_series(start,CURRENT_DATE,interval '1 day') d
-    LEFT JOIN visits v ON v.day=d::date LEFT JOIN signups s ON s.day=d::date ORDER BY d''')
+    LEFT JOIN visits v ON v.day=d::date LEFT JOIN signups s ON s.day=d::date ORDER BY d''', (signup_start, signup_start))
     rows = [dict(r) for r in cur.fetchall()]
     cur.execute('''SELECT count(*) views,count(DISTINCT COALESCE(NULLIF(device_id,''),ip)) unique_visitors,
                    min(visited_at)::date first_tracked FROM analytics_page_visits''')
     totals = dict(cur.fetchone())
-    totals['signups'] = sum(r['signups'] for r in rows)
-    totals['conversion_rate'] = round(100*totals['signups']/totals['unique_visitors'],1) if totals['unique_visitors'] else None
+    totals['signups'] = sum(r['signups'] or 0 for r in rows)
+    # Full traffic history predates the account-metrics epoch. Do not divide
+    # a July signup cohort by March visitor totals. Daily ratios are aligned.
+    totals['conversion_rate'] = None
     peak = max(rows, key=lambda r:r['unique_visitors']) if rows else None
-    return dict(data=rows,totals=totals,peak=peak,timezone='UTC',
-                note='Verified signups / unique browsers is a period ratio, not a linked visitor cohort. Known bots and legacy time-update rows are excluded. Historical signups use account creation day; active time and linked journeys begin with this release.')
+    return dict(data=rows,totals=totals,peak=peak,timezone='UTC',signup_scope_start=signup_start,
+                note=f'Signup comparisons start {signup_start} (the current product cohort). Earlier signup values are unavailable, not zero. Verified signups / unique browsers is a period ratio, not a linked visitor cohort. Known bots and legacy time-update rows are excluded. Historical signups use account creation day; active time and linked journeys begin with this release.')
 
 def journey_report(cur, scope):
     cur.execute('''SELECT min(visited_at) started_at FROM page_visits WHERE analytics_id IS NOT NULL''')
