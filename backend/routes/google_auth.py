@@ -115,6 +115,7 @@ def google_callback():
             cur.execute("SELECT * FROM users WHERE email = %s", (email,))
             user = cur.fetchone()
 
+            is_signup = not user or user["is_verified"] == 0
             if user:
                 if user["is_verified"] == 0:
                     cur.execute(
@@ -172,8 +173,8 @@ def google_callback():
                 """)
             cur.execute("DELETE FROM google_auth_codes WHERE created_at < NOW() - INTERVAL '5 minutes'")
             cur.execute(
-                "INSERT INTO google_auth_codes (code, token, plan, email) VALUES (%s, %s, %s, %s)",
-                (one_time_code, token, plan, email)
+                "INSERT INTO google_auth_codes (code, token, plan, email, is_signup) VALUES (%s, %s, %s, %s, %s)",
+                (one_time_code, token, plan, email, is_signup)
             )
             conn.commit()
 
@@ -202,16 +203,19 @@ def google_exchange():
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT token, plan, email FROM google_auth_codes WHERE code = %s",
+                "DELETE FROM google_auth_codes WHERE code = %s AND created_at > NOW()-INTERVAL '5 minutes' RETURNING token, plan, email, is_signup",
                 (code,)
             )
             row = cur.fetchone()
             if not row:
                 return jsonify({"error": "Invalid or expired code"}), 400
 
-            cur.execute("DELETE FROM google_auth_codes WHERE code = %s", (code,))
             conn.commit()
 
+            if row.get("is_signup"):
+                from website_analytics import record_signup
+                claims = jwt.decode(row["token"], current_app.config["SECRET_KEY"], algorithms=["HS256"])
+                record_signup(int(claims["sub"]), data.get("analytics"))
             return jsonify({
                 "token": row["token"],
                 "plan":  row["plan"],

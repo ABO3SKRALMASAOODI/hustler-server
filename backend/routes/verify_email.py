@@ -93,7 +93,8 @@ def verify_code():
         return jsonify({'error': 'Invalid code'}), 400
 
     # ✅ Mark user verified & cleanup
-    cursor.execute("UPDATE users SET is_verified = 1 WHERE email = %s", (email,))
+    cursor.execute("UPDATE users SET is_verified = 1 WHERE email = %s AND is_verified = 0 RETURNING id", (email,))
+    first_verification = cursor.fetchone()
     cursor.execute("DELETE FROM email_codes WHERE email = %s", (email,))
     conn.commit()
     cursor.execute("SELECT id FROM users WHERE email = %s", (email,))
@@ -103,6 +104,9 @@ def verify_code():
     # Introductory discounts remain retired; verification only verifies.
 
     conn.close()
+    if first_verification:
+        from website_analytics import record_signup
+        record_signup(first_verification['id'], data.get('analytics'))
     return jsonify({'message': 'Email verified successfully'}), 200
 
 # (debug email-codes route removed — it let unauthenticated callers dump

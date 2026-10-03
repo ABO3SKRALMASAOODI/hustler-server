@@ -155,3 +155,36 @@ test('expired renders stop their container before reporting a non-retryable budg
     assert.equal(values.has('active'), false);
   }
 });
+
+test('unready image is destroyed before its shard is readmitted', async () => {
+ const {adapter,values}=fixture('starting');
+ let finish; adapter.destroy=()=>new Promise(resolve=>{finish=resolve;});
+ const retiring=adapter.retireUnreadyContainer(callId);
+ while(!finish) await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(values.get('active').callId,`reset:${callId}`);
+ assert.equal((await adapter.reserve('cf-new-customer',job.type,Date.now(),Date.now()+60000)).kind,'busy');
+ finish();await retiring;
+ assert.equal(values.has('active'),false);
+ assert.equal(values.has(`call:${callId}`),false);
+ assert.equal((await adapter.reserve(callId,job.type,Date.now(),Date.now()+60000)).kind,'reserved');
+});
+test('late readiness handler cannot destroy another accepted call', async () => {
+ for(const [state,owner] of [['running',callId],['done','cf-next-customer'],['starting','cf-next-customer']]) {
+  const {adapter,values}=fixture(state,owner);let destroyed=false;adapter.destroy=async()=>{destroyed=true;};
+  await adapter.retireUnreadyContainer(callId);
+  assert.equal(destroyed,false);assert.equal(values.get('active').callId,owner);
+ }
+});
+test('failed destruction retains the reset fence and permits bounded recovery', async()=>{
+ const {adapter,values}=fixture('starting');adapter.destroy=async()=>{throw new Error('provider unavailable');};
+ await adapter.retireUnreadyContainer(callId);
+ assert.equal(values.get('active').callId,`reset:${callId}`);
+ assert.equal(values.has(`call:${callId}`),false);
+ assert.equal((await adapter.reserve(callId,job.type,Date.now(),Date.now()+60000)).kind,'busy');
+});
+test('abandoned pre-run startup never schedules an unfenced stop', async()=>{
+ const {adapter,values}=fixture('starting');
+ values.get(`call:${callId}`).updatedAt=new Date(Date.now()-200000).toISOString();
+ const state=await adapter.expireStaleStart(callId);
+ assert.equal(state.status,'failed');assert.equal(values.has('active'),false);
+});

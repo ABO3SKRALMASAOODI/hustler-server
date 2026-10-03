@@ -108,3 +108,20 @@ def test_delivery_failure_is_visible_and_retry_recovers(signup,monkeypatch):
     assert client.post('/auth/register',json=data).status_code == 200
     assert db.execute('SELECT id FROM users').fetchone()[0] == account_id
     assert client.post('/verify/verify-code',json={'email':data['email'],'code':sent[-1][1]}).status_code == 200
+
+
+def test_signup_is_attributed_only_after_verification(signup, monkeypatch):
+    import website_analytics
+    client, db, sent=signup
+    events=[]
+    monkeypatch.setattr(website_analytics,'record_signup',lambda user_id,data:events.append((user_id,data)))
+    email='journey@example.com'
+    client.post('/auth/register',json={'email':email,'password':'local-test-password'})
+    assert not events
+    ids={'device_id':'d_test12345','session_id':'s_test12345'}
+    bad=client.post('/verify/verify-code',json={'email':email,'code':'wrong','analytics':ids})
+    assert bad.status_code==400 and not events
+    good=client.post('/verify/verify-code',json={'email':email,'code':sent[-1][1],'analytics':ids})
+    assert good.status_code==200 and len(events)==1 and events[0][1]==ids
+    client.post('/verify/verify-code',json={'email':email,'code':sent[-1][1],'analytics':ids})
+    assert len(events)==1
