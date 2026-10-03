@@ -42,10 +42,22 @@ extractor, or an authorized original; never bypass access controls. A proxy may
 support selection but must not silently become the production master. Resolve
 unacceptable source quality before multiplying the problem across a batch.
 
-Valmera's native export canvas is constrained by the original project source.
-An enlarged overlay or resized final cannot restore detail or raise that source's
-native export ceiling. Repair the source/project lineage and rebuild derived
-picture layers when necessary. Minimize avoidable resampling and re-encoding.
+Source detail and delivery resolution are separate. A user's acceptance of
+archival/soft footage applies to that footage alone; it does not waive sharp
+new headlines, captions, logos, watermarks, or the end card. Keep the delivery
+canvas at the destination's target (normally 1080×1920 for a portrait short).
+Valmera's final renderer composes source-based projects on an HD canvas before
+burning native captions and branding; previews remain smaller. This does not
+restore detail absent from the recording.
+
+Keep new text editable until delivery, or rasterize graphic assets at their
+actual delivery size. Never bake a headline into a 360p preparation master
+and then enlarge that master as the final. When a bounded preparation master
+is necessary, build its canvas at delivery resolution, scale the footage into
+its picture rectangle first, and draw the headline afterward at that resolution.
+Existing low-resolution baked text must be rebuilt from its text/design, not
+sharpened or upscaled. Preserve the original source and timing map. Minimize
+avoidable resampling and re-encoding.
 
 Record native crop coordinates and destination rectangles. Check each camera
 shot, B-roll asset, and graphic at its actual delivered size. Loosen an excessive
@@ -131,8 +143,19 @@ Every new production run writes `taste/quality-policy.json` and supplies it to
 
 Use appropriately demanding values and inspect the pixels; numbers cannot
 approve an aesthetically weak result. Do not lower thresholds merely to pass a
-failed source. Record explicit user exceptions. The policy is checksummed at
-initialization. Historic runs keep their original evidence and rules.
+failed source. Record explicit source-detail exceptions separately; never lower
+final dimensions or waive typography/branding checks because the user accepted
+soft footage. The policy is checksummed at initialization. Historic runs keep
+their original evidence and rules.
+
+For an explicitly accepted source limitation, link `source_quality_exception`
+from the evidence to a JSON record with `version: "source-quality-exception-v1"`,
+the exact `source_sha256`, genuine `native_dimensions`, verbatim
+`user_instruction`, and a measured accepted `max_picture_upscale`. This waives
+only that source's native-detail/crop limits, within the recorded enlargement.
+The helper still enforces delivery dimensions and reports accepted source
+limitations separately. Do not rewrite a checksummed run policy to excuse a
+small final or infer acceptance of blurry independent graphics.
 
 Each candidate's `quality_evidence` links a JSON file containing `source_path`,
 `source_sha256`, `acquisition_record`, `native_dimensions`,

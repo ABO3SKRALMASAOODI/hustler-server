@@ -22766,8 +22766,9 @@ TOOLS = {
                   "without them the crop is the dead-center window, which "
                   "chops an off-center speaker. For 'make it 9:16' on real "
                   "footage PREFER auto_reframe, which measures the subject "
-                  "and sets the focus for you. Never upscales beyond the "
-                  "source's pixels. focus_track replaces the complete per-shot track: "
+                  "and sets the focus for you. Finals compose on an HD canvas so new "
+                  "captions and branding stay sharp even on archival footage; this "
+                  "does not restore missing source detail. focus_track replaces the complete per-shot track: "
                   "[{t0,t1,x,y,mode}] in SOURCE seconds. Read get_edl(frame) first; "
                   "change only the desired spans. Tracks survive trims and speed changes.",
                   {"ratio": {"type": "string",

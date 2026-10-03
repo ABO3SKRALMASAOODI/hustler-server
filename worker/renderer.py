@@ -609,12 +609,24 @@ def _atempo_chain(factor):
     return ",".join(f"atempo={s:g}" for s in steps)
 
 
-def frame_dims(src_w, src_h, ratio):
+def frame_dims(src_w, src_h, ratio, *, delivery=False):
     """Output dims for a target aspect ratio, never exceeding the source's
     pixel budget: the output's short side is the source's short side, the
     long side derived from the ratio and capped at the source's long side
     (re-deriving the short side when capped). 1920x1080 at 9:16 -> 1080x1920;
     at 1:1 -> 1080x1080; at 4:5 -> 1080x1350."""
+    if delivery:
+        # Footage detail and the raster used for new type/branding are separate.
+        # Establish the delivery canvas BEFORE any captions or graphics burn.
+        # Keep larger originals; cap enlargement at the HD envelope so unusual
+        # aspect ratios cannot accidentally allocate an enormous frame.
+        native = frame_dims(src_w, src_h, ratio)
+        if ratio and ratio != "source":
+            target = frame_dims(1920, 1080, ratio)
+            if native[0] < target[0] and native[1] < target[1]:
+                return target
+        scale = min(1080 / min(native), 1920 / max(native))
+        return tuple(_even(n * scale) for n in native) if scale > 1 else native
     if not ratio or ratio == "source":
         return _even(src_w), _even(src_h)
     rw, rh = (int(x) for x in ratio.split(":"))
@@ -628,6 +640,20 @@ def frame_dims(src_w, src_h, ratio):
     if rh >= rw:                       # portrait or square target
         return _even(short_out), _even(long_out)
     return _even(long_out), _even(short_out)
+
+
+def delivery_canvas_current(asset, variant):
+    """Keep HD/history caches, but never reuse a pre-fix tiny final picture."""
+    if variant != "final":
+        return True
+    meta = (asset or {}).get("meta") or {}
+    if meta.get("delivery_v") == 1:
+        return True
+    width, height = (asset or {}).get("width"), (asset or {}).get("height")
+    # Unknown historical geometry stays compatible. The backend applies the
+    # same targeted gate only to assets with measured small dimensions.
+    return not (width and height and min(width, height) < 1080
+                and max(width, height) < 1920)
 
 
 def _needs_preview_downscale(H):
@@ -3627,8 +3653,10 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
 
     frame = edl.get("frame") or None
     W, H = frame_dims(info["width"], info["height"],
-                      (frame or {}).get("ratio"))
+                      (frame or {}).get("ratio"), delivery=not preview)
     frame_mode = (frame or {}).get("mode", "crop") if frame else None
+    if not preview and (W, H) != (info["width"], info["height"]) and not frame_mode:
+        frame_mode = "pad"
     frame_focus = ((frame.get("focus_x"), frame.get("focus_y"))
                    if frame and (frame.get("focus_x") is not None or
                                  frame.get("focus_y") is not None) else None)
@@ -4349,7 +4377,8 @@ def _composition_geometry(edl, src_local, preview):
         W, H = info["width"], info["height"]
     else:
         info = media.probe(src_local)
-        W, H = frame_dims(info["width"], info["height"], (edl.get("frame") or {}).get("ratio"))
+        W, H = frame_dims(info["width"], info["height"],
+                          (edl.get("frame") or {}).get("ratio"), delivery=not preview)
     fps = max(1., min(float(info.get("fps") or 30.), 60.))
     return preview_geometry(W, H, fps) if preview else (W, H, fps)
 
@@ -5118,7 +5147,9 @@ def _run_render_job(worker_db, job):
         _tail_out = Timeline(edl_row["json"].get("keep") or [],
                              edl_row["json"].get("inserts") or [],
                              edl_row["json"].get("speed")).out_duration
-        if fp_ok and outro_current(cached.get("meta"), variant) \
+        if fp_ok and (is_canvas_program(edl_row["json"]) or
+                      delivery_canvas_current(cached, variant)) \
+                and outro_current(cached.get("meta"), variant) \
                 and audio_peak_current(cached.get("meta"), edl_row["json"]) \
                 and shaping_current(cached.get("meta"), edl_row["json"]) \
                 and transitions_current(cached.get("meta"), edl_row["json"]) \
@@ -5399,6 +5430,8 @@ def _run_render_job(worker_db, job):
                     fp_now = _caption_index_fp(prev_row["json"], index) \
                         if prev_row else None
                     if prev_row \
+                            and (is_canvas_program(edl_row["json"]) or
+                                 delivery_canvas_current(prev_asset, variant)) \
                             and outro_current(pm, variant) \
                             and audio_peak_current(pm, prev_row["json"]) \
                             and shaping_current(pm, prev_row["json"]) \
@@ -5740,6 +5773,7 @@ def _run_render_job(worker_db, job):
                               if not proof_only and
                               outro_seconds(variant == "preview") else 0),
                   "gfx_shape_v": config.GFX_SHAPING_VERSION,
+                  "delivery_v": 1,
                   "trans_v": config.TRANSITION_VERSION,
                   "tail_v": config.MUSIC_TAIL_VERSION,
                   "audio_peak_v": 1,

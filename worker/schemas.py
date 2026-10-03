@@ -713,10 +713,11 @@ class FocusSpan(BaseModel):
 
 
 class Frame(BaseModel):
-    """Output frame. ratio 'source' keeps the original dimensions; anything
+    """Output frame. ratio 'source' keeps the original aspect ratio; anything
     else is achieved by crop (center-crop + scale), pad (fit + black bars) or
-    pad_blur (fit over a blurred scaled copy). Never upscales beyond the
-    source's pixel budget — see renderer.frame_dims.
+    pad_blur (fit over a blurred scaled copy). Final delivery uses at least an
+    HD canvas for new captions/graphics, without claiming extra source detail.
+    Previews retain the bounded source/proxy budget — see renderer.frame_dims.
 
     focus_x/focus_y (round 36): where the SUBJECT sits in the source frame,
     as fractions 0-1 — the crop window is centered on that point instead of

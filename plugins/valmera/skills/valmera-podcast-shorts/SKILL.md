@@ -142,6 +142,9 @@ High picture and caption quality is a standing requirement; font, palette,
 scale, phrase length, layout, and animation are chosen for each brief and story.
 Aim for premium execution and verify what that means in actual pixels and timing.
 Do not turn the last successful short or repair into a permanent template.
+Accepting low-quality footage never lowers the quality of independent text or
+branding. Keep an HD delivery canvas and render new graphics at that size;
+record source-only exceptions as described in `delivery-quality-v7.md`.
 
 Taste cannot be communicated reliably by adjectives alone. Accept any useful
 number of user-liked short-form examples plus optional disliked examples; do

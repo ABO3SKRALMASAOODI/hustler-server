@@ -618,8 +618,36 @@ def test_upscaled_source_cannot_pass_native_detail_gate(delivery_evidence):
     evidence["picture_regions"][0]["source_crop_native"] = [0, 0, 380, 285]
     result = run_state.measure_quality(policy, evidence)
     assert "native_source_below_minimum" in result["violations"]
-    assert "expected_canvas_exceeds_native_source" in result["violations"]
+    assert "expected_canvas_exceeds_native_source" not in result["violations"]
     assert "picture_region_0_exceeds_native_detail" in result["violations"]
+
+
+def test_source_exception_keeps_graphics_delivery_floor(tmp_path, delivery_evidence):
+    policy, evidence, probes = delivery_evidence
+    evidence["native_dimensions"] = [638, 360]
+    evidence["expected_final_dimensions"] = [1080, 1920]
+    evidence["picture_regions"] = [{"source_crop_native": [79, 0, 480, 360],
+                                  "output_rect": [0, 552, 1080, 810]}]
+    approval = tmp_path / "accepted-archival.json"
+    write_json(approval, {"version": "source-quality-exception-v1",
+                         "source_sha256": evidence["source_sha256"],
+                         "native_dimensions": [638, 360],
+                         "user_instruction": "Use this archival source.",
+                         "max_picture_upscale": 2.25})
+    evidence["source_quality_exception"] = str(approval)
+    result = run_state.measure_quality(policy, evidence)
+    assert result["verdict"] == "pass"
+    assert set(result["accepted_source_limitations"]) == {
+        "native_source_below_minimum", "picture_region_0_exceeds_native_detail"}
+    final = tmp_path / "tiny-final.mp4"
+    final.write_bytes(b"tiny archival final")
+    probes[str(final)] = [358, 638]
+    result = run_state.measure_quality(policy, evidence, final)
+    assert "final_below_minimum" in result["violations"]
+    assert "final_differs_from_expected" in result["violations"]
+    evidence["source_sha256"] = "another source"
+    with pytest.raises(run_state.StateError, match="checksum"):
+        run_state.measure_quality(policy, evidence)
 
 
 def test_oversized_crop_and_changed_source_are_rejected(delivery_evidence):

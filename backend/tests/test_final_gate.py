@@ -68,17 +68,20 @@ class _Cur:
     rewritten into something that no longer asks the same question."""
 
     def __init__(self, *, transition_versions=(), confirmed=(), paid=False,
-                 pipeline_emits=True):
+                 pipeline_emits=True, small_finals=()):
         self._tr = list(transition_versions)
         self._conf = list(confirmed)
         self._paid = paid
         self._emits = pipeline_emits
+        self._small_finals = small_finals
         self._rows = []
         self._one = None
 
     def execute(self, sql, params=None):
         if "bool_or" in sql:                  # the pipeline probe
             self._one = {"emits": self._emits}
+        elif "LEAST(a.width,a.height)" in sql:
+            self._rows = [{"id": a} for a in self._small_finals]
         elif "'transition'" in sql:
             self._rows = [{"version": v, "has_transition": True}
                           for v in self._tr]
@@ -109,6 +112,17 @@ def _gate(paid=True, **kw):
     """
     video._pipeline_probe.clear()
     return video._final_gate(_Cur(paid=paid, **kw), project_id=1, user_id=7)
+
+
+def test_undersized_final_is_replaced_even_if_old_worker_confirmed_it():
+    gate = _gate(small_finals=(100,), confirmed=(100,))
+    assert not gate(100, CURRENT, 3)
+    assert gate(101, dict(CURRENT, delivery_v=1), 3)
+
+
+def test_delivery_gate_waits_for_capable_pipeline():
+    gate = _gate(small_finals=(100,), confirmed=(100,), pipeline_emits=False)
+    assert gate(100, CURRENT, 3)
 
 
 # ── the rule has to be the worker's rule ────────────────────────────────────

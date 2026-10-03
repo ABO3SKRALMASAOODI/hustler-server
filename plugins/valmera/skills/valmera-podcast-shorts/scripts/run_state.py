@@ -237,8 +237,6 @@ def measure_quality(policy: dict, evidence: dict,
         violations.append("final_differs_from_expected")
     if min(original) < policy["min_native_short_edge"]:
         violations.append("native_source_below_minimum")
-    if min(expected) > min(original) or max(expected) > max(original):
-        violations.append("expected_canvas_exceeds_native_source")
     regions = evidence.get("picture_regions")
     if not isinstance(regions, list) or not regions:
         raise StateError("quality evidence needs picture_regions")
@@ -260,8 +258,30 @@ def measure_quality(policy: dict, evidence: dict,
             violations.append(f"picture_region_{index}_exceeds_native_detail")
         measured.append({"source_crop_native": crop, "output_rect": output,
                          "upscale": round(upscale, 6)})
+    accepted = []
+    exception_file = evidence.get("source_quality_exception")
+    if exception_file:
+        exception = read_object(absolute_existing(exception_file, "source exception"),
+                                "source exception")
+        if (exception.get("version") != "source-quality-exception-v1" or
+                exception.get("source_sha256") != digest or
+                exception.get("native_dimensions") != original or
+                not str(exception.get("user_instruction") or "").strip()):
+            raise StateError("source exception must bind the source and user instruction")
+        ceiling = finite_number(exception.get("max_picture_upscale"),
+                                "accepted picture upscale", minimum=1)
+        for violation in list(violations):
+            source_limit = violation == "native_source_below_minimum"
+            for i, region in enumerate(measured):
+                if violation == f"picture_region_{i}_exceeds_native_detail":
+                    source_limit = region["upscale"] <= ceiling + 1e-6
+            if source_limit:
+                violations.remove(violation)
+                accepted.append(violation)
     return {
         "verdict": "fail" if violations else "pass", "violations": violations,
+        "accepted_source_limitations": accepted,
+        "source_quality_exception": str(exception_file) if exception_file else None,
         "source_path": str(source), "source_sha256": digest,
         "source_dimensions": probed, "native_dimensions": original,
         "acquisition_record": str(provenance),
