@@ -10,7 +10,7 @@ ID = re.compile(r'^[a-zA-Z0-9_-]{8,64}$')
 BOT = re.compile(r'bot|crawler|spider|slurp|headless|notebooklm|vercel-screenshot', re.I)
 EVENTS = frozenset({
  'signup_cta', 'upload_cta', 'edit_cta', 'pricing_cta', 'google_start',
- 'email_start', 'register_submit', 'register_success', 'register_error',
+ 'email_start', 'email_code_start', 'email_code_error', 'email_code_success', 'register_submit', 'register_success', 'register_error',
  'login_submit', 'login_success', 'login_error', 'verify_submit',
  'verify_error', 'verify_success', 'resend_code', 'resend_error',
  'google_error', 'google_success', 'form_started', 'form_invalid',
