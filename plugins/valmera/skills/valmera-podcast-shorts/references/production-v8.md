@@ -72,7 +72,9 @@ intentional bars/cards/stills/silence are not corruption.
 
 Follow lane-specific structure from SKILL.md. The headline stays through its
 editorial program; other lanes needn't inherit that constraint. Montage must
-stop dialogue completely and visibly pay off its premise; action openings
+stop dialogue completely, include a recognizable featured-person anchor and
+visibly pay off its premise; an all-product/interface sequence fails this
+owner's montage brief even if it illustrates the words. Action openings
 show the actual recognizable subject doing something. No repeated B-roll
 moment within one short or incidental metadata subheadline.
 
