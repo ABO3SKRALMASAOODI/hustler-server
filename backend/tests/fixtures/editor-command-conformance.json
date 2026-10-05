@@ -483,7 +483,8 @@
         "mode": "crop",
         "focus_x": 0.4,
         "focus_y": null,
-        "focus_track": null
+        "focus_track": null,
+        "picture": null
       },
       "inserts": [],
       "voiceover": [],

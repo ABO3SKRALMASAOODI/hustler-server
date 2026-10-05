@@ -2083,6 +2083,11 @@ def events_premium(out_words, style=None, max_words=None,
                 act = ("" if motionless else
                        _word_anim_tags(word_anim, px)
                        if word_anim in WORD_ANIMS else _POP_IN)
+                # Explicit dynamic highlighting is independent of reveal,
+                # semantic size and entrance motion. Previously accepted
+                # dynamic=True silently lost its spoken-word colour here.
+                if s.get("dynamic"):
+                    act = rf"\1c{accent}" + act
                 segs.append({"ci": ci, "start": start, "end": end,
                              "last_i": i, "active_i": i, "active": act})
             else:  # karaoke: whole chunk visible, spoken word lights up

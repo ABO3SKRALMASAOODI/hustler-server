@@ -1415,18 +1415,23 @@ def assemble_offset(prev_local, parts, piece_paths, audio_path,
 def keyframe_times(path):
     r = subprocess.run(
         ["ffprobe", "-v", "error", "-select_streams", "v:0",
-         "-skip_frame", "nokey", "-show_entries", "frame=pts_time",
-         "-of", "csv=p=0", path], capture_output=True, text=True, timeout=120)
+         "-skip_frame", "nokey", "-show_entries",
+         "frame=pts_time,best_effort_timestamp_time",
+         "-of", "json", path], capture_output=True, text=True, timeout=120)
     if r.returncode != 0:
         raise media.MediaError(f"keyframe probe failed: {r.stderr[-200:]}")
     out = []
-    for tok in r.stdout.split():
-        tok = tok.strip().strip(",")          # csv writers append a trailing ,
-        if not tok or tok == "N/A":
-            continue
+    # Older ffprobe builds expose only best_effort_timestamp_time. Asking
+    # for pts_time alone silently returned no keys and forced every scoped
+    # revision to fall back to a full render. JSON also excludes side-data
+    # annotations that some CSV writers append to the timestamp cell.
+    for frame in json.loads(r.stdout).get("frames", []):
+        tok = frame.get("pts_time", frame.get("best_effort_timestamp_time"))
         try:
-            out.append(float(tok))
-        except ValueError:
+            value = float(tok)
+            if math.isfinite(value):
+                out.append(value)
+        except (ValueError, TypeError):
             continue
     return sorted(out)
 

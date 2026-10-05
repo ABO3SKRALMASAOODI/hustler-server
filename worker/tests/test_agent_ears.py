@@ -558,6 +558,10 @@ def test_later_turn_can_hear_uploaded_audio_by_persistent_storage_key(
     assert result.startswith("BOUNDED ACTUAL-AUDIO REVIEW")
     assert "interview.m4a 7.0-13.0s" in result
     assert heard["kwargs"]["purpose"] == "audio_asset_review"
+    assert heard["labels"] == ["interview.m4a 7.0-13.0s"]
+    assert "overlapping ranges intentionally repeat" in heard["prompt"]
+    assert "sample edge alone does not prove a clipped word" in heard["prompt"]
+    assert "otherwise say no change is indicated" in heard["prompt"]
     assert ctx.editing_metrics == {
         "audio_asset_reviews": 1, "audio_review_clips": 1}
     monkeypatch.setattr(llm, "ask_audio", lambda *_a, **_kw: None)

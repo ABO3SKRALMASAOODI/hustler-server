@@ -1627,7 +1627,7 @@ def _deliver_frames(ctx, frames, labels, question, subject_line, provenance=None
 
 def _fit_and_zoom_frame(workdir, idx, fp, t, canvas, mode, focus, zooms,
                         prog_end, is_main, crop=None, fit=None,
-                        output_size=None):
+                        output_size=None, picture=None):
     """The round-72 geometry step of _look_at_output: one decoded frame ->
     what the RENDER shows at that output second. Fit first (the same
     cover-crop / letterbox _normalize_video applies, mirrored by
@@ -1662,8 +1662,11 @@ def _fit_and_zoom_frame(workdir, idx, fp, t, canvas, mode, focus, zooms,
         else:
             ow = 640
             oh = max(2, round(ow * canvas[1] / canvas[0]))
+        px, py, pw, ph = renderer.picture_pixels(ow, oh, picture)
         kind, x0, y0, x1, y1 = renderer.fit_fractions(
-            w, h, canvas[0], canvas[1], mode, focus if is_main else None)
+            w, h, pw, ph, mode, focus if is_main else None)
+        full_size = (ow, oh)
+        ow, oh = pw, ph
         if x1 - x0 < 0.999 or y1 - y0 < 0.999:
             if kind == "crop":
                 img = img.crop((round(x0 * w), round(y0 * h),
@@ -1672,7 +1675,7 @@ def _fit_and_zoom_frame(workdir, idx, fp, t, canvas, mode, focus, zooms,
             else:
                 if (mode or "crop") == "pad_blur":
                     _bk, bx0, by0, bx1, by1 = renderer.fit_fractions(
-                        w, h, canvas[0], canvas[1], "crop", None)
+                        w, h, pw, ph, "crop", None)
                     base = img.crop((round(bx0 * w), round(by0 * h),
                                      round(bx1 * w), round(by1 * h))) \
                         .resize((ow, oh), Image.LANCZOS) \
@@ -1687,6 +1690,13 @@ def _fit_and_zoom_frame(workdir, idx, fp, t, canvas, mode, focus, zooms,
             changed = True
         if output_size and img.size != (ow, oh):
             img = img.resize((ow, oh), Image.LANCZOS)
+            changed = True
+        if picture:
+            if img.size != (pw, ph):
+                img = img.resize((pw, ph), Image.LANCZOS)
+            base = Image.new("RGB", full_size, (0, 0, 0))
+            base.paste(img, (px, py))
+            img = base
             changed = True
     suffix = ""
     if z > 1.005:
@@ -1853,7 +1863,8 @@ def _look_at_output(ctx, output_times, question):
             fp, sfx = _fit_and_zoom_frame(
                 ctx.workdir, i, fp, t, canvas, gmode, gfocus, fxz,
                 prog_end, blk["kind"] == "footage",
-                crop=blk.get("crop"), fit=blk.get("fit"))
+                crop=blk.get("crop"), fit=blk.get("fit"),
+                picture=frame_cfg.get("picture"))
         except Exception as ex:
             print(f"[look] output geometry skipped ({ex})", flush=True)
             sfx = ""
@@ -3117,23 +3128,20 @@ def _source_box_to_output(ctx, edl, source_t, box):
         return None
     frame = edl.get("frame") or {}
     W, H = renderer.frame_dims(sw, sh, frame.get("ratio") or "source")
-    kind, fx0, fy0, fx1, fy1 = renderer.fit_fractions(
+    src, dest = renderer.picture_mapping(
         sw, sh, W, H, _frame_mode_at_source(edl, source_t),
-        _frame_focus_at_source(edl, source_t))
+        _frame_focus_at_source(edl, source_t), frame.get("picture"))
+    fx0, fy0, fx1, fy1 = src
+    dx0, dy0, dx1, dy1 = dest
     x0, y0, x1, y1 = (float(v) for v in box)
-    if kind == "crop":
-        x0, y0, x1, y1 = (max(x0, fx0), max(y0, fy0),
-                          min(x1, fx1), min(y1, fy1))
-        if x1 <= x0 or y1 <= y0:
-            return None
-        return [round((x0 - fx0) / max(fx1 - fx0, 1e-9), 4),
-                round((y0 - fy0) / max(fy1 - fy0, 1e-9), 4),
-                round((x1 - fx0) / max(fx1 - fx0, 1e-9), 4),
-                round((y1 - fy0) / max(fy1 - fy0, 1e-9), 4)]
-    return [round(fx0 + x0 * (fx1 - fx0), 4),
-            round(fy0 + y0 * (fy1 - fy0), 4),
-            round(fx0 + x1 * (fx1 - fx0), 4),
-            round(fy0 + y1 * (fy1 - fy0), 4)]
+    x0, y0, x1, y1 = (max(x0, fx0), max(y0, fy0),
+                      min(x1, fx1), min(y1, fy1))
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return [round(dx0 + (x0-fx0)/(fx1-fx0)*(dx1-dx0), 4),
+            round(dy0 + (y0-fy0)/(fy1-fy0)*(dy1-dy0), 4),
+            round(dx0 + (x1-fx0)/(fx1-fx0)*(dx1-dx0), 4),
+            round(dy0 + (y1-fy0)/(fy1-fy0)*(dy1-dy0), 4)]
 
 
 _CAPTION_ZONES = {
@@ -3198,10 +3206,10 @@ def _caption_picture_bounds(ctx, edl, source_t):
         return (0.0, 1.0)
     frame = edl.get("frame") or {}
     W, H = renderer.frame_dims(sw, sh, frame.get("ratio") or "source")
-    kind, _x0, y0, _x1, y1 = renderer.fit_fractions(
+    _src, dest = renderer.picture_mapping(
         sw, sh, W, H, _frame_mode_at_source(edl, source_t),
-        _frame_focus_at_source(edl, source_t))
-    return (float(y0), float(y1)) if kind == "pad" else (0.0, 1.0)
+        _frame_focus_at_source(edl, source_t), frame.get("picture"))
+    return float(dest[1]), float(dest[3])
 
 
 def _caption_zones_for_bounds(bounds):
@@ -3725,7 +3733,8 @@ def _caption_proof_base_frame(ctx, edl, moment, play_res):
     frame, _suffix = _fit_and_zoom_frame(
         ctx.workdir, "caption_cast", raw, moment["out_t"], play_res,
         gmode, gfocus, (edl.get("effects") or {}).get("zooms") or [],
-        program_duration(edl), True, output_size=play_res)
+        program_duration(edl), True, output_size=play_res,
+        picture=frame_cfg.get("picture"))
     return frame
 
 
@@ -6787,8 +6796,10 @@ def set_volume(ctx, start, end, gain_db):
 
 
 def set_frame(ctx, ratio, mode="crop", focus_x=None, focus_y=None,
-              _measured=False, focus_track=None):
+              _measured=False, focus_track=None, picture=None):
     payload = {"ratio": str(ratio), "mode": str(mode or "crop")}
+    if picture is not None:
+        payload["picture"] = picture
     if focus_track is not None:
         payload["focus_track"] = focus_track
     for k, v in (("focus_x", focus_x), ("focus_y", focus_y)):
@@ -6808,7 +6819,7 @@ def set_frame(ctx, ratio, mode="crop", focus_x=None, focus_y=None,
                 'non-overlapping source spans t0<t1 and x/y from 0 to 1. '
                 + str(exc)[:220])
     edl = dict(ctx.latest_edl()["json"])
-    if frame.ratio == "source":
+    if frame.ratio == "source" and frame.picture is None:
         edl["frame"] = None
         return ctx.write_edl(edl, "output frame back to the source ratio")
     edl["frame"] = frame.model_dump()
@@ -6823,7 +6834,7 @@ def set_frame(ctx, ratio, mode="crop", focus_x=None, focus_y=None,
     if (res.startswith("EDL v") and frame.mode == "crop"
             and frame.focus_x is None and frame.focus_y is None
             and frame.ratio in ("9:16", "1:1", "4:5")
-            and ctx.has_main_video):
+            and ctx.has_main_video and not frame.picture):
         res += ("\nNote: this is a CENTER crop — if the subject is not "
                 "dead-center it will sit off-frame or be cut. Call "
                 "auto_reframe to aim the crop at the subject, or pass "
@@ -6851,7 +6862,7 @@ def set_frame(ctx, ratio, mode="crop", focus_x=None, focus_y=None,
         except (TypeError, ValueError, AttributeError):
             pass
     if (res.startswith("EDL v") and frame.mode in ("pad", "pad_blur")
-            and frame.ratio in ("9:16", "1:1", "4:5")):
+            and frame.ratio in ("9:16", "1:1", "4:5") and not frame.picture):
         res += ("\nNote: pad/pad_blur LETTERBOXES the picture. If the user "
                 "asked for a Short / TikTok / Reel / crop / 9:16 fill, they "
                 "wanted the footage to FILL the phone — call set_frame "
@@ -10821,9 +10832,10 @@ def add_overlay(ctx, asset_key, start, duration_s=None, x=0.5, y=0.5,
         fitv = str(fit).strip().lower()
         if fitv in ("", "none", "pip"):
             fitv = None
-        elif fitv != "cover":
+        elif fitv not in ("cover", "picture"):
             return ("REJECTED: fit must be 'cover' (full-frame b-roll "
-                    "cutaway) or omitted (width-fraction PIP).")
+                    "cutaway), 'picture' (the frame's picture rectangle) "
+                    "or omitted (width-fraction PIP).")
     xv, xerr = _parse_anim_float(x if x is not None else 0.5, "x")
     if xerr:
         return xerr
@@ -10863,7 +10875,8 @@ def add_overlay(ctx, asset_key, start, duration_s=None, x=0.5, y=0.5,
     moving = isinstance(xv, list) or isinstance(yv, list)
     pos = ("a keyframed drift" if moving
            else f"center ({xv:g}, {yv:g})")
-    what = (f"FULL-FRAME b-roll cover" if fitv == "cover"
+    what = ("FULL-FRAME b-roll cover" if fitv == "cover"
+            else "PICTURE-RECTANGLE b-roll cover" if fitv == "picture"
             else f"{sc:g}x frame width at {pos}")
     extra = clamp_note
     if dropped_anim:
@@ -10873,7 +10886,7 @@ def add_overlay(ctx, asset_key, start, duration_s=None, x=0.5, y=0.5,
              f"(program time), {what} [{item['id']}]{extra}")
     if res.startswith("EDL v"):
         notes = []
-        if fitv == "cover":
+        if fitv in ("cover", "picture"):
             notes.append("the picture fully switches to this asset for the "
                          "window while the program's AUDIO (speech, music) "
                          "keeps playing — the b-roll cutaway")
@@ -10934,7 +10947,7 @@ def set_overlay_motion(ctx, id, motion, motion_motif=None):
     motif, motif_err = _motion_motif_value(ctx, motion_motif)
     if motif_err:
         return motif_err
-    ignored = {"x", "y", "scale"} & set(motion) if hit.get("fit") == "cover" \
+    ignored = {"x", "y", "scale"} & set(motion) if hit.get("fit") in ("cover", "picture") \
         else set()
     if ignored:
         return ("REJECTED: full-frame cover overlays ignore "
@@ -12359,12 +12372,22 @@ def move_overlay(ctx, id, start=None, x=None, y=None, scale=None):
 def add_text(ctx, text, start, end, template="title", x=None, y=None,
              size_scale=None, color=None, accent_color=None, font=None,
              entrance=None, exit=None, uppercase=None, box=None, motion=None,
-             motion_motif=None):
+             motion_motif=None, mute_captions=True, outline_width=None,
+             shadow=None):
     """Burn a designed text template over a program-time window — titles,
     lower thirds, callouts, big numbers, quotes, chapter markers."""
     t = (text or "").strip()
     if not t:
         return "REJECTED: text is empty."
+    if not isinstance(mute_captions, bool):
+        return "REJECTED: mute_captions must be true or false."
+    for name, value in (("outline_width", outline_width), ("shadow", shadow)):
+        if value is not None:
+            try:
+                if not 0 <= float(value) <= 12:
+                    raise ValueError()
+            except (TypeError, ValueError):
+                return f"REJECTED: {name} must be between 0 and 12."
     tpl = (template or "title").strip().lower()
     if tpl not in TEXT_TEMPLATES:
         return (f"REJECTED: template must be one of "
@@ -12480,13 +12503,15 @@ def add_text(ctx, text, start, end, template="title", x=None, y=None,
             "entrance": entrance, "exit": exit,
             "uppercase": bool(uppercase) if uppercase is not None else None,
             "box": bool(box) if box is not None else None,
-            "motion": parsed_motion, "mute_captions": True}
+            "motion": parsed_motion, "mute_captions": mute_captions,
+            "outline_width": float(outline_width) if outline_width is not None else None,
+            "shadow": float(shadow) if shadow is not None else None}
     if motif:
         item["motion_motif"] = motif
     texts.append(item)
     edl["texts"] = texts
     muted_note = ""
-    if edl.get("captions"):
+    if edl.get("captions") and mute_captions:
         muted_note = ("\nTranscript captions are muted under this designed "
                       "text window by the text item itself, so the mute moves "
                       "or disappears with it and two word layers never stack.")
@@ -12792,7 +12817,8 @@ def _matte_geometry(ctx, edl):
     # pad modes must pad with BLACK here, not transparent: this is a mask, and
     # black means "not the subject" — which is exactly right for the letterbox
     # bars, where there is no picture at all.
-    return renderer.frame_fit_filter(mode, w, h, focus, pad_color="black"), w, h
+    return renderer.frame_fit_filter(mode, w, h, focus, pad_color="black",
+                                     picture=fr.get("picture")), w, h
 
 
 def add_text_behind(ctx, text, at_output_s, duration_s=None, template="title",
@@ -18677,7 +18703,7 @@ def _independent_preview_review(ctx, result, plan=None,
     # stock from visible evidence instead of reviewing only fit/crop damage.
     broll = []
     for ov in (edl.get("overlays") or [])[:16]:
-        if ov.get("fit") != "cover" or not ov.get("asset_key"):
+        if ov.get("fit") not in ("cover", "picture") or not ov.get("asset_key"):
             continue
         asset = None
         try:
@@ -20487,13 +20513,19 @@ def review_audio(ctx, asset_key=None, times=None, output_times=None,
     prompt = (
         "You are a senior music editor and audio post-production mixer. "
         "Listen to the actual labeled clip(s) and answer the specific question "
-        "first. For a transcription question, return the literal audible words "
+        "first. These are bounded review samples, not a newly assembled edit. "
+        "Use their labeled time ranges: overlapping ranges intentionally repeat "
+        "the same source audio, and gaps omit unreviewed audio. Neither is an "
+        "editing defect. A sample edge alone does not prove a clipped word in "
+        "the underlying file. Never claim to have heard outside these ranges. "
+        "For a transcription question, return the literal audible words "
         "for each CLIP, preserving repetitions and fillers; mark unclear words "
         "instead of guessing. Do not return timestamps without the words. "
         "For other questions, describe only what is audible: "
         "speech/music/SFX character, energy, recording quality, intelligibility, "
         "masking, harshness/noise, and whether it supports the stated editing "
-        "purpose. Give one concrete selection, timing or mix recommendation. "
+        "purpose. Recommend a concrete change only when supported by an audible "
+        "defect inside a sample; otherwise say no change is indicated. "
         "Do not infer from filenames and do not relabel an authored music track "
         "as voiceover. Purpose: " + str(question or "judge professional fit")[:2000]
         + ". Direction: " + (direction or "not specified"))
@@ -20546,21 +20578,15 @@ def _source_point_to_output(ctx, edl, source_t, point):
         return None
     frame = edl.get("frame") or {}
     W, H = renderer.frame_dims(sw, sh, frame.get("ratio") or "source")
-    fit = renderer.fit_fractions(
+    src, dest = renderer.picture_mapping(
         sw, sh, W, H, _frame_mode_at_source(edl, source_t),
-        _frame_focus_at_source(edl, source_t))
-    kind, x0, y0, x1, y1 = fit
+        _frame_focus_at_source(edl, source_t), frame.get("picture"))
+    x0, y0, x1, y1 = src
     x, y = point
-    if kind == "crop":
-        # The point may genuinely have been cropped out. A professional edit
-        # does not zoom toward an invisible subject and hope it comes back.
-        if not (x0 <= x <= x1 and y0 <= y <= y1):
-            return None
-        x = (x - x0) / max(x1 - x0, 1e-9)
-        y = (y - y0) / max(y1 - y0, 1e-9)
-    else:
-        x = x0 + x * (x1 - x0)
-        y = y0 + y * (y1 - y0)
+    if not (x0 <= x <= x1 and y0 <= y <= y1):
+        return None
+    x = dest[0] + (x-x0)/(x1-x0)*(dest[2]-dest[0])
+    y = dest[1] + (y-y0)/(y1-y0)*(dest[3]-dest[1])
     return round(min(max(x, 0.0), 1.0), 3), \
         round(min(max(y, 0.0), 1.0), 3)
 
@@ -22774,7 +22800,12 @@ TOOLS = {
                   "captions and branding stay sharp even on archival footage; this "
                   "does not restore missing source detail. focus_track replaces the complete per-shot track: "
                   "[{t0,t1,x,y,mode}] in SOURCE seconds. Read get_edl(frame) first; "
-                  "change only the desired spans. Tracks survive trims and speed changes.",
+                  "change only the desired spans. Tracks survive trims and speed changes. "
+                  "picture=[left,top,right,bottom] optionally places the main picture "
+                  "and inserts inside a normalized output rectangle on black. Crop/fit "
+                  "and focus apply inside it, preserving native audio/transcript timing. "
+                  "For a 4:3 picture on 9:16: picture=[0,0.2890625,1,0.7109375]. "
+                  "Captions, headlines and branding stay at the full delivery resolution.",
                   {"ratio": {"type": "string",
                              "enum": ["source", "16:9", "9:16", "1:1",
                                       "4:5"]},
@@ -22782,6 +22813,8 @@ TOOLS = {
                             "enum": ["crop", "pad", "pad_blur"]},
                    "focus_x": {"type": "number"},
                    "focus_y": {"type": "number"},
+                   "picture": {"type": "array", "items": {"type": "number"},
+                               "minItems": 4, "maxItems": 4},
                    "focus_track": {"type": "array", "items": {"type": "object",
                      "properties": {"t0": {"type": "number"}, "t1": {"type": "number"},
                        "x": {"type": "number"}, "y": {"type": "number"},
@@ -23552,7 +23585,8 @@ TOOLS = {
     "add_overlay": (add_overlay, "Draw an image or video clip OVER the "
                     "program picture for a window of PROGRAM time — "
                     "picture-in-picture, a corner logo, or fit='cover' for "
-                    "a FULL-FRAME B-ROLL CUTAWAY: the picture switches to "
+                    "a FULL-FRAME B-ROLL CUTAWAY. fit='picture' fills only "
+                    "frame.picture, preserving portrait bars and headline space. The picture switches to "
                     "the asset while the program's audio (the speaker, the "
                     "music) keeps playing — THE way to show what the "
                     "speaker is talking about without touching the timing. "
@@ -23582,7 +23616,7 @@ TOOLS = {
                      "x": {"type": ["number", "array"]},
                      "y": {"type": ["number", "array"]},
                      "scale": {"type": "number"},
-                     "fit": {"type": "string", "enum": ["cover"]},
+                     "fit": {"type": "string", "enum": ["cover", "picture"]},
                      "opacity": {"type": "number"},
                      "entrance": {"type": "string",
                                   "enum": list(OVERLAY_ANIMS)},
@@ -23701,6 +23735,8 @@ TOOLS = {
                  "the template's position (fractions of the frame); "
                  "size_scale 0.4-3.0; color/accent_color '#RRGGBB'; font "
                  "from the bundled families (exact name, e.g. 'Anton'); "
+                 "outline_width/shadow 0-12 override template edges (0 for "
+                 "clean flat type on a graphic panel); "
                  "entrance/exit: 'none' (INSTANT — the text is simply there "
                  "at frame one and simply gone at the end, no animation at "
                  "all; use when the user wants no effect), fade, pop, "
@@ -23716,7 +23752,10 @@ TOOLS = {
                  "stay with add_captions. This text item owns caption "
                  "suppression for its live window, so enabling captions "
                  "before or after cannot stack two word layers and removing "
-                 "the text restores those captions automatically.",
+                 "the text restores those captions automatically. Pass "
+                 "mute_captions=false for an independent headline or label in a "
+                 "separate visual area so dialogue captions remain visible. "
+                 "Inspect their geometry together.",
                  {"text": {"type": "string"},
                   "start": {"type": "number"},
                   "end": {"type": "number"},
@@ -23734,6 +23773,9 @@ TOOLS = {
                                     if a != "typewriter"]},
                   "uppercase": {"type": "boolean"},
                   "box": {"type": "boolean"},
+                  "mute_captions": {"type": "boolean"},
+                  "outline_width": {"type": "number", "minimum": 0, "maximum": 12},
+                  "shadow": {"type": "number", "minimum": 0, "maximum": 12},
                   "motion": _TEXT_MOTION_PROP,
                   "motion_motif": _MOTION_MOTIF_PROP}),
     "add_vector_graphic": (

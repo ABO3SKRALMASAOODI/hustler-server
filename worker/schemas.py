@@ -736,6 +736,22 @@ class Frame(BaseModel):
     focus_x: Optional[float] = None
     focus_y: Optional[float] = None
     focus_track: Optional[List[FocusSpan]] = None
+    # Optional destination rectangle on the output canvas, in fractions.
+    # Crop/fit and source focus apply INSIDE it; the exterior stays black.
+    # This preserves the source/transcript clock for portrait editorial layouts.
+    picture: Optional[List[float]] = None
+
+    @field_validator("picture")
+    @classmethod
+    def _picture_rectangle(cls, value):
+        if value is None:
+            return None
+        if (len(value) != 4 or not all(math.isfinite(v) for v in value)
+                or not 0 <= value[0] < value[2] <= 1
+                or not 0 <= value[1] < value[3] <= 1
+                or value[2] - value[0] < .1 or value[3] - value[1] < .1):
+            raise ValueError("picture must be [left, top, right, bottom] within 0..1, at least 10% per axis")
+        return list(value)
 
     @field_validator("focus_track")
     @classmethod
@@ -1418,7 +1434,7 @@ class OverlayItem(BaseModel):
     # picture switches to the overlay while the program's audio keeps
     # playing. None = the legacy width-fraction PIP and is dropped from
     # signatures, so stored EDLs render byte-identically.
-    fit: Optional[Literal["cover"]] = None
+    fit: Optional[Literal["cover", "picture"]] = None
     opacity: Optional[AnimFloat] = None  # 0-1; None = fully opaque
     rotation: Optional[AnimFloat] = None # degrees; curves may cross 0/360
     source_start_s: Optional[float] = None   # video overlays: seek into clip
@@ -1489,6 +1505,8 @@ class TextItem(BaseModel):
     size_scale: Optional[float] = None      # 0.4-3.0 on the template's size
     color: Optional[str] = None             # #RRGGBB
     accent_color: Optional[str] = None
+    outline_width: Optional[float] = Field(default=None, ge=0, le=12)
+    shadow: Optional[float] = Field(default=None, ge=0, le=12)
     font: Optional[Literal["Inter Display Black", "Inter Display ExtraBold",
                            "Inter Display Bold", "Anton", "Bebas Neue",
                            "Archivo Black", "Poppins Black", "Syne ExtraBold",
