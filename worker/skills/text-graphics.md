@@ -10,6 +10,12 @@ Inspect exact words/timing, clear space, face/UI geometry, target objects, capti
 
 ## Strong treatment patterns
 
+SPEECH-CUED TYPE SCENES: `set_typography_scene` composes fixed-position,
+mixed-font rows in one revision. See `premium-composition`. It reserves the
+complete phrase's space, then reveals runs at real program cues without
+moving previous words. Use it for selective serif contrast and type beside a
+subject, not as a mandate to replace every subtitle with a title.
+
 MEASURED EDITORIAL COMPOSITIONS: `set_editorial_graphic` makes a statement,
 comparison, metric, quote, chapter or label as native editable layers in one
 revision. Read `premium-composition` for selection and picture relationships.

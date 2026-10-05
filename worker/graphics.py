@@ -403,6 +403,9 @@ def _compile_item(tx, out_dur, play_res, y_shift=0.0, enforce_min=True,
     fx, fy = W / BASE_PLAY_RES[0], H / BASE_PLAY_RES[1]
     f = max(fx, fy)
     tpl = TEMPLATES.get(tx.get("template") or "title") or TEMPLATES["title"]
+    measured_type = tx.get("text_align") is not None
+    if measured_type:
+        tpl = {**tpl, "align": tx["text_align"]}
 
     # ── time window: clamp into [0, out_dur], floor at GFX_MIN_EVENT_S ──
     start = max(0.0, float(tx.get("start") or 0.0))
@@ -430,6 +433,8 @@ def _compile_item(tx, out_dur, play_res, y_shift=0.0, enforce_min=True,
     # any wrapping so both decks and every line agree on one answer.
     shaped = needs_shaping(tx.get("text") or "")
     sp = 0.0 if shaped else round(tpl["spacing"] * f, 1)
+    if tx.get("tracking") is not None and not shaped:
+        sp = float(tx["tracking"]) * f
     upper = tx.get("uppercase")
     upper = tpl["uppercase"] if upper is None else bool(upper)
     accent = _inline_hl(tx.get("accent_color") or DEFAULT_HIGHLIGHT)
@@ -445,6 +450,7 @@ def _compile_item(tx, out_dur, play_res, y_shift=0.0, enforce_min=True,
     else:
         text_c = _inline_hl("#FFFFFF")
     font = tx.get("font") or tpl["font"]
+    italic = tx["italic"] if tx.get("italic") is not None else tpl.get("italic", False)
     entrance = tx.get("entrance") or tpl["entrance"]
     exit_a = tx.get("exit") or tpl["exit"]
     typewriter = entrance == "typewriter"
@@ -479,6 +485,8 @@ def _compile_item(tx, out_dur, play_res, y_shift=0.0, enforce_min=True,
     y_frac = tpl["y"] if y_frac is None else min(max(float(y_frac), 0.0), 1.0)
     if tpl["align"] == "left":
         usable = max(1.0, W - x_frac * W - edge_x)
+    elif tpl["align"] == "right":
+        usable = max(1.0, x_frac * W - edge_x)
     else:
         usable = max(1.0, 2 * min(x_frac * W, W - x_frac * W) - 2 * edge_x)
     if tx.get("max_width") is not None:
@@ -488,12 +496,18 @@ def _compile_item(tx, out_dur, play_res, y_shift=0.0, enforce_min=True,
         return max(4, int(usable / (tpl["char_w"] * p + s)))
 
     main_lines = _wrap_hard(main_text, budget(px, sp))
+    if measured_type:
+        from type_metrics import width as type_width, wrap as type_wrap
+        main_lines = type_wrap(main_text, font, px, usable, sp, italic)
     if sec_text is not None and d2:
         sec_lines = _wrap_hard(sec_text, budget(px2, sp2))
 
     # ── measure, then shrink-to-fit instead of clipping or truncating ──
     def measure():
         widths = [len(l) * (tpl["char_w"] * px + sp) for l in main_lines]
+        if measured_type:
+            widths = [type_width(l,font,px,sp,italic)+2*f
+                      for l in main_lines]
         widths += [len(l) * (tpl["char_w"] * px2 + sp2) for l in sec_lines]
         bh = len(main_lines) * tpl["leading"] * px
         if sec_lines:
@@ -520,6 +534,10 @@ def _compile_item(tx, out_dur, play_res, y_shift=0.0, enforce_min=True,
                        max(edge_x, W - edge_x - max_w)))
         ay = round(min(max(cy - block_h / 2, edge_y),
                        max(edge_y, H - edge_y - block_h)))
+    elif tpl["align"] == "right":
+        an = 6
+        ax = round(min(max(x_frac * W, edge_x + max_w), W-edge_x))
+        ay = round(cy)
     else:
         an = 5
         lo, hi = edge_x + max_w / 2, W - edge_x - max_w / 2
@@ -566,7 +584,7 @@ def _compile_item(tx, out_dur, play_res, y_shift=0.0, enforce_min=True,
     shadow = tx.get("shadow")
     head += rf"\bord{round((tpl['outline'] if outline is None else outline) * f, 1)}"
     head += rf"\shad{round((tpl['shadow'] if shadow is None else shadow) * f, 1)}"
-    if tpl.get("italic"):
+    if italic:
         head += r"\i1"
     if box:
         bx, by = max(2, round(0.22 * px)), max(2, round(0.13 * px))
@@ -618,8 +636,9 @@ def _compile_item(tx, out_dur, play_res, y_shift=0.0, enforce_min=True,
     # The measured box, in output pixels. \an5 anchors the block CENTER and
     # \an7 its top-left corner, so both are normalized to one band here —
     # the stacker must not have to know which anchor a template uses.
-    top = (ay - block_h / 2.0) if an == 5 else float(ay)
-    left = (ax - max_w / 2.0) if an == 5 else float(ax)
+    top = (ay - block_h / 2.0) if an in (5,6) else float(ay)
+    left = ((ax - max_w / 2.0) if an == 5 else
+            ax - max_w if an == 6 else float(ax))
     return {"start": start, "end": end, "font": font,
             "text": "{" + head + "}" + r"\N".join(out_lines),
             "top": top, "bottom": top + block_h,

@@ -1,5 +1,9 @@
 # Current premium design direction
 
+Also read [the eleven additional reels](additional-reels.md) for the latest
+fixed-slot phrase builds, selective serif contrast, depth type and evidence
+gallery observations. They supplement the following seventeen references.
+
 The owner supplied 17 reference reels in
 `/Users/masaoodi/Downloads/Valmera Instagram Reference Reels/` on October 5.
 Use the folder as viewable evidence, not material to copy into exports.
@@ -66,6 +70,10 @@ Rounded picture treatment is allowed; do not hide the headline behind it.
 It presents a complete phrase with spoken-word tint and semantic size emphasis,
 without the isolated connector states or one-word-per-line default of stacked
 reveal captions. Still inspect the actual words, sizes and timing.
+Karaoke fade now eases tint instead of hiding each already-visible word.
+For designed typography outside ordinary subtitles, `set_typography_scene`
+reveals measured mixed-font runs without moving previous words. It creates
+editable text, supports atomic recipes and owns only its live caption mutes.
 `kinetic`, `quiet` and `editorial` remain available. Choose a recipe then inspect
 the actual phrases; no helper can choose a story or certify taste. Prefer live
 `set_editorial_graphic` for measured panels over the earlier loose local card

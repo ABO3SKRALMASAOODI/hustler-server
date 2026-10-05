@@ -10,6 +10,13 @@ Inspect complete surviving transcript coverage, script/font fallback, speech rhy
 
 ## Strong treatment patterns
 
+For a complete phrase with restrained spoken-word tint, use `composed`.
+In karaoke modes `animation=fade` changes tint without hiding or resizing
+already visible words; `none` makes the tint immediate. Inspect consecutive
+word boundaries, not just the settled frame. For mixed serif/sans phrase
+builds in fixed positions, read `premium-composition` and selectively use
+`set_typography_scene` with actual transcript cue times.
+
 BASICS
 - add_captions("from_transcript") burns word-timed captions for everything that survives the cut — timing always from the real transcript, never invented. add_captions('off') removes captions WE added.
 - To change how EXISTING captions look ("make it red", "move to the top"), use set_caption_style with just the fields to change — never re-add.

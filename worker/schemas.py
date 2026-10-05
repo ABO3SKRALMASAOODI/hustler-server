@@ -1547,6 +1547,11 @@ class TextItem(BaseModel):
     # remain byte-stable; new designs no longer infer type size from a preset.
     font_size: Optional[float] = Field(default=None, ge=.012, le=.3, allow_inf_nan=False)
     max_width: Optional[float] = Field(default=None, ge=.1, le=.96, allow_inf_nan=False)
+    # Opt-in measured layout for authored mixed-type scenes. Historical
+    # templates keep their frozen geometry when alignment is omitted.
+    text_align: Optional[Literal["left", "center", "right"]] = None
+    italic: Optional[bool] = None
+    tracking: Optional[float] = Field(default=None, ge=-3, le=12, allow_inf_nan=False)
     color: Optional[str] = None             # #RRGGBB
     accent_color: Optional[str] = None
     outline_width: Optional[float] = Field(default=None, ge=0, le=12)

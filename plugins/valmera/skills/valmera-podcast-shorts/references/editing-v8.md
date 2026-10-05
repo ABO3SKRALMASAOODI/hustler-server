@@ -72,6 +72,14 @@ use output `start` / `end`, never both. Inspect the original word boundaries;
 this helper does not decide which words to cut.
 
 The recipes are adjustable starting points, not a compulsory house style.
+The optional `typography_scenes` plan array uses the live tool's scene
+arguments. `source_start/source_end` map a scene window inside one retained
+span; each run may use `source_at` instead of program `at`. The compiler
+returns these as **pending_native_operations**, not as already-applied text.
+After the base `apply_edit_batch`, submit them together to `apply_edit_recipe`
+and check its saved receipt before rendering. This removes repeated clock
+arithmetic while keeping exact word cues. A scene spanning a removed section
+needs explicit program times from the actual resulting transcript.
 They place readable, centered dialogue in the lower picture with visible
 spoken-word color and semantic scale. Choose from actual performance and
 reference evidence. Do not solve a collision by shrinking all captions to tiny
