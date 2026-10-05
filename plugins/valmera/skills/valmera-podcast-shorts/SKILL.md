@@ -39,7 +39,10 @@ The current four formats are:
 1. `fast-conversation`: complete continuing speech with purposeful, frequent
    visual changes: specific B-roll and authored visual explanations.
 2. `hook-to-silent-montage`: a complete spoken premise, then a directly relevant
-   silent visual payoff. Post-hook montage <=15s; editorial program <=25s.
+   silent visual payoff. Anchor the montage with recognizable footage of the
+   featured person, then use person footage or directly understandable results
+   of the premise. An all-product/interface montage or multi-hop association
+   does not qualify. Post-hook montage <=15s; editorial program <=25s.
 3. `silent-action-to-conversation`: 3–4s of recognizable silent action footage
    of the actual subject, then a conversation that fulfills that opening.
 4. `headline-conversation`: compelling original conversation, natural camera
