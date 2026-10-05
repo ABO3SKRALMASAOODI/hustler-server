@@ -1087,6 +1087,8 @@ def test_render_preview_public_response_preserves_no_audio_model_provenance(
     body = public["content"][0]["text"]
     assert "PREVIEW PROVENANCE: audio_model_review=false" in body
     assert "no separate listening model was invoked" in body
+    assert "automatically for this saved preview" in body
+    assert "does not describe a separate explicit review_audio call" in body
     assert public["structuredContent"] == {
         "edl_version": 8,
         "edl_changed": False,

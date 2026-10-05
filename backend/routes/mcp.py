@@ -844,12 +844,13 @@ def _preview_policy_line(preview):
                 "listening model was invoked.")
     enabled = raw is True
     value = "true" if enabled else "false"
-    detail = ("a separate listening model was permitted"
+    detail = ("a separate listening model was permitted for this saved preview"
               if enabled else
-              "no separate listening model was invoked; use deterministic "
+              "no separate listening model was invoked automatically for this saved preview; use deterministic "
               "audio QC, transcript, track identity and authored EDL facts")
     return (f"\n\nPREVIEW PROVENANCE: audio_model_review={value} — "
-            f"{detail}.")
+            f"{detail}. This preview flag does not describe a separate explicit "
+            "review_audio call; that call reports its own bounded listening evidence.")
 
 
 def _preview_asset_receipt(row, url=None):
