@@ -7,7 +7,7 @@ hierarchy and a restrained common motion language.
 import math
 import re
 
-KINDS = ("statement", "comparison", "metric", "quote", "chapter", "label")
+KINDS = ("statement", "comparison", "metric", "quote", "chapter", "label", "headline")
 PALETTES = {
     "ink": ("#101012", "#F4F2EE", "#A3A3A7", "#B9AB91"),
     "paper": ("#F0EEE8", "#171719", "#626166", "#605644"),
@@ -17,7 +17,8 @@ PALETTES = {
 
 def compose(*, id, kind, text, start, end, secondary=None, eyebrow=None,
             palette="ink", box=None, motion="settle", W=1080, H=1920,
-            motion_motif=None, treatment="panel", mute_captions=False):
+            motion_motif=None, treatment="panel", mute_captions=False,
+            speaker=None, font_size=None):
     if not re.fullmatch(r"[a-zA-Z0-9_-]{1,48}", str(id)):
         raise ValueError("id must be 1–48 letters, numbers, underscores or hyphens")
     if kind not in KINDS or palette not in PALETTES or motion not in ("settle", "none") or treatment not in ("panel", "type"):
@@ -36,6 +37,13 @@ def compose(*, id, kind, text, start, end, secondary=None, eyebrow=None,
     minimum = max(1.5, words/3.2 + (.45 if motion=="settle" else .15))
     if end-start < minimum:
         raise ValueError(f"Allow at least {minimum:.2f}s to read this composition, or shorten the copy")
+    if kind == "headline":
+        if secondary or eyebrow:
+            raise ValueError("A headline uses speaker and text, without extra supporting labels")
+        return _headline(id=id, text=text, speaker=speaker, start=start, end=end,
+                         palette=palette, box=box, font_size=font_size, W=W, H=H)
+    if speaker is not None or font_size is not None:
+        raise ValueError("speaker and font_size belong to kind=headline")
     from schemas import Frame
     box = Frame._picture_rectangle(box or ([.08,.15,.92,.31] if kind=="label" else [.07,.22,.93,.73]))
     x0,y0,x1,y1 = box
@@ -115,3 +123,53 @@ def compose(*, id, kind, text, start, end, secondary=None, eyebrow=None,
              serif=kind=="quote")
         line("detail",secondary,y0+height*.80,.036,muted)
     return {"texts":texts,"vectors":vectors,"prefix":prefix,"minimum_hold_s":round(minimum,2)}
+
+
+def _headline(*, id, text, speaker, start, end, palette, box, font_size, W, H):
+    """A persistent, speaker-first heading with measured wrapping and no panel.
+
+    Identity is supplied from source evidence by the caller, never inferred
+    here. Keep the name together and wrap the claim at its requested size;
+    don't shrink the entire title to accommodate excess copy.
+    """
+    from schemas import Frame
+    from type_metrics import width
+    from typography_scenes import compose as typography
+    speaker = str(speaker or "").strip()
+    if not speaker or len(speaker)>60 or "\n" in speaker:
+        raise ValueError("Provide the verified speaker name (1–60 characters), or use another kind without attribution")
+    if "\n" in text:
+        raise ValueError("Headline text wraps automatically; omit manual line breaks")
+    size = .052 if font_size is None else float(font_size)
+    if not math.isfinite(size) or not .035 <= size <= .085:
+        raise ValueError("Headline font_size must be .035–.085 of the canvas short edge")
+    box = Frame._picture_rectangle(box or [.08,.13,.92,.27])
+    px = round(min(W,H)*size)
+    room = (box[2]-box[0])*W-12
+    fg,accent = PALETTES[palette][1],PALETTES[palette][3]
+    name = speaker.rstrip(":")+":"
+    pieces = [(name,accent)] + [(word,fg) for word in text.split()]
+    rows=[]; row=[]; used=0
+    gap=width(" ","Inter Display Bold",px)
+    for word,color in pieces:
+        measured=width(word,"Inter Display Bold",px)
+        if measured>room:
+            raise ValueError("Headline name or word exceeds its box; widen the box or shorten the copy")
+        if row and used+gap+measured>room:
+            rows.append({"runs":row});row=[];used=0
+        used += (gap if row else 0)+measured
+        row.append({"text":word,"color":color})
+    if row:rows.append({"runs":row})
+    if len(rows)>3:
+        raise ValueError("Headline needs more than three lines; shorten the claim instead of shrinking it")
+    minimum=max(2.,len((name+" "+text).split())/3.2+.15)
+    if end-start<minimum:
+        raise ValueError(f"Allow at least {minimum:.2f}s to read the speaker and headline")
+    result=typography(id=id,start=start,end=end,lines=rows,box=box,align="left",
+                      reveal="still",motion="none",font_size=size,leading=1.2,
+                      mute_captions=False,W=W,H=H)
+    prefix=f"eg_{id}__"
+    for item in result["texts"]:
+        item["id"]=item["id"].replace(result["prefix"],prefix,1)
+    return {"texts":result["texts"],"vectors":[],"prefix":prefix,
+            "minimum_hold_s":round(minimum,2)}

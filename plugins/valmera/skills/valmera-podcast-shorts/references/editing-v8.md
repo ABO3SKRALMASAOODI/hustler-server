@@ -41,6 +41,19 @@ when you mean a graphic over uninterrupted speech.
 
 ## Independent headline, expressive dialogue
 
+Prefer the source-verified speaker name at the beginning of the headline,
+not in a separate name badge. Use the native measured
+`set_editorial_graphic(kind="headline", speaker=…, text=…, box=…)` for that
+relationship. The box belongs above the actual picture; the headline holds
+still and leaves dialogue visible. It rejects crowded copy instead of making
+fine print. Unknown identity: use an unattributed title. Never inherit the
+person's name from the reference or a previous podcast.
+
+In `compose_short.py`, `headline:{speaker,text,box,font_size,palette}` emits
+this call in `pending_native_operations`. Apply it with the other pending
+calls and verify the saved receipt. The old `headline:{text,y,scale}` still
+works for an unattributed heading; don't mix the two forms.
+
 `add_text(..., mute_captions=false)` keeps the topic headline and dialogue
 captions separate. Put the headline just above the actual picture, with heavy
 type, readable wrapping and no incidental date/place subline. It is visible
@@ -76,8 +89,9 @@ The optional `typography_scenes` plan array uses the live tool's scene
 arguments. `source_start/source_end` map a scene window inside one retained
 span; each run may use `source_at` instead of program `at`. The compiler
 returns these as **pending_native_operations**, not as already-applied text.
-After the base `apply_edit_batch`, submit them together to `apply_edit_recipe`
-and check its saved receipt before rendering. This removes repeated clock
+After the base `apply_edit_batch`, call each named native tool with its args
+and explicit project_id, serially. Check every saved receipt before rendering.
+The retired internal recipe helper is not a public tool. This removes repeated clock
 arithmetic while keeping exact word cues. A scene spanning a removed section
 needs explicit program times from the actual resulting transcript.
 They place readable, centered dialogue in the lower picture with visible

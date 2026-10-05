@@ -64,7 +64,7 @@ def compile_short(plan,index):
     design=copy.deepcopy(plan.get('graphics',{}))
     design.update({'id':plan.get('id','short'),'duration_s':duration,
                    'picture':picture,'accent':accent})
-    if plan.get('headline'):
+    if plan.get('headline') and not plan['headline'].get('speaker'):
         design['headline']=plan['headline']
     for beat in design.get('beats',[]):
         if 'source_start' in beat or 'source_end' in beat:
@@ -82,6 +82,14 @@ def compile_short(plan,index):
     # source cues once, then submit these calls together after the base EDL.
     # Never imply these deferred calls are already present in the EDL above.
     native=[]
+    if plan.get('headline',{}).get('speaker'):
+        headline=copy.deepcopy(plan['headline'])
+        unknown=set(headline)-{'speaker','text','box','font_size','palette'}
+        if unknown:
+            raise ValueError('Speaker headlines use speaker, text, box, font_size and palette')
+        native.append({'tool':'set_editorial_graphic','args':{
+            'id':plan.get('id','short')+'-headline','kind':'headline',
+            'start':0,'end':duration,**headline}})
     for scene in copy.deepcopy(plan.get('typography_scenes',[])):
         if 'source_start' in scene or 'source_end' in scene:
             if 'start' in scene or 'end' in scene:
@@ -115,7 +123,7 @@ def compile_short(plan,index):
     return {'edl':edl,'operations':ops,'pending_native_operations':native,'cues':layers['cues'],
             'program_duration_s':duration,'expected_final_duration_s':duration+5,
             'program_words':words,'review':'unreviewed',
-            'note':'Fresh shared-source child only. Apply the base operations, then any pending_native_operations in one apply_edit_recipe. Verify both saved receipts before rendering. Inspect speech joins, face clearance, phone type and moving result.'}
+            'note':'Fresh shared-source child only. Apply the base operations, then call each pending_native_operations tool with its args and explicit project_id, serially. These calls are not already applied. Check every saved receipt before rendering; do not call the retired recipe helper. Inspect speech joins, face clearance, phone type and moving result.'}
 
 
 def main():

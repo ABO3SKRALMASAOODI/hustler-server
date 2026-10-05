@@ -30,8 +30,9 @@ in `compose_short.py` output. Choose the full row layout once. A small
 connecting row, dominant outcome and short qualifier can form one thought;
 don't center every prefix anew. One sans family plus a selective Instrument
 Serif italic run can express contrast. Stable group IDs allow one replacement
-or removal. Scenes, picture cards and editorial graphics can share an atomic
-`apply_edit_recipe`; inspect its saved receipt before rendering.
+or removal. Apply these through the exposed native setters, serially on one
+project; inspect each saved receipt before rendering. The internal recipe
+helper is not part of the public catalog.
 
 `set_picture_card` shapes footage only, leaving type and branding sharp.
 `reveal` opens inside its window; `fade`/`lift` deliberately fade the picture.

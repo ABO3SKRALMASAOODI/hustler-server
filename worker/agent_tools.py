@@ -13550,7 +13550,8 @@ def remove_picture_card(ctx, id):
 
 def set_editorial_graphic(ctx, id, kind, text, start, end, secondary=None,
                           eyebrow=None, palette="ink", box=None, motion="settle",
-                          motion_motif=None, treatment="panel", mute_captions=False):
+                          motion_motif=None, treatment="panel", mute_captions=False,
+                          speaker=None, font_size=None):
     motion_motif, error = _motion_motif_value(ctx, motion_motif)
     if error:
         return error
@@ -13566,7 +13567,7 @@ def set_editorial_graphic(ctx, id, kind, text, start, end, secondary=None,
         result=editorial_graphics.compose(id=id,kind=kind,text=text,start=start,end=end,
                  secondary=secondary,eyebrow=eyebrow,palette=palette,box=box,
                  motion=motion,W=W,H=H,motion_motif=motion_motif,treatment=treatment,
-                 mute_captions=mute_captions)
+                 mute_captions=mute_captions,speaker=speaker,font_size=font_size)
     except (ValueError,TypeError) as exc:
         return "REJECTED: "+str(exc)[:400]
     for layer in ("texts","vectors"):
@@ -23445,7 +23446,11 @@ TOOLS = {
         set_editorial_graphic,
         "Author a measured, restrained editorial composition as editable native text/vector layers in ONE revision. "
         "Stable id replaces its whole group. kind: statement, comparison (text vs secondary), metric "
-        "(text is the real value, secondary its meaning), quote, chapter, label. Pass exact supported "
+        "(text is the real value, secondary its meaning), quote, chapter, label, headline. "
+        "headline requires the verified speaker name in speaker and a faithful claim in text: "
+        "it prefixes the name inline, wraps at readable font_size (default .052), and holds "
+        "still without a panel or caption suppression. Max three lines; shorten excess copy. "
+        "Place its box above the actual picture; never infer identity from a reference. Pass exact supported "
         "claims; never invent statistics. Optional eyebrow is short context, not filler. "
         "palette ink/paper/slate; motion settle/none; box=[left,top,right,bottom] chooses its region. "
         "treatment=panel draws a backdrop; type removes the box for integrated editorial typography. "
@@ -23456,6 +23461,7 @@ TOOLS = {
         {"id":{"type":"string"},"kind":{"type":"string","enum":list(editorial_graphics.KINDS)},
          "text":{"type":"string"},"start":{"type":"number"},"end":{"type":"number"},
          "secondary":{"type":"string"},"eyebrow":{"type":"string"},
+         "speaker":{"type":"string"},"font_size":{"type":"number"},
          "palette":{"type":"string","enum":list(editorial_graphics.PALETTES)},
          "box":{"type":"array","items":{"type":"number"},"minItems":4,"maxItems":4},
          "motion":{"type":"string","enum":["settle","none"]},"motion_motif":{"type":"string"},

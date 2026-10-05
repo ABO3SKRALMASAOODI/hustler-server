@@ -83,6 +83,16 @@ def test_native_type_cues_use_retained_program_clock_and_are_explicitly_pending(
     with pytest.raises(ValueError,match='not both'):compile_short(plan,index)
 
 
+def test_speaker_headline_is_a_native_pending_operation_not_a_second_title():
+    plan={'id':'identity','keep':[[10,18]],'headline':{
+        'speaker':'Ada Lovelace','text':'An idea worth remembering',
+        'box':[.08,.1,.92,.25]}}
+    result=compile_short(plan,{'video':{'duration':20},'words':[]})
+    assert result['edl']['texts']==[]
+    assert result['pending_native_operations']==[{'tool':'set_editorial_graphic','args':{
+        'id':'identity-headline','kind':'headline','start':0,'end':8.,**plan['headline']}}]
+
+
 def test_graphic_rejects_unreadable_card_instead_of_shrinking_type():
     design=storyboard()
     design['beats']=[{'kind':'statement','text':'This sentence cannot be read in one flash',

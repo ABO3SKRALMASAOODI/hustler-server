@@ -55,7 +55,7 @@ def test_plate_has_transparent_picture_opaque_corners_and_antialiasing(tmp_path)
     assert np.any((a[:,:,3]>0)&(a[:,:,3]<255))
 
 
-@pytest.mark.parametrize('kind',editorial_graphics.KINDS)
+@pytest.mark.parametrize('kind',[k for k in editorial_graphics.KINDS if k!='headline'])
 @pytest.mark.parametrize('dims',[(1080,1920),(1920,1080),(1080,1080)])
 def test_compositions_fit_and_keep_one_editable_hierarchy(kind,dims):
     W,H=dims
