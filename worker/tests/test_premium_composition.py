@@ -79,6 +79,35 @@ def test_short_hold_and_dense_label_rejected():
         editorial_graphics.compose(id='x',kind='label',text='These words do not belong in a tiny badge',start=0,end=6,box=[.1,.1,.22,.22])
 
 
+def test_sparse_phone_heading_uses_space_instead_of_empty_supporting_rows():
+    design = editorial_graphics.compose(id='opening', kind='statement',
+        text='Solar on a\ncloudy day?', start=0, end=4,
+        box=[.06,.08,.94,.26], treatment='type', motion='none')
+    heading, = design['texts']
+    # At a 360px phone width this is at least 28.8px; the prior three-row
+    # reservation shrank this real forward-test headline to about 18px.
+    assert heading['font_size'] >= .08
+    bounds = graphics._compile_item(heading,4,(1080,1920))
+    assert bounds['top'] >= .08*1920
+    assert bounds['bottom'] <= .26*1920
+    assert abs((bounds['top']+bounds['bottom'])/2 - .17*1920) < 3
+
+
+@pytest.mark.parametrize('support', [{'eyebrow':'The question'},
+                                    {'secondary':'One practical answer'},
+                                    {}])
+@pytest.mark.parametrize('kind', ['statement','quote','metric','chapter','label'])
+def test_optional_supporting_rows_keep_type_inside_its_box(kind,support):
+    design = editorial_graphics.compose(id='sparse',kind=kind,
+        text='8 million' if kind=='metric' else 'Build what matters',
+        start=0,end=6,box=[.07,.22,.93,.73],motion='none',**support)
+    boxes = sorted((graphics._compile_item(t,6,(1080,1920))
+                    for t in design['texts']),key=lambda b:b['top'])
+    assert boxes[0]['top'] >= .22*1920
+    assert boxes[-1]['bottom'] <= .73*1920
+    assert all(a['bottom']<=b['top'] for a,b in zip(boxes,boxes[1:]))
+
+
 def test_atomic_group_replacement_and_removal_preserve_other_work():
     import agent_tools
 

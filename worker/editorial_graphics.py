@@ -68,7 +68,19 @@ def compose(*, id, kind, text, start, end, secondary=None, eyebrow=None,
                  color=color,outline_width=0,shadow=0,entrance="none",exit="none",
                  mute_captions=bool(mute_captions),motion=movement(y),motion_motif=motion_motif)
         from graphics import _compile_item
-        max_height = height*H*(.27 if kind=="label" else .25 if key in ("main","other") and kind=="comparison" else .36 if key=="main" else .13)
+        if kind == "label":
+            height_share = .27 if secondary else .72
+        elif kind == "comparison" and key in ("main", "other"):
+            height_share = .25
+        elif key == "main":
+            # Empty supporting rows must not force a sparse two-line headline
+            # into the tiny central slot of a three-row card. Reserve space
+            # only for content that will actually be rendered.
+            height_share = (.36 if eyebrow and secondary else
+                            .48 if secondary else .56 if eyebrow else .78)
+        else:
+            height_share = .13
+        max_height = height*H*height_share
         for _ in range(25):
             measured=_compile_item(row,end,(W,H))
             if measured["height"]<=max_height and measured["right"]-measured["left"]<=width*W*.87:
@@ -97,7 +109,9 @@ def compose(*, id, kind, text, start, end, secondary=None, eyebrow=None,
         line("detail",secondary,y0+height*.73,.029,muted)
     else:
         line("eyebrow",eyebrow,y0+height*.16,.029,accent)
-        line("main",text,y0+height*.48,.145 if kind=="metric" else .092,
+        main_y = (.48 if eyebrow and secondary else
+                  .38 if secondary else .59 if eyebrow else .5)
+        line("main",text,y0+height*main_y,.145 if kind=="metric" else .092,
              serif=kind=="quote")
         line("detail",secondary,y0+height*.80,.036,muted)
     return {"texts":texts,"vectors":vectors,"prefix":prefix,"minimum_hold_s":round(minimum,2)}
