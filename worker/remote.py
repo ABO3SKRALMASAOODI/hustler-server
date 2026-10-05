@@ -1085,6 +1085,14 @@ def _record_remote_execution_with_retry(ledger, job, provider, call_id,
             time.sleep(min(1.0, remaining))
 
 
+def _cloudflare_alternate_safe(job):
+    payload = job.get("payload") or {}
+    return (job.get("type") in {"preview", "preview_check", "filmstrip", "mcp_media"}
+            or (job.get("type") == "mcp_tool"
+                and payload.get("tool") == "review_audio"
+                and payload.get("mutation") is False))
+
+
 def _cloudflare_call_id(job):
     if job.get("id") is None:
         # Scratch frame keys are consumed and deleted by the caller, so two
@@ -1098,8 +1106,7 @@ def _cloudflare_call_id(job):
     digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
     job_type = str(job.get("type") or "job")
     admission_slot = job.get('_cloudflare_admission_slot', 0)
-    if admission_slot in (1, 2) and job_type in {
-            'preview', 'preview_check', 'filmstrip'}:
+    if admission_slot in (1, 2) and _cloudflare_alternate_safe(job):
         return f"cf-alt{admission_slot}-{job_type}-p{int(job['project_id'])}-{digest}"
     group = str((job.get("payload") or {}).get("render_group") or "")
     if job_type in {"final", "preview", "preview_check"} and re.fullmatch(r"[0-9]+-[01]", group):
@@ -1508,8 +1515,7 @@ def _run_cloudflare_with_capacity_wait(job):
             # Preserve project affinity on the first try, but don't make one
             # occupied shard strand a short preview while the pool is idle.
             slot = job.get('_cloudflare_admission_slot', 0)
-            if (not rollout and queued and slot < 2
-                    and job.get('type') in {'preview', 'preview_check', 'filmstrip'}):
+            if not rollout and slot < 2 and _cloudflare_alternate_safe(job):
                 job['_cloudflare_admission_slot'] = slot + 1
                 continue
             remaining = (rollout_deadline if rollout else deadline) - time.monotonic()

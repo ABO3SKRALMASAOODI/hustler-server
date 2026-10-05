@@ -17,6 +17,8 @@ interface CallState {
   activeUntil: number;
   envelope?: JsonObject;
   error?: string;
+  readOnlyRetry?: boolean;
+  disconnectedAt?: number;
 }
 
 interface ActiveCall {
@@ -151,7 +153,7 @@ async function matchesCompletedJob(callId: string, job: ExecutorJob): Promise<bo
   // deterministic identity still proves the exact completed claim.
   return callId === `cf-${prefix}-${digest}`
     || callId === `cf-${job.type.slice(0, 18)}-${digest}`
-    || (["preview", "preview_check", "filmstrip"].includes(job.type)
+    || (["preview", "preview_check", "filmstrip", "mcp_tool"].includes(job.type)
       && [1, 2].some((slot) => callId ===
         `cf-alt${slot}-${job.type}-p${job.project_id}-${digest}`));
 }
@@ -172,13 +174,19 @@ abstract class ValmeraContainer extends Container<Env> {
     // still own work: an ambiguous disconnected /run keeps this row active
     // until its bounded deadline, while ordinary completions release it
     // before their response is returned.
-    const active = await this.ctx.storage.get<ActiveCall>("active");
-    if (active && active.expiresAt > Date.now()) {
-      this.renewActivityTimeout();
-      return;
-    }
+    // Admission and idle destruction share a fence. A plain read followed by
+    // destroy could kill a new /run admitted while the idle handler awaited.
+    const resetId = `reset:idle-${crypto.randomUUID()}`;
+    const reserved = await this.ctx.storage.transaction(async (txn) => {
+      const active = await txn.get<ActiveCall>("active");
+      if (active && active.expiresAt > Date.now()) return false;
+      await txn.put("active", { callId: resetId, expiresAt: Date.now() + 120_000 });
+      return true;
+    });
+    if (!reserved) { this.renewActivityTimeout(); return; }
     console.log("Idle timeout expired with no active provider lease; destroying container");
     await this.destroy();
+    await this.release(resetId);
   }
 
   private environment(): Record<string, string> {
@@ -334,77 +342,78 @@ abstract class ValmeraContainer extends Container<Env> {
   private async expireExecutorLease(
     callId: string, now = Date.now(),
   ): Promise<CallState | null> {
+    const observed = await this.callState(callId);
+    if (!observed || ["done", "failed"].includes(observed.status)) return observed;
+    let reason = "";
+    if (observed.status === "unknown") {
+      // A disconnected read-only listen must not occupy a six-hour edit lane.
+      // Stop its process before permitting a retry. Mutations keep their fence.
+      if (observed.readOnlyRetry && now - (observed.disconnectedAt ?? now) >= 90_000) {
+        reason = "Cloudflare read-only audio review lost its response; fenced recovery";
+      } else {
+        try {
+          const physical = await this.getState();
+          if (["stopped", "stopped_with_code"].includes(physical.status)) {
+            reason = `Cloudflare container exited during ${observed.jobType}`;
+          }
+        } catch { /* Unobservable compute is not proof of a stopped process. */ }
+      }
+    }
+    if (!reason && observed.activeUntil > now && observed.status !== "stopping") return observed;
     const state = await this.ctx.storage.transaction(async (txn) => {
       const key = this.stateKey(callId);
       const current = (await txn.get<CallState>(key)) ?? null;
-      if (!current || current.status === "done" || current.status === "failed"
-          || current.activeUntil > now) return current;
-      if (current.status === "stopping") return current;
-
-      // Fence the expired identity before stopping its container. This keeps
-      // a retry from running beside media work that outlived its lease.
+      if (!current || ["done", "failed"].includes(current.status)) return current;
+      if (current.updatedAt !== observed.updatedAt) return current;
       const prior = current.error ? ` (${current.error})` : "";
-      const error = `Cloudflare ${current.jobType} call exceeded its executor lease while ${current.status}${prior}`;
-      const stopping: CallState = {
-        ...current,
-        status: "stopping",
-        error,
-        updatedAt: new Date(now).toISOString(),
-        activeUntil: now,
-      };
+      const error = reason || `Cloudflare ${current.jobType} call exceeded its executor lease while ${current.status}${prior}`;
       const active = await txn.get<ActiveCall>("active");
-      await txn.put(key, stopping);
-      if (active?.callId === callId) {
-        await txn.put("active", {
-          callId: `reset:${callId}`, expiresAt: now + 120_000,
-        } satisfies ActiveCall);
+      // An old status poll must never stop a newer customer's container.
+      if (active?.callId !== callId && active?.callId !== `reset:${callId}`) {
+        const failed = { ...current, status: "failed" as const, error,
+          envelope: { error, retryable: false }, activeUntil: now,
+          updatedAt: new Date(now).toISOString() };
+        await txn.put({ [key]: failed, [this.terminalKey(callId, now)]: callId });
+        return failed;
       }
+      const stopping: CallState = { ...current, status: "stopping", error,
+        updatedAt: new Date(now).toISOString(), activeUntil: now };
+      await txn.put({ [key]: stopping,
+        active: { callId: `reset:${callId}`, expiresAt: now + 120_000 } satisfies ActiveCall });
       return stopping;
     });
     if (state?.status !== "stopping") return state;
-
     try {
-      await this.stop();
+      // SDK stop() signals SIGTERM but does not await process exit. Destroy
+      // completes the physical fence before another request can use this lane.
+      await this.destroy();
     } catch (error) {
-      const stopped = {
-        ...state,
+      const stopped = { ...state,
         error: `${state.error}; container stop failed: ${String(error)}`,
-        updatedAt: new Date().toISOString(),
-      } satisfies CallState;
+        updatedAt: new Date().toISOString() } satisfies CallState;
       await this.ctx.storage.put(this.stateKey(callId), stopped);
       return stopped;
     }
-
     const terminalAt = Date.now();
     return this.ctx.storage.transaction(async (txn) => {
       const key = this.stateKey(callId);
       const current = (await txn.get<CallState>(key)) ?? state;
-      if (current.status !== "stopping") return current;
-      const error = current.error
-        ?? `Cloudflare ${current.jobType} call exceeded its executor lease`;
+      if (current.status !== "stopping") {
+        const active = await txn.get<ActiveCall>("active");
+        if (active?.callId === `reset:${callId}`) await txn.delete("active");
+        return current;
+      }
+      const error = current.error ?? `Cloudflare ${current.jobType} call exceeded its executor lease`;
       const render = ["preview", "preview_check", "final"].includes(current.jobType);
-      const failed: CallState = {
-        ...current,
-        status: "failed",
-        envelope: {
-          error,
-          retryable: !render,
-          failure: render
-            ? { kind: "render_budget_exceeded", retryable: false,
-                max_attempts: 0, agent_repairable: false }
-            : { kind: "transient_infrastructure", retryable: true },
-        },
-        error,
-        updatedAt: new Date(terminalAt).toISOString(),
-        activeUntil: terminalAt,
-      };
+      const retryable = !render && (current.jobType !== "mcp_tool" || current.readOnlyRetry === true);
+      const failed: CallState = { ...current, status: "failed", error,
+        envelope: { error, retryable, failure: {
+          kind: render ? "render_budget_exceeded" : "transient_infrastructure",
+          retryable, max_attempts: retryable ? 2 : 0, agent_repairable: false,
+        } }, updatedAt: new Date(terminalAt).toISOString(), activeUntil: terminalAt };
       const active = await txn.get<ActiveCall>("active");
-      await txn.put({
-        [key]: failed,
-        [this.terminalKey(callId, terminalAt)]: callId,
-      });
-      if (active?.callId === callId
-          || active?.callId === `reset:${callId}`) await txn.delete("active");
+      await txn.put({ [key]: failed, [this.terminalKey(callId, terminalAt)]: callId });
+      if (active?.callId === `reset:${callId}`) await txn.delete("active");
       return failed;
     });
   }
@@ -420,7 +429,7 @@ abstract class ValmeraContainer extends Container<Env> {
         return current;
       }
       const running: CallState = {
-        status: "running", jobType,
+        ...current, status: "running", jobType,
         updatedAt: new Date().toISOString(), activeUntil,
       };
       await txn.put(key, running);
@@ -614,7 +623,7 @@ abstract class ValmeraContainer extends Container<Env> {
       // and cold-restart it for the next call. No new /run has been sent yet,
       // so a stop failure remains safe to handle on Modal.
       try {
-        await this.stop();
+        await this.destroy();
       } catch (error) {
         return json({
           error: `expired Cloudflare shard could not be reset: ${String(error)}`,
@@ -667,6 +676,7 @@ abstract class ValmeraContainer extends Container<Env> {
     try {
       await update({
         status: "starting", jobType: job.type,
+        readOnlyRetry: job.type === "mcp_tool" && job.payload?.tool === "review_audio" && job.payload?.mutation === false,
         updatedAt: new Date().toISOString(), activeUntil,
       });
       await this.startAndWaitForPorts({
@@ -729,7 +739,13 @@ abstract class ValmeraContainer extends Container<Env> {
           },
         }),
       });
-      const envelope = (await response.json()) as JsonObject;
+      const body = await response.text();
+      let envelope: JsonObject;
+      try { envelope = JSON.parse(body) as JsonObject; }
+      catch { throw new Error(`Container /run HTTP ${response.status} returned non-JSON: ${body.slice(0, 240)}`); }
+      if (!envelope || typeof envelope !== "object" || Array.isArray(envelope)) {
+        throw new Error(`Container /run HTTP ${response.status} returned an invalid envelope`);
+      }
       const status = envelope.error ? "failed" : "done";
       const terminalAt = Date.now();
       await this.storeTerminal(callId, {
@@ -745,11 +761,12 @@ abstract class ValmeraContainer extends Container<Env> {
       const failedAt = Date.now();
       const keptActive = await this.ctx.storage.transaction(async (txn) => {
         const current = await txn.get<CallState>(stateKey);
-        if (current?.status === "done") return true;
+        if (current?.status === "done" || current?.status === "failed" || current?.status === "stopping") return true;
         const active = await txn.get<ActiveCall>("active");
         if (active?.callId !== callId) return false;
         await txn.put(stateKey, {
-          status: "unknown",
+          ...current, status: "unknown",
+          disconnectedAt: current?.disconnectedAt ?? failedAt,
           jobType: job.type,
           error: String(error),
           updatedAt: new Date(failedAt).toISOString(),

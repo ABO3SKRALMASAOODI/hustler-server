@@ -25,8 +25,30 @@ def visits_report(cur, scope, signup_start="2026-07-06"):
     # Full traffic history predates the account-metrics epoch. Do not divide
     # a July signup cohort by March visitor totals. Daily ratios are aligned.
     totals['conversion_rate'] = None
+    # Unique browsers must be deduplicated for the selected period, never
+    # summed from daily distinct counts. Return every supported range once.
+    cur.execute("""WITH ranges AS (
+      SELECT 'all' key, min(visited_at)::date start FROM analytics_page_visits
+      UNION ALL SELECT '90',CURRENT_DATE-89
+      UNION ALL SELECT '30',CURRENT_DATE-29
+      UNION ALL SELECT '7',CURRENT_DATE-6
+    ) SELECT r.key,r.start,count(v.visited_at) views,
+      count(DISTINCT COALESCE(NULLIF(v.device_id,''),v.ip)) unique_visitors
+      FROM ranges r LEFT JOIN analytics_page_visits v ON v.visited_at>=r.start
+      GROUP BY r.key,r.start""")
+    periods = {}
+    for result in cur.fetchall():
+        period = dict(result)
+        key = period.pop('key')
+        start = str(period['start'] or signup_start)
+        aligned_start = max(start, signup_start)
+        period['signups'] = sum(r['signups'] or 0 for r in rows if r['day'] >= aligned_start)
+        period['signup_start'] = aligned_start
+        period['conversion_rate'] = (round(100 * period['signups'] / period['unique_visitors'], 1)
+            if start >= signup_start and period['unique_visitors'] else None)
+        periods[key] = period
     peak = max(rows, key=lambda r:r['unique_visitors']) if rows else None
-    return dict(data=rows,totals=totals,peak=peak,timezone='UTC',signup_scope_start=signup_start,
+    return dict(data=rows,totals=totals,periods=periods,peak=peak,timezone='UTC',signup_scope_start=signup_start,
                 note=f'Signup comparisons start {signup_start} (the current product cohort). Earlier signup values are unavailable, not zero. Verified signups / unique browsers is a period ratio, not a linked visitor cohort. Known bots and legacy time-update rows are excluded. Historical signups use account creation day; active time and linked journeys begin with this release.')
 
 def journey_report(cur, scope):

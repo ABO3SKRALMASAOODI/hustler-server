@@ -140,7 +140,7 @@ test('expired renders stop their container before reporting a non-retryable budg
     const now = Date.now();
     values.set(`call:${callId}`, { status: 'running', jobType, activeUntil: now - 1 });
     let stopped = false;
-    adapter.stop = async () => {
+    adapter.destroy = async () => {
       assert.equal(values.get(`call:${callId}`).status, 'stopping');
       assert.equal(values.get('active').callId, `reset:${callId}`);
       stopped = true;
@@ -187,4 +187,53 @@ test('abandoned pre-run startup never schedules an unfenced stop', async()=>{
  values.get(`call:${callId}`).updatedAt=new Date(Date.now()-200000).toISOString();
  const state=await adapter.expireStaleStart(callId);
  assert.equal(state.status,'failed');assert.equal(values.has('active'),false);
+});
+
+test('lost read-only audio response is fenced and retryable after 90 seconds', async () => {
+  const {adapter, values} = fixture('unknown');
+  Object.assign(values.get(`call:${callId}`), {readOnlyRetry: true, disconnectedAt: Date.now()-91000});
+  let killed = false;
+  adapter.destroy = async () => {
+    assert.equal(values.get('active').callId, `reset:${callId}`);
+    assert.equal((await adapter.reserve('cf-second-listener',job.type,Date.now(),Date.now()+60000)).kind,'busy');
+    killed = true;
+  };
+  const result = await adapter.expireExecutorLease(callId);
+  assert.equal(killed,true); assert.equal(result.status,'failed');
+  assert.equal(result.envelope.failure.max_attempts,2);
+  assert.equal(result.envelope.retryable,true); assert.equal(values.has('active'),false);
+});
+test('lost mutation response remains fenced while its process is healthy',async()=>{
+ const {adapter,values}=fixture('unknown');
+ Object.assign(values.get(`call:${callId}`),{readOnlyRetry:false,disconnectedAt:Date.now()-91000});
+ adapter.getState=async()=>({status:'healthy'});
+ assert.equal((await adapter.expireExecutorLease(callId)).status,'unknown');
+ assert.equal(values.get('active').callId,callId);
+});
+test('confirmed stopped container is recovered without replaying a mutation',async()=>{
+ const {adapter,values}=fixture('unknown');adapter.getState=async()=>({status:'stopped_with_code',exitCode:137});
+ adapter.destroy=async()=>{};
+ const result=await adapter.expireExecutorLease(callId);
+ assert.equal(result.status,'failed');assert.equal(result.envelope.retryable,false);
+ assert.equal(values.has('active'),false);
+});
+test('old expired status cannot destroy a newer accepted job',async()=>{
+ const {adapter,values}=fixture('unknown','cf-new-customer');
+ values.get(`call:${callId}`).activeUntil=Date.now()-1;
+ adapter.getState=async()=>({status:'healthy'});
+ assert.equal((await adapter.expireExecutorLease(callId)).status,'failed');
+ assert.equal(values.get('active').callId,'cf-new-customer');
+});
+test('idle shutdown fences admission until physical destruction finishes',async()=>{
+ const {adapter,values}=fixture();values.delete('active');let finish;
+ adapter.destroy=()=>new Promise(resolve=>{finish=resolve;});
+ const idle=adapter.onActivityExpired();
+ while(!finish)await new Promise(resolve=>setImmediate(resolve));
+ assert.equal((await adapter.reserve('cf-new-customer',job.type,Date.now(),Date.now()+60000)).kind,'busy');
+ finish();await idle;
+ assert.equal((await adapter.reserve('cf-new-customer',job.type,Date.now(),Date.now()+60000)).kind,'reserved');
+});
+test('idle callback never destroys an active edit',async()=>{
+ const {adapter}=fixture();let renewed=false;adapter.renewActivityTimeout=()=>{renewed=true;};
+ await adapter.onActivityExpired();assert.equal(renewed,true);
 });
