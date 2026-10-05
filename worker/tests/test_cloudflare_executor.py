@@ -1060,7 +1060,7 @@ def test_cloudflare_config_is_provider_complete_without_modal():
     assert "pruneTerminalCalls" in adapter
     assert 'sleepAfter = "60s"' in adapter
     assert "override async onActivityExpired" in adapter
-    assert 'storage.get<ActiveCall>("active")' in adapter
+    assert 'txn.get<ActiveCall>("active")' in adapter
     assert "Idle timeout expired with no active provider lease" in adapter
     assert "await this.destroy()" in adapter
     assert "const STARTING_STALE_MS = 180 * 1000" in adapter
@@ -1068,7 +1068,7 @@ def test_cloudflare_config_is_provider_complete_without_modal():
     assert "expireExecutorLease" in adapter
     assert 'status: "stopping"' in adapter
     assert "exceeded its executor lease" in adapter
-    assert 'kind: "transient_infrastructure"' in adapter
+    assert '"transient_infrastructure"' in adapter
     assert "markRunning" in adapter
     assert "startup was abandoned before /run" in adapter
     assert "getByName(shardName" not in adapter  # computed once as `shard`
@@ -1104,3 +1104,44 @@ def test_short_batch_render_identity_shares_only_two_stable_source_pools():
     assert len(set(ids))==30
     assert {name.rsplit('-',1)[0] for name in ids}=={'cf-render-g7-0','cf-render-g7-1'}
     assert 'render-g' not in remote._cloudflare_call_id({'type':'mcp_tool','id':99,'project_id':22,'total_claims':1,'payload':{'render_group':'7-0'}})
+
+@pytest.mark.parametrize('kind,payload', [
+    ('mcp_tool', {'tool': 'review_audio', 'mutation': False}),
+    ('mcp_media', {}),
+])
+def test_read_only_calls_can_use_another_shard_after_proven_busy(monkeypatch, kind, payload):
+    job = dict(JOB, type=kind, payload=payload)
+    if kind == 'mcp_media':
+        job.update(id=None, total_claims=None)
+    calls = []
+    def run(value):
+        calls.append(remote._cloudflare_call_id(value))
+        if len(calls) == 1:
+            raise remote.CloudflareCapacityBusy('Cloudflare Container shard is busy')
+        return {'ok': True}
+    monkeypatch.setattr(remote, '_run_cloudflare', run)
+    assert remote._run_cloudflare_with_capacity_wait(job) == {'ok': True}
+    assert len(set(calls)) == 2
+    assert calls[1].startswith('cf-alt1-')
+    assert remote._cloudflare_call_id(job) == calls[1]
+
+
+def test_mutations_and_context_cached_tools_keep_project_affinity():
+    for tool in ('apply_edit_batch', 'search_stock', 'add_stock_media'):
+        job = dict(JOB, type='mcp_tool', payload={'tool': tool, 'mutation': False})
+        original = remote._cloudflare_call_id(job)
+        job['_cloudflare_admission_slot'] = 1
+        assert remote._cloudflare_call_id(job) == original
+
+
+def test_ambiguous_read_only_call_never_changes_identity(monkeypatch):
+    job = dict(JOB, type='mcp_tool', payload={'tool': 'review_audio', 'mutation': False})
+    ids = []
+    def run(value):
+        ids.append(remote._cloudflare_call_id(value))
+        raise remote.RemoteExecutorError('ambiguous transport failure')
+    monkeypatch.setattr(remote, '_run_cloudflare', run)
+    with pytest.raises(remote.RemoteExecutorError):
+        remote._run_cloudflare_with_capacity_wait(job)
+    assert len(ids) == 1
+    assert '_cloudflare_admission_slot' not in job
