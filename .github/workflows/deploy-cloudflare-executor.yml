@@ -3,6 +3,8 @@ name: deploy-cloudflare-executor
 # Keep the primary executor in lockstep with the dispatcher. Publishing does not
 # interrupt in-flight work; provider ownership is fenced in PostgreSQL and the
 # staged-rollout verifier waits for every Cloudflare lane to serve this source.
+# A cancelled run leaves Cloudflare behind the dispatcher; touching this file
+# re-runs the same pipeline without changing worker source.
 on:
   push:
     branches:
