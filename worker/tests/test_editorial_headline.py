@@ -68,6 +68,27 @@ def test_quality_advisory_uses_actual_headline_geometry(ratio,dims):
                quality_gate.advisory_findings(before,moving))
 
 
+def test_quality_advisory_preserves_separated_moving_headline_and_payoff():
+    import quality_gate
+    import typography_scenes
+    from schemas import default_edl, validate_edl
+    before=default_edl(12)
+    after=default_edl(12)
+    after['frame']={'ratio':'9:16','mode':'pad'}
+    after['texts']=editorial_graphics.compose(id='topic',kind='headline',
+        speaker='Elon Musk',text='What is money worth?',start=0,end=10,
+        box=[.08,.08,.92,.30])['texts']
+    after['texts']+=typography_scenes.compose(id='answer',start=4,end=10,
+        lines=[{'runs':[{'text':'Goods','at':4},{'text':'and services','at':4.5}]}],
+        box=[.08,.70,.92,.86],motion='settle')['texts']
+    after=validate_edl(after,12).model_dump()
+    assert quality_gate.advisory_findings(before,after)==[]
+    # A low block that sweeps through the title still needs review.
+    after['texts'][-1]['motion']['y']=[{'t':0,'v':.78},{'t':1,'v':.19}]
+    assert any('overlaps designed text' in f for f in
+               quality_gate.advisory_findings(before,after))
+
+
 def test_native_recipe_exposes_and_replaces_speaker_heading():
     import agent_tools
     from schemas import default_edl,validate_edl
