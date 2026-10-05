@@ -59,9 +59,15 @@ use another available evidence path; never accept a capability-denial response.
 **First review story and design.** Write the four observations from creative-v8
 (hook/payoff, strongest designed moment/reference, weakest moment, substance
 without celebrity/title). Reject a generic slide treatment, meaningless
-cutaways, tiny captions or an unjustifiably flat whole batch even if the media
+cutaways, primitive clip-art scenes, tiny captions or an unjustifiably flat whole batch even if the media
 probe passes. A deliberate quiet emotional passage can be excellent without
 decorative effects. Review the whole batch's variety by content, without quotas.
+For a designed scene, compare its actual opening and dominant beat with the
+reference at equal phone width. Artwork/material, image scale and hierarchy
+must hold up before polishing motion. A toy diagram does not pass because its
+labels are correct or its render is stable. Speaker-first headlines must use
+the source identity and a faithful claim. Keep a visible creative exception
+when the result still falls short; do not relabel it exceptional.
 
 **Then review execution.** Check identity/current EDL, unclipped speech and
 preserved meaning, caption accuracy/readability/sync, meaningful cues,

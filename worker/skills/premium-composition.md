@@ -7,6 +7,32 @@ Choose a picture treatment, a typography relationship and the meaningful beat
 where each changes. Premium is hierarchy, spacing, good footage and controlled
 timing; a palette or effect count cannot supply those decisions.
 
+## Art direction before geometry
+
+A polished render of crude artwork is still crude artwork. Do not construct
+people, food, islands, buildings or products from circles/rectangles as a
+shortcut for an advanced editorial brief. Keep primitives for their real
+strengths: alignment, rules, measured data, masks and useful annotations.
+An intentionally illustrated brief is different; its artwork still needs
+coherent material, shape language and craft, not stock presentation icons.
+
+For a visual explanation, decide what the viewer should SEE, not which tool
+to exercise. Inspect real source imagery, then acquire a specific asset when
+it improves the argument. Use a real object/shot at a strong scale, deliberate
+cropping, an intelligible relationship to the words, and one controlled motion
+handoff. A photographic object pasted into the same crowded diagram is not a
+repair. Neither is a sequence of generic stock images. Conceptual imagery must
+be distinguishable from evidence of a real event; don't invent an account,
+endorsement, identity or statistic.
+
+At phone width the picture, claim and dialogue cannot all compete equally.
+Give the face or meaningful image enough area to matter. Prefer one readable
+claim over a mesh of tiny labels. Show the actual opening and strongest scene
+beside the chosen reference at the SAME display size. Judge image craft,
+hierarchy and motion continuity before checking technical polish. If the
+scene resembles a slide deck or simple game illustration, rebuild that scene;
+changing its palette or easing curve does not address the weakness.
+
 ## Evidence to inspect
 
 Inspect the opening, actual source framing, complete speech arc, reference
@@ -15,6 +41,17 @@ not another creator's watermark or an unrelated visual gimmick. Preserve the
 user's requested mood, source aspect, music and identity.
 
 ## Strong treatment patterns
+
+- **Speaker-first headline:** when the brief calls for attribution and the
+  speaker is verified from the source/user, use
+  `set_editorial_graphic(kind="headline", speaker="…", text="…")`.
+  The name leads the sentence, with quiet color distinction; the claim wraps
+  at a readable size in its box, holds still and leaves dialogue enabled.
+  Place it just above the actual picture. `font_size` defaults to .052 of the
+  short canvas edge; don't make the name an unrelated extra badge. Shorten
+  crowded copy instead of shrinking it. State a faithful, specific idea;
+  a paraphrase is not a verbatim quotation. Never infer identity from the
+  stylistic reference. Unknown speakers get an unattributed title instead.
 
 - **A phrase built in place:** `set_typography_scene` measures the complete
   phrase before revealing any part of it. Give deliberate `lines`, each with

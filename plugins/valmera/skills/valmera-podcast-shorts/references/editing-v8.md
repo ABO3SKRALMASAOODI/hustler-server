@@ -41,6 +41,19 @@ when you mean a graphic over uninterrupted speech.
 
 ## Independent headline, expressive dialogue
 
+Prefer the source-verified speaker name at the beginning of the headline,
+not in a separate name badge. Use the native measured
+`set_editorial_graphic(kind="headline", speaker=…, text=…, box=…)` for that
+relationship. The box belongs above the actual picture; the headline holds
+still and leaves dialogue visible. It rejects crowded copy instead of making
+fine print. Unknown identity: use an unattributed title. Never inherit the
+person's name from the reference or a previous podcast.
+
+In `compose_short.py`, `headline:{speaker,text,box,font_size,palette}` emits
+this call in `pending_native_operations`. Apply it with the other pending
+calls and verify the saved receipt. The old `headline:{text,y,scale}` still
+works for an unattributed heading; don't mix the two forms.
+
 `add_text(..., mute_captions=false)` keeps the topic headline and dialogue
 captions separate. Put the headline just above the actual picture, with heavy
 type, readable wrapping and no incidental date/place subline. It is visible

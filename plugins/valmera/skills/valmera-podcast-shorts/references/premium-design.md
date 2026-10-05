@@ -1,5 +1,45 @@
 # Current premium design direction
 
+## Latest owner correction: editorial craft, not toy diagrams
+
+The October 5 island/$1T/soup sample was rejected. Its stick figure, cylinder
+can, concentric island ovals and little labels resembled an old game. Treat
+that render as a negative example, even though it passed technical checks.
+Its restraint and native editability did not make its artwork good.
+
+Do not substitute primitive illustrations for the authored visual language
+of the references. Use real footage, well-composed photographic imagery or
+properly crafted artwork when an object earns a place. Acquire assets when
+needed; an efficiency target does not mean forbidding asset research and
+falling back to circles. Research related moments together, inspect a few
+strong candidates and use the best specific image. Keep provenance. For a
+hypothetical analogy, do not pass illustrative imagery off as a real event.
+Availability of generation depends on the deployment; inspect the live tools.
+
+The repair is the whole composition: scale, crop, white space, type and the
+handoff from performance to image to payoff. Do not merely put a photograph
+of a can into the old diagram. Do not respond by making every short a static
+headline either. The designed lane still earns its visual progression;
+the headline lane still earns stillness. One image and one clear thought
+usually read better than an interview thumbnail above a dashboard of labels.
+
+Prefer the verified speaker's name at the START of a headline, in the same
+reading sequence: “Elon Musk: What is money actually worth?” is an example,
+not reusable identity or copy. Reference `0568dc` shows this relationship.
+Use the actual source/user identity; if uncertain, omit attribution. Keep
+the claim faithful, the name quietly distinguished, and separate captions.
+`set_editorial_graphic(kind="headline", speaker=…, text=…, box=…)` handles
+native measured wrapping without shrinking type or adding a panel. Other
+lanes may use a speaker-first opening title without a persistent headline.
+
+Before an expensive full render, inspect one actual composed opening and
+one dominant design beat at phone size beside the relevant reference. Judge
+the image craft and hierarchy, not whether all planned objects are present.
+Then inspect their movement and story handoff in the candidate. Reject tiny
+faces, decorative icon diagrams, stock wallpaper and text-heavy dashboards.
+No numeric self-score, clean decode or render receipt overrides weak pixels.
+This early check replaces wasted polishing; it is not a new multi-stage ritual.
+
 Also read [the eleven additional reels](additional-reels.md) for the latest
 fixed-slot phrase builds, selective serif contrast, depth type and evidence
 gallery observations. They supplement the following seventeen references.

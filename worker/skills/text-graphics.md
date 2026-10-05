@@ -17,8 +17,12 @@ moving previous words. Use it for selective serif contrast and type beside a
 subject, not as a mandate to replace every subtitle with a title.
 
 MEASURED EDITORIAL COMPOSITIONS: `set_editorial_graphic` makes a statement,
-comparison, metric, quote, chapter or label as native editable layers in one
+comparison, metric, quote, chapter, label or speaker-first headline as native editable layers in one
 revision. Read `premium-composition` for selection and picture relationships.
+For kind=headline, pass the source-verified speaker and a faithful claim as
+text. The name starts the sentence; the measured heading holds still, wraps
+without tiny type, draws no panel and keeps dialogue captions. Place its box
+above the actual picture. Never guess identity from a reference.
 For custom layers, font_size is a fraction of the canvas short side and
 max_width is a text-column fraction; these opt-in units avoid guessing preset
 size_scale. Keep type sharp and separate from the footage card.

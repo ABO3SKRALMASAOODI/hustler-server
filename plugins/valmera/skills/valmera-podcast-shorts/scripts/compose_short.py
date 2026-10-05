@@ -64,7 +64,7 @@ def compile_short(plan,index):
     design=copy.deepcopy(plan.get('graphics',{}))
     design.update({'id':plan.get('id','short'),'duration_s':duration,
                    'picture':picture,'accent':accent})
-    if plan.get('headline'):
+    if plan.get('headline') and not plan['headline'].get('speaker'):
         design['headline']=plan['headline']
     for beat in design.get('beats',[]):
         if 'source_start' in beat or 'source_end' in beat:
@@ -82,6 +82,14 @@ def compile_short(plan,index):
     # source cues once, then submit these calls together after the base EDL.
     # Never imply these deferred calls are already present in the EDL above.
     native=[]
+    if plan.get('headline',{}).get('speaker'):
+        headline=copy.deepcopy(plan['headline'])
+        unknown=set(headline)-{'speaker','text','box','font_size','palette'}
+        if unknown:
+            raise ValueError('Speaker headlines use speaker, text, box, font_size and palette')
+        native.append({'tool':'set_editorial_graphic','args':{
+            'id':plan.get('id','short')+'-headline','kind':'headline',
+            'start':0,'end':duration,**headline}})
     for scene in copy.deepcopy(plan.get('typography_scenes',[])):
         if 'source_start' in scene or 'source_end' in scene:
             if 'start' in scene or 'end' in scene:

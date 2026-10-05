@@ -59,6 +59,10 @@ Use wide, square/rounded-card or full-frame compositions from the actual source
 and current references. Preserve the person and useful negative space; don't
 default to destructive portrait crops or the same black rectangle for every
 story. The current owner preference is advanced, restrained, modern design.
+The rejected island/soup diagram is a negative example: native primitives
+are not a shortcut to crafted imagery. Follow the current premium direction
+for asset selection and whole-scene composition. Prefer verified speaker-first
+headlines; never transfer a reference person's identity to the source.
 Preserve both native Valmera brand elements, including the **5-second
 ending**, and reserve that time within the 15–45s final. No added music unless
 explicitly requested. Preserve requested active-word highlighting. Motion,
