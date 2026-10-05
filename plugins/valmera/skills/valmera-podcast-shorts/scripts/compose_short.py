@@ -78,6 +78,32 @@ def compile_short(plan,index):
     ops=[{'action':'set','layer':k,'value':edl[k]} for k in ['keep','frame','captions']]
     ops+=layers['operations']
     if len(ops)>64:raise ValueError('too many operations for one batch; simplify the design')
+    # Designed type uses the server's measured native compiler. Convert all
+    # source cues once, then submit these calls together after the base EDL.
+    # Never imply these deferred calls are already present in the EDL above.
+    native=[]
+    for scene in copy.deepcopy(plan.get('typography_scenes',[])):
+        if 'source_start' in scene or 'source_end' in scene:
+            if 'start' in scene or 'end' in scene:
+                raise ValueError('scene uses source OR program window, not both')
+            scene['start'],scene['end']=source_window(
+                number(scene.pop('source_start'),'source_start'),
+                number(scene.pop('source_end'),'source_end'))
+        for line in scene.get('lines',[]):
+            for run in line.get('runs',[]):
+                if 'source_at' not in run:continue
+                if 'at' in run:raise ValueError('run uses source_at OR at, not both')
+                cue=number(run.pop('source_at'),'source_at')
+                offset=0; found=None
+                for a,b in keep:
+                    if a<=cue<b:
+                        found=round(offset+cue-a,6);break
+                    offset+=b-a
+                if found is None:raise ValueError('typography cue was removed by the chosen cuts')
+                run['at']=found
+        if not 0<=number(scene['start'],'scene start')<number(scene['end'],'scene end')<=duration:
+            raise ValueError('typography scene outside the resulting program')
+        native.append({'tool':'set_typography_scene','args':scene})
     words=[];offset=0
     for a,b in keep:
         for word in index.get('words',[]):
@@ -86,10 +112,10 @@ def compile_short(plan,index):
                 words.append({'w':word['w'],'source_start':x,'source_end':y,
                   'start':round(offset+max(a,x)-a,4),'end':round(offset+min(b,y)-a,4)})
         offset+=b-a
-    return {'edl':edl,'operations':ops,'cues':layers['cues'],
+    return {'edl':edl,'operations':ops,'pending_native_operations':native,'cues':layers['cues'],
             'program_duration_s':duration,'expected_final_duration_s':duration+5,
             'program_words':words,'review':'unreviewed',
-            'note':'Fresh shared-source child only. Inspect speech joins, face clearance, phone type and moving result.'}
+            'note':'Fresh shared-source child only. Apply the base operations, then any pending_native_operations in one apply_edit_recipe. Verify both saved receipts before rendering. Inspect speech joins, face clearance, phone type and moving result.'}
 
 
 def main():

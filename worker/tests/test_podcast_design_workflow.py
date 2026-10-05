@@ -59,6 +59,30 @@ def test_design_batch_is_editable_and_revision_preserves_unrelated_work(tmp_path
     assert r'\t(' in ass.read_text(), 'native motion must reach the renderer'
 
 
+def test_native_type_cues_use_retained_program_clock_and_are_explicitly_pending():
+    import copy
+    index={'video':{'duration':120},'words':[]}
+    plan={'id':'timed','keep':[[10,15],[30,35]],'typography_scenes':[
+        {'id':'payoff','source_start':30,'source_end':35,'lines':[
+            {'runs':[{'text':'One','source_at':30.2},{'text':'idea','source_at':32}]}]}]}
+    original=copy.deepcopy(plan)
+    result=compile_short(plan,index)
+    assert plan==original
+    op=result['pending_native_operations'][0]
+    assert op['tool']=='set_typography_scene'
+    assert (op['args']['start'],op['args']['end'])==(5,10)
+    assert [r['at'] for r in op['args']['lines'][0]['runs']]==[5.2,7]
+    assert result['edl']['texts']==[], 'deferred native calls are not falsely claimed as applied'
+    plan['typography_scenes'][0]['lines'][0]['runs'][0]['source_at']=20
+    with pytest.raises(ValueError,match='removed'):compile_short(plan,index)
+    plan=copy.deepcopy(original)
+    plan['typography_scenes'][0]['source_start']=14
+    with pytest.raises(ValueError,match='crosses a cut'):compile_short(plan,index)
+    plan=copy.deepcopy(original)
+    plan['typography_scenes'][0]['lines'][0]['runs'][0]['at']=.2
+    with pytest.raises(ValueError,match='not both'):compile_short(plan,index)
+
+
 def test_graphic_rejects_unreadable_card_instead_of_shrinking_type():
     design=storyboard()
     design['beats']=[{'kind':'statement','text':'This sentence cannot be read in one flash',

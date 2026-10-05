@@ -16,6 +16,20 @@ user's requested mood, source aspect, music and identity.
 
 ## Strong treatment patterns
 
+- **A phrase built in place:** `set_typography_scene` measures the complete
+  phrase before revealing any part of it. Give deliberate `lines`, each with
+  `runs` containing exact text and its real PROGRAM `at` cue. Runs stay in
+  fixed slots until the scene end. Pair one sans family with a sparse
+  Instrument Serif italic word when that contrast distinguishes setup from
+  consequence; don't alternate fonts mechanically. `align=left/right` places
+  the group in useful negative space beside a speaker. `reveal=build` reveals
+  runs at speech cues; `still` displays the full statement. A run may contain
+  several words. `font_size` is relative to the canvas short edge; line `size`
+  and run `scale` control hierarchy. Overflow is rejected: break or shorten
+  the line instead of making it tiny. Stable id replaces the group; removal
+  restores its owned caption windows. Use `mute_captions=false` for separate
+  topic labels. Scenes, footage cards and editorial graphics can share one
+  `apply_edit_recipe` transaction.
 - **Picture as an object:** `set_frame(picture=[...])` preserves wide footage
   on a portrait canvas. `set_picture_card` then gives that footage its own
   rounded box, hairline border, quiet shadow and a lift/reveal opening or
@@ -46,6 +60,8 @@ user's requested mood, source aspect, music and identity.
   `mute_captions=true` only when a graphic replaces the spoken words; a
   complementary comparison or label should not erase the dialogue subtitles.
   For whole readable phrases with spoken-word tint, use `preset="composed"`.
+  In karaoke mode `animation="fade"` eases tint without hiding already visible
+  words; `none` makes the tint immediate. Inspect actual word boundaries.
   It shows the phrase together, keeping connectors in context. Use reveal
   when accumulation itself is the intended motion, not as a universal default.
 - **Movement with a landing:** text and vectors share local keyframes. A small
@@ -73,6 +89,10 @@ Tiny explanatory subtitles under generic PROGRESS/FUTURE headings; the same
 panel on every noun; repeated noisy word effects; disconnected animations;
 rounded cards so small the person disappears; hiding a gesture to show stock;
 flat speech with no chosen focal moment despite a designed-edit brief.
+An entrance replayed at every cue; words re-centering as the phrase builds;
+changing typeface or position merely because another word arrived.
+Behind-subject type requires `add_text_behind` and a verified real matte.
+Perspective galleries/3D cylinders are not supplied by a typography scene.
 
 ## Verification procedure
 

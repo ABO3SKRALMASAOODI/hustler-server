@@ -19,6 +19,8 @@ remains v7 so interrupted runs can still be reconciled.
 - **Current design brief:** coordinators and editors also read
   [premium reference direction](references/premium-design.md). It supersedes
   older straight-edge, neon-accent and elastic-motion defaults.
+  Its [eleven additional reels](references/additional-reels.md) cover the latest
+  mixed-type phrase builds, depth titles, layouts and corrected caption motion.
 - **Resuming a pre-v8 run:** preserve that run's frozen brief and the v7
   contracts it used. Never rewrite its accepted artifacts to claim v8 quality.
 

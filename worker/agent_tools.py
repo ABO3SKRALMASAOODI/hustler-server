@@ -80,6 +80,7 @@ import quality_verifier
 import tool_outcome as tool_outcome_mod
 import tool_retry
 import webrecord
+import typography_scenes
 import version as worker_version
 from captions import CAPTION_DESIGN_VERSION, KARAOKE_HARD_MAX
 from schemas import (CANVAS_DIMS, CaptionStyle, clean_fingerprint,
@@ -13583,6 +13584,36 @@ def remove_editorial_graphic(ctx, id):
     return ctx.write_edl(edl, f"removed editorial graphic {id} and its owned caption suppression")
 
 
+def set_typography_scene(ctx, id, start, end, lines, box=None, align="center",
+                         reveal="build", motion="settle", color="#F4F2EE",
+                         font_size=.075, leading=1.16, mute_captions=True):
+    edl = json.loads(json.dumps(ctx.latest_edl()["json"]))
+    video = ctx.index.get("video") or {}
+    W,H = renderer.frame_dims(int(video.get("width") or 1920),
+                             int(video.get("height") or 1080),
+                             (edl.get("frame") or {}).get("ratio","source"), delivery=True)
+    if edl.get("canvas"):
+        W,H = edl["canvas"]["width"],edl["canvas"]["height"]
+    try:
+        result = typography_scenes.compose(id=id,start=start,end=end,lines=lines,
+            box=box,align=align,reveal=reveal,motion=motion,color=color,
+            font_size=font_size,leading=leading,mute_captions=mute_captions,W=W,H=H)
+    except (ValueError,TypeError,KeyError) as exc:
+        return "REJECTED: " + str(exc)[:400]
+    edl["texts"] = [t for t in edl.get("texts") or []
+                    if not t.get("id", "").startswith(result["prefix"])] + result["texts"]
+    return ctx.write_edl(edl, f"typography scene {id}: {result['runs']} speech-cued runs with fixed measured placement; inspect face clearance")
+
+
+def remove_typography_scene(ctx, id):
+    if not re.fullmatch(r"[a-zA-Z0-9_-]{1,48}", str(id)):
+        return "REJECTED: invalid typography scene id"
+    edl = json.loads(json.dumps(ctx.latest_edl()["json"]))
+    edl["texts"] = [t for t in edl.get("texts") or []
+                    if not t.get("id", "").startswith(f"ts_{id}__")]
+    return ctx.write_edl(edl, f"removed typography scene {id} and its owned caption suppression")
+
+
 def set_screen_frame(ctx, inset=None, radius=None, shadow=None,
                      background=None, background2=None, direction=None):
     """Inset the picture, round its corners, drop a shadow and float it on a
@@ -19724,6 +19755,9 @@ def complete_edit_plan_steps(ctx, completed_steps=None, blocked_steps=None,
 # render, asks the user, or modifies pixels outside the EDL is intentionally
 # absent: transactional means no external side effect can escape an abort.
 RECIPE_TOOLS = frozenset({
+    "set_typography_scene", "remove_typography_scene",
+    "set_picture_card", "remove_picture_card",
+    "set_editorial_graphic", "remove_editorial_graphic",
     "keep_segments", "cut_range", "cut_output_range", "restore_range",
     "cut_silences", "remove_filler_words",
     "add_captions", "set_caption_style", "set_caption_fixes",
@@ -23427,6 +23461,32 @@ TOOLS = {
          "motion":{"type":"string","enum":["settle","none"]},"motion_motif":{"type":"string"},
          "treatment":{"type":"string","enum":["panel","type"]},"mute_captions":{"type":"boolean"}}),
     "remove_editorial_graphic": (remove_editorial_graphic,"Remove an editorial group and its caption suppression.",{"id":{"type":"string"}}),
+    "set_typography_scene": (
+        set_typography_scene,
+        "Compose a speech-cued mixed-font phrase in ONE revision, as editable native text. "
+        "All words reserve their final positions: earlier words never jump or replay their entrance. "
+        "Stable id replaces its group. lines is 1-6 rows, each {runs:[{text,at,font,italic,scale,color}],size?}. "
+        "at is the REAL PROGRAM cue in seconds (not source or relative time); default=start. "
+        "Runs stay until the shared end. Use build to accumulate at spoken cues; still displays everything. "
+        "Pair Inter Display Bold with sparse Instrument Serif italic for meaningful contrast, not every word. "
+        "A line's size and run scale multiply font_size (fraction of canvas short edge). "
+        "box=[left,top,right,bottom] is a measured region; align left/center/right; motion settle/none. "
+        "Oversized/overcrowded lines are rejected instead of silently shrinking or reflowing. "
+        "mute_captions=true replaces dialogue ONLY in these actual live windows; false for independent labels. "
+        "Use real words and cue times from get_kept_transcript. Inspect the opening, build, settled phrase "
+        "and face clearance. This is designed typography, not a substitute for selecting a good story.",
+        {"id":{"type":"string"},"start":{"type":"number"},"end":{"type":"number"},
+         "lines":{"type":"array","minItems":1,"maxItems":6,"items":{"type":"object",
+            "properties":{"size":{"type":"number"},"runs":{"type":"array","items":{"type":"object",
+              "properties":{"text":{"type":"string"},"at":{"type":"number"},
+                "font":{"type":"string","enum":list(TEXT_FONTS)},"italic":{"type":"boolean"},
+                "scale":{"type":"number"},"color":{"type":"string"}},"required":["text"]}}},"required":["runs"]}},
+         "box":{"type":"array","items":{"type":"number"},"minItems":4,"maxItems":4},
+         "align":{"type":"string","enum":["left","center","right"]},
+         "reveal":{"type":"string","enum":["build","still"]},
+         "motion":{"type":"string","enum":["settle","none"]},"color":{"type":"string"},
+         "font_size":{"type":"number"},"leading":{"type":"number"},"mute_captions":{"type":"boolean"}}),
+    "remove_typography_scene": (remove_typography_scene,"Remove a native typography scene and its owned caption suppression.",{"id":{"type":"string"}}),
     "set_screen_frame": (
         set_screen_frame,
         "THE tool for 'that floating rounded window on a gradient' look — the "
@@ -24629,6 +24689,7 @@ TOOL_DOMAINS = {
         "get_words",
     },
     "graphics": {
+        "set_typography_scene", "remove_typography_scene",
         "set_editorial_graphic", "remove_editorial_graphic",
         "add_kinetic_text", "add_text", "remove_text", "set_text_motion",
         "add_text_behind", "add_title_card",
@@ -24744,6 +24805,8 @@ def planning_tool_names():
     return compact_tool_names(_Fresh())
 
 REQUIRED_ARGS = {
+    "set_typography_scene": ["id", "start", "end", "lines"],
+    "remove_typography_scene": ["id"],
     "set_picture_card": ["id", "start", "end"],
     "remove_picture_card": ["id"],
     "set_editorial_graphic": ["id", "kind", "text", "start", "end"],
@@ -24861,6 +24924,7 @@ REQUIRED_ARGS = {
 # fetch_url is here for the capabilities digest; its success is tracked
 # separately via ctx.urls_fetched (it creates an asset the agent then places).
 WRITE_TOOLS = {"apply_edit_batch", "keep_segments", "cut_range", "cut_output_range",
+               "set_typography_scene", "remove_typography_scene",
                "set_picture_card", "remove_picture_card",
                "set_editorial_graphic", "remove_editorial_graphic",
                "restore_range",

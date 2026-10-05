@@ -556,6 +556,26 @@ def test_existing_audio_gain_is_transaction_safe_recipe_work():
     assert "set_audio_gain" in agent_tools.RECIPE_TOOLS
 
 
+def test_measured_typography_compiles_once_and_late_rejection_rolls_it_back():
+    scene={"tool":"set_typography_scene","args":{"id":"idea","start":0,"end":3,
+        "lines":[{"runs":[{"text":"One","font":"Instrument Serif","italic":True},
+                           {"text":"idea","at":.6}]}]}}
+    ctx,fake=_real_ctx()
+    result=agent_tools.apply_edit_recipe(ctx,[
+        {"tool":"set_frame","args":{"ratio":"9:16","mode":"pad_blur"}},scene])
+    assert result.startswith("EDL v1 -> v2")
+    assert fake.inserts==1
+    texts=fake.rows[-1]["json"]["texts"]
+    assert len(texts)==2 and texts[0]["italic"] is True
+    assert texts[1]["start"]==.6
+    ctx,fake=_real_ctx()
+    result=agent_tools.apply_edit_recipe(ctx,[scene,
+        {"tool":"set_typography_scene","args":{**scene["args"],"end":.1}}])
+    assert fake.inserts==0
+    assert not fake.rows[-1]["json"].get("texts")
+    assert "abort" in result.lower()
+
+
 def test_censor_regions_compile_with_other_repairs_in_one_version():
     ctx, fake = _real_ctx()
     result = agent_tools.apply_edit_recipe(ctx, [

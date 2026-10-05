@@ -268,7 +268,12 @@ def test_spotlight_is_one_word_per_event_with_glow(tmp_path):
     captions.build_ass(edl, index, tl, out, play_res=(1080, 1920))
     txt = open(out).read()
     assert txt.count("Dialogue:") == 6          # 3 words x (glow + main)
-    assert len(re.findall(r"\\blur\d", txt)) == 3
+    # Each word resets inherited blur before its own treatment. Only the
+    # three glow layers should finish with a positive blur radius.
+    events=[line for line in txt.splitlines() if line.startswith('Dialogue:')]
+    final_blurs=[float(re.findall(r"\\blur([\d.]+)", line)[-1]) for line in events]
+    assert sum(value > 0 for value in final_blurs) == 3
+    assert sum(value == 0 for value in final_blurs) == 3
     assert "DISCIPLINE" in txt                  # uppercase is the look
     # dead centre of the 1080x1920 frame — the one preset allowed mid-frame
     assert r"\pos(540,960)" in txt

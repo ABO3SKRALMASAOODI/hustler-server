@@ -1167,7 +1167,7 @@ def _base_tags(p, s, px, f):
     return (rf"\fn{_font_of(p, s)}\fs{px}\b0\i0\1c{_inline_hl(s['color'])}"
             rf"\3c{outline_color}\bord{outline}"
             rf"\shad{shadow}{spacing}"
-            rf"\fscx100\fscy100")
+            rf"\fscx100\fscy100\alpha&H00&\blur0\frz0")
 
 
 def _emph_scale(s, p):
@@ -2108,6 +2108,14 @@ def events_premium(out_words, style=None, max_words=None,
             else:  # karaoke: whole chunk visible, spoken word lights up
                 active_motion = (_word_anim_tags(word_anim, px)
                                  if word_anim in WORD_ANIMS else _POP_ACTIVE)
+                if word_anim == "fade":
+                    # A karaoke word is ALREADY visible. Re-entering from
+                    # alpha=FF at each cue makes it blink out just as it is
+                    # spoken (and short words never finish that entrance).
+                    # Ease only its tint; preserve its outline and geometry.
+                    tint_ms = max(1, min(90, round((end-start)*500)))
+                    active_motion = (rf"\1c{_inline_hl(s['color'])}"
+                                     rf"\t(0,{tint_ms},\1c{accent})")
                 if p["active"] == "box" and treats[i] != "box":
                     bx = max(2, round(0.22 * px))
                     by = max(2, round(0.13 * px))
