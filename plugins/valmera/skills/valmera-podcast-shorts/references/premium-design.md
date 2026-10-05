@@ -61,8 +61,7 @@ Rounded picture treatment is allowed; do not hide the headline behind it.
 `compose_short.py` now starts with the restrained `composed` caption recipe.
 It presents a complete phrase with spoken-word tint and semantic size emphasis,
 without the isolated connector states or one-word-per-line default of stacked
-reveal captions. That default addresses a failure seen in the independent
-October 5 tests; still inspect the actual words, sizes and timing.
+reveal captions. Still inspect the actual words, sizes and timing.
 `kinetic`, `quiet` and `editorial` remain available. Choose a recipe then inspect
 the actual phrases; no helper can choose a story or certify taste. Prefer live
 `set_editorial_graphic` for measured panels over the earlier loose local card
@@ -73,9 +72,10 @@ width. Identify the weakest moment and repair a concrete weakness before
 adding decoration. Never claim exceptional autonomous performance from a
 single hand-directed showcase or a clean technical render.
 
-The October 5 trials were readable but too conservative to certify exceptional
-editing. A rounded picture plus captions is a foundation, not a finished art
-direction for the designed lanes. The fast lane still needs a visible sequence
-of idea/evidence/reaction; the headline lane earns stillness through its story.
-If the selected passage spends most of its time in setup, pick a better passage
-before using typography to camouflage weak pacing.
+A rounded picture plus captions is a foundation, not a finished art direction
+for the designed lanes. The fast lane still needs a visible sequence of
+idea/evidence/reaction; the headline lane earns stillness through its story.
+If the selected passage spends most of its time in setup, find a self-contained
+start near the answer or pick a better passage. Faithful visual context may
+replace routine interviewer setup; it must not replace an essential spoken
+qualification. Never use typography to camouflage weak pacing.
