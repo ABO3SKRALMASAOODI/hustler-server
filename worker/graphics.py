@@ -423,6 +423,8 @@ def _compile_item(tx, out_dur, play_res, y_shift=0.0, enforce_min=True,
     except (TypeError, ValueError):
         size_scale = 1.0
     px = max(12, round(tpl["base_size"] * f * size_scale))
+    if tx.get("font_size") is not None:
+        px = max(6, round(float(tx["font_size"]) * min(W, H) * size_scale))
     # Letter-spacing is suppressed outright for shaping-sensitive scripts —
     # see SHAPING_SENSITIVE_RANGES. Resolved from the item's OWN text before
     # any wrapping so both decks and every line agree on one answer.
@@ -479,6 +481,8 @@ def _compile_item(tx, out_dur, play_res, y_shift=0.0, enforce_min=True,
         usable = max(1.0, W - x_frac * W - edge_x)
     else:
         usable = max(1.0, 2 * min(x_frac * W, W - x_frac * W) - 2 * edge_x)
+    if tx.get("max_width") is not None:
+        usable = min(usable, float(tx["max_width"]) * W)
 
     def budget(p, s):
         return max(4, int(usable / (tpl["char_w"] * p + s)))

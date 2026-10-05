@@ -1238,6 +1238,8 @@ def _authored_department_state(edl, has_main_video=True):
             return False
 
     motion_authored = bool(
+        any(c.get("entrance", "lift") != "none" or c.get("exit", "fade") != "none"
+            for c in effects.get("picture_cards") or []) or
         effects.get("zooms") or effects.get("stylize") or
         effects.get("frame_shifts") or effects.get("custom") or
         effects.get("fade_in_s") or effects.get("fade_out_s") or

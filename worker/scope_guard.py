@@ -143,7 +143,7 @@ def _effects_state(edl: Dict[str, Any], timeline_changed: bool) -> Any:
     effects = copy.deepcopy(edl.get("effects"))
     if not effects or not timeline_changed:
         return effects
-    for lane in ("zooms", "regions", "stylize", "custom"):
+    for lane in ("zooms", "regions", "stylize", "custom", "picture_cards"):
         for item in effects.get(lane) or []:
             item.pop("start", None)
             item.pop("end", None)

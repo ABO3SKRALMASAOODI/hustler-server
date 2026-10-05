@@ -24,6 +24,7 @@ TRANSLATION CAPTIONS ("arabic subtitles", "translate the captions to X"):
 - Style-only follow-ups ("smaller", "nicer font") → set_caption_style, one call, no items re-send. Text corrections → ONE add_captions(mode='items') call with the full corrected list, same timings.
 
 PRESET FAMILIES — prioritize readable, coherent typography over a fixed word count. Choose one coherent visual grammar for the whole video:
+- `composed`: a complete readable phrase, muted spoken-word tint, restrained semantic size hierarchy and no default bounce. Useful when the user wants active-word highlighting without isolated reveal fragments. Custom color/animation remain available.
 - For a vague clean-edit brief, choose restrained phrase captions that preserve meaning and reading time. Use documentary for subtitles; stacked 1-2 word type with fade can suit punchy delivery. Choose from actual speech pace and composition, not the adjective “premium.”
 - Long-form interviews, accessibility, education, changing/bright backgrounds → 'documentary': restrained phrases on a translucent dark panel.
 - News, explainers, headlines, newsroom/B-roll → 'broadcast': left-aligned lower-third panel with sparse accent hierarchy.

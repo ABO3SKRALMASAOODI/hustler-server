@@ -64,7 +64,7 @@ words on both clocks and the expected duration including the 5s ending. It
 never uploads, re-indexes, transcribes or judges the edit.
 
 The plan contains `id`, chronological source `keep` ranges, `caption_recipe`
-(`kinetic`, `quiet`, `editorial`), meaningful `emphasis_words`, optional `accent`,
+(`composed`, `kinetic`, `quiet`, `editorial`), meaningful `emphasis_words`, optional `accent`,
 `frame`, `caption_style` overrides, `headline:{text,y,scale}` and `graphics`.
 `graphics.beats` use the kinds below. Use `source_start` / `source_end` for a
 spoken cue in one kept source range; the compiler maps it after the cuts. Or

@@ -10,6 +10,13 @@ Inspect exact words/timing, clear space, face/UI geometry, target objects, capti
 
 ## Strong treatment patterns
 
+MEASURED EDITORIAL COMPOSITIONS: `set_editorial_graphic` makes a statement,
+comparison, metric, quote, chapter or label as native editable layers in one
+revision. Read `premium-composition` for selection and picture relationships.
+For custom layers, font_size is a fraction of the canvas short side and
+max_width is a text-column fraction; these opt-in units avoid guessing preset
+size_scale. Keep type sharp and separate from the footage card.
+
 TEXT TEMPLATES (add_text / set_text_motion / remove_text) — designed text burned over program time: 'title' (opening card), 'subtitle' (support line), 'lower_third' (name/context bar), 'callout' (short pointed label), 'big_number' (a huge stat like '10x'), 'quote', 'chapter'. Entrances: typewriter (entrance only), pop, whip, blur_in — and 'none' for INSTANT text ("no effect", "just appear" mean entrance='none' / exit='none'). add_text draws OVER the footage — it does not clear the frame. Dictated titles/labels/stats → add_text; spoken-word captions stay with add_captions. By default designed text owns caption suppression for its live window: captions can be enabled before or after without stacking, and moving/resizing/removing the text carries or removes its mute automatically. Do not create a separate caption_mutes span for the same graphic. Use mute_captions=false for an independent headline in a separate region; dialogue captions remain visible. outline_width=0 and shadow=0 give clean flat type on a solid panel; omitted values retain the template edges.
 
 ONE TYPE SYSTEM PER VIDEO. A title in one template, a callout in another, a subtitle in a third, each with unrelated movement, reads as a slide deck. Choose one hierarchy, accent system and motion language, then vary energy only when meaning or music earns it. Keep words few and bind each graphic to the exact phrase, object, action, or beat it clarifies. Put words in the frame's CLEAR space (sky, wall, floor — read it off the filmstrip or look_at), never across a face. Text that simply arrives with a cut can be more confident than decorative movement.

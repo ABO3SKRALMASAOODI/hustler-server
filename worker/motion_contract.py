@@ -104,6 +104,14 @@ def motion_events(edl, index=None):
     duration = _number(blocks[-1]["out_end"], 0.0) if blocks else 0.0
 
     effects = edl.get("effects") or {}
+    for row in effects.get("picture_cards") or []:
+        start, end = float(row["start"]), float(row["end"])
+        edge = min(float(row.get("duration_s", .45)), (end-start)*.3)
+        for mode, a, b in ((row.get("entrance", "lift"), start, start+edge),
+                           (row.get("exit", "fade"), end-edge, end)):
+            if mode != "none":
+                _add(events, "media", "picture_card", a, b, row.get("id"),
+                     mode, row.get("motion_motif"))
     for row in effects.get("zooms") or []:
         if isinstance(row, dict):
             _add(events, "camera", "zoom", row.get("start"), row.get("end"),

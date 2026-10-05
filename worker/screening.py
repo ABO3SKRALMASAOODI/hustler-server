@@ -138,6 +138,12 @@ def _event_frames(edl, duration):
                     f"{kind} graphic {i} entrance")
 
     effects = edl.get("effects") or {}
+    for i, card in enumerate(effects.get("picture_cards") or [], 1):
+        start, end = float(card["start"]), float(card["end"])
+        edge = min(float(card.get("duration_s", .45)), (end-start)*.3)
+        add(start+edge/2, f"picture card {i} opening")
+        add((start+end)/2, f"picture card {i} settled framing")
+        add(end-edge/2, f"picture card {i} closing")
     for i, zoom in enumerate(effects.get("zooms") or [], 1):
         start, end = _number(zoom.get("start")), _number(zoom.get("end"))
         if start is None or end is None or end <= start:

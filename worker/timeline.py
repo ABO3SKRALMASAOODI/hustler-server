@@ -19,11 +19,11 @@ pre-speed behavior (piece factor 1.0, one piece per segment).
 
 try:
     from schemas import (speed_pieces, clip_anim, keep_boundaries,
-                         SCREEN_TAKEOVER_MIN_S)
+                         SCREEN_TAKEOVER_MIN_S, MIN_SPAN_S)
 except ImportError:      # loaded standalone by the backend (importlib):
     # routes/video.py registers the schemas module as 'worker_schemas'
     from worker_schemas import (speed_pieces, clip_anim, keep_boundaries,
-                                SCREEN_TAKEOVER_MIN_S)
+                                SCREEN_TAKEOVER_MIN_S, MIN_SPAN_S)
 
 
 def _ins_tuple(i):
@@ -1019,6 +1019,21 @@ def remap_program_items(edl, old_tl, new_tl):
             kept_regs.append(r)
         if rg_changed:
             fx["regions"] = kept_regs
+            fx_changed = True
+    if fx.get("picture_cards"):
+        cards = []
+        for card in fx["picture_cards"]:
+            card = dict(card)
+            # Like text and overlays, this is a composition of the program,
+            # not an independently chosen source shot.
+            end = min(card["end"], prog)
+            if end-card["start"] < MIN_SPAN_S:
+                region_notes.append(f"note: picture card {card['id']} removed outside the shortened edit.")
+                continue
+            card["end"] = end
+            cards.append(card)
+        if cards != fx["picture_cards"]:
+            fx["picture_cards"] = cards or None
             fx_changed = True
     if fx.get("frame_shifts"):
         # CONTENT-anchored POINT, exactly like an sfx: "go vertical when he
