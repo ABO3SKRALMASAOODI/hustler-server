@@ -113,6 +113,11 @@ def append_graph(parts, vlabel, inputs, W, H, fps, source_rect=None):
         parts.append(f"[{p}bg][{p}tile]overlay=x={x}:y='{ye}':shortest=1:format=auto[{p}placed]")
         parts.append(f"[{idx}:v]setpts=PTS-STARTPTS,format=rgba[{p}plate]")
         parts.append(f"[{p}placed][{p}plate]overlay=0:0:shortest=1:format=auto,setpts=PTS+{start:.6f}/TB[{p}card]")
-        parts.append(f"[{p}pass][{p}card]overlay=0:0:eof_action=pass:enable='gte(t,{start:.6f})*lt(t,{end:.6f})'[{p}out]")
+        # trim/setpts and framesync quantize fractional cut clocks differently.
+        # The card branch can reach EOF one or two frames before the program
+        # clock reaches end. Hold its last composed frame until that exact
+        # boundary; passing through at EOF briefly exposes square footage.
+        # The explicit enable interval still releases it at the authored end.
+        parts.append(f"[{p}pass][{p}card]overlay=0:0:eof_action=repeat:repeatlast=1:enable='gte(t,{start:.6f})*lt(t,{end:.6f})'[{p}out]")
         vlabel = f"{p}out"
     return vlabel

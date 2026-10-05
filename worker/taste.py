@@ -102,24 +102,51 @@ def _separate_authored_text(a, b, duration, play_res):
     """Explicit, non-intersecting labels can form one designed composition.
 
     Count alone cannot judge a diagram, metric or two-colour lockup. Reuse
-    the renderer's text bounds for pinned, stationary-position text. Moving
-    positions/rotation still need rendered review and retain the warning.
+    the renderer's text bounds for pinned text, including its translation
+    and scale envelope while both are visible. Rotation needs rendered review.
+    A phrase settling by a few pixels is not a pile of competing title cards.
     """
     if not all(t.get("x") is not None and t.get("y") is not None for t in (a, b)):
         return False
-    from graphics import _compile_item, _overlaps, anim_bounds
+    from graphics import _compile_item, _overlaps
+    from schemas import anim_bounds, anim_value
+    overlap_start = max(_num(a.get("start")), _num(b.get("start")))
+    overlap_end = min(_num(a.get("end")), _num(b.get("end")))
+    if overlap_end <= overlap_start:
+        return True
     bounds = []
     for t in (a, b):
         motion = t.get("motion") or {}
-        if any(motion.get(key) for key in ("x", "y", "rotation")):
+        if motion.get("rotation"):
             return False
         layout = dict(t)
+        def window_bounds(curve):
+            if not isinstance(curve, list):
+                return anim_bounds(curve)
+            start = overlap_start - _num(t.get("start"))
+            end = overlap_end - _num(t.get("start"))
+            times = [start, end] + [
+                _num(k.get("t")) for k in curve
+                if start < _num(k.get("t")) < end]
+            values = [anim_value(curve, at) for at in times]
+            return min(values), max(values)
         if motion.get("scale"):
             layout["size_scale"] = _num(t.get("size_scale"), 1) * max(
-                0.05, anim_bounds(motion["scale"])[1])
-        bounds.append(_compile_item(layout, duration, play_res,
-                                    size_scale_bounds=(0.02, 12.0) if motion
-                                    else (0.4, 3.0)))
+                0.05, window_bounds(motion["scale"])[1])
+        box = _compile_item(layout, duration, play_res,
+                            size_scale_bounds=(0.02, 12.0) if motion
+                            else (0.4, 3.0))
+        if not box:
+            return False
+        for axis, low_edge, high_edge, dimension in (
+                ("x", "left", "right", play_res[0]),
+                ("y", "top", "bottom", play_res[1])):
+            if motion.get(axis) is not None:
+                lo, hi = window_bounds(motion[axis])
+                base = box[f"base_{axis}_frac"]
+                box[low_edge] += (lo-base)*dimension - 1
+                box[high_edge] += (hi-base)*dimension + 1
+        bounds.append(box)
     return bool(all(bounds) and not _overlaps(*bounds))
 
 
