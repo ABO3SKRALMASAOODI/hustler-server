@@ -41,6 +41,10 @@ Read Valmera's `premium-composition` skill and the live tool schemas once.
   rounded edges, a fine border, shadow, and lift/reveal openings/closings while
   captions/branding retain their independent resolution and placement. Choose
   frame.picture first to preserve the source composition. Inspect actual crop.
+  A card entrance runs on every new card window. During continuing speech,
+  inspect the handoff between adjacent windows: use `entrance="none"` when a
+  direct scale/framing change should preserve the face. Fade/lift deliberately
+  fades the new picture in; it is not a seamless shape morph.
 - `set_editorial_graphic(id,kind,text,start,end,secondary,eyebrow,...)` composes
   a statement/comparison/metric/quote/chapter/label in one revision. The output
   is editable native text and vectors. Stable ids replace groups. Hold long

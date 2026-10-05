@@ -10,7 +10,7 @@ Inspect the source words and camera/gesture changes in the selected range.
 Resolve hook, turn and payoff before styling. Write a short `design.json` with
 the visual idea, deliberate caption grammar and exact moments that need visual
 explanation. Use the relevant saved reference frames/motion already supplied
-in the assignment. Do not re-analyze all seven references for each child.
+in the assignment. Do not re-analyze the full reference library for each child.
 
 ## Preserve the original source clock
 
@@ -92,7 +92,7 @@ When a word, contrast or figure deserves a graphic, optionally author:
   "id":"a-story-specific-slug",
   "duration_s":24,
   "picture":[0,0.2890625,1,0.7109375],
-  "accent":"#BDF76A",
+  "accent":"#B9AB91",
   "beats":[
     {"kind":"contrast","start":8,"end":10.4,
      "before":"An answer","after":"The right answer",
@@ -114,6 +114,10 @@ Run `python <skill>/scripts/design_graphics.py design.json --edl edl.json
 the current `base_version` and a unique `operation_id`. Existing matching IDs
 are updated rather than duplicated. Related cuts, framing and caption changes
 may share the same deliberate batch. Do not render after each operation.
+Check the saved receipt before rendering. A rejected write leaves the previous
+EDL in place; repair the rejected arguments and confirm the intended layers
+were saved before spending a preview on that older, incomplete design. Local
+authoring scripts must stop on validation errors for the same reason.
 
 These are editable native text/vector layers. Make custom compositions when
 the idea needs them; do not convert every noun into the same card. To emphasize
