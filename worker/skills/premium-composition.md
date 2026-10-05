@@ -42,8 +42,9 @@ user's requested mood, source aspect, music and identity.
   reveal, semantic `emphasis_words`, active-word color and separate animation.
   For restrained work use fade/rise or still phrases and modest scale contrast.
   Elastic/bounce, glow and rotating colors are appropriate only when the
-  reference/brief earns them. Designed graphics own duplicate caption mutes;
-  a separate headline uses `mute_captions=false`.
+  reference/brief earns them. Graphics preserve captions by default. Set
+  `mute_captions=true` only when a graphic replaces the spoken words; a
+  complementary comparison or label should not erase the dialogue subtitles.
   For whole readable phrases with spoken-word tint, use `preset="composed"`.
   It shows the phrase together, keeping connectors in context. Use reveal
   when accumulation itself is the intended motion, not as a universal default.

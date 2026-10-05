@@ -69,7 +69,7 @@ def test_compositions_fit_and_keep_one_editable_hierarchy(kind,dims):
     for a,b in zip(sorted(boxes,key=lambda b:b['top']),sorted(boxes,key=lambda b:b['top'])[1:]):
         assert a['bottom']<=b['top'],f'{kind}: type levels overlap'
     assert all(t['shadow']==0 and t['outline_width']==0 for t in design['texts'])
-    assert all(t['mute_captions']==(kind!='label') for t in design['texts'])
+    assert all(not t['mute_captions'] for t in design['texts'])
 
 
 def test_short_hold_and_dense_label_rejected():
@@ -97,7 +97,8 @@ def test_atomic_group_replacement_and_removal_preserve_other_work():
 
     ctx = Context()
     before = copy.deepcopy(ctx.edl)
-    assert agent_tools.set_editorial_graphic(ctx, 'thesis', 'statement', 'One clear idea', 0, 3) == 'saved'
+    assert agent_tools.set_editorial_graphic(ctx, 'thesis', 'statement', 'One clear idea', 0, 3, mute_captions=True) == 'saved'
+    assert any(t['mute_captions'] for t in ctx.edl['texts'] if t['id'].startswith('eg_thesis__'))
     assert agent_tools.set_editorial_graphic(ctx, 'thesis', 'label', 'Revised idea', 0, 3, treatment='type') == 'saved'
     assert ctx.count == 2
     group = [t for t in ctx.edl['texts'] if t['id'].startswith('eg_thesis__')]

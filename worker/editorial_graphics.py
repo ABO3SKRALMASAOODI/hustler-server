@@ -17,7 +17,7 @@ PALETTES = {
 
 def compose(*, id, kind, text, start, end, secondary=None, eyebrow=None,
             palette="ink", box=None, motion="settle", W=1080, H=1920,
-            motion_motif=None, treatment="panel"):
+            motion_motif=None, treatment="panel", mute_captions=False):
     if not re.fullmatch(r"[a-zA-Z0-9_-]{1,48}", str(id)):
         raise ValueError("id must be 1–48 letters, numbers, underscores or hyphens")
     if kind not in KINDS or palette not in PALETTES or motion not in ("settle", "none") or treatment not in ("panel", "type"):
@@ -66,7 +66,7 @@ def compose(*, id, kind, text, start, end, secondary=None, eyebrow=None,
                  x=cx,y=y,font="Instrument Serif" if serif else "Inter Display Bold",
                  font_size=size,max_width=width*.84,uppercase=False,box=False,
                  color=color,outline_width=0,shadow=0,entrance="none",exit="none",
-                 mute_captions=kind!="label",motion=movement(y),motion_motif=motion_motif)
+                 mute_captions=bool(mute_captions),motion=movement(y),motion_motif=motion_motif)
         from graphics import _compile_item
         max_height = height*H*(.27 if kind=="label" else .25 if key in ("main","other") and kind=="comparison" else .36 if key=="main" else .13)
         for _ in range(25):

@@ -47,6 +47,8 @@ Read Valmera's `premium-composition` skill and the live tool schemas once.
   enough to read; shorten copy instead of turning it into fine print.
   Choose `treatment="type"` when typography should sit directly in the scene;
   boxed panels are optional. Do not fill a short with generic black slides.
+  Dialogue captions remain by default. Use `mute_captions=true` only when the
+  graphic actually replaces the spoken words, not for a complementary label.
 - Use custom text/vector motion for an idea the supplied compositions don't
   express. `font_size` is relative to the short canvas edge; `max_width` sets
   the text column. A graphic is judged by what it explains, not its API name.

@@ -13549,7 +13549,7 @@ def remove_picture_card(ctx, id):
 
 def set_editorial_graphic(ctx, id, kind, text, start, end, secondary=None,
                           eyebrow=None, palette="ink", box=None, motion="settle",
-                          motion_motif=None, treatment="panel"):
+                          motion_motif=None, treatment="panel", mute_captions=False):
     motion_motif, error = _motion_motif_value(ctx, motion_motif)
     if error:
         return error
@@ -13564,7 +13564,8 @@ def set_editorial_graphic(ctx, id, kind, text, start, end, secondary=None,
     try:
         result=editorial_graphics.compose(id=id,kind=kind,text=text,start=start,end=end,
                  secondary=secondary,eyebrow=eyebrow,palette=palette,box=box,
-                 motion=motion,W=W,H=H,motion_motif=motion_motif,treatment=treatment)
+                 motion=motion,W=W,H=H,motion_motif=motion_motif,treatment=treatment,
+                 mute_captions=mute_captions)
     except (ValueError,TypeError) as exc:
         return "REJECTED: "+str(exc)[:400]
     for layer in ("texts","vectors"):
@@ -23414,7 +23415,8 @@ TOOLS = {
         "claims; never invent statistics. Optional eyebrow is short context, not filler. "
         "palette ink/paper/slate; motion settle/none; box=[left,top,right,bottom] chooses its region. "
         "treatment=panel draws a backdrop; type removes the box for integrated editorial typography. "
-        "Panels suppress duplicate captions only during their live window; label keeps dialogue captions. "
+        "Dialogue captions remain by default. Set mute_captions=true ONLY when this graphic replaces "
+        "the spoken text; its own live window then owns the suppression and removal restores captions. "
         "Reading-time and type-size checks reject overcrowding rather than silently shrinking it. "
         "Place in deliberate clear space or use as a meaningful cutaway; inspect the rendered composition.",
         {"id":{"type":"string"},"kind":{"type":"string","enum":list(editorial_graphics.KINDS)},
@@ -23423,7 +23425,7 @@ TOOLS = {
          "palette":{"type":"string","enum":list(editorial_graphics.PALETTES)},
          "box":{"type":"array","items":{"type":"number"},"minItems":4,"maxItems":4},
          "motion":{"type":"string","enum":["settle","none"]},"motion_motif":{"type":"string"},
-         "treatment":{"type":"string","enum":["panel","type"]}}),
+         "treatment":{"type":"string","enum":["panel","type"]},"mute_captions":{"type":"boolean"}}),
     "remove_editorial_graphic": (remove_editorial_graphic,"Remove an editorial group and its caption suppression.",{"id":{"type":"string"}}),
     "set_screen_frame": (
         set_screen_frame,
