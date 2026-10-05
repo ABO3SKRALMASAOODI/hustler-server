@@ -677,6 +677,40 @@ def _audio_answer_is_actionable(answer, purpose):
     if not value:
         return False
     lowered = value.casefold()
+    # A 200 response is not evidence that the listener heard anything. These
+    # provider non-answers occurred on real source-audio reviews; never attach
+    # listening provenance to them or to a JSON echo of the requested times.
+    def capability_denial(text):
+        prefix = re.sub(r"^[\s\"']*(?:sorry[,!.:\s]+)?", "", text.casefold())
+        return prefix.startswith((
+            "i cannot listen to", "i can't listen to", "i am unable to listen to",
+            "i cannot process audio", "i can't process audio",
+            "i cannot access audio", "i can't access audio",
+            "i cannot analyze audio", "i cannot analyse audio",
+            "i don't have the ability to listen", "i do not have the ability to listen",
+            "as a text-based", "as an ai language model"))
+
+    if capability_denial(value):
+        return False
+    try:
+        structured = json.loads(re.sub(r"^```(?:json)?\s*|\s*```$", "", value))
+    except (ValueError, TypeError):
+        structured = None
+    if isinstance(structured, (dict, list)):
+        metadata = {"start", "end", "start_time", "end_time", "time", "timestamp",
+                    "duration", "duration_s", "label", "clip", "clip_id", "id"}
+
+        def has_words(item):
+            if isinstance(item, str):
+                return any(char.isalpha() for char in item) and not capability_denial(item)
+            if isinstance(item, dict):
+                return any(has_words(v) for k, v in item.items() if k not in metadata)
+            if isinstance(item, list):
+                return any(has_words(v) for v in item)
+            return False
+
+        if not has_words(structured):
+            return False
     if any(phrase in lowered for phrase in (
             "i will listen", "i'll listen", "will now listen",
             "provided clip to assess", "once i listen")):
@@ -788,8 +822,10 @@ def ask_audio(prompt, audio_paths, labels=None, max_tokens=260,
                     retries_left -= 1
                     content[0]["text"] = (
                         prompt + "\n\nYou already have the audio. Answer NOW "
-                        "from what is audible. Return plain text only; do not "
-                        "describe what you will do and do not return JSON.")
+                        "from what is audible, following the requested response "
+                        "format. Include actual words or audible observations, "
+                        "not just timestamps or labels. Do not describe what "
+                        "you will do. If a word is unclear, say so explicitly.")
                     continue
             break
         if response.status_code >= 400:

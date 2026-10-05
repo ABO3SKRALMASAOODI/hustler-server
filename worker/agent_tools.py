@@ -20486,17 +20486,21 @@ def review_audio(ctx, asset_key=None, times=None, output_times=None,
                      sequence_sound.replace("\n", " | "))[:2600]
     prompt = (
         "You are a senior music editor and audio post-production mixer. "
-        "Listen to the actual labeled clip(s). Describe only what is audible: "
+        "Listen to the actual labeled clip(s) and answer the specific question "
+        "first. For a transcription question, return the literal audible words "
+        "for each CLIP, preserving repetitions and fillers; mark unclear words "
+        "instead of guessing. Do not return timestamps without the words. "
+        "For other questions, describe only what is audible: "
         "speech/music/SFX character, energy, recording quality, intelligibility, "
         "masking, harshness/noise, and whether it supports the stated editing "
         "purpose. Give one concrete selection, timing or mix recommendation. "
         "Do not infer from filenames and do not relabel an authored music track "
-        "as voiceover. Purpose: " + str(question or "judge professional fit")[:400]
+        "as voiceover. Purpose: " + str(question or "judge professional fit")[:2000]
         + ". Direction: " + (direction or "not specified"))
     answer = llm.ask_audio(prompt, clips, labels, max_tokens=240,
                            purpose="audio_asset_review")
     if not answer:
-        return ("Actual clips were extracted, but the listener did not return "
+        return ("UNAVAILABLE: Actual clips were extracted, but the listener did not return "
                 "usable evidence. Use measured analysis and do not repeat the "
                 "same call in this turn.")
     _metric(ctx, "audio_asset_reviews")
