@@ -89,8 +89,9 @@ The optional `typography_scenes` plan array uses the live tool's scene
 arguments. `source_start/source_end` map a scene window inside one retained
 span; each run may use `source_at` instead of program `at`. The compiler
 returns these as **pending_native_operations**, not as already-applied text.
-After the base `apply_edit_batch`, submit them together to `apply_edit_recipe`
-and check its saved receipt before rendering. This removes repeated clock
+After the base `apply_edit_batch`, call each named native tool with its args
+and explicit project_id, serially. Check every saved receipt before rendering.
+The retired internal recipe helper is not a public tool. This removes repeated clock
 arithmetic while keeping exact word cues. A scene spanning a removed section
 needs explicit program times from the actual resulting transcript.
 They place readable, centered dialogue in the lower picture with visible

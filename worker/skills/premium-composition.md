@@ -65,8 +65,8 @@ user's requested mood, source aspect, music and identity.
   and run `scale` control hierarchy. Overflow is rejected: break or shorten
   the line instead of making it tiny. Stable id replaces the group; removal
   restores its owned caption windows. Use `mute_captions=false` for separate
-  topic labels. Scenes, footage cards and editorial graphics can share one
-  `apply_edit_recipe` transaction.
+  topic labels. Use the exposed native setters serially for one project and
+  check each saved receipt. The internal recipe helper is not a public tool.
 - **Picture as an object:** `set_frame(picture=[...])` preserves wide footage
   on a portrait canvas. `set_picture_card` then gives that footage its own
   rounded box, hairline border, quiet shadow and a lift/reveal opening or

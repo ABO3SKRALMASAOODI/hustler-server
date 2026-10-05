@@ -123,7 +123,7 @@ def compile_short(plan,index):
     return {'edl':edl,'operations':ops,'pending_native_operations':native,'cues':layers['cues'],
             'program_duration_s':duration,'expected_final_duration_s':duration+5,
             'program_words':words,'review':'unreviewed',
-            'note':'Fresh shared-source child only. Apply the base operations, then any pending_native_operations in one apply_edit_recipe. Verify both saved receipts before rendering. Inspect speech joins, face clearance, phone type and moving result.'}
+            'note':'Fresh shared-source child only. Apply the base operations, then call each pending_native_operations tool with its args and explicit project_id, serially. These calls are not already applied. Check every saved receipt before rendering; do not call the retired recipe helper. Inspect speech joins, face clearance, phone type and moving result.'}
 
 
 def main():
