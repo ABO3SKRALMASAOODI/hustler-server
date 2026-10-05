@@ -3,6 +3,7 @@
 import os
 import sys
 import time
+import pytest
 from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -148,6 +149,67 @@ def test_audio_reviewer_falls_back_from_chat_messages_to_responses(
                for part in response_parts)
     assert recorded["audio"] == (600, 0)
     assert recorded["response"]["api"] == "responses"
+
+
+@pytest.mark.parametrize("answer", [
+    'Sorry, I cannot listen to or analyze audio clips. Please provide text.',
+    '{"start_time":2723.6,"end_time":2725.6}',
+    '```json\n[{"label":"CLIP 1","start":1,"end":2}]\n```',
+])
+def test_audio_reviewer_retries_unusable_provider_successes(monkeypatch, tmp_path, answer):
+    clip = tmp_path / "source.mp3"
+    clip.write_bytes(b"bounded-audio")
+    sent = []
+
+    def post(_url, **kwargs):
+        parts = kwargs["json"]["messages"][0]["content"]
+        sent.append(parts[0]["text"])
+        assert any(p.get("type") == "input_audio" for p in parts)
+        text = answer if len(sent) == 1 else 'CLIP 1: that that gave'
+        return SimpleNamespace(status_code=200, text="ok", json=lambda: {
+            "choices": [{"message": {"content": text}}], "usage": {}})
+
+    monkeypatch.setattr(config, "AUDIO_REVIEW_API_KEY", "test-key")
+    monkeypatch.setattr(config, "AUDIO_REVIEW_MODEL", "gpt-audio-1.5")
+    monkeypatch.setattr(llm, "_audio_review_dead", False)
+    monkeypatch.setattr(llm.requests, "post", post)
+    monkeypatch.setattr(llm, "record", lambda *_a, **_kw: None)
+    assert llm.ask_audio("Transcribe the words.", [str(clip)],
+                         purpose="audio_asset_review") == 'CLIP 1: that that gave'
+    assert len(sent) == 2
+    assert "following the requested response format" in sent[-1]
+
+
+def test_audio_reviewer_exhausted_non_answers_produce_no_evidence(monkeypatch, tmp_path):
+    clip = tmp_path / "source.mp3"
+    clip.write_bytes(b"bounded-audio")
+    calls, records = [], []
+
+    def post(_url, **_kwargs):
+        calls.append(1)
+        return SimpleNamespace(status_code=200, text="ok", json=lambda: {
+            "choices": [{"message": {"content": '{"start_time":1,"end_time":2}'}}],
+            "usage": {}})
+
+    monkeypatch.setattr(config, "AUDIO_REVIEW_API_KEY", "test-key")
+    monkeypatch.setattr(config, "AUDIO_REVIEW_MODEL", "gpt-audio-1.5")
+    monkeypatch.setattr(llm, "_audio_review_dead", False)
+    monkeypatch.setattr(llm.requests, "post", post)
+    monkeypatch.setattr(llm, "record", lambda *args: records.append(args))
+    assert llm.ask_audio("Transcribe.", [str(clip)], purpose="audio_asset_review") is None
+    assert len(calls) == 3
+    assert records[-1][2]["answer"] is None
+    assert llm.audio_review_available()  # A bad answer must not disable later reviews.
+
+
+@pytest.mark.parametrize("answer,purpose", [
+    ('{"text":"CLIP 1: laborers um so and"}', 'audio_asset_review'),
+    ('{"choice":"none","reason":"Every candidate masks the speech."}', 'audio_music_candidates'),
+    ('{"verdict":"pass","evidence":"Speech is clear."}', 'audio_render_review'),
+    ('No speech is audible; the clip contains only room noise.', 'audio_asset_review'),
+])
+def test_audio_reviewer_preserves_actual_structured_and_silent_clip_evidence(answer, purpose):
+    assert llm._audio_answer_is_actionable(answer, purpose)
 
 
 def test_review_audio_schema_is_honest_off(monkeypatch):
@@ -497,6 +559,11 @@ def test_later_turn_can_hear_uploaded_audio_by_persistent_storage_key(
     assert heard["kwargs"]["purpose"] == "audio_asset_review"
     assert ctx.editing_metrics == {
         "audio_asset_reviews": 1, "audio_review_clips": 1}
+    monkeypatch.setattr(llm, "ask_audio", lambda *_a, **_kw: None)
+    unavailable = agent_tools.review_audio(ctx, asset_key=key, times=[10.0], span_s=6)
+    assert unavailable.startswith("UNAVAILABLE:")
+    assert "BOUNDED ACTUAL-AUDIO REVIEW" not in unavailable
+    assert ctx.editing_metrics == {"audio_asset_reviews": 1, "audio_review_clips": 1}
 
 
 def test_actual_audio_fix_gets_one_targeted_repair_decision():
