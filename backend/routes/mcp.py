@@ -2496,10 +2496,10 @@ def server_card():
             "describe the edit in plain English, and the connected model cuts silences "
             "and filler words, adds word-timed captions, reframes to 9:16, "
             "mixes music, grades the picture, renders a preview, and looks at "
-            "the frames it produced. The user creates the full-quality MP4 "
-            "from the ORIGINAL file in Valmera Studio. It edits footage you "
-            "already have — it is not a "
-            "text-to-video generator.",
+            "the frames it produced. When the user approves, export_final "
+            "renders the full-quality MP4 from the ORIGINAL file (Studio "
+            "export works too). It edits footage you already have — it is "
+            "not a text-to-video generator.",
         "version": SERVER_INFO["version"],
         "websiteUrl": "https://valmera.io",
         "documentationUrl": "https://valmera.io/mcp",
@@ -2513,7 +2513,7 @@ def server_card():
             "type": "oauth2",
             "dynamicClientRegistration": True,
             "pkce": "S256",
-            "alsoAccepts": "bearer token minted at https://valmera.io/mcp",
+            "alsoAccepts": "bearer token minted at https://valmera.io/mcp/connect",
             "metadata": (f"{mcp_oauth.base_url()}"
                          "/.well-known/oauth-authorization-server"),
         },
