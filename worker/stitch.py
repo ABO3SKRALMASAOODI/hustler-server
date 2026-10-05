@@ -43,7 +43,7 @@ from schemas import MIN_SPAN_S, anim_value
 
 # Video-local layers a stitch may differ in. Everything else must be equal.
 _CHANGEABLE_TOP = ("texts", "vectors", "patches", "overlays")
-_CHANGEABLE_FX = ("zooms", "regions", "custom")
+_CHANGEABLE_FX = ("zooms", "regions", "custom", "picture_cards")
 
 _PAD_S = 0.5
 _MAX_WINDOWS = 4
@@ -91,6 +91,8 @@ def _item_windows(edl, tl, duration):
     for v in (edl.get("vectors") or []):
         out.append((float(v["start"]), float(v["end"]), "vector"))
     fx = edl.get("effects") or {}
+    for card in fx.get("picture_cards") or []:
+        out.append((float(card["start"]), float(card["end"]), "picture_card"))
     for z in (fx.get("zooms") or []):
         out.append((float(z["start"]), float(z["end"]), "zoom"))
     for r in (fx.get("regions") or []):
@@ -121,6 +123,7 @@ def _canon_items(edl):
                          ("overlays", edl.get("overlays")),
                          ("zooms", fx.get("zooms")),
                          ("regions", fx.get("regions")),
+                         ("picture_cards", fx.get("picture_cards")),
                          ("custom", fx.get("custom"))):
         d = {}
         for i, it in enumerate(items or []):
@@ -634,6 +637,14 @@ def window_edl(edl, tl, w0, w1, keep_audio=False):
     fx["regions"] = _shift_optional_window(fx.get("regions"))
     fx["custom"] = _shift_optional_window(fx.get("custom"))
     fx["stylize"] = _shift_optional_window(fx.get("stylize"), clip=True)
+    cards = []
+    for card in fx.get("picture_cards") or []:
+        a, b = max(card["start"], w0), min(card["end"], w1)
+        if b - a >= MIN_SPAN_S:
+            cards.append({**card, "start": round(a-w0, 6), "end": round(b-w0, 6),
+                          "phase_s": (card.get("phase_s") or 0) + a-card["start"],
+                          "full_duration_s": card.get("full_duration_s") or card["end"]-card["start"]})
+    fx["picture_cards"] = cards or None
     # Proof-budget clamping can cut the RIGHT edge of the last contained
     # overlay. Merely shifting its start leaves the original duration on a
     # shorter standalone EDL, which validate_edl rejects (the live failure was
@@ -1172,6 +1183,8 @@ def plan_timeline(prev_edl, new_edl, tl_prev, tl_new, out_duration,
     # their spans out of every shifted run. (Patches ride the source clock
     # and shift WITH the footage; they are exempt.)
     anchored = []
+    for card in fx.get("picture_cards") or []:
+        anchored.append((float(card["start"]), float(card["end"])))
     for t in (new_edl.get("texts") or []):
         anchored.append((float(t["start"]), float(t["end"])))
     for v in (new_edl.get("vectors") or []):

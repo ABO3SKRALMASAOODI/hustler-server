@@ -36,6 +36,7 @@ import graphics
 import media
 import render_plan
 import screenframe
+import picture_cards
 import screening
 import sheets
 import stitch
@@ -1538,7 +1539,8 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                       frame_focus=None, robot_idx=None, wm_ass_path=None,
                       wm_anchor_y=None,
                       plate_idx=None, plate_box=None, behind_inputs=None,
-                      patch_inputs=None, cap_burn_offset=None):
+                      patch_inputs=None, cap_burn_offset=None,
+                      picture_card_inputs=None):
     """Input layout: [0] main source video; anullsrc at silence_idx when
     needed (no main audio, image inserts, or silent clip inserts); then one
     input per music item, insert item and voiceover item in EDL order.
@@ -1676,6 +1678,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                or bool(speed) or bool(overlay_inputs) or bool(takeovers)
                or tstyle in ("whip_left", "whip_right", "zoom_punch")
                or bool(shifts) or screen_frame is not None
+               or bool(fx.get("picture_cards"))
                or bool(behind_inputs)
                or any(s.get("kind") == "shake" for s in stylize))
     mode = frame_mode or (edl.get("frame") or {}).get("mode") or "crop"
@@ -2707,6 +2710,11 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             f":enable='gte(t,{o_start:.3f})*lt(t,{o_start + o_dur:.3f})'"
             f"[vov{j}]")
         vlabel = f"vov{j}"
+    # Picture design precedes typography: captions, labels, and branding keep
+    # their delivery-resolution geometry when the footage opens into a card.
+    vlabel = picture_cards.append_graph(
+        parts, vlabel, picture_card_inputs, W, H, fps,
+        (edl.get("frame") or {}).get("picture"))
     if ass_path:
         # fontsdir points libass at the premium fonts bundled with the
         # worker (worker/fonts) — system fontconfig still supplies DejaVu
@@ -3261,6 +3269,8 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
     if plate_idx is not None:
         next_idx += 1
 
+    picture_card_inputs, next_idx = picture_cards.prepare_inputs(
+        edl, workdir, W, H, fps, extra_inputs, next_idx)
     graph = build_filtergraph(edl, tl.out_duration, False, tl, ass_path,
                               music_inputs, {}, preview,
                               W=W, H=H, fps=fps, frame_mode=None,
@@ -3274,7 +3284,8 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
                               wm_ass_path=wm_ass_path,
                               wm_anchor_y=wm_anchor_y,
                               plate_idx=plate_idx, plate_box=plate_box,
-                              cap_burn_offset=cap_burn_offset)
+                              cap_burn_offset=cap_burn_offset,
+                              picture_card_inputs=picture_card_inputs)
 
     if audio_only:
         graph = _prune_graph_to_audio(graph)
@@ -3973,6 +3984,8 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                                                        "graphics.ass"),
                                           play_res=(W, H))
 
+    picture_card_inputs, next_idx = picture_cards.prepare_inputs(
+        edl, workdir, W, H, fps, extra_inputs, next_idx)
     graph = build_filtergraph(edl, src_dur, info["has_audio"], tl, ass_path,
                               music_inputs, index, preview,
                               W=W, H=H, fps=fps, frame_mode=frame_mode,
@@ -3992,7 +4005,8 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                               plate_idx=plate_idx, plate_box=plate_box,
                               behind_inputs=behind_inputs,
                               patch_inputs=patch_inputs,
-                              cap_burn_offset=cap_burn_offset)
+                              cap_burn_offset=cap_burn_offset,
+                              picture_card_inputs=picture_card_inputs)
 
     if audio_only:
         # The same graph the full render would run, minus every chain the

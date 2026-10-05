@@ -11,7 +11,13 @@ Read the full passage around a candidate. In the assignment record four short
 sentences: **viewer question, immediate hook, turn/evidence, final payoff**.
 If the payoff merely restates the opening, look for a better passage. If the
 first ten seconds are a long interviewer setup, seek a self-contained start
-closer to the answer. Keep a necessary question or qualification. Never splice
+closer to the answer. Keep a necessary question or qualification. A complete
+micro-story does not require preserving the interviewer's entire setup: when
+the answer states a complete idea, a concise, faithful visual question or
+context label may orient the viewer. Check it against the full original
+exchange; never remove a condition, change the referent or invent a claim.
+Do not choose ten seconds of routine setup merely to satisfy a hook/turn/payoff
+form. Compare a stronger passage before committing to that candidate. Never splice
 words into a claim the person did not make, reorder causes, or turn a cautious
 statement into certainty. Do not fake personal testimony in headlines.
 
@@ -127,7 +133,9 @@ The reviewer sees the actual result, not the editor's favorable summary. State:
 1. What makes the opening worth watching and where the payoff lands.
 2. The strongest designed moment and the exact reference trait it achieves.
 3. The weakest moment, with a timestamp and its effect on the viewer.
-4. Whether the short would survive with the title/celebrity name hidden.
+4. What value remains without celebrity recognition. Hiding the headline is
+   a diagnostic, not a veto on legitimate visual context: graphics may carry
+   the question while the original speech carries the substantive answer.
 
 Compare the result against the assignment, the best relevant reference and the
 other candidates. A technically clean but forgettable result needs an editorial

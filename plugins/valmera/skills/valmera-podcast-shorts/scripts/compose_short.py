@@ -14,14 +14,17 @@ from design_graphics import compile_design, number
 
 
 RECIPES={
+    'composed':{'preset':'composed','size':'m','size_scale':.72,'layout':'stack',
+                'animation':'none','emphasis':'big','emphasis_scale':1.28,
+                'leading':1.08,'text_align':'center'},
     'kinetic':{'preset':'reels','size':'m','size_scale':.65,'layout':'stack',
-               'animation':'elastic','emphasis':'big','emphasis_scale':1.45,
+               'animation':'rise','emphasis':'big','emphasis_scale':1.30,
                'leading':1.02,'text_align':'center'},
     'quiet':{'preset':'karaoke','size':'m','size_scale':.68,'layout':'stack',
              'animation':'none','emphasis':'big','emphasis_scale':1.15,
              'text_align':'center'},
     'editorial':{'preset':'editorial','size':'m','size_scale':.72,'layout':'stack',
-                 'animation':'elastic','emphasis':'big','emphasis_scale':1.45,
+                 'animation':'fade','emphasis':'big','emphasis_scale':1.22,
                  'text_align':'center'},
 }
 
@@ -47,9 +50,9 @@ def compile_short(plan,index):
            **plan.get('frame',{})}
     picture=frame['picture']
     if len(picture)!=4:raise ValueError('picture needs four fractions')
-    accent=plan.get('accent','#BDF76A')
-    recipe=plan.get('caption_recipe','kinetic')
-    if recipe not in RECIPES:raise ValueError('caption_recipe: kinetic, quiet or editorial')
+    accent=plan.get('accent','#D5C5AA')
+    recipe=plan.get('caption_recipe','composed')
+    if recipe not in RECIPES:raise ValueError('caption_recipe: composed, kinetic, quiet or editorial')
     # Keep dialogue on the lower picture, not lost in detached black space.
     # These are starting coordinates; the editor must inspect actual faces.
     style={**RECIPES[recipe],'dynamic':True,'highlight_color':accent,

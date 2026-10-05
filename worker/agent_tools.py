@@ -64,6 +64,7 @@ import videogen
 import cursor as cursorlib
 import screendet
 import screenframe
+import editorial_graphics
 import screenmatch
 import screening
 import edl_diff
@@ -83,7 +84,7 @@ import version as worker_version
 from captions import CAPTION_DESIGN_VERSION, KARAOKE_HARD_MAX
 from schemas import (CANVAS_DIMS, CaptionStyle, clean_fingerprint,
                      custom_chain_error, patch_fingerprint,
-                     EDLValidationError, Frame,
+                     EDLValidationError, Frame, PictureCard,
                      HEX_COLOR,
                      canvas_edl, clip_anim, default_edl, describe_edl,
                      DEFAULT_CANVAS_FPS,
@@ -12373,7 +12374,7 @@ def add_text(ctx, text, start, end, template="title", x=None, y=None,
              size_scale=None, color=None, accent_color=None, font=None,
              entrance=None, exit=None, uppercase=None, box=None, motion=None,
              motion_motif=None, mute_captions=True, outline_width=None,
-             shadow=None):
+             shadow=None, font_size=None, max_width=None):
     """Burn a designed text template over a program-time window — titles,
     lower thirds, callouts, big numbers, quotes, chapter markers."""
     t = (text or "").strip()
@@ -12381,6 +12382,14 @@ def add_text(ctx, text, start, end, template="title", x=None, y=None,
         return "REJECTED: text is empty."
     if not isinstance(mute_captions, bool):
         return "REJECTED: mute_captions must be true or false."
+    for name, value, low, high in (("font_size", font_size, .012, .3),
+                                   ("max_width", max_width, .1, .96)):
+        if value is not None:
+            try:
+                if not low <= float(value) <= high:
+                    raise ValueError()
+            except (ValueError, TypeError):
+                return f"REJECTED: {name} must be between {low} and {high}."
     for name, value in (("outline_width", outline_width), ("shadow", shadow)):
         if value is not None:
             try:
@@ -12499,6 +12508,8 @@ def add_text(ctx, text, start, end, template="title", x=None, y=None,
             "x": float(x) if x is not None else None,
             "y": float(y) if y is not None else None,
             "size_scale": float(size_scale) if size_scale is not None else None,
+            "font_size": float(font_size) if font_size is not None else None,
+            "max_width": float(max_width) if max_width is not None else None,
             "color": color, "accent_color": accent_color, "font": font,
             "entrance": entrance, "exit": exit,
             "uppercase": bool(uppercase) if uppercase is not None else None,
@@ -13502,6 +13513,75 @@ def add_color_screen(ctx, at_output_s, duration_s=2.0, color="#000000",
 # Both are OUTPUT-FRAME treatments: they change how the finished picture sits
 # in the frame without touching a single timestamp. That is what makes them
 # safe to apply to a finished edit and instant to preview.
+
+def set_picture_card(ctx, id, start, end, box=None, fit="crop", radius=.045,
+                     border=.001, border_color="#444444", background="#101012",
+                     shadow=.35, entrance="lift", exit="fade", duration_s=.45,
+                     motion_motif=None):
+    """Create/replace one native footage-only composition in one revision."""
+    motion_motif, error = _motion_motif_value(ctx, motion_motif)
+    if error:
+        return error
+    try:
+        row = PictureCard.model_validate(dict(
+            id=id,start=start,end=end,box=box or [.06,.24,.94,.74],fit=fit,
+            radius=radius,border=border,border_color=border_color,
+            background=background,shadow=shadow,entrance=entrance,exit=exit,
+            duration_s=duration_s,motion_motif=motion_motif)).model_dump()
+        if row["end"]-row["start"] < .5:
+            raise ValueError("Allow at least 0.5 seconds for a footage card")
+    except (ValueError,TypeError) as exc:
+        return "REJECTED: " + str(exc)[:400]
+    edl = json.loads(json.dumps(ctx.latest_edl()["json"]))
+    fx = edl.setdefault("effects", None) or {}
+    fx["picture_cards"] = [c for c in fx.get("picture_cards") or [] if c["id"]!=id] + [row]
+    edl["effects"] = fx
+    return ctx.write_edl(edl, f"footage card {id} on {start}-{end}s; typography remains outside the picture treatment")
+
+
+def remove_picture_card(ctx, id):
+    edl = json.loads(json.dumps(ctx.latest_edl()["json"]))
+    fx = edl.get("effects") or {}
+    fx["picture_cards"] = [c for c in fx.get("picture_cards") or [] if c["id"]!=id] or None
+    edl["effects"] = fx
+    return ctx.write_edl(edl, f"removed footage card {id}")
+
+
+def set_editorial_graphic(ctx, id, kind, text, start, end, secondary=None,
+                          eyebrow=None, palette="ink", box=None, motion="settle",
+                          motion_motif=None, treatment="panel", mute_captions=False):
+    motion_motif, error = _motion_motif_value(ctx, motion_motif)
+    if error:
+        return error
+    edl = json.loads(json.dumps(ctx.latest_edl()["json"]))
+    video = ctx.index.get("video") or {}
+    W,H = renderer.frame_dims(int(video.get("width") or 1920),
+                               int(video.get("height") or 1080),
+                               (edl.get("frame") or {}).get("ratio","source"),
+                               delivery=True)
+    if edl.get("canvas"):
+        W,H=edl["canvas"]["width"],edl["canvas"]["height"]
+    try:
+        result=editorial_graphics.compose(id=id,kind=kind,text=text,start=start,end=end,
+                 secondary=secondary,eyebrow=eyebrow,palette=palette,box=box,
+                 motion=motion,W=W,H=H,motion_motif=motion_motif,treatment=treatment,
+                 mute_captions=mute_captions)
+    except (ValueError,TypeError) as exc:
+        return "REJECTED: "+str(exc)[:400]
+    for layer in ("texts","vectors"):
+        edl[layer]=[r for r in edl.get(layer) or []
+                    if not r.get("id","").startswith(result["prefix"])] + result[layer]
+    return ctx.write_edl(edl, f"designed {kind} {id} in {palette}; editable type and vector layers with {result['minimum_hold_s']:g}s minimum reading time")
+
+
+def remove_editorial_graphic(ctx, id):
+    if not re.fullmatch(r"[a-zA-Z0-9_-]{1,48}", str(id)):
+        return "REJECTED: invalid editorial graphic id"
+    edl=json.loads(json.dumps(ctx.latest_edl()["json"]))
+    for layer in ("texts","vectors"):
+        edl[layer]=[r for r in edl.get(layer) or [] if not r.get("id","").startswith(f"eg_{id}__")]
+    return ctx.write_edl(edl, f"removed editorial graphic {id} and its owned caption suppression")
+
 
 def set_screen_frame(ctx, inset=None, radius=None, shadow=None,
                      background=None, background2=None, direction=None):
@@ -21327,7 +21407,7 @@ def _seg_schema():
 # agent would then be told a field does not exist on the very tool it uses to
 # restyle EXISTING captions. Keep in step with captions.STYLE_KEYS,
 # schemas.CaptionStyle and _parse_partial_style's allowlist.
-CAPTION_PRESETS = ["clean", "documentary", "broadcast", "retro", "neon",
+CAPTION_PRESETS = ["composed", "clean", "documentary", "broadcast", "retro", "neon",
                    "podcast", "reels", "beast", "karaoke", "elegant", "spotlight",
                    "stacked", "iridescent", "chrome", "editorial",
                    "fashion", "luxe", "impact", "lyric", "classic"]
@@ -23307,6 +23387,46 @@ TOOLS = {
         remove_cursor_enhance,
         "Put the original mouse pointer back (re-derives from the untouched "
         "source).", {}),
+    "set_picture_card": (
+        set_picture_card,
+        "Compose FOOTAGE ONLY as a rounded picture card during start/end program seconds. "
+        "Captions, designed type and branding stay independent and sharp. Stable id replaces the card. "
+        "box=[left,top,right,bottom] on the output canvas; radius 0-.25 of card short side; "
+        "border 0-.015 of canvas short side. entrance/exit none, fade, lift (restrained settle), "
+        "or reveal (picture opens/closes inside its rounded window). duration_s .12-1.2. "
+        "Source is frame.picture if present, otherwise the whole composed program. Set frame.picture "
+        "first to preserve a wide original inside portrait; this cannot recover pixels already cropped away. "
+        "Use fit=pad to retain that whole source, crop to fill. Windows must not overlap. Inspect entry, "
+        "settle, exit and the speaker framing. Rounded cards are one purposeful format, not a quota.",
+        {"id":{"type":"string"},"start":{"type":"number"},"end":{"type":"number"},
+         "box":{"type":"array","items":{"type":"number"},"minItems":4,"maxItems":4},
+         "fit":{"type":"string","enum":["crop","pad"]},"radius":{"type":"number"},
+         "border":{"type":"number"},"border_color":{"type":"string"},
+         "background":{"type":"string"},"shadow":{"type":"number"},
+         "entrance":{"type":"string","enum":["none","fade","lift","reveal"]},
+         "exit":{"type":"string","enum":["none","fade","lift","reveal"]},
+         "duration_s":{"type":"number"},"motion_motif":{"type":"string"}}),
+    "remove_picture_card": (remove_picture_card,"Remove a footage card by id.",{"id":{"type":"string"}}),
+    "set_editorial_graphic": (
+        set_editorial_graphic,
+        "Author a measured, restrained editorial composition as editable native text/vector layers in ONE revision. "
+        "Stable id replaces its whole group. kind: statement, comparison (text vs secondary), metric "
+        "(text is the real value, secondary its meaning), quote, chapter, label. Pass exact supported "
+        "claims; never invent statistics. Optional eyebrow is short context, not filler. "
+        "palette ink/paper/slate; motion settle/none; box=[left,top,right,bottom] chooses its region. "
+        "treatment=panel draws a backdrop; type removes the box for integrated editorial typography. "
+        "Dialogue captions remain by default. Set mute_captions=true ONLY when this graphic replaces "
+        "the spoken text; its own live window then owns the suppression and removal restores captions. "
+        "Reading-time and type-size checks reject overcrowding rather than silently shrinking it. "
+        "Place in deliberate clear space or use as a meaningful cutaway; inspect the rendered composition.",
+        {"id":{"type":"string"},"kind":{"type":"string","enum":list(editorial_graphics.KINDS)},
+         "text":{"type":"string"},"start":{"type":"number"},"end":{"type":"number"},
+         "secondary":{"type":"string"},"eyebrow":{"type":"string"},
+         "palette":{"type":"string","enum":list(editorial_graphics.PALETTES)},
+         "box":{"type":"array","items":{"type":"number"},"minItems":4,"maxItems":4},
+         "motion":{"type":"string","enum":["settle","none"]},"motion_motif":{"type":"string"},
+         "treatment":{"type":"string","enum":["panel","type"]},"mute_captions":{"type":"boolean"}}),
+    "remove_editorial_graphic": (remove_editorial_graphic,"Remove an editorial group and its caption suppression.",{"id":{"type":"string"}}),
     "set_screen_frame": (
         set_screen_frame,
         "THE tool for 'that floating rounded window on a gradient' look — the "
@@ -23734,6 +23854,8 @@ TOOLS = {
                  "quoted line), 'chapter' (section marker). x/y override "
                  "the template's position (fractions of the frame); "
                  "size_scale 0.4-3.0; color/accent_color '#RRGGBB'; font "
+                 "size can instead use font_size .012-.3 of the canvas short "
+                 "side, with max_width .1-.96 for its text column; font "
                  "from the bundled families (exact name, e.g. 'Anton'); "
                  "outline_width/shadow 0-12 override template edges (0 for "
                  "clean flat type on a graphic panel); "
@@ -23764,6 +23886,8 @@ TOOLS = {
                   "x": {"type": "number"},
                   "y": {"type": "number"},
                   "size_scale": {"type": "number"},
+                  "font_size": {"type": "number", "minimum": .012, "maximum": .3},
+                  "max_width": {"type": "number", "minimum": .1, "maximum": .96},
                   "color": {"type": "string"},
                   "accent_color": {"type": "string"},
                   "font": {"type": "string", "enum": list(TEXT_FONTS)},
@@ -24505,6 +24629,7 @@ TOOL_DOMAINS = {
         "get_words",
     },
     "graphics": {
+        "set_editorial_graphic", "remove_editorial_graphic",
         "add_kinetic_text", "add_text", "remove_text", "set_text_motion",
         "add_text_behind", "add_title_card",
         "add_vector_graphic", "set_vector_graphic",
@@ -24541,6 +24666,7 @@ TOOL_DOMAINS = {
         "add_stock_media",
     },
     "motion": {
+        "set_picture_card", "remove_picture_card",
         "set_frame", "auto_reframe", "add_zoom", "remove_zoom", "add_zoom_path",
         "remove_zoom_path", "set_text_motion", "set_overlay_motion",
         "punch_in_on_emphasis",
@@ -24618,6 +24744,10 @@ def planning_tool_names():
     return compact_tool_names(_Fresh())
 
 REQUIRED_ARGS = {
+    "set_picture_card": ["id", "start", "end"],
+    "remove_picture_card": ["id"],
+    "set_editorial_graphic": ["id", "kind", "text", "start", "end"],
+    "remove_editorial_graphic": ["id"],
     "search_transcript": ["query"],
     # times OR start/end — validated in the tool, so neither is "required".
     "look_at": [],
@@ -24731,6 +24861,8 @@ REQUIRED_ARGS = {
 # fetch_url is here for the capabilities digest; its success is tracked
 # separately via ctx.urls_fetched (it creates an asset the agent then places).
 WRITE_TOOLS = {"apply_edit_batch", "keep_segments", "cut_range", "cut_output_range",
+               "set_picture_card", "remove_picture_card",
+               "set_editorial_graphic", "remove_editorial_graphic",
                "restore_range",
                "cut_silences", "remove_filler_words", "add_captions",
                "add_kinetic_text",

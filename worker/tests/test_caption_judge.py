@@ -220,7 +220,7 @@ def test_add_captions_uses_independent_cast_and_persists_decision(monkeypatch):
     traces = ctx.editing_metrics["editorial_decisions"]
     assert [row["kind"] for row in traces] == [
         "caption_cast", "caption_style"]
-    assert traces[0]["candidate_count"] == 20.0
+    assert traces[0]["candidate_count"] == 21.0
     assert traces[0]["confidence"] == .91
     assert traces[0]["source"] == "independent_type_director"
     assert traces[1]["preset"] == "editorial"

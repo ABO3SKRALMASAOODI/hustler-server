@@ -16,6 +16,9 @@ remains v7 so interrupted runs can still be reconciled.
   a candidate arrives; do not ingest every historical contract.
 - **Editor:** [creative direction](references/creative-v8.md),
   [editing](references/editing-v8.md), and your one assignment.
+- **Current design brief:** coordinators and editors also read
+  [premium reference direction](references/premium-design.md). It supersedes
+  older straight-edge, neon-accent and elastic-motion defaults.
 - **Resuming a pre-v8 run:** preserve that run's frozen brief and the v7
   contracts it used. Never rewrite its accepted artifacts to claim v8 quality.
 
@@ -50,9 +53,11 @@ The current four formats are:
    expressive dialogue captions. No B-roll or interrupting cards in this lane.
 
 There is **no default lane and no quota**. Choose the structure the story earns.
-The black portrait canvas and wider straight-edged picture remain the owner's
-preferred composition. Do not replace it with full-height portrait crops by
-habit. Preserve both native Valmera brand elements, including the **5-second
+Use wide, square/rounded-card or full-frame compositions from the actual source
+and current references. Preserve the person and useful negative space; don't
+default to destructive portrait crops or the same black rectangle for every
+story. The current owner preference is advanced, restrained, modern design.
+Preserve both native Valmera brand elements, including the **5-second
 ending**, and reserve that time within the 15–45s final. No added music unless
 explicitly requested. Preserve requested active-word highlighting. Motion,
 scale hierarchy and emphasis are allowed and wanted; flat typography is a

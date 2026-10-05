@@ -280,6 +280,20 @@ PRESETS = {
     # These cover the common briefs that previously got forced through a
     # novelty social preset. Each has one visual grammar; none rotates among
     # unrelated boxes, serif faces and colours inside the same sentence.
+    "composed": {
+        # Read a complete phrase while the spoken word changes colour. Unlike
+        # reveal/stacked, a connector never becomes the only visible caption.
+        "font": "Inter Display Bold", "char_w": 0.54, "base_size": 44,
+        "mode": "karaoke", "align": "center", "uppercase": False,
+        "max_words": 6, "wpl": 4, "outline": 0.5, "shadow": 0.8,
+        "emph_scale": 1.28, "num_scale": 1.4,
+        "treatments": ("big",), "emphasis": "big",
+        "number_treatment": "num_plain", "active": "accent",
+        "position": "bottom", "layout": "stack", "leading": 1.08,
+        "stagger": 0.0, "word_anim": "none", "highlight": "#D5C5AA",
+        "punctuation": "full", "target_words": 4, "max_chunk_s": 2.8,
+        "keep_size_emphasis": True,
+    },
     "clean": {
         # Safe creator default: the whole short phrase is readable at once,
         # with hierarchy carried by size only. White, mixed-case, no gimmick.
@@ -2011,7 +2025,8 @@ def events_premium(out_words, style=None, max_words=None,
         if mode == "karaoke":
             # only the SPOKEN word carries the accent in karaoke modes;
             # persistent keyword coloring would bury the highlight.
-            treats = ["num_plain" if t in ("num", "accent") and
+            treats = [t if p.get("keep_size_emphasis") and t == "big" else
+                      "num_plain" if t in ("num", "accent") and
                       _word_has_digit(c["w"]) else None
                       for t, c in zip(treats, chunk)]
         if stack:

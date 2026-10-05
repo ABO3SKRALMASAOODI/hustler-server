@@ -242,7 +242,7 @@ class CaptionStyle(BaseModel):
         # coherent production families added after the first visual audit:
         # clean creator text, long-form subtitles, a boxed news lower-third,
         # outlined retro display, and a restrained neon/glow treatment.
-        "clean", "documentary", "broadcast", "retro", "neon",
+        "composed", "clean", "documentary", "broadcast", "retro", "neon",
         # round 67: one word at a time, centred, glowing (the modern
         # single-word look — the only preset that defaults position middle)
         "spotlight",
@@ -1261,6 +1261,45 @@ class FrameShift(BaseModel):
     motion_motif: Optional[MotionMotif] = None
 
 
+class PictureCard(BaseModel):
+    """A footage-only card on the program clock; type is composited afterwards.
+
+    The source is frame.picture when set, otherwise the whole program frame.
+    box is the destination rectangle, so source framing and card design remain
+    independent. No speech, caption, or cut timings change.
+    """
+    id: str = Field(min_length=1, max_length=80)
+    start: float = Field(ge=0, allow_inf_nan=False)
+    end: float = Field(gt=0, allow_inf_nan=False)
+    box: List[float] = Field(default_factory=lambda: [.06, .24, .94, .74])
+    fit: Literal["crop", "pad"] = "crop"
+    radius: float = Field(default=.045, ge=0, le=.25, allow_inf_nan=False)
+    border: float = Field(default=.001, ge=0, le=.015, allow_inf_nan=False)
+    border_color: str = "#444444"
+    background: str = "#101012"
+    shadow: float = Field(default=.35, ge=0, le=1, allow_inf_nan=False)
+    entrance: Literal["none", "fade", "lift", "reveal"] = "lift"
+    exit: Literal["none", "fade", "lift", "reveal"] = "fade"
+    duration_s: float = Field(default=.45, ge=.12, le=1.2, allow_inf_nan=False)
+    motion_motif: Optional[MotionMotif] = None
+    # Proof/stitch fragments preserve the original animation phase instead of
+    # replaying an opening each time a cached segment begins.
+    phase_s: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
+    full_duration_s: Optional[float] = Field(default=None, gt=0, allow_inf_nan=False)
+
+    @field_validator("box")
+    @classmethod
+    def _box(cls, value):
+        return Frame._picture_rectangle(value)
+
+    @field_validator("background", "border_color")
+    @classmethod
+    def _color(cls, value):
+        if not re.fullmatch(r"#[0-9A-Fa-f]{6}", value):
+            raise ValueError("picture card colors must be #RRGGBB")
+        return value.upper()
+
+
 class Effects(BaseModel):
     """Whole-program visual effects. grade is a color-grade preset applied
     to all footage (never to burned captions); zooms are punch-in/eased/
@@ -1285,6 +1324,7 @@ class Effects(BaseModel):
     # re-render the lot.
     screen_frame: Optional[ScreenFrame] = None
     frame_shifts: Optional[List[FrameShift]] = None
+    picture_cards: Optional[List[PictureCard]] = None
     # Round 96 — agent-written filter chains (the open-ended stylize).
     # Optional-None for the same signature reason as screen_frame above.
     custom: Optional[List[CustomFilterItem]] = None
@@ -1503,6 +1543,10 @@ class TextItem(BaseModel):
     x: Optional[float] = None       # fractions of frame; None = template's
     y: Optional[float] = None
     size_scale: Optional[float] = None      # 0.4-3.0 on the template's size
+    # Opt-in layout units for authored compositions. Historical templates
+    # remain byte-stable; new designs no longer infer type size from a preset.
+    font_size: Optional[float] = Field(default=None, ge=.012, le=.3, allow_inf_nan=False)
+    max_width: Optional[float] = Field(default=None, ge=.1, le=.96, allow_inf_nan=False)
     color: Optional[str] = None             # #RRGGBB
     accent_color: Optional[str] = None
     outline_width: Optional[float] = Field(default=None, ge=0, le=12)
@@ -2949,13 +2993,30 @@ def validate_edl(data, duration=None, *, render_fragment=False):
                         "overlap — move it later or shorten the first.")
             if not fx.frame_shifts:
                 fx.frame_shifts = None
+        if fx.picture_cards is not None:
+            if len(fx.picture_cards) > 24:
+                raise EDLValidationError("Use at most 24 picture-card windows per edit.")
+            ids = set()
+            fx.picture_cards.sort(key=lambda c: (c.start, c.id))
+            for card in fx.picture_cards:
+                if card.id in ids:
+                    raise EDLValidationError("Picture-card ids must be unique.")
+                ids.add(card.id)
+                _check_span("picture card", card.start, card.end, prog_dur)
+                if card.full_duration_s is not None and (card.phase_s or 0) + card.end - card.start > card.full_duration_s + .01:
+                    raise EDLValidationError("Picture-card fragment exceeds its full duration.")
+            for a, b in zip(fx.picture_cards, fx.picture_cards[1:]):
+                if b.start < a.end - .001:
+                    raise EDLValidationError("Picture-card windows must not overlap.")
+            fx.picture_cards = fx.picture_cards or None
         # all-empty effects is the absence of effects — normalize so old
         # EDLs and cleared-effects EDLs compare identical.
         if fx.grade is None and not fx.zooms and fx.fade_in_s is None \
                 and fx.fade_out_s is None and fx.transition is None \
                 and fx.regions is None and fx.stylize is None \
                 and fx.grade_custom is None and fx.screen_frame is None \
-                and fx.frame_shifts is None and fx.custom is None:
+                and fx.frame_shifts is None and fx.custom is None \
+                and fx.picture_cards is None:
             edl.effects = None
 
     if edl.source_clean is not None:
@@ -3233,6 +3294,10 @@ def describe_edl(edl_dict, duration=None):
                            else " at scene changes"))
         if fx.regions:
             bits.append("censor region x" + str(len(fx.regions)))
+        if fx.picture_cards:
+            bits.append("footage cards " + ", ".join(
+                f"{c.id}@{c.start:g}-{c.end:g}s {c.entrance}/{c.exit}"
+                for c in fx.picture_cards))
         if fx.stylize:
             names = [s.kind + (f"@{s.start:g}-{s.end:g}s"
                                if s.start is not None else "")
