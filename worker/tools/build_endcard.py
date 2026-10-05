@@ -1,6 +1,7 @@
 """Build the compact animated Valmera end card used by every export.
 
-The five-second signature reads "Edited using Valmera AI" and "VALMERA.IO".
+The five-second signature reads "Edited using Valmera AI", followed by the
+descriptor "Autonomous AI video editor" and the lower "VALMERA.IO" address.
 The address uses the bold, spaced uppercase reference wordmark. Elements appear within
 0.36 seconds and hold until the final 0.2-second fade. The exported MP4 is the
 production asset; the PNG is the fully revealed fallback poster.
@@ -33,6 +34,7 @@ HEADLINE_SIZE = 128
 ROBOT_H = 148
 NAME_SIZE = 82
 URL_SIZE = 44
+TAGLINE_SIZE = 40
 GAP_HEADLINE = 36
 GAP_LOCKUP = 30
 URL_CENTER_Y = round(CARD_H * 0.75)
@@ -125,19 +127,24 @@ def _elements():
     headline_font = ImageFont.truetype(JAKARTA_XB, HEADLINE_SIZE)
     name_font = ImageFont.truetype(INTER_BLACK, NAME_SIZE)
     url_font = ImageFont.truetype(INTER_BLACK, URL_SIZE)
+    tagline_font = ImageFont.truetype(INTER_BOLD, TAGLINE_SIZE)
 
     headline = _text("Edited using", headline_font, WHITE, -2.0)
     name = _brand_name(_text("Valmera", name_font, WHITE, -2.0),
                        _text("AI", name_font, WHITE, -2.0))
     url_line = _text("VALMERA.IO", url_font, WHITE, URL_SIZE * 0.12)
     lockup = _lockup(_robot(ROBOT_H), name)
+    tagline = _text("Autonomous AI video editor", tagline_font, SOFT_WHITE)
 
     block_h = (headline.height + GAP_HEADLINE + lockup.height
                + GAP_LOCKUP + url_line.height)
     top = (CARD_H - block_h) // 2
+    # Keep the approved attribution and URL geometry. The short descriptor
+    # occupies the existing clear space below the brand, without moving it.
     return (
         (headline, top),
         (lockup, top + headline.height + GAP_HEADLINE),
+        (tagline, top + headline.height + GAP_HEADLINE + lockup.height + 38),
         # Give the address its own quiet space below the attribution. Keep
         # the headline/robot composition fixed while lowering only this line.
         (url_line, URL_CENTER_Y - url_line.height // 2),
@@ -180,7 +187,7 @@ def _place(frame, layer, center_y, progress, travel=24, scale_from=1.0,
 def frame_at(t, elements=None):
     """Return the designed animation frame at time ``t`` seconds."""
     elements = elements or _elements()
-    headline, lockup, url_line = elements
+    headline, lockup, tagline, url_line = elements
 
     # The final 0.2s resolves to black. This makes the MP4 itself complete;
     # the render pipeline also fades the segment as a codec-safe guard.
@@ -192,6 +199,9 @@ def frame_at(t, elements=None):
            global_opacity=global_opacity)
     _place(frame, lockup[0], lockup[1] + lockup[0].height / 2,
            _progress(t, 0.08, 0.28), travel=20, scale_from=0.92,
+           global_opacity=global_opacity)
+    _place(frame, tagline[0], tagline[1] + tagline[0].height / 2,
+           _progress(t, 0.12, 0.32), travel=14,
            global_opacity=global_opacity)
     _place(frame, url_line[0], url_line[1] + url_line[0].height / 2,
            _progress(t, 0.16, 0.36), travel=14,
@@ -233,7 +243,7 @@ def build(poster_path, video_path=None):
     print(
         f"end card {CARD_W}x{CARD_H}; signature "
         f"{elements[0][0].width}x"
-        f"{elements[2][1] + elements[2][0].height - elements[0][1]}; "
+        f"{elements[-1][1] + elements[-1][0].height - elements[0][1]}; "
         f"poster {os.path.getsize(poster_path) / 1024:.0f} KB"
         + (f"; animation {os.path.getsize(video_path) / 1024:.0f} KB"
            if video_path else ""))

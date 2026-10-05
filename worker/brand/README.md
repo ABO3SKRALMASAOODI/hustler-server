@@ -1,15 +1,17 @@
 # Brand assets baked into renders
 
-`endcard.mp4` is the animated signature every export closes on (v8, round
-102). It is a 1080×1920, 5-second H.264 asset with one short reading path:
+`endcard.mp4` is the animated signature every export closes on (v13).
+It is a 1080×1920, 5-second H.264 asset with a centered reading path:
 
-    Edited by
+    Edited using
     [robot] Valmera AI
-    www.valmera.io
+    Autonomous AI video editor
 
-The headline appears first and holds alone for about half a second. The compact
-robot + Valmera AI lockup follows, and the URL resolves immediately after it.
-The signature occupies about 20% of a vertical reel's height and then holds.
+    VALMERA.IO
+
+The larger attribution leads, followed by the robot/name, a smaller descriptor,
+and the address lower in the frame. All elements resolve within 0.36 seconds
+and hold until the final 0.2-second fade.
 
 `endcard.png` is the fully revealed poster. The renderer prefers the MP4 and
 uses the PNG only as a graceful fallback if the animation is missing from a
@@ -24,17 +26,17 @@ python3 worker/tools/build_endcard.py
 
 ## Design contract
 
-- One message only: attribution. The old descriptor and CTA pill were removed
-  because five stacked elements were too much to parse at the end of a reel.
-- “Edited by” is the largest type. The robot and Valmera AI name are supporting
-  marks; `www.valmera.io` is the quiet but fully legible final read below them.
-- The reveal uses three restrained upward fades: attribution first, then a
-  roughly half-second beat before the brand and URL. A clean hold and final
+- “Edited using” is the largest type. The robot and Valmera AI name support
+  the attribution. The smaller descriptor explains the product category;
+  `VALMERA.IO` retains its own clear space at 75% of the frame height.
+- The approved attribution/name and address positions remain unchanged when
+  the descriptor is added. Each element is centered by its visible ink.
+- The reveal uses short, restrained upward fades. A clean hold and final
   fade complete the five-second card. There is no bounce, glow, panel or
   background texture competing with the mark.
 - The attribution uses `Plus Jakarta Sans ExtraBold`: larger, upright and
   friendlier than the previous italic. The supporting lockup stays in
-  `Inter Display`, and the URL uses natural spacing.
+  `Inter Display`, and the uppercase URL uses the approved bold spaced style.
 
 ## Robot assets
 

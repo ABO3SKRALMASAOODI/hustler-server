@@ -1793,7 +1793,7 @@ OUTRO_ON_PREVIEW = os.getenv("OUTRO_ON_PREVIEW", "0") == "1"
 # Bumped whenever the card's LOOK or its audio handoff changes. It is stored on
 # every render asset and busts the cache, so an existing export re-encodes with
 # the complete current outro treatment instead of serving stale bytes forever.
-OUTRO_VERSION = 12     # v12: larger lead text with the centered robot-and-name row.
+OUTRO_VERSION = 13     # v13: autonomous editor descriptor; approved lockup and lower URL.
                       # See tools/build_endcard.py
 
 # ── Shorts mode (round 99) ───────────────────────────────────────────────
