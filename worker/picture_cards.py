@@ -78,6 +78,8 @@ def prepare_inputs(edl, workdir, W, H, fps, args, next_idx):
 
 
 def append_graph(parts, vlabel, inputs, W, H, fps, source_rect=None):
+    if not inputs:
+        return vlabel
     sx, sy, sw, sh = pixels(W,H,source_rect or [0,0,1,1])
     for j, (idx, spec) in enumerate(inputs or []):
         p = f"pc{j}"
