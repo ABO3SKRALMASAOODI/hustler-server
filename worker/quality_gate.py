@@ -63,6 +63,40 @@ def _overlap(a: Dict[str, Any], b: Dict[str, Any]) -> float:
         return 0.0
 
 
+def _static_measured_bounds(item, edl):
+    """Use the renderer's geometry for explicitly placed, unadorned type.
+
+    Concurrent words are normal in a composed headline. Time overlap alone
+    cannot establish that they print over one another. Unknown geometry and
+    moving/rotating type retain the conservative advisory; ids and generated
+    group prefixes are deliberately not exemptions.
+    """
+    if any(item.get(k) is None for k in ("text_align", "font_size", "x", "y")):
+        return None
+    if item.get("box") is not False or item.get("outline_width") != 0 or \
+            item.get("shadow") != 0:
+        return None
+    if item.get("entrance") not in ("none", "fade") or \
+            item.get("exit") not in ("none", "fade") or item.get("motion_motif"):
+        return None
+    if any(value is not None for key, value in (item.get("motion") or {}).items()
+           if key != "opacity"):
+        return None
+    from schemas import CANVAS_DIMS
+    canvas = edl.get("canvas") or {}
+    dims = ((canvas["width"], canvas["height"])
+            if canvas.get("width") and canvas.get("height") else
+            CANVAS_DIMS.get((edl.get("frame") or {}).get("ratio")))
+    if dims is None:
+        return None
+    try:
+        from graphics import _compile_item
+        return _compile_item(item, float(item["end"]) + 1, dims)
+    except (KeyError, TypeError, ValueError, OSError):
+        # A missing font or unknown legacy layout is not proof of separation.
+        return None
+
+
 def advisory_findings(previous: Dict[str, Any], proposed: Dict[str, Any],
                       user_message: str = "") -> List[str]:
     """Return human/actionable risks without blocking the EDL delta."""
@@ -117,12 +151,20 @@ def advisory_findings(previous: Dict[str, Any], proposed: Dict[str, Any],
 
     new_texts = _new_items(previous, proposed, "texts")
     all_texts = _items(proposed, "texts")
+    measured = {id(item): _static_measured_bounds(item, proposed)
+                for item in all_texts}
     for item in new_texts:
         tid = item.get("id") or "new text"
         for other in all_texts:
             if other is item or other.get("id") == item.get("id"):
                 continue
             if _overlap(item, other) <= 0.08:
+                continue
+            a, b = measured[id(item)], measured[id(other)]
+            if a and b and (a["right"] <= b["left"] or
+                            b["right"] <= a["left"] or
+                            a["bottom"] <= b["top"] or
+                            b["bottom"] <= a["top"]):
                 continue
             # A title + subtitle deliberately composed on one owned card is
             # one hierarchy, not two unrelated word layers. Ordinary footage

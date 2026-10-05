@@ -37,6 +37,37 @@ def test_no_guessed_identity_tiny_copy_or_extra_labels():
             editorial_graphics.compose(**{**args,**change})
 
 
+@pytest.mark.parametrize('ratio,dims',[
+    ('9:16',(1080,1920)),('16:9',(1920,1080)),('1:1',(1080,1080))])
+def test_quality_advisory_uses_actual_headline_geometry(ratio,dims):
+    import copy
+    import quality_gate
+    from schemas import default_edl, validate_edl
+    before=default_edl(12)
+    after=copy.deepcopy(before)
+    after['frame']={'ratio':ratio,'mode':'pad'}
+    result=editorial_graphics.compose(id='topic',kind='headline',
+        speaker='Elon Musk',text='SpaceX builds its own engines',start=0,end=8,
+        box=[.08,.08,.92,.30],W=dims[0],H=dims[1])
+    after['texts']=result['texts']
+    # Exercise the persisted schema, including optional motion fields.
+    after=validate_edl(after,12).model_dump()
+    assert quality_gate.advisory_findings(before,after)==[]
+
+    # A common generated prefix must not hide a real placement collision.
+    colliding=copy.deepcopy(after)
+    colliding['texts'][1]['x']=colliding['texts'][0]['x']
+    colliding['texts'][1]['y']=colliding['texts'][0]['y']
+    assert any('overlaps designed text' in f for f in
+               quality_gate.advisory_findings(before,colliding))
+
+    # Static separation cannot waive a move that might cross another word.
+    moving=copy.deepcopy(after)
+    moving['texts'][1]['motion']={'x':[{'t':0,'v':.05},{'t':1,'v':.95}]}
+    assert any('overlaps designed text' in f for f in
+               quality_gate.advisory_findings(before,moving))
+
+
 def test_native_recipe_exposes_and_replaces_speaker_heading():
     import agent_tools
     from schemas import default_edl,validate_edl
