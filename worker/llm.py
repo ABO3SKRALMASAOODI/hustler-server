@@ -680,13 +680,17 @@ def _audio_answer_is_actionable(answer, purpose):
     # A 200 response is not evidence that the listener heard anything. These
     # provider non-answers occurred on real source-audio reviews; never attach
     # listening provenance to them or to a JSON echo of the requested times.
-    capability_answer = re.sub(r"^[\s\"']*(?:sorry[,!.:\s]+)?", "", lowered)
-    if capability_answer.startswith((
+    def capability_denial(text):
+        prefix = re.sub(r"^[\s\"']*(?:sorry[,!.:\s]+)?", "", text.casefold())
+        return prefix.startswith((
             "i cannot listen to", "i can't listen to", "i am unable to listen to",
             "i cannot process audio", "i can't process audio",
             "i cannot access audio", "i can't access audio",
             "i cannot analyze audio", "i cannot analyse audio",
-            "as a text-based", "as an ai language model")):
+            "i don't have the ability to listen", "i do not have the ability to listen",
+            "as a text-based", "as an ai language model"))
+
+    if capability_denial(value):
         return False
     try:
         structured = json.loads(re.sub(r"^```(?:json)?\s*|\s*```$", "", value))
@@ -698,7 +702,7 @@ def _audio_answer_is_actionable(answer, purpose):
 
         def has_words(item):
             if isinstance(item, str):
-                return any(char.isalpha() for char in item)
+                return any(char.isalpha() for char in item) and not capability_denial(item)
             if isinstance(item, dict):
                 return any(has_words(v) for k, v in item.items() if k not in metadata)
             if isinstance(item, list):

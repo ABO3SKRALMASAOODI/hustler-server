@@ -153,6 +153,7 @@ def test_audio_reviewer_falls_back_from_chat_messages_to_responses(
 
 @pytest.mark.parametrize("answer", [
     'Sorry, I cannot listen to or analyze audio clips. Please provide text.',
+    '{"text":"Sorry, I cannot listen to audio clips."}',
     '{"start_time":2723.6,"end_time":2725.6}',
     '```json\n[{"label":"CLIP 1","start":1,"end":2}]\n```',
 ])
