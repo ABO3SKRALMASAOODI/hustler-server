@@ -5306,7 +5306,7 @@ check("cover overlay scales to FILL the frame and crops the overflow",
       "scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720"
       in _gc)
 check("cover overlay still windows on program time",
-      "enable='between(t,5.000,9.000)'" in _gc)
+      "enable='gte(t,5.000)*lt(t,9.000)'" in _gc)
 
 # ---- round 36: record_website honesty gates --------------------------------
 import webrecord as _wrec                                     # noqa: E402

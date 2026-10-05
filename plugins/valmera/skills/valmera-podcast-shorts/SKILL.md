@@ -1,286 +1,119 @@
 ---
 name: valmera-podcast-shorts
-description: Reliably turn a podcast, interview, or other long-form video into story-led shorts in the user's chosen format with Valmera. Use when Codex must acquire or open a source, calibrate editing taste from references or pilot cuts, select coherent stories, run a bounded parallel editor pool, independently quality-check every render, export approved finals, and hand a verified export manifest to a downstream publisher or CRM.
+description: Turn podcasts and interviews into distinctive, story-led social shorts with Valmera, using Sol and three reusable editors. Use for source acquisition, complete-story selection, reference-informed motion design, efficient independent review, and verified local exports. Does not publish or operate the downstream CRM.
 ---
 
 # Valmera Podcast Shorts
 
-Run this as a finite production pipeline, not an open-ended swarm. The
-coordinator owns story selection, taste, assignments, final QC, export, and the
-truthful final report. Valmera performs project-scoped edits and renders. Each
-subagent owns one child project at a time.
+Make a short someone wants to finish, remember and share. A valid MP4 is only
+one part of that job. This is workflow **v8**; the durable `run.json` format
+remains v7 so interrupted runs can still be reconciled.
 
-Use workflow version `valmera-podcast-shorts-v7`.
+## Read only the instructions for your role
 
-## Read the v7 contracts
+- **Coordinator:** this file, [creative direction](references/creative-v8.md),
+  then [production](references/production-v8.md). Read the review section when
+  a candidate arrives; do not ingest every historical contract.
+- **Editor:** [creative direction](references/creative-v8.md),
+  [editing](references/editing-v8.md), and your one assignment.
+- **Resuming a pre-v8 run:** preserve that run's frozen brief and the v7
+  contracts it used. Never rewrite its accepted artifacts to claim v8 quality.
 
-Read these files completely before acting:
+The unversioned/v6 files and v7 prose are history, not current creative defaults.
+Use existing `scripts/run_state.py` for durable state, `compose_short.py` for
+initial source-clock plans and native caption recipes, `design_graphics.py` for
+editable graphic primitives when useful, and `inspect_cut.py` for bounded media
+review evidence. `--help` describes each interface. These scripts save mechanics;
+none can certify an engaging story or attractive design.
 
-- `references/orchestration-v7.md` before creating a run or launching agents.
-- `references/taste-v7.md` before choosing references or editing styles.
-- `references/editor-v7.md` before selecting stories or assigning an editor.
-- `references/qc-v7.md` before accepting or repairing a candidate.
-- `references/export-v7.md` before requesting or downloading final exports.
-- `references/delivery-quality-v7.md` before source acquisition, typography,
-  and approval; it defines durable picture/caption quality standards and a
-  per-run quality gate without prescribing a permanent visual style.
+## Current owner brief
 
-When the brief requests fast conversational B-roll, a spoken hook followed by
-a silent montage, a silent action opening, or persistent-headline conversation,
-also read `references/style-lanes-v7.md` before selection, assignment, and QC. The user's
-current brief determines structure, pacing, intentional silence, duration,
-aspect ratio, and rounded-card treatment. Generic defaults and earlier taste
-profiles must not override those choices. Rounded corners are a composition
-treatment, not an aspect ratio.
+The user wants exceptional autonomous shorts and efficient production on
+**gpt-6.1-sol**. Keep the coordinator and editing pool on Sol. Do not switch to a
+more expensive model to make the workflow work, or rely on another chat sending
+per-clip instructions. Use exactly one coordinator and at most three reused
+editor subagents, each with one child at a time. A new podcast is a fresh run.
 
-The user's September 9 headline references and current defaults are documented
-in `references/headline-conversation-references-v7.md`. Read it when using
-`headline-conversation` or the user's current four-style brief. Its black-canvas
-layout supersedes the earlier all-shorts rounded-card default. Four styles
-still use at most three reusable editors.
-For that brief, the September 14 corrections in `style-lanes-v7.md` remove
-the default editing lane, require bold headline hierarchy, and preserve both
-Valmera brand elements. The canvas default remains. Apply these corrections
-even when an older starter calls Style 4 the default or bans watermarks.
-Use the admin page's native watermark placement choices as described there;
-the user's correction authorizes that route. Do not invent an exact-corner
-blocker or stop the editing pool for routine placement adjustments.
+The current four formats are:
 
-The older unversioned contracts, schemas, `run_registry.py`, and
-`validate_contract.py` describe the retired v6 workflow. Do not load or run
-them for a v7 run. They remain only so an interrupted v6 run can be audited.
+1. `fast-conversation`: complete continuing speech with purposeful, frequent
+   visual changes: specific B-roll and authored visual explanations.
+2. `hook-to-silent-montage`: a complete spoken premise, then a directly relevant
+   silent visual payoff. Post-hook montage <=15s; editorial program <=25s.
+3. `silent-action-to-conversation`: 3–4s of recognizable silent action footage
+   of the actual subject, then a conversation that fulfills that opening.
+4. `headline-conversation`: compelling original conversation, natural camera
+   changes, one persistent bold topic headline above the picture, and separate
+   expressive dialogue captions. No B-roll or interrupting cards in this lane.
 
-## Non-negotiable operating rules
+There is **no default lane and no quota**. Choose the structure the story earns.
+The black portrait canvas and wider straight-edged picture remain the owner's
+preferred composition. Do not replace it with full-height portrait crops by
+habit. Preserve both native Valmera brand elements, including the **5-second
+ending**, and reserve that time within the 15–45s final. No added music unless
+explicitly requested. Preserve requested active-word highlighting. Motion,
+scale hierarchy and emphasis are allowed and wanted; flat typography is a
+choice for an appropriate passage, not a global safety rule.
 
-1. Use exactly one coordinator and at most three editor subagents. Reuse those
-   editors for later shorts; do not create a visible Codex task per short.
-2. Allow at most three Valmera requests in flight across the run. Calls within
-   one child project are sequential. A returned job is in flight until it is
-   terminal, even while `wait_for_job` is not being called.
-3. Never create a scheduled automation or heartbeat to continue production.
-   Stay in the current turn, wait for subagents directly, and resume as soon as
-   one returns. Do not repeatedly poll unchanged state.
-4. Never make an agent wait merely because another child is editing. Only the
-   three-request capacity limit, a same-project call, or a real dependency may
-   block it.
-5. Do not use `create_thread`, `edit_shorts`, or Valmera's in-house agent.
-   Use collaboration subagents and direct project-scoped editor tools.
-6. Do not use the retired global lease/call-permit registry. Track only durable
-   stage and child outcomes with `scripts/run_state.py`; Valmera's queue and
-   job IDs track requests.
-7. A child may return a `candidate`, never a self-approved final. Only the
-   coordinator can mark `ready`, and only after reviewing the exact preview
-   for the exact current EDL version.
-8. Do not silently omit a selected short. Every selected ID must finish as
-   `exported`, `needs_user_review`, or `failed_technical`, with evidence and a
-   specific next action.
-9. Do not say “all good,” “ready,” “finished,” or equivalent before all
-   applicable QC and export checks have passed.
-10. Keep source media, references, QA artifacts, and exports under the run
-    directory. Do not inspect or modify a downstream CRM; write its handoff
-    manifest only.
-11. Every final filename begins with its reviewed style-lane ID and `__`;
-    reject incidental date/place subheadlines and indirectly related montage
-    shots during coordinator QC. The detailed gates are in
-    `references/style-lanes-v7.md`, `references/qc-v7.md`, and
-    `references/export-v7.md`.
-12. Captions must be accurate, readable, well-composed, and intentionally styled.
-    Choose their treatment for the brief; preserve requested spoken-word
-    highlighting without fixing a permanent font, palette, or motion preset.
-    No B-roll visual may repeat within one short. For `hook-to-silent-montage`, the editorial program is
-    at most 25 seconds and the post-hook montage is at most 15 seconds; the
-    separate native Valmera ending is excluded from those limits.
-13. Fill all three editor slots immediately whenever at least three independent
-    children are claimable; if only one or two are claimable, use all of them.
-    Designate one early final for delivery-quality verification, but never make
-    that pilot, its export, browser access, or final review a gate on independent
-    editing or candidate QC. A real child-specific dependency or technical
-    blocker is an exception; preference or optional analysis is not.
+The user explicitly permits low-quality archival footage when accepted for a
+run. That permission applies to the footage only: new graphics, captions and
+branding still render at native HD delivery resolution. Do not upscale and
+re-upload every child just to obtain sharp text; Valmera already does that.
 
-## Create the run
+## The production loop
 
-Use a project-local directory:
+1. Create `.tmp/valmera-podcast-shorts/<run-id>` with source, taste,
+   assignments, candidates and exports. Never overwrite a previous run.
+2. Reuse the existing analyzed references by content hash. The saved four-style
+   brief and seven reference files are discoverable under
+   `.valmera/podcast-shorts/` and prior run `taste/` directories. Inspect the
+   relevant actual frames/motion; reuse the existing analysis instead of
+   transcribing/OCR-ing the same references again. Current user corrections
+   outrank older profile defaults. Freeze a compact run-local taste profile.
+3. Acquire and index the source once. Read the full transcript and inspect
+   representative camera changes. Check actual speech/source-clock alignment
+   at early, middle and late passages once. Reuse this source across children.
+4. Select independently strong complete stories. A fact being interesting to
+   us is not enough: identify the viewer's curiosity and the payoff. Compare
+   overlapping candidates and retain the stronger complete version. Select
+   all that clear the bar; never manufacture a clip count.
+5. Materialize the selected source ranges with one explicit `make_shorts`
+   call. Children share the indexed parent. Freeze each assignment's IDs and
+   story-specific art direction. Never replace originals for routine cuts,
+   crops, subtitles, headlines or cards.
+6. Launch three editors immediately when three children are available. Keep
+   them occupied with independent children. The coordinator reviews returned
+   work while freed editors take the next assignments. Use direct agent waits,
+   not a heartbeat, scheduled task or visible Codex chat per short.
+7. Review **story and design first**, before polishing technical details.
+   Compare the moving result with the relevant reference traits. Return one
+   consolidated repair packet, not a series of single-word nitpicks.
+8. Export reviewed EDLs, verify the actual final files and branding, and write
+   the delivery manifest. Every selected ID must end exported or as a visible
+   exception with the next action. Never hide a weak/failed short in the total.
 
-```text
-<repo>/.tmp/valmera-podcast-shorts/<run-id>/
-  run.json
-  source/
-  taste/
-  assignments/
-  candidates/<short-id>/
-  exports/
-```
+## Efficiency that protects quality
 
-Reusable approved profiles live at
-`<workspace>/.valmera/podcast-shorts/taste-profiles/<profile-id>.json`. Copy the
-selected profile into the run's `taste/` directory so the run remains
-reproducible. Do not overwrite a user-approved reusable profile unless the user
-asks to revise it.
+Use at most three Valmera requests/jobs in flight. One child's mutations are
+serial; independent children may proceed. Reconcile a lost response by job ID
+and EDL version before retrying. Use `apply_edit_batch` for related, already
+planned changes; its timestamps describe the resulting timeline.
 
-Initialize it once:
+A normal child needs one source inspection, a deliberate editing pass, one
+candidate render and one shared inspection packet. A real defect may require a
+repair render. Do not generate hundreds of frames, rebuild the media locally,
+re-index unchanged speech, install another ASR pipeline, or repeatedly compare
+PCM just to make a report look rigorous. Use a specialized measurement only
+when it answers a timestamped unresolved defect. Reuse checksum-matched
+information; after a scoped repair recheck the changed window and boundaries.
 
-```bash
-python <skill-root>/scripts/run_state.py init \
-  --run-dir <run-dir> --run-id <run-id> --source <source-or-topic>
-```
+Two editor repair rounds and one coordinator rescue are the ceiling, not a
+routine. If the tool prevents the intended edit, report the concrete capability
+gap; do not spend hours hiding it in a custom re-encode/transcription pipeline.
 
-For every new production run, also supply
-`--quality-policy <run-dir>/taste/quality-policy.json` using
-`references/delivery-quality-v7.md`. Verify one actual native final early enough
-to catch delivery defects, while the other editors continue independent work;
-small selection proxies never establish delivery quality.
+## Completion
 
-On resume, run `status`, reconcile only recorded nonterminal Valmera job IDs,
-and continue the next unfinished stage. Never infer progress from task prose.
-At the start of each stage, advance exactly once with `run_state.py phase
---run-dir <run-dir> --stage <stage>`; the state machine rejects skips and
-backward transitions.
-
-## Calibrate taste before the batch
-
-High picture and caption quality is a standing requirement; font, palette,
-scale, phrase length, layout, and animation are chosen for each brief and story.
-Aim for premium execution and verify what that means in actual pixels and timing.
-Do not turn the last successful short or repair into a permanent template.
-Accepting low-quality footage never lowers the quality of independent text or
-branding. Keep an HD delivery canvas and render new graphics at that size;
-record source-only exceptions as described in `delivery-quality-v7.md`.
-
-Taste cannot be communicated reliably by adjectives alone. Accept any useful
-number of user-liked short-form examples plus optional disliked examples; do
-not impose a reference quota. One precise example can teach one trait, while a
-larger varied set can reveal stable taste. Follow `references/taste-v7.md` for
-the exact intake and inspection contract. Analyze which exact properties
-transfer: hook construction, cut density, caption behavior, framing, B-roll
-logic, graphic language, sound, color, and ending. Do not copy protected
-footage, audio, branding, or a creator-specific identity.
-
-Persist `taste/taste-profile.json`, then attach its exact checksum to the run:
-
-```bash
-python <skill-root>/scripts/run_state.py taste \
-  --run-dir <run-dir> --profile <run-dir>/taste/taste-profile.json
-```
-
-Separate:
-
-- invariants shared by every short;
-- two to five approved style lanes used for variety;
-- forbidden patterns;
-- reference-specific observations and confidence.
-
-If there is no approved taste profile and the user supplied no examples, do
-not spend the whole batch guessing. Build three visibly different pilot
-treatments of one strong story, export low-resolution previews, and ask the
-user to choose or combine them. This is the only intentional taste-calibration
-pause. The user may explicitly choose `autopilot`, in which case record that
-the coordinator selected the profile without user calibration.
-
-## Acquire, understand, and select
-
-If given a topic, find one suitable long-form source. If given a URL or an
-existing Valmera project, use that source. Hash downloaded media and do not
-redownload or reupload an identical file within the same run.
-
-Verify picture, speech, and caption timing after source preparation, including
-later source sections and joins; use `delivery-quality-v7.md`. A successful
-opening pilot cannot establish that the entire source remains synchronized.
-
-Read the full transcript before selecting. Select complete micro-stories, not
-isolated quotes. Each must have an immediate hook, enough context to understand
-the claim, development or evidence, and a payoff. Preserve meaning and speaker
-intent. Reject filler, duplicate lessons, weak endings, and clips that need
-outside context.
-
-Apply completeness to the assigned structure. A hook-to-montage short needs a
-self-contained spoken premise and a relevant visual payoff; it does not need
-continued speech during the montage. An action-opening short can begin with
-silent footage of the actual subject. Never extend or restore dialogue just
-to satisfy a generic spoken-story template.
-
-Select all and only the independently strong stories. There is no target,
-minimum, maximum, or default clip count: five and fifty are both valid, and
-zero is valid when nothing clears the bar. Stop only when every remaining
-candidate fails the complete-micro-story and non-duplication tests. Never pad,
-merge weak moments, split one idea merely to raise the count, or omit a strong
-distinct story merely to lower it. Execution stays bounded by processing the
-selected queue in three-editor waves; editorial selection does not.
-
-For each story, write a compact assignment containing immutable parent/child
-IDs, source range, verbatim transcript, story beats, hook/payoff, intended
-audience, one style lane, reference observations to adapt, forbidden choices,
-and acceptance risks. Include the output ratio, frame treatment, allowed
-duration, pacing, planned audio states, and transition cues. Materialize all
-approved ranges with one explicit `make_shorts(project_id, clips=[...])` call,
-then record each returned child ID with `run_state.py add-short`. Store the
-assignment as JSON with a lowercase slug in `style_lane`; `run_state.py`
-carries that reviewed lane through candidate, QC, export filename validation,
-and the handoff manifest.
-
-For the current four-style brief, first record each story's selection reason
-and closest alternative and review the batch for default-lane bias, using
-`style-lanes-v7.md`. No fixed distribution is required. Include the headline
-weight and required Valmera branding geometry/runtime in assignments.
-
-## Edit with a three-worker pool
-
-Spawn or reuse three editor subagents immediately when the queue has at least
-three independent children. Claim three different children with three different
-worker IDs before accepting the first batch candidate. One can produce the
-early delivery-quality final while the other two keep editing; export or browser
-delay on that child does not idle them. Give each editor the editor and QC
-contracts plus exactly one assignment. An editor must:
-
-- open only its immutable child project;
-- inspect source words and visuals before mutating;
-- build the story in a small number of deliberate editing passes;
-- render a rough preview only when composition has a real unresolved risk;
-- consolidate findings into one repair pass;
-- render one current candidate preview after the edit is established;
-- save a local candidate evidence bundle and return its path, EDL version, and
-  outstanding job IDs.
-
-When an editor returns, record and identity-check the candidate, then refill
-that editor's slot before optional deep review if independent queued work
-exists. Review can proceed while the next edit runs. If the candidate fails,
-queue one timestamped, consolidated repair packet for its editor's next free
-slot; do not stop the other editors or create a replacement agent for ordinary
-repair work. Never give one editor two active children at once.
-
-Use direct agent waits, preferably a long bounded wait that wakes when any
-editor finishes. Never schedule a future wakeup. If a tool or agent genuinely
-needs user action, state the exact blocker instead of pretending it is still
-working.
-
-## Accept, repair, and export
-
-Apply `references/qc-v7.md` independently to every candidate. Verify story and
-taste before pixel polish. Use the smallest evidence set that proves the gates
-on the current preview: one end-to-end review, boundary/beat coverage, caption
-timing review, a contact sheet, and deterministic media probe. Stop when they
-pass. Increase density or add a specialist measurement only around a concrete
-suspected defect; do not repeat unchanged checks after a targeted repair.
-
-Allow at most two editor repair rounds. If a candidate still misses a blocker,
-the coordinator performs one bounded rescue pass or marks it
-`needs_user_review`; it must not loop forever or vanish from the batch.
-
-Export only `ready` children and only the reviewed EDL version. Queue no more
-than three finals concurrently. Download each finished final, verify identity,
-duration, dimensions, audio/video streams, EDL version, and checksum, then
-record it with `run_state.py export`. Create `exports/manifest.json` only when
-the set of terminal children is complete. Follow `references/export-v7.md` for
-the exact boundary when MCP export is unavailable.
-
-## Finish truthfully
-
-Before reporting completion, run:
-
-```bash
-python <skill-root>/scripts/run_state.py status --run-dir <run-dir> --json
-python <skill-root>/scripts/run_state.py finalize --run-dir <run-dir>
-```
-
-Report counts for selected, exported, needs-user-review, and failed-technical;
-list every non-exported short and its next action. A run with exceptions is
-complete as an audited production attempt, not “all shorts delivered.”
+Do not claim viral performance or a guaranteed view count. Report what was
+actually produced, the strongest story/design decisions, observed defects and
+exceptions, elapsed time, render/re-index counts, and the verified local
+manifest. Quality is judged from the result, not a self-awarded score.

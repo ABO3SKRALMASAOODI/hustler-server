@@ -80,3 +80,5 @@ Run caption audit, render all paged QA states across distinct layouts/background
 ## Repair ladder
 
 Correct text/coverage → regroup by speech rhythm/read time → reduce hierarchy → reposition/resize → choose a clean/documentary treatment → erase or avoid burned text → render and audit again.
+
+Explicit dynamic=true also colors the currently spoken word in reveal presets such as reels, podcast and stacked. It coexists with semantic size emphasis and animation; animation=none disables motion without disabling that color. Omit dynamic to retain the preset's historical treatment.

@@ -726,7 +726,7 @@ def preview_geometry(W, H, fps):
 
 
 def _normalize_video(parts, in_label, out_label, W, H, fps, mode, uid,
-                     focus=None, seg_dur=None):
+                     focus=None, seg_dur=None, picture=None):
     """Append graph parts that bring in_label to exactly WxH @ fps, sar 1.
     mode: crop (center-crop), pad (black bars), pad_blur (blurred backdrop).
 
@@ -765,6 +765,13 @@ def _normalize_video(parts, in_label, out_label, W, H, fps, mode, uid,
     sniffing an ffmpeg version into a filter chain. Verified on both builds
     against the real EDL: 150.60s and 150.53s for 150.48s expected.
     """
+    if picture:
+        x, y, pw, ph = picture_pixels(W, H, picture)
+        inner = f"pic_{uid}"
+        _normalize_video(parts, in_label, inner, pw, ph, fps, mode, uid + "p",
+                         focus=focus, seg_dur=seg_dur)
+        parts.append(f"[{inner}]pad={W}:{H}:{x}:{y}:color=black[{out_label}]")
+        return
     bound = ("" if seg_dur is None
              else f"trim=end={float(seg_dur):.3f},setpts=PTS-STARTPTS,")
     tail = f"fps={fps:.3f},{bound}setsar=1,format=yuv420p"
@@ -785,7 +792,7 @@ def _normalize_video(parts, in_label, out_label, W, H, fps, mode, uid,
                      f"{tail}[{out_label}]")
 
 
-def frame_fit_filter(mode, W, H, focus=None, pad_color="black"):
+def frame_fit_filter(mode, W, H, focus=None, pad_color="black", picture=None):
     """The scale (+crop or +pad) that maps a SOURCE frame onto the output frame.
 
     Extracted from _normalize_video so that anything which has to land in
@@ -800,6 +807,10 @@ def frame_fit_filter(mode, W, H, focus=None, pad_color="black"):
     fitted rectangle, and the blurred backdrop behind it is the base picture's
     business, not a mask's.
     """
+    if picture:
+        x, y, pw, ph = picture_pixels(W, H, picture)
+        return (frame_fit_filter(mode, pw, ph, focus, pad_color) +
+                f",pad={W}:{H}:{x}:{y}:color={pad_color}")
     if mode in ("pad", "pad_blur"):
         return (f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
                 f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color={pad_color}")
@@ -818,6 +829,26 @@ def frame_fit_filter(mode, W, H, focus=None, pad_color="black"):
                 f"crop={W}:{H}:{xe}:{ye}")
     return (f"scale={W}:{H}:force_original_aspect_ratio=increase,"
             f"crop={W}:{H}")
+
+
+def picture_pixels(W, H, picture=None):
+    """One even-pixel rectangle shared by renders, previews and spatial QA."""
+    if not picture:
+        return 0, 0, W, H
+    x0, y0, x1, y1 = picture
+    x, y = int(W*x0)//2*2, int(H*y0)//2*2
+    right, bottom = int(W*x1)//2*2, int(H*y1)//2*2
+    return x, y, max(2, right-x), max(2, bottom-y)
+
+
+def picture_mapping(src_w, src_h, W, H, mode=None, focus=None, picture=None):
+    """Return source crop and destination rect, both normalized, without IO."""
+    x, y, pw, ph = picture_pixels(W, H, picture)
+    kind, x0, y0, x1, y1 = fit_fractions(src_w, src_h, pw, ph, mode, focus)
+    src = [x0, y0, x1, y1] if kind == "crop" else [0., 0., 1., 1.]
+    dest = ([x/W, y/H, (x+pw)/W, (y+ph)/H] if kind == "crop" else
+            [(x+x0*pw)/W, (y+y0*ph)/H, (x+x1*pw)/W, (y+y1*ph)/H])
+    return src, dest
 
 
 def fit_fractions(src_w, src_h, W, H, mode=None, focus=None):
@@ -1382,17 +1413,18 @@ def watermark_anchor_y(edl, src_w, src_h, W, H, settings=None):
     if position != "scene":
         return None
     frame = (edl or {}).get("frame") or {}
-    if frame.get("ratio") != "9:16" or \
-            frame.get("mode") not in ("pad", "pad_blur"):
+    if frame.get("ratio") != "9:16" or (not frame.get("picture") and
+            frame.get("mode") not in ("pad", "pad_blur")):
         return None
     try:
-        if float(src_w) <= float(src_h):
+        if float(src_w) <= float(src_h) and not frame.get("picture"):
             return None
-        kind, _x0, y0, _x1, y1 = fit_fractions(
-            src_w, src_h, W, H, frame.get("mode"))
+        _src, dest = picture_mapping(src_w, src_h, W, H, frame.get("mode"),
+                                    picture=frame.get("picture"))
+        y0, y1 = dest[1], dest[3]
     except (TypeError, ValueError, ZeroDivisionError):
         return None
-    if kind != "pad" or y0 <= 0.0 or y1 >= 1.0:
+    if y0 <= 0.0 or y1 >= 1.0:
         return None
     content_top = int(round(y0 * H))
     content_bottom = int(round(y1 * H))
@@ -1640,12 +1672,13 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     # needs. Without this a plain single-source cut would take the cheap graph
     # and alphamerge a WxH mask onto frames of some other size.
     do_norm = (bool(insert_inputs) or frame_mode is not None or bool(zooms)
+               or bool((edl.get("frame") or {}).get("picture"))
                or bool(speed) or bool(overlay_inputs) or bool(takeovers)
                or tstyle in ("whip_left", "whip_right", "zoom_punch")
                or bool(shifts) or screen_frame is not None
                or bool(behind_inputs)
                or any(s.get("kind") == "shake" for s in stylize))
-    mode = frame_mode or "crop"
+    mode = frame_mode or (edl.get("frame") or {}).get("mode") or "crop"
 
     # Censor regions are burned into each SOURCE segment BEFORE any
     # reframe/normalization: their fractions are of the SOURCE frame
@@ -1857,7 +1890,8 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             seg_focus, seg_mode = _frame_for(*keep[i])
             _normalize_video(parts, f"segv{i}", f"v_seg{i}", W, H, fps,
                              seg_mode, f"s{i}", focus=seg_focus,
-                             seg_dur=seg_out_len[i])
+                             seg_dur=seg_out_len[i],
+                             picture=(edl.get("frame") or {}).get("picture"))
 
     # insert blocks: trim to their window (source_start_s picks where in
     # the clip the window starts), normalize like everything else
@@ -1915,7 +1949,8 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         motion = item.get("motion")
         norm_out = f"v_insn{j}" if motion else f"v_ins{j}"
         _normalize_video(parts, ins_in, norm_out, W, H, fps,
-                         imode, f"i{j}", seg_dur=dur)
+                         imode, f"i{j}", seg_dur=dur,
+                         picture=(edl.get("frame") or {}).get("picture"))
         if motion:
             nframes = max(1, int(round(dur * fps)))
             prog = f"(on/{nframes})"
@@ -2571,7 +2606,10 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         chain = []
         if item["kind"] != "image":
             off = float(item.get("source_start_s") or 0.0)
-            chain.append(f"trim=start={off:.3f}:end={off + o_dur:.3f}")
+            # Keep a frame available through a fractional-rate handoff;
+            # otherwise EOF can expose the source for the last frame.
+            chain.append(f"trim=start={off:.3f}:end={off + o_dur + .15:.3f}")
+            chain.append("tpad=stop_mode=clone:stop_duration=0.15")
             chain.append("setpts=PTS-STARTPTS")
         if opacity_animated:
             # geq negotiates its output dimensions from its first frame.  Run
@@ -2583,14 +2621,16 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             chain.append(
                 "geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)'"
                 f":a='alpha(X,Y)*({alpha})'")
-        if item.get("fit") == "cover":
-            # B-roll cutaway (round 36): fill the WHOLE output frame — scale
-            # up + center-crop the overflow. The position expression below
-            # still runs; with w == main_w and the default x/y of 0.5 it
-            # resolves to 0, and entrances/exits/opacity keep working.
-            chain.append(f"scale={W or 1280}:{H or 720}:"
+        picture_cover = item.get("fit") == "picture"
+        if item.get("fit") in ("cover", "picture"):
+            # Cover either the canvas or its authored picture rectangle.
+            # Picture-only cutaways preserve the independent headline band
+            # and keep the original dialogue playing underneath.
+            rect = picture_pixels(W or 1280, H or 720,
+                (edl.get("frame") or {}).get("picture") if picture_cover else None)
+            chain.append(f"scale={rect[2]}:{rect[3]}:"
                          f"force_original_aspect_ratio=increase,"
-                         f"crop={W or 1280}:{H or 720}")
+                         f"crop={rect[2]}:{rect[3]}")
         else:
             if scale_animated:
                 scale_expr = _anim_expr(scale_value, "t")
@@ -2645,6 +2685,9 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         lt = f"(t-{o_start:.3f})"
         xe = f"main_w*({_anim_expr(item.get('x', 0.5), lt)})-w/2"
         ye = f"main_h*({_anim_expr(item.get('y', 0.5), lt)})-h/2"
+        if picture_cover:
+            xe = f"{rect[0]}+({rect[2]}-w)/2"
+            ye = f"{rect[1]}+({rect[3]}-h)/2"
         if ent == "slide_left":       # arrives moving leftward: from right
             xe += f"+main_w*pow(max(0,1-{lt}/{ed:.2f}),2)"
         elif ent == "slide_right":
@@ -2661,7 +2704,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         parts.append(
             f"[{vlabel}][ovp{j}]overlay=x='{xe}':y='{ye}'"
             f":eof_action=pass"
-            f":enable='between(t,{o_start:.3f},{o_start + o_dur:.3f})'"
+            f":enable='gte(t,{o_start:.3f})*lt(t,{o_start + o_dur:.3f})'"
             f"[vov{j}]")
         vlabel = f"vov{j}"
     if ass_path:

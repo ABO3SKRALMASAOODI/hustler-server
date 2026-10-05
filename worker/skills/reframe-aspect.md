@@ -14,7 +14,8 @@ CHANGING ASPECT — TWO DIFFERENT ASKS.
 - "Make it 9:16 / vertical / for TikTok / Shorts / Reels / crop it" → compose for the vertical frame, preserving essential information. Crop when it preserves the action, face, HUD or demonstration. auto_reframe("9:16", mode="crop") or set_frame("9:16", "crop"). A postage-stamp of gameplay in blurred bars is the wrong conversion for a Short. Aim the crop at the action (focus from a look, or auto_reframe) so the fight/subject fills the frame without losing information required by the brief. Use a composed fit or layout when a crop would remove it.
 - "Fit the whole picture / keep the HUD / letterbox / don't crop" → pad_blur. auto_reframe("9:16", mode="pad_blur") or set_frame("9:16", "pad_blur"). Screen recordings and "don't lose the UI" briefs live here.
 - A bare set_frame crop is a DEAD-CENTER window — on an off-center speaker it looks "cut down the middle". set_frame(ratio, mode, focus_x, focus_y) is the manual aim (focus from a look).
-- HONEST LIMIT: the focus is one fixed point for the whole video; it does not track a moving subject — say so. On a Short, still crop-fill; don't fall back to pad_blur just because the subject moves.
+- Use focus_track for shot-specific focus in SOURCE seconds; one fixed focus_x/y alone does not track a moving subject.
+- For an editorial inset on a black canvas, set_frame(ratio="9:16", mode="crop", picture=[0,0.2890625,1,0.7109375]) places a 4:3 picture natively. Fractions are left/top/right/bottom. crop/pad/pad_blur and focus apply INSIDE that rectangle; new text and captions remain sharp on the full output canvas. No source re-encode or re-index is needed. add_overlay(fit="picture") preserves that layout during a B-roll cutaway.
 
 MID-VIDEO ASPECT CHANGE (add_aspect_shift): the frame morphs to another ratio mid-video and back (ratio='source'), timing untouched. Remove with remove_aspect_shift.
 

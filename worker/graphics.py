@@ -558,8 +558,10 @@ def _compile_item(tx, out_dur, play_res, y_shift=0.0, enforce_min=True,
     if sp:
         head += rf"\fsp{sp}"
     head += rf"\1c{text_c}\3c&H101010&"
-    head += rf"\bord{round(tpl['outline'] * f, 1)}"
-    head += rf"\shad{round(tpl['shadow'] * f, 1)}"
+    outline = tx.get("outline_width")
+    shadow = tx.get("shadow")
+    head += rf"\bord{round((tpl['outline'] if outline is None else outline) * f, 1)}"
+    head += rf"\shad{round((tpl['shadow'] if shadow is None else shadow) * f, 1)}"
     if tpl.get("italic"):
         head += r"\i1"
     if box:

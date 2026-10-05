@@ -1,7 +1,7 @@
 interface:
   display_name: "Valmera Podcast Shorts"
   short_description: "Make polished story shorts in parallel"
-  default_prompt: "Use $valmera-podcast-shorts with @valmera to calibrate my editing taste, turn this podcast into the strongest coherent shorts with three parallel editors, verify every current preview, and export the approved finals with a CRM handoff manifest."
+  default_prompt: "Use $valmera-podcast-shorts with @valmera to turn this podcast into distinctive story-led shorts using Sol, the saved references and three reusable editors, then independently review and export the verified local finals."
 
 policy:
   allow_implicit_invocation: false
