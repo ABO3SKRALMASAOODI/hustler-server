@@ -107,3 +107,18 @@ def test_authored_italic_and_measured_alignment_survive_roundtrip():
     a=v['texts'][0]
     assert a['italic'] is True and a['tracking']==0 and a['text_align']=='center'
     assert r'\i1' in graphics._compile_item(a,2,(1080,1920))['text']
+
+
+def test_taste_checks_motion_envelopes_not_number_of_phrase_runs():
+    import taste
+    runs=design()['texts']
+    for i,a in enumerate(runs):
+        for b in runs[i+1:]:
+            assert taste._separate_authored_text(a,b,2,(1080,1920))
+    # Removing the blanket movement warning must not hide an actual sweep
+    # through another run, or a rotated design that needs rendered review.
+    a,b=copy.deepcopy(runs[1:])
+    a['motion']['x']=[{'t':0,'v':a['x']},{'t':1,'v':b['x']}]
+    assert not taste._separate_authored_text(a,b,2,(1080,1920))
+    a=copy.deepcopy(runs[0]);a['motion']['rotation']=20
+    assert not taste._separate_authored_text(a,runs[2],2,(1080,1920))

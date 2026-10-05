@@ -185,7 +185,7 @@ def render_fixture(tmp_path,e,name):
     inputs,_=picture_cards.prepare_inputs(e,str(tmp_path),W,H,30,args,2)
     gfx=graphics.build_gfx_ass(e,tl.out_duration,str(tmp_path/f'{name}.ass'),play_res=(W,H))
     graph=renderer.build_filtergraph(e,4,False,tl,None,[],{},False,W=W,H=H,fps=30,
-              frame_mode='pad',src_w=320,src_h=180,silence_idx=1,gfx_ass_path=gfx,picture_card_inputs=inputs)
+              frame_mode=e['frame'].get('mode','pad'),src_w=320,src_h=180,silence_idx=1,gfx_ass_path=gfx,picture_card_inputs=inputs)
     output=tmp_path/f'{name}.mp4'
     result=subprocess.run(['ffmpeg','-v','error','-y','-filter_complex_threads','1',*args,'-filter_complex',graph,
                    '-map','[vout]','-map','[aout]','-t',str(tl.out_duration),'-c:v','libx264','-preset','ultrafast','-crf','10',
@@ -212,3 +212,21 @@ def test_render_rounded_picture_sharp_type_and_fragment_phase(tmp_path):
     proof=stitch.window_edl(e,timeline(e),1.2,2.7)
     partial=render_fixture(tmp_path,proof,'partial')
     assert np.abs(frame(out,1.3).astype(float)-frame(partial,.1)).mean()<4
+
+
+@pytest.mark.skipif(not shutil.which('ffmpeg'),reason='ffmpeg required for pixel proof')
+def test_fractional_card_window_keeps_rounded_last_frame_then_releases(tmp_path):
+    e=sample()
+    e['texts']=[]
+    e['frame']['mode']='crop'
+    e['frame']['picture']=[.1,.3,.9,.7]
+    e['effects']['picture_cards'][0].update(
+        start=.137,end=3.713,entrance='none',exit='none')
+    out=render_fixture(tmp_path,e,'fractional')
+    # Resetting a trimmed tile's PTS can exhaust its stream one frame early.
+    # Every frame inside the authored interval must keep its rounded plate;
+    # the first frame beyond it must reveal the underlying square picture.
+    for t in (.167,3.667,3.7):
+        assert frame(out,t)[170,32].max()<55
+        assert frame(out,t)[280,160,0]>150
+    assert frame(out,3.734)[171,33,0]>150
