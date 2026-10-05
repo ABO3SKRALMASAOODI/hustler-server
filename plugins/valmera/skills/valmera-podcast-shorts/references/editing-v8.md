@@ -130,6 +130,14 @@ densest caption passage, all meaningful joins and payoff. Contact sheets do
 not establish speech or animation quality. A `review_audio`/`watch_video`
 result must actually answer the question; capability denials aren't evidence.
 
+Use the live Valmera `review_audio` lane for actual listening; local credentials
+may differ from the deployed service. `times`/`output_times` are window centers,
+not starts. For three consecutive 8s samples request centers `[4,12,20]` with
+`span_s:8`; use the returned ranges as the evidence scope. Sampling overlap is
+not repeated speech in the edit, and a sample edge is not proof of a clipped
+source word. Corroborate a claimed defect at the same output time before a
+repair. Do not claim full listening when only excerpts were reviewed.
+
 Normal evidence is one reusable packet and concise timestamped observations.
 If actual audio exposes a missed or shifted word, fix that specific native
 caption occurrence and recheck that window. First establish whether it is a

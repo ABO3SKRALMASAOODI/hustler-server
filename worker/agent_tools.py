@@ -20513,13 +20513,19 @@ def review_audio(ctx, asset_key=None, times=None, output_times=None,
     prompt = (
         "You are a senior music editor and audio post-production mixer. "
         "Listen to the actual labeled clip(s) and answer the specific question "
-        "first. For a transcription question, return the literal audible words "
+        "first. These are bounded review samples, not a newly assembled edit. "
+        "Use their labeled time ranges: overlapping ranges intentionally repeat "
+        "the same source audio, and gaps omit unreviewed audio. Neither is an "
+        "editing defect. A sample edge alone does not prove a clipped word in "
+        "the underlying file. Never claim to have heard outside these ranges. "
+        "For a transcription question, return the literal audible words "
         "for each CLIP, preserving repetitions and fillers; mark unclear words "
         "instead of guessing. Do not return timestamps without the words. "
         "For other questions, describe only what is audible: "
         "speech/music/SFX character, energy, recording quality, intelligibility, "
         "masking, harshness/noise, and whether it supports the stated editing "
-        "purpose. Give one concrete selection, timing or mix recommendation. "
+        "purpose. Recommend a concrete change only when supported by an audible "
+        "defect inside a sample; otherwise say no change is indicated. "
         "Do not infer from filenames and do not relabel an authored music track "
         "as voiceover. Purpose: " + str(question or "judge professional fit")[:2000]
         + ". Direction: " + (direction or "not specified"))
