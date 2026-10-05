@@ -138,6 +138,13 @@ not repeated speech in the edit, and a sample edge is not proof of a clipped
 source word. Corroborate a claimed defect at the same output time before a
 repair. Do not claim full listening when only excerpts were reviewed.
 
+Treat automatic taste findings as questions to resolve from the rendered
+evidence. Two diagram labels can be one message; a headline and dialogue can
+occupy separate regions. A camera seam between contiguous source ranges does
+not remove speech. Repair actual collisions or cuts. For a false finding,
+use `justify_verification_findings` with its exact IDs and timestamped evidence
+instead of deleting the intended design or blindly waiving all findings.
+
 Normal evidence is one reusable packet and concise timestamped observations.
 If actual audio exposes a missed or shifted word, fix that specific native
 caption occurrence and recheck that window. First establish whether it is a

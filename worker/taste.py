@@ -98,6 +98,31 @@ def _num(v, default=0.0):
         return default
 
 
+def _separate_authored_text(a, b, duration, play_res):
+    """Explicit, non-intersecting labels can form one designed composition.
+
+    Count alone cannot judge a diagram, metric or two-colour lockup. Reuse
+    the renderer's text bounds for pinned, stationary-position text. Moving
+    positions/rotation still need rendered review and retain the warning.
+    """
+    if not all(t.get("x") is not None and t.get("y") is not None for t in (a, b)):
+        return False
+    from graphics import _compile_item, _overlaps, anim_bounds
+    bounds = []
+    for t in (a, b):
+        motion = t.get("motion") or {}
+        if any(motion.get(key) for key in ("x", "y", "rotation")):
+            return False
+        layout = dict(t)
+        if motion.get("scale"):
+            layout["size_scale"] = _num(t.get("size_scale"), 1) * max(
+                0.05, anim_bounds(motion["scale"])[1])
+        bounds.append(_compile_item(layout, duration, play_res,
+                                    size_scale_bounds=(0.02, 12.0) if motion
+                                    else (0.4, 3.0)))
+    return bool(all(bounds) and not _overlaps(*bounds))
+
+
 def _densest_moment(items):
     """The instant covered by the most WINDOWED devices, as
     (start, end, [labels]) — or None when nothing overlaps anything.
@@ -421,7 +446,11 @@ def critique(edl, index, tl, src_w=None, src_h=None, user_asked=""):
 
     # ── overlapping text ────────────────────────────────────────────────
     texts = edl.get("texts") or []
-    mutes = edl.get("caption_mutes") or []
+    from captions import effective_caption_mutes
+    mutes = effective_caption_mutes(edl)
+    ratio_w, ratio_h = _ratio_wh(edl, src_w, src_h)
+    play_res = (1080, round(1080 * ratio_h / ratio_w)) \
+        if ratio_w and ratio_h else (1920, 1080)
     # TEXT ON TOP OF TEXT. graphics._stack_concurrent now pushes colliding
     # graphics apart so this can no longer RENDER as a pile-up, but a stack
     # of three simultaneous cards is still a composition nobody chose: the
@@ -437,6 +466,8 @@ def critique(edl, index, tl, src_w=None, src_h=None, user_asked=""):
             ins = a.get("anchor_insert")
             if ins and ins == b.get("anchor_insert"):
                 continue
+            if _separate_authored_text(a, b, out_dur, play_res):
+                continue
             a0, a1 = _num(a.get("start")), _num(a.get("end"))
             b0, b1 = _num(b.get("start")), _num(b.get("end"))
             if min(a1, b1) - max(a0, b0) > 0.25:
@@ -447,12 +478,10 @@ def critique(edl, index, tl, src_w=None, src_h=None, user_asked=""):
             f"same time (e.g. '{str(a.get('text'))[:20]}' and "
             f"'{str(b.get('text'))[:20]}' around "
             f"{max(_num(a.get('start')), _num(b.get('start'))):.1f}s). They "
-            "are laid out so they cannot overlap, but two or three lines "
-            "competing in one frame is still one message too many — the "
-            "viewer reads none of them. Keep the one that matters and "
-            "remove_text the rest, or space them out. (A title card's own "
-            "title + subtitle pair is fine; a third line on top of it is "
-            "not.)")
+            "need a composition check in the rendered frames. Keep an "
+            "intentional readable hierarchy; move or simplify text only "
+            "where it collides or competes. Simultaneous labels in one "
+            "diagram are not inherently a defect.")
     # ── one type system per video (round 62) ────────────────────────────
     # A real 26s architecture reel shipped with a title in one template, two
     # callouts and a subtitle, entrances mixed fade/pop — four text styles in
@@ -475,6 +504,11 @@ def critique(edl, index, tl, src_w=None, src_h=None, user_asked=""):
     if caps_on and texts:
         clashes = []
         for t in texts:
+            # Explicit non-muting text is an authored headline/label beside
+            # dialogue. Temporal coexistence cannot establish a collision;
+            # actual caption/text geometry remains part of visual review.
+            if t.get("mute_captions") is False:
+                continue
             ts, te = _num(t.get("start")), _num(t.get("end"))
             if te <= ts:
                 continue

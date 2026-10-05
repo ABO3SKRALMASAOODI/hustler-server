@@ -29,8 +29,15 @@ def midword_boundaries(keep, words, duration=None):
     """All keep boundaries (excluding 0 and the video end) that land inside
     a word. Returns [{'boundary', 'kind': 'start'|'end', 'word', 't0','t1'}]."""
     out = []
-    for s, e in keep:
+    for i, (s, e) in enumerate(keep):
         for b, kind in ((s, "start"), (e, "end")):
+            # A split in continuous source coverage is a picture/scene seam,
+            # not removed speech. Do not tell editors to trim the same word
+            # twice merely because a camera cut divides adjacent keep spans.
+            if kind == "start" and i and abs(keep[i - 1][1] - s) < 1e-6:
+                continue
+            if kind == "end" and i + 1 < len(keep) and abs(keep[i + 1][0] - e) < 1e-6:
+                continue
             if b <= EPS or (duration is not None and b >= duration - EPS):
                 continue
             hit = word_at_boundary(words, b)
