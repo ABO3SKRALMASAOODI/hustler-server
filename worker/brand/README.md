@@ -1,16 +1,15 @@
 # Brand assets baked into renders
 
-`endcard.mp4` is the animated signature every export closes on (v13).
+`endcard.mp4` is the animated signature every export closes on (v14).
 It is a 1080×1920, 5-second H.264 asset with a centered reading path:
 
     Edited using
     [robot] Valmera AI
-    Autonomous AI video editor
 
     VALMERA.IO
 
-The larger attribution leads, followed by the robot/name, a smaller descriptor,
-and the address lower in the frame. All elements resolve within 0.36 seconds
+The larger attribution leads, followed by the robot/name and the address lower
+in the frame. All elements resolve within 0.36 seconds
 and hold until the final 0.2-second fade.
 
 `endcard.png` is the fully revealed poster. The renderer prefers the MP4 and
@@ -27,10 +26,10 @@ python3 worker/tools/build_endcard.py
 ## Design contract
 
 - “Edited using” is the largest type. The robot and Valmera AI name support
-  the attribution. The smaller descriptor explains the product category;
+  the attribution;
   `VALMERA.IO` retains its own clear space at 75% of the frame height.
-- The approved attribution/name and address positions remain unchanged when
-  the descriptor is added. Each element is centered by its visible ink.
+- The approved attribution/name and address positions remain unchanged.
+  Each element is centered by its visible ink.
 - The reveal uses short, restrained upward fades. A clean hold and final
   fade complete the five-second card. There is no bounce, glow, panel or
   background texture competing with the mark.
