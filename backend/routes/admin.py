@@ -1920,3 +1920,45 @@ def conversion_report():
         return jsonify({'error': 'Conversion data is temporarily unavailable. Retry shortly.'}), 503
     finally:
         conn.close()
+
+
+@admin_bp.route('/acquisition', methods=['GET'])
+@admin_required
+def acquisition_report():
+    from acquisition import report
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SET LOCAL statement_timeout='8s'")
+            return jsonify(report(cur, _scope('u')))
+    finally:
+        conn.close()
+
+
+@admin_bp.route('/outreach-conversions', methods=['POST'])
+def outreach_conversions():
+    """Narrow CRM credential: aggregate counts for supplied opaque codes only."""
+    import hashlib
+    import hmac
+    from acquisition import CODE, report
+    auth = request.headers.get('Authorization', '')
+    if not auth.startswith('Bearer ') or not 32 <= len(auth[7:]) <= 128:
+        return jsonify({'error': 'unauthorized'}), 401
+    if request.content_length and request.content_length > 32768:
+        return jsonify({'error': 'payload too large'}), 413
+    data = request.get_json(silent=True)
+    codes = data.get('codes') if isinstance(data, dict) else None
+    if not isinstance(codes, list) or not 1 <= len(codes) <= 500 or any(not isinstance(c, str) or not CODE.fullmatch(c) for c in codes):
+        return jsonify({'error': 'invalid codes'}), 400
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SET LOCAL statement_timeout='8s'")
+            cur.execute("SELECT value FROM app_kv WHERE key='outreach_conversion_key_sha256'")
+            row = cur.fetchone()
+            digest = hashlib.sha256(auth[7:].encode()).hexdigest()
+            if not row or not hmac.compare_digest(str(row['value']), digest):
+                return jsonify({'error': 'unauthorized'}), 401
+            return jsonify(report(cur, _scope('u'), list(set(codes))))
+    finally:
+        conn.close()

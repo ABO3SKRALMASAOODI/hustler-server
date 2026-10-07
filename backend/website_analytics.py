@@ -3,7 +3,8 @@ import re
 import uuid
 from urllib.parse import urlsplit
 import psycopg2
-from psycopg2.extras import RealDictCursor
+from psycopg2.extras import RealDictCursor, Json
+from acquisition import clean_attribution
 from flask import current_app
 
 ID = re.compile(r'^[a-zA-Z0-9_-]{8,64}$')
@@ -69,7 +70,7 @@ def clean_payload(data):
                 page=safe_path(data.get('page')), active=active,
                 scroll=bounded_number(data.get('scroll_depth'), 100),
                 reason=data.get('exit_reason') if data.get('exit_reason') in ('hidden','pagehide','navigation','heartbeat','event') else 'heartbeat',
-                referrer=host, source=source, events=events)
+                referrer=host, source=source, events=events, attribution=clean_attribution(data.get('attribution')))
 
 def connect():
     return psycopg2.connect(current_app.config['DATABASE_URL'], connect_timeout=3,
@@ -92,14 +93,14 @@ def save_visit(data, user_agent):
                 return False
             cur.execute('''INSERT INTO page_visits
                 (analytics_id,page,device_id,session_id,ip,user_agent,country,referrer,
-                 referrer_source,device_type,browser,time_on_page,last_seen_at,scroll_depth,exit_reason)
-                VALUES (%s,%s,%s,%s,NULL,%s,'Unknown',%s,%s,%s,%s,%s,now() AT TIME ZONE 'UTC',%s,%s)
+                 referrer_source,device_type,browser,time_on_page,last_seen_at,scroll_depth,exit_reason,attribution)
+                VALUES (%s,%s,%s,%s,NULL,%s,'Unknown',%s,%s,%s,%s,%s,now() AT TIME ZONE 'UTC',%s,%s,%s)
                 ON CONFLICT (analytics_id) DO UPDATE SET
                   time_on_page=GREATEST(page_visits.time_on_page,EXCLUDED.time_on_page),
                   scroll_depth=GREATEST(page_visits.scroll_depth,EXCLUDED.scroll_depth),
                   last_seen_at=EXCLUDED.last_seen_at,exit_reason=EXCLUDED.exit_reason
                 WHERE page_visits.device_id=EXCLUDED.device_id AND page_visits.session_id=EXCLUDED.session_id
-                RETURNING analytics_id''', (p['visit_id'],p['page'],p['device_id'],p['session_id'],user_agent[:300],p['referrer'],p['source'],device,browser,p['active'],p['scroll'],p['reason']))
+                RETURNING analytics_id''', (p['visit_id'],p['page'],p['device_id'],p['session_id'],user_agent[:300],p['referrer'],p['source'],device,browser,p['active'],p['scroll'],p['reason'],Json(p['attribution'])))
             if not cur.fetchone():
                 return False
             cur.execute('SELECT count(*) AS n FROM website_events WHERE visit_id=%s', (p['visit_id'],))
@@ -120,9 +121,9 @@ def record_signup(user_id, data):
     try:
         conn = connect()
         with conn, conn.cursor() as cur:
-            cur.execute('''INSERT INTO website_signups(user_id,device_id,session_id)
-                           SELECT id,%s,%s FROM users WHERE id=%s AND is_verified=1
-                           ON CONFLICT(user_id) DO NOTHING''', (*ids, user_id))
+            cur.execute('''INSERT INTO website_signups(user_id,device_id,session_id,attribution)
+                           SELECT id,%s,%s,%s FROM users WHERE id=%s AND is_verified=1
+                           ON CONFLICT(user_id) DO NOTHING''', (*ids, Json(clean_attribution(data.get('attribution'))), user_id))
     except Exception:
         current_app.logger.warning('Signup attribution unavailable')
     finally:
