@@ -68,10 +68,12 @@ def prepare_inputs(edl, workdir, W, H, fps, args, next_idx):
         path = plate_path(workdir, W, H, spec)
         if not os.path.exists(path):
             build_plate(path, W, H, spec)
-        # Bound each branch to its own window: cards do not decode/composite
-        # throughout a long program just because the first one starts early.
-        args.extend(["-loop", "1", "-t", str(spec["end"]-spec["start"]+.1),
-                     "-r", str(fps), "-i", path])
+        # The plate is ONE decoded still that overlay holds for the whole
+        # card (append_graph). It used to be a `-loop 1 -t window -r fps`
+        # input that re-decoded the 1080x1920 RGBA PNG every frame; ffmpeg 8
+        # decodes such inputs ahead of the graph and parks the 8 MB frames
+        # in RAM — 12 cards held ~3.3 GB of identical plates on a 40 s final.
+        args.extend(["-i", path])
         inputs.append((next_idx, spec))
         next_idx += 1
     return inputs, next_idx
@@ -112,7 +114,25 @@ def append_graph(parts, vlabel, inputs, W, H, fps, source_rect=None):
             ye += f"+{distance:.3f}*pow(max(0,(t+{phase:.6f}-{full-edge:.6f})/{edge:.6f}),3)"
         parts.append(f"[{p}bg][{p}tile]overlay=x={x}:y='{ye}':shortest=1:format=auto[{p}placed]")
         parts.append(f"[{idx}:v]setpts=PTS-STARTPTS,format=rgba[{p}plate]")
-        parts.append(f"[{p}placed][{p}plate]overlay=0:0:shortest=1:format=auto,setpts=PTS+{start:.6f}/TB[{p}card]")
+        # MEMORY: the card is a window of the program itself, so its first
+        # frame cannot exist until the program reaches `start`, and overlay's
+        # framesync releases no main frame until it has seen the secondary's
+        # first timestamp. Every full-resolution program frame before `start`
+        # therefore queued in RAM: 6 cards on a 40 s 1080x1920 program peaked
+        # at 6.4 GB, and finals were OOM-killed. Two lead frames that tpad
+        # emits on demand before any input arrives tell framesync "nothing
+        # until start-2/fps", so the main stream flows and at most a frame or
+        # two waits. They sit just before `start`, where the enable window
+        # keeps the overlay off, so they are never drawn. tpad keeps the
+        # card's own 1/fps timebase and shifts it by exactly those two ticks,
+        # which `PTS-2` removes: every card frame keeps the timestamp the
+        # direct `PTS+start/TB` gave it, so the composite is bit-identical.
+        # shortest=0 + eof_action=repeat: the single plate frame is held over
+        # every card frame, and [placed] alone decides the card's length —
+        # exactly what the window-length looped plate (always the longer
+        # input under shortest=1) produced before.
+        parts.append(f"[{p}placed][{p}plate]overlay=0:0:shortest=0:eof_action=repeat:format=auto,"
+                     f"tpad=start=2,setpts=PTS-2+{start:.6f}/TB[{p}card]")
         # trim/setpts and framesync quantize fractional cut clocks differently.
         # The card branch can reach EOF one or two frames before the program
         # clock reaches end. Hold its last composed frame until that exact

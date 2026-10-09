@@ -230,3 +230,51 @@ def test_fractional_card_window_keeps_rounded_last_frame_then_releases(tmp_path)
         assert frame(out,t)[170,32].max()<55
         assert frame(out,t)[280,160,0]>150
     assert frame(out,3.734)[171,33,0]>150
+
+
+def _card_graph(tmp_path, specs, W, H, fps, dur):
+    args = ['-f', 'lavfi', '-i', f'testsrc2=s={W}x{H}:r={fps}:d={dur}']
+    inputs, _ = picture_cards.prepare_inputs(
+        {'effects': {'picture_cards': specs}}, str(tmp_path), W, H, fps, args, 1)
+    parts = ['[0:v]format=yuv420p[v0]']
+    out = picture_cards.append_graph(parts, 'v0', inputs, W, H, fps)
+    return args, ';'.join(parts), out
+
+
+def test_card_plate_is_one_still_and_card_branch_has_an_early_lead(tmp_path):
+    """The plate is decoded once (no -loop input re-decoding a full-frame PNG
+    per frame), and every card stream starts with tpad lead frames so the
+    main picture never queues in RAM waiting for a card that starts late."""
+    spec = dict(sample()['effects']['picture_cards'][0], start=20.0, end=23.0)
+    args, graph, _ = _card_graph(tmp_path, [spec], 320, 568, 30, 24)
+    assert '-loop' not in args and args[-2:] == ['-i', picture_cards.plate_path(
+        str(tmp_path), 320, 568, spec)]
+    assert 'tpad=start=2,setpts=PTS-2+20.000000/TB[pc0card]' in graph
+    assert 'shortest=0:eof_action=repeat' in graph
+
+
+@pytest.mark.skipif(not shutil.which('ffmpeg'), reason='ffmpeg required')
+def test_late_cards_keep_render_memory_flat(tmp_path):
+    """6 cards on a 40 s 1080x1920 final peaked at 6.4 GB: overlay buffered
+    every program frame before each card's start. At 320x568 the same shape
+    (cards late in a 60 s program) used to hold ~1650 frames; it must now
+    stay near the cost of a handful of frames."""
+    W, H, fps, dur = 320, 568, 30, 60
+    specs = [dict(sample()['effects']['picture_cards'][0], id=f'c{i}',
+                  start=float(s), end=float(s) + 2.0)
+             for i, s in enumerate((44, 50, 56))]
+    args, graph, out = _card_graph(tmp_path, specs, W, H, fps, dur)
+    cmd = ['ffmpeg', '-v', 'error', '-y', *args, '-filter_complex', graph,
+           '-map', f'[{out}]', '-f', 'null', '-']
+    probe = ("import json,resource,subprocess,sys;"
+             "p=subprocess.run(json.loads(sys.argv[1]));"
+             "r=resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss;"
+             "print(p.returncode, r // (1024 * 1024) if sys.platform == 'darwin' "
+             "else r // 1024)")
+    import json
+    res = subprocess.run([sys.executable, '-c', probe, json.dumps(cmd)],
+                         capture_output=True, text=True, check=True)
+    rc, peak_mb = (int(x) for x in res.stdout.split())
+    assert rc == 0
+    # buffering 44 s of 320x568 yuv420p alone would be ~360 MB
+    assert peak_mb < 200, peak_mb
