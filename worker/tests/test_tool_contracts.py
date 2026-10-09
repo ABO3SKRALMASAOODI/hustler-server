@@ -639,15 +639,7 @@ def test_look_at_source_and_program_paths_do_not_require_a_preview(monkeypatch):
 # Skills that STILL name retired/missing tools. Another phase rewrites these
 # skills; this baseline may only shrink. Remove an entry once its skill is
 # fixed (the test fails until you do, so the list never goes stale).
-KNOWN_STALE_SKILL_TOOLS = {
-    "audio.md": ["fetch_music", "research_music", "search_music"],
-    "broll-inserts.md": ["generate_image"],
-    "generate-fetch.md": ["generate_image"],
-    "music.md": ["audition_music_candidates", "fetch_music",
-                 "research_music", "search_music"],
-    "short-form-direction.md": ["research_music"],
-    "text-graphics.md": ["generate_image"],
-}
+KNOWN_STALE_SKILL_TOOLS = {}   # the premium guidance rewrite removed them all
 
 
 def test_ci_static_registry_matches_runtime_registry():
