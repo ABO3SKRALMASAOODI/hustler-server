@@ -179,7 +179,7 @@ def test_podcast_reel_house_style_expects_motion_type_and_sound():
     assert "ALWAYS override" in block
     low = block.lower()
     for craft in ("micro-story", "camera", "typography", "sound",
-                  "add_motion_graphic", "kit:"):
+                  "add_motion_graphic", "sound:"):
         assert craft in low, craft
     assert "do not create artificial motion" not in low
     assert "podcast-reel" in grammar.library()

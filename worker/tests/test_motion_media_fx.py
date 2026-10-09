@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import motion_engine  # noqa: E402
 import motion_templates  # noqa: E402
-import sfx_kit  # noqa: E402
+import sound_library  # noqa: E402
 
 TEMPLATES = ["image_card", "photo_stack", "flash_transition", "light_leak",
              "glitch_burst", "film_burn", "focus_spotlight"]
@@ -42,7 +42,7 @@ def test_spec_is_complete_and_cues_land_inside_the_item(name):
     motion_templates.check_params(name, spec["example"])
     assert spec["sfx"], name
     for cue in spec["sfx"]:
-        assert cue["kind"] in sfx_kit.KINDS, (name, cue)
+        assert cue["kind"] in sound_library.ROLE_ALIASES, (name, cue)
         assert 0 <= cue["at"] < spec["duration"], (name, cue)
 
 
