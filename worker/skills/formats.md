@@ -37,12 +37,14 @@ WHAT A PREMIUM EDIT LOOKS LIKE, BY FORMAT:
   pattern interrupt and hook text by 1.5 s; one committed look (`apply_look`
   `editorial` is the default starting point); face-aware full-bleed or a card
   on a designed background; motion captions (`editorial` or `clean`) with
-  accent words; 2–4 hero moments on exact words; landing zooms on jump cuts,
-  punches on emphasis, pushes on holds; B-roll evidence on named nouns; a
-  music bed ducked 13–20 dB under the voice with kit cues edited to the
-  picture; word-safe filler and dead-pause cleanup; `set_master_loudness`; a
-  native CTA after the payoff. Hold the face for a vulnerable admission —
-  that passage is the deliberate exception.
+  accent words; 2–4 hero moments on exact words; alternating framing on
+  jump cuts, landings on turns, punches on emphasis, pushes on holds;
+  B-roll evidence on named nouns; a music bed ducked 13–20 dB under the
+  voice with kit cues edited to the picture; word-safe filler and
+  dead-pause cleanup; `set_master_loudness`; a native CTA after the payoff
+  only when the user or brief asks for one, built from the handle, keyword
+  and offer they supplied (never invented). Hold the face for a vulnerable
+  admission — that passage is the deliberate exception.
 - **Talking-head reel / creator** — the same grammar, often higher energy:
   `creator_punch` or `editorial`, `pop`/`stack` captions for punchy
   delivery, faster camera rhythm, more UI and data graphics.
@@ -66,8 +68,8 @@ WHAT A PREMIUM EDIT LOOKS LIKE, BY FORMAT:
   rises, the artist's face at the chorus, no captions unless asked.
 - **Timelapse / nature / architecture** — slow eased moves, no punches or
   whips, no captions, shots breathe 3–5 s, music leads.
-- **Vlog / lifestyle** — keep the personality: jump cuts with landing zooms,
-  warm grade, captions optional, energy over polish.
+- **Vlog / lifestyle** — keep the personality: jump cuts with alternating
+  framing, warm grade, captions optional, energy over polish.
 
 Deliberately breaking one of these is fine — say why in your reply. For
 anything meant to get views, read hooks-retention; for anything with music,

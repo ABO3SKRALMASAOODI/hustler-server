@@ -49,12 +49,15 @@ THE PREMIUM SHORT-FORM GRAMMAR — targets you can measure in the render:
    one accent), `clean_minimal` (quiet product or education) — or build a
    deliberate equivalent: a caption `motion_look`, one grade plus grain, a
    transition vocabulary and a music bed. Refine components afterwards; do
-   not mix looks. On a vertical reel there is no fade-in from black; remove
-   one with `set_fades` if a look adds it.
+   not mix looks. A look may place its own transition whooshes and (with
+   its music option) a bed — read its receipt or `get_edl` before adding
+   junction cues or music, and adjust its cues instead of stacking. On a
+   vertical reel there is no fade-in from black; remove one with
+   `set_fades` if a look adds it.
 2. HOOK. A visual pattern interrupt lands within 0.1–0.6 s: open punched-in
-   with a landing zoom, a `hook_title` or `word_slam`, a flash or light leak,
-   with a low hit or sub drop under it. The hook line is on screen as text
-   by 1.5 s; the speaker is visible and talking by ~0.3 s. Never open on
+   or with a landing at 0 s, a `hook_title` or `word_slam`, a flash or light
+   leak, with a low hit or sub drop under it (the template's own when it
+   carries one). The hook line is on screen as text by 1.5 s; the speaker is visible and talking by ~0.3 s. Never open on
    black, a logo, dead air or more than ~3 s of a non-speaker setup. The
    hook text poses the question; it never spoils the payoff. (Read
    hooks-retention.)
@@ -76,21 +79,27 @@ THE PREMIUM SHORT-FORM GRAMMAR — targets you can measure in the render:
    their onsets; a size ladder separates connector words from 1–2 accent
    words per sentence; captions mute under graphics that say the same words.
    (Read captions.)
-6. CAMERA. Eased punch-ins (1.08–1.18x) on emphasis words, landing zooms
-   (1.12–1.18 easing to 1.0) just after jump cuts, a slow push on holds
-   longer than ~3 s, a beat pulse where music drives, shake only on impacts.
-   Always aimed at the face or target off the tenths grid, varied in
-   strength, never metronomic. (Read zooms.)
+6. CAMERA. `add_zoom` strength is magnification − 1 (0.15 = 1.15x; above
+   1.0 is a 2x+ zoom). Punch-ins (strength 0.08–0.18) on emphasis words;
+   alternating framing across jump cuts (tight from one cut to the next,
+   wide at the following one); a `landing` (0.12–0.18, starting exactly on
+   the cut) on cuts between ideas and B-roll returns; `push_in` (0.05–0.12)
+   across holds of 3 s or more; `pulse` (0.05–0.08) where music drives;
+   `shake` only on impacts. Always aimed at the face or target off the
+   tenths grid, varied in strength, never metronomic, and no more than one
+   camera event per ~1.5 s unless it is a designed hit. (Read zooms.)
 7. TRANSITIONS. Motivated junctions only — section turns, hook → body,
    B-roll in and out, location changes — each with a paired whoosh or hit
    peaking on the junction. Hard cuts inside a continuous take; jump cuts are
-   covered by landing zooms, not effects. (Read transitions.)
+   covered by alternating framing, not effects. (Read transitions.)
 8. SOUND EDITED TO PICTURE. A music bed 13–20 dB under the voice, ducked;
    kit cues pre-rolled so their peaks land on the visual frame: whoosh under
    entrances, pop or tick on reveals, typing under typewriters, shutter on
-   photos, low hit on hero landings, a riser into the payoff, a 50–280 ms
-   stop-down before a reveal. Never a whoosh on every caption; never digital
-   silence in the final. (Read audio and music.)
+   photos, low hit on hero landings, a riser into the payoff, and
+   optionally a short stop-down before a reveal (the bed split around the
+   reveal, or the speaker's own pause when there is no bed — read audio).
+   Never a whoosh on every caption; never digital silence in the final.
+   (Read audio and music.)
 9. GRADE AND TEXTURE. One committed grade for the whole piece plus fine
    grain; vignette or bloom only as part of that look. (Read
    effects-grades.)
@@ -102,10 +111,14 @@ THE PREMIUM SHORT-FORM GRAMMAR — targets you can measure in the render:
 11. LEGIBILITY. Size, placement in face-free clear space, soft shadows or
    plates; important type inside x 60–1020 px and y 8–80% on 9:16, away from
    the bottom platform band.
-12. CTA AND ENDING. Hold the payoff 1.0–1.5 s with an accent (scale, colour,
-   impact, music button), then a native-UI CTA — `comment_cta`, `follow_cta`
-   or `save_cta` — in the last 2–4 s, never over the payoff. Land so the
-   reel loops.
+12. ENDING AND CTA. Hold the payoff 1.0–1.5 s with an accent (scale,
+   colour, impact, music button) and land so the reel loops. A native-UI
+   CTA — `comment_cta`, `follow_cta` or `save_cta` — goes in the last 2–4 s,
+   never over the payoff, and only when the user or brief asks for one,
+   using the handle, keyword and offer they supplied (owner marketing reels
+   supply them in the brief). Never invent a handle, a verified badge, a
+   comment keyword or a promised resource; `save_cta` is the identity-free
+   option.
 
 BUILD ORDER — write in a few atomic passes, not forty serial calls:
 1. Story: keep/order the micro-story, remove fillers and dead pauses
@@ -114,9 +127,10 @@ BUILD ORDER — write in a few atomic passes, not forty serial calls:
    `motion_look`, music bed.
 3. Hook and hero moments: motion graphics on exact word onsets with their
    own sound cues, camera moves bound to the same frames.
-4. Connective tissue: landing zooms on jump cuts, motivated transitions with
-   paired sounds, slow pushes on long holds, B-roll as evidence.
-5. CTA and ending.
+4. Connective tissue: alternating framing on jump cuts, landings on turns,
+   motivated transitions with paired sounds, slow pushes on long holds,
+   B-roll as evidence.
+5. Ending, plus the CTA when one was asked for.
 6. Review the rendered motion and sound (read review) and repair.
 
 B-ROLL IS EVIDENCE. Use the user's footage first. Cover the speaker when
@@ -149,8 +163,8 @@ silence) and justify intentional density.
   moment that should have been held.
 - Headline that spoils the payoff; payoff cut off before it lands; CTA over
   the payoff.
-- Invented numbers or fabricated UI claims; stopping before the rendered
-  preview has been watched.
+- Invented numbers, fabricated UI claims, or a CTA with an invented handle,
+  keyword or offer; stopping before the rendered preview has been watched.
 
 ## Verification procedure
 
@@ -158,9 +172,11 @@ Screen the complete preview as one experience, then measure against the
 grammar: first visual event ≤ 0.6 s; hook text by 1.5 s; no hold over ~2 s
 without design; 2–4 hero moments each landing on its word with camera and
 sound; captions readable at phone size; music bed present and ducked; no
-digital silence; one grade; no flat black void; payoff held; CTA after the
-payoff. Use dense `look_at(rendered=true, output_times=[...])` frames on the
-hook and every hero moment, and the AUDIO CHECK for the mix.
+digital silence; one grade; no flat black void; payoff held; any requested
+CTA after the payoff. Rendered looks need a complete preview of the current
+version: `render_preview(complete=true)`, then dense
+`look_at(rendered=true, output_times=[...])` frames on the hook and every
+hero moment, and the AUDIO CHECK for the mix (read review).
 
 ## Repair ladder
 

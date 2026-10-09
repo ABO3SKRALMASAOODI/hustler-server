@@ -317,7 +317,10 @@ def test_initialize_carries_the_editing_doctrine(client):
     assert "export_final(project_id=ID, edl_version=REVIEWED_VERSION)" in \
         b["result"]["instructions"]
     assert "render_preview(complete=false)" in b["result"]["instructions"]
-    assert "render_preview(complete=true) exactly once" in \
+    assert "render_preview(complete=true) once per reviewed version" in \
+        b["result"]["instructions"]
+    # Rendered looks read a complete preview, never the changed-section proof.
+    assert "look_at(rendered=true) reads only a COMPLETE preview" in \
         b["result"]["instructions"]
 
 
@@ -2020,6 +2023,17 @@ def test_mcp_workflow_teaches_the_premium_short_form_finish():
         assert phrase in w, phrase
     assert "load_tools" not in w
     assert "generated image" not in w
+    flat = " ".join(w.split())
+    # A CTA is conditional and built only from supplied identity/offers.
+    assert "only when the user or brief asks for one" in flat
+    assert "never an invented handle, verified badge" in flat
+    # Child edit batches validate media against that child's own assets, so
+    # music is placed per child rather than carried by the shared batch.
+    assert "(frame, captions style, effects)" in flat
+    assert "Music, kit sounds, motion graphics and camera moves are placed per child" in flat
+    # Dense rendered looks need a complete preview of the reviewed version.
+    assert "render_preview(complete=true) and look_at(rendered=true" in flat
+    assert "strength is magnification minus 1" in flat
 
 
 def test_error_diagnostics_do_not_retain_customer_contents():

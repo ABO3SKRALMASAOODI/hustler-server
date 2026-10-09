@@ -17,16 +17,27 @@ def _skill(name):
     return text
 
 
+def _flat(text):
+    """Skill prose is hard-wrapped; compare phrases across line breaks."""
+    return " ".join(text.split())
+
+
 def test_core_prompt_states_the_premium_short_form_standard():
     p = agent_prompt.CORE_PROMPT
     assert "PREMIUM SHORT-FORM IS THE STANDARD FOR REELS" in p
     for phrase in ("0.1-0.6 s", "hook line as text by 1.5 s",
                    "every 0.3-0.6 s", "2-4 hero moments",
-                   "13-20 dB under the voice", "landing zooms after jump cuts",
+                   "13-20 dB under the voice",
+                   "alternating tight/wide framing across jump cuts",
+                   "strength is magnification minus 1",
                    "never a whoosh on every caption",
                    "deliberate choice for that passage",
                    "Never invent numbers"):
         assert phrase in p, phrase
+    # A CTA is conditional and never carries invented identity or offers.
+    assert "native CTA only when the user or brief asks for one" in p
+    # Rendered looks read a complete preview, not the changed-section proof.
+    assert "look_at(rendered=true) reads only a COMPLETE preview" in p
     # The workflow names playbooks that exist.
     for name in ("short-form-direction", "motion-design"):
         assert name in p and name in agent_prompt.skill_names()
@@ -58,9 +69,11 @@ def test_skills_no_longer_default_to_restraint_and_silence():
 def test_short_form_direction_carries_the_measurable_grammar():
     text = _skill("short-form-direction")
     for phrase in ("apply_look", "0.1–0.6 s", "by 1.5 s", "0.3–0.6 s",
-                   "2–4 hero moments", "motion_look", "landing zooms",
+                   "2–4 hero moments", "motion_look", "alternating framing",
                    "13–20 dB", "never a small card on a flat black void",
-                   "comment_cta", "Never invent facts"):
+                   "comment_cta", "only when the user or brief asks for one",
+                   "Never invent a handle", "magnification − 1",
+                   "Never invent facts"):
         assert phrase.lower() in text.lower(), phrase
 
 
@@ -73,7 +86,8 @@ def test_motion_design_skill_teaches_templates_timing_runtime_and_review():
                    "MG.frame", "MG.active", "MG.box", "MG.spring",
                    "MG.tween", "MG.split", "MG.fit", "MG.count", "MG.draw",
                    "Math.random", "render_preview(complete=false)",
-                   "look_at(rendered=true"):
+                   "render_preview(complete=true)", "look_at(rendered=true",
+                   "`mute_captions` explicitly", "verified=false"):
         assert phrase in text, phrase
 
 
@@ -86,6 +100,48 @@ def test_audio_teaches_the_kit_and_cue_timing():
     music = _skill("music")
     assert "list_music_library tool" in music
     assert "add_library_music tool" in music
+
+
+def test_stop_down_uses_controls_that_exist():
+    # set_music_fit cannot dip mid-track and a cue cannot be shortened: the
+    # stop-down splits the bed and restarts it, never just ends it early.
+    for name in ("audio", "music", "short-form-direction"):
+        text = _skill(name)
+        assert "dip the bed with `set_music_fit`" not in text, name
+        assert "end a cue early" not in text, name
+    audio = _flat(_skill("audio"))
+    assert "Never end the bed early without restarting it" in audio
+    assert "AUDIO CHECK dead-air line" in audio
+
+
+def test_rendered_review_needs_a_complete_preview_everywhere():
+    for name in agent_prompt.skill_names():
+        text = _skill(name)
+        if "look_at(rendered=true" not in text:
+            continue
+        assert "complete" in text, name
+    for name in ("review", "motion-design", "zooms", "captions"):
+        assert "render_preview(complete=true)" in _skill(name), name
+
+
+def test_zoom_strength_is_taught_as_magnification_minus_one():
+    zooms = _flat(_skill("zooms"))
+    assert "STRENGTH IS MAGNIFICATION − 1" in zooms
+    for mode in ("`punch`", "`landing`", "`ease`", "`push_in`", "`pulse`",
+                 "`shake`"):
+        assert mode in zooms, mode
+    assert "`push` (" not in zooms
+    assert "no more than one camera event per ~1.5 s" in zooms
+
+
+def test_ctas_are_conditional_and_identity_safe():
+    for name in ("short-form-direction", "hooks-retention", "motion-design",
+                 "formats"):
+        text = _flat(_skill(name))
+        assert "asks for" in text, name
+        assert "invent" in text, name
+    review = _flat(_skill("review"))
+    assert "a CTA uses only the handle, keyword and offer" in review
 
 
 def test_compact_contracts_carry_the_creative_menus():
@@ -101,12 +157,18 @@ def test_compact_contracts_carry_the_creative_menus():
     for look in ("editorial", "creator_punch", "cinematic_doc", "mono_noir",
                  "clean_minimal"):
         assert look in contracts["apply_look"]
-    for mode in ("punch", "landing", "push", "pulse"):
+    for mode in ("punch", "landing", "push_in", "pulse", "shake"):
         assert mode in contracts["add_zoom"]
     assert "behind_subject" in contracts["add_motion_graphic"]
-    # look_at works without a render for source and assembled geometry.
+    assert "mute_captions explicitly" in contracts["add_motion_graphic"]
+    # look_at works without a render for source and assembled geometry, and
+    # rendered=true reads only a complete preview of the current version.
     assert "no render needed" in contracts["look_at"]
     assert "Requires render_preview" not in contracts["look_at"]
+    assert "COMPLETE preview" in contracts["look_at"]
+    assert "render_preview(complete=true)" in contracts["look_at"]
+    # A look's own transition sounds and bed are read before stacking more.
+    assert "read the receipt" in contracts["apply_look"]
 
 
 def test_compact_catalog_uses_the_contracts():

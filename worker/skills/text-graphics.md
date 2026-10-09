@@ -109,8 +109,10 @@ caption motion looks plus hero motion graphics usually read stronger.
 
 ## Verification procedure
 
-Render and review entry, path extremes, settled state and exit on every
-distinct background with `look_at(rendered=true, output_times=[...])`;
+Render a complete preview and review entry, path extremes, settled state
+and exit on every distinct background with
+`look_at(rendered=true, output_times=[...])` (rendered looks need a
+complete preview of the current version);
 check reading time, geometry, hierarchy, caption suppression and that each
 graphic lands on its word.
 

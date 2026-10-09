@@ -5,7 +5,7 @@
 Premium short-form almost always carries a music bed: it fills the air
 between phrases, sets the emotional register and gives the payoff a place to
 land. The bed sits 13–20 dB under the voice and ducks; its structure is
-edited to the story — a lift into the payoff, a stop-down before a reveal, a
+edited to the story — a lift into the payoff, room before a reveal, a
 button on the ending. Choose by what the video IS and how the speaker
 sounds, not by a mood word alone. A dry passage is a deliberate exception for
 a specific moment, never "no music" by habit.
@@ -26,8 +26,11 @@ SOURCING — in this order:
    list_music_library tool browses 24 licence-free CC0 tracks by mood
    (upbeat, chill, cinematic, corporate, dramatic, hiphop, ambient,
    inspiring) and the add_library_music tool places one as a ducked bed
-   (about -18 to -22 dB under speech). CC0 means no credit or licence
-   obligation; still name the track you chose.
+   (about -18 to -22 dB under speech). When the look you apply offers it,
+   apply_look's music option ('auto', a mood or a slug) lays the look's own
+   library bed in the same call — check `get_edl` before adding a second
+   bed. CC0 means no credit or licence obligation; still name the track you
+   chose.
 3. A SPECIFIC song they NAME: `find_song(query)` returns candidate links
    (prefer the artist's own or "- Topic" channel, never a lyric/sped-up/cover
    version unless asked), then `fetch_url(url, as_kind='music')`. Tell the
@@ -56,12 +59,15 @@ THE DROP LANDS ON THE MOMENT:
 - Find the payoff (reveal, punchline, number, transformation) in OUTPUT
   seconds and the track's build or drop from `get_audio_analysis`.
 - `set_music_fit(offset_s=...)` so the drop hits the moment:
-  offset_s = drop_time_in_track − moment_in_program (when negative, start the
-  music later instead).
+  offset_s = drop_time_in_track − (moment_in_program − music start) (when
+  negative, start the music later instead).
 - Pair it with picture: a riser cue into the moment, the hero graphic and a
   low hit on the landing.
-- STOP-DOWN: a 50–280 ms dip of the bed just before a reveal makes the
-  landing hit harder.
+- STOP-DOWN (optional): a beat of room just before a reveal makes the
+  landing hit harder. There is no mid-track dip control: split the bed
+  around the reveal as audio describes (shorten it with `set_music_fit`,
+  restart the same track at the reveal with the matching offset), or skip
+  the stop-down. Never end the bed early without restarting it.
 
 ENDS MATTER: end on a musical resolve or fade the last 1–2 s with
 `set_music_fit`; never stop mid-bar or leave dead air. Enter on a phrase

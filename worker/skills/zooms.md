@@ -1,10 +1,11 @@
-# zooms — the eased camera: punch-ins on emphasis, landing zooms after cuts, slow pushes, beat pulses, aiming, travelling paths, crops vs zooms
+# zooms — the eased camera: punch-ins on emphasis, alternating framing on jump cuts, landings on turns, slow pushes, beat pulses, aiming, travelling paths, crops vs zooms
 
 ## Editorial decision principles
 
 On short-form, the digital camera is a constant, eased presence: premium
-reels punch in on emphasis words, land every jump cut with a settling zoom,
-push slowly through long holds and pulse with the music, all aimed precisely
+reels punch in on emphasis words, alternate framing across jump cuts, land
+the cuts between ideas with a settling zoom, push slowly through long holds
+and pulse with the music, all aimed precisely
 at the face or the thing being discussed. Every move is bound to a word, a
 cut or a beat and carries a purpose; what makes camera motion cheap is bad
 aim, linear or stepped motion and metronomic spacing, not the number of
@@ -29,26 +30,41 @@ rendered window.
 ## Strong treatment patterns
 
 CAMERA GRAMMAR FOR REELS — read the `add_zoom` schema for exact fields and
-mode names; the modes below are the vocabulary:
-- `punch` — a fast expo-out push (optionally with a small overshoot) landing
-  ON an emphasis word: 1.08–1.18x over ~0.12–0.25 s, held through the
-  phrase. Start 0–2 frames before the onset. Use it on meaning words,
-  numbers, contrasts and punchlines.
-- `landing` — just after a jump cut, start 1.12–1.18x and ease to 1.0 over
-  ~0.3–0.6 s. It hides the jump and gives every cut an arrival. This is the
-  default treatment for jump cuts inside a continuous take.
-- `ease` — a smooth eased reframe between two framings (medium → tight on a
-  sentence turn), the alternative-framing move for podcast reels.
-- `push` (or `push_in`) — a slow continuous push, about 1.00 → 1.06, over
-  holds longer than ~3 s, so long statements never sit frozen.
-- `pulse` — 1.0 → 1.07 → 1.0 on a musical beat or a rhythmic list beat.
-- shake — only on impacts (a hero slam, a hit), short and decaying.
+mode names; the modes below are the vocabulary.
+STRENGTH IS MAGNIFICATION − 1: strength 0.12 is a 1.12x frame, 0.2 is 1.2x;
+above 1.0 is a 2x+ zoom. Never pass a magnification (1.15) as strength.
+- `punch` — a fast expo snap in (~0.12 s, optional overshoot 0.05–0.15 on
+  the biggest beats), held, then a hard cut back out at `end`: strength
+  0.08–0.18 landing ON an emphasis word. Start 0–2 frames before the onset
+  and end on the next cut or sentence turn so the step back reads as a
+  second camera. Use it on meaning words, numbers, contrasts and punchlines.
+- `landing` — starts pushed in (strength 0.12–0.18) and settles to the wide
+  in ~0.35 s. Start it EXACTLY on the cut (end about start + 0.4). Reserve it
+  for cuts between ideas or sections, B-roll returns and the hook — not for
+  every jump cut, where a stream of landings makes the camera bounce.
+- `ease` — a smooth ramp in, hold and ramp out: a gentle reframe onto a
+  subject mid-shot.
+- `push_in` — a slow continuous push, strength 0.05–0.12, across holds of
+  3 s or more, so long statements never sit frozen; `pull_out` is the
+  release or reveal.
+- `pulse` — 1 → 1 + strength → 1 in ~0.3 s on a musical beat or a rhythmic
+  list beat, strength 0.05–0.08.
+- `shake` — a decaying impact shake (the `shake` amount, 0.3–0.8, does the
+  work); a `shake` value on a punch turns it into an impact hit. Only on
+  real impacts: a hero slam, a hit.
+- JUMP CUTS: after `cut_silences` a take is full of jump cuts every 1–2 s.
+  Cover them with ALTERNATING FRAMING — a punch (hard step, `ramp_s=0` when
+  the schema offers it) from one cut to the next at strength 0.12–0.2, then
+  back to the wide at the following cut, aimed at the face — so the edit
+  reads as two cameras. Not every jump cut needs a change.
 - On a hero moment the camera supports the graphic leader: a punch or pulse
   on the same frame as the word slam and its low hit. A deliberate hook
-  may open already punched-in or with a landing zoom at 0 s.
+  may open already punched-in or with a landing at 0 s.
 - Density follows the speech: in a talking-head reel expect a camera event
-  every 2–4 s (landings on cuts, punches on emphasis, pushes on holds),
-  varied in size; cluster on dense ideas, rest on an admission.
+  every 2–4 s (alternating framing on cuts, punches on emphasis, pushes on
+  holds), varied in size, and no more than one camera event per ~1.5 s
+  unless it is a designed hit; cluster on dense ideas, rest on an
+  admission.
 
 AIMING — a coordinate is a MEASUREMENT, never an impression:
 - Every frame you look at carries a faint tenths grid ((0,0) = top-left,
@@ -67,15 +83,19 @@ AIMING — a coordinate is a MEASUREMENT, never an impression:
 - After reframes, re-check aim per shot; a face that moves between shots
   needs a target per shot.
 
-PURPOSE AND EVIDENCE: pass `purpose` naming the event ("landing after jump
-cut at 6.4 s", "punch on 'forty' at 12.1 s"). If a move has no correlated
+PURPOSE AND EVIDENCE: pass `purpose` naming the event ("landing on the turn
+at 6.4 s", "punch on 'forty' at 12.1 s"). If a move has no correlated
 word, cut, beat or visible action, it does not belong; a random move weakens
 the intentional ones.
 
 `punch_in_on_emphasis` writes a measured pass of punches on vocally stressed
-words that survive the cut, using face targets when detected. On a premium
-reel it is a valid starting pass; inspect its choices, then retime, re-aim
-or vary them by hand so the strongest words get the strongest moves.
+words that survive the cut, using face targets when detected: each snaps in
+on its word, holds to the next cut or sentence end, then cuts back out.
+Omitted count and strength are directed from program length; explicit
+values win. On a premium reel it is a valid starting pass; inspect its
+choices, then retime, re-aim or vary them by hand so the strongest words get
+the strongest moves, and complete the camera with `add_zoom` (landings on
+turns, pushes on holds). Skip it for calm or minimal briefs.
 
 TRAVELLING ZOOMS (`add_zoom_path`) — when the zoom must MOVE ("keep it, then
 move to my prompt, then the answer"): ONE path visiting each subject as a
@@ -106,20 +126,27 @@ crop=[x0,y0,x1,y1])` shows only that region; keep the zoom wide across it.
 - Stepped or linear motion; the identical punch at identical intervals.
 - A zoom crossing a shot boundary without a path; stale targets after a cut.
 - A camera bump that fights a graphic leader instead of supporting it.
-- Jump cuts left as raw jumps on a reel instead of landing zooms.
+- Strength passed as a magnification (1.15 instead of 0.15), producing a
+  2x+ zoom.
+- A landing on every jump cut, so the camera bounces every second; or jump
+  cuts left raw on a reel with no framing change at all.
 - Visible drift during a travelling-zoom hold.
 
 ## Verification procedure
 
-Render and inspect each move with dense rendered frames
-(`look_at(rendered=true, output_times=[...])` at start, mid-ease, landing and
-release): the face or target stays composed and centred where intended, the
-ease reads smooth, the landing sits on the word, cut or beat, and adjacent
-moves vary in size and mode. Check every shot boundary and path extreme.
+Check aim and framing first without a render: `look_at(output_times=[...])`
+shows the program in true geometry with every zoom applied. Then judge the
+motion itself on a complete preview — `render_preview(complete=true)`, then
+`look_at(rendered=true, output_times=[...])` at start, mid-ease, landing and
+release (rendered looks need a complete preview of the current version): the
+face or target stays composed and centred where intended, the ease reads
+smooth, the landing sits on the word, cut or beat, and adjacent moves vary
+in size and mode. Check every shot boundary and path extreme.
 
 ## Repair ladder
 
 Re-aim from an unzoomed frame → retime to the onset or cut → change mode
-(punch ↔ ease ↔ landing) or vary strength → add a shot-specific path → split
+(punch ↔ ease ↔ landing) or vary strength → thin moves closer than ~1.5 s →
+add a shot-specific path → split
 at the boundary → convert to a crop where appropriate → remove a move that
 has no event → verify again.

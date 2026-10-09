@@ -94,7 +94,12 @@ CHOOSING A TEMPLATE — confirm names and params with `list_motion_templates()`:
   photos and archival stills as floating 3D cards with a shutter.
 - Endings: `comment_cta`, `follow_cta`, `save_cta` are native-UI calls to
   action — a typed comment keyword, a follow→following press, a bookmark
-  fill — in the last 2–4 s after the payoff has landed, never over it.
+  fill — in the last 2–4 s after the payoff has landed, never over it. Use
+  one only when the user or brief asks for a CTA, and fill it only with the
+  handle, keyword and offer they supplied (owner marketing reels supply them
+  in the brief). Never invent a handle, a verified badge (pass
+  `verified=false` unless the user confirms it), a comment keyword or a
+  promised resource. `save_cta` is the identity-free option.
 - Accents: `emoji_pop` for one reaction beat, never a stream of emoji.
 - Transitions and texture: `flash_transition` (1–2 frame exposure pop on a
   cut), `light_leak` (warm wash across a section turn), `glitch_burst` (RGB
@@ -102,11 +107,12 @@ CHOOSING A TEMPLATE — confirm names and params with `list_motion_templates()`:
   These go ON a real junction with a paired whoosh or hit.
 
 CUING TO THE WORD:
-- Find the onset as above, then set `start` so the template's landing
-  frame falls 0–3 frames (0–0.1 s) before it. Templates land at their own
-  documented offset (hook_title words arrive over ~0.2 s; a slam is
-  near-instant); when unsure, start 0.03–0.08 s before the onset and check
-  the rendered frames.
+- Find the onset as above, then set `start` so the template's LANDING
+  frame falls 0–3 frames (0–0.1 s) before it. A template's description in
+  the listing states its landing offset: an entrance that lands 0.2 s after
+  start begins 0.2 s before the word; a hard pop lands at start. When the
+  listing gives no offset, start 0.03–0.08 s before the onset and check the
+  rendered frames.
 - `end` is when the moment releases: usually at the next phrase or the next
   leader, rarely more than 2.5 s for a hero word. Omit it to use the
   template's natural duration.
@@ -123,11 +129,13 @@ LAYERING AND CAPTIONS:
   thirds, textures, background shapes); `behind_subject` composites the
   graphic behind the person's matte — the giant-word-behind-the-head look —
   and needs a person in frame and no cut inside the window.
-- A graphic that SAYS the spoken words (word_slam, phrase_build, hook_title
-  on the spoken hook) mutes the captions for its window — templates set
-  this by default; pass `mute_captions` explicitly to override. A
-  complementary graphic (counter beside the speaker, lower third, arrow)
-  keeps captions on.
+- Captions and a graphic never say the same words twice. Mute defaults
+  differ by template and the listing does not show them, so pass
+  `mute_captions` explicitly: true when the graphic repeats the words being
+  spoken (a word slam or phrase build on its words, a `hook_title` of the
+  spoken hook line, a typewriter of the sentence being said), false when it
+  complements them (a counter beside the speaker, a lower third, an arrow,
+  a CTA).
 - One text system at a time in one region: never stack a hook title, a
   caption page and a lower third in the same band.
 
@@ -145,12 +153,19 @@ SOUND PAIRING:
   pre-rolled into the entrance, a pop or tick on reveals, typing under a
   typewriter, a shutter on photos, a click on UI presses. Owned cues move and
   delete with the graphic.
-- Adjust rather than stack: lower UI ticks and pops to -8 to -12 dB, give
-  the biggest hero landing a low hit (`add_sfx` with `kit:kick`,
-  `kit:impact_soft` or `kit:sub_drop`) and lead a payoff with
-  `kit:riser_short` ending on the landing frame. Pass `sfx=false` when the
-  music transient already carries the moment or the passage should stay
-  dry. Never a whoosh on every caption.
+- The add_motion_graphic result lists each owned cue as kind@time; in
+  `get_edl` they are sfx items whose ids start `mg_<graphic id>_sfx`.
+  Adjust rather than stack: set their levels with
+  `set_audio_gain(kind='sfx', id=..., gain_db=...)` — UI ticks and pops -8
+  to -12 dB, hits -3 to -6 dB — after the graphic's params are final
+  (changing params or the template re-derives the cues at default gain).
+- Add a low hit (`add_sfx` with `kit:impact_soft`, `kit:kick` or
+  `kit:sub_drop`) only on a hero landing whose template does not already
+  own one; when the result lists a kick or impact (word slam, counter and
+  versus split carry one), raise that cue instead of adding a second. Lead
+  a payoff with `kit:riser_short` ending on the landing frame. Pass
+  `sfx=false` when the music transient already carries the moment or the
+  passage should stay dry. Never a whoosh on every caption.
 
 TIMING VOCABULARY — name the motion you want, then pick a template param or
 author it:
@@ -224,22 +239,29 @@ the engine scales it to the output. Runtime summary:
 
 ## Verification procedure
 
-1. `render_preview(complete=false)` for the changed seconds.
-2. For each graphic, `look_at(rendered=true, output_times=[...])` with dense
-   times around the landing — for example onset − 0.1, onset, +0.03, +0.07,
-   +0.13, +0.27, +0.5 and the release — to judge the entrance, the settled
-   hold and the exit. The geometry-only view without `rendered=true` does
-   not include burned-in graphics or captions.
+1. While placing graphics, `render_preview(complete=false)` encodes only the
+   changed seconds and returns RENDER CHECK and caption QA tiles of them:
+   judge placement, legibility and collisions from those tiles.
+2. `look_at(rendered=true, ...)` reads only a COMPLETE preview of the
+   current EDL version — a changed-section proof does not count. Once the
+   hook and hero moments are built, call `render_preview(complete=true)`
+   (draft quality) once, then `look_at(rendered=true, output_times=[...])`
+   with up to 8 dense times per call around each landing — for example
+   onset − 0.1, onset, +0.03, +0.07, +0.13, +0.27, +0.5 and the release —
+   to judge the entrance, the settled hold and the exit. The geometry-only
+   view without `rendered=true` needs no render but contains no graphics,
+   captions or grade.
 3. Check: lands on the word (0–3 frames early), one leader, clear of the
    face and UI band, readable at phone size on the actual background, sound
    peak on the landing frame, exit clean before the next leader.
-4. Before handoff, look at the complete preview's opening 0–2 s and every
-   hero moment once more.
+4. A repair makes a new EDL version: render it complete again before the
+   next rendered look, and re-check the opening 0–2 s and every hero moment
+   you changed.
 
 ## Repair ladder
 
 Retime to the onset → move into clear space or change layer → reduce copy or
 enlarge type → remove the competing element → change the template or
 entrance → adjust or remove its owned sound cues (`set_motion_graphic`
-with `sfx`) → author an html composition when no template fits → re-render
-the window and look again.
+with `sfx`) → author an html composition when no template fits → render a
+complete preview and look again.

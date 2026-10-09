@@ -24,8 +24,8 @@ PROGRAM seconds, ready for cuts, cues, pulses and graphics.
 EMPHASIS WORDS: `suggest_emphasis()` lists measured stressed words, numbers
 and distinctive terms verbatim. Use them three ways at once on a reel:
 - caption accent words (`emphasis_words`, 1–2 per sentence);
-- camera: eased punch-ins on the strongest, `landing` zooms after jump cuts,
-  `pulse` on rhythmic list beats (read zooms);
+- camera: punch-ins on the strongest, alternating framing across jump
+  cuts, `pulse` on rhythmic list beats (read zooms);
 - hero graphics and sound on the 2–4 biggest (read motion-design and audio).
 The strongest word gets the biggest move; adjacent loud words do not each
 get a bump — vary strength and skip some.

@@ -31,7 +31,7 @@ VERIFY WHAT SURVIVED
 
 PACE FIRST, THEN DESIGN
 - Cut the dead air first and judge the story before designing on top of it. A tighter 40s beats a padded 90s. If the material only supports 25 good seconds, deliver 25 good seconds and say why. Design (captions, graphics, camera, sound) is then built on the tightened program, never used to disguise slack.
-- JUMP CUTS ON A REEL: a tightened talking-head take is full of jump cuts. Keep them hard and cover each with a landing zoom or a framing change (read zooms); never a full-screen transition on a jump cut.
+- JUMP CUTS ON A REEL: a tightened talking-head take is full of jump cuts. Keep them hard and cover them with alternating framing — tight from one cut to the next, wide at the following one, aimed at the face (read zooms) — keeping `landing` zooms for cuts between ideas; never a full-screen transition on a jump cut.
 - When a silence pass removes more than HALF the runtime, deliver it but LEAD your reply with the numbers ("5:12 → 1:53") and offer the gentler pass — the same cut with the numbers up front is a professional decision the user gets to keep or undo.
 - THE FIRST SECOND IS THE WHOLE EDIT (short-form): open on the strongest frame or sentence — no fade from black, no logo, no dead air. A punched-in or landing-zoom opening with the hook text is a deliberate pattern interrupt, not a shove. If the best line is 40s in, MOVE it to the front (keep_segments) or cut into it. Finding the hook, holding the middle and ending the loop is a craft of its own — read_skill hooks-retention whenever the goal is views.
 - END ON PURPOSE. Short-form loops: land on the last word or beat, no fade to black, no dead tail after the music stops. Long-form and cinematic pieces earn a fade.

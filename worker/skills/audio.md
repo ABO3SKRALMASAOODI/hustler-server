@@ -6,8 +6,8 @@ Premium reels are never silent between words. A music bed sits 13–20 dB under
 the voice, and a sparse, structural layer of sound effects is edited to the
 picture: a whoosh under a graphic entrance with its peak on the landing, pops
 and ticks on reveals, typing under a typewriter, a shutter on a photo, a low
-hit on a hero landing, a riser into the payoff, a short stop-down before a
-reveal. Intelligibility of the voice always wins the mix.
+hit on a hero landing, a riser into the payoff, and room before a reveal.
+Intelligibility of the voice always wins the mix.
 
 - Every cue binds to a visible or narrative event and lands ON its frame.
 - Music and sound design are the default for short-form reels; a dry passage
@@ -31,8 +31,9 @@ FOUR DISTINCT LAYERS — never confuse them:
    spans. A spliced scene's own audio mutes with `set_insert_window(id,
    mute=true)`; image inserts are silent.
 2. MUSIC: a bed under speech, or the lead on a speechless video. Place from
-   the music library when its tools are listed (read music), from the user's
-   upload or link, or from a named song. `add_music` defaults to a -18 dB
+   the music library when its tools are listed (or the look's own bed via
+   apply_look's music option — read music), from the user's upload or link,
+   or from a named song. `add_music` defaults to a -18 dB
    auto-ducked bed under speech and a -4 dB lead with no duck where no speech
    survives. Change track with `swap_music`; refit with `set_music_fit`
    (start/end, loop, fade, offset, duck_mode); remove with `remove_music`.
@@ -50,8 +51,10 @@ swish_short, swipe, pop_soft, pop_bright, click_ui, tick, kick, ding, chime,
 notification, coin, riser_short, riser_long, impact_soft, impact_hard,
 sub_drop, glitch, shutter, typing. Place one with
 `add_sfx(storage_key='kit:<kind>', at=<program seconds>, gain_db=...,
-purpose=...)`. Motion templates already add their own synced kit cues;
-adjust those gains or pass `sfx=false` rather than stacking duplicates.
+purpose=...)`. Motion templates already add their own synced kit cues, and
+a look from `apply_look` may add whooshes on its transitions: read the
+receipt or `get_edl` (sfx) first, then adjust those gains with
+`set_audio_gain` or pass `sfx=false` rather than stacking duplicates.
 
 CUE GRAMMAR — what goes where:
 - Graphic or card entrance → `whoosh_soft` or `swipe`, pre-rolled so the
@@ -68,8 +71,16 @@ CUE GRAMMAR — what goes where:
   payoff frame, then the hit.
 - Transition → `whoosh_hard` or `swoosh_up` peaking on the cut; `glitch`
   under a glitch.
-- Stop-down: 50–280 ms of near-silence before a reveal — dip the bed with
-  `set_music_fit` or end a cue early — then land the hit.
+- Stop-down (optional): a beat of near-silence before a reveal, then the
+  hit. With no bed, keep the speaker's own 0.1–0.3 s pause before the reveal
+  word and place no cues inside it. Under a bed there is no dip control and
+  a sound effect cannot be shortened, so split the bed:
+  `set_music_fit(id, end=reveal − 0.15, fade_out_s=0.05)`, then `add_music`
+  with the bed's own storage_key, read from `get_edl`, at start=reveal,
+  offset_s = the bed's offset_s + (reveal − the bed's start), counting an
+  unset offset as 0, fade_in_s=0 and the same gain_db and duck. Skip it
+  when that offset would run past the track's end. Never end the bed early
+  without restarting it; check the AUDIO CHECK dead-air line afterwards.
 - Layering is allowed: a whoosh into an impact on one hero beat is one event.
 - Typical density on a 30–60 s talking reel: a structural cue every 2–4 s,
   stacked on hero moments, quieter on reveals. Count purposes, not sounds.

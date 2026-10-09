@@ -17,14 +17,23 @@ touched, the payoff and the ending, plus any bounded listening evidence.
 
 ## Strong treatment patterns
 
-HOW TO LOOK AT MOTION: `render_preview(complete=false)` during iteration
-encodes only the changed seconds; then
-`look_at(rendered=true, output_times=[...])` with up to 8 dense times around
-a moment — e.g. landing − 0.1, landing, +0.03, +0.07, +0.13, +0.27, +0.5, and
-the release. The geometry-only view (no `rendered=true`) shows framing and
-zoom aim without a render but contains no captions, graphics or grade.
-`native_resolution=true` on one time gives full-detail pixels. One complete
-preview is produced for handoff; check its opening and hero moments again.
+HOW TO LOOK AT MOTION — two different renders:
+- During iteration, `render_preview(complete=false)` encodes only the
+  seconds changed since the last complete preview and returns RENDER CHECK
+  and caption QA tiles of them. Judge placement, legibility and collisions
+  from that result; the complete preview adds the AUDIO CHECK of the whole
+  mix.
+- `look_at(rendered=true, ...)` reads only a COMPLETE preview of the current
+  EDL version; a changed-section proof does not count, and calling it
+  without one is rejected. For dense motion frames, build the hook and hero
+  moments, call `render_preview(complete=true)` (draft quality), then
+  `look_at(rendered=true, output_times=[...])` with up to 8 dense times per
+  call around a moment — e.g. landing − 0.1, landing, +0.03, +0.07, +0.13,
+  +0.27, +0.5, and the release. Batch several moments into a few calls.
+- Every repair makes a new version: render it complete again before the
+  next rendered look. The geometry-only view (no `rendered=true`) needs no
+  render and shows framing and zoom aim, but no captions, graphics or
+  grade. `native_resolution=true` on one time gives full-detail pixels.
 
 SCREEN IN THIS ORDER — each item is a yes/no question:
 1. THE OPEN (rendered 0.0, 0.2, 0.6, 1.5): first visual event by 0.6 s?
@@ -39,7 +48,9 @@ SCREEN IN THIS ORDER — each item is a yes/no question:
    against every background; no overlap with faces, graphics or the platform
    band; no caption stacked over burned-in text.
 5. CAMERA: each zoom aimed at the face or target, eased (no steps or drift),
-   landing zooms on jump cuts, varied strengths.
+   jump cuts covered by alternating framing, landings only on cuts between
+   ideas, varied strengths, no more than one camera event per ~1.5 s except
+   a designed hit.
 6. JUNCTIONS: cuts on word edges, no flash or double frames; transitions only
    on real turns, each with its sound peak on the cut; no effect on a jump
    cut.
@@ -50,13 +61,15 @@ SCREEN IN THIS ORDER — each item is a yes/no question:
    its labeled windows.
 8. LOOK AND LAYOUT: one grade and texture throughout; no flat black void; no
    scene obviously rawer than the rest.
-9. THE END: payoff held 1.0–1.5 s, CTA after it (not over it), last beat
-   lands clean for the loop.
+9. THE END: payoff held 1.0–1.5 s, a requested CTA after it (not over it),
+   last beat lands clean for the loop.
 10. THE BRIEF: reread the user's message once. Every named item delivered or
     honestly reported? Anything they forbade present anyway?
 11. HONESTY: every number, name, quote and UI claim on screen is supported by
-    the transcript, the user or a verified source; every device has a
-    purpose you can name.
+    the transcript, the user or a verified source; a CTA uses only the
+    handle, keyword and offer the user or brief supplied (no invented
+    verified badge or promised resource); every device has a purpose you
+    can name.
 
 TASTE AND DENSITY FINDINGS ARE ADVISORY: fix real defects (collisions,
 illegible type, mistimed cues, clipped faces, fades on reels, silence,
@@ -68,7 +81,8 @@ Deterministic render failures and unresolved current-version checks need
 repair or an honest limitation.
 
 FIX DISCIPLINE: choose the narrowest repair that fixes the moment —
-retime, re-aim, move, resize, swap — and re-render only the changed window.
+retime, re-aim, move, resize, swap — check it with a changed-section proof,
+and render complete again only when you need rendered motion frames.
 
 THE BAR: would a top Instagram editor post this next to the reference reels?
 The hook earns the stop, the middle never sags, the sound feels produced,
@@ -95,7 +109,8 @@ Studio preview.
 
 ## Repair ladder
 
-Localize the finding → apply the narrowest repair → re-render the changed
-window → re-inspect with dense rendered frames → rerun deterministic checks →
+Localize the finding → apply the narrowest repair → prove the changed
+window with `render_preview(complete=false)` → render complete and
+re-inspect motion with dense rendered frames → rerun deterministic checks →
 screen the complete preview → continue until it meets the bar or a genuine
 blocker remains.

@@ -38,7 +38,11 @@ every component it set:
   grade, minimal texture.
 - Legacy looks `hype`, `clean`, `cinematic`, `luxury`, `meme` remain.
 The descriptions above are the intent of each look; the tool result lists
-the exact components it set — read it before refining. Refine any component
+the exact components it set — read it before refining. A look can place its
+own transition whooshes and, through its music option ('auto', a mood or a
+library slug, when the schema lists it), a ducked bed: check its receipt or
+`get_edl` (sfx, music) before adding junction cues or another bed, and
+adjust the look's own cues rather than stacking. Refine any component
 afterwards with its own tool; do not layer a second
 look on top. On a vertical reel there must be no fade-in from black: if a
 look sets one, remove it with `set_fades`.

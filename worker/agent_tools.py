@@ -25093,6 +25093,13 @@ def _compact_description(description):
 
 
 _COMPACT_CONTRACTS = {
+    "add_zoom": (
+        "Camera move, OUTPUT seconds. mode: punch=expo snap-in on a stressed "
+        "word, hard cut out at end (end on a cut or sentence turn); landing="
+        "start ON a cut, settles from 0.12-0.18; push_in=slow 0.05-0.12 push "
+        "over 3s+ holds; pulse=0.3s beat thump; shake=impact; ease=gentle "
+        "push. rect frames a region; cx/cy pins a point. ramp_s, overshoot, "
+        "rotate, shake shape the move."),
     "apply_edit_batch": (
         "Atomic edits, no render wait. Read get_edl; use current base_version. "
         "set replaces one complete layer; upsert patches one object by id; "
@@ -25114,12 +25121,26 @@ _COMPACT_CONTRACTS = {
         "mute affects only the clip's audio; still images are already silent. "
         "Read inserts in get_edl first."),
     "look_at": (
-        "Your eyes, no render needed: times=[...] are SOURCE seconds; "
-        "output_times=[...] show the assembled program in true geometry "
-        "(zoom aim included, no burn-ins) to aim zooms and place type. "
-        "rendered=true after render_preview shows real pixels with captions, "
-        "motion graphics and grade; batch dense output_times around a landing "
-        "to judge motion. Read positions off the tenths grid."),
+        "See frames now, no render needed: times=[...] are SOURCE seconds; "
+        "output_times=[...] show the assembled edit (inserts, framing, zoom; "
+        "not captions/text/grade) to aim zooms and place type. rendered=true "
+        "reads only a COMPLETE preview of the current EDL version "
+        "(render_preview(complete=true) first; a changed-section proof is "
+        "rejected) and shows real captions, motion graphics and grade: batch "
+        "up to 8 dense output_times around a landing to judge motion. Read "
+        "positions off the tenths grid. Uploads: look_at_asset."),
+    "look_at_asset": (
+        "Inspect an uploaded IMAGE or VIDEO by its exact asset_key from list_assets. "
+        "Times are relative to that source. For audio use get_audio_analysis; "
+        "for edited output use render_preview then look_at."),
+    "extract_audio": (
+        "Extract sound from an uploaded video_clip by exact asset_key. Returns "
+        "a music storage_key to place with add_music/add_sfx. Silent sources "
+        "cannot yield sound. Main-video audio is already in the edit; use set_volume."),
+    "get_edl": (
+        "Read current version and exact EDL shapes. sections accepts layer names "
+        "or an array; compact=true gives an index; offset/limit page long lists. "
+        "Use texts for titles, frame for framing, effects for transitions/grades."),
     "list_motion_templates": (
         "READ the live motion library: each template's purpose, params "
         "(* = required) and built-in sound cues. Call once before designing the "
@@ -25129,12 +25150,14 @@ _COMPACT_CONTRACTS = {
     "add_motion_graphic": (
         "Place a premium motion graphic on PROGRAM seconds: a template from "
         "list_motion_templates, or template='html' with your own MG-runtime "
-        "composition in html (read_skill motion-design). Land it on the exact "
-        "spoken word: start 0-3 frames before the onset (get_kept_transcript + "
-        "get_words). layer above_captions (default), below_captions or "
-        "behind_subject. Graphics that say the spoken words mute captions; "
-        "sfx=true adds synced kit cues. Pass purpose and a stable id. Never "
-        "invent numbers or brand messages."),
+        "composition in html (read_skill motion-design). Its LANDING frame "
+        "sits 0-3 frames before the spoken onset (get_kept_transcript + "
+        "get_words; start earlier by the landing offset the template "
+        "description states). layer above_captions (default), below_captions "
+        "or behind_subject. Pass mute_captions explicitly: true when it repeats "
+        "the spoken words (hook_title of the spoken hook too). sfx=true adds "
+        "synced kit cues listed in the result. Pass purpose and a stable id. "
+        "Never invent numbers, brand messages, handles or CTA offers."),
     "set_motion_graphic": (
         "Patch a motion graphic by id: window, params (merged), template, layer, "
         "html, caption muting. Its owned sound cues follow; sfx=true re-derives "
@@ -25170,45 +25193,31 @@ _COMPACT_CONTRACTS = {
         "transitions (+ optional music), reporting every component. Premium: "
         "editorial (podcast/interview default), creator_punch, cinematic_doc, "
         "mono_noir, clean_minimal; legacy hype, clean, cinematic, luxury, meme. "
-        "One look per edit; refine components with their own tools; no fade-in "
-        "on vertical reels (set_fades)."),
-    "add_zoom": (
-        "Eased camera move on OUTPUT seconds, aimed with rect=[x0,y0,x1,y1] "
-        "(frames a region) or cx/cy (pins a point) read off the tenths grid. "
-        "Modes as the schema lists them: punch (fast ease onto an emphasis "
-        "word, 1.08-1.18x), landing (1.12-1.18 easing to 1.0 just after a jump "
-        "cut), ease, push (slow drift on long holds), pulse (on a beat). Bind to "
-        "the word/cut/beat, pass purpose, vary strength. A moving zoom is one "
-        "add_zoom_path."),
+        "Its transitions may carry their own whooshes and its music option "
+        "(when listed) lays a bed: read the receipt before adding junction "
+        "cues or music. One look per edit; refine components with their own "
+        "tools; no fade-in on vertical reels (set_fades)."),
     "punch_in_on_emphasis": (
-        "Writes a measured pass of eased punch-ins on vocally stressed words "
-        "that survive the cut, face-aimed and spaced so adjacent loud words do "
-        "not all bump. A valid first camera pass on reels; then hand-tune the "
-        "strongest moments with add_zoom."),
+        "One-call emphasis pass on vocally stressed words that survive the cut: "
+        "each punch snaps in ON its word (~0.12s expo), holds to the next cut "
+        "or sentence end, then cuts back out; face-aimed, never clustered on "
+        "adjacent loud words. Omitted count/strength are directed from program "
+        "length; explicit values win. Then complete the camera with add_zoom "
+        "(landing on cuts between ideas, push_in on long holds). Skip for "
+        "calm/minimal briefs."),
     "set_transitions": (
         "One junction style at real scene changes; scope='scene' skips jump "
         "cuts — report the junction count it returns. Styles dip_black, "
         "dip_white, whip_left/right, zoom_punch, glitch, flash (fast ones "
         "0.15-0.4s). Adds no sound: pair with add_sfx kit:whoosh_hard peaking "
-        "on the cut. One specific junction: a motion transition template."),
+        "on the cut unless a look already placed one there (get_edl sfx). One "
+        "specific junction: a motion transition template."),
     "set_picture_card": (
         "Footage-only rounded card for start/end program seconds (box, radius, "
         "border, shadow, entrance/exit). Give it a designed background from the "
         "schema (blurred darkened copy of the picture, gradient, grain or "
         "vignette), never a flat black void. Set frame.picture first to keep a "
         "wide original inside portrait."),
-    "look_at_asset": (
-        "Inspect an uploaded IMAGE or VIDEO by its exact asset_key from list_assets. "
-        "Times are relative to that source. For audio use get_audio_analysis; "
-        "for edited output use render_preview then look_at."),
-    "extract_audio": (
-        "Extract sound from an uploaded video_clip by exact asset_key. Returns "
-        "a music storage_key to place with add_music/add_sfx. Silent sources "
-        "cannot yield sound. Main-video audio is already in the edit; use set_volume."),
-    "get_edl": (
-        "Read current version and exact EDL shapes. sections accepts layer names "
-        "or an array; compact=true gives an index; offset/limit page long lists. "
-        "Use texts for titles, frame for framing, effects for transitions/grades."),
 }
 
 

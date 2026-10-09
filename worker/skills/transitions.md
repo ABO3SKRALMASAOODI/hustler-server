@@ -10,8 +10,8 @@ relationship across a real boundary; it never decorates a jump cut.
 
 - Motivated junctions: section turns, hook → body, B-roll in and out,
   location or speaker changes, chapter titles, the montage-to-face return.
-- Hard cuts inside a take; jump cuts get landing zooms (see zooms), not
-  full-screen effects.
+- Hard cuts inside a take; jump cuts get alternating framing (see zooms),
+  not full-screen effects.
 - Every authored transition carries a paired sound cue unless the music
   transient already lands there.
 - Vary the junction vocabulary across a reel; never the same effect
@@ -43,21 +43,25 @@ so its peak sits on the junction (read motion-design). These carry their own
 synced kit sounds. Use them to vary the vocabulary: a light leak into the
 story, a whip into B-roll, a flash on the reveal.
 
-PAIRED SOUND: when `set_transitions` places effects, add kit cues yourself
-(it adds none): `add_sfx(storage_key='kit:whoosh_hard', at=...)` for whips and
-zoom punches, `kit:swoosh_up` into a reveal, `kit:glitch` under a glitch,
-`kit:impact_soft` or `kit:kick` under a flash on a hit. Pre-roll the whoosh
-so its peak lands on the cut — start roughly 40–50% of its length early
-(about 0.2 s for whoosh_hard, 0.3 s for whoosh_soft) — and keep it under the
-voice. Give each cue a `purpose` naming the junction.
+PAIRED SOUND: a look from `apply_look` may already place its own transition
+sounds (ids starting `look_tx`) — read its receipt or `get_edl` (sfx) first
+and adjust those with `set_audio_gain` or `move_sfx` instead of stacking a
+second whoosh. When `set_transitions` places effects, add kit cues yourself
+(it adds none): `add_sfx(storage_key='kit:whoosh_hard', at=...)` for whips
+and zoom punches, `kit:swoosh_up` into a reveal, `kit:glitch` under a
+glitch, `kit:impact_soft` or `kit:kick` under a flash on a hit. Pre-roll the
+whoosh so its peak lands on the cut — start roughly 40–50% of its length
+early (about 0.2 s for whoosh_hard, 0.3 s for whoosh_soft) — and keep it
+under the voice. Give each cue a `purpose` naming the junction.
 
 THE JUMP-CUT LAW:
 - After `cut_silences`, a single talking-head take has one junction per
   removed pause — often 40+ — and every one is a JUMP CUT inside the same
   continuous shot. Decorating each with a full-screen effect looks broken (a
   whip on all of them fires an effect every couple of seconds through
-  footage that never changed scene). Cover jump cuts with landing zooms or
-  framing changes instead.
+  footage that never changed scene). Cover jump cuts with alternating
+  framing instead — tight from one cut to the next, wide at the following
+  one (read zooms); keep `landing` zooms for cuts between ideas.
 - `set_transitions` defaults to scope='scene' and lands only on real shot
   changes and insert boundaries. READ THE RESULT — it says how many junctions
   it used ("7 of 45"); report THAT number, not the cut count.
@@ -74,7 +78,8 @@ tool reports.
 ## Common failure modes
 
 - Effects on jump cuts inside one take.
-- Silent transitions, or a whoosh whose peak lands after the cut.
+- Silent transitions, or a whoosh whose peak lands after the cut; two
+  whooshes on one junction because a look already placed one.
 - One effect repeated mechanically on every boundary.
 - Direction or energy that contradicts the footage (a whip against the
   motion, a glitch in a tender passage).
@@ -90,5 +95,5 @@ and the sequence of junction types varies.
 ## Repair ladder
 
 Retime the sound to the cut → shorten or subdue → change direction or style
-→ move to the real section turn → replace with a hard cut plus landing zoom
-→ rescreen the sequence cadence.
+→ move to the real section turn → replace with a hard cut plus a framing
+change → rescreen the sequence cadence.

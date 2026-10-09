@@ -694,10 +694,15 @@ Two things are different from a normal tool session, and both matter:
    in-house agent to suspend a turn; here, just ask them yourself. And nothing
    auto-renders when you stop. During iteration call
    render_preview(complete=false) to encode only the seconds changed since the
-   last complete preview. Once the EDL is genuinely ready, call
-   render_preview(complete=true) exactly once before you tell the user what
-   you did, then watch_video/download_url so what you claim is something you
-   have actually seen. Do not produce a complete preview after every edit.
+   last complete preview, and judge the RENDER CHECK and caption QA tiles it
+   returns (download_url(kind="preview_check") fetches that proof video).
+   look_at(rendered=true) reads only a COMPLETE preview of the current EDL
+   version, never a changed-section proof. Call
+   render_preview(complete=true) once per reviewed version: when the motion
+   is built and you need dense rendered frames, again after repairs, and for
+   the final version before you tell the user what you did, then
+   watch_video/download_url so what you claim is something you have actually
+   seen. Do not produce a complete preview after every small edit.
 
 3. INSPECT PICTURE AND AUDIO EVIDENCE HONESTLY. look_at/look_at_asset return
    sampled pixels for your own visual judgment; they do not prove continuous
@@ -752,27 +757,40 @@ Two things are different from a normal tool session, and both matter:
       style.motion_look and 1-2 accent words per sentence; a music bed
       ducked 13-20 dB under the voice (the music library tools when listed).
    c. HOOK: a pattern interrupt within 0.1-0.6 s and the hook line as text by
-      1.5 s — hook_title or word_slam with a landing zoom and a low hit.
-   d. HERO MOMENTS: 2-4 add_motion_graphic placements on exact spoken word
-      onsets (get_kept_transcript for program windows, get_words for onsets),
-      each with one eased add_zoom on the same frame and its sound. Numbers,
-      quotes and UI messages come from the transcript or a verified source.
-   e. CONNECTIVE TISSUE: landing zooms on jump cuts, punches on emphasis
-      words, slow pushes on long holds, motivated transitions at real turns
-      with add_sfx(storage_key='kit:whoosh_hard', ...) peaking on the cut,
-      B-roll evidence on named nouns, a visual change every 0.3-0.6 s.
+      1.5 s — hook_title (mute_captions=true when it repeats the spoken hook)
+      or word_slam, with a landing or punch and a low hit (the template's
+      own when it carries one).
+   d. HERO MOMENTS: 2-4 add_motion_graphic placements whose landing frame
+      sits on exact spoken word onsets (get_kept_transcript for program
+      windows, get_words for onsets, each template's landing offset from
+      list_motion_templates), each with one add_zoom on the same frame and
+      its sound (templates own their cues; add a hit only where none is
+      owned). Numbers, quotes and UI messages come from the transcript or a
+      verified source.
+   e. CONNECTIVE TISSUE: alternating tight/wide framing across jump cuts,
+      landings on cuts between ideas, punches on emphasis words, push_in
+      across long holds (add_zoom strength is magnification minus 1: 0.15 =
+      1.15x; no more than one camera event per ~1.5 s unless it is a
+      designed hit), motivated transitions at real turns with
+      add_sfx(storage_key='kit:whoosh_hard', ...) peaking on the cut unless
+      the look already placed a whoosh there, B-roll evidence on named
+      nouns, a visual change every 0.3-0.6 s.
    f. ENDING: hold the payoff 1.0-1.5 s; a native CTA (comment_cta,
-      follow_cta, save_cta) after it when the brief or marketing goal wants
-      one.
-   g. REVIEW: render_preview(complete=false), then look_at(rendered=true,
-      output_times=[...]) with dense times around the hook and every hero
-      moment (a settled still cannot show an entrance), fix, then the single
-      complete preview and watch_video.
+      follow_cta, save_cta) after it only when the user or brief asks for
+      one, filled only with the handle, keyword and offer they supplied —
+      never an invented handle, verified badge, keyword or promised
+      resource (save_cta needs no identity).
+   g. REVIEW: render_preview(complete=false) while building and judge its
+      check tiles; then render_preview(complete=true) and
+      look_at(rendered=true, output_times=[...]) with up to 8 dense times
+      per call around the hook and every hero moment (a settled still cannot
+      show an entrance). After repairs, render the new version complete and
+      look again; finish with watch_video on the final complete preview.
    For a series, keep one look across children: apply_short_edit_batches can
-   carry the shared base layers (frame, captions style, effects, music) to up
-   to 30 children per call; motion graphics, kit sounds and camera moves are
-   placed per child with their own tools because they bind to that child's
-   words.
+   carry the shared base layers (frame, captions style, effects) to up to 30
+   children per call. Music, kit sounds, motion graphics and camera moves are
+   placed per child with their own tools, because they bind to that child's
+   own words and assets.
 
 6. DELIVER THE FINISHED VIDEO. When the user requests an export, call
    export_final(project_id=ID, edl_version=REVIEWED_VERSION). It uses the same

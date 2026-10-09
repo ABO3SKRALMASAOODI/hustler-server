@@ -71,10 +71,12 @@ SIZE LADDER AND ACCENT:
   grade.
 
 CAPTIONS AND GRAPHICS SHARE ONE STAGE. A motion graphic that says the spoken
-words (word slam, phrase build, spoken hook title) mutes captions for its own
-window; complementary graphics keep them. Do not duplicate that with
-`set_caption_mutes`. Never let a caption page and a graphic animate in the
-same band at the same instant.
+words (word slam, phrase build, a hook title of the spoken hook, a typewriter
+of the line being said) must mute captions for its own window;
+complementary graphics keep them. Template defaults differ, so pass
+`mute_captions` explicitly on `add_motion_graphic` rather than duplicating
+it with `set_caption_mutes`. Never let a caption page and a graphic animate
+in the same band at the same instant.
 
 PLACEMENT LAW: multi-word captions sit in measured clear space — usually
 the lower-middle band above the platform UI, or beside the face in a
@@ -139,9 +141,14 @@ READABILITY:
   on distinct backgrounds; fix with the look's plate or glow, a clearer band,
   or a grade adjustment.
 - `audit_captions()` compiles the exact caption artifact and reports
-  lateness, uncovered words and overlaps; after `render_preview`, inspect its
-  `qa_output_times` with `look_at(rendered=true, output_times=[...])`. The
-  geometry-only view without `rendered=true` contains no burned captions.
+  lateness, uncovered words and overlaps. `render_preview(complete=false)`
+  returns caption QA pages of real rendered caption states — judge those
+  while iterating. To inspect its `qa_output_times` or any other moment,
+  render a complete preview of the current version
+  (`render_preview(complete=true)`), then
+  `look_at(rendered=true, output_times=[...])`; rendered looks reject a
+  changed-section proof. The geometry-only view without `rendered=true`
+  contains no burned captions.
 
 CAPTIONS OFF FOR PART OF THE VIDEO: `set_caption_mutes(spans=[[start,end],
 ...])` in PROGRAM seconds replaces the manual mute list; spans=[] clears it.
@@ -177,11 +184,12 @@ ones are the erase case.
 
 ## Verification procedure
 
-Run `audit_captions`, render, and inspect paged QA states with
-`look_at(rendered=true, ...)` across distinct backgrounds and layouts plus
-the densest phrase: words appear on their onsets, the accent lands on the
-right words, the ladder reads at phone size, nothing crosses the face or the
-UI band, and no graphic and caption page fight for the same band.
+Run `audit_captions`, render, and inspect the caption QA pages plus (on a
+complete preview) `look_at(rendered=true, ...)` across distinct backgrounds
+and layouts and the densest phrase: words appear on their onsets, the accent
+lands on the right words, the ladder reads at phone size, nothing crosses
+the face or the UI band, and no graphic and caption page fight for the same
+band.
 
 ## Repair ladder
 
