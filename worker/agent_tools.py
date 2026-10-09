@@ -24047,7 +24047,9 @@ TOOLS = {
         "Each operation is {action,layer,value?,id?}. set replaces one complete layer; "
         "upsert patches or adds a named item; remove deletes a named item; reorder accepts "
         "all insert ids for a canvas sequence. Layers: keep,speed,inserts,frame,captions,"
-        "caption_mutes,texts,vectors,music,sfx,voiceover,volume,master,effects,overlays,canvas. Use existing EDL "
+        "caption_mutes,texts,vectors,music,sfx,voiceover,volume,master,effects,overlays,canvas,motion "
+        "(motion graphics by id: {id,template,start,end,params}; graphics placed this way are "
+        "silent and cannot sit behind the subject — use add_motion_graphic for those). Use existing EDL "
         "field shapes and project media keys. All times describe the RESULTING timeline: "
         "include dependent caption/music/text timing changes in the same batch. "
         "Unknown fields or invalid media reject the whole batch. This saves an edit; "
@@ -24059,7 +24061,8 @@ TOOLS = {
                 "layer": {"type": "string", "enum": [
                     "keep", "speed", "inserts", "frame", "captions",
                     "caption_mutes", "texts", "vectors", "music", "sfx",
-                    "voiceover", "volume", "master", "effects", "overlays", "canvas"]},
+                    "voiceover", "volume", "master", "effects", "overlays", "canvas",
+                    "motion"]},
                 "id": {"type": "string", "description": "Existing item id for upsert/remove; omit for whole-layer set."},
                 "value": {"description": "set: complete layer value (array for texts/inserts/music). upsert: one item object merged by id. reorder: all insert ids. Read get_edl for exact shapes."}},
                 "required": ["action", "layer"]}}}),

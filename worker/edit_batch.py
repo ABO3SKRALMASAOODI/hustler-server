@@ -13,8 +13,9 @@ except ImportError:
 
 LAYERS = frozenset(("keep", "speed", "inserts", "frame", "captions",
     "caption_mutes", "texts", "vectors", "music", "sfx", "voiceover", "volume", "master",
-    "effects", "overlays", "canvas"))
-ITEM_LAYERS = frozenset(("inserts", "texts", "vectors", "music", "sfx", "voiceover", "overlays"))
+    "effects", "overlays", "canvas", "motion"))
+ITEM_LAYERS = frozenset(("inserts", "texts", "vectors", "music", "sfx", "voiceover", "overlays",
+    "motion"))
 
 
 def project_media_keys(conn, project_id):
@@ -117,6 +118,19 @@ def apply_batch(before, operations, duration, allowed_keys):
             raise ValueError(f"Duplicate ids in {layer}.")
     if set(media_keys(edl)) - set(allowed_keys):
         raise ValueError("Use media attached to this project. A referenced asset is not available here.")
+    for item in edl.get("motion") or []:
+        # A graphic behind the subject needs its measured subject mask, which
+        # only add_motion_graphic builds; asset params name project media.
+        if item.get("layer") == "behind_subject" and not item.get("behind"):
+            raise ValueError("A behind_subject motion graphic needs its subject mask; "
+                             "place it with add_motion_graphic(layer='behind_subject').")
+        try:
+            import motion_templates
+            refs = motion_templates.asset_params(item.get("template") or "", item.get("params") or {})
+        except Exception:
+            refs = {}
+        if set(refs.values()) - set(allowed_keys):
+            raise ValueError("Use media attached to this project. A referenced asset is not available here.")
     normalized = validate_edl(edl, duration).model_dump()
     if isinstance(allowed_keys, dict):
         for item in normalized.get("inserts") or []:
