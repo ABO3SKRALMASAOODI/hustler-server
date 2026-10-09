@@ -2375,6 +2375,10 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     #     what lets the mask be measured on the 540p proxy and still composite
     #     into a 4K export: scaling a MASK softens an edge, where scaling a
     #     cut-out subject would drop a blurry patch into a sharp frame.
+    #
+    # Motion graphics on layer='behind_subject' use the very same composite:
+    # their entry carries {"motion": (clip_input, item, clip)} instead of an
+    # ASS file, and the clip is overlaid on the copy where the words burn.
     for j, (idx, item, win) in enumerate(behind_inputs or []):
         b_start, b_end = win
         b_dur = max(0.05, b_end - b_start)
@@ -2396,13 +2400,21 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                          f":stop_mode=add:color=black")
         parts.append(f"[{idx}:v]{','.join(chain)}[bhm{j}]")
         parts.append(f"[{vlabel}]split[bhb{j}][bhf{j}]")
-        # The words, burned on a copy of the picture...
-        parts.append(f"[bhb{j}]subtitles=filename='{item['ass']}'"
-                     f":fontsdir='{caplib.FONTS_DIR}'[bht{j}]")
+        if item.get("motion"):
+            # A browser-rendered motion graphic (layer='behind_subject'),
+            # composited on a copy of the picture in its program window...
+            m_idx, m_item, m_clip = item["motion"]
+            bht = motion_layer.overlay_clip(parts, f"bhb{j}", m_idx, m_item,
+                                            m_clip, fps, f"mgs{j}")
+        else:
+            # The words, burned on a copy of the picture...
+            parts.append(f"[bhb{j}]subtitles=filename='{item['ass']}'"
+                         f":fontsdir='{caplib.FONTS_DIR}'[bht{j}]")
+            bht = f"bht{j}"
         # ...and the subject, lifted off the OTHER copy by the mask and laid
         # back over them.
         parts.append(f"[bhf{j}][bhm{j}]alphamerge[bhfa{j}]")
-        parts.append(f"[bht{j}][bhfa{j}]overlay=0:0:format=auto"
+        parts.append(f"[{bht}][bhfa{j}]overlay=0:0:format=auto"
                      f":eof_action=pass[vbh{j}]")
         vlabel = f"vbh{j}"
 
@@ -3286,6 +3298,8 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
         motion_inputs, next_idx = motion_layer.prepare_inputs(
             edl, workdir, W, H, fps, tl.out_duration, extra_inputs, next_idx,
             fetch_asset=lambda k: _fetch(k, "motion", next_idx))
+        motion_inputs = motion_layer.demote_behind(
+            motion_inputs, "a canvas program has no subject footage")
     graph = build_filtergraph(edl, tl.out_duration, False, tl, ass_path,
                               music_inputs, {}, preview,
                               W=W, H=H, fps=fps, frame_mode=None,
@@ -4028,6 +4042,40 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
             ass_path = caplib.build_ass(edl, index, tl,
                                         os.path.join(workdir, "captions.ass"),
                                         play_res=(W, H))
+        # ---- behind-subject motion graphics: one mask input per item -------
+        # The same contract as the behind texts above: the mask lands where
+        # its SOURCE span now plays, and anything that stops the composite
+        # from being exact DEGRADES the graphic to an ordinary above-captions
+        # layer instead of failing the render. A cut that now falls inside
+        # the window degrades too: the mask is one continuous clip, so past
+        # the cut it would cut the subject out of the wrong second of video.
+        for k, (m_idx, m_item, m_clip) in enumerate(motion_inputs):
+            if m_item.get("layer") != "behind_subject":
+                continue
+            b = m_item.get("behind") or {}
+            pieces = (tl.span_to_out(float(b["src_start"]),
+                                     float(b["src_end"])) if b else [])
+            why, local = None, None
+            if not b:
+                why = "it carries no subject mask"
+            elif not pieces:
+                why = "its footage is no longer in the edit"
+            elif len(pieces) > 1:
+                why = "a cut now falls inside its window"
+            else:
+                try:
+                    local = _fetch(b["asset_key"], "matte", next_idx)
+                except Exception as e:
+                    why = f"mask unavailable ({str(e)[:120]})"
+            if why:
+                motion_inputs[k] = (m_idx, motion_layer.demote(m_item, why),
+                                    m_clip)
+                continue
+            extra_inputs += ["-i", local]
+            behind_inputs.append((next_idx, {"motion": (m_idx, m_item, m_clip)},
+                                  (round(pieces[0][0], 3),
+                                   round(pieces[0][1], 3))))
+            next_idx += 1
     graph = build_filtergraph(edl, src_dur, info["has_audio"], tl, ass_path,
                               music_inputs, index, preview,
                               W=W, H=H, fps=fps, frame_mode=frame_mode,

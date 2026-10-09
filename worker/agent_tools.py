@@ -12843,6 +12843,187 @@ def _matte_geometry(ctx, edl):
                                      picture=fr.get("picture")), w, h
 
 
+# Wording for the shared measurement's refusals. The defaults are the text
+# tool's own (byte-identical to before the extraction); a motion graphic
+# placed behind the subject passes its own nouns and alternatives.
+_BEHIND_TEXT_WORDS = {
+    "clip_alt": "use add_text for a title over the clip",
+    "subject": "the words",
+    "span": "duration_s",
+    "claim": "the text was added",
+    "refuse_alt": ("add_text puts the same words on TOP of the picture, "
+                   "which always works — offer that and say plainly why the "
+                   "behind version will not."),
+}
+
+
+def _measure_subject_matte(ctx, edl, s, e, box, words=None):
+    """The subject mask for program window [s, e] — shared by add_text_behind
+    and add_motion_graphic(layer='behind_subject').
+
+    Enforces the one-continuous-shot rules (no spliced clip, no cut, no speed
+    ramp inside the window), then serves the mask from the content cache or
+    measures it (executor person model first, local photometric fallback),
+    refusing when the measurement says the effect cannot work. ``box`` is
+    (x, y, w, h) frame fractions of what will sit behind the subject — used
+    only to REPORT how much of it the subject crosses.
+
+    Returns (behind_dict, stats, None) on success, or (None, None, reply)
+    where reply is the complete message for the agent; nothing is written to
+    the EDL here either way.
+    """
+    w = dict(_BEHIND_TEXT_WORDS, **(words or {}))
+    # ── the window has to be ONE continuous piece of ONE shot ──────────────
+    tl = Timeline(edl["keep"], edl.get("inserts") or [], edl.get("speed") or [])
+    a_src = tl.out_to_src(s)
+    b_src = tl.out_to_src(max(s, e - 0.02))
+    if a_src is None or b_src is None:
+        return None, None, (
+            f"REJECTED: {s}-{e}s of the program is inside a spliced-in "
+            "clip, not the main footage — there is no shot there to cut a "
+            "subject out of. Point it at a moment where your own video is "
+            f"playing, or {w['clip_alt']}.")
+    ra, rb = tl.seg_program_range(a_src), tl.seg_program_range(b_src)
+    if ra is None or rb is None or abs(ra[0] - rb[0]) > 0.001:
+        return None, None, (
+            f"REJECTED: there is a CUT inside {s}-{e}s. The background has "
+            "to hold still for the whole window — I photograph it from the "
+            f"shot itself — so put {w['subject']} entirely inside one "
+            f"take, or shorten {w['span']}.")
+    for sp in (edl.get("speed") or []):
+        if float(sp["end"]) > a_src and float(sp["start"]) < b_src:
+            return None, None, (
+                f"REJECTED: a speed ramp ({sp.get('id')}) covers that "
+                "footage, and the mask I measure is frame-for-frame with "
+                "the source — sped or slowed, it would drift off the "
+                f"subject. Put {w['subject']} behind footage that plays at "
+                "normal speed, or remove the ramp there first.")
+    src_start, src_end = round(min(a_src, b_src), 2), round(max(a_src, b_src), 2)
+    if src_end - src_start < 0.2:
+        return None, None, ("REJECTED: under 0.2s of source footage is in "
+                            "that window.")
+
+    try:
+        fit, mw, mh = _matte_geometry(ctx, edl)
+    except Exception as err:
+        return None, None, (f"REJECTED: could not work out the output "
+                            f"geometry ({err}).")
+    # The planned METHOD rides the fingerprint (round 64): a mask built by
+    # the photometric fallback (executor down for an afternoon) must not
+    # permanently occupy the cache slot the person model would fill better.
+    seg_planned = (remote.matte_available() or personseg.rvm_available()
+                   or personseg.available())
+    fp = hashlib.sha256(json.dumps([
+        getattr(ctx, "_orig_sha", ""), src_start, src_end, fit, mw, mh,
+        matte.DIFF_THRESHOLD, matte.PLATE_SAMPLES, matte.VERSION,
+        "person" if seg_planned else "plate"],
+        sort_keys=True).encode()).hexdigest()
+    key = f"matte/{ctx.project_id}/{fp[:16]}.mp4"
+    stats = None
+    if storage.exists(key):
+        # Cached: the same window measured before (an undo/redo, a re-worded
+        # title over the same moment). The MASK is reusable — it depends only
+        # on the footage — but the text-box numbers are NOT: round 63 caught
+        # this path parroting "the subject crosses 11% of the text" measured
+        # for a size-2.0 title onto a re-added size-1.2 one, whose smaller box
+        # was in truth mostly behind the walker. So the box numbers are
+        # re-measured against the cached mask itself (a 540p gray decode,
+        # proxy-class work). If the mask cannot be read back, the reply says
+        # nothing about the box rather than the wrong thing.
+        prior = next((it.get("behind") for it in
+                      list(edl.get("texts") or [])
+                      + list(edl.get("motion") or [])
+                      if (it.get("behind") or {}).get("fp") == fp), None)
+        stats = {"ok": True, "coverage": (prior or {}).get("coverage"),
+                 "fps": (prior or {}).get("fps"),
+                 "method": (prior or {}).get("method")
+                 or ("person" if seg_planned else "plate"),
+                 "cached": True}
+        try:
+            mlocal = os.path.join(ctx.workdir, f"matte_c_{fp[:8]}.mp4")
+            storage.download_to(key, mlocal)
+            fresh = matte.box_stats(mlocal, box)
+            if fresh:
+                stats.update(fresh)
+        except Exception:
+            pass
+    else:
+        # The person model's forward passes run on the EXECUTOR (round 64) —
+        # model compute on the dispatcher is the round-60 objection that was
+        # right all along. Remote failure falls back to the photometric build
+        # WITHOUT the model (that is today's dispatcher-safe work, never the
+        # heavy path — the round-61b rule), and says so in the reply.
+        stats = None
+        fell_back = None
+        if remote.matte_available() and getattr(ctx, "db", None):
+            proxy_row = ctx.db.run(dbx.latest_asset, ctx.project_id, "proxy")
+            if proxy_row:
+                try:
+                    stats = remote.run_matte_remote(
+                        ctx.project_id,
+                        {"storage_key": proxy_row["storage_key"],
+                         "start": src_start, "dur": src_end - src_start,
+                         "box": list(box) if box else None,
+                         "extra_vf": fit, "width": mw, "height": mh,
+                         "out_key": key,
+                         "matte_version": matte.VERSION},
+                        user_id=ctx.job.get("user_id"))
+                except Exception as err:
+                    fell_back = str(err)[:160]
+                    stats = None
+                if (stats is not None and stats.get("ok")
+                        and stats.get("matte_version") != matte.VERSION):
+                    # A stale executor predating the version handshake built
+                    # a DIFFERENT mask and uploaded it under this version's
+                    # cache key. Served, it would pin the old defects under
+                    # the new fingerprint forever (the round-60 false-claim
+                    # class). Delete it and fall back honestly.
+                    try:
+                        storage.delete_keys([key])
+                    except Exception:
+                        pass
+                    fell_back = (f"executor built matte "
+                                 f"v{stats.get('matte_version')} but this "
+                                 f"code is v{matte.VERSION} — redeploy the "
+                                 "executor")
+                    stats = None
+        if stats is None:
+            try:
+                src = ctx.proxy_path()
+            except Exception:
+                try:
+                    src = _original_local(ctx)
+                except Exception as err:
+                    return None, None, (
+                        f"REJECTED: could not open the footage to "
+                        f"measure the subject ({str(err)[:140]}).")
+            out = os.path.join(ctx.workdir, f"matte_{fp[:8]}.mp4")
+            try:
+                stats = matte.measure_and_build(
+                    src, out, src_start, src_end - src_start,
+                    box=box, extra_vf=fit,
+                    width=mw, height=mh,
+                    allow_model=not remote.matte_available())
+            except Exception as err:
+                return None, None, (
+                    f"The subject measurement failed ({str(err)[:180]}). "
+                    f"Nothing was changed — do NOT claim {w['claim']}.")
+            if stats.get("ok"):
+                storage.upload_file(out, key, "video/mp4")
+        if not stats.get("ok"):
+            return None, None, (
+                f"REJECTED: {stats.get('why') or 'the subject could not be measured'}. "
+                f"Nothing was changed. {w['refuse_alt']}")
+        if fell_back:
+            stats["fell_back"] = fell_back
+
+    return ({"asset_key": key, "src_start": src_start,
+             "src_end": src_end, "fp": fp,
+             "coverage": stats.get("coverage"),
+             "fps": stats.get("fps"),
+             "method": stats.get("method")}, stats, None)
+
+
 def add_text_behind(ctx, text, at_output_s, duration_s=None, template="title",
                     x=None, y=None, size_scale=None, color=None,
                     accent_color=None, font=None, entrance=None, exit=None,
@@ -12887,32 +13068,6 @@ def add_text_behind(ctx, text, at_output_s, duration_s=None, template="title",
         return ("REJECTED: the window is under 0.4s — too short to read a "
                 "title, let alone walk in front of one.")
 
-    # ── the window has to be ONE continuous piece of ONE shot ──────────────
-    tl = Timeline(edl["keep"], edl.get("inserts") or [], edl.get("speed") or [])
-    a_src = tl.out_to_src(s)
-    b_src = tl.out_to_src(max(s, e - 0.02))
-    if a_src is None or b_src is None:
-        return (f"REJECTED: {s}-{e}s of the program is inside a spliced-in "
-                "clip, not the main footage — there is no shot there to cut a "
-                "subject out of. Point it at a moment where your own video is "
-                "playing, or use add_text for a title over the clip.")
-    ra, rb = tl.seg_program_range(a_src), tl.seg_program_range(b_src)
-    if ra is None or rb is None or abs(ra[0] - rb[0]) > 0.001:
-        return (f"REJECTED: there is a CUT inside {s}-{e}s. The background has "
-                "to hold still for the whole window — I photograph it from the "
-                "shot itself — so put the words entirely inside one take, or "
-                "shorten duration_s.")
-    for sp in (edl.get("speed") or []):
-        if float(sp["end"]) > a_src and float(sp["start"]) < b_src:
-            return (f"REJECTED: a speed ramp ({sp.get('id')}) covers that "
-                    "footage, and the mask I measure is frame-for-frame with "
-                    "the source — sped or slowed, it would drift off the "
-                    "subject. Put the words behind footage that plays at "
-                    "normal speed, or remove the ramp there first.")
-    src_start, src_end = round(min(a_src, b_src), 2), round(max(a_src, b_src), 2)
-    if src_end - src_start < 0.2:
-        return ("REJECTED: under 0.2s of source footage is in that window.")
-
     # ── measure the subject (or refuse, with the number that says why) ──────
     # BIG TYPE IS THE LOOK (round 63b). Behind-subject text reads as depth
     # only when the subject crosses the MIDDLE of tall glyphs — their tops
@@ -12935,122 +13090,11 @@ def add_text_behind(ctx, text, at_output_s, duration_s=None, template="title",
             "uppercase": bool(uppercase) if uppercase is not None else None,
             "box": bool(box) if box is not None else None,
             "mute_captions": True}
-    try:
-        fit, mw, mh = _matte_geometry(ctx, edl)
-    except Exception as err:
-        return f"REJECTED: could not work out the output geometry ({err})."
-    # The planned METHOD rides the fingerprint (round 64): a mask built by
-    # the photometric fallback (executor down for an afternoon) must not
-    # permanently occupy the cache slot the person model would fill better.
-    seg_planned = (remote.matte_available() or personseg.rvm_available()
-                   or personseg.available())
-    fp = hashlib.sha256(json.dumps([
-        getattr(ctx, "_orig_sha", ""), src_start, src_end, fit, mw, mh,
-        matte.DIFF_THRESHOLD, matte.PLATE_SAMPLES, matte.VERSION,
-        "person" if seg_planned else "plate"],
-        sort_keys=True).encode()).hexdigest()
-    key = f"matte/{ctx.project_id}/{fp[:16]}.mp4"
-    stats = None
-    if storage.exists(key):
-        # Cached: the same window measured before (an undo/redo, a re-worded
-        # title over the same moment). The MASK is reusable — it depends only
-        # on the footage — but the text-box numbers are NOT: round 63 caught
-        # this path parroting "the subject crosses 11% of the text" measured
-        # for a size-2.0 title onto a re-added size-1.2 one, whose smaller box
-        # was in truth mostly behind the walker. So the box numbers are
-        # re-measured against the cached mask itself (a 540p gray decode,
-        # proxy-class work). If the mask cannot be read back, the reply says
-        # nothing about the box rather than the wrong thing.
-        prior = next((tx.get("behind") for tx in texts
-                      if (tx.get("behind") or {}).get("fp") == fp), None)
-        stats = {"ok": True, "coverage": (prior or {}).get("coverage"),
-                 "fps": (prior or {}).get("fps"),
-                 "method": (prior or {}).get("method")
-                 or ("person" if seg_planned else "plate"),
-                 "cached": True}
-        try:
-            mlocal = os.path.join(ctx.workdir, f"matte_c_{fp[:8]}.mp4")
-            storage.download_to(key, mlocal)
-            fresh = matte.box_stats(mlocal, _behind_text_box(item))
-            if fresh:
-                stats.update(fresh)
-        except Exception:
-            pass
-    else:
-        # The person model's forward passes run on the EXECUTOR (round 64) —
-        # model compute on the dispatcher is the round-60 objection that was
-        # right all along. Remote failure falls back to the photometric build
-        # WITHOUT the model (that is today's dispatcher-safe work, never the
-        # heavy path — the round-61b rule), and says so in the reply.
-        stats = None
-        fell_back = None
-        if remote.matte_available() and getattr(ctx, "db", None):
-            proxy_row = ctx.db.run(dbx.latest_asset, ctx.project_id, "proxy")
-            if proxy_row:
-                try:
-                    stats = remote.run_matte_remote(
-                        ctx.project_id,
-                        {"storage_key": proxy_row["storage_key"],
-                         "start": src_start, "dur": src_end - src_start,
-                         "box": list(_behind_text_box(item)),
-                         "extra_vf": fit, "width": mw, "height": mh,
-                         "out_key": key,
-                         "matte_version": matte.VERSION},
-                        user_id=ctx.job.get("user_id"))
-                except Exception as err:
-                    fell_back = str(err)[:160]
-                    stats = None
-                if (stats is not None and stats.get("ok")
-                        and stats.get("matte_version") != matte.VERSION):
-                    # A stale executor predating the version handshake built
-                    # a DIFFERENT mask and uploaded it under this version's
-                    # cache key. Served, it would pin the old defects under
-                    # the new fingerprint forever (the round-60 false-claim
-                    # class). Delete it and fall back honestly.
-                    try:
-                        storage.delete_keys([key])
-                    except Exception:
-                        pass
-                    fell_back = (f"executor built matte "
-                                 f"v{stats.get('matte_version')} but this "
-                                 f"code is v{matte.VERSION} — redeploy the "
-                                 "executor")
-                    stats = None
-        if stats is None:
-            try:
-                src = ctx.proxy_path()
-            except Exception:
-                try:
-                    src = _original_local(ctx)
-                except Exception as err:
-                    return (f"REJECTED: could not open the footage to "
-                            f"measure the subject ({str(err)[:140]}).")
-            out = os.path.join(ctx.workdir, f"matte_{fp[:8]}.mp4")
-            try:
-                stats = matte.measure_and_build(
-                    src, out, src_start, src_end - src_start,
-                    box=_behind_text_box(item), extra_vf=fit,
-                    width=mw, height=mh,
-                    allow_model=not remote.matte_available())
-            except Exception as err:
-                return (f"The subject measurement failed ({str(err)[:180]}). "
-                        "Nothing was changed — do NOT claim the text was "
-                        "added.")
-            if stats.get("ok"):
-                storage.upload_file(out, key, "video/mp4")
-        if not stats.get("ok"):
-            return (f"REJECTED: {stats.get('why') or 'the subject could not be measured'}. "
-                    "Nothing was changed. add_text puts the same words on TOP "
-                    "of the picture, which always works — offer that and say "
-                    "plainly why the behind version will not.")
-        if fell_back:
-            stats["fell_back"] = fell_back
-
-    item["behind"] = {"asset_key": key, "src_start": src_start,
-                      "src_end": src_end, "fp": fp,
-                      "coverage": stats.get("coverage"),
-                      "fps": stats.get("fps"),
-                      "method": stats.get("method")}
+    behind, stats, err = _measure_subject_matte(
+        ctx, edl, s, e, _behind_text_box(item))
+    if err:
+        return err
+    item["behind"] = behind
     texts.append(item)
     edl["texts"] = texts
     muted_note = ""
@@ -13525,20 +13569,40 @@ def add_color_screen(ctx, at_output_s, duration_s=2.0, color="#000000",
 # in the frame without touching a single timestamp. That is what makes them
 # safe to apply to a finished edit and instant to preview.
 
+# Designed-backdrop defaults when only a style is named: a lifted tone into
+# near-black, never the flat #101012 void the style exists to replace.
+PICTURE_CARD_STYLE_COLORS = {
+    "vertical_gradient": ("#2C303B", "#0A0A0C"),
+    "radial_gradient": ("#363B48", "#09090B"),
+}
+
+
 def set_picture_card(ctx, id, start, end, box=None, fit="crop", radius=.045,
-                     border=.001, border_color="#444444", background="#101012",
+                     border=.001, border_color="#444444", background=None,
                      shadow=.35, entrance="lift", exit="fade", duration_s=.45,
-                     motion_motif=None):
+                     motion_motif=None, background_style=None,
+                     background_color2=None, background_dim=None, grain=None,
+                     vignette=None):
     """Create/replace one native footage-only composition in one revision."""
     motion_motif, error = _motion_motif_value(ctx, motion_motif)
     if error:
         return error
+    style = (str(background_style).strip().lower() or None
+             if background_style is not None else None)
+    pair = PICTURE_CARD_STYLE_COLORS.get(style)
+    if background is None:
+        background = pair[0] if pair else "#101012"
+    if background_color2 is None and pair and background == pair[0]:
+        background_color2 = pair[1]
     try:
         row = PictureCard.model_validate(dict(
             id=id,start=start,end=end,box=box or [.06,.24,.94,.74],fit=fit,
             radius=radius,border=border,border_color=border_color,
             background=background,shadow=shadow,entrance=entrance,exit=exit,
-            duration_s=duration_s,motion_motif=motion_motif)).model_dump()
+            duration_s=duration_s,motion_motif=motion_motif,
+            background_style=style,background_color2=background_color2,
+            background_dim=background_dim,grain=grain,
+            vignette=vignette)).model_dump()
         if row["end"]-row["start"] < .5:
             raise ValueError("Allow at least 0.5 seconds for a footage card")
     except (ValueError,TypeError) as exc:
@@ -13547,7 +13611,20 @@ def set_picture_card(ctx, id, start, end, box=None, fit="crop", radius=.045,
     fx = edl.setdefault("effects", None) or {}
     fx["picture_cards"] = [c for c in fx.get("picture_cards") or [] if c["id"]!=id] + [row]
     edl["effects"] = fx
-    return ctx.write_edl(edl, f"footage card {id} on {start}-{end}s; typography remains outside the picture treatment")
+    look = ""
+    if row.get("background_style") or row.get("grain") or row.get("vignette"):
+        look = "; backdrop " + " + ".join(
+            [row.get("background_style") or f"solid {row['background']}"]
+            + (["grain"] if row.get("grain") else [])
+            + (["vignette"] if row.get("vignette") else []))
+    res = ctx.write_edl(edl, f"footage card {id} on {start}-{end}s{look}; typography remains outside the picture treatment")
+    if (isinstance(res, str) and res.startswith("EDL v")
+            and not look and row["background"] in ("#101012", "#000000")):
+        res += ("\nNOTE: the canvas around this card is a flat dark void. "
+                "background_style='blur' (the footage itself, blurred and "
+                "darkened, filling the frame) or a vertical/radial gradient, "
+                "with grain ~.25 and vignette ~.4, is the premium finish.")
+    return res
 
 
 def remove_picture_card(ctx, id):
@@ -23452,7 +23529,15 @@ TOOLS = {
         "Source is frame.picture if present, otherwise the whole composed program. Set frame.picture "
         "first to preserve a wide original inside portrait; this cannot recover pixels already cropped away. "
         "Use fit=pad to retain that whole source, crop to fill. Windows must not overlap. Inspect entry, "
-        "settle, exit and the speaker framing. Rounded cards are one purposeful format, not a quota.",
+        "settle, exit and the speaker framing. Rounded cards are one purposeful format, not a quota. "
+        "BACKDROP — the canvas around the card: a flat `background` colour leaves a dead void "
+        "(the default, kept for old edits). Prefer a designed backdrop: background_style='blur' "
+        "fills the frame with the card's own footage blurred and darkened (the premium podcast "
+        "look; background_dim 0-.9, default .45), 'radial_gradient' glows from `background` behind "
+        "the card out to background_color2, 'vertical_gradient' runs `background` (top) to "
+        "background_color2 (bottom); naming only the style picks a tasteful dark palette. "
+        "grain 0-1 adds animated film grain (~.25 subtle, .4 visible) and vignette 0-1 darkens "
+        "the edges (~.4) — both on the backdrop only, never on the footage.",
         {"id":{"type":"string"},"start":{"type":"number"},"end":{"type":"number"},
          "box":{"type":"array","items":{"type":"number"},"minItems":4,"maxItems":4},
          "fit":{"type":"string","enum":["crop","pad"]},"radius":{"type":"number"},
@@ -23460,7 +23545,12 @@ TOOLS = {
          "background":{"type":"string"},"shadow":{"type":"number"},
          "entrance":{"type":"string","enum":["none","fade","lift","reveal"]},
          "exit":{"type":"string","enum":["none","fade","lift","reveal"]},
-         "duration_s":{"type":"number"},"motion_motif":{"type":"string"}}),
+         "duration_s":{"type":"number"},"motion_motif":{"type":"string"},
+         "background_style":{"type":"string",
+                             "enum":["solid","vertical_gradient","radial_gradient","blur"]},
+         "background_color2":{"type":"string"},
+         "background_dim":{"type":"number"},
+         "grain":{"type":"number"},"vignette":{"type":"number"}}),
     "remove_picture_card": (remove_picture_card,"Remove a footage card by id.",{"id":{"type":"string"}}),
     "set_editorial_graphic": (
         set_editorial_graphic,

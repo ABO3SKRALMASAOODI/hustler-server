@@ -7,6 +7,13 @@ stays on top), ``above_captions`` after the text-graphics burn (a designed
 moment wins). Both sit under the frame-shift bars, the floating plate, the
 native watermark and the end card, so branding is never covered.
 
+``behind_subject`` items are not composited by ``append_graph`` at all: the
+renderer hands them to the behind-subject stage (the same split/alphamerge
+composite add_text_behind's words use, before the zoom stage), which draws
+the clip on the picture with ``overlay_clip`` and lays the measured subject
+back over it. One whose mask cannot be used is ``demote``d to an ordinary
+above-captions graphic with a logged warning.
+
 Failure policy: a motion item that cannot render degrades to "absent" with
 a logged reason recorded on ``LAST_WARNINGS`` rather than failing the whole
 render — the user still gets the edit, and the write tool already proved the
@@ -80,24 +87,50 @@ def prepare_inputs(edl, workdir, W, H, fps, out_duration, args, next_idx,
     return inputs, next_idx
 
 
+def overlay_clip(parts, vlabel, idx, item, clip, fps, tag):
+    """Overlay one rendered clip on [vlabel] inside its program window;
+    returns the new label."""
+    s, e = float(item["start"]), float(item["end"])
+    # Hold the clip's last frame for a couple of frames: framesync can
+    # quantize a fractional program clock a frame past the clip's EOF.
+    parts.append(f"[{idx}:v]setpts=PTS-STARTPTS,format=rgba,"
+                 f"tpad=stop_mode=clone:stop_duration={2.0 / max(fps, 1):.4f},"
+                 f"setpts=PTS+{s:.4f}/TB[{tag}c]")
+    parts.append(f"[{vlabel}][{tag}c]overlay=x={clip.x}:y={clip.y}:eof_action=pass"
+                 f":format=auto:enable='gte(t,{s:.4f})*lt(t,{e:.4f})'[{tag}o]")
+    return f"{tag}o"
+
+
 def append_graph(parts, vlabel, inputs, layer, fps):
     """Composite this layer's clips over [vlabel]; returns the new label."""
     j = 0
     for idx, item, clip in inputs or []:
         if (item.get("layer") or "above_captions") != layer:
             continue
-        s, e = float(item["start"]), float(item["end"])
-        tag = f"mg{layer[0]}{j}"
-        # Hold the clip's last frame for a couple of frames: framesync can
-        # quantize a fractional program clock a frame past the clip's EOF.
-        parts.append(f"[{idx}:v]setpts=PTS-STARTPTS,format=rgba,"
-                     f"tpad=stop_mode=clone:stop_duration={2.0 / max(fps, 1):.4f},"
-                     f"setpts=PTS+{s:.4f}/TB[{tag}c]")
-        parts.append(f"[{vlabel}][{tag}c]overlay=x={clip.x}:y={clip.y}:eof_action=pass"
-                     f":format=auto:enable='gte(t,{s:.4f})*lt(t,{e:.4f})'[{tag}o]")
-        vlabel = f"{tag}o"
+        vlabel = overlay_clip(parts, vlabel, idx, item, clip, fps,
+                              f"mg{layer[0]}{j}")
         j += 1
     return vlabel
+
+
+def demote(item, why):
+    """A behind_subject item drawn as an ordinary above-captions graphic.
+
+    The words-behind contract, applied to graphics: losing the depth is a
+    disappointment, losing the graphic (or the render) is a broken product."""
+    msg = (f"motion '{item.get('id')}' rendered above the picture instead of "
+           f"behind the subject: {why}")
+    print(f"[render] {msg}", flush=True)
+    LAST_WARNINGS.append(msg)
+    return dict(item, layer="above_captions", behind=None)
+
+
+def demote_behind(inputs, why):
+    """``inputs`` with every behind_subject item demoted (a render path
+    that has no behind-subject stage, e.g. a canvas program)."""
+    return [(idx, demote(item, why), clip)
+            if item.get("layer") == "behind_subject" else (idx, item, clip)
+            for idx, item, clip in inputs or []]
 
 
 def caption_mute_spans(edl):

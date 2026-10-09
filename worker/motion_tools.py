@@ -29,6 +29,19 @@ import storage
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
 KIT_PREFIX = "kit:"
 DEFAULT_KIT_GAIN_DB = -3.0
+LAYERS = ("above_captions", "below_captions", "behind_subject")
+BEHIND_MIN_S = 0.4
+# The shared subject measurement's refusals, worded for a graphic
+# (agent_tools._measure_subject_matte; its defaults speak about words).
+_BEHIND_WORDS = {
+    "clip_alt": "place the graphic on layer='above_captions' over the clip",
+    "subject": "the graphic",
+    "span": "its start/end window",
+    "claim": "the motion graphic was added",
+    "refuse_alt": ("The same graphic on layer='above_captions' (or "
+                   "'below_captions') always works — offer that and say "
+                   "plainly why the behind version will not."),
+}
 
 
 def _at():
@@ -219,23 +232,134 @@ def _probe_item(item, W, H, fps=30.0):
         return None
 
 
-def _validate_and_probe(ctx, edl, item):
+def _probe_report(ctx, edl, item):
+    """(error, where-note, drawn bbox (x0, y0, x1, y1) fractions or None)."""
     W, H = _canvas_size(ctx, edl)
     rep = _probe_item(item, W, H)
     if rep is None:
-        return None, "\nNOTE: the composition could not be pre-checked here; render a preview to inspect it."
+        return None, "\nNOTE: the composition could not be pre-checked here; render a preview to inspect it.", None
     if rep["errors"]:
         return (f"REJECTED: the composition raised a script error: {rep['errors'][0]}. "
-                "Fix the HTML/params and try again."), ""
+                "Fix the HTML/params and try again."), "", None
     if rep["visible_frames"] == 0:
         return ("REJECTED: the composition drew nothing visible at any sampled moment "
-                "(check text/params, colors with zero alpha, or elements positioned off-frame)."), ""
+                "(check text/params, colors with zero alpha, or elements positioned off-frame)."), "", None
     bb = rep["bboxes"]
     if bb:
         x0 = min(b[0] for b in bb); y0 = min(b[1] for b in bb)
         x1 = max(b[2] for b in bb); y1 = max(b[3] for b in bb)
-        return None, f"\nDraws within x {x0:.2f}-{x1:.2f}, y {y0:.2f}-{y1:.2f} of the frame."
-    return None, ""
+        return None, f"\nDraws within x {x0:.2f}-{x1:.2f}, y {y0:.2f}-{y1:.2f} of the frame.", (x0, y0, x1, y1)
+    return None, "", None
+
+
+def _validate_and_probe(ctx, edl, item):
+    err, where, _bbox = _probe_report(ctx, edl, item)
+    return err, where
+
+
+# ── behind the subject ────────────────────────────────────────────────────
+
+def _matte_box(item, bbox):
+    """(x, y, w, h) fractions the subject-coverage numbers are measured on:
+    what the probe saw the composition draw, else the item's capture hint."""
+    r = bbox or item.get("box")
+    if not r:
+        return None
+    x0, y0, x1, y1 = [min(max(float(v), 0.0), 1.0) for v in r]
+    if x1 - x0 < 0.01 or y1 - y0 < 0.01:
+        return None
+    return (x0, y0, x1 - x0, y1 - y0)
+
+
+def _overlaps(items, s, e):
+    return [it for it in items or []
+            if float(it.get("start") or 0) < e and float(it.get("end") or 0) > s]
+
+
+def _behind_report(stats, edl, item):
+    """What the measurement found, in the add_text_behind voice."""
+    bits = []
+    if stats.get("cached"):
+        bits.append("The subject mask for that exact moment was already "
+                    "measured, so this cost nothing to add.")
+    else:
+        cov = float(stats.get("coverage") or 0.0)
+        how = ("matted frame by frame by the person-matting model"
+               if stats.get("engine") == "rvm" else
+               "found frame by frame by the person-segmentation model"
+               if stats.get("method") == "person" else
+               "from a background photographed out of the shot itself")
+        bits.append(
+            f"MEASURED on the footage: the subject covers {cov * 100:.1f}% of "
+            f"the frame on average across the window (peaking at "
+            f"{float(stats.get('coverage_max') or 0) * 100:.1f}%), {how}. The "
+            "graphic is drawn INTO the shot and the subject is laid back over "
+            "it, so they pass in FRONT of it.")
+        if stats.get("fell_back"):
+            bits.append(
+                "NOTE: the person model was unreachable, so this mask came "
+                "from the photometric fallback — it needs a still camera and "
+                "can miss a dark subject on a dark background. If the render "
+                "shows the graphic over the subject, set_motion_graphic it "
+                "again once the model is back.")
+    tc, tw = stats.get("text_covered"), stats.get("text_width_covered")
+    if tc is not None and tc < 0.02:
+        bits.append(
+            f"WARNING: the subject crosses only {tc * 100:.1f}% of where the "
+            "graphic draws, so on screen it will read as an ordinary overlay. "
+            "Tell the user, and move it (params/box) to where the subject "
+            "actually is, or shift the window to when they cross it.")
+    elif tw is not None and tw >= 0.45:
+        bits.append(
+            f"LEGIBILITY: at its peak the subject covers {tw * 100:.0f}% of "
+            "the graphic's WIDTH. Right for a giant hero word the speaker "
+            "stands in front of (the eye completes tall letters); wrong for "
+            "copy that must be read in full. The craft fix is BIGGER type, "
+            "never smaller.")
+    elif tw is not None:
+        bits.append(
+            f"The subject crosses {tw * 100:.0f}% of the graphic's width at "
+            f"most ({(tc or 0) * 100:.0f}% of its area), so the depth reads "
+            "and the graphic stays legible.")
+    s, e = float(item["start"]), float(item["end"])
+    fx = edl.get("effects") or {}
+    if _overlaps(fx.get("picture_cards"), s, e):
+        bits.append(
+            "A footage card is active over this window: the graphic is part "
+            "of the PICTURE now, so it is framed inside the card with the "
+            "footage (anything drawn outside frame.picture is cropped away). "
+            "Design it for the picture area.")
+    if _overlaps(fx.get("zooms"), s, e):
+        bits.append("A zoom overlaps this window: the graphic lives in the "
+                    "scene, so it scales with the picture.")
+    bits.append(
+        "It is bound to that FOOTAGE: a later cut moves it with the shot and "
+        "removes it if the footage is cut away. No speed ramp over it (the "
+        "mask is frame-for-frame with the source). If the mask ever cannot be "
+        "used (a cut lands inside the window, the mask asset is missing) it "
+        "renders as an ordinary above-captions graphic and the render notes "
+        "say so. NEXT: render_preview and check that the subject's edge reads "
+        "cleanly in front of it.")
+    return "\n" + "\n".join(bits)
+
+
+def _attach_subject_matte(ctx, edl, item, bbox):
+    """Measure (or reuse) the subject mask for a behind_subject item and
+    store it on item['behind']. Returns (report, error_reply)."""
+    if not getattr(ctx, "has_main_video", True):
+        return None, ("REJECTED: layer='behind_subject' puts the graphic "
+                      "behind the SUBJECT of a shot, and there is no main "
+                      "video to find a subject in. Use layer='above_captions'.")
+    s, e = float(item["start"]), float(item["end"])
+    if e - s < BEHIND_MIN_S:
+        return None, (f"REJECTED: the window is under {BEHIND_MIN_S}s — too "
+                      "short for anyone to pass in front of a graphic.")
+    behind, stats, err = _at()._measure_subject_matte(
+        ctx, edl, s, e, _matte_box(item, bbox), words=_BEHIND_WORDS)
+    if err:
+        return None, err
+    item["behind"] = behind
+    return _behind_report(stats, edl, item), None
 
 
 def add_motion_graphic(ctx, template, start, end=None, params=None, html=None,
@@ -278,8 +402,11 @@ def add_motion_graphic(ctx, template, start, end=None, params=None, html=None,
         mid = str(id)
     else:
         mid = at._next_item_id(items, "mg")
+    layer = layer or spec.get("layer") or "above_captions"
+    if layer not in LAYERS:
+        return f"REJECTED: layer must be one of {', '.join(LAYERS)}."
     item = {"id": mid, "template": template, "start": s, "end": e, "params": clean,
-            "layer": layer or spec.get("layer") or "above_captions"}
+            "layer": layer}
     if template == "html":
         item["html"] = html
     if box is not None:
@@ -288,9 +415,14 @@ def add_motion_graphic(ctx, template, start, end=None, params=None, html=None,
         item["mute_captions"] = bool(mute_captions)
     if purpose:
         item["purpose"] = " ".join(str(purpose).split())[:300]
-    err, where = _validate_and_probe(ctx, edl, item)
+    err, where, bbox = _probe_report(ctx, edl, item)
     if err:
         return err
+    behind_note = ""
+    if layer == "behind_subject":
+        behind_note, err = _attach_subject_matte(ctx, edl, item, bbox)
+        if err:
+            return err
     items.append(item)
     edl["motion"] = items
     notes = []
@@ -301,10 +433,12 @@ def add_motion_graphic(ctx, template, start, end=None, params=None, html=None,
     if abs(req[0] - s) > 0.05 or abs(req[1] - e) > 0.05:
         clamp = f"\nCLAMPED: requested {req[0]:g}-{req[1]:g}s into this {prog:g}s program; placed at {s}-{e}s."
     sound = (f"; sound cues: {', '.join(f'{k}@{t:g}s' for t, k, _g in cues)}" if cues else "")
-    res = ctx.write_edl(edl, f"motion graphic {template} at {s}-{e}s [{mid}]{sound}")
+    depth = " BEHIND the subject" if layer == "behind_subject" else ""
+    res = ctx.write_edl(edl, f"motion graphic {template}{depth} at {s}-{e}s [{mid}]{sound}")
     if res.startswith("REJECTED"):
         return res
-    return res + where + clamp + (f"\nNOTE: {'; '.join(notes)}" if notes else "")
+    return (res + where + clamp + (f"\nNOTE: {'; '.join(notes)}" if notes else "")
+            + behind_note)
 
 
 def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
@@ -318,6 +452,9 @@ def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
         have = ", ".join(m.get("id", "?") for m in items) or "none"
         return f"REJECTED: no motion graphic '{id}'. Existing: {have}."
     old_start = float(hit["start"])
+    old_shape = json.dumps([hit.get(k) for k in
+                            ("start", "end", "template", "params", "html", "box", "layer")],
+                           sort_keys=True)
     if template is not None:
         try:
             motion_templates.spec(template)
@@ -348,6 +485,8 @@ def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
     if hit["end"] <= hit["start"] + 0.2:
         hit["end"] = round(min(prog, hit["start"] + 0.2), 3)
     if layer is not None:
+        if layer not in LAYERS:
+            return f"REJECTED: layer must be one of {', '.join(LAYERS)}."
         hit["layer"] = layer
     if box is not None:
         hit["box"] = box or None
@@ -357,9 +496,23 @@ def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
         hit["purpose"] = " ".join(str(purpose).split())[:300] or None
     if hit["template"] != "html":
         hit.pop("html", None)
-    err, where = _validate_and_probe(ctx, edl, hit)
+    err, where, bbox = _probe_report(ctx, edl, hit)
     if err:
         return err
+    behind_note = ""
+    if hit.get("layer") == "behind_subject":
+        shape = json.dumps([hit.get(k) for k in
+                            ("start", "end", "template", "params", "html", "box", "layer")],
+                           sort_keys=True)
+        if not hit.get("behind") or shape != old_shape:
+            # A new window needs a new mask (it is pixels of that footage);
+            # a new design re-measures how much of it the subject crosses
+            # (a cache hit when the window is unchanged).
+            behind_note, err = _attach_subject_matte(ctx, edl, hit, bbox)
+            if err:
+                return err
+    else:
+        hit.pop("behind", None)
     edl["motion"] = items
     owned = [s for s in (edl.get("sfx") or []) if str(s.get("id", "")).startswith(_owned_sfx_prefix(id))]
     notes = []
@@ -376,7 +529,8 @@ def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
     res = ctx.write_edl(edl, f"updated motion graphic {id} ({hit['template']}) at {hit['start']}-{hit['end']}s")
     if res.startswith("REJECTED"):
         return res
-    return res + where + (f"\nNOTE: {'; '.join(notes)}" if notes else "")
+    return (res + where + (f"\nNOTE: {'; '.join(notes)}" if notes else "")
+            + (behind_note or ""))
 
 
 def remove_motion_graphic(ctx, id):
@@ -410,12 +564,19 @@ TOOL_SPECS = {
         "(sfx=false to place it silently). start/end are program seconds; end defaults to the "
         "template's natural duration. Cue it to the exact word/beat it amplifies (use word "
         "times from get_kept_transcript). layer='above_captions' (default for designed moments) "
-        "or 'below_captions'. Templates that replace the spoken words set mute_captions; pass "
+        "or 'below_captions'. layer='behind_subject' is the premium depth signature: the "
+        "graphic (a giant hero word, a number, a shape) is drawn INTO the shot and the "
+        "speaker stays in FRONT of it — the person is measured out of the footage like "
+        "add_text_behind (same rules: one continuous take, no speed ramp, >=0.4s; refused "
+        "with the measured reason when there is no clear subject), and the reply reports how "
+        "much of the graphic the subject crosses. Use it for 1-2 hero moments per short, with "
+        "BIG type placed where the speaker's head/shoulders cross it. Templates that replace "
+        "the spoken words set mute_captions; pass "
         "mute_captions explicitly to override. template='html' takes your own HTML/CSS/JS on the "
         "MG runtime in `html`. The write is rejected if the composition errors or draws nothing.",
         {"template": _TEMPLATE_PARAM, "start": {"type": "number"}, "end": {"type": "number"},
          "params": _PARAMS_PARAM, "html": {"type": "string"},
-         "layer": {"type": "string", "enum": ["above_captions", "below_captions"]},
+         "layer": {"type": "string", "enum": list(LAYERS)},
          "box": {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4,
                  "description": "Optional capture region hint [x0,y0,x1,y1] frame fractions."},
          "mute_captions": {"type": "boolean"}, "sfx": {"type": "boolean"},
@@ -424,10 +585,12 @@ TOOL_SPECS = {
         set_motion_graphic,
         "Patch an existing motion graphic by id — window, params (merged into the current ones), "
         "template, layer, html or caption muting. Its owned sound cues move with it; sfx=true "
-        "re-derives them, sfx=false removes them. Modify instead of removing and re-adding.",
+        "re-derives them, sfx=false removes them. A behind_subject graphic whose window "
+        "changes is re-measured against its new footage. Modify instead of removing and "
+        "re-adding.",
         {"id": {"type": "string"}, "start": {"type": "number"}, "end": {"type": "number"},
          "params": _PARAMS_PARAM, "html": {"type": "string"}, "template": {"type": "string"},
-         "layer": {"type": "string", "enum": ["above_captions", "below_captions"]},
+         "layer": {"type": "string", "enum": list(LAYERS)},
          "box": {"type": "array", "items": {"type": "number"}},
          "mute_captions": {"type": "boolean"}, "sfx": {"type": "boolean"},
          "purpose": {"type": "string"}}),

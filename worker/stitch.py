@@ -81,6 +81,15 @@ def _strip(edl):
     return _canon(e), changeable
 
 
+def _behind_motion(edl):
+    """A behind-subject motion graphic composites a source-timed mask that is
+    one continuous clip from its own frame 0 — a piece starting mid-window
+    would pair the wrong mask frames with the picture, exactly as a behind
+    text would, so both force a full render."""
+    return any(m.get("layer") == "behind_subject"
+               for m in (edl.get("motion") or []))
+
+
 def _item_windows(edl, tl, duration):
     """[(a, b, kind)] output spans of every changeable item in this EDL."""
     out = []
@@ -145,6 +154,8 @@ def plan(prev_edl, new_edl, tl_prev, tl_new, duration, out_duration):
     if any(t.get("behind") for t in (new_edl.get("texts") or [])) or \
             any(t.get("behind") for t in (prev_edl.get("texts") or [])):
         return None, "behind-subject text present"
+    if _behind_motion(new_edl) or _behind_motion(prev_edl):
+        return None, "behind-subject motion graphic present"
     if any(o.get("screen") for o in (new_edl.get("overlays") or [])) or \
             any(o.get("screen") for o in (prev_edl.get("overlays") or [])):
         return None, "screen takeover present"
@@ -1131,6 +1142,8 @@ def plan_timeline(prev_edl, new_edl, tl_prev, tl_new, out_duration,
     if any(t.get("behind") for t in (new_edl.get("texts") or [])) or \
             any(t.get("behind") for t in (prev_edl.get("texts") or [])):
         return None, None, "behind-subject text present"
+    if _behind_motion(new_edl) or _behind_motion(prev_edl):
+        return None, None, "behind-subject motion graphic present"
     if any(o.get("screen") for o in (new_edl.get("overlays") or [])) or \
             any(o.get("screen") for o in (prev_edl.get("overlays") or [])):
         return None, None, "screen takeover present"
