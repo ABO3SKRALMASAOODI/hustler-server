@@ -760,9 +760,11 @@ def _append_designed(parts, vlabel, p, idx, spec, W, H, fps, source_rect):
 # (layout_filter), its value naming the RUN: the contiguous stretch of
 # blocks one card branch draws over.
 LAYOUT_TAG_KEY = "valmera_card"
-# How far a card branch looks past its window for its run's frames. The
-# blocks land on the program clock up to a frame or two away from the
-# Timeline's exact one; the tag, not the clock, decides.
+# How far a card branch looks past its run's Timeline span for the run's
+# frames. The blocks land on the program clock up to a frame or two away
+# from the Timeline's exact one; the tag, not the clock, decides. It also
+# bounds how many program frames ever wait on the branch (MEMORY in
+# _append_source_fed).
 SOURCE_CARD_REACH_S = .25
 
 
@@ -781,7 +783,7 @@ def _ye_abs(y, h, H, ent, ext, origin, edge, full):
     return ye
 
 
-def _append_source_fed(parts, vlabel, p, idx, spec, W, H, fps, tags):
+def _append_source_fed(parts, vlabel, p, idx, spec, W, H, fps, runs):
     """A source-fed card (one panel or a stack). layout_filter already put
     every panel's source rect on its box of the program picture; this cuts
     each box back out of the finished program (camera and grade included)
@@ -793,16 +795,27 @@ def _append_source_fed(parts, vlabel, p, idx, spec, W, H, fps, tags):
     and the last one, wherever the blocks really landed on the frame grid,
     and never a frame of an ordinary block (a cut's neighbour, or a spliced
     insert inside the window, which plays full-frame). After its run the
-    branch ends and the program passes through (eof_action=pass)."""
+    branch ends and the program passes through (eof_action=pass).
+
+    runs: [(tag, program start, program end)] from build_filtergraph.
+
+    MEMORY: overlay's framesync releases no program frame until it knows
+    the card branch's NEXT timestamp, and a branch cut from the program
+    cannot produce its first frame until the program reaches the run. Two
+    lead frames placed just before the run's trim window (tpad, re-timed)
+    answer that at once, so the program flows freely up to the run and at
+    most ~SOURCE_CARD_REACH_S of frames ever wait. With the lead frames at
+    zero instead, every frame before the run queued in RAM: a card at 30 s
+    of a 1080x1920 final peaked at 5.1 GB against 0.6 GB for a program
+    card. Grained plates loop per run for the same reason — a split of one
+    moving plate would park every frame one run consumes in the next run's
+    queue."""
     start, end = float(spec["start"]), float(spec["end"])
     length = end-start
     phase = float(spec.get("phase_s") or 0)
     full = float(spec.get("full_duration_s") or length)
     edge = min(float(spec.get("duration_s", .45)), full*.3)
     origin = start - phase             # the full card's start, program clock
-    a = max(0.0, start - SOURCE_CARD_REACH_S)
-    b = end + SOURCE_CARD_REACH_S
-    span = b - a
     wins = [pixels(W, H, box) for box in card_boxes(spec)]
     n = len(wins)
     blur = spec.get("background_style") == "blur"
@@ -823,14 +836,22 @@ def _append_source_fed(parts, vlabel, p, idx, spec, W, H, fps, tags):
     if fades and shift:
         fades = (f",setpts=PTS+{shift:.6f}/TB{fades}"
                  f",setpts=PTS-{shift:.6f}/TB")
-    runs = len(tags)
+    # Each run's trim window on the program clock: its blocks' Timeline
+    # span, reached a little either side (the tag, not the clock, decides
+    # which frames belong to it).
+    # A bare tag (no span) reaches over the whole authored window.
+    runs = [(run, start, end) if isinstance(run, str) else tuple(run)
+            for run in runs]
+    spans = [(max(0.0, float(t0) - SOURCE_CARD_REACH_S),
+              float(t1) + SOURCE_CARD_REACH_S) for _tag, t0, t1 in runs]
+    nruns = len(runs)
     # The card's stills, once per run: the plate (and the static backdrop's
     # clean fill, or the blur's decor mask). A single still is held over
-    # every frame (eof repeat); a grained plate is a window-long loop placed
+    # every frame (eof repeat); a grained plate is a run-long loop placed
     # on the program clock so its noise moves.
     def stills(label, chain):
-        outs = [f"{p}{label}{r}" for r in range(runs)]
-        parts.append(f"{chain}" + (f",split={runs}" if runs > 1 else "")
+        outs = [f"{p}{label}{r}" for r in range(nruns)]
+        parts.append(f"{chain}" + (f",split={nruns}" if nruns > 1 else "")
                      + "".join(f"[{o}]" for o in outs))
         return outs
     if blur:
@@ -839,13 +860,21 @@ def _append_source_fed(parts, vlabel, p, idx, spec, W, H, fps, tags):
     elif styled:
         parts.append(f"[{idx}:v]format=rgba,split[{p}plate0][{p}under0]")
         unders = stills("under", f"[{p}under0]format=yuv420p,setpts=PTS-STARTPTS")
-        plates = stills("plate", f"[{p}plate0]" + (
-            f"format=yuva444p,{_still(span, fps)},{grain}setpts=PTS+{a:.6f}/TB"
-            if grain else "setpts=PTS-STARTPTS"))
+        if grain:
+            # ONE decoded frame split (cheap), then each run loops its own.
+            plates = stills("still", f"[{p}plate0]format=yuva444p")
+            for r, (a, b) in enumerate(spans):
+                parts.append(f"[{plates[r]}]{_still(b - a, fps)},{grain}"
+                             f"setpts=PTS+{a:.6f}/TB[{p}plate{r}g]")
+            plates = [f"{p}plate{r}g" for r in range(nruns)]
+        else:
+            plates = stills("plate", f"[{p}plate0]setpts=PTS-STARTPTS")
     else:
         plates = stills("plate", f"[{idx}:v]setpts=PTS-STARTPTS,format=rgba")
     color = spec.get("background", "#101012").replace("#", "0x")
-    for r, tag in enumerate(tags):
+    for r, run in enumerate(runs):
+        tag = run[0]
+        a, b = spans[r]
         q = f"{p}r{r}"
         outs = [f"{q}s{k}" for k in range(n)] + [f"{q}b"]
         parts.append(f"[{vlabel}]split[{q}pass][{q}src]")
@@ -878,14 +907,22 @@ def _append_source_fed(parts, vlabel, p, idx, spec, W, H, fps, tags):
             parts.append(f"[{q}bgtop][{masks[r]}]alphamerge[{q}clip]")
             parts.append(f"[{base}][{q}clip]overlay=0:0:format=auto[{q}framed]")
             base = f"{q}framed"
-        # tpad's two lead frames (re-timed to just before zero) tell the
-        # overlay where this branch starts, so the program flows until the
-        # run's first frame instead of queueing in RAM (append_graph's
-        # MEMORY note); the run's own frames keep their exact timestamps.
+        # tpad's two transparent lead frames are re-timed to the two frame
+        # slots just before the trim window (MEMORY above); the run's own
+        # frames get their exact timestamps back.
+        lead = (f"if(lt(N,2),({a:.6f}-(2-N)/{float(fps):.6f})/TB,"
+                f"PTS-2*round(1/(FRAME_RATE*TB)))")
+        # The run's frames alone decide the card's length: a grained plate
+        # loops a little past the run, and overlay would otherwise go on
+        # holding the run's last frame over every remaining plate frame
+        # (the frozen card over the insert or past the cut). A single still
+        # ends at once and is held (eof_action=repeat).
         parts.append(f"[{base}][{plates[r]}]overlay=0:0:eof_action=repeat"
+                     + (":shortest=1" if styled and grain and not blur
+                        else "") +
                      f":format=auto,format=yuva420p,"
                      f"tpad=start=2:color=black@0,"
-                     f"setpts=PTS-2*round(1/(FRAME_RATE*TB))[{q}card]")
+                     f"setpts='{lead}'[{q}card]")
         parts.append(f"[{q}pass][{q}card]overlay=0:0:eof_action=pass"
                      f":format=auto[{q}out]")
         vlabel = f"{q}out"
@@ -897,9 +934,9 @@ def append_graph(parts, vlabel, inputs, W, H, fps, source_rect=None,
     """One branch per card over the composed program ``vlabel``.
 
     source_rect is frame.picture: the region of the program a program card
-    shows. runs = {card id: [layout tag, ...]} names the runs of render
-    blocks renderer.build_filtergraph composed for each source-fed card
-    (_append_source_fed). A source-fed card with no run (its window holds
+    shows. runs = {card id: [(layout tag, program start, program end), ...]}
+    names the runs of render blocks renderer.build_filtergraph composed for
+    each source-fed card (_append_source_fed). A source-fed card with no run (its window holds
     only spliced media) draws nothing.
     """
     if not inputs:

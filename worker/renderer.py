@@ -1960,6 +1960,32 @@ def _keep_layout_tags(parts, mark, in_label, out_label, uid, fps):
     return f"lt{uid}o"
 
 
+def _zooms_outside(zooms, windows):
+    """``zooms`` with every program window in ``windows`` cut out of them.
+    The pieces either side keep the visible motion (stitch's proof clipper
+    samples a cut eased curve as a path; a punch cut after its snap stays
+    punched in), and a piece under 0.2 s is dropped. The camera switches
+    off on the stacked card's own edge, where the picture changes anyway."""
+    out = []
+    for z in zooms:
+        pieces = [z]
+        for a, b in sorted(windows):
+            kept = []
+            for piece in pieces:
+                s, e = float(piece["start"]), float(piece["end"])
+                if min(b, e) - max(a, s) <= 1e-3:
+                    kept.append(piece)
+                    continue
+                kept.extend(stitch._clip_program_zooms([piece], 0.0, a))
+                kept.extend({**q, "start": round(q["start"] + b, 3),
+                             "end": round(q["end"] + b, 3)}
+                            for q in stitch._clip_program_zooms(
+                                [piece], b, e + 1.0))
+            pieces = kept
+        out.extend(pieces)
+    return out
+
+
 def _render_junctions(edl, index, blk_tags):
     """transition_junctions on the RENDER blocks. Pieces of one kept segment
     (split at a focus or picture-card edge) are one EDL block: the junction
@@ -2156,14 +2182,13 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     fx = edl.get("effects") or {}
     zooms = fx.get("zooms") or []
     # A stacked card shows two regions in two boxes; one camera move would
-    # drag one panel's picture into the other. Zooms meeting a stacked
-    # window do not play (set_picture_card says so when it writes one).
+    # drag one panel's picture into the other. Zooms do not play inside a
+    # stacked window (set_picture_card says so when it writes one); the rest
+    # of a zoom that meets one still plays, exactly as authored.
     stack_windows = [(float(c["start"]), float(c["end"])) for c in fx_cards
                      if c.get("panels")]
     if stack_windows and zooms:
-        zooms = [z for z in zooms
-                 if not any(min(b, float(z["end"])) - max(a, float(z["start"]))
-                            > 1e-3 for a, b in stack_windows)]
+        zooms = _zooms_outside(zooms, stack_windows)
     regions = fx.get("regions") or []
     speed = edl.get("speed") or []
     stylize = fx.get("stylize") or []
@@ -2244,33 +2269,39 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     # tagged with its name (picture_cards.layout_filter) so the card branch
     # covers exactly those frames. A spliced insert inside the window ends a
     # run: it plays full-frame. The walk mirrors the program-order loop below.
+    # card_runs = {card id: [[tag, program start, program end], ...]} — the
+    # run's span lets its card branch wait for exactly that stretch of the
+    # program (picture_cards._append_source_fed MEMORY).
     card_layout, card_runs = {}, {}
     if fx_cards and n > 0:
         _at = [tl.ins[j][0] for j in range(len(insert_inputs))]
         _pre = _prog = 0.0
         _j = 0
-        order = []                      # ("ins", None) / ("seg", i, mid)
+        order = []                  # ("ins", None, None) / ("seg", i, start)
         for i in range(n):
             while _j < len(_at) and _at[_j] <= _pre + 1e-6:
                 order.append(("ins", None, None))
                 _prog += float(insert_inputs[_j][1]["duration_s"])
                 _j += 1
-            order.append(("seg", i, _prog + seg_out_len[i] / 2.0))
+            order.append(("seg", i, _prog))
             _pre += seg_out_len[i]
             _prog += seg_out_len[i]
         for j, card in enumerate(fx_cards):
             a, b = card_windows.get(card["id"]) or (float(card["start"]),
                                                     float(card["end"]))
             panels = picture_cards.card_panels(card)
-            tag = None
-            for kind, i, mid in order:
+            run = None
+            for kind, i, t0 in order:
+                mid = None if kind != "seg" else t0 + seg_out_len[i] / 2.0
                 if kind == "seg" and i not in card_layout and a <= mid < b:
-                    if tag is None:
+                    if run is None:
                         tag = f"c{j}r{len(card_runs.get(card['id'], []))}"
-                        card_runs.setdefault(card["id"], []).append(tag)
-                    card_layout[i] = (panels, tag)
+                        run = [tag, t0, t0]
+                        card_runs.setdefault(card["id"], []).append(run)
+                    run[2] = t0 + seg_out_len[i]
+                    card_layout[i] = (panels, run[0])
                 else:
-                    tag = None
+                    run = None
     sw = sh = None
     seg_prog = []
     if regions:

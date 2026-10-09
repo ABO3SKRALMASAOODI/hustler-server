@@ -472,3 +472,189 @@ def test_source_cards_need_footage_in_their_window():
     # the same window as a program card is fine
     assert agent_tools.set_picture_card(
         ctx, "c", 10.5, 14.5, source="program").startswith("EDL v")
+
+
+# ── review fixes (Oct 2026) ───────────────────────────────────────────────
+
+def test_a_late_card_branch_waits_only_for_its_own_run(tmp_path):
+    """MEMORY: overlay holds every program frame until it knows the card
+    branch's next timestamp. The branch's lead frames sit just before its
+    run's trim window — not at zero, where every frame before a card at 30 s
+    of a 1080x1920 final queued in RAM (5.1 GB peak against 0.6 GB)."""
+    e = _edl([dict(CARD, start=30.0, end=35.0, source=[0, 0, 1, 1])],
+             keep=((0.0, 40.0),))
+    graph, _a, _t = _graph(e, tmp_path)
+    reach = picture_cards.SOURCE_CARD_REACH_S
+    assert f"trim=start={30 - reach:.6f}:end={35 + reach:.6f}" in graph
+    assert f"if(lt(N,2),({30 - reach:.6f}-(2-N)/30.000000)/TB" in graph
+
+
+def test_runs_carry_their_program_spans(tmp_path):
+    e = default_edl(SRC)
+    e["keep"] = [[0.5, 2.37], [3.13, 6.0]]
+    e["frame"] = {"ratio": "9:16", "mode": "crop"}
+    e["inserts"] = [{"id": "b", "asset_key": "k", "kind": "image",
+                     "at_output_s": 1.87, "duration_s": 1.0}]
+    e["effects"] = {"picture_cards": [dict(CARD, start=1.0, end=4.5,
+                                           source=[0, 0, 1, 1])]}
+    e = validate_edl(e, SRC).model_dump()
+    tl = Timeline(e["keep"], e["inserts"], [])
+    graph = renderer.build_filtergraph(
+        e, SRC, False, tl, None, [], {}, False, W=320, H=568, fps=30,
+        frame_mode="crop", src_w=320, src_h=180, silence_idx=1,
+        insert_inputs=[(3, e["inserts"][0], False)],
+        picture_card_inputs=[(2, e["effects"]["picture_cards"][0])])
+    reach = picture_cards.SOURCE_CARD_REACH_S
+    # run 0: 1.0 -> the insert at 1.87; run 1: after it (2.87) -> 4.5
+    assert f"trim=start={1.0 - reach:.6f}:end={1.87 + reach:.6f}" in graph
+    assert f"trim=start={2.87 - reach:.6f}:end={4.5 + reach:.6f}" in graph
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg required")
+@pytest.mark.parametrize("look", [
+    {},
+    {"background_style": "radial_gradient", "background_color2": "#050505",
+     "grain": .25},
+])
+def test_an_insert_inside_a_source_card_plays_full_frame(tmp_path, look):
+    """The card steps aside for the insert on its exact frames and returns
+    after it — a grained (looping) plate included, which used to hold the
+    run's last frame over the insert's first third of a second and past
+    the card's end."""
+    src = tmp_path / "g.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+                    "color=c=green:s=320x180:r=30:d=12", "-c:v", "libx264",
+                    "-qp", "0", str(src)], check=True)
+    img = tmp_path / "red.png"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+                    "color=c=red:s=320x568:d=1", "-frames:v", "1", str(img)],
+                   check=True)
+    e = default_edl(SRC)
+    e["keep"] = [[0.0, 5.0], [5.0, 10.0]]
+    e["frame"] = {"ratio": "9:16", "mode": "crop"}
+    e["inserts"] = [{"id": "b", "asset_key": "k", "kind": "image",
+                     "at_output_s": 5.0, "duration_s": 2.0}]
+    e["effects"] = {"picture_cards": [dict(
+        CARD, start=3.0, end=9.0, box=[.05, .3, .95, .7],
+        background="#203040", source=[0, 0, 1, 1], **look)]}
+    e = validate_edl(e, SRC).model_dump()
+    tl = Timeline(e["keep"], e["inserts"], [])
+    args = ["-i", str(src), "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
+            "-loop", "1", "-framerate", "30", "-t", "2.5", "-i", str(img)]
+    inputs, _ = picture_cards.prepare_inputs(e, str(tmp_path), 320, 568, 30,
+                                             args, 3)
+    graph = renderer.build_filtergraph(
+        e, SRC, False, tl, None, [], {}, False, W=320, H=568, fps=30,
+        frame_mode="crop", src_w=320, src_h=180, silence_idx=1,
+        insert_inputs=[(2, e["inserts"][0], False)],
+        picture_card_inputs=inputs)
+    out = tmp_path / "o.mp4"
+    r = subprocess.run(["ffmpeg", "-v", "error", "-y", *args,
+                        "-filter_complex", graph, "-map", "[vout]",
+                        "-map", "[aout]", "-t", str(tl.out_duration),
+                        "-c:v", "libx264", "-qp", "0", "-c:a", "aac",
+                        str(out)], capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, r.stderr[-3000:]
+    raw = subprocess.check_output(["ffmpeg", "-v", "error", "-i", str(out),
+                                   "-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
+    frames = np.frombuffer(raw, np.uint8).reshape(-1, 568, 320, 3).astype(int)
+
+    def kind(f):
+        if f[284, 160, 0] > 200 and f[20, 160, 0] > 200:
+            return "I"                          # the insert, full-frame
+        return "P" if f[20, 160, 1] > 110 else "C"
+    kinds = "".join(kind(f) for f in frames)
+    assert kinds == "P" * 90 + "C" * 60 + "I" * 60 + "C" * 60 + "P" * 90
+
+
+class _ShotCtx(_Ctx):
+    """Two cameras: a close-up of one speaker, then a wide of the other."""
+
+    def __init__(self, faces_b, track=None, **kw):
+        e = default_edl(SRC)
+        e["keep"] = [[10.0, 20.0]]
+        e["frame"] = {"ratio": "9:16", "mode": "crop"}
+        if track:
+            e["frame"]["focus_track"] = track
+        samples = [{"t": t, "faces": [[.40, .20, .62, .62]]}
+                   for t in (11.0, 12.5, 14.0)]
+        samples += [{"t": t, "faces": [f]} for t, f in faces_b]
+        super().__init__(1920, 1080, samples=samples, edl=e, **kw)
+        self.index["shots"] = [{"id": 0, "start": 0.0, "end": 15.0},
+                               {"id": 1, "start": 15.0, "end": 60.0}]
+
+
+def test_a_card_across_a_camera_cut_keeps_the_program_picture():
+    """One source rect frames ONE shot: across a cut to another camera the
+    speaker crop would show a wall. The program follows the reframe shot by
+    shot, so an 'auto' card there stays a program card and says why."""
+    ctx = _ShotCtx([(16.0, [.10, .30, .18, .45]), (18.0, [.11, .31, .19, .46])])
+    res = agent_tools.set_picture_card(ctx, "c", 2.0, 8.0)
+    card = ctx.card()
+    assert card["source"] is None and card["panels"] is None
+    assert "crosses a camera cut (source 15s)" in res and "split" in res
+    # one shot per card: framed from the source
+    agent_tools.set_picture_card(ctx, "c", 1.0, 4.5)
+    assert ctx.card()["source"] is not None
+
+
+def test_a_cut_between_alike_framings_keeps_the_source_card():
+    ctx = _ShotCtx([(16.0, [.41, .21, .62, .63]), (18.0, [.40, .20, .61, .62])])
+    res = agent_tools.set_picture_card(ctx, "c", 2.0, 8.0)
+    assert ctx.card()["source"] is not None
+    assert "camera cut" not in res
+
+
+def test_an_explicit_rect_across_a_cut_is_kept_with_a_note():
+    ctx = _ShotCtx([(16.0, [.10, .30, .18, .45])])
+    res = agent_tools.set_picture_card(ctx, "c", 2.0, 8.0,
+                                       source=[.2, .1, .8, .9])
+    assert ctx.card()["source"] is not None
+    assert "same source region in every shot" in res
+
+
+def test_no_face_aims_at_the_reframes_own_focus_span():
+    track = [{"t0": 0.0, "t1": 30.0, "x": .8, "y": .5}]
+    e = default_edl(SRC)
+    e["keep"] = [[10.0, 20.0]]
+    e["frame"] = {"ratio": "9:16", "mode": "crop", "focus_track": track}
+    ctx = _Ctx(1920, 1080, samples=[], edl=e)
+    res = agent_tools.set_picture_card(ctx, "c", 1.0, 5.0,
+                                       box=[.1, .2, .5, .5])
+    x0, _y0, x1, _y1 = ctx.card()["source"]
+    assert (x0 + x1) / 2 > .6 and "no face measured" in res
+
+
+def test_malformed_card_rects_are_rejected_not_raised():
+    ctx = _Ctx(1920, 1080)
+    for kw in ({"box": [.9, .1, .1, .9]}, {"box": [.1, .1, .15, .9]},
+               {"source": [.5, 0, .5, 1]}, {"source": ["a", 0, 1, 1]},
+               {"panels": [{"box": [.1, .1, .9, .4], "source": [.3, .3, .3, .3]},
+                           {"box": [.1, .5, .9, .9], "source": "full"}]}):
+        res = agent_tools.set_picture_card(ctx, "c", 1.0, 5.0, **kw)
+        assert res.startswith("REJECTED"), (kw, res)
+
+
+def test_overlays_inside_a_source_card_are_flagged():
+    e = default_edl(SRC)
+    e["keep"] = [[10.0, 20.0]]
+    e["frame"] = {"ratio": "9:16", "mode": "crop"}
+    ctx = _Ctx(1920, 1080, edl=e)
+    ctx._edl["overlays"] = [{"id": "logo", "asset_key": "media/p/logo.png",
+                             "kind": "image", "start": 2.0, "duration_s": 1.0}]
+    res = agent_tools.set_picture_card(ctx, "c", 1.0, 5.0, source="full")
+    assert "overlay(s) logo" in res and "canvas covers the rest" in res
+
+
+def test_a_zoom_across_a_stack_still_plays_outside_it():
+    zooms = [{"id": "z", "start": 0.2, "end": 4.5, "strength": .2,
+              "mode": "punch", "ramp_s": .2},
+             {"id": "y", "start": 5.0, "end": 6.0, "strength": .1,
+              "mode": "punch"}]
+    pieces = renderer._zooms_outside(zooms, [(1.0, 3.0)])
+    spans = [(p["id"], p["start"], p["end"]) for p in pieces]
+    assert spans == [("z", 0.2, 1.0), ("z", 3.0, 4.5), ("y", 5.0, 6.0)]
+    # the piece after the stack is already punched in: no second snap
+    assert pieces[1]["ramp_s"] == 0.0
+    # a zoom wholly inside the stack does not play at all
+    assert renderer._zooms_outside(zooms[:1], [(0.0, 5.0)]) == []

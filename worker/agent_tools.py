@@ -116,7 +116,7 @@ from schemas import (CANVAS_DIMS, CaptionStyle, clean_fingerprint,
                      SCREEN_TAKEOVER_MAX_S, quad_bbox, quad_is_sane)
 from schemas import ANIM_MAX_KEYFRAMES, CAPTION_LEADING_RANGE
 from schemas import master_loudness
-from schemas import PICTURE_CARD_MAX_PANELS
+from schemas import PICTURE_CARD_MAX_PANELS, _source_rectangle
 from timeline import Timeline, card_text_window, insert_windows
 
 # Karaoke grouping: the renderer's legacy clamp (captions.KARAOKE_HARD_MAX,
@@ -14619,12 +14619,12 @@ def _source_spans(edl, start, end):
     return out
 
 
-def _card_faces(ctx, spans):
-    """Face boxes (source fractions) the index measured inside ``spans``:
-    the largest face of every spatial sample there."""
+def _card_face_samples(ctx, spans):
+    """[(source second, face box)] the index measured inside ``spans``: the
+    largest face (source fractions) of every spatial sample there."""
     samples = (((getattr(ctx, "index", None) or {}).get("spatial") or {})
                .get("samples") or [])
-    faces = []
+    out = []
     for sample in samples:
         try:
             t = float(sample.get("t"))
@@ -14634,8 +14634,79 @@ def _card_faces(ctx, spans):
             continue
         boxes = [f for f in sample.get("faces") or [] if f and len(f) == 4]
         if boxes:
-            faces.append(max(boxes, key=lambda f: (f[2] - f[0]) * (f[3] - f[1])))
-    return faces
+            out.append((t, max(boxes, key=lambda f: (f[2] - f[0]) * (f[3] - f[1]))))
+    return out
+
+
+def _card_faces(ctx, spans):
+    """Face boxes (source fractions) the index measured inside ``spans``:
+    the largest face of every spatial sample there."""
+    return [f for _t, f in _card_face_samples(ctx, spans)]
+
+
+def _card_cuts(ctx, edl, spans):
+    """Source seconds of the camera cuts inside ``spans`` — indexed shot
+    boundaries and focus_track re-aims. One source rect shows the SAME region
+    of every shot, so a speaker framed in one shot is a wall in the next."""
+    cuts = set()
+    for shot in ((getattr(ctx, "index", None) or {}).get("shots") or [])[1:]:
+        try:
+            cuts.add(round(float(shot["start"]), 3))
+        except (KeyError, TypeError, ValueError):
+            continue
+    track = ((edl.get("frame") or {}).get("focus_track")
+             if isinstance(edl.get("frame"), dict) else None) or []
+    for a, b in zip(track, track[1:]):
+        try:
+            if (a.get("x"), a.get("y"), a.get("mode")) != \
+                    (b.get("x"), b.get("y"), b.get("mode")):
+                cuts.add(round(float(b["t0"]), 3))
+        except (KeyError, TypeError, ValueError, AttributeError):
+            continue
+    return sorted(t for t in cuts
+                  if any(a + .1 < t < b - .1 for a, b in spans))
+
+
+def _one_framing(ctx, spans, cuts):
+    """True when the shots either side of ``cuts`` frame the speaker alike:
+    every stretch between cuts has a measured face, and their median boxes
+    agree in place and size (two cameras, or one camera re-zoomed, do not)."""
+    samples = _card_face_samples(ctx, spans)
+    edges = [-1e9] + list(cuts) + [1e9]
+    medians = []
+    for lo, hi in zip(edges, edges[1:]):
+        face = picture_cards.median_face(
+            [f for t, f in samples if lo <= t < hi])
+        if face is None:
+            return False
+        medians.append(face)
+    ref = medians[0]
+    rh = ref[3] - ref[1]
+    for f in medians[1:]:
+        if (abs((f[0] + f[2]) - (ref[0] + ref[2])) / 2 > .08
+                or abs((f[1] + f[3]) - (ref[1] + ref[3])) / 2 > .08
+                or not .75 <= (f[3] - f[1]) / max(rh, 1e-6) <= 1.35):
+            return False
+    return True
+
+
+def _window_focus(edl, spans):
+    """The reframe's aim over ``spans``: the one focus_track span covering
+    them, else the frame's own focus (source fractions; None = centre)."""
+    frame = edl.get("frame") if isinstance(edl.get("frame"), dict) else {}
+    aims = set()
+    for span in frame.get("focus_track") or []:
+        try:
+            t0, t1 = float(span["t0"]), float(span["t1"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if any(min(b, t1) - max(a, t0) > .05 for a, b in spans):
+            aims.add((span.get("x"), span.get("y")))
+    if len(aims) == 1:
+        x, y = aims.pop()
+        return (frame.get("focus_x") if x is None else x,
+                frame.get("focus_y") if y is None else y)
+    return frame.get("focus_x"), frame.get("focus_y")
 
 
 def _card_canvas(ctx, spans, rect):
@@ -14668,15 +14739,20 @@ def _card_canvas(ctx, spans, rect):
     return picture_cards.CANVAS_FALLBACK
 
 
-def _rect_arg(value, what):
-    """A [left, top, right, bottom] fraction list, or a REJECTED string."""
+def _rect_arg(value, what, source=False):
+    """A validated [left, top, right, bottom] fraction list (a canvas box,
+    or with ``source`` a rect of the SOURCE frame), or a REJECTED string —
+    checked before any geometry runs on it."""
     try:
         rect = [float(v) for v in value]
         if len(rect) != 4:
             raise ValueError
+        rect = (_source_rectangle(rect) if source
+                else Frame._picture_rectangle(rect))
     except (TypeError, ValueError):
         return None, (f"REJECTED: {what} must be [left, top, right, bottom] "
-                      "fractions 0-1.")
+                      "fractions 0-1, left < right and top < bottom, at least "
+                      + ("4%" if source else "10%") + " per axis.")
     return rect, None
 
 
@@ -14702,14 +14778,12 @@ def _resolve_panel(ctx, edl, spans, box, source, fit, canvas):
             fit = fit or "crop"
             face = picture_cards.median_face(_card_faces(ctx, spans))
             if sw and sh and fit == "crop":
-                frame = edl.get("frame") or {}
                 rect, headroom = picture_cards.speaker_rect(
-                    sw, sh, W, H, box, face,
-                    (frame.get("focus_x"), frame.get("focus_y")))
+                    sw, sh, W, H, box, face, _window_focus(edl, spans))
             else:
                 rect = [0.0, 0.0, 1.0, 1.0]
     else:
-        rect, err = _rect_arg(source, "source")
+        rect, err = _rect_arg(source, "source", source=True)
         if err:
             return None, None, None, err
         fit = fit or "pad"
@@ -14799,8 +14873,36 @@ def set_picture_card(ctx, id, start, end, box=None, fit=None, radius=.045,
     except Exception:
         canvas = (1080, 1920)
     rows_panels = None
-    card_box = list(box) if box is not None else [.06, .24, .94, .74]
+    if box is not None:
+        card_box, err = _rect_arg(box, "box")
+        if err:
+            return err
+    else:
+        card_box = [.06, .24, .94, .74]
     card_source = None
+    video_lowres = picture_cards.is_lowres(video.get("width"), video.get("height"))
+    cuts = (_card_cuts(ctx, edl, spans)
+            if spans and (source != "program" or panels) else [])
+    cut_list = ", ".join(f"{t:g}s" for t in cuts[:3])
+    if (panels is None and source == "auto" and cuts and not video_lowres
+            and not _one_framing(ctx, spans, cuts)):
+        # One rect shows the same region of every shot: framed on one camera
+        # it is a wall (or the other speaker's shoulder) on the next. The
+        # composed program follows the reframe shot by shot, so it is the
+        # honest card here; one shot per card gets the source framing.
+        source = "program"
+        report.append(
+            f"this window crosses a camera cut (source {cut_list}) and the "
+            "shots frame the speaker differently, so the card shows the "
+            "composed program picture, which follows the reframe shot by "
+            "shot. For a card framed from the source, give each shot its own "
+            "card (split the window at the cut), or pass source='full' or a "
+            "rect to show one region of every shot.")
+    elif cuts and (panels is not None or not isinstance(source, str)):
+        report.append(
+            f"NOTE: this window crosses a camera cut (source {cut_list}); "
+            "the card shows the same source region in every shot — end it on "
+            "the cut unless that region holds the same thing throughout.")
     if panels is not None:
         if not isinstance(panels, (list, tuple)) or not 2 <= len(panels) <= \
                 PICTURE_CARD_MAX_PANELS:
@@ -14844,7 +14946,6 @@ def set_picture_card(ctx, id, start, end, box=None, fit=None, radius=.045,
     # footage (its own hue, near-black at the edges), with film grain on a
     # low-resolution source — never the blur of itself the judges read as a
     # smear under a soft card.
-    video_lowres = picture_cards.is_lowres(video.get("width"), video.get("height"))
     sampled = None
     if style is None and background is None:
         style = "radial_gradient"
@@ -14933,6 +15034,22 @@ def _source_card_notes(ctx, row):
         notes.append("NOTE: spliced insert(s) " + ", ".join(map(str, inside))
                      + " inside this window play full-frame; the card steps "
                      "aside for them and returns after.")
+    # Overlays composite onto the program BEFORE the card cuts its box(es)
+    # back out of it: the canvas covers whatever part of one falls outside.
+    covered = []
+    for ov in edl.get("overlays") or []:
+        try:
+            o0 = float(ov.get("start") or 0.0)
+            o1 = o0 + float(ov.get("duration_s") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if min(b, o1) - max(a, o0) > 1e-3:
+            covered.append(ov.get("id"))
+    if covered:
+        notes.append("NOTE: overlay(s) " + ", ".join(map(str, covered))
+                     + " fall inside this card: they show only where they lie "
+                     "inside its box(es) — the canvas covers the rest. Time "
+                     "them outside the card, or place them inside a box.")
     if row.get("panels"):
         zooms = [z.get("id") for z in (edl.get("effects") or {}).get("zooms")
                  or [] if min(b, float(z["end"])) - max(a, float(z["start"]))
@@ -14940,9 +15057,10 @@ def _source_card_notes(ctx, row):
         if zooms:
             notes.append("NOTE: zoom(s) " + ", ".join(map(str, zooms))
                          + " overlap this stacked layout and do NOT play "
-                         "(one camera move would drag one panel into the "
-                         "other). remove_zoom them or move them off the "
-                         "window.")
+                         "inside it (one camera move would drag one panel "
+                         "into the other); outside the window they play as "
+                         "authored. Move or remove_zoom them if the move "
+                         "mattered there.")
     behind = [t.get("id") for t in edl.get("texts") or [] if t.get("behind")] + \
         [m.get("id") for m in edl.get("motion") or []
          if m.get("layer") == "behind_subject"]
@@ -25924,8 +26042,10 @@ TOOLS = {
         "fractions); 'program' = the composed program picture (frame.picture region) as before. "
         "fit: 'crop' keeps the box and trims the source rect to it; 'pad' keeps the whole rect "
         "and shrinks the box around it (the default for 'full' and explicit rects). The result "
-        "reports the rect, box, enlargement and headroom. Spliced inserts inside a source card "
-        "play full-frame and the card returns after them. "
+        "reports the rect, box, enlargement and headroom. One rect frames ONE shot: an 'auto' "
+        "window that crosses a camera cut to a differently framed shot keeps the program picture "
+        "(it follows the reframe) and says so — give each shot its own card for source framing. "
+        "Spliced inserts inside a source card play full-frame and the card returns after them. "
         "SPEAKER + EVIDENCE — panels: 2-3 {box, source[, fit]} shown at once over the window, "
         "each box its own rounded window on one canvas, each source its own region of the SAME "
         "source frame: e.g. [{box:[.04,.06,.96,.46], source:'auto'} (the speaker), "
