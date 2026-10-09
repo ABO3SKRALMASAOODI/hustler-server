@@ -187,8 +187,9 @@
     shade.style.opacity = MG.clamp(0.6 + (s.ry || 0) * -0.03 + (1 - k) * 0.4);
     // content settles in just behind the card
     els.forEach((e, i) => {
-      const t0 = 0.12 + i * 0.05;
-      MG.set(e, { y: (1 - MG.ease.outCubic(MG.range(t, t0, 0.42))) * 18 * u / 2.6, opacity: MG.range(t, t0, 0.22) });
+      // content rides in with the card (never an empty plate), settling a beat later
+      const t0 = 0.04 + i * 0.045;
+      MG.set(e, { y: (1 - MG.ease.outCubic(MG.range(t, t0, 0.42))) * 18 * u / 2.6, opacity: 0.35 + 0.65 * MG.range(t, t0, 0.2) });
     });
     // like pop
     if (heart) {

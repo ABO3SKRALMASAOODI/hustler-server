@@ -1,5 +1,5 @@
 <!--MG-SPEC {"title": "Chat bubbles", "category": "social",
- "description": "A text-message thread: bubbles spring in one by one (me = right/blue, them = left/grey), 'them' messages are preceded by a typing indicator, and the thread scrolls up like a real chat. Use to dramatise a conversation, DM, pitch or exchange the speaker describes (keep each message short).",
+ "description": "A text-message thread: messages = [{text, side: me|them, at?}] spring in as bubbles (me right/blue, them left/grey with typing dots first) and the thread scrolls up like a real chat. Use to dramatise a conversation, DM or pitch the speaker describes; keep messages short and allow ~0.75 s each.",
  "duration": 4.0, "layer": "above_captions", "mutes_captions": false,
  "params": {
   "messages": {"type": "rows", "required": true, "fields": ["text", "side", "at"], "max_items": 8, "max": 120,

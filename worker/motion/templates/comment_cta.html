@@ -138,7 +138,8 @@
   // ── timing ────────────────────────────────────────────────────────────
   const chars = Array.from(kw);
   const tSend = 1.7, tType1 = 1.45;
-  const tType0 = Math.max(0.5, tType1 - Math.max(0.42, chars.length * 0.085));
+  // keystrokes always span the typing sound cue (0.5 s → 1.45 s), whatever the keyword length
+  const tType0 = 0.5;
   const rnd = MG.rand(chars.length * 7 + 3);
   const keys = chars.map((_, i) => tType0 + (tType1 - tType0) * Math.min(1, (i + 0.15 + (rnd() - 0.5) * 0.5) / Math.max(1, chars.length)));
   keys.sort((a, b) => a - b);
@@ -185,9 +186,9 @@
     // moving windows (+ caret blink toggles during waits/holds)
     // typing only changes the picture on each key press (+ the send button
     // waking up), so declare those instants instead of the whole span
-    // the keyword bloom decays for ~0.85 s after its word lands
+    // the keyword bloom settles ~0.65 s after its word lands
     const kwI = words.findIndex(w => w.kw);
-    const introEnd = Math.max(0.68, (words.length - 1) * 0.045 + 0.45, kwI >= 0 ? kwI * 0.045 + 0.92 : 0);
+    const introEnd = Math.max(0.68, (words.length - 1) * 0.045 + 0.45, kwI >= 0 ? kwI * 0.045 + 0.66 : 0);
     const wins = [[0, introEnd], [keys.length ? keys[0] - 0.01 : tType0, (keys.length ? keys[0] : tType0) + 0.3],
                   [tSend - 0.09, tPost + 0.62], [exitAt - 0.02, D]];
     keys.forEach(k => wins.push([k - 1e-4, k + 1 / MG.fps - 2e-4]));
@@ -208,7 +209,7 @@
       if (w.kw) {
         const k = MG.spring(t, t0 + 0.06, { stiffness: 320, damping: 16 });
         s.scale = 1.22 - 0.22 * k;
-        const bloom = MG.range(t, t0 + 0.05, 0.2) * (1 - 0.45 * MG.ease.outCubic(MG.range(t, t0 + 0.25, 0.6)));
+        const bloom = MG.range(t, t0 + 0.05, 0.2) * (1 - 0.45 * MG.ease.outCubic(MG.range(t, t0 + 0.25, 0.36)));
         (w.el.querySelector('.kw') || w.el).style.textShadow = `0 2px 10px rgba(0,0,0,.35), 0 0 ${(10 + 16 * bloom).toFixed(1)}px ${P.accent}${Math.round(110 + 90 * bloom).toString(16).padStart(2, '0')}, 0 0 ${(34 + 40 * bloom).toFixed(1)}px ${P.accent}${Math.round(60 + 60 * bloom).toString(16).padStart(2, '0')}`;
       }
       MG.set(w.el, s);
