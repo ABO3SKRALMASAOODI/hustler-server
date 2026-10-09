@@ -130,7 +130,7 @@
     });
     geo.cw = cw; geo.chMax = chMax; geo.cy = cy;
     if (caption) {
-      MG.fit(capT, { width: W - 140, min: 26, max: 60, nowrap: true });
+      MG.fit(capT, { width: W - 140, min: 24, max: Math.min(60, H * 0.065), nowrap: true });
       const fs = parseFloat(capT.style.fontSize);
       capEl.style.top = (cy + chMax / 2 + spreadY + 0.09 * cw + 34) + 'px';
       geo.capBottom = cy + chMax / 2 + spreadY + 0.09 * cw + 34 + fs * 1.2;

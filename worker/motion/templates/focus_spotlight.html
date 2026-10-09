@@ -75,7 +75,7 @@
   let below = true;
   function placeLabel() {
     labT.textContent = label;
-    MG.fit(labT, { width: W - 160, min: 26, max: 52, nowrap: true });
+    MG.fit(labT, { width: W - 160, min: 24, max: Math.min(52, H * 0.06), nowrap: true });
     const lr = lab.getBoundingClientRect();
     const gap = 70;
     below = cy + sh / 2 + gap + lr.height < H * 0.8 || cy - sh / 2 - gap - lr.height < H * 0.08;

@@ -195,7 +195,7 @@
     return (settleF + Math.floor((Math.min(f, holdEndF) - settleF) / STEP) * STEP) / fps;
   };
   const springO = { stiffness: 150, damping: 19 };
-  const ryHold = dir === 0 ? -4 : -dir * 7, rxHold = dir === 0 ? 5 : 4;
+  const ryHold = dir === 0 ? -4 : -dir * 10, rxHold = dir === 0 ? 6 : 5;
 
   MG.frame(t => {
     layout();
