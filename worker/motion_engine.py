@@ -44,7 +44,7 @@ FONTS_DIR = os.path.join(HERE, "fonts")
 
 # Bump when runtime.js, the document wrapper or capture semantics change:
 # it is part of every cache key.
-ENGINE_VERSION = "mg-2"
+ENGINE_VERSION = "mg-3"
 DESIGN_W = 1080           # templates are authored in a 1080-wide CSS space
 ORIGIN = "https://mg.valmera.invalid"
 MAX_DURATION_S = 120.0

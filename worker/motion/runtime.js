@@ -221,11 +221,15 @@
   window.__mgSeek = t => {
     MG.t = t;
     let active = MG._alwaysActive;
+    // A frame stands for the interval since the previous one: a change that
+    // lands between two frames (a word revealed 5 ms after a frame) must still
+    // be captured on the first frame after it, so windows reach one frame on.
+    const fd = 1 / (MG.fps || 30);
     // JS choreography first: it may add/remove elements or classes whose
     // CSS animations must then be seeked to the same instant.
     if (MG._frames.length) {
       if (!MG._windows) active = true;
-      else if (MG._windows.some(([a, b]) => t >= a - 1e-6 && t <= b + 1e-6)) active = true;
+      else if (MG._windows.some(([a, b]) => t >= a - 1e-6 && t <= b + fd + 1e-6)) active = true;
       for (const fn of MG._frames) {
         try { fn(t); } catch (e) { window.__mgErrors.push(String(e && e.message || e)); return 2; }
       }
@@ -237,7 +241,7 @@
         const c = a.effect && a.effect.getComputedTiming ? a.effect.getComputedTiming() : null;
         if (c) {
           const startMs = (c.delay || 0), endMs = c.endTime;
-          if (t * 1000 >= startMs - 1 && (endMs === Infinity || t * 1000 <= endMs + 1)) active = true;
+          if (t * 1000 >= startMs - 1 && (endMs === Infinity || t * 1000 <= endMs + fd * 1000 + 1)) active = true;
         }
       } catch (e) { active = true; }
     }

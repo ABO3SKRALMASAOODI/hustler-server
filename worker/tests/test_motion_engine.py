@@ -300,6 +300,24 @@ def test_engine_renders_alpha_clip_reuses_static_frames_and_caches(tmp_path, mon
 
 
 @needs_browser
+def test_a_change_between_two_frames_reaches_the_next_capture(tmp_path, monkeypatch):
+    """A word revealed 10 ms after a frame inside a 30 ms active window used to
+    be lost: the only frame in the window was captured before the change and
+    re-used for the rest of the clip (phrase_build's last word vanished)."""
+    monkeypatch.setattr(motion_engine, "CACHE_DIR", str(tmp_path / "cache"))
+    body = ("<div id=b style='position:absolute;left:0;top:0;width:200px;height:200px;"
+            "background:#fff;opacity:0'></div><script>MG.box = [0, 0, 400, 400];"
+            "MG.active([[0.99, 1.02]]);"
+            "MG.frame(t => { MG.$('#b').style.opacity = t >= 1.01 ? 1 : 0; });</script>")
+    html = motion_engine.build_document(body, duration=1.5, fps=30)
+    job = motion_engine.RenderJob(html=html, out_w=540, out_h=960, fps=30, duration=1.5)
+    clip = motion_engine.render_jobs([job], str(tmp_path / "out"), pages=1)[0]
+    raw = subprocess.run([FFMPEG, "-v", "error", "-sseof", "-0.1", "-i", clip.path, "-frames:v", "1",
+                          "-f", "rawvideo", "-pix_fmt", "rgba", "-"], capture_output=True).stdout
+    assert raw and max(raw[3::4]) > 200        # the box is on screen at the end
+
+
+@needs_browser
 def test_script_errors_surface_as_motion_render_errors(tmp_path, monkeypatch):
     monkeypatch.setattr(motion_engine, "CACHE_DIR", str(tmp_path / "cache"))
     html = motion_engine.build_document("<div id=x>hi</div><script>MG.frame(t => { nope(); });</script>",
