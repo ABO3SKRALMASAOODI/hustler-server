@@ -2,7 +2,9 @@
 # The interactive build stays slim; the standard-4 batch build sets
 # FULL_COMPUTE=1 and carries Chromium, segmentation, and Demucs so synchronous
 # editor children do not escape to another compute provider.
-FROM python:3.11-slim-bookworm
+# AWS ECR Public mirrors the Docker official images without Docker Hub's
+# anonymous pull limit, which failed a production deploy with HTTP 429.
+FROM public.ecr.aws/docker/library/python:3.11-slim-bookworm
 
 # Separate media dependencies and large Noto families into smaller layers
 # so the registry can upload and retry each package group independently.
