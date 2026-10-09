@@ -385,7 +385,10 @@ def test_insert_proof_clears_baked_caption_mutes_and_keeps_030s_text():
         {"id": "zm7", "start": 36.26, "end": 42.73,
          "strength": 0.05, "mode": "ease"},
     ], [[0.31, 10.13], [26.98, 35.06], [36.445, 42.545]],
-     [[0.0, 10.13], [21.82, 35.06], [36.21, 37.84]]),
+     # Zooms are contained with stitch._ZOOM_CUT_PAD_S of room (a zoom
+     # edge may snap onto a cut a few frames away), so the second and
+     # third ranges open 0.2 s earlier than the bare windows did.
+     [[0.0, 10.13], [21.62, 35.06], [36.01, 37.44]]),
 ])
 def test_exact_production_zoom_proofs_validate_after_budget_clipping(
         duration, zooms, raw_ranges, expected_ranges):

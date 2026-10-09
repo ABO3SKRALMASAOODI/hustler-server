@@ -19,6 +19,11 @@ Why it hid for so long:
 The fix bounds each normalized block to its own program length. These tests pin
 that the bound is emitted for every kind of concat segment, and that it is the
 EDL's number rather than anything measured from the footage.
+
+Cut hygiene (Oct 2026): a programme of two or more blocks now runs on the
+block clock (renderer.block_clock) — the bound is an exact FRAME count, the
+frames from the one its Timeline start names to the one its end names, still
+computed from the EDL alone. A single block keeps the time bound.
 """
 
 import os
@@ -53,8 +58,11 @@ def _edl_with_insert():
 def test_every_kept_span_is_bounded_to_its_own_length():
     e = _edl_with_insert()
     g = _graph(e, insert_inputs=[(2, e["inserts"][0], False)])
-    # 17.600 / 21.020 / 9.850 — the spans, not the source, not the programme.
-    for expected in ("trim=end=17.600", "trim=end=21.020", "trim=end=9.850"):
+    # 17.600 / 21.020 / 9.850 s after a 1.5 s card at 29.601 fps: the block
+    # clock's frames 45-566, 566-1188 and 1188-1480 — the spans, not the
+    # source, not the programme.
+    for expected in ("trim=end_frame=521,", "trim=end_frame=622,",
+                     "trim=end_frame=292,"):
         assert expected in g, f"missing segment bound {expected}"
 
 
@@ -63,16 +71,19 @@ def test_the_insert_block_is_bounded_too():
     made project 226's export fail, so it may never be the one left unbounded."""
     e = _edl_with_insert()
     g = _graph(e, insert_inputs=[(2, e["inserts"][0], False)])
-    assert "trim=end=1.500" in g
+    assert "trim=end_frame=45," in g
 
 
 def test_the_bound_follows_fps_and_precedes_setsar():
     """Order is load-bearing: the bound exists to discard what `fps` added, so
     it has to come after it. Placing the trim BEFORE fps was measured and does
-    not fix the stretch (155.06s, unchanged)."""
+    not fix the stretch (155.06s, unchanged). The clones ahead of `fps` only
+    make sure a build that ends the stream early still emits the last real
+    frame."""
     e = _edl_with_insert()
     g = _graph(e, insert_inputs=[(2, e["inserts"][0], False)])
-    frag = "fps=29.601,trim=end=17.600,setpts=PTS-STARTPTS,setsar=1"
+    frag = ("tpad=stop_mode=clone:stop=2,fps=29.601,trim=end_frame=521,"
+            "setpts=PTS-STARTPTS,setsar=1")
     assert frag in g, f"expected '{frag}' in the chain"
 
 

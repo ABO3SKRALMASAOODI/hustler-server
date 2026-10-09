@@ -331,7 +331,7 @@ class Geometry:
     shared camera's zoom, then any active picture card. Mirrors what the
     render does (plate.Probe uses the same three stages for luma)."""
 
-    def __init__(self, edl, video, W, H, out_duration):
+    def __init__(self, edl, video, W, H, out_duration, zooms=None):
         self.sw, self.sh = float(video["width"]), float(video["height"])
         frame = edl.get("frame") if isinstance(edl.get("frame"), dict) else {}
         self.mode = (frame or {}).get("mode") or "crop"
@@ -340,7 +340,9 @@ class Geometry:
         self.picture = (frame or {}).get("picture")
         self.W, self.H = int(W), int(H)
         fx = edl.get("effects") or {}
-        self.zooms = fx.get("zooms") or []
+        # the camera as it renders (renderer.camera_zooms: edges near a cut
+        # held through it) when the caller has it, else the authored zooms
+        self.zooms = list(zooms) if zooms is not None else (fx.get("zooms") or [])
         self.cards = fx.get("picture_cards") or []
         self.out_duration = float(out_duration)
 
@@ -510,6 +512,17 @@ def _cover_windows(edl):
     return out
 
 
+def camera_zooms(edl, index, tl):
+    """The zooms as the render plays them (a zoom edge near a program cut
+    moved onto it and held through it, renderer.camera_zooms), or the
+    authored list when that cannot be worked out."""
+    try:
+        import renderer
+        return renderer.camera_zooms(edl, index, tl)
+    except Exception:  # noqa: BLE001 — the authored zooms are a fine guess
+        return ((edl.get("effects") or {}).get("zooms") or [])
+
+
 def face_track(edl, index, W, H, start, end, measure=None):
     """[(program second, [face boxes in output fractions])] across
     [start, end], every TRACK_STEP_S.
@@ -532,7 +545,7 @@ def face_track(edl, index, W, H, start, end, measure=None):
     start, end = float(start), min(float(end), tl.out_duration)
     if end - start < 0.05:
         return []
-    geo = Geometry(edl, video, W, H, tl.out_duration)
+    geo = Geometry(edl, video, W, H, tl.out_duration, zooms=camera_zooms(edl, index, tl))
     span = end - start
     n = int(min(MAX_MOMENTS, max(2, math.ceil(span / MOMENT_EVERY_S) + 1)))
     moments = []

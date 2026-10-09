@@ -1921,7 +1921,12 @@ def _look_at_output(ctx, output_times, question):
         return (f"Could not extract output frames ({why[:220]}). The edit "
                 "itself is fine — fall back to look_at(times=...) on the "
                 "source and look_at_asset on the inserted clips.")
-    fxz = (edl["json"].get("effects") or {}).get("zooms") or []
+    # The zooms as the camera renders them: an edge near a program cut
+    # snapped onto it and held through it (renderer.camera_zooms).
+    try:
+        fxz = renderer.camera_zooms(edl["json"], ctx.index, tl)
+    except Exception:
+        fxz = (edl["json"].get("effects") or {}).get("zooms") or []
     frame_cfg = edl["json"].get("frame") or {}
     vid = (ctx.index or {}).get("video") or {}
     canvas = None
@@ -25494,7 +25499,12 @@ TOOLS = {
                  "across a long hold (3s+) — keeps a static talking head "
                  "alive; 'pull_out' = the release/reveal. 'ease' (default) = "
                  "smooth ramp in, hold, ramp out — a gentle push onto a "
-                 "subject mid-shot. 'pulse' = 1 -> 1+strength -> 1 in ~0.3s "
+                 "subject mid-shot. An edge within 4 frames of a cut lands "
+                 "ON the cut and holds through it: no ramp straddles a cut, "
+                 "and a punch/ease starting on a cut is in on its first "
+                 "frame (it ramps from the wide instead when the frame "
+                 "before the cut is already pushed in about as far). "
+                 "'pulse' = 1 -> 1+strength -> 1 in ~0.3s "
                  "on a beat or hit word (strength 0.05-0.08). 'shake' = a "
                  "decaying impact shake (strength unused; shake 0.3-0.8). "
                  "Vary mode, strength and spacing — never the same punch on "

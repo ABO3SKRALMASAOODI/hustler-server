@@ -502,7 +502,8 @@ def _faces_far(edl, index, tl, a, b, W, H):
     mid = (a + b) / 2.0
     src_mid = _src_near(tl, mid)
     try:
-        geo = keepout.Geometry(edl, video, W, H, float(tl.out_duration))
+        geo = keepout.Geometry(edl, video, W, H, float(tl.out_duration),
+                               zooms=keepout.camera_zooms(edl, index, tl))
     except Exception:  # noqa: BLE001
         return []
     out = []

@@ -63,6 +63,24 @@ ZOOM_PER_S = 11.0
 # A zoom that lands before the viewer has seen the shot is a shove.
 ZOOM_MIN_START_S = 1.2
 
+# Jump-cut coverage (cut hygiene, Oct 2026). A jump cut inside one take reads
+# as an edit only when the framing changes across it: the owner's references
+# step the scale by at least ~8% (alternating tight and wide) or move the
+# crop. The judged showcase shorts left cuts bare, or "covered" them with 5%
+# punches that read as the same frame with the head popping.
+JUMP_CUT_MIN_SCALE = 0.08
+# Viewport centre travel (fraction of the frame) that reads as a reframe.
+JUMP_CUT_MIN_SHIFT = 0.08
+# A crop aim moving this much (source fractions) is a new framing.
+JUMP_CUT_MIN_AIM = 0.03
+# Bare cuts named one by one in the note; the rest are counted.
+JUMP_CUT_LIST = 5
+# The punch a fix line asks for: the references' tight-camera step.
+JUMP_CUT_FIX_STRENGTH = 0.12
+# Framing x zoom never enlarges the source past this (agent_tools caps zoom
+# writes there): below an 8% step of room a punch cannot cover a cut.
+_ZOOM_UPSCALE_MAX = 3.0
+
 SFX_PER_S = 8.0
 SFX_MIN_SPACING_S = 0.35
 
@@ -419,6 +437,230 @@ def _speech_starts_at(index, tl):
     return float(words[0]["t0"]) if words else None
 
 
+def _shot_id_at(shots, t):
+    for sh in shots:
+        try:
+            if float(sh["start"]) - 1e-6 <= t < float(sh["end"]) + 1e-6:
+                return sh.get("id", sh["start"])
+        except (KeyError, TypeError, ValueError):
+            continue
+    return None
+
+
+def _crop_room(edl, index):
+    """Zoom strength left before the source passes _ZOOM_UPSCALE_MAX under
+    this framing, or None when the source size is unknown."""
+    video = (index or {}).get("video") or {}
+    frame = edl.get("frame") if isinstance(edl.get("frame"), dict) else {}
+    try:
+        import renderer
+        sw, sh = float(video.get("width") or 0), float(video.get("height")
+                                                      or 0)
+        if sw <= 0 or sh <= 0:
+            return None
+        W, H = renderer.frame_dims(int(sw), int(sh),
+                                   str((frame or {}).get("ratio") or "source"),
+                                   delivery=True)
+        if (frame or {}).get("picture"):
+            _x, _y, W, H = renderer.picture_pixels(W, H, frame["picture"])
+    except Exception:
+        return None
+    mode = (frame or {}).get("mode") or "crop"
+    base = (min(W / sw, H / sh) if mode in ("pad", "pad_blur")
+            else max(W / sw, H / sh))
+    return _ZOOM_UPSCALE_MAX / base - 1.0
+
+
+def uncovered_jump_cuts(edl, index, tl, fps=None):
+    """Jump cuts the picture leaves bare, in programme order:
+    [{"t", "before", "after", "fix"}] (before/after = (zoom, cx, cy)).
+
+    A jump cut is a keep join that skips source time with no insert between
+    and — when the index has shots — the same shot on both sides (a camera
+    change is a real cut, not a jump). It is COVERED when the camera framing
+    across it (renderer.camera_zooms: the zooms as rendered, held through
+    cuts) steps the scale by JUMP_CUT_MIN_SCALE or moves the viewport by
+    JUMP_CUT_MIN_SHIFT of the frame, when the crop's aim or mode changes
+    (focus_track), when a transition fires on it, or when a full-frame
+    overlay hides it. `fix` is one line of what to do, written so taking
+    the fixes in order alternates tight and wide."""
+    segs = list(getattr(tl, "segs", None) or [])
+    if len(segs) < 2:
+        return []
+    import renderer
+    video = (index or {}).get("video") or {}
+    try:
+        fps = float(fps or video.get("fps") or 30.0)
+    except (TypeError, ValueError):
+        fps = 30.0
+    out_dur = float(tl.out_duration)
+    zooms = renderer.camera_zooms(edl, index, tl, fps)
+    shots = (index or {}).get("shots") or []
+    frame = edl.get("frame") if isinstance(edl.get("frame"), dict) else {}
+    track = [sp for sp in (frame or {}).get("focus_track") or []
+             if isinstance(sp, dict)]
+    base_aim = ((frame or {}).get("focus_x"), (frame or {}).get("focus_y"),
+                (frame or {}).get("mode") or "crop")
+    fx = edl.get("effects") or {}
+    junctions = set()
+    if fx.get("transition"):
+        try:
+            junctions = transition_junctions(edl, index)
+        except Exception:
+            junctions = set()
+    covers = []
+    for ov in edl.get("overlays") or []:
+        if ov.get("fit") == "cover" or ov.get("screen"):
+            a = _num(ov.get("start"))
+            covers.append((a, a + _num(ov.get("duration_s"))))
+    try:
+        cuts = renderer.camera_cuts(edl, index, tl, fps)
+    except Exception:
+        cuts = []
+    room = _crop_room(edl, index)
+    dt = 0.5 / fps
+    # Junction k sits between render blocks k and k+1; an insert at a keep
+    # boundary is a block of its own, so walk the blocks to number them.
+    block_of_seg, ins_j, pre = [], 0, 0.0
+    ins_at = [at for at, _d in getattr(tl, "ins", []) or []]
+    for i, L in enumerate(tl.seg_out_len):
+        while ins_j < len(ins_at) and ins_at[ins_j] <= pre + 1e-6:
+            ins_j += 1
+        block_of_seg.append(i + ins_j)
+        pre += L
+
+    def vcentre(z, c):
+        return (1.0 - 1.0 / z) * c + 0.5 / z
+
+    def aim(t):
+        for sp in track:
+            try:
+                if float(sp.get("t0", 0)) <= t <= float(sp.get("t1", 0)):
+                    return (sp["x"] if sp.get("x") is not None
+                            else base_aim[0],
+                            sp["y"] if sp.get("y") is not None
+                            else base_aim[1],
+                            sp.get("mode") or base_aim[2])
+            except (TypeError, ValueError):
+                continue
+        return base_aim
+
+    def aim_moved(p, q):
+        if p[2] != q[2]:
+            return True
+        return any(abs(_num(x, 0.5) - _num(y, 0.5)) >= JUMP_CUT_MIN_AIM
+                   for x, y in zip(p[:2], q[:2]))
+
+    found, released_at = [], None
+    for i in range(len(segs) - 1):
+        e0, s1 = float(segs[i][1]), float(segs[i + 1][0])
+        end = tl.offsets[i] + tl.seg_out_len[i]
+        c = tl.offsets[i + 1]
+        if c - end > 1e-6 or s1 - e0 <= 1e-3:
+            continue                    # an insert between, or one run
+        if shots:
+            sa = _shot_id_at(shots, e0 - 0.04)
+            sb = _shot_id_at(shots, s1 + 0.04)
+            if sa is None or sb is None or sa != sb:
+                continue                # a camera change, not a jump
+        if block_of_seg[i] in junctions:
+            continue
+        if any(a <= c - dt and b >= c + dt for a, b in covers):
+            continue
+        if aim_moved(aim(e0 - 1e-3), aim(s1 + 1e-3)):
+            continue
+        zb = renderer.zoom_state_at(zooms, c - dt, out_dur)
+        za = renderer.zoom_state_at(zooms, c + dt, out_dur)
+        scale = max(za[0], zb[0]) / max(1e-6, min(za[0], zb[0])) - 1.0
+        shift = max(abs(vcentre(za[0], za[1]) - vcentre(zb[0], zb[1])),
+                    abs(vcentre(za[0], za[2]) - vcentre(zb[0], zb[2])))
+        if scale >= JUMP_CUT_MIN_SCALE - 1e-6 or \
+                shift >= JUMP_CUT_MIN_SHIFT - 1e-6:
+            continue
+        if released_at is not None and abs(released_at - c) < 1e-3:
+            # The previous fix's punch releases back to the wide here.
+            released_at = None
+            found.append({"t": round(c, 2), "before": zb, "after": za,
+                          "fix": "covered by the punch above releasing "
+                                 "to the wide here"})
+            continue
+        released_at = None
+        nxt = next((x for x in cuts if x > c + 0.2), None)
+        nxt = min(out_dur, nxt if nxt is not None else c + 3.0)
+        across = [z for z in zooms
+                  if _num(z.get("start")) < c - dt and _num(z.get("end"))
+                  > c + dt and (z.get("mode") or "punch") != "shake"]
+        edge = [z.get("id") for z in zooms
+                if abs(_num(z.get("start")) - c) <= 2 * dt
+                or abs(_num(z.get("end")) - c) <= 2 * dt]
+        if room is not None and room < JUMP_CUT_MIN_SCALE:
+            fix = ("the source is already enlarged to the zoom limit, so no "
+                   "punch can step it — re-aim the crop on the cut "
+                   "(focus_track), land a graphic or caption-block change "
+                   "on it, or trim the jump")
+        elif max(za[0], zb[0]) < 1.02:
+            st = (JUMP_CUT_FIX_STRENGTH if room is None
+                  else round(min(JUMP_CUT_FIX_STRENGTH, room), 2))
+            fix = (f"punch in to {1 + st:.2f}x until {nxt:.2f}: add_zoom "
+                   f"start={c:.2f} end={nxt:.2f} strength={st:g} "
+                   f"mode='punch' ramp_s=0, aimed at the face")
+            released_at = nxt
+        elif across and not edge:
+            z = across[0]
+            fix = (f"zoom {z.get('id')} ({z.get('mode') or 'punch'}) runs "
+                   f"through it at {zb[0]:.2f}x — end it on the cut "
+                   f"(end={c:.2f}) so the cut steps back to the wide")
+        else:
+            # A punch too weak to read off the wide (the judged 0.05
+            # "covers") is fixed by its strength, not by its timing — and
+            # naming the zoom, not the numbers, lets the note group both cuts
+            # of one punch. Between two zoomed framings a stronger zoom can
+            # shrink the step, so that keeps the general line.
+            weak = None
+            if min(zb[0], za[0]) < 1.02:
+                weak = next((z for z in zooms if z.get("id") in edge
+                             and (z.get("mode") or "punch") != "shake"
+                             and _num(z.get("strength"), 0.25)
+                             < JUMP_CUT_FIX_STRENGTH - 1e-6), None)
+            st = (JUMP_CUT_FIX_STRENGTH if room is None
+                  else round(min(JUMP_CUT_FIX_STRENGTH, room), 2))
+            who = f" (zoom {', '.join(map(str, edge))})" if edge else ""
+            if weak is not None and st > _num(weak.get("strength"), 0.25):
+                fix = (f"zoom {weak.get('id')} steps the framing only "
+                       f"{scale * 100:.0f}% — raise its strength to {st:g}")
+            else:
+                fix = (f"the framing steps only {zb[0]:.2f}x → "
+                       f"{za[0]:.2f}x ({scale * 100:.0f}%){who} — make that "
+                       "step ≥8%, or release to the wide on the cut")
+        found.append({"t": round(c, 2), "before": zb, "after": za,
+                      "fix": fix})
+    return found
+
+
+def jump_cut_line(bare):
+    """The advisory sentence for uncovered_jump_cuts' rows, or ''."""
+    if not bare:
+        return ""
+    groups = []                         # [[times], fix] in order
+    for r in bare:
+        if groups and groups[-1][1] == r["fix"]:
+            groups[-1][0].append(r["t"])
+        else:
+            groups.append([[r["t"]], r["fix"]])
+    head = groups[:JUMP_CUT_LIST]
+    more = sum(len(g[0]) for g in groups[JUMP_CUT_LIST:])
+    return (f"{len(bare)} jump cut{'s' if len(bare) != 1 else ''} inside one "
+            "take keep the same framing on both sides (no ≥8% scale step or "
+            "crop move), so the head visibly pops: "
+            + "; ".join(", ".join(f"{t:g}s" for t in ts) + f" — {fix}"
+                        for ts, fix in head)
+            + (f"; (+{more} more)" if more else "")
+            + ". Optional: cover only the cuts whose pop distracts — "
+              "alternate tight and wide across consecutive jump cuts, or "
+              "re-aim the crop (a 5% punch reads as no change); a bare jump "
+              "cut is fine, and zooms are never a rule.")
+
+
 def critique(edl, index, tl, src_w=None, src_h=None, user_asked=""):
     """Craft findings for a rendered EDL. Returns a list of one-line strings.
 
@@ -524,6 +766,20 @@ def critique(edl, index, tl, src_w=None, src_h=None, user_asked=""):
                 f"'{m}' — repetition with no variation reads as an automated "
                 "pass, not an edit. Vary strength and mode (a slow push_in "
                 "under a line, one hard punch on the peak).")
+
+    # ── jump cuts the framing leaves bare ────────────────────────────────
+    # The cut-hygiene judges (Oct 2026): a jump cut inside one take with no
+    # framing change of at least ~8% (or a crop move) across it pops the
+    # head in place. Named one by one, each with a possible fix — advisory
+    # only: the owner wants zooms optional, never a rule.
+    if not any(k in ask for k in ("no zoom", "without zoom", "no punch",
+                                  "no camera move", "keep the jump cut")):
+        try:
+            bare = uncovered_jump_cuts(edl, index, tl)
+        except Exception:
+            bare = []
+        if bare:
+            add(jump_cut_line(bare))
 
     # ── junction effects ─────────────────────────────────────────────────
     trans = fx.get("transition") or None

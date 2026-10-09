@@ -48,7 +48,7 @@ punches.
   for cuts between ideas or sections, B-roll returns and the hook — not for
   every jump cut, where a stream of landings makes the camera bounce.
 - `ease` — a smooth ramp in, hold and ramp out: a gentle reframe onto a
-  subject mid-shot.
+  subject mid-shot. Its ramps never straddle a cut: see EDGES ON CUTS.
 - `push_in` — a slow continuous push, strength 0.05–0.12, across holds of
   3 s or more, so long statements never sit frozen; `pull_out` is the
   release or reveal.
@@ -61,7 +61,22 @@ punches.
   Cover them with ALTERNATING FRAMING — a punch (hard step, `ramp_s=0` when
   the schema offers it) from one cut to the next at strength 0.12–0.2, then
   back to the wide at the following cut, aimed at the face — so the edit
-  reads as two cameras. Not every jump cut needs a change.
+  reads as two cameras. A cover is a framing step of at least ~8% across
+  the cut (0.05 punches and two zooms of nearly equal strength read as the
+  same frame with the head popping) or a crop move; the render's taste
+  notes list each bare jump cut with a one-line fix — an option, not an
+  order. Not every jump cut needs a change: zooms are optional and each
+  one needs an editorial reason; a camera that moves on every cut looks
+  childish, and a bare jump cut is fine where the pop does not distract.
+- EDGES ON CUTS: a zoom start or end within 4 frames of a cut (a jump, a
+  camera change, an insert edge, a crop re-aim, or the programme's last
+  frame) is moved ONTO the cut and holds through it: an `ease` ending on a
+  cut stays pushed in to the cut's last frame instead of releasing over it,
+  and a `punch` or `ease` starting on a cut is already in on the cut's
+  first frame — unless the frame before the cut is already pushed in about
+  as far (a punch ending there), when it ramps up from the wide so the cut
+  still steps. Put edges on cuts and let the cut change the framing; to
+  release BEFORE a cut on purpose, end the zoom at least 0.2 s earlier.
 - On a hero moment the camera supports the graphic leader: a punch or pulse
   on the same frame as the word slam (and its sound, when that landing
   earns one). A deliberate hook

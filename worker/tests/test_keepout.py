@@ -757,3 +757,21 @@ def test_estimated_counter_sizes_its_figure_and_label():
     assert free[1] < 0.08 and held[1] == pytest.approx(0.08)
     assert held[3] - held[1] == pytest.approx(free[3] - free[1])
     assert keepout.nominal_ink("counter", spec, jobs, frame=(1920, 1080)) == free
+
+
+def test_face_track_follows_the_camera_as_rendered_held_through_a_cut():
+    # a punch authored to end 3 frames before a jump cut renders held to the
+    # cut (renderer.camera_zooms): the face the keep-out compares is still
+    # the zoomed one in those frames
+    zoom = {"id": "z1", "start": 2.0, "end": 4.9, "strength": 0.2, "mode": "punch",
+            "ramp_s": 0, "cx": 0.5, "cy": 0.3}
+    edl = _edl(keep=((10.0, 15.0), (16.0, 30.0)),
+               frame={"ratio": "9:16", "mode": "crop", "focus_x": 0.38}, zooms=[zoom])
+    head = [0.32, 0.2, 0.48, 0.5]
+    index = _index([{"t": 10.0 + k * 0.5, "faces": [head]} for k in range(40)],
+                   video=dict(VIDEO, fps=30.0))
+    track = keepout.face_track(edl, index, 1080, 1920, 4.0, 4.99)
+    zoomed = [f[3] - f[1] for t, faces in track if t < 4.85 for f in faces]
+    held = [f[3] - f[1] for t, faces in track if 4.91 < t < 5.0 for f in faces]
+    assert zoomed and held and min(held) == pytest.approx(max(zoomed), abs=0.002)
+    assert min(held) > 0.3 * 1.15
