@@ -27,6 +27,7 @@ The coordinator assigns one Look and one structure per short. The editor reads
 | Hook as text | the hook line complete and readable on screen by 1.5 s (about 5% of frame height or more, not a slow typewriter); it poses the tension, never states or quotes the payoff, never contradicts the words under it |
 | Speaker identity | each speaker named within ~3 s of first appearing (`lower_third` or the headline band: verified name plus role, venue or year) |
 | Meaning | each graphic means what the speaker means: a tick is "achieved" (broken promises and myths take `mark='cross'`), slams go on information-bearing words, never on clichés, and no graphic only recaps an earlier one |
+| Graphic choice | contrast punchlines as a two-beat swap (setup words, then payoff words, each on its onset); counters only for counted or growing quantities and landing ON the number; list items share one type role; zones rotate (above head, beside face, chest, header) and stay off the face; at least one hero word behind the subject when the background allows; no caption-only stretch over ~3 s in the last third |
 | Visual change | something changes every 0.3-0.6 s (caption cue, graphic, zoom, cut); a structural event (cut, zoom, graphic, B-roll) every 1.5-2.5 s |
 | Hero moments | 2-4 designed beats on exact word cues (Kinetic Poster, Mono Noir, Creator Glow: 3-6) |
 | Payoff | marked (type, sound or camera; the owner's song's button when music is on) and held 1.0-1.5 s before the editorial end |

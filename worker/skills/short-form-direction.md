@@ -170,6 +170,30 @@ THE PREMIUM SHORT-FORM GRAMMAR — targets you can measure in the render:
    comment keyword or a promised resource; `save_cta` is the identity-free
    option.
 
+GRAPHIC CHOICE PLAYBOOK — pick by what the line does, not by habit:
+- A contrast punchline ("promised flying cars … got 140 characters") is a
+  two-beat swap: the setup words land as type on their onset, then a hard
+  swap to the payoff words on theirs. A `counter` only for a quantity that
+  grows or is counted; it lands ON the spoken number, and that number is not
+  also in the caption at the same moment.
+- Items of one list share one type role; only the last may escalate.
+- The hook is the speaker's own strongest line (verbatim, or its sharpest
+  words) or a preview of the payoff set as an editorial lockup — not an
+  invented question banner.
+- Rotate the zone a graphic uses (above the head, beside the face, the chest
+  band, a header band) — never the same zone more than twice running — and
+  keep every graphic off the face and mouth. Use text BEHIND the subject
+  (`layer='behind_subject'`) for at least one hero word when the background
+  leaves room; it is the references' most frequent premium device.
+- In a card or letterbox layout, the header band carries a small persistent
+  headline (who + the claim) that beat graphics replace and hand back to; it
+  is never left empty for seconds.
+- No stretch of more than ~3 s with only body captions in the last third:
+  build into the payoff (a push-in, a setup beat), never sag before it.
+- A reaction tail at the end holds at least ~1 s, or is left out.
+- After cutting, re-read the kept transcript once: no dangling "But/And" at
+  a join, no claim that needs context you removed.
+
 BUILD ORDER — write in a few atomic passes, not forty serial calls:
 1. Story: keep/order the micro-story, remove fillers and dead pauses
    (cutting). Loudness mastering and dialogue leveling are automatic on the
