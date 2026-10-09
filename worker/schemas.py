@@ -226,7 +226,8 @@ class CaptionStyle(BaseModel):
     # transcript captions are drawn by the motion engine instead of libass;
     # color/highlight_color/font/size/uppercase/position/anchor_y still apply.
     motion_look: Optional[Literal["pop", "box", "clean", "serif", "glow",
-                                  "stack", "mono"]] = None
+                                  "stack", "mono", "editorial",
+                                  "lockup"]] = None
     # Continuous fine-tune multiplier on top of the `size` bucket (0.5-3.0).
     # Magnitudes belong on a continuous scale, not a 4-value enum — this is the
     # knob for "a little bigger" / "way bigger" without jumping buckets. The

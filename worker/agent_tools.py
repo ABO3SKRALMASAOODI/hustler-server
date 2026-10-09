@@ -3488,6 +3488,36 @@ def _fixed_text_band(ctx, edl, out_start, out_end, preferred="middle",
     return band, len(rows), unsafe, None
 
 
+def _motion_captions_on():
+    """Browser-drawn (motion-engine) captions can be the default here.
+
+    MOTION_CAPTIONS_DEFAULT=0 is the operator kill switch; without the
+    engine the libass presets remain the default exactly as before."""
+    if os.getenv("MOTION_CAPTIONS_DEFAULT", "1").strip().lower() in (
+            "0", "false", "off", "no"):
+        return False
+    try:
+        return bool(motion_tools.motion_engine.available())
+    except Exception:
+        return False
+
+
+# The motion look that carries the same grammar as a libass preset — used
+# when the independent type director picks a preset for a brief whose
+# deterministic default is a motion look. None keeps the preset rendering
+# (panel subtitles, news lower-thirds, retro display, the legacy look).
+_MOTION_LOOK_FOR_PRESET = {
+    "beast": "pop", "impact": "pop", "spotlight": "pop", "karaoke": "box",
+    "neon": "glow", "luxe": "serif", "elegant": "serif", "lyric": "serif",
+    "editorial": "serif", "clean": "clean", "composed": "clean",
+    "documentary": None, "broadcast": None, "retro": None, "classic": None,
+}
+
+
+def _motion_look_for_preset(preset, default):
+    return _MOTION_LOOK_FOR_PRESET.get(preset, default)
+
+
 def _direct_caption_style(ctx, edl):
     """Choose one coherent caption grammar from measurable format + brief.
 
@@ -3531,6 +3561,13 @@ def _direct_caption_style(ctx, edl):
     def hit(*needles):
         return any(n in ask for n in needles)
 
+    motion_ok = _motion_captions_on()
+
+    def mo(style, look):
+        # The preset stays as the libass fallback; motion_look is what renders
+        # when the browser engine is available (worker/motion_captions.py).
+        return dict(style, motion_look=look) if motion_ok and look else style
+
     if hit("classic subtitles", "legacy subtitles", "basic subtitles",
            "captions بسيطة"):
         return {"preset": "classic", "size": "m"}, \
@@ -3546,50 +3583,53 @@ def _direct_caption_style(ctx, edl):
         return {"preset": "retro"}, \
             "the requested retro treatment needs condensed outlined display type"
     if hit("neon", "cyber", "cyberpunk", "electric glow"):
-        return {"preset": "neon", "highlight_color": "#7DEBFF"}, \
+        return mo({"preset": "neon", "highlight_color": "#7DEBFF"}, "glow"), \
             "the requested neon treatment needs one coherent cool glow accent"
-    if hit("plain captions", "simple captions", "minimal captions", "clean",
-           "aesthetic", "premium", "nice captions", "good captions",
+    if hit("plain captions", "simple captions", "minimal captions", "clean"):
+        return mo({"preset": "stacked", "emphasis": "big", "animation": "fade",
+                   "layout": "stack"}, "clean"), \
+            "the brief asks for calm, clean modern type"
+    if hit("aesthetic", "premium", "nice captions", "good captions",
            "beautiful captions"):
-        return {"preset": "stacked", "emphasis": "big", "animation": "fade",
-                "layout": "stack"}, \
-            "the brief asks for modern stacked 1-2 word type with a fade"
+        return mo({"preset": "stacked", "emphasis": "big", "animation": "fade",
+                   "layout": "stack"}, "editorial"), \
+            "the brief asks for premium editorial type with a serif accent"
     if hit("luxury", "luxurious", "premium brand", "expensive", "jewelry",
            "jewellery", "watch ad"):
-        return {"preset": "luxe", "highlight_color": "#E2BE72"}, \
+        return mo({"preset": "luxe", "highlight_color": "#E2BE72"}, "serif"), \
             "luxury/product language calls for restrained serif type and gold accents"
     if hit("fashion", "editorial", "runway", "magazine", "beauty campaign"):
-        return {"preset": "fashion", "highlight_color": "#FF5B91"}, \
+        return mo({"preset": "fashion", "highlight_color": "#FF5B91"}, "editorial"), \
             "fashion/editorial content benefits from a wide magazine-like display face"
     if hit("sports", "gym", "workout", "gaming", "gameplay", "hype",
            "meme", "high energy", "energetic"):
-        return {"preset": "impact", "highlight_color": "#B7FF3C"}, \
+        return mo({"preset": "impact", "highlight_color": "#B7FF3C"}, "pop"), \
             "high-energy footage needs compact, forceful type that survives motion"
     if hit("lyrics", "lyric", "song edit", "music video", "singing"):
         return {"preset": "lyric", "highlight_color": "#E2BE72"}, \
             "music/lyric footage calls for phrase-led display type and a distinct stressed word"
     if hit("wedding", "cinematic", "travel film", "calm",
            "emotional", "storytelling"):
-        return {"preset": "editorial", "highlight_color": "#F2D1A0"}, \
+        return mo({"preset": "editorial", "highlight_color": "#F2D1A0"}, "serif"), \
             "calm/cinematic footage needs air and a quiet serif hierarchy"
     if hit("tutorial", "screen recording", "software", "saas", "tech",
            "product demo", "explainer", "educational", "business"):
-        return {"preset": "stacked", "emphasis": "big", "animation": "fade",
-                "layout": "stack"}, \
-            "tutorial/business speech still reads as 1-2 stacked words, not a subtitle block"
+        return mo({"preset": "stacked", "emphasis": "big", "animation": "fade",
+                   "layout": "stack"}, "clean"), \
+            "tutorial/business speech reads best as calm, clean phrases"
     if hit("podcast", "interview", "talking head", "reel", "viral",
            "creator", "cool captions") or speakers >= 2:
-        return {"preset": "stacked", "emphasis": "big", "animation": "fade",
-                "layout": "stack"}, \
-            "talking-head captions stay modern: 1-2 words, stacked, fade in"
+        return mo({"preset": "stacked", "emphasis": "big", "animation": "fade",
+                   "layout": "stack"}, "editorial"), \
+            "talking-head captions stay modern: editorial type with a serif accent"
     if short_form:
-        return {"preset": "stacked", "emphasis": "big", "animation": "fade",
-                "layout": "stack"}, \
+        return mo({"preset": "stacked", "emphasis": "big", "animation": "fade",
+                   "layout": "stack"}, "editorial"), \
             f"the measured vertical short-form pace is {wpm:.0f} words/minute"
     if out_dur <= 90.0:
-        return {"preset": "stacked", "emphasis": "big", "animation": "fade",
-                "layout": "stack"}, \
-            "a short piece uses stacked 1-2 word captions, not a sentence block"
+        return mo({"preset": "stacked", "emphasis": "big", "animation": "fade",
+                   "layout": "stack"}, "clean"), \
+            "a short piece uses calm modern phrases, not a sentence block"
     return {"preset": "documentary"}, \
         "long-form footage benefits from readable subtitles on a stable contrast panel"
 
@@ -4154,10 +4194,25 @@ def add_captions(ctx, mode=None, items=None, style=None,
                     else:
                         _metric(ctx, "caption_visual_cast_fallbacks")
             chosen = cast.get("style") if cast else fallback
+            motion_note = ""
+            if cast and isinstance(chosen, dict) and \
+                    isinstance(fallback, dict) and \
+                    fallback.get("motion_look") and \
+                    not chosen.get("motion_look"):
+                # The director judged libass preset proofs; when this brief
+                # defaults to browser-drawn captions, render the motion look
+                # carrying the same grammar (the preset stays the fallback).
+                look = _motion_look_for_preset(chosen.get("preset"),
+                                               fallback["motion_look"])
+                if look:
+                    chosen = dict(chosen, motion_look=look)
+                    motion_note = (f"\nRendered with the browser motion "
+                                   f"caption look '{look}'.")
             parsed_style = _parse_style(chosen)
             if isinstance(parsed_style, str):
                 cast = None
                 chosen = fallback
+                motion_note = ""
                 parsed_style = _parse_style(chosen)
             if cast:
                 caption_source = "independent_catalog_cast"
@@ -4179,20 +4234,25 @@ def add_captions(ctx, mode=None, items=None, style=None,
                     f"\nIndependent "
                     f"{'real-pixel ' if pixel_cast else ''}caption "
                     f"treatment: {cast['preset']} — "
-                    f"{cast['reason']}.")
+                    f"{cast['reason']}.{motion_note}")
             else:
                 caption_source = "deterministic_fallback"
                 directed_style_note = (
                     f"\nAuto-directed caption fallback: "
-                    f"{chosen['preset']} — {why}.")
+                    f"{chosen['preset']} — {why}." + (
+                        f" Rendered with the browser motion caption look "
+                        f"'{chosen['motion_look']}'."
+                        if chosen.get("motion_look") else ""))
             placement_locked = any(
                 (parsed_style or {}).get(key) is not None
                 for key in ("position", "anchor_y"))
         preset = (parsed_style or {}).get("preset")
         premium = preset and preset != "classic"
+        motion_look = (parsed_style or {}).get("motion_look")
         # Default modern captions to 1-2 words. Long-form subtitle families
-        # keep their own phrase length unless the caller set max_words.
-        if mw is None and preset not in (
+        # keep their own phrase length unless the caller set max_words, and a
+        # motion look owns its phrase grammar (worker/motion_captions.LOOKS).
+        if mw is None and not motion_look and preset not in (
                 "documentary", "broadcast", "elegant"):
             mw = 2
         # Caption geometry is compiled from pixels, not guessed from a global
@@ -4259,7 +4319,7 @@ def add_captions(ctx, mode=None, items=None, style=None,
             karaoke_note += (f"\nNote: preset '{preset}' animates word-by-"
                              "word — the 'animation' entrance style only "
                              "applies to static looks and is ignored here.")
-        if emphasis_words and not premium:
+        if emphasis_words and not premium and not motion_look:
             karaoke_note += ("\nNote: emphasis_words only take effect with "
                             "a premium preset — pass style "
                             "{preset:'clean'} to "
@@ -4308,7 +4368,7 @@ def add_captions(ctx, mode=None, items=None, style=None,
                 "video is mostly music, say so to the user.")
         auto_emphasis = False
         emphasis_mode = None
-        if premium and emphasis_words is None:
+        if (premium or motion_look) and emphasis_words is None:
             # A premium preset without hierarchy was the dominant production
             # failure: the model omitted an optional argument, so the most
             # important part of the design simply never activated. Make the
@@ -4322,7 +4382,7 @@ def add_captions(ctx, mode=None, items=None, style=None,
                 karaoke_note += (f"\nAutomatically selected "
                                   f"{len(emphasis_words)} semantic emphasis "
                                   "word(s) from the kept transcript.")
-        elif premium:
+        elif premium or motion_look:
             emphasis_mode = "manual" if emphasis_words else "off"
         cfg = {"mode": "from_transcript",
                "design_version": CAPTION_DESIGN_VERSION,
@@ -4365,6 +4425,8 @@ def add_captions(ctx, mode=None, items=None, style=None,
         desc = "captions from transcript enabled"
         if premium:
             desc += f", preset {preset}"
+        if motion_look:
+            desc += f", motion look {motion_look}"
         if mw:
             desc += f", <= {mw} words each"
         if emphasis_words:
@@ -4620,13 +4682,26 @@ def set_caption_style(ctx, style=None, emphasis_words=None,
         merged["design_version"] = CAPTION_DESIGN_VERSION
     # the EFFECTIVE premium preset after the patch ('classic' = legacy)
     eff_preset = None
+    eff_motion = None
     if isinstance(merged, dict):
         eff_preset = (merged.get("style") or {}).get("preset")
         if eff_preset == "classic":
             eff_preset = None
+        eff_motion = (merged.get("style") or {}).get("motion_look")
+    motion_note = ""
+    if eff_motion and partial.get("motion_look") and isinstance(caps, dict) \
+            and not (caps.get("style") or {}).get("motion_look") \
+            and merged.get("max_words_per_caption") == 2:
+        # 2 was add_captions' stacked-preset default, not a user phrase cap:
+        # turning a motion look on hands phrasing to the look's own grammar.
+        merged["max_words_per_caption"] = None
+        motion_note = (f"\nMotion look '{eff_motion}' now groups phrases "
+                       "with its own grammar (the stacked 2-word default "
+                       "was lifted).")
     emph_note = ""
     auto_emphasis = False
-    if emphasis_words is None and eff_preset and isinstance(merged, dict) \
+    if emphasis_words is None and (eff_preset or eff_motion) \
+            and isinstance(merged, dict) \
             and not merged.get("emphasis_words") \
             and merged.get("emphasis_mode") != "off":
         auto = _auto_caption_emphasis(ctx, edl)
@@ -4640,7 +4715,7 @@ def set_caption_style(ctx, style=None, emphasis_words=None,
         if isinstance(merged, dict):
             merged["emphasis_words"] = emphasis_words or None
             merged["emphasis_mode"] = "manual" if emphasis_words else "off"
-            if emphasis_words and not eff_preset:
+            if emphasis_words and not eff_preset and not eff_motion:
                 emph_note = ("\nNote: emphasis_words only take effect with "
                              "a premium preset — set style "
                              "{preset:'clean'} to "
@@ -4733,7 +4808,7 @@ def set_caption_style(ctx, style=None, emphasis_words=None,
     result = ctx.write_edl(edl, desc)
     if result.startswith("EDL v"):
         _trace_caption_state(ctx, edl["captions"], "style_update")
-    result += karaoke_note + emph_note
+    result += karaoke_note + emph_note + motion_note
     if cleared_adaptive_placement:
         result += ("\nCaption placement is locked for the whole video; the "
                    "previous shot-aware position changes were removed.")
@@ -21855,15 +21930,30 @@ CAPTION_ANIMS = ["none", "fade", "pop", "slide_up", "punch", "blur_in",
                  "swing", "zoom_blur"]
 _STYLE_PROPS = {
     "motion_look": {"type": "string",
-                    "enum": ["pop", "box", "clean", "serif", "glow", "stack", "mono"],
-                    "description": "Premium browser-rendered caption look (spring/blur word "
-                                   "animation, glow, real highlight boxes): pop = bold 1-3 word "
-                                   "punches with accent spoken word; box = phrase pill with gliding "
-                                   "highlight; clean = quiet premium sentence case; serif = accent "
-                                   "serif-italic emphasis words; glow = karaoke light-up; stack = "
-                                   "hero word slam under small connectors; mono = typewriter. "
-                                   "Overrides preset rendering; color/highlight_color/font/size/"
-                                   "uppercase/position still apply. Set null to return to presets."},
+                    "enum": ["editorial", "clean", "lockup", "pop", "box", "serif",
+                             "glow", "stack", "mono"],
+                    "description": "Browser-drawn premium caption look (the DEFAULT for "
+                                   "short-form/podcast/premium requests; words reveal IN PLACE "
+                                   "inside a pre-laid-out phrase, near-white type with a soft "
+                                   "shadow, emphasis_words carry the hierarchy): editorial = "
+                                   "tight bold grotesk, the emphasis word becomes a big serif "
+                                   "italic tucked above/below the line, hard pops on the spoken "
+                                   "onset (flagship podcast/reel look); clean = calm sentence "
+                                   "case, words rise out of a blur, warm accent on emphasis "
+                                   "(interviews, tutorials, documentary); lockup = small caps "
+                                   "connectors over ONE huge hero word that ghost-snaps in "
+                                   "(motivational, punchy); pop = bold outlined 1-3 word hype "
+                                   "captions, spoken word punches in the accent colour (sport, "
+                                   "gaming, memes); box = phrase pill with a highlight gliding "
+                                   "word to word; serif = gold serif-italic emphasis inline "
+                                   "(calm, cinematic, luxury); glow = karaoke light-up; stack = "
+                                   "giant condensed hero word slam (loud lockup); mono = "
+                                   "typewriter with caret (tech). Replaces preset rendering "
+                                   "(the preset stays the fallback); color, highlight_color "
+                                   "(accent), font, size/size_scale, uppercase, text_align, "
+                                   "position/anchor_y and animation:'none' (hard pops, hard "
+                                   "clears) still apply. Phrase length follows the look. Set "
+                                   "null to return to presets."},
     "preset": {"type": "string", "enum": CAPTION_PRESETS},
     "color": {"type": "string"},
     "size": {"type": "string", "enum": ["s", "m", "l", "xl"]},
@@ -22576,9 +22666,20 @@ TOOLS = {
                      "typography), plus stacked/iridescent/chrome/editorial/"
                      "fashion/luxe/impact/retro/neon composed looks; "
                      "'classic' is the "
-                     "plain legacy look. If style is omitted, the tool "
-                     "chooses a coherent preset deterministically "
-                     "from the measured format, speech pace and brief — it "
+                     "plain legacy look. MOTION LOOKS (style.motion_look, "
+                     "browser-drawn, the premium default where available): "
+                     "'editorial' (bold grotesk + big serif-italic emphasis "
+                     "word tucked above/below the line, hard pops — podcasts, "
+                     "reels, premium), 'clean' (calm sentence case rising out "
+                     "of a blur — interviews, tutorials), 'lockup' (small caps "
+                     "connectors over ONE huge hero word), 'pop' (outlined "
+                     "hype punches), plus box/serif/glow/stack/mono; words "
+                     "reveal in place on their spoken onset and phrases clear "
+                     "on pauses. If style is omitted, the tool "
+                     "chooses a coherent treatment deterministically "
+                     "from the measured format, speech pace and brief (a "
+                     "motion look for short-form/podcast/premium briefs, with "
+                     "the preset kept as the fallback) — it "
                      "does not make every project wear the same caption skin. "
                      "PLACEMENT: multi-word presets default to the BOTTOM, "
                      "clear of the face — do not move them to 'middle'; "
@@ -22605,11 +22706,13 @@ TOOLS = {
                      "single_line:true to guarantee one rendered row per "
                      "transcript-caption state regardless of the preset's "
                      "normal flow/stack layout, max_words_per_caption 1-16. "
-                     "Default modern look is 1-2 words at a time, stacked "
-                     "levels, fade in (preset 'stacked', max_words_per_caption "
-                     "2) — not a sentence subtitle. Example — modern reel "
-                     "captions: {mode:'from_transcript', style:{preset:"
-                     "'stacked', animation:'fade'}, max_words_per_caption:2}. "
+                     "Without a motion look the default modern preset is 1-2 "
+                     "words at a time, stacked levels, fade in (preset "
+                     "'stacked', max_words_per_caption 2) — not a sentence "
+                     "subtitle; a motion look groups its own phrases (pass "
+                     "max_words_per_caption only to narrow them). Example — "
+                     "premium reel captions: {mode:'from_transcript', style:"
+                     "{motion_look:'editorial', preset:'stacked'}}. "
                      "Example — dictated title card: "
                      "{items:[{text:'CHAPTER ONE', start:0, end:2.5, "
                      "style:{preset:'beast'}}]}. Stack presets (stacked/"
@@ -22881,11 +22984,17 @@ TOOLS = {
     "set_caption_style": (set_caption_style, "Change how existing captions "
                           "LOOK without touching their text or timing. Pass "
                           "only the fields to change: 'make the captions "
-                          "premium/viral' -> {\"style\":{\"preset\":"
-                          "\"clean\"}} (see add_captions for the preset "
-                          "menu: clean/documentary/broadcast/podcast/beast/"
-                          "karaoke/spotlight/elegant/"
-                          "stacked/.../classic), "
+                          "premium' -> {\"style\":{\"motion_look\":"
+                          "\"editorial\"}}, 'calmer/cleaner' -> "
+                          "{\"style\":{\"motion_look\":\"clean\"}}, "
+                          "'more hype/viral' -> {\"style\":{\"motion_look\":"
+                          "\"pop\"}}, 'big hero words' -> {\"style\":"
+                          "{\"motion_look\":\"lockup\"}} (motion looks are "
+                          "browser-drawn; see add_captions for them and for "
+                          "the preset menu: clean/documentary/broadcast/"
+                          "podcast/beast/karaoke/spotlight/elegant/"
+                          "stacked/.../classic; motion_look:null returns to "
+                          "the preset), "
                           "'make it red' -> {\"style\":{\"color\":"
                           "\"#FF0000\"}}, 'center the captions' -> "
                           '{"style":{"position":"middle"}}, '
