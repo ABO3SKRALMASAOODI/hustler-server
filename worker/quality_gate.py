@@ -147,14 +147,11 @@ def advisory_findings(previous: Dict[str, Any], proposed: Dict[str, Any],
 
     new_sfx = _new_items(previous, proposed, "sfx")
     if new_sfx:
-        all_sfx = sorted(_items(proposed, "sfx"),
-                         key=lambda x: float(x.get("at") or 0.0))
+        # spaced by where each sound HITS (a library one starts early)
+        all_sfx = sorted(_items(proposed, "sfx"), key=taste.sfx_time)
         new_ids = {str(x.get("id")) for x in new_sfx}
         for a, b in zip(all_sfx, all_sfx[1:]):
-            try:
-                gap = float(b.get("at")) - float(a.get("at"))
-            except (TypeError, ValueError):
-                continue
+            gap = taste.sfx_time(b) - taste.sfx_time(a)
             # A motion graphic's own layered cues (whoosh into pop), sounds of
             # DIFFERENT roles (a whoosh pre-rolled into an impact) and sounds
             # stacked on one instant are one designed hit, not two

@@ -82,20 +82,44 @@ def test_approved_files_are_untouched_and_timing_fields_are_measured():
         if r.get("max_s") is not None:
             # a tail cap ends after the hit and before the file does
             assert r["peak_s"] + 0.2 < r["max_s"] < r["duration_s"] - 0.15, r["id"]
-    # the long boom that rang under the next line stops ~0.5 s after its hit
+    # the long boom that rang under the next line stops ~0.6 s after its hit
     assert sound_library.max_s("impact_1") == 1.25
     # risers end on their peak and typing runs to its last keystroke: no cap
     for sid in ("riser_1", "riser_2", "riser_3", "riser_4", "typing_1", "typing_2"):
         assert sound_library.max_s(sid) is None, sid
     # typing plays UNDER its action from the first keystroke
     assert sound_library.hit_s("typing_1") == sound_library.hit_s("typing_2") == 0.0
-    assert sound_library.hit_s("impact_1") == sound_library.peak_s("impact_1") == 0.755
+    # the boom reaches full level ~0.69 s in (where the judges heard it); its
+    # loudest 10 ms, a fluctuation inside the boom, is later
+    assert sound_library.hit_s("impact_1") == 0.69 and sound_library.peak_s("impact_1") == 0.755
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg not on PATH")
+def test_hit_times_are_measured_from_the_recordings():
+    import numpy as np
+    for r in sound_library.catalog():
+        raw = subprocess.run(["ffmpeg", "-v", "error", "-i", sound_library.path(r["id"]),
+                              "-ac", "1", "-ar", "48000", "-f", "f32le", "-"],
+                             capture_output=True, check=True).stdout
+        x = np.frombuffer(raw, dtype=np.float32)
+        win, hop = 480, 48                                  # 10 ms, every 1 ms
+        env = np.array([20 * np.log10(np.sqrt(np.mean(x[k:k + win] ** 2)) + 1e-9)
+                        for k in range(0, max(1, len(x) - win), hop)])
+        t = (np.arange(len(env)) * hop + win / 2) / 48000.0
+        # peak_s is the loudest 10 ms (shutter_1's once named its quieter
+        # second click, 85 ms after the shutter)
+        assert abs(r["peak_s"] - t[int(np.argmax(env))]) <= 0.01, r["id"]
+        if r.get("hit_s") is not None:
+            # an override is where the sound reaches full level, clearly
+            # before a later loudest fluctuation
+            attack = t[int(np.nonzero(env >= env.max() - 1.0)[0][0])]
+            assert abs(r["hit_s"] - attack) <= 0.015 and r["hit_s"] < r["peak_s"] - 0.04, r["id"]
 
 
 def test_listing_tells_the_agent_where_each_sound_peaks():
     listing = motion_tools.list_sound_library(None)
     assert "should HIT" in listing
-    assert "sound:impact_1 [impact, 2.624s, peaks 0.755s in, stops by default 1.25s in" in listing
+    assert "sound:impact_1 [impact, 2.624s, hits 0.69s in, stops by default 1.25s in" in listing
     assert "sound:typing_1 [typing, 3.498s, plays from its first sound" in listing
 
 
@@ -114,11 +138,11 @@ def test_every_library_hit_lands_on_the_requested_time(sid):
 def test_peak_preroll_and_negative_preroll_skip_into_the_file():
     # the judged failure: impact_1 placed by file start hit 0.69 s late
     pl = sound_library.place("impact_1", 13.45)
-    assert abs(pl["at"] - 12.695) <= GRID and pl["offset_s"] is None
-    assert pl["lead_s"] == 0.755
+    assert abs(pl["at"] - 12.76) <= GRID and pl["offset_s"] is None
+    assert pl["lead_s"] == 0.69
     # too close to 0 s for the lead-in: start at 0, skip into the file
     pl = sound_library.place("impact_1", 0.3)
-    assert pl["at"] == 0.0 and pl["offset_s"] == 0.46 and abs(pl["lead_s"] - 0.3) < GRID
+    assert pl["at"] == 0.0 and pl["offset_s"] == 0.39 and abs(pl["lead_s"] - 0.3) < GRID
     # a riser ENDS on the moment
     pl = sound_library.place("riser_1", 5.0)
     assert pl["at"] == round(5.0 - 1.828, 2)
@@ -130,7 +154,7 @@ def test_peak_preroll_and_negative_preroll_skip_into_the_file():
 def test_tail_cap_is_the_default_play_length_and_dur_s_wins():
     assert sound_library.place("impact_1", 10.0)["dur_s"] == 1.25
     # the cap is file time: a skip into the file shortens what is left of it
-    assert sound_library.place("impact_1", 0.3)["dur_s"] == pytest.approx(1.25 - 0.46)
+    assert sound_library.place("impact_1", 0.3)["dur_s"] == pytest.approx(1.25 - 0.39)
     assert sound_library.place("impact_1", 10.0, dur_s=2.0)["dur_s"] == 2.0
     assert sound_library.place("whoosh_soft_1", 10.0)["dur_s"] is None
 
@@ -141,10 +165,10 @@ def test_add_sfx_library_reports_the_hit_and_stores_the_preroll(lib):
                               purpose="NEXT LEVEL slam")
     assert out.startswith("EDL v1"), out
     assert "HIT: its peak lands at 26.97s" in out
-    assert "0.76s early" in out and "measured fade point" in out
+    assert "0.69s early" in out and "measured fade point" in out
     s = ctx.sfx("sx1")
     assert s["storage_key"] == sound_library.asset_key(7, "impact_1")
-    assert s["at"] == round(26.97 - 0.755, 2) and s["dur_s"] == 1.25
+    assert s["at"] == round(26.97 - 0.69, 2) and s["dur_s"] == 1.25
     assert not s.get("offset_s")
     assert abs(sound_library.hit_at(s) - 26.97) <= GRID
     # the audit shows the hit next to the file start
@@ -192,12 +216,12 @@ def test_move_sfx_moves_the_hit_and_rederives_automatic_fields(lib):
     ctx = _Ctx()
     agent_tools.add_sfx(ctx, "sound:impact_1", at=0.3, gain_db=-9)
     s = ctx.sfx("sx1")
-    assert s["at"] == 0.0 and s["offset_s"] == 0.46 and s["dur_s"] == pytest.approx(0.79)
+    assert s["at"] == 0.0 and s["offset_s"] == 0.39 and s["dur_s"] == pytest.approx(0.86)
     out = agent_tools.move_sfx(ctx, "sx1", at=8.0)
-    assert out.startswith("EDL v2") and "-> 8s (starts 7.25s" in out, out
+    assert out.startswith("EDL v2") and "-> 8s (starts 7.31s" in out, out
     s = ctx.sfx("sx1")
     # the forced skip and its shortened cap are gone: the full lead-in plays
-    assert s["at"] == round(8.0 - 0.755, 2) and not s.get("offset_s")
+    assert s["at"] == round(8.0 - 0.69, 2) and not s.get("offset_s")
     assert s["dur_s"] == 1.25
     assert abs(sound_library.hit_at(s) - 8.0) <= GRID
     # a deliberate dur_s survives a move
@@ -232,6 +256,69 @@ def test_cuts_keep_a_library_hit_on_its_moment():
     edl4 = dict(edl, keep=[[0.0, 40.0]])
     remap_program_items(edl4, old, Timeline(edl4["keep"], []))
     assert edl4["sfx"][0]["at"] == edl["sfx"][0]["at"]
+
+
+def test_a_cut_moves_only_the_timing_of_older_library_sounds():
+    # placed by file start before peak timing existed: an impact near the end
+    # peaks past it, and plays its whole recording
+    key = sound_library.asset_key(7, "impact_1")
+    edl = validate_edl(dict(default_edl(30.0), sfx=[
+        {"id": "sx1", "storage_key": key, "at": 29.5, "gain_db": -9.0},
+        {"id": "sx2", "storage_key": key, "at": 10.0, "gain_db": -9.0}]), 30.0).model_dump()
+    cut = dict(edl, keep=[[0.0, 5.0], [6.0, 30.0]])
+    remap_program_items(cut, Timeline([[0.0, 30.0]], []), Timeline(cut["keep"], []))
+    # an unrelated cut keeps both (it starts inside the shorter edit)...
+    by_id = {s["id"]: s for s in cut["sfx"]}
+    assert by_id["sx1"]["at"] == 28.5 and by_id["sx2"]["at"] == 9.0
+    # ...and adds no tail cap the editor never chose: only the timing moved
+    assert not by_id["sx1"].get("dur_s") and not by_id["sx2"].get("dur_s")
+
+
+def test_a_deliberate_length_stops_at_the_same_point_in_the_file(lib):
+    ctx = _Ctx()
+    agent_tools.add_sfx(ctx, "sound:impact_1", at=0.3, gain_db=-9, dur_s=1.5)
+    s = ctx.sfx("sx1")
+    assert s["at"] == 0.0 and s["offset_s"] == 0.39 and s["dur_s"] == 1.5
+    stop = s["offset_s"] + s["dur_s"]
+    # moved clear of 0 s: the full lead-in returns and it still rings to the
+    # same point after its hit
+    agent_tools.move_sfx(ctx, "sx1", at=8.0)
+    s = ctx.sfx("sx1")
+    assert not s.get("offset_s") and s["dur_s"] == pytest.approx(stop)
+    agent_tools.move_sfx(ctx, "sx1", at=0.3)
+    s = ctx.sfx("sx1")
+    assert (s["offset_s"] or 0.0) + s["dur_s"] == pytest.approx(stop)
+
+
+def test_a_preserved_sound_lane_survives_a_cut_that_retimes_library_sounds():
+    import scope_guard
+    impact, whoosh = (sound_library.asset_key(7, sid) for sid in ("impact_1", "whoosh_soft_1"))
+    pl = sound_library.place("whoosh_soft_1", 0.2)          # skips into its file
+    prev = validate_edl(dict(default_edl(30.0), sfx=[
+        {"id": "sx1", "storage_key": impact, "at": 10.0, "gain_db": -9.0},
+        {"id": "sx2", "storage_key": whoosh, "at": pl["at"], "offset_s": pl["offset_s"],
+         "gain_db": -13.0}]), 30.0).model_dump()
+    ask = "add the photo at the start but don't touch the sound effects"
+    ins = {"id": "ins1", "asset_key": "img/7/0.png", "kind": "image",
+           "at_output_s": 0.0, "duration_s": 2.0}
+    new = dict(prev, inserts=[ins], sfx=[dict(s) for s in prev["sfx"]])
+    remap_program_items(new, Timeline([[0.0, 30.0]], []), Timeline(new["keep"], [ins]))
+    new = validate_edl(new, 30.0).model_dump()
+    # the whoosh no longer needs its skip, yet nothing the editor set changed
+    whoosh_new = next(s for s in new["sfx"] if s["id"] == "sx2")
+    assert not whoosh_new.get("offset_s") and abs(sound_library.hit_at(whoosh_new) - 2.2) <= GRID
+    assert scope_guard.preservation_violations(prev, new, ask) == []
+    louder = json_copy(new)
+    louder["sfx"][0]["gain_db"] = -3.0
+    assert scope_guard.preservation_violations(prev, louder, ask) == ["sound effects"]
+    longer = json_copy(new)
+    next(s for s in longer["sfx"] if s["id"] == "sx1")["dur_s"] = 0.9
+    assert scope_guard.preservation_violations(prev, longer, ask) == ["sound effects"]
+
+
+def json_copy(value):
+    import json
+    return json.loads(json.dumps(value))
 
 
 def test_a_junction_whoosh_follows_its_broll_entry():
@@ -269,6 +356,69 @@ def test_a_proof_window_keeps_a_hit_whose_lead_in_starts_before_it():
     assert s["dur_s"] == pytest.approx(pl["dur_s"] - (10.0 - pl["at"]), abs=0.002)
 
 
+def test_a_changed_sound_flags_the_seconds_up_to_its_hit():
+    import edl_diff
+    key = sound_library.asset_key(7, "riser_1")
+    pl = sound_library.place("riser_1", 12.0)                # starts 1.83 s early
+    prev = validate_edl(default_edl(30.0), 30.0).model_dump()
+    new = validate_edl(dict(prev, sfx=[{"id": "sx1", "storage_key": key, "at": pl["at"],
+                                        "gain_db": -14.0}]), 30.0).model_dump()
+    (rng,) = edl_diff.change_ranges(prev, new)["out_ranges"]
+    assert rng[0] == pytest.approx(pl["at"]) and rng[1] >= 12.0
+    # a plain upload keeps its short window from where it starts
+    up = validate_edl(dict(prev, sfx=[{"id": "sx1", "storage_key": "music/7/boom.wav",
+                                       "at": 12.0}]), 30.0).model_dump()
+    assert edl_diff.change_ranges(prev, up)["out_ranges"] == [[12.0, 12.6]]
+
+
+def test_audits_space_library_sounds_by_where_they_hit():
+    import quality_gate
+    import taste
+
+    def lib(sid, hit, n):
+        pl = sound_library.place(sid, hit)
+        return {"id": f"sx{n}", "storage_key": sound_library.asset_key(7, sid),
+                "at": pl["at"], "offset_s": pl["offset_s"], "gain_db": -13.0}
+
+    # two whooshes HITTING 0.2 s apart flam, though their files start 0.6 s apart
+    a, b = lib("whoosh_soft_1", 10.0, 1), lib("swish_1", 10.2, 2)
+    assert abs(b["at"] - a["at"]) > taste.SFX_MIN_SPACING_S
+    assert taste.sfx_muddy_pair(a, b)
+    prev = validate_edl(dict(default_edl(30.0), sfx=[a]), 30.0).model_dump()
+    new = validate_edl(dict(default_edl(30.0), sfx=[a, b]), 30.0).model_dump()
+    found = quality_gate.advisory_findings(prev, new, "")
+    assert any("0.20s apart" in f for f in found), found
+    # ...while two hitting 0.6 s apart are not one, though their files start
+    # 0.19 s apart
+    a, b = lib("whoosh_soft_1", 10.6, 1), lib("swish_1", 10.0, 2)
+    assert abs(b["at"] - a["at"]) < taste.SFX_MIN_SPACING_S
+    assert not taste.sfx_muddy_pair(a, b)
+    # an uploaded sound is still spaced from where it starts
+    assert taste.sfx_time({"at": 4.0, "storage_key": "music/7/boom.wav"}) == 4.0
+
+
+def test_the_listening_review_is_told_where_library_sounds_hit():
+    key = sound_library.asset_key(7, "impact_1")
+    pl = sound_library.place("impact_1", 12.0)
+    edl = {"sfx": [{"id": "sx1", "storage_key": key, "at": pl["at"], "dur_s": pl["dur_s"],
+                    "purpose": "payoff"},
+                   {"id": "sx2", "storage_key": "music/7/boom.wav", "at": 20.0}]}
+    # the excerpt holds the hit but not the file start
+    label = agent_tools._audio_window_label(edl, {}, 11.5, 14.0)
+    hit = sound_library.hit_at(edl["sfx"][0])
+    assert abs(hit - 12.0) <= GRID
+    assert f"SFX id=sx1 at={pl['at']:.2f}s hits={hit:.2f}s purpose=payoff" in label
+    context = agent_tools._audio_execution_context(edl, {})
+    assert f"hits={hit:.2f}s" in context and "SFX sx2 at=20.0s touches" in context
+
+
+def test_mcp_clients_are_not_told_to_preroll_by_hand():
+    path = os.path.join(os.path.dirname(__file__), "..", "..", "backend", "routes", "mcp.py")
+    text = " ".join(open(path).read().split())
+    assert "pre-rolled" not in text
+    assert "lands each recording's peak on `at`, so never pre-roll by hand" in text
+
+
 def test_backend_loads_the_remap_standalone():
     # routes/video.py loads worker/timeline.py by path without the worker on
     # sys.path; the library lookup must load by path there too.
@@ -287,7 +437,7 @@ tl = load('worker_timeline', 'timeline.py')
 lib = tl._sound_library()
 key = lib.asset_key(7, 'impact_1')
 edl = {{'keep': [[0.0, 26.5], [26.9, 40.0]], 'sfx': [{{'id': 'sx1', 'storage_key': key,
-       'at': 26.22, 'gain_db': -9.0}}]}}
+       'at': 26.28, 'gain_db': -9.0}}]}}
 tl.remap_program_items(edl, tl.Timeline([[0.0, 40.0]], []), tl.Timeline(edl['keep'], []))
 print(lib.__name__, lib.hit_at(edl['sfx'][0]))
 """
@@ -295,7 +445,7 @@ print(lib.__name__, lib.hit_at(edl['sfx'][0]))
                          cwd="/", timeout=60)
     assert out.returncode == 0, out.stderr
     name, hit = out.stdout.split()
-    assert name == "worker_sound_library" and abs(float(hit) - 26.575) <= GRID
+    assert name == "worker_sound_library" and abs(float(hit) - 26.57) <= GRID
 
 
 def _rendered_sfx(item, prog=20.0):
@@ -332,7 +482,10 @@ def test_rendered_peak_lands_on_the_requested_time(sid, hit):
             "offset_s": pl["offset_s"], "dur_s": pl["dur_s"], "gain_db": -9.0}
     _x, env, hop, win = _rendered_sfx(item)
     loudest = int(np.argmax(env)) * hop + win / 2
-    assert abs(loudest - hit) <= 0.03, (sid, hit, loudest)
+    # where it reaches full level (within 1 dB of its loudest)
+    attack = int(np.nonzero(env >= env.max() - 1.0)[0][0]) * hop + win / 2
+    assert abs(attack - hit) <= 0.045 and attack - 0.03 <= hit <= loudest + 0.03, \
+        (sid, hit, attack, loudest)
 
 
 @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg not on PATH")
@@ -342,9 +495,9 @@ def test_rendered_impact_tail_stops_at_its_fade_point():
     item = {"id": "a", "storage_key": sound_library.asset_key(7, "impact_1"),
             "at": pl["at"], "dur_s": pl["dur_s"], "gain_db": -9.0}
     x, _env, _hop, _win = _rendered_sfx(item)
-    # the boom used to ring ~1.87 s past its hit, under the next line
+    # the boom used to ring ~1.9 s past its hit, under the next line
     end = (np.nonzero(np.abs(x) > 1e-4)[0][-1] + 1) / 48000.0
-    assert 10.45 <= end <= 10.52, end
+    assert 10.52 <= end <= 10.6, end
 
 
 # ── template-owned cues ─────────────────────────────────────────────────
@@ -410,19 +563,41 @@ def test_owned_cues_hit_their_landing_and_follow_moves(lib, monkeypatch):
     for s in owned:
         assert abs(sound_library.hit_at(s) - 13.44) <= GRID, s
     impact = next(s for s in owned if "impact_1" in s["storage_key"])
-    assert impact["at"] == round(13.44 - 0.755, 2) and impact["dur_s"] == 1.25
+    assert impact["at"] == round(13.44 - 0.69, 2) and impact["dur_s"] == 1.25
     # moved to the head of the program: the hit follows, skipping into the file
     assert motion_tools.set_motion_graphic(ctx, "slam", start=0.0, end=1.5).startswith("EDL v")
     owned = [s for s in ctx._edl["sfx"] if s["id"].startswith("mg_slam_sfx")]
     for s in owned:
         assert abs(sound_library.hit_at(s) - 0.2) <= GRID, s
     impact = next(s for s in owned if "impact_1" in s["storage_key"])
-    assert impact["at"] == 0.0 and impact["offset_s"] == pytest.approx(0.555, abs=GRID)
+    assert impact["at"] == 0.0 and impact["offset_s"] == pytest.approx(0.49, abs=GRID)
     # and back: the full lead-in returns
     assert motion_tools.set_motion_graphic(ctx, "slam", start=10.0, end=11.5).startswith("EDL v")
     impact = next(s for s in ctx._edl["sfx"] if "impact_1" in s["storage_key"])
-    assert impact["at"] == round(10.2 - 0.755, 2) and not impact.get("offset_s")
+    assert impact["at"] == round(10.2 - 0.69, 2) and not impact.get("offset_s")
     assert impact["dur_s"] == 1.25
+
+
+def test_a_new_length_moves_the_cues_that_follow_it(lib, monkeypatch):
+    monkeypatch.setattr(motion_tools, "_probe_item", lambda item, W, H, fps=30.0:
+                        {"errors": [], "visible_frames": 4, "samples": 4,
+                         "bboxes": [[.1, .3, .9, .5]]})
+    ctx = _Ctx()
+    motion_tools.add_motion_graphic(ctx, "counter", 10.0, 13.0, id="num",
+                                    params={"value": "140"}, sfx=True)
+
+    def hits():
+        return sorted(sound_library.hit_at(s) for s in ctx._edl["sfx"]
+                      if s["id"].startswith("mg_num_sfx"))
+    assert hits() == pytest.approx([10.05, 11.0], abs=GRID)
+    # shortened to 1.4 s the count lands at 0.77 s: the kick lands with it
+    assert motion_tools.set_motion_graphic(ctx, "num", end=11.4).startswith("EDL v")
+    assert hits() == pytest.approx([10.05, 10.77], abs=GRID)
+    # a plain move keeps the (possibly hand-tuned) cues and shifts them
+    next(s for s in ctx._edl["sfx"] if s["id"] == "mg_num_sfx1")["gain_db"] = -20.0
+    assert motion_tools.set_motion_graphic(ctx, "num", start=12.0, end=13.4).startswith("EDL v")
+    assert hits() == pytest.approx([12.05, 12.77], abs=GRID)
+    assert next(s for s in ctx._edl["sfx"] if s["id"] == "mg_num_sfx1")["gain_db"] == -20.0
 
 
 # ── the cue times against the rendered compositions ─────────────────────

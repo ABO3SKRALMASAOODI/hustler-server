@@ -105,7 +105,7 @@ CUE GRAMMAR — what may get a sound, and with what:
 TIMING — PEAKS LAND ON THE PICTURE:
 - For a library sound, `at` is the frame it HITS. `add_sfx` starts the
   recording early by its measured peak (about 0.26–0.48 s for the soft
-  whooshes, 0.07 s for `swish_1`, 0.76 s for `impact_1`; risers by nearly
+  whooshes, 0.07 s for `swish_1`, 0.69 s for `impact_1`; risers by nearly
   their whole length, so they END on `at`), skips into the file when the
   hit is too close to 0 s, and reports where the peak lands and the span it
   plays. Never pre-roll by hand — that lands the peak early by the same
@@ -113,7 +113,7 @@ TIMING — PEAKS LAND ON THE PICTURE:
   `at`. `move_sfx` uses the same hit time; in `get_edl` an sfx `at` is where
   the file starts. Template cues follow the same rule.
 - Long tails stop at their measured fade point by default (`impact_1` about
-  0.5 s after its hit, `ding_1`, `cash_register_1`), so a boom does not ring
+  0.6 s after its hit, `ding_1`, `cash_register_1`), so a boom does not ring
   under the next line; `dur_s` changes that (seconds from where it starts
   playing).
 - Tie cues to measured times: word onsets (`get_words` mapped to program

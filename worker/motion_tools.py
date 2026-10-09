@@ -565,7 +565,7 @@ def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
     if not hit:
         have = ", ".join(m.get("id", "?") for m in items) or "none"
         return f"REJECTED: no motion graphic '{id}'. Existing: {have}."
-    old_start = float(hit["start"])
+    old_start, old_end = float(hit["start"]), float(hit["end"])
     old_shape = json.dumps([hit.get(k) for k in
                             ("start", "end", "template", "params", "html", "box", "layer")],
                            sort_keys=True)
@@ -633,8 +633,15 @@ def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
     edl["motion"] = items
     owned = [s for s in (edl.get("sfx") or []) if str(s.get("id", "")).startswith(_owned_sfx_prefix(id))]
     notes = []
-    if sfx is True or (sfx is None and owned and (template is not None or params)):
-        cues = _sfx_cues(motion_templates.spec(hit["template"]), hit["params"], hit["start"], hit["end"], seed=id, with_dur=True)
+    tspec = motion_templates.spec(hit["template"])
+    # A new length moves the cues that follow it (a ``land`` landing, an
+    # end-relative or fitted cue): those are re-derived rather than shifted.
+    span, old_span = hit["end"] - hit["start"], old_end - old_start
+    respaced = (bool(owned) and abs(span - old_span) > 1e-6
+                and _sfx_cues(tspec, hit["params"], 0.0, span, seed=id, with_dur=True)
+                != _sfx_cues(tspec, hit["params"], 0.0, old_span, seed=id, with_dur=True))
+    if sfx is True or (sfx is None and owned and (template is not None or params or respaced)):
+        cues = _sfx_cues(tspec, hit["params"], hit["start"], hit["end"], seed=id, with_dur=True)
         notes += _apply_owned_sfx(ctx, edl, id, cues)
     elif sfx is False:
         edl["sfx"] = [s for s in (edl.get("sfx") or []) if s not in owned]
@@ -720,7 +727,7 @@ TOOL_SPECS = {
         "READ: Valmera's sound library — real recordings approved by ear (whooshes, swish, impact, "
         "risers, camera shutters, keyboard typing, clicks, pop, tick, ding, glitches, cash register, "
         "heartbeat) with when to use each and a suggested gain. Place with "
-        "add_sfx(storage_key='sound:<id>', at=...). Sound only on meaningful on-screen moments, sparse "
-        "(≈ one every 4-5 s at most), never on captions.",
+        "add_sfx(storage_key='sound:<id>', at=<the frame it hits>). Sound only on meaningful "
+        "on-screen moments, sparse (≈ one every 4-5 s at most), never on captions.",
         {"role": {"type": "string", "description": "optional role filter, e.g. whoosh, click, riser"}}),
 }

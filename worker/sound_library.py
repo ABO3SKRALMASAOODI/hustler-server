@@ -20,8 +20,11 @@ action shown on screen — never on captions, sparse (about one sound every
 
 Timing: an editor (or template cue) names the moment a recording should
 HIT; ``place`` turns that into the EDL's physical placement. ``peak_s`` is
-the measured loudest moment, so a whoosh or impact starts that much early
-(skipping into the file when the hit is too close to 0 s). A recording
+the measured loudest moment (the loudest 10 ms), so a whoosh or impact
+starts that much early (skipping into the file when the hit is too close to
+0 s). ``hit_s`` overrides it where the ear hears the hit clearly earlier:
+impact_1's boom reaches full level ~0.69 s in (where the judges heard it)
+and only fluctuates to its loudest 10 ms at 0.755 s. A recording
 with ``"align": "start"`` (typing) plays UNDER its action from its first
 sound instead. ``max_s`` is the measured end of the audible tail (the
 A-weighted envelope 25 dB under its peak, and no sooner than 0.12 s — the
@@ -106,12 +109,13 @@ def peak_s(sound_id):
 
 def hit_s(sound_id):
     """Seconds from the file start to the moment that lands ON a requested
-    time: the peak for a hit (whoosh, impact, pop), 0 for a recording that
-    plays under its action from the first sound ("align": "start")."""
+    time: the peak for a hit (whoosh, impact, pop) or its measured attack
+    (``hit_s``), 0 for a recording that plays under its action from the
+    first sound ("align": "start")."""
     r = get(sound_id)
     if not r or r.get("align") == "start":
         return 0.0
-    return float(r.get("peak_s") or 0.0)
+    return float(r.get("hit_s") or r.get("peak_s") or 0.0)
 
 
 def max_s(sound_id):
@@ -147,13 +151,17 @@ def place(sound_id, hit_at, offset_s=0.0, dur_s=None):
             "lead_s": round(max(0.0, hs - offset_s), 3)}
 
 
-def retime(item, hit):
+def retime(item, hit, keep_length=False):
     """Move an EDL sfx dict (in place) so its hit lands on program time hit.
 
     A library recording is re-placed from its hit: the automatic skip into
     the file (a hit too close to 0 s) and the default tail cap follow the new
-    position, while a deliberate offset_s or dur_s is kept. Any other sound
-    simply starts at hit. Returns the seconds it starts before its hit."""
+    position, while a deliberate offset_s, or the point in the file a
+    deliberate dur_s stops at, is kept. keep_length (a mechanical re-anchor
+    after a cut or an insert, not an edit of the sound) also leaves a sound
+    with no length set playing to its end, as it did before the move. Any
+    other sound simply starts at hit. Returns the seconds it starts before
+    its hit."""
     hit = max(0.0, float(hit))
     sid = id_for_key(item.get("storage_key"))
     if not sid:
@@ -164,8 +172,16 @@ def retime(item, hit):
     # than the hit; an offset past the hit (or on a later start) was chosen.
     base = 0.0 if float(item.get("at") or 0.0) <= 1e-3 and off <= hit_s(sid) + 1e-6 else off
     cap, dur = max_s(sid), item.get("dur_s")
-    auto = dur is None or (cap is not None and abs(float(dur) - (cap - off)) < 2e-3)
-    pl = place(sid, hit, base, None if auto else float(dur))
+    if dur is None:
+        auto = not keep_length
+    else:
+        auto = cap is not None and abs(float(dur) - (cap - off)) < 2e-3
+    pl = place(sid, hit, base, None if auto or dur is None else float(dur))
+    if not auto:
+        # a deliberate length stops at the same point in the file (the same
+        # ring after the hit) however far the skip into it moved
+        pl["dur_s"] = (None if dur is None else
+                       round(max(0.05, off + float(dur) - (pl["offset_s"] or 0.0)), 3))
     item["at"] = pl["at"]
     for k in ("offset_s", "dur_s"):
         if pl[k]:
@@ -237,7 +253,7 @@ def describe(r):
     if r.get("align") == "start":
         timing = "plays from its first sound"
     else:
-        timing = f"peaks {float(r.get('peak_s') or 0):g}s in"
+        timing = f"hits {hit_s(r['id']):g}s in"
     if r.get("max_s"):
         timing += f", stops by default {float(r['max_s']):g}s in"
     return (f"{REF_PREFIX}{r['id']} [{r['role']}, {r['duration_s']:g}s, {timing}, suggested "

@@ -5913,8 +5913,8 @@ def search_sfx(ctx, query, max_seconds=None):
     except (TypeError, ValueError):
         return "REJECTED: max_seconds must be a number."
     lib_hits = motion_tools.sound_search(query)
-    kit_text = ("Valmera sound library (approved real recordings — add_sfx(storage_key=<id>, at=..., "
-                "gain_db=<suggested>)):\n- "
+    kit_text = ("Valmera sound library (approved real recordings — add_sfx(storage_key='sound:<id>', "
+                "at=<the frame it hits>, gain_db=<suggested>)):\n- "
                 + "\n- ".join(f"{h['id']} [{h['role']}, {h['duration_s']:g}s, gain {h['gain_db']} dB] — {h['use']}"
                                for h in lib_hits) + "\n") if lib_hits else ""
     memory = getattr(ctx, "tool_failure_memory", {})
@@ -18555,6 +18555,17 @@ def justify_verification_findings(ctx, finding_ids, justification,
             "no unresolved findings remain.")
 
 
+def _sfx_hit_note(item):
+    """' hits=Xs' when an sfx item is a library recording that starts early
+    so its peak lands later (sound_library.hit_at), else ''. A listener
+    told only the file start would hear every such hit as late."""
+    try:
+        at, hit = float(item.get("at")), sound_library.hit_at(item)
+    except (TypeError, ValueError):
+        return ""
+    return f" hits={hit:.2f}s" if hit - at > .005 else ""
+
+
 def _audio_window_label(edl, plan, t0, t1):
     """Causal EDL/sequence facts for one actually heard program excerpt."""
     t0, t1 = float(t0), float(t1)
@@ -18575,12 +18586,14 @@ def _audio_window_label(edl, plan, t0, t1):
     for number, item in enumerate((edl.get("sfx") or []), 1):
         try:
             at = float(item.get("at"))
+            hit = sound_library.hit_at(item)
         except (TypeError, ValueError):
             continue
-        if t0 - .08 <= at <= t1 + .08:
+        if t0 - .08 <= at <= t1 + .08 or t0 - .08 <= hit <= t1 + .08:
             facts.append(
                 f"SFX id={item.get('id') or f'legacy-sfx-{number}'} "
-                f"at={at:.2f}s purpose={item.get('purpose') or 'not recorded'}")
+                f"at={at:.2f}s{_sfx_hit_note(item)} "
+                f"purpose={item.get('purpose') or 'not recorded'}")
     for number, item in enumerate((edl.get("voiceover") or []), 1):
         try:
             at = float(item.get("start_output_s"))
@@ -18633,10 +18646,15 @@ def _audio_execution_context(edl, plan):
             f"{item.get('start')}-{item.get('end')}s touches beats="
             f"{hit or 'none'} purpose={item.get('purpose') or 'not recorded'}")
     for number, item in enumerate((edl.get("sfx") or []), 1):
-        hit = touching(item.get("at"))
+        try:
+            # the beat a sound serves is where it HITS
+            hit = touching(sound_library.hit_at(item))
+        except (TypeError, ValueError):
+            hit = []
         rows.append(
             f"SFX {item.get('id') or f'legacy-sfx-{number}'} "
-            f"at={item.get('at')}s touches beats={hit or 'none'} "
+            f"at={item.get('at')}s{_sfx_hit_note(item)} "
+            f"touches beats={hit or 'none'} "
             f"purpose={item.get('purpose') or 'not recorded'}")
     if not rows:
         return ""
@@ -18762,7 +18780,7 @@ def _review_render_audio(ctx, row, result):
         f"purpose={item.get('purpose') or 'not recorded'}"
         for item in (edl.get("music") or []) if not item.get("mute")]
     authored_sfx = [
-        f"{item.get('id')} at={item.get('at')}s: "
+        f"{item.get('id')} at={item.get('at')}s{_sfx_hit_note(item)}: "
         f"purpose={item.get('purpose') or 'not recorded'}"
         for item in (edl.get("sfx") or [])]
     execution_context = _audio_execution_context(edl, plan)
@@ -26679,9 +26697,9 @@ _COMPACT_CONTRACTS = {
         "READ the owner-approved sound library: real recordings by role "
         "(whoosh, swish, impact, riser, shutter, typing, click, pop, tick, "
         "ding, glitch, cash, heartbeat), each with its use and suggested gain. "
-        "Place with add_sfx(storage_key='sound:<id>', at=..., gain_db="
-        "<suggested>). Sound only where something meaningful happens on "
-        "screen; about one every 4-5 s at most; never on captions."),
+        "Place with add_sfx(storage_key='sound:<id>', at=<the frame it "
+        "hits>, gain_db=<suggested>). Sound only where something meaningful "
+        "happens on screen; about one every 4-5 s at most; never on captions."),
     "add_sfx": (
         "One-shot sound at an OUTPUT second. storage_key 'sound:<id>' places "
         "an approved library recording (list_sound_library); otherwise an "

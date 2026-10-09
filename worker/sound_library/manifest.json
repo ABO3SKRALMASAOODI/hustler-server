@@ -54,6 +54,7 @@
   "source_url": "https://freesound.org/people/chriskalos/sounds/172779",
   "license": "CC0 1.0",
   "peak_s": 0.755,
+  "hit_s": 0.69,
   "max_s": 1.25
  },
  {
@@ -124,7 +125,7 @@
   "author": "roachpowder",
   "source_url": "https://freesound.org/people/roachpowder/sounds/170229",
   "license": "CC0 1.0",
-  "peak_s": 0.192
+  "peak_s": 0.108
  },
  {
   "id": "shutter_2",

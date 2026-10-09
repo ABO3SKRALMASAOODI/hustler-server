@@ -1204,15 +1204,18 @@ def remap_program_items(edl, old_tl, new_tl):
                     f"{round(new_at, 2)}s so it stays on the same moment.")
             if sounds:
                 if abs(new_at - at) > 1e-6:
-                    sounds.retime(s, new_at)
+                    # only the timing moves: where it stops in the file stays
+                    sounds.retime(s, new_at, keep_length=True)
             else:
                 s["at"] = round(new_at, 2)
             # A point past the end of a shortened edit is dropped, not
             # clamped: clamping would pile every orphan onto the last frame.
             # Without this the sfx bounds check in validate_edl rejects the
             # whole CUT — the user asks to trim the end and is told the edit
-            # is invalid, over a sound they never mentioned.
-            if round(new_at, 2) > max(0.0, prog - 0.05):
+            # is invalid, over a sound they never mentioned. Judged on where
+            # the sound STARTS (what that check bounds): an older library
+            # sound placed by file start near the end can peak past it.
+            if float(s["at"]) > max(0.0, prog - 0.05):
                 region_notes.append(
                     f"note: sound effect {s.get('id')} was removed — it sits "
                     "after the end of the shortened edit.")

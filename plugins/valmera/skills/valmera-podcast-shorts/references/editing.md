@@ -54,7 +54,7 @@ hook    0.00  landing 0.16 (silent); hook_title "Computers look like *garbage*" 
 hero 1  6.42  "garbage"   word_slam serif, start 6.22 (lands +0.2, silent)
 turn   14.80  "ten million" counter 0 -> 10M (silent), punch 0.15
 hero 2 21.10  camera change -> landing (silent); marker_text "whether they look great or not" (silent)
-payoff 33.60  "look great" word_slam; riser_2 at 32.5 ending on it, impact_1 at 33.58; hold to 35.0
+payoff 33.60  "look great" word_slam; riser_2 and impact_1 at 33.6 (add_sfx `at` is the hit: the riser ends there, the boom lands there); hold to 35.0
 sound   2 events in 35 s (hook 0.15, payoff 32.5-33.6); music off (no owner song)
 ```
 
