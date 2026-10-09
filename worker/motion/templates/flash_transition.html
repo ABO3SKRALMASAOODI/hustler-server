@@ -1,5 +1,5 @@
 <!--MG-SPEC {"title": "Flash transition", "category": "transition",
- "description": "A 2-8 frame full-frame exposure flash: the picture ramps to white (or warm/cool/colour) in 3 frames, blows out at 0.1 s, then recovers from the edges inward. Use AT a hard cut or a hook beat to punch it: start the item 0.1 s before the cut (the peak lands 0.1 s in); 0.2-0.3 s reads as a camera flash, 0.4-0.6 s as an exposure bloom.",
+ "description": "A 2-8 frame exposure flash that ramps to white (or warm/cool/colour), blows out 0.1 s in and recovers from the edges inward. Use AT a hard cut or hook beat: start the item 0.1 s before the cut (0.2-0.3 s reads as a camera flash, 0.4-0.6 s as an exposure bloom).",
  "duration": 0.3, "layer": "above_captions", "mutes_captions": false,
  "params": {
   "tone": {"type": "enum", "values": ["white", "warm", "cool", "color"], "default": "white", "hint": "warm = film exposure with amber edges; color uses the colour param"},
@@ -11,13 +11,18 @@
  "example": {"tone": "white"},
  "sfx": [{"at": 0.0, "kind": "swish_short"}]} -->
 <style>
-  .fl{position:absolute;inset:0;will-change:opacity,background}
+  #fl{position:absolute;left:0;top:0;width:100%;height:100%;image-rendering:pixelated}
 </style>
-<div class="mg-root"><div class="fl" id="glow"></div><div class="fl" id="fill"></div></div>
+<div class="mg-root"><canvas id="fl"></canvas></div>
 <script>
 (() => {
   const P = MG.params, W = MG.W, H = MG.H, D = MG.duration, fps = MG.fps;
-  const fill = MG.$('#fill'), glow = MG.$('#glow');
+  // Smooth full-frame gradients: drawn at quarter resolution and scaled up
+  // (identical after encoding, far cheaper to capture than full-res pixels).
+  const Q = 4, qw = Math.ceil(W / Q), qh = Math.ceil(H / Q);
+  const cv = MG.$('#fl');
+  cv.width = qw; cv.height = qh;
+  const ctx = cv.getContext('2d');
   const hex = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
   const mix = (a, b, p) => a.map((v, i) => Math.round(v + (b[i] - v) * p));
   const TONES = {
@@ -54,23 +59,30 @@
 
   MG.box = [0, 0, W, H];
   MG.active([[0, D]]);
+  const cx = qw / 2, cy = qh * 0.46, R = Math.hypot(qw, qh) * 0.62;
   MG.frame(t => {
     const a = env(t) * S;
     const r = rec(t);
-    const R = Math.hypot(W, H) * 0.62;
+    ctx.clearRect(0, 0, qw, qh);
+    if (a <= 0.002) return;
     if (P.bloom) {
-      // edges recover first: the falloff tightens around the centre as the
-      // flash decays, and a warm halo lingers a little longer
-      const ac = Math.pow(a, 0.75), ae = Math.pow(a, 1.0 + 1.2 * r);
-      const inner = (8 + 30 * (1 - r)).toFixed(1);
-      fill.style.background = `radial-gradient(${R.toFixed(0)}px ${(R * 1.05).toFixed(0)}px at 50% 46%, ` +
-        `${rgba(core, ac)} 0%, ${rgba(core, ac * 0.96)} ${inner}%, ${rgba(edge, ae)} 100%)`;
+      // a warm halo lingers a little longer than the flash itself
       const ha = Math.max(0, Math.pow(env(Math.max(0, t - 2 / fps)), 1.4) * S * 0.55 - a * 0.25);
-      glow.style.background = `radial-gradient(${(R * 0.8).toFixed(0)}px ${(R * 0.8).toFixed(0)}px at 50% 46%, ` +
-        `${rgba(halo, ha)} 0%, ${rgba(halo, ha * 0.4)} 45%, ${rgba(halo, 0)} 100%)`;
+      if (ha > 0.002) {
+        const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, R * 0.8);
+        g.addColorStop(0, rgba(halo, ha)); g.addColorStop(0.45, rgba(halo, ha * 0.4)); g.addColorStop(1, rgba(halo, 0));
+        ctx.fillStyle = g; ctx.fillRect(0, 0, qw, qh);
+      }
+      // edges recover first: the falloff tightens around the centre as the
+      // flash decays
+      const ac = Math.pow(a, 0.75), ae = Math.pow(a, 1.0 + 1.2 * r);
+      const inner = (8 + 30 * (1 - r)) / 100;
+      const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, R);
+      g.addColorStop(0, rgba(core, ac)); g.addColorStop(inner, rgba(core, ac * 0.96)); g.addColorStop(1, rgba(edge, ae));
+      ctx.fillStyle = g; ctx.fillRect(0, 0, qw, qh);
     } else {
-      fill.style.background = rgba(core, a);
-      glow.style.background = 'none';
+      ctx.fillStyle = rgba(core, a);
+      ctx.fillRect(0, 0, qw, qh);
     }
   });
 })();

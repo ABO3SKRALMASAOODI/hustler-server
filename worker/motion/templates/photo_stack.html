@@ -1,5 +1,5 @@
 <!--MG-SPEC {"title": "Photo stack", "category": "layout",
- "description": "Deals 2-5 project photos one by one onto a fanned or messy pile of prints with rotation, depth and a soft table shadow, the last photo on top, then drifts while it holds. Use for a quick visual montage when the speaker lists people, places, products or moments (before/after, a career in pictures, examples).",
+ "description": "Deals 2-5 project photos one by one (every 0.22 s) onto a fanned or messy pile of prints with depth and a table shadow, the last photo on top. Use as a quick visual montage when the speaker lists people, places, products or moments; the three swipe cues fit 3 photos.",
  "duration": 3.0, "layer": "above_captions", "mutes_captions": false,
  "params": {
   "asset_1": {"type": "asset", "default": null, "hint": "first photo dealt (bottom of the stack)"},
@@ -15,7 +15,7 @@
   "exit": {"type": "enum", "values": ["fade", "cut"], "default": "fade"}
  },
  "example": {"caption": "Three companies, one idea"},
- "sfx": [{"at": 0.17, "kind": "swish_short"}, {"at": 0.39, "kind": "swish_short"}, {"at": 0.61, "kind": "swish_short"}]} -->
+ "sfx": [{"at": 0.15, "kind": "swipe", "gain_db": -4}, {"at": 0.37, "kind": "swipe", "gain_db": -6}, {"at": 0.59, "kind": "swipe", "gain_db": -7}]} -->
 <style>
   .stack{position:absolute;left:0;top:0;width:100%;height:100%;transform-origin:50% 40%;will-change:transform}
   .pc{position:absolute;will-change:transform,opacity,filter;transform-origin:50% 50%}
@@ -143,11 +143,12 @@
     MG.box = [0, Math.max(0, y0), W, Math.min(H, y1)];
   }
   layout();
-  if (!placeholder) {
-    MG.ready = Promise.all(cards.map(c => c.img.decode().catch(() => {
-      c.img.style.display = 'none'; c.pl.style.display = '';
-    }))).then(layout);
-  }
+  // re-layout with real type metrics and the photos' own shapes
+  const fontsLoaded = document.fonts.load("800 40px 'Inter Display'").catch(() => null).then(() => { key = ''; });
+  const imgsLoaded = placeholder ? null : Promise.all(cards.map(c => c.img.decode().catch(() => {
+    c.img.style.display = 'none'; c.pl.style.display = ''; c.img = null;
+  })));
+  MG.ready = Promise.all([fontsLoaded, imgsLoaded]).then(() => { key = ''; layout(); });
 
   // ── choreography ───────────────────────────────────────────────────────
   // card i is dealt at T(i); it lands ~0.2 s later (sound cues sit there)

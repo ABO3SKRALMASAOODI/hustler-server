@@ -1,5 +1,5 @@
 <!--MG-SPEC {"title": "Film burn", "category": "transition",
- "description": "An organic film burn: charred blotches creep in from one edge, then a boiling orange-to-white burn floods the frame (peak ~0.35 s in) and fades. Use as a bold, filmic transition between scenes or chapters (put the peak on the cut) or, with low coverage, as a warm edge-burn accent on an emotional beat.",
+ "description": "An organic film burn: charred blotches creep in from one edge, a boiling orange-to-white burn floods the frame ~0.35 s in, then cools and dissolves. Use as a bold filmic transition between scenes (put the peak on the cut) or, with low coverage, as a warm edge-burn accent.",
  "duration": 0.8, "layer": "above_captions", "mutes_captions": false,
  "params": {
   "from": {"type": "enum", "values": ["right", "left", "bottom", "top"], "default": "right", "hint": "edge the burn grows from"},
@@ -18,7 +18,7 @@
   const P = MG.params, W = MG.W, H = MG.H, D = MG.duration, fps = MG.fps;
   // The burn is a per-pixel noise field computed at quarter resolution and
   // smoothed up by the compositor (its edges are soft anyway).
-  const Q = 4, cw = Math.ceil(W / Q), ch = Math.ceil(H / Q);
+  const Q = 2, cw = Math.ceil(W / Q), ch = Math.ceil(H / Q);
   const cv = MG.$('#fb');
   cv.width = cw; cv.height = ch;
   const ctx = cv.getContext('2d');
@@ -78,7 +78,7 @@
     ? rPeak * (0.06 + 0.94 * MG.ease.inOutCubic(MG.clamp(t / TP)))
     : rPeak * (1 + 0.22 * MG.range(t, TP, Math.max(0.05, D - TP)));
   // fade: holds through the flood, then dissolves (bright core lingers)
-  const fade = t => 1 - MG.ease.inCubic(MG.range(t, TP + 0.1 * D, Math.max(0.05, D * 0.9 - TP)));
+  const fade = t => 1 - MG.ease.inQuad(MG.range(t, TP + 0.08 * D, Math.max(0.05, D * 0.88 - TP)));
 
   const NS = 3.0 / (diag / Q);                           // shape noise: cells per diag
   const HS = 7.0 / (diag / Q);                           // heat/texture noise
@@ -92,7 +92,7 @@
     const soft = 0.24;                                   // colour ramp width (diag units)
     const ox = O[0] / Q, oy = O[1] / Q, inv = Q / diag;
     const late = MG.range(t, TP, Math.max(0.05, D - TP));   // 0 → 1 after the peak
-    const dissolve = late * 1.25;
+    const dissolve = late * 1.5;
     let i = 0;
     for (let y = 0; y < ch; y++) {
       const dy = y - oy;
@@ -101,13 +101,15 @@
         const d = Math.sqrt(dx * dx + dy * dy) * inv;
         if (d > r + 0.3) { px[i + 3] = 0; continue; }
         // domain-warped shape noise gives ragged, fingery burn edges
-        const wx = vnoise(x * NS * 0.7 + 9.2, y * NS * 0.7 + drift * 0.5) - 0.5;
-        const n = fbm(x * NS + wx * 2.2 + drift, y * NS + wx * 1.6 - drift * 0.6);
+        // noise domains are rotated so the value-noise lattice never reads as a grid
+        const rx = 0.866 * x - 0.5 * y, ry = 0.5 * x + 0.866 * y;
+        const wx = vnoise(rx * NS * 0.7 + 9.2, ry * NS * 0.7 + drift * 0.5) - 0.5;
+        const n = fbm(rx * NS + wx * 2.2 + drift, ry * NS + wx * 1.6 - drift * 0.6);
         let v = (r - d + (n - 0.5) * 0.42) / soft;          // > 0: burning
         if (v <= 0) {
           // charred blotches race ahead of the front
           if (v > -0.7) {
-            const bl = vnoise(x * NS * 3.4 + 40, y * NS * 3.4 - drift * 1.3);
+            const bl = vnoise((0.7 * x + 0.71 * y) * NS * 3.4 + 40, (0.71 * x - 0.7 * y) * NS * 3.4 - drift * 1.3);
             const th = 0.6 - v * 0.35;
             if (bl > th) {
               px[i] = T[0][0]; px[i + 1] = T[0][1]; px[i + 2] = T[0][2];
@@ -119,9 +121,10 @@
           continue;
         }
         // heat varies inside the burn: hot white pockets, orange patches
-        const heat = vnoise(x * HS + drift * 2.2, y * HS - drift * 1.4) * 0.65 + vnoise(x * HS * 2.3 + 5, y * HS * 2.3 + drift * 3) * 0.35;
+        const hx = 0.94 * x + 0.34 * y, hy = -0.34 * x + 0.94 * y;
+        const heat = vnoise(hx * HS + drift * 2.2, hy * HS - drift * 1.4) * 0.65 + vnoise(hy * HS * 2.3 + 5, hx * HS * 2.3 + drift * 3) * 0.35;
         let k = Math.min(1, v) * (0.5 + 0.62 * heat) + Math.max(0, v - 1) * 0.08;
-        k = Math.min(1, k * (0.85 + 0.35 * late));            // blows out a little as it goes
+        k = Math.min(1, k * (1 - 0.2 * late));                // cools a little as it fades
         const ki = (k * 255) | 0;
         // dissolve: cooler patches fade first, the hottest pockets linger
         const keep = MG.clamp((heat + 0.75 - dissolve) * 2.6);
