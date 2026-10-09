@@ -84,7 +84,14 @@
     if (hasSub) {
       let ss = Math.max(24, Math.min(0.022 * H, fs * 0.3, 44));
       sub.style.fontSize = ss + 'px';
-      if (sub.scrollWidth > W * 0.84) { ss *= W * 0.84 / sub.scrollWidth; sub.style.fontSize = ss + 'px'; }
+      // never below the phone-readable floor: a long subline wraps instead
+      ss = MG.floorType(sub);
+      Object.assign(sub.style, { whiteSpace: 'nowrap', maxWidth: '', textWrap: '' });
+      if (sub.scrollWidth > W * 0.84) {
+        ss = Math.max(ss * W * 0.84 / sub.scrollWidth, MG.minType(sub));
+        sub.style.fontSize = ss + 'px';
+        if (sub.scrollWidth > W * 0.84) Object.assign(sub.style, { whiteSpace: 'normal', maxWidth: (W * 0.84) + 'px', textWrap: 'balance' });
+      }
       sub.style.textShadow = `0 0 ${(ss * 0.4).toFixed(1)}px ${rgba(0.7 * I)}, 0 0 ${(ss * 1.4).toFixed(1)}px ${rgba(0.3 * I)}`;
     }
     const h = wrap.getBoundingClientRect().height;
@@ -97,7 +104,24 @@
       width: (wmax * fs + 2 * padX) + 'px', height: (r.height + 2 * padY) + 'px' });
     if (P.scrim > 0) MG.box = [Math.max(0, Math.min(MG.box[0], W / 2 - wmax * fs / 2 - padX)), Math.max(0, Math.min(MG.box[1], top - padY)),
       Math.min(W, Math.max(MG.box[2], W / 2 + wmax * fs / 2 + padX)), Math.min(H, Math.max(MG.box[3], r.bottom + padY))];
+    if (hasSub) {   // a floored subline can be wider than the title: keep it (and its glow) in the capture
+      const q = MG.rectOf(sub), gp = parseFloat(sub.style.fontSize) * 1.4;
+      if (q) MG.growBox([q[0] - gp, q[1] - gp, q[2] + gp, q[3] + gp]);
+    }
+    // a measured bright plate: a pocket under the title (display 3:1) and
+    // the subline (body 4.5:1), beyond what the scrim already gives
+    if (BK) { BK.remove(); BK = null; }
+    const tr = MG.rectOf(Array.from(core.children)), sr = hasSub ? MG.rectOf(sub) : null;
+    const have = 0.3 * 0.7 * P.scrim;
+    const need = Math.max(MG.need(tr, { ink: coreCol, ratio: 3, have }),
+                          sr ? MG.need(sr, { ink: coreCol, ratio: 4.5, have }) : 0);
+    if (need > 0) {
+      const u = sr ? [Math.min(tr[0], sr[0]), tr[1], Math.max(tr[2], sr[2]), sr[3]] : tr;
+      BK = MG.backing(MG.$('.mg-root'), u, need, { pad: [0.22 * fs, 0.1 * fs], feather: 0.32 * fs, radius: 0.3 * fs });
+      MG.growBox(BK.box);
+    }
   };
+  let BK = null;
   layout();
   MG.ready = Promise.all([`${F.weight} 100px ${F.css}`, `500 40px ${monoCss}`].map(f => document.fonts.load(f).catch(() => 0)))
     .then(() => document.fonts.ready).then(layout);
@@ -132,7 +156,9 @@
       else x = 1 - MG.ease.outQuad(MG.range(t, D - exitDur, exitDur));
     }
     // the backing eases in under the ignition (no strobe) and leaves with the exit
-    scrim.style.opacity = P.scrim > 0 ? (MG.ease.outCubic(MG.range(t, 0, 0.3)) * (exitDur && t > D - exitDur ? 1 - MG.range(t, D - exitDur, exitDur) : 1)).toFixed(4) : 0;
+    const env = MG.ease.outCubic(MG.range(t, 0, 0.3)) * (exitDur && t > D - exitDur ? 1 - MG.range(t, D - exitDur, exitDur) : 1);
+    scrim.style.opacity = P.scrim > 0 ? env.toFixed(4) : 0;
+    if (BK) BK.style.opacity = env.toFixed(4);
     core.style.opacity = o * x;
     halo.style.opacity = o * hb * x;
     sub.style.opacity = so * x;

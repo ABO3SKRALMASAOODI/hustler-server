@@ -86,7 +86,9 @@ LEGIBILITY:
 - Safe area on 9:16: important type inside x 60–1020 px and y 8–80% of the
   height; never in the bottom platform band; never across eyes or mouth.
 - Check every type state on the actual background in the render, bright
-  and dark plates alike.
+  and dark plates alike. Motion graphics and motion captions firm up their
+  own backing (or switch to dark ink) over a measured bright plate, and keep
+  secondary text at a cap height of at least 2.2% of the frame height.
 
 NATIVE TOOLS THAT REMAIN USEFUL:
 - **Speaker-first headline**: `set_editorial_graphic(kind="headline",

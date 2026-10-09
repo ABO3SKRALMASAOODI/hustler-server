@@ -66,8 +66,7 @@
   if (String(P.kicker || '').trim()) {
     kick = MG.el('div', 'kick', String(P.kicker).trim(), blk);
     kick.style.fontFamily = sans; kick.style.fontWeight = FAM.has('Inter') ? 600 : 700;
-    kick.style.letterSpacing = '-0.02em'; kick.style.color = P.color; kick.style.opacity = 0.94;
-    kick.style.textShadow = '0 2px 14px rgba(0,0,0,.45)';
+    kick.style.letterSpacing = '-0.02em'; kick.style.opacity = 0.94;
   }
   const hero = MG.el('div', 'hero', null, blk);
   let lines = [], chars = [];
@@ -132,10 +131,17 @@
     shadow = `0 ${(fs * 0.015).toFixed(1)}px ${(fs * 0.05).toFixed(1)}px rgba(0,0,0,${a1}), 0 ${(fs * 0.03).toFixed(1)}px ${(fs * 0.16).toFixed(1)}px rgba(0,0,0,${a2})`;
     lines.forEach(el => { el.style.textShadow = shadow; });
     if (kick) {
+      kick.style.color = P.color; kick.style.textShadow = '0 2px 14px rgba(0,0,0,.45)';
+      Object.assign(kick.style, { whiteSpace: 'nowrap', maxWidth: '', textWrap: '' });
       let ks = Math.max(26, Math.min(Math.max(0.3 * fs, 0.024 * H), 0.035 * H, 68));
       kick.style.fontSize = ks + 'px';
+      ks = MG.floorType(kick);             // never below the phone-readable floor
       const kw = kick.scrollWidth;
-      if (kw > maxW) { ks *= maxW / kw; kick.style.fontSize = ks + 'px'; }
+      if (kw > maxW) {
+        // shrink toward the floor, then wrap (balanced) rather than go smaller
+        ks = Math.max(ks * maxW / kw, MG.minType(kick)); kick.style.fontSize = ks + 'px';
+        if (kick.scrollWidth > maxW + 1) Object.assign(kick.style, { whiteSpace: 'normal', maxWidth: maxW + 'px', textWrap: 'balance' });
+      }
       kick.style.marginBottom = (R.caps ? 0.06 : 0.0) * fs + 'px';
     }
     const h = blk.getBoundingClientRect().height;
@@ -145,7 +151,55 @@
     const r = hero.getBoundingClientRect(), b = blk.getBoundingClientRect();
     const padY = r.height * over / 2 + fs * 0.25, padX = r.width * over / 2 + fs * 0.2;
     MG.box = [Math.max(0, r.left - padX), Math.max(0, b.top - padY), Math.min(W, r.right + padX), Math.min(H, b.bottom + padY)];
+    legible();
   };
+  // ── legibility over a measured bright plate ──
+  // Light ink (the colour, never the accent) on a plate too bright for it:
+  // where the plate is bright all the way across, the light words switch
+  // to dark ink (a red or dark accent reads on it as print does); otherwise
+  // a pocket darkens the plate under the light words only, so a saturated
+  // accent is never sunk into grey. Hero lines are display type (3:1), the
+  // kicker is body type (4.5:1). Unmeasured or dark plates change nothing.
+  let BKS = [];
+  const lightInk = MG.luminance(P.color) >= 0.3, darkAccent = MG.luminance(P.accent) < 0.3;
+  // (MG.need answers 0 for a dark ink, so a red accent never asks for a pocket)
+  function legible() {
+    BKS.forEach(el => el.remove()); BKS = [];
+    if (!lightInk || !MG.plate) return;
+    const words = el => Array.from(el.querySelectorAll('.mg-w'));
+    const parts = lines.map(el => {
+      const pw = words(el).filter(w => !w.style.color), aw = words(el).filter(w => w.style.color);
+      return { el, rect: MG.rectOf(words(el)), acc: aw.length > 0, ratio: 3,
+        need: Math.max(pw.length ? MG.need(MG.rectOf(pw), { ink: P.color, ratio: 3 }) : 0,
+                       aw.length ? MG.need(MG.rectOf(aw), { ink: P.accent, ratio: 3 }) : 0) };
+    }).concat(kick ? [{ el: kick, rect: MG.rectOf(kick), acc: false, ratio: 4.5,
+                        need: MG.need(MG.rectOf(kick), { ink: P.color, ratio: 4.5 }) }] : [])
+      .filter(q => q.rect);
+    const weak = parts.filter(q => q.need > 0);
+    if (!weak.length) return;
+    const u = MG.rectOf(weak.map(q => q.el));
+    if ((darkAccent || !weak.some(q => q.acc)) && MG.darkInkOK(u, { ratio: Math.max(...weak.map(q => q.ratio)) })) {
+      weak.forEach(q => {
+        q.el.style.color = MG.DARK_INK;
+        q.el.style.textShadow = `0 0 ${(parseFloat(q.el.style.fontSize) * 0.12).toFixed(1)}px rgba(255,255,255,.22)`;
+      });
+      return;
+    }
+    // one pocket per run of adjacent weak parts (no overlapping double-dark bands)
+    const runs = [];
+    parts.slice().sort((a, b) => a.rect[1] - b.rect[1]).forEach(q => {
+      if (q.need <= 0) { runs.push(null); return; }
+      const last = runs[runs.length - 1];
+      if (last) { last.push(q); } else runs.push([q]);
+    });
+    runs.filter(Boolean).forEach(run => {
+      const rc = run.reduce((v, q) => [Math.min(v[0], q.rect[0]), Math.min(v[1], q.rect[1]), Math.max(v[2], q.rect[2]), Math.max(v[3], q.rect[3])], run[0].rect.slice());
+      const em = Math.min(...run.map(q => parseFloat(q.el.style.fontSize)));
+      const bk = MG.backing(MG.$('.mg-root'), rc, Math.max(...run.map(q => q.need)),
+        { pad: [0.2 * em, 0.06 * em], feather: 0.3 * em, radius: 0.24 * em });
+      BKS.push(bk); MG.growBox(bk.box);
+    });
+  }
   layout();
   MG.ready = Promise.all([`${R.weight} ${R.style} 100px ${R.css}`, `700 60px ${sans}`]
     .map(f => document.fonts.load(f).catch(() => 0))).then(() => document.fonts.ready).then(layout);
@@ -191,6 +245,7 @@
       else if (P.exit === 'strobe') x.opacity = Math.round((D - t) * FPS) - 1 >= 3 ? 0 : 1;
     }
     MG.set(blk, x);
+    BKS.forEach(el => { el.style.opacity = (ko * (x.opacity ?? 1)).toFixed(4); });
   });
 })();
 </script>

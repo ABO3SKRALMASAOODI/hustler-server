@@ -124,10 +124,14 @@
     if (text) {
       const base = (hasFace('Caveat') ? 104 : 92) * S;
       let fs = base;
-      for (; fs > base * 0.55; fs *= 0.95) {
+      // never below the phone-readable floor (a long label then wraps)
+      const floor = Math.min(base, MG.minType(lab));
+      for (; fs > Math.max(base * 0.55, floor); fs = Math.max(floor, fs * 0.95)) {
         lab.style.fontSize = fs + 'px';
         if (lab.getBoundingClientRect().width <= (safe[2] - safe[0])) break;
       }
+      lab.style.fontSize = Math.max(fs, floor) + 'px';
+      if (lab.getBoundingClientRect().width > safe[2] - safe[0]) Object.assign(lab.style, { whiteSpace: 'normal', maxWidth: (safe[2] - safe[0]) + 'px', textWrap: 'balance' });
       const r = lab.getBoundingClientRect(), lw = r.width, lh = r.height, g = 14 * S;
       const spots = {
         above: [C[0] - lw / 2 + rx * 0.25, bb[1] - g - lh], below: [C[0] - lw / 2 + rx * 0.2, bb[3] + g * 0.6],

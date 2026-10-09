@@ -139,7 +139,10 @@ READABILITY:
   ends and avoid ending on "the / because / of".
 - Contrast is non-negotiable: check rendered frames at 2–3 caption moments
   on distinct backgrounds; fix with the look's plate or glow, a clearer band,
-  or a grade adjustment.
+  or a grade adjustment. Motion looks (clean, editorial, lockup, serif,
+  glow, stack) measure the picture under every cue and lay a soft dark
+  pocket under the words where the plate is too bright for them (4.5:1);
+  on dark plates nothing changes.
 - `audit_captions()` compiles the exact caption artifact and reports
   lateness, uncovered words and overlaps. `render_preview(complete=false)`
   returns caption QA pages of real rendered caption states — judge those

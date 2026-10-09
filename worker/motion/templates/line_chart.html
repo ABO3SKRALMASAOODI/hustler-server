@@ -178,9 +178,10 @@
     const len = line.getTotalLength();
     // axis labels
     const axls = [];
-    if (P.start_label.trim()) { const a = MG.el('div', 'axl', P.start_label.trim(), inner); a.style.left = '0px'; a.style.top = (base + 16) + 'px'; axls.push(a); }
-    if (P.end_label.trim()) { const a = MG.el('div', 'axl', P.end_label.trim(), inner); a.style.top = (base + 16) + 'px'; a.style.left = (cw - a.offsetWidth) + 'px'; axls.push(a); }
-    y = base + (axls.length ? 16 + 50 : 8);
+    // (axis labels are secondary text: raised to the phone-readable floor)
+    if (P.start_label.trim()) { const a = MG.el('div', 'axl', P.start_label.trim(), inner); MG.floorType(a); a.style.left = '0px'; a.style.top = (base + 16) + 'px'; axls.push(a); }
+    if (P.end_label.trim()) { const a = MG.el('div', 'axl', P.end_label.trim(), inner); MG.floorType(a); a.style.top = (base + 16) + 'px'; a.style.left = (cw - a.offsetWidth) + 'px'; axls.push(a); }
+    y = base + (axls.length ? 16 + Math.max(50, ...axls.map(a => a.offsetHeight + 2)) : 8);
     inner.style.width = cw + 'px'; inner.style.height = y + 'px';
     card.style.padding = pad + 'px'; card.style.width = cardW + 'px';
     const cardH = y + pad * 2;

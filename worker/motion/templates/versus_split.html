@@ -93,10 +93,13 @@
       if (o.s) {
         // one line while it stays phone-readable; a longer note wraps into two
         // balanced lines at that floor instead of shrinking to a whisper
-        let v = Math.max(36 * S, fs * 0.46);
-        const floor = 34 * S;
-        Object.assign(o.s.style, { fontSize: v + 'px', whiteSpace: 'nowrap', maxWidth: '', lineHeight: '1' });
-        while (o.s.getBoundingClientRect().width > maxW && v > floor) { v *= 0.95; o.s.style.fontSize = v + 'px'; }
+        // (the floor is the template-wide secondary-text minimum, MG.minType;
+        // only a single word too long for the column may go below it)
+        Object.assign(o.s.style, { fontSize: '40px', whiteSpace: 'nowrap', maxWidth: '', lineHeight: '1' });
+        const floor = Math.max(34 * S, MG.minType(o.s));
+        let v = Math.max(36 * S, fs * 0.46, floor);
+        o.s.style.fontSize = v + 'px';
+        while (o.s.getBoundingClientRect().width > maxW && v > floor) { v = Math.max(floor, v * 0.95); o.s.style.fontSize = v + 'px'; }
         if (o.s.getBoundingClientRect().width > maxW) {
           Object.assign(o.s.style, { whiteSpace: 'normal', maxWidth: maxW + 'px', textWrap: 'balance', lineHeight: '1.08' });
           while (o.s.scrollWidth > maxW + 1 && v > 22) { v *= 0.95; o.s.style.fontSize = v + 'px'; }
@@ -131,6 +134,18 @@
     tl.style.background = P.tint ? `${wash(P.left_color, '0%')}, ${base('0%')}` : wash(null, '0%');
     tr.style.background = P.tint ? `${wash(P.right_color, '100%')}, ${base('100%')}` : wash(null, '100%');
     MG.box = [0, t0, W, t1];
+    // a measured bright plate: a pocket under each side's name + value that
+    // still lacks contrast (names are display type, 3:1; values body, 4.5:1)
+    // beyond the wash's own darkening. Dark plates: unchanged.
+    [L, R].forEach(o => {
+      if (o.bk) { o.bk.remove(); o.bk = null; }
+      const a = Math.max(MG.need(MG.rectOf(o.t), { ratio: 3, have: 0.15 }),
+                         o.s ? MG.need(MG.rectOf(o.s), { ink: '#E6E6E6', ratio: 4.5, have: 0.15 }) : 0);
+      if (a > 0) {
+        o.bk = MG.backing(root, MG.rectOf([o.t, o.s]), a, { pad: [0.16 * fs, 0.1 * fs], feather: 0.28 * fs, radius: 0.2 * fs });
+        MG.growBox(o.bk.box);
+      }
+    });
     return { lw: lr.width, rw: rr.width };
   }
 
@@ -150,6 +165,7 @@
     }
     [[L, -1, 0.04], [R, 1, 0.09]].forEach(([o, sg, a]) => {
       const e = MG.ease.outExpo(MG.range(t, a, 0.5)), q = out(sg < 0 ? 0.04 : 0);
+      if (o.bk) o.bk.style.opacity = (e * (1 - q)).toFixed(4);
       MG.set(o.t, { x: sg * ((1 - e) * 240 + q * 260) * S, opacity: MG.range(t, a, 0.08) * (1 - q), blur: (1 - e) * 14 + q * 12 });
       if (o.s) {
         const e2 = MG.ease.outExpo(MG.range(t, a + 0.09, 0.5));

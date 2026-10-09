@@ -91,7 +91,9 @@
       const lfs = Math.min(136, colW * 0.27);
       const sfs = n <= 2 ? 44 : n === 3 ? 40 : n === 4 ? 36 : 32;
       let labH = 0, minLab = 1e9, subOver = false;
-      els.forEach(e => { e.lab.style.fontSize = lfs + 'px'; minLab = Math.min(minLab, MG.fit(e.lab, { width: colW * 0.84, min: 26, max: lfs, nowrap: true })); labH = Math.max(labH, e.lab.offsetHeight); });
+      // labels and notes never drop below the phone-readable floor: at the
+      // floor they wrap (and a crowded portrait row goes vertical below)
+      els.forEach(e => { minLab = Math.min(minLab, MG.fitSecondary(e.lab, { width: colW * 0.84, max: lfs })); labH = Math.max(labH, e.lab.offsetHeight); });
       const lineY = y + labH + Math.max(34, lfs * 0.36);
       let subH = 0;
       els.forEach((e, i) => {
@@ -102,8 +104,9 @@
         if (e.sub) {
           e.sub.style.width = (colW - 12) + 'px';
           e.sub.style.fontSize = sfs + 'px';
-          MG.fit(e.sub, { width: colW - 12, height: sfs * 1.14 * 3 + 4, min: 28, max: sfs });
-          if (e.sub.offsetHeight > 28 * 1.14 * 3 + 6) subOver = true;
+          const sfl = Math.max(28, MG.minType(e.sub));
+          MG.fit(e.sub, { width: colW - 12, height: sfl * 1.14 * 3 + 4, min: sfl, max: Math.max(sfs, sfl) });
+          if (e.sub.offsetHeight > sfl * 1.14 * 3 + 6 || e.sub.scrollWidth > colW - 11) subOver = true;
           e.sub.style.left = (cx - (colW - 12) / 2) + 'px';
           e.sub.style.top = (lineY + 36) + 'px';
           subH = Math.max(subH, e.sub.offsetHeight);
@@ -116,7 +119,7 @@
       rail.dataset.ext = ext;
       h = lineY + 36 + subH;
       // a portrait frame cannot hold 4-5 columns at a readable size: go vertical
-      if (tall && n >= 4 && (minLab < 56 || subOver)) { vert = true; return layout(); }
+      if (tall && n >= 4 && (minLab < 56 || subOver || labH > lfs * 1.6)) { vert = true; return layout(); }
     } else {
       const lx = 26;                                   // rail x
       const tx = lx + 62;                              // text column
@@ -124,15 +127,15 @@
       const lfs = n <= 3 ? 92 : n === 4 ? 80 : 68, sfs = n <= 3 ? 44 : n === 4 ? 40 : 36;
       let cy = y;
       els.forEach((e, i) => {
-        e.lab.style.fontSize = lfs + 'px';
-        MG.fit(e.lab, { width: tw, min: 28, max: lfs, nowrap: true });
+        MG.fitSecondary(e.lab, { width: tw, max: lfs });
         e.lab.style.left = tx + 'px';
         e.lab.style.top = cy + 'px';
         let blockH = e.lab.offsetHeight;
         if (e.sub) {
           e.sub.style.width = tw + 'px';
           e.sub.style.fontSize = sfs + 'px';
-          MG.fit(e.sub, { width: tw, height: sfs * 1.14 * 2 + 4, min: 28, max: sfs });
+          const sfl = Math.max(28, MG.minType(e.sub));
+          MG.fit(e.sub, { width: tw, height: sfl * 1.14 * 2 + 4, min: sfl, max: Math.max(sfs, sfl) });
           e.sub.style.left = tx + 'px';
           e.sub.style.top = (cy + blockH + 10) + 'px';
           blockH += 10 + e.sub.offsetHeight;

@@ -86,12 +86,14 @@
     // lines, and only then shrink further (keeping the card inside the safe area)
     let fs = 64 * S;
     setFs(fs);
+    // row text never shrinks below the phone-readable floor (it wraps instead)
+    const floorFs = Math.max(26, MG.minType(rows[0].txt));
     while (widest() > maxText && fs > 52 * S) { fs *= 0.97; setFs(fs); }
     if (widest() > maxText) {
       fs = Math.max(fs, 56 * S);
       rows.forEach(r => { r.txt.style.whiteSpace = 'normal'; r.txt.style.maxWidth = maxText + 'px'; });
       setFs(fs);
-      while (Math.max(...rows.map(lineCount)) > 2 && fs > 26) { fs *= 0.96; setFs(fs); }
+      while (Math.max(...rows.map(lineCount)) > 2 && fs > floorFs) { fs = Math.max(floorFs, fs * 0.96); setFs(fs); }
     }
     const lineH = fs * 1.08;
     rows.forEach(r => {
@@ -105,8 +107,8 @@
       rule.style.margin = `${18 * S}px 0 ${26 * S}px`;
     }
     let r = card.getBoundingClientRect();
-    while (r.height > safe[1] - safe[0] && fs > 26) {
-      fs *= 0.95; setFs(fs);
+    while (r.height > safe[1] - safe[0] && fs > floorFs) {
+      fs = Math.max(floorFs, fs * 0.95); setFs(fs);
       rows.forEach(rw => {
         rw.box.style.marginTop = Math.max(0, (fs * 1.08 - bs) / 2) + 'px';
         rw.txt.style.marginTop = Math.max(0, (bs - fs * 1.08) / 2) + 'px';
@@ -148,8 +150,25 @@
     const left = (W - cw) / 2, top = MG.clamp(H * P.y - ch / 2, safe[0], Math.max(safe[0], safe[1] - ch));
     card.style.left = left + 'px'; card.style.top = top + 'px';
     MG.box = [left - 56, top - 44, left + cw + 56, top + ch + 76];
+    // a measured bright plate: the glass card darkens its own glass (a panel
+    // reads as dark glass at MG.PANEL_RATIO, never a muddy grey card over a white
+    // shirt); a bare list gets a pocket under its rows. Dark plates: unchanged.
+    if (bk) { bk.remove(); bk = null; }
+    const cr = [left, top, left + cw, top + ch];
+    if (P.panel) {
+      const a = MG.need(cr, { ratio: MG.PANEL_RATIO, have: 0.62 });
+      card.style.backgroundColor = a > 0 ? `rgba(14,14,17,${(1 - 0.38 * (1 - a)).toFixed(3)})` : '';
+    } else {
+      const a = MG.need(cr, { ratio: 4.5 });
+      if (a > 0) {
+        bk = MG.backing(card, [0, 0, cw, ch], a, { pad: [0.3 * fs, 0.24 * fs], feather: 0.32 * fs, radius: 0.3 * fs });
+        bk.style.zIndex = '-1';
+        MG.growBox([left + bk.box[0], top + bk.box[1], left + bk.box[2], top + bk.box[3]]);
+      }
+    }
     return { fs };
   }
+  let bk = null;
 
   const fontsReady = Promise.all(["700 64px 'Inter Display'", "italic 400 84px 'Instrument Serif'"].map(f => document.fonts.load(f).catch(() => null)));
   MG.ready = fontsReady.then(() => { G = layout(); });
@@ -163,6 +182,7 @@
     const c = MG.ease.outCubic(MG.range(t, 0, 0.34));
     if (P.panel) MG.set(card, { y: (1 - c) * 26 + q * 22, scale: 0.965 + 0.035 * c, opacity: MG.range(t, 0, 0.16) * (1 - q), blur: (1 - c) * 10 + q * 8 });
     else MG.set(card, { y: q * 22, opacity: 1 - q, blur: q * 8 });
+    if (bk) bk.style.opacity = MG.ease.outCubic(MG.range(t, Math.max(0, rows[0].t - 0.08), 0.2)).toFixed(4);
     if (ttl) {
       const e = MG.ease.outCubic(MG.range(t, 0.06, 0.3));
       MG.set(ttl, { y: (1 - e) * 12, opacity: MG.range(t, 0.06, 0.12), blur: (1 - e) * 8 });

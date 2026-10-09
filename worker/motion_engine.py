@@ -336,10 +336,16 @@ def design_size(width, height):
 
 
 def build_document(body, *, params=None, theme=None, duration=1.0, fps=30.0,
-                   design_w=DESIGN_W, design_h=1920):
-    """Wrap template/authored HTML with fonts, the runtime and its inputs."""
+                   design_w=DESIGN_W, design_h=1920, plate=None):
+    """Wrap template/authored HTML with fonts, the runtime and its inputs.
+
+    plate: the measured program picture under the item (worker/plate.py),
+    {c, r, s: [{t, g}]}, exposed as MG.plate. None leaves the document
+    exactly as it was before plates existed."""
     init = {"params": params or {}, "theme": theme or {}, "duration": float(duration),
             "fps": float(fps), "W": int(design_w), "H": int(design_h)}
+    if plate:
+        init["plate"] = plate
     return (
         "<!doctype html><html><head><meta charset='utf-8'>"
         f"<style>{_font_css()}\n:root{{--W:{int(design_w)}px;--H:{int(design_h)}px}}{BASE_CSS}</style>"

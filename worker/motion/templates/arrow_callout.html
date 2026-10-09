@@ -99,11 +99,14 @@
     const maxW = Math.min(560 * S, (safe[2] - safe[0]) * 0.62);
     lab.style.maxWidth = maxW + 'px';
     let fs = base;
-    for (; fs > base * 0.5; fs *= 0.95) {
+    // never below the phone-readable floor: a long label takes more lines
+    const floor = Math.min(base, MG.minType(lab));
+    for (; fs > Math.max(base * 0.5, floor); fs = Math.max(floor, fs * 0.95)) {
       lab.style.fontSize = fs + 'px';
       const r = lab.getBoundingClientRect(), lh = parseFloat(getComputedStyle(lab).lineHeight) || fs;
       if (Math.round(r.height / lh) <= 2 && lab.scrollWidth <= maxW + 1) break;
     }
+    lab.style.fontSize = Math.max(fs, floor) + 'px';
     const lr = lab.getBoundingClientRect(), lw = lr.width, lh = lr.height;
     const T = [P.target_x * W, P.target_y * H], dist = P.distance * W, gap = 16 * S;
     const hx = P.target_x > 0.5 ? -0.32 : 0.32;

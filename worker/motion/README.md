@@ -92,6 +92,35 @@ Never use `Date`, `performance.now`, `Math.random`, `setTimeout`,
 - Set `MG.box = [x0, y0, x1, y1]` (design px, include glow/shadow/motion
   overshoot) once layout is known so capture is clipped to it.
 
+### Legibility: the plate under the graphic
+
+Before rendering, the renderer measures the program picture under every item
+at a few moments (every cue of the motion-caption track) — the footage fitted
+and zoomed the way the render shows it, as an 18-column luma grid
+(`worker/plate.py`) — and passes it as `MG.plate` (`null` when unmeasured).
+Templates read it under their OWN laid-out boxes:
+
+- `MG.plateAt(rect, t0, t1)` → `{mean, lo, hi}` (0-1 luma, area-weighted
+  mean and 15th/85th percentiles) or `null`.
+- `MG.need(rect, {ink, ratio, t0, t1, have})` → the black alpha (0-0.9) the
+  plate needs behind light `ink` to reach `ratio`:1 over its bright part
+  (4.5 body text, 3 display type, `MG.PANEL_RATIO` for glass cards); `have`
+  is darkening the template already lays there. 0 = nothing to do.
+- `MG.darkInkOK(rect, {ratio})` — the plate is bright all the way across, so
+  `MG.DARK_INK` reads on it (slams, marker lines).
+- `MG.backing(parent, rect, alpha, {pad, feather, radius})` — a feathered
+  dark pocket behind type (starts hidden; the template drives its opacity;
+  `.box` is its painted extent for `MG.growBox`).
+
+The contract: with no plate, or a dark one, a template renders exactly as it
+did before plates existed — compute `need` and change nothing when it is 0.
+
+Secondary text (kickers, sub-labels, labels, attributions, chips) keeps a cap
+height of at least `MG.MIN_CAP` (2.2%) of the frame height: `MG.minType(el)`
+is the smallest font-size for el's font, `MG.floorType(el)` raises it, and
+`MG.fitSecondary(el, {width, max})` fits one line down to the floor and then
+wraps into balanced lines instead of shrinking further.
+
 Fonts available by CSS family name (variable fonts accept any weight in
 their range):
 - Grotesk backbone: 'Inter Display' (700/800/900, 700 italic), 'Inter' (100–900,
@@ -124,6 +153,8 @@ size on real footage:
 3. **Depth and finish**: soft drop shadows for legibility on any footage,
    optional glow, subtle gradients, crisp 1px borders on cards, real
    rounded corners, backdrop-like dark plates when the text needs contrast.
+   Light type answers `MG.need` over a bright plate (a pocket, dark ink or a
+   darker card) and secondary text respects `MG.minType`.
 4. **Robustness**: any reasonable param value must render well — long and
    short copy, 1–3 lines, all enums. Never overflow the frame. Never leave
    a blank first frame unless the design calls for it.
@@ -137,6 +168,9 @@ PATH=<ffmpeg dir>:$PATH python3 worker/tools/motion_preview.py \
   --template NAME --params '{"text":"..."}' --bg some.mp4 --bg-start 10 \
   --out /tmp/review/NAME --sheet-times 0.05,0.15,0.3,0.6,1,1.5,2.4
 ```
+
+Add `--bg-fit crop --bg-focus 0.4 --plate` to review a template over a real
+bright plate exactly as a render measures it (pockets, dark ink).
 
 Look at the contact sheet AND step through the dense early frames. Test
 extremes of every param. `worker/tests/test_motion_templates.py` renders

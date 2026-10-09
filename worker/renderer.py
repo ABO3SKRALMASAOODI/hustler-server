@@ -41,6 +41,7 @@ import screenframe
 import motion_captions
 import motion_layer
 import picture_cards
+import plate
 import screening
 import sheets
 import stitch
@@ -1634,6 +1635,22 @@ def camera_current(meta, edl):
     if not moves:
         return True
     return ((meta or {}).get("cam_v") or 0) == config.CAMERA_VERSION
+
+
+def legibility_current(meta, edl):
+    """Was this render's motion layer drawn with today's legibility pass?
+
+    Only EDLs the motion engine draws on (motion items, or a motion caption
+    look) can be stale: before config.LEGIBILITY_VERSION their light type
+    sat on bright shirts with only a soft shadow, and secondary text could
+    be too small to read on a phone. Same grandfathering discipline as
+    transitions_current: everything else keeps its cache, and a missing
+    stamp on such an EDL means the render predates the pass.
+    """
+    edl = edl or {}
+    if not (edl.get("motion") or motion_captions.look_of(edl)):
+        return True
+    return ((meta or {}).get("legib_v") or 0) == config.LEGIBILITY_VERSION
 
 
 def look_current(meta):
@@ -3557,6 +3574,20 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp")
 
 
+def _plate_probe(edl, tl, src_path, src_size, W, H, frame_mode, frame_focus,
+                 insert_locals, captions=False):
+    """The plate probe for one render's motion layer (worker/plate.py): the
+    program picture under every graphic and motion-caption cue, measured
+    before the compositions render so light type can firm up its own backing
+    over a bright plate. None when nothing is drawn by the motion engine."""
+    if not (edl.get("motion") or captions) or \
+            not motion_layer.motion_engine.available():
+        return None
+    return plate.Probe(edl, tl, src_path, src_size, W, H, tl.out_duration,
+                       frame_mode=frame_mode, frame_focus=frame_focus,
+                       insert_locals=insert_locals)
+
+
 def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
                        want_wm=False, wm_settings=None, cancelled_cb=None,
                        audio_only=False, asset_locals=None, suppress_outro=False,
@@ -3656,6 +3687,7 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
         sfx_inputs.append((next_idx, item, None))
         next_idx += 1
 
+    insert_locals = {}           # asset key -> local file (the plate probe)
     for item in inserts:
         if audio_only and (item["kind"] == "image" or item.get("mute")):
             # The pruned graph only needs the silence branch. Do not open a
@@ -3663,6 +3695,7 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
             insert_inputs.append((silence_idx, item, False))
             continue
         local = _fetch(item["asset_key"], "insert", next_idx)
+        insert_locals[item["asset_key"]] = local
         input_args, graph_item = render_plan.insert_input(
             item, local, fps, copy_timestamps=False)
         extra_inputs += input_args
@@ -3720,7 +3753,9 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
     if not audio_only:
         motion_inputs, next_idx = motion_layer.prepare_inputs(
             edl, workdir, W, H, fps, tl.out_duration, extra_inputs, next_idx,
-            fetch_asset=lambda k: _fetch(k, "motion", next_idx))
+            fetch_asset=lambda k: _fetch(k, "motion", next_idx),
+            plate=_plate_probe(edl, tl, None, None, W, H, None, None,
+                               insert_locals))
         motion_inputs = motion_layer.demote_behind(
             motion_inputs, "a canvas program has no subject footage")
     graph = build_filtergraph(edl, tl.out_duration, False, tl, ass_path,
@@ -4369,6 +4404,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         sfx_inputs.append((next_idx, item, None))
         next_idx += 1
 
+    insert_locals = {}           # asset key -> local file (the plate probe)
     for item in inserts:
         if audio_only and (item["kind"] == "image" or item.get("mute")):
             # The pruned graph only needs the silence branch. Do not open a
@@ -4376,6 +4412,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
             insert_inputs.append((silence_idx, item, False))
             continue
         local = _fetch(item["asset_key"], "insert", next_idx)
+        insert_locals[item["asset_key"]] = local
         input_args, graph_item = render_plan.insert_input(
             item, local, fps, copy_timestamps=seek_main_source)
         extra_inputs += input_args
@@ -4545,7 +4582,11 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         motion_inputs, next_idx = motion_layer.prepare_inputs(
             edl, workdir, W, H, fps, tl.out_duration, extra_inputs, next_idx,
             fetch_asset=lambda k: _fetch(k, "motion", next_idx),
-            extra_items=caption_motion_items)
+            extra_items=caption_motion_items,
+            plate=_plate_probe(edl, tl, src_path,
+                               (info["width"], info["height"]), W, H,
+                               frame_mode, frame_focus, insert_locals,
+                               bool(caption_motion_items)))
         if caption_motion_items and not any(
                 str(it.get("id", "")).startswith("__captions_")
                 for _i, it, _c in motion_inputs):
@@ -5888,6 +5929,7 @@ def _run_render_job(worker_db, job):
                 and transitions_current(cached.get("meta"), edl_row["json"]) \
                 and music_tail_current(cached.get("meta"), edl_row["json"],
                                        _tail_out) \
+                and legibility_current(cached.get("meta"), edl_row["json"]) \
                 and watermark_current(cached.get("meta"), variant, is_paid,
                                       wm_settings) \
                 and _audio_model_review_cache_compatible(
@@ -5915,6 +5957,7 @@ def _run_render_job(worker_db, job):
                     "sha256": cached.get("sha256"), "cached": True,
                     **({"motion_warnings": cached_meta["motion_warnings"]}
                        if cached_meta.get("motion_warnings") else {})}
+    plate_id = None              # the main source's identity for plate.py's cache
     if is_canvas:
         index = {}
         src_asset = None
@@ -5945,6 +5988,7 @@ def _run_render_job(worker_db, job):
         clean_key = clean_source_key(edl_row["json"],
                                      "final" if _PREVIEW_QUALITY.get() == "approval" else variant,
                                      src_sha)
+        plate_id = f"{src_sha}:{clean_key or ''}"
         if clean_key:
             if not storage.exists(clean_key):
                 raise RuntimeError(
@@ -5962,6 +6006,9 @@ def _run_render_job(worker_db, job):
     # the editor, not only the log: the render still succeeds without them.
     motion_warnings = []
     motion_token = motion_layer.collect_warnings(motion_warnings)
+    # A final measures the plate under its graphics from the original; the
+    # preview already measured the same picture from the proxy (plate.py).
+    plate_token = plate.source_scope(plate_id)
     active_stage = ["download_s"]
 
     def _mark(stage):
@@ -6179,6 +6226,7 @@ def _run_render_job(worker_db, job):
                             and camera_current(pm, prev_row["json"]) \
                             and music_tail_current(pm, prev_row["json"],
                                                    _pout) \
+                            and legibility_current(pm, prev_row["json"]) \
                             and watermark_current(pm, variant, is_paid,
                                                   wm_settings) \
                             and (fp_now is None
@@ -6519,6 +6567,10 @@ def _run_render_job(worker_db, job):
                   "trans_v": config.TRANSITION_VERSION,
                   "cam_v": config.CAMERA_VERSION,
                   "tail_v": config.MUSIC_TAIL_VERSION,
+                  # A reused picture keeps the graphics it was drawn with.
+                  "legib_v": (reused_visual_meta.get("legib_v") or 0
+                              if reused_visual_meta
+                              else config.LEGIBILITY_VERSION),
                   # A reused picture keeps the look it was drawn with.
                   "look_v": (reused_visual_meta.get("look_v") or 0
                              if reused_visual_meta
@@ -6582,4 +6634,5 @@ def _run_render_job(worker_db, job):
         timings.update(detail)
         _RENDER_DETAIL.reset(detail_token)
         motion_layer.stop_collecting(motion_token)
+        plate.end_source_scope(plate_token)
         shutil.rmtree(workdir, ignore_errors=True)

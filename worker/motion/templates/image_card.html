@@ -117,13 +117,15 @@
       cap.style.display = '';
       const mx = base * Math.min(1, cw / 840) + 4;
       // fit with a few px of slack so a 1px rounding never triggers the ellipsis
-      capFs = MG.fit(cap, { width: capW() - 4, min: Math.round(mx * 0.62), max: mx, nowrap: true });
+      // (one line down to the phone-readable floor, then two lines at or above it)
+      const cfl = MG.minType(cap);
+      capFs = MG.fit(cap, { width: capW() - 4, min: Math.max(Math.round(mx * 0.62), cfl), max: Math.max(mx, cfl), nowrap: true });
       capLines = cap.scrollWidth > capW() - 3 ? 2 : 1;
       if (capLines === 2) {
-        capFs = Math.round(mx * 0.8);
+        capFs = Math.max(Math.round(mx * 0.8), cfl);
         Object.assign(cap.style, { fontSize: capFs + 'px', whiteSpace: 'normal', width: capW() + 'px',
           display: '-webkit-box', webkitBoxOrient: 'vertical', webkitLineClamp: '2', lineHeight: '1.12' });
-        MG.fit(cap, { width: capW(), height: capFs * 1.12 * 2 + 2, min: 22, max: capFs });
+        MG.fit(cap, { width: capW(), height: capFs * 1.12 * 2 + 2, min: Math.min(capFs, Math.max(22, cfl * 0.85)), max: capFs });
         capFs = parseFloat(cap.style.fontSize);
       }
       cap.style.maxWidth = capW() + 'px';
@@ -168,6 +170,14 @@
       const k = MG.clamp(cw / 840, 0.7, 1);
       chip.style.transform = `scale(${k})`;
       chip.dataset.k = k;
+      // the chip is a label: at least the phone-readable floor once scaled,
+      // unless a long tag would then overrun the picture
+      chip.style.fontSize = '';
+      const room = (cw - 2 * padX - 48) / k, fl = MG.minType(chip.lastChild) / k;
+      if (fl > 30) {
+        chip.style.fontSize = fl + 'px';
+        if (chip.offsetWidth > room) chip.style.fontSize = Math.max(30, fl * room / chip.offsetWidth) + 'px';
+      }
     }
     Object.assign(geo, { cw, ch, left, top, cy });
     // capture box: card + shadow + entrance overshoot (perspective growth)

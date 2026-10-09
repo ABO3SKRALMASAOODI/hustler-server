@@ -14,6 +14,9 @@ keeps the whole block inside that band and the platform-safe area, so a
 look never grows onto the face the placement compiler steered around.
 Where the spatial index measured the plate, a cue also carries its mean luma
 ``l`` (0-1) so premium looks firm up their scrim and shadow on bright plates.
+At render time the motion layer also measures the picture under every cue
+(worker/plate.py, ``MG.plate``): a light-ink look whose own block sits on a
+plate too bright for 4.5:1 turns its scrim into a pocket dark enough for it.
 
 The caption track is split at natural gaps into segments of ~6–10 s. Each
 segment is an independent RenderJob carrying only its own cues, so segments

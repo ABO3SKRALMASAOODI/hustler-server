@@ -1971,6 +1971,17 @@ CAMERA_VERSION = 1
 # those known-bad cached previews/finals are rebuilt without the black tail.
 MUSIC_TAIL_VERSION = 2
 
+# Legibility of motion graphics and motion captions (worker/plate.py): the
+# renderer measures the program picture under every graphic and caption cue,
+# and light type over a bright plate raises its own backing (or switches to
+# dark ink); secondary text keeps a phone-readable minimum size. Stamped as
+# `legib_v` on every render and compared ONLY for EDLs the motion engine
+# draws on (motion items or a motion caption look): their older renders put
+# white type on white shirts with only a soft shadow. Everything else keeps
+# its cache. Bump when the plate measurement or the templates' bright-plate
+# treatment changes what such a render looks like.
+LEGIBILITY_VERSION = 1
+
 # The picture pipeline's look. A stitched preview stream-copies the unchanged
 # stretches of the previous preview and splices in newly rendered pieces, so
 # pieces from a different look show a sharpness/tone seam at every splice.

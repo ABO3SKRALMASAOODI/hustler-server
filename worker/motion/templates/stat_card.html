@@ -129,8 +129,7 @@
     const lab = MG.el('div', 'lab', null, inner);
     MG.el('span', 'sdot', null, lab);
     MG.el('span', null, P.label, lab);
-    lab.style.fontSize = '44px';
-    MG.fit(lab, { width: cw, min: 30, max: 44, nowrap: true });
+    MG.fitSecondary(lab, { width: cw, max: 44 });        // phone-readable floor; wraps before shrinking past it
     const row = MG.el('div', 'row', null, inner);
     row.style.marginTop = '26px';
     const val = MG.el('div', 'val', V ? fmt(V, V.v) : P.value, row);
@@ -154,8 +153,7 @@
     if (P.caption.trim()) {
       cap = MG.el('div', 'cap', P.caption.trim(), inner);
       cap.style.marginTop = '20px';
-      cap.style.whiteSpace = 'normal';
-      MG.fit(cap, { width: cw, height: 40 * 1.12 * 2 + 4, min: 28, max: 40 });
+      MG.fitSecondary(cap, { width: cw, max: 40 });
     }
     let sp = null;
     let h = inner.getBoundingClientRect().height;
