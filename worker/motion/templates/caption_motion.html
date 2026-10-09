@@ -141,7 +141,7 @@
 
   // Entrance per look/role: kind + duration + how early it may start.
   const ENTER = {
-    pop: { d: F, early: 0 }, ghost: { d: 3 * F, early: 2 * F }, rise: { d: 0.12, early: 0.05 },
+    pop: { d: 0, early: 0 }, ghost: { d: 2 * F, early: 2 * F }, rise: { d: 0.12, early: 0.05 },
     scale: { d: 0.09, early: 0 }, slam: { d: 0.14, early: 0 }, light: { d: 0.17, early: 0 },
     glide: { d: 0.11, early: 0 }, type: { d: 0, early: 0 },
   };
@@ -445,7 +445,10 @@
     cues.sort((a, b) => a.s - b.s);
     // timing: reveal time + entrance per word, then the motion windows
     const Wn = [];
-    const win = (a, b) => Wn.push([a - 0.6 * F, b + 0.6 * F]);
+    // A window covers the first frame at/after every change and nothing
+    // more: frames outside all windows re-use the previous capture.
+    const G = 0.98 * F;
+    const win = (a, b) => Wn.push([a - 1e-4, b]);
     cues.forEach((c, i) => {
       const nxt = cues[i + 1];
       if (nxt && nxt.s < c.e) c.e = nxt.s;            // never two cues at once
@@ -472,16 +475,16 @@
           o.d = Math.max(0.05, Math.min(n / 32, Math.max(0.05, (o.w.e - o.w.s) * 0.9), 0.4));
         }
         if (o.R >= c.e) o.R = Math.max(c.s, c.e - F);
-        win(o.R, o.R + Math.max(F, o.d));
+        win(o.R, o.R + o.d + G);
       });
-      win(c.s, c.s + (look === 'box' || look === 'mono' ? 0.15 : F));
-      if (c.hardOut) win(c.e, c.e + F); else win(c.e - c.fadeD - F, c.e + F);
+      win(c.s, c.s + (look === 'box' || look === 'mono' ? 0.14 : 0) + G);
+      if (c.hardOut) win(c.e, c.e + G); else win(c.e - c.fadeD, c.e + G);
       if (look === 'mono' && !HARD) {
         // caret blinks (2 Hz) only while the line rests
         const ends = c.words.map(o => o.R + o.d);
         c.words.forEach((o, k) => {
           const a = ends[k], b = k + 1 < c.words.length ? c.words[k + 1].R : c.e;
-          for (let tg = a + 0.5; tg < b; tg += 0.5) win(tg, tg + F);
+          for (let tg = a + 0.5; tg < b; tg += 0.5) win(tg, tg + G);
         });
       }
     });

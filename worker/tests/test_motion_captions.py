@@ -375,3 +375,37 @@ def test_words_reveal_in_place_and_animation_none_is_a_hard_pop(look, tmp_path):
         assert {r[0]: r for r in after}[text][1] == 1.0, after
         if anim == "none":
             assert {r[0]: r for r in onset}[text][1] == 1.0, onset
+
+
+def _framemd5(path):
+    import subprocess
+    out = subprocess.run([shutil.which("ffmpeg"), "-v", "error", "-i", path, "-f", "framemd5", "-"],
+                         capture_output=True, text=True, check=True).stdout
+    return [ln.split(",")[-1].strip() for ln in out.splitlines() if ln and not ln.startswith("#")]
+
+
+@needs_browser
+@pytest.mark.parametrize("anim", ["auto", "none"])
+def test_static_frame_reuse_never_drops_a_caption_change(anim, tmp_path, monkeypatch):
+    """Frames outside the declared motion windows are re-used, so every
+    visual change must sit inside a window: the windowed render has to be
+    pixel-identical to rendering every frame."""
+    monkeypatch.setattr(motion_engine, "CACHE_DIR", str(tmp_path / "cache"))
+    style = {"animation": "none"} if anim == "none" else None
+    jobs = []
+    for look in motion_captions.LOOKS:
+        edl, index, tl = _setup(look, style=style)
+        item = motion_captions.items(edl, index, tl)[0]
+        item = dict(item, end=item["start"] + 3.6)       # swaps, pauses, emphasis
+        job = motion_templates.build_job(item, 270, 480, 30)
+        jobs += [job, motion_engine.RenderJob(**dict(job.__dict__, html=job.html.replace(
+            "</body>", "<script>MG.always();</script></body>")))]
+    clips = motion_engine.render_jobs(jobs, str(tmp_path / "clips"), pages=4)
+    for k, look in enumerate(motion_captions.LOOKS):
+        a, b = clips[2 * k], clips[2 * k + 1]
+        assert a.captured < b.captured, look
+        assert (a.x, a.y, a.w, a.h) == (b.x, b.y, b.w, b.h)
+        fa, fb = _framemd5(a.path), _framemd5(b.path)
+        assert len(fa) == len(fb)
+        bad = [i for i, (x, y) in enumerate(zip(fa, fb)) if x != y]
+        assert not bad, (look, anim, bad[:10])
