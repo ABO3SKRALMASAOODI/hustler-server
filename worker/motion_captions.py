@@ -183,13 +183,20 @@ def cues(edl, index, tl):
 
 
 def _segments(all_cues):
-    """Split the track into ~8 s render segments, preferring pauses."""
+    """Split the track into ~8 s render segments, preferring pauses.
+
+    A placement move (another band/anchor) also starts a segment once the
+    current one has some length: each segment is captured inside the union
+    of its blocks, so a top-and-bottom segment would capture most of the
+    frame for every changing frame."""
     segs, cur = [], []
     for c in all_cues:
         if cur:
             seg_s = cur[0]["s"]
             pause = c["s"] - cur[-1]["e"] >= CONTIGUOUS_S
-            if (c["e"] - seg_s > SEGMENT_MAX_S) or \
+            moved = (c.get("b") != cur[-1].get("b") or
+                     abs(float(c.get("y", 0)) - float(cur[-1].get("y", 0))) > 0.06)
+            if (c["e"] - seg_s > SEGMENT_MAX_S) or (moved and c["s"] - seg_s >= 1.5) or \
                     (c["s"] - seg_s >= SEGMENT_TARGET_S and (pause or c["s"] - seg_s >= SEGMENT_TARGET_S + 1.5)):
                 segs.append(cur)
                 cur = []

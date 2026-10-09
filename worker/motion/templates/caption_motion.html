@@ -187,7 +187,10 @@
   }
 
   function buildEditorial(c, blk) {
-    const n = c.w.length, hero = pickHero(c.w, false);
+    const n = c.w.length;
+    let hero = pickHero(c.w, false);
+    // a lone exclamation/question word is a beat of its own ("Why?")
+    if (hero < 0 && n === 1 && /[?!]["'”’)]*$/.test(c.w[0].t) && key(c.w[0].t).length >= 2) hero = 0;
     const mode = hero < 0 ? 'flow' : n === 1 ? 'solo' : hero === n - 1 ? 'below' : hero === 0 ? 'above' : 'inline';
     c.mode = mode;
     const heroColor = accentSet ? accent : color;
@@ -222,7 +225,8 @@
   }
 
   function buildLockup(c, blk) {
-    const hero = pickHero(c.w, true);
+    let hero = pickHero(c.w, true);
+    if (hero < 0 && c.w.length === 1) hero = 0;   // a one-word beat is always the hero
     c.heroK = hero;
     if (hero < 0) {
       // connector-only phrase ("but it could"): one mid-size row, no fake hero
@@ -386,6 +390,8 @@
         if (userWeight && target) target.style.fontWeight = userWeight;
       }
       c.el = el; c.blk = blk;
+      // right-to-left scripts keep their reading order (words are inline boxes)
+      if (c.w.some(w => /[\u0590-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFF]/.test(w.t))) blk.dir = 'rtl';
       el.classList.add('on');
       const zone = zoneOf(c), zoneH = zone[1] - zone[0];
       const base = CFG.fs * size * K;

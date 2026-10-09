@@ -21932,28 +21932,13 @@ _STYLE_PROPS = {
     "motion_look": {"type": "string",
                     "enum": ["editorial", "clean", "lockup", "pop", "box", "serif",
                              "glow", "stack", "mono"],
-                    "description": "Browser-drawn premium caption look (the DEFAULT for "
-                                   "short-form/podcast/premium requests; words reveal IN PLACE "
-                                   "inside a pre-laid-out phrase, near-white type with a soft "
-                                   "shadow, emphasis_words carry the hierarchy): editorial = "
-                                   "tight bold grotesk, the emphasis word becomes a big serif "
-                                   "italic tucked above/below the line, hard pops on the spoken "
-                                   "onset (flagship podcast/reel look); clean = calm sentence "
-                                   "case, words rise out of a blur, warm accent on emphasis "
-                                   "(interviews, tutorials, documentary); lockup = small caps "
-                                   "connectors over ONE huge hero word that ghost-snaps in "
-                                   "(motivational, punchy); pop = bold outlined 1-3 word hype "
-                                   "captions, spoken word punches in the accent colour (sport, "
-                                   "gaming, memes); box = phrase pill with a highlight gliding "
-                                   "word to word; serif = gold serif-italic emphasis inline "
-                                   "(calm, cinematic, luxury); glow = karaoke light-up; stack = "
-                                   "giant condensed hero word slam (loud lockup); mono = "
-                                   "typewriter with caret (tech). Replaces preset rendering "
-                                   "(the preset stays the fallback); color, highlight_color "
-                                   "(accent), font, size/size_scale, uppercase, text_align, "
-                                   "position/anchor_y and animation:'none' (hard pops, hard "
-                                   "clears) still apply. Phrase length follows the look. Set "
-                                   "null to return to presets."},
+                    "description": "Browser-drawn caption look, the default for short-form/"
+                                   "podcast/premium: editorial = bold sans + big serif-italic "
+                                   "emphasis word, hard pops; clean = calm sentence case rising "
+                                   "from a blur; lockup = small caps over one huge hero word; "
+                                   "pop = outlined hype punches; box = gliding highlight pill; "
+                                   "serif = gold serif-italic emphasis; glow = karaoke; stack = "
+                                   "giant condensed hero; mono = typewriter. null = presets."},
     "preset": {"type": "string", "enum": CAPTION_PRESETS},
     "color": {"type": "string"},
     "size": {"type": "string", "enum": ["s", "m", "l", "xl"]},

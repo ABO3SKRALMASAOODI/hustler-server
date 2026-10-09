@@ -125,6 +125,16 @@ def test_items_land_one_frame_early_and_segments_never_overlap(monkeypatch):
             assert all(c["s"] - 1e-6 <= w["s"] for w in c["w"])
 
 
+def test_segments_split_where_the_placement_moves():
+    track = [{"t0": 0.0, "t1": 4.0, "position": "top", "anchor_y": 0.16},
+             {"t0": 4.0, "t1": 8.0, "position": "bottom", "anchor_y": 0.8}]
+    edl, index, tl = _setup("clean", placement=track)
+    items = motion_captions.items(edl, index, tl)
+    assert len(items) >= 2
+    for it in items:   # one capture box per placement band
+        assert len({c["b"] for c in it["params"]["cues"]}) == 1
+
+
 def test_style_params_map_fonts_animation_and_accent():
     edl, _i, _t = _setup("editorial", style={"font": "Inter Display Black",
                                              "animation": "none",
