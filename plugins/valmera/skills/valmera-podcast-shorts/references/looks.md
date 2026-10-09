@@ -24,7 +24,9 @@ The coordinator assigns one Look and one structure per short. The editor reads
 | Target | Value |
 | --- | --- |
 | Hook interrupt | a designed visual event at 0.0-0.6 s (`hook_title`, `word_slam` or a card reveal; a silent landing zoom may ride under it) with at most one sound |
-| Hook as text | the hook line readable on screen by 1.5 s; it poses the tension, never states the payoff |
+| Hook as text | the hook line complete and readable on screen by 1.5 s (about 5% of frame height or more, not a slow typewriter); it poses the tension, never states or quotes the payoff, never contradicts the words under it |
+| Speaker identity | each speaker named within ~3 s of first appearing (`lower_third` or the headline band: verified name plus role, venue or year) |
+| Meaning | each graphic means what the speaker means: a tick is "achieved" (broken promises and myths take `mark='cross'`), slams go on information-bearing words, never on clichés, and no graphic only recaps an earlier one |
 | Visual change | something changes every 0.3-0.6 s (caption cue, graphic, zoom, cut); a structural event (cut, zoom, graphic, B-roll) every 1.5-2.5 s |
 | Hero moments | 2-4 designed beats on exact word cues (Kinetic Poster, Mono Noir, Creator Glow: 3-6) |
 | Payoff | marked (type, sound or camera; the owner's song's button when music is on) and held 1.0-1.5 s before the editorial end |
@@ -44,7 +46,13 @@ The coordinator assigns one Look and one structure per short. The editor reads
   No thick outlines, no default yellow boxes, no emoji spam. Legibility comes
   from size, face-free placement, a soft shadow and the grade.
 - One text system on screen at a time. Templates that replace the spoken words
-  (`word_slam`, `phrase_build`) mute the captions under them.
+  (`word_slam`, `phrase_build`) mute the captions under them. Mute captions
+  only under a graphic that carries the words being spoken, never over a
+  punchline's setup; kickers quote the transcript.
+- One accent colour for the whole short, passed to every graphic's `accent`;
+  at most about 4 template families per short, varied across the batch.
+- Over a bright shirt or wall, raise the template's `scrim` (or move the type
+  to darker space); white type on a white shirt is a defect.
 - Safe area on 9:16: x 60-1020 px, y 8-80% of height. Keep the native corner
   mark and the bottom 20% clear; no card, caption or graphic below y 0.80.
 

@@ -38,7 +38,10 @@ at 1x with the sound on, then answer:
    the handback)?
 4. **Attention:** with the famous name hidden, is the idea still worth
    finishing?
-5. **Clean:** faithful claims and qualifiers, accurate readable captions,
+5. **Clean:** faithful claims and qualifiers, accurate readable captions
+   (none muted over a punchline's setup), speakers named, graphics that mean
+   what is said, no white type on white clothing, at most one impact sound
+   (on the payoff), at least ~0.5 s after the last word before the end card,
    nothing over the face or the brand corner, the corner mark and native end
    card untouched, no flash frames, pops, exposed edges or clipped words,
    rights recorded for every asset?
