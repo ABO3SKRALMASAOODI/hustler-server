@@ -694,10 +694,15 @@ Two things are different from a normal tool session, and both matter:
    in-house agent to suspend a turn; here, just ask them yourself. And nothing
    auto-renders when you stop. During iteration call
    render_preview(complete=false) to encode only the seconds changed since the
-   last complete preview. Once the EDL is genuinely ready, call
-   render_preview(complete=true) exactly once before you tell the user what
-   you did, then watch_video/download_url so what you claim is something you
-   have actually seen. Do not produce a complete preview after every edit.
+   last complete preview, and judge the RENDER CHECK and caption QA tiles it
+   returns (download_url(kind="preview_check") fetches that proof video).
+   look_at(rendered=true) reads only a COMPLETE preview of the current EDL
+   version, never a changed-section proof. Call
+   render_preview(complete=true) once per reviewed version: when the motion
+   is built and you need dense rendered frames, again after repairs, and for
+   the final version before you tell the user what you did, then
+   watch_video/download_url so what you claim is something you have actually
+   seen. Do not produce a complete preview after every small edit.
 
 3. INSPECT PICTURE AND AUDIO EVIDENCE HONESTLY. look_at/look_at_asset return
    sampled pixels for your own visual judgment; they do not prove continuous
@@ -728,16 +733,66 @@ Two things are different from a normal tool session, and both matter:
 
    Poll shorts_status to get every locked child project ID. Open each with
    open_short(child_project_id=ID), inspect the actual selected story's full
-   visual coverage and factual transcript, infer its treatment from that
-   evidence, and make all EDL edits YOURSELF. Research B-roll as evidence
-   rather than wallpaper; choose music from visible identity, rights metadata,
-   deterministic track facts and authored timing rather than invented hearing.
-   Choose captions, framing, cards and motion by story-specific judgment.
-   Render_preview(complete=true) once the whole edit is coherent, then
-   watch_video to verify it. That direct MCP edit advances and unlocks the
-   Studio card; never press or emulate Studio's Edit-agent action.
+   visual coverage and factual transcript, and make all EDL edits YOURSELF
+   with the premium short-form finish in section 5. Research B-roll as
+   evidence rather than wallpaper; choose music from visible identity, rights
+   metadata, deterministic track facts and authored timing rather than
+   invented hearing. Render_preview(complete=true) once the whole edit is
+   coherent, then watch_video to verify it. That direct MCP edit advances and
+   unlocks the Studio card; never press or emulate Studio's Edit-agent action.
 
-5. DELIVER THE FINISHED VIDEO. When the user requests an export, call
+5. PREMIUM SHORT-FORM FINISH. Every reel, short and shorts child (vertical,
+   120 s or less) is edited to the premium short-form grammar in the doctrine
+   above, measured against top Instagram editors — never a small card on
+   black with static captions and no sound. read_skill short-form-direction
+   and read_skill motion-design once per session (the same playbooks
+   Valmera's own agent uses), and call list_motion_templates and list_sfx_kit
+   once for the live libraries. Then, per short, in a few atomic writes:
+   a. STORY: keep the complete micro-story, remove_filler_words, cut dead
+      pauses on word edges, set_master_loudness.
+   b. FRAME AND LOOK: face-aware full-bleed (auto_reframe crop with a
+      shot-aware focus track) or the picture as a card on a designed
+      background (set_picture_card); ONE look via apply_look (editorial is
+      the podcast default) or a deliberate equivalent; captions with
+      style.motion_look and 1-2 accent words per sentence; a music bed
+      ducked 13-20 dB under the voice (the music library tools when listed).
+   c. HOOK: a pattern interrupt within 0.1-0.6 s and the hook line as text by
+      1.5 s — hook_title (mute_captions=true when it repeats the spoken hook)
+      or word_slam, with a landing or punch and a low hit (the template's
+      own when it carries one).
+   d. HERO MOMENTS: 2-4 add_motion_graphic placements whose landing frame
+      sits on exact spoken word onsets (get_kept_transcript for program
+      windows, get_words for onsets, each template's landing offset from
+      list_motion_templates), each with one add_zoom on the same frame and
+      its sound (templates own their cues; add a hit only where none is
+      owned). Numbers, quotes and UI messages come from the transcript or a
+      verified source.
+   e. CONNECTIVE TISSUE: alternating tight/wide framing across jump cuts,
+      landings on cuts between ideas, punches on emphasis words, push_in
+      across long holds (add_zoom strength is magnification minus 1: 0.15 =
+      1.15x; no more than one camera event per ~1.5 s unless it is a
+      designed hit), motivated transitions at real turns with
+      add_sfx(storage_key='kit:whoosh_hard', ...) peaking on the cut unless
+      the look already placed a whoosh there, B-roll evidence on named
+      nouns, a visual change every 0.3-0.6 s.
+   f. ENDING: hold the payoff 1.0-1.5 s; a native CTA (comment_cta,
+      follow_cta, save_cta) after it only when the user or brief asks for
+      one, filled only with the handle, keyword and offer they supplied —
+      never an invented handle, verified badge, keyword or promised
+      resource (save_cta needs no identity).
+   g. REVIEW: render_preview(complete=false) while building and judge its
+      check tiles; then render_preview(complete=true) and
+      look_at(rendered=true, output_times=[...]) with up to 8 dense times
+      per call around the hook and every hero moment (a settled still cannot
+      show an entrance). After repairs, render the new version complete and
+      look again; finish with watch_video on the final complete preview.
+   For a series, keep one look across children: apply_short_edit_batches can
+   carry the shared base layers (frame, captions style, effects) to up to 30
+   children per call. Music, kit sounds, motion graphics and camera moves are
+   placed per child with their own tools, because they bind to that child's
+   own words and assets.
+
+6. DELIVER THE FINISHED VIDEO. When the user requests an export, call
    export_final(project_id=ID, edl_version=REVIEWED_VERSION). It uses the same
    export checks, queue and plan watermark as Studio. Poll wait_for_job until
    done, then call download_url(project_id=ID, kind="final",
@@ -748,10 +803,10 @@ Two things are different from a normal tool session, and both matter:
    normally instead of starting the multi-clip workflow.
 
 Nothing is charged to their Valmera credits for the thinking you do — but a
-render, a look at the footage and a generated image are real work on real
+render, a look at the footage and a media fetch are real work on real
 hardware. Do not spend them idly.
 
-A slow tool (a render, erasing burned-in text, generating video) may reply
+A slow tool (a render, erasing burned-in text, a stock download) may reply
 "STILL RUNNING — job N". That is not a failure and not a timeout: the work is
 in flight. Call wait_for_job(N) until it answers.
 
@@ -774,18 +829,39 @@ silences) — index_status reports that, and it takes minutes on a long video.
 INSTRUCTIONS_MODE = os.getenv("MCP_INSTRUCTIONS", "full").strip().lower()
 
 
+# The shared doctrine tells Valmera's in-house agent how its first provider
+# page pages tool schemas in through load_tools (worker/agent_prompt.py,
+# IN_APP_TOOL_PAGING). MCP denies load_tools and lists every tool up front, so
+# that one sentence only produced wasted load_tools calls over MCP.
+_IN_APP_TOOL_PAGING_RE = re.compile(
+    r"The first provider page intentionally carries.*?rest of the turn\.")
+_MCP_TOOL_PAGING = ("Your MCP client already lists every tool: call the "
+                    "exact tools you need directly.")
+# The CAPABILITIES block carries the same in-app paging instruction
+# (worker/agent_loop.capabilities_block).
+_IN_APP_CAPS_PAGING_RE = re.compile(
+    r"The current provider page has full schemas.*?no numeric tool allowance\.")
+_MCP_CAPS_PAGING = ("Your MCP client lists every one of these tools with its "
+                    "full schema.")
+
+
 def _instructions(catalog):
     if not catalog:
         return CATALOG_MISSING
     # Studio's in-house agent cannot export; an authorized MCP caller can.
-    # Adapt only that surface-specific rule in the shared editing doctrine.
+    # Adapt only these surface-specific rules in the shared editing doctrine.
     doctrine = catalog.get("system_prompt", "").replace(
         "You cannot render the final full-resolution export — only the user can, from the app.",
         "When the user asks for the finished video, use export_final for the reviewed version, "
         "wait for completion and retrieve the final download link.")
+    doctrine = _IN_APP_TOOL_PAGING_RE.sub(_MCP_TOOL_PAGING, doctrine)
     parts = ([] if INSTRUCTIONS_MODE == "brief"
              else [doctrine])
-    parts += [catalog.get("capabilities", ""), WORKFLOW]
+    capabilities = _IN_APP_CAPS_PAGING_RE.sub(
+        _MCP_CAPS_PAGING, catalog.get("capabilities", ""))
+    # The directory also lists load_tools among the utility tools; MCP denies it.
+    capabilities = re.sub(r"\bload_tools, |, load_tools\b", "", capabilities)
+    parts += [capabilities, WORKFLOW]
     return "\n\n".join(p for p in parts if p)
 
 

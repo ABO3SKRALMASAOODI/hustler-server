@@ -1,42 +1,116 @@
-# review — the final screening pass before any edit leaves your hands
+# review — the final screening pass: rendered motion, sound, the premium bar, honest handoff
 
 ## Editorial decision principles
 
-Completion is earned by evidence from the latest immutable EDL and complete preview. A successful tool call is not proof that an edit is good.
+Completion is earned by evidence from the latest EDL and its rendered
+preview. A successful tool call is not proof that an edit is good, and a
+single settled still is not proof that motion is good: entrances, landings,
+eases and sound cues have to be inspected in the rendered frames around the
+moment they happen. The bar is the owner's premium references, not "nothing
+is broken".
 
 ## Evidence to inspect
 
-Inspect deterministic checks, every affected scene/risk window, caption pages, audio measurements/listening windows, opening, turns, junctions, payoff and ending.
+Inspect deterministic checks, the AUDIO CHECK, dense rendered frames around
+the hook and every hero moment, caption pages, every junction the edit
+touched, the payoff and the ending, plus any bounded listening evidence.
 
 ## Strong treatment patterns
 
-WHEN: verify changed pictures and sound before claiming the edit is complete. Use the render's frames, look_at and AUDIO CHECK for the relevant risks; distinguish sampled evidence from continuous listening. There is no fixed pass count. Taste observations require judgment, while deterministic failures and unresolved current-version checks require repair or an honest limitation.
+HOW TO LOOK AT MOTION — two different renders:
+- During iteration, `render_preview(complete=false)` encodes only the
+  seconds changed since the last complete preview and returns RENDER CHECK
+  and caption QA tiles of them. Judge placement, legibility and collisions
+  from that result; the complete preview adds the AUDIO CHECK of the whole
+  mix.
+- `look_at(rendered=true, ...)` reads only a COMPLETE preview of the current
+  EDL version; a changed-section proof does not count, and calling it
+  without one is rejected. For dense motion frames, build the hook and hero
+  moments, call `render_preview(complete=true)` (draft quality), then
+  `look_at(rendered=true, output_times=[...])` with up to 8 dense times per
+  call around a moment — e.g. landing − 0.1, landing, +0.03, +0.07, +0.13,
+  +0.27, +0.5, and the release. Batch several moments into a few calls.
+- Every repair makes a new version: render it complete again before the
+  next rendered look. The geometry-only view (no `rendered=true`) needs no
+  render and shows framing and zoom aim, but no captions, graphics or
+  grade. `native_resolution=true` on one time gives full-detail pixels.
 
-SCREEN IN THIS ORDER — each item is a question with a yes/no answer:
-1. THE OPEN (look_at output_times=[0.2, 1.5]): is frame one sharp, composed, captioned, hook-forward? No black, no dead air, no half-faded anything?
-2. EVERY JUNCTION the edit touched (the verify tiles show them): does the cut land on a word edge, is there a flash frame, a double frame, a mid-gesture jump that reads as broken? Transitions: does the effect mark a real scene change and finish clean?
-3. CLAIMS: each verify tile carries the claim you made — does the picture literally show it (the text where you said, the zoom framing what you named, the erase actually clean)? A claim the frame does not show is a fix, not a caveat.
-4. CAPTIONS: legible against their background at every sampled moment, inside safe areas, no overlap with faces/graphics, emphasis words the RIGHT words, no caption stacked over burned-in text?
-5. SOUND: AUDIO CHECK + authored timing answer levels, peaks, dead air and whether every SFX is on its named event. ACTUAL-AUDIO REVIEW, when present, adds bounded listening evidence for masking, tone and whether the designed sound feels coherent. Keep the sources distinct and never claim continuous listening beyond its labeled windows.
-6. THE END: last word/beat lands and stops clean — no tail silence, no mid-bar music stop, no fade on a reel?
-7. THE WHOLE (the 3x3 sheet): does it read as ONE video — consistent grade, inserts color-matched, no scene obviously rawer than the rest?
-8. THE BRIEF: reread the user's message once. Every named item delivered or honestly reported? Anything they forbade present anyway?
-9. MOTIVATION AUDIT: for every zoom, transition and SFX, can you point to the exact visible, spoken, musical or narrative event it serves? Remove any orphan rather than defending it as generic polish. An intentional omission is complete work, not a missing layer.
+SCREEN IN THIS ORDER — each item is a yes/no question:
+1. THE OPEN (rendered 0.0, 0.2, 0.6, 1.5): first visual event by 0.6 s?
+   Hook text readable by 1.5 s? Speaker on screen and talking by ~0.3 s? No
+   black, no fade-in, no dead air?
+2. RHYTHM: scanning the program, is anything static for more than ~2 s
+   without a designed reason? Does a bigger change arrive every 2–4 s?
+3. HERO MOMENTS (dense frames each): does one leader land on its word
+   (0–3 frames early), with camera and sound on the same frame, clear of the
+   face and the UI band, readable at phone size, and exit cleanly?
+4. CAPTIONS: words appear on onsets; accents on the right 1–2 words; legible
+   against every background; no overlap with faces, graphics or the platform
+   band; no caption stacked over burned-in text.
+5. CAMERA: each zoom aimed at the face or target, eased (no steps or drift),
+   jump cuts covered by alternating framing, landings only on cuts between
+   ideas, varied strengths, no more than one camera event per ~1.5 s except
+   a designed hit.
+6. JUNCTIONS: cuts on word edges, no flash or double frames; transitions only
+   on real turns, each with its sound peak on the cut; no effect on a jump
+   cut.
+7. SOUND: AUDIO CHECK loudness and peaks; a bed present under speech at
+   roughly 13–20 dB below the voice; no digital silence; every cue on its
+   named event; nothing masking the voice. ACTUAL-AUDIO REVIEW, when present,
+   adds bounded listening evidence — never claim continuous listening beyond
+   its labeled windows.
+8. LOOK AND LAYOUT: one grade and texture throughout; no flat black void; no
+   scene obviously rawer than the rest.
+9. THE END: payoff held 1.0–1.5 s, a requested CTA after it (not over it),
+   last beat lands clean for the loop.
+10. THE BRIEF: reread the user's message once. Every named item delivered or
+    honestly reported? Anything they forbade present anyway?
+11. HONESTY: every number, name, quote and UI claim on screen is supported by
+    the transcript, the user or a verified source; a CTA uses only the
+    handle, keyword and offer the user or brief supplied (no invented
+    verified badge or promised resource); every device has a purpose you
+    can name.
 
-TASTE AND AUDIO FINDINGS ARE ADVISORY EVIDENCE: fix, keep, override, or investigate them according to your judgment. Summarize material uncertainty honestly without treating a reviewer as a veto.
+TASTE AND DENSITY FINDINGS ARE ADVISORY: fix real defects (collisions,
+illegible type, mistimed cues, clipped faces, fades on reels, silence,
+invented facts) and keep intentional density bound to words and beats. When
+a verification finding flags intentional design that the rendered frames
+show is clean, resolve it with `justify_verification_findings`, citing that
+pixel or audio evidence.
+Deterministic render failures and unresolved current-version checks need
+repair or an honest limitation.
 
-FIX DISCIPLINE: when a check fails, choose the repair, rebuild, alternate tool, or further evidence that best serves the edit. There is no fixed attempt count.
+FIX DISCIPLINE: choose the narrowest repair that fixes the moment —
+retime, re-aim, move, resize, swap — check it with a changed-section proof,
+and render complete again only when you need rendered motion frames.
 
-THE BAR: would a paid editor hand this over? Not "did every tool succeed" — "is it GOOD": the hook earns the stop, the middle never sags, the sound feels produced, nothing looks accidental. If the honest answer is no and the cause is within your tools, keep working — that is what "works on it until it's nicer than you imagined" means. If the cause is the footage, say exactly that with the one sentence a pro would use.
+THE BAR: would a top Instagram editor post this next to the reference reels?
+The hook earns the stop, the middle never sags, the sound feels produced,
+nothing looks accidental. If the honest answer is no and the cause is within
+your tools, keep working. If the cause is the footage, say exactly that in
+one sentence.
 
 ## Common failure modes
 
-- Declaring completion from the EDL or one midpoint, ignoring failed proof pages, unreviewed captions/audio, stale previews or rationalizing a visible defect.
+- Declaring completion from the EDL, a midpoint still or a geometry-only
+  look that contains no graphics.
+- Judging motion from one settled frame; missing a late landing or a
+  drifting hold.
+- Ignoring the AUDIO CHECK; claiming to have heard unreviewed seconds.
+- Defending an orphan device as polish, or stripping intentional design to
+  silence an advisory.
 
 ## Verification procedure
 
-Require deterministic checks, paged risk coverage, current-version visual/audio review, repairs/justifications for every finding and one complete Studio preview.
+Require deterministic checks, dense rendered frames on the hook and every
+hero moment, caption QA pages, the AUDIO CHECK, current-version visual and
+audio review, repairs or justifications for every finding, and one complete
+Studio preview.
 
 ## Repair ladder
 
-Localize the finding → apply the narrowest repair → regenerate affected proof → rerun deterministic checks → screen the complete preview → continue until passed or a genuine exhausted blocker remains.
+Localize the finding → apply the narrowest repair → prove the changed
+window with `render_preview(complete=false)` → render complete and
+re-inspect motion with dense rendered frames → rerun deterministic checks →
+screen the complete preview → continue until it meets the bar or a genuine
+blocker remains.

@@ -106,6 +106,8 @@ def test_edit_press_boots_one_fresh_child_agent(monkeypatch):
     prompt = cur.prompts[0]["text"]
     assert "fresh lead editor" in prompt
     assert "read_skill for short-form-direction" in prompt
+    assert "motion-design" in prompt
+    assert "edit plan" not in prompt
     assert "Do not apply a formula" in prompt
     assert "render a complete preview" in prompt
     assert cur.prompts[0]["meta"]["shorts_boot"] is True

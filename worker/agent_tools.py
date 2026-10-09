@@ -25098,6 +25098,13 @@ def _compact_description(description):
 
 
 _COMPACT_CONTRACTS = {
+    "add_zoom": (
+        "Camera move, OUTPUT seconds. mode: punch=expo snap-in on a stressed "
+        "word, hard cut out at end (end on a cut or sentence turn); landing="
+        "start ON a cut, settles from 0.12-0.18; push_in=slow 0.05-0.12 push "
+        "over 3s+ holds; pulse=0.3s beat thump; shake=impact; ease=gentle "
+        "push. rect frames a region; cx/cy pins a point. ramp_s, overshoot, "
+        "rotate, shake shape the move."),
     "apply_edit_batch": (
         "Atomic edits, no render wait. Read get_edl; use current base_version. "
         "set replaces one complete layer; upsert patches one object by id; "
@@ -25119,9 +25126,14 @@ _COMPACT_CONTRACTS = {
         "mute affects only the clip's audio; still images are already silent. "
         "Read inserts in get_edl first."),
     "look_at": (
-        "Inspect rendered OUTPUT frames. Requires render_preview for the latest "
-        "EDL first. Use look_at_asset for original uploaded pictures; a saved "
-        "timeline alone is not a rendered preview."),
+        "See frames now, no render needed: times=[...] are SOURCE seconds; "
+        "output_times=[...] show the assembled edit (inserts, framing, zoom; "
+        "not captions/text/grade) to aim zooms and place type. rendered=true "
+        "reads only a COMPLETE preview of the current EDL version "
+        "(render_preview(complete=true) first; a changed-section proof is "
+        "rejected) and shows real captions, motion graphics and grade: batch "
+        "up to 8 dense output_times around a landing to judge motion. Read "
+        "positions off the tenths grid. Uploads: look_at_asset."),
     "look_at_asset": (
         "Inspect an uploaded IMAGE or VIDEO by its exact asset_key from list_assets. "
         "Times are relative to that source. For audio use get_audio_analysis; "
@@ -25134,6 +25146,83 @@ _COMPACT_CONTRACTS = {
         "Read current version and exact EDL shapes. sections accepts layer names "
         "or an array; compact=true gives an index; offset/limit page long lists. "
         "Use texts for titles, frame for framing, effects for transitions/grades."),
+    "list_motion_templates": (
+        "READ the live motion library: each template's purpose, params "
+        "(* = required) and built-in sound cues. Call once before designing the "
+        "hook, hero moments, CTAs or motion transitions; never guess params. "
+        "Optional category: type, data, callout, social, layout, transition, "
+        "texture, cta."),
+    "add_motion_graphic": (
+        "Place a premium motion graphic on PROGRAM seconds: a template from "
+        "list_motion_templates, or template='html' with your own MG-runtime "
+        "composition in html (read_skill motion-design). Its LANDING frame "
+        "sits 0-3 frames before the spoken onset (get_kept_transcript + "
+        "get_words; start earlier by the landing offset the template "
+        "description states). layer above_captions (default), below_captions "
+        "or behind_subject. Pass mute_captions explicitly: true when it repeats "
+        "the spoken words (hook_title of the spoken hook too). sfx=true adds "
+        "synced kit cues listed in the result. Pass purpose and a stable id. "
+        "Never invent numbers, brand messages, handles or CTA offers."),
+    "set_motion_graphic": (
+        "Patch a motion graphic by id: window, params (merged), template, layer, "
+        "html, caption muting. Its owned sound cues follow; sfx=true re-derives "
+        "them, sfx=false removes them. Modify instead of remove and re-add."),
+    "list_sfx_kit": (
+        "READ the 22 built-in licence-free sounds (whooshes, pops, clicks, "
+        "ticks, kick, dings, risers, impacts, sub_drop, glitch, shutter, "
+        "typing). Place with add_sfx(storage_key='kit:<kind>', at=...)."),
+    "add_sfx": (
+        "One-shot sound at an OUTPUT second. storage_key 'kit:<kind>' uses the "
+        "built-in kit (list_sfx_kit: instant, licence-free); otherwise an exact "
+        "key from fetch_sfx or list_assets, never invented. Pre-roll so the "
+        "peak lands on the visual frame (whoosh ~40-50% of its length early, "
+        "riser ends on the moment). purpose names the event. Default -6 dB; "
+        "UI pops/ticks -8 to -12. Never a whoosh on every caption."),
+    "add_captions": (
+        "Burned captions: mode='from_transcript', 'off', or dictated items. "
+        "Short-form speech: style.motion_look editorial|clean (premium default), "
+        "lockup|serif (editorial accent), pop|stack (hype), box|glow (busy "
+        "backgrounds, karaoke), mono (tech): words reveal on onsets with a size "
+        "ladder; highlight_color is the accent; emphasis_words (verbatim, 1-2 "
+        "per sentence) pick accent words. Long-form/translation: style.preset "
+        "documentary|clean|broadcast. Replaces the whole set; restyle with "
+        "set_caption_style."),
+    "set_caption_style": (
+        "Restyle existing captions without touching text or timing; pass only "
+        "changed fields inside style. motion_look switches to premium browser "
+        "captions (null returns to presets); color, highlight_color, font, "
+        "size/size_scale, uppercase, position/anchor_y still apply. A rejected "
+        "colour means no accent, never a different hue."),
+    "apply_look": (
+        "ONE committed look in one version: caption look + grade + grain + "
+        "transitions (+ optional music), reporting every component. Premium: "
+        "editorial (podcast/interview default), creator_punch, cinematic_doc, "
+        "mono_noir, clean_minimal; legacy hype, clean, cinematic, luxury, meme. "
+        "Its transitions may carry their own whooshes and its music option "
+        "(when listed) lays a bed: read the receipt before adding junction "
+        "cues or music. One look per edit; refine components with their own "
+        "tools; no fade-in on vertical reels (set_fades)."),
+    "punch_in_on_emphasis": (
+        "One-call emphasis pass on vocally stressed words that survive the cut: "
+        "each punch snaps in ON its word (~0.12s expo), holds to the next cut "
+        "or sentence end, then cuts back out; face-aimed, never clustered on "
+        "adjacent loud words. Omitted count/strength are directed from program "
+        "length; explicit values win. Then complete the camera with add_zoom "
+        "(landing on cuts between ideas, push_in on long holds). Skip for "
+        "calm/minimal briefs."),
+    "set_transitions": (
+        "One junction style at real scene changes; scope='scene' skips jump "
+        "cuts — report the junction count it returns. Styles dip_black, "
+        "dip_white, whip_left/right, zoom_punch, glitch, flash (fast ones "
+        "0.15-0.4s). Adds no sound: pair with add_sfx kit:whoosh_hard peaking "
+        "on the cut unless a look already placed one there (get_edl sfx). One "
+        "specific junction: a motion transition template."),
+    "set_picture_card": (
+        "Footage-only rounded card for start/end program seconds (box, radius, "
+        "border, shadow, entrance/exit). Give it a designed background from the "
+        "schema (blurred darkened copy of the picture, gradient, grain or "
+        "vignette), never a flat black void. Set frame.picture first to keep a "
+        "wide original inside portrait."),
 }
 
 

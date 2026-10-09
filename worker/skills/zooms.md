@@ -1,60 +1,152 @@
-# zooms — aiming, travelling paths, screen-recording choreography, crops vs zooms; do not punch in for no reason
+# zooms — the eased camera: punch-ins on emphasis, alternating framing on jump cuts, landings on turns, slow pushes, beat pulses, aiming, travelling paths, crops vs zooms
 
 ## Editorial decision principles
 
-Every zoom needs a narrative purpose, measured target and safe temporal window. Camera motion directs attention; zero zooms is often the professional choice.
+On short-form, the digital camera is a constant, eased presence: premium
+reels punch in on emphasis words, alternate framing across jump cuts, land
+the cuts between ideas with a settling zoom, push slowly through long holds
+and pulse with the music, all aimed precisely
+at the face or the thing being discussed. Every move is bound to a word, a
+cut or a beat and carries a purpose; what makes camera motion cheap is bad
+aim, linear or stepped motion and metronomic spacing, not the number of
+moves.
+
+- Every zoom has a named event (word, cut, beat, reveal, UI action) and a
+  measured target.
+- Vary strength, mode and spacing with the speech; never the same punch three
+  times in a row.
+- A steady frame is a deliberate choice for a specific passage (a vulnerable
+  admission, a reaction that must be read), not the default for a reel.
 
 ## Evidence to inspect
 
-Inspect unzoomed target frames, evidence IDs, every shot boundary and path extreme, subject/face/UI geometry, target appearance timing and the full rendered window.
+Inspect unzoomed target frames (`look_at` on source times or
+`look_at(output_times=...)` on the program — both work without a render),
+the tenths grid, every shot boundary and jump cut in the program map, word
+onsets of emphasis words (`get_words`, `suggest_emphasis`), beat times when
+music leads (`get_audio_analysis`), subject/face/UI geometry, and the full
+rendered window.
 
 ## Strong treatment patterns
 
+CAMERA GRAMMAR FOR REELS — read the `add_zoom` schema for exact fields and
+mode names; the modes below are the vocabulary.
+STRENGTH IS MAGNIFICATION − 1: strength 0.12 is a 1.12x frame, 0.2 is 1.2x;
+above 1.0 is a 2x+ zoom. Never pass a magnification (1.15) as strength.
+- `punch` — a fast expo snap in (~0.12 s, optional overshoot 0.05–0.15 on
+  the biggest beats), held, then a hard cut back out at `end`: strength
+  0.08–0.18 landing ON an emphasis word. Start 0–2 frames before the onset
+  and end on the next cut or sentence turn so the step back reads as a
+  second camera. Use it on meaning words, numbers, contrasts and punchlines.
+- `landing` — starts pushed in (strength 0.12–0.18) and settles to the wide
+  in ~0.35 s. Start it EXACTLY on the cut (end about start + 0.4). Reserve it
+  for cuts between ideas or sections, B-roll returns and the hook — not for
+  every jump cut, where a stream of landings makes the camera bounce.
+- `ease` — a smooth ramp in, hold and ramp out: a gentle reframe onto a
+  subject mid-shot.
+- `push_in` — a slow continuous push, strength 0.05–0.12, across holds of
+  3 s or more, so long statements never sit frozen; `pull_out` is the
+  release or reveal.
+- `pulse` — 1 → 1 + strength → 1 in ~0.3 s on a musical beat or a rhythmic
+  list beat, strength 0.05–0.08.
+- `shake` — a decaying impact shake (the `shake` amount, 0.3–0.8, does the
+  work); a `shake` value on a punch turns it into an impact hit. Only on
+  real impacts: a hero slam, a hit.
+- JUMP CUTS: after `cut_silences` a take is full of jump cuts every 1–2 s.
+  Cover them with ALTERNATING FRAMING — a punch (hard step, `ramp_s=0` when
+  the schema offers it) from one cut to the next at strength 0.12–0.2, then
+  back to the wide at the following cut, aimed at the face — so the edit
+  reads as two cameras. Not every jump cut needs a change.
+- On a hero moment the camera supports the graphic leader: a punch or pulse
+  on the same frame as the word slam and its low hit. A deliberate hook
+  may open already punched-in or with a landing at 0 s.
+- Density follows the speech: in a talking-head reel expect a camera event
+  every 2–4 s (alternating framing on cuts, punches on emphasis, pushes on
+  holds), varied in size, and no more than one camera event per ~1.5 s
+  unless it is a designed hit; cluster on dense ideas, rest on an
+  admission.
+
 AIMING — a coordinate is a MEASUREMENT, never an impression:
-- Every frame you look at carries a faint tenths grid ((0,0) = top-left, labels .2/.4/.6/.8). Read aim points, rects and positions off it.
-- To zoom INTO a thing (a message, a button, a panel): read its box off the grid and pass add_zoom rect=[x0,y0,x1,y1]. cx/cy pin a POINT in place and cannot bring an edge subject to centre — rect framing is the reliable way.
-- Frame the THING, not its container: the rect hugs the message/button the user named. A whole-panel rect makes the subject small; "zoom more" means a tighter rect or higher strength on IT.
-- A chat message is its bubble PLUS the avatar/label beside it — extend the rect to the panel edge (x0=0 for left-side messages) or the avatar gets clipped.
-- Aim coordinates come only from UNZOOMED frames: a tile labeled as zoomed shows the magnified view's screen coordinates, not positions you can aim at.
-- To RETIME an existing zoom ("make it longer"): KEEP ITS AIM — copy rect (or cx/cy) from get_edl and change only start/end. Re-deriving a target you already had is how a correct zoom moves to the wrong place.
+- Every frame you look at carries a faint tenths grid ((0,0) = top-left,
+  labels .2/.4/.6/.8). Read aim points, rects and positions off it.
+- On a talking head, aim at the face: cx/cy on the eyes-to-mouth centre so
+  the face stays composed, or a rect around head and shoulders.
+- To zoom INTO a thing (a message, a button, a panel): read its box off the
+  grid and pass rect=[x0,y0,x1,y1]. cx/cy pin a POINT in place and cannot
+  bring an edge subject to centre — rect framing is the reliable way.
+- Frame the THING, not its container. A chat message is its bubble PLUS the
+  avatar/label beside it — extend the rect so the avatar is not clipped.
+- Aim coordinates come only from UNZOOMED frames: a tile labeled as zoomed
+  shows magnified screen coordinates, not positions you can aim at.
+- To RETIME an existing zoom, KEEP ITS AIM — copy rect (or cx/cy) from
+  `get_edl` and change only start/end.
+- After reframes, re-check aim per shot; a face that moves between shots
+  needs a target per shot.
 
-NO STUPID PUNCH-INS. This is the most common zoom failure. A talking-head, reel, "make it premium/high-retention", or "keep attention" brief is NOT a request to bump the camera every few seconds.
-- Do not sprinkle `punch` / `punch_in_on_emphasis` / tiny 0.05–0.15 punches on "important sentences." If the picture is already a face in frame, a punch-in that does not reveal new information is decoration. Hold the shot.
-- `punch` is a snap. Use it only for one real hit the viewer can name: a punchline, a reveal, a number landing, an explicit "punch in on this." Never as the default mode, never on three similar lines, never to "change the framing every 2–3 seconds."
-- "Subtle zooms" means one or two gentle `ease`/`push_in` moves on actual turns — or none. It does not mean many small punches.
-- `punch_in_on_emphasis` is a last-resort helper when the user asked for punch-ins on stressed words. It is not a finishing pass. If you cannot name why THIS word deserves a camera bump, do not call it.
-- If a zoom you already wrote has no new information at the landing, remove it. Three weak punches are worse than a locked-off frame.
+PURPOSE AND EVIDENCE: pass `purpose` naming the event ("landing on the turn
+at 6.4 s", "punch on 'forty' at 12.1 s"). If a move has no correlated
+word, cut, beat or visible action, it does not belong; a random move weakens
+the intentional ones.
 
-MOTIVATION COMES BEFORE GRAMMAR:
-- A zoom must answer "why does the camera move HERE?" with a named, evidenced event: a reveal that becomes visible, a face/subject that becomes important, a measured stressed word, a UI action the viewer must read, or an explicit user-requested beat. Bind its start/landing to that event and aim it from an unzoomed frame. A beat grid alone is cadence evidence, not permission to magnify an arbitrary picture.
-- No coverage targets and no polish quotas. Zero zooms is a finished professional choice when the footage, format, or user's restraint calls for a steady frame. Never add a zoom merely because the motion department exists, a minute has passed, or the edit feels "too simple."
-- Before delivery, name the event for every authored zoom. If one has no correlated visual/narrative action, remove it. Random camera motion is not harmless decoration; it competes with the story and makes intentional zooms weaker.
+`punch_in_on_emphasis` writes a measured pass of punches on vocally stressed
+words that survive the cut, using face targets when detected: each snaps in
+on its word, holds to the next cut or sentence end, then cuts back out.
+Omitted count and strength are directed from program length; explicit
+values win. On a premium reel it is a valid starting pass; inspect its
+choices, then retime, re-aim or vary them by hand so the strongest words get
+the strongest moves, and complete the camera with `add_zoom` (landings on
+turns, pushes on holds). Skip it for calm or minimal briefs.
 
-GRAMMAR — gentle is the default after the move is motivated:
-- Default mode is `ease`. strength 0.08-0.18 (a push the viewer feels rather than sees). `push_in` for a slow cinematic drift. A hard `punch` is a deliberate hype device for the single biggest peak or an explicit request — never the routine move, never the omitted-mode fallback in your head.
-- On longer talk-driven footage, 2-3 zooms a minute is an upper craft reference, never a minimum or a request to fill time. Use only the real turns of the argument; never on a filler word, never adjacent, never all the same size. One harder punch on the single peak reads as a hit; ten punches read as a nervous tic.
+TRAVELLING ZOOMS (`add_zoom_path`) — when the zoom must MOVE ("keep it, then
+move to my prompt, then the answer"): ONE path visiting each subject as a
+rect keyframe — never a chain of static zooms, never one wide zoom over
+everything.
+- Hold = the SAME keyframe repeated at the hold's start and end. There is no
+  implicit hold: between two keyframes that disagree the camera is in motion
+  the whole gap. The tool's DRIFT CHECK names any gap that glides.
+- Travels between subjects are fast (0.4–0.8 s); end wide (strength 0)
+  exactly at a scene boundary, never mid-shot.
 
-TRAVELLING ZOOMS (add_zoom_path) — when the user asks a zoom to MOVE ("keep it, then move to my prompt, then the answer"): ONE add_zoom_path visiting each subject as a rect keyframe — never a chain of static zooms, never one wide zoom over everything.
-- Hold = the SAME keyframe repeated at the hold's start and end. THERE IS NO IMPLICIT HOLD: between two keyframes that disagree, the camera is IN MOTION the whole gap — to stay on a target, repeat its keyframe just before the next beat. The tool's DRIFT CHECK names any gap that glides — fix it, don't ship it.
-- Travels between subjects are FAST (0.4-0.8s); end wide (strength 0) exactly at a scene boundary, never mid-shot.
+SCREEN-RECORDING CHOREOGRAPHY:
+- ARRIVE WITH THE APPEARANCE: park the camera where something will appear
+  before it exists, landing exactly at the cut.
+- RE-AIM AT CUTS, NOT MID-SHOT: two keyframes ≤0.1 s apart exactly on the
+  scene cut.
+- EXCLUSIONS PICK THE STRENGTH: "don't show the top part" is a viewport
+  constraint; compute strength ≥ 1/size − 1 from the grid.
+- New scenes dropped inside a move play wide; aim them deliberately.
 
-SCREEN-RECORDING CHOREOGRAPHY — what makes a travelling zoom over a UI read as directed:
-- ARRIVE WITH THE APPEARANCE. Moving to something that APPEARS (a message pops in, a panel opens): park the camera at its position BEFORE it exists — glide during the tail of the previous shot and land exactly at the cut, so the thing pops into an already-composed frame. Holding where it pops and THEN travelling shows the reveal twice.
-- RE-AIM AT CUTS, NOT MID-SHOT. Need a different centre for the next subject? Two keyframes ≤0.1s apart exactly ON the scene cut — the content changes there anyway. Never chase a subject that moved ACROSS a cut with a visible glide; hold one viewport through the cut and let the cut do the move.
-- EXCLUSIONS PICK THE STRENGTH. "Don't show the player / the top part" is a viewport constraint: read the boundary off the grid; the viewport must be at most that wide/tall (strength >= 1/size - 1). Compute it — don't guess and check.
-- NEW SCENES DROPPED INSIDE YOUR MOVE PLAY WIDE. When new content lands mid-path, the remap re-anchors keyframes to their own scene and plays the new scene wide — aim it deliberately if it deserves a shot.
-
-A WIDE UI STRIP IS A CROP, NOT A ZOOM. "Show the full timeline, nothing else" is geometrically impossible for a zoom — a 16:9 viewport wide enough for a 2.6:1 strip must include what sits above it. set_insert_window(id, crop=[x0,y0,x1,y1]) makes a spliced scene show ONLY that region, letterboxed; keep the zoom wide across it. Split the insert first when only a stretch should be the detail shot. Read the region's bounds off a look_at_asset grid of THAT clip.
+A WIDE UI STRIP IS A CROP, NOT A ZOOM. A 16:9 viewport wide enough for a
+2.6:1 strip must include what sits above it. `set_insert_window(id,
+crop=[x0,y0,x1,y1])` shows only that region; keep the zoom wide across it.
 
 ## Common failure modes
 
-- Punch-ins with no reason: every-few-seconds bumps, `punch_in_on_emphasis` as a default pass, identical tiny punches on three "important" lines.
-- Repetitive equally spaced pushes, missing purpose/evidence, empty-wall framing, clipped faces/UI, visible drift during holds or stale targeting across cuts.
+- Unaimed zooms that crop foreheads or push into an empty wall.
+- Stepped or linear motion; the identical punch at identical intervals.
+- A zoom crossing a shot boundary without a path; stale targets after a cut.
+- A camera bump that fights a graphic leader instead of supporting it.
+- Strength passed as a magnification (1.15 instead of 0.15), producing a
+  2x+ zoom.
+- A landing on every jump cut, so the camera bounces every second; or jump
+  cuts left raw on a reel with no framing change at all.
+- Visible drift during a travelling-zoom hold.
 
 ## Verification procedure
 
-Track/inspect the intended subject across the whole window, every shot boundary and path extreme; review motivation, repetition and the rendered landing/hold/exit.
+Check aim and framing first without a render: `look_at(output_times=[...])`
+shows the program in true geometry with every zoom applied. Then judge the
+motion itself on a complete preview — `render_preview(complete=true)`, then
+`look_at(rendered=true, output_times=[...])` at start, mid-ease, landing and
+release (rendered looks need a complete preview of the current version): the
+face or target stays composed and centred where intended, the ease reads
+smooth, the landing sits on the word, cut or beat, and adjacent moves vary
+in size and mode. Check every shot boundary and path extreme.
 
 ## Repair ladder
 
-Retarget from unzoomed evidence → add shot-specific path → split at boundary → widen/reduce strength → convert to crop where appropriate → remove the zoom → verify again.
+Re-aim from an unzoomed frame → retime to the onset or cut → change mode
+(punch ↔ ease ↔ landing) or vary strength → thin moves closer than ~1.5 s →
+add a shot-specific path → split
+at the boundary → convert to a crop where appropriate → remove a move that
+has no event → verify again.

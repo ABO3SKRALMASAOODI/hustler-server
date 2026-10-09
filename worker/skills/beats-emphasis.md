@@ -1,39 +1,76 @@
-# beats-emphasis — audio analysis, beat-aligned cuts, punch-ins, sound design pass
+# beats-emphasis — measuring stress and beats, emphasis words, beat-aligned cuts, camera punches and sound on emphasis
 
 ## Editorial decision principles
 
-Rhythm should reveal structure, not manufacture activity. A beat or stressed word is evidence for timing only after the picture/story gives the event a purpose.
+Emphasis is where the speaker's meaning lands; beats are where the music
+lands. Premium reels bind their camera moves, hero graphics and sound cues to
+those measured instants, 0–3 frames early. Measure first, then let the
+strongest words get the strongest treatment and vary the rest so the
+rhythm never feels mechanical.
 
 ## Evidence to inspect
 
-Inspect measured tempo confidence, beat grids, vocal stress, energy changes, existing cut geometry, music placement and the rendered audiovisual result.
+Inspect measured tempo confidence and the beat grid, vocal stress, energy
+rises, numbers and outcome words (`suggest_emphasis`), existing cut
+geometry, music placement and the rendered audiovisual result.
 
 ## Strong treatment patterns
 
-MEASURE FIRST (get_audio_analysis): tempo with a confidence score, the beat grid, energy peaks/rises, the most vocally stressed words. Pass asset_key to measure a SONG instead; when that song is already in the edit it also prints beat times in PROGRAM seconds, ready for keep_segments / add_sfx / add_zoom.
+MEASURE FIRST (`get_audio_analysis`): tempo with a confidence score, the beat
+grid, energy peaks and rises, the most vocally stressed words. Pass asset_key
+to measure a SONG; when that song is in the edit it also prints beat times in
+PROGRAM seconds, ready for cuts, cues, pulses and graphics.
 
-BEAT-ALIGNED CUTS (beat_align_cuts): snaps internal cut points to the beat — when the edit has music it cuts to the SONG the viewer hears, not the footage's own noise (that is what "cut to the beat" means). A low-confidence detected grid is committed with a quality advisory rather than used as a permission gate.
-- If the USER tells you the tempo ("there's a beat every second", "it's 120 BPM"): pass every_s=1 / bpm=120 — their ears beat our estimator; refusing after they told you is the wrong answer.
-- It MOVES existing cuts, never creates them: for "cut it on every beat", build the spans with keep_segments from the beat times first, then snap.
-- If a track measures as no-pulse AND the analysis warns the file is flat-lined/broken, say so and ask for a re-upload — do not keep scoring against a dead file.
+EMPHASIS WORDS: `suggest_emphasis()` lists measured stressed words, numbers
+and distinctive terms verbatim. Use them three ways at once on a reel:
+- caption accent words (`emphasis_words`, 1–2 per sentence);
+- camera: punch-ins on the strongest, alternating framing across jump
+  cuts, `pulse` on rhythmic list beats (read zooms);
+- hero graphics and sound on the 2–4 biggest (read motion-design and audio).
+The strongest word gets the biggest move; adjacent loud words do not each
+get a bump — vary strength and skip some.
 
-PUNCH-INS (punch_in_on_emphasis): writes one coherent emphasis-motion pass. Omit count/strength to let program length + the creative motion brief determine a restrained density and varied magnitude; selection combines real vocal stress, semantic weight and timeline spacing so adjacent loud words do not become adjacent camera bumps. Explicit count/strength remain available. suggest_emphasis lists candidates without writing.
+PUNCH-INS (`punch_in_on_emphasis`): writes one measured pass of punches on
+stressed words that survive the cut, aimed at detected faces, with spacing
+that avoids adjacent bumps. On a reel it is a valid first pass; inspect it
+and hand-tune the top moments (strength, timing, mode) rather than accepting
+uniform punches. Explicit count/strength remain available.
 
-SOUND DESIGN BY HAND: fetch sounds (search_sfx/fetch_sfx — a whoosh for junctions, an impact for the strongest word, a riser into the biggest rise) and place each with add_sfx where it serves the edit. Spacing and the audio skill are taste guidance, not hard authorization. Use the render, measured timing, AUDIO CHECK, or your judgment to refine anything that misses its moment.
+BEAT-ALIGNED CUTS (`beat_align_cuts`): snaps internal cut points to the
+beat — the SONG the viewer hears when the edit has music. It MOVES existing
+cuts; to cut ON every beat, build spans with `keep_segments` from beat times
+first, then snap. If the USER tells you the tempo, pass every_s or bpm —
+their ears beat the estimator. If a track measures as no-pulse and the
+analysis warns the file is broken, say so.
 
-Every one of these writes CONCRETE timestamps into the EDL — any number you quote must come from the tool result. That does NOT mean quoting them all: the timestamps are on the timeline where the user can see them; a reply that lists every sfx is a receipt, not a report.
+SOUND ON EMPHASIS: kit cues land on measured instants — a `kick` or
+`impact_soft` under the hero word, `tick`/`pop_soft` on list items, a riser
+that ENDS on the payoff (read audio for pre-roll and levels).
 
-MUSIC-LED FORMATS: in a montage/gameplay/music piece the music IS the structure — cut on its beats, build to the peak, one slow-motion beat on the single best moment, HARD cuts (see the formats skill).
+Every one of these writes concrete timestamps; any number you quote must come
+from the tool result. The reply does not recite them — the timeline shows
+them.
+
+MUSIC-LED FORMATS: in a montage, gameplay or music piece the music IS the
+structure — cut on its beats, pulse and flash on transients, build to the
+peak, one slow-motion beat on the best moment.
 
 ## Common failure modes
 
-- Snapping to a weak/incorrect grid, punching every loud word, or repeating equal-strength motion mechanically.
-- Treating beat alignment as permission for cuts/SFX/zooms with no story event.
+- Snapping to a weak or incorrect grid; punching every loud word with the
+  same strength.
+- Emphasis on filler or random nouns instead of meaning words.
+- Camera, graphic and sound for one word landing on three different frames.
 
 ## Verification procedure
 
-Compare authored timestamps to the measured grid and named event, then review changed windows in picture and sound for cadence, comprehension and repetition.
+Compare authored timestamps with the measured onsets and beats, then review
+changed windows with dense rendered frames and the AUDIO CHECK: each accent
+lands on its word or beat, the strongest word reads as the strongest moment,
+and the rhythm varies.
 
 ## Repair ladder
 
-Correct the grid → move to the actual event → vary or remove weak accents → rebuild the cut structure → verify the complete rhythmic arc.
+Correct the grid → move to the actual onset → vary or remove weak accents →
+align camera, graphic and sound to one frame → rebuild the cut structure →
+verify the complete rhythmic arc.

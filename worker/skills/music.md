@@ -1,59 +1,112 @@
-# music — choosing the track, placing the drop, fitting the ends, beat culture
+# music — the bed under every reel: choosing from the library or the user's track, levels, placing the drop, fitting the ends, beat culture
 
 ## Editorial decision principles
 
-Music must belong to the treatment, emotional implication and dialogue profile. Audition real candidates; dry speech and intentional silence remain valid choices.
+Premium short-form almost always carries a music bed: it fills the air
+between phrases, sets the emotional register and gives the payoff a place to
+land. The bed sits 13–20 dB under the voice and ducks; its structure is
+edited to the story — a lift into the payoff, room before a reveal, a
+button on the ending. Choose by what the video IS and how the speaker
+sounds, not by a mood word alone. A dry passage is a deliberate exception for
+a specific moment, never "no music" by habit.
 
 ## Evidence to inspect
 
-Inspect actual candidate audio, treatment/energy arc, dialogue density, tempo confidence, dynamics, editability, license, opening, representative speech, peaks, transitions and ending.
+Inspect the treatment and energy arc, dialogue density, the payoff and turns
+in program time, candidate tracks' tempo, energy and structure
+(`get_audio_analysis(asset_key=...)`), the opening, representative speech,
+the ending, and the rendered AUDIO CHECK.
 
 ## Strong treatment patterns
 
-Treat a music request as part of the brief. `add_music` may proceed from the
-brief, metadata, an attached or named track, search context, measured audio
-analysis, or editorial judgment. It may also be included in an atomic recipe.
-If one source or URL fails, choose another route or candidate. A missing search
-result is never a reason to block an otherwise complete edit: when the user did
-not require one exact song, finish with the source's original ambience/speech
-and make the picture rhythm work on its own, then offer music as an optional
-follow-up. Ask for an upload/link only when the named copyrighted or trending
-track itself is essential to the request. Never claim to have heard unreviewed
-seconds. When review_audio or an audition result carries
-an ACTUAL LISTENING comparison, use only those labeled excerpts as subjective
-evidence; otherwise say the choice is based on measurements and context.
+SOURCING — in this order:
+1. The user's own upload or link — when they provide a song, that IS the
+   song (`list_assets(kind='music')`, `fetch_url` for links when listed).
+2. The Valmera music library when its tools are listed: the
+   list_music_library tool browses 24 licence-free CC0 tracks by mood
+   (upbeat, chill, cinematic, corporate, dramatic, hiphop, ambient,
+   inspiring) and the add_library_music tool places one as a ducked bed
+   (about -18 to -22 dB under speech). When the look you apply offers it,
+   apply_look's music option ('auto', a mood or a slug) lays the look's own
+   library bed in the same call — check `get_edl` before adding a second
+   bed. CC0 means no credit or licence obligation; still name the track you
+   chose.
+3. A SPECIFIC song they NAME: `find_song(query)` returns candidate links
+   (prefer the artist's own or "- Topic" channel, never a lyric/sped-up/cover
+   version unless asked), then `fetch_url(url, as_kind='music')`. Tell the
+   user which version you grabbed; a found link verifies the recording, not a
+   usage licence.
+4. A video can be a sound source: pass the clip's storage_key to
+   `add_music`.
+If no track route is available, finish the edit with the source's speech
+and a strong picture rhythm and say music was not available — never block a
+complete edit waiting for an MP3.
 
-CHOOSE BY WHAT THE VIDEO IS, not by a mood word. Genre, energy, era and tempo all follow the content: gym/hustle → dark phonk or hard drill-adjacent beats; luxury/fashion → smooth soul, jazzy or minimal house; tech demo → clean minimal electronic; vlog → lofi or indie warmth; emotional story → sparse piano/ambient that stays out of the words' way; comedy → nothing, or one ironic needle-drop. For a substantial edit use research_music: it returns the provider-diverse licensed search page and acoustically compares several plausible candidates in ONE evidence pass. Use search_music alone only for a quick/low-stakes lookup; audition_music_candidates remains useful when deliberately comparing a different subset from the cached slate. The comparison measures actual tempo confidence, dynamics, brightness, bass and dialogue-band masking risk against the creative blueprint. When the bounded listener is available it also compares actual candidate excerpts; otherwise the main model still does not hear the tracks. Combine both kinds of evidence with identity/license/context instead of turning either score into a taste lock. Reuse or vary tracks as the edit benefits.
+CHOOSE BY CONTENT: podcast and interview insight → cinematic, ambient or
+inspiring beds that stay out of the words; business, product and education →
+corporate or chill; hustle, sport and hype → hiphop or upbeat; tension and
+stakes → dramatic; tender or vulnerable stories → sparse ambient that can
+drop out. Match tempo to cut rate: fast-cut montage 120–160 BPM, talking-head
+beds anything unobtrusive, cinematic 60–90.
 
-TEMPO SHOULD ROUGHLY MATCH THE CUT. get_audio_analysis(asset_key) measures a candidate's BPM and beat grid. Fast-cut montage wants 120-160; talking-head beds want anything unobtrusive; cinematic wants 60-90. A track whose energy fights the footage's pace reads as wrong even when the genre is right.
+LEVELS AND DUCKING: under speech the bed sits about 13–20 dB below the voice
+(the `add_music` default is -18 dB ducked); `set_music_fit(duck_mode='smooth')`
+fixes pumping or a swallowed first word. In speechless stretches — B-roll
+montage, the hook interrupt, the ending button — let it rise. On a speechless
+video the music IS the program: lead level, no duck, cuts on its beats.
 
-THE DROP LANDS ON THE MOMENT. This is the single most professional-sounding move available:
-- Find the video's peak (the reveal, the transformation, the punchline, the hardest cut) in OUTPUT seconds.
-- Find the track's build/drop from get_audio_analysis (energy rises/peaks).
-- set_music_fit(offset_s=...) so the drop hits the moment exactly: offset_s = drop_time_in_track - moment_in_program (clamp ≥ 0; when negative, start the music later instead: start=moment - drop_time).
-- The riser/build then automatically leads INTO the moment — that is the whole trick.
+THE DROP LANDS ON THE MOMENT:
+- Find the payoff (reveal, punchline, number, transformation) in OUTPUT
+  seconds and the track's build or drop from `get_audio_analysis`.
+- `set_music_fit(offset_s=...)` so the drop hits the moment:
+  offset_s = drop_time_in_track − (moment_in_program − music start) (when
+  negative, start the music later instead).
+- Pair it with picture: a riser cue into the moment, the hero graphic and a
+  low hit on the landing.
+- STOP-DOWN (optional): a beat of room just before a reveal makes the
+  landing hit harder. There is no mid-track dip control: split the bed
+  around the reveal as audio describes (shorten it with `set_music_fit`,
+  restart the same track at the reveal with the matching offset), or skip
+  the stop-down. Never end the bed early without restarting it.
 
-ENDS MATTER AS MUCH AS STARTS. Music that stops mid-bar at the video's end reads as a mistake (the AUDIO CHECK flags it as dead air or an abrupt stop). set_music_fit fade_out over the last 1-2s, OR end the video ON a musical resolve. Enter on a phrase boundary too — offset_s to skip a limp 8-bar intro is routinely the difference between amateur and produced.
+ENDS MATTER: end on a musical resolve or fade the last 1–2 s with
+`set_music_fit`; never stop mid-bar or leave dead air. Enter on a phrase
+boundary — use offset_s to skip a limp intro.
 
-DUCKING IS THE MIX. Under speech the bed sits -18dB and ducks (the add_music default — trust it). If playback feedback says music swallows the first word after a pause or pumps on short gaps, set_music_fit(duck_mode='smooth') is the direct correction. On a speechless video the music IS the program: -4dB lead, no duck, and cuts belong on its beats (beat_align_cuts).
+BEAT CULTURE BY FORMAT: montage, gameplay, sports and music-led pieces — the
+music is the structure: cut on beats (`beat_align_cuts`), land graphics and
+pulses on transients, build to the peak. Talking-head and podcast reels — the
+words are the structure: cuts follow speech, the bed supports, and only the
+hook, B-roll passages and the payoff lock to the music. When both exist,
+switch rules at the section boundary.
 
-BEAT CULTURE BY FORMAT: montage/gameplay/sports/music-led — the music is the structure: cut ON beats, build to the peak, slow-motion on the single best moment. Talking-head/podcast/narrative — the WORDS are the structure: music stays a bed, cuts follow speech, and beat-syncing captions or cuts reads as gimmick. When both exist (a talking reel with a hype section), switch rules at the section boundary and say so.
+TRENDING SOUNDS: platforms license them in-app only. The user uploads the
+sound (or a clip carrying it — `extract_audio`), you analyze it and cut the
+edit to its grid with the hook on its drop; they attach the licensed version
+in-app.
 
-TRENDING SOUNDS — the honest flow, offered proactively when someone says "trending/viral audio": platforms license those sounds inside their own apps only, so nothing you export can legally carry them. The pro workflow you CAN deliver end-to-end: they upload the sound (or any clip carrying it — extract_audio takes it out), you analyze it (get_audio_analysis), cut the whole edit on ITS grid with the hook on ITS drop, and export — they attach the platform's licensed version in-app and the cut already fits it perfectly. Also export the mixed version so they can preview the sync.
-
-LICENSES TRAVEL WITH THE TRACK: a fetch_music result's license line (public domain, CC BY credit, or NON-COMMERCIAL-ONLY) is the user's obligation, not trivia — repeat it once in your reply whenever it carries one. Non-commercial means fine for a personal video, not for monetized/business content. For an ad, brand, product, company, client, startup or monetized reel, search_music automatically excludes NC tracks (and commercial_use=true makes any ambiguous brief strict); never deliberately work around that gate.
-
-A NAMED SONG IS A SEARCH, NOT A DEAD END: "add Blinding Lights" → find_song("Blinding Lights The Weeknd") → pick a suitable candidate → fetch_url(url, as_kind='music') → add it. Say which version you grabbed. If search is unavailable or empty, ask for a link/file or use another valid route.
+LICENCES TRAVEL WITH THE TRACK: relay any obligation a user-provided or
+fetched track carries (credit, non-commercial-only); never work around a
+commercial-use restriction for a business or monetized reel.
 
 ## Common failure modes
 
-- Track/style mismatch, music beginning at/after the ending, short coverage, invalid loops/offsets/fades or dialogue masking.
-- Picking from titles/metadata without auditioning the real audio.
+- No bed on a reel, leaving digital silence between phrases.
+- Bed too loud under speech, or a genre that fights the story.
+- The drop landing nowhere near the payoff; music stopping mid-bar at the
+  end; a limp intro left in.
+- Beat-synced captions or cuts on a talking reel where the words should lead.
+- Claiming to have heard a track that was only measured.
 
 ## Verification procedure
 
-Validate placement/coverage/fades deterministically and listen-check opening, representative dialogue, energy turns, non-speech peaks, transitions and ending in the rendered mix.
+Validate placement, coverage, fades and ducking deterministically; check the
+AUDIO CHECK for bed level under speech and dead air; inspect the drop against
+the payoff frame; listen-check (when the reviewer is available) the opening,
+representative dialogue, the payoff and the ending.
 
 ## Repair ladder
 
-Refit timing → adjust duck/gain/fades → use a different section → choose the next auditioned track → remove music/use silence → render and listen again.
+Refit the offset to the payoff → adjust duck/gain/fades → use a different
+section of the track → choose another track or mood → dry the specific
+passage that needs it → render and review again.

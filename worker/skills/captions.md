@@ -1,92 +1,199 @@
-# captions — presets, families, placement, composition, fixes, pre-captioned footage
+# captions — motion caption looks, size ladders and accents, placement, legacy presets, fixes, translation, pre-captioned footage
 
 ## Editorial decision principles
 
-Captions are a reading system: clean hierarchy, speech-rhythm phrasing, measured geometry and one coherent treatment. Accessibility and legibility outrank novelty.
+On short-form speech, captions are the motion-typography layer the viewer
+reads on every frame: words reveal on their spoken onsets, a size ladder
+separates connector words from the 1–2 words that carry the sentence, and
+one accent role (colour, serif italic or a hero size) marks meaning. Static
+all-white subtitles are an accessibility track, not a premium reel. Legibility
+is still the craft: hierarchy, speech-rhythm phrasing, measured placement and
+one coherent treatment.
+
+- Short-form speech (reels, shorts, podcast clips, vertical ≤120 s):
+  browser motion captions via `style.motion_look`.
+- Long-form, interviews for accessibility, education and translation:
+  readable phrase subtitles (presets such as `documentary`, `clean`,
+  `broadcast`).
+- One caption system per video; designed graphics take over the words for
+  their own windows instead of stacking a second system.
 
 ## Evidence to inspect
 
-Inspect complete surviving transcript coverage, script/font fallback, speech rhythm, safe width, faces/UI, burned-in text, densest phrases, distinct backgrounds and every placement/layout change.
+Inspect complete surviving transcript coverage (`get_kept_transcript`),
+speech rhythm and stress (`suggest_emphasis`, `get_audio_analysis`), face and
+UI geometry and clear bands (`look_at`, `get_editorial_map`), burned-in text,
+densest phrases, distinct backgrounds, script/font fallback, and every
+placement or layout change in the rendered preview.
 
 ## Strong treatment patterns
 
-For a complete phrase with restrained spoken-word tint, use `composed`.
-In karaoke modes `animation=fade` changes tint without hiding or resizing
-already visible words; `none` makes the tint immediate. Inspect consecutive
-word boundaries, not just the settled frame. For mixed serif/sans phrase
-builds in fixed positions, read `premium-composition` and selectively use
-`set_typography_scene` with actual transcript cue times.
+MOTION LOOKS — `add_captions(mode='from_transcript', style={...})` or
+`set_caption_style` with `style.motion_look`. The browser engine draws the
+captions from the same kept, corrected, mute-filtered words as every other
+caption path, so they follow cuts exactly.
+- `editorial` — the premium default for podcast and interview reels: tight
+  grotesk phrases with a size ladder and an accent role on hero words.
+- `clean` — quiet premium sentence case; words fade and rise in as spoken.
+  Documentary and calm conversation.
+- `lockup` — pre-laid-out stacked lockups; words reveal in place and the
+  block never reflows. Designed, poster-like delivery.
+- `serif` — sans phrases whose emphasis words switch to a large serif
+  italic. Editorial luxury, reflective speech.
+- `pop` — bold 1–3 word punches; the spoken word springs in and takes the
+  accent colour. Hype, motivation, fast creators.
+- `stack` — small connector words above a huge hero word that slams in.
+  Punchy statements.
+- `box` — phrase on a soft dark pill with a highlight gliding to each word.
+  Busy or bright backgrounds.
+- `glow` — whole phrase dim, spoken words light up with an accent glow.
+  Karaoke and music-led edits.
+- `mono` — monospace typewriter with a caret. Tech and terminal stories.
+`color`, `highlight_color` (the accent), `font`, `size`/`size_scale`,
+`uppercase`, `position`/`anchor_y` and `max_words_per_caption` still apply
+to motion looks. Set `motion_look` to null to return to presets. `apply_look`
+sets a matching motion look as part of its package; refine it with
+`set_caption_style` rather than re-adding.
 
-BASICS
-- add_captions("from_transcript") burns word-timed captions for everything that survives the cut — timing always from the real transcript, never invented. add_captions('off') removes captions WE added.
-- To change how EXISTING captions look ("make it red", "move to the top"), use set_caption_style with just the fields to change — never re-add.
-- Manual caption items are only for text the user dictates — and for translations.
-- Manual items render at their exact authored start/end. There is no hidden minimum hold; adjacent 50ms+ items do not get stretched over one another. Do not inflate word timings to compensate for an old renderer bug.
-- add_captions REPLACES the whole caption set in one call. NEVER call mode='off' first and re-add — that is two EDL versions, a wasted render, and the loop detector will flag the thrash.
+SIZE LADDER AND ACCENT:
+- Connector words sit around 2.5–4% of frame height; accent words 2–3x that
+  (hero words in graphics go far larger — see motion-design).
+- Accent colour on 1–2 words per sentence only, from one restrained palette
+  (near-white type with a single red, gold, sand or periwinkle accent).
+  Choose the meaning words — numbers, names, the verb that lands, the
+  contrast — and pass them VERBATIM as `emphasis_words`; otherwise emphasis is
+  auto-selected from measured stress, numbers and outcome words. Pass [] for
+  a deliberately flat hierarchy.
+- Words containing digits are emphasized automatically. Wrong emphasis reads
+  worse than none.
+- No thick outlines, no yellow boxes by default, no emoji streams.
+  Legibility comes from size, clear-space placement, soft shadow and the
+  grade.
 
-TRANSLATION CAPTIONS ("arabic subtitles", "translate the captions to X"):
-- Build manual items from get_kept_transcript: ONE item per transcript segment, the segment's own start/end, and a COMPLETE translation of every segment — count your items against the transcript segments before writing. Dropped or compressed lines are immediately visible to a bilingual viewer.
-- Translate meaning faithfully and fully — filler sounds can drop, spoken content cannot.
-- These are subtitles, not hype captions: default to 'documentary' (translucent contrast panel, restrained Plus Jakarta Sans, bottom), never spotlight/beast. RTL scripts (Arabic, Hebrew, Farsi) render correctly through Noto fallback — write natural RTL text with its punctuation.
-- Style-only follow-ups ("smaller", "nicer font") → set_caption_style, one call, no items re-send. Text corrections → ONE add_captions(mode='items') call with the full corrected list, same timings.
+CAPTIONS AND GRAPHICS SHARE ONE STAGE. A motion graphic that says the spoken
+words (word slam, phrase build, a hook title of the spoken hook, a typewriter
+of the line being said) must mute captions for its own window;
+complementary graphics keep them. Template defaults differ, so pass
+`mute_captions` explicitly on `add_motion_graphic` rather than duplicating
+it with `set_caption_mutes`. Never let a caption page and a graphic animate
+in the same band at the same instant.
 
-PRESET FAMILIES — prioritize readable, coherent typography over a fixed word count. Choose one coherent visual grammar for the whole video:
-- `composed`: a complete readable phrase, muted spoken-word tint, restrained semantic size hierarchy and no default bounce. Useful when the user wants active-word highlighting without isolated reveal fragments. Custom color/animation remain available.
-- For a vague clean-edit brief, choose restrained phrase captions that preserve meaning and reading time. Use documentary for subtitles; stacked 1-2 word type with fade can suit punchy delivery. Choose from actual speech pace and composition, not the adjective “premium.”
-- Long-form interviews, accessibility, education, changing/bright backgrounds → 'documentary': restrained phrases on a translucent dark panel.
-- News, explainers, headlines, newsroom/B-roll → 'broadcast': left-aligned lower-third panel with sparse accent hierarchy.
-- Fast, punchy, hype, motivational → 'spotlight': ONE glowing word at a time, big caps, dead centre. Use only when that one-word rhythm is actually requested or clearly fits.
-- Music/lyric edits, montage reels, "lyrics on screen", motivational quote-over-footage → 'lyric': heavy lowercase phrases dead CENTRE, words landing as spoken, and the stressed word ~2x in a white ITALIC SERIF on its own line ("we gotta be / excited"). Gold accent tints occasional whole phrases. Mid-frame is this look's signature (it and 'spotlight' are the only two allowed there).
-- Explicit colorful/dynamic social treatment → 'reels' (the flagship: tight two-line hierarchy, one warm hero word and elastic word landings), 'podcast' (words reveal with mixed keyword treatments), 'beast' (loud ALL-CAPS Anton), or 'karaoke' (accent box tracks speech). These are options, not defaults; rotating boxes/serifs/colors can read cheap on ordinary footage.
-- Luxury/fashion/editorial footage → 'luxe' (Playfair serif, gold accents), 'editorial' (light Instrument Serif, airy), 'fashion' (wide Archivo caps).
-- STACK presets compose the phrase across independently-placed lines whose SIZES differ hard (small connector above a huge hero word): 'stacked' (flagship, all-white, emphasis is pure SIZE), 'iridescent' (RGB fringe), 'chrome' (liquid metal), 'impact' (Bebas caps, sports/hype).
-- Visual genres → 'retro' (outlined condensed poster type) or 'neon' (two-word cool glow). 'classic' is the legacy subtitle renderer; choose it whenever that grammar best serves the edit.
+PLACEMENT LAW: multi-word captions sit in measured clear space — usually
+the lower-middle band above the platform UI, or beside the face in a
+designed layout — never across eyes or mouth, never inside the bottom ~13–15%
+of a 9:16 frame, never covering what the speaker points at. Placement is
+shot-measured and stabilized; `position` or `anchor_y` locks one band for the
+whole video, so omit them to let collision-aware placement adapt by shot.
+Only single-word looks (or the `lyric` preset) hold dead centre.
 
-PLACEMENT LAW: 1-2 word stacked captions sit in the BOTTOM area, never across the face (presets default there — do not pass position='middle' for them). Only 'spotlight' (one word at a time), 'lyric' (the mixed-face lyric edit — centre IS the look), or max_words_per_caption=1 may hold the centre.
+LEGACY PRESET FAMILIES (`style.preset`) remain available and are the right
+choice for subtitles and specific grammars:
+- `documentary` — restrained phrases on a translucent panel: long-form,
+  accessibility, education, bright or changing backgrounds, translations.
+- `clean` — white complete short phrases with size-only hierarchy;
+  `composed` — complete readable phrases with a muted spoken-word tint.
+- `broadcast` — left-aligned lower-third panel for news and explainers.
+- `reels`, `podcast`, `beast`, `karaoke`, `spotlight` (one glowing word at a
+  time, centre), `lyric` (phrase-led music and quote typography, centre) for
+  ASS-rendered social grammars.
+- `luxe`, `editorial`, `fashion`, `elegant` for serif/fashion footage (the
+  `editorial` PRESET is the ASS serif look; `motion_look='editorial'` is the
+  browser motion look above — different fields);
+  stack presets (`stacked`, `iridescent`, `chrome`, `impact`) compose lines
+  of very different sizes; `retro`, `neon` for visual genres; `classic` is the
+  legacy subtitle look.
+- Composition overrides: `font` (bundled family), `emphasis` (big, accent,
+  pop, box, serif, script, chrome, glow, chroma), `emphasis_scale` 1.0–3.0,
+  `layout='stack'` with `leading` 0.85–0.95 for interlocking lines,
+  `animation` (fade, pop, punch, blur_in, whip, flash, rise, drop, elastic,
+  bounce, swing, zoom_blur, or none), outline/shadow/background panel,
+  `tracking`, `text_align`, `anchor_y`.
 
-EMPHASIS: the tool automatically selects sparse semantic emphasis from the KEPT transcript whenever a preset is enabled and emphasis_words is omitted. On short-form (or when analysis is already cached) measured vocal stress is the strongest non-numeric signal, so the typography lands where the speaker does; numbers, money, rare/outcome terms and phrase endings are the fallback. Hero treatment belongs on meaning-bearing or delivery-bearing words, with contrast between ordinary setup and true peaks—not at a fixed word interval. Pass emphasis_words whenever editorial judgment or the brief makes particular words important; use them VERBATIM. Pass [] whenever a flat hierarchy is the better choice. Words containing digits are emphasized automatically.
+USER PREFERENCES WIN:
+- When the user rejects a caption colour or accent, the answer is NO accent —
+  white, emphasis by size alone. Never swap the rejected colour for another
+  hue. Honour explicit "clean/minimal/no colour" requests the same way.
+- A named preset, font or size request is honoured exactly; a second "too
+  small" means much bigger.
 
-COMPOSITION — every preset is a starting point you can override per field:
-- font: exact bundled family name (Inter Display Black/ExtraBold/Bold, Plus Jakarta Sans, Anton, Bebas Neue, Archivo Black, Poppins Black, Syne ExtraBold, Playfair Display Black, Instrument Serif, DM Serif Display, Montserrat). Honour a specific font request instead of deflecting; multilingual scripts fall back to Noto rather than tofu boxes.
-- emphasis: 'big' (size only — the reference look), 'accent'/'pop' (colour too), 'box' (marker highlight), 'serif' (accented serif-italic), 'script' (WHITE italic display serif — the lyric-edit hero word), 'chrome'/'glow'/'chroma' (layered effects). emphasis_scale 1.0-3.0 (2.0+ is the dramatic reel look).
-- layout 'stack' turns ANY preset into the per-line composer; leading below 1.0 makes lines deliberately OVERLAP (0.85-0.95 is the interlock sweet spot).
-- animation (entrance): fade, pop, punch, blur_in, whip, flash, rise, drop, elastic, bounce, swing, zoom_blur; `none` truly disables fades/slides/pops/scale punches even for word-driven presets (word reveal/highlight state still follows the speech). `elastic` and `bounce` suit confident hero landings; `swing` is playful; `zoom_blur` is a fast transition accent, not an every-word default. highlight_color sets the accent. uppercase and position override preset defaults.
-- Production controls: outline_color + outline_width 0-12, shadow 0-12, background_color + background_opacity 0-1 (real ASS backing panel), tracking -8..24, text_align left/center/right, and anchor_y 0.05..0.95 for an exact output-frame vertical anchor. They compose with presets and classic styles independently.
-- Other styling: color (#RRGGBB), size (s/m/l/xl), size_scale (0.5-3.0), position (bottom/top/middle), dynamic (legacy karaoke), max_words_per_caption (1-16).
+BASICS:
+- `add_captions('from_transcript')` burns word-timed captions for
+  everything that survives the cut; timing always comes from the transcript.
+  `add_captions('off')` removes captions WE added. It replaces the whole set
+  in one call — never call 'off' first and re-add.
+- Restyle existing captions with `set_caption_style` and only the fields to
+  change.
+- Manual caption items are only for dictated text and translations; they
+  render at their exact authored start/end.
 
-SIZE COMPLAINTS: "too small" / "big TikTok captions" → with a preset go size 'l' or 'xl'; without one, size 'xl' + dynamic:true. If they say "too small" a second time they mean MUCH bigger. "Captions look basic/boring/cheap" → first diagnose the grammar: use 'stacked' 1-2 words with fade and size hierarchy, or 'beast' only for explicit hype. Do not answer every taste complaint with yellow boxes or a size bump.
+TRANSLATION CAPTIONS: build manual items from `get_kept_transcript`, ONE item
+per transcript segment with its own start/end and a COMPLETE, faithful
+translation of every segment (count items against segments). These are
+subtitles: default to `documentary`. RTL scripts render through Noto
+fallback; write natural RTL text. Text corrections → ONE
+`add_captions(mode='items')` call with the full corrected list.
 
-COLOR COMPLAINTS: when the user rejects a caption color/accent, the answer is NO accent — pure white, emphasis 'big' (size-only), highlight_color/effect off. NEVER swap the rejected color for a different color (cyan→gold repeats the mistake in a new hue); they are telling you colored captions are wrong for this video, not that you picked the wrong shade. Same when they ask for "clean", "minimal", "aesthetic" or a premium/insta look on calm or cinematic footage: all-white captions, emphasis by SIZE alone, mixed case, no glow/box — restraint reads expensive; color reads loud. Reserve colored accents for hype content or an explicit ask.
+READABILITY:
+- Group words by meaning and reading time; avoid both crowded sentences and
+  rapid isolated fragments. New tracks reset at breath pauses and sentence
+  ends and avoid ending on "the / because / of".
+- Contrast is non-negotiable: check rendered frames at 2–3 caption moments
+  on distinct backgrounds; fix with the look's plate or glow, a clearer band,
+  or a grade adjustment.
+- `audit_captions()` compiles the exact caption artifact and reports
+  lateness, uncovered words and overlaps. `render_preview(complete=false)`
+  returns caption QA pages of real rendered caption states — judge those
+  while iterating. To inspect its `qa_output_times` or any other moment,
+  render a complete preview of the current version
+  (`render_preview(complete=true)`), then
+  `look_at(rendered=true, output_times=[...])`; rendered looks reject a
+  changed-section proof. The geometry-only view without `rendered=true`
+  contains no burned captions.
 
-READABILITY IS THE CRAFT — the details that separate produced captions from burned subtitles:
-- PHRASES MUST READ: group words by meaning and reading time. Avoid both overcrowded sentences and rapid isolated words that make the message harder to follow. Check real rendered timing, including the opening and dense passages.
-- NEW tracks are phrase-directed automatically: breath pauses and sentence ends reset the card; the composer rebalances neighboring cards instead of ending on "the / because / of", clears completed thoughts promptly during silence, and optically balances stack lines instead of leaving an accidental one-word widow. Documentary/editorial families preserve full punctuation; creator families retain expressive ?/! without comma clutter.
-- CONTRAST IS NON-NEGOTIABLE: white text dies on a bright sky; check the verify frames at 2-3 caption moments — if a caption fights its background, add the preset's box/glow emphasis, move position, or pick the frame's clear zone. Never ship a caption you haven't seen against its actual background.
-- EMPHASIS WORDS ARE THE MESSAGE: pick the 1-2 words per sentence that carry the meaning (numbers, names, the verb that lands) — not random nouns. Wrong emphasis reads worse than none.
-- NEVER over a face's mouth/eyes, never under the platform UI band (the bottom ~13% on 9:16), never covering the thing the speaker is pointing at.
-- Placement is shot-measured and stabilized: it changes bands when the current one is genuinely unsafe, not because one noisy sample was a fraction cleaner. On pad/pad_blur it anchors to the real foreground picture rather than floating in the blurred band. When all bands are occupied it keeps every word in the least-obstructed band and marks that span as a fallback; it never silently deletes speech. Do not add manual top/bottom changes unless the user asks for a fixed composition.
-- QA is available after caption changes: `audit_captions()` mechanically compiles the exact ASS artifact and reports first-word lateness, uncovered words and true visual-state overlaps; after `render_preview`, its returned `qa_output_times` can be inspected with `look_at(rendered=true, output_times=[...])`. These are evidence tools, not permission gates. `look_at(output_times=...)` without `rendered=true` is geometry-only and does not contain burned captions.
+CAPTIONS OFF FOR PART OF THE VIDEO: `set_caption_mutes(spans=[[start,end],
+...])` in PROGRAM seconds replaces the manual mute list; spans=[] clears it.
+Designed text and motion graphics own suppression for their own windows.
+Inserted media and title cards are never captioned.
 
-CAPTIONS OFF FOR PART OF THE VIDEO: set_caption_mutes(spans=[[start,end],...]) in PROGRAM seconds — replaces the whole MANUAL mute list; spans=[] clears it. Transcript words whose midpoint falls in a mute are removed before regrouping, so captions resume from the first word after the window instead of losing a whole straddling phrase; dictated manual caption items are dropped as whole events. Designed text/kinetic phrases own suppression for their own live windows automatically — do not duplicate those with set_caption_mutes, and removing the text restores its captions. Inserted media and title cards are never captioned — no mute needed there.
+CORRECTIONS: `set_caption_fixes` replaces the correction set by default;
+operation='list' inspects, 'append' upserts, 'clear' removes. Pairs apply
+globally; {from,to,start,end} targets one occurrence in output seconds.
+Check names and ASR confidence with `get_words` before correcting.
 
-CORRECTIONS: set_caption_fixes replaces the complete correction set by default. Use operation='list' to inspect active fixes and their compiled text preview; operation='append' upserts a matching correction and operation='clear' removes all. Pairs apply globally; {from,to,start,end} objects target one occurrence in output seconds. Replacement text controls punctuation/capitalization exactly. Unequal word counts share the original phrase's spoken span; audio/cuts do not change. Inspect ASR confidence with get_words before choosing corrections; unavailable confidence is not evidence of accuracy. Always check names in sermons/interviews.
+PHRASE CADENCE: with static phrase presets, `min_words_per_caption` sets a
+preferred minimum bounded by `max_words_per_caption`; caption QA reports
+short states.
 
-PHRASE CADENCE: with a static phrase preset such as clean, min_words_per_caption sets a preferred minimum (bounded by max_words_per_caption). Caption QA reports short states and excessive one/two-word phrases. Sentence endings, real gaps and width limits can still require shorter states; inspect the returned preview before rendering.
-
-PRE-CAPTIONED FOOTAGE (the most common request on footage the user did not shoot): when the filmstrip shows captions burned into the source, or the user says so — NEVER silently burn new captions on top; stacked caption soup is the clearest way to make the frame look broken. The answer is REMOVAL: erase_burned_text() finds every burned caption band and repaints those pixels, then add_captions puts your own on a clear frame. That is also the answer to "change the caption font" / "make the subtitles bigger" on burned-in text — you are removing theirs and writing new ones from the transcript; say exactly that. Fallbacks when the erase measurement says ink survived OR your eyes say it ghosts — animated/boxed caption bands can ghost even when ink measures gone, so always look_at(output_times=[...]) inside the erased window on the next preview: cover the band (blur_region), crop it out (auto_reframe / set_frame) if it hugs an edge, or place new captions elsewhere (position 'top'). Re-erasing the same band with a nudged rectangle never improves quality — escalate a rung instead. Style the NEW captions so they cannot be mistaken for the old ones: if the burned captions were yellow boxes, do not pick a yellow highlight because emphasis pops then resemble the ghosts the user asked you to remove.
-"Remove the captions": get_edl FIRST and say which case theirs is — captions WE added turn off with add_captions('off') (or set_caption_mutes for stretches); captions burned into the footage are the erase_burned_text case.
+PRE-CAPTIONED FOOTAGE: when captions are burned into the source, never burn
+new ones on top. `erase_burned_text()` repaints those bands; then
+`add_captions` writes ours on a clear frame. If the erase ghosts, escalate:
+cover the band (`blur_region`), crop it out, or place new captions elsewhere.
+Style new captions so they cannot be mistaken for the old ones. "Remove the
+captions": `get_edl` first — ours turn off with `add_captions('off')`; burned
+ones are the erase case.
 
 ## Common failure modes
 
-- Corrupt glyphs, missing transcript, orphan connectors, overcrowded phrases, or phrase timing too fast to read.
-- Face/UI/safe-band collisions, burned-caption stacking, or a panel whose bounds/fade/motion do not match its glyph layout.
+- Static white subtitles on a premium reel; captions shrunk until the hero
+  words carry no weight.
+- Accent colour on every other word, or on random nouns.
+- Corrupt glyphs, missing words, orphan connectors, phrases too fast to read.
+- Face, UI-band or graphic collisions; two caption systems on screen;
+  burned-caption stacking.
+- Swapping a rejected colour for another colour.
 
 ## Verification procedure
 
-Run caption audit, render all paged QA states across distinct layouts/backgrounds/placements plus density and font-fallback extremes, and inspect transcript coverage, timing, geometry and legibility.
+Run `audit_captions`, render, and inspect the caption QA pages plus (on a
+complete preview) `look_at(rendered=true, ...)` across distinct backgrounds
+and layouts and the densest phrase: words appear on their onsets, the accent
+lands on the right words, the ladder reads at phone size, nothing crosses
+the face or the UI band, and no graphic and caption page fight for the same
+band.
 
 ## Repair ladder
 
-Correct text/coverage → regroup by speech rhythm/read time → reduce hierarchy → reposition/resize → choose a clean/documentary treatment → erase or avoid burned text → render and audit again.
-
-Explicit dynamic=true also colors the currently spoken word in reveal presets such as reels, podcast and stacked. It coexists with semantic size emphasis and animation; animation=none disables motion without disabling that color. Omit dynamic to retain the preset's historical treatment.
+Correct text/coverage → regroup by speech rhythm → re-pick accent words →
+move to clear space or adjust size → switch motion look (box/glow for busy
+backgrounds) → mute under the graphic that says the words → erase or avoid
+burned text → render and audit again.
