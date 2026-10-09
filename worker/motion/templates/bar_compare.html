@@ -40,6 +40,7 @@
   .v .bar .sheen{background:linear-gradient(90deg,rgba(255,255,255,.22),rgba(255,255,255,0) 60%)}
   .glowbar{position:absolute;border-radius:999px;background:var(--accent);filter:blur(18px);opacity:0;will-change:opacity}
   .none .title,.none .lab,.none .val{text-shadow:0 2px 16px rgba(0,0,0,.55)}
+  .none .bar{box-shadow:0 4px 18px rgba(0,0,0,.35)}
 </style>
 <div class="mg-root"><div class="plate" id="plate"></div><div class="card" id="card"><div class="inner" id="inner"></div></div></div>
 <script>
@@ -59,8 +60,9 @@
   css.setProperty('--accent-ink', light && lum(P.accent) > 0.45 ? mix(P.accent, 0.55) : P.accent);
   css.setProperty('--fg', light ? '#0D0D12' : '#F7F5F2');
   css.setProperty('--fg2', light ? 'rgba(13,13,18,.62)' : 'rgba(247,245,242,.74)');
-  css.setProperty('--track', light ? 'rgba(13,13,18,.06)' : 'rgba(255,255,255,.07)');
-  css.setProperty('--bar', light ? 'rgba(13,13,18,.22)' : 'rgba(247,245,242,.34)');
+  const bare = P.plate === 'none';
+  css.setProperty('--track', light ? 'rgba(13,13,18,.06)' : bare ? 'rgba(255,255,255,.1)' : 'rgba(255,255,255,.07)');
+  css.setProperty('--bar', light ? 'rgba(13,13,18,.22)' : bare ? 'rgba(247,245,242,.62)' : 'rgba(247,245,242,.34)');
 
   const parse = s => {
     s = String(s ?? '').trim().replace(/−/g, '-');
@@ -89,9 +91,20 @@
   };
   const rich = s => MG.esc(s).replace(/\*([^*]+)\*/g, '<span class="acc">$1</span>');
 
+  // compare like with like: '6 hours' vs '9 minutes', '900K' vs '1.2M'
+  const UNITS = [[/^(k|thousand)$/i, 1e3], [/^(m|mm|mn|million|millions)$/i, 1e6], [/^(b|bn|billion|billions)$/i, 1e9],
+    [/^(t|tn|trillion|trillions)$/i, 1e12], [/^(s|sec|secs|seconds?)$/i, 1], [/^(min|mins|minutes?)$/i, 60],
+    [/^(h|hr|hrs|hours?)$/i, 3600], [/^(d|days?)$/i, 86400], [/^(w|wk|wks|weeks?)$/i, 604800],
+    [/^(mo|mos|months?)$/i, 2629800], [/^(y|yr|yrs|years?)$/i, 31557600]];
+  const unitMult = n => {
+    const u = String(n && n.suf || '').trim().replace(/^[^A-Za-z]+/, '').split(/\s+/)[0] || '';
+    for (const [re, k] of UNITS) if (re.test(u)) return k;
+    return 1;
+  };
   const rows = (P.rows || []).filter(r => (r.label || r.value)).slice(0, 5).map(r => {
     const n = parse(r.value);
-    return { label: r.label || '', raw: r.value || '', n, v: n ? Math.abs(n.v) : 0, hi: /^(1|true|yes|y|x|\*)$/i.test(String(r.highlight || '').trim()) };
+    const v = n ? Math.abs(n.v) * (P.scale_max > 0 ? 1 : unitMult(n)) : 0;
+    return { label: r.label || '', raw: r.value || '', n, v, hi: /^(1|true|yes|y|x|\*)$/i.test(String(r.highlight || '').trim()) };
   });
   if (!rows.length) rows.push({ label: '', raw: '', n: null, v: 0, hi: false });
   const vmax = P.scale_max > 0 ? P.scale_max : Math.max(1e-9, ...rows.map(r => r.v));

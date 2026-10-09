@@ -3,7 +3,7 @@
  "duration": 3.0, "layer": "above_captions", "mutes_captions": false,
  "params": {
   "value": {"type": "str", "required": true, "max": 24, "hint": "the number exactly as it should finally read: '62,000+', '$1.2B', '340%', '4.9', '10x', '1,000,000 users'. Prefix/suffix, decimals and thousands separator follow how it is written; plain numbers of 10000+ get commas"},
-  "from": {"type": "float", "default": 0, "hint": "start value of the count"},
+  "from": {"type": "float", "default": 0, "hint": "start value of the count (e.g. 1990 when the value is a year)"},
   "label": {"type": "str", "default": "", "max": 60, "hint": "short line under/over the number; wrap a word in *stars* for the serif accent"},
   "label_pos": {"type": "enum", "values": ["below", "above"], "default": "below"},
   "style": {"type": "enum", "values": ["count", "odometer"], "default": "count", "hint": "count = digits tick up; odometer = digit columns roll into place"},
@@ -88,6 +88,7 @@
   const grp = V ? (V.grp || (Math.max(Math.abs(to), Math.abs(from)) >= 10000 ? ',' : '')) : '';
   const dec = V ? V.dec : '.';
   const finalStr = V ? fmt(to, decimals, grp, dec) : String(P.value);
+  const startStr = V ? fmt(from, decimals, grp, dec) : finalStr;
   const pre = V ? V.pre.trim() : '', suf = V ? V.suf.trim() : '';
   const sufWord = V && (/^\s/.test(V.suf) && suf.length > 1 || suf.length > 3);
 
@@ -139,13 +140,15 @@
       if (a === suf && sufWord) return metric(a, fs * 0.27, "'Inter Display'", 800).width + fs * 0.1;
       return metric(a, fs * AFFIX_EM[affixKind(a)], fam, fw).width + fs * 0.05;
     };
-    const widthAt = fs => {
+    const widthAt = (fs, str) => {
       let w = 0;
-      for (const ch of finalStr) w += /\d/.test(ch) ? slot * fs : metric(ch, fs, fam, fw).width + track * fs;
+      for (const ch of str) w += /\d/.test(ch) ? slot * fs : metric(ch, fs, fam, fw).width + track * fs;
       return w + affW(pre, fs) + affW(suf, fs);
     };
+    // a countdown can start wider than it lands: size (and clip box) for the widest
+    const sizeStr = P.style !== 'odometer' && widthAt(100, startStr) > widthAt(100, finalStr) ? startStr : finalStr;
     const maxFs = Math.min(400 * P.size, (SAFE.y1 - SAFE.y0) * 0.42);
-    const fs = Math.max(40, Math.min(maxFs, 100 * (SAFE.x1 - SAFE.x0 - 40) / widthAt(100)));
+    const fs = Math.max(40, Math.min(maxFs, 100 * (SAFE.x1 - SAFE.x0 - 40) / widthAt(100, sizeStr)));
     num.style.fontSize = fs + 'px';
     num.style.letterSpacing = track + 'em';
     const digitTop = metric('8', fs, fam, fw).actualBoundingBoxAscent;
@@ -188,7 +191,7 @@
         c.t0 = c.idx * 0.03;
         c.land = CT - 0.42 * (n > 1 ? 1 - c.idx / (n - 1) : 0);
       });
-    } else core.innerHTML = digitsHTML(finalStr, slot);
+    } else core.innerHTML = digitsHTML(sizeStr, slot);
 
     // bloom: blurred accent clone of the FINAL number, static -> cached layer
     let glow = null;
@@ -245,9 +248,7 @@
     MG.set(numwrap, { y: (1 - pe) * fs * 0.13, scale: 1 + 0.035 * bump, opacity: MG.range(t, 0, 0.1), blur: (1 - MG.range(t, 0, 0.2)) * 12 });
     if (V && !cols.length) {
       const v = from + (to - from) * MG.ease.outExpo(MG.range(t, 0, CT));
-      // tiny integer runs ('1M', '3x') count with a temporary decimal so they visibly run
-      const cd = decimals === 0 && Math.abs(to - from) <= 4 ? 1 : decimals;
-      const s = t >= CT ? finalStr : fmt(v, cd, grp, dec);
+      const s = t >= CT ? finalStr : fmt(v, decimals, grp, dec);
       if (s !== lastStr) { core.innerHTML = digitsHTML(s, slot); lastStr = s; }
     }
     cols.forEach(c => {

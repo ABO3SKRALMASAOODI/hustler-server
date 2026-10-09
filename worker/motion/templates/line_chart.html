@@ -77,7 +77,17 @@
   };
   const rich = s => MG.esc(s).replace(/\*([^*]+)\*/g, '<span class="acc">$1</span>');
 
-  let vals = (P.values || []).map(s => parse(s)).filter(Boolean).map(n => n.v);
+  // compare like with like: '6 hours' vs '9 minutes', '900K' vs '1.2M'
+  const UNITS = [[/^(k|thousand)$/i, 1e3], [/^(m|mm|mn|million|millions)$/i, 1e6], [/^(b|bn|billion|billions)$/i, 1e9],
+    [/^(t|tn|trillion|trillions)$/i, 1e12], [/^(s|sec|secs|seconds?)$/i, 1], [/^(min|mins|minutes?)$/i, 60],
+    [/^(h|hr|hrs|hours?)$/i, 3600], [/^(d|days?)$/i, 86400], [/^(w|wk|wks|weeks?)$/i, 604800],
+    [/^(mo|mos|months?)$/i, 2629800], [/^(y|yr|yrs|years?)$/i, 31557600]];
+  const unitMult = n => {
+    const u = String(n && n.suf || '').trim().replace(/^[^A-Za-z]+/, '').split(/\s+/)[0] || '';
+    for (const [re, k] of UNITS) if (re.test(u)) return k;
+    return 1;
+  };
+  let vals = (P.values || []).map(s => parse(s)).filter(Boolean).map(n => n.v * unitMult(n));
   if (vals.length < 2) vals = vals.length ? [vals[0], vals[0]] : [0, 1];
   const lastRaw = (P.values || []).filter(s => parse(s)).slice(-1)[0] || String(vals[vals.length - 1]);
   const tagText = P.value_label.trim() || lastRaw.trim();
@@ -197,8 +207,8 @@
                  opacity: (0.3 + 0.7 * MG.range(t, 0, 0.12)) * (1 - qx) };
     MG.set(plate, cs);
     MG.set(card, Object.assign({ blur: (1 - MG.range(t, 0, 0.16)) * 8 }, cs));
-    if (L.title) { const p = MG.ease.outExpo(MG.range(t, 0.04, 0.6)); MG.set(L.title, { y: (1 - p) * L.title.offsetHeight * 1.1, opacity: MG.range(t, 0.04, 0.12) }); }
-    const pg = MG.ease.outCubic(MG.range(t, 0.06, 0.5));
+    if (L.title) { const p = MG.ease.outExpo(MG.range(t, 0, 0.6)); MG.set(L.title, { y: (1 - p) * L.title.offsetHeight * 1.1, opacity: 0.3 + 0.7 * MG.range(t, 0, 0.1) }); }
+    const pg = MG.ease.outCubic(MG.range(t, 0, 0.45));
     L.guides.forEach(gl => gl.setAttribute('opacity', pg.toFixed(3)));
     L.baseline.setAttribute('x2', (L.cw * pg).toFixed(1));
     L.axls.forEach((a, i) => MG.set(a, { y: (1 - MG.ease.outExpo(MG.range(t, 0.2 + i * 0.8, 0.5))) * 12, opacity: MG.range(t, 0.2 + i * 0.8, 0.2) }));
@@ -222,7 +232,7 @@
     let txt;
     if (p >= 1) txt = tagText;
     else if (P.value_label.trim()) txt = tagNum ? fmt(tagNum, tagNum.v * p) : tagText;
-    else txt = lastNum ? fmt(lastNum, L.valueAtX(pt.x)) : tagText;
+    else txt = lastNum ? fmt(lastNum, L.valueAtX(pt.x) / unitMult(lastNum)) : tagText;
     if (L.tag.textContent !== txt) L.tag.textContent = txt;
     const tw = L.tag.offsetWidth;
     const tx = Math.max(-L.pad * 0.4, Math.min(L.cw - tw + L.pad * 0.4, pt.x - tw / 2));
