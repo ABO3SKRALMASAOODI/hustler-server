@@ -340,8 +340,13 @@ encode settings, so asking for the same window twice encodes once.
 ## Things worth knowing
 
 - **Slow tools answer with a ticket, not a lie.** A render or a burned-text
-  erase outruns `MCP_SYNC_WAIT_S` (25s), so the reply is `STILL RUNNING — job
-  N` and the model calls `wait_for_job(N)`. It is never reported as failed.
+  erase that outruns `MCP_SYNC_WAIT_S` (110s; most previews finish inside it)
+  replies `STILL RUNNING — job N` and the model calls `wait_for_job(N)`. It is
+  never reported as failed.
+- **Calls made during analysis wait for it.** An editor call that arrives
+  while the project's video is still being analyzed waits up to
+  `MCP_INDEX_WAIT_S` (90s, inside the same budget) and then runs; past that it
+  returns a retryable PREREQUISITE naming the analysis job and its progress.
 - **One timeline mutation at a time.** MCP and in-house agent jobs share the
   same project serialization. Durable queue claims serialize
   timeline mutations per project; parallel editors should use separate child
@@ -407,7 +412,8 @@ Cloudflare container ceilings; a regression test enforces that relationship.
 | `BACKEND_URL` | backend | the onrender URL | the OAuth `issuer` — must be this server's real public origin |
 | `MCP_ACCESS_TTL_S` | backend | 28800 | access-token lifetime |
 | `MCP_REFRESH_TTL_S` | backend | 7776000 | refresh-token lifetime |
-| `MCP_SYNC_WAIT_S` | backend | 25 | longest a call blocks before ticketing |
+| `MCP_SYNC_WAIT_S` | backend | 110 | longest a call blocks before ticketing |
+| `MCP_INDEX_WAIT_S` | backend | 90 | longest an editor call waits for running analysis |
 | `MCP_INSTRUCTIONS` | backend | `full` | `brief` drops the doctrine |
 | `MCP_AUDIO_OUT` | worker | on | attach the window's sound to `watch_video` |
 | `MCP_AUDIO_MAX_KB` / `MCP_AUDIO_MAX_KBPS` / `MCP_AUDIO_MIN_KBPS` | worker | 256 / 48 / 24 | the audio budget, and the floor below which a long window gets no sound rather than an unlistenable one |

@@ -31,6 +31,7 @@ import grammar
 import inpaint
 import llm
 import matte
+import media_cache
 import graphics
 import personseg
 import media
@@ -152,6 +153,9 @@ class ToolContext:
         self.canvas_ratio = "16:9"
         self.workdir = workdir
         self._proxy_local = None
+        # {gen, row} while mcp_exec runs ONE call (see latest_edl); None
+        # everywhere else, so agent turns keep their always-fresh reads.
+        self._call_edl_cache = None
         self._asset_locals = {}       # asset id -> downloaded local path
         self._perception = None       # main video's audio analysis, cached
         self._spatial = None          # face/text/UI track, cached
@@ -468,12 +472,27 @@ class ToolContext:
             proxy = self.db.run(dbx.latest_asset, self.project_id, "proxy")
             if not proxy:
                 raise RuntimeError("no proxy available")
-            local = os.path.join(self.workdir, "proxy.mp4")
-            storage.download_to(proxy["storage_key"], local)
+            # Served from the per-container cache when possible: contexts are
+            # evicted between calls, and every child short shares its
+            # parent's proxy object, so a per-context download was repeated
+            # on most look_at calls.
+            local = media_cache.lease(proxy["storage_key"], self.workdir,
+                                      "proxy.mp4")
+            if not local:
+                local = os.path.join(self.workdir, "proxy.mp4")
+                storage.download_to(proxy["storage_key"], local)
             self._proxy_local = local
         return self._proxy_local
 
     def latest_edl(self):
+        cache = getattr(self, "_call_edl_cache", None)
+        gen = dbx.edl_write_generation(self.project_id) \
+            if cache is not None else None
+        if cache is not None and cache.get("row") is not None \
+                and cache.get("gen") == gen:
+            # A private copy: tools edit the returned json in place before
+            # validating, and a rejected edit must not leak into the next read.
+            return copy.deepcopy(cache["row"])
         row = self.db.run(dbx.latest_edl, self.project_id)
         if not row:
             from schemas import default_edl
@@ -481,7 +500,25 @@ class ToolContext:
                     else canvas_edl(self.canvas_ratio))
             v = self.db.run(dbx.insert_edl, self.project_id, base, "agent")
             row = self.db.run(dbx.get_edl_version, self.project_id, v)
+            gen = dbx.edl_write_generation(self.project_id) \
+                if cache is not None else None
+        if cache is not None and row:
+            cache.update(gen=gen, row=copy.deepcopy(dict(row)))
         return row
+
+    def begin_call_edl_cache(self):
+        """Reuse the latest EDL row within one MCP tool call.
+
+        A single call read the same row 3-10 times (before/after the tool,
+        each helper, write_edl's base), each a full Postgres transaction from
+        a container in another region. Every EDL insert in this process bumps
+        dbx.edl_write_generation, which invalidates the copy; a writer in
+        another process during the call is caught by insert_edl's
+        before_version check rather than silently overwritten."""
+        self._call_edl_cache = {}
+
+    def end_call_edl_cache(self):
+        self._call_edl_cache = None
 
     def write_edl(self, new_edl_dict, change_desc):
         """Validate + append a new version. Returns the diff line, a NO
@@ -17408,6 +17445,21 @@ def _proof_pages(ranges):
     return pages
 
 
+def _motion_warning_line(result):
+    """Name motion graphics a render could not draw. The render succeeds
+    without them (motion_layer degrades an item to absent), so without this
+    line the editor would approve frames that silently lack its design."""
+    warnings = [str(w) for w in (result or {}).get("motion_warnings") or []]
+    if not warnings:
+        return ""
+    return (" MOTION RENDER WARNING: " + "; ".join(warnings[:4])
+            + (f" (+{len(warnings) - 4} more)" if len(warnings) > 4 else "")
+            + ". These motion items are NOT in this render; the EDL still "
+              "has them. A script/params error is yours to fix with "
+              "set_motion_graphic; an unavailable renderer is not, so say "
+              "so instead of approving these frames as the finished design.")
+
+
 def _run_changed_preview_check(ctx, row, plan, ranges):
     """Render every logical proof page in one source-reusing queue job."""
     version = int(row["version"])
@@ -17464,7 +17516,8 @@ def _run_changed_preview_check(ctx, row, plan, ranges):
                     + (" and delivered review frames. " if delivered else ". ")
                     + f"Covered ranges: {all_covered}. This proof does not "
                       "replace the complete Studio preview; repair any "
-                      "finding, otherwise continue to final verification.")
+                      "finding, otherwise continue to final verification."
+                    + _motion_warning_line(result))
         if job["state"] == "failed":
             failure = dict(((job.get("result") or {}).get("failure") or {}))
             err = str(failure.get("error") or job.get("error")
@@ -17807,6 +17860,7 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft"):
                 note += (" MID-WORD AUDIT: " + "; ".join(mw[:5])
                          + " — snap these boundaries to word edges "
                            "(get_words) and re-render.")
+            note += _motion_warning_line(result)
             # Caption audit on what actually survived the cut: captions are
             # usually enabled BEFORE later cuts, so the add-time warning
             # can't see speech that a later keep_segments removed. A real
@@ -20553,6 +20607,22 @@ def _proof_audio_spans(spans, segments):
     return mapped
 
 
+def _source_sound_fallback(ctx):
+    """(input, label) carrying the main video's sound when no audio sidecar
+    asset exists: the (cached) proxy, else a ranged read of the original.
+    ffmpeg input-seeks either one, so a review never stages a whole source."""
+    try:
+        return ctx.proxy_path(), "main-video SOURCE sound (from the proxy)"
+    except Exception as exc:
+        proxy_error = exc
+    original = ctx.db.run(dbx.latest_asset, ctx.project_id, "original")
+    if original and original.get("storage_key") and \
+            (original.get("meta") or {}).get("upload_state") != "pending":
+        return (storage.presign_get(original["storage_key"], expires=1800),
+                "main-video SOURCE sound (from the original)")
+    raise proxy_error
+
+
 def review_audio(ctx, asset_key=None, times=None, output_times=None,
                  span_s=6.0, question=None):
     """Bounded actual listening for uploads, source sound or rendered mix.
@@ -20644,15 +20714,23 @@ def review_audio(ctx, asset_key=None, times=None, output_times=None,
             return ("REJECTED: there is no main-video audio. Pass asset_key "
                     "for an uploaded song/audio/clip instead.")
         asset = ctx.db.run(dbx.latest_asset, ctx.project_id, "audio")
-        if not asset:
-            return ("REJECTED: the indexed video has no stored audio sidecar; "
-                    "use the transcript and measured video evidence.")
         try:
-            duration = float(ctx.duration or asset.get("duration_s") or 0.0)
-            source = _asset_local_path(ctx, asset)
+            if asset:
+                duration = float(ctx.duration or asset.get("duration_s") or 0.0)
+                try:
+                    source = _asset_local_path(ctx, asset)
+                    label = "main-video SOURCE sound"
+                except Exception:
+                    source, label = _source_sound_fallback(ctx)
+            else:
+                # No stored sidecar (child shorts made before it was shared,
+                # cached-index projects): 137 reviews were refused for this.
+                # The proxy carries the same sound on the same clock, and
+                # only the requested windows are extracted from it.
+                duration = float(ctx.duration or 0.0)
+                source, label = _source_sound_fallback(ctx)
         except Exception as exc:
             return f"Audio review could not load source sound ({str(exc)[:160]})."
-        label = "main-video SOURCE sound"
         wants, clock = times, "source times"
 
     spans, error = windows(wants, duration, clock)
@@ -25203,7 +25281,13 @@ def _tool_disabled(name, model=None):
         return not sfx_search.available()
     if name in ("list_motion_templates", "add_motion_graphic",
                 "set_motion_graphic"):
-        return not motion_tools.motion_engine.available()
+        # Authoring is a fleet capability: the MCP/agent lanes that run these
+        # tools ship no browser, and the render lanes draw the items. The
+        # write-time probe degrades to "not pre-checked here" on a lane
+        # without Chromium (motion_engine.available() is the per-lane
+        # render check), and a render that cannot draw an item reports it in
+        # its result as motion_warnings.
+        return not motion_tools.motion_engine.package_installed()
     return False
 
 

@@ -253,8 +253,14 @@ def process_one(worker_db, job):
                       "returned to the queue without consuming its retry "
                       f"budget ({e})", flush=True)
                 return
-        traceback.print_exc()
         decision = failure_policy.decision_for(e, job["type"])
+        if failure_policy.defer_prerequisite(
+                worker_db, job, e, decision, lease_claim):
+            worker_db.run(dbx.bump_metric, "prerequisite_deferred")
+            print(f"[job {job_id}] input not ready; returned to the queue "
+                  f"without consuming its retry budget ({e})", flush=True)
+            return
+        traceback.print_exc()
         if decision.retryable and job["attempts"] < decision.max_attempts:
             requeued = worker_db.run(dbx.requeue_job, job_id, e, lease_claim)
             what = ("requeued" if requeued else

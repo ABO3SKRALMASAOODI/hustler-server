@@ -326,6 +326,7 @@ def run_index_job(worker_db, job):
             _ensure_proxy(worker_db, project_id, sha, proxy_key, src, info,
                           workdir,
                           ready_proxy=src if from_client_proxy else None)
+            _ensure_audio(worker_db, project_id, sha, info)
             _finish_setup(worker_db, project_id, session_id, info,
                           cached["json"], job["user_id"],
                           reindex=bool(job["payload"].get("reindex")),
@@ -827,6 +828,34 @@ def _ensure_proxy(worker_db, project_id, sha, proxy_key, src_local, info,
                   bytes_=os.path.getsize(proxy_local),
                   duration_s=p["duration"], width=p["width"],
                   height=p["height"], fps=p["fps"], sha256=sha)
+
+
+def _ensure_audio(worker_db, project_id, sha, info):
+    """Cache hits must register the source-audio sidecar too.
+
+    Only the full path extracted a wav and inserted the ``audio`` asset, so a
+    project whose bytes were indexed before (a re-upload, a child short's
+    re-index) had no source sound for review_audio. Reuse the stored sidecar
+    of the same bytes server-side, like _ensure_proxy. Best-effort: a missing
+    donor leaves review_audio its proxy fallback, and nothing here may fail
+    an otherwise-complete index."""
+    try:
+        current = worker_db.run(dbx.latest_asset, project_id, "audio")
+        if current and current.get("sha256") == sha:
+            return
+        donor = worker_db.run(dbx.any_asset_by_sha, "audio", sha)
+        if not donor or not storage.exists(donor["storage_key"]):
+            return
+        audio_key = f"audio/{project_id}/{sha}.wav"
+        if donor["storage_key"] != audio_key:
+            storage.copy_object(donor["storage_key"], audio_key)
+        worker_db.run(dbx.insert_asset, project_id, "audio", audio_key,
+                      bytes_=donor.get("bytes"),
+                      duration_s=donor.get("duration_s") or info["duration"],
+                      sha256=sha)
+    except Exception as exc:
+        print(f"[index] audio sidecar not registered for project "
+              f"{project_id}: {str(exc)[:160]}", flush=True)
 
 
 # A ready-notice claiming edits already happened is a lie — analysis only

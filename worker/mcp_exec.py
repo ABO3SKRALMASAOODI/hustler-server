@@ -237,11 +237,27 @@ def _tool_result_contract(ctx, text):
     }
 
 
-def _index_for(worker_db, project_id):
+class IndexNotReady(RuntimeError):
+    """The project's main video exists but its analysis has not finished."""
+
+    def __init__(self, original):
+        super().__init__(
+            "This project's video hasn't finished analyzing yet. Call "
+            "index_status and wait for it to reach 'done' — the transcript, "
+            "shots and silences the editing tools read do not exist until "
+            "then.")
+        self.original = original
+
+
+def _index_for(worker_db, project_id, original=None, _fetched=False):
     """(index_json, sha, has_original) for the project's main video. index is
     None for a canvas program (no original at all) AND for a video that is
-    still being analyzed — has_original tells those two apart."""
-    original = worker_db.run(dbx.latest_asset, project_id, "original")
+    still being analyzed — has_original tells those two apart.
+
+    The index row is 2-5 MB of JSON; callers that only need to know whether
+    a cached context is still current must not come here (see _session)."""
+    if not _fetched:
+        original = worker_db.run(dbx.latest_asset, project_id, "original")
     if not original:
         return None, None, False
     if not original.get("sha256"):
@@ -284,18 +300,49 @@ def _new_context(worker_db, job, project, index, sha):
     return _Session(ctx, workdir, sha)
 
 
-def _session(worker_db, job, project):
+_UNSET = object()
+
+
+def _call_snapshot(conn, project_id, user_id):
+    """The rows every call starts from, read in ONE transaction.
+
+    Each Db.run is BEGIN + set_config + its queries + COMMIT, every one a
+    round trip from the container to Postgres in another region; reading
+    project, main video and billing separately cost three of those."""
+    project = dbx.get_project(conn, project_id)
+    return {
+        "project": project,
+        "original": (dbx.latest_asset(conn, project_id, "original")
+                     if project else None),
+        "billing": (dbx.user_billing(conn, user_id)
+                    if project and user_id is not None else None),
+    }
+
+
+def _session(worker_db, job, project, original=_UNSET):
     """The project's live ToolContext, rebuilt when the footage under it
     changed (a replaced upload) — an EDL written against a stale index is the
     failure that leaves every later write rejected."""
     pid = project["id"]
-    index, sha, has_original = _index_for(worker_db, pid)
+    # One small row decides whether the cached context is still current.
+    # This used to fetch the whole index JSON (p50 2 MB, max 4.7 MB) on every
+    # call only to compare its sha, which the original row already carries.
+    if original is _UNSET:
+        original = worker_db.run(dbx.latest_asset, pid, "original")
+    sha = (original or {}).get("sha256") or None
+    if original is not None and sha is None:
+        raise IndexNotReady(original)
+    now = time.time()
+    with _sessions_lock:
+        s = _sessions.get(pid)
+        if s is not None and s.sha == sha:
+            s.used = now
+            _drop_dead_sessions(now, keep=pid)
+            return s
+    index, sha, has_original = _index_for(
+        worker_db, pid, original=original, _fetched=True)
     if has_original and index is None:
-        raise RuntimeError(
-            "This project's video hasn't finished analyzing yet. Call "
-            "index_status and wait for it to reach 'done' — the transcript, "
-            "shots and silences the editing tools read do not exist until "
-            "then.")
+        raise IndexNotReady(original)
     now = time.time()
     with _sessions_lock:
         s = _sessions.get(pid)
@@ -319,10 +366,98 @@ def _session(worker_db, job, project):
     return s
 
 
-def _refresh_contract_budget(ctx, worker_db, job):
-    """Fresh usage/balance for new MCP contracts; legacy billing is unchanged."""
+_INDEX_POLL_S = 3.0
+
+
+def _live_index(worker_db, project_id, original):
+    try:
+        return worker_db.run(dbx.live_index_job, project_id,
+                             (original or {}).get("id"))
+    except Exception as exc:
+        print(f"[mcp] analysis-state check failed: {str(exc)[:160]}",
+              flush=True)
+        return None
+
+
+def _index_not_ready_result(tool, live, waited_s):
+    """The retryable PREREQUISITE outcome for a call that arrived before its
+    project's analysis finished. A job-level failure here used to read as an
+    infrastructure error and cost the caller its one MCP attempt."""
+    label = tool if tool and not str(tool).startswith("__") else "this call"
+    if live:
+        pct = int(live.get("progress") or 0)
+        waited = f" after waiting {waited_s:.0f}s" if waited_s >= 1 else ""
+        text = (f"PREREQUISITE: this project's video is still being analyzed "
+                f"(analysis job {live['id']}, {pct}% done{waited}). Nothing "
+                f"was changed. Call wait_for_job(job_id={live['id']}), then "
+                f"retry {label}.")
+    else:
+        text = ("PREREQUISITE: this project's video has not been analyzed "
+                "and no analysis is running. Nothing was changed. Call "
+                "index_status to see why, and resolve it before editing.")
+    outcome = tool_outcome.ToolOutcome(
+        status="prerequisite", message=text, retryable=bool(live),
+        idempotent=True,
+        prerequisite_tool="wait_for_job" if live else "index_status",
+        evidence={"index_job_id": (live or {}).get("id"),
+                  "index_progress": (live or {}).get("progress"),
+                  "waited_s": round(waited_s, 1)})
+    return {"text": text, "is_error": True, "code": "index_not_ready",
+            "retryable": bool(live), "index_job_id": (live or {}).get("id"),
+            "edl_changed": False, "tool_outcome": outcome.to_dict()}
+
+
+def _session_when_indexed(worker_db, job, project, pending, tool):
+    """(session, None) once the project's analysis is done, or (None,
+    outcome) after waiting at most MCP_INDEX_WAIT_S while it runs.
+
+    The backend refuses most of these calls before they are enqueued; this is
+    the race behind its check (e.g. the video was replaced meanwhile). Polls
+    one small row, mirrors the analysis progress onto this call's job row so
+    a caller polling wait_for_job sees movement, and never raises."""
+    pid = project["id"]
+    started = time.monotonic()
+    deadline = started + config.MCP_INDEX_WAIT_S
+    original = pending.original
+    while True:
+        live = _live_index(worker_db, pid, original)
+        if live is None or time.monotonic() >= deadline:
+            try:
+                return _session(worker_db, job, project), None
+            except IndexNotReady as again:
+                original = again.original
+                return None, _index_not_ready_result(
+                    tool, _live_index(worker_db, pid, original),
+                    time.monotonic() - started)
+        if job.get("id"):
+            try:
+                worker_db.run(dbx.set_progress, job["id"],
+                              min(95, int(live.get("progress") or 0)))
+            except Exception:
+                pass
+        time.sleep(max(0.0, min(_INDEX_POLL_S,
+                                deadline - time.monotonic())))
+        try:
+            fresh = worker_db.run(dbx.latest_asset, pid, "original")
+            ready = bool(fresh and fresh.get("sha256") and worker_db.run(
+                dbx.index_exists, fresh["sha256"]))
+        except Exception:
+            fresh, ready = None, False
+        original = fresh or original
+        if ready:
+            try:
+                return _session(worker_db, job, project), None
+            except IndexNotReady as again:
+                original = again.original
+
+
+def _refresh_contract_budget(ctx, worker_db, job, billing=None):
+    """Fresh usage/balance for new MCP contracts; legacy billing is unchanged.
+    ``billing`` is this call's user_billing row when already read."""
     previous_plan = ctx.plan
-    ctx.subscribed, ctx.plan, ctx.trialing = worker_db.run(dbx.user_billing, job["user_id"])
+    ctx.subscribed, ctx.plan, ctx.trialing = (
+        billing if billing is not None
+        else worker_db.run(dbx.user_billing, job["user_id"]))
     if ctx.plan != previous_plan:
         ctx.llm_client, ctx.agent_model = llm.agent_client_for(ctx.subscribed, ctx.plan)
     if ctx.plan in {"mcp_connect", "advanced"}:
@@ -360,11 +495,19 @@ def run_mcp_job(worker_db, job):
     if tool in MCP_DENIED_TOOLS:
         return {"text": MCP_DENIED_MESSAGES[tool], "is_error": True}
 
-    project = worker_db.run(dbx.get_project, job["project_id"])
+    snapshot = worker_db.run(_call_snapshot, job["project_id"],
+                             job.get("user_id"))
+    project = snapshot["project"]
     if not project:
         raise RuntimeError("project not found")
 
-    s = _session(worker_db, job, project)
+    try:
+        s = _session(worker_db, job, project, original=snapshot["original"])
+    except IndexNotReady as pending:
+        s, not_ready = _session_when_indexed(
+            worker_db, job, project, pending, tool)
+        if s is None:
+            return not_ready
     with s.lock:
         ctx = s.ctx
         # The context outlives the job that built it: re-point it at THIS
@@ -373,7 +516,8 @@ def run_mcp_job(worker_db, job):
         ctx.db = worker_db
         ctx.job = job
         s.used = time.time()
-        _refresh_contract_budget(ctx, worker_db, job)
+        _refresh_contract_budget(ctx, worker_db, job,
+                                 billing=snapshot["billing"])
 
         def _recorder(purpose, request, response, usage):
             cached_in = llm.cached_input_tokens(usage)
@@ -405,6 +549,7 @@ def run_mcp_job(worker_db, job):
 
         llm.set_recorder(_recorder)
         llm.set_turn_plan(ctx.plan if ctx.subscribed else "", project_id=ctx.project_id)
+        ctx.begin_call_edl_cache()
         try:
             if tool == STATE_TOOL:
                 return {"text": agent_loop.state_block(
@@ -495,6 +640,11 @@ def run_mcp_job(worker_db, job):
                         "audio_model_review", False),
                     "asset_id": preview_asset.get("id"),
                 }
+                if preview_meta.get("motion_warnings"):
+                    # Motion items this render could not draw: the edit is
+                    # intact, the pixels are missing them.
+                    out["preview"]["motion_warnings"] = list(
+                        preview_meta["motion_warnings"])
             check = getattr(ctx, "last_preview_check", None)
             if check:
                 out["changed_section_preview"] = {
@@ -513,6 +663,7 @@ def run_mcp_job(worker_db, job):
                     for item in getattr(ctx, "last_preview_checks", [])]
             return out
         finally:
+            ctx.end_call_edl_cache()
             llm.set_recorder(None)
             llm.clear_turn_plan()
             try:

@@ -3764,8 +3764,9 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
             caption_motion_items = motion_captions.items(edl, index, tl)
             ass_path = None
         except Exception as e:  # noqa: BLE001 — fall back to libass captions
-            print(f"[render] motion captions unavailable ({str(e)[:160]}) — "
-                  "burning ordinary captions", flush=True)
+            motion_layer.warn(
+                f"motion captions unavailable ({str(e)[:160]}) — "
+                "burned ordinary captions instead")
             caption_motion_items = []
     # TWO text layers, not one. A behind-subject text is burned early (under the
     # subject); everything else is burned last (over everything). Splitting the
@@ -4025,6 +4026,9 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                 str(it.get("id", "")).startswith("__captions_")
                 for _i, it, _c in motion_inputs):
             # The caption track failed to render: never ship captionless.
+            motion_layer.warn(
+                "motion caption track did not render — burned ordinary "
+                "captions instead")
             ass_path = caplib.build_ass(edl, index, tl,
                                         os.path.join(workdir, "captions.ass"),
                                         play_res=(W, H))
@@ -5170,6 +5174,50 @@ def run_render_job(worker_db, job):
         _RENDER_JOB_TYPE.reset(job_type_token)
 
 
+def _source_not_ready(worker_db, project_id, original, missing_text):
+    """The exception for a render whose source video has no index yet.
+
+    While the main video's analysis is queued or running, waiting is the
+    answer: PrerequisitePending sends the job back to the queue without
+    spending an attempt and claim_job holds it until analysis ends. With no
+    analysis live, a retry seconds later cannot change anything, so the render
+    fails once with the reason instead of twice as 'unknown'."""
+    live = None
+    if original:
+        try:
+            live = worker_db.run(dbx.live_index_job, project_id,
+                                 original.get("id"))
+        except Exception as exc:
+            print(f"[render] analysis-state check failed: {str(exc)[:160]}",
+                  flush=True)
+            return RuntimeError(missing_text)
+    if live:
+        return dbx.PrerequisitePending(
+            "The source video is still being analyzed (analysis job "
+            f"{live['id']}, {int(live.get('progress') or 0)}% done); this "
+            "render starts automatically when analysis finishes.",
+            waiting_on={"index_job_id": live["id"]})
+    # Analysis may have finished between the reads above and this check.
+    try:
+        fresh = worker_db.run(dbx.latest_asset, project_id, "original")
+        ready = bool(fresh and fresh.get("sha256") and worker_db.run(
+            dbx.index_exists, fresh["sha256"]))
+    except Exception:
+        ready = False
+    if ready:
+        return dbx.PrerequisitePending(
+            "The source video's analysis finished while this render was "
+            "starting; it restarts against the analyzed source.")
+    if not original:
+        return dbx.PermanentJobError(
+            f"{missing_text}: this project has no source video. Upload one, "
+            "or render a canvas program.")
+    return dbx.PermanentJobError(
+        f"{missing_text}: the source video has not been analyzed and no "
+        "analysis is running. Re-run its analysis (or upload it again) "
+        "before rendering.")
+
+
 def _run_render_job(worker_db, job):
     job_id, project_id = job["id"], job["project_id"]
     # Which run of this job we are. The dispatcher ships it (remote._job_payload)
@@ -5216,7 +5264,8 @@ def _run_render_job(worker_db, job):
     # canvas — there is no original/proxy/index to require or download.
     is_canvas = is_canvas_program(edl_row["json"])
     if not is_canvas and (not original or not original["sha256"]):
-        raise RuntimeError("No indexed original video for this project")
+        raise _source_not_ready(worker_db, project_id, original,
+                                "No indexed original video for this project")
     src_sha = original["sha256"] if original else "canvas"
 
     # Cache: this exact EDL version was already rendered in this variant against
@@ -5287,14 +5336,17 @@ def _run_render_job(worker_db, job):
                     "duration_s": cached["duration_s"], "edl_version": version,
                     "variant": variant, "render_job_id": cached_meta.get("render_job_id"),
                     "quality": cached_meta.get("quality", "draft"),
-                    "sha256": cached.get("sha256"), "cached": True}
+                    "sha256": cached.get("sha256"), "cached": True,
+                    **({"motion_warnings": cached_meta["motion_warnings"]}
+                       if cached_meta.get("motion_warnings") else {})}
     if is_canvas:
         index = {}
         src_asset = None
     else:
         index_row = worker_db.run(dbx.get_index_by_sha, original["sha256"])
         if not index_row:
-            raise RuntimeError("Video index missing — re-run indexing")
+            raise _source_not_ready(worker_db, project_id, original,
+                                    "Video index missing — re-run indexing")
         index = index_row["json"]
 
         src_asset = original
@@ -5330,6 +5382,10 @@ def _run_render_job(worker_db, job):
     timings, t0 = {}, time.monotonic()
     detail = {}
     detail_token = _RENDER_DETAIL.set(detail)
+    # Motion items that degrade to absent (motion_layer.warn) must reach
+    # the editor, not only the log: the render still succeeds without them.
+    motion_warnings = []
+    motion_token = motion_layer.collect_warnings(motion_warnings)
     active_stage = ["download_s"]
 
     def _mark(stage):
@@ -5888,7 +5944,9 @@ def _run_render_job(worker_db, job):
                   "wm_v": (0 if proof_only else
                            watermark_version(variant, is_paid, wm_settings)),
                   "wm_p": (watermark_position(wm_settings)
-                           if want_wm else None)})
+                           if want_wm else None),
+                  **({"motion_warnings": motion_warnings[:12]}
+                     if motion_warnings else {})})
         # Completed renders, including proof reels, remain recoverable history.
         # Never delete an asset referenced by an issued receipt.
         # Deterministic mid-word audit: keep boundaries that clip a word,
@@ -5918,6 +5976,8 @@ def _run_render_job(worker_db, job):
                     "proof_set_id": proof_set_id,
                     "scope": "changes"} if proof_only else {}),
                 "midword_audit": mw,
+                **({"motion_warnings": motion_warnings[:12]}
+                   if motion_warnings else {}),
                 "audio_qc": audio_qc_res, "listen_keys": listen_keys,
                 "audio_model_review": audio_model_review}
     except Exception as exc:
@@ -5938,4 +5998,5 @@ def _run_render_job(worker_db, job):
     finally:
         timings.update(detail)
         _RENDER_DETAIL.reset(detail_token)
+        motion_layer.stop_collecting(motion_token)
         shutil.rmtree(workdir, ignore_errors=True)

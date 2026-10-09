@@ -18,6 +18,7 @@ from psycopg2.extras import RealDictCursor, Json
 
 import config
 import error_text
+import io_telemetry
 import model_prices
 import schemas
 import queue_admission
@@ -75,10 +76,29 @@ _CONNECT_KW = {
 _STATEMENT_TIMEOUT_MS = int(os.getenv("PGSTATEMENT_TIMEOUT_S", "60")) * 1000
 
 
+class _MeteredCursor(RealDictCursor):
+    """RealDictCursor that counts statements for the per-job io telemetry.
+
+    Every statement is one network round trip to Postgres, and an MCP call's
+    fixed cost was inferred (never measured) to be dominated by them. Counting
+    here costs one ContextVar read per statement and changes nothing else.
+    """
+
+    def execute(self, query, vars=None):
+        io_telemetry.add_db_statement()
+        return super().execute(query, vars)
+
+    def executemany(self, query, vars_list):
+        io_telemetry.add_db_statement()
+        return super().executemany(query, vars_list)
+
+
 def connect():
-    conn = psycopg2.connect(config.DATABASE_URL, cursor_factory=RealDictCursor,
+    started = time.monotonic()
+    conn = psycopg2.connect(config.DATABASE_URL, cursor_factory=_MeteredCursor,
                             **_CONNECT_KW)
     conn.autocommit = False
+    io_telemetry.add_db_connect(time.monotonic() - started)
     return conn
 
 
@@ -105,6 +125,13 @@ class Db:
 
     def run(self, fn, *args, **kwargs):
         """Run fn(conn, ...) with one reconnect retry on connection errors."""
+        started = time.monotonic()
+        try:
+            return self._run(fn, *args, **kwargs)
+        finally:
+            io_telemetry.add_db_call(time.monotonic() - started)
+
+    def _run(self, fn, *args, **kwargs):
         for attempt in (1, 2):
             try:
                 # Transaction-local state is safe with PgBouncer transaction
@@ -255,6 +282,8 @@ def claim_job(conn, types, max_attempts):
     if has_claims:
         params.append(config.MAX_CLAIMS_ABSOLUTE)
     params.extend([config.CLOUDFLARE_BUSY_RETRY_DELAY_S,
+                   config.PREREQUISITE_RETRY_DELAY_S,
+                   config.MAX_ATTEMPTS_MEDIA,
                    config.STALE_AFTER_S])
     if serialize:
         # A sibling blocks this row when it is RUNNING with a fresh heartbeat
@@ -372,6 +401,20 @@ def claim_job(conn, types, max_attempts):
                          'false') <> 'true'
                        OR video_jobs.updated_at <= NOW()
                           - make_interval(secs => %s))
+                  /* a render deferred for a still-analyzing source waits
+                     until no analysis job is live for its project */
+                  AND (COALESCE(
+                         video_jobs.payload->>'prerequisite_wait',
+                         'false') <> 'true'
+                       OR (video_jobs.updated_at <= NOW()
+                             - make_interval(secs => %s)
+                           AND NOT EXISTS (
+                             SELECT 1 FROM video_jobs prereq
+                             WHERE prereq.project_id = video_jobs.project_id
+                               AND prereq.type = 'index'
+                               AND (prereq.state = 'running'
+                                    OR (prereq.state = 'queued'
+                                        AND prereq.attempts < %s)))))
                   AND (
                     video_jobs.type <> 'agent_turn'
                     OR NOT EXISTS (
@@ -840,6 +883,49 @@ def defer_unlaunched_cloudflare_busy(conn, job_id, total_claims, error,
                                ELSE 0 END < %s""",
                     (error_text.excerpt(error, 2000), job_id, total_claims,
                      max(0, int(max_deferrals))))
+        return cur.rowcount > 0
+
+
+def defer_prerequisite_pending(conn, job_id, total_claims, error,
+                               max_deferrals):
+    """Return a job whose input is still being prepared to the queue.
+
+    Same shape as the Cloudflare busy deferral: the refundable attempt is
+    given back (waiting for analysis is not a failed try) while
+    ``total_claims`` is not, so MAX_CLAIMS_ABSOLUTE stays the hard bound and
+    a payload counter caps the cycle. ``prerequisite_wait`` makes claim_job
+    hold the row until no analysis job is live for its project, so the
+    requeue cannot spin through claims while a long index runs.
+    """
+    lease_where = " AND total_claims = %s" if total_claims is not None else ""
+    params = [error_text.excerpt(error, 2000), job_id]
+    if total_claims is not None:
+        params.append(total_claims)
+    params.append(max(0, int(max_deferrals)))
+    with conn.cursor() as cur:
+        cur.execute(f"""UPDATE video_jobs
+                        SET state = 'queued',
+                            attempts = GREATEST(0, attempts - 1),
+                            error = %s,
+                            payload = jsonb_set(
+                              jsonb_set(COALESCE(payload, '{{}}'::jsonb),
+                                '{{prerequisite_wait}}', 'true'::jsonb, true),
+                              '{{prerequisite_deferrals}}',
+                              to_jsonb(CASE
+                                WHEN payload->>'prerequisite_deferrals'
+                                       ~ '^[0-9]+$'
+                                THEN (payload->>
+                                       'prerequisite_deferrals')::int + 1
+                                ELSE 1 END), true),
+                            updated_at = NOW()
+                        WHERE id = %s AND state = 'running'{lease_where}
+                          AND CASE
+                                WHEN payload->>'prerequisite_deferrals'
+                                       ~ '^[0-9]+$'
+                                THEN (payload->>
+                                       'prerequisite_deferrals')::int
+                                ELSE 0 END < %s""",
+                    tuple(params))
         return cur.rowcount > 0
 
 
@@ -2284,6 +2370,40 @@ def get_index_by_sha(conn, sha256):
         return cur.fetchone()
 
 
+def index_exists(conn, sha256):
+    """Whether an index row exists, without shipping its 2-5 MB JSON."""
+    if not sha256:
+        return False
+    with conn.cursor() as cur:
+        cur.execute("SELECT 1 AS ok FROM indexes WHERE video_sha256 = %s",
+                    (sha256,))
+        return cur.fetchone() is not None
+
+
+def live_index_job(conn, project_id, asset_id=None):
+    """The newest queued/running analysis job for a project, or None.
+
+    ``asset_id`` narrows to the main video's own analysis: the index lane
+    also carries perception jobs for uploaded clips and music, which do not
+    make the main video renderable. A queued row must still have attempts
+    left; a running row counts regardless of heartbeat because the reaper,
+    not this reader, decides when a silent run is dead.
+    """
+    asset_where = ""
+    params = [project_id, config.MAX_ATTEMPTS_MEDIA]
+    if asset_id is not None:
+        asset_where = " AND payload->>'asset_id' = %s"
+        params.append(str(asset_id))
+    with conn.cursor() as cur:
+        cur.execute(f"""SELECT id, state, progress FROM video_jobs
+                        WHERE project_id = %s AND type = 'index'
+                          AND (state = 'running'
+                               OR (state = 'queued' AND attempts < %s))
+                          {asset_where}
+                        ORDER BY id DESC LIMIT 1""", tuple(params))
+        return cur.fetchone()
+
+
 def upsert_index(conn, project_id, sha256, index_json):
     with conn.cursor() as cur:
         cur.execute("""
@@ -2336,6 +2456,28 @@ def set_index_motion(conn, sha256, motion_json, pipeline_version):
         """, (json.dumps(motion_json), sha256, pipeline_version))
 
 
+_EDL_WRITE_GEN = {}
+_EDL_WRITE_GEN_LOCK = threading.Lock()
+
+
+def edl_write_generation(project_id):
+    """In-process counter of EDL inserts for one project.
+
+    A call-scoped EDL cache (agent_tools.ToolContext.latest_edl) compares it
+    to decide whether this process has written a newer version since the
+    cached read. Writers in OTHER processes are not visible here; the cache
+    is therefore only enabled for the few seconds of one MCP tool call, and
+    insert_edl's before_version check still refuses a stale-based write."""
+    with _EDL_WRITE_GEN_LOCK:
+        return _EDL_WRITE_GEN.get(int(project_id), 0)
+
+
+def _bump_edl_write_generation(project_id):
+    with _EDL_WRITE_GEN_LOCK:
+        key = int(project_id)
+        _EDL_WRITE_GEN[key] = _EDL_WRITE_GEN.get(key, 0) + 1
+
+
 def latest_edl(conn, project_id):
     with conn.cursor() as cur:
         cur.execute("""SELECT * FROM edls WHERE project_id = %s
@@ -2371,6 +2513,8 @@ def insert_edl(conn, project_id, edl_json, created_by, job_id=None,
     changed" without guessing from a later project version another call may
     have created.
     """
+    # Any EDL row cached by this process before this write is now suspect.
+    _bump_edl_write_generation(project_id)
     with conn.cursor() as cur:
         # The API batch writer takes this same lock. A worker that read an
         # older document must not silently overwrite a newer manual/MCP edit.
@@ -2464,6 +2608,20 @@ class JobLeaseLost(RuntimeError):
 
 class RemoteExecutionUnconfirmed(RuntimeError):
     """Provider launch never acquired its durable call-id ownership row."""
+
+
+class PrerequisitePending(RuntimeError):
+    """The job's input is not ready YET (e.g. the source is still being
+    analyzed). Not a failure: the dispatcher returns the row to the queue
+    without spending an attempt, and the claim gate holds it until the work
+    it waits on is no longer live. Customer previews (61819-61825) were
+    instead classified 'unknown', retried within seconds while analysis
+    takes minutes, and failed."""
+
+    def __init__(self, message, *, retry_after_s=None, waiting_on=None):
+        super().__init__(message)
+        self.retry_after_s = retry_after_s
+        self.waiting_on = waiting_on or {}
 
 
 def recent_llm_tokens(conn, seconds=60):

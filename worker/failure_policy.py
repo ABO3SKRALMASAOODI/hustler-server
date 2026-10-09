@@ -78,6 +78,13 @@ def classify(error, job_type=None):
 
     if isinstance(error, dbx.JobLeaseLost):
         return FailureDecision("lease_lost", False, 0, False)
+    if isinstance(error, dbx.PrerequisitePending):
+        # Not a failed try: the input (usually the source's analysis) is
+        # still being produced. Dispatchers defer it without spending an
+        # attempt (defer_prerequisite); this decision is only the fallback
+        # once the bounded deferrals are used up.
+        return FailureDecision("prerequisite_pending", True,
+                               _base_attempts(job_type), False)
     if isinstance(error, dbx.RemoteExecutionUnconfirmed):
         return FailureDecision(
             "remote_ownership_unconfirmed", True,
@@ -170,6 +177,24 @@ def attach(error, decision, payload=None):
     error.agent_repairable = bool(
         (payload or {}).get("agent_repairable", decision.agent_repairable))
     return error
+
+
+def defer_prerequisite(worker_db, job, error, decision, claim):
+    """Requeue a prerequisite-pending job without spending its attempt.
+
+    Returns True when the row went back to the queue; False means the caller
+    applies the ordinary retry policy (bounded deferrals exhausted, the lease
+    moved on, or the decision is a different kind)."""
+    if decision.kind != "prerequisite_pending" or not job.get("id"):
+        return False
+    try:
+        return bool(worker_db.run(
+            dbx.defer_prerequisite_pending, job["id"], claim, error,
+            config.PREREQUISITE_MAX_DEFERRALS))
+    except Exception as exc:
+        print(f"[job {job.get('id')}] prerequisite deferral failed: "
+              f"{str(exc)[:160]}", flush=True)
+        return False
 
 
 def decision_for(error, job_type=None):

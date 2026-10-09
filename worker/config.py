@@ -729,11 +729,42 @@ MAX_ATTEMPTS_MCP = 1
 # is kept between calls so a session does not re-download the proxy for every
 # look_at, and swept this long after its last use.
 MCP_SESSION_TTL_S = float(os.getenv("WORKER_MCP_SESSION_TTL_S", "300"))
-# How many projects may hold a live context at once — each one owns a work dir
-# on the same small disk the renders use.
-MCP_MAX_SESSIONS = int(os.getenv("WORKER_MCP_MAX_SESSIONS", "2"))
+# How many projects may hold a live context at once. Two was sized for when
+# each context owned a full proxy download in its work dir; the proxy now
+# lives once per container in the tool media cache (worker/media_cache.py),
+# so a context is mostly its parsed index. At two, a shard serving a parent's
+# shorts evicted constantly and every look_at re-downloaded ~180 MB (57.6% of
+# warm look_at calls fetched >50 MB). Memory pressure still evicts idle
+# contexts first (MCP_MEMORY_PRESSURE_RATIO).
+MCP_MAX_SESSIONS = int(os.getenv("WORKER_MCP_MAX_SESSIONS", "4"))
 MCP_MEMORY_PRESSURE_RATIO = float(os.getenv(
     "WORKER_MCP_MEMORY_PRESSURE_RATIO", "0.82"))
+# An MCP call that reaches the worker before its project's video finished
+# analysis waits this long (polling a one-row check) for it, then returns a
+# retryable PREREQUISITE outcome naming the analysis job. The backend already
+# waits before enqueueing; this covers the race behind that check, so it is
+# kept short — the wait holds an MCP shard.
+MCP_INDEX_WAIT_S = max(0.0, min(120.0, float(os.getenv(
+    "WORKER_MCP_INDEX_WAIT_S", "30"))))
+# A render claimed while its source is still being analyzed goes back to the
+# queue (dbx.PrerequisitePending) without spending an attempt, and claim_job
+# holds it until no analysis job is live for the project. The delay is a floor
+# against claim spinning; the deferral cap keeps the cycle bounded below
+# MAX_CLAIMS_ABSOLUTE.
+PREREQUISITE_RETRY_DELAY_S = max(1.0, min(300.0, float(os.getenv(
+    "PREREQUISITE_RETRY_DELAY_S", "15"))))
+PREREQUISITE_MAX_DEFERRALS = max(1, min(5, int(os.getenv(
+    "PREREQUISITE_MAX_DEFERRALS", "3"))))
+# Per-container on-disk LRU of immutable media the editor tools read (the
+# 540p proxy behind look_at above all), keyed by storage key and independent
+# of MCP context eviction. Never a reservation on scratch: an entry is only
+# cached when MIN_FREE remains afterwards, and the LRU evicts to restore it.
+TOOL_MEDIA_CACHE_MAX_BYTES = int(float(os.getenv(
+    "TOOL_MEDIA_CACHE_MAX_GB", "2")) * 1024 ** 3)
+TOOL_MEDIA_CACHE_MAX_ITEM_BYTES = int(float(os.getenv(
+    "TOOL_MEDIA_CACHE_MAX_ITEM_GB", "1.5")) * 1024 ** 3)
+TOOL_MEDIA_CACHE_MIN_FREE_BYTES = int(float(os.getenv(
+    "TOOL_MEDIA_CACHE_MIN_FREE_GB", "1.5")) * 1024 ** 3)
 
 # Managed S3 transfers default to ten worker threads. Each owns multipart
 # buffers, so one stock upload beside a live ToolContext was enough to cross a

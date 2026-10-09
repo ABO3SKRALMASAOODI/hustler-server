@@ -24,12 +24,13 @@ HOW A CALL FLOWS.
                 --video_jobs row (type 'mcp_tool')--> worker MCP lane
                 --agent_tools.execute(ctx, name, args)--> EDL / render / R2
     and the result string comes back out the same way.
-The backend waits on the row for MCP_SYNC_WAIT_S; anything slower (a render, a
-frame-by-frame erase) returns a job id and the model calls wait_for_job. It
-never lies about a job that is still running, and it never holds a gunicorn
-worker for minutes — this deploys with 3 SYNC workers, so a long block here is
-a third of the whole API. If MCP ever gets real traffic, move gunicorn to
-`--worker-class gthread --threads 8` BEFORE raising MCP_SYNC_WAIT_S.
+The backend waits on the row for MCP_SYNC_WAIT_S; anything slower (a long
+render, a frame-by-frame erase) returns a job id and the model calls
+wait_for_job. It never lies about a job that is still running. The wait holds
+one gunicorn THREAD, not a worker: start.sh runs `--worker-class gthread
+--threads 8` (24 threads), the precondition this wait was raised against.
+At 25 s, render_preview (p50 58 s, p90 103 s) needed 1-3 extra wait_for_job
+round trips per preview; ~110 s returns most of them in the first call.
 
 TWO WAYS IN, ONE DOOR. Claude Code carries a static `vlm_mcp_…` token in a
 header. claude.ai cannot — its connector UI has no header field — so it takes
@@ -64,6 +65,7 @@ from video_services.mcp_reads import read_metadata
 from video_services.jobs import enqueue as _enqueue
 from video_services.project_state import (
     active_original as _active_original,
+    index_job_state as _index_job_state,
     index_row as _index_row,
     project_for_user as _project_for_user,
 )
@@ -77,8 +79,18 @@ ALLOWED_EMAILS = {e.strip().lower()
                                      ADMIN_EMAIL).split(",") if e.strip()}
 
 # Longest a tool call may block the HTTP request. See the gunicorn note above.
-SYNC_WAIT_S = float(os.getenv("MCP_SYNC_WAIT_S", "25"))
+SYNC_WAIT_S = float(os.getenv("MCP_SYNC_WAIT_S", "110"))
 POLL_S = 0.2
+# Each poll opens a fresh connection (see _wait). Quick tools settle in the
+# first second, so poll fast at first and back off for the long tail: a
+# 110 s render wait costs ~130 connections, not 550.
+POLL_MAX_S = 1.0
+# An index-dependent editor call that arrives while the project's video is
+# still being analyzed waits this long for the analysis (polling one small
+# query, no worker job, no compute) before answering with a retryable
+# PREREQUISITE naming the analysis job. Taken out of the same SYNC budget.
+INDEX_WAIT_S = float(os.getenv("MCP_INDEX_WAIT_S", "90"))
+INDEX_POLL_S = 2.0
 
 # How big a video watch_video may EMBED in a tool reply (round 83). It leaves
 # here base64'd, so the JSON-RPC body is ~4/3 of this, and it is read whole
@@ -907,11 +919,15 @@ def _wait(job_id, user_id, seconds=None):
     connection per read: the alternative holds one open across the whole wait,
     which on 3 sync gunicorn workers is a connection idle-in-transaction for
     as long as a render takes."""
-    deadline = time.time() + (SYNC_WAIT_S if seconds is None else seconds)
+    started = time.time()
+    deadline = started + (SYNC_WAIT_S if seconds is None else seconds)
     row = _job_row(job_id, user_id)
     while row and row["state"] in ("queued", "running") \
             and time.time() < deadline:
-        time.sleep(POLL_S)
+        elapsed = time.time() - started
+        interval = POLL_S if elapsed < 3 else (0.5 if elapsed < 10
+                                                else POLL_MAX_S)
+        time.sleep(max(0.0, min(interval, deadline - time.time())))
         row = _job_row(job_id, user_id)
     return row
 
@@ -1100,7 +1116,43 @@ def _mutation_failure_result(row, project_id, label):
             "mutation_status": status}
 
 
-def _run_tool_job(tok, name, args, raw=False, project_id=None):
+def _index_ready(cur, project_id):
+    """(ready, analysis) for the project's main video. ``analysis`` describes
+    its newest analysis job when the video is not indexed yet."""
+    original = _active_original(cur, project_id)
+    if not original or (original.get("sha256") and
+                        _index_row(cur, original["sha256"])):
+        return True, None
+    analysis = _index_job_state(cur, project_id, original.get("id"))
+    if not analysis.get("id"):
+        # Legacy rows without an asset_id in their payload.
+        cur.execute("""SELECT id, state, progress FROM video_jobs
+                       WHERE project_id = %s AND type = 'index'
+                       ORDER BY id DESC LIMIT 1""", (project_id,))
+        row = cur.fetchone() or {}
+        analysis = {"id": row.get("id"), "state": row.get("state"),
+                    "progress": row.get("progress"),
+                    "active": row.get("state") in ("queued", "running")}
+    return False, analysis
+
+
+def _await_index(project_id, budget_s):
+    """Poll, without holding a connection between polls, until the project's
+    video is indexed, its analysis stops running, or ``budget_s`` passes.
+    Returns the seconds spent."""
+    started = time.time()
+    deadline = started + max(0.0, budget_s)
+    while time.time() < deadline:
+        time.sleep(max(0.0, min(INDEX_POLL_S, deadline - time.time())))
+        with vdb() as conn:
+            ready, analysis = _index_ready(conn.cursor(), project_id)
+        if ready or not (analysis or {}).get("active"):
+            break
+    return time.time() - started
+
+
+def _run_tool_job(tok, name, args, raw=False, project_id=None,
+                  _index_waited_s=0.0):
     """Enqueue one editor tool call for the worker and wait for its answer.
 
     `raw=True` returns the worker's whole result dict instead of just its
@@ -1145,44 +1197,73 @@ def _run_tool_job(tok, name, args, raw=False, project_id=None):
             result = {"text": identity + "\n" + immediate, "is_error": False}
             return _out(result["text"], result)
         # An index-dependent call cannot succeed by cold-starting an editor
-        # before its transcript exists. Return the authoritative analysis job
-        # to wait on, without spending a tool attempt or a compute slot.
-        original = _active_original(cur, project_id)
-        if original and not (original.get("sha256") and
-                             _index_row(cur, original["sha256"])):
-            cur.execute("""SELECT id, state FROM video_jobs
-                           WHERE project_id = %s AND type = 'index'
-                           ORDER BY id DESC LIMIT 1""", (project_id,))
-            analysis = cur.fetchone() or {}
-            waiting = analysis.get("state") in ("queued", "running")
-            guidance = (f"Call wait_for_job(job_id={analysis['id']}) and then "
-                        "index_status before retrying this tool."
+        # before its transcript exists. While analysis is running, wait for
+        # it here (one small query every INDEX_POLL_S, no worker job, no
+        # compute slot) so a call made minutes after upload simply proceeds;
+        # past the budget, return the analysis job to wait on as a
+        # retryable PREREQUISITE. Control calls answer immediately.
+        ready, analysis = _index_ready(cur, project_id)
+        wait_budget = min(INDEX_WAIT_S, SYNC_WAIT_S) - _index_waited_s
+        wait_for_index = (not ready and analysis.get("active")
+                          and wait_budget > 0 and not name.startswith("__"))
+        if not ready and not wait_for_index:
+            waiting = bool(analysis.get("active"))
+            pct = int(analysis.get("progress") or 0)
+            guidance = (f"Analysis job {analysis['id']} is {pct}% done"
+                        + (f" (waited {_index_waited_s:.0f}s)"
+                           if _index_waited_s >= 1 else "")
+                        + f". Call wait_for_job(job_id={analysis['id']}) "
+                        "and then index_status before retrying this tool."
                         if waiting else
                         "Call index_status to inspect the analysis failure or "
                         "missing upload, then resolve it before editing.")
-            result = {"text": f"PROJECT {project_id} — video analysis is not "
-                      f"ready. No editing job was started. {guidance}",
+            text = (f"PROJECT {project_id} — video analysis is not "
+                    f"ready. No editing job was started. {guidance}")
+            result = {"text": text,
                       "is_error": True, "code": "index_not_ready",
                       "index_job_id": analysis.get("id"),
-                      "retryable": waiting, "edl_changed": False}
+                      "index_progress": analysis.get("progress"),
+                      "retryable": waiting, "edl_changed": False,
+                      "tool_outcome": {
+                          "status": "prerequisite", "message": text,
+                          "state_changed": False, "retryable": waiting,
+                          "idempotent": True,
+                          "corrected_argument_guidance": None,
+                          "prerequisite_tool": ("wait_for_job" if waiting
+                                                else "index_status"),
+                          "safe_fallback": None,
+                          "evidence": {"index_job_id": analysis.get("id"),
+                                       "index_progress": analysis.get(
+                                           "progress"),
+                                       "waited_s": round(_index_waited_s, 1)},
+                          "affected_ranges": []}}
             return _out(_session_error(result["text"]), result)
-        mutation = name in set(catalog.get("write_tools") or []) or name in {
-            "reset_edit"}
-        cur.execute("""SELECT MAX(version) AS version FROM edls
-                       WHERE project_id = %s""", (int(project_id),))
-        version_row = cur.fetchone() or {}
-        before_version = version_row.get("version")
-        call_ref = secrets.token_hex(8)
-        job_id = _enqueue(cur, project_id, tok["user_id"], "mcp_tool",
-                          {"tool": name, "args": args,
-                           "mutation": mutation,
-                           "before_edl_version": before_version,
-                           "mcp_call_id": call_ref})
+        if not wait_for_index:
+            mutation = name in set(catalog.get("write_tools") or []) or \
+                name in {"reset_edit"}
+            cur.execute("""SELECT MAX(version) AS version FROM edls
+                           WHERE project_id = %s""", (int(project_id),))
+            version_row = cur.fetchone() or {}
+            before_version = version_row.get("version")
+            call_ref = secrets.token_hex(8)
+            job_id = _enqueue(cur, project_id, tok["user_id"], "mcp_tool",
+                              {"tool": name, "args": args,
+                               "mutation": mutation,
+                               "before_edl_version": before_version,
+                               "mcp_call_id": call_ref})
+    if wait_for_index:
+        waited = _await_index(project_id, wait_budget)
+        return _run_tool_job(tok, name, args, raw=raw, project_id=project_id,
+                             _index_waited_s=_index_waited_s + waited)
     # The control calls are plumbing the model never asked for by name, so a
     # failure must not be reported as "__state__ failed".
     label = {"__state__": "Reading the project state",
              "__media__": "Fetching the video"}.get(name, name)
-    row = _wait(job_id, tok["user_id"])
+    # One HTTP budget: time already spent waiting for analysis comes out of
+    # the job wait, keeping a call near MCP_SYNC_WAIT_S overall.
+    row = _wait(job_id, tok["user_id"],
+                max(15.0, SYNC_WAIT_S - _index_waited_s)
+                if _index_waited_s else None)
     if not row:
         return _out(_session_error(
             f"Tool call {name} vanished from the queue — try it again."))

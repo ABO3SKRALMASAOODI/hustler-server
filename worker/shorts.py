@@ -1224,6 +1224,9 @@ def run_shorts_plan(worker_db, job):
         worker_db.run(_save_shorts_meta, project_id, shorts_meta)
 
         proxy = worker_db.run(dbx.latest_asset, project_id, "proxy")
+        # The source-audio sidecar too: without it a child's review_audio had
+        # no source sound to hear (137 refusals across 19% of shorts).
+        audio = worker_db.run(dbx.latest_asset, project_id, "audio")
         n = len(clips)
         # The scout creates RAW STORY CUTS. No caption preset, crop, grade,
         # zoom, B-roll, music, final render, or other creative choice belongs
@@ -1239,6 +1242,8 @@ def run_shorts_plan(worker_db, job):
                               project_id)
                 if proxy:
                     worker_db.run(_share_asset, child_id, proxy, project_id)
+                if audio:
+                    worker_db.run(_share_asset, child_id, audio, project_id)
                 if ref:
                     # The child editor must be able to watch the real reference
                     # itself. A prose style summary is context, not eyesight.
