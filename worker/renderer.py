@@ -14,7 +14,6 @@ previews read the 720p PROXY and encode fast at 480p with dense keyframes
 Every render also emits a 3x3 contact sheet for the agent's self-check.
 """
 
-import functools
 import hashlib
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -849,7 +848,9 @@ def _normalize_video(parts, in_label, out_label, W, H, fps, mode, uid,
                      f"{tail}[{out_label}]")
 
 
-@functools.lru_cache(maxsize=64)
+_GRADED_BLACK = {}
+
+
 def _graded_black(chain):
     """The colour the grade turns the bars' black into, as 0xRRGGBB — or None.
 
@@ -858,8 +859,21 @@ def _graded_black(chain):
     pad has to pad in that same colour to stay the same picture. Measured by
     pushing pad's own black (yuv420p 16/128/128) through the real chain on
     this build's ffmpeg; any failure returns None and the caller keeps the
-    grade after the pad, exactly as before.
+    grade after the pad, exactly as before. Only answers are memoized: a
+    timeout under load must not pin this chain to the slow path for the
+    life of the process.
     """
+    if chain in _GRADED_BLACK:
+        return _GRADED_BLACK[chain]
+    color = _measure_graded_black(chain)
+    if color is not None:
+        if len(_GRADED_BLACK) >= 64:
+            _GRADED_BLACK.clear()
+        _GRADED_BLACK[chain] = color
+    return color
+
+
+def _measure_graded_black(chain):
     try:
         p = subprocess.run(
             ["ffmpeg", "-hide_banner", "-v", "error", "-f", "rawvideo",
@@ -1530,6 +1544,16 @@ def transitions_current(meta, edl):
     if not ((edl or {}).get("effects") or {}).get("transition"):
         return True
     return ((meta or {}).get("trans_v") or 0) == config.TRANSITION_VERSION
+
+
+def look_current(meta):
+    """May new pieces be spliced into this cached render (stitched preview)?
+
+    Only when it was drawn with today's picture look (config.
+    RENDER_LOOK_VERSION). An absent stamp predates the stamp and is a
+    different look. Serving or reusing a whole old render is unaffected.
+    """
+    return ((meta or {}).get("look_v") or 0) == config.RENDER_LOOK_VERSION
 
 
 def watermark_font_path():
@@ -5931,7 +5955,8 @@ def _run_render_job(worker_db, job):
                             asset_locals=asset_locals)
                         if out_dur is not None:
                             reused_visual_meta = pm
-                        if out_dur is None and not want_wm:
+                        if out_dur is None and not want_wm \
+                                and look_current(pm):
                             out_dur = _stitched_preview(
                                 job_id, edl_row, prev_row, prev_asset, index,
                                 src_local, workdir, patch_locals, out_local,
@@ -6257,6 +6282,10 @@ def _run_render_job(worker_db, job):
                   "delivery_v": 1,
                   "trans_v": config.TRANSITION_VERSION,
                   "tail_v": config.MUSIC_TAIL_VERSION,
+                  # A reused picture keeps the look it was drawn with.
+                  "look_v": (reused_visual_meta.get("look_v") or 0
+                             if reused_visual_meta
+                             else config.RENDER_LOOK_VERSION),
                   "audio_peak_v": 1,
                   "wm_v": (0 if proof_only else
                            watermark_version(variant, is_paid, wm_settings)),

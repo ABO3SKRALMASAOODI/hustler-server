@@ -1860,6 +1860,17 @@ TRANSITION_VERSION = 3  # v3: zoom_punch no longer tmix-blends across concat
 # those known-bad cached previews/finals are rebuilt without the black tail.
 MUSIC_TAIL_VERSION = 2
 
+# The picture pipeline's look. A stitched preview stream-copies the unchanged
+# stretches of the previous preview and splices in newly rendered pieces, so
+# pieces from a different look show a sharpness/tone seam at every splice.
+# A cached render stamped with another look is never stitched into (it is
+# still served, and still reused whole for audio-only changes — a whole old
+# picture has no seam); the next preview renders in full once. Bump when the
+# fit, resampling, grade order or colour handling changes what pixels look
+# like. v1: crop-first lanczos fit + unsharp, block grade, pinned end-card
+# matrix (render-perf round).
+RENDER_LOOK_VERSION = 1
+
 # ── Free-tier watermark (round 41) ────────────────────────────────────────
 # The site's robot in the top-left of the EXPORT, with "edited by valmera
 # agent" sliding out beside it every few seconds and sliding back.

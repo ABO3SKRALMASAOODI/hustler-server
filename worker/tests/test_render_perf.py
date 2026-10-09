@@ -190,6 +190,24 @@ def test_letterbox_bars_are_padded_in_graded_black():
     assert f"color={color}" in g and "[vgrade]" not in g
 
 
+def test_a_failed_graded_black_measurement_is_not_remembered(monkeypatch):
+    """A timeout under load used to pin the chain to the slow post-concat
+    grade (functools.lru_cache kept the None) for the life of the process."""
+    answers = iter([None, "0x0C0908", "0xFFFFFF"])
+    calls = []
+
+    def measure(chain):
+        calls.append(chain)
+        return next(answers)
+
+    monkeypatch.setattr(renderer, "_measure_graded_black", measure)
+    monkeypatch.setattr(renderer, "_GRADED_BLACK", {})
+    assert renderer._graded_black("eq=gamma=1.1") is None
+    assert renderer._graded_black("eq=gamma=1.1") == "0x0C0908"
+    assert renderer._graded_black("eq=gamma=1.1") == "0x0C0908"
+    assert len(calls) == 2
+
+
 def _render_rgb(graph, W, H, tmp_path, name, t=0.5):
     out = str(tmp_path / f"{name}.mkv")
     subprocess.run(
