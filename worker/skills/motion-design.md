@@ -80,7 +80,9 @@ CHOOSING A TEMPLATE — confirm names and params with `list_motion_templates()`:
   a genuine A-versus-B contrast; `quote_card` for a faithful quotation held
   long enough to read.
 - Numbers: `counter` when a figure is spoken (expo-out count-up landing on
-  the word); `stat_card` for a metric plus its meaning; `bar_compare` for
+  the word); a rapid run of spoken stats as one `word_slam` each with
+  `fit='justify'` and the figure over its label (`'*32%* / fewer errors'`,
+  pop entrance on the figure's onset); `stat_card` for a metric plus its meaning; `bar_compare` for
   2–4 spoken quantities; `line_chart` for a spoken trend; `progress_ring`
   for a spoken percentage or completion. Numbers come from the transcript
   or a verified source only.
@@ -167,6 +169,13 @@ SOUND PAIRING — graphics are SILENT by default:
   graphic's params are final (changing params or the template re-derives
   the cues at their suggested gain), or `set_motion_graphic(id,
   sfx=false)` to drop them.
+- Accents: `*one word*` or a `*multi word run*` takes the accent; star 1–2
+  words per line. Over a bright shirt or wall, raise `scrim` on
+  `hook_title`, `glow_title` and `phrase_build` (a soft dark backing) rather
+  than moving the type onto the face.
+- A long recording (typing, a riser) placed by hand stops with its event:
+  `add_sfx(..., dur_s=<seconds of visible typing>)` trims it with a short
+  fade.
 - A template whose cue repeats (a tick per counter step or per letter)
   stays silent; give the settled figure one sound instead (`cash_register_1`
   on money, `ding_1` on a result).
