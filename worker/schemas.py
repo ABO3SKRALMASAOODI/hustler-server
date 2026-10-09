@@ -1846,10 +1846,58 @@ class SpeedSpan(BaseModel):
 
 
 class Master(BaseModel):
-    """Output mastering. loudness 'social' normalizes the final mix to
-    -14 LUFS with a codec-safe -2.0 dBTP ceiling via loudnorm + limiter —
-    applied to preview AND final so what the user approves is what ships."""
-    loudness: Optional[Literal["social"]] = None
+    """Output mastering. loudness 'social' levels the main dialogue to a
+    steady -20 LUFS before music/voiceover/sfx are mixed, then normalizes the
+    final mix to -14 LUFS with a codec-safe -2.0 dBTP ceiling via loudnorm +
+    limiter — applied to preview AND final so what the user approves is what
+    ships. 'natural' is the explicit opt-out: the mix ships at its own level.
+    None (unset) resolves by format — see master_loudness."""
+    loudness: Optional[Literal["social", "natural"]] = None
+
+
+# Output ratios that are social-feed formats. An EDL that leaves
+# master.loudness unset is mastered ('social') on these: every short used to
+# ship at whatever level the source was recorded (-29 LUFS on a quiet lecture,
+# against -13/-14 for every reference edit) because nothing opted in.
+SOCIAL_MASTER_RATIOS = ("9:16", "4:5", "1:1")
+
+
+def master_loudness(edl, src_w=None, src_h=None):
+    """The mastering a render of `edl` applies: 'social' or None (natural).
+
+    Explicit values win: 'social' masters, 'natural' never does. Unset
+    resolves by the OUTPUT frame: 9:16, 4:5 and 1:1 master; 16:9 does not;
+    'source' (or no frame) follows the source picture — a canvas program's
+    canvas, else src_w x src_h — and masters a portrait or square one. An
+    unknown source shape resolves to None. One function, so the renderer, the
+    cache stamps, describe_edl and the agent's state all agree."""
+    if hasattr(edl, "model_dump"):
+        edl = edl.model_dump()
+    edl = edl or {}
+    m = edl.get("master") or {}
+    loud = m.get("loudness") if isinstance(m, dict) else getattr(m, "loudness", None)
+    if loud == "social":
+        return "social"
+    if loud == "natural":
+        return None
+    frame = edl.get("frame") or {}
+    ratio = (frame.get("ratio") if isinstance(frame, dict)
+             else getattr(frame, "ratio", None)) or "source"
+    if ratio in SOCIAL_MASTER_RATIOS:
+        return "social"
+    if ratio != "source":
+        return None
+    canvas = edl.get("canvas") or None
+    if canvas and not edl.get("keep"):
+        cv = canvas if isinstance(canvas, dict) else canvas.model_dump()
+        src_w, src_h = cv.get("width"), cv.get("height")
+    try:
+        w, h = float(src_w or 0), float(src_h or 0)
+    except (TypeError, ValueError):
+        return None
+    if w > 0 and h > 0 and w <= h * 1.01:
+        return "social"
+    return None
 
 
 class StemMix(BaseModel):
@@ -3440,8 +3488,10 @@ def _style_desc(style):
     return f" ({', '.join(bits)})" if bits else ""
 
 
-def describe_edl(edl_dict, duration=None):
-    """One-line human summary used in diffs and activity messages."""
+def describe_edl(edl_dict, duration=None, src_shape=None):
+    """One-line human summary used in diffs and activity messages.
+    src_shape: the source's display (width, height) when known — it decides
+    whether a 'source' frame is mastered by default (master_loudness)."""
     edl = EDL.model_validate(edl_dict)
     if not edl.keep and edl.canvas is not None:
         # Canvas program (no main video): the program IS the inserts on the
@@ -3630,8 +3680,15 @@ def describe_edl(edl_dict, duration=None):
                 f"{s.ratio}@{s.at:g}s over {s.duration_s:g}s"
                 for s in fx.frame_shifts))
         parts.append(", ".join(bits))
-    if edl.master and edl.master.loudness:
+    if edl.master and edl.master.loudness == "natural":
+        parts.append("unmastered (natural loudness)")
+    elif edl.master and edl.master.loudness:
         parts.append(f"mastered ({edl.master.loudness} loudness)")
+    elif master_loudness(edl_dict, *(src_shape or (None, None))) == "social":
+        # Unset on a social format (9:16/4:5/1:1, or a portrait source or
+        # canvas left at 'source'): the renderer masters it, so the summary
+        # must not read as unmastered.
+        parts.append("mastered (social loudness, format default)")
     if edl.source_clean and edl.source_clean.cursor:
         cu = edl.source_clean.cursor
         parts.append(

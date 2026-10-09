@@ -33,6 +33,7 @@ import captions as caplib
 import config
 import execution_inputs
 import db as dbx
+import dialogue_level
 import gradelut
 import graphics
 import media
@@ -48,8 +49,8 @@ import storage
 import timeline as timeline_mod
 import travel
 from schemas import (clean_fingerprint, patch_fingerprint, EDLValidationError,
-                     is_canvas_program, keep_boundaries, quad_bbox,
-                     speed_pieces, subject_matte_geom, validate_edl)
+                     is_canvas_program, keep_boundaries, master_loudness,
+                     quad_bbox, speed_pieces, subject_matte_geom, validate_edl)
 from timeline import Timeline, merge_spans, transition_junctions
 
 DUCK_DB = -12.0            # music under speech AND program audio under voiceover
@@ -1495,6 +1496,22 @@ def audio_peak_current(meta, edl):
             or (meta or {}).get("audio_peak_v") == 1)
 
 
+def master_current(meta, edl, src_w=None, src_h=None):
+    """Does this cached render carry the mastering its EDL now resolves to?
+
+    Only EDLs that resolve to social mastering (schemas.master_loudness:
+    explicit 'social', or unset on a 9:16/4:5/1:1 frame) are ever busted —
+    a short rendered before social became the format default shipped at the
+    source's own level, and one mastered before dialogue leveling sounds
+    different from today's preview of the same version. Natural mixes keep
+    their cache. src_w/src_h are the source's display size, needed only when
+    the frame is 'source'.
+    """
+    if master_loudness(edl, src_w, src_h) != "social":
+        return True
+    return ((meta or {}).get("master_v") or 0) == config.MASTER_VERSION
+
+
 def shaping_current(meta, edl):
     """Does this cached render predate the complex-script text fix?
 
@@ -1872,7 +1889,9 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                       wm_anchor_y=None,
                       plate_idx=None, plate_box=None, behind_inputs=None,
                       patch_inputs=None, cap_burn_offset=None,
-                      picture_card_inputs=None, main_video_inputs=None):
+                      picture_card_inputs=None, main_video_inputs=None,
+                      loudness="auto", dialogue_gain=None,
+                      dialogue_probe=False):
     """Input layout: [0] main source video; anullsrc at silence_idx when
     needed (no main audio, image inserts, or silent clip inserts); then one
     input per music item, insert item and voiceover item in EDL order.
@@ -1891,6 +1910,14 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     frame is held across them, matching what a player shows, what the proxy
     holds and therefore what the user approved in the preview — trimming a keep
     span that lands in there would otherwise yield no picture at all.
+    loudness: 'auto' resolves the EDL's mastering (schemas.master_loudness on
+    the source shape); 'social'/None force it — the bounded canvas base stages
+    pass None, because mastering belongs to the final composition.
+    dialogue_gain: dialogue_level knots that level the program bed [ac] before
+    anything is mixed onto it (_dialogue_gain measures them).
+    dialogue_probe: build the graph the leveler MEASURES — identical except
+    that the source volume automation is left out, so a deliberate "quieter
+    here" is not counted as quiet speech to undo.
     """
     # The program clock is the picture clock. Music can remain parked beyond
     # this boundary in the EDL, but its temporary render window is clamped.
@@ -1962,7 +1989,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             asrc = "0:a" if has_audio else f"{silence_idx}:a"
         # Source-time volume automation runs before trimming, so between(t,a,b)
         # windows are in source seconds — exactly what the agent wrote.
-        vol_filters = "".join(
+        vol_filters = "" if dialogue_probe else "".join(
             f",volume={v['gain_db']}dB:enable='between(t,{v['start']:.2f},{v['end']:.2f})'"
             for v in edl.get("volume", []))
         parts.append(f"[{asrc}]anull{vol_filters}[asrc]")
@@ -1999,7 +2026,8 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     takeovers = [(i, it) for i, it in overlay_inputs if it.get("screen")]
     overlay_inputs = [(i, it) for i, it in overlay_inputs
                       if not it.get("screen")]
-    master = edl.get("master") or {}
+    master = (master_loudness(edl, src_w, src_h) if loudness == "auto"
+              else loudness)
     transition = fx.get("transition") or None
     tstyle = (transition or {}).get("style")
     shifts = fx.get("frame_shifts") or []
@@ -3329,8 +3357,18 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     else:
         parts.append(f"[{vlabel}]format=yuv420p[vout]")
 
-    # program audio: duck under active voiceover, then mix music + voiceover
+    # program audio: level the dialogue, duck it under active voiceover, then
+    # mix music + voiceover + sfx onto it.
     alabel = "ac"
+    if dialogue_gain and master == "social":
+        # Mastered mixes level the program's own speech first (see
+        # dialogue_level): the sfx/music/voiceover gains then sit against a
+        # steady -20 LUFS voice instead of whatever the mic recorded, and two
+        # speakers on different mics meet in the middle. Program time, after
+        # concat, before the voiceover duck and the card's silent pad.
+        parts.append(f"[ac]{dialogue_level.volume_filter(dialogue_gain)}"
+                     "[alev]")
+        alabel = "alev"
     duck_wins = merge_spans(
         [(max(0.0, float(vo["start_output_s"])),
           min(tl.out_duration, float(vo["start_output_s"]) + vd))
@@ -3462,7 +3500,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         mix_labels.append(f"[sfx{j}]")
 
     outro_on = outro_here          # one predicate, so the video and audio
-    loud = (master or {}).get("loudness") == "social"
+    loud = master == "social"
     a_prog = "aprog"
     a_final = "apre" if (fade_in or fade_out or outro_on) else a_prog
     if mix_labels:
@@ -3562,13 +3600,15 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
                        audio_only=False, asset_locals=None, suppress_outro=False,
                        cap_ass_override=None, cap_burn_offset=None,
                        render_fragment=False, _base_stage=False,
-                       _batch_window=None, _source_stage=False):
+                       _batch_window=None, _source_stage=False,
+                       discard_audio=False):
     """Render a canvas program (round 34): a timeline with NO main video, where
     the ordered inserts (clips/images) are concatenated on the canvas, plus
     music / sfx / voiceover / manual captions / effects. Mirrors render_edl but
     assembles the ffmpeg inputs with NO input [0] main video — every input
     (silence, music, sfx, inserts, voiceover, end card) starts at index 0 — and
-    takes the output geometry from the canvas rather than probing a source."""
+    takes the output geometry from the canvas rather than probing a source.
+    discard_audio: see render_edl."""
     edl = validate_edl(edl_dict, render_fragment=render_fragment).model_dump()
     canvas = edl["canvas"]
     W, H = int(canvas["width"]), int(canvas["height"])
@@ -3723,22 +3763,35 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
             fetch_asset=lambda k: _fetch(k, "motion", next_idx))
         motion_inputs = motion_layer.demote_behind(
             motion_inputs, "a canvas program has no subject footage")
-    graph = build_filtergraph(edl, tl.out_duration, False, tl, ass_path,
-                              music_inputs, {}, preview,
-                              W=W, H=H, fps=fps, frame_mode=None,
-                              insert_inputs=insert_inputs,
-                              vo_inputs=vo_inputs, silence_idx=silence_idx,
-                              src_w=W, src_h=H, src_pad=0.0,
-                              sfx_inputs=sfx_inputs, outro_s=outro_s,
-                              card_idx=card_idx, src_sar=1.0, src_fps=fps,
-                              overlay_inputs=overlay_inputs,
-                              gfx_ass_path=gfx_path, robot_idx=robot_idx,
-                              wm_ass_path=wm_ass_path,
-                              wm_anchor_y=wm_anchor_y,
-                              plate_idx=plate_idx, plate_box=plate_box,
-                              cap_burn_offset=cap_burn_offset,
-                              picture_card_inputs=picture_card_inputs,
-                              motion_inputs=motion_inputs)
+    # Base stages are lossless building blocks: the final composition alone
+    # masters (and levels) the joined program, exactly once.
+    master = None if _base_stage else master_loudness(edl)
+
+    def _graph(**extra):
+        return build_filtergraph(edl, tl.out_duration, False, tl, ass_path,
+                                 music_inputs, {}, preview,
+                                 W=W, H=H, fps=fps, frame_mode=None,
+                                 insert_inputs=insert_inputs,
+                                 vo_inputs=vo_inputs, silence_idx=silence_idx,
+                                 src_w=W, src_h=H, src_pad=0.0,
+                                 sfx_inputs=sfx_inputs, outro_s=outro_s,
+                                 card_idx=card_idx, src_sar=1.0, src_fps=fps,
+                                 overlay_inputs=overlay_inputs,
+                                 gfx_ass_path=gfx_path, robot_idx=robot_idx,
+                                 wm_ass_path=wm_ass_path,
+                                 wm_anchor_y=wm_anchor_y,
+                                 plate_idx=plate_idx, plate_box=plate_box,
+                                 cap_burn_offset=cap_burn_offset,
+                                 picture_card_inputs=picture_card_inputs,
+                                 motion_inputs=motion_inputs,
+                                 loudness=master, **extra)
+
+    dialogue_gain = None
+    if master == "social" and not discard_audio:
+        dialogue_gain = _dialogue_gain(
+            _graph, extra_inputs, workdir, tl.out_duration, preview,
+            cancelled_cb=cancelled_cb)
+    graph = _graph(dialogue_gain=dialogue_gain)
 
     if audio_only:
         graph = _prune_graph_to_audio(graph)
@@ -3906,6 +3959,49 @@ def _bounded_canvas_program(edl, workdir, preview, asset_locals,
     print(f"[render] assembled {len(edl['inserts'])} clips in {len(pieces)} "
           "bounded batches; composing from one local program", flush=True)
     return composed, {**(asset_locals or {}), key: program}
+
+
+def _dialogue_gain(build, input_args, workdir, expected_s, preview,
+                   cancelled_cb=None):
+    """Measure the program's dialogue bed and return the dialogue_level
+    knots that level it, or None — nothing to level (silence, too little
+    speech), or the measurement failed, in which case the master still runs,
+    just without leveling.
+
+    `build(**kw)` builds this render's own filtergraph. The probe is that
+    graph with the source volume automation left out (dialogue_probe),
+    pruned to the concatenated program audio [ac] — the exact bed the
+    leveler will act on, inserts, speed and stems included — measured with
+    ebur128 into a small metadata file. Audio-only, so no frame is decoded.
+    """
+    try:
+        graph = _prune_graph_to_audio(build(dialogue_probe=True), target="ac")
+    except media.MediaError as e:
+        print(f"[render] dialogue leveling skipped (probe graph: "
+              f"{str(e)[:160]})", flush=True)
+        return None
+    path = os.path.join(workdir, f"dialogue-{uuid.uuid4().hex[:12]}.txt")
+    graph += f";[ac]{dialogue_level.probe_chain(path)}[adlg]"
+    cmd = ["ffmpeg", "-y", "-hide_banner", "-nostats", *input_args,
+           *_graph_args(graph, workdir), "-map", "[adlg]", "-f", "null", "-"]
+    try:
+        _render_media_run(cmd, timeout=_render_ffmpeg_timeout(preview,
+                                                              expected_s),
+                          cancelled_cb=cancelled_cb)
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            blocks = dialogue_level.parse_probe(fh.read())
+    except (media.MediaError, OSError) as e:
+        if cancelled_cb and cancelled_cb():
+            raise
+        print(f"[render] dialogue leveling skipped (measurement: "
+              f"{str(e)[:160]})", flush=True)
+        return None
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    return dialogue_level.gain_knots(blocks)
 
 
 def _prune_graph_to_audio(graph, target="aout"):
@@ -4146,7 +4242,8 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                cancelled_cb=None,
                patch_locals=None, cap_ass_override=None,
                suppress_outro=False, cap_burn_offset=None,
-               audio_only=False, asset_locals=None, render_fragment=False):
+               audio_only=False, asset_locals=None, render_fragment=False,
+               discard_audio=False):
     """Render an EDL against a source file. Returns output duration (s).
 
     patch_locals (round 92): {patch id: local file} for the EDL's `patches` —
@@ -4163,6 +4260,12 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     audio cannot be spliced (adaptive loudnorm, output-anchored music, no
     clean AAC cut points). Same inputs, same filters, same order: the track
     is the one the full render would have produced, by construction.
+
+    discard_audio: the caller throws this file's audio away — a stitched
+    preview's re-encoded picture window, muxed with the previous preview's
+    track or a separately rebuilt one. The dialogue leveler's measurement
+    pass is skipped: it would be one more ffmpeg run per window, every input
+    reopened, for a track nobody hears.
     """
     edl_dict = render_plan.canonical_program(edl_dict)
     if is_canvas_program(edl_dict):
@@ -4175,7 +4278,8 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                                   suppress_outro=suppress_outro,
                                   cap_ass_override=cap_ass_override,
                                   cap_burn_offset=cap_burn_offset,
-                                  render_fragment=render_fragment)
+                                  render_fragment=render_fragment,
+                                  discard_audio=discard_audio)
     info = media.probe(src_path)
     src_dur = info["duration"]
     render_dict = _repair_legacy_insert_boundaries(edl_dict)
@@ -4606,30 +4710,44 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                                   (round(pieces[0][0], 3),
                                    round(pieces[0][1], 3))))
             next_idx += 1
-    graph = build_filtergraph(edl, src_dur, info["has_audio"], tl, ass_path,
-                              music_inputs, index, preview,
-                              W=W, H=H, fps=fps, frame_mode=frame_mode,
-                              insert_inputs=insert_inputs,
-                              vo_inputs=vo_inputs, silence_idx=silence_idx,
-                              src_w=info["width"], src_h=info["height"],
-                              src_pad=src_pad, sfx_inputs=sfx_inputs,
-                              outro_s=outro_s, card_idx=card_idx,
-                              stem_inputs=stem_inputs,
-                              src_sar=info.get("sar") or 1.0,
-                              src_fps=float(info["fps"]) or fps,
-                              src_color_space=info.get("color_space"),
-                              overlay_inputs=overlay_inputs,
-                              gfx_ass_path=gfx_path,
-                              frame_focus=frame_focus, robot_idx=robot_idx,
-                              wm_ass_path=wm_ass_path,
-                              wm_anchor_y=wm_anchor_y,
-                              plate_idx=plate_idx, plate_box=plate_box,
-                              behind_inputs=behind_inputs,
-                              patch_inputs=patch_inputs,
-                              cap_burn_offset=cap_burn_offset,
-                              picture_card_inputs=picture_card_inputs,
-                              motion_inputs=motion_inputs,
-                              main_video_inputs=main_video_inputs)
+    def _graph(**extra):
+        return build_filtergraph(edl, src_dur, info["has_audio"], tl, ass_path,
+                                 music_inputs, index, preview,
+                                 W=W, H=H, fps=fps, frame_mode=frame_mode,
+                                 insert_inputs=insert_inputs,
+                                 vo_inputs=vo_inputs, silence_idx=silence_idx,
+                                 src_w=info["width"], src_h=info["height"],
+                                 src_pad=src_pad, sfx_inputs=sfx_inputs,
+                                 outro_s=outro_s, card_idx=card_idx,
+                                 stem_inputs=stem_inputs,
+                                 src_sar=info.get("sar") or 1.0,
+                                 src_fps=float(info["fps"]) or fps,
+                                 src_color_space=info.get("color_space"),
+                                 overlay_inputs=overlay_inputs,
+                                 gfx_ass_path=gfx_path,
+                                 frame_focus=frame_focus, robot_idx=robot_idx,
+                                 wm_ass_path=wm_ass_path,
+                                 wm_anchor_y=wm_anchor_y,
+                                 plate_idx=plate_idx, plate_box=plate_box,
+                                 behind_inputs=behind_inputs,
+                                 patch_inputs=patch_inputs,
+                                 cap_burn_offset=cap_burn_offset,
+                                 picture_card_inputs=picture_card_inputs,
+                                 motion_inputs=motion_inputs,
+                                 main_video_inputs=main_video_inputs,
+                                 **extra)
+
+    # Mastered mixes level the dialogue first, from one measurement pass of
+    # the same graph's audio. Previews, finals and the audio-only rebuilds
+    # (picture reuse, timeline stitches) all come through here, so what the
+    # user approves and what ships carry the same curve.
+    dialogue_gain = None
+    if not discard_audio \
+            and master_loudness(edl, info["width"], info["height"]) == "social":
+        dialogue_gain = _dialogue_gain(
+            _graph, main_input_args + extra_inputs, workdir,
+            tl.out_duration, preview, cancelled_cb=cancelled_cb)
+    graph = _graph(dialogue_gain=dialogue_gain)
 
     if audio_only:
         # The same graph the full render would run, minus every chain the
@@ -5181,7 +5299,8 @@ def _timeline_stitch(job_id, prev_edl, new_edl, tl_prev, tl_new, index,
                           patch_locals=patch_locals,
                           cap_ass_override=(cap_new or ""),
                           cap_burn_offset=(a if cap_new else None),
-                          suppress_outro=True, render_fragment=True)
+                          suppress_outro=True, render_fragment=True,
+                          discard_audio=True)
         if abs(pdur - (b - a)) > max(0.15, 2.0 / fps):
             print(f"[render {job_id}] stitch(timeline): full render (piece "
                   f"{i} came out {pdur:.3f}s for a {b - a:.3f}s window)",
@@ -5347,7 +5466,8 @@ def _stitched_preview(job_id, new_row, prev_row, prev_asset, index,
                               patch_locals=patch_locals,
                               cap_ass_override=(full_cap or ""),
                               cap_burn_offset=(a if full_cap else None),
-                              suppress_outro=True, render_fragment=True)
+                              suppress_outro=True, render_fragment=True,
+                              discard_audio=True)
             if abs(pdur - (b - a)) > max(0.15, 2.0 / fps):
                 print(f"[render {job_id}] stitch: full render (piece {i} "
                       f"came out {pdur:.3f}s for a {b - a:.3f}s window)",
@@ -5843,6 +5963,9 @@ def _run_render_job(worker_db, job):
         raise _source_not_ready(worker_db, project_id, original,
                                 "No indexed original video for this project")
     src_sha = original["sha256"] if original else "canvas"
+    # The source's display shape: an unset master on a 'source' frame is
+    # mastered when the footage itself is portrait or square.
+    src_shape = ((original or {}).get("width"), (original or {}).get("height"))
 
     # Cache: this exact EDL version was already rendered in this variant against
     # this exact source file — serve the stored asset instead of re-encoding.
@@ -5884,6 +6007,8 @@ def _run_render_job(worker_db, job):
                       delivery_canvas_current(cached, variant)) \
                 and outro_current(cached.get("meta"), variant) \
                 and audio_peak_current(cached.get("meta"), edl_row["json"]) \
+                and master_current(cached.get("meta"), edl_row["json"],
+                                   *src_shape) \
                 and shaping_current(cached.get("meta"), edl_row["json"]) \
                 and transitions_current(cached.get("meta"), edl_row["json"]) \
                 and music_tail_current(cached.get("meta"), edl_row["json"],
@@ -6174,6 +6299,8 @@ def _run_render_job(worker_db, job):
                                  delivery_canvas_current(prev_asset, variant)) \
                             and outro_current(pm, variant) \
                             and audio_peak_current(pm, prev_row["json"]) \
+                            and master_current(pm, prev_row["json"],
+                                               *src_shape) \
                             and shaping_current(pm, prev_row["json"]) \
                             and transitions_current(pm, prev_row["json"]) \
                             and camera_current(pm, prev_row["json"]) \
@@ -6418,7 +6545,12 @@ def _run_render_job(worker_db, job):
         listen_keys = []
         if variant == "preview" and not proof_only:
             try:
-                audio_qc_res = audio_qc.measure(out_local, duration_s=out_dur)
+                _explicit = ((edl_row["json"].get("master") or {})
+                             .get("loudness"))
+                audio_qc_res = audio_qc.measure(
+                    out_local, duration_s=out_dur,
+                    master=(master_loudness(edl_row["json"], *src_shape)
+                            or _explicit))
             except Exception:
                 audio_qc_res = None
             authored = edl_row["json"]
@@ -6524,6 +6656,7 @@ def _run_render_job(worker_db, job):
                              if reused_visual_meta
                              else config.RENDER_LOOK_VERSION),
                   "audio_peak_v": 1,
+                  "master_v": config.MASTER_VERSION,
                   "wm_v": (0 if proof_only else
                            watermark_version(variant, is_paid, wm_settings)),
                   "wm_p": (watermark_position(wm_settings)

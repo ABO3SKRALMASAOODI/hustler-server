@@ -22,10 +22,10 @@ import math
 import re
 import subprocess
 
-# The social/streaming loudness target the renderer itself masters to when
-# asked (renderer loudnorm I=-14:TP=-2.0 plus a hard ceiling). QC judges
-# against the same
-# numbers so the check and the fix can never disagree.
+# The social/streaming loudness target the renderer itself masters to (by
+# default on 9:16/4:5/1:1, on request elsewhere: renderer loudnorm
+# I=-14:TP=-2.0 plus a hard ceiling). QC judges against the same numbers so
+# the check and the fix can never disagree.
 TARGET_I = -14.0
 TARGET_TP = -2.0
 
@@ -81,13 +81,18 @@ def _parse(stderr_text):
     return loud, silences
 
 
-def measure(path, duration_s=None):
+def measure(path, duration_s=None, master=None):
     """The QC record for one rendered file, or None when analysis failed.
 
     {"i": integrated LUFS, "tp": true peak dBTP, "lra": loudness range,
      "silences": [[s, e], ...] internal dead-air spans,
      "findings": [plain-language strings, worst first]}
     A file with no audio stream returns findings saying exactly that.
+
+    `master` is what the render applied (schemas.master_loudness, or the
+    EDL's explicit 'natural'): a loudness finding must not prescribe
+    set_master_loudness for a mix that is already mastered, or quietly
+    overrule a user who asked for the natural level.
     """
     err = _run_ffmpeg(path)
     if err is None:
@@ -127,7 +132,20 @@ def measure(path, duration_s=None):
                         f"{i:.1f} LUFS) — every audio layer is muted or "
                         "missing")
     elif i is not None:
-        if i < TARGET_I - LOUDNESS_SLACK_LU:
+        off = (i < TARGET_I - LOUDNESS_SLACK_LU
+               or i > TARGET_I + LOUDNESS_SLACK_LU)
+        if off and master == "social":
+            findings.append(
+                f"the mix measures {i:.1f} LUFS even though it is mastered "
+                f"to {TARGET_I:.0f} — most of the program is silence or a "
+                "layer is muted; check the volume automation and the bed")
+        elif off and master == "natural":
+            findings.append(
+                f"the mix is {i:.1f} LUFS against the {TARGET_I:.0f} social "
+                "target, at its natural level by request — only "
+                "set_master_loudness(enabled=true) if the user wants it "
+                "mastered after all")
+        elif i < TARGET_I - LOUDNESS_SLACK_LU:
             findings.append(
                 f"the whole mix is quiet: {i:.1f} LUFS against the "
                 f"{TARGET_I:.0f} social target — set_master_loudness "

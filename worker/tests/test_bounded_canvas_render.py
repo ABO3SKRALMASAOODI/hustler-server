@@ -115,8 +115,10 @@ def test_real_batched_video_keeps_frames_audio_effects_and_global_master(
     assert abs(media.duration_of(ref) - media.duration_of(actual)) < 0.06
     assert progress == sorted(progress)
     graphs = [c[c.index("-filter_complex")+1] for c in commands if "-filter_complex" in c]
-    assert len(graphs) == len(edl["inserts"]) + 4
+    # +1: the final composition's dialogue-leveling measurement pass.
+    assert len(graphs) == len(edl["inserts"]) + 5
     assert sum("loudnorm=" in g for g in graphs) == 1
+    assert sum("ebur128=metadata=1" in g for g in graphs) == 1
     # Each original is prepared once and never shares a graph with another
     # remote source. The batch and final graphs consume only local media.
     source_commands = [c for c in commands if "ffv1" in c]

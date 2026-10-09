@@ -9,10 +9,10 @@ import hashlib
 import json
 
 try:
-    from schemas import speed_pieces
+    from schemas import master_loudness, speed_pieces
     from render_plan import canonical_program
 except ImportError:
-    from worker_schemas import speed_pieces
+    from worker_schemas import master_loudness, speed_pieces
     from worker_render_plan import canonical_program
 
 PLAN_VERSION = 1
@@ -85,7 +85,9 @@ def changed_work(before, after):
     duration = max(old["duration"], new["duration"])
     changed = sorted(k for k in set(a) | set(b) if a.get(k) != b.get(k))
     visual = [k for k in changed if k not in AUDIO_LAYERS]
-    audio_changed = any(k in changed for k in (*AUDIO_LAYERS, "keep", "inserts", "speed"))
+    # A new frame can switch the format-default mastering on or off.
+    audio_changed = any(k in changed for k in (*AUDIO_LAYERS, "keep", "inserts", "speed")) \
+        or master_loudness(a) != master_loudness(b)
     ranges = []
     local = {"texts", "vectors", "caption_mutes", "volume"}
     if visual and all(k in local for k in visual):

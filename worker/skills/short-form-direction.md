@@ -171,7 +171,8 @@ THE PREMIUM SHORT-FORM GRAMMAR — targets you can measure in the render:
 
 BUILD ORDER — write in a few atomic passes, not forty serial calls:
 1. Story: keep/order the micro-story, remove fillers and dead pauses
-   (cutting), master loudness.
+   (cutting). Loudness mastering and dialogue leveling are automatic on the
+   vertical frame.
 2. Frame and look: reframe or card layout, `apply_look`, caption
    `motion_look`; music only if the user asked for it or supplied a track.
 3. Hook and hero moments: motion graphics on exact word onsets, camera

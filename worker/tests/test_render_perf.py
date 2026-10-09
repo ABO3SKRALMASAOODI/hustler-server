@@ -233,7 +233,10 @@ def _render_rgb(graph, W, H, tmp_path, name, t=0.5):
 def test_block_grade_is_the_same_picture_as_the_post_concat_grade(
         frame, grade, monkeypatch, tmp_path):
     W, H = 360, 640
-    edl = {"keep": KEEP, "frame": frame, "effects": {"grade": grade}}
+    # A picture comparison: _render_rgb cuts the encode at 1 s, which a
+    # mastered mix (3 s loudnorm lookahead) cannot deliver audio for.
+    edl = {"keep": KEEP, "frame": frame, "effects": {"grade": grade},
+           "master": {"loudness": "natural"}}
     monkeypatch.setenv("BLOCK_GRADE_DISABLE", "1")
     legacy = _graph(edl, W=W, H=H, src=(640, 360), has_audio=False)
     monkeypatch.setenv("BLOCK_GRADE_DISABLE", "0")
@@ -347,7 +350,11 @@ def test_cluster_reads_render_the_identical_programme(tmp_path, monkeypatch):
     index = {"words": [], "sentences": [], "silences": [], "video": {}}
     commands = {}
 
+    real_run = renderer._render_media_run
+
     def capture(cmd, **kw):
+        if "[adlg]" in cmd:                 # the dialogue-leveling probe
+            return real_run(cmd, **kw)
         commands["cmd"] = [c for c in cmd
                            if c not in ("-progress", "pipe:1", "-nostats")]
         raise StopIteration
@@ -445,7 +452,11 @@ def test_end_card_join_keeps_the_programme_colour(frame, tmp_path,
     index = {"words": [], "sentences": [], "silences": [], "video": {}}
     commands = {}
 
+    real_run = renderer._render_media_run
+
     def capture(cmd, **kw):
+        if "[adlg]" in cmd:                 # the dialogue-leveling probe
+            return real_run(cmd, **kw)
         commands["cmd"] = [c for c in cmd
                            if c not in ("-progress", "pipe:1", "-nostats")]
         raise StopIteration
@@ -509,7 +520,11 @@ def test_cluster_reads_keep_peak_memory_bounded(tmp_path, monkeypatch):
     index = {"words": [], "sentences": [], "silences": [], "video": {}}
     commands = {}
 
+    real_run = renderer._render_media_run
+
     def capture(cmd, **kw):
+        if "[adlg]" in cmd:                 # the dialogue-leveling probe
+            return real_run(cmd, **kw)
         commands["cmd"] = [c for c in cmd
                            if c not in ("-progress", "pipe:1", "-nostats")]
         raise StopIteration
