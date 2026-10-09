@@ -3363,7 +3363,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     if dialogue_gain and master == "social":
         # Mastered mixes level the program's own speech first (see
         # dialogue_level): the sfx/music/voiceover gains then sit against a
-        # steady -18 LUFS voice instead of whatever the mic recorded, and two
+        # steady -20 LUFS voice instead of whatever the mic recorded, and two
         # speakers on different mics meet in the middle. Program time, after
         # concat, before the voiceover duck and the card's silent pad.
         parts.append(f"[ac]{dialogue_level.volume_filter(dialogue_gain)}"
@@ -3600,13 +3600,15 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
                        audio_only=False, asset_locals=None, suppress_outro=False,
                        cap_ass_override=None, cap_burn_offset=None,
                        render_fragment=False, _base_stage=False,
-                       _batch_window=None, _source_stage=False):
+                       _batch_window=None, _source_stage=False,
+                       discard_audio=False):
     """Render a canvas program (round 34): a timeline with NO main video, where
     the ordered inserts (clips/images) are concatenated on the canvas, plus
     music / sfx / voiceover / manual captions / effects. Mirrors render_edl but
     assembles the ffmpeg inputs with NO input [0] main video — every input
     (silence, music, sfx, inserts, voiceover, end card) starts at index 0 — and
-    takes the output geometry from the canvas rather than probing a source."""
+    takes the output geometry from the canvas rather than probing a source.
+    discard_audio: see render_edl."""
     edl = validate_edl(edl_dict, render_fragment=render_fragment).model_dump()
     canvas = edl["canvas"]
     W, H = int(canvas["width"]), int(canvas["height"])
@@ -3785,7 +3787,7 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
                                  loudness=master, **extra)
 
     dialogue_gain = None
-    if master == "social":
+    if master == "social" and not discard_audio:
         dialogue_gain = _dialogue_gain(
             _graph, extra_inputs, workdir, tl.out_duration, preview,
             cancelled_cb=cancelled_cb)
@@ -4240,7 +4242,8 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                cancelled_cb=None,
                patch_locals=None, cap_ass_override=None,
                suppress_outro=False, cap_burn_offset=None,
-               audio_only=False, asset_locals=None, render_fragment=False):
+               audio_only=False, asset_locals=None, render_fragment=False,
+               discard_audio=False):
     """Render an EDL against a source file. Returns output duration (s).
 
     patch_locals (round 92): {patch id: local file} for the EDL's `patches` —
@@ -4257,6 +4260,12 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     audio cannot be spliced (adaptive loudnorm, output-anchored music, no
     clean AAC cut points). Same inputs, same filters, same order: the track
     is the one the full render would have produced, by construction.
+
+    discard_audio: the caller throws this file's audio away — a stitched
+    preview's re-encoded picture window, muxed with the previous preview's
+    track or a separately rebuilt one. The dialogue leveler's measurement
+    pass is skipped: it would be one more ffmpeg run per window, every input
+    reopened, for a track nobody hears.
     """
     edl_dict = render_plan.canonical_program(edl_dict)
     if is_canvas_program(edl_dict):
@@ -4269,7 +4278,8 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                                   suppress_outro=suppress_outro,
                                   cap_ass_override=cap_ass_override,
                                   cap_burn_offset=cap_burn_offset,
-                                  render_fragment=render_fragment)
+                                  render_fragment=render_fragment,
+                                  discard_audio=discard_audio)
     info = media.probe(src_path)
     src_dur = info["duration"]
     render_dict = _repair_legacy_insert_boundaries(edl_dict)
@@ -4732,7 +4742,8 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     # (picture reuse, timeline stitches) all come through here, so what the
     # user approves and what ships carry the same curve.
     dialogue_gain = None
-    if master_loudness(edl, info["width"], info["height"]) == "social":
+    if not discard_audio \
+            and master_loudness(edl, info["width"], info["height"]) == "social":
         dialogue_gain = _dialogue_gain(
             _graph, main_input_args + extra_inputs, workdir,
             tl.out_duration, preview, cancelled_cb=cancelled_cb)
@@ -5288,7 +5299,8 @@ def _timeline_stitch(job_id, prev_edl, new_edl, tl_prev, tl_new, index,
                           patch_locals=patch_locals,
                           cap_ass_override=(cap_new or ""),
                           cap_burn_offset=(a if cap_new else None),
-                          suppress_outro=True, render_fragment=True)
+                          suppress_outro=True, render_fragment=True,
+                          discard_audio=True)
         if abs(pdur - (b - a)) > max(0.15, 2.0 / fps):
             print(f"[render {job_id}] stitch(timeline): full render (piece "
                   f"{i} came out {pdur:.3f}s for a {b - a:.3f}s window)",
@@ -5454,7 +5466,8 @@ def _stitched_preview(job_id, new_row, prev_row, prev_asset, index,
                               patch_locals=patch_locals,
                               cap_ass_override=(full_cap or ""),
                               cap_burn_offset=(a if full_cap else None),
-                              suppress_outro=True, render_fragment=True)
+                              suppress_outro=True, render_fragment=True,
+                              discard_audio=True)
             if abs(pdur - (b - a)) > max(0.15, 2.0 / fps):
                 print(f"[render {job_id}] stitch: full render (piece {i} "
                       f"came out {pdur:.3f}s for a {b - a:.3f}s window)",

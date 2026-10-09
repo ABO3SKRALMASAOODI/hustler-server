@@ -778,7 +778,9 @@ def state_block(ctx, worker_db, denied_tools=(), include_blueprint=True):
         index_summary = ("TRANSCRIPT / SHOTS / SILENCES: none — there is no "
                          "indexed main video to read them from.")
     edl = ctx.latest_edl()
-    edl_line = f"v{edl['version']} — {describe_edl(edl['json'], ctx.duration)}"
+    described = describe_edl(edl["json"], ctx.duration,
+                             agent_tools._source_shape(ctx))
+    edl_line = f"v{edl['version']} — {described}"
     try:
         program_lines = timeline.describe_program(
             edl["json"], agent_tools.program_name_of(ctx))

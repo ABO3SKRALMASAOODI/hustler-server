@@ -144,7 +144,7 @@ Without it, offer mute ranges, muting everything, or covering with new music.
 
 MASTERING: 9:16, 4:5 and 1:1 programs (and portrait sources left at
 'source') are mastered by default; `set_master_loudness(enabled=true)` forces
-it on 16:9. Mastering levels the main dialogue to a steady -18 LUFS before
+it on 16:9. Mastering levels the main dialogue to a steady -20 LUFS before
 music/voiceover/sfx are mixed — speakers on different mics meet in the middle
 and every suggested gain sits relative to that voice — then normalizes the
 mix to -14 LUFS on preview and export. `enabled=false` ships the natural,

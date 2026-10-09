@@ -555,7 +555,8 @@ class ToolContext:
                         "rebuild what they asked for.")
             return msg
         violations = scope_guard.preservation_violations(
-            prev["json"], normalized, self.user_message)
+            prev["json"], normalized, self.user_message,
+            source_shape=_source_shape(self))
         if violations:
             return scope_guard.rejection_message(prev["version"], violations)
         advisories = quality_gate.advisory_findings(
@@ -592,8 +593,9 @@ class ToolContext:
         self.last_change = (dict(chg, edl_version=version,
                                  manifest=manifest) if chg else
                             {"edl_version": version, "manifest": manifest})
-        before = describe_edl(prev["json"])
-        after = describe_edl(normalized, self.duration)
+        before = describe_edl(prev["json"], src_shape=_source_shape(self))
+        after = describe_edl(normalized, self.duration,
+                             src_shape=_source_shape(self))
         line = (f"EDL v{prev['version']} -> v{version}: {change_desc}. "
                 f"Before: {before}. After: {after}.")
         if advisories:
@@ -887,7 +889,7 @@ def get_video_info(ctx):
             f"{len(words)} words{spk_txt}{fill_txt}, "
             f"{gap_txt}. "
             f"Current EDL v{edl['version']}: "
-            f"{describe_edl(edl['json'], v['duration'])}."
+            f"{describe_edl(edl['json'], v['duration'], _source_shape(ctx))}."
             + (f"\n{prog}" if prog else ""))
 
 
@@ -15287,13 +15289,19 @@ def set_grade_custom(ctx, exposure=None, contrast=None, saturation=None,
     return res
 
 
+def _source_shape(ctx):
+    """The source's display (width, height), or (None, None) — what decides
+    the default mastering of a 'source' frame (schemas.master_loudness)."""
+    vid = (getattr(ctx, "index", None) or {}).get("video") or {}
+    return vid.get("width"), vid.get("height")
+
+
 def _master_state(ctx, edl):
     """The mastering a render of `edl` will apply, as the agent should read
     it: the raw EDL field is None on every short that relies on the social
     default, which reads as "unmastered" when it is not."""
-    vid = (getattr(ctx, "index", None) or {}).get("video") or {}
     explicit = (edl.get("master") or {}).get("loudness")
-    loud = master_loudness(edl, vid.get("width"), vid.get("height"))
+    loud = master_loudness(edl, *_source_shape(ctx))
     return {"loudness": loud or "natural",
             "set_by": "edl" if explicit else "format default"}
 
@@ -15311,7 +15319,7 @@ def set_master_loudness(ctx, enabled):
                  "unleveled)")
     res = ctx.write_edl(edl, "master loudness: social (-14 LUFS)")
     if res.startswith("EDL v"):
-        res += ("\nThe dialogue is leveled to a steady -18 LUFS before "
+        res += ("\nThe dialogue is leveled to a steady -20 LUFS before "
                 "music/voiceover/sfx are mixed, then the final mix is "
                 "normalized to -14 LUFS with a codec-safe -2.0 dBTP ceiling "
                 "on PREVIEW and EXPORT — what the user approves is what "
@@ -17231,7 +17239,7 @@ def _compact_edl(row, ctx):
         cap_summary = None
     return {
         "version": row["version"],
-        "description": describe_edl(edl, ctx.duration),
+        "description": describe_edl(edl, ctx.duration, _source_shape(ctx)),
         "program_map": _program_map(ctx, edl) or None,
         "program_duration_s": round(program_duration(edl), 3),
         "frame": edl.get("frame"),
@@ -25835,7 +25843,7 @@ TOOLS = {
     "remove_stem_mix": (remove_stem_mix, "Restore the original mixed "
                         "soundtrack (undo separate_music).", {}),
     "set_master_loudness": (set_master_loudness, "Social mastering: the "
-                            "main dialogue is leveled to a steady -18 LUFS "
+                            "main dialogue is leveled to a steady -20 LUFS "
                             "(speakers on different mics meet in the middle) "
                             "BEFORE music/voiceover/sfx are mixed, then the "
                             "FINAL MIX is normalized to -14 LUFS with a "

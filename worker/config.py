@@ -1974,7 +1974,7 @@ MUSIC_TAIL_VERSION = 2
 # Mastering. Stamped as `master_v` on every render and compared ONLY for EDLs
 # that resolve to social mastering (schemas.master_loudness): an explicit
 # 'social', or an unset master on a 9:16/4:5/1:1 frame. v1 levels the main
-# dialogue to -18 LUFS before the mix and makes social the default for those
+# dialogue to -20 LUFS before the mix and makes social the default for those
 # formats; renders before it shipped shorts at the source's own level (-29
 # LUFS on a quiet lecture) and mastered without leveling, and the cache is
 # keyed on EDL version, so without this stamp they would be served forever.

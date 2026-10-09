@@ -35,7 +35,15 @@ final measure the same program and apply the same curve.
 import math
 import re
 
-TARGET_LUFS = -18.0       # speech level the mix is built on; master adds ~4 dB
+# The speech level the mix is built on (the master then adds ~6 dB). Every
+# absolute gain downstream was tuned against unleveled speech: the music
+# beds on a -23 LUFS voice, with the owner's podcast sources at a median of
+# about -21, and the library sfx by ear. -20 keeps those relations where
+# they were tuned. Measured on the three showcase shorts with the library's
+# suggested gains, -18 left the sfx 6-10.5 dB under the speech peaks on two
+# of them (target 3-8) and every bed ~3 dB further under a median voice;
+# -20 lands all but one cue about 3-8.5 dB under.
+TARGET_LUFS = -20.0
 STEP_S = 0.1              # ebur128 metadata=1 emits one 100 ms block each
 WINDOW_S = 3.0            # local level window, centred
 ABS_GATE_LUFS = -50.0     # under this a block is silence/room tone

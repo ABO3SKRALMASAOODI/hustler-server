@@ -1847,7 +1847,7 @@ class SpeedSpan(BaseModel):
 
 class Master(BaseModel):
     """Output mastering. loudness 'social' levels the main dialogue to a
-    steady -18 LUFS before music/voiceover/sfx are mixed, then normalizes the
+    steady -20 LUFS before music/voiceover/sfx are mixed, then normalizes the
     final mix to -14 LUFS with a codec-safe -2.0 dBTP ceiling via loudnorm +
     limiter — applied to preview AND final so what the user approves is what
     ships. 'natural' is the explicit opt-out: the mix ships at its own level.
@@ -3488,8 +3488,10 @@ def _style_desc(style):
     return f" ({', '.join(bits)})" if bits else ""
 
 
-def describe_edl(edl_dict, duration=None):
-    """One-line human summary used in diffs and activity messages."""
+def describe_edl(edl_dict, duration=None, src_shape=None):
+    """One-line human summary used in diffs and activity messages.
+    src_shape: the source's display (width, height) when known — it decides
+    whether a 'source' frame is mastered by default (master_loudness)."""
     edl = EDL.model_validate(edl_dict)
     if not edl.keep and edl.canvas is not None:
         # Canvas program (no main video): the program IS the inserts on the
@@ -3682,9 +3684,10 @@ def describe_edl(edl_dict, duration=None):
         parts.append("unmastered (natural loudness)")
     elif edl.master and edl.master.loudness:
         parts.append(f"mastered ({edl.master.loudness} loudness)")
-    elif master_loudness(edl_dict) == "social":
-        # Unset on a social format (9:16/4:5/1:1 or a portrait canvas): the
-        # renderer masters it, so the summary must not read as unmastered.
+    elif master_loudness(edl_dict, *(src_shape or (None, None))) == "social":
+        # Unset on a social format (9:16/4:5/1:1, or a portrait source or
+        # canvas left at 'source'): the renderer masters it, so the summary
+        # must not read as unmastered.
         parts.append("mastered (social loudness, format default)")
     if edl.source_clean and edl.source_clean.cursor:
         cu = edl.source_clean.cursor

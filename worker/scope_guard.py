@@ -186,8 +186,21 @@ def _lane_state(edl: Dict[str, Any], lane: str,
     raise KeyError(lane)
 
 
+def _mastering(edl: Dict[str, Any], source_shape) -> Any:
+    """The mastering a render of `edl` applies, not the raw field: an unset
+    master on a 9:16/4:5/1:1 frame is mastered, so a reframe changes the
+    sound without touching edl['master'], while an explicit 'natural' on a
+    16:9 frame changes nothing (schemas.master_loudness)."""
+    try:
+        from schemas import master_loudness
+    except ImportError:
+        from worker_schemas import master_loudness
+    return master_loudness(edl, *(source_shape or (None, None)))
+
+
 def _audio_mix_preserved(previous: Dict[str, Any], proposed: Dict[str, Any],
-                         timeline_changed: bool) -> bool:
+                         timeline_changed: bool,
+                         source_shape=None) -> bool:
     """Preserve authored sound without making picture deletion impossible.
 
     An inserted video's own audio is structurally attached to that picture.
@@ -198,6 +211,8 @@ def _audio_mix_preserved(previous: Dict[str, Any], proposed: Dict[str, Any],
     """
     before = _lane_state(previous, "audio_mix", timeline_changed)
     after = _lane_state(proposed, "audio_mix", timeline_changed)
+    before["master"] = _mastering(previous, source_shape)
+    after["master"] = _mastering(proposed, source_shape)
     before_inserts = {str(row.get("id")): bool(row.get("mute"))
                       for row in before.pop("insert_audio", [])
                       if row.get("id") is not None}
@@ -236,8 +251,11 @@ def picture_timing(edl):
 
 def preservation_violations(previous: Dict[str, Any],
                             proposed: Dict[str, Any],
-                            user_message: str = "") -> List[str]:
-    """Human labels for explicitly protected lanes changed by a proposal."""
+                            user_message: str = "",
+                            source_shape=None) -> List[str]:
+    """Human labels for explicitly protected lanes changed by a proposal.
+    source_shape: the source's display (width, height), which decides the
+    default mastering of a 'source' frame."""
     protected = protected_lanes(user_message)
     audio_only = audio_revision_only(user_message)
     if not protected and not audio_only:
@@ -250,8 +268,17 @@ def preservation_violations(previous: Dict[str, Any],
     for lane in sorted(protected):
         if lane == "audio_mix":
             if not _audio_mix_preserved(previous, proposed,
-                                        timeline_changed):
-                violations.append(LANE_LABELS[lane])
+                                        timeline_changed, source_shape):
+                label = LANE_LABELS[lane]
+                was = _mastering(previous, source_shape) or "natural"
+                now = _mastering(proposed, source_shape) or "natural"
+                if was != now:
+                    # Usually a reframe: name the cause, or the agent cannot
+                    # see why a picture edit touched the sound.
+                    label += (f" (loudness mastering {was} -> {now}: an "
+                              "unset master follows the frame; "
+                              "set_master_loudness pins it)")
+                violations.append(label)
             continue
         before = _lane_state(previous, lane, timeline_changed)
         after = _lane_state(proposed, lane, timeline_changed)

@@ -86,6 +86,12 @@ def test_describe_says_what_will_actually_ship():
     assert "unmastered (natural loudness)" in describe_edl(natural)
     assert "mastered (social loudness)" in describe_edl(
         dict(base, master={"loudness": "social"}))
+    # A phone recording left at 'source' is mastered too, once the source's
+    # shape is known (the agent's state line and project_state pass it).
+    source = dict(base, frame={"ratio": "source", "mode": "crop"})
+    assert "mastered" not in describe_edl(source)
+    assert "format default" in describe_edl(source, src_shape=(1080, 1920))
+    assert "mastered" not in describe_edl(source, src_shape=(1920, 1080))
 
 
 # ---- the graph ---------------------------------------------------------------
@@ -173,7 +179,8 @@ def test_a_quiet_recording_is_brought_up_and_pauses_hold_the_gain():
     knots = dialogue_level.gain_knots(_blocks(levels))
     expr = dialogue_level.gain_expr(knots)
     gains = [_eval_gain(expr, t) for t, _v in _blocks(levels)]
-    assert all(abs(g - 12.0) < 0.3 for g in gains)    # never pumps the pause
+    want = dialogue_level.TARGET_LUFS + 30.0
+    assert all(abs(g - want) < 0.3 for g in gains)    # never pumps the pause
 
 
 def test_the_curve_is_slew_limited_and_clamped():
@@ -261,7 +268,7 @@ def test_turning_mastering_off_is_an_explicit_natural_opt_out():
     assert master_loudness(ctx.written, 1920, 1080) is None
     res = agent_tools.set_master_loudness(ctx, True)
     assert ctx.written["master"] == {"loudness": "social"}
-    assert "-18 LUFS" in res
+    assert "-20 LUFS" in res
 
 
 def test_project_state_reports_the_effective_mastering():
@@ -352,3 +359,35 @@ def test_a_portrait_render_is_leveled_and_mastered(tmp_path, monkeypatch):
     loud, _ = _loudness(raw, 3.2, 3.9)
     assert loud - q > 6.0                     # untouched: the mics still differ
     assert _loudness(raw)[0] < -16.0
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg required")
+def test_a_stitched_picture_window_skips_the_measurement(tmp_path,
+                                                         monkeypatch):
+    # A stitched preview muxes each re-encoded window with the previous
+    # preview's track or a rebuilt whole-program one; the window's own audio
+    # is thrown away, so measuring it would be one more ffmpeg run per window.
+    src = tmp_path / "two_mics.mp4"
+    _speechlike(src, -16.0, -8.0)
+    index = {"video": {"duration": 6.0, "width": 180, "height": 320,
+                      "fps": 25}, "words": []}
+    edl = default_edl(6.0)
+    probes = []
+    real_run = renderer._render_media_run
+
+    def run(cmd, **kw):
+        if "[adlg]" in cmd:
+            probes.append(cmd)
+        return real_run(cmd, **kw)
+
+    monkeypatch.setattr(renderer, "_render_media_run", run)
+    piece = dict(edl, keep=[[1.0, 3.0]])
+    renderer.render_edl(piece, index, str(src), str(tmp_path / "w.mp4"),
+                        str(tmp_path), preview=True, suppress_outro=True,
+                        render_fragment=True, discard_audio=True)
+    assert probes == []
+    # The whole-program track the stitch muxes in is still leveled.
+    renderer.render_edl(edl, index, str(src), str(tmp_path / "a.m4a"),
+                        str(tmp_path), preview=True, suppress_outro=True,
+                        audio_only=True)
+    assert len(probes) == 1

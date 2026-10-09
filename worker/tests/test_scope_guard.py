@@ -104,6 +104,33 @@ def test_preserved_audio_mix_does_not_make_deleted_picture_undeletable():
             "audio mix"]
 
 
+def test_a_frozen_audio_mix_sees_the_mastering_a_reframe_switches_on():
+    # 9:16/4:5/1:1 frames master an unset master by default, so "make it
+    # vertical but keep the audio as it is" must not level and master the
+    # mix behind the user's back via the frame alone.
+    wide = default_edl(20.0)
+    wide["frame"] = {"ratio": "16:9", "mode": "crop"}
+    tall = {**wide, "frame": {"ratio": "9:16", "mode": "crop"}}
+    ask = "make it vertical but do not change the audio"
+    [label] = scope_guard.preservation_violations(
+        wide, tall, ask, source_shape=(1920, 1080))
+    assert label.startswith("audio mix (loudness mastering natural -> social")
+    assert "set_master_loudness" in label
+    # Pinning the natural level first makes the same reframe legal, and the
+    # pin itself changes nothing a 16:9 render plays.
+    pinned = {**wide, "master": {"loudness": "natural"}}
+    assert scope_guard.preservation_violations(
+        wide, pinned, ask, source_shape=(1920, 1080)) == []
+    assert scope_guard.preservation_violations(
+        pinned, {**pinned, "frame": tall["frame"]}, ask,
+        source_shape=(1920, 1080)) == []
+    # A phone recording left at 'source' is already mastered by default:
+    # cropping it to 9:16 keeps the same sound.
+    portrait = {**wide, "frame": {"ratio": "source", "mode": "crop"}}
+    assert scope_guard.preservation_violations(
+        portrait, tall, ask, source_shape=(1080, 1920)) == []
+
+
 def test_text_timing_can_follow_a_real_cut_without_weakening_its_design():
     previous = default_edl(20.0)
     previous["texts"] = [{"id": "tx1", "text": "CHAPTER TWO",
