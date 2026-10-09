@@ -24,9 +24,9 @@ boundary.
 
 ## Strong treatment patterns
 
-LOOKS (`apply_look`) — one call composes caption look, grade, grain,
-transitions and optional music into a single coherent package and reports
-every component it set:
+LOOKS (`apply_look`) — one call composes caption look, grade, grain and
+transitions into a single coherent package and reports every component it
+set:
 - `editorial` — premium podcast/interview default: editorial motion captions,
   warm-neutral grade, fine grain, restrained junctions.
 - `creator_punch` — high-energy creator: punchy captions, vibrant contrast,
@@ -39,13 +39,14 @@ every component it set:
 - Legacy looks `hype`, `clean`, `cinematic`, `luxury`, `meme` remain.
 The descriptions above are the intent of each look; the tool result lists
 the exact components it set — read it before refining. A look can place its
-own transition whooshes and, through its music option ('auto', a mood or a
-library slug, when the schema lists it), a ducked bed: check its receipt or
-`get_edl` (sfx, music) before adding junction cues or another bed, and
-adjust the look's own cues rather than stacking. Refine any component
-afterwards with its own tool; do not layer a second
-look on top. On a vertical reel there must be no fade-in from black: if a
-look sets one, remove it with `set_fades`.
+own transition sounds: check its receipt or `get_edl` (sfx) before adding
+junction cues, and adjust or remove the look's own cues rather than stacking
+(read audio for the sparse sound rules). Where the schema lists a music
+option, pass it only when the user explicitly asked for generic background
+music — never on your own initiative (read music). Refine any component
+afterwards with its own tool; do not layer a second look on top. On a
+vertical reel there must be no fade-in from black: if a look sets one,
+remove it with `set_fades`.
 
 GRADES (`set_color_grade`: vibrant, warm, cool, bw, vintage, cinematic) —
 choose FOR the footage: 'cinematic' crushes and desaturates (night, drama,
@@ -66,7 +67,8 @@ and off between shots.
 STYLIZE (`add_stylize`): grain, vignette, glow, chromatic, dream_blur, vhs,
 flash, shake, stabilize, motion_blur — windowed, intensity 0–1. Use flash
 (1–2 frames), shake (short, decaying) and chromatic as beat punctuation on
-hero landings, together with the graphic and the hit sound. 'stabilize'
+hero landings, together with the graphic (and its sound, when that landing
+earns one). 'stabilize'
 smooths handheld wobble; 'motion_blur' blurs real movement.
 
 WHEN THE USER LISTS SEVERAL DEVICES ("zoom + flash + shake + glow + speed

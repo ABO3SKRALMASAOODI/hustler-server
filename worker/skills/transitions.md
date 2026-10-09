@@ -1,19 +1,21 @@
-# transitions — motivated junctions with paired sound, the styles and motion transitions, the jump-cut law
+# transitions — motivated junctions, their optional sound, the styles and motion transitions, the jump-cut law
 
 ## Editorial decision principles
 
 Premium reels mark every real turn with a designed junction — a whip, a
-zoom-through, a flash, a light leak, a film burn, a glitch — and give it a
-sound: a whoosh or hit whose peak lands on the cut. Inside one continuous
-take the cut stays hard and invisible. A transition expresses a motivated
-relationship across a real boundary; it never decorates a jump cut.
+zoom-through, a flash, a light leak, a film burn, a glitch — and may give it
+one sound from the approved library whose peak lands on the cut. Inside one
+continuous take the cut stays hard, invisible and silent. A transition
+expresses a motivated relationship across a real boundary; it never
+decorates a jump cut.
 
 - Motivated junctions: section turns, hook → body, B-roll in and out,
   location or speaker changes, chapter titles, the montage-to-face return.
 - Hard cuts inside a take; jump cuts get alternating framing (see zooms),
   not full-screen effects.
-- Every authored transition carries a paired sound cue unless the music
-  transient already lands there.
+- A junction at a real turn may carry one library sound, counted in the
+  short's sparse budget (about one sound every 4–5 s at most, never the same
+  sound twice within ~3 s). Ordinary cuts inside a conversation get none.
 - Vary the junction vocabulary across a reel; never the same effect
   back-to-back on every boundary.
 
@@ -39,20 +41,26 @@ treatment, place a motion graphic centred on that cut —
 `flash_transition` (1–2 frame exposure pop), `light_leak` (warm wash across a
 section turn), `glitch_burst` (RGB split on a tech or twist beat),
 `film_burn` (cinematic section change) — with `add_motion_graphic`, starting
-so its peak sits on the junction (read motion-design). These carry their own
-synced kit sounds. Use them to vary the vocabulary: a light leak into the
+so its peak sits on the junction (read motion-design). They are silent
+unless you pass `sfx=true`, which maps their sound roles onto the approved
+library. Use them to vary the vocabulary: a light leak into the
 story, a whip into B-roll, a flash on the reveal.
 
-PAIRED SOUND: a look from `apply_look` may already place its own transition
-sounds (ids starting `look_tx`) — read its receipt or `get_edl` (sfx) first
-and adjust those with `set_audio_gain` or `move_sfx` instead of stacking a
-second whoosh. When `set_transitions` places effects, add kit cues yourself
-(it adds none): `add_sfx(storage_key='kit:whoosh_hard', at=...)` for whips
-and zoom punches, `kit:swoosh_up` into a reveal, `kit:glitch` under a
-glitch, `kit:impact_soft` or `kit:kick` under a flash on a hit. Pre-roll the
-whoosh so its peak lands on the cut — start roughly 40–50% of its length
-early (about 0.2 s for whoosh_hard, 0.3 s for whoosh_soft) — and keep it
-under the voice. Give each cue a `purpose` naming the junction.
+JUNCTION SOUND: a look from `apply_look` may already place its own
+transition sounds (ids starting `look_tx`) — read its receipt or `get_edl`
+(sfx) first and adjust, move or remove those with `set_audio_gain`,
+`move_sfx` or `remove_sfx` instead of stacking a second sound. When
+`set_transitions` places effects it adds no sound; choose which real turns
+earn one and place it from the library (`list_sound_library`):
+`add_sfx(storage_key='sound:swish_1', at=..., gain_db=-14)` for a whip or
+zoom punch, `sound:whoosh_soft_1` or `sound:whoosh_soft_2` into a slide, a
+light leak or a reveal, `sound:glitch_1` under a deliberate glitch, and
+`sound:impact_1` under a flash only when that junction is the payoff or the
+single biggest landing (at most once per short). Pre-roll so the peak lands
+on the cut — about 0.12 s early for `swish_1`, 0.3 s for the soft whooshes —
+pass the suggested gain so it sits under the voice, and give each cue a
+`purpose` naming the junction. A run of junctions inside ~3 s gets one
+sound, not one each.
 
 THE JUMP-CUT LAW:
 - After `cut_silences`, a single talking-head take has one junction per
@@ -78,8 +86,9 @@ tool reports.
 ## Common failure modes
 
 - Effects on jump cuts inside one take.
-- Silent transitions, or a whoosh whose peak lands after the cut; two
-  whooshes on one junction because a look already placed one.
+- Whoosh wars: a sound on every junction or jump cut, the same sound on
+  junctions less than ~3 s apart, a whoosh whose peak lands after the cut,
+  or two sounds on one junction because a look already placed one.
 - One effect repeated mechanically on every boundary.
 - Direction or energy that contradicts the footage (a whip against the
   motion, a glitch in a tender passage).
@@ -88,12 +97,13 @@ tool reports.
 ## Verification procedure
 
 Review every authored junction with dense rendered frames around the cut
-and the AUDIO CHECK: it sits on a real turn, the motion reads clean, the
-sound peak lands on the junction, the next shot's first word is not swallowed,
-and the sequence of junction types varies.
+and the AUDIO CHECK: it sits on a real turn, the motion reads clean, a
+sound (when the junction earned one) peaks on the cut, the next shot's first
+word is not swallowed, and the sequence of junction types varies.
 
 ## Repair ladder
 
-Retime the sound to the cut → shorten or subdue → change direction or style
+Retime the sound to the cut → remove sounds the junction does not earn →
+shorten or subdue → change direction or style
 → move to the real section turn → replace with a hard cut plus a framing
 change → rescreen the sequence cadence.

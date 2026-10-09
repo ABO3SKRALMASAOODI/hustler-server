@@ -2017,7 +2017,7 @@ def test_mcp_workflow_teaches_the_premium_short_form_finish():
     assert "PREMIUM SHORT-FORM FINISH" in w
     for phrase in ("read_skill short-form-direction",
                    "read_skill motion-design", "list_motion_templates",
-                   "list_sfx_kit", "apply_look", "style.motion_look",
+                   "list_sound_library", "apply_look", "style.motion_look",
                    "add_motion_graphic", "0.1-0.6 s", "by\n      1.5 s",
                    "look_at(rendered=true", "apply_short_edit_batches"):
         assert phrase in w, phrase
@@ -2030,7 +2030,16 @@ def test_mcp_workflow_teaches_the_premium_short_form_finish():
     # Child edit batches validate media against that child's own assets, so
     # music is placed per child rather than carried by the shared batch.
     assert "(frame, captions style, effects)" in flat
-    assert "Music, kit sounds, motion graphics and camera moves are placed per child" in flat
+    assert "Music, library sounds, motion graphics and camera moves are placed per child" in flat
+    # Sound comes only from the owner-approved library, sparingly; the
+    # rejected synthesized kit and autonomous music beds never come back.
+    assert "add_sfx(storage_key='sound:<id>'" in flat
+    assert "about one sound every 4-5 s" in flat
+    assert "never the same sound twice within ~3 s" in flat
+    assert "Never on captions or ordinary cuts inside a conversation" in flat
+    assert "Music only when the user asks for it or supplies a track" in flat
+    for retired in ("list_sfx_kit", "kit:", "kit sounds", "music bed"):
+        assert retired not in w, retired
     # Dense rendered looks need a complete preview of the reviewed version.
     assert "render_preview(complete=true) and look_at(rendered=true" in flat
     assert "strength is magnification minus 1" in flat

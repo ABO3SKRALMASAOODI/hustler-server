@@ -120,9 +120,9 @@ The example shows the format only; never reuse its copy, cues or claims.
     "payoff": "The Mac would ship with real typefaces."
   },
   "beats": [
-    {"role": "hook", "cue": "garbage", "source_s": 1312.4, "move": "word_slam serif + kick"},
-    {"role": "turn", "cue": "same width", "source_s": 1321.8, "move": "W-R-I-T-I-N-G mono cells, tick per letter"},
-    {"role": "payoff", "cue": "real typefaces", "source_s": 1340.2, "move": "typeface cycle 0.3 s each, ding on settle"}
+    {"role": "hook", "cue": "garbage", "source_s": 1312.4, "move": "word_slam serif, silent"},
+    {"role": "turn", "cue": "same width", "source_s": 1321.8, "move": "W-R-I-T-I-N-G mono cells, silent"},
+    {"role": "payoff", "cue": "real typefaces", "source_s": 1340.2, "move": "typeface cycle 0.3 s each, riser_2 into impact_1 on settle"}
   ],
   "brief": "About 150 words of art direction ..."
 }
@@ -130,7 +130,9 @@ The example shows the format only; never reuse its copy, cues or claims.
 
 `story` with all four fields, `look`, `structure` and `brief` are required;
 the script rejects a brief over 250 words. `music` is `inherit` (the default:
-follow the run switch) unless this short needs an explicit `on` or `off`;
-`run.py assign` prints the resulting `music_effective`, which the editor
-receives with the brief. Editors convert source cues to output time after
+follow the run, which is off unless the owner supplied a song) or `off` to
+keep this short dry; `on` is accepted only when the run records the owner's
+song. Never choose a track in a brief. `run.py assign` prints the resulting
+`music_effective` and `music_song`, which the editor receives with the
+brief. Editors convert source cues to output time after
 their cuts.

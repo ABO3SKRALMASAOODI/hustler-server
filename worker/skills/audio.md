@@ -1,28 +1,38 @@
-# audio — sound edited to picture: the four layers, the music bed, the sound kit, cue timing, mixing, loudness
+# audio — sound edited to picture: the four layers, the approved sound library, when a sound earns its place, cue timing, music only on request, mixing, loudness
 
 ## Editorial decision principles
 
-Premium reels are never silent between words. A music bed sits 13–20 dB under
-the voice, and a sparse, structural layer of sound effects is edited to the
-picture: a whoosh under a graphic entrance with its peak on the landing, pops
-and ticks on reveals, typing under a typewriter, a shutter on a photo, a low
-hit on a hero landing, a riser into the payoff, and room before a reveal.
+The voice is the program. Sound design is sparse and professional: a sound
+goes only where something meaningful happens ON SCREEN, and most of a
+talking reel carries no added sound at all. Music is never your choice to
+make: it goes in only when the user asks for it or supplies a track.
 Intelligibility of the voice always wins the mix.
 
-- Every cue binds to a visible or narrative event and lands ON its frame.
-- Music and sound design are the default for short-form reels; a dry passage
-  is a deliberate choice for a specific moment (an admission, a joke that
-  needs room), not the whole piece.
-- Never a whoosh on every caption; structure, not wallpaper.
-- Digital silence in a finished reel reads as broken.
+- A sound earns its place only on a designed graphic landing, a real section
+  change or B-roll entry, the payoff, or a real-world action shown on screen
+  (a shutter on a photo or still, typing under typed text, a click on a
+  button press, a cash register on a money figure).
+- Never a sound on captions, on ordinary cuts inside a conversation (jump
+  cuts, angle changes), or on camera moves. Never a whoosh on every caption
+  or graphic: sound design is structure, not wallpaper.
+- Sparse: at most about one sound every 4–5 s (about 4–8 in a 30–45 s short),
+  never the same sound twice within ~3 s. Zero is a fine answer when nothing
+  on screen earns one.
+- Match the material and keep one sound family per short; the peak lands on
+  the visual frame; mix under the voice so no word is masked.
+- Never add music on your own initiative. Suggesting in the reply that a song
+  would help is fine; choosing one is not.
+- No digital silence: under silent inserts, stills or a no-dialogue passage,
+  keep the source's natural sound or design the passage around speech.
 
 ## Evidence to inspect
 
 Inspect the current EDL (music, sfx, voiceover, volume), every motion graphic
-and its owned cues, junctions and hero moments in the program map, dialogue
-windows (`get_kept_transcript`), the track's structure and beats
-(`get_audio_analysis`), the rendered AUDIO CHECK (loudness, peaks, dead air)
-and any bounded listening evidence.
+and any owned cues, junctions and hero moments in the program map, dialogue
+windows (`get_kept_transcript`), what the user asked for about music, the
+track's structure and beats when a track exists (`get_audio_analysis`), the
+rendered AUDIO CHECK (loudness, peaks, dead air) and any bounded listening
+evidence.
 
 ## Strong treatment patterns
 
@@ -30,14 +40,12 @@ FOUR DISTINCT LAYERS — never confuse them:
 1. The ORIGINAL footage's audio (the speaker): `set_volume` on SOURCE-time
    spans. A spliced scene's own audio mutes with `set_insert_window(id,
    mute=true)`; image inserts are silent.
-2. MUSIC: a bed under speech, or the lead on a speechless video. Place from
-   the music library when its tools are listed (or the look's own bed via
-   apply_look's music option — read music), from the user's upload or link,
-   or from a named song. `add_music` defaults to a -18 dB
-   auto-ducked bed under speech and a -4 dB lead with no duck where no speech
-   survives. Change track with `swap_music`; refit with `set_music_fit`
-   (start/end, loop, fade, offset, duck_mode); remove with `remove_music`.
-   Music start/end are OUTPUT-timeline positions.
+2. MUSIC: only when the user asked for it or supplied a track (read music).
+   `add_music` defaults to a -18 dB auto-ducked bed under speech and a -4 dB
+   lead with no duck where no speech survives. Change track with
+   `swap_music`; refit with `set_music_fit` (start/end, loop, fade, offset,
+   duck_mode); remove with `remove_music`. Music start/end are
+   OUTPUT-timeline positions.
 3. SOUND EFFECTS: `add_sfx` at a POINT in output time. A cue fires once,
    never loops, never ducks. Retime with `move_sfx`, delete with `remove_sfx`.
 4. VOICEOVER: `add_voiceover` lays uploaded narration over the program,
@@ -45,70 +53,82 @@ FOUR DISTINCT LAYERS — never confuse them:
 - To change music/sfx/voiceover level use `set_audio_gain` (kind 'music',
   'sfx' or 'voiceover') — never `set_volume`, which changes the speaker.
 
-THE SOUND KIT — `list_sfx_kit()` lists Valmera's 22 built-in, licence-free
-sounds, always available and instant: whoosh_soft, whoosh_hard, swoosh_up,
-swish_short, swipe, pop_soft, pop_bright, click_ui, tick, kick, ding, chime,
-notification, coin, riser_short, riser_long, impact_soft, impact_hard,
-sub_drop, glitch, shutter, typing. Place one with
-`add_sfx(storage_key='kit:<kind>', at=<program seconds>, gain_db=...,
-purpose=...)`. Motion templates already add their own synced kit cues, and
-a look from `apply_look` may add whooshes on its transitions: read the
-receipt or `get_edl` (sfx) first, then adjust those gains with
-`set_audio_gain` or pass `sfx=false` rather than stacking duplicates.
+THE SOUND LIBRARY — `list_sound_library()` lists the owner-approved real
+recordings (CC0, no attribution) with when to use each and a suggested gain.
+Roles and ids: whoosh (`whoosh_soft_1`, `whoosh_soft_2`), swish (`swish_1`),
+impact (`impact_1`), riser (`riser_1` to `riser_4`), shutter (`shutter_1`,
+`shutter_2`), typing (`typing_1`, `typing_2`), click (`click_1`, `click_2`),
+pop (`pop_1`), tick (`tick_1`), ding (`ding_1`), glitch (`glitch_1`,
+`glitch_2`), cash (`cash_register_1`), heartbeat (`heartbeat_1`). Place one
+with `add_sfx(storage_key='sound:<id>', at=<program seconds>,
+gain_db=<suggested>, purpose=...)` and always pass the suggested gain: the
+-6 dB default is louder than any library sound should sit. Motion graphics
+are silent by default; `add_motion_graphic(..., sfx=true)` opts one moment
+in by mapping the template's sound roles onto library recordings (roles with
+no approved recording are skipped). Read `get_edl` (sfx) before adding a cue
+so a graphic's owned cue is never doubled.
 
-CUE GRAMMAR — what goes where:
-- Graphic or card entrance → `whoosh_soft` or `swipe`, pre-rolled so the
-  peak lands on the landing frame.
-- Word, icon or list reveal → `pop_soft`, `pop_bright`, `tick` or
-  `click_ui`, quiet.
-- Typewriter or terminal → `typing`; counter → `tick` run or a `coin` on the
-  final money figure; photo or freeze → `shutter`; phone UI → `notification`
-  or `click_ui`.
-- Hero landing → a low hit: `kick` (word slam), `impact_soft` (reveal),
-  `impact_hard` (the single biggest beat), `sub_drop` (gravity, after a
-  riser).
-- Payoff → `riser_short` (1.2 s) or `riser_long` (2.6 s) ENDING on the
-  payoff frame, then the hit.
-- Transition → `whoosh_hard` or `swoosh_up` peaking on the cut; `glitch`
-  under a glitch.
-- Stop-down (optional): a beat of near-silence before a reveal, then the
-  hit. With no bed, keep the speaker's own 0.1–0.3 s pause before the reveal
-  word and place no cues inside it. Under a bed there is no dip control and
-  a sound effect cannot be shortened, so split the bed:
+CUE GRAMMAR — what may get a sound, and with what:
+- A designed graphic or card landing → `whoosh_soft_1` or `whoosh_soft_2`,
+  pre-rolled so the peak lands on the landing frame; a quick word or element
+  flick → `swish_1`.
+- A real section change or B-roll entry with a designed junction → `swish_1`
+  for a whip or zoom punch, a soft whoosh for a slide or light leak, `glitch_1`
+  or `glitch_2` only under a deliberate glitch transition.
+- The payoff or the single biggest landing → `impact_1`, at most once per
+  short; a riser (`riser_1`–`riser_4`) may lead into it and must END on the
+  frame. `heartbeat_1` only for a tense pause or emotional beat that the
+  picture holds.
+- Real-world actions shown on screen → `shutter_1`/`shutter_2` on a photo,
+  still or freeze; `typing_1`/`typing_2` under typed text; `click_1`/`click_2`
+  on a visible button press; `pop_1` on a bubble, emoji or list item
+  appearing; `tick_1` on a counter or timeline step; `ding_1` on a result or
+  notification; `cash_register_1` on a money figure.
+- Repeating template cues (a counter's tick run, a tick per letter) break the
+  ~3 s rule: leave that graphic silent and give its settled figure one sound.
+- One family per short: soft whooshes plus one impact for a talking reel;
+  clicks, pops and a ding for a product or UI short. Do not tour the library.
+- Stop-down (optional): a beat of room before a reveal makes the landing hit
+  harder. With no music, keep the speaker's own 0.1–0.3 s pause before the
+  reveal word and place no cues inside it. Under a bed there is no dip
+  control and a sound effect cannot be shortened, so split the bed:
   `set_music_fit(id, end=reveal − 0.15, fade_out_s=0.05)`, then `add_music`
   with the bed's own storage_key, read from `get_edl`, at start=reveal,
   offset_s = the bed's offset_s + (reveal − the bed's start), counting an
   unset offset as 0, fade_in_s=0 and the same gain_db and duck. Skip it
   when that offset would run past the track's end. Never end the bed early
   without restarting it; check the AUDIO CHECK dead-air line afterwards.
-- Layering is allowed: a whoosh into an impact on one hero beat is one event.
-- Typical density on a 30–60 s talking reel: a structural cue every 2–4 s,
-  stacked on hero moments, quieter on reveals. Count purposes, not sounds.
+- Layering is allowed only on one landing (a riser into the impact on the
+  payoff, a title template's whoosh and pop): that is one event. Count
+  events, then check the density: about one every 4–5 s at most.
 
 TIMING — PEAKS LAND ON THE PICTURE:
 - `at` is when the file starts; its peak arrives later. Pre-roll by the
-  sound's attack: whooshes ~40–50% of their length early, risers by their
-  full length so they END on the frame, pops/ticks/clicks 0–1 frame early,
-  hits 0–2 frames early.
+  sound's attack: whooshes ~40–50% of their length early (about 0.3 s for
+  the soft whooshes, 0.12 s for `swish_1`), risers by their full length so
+  they END on the frame (`riser_2` 1.1 s; `riser_1` and `riser_3` 1.85 s;
+  `riser_4` 1.7 s), pops, ticks, clicks and shutters 0–1 frame early, the
+  impact 0–2 frames early.
 - Tie cues to measured times: word onsets (`get_words` mapped to program
-  time), junctions from the program map, graphic landing frames, music
-  transients.
+  time), junctions from the program map, graphic landing frames.
 
 LEVELS:
-- Voice is the reference. Bed 13–20 dB under the voice (a library bed at
-  about -18 to -22 dB, ducked); in speechless stretches the music may rise.
-- UI ticks, pops and clicks at -8 to -12 dB; whooshes -6 to -10 dB; hero hits
-  -3 to -6 dB but never masking the hero word itself.
-- `set_music_fit(duck_mode='smooth')` when the bed pumps or swallows the first
-  word after a pause.
+- Voice is the reference. Library sounds sit at their suggested gain
+  (roughly -9 to -17 dB) under the voice; lower one rather than let it mask a
+  word.
+- When the user asked for music: the bed sits 13–20 dB under the voice,
+  ducked; in speechless stretches it may rise. `set_music_fit(duck_mode=
+  'smooth')` when the bed pumps or swallows the first word after a pause.
 
 OTHER SOURCES:
-- `add_web_sfx` and the search/audition/fetch chain find real recordings for
-  an exact sound the kit lacks (a crowd cheer, a door, rain). Relay licence
-  lines when they carry obligations.
+- `search_sfx`, the audition/fetch chain and `add_web_sfx` find a real
+  recording online only when the user explicitly asks for a specific sound
+  the library lacks (a crowd cheer, a door, rain). Relay licence lines when
+  they carry obligations.
 - A sound the user uploads, or the sound off a clip they sent, places
   directly with `add_sfx` / `add_music`.
-- Keep real environmental sound when it already tells the truth.
+- Keep real environmental sound when it already tells the truth; it is the
+  first answer to a silent passage.
 - TRENDING platform sounds are licensed inside the platform apps only: cut to
   the user's uploaded copy, export, and they attach the licensed version
   in-app. Never substitute a soundalike silently.
@@ -128,26 +148,31 @@ dead air — treat its findings as work.
 
 ## Common failure modes
 
-- No bed and no sound design on a reel; digital silence between phrases or
-  on montage passages.
+- Whoosh wars: a sound on every caption, cut, zoom or graphic; the same
+  sound twice within ~3 s; more than about one sound every 4–5 s.
+- Sounds where nothing meaningful happens on screen, or a sound that fights
+  the material (an impact under a tender admission).
+- Music added on the agent's own initiative, or a CC0 library bed chosen
+  when the user never asked for generic background music.
 - Cues whose peak lands after the visual (late whoosh, riser that ends past
-  the payoff).
-- A whoosh on every caption or graphic; UI pops loud enough to compete with
-  speech.
-- Bed too loud under the voice, or pumping on short gaps.
+  the payoff); library sounds left at the -6 dB default and masking words.
+- Digital silence under stills or a no-dialogue passage.
 - Gains changed through the wrong layer; duplicate cues stacked on a graphic
-  that already owns them.
+  that already owns one.
 
 ## Verification procedure
 
-Render; read the AUDIO CHECK (LUFS, peaks, dead air, bed level under speech);
-compare every cue's authored time with its named event and its landing frame
-in dense rendered looks; listen-check (when the reviewer is available) the
-opening, a dense dialogue passage, each hero moment, transitions and the
-ending. Be able to name the event for every cue; remove orphans.
+Render; read the AUDIO CHECK (LUFS, peaks, dead air, bed level under speech
+when music exists); list every cue with its program time and named on-screen
+event, then check the spacing (about one every 4–5 s at most, no repeat
+within ~3 s) and that each peak lands on its frame in dense rendered looks;
+listen-check (when the reviewer is available) the opening, a dense dialogue
+passage, each sounded moment and the ending. Remove any cue whose event you
+cannot name.
 
 ## Repair ladder
 
-Retime cues to their landing frames → correct gain and ducking → swap a
-cue's kind → remove orphan or duplicate cues → add the missing bed or
-structural cue → refit music ends → render and review again.
+Remove orphan, duplicate and caption-bound cues → thin to about one sound
+every 4–5 s → retime cues to their landing frames → correct gain and ducking
+→ swap a cue for the one that matches the on-screen action → restore natural
+sound under a silent passage → refit music ends → render and review again.

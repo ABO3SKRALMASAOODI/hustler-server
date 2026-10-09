@@ -9,8 +9,8 @@ the word, a number that counts up as it is said, a phone notification when
 the speaker describes a message, a circle drawn around the thing they point
 at. Valmera's browser motion engine renders these at After-Effects quality;
 your job is to choose the right composition, bind it to the exact spoken
-frame, give it one clear role, pair it with sound and check the rendered
-motion.
+frame, give it one clear role, decide whether the moment earns a sound,
+and check the rendered motion.
 
 - **Bind every graphic to a word or a beat.** The landing frame of a graphic
   sits on the spoken onset (0–3 frames early), never "somewhere in the
@@ -70,7 +70,8 @@ CHOOSING A TEMPLATE — confirm names and params with `list_motion_templates()`:
   moment); `phrase_build` for a short lockup assembled word by word on
   onsets; `glow_title` for a luminous keyword on dark or night footage.
 - Reveal grammar: `typewriter` for a typed prompt, definition or terminal
-  line (25–40 chars/s with a cursor and `typing` sound); `text_scramble` for
+  line (25–40 chars/s with a cursor; `typing` sound under it when it is
+  sounded); `text_scramble` for
   a decode reveal (secrets, tech, "the answer is…"); `marker_text` for a
   highlighter sweep behind the key phrase.
 - Structure: `chapter_title` at a real section turn ("The problem", "Step
@@ -87,8 +88,9 @@ CHOOSING A TEMPLATE — confirm names and params with `list_motion_templates()`:
   read off the grid; `focus_spotlight` darkens everything except the
   subject or region for a reveal; `lower_third` names a verified person,
   place or role.
-- Social and UI (Apple/SaaS-style mockups with animated cursor and click
-  sounds): `notification` when the speaker describes a message or alert;
+- Social and UI (Apple/SaaS-style mockups with an animated cursor; a click
+  sound only on a visible press, when sounded): `notification` when the
+  speaker describes a message or alert;
   `chat_bubbles` for a retold conversation; `search_bar` for "I searched…";
   `post_card` for a post they reference; `image_card` and `photo_stack` for
   photos and archival stills as floating 3D cards with a shutter.
@@ -104,7 +106,8 @@ CHOOSING A TEMPLATE — confirm names and params with `list_motion_templates()`:
 - Transitions and texture: `flash_transition` (1–2 frame exposure pop on a
   cut), `light_leak` (warm wash across a section turn), `glitch_burst` (RGB
   split on a tech or twist beat), `film_burn` (cinematic section change).
-  These go ON a real junction with a paired whoosh or hit.
+  These go ON a real junction; one library sound may peak on it when the
+  turn earns it (read transitions).
 
 CUING TO THE WORD:
 - Find the onset as above, then set `start` so the template's LANDING
@@ -148,24 +151,31 @@ LEGIBILITY:
   frosted or dark plate, or the grade — not thick outlines or yellow boxes
   by default. Check bright and dark plates in the render.
 
-SOUND PAIRING:
-- Templates add their own kit cues by default (`sfx=true`): a whoosh
-  pre-rolled into the entrance, a pop or tick on reveals, typing under a
-  typewriter, a shutter on photos, a click on UI presses. Owned cues move and
-  delete with the graphic.
-- The add_motion_graphic result lists each owned cue as kind@time; in
-  `get_edl` they are sfx items whose ids start `mg_<graphic id>_sfx`.
-  Adjust rather than stack: set their levels with
-  `set_audio_gain(kind='sfx', id=..., gain_db=...)` — UI ticks and pops -8
-  to -12 dB, hits -3 to -6 dB — after the graphic's params are final
-  (changing params or the template re-derives the cues at default gain).
-- Add a low hit (`add_sfx` with `kit:impact_soft`, `kit:kick` or
-  `kit:sub_drop`) only on a hero landing whose template does not already
-  own one; when the result lists a kick or impact (word slam, counter and
-  versus split carry one), raise that cue instead of adding a second. Lead
-  a payoff with `kit:riser_short` ending on the landing frame. Pass
-  `sfx=false` when the music transient already carries the moment or the
-  passage should stay dry. Never a whoosh on every caption.
+SOUND PAIRING — graphics are SILENT by default:
+- Most graphics need no sound. Opt a moment in with `sfx=true` only when its
+  landing is meaningful on screen — the hook title, a hero landing, the
+  payoff, or a graphic that shows a real-world action (a photo card's
+  shutter, a typewriter's typing, a UI press's click, a money figure's cash
+  register). `sfx=true` maps the template's declared sound roles onto the
+  owner-approved library (`list_sound_library`); roles with no approved
+  recording are skipped. Owned cues move and delete with the graphic.
+- The add_motion_graphic result lists each owned cue as sound@time; in
+  `get_edl` they are sfx items whose ids start `mg_<graphic id>_sfx`. Read
+  them against the short's budget — about one sound every 4–5 s at most,
+  never the same sound twice within ~3 s — and adjust rather than stack: set
+  a level with `set_audio_gain(kind='sfx', id=..., gain_db=...)` after the
+  graphic's params are final (changing params or the template re-derives
+  the cues at their suggested gain), or `set_motion_graphic(id,
+  sfx=false)` to drop them.
+- A template whose cue repeats (a tick per counter step or per letter)
+  stays silent; give the settled figure one sound instead (`cash_register_1`
+  on money, `ding_1` on a result).
+- For a moment with no owned cue, place one library sound yourself:
+  `add_sfx(storage_key='sound:<id>', at=..., gain_db=<suggested>)` —
+  `whoosh_soft_1` or `whoosh_soft_2` pre-rolled into a landing, `swish_1`
+  for a quick flick, `impact_1` only on the payoff or the single biggest
+  landing (at most once per short), a riser (`riser_1`–`riser_4`) ending
+  exactly on the payoff frame. Never a whoosh on every caption or graphic.
 
 TIMING VOCABULARY — name the motion you want, then pick a template param or
 author it:
@@ -233,7 +243,8 @@ the engine scales it to the output. Runtime summary:
   entrances; elements that keep drifting after they should hold still.
 - Small type in the middle of the face, or important type in the bottom UI
   band; thick outlines and yellow boxes used as the only legibility fix.
-- A whoosh on every graphic, or UI pops loud enough to compete with speech.
+- A sound on every graphic (whoosh wars), a repeated tick run, or UI pops
+  loud enough to compete with speech.
 - Invented numbers, fake brand notifications, testimonials or metrics.
 - Judging motion from one settled still.
 
@@ -252,8 +263,8 @@ the engine scales it to the output. Runtime summary:
    view without `rendered=true` needs no render but contains no graphics,
    captions or grade.
 3. Check: lands on the word (0–3 frames early), one leader, clear of the
-   face and UI band, readable at phone size on the actual background, sound
-   peak on the landing frame, exit clean before the next leader.
+   face and UI band, readable at phone size on the actual background, any
+   sound peaking on the landing frame, exit clean before the next leader.
 4. A repair makes a new EDL version: render it complete again before the
    next rendered look, and re-check the opening 0–2 s and every hero moment
    you changed.

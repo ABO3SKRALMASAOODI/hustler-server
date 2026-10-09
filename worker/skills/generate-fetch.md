@@ -1,4 +1,4 @@
-# generate-fetch — acquiring media: links, the built-in sound kit, found sounds, what cannot be generated, animation requests
+# generate-fetch — acquiring media: links, the approved sound library, found sounds on request, music on request, what cannot be generated, animation requests
 
 ## Editorial decision principles
 
@@ -29,16 +29,23 @@ user's footage and photos, fetched or stock media, authored motion graphics
 screens, and freeze frames. Never present an illustration or mockup as
 footage of a real event.
 
-SOUND — kit first:
-- The built-in kit (`list_sfx_kit()`) has 22 instant, licence-free sounds —
-  whooshes, pops, clicks, ticks, kicks, dings, chimes, notification, coin,
-  risers, impacts, sub drop, glitch, shutter, typing — placed with
-  `add_sfx(storage_key='kit:<kind>', at=...)`. Use it for all ordinary sound
-  design (read audio).
+SOUND — the approved library first:
+- `list_sound_library()` lists the owner-approved real recordings (CC0):
+  whooshes, a swish, an impact, risers, camera shutters, keyboard typing,
+  clicks, a pop, a tick, a ding, glitches, a cash register and a heartbeat,
+  each with when to use it and a suggested gain. Place one with
+  `add_sfx(storage_key='sound:<id>', at=..., gain_db=<suggested>)`. Use it
+  for all ordinary sound design, sparingly (read audio).
 - Found sounds (the search → audition → fetch chain, or `add_web_sfx` for one
-  exact named sound) are for things the kit lacks: a crowd cheer, a specific
-  door, rain, an engine. Relay the licence line when it carries an
-  obligation.
+  exact named sound) only when the user explicitly asks for a specific sound
+  the library lacks: a crowd cheer, a specific door, rain, an engine. Relay
+  the licence line when it carries an obligation.
+
+MUSIC — only when the user asks for it or supplies a track (read music):
+their upload or pasted link first, a song they name next (`find_song`, then
+`fetch_url`; a found song is not a usage licence), generic CC0 background
+music only when they explicitly ask for generic background music. Never
+fetch or place music on your own initiative.
 
 LINKS (`fetch_url`): when the user pastes a URL for something they want in
 the edit — a song, a clip, a photo — DOWNLOAD IT instead of asking for an
@@ -65,7 +72,9 @@ explain that precise limitation and offer the motion-graphics route.
   near-duplicates; wrong aspect; weak provenance.
 - Fetching or generating and never placing.
 - Promising generated imagery that does not exist on this deployment.
-- Using a found sound where an instant kit sound does the job.
+- Using a found sound where an approved library sound does the job, or
+  searching online for sounds nobody asked for.
+- Fetching or placing music the user never asked for.
 
 ## Verification procedure
 

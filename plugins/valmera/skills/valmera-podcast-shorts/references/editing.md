@@ -1,7 +1,8 @@
 # Editor playbook
 
 You own one child short at a time: its `project_id`, Look, structure,
-brief and `music_effective` (on or off, from the coordinator). Make it the
+brief, `music_effective` (off unless the owner supplied a song for the run)
+and, when that is on, `music_song`, the owner's song. Make it the
 best short in the batch. You do not spawn agents, touch siblings, export, or
 approve your own work. Read [looks.md](looks.md): **Shared grammar**, your
 structure, and your Look block. Nothing else is required.
@@ -17,8 +18,9 @@ state between them; re-read only after a cut or a rejection.
 
 - `list_motion_templates()`: the live template list with params and sound
   cues. Params change; never guess them from memory or from these docs.
-- `list_sfx_kit()`; and `list_music_library(mood)` when `music_effective`
-  is on and you want a specific track.
+- `list_sound_library()`: the owner-approved real recordings with their use
+  and suggested gain. These are the only sounds you use: never `search_sfx`,
+  `add_web_sfx` or a music library, and never a song you chose.
 - Read a tool's schema before its first use. Do not read Valmera backend
   source code to guess EDL fields; typed tools and `get_edl` show the shapes.
 
@@ -48,11 +50,12 @@ After any cut, read the program words once more (`get_kept_transcript`) and
 write the beats you will execute, in output seconds:
 
 ```text
-hook    0.00  landing 0.16 (silent); hook_title "Computers look like *garbage*" 0.15-2.6 (its whoosh)
-hero 1  6.42  "garbage"   word_slam serif, start 6.22 (lands +0.2, template hit)
-turn   14.80  "ten million" counter 0 -> 10M (template cues), punch 0.15
-hero 2 21.10  camera change -> landing (silent); marker_text "whether they look great or not"
-payoff 33.60  "look great" word_slam + chime; hold to 35.0; music button if on
+hook    0.00  landing 0.16 (silent); hook_title "Computers look like *garbage*" 0.15-2.6 (sfx=true: its whoosh + pop, one event)
+hero 1  6.42  "garbage"   word_slam serif, start 6.22 (lands +0.2, silent)
+turn   14.80  "ten million" counter 0 -> 10M (silent), punch 0.15
+hero 2 21.10  camera change -> landing (silent); marker_text "whether they look great or not" (silent)
+payoff 33.60  "look great" word_slam; riser_2 at 32.5 ending on it, impact_1 at 33.58; hold to 35.0
+sound   2 events in 35 s (hook 0.15, payoff 32.5-33.6); music off (no owner song)
 ```
 
 Every timestamp comes from a tool result. Readable frames land on the word's
@@ -70,20 +73,20 @@ recheck every output-timed item.
 | Step | Calls | Notes |
 | --- | --- | --- |
 | Cuts | 0-1 `keep_segments` | only to tighten inside the range |
-| Look | 1 `apply_look(name)`, or `apply_look(name, music=<mood or slug>)` when `music_effective` is on | sets caption look, grade, grain, base transitions with their sounds, and the bed; read what it set |
+| Look | 1 `apply_look(name)`, never with a music option | sets caption look, grade, grain and base transitions; read what it set and remove any transition sound that is not on a real turn |
 | Captions | 1 `add_captions(mode='from_transcript', style={...})` or `set_caption_style` | `style.motion_look` per Look; `emphasis_words` = the meaning-bearing words; keep the active-word accent if the brief asks |
 | Frame | 1-2 `set_frame` (or `auto_reframe`), `set_picture_card` | full-bleed with a per-shot `focus_track` (source seconds), or a card from looks.md **Card geometry** with `background_style` (`blur` or a gradient), grain and vignette |
 | Headline | 0-1 `set_editorial_graphic(kind="headline", speaker, text)` | headline-conversation only; verified speaker first |
-| Designed beats | 3-6 `add_motion_graphic` | one per beat, `sfx` left on, `purpose` names the beat, stable `id` |
+| Designed beats | 3-6 `add_motion_graphic` | one per beat, silent by default; `sfx=true` only on the hook, the payoff or a graphic showing a real-world action; `purpose` names the beat, stable `id` |
 | Camera | 3-6 `add_zoom` | `landing`, `punch`, `pulse`, `push_in` per the Look (schema names) |
 | Transitions | 0-1 `set_transitions` | base style, `scope='scene'` |
-| Extra sound | 2-4 `add_sfx(storage_key='kit:...')` | the hook, the payoff, a replaced base transition; templates already cue their own. Stay within the Look's cue budget |
-| Music | 0-1 `add_library_music` | only if `music_effective` is on and `apply_look` did not lay it; bed -20 dB ducked; a montage's bed leads |
-| Sound without music | 2-4 `search_sfx`/`fetch_sfx`/`add_sfx` | montage or action opener with music off: the ambience-bed recipe in looks.md |
+| Sound | 0-5 `add_sfx(storage_key='sound:<id>', at=..., gain_db=<suggested>)` | only meaningful on-screen moments, from your Look's family; the whole short stays at about one sound every 4-5 s at most (template cues count), none repeated within ~3 s |
+| Music | 0-1 `add_music` (after `fetch_url` for a link) | only the owner's song, only when `music_effective` is on; bed -20 dB ducked; a montage's bed leads |
+| Sound without music | 0-3 | montage or action opener with music off: natural sound, design around speech, a few library sounds, or a flag (looks.md) |
 
 Plain layer changes you already know the shape of may go together in one
-`apply_edit_batch`; prefer typed tools when unsure, and place kit sounds
-(`kit:<kind>`) with `add_sfx`, not in a batch. One child's writes are
+`apply_edit_batch`; prefer typed tools when unsure, and place library
+sounds (`sound:<id>`) with `add_sfx`, not in a batch. One child's writes are
 serial. On a `REJECTED` result, correct the arguments from the message and
 retry once; a transient error (for example "shard is busy") gets one retry
 after a short pause, then report it.
@@ -102,21 +105,28 @@ after a short pause, then report it.
 - `layer='behind_subject'` only inside one continuous shot (no cut in the window).
 - B-roll that shows the exact noun or action, licensed, with provenance in the
   handback; every still pushes or pans.
-- A sound on each designed beat (hook, graphic or hero-word entrance,
-  transition, B-roll or photo entry, payoff) within the Look's cue budget;
-  a stop-down of 50-280 ms before a reveal is a choice, longer silence is a
-  defect.
+- A sound only where something meaningful happens on screen (the hook
+  graphic, a hero landing that earns it, a real turn or B-roll entry, the
+  payoff, or a real-world action shown: a shutter on a photo, typing under
+  typed text, a click on a press, a cash register on money), at most about
+  one every 4-5 s, never the same sound within ~3 s, from your Look's
+  family and at its suggested gain; a stop-down of 50-280 ms before a
+  reveal is a choice, longer digital silence is a defect unless the passage
+  is flagged for the owner's song.
 
 ### Don't
 
 - A picture band on a flat black canvas, or a fade from black on frame 1.
-- A whoosh on every caption; sounds on landing zooms, `push_in`, pulses on
-  speech or jump cuts; a punch every sentence (keep 4 s between punches); a
-  zoom across a cut.
+- A whoosh on every caption; sounds on captions, landing zooms, `push_in`,
+  pulses on speech, jump cuts or ordinary cuts in the conversation; any
+  sound outside the approved library; a punch every sentence (keep 4 s
+  between punches); a zoom across a cut.
 - Graphics over the face for more than 1 s, under the corner brand mark,
   or below y 0.80.
-- A music bed when `music_effective` is off, or a silent montage when it is
-  off (use the ambience recipe).
+- Music of any kind when `music_effective` is off (no CC0 library bed, no
+  song you chose), anything but the owner's song when it is on, or a
+  montage of digital silence (use **Sound without music**).
+- Any change to the corner mark or the native end card.
 - Numbers, quotes, notifications, chats or posts the source does not support;
   a reference person's name or identity.
 - Downloading previews to re-encode, local ASR, re-uploading or re-indexing
@@ -141,11 +151,13 @@ after each operation.
    times in that one call).
 3. `audit_captions` once if you changed captions; read the render's warnings.
 4. Measure against your Look's targets: hook at or before 0.6 s, visual
-   change rate, hero count, picture area, cues within budget, no silence,
+   change rate, hero count, picture area, sounds within budget and spacing
+   (list each with its time and on-screen event), no digital silence,
    payoff held.
 
 Fix real defects (clipped words, collisions, unreadable or wrong captions,
-silence, an exposed edge or one-frame pop) and the single weakest designed
+digital silence, a sound with no on-screen event, an exposed edge or
+one-frame pop) and the single weakest designed
 moment. Re-render only if the fix changed pixels or sound that matter;
 two renders is the ceiling.
 
@@ -156,10 +168,10 @@ preview link:
 
 ```text
 s07 · kinetic-poster · fast-conversation · EDL v14 · 1 render
-Hook: 0.2s landing+whoosh, hook_title by 1.1s ("Why fonts were garbage")
+Hook: 0.2s landing + hook_title whoosh, title by 1.1s ("Why fonts were garbage")
 Heroes: 6.4 garbage slam; 14.8 counter 10M; 29.0 typeface cycle
-Payoff: 33.6 "look great" slam + chime, held 1.3s
-Sound: 12 cues (8 template, 4 kit; ~10 per 30 s); music off (run auto, conversation)
+Payoff: 33.6 "look great" slam + riser_2 into impact_1, held 1.3s
+Sound: 2 events, 4 cues (2 template, 2 library); music off (no owner song)
 Targets: change ~0.4s, picture full-bleed, 3 heroes
 Weakest: 18-20s talking head with only captions (push_in 0.05)
 Assets: Lisa photo (Wikimedia, CC BY-SA 4.0, credit in handback)
@@ -167,4 +179,6 @@ Assets: Lisa photo (Wikimedia, CC BY-SA 4.0, credit in handback)
 
 Optionally attach a handback JSON (`music`, `broll`, `required_credits`,
 `rights_note`, `headline`, `kept_transcript`, `kept_source_ranges_s`) so the
-manifest is complete. Do not self-score.
+manifest is complete. `music` names the owner's song, or reads `none - owner
+to add a song when posting (montage <start>-<end> s)` for a flagged
+passage. Do not self-score.

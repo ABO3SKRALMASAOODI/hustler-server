@@ -25160,24 +25160,32 @@ _COMPACT_CONTRACTS = {
         "get_words; start earlier by the landing offset the template "
         "description states). layer above_captions (default), below_captions "
         "or behind_subject. Pass mute_captions explicitly: true when it repeats "
-        "the spoken words (hook_title of the spoken hook too). sfx=true adds "
-        "synced kit cues listed in the result. Pass purpose and a stable id. "
+        "the spoken words (hook_title of the spoken hook too). Silent by "
+        "default; sfx=true, only for a moment that earns sound, maps its "
+        "sound roles onto the approved library (cues listed in the result). "
+        "Pass purpose and a stable id. "
         "Never invent numbers, brand messages, handles or CTA offers."),
     "set_motion_graphic": (
         "Patch a motion graphic by id: window, params (merged), template, layer, "
         "html, caption muting. Its owned sound cues follow; sfx=true re-derives "
         "them, sfx=false removes them. Modify instead of remove and re-add."),
-    "list_sfx_kit": (
-        "READ the 22 built-in licence-free sounds (whooshes, pops, clicks, "
-        "ticks, kick, dings, risers, impacts, sub_drop, glitch, shutter, "
-        "typing). Place with add_sfx(storage_key='kit:<kind>', at=...)."),
+    "list_sound_library": (
+        "READ the owner-approved sound library: real recordings by role "
+        "(whoosh, swish, impact, riser, shutter, typing, click, pop, tick, "
+        "ding, glitch, cash, heartbeat), each with its use and suggested gain. "
+        "Place with add_sfx(storage_key='sound:<id>', at=..., gain_db="
+        "<suggested>). Sound only where something meaningful happens on "
+        "screen; about one every 4-5 s at most; never on captions."),
     "add_sfx": (
-        "One-shot sound at an OUTPUT second. storage_key 'kit:<kind>' uses the "
-        "built-in kit (list_sfx_kit: instant, licence-free); otherwise an exact "
-        "key from fetch_sfx or list_assets, never invented. Pre-roll so the "
-        "peak lands on the visual frame (whoosh ~40-50% of its length early, "
-        "riser ends on the moment). purpose names the event. Default -6 dB; "
-        "UI pops/ticks -8 to -12. Never a whoosh on every caption."),
+        "One-shot sound at an OUTPUT second. storage_key 'sound:<id>' places "
+        "an approved library recording (list_sound_library); otherwise an "
+        "exact key from list_assets, or from fetch_sfx when the user asked "
+        "for a specific sound the library lacks; never invented. Pass the "
+        "library's suggested gain_db (the -6 dB default is too loud). "
+        "Pre-roll so the peak lands on the visual frame (whoosh ~40-50% of "
+        "its length early, riser ends on the moment). purpose names the "
+        "on-screen event. Never on captions or ordinary cuts; about one "
+        "sound every 4-5 s at most, none repeated within ~3 s."),
     "add_captions": (
         "Burned captions: mode='from_transcript', 'off', or dictated items. "
         "Short-form speech: style.motion_look editorial|clean (premium default), "
@@ -25195,13 +25203,14 @@ _COMPACT_CONTRACTS = {
         "colour means no accent, never a different hue."),
     "apply_look": (
         "ONE committed look in one version: caption look + grade + grain + "
-        "transitions (+ optional music), reporting every component. Premium: "
+        "transitions, reporting every component. Premium: "
         "editorial (podcast/interview default), creator_punch, cinematic_doc, "
         "mono_noir, clean_minimal; legacy hype, clean, cinematic, luxury, meme. "
-        "Its transitions may carry their own whooshes and its music option "
-        "(when listed) lays a bed: read the receipt before adding junction "
-        "cues or music. One look per edit; refine components with their own "
-        "tools; no fade-in on vertical reels (set_fades)."),
+        "Its transitions may carry their own sounds: read the receipt before "
+        "adding junction cues. Its music option (when listed) lays a library "
+        "bed: pass it only when the user asked for background music. One look "
+        "per edit; refine components with their own tools; no fade-in on "
+        "vertical reels (set_fades)."),
     "punch_in_on_emphasis": (
         "One-call emphasis pass on vocally stressed words that survive the cut: "
         "each punch snaps in ON its word (~0.12s expo), holds to the next cut "
@@ -25214,9 +25223,10 @@ _COMPACT_CONTRACTS = {
         "One junction style at real scene changes; scope='scene' skips jump "
         "cuts — report the junction count it returns. Styles dip_black, "
         "dip_white, whip_left/right, zoom_punch, glitch, flash (fast ones "
-        "0.15-0.4s). Adds no sound: pair with add_sfx kit:whoosh_hard peaking "
-        "on the cut unless a look already placed one there (get_edl sfx). One "
-        "specific junction: a motion transition template."),
+        "0.15-0.4s). Adds no sound: a real turn may take one add_sfx "
+        "sound:swish_1 peaking on the cut unless a look already placed one "
+        "there (get_edl sfx); ordinary cuts stay silent. One specific "
+        "junction: a motion transition template."),
     "set_picture_card": (
         "Footage-only rounded card for start/end program seconds (box, radius, "
         "border, shadow, entrance/exit). Give it a designed background from the "

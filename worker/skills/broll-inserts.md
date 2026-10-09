@@ -16,8 +16,8 @@ THE CHOICE: does the voice keep going?
 - Taste: map every proposed cutaway to a narrative purpose (proof, context, contrast, scale, time, place, payoff). On a reel, every concrete noun is a candidate for evidence; density follows the story, not a quota. Never cover a punchline, admission or reaction that earns a face-on delivery, and never use generic wallpaper merely because a search result exists.
 
 DESIGNED ENTRANCES AND MOVING STILLS (short-form):
-- Enter B-roll on the word, and when the cutaway marks a turn give it a designed junction — a whip or zoom_punch, a `light_leak` or `flash_transition` motion graphic — with a whoosh whose peak lands on the cut (read transitions). Plain hard cuts are right inside a fast evidence run.
-- Stills never sit frozen: give photos a slow push or drift (`set_overlay_motion` scale/x/y keyframes, or `insert_media` motion='zoom_in'/'zoom_out'/'pan_left'/'pan_right' on a spliced still), or present them as designed cards with `image_card` or `photo_stack` (3D floating cards with a shutter cue).
+- Enter B-roll on the word, and when the cutaway marks a turn give it a designed junction — a whip or zoom_punch, a `light_leak` or `flash_transition` motion graphic — and, within the sparse sound budget, one library whoosh or swish whose peak lands on the cut (read transitions). Plain hard cuts are right inside a fast evidence run.
+- Stills never sit frozen: give photos a slow push or drift (`set_overlay_motion` scale/x/y keyframes, or `insert_media` motion='zoom_in'/'zoom_out'/'pan_left'/'pan_right' on a spliced still), or present them as designed cards with `image_card` or `photo_stack` (3D floating cards; `sfx=true` gives the card a shutter when the photo's arrival earns one).
 - Archival or 4:3 evidence can sit as a card on a designed background instead of a full-frame crop that destroys it (premium-composition).
 
 INSERTING (insert_media): splices an uploaded clip or image at ANY output position — a mid-take position splits the take at a word edge automatically. For clips longer than ~15s NEVER splice the whole thing: look_at_asset first to find the moment, then pass duration_s (2-8s typical) and clip_start_s. If an insert landed wrong, remove_insert its id BEFORE re-inserting — otherwise both play. Both need a storage_key from list_assets — never invent one. Inserted media is not captioned. NEVER splice a STYLE REFERENCE ("watch this", "like this", "use this song/style", a YouTube they asked you to study). If list_assets marks ROLE=edit_reference, or the studio already dropped that clip on the timeline, remove_insert it and study it with look_at_asset / extract_audio instead.
@@ -47,7 +47,7 @@ SOURCING ORDER for b-roll: the user's uploads first (list_assets), then whicheve
 
 - First-result, irrelevant, repeated, watermarked, corporate-cheap or palette-incompatible footage.
 - Covering a face-dependent payoff, using the wrong clock, or shipping bad entry/exit junctions.
-- Frozen stills, silent designed entrances, or a turn into B-roll with no junction or sound.
+- Frozen stills, a turn into B-roll with no designed junction, or a sound on every cutaway (whoosh wars).
 
 ## Verification procedure
 

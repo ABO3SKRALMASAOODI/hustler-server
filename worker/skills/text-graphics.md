@@ -52,8 +52,8 @@ VECTOR GRAPHICS (`add_vector_graphic` / `set_vector_graphic` /
 - An arrow or ring identifies a REAL visible object, control, statistic or
   action read off the grid; a panel sits behind words with deliberate
   padding; progress represents real completion only — never invent 73%.
-- For drawn-on arrows, hand-drawn circles and highlighter sweeps with sound,
-  the motion library (arrow_callout, circle_highlight, marker_text) is the
+- For drawn-on arrows, hand-drawn circles and highlighter sweeps (sounded
+  only when the moment earns it), the motion library (arrow_callout, circle_highlight, marker_text) is the
   premium route.
 - Revise an existing vector instead of stacking a near-duplicate.
 
@@ -89,8 +89,9 @@ static burst. Different from the `glitch` junction style and the
 
 FREEZE FRAMES (`add_freeze_frame`): freeze the picture and hold big words
 over the blurred, darkened still — a real cut, captions never land on it.
-Right for the 2–3 strongest lines of a sermon or motivational piece; pair it
-with a `shutter` or `impact_soft` cue.
+Right for the 2–3 strongest lines of a sermon or motivational piece; a
+freeze may carry one `shutter_1` or `shutter_2` cue from the sound library
+(the strongest one may take `impact_1` instead, once per short).
 
 KINETIC TEXT (`add_kinetic_text`): transcript-timed phrase typography over a
 range, placed in measured clear bands; `motion_style='composed'` is one

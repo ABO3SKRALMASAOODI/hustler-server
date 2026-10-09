@@ -10,8 +10,9 @@ and better: a story worth finishing, committed art direction, motion
 typography, sound edited to picture and eased camera moves. The owner's
 references score about 7.5/10; October's restrained, silent shorts scored
 2.6. v9 replaces restraint with **Looks** ([references/looks.md](references/looks.md)):
-SFX on, the picture fills the frame, one render is the norm and review is a
-quick binary verdict. Superseded v6-v8 material lives in `legacy/`.
+sparse sound from the owner-approved library, the picture fills the frame,
+one render is the norm and review is a quick binary verdict. Superseded v6-v8
+material lives in `legacy/`.
 
 ## Roles and what to read
 
@@ -20,9 +21,9 @@ quick binary verdict. Superseded v6-v8 material lives in `legacy/`.
   You select, brief, review, export and write the manifest. You do not edit
   shorts yourself.
 - **Editors:** [editing.md](references/editing.md), the Shared grammar,
-  structure and Look sections of looks.md, one brief and its
-  `music_effective`. Default **three editors**, reused: a finished editor
-  takes the next brief at once. Raise the pool (and `--max-jobs`) to 4-6
+  structure and Look sections of looks.md, one brief, its `music_effective`
+  and, when that is on, the owner's song. Default **three editors**, reused:
+  a finished editor takes the next brief at once. Raise the pool (and `--max-jobs`) to 4-6
   when renders return in about a minute with no "shard is busy" errors.
 - Everyone runs on the session's current model (in Codex, `gpt-6.1-sol`).
 
@@ -35,19 +36,24 @@ disagree, v9 wins on method and the brief wins on preferences.
 - **Still binding:** the source and people, lane (structure) names,
   speaker-first verified headlines, spoken-word highlighting when asked,
   asset provenance notes, no publishing or scheduling, B-roll and montage
-  rules, and the music preference ("do not add music" means `--music off`).
+  rules, and the music preference. Music is off unless the owner supplies
+  or approves a specific song for the run (the brief's Music line names it;
+  record it with `--song`).
 - **Superseded:** "no maximum" story counts (use 8-12 heroes; a standard
   tier only when asked); v7 run state (use `scripts/run.py`);
   `premium-design.md`, `additional-reels.md` and `set_typography_scene` as
-  primary direction (use looks.md); restraint defaults, the SFX ban, the
-  black canvas, the per-candidate evidence path (use review.md) and the
-  score-90 gate.
+  primary direction (use looks.md); restraint defaults, the blanket SFX ban
+  (sound is now sparse and library-only), any `auto` music or library bed
+  (music is off without the owner's song), the black canvas, the
+  per-candidate evidence path (use review.md) and the score-90 gate.
 
 ## The production loop
 
 1. **Start.** Make `.tmp/valmera-podcast-shorts/<run-id>` under
    `/Users/masaoodi/Documents/Valmera` and run `scripts/run.py init`
-   (source, `--music`, editors). A new podcast is a new run.
+   (source, editors; `--song '<file, link or Artist - Title>'` only when the
+   owner supplied or approved one, otherwise music stays off). A new podcast
+   is a new run.
 2. **Acquire and index once.** `create_project(kind='shorts')`, upload the
    source as `original` (`upload_start`/`upload_finish`; download a URL
    locally once if Valmera cannot fetch it). Indexing takes about 15-20 min:
@@ -66,10 +72,10 @@ disagree, v9 wins on method and the brief wins on preferences.
    `assignments/<id>.json`. Then one `shorts_status(parent)`,
    `run.py add-short` per child and `run.py assign --brief`.
 6. **Edit.** Hand each editor one short (`run.py assign --editor`) with its
-   brief and `music_effective`. Editors execute in batched calls, render one
-   preview, self-check with `watch_video` and rendered `look_at`, fix only
-   the weakest moment and hand back a note of at most 10 lines. Record it
-   with `run.py candidate` and refill that editor.
+   brief, `music_effective` and `music_song`. Editors execute in batched
+   calls, render one preview, self-check with `watch_video` and rendered
+   `look_at`, fix only the weakest moment and hand back a note of at most 10
+   lines. Record it with `run.py candidate` and refill that editor.
 7. **Review** ([review.md](references/review.md)) in batches as candidates
    arrive: five yes/no questions, then **ship**, **one targeted fix** or
    **kill**, recorded with `run.py review`.
@@ -86,15 +92,18 @@ disagree, v9 wins on method and the brief wins on preferences.
 - **Faithful claims.** No spliced claims, qualifiers kept, cautious
   statements stay cautious. No invented numbers, quotes, messages, posts or
   identities: UI and data templates dramatize only what the source says.
-- **Rights.** Licensed, CC, Valmera kit or library media only; record source
-  and licence for every asset and put required credits in the handback. Never
-  use another creator's logo, footage, music or identity, or present
-  archival footage as the exact event discussed.
+- **Rights.** Licensed or CC media, the Valmera sound library, and only the
+  owner's own song for music; record source and licence for every asset and
+  put required credits in the handback. Never use another creator's logo,
+  footage, music or identity, or present archival footage as the exact event
+  discussed.
 - **Speaker-first, verified headlines** (`Name: claim`). If identity is
   uncertain, omit the name; never borrow one from a reference or earlier run.
-- **Branding.** Every final keeps the native corner mark and the complete
-  5-second native Valmera ending, never cropped, covered, trimmed or
-  replaced. The final is 15-45 s including that ending.
+- **Branding.** Every final keeps the native corner watermark ("Edited
+  using Valmera AI") and the complete 5-second native Valmera end card
+  exactly as Valmera renders them: never cropped, covered, trimmed,
+  shortened, moved or replaced. They are the owner's marketing. The final is
+  15-45 s including that ending.
 - **Accounted for.** Every selected short ends exported, killed,
   needs_user_review or failed_technical, with a reason and next action.
 - Archival footage is used as is; never upscale or re-upload children.
@@ -103,13 +112,29 @@ disagree, v9 wins on method and the brief wins on preferences.
 
 ## Sound and music
 
-SFX are on: a sound on each designed beat, within the Look's cue budget.
-The run's `music` switch is `auto` (default: a quiet library bed for
-montage and action-opener structures, dry with SFX for conversation), `on`
-(a bed under every short at about -20 dB, ducked) or `off`. A brief's
-`music` is `inherit` unless it says `on` or `off`, and only those override
-the run. No final contains digital silence longer than 0.3 s; with music off,
-montages get an ambience bed and SFX (looks.md, **Sound without music**).
+**Sound** comes only from the owner-approved library of real recordings
+(`list_sound_library`; `add_sfx(storage_key='sound:<id>', at=...,
+gain_db=<suggested>)`), never from online search. It goes only where
+something meaningful happens on screen: a designed graphic landing, a real
+section change or B-roll entry, the payoff, or a real-world action shown (a
+shutter on a photo, typing under typed text, a click on a button press, a
+cash register on a money figure). Never on captions or ordinary cuts inside
+the conversation. At most about one sound every 4-5 s (about 4-8 in a
+30-45 s short), never the same sound twice within ~3 s, zero when nothing
+earns one; one family per short, matched to the material; peaks on the
+visual frame; mixed under the voice at the suggested gain. Motion graphics
+are silent unless the editor passes `sfx=true` (looks.md, **Sound**).
+
+**Music is off.** Agents never choose music: no CC0 library bed, no stock
+track, no song picked by taste. It is on only when the owner supplies or
+approves a specific song for the run (`run.py init --song ...`); then that
+exact song goes under every short whose brief does not say `off`, about
+-20 dB and ducked. A brief's `music` is `inherit` or `off`; `on` is accepted
+only when the run has the owner's song. Montages and action openers never
+ship digital silence: they keep the source's natural sound, are designed
+around speech, or, when neither works, are flagged in the handback for the
+owner to add a song when posting (looks.md, **Sound without music**). Never
+invent a music choice.
 
 ## Efficiency rules
 
@@ -124,7 +149,7 @@ montages get an ambience bed and SFX (looks.md, **Sound without music**).
   are serial; independent children proceed in parallel.
 - Reuse the parent source and index. No local re-encodes, local ASR, frame
   dumps, preview downloads or reading Valmera's backend code; use the tool
-  schemas. Editors list templates, kit and music once.
+  schemas. Editors list templates and the sound library once.
 - On a rejected call, correct the arguments and retry once. On a lost
   response, check `shorts_status` and the job id before retrying. A transient
   failure gets one retry, then `run.py exception` and move on.

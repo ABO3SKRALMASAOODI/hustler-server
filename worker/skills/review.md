@@ -42,8 +42,8 @@ SCREEN IN THIS ORDER — each item is a yes/no question:
 2. RHYTHM: scanning the program, is anything static for more than ~2 s
    without a designed reason? Does a bigger change arrive every 2–4 s?
 3. HERO MOMENTS (dense frames each): does one leader land on its word
-   (0–3 frames early), with camera and sound on the same frame, clear of the
-   face and the UI band, readable at phone size, and exit cleanly?
+   (0–3 frames early), with camera (and any sound) on the same frame, clear
+   of the face and the UI band, readable at phone size, and exit cleanly?
 4. CAPTIONS: words appear on onsets; accents on the right 1–2 words; legible
    against every background; no overlap with faces, graphics or the platform
    band; no caption stacked over burned-in text.
@@ -52,11 +52,13 @@ SCREEN IN THIS ORDER — each item is a yes/no question:
    ideas, varied strengths, no more than one camera event per ~1.5 s except
    a designed hit.
 6. JUNCTIONS: cuts on word edges, no flash or double frames; transitions only
-   on real turns, each with its sound peak on the cut; no effect on a jump
+   on real turns, any sound peaking on the cut; no effect or sound on a jump
    cut.
-7. SOUND: AUDIO CHECK loudness and peaks; a bed present under speech at
-   roughly 13–20 dB below the voice; no digital silence; every cue on its
-   named event; nothing masking the voice. ACTUAL-AUDIO REVIEW, when present,
+7. SOUND: AUDIO CHECK loudness and peaks; no digital silence; every cue on
+   a named on-screen event (never a caption or an ordinary cut), about one
+   every 4–5 s at most, no sound repeated within ~3 s; nothing masking the
+   voice; music present only if the user asked for it or supplied it, then
+   roughly 13–20 dB below the voice. ACTUAL-AUDIO REVIEW, when present,
    adds bounded listening evidence — never claim continuous listening beyond
    its labeled windows.
 8. LOOK AND LAYOUT: one grade and texture throughout; no flat black void; no
@@ -85,7 +87,7 @@ retime, re-aim, move, resize, swap — check it with a changed-section proof,
 and render complete again only when you need rendered motion frames.
 
 THE BAR: would a top Instagram editor post this next to the reference reels?
-The hook earns the stop, the middle never sags, the sound feels produced,
+The hook earns the stop, the middle never sags, the few sounds feel placed,
 nothing looks accidental. If the honest answer is no and the cause is within
 your tools, keep working. If the cause is the footage, say exactly that in
 one sentence.

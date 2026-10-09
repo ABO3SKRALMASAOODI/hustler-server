@@ -102,7 +102,7 @@ NATIVE TOOLS THAT REMAIN USEFUL:
 - **A visible argument**: `set_editorial_graphic` kinds comparison, metric,
   statement, quote, chapter and label produce editable measured type/vector
   layers; `treatment="type"` removes the panel. For animated equivalents
-  with sound use the motion library (versus_split, stat_card, quote_card,
+  use the motion library (versus_split, stat_card, quote_card,
   chapter_title, lower_third).
 - **Words behind the subject**: `add_text_behind` (person matte) or a motion
   graphic with `layer='behind_subject'`; the type must be LARGE so the

@@ -50,12 +50,16 @@ STRUCTURES = (
     "fast-conversation", "headline-conversation", "hook-to-silent-montage",
     "silent-action-to-conversation",
 )
-MUSIC = ("auto", "on", "off")
-# A brief inherits the run switch unless it says "on" or "off" explicitly.
+# Music is off unless the owner supplies or approves a specific song for the
+# run (init --song). Agents never choose music: no CC0 library bed, no stock
+# track, no song picked by taste. Runs created with the retired "auto" switch
+# resolve to off.
+MUSIC = ("off", "on")
+# A brief inherits the run switch unless it says "off" (keep this short dry)
+# or "on" (use the owner's song here; only valid when the run has one).
 MUSIC_BRIEF = ("inherit", "on", "off")
-# Under the run switch "auto", these structures get a quiet library bed and
-# the conversation structures stay dry (SFX only).
-BED_STRUCTURES = ("hook-to-silent-montage", "silent-action-to-conversation")
+NEEDS_SONG = ("music on needs the owner's supplied or approved song for this run "
+              "(run.py init --song '<file, link or Artist - Title>'); never choose one")
 CHECKS = ("hook", "payoff", "targets", "attention", "clean")
 TERMINAL = ("exported", "killed", "needs_user_review", "failed_technical")
 STATUSES = ("queued", "editing", "candidate", "fix", "approved") + TERMINAL
@@ -182,18 +186,30 @@ def hms(seconds: float | None) -> str | None:
 
 
 def effective_music(state: dict, item: dict) -> tuple[str, str]:
-    """('on' | 'off', why) for one short: an explicit brief on/off wins,
-    otherwise the run switch, with "auto" resolved by the structure."""
+    """('on' | 'off', why) for one short. Off unless the run records the
+    owner's song: a brief "off" keeps a short dry; a brief "on" or the run
+    switch "on" puts that song under it. Nothing else turns music on."""
     brief_music = (item.get("brief") or {}).get("music") or "inherit"
-    if brief_music in ("on", "off"):
-        return brief_music, f"brief {brief_music}"
-    run_music = state.get("music") or "auto"
-    if run_music in ("on", "off"):
-        return run_music, f"run {run_music}"
-    structure = item.get("structure")
-    if structure in BED_STRUCTURES:
-        return "on", f"run auto + {structure}"
-    return "off", f"run auto + {structure or 'conversation'}"
+    if brief_music == "off":
+        return "off", "brief off"
+    if not state.get("song"):
+        return "off", "no owner song"
+    if brief_music == "on":
+        return "on", "brief on (owner song)"
+    run_music = state.get("music") or "off"
+    if run_music == "on":
+        return "on", "run on (owner song)"
+    return "off", "run off" if run_music == "off" else f"run {run_music} retired: off"
+
+
+def music_song(state: dict, item: dict) -> str | None:
+    """The owner's song when music is on for this short, else None."""
+    return state.get("song") if effective_music(state, item)[0] == "on" else None
+
+
+def set_music(item: dict, state: dict) -> None:
+    item["music_effective"], item["music_why"] = effective_music(state, item)
+    item["music_song"] = music_song(state, item)
 
 
 def editors_busy(state: dict) -> dict:
@@ -209,8 +225,10 @@ def cmd_init(args: argparse.Namespace) -> dict:
     for name in ("source", "assignments", "candidates", "exports"):
         (directory / name).mkdir(exist_ok=True)
     path = directory / "run.json"
+    song = " ".join(args.song.split()) if args.song and args.song.strip() else None
+    music_arg = args.music or ("on" if song else None)
     settings = {
-        "music": args.music, "max_editors": args.max_editors,
+        "music": music_arg, "song": song, "max_editors": args.max_editors,
         "max_jobs": args.max_jobs, "parent_project_id": args.parent_project_id,
         "min_final_s": args.min_final_s, "max_final_s": args.max_final_s,
     }
@@ -227,22 +245,26 @@ def cmd_init(args: argparse.Namespace) -> dict:
                 raise StateError(
                     f"{path} belongs to run {state['run_id']!r}; use a new folder")
             changed = {k: v for k, v in settings.items() if v is not None}
+            if (changed.get("music") or state.get("music")) == "on" and \
+                    not (changed.get("song") or state.get("song")):
+                raise StateError(NEEDS_SONG)
             state.update(changed)
             for item in state["shorts"].values():
                 if item.get("brief"):
-                    item["music_effective"], item["music_why"] = \
-                        effective_music(state, item)
+                    set_music(item, state)
             state["source_meta"].update({k: v for k, v in meta.items() if v})
             if changed:
                 event(state, "settings", **changed)
             return state
+    if settings["music"] == "on" and not song:
+        raise StateError(NEEDS_SONG)
     stamp = now()
     editors = settings["max_editors"] or DEFAULT_EDITORS
     state = {
         "version": VERSION, "run_id": args.run_id, "source": args.source,
         "source_meta": {k: v for k, v in meta.items() if v},
         "parent_project_id": settings["parent_project_id"],
-        "music": settings["music"] or "auto",
+        "music": settings["music"] or "off", "song": song,
         "max_editors": editors, "max_jobs": settings["max_jobs"] or editors,
         "min_final_s": settings["min_final_s"] or 15.0,
         "max_final_s": settings["max_final_s"] or 45.0,
@@ -326,7 +348,8 @@ def load_brief(path_text: str, short_id: str) -> dict:
     if music not in MUSIC_BRIEF:
         raise StateError(
             f"brief music must be one of {', '.join(MUSIC_BRIEF)} (inherit = "
-            "follow the run switch; only on/off override it)")
+            "follow the run switch; off keeps this short dry; on needs the "
+            "owner's song for the run)")
     beats = payload.get("beats", [])
     if not isinstance(beats, list):
         raise StateError("brief beats must be a list")
@@ -351,9 +374,11 @@ def cmd_assign(args: argparse.Namespace) -> dict:
             if item["status"] in ("editing", "fix") and item.get("structure") and \
                     loaded["structure"] != item["structure"] and item["candidates"]:
                 raise StateError("structure cannot change after a candidate exists")
+            if loaded["brief"]["music"] == "on" and not state.get("song"):
+                raise StateError(f"brief {NEEDS_SONG}")
             item.update(loaded)
         if item.get("brief"):
-            item["music_effective"], item["music_why"] = effective_music(state, item)
+            set_music(item, state)
         if args.editor is not None:
             editor = text_value(args.editor, "--editor")
             if not item.get("brief"):
@@ -579,7 +604,7 @@ def summary(state: dict) -> dict:
         nxt.append("every short is accounted for: run finalize")
     return {
         "version": state["version"], "run_id": state["run_id"],
-        "stage": state["stage"], "music": state["music"],
+        "stage": state["stage"], "music": state["music"], "song": state.get("song"),
         "selected": len(rows), "counts": counts,
         "editors": {"busy": busy, "max": state["max_editors"], "idle": idle},
         "max_jobs": state["max_jobs"],
@@ -595,7 +620,8 @@ def cmd_status(args: argparse.Namespace) -> dict:
 
 
 def format_status(value: dict) -> str:
-    lines = [f"{value['run_id']} ({value['stage']}, music {value['music']}): "
+    song = f" - {value['song']}" if value.get("song") else ""
+    lines = [f"{value['run_id']} ({value['stage']}, music {value['music']}{song}): "
              f"{value['selected']} shorts, "
              + ", ".join(f"{k} {v}" for k, v in sorted(value["counts"].items())),
              f"editors busy {len(value['editors']['busy'])}/{value['editors']['max']}"
@@ -616,7 +642,7 @@ def publishing_item(state: dict, item: dict) -> dict:
     story = brief.get("story") or {}
     handback = (item["candidates"][-1].get("handback") or {}) if item["candidates"] else {}
     review = item.get("review") or {}
-    music = handback.get("music") or (
+    music = handback.get("music") or music_song(state, item) or (
         "none" if effective_music(state, item)[0] == "off" else "not recorded")
     first_full = next((i["short_id"] for i in state["shorts"].values()
                        if (i.get("export") or {}).get("verified_full")), None)
@@ -812,9 +838,11 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--archival-note")
     p.add_argument("--parent-project-id", type=int)
     p.add_argument("--music", choices=MUSIC,
-                   help="run music switch (default auto: a library bed for montage and "
-                   "action-opener structures, dry with SFX for conversation; off = no "
-                   "music anywhere unless a brief says on)")
+                   help="run music switch (default off: no music in any short). on needs "
+                   "--song; agents never choose music")
+    p.add_argument("--song", help="the owner's supplied or approved song for this run "
+                   "(file path, link or 'Artist - Title'); turns music on unless "
+                   "--music off is given")
     p.add_argument("--max-editors", type=int, help=f"default {DEFAULT_EDITORS}")
     p.add_argument("--max-jobs", type=int, help="Valmera jobs in flight (default = editors)")
     p.add_argument("--min-final-s", type=float, help="default 15")

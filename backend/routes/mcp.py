@@ -735,18 +735,20 @@ Two things are different from a normal tool session, and both matter:
    open_short(child_project_id=ID), inspect the actual selected story's full
    visual coverage and factual transcript, and make all EDL edits YOURSELF
    with the premium short-form finish in section 5. Research B-roll as
-   evidence rather than wallpaper; choose music from visible identity, rights
-   metadata, deterministic track facts and authored timing rather than
-   invented hearing. Render_preview(complete=true) once the whole edit is
-   coherent, then watch_video to verify it. That direct MCP edit advances and
+   evidence rather than wallpaper. Add music only when the user asks for it
+   or supplies a track (never on your own initiative), and judge a track
+   from visible identity, rights metadata, deterministic track facts and
+   authored timing rather than invented hearing.
+   Render_preview(complete=true) once the whole edit is coherent, then
+   watch_video to verify it. That direct MCP edit advances and
    unlocks the Studio card; never press or emulate Studio's Edit-agent action.
 
 5. PREMIUM SHORT-FORM FINISH. Every reel, short and shorts child (vertical,
    120 s or less) is edited to the premium short-form grammar in the doctrine
    above, measured against top Instagram editors — never a small card on
-   black with static captions and no sound. read_skill short-form-direction
-   and read_skill motion-design once per session (the same playbooks
-   Valmera's own agent uses), and call list_motion_templates and list_sfx_kit
+   black with static captions. read_skill short-form-direction and
+   read_skill motion-design once per session (the same playbooks Valmera's
+   own agent uses), and call list_motion_templates and list_sound_library
    once for the live libraries. Then, per short, in a few atomic writes:
    a. STORY: keep the complete micro-story, remove_filler_words, cut dead
       pauses on word edges, set_master_loudness.
@@ -754,33 +756,46 @@ Two things are different from a normal tool session, and both matter:
       shot-aware focus track) or the picture as a card on a designed
       background (set_picture_card); ONE look via apply_look (editorial is
       the podcast default) or a deliberate equivalent; captions with
-      style.motion_look and 1-2 accent words per sentence; a music bed
-      ducked 13-20 dB under the voice (the music library tools when listed).
+      style.motion_look and 1-2 accent words per sentence. Music only when
+      the user asks for it or supplies a track — their upload or link, or a
+      song they name via find_song (not a usage licence); the CC0 music
+      library only when they ask for generic background music; then ducked
+      13-20 dB under the voice. Suggesting a song is fine; choosing one
+      unasked is not.
    c. HOOK: a pattern interrupt within 0.1-0.6 s and the hook line as text by
       1.5 s — hook_title (mute_captions=true when it repeats the spoken hook)
-      or word_slam, with a landing or punch and a low hit (the template's
-      own when it carries one).
+      or word_slam, with a landing or punch and at most one sound (sfx=true
+      on the graphic, or one library cue).
    d. HERO MOMENTS: 2-4 add_motion_graphic placements whose landing frame
       sits on exact spoken word onsets (get_kept_transcript for program
       windows, get_words for onsets, each template's landing offset from
-      list_motion_templates), each with one add_zoom on the same frame and
-      its sound (templates own their cues; add a hit only where none is
-      owned). Numbers, quotes and UI messages come from the transcript or a
-      verified source.
+      list_motion_templates), each with one add_zoom on the same frame.
+      Graphics are silent by default; pass sfx=true only where the landing
+      earns a sound. Numbers, quotes and UI messages come from the
+      transcript or a verified source.
    e. CONNECTIVE TISSUE: alternating tight/wide framing across jump cuts,
       landings on cuts between ideas, punches on emphasis words, push_in
       across long holds (add_zoom strength is magnification minus 1: 0.15 =
       1.15x; no more than one camera event per ~1.5 s unless it is a
-      designed hit), motivated transitions at real turns with
-      add_sfx(storage_key='kit:whoosh_hard', ...) peaking on the cut unless
-      the look already placed a whoosh there, B-roll evidence on named
-      nouns, a visual change every 0.3-0.6 s.
-   f. ENDING: hold the payoff 1.0-1.5 s; a native CTA (comment_cta,
+      designed hit), motivated transitions at real turns, B-roll evidence
+      on named nouns, a visual change every 0.3-0.6 s.
+   f. SOUND: only the approved library — add_sfx(storage_key='sound:<id>',
+      at=..., gain_db=<suggested>) — and only where something meaningful
+      happens on screen: a designed graphic landing, a real section change
+      or B-roll entry (sound:swish_1 on a whip), the payoff (sound:impact_1,
+      once), or a real-world action shown (shutter on a photo, typing under
+      typed text, a click on a button press, a cash register on a money
+      figure). Never on captions or ordinary cuts inside a conversation; at
+      most about one sound every 4-5 s (about 4-8 in a 30-45 s short), never
+      the same sound twice within ~3 s, zero when nothing earns one; one
+      family per short; peaks pre-rolled onto the visual frame; mixed under
+      the voice. search_sfx only for a specific sound the user asks for.
+   g. ENDING: hold the payoff 1.0-1.5 s; a native CTA (comment_cta,
       follow_cta, save_cta) after it only when the user or brief asks for
       one, filled only with the handle, keyword and offer they supplied —
       never an invented handle, verified badge, keyword or promised
       resource (save_cta needs no identity).
-   g. REVIEW: render_preview(complete=false) while building and judge its
+   h. REVIEW: render_preview(complete=false) while building and judge its
       check tiles; then render_preview(complete=true) and
       look_at(rendered=true, output_times=[...]) with up to 8 dense times
       per call around the hook and every hero moment (a settled still cannot
@@ -788,9 +803,9 @@ Two things are different from a normal tool session, and both matter:
       look again; finish with watch_video on the final complete preview.
    For a series, keep one look across children: apply_short_edit_batches can
    carry the shared base layers (frame, captions style, effects) to up to 30
-   children per call. Music, kit sounds, motion graphics and camera moves are
-   placed per child with their own tools, because they bind to that child's
-   own words and assets.
+   children per call. Music, library sounds, motion graphics and camera
+   moves are placed per child with their own tools, because they bind to
+   that child's own words and assets.
 
 6. DELIVER THE FINISHED VIDEO. When the user requests an export, call
    export_final(project_id=ID, edl_version=REVIEWED_VERSION). It uses the same

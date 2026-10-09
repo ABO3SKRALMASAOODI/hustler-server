@@ -96,10 +96,13 @@ class RunTests(unittest.TestCase):
     def test_init_is_idempotent_and_guards_other_runs(self) -> None:
         for name in ("source", "assignments", "candidates", "exports"):
             self.assertTrue((Path(self.dir) / name).is_dir())
+        self.assertEqual((self.state()["music"], self.state()["song"]), ("off", None))
         self.ok("init", "--run-dir", self.dir, "--run-id", "pod-1",
-                "--source", "https://youtu.be/x", "--max-editors", "5", "--music", "on")
+                "--source", "https://youtu.be/x", "--max-editors", "5", "--music", "on",
+                "--song", "owner-track.mp3")
         state = self.state()
-        self.assertEqual((state["max_editors"], state["music"]), (5, "on"))
+        self.assertEqual((state["max_editors"], state["music"], state["song"]),
+                         (5, "on", "owner-track.mp3"))
         self.assertEqual(state["max_jobs"], 3)  # unchanged from the default
         self.fails("belongs to run", "init", "--run-dir", self.dir,
                    "--run-id", "other", "--source", "x")
@@ -258,11 +261,9 @@ class RunTests(unittest.TestCase):
                    "--file", str(right), "--job-id", "1", "--edl-version", "7",
                    "--duration", "52")
 
-    def test_music_inherits_the_run_switch(self) -> None:
-        # The owner's saved brief says no music: the run is off, and a brief
-        # that does not say otherwise must not bring a bed back.
-        self.ok("init", "--run-dir", self.dir, "--run-id", "pod-1",
-                "--source", "https://youtu.be/x", "--music", "off")
+    def test_music_is_off_unless_the_owner_supplies_a_song(self) -> None:
+        # Default: no music in any short, montages included; agents never
+        # choose a track, so there is no "auto" bed and "on" needs a song.
         self.add("s01", 11)
         self.add("s02", 12)
         self.add("s03", 13)
@@ -271,27 +272,59 @@ class RunTests(unittest.TestCase):
         out = json.loads(self.ok(
             "assign", "--run-dir", self.dir, "--short-id", "s01", "--brief",
             self.brief("s01", structure="hook-to-silent-montage")))
-        self.assertEqual((out["music_effective"], out["brief"]["music"]), ("off", "inherit"))
-        out = json.loads(self.ok(
-            "assign", "--run-dir", self.dir, "--short-id", "s02", "--brief",
-            self.brief("s02", structure="hook-to-silent-montage", music="on")))
-        self.assertEqual((out["music_effective"], out["music_why"]), ("on", "brief on"))
+        self.assertEqual((out["music_effective"], out["music_why"], out["music_song"],
+                          out["brief"]["music"]),
+                         ("off", "no owner song", None, "inherit"))
+        self.fails("owner's supplied or approved song", "assign", "--run-dir", self.dir,
+                   "--short-id", "s02", "--brief",
+                   self.brief("s02", structure="hook-to-silent-montage", music="on"))
+        self.fails("needs the owner's supplied or approved song", "init",
+                   "--run-dir", self.dir, "--run-id", "pod-1",
+                   "--source", "https://youtu.be/x", "--music", "on")
+        self.assertEqual(self.state()["music"], "off")
+        self.ok("assign", "--run-dir", self.dir, "--short-id", "s02", "--brief",
+                self.brief("s02", music="off"))
         self.ok("assign", "--run-dir", self.dir, "--short-id", "s03",
                 "--brief", self.brief("s03"))
         status = json.loads(self.ok("status", "--run-dir", self.dir, "--json"))
         self.assertEqual({r["short_id"]: r["music"] for r in status["shorts"]},
-                         {"s01": "off", "s02": "on", "s03": "off"})
-        # auto: montage and action openers get a bed, conversation stays dry
+                         {"s01": "off", "s02": "off", "s03": "off"})
+        # The owner supplies a song: it goes under every short that inherits,
+        # and a brief "off" keeps its short dry.
         self.ok("init", "--run-dir", self.dir, "--run-id", "pod-1",
-                "--source", "https://youtu.be/x", "--music", "auto")
-        state = self.state()["shorts"]
-        self.assertEqual((state["s01"]["music_effective"], state["s03"]["music_effective"]),
-                         ("on", "off"))
-        self.assertEqual(state["s01"]["music_why"], "run auto + hook-to-silent-montage")
-
-    def test_manifest_music_none_when_run_is_off_and_brief_inherits(self) -> None:
+                "--source", "https://youtu.be/x", "--song", "Artist - Owner Song")
+        state = self.state()
+        self.assertEqual((state["music"], state["song"]), ("on", "Artist - Owner Song"))
+        shorts = state["shorts"]
+        self.assertEqual({k: shorts[k]["music_effective"] for k in ("s01", "s02", "s03")},
+                         {"s01": "on", "s02": "off", "s03": "on"})
+        self.assertEqual((shorts["s01"]["music_why"], shorts["s01"]["music_song"]),
+                         ("run on (owner song)", "Artist - Owner Song"))
+        self.assertEqual(shorts["s02"]["music_why"], "brief off")
+        # Switching the run off keeps the song on record but places no music.
         self.ok("init", "--run-dir", self.dir, "--run-id", "pod-1",
                 "--source", "https://youtu.be/x", "--music", "off")
+        shorts = self.state()["shorts"]
+        self.assertEqual((shorts["s01"]["music_effective"], shorts["s01"]["music_song"]),
+                         ("off", None))
+
+    def test_retired_auto_switch_resolves_to_off(self) -> None:
+        path = Path(self.dir) / "run.json"
+        state = json.loads(path.read_text())
+        state["music"] = "auto"
+        path.write_text(json.dumps(state))
+        self.add("s01", 11)
+        out = json.loads(self.ok(
+            "assign", "--run-dir", self.dir, "--short-id", "s01", "--brief",
+            self.brief("s01", structure="hook-to-silent-montage")))
+        self.assertEqual(out["music_effective"], "off")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), self.assertRaises(SystemExit):
+            run.main(["init", "--run-dir", self.dir, "--run-id", "pod-1",
+                      "--source", "https://youtu.be/x", "--music", "auto"])
+        self.assertIn("invalid choice", err.getvalue())
+
+    def test_manifest_music_none_when_run_is_off_and_brief_inherits(self) -> None:
         self.add("s01", 11)
         self.ok("assign", "--run-dir", self.dir, "--short-id", "s01", "--brief",
                 self.brief("s01", structure="hook-to-silent-montage"), "--editor", "e1")
@@ -307,6 +340,22 @@ class RunTests(unittest.TestCase):
         publishing = json.loads(
             (Path(self.dir) / "exports" / "publishing-manifest.json").read_text())
         self.assertEqual(publishing["items"][0]["music"], "none")
+
+    def test_manifest_names_the_owner_song_when_music_is_on(self) -> None:
+        self.ok("init", "--run-dir", self.dir, "--run-id", "pod-1",
+                "--source", "https://youtu.be/x", "--song", "owner-song.mp3")
+        self.add("s01", 11)
+        self.to_candidate("s01", "e1", version=4)
+        self.ok("review", "--run-dir", self.dir, "--short-id", "s01",
+                "--verdict", "ship", "--note", "ok", "--checks", CHECKS)
+        final = self.final("s01")
+        self.ok("export", "--run-dir", self.dir, "--short-id", "s01", "--file", str(final),
+                "--job-id", "3", "--edl-version", "4", "--duration", "29.5",
+                "--width", "1080", "--height", "1920")
+        self.ok("finalize", "--run-dir", self.dir)
+        publishing = json.loads(
+            (Path(self.dir) / "exports" / "publishing-manifest.json").read_text())
+        self.assertEqual(publishing["items"][0]["music"], "owner-song.mp3")
 
     def test_score_is_recorded_and_bounded(self) -> None:
         self.add("s01", 11, rank=1, score=92)

@@ -33,8 +33,9 @@ THE HOOK — 0 to 1.5 s:
   back to the natural start. Keep the minimum context to be understood.
 - PATTERN INTERRUPT within 0.1–0.6 s: open already punched-in or with a
   landing at 0 s, a `hook_title` or `word_slam` on the first strong word, a
-  flash or light leak, with a low hit or sub drop under it (the template's
-  own when it carries one). The speaker is on screen and talking by ~0.3 s.
+  flash or light leak, with at most one library sound under it when the
+  landing earns one (a soft whoosh into the title). The speaker is on screen
+  and talking by ~0.3 s.
 - HOOK TEXT by 1.5 s: the hook line (or its sharpest 2–6 words) as designed
   type, posed as the question or tension — never the answer.
 - FIRST FRAME is the thumbnail: sharp, composed, designed, never black or
@@ -56,23 +57,27 @@ RHYTHM — the middle:
   reel that keeps moving beats a 58 s reel with the same content.
 
 HERO MOMENTS — 2 to 4 per reel, on exact words: the claim, the number, the
-turn, the payoff. Each gets one leader graphic, an eased camera move and a
-sound on the same frame (motion-design has the templates and timing).
+turn, the payoff. Each gets one leader graphic and an eased camera move on
+the same frame, plus one sound only when the landing earns it within the
+sparse budget (motion-design has the templates and timing; audio the sound
+rules).
 
 OPEN LOOPS: a hook that asks ("this mistake cost me $40k") needs its answer
 to arrive. Choose when to answer for tension and comprehension; never distort
 the speaker's meaning.
 
-THE PAYOFF: hold it 1.0–1.5 s with an accent — a scale-in, a colour change, a
-music button, an impact — instead of cutting away on the last syllable.
+THE PAYOFF: hold it 1.0–1.5 s with an accent — a scale-in, a colour change,
+the short's one impact, or the music's button when the user supplied music —
+instead of cutting away on the last syllable.
 
 CTA AS NATIVE UI: after the payoff has landed, in the last 2–4 s, use
-`comment_cta` (a typed comment keyword), `follow_cta` (follow → following) or
-`save_cta` (bookmark fill) — one CTA, never over the payoff, with its own
-click/pop sound. Use it only when the user or brief asks for a CTA, and only
-with the handle, keyword and offer they supplied (owner marketing reels
-supply them in the brief): never invent a handle, a verified badge, a
-comment keyword or a promised resource. `save_cta` needs no identity.
+`comment_cta` (a typed comment keyword), `follow_cta` (follow → following)
+or `save_cta` (bookmark fill) — one CTA, never over the payoff, with at most
+a click on its visible press (`sfx=true`). Use it only when the user or
+brief asks for a CTA, and only with the handle, keyword and offer they
+supplied (owner marketing reels supply them in the brief): never invent a
+handle, a verified badge, a comment keyword or a promised resource.
+`save_cta` needs no identity.
 
 END ON THE LOOP: land the last cut on the last word or beat — no fade, no dead
 tail, no "thanks for watching". The best endings rhyme with the first frame

@@ -1,7 +1,8 @@
 # Looks
 
 A Look is a complete art direction applied in one pass: canvas, type, grade,
-camera, signature moves, transitions with their sounds, and music. The seven
+camera, signature moves, transitions and the short's few sounds. Music is not
+part of a Look: it is off unless the owner supplies a song. The seven
 Looks below are distilled from a frame-level analysis of the owner's 28
 reference reels in `/Users/masaoodi/Documents/Valmera/Instagram Reference Videos/`
 (`orig-NN` = `01 - Original Instagram References/NN-*`, `gum-NN` = `02 - Mr Gum
@@ -22,13 +23,13 @@ The coordinator assigns one Look and one structure per short. The editor reads
 
 | Target | Value |
 | --- | --- |
-| Hook interrupt | a designed visual event at 0.0-0.6 s (`hook_title`, `word_slam` or a card reveal; a silent landing zoom may ride under it) with one sound |
+| Hook interrupt | a designed visual event at 0.0-0.6 s (`hook_title`, `word_slam` or a card reveal; a silent landing zoom may ride under it) with at most one sound |
 | Hook as text | the hook line readable on screen by 1.5 s; it poses the tension, never states the payoff |
 | Visual change | something changes every 0.3-0.6 s (caption cue, graphic, zoom, cut); a structural event (cut, zoom, graphic, B-roll) every 1.5-2.5 s |
 | Hero moments | 2-4 designed beats on exact word cues (Kinetic Poster, Mono Noir, Creator Glow: 3-6) |
-| Payoff | marked (type, sound, camera or music button) and held 1.0-1.5 s before the editorial end |
+| Payoff | marked (type, sound or camera; the owner's song's button when music is on) and held 1.0-1.5 s before the editorial end |
 | Picture area | full-bleed (1.0) when the face crop needs at most 2x upscale; otherwise a card on a designed backdrop covering at least 0.54 of the canvas (see Card geometry). Only Editorial Serif's square card may go down to 0.48 (gum-02), because its field carries the type |
-| Sound | a sound on each designed beat, within the Look's cue budget (see Sound); no digital silence longer than 0.3 s except a deliberate 50-280 ms stop-down before a reveal |
+| Sound | approved library sounds only on meaningful on-screen moments: at most about one every 4-5 s (about 4-8 per short), never the same sound within ~3 s, within the Look's budget (see Sound); no digital silence longer than 0.3 s except a deliberate 50-280 ms stop-down before a reveal or a montage passage flagged for the owner's song (see Sound without music) |
 | Length | final 15-45 s including the 5 s native ending, so the editorial program is 10-40 s (montage editorial at most 25 s) |
 
 ### Type
@@ -78,105 +79,151 @@ full-width cards, captions and hero words therefore sit inside the card.
 | `punch` | a stressed word, number or payoff | strength 0.10-0.25, about 0.12 s snap, held, steps back out at `end` (the next cut or sentence turn); `overshoot` 0.05-0.15 only on the biggest beat; at least 4 s apart |
 | `pulse` | a beat, laugh or list item | strength 0.05-0.08, in and out in about 0.3 s |
 | `push_in` | any take longer than about 4 s | strength 0.05-0.08 across the take |
-| `shake` (or `shake` 0.3-0.8 on a punch) | only the single biggest impact | always with `impact_hard` or `kick` |
+| `shake` (or `shake` 0.3-0.8 on a punch) | only the single biggest impact | with the short's one `impact_1` on that frame |
 
 Every still image moves (`push_in` or a slow pan). Start a zoom after a cut,
 never across it. Aim with `rect` or `cx`/`cy` read off `look_at`'s grid.
 
 ### Transitions and their sounds
 
-`apply_look` sets a base transition with its own sounds, firing only at real
-scene changes. If you replace it with `set_transitions` (keep `scope='scene'`
-so jump cuts stay invisible), add the kit sound yourself with `add_sfx`. Add
-1-2 transition templates (`list_motion_templates('transition')`) at the
-story's turn; templates bring their own sound.
+`apply_look` sets a base transition, firing only at real scene changes; if it
+placed sounds on those junctions (`get_edl` sfx), keep only the ones on real
+turns that fit the budget and remove the rest. `set_transitions` (keep
+`scope='scene'` so jump cuts stay invisible) adds no sound. Add 1-2
+transition templates (`list_motion_templates('transition')`) at the story's
+turn; templates are silent unless you pass `sfx=true`.
 
-| Move | Tool | Kit sound, placed so the peak lands on the cut |
+Only a junction at a real turn earns a sound, and a run of junctions inside
+~3 s gets one sound in total. Ordinary cuts inside the conversation get none.
+
+| Move | Tool | Library sound when the turn earns one, peak on the cut |
 | --- | --- | --- |
-| hard cut on a speech onset | none | none, or `tick` on list beats |
-| whip | `set_transitions` `whip_left`/`whip_right`, 0.2-0.3 s | `whoosh_hard`, start about 0.25 s early |
-| zoom punch | `set_transitions` `zoom_punch` | `whoosh_hard` + `kick` on the cut |
-| flash | `flash_transition` or `set_transitions` `flash` 0.15-0.25 s | `impact_soft` or `kick` |
-| light leak | `light_leak` | `whoosh_soft` or `swoosh_up` |
-| film burn | `film_burn` | `swoosh_up` into `impact_soft` |
-| glitch | `glitch_burst` or `set_transitions` `glitch` | `glitch` |
+| hard cut on a speech onset | none | none |
+| whip | `set_transitions` `whip_left`/`whip_right`, 0.2-0.3 s | `swish_1`, start about 0.12 s early |
+| zoom punch | `set_transitions` `zoom_punch` | `swish_1` on the cut (one sound, no second hit) |
+| flash | `flash_transition` or `set_transitions` `flash` 0.15-0.25 s | none, or `impact_1` when the flash is the payoff |
+| light leak | `light_leak` | `whoosh_soft_1` or `whoosh_soft_2`, about 0.3 s early |
+| film burn | `film_burn` | a soft whoosh, or `riser_3` ending on the cut at the one big section change |
+| glitch | `glitch_burst` or `set_transitions` `glitch` | `glitch_1` or `glitch_2` |
 
 ### Sound
 
-SFX are on in every Look, and they are sparse and structural. A sound goes on
-each **designed beat**: the hook event, a graphic or hero-word entrance, a
-transition or transition template, a B-roll or photo entry, and the payoff.
-No sound on landing zooms, `push_in`, pulses on speech, caption cues or jump
-cuts; a punch gets one only when it is the hero or payoff beat. Cue the peak
-where the motion lands (0-3 frames early).
+Sound is used the way a professional editor uses it, never as decoration.
+The owner rejected decorative "whoosh wars": every sound must be earned by
+something on screen.
 
-**Cue budget per 30 s of editorial program** (template cues count):
+**Only the approved library.** `list_sound_library()` lists 21 real
+recordings the owner approved by ear (CC0), with when to use each and a
+suggested gain. Roles and ids: whoosh (`whoosh_soft_1`, `whoosh_soft_2`),
+swish (`swish_1`), impact (`impact_1`), riser (`riser_1`-`riser_4`), shutter
+(`shutter_1`, `shutter_2`), typing (`typing_1`, `typing_2`), click
+(`click_1`, `click_2`), pop (`pop_1`), tick (`tick_1`), ding (`ding_1`),
+glitch (`glitch_1`, `glitch_2`), cash (`cash_register_1`), heartbeat
+(`heartbeat_1`). Place one with `add_sfx(storage_key='sound:<id>', at=...,
+gain_db=<suggested>)` as a typed call, not inside `apply_edit_batch`, and
+always pass the suggested gain (the -6 dB default is too loud). Never
+`search_sfx`, `add_web_sfx` or any other online sound in these shorts. There
+is no paper sound, no sub drop and no hard whoosh: whips take `swish_1`,
+hits take `impact_1`.
 
-| Looks | Cues per 30 s |
+**Graphics are silent by default.** `add_motion_graphic(..., sfx=true)` opts
+one moment in and maps the template's sound roles onto the library (roles
+with no approved recording are skipped). Opt in only where the graphic's
+landing earns a sound; a template whose cue repeats (a tick per counter step
+or per letter) stays silent and its settled figure gets one sound instead.
+
+**Where a sound goes.** Only where something meaningful happens on screen:
+the hook graphic landing, a hero graphic landing, a real section change or
+B-roll entry, the payoff, or a real-world action shown on screen (a shutter
+on a photo or still arriving, typing under typed text, a click on a visible
+button press, a cash register on a money figure, a ding on a result).
+Never on captions, jump cuts, ordinary cuts inside the conversation,
+landing zooms, `push_in`, punches or pulses on speech.
+
+**How many.** At most about one sound every 4-5 s for the whole short, so
+about 4-8 in a 30-45 s short (template cues count), never the same sound
+twice within ~3 s, and zero is fine for a passage where nothing earns one.
+Each Look names a ceiling per short and one consistent family; stay inside
+both and match the material (no impact under a tender admission). A ceiling
+is never a quota, and the spacing rule wins: a 30 s short holds about 6-7
+sounds at most whatever its Look.
+
+| Looks | Sounds per short, at most |
 | --- | --- |
-| Headline Pro, Editorial Serif, Cinematic Doc | 5-9 |
-| Clean Data, Creator Glow | 8-12 |
-| Kinetic Poster, Mono Noir | 10-16 |
+| Headline Pro, Editorial Serif | 5 |
+| Cinematic Doc | 6 |
+| Clean Data, Creator Glow | 7 |
+| Kinetic Poster, Mono Noir | 8 |
 
-Montage cuts are designed beats too: at most one sound per cut, and a
-montage section may run above the budget. Gains: whooshes and impacts -6 to
--10 dB; pops, ticks, clicks and typing -12 to -16 dB. The voice always stays
-on top. Risers end on the payoff frame (`riser_short` starts 1.2 s before,
-`riser_long` 2.6 s). Kit sounds are licence-free: `list_sfx_kit`, then
-`add_sfx(storage_key='kit:<kind>', at=...)` (typed calls; not inside
-`apply_edit_batch`).
+**Timing and level.** The peak lands on the visual frame: soft whooshes
+start about 0.3 s early, `swish_1` about 0.12 s, risers by their full length
+so they end on the payoff frame (`riser_2` 1.1 s; `riser_1` and `riser_3`
+1.85 s; `riser_4` 1.7 s); shutters, clicks, pops and ticks 0-1 frame early;
+`impact_1` 0-2 frames early. Every sound sits at its suggested gain under
+the voice; lower it rather than mask a word. `impact_1` is used at most once
+per short, on the payoff or the single biggest landing.
 
-### Music: the run switch and the brief
+Montage cuts are not designed beats: a montage gets at most a sound on its
+entry, a shutter on a still's arrival now and then (never two within ~3 s),
+and one sound on its final image.
 
-The run's switch (`run.py init --music`) decides music for every short:
+### Music: off unless the owner supplies a song
 
-- **auto** (default): hook-to-silent-montage and silent-action-to-conversation
-  get a quiet library bed; fast- and headline-conversation stay dry with SFX.
-- **on**: a bed under every short in the Look's mood, -20 dB (-18 to -22)
-  ducked under speech; it rises when speech stops and ends on a button at
-  the payoff.
-- **off**: no music anywhere. This is the owner's earlier preference and what
-  a saved brief saying "no music" means. Montages and action openers then
-  follow **Sound without music** below.
+The owner does not use agent-chosen music. Music is **off** for every short
+by default: no CC0 library bed, no stock track, no song picked by taste, and
+`apply_look` is never called with a music option.
 
-A brief's `music` is `inherit` unless the coordinator writes an explicit `on`
-or `off`; only those override the run switch for that short. `run.py assign`
-prints the result as `music_effective`, and the coordinator hands that value
-to the editor. Editors never re-derive it.
+Music is **on** only when the owner supplies or approves a specific song for
+the run. The saved brief's Music line names it, and the coordinator records
+it with `run.py init --song '<file, link or Artist - Title>'`. A brief's
+`music` is `inherit` (follow the run) or `off` (keep this short dry); `on` is
+accepted only when the run has the owner's song. `run.py assign` prints
+`music_effective` and `music_song`, and the coordinator hands both to the
+editor. Editors never re-derive them and never substitute another track.
 
-Lay a bed in the Look call itself, `apply_look(name, music=<mood or slug>)`,
-or with `list_music_library(mood)` + `add_library_music(slug, ...)` (CC0;
-moods upbeat, chill, cinematic, corporate, dramatic, hiphop, ambient,
-inspiring). Record the slug in the handback so the manifest names it.
+When on, place exactly that song: the owner's file
+(`list_assets(kind='music')`, then `add_music`), the owner's link
+(`fetch_url(url, as_kind='music')`), or a named song via `find_song` then `fetch_url` (the
+artist's own or "- Topic" upload; note in the handback that a found song is
+not a usage licence and platforms may mute it). The bed sits about -20 dB
+(-18 to -22) ducked under speech, rises when speech stops and ends on a
+button at the payoff. Record the song in the handback so the manifest names
+it.
 
-### Sound without music (montage and action openers when music is off)
+### Sound without music (montage and action openers, the default)
 
-An ambience bed is not music, so it honours a no-music brief. A montage built
-from stills or silent stock is digital silence until you do this:
+A no-dialogue passage must never ship as digital silence, and it must never
+get an invented music choice. With music off, in this order:
 
-1. **Bed.** Keep the natural sound of video inserts that have it. Otherwise
-   lay one ambience or room-tone bed: `search_sfx(query='room tone'`, `'crowd
-   ambience'`, `'city ambience'` or the scene's real place, `max_seconds=30)`,
-   pick a public-domain or attribution licence (never non-commercial),
-   `fetch_sfx`, then `add_sfx` at the montage start at about -22 dB, long
-   enough to span it (add a second copy if it is short). Or carry the
-   source's own room tone, laughter or applause under `add_overlay`
-   cutaways (overlays keep the program audio; trim it with `set_volume` over
-   that source span), never with audible words outside the story.
-2. `riser_long` ending on the final image; `impact_soft` or `sub_drop` on
-   the button.
-3. `shutter` on photos or `whoosh_soft` on clips, one per montage cut.
-4. Check with `audit_audio_mix` and the render's audio check: no digital
-   silence over 0.3 s. Credit the ambience in the handback if its licence
-   asks.
+1. **Natural sound.** Prefer footage that carries its own sound and keep it:
+   spliced video inserts play their own audio unless muted, so leave them
+   unmuted when the sound is clean. Or carry the source's own room tone,
+   laughter or applause under `add_overlay` cutaways (overlays keep the
+   program audio; set its level with `set_volume` over that source span),
+   never with audible words outside the story.
+2. **Design around speech.** Keep the silent stretch short, or lay the
+   montage as overlays over the premise's last spoken lines so the voice
+   carries it and the montage proper is only the final few seconds.
+3. **A few library sounds, not a bed.** A shutter as a still arrives (never
+   two within ~3 s), a riser ending on the final image, `impact_1` on the
+   button, all inside the short's budget. Never string sounds together to
+   fill the silence, and never search online for ambience.
+4. **Flag it.** Only when neither works: keep the passage short and write
+   the handback `music` as `none - owner to add a song when posting
+   (montage <start>-<end> s)`; it flows into PUBLISHING.md so the owner adds
+   a song at posting. Never pick a song yourself.
+5. Check with `audit_audio_mix` and the render's audio check: no digital
+   silence over 0.3 s outside a deliberate stop-down or a flagged passage.
 
 ### Never
 
 A picture band on a flat black void; a fade from black on frame 1 (if an old
 look added one, remove it with `set_fades`); a still held frozen; a whoosh on
-every caption; a graphic over the face for more than 1 s; a headline that
-spoils the payoff; a number, quote, notification, chat or post that the source
-does not support; another creator's logo, footage or identity.
+every caption or cut, or the same sound twice within ~3 s; music the owner
+did not supply; any change to the corner mark or the native end card; a
+graphic over the face for more than 1 s; a headline that spoils the payoff;
+a number, quote, notification, chat or post that the source does not
+support; another creator's logo, footage or identity.
 
 ## Structures
 
@@ -199,17 +246,19 @@ structure can wear any Look unless noted.
 - **hook-to-silent-montage**: a complete spoken premise, then a montage of at
   most 15 s (editorial at most 25 s) anchored by recognizable footage of the
   featured person plus direct, viewer-visible results of the premise. Never
-  an all-product or multi-hop montage. Sound is mandatory: with a bed
-  (`music_effective` on), it enters under the last spoken line at about
-  -22 dB, becomes the lead as speech ends and buttons on the final image;
-  cuts land on beats (`beat_align_cuts`) with `whoosh_soft`, `shutter` or
-  `tick`. With music off, follow **Sound without music** (ambience bed,
-  riser into the final image, a sound per cut).
+  an all-product or multi-hop montage. Never digital silence: with the
+  owner's song (`music_effective` on) it enters under the last spoken line at
+  about -22 dB, becomes the lead as speech ends and buttons on the final
+  image, and cuts land on its beats (`beat_align_cuts`) without a sound per
+  cut. With music off (the default), follow **Sound without music**: natural
+  sound, a montage designed around speech, a few library sounds, or a flag
+  for the owner to add a song when posting.
 - **silent-action-to-conversation**: 3-4 s of recognizable action by the
-  actual subject, then the conversation that pays it off. The action gets
-  sound (its natural audio or an ambience bed, `riser_short` or
-  `whoosh_soft`, and a library bed when `music_effective` is on) and a
-  `hook_title` by 1.5 s.
+  actual subject, then the conversation that pays it off. The action keeps
+  its natural audio (or follows **Sound without music**), may take one
+  library sound into the hook title (`riser_2` ending on it, or a soft
+  whoosh), carries the owner's song only when `music_effective` is on, and
+  gets a `hook_title` by 1.5 s.
 
 ## Choosing a Look
 
@@ -258,11 +307,11 @@ A `custom-<slug>` Look is allowed when the brief spells out every field below.
   it) or `marker_text` on the payoff phrase;
   `circle_highlight`/`arrow_callout` when the speaker points at something
   visible; `counter` or `stat_card` only for a spoken number.
-- **Transitions + sound:** hard cuts with landing zooms (silent);
-  `whoosh_soft` at the open; `pop_soft` on hero words; `impact_soft` or
-  `chime` on the payoff. Cue budget 5-9 per 30 s.
-- **Music (when on):** chill, cinematic or inspiring at -22 dB; bass or
-  swell enters at the turn.
+- **Transitions + sound:** hard cuts with landing zooms (silent). Family:
+  `whoosh_soft_1` into the opening card or hook title, `pop_1` on at most one
+  hero word, `impact_1` or `ding_1` on the payoff. At most 5 sounds per short.
+- **Music (owner's song only, when on):** -22 dB ducked; let its swell land
+  at the turn.
 - **Targets:** change every 0.4-0.7 s; hook at or before 0.6 s; 2-3 hero moments.
 - **Golden traits:** big face, still headline, captions that perform, payoff word lands with sound.
 
@@ -291,10 +340,10 @@ A `custom-<slug>` Look is allowed when the brief spells out every field below.
   `add_text_behind`) inside one continuous shot; `quote_card` or `marker_text`
   for the payoff.
 - **Transitions + sound:** hard cuts; strobe exits on type; at most one
-  `light_leak` at the turn. Template pops and ticks on rows; `whoosh_soft`
-  into a behind-subject word; `sub_drop` or `impact_soft` under the payoff.
-  Cue budget 5-9 per 30 s.
-- **Music (when on):** ambient or cinematic at -22 dB.
+  `light_leak` at the turn. Family: `whoosh_soft_2` into a behind-subject word
+  or the light leak, `heartbeat_1` or `impact_1` under the payoff;
+  `phrase_build` rows stay silent. At most 5 sounds per short.
+- **Music (owner's song only, when on):** -22 dB ducked.
 - **Targets:** change every 0.35-0.6 s; hook at or before 0.6 s (first
   `phrase_build` row on the first word); 2-4 hero moments.
 - **Golden traits:** quiet field, huge serif contrast on the right word, depth behind the subject.
@@ -320,13 +369,13 @@ A `custom-<slug>` Look is allowed when the brief spells out every field below.
   `phrase_build` for the thesis; `versus_split` for a contrast; `image_card`
   or `photo_stack` for licensed evidence; `chapter_title` between list items;
   `glitch_burst` or `flash_transition` at the turn.
-- **Transitions + sound:** `zoom_punch` or whip base; dense but structural:
-  `whoosh_hard` on transitions, `kick`/`impact_hard` on slams, `riser_short`
-  into the payoff and `sub_drop` after it, with a 100-250 ms stop-down before
-  the payoff word. Cue budget 10-16 per 30 s.
-- **Music (when on):** hiphop, dramatic or upbeat at -18 dB, with the stop-down.
+- **Transitions + sound:** `zoom_punch` or whip base. Family: `swish_1` on the
+  1-2 real turns, `riser_2` ending on the payoff word after a 100-250 ms
+  stop-down, `impact_1` on the payoff; most slams land silent, at most one
+  more with `pop_1`. At most 8 sounds per short.
+- **Music (owner's song only, when on):** -18 dB ducked, with the stop-down.
 - **Targets:** change every 0.25-0.45 s; hook at or before 0.3 s; 4-6 hero moments.
-- **Golden traits:** something lands on almost every stressed word, and the payoff is the biggest thing in the short.
+- **Golden traits:** type lands on almost every stressed word (silently; sound only on the few that earn it), and the payoff is the biggest thing in the short.
 
 ### Cinematic Doc
 
@@ -349,11 +398,12 @@ A `custom-<slug>` Look is allowed when the brief spells out every field below.
   `chapter_title` for a time jump (1983 to 2010); `image_card`/`photo_stack`
   archival evidence; `quote_card` for the payoff line; `focus_spotlight` on
   one face in a group; `light_leak`/`film_burn` at the turn.
-- **Transitions + sound:** `dip_white` 0.2 s or short flash base; `shutter`
-  on photos, `whoosh_soft` into titles, `riser_long` into the turn (once),
-  `impact_soft` on the payoff. Cue budget 5-9 per 30 s.
-- **Music (when on):** cinematic, inspiring or ambient at -20 dB, swelling
-  into the payoff.
+- **Transitions + sound:** `dip_white` 0.2 s or short flash base. Family:
+  `shutter_2` as an archival photo arrives (not every photo; never two within
+  ~3 s), `whoosh_soft_1` into a title, `riser_1` into the turn (once),
+  `impact_1` on the payoff. At most 6 sounds per short.
+- **Music (owner's song only, when on):** -20 dB ducked, swelling into the
+  payoff.
 - **Targets:** change every 0.5-0.8 s with a structural event every 2-3 s;
   hook at or before 0.6 s; 2-3 hero moments.
 - **Golden traits:** graded, textured, always drifting; the past feels like film, not a webcam.
@@ -375,12 +425,14 @@ A `custom-<slug>` Look is allowed when the brief spells out every field below.
   or `typewriter` for numbers and technical terms; `counter` for a spoken
   number; red behind-subject keyword; `glitch_burst` at the turn.
 - **Transitions + sound:** white flash on drops, glitch, hard cuts on speech
-  onsets; `impact_hard` + `sub_drop` for the hero, `glitch`, `typing` under
-  typewriters, `tick` on counters, `riser_short` into the payoff. Cue
-  budget 10-16 per 30 s.
-- **Music (when on):** dramatic or hiphop at -18 dB with a stop-down before the payoff.
+  onsets. Family: `glitch_1` or `glitch_2` under a real glitch transition,
+  `typing_1` under a typewriter, `riser_4` into the payoff and `impact_1` on
+  it (or `heartbeat_1` on a tense pause); a counter stays silent until one
+  `tick_1` or `ding_1` on the settled number. At most 8 sounds per short.
+- **Music (owner's song only, when on):** -18 dB ducked, with a stop-down
+  before the payoff.
 - **Targets:** change every 0.3-0.5 s; hook at or before 0.4 s; 3-5 hero moments.
-- **Golden traits:** stark, loud, red only where it matters.
+- **Golden traits:** stark, red only where it matters, and the few sounds hit with weight.
 
 ### Clean Data
 
@@ -403,12 +455,14 @@ A `custom-<slug>` Look is allowed when the brief spells out every field below.
   `chat_bubbles`, `post_card`, `versus_split`, `arrow_callout`. Only for
   numbers and events the source actually states; never fake a real person's
   message or post.
-- **Transitions + sound:** short whips and swipes; `click_ui`, `tick`, `coin`
-  for money, `ding` on a result, `typing` under `search_bar`, `notification`
-  for notifications, `whoosh_soft` on cards. Cue budget 8-12 per 30 s.
-- **Music (when on):** corporate or upbeat at -20 dB.
+- **Transitions + sound:** short whips and swipes. Family (UI): `click_1` or
+  `click_2` on a visible press, `typing_2` under `search_bar`,
+  `cash_register_1` on a money figure, `ding_1` on a result or notification,
+  `pop_1` as a card lands; counters count up silently. At most 7 sounds per
+  short.
+- **Music (owner's song only, when on):** -20 dB ducked.
 - **Targets:** change every 0.35-0.6 s; hook at or before 0.6 s; 3-5 data beats.
-- **Golden traits:** the number becomes the picture, and it counts up with a sound.
+- **Golden traits:** the number becomes the picture, and its settled figure lands with one sound.
 
 ### Creator Glow
 
@@ -429,8 +483,9 @@ A `custom-<slug>` Look is allowed when the brief spells out every field below.
   `focus_spotlight`. CTA templates (`follow_cta`, `save_cta`, `comment_cta`)
   only when the run brief asks.
 - **Transitions + sound:** `zoom_punch` or whip base plus `flash_transition`
-  or `light_leak`; `whoosh_hard`, `pop_bright` on keyword stacks,
-  `riser_short` into the payoff, `impact_soft`. Cue budget 8-12 per 30 s.
-- **Music (when on):** upbeat or hiphop at -18 dB.
+  or `light_leak`. Family: `swish_1` on the 1-2 real turns, `pop_1` on one
+  keyword stack, `riser_2` into the payoff and `impact_1` on it. At most 7
+  sounds per short.
+- **Music (owner's song only, when on):** -18 dB ducked.
 - **Targets:** change every 0.3-0.5 s; hook at or before 0.4 s; 3-5 hero moments.
 - **Golden traits:** glowing words build beside the face, so the hook reads before the sentence ends.

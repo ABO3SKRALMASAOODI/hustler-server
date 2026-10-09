@@ -26,17 +26,22 @@ at 1x with the sound on, then answer:
 
 1. **Hook:** does a designed moment land by 0.6 s, with the hook line
    readable by 1.5 s, and would a stranger keep watching?
-2. **Payoff:** is the payoff designed (type, sound, camera or music) and held
-   1.0-1.5 s, and does it resolve the viewer question?
+2. **Payoff:** is the payoff designed (type, sound or camera; the owner's
+   song's button when music is on) and held 1.0-1.5 s, and does it resolve
+   the viewer question?
 3. **Targets:** does it meet its Look's targets: change rate, hero moments,
-   picture area, sound on designed beats and transitions within the Look's
-   cue budget (neither silent beats nor a sound on every caption or zoom),
-   music as `music_effective` says, and no digital silence?
+   picture area; sound only from the approved library and only on
+   meaningful on-screen moments, at most about one every 4-5 s and within
+   the Look's ceiling, no sound repeated within ~3 s, nothing on captions,
+   zooms or ordinary cuts; music only if `music_effective` is on and only the
+   owner's song; no digital silence (a flagged montage passage is noted in
+   the handback)?
 4. **Attention:** with the famous name hidden, is the idea still worth
    finishing?
 5. **Clean:** faithful claims and qualifiers, accurate readable captions,
-   nothing over the face or the brand corner, no flash frames, pops, exposed
-   edges or clipped words, rights recorded for every asset?
+   nothing over the face or the brand corner, the corner mark and native end
+   card untouched, no flash frames, pops, exposed edges or clipped words,
+   rights recorded for every asset?
 
 Record it with `run.py review --checks hook=...,payoff=...,targets=...,attention=...,clean=...`.
 
@@ -57,13 +62,14 @@ still appears in the manifest.
 ```text
 s07 fix · EDL v14
 18.2-20.4s: two seconds of talking head with captions only; the turn "ten million" has no beat.
-Change: counter 0 -> 10M on "ten million" (cue 18.6), tick sound on, punch 1.15x at 18.6.
+Change: counter 0 -> 10M on "ten million" (cue 18.6, silent), punch 1.15x at 18.6.
 Keep: everything else, especially the hook and payoff.
 ```
 
 Name the timestamp, the effect on the viewer, the exact change and what not
 to touch. Never send a list of nitpicks or a re-edit request, and never ask
-for more sound than the Look's cue budget.
+for more sound than the Look's ceiling; removing a sound that nothing on
+screen earns is always a fair fix.
 
 ### Golden traits per Look
 
@@ -71,10 +77,10 @@ for more sound than the Look's cue budget.
 | --- | --- |
 | Headline Pro | big face on a designed card, a still headline, captions that perform, the payoff lands with sound |
 | Editorial Serif | a quiet field, serif contrast on the right word, depth behind the subject |
-| Kinetic Poster | something lands on almost every stressed word; the payoff is the biggest event |
+| Kinetic Poster | type lands on almost every stressed word (sound only on the few that earn it); the payoff is the biggest event |
 | Cinematic Doc | graded, textured, always drifting; archive feels like film |
-| Mono Noir | stark monochrome, red only where it matters, hits with weight |
-| Clean Data | numbers become pictures and count up with sound |
+| Mono Noir | stark monochrome, red only where it matters, a few sounds that hit with weight |
+| Clean Data | numbers become pictures, and a settled figure lands with one sound |
 | Creator Glow | glowing words build beside the face; the hook reads before the sentence ends |
 
 ### Batch view
@@ -91,9 +97,10 @@ type, the complete 5 s native Valmera ending is present, the audio plays
 through, and the duration matches. Record it with `run.py export
 --verified-full`. Later finals of the same geometry need only the probe that
 `run.py export` already does (file, duration, sha256), unless their layout
-differs. If the corner mark collides with the composition, the watermark
-placement modes are described in `legacy/references/style-lanes-v7.md`
-(branding section); only the coordinator changes that shared setting.
+differs. The corner mark and the 5 s end card stay exactly as Valmera
+renders them in every short: if the corner mark collides with the
+composition, move the type, card or graphic, never the mark, and never
+crop, cover, trim, shorten or replace the ending.
 
 ## Calibration rubric (not a gate)
 
@@ -118,6 +125,7 @@ orig-17); 9-10 the best in the set (orig-04, orig-05, gum-03, gum-09).
 
 Premium references average 7.5, the top five 8.2. A hero short worth
 shipping as the owner's marketing should reach 7 or more; beating the
-references means 8 or more, with sound never at zero (music follows the
-run's switch). These scores are for calibration and owner
+references means 8 or more. **S** rewards sounds that are placed, sparse and
+earned, never their count; **M** is scored only when the owner supplied a
+song. These scores are for calibration and owner
 conversations, never a ship gate or a number to stamp on every short.

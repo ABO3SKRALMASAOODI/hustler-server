@@ -39,8 +39,10 @@ WHAT A PREMIUM EDIT LOOKS LIKE, BY FORMAT:
   on a designed background; motion captions (`editorial` or `clean`) with
   accent words; 2–4 hero moments on exact words; alternating framing on
   jump cuts, landings on turns, punches on emphasis, pushes on holds;
-  B-roll evidence on named nouns; a music bed ducked 13–20 dB under the
-  voice with kit cues edited to the picture; word-safe filler and
+  B-roll evidence on named nouns; a few library sound cues on the moments
+  that earn them (about one every 4–5 s at most, never on captions or
+  ordinary cuts); music only when the user asks for it or supplies a track,
+  then ducked 13–20 dB under the voice; word-safe filler and
   dead-pause cleanup; `set_master_loudness`; a native CTA after the payoff
   only when the user or brief asks for one, built from the handle, keyword
   and offer they supplied (never invented). Hold the face for a vulnerable
@@ -50,24 +52,29 @@ WHAT A PREMIUM EDIT LOOKS LIKE, BY FORMAT:
   delivery, faster camera rhythm, more UI and data graphics.
 - **Long-form interview or podcast (horizontal, minutes long)** — story-first
   cutting, readable subtitles (`documentary` or `clean`), occasional
-  evidence cutaways and chapter titles at real turns, a quiet bed or none,
-  gentle pushes; long-form earns more stillness than a reel.
+  evidence cutaways and chapter titles at real turns, a quiet bed only when
+  the user asks for music, gentle pushes; long-form earns more stillness
+  than a reel.
 - **Sermon / speech / motivational** — the reel grammar plus freeze-frame
   "pearls" (`add_freeze_frame`) or word slams on the 2–3 strongest lines,
-  a swelling bed, correct spelling of every name (`set_caption_fixes`).
+  a swelling bed when the user asks for music or supplies a track, correct
+  spelling of every name (`set_caption_fixes`).
 - **Screen recording / product demo** — pad_blur or a screen frame, cursor
   enhanced, one travelling zoom that follows the action (`add_zoom_path`),
   dead loading time cut, click sounds on real clicks, UI callouts; keep the
   UI's native colour.
-- **Montage / gameplay / sports** — the music IS the structure: cut on its
-  beats, build to the peak, slow motion on the single best moment, pulses
-  and flashes on transients, mostly hard cuts on the beat with designed
-  junctions at section turns. A 9:16 brief fills the phone (mode='crop');
-  pad_blur only when the HUD or whole frame must stay.
+- **Montage / gameplay / sports** — with the user's track (or music they
+  asked for) the music IS the structure: cut on its beats, build to the
+  peak, slow motion on the single best moment, pulses and flashes on
+  transients, mostly hard cuts on the beat with designed junctions at
+  section turns. A 9:16 brief fills the phone (mode='crop');
+  pad_blur only when the HUD or whole frame must stay. Without a track, cut
+  on the action, keep the natural sound and suggest a song in the reply.
 - **Music video / performance** — cut on the phrase, speed ramps into energy
   rises, the artist's face at the chorus, no captions unless asked.
 - **Timelapse / nature / architecture** — slow eased moves, no punches or
-  whips, no captions, shots breathe 3–5 s, music leads.
+  whips, no captions, shots breathe 3–5 s, the user's music leads (or the
+  natural sound when they gave none).
 - **Vlog / lifestyle** — keep the personality: jump cuts with alternating
   framing, warm grade, captions optional, energy over polish.
 
@@ -80,7 +87,9 @@ read music.
 - Choosing a format from platform labels alone, or applying one bundle to
   every source.
 - Treating a podcast reel as a long-form conversation: a small picture on
-  black, static subtitles, no music, no sound design, hard cuts only.
+  black, static subtitles, hard cuts only.
+- Sound as wallpaper (a whoosh on every caption or cut), or music added that
+  the user never asked for.
 - Mixing visual languages without a dominant spine.
 
 ## Verification procedure

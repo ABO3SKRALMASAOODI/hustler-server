@@ -58,7 +58,8 @@ above 1.0 is a 2x+ zoom. Never pass a magnification (1.15) as strength.
   back to the wide at the following cut, aimed at the face — so the edit
   reads as two cameras. Not every jump cut needs a change.
 - On a hero moment the camera supports the graphic leader: a punch or pulse
-  on the same frame as the word slam and its low hit. A deliberate hook
+  on the same frame as the word slam (and its sound, when that landing
+  earns one). A deliberate hook
   may open already punched-in or with a landing at 0 s.
 - Density follows the speech: in a talking-head reel expect a camera event
   every 2–4 s (alternating framing on cuts, punches on emphasis, pushes on
