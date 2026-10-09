@@ -1,0 +1,178 @@
+<!--MG-SPEC {"title": "Lower third", "category": "callout",
+ "description": "Speaker name tag: name plus optional role, revealed with a mask/slide and a text stagger, leaving in reverse. Use the first time a speaker or guest appears (3-4 s), placed on the side away from the face.",
+ "duration": 3.5, "layer": "above_captions", "mutes_captions": false,
+ "params": {
+  "name": {"type": "str", "required": true, "max": 32, "hint": "e.g. 'Peter Thiel'"},
+  "role": {"type": "str", "default": "", "max": 48, "hint": "optional, e.g. 'Co-founder, PayPal'"},
+  "style": {"type": "enum", "values": ["clean_bar", "glass_pill", "minimal"], "default": "clean_bar", "hint": "clean_bar = accent bar + text sliding out of it, glass_pill = frosted pill with monogram, minimal = two lines split by a drawn rule"},
+  "side": {"type": "enum", "values": ["left", "right"], "default": "left"},
+  "y": {"type": "float", "min": 0.12, "max": 0.8, "default": 0.63, "hint": "vertical centre, frame fraction (default sits above the caption band)"},
+  "accent": {"type": "color", "default": "#FFD84D"},
+  "size": {"type": "float", "min": 0.7, "max": 1.4, "default": 1.0}
+ },
+ "example": {"name": "Peter Thiel", "role": "Co-founder, PayPal"},
+ "sfx": [{"at": 0.05, "kind": "swipe"}]} -->
+<style>
+  .lt{position:absolute;top:0;display:flex;align-items:center}
+  .txt{display:flex;flex-direction:column}
+  .clip{overflow:hidden;padding:.06em .02em .14em;margin:-.06em -.02em -.14em}
+  .name,.role{white-space:nowrap;will-change:transform,opacity,filter}
+  .name{font-family:'Inter Display','Inter',sans-serif;font-weight:800;letter-spacing:-.03em;line-height:1.02;color:#fff}
+  .role{font-family:'Inter','Inter Display',sans-serif;font-weight:600;line-height:1.1}
+  .shadowed .name,.shadowed .role{text-shadow:0 2px 16px rgba(0,0,0,.5),0 1px 3px rgba(0,0,0,.32)}
+  /* clean bar */
+  .clean .bar{flex:none;width:var(--bw);border-radius:99px;align-self:stretch;margin:.06em 0}
+  .clean .role{text-transform:uppercase;letter-spacing:.15em;color:rgba(255,255,255,.86);margin-top:.5em}
+  /* glass pill */
+  .pill{align-items:center}
+  .pill .plate{position:absolute;top:0;bottom:0;border-radius:999px;background:rgba(16,16,19,.6);
+    background-image:linear-gradient(180deg,rgba(255,255,255,.13),rgba(255,255,255,.02) 55%,rgba(255,255,255,0));
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.24),inset 0 0 0 1px rgba(255,255,255,.16),0 18px 48px rgba(0,0,0,.38),0 3px 10px rgba(0,0,0,.22)}
+  .pill .mono{position:relative;flex:none;border-radius:50%;display:flex;align-items:center;justify-content:center;
+    font-family:'Inter Display','Inter',sans-serif;font-weight:900;letter-spacing:-.04em;color:#121212;
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.45),inset 0 -2px 6px rgba(0,0,0,.18)}
+  .pill .txtclip{position:relative;overflow:hidden}
+  .pill .role{color:rgba(255,255,255,.72);font-weight:500;margin-top:.18em}
+  /* minimal */
+  .min .txt{align-items:flex-start}
+  .min .rule{height:2px;background:rgba(255,255,255,.82);border-radius:2px;box-shadow:0 1px 6px rgba(0,0,0,.35)}
+  .min .role{font-family:'Instrument Serif',serif;font-style:italic;font-weight:400;letter-spacing:-.005em;color:rgba(255,255,255,.95)}
+</style>
+<div class="mg-root" id="root"></div>
+<script>
+(() => {
+  const P = MG.params, W = MG.W, H = MG.H, D = MG.duration, S = P.size * (MG.H < MG.W ? 0.72 : 1);
+  const root = MG.$('#root');
+  const right = P.side === 'right', style = P.style;
+  const name = String(P.name || '').trim(), role = String(P.role || '').trim();
+  const margin = 72, maxBlock = W - margin * 2;
+  const safeY = H / W > 1.5 ? [0.08 * H, 0.80 * H] : [0.05 * H, 0.95 * H];
+  const lt = MG.el('div', 'lt ' + ({ clean_bar: 'clean shadowed', glass_pill: 'pill', minimal: 'min shadowed' }[style]), null, root);
+  const R = {};
+  if (style === 'clean_bar') {
+    R.bar = MG.el('div', 'bar', null, lt);
+    R.bar.style.background = P.accent;
+    lt.style.setProperty('--bw', (7 * S) + 'px');
+    R.txt = MG.el('div', 'txt', null, lt);
+    R.nc = MG.el('div', 'clip', null, R.txt); R.name = MG.el('div', 'name', name, R.nc);
+    if (role) { R.rc = MG.el('div', 'clip', null, R.txt); R.role = MG.el('div', 'role', role, R.rc); }
+    R.txt.style[right ? 'marginRight' : 'marginLeft'] = (22 * S) + 'px';
+    if (right) { lt.style.flexDirection = 'row-reverse'; R.txt.style.alignItems = 'flex-end'; }
+  } else if (style === 'glass_pill') {
+    R.plate = MG.el('div', 'plate', null, lt);
+    R.mono = MG.el('div', 'mono', null, lt);
+    const ini = name.split(/\s+/).filter(Boolean);
+    R.mono.textContent = ((ini[0] || '?')[0] + (ini.length > 1 ? ini[ini.length - 1][0] : '')).toUpperCase();
+    R.mono.style.background = `radial-gradient(120% 120% at 30% 20%, ${P.accent}, ${P.accent} 45%, color-mix(in srgb, ${P.accent} 70%, #000) 100%)`;
+    R.tc = MG.el('div', 'txtclip', null, lt);
+    R.txt = MG.el('div', 'txt', null, R.tc);
+    R.name = MG.el('div', 'name', name, R.txt);
+    if (role) R.role = MG.el('div', 'role', role, R.txt);
+    if (right) { lt.style.flexDirection = 'row-reverse'; R.txt.style.alignItems = 'flex-end'; }
+  } else {
+    R.txt = MG.el('div', 'txt', null, lt);
+    R.nc = MG.el('div', 'clip', null, R.txt); R.name = MG.el('div', 'name', name, R.nc);
+    R.rule = MG.el('div', 'rule', null, R.txt);
+    if (role) { R.rc = MG.el('div', 'clip', null, R.txt); R.role = MG.el('div', 'role', role, R.rc); }
+    if (right) R.txt.style.alignItems = 'flex-end';
+  }
+  let G = null;
+
+  function layout() {
+    const fit = (el, base, maxW) => {
+      let fs = base;
+      el.style.fontSize = fs + 'px';
+      while (el.getBoundingClientRect().width > maxW && fs > base * 0.45) { fs *= 0.96; el.style.fontSize = fs + 'px'; }
+      return fs;
+    };
+    let h, blockW;
+    if (style === 'clean_bar') {
+      const tw = maxBlock - 7 * S - 22 * S;
+      const nfs = fit(R.name, 80 * S, tw);
+      if (R.role) fit(R.role, Math.max(22, Math.min(34 * S, nfs * 0.42)), tw);
+    } else if (style === 'glass_pill') {
+      const ph = (role ? 134 : 106) * S, d = ph - 22 * S;
+      lt.style.height = ph + 'px';
+      R.mono.style.width = R.mono.style.height = d + 'px';
+      R.mono.style.fontSize = (d * 0.38) + 'px';
+      R.mono.style.margin = right ? `0 ${11 * S}px 0 0` : `0 0 0 ${11 * S}px`;
+      R.tc.style.padding = right ? `0 ${20 * S}px 0 ${38 * S}px` : `0 ${38 * S}px 0 ${20 * S}px`;
+      const tw = maxBlock - d - 11 * S - 58 * S;
+      fit(R.name, (role ? 50 : 54) * S, tw);
+      if (R.role) fit(R.role, 33 * S, tw);
+    } else {
+      const nfs = fit(R.name, 78 * S, maxBlock);
+      if (R.role) fit(R.role, Math.max(24, nfs * 0.64), maxBlock);
+      const tw = Math.max(R.name.getBoundingClientRect().width, R.role ? R.role.getBoundingClientRect().width : 0);
+      R.rule.style.width = Math.max(tw, 200 * S) + 'px';
+      R.rule.style.margin = `${14 * S}px 0 ${role ? 10 * S : 0}px`;
+    }
+    const r = lt.getBoundingClientRect();
+    h = r.height; blockW = r.width;
+    const top = Math.min(Math.max(H * P.y - h / 2, safeY[0]), safeY[1] - h);
+    lt.style.top = top + 'px';
+    lt.style.left = (right ? W - margin - blockW : margin) + 'px';
+    if (style === 'glass_pill') {
+      R.plate.style.left = '0px'; R.plate.style.width = blockW + 'px';
+    }
+    const b = lt.getBoundingClientRect();
+    MG.box = [b.left - 70, b.top - 60, b.right + 70, b.bottom + 80];
+    return {
+      w: blockW, h,
+      nw: R.name.getBoundingClientRect().width, rw: R.role ? R.role.getBoundingClientRect().width : 0,
+      d: style === 'glass_pill' ? parseFloat(R.mono.style.width) : 0,
+    };
+  }
+
+  const fontsReady = Promise.all(["800 80px 'Inter Display'", "600 31px 'Inter'", "500 29px 'Inter'", "700 31px 'Inter Display'", "italic 400 44px 'Instrument Serif'", "900 40px 'Inter Display'"]
+    .map(f => document.fonts.load(f).catch(() => null)));
+  MG.ready = fontsReady.then(() => { G = layout(); });
+
+  const exitDur = Math.min(0.36, D * 0.18), exitAt = D - exitDur - 1 / MG.fps;   // exits finish on the last frame
+  MG.active([[0, Math.min(D, 0.8)], [Math.max(0, exitAt - 0.02), D]]);
+  const sgn = right ? 1 : -1;
+  MG.frame(t => {
+    if (!G) G = layout();
+    const ex = (a, dur) => MG.ease.inExpo(MG.range(t, exitAt + a, dur));
+    if (style === 'clean_bar') {
+      const b = MG.ease.outExpo(MG.range(t, 0, 0.32)) * (1 - MG.ease.inCubic(MG.range(t, exitAt + exitDur * 0.55, exitDur * 0.45)));
+      MG.set(R.bar, { sy: Math.max(0.0001, b), opacity: b > 0.001 ? 1 : 0 });
+      const n = MG.ease.outExpo(MG.range(t, 0.08, 0.52)) - ex(0.06, exitDur * 0.6);
+      MG.set(R.name, { x: sgn * (1 - n) * (G.nw + 40) });
+      if (R.role) {
+        const r = MG.ease.outExpo(MG.range(t, 0.16, 0.52)) - ex(0, exitDur * 0.55);
+        MG.set(R.role, { x: sgn * (1 - r) * (G.rw + 40) });
+      }
+    } else if (style === 'glass_pill') {
+      const k = MG.spring(t, 0, { stiffness: 300, damping: 19 });
+      const mOut = MG.ease.inBack(MG.range(t, exitAt + exitDur * 0.62, exitDur * 0.38));
+      MG.set(R.mono, { scale: Math.max(0, k * (1 - mOut)), rotate: (1 - k) * -24 * (right ? -1 : 1) });
+      const open = MG.ease.outExpo(MG.range(t, 0.12, 0.62)) * (1 - MG.ease.inExpo(MG.range(t, exitAt + exitDur * 0.18, exitDur * 0.5)));
+      const ins = 11 * S;
+      const pw = (G.d + ins * 2) + (G.w - G.d - ins * 2) * open;
+      R.plate.style.width = pw + 'px';
+      R.plate.style.left = right ? (G.w - pw) + 'px' : '0px';
+      R.plate.style.opacity = MG.clamp(MG.range(t, 0.02, 0.1) * (1 - mOut));
+      const vis = Math.max(0, pw - G.d - ins);
+      R.tc.style.clipPath = right ? `inset(-20px ${0}px -20px ${Math.max(0, G.w - G.d - ins - vis)}px)` : `inset(-20px ${Math.max(0, G.w - G.d - ins - vis)}px -20px 0)`;
+      const tq = MG.ease.inCubic(MG.range(t, exitAt, exitDur * 0.3));
+      [[R.name, 0.27], [R.role, 0.35]].forEach(([el, a]) => {
+        if (!el) return;
+        const e = MG.ease.outCubic(MG.range(t, a, 0.32));
+        MG.set(el, { x: (1 - e) * 18 * sgn, opacity: MG.range(t, a, 0.14) * (1 - tq), blur: (1 - e) * 8 + tq * 5 });
+      });
+    } else {
+      const n = MG.ease.outExpo(MG.range(t, 0.04, 0.6)) - ex(0.08, exitDur * 0.55);
+      MG.set(R.name, { y: (1 - n) * 1.15 * parseFloat(R.name.style.fontSize) });
+      const rl = MG.ease.outExpo(MG.range(t, 0.1, 0.62));
+      const rq = MG.ease.inCubic(MG.range(t, exitAt + exitDur * 0.35, exitDur * 0.65));
+      R.rule.style.transformOrigin = rq > 0 ? (right ? '0 50%' : '100% 50%') : (right ? '100% 50%' : '0 50%');
+      MG.set(R.rule, { sx: Math.max(0.0001, rq > 0 ? 1 - rq : rl), opacity: rl > 0.001 ? 1 : 0 });
+      if (R.role) {
+        const r = MG.ease.outExpo(MG.range(t, 0.2, 0.6)) - ex(0, exitDur * 0.55);
+        MG.set(R.role, { y: -(1 - r) * 1.2 * parseFloat(R.role.style.fontSize) });
+      }
+    }
+  });
+})();
+</script>

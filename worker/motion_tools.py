@@ -152,9 +152,28 @@ def list_motion_templates(ctx, category=None):
             "'motion-design' for the API).")
 
 
+_JS_FLOAT = re.compile(r"\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)")
+
+
+def _js_float(value):
+    """Number the way the templates read it (JavaScript parseFloat after the first
+    ',' becomes '.'): '1.2s' -> 1.2, '2,25' -> 2.25, '' / 'soon' / None -> None."""
+    if value is None or isinstance(value, bool):
+        return None
+    m = _JS_FLOAT.match(str(value).replace(",", ".", 1))
+    if not m:
+        return None
+    v = float(m.group(1))
+    return v if v == v and abs(v) != float("inf") else None
+
+
 def _sfx_cues(spec, params, start, end, seed=""):
     """[(time, sound_id, gain_db)] for a template's declared sound roles,
-    mapped onto approved library recordings (roles without one are skipped)."""
+    mapped onto approved library recordings (roles without one are skipped).
+    A cue with ``repeat`` sounds once per entry of a list param: ``from`` +
+    i*``every``; optional ``fit``/``min_every`` tighten ``every`` to
+    (duration - fit)/(n - 1), ``require`` skips rows whose named field is
+    blank, and ``field``/``offset`` use a row's own time."""
     cues = []
     for n, c in enumerate(spec.get("sfx") or []):
         row = sound_library.pick(c.get("kind") or "", seed=f"{seed}:{n}")
@@ -165,10 +184,25 @@ def _sfx_cues(spec, params, start, end, seed=""):
         t = (end + at) if at < 0 else (start + at)
         rep = c.get("repeat")
         if rep and isinstance(params.get(rep.get("param")), list):
-            n_items = len(params[rep["param"]])
-            for i in range(n_items):
-                cues.append((round(start + float(rep.get("from", at)) + i * float(rep.get("every", 0.3)), 3),
-                             row["id"], gain))
+            entries = params[rep["param"]]
+            if rep.get("require"):
+                # rows the template drops (blank text) get no sound and no slot
+                entries = [e for e in entries
+                           if not isinstance(e, dict) or str(e.get(rep["require"]) or "").strip()]
+            every = float(rep.get("every", 0.3))
+            if rep.get("fit") is not None and len(entries) > 1:
+                # the template tightens its cadence so every row lands before the exit
+                every = min(every, max(float(rep.get("min_every", 0.22)),
+                                       ((end - start) - float(rep["fit"])) / (len(entries) - 1)))
+            for i, entry in enumerate(entries):
+                off = float(rep.get("from", at)) + i * every
+                # rows may carry their own landing time (e.g. checklist 'at')
+                if rep.get("field") and isinstance(entry, dict):
+                    v = _js_float(entry.get(rep["field"]))
+                    if v is not None:
+                        v = min(max(v, 0.0), max(0.0, (end - start) - 0.5))   # same clamp as the template
+                        off = v + float(rep.get("offset", 0.0))
+                cues.append((round(start + off, 3), row["id"], gain))
             continue
         cues.append((round(t, 3), row["id"], gain))
     return [(t, k, g) for t, k, g in cues if start - 0.01 <= t <= end]

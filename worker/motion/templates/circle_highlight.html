@@ -1,0 +1,187 @@
+<!--MG-SPEC {"title": "Circle highlight", "category": "callout",
+ "description": "Hand-drawn marker loop that draws on around a region of the frame (cx/cy = centre, w/h = size, all frame fractions), with an optional handwritten label. Use to single out a face, object, number or word on screen while it is mentioned; aim it at the real region after looking at the frame.",
+ "duration": 2.4, "layer": "above_captions", "mutes_captions": false,
+ "params": {
+  "cx": {"type": "float", "required": true, "min": 0, "max": 1, "hint": "centre x of the region to circle, frame fraction"},
+  "cy": {"type": "float", "required": true, "min": 0, "max": 1, "hint": "centre y of the region to circle, frame fraction"},
+  "w": {"type": "float", "min": 0.04, "max": 0.95, "default": 0.3, "hint": "region width, fraction of frame width (the loop is drawn just outside it)"},
+  "h": {"type": "float", "min": 0.02, "max": 0.7, "default": 0.12, "hint": "region height, fraction of frame height"},
+  "label": {"type": "str", "default": "", "max": 36, "hint": "optional 1-4 word note written beside the loop"},
+  "label_side": {"type": "enum", "values": ["auto", "above", "below", "left", "right"], "default": "auto"},
+  "style": {"type": "enum", "values": ["loop", "double"], "default": "loop", "hint": "loop = one pass that overshoots its start; double = two loose passes"},
+  "color": {"type": "color", "default": "#FF3B3B", "hint": "loop colour"},
+  "label_color": {"type": "color", "default": "#FFFFFF", "hint": "note colour; white reads on any footage"},
+  "glow": {"type": "bool", "default": true},
+  "size": {"type": "float", "min": 0.6, "max": 1.6, "default": 1.0, "hint": "stroke weight and label size"}
+ },
+ "example": {"cx": 0.5, "cy": 0.42, "w": 0.34, "h": 0.12, "label": "watch this"},
+ "sfx": [{"at": 0.02, "kind": "swish_short"}]} -->
+<style>
+  svg.ink{position:absolute;left:0;top:0;overflow:visible}
+  .lab{position:absolute;display:inline-block;white-space:nowrap;font-family:'Caveat','Instrument Serif',serif;font-weight:700;
+       line-height:.95;text-shadow:0 2px 4px rgba(0,0,0,.6),0 4px 22px rgba(0,0,0,.55);will-change:transform,filter,opacity}
+  .lab.serif{font-family:'DM Serif Display','Instrument Serif',serif;font-style:italic;font-weight:400;letter-spacing:-.01em}
+</style>
+<div class="mg-root"><svg class="ink" id="ink"><path id="loop"/></svg><div class="lab" id="lab"></div></div>
+<script>
+(() => {
+  const P = MG.params, W = MG.W, H = MG.H, D = MG.duration;
+  const clamp = MG.clamp, lerp = MG.lerp;
+  const smooth = x => x * x * (3 - 2 * x);
+
+  // Tapered hand stroke: dense centerline -> filled outline for any [a, b] slice.
+  function handStroke(pts, o) {
+    const cum = [0];
+    for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]));
+    const L = cum[cum.length - 1] || 1, N = Math.max(3, Math.ceil(L / Math.max(1.5, Math.min(4, L / 240))) + 1);
+    const Pt = []; let j = 0;
+    for (let k = 0; k < N; k++) {
+      const s = L * k / (N - 1);
+      while (j < cum.length - 2 && cum[j + 1] < s) j++;
+      const f = clamp((s - cum[j]) / ((cum[j + 1] - cum[j]) || 1));
+      Pt.push([lerp(pts[j][0], pts[j + 1][0], f), lerp(pts[j][1], pts[j + 1][1], f)]);
+    }
+    const Tn = Pt.map((p, k) => {
+      const a = Pt[Math.max(0, k - 1)], b = Pt[Math.min(N - 1, k + 1)];
+      const tx = b[0] - a[0], ty = b[1] - a[1], l = Math.hypot(tx, ty) || 1;
+      return [tx / l, ty / l];
+    });
+    const w0 = o.w0 ?? 0.3, w1 = o.w1 ?? 0.2;
+    const Wd = Pt.map((p, k) => {
+      const u = k / (N - 1);
+      const a = w0 + (1 - w0) * smooth(clamp(u / (o.tin || 0.15)));
+      const b = w1 + (1 - w1) * smooth(clamp((1 - u) / (o.tout || 0.25)));
+      return o.w * a * b * (1 + (o.jitter ?? 0.1) * MG.noise(u * L / 55 + (o.seed || 0) * 7.31));
+    });
+    const at = f => {
+      const k = Math.min(N - 2, Math.floor(f)), r = f - k;
+      let tx = lerp(Tn[k][0], Tn[k + 1][0], r), ty = lerp(Tn[k][1], Tn[k + 1][1], r);
+      const l = Math.hypot(tx, ty) || 1;
+      return { x: lerp(Pt[k][0], Pt[k + 1][0], r), y: lerp(Pt[k][1], Pt[k + 1][1], r), tx: tx / l, ty: ty / l, w: lerp(Wd[k], Wd[k + 1], r) };
+    };
+    const cap = (c, sg) => {
+      const out = [], h = c.w / 2, nx = -c.ty, ny = c.tx;
+      for (let i = 1; i < 8; i++) {
+        const th = Math.PI * i / 8, cs = Math.cos(th), sn = Math.sin(th);
+        out.push([c.x + sg * (nx * cs + c.tx * sn) * h, c.y + sg * (ny * cs + c.ty * sn) * h]);
+      }
+      return out;
+    };
+    return {
+      L, pts: Pt,
+      d(a, b) {
+        a = clamp(a); b = clamp(b);
+        if (b - a < 1e-4) return '';
+        const fa = a * (N - 1), fb = b * (N - 1) - 1e-6, S = [at(fa)];
+        for (let k = Math.floor(fa) + 1; k < fb; k++) S.push(at(k));
+        S.push(at(fb));
+        const Lf = [], Rt = [];
+        S.forEach(s => { const h = s.w / 2; Lf.push([s.x - s.ty * h, s.y + s.tx * h]); Rt.push([s.x + s.ty * h, s.y - s.tx * h]); });
+        const all = Lf.concat(cap(S[S.length - 1], 1), Rt.reverse(), cap(S[0], -1));
+        return 'M' + all.map(p => p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join('L') + 'Z';
+      },
+    };
+  }
+
+  const loop = MG.$('#loop'), ink = MG.$('#ink'), lab = MG.$('#lab');
+  const S = P.size * (MG.H < MG.W ? 0.72 : 1), col = P.color;
+  loop.setAttribute('fill', col);
+  const hexA = (hex, a) => { const n = parseInt(hex.slice(1), 16); return `rgba(${n >> 16},${(n >> 8) & 255},${n & 255},${a})`; };
+  // one filter pass (blur cost scales with the loop's area): coloured glow, or a soft dark shadow
+  ink.style.filter = P.glow ? `drop-shadow(0 0 ${10 * S}px ${hexA(col, 0.7)})` : 'drop-shadow(0 2px 5px rgba(0,0,0,.45))';
+  const text = String(P.label || '').trim();
+  lab.textContent = text;
+  lab.style.color = P.label_color;
+  const hasFace = fam => Array.from(document.fonts).some(f => f.family.replace(/["']/g, '') === fam);
+  if (!hasFace('Caveat')) lab.classList.add('serif');
+  const safe = H / W > 1.5 ? [60, 0.08 * H, W - 60, 0.80 * H] : [48, 0.06 * H, W - 48, 0.94 * H];
+  let G = null;
+
+  function layout() {
+    const C = [P.cx * W, P.cy * H];
+    const rx = Math.max(34, P.w * W / 2) * 1.06 + 12 * S, ry = Math.max(26, P.h * H / 2) * 1.1 + 12 * S;
+    const dbl = P.style === 'double';
+    const turns = dbl ? 1.86 : 1.2;
+    const seed = Math.round(P.cx * 37 + P.cy * 91 + text.length * 7) % 89;
+    const tilt = (-4 + 3 * MG.noise(seed * 0.37)) * Math.PI / 180;
+    const th0 = -Math.PI * 0.36, dir = -1;            // start near 1 o'clock, travel counter-clockwise
+    const n = Math.round(160 * turns), raw = [];
+    for (let i = 0; i <= n; i++) {
+      const u = i / n, phi = u * turns * 2 * Math.PI;
+      const th = th0 + dir * phi;
+      // radius drifts outward through the stroke so passes never sit on each other;
+      // low-frequency wobble makes the loop lopsided like a real marker loop
+      const drift = dbl ? lerp(0.93, 1.07, u) : lerp(0.95, 1.06, smooth(u));
+      const wob = 1 + 0.035 * MG.noise(seed + phi * 0.85) + 0.02 * Math.sin(phi * 2 + seed);
+      const x = Math.cos(th) * rx * drift * wob, y = Math.sin(th) * ry * drift * (1 + 0.03 * MG.noise(seed + 40 + phi));
+      raw.push([C[0] + x * Math.cos(tilt) - y * Math.sin(tilt), C[1] + x * Math.sin(tilt) + y * Math.cos(tilt)]);
+    }
+    const sw = 7.5 * S;
+    const st = handStroke(raw, { w: sw, w0: 0.35, tin: dbl ? 0.04 : 0.06, w1: 0.12, tout: dbl ? 0.12 : 0.2, seed, jitter: 0.14 });
+    const xs = st.pts.map(p => p[0]), ys = st.pts.map(p => p[1]);
+    const bb = [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
+    let lb = null;
+    if (text) {
+      const base = (hasFace('Caveat') ? 104 : 92) * S;
+      let fs = base;
+      for (; fs > base * 0.55; fs *= 0.95) {
+        lab.style.fontSize = fs + 'px';
+        if (lab.getBoundingClientRect().width <= (safe[2] - safe[0])) break;
+      }
+      const r = lab.getBoundingClientRect(), lw = r.width, lh = r.height, g = 14 * S;
+      const spots = {
+        above: [C[0] - lw / 2 + rx * 0.25, bb[1] - g - lh], below: [C[0] - lw / 2 + rx * 0.2, bb[3] + g * 0.6],
+        left: [bb[0] - g - lw, C[1] - ry * 0.6 - lh / 2], right: [bb[2] + g, C[1] - ry * 0.6 - lh / 2],
+      };
+      const fit = side => {
+        const [x, y] = spots[side];
+        const cx = clamp(x, safe[0], Math.max(safe[0], safe[2] - lw)), cy = clamp(y, safe[1], Math.max(safe[1], safe[3] - lh));
+        let cost = Math.hypot(cx - x, cy - y);
+        // never cover the circled region itself
+        if (cx < bb[2] && cx + lw > bb[0] && cy < bb[3] && cy + lh > bb[1]) cost += 1500;
+        return { side, x: cx, y: cy, cost };
+      };
+      // beside the loop first (the roomier side), so a loop round a face does not put
+      // its note on the forehead; above/below only when the sides are full. An explicit
+      // side is kept unless the frame edge would shove the note onto the loop.
+      const sides = P.cx <= 0.5 ? ['right', 'left'] : ['left', 'right'];
+      const autoPick = sides.concat(['above', 'below']).map((s, i) => { const c = fit(s); c.cost += i * 30; return c; })
+        .sort((a, b) => a.cost - b.cost)[0];
+      const want = P.label_side !== 'auto' ? fit(P.label_side) : null;
+      const pick = want && want.cost < 300 ? want : autoPick;
+      lab.style.left = pick.x + 'px'; lab.style.top = pick.y + 'px';
+      lab.style.transformOrigin = '0% 60%';
+      lb = [pick.x, pick.y, pick.x + lw, pick.y + lh, lw];
+    }
+    const box = [bb[0], bb[1], bb[2], bb[3]];
+    if (lb) { box[0] = Math.min(box[0], lb[0]); box[1] = Math.min(box[1], lb[1]); box[2] = Math.max(box[2], lb[2]); box[3] = Math.max(box[3], lb[3]); }
+    const pad = P.glow ? 46 * S : 30;
+    MG.box = [box[0] - pad, box[1] - pad, box[2] + pad, box[3] + pad + 6];
+    return { st, lb, drawDur: dbl ? 0.62 : 0.44 };
+  }
+
+  const fontsReady = Promise.all(["700 104px 'Caveat'", "italic 400 92px 'DM Serif Display'", "italic 400 92px 'Instrument Serif'"]
+    .map(f => document.fonts.load(f).catch(() => null)));
+  MG.ready = fontsReady.then(() => { G = layout(); });
+
+  const exitDur = Math.min(0.24, D * 0.16), exitAt = D - exitDur - 1 / MG.fps;   // exits finish on the last frame
+  const drawEnd = P.style === 'double' ? 0.62 : 0.44;
+  const labAt = drawEnd * 0.72, labEnd = labAt + 0.34;
+  MG.active([[0, Math.min(D, Math.max(drawEnd, text ? labEnd : 0) + 0.04)], [Math.max(0, exitAt - 0.02), D]]);
+  MG.frame(t => {
+    if (!G) G = layout();
+    // pen speed: quick start, steady middle, soft landing
+    const x = MG.range(t, 0, G.drawDur);
+    const p = 0.25 * x + 0.75 * MG.ease.outCubic(x);
+    const q = exitDur > 0 ? MG.range(t, exitAt, exitDur) : 0;
+    loop.setAttribute('d', G.st.d(MG.ease.inCubic(q), p));
+    if (G.lb) {
+      const lp = MG.range(t, labAt, 0.34), e = MG.ease.outQuad(lp), feather = 40, reach = (G.lb[4] + feather) * e;
+      const qq = MG.ease.inCubic(MG.range(t, exitAt, exitDur * 0.8));
+      MG.set(lab, { y: (1 - MG.ease.outCubic(lp)) * 8 - qq * 6, rotate: -3, opacity: (lp > 0 ? 1 : 0) * (1 - qq), blur: qq * 6 });
+      lab.style.webkitMaskImage = e >= 1 ? '' :
+        `linear-gradient(90deg,#000 0,#000 ${Math.max(0, reach - feather).toFixed(1)}px,transparent ${reach.toFixed(1)}px)`;
+    }
+  });
+})();
+</script>

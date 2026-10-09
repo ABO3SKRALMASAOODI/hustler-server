@@ -1,0 +1,197 @@
+<!--MG-SPEC {"title": "Checklist", "category": "callout",
+ "description": "2-5 list rows that appear one by one, each ticked with a drawn check mark (or a cross for myths/don'ts), with optional strike-through. Use when the speaker enumerates steps, rules, reasons or myths; items = [{text, at}] where at = item seconds when that row is said (blank = evenly every 0.55 s, tighter on short items). Allow about 0.6 s per row plus 1 s.",
+ "duration": 4.0, "layer": "above_captions", "mutes_captions": false,
+ "params": {
+  "items": {"type": "rows", "required": true, "fields": ["text", "at"], "max_items": 5, "max": 44, "hint": "2-5 rows like {'text': 'Talk to users', 'at': '0.4'}; 'at' = item-relative seconds when the row lands (blank = even spacing)"},
+  "title": {"type": "str", "default": "", "max": 40, "hint": "optional heading, e.g. '3 rules'"},
+  "mark": {"type": "enum", "values": ["check", "cross"], "default": "check", "hint": "cross for myths, mistakes or don'ts"},
+  "strike": {"type": "bool", "default": false, "hint": "strike through each row once it is marked (good with cross)"},
+  "accent": {"type": "color", "default": "#34C759", "hint": "tick colour; with mark=cross the default switches to red"},
+  "panel": {"type": "bool", "default": true, "hint": "dark glass card behind the list for legibility"},
+  "y": {"type": "float", "min": 0.15, "max": 0.8, "default": 0.55, "hint": "vertical centre, frame fraction"},
+  "size": {"type": "float", "min": 0.7, "max": 1.3, "default": 1.0}
+ },
+ "example": {"items": [{"text": "Talk to users"}, {"text": "Ship every week"}, {"text": "Ignore the noise"}], "title": "3 rules"},
+ "sfx": [{"at": 0.32, "kind": "tick", "repeat": {"param": "items", "from": 0.32, "every": 0.55, "fit": 1.1, "min_every": 0.22, "field": "at", "offset": 0.12, "require": "text"}}]} -->
+<style>
+  .card{position:absolute;left:0;top:0;padding:var(--pad);border-radius:var(--rad);transform-origin:50% 40%;will-change:transform,opacity,filter}
+  .card.glass{background:rgba(14,14,17,.62);background-image:linear-gradient(180deg,rgba(255,255,255,.09),rgba(255,255,255,0) 40%);
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.18),inset 0 0 0 1px rgba(255,255,255,.1),0 24px 60px rgba(0,0,0,.36),0 4px 14px rgba(0,0,0,.2)}
+  .card.bare .txt,.card.bare .ttl{text-shadow:0 2px 14px rgba(0,0,0,.55),0 1px 3px rgba(0,0,0,.35)}
+  .ttl{font-family:'Instrument Serif',serif;font-style:italic;font-weight:400;letter-spacing:-.01em;line-height:1;color:#fff;white-space:nowrap}
+  .rule{height:2px;background:rgba(255,255,255,.16);border-radius:2px}
+  .row{position:relative;display:flex;align-items:flex-start;will-change:transform,opacity,filter}
+  .box{position:relative;flex:none;border-radius:30%;box-shadow:inset 0 0 0 3px rgba(255,255,255,.5)}
+  .fill{position:absolute;inset:0;border-radius:30%}
+  .box svg{position:absolute;inset:0;overflow:visible}
+  .txt{position:relative;font-family:'Inter Display','Inter',sans-serif;font-weight:700;letter-spacing:-.022em;line-height:1.08;color:#fff;white-space:nowrap;text-wrap:balance}
+  .strike{position:absolute;height:.075em;border-radius:1em;background:#fff;transform-origin:0 50%}
+</style>
+<div class="mg-root"><div class="card" id="card"></div></div>
+<script>
+(() => {
+  const P = MG.params, W = MG.W, H = MG.H, D = MG.duration, S = P.size * (MG.H < MG.W ? 0.72 : 1);
+  const card = MG.$('#card'), NS = 'http://www.w3.org/2000/svg';
+  const cross = P.mark === 'cross';
+  const acc = cross && P.accent.toUpperCase() === '#34C759' ? '#FF453A' : P.accent;
+  card.classList.add(P.panel ? 'glass' : 'bare');
+  const rowsIn = (P.items || []).filter(r => r && String(r.text || '').trim()).slice(0, 5);
+  if (!rowsIn.length) rowsIn.push({ text: '—' });
+  // even cadence, tightened so every row (and its tick) lands before the exit on short items
+  const FIRST = 0.2, MARK = 0.12, EVERY = Math.min(0.55, Math.max(0.22, (D - 1.1) / Math.max(1, rowsIn.length - 1)));
+  // row landing times: explicit 'at' (item seconds) or an even cadence
+  const times = rowsIn.map((r, i) => {
+    const v = parseFloat(String(r.at ?? '').replace(',', '.'));
+    return Number.isFinite(v) ? MG.clamp(v, 0, Math.max(0, D - 0.5)) : FIRST + i * EVERY;
+  });
+  const title = String(P.title || '').trim();
+  let ttl = null, rule = null;
+  if (title) { ttl = MG.el('div', 'ttl', title, card); rule = MG.el('div', 'rule', null, card); }
+  const rows = rowsIn.map((r, i) => {
+    const row = MG.el('div', 'row', null, card);
+    const box = MG.el('div', 'box', null, row);
+    const fill = MG.el('div', 'fill', null, box);
+    fill.style.background = `linear-gradient(160deg, color-mix(in srgb, ${acc} 88%, #fff), ${acc} 55%, color-mix(in srgb, ${acc} 82%, #000))`;
+    fill.style.boxShadow = `0 6px 18px color-mix(in srgb, ${acc} 45%, transparent), inset 0 1px 0 rgba(255,255,255,.35)`;
+    const svg = document.createElementNS(NS, 'svg');
+    svg.setAttribute('viewBox', '0 0 100 100');
+    const paths = (cross ? ['M31 31 L69 69', 'M69 31 L31 69'] : ['M27 53 L43 68 L74 34']).map(d => {
+      const p = document.createElementNS(NS, 'path');
+      p.setAttribute('d', d); p.setAttribute('fill', 'none'); p.setAttribute('stroke', '#fff');
+      p.setAttribute('stroke-width', '11'); p.setAttribute('stroke-linecap', 'round'); p.setAttribute('stroke-linejoin', 'round');
+      svg.appendChild(p); return p;
+    });
+    box.appendChild(svg);
+    const txt = MG.el('div', 'txt', String(r.text).trim(), row);
+    return { row, box, fill, paths, txt, strikes: [], t: times[i] };
+  });
+  let G = null;
+
+  function layout() {
+    const pad = (P.panel ? 50 : 8) * S, gap = 28 * S, bs = 64 * S;
+    card.style.setProperty('--pad', pad + 'px');
+    card.style.setProperty('--rad', (38 * S) + 'px');
+    const maxText = W - 120 - pad * 2 - bs - gap;
+    const safe = H / W > 1.5 ? [0.08 * H, 0.80 * H] : [0.05 * H, 0.95 * H];
+    const rowGap = 24 * S;
+    const setFs = v => rows.forEach(r => { r.txt.style.fontSize = v + 'px'; });
+    const widest = () => Math.max(...rows.map(r => r.txt.getBoundingClientRect().width));
+    const lineCount = r => Math.round(r.txt.getBoundingClientRect().height / (parseFloat(r.txt.style.fontSize) * 1.08));
+    rows.forEach((r, i) => {
+      r.box.style.width = r.box.style.height = bs + 'px';
+      r.txt.style.marginLeft = gap + 'px';
+      r.row.style.marginTop = (i ? rowGap : 0) + 'px';
+    });
+    // big type first: shrink a little on one line, then let long rows take two balanced
+    // lines, and only then shrink further (keeping the card inside the safe area)
+    let fs = 64 * S;
+    setFs(fs);
+    while (widest() > maxText && fs > 52 * S) { fs *= 0.97; setFs(fs); }
+    if (widest() > maxText) {
+      fs = Math.max(fs, 56 * S);
+      rows.forEach(r => { r.txt.style.whiteSpace = 'normal'; r.txt.style.maxWidth = maxText + 'px'; });
+      setFs(fs);
+      while (Math.max(...rows.map(lineCount)) > 2 && fs > 26) { fs *= 0.96; setFs(fs); }
+    }
+    const lineH = fs * 1.08;
+    rows.forEach(r => {
+      // the box sits on the first line, so a two-line row still reads as one bullet
+      r.box.style.marginTop = Math.max(0, (lineH - bs) / 2) + 'px';
+      r.txt.style.marginTop = Math.max(0, (bs - lineH) / 2) + 'px';
+    });
+    if (ttl) {
+      ttl.style.fontSize = Math.min(84 * S, fs * 1.32) + 'px';
+      while (ttl.getBoundingClientRect().width > W - 120 - pad * 2 && parseFloat(ttl.style.fontSize) > 28) ttl.style.fontSize = (parseFloat(ttl.style.fontSize) * 0.95) + 'px';
+      rule.style.margin = `${18 * S}px 0 ${26 * S}px`;
+    }
+    let r = card.getBoundingClientRect();
+    while (r.height > safe[1] - safe[0] && fs > 26) {
+      fs *= 0.95; setFs(fs);
+      rows.forEach(rw => {
+        rw.box.style.marginTop = Math.max(0, (fs * 1.08 - bs) / 2) + 'px';
+        rw.txt.style.marginTop = Math.max(0, (bs - fs * 1.08) / 2) + 'px';
+      });
+      r = card.getBoundingClientRect();
+    }
+    // a wrapped row is as wide as its longest balanced line, so the card hugs the text
+    rows.forEach(rw => {
+      if (rw.txt.style.whiteSpace !== 'normal') return;
+      const rg = document.createRange();
+      rg.selectNodeContents(rw.txt);
+      const n0 = lineCount(rw), wide = Math.max(...Array.from(rg.getClientRects()).map(b => b.width));
+      rw.txt.style.width = Math.ceil(wide + 2) + 'px';
+      if (lineCount(rw) !== n0) rw.txt.style.width = '';
+    });
+    r = card.getBoundingClientRect();
+    if (P.strike) {
+      // one strike bar per text line, drawn left to right line after line
+      rows.forEach(rw => {
+        const tr = rw.txt.getBoundingClientRect(), rg = document.createRange();
+        rg.selectNodeContents(rw.txt);
+        const lines = [];
+        Array.from(rg.getClientRects()).forEach(b => {
+          if (b.width < 1) return;
+          const k = Math.max(0, Math.floor((b.top + b.height / 2 - tr.top) / (fs * 1.08)));
+          lines[k] = lines[k] ? [Math.min(lines[k][0], b.left), Math.max(lines[k][1], b.right)] : [b.left, b.right];
+        });
+        lines.forEach((ln, k) => {
+          if (!ln) return;
+          const bar = MG.el('div', 'strike', null, rw.txt);
+          bar.style.left = (ln[0] - tr.left - 0.04 * fs) + 'px';
+          bar.style.width = (ln[1] - ln[0] + 0.1 * fs) + 'px';
+          bar.style.top = (k * fs * 1.08 + 0.56 * fs * 1.08) + 'px';
+          rw.strikes.push(bar);
+        });
+      });
+    }
+    const cw = r.width, ch = r.height;
+    const left = (W - cw) / 2, top = MG.clamp(H * P.y - ch / 2, safe[0], Math.max(safe[0], safe[1] - ch));
+    card.style.left = left + 'px'; card.style.top = top + 'px';
+    MG.box = [left - 56, top - 44, left + cw + 56, top + ch + 76];
+    return { fs };
+  }
+
+  const fontsReady = Promise.all(["700 64px 'Inter Display'", "italic 400 84px 'Instrument Serif'"].map(f => document.fonts.load(f).catch(() => null)));
+  MG.ready = fontsReady.then(() => { G = layout(); });
+
+  const exitDur = Math.min(0.28, D * 0.12), exitAt = D - exitDur - 1 / MG.fps;   // exits finish on the last frame
+  const wins = [[0, title ? 0.6 : 0.42]].concat(rows.map(r => [Math.max(0, r.t - 0.09), r.t + (P.strike ? 0.66 : 0.42)]));
+  MG.active(wins.concat([[Math.max(0, exitAt - 0.02), D]]));
+  MG.frame(t => {
+    if (!G) G = layout();
+    const q = exitDur > 0 ? MG.ease.inCubic(MG.range(t, exitAt, exitDur)) : 0;
+    const c = MG.ease.outCubic(MG.range(t, 0, 0.34));
+    if (P.panel) MG.set(card, { y: (1 - c) * 26 + q * 22, scale: 0.965 + 0.035 * c, opacity: MG.range(t, 0, 0.16) * (1 - q), blur: (1 - c) * 10 + q * 8 });
+    else MG.set(card, { y: q * 22, opacity: 1 - q, blur: q * 8 });
+    if (ttl) {
+      const e = MG.ease.outCubic(MG.range(t, 0.06, 0.3));
+      MG.set(ttl, { y: (1 - e) * 12, opacity: MG.range(t, 0.06, 0.12), blur: (1 - e) * 8 });
+      rule.style.transformOrigin = '0 50%';
+      MG.set(rule, { sx: Math.max(0.0001, MG.ease.outExpo(MG.range(t, 0.1, 0.5))) });
+    }
+    rows.forEach(r => {
+      const t0 = r.t - 0.08;
+      const e = MG.ease.outCubic(MG.range(t, t0, 0.22));
+      MG.set(r.row, { y: (1 - e) * 16, opacity: MG.range(t, t0, 0.1), blur: (1 - e) * 9 });
+      // mark: box fills with a small spring pop, tick/cross draws on
+      const tm = r.t + MARK;
+      const k = MG.spring(t, tm, { stiffness: 700, damping: 30 });
+      MG.set(r.fill, { scale: Math.max(0, 0.55 + 0.45 * k), opacity: MG.range(t, tm, 0.06) });
+      MG.set(r.box, { scale: 1 + 0.07 * Math.sin(Math.PI * MG.range(t, tm, 0.24)) });
+      if (cross) {
+        MG.draw(r.paths[0], MG.ease.outCubic(MG.range(t, tm + 0.04, 0.13)));
+        MG.draw(r.paths[1], MG.ease.outCubic(MG.range(t, tm + 0.13, 0.13)));
+      } else MG.draw(r.paths[0], MG.ease.outCubic(MG.range(t, tm + 0.04, 0.22)));
+      const done = MG.range(t, tm + 0.2, 0.3);
+      if (r.strikes.length) {
+        const nl = r.strikes.length;
+        r.strikes.forEach((bar, k) => {
+          const d = MG.clamp(done * nl - k);
+          MG.set(bar, { sx: Math.max(0.0001, MG.ease.outExpo(d)), opacity: d > 0 ? 1 : 0 });
+        });
+        r.txt.style.opacity = 1 - 0.42 * MG.ease.outCubic(done);
+      }
+    });
+  });
+})();
+</script>

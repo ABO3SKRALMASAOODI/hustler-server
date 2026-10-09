@@ -1,0 +1,233 @@
+<!--MG-SPEC {"title": "Arrow callout", "category": "callout",
+ "description": "Hand-drawn arrow that draws on from a short label to an exact point in the frame (target_x/target_y as frame fractions, 0,0 = top-left). Use to point at a person, product, number or detail while it is mentioned (1.5-3 s); look at the frame first and aim at the real object, label in empty space.",
+ "duration": 2.4, "layer": "above_captions", "mutes_captions": false,
+ "params": {
+  "label": {"type": "str", "required": true, "max": 40, "hint": "1-4 words, e.g. 'the real cost'"},
+  "target_x": {"type": "float", "required": true, "min": 0, "max": 1, "hint": "x of the point to aim at, frame fraction (0 = left)"},
+  "target_y": {"type": "float", "required": true, "min": 0, "max": 1, "hint": "y of the point to aim at, frame fraction (0 = top)"},
+  "side": {"type": "enum", "values": ["auto", "left", "right", "above", "below"], "default": "auto", "hint": "where the label sits relative to the target; auto picks the side with room"},
+  "distance": {"type": "float", "min": 0.12, "max": 0.45, "default": 0.25, "hint": "label-to-target distance, fraction of frame width"},
+  "font": {"type": "enum", "values": ["hand", "sans", "serif"], "default": "hand", "hint": "hand = marker handwriting, sans = bold grotesk, serif = italic serif"},
+  "color": {"type": "color", "default": "#FFFFFF"},
+  "size": {"type": "float", "min": 0.6, "max": 1.5, "default": 1.0}
+ },
+ "example": {"label": "this is the trick", "target_x": 0.62, "target_y": 0.40},
+ "sfx": [{"at": 0.12, "kind": "swish_short"}]} -->
+<style>
+  .lab{position:absolute;display:inline-block;line-height:1.02;white-space:normal;text-wrap:balance;
+       text-shadow:0 2px 14px rgba(0,0,0,.55),0 1px 3px rgba(0,0,0,.35);will-change:transform,filter,opacity,mask-image}
+  .lab.hand{font-family:'Caveat','Instrument Serif',serif;font-weight:700;letter-spacing:.005em;line-height:.92}
+  .lab.serif{font-family:'Instrument Serif',serif;font-style:italic;font-weight:400;letter-spacing:-.01em;line-height:.95}
+  .lab.sans{font-family:'Inter Display','Inter',sans-serif;font-weight:800;letter-spacing:-.03em;line-height:1.0}
+  svg.ink{position:absolute;left:0;top:0;overflow:visible;filter:drop-shadow(0 2px 5px rgba(0,0,0,.42))}
+</style>
+<div class="mg-root"><svg class="ink" id="ink"><path id="shaft"/><path id="b1"/><path id="b2"/></svg><div class="lab" id="lab"></div></div>
+<script>
+(() => {
+  const P = MG.params, W = MG.W, H = MG.H, D = MG.duration;
+  const clamp = MG.clamp, lerp = MG.lerp;
+  const smooth = x => x * x * (3 - 2 * x);
+
+  // Tapered hand stroke: dense centerline -> filled outline for any [a, b] slice.
+  function handStroke(pts, o) {
+    const cum = [0];
+    for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]));
+    const L = cum[cum.length - 1] || 1, N = Math.max(3, Math.ceil(L / Math.max(1.5, Math.min(4, L / 240))) + 1);
+    const Pt = []; let j = 0;
+    for (let k = 0; k < N; k++) {
+      const s = L * k / (N - 1);
+      while (j < cum.length - 2 && cum[j + 1] < s) j++;
+      const f = clamp((s - cum[j]) / ((cum[j + 1] - cum[j]) || 1));
+      Pt.push([lerp(pts[j][0], pts[j + 1][0], f), lerp(pts[j][1], pts[j + 1][1], f)]);
+    }
+    const Tn = Pt.map((p, k) => {
+      const a = Pt[Math.max(0, k - 1)], b = Pt[Math.min(N - 1, k + 1)];
+      const tx = b[0] - a[0], ty = b[1] - a[1], l = Math.hypot(tx, ty) || 1;
+      return [tx / l, ty / l];
+    });
+    const w0 = o.w0 ?? 0.3, w1 = o.w1 ?? 0.2;
+    const Wd = Pt.map((p, k) => {
+      const u = k / (N - 1);
+      const a = w0 + (1 - w0) * smooth(clamp(u / (o.tin || 0.15)));
+      const b = w1 + (1 - w1) * smooth(clamp((1 - u) / (o.tout || 0.25)));
+      return o.w * a * b * (1 + (o.jitter ?? 0.1) * MG.noise(u * L / 55 + (o.seed || 0) * 7.31));
+    });
+    const at = f => {
+      const k = Math.min(N - 2, Math.floor(f)), r = f - k;
+      let tx = lerp(Tn[k][0], Tn[k + 1][0], r), ty = lerp(Tn[k][1], Tn[k + 1][1], r);
+      const l = Math.hypot(tx, ty) || 1;
+      return { x: lerp(Pt[k][0], Pt[k + 1][0], r), y: lerp(Pt[k][1], Pt[k + 1][1], r), tx: tx / l, ty: ty / l, w: lerp(Wd[k], Wd[k + 1], r) };
+    };
+    const cap = (c, sg) => {
+      const out = [], h = c.w / 2, nx = -c.ty, ny = c.tx;
+      for (let i = 1; i < 8; i++) {
+        const th = Math.PI * i / 8, cs = Math.cos(th), sn = Math.sin(th);
+        out.push([c.x + sg * (nx * cs + c.tx * sn) * h, c.y + sg * (ny * cs + c.ty * sn) * h]);
+      }
+      return out;
+    };
+    return {
+      L, pts: Pt, end: () => at(N - 1 - 1e-6),
+      d(a, b) {
+        a = clamp(a); b = clamp(b);
+        if (b - a < 1e-4) return '';
+        const fa = a * (N - 1), fb = b * (N - 1) - 1e-6, S = [at(fa)];
+        for (let k = Math.floor(fa) + 1; k < fb; k++) S.push(at(k));
+        S.push(at(fb));
+        const Lf = [], Rt = [];
+        S.forEach(s => { const h = s.w / 2; Lf.push([s.x - s.ty * h, s.y + s.tx * h]); Rt.push([s.x + s.ty * h, s.y - s.tx * h]); });
+        const all = Lf.concat(cap(S[S.length - 1], 1), Rt.reverse(), cap(S[0], -1));
+        return 'M' + all.map(p => p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join('L') + 'Z';
+      },
+    };
+  }
+
+  const lab = MG.$('#lab'), ink = MG.$('#ink');
+  const shaft = MG.$('#shaft'), b1 = MG.$('#b1'), b2 = MG.$('#b2');
+  [shaft, b1, b2].forEach(p => p.setAttribute('fill', P.color));
+  lab.style.color = P.color;
+  lab.textContent = String(P.label || '').trim();
+  const hasFace = fam => Array.from(document.fonts).some(f => f.family.replace(/["']/g, '') === fam);
+  const font = P.font === 'hand' && !hasFace('Caveat') ? 'serif' : P.font;
+  lab.classList.add(font);
+  const S = P.size * (MG.H < MG.W ? 0.72 : 1);
+  const safe = H / W > 1.5 ? [60, 0.08 * H, W - 60, 0.80 * H] : [48, 0.06 * H, W - 48, 0.94 * H];
+  let G = null;
+
+  function layout() {
+    const base = { hand: 98, serif: 92, sans: 60 }[font] * S;
+    const maxW = Math.min(560 * S, (safe[2] - safe[0]) * 0.62);
+    lab.style.maxWidth = maxW + 'px';
+    let fs = base;
+    for (; fs > base * 0.5; fs *= 0.95) {
+      lab.style.fontSize = fs + 'px';
+      const r = lab.getBoundingClientRect(), lh = parseFloat(getComputedStyle(lab).lineHeight) || fs;
+      if (Math.round(r.height / lh) <= 2 && lab.scrollWidth <= maxW + 1) break;
+    }
+    const lr = lab.getBoundingClientRect(), lw = lr.width, lh = lr.height;
+    const T = [P.target_x * W, P.target_y * H], dist = P.distance * W, gap = 16 * S;
+    const hx = P.target_x > 0.5 ? -0.32 : 0.32;
+    const dirs = { left: [-1, -0.42], right: [1, -0.42], above: [hx, -1], below: [hx, 1] };
+    const place = side => {
+      const v = dirs[side], n = Math.hypot(v[0], v[1]);
+      const A = [T[0] + v[0] / n * dist, T[1] + v[1] / n * dist];
+      let x, y;
+      if (side === 'left') { x = A[0] - gap - lw; y = A[1] - lh / 2; }
+      else if (side === 'right') { x = A[0] + gap; y = A[1] - lh / 2; }
+      else if (side === 'above') { x = A[0] - lw / 2; y = A[1] - gap - lh; }
+      else { x = A[0] - lw / 2; y = A[1] + gap; }
+      const cx = clamp(x, safe[0], Math.max(safe[0], safe[2] - lw)), cy = clamp(y, safe[1], Math.max(safe[1], safe[3] - lh));
+      let cost = Math.hypot(cx - x, cy - y);
+      const pad = 24;
+      if (T[0] > cx - pad && T[0] < cx + lw + pad && T[1] > cy - pad && T[1] < cy + lh + pad) cost += 2000;
+      // arrow must leave the label towards the target
+      const ex = side === 'left' ? cx + lw : side === 'right' ? cx : cx + lw / 2;
+      const ey = side === 'above' ? cy + lh : side === 'below' ? cy : cy + lh / 2;
+      const len = Math.hypot(T[0] - ex, T[1] - ey);
+      if (len < 90 * S) cost += 800;
+      return { side, x: cx, y: cy, cost };
+    };
+    // An explicit side is a preference: if the frame edge pushes the label far off its
+    // spot (or onto the target, or too close for an arrow) the best automatic side wins.
+    const horiz = P.target_x >= 0.5 ? ['left', 'right'] : ['right', 'left'];
+    const vert = P.target_y > 0.55 ? ['above', 'below'] : ['below', 'above'];
+    const order = [horiz[0], vert[0], vert[1], horiz[1]];
+    const autoPick = order.map((s, i) => { const c = place(s); c.cost += i * 25; return c; }).sort((a, b) => a.cost - b.cost)[0];
+    const want = P.side !== 'auto' ? place(P.side) : null;
+    const pick = want && want.cost < 300 ? want : autoPick;
+    lab.style.left = pick.x + 'px'; lab.style.top = pick.y + 'px';
+    // Arrow geometry. The arrow leaves from the label edge that really faces the target
+    // (after clamping), so the shaft can never run back through the words.
+    const bx = { l: pick.x, t: pick.y, r: pick.x + lw, b: pick.y + lh };
+    const anchorOf = s => s === 'left' ? [bx.r + gap, bx.t + lh * 0.55] : s === 'right' ? [bx.l - gap, bx.t + lh * 0.55]
+      : s === 'above' ? [(bx.l + bx.r) / 2, bx.b + gap * 0.7] : [(bx.l + bx.r) / 2, bx.t - gap * 0.7];
+    const normals = { left: [1, 0], right: [-1, 0], above: [0, 1], below: [0, -1] };
+    const facing = s => {
+      const a = anchorOf(s), n = normals[s], dx = T[0] - a[0], dy = T[1] - a[1];
+      return (dx * n[0] + dy * n[1]) / (Math.hypot(dx, dy) || 1);
+    };
+    let side = pick.side;
+    if (facing(side) < 0.25) side = Object.keys(normals).sort((a, b) => facing(b) - facing(a))[0];
+    lab.style.textAlign = side === 'left' ? 'right' : side === 'right' ? 'left' : 'center';
+    const A = anchorOf(side);
+    const exitN = normals[side];
+    let v = [T[0] - A[0], T[1] - A[1]];
+    const full = Math.hypot(v[0], v[1]) || 1;
+    const endGap = Math.min(18 * S, full * 0.15);
+    const E = [T[0] - v[0] / full * endGap, T[1] - v[1] / full * endGap];
+    v = [E[0] - A[0], E[1] - A[1]];
+    const L = Math.hypot(v[0], v[1]) || 1, u = [v[0] / L, v[1] / L];
+    const rot = (p, a) => [p[0] * Math.cos(a) - p[1] * Math.sin(a), p[0] * Math.sin(a) + p[1] * Math.cos(a)];
+    const th1 = 34 * Math.PI / 180, th2 = 24 * Math.PI / 180;
+    const sg = (rot(u, th1)[0] * exitN[0] + rot(u, th1)[1] * exitN[1]) >= (rot(u, -th1)[0] * exitN[0] + rot(u, -th1)[1] * exitN[1]) ? 1 : -1;
+    const t1 = rot(u, sg * th1), t2 = rot(u, -sg * th2);
+    const C1 = [A[0] + t1[0] * L * 0.42, A[1] + t1[1] * L * 0.42], C2 = [E[0] - t2[0] * L * 0.32, E[1] - t2[1] * L * 0.32];
+    const raw = [];
+    const n = 140;
+    for (let i = 0; i <= n; i++) {
+      const s = i / n, m = 1 - s;
+      raw.push([m * m * m * A[0] + 3 * m * m * s * C1[0] + 3 * m * s * s * C2[0] + s * s * s * E[0],
+                m * m * m * A[1] + 3 * m * m * s * C1[1] + 3 * m * s * s * C2[1] + s * s * s * E[1]]);
+    }
+    // hand wobble: low-frequency perpendicular drift, zero at both ends
+    const amp = 2.2 * S, seed = (lab.textContent.length * 17 + Math.round(P.target_x * 100)) % 97;
+    const wob = raw.map((p, i) => {
+      const a = raw[Math.max(0, i - 1)], b = raw[Math.min(n, i + 1)];
+      const tx = b[0] - a[0], ty = b[1] - a[1], l = Math.hypot(tx, ty) || 1, s = i / n;
+      const o = amp * MG.noise(seed + s * L / 85) * Math.sin(Math.PI * s);
+      return [p[0] - ty / l * o, p[1] + tx / l * o];
+    });
+    const sw = (font === 'sans' ? 7.4 : 8.2) * S;
+    const sh = handStroke(wob, { w: sw, w0: 0.28, tin: 0.16, w1: 0.62, tout: 0.3, seed, jitter: 0.09 });
+    const tip = sh.end(), back = [-tip.tx, -tip.ty];
+    const hl = clamp(L * 0.19, 30, 56) * S;
+    const mkBarb = (ang, k, curl) => {
+      const d = rot(back, ang), e = [tip.x + d[0] * hl * k, tip.y + d[1] * hl * k];
+      const mid = [(tip.x + e[0]) / 2 - d[1] * curl, (tip.y + e[1]) / 2 + d[0] * curl];
+      const pts = [];
+      for (let i = 0; i <= 16; i++) {
+        const s = i / 16, m = 1 - s;
+        pts.push([m * m * tip.x + 2 * m * s * mid[0] + s * s * e[0], m * m * tip.y + 2 * m * s * mid[1] + s * s * e[1]]);
+      }
+      return handStroke(pts, { w: sw * 0.95, w0: 0.9, tin: 0.05, w1: 0.25, tout: 0.55, seed: seed + k * 3, jitter: 0.05 });
+    };
+    const B1 = mkBarb(27 * Math.PI / 180, 1, 2.5 * S), B2 = mkBarb(-33 * Math.PI / 180, 0.9, -2 * S);
+    const xs = sh.pts.map(p => p[0]).concat([bx.l, bx.r, tip.x - hl, tip.x + hl]);
+    const ys = sh.pts.map(p => p[1]).concat([bx.t, bx.b, tip.y - hl, tip.y + hl]);
+    MG.box = [Math.min(...xs) - 40, Math.min(...ys) - 40, Math.max(...xs) + 40, Math.max(...ys) + 46];
+    return { sh, B1, B2, lw };
+  }
+
+  const fontsReady = Promise.all(["700 98px 'Caveat'", "italic 400 92px 'Instrument Serif'", "800 60px 'Inter Display'"]
+    .map(f => document.fonts.load(f).catch(() => null)));
+  MG.ready = fontsReady.then(() => { G = layout(); });
+
+  const exitDur = Math.min(0.24, D * 0.16), exitAt = D - exitDur - 1 / MG.fps;   // exits finish on the last frame
+  MG.active([[0, Math.min(D, 0.66)], [Math.max(0, exitAt - 0.02), D]]);
+  MG.frame(t => {
+    if (!G) G = layout();
+    // label
+    const lp = MG.range(t, 0, 0.3);
+    const q = exitDur > 0 ? MG.ease.inCubic(MG.range(t, exitAt, exitDur * 0.85)) : 0;
+    if (font === 'sans') {
+      const e = MG.ease.outCubic(MG.range(t, 0, 0.18));
+      MG.set(lab, { y: (1 - e) * 12 - q * 8, opacity: MG.range(t, 0, 0.1) * (1 - q), blur: (1 - e) * 9 + q * 6 });
+      lab.style.webkitMaskImage = '';
+    } else {
+      const e = MG.ease.outQuad(lp), feather = 46, reach = (G.lw + feather) * e;
+      MG.set(lab, { y: (1 - MG.ease.outCubic(lp)) * 7 - q * 6, rotate: font === 'hand' ? -2.5 : 0, opacity: 1 - q, blur: q * 6 });
+      lab.style.webkitMaskImage = e >= 1 ? '' :
+        `linear-gradient(90deg,#000 0,#000 ${Math.max(0, reach - feather).toFixed(1)}px,transparent ${reach.toFixed(1)}px)`;
+    }
+    // arrow: draw-on (ease-out), then barbs flick on; exit erases from the tail
+    const p = MG.ease.outCubic(MG.range(t, 0.13, 0.36));
+    const tail = q > 0 ? MG.ease.inCubic(MG.range(t, exitAt, exitDur)) : 0;
+    shaft.setAttribute('d', G.sh.d(tail, p));
+    const h1 = MG.ease.outQuad(MG.range(t, 0.47, 0.09)), h2 = MG.ease.outQuad(MG.range(t, 0.51, 0.09));
+    b1.setAttribute('d', G.B1.d(0, h1));
+    b2.setAttribute('d', G.B2.d(0, h2));
+    const hb = 1 - MG.range(t, exitAt + exitDur * 0.55, exitDur * 0.45);
+    b1.style.opacity = b2.style.opacity = hb;
+  });
+})();
+</script>
