@@ -75,6 +75,10 @@ user's requested mood, source aspect, music and identity.
   evidence shot or story transition, with stillness during sustained dialogue.
   Inspect source focus before changing the destination box. `fit=pad` preserves
   the whole picture; `crop` fills and may discard important context.
+  Never leave the canvas around a card as a flat void: `background_style=
+  "blur"` fills it with the card's own footage blurred and darkened (the
+  premium podcast look), `radial_gradient`/`vertical_gradient` give a graded
+  field; add `grain` ~.25 and `vignette` ~.4 for texture.
 - **A visible argument:** use `set_editorial_graphic(kind="comparison")` for
   two actual opposing ideas, `metric` for a supported figure plus its meaning,
   `statement` for a specific thesis, `quote` for a faithful short quotation,
@@ -128,7 +132,8 @@ rounded cards so small the person disappears; hiding a gesture to show stock;
 flat speech with no chosen focal moment despite a designed-edit brief.
 An entrance replayed at every cue; words re-centering as the phrase builds;
 changing typeface or position merely because another word arrived.
-Behind-subject type requires `add_text_behind` and a verified real matte.
+Behind-subject type requires `add_text_behind` (or a motion graphic placed
+by `add_motion_graphic` on `layer="behind_subject"`) and a verified real matte.
 Perspective galleries/3D cylinders are not supplied by a typography scene.
 
 ## Verification procedure

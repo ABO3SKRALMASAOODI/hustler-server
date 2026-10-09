@@ -350,6 +350,26 @@ def test_render_edl_puts_the_mask_and_the_clip_on_the_right_inputs(
 
 
 @needs_ffmpeg
+def test_a_proof_fragment_starting_mid_window_skips_into_the_mask(
+        shot, mask, workdir, fake_engine, monkeypatch):
+    monkeypatch.setattr(renderer.storage, "download_to",
+                        lambda key, local: shutil.copyfile(mask, local))
+    e = validate_edl({"keep": [[0.0, SHOT_S]], "motion": [_mo()]}, SHOT_S).model_dump()
+    frag = stitch.window_edl(e, Timeline(e["keep"], [], []), 2.0, 5.0)
+    assert frag["motion"][0]["phase_s"] == pytest.approx(1.0)
+    out = os.path.join(workdir, "frag.mp4")
+    renderer.render_edl(frag, {"video": {"duration": SHOT_S}, "words": [],
+                               "sentences": []}, shot, out, workdir, preview=True)
+    assert "trim=start=1.000:end=3.000" in fake_engine["graph"]
+    src, frame = _frame_at(shot, 2.6), _frame_at(out, 0.6)
+    x0, x1 = _subject_cols(src)
+    band = slice(GFX_BAND[0] + 4, GFX_BAND[1] - 4)
+    assert _magenta(frame)[band].mean() > 0.4
+    assert _magenta(frame)[band, x0 + 10:x1 - 10].mean() < 0.05, \
+        "the fragment paired the wrong mask frames with the picture"
+
+
+@needs_ffmpeg
 def test_render_edl_degrades_to_an_ordinary_graphic_when_the_mask_is_missing(
         shot, workdir, fake_engine, monkeypatch):
     monkeypatch.setattr(

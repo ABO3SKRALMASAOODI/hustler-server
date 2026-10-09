@@ -157,7 +157,8 @@ def build_designed_plate(path, W, H, spec):
     img = fill * (1 - s * a)                 # shadow only where the plate shows
     img = img * (1 - b) + _rgb(spec.get("border_color", "#444444")) * b
     rgba = np.dstack([_dither(img), np.asarray(hole, np.uint8)])
-    Image.fromarray(rgba, "RGBA").save(path)
+    # Fast deflate: the dither makes this a large PNG, decoded once a render.
+    Image.fromarray(rgba, "RGBA").save(path, compress_level=1)
     return path
 
 
@@ -282,7 +283,9 @@ def _blur_chain(W, H, spec):
     bw, bh = max(16, int(round(W / 16)) * 2), max(16, int(round(H / 16)) * 2)
     k = 1.0 - float(spec.get("background_dim") if spec.get("background_dim")
                     is not None else BLUR_DIM_DEFAULT)
-    sigma = max(2.0, min(bw, bh) / 32.0)
+    # Proportional to the canvas, so a 360p preview and a 1080p final show
+    # the same softness.
+    sigma = max(1.0, min(bw, bh) / 32.0)
     return (f"scale={bw}:{bh}:force_original_aspect_ratio=increase,crop={bw}:{bh},"
             f"setsar=1,format=yuv420p,gblur=sigma={sigma:.2f}:steps=2,"
             f"lutyuv=y='16+(val-16)*{k:.3f}':u='128+(val-128)*.85':v='128+(val-128)*.85',"

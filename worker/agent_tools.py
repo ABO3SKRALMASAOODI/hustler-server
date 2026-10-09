@@ -23533,7 +23533,7 @@ TOOLS = {
         "BACKDROP — the canvas around the card: a flat `background` colour leaves a dead void "
         "(the default, kept for old edits). Prefer a designed backdrop: background_style='blur' "
         "fills the frame with the card's own footage blurred and darkened (the premium podcast "
-        "look; background_dim 0-.9, default .45), 'radial_gradient' glows from `background` behind "
+        "look; background_dim 0-.9, default .45, ~.25 on dark footage), 'radial_gradient' glows from `background` behind "
         "the card out to background_color2, 'vertical_gradient' runs `background` (top) to "
         "background_color2 (bottom); naming only the style picks a tasteful dark palette. "
         "grain 0-1 adds animated film grain (~.25 subtle, .4 visible) and vignette 0-1 darkens "

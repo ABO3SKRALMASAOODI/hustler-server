@@ -43,6 +43,20 @@ The page is `MG.W` = 1080 CSS px wide and `MG.H` tall (1920 for 9:16, 1080 for
 scales to the output resolution. Respect platform-safe areas on 9:16: keep
 important type between y ≈ 0.08·H and 0.80·H and x ≈ 60–1020 px.
 
+## Layers
+
+`above_captions` (designed moments, the default) and `below_captions`
+composite on the finished frame. `behind_subject` puts the composition INTO
+the shot: the editor's `add_motion_graphic(..., layer="behind_subject")`
+measures a person matte for the window (the `add_text_behind` pipeline), and
+the renderer draws the clip on the picture before the zoom stage and lays the
+subject back over it — the references' "magazine cover" depth. Design for it:
+giant type (25–35% of frame height, near full width) whose letters the head
+and shoulders cross, so tops and bottoms stay readable; no box or plate
+behind the words; the graphic is part of the picture, so a zoom scales it and
+a footage card frames it with the picture. If the mask cannot be used at
+render time the item falls back to `above_captions`.
+
 ## Runtime (MG) — everything must be a pure function of time
 
 Never use `Date`, `performance.now`, `Math.random`, `setTimeout`,

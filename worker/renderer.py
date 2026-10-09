@@ -2389,7 +2389,12 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         # window the "subject" layer is fully transparent, so the composite is
         # the picture, exactly. Padding in the graph rather than encoding
         # thousands of black frames into the artifact.
-        chain = [f"trim=start=0:end={b_dur:.3f}", "setpts=PTS-STARTPTS",
+        # mask_offset: seconds into the mask where this program's window
+        # begins (a proof fragment that starts mid-window); 0 for every
+        # whole window, which keeps the historical trim.
+        m_off = float(item.get("mask_offset") or 0.0)
+        chain = [(f"trim=start={m_off:.3f}:end={m_off + b_dur:.3f}" if m_off > 0
+                  else f"trim=start=0:end={b_dur:.3f}"), "setpts=PTS-STARTPTS",
                  f"scale={W}:{H}", "format=gray",
                  f"fps={fps:.3f}"]
         if b_start > 0.001:
@@ -4071,8 +4076,15 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                 motion_inputs[k] = (m_idx, motion_layer.demote(m_item, why),
                                     m_clip)
                 continue
+            # Where in the mask this program's window starts: 0 for a whole
+            # window; a proof fragment that begins mid-window skips ahead.
+            a_src = tl.out_to_src(pieces[0][0] + 1e-3)
+            m_off = (max(0.0, float(a_src) - 1e-3 - float(b["src_start"]))
+                     if a_src is not None else 0.0)
             extra_inputs += ["-i", local]
-            behind_inputs.append((next_idx, {"motion": (m_idx, m_item, m_clip)},
+            behind_inputs.append((next_idx, {"motion": (m_idx, m_item, m_clip),
+                                             "mask_offset": (round(m_off, 3)
+                                                             if m_off > 0.02 else 0.0)},
                                   (round(pieces[0][0], 3),
                                    round(pieces[0][1], 3))))
             next_idx += 1
