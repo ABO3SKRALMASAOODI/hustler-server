@@ -165,7 +165,10 @@ LEGIBILITY:
   `allow_face_overlap=true` keeps a deliberate design over the face; use it
   rarely — the references never cover a face. On a lane that cannot render
   the graphic the check uses the template's estimated size (`KEEP-OUT
-  (estimated)`): confirm it in the preview.
+  (estimated)`), moves it a full clearance off the face, and keeps only the
+  word slam and phrase build templates (their width is their own knob) out
+  of the margins and the button rail: confirm every placement in the
+  preview, and check the safe area of other wide type there yourself.
 - Rotate zones between beats — the band above the head, the chest band
   under the chin, beside the face, the header above a card — instead of
   stacking every graphic in the chest band.

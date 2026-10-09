@@ -710,6 +710,7 @@ def _keep_out(ctx, edl, item, rep):
     item.pop("footprint", None)
     if rep is not None and rep.get("errors"):
         return "", None
+    placed = {k: json.loads(json.dumps(item[k])) for k in ("params", "box") if k in item}
     try:
         if rep is None:
             return _keep_out_estimated(ctx, edl, item)
@@ -717,58 +718,110 @@ def _keep_out(ctx, edl, item, rep):
     except Exception as ex:  # noqa: BLE001 — a measurement never blocks an edit
         print(f"[motion] keep-out skipped: {str(ex)[:200]}", flush=True)
         item.pop("footprint", None)
+        item.update(placed)       # a half-finished move is not reported, so undo it
         return "", None
 
 
 def _keep_out_estimated(ctx, edl, item):
-    """The keep-out on a lane with no browser to probe the composition: the
-    face is measured as usual and compared with the template's NOMINAL ink
-    (keepout.nominal_ink); a collision moves it by the same solver without
-    a verifying render, and the reply says the box was estimated. Nothing
-    is stored for the caption track (it steps only around measured ink)."""
-    if item.get("allow_face_overlap") or not getattr(ctx, "has_main_video", True):
-        return "", None
+    """The keep-out on a lane with no browser to probe the composition. The
+    agent, MCP and shorts lanes ship no Chromium, so this is what production
+    writes run. The face is measured as usual and compared with the
+    template's NOMINAL ink (keepout.nominal_ink). A collision moves it by
+    the same solver without a verifying render, to a spot a full CLEARANCE
+    off the face: the estimate can be a wrapped line short (the Elon lower
+    third's role ran to two lines, and a graze on the estimate still sat on
+    his mouth). Templates whose width is their own knob
+    (keepout.COLUMN_TEMPLATES) are kept out of the side margins and the
+    button rail too. The estimated box is stored as the footprint, so the
+    motion captions step around the graphic here as well. The reply says
+    the box was estimated."""
     template = item["template"]
     spec = motion_templates.spec(template)
     if not keepout.applicable(template, spec, item.get("layer")):
         return "", None
-    box = keepout.nominal_ink(template, spec, item.get("params") or {})
+    W, H = _canvas_size(ctx, edl)
+    box = keepout.nominal_ink(template, spec, item.get("params") or {}, frame=(W, H))
     if not box:
         return "", None
-    W, H = _canvas_size(ctx, edl)
     s, e = float(item["start"]), float(item["end"])
-    track = keepout.face_track(edl, getattr(ctx, "index", None) or {}, W, H, s, e,
-                               measure=_face_measure(ctx))
-    hit = keepout.assess(box, track)
-    if not hit["hit"]:
-        return "", None
+    track = []
+    if getattr(ctx, "has_main_video", True):
+        track = keepout.face_track(edl, getattr(ctx, "index", None) or {}, W, H, s, e,
+                                   measure=_face_measure(ctx))
     zones = keepout.zones_of(track)
-    what = "the speaker's mouth" if hit["mouth"] else "the speaker's face"
-    w0, w1 = hit["when"]
-    cands = keepout.candidates(template, spec, item.get("params") or {}, box, [], zones, W, H,
-                               captions=[keepout.caption_band(y) for y in
-                                         _caption_anchors(ctx, edl, item)],
-                               mouths=keepout.zones_of(track, keepout.mouth_zone))
-    for _cost, patch, pred in cands[:3]:
-        try:
-            params = motion_templates.check_params(template, dict(item["params"], **patch),
-                                                   html=item.get("html"))
-        except ValueError:
-            continue
-        old = item.get("params") or {}
-        pspec = spec.get("params") or {}
-        changes = ", ".join(f"{k} {_fmt(old.get(k, _implicit(k, pspec.get(k) or {})))} → "
-                            f"{_fmt(params.get(k))}" for k in sorted(patch))
-        item["params"] = params
-        place = keepout.where_label(pred, zones)
-        return (f"\nKEEP-OUT (estimated): at its old place it would have covered {what} at "
-                f"{w0:.2f}-{w1:.2f}s, so it moved" + (f" {place}" if place else "")
-                + f" ({changes}). This lane cannot render the graphic, so its box was "
-                "estimated from the template: check the placement in the preview. Pass "
-                "allow_face_overlap=true only for a deliberate design over the face."), None
-    return (f"\nNOTE (keep-out, estimated): it would cover {what} at {w0:.2f}-{w1:.2f}s and no "
-            "clear zone fits it by the template's estimated size. Make it smaller or move it "
-            "to a moment where the face is elsewhere (or allow_face_overlap=true if deliberate)."), None
+    allow = bool(item.get("allow_face_overlap"))
+    hit = keepout.assess(box, track)
+    face_bad = hit["hit"] and not allow
+    issues = ([i for i in keepout.safe_issues(box, W, H) if i in ("side", "rail")]
+              if template in keepout.COLUMN_TEMPLATES else [])
+    bands = _caption_anchors(ctx, edl, item)
+    notes = []
+    if face_bad or (issues and not allow):
+        why = []
+        what = "the speaker's mouth" if hit["mouth"] else "the speaker's face"
+        if face_bad:
+            w0, w1 = hit["when"]
+            why.append(f"covered {what} at {w0:.2f}-{w1:.2f}s")
+        why += [keepout.ISSUE_TEXT[i] for i in issues]
+        kw = dict(captions=[keepout.caption_band(y) for y in bands],
+                  mouths=keepout.zones_of(track, keepout.mouth_zone),
+                  clear_penalty=keepout.CLEAR_PENALTY if face_bad else 0.0)
+        params0 = item.get("params") or {}
+        # another side/align the estimate can draw (the lower third's side)
+        variants = []
+        for key in keepout.HORIZONTAL_KEYS:
+            p = (spec.get("params") or {}).get(key) or {}
+            if p.get("type") != "enum" or item.get("box"):
+                continue
+            cur = params0.get(key, p.get("default"))
+            for v in p.get("values") or []:
+                alt = keepout.nominal_ink(template, spec, dict(params0, **{key: v}),
+                                          frame=(W, H))
+                if v != cur and v in ("left", "center", "right") and alt \
+                        and keepout.rounded(alt) != keepout.rounded(box):
+                    variants.append(({key: v}, alt))
+        cands = keepout.candidates(template, spec, params0, box, variants, zones, W, H,
+                                   require_clear=face_bad, **kw)
+        if face_bad and not cands:
+            cands = keepout.candidates(template, spec, params0, box, variants, zones, W, H, **kw)
+        moved = False
+        for _cost, patch, pred in cands[:3]:
+            try:
+                params = motion_templates.check_params(template, dict(item["params"], **patch),
+                                                       html=item.get("html"))
+            except ValueError:
+                continue
+            pspec = spec.get("params") or {}
+            changes = ", ".join(f"{k} {_fmt(params0.get(k, _implicit(k, pspec.get(k) or {})))} → "
+                                f"{_fmt(params.get(k))}" for k in sorted(patch))
+            item["params"] = params
+            box = keepout.nominal_ink(template, spec, params, frame=(W, H)) or pred
+            place = keepout.where_label(box, zones) if face_bad else ""
+            notes.append(
+                f"KEEP-OUT (estimated): by the template's estimated size it {' and '.join(why)}, "
+                "so it moved" + (f" {place}" if place else "") + f" ({changes}). This lane "
+                "cannot render the graphic, so its box was estimated from the template: check "
+                "the placement in the preview."
+                + (" Pass allow_face_overlap=true only for a deliberate design over the face."
+                   if face_bad else ""))
+            moved = True
+            break
+        if not moved:
+            notes.append(
+                f"NOTE (keep-out, estimated): by the template's estimated size it "
+                f"{' and '.join(why)}, and no clear zone fits it. Make it smaller"
+                + (" or move it to a moment where the face is elsewhere (or "
+                   "allow_face_overlap=true if deliberate)." if face_bad else "."))
+    elif allow and issues:
+        notes.append("NOTE (keep-out, estimated): kept as designed (allow_face_overlap), but by "
+                     "the template's estimated size it "
+                     + " and ".join(keepout.ISSUE_TEXT[i] for i in issues) + ".")
+    item["footprint"] = {"box": keepout.rounded(box, 4), "ar": round(float(W) / float(H), 4),
+                         "faces": [keepout.rounded(z, 4) for z in zones[:8]]}
+    cap = _caption_keepout_note(ctx, edl, item, box, zones, bands, W, H)
+    if cap:
+        notes.append(cap)
+    return "".join("\n" + n for n in notes), None
 
 
 def _keep_out_inner(ctx, edl, item, rep):

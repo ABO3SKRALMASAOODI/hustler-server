@@ -31,21 +31,30 @@ browser session and keeping the first whose REAL ink is clear (a second
 round searches over what the first measured). The tool says what moved; when
 nothing fits the graphic stays and the tool returns a NOTE.
 ``allow_face_overlap`` keeps a deliberate design; ``behind_subject`` graphics
-are behind the speaker by construction. A lane with no browser compares the
-template's NOMINAL ink instead and says the box was estimated.
+are behind the speaker by construction.
 
-Captions: the final ink box and the face zones of the window are stored on
-the item (``footprint``). The motion-caption track (motion_captions.cues)
-moves a cue that would land on an on-screen graphic into the nearest band
-clear of the graphic AND the face zones, so moving the graphic never pushes a
-caption onto the mouth. Items written before this have no footprint and
-render exactly as before (no render stamp is needed: only new writes carry
-one, and motion-caption programs always render in full).
+A lane with no browser (the agent, MCP and shorts lanes ship no Chromium, so
+this is what production writes run) compares the template's NOMINAL ink
+instead and says the box was estimated: the example's probed box moved by
+the item's y/x/size, the lower third sized by its own copy and side. A move
+there must clear the face by a full CLEARANCE (the estimate can be a wrapped
+line short), and only templates whose width is their own knob
+(COLUMN_TEMPLATES) are also moved out of the margins and the button rail.
+
+Captions: the final ink box (estimated on a browserless lane) and the face
+zones of the window are stored on the item (``footprint``). The
+motion-caption track (motion_captions.cues) moves a cue that would land on
+an on-screen graphic into the nearest band clear of the graphic AND the face
+zones (and the hair above them when there is room), so moving the graphic
+never pushes a caption onto the mouth. Items written before this have no
+footprint and render exactly as before (no render stamp is needed: only new
+writes carry one, and motion-caption programs always render in full).
 """
 
 import json
 import math
 import os
+import threading
 
 # ── the 9:16 platform safe area (output-frame fractions) ──────────────────
 SAFE_X0, SAFE_X1 = 0.06, 0.94
@@ -90,6 +99,7 @@ CAPTION_HALF = 0.045        # estimated half-height of a caption block
 CAPTION_ZONE_MIN = 0.085    # caption_motion ignores a zone under 0.08 H
 CAPTION_COL = (0.15, 0.85)  # where a centred caption block can reach
 CAPTION_PENALTY = 0.2       # solver cost of a spot on the caption band
+HAIR_UP = 0.3               # a face zone's height that the hair adds above it
 
 
 # ── boxes ─────────────────────────────────────────────────────────────────
@@ -190,12 +200,16 @@ def _cv():
         return None
 
 
-_CASCADES = {}
+# One cascade set per thread (as spatial.py keeps them): an OpenCV
+# CascadeClassifier is not safe to share between threads, and agent lanes
+# run tool calls on several.
+_CASCADES = threading.local()
 _RANK = {"alt2": 0, "front": 1, "profile": 2}
 
 
 def _cascades(cv2):
-    if "c" not in _CASCADES:
+    cached = getattr(_CASCADES, "c", None)
+    if cached is None:
         out = []
         try:
             base = cv2.data.haarcascades
@@ -211,8 +225,8 @@ def _cascades(cv2):
                 c = None
             if c is not None and not c.empty():
                 out.append((kind, c))
-        _CASCADES["c"] = out
-    return _CASCADES["c"]
+        _CASCADES.c = cached = out
+    return cached
 
 
 def _iou(a, b):
@@ -257,13 +271,17 @@ def detect_faces(path, width=480):
     keep-out that misses a face is the failure it exists to prevent, so
     this pass runs the frontal, alt2 and profile cascades and the profile
     MIRRORED (it only knows one direction) at 480 px, clusters the hits
-    and filters body false positives (filter_faces): 67 of 67 there."""
+    and filters body false positives (filter_faces): 67 of 67 there.
+
+    None (not []) when it cannot measure — no OpenCV, no cascades, an
+    unreadable frame — so the caller asks the index instead of reading the
+    failure as "no face here"."""
     cv2 = _cv()
-    if cv2 is None:
-        return []
+    if cv2 is None or not _cascades(cv2):
+        return None
     img = cv2.imread(path)
     if img is None:
-        return []
+        return None
     h, w = img.shape[:2]
     if w != width:
         img = cv2.resize(img, (width, max(1, int(round(h * width / float(w))))))
@@ -473,6 +491,24 @@ def _consistent(moments):
     return out
 
 
+def _cover_windows(edl):
+    """Program windows where an opaque overlay replaces the picture (a b-roll
+    cutaway with fit 'cover' or 'picture'): the speaker is not on screen."""
+    out = []
+    for o in edl.get("overlays") or []:
+        try:
+            if o.get("fit") not in ("cover", "picture") or o.get("screen"):
+                continue
+            op = o.get("opacity")
+            if isinstance(op, (int, float)) and not isinstance(op, bool) and op < 0.9:
+                continue
+            a = float(o.get("start") or 0.0)
+            out.append((a, a + float(o.get("duration_s") or 0.0)))
+        except (TypeError, ValueError, AttributeError):
+            continue
+    return out
+
+
 def face_track(edl, index, W, H, start, end, measure=None):
     """[(program second, [face boxes in output fractions])] across
     [start, end], every TRACK_STEP_S.
@@ -483,7 +519,9 @@ def face_track(edl, index, W, H, start, end, measure=None):
     borrows the nearest moment with a face in its own kept segment within
     FILL_S (a cascade that misses one frame of a talking head is a miss,
     not an empty shot) and is mapped through the geometry AT that second,
-    so zooms and cards move the face as the viewer sees it."""
+    so zooms and cards move the face as the viewer sees it. A second under
+    an inserted clip or an opaque b-roll overlay that fills the picture
+    (fit cover/picture) shows no face."""
     from timeline import Timeline
     video = (index or {}).get("video") or {}
     if not edl.get("keep") or not video.get("width") or not video.get("height") \
@@ -508,12 +546,13 @@ def face_track(edl, index, W, H, start, end, measure=None):
             faces = _index_faces(index, src, seg)
         moments.append((t, (seg, _shot_at((index or {}).get("shots"), src)), faces or []))
     moments = _consistent(moments)
+    covers = _cover_windows(edl)
     steps = int(min(MAX_TRACK, max(2, math.ceil(span / TRACK_STEP_S) + 1)))
     out = []
     for i in range(steps):
         t = start + span * i / (steps - 1)
         src = tl.out_to_src(t)
-        if src is None:
+        if src is None or any(a <= t < b for a, b in covers):
             out.append((t, []))
             continue
         seg = (_segment_of(tl, src), _shot_at((index or {}).get("shots"), src))
@@ -594,8 +633,8 @@ def clear_of_faces(box, zones):
 # run there. The keep-out still checks the face against the template's
 # NOMINAL ink: its example measured by the probe at y = 0.5 (x0, top offset
 # from y, x1, bottom offset), scaled by the item's size and moved by its
-# x/y. It is an estimate — the reply says so, and only a face collision is
-# acted on (widths depend on the copy, so the safe area waits for a probe).
+# x/y. It is an estimate — the reply says so. Widths depend on the copy, so
+# the safe area is acted on only for COLUMN_TEMPLATES (width = their knob).
 NOMINAL_INK = {
     "bar_compare": (0.056, -0.208, 0.944, 0.208),
     "chapter_title": (0.115, -0.133, 0.93, 0.133),
@@ -628,8 +667,10 @@ NOMINAL_INK = {
 }
 
 
-def nominal_ink(template, spec, params):
-    """The estimated ink box of a library template at these params, or None."""
+def nominal_ink(template, spec, params, frame=None):
+    """The estimated ink box of a library template at these params, or None.
+    ``frame`` = (W, H) lets the box follow a template's own clamp into the
+    9:16 safe band (the counter and the lower third keep y 0.08-0.80)."""
     row = NOMINAL_INK.get(template)
     pspec = (spec or {}).get("params") or {}
     if not row or (pspec.get("y") or {}).get("type") != "float":
@@ -646,8 +687,77 @@ def nominal_ink(template, spec, params):
     dx = (num(params, "x", 0.5) - num(example, "x", xs.get("default", 0.5))) \
         if xs.get("type") == "float" else 0.0
     y = num(params, "y", pspec["y"].get("default", 0.5))
+    if template in ("lower_third", "counter"):
+        box = (_lower_third_ink if template == "lower_third" else _counter_ink)(params or {}, y, k)
+        if frame and portrait(*frame) and box[3] - box[1] <= CLAMP_BAND[1] - CLAMP_BAND[0]:
+            dy = max(0.0, CLAMP_BAND[0] - box[1]) - max(0.0, box[3] - CLAMP_BAND[1])
+            box = shift(box, 0.0, dy)
+        return box
     x0, top, x1, bottom = row
     return (0.5 + dx - (0.5 - x0) * k, y + top * k, 0.5 + dx + (x1 - 0.5) * k, y + bottom * k)
+
+
+# The counter's box is set by its copy too: a short figure is drawn huge
+# (capped by height), a long one fitted to the width, and a label adds a
+# line under (or over) it — larger under a short figure. Probed at y 0.5,
+# size 1 (heights): '3x' 0.162, '100%' 0.146, '$1.2B' 0.15, '62,000+' 0.113,
+# '1,000,000 users' 0.075; with a label '3x' 0.256, '100%' 0.235, '$1.2B'
+# 0.25, '62,000+' 0.163 (the example), a label that wraps under '40' 0.289.
+# The example's 0.163 put the Jobs '40 / fonts on the screen' (0.256) clear
+# of a face it covered. Both tags stay inside y 0.08-0.80 on a 9:16 frame.
+CLAMP_BAND = (0.08, 0.80)
+COUNTER_W = 0.852            # the safe width the figure is fitted to
+
+
+def _counter_ink(params, y, k):
+    n = len(str(params.get("value") or "").strip())
+    label = str(params.get("label") or "").replace("*", "").strip()
+    h = 0.162 if n <= 3 else 0.15 if n <= 5 else 0.115 if n <= 7 else 0.08
+    w = min(COUNTER_W, 0.12 + 0.19 * n)
+    if label:
+        h += (0.09 if n <= 5 else 0.05) + (0.035 if len(label) > 30 else 0.0)
+        w = max(w, min(0.75, 0.02 + 0.035 * len(label)))
+    w, half = min(COUNTER_W, w * k), h * k / 2.0
+    if params.get("align") == "left":
+        return (0.056, y - half, 0.056 + w, y + half)
+    return (0.5 - w / 2.0, y - half, 0.5 + w / 2.0, y + half)
+
+
+# The lower third is the graphic placed beside a face by design, and its box
+# is set by its copy: it hangs off the left (or right) margin, a name alone
+# is ONE line about as wide as the name, and a long role wraps to a second
+# line. Probed at y 0.5: 'Joe Rogan' alone 0.04 tall x 0.37 wide; 'Peter
+# Thiel / Co-founder, PayPal' 0.088 x 0.655; 'Elon Musk / on The Joe Rogan
+# Experience' 0.12 x 0.61; a 46-character role 0.154. The example's box for
+# every one of them moved name-only tags that sat beside the face and left
+# wrapped ones on the chin.
+LT_MARGIN, LT_WIDTH = 0.067, 0.655
+
+
+def _lower_third_ink(params, y, k):
+    name = str(params.get("name") or "")
+    role = str(params.get("role") or "").strip()
+    w = LT_WIDTH
+    if not role:
+        half, w = 0.021, min(w, 0.03 + 0.038 * len(name))
+    elif len(role) > 44:
+        half = 0.078
+    elif len(role) > 22:
+        half = 0.062
+    else:
+        half = 0.044
+    w, half = min(1.0 - 2 * LT_MARGIN, w * k), half * k
+    if params.get("side") == "right":
+        return (1.0 - LT_MARGIN - w, y - half, 1.0 - LT_MARGIN, y + half)
+    return (LT_MARGIN, y - half, LT_MARGIN + w, y + half)
+
+
+# Templates whose widest line FILLS their own width knob (word_slam fits its
+# type to ``width``, phrase_build its widest row to the column): their
+# estimated width is the drawn width whatever the copy, so a lane without a
+# browser can keep them out of the side margins and the button rail as well.
+# Every other template sizes to its copy, and its safe area waits for a probe.
+COLUMN_TEMPLATES = frozenset(("word_slam", "phrase_build"))
 
 
 # ── captions as obstacles ─────────────────────────────────────────────────
@@ -660,14 +770,24 @@ def caption_zone(y, graphics, faces, port=True):
     """Where a caption anchored at ``y`` may go while ``graphics`` (boxes)
     are on screen: None when its block is already clear of them; else
     (zone_y0, zone_y1, anchor_y) — the band nearest ``y`` that clears every
-    graphic and every face zone reaching the caption column — or False when
-    no band of CAPTION_ZONE_MIN fits (the caption stays and overlaps)."""
+    graphic and every face zone reaching the caption column, preferring one
+    that clears the hair above it too (HAIR_UP) — or False when no band of
+    CAPTION_ZONE_MIN fits (the caption stays and overlaps)."""
     band = caption_band(y)
     hit = [g for g in graphics if g and inter(g, band) > 0]
     if not hit:
         return None
-    lo = SAFE_Y0 + 0.02 if port else 0.04
-    hi = SAFE_Y1 if port else 0.92
+    heads = [(f[0], f[1] - HAIR_UP * (f[3] - f[1]), f[2], f[3]) for f in faces or [] if f]
+    return _caption_band_free(y, graphics, heads, port) or \
+        _caption_band_free(y, graphics, faces, port)
+
+
+def _caption_band_free(y, graphics, faces, port):
+    # inside caption_motion's own SAFE band on every frame shape (9:16:
+    # 0.08-0.80; 4:5 0.06-0.90; square 0.06-0.92; landscape 0.07-0.92): a
+    # zone it clips under 0.08 H is ignored and the block may land anywhere
+    lo = SAFE_Y0 + 0.02 if port else 0.07
+    hi = SAFE_Y1 if port else 0.90
     blocks = sorted((max(lo, b[1] - 0.012), min(hi, b[3] + 0.012))
                     for b in list(graphics) + list(faces or [])
                     if b and b[2] > CAPTION_COL[0] and b[0] < CAPTION_COL[1])
@@ -739,7 +859,8 @@ def patch_cost(patch, params, spec):
 
 
 def candidates(template, spec, params, box, variants, zones, W, H,
-               captions=(), predict=True, mouths=(), clear_penalty=CLEAR_PENALTY):
+               captions=(), predict=True, mouths=(), clear_penalty=CLEAR_PENALTY,
+               require_clear=False):
     """Ranked placements [(cost, patch, predicted box)] off every face (no real
     share of a zone or mouth band, on_face; grazing a zone's CLEARANCE costs
     CLEAR_PENALTY) and inside the safe area. ``variants`` are measured alternatives at the
@@ -749,7 +870,10 @@ def candidates(template, spec, params, box, variants, zones, W, H,
     when the graphic is too wide for the safe area. predict=False searches
     only y over the measured variants (no predicted x/size boxes). A move
     OFF a face pays ``clear_penalty`` for a spot that grazes a zone; a
-    safe-area fix passes 0 (the design already sat that close)."""
+    safe-area fix passes 0 (the design already sat that close).
+    ``require_clear`` keeps only spots a full CLEARANCE off every zone (an
+    ESTIMATED box, whose real ink can run a wrapped line taller than the
+    template's example: a graze on the estimate is a collision on screen)."""
     pspec = (spec or {}).get("params") or {}
     port = portrait(W, H)
     y_lo, y_hi = (SAFE_Y0, SAFE_Y1) if port else (0.02, 0.98)
@@ -806,7 +930,9 @@ def candidates(template, spec, params, box, variants, zones, W, H,
             if safe_issues(nb, W, H) or on_face(nb, zones, mouths):
                 continue
             cost = c + abs(dy)
-            if clear_penalty and not clear_of_faces(nb, zones):
+            if (clear_penalty or require_clear) and not clear_of_faces(nb, zones):
+                if require_clear:
+                    continue
                 cost += clear_penalty
             if any(inter(nb, cb) > 0 for cb in captions):
                 cost += CAPTION_PENALTY
@@ -853,8 +979,12 @@ def where_label(box, zones):
         return ""
     top = min(z[1] for z in zones)
     bottom = max(z[3] for z in zones)
-    if box[3] <= top + 0.01:
+    # A clear spot may still graze the zones' outer fifth (a push-in grows
+    # the chin zone for part of the window; on_face tolerates a sliver), and
+    # that is still the band under the chin, not a spot beside the face.
+    edge = max(0.01, 0.2 * (bottom - top))
+    if box[3] <= top + edge:
         return "above the head"
-    if box[1] >= bottom - 0.01:
+    if box[1] >= bottom - edge:
         return "below the chin"
     return "beside the face"

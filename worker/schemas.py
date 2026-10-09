@@ -1773,8 +1773,8 @@ class MotionItem(BaseModel):
 
     ``footprint`` is what the write-time keep-out measured (worker/
     keepout.py, written by add/set_motion_graphic, never by hand): the
-    settled ink box on the canvas and the speaker's face zones over the
-    window, so the motion caption track can step around the graphic without
+    settled ink box on the canvas (the template's estimated box on a lane
+    without a browser) and the speaker's face zones over the window, so the motion caption track can step around the graphic without
     landing on the mouth. ``allow_face_overlap`` records a deliberate design
     over the face: the keep-out then leaves the placement alone.
     """

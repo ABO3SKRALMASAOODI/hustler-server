@@ -521,9 +521,9 @@ def test_every_movable_template_with_a_y_has_a_nominal_ink_box():
 
 def test_nominal_ink_follows_y_size_and_x():
     spec = motion_templates.spec("counter")
-    a = keepout.nominal_ink("counter", spec, {"y": 0.5})
-    b = keepout.nominal_ink("counter", spec, {"y": 0.6, "size": 0.5})
-    assert a[1] == pytest.approx(0.425) and b[1] == pytest.approx(0.6 - 0.0375)
+    a = keepout.nominal_ink("counter", spec, {"value": "140", "y": 0.5})
+    b = keepout.nominal_ink("counter", spec, {"value": "140", "y": 0.6, "size": 0.5})
+    assert a[1] == pytest.approx(0.419, abs=0.005) and b[1] == pytest.approx(0.6 - 0.0405, abs=0.005)
     assert (b[2] - b[0]) == pytest.approx((a[2] - a[0]) / 2)
     slam = motion_templates.spec("word_slam")
     c = keepout.nominal_ink("word_slam", slam, {"y": 0.5, "x": 0.45})
@@ -540,10 +540,125 @@ def test_without_a_browser_the_estimated_box_still_moves_it_off_the_mouth(monkey
     assert "KEEP-OUT (estimated)" in out and "mouth" in out, out
     item = ctx.latest_edl()["json"]["motion"][0]
     assert item["params"]["y"] > 0.55
-    assert not item.get("footprint")                    # captions step only around measured ink
+    # the estimate is the footprint (the production lanes have no browser, and
+    # the captions must step around a graphic the keep-out moved onto them)
+    fp = item["footprint"]
+    want = keepout.nominal_ink("counter", motion_templates.spec("counter"), item["params"])
+    assert fp["box"] == pytest.approx(want, abs=1e-3) and fp["faces"]
+    # moved a CLEARANCE off the face, not onto a graze of it
+    assert fp["box"][1] >= fp["faces"][0][3] + keepout.CLEARANCE - 0.005, fp
     # clear of the face: nothing to say
     out = motion_tools.set_motion_graphic(ctx, "num")
     assert "KEEP-OUT" not in out, out
+
+
+# The Elon showcase, browserless: the example's lower third is 0.088 tall,
+# but 'on The Joe Rogan Experience' wraps to two lines (0.12). Measured real
+# ink of this item at y 0.63, where the example-sized estimate had put it:
+# still across his mouth.
+ELON_REAL_AT_063 = (0.067, 0.569, 0.681, 0.692)
+
+
+def test_estimated_lower_third_sizes_its_own_copy_and_side():
+    spec = motion_templates.spec("lower_third")
+    elon = keepout.nominal_ink("lower_third", spec, {"name": "Elon Musk", "y": 0.63,
+                                                     "role": "on The Joe Rogan Experience"})
+    assert elon[1] <= ELON_REAL_AT_063[1] + 0.005 and elon[3] >= ELON_REAL_AT_063[3] - 0.005
+    # a name alone is one line about as wide as the name (probed: 0.04 x 0.37)
+    rogan = keepout.nominal_ink("lower_third", spec, {"name": "Joe Rogan", "y": 0.5})
+    assert rogan == pytest.approx((0.067, 0.479, 0.439, 0.521), abs=0.01)
+    right = keepout.nominal_ink("lower_third", spec, {"name": "Joe Rogan", "y": 0.5, "side": "right"})
+    assert right[2] == pytest.approx(1 - 0.067) and right[0] == pytest.approx(1 - 0.439, abs=0.01)
+
+
+def test_without_a_browser_the_elon_lower_third_clears_the_real_mouth(monkeypatch):
+    monkeypatch.setattr(motion_tools, "_probe_item", lambda item, W, H, fps=30.0: None)
+    ctx = _showcase_ctx(ELON)
+    template, s, e, params = ELON["item"]
+    out = motion_tools.add_motion_graphic(ctx, template, s, e, params=params, id="g")
+    assert "KEEP-OUT (estimated)" in out and "below the chin" in out, out
+    item = ctx.latest_edl()["json"]["motion"][0]
+    track = keepout.face_track(ctx._edl, ctx.index, 1080, 1920, s, e)
+    # the real ink of this copy is 0.123 tall, centred on y
+    y = item["params"]["y"]
+    real = (0.067, y - 0.0615, 0.681, y + 0.0615)
+    assert not keepout.assess(real, track)["hit"], (y, real)
+    assert keepout.assess(ELON_REAL_AT_063, track)["mouth"]     # where the old estimate put it
+    assert not keepout.safe_issues(item["footprint"]["box"], 1080, 1920)
+
+
+def test_without_a_browser_a_name_tag_beside_the_face_stays(monkeypatch):
+    monkeypatch.setattr(motion_tools, "_probe_item", lambda item, W, H, fps=30.0: None)
+    ctx = _thiel_like_ctx()              # the head sits x 0.31-0.81 of the 9:16 frame
+    out = motion_tools.add_motion_graphic(ctx, "lower_third", 2.0, 4.0,
+                                          params={"name": "Jo", "y": 0.45}, id="tag")
+    assert "KEEP-OUT" not in out, out
+    assert ctx.latest_edl()["json"]["motion"][0]["params"]["y"] == 0.45
+    # the same tag on the face's side moves; flipping the side is one way out
+    out = motion_tools.set_motion_graphic(ctx, "tag", params={"name": "Peter Thiel",
+                                                              "role": "Co-founder, PayPal"})
+    assert "KEEP-OUT (estimated)" in out, out
+
+
+def test_without_a_browser_slams_leave_the_button_rail(monkeypatch):
+    monkeypatch.setattr(motion_tools, "_probe_item", lambda item, W, H, fps=30.0: None)
+    edl = default_edl(10.0)
+    ctx = _Ctx(edl, {"video": {"width": 1080, "height": 1920}}, 10.0)
+    out = motion_tools.add_motion_graphic(ctx, "word_slam", 1.0, 2.5,
+                                          params={"text": "*enough*", "y": 0.64}, id="w")
+    assert "KEEP-OUT (estimated)" in out and "button rail" in out, out
+    item = ctx.latest_edl()["json"]["motion"][0]
+    assert item["params"].get("x", 0.5) < 0.5 or item["params"].get("width", 0.85) < 0.85
+    assert not keepout.safe_issues(item["footprint"]["box"], 1080, 1920)
+    # a template sized by its copy is not second-guessed without a probe
+    out = motion_tools.add_motion_graphic(ctx, "hook_title", 3.0, 4.5,
+                                          params={"text": "Hi", "y": 0.64}, id="h")
+    assert "KEEP-OUT" not in out, out
+
+
+def test_a_failed_keep_out_leaves_the_placement_as_written(monkeypatch):
+    monkeypatch.setattr(motion_tools, "_probe_item", _probe_by_y())
+    real = motion_tools._caption_keepout_note
+
+    def boom(*a, **k):
+        raise RuntimeError("late failure")
+    monkeypatch.setattr(motion_tools, "_caption_keepout_note", boom)
+    ctx = _thiel_like_ctx()
+    out = motion_tools.add_motion_graphic(ctx, "counter", 2.0, 4.0,
+                                          params={"value": "140", "y": 0.42}, id="num")
+    assert out.startswith("EDL v1") and "KEEP-OUT" not in out, out
+    item = ctx.latest_edl()["json"]["motion"][0]
+    assert item["params"]["y"] == 0.42 and not item.get("footprint")
+    monkeypatch.setattr(motion_tools, "_caption_keepout_note", real)
+
+
+def test_detect_faces_says_when_it_cannot_measure(tmp_path):
+    assert keepout.detect_faces(str(tmp_path / "missing.jpg")) is None
+
+
+def test_face_cascades_are_per_thread():
+    import threading
+    cv2 = keepout._cv()
+    if cv2 is None:
+        pytest.skip("OpenCV not installed")
+    got = {}
+
+    def grab(k):
+        got[k] = keepout._cascades(cv2)
+    threads = [threading.Thread(target=grab, args=(k,)) for k in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert got[0] and got[1] and got[0][0][1] is not got[1][0][1]
+    assert keepout._cascades(cv2) is keepout._cascades(cv2)
+
+
+def test_where_label_reads_a_chin_graze_as_below_the_chin():
+    zones = [(0.1, 0.25, 0.72, 0.62)]
+    assert keepout.where_label((0.07, 0.6, 0.7, 0.72), zones) == "below the chin"
+    assert keepout.where_label((0.07, 0.1, 0.7, 0.26), zones) == "above the head"
+    assert keepout.where_label((0.75, 0.3, 0.95, 0.5), zones) == "beside the face"
 
 
 @needs_browser
@@ -560,3 +675,51 @@ def test_nominal_ink_matches_a_fresh_probe_of_each_example():
         got = keepout.settled_ink(rep, motion_tools._probe_times(item))
         want = keepout.nominal_ink(name, motion_templates.spec(name), item["params"])
         assert got and max(abs(a - b) for a, b in zip(got, want)) < 0.03, (name, got, want)
+
+
+def test_an_opaque_b_roll_cutaway_hides_the_face():
+    ctx = _thiel_like_ctx()
+    edl = dict(ctx._edl, overlays=[
+        {"id": "b1", "asset_key": "projects/1/broll.mp4", "kind": "video", "start": 2.0,
+         "duration_s": 2.0, "fit": "cover"},
+        {"id": "p1", "asset_key": "projects/1/pip.png", "kind": "image", "start": 5.0,
+         "duration_s": 2.0}])                       # a PiP leaves the speaker on screen
+    track = keepout.face_track(edl, ctx.index, 1080, 1920, 2.1, 3.9)
+    assert track and all(not faces for _t, faces in track)
+    assert all(faces for _t, faces in keepout.face_track(edl, ctx.index, 1080, 1920, 5.1, 6.9))
+
+
+def test_a_caption_stepping_above_the_head_clears_the_hair_when_it_can():
+    graphic = (0.1, 0.62, 0.8, 0.76)
+    face = keepout.face_zone((0.3, 0.42, 0.7, 0.6))        # a head low in the frame
+    z0, z1, y = keepout.caption_zone(0.72, [graphic], [face])
+    hair = face[1] - keepout.HAIR_UP * (face[3] - face[1])
+    assert z1 <= hair and y <= z1 - 0.04
+    # a frame-filling head leaves only the band over the hair: still used
+    big = keepout.face_zone((0.1, 0.25, 0.7, 0.6))
+    z0, z1, y = keepout.caption_zone(0.72, [graphic], [big])
+    assert z1 <= big[1] and z1 > big[1] - keepout.HAIR_UP * (big[3] - big[1])
+
+
+def test_caption_zones_stay_inside_the_template_safe_band_off_portrait():
+    z0, z1, _y = keepout.caption_zone(0.8, [(0.1, 0.6, 0.9, 0.95)], [], port=False)
+    assert 0.07 <= z0 and z1 <= 0.9
+
+
+def test_estimated_counter_sizes_its_figure_and_label():
+    spec = motion_templates.spec("counter")
+    # probed at y 0.5: '3x' 0.162 tall; '3x / faster' 0.256; '1,000,000 users' 0.075
+    short = keepout.nominal_ink("counter", spec, {"value": "3x", "y": 0.5})
+    labelled = keepout.nominal_ink("counter", spec, {"value": "3x", "label": "faster", "y": 0.5})
+    long = keepout.nominal_ink("counter", spec, {"value": "1,000,000 users", "y": 0.5})
+    assert short[3] - short[1] == pytest.approx(0.162, abs=0.01)
+    assert labelled[3] - labelled[1] == pytest.approx(0.256, abs=0.015)
+    assert long[3] - long[1] == pytest.approx(0.075, abs=0.01)
+    # the Jobs counter (probed: 0.10-0.25 at y 0.1, size 0.576): the template
+    # keeps it inside y 0.08-0.80 on a 9:16 frame, and so does the estimate
+    jobs = {"value": "40", "label": "fonts on the screen", "y": 0.125, "size": 0.72}
+    free = keepout.nominal_ink("counter", spec, jobs)
+    held = keepout.nominal_ink("counter", spec, jobs, frame=(1080, 1920))
+    assert free[1] < 0.08 and held[1] == pytest.approx(0.08)
+    assert held[3] - held[1] == pytest.approx(free[3] - free[1])
+    assert keepout.nominal_ink("counter", spec, jobs, frame=(1920, 1080)) == free
