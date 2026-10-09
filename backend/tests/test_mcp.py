@@ -1971,6 +1971,57 @@ def test_mcp_doctrine_allows_requested_export_without_changing_studio_prompt():
     assert "You cannot render the final" in catalog["system_prompt"]
 
 
+def _worker_doctrine():
+    """The real worker prompt and CAPABILITIES intro, without worker deps."""
+    import ast
+    import importlib.util
+    worker = Path(__file__).resolve().parents[2] / "worker"
+    spec = importlib.util.spec_from_file_location(
+        "valmera_worker_agent_prompt", worker / "agent_prompt.py")
+    prompt = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(prompt)
+    tree = ast.parse((worker / "agent_loop.py").read_text(encoding="utf-8"))
+    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+              and n.name == "capabilities_block")
+    expr = next(n for n in ast.walk(fn) if isinstance(n, ast.Return)).value
+    while isinstance(expr, ast.BinOp):
+        expr = expr.left
+    caps_intro = expr.value
+    caps = (caps_intro + "evidence, planning, verification and utility: "
+            "ask_user, get_edl, load_tools, look_at, read_skill. "
+            "Nothing else exists.")
+    return prompt, caps
+
+
+def test_mcp_doctrine_drops_the_in_app_tool_pager_but_keeps_the_craft():
+    prompt, caps = _worker_doctrine()
+    assert prompt.IN_APP_TOOL_PAGING in prompt.CORE_PROMPT
+    assert "load_tools" in caps
+    instructions = mcpmod._instructions(
+        {"system_prompt": prompt.system_prompt(), "capabilities": caps})
+    assert "load_tools" not in instructions
+    assert "first provider page" not in instructions
+    assert "current provider page" not in instructions
+    assert "Your MCP client already lists every tool" in instructions
+    assert "ask_user, get_edl, look_at, read_skill" in instructions
+    # The shared editing doctrine (premium grammar, skills) still arrives.
+    assert "PREMIUM SHORT-FORM IS THE STANDARD FOR REELS" in instructions
+    assert "motion-design" in instructions
+
+
+def test_mcp_workflow_teaches_the_premium_short_form_finish():
+    w = mcpmod.WORKFLOW
+    assert "PREMIUM SHORT-FORM FINISH" in w
+    for phrase in ("read_skill short-form-direction",
+                   "read_skill motion-design", "list_motion_templates",
+                   "list_sfx_kit", "apply_look", "style.motion_look",
+                   "add_motion_graphic", "0.1-0.6 s", "by\n      1.5 s",
+                   "look_at(rendered=true", "apply_short_edit_batches"):
+        assert phrase in w, phrase
+    assert "load_tools" not in w
+    assert "generated image" not in w
+
+
 def test_error_diagnostics_do_not_retain_customer_contents():
     result = mcpmod._text("REJECTED: private transcript secret@example.com https://private/path?token=secret", True)
     detail = mcpmod._public_error_detail("apply_edit_batch", result)

@@ -25114,9 +25114,89 @@ _COMPACT_CONTRACTS = {
         "mute affects only the clip's audio; still images are already silent. "
         "Read inserts in get_edl first."),
     "look_at": (
-        "Inspect rendered OUTPUT frames. Requires render_preview for the latest "
-        "EDL first. Use look_at_asset for original uploaded pictures; a saved "
-        "timeline alone is not a rendered preview."),
+        "Your eyes, no render needed: times=[...] are SOURCE seconds; "
+        "output_times=[...] show the assembled program in true geometry "
+        "(zoom aim included, no burn-ins) to aim zooms and place type. "
+        "rendered=true after render_preview shows real pixels with captions, "
+        "motion graphics and grade; batch dense output_times around a landing "
+        "to judge motion. Read positions off the tenths grid."),
+    "list_motion_templates": (
+        "READ the live motion library: each template's purpose, params "
+        "(* = required) and built-in sound cues. Call once before designing the "
+        "hook, hero moments, CTAs or motion transitions; never guess params. "
+        "Optional category: type, data, callout, social, layout, transition, "
+        "texture, cta."),
+    "add_motion_graphic": (
+        "Place a premium motion graphic on PROGRAM seconds: a template from "
+        "list_motion_templates, or template='html' with your own MG-runtime "
+        "composition in html (read_skill motion-design). Land it on the exact "
+        "spoken word: start 0-3 frames before the onset (get_kept_transcript + "
+        "get_words). layer above_captions (default), below_captions or "
+        "behind_subject. Graphics that say the spoken words mute captions; "
+        "sfx=true adds synced kit cues. Pass purpose and a stable id. Never "
+        "invent numbers or brand messages."),
+    "set_motion_graphic": (
+        "Patch a motion graphic by id: window, params (merged), template, layer, "
+        "html, caption muting. Its owned sound cues follow; sfx=true re-derives "
+        "them, sfx=false removes them. Modify instead of remove and re-add."),
+    "list_sfx_kit": (
+        "READ the 22 built-in licence-free sounds (whooshes, pops, clicks, "
+        "ticks, kick, dings, risers, impacts, sub_drop, glitch, shutter, "
+        "typing). Place with add_sfx(storage_key='kit:<kind>', at=...)."),
+    "add_sfx": (
+        "One-shot sound at an OUTPUT second. storage_key 'kit:<kind>' uses the "
+        "built-in kit (list_sfx_kit: instant, licence-free); otherwise an exact "
+        "key from fetch_sfx or list_assets, never invented. Pre-roll so the "
+        "peak lands on the visual frame (whoosh ~40-50% of its length early, "
+        "riser ends on the moment). purpose names the event. Default -6 dB; "
+        "UI pops/ticks -8 to -12. Never a whoosh on every caption."),
+    "add_captions": (
+        "Burned captions: mode='from_transcript', 'off', or dictated items. "
+        "Short-form speech: style.motion_look editorial|clean (premium default), "
+        "lockup|serif (editorial accent), pop|stack (hype), box|glow (busy "
+        "backgrounds, karaoke), mono (tech): words reveal on onsets with a size "
+        "ladder; highlight_color is the accent; emphasis_words (verbatim, 1-2 "
+        "per sentence) pick accent words. Long-form/translation: style.preset "
+        "documentary|clean|broadcast. Replaces the whole set; restyle with "
+        "set_caption_style."),
+    "set_caption_style": (
+        "Restyle existing captions without touching text or timing; pass only "
+        "changed fields inside style. motion_look switches to premium browser "
+        "captions (null returns to presets); color, highlight_color, font, "
+        "size/size_scale, uppercase, position/anchor_y still apply. A rejected "
+        "colour means no accent, never a different hue."),
+    "apply_look": (
+        "ONE committed look in one version: caption look + grade + grain + "
+        "transitions (+ optional music), reporting every component. Premium: "
+        "editorial (podcast/interview default), creator_punch, cinematic_doc, "
+        "mono_noir, clean_minimal; legacy hype, clean, cinematic, luxury, meme. "
+        "One look per edit; refine components with their own tools; no fade-in "
+        "on vertical reels (set_fades)."),
+    "add_zoom": (
+        "Eased camera move on OUTPUT seconds, aimed with rect=[x0,y0,x1,y1] "
+        "(frames a region) or cx/cy (pins a point) read off the tenths grid. "
+        "Modes as the schema lists them: punch (fast ease onto an emphasis "
+        "word, 1.08-1.18x), landing (1.12-1.18 easing to 1.0 just after a jump "
+        "cut), ease, push (slow drift on long holds), pulse (on a beat). Bind to "
+        "the word/cut/beat, pass purpose, vary strength. A moving zoom is one "
+        "add_zoom_path."),
+    "punch_in_on_emphasis": (
+        "Writes a measured pass of eased punch-ins on vocally stressed words "
+        "that survive the cut, face-aimed and spaced so adjacent loud words do "
+        "not all bump. A valid first camera pass on reels; then hand-tune the "
+        "strongest moments with add_zoom."),
+    "set_transitions": (
+        "One junction style at real scene changes; scope='scene' skips jump "
+        "cuts — report the junction count it returns. Styles dip_black, "
+        "dip_white, whip_left/right, zoom_punch, glitch, flash (fast ones "
+        "0.15-0.4s). Adds no sound: pair with add_sfx kit:whoosh_hard peaking "
+        "on the cut. One specific junction: a motion transition template."),
+    "set_picture_card": (
+        "Footage-only rounded card for start/end program seconds (box, radius, "
+        "border, shadow, entrance/exit). Give it a designed background from the "
+        "schema (blurred darkened copy of the picture, gradient, grain or "
+        "vignette), never a flat black void. Set frame.picture first to keep a "
+        "wide original inside portrait."),
     "look_at_asset": (
         "Inspect an uploaded IMAGE or VIDEO by its exact asset_key from list_assets. "
         "Times are relative to that source. For audio use get_audio_analysis; "

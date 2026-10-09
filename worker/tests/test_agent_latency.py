@@ -274,9 +274,16 @@ def test_post_plan_tool_catalog_keeps_capability_but_drops_repeated_handbook():
         x["function"]["name"] for x in full]
     assert [x["function"]["parameters"] for x in compact] == [
         x["function"]["parameters"] for x in full]
+    # The handbook lives in descriptions; parameter schemas are identical in
+    # both catalogs, so measure the dropped prose directly. Compact contracts
+    # deliberately keep each creative tool's operating menu (motion looks,
+    # zoom modes, kit sounds), which is still a small fraction of the prose.
+    full_desc = sum(len(x["function"]["description"]) for x in full)
+    compact_desc = sum(len(x["function"]["description"]) for x in compact)
+    assert compact_desc < full_desc * 0.25
     full_bytes = len(json.dumps(full, separators=(",", ":")))
     compact_bytes = len(json.dumps(compact, separators=(",", ":")))
-    assert compact_bytes < full_bytes * 0.5
+    assert compact_bytes < full_bytes * 0.55
 
 
 def test_successful_auto_preview_rubric_is_not_reported_as_render_failure(
