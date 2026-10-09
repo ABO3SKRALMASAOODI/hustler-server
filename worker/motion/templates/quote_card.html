@@ -1,0 +1,142 @@
+<!--MG-SPEC {"title": "Quote card", "category": "type",
+ "description": "Editorial pull quote: large italic serif lines that rise in one by one under an oversized open-quote mark, with an attribution on a drawn rule; optional dark glass plate. Use for the most memorable line of a clip (the one people would screenshot), held long enough to read.",
+ "duration": 4.0, "layer": "above_captions", "mutes_captions": true,
+ "params": {
+  "text": {"type": "text", "required": true, "max": 160, "hint": "the quote itself, no quote marks; *star* a word for the accent colour"},
+  "author": {"type": "str", "default": "", "max": 48, "hint": "attribution, e.g. 'Steve Jobs, 1995'"},
+  "color": {"type": "color", "default": "#F8F6F2"},
+  "accent": {"type": "color", "default": "#F2C94C", "hint": "quote mark, rule and starred words"},
+  "plate": {"type": "bool", "default": false, "hint": "dark glass plate behind the quote (busy or bright footage)"},
+  "align": {"type": "enum", "values": ["left", "center"], "default": "left"},
+  "size": {"type": "float", "min": 0.7, "max": 1.4, "default": 1.0},
+  "y": {"type": "float", "min": 0.15, "max": 0.8, "default": 0.6},
+  "exit": {"type": "enum", "values": ["fade", "blur", "cut"], "default": "fade"}
+ },
+ "example": {"text": "Everything around you that you call life was made up by people that were *no smarter* than you.", "author": "Steve Jobs, 1994"},
+ "sfx": [{"at": 0.0, "kind": "whoosh_soft"}]} -->
+<style>
+  .card{position:absolute;will-change:opacity,transform,filter}
+  .plate{position:absolute;inset:0;border-radius:34px;background:linear-gradient(180deg,rgba(28,28,32,.74),rgba(12,12,14,.80));
+    border:1px solid rgba(255,255,255,.12);box-shadow:0 24px 70px rgba(0,0,0,.36),inset 0 1px 0 rgba(255,255,255,.08)}
+  .qm{position:absolute;line-height:1;will-change:transform,opacity}
+  .ln{display:block;white-space:nowrap;width:max-content;will-change:transform,opacity,filter}
+  .ln .w{display:inline}
+  .by{display:flex;align-items:center;white-space:nowrap;width:max-content}
+  .rule{display:block;transform-origin:0 50%}
+  .meas{position:absolute;left:-9999px;top:0;visibility:hidden;white-space:normal}
+</style>
+<div class="mg-root"><div class="card" id="card"><div class="plate" id="plate"></div><div class="qm" id="qm">&ldquo;</div><div class="body" id="body"></div></div></div>
+<script>
+(() => {
+  const P = MG.params, W = MG.W, H = MG.H, D = MG.duration;
+  const card = MG.$('#card'), plateEl = MG.$('#plate'), qm = MG.$('#qm'), body = MG.$('#body');
+  const FAM = new Set(Array.from(document.fonts, f => f.family.replace(/["']/g, '')));
+  const SERIF = FAM.has('Instrument Serif') ? `'Instrument Serif','Playfair Display',Georgia,serif` : `'Playfair Display',Georgia,serif`;
+  const QFONT = FAM.has('Playfair Display') ? `'Playfair Display','Instrument Serif',Georgia,serif` : SERIF;
+  const SANS = `'Inter Display','Inter',sans-serif`;
+  const center = P.align === 'center';
+  if (!P.plate) plateEl.style.display = 'none';
+  Object.assign(qm.style, { fontFamily: QFONT, fontWeight: 900, fontStyle: 'italic', color: P.accent });
+  Object.assign(body.style, { fontFamily: SERIF, fontStyle: 'italic', fontWeight: FAM.has('Instrument Serif') ? 400 : 900,
+    color: P.color, letterSpacing: '-0.012em', textAlign: center ? 'center' : 'left', position: 'relative',
+    display: 'flex', flexDirection: 'column', alignItems: center ? 'center' : 'flex-start' });
+  // words (stars = accent)
+  // words; *stars* may span several words ("*no smarter*")
+  const words = [];
+  String(P.text || '').trim().replace(/^["\u201c\u201d]+|["\u201c\u201d]+$/g, '').split(/(\*[^*]+\*)/).forEach(seg => {
+    const acc = /^\*[^*]+\*$/.test(seg);
+    (acc ? seg.slice(1, -1) : seg).split(/\s+/).filter(Boolean).forEach(text => words.push({ text, acc }));
+  });
+  const author = String(P.author || '').trim();
+  let lines = [], by = null, rule = null, name = null, fs = 70, padX = 0, padY = 0;
+
+  const breakLines = (width) => {
+    const m = MG.el('div', 'meas', null, card);
+    Object.assign(m.style, { fontFamily: SERIF, fontStyle: 'italic', fontWeight: body.style.fontWeight,
+      letterSpacing: '-0.012em', fontSize: fs + 'px', lineHeight: '1.1', width: width + 'px' });
+    const spans = words.map((w, i) => { const s = MG.el('span', null, w.text, m); if (i < words.length - 1) m.appendChild(document.createTextNode(' ')); return s; });
+    const groups = []; let top = null;
+    spans.forEach((s, i) => { if (top === null || Math.abs(s.offsetTop - top) > fs * 0.5) { groups.push([]); top = s.offsetTop; } groups[groups.length - 1].push(i); });
+    m.remove();
+    return groups;
+  };
+  const layout = () => {
+    const outerW = Math.min(W * 0.86, W - 100);
+    padX = P.plate ? 64 : 0; padY = P.plate ? 58 : 0;
+    const colW = outerW - 2 * padX;
+    // size: start large, shrink until it fits in <= 5 lines and the height budget
+    fs = Math.round(Math.min(84, 0.046 * H) * P.size);
+    let groups = breakLines(colW);
+    while ((groups.length > 5 || groups.length * fs * 1.1 > 0.36 * H) && fs > 34) { fs -= 3; groups = breakLines(colW); }
+    // balanced rag
+    const n = groups.length;
+    if (n > 1) { let lo = colW * 0.5, hi = colW;
+      for (let i = 0; i < 9; i++) { const mid = (lo + hi) / 2; if (breakLines(mid).length > n) lo = mid; else hi = mid; }
+      groups = breakLines(hi); }
+    body.textContent = ''; lines = [];
+    groups.forEach(g => {
+      const el = MG.el('div', 'ln', null, body);
+      g.forEach((wi, k) => { const s = MG.el('span', 'w', words[wi].text + (k < g.length - 1 ? ' ' : ''), el);
+        if (words[wi].acc) s.style.color = P.accent; });
+      Object.assign(el.style, { fontSize: fs + 'px', lineHeight: 1.1 });
+      lines.push(el);
+    });
+    body.style.textShadow = P.plate ? 'none' : `0 ${(fs * 0.03).toFixed(1)}px ${(fs * 0.22).toFixed(1)}px rgba(0,0,0,.55), 0 0 ${(fs * 0.05).toFixed(1)}px rgba(0,0,0,.3)`;
+    if (author) {
+      by = MG.el('div', 'by', null, body);
+      const small = Math.max(22, Math.min(0.02 * H, 40));
+      rule = MG.el('span', 'rule', null, by);
+      name = MG.el('span', null, author.toUpperCase(), by);
+      Object.assign(by.style, { marginTop: fs * 0.55 + 'px', justifyContent: center ? 'center' : 'flex-start', textShadow: body.style.textShadow });
+      Object.assign(rule.style, { width: small * 2.2 + 'px', height: Math.max(2, small * 0.09) + 'px', background: P.accent, marginRight: small * 0.6 + 'px' });
+      Object.assign(name.style, { fontFamily: SANS, fontStyle: 'normal', fontWeight: 700, fontSize: small + 'px', letterSpacing: '0.14em', color: P.color, opacity: 0.9 });
+    }
+    // card geometry
+    const textW = Math.max(...lines.map(l => l.scrollWidth), by ? by.scrollWidth : 0);
+    const qs = fs * 4.2;
+    qm.style.fontSize = qs + 'px';
+    const qTop = qs * 0.3;                                // room above the first line for the mark
+    const bodyH = body.getBoundingClientRect().height;
+    const cw = textW + 2 * padX, ch = bodyH + qTop + 2 * padY;
+    const cx = W / 2 - cw / 2;
+    const cy = Math.min(Math.max(H * P.y - ch / 2, H * 0.07), H * 0.84 - ch);
+    Object.assign(card.style, { left: cx + 'px', top: cy + 'px', width: cw + 'px', height: ch + 'px' });
+    Object.assign(body.style, { position: 'absolute', left: padX + 'px', top: (padY + qTop) + 'px', width: textW + 'px' });
+    Object.assign(qm.style, center ? { left: '50%', top: (padY - qs * 0.3) + 'px', marginLeft: -qs * 0.2 + 'px' }
+                                   : { left: (padX - qs * 0.05) + 'px', top: (padY - qs * 0.3) + 'px' });
+    const shade = P.plate ? 0 : 0.5;
+    qm.style.textShadow = shade ? `0 ${qs * 0.02}px ${qs * 0.1}px rgba(0,0,0,${shade})` : 'none';
+    MG.box = [Math.max(0, cx - 56), Math.max(0, cy - qs * 0.3 - 40), Math.min(W, cx + cw + 56), Math.min(H, cy + ch + 60)];
+  };
+  layout();
+  MG.ready = Promise.all([`italic 400 100px ${SERIF}`, `italic 900 100px ${QFONT}`, `700 40px ${SANS}`].map(f => document.fonts.load(f).catch(() => 0)))
+    .then(() => document.fonts.ready).then(layout);
+
+  // ── choreography ──
+  const L0 = P.plate ? 0.18 : 0.1, LS = 0.17, LD = 0.3;
+  const lastLine = () => L0 + (lines.length - 1) * LS;
+  const byT = () => lastLine() + 0.22;
+  const exitDur = P.exit === 'fade' ? 0.26 : P.exit === 'blur' ? 0.3 : 0;
+  MG.active([[0, byT() + 0.5], [Math.max(0, D - exitDur - 0.04), D]]);
+  MG.frame(t => {
+    if (P.plate) { const k = MG.ease.outCubic(MG.range(t, 0, 0.3)); MG.set(plateEl, { opacity: k, scale: 0.965 + 0.035 * k }); }
+    const q = MG.spring(t, 0.04, { stiffness: 260, damping: 18 });
+    MG.set(qm, { opacity: MG.range(t, 0.04, 0.1), scale: 0.55 + 0.45 * q, y: (1 - q) * fs * 0.3 });
+    lines.forEach((l, i) => {
+      const t0 = L0 + i * LS, p = MG.ease.outCubic(MG.range(t, t0, LD));
+      MG.set(l, { opacity: MG.range(t, t0, 0.22), y: (1 - p) * Math.max(12, fs * 0.2), blur: (1 - p) * 9 });
+    });
+    if (by) {
+      const bt = byT();
+      MG.set(rule, { sx: Math.max(0.001, MG.ease.outExpo(MG.range(t, bt, 0.4))), opacity: t >= bt ? 1 : 0 });
+      MG.set(name, { opacity: 0.9 * MG.range(t, bt + 0.1, 0.22), x: (1 - MG.ease.outCubic(MG.range(t, bt + 0.1, 0.36))) * -10 });
+    }
+    let x = { opacity: 1 };
+    if (exitDur && t > D - exitDur - 1e-6) {
+      const e = MG.range(t, D - exitDur, exitDur);
+      x = P.exit === 'fade' ? { opacity: 1 - MG.ease.outQuad(e) } : { opacity: 1 - MG.ease.inQuad(e), blur: e * 14, y: -e * 16 };
+    }
+    MG.set(card, x);
+  });
+})();
+</script>

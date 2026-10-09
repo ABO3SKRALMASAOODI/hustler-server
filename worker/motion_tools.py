@@ -162,17 +162,51 @@ def list_motion_templates(ctx, category=None):
             "'motion-design' for the API).")
 
 
+def _cue_applies(cue, params):
+    """A cue's optional "when" ({param: value or [values]}) gates it on the
+    item's params, e.g. a kick only for the 'slam' entrance."""
+    cond = cue.get("when")
+    if not isinstance(cond, dict):
+        return True
+    for key, want in cond.items():
+        if params.get(key) not in (want if isinstance(want, list) else [want]):
+            return False
+    return True
+
+
+def _repeat_count(rep, params):
+    """Cue count for a "repeat": one per item of a list param; for a text
+    param, one per character, or with "rate" (chars/second, a number or the
+    name of a numeric param) one per "every" seconds of typing."""
+    v = params.get(rep.get("param"))
+    if isinstance(v, list):
+        return len(v)
+    if not isinstance(v, str) or not v.strip():
+        return None
+    chars = len(v.strip())
+    rate = rep.get("rate")
+    if isinstance(rate, str):
+        rate = params.get(rate)
+    try:
+        rate, every = float(rate or 0), float(rep.get("every", 0.3))
+    except (TypeError, ValueError):
+        return None
+    if rate > 0 and every > 0:
+        return max(1, int(-(-chars // (rate * every))))
+    return min(chars, 40)
+
+
 def _sfx_cues(spec, params, start, end):
     cues = []
     for c in spec.get("sfx") or []:
         kind = c.get("kind")
-        if kind not in sfx_kit.KINDS:
+        if kind not in sfx_kit.KINDS or not _cue_applies(c, params):
             continue
         at = float(c.get("at") or 0.0)
         t = (end + at) if at < 0 else (start + at)
         rep = c.get("repeat")
-        if rep and isinstance(params.get(rep.get("param")), list):
-            n = len(params[rep["param"]])
+        n = _repeat_count(rep, params) if rep else None
+        if n is not None:
             for i in range(n):
                 cues.append((round(start + float(rep.get("from", at)) + i * float(rep.get("every", 0.3)), 3),
                              kind, float(c.get("gain_db", DEFAULT_KIT_GAIN_DB))))

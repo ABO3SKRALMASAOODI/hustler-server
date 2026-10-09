@@ -1,0 +1,104 @@
+<!--MG-SPEC {"title": "Text scramble", "category": "type",
+ "description": "A word or short phrase decodes from random glyphs, letter by letter left to right (each letter scrambles for ~4 frames, then locks with an accent flash). Use for tech/data/reveal moments: a product name, a number, a secret, 'ACCESS GRANTED'; pairs well with a glitch transition.",
+ "duration": 2.2, "layer": "above_captions", "mutes_captions": false,
+ "params": {
+  "text": {"type": "str", "required": true, "max": 28, "hint": "1-4 words, best short and in caps"},
+  "font": {"type": "enum", "values": ["mono", "grotesk"], "default": "mono"},
+  "color": {"type": "color", "default": "#F8F6F2"},
+  "accent": {"type": "color", "default": "#3BA7FF", "hint": "colour of the scrambling glyphs and the lock flash"},
+  "size": {"type": "float", "min": 0.5, "max": 1.6, "default": 1.0},
+  "y": {"type": "float", "min": 0.1, "max": 0.82, "default": 0.5},
+  "uppercase": {"type": "bool", "default": true},
+  "exit": {"type": "enum", "values": ["scramble", "fade", "cut"], "default": "scramble", "hint": "scramble = decodes back out right to left"}
+ },
+ "example": {"text": "ACCESS GRANTED"},
+ "sfx": [{"at": 0.0, "kind": "tick", "repeat": {"param": "text", "every": 0.09, "rate": 22.2}}]} -->
+<style>
+  .line{position:absolute;left:0;width:100%;text-align:center;white-space:nowrap}
+  .cell{display:inline-block;position:relative;text-align:center;white-space:pre}
+  .cell b{font-weight:inherit;position:absolute;left:50%;top:0;transform:translateX(-50%)}
+</style>
+<div class="mg-root"><div class="line" id="line"></div></div>
+<script>
+(() => {
+  const P = MG.params, W = MG.W, H = MG.H, D = MG.duration;
+  const line = MG.$('#line');
+  const FAM = new Set(Array.from(document.fonts, f => f.family.replace(/["']/g, '')));
+  const mono = P.font === 'mono';
+  const F = mono
+    ? { css: `'JetBrains Mono','IBM Plex Mono','SFMono-Regular',Menlo,Consolas,ui-monospace,monospace`, weight: 700, track: '0.02em' }
+    : { css: `'Inter Display','Inter',sans-serif`, weight: 800, track: '-0.02em' };
+  Object.assign(line.style, { fontFamily: F.css, fontWeight: F.weight, letterSpacing: F.track, color: P.color });
+  let text = String(P.text || '').trim().replace(/\s+/g, ' ');
+  if (P.uppercase) text = text.toUpperCase();
+  const GL = mono ? 'ABCDEFGHJKLMNPQRSTUVWXYZ0123456789#$%&@*+=<>/\\?!'
+                  : 'ABCDEFGHJKLMNOPRSTUVXYZ0123456789#%&@$*+=?';
+  // each letter: a fixed-width cell holding the final glyph (for metrics) and a live glyph
+  const cells = Array.from(text).map((ch, i) => {
+    const c = MG.el('span', 'cell', null, line);
+    const ghost = MG.el('span', null, ch, c); ghost.style.visibility = 'hidden';
+    const live = MG.el('b', null, '', c);
+    return { ch, c, live, space: ch === ' ' };
+  });
+  const EACH = 0.045, SCR = 4;                       // letter stagger (s), scramble length (frames)
+  const FR = 1 / 30;                                 // pattern timing is fps-independent
+  let order = 0;
+  cells.forEach(c => { c.t0 = order * EACH; if (!c.space) order++; c.t1 = c.t0 + SCR * FR; });
+  const decodeEnd = cells.length ? Math.max(...cells.map(c => c.t1)) : 0;
+  const exitDur = P.exit === 'scramble' ? Math.min(0.45, 0.02 * order + 0.2) : P.exit === 'fade' ? 0.2 : 0;
+
+  let fs = 80;
+  const layout = () => {
+    line.style.fontSize = '100px';
+    const w = line.scrollWidth > 0 ? Array.from(cells, c => c.c.offsetWidth).reduce((a, b) => a + b, 0) : 100;
+    fs = Math.max(36, Math.min((W * 0.84) / (w / 100), 0.085 * H * P.size, 190 * P.size));
+    line.style.fontSize = fs + 'px';
+    line.style.lineHeight = '1.1';
+    const h = line.getBoundingClientRect().height;
+    const top = Math.min(Math.max(H * P.y - h / 2, H * 0.07), H * 0.86 - h);
+    line.style.top = top + 'px';
+    line.style.textShadow = `0 ${fs * 0.03}px ${fs * 0.18}px rgba(0,0,0,.5)`;
+    const tw = cells.reduce((a, c) => a + c.c.offsetWidth, 0);
+    MG.box = [Math.max(0, W / 2 - tw / 2 - fs * 0.6), Math.max(0, top - fs * 0.6),
+              Math.min(W, W / 2 + tw / 2 + fs * 0.6), Math.min(H, top + h + fs * 0.6)];
+  };
+  layout();
+  MG.ready = document.fonts.load(`${F.weight} 100px ${F.css}`).catch(() => 0).then(() => document.fonts.ready).then(layout);
+
+  const glyph = (i, f) => GL[Math.floor(MG.rand(i * 7919 + f * 31 + 3)() * GL.length)];
+  MG.active([[0, decodeEnd + 0.4], [Math.max(0, D - exitDur - 0.04), D]]);
+  MG.frame(t => {
+    const f = Math.floor(t / FR + 1e-4);
+    const exitT = exitDur ? D - exitDur : D + 1;
+    cells.forEach((c, i) => {
+      if (c.space) { c.live.textContent = ''; return; }
+      let state;                                       // 'off' | 'scr' | 'lock'
+      if (t < c.t0 - 1e-6) state = 'off';
+      else if (t < c.t1 - 1e-6) state = 'scr';
+      else state = 'lock';
+      if (P.exit === 'scramble' && t >= exitT) {     // right-to-left decode-out
+        const k = (cells.length - 1 - i) / Math.max(1, cells.length - 1);
+        const s0 = exitT + k * (exitDur - SCR * FR * 0.75);
+        if (t >= s0 + SCR * FR * 0.75) state = 'off'; else if (t >= s0) state = 'scr';
+      }
+      if (state === 'off') { c.live.textContent = ''; return; }
+      if (state === 'scr') {
+        c.live.textContent = glyph(i, f);
+        c.live.style.color = P.accent; c.live.style.opacity = 0.9;
+        c.live.style.textShadow = `0 0 ${fs * 0.18}px ${P.accent}`;
+        return;
+      }
+      c.live.textContent = c.ch;
+      // lock flash: accent-hot for ~2 frames, then cools to the text colour
+      const k = MG.range(t, c.t1, 0.16);
+      c.live.style.opacity = 1;
+      c.live.style.color = k < 0.35 ? P.accent : P.color;
+      c.live.style.textShadow = k < 1 ? `0 0 ${(fs * 0.25 * (1 - k)).toFixed(1)}px ${P.accent}` : '';
+    });
+    // whole-word glow pulse when the final glyph locks
+    const g = MG.range(t, decodeEnd, 0.35);
+    line.style.filter = g > 0 && g < 1 ? `brightness(${(1 + 0.25 * (1 - g)).toFixed(3)})` : '';
+    line.style.opacity = P.exit === 'fade' && t > exitT ? 1 - MG.ease.outQuad(MG.range(t, exitT, exitDur)) : 1;
+  });
+})();
+</script>

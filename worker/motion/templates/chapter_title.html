@@ -1,0 +1,183 @@
+<!--MG-SPEC {"title": "Chapter title", "category": "type",
+ "description": "Section/chapter card: a number plus a title revealed with a drawn line and a mask. Styles: minimal (centred number, drawn rule, masked title), bold_red_italic (giant italic accent title with a per-letter cascade) or boxed (accent box wipe with a number tab). Use at a topic change or for list items (01, 02, 03); exit 'collapse' shrinks it into a small corner label that stays until the item ends, so extend the item over the whole section.",
+ "duration": 2.6, "layer": "above_captions", "mutes_captions": false,
+ "params": {
+  "title": {"type": "str", "required": true, "max": 40, "hint": "1-3 words read best"},
+  "number": {"type": "str", "default": "01", "max": 6, "hint": "chapter/step number; empty to hide"},
+  "label": {"type": "str", "default": "", "max": 48, "hint": "optional small line under the title"},
+  "style": {"type": "enum", "values": ["minimal", "bold_red_italic", "boxed"], "default": "minimal"},
+  "color": {"type": "color", "default": "#F8F6F2"},
+  "accent": {"type": "color", "default": "#E2401F", "hint": "number/rule (minimal), title (bold_red_italic) or box fill (boxed)"},
+  "y": {"type": "float", "min": 0.12, "max": 0.8, "default": 0.42},
+  "exit": {"type": "enum", "values": ["fade", "cut", "collapse"], "default": "fade", "hint": "collapse = shrink into a corner label at 1.6 s and hold it to the end"}
+ },
+ "example": {"title": "First", "number": "01", "label": "custom animations", "style": "bold_red_italic"},
+ "sfx": [{"at": 0.0, "kind": "whoosh_soft", "when": {"style": ["minimal"]}},
+         {"at": 0.12, "kind": "impact_soft", "when": {"style": ["bold_red_italic"]}},
+         {"at": 0.0, "kind": "swipe", "when": {"style": ["boxed"]}},
+         {"at": 1.6, "kind": "swish_short", "when": {"exit": ["collapse"]}}]} -->
+<style>
+  .grp{position:absolute;left:0;top:0;transform-origin:0 0;will-change:transform,opacity}
+  .num{white-space:nowrap}
+  .mask{overflow:hidden;display:block;padding:0 .08em}
+  .ttl{display:block;white-space:nowrap}
+  .lbl{white-space:nowrap}
+  .rule{height:3px;border-radius:2px;transform-origin:50% 50%}
+  .chip{position:absolute;display:flex;align-items:center;gap:14px;white-space:nowrap;opacity:0;
+    padding:12px 22px 13px;border-radius:999px;background:rgba(12,12,14,.58);
+    border:1px solid rgba(255,255,255,.13);box-shadow:0 10px 30px rgba(0,0,0,.28)}
+  .mg-c{will-change:transform,opacity,filter;transform-origin:50% 70%}
+</style>
+<div class="mg-root"><div class="grp" id="grp"></div><div class="chip" id="chip"></div></div>
+<script>
+(() => {
+  const P = MG.params, W = MG.W, H = MG.H, D = MG.duration;
+  const grp = MG.$('#grp'), chip = MG.$('#chip');
+  const FAM = new Set(Array.from(document.fonts, f => f.family.replace(/["']/g, '')));
+  const SANS = `'Inter Display','Inter',sans-serif`;
+  const MONO = `'JetBrains Mono','IBM Plex Mono','SFMono-Regular',Menlo,Consolas,ui-monospace,monospace`;
+  const S = P.style, title = String(P.title || '').trim(), num = String(P.number || '').trim(), lab = String(P.label || '').trim();
+  const shadow = (fs, a = 0.42) => `0 ${(fs * 0.02).toFixed(1)}px ${(fs * 0.12).toFixed(1)}px rgba(0,0,0,${a})`;
+  const css = (el, o) => Object.assign(el.style, o);
+  let els = {};
+  // ── build ──
+  if (S === 'boxed') {
+    css(grp, { display: 'flex', flexDirection: 'column', alignItems: 'flex-start' });
+    const row = MG.el('div', null, null, grp); css(row, { display: 'flex', alignItems: 'stretch' });
+    if (num) { els.tab = MG.el('div', 'num', num, row); css(els.tab, { fontFamily: SANS, fontWeight: 800, background: '#F8F6F2', color: '#111214', display: 'flex', alignItems: 'center', justifyContent: 'center', letterSpacing: '-0.02em' }); }
+    els.box = MG.el('div', null, null, row); css(els.box, { background: P.accent, position: 'relative', transformOrigin: '0 50%' });
+    els.mask = MG.el('div', 'mask', null, els.box);
+    els.ttl = MG.el('div', 'ttl', title, els.mask); css(els.ttl, { fontFamily: SANS, fontWeight: 800, letterSpacing: '-0.03em', color: P.color, lineHeight: 1.0 });
+    if (lab) { els.lbl = MG.el('div', 'lbl', lab, grp); css(els.lbl, { fontFamily: SANS, fontWeight: 700, color: P.color, letterSpacing: '-0.01em' }); }
+  } else if (S === 'bold_red_italic') {
+    css(grp, { display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center' });
+    if (num) { els.num = MG.el('div', 'num', num, grp); css(els.num, { fontFamily: SANS, fontWeight: 700, fontStyle: 'italic', color: P.color, letterSpacing: '-0.01em', alignSelf: 'flex-start' }); }
+    els.ttl = MG.el('div', 'ttl', null, grp);
+    css(els.ttl, { fontFamily: SANS, fontWeight: 700, fontStyle: 'italic', letterSpacing: '-0.05em', color: P.accent, lineHeight: 0.92 });
+    els.chars = Array.from(title).map(ch => MG.el('span', 'mg-c', ch, els.ttl));
+    if (lab) { els.lbl = MG.el('div', 'lbl', lab, grp); css(els.lbl, { fontFamily: SANS, fontWeight: 700, fontStyle: 'italic', color: P.color, letterSpacing: '-0.015em' }); }
+  } else {
+    css(grp, { display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center' });
+    if (num) { els.num = MG.el('div', 'num', num, grp); css(els.num, { fontFamily: MONO, fontWeight: 600, color: P.accent, letterSpacing: '0.18em' }); }
+    els.rule = MG.el('div', 'rule', null, grp); css(els.rule, { background: P.accent });
+    // a long title is set as a balanced two-line stack, each line in its own mask
+    const ws = title.split(/\s+/);
+    let parts = [title];
+    if (ws.length >= 2 && title.length > 14) {
+      let best = null;
+      for (let k = 1; k < ws.length; k++) { const a = ws.slice(0, k).join(' '), b = ws.slice(k).join(' ');
+        const sc = Math.max(a.length, b.length); if (!best || sc < best.sc) best = { sc, a, b }; }
+      parts = [best.a, best.b];
+    }
+    els.lines = parts.map(txt => {
+      const mask = MG.el('div', 'mask', null, grp);
+      const t = MG.el('div', 'ttl', txt, mask);
+      css(t, { fontFamily: SANS, fontWeight: 800, letterSpacing: '-0.035em', color: P.color, lineHeight: 1.0 });
+      return { mask, t };
+    });
+    els.ttl = els.lines[0].t;
+    if (lab) { els.lbl = MG.el('div', 'lbl', lab, grp); css(els.lbl, { fontFamily: SANS, fontWeight: 600, color: P.color, letterSpacing: '-0.005em', opacity: 0.86 }); }
+  }
+  // corner chip (collapse target)
+  if (num) { const cn = MG.el('span', null, num, chip); css(cn, { fontFamily: MONO, fontWeight: 700, color: P.accent, fontSize: '28px', letterSpacing: '0.06em' }); }
+  const ct = MG.el('span', null, title, chip); css(ct, { fontFamily: SANS, fontWeight: 700, color: '#F8F6F2', fontSize: '33px', letterSpacing: '-0.02em' });
+  if (P.exit !== 'collapse') chip.style.display = 'none';
+
+  // ── layout ──
+  let G = { x: 0, y: 0, w: 0, h: 0 }, fsT = 100, CR = { left: 64, top: 160, height: 56 };
+  const layout = () => {
+    const maxW = W * (S === 'bold_red_italic' ? 0.9 : 0.84);
+    const tEls = els.lines ? els.lines.map(l => l.t) : [els.ttl];
+    tEls.forEach(e => { e.style.fontSize = '100px'; });
+    const unit = Math.max(...tEls.map(e => e.scrollWidth)) / 100 + (S === 'boxed' ? 1.0 : 0.16);   // box padding / mask pad
+    const cap = S === 'bold_red_italic' ? 0.24 * H : S === 'boxed' ? 0.07 * H : 0.09 * H;
+    fsT = Math.max(36, Math.min((maxW - (S === 'boxed' && num ? 0.07 * H * 1.6 : 0)) / unit, cap));
+    tEls.forEach(e => { e.style.fontSize = fsT + 'px';
+      e.style.textShadow = S === 'boxed' ? 'none' : shadow(fsT, S === 'bold_red_italic' ? 0.3 : 0.42); });
+    const small = Math.max(24, Math.min(0.026 * H, 52));
+    if (S === 'boxed') {
+      css(els.ttl, { padding: `${fsT * 0.16}px ${fsT * 0.38}px ${fsT * 0.2}px` });
+      if (els.tab) css(els.tab, { fontSize: fsT * 0.62 + 'px', minWidth: fsT * 1.36 + 'px', padding: `0 ${fsT * 0.2}px` });
+      if (els.lbl) css(els.lbl, { fontSize: small + 'px', marginTop: fsT * 0.28 + 'px', textShadow: shadow(small, 0.55) });
+      const bs = `0 ${(fsT * 0.08).toFixed(1)}px ${(fsT * 0.32).toFixed(1)}px rgba(0,0,0,.3)`;
+      els.box.style.boxShadow = bs; if (els.tab) els.tab.style.boxShadow = bs;
+    } else if (S === 'bold_red_italic') {
+      if (els.num) css(els.num, { fontSize: small * 1.15 + 'px', marginBottom: -fsT * 0.04 + 'px', marginLeft: fsT * 0.12 + 'px', textShadow: shadow(small, 0.5) });
+      if (els.lbl) css(els.lbl, { fontSize: small * 1.1 + 'px', marginTop: -fsT * 0.02 + 'px', textShadow: shadow(small, 0.55) });
+    } else {
+      if (els.num) css(els.num, { fontSize: small * 1.25 + 'px', marginBottom: small * 0.5 + 'px', textShadow: shadow(small, 0.5), paddingLeft: '0.18em' });
+      css(els.rule, { width: Math.min(fsT * 2.2, maxW * 0.5) + 'px', height: Math.max(4, fsT * 0.04) + 'px', marginBottom: fsT * 0.24 + 'px', boxShadow: shadow(fsT * 0.3, 0.35) });
+      els.lines.forEach((l, i) => { l.mask.style.marginTop = i ? (-fsT * 0.06) + 'px' : '0px'; });
+      if (els.lbl) css(els.lbl, { fontSize: small + 'px', marginTop: fsT * 0.16 + 'px', textShadow: shadow(small, 0.55) });
+    }
+    grp.style.transform = 'none';
+    const r = grp.getBoundingClientRect();
+    G = { w: r.width, h: r.height };
+    G.x = (W - G.w) / 2;
+    G.y = Math.min(Math.max(H * P.y - G.h / 2, H * 0.07), H * 0.86 - G.h);
+    grp.style.left = G.x + 'px'; grp.style.top = G.y + 'px';
+    // chip sits top-left inside the safe area
+    css(chip, { left: '64px', top: Math.round(H * 0.085) + 'px' });
+    CR = { left: 64, top: Math.round(H * 0.085), height: chip.offsetHeight || 56 };
+    const pad = fsT * (S === 'bold_red_italic' ? 0.3 : 0.35);
+    let box = [G.x - pad, G.y - pad, G.x + G.w + pad, G.y + G.h + pad];
+    if (P.exit === 'collapse') box = [0, Math.min(box[1], H * 0.085 - 30), Math.max(box[2], 64 + chip.offsetWidth + 40), box[3]];
+    MG.box = [Math.max(0, box[0]), Math.max(0, box[1]), Math.min(W, box[2]), Math.min(H, box[3])];
+  };
+  layout();
+  MG.ready = Promise.all([`800 100px ${SANS}`, `italic 700 100px ${SANS}`, `600 40px ${MONO}`].map(f => document.fonts.load(f).catch(() => 0)))
+    .then(() => document.fonts.ready).then(layout);
+
+  // ── choreography ──
+  const TC = P.exit === 'collapse' ? Math.max(0.9, Math.min(1.6, D - 0.9)) : D;   // collapse start
+  const EACH = 0.06, LET = 0.22;
+  const nC = els.chars ? els.chars.length : 0;
+  const inEnd = S === 'bold_red_italic' ? EACH * nC + LET + 0.3 : 0.85;
+  const exitDur = P.exit === 'fade' ? 0.24 : 0;
+  const wins = [[0, Math.min(D, inEnd)]];
+  if (P.exit === 'collapse') wins.push([TC - 0.02, Math.min(D, TC + 0.62)], [D - 0.22, D]);
+  if (exitDur) wins.push([D - exitDur - 0.04, D]);
+  MG.active(wins);
+  const ex = MG.ease.outExpo;
+  MG.frame(t => {
+    const lbl = els.lbl;
+    if (S === 'minimal') {
+      if (els.num) MG.set(els.num, { opacity: MG.range(t, 0, 0.14), y: (1 - MG.ease.outCubic(MG.range(t, 0, 0.3))) * 10 });
+      MG.set(els.rule, { sx: ex(MG.range(t, 0.06, 0.55)), opacity: t >= 0.06 ? 1 : 0 });
+      els.lines.forEach((l, i) => { const t0 = 0.16 + i * 0.08, p = ex(MG.range(t, t0, 0.7));
+        MG.set(l.t, { y: (1 - p) * fsT * 1.08, opacity: t >= t0 ? 1 : 0 }); });
+      if (lbl) MG.set(lbl, { opacity: 0.86 * MG.range(t, 0.42, 0.2), y: (1 - MG.ease.outCubic(MG.range(t, 0.42, 0.3))) * 10 });
+    } else if (S === 'bold_red_italic') {
+      els.chars.forEach((c, i) => {
+        const t0 = i * EACH, k = MG.ease.outCubic(MG.range(t, t0, LET));
+        MG.set(c, { opacity: MG.range(t, t0, 0.06), scale: 1.5 - 0.5 * k, blur: (1 - k) * Math.min(16, fsT * 0.05) });
+      });
+      const tl = EACH * Math.max(0, nC - 1) + LET * 0.6;
+      if (els.num) MG.set(els.num, { opacity: MG.range(t, 0.04, 0.1) });
+      if (lbl) { const p = ex(MG.range(t, tl, 0.5)); lbl.style.clipPath = `inset(-20% ${((1 - p) * 100).toFixed(2)}% -20% -2%)`; lbl.style.opacity = t >= tl ? 1 : 0; }
+    } else {
+      if (els.tab) MG.set(els.tab, { scale: 0.6 + 0.4 * MG.ease.outBack(MG.range(t, 0, 0.28)), opacity: MG.range(t, 0, 0.08) });
+      const b = ex(MG.range(t, 0.08, 0.5));
+      MG.set(els.box, { sx: Math.max(0.001, b), opacity: t >= 0.08 ? 1 : 0 });
+      const p = ex(MG.range(t, 0.2, 0.6));
+      MG.set(els.ttl, { y: (1 - p) * fsT * 1.2, opacity: t >= 0.2 ? 1 : 0 });
+      if (lbl) MG.set(lbl, { opacity: MG.range(t, 0.4, 0.2), y: (1 - MG.ease.outCubic(MG.range(t, 0.4, 0.3))) * 10 });
+    }
+    // exits
+    let g = { opacity: 1 };
+    if (P.exit === 'collapse' && t >= TC) {
+      const p = MG.ease.inOutCubic(MG.range(t, TC, 0.5));
+      const cr = CR;
+      const s = Math.min(1, (cr.height * 1.15) / G.h);
+      g = { x: (cr.left - G.x) * p, y: (cr.top - G.y) * p, scale: 1 - (1 - s) * p, opacity: 1 - MG.range(t, TC + 0.22, 0.24) };
+      grp.style.transformOrigin = '0 0';
+      const co = MG.range(t, TC + 0.3, 0.22) * (1 - MG.range(t, D - 0.2, 0.2));
+      MG.set(chip, { opacity: co, x: (1 - MG.ease.outCubic(MG.range(t, TC + 0.3, 0.3))) * -12 });
+    } else if (exitDur && t > D - exitDur) {
+      const q = MG.range(t, D - exitDur, exitDur);
+      g = { opacity: 1 - MG.ease.outQuad(q), y: -q * 14 };
+    }
+    MG.set(grp, g);
+  });
+})();
+</script>
