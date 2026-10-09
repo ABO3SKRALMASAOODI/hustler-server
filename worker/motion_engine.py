@@ -44,7 +44,7 @@ FONTS_DIR = os.path.join(HERE, "fonts")
 
 # Bump when runtime.js, the document wrapper or capture semantics change:
 # it is part of every cache key.
-ENGINE_VERSION = "mg-1"
+ENGINE_VERSION = "mg-2"
 DESIGN_W = 1080           # templates are authored in a 1080-wide CSS space
 ORIGIN = "https://mg.valmera.invalid"
 MAX_DURATION_S = 120.0
@@ -76,21 +76,33 @@ FONT_FACES = [
     ("Plus Jakarta Sans", "PlusJakartaSans-ExtraBold.ttf", 800, "normal"),
     ("Syne", "Syne-ExtraBold.ttf", 800, "normal"),
 ]
-OPTIONAL_FONT_FACES = [
-    # Added with the motion engine; absent files are skipped so an older
-    # image never references a font it does not ship.
-    ("Inter", "Inter-Regular.ttf", 400, "normal"),
-    ("Inter", "Inter-Medium.ttf", 500, "normal"),
-    ("Inter", "Inter-SemiBold.ttf", 600, "normal"),
-    ("Inter", "Inter-Bold.ttf", 700, "normal"),
-    ("Inter", "Inter-ExtraBold.ttf", 800, "normal"),
-    ("Inter", "Inter-Black.ttf", 900, "normal"),
-    ("JetBrains Mono", "JetBrainsMono-Bold.ttf", 700, "normal"),
-    ("JetBrains Mono", "JetBrainsMono-Regular.ttf", 400, "normal"),
-    ("Caveat", "Caveat-Bold.ttf", 700, "normal"),
-    ("Space Grotesk", "SpaceGrotesk-Bold.ttf", 700, "normal"),
-    ("Manrope", "Manrope-ExtraBold.ttf", 800, "normal"),
+MOTION_FONTS_DIR = os.path.join(MOTION_DIR, "fonts")
+# Motion-only families (worker/motion/fonts, never on libass's fontsdir so
+# caption rendering cannot change). Variable fonts declare weight ranges.
+# (family, file, weight or "lo hi", style, stretch or None)
+MOTION_FONT_FACES = [
+    ("Inter", "Inter-Variable.ttf", "100 900", "normal", None),
+    ("Inter", "Inter-Italic-Variable.ttf", "100 900", "italic", None),
+    ("Inter Tight", "InterTight-Variable.ttf", "100 900", "normal", None),
+    ("Inter Tight", "InterTight-Italic-Variable.ttf", "100 900", "italic", None),
+    ("JetBrains Mono", "JetBrainsMono-Variable.ttf", "100 800", "normal", None),
+    ("Caveat", "Caveat-Variable.ttf", "400 700", "normal", None),
+    ("Space Grotesk", "SpaceGrotesk-Variable.ttf", "300 700", "normal", None),
+    ("Manrope", "Manrope-Variable.ttf", "200 800", "normal", None),
+    ("Pinyon Script", "PinyonScript-Regular.ttf", 400, "normal", None),
+    ("Great Vibes", "GreatVibes-Regular.ttf", 400, "normal", None),
+    ("Yellowtail", "Yellowtail-Regular.ttf", 400, "normal", None),
+    ("Bodoni Moda", "BodoniModa-Variable.ttf", "400 900", "normal", None),
+    ("Bodoni Moda", "BodoniModa-Italic-Variable.ttf", "400 900", "italic", None),
+    ("Playfair Display", "PlayfairDisplay-Variable.ttf", "400 900", "normal", None),
+    ("Playfair Display", "PlayfairDisplay-Italic-Variable.ttf", "400 900", "italic", None),
+    ("Unbounded", "Unbounded-Variable.ttf", "200 900", "normal", None),
+    ("Montserrat", "Montserrat-Variable.ttf", "100 900", "normal", None),
+    ("Poppins", "Poppins-Light.ttf", 300, "normal", None),
+    ("Poppins", "Poppins-ExtraBold.ttf", 800, "normal", None),
+    ("Archivo", "Archivo-Variable.ttf", "100 900", "normal", "62% 125%"),
 ]
+OPTIONAL_FONT_FACES = []
 
 
 # Headless Chrome otherwise paces screenshots to its frame clock (~50 ms per
@@ -123,10 +135,14 @@ def available():
 
 
 def font_faces():
+    """[(family, url_path, weight, style, stretch)] for every installed face."""
     out = []
-    for fam, fn, weight, style in FONT_FACES + OPTIONAL_FONT_FACES:
+    for fam, fn, weight, style in FONT_FACES:
         if os.path.exists(os.path.join(FONTS_DIR, fn)):
-            out.append((fam, fn, weight, style))
+            out.append((fam, f"fonts/{fn}", weight, style, None))
+    for fam, fn, weight, style, stretch in MOTION_FONT_FACES:
+        if os.path.exists(os.path.join(MOTION_FONTS_DIR, fn)):
+            out.append((fam, f"mfonts/{fn}", weight, style, stretch))
     return out
 
 
@@ -140,10 +156,12 @@ def font_families():
 
 def _font_css():
     rules = []
-    for fam, fn, weight, style in font_faces():
+    for fam, path, weight, style, stretch in font_faces():
         rules.append(
-            "@font-face{font-family:'%s';src:url('%s/fonts/%s') format('truetype');"
-            "font-weight:%d;font-style:%s;font-display:block}" % (fam, ORIGIN, fn, weight, style))
+            "@font-face{font-family:'%s';src:url('%s/%s') format('truetype');"
+            "font-weight:%s;font-style:%s;%sfont-display:block}" % (
+                fam, ORIGIN, path, weight, style,
+                f"font-stretch:{stretch};" if stretch else ""))
     return "\n".join(rules)
 
 
@@ -345,11 +363,12 @@ async def _route_factory(job):
         try:
             if url == ORIGIN + "/" or url == ORIGIN:
                 return await route.fulfill(body=doc, content_type="text/html; charset=utf-8")
-            if url.startswith(ORIGIN + "/fonts/"):
-                fn = os.path.basename(url.split("?", 1)[0])
-                p = os.path.join(font_dir, fn)
-                if os.path.isfile(p):
-                    return await route.fulfill(path=p, content_type="font/ttf")
+            for prefix, base in (("/fonts/", font_dir), ("/mfonts/", MOTION_FONTS_DIR)):
+                if url.startswith(ORIGIN + prefix):
+                    fn = os.path.basename(url.split("?", 1)[0])
+                    p = os.path.join(base, fn)
+                    if os.path.isfile(p):
+                        return await route.fulfill(path=p, content_type="font/ttf")
             if url.startswith(ORIGIN + "/assets/"):
                 rel = url[len(ORIGIN) + len("/assets/"):].split("?", 1)[0]
                 p = (job.assets or {}).get(rel)

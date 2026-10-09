@@ -155,6 +155,11 @@ RUN if [ "$STEMS" = "1" ]; then \
 
 FROM worker-base AS worker-runtime
 
+# Colour emoji for browser-rendered motion graphics and captions.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends fonts-noto-color-emoji \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 COPY . .
 

@@ -87,6 +87,18 @@ RUN if [ -n "$WHISPER_MODEL" ]; then \
       python -c "from faster_whisper import download_model; download_model('${WHISPER_MODEL}')"; \
     fi
 
+# Motion graphics and motion captions render in previews too, so the slim
+# interactive image carries Chromium's headless shell (the batch image above
+# already has full Chromium). Placed after the heavy layers so adding it does
+# not invalidate their build cache. Colour emoji for captions/graphics.
+RUN if [ "$FULL_COMPUTE" != "1" ]; then \
+      playwright install --with-deps --only-shell chromium \
+      && rm -rf /var/lib/apt/lists/*; \
+    fi
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends fonts-noto-color-emoji \
+    && rm -rf /var/lib/apt/lists/*
+
 # Wrangler/BuildKit has reused a stale COPY layer during a production
 # Containers rollout even though the worker checkout changed.  The content
 # fingerprint is injected by the deploy workflow; changing it invalidates this

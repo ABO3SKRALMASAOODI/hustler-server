@@ -31,9 +31,11 @@ good defaults matter more than knobs.
 
 `sfx` lists sound cues relative to the item start. Kinds come from the
 built-in kit (`worker/sfx_kit.py`): whoosh_soft, whoosh_hard, swoosh_up,
-swish_short, pop_soft, pop_bright, click_ui, tick, ding, chime, riser_short,
-riser_long, impact_soft, impact_hard, sub_drop, glitch, shutter, typing,
-notification, cash, swipe. Editors can add/remove them; cue the moment where
+swish_short, swipe, pop_soft, pop_bright, click_ui, tick, kick, ding, chime,
+notification, coin, riser_short, riser_long, impact_soft, impact_hard,
+sub_drop, glitch, shutter, typing. A negative "at" counts back from the item
+end; {"repeat": {"param": "items", "every": 0.3, "from": 0.2}} repeats a cue
+once per list/rows entry. Editors can add/remove them; cue the moment where
 the motion *lands*, not where it starts drifting.
 
 ## The design space
@@ -69,13 +71,21 @@ Never use `Date`, `performance.now`, `Math.random`, `setTimeout`,
 - Set `MG.box = [x0, y0, x1, y1]` (design px, include glow/shadow/motion
   overshoot) once layout is known so capture is clipped to it.
 
-Fonts available by CSS family name: 'Inter Display' (700/800/900, 700
-italic), 'Inter' (400–900 when installed), 'Instrument Serif' (400, italic),
-'DM Serif Display' (400, italic), 'Playfair Display' (900, italic), 'Anton',
-'Bebas Neue', 'Archivo Black', 'Montserrat' (700), 'Poppins' (900),
-'Plus Jakarta Sans' (800), 'Syne' (800), plus 'JetBrains Mono', 'Caveat',
-'Space Grotesk', 'Manrope' when installed. Emoji render from the system
-color-emoji font.
+Fonts available by CSS family name (variable fonts accept any weight in
+their range):
+- Grotesk backbone: 'Inter Display' (700/800/900, 700 italic), 'Inter' (100–900,
+  italic), 'Inter Tight' (100–900, italic), 'Manrope' (200–800),
+  'Space Grotesk' (300–700), 'Montserrat' (100–900), 'Poppins' (300, 800, 900),
+  'Plus Jakarta Sans' (800), 'Syne' (800).
+- Extended / condensed: 'Archivo' (100–900, `font-stretch` 62%–125% — condensed
+  heavy or extended black), 'Unbounded' (200–900), 'Anton', 'Bebas Neue',
+  'Archivo Black'.
+- Serif accent: 'Instrument Serif' (400, italic), 'Playfair Display' (400–900,
+  italic), 'DM Serif Display' (400, italic), 'Bodoni Moda' (400–900, italic —
+  high-contrast Didone).
+- Script: 'Pinyon Script', 'Great Vibes' (formal), 'Yellowtail' (casual brush).
+- Hand / marker: 'Caveat' (400–700). Mono: 'JetBrains Mono' (100–800).
+- Emoji render from the system colour-emoji font (Noto Color Emoji in images).
 
 ## The quality bar
 

@@ -50,6 +50,9 @@ jobs:
           sudo apt-get install -y --no-install-recommends ffmpeg fontconfig fonts-dejavu-core fonts-noto-core fonts-noto-cjk
       - name: Install pinned dependencies
         run: python -m pip install -r '${{ matrix.service }}/requirements.txt' pytest
+      - name: Install headless Chromium for motion-engine tests
+        if: matrix.service == 'worker'
+        run: python -m playwright install --with-deps --only-shell chromium || echo "::warning::Chromium unavailable; motion render tests will skip"
       - name: Verify editor behavior without production services
         env:
           DATABASE_URL: postgresql://stub/stub

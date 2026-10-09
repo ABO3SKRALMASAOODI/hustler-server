@@ -68,6 +68,10 @@ jobs:
           python backend/scripts/security_release_preflight.py --database-only
           python -m pip install --disable-pip-version-check \
             -r worker/requirements.txt pytest pip-audit==2.9.0
+          # Motion-engine tests render real frames; without a browser they
+          # skip, so a failed install degrades coverage instead of blocking.
+          python -m playwright install --with-deps --only-shell chromium \
+            || echo "::warning::Chromium unavailable; motion render tests will skip"
           python -m pip_audit -r worker/requirements.txt \
             --progress-spinner off
           python -m compileall -q worker
