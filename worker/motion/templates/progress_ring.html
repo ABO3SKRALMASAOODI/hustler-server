@@ -1,0 +1,193 @@
+<!--MG-SPEC {"title": "Progress ring", "category": "data",
+ "description": "A ring (or gauge / half-arc) that sweeps to a percentage while the centre number counts up, with a glowing tip that flares on landing and an optional label. Use when the speaker gives a share, rate or completion ('87% of startups fail', 'only 6% get funded') and a part-of-a-whole picture makes it land.",
+ "duration": 3.0, "layer": "above_captions", "mutes_captions": false,
+ "params": {
+  "percent": {"type": "float", "required": true, "min": 0, "max": 100, "hint": "0-100; decimals are shown if given (99.9)"},
+  "label": {"type": "str", "default": "", "max": 48, "hint": "short line, e.g. 'of startups fail'; wrap a word in *stars* for the serif accent"},
+  "style": {"type": "enum", "values": ["ring", "gauge", "half"], "default": "ring", "hint": "ring = full circle, gauge = 240-degree dial, half = thin semicircle over the number"},
+  "weight": {"type": "enum", "values": ["bold", "thin"], "default": "bold", "hint": "bold = thick arc on a track, thin = hairline editorial arc"},
+  "accent": {"type": "color", "default": "#FFD400"},
+  "backdrop": {"type": "enum", "values": ["none", "scrim"], "default": "none", "hint": "scrim = soft dark falloff behind the graphic; use it on bright or busy footage"},
+  "y": {"type": "float", "min": 0.1, "max": 0.9, "default": 0.42, "hint": "vertical centre as frame fraction"},
+  "size": {"type": "float", "min": 0.6, "max": 1.4, "default": 1.0}
+ },
+ "example": {"percent": 87, "label": "of startups *never* make it"},
+ "sfx": [{"at": 0.12, "kind": "tick"}, {"at": 0.2, "kind": "tick"}, {"at": 0.3, "kind": "tick"}, {"at": 0.43, "kind": "tick"},
+         {"at": 0.6, "kind": "tick"}, {"at": 0.82, "kind": "tick"}, {"at": 1.2, "kind": "ding"}]} -->
+<style>
+  .scrim{position:absolute;left:0;top:0;width:64px;height:64px;pointer-events:none;will-change:transform,opacity;transform-origin:0 0;
+         background:radial-gradient(closest-side,rgba(0,0,0,.5),rgba(0,0,0,.34) 45%,rgba(0,0,0,.12) 75%,rgba(0,0,0,0))}
+  .stage{position:absolute;left:0;top:0;transform-origin:50% 50%;will-change:transform,opacity}
+  svg{position:absolute;left:0;top:0;overflow:visible}
+  .num{position:absolute;left:0;top:0;display:flex;align-items:baseline;justify-content:center;white-space:nowrap;
+       font-family:'Inter Display',sans-serif;font-weight:800;letter-spacing:-0.05em;color:#F7F5F2;line-height:1;
+       font-variant-numeric:tabular-nums;text-shadow:0 4px 22px rgba(0,0,0,.45)}
+  .pct{color:var(--accent);font-size:.46em;margin-left:-.02em;letter-spacing:0;display:inline-block}
+  .label{position:absolute;left:0;top:0;text-align:center;font-family:'Inter','Inter Display',sans-serif;font-weight:600;
+         color:rgba(247,245,242,.88);letter-spacing:-0.015em;line-height:1.1;text-shadow:0 2px 16px rgba(0,0,0,.6)}
+  .acc{font-family:'Instrument Serif',serif;font-style:italic;font-weight:400;color:var(--accent);font-size:1.2em;letter-spacing:-0.005em;line-height:.9}
+</style>
+<div class="mg-root"><div class="scrim" id="scrim"></div><div class="stage" id="stage"></div></div>
+<script>
+(() => {
+  const P = MG.params, D = MG.duration, W = MG.W, H = MG.H;
+  const tall = H / W > 1.45;
+  const SAFE = { x0: 60, x1: W - 60, y0: H * (tall ? 0.08 : 0.06), y1: H * (tall ? 0.80 : 0.94) };
+  const css = document.documentElement.style;
+  const rgb = h => { const n = parseInt(String(h).slice(1), 16); return [n >> 16 & 255, n >> 8 & 255, n & 255]; };
+  const mix = (h, k) => `rgb(${rgb(h).map(v => Math.round(v * k)).join(',')})`;
+  const tint = (h, k) => `rgb(${rgb(h).map(v => Math.round(v + (255 - v) * k)).join(',')})`;
+  css.setProperty('--accent', P.accent);
+  const pct = Math.max(0, Math.min(100, Number(P.percent) || 0));
+  const decimals = Math.abs(pct - Math.round(pct)) > 1e-6 ? (Math.abs(pct * 10 - Math.round(pct * 10)) > 1e-6 ? 2 : 1) : 0;
+  const thin = P.weight === 'thin';
+  const rich = s => MG.esc(s).replace(/\*([^*]+)\*/g, '<span class="acc">$1</span>');
+  const fontsReady = Promise.all([`800 120px 'Inter Display'`, `600 40px 'Inter'`, `italic 400 40px 'Instrument Serif'`]
+    .map(f => document.fonts.load(f).catch(() => 0)));
+  const NS = 'http://www.w3.org/2000/svg';
+  const sv = (tag, attrs, parent) => { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); if (parent) parent.appendChild(e); return e; };
+  const stage = MG.$('#stage');
+  // sweep geometry in degrees, 0 = 12 o'clock, clockwise
+  const SWEEP = P.style === 'gauge' ? [-120, 240] : P.style === 'half' ? [-90, 180] : [0, 360];
+  const T_FILL = 0.12, LAND = 1.2;
+  let L = null;
+
+  function layout() {
+    stage.innerHTML = '';
+    const R = Math.min(280 * P.size, (SAFE.x1 - SAFE.x0) / 2 - 30);
+    const sw = thin ? Math.max(6, 9 * P.size) : Math.max(22, 44 * P.size);
+    const pad = sw + 40;
+    const half = P.style === 'half';
+    const boxW = 2 * R + 2 * pad;
+    const boxH = half ? R + 2 * pad : 2 * R + 2 * pad;
+    const cx = boxW / 2, cy = half ? R + pad : R + pad;
+    const svg = sv('svg', { width: boxW, height: boxH, viewBox: `0 0 ${boxW} ${boxH}` }, stage);
+    const defs = sv('defs', {}, svg);
+    const gid = 'pg' + Math.round(MG.rand(3)() * 1e6);
+    const g = sv('linearGradient', { id: gid, x1: 0, y1: 0, x2: 1, y2: 1 }, defs);
+    sv('stop', { offset: 0, 'stop-color': thin ? '#FFFFFF' : tint(P.accent, 0.35) }, g);
+    sv('stop', { offset: 0.55, 'stop-color': thin ? '#FFFFFF' : P.accent }, g);
+    sv('stop', { offset: 1, 'stop-color': thin ? tint(P.accent, 0.4) : mix(P.accent, 0.78) }, g);
+    const rg = sv('radialGradient', { id: gid + 'h' }, defs);
+    sv('stop', { offset: 0, 'stop-color': '#FFFFFF', 'stop-opacity': 1 }, rg);
+    sv('stop', { offset: 0.35, 'stop-color': P.accent, 'stop-opacity': 0.9 }, rg);
+    sv('stop', { offset: 1, 'stop-color': P.accent, 'stop-opacity': 0 }, rg);
+    // arc path for the sweep (drawn with dashes)
+    const pt = deg => { const a = (deg - 90) * Math.PI / 180; return [cx + R * Math.cos(a), cy + R * Math.sin(a)]; };
+    const arcD = (a0, span) => {
+      if (span >= 359.99) return `M${cx},${cy - R} a${R},${R} 0 1,1 0,${2 * R} a${R},${R} 0 1,1 0,${-2 * R}`;
+      const [x0, y0] = pt(a0), [x1, y1] = pt(a0 + span);
+      return `M${x0.toFixed(2)},${y0.toFixed(2)} A${R},${R} 0 ${span > 180 ? 1 : 0},1 ${x1.toFixed(2)},${y1.toFixed(2)}`;
+    };
+    const d = arcD(SWEEP[0], SWEEP[1]);
+    // a soft dark channel under the sweep keeps hairlines legible on bright footage
+    const channel = sv('path', { d, fill: 'none', stroke: 'rgba(0,0,0,.2)', 'stroke-width': thin ? sw * 3.2 : sw + 8, 'stroke-linecap': 'round' }, svg);
+    const track = sv('path', { d, fill: 'none', stroke: thin ? 'rgba(255,255,255,.3)' : 'rgba(255,255,255,.13)', 'stroke-width': thin ? Math.max(2.5, sw * 0.32) : sw, 'stroke-linecap': 'round' }, svg);
+    const arc = sv('path', { d, fill: 'none', stroke: `url(#${gid})`, 'stroke-width': sw, 'stroke-linecap': 'round' }, svg);
+    const ticks = [];
+    if (thin) {   // editorial hairline: two small end ticks
+      [0, 1].forEach(e => {
+        const a = SWEEP[0] + SWEEP[1] * e, r0 = R - 14, r1 = R + 14, aa = (a - 90) * Math.PI / 180;
+        if (SWEEP[1] >= 360 && e === 1) return;
+        ticks.push(sv('line', { x1: cx + r0 * Math.cos(aa), y1: cy + r0 * Math.sin(aa), x2: cx + r1 * Math.cos(aa), y2: cy + r1 * Math.sin(aa), stroke: 'rgba(255,255,255,.55)', 'stroke-width': 3, 'stroke-linecap': 'round' }, svg));
+      });
+    }
+    const flare = sv('circle', { r: sw * 1.2 + 16, fill: `url(#${gid}h)`, opacity: 0 }, svg);
+    const tip = sv('circle', { r: thin ? sw * 1.1 : sw * 0.22, fill: '#FFFFFF', opacity: 0 }, svg);
+    const len = arc.getTotalLength();
+    // centre number
+    const num = MG.el('div', 'num', null, stage);
+    const digits = MG.el('span', null, pct.toFixed(decimals), num);
+    MG.el('span', 'pct', '%', num);
+    const inner = 2 * (R - sw / 2) * (half ? 0.82 : 0.74);
+    const fs = Math.min((half ? 0.62 : 0.5) * R, 100 * inner / Math.max(1, (() => { num.style.fontSize = '100px'; return num.getBoundingClientRect().width; })()));
+    num.style.fontSize = fs + 'px';
+    // '%' sits small and cap-aligned (superscript), like the counter
+    const cv = document.createElement('canvas').getContext('2d');
+    const asc = (txt, px) => { cv.font = `800 ${px}px 'Inter Display'`; return cv.measureText(txt).actualBoundingBoxAscent; };
+    MG.$('.pct', num).style.transform = `translateY(${-(asc('8', fs) - asc('%', fs * 0.46))}px)`;
+    digits.style.display = 'inline-block';
+    digits.style.textAlign = 'right';
+    digits.style.minWidth = digits.getBoundingClientRect().width + 'px';
+    const nb = num.getBoundingClientRect();
+    const numCy = half ? cy - fs * 0.28 : P.style === 'gauge' ? cy + fs * 0.02 : cy;
+    num.style.width = boxW + 'px';
+    num.style.transform = `translateY(${numCy - nb.height / 2}px)`;
+    let label = null, labTop = 0;
+    if (P.label.trim()) {
+      label = MG.el('div', 'label', null, stage);
+      label.innerHTML = rich(P.label.trim().replace(/(\w)-(\w)/g, '$1\u2011$2'));
+      // inside the ring when it fits on two short lines, otherwise under it
+      const insideW = inner * 0.98;
+      label.style.width = insideW + 'px';
+      const lmax = Math.max(30, Math.min(46, R * 0.15));
+      const lfs = MG.fit(label, { width: insideW, height: lmax * 1.1 * 2 + 4, min: 24, max: lmax });
+      const inside = !half && P.style === 'ring' && lfs >= lmax * 0.82 && label.getBoundingClientRect().height < R * 0.45;
+      if (inside) {
+        labTop = numCy + nb.height * 0.42 + 14;
+        num.style.transform = `translateY(${numCy - nb.height / 2 - label.getBoundingClientRect().height * 0.5}px)`;
+        labTop -= label.getBoundingClientRect().height * 0.5;
+        label.style.left = (cx - insideW / 2) + 'px';
+      } else {
+        const wOut = Math.min(SAFE.x1 - SAFE.x0, Math.max(boxW, 760));
+        label.style.width = wOut + 'px';
+        const lf = Math.max(36, Math.min(54, R * 0.18));
+        MG.fit(label, { width: wOut, height: lf * 1.1 * 2 + 4, min: 26, max: lf });
+        const numBottom = numCy + nb.height * 0.5;
+        labTop = P.style === 'gauge' ? Math.max(cy + R * 0.62, numBottom + 10) : half ? Math.max(cy + sw * 1.6 + 26, numBottom + 18) : boxH - pad + 34;
+        label.style.left = (cx - wOut / 2) + 'px';
+      }
+      label.style.top = labTop + 'px';
+    }
+    const contentBottom = label ? labTop + label.getBoundingClientRect().height : boxH;
+    const totalH = Math.max(boxH, contentBottom);
+    const k = Math.min(1, (SAFE.y1 - SAFE.y0) / totalH, (SAFE.x1 - SAFE.x0 + 2 * pad) / boxW);
+    stage.style.width = boxW + 'px'; stage.style.height = totalH + 'px';
+    const x = (W - boxW) / 2;
+    const visTop = Math.min(SAFE.y1 - totalH * k, Math.max(SAFE.y0 - pad * k * 0.6, H * P.y - totalH * k / 2));
+    const y = visTop - totalH * (1 - k) / 2;
+    const m = 70;
+    const scrim = MG.$('#scrim');
+    if (P.backdrop === 'scrim') {
+      const sw2 = boxW * k + 160, sh2 = totalH * k + 160;
+      scrim.style.transform = `translate(${W / 2 - sw2 / 2}px,${visTop + totalH * k / 2 - sh2 / 2}px) scale(${sw2 / 64},${sh2 / 64})`;
+    } else scrim.remove();
+    MG.box = [Math.max(0, x + boxW * (1 - k) / 2 - m), Math.max(0, visTop - m), Math.min(W, x + boxW * (1 + k) / 2 + m), Math.min(H, visTop + totalH * k + m)];
+    return { scrim: P.backdrop === 'scrim' ? scrim : null, arc, track, channel, flare, tip, ticks, len, digits, num, label, x, y, k, R, cx, cy, sw, pt };
+  }
+  MG.ready = fontsReady.then(() => { L = L || layout(); });
+
+  const XD = Math.min(0.24, D * 0.1);
+  MG.active([[0, Math.min(D, LAND + 0.42)], [D - XD - 0.02, D]]);
+  const frac = pct / 100;
+  MG.frame(t => {
+    if (!L) L = layout();
+    const sp = MG.spring(t, 0, { stiffness: 220, damping: 20 });
+    const qx = MG.ease.inCubic(MG.range(t, D - XD, XD));
+    if (L.scrim) L.scrim.style.opacity = (MG.ease.outCubic(MG.range(t, 0, 0.3)) * (1 - qx)).toFixed(3);
+    MG.set(stage, { x: L.x, y: L.y - qx * 20, scale: L.k * (0.9 + 0.1 * sp - 0.04 * qx), opacity: (0.35 + 0.65 * MG.range(t, 0, 0.12)) * (1 - qx), blur: qx * 10 });
+    L.track.setAttribute('opacity', MG.ease.outCubic(MG.range(t, 0, 0.3)).toFixed(3));
+    L.channel.setAttribute('opacity', MG.ease.outCubic(MG.range(t, 0, 0.3)).toFixed(3));
+    L.ticks.forEach(tk => tk.setAttribute('opacity', MG.range(t, 0.05, 0.25).toFixed(3)));
+    const p = MG.ease.outQuart(MG.range(t, T_FILL, LAND - T_FILL));
+    const f = frac * p;
+    MG.draw(L.arc, f);
+    L.arc.setAttribute('opacity', f > 0.0005 ? 1 : 0);
+    const [hx, hy] = L.pt(SWEEP[0] + SWEEP[1] * f);
+    const q = MG.range(t, LAND - 0.03, 0.36), bump = q > 0 && q < 1 ? Math.sin(Math.PI * q) : 0;
+    const live = MG.range(t, T_FILL, 0.1);
+    L.tip.setAttribute('cx', hx.toFixed(2)); L.tip.setAttribute('cy', hy.toFixed(2));
+    L.tip.setAttribute('opacity', (live * (f > 0.0005 ? 0.95 : 0)).toFixed(3));
+    L.flare.setAttribute('cx', hx.toFixed(2)); L.flare.setAttribute('cy', hy.toFixed(2));
+    // the tip glows while it travels, flares on landing, then rests softly
+    const travel = 1 - MG.range(t, LAND - 0.35, 0.35);
+    L.flare.setAttribute('opacity', (f > 0.0005 ? live * (0.28 + 0.32 * travel + 0.5 * bump) : 0).toFixed(3));
+    L.flare.setAttribute('r', ((L.sw * 1.2 + 16) * (1 + 0.7 * bump)).toFixed(2));
+    const txt = (pct * (t >= LAND ? 1 : p)).toFixed(decimals);
+    if (L.digits.textContent !== txt) L.digits.textContent = txt;
+    L.num.style.opacity = MG.range(t, 0.04, 0.12).toFixed(3);
+    L.num.style.scale = (1 + 0.035 * bump).toFixed(4);
+    if (L.label) MG.set(L.label, { y: (1 - MG.ease.outExpo(MG.range(t, 0.24, 0.55))) * 16, opacity: MG.range(t, 0.24, 0.18) });
+  });
+})();
+</script>

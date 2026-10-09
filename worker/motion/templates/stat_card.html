@@ -1,0 +1,241 @@
+<!--MG-SPEC {"title": "Stat card", "category": "data",
+ "description": "A premium dashboard-style metric card (Stripe/Apple look) that tilts in from 3D and settles: label, a big value that counts up, a coloured delta pill (+340% up / -12% down) and an optional sparkline. Use for proof moments - revenue, growth, users, conversion - when one metric with its change sells the claim.",
+ "duration": 3.5, "layer": "above_captions", "mutes_captions": false,
+ "params": {
+  "label": {"type": "str", "required": true, "max": 40, "hint": "metric name, e.g. 'Net revenue'"},
+  "value": {"type": "str", "required": true, "max": 20, "hint": "as it should read: '$977,424', '2.4M', '38%' (counts up)"},
+  "delta": {"type": "str", "default": "", "max": 12, "hint": "change, e.g. '+340%' (green, up) or '-12%' (red, down); empty = none"},
+  "caption": {"type": "str", "default": "", "max": 48, "hint": "small context line, e.g. 'vs. last year'"},
+  "spark": {"type": "list", "default": [], "max_items": 24, "max": 16, "hint": "optional sparkline values in order, as strings"},
+  "style": {"type": "enum", "values": ["glass", "solid", "light"], "default": "glass", "hint": "glass = smoked translucent, solid = near-black, light = white card"},
+  "accent": {"type": "color", "default": "#8C7CFF", "hint": "sparkline and status dot"},
+  "y": {"type": "float", "min": 0.1, "max": 0.9, "default": 0.42, "hint": "vertical centre as frame fraction"}
+ },
+ "example": {"label": "Net revenue", "value": "$977,424", "delta": "+340%", "caption": "vs. $222,140 last year", "spark": ["10", "14", "12", "20", "26", "24", "38", "52", "61"]},
+ "sfx": [{"at": 0.0, "kind": "whoosh_soft"}, {"at": 0.78, "kind": "pop_soft"}, {"at": 1.2, "kind": "ding"}]} -->
+<style>
+  .card,.plate{position:absolute;left:0;top:0;border-radius:44px;transform-origin:50% 100%;will-change:transform,opacity}
+  .plate{overflow:hidden}
+  .plate.glass{background:linear-gradient(160deg,rgba(52,52,62,.8) 0%,rgba(16,16,22,.88) 70%);
+    border:1px solid rgba(255,255,255,.16);box-shadow:inset 0 1px 0 rgba(255,255,255,.16),0 40px 90px rgba(0,0,0,.5)}
+  .plate.solid{background:linear-gradient(170deg,#18181e 0%,#0a0a0d 100%);border:1px solid rgba(255,255,255,.1);
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.08),0 40px 90px rgba(0,0,0,.55)}
+  .plate.light{background:linear-gradient(175deg,#ffffff 0%,#f5f4f2 100%);border:1px solid rgba(0,0,0,.06);
+    box-shadow:0 36px 80px rgba(0,0,0,.3),0 4px 14px rgba(0,0,0,.08)}
+  .sheen{position:absolute;top:-20%;bottom:-20%;width:38%;left:0;opacity:0;
+    background:linear-gradient(100deg,rgba(255,255,255,0) 0%,rgba(255,255,255,.13) 45%,rgba(255,255,255,.2) 50%,rgba(255,255,255,.13) 55%,rgba(255,255,255,0) 100%)}
+  .plate.light .sheen{background:linear-gradient(100deg,rgba(255,255,255,0) 0%,rgba(255,255,255,.75) 50%,rgba(255,255,255,0) 100%)}
+  .inner{position:relative}
+  .lab{display:flex;align-items:center;gap:16px;font-family:'Inter','Inter Display',sans-serif;font-weight:600;color:var(--fg2);
+       letter-spacing:-0.01em;white-space:nowrap;line-height:1.1}
+  .sdot{width:16px;height:16px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 6px var(--accent-soft);flex:none}
+  .row{display:flex;align-items:center;gap:26px;flex-wrap:nowrap}
+  .row.stack{flex-direction:column;align-items:flex-start;gap:14px}
+  .val{font-family:'Inter Display',sans-serif;font-weight:800;letter-spacing:-0.045em;color:var(--fg);white-space:nowrap;
+       line-height:1;font-variant-numeric:tabular-nums;display:inline-block}
+  .pill{display:inline-flex;align-items:center;gap:.28em;padding:.24em .5em .26em .42em;border-radius:999px;font-family:'Inter Display',sans-serif;
+        font-weight:800;letter-spacing:-0.02em;line-height:1;white-space:nowrap;font-size:42px;color:var(--dc);background:var(--dbg);
+        font-variant-numeric:tabular-nums;transform-origin:0% 50%;flex:none}
+  .pill svg{width:.72em;height:.72em;flex:none}
+  .cap{font-family:'Inter','Inter Display',sans-serif;font-weight:500;color:var(--fg3);letter-spacing:-0.005em;white-space:nowrap;font-size:34px;line-height:1.1}
+  svg.spark{position:absolute;left:0;overflow:visible}
+</style>
+<div class="mg-root"><div class="plate" id="plate"><div class="sheen" id="sheen"></div></div><div class="card" id="card"><div class="inner" id="inner"></div></div></div>
+<script>
+(() => {
+  const P = MG.params, D = MG.duration, W = MG.W, H = MG.H;
+  const tall = H / W > 1.45;
+  const SAFE = { x0: 60, x1: W - 60, y0: H * (tall ? 0.08 : 0.06), y1: H * (tall ? 0.80 : 0.94) };
+  const css = document.documentElement.style;
+  const rgb = h => { const n = parseInt(String(h).slice(1), 16); return [n >> 16 & 255, n >> 8 & 255, n & 255]; };
+  const rgba = (h, a) => `rgba(${rgb(h).join(',')},${a})`;
+  const light = P.style === 'light';
+  css.setProperty('--accent', P.accent);
+  css.setProperty('--accent-soft', rgba(P.accent, light ? 0.16 : 0.22));
+  css.setProperty('--fg', light ? '#0D0D12' : '#F7F5F2');
+  css.setProperty('--fg2', light ? 'rgba(13,13,18,.66)' : 'rgba(247,245,242,.74)');
+  css.setProperty('--fg3', light ? 'rgba(13,13,18,.5)' : 'rgba(247,245,242,.58)');
+
+  const parse = s => {
+    s = String(s ?? '').trim().replace(/−/g, '-');
+    const m = s.match(/^(.*?)(-?\d(?:[\d,.   ]*\d)?)(.*)$/);
+    if (!m) return null;
+    const [, pre, body, suf] = m;
+    let dec = '.', grp = '';
+    const hasC = body.includes(','), hasD = body.includes('.'), hasS = /[   ]/.test(body);
+    if (hasC && hasD) { dec = body.lastIndexOf(',') > body.lastIndexOf('.') ? ',' : '.'; grp = dec === ',' ? '.' : ','; }
+    else if (hasC) { const p = body.split(','); if (p.length === 2 && p[1].length !== 3) dec = ','; else grp = ','; }
+    else if (hasD && body.split('.').length > 2) { grp = '.'; dec = ','; }
+    if (hasS) grp = ' ';
+    let clean = body.replace(/[   ]/g, '');
+    if (grp) clean = clean.split(grp).join('');
+    if (dec === ',') clean = clean.replace(',', '.');
+    const v = parseFloat(clean);
+    if (!isFinite(v)) return null;
+    const di = clean.indexOf('.');
+    return { pre, suf, v, decimals: di < 0 ? 0 : clean.length - di - 1, grp, dec };
+  };
+  const fmt = (n, v) => {
+    const s = Math.abs(v).toFixed(n.decimals);
+    let [i, f] = s.split('.');
+    if (n.grp) i = i.replace(/\B(?=(\d{3})+(?!\d))/g, n.grp);
+    return n.pre + (v < 0 && Number(s) !== 0 ? '-' : '') + i + (f ? n.dec + f : '') + n.suf;
+  };
+  const V = parse(P.value);
+  // tiny integers ('1M', '3x') count with a temporary decimal so they visibly run
+  const VC = V && V.decimals === 0 && Math.abs(V.v) <= 4 ? Object.assign({}, V, { decimals: 1 }) : V;
+  const deltaRaw = P.delta.trim().replace(/−/g, '-');
+  const down = /^[-↓▼]/.test(deltaRaw) || /^[^\d]*-\d/.test(deltaRaw);
+  const deltaTxt = deltaRaw.replace(/^[+\-↑↓▲▼]\s*/, '');
+  const up = !down;
+  const dcol = up ? (light ? '#0B9B4A' : '#3BDB7A') : (light ? '#D92D20' : '#FF5A4E');
+  css.setProperty('--dc', dcol);
+  css.setProperty('--dbg', rgba(up ? '#22C55E' : '#FF453A', light ? 0.12 : 0.17));
+  const spark = (P.spark || []).map(s => parse(s)).filter(Boolean).map(n => n.v);
+
+  const fontsReady = Promise.all([`800 60px 'Inter Display'`, `600 40px 'Inter'`, `500 30px 'Inter'`]
+    .map(f => document.fonts.load(f).catch(() => 0)));
+  const card = MG.$('#card'), inner = MG.$('#inner'), plate = MG.$('#plate'), sheen = MG.$('#sheen');
+  plate.classList.add(P.style);
+  const NS = 'http://www.w3.org/2000/svg';
+  const sv = (tag, attrs, parent) => { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); if (parent) parent.appendChild(e); return e; };
+  function smoothPath(pts) {
+    const n = pts.length, dx = [], m = [], tg = [];
+    for (let i = 0; i < n - 1; i++) { dx[i] = pts[i + 1][0] - pts[i][0]; m[i] = (pts[i + 1][1] - pts[i][1]) / dx[i]; }
+    tg[0] = m[0]; tg[n - 1] = m[n - 2];
+    for (let i = 1; i < n - 1; i++) tg[i] = m[i - 1] * m[i] <= 0 ? 0 : (m[i - 1] + m[i]) / 2;
+    for (let i = 0; i < n - 1; i++) {
+      if (m[i] === 0) { tg[i] = tg[i + 1] = 0; continue; }
+      const a = tg[i] / m[i], b = tg[i + 1] / m[i], s = a * a + b * b;
+      if (s > 9) { const k = 3 / Math.sqrt(s); tg[i] = k * a * m[i]; tg[i + 1] = k * b * m[i]; }
+    }
+    let d = `M${pts[0][0].toFixed(2)},${pts[0][1].toFixed(2)}`;
+    for (let i = 0; i < n - 1; i++) {
+      const h = dx[i] / 3;
+      d += ` C${(pts[i][0] + h).toFixed(2)},${(pts[i][1] + tg[i] * h).toFixed(2)} ${(pts[i + 1][0] - h).toFixed(2)},${(pts[i + 1][1] - tg[i + 1] * h).toFixed(2)} ${pts[i + 1][0].toFixed(2)},${pts[i + 1][1].toFixed(2)}`;
+    }
+    return d;
+  }
+
+  const T_COUNT = 0.2, LAND = 1.2, T_PILL = 0.68, T_SPARK = 0.3;
+  let L = null;
+  function layout() {
+    inner.innerHTML = '';
+    const cardW = Math.min(SAFE.x1 - SAFE.x0, 900);
+    const pad = 58, cw = cardW - pad * 2;
+    const lab = MG.el('div', 'lab', null, inner);
+    MG.el('span', 'sdot', null, lab);
+    MG.el('span', null, P.label, lab);
+    lab.style.fontSize = '40px';
+    MG.fit(lab, { width: cw, min: 26, max: 40, nowrap: true });
+    const row = MG.el('div', 'row', null, inner);
+    row.style.marginTop = '26px';
+    const val = MG.el('div', 'val', V ? fmt(V, V.v) : P.value, row);
+    let pill = null, arrow = null;
+    if (deltaRaw) {
+      pill = MG.el('div', 'pill', null, row);
+      const s = sv('svg', { viewBox: '0 0 20 20' }, pill);
+      arrow = sv('path', { d: up ? 'M10 3 L17.5 13 H12.6 V17 H7.4 V13 H2.5 Z' : 'M10 17 L17.5 7 H12.6 V3 H7.4 V7 H2.5 Z', fill: 'currentColor' }, s);
+      MG.el('span', null, deltaTxt, pill);
+    }
+    // value + pill share a row when the value can stay big; otherwise stack
+    const pillW = pill ? pill.getBoundingClientRect().width + 26 : 0;
+    const fsRow = MG.fit(val, { width: cw - pillW, min: 40, max: 156, nowrap: true });
+    if (pill && fsRow < 104) {
+      row.classList.add('stack');
+      MG.fit(val, { width: cw, min: 40, max: 156, nowrap: true });
+    }
+    // reserve the FINAL width so the pill never slides while digits are added
+    let vw = val.getBoundingClientRect().width;
+    if (VC !== V) { val.textContent = fmt(VC, VC.v); vw = Math.max(vw, val.getBoundingClientRect().width); val.textContent = fmt(V, V.v); }
+    val.style.width = Math.ceil(vw + 2) + 'px';
+    let cap = null;
+    if (P.caption.trim()) {
+      cap = MG.el('div', 'cap', P.caption.trim(), inner);
+      cap.style.marginTop = '20px';
+      cap.style.whiteSpace = 'normal';
+      MG.fit(cap, { width: cw, height: 34 * 1.1 * 2 + 4, min: 22, max: 34 });
+    }
+    let sp = null;
+    let h = inner.getBoundingClientRect().height;
+    if (spark.length >= 2) {
+      const sh = 150, top = h + 40;
+      const lo = Math.min(...spark), hi = Math.max(...spark), span = hi - lo || 1;
+      const pts = spark.map((v, i) => [10 + (cw - 20) * i / (spark.length - 1), top + 10 + (1 - (v - lo) / span) * (sh - 20)]);
+      const svg = sv('svg', { class: 'spark', width: cw, height: top + sh, viewBox: `0 0 ${cw} ${top + sh}` }, inner);
+      svg.style.top = '0px';
+      const defs = sv('defs', {}, svg);
+      const ga = sv('linearGradient', { id: 'sca', x1: 0, y1: top, x2: 0, y2: top + sh, gradientUnits: 'userSpaceOnUse' }, defs);
+      sv('stop', { offset: 0, 'stop-color': P.accent, 'stop-opacity': light ? 0.22 : 0.3 }, ga);
+      sv('stop', { offset: 1, 'stop-color': P.accent, 'stop-opacity': 0 }, ga);
+      const clip = sv('clipPath', { id: 'scc' }, defs);
+      const clipRect = sv('rect', { x: -10, y: 0, width: 0, height: top + sh + 20 }, clip);
+      const d = smoothPath(pts);
+      sv('path', { d: d + ` L${pts[pts.length - 1][0]},${top + sh} L${pts[0][0]},${top + sh} Z`, fill: 'url(#sca)', 'clip-path': 'url(#scc)' }, svg);
+      const line = sv('path', { d, fill: 'none', stroke: P.accent, 'stroke-width': 6, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }, svg);
+      const dot = sv('circle', { r: 0, fill: P.accent }, svg);
+      const ring = sv('circle', { r: 0, fill: 'none', stroke: P.accent, 'stroke-width': 3, opacity: 0 }, svg);
+      sp = { line, dot, ring, clipRect, len: line.getTotalLength() };
+      h = top + sh;
+    }
+    inner.style.width = cw + 'px'; inner.style.height = h + 'px';
+    card.style.padding = pad + 'px'; card.style.width = cardW + 'px';
+    const cardH = h + pad * 2;
+    plate.style.width = cardW + 'px'; plate.style.height = cardH + 'px';
+    const k = Math.min(1, (SAFE.y1 - SAFE.y0) / cardH);
+    const x = (W - cardW) / 2;
+    // transform origin is the card's bottom centre: keep the scaled card centred on y
+    const visTop = Math.min(SAFE.y1 - cardH * k, Math.max(SAFE.y0, H * P.y - cardH * k / 2));
+    const ty = visTop - cardH * (1 - k);
+    const m = 100;
+    MG.box = [Math.max(0, x - m), Math.max(0, visTop - m), Math.min(W, x + cardW + m), Math.min(H, visTop + cardH * k + m + 30)];
+    return { lab, val, pill, cap, sp, x, ty, k, cardW, cardH };
+  }
+  MG.ready = fontsReady.then(() => { L = L || layout(); });
+
+  const XD = Math.min(0.26, D * 0.1);
+  MG.active([[0, Math.min(D, LAND + 0.4)], [D - XD - 0.02, D]]);
+  MG.frame(t => {
+    if (!L) L = layout();
+    // 3D tilt-in: the card swings up from lying back, overshoots a touch, settles flat
+    const s = MG.spring(t, 0, { stiffness: 130, damping: 15 });
+    const qx = MG.ease.inCubic(MG.range(t, D - XD, XD));
+    const st = { perspective: 1700, x: L.x, y: L.ty + (1 - s) * 120 + qx * 30, rx: (1 - s) * 46 + qx * 8,
+                 scale: L.k * (0.9 + 0.1 * s - 0.03 * qx), opacity: (0.25 + 0.75 * MG.range(t, 0, 0.14)) * (1 - qx) };
+    MG.set(plate, st);
+    MG.set(card, Object.assign({ blur: (1 - MG.range(t, 0, 0.18)) * 8 }, st));
+    // sheen sweeps once as the card settles
+    const sh = MG.range(t, 0.42, 0.7);
+    sheen.style.opacity = sh > 0 && sh < 1 ? Math.sin(Math.PI * sh).toFixed(3) : 0;
+    sheen.style.transform = `translateX(${(-60 + 330 * MG.ease.inOutCubic(sh)).toFixed(1)}%) skewX(-12deg)`;
+    // label, value (count), caption
+    MG.set(L.lab, { y: (1 - MG.ease.outExpo(MG.range(t, 0.1, 0.5))) * 16, opacity: MG.range(t, 0.1, 0.2) });
+    if (V) {
+      const p = MG.ease.outExpo(MG.range(t, T_COUNT, LAND - T_COUNT));
+      const txt = t >= LAND ? fmt(V, V.v) : fmt(VC, V.v * p);
+      if (L.val.textContent !== txt) L.val.textContent = txt;
+    }
+    const lq = MG.range(t, LAND - 0.02, 0.3), bump = lq > 0 && lq < 1 ? Math.sin(Math.PI * lq) : 0;
+    L.val.style.transformOrigin = '0% 70%';
+    MG.set(L.val, { y: (1 - MG.ease.outExpo(MG.range(t, 0.14, 0.5))) * 22, opacity: MG.range(t, 0.14, 0.16), scale: 1 + 0.03 * bump });
+    if (L.cap) MG.set(L.cap, { y: (1 - MG.ease.outExpo(MG.range(t, 0.3, 0.5))) * 12, opacity: MG.range(t, 0.3, 0.2) });
+    if (L.pill) {
+      const ps = MG.spring(t, T_PILL, { stiffness: 320, damping: 17 });
+      MG.set(L.pill, { scale: 0.4 + 0.6 * ps, opacity: MG.range(t, T_PILL, 0.08) });
+    }
+    if (L.sp) {
+      const p = MG.ease.inOutCubic(MG.range(t, T_SPARK, LAND - T_SPARK));
+      MG.draw(L.sp.line, p);
+      const pt = L.sp.line.getPointAtLength(Math.max(0.001, p * L.sp.len));
+      L.sp.clipRect.setAttribute('width', (pt.x + 10).toFixed(1));
+      L.sp.line.style.opacity = p > 0 ? 1 : 0;
+      const dr = 11 * MG.ease.outBack(MG.range(t, T_SPARK, 0.2)) * (1 + 0.4 * bump);
+      L.sp.dot.setAttribute('cx', pt.x.toFixed(2)); L.sp.dot.setAttribute('cy', pt.y.toFixed(2)); L.sp.dot.setAttribute('r', Math.max(0, dr).toFixed(2));
+      const pr = MG.range(t, LAND, 0.4);
+      L.sp.ring.setAttribute('cx', pt.x.toFixed(2)); L.sp.ring.setAttribute('cy', pt.y.toFixed(2));
+      L.sp.ring.setAttribute('r', (12 + 34 * MG.ease.outCubic(pr)).toFixed(2));
+      L.sp.ring.setAttribute('opacity', pr > 0 && pr < 1 ? ((1 - pr) * 0.85).toFixed(3) : 0);
+    }
+  });
+})();
+</script>

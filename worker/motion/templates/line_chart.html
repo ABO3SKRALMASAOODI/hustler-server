@@ -1,0 +1,236 @@
+<!--MG-SPEC {"title": "Line chart", "category": "data",
+ "description": "A trend line that draws itself left to right with a gradient stroke and soft area fill; a live value tag rides the tip and the end dot lands with a pulse. Use when the speaker talks about growth, decline or a trajectory over time (revenue, followers, price) and the shape of the curve tells the story.",
+ "duration": 3.5, "layer": "above_captions", "mutes_captions": false,
+ "params": {
+  "values": {"type": "list", "required": true, "max_items": 24, "max": 16, "hint": "2-24 numbers in order, as strings: ['12','18','15','30','61']"},
+  "title": {"type": "str", "default": "", "max": 56, "hint": "optional heading; wrap a word in *stars* for the serif accent"},
+  "value_label": {"type": "str", "default": "", "max": 16, "hint": "text of the end tag, e.g. '$977K' or '+340%' (counts up if numeric); empty = the last value"},
+  "start_label": {"type": "str", "default": "", "max": 16, "hint": "under the start, e.g. '2019' or 'Jan'"},
+  "end_label": {"type": "str", "default": "", "max": 16, "hint": "under the end, e.g. 'Today'"},
+  "accent": {"type": "color", "default": "#FFD400"},
+  "plate": {"type": "enum", "values": ["glass", "dark", "light", "none"], "default": "glass"},
+  "curve": {"type": "enum", "values": ["smooth", "linear"], "default": "smooth"},
+  "y": {"type": "float", "min": 0.1, "max": 0.9, "default": 0.45, "hint": "vertical centre as frame fraction"}
+ },
+ "example": {"values": ["12", "14", "13", "19", "24", "22", "35", "48", "61"], "title": "Monthly *revenue*", "value_label": "$61K", "start_label": "Jan", "end_label": "Sep"},
+ "sfx": [{"at": 0.12, "kind": "whoosh_soft"}, {"at": 1.15, "kind": "ding"}]} -->
+<style>
+  .card,.plate{position:absolute;left:0;top:0;transform-origin:50% 50%;border-radius:40px;will-change:transform,opacity}
+  .plate.glass{background:linear-gradient(165deg,rgba(40,40,48,.8) 0%,rgba(12,12,16,.86) 100%);
+    border:1px solid rgba(255,255,255,.14);box-shadow:inset 0 1px 0 rgba(255,255,255,.12),0 26px 64px rgba(0,0,0,.5)}
+  .plate.dark{background:linear-gradient(170deg,#17171c 0%,#0b0b0e 100%);border:1px solid rgba(255,255,255,.1);
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.07),0 26px 64px rgba(0,0,0,.5)}
+  .plate.light{background:linear-gradient(175deg,#ffffff 0%,#f4f3f1 100%);border:1px solid rgba(0,0,0,.06);
+    box-shadow:0 24px 60px rgba(0,0,0,.3),0 4px 14px rgba(0,0,0,.08)}
+  .inner{position:relative}
+  .title{font-family:'Inter Display',sans-serif;font-weight:800;letter-spacing:-0.035em;line-height:1.02;color:var(--fg);white-space:nowrap}
+  .acc{font-family:'Instrument Serif',serif;font-style:italic;font-weight:400;letter-spacing:-0.01em;color:var(--accent-ink);font-size:1.14em;line-height:.8}
+  .tmask{overflow:hidden;padding:.06em 0 .12em}
+  .axl{position:absolute;font-family:'Inter','Inter Display',sans-serif;font-weight:600;font-size:32px;color:var(--fg2);white-space:nowrap;letter-spacing:-0.01em}
+  svg{position:absolute;left:0;top:0;overflow:visible}
+  .tag{position:absolute;left:0;top:0;padding:.2em .5em .22em;border-radius:999px;background:var(--accent);color:var(--tag-ink);
+       font-family:'Inter Display',sans-serif;font-weight:800;letter-spacing:-0.02em;font-size:44px;line-height:1;white-space:nowrap;
+       font-variant-numeric:tabular-nums;box-shadow:0 8px 24px rgba(0,0,0,.3);transform-origin:50% 100%}
+  .none .title,.none .axl{text-shadow:0 2px 16px rgba(0,0,0,.6)}
+</style>
+<div class="mg-root"><div class="plate" id="plate"></div><div class="card" id="card"><div class="inner" id="inner"></div></div></div>
+<script>
+(() => {
+  const P = MG.params, D = MG.duration, W = MG.W, H = MG.H;
+  const tall = H / W > 1.45;
+  const SAFE = { x0: 60, x1: W - 60, y0: H * (tall ? 0.08 : 0.06), y1: H * (tall ? 0.80 : 0.94) };
+  const css = document.documentElement.style;
+  const rgb = h => { const n = parseInt(String(h).slice(1), 16); return [n >> 16 & 255, n >> 8 & 255, n & 255]; };
+  const lum = h => { const [r, g, b] = rgb(h).map(v => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); }); return 0.2126 * r + 0.7152 * g + 0.0722 * b; };
+  const mix = (h, k) => `rgb(${rgb(h).map(v => Math.round(v * k)).join(',')})`;
+  const light = P.plate === 'light';
+  css.setProperty('--accent', P.accent);
+  css.setProperty('--accent-ink', light && lum(P.accent) > 0.45 ? mix(P.accent, 0.55) : P.accent);
+  css.setProperty('--tag-ink', lum(P.accent) > 0.35 ? '#0D0D12' : '#FFFFFF');
+  css.setProperty('--fg', light ? '#0D0D12' : '#F7F5F2');
+  css.setProperty('--fg2', light ? 'rgba(13,13,18,.55)' : 'rgba(247,245,242,.66)');
+
+  const parse = s => {
+    s = String(s ?? '').trim().replace(/−/g, '-');
+    const m = s.match(/^(.*?)(-?\d(?:[\d,.   ]*\d)?)(.*)$/);
+    if (!m) return null;
+    const [, pre, body, suf] = m;
+    let dec = '.', grp = '';
+    const hasC = body.includes(','), hasD = body.includes('.'), hasS = /[   ]/.test(body);
+    if (hasC && hasD) { dec = body.lastIndexOf(',') > body.lastIndexOf('.') ? ',' : '.'; grp = dec === ',' ? '.' : ','; }
+    else if (hasC) { const p = body.split(','); if (p.length === 2 && p[1].length !== 3) dec = ','; else grp = ','; }
+    else if (hasD && body.split('.').length > 2) { grp = '.'; dec = ','; }
+    if (hasS) grp = ' ';
+    let clean = body.replace(/[   ]/g, '');
+    if (grp) clean = clean.split(grp).join('');
+    if (dec === ',') clean = clean.replace(',', '.');
+    const v = parseFloat(clean);
+    if (!isFinite(v)) return null;
+    const di = clean.indexOf('.');
+    return { pre, suf, v, decimals: di < 0 ? 0 : clean.length - di - 1, grp, dec };
+  };
+  const fmt = (n, v) => {
+    const s = Math.abs(v).toFixed(n.decimals);
+    let [i, f] = s.split('.');
+    if (n.grp || Math.abs(n.v) >= 10000) i = i.replace(/\B(?=(\d{3})+(?!\d))/g, n.grp || ',');
+    return n.pre + (v < 0 && Number(s) !== 0 ? '-' : '') + i + (f ? n.dec + f : '') + n.suf;
+  };
+  const rich = s => MG.esc(s).replace(/\*([^*]+)\*/g, '<span class="acc">$1</span>');
+
+  let vals = (P.values || []).map(s => parse(s)).filter(Boolean).map(n => n.v);
+  if (vals.length < 2) vals = vals.length ? [vals[0], vals[0]] : [0, 1];
+  const lastRaw = (P.values || []).filter(s => parse(s)).slice(-1)[0] || String(vals[vals.length - 1]);
+  const tagText = P.value_label.trim() || lastRaw.trim();
+  const tagNum = parse(tagText);
+
+  const fontsReady = Promise.all([`800 60px 'Inter Display'`, `600 40px 'Inter'`, `italic 400 60px 'Instrument Serif'`]
+    .map(f => document.fonts.load(f).catch(() => 0)));
+  const card = MG.$('#card'), inner = MG.$('#inner'), plate = MG.$('#plate');
+  card.classList.add(P.plate); plate.classList.add(P.plate);
+  const NS = 'http://www.w3.org/2000/svg';
+  const sv = (tag, attrs, parent) => { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); if (parent) parent.appendChild(e); return e; };
+
+  // monotone cubic (Fritsch-Carlson): smooth, never overshoots the data
+  function smoothPath(pts) {
+    const n = pts.length, dx = [], m = [], tg = [];
+    for (let i = 0; i < n - 1; i++) { dx[i] = pts[i + 1][0] - pts[i][0]; m[i] = (pts[i + 1][1] - pts[i][1]) / dx[i]; }
+    tg[0] = m[0]; tg[n - 1] = m[n - 2];
+    for (let i = 1; i < n - 1; i++) tg[i] = m[i - 1] * m[i] <= 0 ? 0 : (m[i - 1] + m[i]) / 2;
+    for (let i = 0; i < n - 1; i++) {
+      if (m[i] === 0) { tg[i] = tg[i + 1] = 0; continue; }
+      const a = tg[i] / m[i], b = tg[i + 1] / m[i], s = a * a + b * b;
+      if (s > 9) { const k = 3 / Math.sqrt(s); tg[i] = k * a * m[i]; tg[i + 1] = k * b * m[i]; }
+    }
+    let d = `M${pts[0][0].toFixed(2)},${pts[0][1].toFixed(2)}`;
+    for (let i = 0; i < n - 1; i++) {
+      const h = dx[i] / 3;
+      d += ` C${(pts[i][0] + h).toFixed(2)},${(pts[i][1] + tg[i] * h).toFixed(2)} ${(pts[i + 1][0] - h).toFixed(2)},${(pts[i + 1][1] - tg[i + 1] * h).toFixed(2)} ${pts[i + 1][0].toFixed(2)},${pts[i + 1][1].toFixed(2)}`;
+    }
+    return d;
+  }
+
+  const T_DRAW = 0.16, DRAW = 1.0, LAND = T_DRAW + DRAW;     // 'ding' at 1.15
+  let L = null;
+  function layout() {
+    inner.innerHTML = '';
+    const cardW = Math.min(SAFE.x1 - SAFE.x0, 960);
+    const pad = P.plate === 'none' ? 0 : 56;
+    const cw = cardW - pad * 2;
+    let y = 0, title = null;
+    if (P.title.trim()) {
+      const tmask = MG.el('div', 'tmask', null, inner);
+      title = MG.el('div', 'title', null, tmask);
+      title.innerHTML = rich(P.title.trim());
+      MG.fit(title, { width: cw, min: 32, max: 74, nowrap: true });
+      y = tmask.offsetHeight + 24;
+    }
+    // room above the line for the riding tag
+    const tag = MG.el('div', 'tag', '0', inner);
+    const tagH = tag.offsetHeight;
+    const top = y + tagH + 34, chartH = tall ? 460 : 400, base = top + chartH;
+    const svg = sv('svg', { width: cw, height: base + 4, viewBox: `0 0 ${cw} ${base + 4}` });
+    inner.insertBefore(svg, tag);
+    const defs = sv('defs', {}, svg);
+    const id = 'lc' + Math.round(MG.rand(7)() * 1e6);
+    const gs = sv('linearGradient', { id: id + 's', x1: 0, y1: 0, x2: cw, y2: 0, gradientUnits: 'userSpaceOnUse' }, defs);
+    sv('stop', { offset: 0, 'stop-color': P.accent, 'stop-opacity': 0.35 }, gs);
+    sv('stop', { offset: 0.55, 'stop-color': P.accent, 'stop-opacity': 0.85 }, gs);
+    sv('stop', { offset: 1, 'stop-color': P.accent, 'stop-opacity': 1 }, gs);
+    const ga = sv('linearGradient', { id: id + 'a', x1: 0, y1: top, x2: 0, y2: base, gradientUnits: 'userSpaceOnUse' }, defs);
+    sv('stop', { offset: 0, 'stop-color': P.accent, 'stop-opacity': light ? 0.28 : P.plate === 'none' ? 0.22 : 0.34 }, ga);
+    sv('stop', { offset: 1, 'stop-color': P.accent, 'stop-opacity': 0 }, ga);
+    const clip = sv('clipPath', { id: id + 'c' }, defs);
+    const clipRect = sv('rect', { x: -20, y: 0, width: 0, height: base + 40 }, clip);
+    // minimal axis: two faint guides + a hairline baseline
+    const guide = light ? 'rgba(13,13,18,.10)' : 'rgba(255,255,255,.11)';
+    const guides = [top + chartH / 3, top + chartH * 2 / 3].map(gy =>
+      sv('line', { x1: 0, x2: cw, y1: gy, y2: gy, stroke: guide, 'stroke-width': 2, 'stroke-dasharray': '2 12', 'stroke-linecap': 'round' }, svg));
+    const baseline = sv('line', { x1: 0, x2: cw, y1: base, y2: base, stroke: light ? 'rgba(13,13,18,.22)' : 'rgba(255,255,255,.26)', 'stroke-width': 2 }, svg);
+    // data -> points (8% floor, 14% headroom)
+    const lo = Math.min(...vals), hi = Math.max(...vals), span = hi - lo || Math.abs(hi) || 1;
+    const vmin = lo - span * 0.08, vmax = hi + span * 0.14;
+    const inset = 14;
+    const pts = vals.map((v, i) => [inset + (cw - inset * 2) * i / (vals.length - 1), base - (v - vmin) / (vmax - vmin) * chartH]);
+    const d = P.curve === 'linear' ? 'M' + pts.map(p => p[0].toFixed(2) + ',' + p[1].toFixed(2)).join(' L') : smoothPath(pts);
+    const g = sv('g', { 'clip-path': `url(#${id}c)` }, svg);
+    sv('path', { d: d + ` L${pts[pts.length - 1][0]},${base} L${pts[0][0]},${base} Z`, fill: `url(#${id}a)` }, g);
+    // on a card the halo is a soft accent glow; straight on footage it is a dark keyline
+    const bare = P.plate === 'none';
+    const halo = sv('path', { d, fill: 'none', stroke: bare ? '#000' : P.accent, 'stroke-opacity': bare ? 0.38 : 0.16, 'stroke-width': bare ? 22 : 26, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }, svg);
+    const line = sv('path', { d, fill: 'none', stroke: `url(#${id}s)`, 'stroke-width': 9, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }, svg);
+    const ring = sv('circle', { r: 16, fill: 'none', stroke: P.accent, 'stroke-width': 4, opacity: 0 }, svg);
+    const dot = sv('circle', { r: 15, fill: P.accent }, svg);
+    const core = sv('circle', { r: 6, fill: light ? '#FFFFFF' : '#0D0D12' }, svg);
+    const len = line.getTotalLength();
+    // axis labels
+    const axls = [];
+    if (P.start_label.trim()) { const a = MG.el('div', 'axl', P.start_label.trim(), inner); a.style.left = '0px'; a.style.top = (base + 16) + 'px'; axls.push(a); }
+    if (P.end_label.trim()) { const a = MG.el('div', 'axl', P.end_label.trim(), inner); a.style.top = (base + 16) + 'px'; a.style.left = (cw - a.offsetWidth) + 'px'; axls.push(a); }
+    y = base + (axls.length ? 16 + 40 : 6);
+    inner.style.width = cw + 'px'; inner.style.height = y + 'px';
+    card.style.padding = pad + 'px'; card.style.width = cardW + 'px';
+    const cardH = y + pad * 2;
+    plate.style.width = cardW + 'px'; plate.style.height = cardH + 'px';
+    const k = Math.min(1, (SAFE.y1 - SAFE.y0) / cardH);
+    const x = (W - cardW) / 2;
+    const ty = Math.min(SAFE.y1 - cardH * (1 + k) / 2, Math.max(SAFE.y0 - cardH * (1 - k) / 2, H * P.y - cardH / 2));
+    const m = 84;
+    MG.box = [Math.max(0, x - m), Math.max(0, ty + cardH * (1 - k) / 2 - m), Math.min(W, x + cardW + m), Math.min(H, ty + cardH * (1 + k) / 2 + m + 40)];
+    // x -> data value (for the live tag)
+    const valueAtX = px => {
+      const f = Math.max(0, Math.min(vals.length - 1, (px - inset) / (cw - inset * 2) * (vals.length - 1)));
+      const i = Math.min(vals.length - 2, Math.floor(f));
+      return MG.lerp(vals[i], vals[i + 1], f - i);
+    };
+    return { title, tag, tagH, svg, clipRect, guides, baseline, halo, line, ring, dot, core, len, axls, cw, pts, x, ty, k, valueAtX, pad };
+  }
+  MG.ready = fontsReady.then(() => { L = L || layout(); });
+
+  const XD = Math.min(0.26, D * 0.1);
+  MG.active([[0, Math.min(D, LAND + 0.42)], [D - XD - 0.02, D]]);
+  const lastNum = parse(lastRaw);
+  MG.frame(t => {
+    if (!L) L = layout();
+    const sp = MG.spring(t, 0, { stiffness: 230, damping: 22 });
+    const qx = MG.ease.inCubic(MG.range(t, D - XD, XD));
+    const cs = { x: L.x, y: L.ty + (1 - sp) * 60 + qx * 30, scale: L.k * (0.94 + 0.06 * sp - 0.03 * qx),
+                 opacity: (0.3 + 0.7 * MG.range(t, 0, 0.12)) * (1 - qx) };
+    MG.set(plate, cs);
+    MG.set(card, Object.assign({ blur: (1 - MG.range(t, 0, 0.16)) * 8 }, cs));
+    if (L.title) { const p = MG.ease.outExpo(MG.range(t, 0.04, 0.6)); MG.set(L.title, { y: (1 - p) * L.title.offsetHeight * 1.1, opacity: MG.range(t, 0.04, 0.12) }); }
+    const pg = MG.ease.outCubic(MG.range(t, 0.06, 0.5));
+    L.guides.forEach(gl => gl.setAttribute('opacity', pg.toFixed(3)));
+    L.baseline.setAttribute('x2', (L.cw * pg).toFixed(1));
+    L.axls.forEach((a, i) => MG.set(a, { y: (1 - MG.ease.outExpo(MG.range(t, 0.2 + i * 0.8, 0.5))) * 12, opacity: MG.range(t, 0.2 + i * 0.8, 0.2) }));
+    // the draw
+    const p = MG.ease.inOutCubic(MG.range(t, T_DRAW, DRAW));
+    const pt = L.line.getPointAtLength(Math.max(0.001, p * L.len));
+    MG.draw(L.line, p); MG.draw(L.halo, p);
+    L.clipRect.setAttribute('width', (pt.x + 20).toFixed(1));
+    const vis = t >= T_DRAW - 0.04 ? 1 : 0;
+    // landing: dot pops, one ring pulse
+    const q = MG.range(t, LAND - 0.02, 0.3), bump = q > 0 && q < 1 ? Math.sin(Math.PI * q) : 0;
+    const dr = 15 * (MG.ease.outBack(MG.range(t, T_DRAW - 0.04, 0.25)) + 0.45 * bump);
+    [L.dot, L.core].forEach((c, i) => { c.setAttribute('cx', pt.x.toFixed(2)); c.setAttribute('cy', pt.y.toFixed(2)); c.setAttribute('opacity', vis); });
+    L.dot.setAttribute('r', Math.max(0, dr).toFixed(2));
+    L.core.setAttribute('r', Math.max(0, dr * 0.4).toFixed(2));
+    const pr = MG.range(t, LAND, 0.4);
+    L.ring.setAttribute('cx', pt.x.toFixed(2)); L.ring.setAttribute('cy', pt.y.toFixed(2));
+    L.ring.setAttribute('r', (16 + 46 * MG.ease.outCubic(pr)).toFixed(2));
+    L.ring.setAttribute('opacity', pr > 0 && pr < 1 ? ((1 - pr) * 0.9).toFixed(3) : 0);
+    // the tag rides the tip and counts with it
+    let txt;
+    if (p >= 1) txt = tagText;
+    else if (P.value_label.trim()) txt = tagNum ? fmt(tagNum, tagNum.v * p) : tagText;
+    else txt = lastNum ? fmt(lastNum, L.valueAtX(pt.x)) : tagText;
+    if (L.tag.textContent !== txt) L.tag.textContent = txt;
+    const tw = L.tag.offsetWidth;
+    const tx = Math.max(-L.pad * 0.4, Math.min(L.cw - tw + L.pad * 0.4, pt.x - tw / 2));
+    const tyy = pt.y - L.tagH - 30;
+    const ta = MG.ease.outBack(MG.range(t, T_DRAW + 0.05, 0.3));
+    L.tag.style.opacity = MG.range(t, T_DRAW + 0.05, 0.1).toFixed(3);
+    L.tag.style.transformOrigin = `${(pt.x - tx).toFixed(1)}px 100%`;
+    L.tag.style.transform = `translate(${tx.toFixed(2)}px,${tyy.toFixed(2)}px) scale(${(0.6 + 0.4 * ta + 0.1 * bump).toFixed(4)})`;
+  });
+})();
+</script>

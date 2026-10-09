@@ -1,0 +1,240 @@
+<!--MG-SPEC {"title": "Bar comparison", "category": "data",
+ "description": "Editorial bar chart of 2-5 values: bars grow in a quick stagger while their numbers count up, and the highlighted bar lands in the accent colour. Use when the speaker compares quantities (us vs them, before vs after, a ranking) and the gap between the numbers is the point.",
+ "duration": 3.5, "layer": "above_captions", "mutes_captions": false,
+ "params": {
+  "rows": {"type": "rows", "required": true, "fields": ["label", "value", "highlight"], "max_items": 5, "max": 40,
+           "hint": "2-5 rows: label (short), value as it should read ('42%', '$1.2M', '3.5x'), highlight '1' for the bar that matters"},
+  "title": {"type": "str", "default": "", "max": 56, "hint": "optional heading; wrap a word in *stars* for the serif accent"},
+  "orientation": {"type": "enum", "values": ["horizontal", "vertical"], "default": "horizontal"},
+  "accent": {"type": "color", "default": "#FFD400"},
+  "plate": {"type": "enum", "values": ["glass", "dark", "light", "none"], "default": "glass", "hint": "card behind the chart; light = white card with dark type"},
+  "scale_max": {"type": "float", "min": 0, "default": 0, "hint": "value that fills a whole bar (e.g. 100 for percentages); 0 = the largest value"},
+  "y": {"type": "float", "min": 0.1, "max": 0.9, "default": 0.45, "hint": "vertical centre as frame fraction"}
+ },
+ "example": {"title": "Time to *first sale*", "rows": [{"label": "Old funnel", "value": "41 days"}, {"label": "Agency", "value": "23 days"}, {"label": "With Valmera", "value": "6 days", "highlight": "1"}]},
+ "sfx": [{"at": 0.06, "kind": "swipe"}, {"at": 0.5, "kind": "pop_soft", "gain_db": -13, "repeat": {"param": "rows", "from": 0.5, "every": 0.075}}]} -->
+<style>
+  .card,.plate{position:absolute;left:0;top:0;transform-origin:50% 50%;border-radius:40px;will-change:transform,opacity}
+  /* the card's background + shadow are a separate static layer, so growing bars
+     only repaint the (transparent) content layer */
+  .plate.glass{background:linear-gradient(165deg,rgba(40,40,48,.8) 0%,rgba(12,12,16,.86) 100%);
+    border:1px solid rgba(255,255,255,.14);box-shadow:inset 0 1px 0 rgba(255,255,255,.12),0 26px 64px rgba(0,0,0,.5)}
+  .plate.dark{background:linear-gradient(170deg,#17171c 0%,#0b0b0e 100%);border:1px solid rgba(255,255,255,.1);
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.07),0 26px 64px rgba(0,0,0,.5)}
+  .plate.light{background:linear-gradient(175deg,#ffffff 0%,#f4f3f1 100%);border:1px solid rgba(0,0,0,.06);
+    box-shadow:0 24px 60px rgba(0,0,0,.3),0 4px 14px rgba(0,0,0,.08)}
+  .inner{position:relative}
+  .title{font-family:'Inter Display',sans-serif;font-weight:800;letter-spacing:-0.035em;line-height:1.02;color:var(--fg);white-space:nowrap}
+  .acc{font-family:'Instrument Serif',serif;font-style:italic;font-weight:400;letter-spacing:-0.01em;color:var(--accent-ink);font-size:1.14em;line-height:.8}
+  .tmask{overflow:hidden;padding:.06em 0 .12em}
+  .lab{font-family:'Inter','Inter Display',sans-serif;font-weight:600;letter-spacing:-0.01em;color:var(--fg2);white-space:nowrap;line-height:1.1}
+  .lab.hi{color:var(--fg)}
+  .val{font-family:'Inter Display',sans-serif;font-weight:800;letter-spacing:-0.03em;color:var(--fg2);white-space:nowrap;
+       font-variant-numeric:tabular-nums;line-height:1;position:absolute}
+  .val.hi{color:var(--accent-ink)}
+  .track{position:absolute;border-radius:999px;background:var(--track)}
+  .bar{position:absolute;border-radius:999px;background:var(--bar)}
+  .bar.hi{background:linear-gradient(90deg,var(--accent-deep),var(--accent))}
+  .v .bar.hi{background:linear-gradient(0deg,var(--accent-deep),var(--accent))}
+  .bar .sheen{position:absolute;inset:0;border-radius:inherit;background:linear-gradient(180deg,rgba(255,255,255,.28),rgba(255,255,255,0) 55%)}
+  .v .bar .sheen{background:linear-gradient(90deg,rgba(255,255,255,.22),rgba(255,255,255,0) 60%)}
+  .glowbar{position:absolute;border-radius:999px;background:var(--accent);filter:blur(18px);opacity:0;will-change:opacity}
+  .none .title,.none .lab,.none .val{text-shadow:0 2px 16px rgba(0,0,0,.55)}
+</style>
+<div class="mg-root"><div class="plate" id="plate"></div><div class="card" id="card"><div class="inner" id="inner"></div></div></div>
+<script>
+(() => {
+  const P = MG.params, D = MG.duration, W = MG.W, H = MG.H;
+  const tall = H / W > 1.45;
+  const SAFE = { x0: 60, x1: W - 60, y0: H * (tall ? 0.08 : 0.06), y1: H * (tall ? 0.80 : 0.94) };
+  const css = document.documentElement.style;
+  const rgb = h => { const n = parseInt(String(h).slice(1), 16); return [n >> 16 & 255, n >> 8 & 255, n & 255]; };
+  const rgba = (h, a) => `rgba(${rgb(h).join(',')},${a})`;
+  const lum = h => { const [r, g, b] = rgb(h).map(v => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); }); return 0.2126 * r + 0.7152 * g + 0.0722 * b; };
+  const mix = (h, k) => { const c = rgb(h).map(v => Math.round(v * k)); return `rgb(${c.join(',')})`; };
+  const light = P.plate === 'light';
+  css.setProperty('--accent', P.accent);
+  css.setProperty('--accent-deep', mix(P.accent, 0.78));
+  // accent used as TEXT must stay legible on the card
+  css.setProperty('--accent-ink', light && lum(P.accent) > 0.45 ? mix(P.accent, 0.55) : P.accent);
+  css.setProperty('--fg', light ? '#0D0D12' : '#F7F5F2');
+  css.setProperty('--fg2', light ? 'rgba(13,13,18,.62)' : 'rgba(247,245,242,.74)');
+  css.setProperty('--track', light ? 'rgba(13,13,18,.06)' : 'rgba(255,255,255,.07)');
+  css.setProperty('--bar', light ? 'rgba(13,13,18,.22)' : 'rgba(247,245,242,.34)');
+
+  const parse = s => {
+    s = String(s ?? '').trim().replace(/−/g, '-');
+    const m = s.match(/^(.*?)(-?\d(?:[\d,.   ]*\d)?)(.*)$/);
+    if (!m) return null;
+    const [, pre, body, suf] = m;
+    let dec = '.', grp = '';
+    const hasC = body.includes(','), hasD = body.includes('.'), hasS = /[   ]/.test(body);
+    if (hasC && hasD) { dec = body.lastIndexOf(',') > body.lastIndexOf('.') ? ',' : '.'; grp = dec === ',' ? '.' : ','; }
+    else if (hasC) { const p = body.split(','); if (p.length === 2 && p[1].length !== 3) dec = ','; else grp = ','; }
+    else if (hasD && body.split('.').length > 2) { grp = '.'; dec = ','; }
+    if (hasS) grp = ' ';
+    let clean = body.replace(/[   ]/g, '');
+    if (grp) clean = clean.split(grp).join('');
+    if (dec === ',') clean = clean.replace(',', '.');
+    const v = parseFloat(clean);
+    if (!isFinite(v)) return null;
+    const di = clean.indexOf('.');
+    return { pre, suf, v, decimals: di < 0 ? 0 : clean.length - di - 1, grp, dec };
+  };
+  const fmt = (n, v) => {
+    const s = Math.abs(v).toFixed(n.decimals);
+    let [i, f] = s.split('.');
+    if (n.grp) i = i.replace(/\B(?=(\d{3})+(?!\d))/g, n.grp);
+    return n.pre + (v < 0 && Number(s) !== 0 ? '-' : '') + i + (f ? n.dec + f : '') + n.suf;
+  };
+  const rich = s => MG.esc(s).replace(/\*([^*]+)\*/g, '<span class="acc">$1</span>');
+
+  const rows = (P.rows || []).filter(r => (r.label || r.value)).slice(0, 5).map(r => {
+    const n = parse(r.value);
+    return { label: r.label || '', raw: r.value || '', n, v: n ? Math.abs(n.v) : 0, hi: /^(1|true|yes|y|x|\*)$/i.test(String(r.highlight || '').trim()) };
+  });
+  if (!rows.length) rows.push({ label: '', raw: '', n: null, v: 0, hi: false });
+  const vmax = P.scale_max > 0 ? P.scale_max : Math.max(1e-9, ...rows.map(r => r.v));
+  const vert = P.orientation === 'vertical';
+  const fontsReady = Promise.all([`800 60px 'Inter Display'`, `600 40px 'Inter'`, `italic 400 60px 'Instrument Serif'`]
+    .map(f => document.fonts.load(f).catch(() => 0)));
+
+  const card = MG.$('#card'), inner = MG.$('#inner'), plate = MG.$('#plate');
+  card.classList.add(P.plate);
+  plate.classList.add(P.plate);
+  if (vert) card.classList.add('v');
+  const T0 = 0.1, EACH = 0.075, GROW = 0.85;
+  let L = null;
+
+  function layout() {
+    inner.innerHTML = '';
+    const cardW = Math.min(SAFE.x1 - SAFE.x0, 960);
+    const pad = P.plate === 'none' ? 0 : 56;
+    const cw = cardW - pad * 2;
+    let y = 0, title = null, tmask = null;
+    if (P.title.trim()) {
+      tmask = MG.el('div', 'tmask', null, inner);
+      title = MG.el('div', 'title', null, tmask);
+      title.innerHTML = rich(P.title.trim());
+      MG.fit(title, { width: cw, min: 32, max: 74, nowrap: true });
+      y = tmask.offsetHeight + (vert ? 40 : 34);
+    }
+    const n = rows.length;
+    const els = rows.map(r => {
+      const lab = MG.el('div', 'lab' + (r.hi ? ' hi' : ''), r.label, inner);
+      const track = MG.el('div', 'track', null, inner);
+      const glow = r.hi ? MG.el('div', 'glowbar', null, inner) : null;
+      const bar = MG.el('div', 'bar' + (r.hi ? ' hi' : ''), null, inner);
+      MG.el('div', 'sheen', null, bar);
+      const val = MG.el('div', 'val' + (r.hi ? ' hi' : ''), r.raw, inner);
+      return { r, lab, track, bar, val, glow };
+    });
+    const geo = [];
+    if (!vert) {
+      // label line, then the bar with its value riding the tip
+      const barH = n <= 3 ? 80 : n === 4 ? 68 : 58, gap = n <= 3 ? 38 : n === 4 ? 30 : 24;
+      const lfs = n <= 3 ? 44 : n === 4 ? 40 : 36, vfs = n <= 3 ? 62 : n === 4 ? 56 : 50;
+      els.forEach(e => { e.lab.style.fontSize = lfs + 'px'; e.val.style.fontSize = vfs + 'px'; e.val.style.lineHeight = barH + 'px'; });
+      const valW = Math.max(...els.map(e => e.val.getBoundingClientRect().width));
+      const trackW = Math.max(240, cw - valW - 22);
+      els.forEach(e => {
+        MG.fit(e.lab, { width: cw, min: 22, max: lfs, nowrap: true });
+        e.lab.style.position = 'absolute'; e.lab.style.left = '0px'; e.lab.style.top = y + 'px';
+        y += e.lab.offsetHeight + 14;
+        const len = Math.max(barH, trackW * Math.min(1, e.r.v / vmax));
+        Object.assign(e.track.style, { left: '0px', top: y + 'px', width: trackW + 'px', height: barH + 'px' });
+        Object.assign(e.bar.style, { left: '0px', top: y + 'px', width: len + 'px', height: barH + 'px', transformOrigin: '0 50%' });
+        if (e.glow) Object.assign(e.glow.style, { left: '6px', top: (y + 10) + 'px', width: (len - 12) + 'px', height: (barH - 8) + 'px' });
+        e.val.style.top = y + 'px';
+        geo.push({ len, y, barH });
+        y += barH + gap;
+      });
+      y -= gap;
+    } else {
+      const chartH = n <= 3 ? 620 : 580;
+      const colW = cw / n, barW = Math.min(150, colW * 0.62);
+      const lfs = n <= 3 ? 40 : n === 4 ? 34 : 30, vfs = n <= 3 ? 60 : n === 4 ? 50 : 42;
+      const valH = vfs * 1.25;
+      const base = y + valH + chartH;
+      els.forEach((e, i) => {
+        e.val.style.fontSize = vfs + 'px';
+        const cx = colW * (i + 0.5);
+        const len = Math.max(barW * 0.5, chartH * Math.min(1, e.r.v / vmax));
+        Object.assign(e.track.style, { left: (cx - barW / 2) + 'px', top: (base - chartH) + 'px', width: barW + 'px', height: chartH + 'px', borderRadius: '26px' });
+        Object.assign(e.bar.style, { left: (cx - barW / 2) + 'px', top: (base - len) + 'px', width: barW + 'px', height: len + 'px', borderRadius: '26px', transformOrigin: '50% 100%' });
+        if (e.glow) Object.assign(e.glow.style, { left: (cx - barW / 2 + 8) + 'px', top: (base - len + 8) + 'px', width: (barW - 16) + 'px', height: (len - 8) + 'px', borderRadius: '26px' });
+        MG.fit(e.val, { width: colW - 8, min: 18, max: vfs, nowrap: true });
+        e.lab.style.fontSize = lfs + 'px';
+        Object.assign(e.lab.style, { position: 'absolute', whiteSpace: 'normal', textAlign: 'center', width: (colW - 10) + 'px', left: (colW * i + 5) + 'px', top: (base + 18) + 'px' });
+        MG.fit(e.lab, { width: colW - 10, height: lfs * 1.1 * 2 + 4, min: 18, max: lfs });
+        geo.push({ len, cx, base });
+      });
+      y = base + 18 + Math.max(...els.map(e => e.lab.offsetHeight));
+    }
+    inner.style.width = cw + 'px'; inner.style.height = y + 'px';
+    card.style.padding = pad + 'px';
+    const cardH = y + pad * 2;
+    card.style.width = cardW + 'px';
+    plate.style.width = cardW + 'px'; plate.style.height = cardH + 'px';
+    const k = Math.min(1, (SAFE.y1 - SAFE.y0) / cardH);
+    const x = (W - cardW) / 2;
+    const top = Math.min(SAFE.y1 - cardH * (1 + k) / 2, Math.max(SAFE.y0 - cardH * (1 - k) / 2, H * P.y - cardH / 2));
+    const m = 84;
+    MG.box = [Math.max(0, x - m), Math.max(0, top + cardH * (1 - k) / 2 - m), Math.min(W, x + cardW + m), Math.min(H, top + cardH * (1 + k) / 2 + m + 40)];
+    return { els, geo, x, top, k, title, tmask };
+  }
+  MG.ready = fontsReady.then(() => { L = L || layout(); });
+
+  const n = rows.length;
+  const XD = Math.min(0.26, D * 0.1);
+  const endIn = T0 + (n - 1) * EACH + GROW + 0.04;
+  MG.active([[0, Math.min(D, endIn)], [D - XD - 0.02, D]]);
+  MG.frame(t => {
+    if (!L) L = layout();
+    const { els, geo, title } = L;
+    // card: object -> a gentle spring with blur-to-sharp
+    const sp = MG.spring(t, 0, { stiffness: 230, damping: 22 });
+    const qx = MG.ease.inCubic(MG.range(t, D - XD, XD));
+    const cs = { x: L.x, y: L.top + (1 - sp) * 60 + qx * 30, scale: L.k * (0.94 + 0.06 * sp - 0.03 * qx),
+                 opacity: (0.3 + 0.7 * MG.range(t, 0, 0.12)) * (1 - qx) };
+    MG.set(plate, cs);
+    MG.set(card, Object.assign({ blur: (1 - MG.range(t, 0, 0.16)) * 8 }, cs));
+    if (title) {
+      const p = MG.ease.outExpo(MG.range(t, 0.04, 0.6));
+      MG.set(title, { y: (1 - p) * title.offsetHeight * 1.1, opacity: MG.range(t, 0.04, 0.12) });
+    }
+    els.forEach((e, i) => {
+      const t0 = T0 + i * EACH, g = geo[i];
+      const pl = MG.ease.outExpo(MG.range(t, t0 - 0.06, 0.5));
+      MG.set(e.lab, { y: (1 - pl) * 14, opacity: MG.range(t, t0 - 0.06, 0.2) });
+      e.track.style.opacity = MG.range(t, t0 - 0.1, 0.25).toFixed(3);
+      const p = MG.ease.outExpo(MG.range(t, t0, GROW));
+      const len = g.len * p;
+      if (!vert) {
+        e.bar.style.width = Math.max(0.01, len) + 'px';
+        e.bar.style.opacity = p > 0.002 ? 1 : 0;
+        e.val.style.left = (len + 18) + 'px';
+      } else {
+        e.bar.style.height = Math.max(0.01, len) + 'px';
+        e.bar.style.top = (g.base - len) + 'px';
+        e.bar.style.opacity = p > 0.002 ? 1 : 0;
+        const vw = e.val.offsetWidth;
+        e.val.style.left = (g.cx - vw / 2) + 'px';
+        e.val.style.top = (g.base - len - e.val.offsetHeight - 14) + 'px';
+      }
+      e.val.textContent = e.r.n ? fmt(e.r.n, e.r.n.v * p) : e.r.raw;
+      e.val.style.opacity = MG.range(t, t0, 0.12).toFixed(3);
+      if (e.r.hi) {
+        // land: value pops once, accent glow breathes up and settles
+        const q = MG.range(t, t0 + 0.4, 0.3);
+        const bump = q > 0 && q < 1 ? Math.sin(Math.PI * q) : 0;
+        e.val.style.transformOrigin = vert ? '50% 100%' : '0% 50%';
+        e.val.style.transform = `scale(${1 + 0.12 * bump})`;
+        // the glow is a static blurred layer at the final size: it only fades
+        const gl = MG.ease.outCubic(MG.range(t, t0 + 0.4, 0.25)) * (0.5 + 0.35 * bump);
+        if (e.glow) { e.glow.style.opacity = gl.toFixed(3); e.glow.style.visibility = gl > 0.002 ? 'visible' : 'hidden'; }
+      }
+    });
+  });
+})();
+</script>
