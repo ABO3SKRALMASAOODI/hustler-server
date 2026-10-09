@@ -29,6 +29,15 @@ image the renderer serves to the page; the param arrives as a URL or `null`).
 Every non-required param needs a `default`. Keep params few and meaningful;
 good defaults matter more than knobs.
 
+`mutes_captions` says the template exists to SAY the spoken words (a slam, a
+phrase build, a marker line, a quote). Captions are word-level either way
+(worker/caption_carry.py): an item with `mute_captions` unset drops only the
+spoken words its visible text params show, and the rest stay captioned in a
+band clear of the box it draws. The flag decides the fallback when no band is
+clear — a speech template mutes those words, any other keeps them in place —
+so every text a template prints must come from its params (that is what the
+captions are matched against).
+
 `sfx` declares sound ROLES relative to the item start (where a sound would
 belong if the editor chooses to add one): whoosh_soft, whoosh_hard, swish_short,
 swipe, pop_soft, click_ui, tick, kick/impact_soft/impact_hard, ding, chime,

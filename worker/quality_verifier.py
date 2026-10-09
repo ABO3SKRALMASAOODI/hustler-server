@@ -43,7 +43,7 @@ ADVISORY_FINDINGS = {
     "zoom_crosses_shots_without_targets", "mechanical_zoom_pattern",
     "scene_unaware_reframe", "duplicate_broll_window",
     "music_missing_treatment_purpose", "sfx_missing_trigger",
-    "mechanical_sfx_pattern", "taste_advisory",
+    "mechanical_sfx_pattern", "taste_advisory", "sound_off_gap",
 }
 ADVISORY_LABEL = "advisory: keep if intentional"
 
@@ -647,9 +647,45 @@ def _motion_findings(edl):
     return findings
 
 
+def _sound_off_findings(edl, index):
+    """Speech a sound-off viewer cannot read: a spoken span longer than
+    caption_carry.SOUND_OFF_GAP_S with neither a caption nor a graphic or
+    text on screen showing it (a whole-window mute over words the graphic
+    does not carry, a graphic that leaves no caption band clear, a manual
+    caption mute). One advisory naming the spans and their fix."""
+    caps = edl.get("captions")
+    if not (isinstance(caps, dict) and caps.get("mode") == "from_transcript") \
+            or not (index or {}).get("words") or not edl.get("keep"):
+        return []
+    try:
+        import caption_carry
+        timeline = Timeline(edl.get("keep") or [], edl.get("inserts") or [],
+                            edl.get("speed") or [])
+        gaps = caption_carry.sound_off_gaps(edl, index, timeline)
+    except Exception as exc:  # noqa: BLE001 — an advisory never breaks review
+        print(f"[verify] sound-off check skipped: {type(exc).__name__}", flush=True)
+        return []
+    if not gaps:
+        return []
+    shown = "; ".join(
+        f"{g['start']:.2f}-{g['end']:.2f}s \"{g['said']}\" ({g['cause']}: {g['fix']})"
+        for g in gaps[:3])
+    more = f" (+{len(gaps) - 3} more)" if len(gaps) > 3 else ""
+    total = sum(g["duration_s"] for g in gaps)
+    return [_finding(
+        "sound_off_gap", "captions",
+        (f"Sound-off gap: {len(gaps)} spoken span(s) ({total:.1f}s) have neither a "
+         f"caption nor a graphic showing them — {shown}{more}."),
+        {"gaps": gaps[:12], "min_gap_s": caption_carry.SOUND_OFF_GAP_S},
+        ("keep every spoken word readable: leave graphics' mute_captions unset so "
+         "they hide only the words they show, and keep graphics off the caption "
+         "band"))]
+
+
 def deterministic_findings(edl, index=None, request_text=None):
     return (_text_corruption_findings(edl)
             + _caption_findings(edl)
+            + _sound_off_findings(edl, index or {})
             + _motion_findings(edl)
             + _zoom_findings(edl, index or {})
             + _reframe_findings(edl, index or {})

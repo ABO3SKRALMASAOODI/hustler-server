@@ -72,17 +72,27 @@ SIZE LADDER AND ACCENT:
   Legibility comes from size, clear-space placement, soft shadow and the
   grade.
 
-CAPTIONS AND GRAPHICS SHARE ONE STAGE. A motion graphic that says the spoken
-words (word slam, phrase build, a hook title of the spoken hook, a typewriter
-of the line being said) must mute captions for its own window;
-complementary graphics keep them. Template defaults differ, so pass
-`mute_captions` explicitly on `add_motion_graphic` rather than duplicating
-it with `set_caption_mutes`. Never let a caption page and a graphic animate
-in the same band at the same instant. A mute over words the graphic does not
-carry (a counter over its own setup line) leaves sound-off viewers with
-nothing; the write reply NOTEs the words that would vanish. Kickers, labels
-and quotes copy the transcript's exact words — the reply NOTEs a
-paraphrase and quotes the phrase to use.
+CAPTIONS AND GRAPHICS SHARE ONE STAGE, word by word. On
+`add_motion_graphic` leave `mute_captions` unset: the captions drop exactly
+the spoken words the graphic shows (its number, slammed word, quoted kicker,
+list rows — matched through case, punctuation, plurals, "forty"/"40" and
+*stars*) and keep every other spoken word, so a sound-off viewer reads the
+whole sentence across caption and graphic and never reads a number twice.
+While the graphic is up those captions move to a band clear of the box it
+draws and of the face; where none is clear, a graphic that says the line (word
+slam, phrase build, marker, quote) mutes them and the write reply NOTEs the
+words lost — move the graphic off the caption band (top band, beside the
+head) rather than accept the gap. `mute_captions=true` hides every caption
+for the graphic's whole window (only when it replaces the whole spoken line);
+`false` keeps all captions running beside it (a number or *starred* word it
+shows is still not repeated). Never duplicate it with `set_caption_mutes`.
+Kickers, labels and quotes copy the transcript's exact words — the reply
+NOTEs a paraphrase and quotes the phrase to use.
+
+SOUND-OFF COVERAGE: no spoken span longer than ~0.6 s may go without
+on-screen text (a caption or a graphic showing those words). Review lists
+every such gap as a "Sound-off gap" advisory with its cause, and
+`audit_captions` returns them as `sound_off_gaps`.
 
 PLACEMENT LAW: multi-word captions sit in measured clear space — usually
 the lower-middle band above the platform UI, or beside the face in a

@@ -139,6 +139,14 @@ def caption_review_times(edl, index, workdir, duration, max_times=16):
     try:
         tl = Timeline(edl.get("keep") or [], edl.get("inserts") or [],
                       edl.get("speed") or [])
+        if edl.get("motion"):
+            # the same caption placement the render used (its drawn-box
+            # measurements are cached in this process)
+            video = (index or {}).get("video") or {}
+            edl = json.loads(json.dumps(edl))
+            motion_layer.fill_drawn(edl, *frame_dims(
+                float(video.get("width") or 1920), float(video.get("height") or 1080),
+                (edl.get("frame") or {}).get("ratio")))
         path = caplib.build_ass(
             edl, index, tl, os.path.join(workdir, "caption_review.ass"))
         states = sorted(set(stitch.ass_events(path))) if path else []
@@ -1693,6 +1701,24 @@ def legibility_current(meta, edl):
     if not (edl.get("motion") or motion_captions.look_of(edl)):
         return True
     return ((meta or {}).get("legib_v") or 0) == config.LEGIBILITY_VERSION
+
+
+def carry_current(meta, edl):
+    """Were this render's captions planned with today's word-level muting?
+
+    Only transcript-caption EDLs with motion graphics can be stale: before
+    config.CAPTION_CARRY_VERSION every caption under a muting graphic was
+    hidden for its whole window, and a counter's number was read twice.
+    Same grandfathering discipline as legibility_current: everything else
+    keeps its cache, and a missing stamp on such an EDL means the render
+    predates the plan.
+    """
+    edl = edl or {}
+    caps = edl.get("captions")
+    if not (isinstance(caps, dict) and caps.get("mode") == "from_transcript"
+            and edl.get("motion")):
+        return True
+    return ((meta or {}).get("carry_v") or 0) == config.CAPTION_CARRY_VERSION
 
 
 def look_current(meta):
@@ -4437,6 +4463,11 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     if cap_ass_override is not None:
         ass_path = cap_ass_override or None
     else:
+        # Word-level caption muting places the words a graphic does not show
+        # clear of the box it draws; items written before the write-time
+        # probe stored that box are measured now (worker/caption_carry.py).
+        if not audio_only:
+            motion_layer.fill_drawn(edl, W, H, fps)
         ass_path = caplib.build_ass(edl, index, tl,
                                     os.path.join(workdir, "captions.ass"),
                                     play_res=(W, H))
@@ -5328,6 +5359,10 @@ def _timeline_stitch(job_id, prev_edl, new_edl, tl_prev, tl_new, index,
     if not preview and outro_seconds(False) and abs(tl_prev.out_duration-dur_out) > .001:
         return None
     W, H, fps = _composition_geometry(new_edl, src_local, preview)
+    # Both programs place their captions clear of the graphics' drawn boxes
+    # (worker/caption_carry.py), measured once per composition.
+    motion_layer.fill_drawn(new_edl, W, H, fps)
+    motion_layer.fill_drawn(prev_edl, W, H, fps)
 
     # Both programs' burned captions, with payloads: plan_timeline PAIRS the
     # events modulo each run's shift and re-encodes any span where the two
@@ -5446,6 +5481,30 @@ def _timeline_stitch(job_id, prev_edl, new_edl, tl_prev, tl_new, index,
     return out_dur
 
 
+def _caption_change_windows(prev_edl, tl_prev, full_cap, index, workdir, W, H,
+                            fps, out_duration):
+    """Window-mode stitch: [[a, b]] spans of the program where the previous
+    program burned other captions than ``full_cap`` (the new program's ASS).
+
+    A changed graphic or text can change captions OUTSIDE its own window:
+    word-level muting hands a graphic the words said just before it, and a
+    dropped word regroups the caption card it sat in. The copied stretches
+    carry the previous program's captions, so every event the two programs
+    do not burn alike re-encodes too (timeline mode checks the same way)."""
+    if not prev_edl.get("captions") and not full_cap:
+        return []
+    motion_layer.fill_drawn(prev_edl, W, H, fps)
+    prev_cap = caplib.build_ass(prev_edl, index, tl_prev,
+                                os.path.join(workdir, "stitch_cap_prev.ass"),
+                                play_res=(W, H)) if prev_edl.get("captions") else None
+    ev_new = stitch.ass_events(full_cap, with_payload=True) if full_cap else []
+    ev_prev = stitch.ass_events(prev_cap, with_payload=True) if prev_cap else []
+    return [[max(0.0, a), min(out_duration, b)]
+            for a, b in stitch.caption_mismatch_spans(
+                [(0.0, out_duration, 0.0)], ev_prev, ev_new, out_duration)
+            if min(out_duration, b) > max(0.0, a)]
+
+
 def _stitched_preview(job_id, new_row, prev_row, prev_asset, index,
                       src_local, workdir, patch_locals, out_path, preview=True):
     """Try to build this preview by re-encoding only the changed windows and
@@ -5512,9 +5571,13 @@ def _stitched_preview(job_id, new_row, prev_row, prev_asset, index,
         # one would make the piece re-play the insert from its start.
         item_spans += list(timeline_mod.insert_windows(
             new_edl.get("inserts") or [], tl_new).values())
+        motion_layer.fill_drawn(new_edl, W, H, fps)
         full_cap = caplib.build_ass(new_edl, index, tl_new,
                                     os.path.join(workdir, "stitch_cap.ass"),
                                     play_res=(W, H))
+        windows = list(windows) + _caption_change_windows(
+            prev_edl, tl_prev, full_cap, index, workdir, W, H, fps,
+            tl_new.out_duration)
         fx = new_edl.get("effects") or {}
         junction_zones = []
         tr = fx.get("transition") or None
@@ -5841,6 +5904,7 @@ def _render_changed_sections(job_id, edl_row, index, src_local, workdir,
         W, H = frame_dims(1920, 1080,
                           (edl.get("frame") or {}).get("ratio"))
         W, H, _fps = preview_geometry(W, H, 30.0)
+    motion_layer.fill_drawn(edl, W, H, _fps)
     cap_path = caplib.build_ass(
         edl, index, tl, os.path.join(workdir, "check_full_cap.ass"),
         play_res=(W, H)) if edl.get("captions") else ""
@@ -6129,6 +6193,7 @@ def _run_render_job(worker_db, job):
                 and music_tail_current(cached.get("meta"), edl_row["json"],
                                        _tail_out) \
                 and legibility_current(cached.get("meta"), edl_row["json"]) \
+                and carry_current(cached.get("meta"), edl_row["json"]) \
                 and watermark_current(cached.get("meta"), variant, is_paid,
                                       wm_settings) \
                 and _audio_model_review_cache_compatible(
@@ -6429,6 +6494,7 @@ def _run_render_job(worker_db, job):
                             and music_tail_current(pm, prev_row["json"],
                                                    _pout) \
                             and legibility_current(pm, prev_row["json"]) \
+                            and carry_current(pm, prev_row["json"]) \
                             and watermark_current(pm, variant, is_paid,
                                                   wm_settings) \
                             and (fp_now is None
@@ -6783,6 +6849,10 @@ def _run_render_job(worker_db, job):
                   "legib_v": (reused_visual_meta.get("legib_v") or 0
                               if reused_visual_meta
                               else config.LEGIBILITY_VERSION),
+                  # ...and the caption plan they were burned with.
+                  "carry_v": (reused_visual_meta.get("carry_v") or 0
+                              if reused_visual_meta
+                              else config.CAPTION_CARRY_VERSION),
                   # A reused picture keeps the look it was drawn with.
                   "look_v": (reused_visual_meta.get("look_v") or 0
                              if reused_visual_meta

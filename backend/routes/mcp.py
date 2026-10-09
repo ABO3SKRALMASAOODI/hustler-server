@@ -775,9 +775,10 @@ Two things are different from a normal tool session, and both matter:
       13-20 dB under the voice. Suggesting a song is fine; choosing one
       unasked is not.
    c. HOOK: a pattern interrupt within 0.1-0.6 s and the hook line as text by
-      1.5 s — hook_title (mute_captions=true when it repeats the spoken hook)
-      or word_slam, with a landing or punch and at most one sound (sfx=true
-      on the graphic, or one library cue).
+      1.5 s — hook_title or word_slam (leave mute_captions unset: the
+      captions drop just the spoken words it shows), off the caption band,
+      with a landing or punch and at most one sound (sfx=true on the
+      graphic, or one library cue).
    d. HERO MOMENTS: 2-4 add_motion_graphic placements whose landing frame
       sits on exact spoken word onsets (get_kept_transcript for program
       windows, get_words for onsets, each template's landing offset from

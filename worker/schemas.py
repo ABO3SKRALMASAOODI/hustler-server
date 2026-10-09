@@ -1787,7 +1787,18 @@ class MotionItem(BaseModel):
     layer: Literal["above_captions", "below_captions",
                    "behind_subject"] = "above_captions"
     box: Optional[List[float]] = None
+    # unset = word-level (the captions drop only the spoken words this
+    # graphic shows, worker/caption_carry.py); true = no captions for the
+    # whole window; false = captions keep running (a number/hero word it
+    # shows is still not repeated).
     mute_captions: Optional[bool] = None
+    # Where the composition draws ([x0,y0,x1,y1] frame fractions), measured
+    # by the write-time probe (never by hand). Word-level caption muting
+    # places the captions the graphic does not show clear of it. drawn_ar is
+    # the frame aspect (H/W) it was measured at: after a frame change the box
+    # is stale and is measured again (worker/caption_carry.py drawn_fresh).
+    drawn: Optional[list] = None
+    drawn_ar: Optional[float] = None
     purpose: Optional[str] = Field(default=None, max_length=300)
     phase_s: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
     full_duration_s: Optional[float] = Field(default=None, gt=0, allow_inf_nan=False)
@@ -3087,6 +3098,21 @@ def validate_edl(data, duration=None, *, render_fragment=False):
                 fp.faces = [[round(min(max(float(v), -0.5), 1.5), 4) for v in r]
                             for r in fp.faces or []]
                 fp.ar = round(float(fp.ar), 4)
+            if mo.drawn is not None:
+                # A measurement, not an authoring choice: an unusable one is
+                # dropped (the renderer measures again), never rejected.
+                try:
+                    x0, y0, x1, y1 = [round(min(max(float(v), 0.0), 1.0), 4)
+                                      for v in mo.drawn]
+                    mo.drawn = [x0, y0, x1, y1] if x1 > x0 and y1 > y0 else None
+                except (TypeError, ValueError):
+                    mo.drawn = None
+            if mo.drawn_ar is not None:
+                try:
+                    ar = float(mo.drawn_ar)
+                    mo.drawn_ar = round(ar, 4) if mo.drawn and 0.05 < ar < 20 else None
+                except (TypeError, ValueError):
+                    mo.drawn_ar = None
             if mo.layer != "behind_subject":
                 # A mask only means something on the behind layer; a stale
                 # one left by a layer change is dropped, not rejected.

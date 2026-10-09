@@ -99,7 +99,7 @@ def test_motion_design_skill_teaches_templates_timing_runtime_and_review():
                    "MG.tween", "MG.split", "MG.fit", "MG.count", "MG.draw",
                    "Math.random", "render_preview(complete=false)",
                    "render_preview(complete=true)", "look_at(rendered=true",
-                   "`mute_captions` explicitly", "verified=false"):
+                   "Leave `mute_captions` unset", "verified=false"):
         assert phrase in text, phrase
 
 
@@ -224,7 +224,7 @@ def test_compact_contracts_carry_the_creative_menus():
     for mode in ("punch", "landing", "push_in", "pulse", "shake"):
         assert mode in contracts["add_zoom"]
     assert "behind_subject" in contracts["add_motion_graphic"]
-    assert "mute_captions explicitly" in contracts["add_motion_graphic"]
+    assert "leave mute_captions unset" in contracts["add_motion_graphic"]
     # look_at works without a render for source and assembled geometry, and
     # rendered=true reads only a complete preview of the current version.
     assert "no render needed" in contracts["look_at"]

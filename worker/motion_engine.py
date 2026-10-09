@@ -423,16 +423,31 @@ def _ffmpeg():
     return shutil.which("ffmpeg") or "ffmpeg"
 
 
-# Alpha at or above which a probed pixel counts as INK: glyphs, strokes,
+# Two alpha thresholds over the same probe screenshot, because the two
+# consumers ask different questions about a graphic (worker/keepout.py,
+# worker/caption_carry.py):
+#
+# INK_ALPHA (200 of 255): what HIDES the speaker — glyphs, strokes, opaque
 # plates and solid shapes. Soft scrims, washes and blooms stay below it (the
-# counter's scrim peaks at .68 = 173), so the ink box is what the type and
-# its solid furniture cover — what a face keep-out compares (keepout.py).
+# counter's scrim peaks at .68 = 173). The face keep-out compares this box:
+# a scrim darkens a face without hiding it, and it spreads across most of
+# the frame, so counting it would put every scrimmed graphic "on the face"
+# with no move able to clear it.
+#
+# COVER_ALPHA (102 of 255, 40%): what a CAPTION cannot share space with —
+# the ink plus translucent plates and the dense core of a scrim or glow,
+# where caption letters would read as part of the graphic. Only the falloff
+# tails (shadows, glows, a scrim's edge) stay below it; a caption may sit on
+# those. Word-level caption muting and the motion caption track keep clear
+# of this box, and it is the one stored on the item (MotionItem.footprint).
 INK_ALPHA = 200
+COVER_ALPHA = 102
+VISIBLE_ALPHA = 4
 
 
-def _alpha_bbox(png_bytes, ink=False):
-    """Visible (alpha >= 4) bbox of a PNG, or with ink=True a pair
-    (visible bbox, ink bbox) from the same decode."""
+def _alpha_bbox(png_bytes, threshold=VISIBLE_ALPHA):
+    """Bbox of the pixels at or above ``threshold`` alpha (an int), or a
+    tuple of bboxes for a tuple of thresholds, from one decode."""
     from io import BytesIO
     from PIL import Image
     im = Image.open(BytesIO(png_bytes))
@@ -440,11 +455,11 @@ def _alpha_bbox(png_bytes, ink=False):
         im = im.convert("RGBA")
     a = im.getchannel("A")
     # Threshold through a LUT (C speed) rather than a per-pixel lambda.
-    vis = a.point([0] * 4 + [255] * 252).getbbox()
-    if not ink:
-        return vis
-    return vis, (a.point([0] * INK_ALPHA + [255] * (256 - INK_ALPHA)).getbbox()
-                 if vis else None)
+    def box(t):
+        return a.point([0] * t + [255] * (256 - t)).getbbox()
+    if isinstance(threshold, (tuple, list)):
+        return tuple(box(int(t)) for t in threshold)
+    return box(int(threshold))
 
 
 def _even_box(x0, y0, x1, y1, W, H):
@@ -756,7 +771,7 @@ async def _probe_all(jobs, times_list, budget_s):
                     cdp = await ctx.new_cdp_session(page)
                     await cdp.send("Emulation.setDefaultBackgroundColorOverride",
                                    {"color": {"r": 0, "g": 0, "b": 0, "a": 0}})
-                    visible, bboxes, inks = 0, [], []
+                    visible, bboxes, inks, covers = 0, [], [], []
 
                     def frac(bb):
                         return [round(v * 4.0 / dw, 3) if i % 2 == 0 else round(v * 4.0 / dh, 3)
@@ -766,17 +781,21 @@ async def _probe_all(jobs, times_list, budget_s):
                         r = await cdp.send("Page.captureScreenshot", {
                             "format": "png", "optimizeForSpeed": True,
                             "clip": {"x": 0, "y": 0, "width": dw, "height": dh, "scale": 0.25}})
-                        bb, ib = _alpha_bbox(base64.b64decode(r["data"]), ink=True)
+                        bb, cb, ib = _alpha_bbox(base64.b64decode(r["data"]),
+                                                 (VISIBLE_ALPHA, COVER_ALPHA, INK_ALPHA))
                         if bb:
                             visible += 1
                             bboxes.append(frac(bb))
-                        inks.append(frac(ib) if ib else None)     # one per time
+                        # one entry per requested time (None = nothing that dense)
+                        inks.append(frac(ib) if ib else None)
+                        covers.append(frac(cb) if cb else None)
                     errs = await page.evaluate("window.__mgErrors || []")
                     out.append({"errors": [str(e)[:200] for e in errs], "visible_frames": visible,
-                                "samples": len(times), "bboxes": bboxes, "ink": inks})
+                                "samples": len(times), "bboxes": bboxes, "ink": inks,
+                                "cover": covers})
                   except Exception as e:  # noqa: BLE001 — one bad composition
                     out.append({"errors": [str(e).splitlines()[0][:200]], "visible_frames": 0,
-                                "samples": len(times), "bboxes": [], "ink": []})
+                                "samples": len(times), "bboxes": [], "ink": [], "cover": []})
                 finally:
                     await ctx.close()
         finally:
@@ -787,9 +806,11 @@ async def _probe_all(jobs, times_list, budget_s):
 def probe(jobs, times_list, budget_s=60.0):
     """Cheap write-time check: load each composition, seek the given item-local
     times at quarter scale, and report script errors and visible coverage
-    (bboxes as frame fractions, one per visible moment; ``ink`` one entry per
-    requested time — the box of nearly opaque pixels, INK_ALPHA, or None).
-    Raises MotionRenderError when the browser itself cannot run."""
+    (bboxes as frame fractions, one per visible moment). ``ink`` and
+    ``cover`` hold one entry per requested time: the box of the pixels at
+    INK_ALPHA (what hides a face) and at COVER_ALPHA (what a caption must
+    clear), or None. Raises MotionRenderError when the browser itself cannot
+    run."""
     if not available():
         raise MotionRenderError("motion graphics renderer unavailable: "
                                 + unavailable_reason())
