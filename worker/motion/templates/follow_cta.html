@@ -1,0 +1,249 @@
+<!--MG-SPEC {"title": "Follow CTA", "category": "cta",
+ "description": "Profile card (avatar with a ring that draws on, name, typed handle, verified badge) with a Follow button that an animated cursor clicks; it turns into Following. Use for the closing follow ask, or when the speaker says 'follow for more' / introduces the creator.",
+ "duration": 3.0, "layer": "above_captions", "mutes_captions": false,
+ "params": {
+  "handle": {"type": "str", "required": true, "max": 30, "hint": "e.g. @studio.north (the @ is added if missing)"},
+  "name": {"type": "str", "default": "", "max": 32, "hint": "optional display name shown bold above the handle"},
+  "verified": {"type": "bool", "default": true},
+  "avatar": {"type": "asset", "default": null, "hint": "optional profile photo; otherwise an initial tile"},
+  "layout": {"type": "enum", "values": ["pill", "card"], "default": "pill", "hint": "pill = one horizontal row; card = compact vertical profile card (good beside a face)"},
+  "theme": {"type": "enum", "values": ["dark", "light"], "default": "dark"},
+  "cursor": {"type": "bool", "default": true, "hint": "animated pointer that clicks Follow (off = a tap ripple only)"},
+  "x": {"type": "float", "min": 0.2, "max": 0.8, "default": 0.5, "hint": "horizontal centre as frame fraction"},
+  "y": {"type": "float", "min": 0.1, "max": 0.85, "default": 0.62, "hint": "vertical centre as frame fraction"},
+  "scale": {"type": "float", "min": 0.7, "max": 1.3, "default": 1.0}
+ },
+ "example": {"handle": "@studio.north", "name": "Studio North"},
+ "sfx": [{"at": 0.06, "kind": "pop_soft"}, {"at": 1.22, "kind": "click_ui"}, {"at": 1.3, "kind": "pop_soft", "gain_db": -16}]} -->
+<style>
+  .mg-root{font-family:'Inter','Inter Display',system-ui,sans-serif}
+  #card{position:absolute;left:0;top:0;background:var(--fill);box-shadow:var(--shadow);transform-origin:50% 50%;will-change:transform,opacity}
+  #card::after{content:"";position:absolute;inset:0;border-radius:inherit;box-shadow:var(--rim);pointer-events:none}
+  .row{position:absolute;inset:0;display:flex;align-items:center}
+  .avw{position:relative;flex:0 0 auto}
+  .avw svg.ring{position:absolute;inset:0;width:100%;height:100%;transform:rotate(-90deg)}
+  .av{position:absolute;border-radius:50%;overflow:hidden;background:var(--tile)}
+  .av img{width:100%;height:100%;object-fit:cover;display:block}
+  .av .lt{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#fff;
+    font-family:'Inter Display','Inter',sans-serif;font-weight:800;letter-spacing:-0.02em}
+  .meta{min-width:0;flex:1 1 auto}
+  .nm{display:flex;align-items:center;color:var(--fg);font-weight:700;letter-spacing:-0.02em;line-height:1.2;white-space:nowrap;min-height:1.2em;max-width:100%}
+  .nm .t{overflow:hidden;text-overflow:ellipsis}
+  .hd{color:var(--sec);font-weight:400;letter-spacing:-0.01em;line-height:1.25;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-height:1.25em;max-width:100%}
+  .vb{flex:0 0 auto;display:inline-block}
+  .vb svg{display:block;width:100%;height:100%}
+  .btn{position:relative;flex:0 0 auto;display:flex;align-items:center;justify-content:center;font-weight:600;letter-spacing:-0.012em;
+    will-change:transform;overflow:hidden;isolation:isolate}
+  .btn .bg{position:absolute;inset:0;border-radius:inherit}
+  .btn .b1{background:var(--tint)}
+  .btn .b2{background:var(--btn2);opacity:0;box-shadow:inset 0 0 0 1px var(--btn2rim)}
+  .btn .l{position:absolute;white-space:nowrap}
+  .btn .l1{color:#fff}
+  .btn .l2{color:var(--fg);opacity:0;display:flex;align-items:center;gap:.28em}
+  .rip{position:absolute;border-radius:50%;background:var(--ripc);opacity:0;pointer-events:none}
+  #cur{position:absolute;left:0;top:0;width:0;height:0;opacity:0;will-change:transform}
+  #cur svg{position:absolute;left:-3px;top:-2px;overflow:visible;filter:drop-shadow(0 3px 5px rgba(0,0,0,.35))}
+  .tap{position:absolute;border-radius:50%;background:rgba(255,255,255,.55);opacity:0}
+</style>
+<div class="mg-root"><div id="card"></div><div id="cur"></div></div>
+<script>
+(() => {
+  const P = MG.params, root = document.documentElement, D = MG.duration;
+  const dark = P.theme !== 'light', isCard = P.layout === 'card';
+  const tint = '#2F7CF6';
+  const T = dark ? {
+    fill: 'linear-gradient(180deg, rgb(40,40,44), rgb(27,27,30))', fg: '#F5F5F7', sec: 'rgba(235,235,245,.56)',
+    rim: 'inset 0 0 0 1px rgba(255,255,255,.08), inset 0 1px 0 rgba(255,255,255,.09)',
+    shadow: '0 2px 8px rgba(0,0,0,.28), 0 20px 50px rgba(0,0,0,.45)', btn2: 'rgba(255,255,255,.12)', btn2rim: 'rgba(255,255,255,.06)',
+    ripc: 'rgba(255,255,255,.35)'
+  } : {
+    fill: 'linear-gradient(180deg, rgb(255,255,255), rgb(244,244,247))', fg: '#0B0B0D', sec: 'rgba(60,60,67,.6)',
+    rim: 'inset 0 0 0 1px rgba(255,255,255,.6), inset 0 -1px 0 rgba(0,0,0,.05)',
+    shadow: '0 2px 8px rgba(0,0,0,.12), 0 20px 50px rgba(0,0,0,.32)', btn2: 'rgba(118,118,128,.14)', btn2rim: 'rgba(0,0,0,.04)',
+    ripc: 'rgba(47,124,246,.30)'
+  };
+  // Deterministic avatar tile colour from the handle (no brand colours).
+  const handle = (() => { const h = String(P.handle || '').trim().replace(/\s+/g, ''); return h.startsWith('@') ? h : '@' + h; })();
+  let hsh = 0; for (const ch of handle) hsh = (hsh * 31 + ch.codePointAt(0)) >>> 0;
+  const tiles = [['#5B8DEF', '#3A5BD9'], ['#F2994A', '#E0533D'], ['#34C38F', '#1E8E6E'], ['#A06CF0', '#6B46D6'], ['#F06C9B', '#C2416F'], ['#4FB3D9', '#2C7DA8']];
+  const tl = tiles[hsh % tiles.length];
+  Object.entries({ '--fill': T.fill, '--fg': T.fg, '--sec': T.sec, '--rim': T.rim, '--shadow': T.shadow, '--tint': tint,
+    '--btn2': T.btn2, '--btn2rim': T.btn2rim, '--ripc': T.ripc, '--tile': `linear-gradient(145deg, ${tl[0]}, ${tl[1]})` })
+    .forEach(([k, v]) => root.style.setProperty(k, v));
+
+  // ── geometry (u = px per design point) ───────────────────────────────
+  const u = (isCard ? 2.55 : 2.6) * P.scale;
+  const card = MG.$('#card');
+  const cw = isCard ? 214 * u : Math.min(1000, 364 * u);
+  let ch = isCard ? 262 * u : 82 * u;
+  card.style.width = cw + 'px'; card.style.height = ch + 'px';
+  card.style.borderRadius = (isCard ? 30 * u : ch / 2) + 'px';
+  const avS = isCard ? 92 * u : 60 * u, ringW = 2.6 * u, gap = 3.2 * u;
+  const name = String(P.name || '').trim();
+  const primary = name || handle, secondary = name ? handle : '';
+
+  const row = MG.el('div', 'row', null, card);
+  if (isCard) { row.style.flexDirection = 'column'; row.style.justifyContent = 'flex-start'; row.style.paddingTop = (20 * u) + 'px'; }
+  else { row.style.padding = `0 ${11 * u}px 0 ${11 * u}px`; row.style.gap = (12 * u) + 'px'; }
+  const avw = MG.el('div', 'avw', null, row);
+  avw.style.width = avw.style.height = avS + 'px';
+  const r = avS / 2 - ringW / 2;
+  avw.innerHTML = `<svg class="ring" viewBox="0 0 ${avS} ${avS}"><defs><linearGradient id="rg" x1="0" y1="1" x2="1" y2="0">` +
+    `<stop offset="0" stop-color="#2F7CF6"/><stop offset=".55" stop-color="#7B61FF"/><stop offset="1" stop-color="#C86DD7"/></linearGradient></defs>` +
+    `<circle id="rc" cx="${avS / 2}" cy="${avS / 2}" r="${r}" fill="none" stroke="url(#rg)" stroke-width="${ringW}" stroke-linecap="round"/></svg>`;
+  const av = MG.el('div', 'av', null, avw);
+  const inset = ringW + gap;
+  Object.assign(av.style, { left: inset + 'px', top: inset + 'px', width: (avS - 2 * inset) + 'px', height: (avS - 2 * inset) + 'px' });
+  if (P.avatar) { const im = MG.el('img', null, null, av); im.src = P.avatar; }
+  else {
+    const ini = (Array.from(primary.replace(/^[@\s]+/, ''))[0] || '•').toUpperCase();
+    const lt = MG.el('div', 'lt', ini, av); lt.style.fontSize = ((avS - 2 * inset) * 0.44) + 'px';
+  }
+  const meta = MG.el('div', 'meta', null, row);
+  if (isCard) { meta.style.cssText = `flex:0 0 auto;display:flex;flex-direction:column;align-items:center;margin-top:${12 * u}px;max-width:${cw - 28 * u}px`; }
+  const nm = MG.el('div', 'nm', null, meta);
+  nm.style.fontSize = ((isCard ? 18 : 17) * u) + 'px';
+  const nmT = MG.el('span', 't', '', nm);
+  let vb = null;
+  if (P.verified) {
+    vb = MG.el('span', 'vb', null, nm);
+    const vs = (isCard ? 17 : 16) * u;
+    Object.assign(vb.style, { width: vs + 'px', height: vs + 'px', marginLeft: (5 * u) + 'px' });
+    // generic rosette badge with a check
+    const pts = []; for (let i = 0; i < 24; i++) { const a = i / 24 * Math.PI * 2, rr = i % 2 ? 10.2 : 12; pts.push(`${(12 + rr * Math.cos(a)).toFixed(2)},${(12 + rr * Math.sin(a)).toFixed(2)}`); }
+    vb.innerHTML = `<svg viewBox="0 0 24 24"><polygon points="${pts.join(' ')}" fill="${tint}" stroke="${tint}" stroke-width="2.2" stroke-linejoin="round"/>` +
+      `<path d="M7.6 12.3l3 3 5.9-6.3" fill="none" stroke="#fff" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+  }
+  let hdEl = null;
+  if (secondary) { hdEl = MG.el('div', 'hd', '', meta); hdEl.style.fontSize = ((isCard ? 15 : 14.5) * u) + 'px'; hdEl.style.marginTop = (1.5 * u) + 'px'; }
+  // typed line = handle (secondary when a name exists, else the primary line)
+  const typedEl = secondary ? hdEl : nmT, typedText = handle;
+  if (secondary) nmT.textContent = name;
+
+  const btn = MG.el('div', 'btn', null, row);
+  const bh = (isCard ? 38 : 40) * u;
+  btn.style.height = bh + 'px'; btn.style.borderRadius = (isCard ? 12 * u : bh / 2) + 'px';
+  btn.style.fontSize = ((isCard ? 15.5 : 15.5) * u) + 'px';
+  MG.el('div', 'bg b1', null, btn); const b2 = MG.el('div', 'bg b2', null, btn);
+  const l1 = MG.el('span', 'l l1', 'Follow', btn);
+  const l2 = MG.el('span', 'l l2', null, btn);
+  l2.innerHTML = `<span>Following</span><svg viewBox="0 0 24 24" style="width:.78em;height:.78em"><path d="M6 9.5l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+  const rip = MG.el('div', 'rip', null, btn);
+  if (isCard) { btn.style.marginTop = (16 * u) + 'px'; }
+
+  const cur = MG.$('#cur');
+  const cs = 52 * P.scale;
+  cur.innerHTML = `<svg width="${cs * 1.0}" height="${cs * 1.45}" viewBox="0 0 20 29"><path d="M2 1.6v21.6c0 .9 1 1.3 1.7.7l4.6-4.3 3.3 7.6c.3.6 1 .9 1.6.6l2.4-1c.6-.3.9-1 .6-1.6l-3.3-7.4h6.4c.9 0 1.4-1.1.7-1.7L3.7 .9C3 .3 2 .7 2 1.6z" fill="#111" stroke="#fff" stroke-width="1.6" stroke-linejoin="round"/></svg>`;
+  const tap = MG.el('div', 'tap', null, MG.$('.mg-root'));
+
+  // ── timing ────────────────────────────────────────────────────────────
+  const tRing = 0.1, tType = 0.26, cps = 30;
+  const chars = Array.from(typedText);
+  const tTyped = tType + chars.length / cps;
+  const tBadge = Math.min(tTyped + 0.04, 1.0);
+  const tPress = 1.2, tRel = 1.29;
+  const exitDur = Math.min(0.26, D * 0.1), exitAt = D - exitDur;
+
+  let L = null;
+  const layout = () => {
+    // button: fixed width that fits both labels (block never reflows)
+    const pad = (isCard ? 0 : 18) * u;
+    const lw = Math.max(l1.getBoundingClientRect().width, l2.getBoundingClientRect().width);
+    btn.style.width = (isCard ? cw - 36 * u : lw + 2 * pad) + 'px';
+    // name/handle: fit long copy by shrinking
+    typedEl.textContent = typedText;
+    if (!isCard) {
+      const avail = cw - 22 * u - avS - 24 * u - parseFloat(btn.style.width);
+      meta.style.maxWidth = avail + 'px';
+    }
+    // long names/handles shrink (to a floor) before they ellipsize
+    const maxW = parseFloat(meta.style.maxWidth) || (cw - 28 * u);
+    const fitLine = (line, text, extra) => {
+      let fs = parseFloat(line.style.fontSize);
+      while (text.scrollWidth + extra > maxW + 0.5 && fs > 11.5 * u) { fs -= 0.25 * u; line.style.fontSize = fs + 'px'; }
+    };
+    fitLine(nm, nmT, vb ? (5 + (isCard ? 17 : 16)) * u * parseFloat(nm.style.fontSize) / ((isCard ? 18 : 17) * u) : 0);
+    if (hdEl) fitLine(hdEl, hdEl, 0);
+    if (vb) { const k = parseFloat(nm.style.fontSize) / ((isCard ? 18 : 17) * u); vb.style.width = vb.style.height = ((isCard ? 17 : 16) * u * k) + 'px'; vb.style.marginLeft = (5 * u * k) + 'px'; }
+    typedEl.textContent = '';
+    if (isCard) {   // card height hugs its content
+      ch = btn.offsetTop + btn.offsetHeight + 18 * u;
+      card.style.height = ch + 'px';
+    }
+    // place card: centre at (x, y), clamped to the safe area
+    let cx = MG.W * P.x - cw / 2;
+    cx = MG.clamp(cx, 40, MG.W - 40 - cw);
+    let cy = MG.H * P.y - ch / 2;
+    cy = MG.clamp(cy, MG.H * 0.05, Math.max(MG.H * 0.05, MG.H * 0.92 - ch));
+    card.style.left = cx + 'px'; card.style.top = cy + 'px';
+    // cursor path: from lower right, curving to the button centre
+    const br = btn.getBoundingClientRect();
+    const bx = br.left + br.width * 0.56, by = br.top + br.height * 0.62;
+    L = { bx, by, bw: br.width, bh: br.height, cx, cy,
+          p0: [Math.min(MG.W + 40, bx + 260 * P.scale), by + 300 * P.scale],
+          p1: [bx + 210 * P.scale, by + 40 * P.scale], p2: [bx + 30 * P.scale, by + 70 * P.scale] };
+    const rr = br.width * 0.75;
+    Object.assign(rip.style, { width: 2 * rr + 'px', height: 2 * rr + 'px', left: (br.width * 0.56 - rr) + 'px', top: (br.height * 0.62 - rr) + 'px' });
+    const tr = 26 * u;
+    Object.assign(tap.style, { width: 2 * tr + 'px', height: 2 * tr + 'px', left: (bx - tr) + 'px', top: (by - tr) + 'px' });
+    const curExtra = P.cursor ? 320 * P.scale : 0;
+    MG.box = [Math.max(0, cx - 70), cy - 60, Math.min(MG.W, Math.max(cx + cw, bx + curExtra) + 70), Math.max(cy + ch, by + curExtra) + 90];
+    const wins = [[0, Math.max(0.62, tBadge + 0.45)], [0.5, tRel + 0.55], [exitAt - 0.02, D]];
+    if (P.cursor) wins.push([tRel + 0.4, tRel + 1.15]);
+    MG.active(wins);
+    return L;
+  };
+  document.body.offsetHeight;
+  MG.ready = document.fonts.ready.then(() => { if (!L) layout(); });
+
+  const bez = (a, b, c, d, p) => { const q = 1 - p; return q * q * q * a + 3 * q * q * p * b + 3 * q * p * p * c + p * p * p * d; };
+  MG.frame(t => {
+    if (!L) layout();
+    // card entrance: spring with a little scale + blur-to-sharp
+    const k = MG.spring(t, 0, { stiffness: 300, damping: 22 });
+    let cs0 = { y: (1 - k) * 40, scale: 0.9 + 0.1 * Math.min(k, 1.03), opacity: MG.range(t, 0, 0.1), blur: (1 - MG.range(t, 0, 0.18)) * 8 };
+    // ring draws on clockwise
+    const rc = MG.$('#rc');
+    if (rc) MG.draw(rc, MG.ease.outCubic(MG.range(t, tRing, 0.42)));
+    // typed handle + caret-less letter-by-letter (UI autofill feel)
+    const n = Math.max(0, Math.min(chars.length, Math.floor((t - tType) * cps)));
+    typedEl.textContent = chars.slice(0, n).join('');
+    if (vb) {
+      const kb = MG.spring(t, tBadge, { stiffness: 420, damping: 15 });
+      MG.set(vb, { scale: t < tBadge ? 0 : kb, opacity: t < tBadge ? 0 : 1 });
+    }
+    // button press: dip on press, spring back on release, colour swap
+    let bs = 1;
+    if (t >= tPress - 0.02 && t < tRel) bs = 1 - 0.07 * MG.ease.outQuad(MG.range(t, tPress - 0.02, 0.06));
+    else if (t >= tRel) bs = 0.93 + 0.07 * MG.spring(t, tRel, { stiffness: 420, damping: 16 });
+    MG.set(btn, { scale: bs });
+    const sw = MG.range(t, tRel, 0.14);
+    b2.style.opacity = sw; MG.$('.b1', btn).style.opacity = 1 - sw;
+    l1.style.opacity = 1 - MG.range(t, tRel, 0.08);
+    MG.set(l2, { opacity: MG.range(t, tRel + 0.04, 0.12), y: (1 - MG.ease.outCubic(MG.range(t, tRel + 0.04, 0.2))) * 6 * u });
+    const rp = MG.range(t, tPress, 0.45);
+    MG.set(rip, { scale: 0.2 + 0.8 * MG.ease.outExpo(rp), opacity: rp > 0 && rp < 1 ? 0.9 * (1 - rp) : 0 });
+    // cursor: glide in along a bezier, press, then drift away and fade
+    if (P.cursor) {
+      const tIn = 0.55, tArr = tPress - 0.06;
+      const mp = MG.ease.inOutCubic(MG.range(t, tIn, tArr - tIn));
+      let x = bez(L.p0[0], L.p1[0], L.p2[0], L.bx, mp), y = bez(L.p0[1], L.p1[1], L.p2[1], L.by, mp);
+      let sc = 1, op = MG.range(t, tIn, 0.12);
+      if (t >= tPress - 0.02 && t < tRel + 0.02) sc = 1 - 0.14 * MG.ease.outQuad(MG.range(t, tPress - 0.02, 0.06));
+      else if (t >= tRel + 0.02) sc = 0.86 + 0.14 * MG.spring(t, tRel + 0.02, { stiffness: 400, damping: 18 });
+      const lv = MG.ease.inOutCubic(MG.range(t, tRel + 0.45, 0.6));
+      x += lv * 70 * P.scale; y += lv * 90 * P.scale; op *= 1 - MG.range(t, tRel + 0.6, 0.45);
+      MG.set(cur, { x, y, scale: sc, opacity: op });
+    } else {
+      const tp = MG.range(t, tPress, 0.4);
+      MG.set(tap, { scale: 0.4 + 0.8 * MG.ease.outCubic(tp), opacity: tp > 0 && tp < 1 ? 0.7 * (1 - tp) : 0 });
+    }
+    // exit
+    if (t > exitAt) {
+      const q = MG.ease.inCubic(MG.range(t, exitAt, exitDur));
+      cs0 = { y: -q * 30, scale: 1 - 0.04 * q, opacity: 1 - q, blur: q * 6 };
+    }
+    MG.set(card, cs0);
+  });
+})();
+</script>
