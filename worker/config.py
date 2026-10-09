@@ -1694,6 +1694,13 @@ SCREENING_FRAME_PARALLELISM = int(os.getenv(
 FINAL_PRESET = os.getenv("FINAL_PRESET", "veryfast")
 FINAL_CRF = int(os.getenv("FINAL_CRF", "18"))
 
+# Keep spans further apart than this (source seconds) are read through their
+# own bounded input instead of decoding the gap (renderer._keep_clusters).
+# A new input costs a seek plus up to one GOP of preroll, so short gaps stay
+# in one read. 0 disables; MAX bounds the extra demuxer/decoder pairs.
+KEEP_CLUSTER_GAP_S = float(os.getenv("KEEP_CLUSTER_GAP_S", "20"))
+KEEP_CLUSTER_MAX_INPUTS = int(os.getenv("KEEP_CLUSTER_MAX_INPUTS", "8"))
+
 SILENCE_NOISE_DB = "-35dB"
 SILENCE_MIN_S = 0.6
 SCENE_THRESHOLD = float(os.getenv("SCENE_THRESHOLD", "27.0"))

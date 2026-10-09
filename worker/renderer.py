@@ -1735,7 +1735,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                       wm_anchor_y=None,
                       plate_idx=None, plate_box=None, behind_inputs=None,
                       patch_inputs=None, cap_burn_offset=None,
-                      picture_card_inputs=None):
+                      picture_card_inputs=None, main_video_inputs=None):
     """Input layout: [0] main source video; anullsrc at silence_idx when
     needed (no main audio, image inserts, or silent clip inserts); then one
     input per music item, insert item and voiceover item in EDL order.
@@ -1743,6 +1743,12 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     insert_inputs: [(input_idx, item, has_audio)] aligned with the sorted
     EDL inserts (same order as tl.insert_positions()).
     vo_inputs: [(input_idx, item, vo_duration_s)].
+    main_video_inputs: [(input_idx, src_start, src_end)] — bounded extra
+    reads of the MAIN source, one per distant cluster of keep spans
+    (_keep_clusters). Each segment's picture is tapped from the input whose
+    window holds it, so the gaps between clusters are never decoded; audio
+    still comes from [0]. None (or any segment left uncovered) keeps the
+    single [0:v] split.
     src_pad: seconds of the source whose picture track ran out early (a phone
     screen recording stops writing frames while the screen is static). The last
     frame is held across them, matching what a player shows, what the proxy
@@ -2048,14 +2054,42 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                          f":enable='between(t,{pps:.3f},{ppe:.3f})'"
                          f"[vptc{pj}]")
             vsrc = f"vptc{pj}"
+    # Distant keep clusters read from their own bounded inputs (render_edl
+    # opens them only when nothing touches the [0:v] stream before the trims:
+    # no repaint patches, no picture-track pad). Each segment's video tap
+    # comes from the input that holds it; every frame it receives carries
+    # the same source timestamp (-copyts) the single split delivered.
+    owners = None
+    if main_video_inputs and n > 1 and not patch_inputs and src_pad <= 0:
+        owners = []
+        for seg_a, seg_b in keep:
+            hit = [ix for ix, a, b in main_video_inputs
+                   if a - 0.01 <= seg_a and seg_b <= b + 0.01]
+            if not hit:
+                owners = None
+                break
+            owners.append(hit[0])
+
+    def _video_taps():
+        for ix in dict.fromkeys(owners):
+            segs = [i for i, o in enumerate(owners) if o == ix]
+            if len(segs) == 1:
+                parts.append(f"[{ix}:v]null[vin{segs[0]}]")
+            else:
+                parts.append(f"[{ix}:v]split={len(segs)}"
+                             + "".join(f"[vin{i}]" for i in segs))
+
     if speed and n >= 1:
         # Speed path: every segment needs its own video AND audio tap.
         if n == 1:
             parts.append(f"[{vsrc}]null[vin0]")
             parts.append("[asrc]anull[ain0]")
         else:
-            parts.append(f"[{vsrc}]split=" + str(n)
-                         + "".join(f"[vin{i}]" for i in range(n)))
+            if owners:
+                _video_taps()
+            else:
+                parts.append(f"[{vsrc}]split=" + str(n)
+                             + "".join(f"[vin{i}]" for i in range(n)))
             parts.append("[asrc]asplit=" + str(n)
                          + "".join(f"[ain{i}]" for i in range(n)))
         for i, (s, e) in enumerate(keep):
@@ -2066,8 +2100,11 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                      f"asetpts=PTS-STARTPTS"
                      + (f",{AUDIO_NORM}" if do_norm else "") + "[a_seg0]")
     elif n > 1:
-        parts.append(f"[{vsrc}]split=" + str(n)
-                     + "".join(f"[vin{i}]" for i in range(n)))
+        if owners:
+            _video_taps()
+        else:
+            parts.append(f"[{vsrc}]split=" + str(n)
+                         + "".join(f"[vin{i}]" for i in range(n)))
         parts.append("[asrc]asplit=" + str(n)
                      + "".join(f"[ain{i}]" for i in range(n)))
         for i, (s, e) in enumerate(keep):
@@ -3853,6 +3890,32 @@ def _render_asset_source_impl(key, tag, idx, workdir, asset_locals=None):
     return _fetch_into(workdir, key, f"{tag}_{idx}")
 
 
+def _keep_clusters(keep, gap_s, max_clusters):
+    """Group keep spans (source seconds) into clusters separated by at least
+    `gap_s` of unused source, as sorted (start, end) windows. Spans may be in
+    any program order; a cluster is a source window, not a program range.
+    Past `max_clusters` the closest clusters merge (each cluster is one more
+    demuxer + decoder). gap_s <= 0 disables clustering (one window)."""
+    spans = sorted((float(a), float(b)) for a, b in keep or []
+                   if float(b) - float(a) > 0.01)
+    if not spans:
+        return []
+    if gap_s <= 0:
+        return [(spans[0][0], max(b for _a, b in spans))]
+    clusters = [list(spans[0])]
+    for a, b in spans[1:]:
+        if a - clusters[-1][1] < gap_s:
+            clusters[-1][1] = max(clusters[-1][1], b)
+        else:
+            clusters.append([a, b])
+    while len(clusters) > max(1, int(max_clusters)):
+        k = min(range(len(clusters) - 1),
+                key=lambda i: clusters[i + 1][0] - clusters[i][1])
+        clusters[k][1] = max(clusters[k][1], clusters[k + 1][1])
+        del clusters[k + 1]
+    return [(a, b) for a, b in clusters]
+
+
 def _repair_legacy_insert_boundaries(edl_dict):
     """Snap only legacy off-boundary inserts so an old broken EDL can render.
 
@@ -4168,6 +4231,30 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                                      media.PROXY_SHORT_FRAC * src_dur):
         src_pad = src_dur - vdur
 
+    # Distant keep spans (perf round). The main input seeks once, to the first
+    # keep, and the [0:v] split then decodes EVERY frame up to the last keep:
+    # 12 s of output from two moments 20 minutes apart took 13.4 s instead of
+    # 1.3 s. Each distant cluster of spans gets its own bounded read of the
+    # same file (-ss/-t, 1 s preroll; -copyts is already on, so frames keep
+    # their source timestamps and every trim is unchanged). Audio keeps coming
+    # from [0] — volume automation, stems and loudness see the same track.
+    # Only when nothing rewrites [0:v] before the trims (repaint patches, the
+    # picture-track pad), and never for an audio-only rebuild.
+    main_video_inputs = None
+    if seek_main_source and not patch_inputs and src_pad <= 0 \
+            and not audio_only:
+        clusters = _keep_clusters(edl["keep"], config.KEEP_CLUSTER_GAP_S,
+                                  config.KEEP_CLUSTER_MAX_INPUTS)
+        if len(clusters) > 1:
+            main_video_inputs = []
+            for a, b in clusters:
+                seek = max(0.0, a - 1.0)
+                extra_inputs += ["-ss", f"{seek:.3f}",
+                                 "-t", f"{b - seek + 1.0:.3f}",
+                                 "-i", src_path]
+                main_video_inputs.append((next_idx, a, b))
+                next_idx += 1
+
     # The end card is its own bounded ffmpeg input — an MP4 in the healthy
     # build, or its PNG poster fallback. No filter conjures a bundled asset out
     # of nothing, and the explicit input -t prevents either branch from ever
@@ -4283,7 +4370,8 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                               patch_inputs=patch_inputs,
                               cap_burn_offset=cap_burn_offset,
                               picture_card_inputs=picture_card_inputs,
-                              motion_inputs=motion_inputs)
+                              motion_inputs=motion_inputs,
+                              main_video_inputs=main_video_inputs)
 
     if audio_only:
         # The same graph the full render would run, minus every chain the

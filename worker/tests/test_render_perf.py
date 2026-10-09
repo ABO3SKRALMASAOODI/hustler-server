@@ -279,3 +279,83 @@ def test_reduced_resolution_glow_matches_the_full_resolution_glow():
         vals.append(np.frombuffer(out, np.uint8).astype(float))
     mse = float(np.mean((vals[0] - vals[1]) ** 2))
     assert 10 * math.log10(255 ** 2 / max(mse, 1e-9)) > 40
+
+
+# ------------------------------------------------- distant keep clusters ----
+
+def test_keep_clusters_split_on_long_gaps_and_cap_the_input_count():
+    keep = [[600, 606], [610, 614.5], [1800, 1806], [2400, 2405.5]]
+    assert renderer._keep_clusters(keep, 20, 8) == [
+        (600.0, 614.5), (1800.0, 1806.0), (2400.0, 2405.5)]
+    # the closest clusters merge first when there are too many
+    assert renderer._keep_clusters(keep, 20, 2) == [
+        (600.0, 614.5), (1800.0, 2405.5)]
+    assert renderer._keep_clusters(keep, 0, 8) == [(600.0, 2405.5)]
+
+
+def test_cluster_inputs_feed_each_segment_its_own_bounded_read():
+    e = validate_edl({"keep": [[600, 606], [610, 614], [1800, 1806]],
+                      "frame": {"ratio": "9:16", "mode": "crop"}},
+                     4000).model_dump()
+    tl = Timeline(e["keep"])
+    kw = dict(W=360, H=640, fps=30.0, frame_mode="crop", src_w=640,
+              src_h=360)
+    g = renderer.build_filtergraph(
+        e, 4000.0, True, tl, None, [], INDEX, False,
+        main_video_inputs=[(1, 600.0, 614.0), (2, 1800.0, 1806.0)], **kw)
+    assert "[0:v]" not in g, "the gap between clusters is never decoded"
+    assert "[1:v]split=2[vin0][vin1]" in g and "[2:v]null[vin2]" in g
+    assert "[0:a]" in g, "audio still comes from the main input"
+    # a segment no cluster covers keeps the single-input graph
+    g2 = renderer.build_filtergraph(
+        e, 4000.0, True, tl, None, [], INDEX, False,
+        main_video_inputs=[(1, 600.0, 606.0)], **kw)
+    assert "[0:v]split=3" in g2
+
+
+@needs_ffmpeg
+def test_cluster_reads_render_the_identical_programme(tmp_path, monkeypatch):
+    src = str(tmp_path / "long.mp4")
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+         "testsrc2=s=320x180:r=30:d=95", "-f", "lavfi", "-i",
+         "sine=frequency=330:sample_rate=48000:duration=95",
+         "-c:v", "libx264", "-preset", "ultrafast", "-g", "60",
+         "-pix_fmt", "yuv420p", "-c:a", "aac", src],
+        check=True, capture_output=True, timeout=120)
+    edl = {"keep": [[8.0, 10.0], [11.0, 12.5], [45.0, 47.0], [88.0, 90.0]],
+           "frame": {"ratio": "9:16", "mode": "crop"},
+           "effects": {"grade": "warm"}}
+    index = {"words": [], "sentences": [], "silences": [], "video": {}}
+    commands = {}
+
+    def capture(cmd, **kw):
+        commands["cmd"] = [c for c in cmd
+                           if c not in ("-progress", "pipe:1", "-nostats")]
+        raise StopIteration
+
+    monkeypatch.setattr(renderer, "_render_media_run", capture)
+    digests = {}
+    for gap in (0.0, 20.0):
+        monkeypatch.setattr(renderer.config, "KEEP_CLUSTER_GAP_S", gap)
+        out = str(tmp_path / f"out_{int(gap)}.mp4")
+        work = tmp_path / f"work_{int(gap)}"
+        work.mkdir()
+        with pytest.raises(StopIteration):
+            renderer.render_edl(edl, index, src, out, str(work), preview=True)
+        n_inputs = commands["cmd"].count("-i")
+        subprocess.run(commands["cmd"], check=True, capture_output=True,
+                       timeout=180)
+        frames = subprocess.run(
+            ["ffmpeg", "-v", "error", "-i", out, "-map", "0:v", "-f",
+             "framemd5", "-"], capture_output=True, text=True,
+            check=True).stdout
+        audio = subprocess.run(
+            ["ffmpeg", "-v", "error", "-i", out, "-map", "0:a", "-f", "md5",
+             "-"], capture_output=True, text=True, check=True).stdout
+        digests[gap] = (n_inputs,
+                        [ln for ln in frames.splitlines()
+                         if not ln.startswith("#")], audio)
+    assert digests[20.0][0] == digests[0.0][0] + 3, "one read per cluster"
+    assert digests[20.0][1] == digests[0.0][1], "every frame identical"
+    assert digests[20.0][2] == digests[0.0][2], "audio identical"
