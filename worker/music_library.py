@@ -152,6 +152,25 @@ def describe(t):
     return ", ".join(bits)
 
 
+def body_start(track):
+    """Seconds into the track where its main body starts after a quiet intro
+    (manifest ``body_s``; 0.0 when it has none). Twelve tracks open with
+    7.5-25.6 s sitting 5-19 LU under their own body — most or all of a
+    short. Measured on a 14 s editorial render: the bed started at 0 sat
+    21.8 dB under the voice while words played, 16.4 dB started here."""
+    try:
+        b = float(track.get("body_s") or 0.0)
+    except (TypeError, ValueError, AttributeError):
+        return 0.0
+    try:
+        d = float(track.get("duration_s") or 0.0)
+    except (TypeError, ValueError):
+        d = 0.0
+    if b <= 0.0 or (d and b >= d - 10.0):
+        return 0.0
+    return round(b, 2)
+
+
 def project_key(project_id, track):
     return f"music/{int(project_id)}/library-{track['slug']}.mp3"
 
@@ -296,8 +315,11 @@ def list_music_library(ctx, mood=None):
 
 
 def add_library_music(ctx, slug, start=None, end=None, gain_db=None,
-                      duck=True, fade_in_s=None, fade_out_s=None,
+                      duck=None, fade_in_s=None, fade_out_s=None,
                       offset_s=None, loop=None, purpose=None):
+    # duck=None lets add_music decide from the program: a bed ducks under
+    # speech, while music that IS the audio (no speech) is never pumped by
+    # the sidechain on every loud original sound.
     track, err = find(slug)
     if err:
         return err
@@ -307,11 +329,17 @@ def add_library_music(ctx, slug, start=None, end=None, gain_db=None,
     purpose_n = " ".join(str(purpose or "").split()) or (
         f"{track['mood']} bed from the Valmera CC0 library "
         f"(\"{track['title']}\")")
+    body = body_start(track) if offset_s is None else 0.0
     res = _at().add_music(
         ctx, key, start=start, end=end, gain_db=gain_db, duck=duck,
-        offset_s=offset_s, fade_in_s=fade_in_s, fade_out_s=fade_out_s,
+        offset_s=(body or None) if offset_s is None else offset_s,
+        fade_in_s=fade_in_s, fade_out_s=fade_out_s,
         loop=True if loop is None else bool(loop), purpose=purpose_n)
     if str(res).startswith("EDL v"):
+        if body:
+            res += (f"\nStarts {body:g}s into the track, where its body "
+                    "begins after a quiet intro (offset_s=0 plays the "
+                    "intro).")
         res += (f"\nTrack: \"{track['title']}\" by {track.get('author')} "
                 f"({track['mood']}) — {LICENSE_NOTE}. Source: "
                 f"{track.get('source_url')}")
@@ -339,8 +367,17 @@ TOOL_SPECS = {
         "omitted); with no speech it becomes the lead at -4 dB.",
         {"slug": {"type": "string"},
          "start": {"type": "number"}, "end": {"type": "number"},
-         "gain_db": {"type": "number"}, "duck": {"type": "boolean"},
+         "gain_db": {"type": "number"},
+         "duck": {"type": "boolean",
+                  "description": "Omit to duck under speech only; with no "
+                                 "speech the track plays undiminished as "
+                                 "the lead."},
          "fade_in_s": {"type": "number"}, "fade_out_s": {"type": "number"},
-         "offset_s": {"type": "number"}, "loop": {"type": "boolean"},
+         "offset_s": {"type": "number",
+                      "description": "Seconds into the track to start. "
+                                     "Omit to start where the track's body "
+                                     "begins (skipping a quiet intro); 0 "
+                                     "plays it from the very start."},
+         "loop": {"type": "boolean"},
          "purpose": {"type": "string"}}),
 }

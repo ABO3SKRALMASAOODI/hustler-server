@@ -10090,6 +10090,7 @@ def set_insert_window(ctx, id, duration_s=None, clip_start_s=None,
     old_tl = Timeline(edl.get("keep") or [], before, speed)
     new_tl = Timeline(edl.get("keep") or [], inserts, speed)
     notes = _remap_program_items(edl, old_tl, new_tl)
+    notes += _prune_stray_look_sfx(ctx, edl)
     res = ctx.write_edl(
         edl, f"insert {id} now plays {off}-{round(off + span, 2)}s of "
              f"'{os.path.basename(hit['asset_key'])}'{at_rate} "
@@ -10142,6 +10143,7 @@ def move_insert(ctx, id, after_id=None):
     edl["inserts"] = new_list
     new_tl = Timeline(edl.get("keep") or [], new_list, speed)
     notes = _remap_program_items(edl, old_tl, new_tl)
+    notes += _prune_stray_look_sfx(ctx, edl)
     win = insert_windows(new_list, new_tl).get(id)
     where = (f"it now plays {round(win[0], 2)}-{round(win[1], 2)}s of the "
              "program" if win else "moved")
@@ -10173,6 +10175,7 @@ def remove_insert(ctx, id):
     old_tl = Timeline(edl.get("keep") or [], inserts, speed)
     new_tl = Timeline(edl.get("keep") or [], edl["inserts"], speed)
     notes = _remap_program_items(edl, old_tl, new_tl)
+    notes += _prune_stray_look_sfx(ctx, edl)
     res = ctx.write_edl(
         edl, f"removed insert {id} "
              f"('{os.path.basename(hit['asset_key'])}', {hit['duration_s']}s) "
@@ -10280,6 +10283,7 @@ def cut_output_range(ctx, start, end):
     edl["inserts"] = new_inserts
     new_tl = Timeline(new_keep, new_inserts, speed)
     notes = ins_notes + _remap_program_items(edl, tl, new_tl)
+    notes += _prune_stray_look_sfx(ctx, edl)
     bits = []
     if src_cuts:
         bits.append("footage " + ", ".join(f"{s}-{e}s" for s, e in src_cuts)
@@ -21318,22 +21322,35 @@ def suggest_emphasis(ctx):
 #   from/to black to a vertical/square short (taste.critique flags both: the
 #   first second is the only one every viewer watches, and a short loops),
 #   and hype's declared-but-never-read `sound_design` is real now as
-#   `transition_sfx`: a kit whoosh lands on each scene transition it fires.
+#   `transition_sfx`: a kit whoosh lands on a budgeted, spaced subset of the
+#   scene transitions it fires (see LOOK_SFX_HERO_RESERVE).
 # * The premium SYSTEMS ("system": True) set a coherent whole in one call:
 #   browser-drawn motion captions (captions.style.motion_look) in the look's
-#   colours with a matching libass preset as the render fallback, one
-#   committed grade (preset + continuous values that REPLACE any earlier
-#   custom grade), texture (grain/vignette/halation, replacing earlier
-#   whole-program texture), one scene-transition style with paired kit
-#   sounds, no fade from black on vertical, and — only when asked
-#   (music='auto', a mood or a slug) — a ducked CC0 library bed. They return
-#   the hero-moment templates to place next.
+#   colours over a matching libass preset (used alone where the browser
+#   engine is unavailable), one committed grade (preset + continuous values
+#   that REPLACE any earlier custom grade), texture (grain/vignette/
+#   halation, replacing earlier whole-program texture), one scene-transition
+#   style with paired kit sounds, no fade from black on vertical, and — only
+#   when asked (music='auto', a mood or a slug) — a ducked CC0 library bed.
+#   They return the hero-moment templates to place next.
 #
 # Every component is an ordinary EDL field the user could have set one call
 # at a time, and the result names each one. A key absent = leave that axis
 # alone; "grade": None / "transition": None = explicitly clear it. Cuts are
 # never touched. Sounds the look places carry ids look_tx<n> so re-applying
 # (or switching) a look replaces them instead of stacking.
+#
+# Bed levels ("music_db") come from measurement. Rendered through the real
+# smooth duck on a 30 s podcast window (voice -23 LUFS; 22 podcast sources
+# the owner cut span -14 to -32 LUFS, median about -21) with every CC0
+# track started on its body (music_library.body_start), the median per-word
+# gap at -18 dB was ~14-15 dB under the voice for upbeat/hiphop/chill,
+# ~16-17 for ambient/dramatic, ~18 for corporate/inspiring and ~20 for the
+# sparse cinematic beds. So cinematic_doc sits 2 dB hotter and mono_noir
+# 1 dB, putting each system's pool at 15-19 dB (DESIGN_BRIEF: references
+# sit 13-20 dB under the voice); clean_minimal stays deliberately quiet.
+# The bed is an absolute gain, so a source 6 dB louder than that one puts
+# it 6 dB further under (the renderer has no voice-relative bed level).
 LOOK_TEXTURE_KINDS = ("grain", "vignette", "halation", "glow")
 LOOK_SFX_PREFIX = "look_tx"
 
@@ -21429,7 +21446,7 @@ LOOKS = {
         "transition": ("dip_black", 0.45),
         "transition_sfx": (("whoosh_soft", "swoosh_up"), -9.0),
         "fade_in_s": 0.0, "fade_out_s": 0.0,
-        "music": ("cinematic", "ambient", "dramatic"), "music_db": -18.0,
+        "music": ("cinematic", "ambient", "dramatic"), "music_db": -16.0,
         "hero": {"categories": ("type", "layout", "callout", "data"),
                  "keywords": ("lower third", "chapter", "date", "map",
                               "quote", "location", "title", "documentary",
@@ -21453,7 +21470,7 @@ LOOKS = {
         "transition": ("glitch", 0.2),
         "transition_sfx": (("glitch", "whoosh_hard"), -8.0),
         "fade_in_s": 0.0, "fade_out_s": 0.0,
-        "music": ("dramatic", "hiphop"), "music_db": -18.0,
+        "music": ("dramatic", "hiphop"), "music_db": -17.0,
         "music_fade_in_s": 0.3,
         "hero": {"categories": ("type", "transition", "texture", "callout"),
                  "keywords": ("glitch", "slam", "impact", "word", "stamp",
@@ -21507,48 +21524,141 @@ def _kit_landing_s(kind):
     return _KIT_LANDING_CACHE[kind]
 
 
-def _look_transition_times(ctx, edl):
-    """(output times of the junctions the look's transition fires on, note).
+# Transition SOUNDS are accents, so they are budgeted separately from the
+# transitions themselves (DESIGN_BRIEF: "SFX sparse and structural"). A look
+# sounds at most one junction per insert (its entry), never two within
+# TRANSITION_MIN_SPACING_S, never on top of an existing sound, and leaves
+# room inside taste's sfx density budget for the hero graphics it recommends
+# (each template brings its own cues — hook_title has two).
+LOOK_SFX_HERO_RESERVE = 2
+LOOK_SFX_CLEAR_S = 1.0
+# A look sound starts this far (at most) before the junction it lands on —
+# the longest landing of the kit kinds looks use is ~0.44s.
+LOOK_SFX_LEAD_MAX_S = 0.6
+
+
+def _look_junction_rows(ctx, edl):
+    """The junctions the current transition fires on, in program order:
+    [{"k", "t", "enters", "leaves"}] — t is the output time of the cut,
+    enters/leaves name the insert the cut goes INTO / comes OUT of (None
+    for footage). Same resolver the renderer uses."""
+    if not (edl.get("effects") or {}).get("transition"):
+        return []
+    try:
+        ks = sorted(timeline_mod.transition_junctions(
+            edl, getattr(ctx, "index", None)))
+        blocks = timeline_mod.program_blocks(edl)
+    except Exception:
+        return []
+    rows = []
+    for k in ks:
+        if k + 1 >= len(blocks):
+            continue
+        a, b = blocks[k], blocks[k + 1]
+        rows.append({
+            "k": k, "t": float(b["out_start"]),
+            "enters": ((b.get("id") or f"block{k + 2}")
+                       if b.get("kind") == "insert" else None),
+            "leaves": ((a.get("id") or f"block{k + 1}")
+                       if a.get("kind") == "insert" else None)})
+    return rows
+
+
+def _time_spaced(rows, gap):
+    """Greedy pick in time order: a row is kept only when it is at least
+    `gap` seconds after the previously kept one (clustered B-roll in/out
+    pairs collapse to their first cut instead of firing twice)."""
+    out = []
+    for r in rows:
+        if not out or r["t"] - out[-1]["t"] >= gap - 1e-6:
+            out.append(r)
+    return out
+
+
+def _even_subset(rows, n):
+    if n <= 0:
+        return []
+    if len(rows) <= n:
+        return list(rows)
+    if n == 1:
+        return [rows[0]]
+    idx = sorted({round(i * (len(rows) - 1) / (n - 1)) for i in range(n)})
+    return [rows[i] for i in idx]
+
+
+def _look_transition_rows(ctx, edl):
+    """(junction rows the look's transition fires on, note).
 
     Same resolver and the same cadence rule as set_transitions: scope 'scene'
     only fires where the footage really changes (never on jump cuts), and a
     look must not turn a dense montage into an effect every couple of
-    seconds — it marks an evenly spaced subset instead of refusing."""
-    fx = edl.get("effects") or {}
-    tr = fx.get("transition")
-    if not tr:
-        return [], ""
-    try:
-        eligible = sorted(timeline_mod.transition_junctions(
-            edl, getattr(ctx, "index", None)))
-    except Exception:
-        return [], ""
+    seconds — it marks a TIME-spaced subset (each kept junction at least
+    TRANSITION_MIN_SPACING_S after the previous one) instead of refusing."""
+    rows = _look_junction_rows(ctx, edl)
     prog = program_duration(edl)
     note = ""
-    if len(eligible) >= 3 and prog > 0 \
-            and prog / len(eligible) < TRANSITION_MIN_SPACING_S:
+    if len(rows) >= 3 and prog > 0 \
+            and prog / len(rows) < TRANSITION_MIN_SPACING_S:
         keep_n = max(1, int(prog / TRANSITION_MIN_SPACING_S))
-        if keep_n == 1:
-            chosen = [eligible[len(eligible) // 2]]
-        else:
-            chosen = sorted({eligible[round(i * (len(eligible) - 1)
-                                            / (keep_n - 1))]
-                             for i in range(keep_n)})
-        note = (f"{len(eligible)} scene changes would fire a full-screen "
-                f"transition every {prog / len(eligible):.1f}s, so the look "
-                f"marks {len(chosen)} evenly spaced ones and leaves the rest "
-                "as hard cuts")
-        tr = dict(tr, junctions=chosen)
-        fx = dict(fx, transition=tr)
+        chosen = _even_subset(
+            _time_spaced(rows, TRANSITION_MIN_SPACING_S), keep_n)
+        note = (f"{len(rows)} scene changes would fire a full-screen "
+                f"transition every {prog / len(rows):.1f}s, so the look "
+                f"marks {len(chosen)} of them at least "
+                f"{TRANSITION_MIN_SPACING_S:g}s apart and leaves the rest as "
+                "hard cuts")
+        fx = dict(edl.get("effects") or {})
+        fx["transition"] = dict(fx["transition"],
+                                junctions=[r["k"] for r in chosen])
         edl["effects"] = fx
-        eligible = chosen
-    try:
-        blocks = timeline_mod.program_blocks(edl)
-    except Exception:
-        return [], note
-    times = [float(blocks[k + 1]["out_start"]) for k in eligible
-             if k + 1 < len(blocks)]
-    return times, note
+        rows = chosen
+    return rows, note
+
+
+def _look_sound_rows(rows, existing_at, cap):
+    """Which transition junctions get a look sound: one per insert (its
+    entry; the exit only when the entry does not fire), clear of existing
+    sounds, time-spaced, at most `cap`."""
+    entered = {r["enters"] for r in rows if r["enters"]}
+    cand = [r for r in rows
+            if not (r["enters"] is None and r["leaves"] in entered)]
+    cand = [r for r in cand
+            if all(abs(a - r["t"]) >= LOOK_SFX_CLEAR_S for a in existing_at)]
+    return _even_subset(_time_spaced(cand, TRANSITION_MIN_SPACING_S), cap)
+
+
+def _look_sfx_budget(prog):
+    """taste.critique's sfx density ceiling for a program this long."""
+    return max(3, int(prog / taste.SFX_PER_S)) if prog > 0 else 0
+
+
+def _prune_stray_look_sfx(ctx, edl):
+    """After an insert is removed, moved or retimed the transition moves with
+    its junction, but a look sound re-anchors to the footage it sat on and
+    can end up on a plain cut or mid-shot. Drop look_tx* sounds that no
+    longer lead into a firing transition. Mutates edl; returns notes."""
+    sfx = list(edl.get("sfx") or [])
+    if not any(str(s.get("id") or "").startswith(LOOK_SFX_PREFIX)
+               for s in sfx):
+        return []
+    times = [r["t"] for r in _look_junction_rows(ctx, edl)]
+    kept, gone = [], []
+    for s in sfx:
+        if str(s.get("id") or "").startswith(LOOK_SFX_PREFIX):
+            try:
+                at = float(s.get("at") or 0.0)
+            except (TypeError, ValueError):
+                at = -1e9
+            if not any(-0.1 <= t - at <= LOOK_SFX_LEAD_MAX_S for t in times):
+                gone.append(str(s.get("id")))
+                continue
+        kept.append(s)
+    if not gone:
+        return []
+    edl["sfx"] = kept
+    return [f"Removed look transition sound(s) {', '.join(gone)} — the scene "
+            "transition they landed on is no longer there after this change. "
+            "Re-apply the look to sound the current transitions."]
 
 
 def _look_portrait(ctx, edl):
@@ -21660,6 +21770,20 @@ def apply_look(ctx, name, music=None):
                 # The motion look carries its own type system: an earlier
                 # look's font or fine size multiplier would override it.
                 patch.update({"size_scale": None, "font": None})
+            if patch.get("motion_look") \
+                    and not motion_tools.motion_engine.available():
+                # The renderer skips the libass burn whenever motion_look is
+                # set, so writing it where the browser engine is missing
+                # would lose the captions outright, not just their motion.
+                notes.append(
+                    "browser-drawn motion captions are not available on "
+                    "this deployment, so the captions use the look's "
+                    f"'{patch['preset']}' preset in its colours instead.")
+                patch["motion_look"] = None
+            elif not patch.get("motion_look"):
+                # A classic look's preset IS its caption look: clear a motion
+                # look an earlier system left, or it would keep drawing.
+                patch["motion_look"] = None
             if isinstance(caps, list):
                 # motion_look / highlight colours exist for transcript
                 # captions only; manual items keep their authored timing.
@@ -21687,11 +21811,16 @@ def apply_look(ctx, name, music=None):
                        f"({patch.get('color')}"
                        + (f" + accent {patch['highlight_color']}"
                           if patch.get("highlight_color") else "")
-                       + f"; fallback preset '{patch['preset']}')")
+                       + f"; base preset '{patch['preset']}')")
             else:
                 bit = f"captions preset '{patch['preset']}'"
                 if patch.get("size"):
                     bit += f" size {patch['size']}"
+                if system and patch.get("color"):
+                    bit += (f" ({patch['color']}"
+                            + (f" + accent {patch['highlight_color']}"
+                               if patch.get("highlight_color") else "")
+                            + ")")
             if isinstance(merged, dict):
                 merged["design_version"] = CAPTION_DESIGN_VERSION
                 if system and (merged.get("max_words_per_caption")
@@ -21816,16 +21945,29 @@ def apply_look(ctx, name, music=None):
         sfx = [s for s in old
                if not str(s.get("id") or "").startswith(LOOK_SFX_PREFIX)]
         dropped = len(old) - len(sfx)
-        times, cadence_note = _look_transition_times(ctx, edl)
+        rows, cadence_note = _look_transition_rows(ctx, edl)
         if cadence_note:
             notes.append(cadence_note + ".")
         spec = look.get("transition_sfx")
         placed = []
         prog = program_duration(edl)
-        if spec and times:
+        if spec and rows:
             kinds, gain = spec
             style = (look.get("transition") or ("", 0))[0]
-            for i, t in enumerate(times):
+            existing_at = []
+            for s in sfx:
+                try:
+                    existing_at.append(float(s.get("at") or 0.0))
+                except (TypeError, ValueError):
+                    pass
+            hero_sfx = sum(1 for s in sfx
+                           if str(s.get("id") or "").startswith("mg_"))
+            budget = _look_sfx_budget(prog)
+            cap = max(0, budget - len(sfx)
+                      - max(0, LOOK_SFX_HERO_RESERVE - hero_sfx))
+            sounded = _look_sound_rows(rows, existing_at, cap)
+            for i, r in enumerate(sounded):
+                t = r["t"]
                 kind = kinds[i % len(kinds)]
                 at = round(max(0.0, t - _kit_landing_s(kind)), 3)
                 if at > prog - 0.05:
@@ -21836,12 +21978,23 @@ def apply_look(ctx, name, music=None):
                     notes.append(f"transition sound {kind} unavailable "
                                  f"({str(e)[:80]}).")
                     continue
+                into = (f" into {r['enters']}" if r["enters"] else
+                        f" out of {r['leaves']}" if r["leaves"] else "")
                 sfx.append({"id": f"{LOOK_SFX_PREFIX}{len(placed) + 1}",
                             "storage_key": key, "at": at, "gain_db": gain,
                             "purpose": (f"{kind} landing on the {style} "
-                                        f"scene transition at {t:.2f}s "
-                                        f"('{n}' look)")})
+                                        f"scene transition{into} at "
+                                        f"{t:.2f}s ('{n}' look)")})
                 placed.append(kind)
+            silent = len(rows) - len(placed)
+            if silent > 0:
+                notes.append(
+                    f"{silent} of {len(rows)} scene transition(s) left "
+                    "unsounded — transition sounds are accents: one per "
+                    "B-roll (on its entry), at least "
+                    f"{TRANSITION_MIN_SPACING_S:g}s apart, clear of existing "
+                    f"sounds, inside the {budget}-effect sound budget for "
+                    f"{prog:.0f}s with room kept for hero graphics.")
         elif spec and look.get("transition"):
             notes.append(
                 f"the {look['transition'][0]} transition fires only where "
@@ -21886,6 +22039,9 @@ def apply_look(ctx, name, music=None):
                                       music_library.DEFAULT_BED_DB)
                              if bed else None),
                     duck=True if bed else None,
+                    # Start on the track's body: a quiet intro would be most
+                    # of a short (see music_library.body_start).
+                    offset_s=music_library.body_start(track) or None,
                     fade_in_s=look.get("music_fade_in_s", 0.6),
                     fade_out_s=1.5,
                     purpose=(f"{track['mood']} bed for the '{n}' look "
@@ -21897,6 +22053,8 @@ def apply_look(ctx, name, music=None):
                     set_bits.append(
                         f"music \"{track['title']}\" ({track['mood']}, CC0) "
                         f"{item.get('gain_db')}dB"
+                        + (f" from {item['offset_s']:g}s in (past its quiet "
+                           "intro)" if item.get("offset_s") else "")
                         + (", ducked under speech" if bed else
                            " as the lead audio")
                         + f" [{item.get('id')}]")
@@ -21932,6 +22090,13 @@ def apply_look(ctx, name, music=None):
                     res += f"\n- {tname} [{tcat}]: {tdesc}"
                     if tparams:
                         res += " params " + json.dumps(tparams)
+                prog_now = program_duration(edl)
+                n_sfx = len(edl.get("sfx") or [])
+                budget = _look_sfx_budget(prog_now)
+                res += (f"\nSound budget: {n_sfx} of {budget} sound effects "
+                        f"used for this {prog_now:.0f}s cut. Each hero "
+                        "template brings its own cues; once the budget is "
+                        "spent, place further heroes with sfx=false.")
         if system and not music_placed and music_req is None \
                 and not edl.get("music"):
             res += ("\nThis edit has no music: apply_look(name, "

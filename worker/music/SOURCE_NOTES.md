@@ -85,3 +85,12 @@ Every row above resolves to the same dedication instrument:
   a real session scored an edit with it). It stays in the
   manifest so its licence record survives, but it is never listed and never
   accepted by `add_library_music`.
+- **`body_s`** is where the track's main body starts after a quiet intro
+  (0.0 when there is none), measured from the shipped files with ffmpeg
+  ebur128: the first moment momentary loudness comes within 3 LU of the
+  integrated level and the next 4 s stay within 4 LU of it, when the intro
+  before it is at least 5 LU quieter, snapped back to the strongest 10 ms
+  transient in the 0.7 s before (a section downbeat). Twelve tracks open
+  with 7.5-25.6 s at -22 to -36 LUFS, which is most or all of a short;
+  library placement starts there by default so a bed is at full body from
+  the first frame.

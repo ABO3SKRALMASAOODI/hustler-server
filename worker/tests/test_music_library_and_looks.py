@@ -22,9 +22,11 @@ import motion_captions  # noqa: E402
 import motion_tools  # noqa: E402
 import music_library  # noqa: E402
 import sfx_kit  # noqa: E402
+import taste  # noqa: E402
 from schemas import (CaptionStyle, GradeCustom, STYLIZE_KINDS,  # noqa: E402
                      TRANSITION_STYLES, default_edl, edl_signature,
                      validate_edl)
+from timeline import Timeline  # noqa: E402
 
 
 # ── fakes ───────────────────────────────────────────────────────────────
@@ -135,6 +137,13 @@ def kit(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _engine_on(monkeypatch):
+    # The premium looks write browser captions only where the engine exists;
+    # pin it on so these tests do not depend on the host's Playwright.
+    monkeypatch.setattr(motion_tools.motion_engine, "available", lambda: True)
+
+
+@pytest.fixture(autouse=True)
 def _no_perception(monkeypatch):
     # emphasis picking must not try to load audio perception in unit tests
     monkeypatch.setattr(agent_tools, "_get_perception",
@@ -182,6 +191,35 @@ def test_find_is_exact_slug_only():
         assert t is None and err.startswith("REJECTED"), probe
     t, err = music_library.find("upbeat-50-over-the-speed-limit")
     assert t is None and "retired" in err
+
+
+def test_body_start_skips_quiet_intros_only_where_measured():
+    rows = music_library.catalog()
+    with_intro = [r for r in rows if music_library.body_start(r) > 0]
+    assert len(with_intro) == 12
+    for r in rows:
+        b = r["body_s"]
+        assert isinstance(b, float) and 0.0 <= b < r["duration_s"] - 10, r
+        assert music_library.body_start(r) == b
+    t = music_library.find("chill-calm-currents-lofi-relax-calm")[0]
+    assert music_library.body_start(t) == 11.9   # -27 LUFS for 12s
+    for bad in ({}, {"body_s": "x"}, {"body_s": -3},
+                {"body_s": 175.0, "duration_s": 180.0}):
+        assert music_library.body_start(bad) == 0.0
+
+
+def test_library_beds_start_on_the_body_unless_told_otherwise(store):
+    ctx = _Ctx()
+    out = music_library.add_library_music(ctx, "upbeat-back-in-the-80s")
+    assert out.startswith("EDL v1"), out
+    assert ctx.latest_edl()["json"]["music"][0]["offset_s"] == 7.98
+    assert "Starts 7.98s into the track" in out
+    out = music_library.add_library_music(ctx, "upbeat-back-in-the-80s",
+                                          offset_s=0)
+    assert not ctx.latest_edl()["json"]["music"][1]["offset_s"]
+    assert "Starts" not in out
+    spec = music_library.TOOL_SPECS["add_library_music"][2]
+    assert "body" in spec["offset_s"]["description"]
 
 
 def test_list_music_library_groups_by_mood_and_marks_repeats():
@@ -300,7 +338,7 @@ def test_every_look_component_is_a_real_renderable_value():
         assert all(m in music_library.MOODS for m in look.get("music", ())), name
         if look.get("system"):
             assert caps.get("motion_look"), name
-            assert -22.0 <= look["music_db"] <= -18.0, name
+            assert -21.0 <= look["music_db"] <= -15.0, name
             assert look["fade_in_s"] == 0.0, name
     assert {"editorial", "creator_punch", "cinematic_doc", "mono_noir",
             "clean_minimal"} <= {n for n, lk in agent_tools.LOOKS.items()
@@ -391,15 +429,18 @@ def test_switching_systems_replaces_texture_grade_and_owned_sounds(kit):
     assert out.startswith("EDL v1"), out
     edl = ctx.latest_edl()["json"]
     tx = [s for s in edl["sfx"] if s["id"].startswith("look_tx")]
-    # 2 inserts -> 4 junctions (in/out of each B-roll), each sounded
-    assert len(tx) == 4
+    # 2 inserts -> 4 junctions (in/out of each B-roll), all transitioned,
+    # but only each B-roll's ENTRY is sounded — accents, not a sound per cut
+    assert edl["effects"]["transition"].get("junctions") is None
+    assert len(tx) == 2
     assert {s["storage_key"].split("kit-")[1][:-4] for s in tx} == \
         {"whoosh_hard", "swipe"}
     # the whoosh PEAKS on the cut: placed before the junction, not on it
-    junction_times = [10.0, 12.0, 24.0, 26.0]     # inserts shift later cuts
-    for s, t in zip(sorted(tx, key=lambda s: s["at"]), junction_times):
+    entry_times = [10.0, 24.0]                    # inserts shift later cuts
+    for s, t in zip(sorted(tx, key=lambda s: s["at"]), entry_times):
         assert t - 0.4 < s["at"] < t, (s, t)
-        assert s["purpose"]
+        assert "into ins" in s["purpose"]
+    assert "2 of 4 scene transition(s) left unsounded" in out
     user_sound = {"id": "sx1", "storage_key": "sfx/7/kit-pop_soft.wav",
                   "at": 5.0, "gain_db": -8.0, "purpose": "user pop"}
     edl2 = json.loads(json.dumps(edl))
@@ -418,7 +459,7 @@ def test_switching_systems_replaces_texture_grade_and_owned_sounds(kit):
     assert edl["captions"]["style"]["motion_look"] == "stack"
     assert edl["captions"]["style"]["highlight_color"] == "#ED080D"
     tx = [s for s in edl["sfx"] if s["id"].startswith("look_tx")]
-    assert len(tx) == 4 and any("glitch" in s["storage_key"] for s in tx)
+    assert len(tx) == 2 and any("glitch" in s["storage_key"] for s in tx)
     assert any(s["id"] == "sx1" for s in edl["sfx"])   # user sound kept
     # clean_minimal = hard cuts: transition AND its sounds go
     out = agent_tools.apply_look(ctx, "clean_minimal")
@@ -429,17 +470,23 @@ def test_switching_systems_replaces_texture_grade_and_owned_sounds(kit):
     assert "transitions cleared" in out
 
 
-def test_dense_scene_changes_get_an_evenly_spaced_subset(kit):
+def test_dense_scene_changes_get_a_time_spaced_subset(kit):
     cuts = [4.0, 8.0, 12.0, 16.0, 20.0, 24.0, 28.0, 32.0]
     ctx = _Ctx(ratio="9:16", duration=40.0, edl=_broll_edl(40.0, cuts, 1.0))
     out = agent_tools.apply_look(ctx, "creator_punch")
     assert out.startswith("EDL v1"), out
-    tr = ctx.latest_edl()["json"]["effects"]["transition"]
+    edl = ctx.latest_edl()["json"]
+    tr = edl["effects"]["transition"]
     assert tr["junctions"] and len(tr["junctions"]) <= 48 // 5
-    tx = [s for s in ctx.latest_edl()["json"]["sfx"]
-          if s["id"].startswith("look_tx")]
-    assert len(tx) == len(tr["junctions"])
-    assert "evenly spaced" in out
+    times = _junction_times(ctx, edl)
+    assert len(times) == len(tr["junctions"])
+    assert all(b - a >= 5.0 - 1e-6 for a, b in zip(times, times[1:]))
+    tx = sorted(s["at"] for s in edl["sfx"] if s["id"].startswith("look_tx"))
+    # 48s -> taste allows 6 sounds; 2 stay free for the hero graphics
+    assert 1 <= len(tx) <= 6 - agent_tools.LOOK_SFX_HERO_RESERVE
+    assert all(b - a >= 5.0 - 0.5 for a, b in zip(tx, tx[1:]))
+    assert "at least 5s apart" in out and "left unsounded" in out
+    assert not _sound_or_cadence_findings(ctx, edl)
 
 
 def test_music_auto_lays_a_ducked_library_bed_in_the_same_version(store):
@@ -453,6 +500,8 @@ def test_music_auto_lays_a_ducked_library_bed_in_the_same_version(store):
     assert music_library.find(slug)[0]["mood"] in ("chill", "ambient",
                                                    "inspiring")
     assert m["gain_db"] == -18.0 and m["duck"] and m["duck_mode"] == "smooth"
+    track = music_library.find(slug)[0]
+    assert m["offset_s"] == (music_library.body_start(track) or None)
     assert "'editorial' look" in m["purpose"]
     assert "CC0" in out
     # a second application never stacks a second bed
@@ -504,3 +553,205 @@ def _broll_edl(duration, cuts, ins_dur=2.0):
                        "kind": "image", "at_output_s": c, "duration_s": ins_dur}
                       for i, c in enumerate(cuts)]
     return edl
+
+
+def _junction_times(ctx, edl):
+    return [r["t"] for r in agent_tools._look_junction_rows(ctx, edl)]
+
+
+def _sound_or_cadence_findings(ctx, edl):
+    """taste.critique findings a one-call look must never cause by itself
+    (finishing_review turns them into repair directives)."""
+    tl = Timeline(edl["keep"], edl.get("inserts") or [], edl.get("speed") or [])
+    found = taste.critique(edl, ctx.index, tl, src_w=1920, src_h=1080,
+                           user_asked="make it look premium")
+    return [f for f in found
+            if "sound effects in" in f or "transitions across" in f
+            or "attention-grabbing devices" in f]
+
+
+def _talking_ctx(duration, cuts, ins_dur):
+    # one continuous take: only the B-roll junctions are scene changes
+    ctx = _Ctx(ratio="9:16", duration=duration,
+               edl=_broll_edl(duration, cuts, ins_dur),
+               shots=[{"id": 0, "start": 0.0, "end": duration}])
+    ctx.index["words"] = _words(n=int((duration - 1) / 0.5), step=0.5)
+    ctx.index["sentences"] = [{"t0": 0.4, "t1": duration - 1, "text": "x"}]
+    return ctx
+
+
+# ── apply_look: transition sounds are budgeted accents ──────────────────
+
+@pytest.mark.parametrize("name", ["creator_punch", "editorial", "mono_noir",
+                                  "cinematic_doc", "hype"])
+def test_four_brolls_in_36s_stay_inside_the_sound_budget(kit, name):
+    # 30s talk + four 1.5s B-rolls = 36s with 8 junctions in in/out pairs
+    # 1.5s apart. Before: 7 look sounds, "7 sound effects in 36s".
+    ctx = _talking_ctx(30.0, [5.0, 10.0, 15.0, 20.0], 1.5)
+    out = agent_tools.apply_look(ctx, name)
+    assert out.startswith("EDL v1"), out
+    edl = ctx.latest_edl()["json"]
+    assert not _sound_or_cadence_findings(ctx, edl)
+    tx = sorted((s for s in edl["sfx"] if s["id"].startswith("look_tx")),
+                key=lambda s: s["at"])
+    assert 1 <= len(tx) <= taste.SFX_PER_S and len(tx) <= 2
+    entries = {5.0, 11.5, 18.0, 24.5}             # B-roll entry cuts
+    for s in tx:
+        land = s["at"] + agent_tools._kit_landing_s(
+            s["storage_key"].split("kit-")[1][:-4])
+        assert any(abs(land - t) < 0.01 for t in entries), s
+    # the visual subset is time-spaced too: never an in/out pair 1.5s apart
+    times = _junction_times(ctx, edl)
+    assert all(b - a >= 5.0 - 1e-6 for a, b in zip(times, times[1:]))
+    assert "left unsounded" in out
+
+
+def test_two_brolls_plus_the_recommended_hero_stay_inside_the_budget(kit,
+                                                                    monkeypatch):
+    monkeypatch.setattr(motion_tools, "_probe_item", lambda *a, **k: None)
+    ctx = _talking_ctx(30.0, [8.0, 18.0], 2.0)    # 34s program
+    out = agent_tools.apply_look(ctx, "creator_punch")
+    assert out.startswith("EDL v1"), out
+    assert "HERO MOMENTS" in out and "hook_title" in out
+    assert "Sound budget: 2 of 4" in out
+    res = motion_tools.add_motion_graphic(
+        ctx, "hook_title", 0.3, params={"text": "This changed *everything*"})
+    assert res.startswith("EDL v2"), res
+    edl = ctx.latest_edl()["json"]
+    assert any(s["id"].startswith("mg_") for s in edl["sfx"])
+    assert not _sound_or_cadence_findings(ctx, edl)
+
+
+def test_long_programs_get_more_sounds_but_never_past_the_budget(kit):
+    ctx = _talking_ctx(60.0, [10.0, 20.0, 30.0, 40.0, 50.0], 2.0)  # 70s
+    out = agent_tools.apply_look(ctx, "creator_punch")
+    edl = ctx.latest_edl()["json"]
+    tx = [s for s in edl["sfx"] if s["id"].startswith("look_tx")]
+    budget = int(70 / taste.SFX_PER_S)
+    assert len(tx) <= budget - agent_tools.LOOK_SFX_HERO_RESERVE
+    assert len(tx) == 5                           # one per B-roll entry
+    assert not _sound_or_cadence_findings(ctx, edl)
+    assert "5 of 10 scene transition(s) left unsounded" in out
+
+
+def test_look_sounds_respect_existing_sounds_and_their_budget(kit):
+    ctx = _talking_ctx(30.0, [8.0, 18.0], 2.0)
+    seeded = json.loads(json.dumps(ctx._edl))
+    seeded["sfx"] = [{"id": "sx1", "storage_key": "sfx/7/kit-pop_soft.wav",
+                      "at": 7.6, "gain_db": -8.0, "purpose": "user hit"}]
+    ctx._edl = validate_edl(seeded, ctx.duration).model_dump()
+    agent_tools.apply_look(ctx, "creator_punch")
+    edl = ctx.latest_edl()["json"]
+    tx = [s for s in edl["sfx"] if s["id"].startswith("look_tx")]
+    # the user's sound already marks the first entry: only the second rings
+    assert len(tx) == 1 and 19.5 < tx[0]["at"] < 20.0
+    # a sound-heavy edit gets no look sounds at all
+    seeded["sfx"] = [{"id": f"sx{i}", "storage_key": "sfx/7/kit-pop_soft.wav",
+                      "at": 1.0 + 6 * i, "gain_db": -8.0} for i in range(3)]
+    ctx = _talking_ctx(30.0, [8.0, 18.0], 2.0)
+    ctx._edl = validate_edl(seeded, ctx.duration).model_dump()
+    out = agent_tools.apply_look(ctx, "creator_punch")
+    edl = ctx.latest_edl()["json"]
+    assert not [s for s in edl["sfx"] if s["id"].startswith("look_tx")]
+    assert "4 of 4 scene transition(s) left unsounded" in out
+
+
+def test_insert_edits_drop_look_sounds_whose_transition_moved(kit):
+    ctx = _talking_ctx(30.0, [8.0, 18.0], 2.0)
+    agent_tools.apply_look(ctx, "creator_punch")
+    before = [s for s in ctx.latest_edl()["json"]["sfx"]
+              if s["id"].startswith("look_tx")]
+    assert len(before) == 2
+    out = agent_tools.remove_insert(ctx, "ins1")
+    assert out.startswith("EDL v2"), out
+    edl = ctx.latest_edl()["json"]
+    tx = [s for s in edl["sfx"] if s["id"].startswith("look_tx")]
+    # ins1's whoosh would now play over a plain cut: it goes, said so
+    assert [s["id"] for s in tx] == ["look_tx2"]
+    assert "look_tx1" in out and "Re-apply the look" in out
+    # the surviving one still leads into a firing transition
+    t = _junction_times(ctx, edl)
+    assert any(0 <= x - tx[0]["at"] <= agent_tools.LOOK_SFX_LEAD_MAX_S
+               for x in t)
+    # user sounds are never pruned, and with no look sounds nothing changes
+    ctx2 = _talking_ctx(30.0, [8.0, 18.0], 2.0)
+    seeded = json.loads(json.dumps(ctx2._edl))
+    seeded["sfx"] = [{"id": "sx1", "storage_key": "sfx/7/kit-pop_soft.wav",
+                      "at": 7.8, "gain_db": -8.0}]
+    ctx2._edl = validate_edl(seeded, ctx2.duration).model_dump()
+    out = agent_tools.remove_insert(ctx2, "ins1")
+    assert [s["id"] for s in ctx2.latest_edl()["json"]["sfx"]] == ["sx1"]
+    assert "Re-apply the look" not in out
+
+
+def test_without_the_browser_engine_captions_fall_back_to_the_preset(
+        monkeypatch):
+    monkeypatch.setattr(motion_tools.motion_engine, "available", lambda: False)
+    ctx = _Ctx(ratio="9:16")
+    out = agent_tools.apply_look(ctx, "editorial")
+    assert out.startswith("EDL v1"), out
+    st = ctx.latest_edl()["json"]["captions"]["style"]
+    assert st.get("motion_look") is None          # libass burn still runs
+    assert st["preset"] == "editorial"
+    assert st["color"] == "#F5F1EA" and st["highlight_color"] == "#F2C94C"
+    assert "motion captions are not available" in out
+    assert "captions preset 'editorial'" in out
+
+
+def test_a_classic_look_after_a_system_clears_its_motion_captions():
+    ctx = _Ctx(ratio="9:16")
+    agent_tools.apply_look(ctx, "mono_noir")
+    assert motion_captions.look_of(ctx.latest_edl()["json"]) == "stack"
+    agent_tools.apply_look(ctx, "hype")
+    edl = ctx.latest_edl()["json"]
+    assert motion_captions.look_of(edl) is None
+    assert edl["captions"]["style"]["preset"] == "beast"
+
+
+def test_library_music_without_speech_leads_undiminished(store):
+    ctx = _Ctx(speech=False)
+    out = music_library.add_library_music(ctx, "hiphop-abducted")
+    assert out.startswith("EDL v1"), out
+    m = ctx.latest_edl()["json"]["music"][0]
+    assert m["gain_db"] == -4.0 and m["duck"] is False
+    spec = music_library.TOOL_SPECS["add_library_music"][2]
+    assert "duck" in spec and "Omit" in spec["duck"]["description"]
+
+
+def test_used_by_user_counts_only_music_the_latest_edl_plays():
+    seen = {}
+
+    class _Cur:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql, params):
+            seen["sql"], seen["params"] = sql, params
+
+        def fetchall(self):
+            return [{"slug": "hiphop-abducted"}]
+
+    class _Conn:
+        def cursor(self):
+            return _Cur()
+
+    assert dbx.library_music_used_by_user(_Conn(), 3, 7) == ["hiphop-abducted"]
+    sql = " ".join(seen["sql"].split())
+    assert "FROM edls e WHERE e.project_id = a.project_id" in sql
+    assert "ORDER BY e.version DESC LIMIT 1" in sql
+    assert ("le.json->'music' @> jsonb_build_array( "
+            "jsonb_build_object('storage_key', a.storage_key))") in sql
+    assert seen["params"] == (3, 7, 7, 24)
+
+
+def test_music_fallback_hint_offers_the_library_only_when_it_ships(
+        monkeypatch):
+    import agent_loop
+    hint = agent_loop._nearest_alternative("add some background music")
+    assert "list_music_library" in hint and "genre/vibe" not in hint.lower()
+    monkeypatch.setattr(music_library, "available", lambda: False)
+    hint = agent_loop._nearest_alternative("add some background music")
+    assert "list_music_library" not in hint and "CC0" not in hint

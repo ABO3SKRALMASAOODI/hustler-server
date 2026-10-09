@@ -1940,20 +1940,28 @@ def asset_by_key(conn, project_id, storage_key):
 
 def library_music_used_by_user(conn, user_id, exclude_project_id=None,
                                limit=24):
-    """CC0 library slugs this user already copied into OTHER projects,
-    newest first (worker/music_library.py registers each copy with
+    """CC0 library slugs that score this user's OTHER projects, newest
+    first (worker/music_library.py registers each copy with
     meta.library_slug). Lets the library mark and avoid repeats across a
     user's videos — "do not use the same background music as my previous
-    projects" was a real request."""
+    projects" was a real request. Only a copy that the project's LATEST EDL
+    actually plays counts: the asset row is registered before the EDL write,
+    so a rejected placement (or music removed later) must not mark the track
+    as used."""
     with conn.cursor() as cur:
         cur.execute("""
             SELECT a.meta->>'library_slug' AS slug, MAX(a.id) AS last_id
               FROM assets a
               JOIN projects p ON p.id = a.project_id
+              JOIN LATERAL (SELECT e.json FROM edls e
+                             WHERE e.project_id = a.project_id
+                             ORDER BY e.version DESC LIMIT 1) le ON TRUE
              WHERE p.user_id = %s
                AND a.kind = 'music'
                AND a.meta ? 'library_slug'
                AND (%s::int IS NULL OR a.project_id <> %s)
+               AND le.json->'music' @> jsonb_build_array(
+                       jsonb_build_object('storage_key', a.storage_key))
              GROUP BY 1
              ORDER BY last_id DESC
              LIMIT %s""", (user_id, exclude_project_id, exclude_project_id,
