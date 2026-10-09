@@ -62,11 +62,13 @@
   .L-glow .blk{font-family:'Inter Display',sans-serif;font-weight:800;letter-spacing:-0.02em;line-height:1.1}
   /* mono: typewriter on a quiet plate */
   .L-mono .blk{font-family:'JetBrains Mono','Space Mono','IBM Plex Mono','DejaVu Sans Mono','Noto Sans Mono',ui-monospace,Menlo,monospace;
-    font-weight:700;letter-spacing:-0.01em;line-height:1.26;text-align:left;text-wrap:wrap;
-    background:rgba(9,11,13,.80);border-radius:.32em;padding:.24em .52em .3em;border:1px solid rgba(255,255,255,.10);
-    box-shadow:0 .2em .7em rgba(0,0,0,.30)}
+    font-weight:700;letter-spacing:-0.01em;line-height:1.26;text-align:left;text-wrap:wrap;padding:.24em .52em .3em}
+  /* the plate grows with the typed line (a terminal pill, not an empty bar) */
+  .L-mono .plate{position:absolute;left:0;top:0;z-index:0;background:rgba(9,11,13,.80);border-radius:.32em;
+    border:1px solid rgba(255,255,255,.10);box-shadow:0 .2em .7em rgba(0,0,0,.30)}
+  .L-mono .mg-w{position:relative;z-index:1}
   .L-mono .mg-c{visibility:hidden}
-  .L-mono .caret{position:absolute;width:.56em;height:1.02em;left:0;top:0}
+  .L-mono .caret{position:absolute;width:.56em;height:1.02em;left:0;top:0;z-index:2}
 </style>
 <div class="mg-root" id="root"></div>
 <script>
@@ -258,6 +260,7 @@
   }
 
   function buildMono(c, blk) {
+    c.plate = MG.el('span', 'plate', null, blk);
     c.w.forEach((w, k) => {
       const o = newWord(blk, null, w, k, 'base');
       o.chars = Array.from(caseOf(w.t, upperAll)).map(ch => MG.el('span', 'mg-c', ch, o.el));
@@ -435,7 +438,9 @@
         if (look === 'mono') {
           const f0 = c.words[0].chars[0].getBoundingClientRect();
           c.caret0 = [f0.left - r.left, f0.top - r.top];
-          c.caret.style.height = (f0.height * 0.92).toFixed(1) + 'px';
+          c.charH = f0.height;
+          c.blkW = r.width; c.blkH = r.height;
+          c.caret.style.height = (f0.height * 0.78).toFixed(1) + 'px';
         }
       }
       c.rect = [r.left, r.top, r.right, r.bottom];
@@ -608,8 +613,13 @@
         blinkOn = Math.floor((t - lastEnd + 1e-6) / 0.5) % 2 === 0;
       }
       c.caret.style.left = caretAt[0].toFixed(1) + 'px';
-      c.caret.style.top = (caretAt[1] + 0.04 * c.fs).toFixed(1) + 'px';
+      c.caret.style.top = (caretAt[1] + 0.1 * c.charH).toFixed(1) + 'px';
       c.caret.style.opacity = blinkOn ? 1 : 0;
+      const secondLine = caretAt[1] > c.caret0[1] + 0.5 * c.charH;
+      const pw = secondLine ? c.blkW : Math.min(c.blkW, caretAt[0] + 0.56 * c.fs + 0.52 * c.fs);
+      const ph = Math.min(c.blkH, caretAt[1] + c.charH + 0.3 * c.fs);
+      c.plate.style.width = pw.toFixed(1) + 'px';
+      c.plate.style.height = ph.toFixed(1) + 'px';
     }
   });
 })();
