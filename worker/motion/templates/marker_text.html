@@ -1,5 +1,5 @@
 <!--MG-SPEC {"title": "Marker text", "category": "callout",
- "description": "A key line set like a premium caption where *starred* words get a highlighter swipe, a hand-drawn underline or a hand-drawn box. Use on the one sentence that carries the point (it replaces the captions while on screen); star only 1-2 words.",
+ "description": "A key line set like a premium caption where *starred* words get a highlighter swipe, a hand-drawn underline or a hand-drawn box (' / ' forces a line break). Use on the one sentence that carries the point (it replaces the captions while on screen); star only 1-2 words.",
  "duration": 3.0, "layer": "above_captions", "mutes_captions": true,
  "params": {
   "text": {"type": "text", "required": true, "max": 90, "hint": "the line, 3-12 words; wrap the 1-2 key words in *stars* (a *multi word* run works); ' / ' forces a line break"},
@@ -90,10 +90,10 @@
   }
 
   const wrap = MG.$('#wrap'), ink = MG.$('#ink');
-  const font = P.font, SZ = P.size, style = P.style;
+  const font = P.font, SZ = P.size * (MG.H < MG.W ? 0.72 : 1), style = P.style;
   const DARK = '#141414';
   // ── parse: lines, words, starred runs ────────────────────────────────
-  let raw = String(P.text || '').replace(/\s*\/\s*/g, '\n').trim();
+  let raw = String(P.text || '').replace(/\s+\/\s*|\s*\/\s+/g, '\n').trim();   // ' / ' breaks a line; '24/7' stays
   let lines = raw.split('\n').map(s => s.trim()).filter(Boolean);
   if (lines.length === 1) {
     // balance a long single line into 2-3 lines by character count
@@ -243,8 +243,9 @@
       }
       shapes.push(shp);
     });
-    const r = wrap.getBoundingClientRect();
-    let bx = [r.left, r.top, r.right, r.bottom];
+    // capture box = the set lines (not the full-width column), plus marks and shadow
+    const lrs = MG.$$('.line', wrap).map(el => el.getBoundingClientRect());
+    let bx = [Math.min(...lrs.map(r => r.left)), Math.min(...lrs.map(r => r.top)), Math.max(...lrs.map(r => r.right)), Math.max(...lrs.map(r => r.bottom))];
     shapes.forEach(s => { bx = [Math.min(bx[0], s.x0 - 0.3 * fs), Math.min(bx[1], s.y0 - 0.1 * fs), Math.max(bx[2], s.x1 + 0.3 * fs), Math.max(bx[3], s.y1 + 0.3 * fs)]; });
     MG.box = [bx[0] - 50, bx[1] - 60, bx[2] + 50, bx[3] + 70];
     return { fs, shapes };
@@ -258,7 +259,7 @@
   const markAt = 0.36, markEach = 0.2;
   const markDur = style === 'marker' ? 0.3 : style === 'underline' ? 0.36 : 0.46;
   const enterEnd = Math.max(each * n + 0.2, markAt + markEach * Math.max(0, groups.length - 1) + markDur) + 0.02;
-  const exitDur = Math.min(0.26, D * 0.15), exitAt = D - exitDur;
+  const exitDur = Math.min(0.26, D * 0.15), exitAt = D - exitDur - 1 / MG.fps;   // exits finish on the last frame
   MG.active([[0, Math.min(D, enterEnd)], [Math.max(0, exitAt - 0.02), D]]);
   MG.frame(t => {
     if (!G) G = layout();

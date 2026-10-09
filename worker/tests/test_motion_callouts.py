@@ -116,6 +116,22 @@ def test_callout_variants_render_without_errors():
 
 
 @needs_browser
+def test_callouts_survive_short_long_and_landscape_items():
+    jobs, times, labels = [], [], []
+    for name in CALLOUTS:
+        params = motion_templates.check_params(name, motion_templates.spec(name)["example"])
+        for dur, size in ((0.8, (540, 960)), (8.0, (540, 960)), (3.0, (960, 540)), (3.0, (720, 720))):
+            item = {"id": name, "template": name, "start": 0, "end": dur, "params": params}
+            jobs.append(motion_templates.build_job(item, size[0], size[1], 30))
+            times.append([dur * 0.5, dur - 0.1])
+            labels.append((name, dur, size))
+    reports = motion_engine.probe(jobs, times)
+    for label, rep in zip(labels, reports):
+        assert not rep["errors"], (label, rep["errors"])
+        assert rep["visible_frames"] >= 1, (label, rep)
+
+
+@needs_browser
 def test_arrow_and_circle_land_on_the_requested_spot():
     cases = [("arrow_callout", {"label": "this", "target_x": 0.7, "target_y": 0.3}, (0.7, 0.3)),
              ("arrow_callout", {"label": "that", "target_x": 0.2, "target_y": 0.66, "side": "above"}, (0.2, 0.66)),

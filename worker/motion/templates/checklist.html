@@ -1,5 +1,5 @@
 <!--MG-SPEC {"title": "Checklist", "category": "callout",
- "description": "2-5 list rows that appear one by one, each ticked with a drawn check mark (or a cross for myths/don'ts), with optional strike-through. Use when the speaker enumerates steps, rules, reasons or myths; time each row's 'at' (item seconds) to when it is said.",
+ "description": "2-5 list rows that appear one by one, each ticked with a drawn check mark (or a cross for myths/don'ts), with optional strike-through. Use when the speaker enumerates steps, rules, reasons or myths; items = [{text, at}] where at = item seconds when that row is said (blank = every 0.55 s).",
  "duration": 4.0, "layer": "above_captions", "mutes_captions": false,
  "params": {
   "items": {"type": "rows", "required": true, "fields": ["text", "at"], "max_items": 5, "max": 44, "hint": "2-5 rows like {'text': 'Talk to users', 'at': '0.4'}; 'at' = item-relative seconds when the row lands (blank = every 0.55 s)"},
@@ -30,7 +30,7 @@
 <div class="mg-root"><div class="card" id="card"></div></div>
 <script>
 (() => {
-  const P = MG.params, W = MG.W, H = MG.H, D = MG.duration, S = P.size;
+  const P = MG.params, W = MG.W, H = MG.H, D = MG.duration, S = P.size * (MG.H < MG.W ? 0.72 : 1);
   const card = MG.$('#card'), NS = 'http://www.w3.org/2000/svg';
   const cross = P.mark === 'cross';
   const acc = cross && P.accent.toUpperCase() === '#34C759' ? '#FF453A' : P.accent;
@@ -100,7 +100,7 @@
   const fontsReady = Promise.all(["700 58px 'Inter Display'", "italic 400 74px 'Instrument Serif'"].map(f => document.fonts.load(f).catch(() => null)));
   MG.ready = fontsReady.then(() => { G = layout(); });
 
-  const exitDur = Math.min(0.28, D * 0.12), exitAt = D - exitDur;
+  const exitDur = Math.min(0.28, D * 0.12), exitAt = D - exitDur - 1 / MG.fps;   // exits finish on the last frame
   const wins = [[0, title ? 0.6 : 0.42]].concat(rows.map(r => [Math.max(0, r.t - 0.09), r.t + (P.strike ? 0.66 : 0.42)]));
   MG.active(wins.concat([[Math.max(0, exitAt - 0.02), D]]));
   MG.frame(t => {
