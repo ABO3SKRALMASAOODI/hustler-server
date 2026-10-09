@@ -424,7 +424,16 @@ def probe(path):
         sar = 1.0
     if not (0.1 <= sar <= 10.0):
         sar = 1.0
+    # The YUV matrix / range the file is tagged with, or None when untagged.
+    # The renderer pins its end-card join to this matrix (see
+    # renderer._outro_matrix) so a final is converted, and tagged, exactly
+    # like the preview the user approved.
+    csp = str(v.get("color_space") or "").strip().lower()
+    rng = str(v.get("color_range") or "").strip().lower()
     return {
+        "color_space": csp if csp and csp not in ("unknown", "reserved")
+        else None,
+        "color_range": rng if rng in ("tv", "pc") else None,
         "sar": round(sar, 6),
         "duration": round(duration, 3),
         "video_duration": video_duration,

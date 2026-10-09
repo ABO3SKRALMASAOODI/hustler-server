@@ -359,3 +359,102 @@ def test_cluster_reads_render_the_identical_programme(tmp_path, monkeypatch):
     assert digests[20.0][0] == digests[0.0][0] + 3, "one read per cluster"
     assert digests[20.0][1] == digests[0.0][1], "every frame identical"
     assert digests[20.0][2] == digests[0.0][2], "audio identical"
+
+
+# ------------------------------------------------------- end-card colour ----
+
+def test_outro_join_is_pinned_to_the_source_matrix():
+    e = validate_edl({"keep": KEEP, "frame": {"ratio": "9:16", "mode": "crop"},
+                      "effects": {"grade": "cinematic"}}, 30).model_dump()
+    tl = Timeline(e["keep"])
+    kw = dict(W=360, H=640, fps=30.0, frame_mode="crop", src_w=640,
+              src_h=360, outro_s=5.0, card_idx=1)
+    g = renderer.build_filtergraph(e, 30.0, True, tl, None, [], INDEX, False,
+                                   src_color_space="bt709", **kw)
+    prog = re.search(r"\]([^;]*)\[vprog\]", g).group(1)
+    card = re.search(r"\[ocomp\]([^;]*)\[ovid\]", g).group(1)
+    assert "out_color_matrix=bt709:out_range=tv" in prog
+    assert "scale=out_color_matrix=bt709:out_range=tv,format=yuv420p" in card
+    assert renderer._outro_matrix("bt2020nc") == "bt2020"
+    assert renderer._outro_matrix("bt470bg") == "bt470"
+    # an untagged source keeps the old free negotiation, byte for byte
+    g0 = renderer.build_filtergraph(e, 30.0, True, tl, None, [], INDEX, False,
+                                    **kw)
+    assert "out_color_matrix" not in g0
+    assert "format=yuv420p,setsar=1[ovid]" in g0
+
+
+def _programme_y(cmd, W, H, frames=12):
+    """The first frames of [vout] (the programme, before any end card) as Y
+    planes, straight off the graph — no encode."""
+    i = cmd.index("-filter_complex")
+    raw = subprocess.run(
+        cmd[:i + 2] + ["-map", "[vout]", "-frames:v", str(frames), "-f",
+                       "rawvideo", "-pix_fmt", "yuv420p", "-",
+                       "-map", "[aout]", "-f", "null", "-"],
+        capture_output=True, check=True, timeout=180).stdout
+    fs = W * H * 3 // 2
+    d = np.frombuffer(raw, np.uint8)[:frames * fs].reshape(frames, fs)
+    return d[:, :W * H].reshape(frames, H, W).astype(float)
+
+
+@needs_ffmpeg
+@pytest.mark.parametrize("frame", [
+    {"ratio": "9:16", "mode": "crop"},
+    {"ratio": "9:16", "mode": "pad"},
+    {"ratio": "9:16", "mode": "crop", "picture": [0, .29, 1, .71]},
+])
+def test_end_card_join_keeps_the_programme_colour(frame, tmp_path,
+                                                  monkeypatch):
+    """A final carries the end card; the approval preview does not. Joining
+    the card must not change a single programme pixel's tone: an unanchored
+    join once converted a BT.709 programme into BT.601 and turned graded pad
+    bars from Y 25 to 21 in finals only."""
+    src = str(tmp_path / "src709.mp4")
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+         "testsrc2=s=640x360:r=30:d=6", "-f", "lavfi", "-i",
+         "sine=frequency=330:sample_rate=48000:duration=6",
+         "-vf", "format=yuv420p,setparams=colorspace=bt709:"
+         "color_primaries=bt709:color_trc=bt709:range=tv",
+         "-c:v", "libx264", "-preset", "ultrafast", "-qp", "0",
+         "-c:a", "aac", src], check=True, capture_output=True, timeout=120)
+    assert renderer.media.probe(src)["color_space"] == "bt709"
+    edl = {"keep": KEEP, "frame": frame,
+           "effects": {"grade": "cinematic",
+                       "grade_custom": {"temperature": .3, "contrast": 1.05,
+                                        "shadows": .3}}}
+    index = {"words": [], "sentences": [], "silences": [], "video": {}}
+    commands = {}
+
+    def capture(cmd, **kw):
+        commands["cmd"] = [c for c in cmd
+                           if c not in ("-progress", "pipe:1", "-nostats")]
+        raise StopIteration
+
+    monkeypatch.setattr(renderer, "_render_media_run", capture)
+    planes = {}
+    for grade_path in ("block", "post"):
+        monkeypatch.setenv("BLOCK_GRADE_DISABLE",
+                           "1" if grade_path == "post" else "0")
+        for outro in (True, False):
+            work = tmp_path / f"w_{grade_path}_{outro}"
+            work.mkdir()
+            with pytest.raises(StopIteration):
+                renderer.render_edl(edl, index, src,
+                                    str(tmp_path / "o.mp4"), str(work),
+                                    preview=False, suppress_outro=not outro)
+            assert ("[ovid]" in " ".join(commands["cmd"])) is outro
+            planes[grade_path, outro] = _programme_y(commands["cmd"],
+                                                     1080, 1920)
+    for grade_path in ("block", "post"):
+        with_card = planes[grade_path, True]
+        without = planes[grade_path, False]
+        assert abs(with_card.mean() - without.mean()) < 0.25, grade_path
+        assert np.abs(with_card - without).mean() < 0.5, grade_path
+    # block grade vs post-concat grade: bars and overall tone agree too
+    a, b = planes["post", True], planes["block", True]
+    assert abs(a.mean() - b.mean()) < 1.0, (a.mean(), b.mean())
+    if frame.get("mode") == "pad" or frame.get("picture"):
+        assert abs(a[0, 40, 540] - b[0, 40, 540]) <= 1, (a[0, 40, 540],
+                                                         b[0, 40, 540])

@@ -1315,6 +1315,29 @@ def _endcard_input_args(path, duration_s, fps):
     return ["-stream_loop", "-1", "-t", f"{duration_s:.3f}", "-i", path]
 
 
+# ffprobe colour-matrix name -> the swscale out_color_matrix that writes it.
+_SCALE_MATRIX = {"bt709": "bt709", "smpte170m": "smpte170m",
+                 "bt470bg": "bt470", "fcc": "fcc", "smpte240m": "smpte240m",
+                 "bt2020nc": "bt2020"}
+
+
+def _outro_matrix(src_color_space):
+    """The YUV matrix the end-card join is pinned to, or None to leave it free.
+
+    concat makes every segment share one colour space, and the card branch is
+    born RGB, so nothing anchored the join: ffmpeg settled on "unknown" and
+    converted the programme into it — the BT.601 matrix, under a tag players
+    read as BT.709 on HD. A final with the card came out up to ~3 luma levels
+    off the approval preview (which has no card and keeps the source's
+    matrix), worst where the grade had already left the programme in RGB or
+    in BT.709 YUV. Pinning both sides of the join to the SOURCE's own matrix
+    converts — and tags — the final like the preview. An untagged source has
+    nothing to match and keeps the old free negotiation, which already agrees
+    with its preview.
+    """
+    return _SCALE_MATRIX.get(str(src_color_space or "").strip().lower())
+
+
 def clean_source_key(edl_json, variant, src_sha=None):
     """Round 39 — the REPAINTED source this EDL renders from, or None.
 
@@ -1728,7 +1751,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                       src_w=None, src_h=None, src_pad=0.0,
                       sfx_inputs=None, outro_s=0.0, card_idx=None,
                       stem_inputs=None,
-                      src_sar=1.0, src_fps=None,
+                      src_sar=1.0, src_fps=None, src_color_space=None,
                       overlay_inputs=None, gfx_ass_path=None,
                       motion_inputs=None,
                       frame_focus=None, robot_idx=None, wm_ass_path=None,
@@ -3149,7 +3172,13 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         sar = 1.0 if do_norm else (float(src_sar) or 1.0)
         oW = W if abs(sar - 1.0) < 0.001 else _even(W * sar)
         ofps = fps if (do_norm or not src_fps) else float(src_fps)
-        parts.append(f"[{vlabel}]scale={oW}:{H},setsar=1,"
+        # Both sides of the join are pinned to the source's matrix
+        # (_outro_matrix): an explicit scale converts with the right
+        # coefficients, where a relabel (setparams) would only retag them.
+        pin = _outro_matrix(src_color_space)
+        csp = f":out_color_matrix={pin}:out_range=tv" if pin else ""
+        card_csp = f"scale=out_color_matrix={pin}:out_range=tv," if pin else ""
+        parts.append(f"[{vlabel}]scale={oW}:{H}{csp},setsar=1,"
                      f"format=yuv420p[vprog]")
         # v7: the motion card is a full 9:16 sheet that carries its own
         # margins, so it fills the frame rather than being inset again.
@@ -3167,7 +3196,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         fo = min(config.OUTRO_FADE_OUT_S, outro_s / 3)
         parts.append(f"[ocomp]fade=t=in:st=0:d={fi:.2f},"
                      f"fade=t=out:st={outro_s - fo:.2f}:d={fo:.2f},"
-                     f"format=yuv420p,setsar=1[ovid]")
+                     f"{card_csp}format=yuv420p,setsar=1[ovid]")
         v_final = "vprog"
     else:
         parts.append(f"[{vlabel}]format=yuv420p[vout]")
@@ -4360,6 +4389,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                               stem_inputs=stem_inputs,
                               src_sar=info.get("sar") or 1.0,
                               src_fps=float(info["fps"]) or fps,
+                              src_color_space=info.get("color_space"),
                               overlay_inputs=overlay_inputs,
                               gfx_ass_path=gfx_path,
                               frame_focus=frame_focus, robot_idx=robot_idx,
