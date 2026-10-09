@@ -81,6 +81,13 @@ def path(sound_id):
     return os.path.join(LIB_DIR, r["file"]) if r else None
 
 
+def peak_s(sound_id):
+    """Seconds from the sound's start to its loudest moment (so a whoosh can
+    PEAK on a cut instead of starting there)."""
+    r = get(sound_id)
+    return float(r.get("peak_s") or 0.0) if r else 0.0
+
+
 def roles():
     return sorted({r["role"] for r in _load()})
 

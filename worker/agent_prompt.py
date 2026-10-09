@@ -235,16 +235,32 @@ def project_state_block(video, index_summary, edl_line, history_lines,
     # that work: a user link/upload, or explicit named-song discovery.
     import sfx_search
     import song_find
+    import music_library
     named = ("A SPECIFIC song they NAME: load acquisition, use find_song "
              "for its link, then fetch_url downloads the pick. "
              if song_find.available() else "")
+    # The CC0 library (restored 2026-10) is the one music source that needs
+    # nothing from the user; it is claimed only when its manifest shipped.
+    owner_rule = ("Music: only when the user asks for it or supplies a "
+                  "track — never on your own initiative (you may suggest that "
+                  "a song would help). ")
+    if music_library.available():
+        library = owner_rule + (
+            "When they ask for generic background music without naming a "
+            "song, a built-in CC0 library offers moods (list_music_library, "
+            "then add_library_music) — licence-verified, no credit needed. "
+            "There is no generic catalog search. ")
+        vibe = ("For a genre/vibe request with no link, use the closest "
+                "library mood (say so when their genre is not one of them) "
+                "or a music asset already in the project; ")
+    else:
+        library = owner_rule + "No bundled tracks and no generic catalog search. "
+        vibe = ("For a genre/vibe request with no link, use a music asset "
+                "already in the project or ask for an upload; ")
     lines.append(
-        "Music: only when the user asks for it or supplies a track — never "
-        "on your own initiative. No bundled tracks and no generic catalog "
-        "search. " + named
+        library + named
         + "Any LINK they paste (song URL, YouTube, SoundCloud...) fetch_url "
-          "ingests as music. For a genre/vibe request with no link, use a "
-          "music asset already in the project or ask for an upload; never "
+          "ingests as music. " + vibe + "never "
           "burn turns repeatedly searching. A trending platform sound only "
           "they can provide (upload or a clip carrying it).")
     sfx_line = ("Sound effects: the approved sound library "

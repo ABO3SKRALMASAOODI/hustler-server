@@ -84,6 +84,8 @@ import webrecord
 import typography_scenes
 import motion_tools
 import motion_planner
+import music_library
+import sound_library
 import version as worker_version
 from captions import CAPTION_DESIGN_VERSION, KARAOKE_HARD_MAX
 from schemas import (CANVAS_DIMS, CaptionStyle, clean_fingerprint,
@@ -10196,6 +10198,7 @@ def set_insert_window(ctx, id, duration_s=None, clip_start_s=None,
     old_tl = Timeline(edl.get("keep") or [], before, speed)
     new_tl = Timeline(edl.get("keep") or [], inserts, speed)
     notes = _remap_program_items(edl, old_tl, new_tl)
+    notes += _prune_stray_look_sfx(ctx, edl)
     res = ctx.write_edl(
         edl, f"insert {id} now plays {off}-{round(off + span, 2)}s of "
              f"'{os.path.basename(hit['asset_key'])}'{at_rate} "
@@ -10248,6 +10251,7 @@ def move_insert(ctx, id, after_id=None):
     edl["inserts"] = new_list
     new_tl = Timeline(edl.get("keep") or [], new_list, speed)
     notes = _remap_program_items(edl, old_tl, new_tl)
+    notes += _prune_stray_look_sfx(ctx, edl)
     win = insert_windows(new_list, new_tl).get(id)
     where = (f"it now plays {round(win[0], 2)}-{round(win[1], 2)}s of the "
              "program" if win else "moved")
@@ -10279,6 +10283,7 @@ def remove_insert(ctx, id):
     old_tl = Timeline(edl.get("keep") or [], inserts, speed)
     new_tl = Timeline(edl.get("keep") or [], edl["inserts"], speed)
     notes = _remap_program_items(edl, old_tl, new_tl)
+    notes += _prune_stray_look_sfx(ctx, edl)
     res = ctx.write_edl(
         edl, f"removed insert {id} "
              f"('{os.path.basename(hit['asset_key'])}', {hit['duration_s']}s) "
@@ -10386,6 +10391,7 @@ def cut_output_range(ctx, start, end):
     edl["inserts"] = new_inserts
     new_tl = Timeline(new_keep, new_inserts, speed)
     notes = ins_notes + _remap_program_items(edl, tl, new_tl)
+    notes += _prune_stray_look_sfx(ctx, edl)
     bits = []
     if src_cuts:
         bits.append("footage " + ", ".join(f"{s}-{e}s" for s, e in src_cuts)
@@ -21642,42 +21648,427 @@ def suggest_emphasis(ctx):
                   "emphasis_words: " + json.dumps(out) + note)
 
 
-# ONE-CALL looks (apply_look): each composes caption style + grade + custom
-# grade + transitions + fades + stylize as plain EDL DATA — every component
-# is an ordinary field the user could have set one call at a time, and the
-# result names each one. A key absent = leave that axis alone; "grade": None
-# = explicitly clear it. sound_design/smooth_duck are REPORTED suggestions
-# only — apply_look never touches keep, music or sfx.
+# ONE-CALL looks (apply_look). Two generations share one tool.
+#
+# * The classic five (hype/clean/cinematic/luxury/meme) compose caption
+#   preset + grade + custom grade + transitions + fades + stylize as plain
+#   EDL DATA, exactly as before — with two repairs: no look ever ADDS a fade
+#   from/to black to a vertical/square short (taste.critique flags both: the
+#   first second is the only one every viewer watches, and a short loops),
+#   and hype's declared-but-never-read `sound_design` is real now as
+#   `transition_sfx`: an approved library whoosh lands on a budgeted, spaced subset of the
+#   scene transitions it fires (see LOOK_SFX_HERO_RESERVE).
+# * The premium SYSTEMS ("system": True) set a coherent whole in one call:
+#   browser-drawn motion captions (captions.style.motion_look) in the look's
+#   colours over a matching libass preset (used alone where the browser
+#   engine is unavailable), one committed grade (preset + continuous values
+#   that REPLACE any earlier custom grade), texture (grain/vignette/
+#   halation, replacing earlier whole-program texture), one scene-transition
+#   style with paired kit sounds, no fade from black on vertical, and — only
+#   when asked (music='auto', a mood or a slug) — a ducked CC0 library bed.
+#   They return the hero-moment templates to place next.
+#
+# Every component is an ordinary EDL field the user could have set one call
+# at a time, and the result names each one. A key absent = leave that axis
+# alone; "grade": None / "transition": None = explicitly clear it. Cuts are
+# never touched. Sounds the look places carry ids look_tx<n> so re-applying
+# (or switching) a look replaces them instead of stacking.
+#
+# Bed levels ("music_db") come from measurement. Rendered through the real
+# smooth duck on a 30 s podcast window (voice -23 LUFS; 22 podcast sources
+# the owner cut span -14 to -32 LUFS, median about -21) with every CC0
+# track started on its body (music_library.body_start), the median per-word
+# gap at -18 dB was ~14-15 dB under the voice for upbeat/hiphop/chill,
+# ~16-17 for ambient/dramatic, ~18 for corporate/inspiring and ~20 for the
+# sparse cinematic beds. So cinematic_doc sits 2 dB hotter and mono_noir
+# 1 dB, putting each system's pool at 15-19 dB (DESIGN_BRIEF: references
+# sit 13-20 dB under the voice); clean_minimal stays deliberately quiet.
+# The bed is an absolute gain, so a source 6 dB louder than that one puts
+# it 6 dB further under (the renderer has no voice-relative bed level).
+LOOK_TEXTURE_KINDS = ("grain", "vignette", "halation", "glow")
+LOOK_SFX_PREFIX = "look_tx"
+
 LOOKS = {
+    # ── classic looks ─────────────────────────────────────────────────────
     "hype": {"captions": {"preset": "beast", "size": "xl"},
              "grade": "vibrant", "transition": ("zoom_punch", 0.25),
-             "fade_out_s": 0.6, "sound_design": "medium"},
+             "fade_out_s": 0.6,
+             "transition_sfx": (("whoosh_hard", "swipe"), -6.0),
+             "music": ("hiphop", "upbeat")},
     "clean": {"captions": {"preset": "clean", "emphasis": "big"},
               "grade": None,
-              "fade_in_s": 0.5, "fade_out_s": 0.5, "smooth_duck": True},
+              "fade_in_s": 0.5, "fade_out_s": 0.5, "smooth_duck": True,
+              "music": ("corporate", "chill")},
     "cinematic": {"captions": {"preset": "elegant"}, "grade": "cinematic",
                   "grade_custom": {"temperature": 0.1},
                   "fade_in_s": 1.0, "fade_out_s": 1.0,
-                  "transition": ("dip_black", 0.4)},
+                  "transition": ("dip_black", 0.4),
+                  "music": ("cinematic", "ambient")},
     "luxury": {"captions": {"preset": "luxe"}, "grade": "warm",
                "grade_custom": {"temperature": 0.15},
-               "fade_in_s": 0.8, "fade_out_s": 0.8},
+               "fade_in_s": 0.8, "fade_out_s": 0.8,
+               "music": ("chill", "ambient")},
     "meme": {"captions": {"preset": "impact", "size": "xl"},
-             "transition": ("flash", 0.15), "stylize": ("grain", 0.3)},
+             "transition": ("flash", 0.15), "stylize": ("grain", 0.3),
+             "music": ("upbeat", "hiphop")},
+    # ── premium systems ───────────────────────────────────────────────────
+    "editorial": {
+        "system": True,
+        "summary": ("ivory sans captions whose key words turn gold serif "
+                    "italic, matte filmic grade (lifted blacks, soft "
+                    "highlights, gentle desaturation), light grain + "
+                    "vignette, soft white dips with an airy whoosh"),
+        "captions": {"motion_look": "serif", "preset": "editorial",
+                     "color": "#F5F1EA", "highlight_color": "#F2C94C",
+                     "size": "l"},
+        "grade": None,
+        "grade_custom": {"contrast": 0.97, "saturation": 0.88,
+                         "shadows": 0.16, "highlights": -0.1,
+                         "temperature": 0.07},
+        "stylize": (("grain", 0.18), ("vignette", 0.25)),
+        "transition": ("dip_white", 0.3),
+        "transition_sfx": (("whoosh_soft", "swish_short"), -9.0),
+        "fade_in_s": 0.0, "fade_out_s": 0.0,
+        "music": ("chill", "ambient", "inspiring"), "music_db": -18.0,
+        "hero": {"categories": ("type", "callout", "layout", "data"),
+                 "keywords": ("serif", "quote", "statement", "headline",
+                              "chapter", "lower third", "title"),
+                 "params": {"treatment": "serif", "accent": "#F2C94C",
+                            "color": "#F5F1EA", "entrance": "mask",
+                            "exit": "blur"}},
+    },
+    "creator_punch": {
+        "system": True,
+        "summary": ("bold uppercase pop captions with a yellow active word, "
+                    "vibrant punchy grade, zoom-punch scene transitions on a "
+                    "hard whoosh"),
+        "captions": {"motion_look": "pop", "preset": "reels",
+                     "color": "#FFFFFF", "highlight_color": "#FFD400",
+                     "size": "m"},
+        "grade": None,
+        "grade_custom": {"contrast": 1.08, "saturation": 1.12,
+                         "shadows": -0.06, "highlights": 0.05,
+                         "temperature": 0.02},
+        "stylize": (("vignette", 0.12),),
+        "transition": ("zoom_punch", 0.25),
+        "transition_sfx": (("whoosh_hard", "swipe"), -5.0),
+        "fade_in_s": 0.0, "fade_out_s": 0.0,
+        "music": ("upbeat", "hiphop"), "music_db": -18.0,
+        "music_fade_in_s": 0.2,
+        "hero": {"categories": ("type", "data", "social", "callout", "cta"),
+                 "keywords": ("counter", "number", "pop", "emoji", "comment",
+                              "follow", "notification", "slam", "sticker",
+                              "marker"),
+                 "params": {"treatment": "marker", "accent": "#FFD400",
+                            "color": "#FFFFFF", "entrance": "slam",
+                            "uppercase": True, "font": "Anton"}},
+    },
+    "cinematic_doc": {
+        "system": True,
+        "summary": ("clean sentence-case captions that rise in word by word, "
+                    "warm teal/orange cinematic grade, vignette + fine grain, "
+                    "unhurried dips to black"),
+        "captions": {"motion_look": "clean", "preset": "documentary",
+                     "color": "#F4F1EC", "highlight_color": "#E9C46A",
+                     "size": "l"},
+        "grade": "cinematic",
+        "grade_custom": {"temperature": 0.08, "saturation": 0.92,
+                         "highlights": -0.08},
+        # No halation by default: at full resolution its blur pass added
+        # ~55% to a measured 1080x1920 render for a barely visible bloom.
+        "stylize": (("vignette", 0.35), ("grain", 0.12)),
+        "transition": ("dip_black", 0.45),
+        "transition_sfx": (("whoosh_soft", "swoosh_up"), -9.0),
+        "fade_in_s": 0.0, "fade_out_s": 0.0,
+        "music": ("cinematic", "ambient", "dramatic"), "music_db": -16.0,
+        "hero": {"categories": ("type", "layout", "callout", "data"),
+                 "keywords": ("lower third", "chapter", "date", "map",
+                              "quote", "location", "title", "documentary",
+                              "timeline"),
+                 "params": {"treatment": "serif", "accent": "#E9C46A",
+                            "color": "#F4F1EC", "entrance": "blur",
+                            "exit": "blur"}},
+    },
+    "mono_noir": {
+        "system": True,
+        "summary": ("high-contrast black-and-white, stacked captions whose "
+                    "hero word slams in (key words red), heavy grain + "
+                    "vignette, glitch transitions with a digital burst"),
+        "captions": {"motion_look": "stack", "preset": "impact",
+                     "color": "#F7F7F5", "highlight_color": "#ED080D",
+                     "size": "m"},
+        "grade": "bw",
+        "grade_custom": {"contrast": 1.08, "shadows": -0.1,
+                         "highlights": 0.05},
+        "stylize": (("grain", 0.32), ("vignette", 0.4)),
+        "transition": ("glitch", 0.2),
+        "transition_sfx": (("glitch", "whoosh_hard"), -8.0),
+        "fade_in_s": 0.0, "fade_out_s": 0.0,
+        "music": ("dramatic", "hiphop"), "music_db": -17.0,
+        "music_fade_in_s": 0.3,
+        "hero": {"categories": ("type", "transition", "texture", "callout"),
+                 "keywords": ("glitch", "slam", "impact", "word", "stamp",
+                              "flash", "strobe", "noir"),
+                 "params": {"treatment": "color", "accent": "#ED080D",
+                            "color": "#F7F7F5", "entrance": "slam",
+                            "uppercase": True, "font": "Bebas Neue"}},
+    },
+    "clean_minimal": {
+        "system": True,
+        "summary": ("large clean white captions that rise in as spoken, "
+                    "near-neutral polish grade, no texture, hard cuts"),
+        "captions": {"motion_look": "clean", "preset": "clean",
+                     "color": "#FFFFFF", "highlight_color": None,
+                     "size": "l"},
+        "grade": None,
+        "grade_custom": {"contrast": 1.04, "saturation": 1.04,
+                         "highlights": -0.05},
+        "stylize": (),
+        "transition": None,
+        "fade_in_s": 0.0, "fade_out_s": 0.0,
+        "music": ("corporate", "inspiring", "chill"), "music_db": -20.0,
+        "hero": {"categories": ("type", "callout", "layout", "cta"),
+                 "keywords": ("lower third", "title", "list", "label",
+                              "minimal", "clean"),
+                 "params": {"treatment": "serif", "accent": "#FFFFFF",
+                            "color": "#FFFFFF", "entrance": "rise"}},
+    },
 }
 
 
-def apply_look(ctx, name):
-    """Compose one look — captions/grade/transitions/fades/stylize — in a
-    single EDL version, reporting every component it set."""
+# Transition SOUNDS are accents, so they are budgeted separately from the
+# transitions themselves (DESIGN_BRIEF: "SFX sparse and structural"). A look
+# sounds at most one junction per insert (its entry), never two within
+# TRANSITION_MIN_SPACING_S, never on top of an existing sound, and leaves
+# room inside taste's sfx density budget for the hero graphics it recommends
+# (each template brings its own cues — hook_title has two).
+LOOK_SFX_HERO_RESERVE = 2
+LOOK_SFX_CLEAR_S = 1.0
+# A look sound starts this far (at most) before the junction it lands on —
+# the longest landing of the kit kinds looks use is ~0.44s.
+LOOK_SFX_LEAD_MAX_S = 0.6
+
+
+def _look_junction_rows(ctx, edl):
+    """The junctions the current transition fires on, in program order:
+    [{"k", "t", "enters", "leaves"}] — t is the output time of the cut,
+    enters/leaves name the insert the cut goes INTO / comes OUT of (None
+    for footage). Same resolver the renderer uses."""
+    if not (edl.get("effects") or {}).get("transition"):
+        return []
+    try:
+        ks = sorted(timeline_mod.transition_junctions(
+            edl, getattr(ctx, "index", None)))
+        blocks = timeline_mod.program_blocks(edl)
+    except Exception:
+        return []
+    rows = []
+    for k in ks:
+        if k + 1 >= len(blocks):
+            continue
+        a, b = blocks[k], blocks[k + 1]
+        rows.append({
+            "k": k, "t": float(b["out_start"]),
+            "enters": ((b.get("id") or f"block{k + 2}")
+                       if b.get("kind") == "insert" else None),
+            "leaves": ((a.get("id") or f"block{k + 1}")
+                       if a.get("kind") == "insert" else None)})
+    return rows
+
+
+def _time_spaced(rows, gap):
+    """Greedy pick in time order: a row is kept only when it is at least
+    `gap` seconds after the previously kept one (clustered B-roll in/out
+    pairs collapse to their first cut instead of firing twice)."""
+    out = []
+    for r in rows:
+        if not out or r["t"] - out[-1]["t"] >= gap - 1e-6:
+            out.append(r)
+    return out
+
+
+def _even_subset(rows, n):
+    if n <= 0:
+        return []
+    if len(rows) <= n:
+        return list(rows)
+    if n == 1:
+        return [rows[0]]
+    idx = sorted({round(i * (len(rows) - 1) / (n - 1)) for i in range(n)})
+    return [rows[i] for i in idx]
+
+
+def _look_transition_rows(ctx, edl):
+    """(junction rows the look's transition fires on, note).
+
+    Same resolver and the same cadence rule as set_transitions: scope 'scene'
+    only fires where the footage really changes (never on jump cuts), and a
+    look must not turn a dense montage into an effect every couple of
+    seconds — it marks a TIME-spaced subset (each kept junction at least
+    TRANSITION_MIN_SPACING_S after the previous one) instead of refusing."""
+    rows = _look_junction_rows(ctx, edl)
+    prog = program_duration(edl)
+    note = ""
+    if len(rows) >= 3 and prog > 0 \
+            and prog / len(rows) < TRANSITION_MIN_SPACING_S:
+        keep_n = max(1, int(prog / TRANSITION_MIN_SPACING_S))
+        chosen = _even_subset(
+            _time_spaced(rows, TRANSITION_MIN_SPACING_S), keep_n)
+        note = (f"{len(rows)} scene changes would fire a full-screen "
+                f"transition every {prog / len(rows):.1f}s, so the look "
+                f"marks {len(chosen)} of them at least "
+                f"{TRANSITION_MIN_SPACING_S:g}s apart and leaves the rest as "
+                "hard cuts")
+        fx = dict(edl.get("effects") or {})
+        fx["transition"] = dict(fx["transition"],
+                                junctions=[r["k"] for r in chosen])
+        edl["effects"] = fx
+        rows = chosen
+    return rows, note
+
+
+def _look_sound_rows(rows, existing_at, cap):
+    """Which transition junctions get a look sound: one per insert (its
+    entry; the exit only when the entry does not fire), clear of existing
+    sounds, time-spaced, at most `cap`."""
+    entered = {r["enters"] for r in rows if r["enters"]}
+    cand = [r for r in rows
+            if not (r["enters"] is None and r["leaves"] in entered)]
+    cand = [r for r in cand
+            if all(abs(a - r["t"]) >= LOOK_SFX_CLEAR_S for a in existing_at)]
+    return _even_subset(_time_spaced(cand, TRANSITION_MIN_SPACING_S), cap)
+
+
+def _look_sfx_budget(prog):
+    """taste.critique's sfx density ceiling for a program this long."""
+    return max(3, int(prog / taste.SFX_PER_S)) if prog > 0 else 0
+
+
+def _prune_stray_look_sfx(ctx, edl):
+    """After an insert is removed, moved or retimed the transition moves with
+    its junction, but a look sound re-anchors to the footage it sat on and
+    can end up on a plain cut or mid-shot. Drop look_tx* sounds that no
+    longer lead into a firing transition. Mutates edl; returns notes."""
+    sfx = list(edl.get("sfx") or [])
+    if not any(str(s.get("id") or "").startswith(LOOK_SFX_PREFIX)
+               for s in sfx):
+        return []
+    times = [r["t"] for r in _look_junction_rows(ctx, edl)]
+    kept, gone = [], []
+    for s in sfx:
+        if str(s.get("id") or "").startswith(LOOK_SFX_PREFIX):
+            try:
+                at = float(s.get("at") or 0.0)
+            except (TypeError, ValueError):
+                at = -1e9
+            if not any(-0.1 <= t - at <= LOOK_SFX_LEAD_MAX_S for t in times):
+                gone.append(str(s.get("id")))
+                continue
+        kept.append(s)
+    if not gone:
+        return []
+    edl["sfx"] = kept
+    return [f"Removed look transition sound(s) {', '.join(gone)} — the scene "
+            "transition they landed on is no longer there after this change. "
+            "Re-apply the look to sound the current transitions."]
+
+
+def _look_portrait(ctx, edl):
+    aspect = _output_aspect(ctx, edl)
+    return aspect is not None and aspect <= 1.05
+
+
+def _look_hero_templates(look, limit=4):
+    """Installed motion templates that suit the look, with the look's colours
+    pre-filled for the params each template actually has."""
+    hero = look.get("hero") or {}
+    try:
+        cat = motion_tools.motion_templates.catalog()
+    except Exception:
+        return []
+    cats = list(hero.get("categories") or ())
+    kws = [k.lower() for k in hero.get("keywords") or ()]
+    ranked = []
+    for t in cat:
+        if t.get("category") == "caption":
+            continue
+        hay = " ".join(str(t.get(k) or "") for k in
+                       ("name", "title", "description")).lower()
+        score = 0
+        if t.get("category") in cats:
+            score += 20 - 3 * cats.index(t["category"])
+        score += 4 * sum(1 for k in kws if k in hay)
+        if score <= 0:
+            continue
+        ranked.append((-score, t["name"], t))
+    ranked.sort(key=lambda r: (r[0], r[1]))
+    out = []
+    for _s, _n, t in ranked[:limit]:
+        params = {}
+        for key, value in (hero.get("params") or {}).items():
+            spec = (t.get("params") or {}).get(key)
+            if not spec:
+                continue
+            kind = spec.get("type")
+            if kind == "enum" and value not in (spec.get("values") or []):
+                continue
+            if kind == "color" and not (isinstance(value, str)
+                                        and HEX_COLOR.match(value)):
+                continue
+            if kind == "bool" and not isinstance(value, bool):
+                continue
+            if kind in ("str", "text", "list", "rows", "asset", "int",
+                        "float"):
+                continue
+            params[key] = value
+        desc = re.split(r"(?<=[.!?])\s+", str(t.get("description") or ""),
+                        maxsplit=1)[0]
+        out.append((t["name"], t.get("category"), desc, params))
+    return out
+
+
+def _look_music_choice(look, music):
+    """(request, error). request is None, ('moods', tuple) or ('track', row)."""
+    if music is None:
+        return None, None
+    mv = str(music).strip().lower()
+    if mv in ("", "none", "off", "no", "false"):
+        return None, None
+    if not music_library.available():
+        return None, ("REJECTED: the built-in music library is not available "
+                      "on this deployment — call apply_look again without "
+                      "music, and use the user's own track for music.")
+    if mv == "auto":
+        return ("moods", tuple(look.get("music") or ())), None
+    if mv in music_library.MOODS:
+        return ("moods", (mv,)), None
+    track, err = music_library.find(mv)
+    if err:
+        detail = err.split("REJECTED: ", 1)[-1]
+        return None, ("REJECTED: music must be 'auto', a mood ("
+                      + ", ".join(music_library.MOODS)
+                      + ") or an exact slug from list_music_library. "
+                      + detail)
+    return ("track", track), None
+
+
+def apply_look(ctx, name, music=None):
+    """Compose one look — captions/grade/texture/transitions(+sounds)/fades
+    and optionally a library music bed — in a single EDL version, reporting
+    every component it set."""
     n = (name or "").strip().lower()
     look = LOOKS.get(n)
     if not look:
         return (f"REJECTED: unknown look '{name}'. Looks: "
                 + ", ".join(sorted(LOOKS))
-                + ". Each composes captions, grade, transitions, fades and "
-                  "stylize in one version.")
-    edl = dict(ctx.latest_edl()["json"])
+                + ". Each composes captions, grade, texture, transitions "
+                  "and fades in one version.")
+    music_req, music_err = _look_music_choice(look, music)
+    if music_err:
+        return music_err
+    system = bool(look.get("system"))
+    row = ctx.latest_edl()
+    edl = json.loads(json.dumps(row["json"]))
     set_bits, notes = [], []
     cap_patch = look.get("captions")
     if cap_patch:
@@ -21686,6 +22077,29 @@ def apply_look(ctx, name):
                          "there is nothing to caption.")
         else:
             caps = edl.get("captions")
+            patch = dict(cap_patch)
+            if system:
+                # The motion look carries its own type system: an earlier
+                # look's font or fine size multiplier would override it.
+                patch.update({"size_scale": None, "font": None})
+            if patch.get("motion_look") \
+                    and not motion_tools.motion_engine.available():
+                # The renderer skips the libass burn whenever motion_look is
+                # set, so writing it where the browser engine is missing
+                # would lose the captions outright, not just their motion.
+                notes.append(
+                    "browser-drawn motion captions are not available on "
+                    "this deployment, so the captions use the look's "
+                    f"'{patch['preset']}' preset in its colours instead.")
+                patch["motion_look"] = None
+            elif not patch.get("motion_look"):
+                # A classic look's preset IS its caption look: clear a motion
+                # look an earlier system left, or it would keep drawing.
+                patch["motion_look"] = None
+            if isinstance(caps, list):
+                # motion_look / highlight colours exist for transcript
+                # captions only; manual items keep their authored timing.
+                patch.pop("motion_look", None)
             emphasis_off = (isinstance(caps, dict)
                             and caps.get("emphasis_mode") == "off")
             if emphasis_off:
@@ -21693,18 +22107,41 @@ def apply_look(ctx, name):
             elif isinstance(caps, dict) and caps.get("emphasis_words"):
                 emphasis, emph_src = caps["emphasis_words"], "kept existing"
             else:
-                emphasis = _emphasis_candidates(ctx)[0]
+                # Systems put an accent treatment (colour, serif, slam) on
+                # every emphasis word, so they take the sparse kept-transcript
+                # picker (about one word per phrase) set_caption_style uses.
+                emphasis = (_auto_caption_emphasis(ctx, edl) if system
+                            else []) or _emphasis_candidates(ctx)[0]
                 emph_src = "picked from the transcript"
-            merged = (merge_caption_style(caps, dict(cap_patch)) if caps
+            merged = (merge_caption_style(caps, patch) if caps
                       else {"mode": "from_transcript",
                             "design_version": CAPTION_DESIGN_VERSION,
                             "max_words_per_caption": None,
-                            "style": dict(cap_patch)})
-            bit = f"captions preset '{cap_patch['preset']}'"
-            if cap_patch.get("size"):
-                bit += f" size {cap_patch['size']}"
+                            "style": dict(patch)})
+            if patch.get("motion_look"):
+                bit = (f"captions '{patch['motion_look']}' motion look "
+                       f"({patch.get('color')}"
+                       + (f" + accent {patch['highlight_color']}"
+                          if patch.get("highlight_color") else "")
+                       + f"; base preset '{patch['preset']}')")
+            else:
+                bit = f"captions preset '{patch['preset']}'"
+                if patch.get("size"):
+                    bit += f" size {patch['size']}"
+                if system and patch.get("color"):
+                    bit += (f" ({patch['color']}"
+                            + (f" + accent {patch['highlight_color']}"
+                               if patch.get("highlight_color") else "")
+                            + ")")
             if isinstance(merged, dict):
                 merged["design_version"] = CAPTION_DESIGN_VERSION
+                if system and (merged.get("max_words_per_caption")
+                               or merged.get("min_words_per_caption")):
+                    # The look's own phrase grouping (1-3 word punches for
+                    # pop, 4-6 for clean...) is part of the system.
+                    merged["max_words_per_caption"] = None
+                    merged["min_words_per_caption"] = None
+                    bit += ", phrase length from the look"
                 if emphasis:
                     merged["emphasis_words"] = emphasis
                     merged["emphasis_mode"] = (caps.get("emphasis_mode")
@@ -21723,35 +22160,226 @@ def apply_look(ctx, name):
             set_bits.append(bit)
     fx = dict(edl.get("effects") or {})
     if "grade" in look:
+        if look["grade"] or fx.get("grade"):
+            set_bits.append(f"grade {look['grade'] or 'cleared'}")
         fx["grade"] = look["grade"]
-        set_bits.append(f"grade {look['grade'] or 'cleared'}")
-    if look.get("grade_custom"):
+    if system:
+        # One committed grade: the look's continuous values REPLACE an
+        # earlier custom grade instead of stacking onto it.
+        gc = dict(look.get("grade_custom") or {}) or None
+        if gc or fx.get("grade_custom"):
+            fx["grade_custom"] = gc
+            set_bits.append("custom grade " + (", ".join(
+                f"{k} {v:g}" for k, v in gc.items()) if gc else "cleared"))
+    elif look.get("grade_custom"):
         gc = dict(fx.get("grade_custom") or {})
         gc.update(look["grade_custom"])
         fx["grade_custom"] = gc
         set_bits.append("custom grade " + ", ".join(
             f"{k} {v:+g}" for k, v in look["grade_custom"].items()))
-    if look.get("transition"):
-        tst, tdur = look["transition"]
-        fx["transition"] = {"style": tst, "duration_s": tdur}
-        set_bits.append(f"transitions {tst} {tdur}s")
+    if "transition" in look:
+        tr = look["transition"]
+        if tr:
+            tst, tdur = tr
+            fx["transition"] = {"style": tst, "duration_s": tdur,
+                                "scope": "scene"}
+            set_bits.append(f"transitions {tst} {tdur}s at scene changes")
+        elif fx.get("transition"):
+            fx["transition"] = None
+            set_bits.append("transitions cleared (hard cuts)")
+    portrait = _look_portrait(ctx, edl)
+    short = portrait and program_duration(edl) <= taste.SHORT_FORM_MAX_S
     for fk, label in (("fade_in_s", "fade in"), ("fade_out_s", "fade out")):
-        if fk in look:
-            fx[fk] = look[fk]
-            set_bits.append(f"{label} {look[fk]}s")
-    if look.get("stylize"):
-        skind, sint = look["stylize"]
+        if fk not in look:
+            continue
+        want = float(look[fk] or 0.0)
+        blocked = portrait if fk == "fade_in_s" else short
+        if want > 0 and blocked:
+            notes.append(f"no {label} {'from' if fk == 'fade_in_s' else 'to'}"
+                         " black — a vertical/square short "
+                         + ("opens on the picture (the first second decides "
+                            "retention)" if fk == "fade_in_s" else
+                            "loops, so a fade to black reads as a stall")
+                         + "; set_fades adds one if the user asks.")
+        elif want > 0:
+            fx[fk] = want
+            set_bits.append(f"{label} {want:g}s")
+        elif system and blocked and float(fx.get(fk) or 0.0) > 0:
+            fx[fk] = 0.0
+            set_bits.append(f"{label} cleared (vertical shorts open/loop "
+                            "on the picture)")
+    if look.get("stylize") is not None:
+        st_spec = look["stylize"]
+        if st_spec and isinstance(st_spec[0], str):
+            st_spec = (st_spec,)
         sts = [dict(sx) for sx in (fx.get("stylize") or [])]
-        if any(sx.get("kind") == skind and sx.get("start") is None
-               for sx in sts):
-            notes.append(f"stylize {skind} was already on the whole video — "
-                         "left as is.")
+        if system:
+            replaced = [sx.get("kind") for sx in sts
+                        if sx.get("kind") in LOOK_TEXTURE_KINDS
+                        and sx.get("start") is None and sx.get("end") is None]
+            sts = [sx for sx in sts
+                   if not (sx.get("kind") in LOOK_TEXTURE_KINDS
+                           and sx.get("start") is None
+                           and sx.get("end") is None)]
+            added = []
+            for skind, sint in st_spec:
+                sts.append({"id": _next_item_id(sts, "st"), "kind": skind,
+                            "start": None, "end": None, "intensity": sint})
+                added.append(f"{skind} {sint:g}")
+            if added or replaced:
+                fx["stylize"] = sts or None
+                if added:
+                    set_bits.append("texture " + " + ".join(added)
+                                    + (" (replacing whole-video "
+                                       + ", ".join(replaced) + ")"
+                                       if replaced else ""))
+                else:
+                    set_bits.append("removed whole-video "
+                                    + ", ".join(replaced)
+                                    + " (this look has no texture)")
         else:
-            sts.append({"id": _next_item_id(sts, "st"), "kind": skind,
-                        "start": None, "end": None, "intensity": sint})
-            fx["stylize"] = sts
-            set_bits.append(f"stylize {skind} {sint:g}")
+            for skind, sint in st_spec:
+                if any(sx.get("kind") == skind and sx.get("start") is None
+                       for sx in sts):
+                    notes.append(f"stylize {skind} was already on the whole "
+                                 "video — left as is.")
+                    continue
+                sts.append({"id": _next_item_id(sts, "st"), "kind": skind,
+                            "start": None, "end": None, "intensity": sint})
+                fx["stylize"] = sts
+                set_bits.append(f"stylize {skind} {sint:g}")
     edl["effects"] = fx
+    # Scene-transition sounds. The look owns its transition, so it owns the
+    # sounds that sit on it: earlier look sounds are replaced, user sounds
+    # are never touched.
+    if "transition" in look:
+        old = [dict(s) for s in (edl.get("sfx") or [])]
+        sfx = [s for s in old
+               if not str(s.get("id") or "").startswith(LOOK_SFX_PREFIX)]
+        dropped = len(old) - len(sfx)
+        rows, cadence_note = _look_transition_rows(ctx, edl)
+        if cadence_note:
+            notes.append(cadence_note + ".")
+        spec = look.get("transition_sfx")
+        placed = []
+        prog = program_duration(edl)
+        if spec and rows:
+            kinds, gain = spec
+            style = (look.get("transition") or ("", 0))[0]
+            existing_at = []
+            for s in sfx:
+                try:
+                    existing_at.append(float(s.get("at") or 0.0))
+                except (TypeError, ValueError):
+                    pass
+            hero_sfx = sum(1 for s in sfx
+                           if str(s.get("id") or "").startswith("mg_"))
+            budget = _look_sfx_budget(prog)
+            cap = max(0, budget - len(sfx)
+                      - max(0, LOOK_SFX_HERO_RESERVE - hero_sfx))
+            sounded = _look_sound_rows(rows, existing_at, cap)
+            for i, r in enumerate(sounded):
+                t = r["t"]
+                role = kinds[i % len(kinds)]
+                # Owner-approved real recordings only; a role without one
+                # leaves that junction silent.
+                row = sound_library.pick(role, seed=f"{n}:{i}")
+                if not row:
+                    continue
+                kind = row["id"]
+                at = round(max(0.0, t - sound_library.peak_s(kind)), 3)
+                if at > prog - 0.05:
+                    continue
+                try:
+                    key = motion_tools.ensure_library_asset(ctx, kind)
+                except Exception as e:  # noqa: BLE001
+                    notes.append(f"transition sound {kind} unavailable "
+                                 f"({str(e)[:80]}).")
+                    continue
+                gain = min(float(gain), float(row["gain_db"]))
+                into = (f" into {r['enters']}" if r["enters"] else
+                        f" out of {r['leaves']}" if r["leaves"] else "")
+                sfx.append({"id": f"{LOOK_SFX_PREFIX}{len(placed) + 1}",
+                            "storage_key": key, "at": at, "gain_db": gain,
+                            "purpose": (f"{kind} landing on the {style} "
+                                        f"scene transition{into} at "
+                                        f"{t:.2f}s ('{n}' look)")})
+                placed.append(kind)
+            silent = len(rows) - len(placed)
+            if silent > 0:
+                notes.append(
+                    f"{silent} of {len(rows)} scene transition(s) left "
+                    "unsounded — transition sounds are accents: one per "
+                    "B-roll (on its entry), at least "
+                    f"{TRANSITION_MIN_SPACING_S:g}s apart, clear of existing "
+                    f"sounds, inside the {budget}-effect sound budget for "
+                    f"{prog:.0f}s with room kept for hero graphics.")
+        elif spec and look.get("transition"):
+            notes.append(
+                f"the {look['transition'][0]} transition fires only where "
+                "the footage really changes (B-roll/inserts or a new shot) "
+                "and this cut has none yet — it lands automatically once "
+                "media is inserted; re-apply the look then to sound it.")
+        if placed:
+            set_bits.append(f"{len(placed)} transition sound(s) "
+                            f"({', '.join(sorted(set(placed)))})")
+        elif dropped:
+            set_bits.append(f"removed {dropped} earlier look transition "
+                            "sound(s)")
+        if placed or dropped:
+            edl["sfx"] = sfx
+    # Music: only when asked, never stacked on an existing score.
+    music_placed = False
+    if music_req:
+        existing = [m.get("id") or "?" for m in (edl.get("music") or [])]
+        if existing:
+            notes.append("music left as is — " + ", ".join(existing)
+                         + " already scores this edit (swap_music or "
+                           "remove_music to change it).")
+        else:
+            if music_req[0] == "track":
+                track = music_req[1]
+            else:
+                track = music_library.pick(
+                    music_req[1], f"{ctx.project_id}:{n}",
+                    avoid=music_library.used_by_user(ctx))
+            key, err = ((None, "no library track matches those moods")
+                        if not track else
+                        music_library.ensure_project_asset(ctx, track))
+            if err:
+                notes.append("music NOT added — " + err)
+            else:
+                prog = program_duration(edl)
+                bed = _speech_overlap_s(ctx, edl, 0.0, prog) >= 1.0
+                stage = _RecipeContext(ctx, edl, row["version"])
+                placed_res = add_music(
+                    stage, key,
+                    gain_db=(look.get("music_db",
+                                      music_library.DEFAULT_BED_DB)
+                             if bed else None),
+                    duck=True if bed else None,
+                    # Start on the track's body: a quiet intro would be most
+                    # of a short (see music_library.body_start).
+                    offset_s=music_library.body_start(track) or None,
+                    fade_in_s=look.get("music_fade_in_s", 0.6),
+                    fade_out_s=1.5,
+                    purpose=(f"{track['mood']} bed for the '{n}' look "
+                             f"(Valmera CC0 library: \"{track['title']}\")"))
+                if str(placed_res).startswith("EDL v"):
+                    edl = stage._edl
+                    item = (edl.get("music") or [{}])[-1]
+                    music_placed = True
+                    set_bits.append(
+                        f"music \"{track['title']}\" ({track['mood']}, CC0) "
+                        f"{item.get('gain_db')}dB"
+                        + (f" from {item['offset_s']:g}s in (past its quiet "
+                           "intro)" if item.get("offset_s") else "")
+                        + (", ducked under speech" if bed else
+                           " as the lead audio")
+                        + f" [{item.get('id')}]")
+                else:
+                    notes.append("music NOT added — "
+                                 + str(placed_res)[:240])
     if not set_bits:
         return ("NO CHANGE: every component of that look is already in "
                 "place (or not applicable here). Do NOT tell the user you "
@@ -21760,11 +22388,38 @@ def apply_look(ctx, name):
     if res.startswith("EDL v"):
         if notes:
             res += "\n" + "\n".join("Note: " + x for x in notes)
-        res += "\napply_look never touches cuts, music or sfx."
-        if look.get("smooth_duck") and edl.get("music"):
+        res += ("\napply_look never touches cuts; it changes music only when "
+                "music= is passed, and the only sounds it places are its own "
+                "transition sounds (look_tx*).")
+        if music_placed:
+            res += (" Music licence: CC0 1.0 public domain — no credit "
+                    "required.")
+        if look.get("smooth_duck") and edl.get("music") and not music_placed:
             res += ("\nNote: existing music items were NOT touched — for "
                     "the smooth speech duck this look pairs with, call "
                     "set_music_fit(id, duck_mode='smooth') on them.")
+        if system and not _tool_disabled("add_motion_graphic"):
+            heroes = _look_hero_templates(look)
+            if heroes:
+                res += ("\nHERO MOMENTS for this look — place 2-4 with "
+                        "add_motion_graphic on the hook, the key claim, a "
+                        "number and the payoff, each cued to its spoken word "
+                        "(params below keep the look's colours):")
+                for tname, tcat, tdesc, tparams in heroes:
+                    res += f"\n- {tname} [{tcat}]: {tdesc}"
+                    if tparams:
+                        res += " params " + json.dumps(tparams)
+                prog_now = program_duration(edl)
+                n_sfx = len(edl.get("sfx") or [])
+                budget = _look_sfx_budget(prog_now)
+                res += (f"\nSound budget: {n_sfx} of {budget} sound effects "
+                        f"used for this {prog_now:.0f}s cut. Each hero "
+                        "template brings its own cues; once the budget is "
+                        "spent, place further heroes with sfx=false.")
+        if system and not music_placed and music_req is None \
+                and not edl.get("music"):
+            res += ("\nThis edit has no music: apply_look(name, "
+                    "music='auto') or add_library_music lays a CC0 bed.")
     return res
 
 
@@ -24971,23 +25626,41 @@ TOOLS = {
                          "and rare/distinctive words — as a verbatim list "
                          "to pass to add_captions / set_caption_style "
                          "emphasis_words.", {}),
-    "apply_look": (apply_look, "ONE-CALL aesthetic: composes caption "
-                   "preset + grade + custom grade + transitions + fades + "
-                   "stylize in a single EDL version and reports every "
-                   "component it set. Looks: 'hype' (beast xl captions, "
-                   "vibrant grade, zoom_punch cuts, closing fade), 'clean' "
-                   "(clean white size-led captions, ungraded, gentle fades), "
-                   "'cinematic' (elegant captions, cinematic grade + "
-                   "slight warmth, 1s fades, dip_black), 'luxury' (luxe "
-                   "captions, warm grade + temperature lift, long fades), "
-                   "'meme' (impact xl captions, flash cuts, grain). "
-                   "Preserves existing emphasis_words, else picks them "
-                   "from the transcript. Never touches cuts, music or sfx "
-                   "— place accents with add_sfx. "
-                   "Every component can be adjusted afterwards "
-                   "with its own tool.",
+    "apply_look": (apply_look, "One call sets a whole premium look: "
+                   "captions, grade, texture, transitions and optional "
+                   "music. PREMIUM SYSTEMS (best for reels/shorts) — "
+                   + "; ".join(f"'{n}': {lk['summary']}"
+                               for n, lk in LOOKS.items() if lk.get("system"))
+                   + ". A system "
+                   "draws captions with the browser motion engine, REPLACES "
+                   "the earlier look's custom grade, whole-video texture and "
+                   "transition sounds, never puts a fade from black on a "
+                   "vertical short, and returns hero-moment templates to "
+                   "place next with add_motion_graphic. CLASSIC looks: "
+                   "'hype' (beast xl captions, vibrant, zoom_punch cuts with "
+                   "whooshes), 'clean' (clean white size-led captions, "
+                   "ungraded), 'cinematic' (elegant captions, cinematic "
+                   "grade + warmth, dip_black), 'luxury' (luxe captions, "
+                   "warm), 'meme' (impact xl captions, flash cuts, grain); "
+                   "their fades apply to landscape only. Transitions fire "
+                   "only at real scene changes (B-roll/inserts/new shots), "
+                   "never on jump cuts. ONLY when the user asked for music: "
+                   "music='auto' (the look's moods), a mood or an exact "
+                   "library slug lays a ducked CC0 bed (-18 to -22 dB) when "
+                   "the edit has no music yet; otherwise omit music — never "
+                   "add music on your own initiative. Preserves existing "
+                   "emphasis_words, else picks them from the transcript. "
+                   "Never touches cuts. Every component can be adjusted "
+                   "afterwards with its own tool.",
                    {"name": {"type": "string",
-                             "enum": sorted(LOOKS)}}),
+                             "enum": sorted(LOOKS)},
+                    "music": {"type": "string",
+                              "description": "'auto' = a CC0 library bed "
+                              "in the look's moods; or a mood (upbeat, "
+                              "chill, cinematic, corporate, dramatic, "
+                              "hiphop, ambient, inspiring); or an exact "
+                              "slug from list_music_library. Omit to leave "
+                              "music unchanged."}}),
     "get_edl": (get_edl, "Current EDL JSON and version. Large timelines "
                 "return a compact index instead of invalid truncated JSON. "
                 "Request top-level sections such as ['captions','overlays'] "
@@ -25105,6 +25778,8 @@ TOOLS = {
 # Browser-rendered motion design + the approved real sound library (worker/motion_tools.py).
 TOOLS.update(motion_tools.TOOL_SPECS)
 TOOLS.update(motion_planner.TOOL_SPECS)
+# Built-in CC0 music library (worker/music_library.py, worker/music/).
+TOOLS.update(music_library.TOOL_SPECS)
 
 # Retired from the live agent/MCP catalog. Functions stay imported so leftover
 # tests and any in-flight payload that still names them can resolve; the model
@@ -25195,6 +25870,7 @@ TOOL_DOMAINS = {
         "list_assets",
         "get_audio_analysis", "audit_audio_mix", "review_audio",
         "extract_audio", "add_music", "remove_music",
+        "list_music_library", "add_library_music",
         "swap_music", "set_music_fit", "set_audio_gain", "set_volume",
         "add_voiceover", "remove_voiceover", "beat_align_cuts",
         "separate_music", "remove_stem_mix", "set_master_loudness",
@@ -25326,6 +26002,8 @@ REQUIRED_ARGS = {
     # start/end default to the whole program, so "add some music" needs only
     # a track.
     "add_music": ["storage_key"],
+    "add_library_music": ["slug"],
+    "list_music_library": [],
     "find_song": ["query"],
     "load_tools": [],
     "expand_toolset": ["domains"],
@@ -25431,7 +26109,8 @@ WRITE_TOOLS = {"apply_edit_batch", "keep_segments", "cut_range", "cut_output_ran
                "restore_range",
                "cut_silences", "remove_filler_words", "add_captions",
                "add_kinetic_text",
-               "set_caption_style", "add_music", "remove_music",
+               "set_caption_style", "add_music", "add_library_music",
+               "remove_music",
                "swap_music", "set_music_fit", "extract_audio",
                "add_sfx", "add_web_sfx", "move_sfx", "remove_sfx",
                "set_audio_gain", "set_volume", "set_frame", "auto_reframe",
@@ -25507,6 +26186,8 @@ def _tool_disabled(name, model=None):
         # render check), and a render that cannot draw an item reports it in
         # its result as motion_warnings.
         return not motion_tools.motion_engine.package_installed()
+    if name in ("list_music_library", "add_library_music"):
+        return not music_library.available()
     return False
 
 

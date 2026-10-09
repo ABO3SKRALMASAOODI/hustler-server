@@ -4083,7 +4083,10 @@ check("music: the diff line names the fit", "looped" in _d2)
 # here until 2026-08-08, when the pack was deleted outright — tracks
 # copied to R2 under legacy-music/, every EDL reference rewritten to
 # those plain storage keys. The sfx pack's copy of the same security
-# property is still pinned in the Round-26 section below.)
+# property is still pinned in the Round-26 section below. The CC0
+# CATALOGUE came back on 2026-10-09 as worker/music_library.py — exact-slug
+# whitelist, project-scoped copies; its pins live in
+# tests/test_music_library_and_looks.py.)
 
 # --- swap / refit behaviour the user asked for by name ---
 _sc = ToolCtx(json.loads(json.dumps(_old)))
@@ -4200,15 +4203,17 @@ finally:
     _cfg.MUSIC_SEARCH_ENABLED = _saved_ms
 check("state: retired music search is never offered",
       "search_music" not in _sb_on
-      and "search_music" not in _sb_off
-      and "list_music_library" not in _sb_on)
+      and "search_music" not in _sb_off)
+check("state: the CC0 library is offered exactly when its manifest ships",
+      "list_music_library" in _sb_on)
 # The fallback hint must describe only working paths too.
 _hint = _nearest_alternative("add some background music")
 check("audio hint does not revive generic music search",
       "genre/vibe" not in _hint.lower()
       and "find online" not in _hint.lower())
-check("the retired library tool is no longer registered",
-      "list_music_library" not in agent_tools.TOOLS)
+check("the restored CC0 library tools are registered",
+      "list_music_library" in agent_tools.TOOLS
+      and "add_library_music" in agent_tools.TOOLS)
 check("music search tools stay retired even if their provider is enabled",
       all(name not in agent_tools.TOOLS for name in
           ("search_music", "research_music",

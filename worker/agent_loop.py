@@ -3033,7 +3033,9 @@ ALTERNATIVE_HINTS = [
      "animations."),
     (re.compile(r"(?i)voice.?over|narrat|music|song|soundtrack|audio|volume"),
      "What I CAN do: score the edit with music on any time range — a "
-     "specific song the user named (load acquisition, then find_song), "
+     "licence-free CC0 bed from the built-in library by mood "
+     "(list_music_library), "
+     "a specific song the user named (load acquisition, then find_song), "
      "any link they paste (a song URL, "
      "YouTube, SoundCloud...), or the user's own "
      "upload — loop it to fill the video, fade it in and out, start it "
@@ -3086,6 +3088,12 @@ def _nearest_alternative(user_text):
             if "find_song" in hint and not song_find.available():
                 hint = hint.replace(
                     "a specific song found by NAME (find_song), ", "")
+            if "list_music_library" in hint:
+                import music_library
+                if not music_library.available():
+                    hint = hint.replace(
+                        "a licence-free CC0 bed from the built-in library "
+                        "by mood (list_music_library), ", "")
             # A deployment with sfx search off must not offer found sounds.
             if "sounds I find on the web" in hint \
                     and not sfx_search.available():

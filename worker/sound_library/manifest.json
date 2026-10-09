@@ -10,7 +10,8 @@
   "title": "Backwards Whoosh",
   "author": "SlavicMagic",
   "source_url": "https://freesound.org/people/SlavicMagic/sounds/446010",
-  "license": "CC0 1.0"
+  "license": "CC0 1.0",
+  "peak_s": 0.484
  },
  {
   "id": "whoosh_soft_2",
@@ -23,7 +24,8 @@
   "title": "Swoosh 3",
   "author": "D4XX",
   "source_url": "https://freesound.org/people/D4XX/sounds/607250",
-  "license": "CC0 1.0"
+  "license": "CC0 1.0",
+  "peak_s": 0.263
  },
  {
   "id": "swish_1",
@@ -36,7 +38,8 @@
   "title": "Swish 5",
   "author": "ihitokage",
   "source_url": "https://freesound.org/people/ihitokage/sounds/395368",
-  "license": "CC0 1.0"
+  "license": "CC0 1.0",
+  "peak_s": 0.069
  },
  {
   "id": "impact_1",
@@ -49,7 +52,8 @@
   "title": "Impact",
   "author": "chriskalos",
   "source_url": "https://freesound.org/people/chriskalos/sounds/172779",
-  "license": "CC0 1.0"
+  "license": "CC0 1.0",
+  "peak_s": 0.755
  },
  {
   "id": "riser_1",
@@ -62,7 +66,8 @@
   "title": "Riser",
   "author": "Rizzard",
   "source_url": "https://freesound.org/people/Rizzard/sounds/561207",
-  "license": "CC0 1.0"
+  "license": "CC0 1.0",
+  "peak_s": 1.828
  },
  {
   "id": "riser_2",
@@ -75,7 +80,8 @@
   "title": "Energy Riser 3",
   "author": "magnuswaker",
   "source_url": "https://freesound.org/people/magnuswaker/sounds/531729",
-  "license": "CC0 1.0"
+  "license": "CC0 1.0",
+  "peak_s": 0.982
  },
  {
   "id": "riser_3",
@@ -88,7 +94,8 @@
   "title": "reverse fx 9.wav",
   "author": "neezen.",
   "source_url": "https://freesound.org/people/neezen./sounds/503799",
-  "license": "CC0 1.0"
+  "license": "CC0 1.0",
+  "peak_s": 1.812
  },
  {
   "id": "riser_4",
@@ -101,7 +108,8 @@
   "title": "reverse bass.wav",
   "author": "neezen.",
   "source_url": "https://freesound.org/people/neezen./sounds/503812",
-  "license": "CC0 1.0"
+  "license": "CC0 1.0",
+  "peak_s": 1.656
  },
  {
   "id": "shutter_1",
@@ -114,7 +122,8 @@
   "title": "Camera Shutter",
   "author": "roachpowder",
   "source_url": "https://freesound.org/people/roachpowder/sounds/170229",
-  "license": "CC0 1.0"
+  "license": "CC0 1.0",
+  "peak_s": 0.192
  },
  {
   "id": "shutter_2",
@@ -127,7 +136,8 @@
   "title": "Nikon D5200 Camera Shutter (with focusing)",
   "author": "mitkonikov",
   "source_url": "https://freesound.org/people/mitkonikov/sounds/398412",
-  "license": "CC0 1.0"
+  "license": "CC0 1.0",
+  "peak_s": 0.156
  },
  {
   "id": "typing_1",
@@ -140,7 +150,8 @@
   "title": "Keyboard Typing 001.wav",
   "author": "ristooooo1",
   "source_url": "https://freesound.org/people/ristooooo1/sounds/539146",
-  "license": "CC0 1.0"
+  "license": "CC0 1.0",
+  "peak_s": 1.534
  },
  {
   "id": "typing_2",
@@ -153,7 +164,8 @@
   "title": "Mechanical Keyboard",
   "author": "greenvwbeetle",
   "source_url": "https://freesound.org/people/greenvwbeetle/sounds/423648",
-  "license": "CC0 1.0"
+  "license": "CC0 1.0",
+  "peak_s": 1.183
  },
  {
   "id": "click_1",
@@ -166,7 +178,8 @@
   "title": "Mouse Click",
   "author": "Sillyslimeball",
   "source_url": "https://freesound.org/people/Sillyslimeball/sounds/333575",
-  "license": "CC0 1.0"
+  "license": "CC0 1.0",
+  "peak_s": 0.168
  },
  {
   "id": "click_2",
@@ -179,7 +192,8 @@
   "title": "Mouse Click",
   "author": "pillwave",
   "source_url": "https://freesound.org/people/pillwave/sounds/423958",
-  "license": "CC0 1.0"
+  "license": "CC0 1.0",
+  "peak_s": 0.149
  },
  {
   "id": "pop_1",
@@ -192,7 +206,8 @@
   "title": "Pop 2",
   "author": "greenvwbeetle",
   "source_url": "https://freesound.org/people/greenvwbeetle/sounds/244654",
-  "license": "CC0 1.0"
+  "license": "CC0 1.0",
+  "peak_s": 0.033
  },
  {
   "id": "tick_1",
@@ -205,7 +220,8 @@
   "title": "single-tick.wav",
   "author": "DeltaCode",
   "source_url": "https://freesound.org/people/DeltaCode/sounds/668355",
-  "license": "CC0 1.0"
+  "license": "CC0 1.0",
+  "peak_s": 0.02
  },
  {
   "id": "ding_1",
@@ -218,7 +234,8 @@
   "title": "ding2.wav",
   "author": "mrbriandesign",
   "source_url": "https://freesound.org/people/mrbriandesign/sounds/159011",
-  "license": "CC0 1.0"
+  "license": "CC0 1.0",
+  "peak_s": 0.005
  },
  {
   "id": "glitch_1",
@@ -231,7 +248,8 @@
   "title": "Glitch",
   "author": "smokevhstapes",
   "source_url": "https://freesound.org/people/smokevhstapes/sounds/347180",
-  "license": "CC0 1.0"
+  "license": "CC0 1.0",
+  "peak_s": 0.161
  },
  {
   "id": "glitch_2",
@@ -244,7 +262,8 @@
   "title": "Glitch 03",
   "author": "JacksonMiller0",
   "source_url": "https://freesound.org/people/JacksonMiller0/sounds/237605",
-  "license": "CC0 1.0"
+  "license": "CC0 1.0",
+  "peak_s": 0.101
  },
  {
   "id": "cash_register_1",
@@ -257,7 +276,8 @@
   "title": "Cash register",
   "author": "MaoDin204",
   "source_url": "https://freesound.org/people/MaoDin204/sounds/721774",
-  "license": "CC0 1.0"
+  "license": "CC0 1.0",
+  "peak_s": 0.274
  },
  {
   "id": "heartbeat_1",
@@ -270,6 +290,7 @@
   "title": "Single Heartbeat HQ_BeatSmith.wav",
   "author": "Lunardrive",
   "source_url": "https://freesound.org/people/Lunardrive/sounds/22417",
-  "license": "CC0 1.0"
+  "license": "CC0 1.0",
+  "peak_s": 0.03
  }
 ]
