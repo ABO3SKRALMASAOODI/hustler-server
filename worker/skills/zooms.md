@@ -33,6 +33,11 @@ CAMERA GRAMMAR FOR REELS — read the `add_zoom` schema for exact fields and
 mode names; the modes below are the vocabulary.
 STRENGTH IS MAGNIFICATION − 1: strength 0.12 is a 1.12x frame, 0.2 is 1.2x;
 above 1.0 is a 2x+ zoom. Never pass a magnification (1.15) as strength.
+RESOLUTION CAPS IT: framing x zoom (overlapping zooms add up) never enlarges
+the source past 3x. A 9:16 crop of 1080p is already 1.78x (room ~0.68); a
+480p crop is 4x, so its zooms drop to the 5% minimum — the write says
+"capped". On low-resolution footage, motion comes from cuts and type, not
+punches.
 - `punch` — a fast expo snap in (~0.12 s, optional overshoot 0.05–0.15 on
   the biggest beats), held, then a hard cut back out at `end`: strength
   0.08–0.18 landing ON an emphasis word. Start 0–2 frames before the onset

@@ -1014,11 +1014,17 @@ def _seed_story_child(worker_db, job, child_id, index, clip, workdir,
     os.makedirs(wd, exist_ok=True)
     ctx = agent_tools.ToolContext(worker_db, job, child, index, wd)
     try:
-        expected_keep = audit.snap_keep_to_words(
+        word_keep = audit.snap_keep_to_words(
             [[clip["start"], clip["end"]]], index.get("words") or [],
             ctx.duration)
+        # keep_segments also pulls an edge off a camera cut it lands a few
+        # frames past (agent_tools._snap_keep_to_shots); a seed written
+        # before that rule is still the same story cut.
+        expected_keep = agent_tools._snap_keep_to_shots(
+            word_keep, index, index.get("words"))[0]
         before = ctx.latest_edl()
-        if (before.get("json") or {}).get("keep") == expected_keep:
+        if (before.get("json") or {}).get("keep") in (expected_keep,
+                                                       word_keep):
             return (before["version"],
                     "recovered existing word-snapped story seed")
         result = agent_tools.execute(

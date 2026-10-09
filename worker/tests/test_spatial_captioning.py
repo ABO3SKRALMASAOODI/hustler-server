@@ -537,8 +537,10 @@ def test_auto_reframe_builds_mixed_track_before_global_detail_fit(
         enforce_spatial = True
         duration = 6.52
         workdir = str(tmp_path)
+        # 1080p: a 540p source would now be windowed on resolution alone
+        # (3.6x crop enlargement) before any per-shot track is measured.
         index = {
-            "video": {"duration": 6.52, "width": 960, "height": 540},
+            "video": {"duration": 6.52, "width": 1920, "height": 1080},
             "shots": [{"start": 0.0, "end": 5.48},
                       {"start": 5.48, "end": 6.52}],
         }

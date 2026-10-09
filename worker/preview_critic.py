@@ -279,7 +279,10 @@ compare treatment ACROSS SHOTS: if a wide composition appropriately fits and a
 later clear close-up/product shot stays unnecessarily tiny in the same inset,
 flag that uniform treatment when the edit brief asks for deliberate or
 shot-specific framing. The close shot should normally fill cleanly while the
-wide shot remains preserved. Do not invent audio defects. Do not flag a
+wide shot remains preserved. Low-resolution or archival footage shown whole
+as a window with a headline band (a crop would enlarge it past ~2.5x and
+smear it) is a deliberate composition, not a tiny-inset defect. Do not
+invent audio defects. Do not flag a
 music-led / gameplay / montage edit for "dead air" or a missing spoken hook
 — leftover VOD words are not a talking-head open. Do not approve
 merely because a requested operation is technically visible: decide whether

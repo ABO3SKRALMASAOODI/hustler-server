@@ -2876,6 +2876,140 @@ def _merge_touching(spans):
 _remap_program_items = timeline_mod.remap_program_items
 
 
+# Shot-cut hygiene. A keep edge a few frames past a SOURCE camera cut shows
+# the neighbouring shot for those frames: the Oct 2026 Elon showcase ended
+# its last span at 152.70 with the cut at 152.65 and flashed 2 frames of an
+# unrelated wide before the end card. Within this many frames of a cut an
+# edge is moved onto it.
+SHOT_SLIVER_FRAMES = 6
+# A snap never leaves a span shorter than this (the span itself would be the
+# flash; it is left for the editor to judge).
+SHOT_SNAP_MIN_SPAN_S = 0.2
+# focus_track edges this close to a camera cut are moved onto it: a crop
+# that re-aims 2 frames after the cut shows the new shot through the old
+# crop (the same showcase, 138.04 vs the cut at 137.98).
+FOCUS_SHOT_SNAP_S = 0.25
+
+
+def _shot_cuts(index):
+    """Sorted SOURCE-time camera cuts: every indexed shot start after 0."""
+    cuts = set()
+    for shot in (index or {}).get("shots") or []:
+        try:
+            t = round(float(shot["start"]), 3)
+        except (KeyError, TypeError, ValueError):
+            continue
+        if t > 0.0:
+            cuts.add(t)
+    return sorted(cuts)
+
+
+def _index_fps(index):
+    try:
+        fps = float(((index or {}).get("video") or {}).get("fps") or 0.0)
+    except (TypeError, ValueError):
+        fps = 0.0
+    return fps if 1.0 <= fps <= 240.0 else 30.0
+
+
+def _snap_keep_to_shots(keep, index, words=None):
+    """(keep, notes) with every keep edge pulled off a nearby camera cut.
+
+    An END up to SHOT_SLIVER_FRAMES after a cut moves back onto the cut. A
+    START up to that far before a cut (or less than a frame after it) moves
+    to one frame past it: the indexed cut can sit a frame early on the
+    source clock (renderer.build_filtergraph shifts focus edges by the same
+    frame), so the frame after it is the first one that is surely the new
+    shot. Edges where two spans touch are one continuous source run, not a
+    cut, and are left alone. notes is empty when nothing moved."""
+    cuts = _shot_cuts(index)
+    if not cuts or not keep:
+        return keep, []
+    step = 1.0 / _index_fps(index)
+    reach = SHOT_SLIVER_FRAMES * step + 1e-6
+    src = [[float(s), float(e)] for s, e in keep]
+    out = [list(span) for span in src]
+    moved = []
+    for i, span in enumerate(out):
+        s, e = span
+        # Past the LAST cut in reach for a start, before the FIRST for an
+        # end: two cuts a few frames apart are a sliver shot of their own.
+        if not (i > 0 and abs(src[i - 1][1] - s) <= 0.011):
+            b = max((c for c in cuts if c - reach <= s < c + step),
+                    default=None)
+            # EDL keep times are hundredths (schemas._r): at least 0.01 past
+            # the cut, about one frame at any real frame rate.
+            first = max(round(b + step, 2), round(b + 0.01, 2)) \
+                if b is not None else None
+            if b is not None and first - s > 0.004 and \
+                    e - first >= SHOT_SNAP_MIN_SPAN_S:
+                moved.append(("start", s, first, b))
+                s = first
+        if not (i + 1 < len(src) and abs(src[i + 1][0] - e) <= 0.011):
+            b = min((c for c in cuts if c < e <= c + reach), default=None)
+            if b is not None and round(b, 2) < e and \
+                    b - s >= SHOT_SNAP_MIN_SPAN_S:
+                moved.append(("end", e, round(b, 2), b))
+                e = round(b, 2)
+        span[0], span[1] = s, e
+    if not moved:
+        return keep, []
+    bits = []
+    for side, old, new, cut in moved:
+        frames = max(1, int(round(abs(new - old) / step)))
+        lo, hi = min(old, new), max(old, new)
+        clipped = [str(w.get("w") or "").strip() for w in words or []
+                   if float(w.get("t0", 0)) < hi - 0.02
+                   and float(w.get("t1", 0)) > lo + 0.02]
+        bits.append(
+            f"{side} {old:g}->{new:g} ({frames} frame"
+            f"{'s' if frames != 1 else ''} of the "
+            f"{'next' if side == 'end' else 'previous'} shot, cut at "
+            f"{cut:g})"
+            + (f" — trims '{' '.join(x for x in clipped if x)[:40]}'"
+               if any(clipped) else ""))
+    return out, [
+        f"SHOT-CUT HYGIENE: moved {len(moved)} keep edge"
+        f"{'s' if len(moved) != 1 else ''} onto source camera cuts so no "
+        "span starts or ends with a 1-5 frame flash of the neighbouring "
+        "shot: " + "; ".join(bits) + "."]
+
+
+def _snap_focus_track_to_shots(track, index):
+    """(track, notes): internal focus_track edges within FOCUS_SHOT_SNAP_S of
+    a camera cut move onto it, so the crop re-aims exactly on the cut. The
+    track's outer bounds stay put (moving them would uncover footage).
+    Returns the input unchanged when no edge moves or a span would
+    collapse."""
+    cuts = _shot_cuts(index)
+    rows = [dict(sp) for sp in track or []]
+    if not cuts or not rows:
+        return track, []
+    try:
+        edges = sorted({float(sp[k]) for sp in rows for k in ("t0", "t1")})
+    except (KeyError, TypeError, ValueError):
+        return track, []
+    moved = {}
+    for t in edges[1:-1]:
+        b = min(cuts, key=lambda c: abs(c - t))
+        if 0.0005 < abs(b - t) <= FOCUS_SHOT_SNAP_S:
+            moved[t] = b
+    if not moved:
+        return track, []
+    for sp in rows:
+        sp["t0"] = moved.get(float(sp["t0"]), float(sp["t0"]))
+        sp["t1"] = moved.get(float(sp["t1"]), float(sp["t1"]))
+        if sp["t1"] - sp["t0"] < 0.05:
+            return track, []
+    return rows, [
+        "SHOT-CUT HYGIENE: focus_track edge"
+        f"{'s' if len(moved) != 1 else ''} "
+        + ", ".join(f"{old:g}->{new:g}" for old, new in sorted(moved.items()))
+        + " moved onto the source camera cut, so the crop re-aims ON the "
+        "cut instead of showing the new shot through the old crop for a "
+        "frame or two."]
+
+
 def _write_keep(ctx, new_keep, desc, snap_to_words=False,
                 check_regression=False):
     """Shared tail for every keep-modifying write: optional outward word
@@ -2890,6 +3024,7 @@ def _write_keep(ctx, new_keep, desc, snap_to_words=False,
     new_keep = [x for x in new_keep if x[1] - x[0] >= 0.05]
     if not new_keep:
         return "REJECTED: nothing would survive that keep list."
+    new_keep, shot_notes = _snap_keep_to_shots(new_keep, ctx.index, words)
     prev = ctx.latest_edl()
     prev_keep = prev["json"]["keep"]
     edl = dict(prev["json"])
@@ -2915,8 +3050,8 @@ def _write_keep(ctx, new_keep, desc, snap_to_words=False,
     result = ctx.write_edl(edl, desc)
     if not result.startswith("EDL v"):
         return result
-    if region_notes:
-        result += "\n" + "\n".join(region_notes)
+    if region_notes + shot_notes:
+        result += "\n" + "\n".join(region_notes + shot_notes)
     warn = audit.boundary_warning_lines(new_keep, words, silences,
                                         ctx.duration)
     if snap_to_words:
@@ -7019,6 +7154,133 @@ def _behind_framing_note(ctx, res):
         "framing back.")
 
 
+# Resolution-aware framing (judges, Oct 2026). The 646x480 archival Jobs talk
+# cropped to fill 9:16 was enlarged 4x on the 1080x1920 final (4.5x under its
+# punch-ins): smeared footage under razor-sharp type, where the reference
+# edits show such footage as a 4:3 window with a headline zone. Past this
+# crop-to-fill enlargement auto_reframe FITS the picture instead (1080p ->
+# 9:16 is 1.78x and still fills; 4:3 at 720p or below windows).
+FRAME_WINDOW_UPSCALE = 2.5
+# ...but only when the fitted picture is a real window — at least this share
+# of the frame (4:3 in 9:16 is 0.42). A 16:9 source fitted into 9:16 is a
+# 0.32 strip, so a 720p podcast (2.67x) keeps filling the phone, and only
+# footage that would smear worse than STRIP_UPSCALE (540p and below) is
+# shown as a strip instead.
+FRAME_WINDOW_MIN_SHARE = 0.4
+FRAME_STRIP_UPSCALE = 3.5
+# Zooms multiply the framing's enlargement, and overlapping moves sum their
+# strengths (camera.camera_chain). Past this combined factor the footage is
+# visibly soft under sharp type, so zoom writes cap their strength to it.
+ZOOM_UPSCALE_MAX = 3.0
+
+
+def _frame_upscale(index, ratio, mode="crop", picture=None):
+    """How many times the main SOURCE is enlarged on the final delivery
+    canvas under a framing — cover fit for crop, contain fit for the pad
+    modes — or None when the source's dimensions are unknown."""
+    video = (index or {}).get("video") or {}
+    try:
+        sw, sh = float(video.get("width") or 0), float(video.get("height") or 0)
+        if sw <= 0 or sh <= 0:
+            return None
+        W, H = renderer.frame_dims(int(sw), int(sh), str(ratio or "source"),
+                                   delivery=True)
+        if picture:
+            _x, _y, W, H = renderer.picture_pixels(W, H, picture)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+    if (mode or "crop") in ("pad", "pad_blur"):
+        return min(W / sw, H / sh)
+    return max(W / sw, H / sh)
+
+
+def _window_note(ctx, ratio):
+    """Why a FITTED picture is right for this source, and where its free
+    headline band is — or '' when a crop to `ratio` would stay under
+    FRAME_WINDOW_UPSCALE, would not crop anything, or would only trade the
+    softness for a thin strip (see FRAME_WINDOW_MIN_SHARE)."""
+    index = getattr(ctx, "index", None) or {}
+    crop_up = _frame_upscale(index, ratio, "crop")
+    fit_up = _frame_upscale(index, ratio, "pad_blur")
+    if not crop_up or not fit_up or crop_up <= FRAME_WINDOW_UPSCALE \
+            or crop_up < fit_up * 1.05:
+        return ""
+    sw, sh = (int(float(index["video"][k])) for k in ("width", "height"))
+    W, H = renderer.frame_dims(sw, sh, str(ratio), delivery=True)
+    _kind, x0, y0, x1, y1 = renderer.fit_fractions(sw, sh, W, H, "pad_blur")
+    if (x1 - x0) * (y1 - y0) < FRAME_WINDOW_MIN_SHARE and \
+            crop_up <= FRAME_STRIP_UPSCALE:
+        return ""
+    note = (f"RESOLUTION-AWARE WINDOW: a crop to fill {ratio} would enlarge "
+            f"the {sw}x{sh} source {crop_up:.1f}x on the {W}x{H} final — "
+            "smeared footage under sharp captions and type. Fitted it is "
+            f"enlarged {fit_up:.1f}x and sits at y {y0:.2f}-{y1:.2f} of the "
+            "frame.")
+    if y0 >= 0.15:
+        note += (f" The TOP band (y 0-{y0:.2f}) is free for a headline — "
+                 "set_editorial_graphic(kind='headline', box=[0.06,0.08,0.94,"
+                 f"{y0 - 0.02:.2f}]) naming the speaker and the claim — and "
+                 f"the bottom band (y {y1:.2f}-1) for captions.")
+    return note + (" Full-bleed only if the user asked to fill the screen, "
+                   f"accepting the softness: set_frame('{ratio}', 'crop').")
+
+
+def _zoom_room(ctx, edl, start, end):
+    """(room, base, stacked) for a zoom over PROGRAM start-end: the strength
+    still available before the main footage passes ZOOM_UPSCALE_MAX, after
+    the framing's own enlargement (base) and the strongest stack of existing
+    zooms inside that window (stacked). room None = nothing to cap (no main
+    video, unknown dimensions, or more room than any zoom can use)."""
+    if not getattr(ctx, "has_main_video", False):
+        return None, None, 0.0
+    frame = edl.get("frame") or {}
+    modes = {frame.get("mode") or "crop"} | {
+        sp.get("mode") for sp in frame.get("focus_track") or []
+        if isinstance(sp, dict) and sp.get("mode")}
+    base = _frame_upscale(getattr(ctx, "index", None), frame.get("ratio"),
+                          "crop" if "crop" in modes else "pad_blur",
+                          frame.get("picture"))
+    if not base:
+        return None, None, 0.0
+    events = []
+    for z in (edl.get("effects") or {}).get("zooms") or []:
+        try:
+            a, b = max(float(z["start"]), start), min(float(z["end"]), end)
+            st = float(z.get("strength") or 0.0)
+        except (KeyError, TypeError, ValueError):
+            continue
+        if b - a > 1e-3 and st > 0:
+            events += [(a, 1, st), (b, 0, -st)]
+    stacked = peak = 0.0
+    for _t, _kind, delta in sorted(events):
+        stacked += delta
+        peak = max(peak, stacked)
+    room = ZOOM_UPSCALE_MAX / base - 1.0 - peak
+    if room >= ZOOM_STRENGTH_MAX:
+        return None, base, peak
+    return room, base, peak
+
+
+def _cap_zoom_strength(ctx, strength, room, base, stacked=0.0):
+    """(strength, note): `strength` held inside the resolution cap, with a
+    NOTE saying why when it was lowered ('' when untouched)."""
+    if room is None or strength is None or strength <= room + 1e-9:
+        return strength, ""
+    capped = max(ZOOM_STRENGTH_MIN, math.floor(max(room, 0.0) * 100) / 100)
+    if capped >= strength:
+        return strength, ""
+    video = (getattr(ctx, "index", None) or {}).get("video") or {}
+    return capped, (
+        f"NOTE: zoom strength capped {strength:g} -> {capped:g}. The "
+        f"{int(float(video.get('width') or 0))}x"
+        f"{int(float(video.get('height') or 0))} source is already enlarged "
+        f"{base:.1f}x by the framing"
+        + (f" and overlapping zooms add {stacked:g}" if stacked > 0 else "")
+        + f"; past {ZOOM_UPSCALE_MAX:g}x combined the footage smears under "
+        "sharp type. A tighter shot needs a higher-resolution source or a "
+        "window layout that enlarges it less.")
+
+
 def set_frame(ctx, ratio, mode="crop", focus_x=None, focus_y=None,
               _measured=False, focus_track=None, picture=None):
     return _behind_framing_note(ctx, _set_frame(
@@ -7048,6 +7310,17 @@ def _set_frame(ctx, ratio, mode="crop", focus_x=None, focus_y=None,
                 'and mode one of crop, pad, pad_blur. focus_track needs '
                 'non-overlapping source spans t0<t1 and x/y from 0 to 1. '
                 + str(exc)[:220])
+    track_notes = []
+    if frame.focus_track:
+        snapped, track_notes = _snap_focus_track_to_shots(
+            [sp.model_dump() for sp in frame.focus_track],
+            getattr(ctx, "index", None))
+        if track_notes:
+            try:
+                frame = Frame.model_validate({**payload,
+                                              "focus_track": snapped})
+            except Exception:
+                track_notes = []
     edl = dict(ctx.latest_edl()["json"])
     if frame.ratio == "source" and frame.picture is None:
         edl["frame"] = None
@@ -7091,9 +7364,29 @@ def _set_frame(ctx, ratio, mode="crop", focus_x=None, focus_y=None,
                             "mode='pad_blur' instead.")
         except (TypeError, ValueError, AttributeError):
             pass
-    if (res.startswith("EDL v") and frame.mode in ("pad", "pad_blur")
-            and frame.ratio in ("9:16", "1:1", "4:5") and not frame.picture):
-        res += ("\nNote: pad/pad_blur LETTERBOXES the picture. If the user "
+    if not res.startswith("EDL v"):
+        return res
+    if track_notes:
+        res += "\n" + "\n".join(track_notes)
+    has_video = getattr(ctx, "has_main_video", False)
+    if has_video and not _measured and not frame.picture:
+        res += "".join("\n" + n for n in _edge_band_advisories(
+            ctx, frame, edl.get("keep") or []))
+    window = (_window_note(ctx, frame.ratio)
+              if has_video and not frame.picture else "")
+    if frame.mode == "crop" and window:
+        up = _frame_upscale(ctx.index, frame.ratio, "crop")
+        if up:
+            res += (f"\nNOTE: this crop enlarges the source {up:.1f}x on the "
+                    "final, so the footage will look soft under sharp "
+                    "captions and type. Unless the user asked to fill the "
+                    f"screen, auto_reframe('{frame.ratio}') shows it as a "
+                    "window that enlarges it less, with a free headline "
+                    "band.")
+    if frame.mode in ("pad", "pad_blur") and \
+            frame.ratio in ("9:16", "1:1", "4:5") and not frame.picture:
+        res += ("\n" + window if window else
+                "\nNote: pad/pad_blur LETTERBOXES the picture. If the user "
                 "asked for a Short / TikTok / Reel / crop / 9:16 fill, they "
                 "wanted the footage to FILL the phone — call set_frame "
                 f"(\"{frame.ratio}\", \"crop\") or auto_reframe("
@@ -7139,6 +7432,174 @@ def _spatial_face_points(sidecar, windows):
         except (TypeError, ValueError, IndexError):
             continue
     return points, len(points) / max(1, len(samples))
+
+
+def _spatial_face_boxes(sidecar, windows):
+    """Every single-face box the sidecar measured inside the windows."""
+    boxes = []
+    for sample in (sidecar or {}).get("samples") or []:
+        try:
+            t = float(sample.get("t"))
+            faces = sample.get("faces") or []
+            if len(faces) == 1 and \
+                    any(float(a) <= t <= float(b) for a, b in windows):
+                boxes.append([float(v) for v in faces[0][:4]])
+        except (TypeError, ValueError, IndexError):
+            continue
+    return boxes
+
+
+# Burned-in bands at the crop edge (judges, Oct 2026). A persistent hard edge
+# inside a crop, this close to its border (share of the crop's width), leaves
+# a sliver of something else down the frame edge for the whole shot: the
+# Elon showcase's browser inset ran 8% deep for 9 s, the archival Jobs door
+# frame a grey strip. The crop slides past it by CROP_SLIVER_MARGIN of the
+# source when the aimed subject stays at least CROP_SLIVER_AIM_INSET inside.
+CROP_SLIVER_MAX = 0.35
+CROP_SLIVER_MARGIN = 0.008
+CROP_SLIVER_AIM_INSET = 0.2
+
+
+def _clear_crop_edges(ctx, ratio, focus, frames, faces=(), authored=False):
+    """(focus, note): a crop aimed at `focus` moved off any hard-edged band
+    at its edge (subject.hard_edge_lines on `frames`: an inset, a screen, a
+    door frame, a letterbox border).
+
+    Excluding the band is the cheap, always-available fix — including a
+    whole inset rarely fits a 9:16 window. The slide is refused (focus comes
+    back unchanged, with a REVIEW note) when it would push the aim within
+    CROP_SLIVER_AIM_INSET of an edge, cut a measured face box that was in the
+    crop, or bring another band in on the far side. note is '' when the
+    crop's edges are clean. authored=True words the note as advice about an
+    aim the editor chose (set_frame keeps it) rather than as a slide made."""
+    video = (getattr(ctx, "index", None) or {}).get("video") or {}
+    try:
+        sw, sh = int(float(video["width"])), int(float(video["height"]))
+        W, H = renderer.frame_dims(sw, sh, str(ratio), delivery=True)
+        _kind, x0, y0, x1, y1 = renderer.fit_fractions(
+            sw, sh, W, H, "crop", focus)
+    except (KeyError, TypeError, ValueError, ZeroDivisionError):
+        return focus, ""
+    if x1 - x0 < 0.995:
+        axis, k, lo, hi = "x", 0, x0, x1
+    elif y1 - y0 < 0.995:
+        axis, k, lo, hi = "y", 1, y0, y1
+    else:
+        return focus, ""                 # nothing is cropped
+    size = hi - lo
+    band = CROP_SLIVER_MAX * size
+    lines = [p for p, _run in subject.hard_edge_lines(frames, axis)]
+    near_lo = [p for p in lines if lo < p <= lo + band]
+    near_hi = [p for p in lines if hi - band <= p < hi]
+    if not near_lo and not near_hi:
+        return focus, ""
+    if near_lo:
+        line, side = max(near_lo), ("left" if axis == "x" else "top")
+        new_lo = line + CROP_SLIVER_MARGIN
+        depth = line - lo
+    else:
+        line, side = min(near_hi), ("right" if axis == "x" else "bottom")
+        new_lo = line - CROP_SLIVER_MARGIN - size
+        depth = hi - line
+    new_hi = new_lo + size
+    aim = focus[k] if focus and focus[k] is not None else 0.5
+    inset = CROP_SLIVER_AIM_INSET * size
+    framed = [b for b in faces or [] if lo <= (b[k] + b[k + 2]) / 2.0 <= hi]
+    ok = (not (near_lo and near_hi) and new_lo >= -1e-6
+          and new_hi <= 1.0 + 1e-6
+          and new_lo + inset <= aim <= new_hi - inset
+          and all(b[k] >= new_lo and b[k + 2] <= new_hi for b in framed)
+          and not any(new_lo < p <= new_lo + band or new_hi - band <= p
+                      < new_hi for p in lines))
+    what = (f"a hard-edged band (a burned-in inset, screen or frame edge) "
+            f"at {axis}={line:.2f} of the source")
+    pct = int(round(100 * depth / size))
+    if not ok:
+        return focus, (
+            f"REVIEW REQUIRED: {what} leaves a {pct}% sliver down the crop's "
+            f"{side} edge for the whole shot, and sliding the crop off it "
+            "would cut the subject. Look at the shot, then fit it (a "
+            "focus_track span with mode='pad_blur'), re-aim, or cut away.")
+    moved = list(focus or (0.5, 0.5))
+    moved[k] = round(min(max(new_lo + size / 2.0, 0.0), 1.0), 3)
+    if authored:
+        return tuple(moved), (
+            f"EDGE BAND: {what} leaves a {pct}% sliver down the crop's "
+            f"{side} edge for the whole shot; focus {axis}={moved[k]:g} "
+            "would exclude it (the authored aim was kept).")
+    return tuple(moved), (
+        f"EDGE BAND CLEARED: {what} would have left a {pct}% sliver down the "
+        f"crop's {side} edge for the whole shot; the crop slid "
+        f"{abs(new_lo - lo):.2f} to exclude it.")
+
+
+# set_frame checks at most this many authored crop spans (three proxy frames
+# each) so a long hand-written track cannot turn a framing write slow.
+EDGE_ADVISORY_MAX_SPANS = 6
+
+
+def _kept_sample_times(keep, t0, t1, n=3):
+    """n source times spread over the footage the viewer actually sees
+    inside t0-t1 (the keep spans clipped to it), or [] when none is shown."""
+    parts = [(max(float(s), t0), min(float(e), t1)) for s, e in keep
+             if min(float(e), t1) - max(float(s), t0) > 0.05]
+    total = sum(b - a for a, b in parts)
+    times = []
+    for i in range(n if parts else 0):
+        target, acc = total * (i + 0.5) / n, 0.0
+        for a, b in parts:
+            if acc + (b - a) >= target:
+                times.append(round(a + target - acc, 3))
+                break
+            acc += b - a
+    return times
+
+
+def _edge_band_advisories(ctx, frame, keep):
+    """Notes for an AUTHORED crop (set_frame) that leaves a sliver of a
+    burned-in band at its edge. The aim stays the editor's — the note names
+    the x that would exclude the band, or says it cannot be excluded without
+    cutting the subject. [] when nothing is cropped, there is no proxy, or
+    the edges are clean."""
+    if frame.ratio == "source":
+        return []
+    track = list(frame.focus_track or [])
+    if track:
+        spans = [(sp.t0, sp.t1, (sp.x if sp.x is not None else
+                                 frame.focus_x,
+                                 sp.y if sp.y is not None else
+                                 frame.focus_y))
+                 for sp in track if (sp.mode or frame.mode) == "crop"]
+    elif frame.mode == "crop" and keep:
+        spans = [(min(float(s) for s, _e in keep),
+                  max(float(e) for _s, e in keep),
+                  (frame.focus_x, frame.focus_y))]
+    else:
+        spans = []
+    if not spans:
+        return []
+    try:
+        proxy = ctx.proxy_path()
+    except Exception:
+        return []
+    shown = [(float(s), float(e)) for s, e in keep] or [(0.0, ctx.duration)]
+    notes = []
+    for i, (t0, t1, aim) in enumerate(spans[:EDGE_ADVISORY_MAX_SPANS]):
+        times = _kept_sample_times(shown, t0, t1)
+        paths = []
+        for j, t in enumerate(times):
+            fp = os.path.join(ctx.workdir, f"edge_set_{i}_{j}.jpg")
+            try:
+                media.frame_at(proxy, t, fp)
+                paths.append(fp)
+            except Exception:
+                continue
+        aim = tuple(0.5 if v is None else float(v) for v in aim)
+        _moved, note = _clear_crop_edges(ctx, frame.ratio, aim, paths,
+                                         authored=True)
+        if note:
+            notes.append(f"{t0:g}-{t1:g}s: {note}")
+    return notes
 
 
 def _reframe_with_track(ctx, ratio, global_pt, preserve_unmeasured=True):
@@ -7255,6 +7716,26 @@ def _reframe_with_track(ctx, ratio, global_pt, preserve_unmeasured=True):
                       "mode": span_mode})
     if len(spans) < 2:
         return None                      # one aim — the single point serves
+    # Each cropped shot's edges are checked on its own frames: an inset or a
+    # door frame belongs to one camera position, not to the whole video.
+    edge_notes = []
+    for i, sp in enumerate(spans):
+        if sp.get("mode") != "crop" or not proxy:
+            continue
+        paths = []
+        for j, t in enumerate(_kept_sample_times(keep, sp["t0"], sp["t1"])):
+            fp = os.path.join(ctx.workdir, f"edge_{i}_{j}.jpg")
+            try:
+                media.frame_at(proxy, t, fp)
+                paths.append(fp)
+            except Exception:
+                continue
+        aim, note = _clear_crop_edges(
+            ctx, ratio, (sp["x"], sp["y"]), paths,
+            _spatial_face_boxes(sidecar, [[sp["t0"], sp["t1"]]]))
+        if note:
+            sp["x"], sp["y"] = aim
+            edge_notes.append(f"{sp['t0']:g}-{sp['t1']:g}s: {note}")
     # Composition state is not editorial state. Older revisions split `keep`
     # at every focus boundary so each ffmpeg segment had one aim. The renderer
     # now performs that split locally (without changing the EDL timeline), so
@@ -7284,6 +7765,8 @@ def _reframe_with_track(ctx, ratio, global_pt, preserve_unmeasured=True):
                 "specific spans fit the whole picture over a blurred "
                 "background instead of inheriting a previous crop and "
                 "showing empty/irrelevant space.")
+    if edge_notes:
+        res += "\n" + "\n".join(edge_notes)
     return res
 
 
@@ -7369,6 +7852,16 @@ def auto_reframe(ctx, ratio="9:16", mode="auto"):
     if not ctx.has_main_video:
         return set_frame(ctx, ratio, "crop" if mode == "auto" else mode,
                          _measured=True)
+    if mode == "auto" and _window_note(ctx, ratio):
+        # Resolution decides before any subject is measured: no aim makes a
+        # 4x enlargement sharp, and a fitted window carries its own headline
+        # band (set_frame appends where it is). An explicit crop still wins.
+        res = set_frame(ctx, ratio, "pad_blur", _measured=True)
+        if res.startswith("EDL v"):
+            res += ("\nauto mode chose this window from the source "
+                    "RESOLUTION; tell the user the footage is shown whole "
+                    "because filling the screen would have smeared it.")
+        return res
     try:
         proxy = ctx.proxy_path()
     except Exception as err:
@@ -7524,8 +8017,14 @@ def auto_reframe(ctx, ratio="9:16", mode="auto"):
                     f"{keep_score * 100:.0f}% of the frame's detail. This "
                     "is likely a screen/game/wide composition where the "
                     "surrounding content matters as much as the face.")
+        face_pt = pt
+        pt, edge_note = _clear_crop_edges(
+            ctx, ratio, pt, frames, _spatial_face_boxes(sidecar, keep))
         res = set_frame(ctx, ratio, "crop", focus_x=pt[0], focus_y=pt[1],
                         _measured=True)
+        if res.startswith("EDL v") and edge_note:
+            res += "\n" + edge_note
+        pt = face_pt
         if res.startswith("EDL v"):
             measured_total = (len((sidecar or {}).get("samples") or [])
                               if method == "faces_spatial" else len(frames))
@@ -7617,8 +8116,11 @@ def auto_reframe(ctx, ratio="9:16", mode="auto"):
                 f"{fy:.2f}), but a {ratio} crop aimed there would still keep "
                 f"only {keep * 100:.0f}% of the picture's detail — this "
                 "footage fills its frame edge to edge.")
-    res = set_frame(ctx, ratio, "crop", focus_x=round(fx, 3),
-                    focus_y=round(fy, 3), _measured=True)
+    (ax, ay), edge_note = _clear_crop_edges(ctx, ratio, (fx, fy), frames)
+    res = set_frame(ctx, ratio, "crop", focus_x=round(ax, 3),
+                    focus_y=round(ay, 3), _measured=True)
+    if res.startswith("EDL v") and edge_note:
+        res += "\n" + edge_note
     if res.startswith("EDL v"):
         res += (f"\nMeasured on {len(pts)} sampled frames: subject sits at "
                 f"({fx:.2f}, {fy:.2f}) of the source frame — the crop "
@@ -7880,6 +8382,8 @@ def add_zoom(ctx, start, end, strength=None, mode=None, cx=None, cy=None,
                 "punch-in; above 1.0 is a dramatic 2x+ punch).")
     if e - s < 0.2:
         return "REJECTED: a zoom needs at least 0.2s."
+    room, base, stacked = _zoom_room(ctx, edl, s, e)
+    st, cap_note = _cap_zoom_strength(ctx, st, room, base, stacked)
     motif, motif_err = _motion_motif_value(ctx, motion_motif)
     if motif_err:
         return motif_err
@@ -7953,11 +8457,19 @@ def add_zoom(ctx, start, end, strength=None, mode=None, cx=None, cy=None,
         err, st, scx, scy, rr = _solve_zoom_rect(rect, st)
         if err:
             return err
+        if not cap_note:
+            # The fit strength the solver chose can pass the cap too; the
+            # pin is re-solved for the strength that will actually render.
+            capped, cap_note = _cap_zoom_strength(ctx, st, room, base,
+                                                  stacked)
+            if cap_note:
+                err, st, scx, scy, rr = _solve_zoom_rect(rect, capped)
         rw, rh = rr[2] - rr[0], rr[3] - rr[1]
         tgt = {"cx": scx, "cy": scy}
         rct = [round(v, 3) for v in rr]
     if st is None:
-        st = ZOOM_MODE_STRENGTH.get(zmode, 0.15)
+        st, cap_note = _cap_zoom_strength(
+            ctx, ZOOM_MODE_STRENGTH.get(zmode, 0.15), room, base, stacked)
     pts = None
     if zmode == "follow":
         pts, err = _parse_zoom_path(path)
@@ -8039,6 +8551,8 @@ def add_zoom(ctx, start, end, strength=None, mode=None, cx=None, cy=None,
         edl, f"{ZOOM_MODE_DESC[zmode]} zoom{strength_txt} on {s}-{e}s "
              f"(output time){aimed}{f' ({feel})' if feel else ''} "
              f"[{item['id']}]")
+    if cap_note and result.startswith("EDL v"):
+        result += "\n" + cap_note
     if defaulted_target and result.startswith("EDL v") \
             and zmode != "shake":
         result += ("\nQUALITY ADVISORY: no target was supplied, so this zoom "
@@ -8153,8 +8667,21 @@ def add_zoom_path(ctx, keyframes, ease=None, motion_motif=None, purpose=None,
                         "you are aiming at.")
             if s is None:
                 s = 0.25
-        clean.append({"t": t, "cx": cx, "cy": cy, "strength": s})
+        clean.append({"t": t, "cx": cx, "cy": cy, "strength": s,
+                      "rect": rct})
     clean.sort(key=lambda p: p["t"])
+    room, base, stacked = _zoom_room(ctx, edl, clean[0]["t"], clean[-1]["t"])
+    cap_note = ""
+    for p in clean:
+        capped, why = _cap_zoom_strength(ctx, p["strength"], room, base,
+                                         stacked)
+        if why:
+            cap_note = cap_note or why
+            p["strength"] = capped
+            if p["rect"] is not None:     # re-aim at the strength it renders
+                _err, _s, p["cx"], p["cy"], _r = _solve_zoom_rect(
+                    p["rect"], capped)
+        del p["rect"]
     # Round 77 drift check. Interpolation means the camera is IN MOTION for
     # the ENTIRE gap between two keyframes that disagree — there is no
     # implicit hold. A path that went straight from a 4.4x close-up to the
@@ -8235,6 +8762,7 @@ def add_zoom_path(ctx, keyframes, ease=None, motion_motif=None, purpose=None,
                 "seamless entry and exit, give the first and last keyframe "
                 "strength 0.")
     return (written + note + drift_note
+            + (f"\n{cap_note}" if cap_note else "")
             + "\nThe frame travels between the keyframes; remove the whole "
               f"move with remove_zoom_path('{item['id']}').")
 
@@ -10589,6 +11117,10 @@ def cut_output_range(ctx, start, end):
             return ("REJECTED: that would remove ALL the kept footage. Cut "
                     "a smaller span, or remove the inserts individually and "
                     "reset_edit for the footage.")
+        new_keep, shot_notes = _snap_keep_to_shots(
+            new_keep, ctx.index, ctx.index.get("words"))
+    else:
+        shot_notes = []
     ins_notes = []
     if new_inserts and new_keep != keep:
         new_inserts, ins_notes = timeline_mod.resnap_inserts(
@@ -10597,7 +11129,7 @@ def cut_output_range(ctx, start, end):
     edl["inserts"] = new_inserts
     new_tl = Timeline(new_keep, new_inserts, speed)
     notes = ins_notes + _remap_program_items(edl, tl, new_tl)
-    notes += _prune_stray_look_sfx(ctx, edl)
+    notes += _prune_stray_look_sfx(ctx, edl) + shot_notes
     bits = []
     if src_cuts:
         bits.append("footage " + ", ".join(f"{s}-{e}s" for s, e in src_cuts)
@@ -21450,6 +21982,7 @@ def punch_in_on_emphasis(ctx, count=None, strength=None):
     sentences = ctx.index.get("sentences") or []
     starts = [round(max(0.0, row[2] - 0.06), 2) for row in picked]
     top_score = max(row[0] for row in picked)
+    capped, cap_note = 0, ""
     for k, (combined_score, w, pt, source_mid, motion_motif,
             beat_number) in enumerate(picked):
         measured = source_mid in targets
@@ -21486,6 +22019,10 @@ def punch_in_on_emphasis(ctx, count=None, strength=None):
             floor = 1.0 - .35 * contrast
             st = round(max(ZOOM_STRENGTH_MIN,
                            base_strength * (floor + (1.0 - floor) * rank)), 2)
+        st, why = _cap_zoom_strength(ctx, st, *_zoom_room(ctx, edl, s, e))
+        if why:
+            capped += 1
+            cap_note = cap_note or why
         item = {"id": _next_item_id(zooms, "zm"), "start": s, "end": e,
                 "strength": st, "cx": target[0], "cy": target[1],
                 "target_measured": measured}
@@ -21534,6 +22071,10 @@ def punch_in_on_emphasis(ctx, count=None, strength=None):
             res += (f"\nQUALITY ADVISORY: {fallback_count} punch-in(s) had "
                     "no detected face and were committed at frame center; "
                     "inspect and retarget them if desired.")
+        if capped:
+            res += (f"\n{capped} punch-in(s) were held under the resolution "
+                    "cap (the strengths listed above are the capped ones). "
+                    + cap_note)
     return res
 
 
@@ -23255,6 +23796,40 @@ AGENT_TOOL_DOMAINS = (
 )
 
 
+def _batch_framing_advisories(ctx, before, after):
+    """What keep_segments / set_frame / add_zoom would have corrected in a
+    batch — keep or focus_track edges a few frames off a camera cut, zooms
+    past the resolution cap. A batch writes exactly what it was given (its
+    times describe the resulting timeline), so these are advisories only."""
+    index = getattr(ctx, "index", None) or {}
+    notes = []
+    if after.get("keep") and after.get("keep") != before.get("keep"):
+        _keep, moved = _snap_keep_to_shots(after["keep"], index,
+                                           index.get("words"))
+        notes += moved
+    frame = after.get("frame") or {}
+    if frame.get("focus_track") and frame != (before.get("frame") or {}):
+        notes += _snap_focus_track_to_shots(frame["focus_track"], index)[1]
+    if (after.get("effects") or {}).get("zooms") != \
+            (before.get("effects") or {}).get("zooms"):
+        for z in (after.get("effects") or {}).get("zooms") or []:
+            others = dict(after, effects={"zooms": [
+                o for o in after["effects"]["zooms"] if o is not z]})
+            try:
+                room, base, stacked = _zoom_room(
+                    ctx, others, float(z["start"]), float(z["end"]))
+                _st, why = _cap_zoom_strength(
+                    ctx, float(z.get("strength") or 0), room, base, stacked)
+            except (KeyError, TypeError, ValueError):
+                continue
+            if why:
+                notes.append(f"zoom {z.get('id')}: {why}")
+                break
+    return [("ADVISORY (not applied; this batch was written as given — "
+             "keep_segments / set_frame / add_zoom apply it): " + n)
+            for n in notes]
+
+
 def apply_edit_batch(ctx, base_version, operations, operation_id):
     """Validate all changes before the single fenced ToolContext write."""
     import edit_batch
@@ -23269,6 +23844,8 @@ def apply_edit_batch(ctx, base_version, operations, operation_id):
         return f"REJECTED: no batch changes were saved: {exc}"
     result = ctx.write_edl(updated, f"applied {len(operations)} edits as one batch")
     if result.startswith("EDL v"):
+        result += "".join("\n" + n for n in _batch_framing_advisories(
+            ctx, row["json"], updated))
         result += "\nReview scope: " + json.dumps(playback_plan.changed_work(row["json"], updated))
         result += "\nThe edit is saved; supported layers play directly in Studio. Inspect changed moments before a full approval preview; this receipt is not visual or audio proof."
     return result
@@ -23804,7 +24381,10 @@ TOOLS = {
                       "wholesale restructuring, always after get_edl — for "
                       "local fixes prefer cut_range/restore_range. "
                       "snap_to_words:true moves boundaries outward to word "
-                      "edges so no word is clipped.",
+                      "edges so no word is clipped. Every keep write also "
+                      "moves an edge that lands up to 6 frames past a source "
+                      "camera cut onto the cut (no flash of the other shot) "
+                      "and reports it.",
                       {"segments": _seg_schema(),
                        "snap_to_words": {"type": "boolean"}}),
     "cut_range": (cut_range, "Remove ONE source-time range from the current "
@@ -24272,7 +24852,8 @@ TOOLS = {
                   "captions and branding stay sharp even on archival footage; this "
                   "does not restore missing source detail. focus_track replaces the complete per-shot track: "
                   "[{t0,t1,x,y,mode}] in SOURCE seconds. Read get_edl(frame) first; "
-                  "change only the desired spans. Tracks survive trims and speed changes. "
+                  "change only the desired spans. Tracks survive trims and speed changes; "
+                  "a span edge within 0.25s of a camera cut snaps onto the cut. "
                   "picture=[left,top,right,bottom] optionally places the main picture "
                   "and inserts inside a normalized output rectangle on black. Crop/fit "
                   "and focus apply inside it, preserving native audio/transcript timing. "
@@ -24305,6 +24886,11 @@ TOOLS = {
                      "FITTED into the new frame over a blurred backdrop so "
                      "nothing is cut off — cropping those is the 'it just "
                      "truncated my video instead of adjusting it' complaint. "
+                     "Low-resolution footage a crop would enlarge past ~2.5x "
+                     "(480p/archival 4:3) is FITTED as a window instead, with "
+                     "the free headline band reported. Crops slide off "
+                     "burned-in insets and frame edges that would leave a "
+                     "sliver at the crop edge. "
                      "Pass mode explicitly to force one. Read what it reports "
                      "and repeat THAT.",
                      {"ratio": {"type": "string",
@@ -24694,7 +25280,9 @@ TOOLS = {
                  "(+ clockwise, 1-3 for a dynamic punch), shake 0-1 with "
                  "shake_hz/shake_decay on ANY mode (punch + shake 0.4 = an "
                  "impact hit). strength 0.05-4.5 (default 0.15; pulse 0.07; "
-                 "above 1.0 is a dramatic 2x+). TWO "
+                 "above 1.0 is a dramatic 2x+), capped so the footage is "
+                 "never enlarged past 3x in total (framing x zoom — the "
+                 "result says when). TWO "
                  "ways to aim, and they answer different requests: "
                  "rect=[x0,y0,x1,y1] (fractions of the output frame, read "
                  "off look_at's grid) FRAMES A REGION — the tool solves "

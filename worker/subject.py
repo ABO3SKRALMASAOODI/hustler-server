@@ -22,6 +22,7 @@ last resort, which still beats the middle of the frame.
 Pure measurement: returns points, never writes an EDL.
 """
 
+import math
 import os
 
 # Fractions of the frame. A detection this far out is almost always a false
@@ -246,6 +247,114 @@ def crop_detail_kept(paths, out_w, out_h, focus=None, max_width=640):
     if not kept:
         return None
     return round(sorted(kept)[len(kept) // 2], 3)
+
+
+# Hard-edged bands (judges, Oct 2026). A burned-in browser inset left an
+# 8%-wide sliver down a 9:16 crop's edge for 9 s, and an archival door frame
+# a grey strip down another: both read as a render glitch. What insets,
+# screens, window/door frames and letterbox borders share — and faces,
+# bodies and moving content do not — is a long, perfectly straight edge
+# that sits in the SAME column across the shot. Measured on the jpegs the
+# reframe already pulls; no detector model, no extra decode.
+_LINE_WORK_W = 360        # detection width (positions are fractions)
+_LINE_STEP = 22           # luma step across the edge (0-255, 2 px apart)
+_LINE_MIN_RUN = 0.33      # straight run as a share of the frame's height;
+                          # natural background edges measured 0.22-0.31,
+                          # the inset 0.39, the door frame 0.53-0.95
+_LINE_TOL = 0.012         # same column across frames (fraction of width)
+
+
+def _longest_runs(mask):
+    """Per column: the longest unbroken vertical run of True in `mask`
+    (rows x cols), as a row count."""
+    import numpy as np
+    best = np.zeros(mask.shape[1], np.int32)
+    cur = np.zeros(mask.shape[1], np.int32)
+    for row in mask:
+        cur = np.where(row, cur + 1, 0)
+        np.maximum(best, cur, out=best)
+    return best
+
+
+def _frame_lines(cv2, np, gray):
+    """[(position, run)] of straight vertical edges in one grey frame."""
+    h, w = gray.shape[:2]
+    g = gray.astype(np.float32)
+    d = np.zeros_like(g)
+    d[:, 1:-1] = g[:, 2:] - g[:, :-2]
+    found = []
+    for sign in (1.0, -1.0):
+        raw = (d * sign) > _LINE_STEP
+        # One pixel of column jitter (antialiasing, chroma bleed) is still
+        # a straight edge; one row of gap is still the same edge.
+        edge = raw.copy()
+        edge[:, 1:] |= raw[:, :-1]
+        edge[:, :-1] |= raw[:, 1:]
+        edge[1:-1, :] |= edge[:-2, :] & edge[2:, :]
+        runs = _longest_runs(edge)
+        for c in range(2, w - 2):
+            if runs[c] >= _LINE_MIN_RUN * h and \
+                    runs[c] == runs[c - 2:c + 3].max():
+                found.append((c / float(w), runs[c] / float(h)))
+    found.sort(key=lambda f: -f[1])
+    kept = []
+    for pos, run in found:
+        if all(abs(pos - k[0]) > _LINE_TOL for k in kept):
+            kept.append((pos, run))
+    return kept
+
+
+def hard_edge_lines(paths, axis="x"):
+    """Persistent straight edges across `paths`: sorted [(position, run)].
+
+    axis 'x' finds vertical lines (position = fraction of the width, the
+    edges a side crop can leave a sliver of); 'y' finds horizontal ones
+    (position = fraction of the height). A line counts only when it sits in
+    the same place in most readable frames — a static inset or frame edge,
+    not a moving arm. Unreadable frames are skipped; nothing readable
+    returns []."""
+    cv2 = _cv2()
+    if cv2 is None or not paths:
+        return []
+    try:
+        import numpy as np
+    except Exception:
+        return []
+    per_frame = []
+    for p in paths:
+        try:
+            img = cv2.imread(p, cv2.IMREAD_GRAYSCALE)
+        except Exception:
+            img = None
+        if img is None:
+            continue
+        if axis == "y":
+            img = img.T
+        h, w = img.shape[:2]
+        if w > _LINE_WORK_W:
+            try:
+                img = cv2.resize(img, (_LINE_WORK_W,
+                                       max(1, int(h * _LINE_WORK_W / w))),
+                                 interpolation=cv2.INTER_AREA)
+            except Exception:
+                continue
+        per_frame.append(_frame_lines(cv2, np, img))
+    n = len(per_frame)
+    if not n:
+        return []
+    need = n if n <= 2 else max(2, int(math.ceil(0.6 * n)))
+    out = []
+    for lines in per_frame:
+        for pos, _run in lines:
+            if any(abs(pos - o[0]) <= _LINE_TOL for o in out):
+                continue
+            hits = [next(r for q, r in other if abs(q - pos) <= _LINE_TOL)
+                    for other in per_frame
+                    if any(abs(q - pos) <= _LINE_TOL for q, _r in other)]
+            if len(hits) >= need:
+                out.append((round(pos, 4), round(sorted(hits)[len(hits) // 2],
+                                                 3)))
+    return sorted(out)
 
 
 def median_point(points):
