@@ -1700,6 +1700,17 @@ FINAL_CRF = int(os.getenv("FINAL_CRF", "18"))
 # in one read. 0 disables; MAX bounds the extra demuxer/decoder pairs.
 KEEP_CLUSTER_GAP_S = float(os.getenv("KEEP_CLUSTER_GAP_S", "20"))
 KEEP_CLUSTER_MAX_INPUTS = int(os.getenv("KEEP_CLUSTER_MAX_INPUTS", "8"))
+# Decoder threads per cluster input (0 = ffmpeg's auto). Every input's decoder
+# starts at launch and holds its own frame-thread buffers, so with auto
+# threads peak RSS grew with the cluster count (4K, 8 clusters: +66%). The
+# concat consumes one cluster at a time, so a narrow decoder per input costs
+# no wall time while bounding that growth.
+KEEP_CLUSTER_THREADS = int(os.getenv("KEEP_CLUSTER_THREADS", "2"))
+# Extra peak memory the cluster reads may add, in MB. Each extra read holds a
+# decoder (reference frames) and its queued frames: measured ~30 MB per source
+# megapixel at 2 threads (1080p ~65 MB, 4K ~230 MB per read), so a 1080p
+# source keeps all 8 reads and a 4K source gets 3 (renderer._cluster_input_cap).
+KEEP_CLUSTER_MEM_MB = float(os.getenv("KEEP_CLUSTER_MEM_MB", "512"))
 
 SILENCE_NOISE_DB = "-35dB"
 SILENCE_MIN_S = 0.6

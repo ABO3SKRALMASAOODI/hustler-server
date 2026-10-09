@@ -458,3 +458,73 @@ def test_end_card_join_keeps_the_programme_colour(frame, tmp_path,
     if frame.get("mode") == "pad" or frame.get("picture"):
         assert abs(a[0, 40, 540] - b[0, 40, 540]) <= 1, (a[0, 40, 540],
                                                          b[0, 40, 540])
+
+
+def test_cluster_read_count_is_held_to_a_memory_budget(monkeypatch):
+    monkeypatch.setattr(renderer.config, "KEEP_CLUSTER_MAX_INPUTS", 8)
+    monkeypatch.setattr(renderer.config, "KEEP_CLUSTER_MEM_MB", 512.0)
+    assert renderer._cluster_input_cap(1920, 1080) == 8
+    assert renderer._cluster_input_cap(3840, 2160) == 3
+    assert renderer._cluster_input_cap(7680, 4320) == 1     # no extra reads
+    monkeypatch.setattr(renderer.config, "KEEP_CLUSTER_MAX_INPUTS", 4)
+    assert renderer._cluster_input_cap(1280, 720) == 4
+
+
+@needs_ffmpeg
+def test_cluster_reads_keep_peak_memory_bounded(tmp_path, monkeypatch):
+    """Every cluster read is its own decoder, started at launch. With ffmpeg's
+    auto thread count each one held a full set of frame-thread buffers, so a
+    4K final with 8 clusters went from 4.0 to 6.8 GB. Each read now decodes on
+    two threads, and nothing may queue a cluster's frames while an earlier
+    cluster plays (4 s of 960x540 is ~93 MB per read)."""
+    import json
+    src = str(tmp_path / "long540.mp4")
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+         "testsrc2=s=960x540:r=30:d=100", "-f", "lavfi", "-i",
+         "sine=frequency=330:sample_rate=48000:duration=100",
+         "-c:v", "libx264", "-preset", "ultrafast", "-g", "60",
+         "-pix_fmt", "yuv420p", "-c:a", "aac", src],
+        check=True, capture_output=True, timeout=180)
+    edl = {"keep": [[8.0, 12.0], [34.0, 38.0], [60.0, 64.0], [90.0, 94.0]],
+           "frame": {"ratio": "9:16", "mode": "crop"}}
+    index = {"words": [], "sentences": [], "silences": [], "video": {}}
+    commands = {}
+
+    def capture(cmd, **kw):
+        commands["cmd"] = [c for c in cmd
+                           if c not in ("-progress", "pipe:1", "-nostats")]
+        raise StopIteration
+
+    monkeypatch.setattr(renderer, "_render_media_run", capture)
+    monkeypatch.setattr(renderer.config, "KEEP_CLUSTER_THREADS", 2)
+    probe = ("import json,resource,subprocess,sys;"
+             "p=subprocess.run(json.loads(sys.argv[1]));"
+             "r=resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss;"
+             "print(p.returncode, r // (1024 * 1024) if sys.platform == "
+             "'darwin' else r // 1024)")
+    peak, cmds = {}, {}
+    for gap in (0.0, 20.0):
+        monkeypatch.setattr(renderer.config, "KEEP_CLUSTER_GAP_S", gap)
+        work = tmp_path / f"w{int(gap)}"
+        work.mkdir()
+        with pytest.raises(StopIteration):
+            renderer.render_edl(edl, index, src, str(tmp_path / "o.mp4"),
+                                str(work), preview=True)
+        cmd = cmds[gap] = commands["cmd"]
+        i = cmd.index("-filter_complex")
+        run = cmd[:i + 2] + ["-map", "[vout]", "-f", "null", "-",
+                             "-map", "[aout]", "-f", "null", "-"]
+        res = subprocess.run([sys.executable, "-c", probe, json.dumps(run)],
+                             capture_output=True, text=True, check=True,
+                             timeout=300)
+        rc, peak[gap] = (int(x) for x in res.stdout.split())
+        assert rc == 0
+    reads = [j for j, a in enumerate(cmds[20.0])
+             if a == "-i" and cmds[20.0][j + 1] == src]
+    assert len(reads) == 5, "the main input plus one read per cluster"
+    for j in reads[1:]:
+        assert cmds[20.0][j - 8:j - 6] == ["-threads:v", "2"]
+    assert "-threads:v" not in cmds[0.0]
+    per_read = (peak[20.0] - peak[0.0]) / (len(reads) - 2)
+    assert per_read < 40, (peak, per_read)

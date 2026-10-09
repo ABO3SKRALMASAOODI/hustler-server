@@ -3919,6 +3919,23 @@ def _render_asset_source_impl(key, tag, idx, workdir, asset_locals=None):
     return _fetch_into(workdir, key, f"{tag}_{idx}")
 
 
+# Peak memory one extra cluster read holds per source megapixel (decoder
+# reference frames + queued frames, 2 decoder threads). Measured with 4-thread
+# finals on ffmpeg 8.0: 1080p +65 MB, 4K +216..237 MB per extra read.
+_CLUSTER_MB_PER_MPIX = 30.0
+
+
+def _cluster_input_cap(width, height):
+    """How many bounded reads of the source a render may open: every read
+    beyond the first costs memory in proportion to the frame size, so the
+    count is held to KEEP_CLUSTER_MEM_MB of extra peak memory as well as to
+    KEEP_CLUSTER_MAX_INPUTS (1080p: 8 reads, 4K: 3, 8K: none)."""
+    mpix = max(0.1, float(width or 1920) * float(height or 1080) / 1e6)
+    afford = 1 + int(max(0.0, config.KEEP_CLUSTER_MEM_MB)
+                     // (_CLUSTER_MB_PER_MPIX * mpix))
+    return max(1, min(int(config.KEEP_CLUSTER_MAX_INPUTS), afford))
+
+
 def _keep_clusters(keep, gap_s, max_clusters):
     """Group keep spans (source seconds) into clusters separated by at least
     `gap_s` of unused source, as sorted (start, end) windows. Spans may be in
@@ -4272,12 +4289,16 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     main_video_inputs = None
     if seek_main_source and not patch_inputs and src_pad <= 0 \
             and not audio_only:
-        clusters = _keep_clusters(edl["keep"], config.KEEP_CLUSTER_GAP_S,
-                                  config.KEEP_CLUSTER_MAX_INPUTS)
+        clusters = _keep_clusters(
+            edl["keep"], config.KEEP_CLUSTER_GAP_S,
+            _cluster_input_cap(info.get("width"), info.get("height")))
         if len(clusters) > 1:
             main_video_inputs = []
+            threads = max(0, int(config.KEEP_CLUSTER_THREADS))
             for a, b in clusters:
                 seek = max(0.0, a - 1.0)
+                if threads:
+                    extra_inputs += ["-threads:v", str(threads)]
                 extra_inputs += ["-ss", f"{seek:.3f}",
                                  "-t", f"{b - seek + 1.0:.3f}",
                                  "-i", src_path]

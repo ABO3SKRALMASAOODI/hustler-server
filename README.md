@@ -69,6 +69,7 @@ frontend repo.
 | `UPSCALE_SCALER` / `UPSCALE_SHARPEN` | worker | default `lanczos` / `0.6` — resampler and light 3x3 luma unsharp for cover-crop windows enlarged 1.3x or more; `bicubic` / `0` restore the old soft up-scale |
 | `BLOCK_GRADE_DISABLE` | worker | `1` moves the global grade back after concat (it normally runs per block on the fewest pixels) |
 | `KEEP_CLUSTER_GAP_S` / `KEEP_CLUSTER_MAX_INPUTS` | worker | default `20` / `8` — keep spans further apart than this get their own bounded source read instead of decoding the gap; `0` disables |
+| `KEEP_CLUSTER_THREADS` / `KEEP_CLUSTER_MEM_MB` | worker | default `2` / `512` — decoder threads per cluster read (`0` = ffmpeg auto) and the extra peak memory the reads may add; the read count follows the frame size (~30 MB per source megapixel per read: 1080p keeps 8 reads, 4K gets 3) |
 | `LLM_PRICE_IN_PER_M` / `LLM_PRICE_OUT_PER_M` | api | $/1M tokens for the admin cost view (defaults 0.4 / 1.2, qwen-plus ballpark) |
 | `PIPELINE_VERSION` | api, worker | default `2`. Bumped when the index pipeline output changes; older cached indexes re-build automatically on next project open |
 | `MAX_UPLOAD_GB` | api, worker | default `14` (chat attachments: images 50 MB, audio 50 MB) |
