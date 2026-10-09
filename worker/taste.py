@@ -75,6 +75,8 @@ JUMP_CUT_MIN_SHIFT = 0.08
 JUMP_CUT_MIN_AIM = 0.03
 # Bare cuts named one by one in the note; the rest are counted.
 JUMP_CUT_LIST = 5
+# The punch a fix line asks for: the references' tight-camera step.
+JUMP_CUT_FIX_STRENGTH = 0.12
 # Framing x zoom never enlarges the source past this (agent_tools caps zoom
 # writes there): below an 8% step of room a punch cannot cover a cut.
 _ZOOM_UPSCALE_MAX = 3.0
@@ -597,7 +599,8 @@ def uncovered_jump_cuts(edl, index, tl, fps=None):
                    "(focus_track), land a graphic or caption-block change "
                    "on it, or trim the jump")
         elif max(za[0], zb[0]) < 1.02:
-            st = 0.12 if room is None else round(min(0.12, room), 2)
+            st = (JUMP_CUT_FIX_STRENGTH if room is None
+                  else round(min(JUMP_CUT_FIX_STRENGTH, room), 2))
             fix = (f"punch in to {1 + st:.2f}x until {nxt:.2f}: add_zoom "
                    f"start={c:.2f} end={nxt:.2f} strength={st:g} "
                    f"mode='punch' ramp_s=0, aimed at the face")
@@ -608,10 +611,27 @@ def uncovered_jump_cuts(edl, index, tl, fps=None):
                    f"through it at {zb[0]:.2f}x — end it on the cut "
                    f"(end={c:.2f}) so the cut steps back to the wide")
         else:
+            # A punch too weak to read off the wide (the judged 0.05
+            # "covers") is fixed by its strength, not by its timing — and
+            # naming the zoom, not the numbers, lets the note group both cuts
+            # of one punch. Between two zoomed framings a stronger zoom can
+            # shrink the step, so that keeps the general line.
+            weak = None
+            if min(zb[0], za[0]) < 1.02:
+                weak = next((z for z in zooms if z.get("id") in edge
+                             and (z.get("mode") or "punch") != "shake"
+                             and _num(z.get("strength"), 0.25)
+                             < JUMP_CUT_FIX_STRENGTH - 1e-6), None)
+            st = (JUMP_CUT_FIX_STRENGTH if room is None
+                  else round(min(JUMP_CUT_FIX_STRENGTH, room), 2))
             who = f" (zoom {', '.join(map(str, edge))})" if edge else ""
-            fix = (f"the framing steps only {zb[0]:.2f}x → {za[0]:.2f}x "
-                   f"({scale * 100:.0f}%){who} — make that step ≥8%, or "
-                   "release to the wide on the cut")
+            if weak is not None and st > _num(weak.get("strength"), 0.25):
+                fix = (f"zoom {weak.get('id')} steps the framing only "
+                       f"{scale * 100:.0f}% — raise its strength to {st:g}")
+            else:
+                fix = (f"the framing steps only {zb[0]:.2f}x → "
+                       f"{za[0]:.2f}x ({scale * 100:.0f}%){who} — make that "
+                       "step ≥8%, or release to the wide on the cut")
         found.append({"t": round(c, 2), "before": zb, "after": za,
                       "fix": fix})
     return found

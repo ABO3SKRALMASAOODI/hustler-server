@@ -71,7 +71,9 @@ punches.
   frame) is moved ONTO the cut and holds through it: an `ease` ending on a
   cut stays pushed in to the cut's last frame instead of releasing over it,
   and a `punch` or `ease` starting on a cut is already in on the cut's
-  first frame. Put edges on cuts and let the cut change the framing; to
+  first frame — unless the frame before the cut is already pushed in about
+  as far (a punch ending there), when it ramps up from the wide so the cut
+  still steps. Put edges on cuts and let the cut change the framing; to
   release BEFORE a cut on purpose, end the zoom at least 0.2 s earlier.
 - On a hero moment the camera supports the graphic leader: a punch or pulse
   on the same frame as the word slam (and its sound, when that landing

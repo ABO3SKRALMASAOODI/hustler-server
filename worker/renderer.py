@@ -1347,9 +1347,10 @@ def camera_zooms(edl, index, tl=None, fps=None, src_fps=None, origin=None):
     if tl is None:
         tl = Timeline(edl.get("keep") or [], edl.get("inserts") or [],
                       edl.get("speed"))
+    canvas = edl.get("canvas") if isinstance(edl.get("canvas"), dict) else {}
     try:
         fps = float(fps or ((index or {}).get("video") or {}).get("fps")
-                    or 30.0)
+                    or (canvas or {}).get("fps") or 30.0)
     except (TypeError, ValueError):
         fps = 30.0
     return camera.hold_through_cuts(
@@ -1394,18 +1395,20 @@ def block_clock(lengths, fps):
 
 
 def program_render_s(tl, fps):
-    """How long the rendered programme runs. On the block clock a programme
-    of two or more blocks (or any canvas programme) ends on the frame its
-    Timeline end names — up to a frame past tl.out_duration — so the
-    output's -t (and the progress bar) use this, and the end card after it
-    is never trimmed. A single kept span keeps the Timeline length."""
+    """How long the rendered programme runs: to the frame its Timeline end
+    names, up to a frame past tl.out_duration. On the block clock every
+    multi-block programme (focus-track splits of one kept span included)
+    and every canvas programme ends there, and a single normalized block's
+    time bound keeps exactly those frames too (`trim=end` after `fps`), so
+    the output's -t (and the progress bar) use this and the end card after
+    it is never trimmed. A -t past the last frame of a programme without a
+    card changes nothing."""
     out = float(tl.out_duration)
     try:
         fps = round(float(fps or 0.0), 3)
     except (TypeError, ValueError):
         return out
-    if fps <= 0 or (len(tl.segs) + len(tl.ins) < 2
-                    and (tl.segs or not tl.ins)):
+    if fps <= 0:
         return out
     return max(out, first_frame_at(out, fps) / fps)
 
@@ -1877,7 +1880,9 @@ def camera_current(meta, edl, index=None):
     A v1 render (before cut hygiene) stays current when no zoom of this EDL
     sits near a program cut: camera.hold_through_cuts leaves every such zoom
     untouched, so v2 draws the same frames. `index` supplies the indexed
-    camera cuts.
+    camera cuts; where the render put a focus handoff depends on the
+    source's first-frame origin, which the index does not keep, so every
+    origin a render can use must leave the zooms untouched.
     """
     edl = edl or {}
     fx = edl.get("effects") or {}
@@ -1894,7 +1899,17 @@ def camera_current(meta, edl, index=None):
         return False
     try:
         zooms = list(fx.get("zooms") or [])
-        return not camera.changed(zooms, camera_zooms(edl, index))
+        try:
+            fps = float(((index or {}).get("video") or {}).get("fps")
+                        or 30.0)
+        except (TypeError, ValueError):
+            fps = 30.0
+        # The render places a focus handoff or an indexed camera cut on the
+        # source's own first-frame origin (focus_handoff), which the index
+        # does not record: every placement a render can choose is checked.
+        return not any(
+            camera.changed(zooms, camera_zooms(edl, index, origin=origin))
+            for origin in (None, 0.0, 1.0 / max(fps, 1.0)))
     except Exception:
         return False
 
@@ -1905,9 +1920,12 @@ def block_clock_current(meta, edl):
     it changed) or a render on today's block clock (config.
     BLOCK_CLOCK_VERSION); an older multi-block render's cuts sit a fraction
     of a frame off the clock, so new pieces or new sound would drift from
-    it. Only the splice/reuse path asks."""
+    it. Only the splice/reuse path asks. A focus_track splits one kept
+    span into several blocks, so it counts as multi-block."""
     edl = edl or {}
-    if len(edl.get("keep") or []) + len(edl.get("inserts") or []) < 2:
+    frame = edl.get("frame") if isinstance(edl.get("frame"), dict) else {}
+    if len(edl.get("keep") or []) + len(edl.get("inserts") or []) < 2 \
+            and not (frame or {}).get("focus_track"):
         return True
     return ((meta or {}).get("clock_v") or 0) == config.BLOCK_CLOCK_VERSION
 
@@ -4073,12 +4091,20 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                          f"concat=n=2:v=1:a=0[{cat_v}]")
             parts.append(f"[{a_prog}]anull[aout]")
         else:
-            # Existing silent-card behavior, byte/graph-identical when no
-            # score reaches the final program frame.
+            # Existing silent-card behavior when no score reaches the final
+            # program frame. concat starts the card after the LATER of the
+            # programme's picture and sound, and the mastering chain stamps
+            # the sound's last frames up to 0.1 s past its last sample
+            # (loudnorm flushes on its own 100 ms grid): the card began up to
+            # three frames late, the programme's last frame repeated into the
+            # gap and -t cut the card's own last frames (cut hygiene, Oct
+            # 2026). Restamped on its samples, the sound ends with the
+            # picture and the card follows the programme's last frame.
             parts.append(f"anullsrc=r=48000:cl=stereo:d={outro_s:.3f},"
                          "aformat=sample_fmts=fltp:"
                          "channel_layouts=stereo[osil]")
-            parts.append(f"[{v_final}][{a_prog}][ovid][osil]"
+            parts.append(f"[{a_prog}]asetpts=N/SR/TB[aprogc]")
+            parts.append(f"[{v_final}][aprogc][ovid][osil]"
                          f"concat=n=2:v=1:a=1[{cat_v}][aout]")
         if shrink:
             parts.append(rf"[vcat]scale=-2:min({config.PREVIEW_MAX_HEIGHT}\,"

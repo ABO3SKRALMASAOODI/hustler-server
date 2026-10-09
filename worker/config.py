@@ -1963,10 +1963,12 @@ TRANSITION_VERSION = 3  # v3: zoom_punch no longer tmix-blends across concat
 # punches, whole-pixel framing, inclusive window ends), and a stitch would
 # mix the two cameras in one preview. A render is never re-encoded just for
 # being older when it is served for its OWN version.
-# v2 (cut hygiene, Oct 2026): a zoom edge within 4 frames of a program cut is
-# moved onto the cut and holds through it (camera.hold_through_cuts). Only
-# those zooms render differently, so a v1 render is still current for an
-# EDL whose zooms the rule leaves untouched (renderer.camera_current).
+# v2 (cut hygiene, Oct 2026): a zoom edge within 4 frames (counted at no
+# more than 30 fps) of a program cut is moved onto the cut and holds through
+# it — a start only where that steps the framing more than ramping from the
+# wide (camera.hold_through_cuts). Only those zooms render differently, so a
+# v1 render is still current for an EDL whose zooms the rule leaves
+# untouched on every focus origin (renderer.camera_current).
 CAMERA_VERSION = 2
 
 # ── The block clock (cut hygiene, Oct 2026) ─────────────────────────────
