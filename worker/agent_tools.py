@@ -256,6 +256,7 @@ class ToolContext:
         # handoff metadata, never as write, reply, preview, or export locks.
         self.last_taste = []
         self.last_taste_version = None
+        self.last_taste_advisory = []
         self.last_visual_critic = None
         # Independent semantic judgment for speech-led cuts. Kept separate
         # from pixels/audio so a reviewer can never claim evidence it did not
@@ -601,6 +602,35 @@ def _metric(ctx, key, amount=1):
         metrics = {}
         setattr(ctx, "editing_metrics", metrics)
     metrics[key] = metrics.get(key, 0) + amount
+
+
+def program_cast_inputs(ctx, edl=None):
+    """(inferred_grammar, program_shape) measured from the KEPT program.
+
+    A Shorts child shares its parent's full index, so classifying the index
+    alone called every podcast reel a long-form conversation. The latest
+    EDL (or ``edl``) and the child's parent link decide the program shape;
+    every editorial-family cast and the house-style block use this.
+    """
+    index = getattr(ctx, "index", None) or {}
+    if edl is None:
+        try:
+            edl = ctx.latest_edl()["json"]
+        except Exception:
+            edl = None
+    if not isinstance(edl, dict):
+        edl = None
+    child = bool((getattr(ctx, "project", None) or {}).get(
+        "parent_project_id"))
+    try:
+        shape = grammar.program_shape(index, edl, shorts_child=child)
+    except Exception:
+        shape = {"shorts_child": child, "reel": child}
+    try:
+        inferred = grammar.classify(index, edl, shorts_child=child)[0]
+    except Exception:
+        inferred = None
+    return inferred, shape
 
 
 def _execution_policy(ctx):
@@ -17810,9 +17840,16 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft"):
                 note += story_critic.summary_line(story_report)
             # Taste audit (round 52): the craft reviewer. Everything above
             # asks whether the edit is CORRECT; this asks whether it is any
-            # GOOD, which is the difference between an edit that renders and
-            # an edit someone wants to post. It runs on a REAL render only —
-            # a cached one was reviewed when it was made.
+            # GOOD. Its findings are ADVISORY craft notes (Oct 2026): they
+            # are printed in this result and kept in the durable record as
+            # advisories, but they never make the version repair_required,
+            # never trigger a repair loop and never gate the Studio export.
+            # A premium reel's dense camera, type and sound design used to
+            # be blocked by exactly these density heuristics. ctx.last_taste
+            # now carries only BLOCKING review lines for this version.
+            ctx.last_taste = list(critic_repairs) + repetition_repairs
+            ctx.last_taste_version = row.get("version")
+            ctx.last_taste_advisory = []
             try:
                 edl = row["json"]
                 tl = Timeline(edl["keep"], edl.get("inserts") or [],
@@ -17822,17 +17859,10 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft"):
                     src_w=(ctx.index.get("video") or {}).get("width"),
                     src_h=(ctx.index.get("video") or {}).get("height"),
                     user_asked=ctx.user_message or "")
-                # Published to the loop as well as printed here: a finding the
-                # model can read and skip past is not a review.
-                ctx.last_taste = (list(findings) + critic_repairs +
-                                  repetition_repairs)
-                ctx.last_taste_version = row.get("version")
+                ctx.last_taste_advisory = list(findings)
                 note += taste.audit_line(findings)
             except Exception:
-                # Visual review must still block a bad handoff when a
-                # deterministic taste rule itself happens to fail.
-                ctx.last_taste = list(critic_repairs) + repetition_repairs
-                ctx.last_taste_version = row.get("version")
+                pass
             # The SOUND side stays deterministic: render audio_qc measures the
             # actual mix without asking a second model to listen on the
             # editor's behalf.
@@ -17850,7 +17880,12 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft"):
             if audio_review:
                 reused = (" (reused: rendered audio program unchanged)"
                           if audio_review.get("reused") else "")
-                note += " ACTUAL-AUDIO REVIEW" + reused + ": " + \
+                advisory = ""
+                if audio_review.get("verdict") == "fix" and \
+                        not audio_review_blocks(audio_review):
+                    advisory = (" (" + quality_verifier.ADVISORY_LABEL
+                                + " — a craft opinion, not a defect)")
+                note += " ACTUAL-AUDIO REVIEW" + reused + advisory + ": " + \
                     audio_review["text"]
             department_gaps = director.department_execution_gaps(
                 getattr(ctx, "edit_plan", None), row.get("json") or {},
@@ -17890,6 +17925,13 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft"):
                                       if not str(line).startswith("audio QC: ")]
             visual_record_findings += preview_critic.repair_lines(
                 ctx.last_visual_critic or {})
+            advisory_record_findings = list(
+                getattr(ctx, "last_taste_advisory", None) or [])
+            advisory_record_findings += [
+                line for line in (
+                    preview_critic.advisory_lines(ctx.last_visual_critic or {})
+                    + _audio_review_advisories(ctx))
+                if line not in advisory_record_findings]
             story_record_findings = story_critic.repair_lines(
                 ctx.last_story_review or {})
             audio_record_findings = _audio_verification_findings(ctx)
@@ -17905,7 +17947,8 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft"):
                 visual_findings=visual_record_findings,
                 audio_findings=audio_record_findings,
                 story_findings=story_record_findings,
-                request_text=quality_verifier.request_text_for(ctx))
+                request_text=quality_verifier.request_text_for(ctx),
+                advisory_findings=advisory_record_findings)
             if not hasattr(ctx, "verification_records"):
                 ctx.verification_records = {}
             ctx.verification_records[version] = verification
@@ -17926,6 +17969,14 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft"):
                          + "; ".join(lines)
                          + ". Repair the concrete findings and verify the "
                            "new EDL version; completion remains open.")
+            craft_notes = [row["message"] for row in
+                           verification.get("advisories") or []
+                           if row.get("code") != "taste_advisory"]
+            if craft_notes:
+                note += (" VERIFICATION ADVISORIES ("
+                         + quality_verifier.ADVISORY_LABEL + "; they do not "
+                         "block completion or export): "
+                         + "; ".join(craft_notes[:4]) + ".")
             if finishing_checkpoint(ctx):
                 if not getattr(ctx, "_finishing_checkpoint_announced", False):
                     ctx._finishing_checkpoint_announced = True
@@ -18113,17 +18164,44 @@ def _audio_model_review_enabled(ctx):
     return getattr(ctx, "audio_model_review", True) is not False
 
 
+# Listening-model categories that name an objective defect in the delivered
+# mix. The rest (sfx_choice, sound_coherence, tone_mismatch, sfx_timing,
+# music_edit, music_balance) are craft opinions: a reviewer that dislikes a
+# whoosh must not be able to force a silent edit, so they stay advisory.
+AUDIO_BLOCKING_CATEGORIES = {"speech_masking", "audio_artifact", "level"}
+
+
+def audio_review_blocks(review):
+    """Whether one actual-audio review is a blocking (real-defect) FIX."""
+    review = review or {}
+    if review.get("verdict") != "fix":
+        return False
+    category = review.get("category")
+    # Legacy/unstructured reports carry no category: keep their old meaning.
+    return not category or category in AUDIO_BLOCKING_CATEGORIES
+
+
+def _audio_review_advisories(ctx):
+    if not _audio_model_review_enabled(ctx):
+        return []
+    review = getattr(ctx, "last_audio_review", None) or {}
+    if review.get("verdict") == "fix" and not audio_review_blocks(review):
+        return ["actual-audio review (" + quality_verifier.ADVISORY_LABEL
+                + "): " + str(review.get("text") or "")[:700]]
+    return []
+
+
 def _audio_verification_findings(ctx):
     """Durable audio findings, excluding forbidden model opinions.
 
     Deterministic whole-mix QC remains valid for every workflow. A subjective
     reviewer finding is eligible only for owners that explicitly retain that
-    legacy Studio lane.
+    legacy Studio lane, and only an objective defect category blocks.
     """
     findings = list(getattr(ctx, "last_audio_qc_findings", None) or [])
     if _audio_model_review_enabled(ctx):
         review = getattr(ctx, "last_audio_review", None) or {}
-        if review.get("verdict") == "fix":
+        if audio_review_blocks(review):
             findings.append(
                 review.get("text") or
                 "actual-audio review requested a repair")
@@ -18197,7 +18275,10 @@ def _review_render_audio(ctx, row, result):
     execution_context = _audio_execution_context(edl, plan)
     priority_audio = [
         "Global audio direction: " + global_direction
-        if global_direction else "Global audio direction: use restraint",
+        if global_direction else ("Global audio direction: speech first; "
+                                  "authored music and SFX should land on "
+                                  "their visual events and support the "
+                                  "piece's energy"),
         execution_context,
         ("Sound sequence contract: " + sequence_sound.replace("\n", " | "))
         if sequence_sound else "",
@@ -18372,14 +18453,11 @@ def _review_program_story(ctx, row):
         ctx.story_reviewed_versions = reviewed
     if version in reviewed:
         return prior if prior.get("edl_version") == version else None
-    try:
-        inferred = grammar.classify(getattr(ctx, "index", None))[0]
-    except Exception:
-        inferred = None
+    inferred, program = program_cast_inputs(ctx, row.get("json"))
     family = director.editorial_family(
         getattr(ctx, "edit_plan", None), inferred,
         bool(getattr(ctx, "has_main_video", True)),
-        request_text=getattr(ctx, "user_message", None))
+        request_text=getattr(ctx, "user_message", None), program=program)
     edl = row.get("json") or {}
     asset_indexes = {}
     for item in edl.get("inserts") or []:
@@ -18740,14 +18818,11 @@ def _independent_preview_review(ctx, result, plan=None,
     lines = []
     if convergence_context:
         lines.append(convergence_context[:3600])
-    try:
-        inferred = grammar.classify(getattr(ctx, "index", None))[0]
-    except Exception:
-        inferred = None
+    inferred, program = program_cast_inputs(ctx, edl)
     family = director.editorial_family(
         getattr(ctx, "edit_plan", None), inferred,
         bool(getattr(ctx, "has_main_video", True)),
-        request_text=getattr(ctx, "user_message", None))
+        request_text=getattr(ctx, "user_message", None), program=program)
     lines.append(editorial_contracts.critic_block(family))
     edit_plan = getattr(ctx, "edit_plan", None) or {}
     if edit_plan:
@@ -19587,15 +19662,14 @@ def set_edit_plan(ctx, steps, brief=None, treatment=None, format=None,
     if (sequence_map is not None and plan.get("sequence_map")
             and str(getattr(ctx, "user_message", "") or "").strip()
             and not getattr(ctx, "sight_out", False)):
-        try:
-            inferred = (grammar.classify(getattr(ctx, "index", None) or {})[0]
-                        if getattr(ctx, "has_main_video", True) else None)
-        except Exception:
+        inferred, program = program_cast_inputs(ctx)
+        if not getattr(ctx, "has_main_video", True):
             inferred = None
         prior_cast = director.editorial_family_cast(
             getattr(ctx, "edit_plan", None), inferred,
             getattr(ctx, "has_main_video", True),
-            request_text=getattr(ctx, "user_message", None))
+            request_text=getattr(ctx, "user_message", None),
+            program=program)
         # A measured grammar can identify the storytelling family while the
         # user's actual treatment remains entirely open ("make it great").
         # Explicit format words or a durable prior family are different: they
@@ -19607,7 +19681,8 @@ def set_edit_plan(ctx, steps, brief=None, treatment=None, format=None,
         if ambiguous_treatment:
             chosen_family = director.editorial_family(
                 plan, inferred, getattr(ctx, "has_main_video", True),
-                request_text=getattr(ctx, "user_message", None))
+                request_text=getattr(ctx, "user_message", None),
+                program=program)
             review_key = treatment_judge.fingerprint(
                 plan, getattr(ctx, "user_message", None))
             cache = getattr(ctx, "_treatment_review_cache", None)
@@ -19687,15 +19762,13 @@ def set_edit_plan(ctx, steps, brief=None, treatment=None, format=None,
         ", " + str(len(plan.get("department_plan") or {}))
         + " explicit department decisions"
         if plan.get("department_plan") else "")
-    try:
-        inferred = (grammar.classify(getattr(ctx, "index", None) or {})[0]
-                    if getattr(ctx, "has_main_video", True) else None)
-    except Exception:
+    inferred, program = program_cast_inputs(ctx)
+    if not getattr(ctx, "has_main_video", True):
         inferred = None
     chosen_family = director.editorial_family(
         plan, inferred,
         getattr(ctx, "has_main_video", True),
-        request_text=getattr(ctx, "user_message", None))
+        request_text=getattr(ctx, "user_message", None), program=program)
     review_note = (("\n" + treatment_judge.summary(treatment_review))
                    if treatment_review else "")
     return (f"Plan recorded as a creative blueprint ({len(plan['steps'])} "

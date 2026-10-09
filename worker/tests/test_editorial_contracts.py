@@ -3,7 +3,7 @@ import director
 
 
 EXPECTED_FAMILIES = {
-    "podcast_conversation", "talking_head_social",
+    "podcast_reel", "podcast_conversation", "talking_head_social",
     "product_demo_explainer", "action_sports_gameplay",
     "music_led_performance", "commercial_brand", "narrative_story",
     "voiceover_montage", "graphic_canvas", "mixed_other",
@@ -55,9 +55,15 @@ def test_critic_contract_is_visual_and_abstains_from_unseen_story_or_sound():
 
 
 def test_current_request_can_select_family_before_blueprint_exists():
+    # A podcast delivered as a reel is the short-form podcast_reel format
+    # (Oct 2026); a podcast with no short-form signal stays long-form.
     assert director.editorial_family(
         None, None, True,
         request_text="Cut this long podcast into one coherent reel") == \
+        "podcast_reel"
+    assert director.editorial_family(
+        None, None, True,
+        request_text="Tighten this long podcast episode") == \
         "podcast_conversation"
     assert director.editorial_family(
         None, None, True,
@@ -104,3 +110,49 @@ def test_uncertain_cast_exposes_every_concrete_driver_without_a_recipe():
 def test_unknown_contract_abstains_to_mixed_other():
     assert editorial_contracts.contract("invented-format") is \
         editorial_contracts.contract("mixed_other")
+
+
+def test_podcast_reel_contract_expects_a_designed_short_not_restraint():
+    reel = editorial_contracts.contract("podcast_reel")
+    joined = " ".join(reel["publish_ready"] + reel["visual_review"]
+                      + reel["reject_if"]).lower()
+    assert "micro-story" in reel["driver"]
+    assert "flat static delivery" in joined
+    assert "caption-only" in joined
+    assert "sound" in joined and "type system" in joined
+    assert "feature demo" not in joined
+    block = editorial_contracts.critic_block("podcast_reel")
+    assert "FORMAT-SPECIFIC VISUAL BENCHMARK: podcast_reel" in block
+    assert "not_judged" in block
+
+
+def test_reel_shaped_programs_cast_podcast_reel_before_the_podcast_keyword():
+    child = {"shorts_child": True, "reel": True, "vertical": False,
+             "duration": 48.0}
+    cast = director.editorial_family_cast(
+        None, "podcast-reel", True, request_text="make the captions bigger",
+        program=child)
+    assert cast["family"] == "podcast_reel"
+    # The Studio boot prompt says "podcast reel"; the keyword no longer
+    # routes a Shorts child to the long-form contract.
+    cast = director.editorial_family_cast(
+        None, "podcast-conversation", True,
+        request_text="You are the fresh lead editor for one selected "
+                     "podcast reel.", program=child)
+    assert cast["family"] == "podcast_reel"
+    assert cast["confidence"] >= .75
+    vertical = {"shorts_child": False, "reel": True, "vertical": True,
+                "duration": 45.0}
+    assert director.editorial_family(
+        None, None, True, request_text="edit this interview",
+        program=vertical) == "podcast_reel"
+    landscape = {"shorts_child": False, "reel": False, "vertical": False,
+                 "duration": 600.0}
+    assert director.editorial_family(
+        None, "podcast-conversation", True,
+        request_text="edit this interview", program=landscape) == \
+        "podcast_conversation"
+    # A reel shape alone is not a conversation: other formats still win.
+    assert director.editorial_family(
+        None, None, True, request_text="cut a cinematic gameplay montage",
+        program=vertical) == "action_sports_gameplay"

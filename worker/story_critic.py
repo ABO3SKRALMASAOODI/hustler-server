@@ -32,7 +32,7 @@ _CATEGORIES = {
 }
 _SEVERITIES = {"blocker", "major", "minor"}
 _STORY_FAMILIES = {
-    "podcast_conversation", "talking_head_social",
+    "podcast_reel", "podcast_conversation", "talking_head_social",
     "product_demo_explainer", "narrative_story", "voiceover_montage",
 }
 

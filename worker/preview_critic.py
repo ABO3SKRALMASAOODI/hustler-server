@@ -4,9 +4,14 @@ The editing agent is an interested party: it chose the crop, zoom and text,
 then historically approved those choices from a sparse contact sheet in the
 same conversation. This module starts a fresh, tool-free vision call with an
 adversarial review rubric and parses a small JSON contract. It never writes an
-EDL. High-confidence major findings are handed back to the agent for one
-bounded repair pass; unavailable or malformed vision degrades to deterministic
-audits rather than failing a render.
+EDL. Only blocker findings, or major findings at MAJOR_BLOCK_CONFIDENCE, are
+handed back to the agent for one bounded repair pass; unavailable or malformed
+vision degrades to deterministic audits rather than failing a render.
+
+Stills cannot prove motion. Easing, punch feel, pacing, shake, flash and whip
+energy happen between sampled frames, so findings in NEVER_BLOCK_CATEGORIES
+are advisory observations only (Oct 2026: the old rubric rewarded
+"restraint" and could block premium motion design it judged from stills).
 """
 
 import json
@@ -24,10 +29,23 @@ _CATEGORIES = {
 }
 _RUBRIC_DIMENSIONS = {
     "visual_coherence", "editorial_specificity", "narrative_support",
-    "motion_rhythm", "typography", "restraint",
+    "motion_rhythm", "typography", "retention_energy", "finish_quality",
 }
 _RUBRIC_LEVELS = {"strong", "adequate", "weak", "not_judged"}
 _CONTEXT_MAX_CHARS = 16000
+
+# Motion and pacing are judged from sampled stills: a flash, whip or shake
+# frame caught mid-effect looks like a defect and is not one. These
+# categories are reported as advisory observations and never block.
+NEVER_BLOCK_CATEGORIES = {
+    "pacing_rhythm", "motion_path", "motion_trigger", "motion_settle",
+    "effect",
+}
+# A finding blocks delivery only as a blocker (at the base confidence) or as
+# a major at this confidence or above.
+MAJOR_BLOCK_CONFIDENCE = 0.90
+_HIGH_RISK_CATEGORIES = {"black_frame", "continuity", "insert"}
+_EVIDENCE_HUNGRY_CATEGORIES = {"narrative_relevance", "stock_quality"}
 
 
 def pack_context(priority_sections, supporting_sections=(),
@@ -133,14 +151,44 @@ def parse_report(answer):
             continue
         rubric[dimension] = {"level": level, "evidence": evidence[:240],
                              "confidence": round(confidence, 3)}
-    # A model may accidentally say pass beside a real finding. Evidence wins.
-    if any(x["severity"] in {"blocker", "major"} and
-           x["confidence"] >= 0.72 for x in clean):
-        verdict = "repair"
-    if any(x["level"] == "weak" and x["confidence"] >= 0.72
-           for x in rubric.values()):
-        verdict = "repair"
-    return {"verdict": verdict, "findings": clean, "rubric": rubric}
+    # The verdict follows the evidence, not the model's word: a stray "pass"
+    # beside a blocking finding is a repair, and a "repair" with only
+    # sub-threshold, motion/pacing or minor findings is a pass with advisory
+    # notes. A weak rubric dimension is context, never a gate by itself.
+    model_verdict = verdict
+    verdict = "repair" if any(blocks(x) for x in clean) else "pass"
+    return {"verdict": verdict, "model_verdict": model_verdict,
+            "findings": clean, "rubric": rubric}
+
+
+def blocks(finding, min_confidence=0.72):
+    """Whether one parsed finding is a delivery-blocking visible defect."""
+    category = finding.get("category")
+    if category in NEVER_BLOCK_CATEGORIES:
+        return False
+    severity = finding.get("severity")
+    if severity == "blocker":
+        threshold = min_confidence
+    elif severity == "major":
+        threshold = max(min_confidence, MAJOR_BLOCK_CONFIDENCE)
+    else:
+        return False
+    # Sparse sheets can make a deliberate dark shot, a repeated-looking angle,
+    # or a tile decode miss look like a broken render. The file has already
+    # passed deterministic duration/black-frame verification. These, and
+    # relevance claims, need exact timing as well as confidence.
+    if category in _HIGH_RISK_CATEGORIES:
+        threshold = max(threshold, 0.90)
+    elif category in _EVIDENCE_HUNGRY_CATEGORIES:
+        threshold = max(threshold, 0.82)
+    if (category in _HIGH_RISK_CATEGORIES
+            or category in _EVIDENCE_HUNGRY_CATEGORIES) and \
+            finding.get("time_s") is None:
+        return False
+    try:
+        return float(finding.get("confidence") or 0.0) >= threshold
+    except (TypeError, ValueError):
+        return False
 
 
 def review(image_paths, image_labels, context):
@@ -163,7 +211,8 @@ filmstrips are comparison evidence: use them to notice that a crop/zoom lost
 the actual subject, preserved empty space, hid a screen region, or stacked new
 text on existing text. Look specifically for:
 - faces, hands, products, cursor targets or UI controls clipped or off-frame;
-- zooms that magnify empty/irrelevant space or feel like accidental bumps;
+- zooms or reframes whose framing magnifies empty/irrelevant space or loses
+  the subject;
 - captions/text touching faces, interface text, burned subtitles, platform UI,
   or frame edges; unreadable, generic, inconsistent or disproportionate type;
 - inserts/overlays showing blank canvas, bad fit, accidental bars, stretched
@@ -171,8 +220,8 @@ text on existing text. Look specifically for:
 - vector panels, lines, arrows, rings or progress indicators that cover the
   subject/source UI, point at nothing, misstate progress, or feel like generic
   decoration rather than clarifying the beat;
-- broken continuity, duplicate frames, unexpected black frames, harsh or
-  cheap-looking effects, and visual clutter.
+- broken continuity, duplicate frames, unexpected black frames, and visual
+  clutter that hides the subject or the words.
 
 A raw-source image is not the edited output and is not a required shot list.
 Never demand a shot merely because it exists in an upload or appears in a raw
@@ -186,14 +235,27 @@ contradiction of the customer's brief or a defect in the edited output.
 This is also a CRAFT review, not just damage detection. Across the sampled
 sequence judge whether the visual language is coherent, every cutaway visibly
 supports its recorded narrative purpose rather than acting as generic stock
-wallpaper, the first frame has hierarchy, type treatment is intentional and
-consistent, movement/cut density has contrast instead of metronomic repetition,
-and effects show restraint. Do not reward mere feature count. A clean hard cut
-can be stronger than a transition; an unadorned shot can be stronger than an
-irrelevant cutaway. If the context names a B-roll purpose/query, compare the
+wallpaper, the first frame has hierarchy, and type treatment is intentional
+and consistent. Judge RETENTION ENERGY: for short-form, a visible hook,
+framing/type/graphic changes with rhythm and contrast, and designed emphasis
+on the beats that matter — one static plate with subtitles is weak short-form
+craft, not a safe choice. Judge FINISH QUALITY: a committed grade, a clean
+type hierarchy with one accent role, graphics that settle, nothing that looks
+like a placeholder or an unreviewed preset. Feature count is not quality, and
+neither is the absence of features; an irrelevant cutaway is weaker than a
+revealing face. If the context names a B-roll purpose/query, compare the
 visible downloaded rendition with that purpose and flag a contradiction at its
 exact time. Do not infer relevance when the needed moment is absent from the
 sheets; mark the rubric dimension not_judged instead.
+
+STILLS CANNOT PROVE MOTION. Easing, punch feel, pacing, shake, flash, whip
+and transition energy happen between the sampled frames; a flash, whip, blur
+or shake frame caught mid-effect is expected, not a broken render. Report
+motion_*, pacing_rhythm and effect observations as minor; they never block
+delivery. Only a blocker, or a major at 0.90+ confidence with an exact time,
+blocks delivery — reserve those for visible damage: a clipped or lost
+subject, captions or graphics over a face, unreadable or corrupt text, blank
+or broken frames, contradicting inserts.
 
 Tiles labeled "text motion N state A/B", "<shape> motion N state A/B", or
 "motion proof N <domain>/<kind> state A/B" are an ORDERED state sequence from
@@ -245,7 +307,8 @@ sample cannot prove it:
 "narrative_support":{{"level":"strong|adequate|weak|not_judged","evidence":"visible fact","confidence":0.0}},
 "motion_rhythm":{{"level":"strong|adequate|weak|not_judged","evidence":"visible fact","confidence":0.0}},
 "typography":{{"level":"strong|adequate|weak|not_judged","evidence":"visible fact","confidence":0.0}},
-"restraint":{{"level":"strong|adequate|weak|not_judged","evidence":"visible fact","confidence":0.0}}}}}}
+"retention_energy":{{"level":"strong|adequate|weak|not_judged","evidence":"visible fact","confidence":0.0}},
+"finish_quality":{{"level":"strong|adequate|weak|not_judged","evidence":"visible fact","confidence":0.0}}}}}}
 Use blocker only for unusable output; major for a defect likely to make a user
 reject the edit; minor for real polish that does not block delivery. A clean
 result is {{"verdict":"pass","findings":[]}}."""
@@ -260,45 +323,37 @@ result is {{"verdict":"pass","findings":[]}}."""
     return parse_report(answer)
 
 
+def _line(finding, prefix):
+    where = (f" at {finding['time_s']:.1f}s"
+             if finding.get("time_s") is not None else "")
+    target = (f" target={finding['target_id']}"
+              if finding.get("target_id") else "")
+    motif = (f" motif={finding['motion_motif']}"
+             if finding.get("motion_motif") else "")
+    return (f"{prefix} [{finding['category']}]{where}{target}{motif}: "
+            f"{finding['evidence']} Repair: {finding['repair']}")
+
+
 def repair_lines(report, min_confidence=0.72):
-    """High-signal findings that must receive the one bounded repair pass."""
+    """Blocking findings that receive the one bounded repair pass."""
     if not report:
         return []
-    out = []
-    for finding in report.get("findings") or []:
-        if finding["severity"] not in {"blocker", "major"}:
-            continue
-        # Sparse sheets can make a deliberate dark shot, a repeated-looking
-        # angle, or a tile decode miss look like a broken render. The file has
-        # already passed deterministic duration/black-frame verification.
-        # Require exact timing and very high confidence for these categories
-        # before they authorize another EDL write.
-        high_risk = finding["category"] in {
-            "black_frame", "continuity", "insert"}
-        evidence_hungry = finding["category"] in {
-            "narrative_relevance", "pacing_rhythm", "stock_quality",
-            "motion_path", "motion_trigger", "motion_settle"}
-        motion_specific = finding["category"] in {
-            "motion_path", "motion_trigger", "motion_settle"}
-        threshold = (max(min_confidence, 0.90) if high_risk else
-                     max(min_confidence, 0.82) if evidence_hungry else
-                     min_confidence)
-        if finding["confidence"] < threshold or \
-                ((high_risk or evidence_hungry) and
-                 finding.get("time_s") is None) or \
-                (motion_specific and not finding.get("target_id")):
-            continue
-        where = (f" at {finding['time_s']:.1f}s"
-                 if finding.get("time_s") is not None else "")
-        target = (f" target={finding['target_id']}"
-                  if finding.get("target_id") else "")
-        motif = (f" motif={finding['motion_motif']}"
-                 if finding.get("motion_motif") else "")
-        out.append(
-            f"independent visual review [{finding['category']}]{where}"
-            f"{target}{motif}: "
-            f"{finding['evidence']} Repair: {finding['repair']}")
-    return out
+    return [_line(finding, "independent visual review")
+            for finding in report.get("findings") or []
+            if blocks(finding, min_confidence)]
+
+
+def advisory_lines(report, min_confidence=0.72):
+    """Major/blocker observations that do not block (motion/pacing judged
+    from stills, or below the blocking confidence): craft notes the editor
+    may act on, labelled advisory."""
+    if not report:
+        return []
+    return [_line(finding, "independent visual review (advisory: keep if "
+                           "intentional)")
+            for finding in report.get("findings") or []
+            if finding.get("severity") in {"blocker", "major"}
+            and not blocks(finding, min_confidence)]
 
 
 def summary_line(report, limit=4):
@@ -318,7 +373,9 @@ def summary_line(report, limit=4):
         needs_confirmation = (finding["category"] in {
             "black_frame", "continuity", "insert"} and
             (finding["confidence"] < 0.90 or finding.get("time_s") is None))
-        status = "unconfirmed " if needs_confirmation else ""
+        status = ("unconfirmed " if needs_confirmation else
+                  "" if blocks(finding) or finding["severity"] == "minor"
+                  else "advisory ")
         bits.append(f"{status}{finding['severity']}/{finding['category']}"
                     f"{where}{target}{motif}: "
                     f"{finding['evidence']} Repair: {finding['repair']}")

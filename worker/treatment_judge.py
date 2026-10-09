@@ -7,7 +7,7 @@ deliberately narrower: it receives the source-grounded decision record, the
 format contract and the competing routes, then checks specificity, internal
 coherence and evidence support before any expensive recipe/render work.
 
-It never invents a style, selects tools, or requires decoration.  A revision
+It never invents a style or selects tools.  A revision
 is actionable only when the reviewer cites exact labeled evidence from the
 submitted plan at high confidence.  Outages, malformed answers and subjective
 preference degrade to no gate.
@@ -141,9 +141,14 @@ and must not pretend to see pixels or hear sound.
 Judge whether the chosen treatment is a specific, executable editorial idea
 supported by the observed facts, whether its story/picture/type/motion/sound
 decisions form one system, and whether materially credible alternatives were
-actually distinguished. The user's explicit direction wins. Silence,
-stillness, natural color, the base picture and no captions/B-roll/SFX are valid
-winners. Do not reward feature count, effect density or fashionable words.
+actually distinguished. The user's explicit direction wins. Judge RETENTION
+ENERGY and FINISH QUALITY against the family contract: for short-form reels
+(e.g. podcast_reel) a flat static treatment — one unchanging frame with
+subtitles and a silent mix — is a weak route unless the user asked for it;
+for long-form or documentary families stillness and natural sound can win.
+Do not reward feature count, effect density or fashionable words for their
+own sake, and do not penalize a dense motion/type/sound system that the
+contract calls for.
 
 REVISE only for a high-confidence load-bearing problem: the route contradicts
 the user or its cited evidence, the family/sequence/department decisions are
@@ -171,10 +176,16 @@ allowed_evidence_refs. Return JSON only:
     return parse_report(result.get("text"), packet["allowed_evidence_refs"])
 
 
+# Same bar as the visual critic's major findings (Oct 2026): a subjective
+# route preference must be near-certain before it can stop an edit.
+ACTIONABLE_CONFIDENCE = .90
+
+
 def actionable_revision(report):
     """Only exact, confident evidence may stop the wrong route pre-write."""
     return bool(report and report.get("verdict") == "revise" and
-                float(report.get("confidence") or 0.0) >= .86 and
+                float(report.get("confidence") or 0.0)
+                >= ACTIONABLE_CONFIDENCE and
                 report.get("evidence_refs") and report.get("revision"))
 
 

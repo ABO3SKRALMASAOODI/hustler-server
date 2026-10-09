@@ -187,7 +187,12 @@ def test_editorial_family_is_coarse_and_abstains_on_ambiguous_work():
         steps=["select the exchange"], format="podcast reel")
     demo = director.create_blueprint(
         steps=["show the workflow"], format="SaaS product demo")
-    assert director.editorial_family(podcast) == "podcast_conversation"
+    # A "podcast reel" is the short-form reel format (Oct 2026), not the
+    # long-form conversation contract.
+    assert director.editorial_family(podcast) == "podcast_reel"
+    long_form = director.create_blueprint(
+        steps=["select the exchange"], format="podcast conversation")
+    assert director.editorial_family(long_form) == "podcast_conversation"
     assert director.editorial_family(demo) == "product_demo_explainer"
     assert director.editorial_family(None, "narrative-vlog") == \
         "narrative_story"

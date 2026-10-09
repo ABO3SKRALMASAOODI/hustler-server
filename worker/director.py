@@ -992,8 +992,14 @@ def status(blueprint):
             "pending_criteria": checks}
 
 
+_REEL_WORDS = re.compile(
+    r"\b(?:reels?|shorts|tiktoks?|clips?|vertical|9:16|instagram|"
+    r"youtube short)\b")
+
+
 def editorial_family_cast(blueprint, inferred_grammar=None,
-                          has_main_video=True, request_text=None):
+                          has_main_video=True, request_text=None,
+                          program=None):
     """Return an evidence-honest format cast, including uncertainty.
 
     A platform container ("Instagram reel") and an energy adjective do not say
@@ -1001,6 +1007,12 @@ def editorial_family_cast(blueprint, inferred_grammar=None,
     sequence or narrated montage. This cast commits only from an explicit
     blueprint, format-specific language, or measured grammar; otherwise it
     exposes the full slate and abstains to ``mixed_other``.
+
+    ``program`` is grammar.program_shape() of the KEPT program. A
+    conversation delivered as a reel — a Shorts child, a vertical/square
+    output of 120s or less, or a podcast brief that names a reel/short/clip —
+    is cast to ``podcast_reel`` BEFORE the generic 'podcast' keyword can
+    route it to the long-form podcast_conversation contract.
     """
     bp = normalize_blueprint(blueprint) or {}
     explicit = str(bp.get("editorial_family") or "").strip()
@@ -1024,8 +1036,17 @@ def editorial_family_cast(blueprint, inferred_grammar=None,
     def hit(*needles):
         return any(needle in text for needle in needles)
 
+    program = program or {}
+    reel_output = bool(program.get("reel") or program.get("shorts_child"))
     selected = reason = None
-    if hit("podcast", "interview", "conversation", "roundtable", "q&a"):
+    conversation = hit("podcast", "interview", "conversation", "roundtable",
+                       "q&a")
+    if conversation and (reel_output or _REEL_WORDS.search(text)
+                         or inferred_grammar == "podcast-reel"):
+        selected, reason = "podcast_reel", (
+            "Shorts child of a conversation" if program.get("shorts_child")
+            else "conversation delivered as a short-form reel")
+    elif conversation:
         selected, reason = "podcast_conversation", "explicit conversation format"
     elif hit("tutorial", "product demo", "software demo", "screen recording",
              "saas", "walkthrough", "how-to", "explainer"):
@@ -1056,6 +1077,7 @@ def editorial_family_cast(blueprint, inferred_grammar=None,
                 "candidates": [selected]}
 
     grammar_map = {
+        "podcast-reel": "podcast_reel",
         "podcast-conversation": "podcast_conversation",
         "talking-head-promo": "talking_head_social",
         "kinetic-typography-talking-head": "talking_head_social",
@@ -1081,10 +1103,11 @@ def editorial_family_cast(blueprint, inferred_grammar=None,
 
 
 def editorial_family(blueprint, inferred_grammar=None, has_main_video=True,
-                     request_text=None):
+                     request_text=None, program=None):
     """Privacy-safe coarse label for prompts, critics and production cohorts."""
     return editorial_family_cast(
-        blueprint, inferred_grammar, has_main_video, request_text)["family"]
+        blueprint, inferred_grammar, has_main_video, request_text,
+        program=program)["family"]
 
 
 def sequence_block(blueprint, include=("anchor", "purpose", "visual", "sound"),

@@ -74,6 +74,61 @@ def test_long_conversation_does_not_get_creator_promo_skin():
     assert "conversation" in reason
 
 
+def _podcast_index(dur=3600.0):
+    idx = _talking_index(dur=dur, n_shots=6, speech_frac=0.65)
+    idx["video"].update(width=1920, height=1080)
+    idx["speakers"] = 2
+    return idx
+
+
+def test_shorts_child_is_classified_from_its_kept_program_not_the_parent():
+    """Oct 2026: a Shorts child shares the parent's full index. Classifying
+    that index called a 45s reel a long-form conversation and handed it the
+    'do not create artificial motion' house style."""
+    idx = _podcast_index()
+    child_edl = {"keep": [[612.3, 657.8]]}
+    assert grammar.classify(idx)[0] == "podcast-conversation"
+    slug, reason = grammar.classify(idx, child_edl, shorts_child=True)
+    assert slug == "podcast-reel", reason
+    assert "short-form podcast reel" in reason
+    shape = grammar.program_shape(idx, child_edl, shorts_child=True)
+    assert shape["from_program"] and shape["reel"]
+    assert 45 <= shape["duration"] <= 46
+
+
+def test_vertical_short_program_of_a_conversation_is_a_podcast_reel():
+    idx = _podcast_index()
+    reel = {"keep": [[100.0, 160.0]], "frame": {"ratio": "9:16"}}
+    assert grammar.classify(idx, reel)[0] == "podcast-reel"
+    # The same cut delivered landscape stays a conversation cut.
+    landscape = {"keep": [[100.0, 160.0]], "frame": {"ratio": "16:9"}}
+    assert grammar.classify(idx, landscape)[0] == "podcast-conversation"
+    # A long vertical program is not a reel.
+    long_cut = {"keep": [[100.0, 400.0]], "frame": {"ratio": "9:16"}}
+    assert grammar.classify(idx, long_cut)[0] == "podcast-conversation"
+
+
+def test_single_speaker_vertical_take_stays_a_talking_head():
+    idx = _talking_index()
+    assert grammar.classify(idx, {"keep": [[0.0, 60.0]],
+                                  "frame": {"ratio": "9:16"}})[0] == \
+        "talking-head-promo"
+
+
+def test_podcast_reel_house_style_expects_motion_type_and_sound():
+    idx = _podcast_index()
+    block = grammar.plan_block(idx, {"keep": [[612.3, 657.8]]},
+                               shorts_child=True)
+    assert "podcast-reel" in block
+    assert "ALWAYS override" in block
+    low = block.lower()
+    for craft in ("micro-story", "camera", "typography", "sound",
+                  "add_motion_graphic", "kit:"):
+        assert craft in low, craft
+    assert "do not create artificial motion" not in low
+    assert "podcast-reel" in grammar.library()
+
+
 def test_plan_block_carries_rules_rubric_and_the_user_wins_rule():
     block = grammar.plan_block(_talking_index())
     assert "HOUSE STYLE" in block

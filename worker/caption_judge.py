@@ -32,7 +32,7 @@ def catalog():
     rows = [{"preset": "classic", "font": "bundled sans",
              "mode": "static", "align": "center", "uppercase": False,
              "position": "bottom", "layout": "flow",
-             "note": "legacy plain subtitle; maximum restraint"}]
+             "note": "legacy plain subtitle; lowest retention energy"}]
     for name, spec in captions.PRESETS.items():
         row = {"preset": name}
         for key in _FIELDS:
@@ -116,9 +116,14 @@ def review(context, proof_paths=None, proof_labels=None):
 Choose ONE caption treatment for a finished edit from the complete renderer
 catalog supplied by the caller. Judge the speaker/content, reading pace,
 platform/aspect, durable creative treatment, source visual conditions and
-cross-department coherence. Do not reward novelty or motion density. Prefer
-readability, semantic hierarchy, safe composition and a consistent grammar;
-restraint can win. A preset name is only an id—use its supplied mechanics.
+cross-department coherence. Judge RETENTION ENERGY and FINISH QUALITY: on
+vertical short-form speech, an animated caption system with clear hierarchy
+and one keyword accent usually holds a muted feed viewer better than a plain
+static subtitle, which is the weakest short-form choice unless the brief asks
+for it. Do not reward novelty for its own sake; readability, semantic
+hierarchy, safe composition and a consistent grammar are mandatory, and the
+user's explicit direction (e.g. no colour) always wins. A preset name is only
+an id—use its supplied mechanics.
 Do not invent a preset, font, animation or effect. `position` should be null
 to preserve shot-aware adaptive placement unless the recorded treatment
 specifically requires top, middle or bottom. Return JSON only:
@@ -138,9 +143,12 @@ through the production ASS compiler, bundled fonts and production PlayRes on
 the SAME real output-geometry frame and SAME transcript landing. Compare the
 visible pixels: font character, scale, wrapping, hierarchy, contrast,
 placement, collision risk and coherence with the supplied edit. Choose ONE
-preset. Do not reward novelty or motion density; restraint can win. The still
-captures one real animation state, so use catalog mechanics to reason about
-motion without inventing controls. Do not choose a preset absent from the
+preset. Judge retention energy and finish quality: for vertical short-form
+speech, hierarchy, a keyword accent and a deliberate entrance usually beat a
+plain static subtitle; readability, safe placement and coherence remain
+mandatory, and novelty alone earns nothing. The still captures one real
+animation state, so use catalog mechanics to reason about motion without
+inventing controls and never penalize motion you cannot see. Do not choose a preset absent from the
 pages and do not add style overrides that were not rendered. Return JSON only:
 {"preset":"exact catalog id","confidence":0.0,
 "reason":"specific visible and program evidence",

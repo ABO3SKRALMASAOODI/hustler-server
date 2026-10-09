@@ -72,10 +72,11 @@ def test_parse_report_requires_exact_labeled_evidence():
 
 
 def test_only_high_confidence_grounded_revision_is_actionable():
-    base = {"verdict": "revise", "confidence": .85,
+    # Oct 2026: the bar matches the visual critic's blocking majors (0.90).
+    base = {"verdict": "revise", "confidence": .89,
             "evidence_refs": ["B1"], "revision": "distinguish the proof"}
     assert not treatment_judge.actionable_revision(base)
-    base["confidence"] = .86
+    base["confidence"] = .90
     assert treatment_judge.actionable_revision(base)
     base["evidence_refs"] = []
     assert not treatment_judge.actionable_revision(base)
@@ -99,6 +100,8 @@ def test_review_is_bounded_to_packet_and_degrades_on_outage(monkeypatch):
     assert seen["kwargs"]["max_tokens"] == 500
     assert "must not pretend to see pixels or hear sound" in seen["system"]
     assert "Do not reward feature count" in seen["system"]
+    assert "RETENTION" in seen["system"] and "flat static" in seen["system"]
+    assert "valid\nwinners" not in seen["system"]
     assert '"ref":"B1"' in seen["user"]
 
     monkeypatch.setattr(
@@ -188,7 +191,8 @@ def test_known_source_grammar_does_not_mistake_vague_treatment_for_direction(
     calls = []
     monkeypatch.setattr(
         agent_tools.grammar, "classify",
-        lambda _index: ("podcast-conversation", {"confidence": .8}))
+        lambda _index, *_a, **_k: ("podcast-conversation",
+                                   {"confidence": .8}))
 
     def accept(*_args):
         calls.append(1)

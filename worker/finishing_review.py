@@ -2,6 +2,12 @@
 
 This does not certify unseen pixels, lock tools, or erase a review finding.
 It keeps known repairs in front of the editor while a new version awaits review.
+
+Only real defects (quality_verifier ERROR findings) are presented as repairs.
+Taste notes and other craft heuristics are presented separately, labelled
+"advisory: keep if intentional": a premium edit that deliberately carries
+dense camera, type and sound design must be able to finish without arguing
+with them.
 """
 import quality_verifier
 import taste
@@ -9,20 +15,44 @@ from timeline import Timeline
 
 
 DIRECTIVE_PREFIX = "CURRENT FINISHING EVIDENCE:"
+ADVISORY_LIMIT = 3
+
+
+def _deterministic(ctx, edl, index):
+    return quality_verifier.deterministic_findings(
+        edl, index, request_text=quality_verifier.request_text_for(ctx))
 
 
 def current_findings(ctx, row):
+    """Blocking (real-defect) lines for this exact EDL version."""
+    edl = row.get("json") or {}
+    index = getattr(ctx, "index", None) or {}
+    findings = [r["message"] for r in _deterministic(ctx, edl, index)
+                if quality_verifier.is_blocking(r)]
+    return list(dict.fromkeys(findings))
+
+
+def advisory_findings(ctx, row):
+    """Craft notes for this EDL version: taste audit plus advisory checks."""
     edl = row.get("json") or {}
     index = getattr(ctx, "index", None) or {}
     video = index.get("video") or {}
-    request = quality_verifier.request_text_for(ctx)
     findings = taste.critique(
         edl, index, Timeline(edl.get("keep") or [], edl.get("inserts") or [],
                              edl.get("speed") or []),
-        src_w=video.get("width"), src_h=video.get("height"), user_asked=request)
-    findings += [r["message"] for r in quality_verifier.deterministic_findings(
-        edl, index, request_text=request)]
+        src_w=video.get("width"), src_h=video.get("height"),
+        user_asked=quality_verifier.request_text_for(ctx))
+    findings += [r["message"] for r in _deterministic(ctx, edl, index)
+                 if not quality_verifier.is_blocking(r)]
     return list(dict.fromkeys(findings))
+
+
+def _advisory_block(lines):
+    if not lines:
+        return ""
+    return ("\nAdvisory craft notes (" + quality_verifier.ADVISORY_LABEL
+            + "; they never block completion or export):\n- "
+            + "\n- ".join(s[:400] for s in lines[:ADVISORY_LIMIT]))
 
 
 def directive(ctx):
@@ -41,16 +71,23 @@ def directive(ctx):
     fresh = [line for line in fresh if line not in resolved]
     lines = list(fresh)
     lines += [str(r.get("message") or r) for r in current.get("unresolved_findings") or []
-              if r.get("code") != "complete_preview_missing"]
+              if r.get("code") != "complete_preview_missing"
+              and quality_verifier.is_blocking(r)]
     lines = list(dict.fromkeys(lines))
     header = f"{DIRECTIVE_PREFIX} EDL v{version}. "
+    try:
+        advisories = [line for line in advisory_findings(ctx, row)
+                      if line not in lines]
+    except Exception:
+        advisories = []
     if lines:
         return (header + "Repair these current findings before optional polish or another full encode:\n- "
                 + "\n- ".join(s[:1000] for s in lines[:8])
-                + "\nChoose the smallest targeted edit. A metadata finding such as transition density "
-                  "does not require inspecting every source again. Preserve shots and audio that already "
+                + "\nChoose the smallest targeted edit. A metadata finding does "
+                  "not require inspecting every source again. Preserve shots and audio that already "
                   "passed. Once repaired, render and verify the new version. If direct evidence shows "
-                  "a false positive, use justify_verification_findings; never claim an unchecked pass.")
+                  "a false positive, use justify_verification_findings; never claim an unchecked pass."
+                + _advisory_block(advisories))
     if (current.get("status") in {"passed", "justified"}
             and current.get("complete_preview_passed") is True):
         return (header + "The complete preview and its verification passed. If the customer's requested "
@@ -61,13 +98,18 @@ def directive(ctx):
                 if int(v) < version and r.get("complete_preview_passed")]
     if reviewed:
         previous_version, previous = max(reviewed, key=lambda item: item[0])
-        unresolved = previous.get("unresolved_findings") or []
+        unresolved = [r for r in previous.get("unresolved_findings") or []
+                      if quality_verifier.is_blocking(r)]
         if unresolved:
             return (header + f"Not yet verified. The last complete review was v{previous_version}:\n- "
                     + "\n- ".join(str(r.get("message") or r)[:1000] for r in unresolved[:6])
                     + "\nThese are prior-version findings, not proof about current pixels. Confirm the "
                       "targeted repairs with one current preview. Do not restart broad research or "
-                      "change unrelated passed work while verification is pending.")
+                      "change unrelated passed work while verification is pending."
+                    + _advisory_block(advisories))
+    if advisories:
+        return (header + "No blocking finding is open for this version."
+                + _advisory_block(advisories))
     return None
 
 

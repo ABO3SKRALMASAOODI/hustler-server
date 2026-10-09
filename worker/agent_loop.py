@@ -86,6 +86,14 @@ _NON_PRODUCTIVE_CONTINUATION_REASONS = {
     "awaiting complete preview",
 }
 
+# Verification-driven repair is bounded to ONE pass per logical turn: one
+# in-slice repair pushback and at most one durable continuation slice whose
+# only reason is an unresolved verification record. Only real defects reach
+# verification now (taste notes are advisory), and anything still open after
+# that pass is disclosed in the reply and keeps the Studio export gate shut.
+MAX_QUALITY_REPAIR_PUSHBACKS = 1
+MAX_VERIFICATION_CONTINUATIONS = 1
+
 
 def _continuation_work_slices(state, reason):
     """Count physical slices that performed or retried editorial work.
@@ -1063,7 +1071,16 @@ def state_block(ctx, worker_db, denied_tools=(), include_blueprint=True):
     # user's words always win. Never allowed to break a turn.
     if ctx.has_main_video:
         try:
-            style = grammar.plan_block(ctx.index)
+            # Classified from the KEPT program: a Shorts child must get the
+            # podcast-reel house style, not its parent's long-form one.
+            try:
+                style_edl = ctx.latest_edl()["json"]
+            except Exception:
+                style_edl = None
+            style = grammar.plan_block(
+                ctx.index, style_edl if isinstance(style_edl, dict) else None,
+                shorts_child=bool((getattr(ctx, "project", None) or {}).get(
+                    "parent_project_id")))
             if style:
                 block += "\n\n" + style
         except Exception as e:
@@ -1087,10 +1104,13 @@ def state_block(ctx, worker_db, denied_tools=(), include_blueprint=True):
     # while a vague "make it nice" still receives a real quality target.
     family = None
     try:
-        inferred = grammar.classify(ctx.index)[0] if ctx.has_main_video else None
+        inferred, program = agent_tools.program_cast_inputs(ctx)
+        if not ctx.has_main_video:
+            inferred = None
         cast = director.editorial_family_cast(
             getattr(ctx, "edit_plan", None), inferred, ctx.has_main_video,
-            request_text=getattr(ctx, "user_message", None))
+            request_text=getattr(ctx, "user_message", None),
+            program=program)
         family = cast["family"]
         block += "\n\n" + editorial_contracts.casting_block(cast)
     except Exception as e:
@@ -2215,7 +2235,7 @@ _EXPLICIT_MICRO_EDIT = re.compile(
 _PREVIEW_CHECKPOINT_FIELDS = (
     "last_preview", "last_visual_critic", "last_story_review",
     "last_audio_review", "last_audio_qc_findings", "last_taste",
-    "last_taste_version",
+    "last_taste_version", "last_taste_advisory",
 )
 
 
@@ -2396,18 +2416,27 @@ def _preview_repair_pushback(ctx, messages, t_start, already_pushed,
 
 def _quality_repair_pushback(ctx, messages, t_start, pushed_versions,
                              turn_started=None):
-    """Require one decision on each newly proven high-confidence defect.
+    """Require one decision on a newly proven high-confidence defect.
 
-    This is semantic, not a turn-count throttle: an immutable preview version
-    is surfaced once. A repaired version may produce new evidence and earns
-    its own decision; the same false positive cannot trap the model forever.
+    An immutable preview version is surfaced once, and a logical turn gets
+    MAX_QUALITY_REPAIR_PUSHBACKS of them in total: the same false positive,
+    or a reviewer that finds something new on every repaired version, cannot
+    trap the model in render-repair loops.
     """
+    # One repair pass per logical turn (Oct 2026). Each pushback asked for
+    # another write + complete render (~2 minutes with its reviewers), and a
+    # reviewer that found something new on every version kept the editor in
+    # a loop. After one targeted pass the remaining real defects are carried
+    # by the finishing directive and disclosed in the handoff instead.
+    if len(pushed_versions) >= MAX_QUALITY_REPAIR_PUSHBACKS:
+        return False
     report = getattr(ctx, "last_visual_critic", None) or {}
     findings = preview_critic.repair_lines(report)
     findings.extend(story_critic.repair_lines(
         getattr(ctx, "last_story_review", None) or {}))
     audio_review = getattr(ctx, "last_audio_review", None) or {}
-    if audio_review.get("verdict") == "fix" and audio_review.get("text"):
+    if agent_tools.audio_review_blocks(audio_review) and \
+            audio_review.get("text"):
         findings.append(
             "independent actual-audio review: "
             + str(audio_review["text"])[:700])
@@ -2795,11 +2824,13 @@ def _quality_handoff(ctx):
         findings.append("audio QC: " + str(line))
     audio_review = getattr(ctx, "last_audio_review", None) or {}
     if audio_review.get("edl_version") == latest \
-            and audio_review.get("verdict") == "fix":
+            and agent_tools.audio_review_blocks(audio_review):
         findings.append("actual-audio review: "
                         + str(audio_review.get("text") or "needs repair"))
-    # Deterministic taste findings (dead air, excessive devices, invalid mix)
-    # count too, but only for the exact latest version.
+    # Blocking review lines recorded at render time (critic repairs, edit
+    # duplication, audio QC, execution gaps) count too, but only for the
+    # exact latest version. Taste notes are advisory and live separately in
+    # ctx.last_taste_advisory; they never reach this list.
     if getattr(ctx, "last_taste_version", None) == latest:
         for line in (getattr(ctx, "last_taste", None) or []):
             if line not in findings:
@@ -3814,14 +3845,15 @@ def _outcome_meta(ctx, outcome):
         edit_shape = {}
     plan_state = director.status(getattr(ctx, "edit_plan", None))["state"]
     try:
-        inferred_grammar = grammar.classify(
-            getattr(ctx, "index", None))[0]
+        inferred_grammar, program_shape = agent_tools.program_cast_inputs(
+            ctx, latest if latest_available else None)
     except Exception:
-        inferred_grammar = None
+        inferred_grammar, program_shape = None, None
     family_cast = director.editorial_family_cast(
         getattr(ctx, "edit_plan", None), inferred_grammar,
         bool(getattr(ctx, "has_main_video", False)),
-        request_text=getattr(ctx, "user_message", None))
+        request_text=getattr(ctx, "user_message", None),
+        program=program_shape)
     editorial_family = family_cast["family"]
     metrics = dict(getattr(ctx, "editing_metrics", None) or {})
     department_execution = {
@@ -3948,6 +3980,8 @@ def _outcome_meta(ctx, outcome):
                     "findings") or [])],
             "deterministic_taste_findings": len(
                 getattr(ctx, "last_taste", None) or []),
+            "advisory_taste_findings": len(
+                getattr(ctx, "last_taste_advisory", None) or []),
             "audio_qc_findings": len(
                 getattr(ctx, "last_audio_qc_findings", None) or []),
             "audio_review_verdict": (
@@ -4257,7 +4291,8 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
     visual_handoff = False
 
     def _durable_continuation(reason, blocker_fingerprint=None,
-                              blocker_repeats=0, progress_frontier=None):
+                              blocker_repeats=0, progress_frontier=None,
+                              verification_slices=None):
         """Checkpoint consequences, enqueue the next slice, post no reply."""
         root_id = int(payload.get("root_agent_job_id") or job["id"])
         sequence = int(payload.get("continuation_sequence") or 0) + 1
@@ -4323,6 +4358,11 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             # and 543 churned EDL rows could each buy another execution slice.
             "semantic0": _serializable_progress_marker(progress_frontier),
             "work_slices": work_slices,
+            # Verification-driven continuations already spent by this
+            # logical turn (carried through every later slice).
+            "verification_slices": (
+                int(verification_slices) if verification_slices is not None
+                else int(_cont.get("verification_slices") or 0)),
         }
         next_payload = {
             key: value for key, value in payload.items()
@@ -5007,35 +5047,27 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 if body:
                     messages.append({"role": "assistant", "content": body})
                 continue
-            if ctx.versions_written and not _verification_complete(ctx):
+            if ctx.versions_written and not _verification_complete(ctx) \
+                    and int(_cont.get("verification_slices") or 0) \
+                    < MAX_VERIFICATION_CONTINUATIONS:
                 # A model draft is not completion while the current immutable
                 # version still has an unresolved quality record. Checkpoint
-                # the consequences and resume; never make the user ask again
-                # because a provider/runtime slice ended between repair steps.
+                # the consequences and resume ONCE; never make the user ask
+                # again because a provider/runtime slice ended between repair
+                # steps. A second unresolved pass is not retried in another
+                # slice: the reply below discloses the open finding and the
+                # handoff keeps export closed (MAX_VERIFICATION_CONTINUATIONS).
                 _verification_version, verification = _latest_verification(ctx)
-                unresolved_rows = verification.get("unresolved_findings") or []
                 fingerprint, _blocker_state = \
                     _objective_blocker_fingerprint(
                         getattr(ctx, "edit_plan", None), verification)
                 previous = _cont.get("blocker_fingerprint")
                 repeats = (int(_cont.get("blocker_repeats") or 0) + 1
                            if previous == fingerprint else 1)
-                if repeats < 3:
-                    return _durable_continuation(
-                        "verification repair remains", fingerprint, repeats)
-                detail = "; ".join(
-                    str(row.get("message") or row)[:260]
-                    for row in unresolved_rows[:4]) or \
-                    "the complete preview verification did not pass"
-                return _finalize(
-                    ctx, worker_db, session_id,
-                    "I couldn't close the current edit because the same "
-                    "verification findings remained after the repair and "
-                    "direct-evidence fallback passes: " + detail +
-                    ". The saved preview remains available, but I am not "
-                    "marking this version complete.",
-                    "blocked", total_steps, timings, honesty,
-                    turn_deadline=turn_deadline, job=job)
+                return _durable_continuation(
+                    "verification repair remains", fingerprint, repeats,
+                    verification_slices=int(
+                        _cont.get("verification_slices") or 0) + 1)
             draft = body
             if not draft:
                 if ctx.versions_written or ctx.last_preview:

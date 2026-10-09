@@ -31,7 +31,19 @@ Each check earns its place by having actually shipped as a defect:
     TikTok/Reels UI
   * a 4:50 "reel"
   * every zoom identical: same 35%, same mode, five times
+
+Round 2026-10 (premium motion). Findings here are ADVISORY craft notes: they
+are shown in the render result labelled "advisory: keep if intentional" and
+never become blocking verification findings, repair loops or an export gate.
+The density limits are per FORMAT: a vertical/square reel of REEL_MAX_S or
+less is measured against premium short-form references (a camera, type or
+sound event every few seconds, a whoosh layered into an impact, a hook punch
+at 0s), not against long-form restraint. The guards that caught real
+failures stay: transitions on every jump cut, identical-zoom repetition,
+fade from black on a reel, captions under the platform UI band.
 """
+
+import re
 
 from timeline import program_blocks, transition_junctions
 
@@ -88,7 +100,51 @@ MAX_SIMULTANEOUS_DEVICES = 2
 # viewer did not ask for.
 HOOK_DEAD_AIR_S = 1.5
 
+# ── the premium reel profile (Oct 2026) ─────────────────────────────────
+# The limits above were tuned against long-form restraint, and on a reel they
+# fired on exactly what the owner's premium references do: a simulated 45s
+# podcast reel with 10 eased, aimed zooms, 13 purposeful SFX, one whip and a
+# flash+shake hit got seven findings ("restraint is the look") and could not
+# ship. Frame-level measurement of 28 reference reels: something visual
+# changes every 0.3-0.6s, framing alternates on sentence turns every 2-5s, a
+# hook pattern interrupt lands in the first 0.1-0.6s, and SFX are layered
+# (whoosh pre-rolled into an impact, sub under a hit). A vertical or square
+# output of REEL_MAX_S or less is judged against THAT density. 120s matches
+# the podcast_reel editorial contract, so the contract and the audit agree.
+REEL_MAX_S = 120.0
+REEL_ZOOM_PER_S = 3.0           # flag only past one camera move every 3s
+REEL_ZOOM_MIN_SPACING_S = 1.5   # two pushes closer than this fight
+REEL_ZOOM_MIN_START_S = 0.0     # a punched-in hook at 0s is a device
+REEL_SFX_PER_S = 2.0            # sound EVENTS (a layered stack is one event)
+REEL_DEVICE_MIN_SPACING_S = 0.8
+REEL_MAX_SIMULTANEOUS_DEVICES = 4   # punch + flash + shake + zoom = one hit
+
+# Two sounds closer than SFX_MIN_SPACING_S are a muddy flam only when they
+# play the SAME role. Different roles are a designed layer (a whoosh whose
+# peak lands on an impact, a sub drop under a hit); sounds within this window
+# of each other are one stacked hit rather than two mistimed ones.
+SFX_LAYER_WINDOW_S = 0.05
+
 _AGGRESSIVE_STYLIZE = ("flash", "chromatic", "vhs", "shake", "glitch")
+
+# Role vocabulary for a sound, matched against its storage key (kit sounds
+# are stored as ``kit-<kind>-<fingerprint>.wav``) and then its purpose. Order
+# matters: a sub drop is not a generic hit, a riser is not a whoosh.
+_SFX_ROLES = (
+    ("riser", ("riser", "rise", "build", "buildup", "swell", "tension")),
+    ("sub", ("sub", "subdrop", "bass", "808")),
+    ("whoosh", ("whoosh", "woosh", "swoosh", "swish", "swipe", "swoop",
+                "passby", "transition")),
+    ("hit", ("impact", "hit", "boom", "thud", "kick", "slam", "punch",
+             "stomp", "bang", "drum")),
+    ("ui", ("pop", "click", "tick", "typing", "keyboard", "tap", "bubble",
+            "blip", "typewriter")),
+    ("tone", ("ding", "chime", "bell", "notification", "coin", "cash",
+              "ping", "sparkle", "shimmer")),
+    ("glitch", ("glitch", "static", "digital", "error")),
+    ("shutter", ("shutter", "camera", "photo")),
+    ("scratch", ("scratch", "rewind")),
+)
 
 
 def _num(v, default=0.0):
@@ -96,6 +152,109 @@ def _num(v, default=0.0):
         return float(v)
     except (TypeError, ValueError):
         return default
+
+
+def _role_in(text):
+    words = set(re.split(r"[^a-z0-9]+", str(text or "").lower()))
+    for role, vocabulary in _SFX_ROLES:
+        if words.intersection(vocabulary):
+            return role
+    return None
+
+
+def sfx_role(item):
+    """Coarse sound-design role of one SFX item, or None when unknowable.
+
+    The storage key wins (kit sounds carry their kind in the key); the
+    authored purpose is the fallback for web/library sounds."""
+    return (_role_in(item.get("storage_key"))
+            or _role_in(item.get("purpose")))
+
+
+def sfx_owner(item):
+    """The motion graphic that owns this sound cue ('mg_<id>_sfxN'), or None.
+
+    A motion graphic's cue stack is part of ONE designed moment: it moves
+    and dies with its graphic, so it is judged as that graphic's sound, not
+    as N independent accents."""
+    sid = str(item.get("id") or "")
+    if sid.startswith("mg_") and "_sfx" in sid:
+        return sid.rsplit("_sfx", 1)[0]
+    return None
+
+
+def sfx_muddy_pair(a, b):
+    """True when two SFX land as one mistimed flam rather than a designed
+    layer. Only meaningful for sounds closer than SFX_MIN_SPACING_S."""
+    gap = abs(_num(b.get("at")) - _num(a.get("at")))
+    if gap >= SFX_MIN_SPACING_S:
+        return False
+    owner = sfx_owner(a)
+    if owner and owner == sfx_owner(b):
+        return False
+    if gap <= SFX_LAYER_WINDOW_S:
+        # Stacked on one instant: one thicker hit. Only the SAME file fired
+        # twice is an accident rather than a layer.
+        return bool(a.get("storage_key")) and \
+            a.get("storage_key") == b.get("storage_key")
+    ra, rb = sfx_role(a), sfx_role(b)
+    return not (ra and rb and ra != rb)
+
+
+def sfx_events(sfx):
+    """Sound EVENTS in program order: a motion graphic's owned cue stack, or
+    a layered stack (different roles / one instant), counts once."""
+    events = []
+    for item in sorted(sfx or [], key=lambda s: _num(s.get("at"))):
+        if events:
+            last = events[-1][-1]
+            owner = sfx_owner(item)
+            same_owner = owner and any(sfx_owner(x) == owner
+                                       for x in events[-1])
+            layered = (abs(_num(item.get("at")) - _num(last.get("at")))
+                       < SFX_MIN_SPACING_S and not sfx_muddy_pair(last, item))
+            if same_owner or layered:
+                events[-1].append(item)
+                continue
+        events.append([item])
+    return events
+
+
+def density_limits(fmt):
+    """The device-density limits for this format (see REEL_* above)."""
+    reel = fmt.get("reel")
+    if reel is None:
+        reel = bool((fmt.get("vertical") or fmt.get("square"))
+                    and 0 < _num(fmt.get("duration")) <= REEL_MAX_S)
+    if reel:
+        return {"profile": "reel", "zoom_per_s": REEL_ZOOM_PER_S,
+                "zoom_min_spacing_s": REEL_ZOOM_MIN_SPACING_S,
+                "zoom_min_start_s": REEL_ZOOM_MIN_START_S,
+                "sfx_per_s": REEL_SFX_PER_S,
+                "device_min_spacing_s": REEL_DEVICE_MIN_SPACING_S,
+                "max_simultaneous": REEL_MAX_SIMULTANEOUS_DEVICES}
+    return {"profile": "default", "zoom_per_s": ZOOM_PER_S,
+            "zoom_min_spacing_s": ZOOM_MIN_SPACING_S,
+            "zoom_min_start_s": ZOOM_MIN_START_S,
+            "sfx_per_s": SFX_PER_S,
+            "device_min_spacing_s": DEVICE_MIN_SPACING_S,
+            "max_simultaneous": MAX_SIMULTANEOUS_DEVICES}
+
+
+def _motion_moments(edl, out_dur):
+    """EDL.motion items that are MOMENTS (a title, card, counter, sticker),
+    not a whole-programme layer such as a browser caption track or texture."""
+    out = []
+    for item in edl.get("motion") or []:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("template") or "").startswith("caption"):
+            continue
+        start, end = _num(item.get("start")), _num(item.get("end"))
+        if out_dur > 0 and end - start >= 0.8 * out_dur:
+            continue
+        out.append(item)
+    return out
 
 
 def _separate_authored_text(a, b, duration, play_res):
@@ -215,6 +374,7 @@ def describe_format(edl, index, out_duration, src_w=None, src_h=None):
     else:
         kind = "sparse-speech piece (visual-led)"
     return {"vertical": vertical, "square": square, "short_form": short_form,
+            "reel": bool(short_form and 0 < out_duration <= REEL_MAX_S),
             "kind": kind, "n_words": n_words, "n_shots": len(shots),
             "has_music": has_music, "duration": out_duration}
 
@@ -239,6 +399,7 @@ def critique(edl, index, tl, src_w=None, src_h=None, user_asked=""):
     ask = (user_asked or "").lower()
     out_dur = float(getattr(tl, "out_duration", 0.0) or 0.0)
     fmt = describe_format(edl, index, out_dur, src_w, src_h)
+    limits = density_limits(fmt)
     fx = edl.get("effects") or {}
     found = []
 
@@ -270,17 +431,20 @@ def critique(edl, index, tl, src_w=None, src_h=None, user_asked=""):
                    key=lambda z: _num(z.get("start")))
     if zooms:
         first = _num(zooms[0].get("start"))
-        if first < ZOOM_MIN_START_S:
+        # On a reel a punched-in or pushing hook at 0s IS the pattern
+        # interrupt the references open on (limit 0); long-form keeps 1.2s.
+        if first < limits["zoom_min_start_s"]:
             add(f"the first zoom fires at {first:.1f}s, before the viewer has "
                 "read the shot — a push that early reads as a camera bump, "
                 "not emphasis. Move it past 1.5s or drop it.")
 
     # ── zoom rhythm ──────────────────────────────────────────────────────
-    if out_dur > 0 and len(zooms) > max(2, int(out_dur / ZOOM_PER_S)):
+    if out_dur > 0 and len(zooms) > max(2, int(out_dur / limits["zoom_per_s"])):
         add(f"{len(zooms)} zooms across {out_dur:.0f}s is roughly one every "
-            f"{out_dur / max(1, len(zooms)):.0f}s — when the frame is always "
-            "moving, none of the moves mean anything. Keep the 2-3 that land "
-            "on the real turns and remove the rest.")
+            f"{out_dur / max(1, len(zooms)):.1f}s — when the frame never "
+            "settles, no single move reads as emphasis. Keep the moves that "
+            "land on sentence turns, jump cuts and payoffs, and let the "
+            "frame hold between them.")
     # A push that lands ON a cut is not fighting the one before it: the cut
     # resets the eye, and cut-plus-punch is a deliberate, standard move.
     # Round 75: without this exemption, a scene-3 message zoom ending at
@@ -294,7 +458,7 @@ def critique(edl, index, tl, src_w=None, src_h=None, user_asked=""):
         cut_points = []
     tight = [(a, b) for a, b in zip(zooms, zooms[1:])
              if _num(b.get("start")) - _num(a.get("start"))
-             < ZOOM_MIN_SPACING_S
+             < limits["zoom_min_spacing_s"]
              and not any(_num(a.get("end")) - 0.15 <= c
                          <= _num(b.get("start")) + 0.15
                          for c in cut_points)]
@@ -378,17 +542,23 @@ def critique(edl, index, tl, src_w=None, src_h=None, user_asked=""):
     # Whether sound design serves the cut is an editorial judgment, not a
     # keyword permission check. Mechanical density and collision findings
     # below remain useful evidence regardless of how the request was phrased.
-    if out_dur > 0 and len(sfx) > max(3, int(out_dur / SFX_PER_S)):
-        add(f"{len(sfx)} sound effects in {out_dur:.0f}s — accents stop being "
-            "accents when they are constant. 3-6 placed on the real moments "
-            "beat one on every cut.")
-    stacked = [(a, b) for a, b in zip(sfx, sfx[1:])
-               if _num(b.get("at")) - _num(a.get("at")) < SFX_MIN_SPACING_S]
+    # Density counts sound EVENTS: a motion graphic's owned cue stack
+    # ('mg_<id>_sfxN') and a layered stack (whoosh pre-rolled into an
+    # impact, a sub under a hit) are one designed moment each.
+    sound_events = sfx_events(sfx)
+    if out_dur > 0 and len(sound_events) > max(
+            3, int(out_dur / limits["sfx_per_s"])):
+        add(f"{len(sound_events)} sound events in {out_dur:.0f}s — accents "
+            "stop being accents when they never stop. Tie each sound to an "
+            "authored visual event (a graphic landing, a punch, a cut, a "
+            "reveal) and drop the ones that are not.")
+    stacked = [(a, b) for a, b in zip(sfx, sfx[1:]) if sfx_muddy_pair(a, b)]
     if stacked:
         a, b = stacked[0]
         add(f"two sound effects {_num(b.get('at')) - _num(a.get('at')):.2f}s "
-            f"apart at {_num(a.get('at')):.1f}s — they land as one muddy hit. "
-            "Keep one.")
+            f"apart at {_num(a.get('at')):.1f}s play the same role — they land "
+            "as one flammed, muddy hit. Keep one, or layer DIFFERENT roles "
+            "(a whoosh whose peak lands on an impact) on the same beat.")
 
     music = edl.get("music") or []
     if music and fmt["n_words"] > 20:
@@ -443,7 +613,9 @@ def critique(edl, index, tl, src_w=None, src_h=None, user_asked=""):
     caps = edl.get("captions")
     caps_on = (isinstance(caps, dict)
                and caps.get("mode") == "from_transcript") \
-        or (isinstance(caps, list) and bool(caps))
+        or (isinstance(caps, list) and bool(caps)) \
+        or any(str(m.get("template") or "").startswith("caption")
+               for m in edl.get("motion") or [] if isinstance(m, dict))
     if fmt["short_form"] and fmt["n_words"] >= 25 and not caps_on \
             and "no caption" not in ask and "sin subtítulo" not in ask:
         add("a talking short-form video with no captions — most of the feed "
@@ -599,9 +771,16 @@ def critique(edl, index, tl, src_w=None, src_h=None, user_asked=""):
     # of them separately — 9 transitions, 3 zooms, 3 stylize windows, 5 sfx —
     # and landed as a device every 1.5 seconds. That is the video the user
     # described as "putting a sound and a transition every second".
+    # Owned motion-graphic cue stacks and layered stacks count once (see
+    # sfx_events) and a motion graphic counts as one device together with
+    # its own sounds: one designed moment, one device.
+    motion_moments = _motion_moments(edl, out_dur)
     if out_dur > 4:
-        devices = len(zooms) + len(sfx) + len([s for s in stylize
-                                               if s.get("start") is not None])
+        devices = (len(zooms)
+                   + len([e for e in sound_events
+                          if not all(sfx_owner(x) for x in e)])
+                   + len([s for s in stylize if s.get("start") is not None])
+                   + len(motion_moments))
         if trans:
             try:
                 devices += len(transition_junctions(
@@ -610,15 +789,16 @@ def critique(edl, index, tl, src_w=None, src_h=None, user_asked=""):
                     + len(edl.get("inserts") or [])))
             except Exception:
                 pass
-        if devices >= 6 and out_dur / devices < DEVICE_MIN_SPACING_S:
+        if devices >= 6 and \
+                out_dur / devices < limits["device_min_spacing_s"]:
             add(f"{devices} attention-grabbing devices across {out_dur:.0f}s "
-                f"(transitions, zooms, windowed stylize passes and sound "
-                f"effects together) — one every "
+                f"(transitions, zooms, windowed stylize passes, motion "
+                f"graphics and sound events together) — one every "
                 f"{out_dur / devices:.1f}s. Each kind may look reasonable on "
-                "its own; stacked they are a video that never sits still, and "
-                "nothing in it can register as emphasis because everything "
-                "is. Strip it back to the few beats that carry the piece — "
-                "restraint is the look.")
+                "its own; at this rate the picture never settles long enough "
+                "for a peak to read as one. Group devices into fewer, "
+                "stronger hits on the beats that carry the piece and let the "
+                "frame breathe between them.")
 
     # ── the PEAK, not the average ────────────────────────────────────────
     # The rate check above is blind to simultaneity by construction, and a
@@ -626,7 +806,9 @@ def critique(edl, index, tl, src_w=None, src_h=None, user_asked=""):
     # is exactly the input that invites one moment to carry all of them. See
     # MAX_SIMULTANEOUS_DEVICES. Windowed devices only — a global pass is a
     # look, not a moment — and no `ask` suppression: the user asked for the
-    # devices, never for them to land on the same half-second.
+    # devices, never for them to land on the same half-second. A reel allows
+    # one declared composite hit (punch + flash + shake under a camera move)
+    # up to REEL_MAX_SIMULTANEOUS_DEVICES.
     if out_dur > 4:
         pile = _densest_moment(
             [(_num(z.get("start")), _num(z.get("end")),
@@ -634,7 +816,7 @@ def critique(edl, index, tl, src_w=None, src_h=None, user_asked=""):
             + [(_num(s.get("start")), _num(s.get("end")),
                 f"{s.get('kind') or 'a'} stylize ({s.get('id')})")
                for s in stylize if s.get("start") is not None])
-        if pile and len(pile[2]) > MAX_SIMULTANEOUS_DEVICES:
+        if pile and len(pile[2]) > limits["max_simultaneous"]:
             lo, hi, labels = pile
             add(f"{len(labels)} full-frame devices are live at the same time "
                 f"({', '.join(sorted(labels))}) over {lo:.1f}-{hi:.1f}s — "
@@ -650,13 +832,15 @@ def critique(edl, index, tl, src_w=None, src_h=None, user_asked=""):
 
 
 def audit_line(findings, limit=4):
-    """One compact string for a tool result, or '' when the edit is clean."""
+    """One compact ADVISORY string for a tool result, or '' when clean."""
     if not findings:
         return ""
     head = findings[:limit]
     more = len(findings) - len(head)
-    line = " TASTE AUDIT (craft, not correctness — fix what the user did not "
-    line += "explicitly ask for): " + "; ".join(head)
+    line = (" TASTE NOTES (advisory: keep if intentional — craft "
+            "observations, not defects; they never block completion or "
+            "export): ") + "; ".join(head)
     if more:
         line += f"; (+{more} more)"
-    return line + " Re-render after fixing."
+    return line + (" Change one only if you agree it hurts THIS edit. "
+                   "Re-render only if you change something.")
