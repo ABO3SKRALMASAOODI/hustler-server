@@ -153,6 +153,12 @@ def advisory_findings(previous: Dict[str, Any], proposed: Dict[str, Any],
                 gap = float(b.get("at")) - float(a.get("at"))
             except (TypeError, ValueError):
                 continue
+            # A motion graphic's own layered cues (whoosh into pop) are one
+            # designed hit, not two accidental ones.
+            owner_a = str(a.get("id") or "").rsplit("_sfx", 1)[0]
+            owner_b = str(b.get("id") or "").rsplit("_sfx", 1)[0]
+            if owner_a.startswith("mg_") and owner_a == owner_b:
+                continue
             if gap < SFX_MIN_SPACING_S and (
                     str(a.get("id")) in new_ids or
                     str(b.get("id")) in new_ids):

@@ -2355,6 +2355,14 @@ def effective_caption_mutes(edl):
             continue
         if e > s:
             spans.append([s, e])
+    if edl.get("motion"):
+        # Motion graphics own their caption suppression the same way designed
+        # text does (explicit mute_captions, else the template's default).
+        try:
+            import motion_layer
+            spans.extend(motion_layer.caption_mute_spans(edl))
+        except Exception:
+            pass
     merged = []
     for s, e in sorted(spans):
         if merged and s <= merged[-1][1] + 0.001:

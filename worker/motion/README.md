@@ -1,0 +1,112 @@
+# Valmera motion templates
+
+Browser-rendered motion design for Valmera edits. A template is one file,
+`templates/<name>.html`, rendered frame-by-frame by headless Chromium
+(`worker/motion_engine.py`) into a transparent clip that the ffmpeg graph
+overlays on the program (`worker/motion_layer.py`). Editors place it with
+`add_motion_graphic(template=..., start, end, params)`; the EDL stores it in
+`edl.motion`.
+
+## File format
+
+```html
+<!--MG-SPEC {"title": "...", "category": "type|caption|data|callout|social|layout|transition|texture|cta",
+ "description": "one or two sentences: what it is and WHEN an editor should use it",
+ "duration": 2.5, "layer": "above_captions", "mutes_captions": false,
+ "params": { "text": {"type": "text", "required": true, "max": 90, "hint": "..."},
+             "accent": {"type": "color", "default": "#FFD84D"}, ... },
+ "sfx": [{"at": 0.0, "kind": "whoosh_soft"}]} -->
+<style> ... </style>
+<div class="mg-root"> ... </div>
+<script> ... uses MG ... </script>
+```
+
+The spec MUST be the first thing in the file and valid JSON. Param types:
+`str` (single line), `text` (multi-line), `int`, `float` (`min`/`max`),
+`bool`, `color` (#RRGGBB), `enum` (`values`), `list` (strings: `max_items`,
+`max`), `rows` (objects: `fields`, `max_items`, `max`), `asset` (a project
+image the renderer serves to the page; the param arrives as a URL or `null`).
+Every non-required param needs a `default`. Keep params few and meaningful;
+good defaults matter more than knobs.
+
+`sfx` lists sound cues relative to the item start. Kinds come from the
+built-in kit (`worker/sfx_kit.py`): whoosh_soft, whoosh_hard, swoosh_up,
+swish_short, pop_soft, pop_bright, click_ui, tick, ding, chime, riser_short,
+riser_long, impact_soft, impact_hard, sub_drop, glitch, shutter, typing,
+notification, cash, swipe. Editors can add/remove them; cue the moment where
+the motion *lands*, not where it starts drifting.
+
+## The design space
+
+The page is `MG.W` = 1080 CSS px wide and `MG.H` tall (1920 for 9:16, 1080 for
+1:1, 1350 for 4:5, 608 for 16:9). Lay out in CSS px of that space; the engine
+scales to the output resolution. Respect platform-safe areas on 9:16: keep
+important type between y ≈ 0.08·H and 0.80·H and x ≈ 60–1020 px.
+
+## Runtime (MG) — everything must be a pure function of time
+
+Never use `Date`, `performance.now`, `Math.random`, `setTimeout`,
+`requestAnimationFrame` or network URLs. Use:
+
+- `MG.params`, `MG.duration` (item seconds), `MG.fps`, `MG.W`, `MG.H`, `MG.t`
+- `MG.frame(t => {...})` — per-frame choreography. Declare moving windows
+  with `MG.active([[a, b], ...])` so static holds are re-used (big speed
+  win). Without a declaration every frame is captured.
+- CSS `@keyframes` / transitions are seeked automatically; `animation-delay`
+  works for staggers. Prefer JS (`MG.frame`) for anything param-dependent.
+- Easing: `MG.ease.outExpo|outCubic|outQuart|outQuint|outBack|inOutCubic|inCubic|smooth|snap|outElastic|...`
+- `MG.spring(t, start, {stiffness, damping, mass})` → 0..1 with overshoot.
+- `MG.tween(t, start, dur, a, b, ease)`, `MG.range(t, start, dur)`,
+  `MG.stagger(i, each)`, `MG.lerp`, `MG.clamp`.
+- `MG.set(el, {x, y, z, scale, sx, sy, rotate, rx, ry, skewX, perspective, opacity, blur, bright})`
+- `MG.anim(el, t, start, dur, fromState, toState, ease)`
+- `MG.split(el, 'words'|'chars')` → `[{el, text, chars}]`
+- `MG.fit(el, {width, height, min, max, nowrap})` — shrink-to-fit type.
+- `MG.count(t, start, dur, from, to, {prefix, suffix, decimals, ease})`
+- `MG.draw(svgPathEl, progress)` — stroke draw-on.
+- `MG.typed(text, t, start, cps)`, `MG.wiggle(t, amp, freq, seed)`,
+  `MG.noise(x)`, `MG.rand(seed)` (deterministic), `MG.esc(str)`.
+- Set `MG.box = [x0, y0, x1, y1]` (design px, include glow/shadow/motion
+  overshoot) once layout is known so capture is clipped to it.
+
+Fonts available by CSS family name: 'Inter Display' (700/800/900, 700
+italic), 'Inter' (400–900 when installed), 'Instrument Serif' (400, italic),
+'DM Serif Display' (400, italic), 'Playfair Display' (900, italic), 'Anton',
+'Bebas Neue', 'Archivo Black', 'Montserrat' (700), 'Poppins' (900),
+'Plus Jakarta Sans' (800), 'Syne' (800), plus 'JetBrains Mono', 'Caveat',
+'Space Grotesk', 'Manrope' when installed. Emoji render from the system
+color-emoji font.
+
+## The quality bar
+
+These templates are what makes a Valmera edit look like a top Instagram
+editor made it. Every template must look intentional and expensive at phone
+size on real footage:
+
+1. **Motion with physics**: entrances use springs/expo-outs with a short
+   blur-to-sharp or mask reveal; staggers of 30–80 ms per word/element;
+   nothing moves linearly unless it is a constant drift. Settle, then hold
+   perfectly still. Exits are faster than entrances (150–300 ms).
+2. **Typography**: tight tracking on bold display type (-0.02 to -0.04em),
+   generous size, one family + one accent (serif italic or color). Never
+   default browser look. Text must be fitted (`MG.fit`) so any copy works.
+3. **Depth and finish**: soft drop shadows for legibility on any footage,
+   optional glow, subtle gradients, crisp 1px borders on cards, real
+   rounded corners, backdrop-like dark plates when the text needs contrast.
+4. **Robustness**: any reasonable param value must render well — long and
+   short copy, 1–3 lines, all enums. Never overflow the frame. Never leave
+   a blank first frame unless the design calls for it.
+5. **Performance**: declare `MG.active` windows and `MG.box`. Avoid
+   animating huge blurred areas every frame when a static hold works.
+
+## Testing
+
+```
+PATH=<ffmpeg dir>:$PATH python3 worker/tools/motion_preview.py \
+  --template NAME --params '{"text":"..."}' --bg some.mp4 --bg-start 10 \
+  --out /tmp/review/NAME --sheet-times 0.05,0.15,0.3,0.6,1,1.5,2.4
+```
+
+Look at the contact sheet AND step through the dense early frames. Test
+extremes of every param. `worker/tests/test_motion_templates.py` renders
+every template with its defaults and fails on script errors or empty output.

@@ -36,6 +36,8 @@ import graphics
 import media
 import render_plan
 import screenframe
+import motion_captions
+import motion_layer
 import picture_cards
 import screening
 import sheets
@@ -1536,6 +1538,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                       stem_inputs=None,
                       src_sar=1.0, src_fps=None,
                       overlay_inputs=None, gfx_ass_path=None,
+                      motion_inputs=None,
                       frame_focus=None, robot_idx=None, wm_ass_path=None,
                       wm_anchor_y=None,
                       plate_idx=None, plate_box=None, behind_inputs=None,
@@ -2715,6 +2718,9 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     vlabel = picture_cards.append_graph(
         parts, vlabel, picture_card_inputs, W, H, fps,
         (edl.get("frame") or {}).get("picture"))
+    # Browser-rendered motion design under the dialogue captions...
+    vlabel = motion_layer.append_graph(parts, vlabel, motion_inputs,
+                                       "below_captions", fps)
     if ass_path:
         # fontsdir points libass at the premium fonts bundled with the
         # worker (worker/fonts) — system fontconfig still supplies DejaVu
@@ -2746,6 +2752,10 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         parts.append(f"[{vlabel}]subtitles=filename='{gfx_ass_path}'"
                      f":fontsdir='{caplib.FONTS_DIR}'[vgfx]")
         vlabel = "vgfx"
+    # ...and designed moments above every text layer (still under the
+    # frame-shift bars, floating plate, watermark and end card).
+    vlabel = motion_layer.append_graph(parts, vlabel, motion_inputs,
+                                       "above_captions", fps)
     # ---- mid-video aspect change (round 51) -----------------------------
     # The bars go on ABOVE the captions on purpose: when the frame narrows to
     # 9:16, anything outside the new window is outside the FRAME, and a caption
@@ -3271,6 +3281,11 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
 
     picture_card_inputs, next_idx = picture_cards.prepare_inputs(
         edl, workdir, W, H, fps, extra_inputs, next_idx)
+    motion_inputs = []
+    if not audio_only:
+        motion_inputs, next_idx = motion_layer.prepare_inputs(
+            edl, workdir, W, H, fps, tl.out_duration, extra_inputs, next_idx,
+            fetch_asset=lambda k: _fetch(k, "motion", next_idx))
     graph = build_filtergraph(edl, tl.out_duration, False, tl, ass_path,
                               music_inputs, {}, preview,
                               W=W, H=H, fps=fps, frame_mode=None,
@@ -3285,7 +3300,8 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
                               wm_anchor_y=wm_anchor_y,
                               plate_idx=plate_idx, plate_box=plate_box,
                               cap_burn_offset=cap_burn_offset,
-                              picture_card_inputs=picture_card_inputs)
+                              picture_card_inputs=picture_card_inputs,
+                              motion_inputs=motion_inputs)
 
     if audio_only:
         graph = _prune_graph_to_audio(graph)
@@ -3738,6 +3754,19 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         ass_path = caplib.build_ass(edl, index, tl,
                                     os.path.join(workdir, "captions.ass"),
                                     play_res=(W, H))
+    # Motion captions: the browser engine draws the transcript captions
+    # instead of libass (worker/motion_captions.py). Stitched pieces never
+    # reach here with a motion look — the stitchers refuse those programs.
+    caption_motion_items = []
+    if not audio_only and cap_ass_override is None and \
+            motion_captions.look_of(edl):
+        try:
+            caption_motion_items = motion_captions.items(edl, index, tl)
+            ass_path = None
+        except Exception as e:  # noqa: BLE001 — fall back to libass captions
+            print(f"[render] motion captions unavailable ({str(e)[:160]}) — "
+                  "burning ordinary captions", flush=True)
+            caption_motion_items = []
     # TWO text layers, not one. A behind-subject text is burned early (under the
     # subject); everything else is burned last (over everything). Splitting the
     # LIST rather than teaching graphics.py about depth keeps the ASS builder
@@ -3986,6 +4015,19 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
 
     picture_card_inputs, next_idx = picture_cards.prepare_inputs(
         edl, workdir, W, H, fps, extra_inputs, next_idx)
+    motion_inputs = []
+    if not audio_only:
+        motion_inputs, next_idx = motion_layer.prepare_inputs(
+            edl, workdir, W, H, fps, tl.out_duration, extra_inputs, next_idx,
+            fetch_asset=lambda k: _fetch(k, "motion", next_idx),
+            extra_items=caption_motion_items)
+        if caption_motion_items and not any(
+                str(it.get("id", "")).startswith("__captions_")
+                for _i, it, _c in motion_inputs):
+            # The caption track failed to render: never ship captionless.
+            ass_path = caplib.build_ass(edl, index, tl,
+                                        os.path.join(workdir, "captions.ass"),
+                                        play_res=(W, H))
     graph = build_filtergraph(edl, src_dur, info["has_audio"], tl, ass_path,
                               music_inputs, index, preview,
                               W=W, H=H, fps=fps, frame_mode=frame_mode,
@@ -4006,7 +4048,8 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                               behind_inputs=behind_inputs,
                               patch_inputs=patch_inputs,
                               cap_burn_offset=cap_burn_offset,
-                              picture_card_inputs=picture_card_inputs)
+                              picture_card_inputs=picture_card_inputs,
+                              motion_inputs=motion_inputs)
 
     if audio_only:
         # The same graph the full render would run, minus every chain the
@@ -4463,6 +4506,8 @@ def _timeline_stitch(job_id, prev_edl, new_edl, tl_prev, tl_new, index,
     dur_out = tl_new.out_duration
     if preview and outro_seconds(True) > 0:
         return None                    # previews with an end card: rare, out
+    if motion_captions.look_of(new_edl) or motion_captions.look_of(prev_edl):
+        return None                    # browser captions regroup per window
     if is_canvas_program(new_edl) != is_canvas_program(prev_edl):
         return None
     if music_tail_ext(new_edl, dur_out) or music_tail_ext(prev_edl, tl_prev.out_duration):
@@ -4613,6 +4658,12 @@ def _stitched_preview(job_id, new_row, prev_row, prev_asset, index,
                 (float(e) for _s, e in
                  (prev_row["json"].get("keep") or [])), default=0.0))
         ).model_dump()
+        if motion_captions.look_of(new_edl) or motion_captions.look_of(prev_edl):
+            # Browser-drawn captions are a single program-wide track; a piece
+            # would otherwise burn libass captions in their place.
+            print(f"[render {job_id}] stitch: full render (motion captions)",
+                  flush=True)
+            return None
         tl_new = Timeline(new_edl["keep"], new_edl.get("inserts") or [],
                           new_edl.get("speed") or [])
         tl_prev = Timeline(prev_edl["keep"], prev_edl.get("inserts") or [],

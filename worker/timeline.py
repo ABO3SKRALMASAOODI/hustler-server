@@ -1433,6 +1433,43 @@ def remap_program_items(edl, old_tl, new_tl):
                     f"{vec['end']}s to fit the shortened edit.")
             kept_vec.append(vec)
         edl["vectors"] = kept_vec
+    if edl.get("motion"):
+        # Motion graphics are usually cued to words ("10x" lands as he says
+        # it), so over kept footage they follow that content through upstream
+        # cuts, like behind-subject text. Over spliced media they ride the
+        # insert's shift; otherwise they clamp like vectors.
+        kept_mo = []
+        for mo in edl["motion"]:
+            mo = dict(mo)
+            s0, e0 = float(mo["start"]), float(mo["end"])
+            on_footage = (old_tl.out_to_src(s0) is not None
+                          and old_tl.out_to_src(e0) is not None)
+            if on_footage:
+                moved = remap_program_span(old_tl, new_tl, s0, e0)
+                if moved is None or moved[1] - moved[0] < 0.3:
+                    region_notes.append(
+                        f"note: motion graphic {mo.get('id')} "
+                        f"({mo.get('template')}) was removed — the moment it "
+                        "was cued to is no longer in the edit.")
+                    continue
+                if (moved[0], moved[1]) != (s0, e0):
+                    mo["start"], mo["end"] = moved
+                    region_notes.append(
+                        f"note: motion graphic {mo.get('id')} moved to "
+                        f"{moved[0]}-{moved[1]}s with its moment.")
+            else:
+                d = _insert_shift(s0, e0)
+                if d:
+                    mo["start"], mo["end"] = round(s0 + d, 2), round(e0 + d, 2)
+            if float(mo["end"]) > prog:
+                if float(mo["start"]) >= prog - 0.3:
+                    region_notes.append(
+                        f"note: motion graphic {mo.get('id')} was removed — "
+                        "its window falls outside the shortened edit.")
+                    continue
+                mo["end"] = round(prog, 2)
+            kept_mo.append(mo)
+        edl["motion"] = kept_mo
     if edl.get("caption_mutes"):
         # CONTENT-anchored: a mute exists to keep captions off a particular
         # moment (the effect / graphic it was paired with), so it must follow

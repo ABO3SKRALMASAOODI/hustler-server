@@ -1,0 +1,111 @@
+<!--MG-SPEC {"title": "Hook title", "category": "type",
+ "description": "Big opening/thesis title (1-3 lines). Words spring in with blur-to-sharp and a stagger; *starred* words switch to an accent treatment (serif italic, color, marker, or glow). Use for the first 1-3 seconds or a key claim.",
+ "duration": 2.6, "layer": "above_captions", "mutes_captions": false,
+ "params": {
+  "text": {"type": "text", "required": true, "max": 90, "hint": "1-3 short lines; separate lines with ' / ' or newline; wrap accent words in *stars*"},
+  "accent": {"type": "color", "default": "#FFD84D"},
+  "color": {"type": "color", "default": "#FFFFFF"},
+  "treatment": {"type": "enum", "values": ["serif", "color", "marker", "glow", "outline"], "default": "serif"},
+  "font": {"type": "enum", "values": ["Inter Display", "Anton", "Bebas Neue", "Archivo Black", "Poppins", "Syne", "Montserrat", "Plus Jakarta Sans"], "default": "Inter Display"},
+  "uppercase": {"type": "bool", "default": false},
+  "y": {"type": "float", "min": 0.08, "max": 0.92, "default": 0.42, "hint": "vertical centre as frame fraction"},
+  "size": {"type": "float", "min": 0.5, "max": 1.6, "default": 1.0},
+  "align": {"type": "enum", "values": ["center", "left"], "default": "center"},
+  "entrance": {"type": "enum", "values": ["spring", "slam", "rise", "blur", "mask"], "default": "spring"},
+  "exit": {"type": "enum", "values": ["blur", "drop", "none", "cut"], "default": "blur"},
+  "shadow": {"type": "float", "min": 0, "max": 1, "default": 0.55}
+ },
+ "example": {"text": "Computer fonts / have been *garbage*"},
+ "sfx": [{"at": 0.0, "kind": "whoosh_soft"}, {"at": 0.18, "kind": "pop_soft"}]} -->
+<style>
+  .wrap{position:absolute;left:70px;right:70px;display:flex;flex-direction:column;gap:6px}
+  .line{display:block;line-height:1.02;letter-spacing:-0.035em;font-weight:900;white-space:nowrap}
+  .mg-w{margin-right:.22em;will-change:transform,filter,opacity;transform-origin:50% 80%}
+  .mg-w:last-child{margin-right:0}
+  .acc-serif{font-family:'Instrument Serif',serif!important;font-style:italic;font-weight:400!important;letter-spacing:-0.01em;font-size:1.12em}
+  .acc-marker{position:relative;color:#111!important;padding:0 .12em;z-index:0}
+  .acc-marker::before{content:"";position:absolute;left:-.04em;right:-.04em;top:.12em;bottom:.04em;background:var(--accent);border-radius:.08em;z-index:-1;transform-origin:0 50%;transform:scaleX(var(--mk,1))}
+  .acc-outline{color:transparent!important;-webkit-text-stroke:3px var(--accent)}
+</style>
+<div class="mg-root"><div class="wrap" id="wrap"></div></div>
+<script>
+(() => {
+  const P = MG.params, wrap = MG.$('#wrap');
+  const root = document.documentElement;
+  root.style.setProperty('--accent', P.accent);
+  wrap.style.alignItems = P.align === 'left' ? 'flex-start' : 'center';
+  wrap.style.textAlign = P.align;
+  const raw = String(P.text || '').replace(/\s*\/\s*/g, '\n');
+  const lines = raw.split('\n').map(s => s.trim()).filter(Boolean).slice(0, 3);
+  const words = [];
+  lines.forEach(L => {
+    const el = MG.el('div', 'line', null, wrap);
+    el.style.fontFamily = `'${P.font}', 'Inter Display', sans-serif`;
+    el.style.color = P.color;
+    if (P.font === 'Anton' || P.font === 'Bebas Neue') el.style.letterSpacing = '0';
+    L.split(/\s+/).forEach(tok => {
+      const acc = /^\*.*\*[.,!?:;]*$/.test(tok);
+      const text = acc ? tok.replace(/^\*/, '').replace(/\*([.,!?:;]*)$/, '$1') : tok;
+      const w = MG.el('span', 'mg-w', P.uppercase ? text.toUpperCase() : text, el);
+      if (acc) {
+        if (P.treatment === 'serif') { w.classList.add('acc-serif'); w.style.color = P.accent; }
+        else if (P.treatment === 'color') w.style.color = P.accent;
+        else if (P.treatment === 'marker') w.classList.add('acc-marker');
+        else if (P.treatment === 'outline') w.classList.add('acc-outline');
+        else if (P.treatment === 'glow') { w.style.color = '#fff'; w.style.textShadow = `0 0 18px ${P.accent}, 0 0 42px ${P.accent}`; }
+      }
+      words.push({ el: w, acc, line: el });
+    });
+  });
+  // Size: fit the widest line to the column, then cap by line count.
+  const maxW = MG.W - 140, base = 150 * P.size;
+  const capH = lines.length === 1 ? 210 : lines.length === 2 ? 170 : 140;
+  MG.$$('.line').forEach(el => MG.fit(el, { width: maxW, min: 40, max: Math.min(capH, base) * P.size, nowrap: true }));
+  // Harmonise: all lines share the smallest fitted size (one type size reads premium).
+  const sizes = MG.$$('.line').map(el => parseFloat(el.style.fontSize));
+  const fs = Math.min(...sizes);
+  MG.$$('.line').forEach(el => { el.style.fontSize = fs + 'px'; });
+  const h = wrap.getBoundingClientRect().height;
+  wrap.style.top = (MG.H * P.y - h / 2) + 'px';
+  if (P.shadow > 0) wrap.style.filter = `drop-shadow(0 ${6 * P.shadow}px ${22 * P.shadow}px rgba(0,0,0,${0.55 * P.shadow}))`;
+  const r = wrap.getBoundingClientRect();
+  MG.box = [r.left - 60, r.top - 60, r.right + 60, r.bottom + 70];
+
+  const D = MG.duration, each = Math.min(0.075, 0.55 / Math.max(words.length, 1));
+  const exitDur = P.exit === 'none' || P.exit === 'cut' ? 0 : Math.min(0.32, D * 0.18);
+  const enterEnd = each * words.length + 0.7;
+  MG.active([[0, Math.min(D, enterEnd)], [Math.max(0, D - exitDur - 0.02), D]]);
+  MG.frame(t => {
+    words.forEach((w, i) => {
+      const t0 = i * each;
+      let s = {};
+      if (P.entrance === 'spring') {
+        const k = MG.spring(t, t0, { stiffness: 210, damping: 15 });
+        s = { y: (1 - k) * 70, scale: 0.72 + 0.28 * k, opacity: MG.range(t, t0, 0.12), blur: Math.max(0, 1 - MG.range(t, t0, 0.28)) * 16 };
+      } else if (P.entrance === 'slam') {
+        const k = MG.spring(t, t0, { stiffness: 420, damping: 22 });
+        s = { scale: 1 + (1 - k) * 1.6, opacity: MG.range(t, t0, 0.05), blur: (1 - MG.range(t, t0, 0.12)) * 10 };
+      } else if (P.entrance === 'rise') {
+        const p = MG.ease.outExpo(MG.range(t, t0, 0.6));
+        s = { y: (1 - p) * 90, opacity: MG.range(t, t0, 0.25) };
+      } else if (P.entrance === 'blur') {
+        const p = MG.ease.outCubic(MG.range(t, t0, 0.5));
+        s = { opacity: p, blur: (1 - p) * 26, scale: 1.08 - 0.08 * p };
+      } else { // mask: words rise from behind their own baseline
+        const p = MG.ease.outQuart(MG.range(t, t0, 0.55));
+        s = { y: (1 - p) * 1.1 * fs, opacity: p > 0 ? 1 : 0 };
+        w.line.style.clipPath = 'inset(-20% -5% 0 -5%)';
+      }
+      if (w.acc && P.treatment === 'marker') {
+        w.el.style.setProperty('--mk', MG.ease.outExpo(MG.range(t, t0 + 0.12, 0.45)).toFixed(4));
+      }
+      if (exitDur > 0 && t > D - exitDur) {
+        const q = MG.ease.inCubic(MG.range(t, D - exitDur, exitDur));
+        if (P.exit === 'blur') { s.opacity = (s.opacity ?? 1) * (1 - q); s.blur = (s.blur || 0) + q * 18; s.y = (s.y || 0) - q * 30; }
+        else if (P.exit === 'drop') { s.y = (s.y || 0) + q * 120; s.opacity = (s.opacity ?? 1) * (1 - q); }
+      }
+      MG.set(w.el, s);
+    });
+  });
+})();
+</script>

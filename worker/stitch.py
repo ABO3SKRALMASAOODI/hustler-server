@@ -42,7 +42,7 @@ import travel
 from schemas import MIN_SPAN_S, anim_value
 
 # Video-local layers a stitch may differ in. Everything else must be equal.
-_CHANGEABLE_TOP = ("texts", "vectors", "patches", "overlays")
+_CHANGEABLE_TOP = ("texts", "vectors", "patches", "overlays", "motion")
 _CHANGEABLE_FX = ("zooms", "regions", "custom", "picture_cards")
 
 _PAD_S = 0.5
@@ -90,6 +90,8 @@ def _item_windows(edl, tl, duration):
         out.append((float(t["start"]), float(t["end"]), "text"))
     for v in (edl.get("vectors") or []):
         out.append((float(v["start"]), float(v["end"]), "vector"))
+    for m in (edl.get("motion") or []):
+        out.append((float(m["start"]), float(m["end"]), "motion"))
     fx = edl.get("effects") or {}
     for card in fx.get("picture_cards") or []:
         out.append((float(card["start"]), float(card["end"]), "picture_card"))
@@ -121,6 +123,7 @@ def _canon_items(edl):
                          ("vectors", edl.get("vectors")),
                          ("patches", edl.get("patches")),
                          ("overlays", edl.get("overlays")),
+                         ("motion", edl.get("motion")),
                          ("zooms", fx.get("zooms")),
                          ("regions", fx.get("regions")),
                          ("picture_cards", fx.get("picture_cards")),
@@ -177,7 +180,9 @@ def plan(prev_edl, new_edl, tl_prev, tl_new, duration, out_duration):
                    "patches": edl.get("patches"),
                    "overlays": edl.get("overlays"), "zooms": fx.get("zooms"),
                    "regions": fx.get("regions"),
-                   "custom": fx.get("custom")}[l] or []
+                   "picture_cards": fx.get("picture_cards"),
+                   "motion": edl.get("motion"),
+                   "custom": fx.get("custom")}.get(l) or []
             for idx, it in enumerate(src):
                 if (it.get("id") or f"#{idx}") != i:
                     continue
@@ -645,6 +650,17 @@ def window_edl(edl, tl, w0, w1, keep_audio=False):
                           "phase_s": (card.get("phase_s") or 0) + a-card["start"],
                           "full_duration_s": card.get("full_duration_s") or card["end"]-card["start"]})
     fx["picture_cards"] = cards or None
+    # Motion graphics: clip to the window and carry the composition clock so
+    # the piece renders exactly the frames the full program would.
+    motion = []
+    for item in e.get("motion") or []:
+        a, b = max(float(item["start"]), w0), min(float(item["end"]), w1)
+        if b - a >= 0.05:
+            motion.append({**item, "start": round(a - w0, 6), "end": round(b - w0, 6),
+                           "phase_s": round((item.get("phase_s") or 0) + a - float(item["start"]), 6),
+                           "full_duration_s": item.get("full_duration_s")
+                           or round(float(item["end"]) - float(item["start"]), 6)})
+    e["motion"] = motion
     # Proof-budget clamping can cut the RIGHT edge of the last contained
     # overlay. Merely shifting its start leaves the original duration on a
     # shorter standalone EDL, which validate_edl rejects (the live failure was
@@ -1189,6 +1205,8 @@ def plan_timeline(prev_edl, new_edl, tl_prev, tl_new, out_duration,
         anchored.append((float(t["start"]), float(t["end"])))
     for v in (new_edl.get("vectors") or []):
         anchored.append((float(v["start"]), float(v["end"])))
+    for m in (new_edl.get("motion") or []):
+        anchored.append((float(m["start"]), float(m["end"])))
     for z in (fx.get("zooms") or []):
         anchored.append((float(z["start"]), float(z["end"])))
     for r in (fx.get("regions") or []):

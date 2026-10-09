@@ -222,6 +222,11 @@ class CaptionStyle(BaseModel):
     written before styling existed render unchanged."""
     color: str = "#FFFFFF"
     size: Literal["s", "m", "l", "xl"] = "m"
+    # Browser-rendered caption look (worker/motion_captions.py). When set,
+    # transcript captions are drawn by the motion engine instead of libass;
+    # color/highlight_color/font/size/uppercase/position/anchor_y still apply.
+    motion_look: Optional[Literal["pop", "box", "clean", "serif", "glow",
+                                  "stack", "mono"]] = None
     # Continuous fine-tune multiplier on top of the `size` bucket (0.5-3.0).
     # Magnitudes belong on a continuous scale, not a 4-value enum — this is the
     # knob for "a little bigger" / "way bigger" without jumping buckets. The
@@ -1647,6 +1652,38 @@ class VectorItem(BaseModel):
     motion_motif: Optional[MotionMotif] = None
 
 
+MOTION_LAYERS = ("above_captions", "below_captions")
+MOTION_HTML_MAX = 60000
+
+
+class MotionItem(BaseModel):
+    """A motion-graphics clip rendered by worker/motion_engine.py.
+
+    ``template`` names a library composition in worker/motion/templates (its
+    ``params`` are validated against that template's spec) or ``html`` for an
+    authored HTML/CSS/JS composition driven by the deterministic MG runtime.
+    Time is the FINAL program clock, like texts and vectors. ``box`` is an
+    optional drawing-region hint ([x0,y0,x1,y1] frame fractions) that only
+    bounds capture; the composition decides what it draws.
+
+    ``phase_s``/``full_duration_s`` are internal: a stitched preview piece
+    renders the part of an item that falls in its window, starting
+    ``phase_s`` seconds into the composition's own clock.
+    """
+    id: str = Field(min_length=1, max_length=80)
+    template: str = Field(min_length=1, max_length=60)
+    start: float = Field(ge=0, allow_inf_nan=False)
+    end: float = Field(gt=0, allow_inf_nan=False)
+    params: dict = Field(default_factory=dict)
+    html: Optional[str] = Field(default=None, max_length=MOTION_HTML_MAX)
+    layer: Literal["above_captions", "below_captions"] = "above_captions"
+    box: Optional[List[float]] = None
+    mute_captions: Optional[bool] = None
+    purpose: Optional[str] = Field(default=None, max_length=300)
+    phase_s: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
+    full_duration_s: Optional[float] = Field(default=None, gt=0, allow_inf_nan=False)
+
+
 class SubjectMatte(BaseModel):
     """Where the subject-mask clip is, and which footage it was measured from."""
     asset_key: str
@@ -1871,6 +1908,9 @@ class EDL(BaseModel):
     overlays: List[OverlayItem] = Field(default_factory=list)
     texts: List[TextItem] = Field(default_factory=list)
     vectors: List[VectorItem] = Field(default_factory=list)
+    # Browser-rendered motion design (worker/motion_engine.py): premium
+    # animated typography, callouts, counters, cards and authored HTML.
+    motion: List[MotionItem] = Field(default_factory=list)
     speed: List[SpeedSpan] = Field(default_factory=list)
     master: Optional[Master] = None
     # Round 97: music/voice rebalance of the original audio via separated
@@ -2746,6 +2786,33 @@ def validate_edl(data, duration=None, *, render_fragment=False):
                 "remove it or animate motion.opacity to a visible value.")
     edl.vectors.sort(key=lambda v: (v.start, v.id))
 
+    # Motion graphics: program-time windows; params are validated against the
+    # template spec (motion_templates), authored HTML is size-bounded.
+    if edl.motion:
+        import motion_templates as _mt
+        seen_mo = set()
+        for i, mo in enumerate(edl.motion):
+            label = f"motion[{i}]"
+            if mo.id in seen_mo:
+                raise EDLValidationError(f"{label}.id must be unique.")
+            seen_mo.add(mo.id)
+            mo.start, mo.end = _r(mo.start), _r(mo.end)
+            _check_span(label, mo.start, mo.end, prog_dur, min_len=0.2)
+            try:
+                mo.params = _mt.normalize_params(mo.template, mo.params, html=mo.html)
+            except ValueError as e:
+                raise EDLValidationError(f"{label}: {e}")
+            if mo.template != "html":
+                mo.html = None
+            if mo.box is not None:
+                if len(mo.box) != 4:
+                    raise EDLValidationError(f"{label}.box must be [x0, y0, x1, y1] fractions.")
+                x0, y0, x1, y1 = [round(min(max(float(v), 0.0), 1.0), 4) for v in mo.box]
+                if x1 - x0 < 0.01 or y1 - y0 < 0.01:
+                    raise EDLValidationError(f"{label}.box is empty.")
+                mo.box = [x0, y0, x1, y1]
+        edl.motion.sort(key=lambda m: (m.start, m.id))
+
     # Caption mutes: PROGRAM-time windows, same clock as texts/stylize. Sorted
     # and merged, so overlapping asks collapse instead of stacking duplicates
     # (the renderer only cares whether a caption falls inside ANY window).
@@ -3265,6 +3332,9 @@ def describe_edl(edl_dict, duration=None):
             bits.append(f"{vec.kind}{detail}@{vec.start:g}-{vec.end:g}s"
                         f"{moving}")
         parts.append(f"vectors x{len(edl.vectors)} ({', '.join(bits)})")
+    if edl.motion:
+        bits = [f"{mo.template}#{mo.id}@{mo.start:g}-{mo.end:g}s" for mo in edl.motion]
+        parts.append(f"motion x{len(edl.motion)} ({', '.join(bits)})")
     if edl.caption_mutes:
         bits = [f"{s:g}-{e:g}s" for s, e in edl.caption_mutes]
         parts.append(f"captions muted ({', '.join(bits)})")

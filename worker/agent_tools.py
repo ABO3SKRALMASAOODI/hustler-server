@@ -81,6 +81,7 @@ import tool_outcome as tool_outcome_mod
 import tool_retry
 import webrecord
 import typography_scenes
+import motion_tools
 import version as worker_version
 from captions import CAPTION_DESIGN_VERSION, KARAOKE_HARD_MAX
 from schemas import (CANVAS_DIMS, CaptionStyle, clean_fingerprint,
@@ -4420,7 +4421,7 @@ def _parse_partial_style(style):
     # Mirrors captions.STYLE_KEYS (+ dynamic/uppercase, which are booleans
     # handled separately there). A field missing HERE is rejected outright;
     # a field missing from STYLE_KEYS is accepted and then silently ignored.
-    unknown = sorted(set(style) - {"color", "size", "size_scale", "position",
+    unknown = sorted(set(style) - {"motion_look", "color", "size", "size_scale", "position",
                                    "dynamic", "highlight_color", "animation",
                                    "preset", "uppercase", "font", "effect",
                                    "layout", "leading", "emphasis",
@@ -5739,6 +5740,10 @@ def search_sfx(ctx, query, max_seconds=None):
         mx = float(max_seconds) if max_seconds is not None else None
     except (TypeError, ValueError):
         return "REJECTED: max_seconds must be a number."
+    kit_hits = motion_tools.kit_search(query)
+    kit_text = ("Valmera kit (instant, licence-free — add_sfx(storage_key=<id>, at=...)):\n- "
+                + "\n- ".join(f"{h['id']} ({h['duration_s']:g}s) — {h['use']}" for h in kit_hits)
+                + "\n") if kit_hits else ""
     memory = getattr(ctx, "tool_failure_memory", {})
     unavailable_until = memory.get("sfx_auth_retry_at", 0)
     try:
@@ -5746,31 +5751,33 @@ def search_sfx(ctx, query, max_seconds=None):
             hits = sfx_search._outage_hits(query, min(mx or sfx_search.DEFAULT_MAX_S,
                                                     sfx_search.HARD_MAX_S), 12)
             if not hits:
-                return ("UNAVAILABLE: sound search authentication is failing. "
+                return ("UNAVAILABLE: online sound search authentication is failing. "
                         "Changing the query will not fix it. Use uploaded audio "
-                        "or continue the edit; do not claim sound was added.")
+                        "or continue the edit; do not claim sound was added.\n" + kit_text)
         else:
             hits = sfx_search.search(query, max_s=mx)
     except sfx_search.SfxSearchError as e:
         if re.search(r"\b(?:401|403)\b", str(e)):
             memory["sfx_auth_retry_at"] = time.time() + 900
             ctx.tool_failure_memory = dict(list(memory.items())[-64:])
-            return ("UNAVAILABLE: sound search authentication failed (401/403). "
+            return ("UNAVAILABLE: online sound search authentication failed (401/403). "
                     "Changing the query cannot fix authentication. Use an uploaded "
                     "sound or the verified outage catalog for common effects; "
-                    "continue other work and disclose any missing required sound.")
-        return (f"Sound search failed ({str(e)[:180]}). Try a simpler "
-                "query ('whoosh', 'camera shutter', 'pop').")
+                    "continue other work and disclose any missing required sound.\n" + kit_text)
+        return (kit_text + f"Online sound search failed ({str(e)[:180]}). Try a simpler "
+                "query ('whoosh', 'camera shutter', 'pop') or use the kit.")
     except Exception as e:
-        return (f"Sound search failed ({str(e)[:180]}). Try again or use "
-                "an uploaded file.")
+        return (kit_text + f"Online sound search failed ({str(e)[:180]}). Try again, use "
+                "the kit, or an uploaded file.")
     if not hits:
+        if kit_text:
+            return kit_text
         return (f"No sounds matched '{query}'. Use the PHYSICAL name of "
                 "the sound ('whoosh', 'camera shutter', 'keyboard click', "
-                "'pop', 'riser') rather than a mood word.")
+                "'pop', 'riser') rather than a mood word, or list_sfx_kit.")
     ctx._sfx_hits = {h["id"]: h for h in hits}
     _remember_search_hits(ctx, "sfx", hits)
-    return ("Sounds found (each line carries its license terms — relay "
+    return (kit_text + "Sounds found (each line carries its license terms — relay "
             "them):\n- "
             + "\n- ".join(sfx_search.describe(h) for h in hits)
             + "\nFor deliberate sound design, audition_sfx_candidates(ids, "
@@ -6414,6 +6421,9 @@ def _resolve_sfx(ctx, storage_key):
     the sound off this clip" is a thing users ask for and the picture is
     simply never used.
     """
+    kit, kit_err = motion_tools.resolve_kit_reference(ctx, storage_key)
+    if kit or kit_err:
+        return kit, kit_err
     asset = ctx.db.run(dbx.asset_by_key, ctx.project_id, storage_key)
     if asset and asset["kind"] == "audio":
         return None, (
@@ -21844,6 +21854,16 @@ CAPTION_ANIMS = ["none", "fade", "pop", "slide_up", "punch", "blur_in",
                  "whip", "flash", "rise", "drop", "elastic", "bounce",
                  "swing", "zoom_blur"]
 _STYLE_PROPS = {
+    "motion_look": {"type": "string",
+                    "enum": ["pop", "box", "clean", "serif", "glow", "stack", "mono"],
+                    "description": "Premium browser-rendered caption look (spring/blur word "
+                                   "animation, glow, real highlight boxes): pop = bold 1-3 word "
+                                   "punches with accent spoken word; box = phrase pill with gliding "
+                                   "highlight; clean = quiet premium sentence case; serif = accent "
+                                   "serif-italic emphasis words; glow = karaoke light-up; stack = "
+                                   "hero word slam under small connectors; mono = typewriter. "
+                                   "Overrides preset rendering; color/highlight_color/font/size/"
+                                   "uppercase/position still apply. Set null to return to presets."},
     "preset": {"type": "string", "enum": CAPTION_PRESETS},
     "color": {"type": "string"},
     "size": {"type": "string", "enum": ["s", "m", "l", "xl"]},
@@ -24622,6 +24642,9 @@ TOOLS = {
                                 "items": {"type": "integer"}}}),
 }
 
+# Browser-rendered motion design + built-in sound kit (worker/motion_tools.py).
+TOOLS.update(motion_tools.TOOL_SPECS)
+
 # Retired from the live agent/MCP catalog. Functions stay imported so leftover
 # tests and any in-flight payload that still names them can resolve; the model
 # never sees these names in schemas.
@@ -24695,6 +24718,8 @@ TOOL_DOMAINS = {
         "get_words",
     },
     "graphics": {
+        "list_motion_templates", "add_motion_graphic", "set_motion_graphic",
+        "remove_motion_graphic",
         "set_typography_scene", "remove_typography_scene",
         "set_editorial_graphic", "remove_editorial_graphic",
         "add_kinetic_text", "add_text", "remove_text", "set_text_motion",
@@ -24713,6 +24738,7 @@ TOOL_DOMAINS = {
         "separate_music", "remove_stem_mix", "set_master_loudness",
     },
     "sfx": {
+        "list_sfx_kit",
         "search_sfx", "audition_sfx_candidates", "fetch_sfx",
         "add_web_sfx", "add_sfx", "move_sfx", "remove_sfx",
     },
@@ -24733,6 +24759,8 @@ TOOL_DOMAINS = {
         "add_stock_media",
     },
     "motion": {
+        "list_motion_templates", "add_motion_graphic", "set_motion_graphic",
+        "remove_motion_graphic",
         "set_picture_card", "remove_picture_card",
         "set_frame", "auto_reframe", "add_zoom", "remove_zoom", "add_zoom_path",
         "remove_zoom_path", "set_text_motion", "set_overlay_motion",
@@ -24811,6 +24839,9 @@ def planning_tool_names():
     return compact_tool_names(_Fresh())
 
 REQUIRED_ARGS = {
+    "add_motion_graphic": ["template", "start"],
+    "set_motion_graphic": ["id"],
+    "remove_motion_graphic": ["id"],
     "set_typography_scene": ["id", "start", "end", "lines"],
     "remove_typography_scene": ["id"],
     "set_picture_card": ["id", "start", "end"],
@@ -24930,6 +24961,7 @@ REQUIRED_ARGS = {
 # fetch_url is here for the capabilities digest; its success is tracked
 # separately via ctx.urls_fetched (it creates an asset the agent then places).
 WRITE_TOOLS = {"apply_edit_batch", "keep_segments", "cut_range", "cut_output_range",
+               "add_motion_graphic", "set_motion_graphic", "remove_motion_graphic",
                "set_typography_scene", "remove_typography_scene",
                "set_picture_card", "remove_picture_card",
                "set_editorial_graphic", "remove_editorial_graphic",
@@ -25003,6 +25035,9 @@ def _tool_disabled(name, model=None):
     if name in ("search_sfx", "audition_sfx_candidates", "fetch_sfx",
                 "add_web_sfx"):
         return not sfx_search.available()
+    if name in ("list_motion_templates", "add_motion_graphic",
+                "set_motion_graphic"):
+        return not motion_tools.motion_engine.available()
     return False
 
 
