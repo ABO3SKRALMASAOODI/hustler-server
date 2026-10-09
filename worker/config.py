@@ -1685,10 +1685,14 @@ SCREENING_PAGE_TILES = int(os.getenv("SCREENING_PAGE_TILES", "16"))
 SCREENING_FRAME_PARALLELISM = int(os.getenv(
     "SCREENING_FRAME_PARALLELISM", "4"))
 
-# Final exports: veryfast/CRF20 is effectively transparent for talking-head /
-# screen content and several times faster than the old medium/CRF18.
+# Final exports: veryfast keeps the encode a small share of the render (the
+# filter graph dominates). CRF 18, not 20: finals shipped at 0.6-1.6 Mbps,
+# and every platform re-encodes the upload, so the first generation has to
+# carry the detail the second one will spend. On a 30 s 1080x1920 test the
+# x264 sweep measured veryfast CRF20 848 kbps / VMAF 91.7 vs CRF17 1338 kbps
+# / VMAF 92.7 at no extra encode time (veryfast is not rate-bound here).
 FINAL_PRESET = os.getenv("FINAL_PRESET", "veryfast")
-FINAL_CRF = int(os.getenv("FINAL_CRF", "20"))
+FINAL_CRF = int(os.getenv("FINAL_CRF", "18"))
 
 SILENCE_NOISE_DB = "-35dB"
 SILENCE_MIN_S = 0.6

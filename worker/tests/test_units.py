@@ -1266,8 +1266,12 @@ g_fx = build_filtergraph(fx_edl, 60.0, True, fx_tl, None, [], index,
 # not the literal eq chain — same values per 8-bit input, several times
 # cheaper. The graph carries a [vgrade] link either way; on a machine with no
 # ffmpeg the bake falls back to the legacy eq string, so accept both forms.
+# Perf round: a normalized program grades inside each block (on the fewest
+# pixels) instead of after concat, so the table sits in the [segv0] chain.
 check("grade filter lands in the graph as a table (or legacy fallback)",
-      "[vgrade]" in g_fx and
+      ("[vgrade]" in g_fx or
+       any(seg.startswith("[segv0]") and ("lutyuv=" in seg or "eq=" in seg)
+           for seg in g_fx.split(";"))) and
       ("lutyuv=" in g_fx or "eq=saturation=1.35:contrast=1.08" in g_fx))
 check("zoom becomes a zoompan window in program time",
       "zoompan=z='1+0.30*between(on/30.000,2.000,4.000)'" in g_fx)
@@ -5280,15 +5284,24 @@ _gf = _rnd.build_filtergraph(
     {"sentences": [], "words": [], "silences": []}, preview=True,
     W=1080, H=1920, frame_mode="crop", src_w=1920, src_h=1080,
     frame_focus=(0.31, None))
-check("focused crop emits the clip()-bounded x expression",
-      "crop=1080:1920:x='clip(iw*0.3100-ow/2,0,iw-ow)'" in _gf)
+# Perf round: with the probed source size the cover crop cuts its window out
+# of the SOURCE first (renderer._cover_geometry reproduces the legacy
+# scale-then-crop framing); the focus point positions that window.
+_fx_geo = _rnd._cover_geometry(1920, 1080, 1080, 1920, (0.31, None))
+check("focused crop aims the source window at the focus point",
+      f"crop='min(iw,{_fx_geo[2]})':'min(ih,{_fx_geo[3]})'"
+      f":'min({_fx_geo[0]},iw-ow)'" in _gf
+      and _fx_geo[0] + _fx_geo[2] / 2 < 1920 * 0.45)
 _gf_center = _rnd.build_filtergraph(
     _edl_focus, 60.0, True, Timeline(_edl_focus["keep"]), None, [],
     {"sentences": [], "words": [], "silences": []}, preview=True,
     W=1080, H=1920, frame_mode="crop", src_w=1920, src_h=1080,
     frame_focus=None)
-check("no focus keeps the exact legacy crop string",
-      "crop=1080:1920,fps=" in _gf_center and "clip(iw*" not in _gf_center)
+_c_geo = _rnd._cover_geometry(1920, 1080, 1080, 1920, None)
+check("no focus keeps a centered source window",
+      f":'min({_c_geo[0]},iw-ow)'" in _gf_center
+      and abs(_c_geo[0] + _c_geo[2] / 2 - 960) <= 4
+      and "clip(iw*" not in _gf_center)
 
 _edl_cov = default_edl(60.0)
 _edl_cov["keep"] = [[0.0, 30.0]]
