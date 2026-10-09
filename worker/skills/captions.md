@@ -188,7 +188,9 @@ ones are the erase case.
 - Accent colour on every other word, or on random nouns.
 - Corrupt glyphs, missing words, orphan connectors, phrases too fast to read.
 - Face, UI-band or graphic collisions; two caption systems on screen;
-  burned-caption stacking.
+  burned-caption stacking. (Motion captions step around a motion graphic
+  and the face while it is on screen; a `NOTE (caption placement)` on the
+  graphic's write means no band was left — mute or shrink.)
 - Swapping a rejected colour for another colour.
 
 ## Verification procedure

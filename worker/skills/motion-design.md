@@ -148,7 +148,35 @@ LEGIBILITY:
 - Size first: hero words 7–20% of frame height, connector words 2.5–4%.
 - Place type in measured clear space beside or above the face, never across
   eyes or mouth. On 9:16 keep important type inside x 60–1020 px and y 8–80%
-  of the height; the bottom ~15% belongs to the platform UI.
+  of the height; the bottom ~15% belongs to the platform UI, and the right
+  ~12% between y 0.5 and 0.85 to its button rail.
+- FACE KEEP-OUT (automatic): every add/set_motion_graphic compares the
+  graphic's drawn ink with the speaker's face and mouth over its whole window
+  — through the crop, focus track, zooms (a push-in grows the face) and
+  picture cards — and with the 9:16 safe area (6% side margins, the right
+  12% clear between y 0.5 and 0.85, nothing below y 0.80). A collision is
+  moved to the nearest clear zone with the template's own knobs — `y`; `x`,
+  `align` or `side` where it has them; a small size/width step when it is
+  too wide — and the result says what moved (`KEEP-OUT: ... moved below the
+  chin (y 0.5 → 0.64)`). Read it and keep designing from the new place;
+  never type the old y back. When nothing fits, the result says so (`NOTE
+  (keep-out)`): make it smaller, move it to a moment where the face is
+  elsewhere, or put big type behind the speaker (`layer='behind_subject'`).
+  `allow_face_overlap=true` keeps a deliberate design over the face; use it
+  rarely — the references never cover a face. On a lane that cannot render
+  the graphic the check uses the template's estimated size (`KEEP-OUT
+  (estimated)`), moves it a full clearance off the face, and keeps only the
+  word slam and phrase build templates (their width is their own knob) out
+  of the margins and the button rail: confirm every placement in the
+  preview, and check the safe area of other wide type there yourself.
+- Rotate zones between beats — the band above the head, the chest band
+  under the chin, beside the face, the header above a card — instead of
+  stacking every graphic in the chest band.
+- While a graphic is on screen, the motion captions step out of its way
+  into the nearest band clear of it AND the face (`CAPTIONS: ... step to y
+  ...` in the result). When no band is left (`NOTE (caption placement)`),
+  mute the captions for it when it carries the spoken words, or make it
+  smaller.
 - Contrast from a soft shadow (0 2–6 px 12–30 px at 35–60% black), a
   frosted or dark plate, or the grade — not thick outlines or yellow boxes
   by default. Check bright and dark plates in the render.
@@ -255,7 +283,10 @@ the engine scales it to the output. Runtime summary:
   Display, DM Serif Display, Bodoni Moda, Pinyon Script, Great Vibes,
   Yellowtail, Caveat, JetBrains Mono; emoji from the system colour font.
 - A write is rejected if the page throws or draws nothing; the result
-  reports the drawn bounds — compare them with the safe area.
+  reports the drawn bounds of its ink (type, strokes and plates, not soft
+  scrims) — compare them with the safe area. Authored HTML has no `y` the
+  keep-out can move: place it clear of the face yourself (a collision comes
+  back as a NOTE).
 
 ## Common failure modes
 

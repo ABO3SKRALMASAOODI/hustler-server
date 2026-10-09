@@ -1770,6 +1770,13 @@ class MotionItem(BaseModel):
     measured mask (written by add_motion_graphic, never by hand); its SOURCE
     span makes the item content-anchored. A behind item whose mask cannot be
     used at render time degrades to an ordinary above-captions graphic.
+
+    ``footprint`` is what the write-time keep-out measured (worker/
+    keepout.py, written by add/set_motion_graphic, never by hand): the
+    settled ink box on the canvas (the template's estimated box on a lane
+    without a browser) and the speaker's face zones over the window, so the motion caption track can step around the graphic without
+    landing on the mouth. ``allow_face_overlap`` records a deliberate design
+    over the face: the keep-out then leaves the placement alone.
     """
     id: str = Field(min_length=1, max_length=80)
     template: str = Field(min_length=1, max_length=60)
@@ -1785,6 +1792,18 @@ class MotionItem(BaseModel):
     phase_s: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
     full_duration_s: Optional[float] = Field(default=None, gt=0, allow_inf_nan=False)
     behind: Optional["SubjectMatte"] = None
+    allow_face_overlap: Optional[bool] = None
+    footprint: Optional["MotionFootprint"] = None
+
+
+class MotionFootprint(BaseModel):
+    """A motion item's measured place on the canvas (frame fractions):
+    ``box`` its settled ink, ``faces`` the face keep-out zones over its
+    window, ``ar`` the canvas width/height they were measured on (a later
+    aspect change makes them stale, and they are then ignored)."""
+    box: List[float]
+    ar: float = Field(gt=0, allow_inf_nan=False)
+    faces: List[List[float]] = Field(default_factory=list, max_length=8)
 
 
 class SubjectMatte(BaseModel):
@@ -3058,6 +3077,16 @@ def validate_edl(data, duration=None, *, render_fragment=False):
                 if x1 - x0 < 0.01 or y1 - y0 < 0.01:
                     raise EDLValidationError(f"{label}.box is empty.")
                 mo.box = [x0, y0, x1, y1]
+            if mo.footprint is not None:
+                fp = mo.footprint
+                rects = [fp.box] + list(fp.faces or [])
+                if any(len(r) != 4 for r in rects):
+                    raise EDLValidationError(
+                        f"{label}.footprint boxes must be [x0, y0, x1, y1] fractions.")
+                fp.box = [round(min(max(float(v), 0.0), 1.0), 4) for v in fp.box]
+                fp.faces = [[round(min(max(float(v), -0.5), 1.5), 4) for v in r]
+                            for r in fp.faces or []]
+                fp.ar = round(float(fp.ar), 4)
             if mo.layer != "behind_subject":
                 # A mask only means something on the behind layer; a stale
                 # one left by a layer change is dropped, not rejected.
