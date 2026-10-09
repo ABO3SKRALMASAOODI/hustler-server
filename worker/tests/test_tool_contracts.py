@@ -157,9 +157,12 @@ def test_keyframe_schema_carries_the_validator_keyframe_limit():
 @pytest.mark.parametrize("dims", [(1080, 1920), (1920, 1080), (1080, 1080)])
 def test_auto_fit_shrinks_oversized_rows_and_reports_applied_size(dims):
     W, H = dims
+    # Decisively too wide (about 25% over the box): "or your time" was only
+    # 4 px over, so Pillow's kerning engine (raqm on Linux, absent on macOS)
+    # decided the verdict.
     args = _scene(font_size=.18, W=W, H=H,
                   lines=[{"runs": [{"text": "Your money"}]},
-                         {"runs": [{"text": "or your time", "at": 1}]}])
+                         {"runs": [{"text": "or all your time", "at": 1}]}])
     with pytest.raises(scenes.LayoutRejected, match="exceed"):
         scenes.compose(**args)
     result = scenes.compose(**args, fit="auto")

@@ -48,6 +48,17 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends ffmpeg fontconfig fonts-dejavu-core fonts-noto-core fonts-noto-cjk
+          # Test against the ffmpeg the executor images ship
+          # (worker/Dockerfile.cloudflare FFMPEG_STATIC), not Ubuntu's older
+          # package: colour-matrix handling and filter options differ between
+          # 6.x and 8.x, so a 6.x run tests a renderer production never runs.
+          curl -fsSL --retry 3 -o /tmp/ff.tar.xz \
+            https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-linux64-gpl-8.1.tar.xz
+          tar -xJf /tmp/ff.tar.xz -C /tmp
+          sudo install -m755 /tmp/ffmpeg-*/bin/ffmpeg /usr/local/bin/ffmpeg
+          sudo install -m755 /tmp/ffmpeg-*/bin/ffprobe /usr/local/bin/ffprobe
+          rm -rf /tmp/ff.tar.xz /tmp/ffmpeg-*
+          ffmpeg -version | head -1
       - name: Install pinned dependencies
         run: python -m pip install -r '${{ matrix.service }}/requirements.txt' pytest
       - name: Install headless Chromium for motion-engine tests
