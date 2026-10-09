@@ -17,14 +17,14 @@
   .card,.plate{position:absolute;left:0;top:0;transform-origin:50% 50%;border-radius:40px;will-change:transform,opacity}
   /* the card's background + shadow are a separate static layer, so growing bars
      only repaint the (transparent) content layer */
-  .plate.glass{background:linear-gradient(165deg,rgba(40,40,48,.8) 0%,rgba(12,12,16,.86) 100%);
+  .plate.glass{background:linear-gradient(165deg,rgba(44,44,54,.93) 0%,rgba(14,14,19,.96) 100%);
     border:1px solid rgba(255,255,255,.14);box-shadow:inset 0 1px 0 rgba(255,255,255,.12),0 26px 64px rgba(0,0,0,.5)}
   .plate.dark{background:linear-gradient(170deg,#17171c 0%,#0b0b0e 100%);border:1px solid rgba(255,255,255,.1);
     box-shadow:inset 0 1px 0 rgba(255,255,255,.07),0 26px 64px rgba(0,0,0,.5)}
   .plate.light{background:linear-gradient(175deg,#ffffff 0%,#f4f3f1 100%);border:1px solid rgba(0,0,0,.06);
     box-shadow:0 24px 60px rgba(0,0,0,.3),0 4px 14px rgba(0,0,0,.08)}
   .inner{position:relative}
-  .title{font-family:'Inter Display',sans-serif;font-weight:800;letter-spacing:-0.035em;line-height:1.02;color:var(--fg);white-space:nowrap}
+  .title{font-family:'Inter Display',sans-serif;font-weight:800;letter-spacing:-0.035em;line-height:1.02;color:var(--fg);text-wrap:balance}
   .acc{font-family:'Instrument Serif',serif;font-style:italic;font-weight:400;letter-spacing:-0.01em;color:var(--accent-ink);font-size:1.14em;line-height:.8}
   .tmask{overflow:hidden;padding:.06em 0 .12em}
   .lab{font-family:'Inter','Inter Display',sans-serif;font-weight:600;letter-spacing:-0.01em;color:var(--fg2);white-space:nowrap;line-height:1.1}
@@ -32,6 +32,7 @@
   .val{font-family:'Inter Display',sans-serif;font-weight:800;letter-spacing:-0.03em;color:var(--fg2);white-space:nowrap;
        font-variant-numeric:tabular-nums;line-height:1;position:absolute}
   .val.hi{color:var(--accent-ink)}
+  .val .u{font-size:.6em;font-weight:700;letter-spacing:-0.01em;opacity:.86}
   .track{position:absolute;border-radius:999px;background:var(--track)}
   .bar{position:absolute;border-radius:999px;background:var(--bar)}
   .bar.hi{background:linear-gradient(90deg,var(--accent-deep),var(--accent))}
@@ -39,8 +40,10 @@
   .bar .sheen{position:absolute;inset:0;border-radius:inherit;background:linear-gradient(180deg,rgba(255,255,255,.28),rgba(255,255,255,0) 55%)}
   .v .bar .sheen{background:linear-gradient(90deg,rgba(255,255,255,.22),rgba(255,255,255,0) 60%)}
   .glowbar{position:absolute;border-radius:999px;background:var(--accent);filter:blur(18px);opacity:0;will-change:opacity}
-  .none .title,.none .lab,.none .val{text-shadow:0 2px 16px rgba(0,0,0,.55)}
-  .none .bar{box-shadow:0 4px 18px rgba(0,0,0,.35)}
+  /* straight on footage: full-strength type with a two-layer shadow, bars keyed off the plate */
+  .none .lab,.none .val:not(.hi){color:var(--fg)}
+  .none .title,.none .lab,.none .val{text-shadow:0 2px 4px rgba(0,0,0,.4),0 6px 28px rgba(0,0,0,.55)}
+  .none .bar{box-shadow:0 0 0 1.5px rgba(0,0,0,.18),0 6px 22px rgba(0,0,0,.45)}
 </style>
 <div class="mg-root"><div class="plate" id="plate"></div><div class="card" id="card"><div class="inner" id="inner"></div></div></div>
 <script>
@@ -61,11 +64,11 @@
   css.setProperty('--fg', light ? '#0D0D12' : '#F7F5F2');
   css.setProperty('--fg2', light ? 'rgba(13,13,18,.62)' : 'rgba(247,245,242,.74)');
   const bare = P.plate === 'none';
-  css.setProperty('--track', light ? 'rgba(13,13,18,.06)' : bare ? 'rgba(255,255,255,.1)' : 'rgba(255,255,255,.07)');
-  css.setProperty('--bar', light ? 'rgba(13,13,18,.22)' : bare ? 'rgba(247,245,242,.62)' : 'rgba(247,245,242,.34)');
+  css.setProperty('--track', light ? 'rgba(13,13,18,.06)' : bare ? 'rgba(8,8,12,.3)' : 'rgba(255,255,255,.07)');
+  css.setProperty('--bar', light ? 'rgba(13,13,18,.22)' : bare ? 'rgba(247,245,242,.86)' : 'rgba(247,245,242,.34)');
 
   const parse = s => {
-    s = String(s ?? '').trim().replace(/−/g, '-');
+    s = String(s ?? '').trim().replace(/[−–]/g, '-');
     const m = s.match(/^(.*?)(-?\d(?:[\d,.   ]*\d)?)(.*)$/);
     if (!m) return null;
     const [, pre, body, suf] = m;
@@ -81,14 +84,21 @@
     const v = parseFloat(clean);
     if (!isFinite(v)) return null;
     const di = clean.indexOf('.');
-    return { pre, suf, v, decimals: di < 0 ? 0 : clean.length - di - 1, grp, dec };
+    return { pre, suf, body, v, decimals: di < 0 ? 0 : clean.length - di - 1, grp, dec };
   };
+  // value markup: a word unit ('41 days', '6 hours') is set smaller than the
+  // number; negatives get a typographic minus (U+2212)
+  const wordUnit = n => /^\s*[A-Za-z]{2,}/.test(n.suf);
+  const valHTML = (n, digits) => MG.esc(n.pre) + MG.esc(digits) +
+    (n.suf ? (wordUnit(n) ? `<span class="u">${MG.esc(n.suf)}</span>` : MG.esc(n.suf)) : '');
   const fmt = (n, v) => {
     const s = Math.abs(v).toFixed(n.decimals);
     let [i, f] = s.split('.');
     if (n.grp) i = i.replace(/\B(?=(\d{3})+(?!\d))/g, n.grp);
-    return n.pre + (v < 0 && Number(s) !== 0 ? '-' : '') + i + (f ? n.dec + f : '') + n.suf;
+    return valHTML(n, (v < 0 && Number(s) !== 0 ? '\u2212' : '') + i + (f ? n.dec + f : ''));
   };
+  // the landed value reads exactly as written (minus sign typeset)
+  const finalHTML = n => n ? valHTML(n, n.body.replace(/^-/, '\u2212')) : '';
   const rich = s => MG.esc(s).replace(/\*([^*]+)\*/g, '<span class="acc">$1</span>');
 
   // compare like with like: '6 hours' vs '9 minutes', '900K' vs '1.2M'
@@ -116,7 +126,12 @@
   card.classList.add(P.plate);
   plate.classList.add(P.plate);
   if (vert) card.classList.add('v');
-  const T0 = 0.1, EACH = 0.075, GROW = 0.85;
+  const n = rows.length;
+  const T0 = 0.1, EACH = 0.075;
+  // every bar lands by ~55% of the item, whatever duration the editor gave it
+  const GROW = Math.min(0.85, Math.max(0.3, D * 0.55 - T0 - (n - 1) * EACH));
+  const XD = Math.min(0.26, D * 0.1);
+  const LAST = D - XD - 0.03;                 // from here on every value reads exactly as written
   let L = null;
 
   function layout() {
@@ -124,34 +139,39 @@
     const cardW = Math.min(SAFE.x1 - SAFE.x0, 960);
     const pad = P.plate === 'none' ? 0 : 56;
     const cw = cardW - pad * 2;
+    inner.style.width = cw + 'px';                 // fixed before anything is fitted inside it
     let y = 0, title = null, tmask = null;
     if (P.title.trim()) {
       tmask = MG.el('div', 'tmask', null, inner);
       title = MG.el('div', 'title', null, tmask);
       title.innerHTML = rich(P.title.trim());
-      MG.fit(title, { width: cw, min: 32, max: 74, nowrap: true });
+      title.style.width = cw + 'px';
+      MG.fit(title, { width: cw, height: 74 * 1.02 * 2 + 8, min: 46, max: 74 });
       y = tmask.offsetHeight + (vert ? 40 : 34);
     }
-    const n = rows.length;
     const els = rows.map(r => {
       const lab = MG.el('div', 'lab' + (r.hi ? ' hi' : ''), r.label, inner);
       const track = MG.el('div', 'track', null, inner);
       const glow = r.hi ? MG.el('div', 'glowbar', null, inner) : null;
       const bar = MG.el('div', 'bar' + (r.hi ? ' hi' : ''), null, inner);
       MG.el('div', 'sheen', null, bar);
-      const val = MG.el('div', 'val' + (r.hi ? ' hi' : ''), r.raw, inner);
-      return { r, lab, track, bar, val, glow };
+      const val = MG.el('div', 'val' + (r.hi ? ' hi' : ''), null, inner);
+      val.innerHTML = r.n ? finalHTML(r.n) : MG.esc(r.raw);
+      return { r, lab, track, bar, val, glow, html: null };
     });
     const geo = [];
     if (!vert) {
-      // label line, then the bar with its value riding the tip
-      const barH = n <= 3 ? 80 : n === 4 ? 68 : 58, gap = n <= 3 ? 38 : n === 4 ? 30 : 24;
-      const lfs = n <= 3 ? 44 : n === 4 ? 40 : 36, vfs = n <= 3 ? 62 : n === 4 ? 56 : 50;
-      els.forEach(e => { e.lab.style.fontSize = lfs + 'px'; e.val.style.fontSize = vfs + 'px'; e.val.style.lineHeight = barH + 'px'; });
-      const valW = Math.max(...els.map(e => e.val.getBoundingClientRect().width));
-      const trackW = Math.max(240, cw - valW - 22);
+      // label line, then the bar with its value riding the tip; the hero bar's value is 1.2x
+      const [barH, lfs, vfs, gap] = n <= 2 ? [104, 54, 96, 44] : n === 3 ? [88, 48, 80, 38] : n === 4 ? [72, 44, 66, 30] : [60, 40, 56, 24];
       els.forEach(e => {
-        MG.fit(e.lab, { width: cw, min: 22, max: lfs, nowrap: true });
+        e.lab.style.fontSize = lfs + 'px';
+        e.val.style.fontSize = (e.r.hi ? vfs * 1.2 : vfs) + 'px';
+        e.val.style.lineHeight = barH + 'px';
+      });
+      const valW = Math.max(...els.map(e => e.val.getBoundingClientRect().width));
+      const trackW = Math.max(240, cw - valW - 24);
+      els.forEach(e => {
+        MG.fit(e.lab, { width: cw, min: 30, max: lfs, nowrap: true });
         e.lab.style.position = 'absolute'; e.lab.style.left = '0px'; e.lab.style.top = y + 'px';
         y += e.lab.offsetHeight + 14;
         const len = Math.max(barH, trackW * Math.min(1, e.r.v / vmax));
@@ -159,30 +179,35 @@
         Object.assign(e.bar.style, { left: '0px', top: y + 'px', width: len + 'px', height: barH + 'px', transformOrigin: '0 50%' });
         if (e.glow) Object.assign(e.glow.style, { left: '6px', top: (y + 10) + 'px', width: (len - 12) + 'px', height: (barH - 8) + 'px' });
         e.val.style.top = y + 'px';
+        // values that would overrun the card at full length stay inside the card
+        e.maxLeft = cw - e.val.getBoundingClientRect().width;
         geo.push({ len, y, barH });
         y += barH + gap;
       });
       y -= gap;
     } else {
-      const chartH = n <= 3 ? 620 : 580;
+      const chartH = n <= 3 ? 600 : 560;
       const colW = cw / n, barW = Math.min(150, colW * 0.62);
-      const lfs = n <= 3 ? 40 : n === 4 ? 34 : 30, vfs = n <= 3 ? 60 : n === 4 ? 50 : 42;
-      const valH = vfs * 1.25;
+      const lfs = n <= 3 ? 44 : n === 4 ? 38 : 34, vfs = n <= 3 ? 72 : n === 4 ? 60 : 50;
+      const valH = vfs * 1.2 * 1.2;
       const base = y + valH + chartH;
+      let labH = 0;
       els.forEach((e, i) => {
-        e.val.style.fontSize = vfs + 'px';
+        const vf = e.r.hi ? vfs * 1.15 : vfs;
+        e.val.style.fontSize = vf + 'px';
         const cx = colW * (i + 0.5);
         const len = Math.max(barW * 0.5, chartH * Math.min(1, e.r.v / vmax));
         Object.assign(e.track.style, { left: (cx - barW / 2) + 'px', top: (base - chartH) + 'px', width: barW + 'px', height: chartH + 'px', borderRadius: '26px' });
         Object.assign(e.bar.style, { left: (cx - barW / 2) + 'px', top: (base - len) + 'px', width: barW + 'px', height: len + 'px', borderRadius: '26px', transformOrigin: '50% 100%' });
         if (e.glow) Object.assign(e.glow.style, { left: (cx - barW / 2 + 8) + 'px', top: (base - len + 8) + 'px', width: (barW - 16) + 'px', height: (len - 8) + 'px', borderRadius: '26px' });
-        MG.fit(e.val, { width: colW - 8, min: 18, max: vfs, nowrap: true });
+        MG.fit(e.val, { width: colW - 6, min: 30, max: vf, nowrap: true });
         e.lab.style.fontSize = lfs + 'px';
-        Object.assign(e.lab.style, { position: 'absolute', whiteSpace: 'normal', textAlign: 'center', width: (colW - 10) + 'px', left: (colW * i + 5) + 'px', top: (base + 18) + 'px' });
-        MG.fit(e.lab, { width: colW - 10, height: lfs * 1.1 * 2 + 4, min: 18, max: lfs });
+        Object.assign(e.lab.style, { position: 'absolute', whiteSpace: 'normal', textAlign: 'center', textWrap: 'balance', width: (colW - 6) + 'px', left: (colW * i + 3) + 'px', top: (base + 20) + 'px' });
+        MG.fit(e.lab, { width: colW - 6, height: lfs * 1.1 * 3 + 4, min: 26, max: lfs });
+        labH = Math.max(labH, e.lab.offsetHeight);
         geo.push({ len, cx, base });
       });
-      y = base + 18 + Math.max(...els.map(e => e.lab.offsetHeight));
+      y = base + 20 + labH;
     }
     inner.style.width = cw + 'px'; inner.style.height = y + 'px';
     card.style.padding = pad + 'px';
@@ -198,23 +223,22 @@
   }
   MG.ready = fontsReady.then(() => { L = L || layout(); });
 
-  const n = rows.length;
-  const XD = Math.min(0.26, D * 0.1);
-  const endIn = T0 + (n - 1) * EACH + GROW + 0.04;
-  MG.active([[0, Math.min(D, endIn)], [D - XD - 0.02, D]]);
+  // moving until the last bar has grown and the hero value's pop has settled
+  const endIn = Math.max(T0 + (n - 1) * EACH + GROW, T0 + n * EACH + GROW * 0.5 + 0.3) + 0.02;
+  MG.active([[0, Math.min(D, endIn)], [LAST - 0.01, D]]);
   MG.frame(t => {
     if (!L) L = layout();
     const { els, geo, title } = L;
-    // card: object -> a gentle spring with blur-to-sharp
+    // card: object -> a gentle spring with blur-to-sharp; the plate fades up from nothing
     const sp = MG.spring(t, 0, { stiffness: 230, damping: 22 });
     const qx = MG.ease.inCubic(MG.range(t, D - XD, XD));
     const cs = { x: L.x, y: L.top + (1 - sp) * 60 + qx * 30, scale: L.k * (0.94 + 0.06 * sp - 0.03 * qx),
-                 opacity: (0.3 + 0.7 * MG.range(t, 0, 0.12)) * (1 - qx) };
+                 opacity: MG.ease.outCubic(MG.range(t, 0, 0.12)) * (1 - qx) };
     MG.set(plate, cs);
     MG.set(card, Object.assign({ blur: (1 - MG.range(t, 0, 0.16)) * 8 }, cs));
     if (title) {
-      const p = MG.ease.outExpo(MG.range(t, 0.04, 0.6));
-      MG.set(title, { y: (1 - p) * title.offsetHeight * 1.1, opacity: MG.range(t, 0.04, 0.12) });
+      const p = MG.ease.outExpo(MG.range(t, 0, 0.6));
+      MG.set(title, { y: (1 - p) * title.offsetHeight * 0.6 });     // arrives with the card: no empty plate
     }
     els.forEach((e, i) => {
       const t0 = T0 + i * EACH, g = geo[i];
@@ -222,29 +246,32 @@
       MG.set(e.lab, { y: (1 - pl) * 14, opacity: MG.range(t, t0 - 0.06, 0.2) });
       e.track.style.opacity = MG.range(t, t0 - 0.1, 0.25).toFixed(3);
       const p = MG.ease.outExpo(MG.range(t, t0, GROW));
-      const len = g.len * p;
+      const landed = t >= t0 + GROW || t >= LAST;
+      const len = g.len * (landed ? 1 : p);
+      const html = e.r.n ? (landed ? finalHTML(e.r.n) : fmt(e.r.n, e.r.n.v * p)) : MG.esc(e.r.raw);
+      if (html !== e.html) { e.val.innerHTML = html; e.html = html; }
       if (!vert) {
         e.bar.style.width = Math.max(0.01, len) + 'px';
-        e.bar.style.opacity = p > 0.002 ? 1 : 0;
-        e.val.style.left = (len + 18) + 'px';
+        e.bar.style.opacity = p > 0.002 || landed ? 1 : 0;
+        e.val.style.left = Math.min(e.maxLeft, len + 20) + 'px';
       } else {
         e.bar.style.height = Math.max(0.01, len) + 'px';
         e.bar.style.top = (g.base - len) + 'px';
-        e.bar.style.opacity = p > 0.002 ? 1 : 0;
+        e.bar.style.opacity = p > 0.002 || landed ? 1 : 0;
         const vw = e.val.offsetWidth;
         e.val.style.left = (g.cx - vw / 2) + 'px';
-        e.val.style.top = (g.base - len - e.val.offsetHeight - 14) + 'px';
+        e.val.style.top = (g.base - len - e.val.offsetHeight - 12) + 'px';
       }
-      e.val.textContent = e.r.n ? fmt(e.r.n, e.r.n.v * p) : e.r.raw;
-      e.val.style.opacity = MG.range(t, t0, 0.12).toFixed(3);
+      e.val.style.opacity = Math.max(landed ? 1 : 0, MG.range(t, t0, 0.12)).toFixed(3);
       if (e.r.hi) {
         // land: value pops once, accent glow breathes up and settles
-        const q = MG.range(t, t0 + 0.4, 0.3);
+        const tl = Math.min(t0 + GROW * 0.5, LAST - 0.3);
+        const q = MG.range(t, tl, 0.3);
         const bump = q > 0 && q < 1 ? Math.sin(Math.PI * q) : 0;
         e.val.style.transformOrigin = vert ? '50% 100%' : '0% 50%';
         e.val.style.transform = `scale(${1 + 0.12 * bump})`;
         // the glow is a static blurred layer at the final size: it only fades
-        const gl = MG.ease.outCubic(MG.range(t, t0 + 0.4, 0.25)) * (0.5 + 0.35 * bump);
+        const gl = MG.ease.outCubic(MG.range(t, tl, 0.25)) * (0.5 + 0.35 * bump);
         if (e.glow) { e.glow.style.opacity = gl.toFixed(3); e.glow.style.visibility = gl > 0.002 ? 'visible' : 'hidden'; }
       }
     });

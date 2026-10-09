@@ -13,25 +13,26 @@
   "y": {"type": "float", "min": 0.1, "max": 0.9, "default": 0.45, "hint": "vertical centre as frame fraction"}
  },
  "example": {"values": ["12", "14", "13", "19", "24", "22", "35", "48", "61"], "title": "Monthly *revenue*", "value_label": "$61K", "start_label": "Jan", "end_label": "Sep"},
- "sfx": [{"at": 0.1, "kind": "whoosh_soft"}, {"at": 1.06, "kind": "ding"}]} -->
+ "sfx": [{"at": 0.0, "kind": "whoosh_soft"}, {"at": 0.72, "kind": "ding"}]} -->
 <style>
   .card,.plate{position:absolute;left:0;top:0;transform-origin:50% 50%;border-radius:40px;will-change:transform,opacity}
-  .plate.glass{background:linear-gradient(165deg,rgba(40,40,48,.8) 0%,rgba(12,12,16,.86) 100%);
+  .plate.glass{background:linear-gradient(165deg,rgba(44,44,54,.93) 0%,rgba(14,14,19,.96) 100%);
     border:1px solid rgba(255,255,255,.14);box-shadow:inset 0 1px 0 rgba(255,255,255,.12),0 26px 64px rgba(0,0,0,.5)}
   .plate.dark{background:linear-gradient(170deg,#17171c 0%,#0b0b0e 100%);border:1px solid rgba(255,255,255,.1);
     box-shadow:inset 0 1px 0 rgba(255,255,255,.07),0 26px 64px rgba(0,0,0,.5)}
   .plate.light{background:linear-gradient(175deg,#ffffff 0%,#f4f3f1 100%);border:1px solid rgba(0,0,0,.06);
     box-shadow:0 24px 60px rgba(0,0,0,.3),0 4px 14px rgba(0,0,0,.08)}
   .inner{position:relative}
-  .title{font-family:'Inter Display',sans-serif;font-weight:800;letter-spacing:-0.035em;line-height:1.02;color:var(--fg);white-space:nowrap}
+  .title{font-family:'Inter Display',sans-serif;font-weight:800;letter-spacing:-0.035em;line-height:1.02;color:var(--fg);text-wrap:balance}
   .acc{font-family:'Instrument Serif',serif;font-style:italic;font-weight:400;letter-spacing:-0.01em;color:var(--accent-ink);font-size:1.14em;line-height:.8}
   .tmask{overflow:hidden;padding:.06em 0 .12em}
-  .axl{position:absolute;font-family:'Inter','Inter Display',sans-serif;font-weight:600;font-size:32px;color:var(--fg2);white-space:nowrap;letter-spacing:-0.01em}
+  .axl{position:absolute;font-family:'Inter','Inter Display',sans-serif;font-weight:600;font-size:40px;color:var(--fg2);white-space:nowrap;letter-spacing:-0.01em}
   svg{position:absolute;left:0;top:0;overflow:visible}
   .tag{position:absolute;left:0;top:0;padding:.2em .5em .22em;border-radius:999px;background:var(--accent);color:var(--tag-ink);
-       font-family:'Inter Display',sans-serif;font-weight:800;letter-spacing:-0.02em;font-size:44px;line-height:1;white-space:nowrap;
+       font-family:'Inter Display',sans-serif;font-weight:800;letter-spacing:-0.02em;font-size:54px;line-height:1;white-space:nowrap;
        font-variant-numeric:tabular-nums;box-shadow:0 8px 24px rgba(0,0,0,.3);transform-origin:50% 100%}
-  .none .title,.none .axl{text-shadow:0 2px 16px rgba(0,0,0,.6)}
+  .none .axl{color:#F7F5F2}
+  .none .title,.none .axl{text-shadow:0 2px 4px rgba(0,0,0,.4),0 6px 28px rgba(0,0,0,.55)}
 </style>
 <div class="mg-root"><div class="plate" id="plate"></div><div class="card" id="card"><div class="inner" id="inner"></div></div></div>
 <script>
@@ -51,7 +52,7 @@
   css.setProperty('--fg2', light ? 'rgba(13,13,18,.55)' : 'rgba(247,245,242,.66)');
 
   const parse = s => {
-    s = String(s ?? '').trim().replace(/−/g, '-');
+    s = String(s ?? '').trim().replace(/[−–]/g, '-');
     const m = s.match(/^(.*?)(-?\d(?:[\d,.   ]*\d)?)(.*)$/);
     if (!m) return null;
     const [, pre, body, suf] = m;
@@ -73,7 +74,7 @@
     const s = Math.abs(v).toFixed(n.decimals);
     let [i, f] = s.split('.');
     if (n.grp || Math.abs(n.v) >= 10000) i = i.replace(/\B(?=(\d{3})+(?!\d))/g, n.grp || ',');
-    return n.pre + (v < 0 && Number(s) !== 0 ? '-' : '') + i + (f ? n.dec + f : '') + n.suf;
+    return n.pre + (v < 0 && Number(s) !== 0 ? '\u2212' : '') + i + (f ? n.dec + f : '') + n.suf;
   };
   const rich = s => MG.esc(s).replace(/\*([^*]+)\*/g, '<span class="acc">$1</span>');
 
@@ -90,7 +91,7 @@
   let vals = (P.values || []).map(s => parse(s)).filter(Boolean).map(n => n.v * unitMult(n));
   if (vals.length < 2) vals = vals.length ? [vals[0], vals[0]] : [0, 1];
   const lastRaw = (P.values || []).filter(s => parse(s)).slice(-1)[0] || String(vals[vals.length - 1]);
-  const tagText = P.value_label.trim() || lastRaw.trim();
+  const tagText = (P.value_label.trim() || lastRaw.trim()).replace(/^-(?=\d)/, '\u2212');
   const tagNum = parse(tagText);
 
   const fontsReady = Promise.all([`800 60px 'Inter Display'`, `600 40px 'Inter'`, `italic 400 60px 'Instrument Serif'`]
@@ -119,25 +120,28 @@
     return d;
   }
 
-  const T_DRAW = 0.14, DRAW = 0.92, LAND = T_DRAW + DRAW;    // 'ding' at 1.06
+  // a fast ease-out draw (~0.6 s) that lands by ~55% of the item ('ding' at 0.72)
+  const T_DRAW = 0.1, DRAW = Math.min(0.62, Math.max(0.35, D * 0.55 - T_DRAW)), LAND = T_DRAW + DRAW;
   let L = null;
   function layout() {
     inner.innerHTML = '';
     const cardW = Math.min(SAFE.x1 - SAFE.x0, 960);
     const pad = P.plate === 'none' ? 0 : 56;
     const cw = cardW - pad * 2;
+    inner.style.width = cw + 'px';                 // fixed before anything is fitted inside it
     let y = 0, title = null;
     if (P.title.trim()) {
       const tmask = MG.el('div', 'tmask', null, inner);
       title = MG.el('div', 'title', null, tmask);
       title.innerHTML = rich(P.title.trim());
-      MG.fit(title, { width: cw, min: 32, max: 74, nowrap: true });
+      title.style.width = cw + 'px';
+      MG.fit(title, { width: cw, height: 74 * 1.02 * 2 + 8, min: 46, max: 74 });
       y = tmask.offsetHeight + 24;
     }
     // room above the line for the riding tag
     const tag = MG.el('div', 'tag', '0', inner);
     const tagH = tag.offsetHeight;
-    const top = y + tagH + 34, chartH = tall ? 460 : 400, base = top + chartH;
+    const top = y + tagH + 40, chartH = tall ? 460 : 400, base = top + chartH;
     const svg = sv('svg', { width: cw, height: base + 4, viewBox: `0 0 ${cw} ${base + 4}` });
     inner.insertBefore(svg, tag);
     const defs = sv('defs', {}, svg);
@@ -166,17 +170,17 @@
     sv('path', { d: d + ` L${pts[pts.length - 1][0]},${base} L${pts[0][0]},${base} Z`, fill: `url(#${id}a)` }, g);
     // on a card the halo is a soft accent glow; straight on footage it is a dark keyline
     const bare = P.plate === 'none';
-    const halo = sv('path', { d, fill: 'none', stroke: bare ? '#000' : P.accent, 'stroke-opacity': bare ? 0.38 : 0.16, 'stroke-width': bare ? 22 : 26, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }, svg);
-    const line = sv('path', { d, fill: 'none', stroke: `url(#${id}s)`, 'stroke-width': 9, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }, svg);
-    const ring = sv('circle', { r: 16, fill: 'none', stroke: P.accent, 'stroke-width': 4, opacity: 0 }, svg);
-    const dot = sv('circle', { r: 15, fill: P.accent }, svg);
-    const core = sv('circle', { r: 6, fill: light ? '#FFFFFF' : '#0D0D12' }, svg);
+    const halo = sv('path', { d, fill: 'none', stroke: bare ? '#000' : P.accent, 'stroke-opacity': bare ? 0.38 : 0.16, 'stroke-width': bare ? 26 : 34, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }, svg);
+    const line = sv('path', { d, fill: 'none', stroke: `url(#${id}s)`, 'stroke-width': 14, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }, svg);
+    const ring = sv('circle', { r: 20, fill: 'none', stroke: P.accent, 'stroke-width': 5, opacity: 0 }, svg);
+    const dot = sv('circle', { r: 19, fill: P.accent }, svg);
+    const core = sv('circle', { r: 7, fill: light ? '#FFFFFF' : '#0D0D12' }, svg);
     const len = line.getTotalLength();
     // axis labels
     const axls = [];
     if (P.start_label.trim()) { const a = MG.el('div', 'axl', P.start_label.trim(), inner); a.style.left = '0px'; a.style.top = (base + 16) + 'px'; axls.push(a); }
     if (P.end_label.trim()) { const a = MG.el('div', 'axl', P.end_label.trim(), inner); a.style.top = (base + 16) + 'px'; a.style.left = (cw - a.offsetWidth) + 'px'; axls.push(a); }
-    y = base + (axls.length ? 16 + 40 : 6);
+    y = base + (axls.length ? 16 + 50 : 8);
     inner.style.width = cw + 'px'; inner.style.height = y + 'px';
     card.style.padding = pad + 'px'; card.style.width = cardW + 'px';
     const cardH = y + pad * 2;
@@ -197,46 +201,49 @@
   MG.ready = fontsReady.then(() => { L = L || layout(); });
 
   const XD = Math.min(0.26, D * 0.1);
+  const LAST = D - XD - 0.03;                 // from here on the tag reads exactly as written
   MG.active([[0, Math.min(D, LAND + 0.38)], [D - XD - 0.02, D]]);
   const lastNum = parse(lastRaw);
+  const lastVal = vals[vals.length - 1];
   MG.frame(t => {
     if (!L) L = layout();
     const sp = MG.spring(t, 0, { stiffness: 230, damping: 22 });
     const qx = MG.ease.inCubic(MG.range(t, D - XD, XD));
     const cs = { x: L.x, y: L.ty + (1 - sp) * 60 + qx * 30, scale: L.k * (0.94 + 0.06 * sp - 0.03 * qx),
-                 opacity: (0.3 + 0.7 * MG.range(t, 0, 0.12)) * (1 - qx) };
+                 opacity: MG.ease.outCubic(MG.range(t, 0, 0.12)) * (1 - qx) };
     MG.set(plate, cs);
     MG.set(card, Object.assign({ blur: (1 - MG.range(t, 0, 0.16)) * 8 }, cs));
-    if (L.title) { const p = MG.ease.outExpo(MG.range(t, 0, 0.6)); MG.set(L.title, { y: (1 - p) * L.title.offsetHeight * 1.1, opacity: 0.3 + 0.7 * MG.range(t, 0, 0.1) }); }
+    if (L.title) { const p = MG.ease.outExpo(MG.range(t, 0, 0.6)); MG.set(L.title, { y: (1 - p) * L.title.offsetHeight * 0.6 }); }   // arrives with the card
     const pg = MG.ease.outCubic(MG.range(t, 0, 0.45));
     L.guides.forEach(gl => gl.setAttribute('opacity', pg.toFixed(3)));
     L.baseline.setAttribute('x2', (L.cw * pg).toFixed(1));
-    L.axls.forEach((a, i) => MG.set(a, { y: (1 - MG.ease.outExpo(MG.range(t, 0.2 + i * 0.8, 0.5))) * 12, opacity: MG.range(t, 0.2 + i * 0.8, 0.2) }));
-    // the draw
-    const p = MG.ease.inOutCubic(MG.range(t, T_DRAW, DRAW));
+    L.axls.forEach((a, i) => { const ta = i ? LAND - 0.12 : 0.16; MG.set(a, { y: (1 - MG.ease.outExpo(MG.range(t, ta, 0.5))) * 12, opacity: MG.range(t, ta, 0.18) }); });
+    // the draw: ease-out, so the line is visibly travelling from its first frame
+    const landed = t >= LAND || t >= LAST;
+    const p = landed ? 1 : MG.ease.outCubic(MG.range(t, T_DRAW, DRAW));
     const pt = L.line.getPointAtLength(Math.max(0.001, p * L.len));
     MG.draw(L.line, p); MG.draw(L.halo, p);
     L.clipRect.setAttribute('width', (pt.x + 20).toFixed(1));
     const vis = t >= T_DRAW - 0.04 ? 1 : 0;
     // landing: dot pops, one ring pulse
     const q = MG.range(t, LAND - 0.02, 0.3), bump = q > 0 && q < 1 ? Math.sin(Math.PI * q) : 0;
-    const dr = 15 * (MG.ease.outBack(MG.range(t, T_DRAW - 0.04, 0.25)) + 0.45 * bump);
+    const dr = 19 * (MG.ease.outBack(MG.range(t, T_DRAW - 0.04, 0.25)) + 0.4 * bump);
     [L.dot, L.core].forEach((c, i) => { c.setAttribute('cx', pt.x.toFixed(2)); c.setAttribute('cy', pt.y.toFixed(2)); c.setAttribute('opacity', vis); });
     L.dot.setAttribute('r', Math.max(0, dr).toFixed(2));
     L.core.setAttribute('r', Math.max(0, dr * 0.4).toFixed(2));
     const pr = MG.range(t, LAND, 0.36);
     L.ring.setAttribute('cx', pt.x.toFixed(2)); L.ring.setAttribute('cy', pt.y.toFixed(2));
-    L.ring.setAttribute('r', (16 + 46 * MG.ease.outCubic(pr)).toFixed(2));
+    L.ring.setAttribute('r', (20 + 52 * MG.ease.outCubic(pr)).toFixed(2));
     L.ring.setAttribute('opacity', pr > 0 && pr < 1 ? ((1 - pr) * 0.9).toFixed(3) : 0);
-    // the tag rides the tip and counts with it
+    // the tag rides the tip and reads the data under it (scaled to the label's units)
     let txt;
-    if (p >= 1) txt = tagText;
-    else if (P.value_label.trim()) txt = tagNum ? fmt(tagNum, tagNum.v * p) : tagText;
+    if (landed) txt = tagText;
+    else if (P.value_label.trim()) txt = !tagNum ? tagText : lastVal ? fmt(tagNum, tagNum.v * L.valueAtX(pt.x) / lastVal) : fmt(tagNum, tagNum.v * p);
     else txt = lastNum ? fmt(lastNum, L.valueAtX(pt.x) / unitMult(lastNum)) : tagText;
     if (L.tag.textContent !== txt) L.tag.textContent = txt;
     const tw = L.tag.offsetWidth;
     const tx = Math.max(-L.pad * 0.4, Math.min(L.cw - tw + L.pad * 0.4, pt.x - tw / 2));
-    const tyy = pt.y - L.tagH - 30;
+    const tyy = pt.y - L.tagH - 36;
     const ta = MG.ease.outBack(MG.range(t, T_DRAW + 0.05, 0.3));
     L.tag.style.opacity = MG.range(t, T_DRAW + 0.05, 0.1).toFixed(3);
     L.tag.style.transformOrigin = `${(pt.x - tx).toFixed(1)}px 100%`;

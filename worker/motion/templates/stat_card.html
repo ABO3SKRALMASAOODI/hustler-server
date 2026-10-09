@@ -17,7 +17,7 @@
   .card,.plate,.gloss{position:absolute;left:0;top:0;border-radius:44px;transform-origin:50% 100%;will-change:transform,opacity}
   /* the sheen lives on its own clipped layer: sweeping it never re-blurs the plate's shadow */
   .gloss{overflow:hidden}
-  .plate.glass{background:linear-gradient(160deg,rgba(52,52,62,.8) 0%,rgba(16,16,22,.88) 70%);
+  .plate.glass{background:linear-gradient(160deg,rgba(52,52,62,.93) 0%,rgba(16,16,22,.96) 70%);
     border:1px solid rgba(255,255,255,.16);box-shadow:inset 0 1px 0 rgba(255,255,255,.16),0 30px 64px rgba(0,0,0,.5)}
   .plate.solid{background:linear-gradient(170deg,#18181e 0%,#0a0a0d 100%);border:1px solid rgba(255,255,255,.1);
     box-shadow:inset 0 1px 0 rgba(255,255,255,.08),0 30px 64px rgba(0,0,0,.55)}
@@ -29,16 +29,16 @@
   .inner{position:relative}
   .lab{display:flex;align-items:center;gap:16px;font-family:'Inter','Inter Display',sans-serif;font-weight:600;color:var(--fg2);
        letter-spacing:-0.01em;white-space:nowrap;line-height:1.1}
-  .sdot{width:16px;height:16px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 6px var(--accent-soft);flex:none}
+  .sdot{width:18px;height:18px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 6px var(--accent-soft);flex:none}
   .row{display:flex;align-items:center;gap:26px;flex-wrap:nowrap}
   .row.stack{flex-direction:column;align-items:flex-start;gap:14px}
   .val{font-family:'Inter Display',sans-serif;font-weight:800;letter-spacing:-0.045em;color:var(--fg);white-space:nowrap;
        line-height:1;font-variant-numeric:tabular-nums;display:inline-block}
   .pill{display:inline-flex;align-items:center;gap:.28em;padding:.24em .5em .26em .42em;border-radius:999px;font-family:'Inter Display',sans-serif;
-        font-weight:800;letter-spacing:-0.02em;line-height:1;white-space:nowrap;font-size:42px;color:var(--dc);background:var(--dbg);
+        font-weight:800;letter-spacing:-0.02em;line-height:1;white-space:nowrap;font-size:50px;color:var(--dc);background:var(--dbg);
         font-variant-numeric:tabular-nums;transform-origin:0% 50%;flex:none}
   .pill svg{width:.72em;height:.72em;flex:none}
-  .cap{font-family:'Inter','Inter Display',sans-serif;font-weight:500;color:var(--fg3);letter-spacing:-0.005em;white-space:nowrap;font-size:34px;line-height:1.1}
+  .cap{font-family:'Inter','Inter Display',sans-serif;font-weight:500;color:var(--fg3);letter-spacing:-0.005em;white-space:nowrap;font-size:40px;line-height:1.12;text-wrap:balance}
   svg.spark{position:absolute;left:0;overflow:visible}
 </style>
 <div class="mg-root"><div class="plate" id="plate"></div><div class="gloss" id="gloss"><div class="sheen" id="sheen"></div></div><div class="card" id="card"><div class="inner" id="inner"></div></div></div>
@@ -58,7 +58,7 @@
   css.setProperty('--fg3', light ? 'rgba(13,13,18,.5)' : 'rgba(247,245,242,.58)');
 
   const parse = s => {
-    s = String(s ?? '').trim().replace(/−/g, '-');
+    s = String(s ?? '').trim().replace(/[−–]/g, '-');
     const m = s.match(/^(.*?)(-?\d(?:[\d,.   ]*\d)?)(.*)$/);
     if (!m) return null;
     const [, pre, body, suf] = m;
@@ -80,12 +80,10 @@
     const s = Math.abs(v).toFixed(n.decimals);
     let [i, f] = s.split('.');
     if (n.grp) i = i.replace(/\B(?=(\d{3})+(?!\d))/g, n.grp);
-    return n.pre + (v < 0 && Number(s) !== 0 ? '-' : '') + i + (f ? n.dec + f : '') + n.suf;
+    return n.pre + (v < 0 && Number(s) !== 0 ? '\u2212' : '') + i + (f ? n.dec + f : '') + n.suf;
   };
   const V = parse(P.value);
-  // tiny integers ('1M', '3x') count with a temporary decimal so they visibly run
-  const VC = V && V.decimals === 0 && Math.abs(V.v) <= 4 ? Object.assign({}, V, { decimals: 1 }) : V;
-  const deltaRaw = P.delta.trim().replace(/−/g, '-');
+  const deltaRaw = P.delta.trim().replace(/[−–]/g, '-');
   const down = /^[-↓▼]/.test(deltaRaw) || /^[^\d]*-\d/.test(deltaRaw);
   const deltaTxt = deltaRaw.replace(/^[+\-↑↓▲▼]\s*/, '');
   const up = !down;
@@ -118,17 +116,21 @@
     return d;
   }
 
-  const T_COUNT = 0.2, LAND = 1.2, T_PILL = 0.68, T_SPARK = 0.3;
+  // the value lands by ~55% of the item (1.2 s for the default length: 'ding'),
+  // the pill pops 0.52 s before it ('pop_soft' at 0.78)
+  const LAND = Math.min(1.2, Math.max(0.5, D * 0.55));
+  const T_COUNT = Math.min(0.2, LAND * 0.17), T_PILL = Math.max(0.12, LAND - 0.52), T_SPARK = Math.min(0.3, LAND * 0.25);
   let L = null;
   function layout() {
     inner.innerHTML = '';
     const cardW = Math.min(SAFE.x1 - SAFE.x0, 900);
     const pad = 58, cw = cardW - pad * 2;
+    inner.style.width = cw + 'px';                 // fixed before anything is fitted inside it
     const lab = MG.el('div', 'lab', null, inner);
     MG.el('span', 'sdot', null, lab);
     MG.el('span', null, P.label, lab);
-    lab.style.fontSize = '40px';
-    MG.fit(lab, { width: cw, min: 26, max: 40, nowrap: true });
+    lab.style.fontSize = '44px';
+    MG.fit(lab, { width: cw, min: 30, max: 44, nowrap: true });
     const row = MG.el('div', 'row', null, inner);
     row.style.marginTop = '26px';
     const val = MG.el('div', 'val', V ? fmt(V, V.v) : P.value, row);
@@ -147,15 +149,13 @@
       MG.fit(val, { width: cw, min: 40, max: 156, nowrap: true });
     }
     // reserve the FINAL width so the pill never slides while digits are added
-    let vw = val.getBoundingClientRect().width;
-    if (VC !== V) { val.textContent = fmt(VC, VC.v); vw = Math.max(vw, val.getBoundingClientRect().width); val.textContent = fmt(V, V.v); }
-    val.style.width = Math.ceil(vw + 2) + 'px';
+    val.style.width = Math.ceil(val.getBoundingClientRect().width + 2) + 'px';
     let cap = null;
     if (P.caption.trim()) {
       cap = MG.el('div', 'cap', P.caption.trim(), inner);
       cap.style.marginTop = '20px';
       cap.style.whiteSpace = 'normal';
-      MG.fit(cap, { width: cw, height: 34 * 1.1 * 2 + 4, min: 22, max: 34 });
+      MG.fit(cap, { width: cw, height: 40 * 1.12 * 2 + 4, min: 28, max: 40 });
     }
     let sp = null;
     let h = inner.getBoundingClientRect().height;
@@ -195,6 +195,8 @@
   MG.ready = fontsReady.then(() => { L = L || layout(); });
 
   const XD = Math.min(0.26, D * 0.1);
+  const LAST = D - XD - 0.03;                 // from here on the value reads exactly as written
+  const SH0 = LAND * 0.35, SHD = LAND * 0.58; // one sheen sweep as the card settles
   MG.active([[0, Math.min(D, LAND + 0.4)], [D - XD - 0.02, D]]);
   MG.frame(t => {
     if (!L) L = layout();
@@ -204,33 +206,33 @@
     const rx = (1 - s) * 46 + qx * 8;
     // 3D only while it visibly tilts: flat layers composite far cheaper
     const st = { perspective: Math.abs(rx) > 0.12 ? 1700 : 0, x: L.x, y: L.ty + (1 - s) * 120 + qx * 30, rx: Math.abs(rx) > 0.12 ? rx : 0,
-                 scale: L.k * (0.9 + 0.1 * s - 0.03 * qx), opacity: (0.25 + 0.75 * MG.range(t, 0, 0.14)) * (1 - qx) };
+                 scale: L.k * (0.9 + 0.1 * s - 0.03 * qx), opacity: MG.ease.outCubic(MG.range(t, 0, 0.12)) * (1 - qx) };
     MG.set(plate, st);
-    const shOn = t > 0.4 && t < 1.14;
+    const shOn = t > SH0 - 0.02 && t < SH0 + SHD + 0.02;
     gloss.style.display = shOn ? 'block' : 'none';
     if (shOn) MG.set(gloss, st);
     MG.set(card, Object.assign({ blur: (1 - MG.range(t, 0, 0.18)) * 8 }, st));
     // sheen sweeps once as the card settles
-    const sh = MG.range(t, 0.42, 0.7);
+    const sh = MG.range(t, SH0, SHD);
     sheen.style.opacity = sh > 0 && sh < 1 ? Math.sin(Math.PI * sh).toFixed(3) : 0;
     sheen.style.transform = `translateX(${(-60 + 330 * MG.ease.inOutCubic(sh)).toFixed(1)}%) skewX(-12deg)`;
     // label, value (count), caption
-    MG.set(L.lab, { y: (1 - MG.ease.outExpo(MG.range(t, 0.1, 0.5))) * 16, opacity: MG.range(t, 0.1, 0.2) });
+    MG.set(L.lab, { y: (1 - MG.ease.outExpo(MG.range(t, 0, 0.5))) * 16 });   // arrives with the card
     if (V) {
       const p = MG.ease.outExpo(MG.range(t, T_COUNT, LAND - T_COUNT));
-      const txt = t >= LAND ? fmt(V, V.v) : fmt(VC, V.v * p);
+      const txt = t >= LAND || t >= LAST ? fmt(V, V.v) : fmt(V, V.v * p);
       if (L.val.textContent !== txt) L.val.textContent = txt;
     }
     const lq = MG.range(t, LAND - 0.02, 0.3), bump = lq > 0 && lq < 1 ? Math.sin(Math.PI * lq) : 0;
     L.val.style.transformOrigin = '0% 70%';
-    MG.set(L.val, { y: (1 - MG.ease.outExpo(MG.range(t, 0.14, 0.5))) * 22, opacity: MG.range(t, 0.14, 0.16), scale: 1 + 0.03 * bump });
-    if (L.cap) MG.set(L.cap, { y: (1 - MG.ease.outExpo(MG.range(t, 0.3, 0.5))) * 12, opacity: MG.range(t, 0.3, 0.2) });
+    MG.set(L.val, { y: (1 - MG.ease.outExpo(MG.range(t, 0.08, 0.5))) * 22, opacity: MG.range(t, 0.08, 0.14), scale: 1 + 0.03 * bump });
+    if (L.cap) MG.set(L.cap, { y: (1 - MG.ease.outExpo(MG.range(t, 0.24, 0.5))) * 12, opacity: MG.range(t, 0.24, 0.2) });
     if (L.pill) {
       const ps = MG.spring(t, T_PILL, { stiffness: 320, damping: 17 });
       MG.set(L.pill, { scale: 0.4 + 0.6 * ps, opacity: MG.range(t, T_PILL, 0.08) });
     }
     if (L.sp) {
-      const p = MG.ease.inOutCubic(MG.range(t, T_SPARK, LAND - T_SPARK));
+      const p = t >= LAST ? 1 : MG.ease.inOutCubic(MG.range(t, T_SPARK, LAND - T_SPARK));
       MG.draw(L.sp.line, p);
       const pt = L.sp.line.getPointAtLength(Math.max(0.001, p * L.sp.len));
       L.sp.clipRect.setAttribute('width', (pt.x + 10).toFixed(1));
