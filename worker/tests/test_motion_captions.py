@@ -1,6 +1,7 @@
 """Browser-drawn motion captions: cue grammar, placement, defaults, pixels."""
 
 import asyncio
+import math
 import os
 import shutil
 import sys
@@ -292,7 +293,7 @@ async def _dom(job, times, script):
     return out
 
 
-_BLOCK = """() => Array.from(document.querySelectorAll('.cue.on .blk')).map(b => {
+_BLOCK = """() => Array.from(document.querySelectorAll('.cue.on > .blk')).map(b => {
     const r = b.getBoundingClientRect(); return [r.left, r.top, r.right, r.bottom]; })"""
 
 
@@ -515,6 +516,41 @@ def test_a_preset_patch_that_names_a_motion_look_keeps_it():
     assert merged["style"]["preset"] == "impact" and merged["style"]["motion_look"] is None
 
 
+def test_cues_carry_the_plate_luma_from_the_spatial_index():
+    edl, index, tl = _setup("editorial")
+    assert all("l" not in c for c in motion_captions.cues(edl, index, tl))
+    index["spatial"] = {"samples": [{"t": 0.5, "mean_luma": 200.0},
+                                    {"t": 6.0, "mean_luma": 40.0}]}
+    cues = motion_captions.cues(edl, index, tl)
+    assert cues[0]["l"] == round(200 / 255, 2)
+    assert cues[-1]["l"] == round(40 / 255, 2)
+    # far from every sample: no hint at all (the plate may be another shot)
+    index["spatial"] = {"samples": [{"t": 30.0, "mean_luma": 200.0}]}
+    assert all("l" not in c for c in motion_captions.cues(edl, index, tl))
+
+
+def test_every_caption_font_stack_resolves_to_engine_fonts():
+    """Each CSS stack in the caption template must name a face the engine
+    registers (bundled or optional) before any system fallback, so preview
+    and production draw the same family once the optional files ship."""
+    import re
+    html = open(os.path.join(os.path.dirname(motion_engine.__file__), "motion",
+                             "templates", "caption_motion.html")).read()
+    known = {fam for fam, *_ in motion_engine.FONT_FACES + motion_engine.OPTIONAL_FONT_FACES}
+    bundled = {fam for fam, *_ in motion_engine.FONT_FACES}
+    generic = {"serif", "sans-serif", "monospace", "ui-monospace"}
+    stacks = re.findall(r"font-family:([^;}]+)", html)
+    assert len(stacks) >= 8
+    for stack in stacks:
+        fams = [f.strip().strip("'\"") for f in stack.split(",")]
+        assert fams[0] in known, stack
+        if "monospace" not in fams:      # every non-mono role has a bundled face
+            assert any(f in bundled for f in fams), stack
+        assert all(f in known or f in generic or f in (
+            "Space Mono", "IBM Plex Mono", "DejaVu Sans Mono", "Noto Sans Mono", "Menlo")
+            for f in fams), stack
+
+
 GRID_WORDS = [("It", 0.0, 0.2), ("is", 0.3, 0.4), ("accurate", 0.5, 0.9),
               ("and", 1.3, 1.4), ("it", 1.5, 1.6), ("will", 1.7, 1.8), ("be", 1.9, 2.0),
               ("the", 2.1, 2.2), ("biggest", 2.3, 2.8), ("product", 2.9, 3.3),
@@ -578,3 +614,110 @@ def test_sub_frame_onsets_render_exactly_like_every_frame(look, anim, tmp_path, 
         state = dict(asyncio.run(_dom(job, [s + 3 / 30 + 0.001], js))[0])
         key = next(k for k in state if k.lower().strip(",.") == text.lower().strip(",."))
         assert state[key] == 1.0, (look, text, state)
+
+
+_WORD_STATE = """() => Array.from(document.querySelectorAll('.cue.on > .blk .mg-w')).map(e => {
+    const r = e.getBoundingClientRect();
+    return {t: e.textContent, o: +getComputedStyle(e).opacity, hero: !!e.closest('.hero'),
+            srf: e.classList.contains('srf'), x0: r.left, x1: r.right}; })"""
+
+
+@needs_browser
+def test_bare_connector_beats_never_become_heroes(tmp_path, monkeypatch):
+    monkeypatch.setattr(motion_engine, "CACHE_DIR", str(tmp_path / "cache"))
+    words = [("Yeah.", 0.2, 0.6), ("Why?", 2.0, 2.5), ("Freedom.", 4.0, 4.6)]
+    for look in ("lockup", "stack"):
+        items, jobs = _custom(look, words)
+        ts = [c["w"][0]["s"] + 0.3 for c in items[0]["params"]["cues"]]
+        yeah, why, freedom = asyncio.run(_dom(jobs[0], ts, _WORD_STATE))
+        assert yeah and not any(w["hero"] for w in yeah), (look, yeah)
+        assert why[0]["hero"] and freedom[0]["hero"], (look, why, freedom)
+    # an emphasised connector stays inline in editorial (no serif 'out' hero)
+    words = [("Get", 0.2, 0.4), ("out", 0.45, 0.7), ("now", 0.75, 1.0)]
+    items, jobs = _custom("editorial", words, emphasis=["out"])
+    state = asyncio.run(_dom(jobs[0], [0.95], _WORD_STATE))[0]
+    assert len(state) == 3 and not any(w["srf"] for w in state), state
+
+
+@needs_browser
+@pytest.mark.parametrize("look", ["clean", "stack", "serif"])
+def test_a_hard_swap_never_blinks_the_new_phrase(look, tmp_path, monkeypatch):
+    monkeypatch.setattr(motion_engine, "CACHE_DIR", str(tmp_path / "cache"))
+    items, jobs = _custom(look, WORDS, emphasis=["important"])
+    cues = items[0]["params"]["cues"]
+    swaps = [b for a, b in zip(cues, cues[1:]) if a["k"]]
+    assert swaps, look
+    for c in swaps:
+        first_frame = math.ceil(c["s"] * 30 - 1e-4) / 30      # the cue's first frame
+        state = asyncio.run(_dom(jobs[0], [first_frame], _WORD_STATE))[0]
+        assert state, (look, c["s"])
+        first = state[0]
+        # rise: already part-way in (>= 60 % opaque); slam hero: fully opaque
+        assert first["o"] >= (1.0 if first["hero"] else 0.6), (look, c["s"], state)
+
+
+@needs_browser
+def test_punch_and_slam_never_cross_the_frame_edge(tmp_path, monkeypatch):
+    monkeypatch.setattr(motion_engine, "CACHE_DIR", str(tmp_path / "cache"))
+    words = [("Internationalization", 0.2, 1.0), ("counterintuitive", 1.6, 2.4),
+             ("extraordinarily", 3.0, 3.8)]
+    for look, style in (("pop", {"size_scale": 2.5}), ("pop", {"size": "xl"}),
+                        ("stack", None), ("stack", {"size_scale": 2.0})):
+        items, jobs = _custom(look, words, style=style)
+        dw = motion_engine.design_size(540, 960)[0]
+        ts = [w["s"] + d for c in items[0]["params"]["cues"] for w in c["w"] for d in (0.0, 0.034)]
+        for state in asyncio.run(_dom(jobs[0], ts, _WORD_STATE)):
+            for w in state:
+                if w["o"] > 0:
+                    assert w["x0"] >= 0 and w["x1"] <= dw, (look, style, w)
+
+
+@needs_browser
+def test_box_ink_is_a_pixel_exact_copy_clipped_to_the_highlight(tmp_path, monkeypatch):
+    monkeypatch.setattr(motion_engine, "CACHE_DIR", str(tmp_path / "cache"))
+    items, jobs = _custom("box", WORDS)
+    cue = items[0]["params"]["cues"][0]
+    mid = cue["w"][1]["s"] + 0.04                      # mid-glide to the 2nd word
+    js = """() => { const blk = document.querySelector('.cue.on > .blk');
+        const ink = blk.querySelector('.blk.ink'), hl = blk.querySelector('.hl');
+        if (!ink) return null;
+        const a = Array.from(blk.querySelectorAll(':scope > .mg-w')).map(e => e.getBoundingClientRect().left);
+        const b = Array.from(ink.querySelectorAll('.mg-w')).map(e => e.getBoundingClientRect().left);
+        return {clip: ink.style.clipPath, vis: getComputedStyle(ink).visibility,
+                dx: Math.max(...a.map((v, i) => Math.abs(v - b[i]))),
+                hl: [hl.offsetLeft + blk.clientLeft, hl.offsetWidth],
+                colors: Array.from(blk.querySelectorAll(':scope > .mg-w')).map(e => getComputedStyle(e).color)}; }"""
+    st = asyncio.run(_dom(jobs[0], [mid], js))[0]
+    assert st and st["vis"] == "visible" and st["dx"] < 0.6, st
+    assert st["clip"].startswith("inset(") and "round" in st["clip"], st
+    left = float(st["clip"].split()[3].rstrip("px"))
+    assert abs(left - st["hl"][0]) <= 1.0, st
+    assert len(set(st["colors"])) == 1, st         # the light words never turn dark
+
+
+@needs_browser
+def test_scrim_hugs_only_the_words_already_spoken(tmp_path, monkeypatch):
+    monkeypatch.setattr(motion_engine, "CACHE_DIR", str(tmp_path / "cache"))
+    items, jobs = _custom("clean", WORDS)
+    cue = next(c for c in items[0]["params"]["cues"] if len(c["w"]) >= 4)
+    js = """() => { const blk = document.querySelector('.cue.on > .blk');
+        if (!blk) return null;
+        const q = blk.querySelector('.scrim').getBoundingClientRect();
+        return {o: +blk.querySelector('.scrim').style.opacity, l: q.left, r: q.right,
+                words: Array.from(blk.querySelectorAll('.mg-w')).map(e => {
+                  const b = e.getBoundingClientRect();
+                  return [+getComputedStyle(e).opacity, b.left, b.right, b.top]; })}; }"""
+    before = round(cue["s"] - 0.1, 3)
+    times = [round(cue["w"][1]["s"] + 0.1, 3), round(cue["e"] - 0.2, 3)]
+    early, late = asyncio.run(_dom(jobs[0], times, js))
+    for st in (early, late):
+        shown = [w for w in st["words"] if w[0] > 0]
+        pad = shown[0][1] - st["l"] if len({w[3] for w in shown}) == 1 else None
+        assert shown and st["o"] > 0
+        if pad is not None:     # one line: the scrim ends one pad past the last spoken word
+            assert st["r"] <= max(w[2] for w in shown) + pad + 2, st
+    hidden = [w for w in early["words"] if w[0] == 0]
+    assert hidden and early["r"] < max(w[2] for w in hidden), early
+    assert early["r"] - early["l"] < late["r"] - late["l"]
+    if before > 0:
+        assert asyncio.run(_dom(jobs[0], [before], js))[0] is None

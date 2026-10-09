@@ -12,6 +12,8 @@ Each cue carries its vertical anchor ``y`` and band ``b`` (t/m/b) from the
 shot-aware placement track (or the style's position/anchor_y). The template
 keeps the whole block inside that band and the platform-safe area, so a
 look never grows onto the face the placement compiler steered around.
+Where the spatial index measured the plate, a cue also carries its mean luma
+``l`` (0-1) so premium looks firm up their scrim and shadow on bright plates.
 
 The caption track is split at natural gaps into segments of ~6–10 s. Each
 segment is an independent RenderJob carrying only its own cues, so segments
@@ -128,11 +130,36 @@ def _anchor_for(style, placement_track, src_mid):
     return _placement_for(style, placement_track, src_mid)[0]
 
 
+# A spatial sample this close (source seconds) speaks for the plate under a
+# cue; further away it may already be another shot.
+LUMA_NEAR_S = 2.0
+
+
+def _luma_samples(index):
+    out = []
+    for s in ((index or {}).get("spatial") or {}).get("samples") or []:
+        try:
+            out.append((float(s["t"]), float(s["mean_luma"]) / 255.0))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return sorted(out)
+
+
+def _luma_at(samples, src_t):
+    """Mean plate luma (0-1) of the nearest spatial sample, or None."""
+    best = None
+    for t, l in samples:
+        if abs(t - src_t) <= LUMA_NEAR_S and (best is None or abs(t - src_t) < best[0]):
+            best = (abs(t - src_t), l)
+    return None if best is None else round(best[1], 2)
+
+
 def cues(edl, index, tl):
     """[{s, e, y, b, k, w:[{t, s, e, x}]}] on the program clock, or [] when off.
 
     ``b`` is the placement band (t/m/b) the block must stay inside; ``k`` = 1
-    when the next cue follows without a pause (hard swap instead of a fade).
+    when the next cue follows without a pause (hard swap instead of a fade);
+    ``l`` (optional) is the nearest spatial sample's mean plate luma.
     """
     look = look_of(edl)
     if not look:
@@ -157,6 +184,7 @@ def cues(edl, index, tl):
     chunks = [ch for ch in caplib._premium_chunks_v2(words, max_w, cfg["chars"], p) if ch]
     emph = {caplib._norm_word(w) for w in (caps.get("emphasis_words") or []) if w}
     upper = bool(style.get("uppercase"))
+    lumas = _luma_samples(index)
     out = []
     prog_end = float(tl.out_duration)
     for i, ch in enumerate(chunks):
@@ -176,9 +204,13 @@ def cues(edl, index, tl):
             key = caplib._norm_word(w["w"])
             ws.append({"t": text, "s": round(float(w["t0"]), 3), "e": round(float(w["t1"]), 3),
                        "x": 1 if (key in emph or caplib._word_has_digit(w["w"])) else 0})
-        out.append({"s": round(s, 3), "e": round(e, 3), "y": round(y, 4), "b": band,
-                    "k": 1 if nxt is not None and nxt - e < CONTIGUOUS_S else 0,
-                    "w": ws})
+        cue = {"s": round(s, 3), "e": round(e, 3), "y": round(y, 4), "b": band,
+               "k": 1 if nxt is not None and nxt - e < CONTIGUOUS_S else 0,
+               "w": ws}
+        luma = _luma_at(lumas, src_mid) if lumas else None
+        if luma is not None:
+            cue["l"] = luma      # bright plates get a firmer scrim + shadow
+        out.append(cue)
     return out
 
 
@@ -261,9 +293,10 @@ def items(edl, index, tl):
     for k, seg in enumerate(_segments(allc)):
         s0 = max(0.0, seg[0]["s"] - lead)
         s1 = max(s0 + 0.1, seg[-1]["e"] - lead)
-        rebased = [{"s": rb(c["s"], s0), "e": rb(c["e"], s0), "y": c["y"], "b": c.get("b", "b"),
-                    "k": c.get("k", 0),
-                    "w": [dict(w, s=rb(w["s"], s0), e=rb(w["e"], s0)) for w in c["w"]]}
+        rebased = [dict({"s": rb(c["s"], s0), "e": rb(c["e"], s0), "y": c["y"], "b": c.get("b", "b"),
+                         "k": c.get("k", 0),
+                         "w": [dict(w, s=rb(w["s"], s0), e=rb(w["e"], s0)) for w in c["w"]]},
+                        **({"l": c["l"]} if "l" in c else {}))
                    for c in seg]
         out.append({"id": f"__captions_{k}", "template": TEMPLATE, "start": round(s0, 3),
                     "end": round(s1, 3), "params": dict(sp, cues=rebased),

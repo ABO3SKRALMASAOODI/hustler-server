@@ -18,9 +18,16 @@
   .cue.on{display:block}
   .blk{display:inline-block;position:relative;text-wrap:balance;vertical-align:top;isolation:isolate}
   /* premium looks carry no box: a very soft local scrim (a pocket of grade,
-     invisible on dark footage) keeps near-white type legible on white shirts */
-  .scrim{position:absolute;left:-.7em;right:-.7em;top:-.45em;bottom:-.45em;z-index:-1;pointer-events:none;
-    background:radial-gradient(closest-side,rgba(0,0,0,.30),rgba(0,0,0,.16) 55%,rgba(0,0,0,0))}
+     invisible on dark footage) keeps near-white type legible on white shirts.
+     It hugs the words revealed so far (geometry + opacity set per frame), so
+     no smudge ever sits where nothing is written yet. */
+  .scrim{position:absolute;left:0;top:0;width:0;height:0;z-index:-1;pointer-events:none;opacity:0;
+    background:radial-gradient(closest-side,rgba(0,0,0,.42),rgba(0,0,0,.22) 55%,rgba(0,0,0,0))}
+  /* bright plates (cue luma hint): a firmer shadow core behind near-white type */
+  .cue.lit.L-clean .blk,.cue.lit.L-editorial .blk,.cue.lit.L-serif .blk,.cue.lit.L-lockup .sm{
+    text-shadow:0 1px 3px rgba(0,0,0,.56),0 3px 16px rgba(0,0,0,.56),0 0 44px rgba(0,0,0,.32)}
+  .cue.lit.L-editorial .srf,.cue.lit.L-lockup .hero{
+    text-shadow:0 1px 4px rgba(0,0,0,.52),0 4px 22px rgba(0,0,0,.52),0 0 56px rgba(0,0,0,.30)}
   .mg-w{transform-origin:50% 72%}
   .row{display:block;white-space:nowrap}
   .row.wrap{white-space:normal;text-wrap:balance}
@@ -57,6 +64,10 @@
   .L-box .blk{word-spacing:.1em}
   .L-box .hl{position:absolute;border-radius:.2em;z-index:0;left:0;top:0;opacity:0}
   .L-box .mg-w{position:relative;z-index:1}
+  /* dark ink = an identical copy of the text clipped to the highlight rect,
+     so the ink always matches the gliding box exactly (never dark-on-dark) */
+  .L-box .blk.ink{position:absolute;left:0;top:0;margin:0;max-width:none;box-sizing:border-box;
+    background:none;box-shadow:none;border-color:transparent;z-index:2;pointer-events:none;visibility:hidden}
   /* serif: sans phrase, emphasis words inline in accent serif italic */
   .L-serif .blk{font-family:'Inter Display','Inter',sans-serif;font-weight:700;letter-spacing:-0.02em;line-height:1.14;
     text-shadow:0 1px 3px rgba(0,0,0,.42),0 3px 16px rgba(0,0,0,.48),0 0 44px rgba(0,0,0,.28)}
@@ -94,17 +105,21 @@
   const COLW = SAFE.x1 - SAFE.x0;
   const CFG = {
     // fs = base font px on 9:16 at size 1; lines = max wrapped lines
-    clean:     { fs: 64, lines: 2, fade: 0.12, accent: '#F3CF8B', premium: true },
-    editorial: { fs: 64, lines: 2, fade: 0.14, accent: null, premium: true, hero: 1.8 },
+    clean:     { fs: 70, lines: 2, fade: 0.12, accent: '#F3CF8B', premium: true },
+    editorial: { fs: 72, lines: 2, fade: 0.14, accent: null, premium: true, hero: 1.8 },
     lockup:    { fs: 44, lines: 2, fade: 0.12, accent: null, premium: true, heroMin: 2.3, heroMax: 4.9, mid: 1.6 },
     pop:       { fs: 94, lines: 1, fade: 0.08, accent: '#FFD84D' },
-    box:       { fs: 58, lines: 2, fade: 0.10, accent: '#FFD84D' },
-    serif:     { fs: 60, lines: 2, fade: 0.14, accent: '#F3C96B', premium: true },
+    box:       { fs: 62, lines: 2, fade: 0.10, accent: '#FFD84D' },
+    serif:     { fs: 66, lines: 2, fade: 0.14, accent: '#F3C96B', premium: true },
     glow:      { fs: 74, lines: 2, fade: 0.12, accent: '#7CC4FF' },
     stack:     { fs: 48, lines: 2, fade: 0.10, accent: '#FFD84D', heroMin: 2.6, heroMax: 5.6, mid: 1.7 },
     mono:      { fs: 46, lines: 2, fade: 0.10, accent: '#7CFFB2' },
   }[look];
   if (ar < 0.95 && CFG.heroMax) { CFG.heroMax *= 0.78; CFG.heroMin = Math.min(CFG.heroMin, CFG.heroMax * 0.6); }
+  // Scrim: pads around the revealed words (x, y in units of the cue font
+  // size), the ease as it grows to a new word, and its strength (x the
+  // gradient's .42 core) on ordinary vs bright plates (luma hint >= LIT).
+  const SCRIM_PAD = [0.6, 0.4], SCRIM_T = 0.08, SCRIM_OP = [0.6, 0.85], LIT = 0.55;
   const isHex = v => typeof v === 'string' && /^#[0-9A-Fa-f]{6}$/.test(v);
   const baseColor = isHex(P.color) ? P.color.toUpperCase() : '#FFFFFF';
   // Premium looks sit on near-white, never stark #FFF (reads printed, not screen).
@@ -128,10 +143,11 @@
 
   // Hero: the emphasised word (numbers count) — the longest wins; with no
   // emphasis and allowFallback, the longest content word, later preferred.
+  // A connector ('out', 'the') never becomes a hero, even when emphasised.
   function pickHero(ws, allowFallback) {
     let best = -1, score = -1;
     ws.forEach((w, k) => {
-      if (!w.x) return;
+      if (!w.x || (STOP.has(key(w.t)) && !/\d/.test(w.t))) return;
       const sc = 100 + key(w.t).length + k * 0.01;
       if (sc > score) { score = sc; best = k; }
     });
@@ -232,7 +248,9 @@
 
   function buildLockup(c, blk) {
     let hero = pickHero(c.w, true);
-    if (hero < 0 && c.w.length === 1) hero = 0;   // a one-word beat is always the hero
+    // a one-word beat is the hero — unless it is a bare connector ('Yeah',
+    // 'and'), which reads as a mid-size row instead of a slammed 'THE'
+    if (hero < 0 && c.w.length === 1 && (!STOP.has(key(c.w[0].t)) || /[?!]/.test(c.w[0].t))) hero = 0;
     c.heroK = hero;
     if (hero < 0) {
       // connector-only phrase ("but it could"): one mid-size row, no fake hero
@@ -284,7 +302,8 @@
       const lines = lineCount(c.flowWords.length ? c.flowWords : c.words);
       const wide = r.width > COLW + 1 || c.blk.scrollWidth > COLW + 2;
       if (!wide && lines <= maxLines && r.height <= zoneH) break;
-      if (fs <= base * 0.5) break;
+      // a word wider than the column keeps shrinking: never clip off-frame
+      if (fs <= base * (wide ? 0.25 : 0.5)) break;
       fs *= 0.95;
     }
     return fs;
@@ -329,7 +348,7 @@
       const heroW = c.heroRow ? c.heroRow.scrollWidth : 0;
       const wide = r.width > COLW + 1 || c.blk.scrollWidth > COLW + 2 || heroW > COLW + 1;
       if (!wide && lines <= CFG.lines && r.height <= zoneH) break;
-      if (fs <= base * 0.5) break;
+      if (fs <= base * (wide ? 0.25 : 0.5)) break;
       fs *= 0.95;
     }
     return fs;
@@ -386,7 +405,9 @@
                   w: src.w.map(w => ({ t: String(w.t || ''), s: +w.s || 0, e: +w.e || 0, x: !!w.x })),
                   words: [], flowWords: [] };
       if (c.e - c.s < 0.04) return;
-      const el = MG.el('div', `cue L-${look}`, null, root);
+      // l = plate luma hint (0-1) under the caption, when the pipeline knows it
+      c.lit = CFG.premium && +src.l >= LIT;
+      const el = MG.el('div', `cue L-${look}${c.lit ? ' lit' : ''}`, null, root);
       el.style.left = SAFE.x0 + 'px'; el.style.width = COLW + 'px'; el.style.textAlign = align;
       const blk = MG.el('div', 'blk', null, el);
       blk.style.maxWidth = COLW + 'px';
@@ -397,8 +418,11 @@
         if (userWeight && target) target.style.fontWeight = userWeight;
       }
       c.el = el; c.blk = blk;
-      // right-to-left scripts keep their reading order (words are inline boxes)
-      if (c.w.some(w => /[\u0590-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFF]/.test(w.t))) blk.dir = 'rtl';
+      // right-to-left scripts keep their reading order (words are inline
+      // boxes); a stray RTL word inside an LTR phrase keeps the phrase LTR
+      const isRtl = w => /[\u0590-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFF]/.test(w.t);
+      const nRtl = c.w.filter(isRtl).length;
+      if (2 * nRtl > c.w.length || (nRtl && 2 * nRtl === c.w.length && isRtl(c.w[0]))) blk.dir = 'rtl';
       el.classList.add('on');
       const zone = zoneOf(c), zoneH = zone[1] - zone[0];
       const base = CFG.fs * size * K;
@@ -418,12 +442,13 @@
         if (look === 'pop') blk.style.whiteSpace = 'nowrap';
         c.fs = fitFlow(c, base, CFG.lines, zoneH);
         if (look === 'box') {
+          c.ink = blk.cloneNode(true);       // the dark copy, before the box joins
           c.hl = MG.el('span', 'hl', null, blk);
           c.hl.style.background = accent;
           blk.insertBefore(c.hl, blk.firstChild);
         }
       }
-      if (CFG.premium) blk.insertBefore(MG.el('span', 'scrim'), blk.firstChild);
+      if (CFG.premium) c.scrim = blk.insertBefore(MG.el('span', 'scrim'), blk.firstChild);
       // vertical placement: block centre on the anchor, kept inside its
       // measured band (face-safe) and the platform-safe area.
       let r = blk.getBoundingClientRect();
@@ -433,20 +458,34 @@
       else top = c.b === 't' ? zone[1] - h : c.b === 'm' ? (zone[0] + zone[1] - h) / 2 : zone[0];
       el.style.top = Math.round(top) + 'px';
       r = blk.getBoundingClientRect();
-      // measure word geometry (box highlight, mono caret) relative to the block
-      if (look === 'box' || look === 'mono') {
-        c.words.forEach(o => {
-          const wr = o.el.getBoundingClientRect();
-          o.box = [wr.left - r.left, wr.top - r.top, wr.width, wr.height];
-          if (o.chars) o.cbox = o.chars.map(ch => { const q = ch.getBoundingClientRect(); return [q.right - r.left, q.top - r.top, q.height]; });
+      // word geometry relative to the block's border box (scrim, box
+      // highlight, mono caret) and on the frame (punch/slam headroom)
+      c.words.forEach(o => {
+        const wr = o.el.getBoundingClientRect();
+        o.box = [wr.left - r.left, wr.top - r.top, wr.width, wr.height];
+        o.cx = (wr.left + wr.right) / 2; o.hw = wr.width / 2;
+        if (o.chars) o.cbox = o.chars.map(ch => { const q = ch.getBoundingClientRect(); return [q.right - r.left, q.top - r.top, q.height]; });
+      });
+      c.bl = blk.clientLeft; c.bt = blk.clientTop; c.bw = r.width; c.bh = r.height;
+      if (c.ink) {
+        const ink = c.ink;
+        ink.classList.add('ink');
+        Object.assign(ink.style, { width: r.width + 'px', left: -c.bl + 'px', top: -c.bt + 'px', color: '#0B0B0C' });
+        blk.appendChild(ink);
+        c.inkWords = Array.from(ink.querySelectorAll('.mg-w'));
+        // the copy must sit on the very same pixels; otherwise fall back
+        const off = c.inkWords.length !== c.words.length || c.words.some((o, i) => {
+          const a = o.el.getBoundingClientRect(), b = c.inkWords[i].getBoundingClientRect();
+          return Math.abs(a.left - b.left) > 0.6 || Math.abs(a.top - b.top) > 0.6 || Math.abs(a.width - b.width) > 0.6;
         });
-        if (look === 'mono') {
-          const f0 = c.words[0].chars[0].getBoundingClientRect();
-          c.caret0 = [f0.left - r.left, f0.top - r.top];
-          c.charH = f0.height;
-          c.blkW = r.width; c.blkH = r.height;
-          c.caret.style.height = (f0.height * 0.78).toFixed(1) + 'px';
-        }
+        if (off) { ink.remove(); c.ink = null; }
+      }
+      if (look === 'mono') {
+        const f0 = c.words[0].chars[0].getBoundingClientRect();
+        c.caret0 = [f0.left - r.left, f0.top - r.top];
+        c.charH = f0.height;
+        c.blkW = r.width; c.blkH = r.height;
+        c.caret.style.height = (f0.height * 0.78).toFixed(1) + 'px';
       }
       c.rect = [r.left, r.top, r.right, r.bottom];
       el.classList.remove('on');
@@ -469,6 +508,11 @@
       if (nxt && nxt.s < c.e) c.e = nxt.s;            // never two cues at once
       c.hardOut = HARD || c.k || (nxt && nxt.s - c.e < 0.05);
       c.fadeD = Math.min(CFG.fade, Math.max(0, (c.e - c.s) * 0.3));
+    });
+    cues.forEach((c, i) => {
+      const prev = cues[i - 1];
+      // a hard swap in continuous speech: the new phrase must not blink
+      const swapIn = !!prev && (prev.k || c.s - prev.e < 0.05);
       c.words.forEach(o => {
         let kind = 'pop';
         if (!HARD) {
@@ -490,7 +534,20 @@
           o.d = Math.max(0.05, Math.min(n / 32, Math.max(0.05, (o.w.e - o.w.s) * 0.9), 0.4));
         }
         if (o.R >= c.e) o.R = Math.max(c.s, c.e - F);
-        win(o.R, o.R + o.d + G);
+        // An entrance whose pre-roll was clamped to the cue start begins
+        // where it would have been by then (a word that 'rises' from 0 on
+        // the cue's first frame would leave that frame empty).
+        o.p0 = 0;
+        if (o.d > 0 && (kind === 'rise' || kind === 'slam')) {
+          o.p0 = MG.clamp((o.R - (o.w.s - en.early)) / o.d, 0, 0.6);
+          if (swapIn && o.R <= c.s + 1e-6) {
+            if (kind === 'rise') o.p0 = Math.max(o.p0, 0.4);
+            o.solid = true;                  // slam: full opacity, keep the settle
+          }
+        }
+        // punch / slam overshoot never pushes a word past the frame edge
+        o.smax = o.hw > 0 ? Math.max(1, Math.min(o.cx - 24, W - 24 - o.cx) / o.hw) : 1;
+        win(o.R, o.R + Math.max(o.d, CFG.premium && !HARD ? SCRIM_T : 0) + G);
       });
       win(c.s, c.s + (look === 'box' || look === 'mono' ? 0.14 : 0) + G);
       if (c.hardOut) win(c.e, c.e + G); else win(c.e - c.fadeD, c.e + G);
@@ -505,7 +562,8 @@
     });
     MG.active(Wn);
     if (cues.length) {
-      const pad = look === 'glow' ? 80 : look === 'pop' ? 70 : look === 'stack' ? 120 : 46;
+      let pad = look === 'glow' ? 80 : look === 'pop' ? 70 : look === 'stack' ? 120 : 46;
+      if (CFG.premium) pad = Math.max(pad, SCRIM_PAD[0] * Math.max(...cues.map(c => c.fs)) + 4);
       MG.box = [Math.min(...cues.map(c => c.rect[0])) - pad, Math.min(...cues.map(c => c.rect[1])) - pad,
                 Math.max(...cues.map(c => c.rect[2])) + pad, Math.max(...cues.map(c => c.rect[3])) + pad];
     }
@@ -549,32 +607,63 @@
     c.words.forEach((o, i) => {
       const on = t >= o.R - 1e-6;
       if (on) active = i;
-      const p = on ? MG.range(t, o.R, o.d) : 0;
+      // p0: an entrance whose pre-roll was clamped starts part-way through
+      const p = on ? MG.range(t, o.R - o.p0 * o.d, o.d) : 0;
+      let op = on ? 1 : 0;
       switch (o.kind) {
-        case 'pop': o.el.style.opacity = on ? 1 : 0; break;
-        case 'ghost': o.el.style.opacity = !on ? 0 : t < o.R + 2 * F - 1e-6 ? 0.38 : 1; break;
+        case 'pop': break;
+        case 'ghost': op = !on ? 0 : t < o.R + 2 * F - 1e-6 ? 0.38 : 1; break;
         case 'rise': {
-          if (!on) { o.el.style.opacity = 0; break; }
+          if (!on) break;
           const e = MG.ease.outCubic(p);
-          setWord(o, { opacity: Math.min(1, p * 1.7), y: (1 - e) * (o.role === 'em' ? 12 : 10), blur: (1 - e) * 7 });
+          op = Math.min(1, p * 1.7);
+          setWord(o, { opacity: op, y: (1 - e) * (o.role === 'em' ? 12 : 10), blur: (1 - e) * 7 });
           break;
         }
         case 'scale': {
-          if (!on) { o.el.style.opacity = 0; break; }
+          if (!on) break;
           const e = MG.ease.outCubic(p);
-          setWord(o, { opacity: 1, scale: 1 + 0.13 * (1 - e) });
+          setWord(o, { opacity: 1, scale: 1 + Math.min(0.13, o.smax - 1) * (1 - e) });
           break;
         }
         case 'slam': {
-          if (!on) { o.el.style.opacity = 0; break; }
+          if (!on) break;
           const e = MG.ease.outQuart(p);
-          setWord(o, { opacity: Math.min(1, p * 4), scale: 1 + 0.3 * (1 - e), blur: (1 - Math.min(1, p * 1.6)) * 5 });
+          op = o.solid ? 1 : Math.min(1, p * 4);
+          setWord(o, { opacity: op, scale: 1 + Math.min(0.3, o.smax - 1) * (1 - e), blur: (1 - Math.min(1, p * 1.6)) * 5 });
           break;
         }
-        case 'light': case 'glide': o.el.style.opacity = 1; break;
-        case 'type': break;
+        case 'light': case 'glide': case 'type': break;
       }
+      o.op = op;
+      // box/glow show the whole phrase from the cue start; mono types chars
+      if (o.kind === 'light' || o.kind === 'glide') o.el.style.opacity = 1;
+      else if (o.kind !== 'type' && (!on || o.kind === 'pop' || o.kind === 'ghost')) o.el.style.opacity = op;
     });
+
+    if (c.scrim) {
+      // hug the words revealed so far; grow to each new word over SCRIM_T
+      const rev = c.words.filter(o => t >= o.R - 1e-6);
+      if (!rev.length) c.scrim.style.opacity = 0;
+      else {
+        const lastR = Math.max(...rev.map(o => o.R));
+        const union = ws => ws.reduce((u, o) => u ? [Math.min(u[0], o.box[0]), Math.min(u[1], o.box[1]),
+          Math.max(u[2], o.box[0] + o.box[2]), Math.max(u[3], o.box[1] + o.box[3])]
+          : [o.box[0], o.box[1], o.box[0] + o.box[2], o.box[1] + o.box[3]], null);
+        const nb = union(rev), older = rev.filter(o => o.R < lastR - 1e-6);
+        let b = nb;
+        if (older.length && !HARD) {
+          const q = MG.ease.outCubic(MG.range(t, lastR, SCRIM_T)), pb = union(older);
+          b = nb.map((v, i) => MG.lerp(pb[i], v, q));
+        }
+        const first = rev.reduce((a, o) => (o.R < a.R ? o : a), rev[0]);
+        const px = SCRIM_PAD[0] * c.fs, py = SCRIM_PAD[1] * c.fs;
+        Object.assign(c.scrim.style, {
+          left: (b[0] - px).toFixed(1) + 'px', top: (b[1] - py).toFixed(1) + 'px',
+          width: (b[2] - b[0] + 2 * px).toFixed(1) + 'px', height: (b[3] - b[1] + 2 * py).toFixed(1) + 'px',
+          opacity: (SCRIM_OP[c.lit ? 1 : 0] * first.op).toFixed(3) });
+      }
+    }
 
     if (look === 'pop') {
       c.words.forEach((o, i) => { o.el.style.color = (i === active || (o.w.x && i <= active)) ? accent : color; });
@@ -594,17 +683,32 @@
           : '0 .04em .2em rgba(0,0,0,.45)';
       });
     } else if (look === 'box') {
-      if (active < 0) { c.hl.style.opacity = 0; c.words.forEach(o => { o.el.style.color = color; }); }
-      else {
+      if (active < 0) {
+        c.hl.style.opacity = 0;
+        if (c.ink) c.ink.style.visibility = 'hidden';
+        c.words.forEach(o => { o.el.style.color = color; });
+      } else {
         const cur = c.words[active], prev = c.words[Math.max(0, active - 1)];
         const g = HARD || active === 0 ? 1 : MG.ease.outCubic(MG.range(t, cur.R, 0.11));
-        // the dark ink follows the highlight, not the clock
-        const inked = g >= 0.5 ? active : Math.max(0, active - 1);
-        c.words.forEach((o, i) => { o.el.style.color = i === inked ? '#0B0B0C' : color; });
         const b = cur.box.map((v, i) => MG.lerp(prev.box[i], v, g));
         const px = 0.11 * c.fs, py = 0.015 * c.fs;
-        Object.assign(c.hl.style, { left: (b[0] - px).toFixed(1) + 'px', top: (b[1] - py).toFixed(1) + 'px',
-          width: (b[2] + 2 * px).toFixed(1) + 'px', height: (b[3] + 2 * py).toFixed(1) + 'px', opacity: 1 });
+        // highlight rect in the block's border-box coordinates
+        const X = b[0] - px, Y = b[1] - py, BW = b[2] + 2 * px, BH = b[3] + 2 * py;
+        Object.assign(c.hl.style, { left: (X - c.bl).toFixed(1) + 'px', top: (Y - c.bt).toFixed(1) + 'px',
+          width: BW.toFixed(1) + 'px', height: BH.toFixed(1) + 'px', opacity: 1 });
+        if (c.ink) {
+          // dark copy of the text clipped to exactly the box: whatever part
+          // of a word the gliding box covers is dark, the rest stays light
+          const rad = (0.2 * c.fs).toFixed(1);
+          c.ink.style.clipPath = `inset(${Y.toFixed(1)}px ${(c.bw - X - BW).toFixed(1)}px ` +
+            `${(c.bh - Y - BH).toFixed(1)}px ${X.toFixed(1)}px round ${rad}px)`;
+          c.ink.style.visibility = 'visible';
+        } else {
+          // no pixel-exact copy: ink a word only while the box mostly covers it
+          c.words.forEach((o, i) => {
+            o.el.style.color = (i === active && g >= 0.9) || (i === active - 1 && g <= 0.1) ? '#0B0B0C' : color;
+          });
+        }
       }
     } else if (look === 'mono') {
       let caretAt = c.caret0, typing = false;
