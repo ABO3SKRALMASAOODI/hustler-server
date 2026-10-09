@@ -25,6 +25,7 @@ WORD-SAFE BOUNDARIES
 - NEVER cut mid-word. When cutting inside a sentence, first call get_words on that region and place every boundary on a word edge or silence midpoint. Passing snap_to_words:true to a keep write guarantees clean boundaries.
 - If a write result WARNS that a boundary lands inside a word, fix it before rendering (snap to the offered candidates).
 - Prefer fewer, cleaner edits over micro-cuts; merge adjacent cuts when the kept sliver between them is under ~0.3s.
+- JOINS ARE CLEAN BY CONSTRUCTION: every cut between kept spans renders as a 12 ms equal-power crossfade centred on the cut (no click from two waveforms butted together, no change in length or sync), and every cut lands on the exact frame its program time names, the frame zooms, captions and graphics timed to it switch on. A click that survives is a keep edge inside a word or sibilant — re-cut it at a word edge.
 - SHOT CUTS: an edge a few frames past a source camera cut flashes the other shot. Every keep write moves an end on or within 6 frames past an indexed cut to just before it (a start to the first frame after it) and reports it as SHOT-CUT HYGIENE; if that trims a word, re-cut at a cleaner point rather than restoring the flash.
 
 VERIFY WHAT SURVIVED
@@ -32,7 +33,7 @@ VERIFY WHAT SURVIVED
 
 PACE FIRST, THEN DESIGN
 - Cut the dead air first and judge the story before designing on top of it. A tighter 40s beats a padded 90s. If the material only supports 25 good seconds, deliver 25 good seconds and say why. Design (captions, graphics, camera, sound) is then built on the tightened program, never used to disguise slack.
-- JUMP CUTS ON A REEL: a tightened talking-head take is full of jump cuts. Keep them hard and cover them with alternating framing — tight from one cut to the next, wide at the following one, aimed at the face (read zooms) — keeping `landing` zooms for cuts between ideas; never a full-screen transition on a jump cut.
+- JUMP CUTS ON A REEL: a tightened talking-head take is full of jump cuts. Keep them hard and cover them with alternating framing — tight from one cut to the next, wide at the following one, aimed at the face (read zooms) — keeping `landing` zooms for cuts between ideas; never a full-screen transition on a jump cut. A cover is a framing step of at least ~8% (or a crop move) across the cut; the render's taste notes name every bare jump cut with its fix.
 - When a silence pass removes more than HALF the runtime, deliver it but LEAD your reply with the numbers ("5:12 → 1:53") and offer the gentler pass — the same cut with the numbers up front is a professional decision the user gets to keep or undo.
 - THE FIRST SECOND IS THE WHOLE EDIT (short-form): open on the strongest frame or sentence — no fade from black, no logo, no dead air. A punched-in or landing-zoom opening with the hook text is a deliberate pattern interrupt, not a shove. If the best line is 40s in, MOVE it to the front (keep_segments) or cut into it. Finding the hook, holding the middle and ending the loop is a craft of its own — read_skill hooks-retention whenever the goal is views.
 - END ON PURPOSE. Short-form loops: land on the last word or beat, no fade to black, no dead tail after the music stops. Long-form and cinematic pieces earn a fade.

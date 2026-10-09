@@ -1165,7 +1165,7 @@ def test_the_render_stamps_its_camera_version_and_the_splice_checks_it():
     import inspect
     src = inspect.getsource(renderer)
     assert '"cam_v": config.CAMERA_VERSION' in src
-    assert "camera_current(pm, prev_row[\"json\"])" in src
+    assert "camera_current(pm, prev_row[\"json\"], index)" in src
 
 
 def _chain_zoom(chain, n, w=1080):

@@ -1726,8 +1726,9 @@ check("first block fades out only (no fade-in at program start)",
       "fade=t=in:st=0:d=0.30:c=black[vtr0]" not in g_tr)
 check("second block fades in only (no fade-out at program end)",
       "fade=t=in:st=0:d=0.30:c=black" in g_tr)
-check("audio is untouched by transitions (no afade at junctions)",
-      g_tr.count("afade") == 0)
+check("audio is untouched by transitions (only the join's micro-crossfade)",
+      all("curve=qsin" in f for f in g_tr.split(",")
+          if f.startswith("afade")) and "afade=t=out:st=4.70" not in g_tr)
 wt_edl = validate_edl(
     {"keep": [[0, 5], [10, 20]],
      "effects": {"transition": {"style": "dip_white",

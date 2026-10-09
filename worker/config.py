@@ -1963,7 +1963,24 @@ TRANSITION_VERSION = 3  # v3: zoom_punch no longer tmix-blends across concat
 # punches, whole-pixel framing, inclusive window ends), and a stitch would
 # mix the two cameras in one preview. A render is never re-encoded just for
 # being older when it is served for its OWN version.
-CAMERA_VERSION = 1
+# v2 (cut hygiene, Oct 2026): a zoom edge within 4 frames of a program cut is
+# moved onto the cut and holds through it (camera.hold_through_cuts). Only
+# those zooms render differently, so a v1 render is still current for an
+# EDL whose zooms the rule leaves untouched (renderer.camera_current).
+CAMERA_VERSION = 2
+
+# ── The block clock (cut hygiene, Oct 2026) ─────────────────────────────
+# Stamped as `clock_v` on every render and compared, like `cam_v`, ONLY where
+# a previous render's pixels are spliced into or reused for a NEW version
+# (stitched previews, picture reuse with new audio), and only for programmes
+# of two or more blocks. v1: every concat block of a normalized programme is
+# an exact number of frames starting on the frame its Timeline start names,
+# with its sound exactly as long (renderer.block_clock), and every cut
+# between kept spans is a centred micro-crossfade. Older renders placed each
+# block after the longer of its picture and sound, a fraction of a frame
+# off — new sound or new pieces on that old picture would sit up to a frame
+# per cut out of step. A render served for its OWN version keeps its cache.
+BLOCK_CLOCK_VERSION = 1
 
 # ── Transcript caption timing (caption hygiene, Oct 2026) ─────────────────
 # Stamped as `cap_v` on every render and compared, like `cam_v`, ONLY where a

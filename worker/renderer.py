@@ -57,6 +57,18 @@ from timeline import Timeline, merge_spans, transition_junctions
 DUCK_DB = -12.0            # music under speech AND program audio under voiceover
 MAX_ENABLE_SPANS = 80
 AUDIO_NORM = "aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo"
+# Audio at keep joins (cut hygiene, Oct 2026). A join that skips source time
+# butted two waveforms together at arbitrary phase — and wherever a block's
+# picture ran longer than its sound, `concat` put up to a frame of silence
+# between them: a click on each side (the judged Jobs short measured ~26 dB
+# over the local HF level at its joins). On the block clock (block_clock)
+# nothing gaps, and each such join is an equal-power (qsin) crossfade this
+# long, CENTRED on the cut: each side lends the other half of it from its
+# source handle, so every block keeps its exact length and the picture its
+# sync. Where footage meets a spliced insert there is no shared handle, and
+# off the clock a join may still gap, so those sides fade over JOIN_FADE_S.
+JOIN_XFADE_S = 0.012
+JOIN_FADE_S = 0.006
 _RENDER_DETAIL = ContextVar("render_detail", default=None)
 _RENDER_JOB_TYPE = ContextVar("render_job_type", default=None)
 CANVAS_MAX_DIRECT_INPUTS = 8
@@ -791,7 +803,7 @@ def preview_geometry(W, H, fps):
 
 def _normalize_video(parts, in_label, out_label, W, H, fps, mode, uid,
                      focus=None, seg_dur=None, picture=None, grade=None,
-                     src_size=None):
+                     src_size=None, frames=None):
     """Append graph parts that bring in_label to exactly WxH @ fps, sar 1.
     mode: crop (center-crop), pad (black bars), pad_blur (blurred backdrop).
 
@@ -840,6 +852,14 @@ def _normalize_video(parts, in_label, out_label, W, H, fps, mode, uid,
     (_graded_black). build_filtergraph decides when this is allowed at all.
     src_size: the (w, h) of the frames entering the block when known — it
     picks the grade position and the up-scale resampler (frame_fit_filter).
+
+    frames (cut hygiene, Oct 2026): the block's EXACT frame count on the
+    programme's block clock (build_filtergraph). The last frame is cloned
+    twice ahead of `fps` and the block cut to `frames` after it — the bound
+    is then a frame count, not a time — so its length no longer depends on
+    where the source's frame grid falls or on how an ffmpeg build's `fps`
+    ends a stream, and the cut lands on the frame the camera, captions and
+    sound expect.
     """
     if picture:
         x, y, pw, ph = picture_pixels(W, H, picture)
@@ -847,14 +867,25 @@ def _normalize_video(parts, in_label, out_label, W, H, fps, mode, uid,
         bars = _graded_black(grade) if grade else "black"
         _normalize_video(parts, in_label, inner, pw, ph, fps, mode, uid + "p",
                          focus=focus, seg_dur=seg_dur,
-                         grade=grade if bars else None, src_size=src_size)
+                         grade=grade if bars else None, src_size=src_size,
+                         frames=frames)
         late = f",{grade},format=yuv420p" if grade and not bars else ""
         parts.append(f"[{inner}]pad={W}:{H}:{x}:{y}:color={bars or 'black'}"
                      f"{late}[{out_label}]")
         return
     bound = ("" if seg_dur is None
              else f"trim=end={float(seg_dur):.3f},setpts=PTS-STARTPTS,")
-    tail = f"fps={fps:.3f},{bound}setsar=1,format=yuv420p"
+    lead = ""
+    if frames is not None and seg_dur is not None:
+        # The bound is the frame count. Two clones go in BEFORE `fps`: how a
+        # build's `fps` ends a stream (on the last frame's timestamp, or past
+        # it) decides whether the last real frame is emitted, and with the
+        # clones behind it, it always is. They are shown only when the clock
+        # gives the block a frame more than its source span holds.
+        lead = "tpad=stop_mode=clone:stop=2,"
+        bound = (f"trim=end_frame={max(1, int(frames))},"
+                 "setpts=PTS-STARTPTS,")
+    tail = f"{lead}fps={fps:.3f},{bound}setsar=1,format=yuv420p"
     # Where the grade lands when it cannot go earlier: after the block's own
     # format=yuv420p, i.e. on exactly the frames the post-concat grade saw.
     late = f",{grade},format=yuv420p" if grade else ""
@@ -1226,6 +1257,206 @@ def zoom_state_at(zooms, t, out_duration, size=None):
                 camera.cover_zoom(rot, amp,
                                   camera.aspect_k(*(size or (9, 16)))))
     return z, _clip01(0.5 + cxo), _clip01(0.5 + cyo)
+
+
+def _aim_at(track, t, base):
+    """(x, y, mode) of the crop at source second t — build_filtergraph's
+    _frame_for, reduced to what changes the picture."""
+    for sp in track:
+        try:
+            if float(sp.get("t0", 0)) <= t <= float(sp.get("t1", 0)):
+                return (sp["x"] if sp.get("x") is not None else base[0],
+                        sp["y"] if sp.get("y") is not None else base[1],
+                        sp.get("mode") or base[2])
+        except (TypeError, ValueError, AttributeError):
+            continue
+    return base
+
+
+def camera_cuts(edl, index, tl, fps=None, src_fps=None, origin=None):
+    """Program seconds where the PICTURE changes shot — what a zoom edge
+    snaps onto and holds through (camera.hold_through_cuts).
+
+    Every keep join that skips source time and both edges of every insert
+    (captions.program_cuts); every indexed camera cut inside a kept span —
+    including the one a source-contiguous join was split for; and every
+    focus_track handoff where the crop's aim or mode changes. Source-clock
+    edges are placed where the renderer's trims put the new shot's first
+    frame (focus_handoff, half a frame before it), so the camera's
+    half-open windows split on the same frame as the picture."""
+    if tl is None:
+        return []
+    cuts = set(caplib.program_cuts(tl))
+    if not getattr(tl, "segs", None):
+        # A canvas programme is its inserts, cut one to the next.
+        for ws, wd in tl.insert_positions():
+            cuts.update((ws, ws + wd))
+    video = (index or {}).get("video") or {}
+    try:
+        # The same frame rate build_filtergraph splits focus handoffs on.
+        sfps = float(src_fps or fps or video.get("fps") or 30.0)
+    except (TypeError, ValueError):
+        sfps = 30.0
+    out_fps = float(fps or sfps)
+
+    def at_source(x):
+        h = focus_handoff(x, sfps, origin, out_fps)
+        for s, e in tl.segs:
+            if s + 1e-3 < h < e - 1e-3:
+                p = tl.src_to_out(h)
+                if p is not None:
+                    cuts.add(p)
+                return
+
+    for shot in (index or {}).get("shots") or []:
+        try:
+            c = float(shot["start"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if c > 0.0:
+            at_source(c)
+    frame = edl.get("frame") if isinstance(edl.get("frame"), dict) else {}
+    track = [sp for sp in (frame or {}).get("focus_track") or []
+             if isinstance(sp, dict)]
+    if track:
+        base = (frame.get("focus_x"), frame.get("focus_y"),
+                frame.get("mode") or "crop")
+        edges = set()
+        for sp in track:
+            for key in ("t0", "t1"):
+                try:
+                    edges.add(float(sp[key]))
+                except (KeyError, TypeError, ValueError):
+                    continue
+        for edge in sorted(edges)[1:-1]:
+            if _aim_at(track, edge - 1e-3, base) != \
+                    _aim_at(track, edge + 1e-3, base):
+                at_source(edge)
+    end = float(tl.out_duration)
+    return sorted(round(c, 4) for c in cuts if 1e-3 < c < end - 1e-3)
+
+
+def camera_zooms(edl, index, tl=None, fps=None, src_fps=None, origin=None):
+    """The EDL's zooms as the camera renders them: every edge near a program
+    cut moved onto it and held through it (camera.hold_through_cuts). The
+    renderer's camera and its python mirrors (look_at output frames) read
+    this one list."""
+    zooms = list(((edl or {}).get("effects") or {}).get("zooms") or [])
+    if not zooms:
+        return zooms
+    if tl is None:
+        tl = Timeline(edl.get("keep") or [], edl.get("inserts") or [],
+                      edl.get("speed"))
+    try:
+        fps = float(fps or ((index or {}).get("video") or {}).get("fps")
+                    or 30.0)
+    except (TypeError, ValueError):
+        fps = 30.0
+    return camera.hold_through_cuts(
+        zooms, camera_cuts(edl, index, tl, fps, src_fps, origin), fps,
+        tl.out_duration)
+
+
+def first_frame_at(t, fps):
+    """The first frame index n whose time n/fps is at or after programme
+    second t — the frame the camera's half-open windows (camera.window_gate,
+    on t rounded to the millisecond) switch on, evaluated the way ffmpeg
+    evaluates (on-1)/fps."""
+    fps = round(float(fps), 3)
+    t = round(float(t), 3)
+    n = max(0, int(math.ceil(t * fps - 1e-6)))
+    while n / fps < t:
+        n += 1
+    while n > 0 and (n - 1) / fps >= t:
+        n -= 1
+    return n
+
+
+def block_clock(lengths, fps):
+    """Frame counts for the concat blocks of a multi-block programme.
+
+    Block j starts on frame first_frame_at(T_j), T_j being its programme
+    start (the Timeline's): exactly where a camera window, a caption cue or
+    a motion graphic timed to the cut switches. Before this (Oct 2026) each
+    block took however many frames its trim and `fps` happened to produce —
+    within a frame of its length, either way — and `concat` placed the next
+    block after the LONGER of its picture and sound: a cut could land a
+    frame before or after every zoom edge timed to it, and the sound gapped
+    with silence for up to a frame at the join. Every block gets at least
+    one frame."""
+    out, acc, k_prev = [], 0.0, 0
+    for L in lengths:
+        acc += float(L)
+        k = max(k_prev + 1, first_frame_at(acc, fps))
+        out.append(k - k_prev)
+        k_prev = k
+    return out
+
+
+def program_render_s(tl, fps):
+    """How long the rendered programme runs. On the block clock a programme
+    of two or more blocks (or any canvas programme) ends on the frame its
+    Timeline end names — up to a frame past tl.out_duration — so the
+    output's -t (and the progress bar) use this, and the end card after it
+    is never trimmed. A single kept span keeps the Timeline length."""
+    out = float(tl.out_duration)
+    try:
+        fps = round(float(fps or 0.0), 3)
+    except (TypeError, ValueError):
+        return out
+    if fps <= 0 or (len(tl.segs) + len(tl.ins) < 2
+                    and (tl.segs or not tl.ins)):
+        return out
+    return max(out, first_frame_at(out, fps) / fps)
+
+
+def join_fades(spans, seg_len, src_dur, cut_after, insert_before=None,
+               insert_after=None, crossfade=True):
+    """How each kept segment's audio meets its neighbours, as four lists of
+    seconds per segment: (xl, xr, fl, fr).
+
+    spans: each segment's own audio, (source start, source end).
+    cut_after[i]: the join after segment i skips source time (a jump or a
+    camera cut) — a source-contiguous join (a split for a focus handoff or a
+    speed ramp) is one continuous waveform and gets nothing.
+
+    xl/xr: half of the equal-power crossfade at the left/right join between
+    two kept spans. The segment's audio is read xl before its start and xr
+    past its end (its handles), faded across the cut, and the handles are
+    mixed into the neighbours (build_filtergraph), so the join is a 2·x
+    crossfade centred on the cut and every block keeps its length. fl/fr: a
+    one-sided fade where an insert meets the segment, or at a cut when
+    `crossfade` is False (the speed path and the unnormalized cheap path,
+    whose joins can gap with up to a frame of silence — fading into a gap
+    is clean, crossfading into one is not). A crossfade is shortened to the
+    source room and a quarter of either segment, and dropped below 2 ms.
+    All zeros keeps the legacy chain."""
+    n = len(spans)
+    xl, xr, fl, fr = [0.0] * n, [0.0] * n, [0.0] * n, [0.0] * n
+    before = list(insert_before or [False] * n)
+    after = list(insert_after or [False] * n)
+
+    def ms(v):
+        return math.floor(max(0.0, v) * 1000.0 + 1e-6) / 1000.0
+
+    for i in range(n - 1):
+        if after[i] or before[i + 1] or not cut_after[i]:
+            continue
+        if not crossfade:
+            fr[i] = ms(min(JOIN_FADE_S, seg_len[i] / 4.0))
+            fl[i + 1] = ms(min(JOIN_FADE_S, seg_len[i + 1] / 4.0))
+            continue
+        h = ms(min(JOIN_XFADE_S / 2.0, float(spans[i + 1][0]),
+                   float(src_dur) - float(spans[i][1]),
+                   seg_len[i] / 4.0, seg_len[i + 1] / 4.0))
+        if h >= 0.002:
+            xr[i] = xl[i + 1] = h
+    for i in range(n):
+        if before[i]:
+            fl[i] = ms(min(JOIN_FADE_S, seg_len[i] / 4.0))
+        if after[i]:
+            fr[i] = ms(min(JOIN_FADE_S, seg_len[i] / 4.0))
+    return xl, xr, fl, fr
 
 
 def _shift_push_window(zpts, prog):
@@ -1631,7 +1862,7 @@ def transitions_current(meta, edl):
     return ((meta or {}).get("trans_v") or 0) == config.TRANSITION_VERSION
 
 
-def camera_current(meta, edl):
+def camera_current(meta, edl, index=None):
     """May this render's pixels be spliced into (or reused for) a newer
     version's render without mixing two cameras in one video?
 
@@ -1642,6 +1873,11 @@ def camera_current(meta, edl):
     into it would put both cameras in one preview until a full re-render.
     Only the splice/reuse path asks: a cached render served for its own
     version is self-consistent and keeps its cache.
+
+    A v1 render (before cut hygiene) stays current when no zoom of this EDL
+    sits near a program cut: camera.hold_through_cuts leaves every such zoom
+    untouched, so v2 draws the same frames. `index` supplies the indexed
+    camera cuts.
     """
     edl = edl or {}
     fx = edl.get("effects") or {}
@@ -1651,7 +1887,29 @@ def camera_current(meta, edl):
         or any(sh.get("zoom", True) for sh in fx.get("frame_shifts") or [])
     if not moves:
         return True
-    return ((meta or {}).get("cam_v") or 0) == config.CAMERA_VERSION
+    cam_v = (meta or {}).get("cam_v") or 0
+    if cam_v == config.CAMERA_VERSION:
+        return True
+    if cam_v != 1:
+        return False
+    try:
+        zooms = list(fx.get("zooms") or [])
+        return not camera.changed(zooms, camera_zooms(edl, index))
+    except Exception:
+        return False
+
+
+def block_clock_current(meta, edl):
+    """May this render's picture be spliced into (or reused under new sound
+    for) a newer version? True for a single-block programme (nothing about
+    it changed) or a render on today's block clock (config.
+    BLOCK_CLOCK_VERSION); an older multi-block render's cuts sit a fraction
+    of a frame off the clock, so new pieces or new sound would drift from
+    it. Only the splice/reuse path asks."""
+    edl = edl or {}
+    if len(edl.get("keep") or []) + len(edl.get("inserts") or []) < 2:
+        return True
+    return ((meta or {}).get("clock_v") or 0) == config.BLOCK_CLOCK_VERSION
 
 
 def captions_current(meta, edl):
@@ -2174,6 +2432,143 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             _pre += seg_out_len[i]
             _prog += seg_out_len[i]
 
+    # ---- the block clock and the joins (cut hygiene, Oct 2026) ----------
+    # Concat order: an insert splices in before the segment that starts at
+    # its boundary (the blocks loop below assembles the same order).
+    _ins_at = [tl.ins[j][0] for j in range(len(insert_inputs))]
+    order = []                          # (kind, index, programme length)
+    ins_before, ins_after = [False] * n, [False] * n
+    _j, _pre = 0, 0.0
+    for i in range(n):
+        _j0 = _j
+        while _j < len(_ins_at) and _ins_at[_j] <= _pre + 1e-6:
+            order.append(("ins", _j,
+                          float(insert_inputs[_j][1]["duration_s"])))
+            _j += 1
+        if _j > _j0:
+            ins_before[i] = True
+            if i > 0:
+                ins_after[i - 1] = True
+        order.append(("seg", i, seg_out_len[i]))
+        _pre += seg_out_len[i]
+    if n and _j < len(_ins_at):
+        ins_after[n - 1] = True
+    while _j < len(_ins_at):
+        order.append(("ins", _j, float(insert_inputs[_j][1]["duration_s"])))
+        _j += 1
+    # A normalized programme of two or more blocks runs on the block clock
+    # (block_clock): each block an exact number of frames starting on the
+    # frame its Timeline start names, and its sound exactly as long, so
+    # nothing gaps at a join and every cut lands on the frame the camera's
+    # windows switch on. A canvas programme always does: a long one is
+    # assembled in bounded batches and recomposed as ONE clip, which must
+    # come out exactly as long as the direct multi-clip render. One kept
+    # span, or the unnormalized cheap path, keeps the legacy graph byte for
+    # byte.
+    blk_frames, blk_len = {}, {}
+    if do_norm and order and (len(order) >= 2 or canvas_prog):
+        for (kind, idx, _L), nf in zip(order, block_clock(
+                [L for _k, _i, L in order], fps)):
+            blk_frames[(kind, idx)] = nf
+            blk_len[(kind, idx)] = nf / round(float(fps), 3)
+    # Each segment's own sound: its span of the source, as long as its block.
+    # Across a source-contiguous join (a focus-handoff or speed split) the
+    # sound runs on from where the previous block's left off, so a block a
+    # fraction of a frame longer or shorter than its span never skips or
+    # repeats a sliver of one continuous waveform.
+    cut_after = [i + 1 < n and (ins_after[i] or
+                                float(keep[i + 1][0]) - float(keep[i][1])
+                                > 1e-3) for i in range(n)]
+    # Where nothing of the source follows (the programme's end, or an
+    # insert), a block longer than its span is made up with silence, never
+    # with the removed material after it.
+    a_spans, a_pad = [], {}
+    for i, (s_, e_) in enumerate(keep):
+        if ("seg", i) not in blk_len:
+            a_spans.append((float(s_), float(e_)))
+            continue
+        V = blk_len[("seg", i)]
+        a0 = float(s_)
+        if i > 0 and not cut_after[i - 1]:
+            a0 = a_spans[-1][1]
+        if (i == n - 1 or ins_after[i]) and a0 + V > float(e_) + 1e-6:
+            a_spans.append((a0, float(e_)))
+            a_pad[i] = V
+        else:
+            a_spans.append((a0, a0 + V))
+    if has_audio or stem_inputs:
+        jx_l, jx_r, jf_l, jf_r = join_fades(
+            a_spans, [b - a for a, b in a_spans], src_dur, cut_after,
+            ins_before, ins_after,
+            crossfade=not speed and bool(blk_len))
+    else:
+        jx_l = jx_r = jf_l = jf_r = [0.0] * n
+
+    def _join_fade_text(i, off, L):
+        """The afade chain of segment i's join treatment, on a stream whose
+        own audio starts `off` in and runs L ('' when it has none)."""
+        out = ""
+        if jx_l[i]:
+            out += f",afade=t=in:st=0:d={2 * jx_l[i]:.3f}:curve=qsin"
+        if jf_l[i]:
+            out += f",afade=t=in:st=0:d={jf_l[i]:.3f}:curve=qsin"
+        if jx_r[i]:
+            out += (f",afade=t=out:st={off + L - jx_r[i]:.6f}"
+                    f":d={2 * jx_r[i]:.3f}:curve=qsin")
+        if jf_r[i]:
+            out += (f",afade=t=out:st={off + L - jf_r[i]:.6f}"
+                    f":d={jf_r[i]:.3f}:curve=qsin")
+        return out
+
+    def _seg_audio(i, a_in):
+        """[a_in] -> [a_seg{i}]: the segment's sound (a_spans[i]) with its
+        join treatment. A crossfaded join reads the source xl before / xr
+        past the span (its handles), fades the whole run, keeps the span as
+        the block's own sound and hands the handles to the neighbours'
+        mixes, so the block keeps its exact length and its sync."""
+        norm = f",{AUDIO_NORM}" if do_norm else ""
+        if i in a_pad:
+            norm = f",apad=whole_dur={a_pad[i]:.6f}{norm}"
+        s_, e_ = a_spans[i]
+        xl, xr = jx_l[i], jx_r[i]
+        L = e_ - s_
+        fades = _join_fade_text(i, xl, L)
+        exact = ("seg", i) in blk_len
+        fmt = (lambda v: f"{v:.6f}") if exact else (lambda v: f"{v:.3f}")
+        if not fades:
+            parts.append(f"[{a_in}]atrim=start={fmt(s_)}:end={fmt(e_)},"
+                         f"asetpts=PTS-STARTPTS{norm}[a_seg{i}]")
+            return
+        head = (f"[{a_in}]atrim=start={fmt(s_ - xl)}:end={fmt(e_ + xr)},"
+                f"asetpts=PTS-STARTPTS{fades}")
+        if not (xl or xr):
+            parts.append(f"{head}{norm}[a_seg{i}]")
+            return
+        outs = ([f"axc{i}"] + ([f"axp{i}"] if xl else [])
+                + ([f"axq{i}"] if xr else []))
+        parts.append(f"{head},asplit={len(outs)}"
+                     + "".join(f"[{o}]" for o in outs))
+        parts.append(f"[axc{i}]atrim=start={xl:.3f}:end={xl + L:.6f},"
+                     f"asetpts=PTS-STARTPTS[axk{i}]")
+        if xl:
+            # The first half of this side's fade-in, heard under the end of
+            # the previous block's fade-out.
+            prev = a_spans[i - 1][1] - a_spans[i - 1][0]
+            parts.append(f"[axp{i}]atrim=start=0:end={xl:.3f},"
+                         f"asetpts=PTS-STARTPTS,"
+                         f"adelay=delays={(prev - xl) * 1000:.3f}:all=1"
+                         f"[axpre{i}]")
+        if xr:
+            # The second half of this side's fade-out, heard under the start
+            # of the next block's fade-in.
+            parts.append(f"[axq{i}]atrim=start={xl + L:.6f},"
+                         f"asetpts=PTS-STARTPTS[axpost{i}]")
+        mix = ([f"axk{i}"] + ([f"axpost{i - 1}"] if xl else [])
+               + ([f"axpre{i + 1}"] if xr else []))
+        parts.append("".join(f"[{x}]" for x in mix)
+                     + f"amix=inputs={len(mix)}:duration=first:"
+                     f"dropout_transition=0:normalize=0{norm}[a_seg{i}]")
+
     def _seg_video(i, in_label, s, e):
         vlab = f"segv{i}" if do_norm else f"v_seg{i}"
         if regions:
@@ -2239,12 +2634,22 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                          f"asetpts=PTS-STARTPTS{tempo},{AUDIO_NORM}"
                          f"[paz{i}_{j}]")
             p_acc += (pe - ps) / f
+        # On the block clock the sped sound is padded or trimmed to its
+        # block's exact length (a fraction of a frame), then faded at a cut.
+        V = blk_len.get(("seg", i))
+        tail = (f",apad=whole_dur={V:.6f},atrim=start=0:end={V:.6f}"
+                if V is not None else "")
+        tail += _join_fade_text(i, 0.0, V if V is not None
+                                else seg_out_len[i])
+        a_out = f"a_segr{i}" if tail else f"a_seg{i}"
         if k == 1:
             parts.append(f"[pvz{i}_0]null[segv{i}]")
-            parts.append(f"[paz{i}_0]anull[a_seg{i}]")
+            parts.append(f"[paz{i}_0]anull[{a_out}]")
         else:
             pairs = "".join(f"[pvz{i}_{j}][paz{i}_{j}]" for j in range(k))
-            parts.append(f"{pairs}concat=n={k}:v=1:a=1[segv{i}][a_seg{i}]")
+            parts.append(f"{pairs}concat=n={k}:v=1:a=1[segv{i}][{a_out}]")
+        if tail:
+            parts.append(f"[{a_out}]{tail[1:]}[a_seg{i}]")
 
     # main segments: trim (+ censor regions), then (when needed) normalize
     # to the output frame. Skipped entirely for a canvas program (no [0]).
@@ -2328,9 +2733,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             _seg_pieces_video_audio(i, f"vin{i}", f"ain{i}", s, e)
     elif n == 1:
         _seg_video(0, vsrc, keep[0][0], keep[0][1])
-        parts.append(f"[asrc]atrim=start={keep[0][0]:.3f}:end={keep[0][1]:.3f},"
-                     f"asetpts=PTS-STARTPTS"
-                     + (f",{AUDIO_NORM}" if do_norm else "") + "[a_seg0]")
+        _seg_audio(0, "asrc")
     elif n > 1:
         if owners:
             _video_taps()
@@ -2341,10 +2744,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                      + "".join(f"[ain{i}]" for i in range(n)))
         for i, (s, e) in enumerate(keep):
             _seg_video(i, f"vin{i}", s, e)
-            parts.append(f"[ain{i}]atrim=start={s:.3f}:end={e:.3f},"
-                         f"asetpts=PTS-STARTPTS"
-                         + (f",{AUDIO_NORM}" if do_norm else "")
-                         + f"[a_seg{i}]")
+            _seg_audio(i, f"ain{i}")
     if do_norm:
         # focus_track (round 100): a kept segment whose midpoint falls inside
         # a span crops on that span's own aim — how the crop FOLLOWS a subject
@@ -2392,6 +2792,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             _normalize_video(parts, f"segv{i}", f"v_seg{i}", W, H, fps,
                              seg_mode, f"s{i}", focus=seg_focus,
                              seg_dur=seg_out_len[i],
+                             frames=blk_frames.get(("seg", i)),
                              picture=(edl.get("frame") or {}).get("picture"),
                              grade=block_grade, src_size=main_src_size)
 
@@ -2459,21 +2860,27 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         _normalize_video(parts, ins_in, f"v_ins{j}", W, H, fps,
                          imode, f"i{j}", seg_dur=dur,
                          picture=(edl.get("frame") or {}).get("picture"),
-                         grade=block_grade)
+                         grade=block_grade,
+                         frames=blk_frames.get(("ins", j)))
+        # On the block clock the block's sound is exactly its frames long.
+        V = blk_len.get(("ins", j))
+        pad = (f"apad=whole_dur={V:.6f},atrim=start=0:end={V:.6f}"
+               if V is not None else f"apad=whole_dur={dur:.3f}")
         if ins_audio:
             if abs(rate - 1.0) > 1e-6:
                 parts.append(
                     f"[{idx}:a]atrim=start={off:.3f}"
                     f":end={off + dur * rate:.3f},"
                     f"asetpts=PTS-STARTPTS,{_atempo_chain(rate)},"
-                    f"{AUDIO_NORM},apad=whole_dur={dur:.3f}[a_ins{j}]")
+                    f"{AUDIO_NORM},{pad}[a_ins{j}]")
             else:
                 parts.append(f"[{idx}:a]atrim=start={off:.3f}"
                              f":end={off + dur:.3f},"
                              f"asetpts=PTS-STARTPTS,{AUDIO_NORM},"
-                             f"apad=whole_dur={dur:.3f}[a_ins{j}]")
+                             f"{pad}[a_ins{j}]")
         else:
-            parts.append(f"[sil{sil_i}]atrim=start=0:end={dur:.3f},"
+            end = f"{V:.6f}" if V is not None else f"{dur:.3f}"
+            parts.append(f"[sil{sil_i}]atrim=start=0:end={end},"
                          f"asetpts=PTS-STARTPTS,{AUDIO_NORM}[a_ins{j}]")
             sil_i += 1
 
@@ -2483,16 +2890,19 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     at_list = [tl.ins[j][0] for j in range(len(insert_inputs))]
     for i, (s, e) in enumerate(keep):
         while ins_j < len(insert_inputs) and at_list[ins_j] <= pre + 1e-6:
-            blocks.append((f"v_ins{ins_j}", f"a_ins{ins_j}",
-                           float(insert_inputs[ins_j][1]["duration_s"])))
+            blocks.append((f"v_ins{ins_j}", f"a_ins{ins_j}", blk_len.get(
+                ("ins", ins_j),
+                float(insert_inputs[ins_j][1]["duration_s"]))))
             ins_j += 1
         # seg_out_len, not e - s: a sped segment's block duration is its
         # REMAPPED length (identical to e - s when no speed spans exist).
-        blocks.append((f"v_seg{i}", f"a_seg{i}", seg_out_len[i]))
+        # On the block clock, its exact frames.
+        blocks.append((f"v_seg{i}", f"a_seg{i}",
+                       blk_len.get(("seg", i), seg_out_len[i])))
         pre += seg_out_len[i]
     while ins_j < len(insert_inputs):
-        blocks.append((f"v_ins{ins_j}", f"a_ins{ins_j}",
-                       float(insert_inputs[ins_j][1]["duration_s"])))
+        blocks.append((f"v_ins{ins_j}", f"a_ins{ins_j}", blk_len.get(
+            ("ins", ins_j), float(insert_inputs[ins_j][1]["duration_s"]))))
         ins_j += 1
 
     # Transitions: a junction effect at every cut/insert boundary, chosen
@@ -2977,6 +3387,16 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     shots = []
     T = camera.time_var(fps)
     t = str(T)
+    # Cut hygiene (camera.hold_through_cuts): a zoom edge within a few frames
+    # of a program cut moves onto the cut and holds through it, so an eased
+    # release never completes in the frames before a cut (a flash of the
+    # wide) and a zoom starting on a jump cut is already in on its first
+    # frame. Zooms nowhere near a cut come back untouched — their text, and
+    # so their render, is exactly what it was before the rule.
+    if zooms:
+        zooms = camera.hold_through_cuts(
+            zooms, camera_cuts(edl, index, tl, fps, src_fps, focus_origin),
+            fps, tl.out_duration)
     for z in zooms:
         a = max(0.0, float(z["start"]))
         b = min(tl.out_duration, float(z["end"]))
@@ -3889,7 +4309,7 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
 
     if audio_only:
         graph = _prune_graph_to_audio(graph)
-        expected_out_s = (tl.out_duration
+        expected_out_s = (program_render_s(tl, fps)
                           + music_tail_ext(edl, tl.out_duration) + outro_s)
         cmd = ["ffmpeg", "-y", *extra_inputs,
                *_graph_args(graph, workdir), "-map", "[aout]",
@@ -3920,7 +4340,7 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
                   "-crf", str(config.FINAL_CRF), "-g", "120",
                   "-c:a", "aac", "-b:a", "192k"]
 
-    expected_out_s = (tl.out_duration
+    expected_out_s = (program_render_s(tl, fps)
                       + music_tail_ext(edl, tl.out_duration) + outro_s)
     keyframes = []
     if _batch_window is not None:
@@ -4864,7 +5284,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         # decoded, so the video pipeline's whole cost (the reason previews
         # were slow) drops away and this finishes in seconds.
         graph = _prune_graph_to_audio(graph)
-        expected_out_s = (tl.out_duration
+        expected_out_s = (program_render_s(tl, fps)
                           + music_tail_ext(edl, tl.out_duration) + outro_s)
         cmd = ["ffmpeg", "-y", *main_input_args, *extra_inputs,
                *_graph_args(graph, workdir), "-map", "[aout]",
@@ -4890,7 +5310,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                   "-crf", str(config.FINAL_CRF), "-g", "120",
                   "-c:a", "aac", "-b:a", "192k"]
 
-    expected_out_s = (tl.out_duration
+    expected_out_s = (program_render_s(tl, fps)
                       + music_tail_ext(edl, tl.out_duration) + outro_s)
     cmd = ["ffmpeg", "-y", *_stable_video_inputs(main_input_args + extra_inputs),
            *_graph_args(graph, workdir), "-map", "[vout]", "-map", "[aout]",
@@ -6424,7 +6844,8 @@ def _run_render_job(worker_db, job):
                                                *src_shape) \
                             and shaping_current(pm, prev_row["json"]) \
                             and transitions_current(pm, prev_row["json"]) \
-                            and camera_current(pm, prev_row["json"]) \
+                            and camera_current(pm, prev_row["json"], index) \
+                            and block_clock_current(pm, prev_row["json"]) \
                             and captions_current(pm, prev_row["json"]) \
                             and music_tail_current(pm, prev_row["json"],
                                                    _pout) \
@@ -6773,6 +7194,10 @@ def _run_render_job(worker_db, job):
                   "delivery_v": 1,
                   "trans_v": config.TRANSITION_VERSION,
                   "cam_v": config.CAMERA_VERSION,
+                  # A reused picture keeps the block clock it was cut on.
+                  "clock_v": (reused_visual_meta.get("clock_v") or 0
+                              if reused_visual_meta
+                              else config.BLOCK_CLOCK_VERSION),
                   # A reused picture keeps the caption clock it was drawn
                   # with (as look_v below).
                   "cap_v": (reused_visual_meta.get("cap_v") or 0

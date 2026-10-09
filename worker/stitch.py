@@ -48,6 +48,12 @@ _CHANGEABLE_TOP = ("texts", "vectors", "patches", "overlays", "motion")
 _CHANGEABLE_FX = ("zooms", "regions", "custom", "picture_cards")
 
 _PAD_S = 0.5
+# A zoom edge within camera.CUT_HOLD_FRAMES of a cut is moved onto it
+# (camera.hold_through_cuts), and a piece's own end counts as a cut. A zoom
+# is therefore contained with this much room on both sides: the cut it may
+# snap to is inside the piece, and no piece ends where the full render would
+# not hold. 4 frames at 23.976 fps is 0.167 s.
+_ZOOM_CUT_PAD_S = 0.2
 _MAX_WINDOWS = 4
 _MAX_COVER = 0.65          # beyond this share of the program, full render wins
 
@@ -107,7 +113,8 @@ def _item_windows(edl, tl, duration):
     for card in fx.get("picture_cards") or []:
         out.append((float(card["start"]), float(card["end"]), "picture_card"))
     for z in (fx.get("zooms") or []):
-        out.append((float(z["start"]), float(z["end"]), "zoom"))
+        out.append((max(0.0, float(z["start"]) - _ZOOM_CUT_PAD_S),
+                    float(z["end"]) + _ZOOM_CUT_PAD_S, "zoom"))
     for r in (fx.get("regions") or []):
         if r.get("start") is None:
             out.append((0.0, duration, "region"))

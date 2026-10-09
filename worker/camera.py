@@ -36,6 +36,12 @@ being one of:
             `shake` > 0 adds the same to any other mode (a punch that lands
             as an impact).
 
+A zoom edge within CUT_HOLD_FRAMES (4) of a program cut is moved onto the
+cut and holds through it (hold_through_cuts): an ease ending on a cut stays
+pushed in to the cut's last frame instead of releasing over it, and a punch
+or ease starting on a cut is already in on the cut's first frame — the cut
+changes the framing, once.
+
 `rotate` (degrees, + = clockwise on screen) rides the same envelope as the
 zoom. Roll and shake need picture outside the frame, so the camera zooms in
 JUST enough to cover them (never more), and the window centre is clamped so
@@ -521,14 +527,19 @@ def window_gate(t, a, b):
 
 def envelope(z, t, a, b):
     """0..1 (more with overshoot): how far this zoom's move has got at t.
-    Zero outside [a, b) for every mode."""
+    Zero outside [a, b) for every mode. A zoom edge hold_through_cuts put on
+    a program cut (`_hold_in` / `_hold_out`) has no ramp at that edge: the
+    move is already complete on the cut's first frame, or still held on the
+    last frame before it."""
     mode = z.get("mode") or "punch"
     a, b = round(float(a), 3), round(float(b), 3)
     r = ramp_seconds(z, a, b)
     c1 = back_c1(_f(z.get("overshoot"), 0.0) or 0.0)
     gate = window_gate(t, a, b)
+    # An overshoot slam keeps its attack on a cut: the impact IS the move.
+    hold_in = bool(z.get("_hold_in")) and c1 <= 0
     if mode == "punch":
-        if r <= 1e-3:
+        if r <= 1e-3 or hold_in:
             return gate
         curve = (lambda u: back_out(u, c1)) if c1 > 0 else expo_out
         return let(_R_U, clip((t - a) / r, 0.0, 1.0), curve) * gate
@@ -536,8 +547,10 @@ def envelope(z, t, a, b):
         if r <= 1e-3:
             return gate
         curve = (lambda u: back_out(u, c1)) if c1 > 0 else smootherstep
-        rise = let(_R_U, clip((t - a) / r, 0.0, 1.0), curve)
-        fall = let(_R_U, clip((b - t) / r, 0.0, 1.0), smootherstep)
+        rise = gte(t, a) if hold_in else \
+            let(_R_U, clip((t - a) / r, 0.0, 1.0), curve)
+        fall = lt(t, b) if z.get("_hold_out") else \
+            let(_R_U, clip((b - t) / r, 0.0, 1.0), smootherstep)
         return rise * fall
     if mode in ("push_in", "pull_out"):
         span = b - a
@@ -1143,3 +1156,110 @@ def describe(z):
     if shake_amount(z) > 1e-4:
         bits.append(f"shake {shake_amount(z):g}")
     return ", ".join(bits)
+
+
+# --------------------------------------------------------------------------
+# Cut hygiene: zoom edges that sit on a program cut
+# --------------------------------------------------------------------------
+
+# A zoom edge within this many frames of a program cut is moved ONTO the cut
+# and holds its strength through it (hold_through_cuts). Judged on the Oct
+# 2026 showcase shorts: an 'ease' ending on a cut released over its last
+# frames, so the wide flashed a frame before the new shot; an 'ease' starting
+# on a jump cut began at 1.0x and left the jump bare; and an edge a frame or
+# two off its cut changed the framing twice, once at the edge and again at
+# the cut.
+CUT_HOLD_FRAMES = 4
+# Modes whose START moves onto a nearby cut (they are visibly pushed in from
+# their first frame, or punch in there) and modes whose END does (still
+# pushed in on their last frame). pulse and shake are beat devices — a cut is
+# not their clock — and follow/path travel on authored waypoints.
+_CUT_START_MODES = ("punch", "ease", "pull_out", "landing")
+_CUT_END_MODES = ("punch", "ease", "push_in")
+# A snap never leaves a zoom shorter than this.
+_CUT_SNAP_MIN_SPAN_S = 0.2
+
+
+def cut_reach_s(fps):
+    """How far (seconds) a zoom edge may sit from a cut and still snap."""
+    fps = float(fps or 30.0)
+    return CUT_HOLD_FRAMES / max(fps, 1.0) + 1e-6
+
+
+def hold_through_cuts(zooms, cuts, fps, out_duration=None):
+    """The zooms as the camera renders them around program cuts.
+
+    A zoom whose start or end lies within CUT_HOLD_FRAMES of a cut is moved
+    onto that cut and HOLDS there instead of ramping across it: an eased
+    release that would complete in the last frames before the cut stays at
+    full strength until the cut (`_hold_out`), and a punch or ease that
+    starts on a cut is already at full strength on the cut's first frame
+    (`_hold_in`) — the cut itself changes the framing, once. An overshoot
+    slam keeps its attack (envelope). `out_duration`, when given, counts as
+    a cut for zoom ENDS: the programme's last frame cuts to the end card (or
+    back to the start of a loop), and a zoom overhanging it ends there.
+
+    `cuts` are program seconds (renderer.camera_cuts). Returns a new list;
+    a zoom nothing touches is the SAME dict object, so an edit with no zoom
+    near a cut renders byte-identically to the camera before this rule, and
+    `changed()` can tell. Moved zooms are copies — the EDL is never edited.
+    """
+    zooms = list(zooms or [])
+    pts = sorted({round(float(c), 4) for c in cuts or []})
+    reach = cut_reach_s(fps)
+    end_pts = list(pts)
+    if out_duration is not None:
+        end_pts = sorted(set(end_pts) | {round(float(out_duration), 4)})
+    if not zooms or not end_pts:
+        return zooms
+
+    def nearest(t, among):
+        best = None
+        for c in among:
+            d = abs(c - t)
+            if d <= reach and (best is None or d < abs(best - t)):
+                best = c
+        return best
+
+    out = []
+    for z in zooms:
+        mode = z.get("mode") or "punch"
+        try:
+            a, b = float(z["start"]), float(z["end"])
+        except (KeyError, TypeError, ValueError):
+            out.append(z)
+            continue
+        na, nb, held_in, held_out = a, b, False, False
+        if mode in _CUT_START_MODES:
+            c = nearest(a, pts)
+            if c is not None and nb - c >= _CUT_SNAP_MIN_SPAN_S:
+                na, held_in = c, True
+        if mode in _CUT_END_MODES:
+            c = nearest(b, end_pts)
+            if out_duration is not None and b >= float(out_duration):
+                # Overhanging the programme: the renderer clamps the window
+                # to its end already, so only an ease's release changes.
+                c = round(float(out_duration), 4) if mode == "ease" else None
+            if c is not None and c - na >= _CUT_SNAP_MIN_SPAN_S:
+                nb, held_out = c, True
+        # Flag only a hold that changes the curve: a stepped punch/ease
+        # (ramp_s 0) and an overshoot slam render the same either way, so
+        # they keep their dict (and an old render of them stays current).
+        flags = {}
+        ramped = ramp_seconds(z, na, nb) > 1e-3
+        if held_in and ramped and mode in ("punch", "ease") and \
+                back_c1(_f(z.get("overshoot"), 0.0) or 0.0) <= 0:
+            flags["_hold_in"] = True
+        if held_out and ramped and mode == "ease":
+            flags["_hold_out"] = True
+        if not flags and abs(na - a) < 1e-9 and abs(nb - b) < 1e-9:
+            out.append(z)
+            continue
+        out.append(dict(z, start=round(na, 4), end=round(nb, 4), **flags))
+    return out
+
+
+def changed(before, after):
+    """Ids (or positions) of the zooms hold_through_cuts moved or held."""
+    return [z.get("id") or i for i, (z, n) in enumerate(zip(before, after))
+            if z is not n]
