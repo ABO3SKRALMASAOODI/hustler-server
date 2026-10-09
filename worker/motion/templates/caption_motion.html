@@ -456,8 +456,13 @@
     // timing: reveal time + entrance per word, then the motion windows
     const Wn = [];
     // A window covers the first frame at/after every change and nothing
-    // more: frames outside all windows re-use the previous capture.
-    const G = 0.98 * F;
+    // more: frames outside all windows re-use the previous capture. Every
+    // window spans MORE than one frame period, so it always contains a frame
+    // whatever the sub-frame phase of the event (ms-rounded word timings, a
+    // lead that is not exactly one frame): a narrower window can fall between
+    // two frames and silently drop the change (a word never shown, a hero
+    // stuck at its ghost opacity).
+    const G = F + 2e-4;
     const win = (a, b) => Wn.push([a - 1e-4, b]);
     cues.forEach((c, i) => {
       const nxt = cues[i + 1];

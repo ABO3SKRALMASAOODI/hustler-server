@@ -513,3 +513,68 @@ def test_a_preset_patch_that_names_a_motion_look_keeps_it():
     # and apply_look (a preset family) renders its preset too
     merged = agent_tools.merge_caption_style(ctx.edl["captions"], {"preset": "impact"})
     assert merged["style"]["preset"] == "impact" and merged["style"]["motion_look"] is None
+
+
+GRID_WORDS = [("It", 0.0, 0.2), ("is", 0.3, 0.4), ("accurate", 0.5, 0.9),
+              ("and", 1.3, 1.4), ("it", 1.5, 1.6), ("will", 1.7, 1.8), ("be", 1.9, 2.0),
+              ("the", 2.1, 2.2), ("biggest", 2.3, 2.8), ("product", 2.9, 3.3),
+              ("ever.", 3.4, 3.8)]
+
+
+def _custom(look, words, style=None, emphasis=None, size=(540, 960), dur=8.0):
+    edl = default_edl(dur)
+    st = {"motion_look": look}
+    st.update(style or {})
+    edl["captions"] = {"mode": "from_transcript", "style": st,
+                       "emphasis_words": emphasis}
+    edl = validate_edl(edl, dur).model_dump()
+    index = {"words": [{"w": w, "t0": s, "t1": e} for w, s, e in words]}
+    items = motion_captions.items(edl, index, Timeline(edl["keep"]))
+    return items, [motion_templates.build_job(it, size[0], size[1], 30) for it in items]
+
+
+@needs_browser
+def test_every_motion_window_contains_a_frame(tmp_path, monkeypatch):
+    """Onsets on a 0.1 s grid minus the 33 ms lead land 1/3 ms after a frame
+    boundary. A window shorter than one frame period can then hold no frame
+    at all, and the change it guards is never captured (regression: words
+    never shown, lockup heroes stuck at their ghost opacity)."""
+    monkeypatch.setattr(motion_engine, "CACHE_DIR", str(tmp_path / "cache"))
+    for look in motion_captions.LOOKS:
+        for anim in ("auto", "none"):
+            _items, jobs = _custom(look, GRID_WORDS, emphasis=["accurate", "biggest"],
+                                   style={"animation": "none"} if anim == "none" else None)
+            wins = asyncio.run(_dom(jobs[0], [0.0], "() => MG._windows"))[0]
+            assert wins, look
+            for a, b in wins:
+                assert any(a - 1e-6 <= i / 30 <= b + 1e-6
+                           for i in range(int(a * 30) - 1, int(b * 30) + 2)), (look, anim, a, b)
+
+
+@needs_browser
+@pytest.mark.parametrize("look,anim", [("editorial", "auto"), ("lockup", "auto"),
+                                       ("editorial", "none"), ("pop", "none")])
+def test_sub_frame_onsets_render_exactly_like_every_frame(look, anim, tmp_path, monkeypatch):
+    monkeypatch.setattr(motion_engine, "CACHE_DIR", str(tmp_path / "cache"))
+    items, _jobs = _custom(look, GRID_WORDS, emphasis=["accurate", "biggest"],
+                           style={"animation": "none"} if anim == "none" else None)
+    item = items[0]
+    assert item["start"] == 0.0
+    job = motion_templates.build_job(item, 270, 480, 30)
+    always = motion_engine.RenderJob(**dict(job.__dict__, html=job.html.replace(
+        "</body>", "<script>MG.always();</script></body>")))
+    a, b = motion_engine.render_jobs([job, always], str(tmp_path / "clips"), pages=2)
+    assert a.captured < b.captured
+    fa = _frames(a.path, str(tmp_path / "a"))
+    fb = _frames(b.path, str(tmp_path / "b"))
+    bad = [(i, n) for i, (x, y) in enumerate(zip(fa, fb)) if (n := _changed_pixels(x, y)) > 40]
+    assert not bad, (look, bad[:10])
+    # and the heroes really reach full opacity within 3 frames of their onset
+    heroes = [(w["t"], w["s"]) for c in item["params"]["cues"] for w in c["w"]
+              if w["x"] and look != "pop"]
+    js = """() => Array.from(document.querySelectorAll('.cue.on .mg-w'))
+                .map(e => [e.textContent, +getComputedStyle(e).opacity])"""
+    for text, s in heroes:
+        state = dict(asyncio.run(_dom(job, [s + 3 / 30 + 0.001], js))[0])
+        key = next(k for k in state if k.lower().strip(",.") == text.lower().strip(",."))
+        assert state[key] == 1.0, (look, text, state)
