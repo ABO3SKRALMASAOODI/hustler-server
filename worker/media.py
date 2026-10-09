@@ -74,11 +74,13 @@ def stderr_tail(lines, limit=STDERR_TAIL_CHARS):
 def _oom_kill_count():
     """Kernel OOM kills visible to this process, or None when unreadable.
 
-    cgroup v2 ``memory.events`` counts kills inside this container; the VM's
-    ``/proc/vmstat`` counts them for the whole micro-VM (Cloudflare hides the
-    cgroup files). Either moving during a SIGKILLed encode is the evidence.
+    cgroup v2 ``memory.events`` counts kills of this container's processes by
+    any OOM killer; the VM's ``/proc/vmstat`` counts them for the whole
+    micro-VM (Cloudflare hides the cgroup files). One source only — the first
+    readable — because a host exposing both counts one kill in each, and the
+    message then claimed two. Either moving during a SIGKILLed encode is the
+    evidence.
     """
-    total, seen = 0, False
     for path, key in (("/sys/fs/cgroup/memory.events", "oom_kill"),
                       ("/proc/vmstat", "oom_kill")):
         try:
@@ -86,11 +88,10 @@ def _oom_kill_count():
                 for line in fh:
                     parts = line.split()
                     if len(parts) == 2 and parts[0] == key:
-                        total += int(parts[1])
-                        seen = True
+                        return int(parts[1])
         except (OSError, ValueError):
             continue
-    return total if seen else None
+    return None
 
 
 def _command_failure(cmd, returncode, lines, oom_before, prefix=None):

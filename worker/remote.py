@@ -636,7 +636,8 @@ def _interpret_executor_data(data, job):
         raise RemoteExecutorError(
             f"executor returned an invalid response: {type(data).__name__}")
     if data.get("error"):
-        msg = error_text.excerpt(data["error"], 500)
+        # 2000 = what the job row keeps (db.py); ffmpeg's cause is at the end.
+        msg = error_text.excerpt(data["error"], 2000)
         skew = (check_agent_executor_version(quiet=True)
                 if job.get("type") == "agent_turn"
                 else check_executor_version(quiet=True))
@@ -1154,7 +1155,7 @@ def _interpret_cloudflare_terminal(data, job):
                 ledger.reset()
         terminal = CloudflareTerminalFailure(str(exc))
         for attr in ("failure_kind", "retryable", "max_attempts",
-                     "agent_repairable", "executor_timings"):
+                     "agent_repairable", "executor_timings", "stderr_tail"):
             if hasattr(exc, attr):
                 setattr(terminal, attr, getattr(exc, attr))
         raise terminal from exc
@@ -1563,7 +1564,7 @@ def _run_remote(job, url_override=None, modal_function=None):
             # deterministic answer.
             provider_switch_kinds = {
                 "executor_capacity", "provider_budget_exhausted",
-                "provider_start_abandoned",
+                "provider_start_abandoned", "executor_memory",
             }
             retryable_fallback_kinds = {
                 "transient_infrastructure", "stalled_io", "media_command",
@@ -2050,8 +2051,11 @@ def _run_request_with_capacity_fallback(job):
     try:
         return _run_remote(job)
     except Exception as error:
-        is_capacity = getattr(error, "failure_kind", "") == \
-            "executor_capacity"
+        # An encode the kernel OOM-killed (executor_memory) is the same
+        # verdict as a source that needs more room: the identical graph fits
+        # only on the larger lane.
+        is_capacity = getattr(error, "failure_kind", "") in (
+            "executor_capacity", "executor_memory")
         definitely_missing = isinstance(error, RemoteServiceUnavailable)
         provider = desired_execution_provider(job)
         modal_capacity = (config.MODAL_EXECUTOR_ENABLED and is_capacity and (

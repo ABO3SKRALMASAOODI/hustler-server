@@ -319,3 +319,48 @@ def test_media_executor_also_owns_terminal_commit():
         assert result["ok"] is True
     finally:
         _teardown(srv, saved)
+
+
+def test_executor_failure_envelope_keeps_the_ffmpeg_tail(monkeypatch):
+    """Every production render is remote. The executor's failure payload
+    carried the stderr tail, but the dispatcher rebuilt the exception from a
+    500-character excerpt and dropped it, so stored failures had neither."""
+    import failure_policy
+    import media
+    monkeypatch.setattr(remote, "check_executor_version",
+                        lambda quiet=True: "")
+    err = media.MediaError("ffmpeg failed (exit 1): " + "x" * 1800
+                           + " Error reinitializing filters!")
+    err.stderr_tail = "[Parsed_overlay_3] Error reinitializing filters!"
+    data = {"error": str(err), "retryable": True,
+            "failure": failure_policy.classify(err, "final").payload(err)}
+    try:
+        remote._interpret_executor_data(data, dict(JOB, type="final"))
+    except Exception as exc:          # noqa: BLE001 - asserting its shape
+        raised = exc
+    stored = failure_policy.decision_for(raised, "final").payload(raised)
+    assert stored["stderr_tail"] == err.stderr_tail
+    assert len(stored["error"]) > 1500
+    assert stored["error"].endswith("Error reinitializing filters!")
+
+
+def test_oom_killed_render_takes_the_heavy_lane_once(monkeypatch):
+    monkeypatch.setattr(config, "REMOTE_EXECUTOR_URL", "https://heavy")
+    monkeypatch.setattr(
+        config, "REMOTE_EXECUTOR_BATCH_URL", "https://right-sized")
+    calls = []
+
+    def fake_remote(job, url_override=None):
+        calls.append(url_override)
+        if len(calls) == 1:
+            error = remote.RemoteExecutorError(
+                "ffmpeg was killed by the out-of-memory killer (exit -9)")
+            error.failure_kind = "executor_memory"
+            raise error
+        return {"ok": True}
+
+    monkeypatch.setattr(remote, "_run_remote", fake_remote)
+    result = remote._run_request_with_capacity_fallback(
+        dict(JOB, type="final"))
+    assert result == {"ok": True}
+    assert calls == [None, "https://heavy"]

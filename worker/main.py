@@ -380,7 +380,8 @@ def _notify_failure(worker_db, job, err):
                 "analyze it. This needs a service-side fix; uploading the same "
                 "file again or changing its format will not resolve it.")
     elif note and job["type"] in {"preview", "preview_check", "final"} and (
-            decision.kind == "render_budget_exceeded" and not decision.agent_repairable
+            decision.kind in {"render_budget_exceeded", "executor_memory"}
+            and not decision.agent_repairable
             or decision.kind in {"executor_unavailable", "executor_capacity",
                                  "provider_budget_exhausted"}):
         note = ("Your edit is saved, but our rendering service could not "

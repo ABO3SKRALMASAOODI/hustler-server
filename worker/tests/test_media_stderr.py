@@ -111,3 +111,23 @@ def test_font_dir_holds_only_fonts_so_libass_has_nothing_to_complain_about():
                 for e in entries if e.lower().endswith(".ttf")}
     for fam in families:
         assert f"LICENSE-{fam}.txt" in licences, fam
+
+
+def test_one_oom_kill_is_counted_once(monkeypatch):
+    """A host exposing both counters counts one kill in each; the message
+    used to read "2 kernel OOM kill(s)" for a single kill."""
+    import io
+    files = {"/sys/fs/cgroup/memory.events": "low 0\nmax 9\noom 1\noom_kill 3\n",
+             "/proc/vmstat": "nr_free_pages 1\noom_kill 7\n"}
+
+    def fake_open(path, *a, **k):
+        if path not in files:
+            raise FileNotFoundError(path)
+        return io.StringIO(files[path])
+
+    monkeypatch.setattr(media, "open", fake_open, raising=False)
+    assert media._oom_kill_count() == 3          # the container's own count
+    del files["/sys/fs/cgroup/memory.events"]
+    assert media._oom_kill_count() == 7          # Cloudflare: VM-wide only
+    files.clear()
+    assert media._oom_kill_count() is None
