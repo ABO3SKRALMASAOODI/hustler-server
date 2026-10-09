@@ -924,11 +924,28 @@ class ZoomPathPoint(BaseModel):
 
 class ZoomItem(BaseModel):
     """A zoom over a FINAL-program time range (output seconds). mode:
-    'punch' (default, instant step in/out), 'ease' (smoothly ramps in and
-    out inside the window), 'push_in' / 'pull_out' (continuous Ken Burns
-    drift across the whole window), 'follow' (round 45: ramps in like ease
-    and GLIDES its centre along `path` while held). Optional so pre-round-9
-    EDLs keep their signatures.
+    'punch' (default: a fast expo-out snap in — 0.12 s — held, then a hard
+    cut back out at the window end), 'ease' (smootherstep ramps in and out
+    inside the window), 'push_in' / 'pull_out' (continuous Ken Burns drift
+    across the whole window, with a soft start / soft landing), 'landing'
+    (starts pushed in by `strength` and settles to the wide in ~0.35 s —
+    placed right after a cut), 'pulse' (1 -> 1+strength -> 1 in ~0.3 s, a
+    beat/word thump), 'shake' (an impact: smooth noise shake that decays —
+    strength is unused), 'follow' (round 45: ramps in like ease and GLIDES
+    its centre along `path` while held). Optional so pre-round-9 EDLs keep
+    their signatures. All of them render through worker/camera.py, a
+    sub-pixel `perspective` camera — old EDLs keep their framing and lose
+    zoompan's whole-pixel shimmer.
+
+    The camera fields (all None by default, so every older EDL keeps its
+    signature): ramp_s — how long the move takes (punch attack, ease ramps,
+    landing settle, pulse length, push soft start; 0 on a punch = the old
+    instant step). overshoot — 0-0.5, a punch/ease attack that passes the
+    target by that fraction and settles (back-out). rotate — degrees of
+    roll (+ = clockwise) riding the zoom's own curve. shake / shake_hz /
+    shake_decay — 0-1 intensity, frequency and exponential decay (1/s) of a
+    noise shake on ANY mode (mode 'shake' defaults the intensity to 0.5).
+    Roll and shake zoom in only as far as needed to keep the frame covered.
 
     cx/cy (round 35): the zoom TARGET as fractions of the output frame
     (0,0 = top-left). None = center, which is exactly what every earlier
@@ -964,6 +981,7 @@ class ZoomItem(BaseModel):
     end: float
     strength: float = 0.25
     mode: Optional[Literal["punch", "ease", "push_in", "pull_out",
+                           "landing", "pulse", "shake",
                            "follow", "path"]] = None
     cx: Optional[float] = None
     cy: Optional[float] = None
@@ -980,6 +998,13 @@ class ZoomItem(BaseModel):
     # signatures; every newly authored zoom tool records both when available.
     purpose: Optional[str] = None
     target_evidence_ids: Optional[List[str]] = None
+    # The camera's curve and texture (worker/camera.py). See the docstring.
+    ramp_s: Optional[float] = None
+    overshoot: Optional[float] = None
+    rotate: Optional[float] = None
+    shake: Optional[float] = None
+    shake_hz: Optional[float] = None
+    shake_decay: Optional[float] = None
 
 
 # Round 35: the junction library grew past the two dips. Every style is
@@ -2204,6 +2229,67 @@ def _check_screen_lock(lock, name, window_s):
             "second reads as a cut, over five it stalls.")
 
 
+# Ranges of the camera fields on ZoomItem (worker/camera.py honours exactly
+# these). A field the zoom's mode would ignore is REJECTED rather than
+# carried — the same rule `path` and `ease` follow: an agent must never
+# believe it placed a move that does not render.
+ZOOM_RAMP_MAX_S = 3.0
+ZOOM_OVERSHOOT_MAX = 0.5
+ZOOM_ROTATE_MAX_DEG = 15.0
+ZOOM_SHAKE_HZ = (0.5, 30.0)
+ZOOM_SHAKE_DECAY_MAX = 30.0
+
+
+def _check_zoom_camera(i, z):
+    mode = z.mode or "punch"
+    where = f"effects.zooms[{i}]"
+    travel = mode in ("follow", "path")
+    if z.ramp_s is not None:
+        if travel or mode == "shake":
+            raise EDLValidationError(
+                f"{where}: `ramp_s` does not apply to mode '{mode}' (a "
+                "travelling zoom is timed by its keyframes; a shake by "
+                "shake_decay).")
+        z.ramp_s = round(min(max(float(z.ramp_s), 0.0), ZOOM_RAMP_MAX_S), 3)
+    if z.overshoot is not None:
+        if mode not in ("punch", "ease"):
+            raise EDLValidationError(
+                f"{where}: `overshoot` only applies to mode 'punch' or "
+                f"'ease'; this zoom is '{mode}'.")
+        z.overshoot = round(min(max(float(z.overshoot), 0.0),
+                                ZOOM_OVERSHOOT_MAX), 3)
+        if z.overshoot <= 0.0:
+            z.overshoot = None
+    if z.rotate is not None:
+        if travel or mode == "shake":
+            raise EDLValidationError(
+                f"{where}: `rotate` rides a zoom's own curve and does not "
+                f"apply to mode '{mode}'.")
+        z.rotate = round(min(max(float(z.rotate), -ZOOM_ROTATE_MAX_DEG),
+                             ZOOM_ROTATE_MAX_DEG), 2)
+        if z.rotate == 0.0:
+            z.rotate = None
+    if z.shake is not None:
+        z.shake = round(min(max(float(z.shake), 0.0), 1.0), 3)
+        if z.shake <= 0.0:
+            if mode == "shake":
+                raise EDLValidationError(
+                    f"{where}: a 'shake' zoom needs shake > 0 (0-1 "
+                    "intensity; omit it for the 0.5 default).")
+            z.shake = None
+    shaking = mode == "shake" or z.shake is not None
+    for name, lo, hi in (("shake_hz",) + ZOOM_SHAKE_HZ,
+                         ("shake_decay", 0.0, ZOOM_SHAKE_DECAY_MAX)):
+        v = getattr(z, name)
+        if v is None:
+            continue
+        if not shaking:
+            raise EDLValidationError(
+                f"{where}: `{name}` needs a shake (mode 'shake' or "
+                "shake > 0).")
+        setattr(z, name, round(min(max(float(v), lo), hi), 2))
+
+
 def validate_edl(data, duration=None, *, render_fragment=False):
     """Parse + validate an EDL dict.
 
@@ -2905,6 +2991,7 @@ def validate_edl(data, duration=None, *, render_fragment=False):
             if z.ease is not None and z.mode != "path":
                 raise EDLValidationError(
                     f"effects.zooms[{i}]: `ease` only applies to mode 'path'.")
+            _check_zoom_camera(i, z)
         fx.zooms.sort(key=lambda z: z.start)
         if fx.transition is not None:
             tr = fx.transition

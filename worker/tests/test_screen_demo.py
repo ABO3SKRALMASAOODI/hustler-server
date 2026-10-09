@@ -26,6 +26,7 @@ Run:  python -m pytest tests/test_screen_demo.py -q     (from worker/)
 """
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -701,11 +702,13 @@ def test_path_zoom_emits_an_eased_interpolation():
         "ease": "cubic_in_out",
         "path": [{"f": 0.0, "cx": 0.2, "cy": 0.5, "s": 0.0},
                  {"f": 1.0, "cx": 0.8, "cy": 0.5, "s": 0.8}]}]}})
-    assert "zoompan" in g
+    # The camera is the sub-pixel perspective chain now; its frame counter
+    # is 1-based, so program time reads (on-1)/fps where zoompan read on/fps.
+    assert "perspective=" in g and "zoompan" not in g
     # the cubic Hermite curve, applied to the segment's own clip()
-    assert "(3-2*(clip((on/30.000-1.000)/4.000,0,1)))" in g, g
+    assert "(3-2*(clip((((on-1)/30.000)-1.000)/4.000,0,1)))" in g, g
     # the STRENGTH interpolates too (this is what 'path' adds over 'follow')
-    assert "0.8000*" in g and "between(on/30.000,1.000,5.000)" in g
+    assert "0.8000*" in g and "between(((on-1)/30.000),1.000,5.000)" in g
 
 
 def test_linear_ease_emits_no_curve():
@@ -731,7 +734,8 @@ def test_aspect_shift_emits_time_varying_bars():
     # overlay, NOT drawbox: drawbox evaluates its geometry once at config
     # time, so a bar whose width is an expression in t never moves.
     assert "drawbox" not in g
-    assert g.count("eval=frame") == 2, "a pillarbox is two bars, no more"
+    bars = re.findall(r"\]overlay=[^\[]*?:eval=frame", g)
+    assert len(bars) == 2, "a pillarbox is two bars, no more"
     assert "clip((t-2.000)/0.800,0,1)" in g, g
 
 
@@ -742,8 +746,10 @@ def test_aspect_shift_zoom_rides_the_existing_zoompan():
         "zooms": [{"id": "z", "start": 1.0, "end": 3.0, "strength": 0.3}],
         "frame_shifts": [{"id": "a", "at": 5.0, "ratio": "1:1",
                           "duration_s": 0.5, "zoom": True}]}})
-    assert g.count("zoompan") == 1, g
-    assert "0.30*between(on/30.000,1.000,3.000)" in g
+    # One always-on camera filter carries the shift's push AND the zoom.
+    assert g.count("perspective=") == 1 and "zoompan" not in g, g
+    assert "(0.3*" in g, g
+    assert "gte(((on-1)/30.000),1)*lt(((on-1)/30.000),3)" in g, g
 
 
 def test_both_axes_can_shift_without_stranding_a_split_output():
@@ -755,7 +761,7 @@ def test_both_axes_can_shift_without_stranding_a_split_output():
         {"id": "b", "at": 8.0, "ratio": "16:9", "duration_s": 0.5}]}},
         dur=20.0, gw=1440, gh=1080)
     assert "split=4" in g
-    assert g.count("eval=frame") == 4
+    assert len(re.findall(r"\]overlay=[^\[]*?:eval=frame", g)) == 4
     for i in range(4):
         assert f"[fsb{i}]" in g, i
     # every declared split output is consumed exactly once as an overlay input

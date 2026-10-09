@@ -27,6 +27,7 @@ import uuid
 
 import audio_qc
 import audit
+import camera
 import captions as caplib
 import config
 import execution_inputs
@@ -922,23 +923,28 @@ def _path_value_at(pts, key, t, a, b, default, ease):
     return v
 
 
-def zoom_state_at(zooms, t, out_duration):
-    """(z, cx, cy) of the shared zoompan at output second t — the python
-    mirror of the term emission below (punch/ease/push_in/pull_out plus the
-    travelling follow/path shapes), so a caller can know the zoomed viewport
-    without rendering. Round 72: look_at(output_times) crops frames through
-    this, which is what lets the agent SEE a zoom's framing before a render
-    instead of discovering it from the user's complaint.
+def zoom_state_at(zooms, t, out_duration, size=None):
+    """(z, cx, cy) of the shared camera at output second t — the python
+    mirror of the term emission below (the eased punch/ease/push/landing/
+    pulse curves from worker/camera.py, plus the travelling follow/path
+    shapes), so a caller can know the zoomed viewport without rendering.
+    Round 72: look_at(output_times) crops frames through this, which is
+    what lets the agent SEE a zoom's framing before a render instead of
+    discovering it from the user's complaint.
 
     Only the zooms list is evaluated — a screen takeover's push and an
-    aspect shift's compensation ride the same zoompan at render time but are
+    aspect shift's compensation ride the same camera at render time but are
     their own subsystems; callers overlapping those windows say so instead
     of approximating them. The viewport at (z, cx, cy) is
-    x0=(1-1/z)*cx, width 1/z (zoompan's own clamp is mirrored by clamping
-    cx/cy to 0-1)."""
+    x0=(1-1/z)*cx, width 1/z (the filter's clamp is mirrored by clamping
+    cx/cy to 0-1). A roll or shake raises z to the cover zoom the filter
+    uses (`size` = (W, H) sets the aspect that cover needs; 9:16 when
+    unknown); the roll itself and the shake's travel are not part of a
+    viewport and are left out."""
     z = 1.0
     cxo = 0.0
     cyo = 0.0
+    terms = []                          # camera.Terms (floats) per zoom
     for zm in zooms or []:
         a = max(0.0, float(zm["start"]))
         b = min(float(out_duration), float(zm["end"]))
@@ -960,25 +966,19 @@ def zoom_state_at(zooms, t, out_duration):
             if inside:
                 cxo += _path_value_at(pts, "cx", t, a, b, 0.5, ease) - 0.5
                 cyo += _path_value_at(pts, "cy", t, a, b, 0.5, ease) - 0.5
+            terms.append(camera.add_shake(camera.Terms(), zm, float(t), a, b))
             continue
-        if mode == "ease":
-            r = max(0.15, min(0.4, (b - a) / 4.0))
-            z += st * _clip01((t - a) / r) * _clip01((b - t) / r)
-        elif mode == "push_in":
-            if inside:
-                z += st * (t - a) / (b - a)
-        elif mode == "pull_out":
-            if inside:
-                z += st * (1.0 - (t - a) / (b - a))
-        elif inside:                    # punch
-            z += st
-        if inside:
-            cx = zm.get("cx")
-            cy = zm.get("cy")
-            if cx is not None and abs(float(cx) - 0.5) > 1e-6:
-                cxo += float(cx) - 0.5
-            if cy is not None and abs(float(cy) - 0.5) > 1e-6:
-                cyo += float(cy) - 0.5
+        terms.append(camera.zoom_terms(zm, float(t), a, b))
+    for tm in terms:
+        z += float(tm.z)
+        cxo += float(tm.cx) if tm.cx is not None else 0.0
+        cyo += float(tm.cy) if tm.cy is not None else 0.0
+    rot = sum(float(tm.rot) for tm in terms)
+    amp = sum(float(tm.amp) for tm in terms)
+    if abs(rot) > 0 or amp > 0:
+        z = max(min(max(z, 1.0), camera.ZOOM_MAX),
+                camera.cover_zoom(rot, amp,
+                                  camera.aspect_k(*(size or (9, 16)))))
     return z, _clip01(0.5 + cxo), _clip01(0.5 + cyo)
 
 
@@ -1958,19 +1958,26 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                          imode, f"i{j}", seg_dur=dur,
                          picture=(edl.get("frame") or {}).get("picture"))
         if motion:
+            # Sub-pixel Ken Burns (worker/camera.py): a still is where
+            # zoompan's whole-pixel crop shimmered worst — every edge in a
+            # photo stair-stepped through the push. Constant speed on
+            # purpose: the move starts and ends on the block's own cuts.
+            # perspective's frame counter is 1-based, hence (on-1).
             nframes = max(1, int(round(dur * fps)))
-            prog = f"(on/{nframes})"
-            cx, cy = "iw/2-(iw/zoom/2)", "ih/2-(ih/zoom/2)"
+            prog = camera.X(f"((on-1)/{nframes})")
+            cxt = None
             if motion == "zoom_in":
-                z, x, y = f"1+0.25*{prog}", cx, cy
+                zt = prog * 0.25
             elif motion == "zoom_out":
-                z, x, y = f"1.25-0.25*{prog}", cx, cy
+                zt = 0.25 - prog * 0.25
             elif motion == "pan_left":
-                z, x, y = "1.15", f"(iw-iw/zoom)*(1-{prog})", cy
+                zt, cxt = 0.15, 0.5 - prog
             else:                       # pan_right
-                z, x, y = "1.15", f"(iw-iw/zoom)*{prog}", cy
-            parts.append(f"[{norm_out}]zoompan=z='{z}':x='{x}':y='{y}'"
-                         f":d=1:s={W}x{H}:fps={fps:.3f}[v_ins{j}]")
+                zt, cxt = 0.15, prog - 0.5
+            parts.extend(camera.camera_chain(
+                norm_out, f"v_ins{j}", W, H, fps,
+                [camera.Shot(0.0, dur, camera.Terms(zt, cxt))],
+                always=True))
         if ins_audio:
             if abs(rate - 1.0) > 1e-6:
                 parts.append(
@@ -2406,22 +2413,30 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                      f":eof_action=pass[vbh{j}]")
         vlabel = f"vbh{j}"
 
-    zoom_terms = []
     # A takeover always aims (at the screen), so it forces the targeted branch
-    # for the whole zoompan. It must be decided BEFORE the zoom loop: that loop
+    # for the whole camera. It must be decided BEFORE the zoom loop: that loop
     # only emits a zoom's own cx/cy terms when the graph is already targeted,
     # so flipping this afterwards would silently drop them.
     zoom_targeted = bool(takeovers) or any(
         z.get("cx") is not None or z.get("cy") is not None or z.get("path")
         for z in zooms)
-    cx_terms, cy_terms = [], []
+    # The camera is a chain of sub-pixel `perspective` filters built by
+    # worker/camera.py (zoompan cropped on whole pixels and shimmered on
+    # every slow move). Each zoom, takeover push and aspect-shift push is a
+    # Shot: its window plus its zoom / aim / roll / shake terms. Shots that
+    # overlap in time sum into one filter — the single-zoompan maths — and
+    # each filter runs only on its own frames. perspective's `on` counter is
+    # 1-based, so program time is (on-1)/fps: the same frames the old
+    # zoompan's on/fps addressed.
+    shots = []
+    cam_always = False
+    T = camera.time_var(fps)
+    t = str(T)
     for z in zooms:
         a = max(0.0, float(z["start"]))
         b = min(tl.out_duration, float(z["end"]))
         if b - a < 0.05:
             continue
-        st = float(z.get("strength", 0.25))
-        t = f"on/{fps:.3f}"
         zmode = z.get("mode") or "punch"
         if zmode in ("follow", "path"):
             # Round 45 / round 51. The travelling zoom: the CENTRE glides
@@ -2430,64 +2445,31 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             # strength and ramps it at the window edges; 'path' keyframes the
             # strength too. Both shapes — and both callers, showcase_demo and
             # add_zoom_path — go through worker/travel.py, which emits ONE
-            # expression per axis. Legacy 'follow' zooms come back out of it
-            # character-for-character, so their cached renders still match.
-            zoom_terms.append(travel.strength_term(z, t, a, b))
+            # expression per axis.
             cxe, cye = travel.centre_terms(z, t, a, b)
-            if cxe:
-                cx_terms.append(cxe)
-            if cye:
-                cy_terms.append(cye)
+            terms = camera.Terms(travel.strength_term(z, t, a, b), cxe, cye)
+            shots.append(camera.Shot(a, b, camera.add_shake(
+                terms, z, T, a, b)))
             continue
-        if zmode == "ease":
-            # smooth ramp in and out inside the window (0 outside it)
-            r = max(0.15, min(0.4, (b - a) / 4.0))
-            zoom_terms.append(
-                f"{st:.2f}*clip(({t}-{a:.3f})/{r:.3f},0,1)"
-                f"*clip(({b:.3f}-{t})/{r:.3f},0,1)")
-        elif zmode == "push_in":
-            # Ken Burns drift: zoom grows 0 -> strength across the window
-            zoom_terms.append(
-                f"{st:.2f}*(({t}-{a:.3f})/{b - a:.3f})"
-                f"*between({t},{a:.3f},{b:.3f})")
-        elif zmode == "pull_out":
-            zoom_terms.append(
-                f"{st:.2f}*(1-(({t}-{a:.3f})/{b - a:.3f}))"
-                f"*between({t},{a:.3f},{b:.3f})")
-        else:                           # punch: instant step in/out
-            zoom_terms.append(f"{st:.2f}*between({t},{a:.3f},{b:.3f})")
-        if zoom_targeted:
-            # target expressions: 0.5 (center) outside every window, the
-            # zoom's own cx/cy inside its window — so multiple zooms can
-            # each punch toward their own subject.
-            cx = z.get("cx")
-            cy = z.get("cy")
-            if cx is not None and abs(float(cx) - 0.5) > 1e-6:
-                cx_terms.append(f"{float(cx) - 0.5:.3f}"
-                                f"*between({t},{a:.3f},{b:.3f})")
-            if cy is not None and abs(float(cy) - 0.5) > 1e-6:
-                cy_terms.append(f"{float(cy) - 0.5:.3f}"
-                                f"*between({t},{a:.3f},{b:.3f})")
+        # punch / ease / push_in / pull_out / landing / pulse / shake: the
+        # eased curves, roll and shake (and zoom_state_at's python mirror)
+        # all live in worker/camera.py.
+        shots.append(camera.zoom_shot(z, a, b, fps, targeted=zoom_targeted))
     # An aspect shift optionally pushes the picture in as the frame narrows, so
     # the subject holds its size instead of just losing its sides. It rides the
-    # SAME zoompan as the zooms (one geometry filter, not two) and is emitted
+    # SAME camera as the zooms (one geometry stage, not two) and is emitted
     # as one more term — which also means a zoom and a shift over the same
     # moment compose rather than fight.
     # A screen takeover's camera push is a zoom term like any other — one
-    # geometry filter, and the same resolver the corner pin below reads, so the
+    # geometry stage, and the same resolver the corner pin below reads, so the
     # shot and the content it is pinned to can never be computed differently.
     for idx, item in takeovers:
         a = max(0.0, float(item["start"]))
         b = min(tl.out_duration, a + float(item["duration_s"]))
         if b - a < 0.05:
             continue
-        st, cxt, cyt = _screen_lock_terms(item["screen"], f"on/{fps:.3f}",
-                                          a, b, fps)
-        zoom_terms.append(st)
-        if cxt:
-            cx_terms.append(cxt)
-        if cyt:
-            cy_terms.append(cyt)
+        st, cxt, cyt = _screen_lock_terms(item["screen"], t, a, b, fps)
+        zt = [st]
         # The landing (round 62b, reshaped in 63b): momentum through the cut.
         # ONE sin profile starts at the ARRIVAL (b minus the hold — where the
         # push actually lands now), rises past full frame and settles. Its
@@ -2496,7 +2478,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         # picking up the SAME curve at the SAME value on the frame after the
         # handoff — both sides of the cut show the same content at the same
         # magnification, so the join sits inside one uninterrupted zoom.
-        tvar = f"on/{fps:.3f}"
+        tvar = t
         hold = screen_lock_hold(b - a)
         bp = b - hold
         le = min(tl.out_duration, bp + hold + SCREEN_LAND_S)
@@ -2505,32 +2487,28 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         if le - b > 0.05 and (item.get("screen") or {}).get("land") \
                 is not False:
             p = f"clip(({tvar}-{bp:.3f})/{le - bp:.5f},0,1)"
-            zoom_terms.append(f"{SCREEN_LAND_ZOOM:.3f}*sin(PI*{p})"
-                              f"*gt({tvar},{b:.3f})*lt({tvar},{le:.3f})")
+            zt.append(f"{SCREEN_LAND_ZOOM:.3f}*sin(PI*{p})"
+                      f"*gt({tvar},{b:.3f})*lt({tvar},{le:.3f})")
+        shots.append(camera.Shot(a, max(b, le),
+                                 camera.Terms("+".join(zt), cxt, cyt)))
     shift_w, shift_h, shift_z = ([], [], [])
     if shifts:
         shift_w, shift_h, shift_z = screenframe.shift_tracks(
             shifts, W or 1280, H or 720, tl.out_duration)
         if screenframe.track_varies(shift_z):
             zexp = travel.path_value_expr(
-                shift_z, "v", f"on/{fps:.3f}", 0.0, tl.out_duration,
+                shift_z, "v", t, 0.0, tl.out_duration,
                 default=0.0, ease="cubic_in_out")
             if zexp:
-                zoom_terms.append(f"({zexp})")
-    if zoom_terms:
-        zexpr = "1+" + "+".join(zoom_terms)
-        if zoom_targeted:
-            cxe = "0.5" + ("+" + "+".join(cx_terms) if cx_terms else "")
-            cye = "0.5" + ("+" + "+".join(cy_terms) if cy_terms else "")
-            xexpr = f"(iw-iw/zoom)*({cxe})"
-            yexpr = f"(ih-ih/zoom)*({cye})"
-        else:
-            # the exact legacy strings — mathematically (iw-iw/zoom)*0.5
-            xexpr = "iw/2-(iw/zoom/2)"
-            yexpr = "ih/2-(ih/zoom/2)"
-        parts.append(f"[{vlabel}]zoompan=z='{zexpr}'"
-                     f":x='{xexpr}':y='{yexpr}'"
-                     f":d=1:s={W}x{H}:fps={fps:.3f}[vzoom]")
+                shots.append(camera.Shot(0.0, tl.out_duration,
+                                         camera.Terms(f"({zexp})")))
+                # A shift's push can hold across any span of the programme,
+                # so the camera runs as one always-on filter.
+                cam_always = True
+    if shots:
+        parts.extend(camera.camera_chain(
+            vlabel, "vzoom", W, H, fps, shots, targeted=zoom_targeted,
+            always=cam_always))
         vlabel = "vzoom"
     # ---- screen takeovers (round 55): content pinned INTO the footage ----
     # Emitted after the zoom because the corner path is written in POST-push
