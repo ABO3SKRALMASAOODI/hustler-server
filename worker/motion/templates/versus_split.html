@@ -4,7 +4,7 @@
  "params": {
   "left": {"type": "str", "required": true, "max": 22, "hint": "left side label, e.g. 'Tesla'"},
   "right": {"type": "str", "required": true, "max": 22, "hint": "right side label, e.g. 'Ford'"},
-  "left_sub": {"type": "str", "default": "", "max": 28, "hint": "optional value or note under the left label, e.g. '$800B'"},
+  "left_sub": {"type": "str", "default": "", "max": 28, "hint": "optional value or short note under the left label, e.g. '$800B' (best under ~16 characters; longer wraps to two lines)"},
   "right_sub": {"type": "str", "default": "", "max": 28},
   "left_color": {"type": "color", "default": "#FF4B4B"},
   "right_color": {"type": "color", "default": "#4C7DFF"},
@@ -91,9 +91,16 @@
       o.t.style.fontSize = fs + 'px';
       o.t.style.paddingTop = o.t.style.paddingBottom = '0px';
       if (o.s) {
+        // one line while it stays phone-readable; a longer note wraps into two
+        // balanced lines at that floor instead of shrinking to a whisper
         let v = Math.max(36 * S, fs * 0.46);
-        o.s.style.fontSize = v + 'px';
-        while (o.s.getBoundingClientRect().width > maxW && v > 22) { v *= 0.95; o.s.style.fontSize = v + 'px'; }
+        const floor = 34 * S;
+        Object.assign(o.s.style, { fontSize: v + 'px', whiteSpace: 'nowrap', maxWidth: '', lineHeight: '1' });
+        while (o.s.getBoundingClientRect().width > maxW && v > floor) { v *= 0.95; o.s.style.fontSize = v + 'px'; }
+        if (o.s.getBoundingClientRect().width > maxW) {
+          Object.assign(o.s.style, { whiteSpace: 'normal', maxWidth: maxW + 'px', textWrap: 'balance', lineHeight: '1.08' });
+          while (o.s.scrollWidth > maxW + 1 && v > 22) { v *= 0.95; o.s.style.fontSize = v + 'px'; }
+        }
       }
     });
     const cy = MG.clamp(P.y * H, safe[0] + bd, safe[1] - bd);

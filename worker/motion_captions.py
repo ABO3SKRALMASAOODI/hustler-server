@@ -185,6 +185,7 @@ def cues(edl, index, tl):
     emph = {caplib._norm_word(w) for w in (caps.get("emphasis_words") or []) if w}
     upper = bool(style.get("uppercase"))
     lumas = _luma_samples(index)
+    mutes = [(float(a), float(b)) for a, b in caplib.effective_caption_mutes(edl)]
     out = []
     prog_end = float(tl.out_duration)
     for i, ch in enumerate(chunks):
@@ -194,6 +195,11 @@ def cues(edl, index, tl):
         # Hold through a short breath; release promptly at a real pause.
         e = min(nxt, last + 0.6) if nxt is not None and nxt - last < 0.6 else last + 0.35
         e = min(e, prog_end)
+        # A muted window (a graphic that replaces the captions) starts with
+        # the line already gone: the hold never reaches into it.
+        for m0, _m1 in mutes:
+            if s < m0 < e:
+                e = m0
         if e - s < 0.12:
             continue
         src_mid = (float(ch[0].get("src_t0", s)) + float(ch[-1].get("src_t1", last))) / 2.0

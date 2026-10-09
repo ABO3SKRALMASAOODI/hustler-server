@@ -204,6 +204,17 @@
   /** Theme color with fallback. */
   MG.color = (name, fallback) => (MG.theme && MG.theme[name]) || fallback;
   /** Escape text for safe innerHTML use. */
+  // Whitespace tokens with *starred* accents; a *multi word run* marks every
+  // word in it (trailing punctuation after the closing star stays plain text).
+  MG.starWords = s => {
+    let run = false;
+    return String(s ?? '').split(/\s+/).filter(Boolean).map(tok => {
+      let t = tok, acc = run;
+      if (/^\*/.test(t)) { acc = true; run = true; t = t.replace(/^\*/, ''); }
+      if (/\*[.,!?:;"')\u2019\u201d]*$/.test(t)) { acc = true; run = false; t = t.replace(/\*([.,!?:;"')\u2019\u201d]*)$/, '$1'); }
+      return { t: t.replace(/\*/g, ''), acc };
+    }).filter(w => w.t);
+  };
   MG.esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
   // ── frame driver (called by the renderer) ──────────────────────────────

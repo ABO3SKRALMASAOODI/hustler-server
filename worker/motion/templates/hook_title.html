@@ -51,9 +51,7 @@
       el.style.fontFamily = `'${P.font}', 'Inter Display', sans-serif`;
       el.style.color = P.color;
       if (P.font === 'Anton' || P.font === 'Bebas Neue') el.style.letterSpacing = '0';
-      L.split(/\s+/).forEach(tok => {
-        const acc = /^\*.*\*[.,!?:;]*$/.test(tok);
-        const text = acc ? tok.replace(/^\*/, '').replace(/\*([.,!?:;]*)$/, '$1') : tok;
+      MG.starWords(L).forEach(({ t: text, acc }) => {
         const w = MG.el('span', 'mg-w', P.uppercase ? text.toUpperCase() : text, el);
         if (acc) {
           if (P.treatment === 'serif') { w.classList.add('acc-serif'); w.style.color = P.accent; }

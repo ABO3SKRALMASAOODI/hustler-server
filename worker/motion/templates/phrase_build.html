@@ -11,7 +11,8 @@
   "accent": {"type": "color", "default": "#ED080D"},
   "entrance": {"type": "enum", "values": ["pop", "ghost", "rise"], "default": "pop", "hint": "pop = hard cut per word; ghost = 2 frames at 35% then snap; rise = small rise + blur-to-sharp"},
   "word_stagger": {"type": "float", "min": 0.0, "max": 0.6, "default": 0.14, "hint": "seconds between words inside a row (0 = the whole row at once)"},
-  "exit": {"type": "enum", "values": ["cut", "fade", "blur"], "default": "cut"}
+  "exit": {"type": "enum", "values": ["cut", "fade", "blur"], "default": "cut"},
+  "scrim": {"type": "float", "min": 0, "max": 1, "default": 0.45, "hint": "soft dark backing under the block so thin serif/script rows read over bright shirts and walls; 0 = none"}
  },
  "example": {"rows": [{"text": "Your", "role": "script", "size": "1.1", "at": "0"},
                       {"text": "only focus", "role": "sans", "size": "1", "at": "0.25"},
@@ -24,12 +25,15 @@
   .row{white-space:nowrap;display:block;position:relative;width:max-content}
   .row .mg-w{margin-right:.22em;will-change:opacity,transform,filter}
   .row .mg-w:last-child{margin-right:0}
+  .scrim{position:absolute;pointer-events:none;border-radius:50%;opacity:0;
+    background:radial-gradient(closest-side,rgba(0,0,0,var(--sa)) 0%,rgba(0,0,0,calc(var(--sa) * .62)) 52%,rgba(0,0,0,0) 100%)}
 </style>
-<div class="mg-root"><div class="blk" id="blk"></div></div>
+<div class="mg-root"><div class="scrim" id="scrim"></div><div class="blk" id="blk"></div></div>
 <script>
 (() => {
   const P = MG.params, W = MG.W, H = MG.H, D = MG.duration, FPS = MG.fps || 30;
-  const blk = MG.$('#blk');
+  const blk = MG.$('#blk'), scrim = MG.$('#scrim');
+  scrim.style.setProperty('--sa', (0.8 * (P.scrim || 0)).toFixed(3));
   // ── font roles (first bundled family wins; graceful CSS fallbacks) ──
   const FAM = new Set(Array.from(document.fonts, f => f.family.replace(/["']/g, '')));
   const first = list => list.find(f => FAM.has(f));
@@ -51,14 +55,14 @@
 
   // ── build every row in its final place (hidden words keep their space) ──
   const rows = (P.rows || []).slice(0, 4).map(r => {
-    const name = ROLE[String(r.role || 'sans').toLowerCase()] ? String(r.role).toLowerCase() : 'sans';
+    const want = String(r.role || 'sans').toLowerCase();
+    const name = ROLE[want] ? want : 'sans';
     const R = ROLE[name]();
     const el = MG.el('div', 'row', null, blk);
     Object.assign(el.style, { fontFamily: R.css, fontWeight: R.weight, fontStyle: R.style,
       letterSpacing: R.track, lineHeight: R.lh, color: truthy(r.accent) ? P.accent : P.color });
-    const words = String(r.text || '').trim().split(/\s+/).filter(Boolean).map(tok => {
-      const acc = /^\*[^*]+\*[.,!?:;]*$/.test(tok);
-      const w = MG.el('span', 'mg-w', acc ? tok.replace(/^\*/, '').replace(/\*([.,!?:;]*)$/, '$1') : tok, el);
+    const words = MG.starWords(r.text).map(({ t, acc }) => {
+      const w = MG.el('span', 'mg-w', t, el);
       if (acc) w.style.color = P.accent;
       return w;
     });
@@ -110,6 +114,11 @@
     rows.forEach(r => { const b = r.el.getBoundingClientRect();
       x0 = Math.min(x0, b.left - r.fs * 0.35); x1 = Math.max(x1, b.right + r.fs * 0.35);
       y0 = Math.min(y0, b.top - r.fs * 0.45); y1 = Math.max(y1, b.bottom + r.fs * 0.5); });
+    if (P.scrim > 0) {
+      const px = 0.25 * lastFs + 50, py = 0.3 * lastFs + 50;
+      x0 -= px; x1 += px; y0 -= py; y1 += py;
+      Object.assign(scrim.style, { left: x0 + 'px', top: y0 + 'px', width: (x1 - x0) + 'px', height: (y1 - y0) + 'px' });
+    }
     MG.box = [Math.max(0, x0), Math.max(0, y0), Math.min(W, x1), Math.min(H, y1)];
   };
   layout();
@@ -122,6 +131,8 @@
   const wins = [];
   rows.forEach(r => r.times.forEach(t0 => wins.push([Math.max(0, t0 - 0.02), t0 + IN + 0.02])));
   if (exitDur) wins.push([Math.max(0, D - exitDur - 0.04), D]);
+  const sc0 = rows.length ? rows[0].t0 : 0;
+  if (P.scrim > 0) wins.push([Math.max(0, sc0 - 0.07), sc0 + 0.32]);
   MG.active(wins);
   MG.frame(t => {
     rows.forEach(r => r.words.forEach((w, j) => {
@@ -142,6 +153,7 @@
         : { opacity: 1 - MG.ease.inQuad(q), blur: q * 14, y: -q * lastFs * 0.12 };
     }
     MG.set(blk, x);
+    if (P.scrim > 0) scrim.style.opacity = (MG.ease.outCubic(MG.range(t, sc0 - 0.05, 0.3)) * (x.opacity ?? 1)).toFixed(4);
   });
 })();
 </script>

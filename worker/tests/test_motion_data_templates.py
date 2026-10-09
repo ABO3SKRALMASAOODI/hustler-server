@@ -198,3 +198,20 @@ def test_every_enum_value_and_aspect_renders():
     for job, rep in zip(jobs, reports):
         assert not rep["errors"], (job.label, rep["errors"])
         assert rep["visible_frames"] == 3, (job.label, rep)
+
+
+@needs_browser
+def test_multi_word_starred_runs_never_print_stars():
+    """'*flying cars*' accents both words in every template that reads stars;
+    a literal asterisk on screen is the bug agents hit most."""
+    cases = [("hook_title", {"text": "We were promised / *flying cars*"}),
+             ("word_slam", {"text": "*next level*", "kicker": "to the"}),
+             ("phrase_build", {"rows": [{"text": "the *narrow cone* of progress"}]}),
+             ("marker_text", {"text": "a *narrow cone* of progress"}),
+             ("quote_card", {"text": "they promised us *flying cars*"}),
+             ("typewriter", {"text": "all we got was *140 characters*"}),
+             ("counter", {"value": "140", "label": "all we got: *140 characters*"})]
+    jobs = [(_job(n, p), "body", [_job(n, p).duration * 0.9]) for n, p in cases]
+    texts = [r[0] for r in asyncio.run(_probe(jobs, "s => document.querySelector(s).innerText"))]
+    for (name, _p), text in zip(cases, texts):
+        assert "*" not in text, (name, text)

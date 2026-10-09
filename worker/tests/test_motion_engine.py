@@ -166,6 +166,19 @@ def test_motion_caption_cues_follow_cuts_and_mutes():
     assert items[0]["params"]["cues"][0]["s"] == 0.0
 
 
+def test_motion_caption_hold_stops_where_a_muting_graphic_starts():
+    words = [("our", 0.1, 0.3), ("civilization", 0.35, 0.9), ("to", 0.95, 1.1),
+             ("the", 2.0, 2.1), ("next", 2.15, 2.4), ("level", 2.45, 2.9)]
+    edl = default_edl(4.0)
+    edl["captions"] = {"mode": "from_transcript", "style": {"motion_look": "editorial"}}
+    edl["motion"] = [{"id": "slam", "template": "word_slam", "start": 1.2, "end": 2.7,
+                      "params": {"text": "next *level*"}}]
+    edl = validate_edl(edl, 4.0).model_dump()
+    cues = motion_captions.cues(edl, _index(words), Timeline(edl["keep"]))
+    before = [c for c in cues if c["s"] < 1.2]
+    assert before and all(c["e"] <= 1.2 + 1e-6 for c in before)
+
+
 def test_motion_look_is_a_caption_style_field():
     edl = default_edl(5.0)
     edl["captions"] = {"mode": "from_transcript", "style": {"motion_look": "glow"}}

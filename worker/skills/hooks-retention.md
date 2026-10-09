@@ -29,8 +29,11 @@ THE HOOK — 0 to 1.5 s:
 - FIND it before cutting: the most extreme claim, the boldest visual, the
   question that opens a loop, the mid-action moment ("we lost everything" >
   "hi guys, today…"). It is rarely at the start of the raw footage.
-- MOVE it: `keep_segments` reorders — open on the hook sentence, then jump
-  back to the natural start. Keep the minimum context to be understood.
+- START on it: kept footage always plays in source order (`keep_segments`
+  sorts its spans), so a later line cannot be moved ahead of earlier speech.
+  Trim the lead-in so the first kept sentence IS the hook; when the payoff
+  line sits later, open on the tension it answers and pose it as hook type.
+  Keep the minimum context to be understood.
 - PATTERN INTERRUPT within 0.1–0.6 s: open already punched-in or with a
   landing at 0 s, a `hook_title` or `word_slam` on the first strong word, a
   flash or light leak, with at most one library sound under it when the

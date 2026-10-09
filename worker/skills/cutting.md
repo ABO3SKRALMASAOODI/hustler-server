@@ -47,4 +47,4 @@ Audit word boundaries and program order, then screen the opening, every story tu
 
 ## Repair ladder
 
-Snap boundaries → restore needed context/reaction → reorder complete beats → relax or compress pacing → rebuild the arc → verify the full preview.
+Snap boundaries → restore needed context/reaction → drop or trim whole beats (kept footage plays in source order) → relax or compress pacing → rebuild the arc → verify the full preview.

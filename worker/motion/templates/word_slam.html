@@ -10,7 +10,8 @@
   "kicker": {"type": "str", "default": "", "max": 60, "hint": "optional small connector line above the hero (e.g. 'out of the')"},
   "y": {"type": "float", "min": 0.12, "max": 0.8, "default": 0.56, "hint": "vertical centre as a frame fraction; keep off the face"},
   "uppercase": {"type": "bool", "default": true, "hint": "caps for grotesk/condensed; serif and script keep the typed case"},
-  "exit": {"type": "enum", "values": ["cut", "fade", "blur", "strobe"], "default": "cut"}
+  "exit": {"type": "enum", "values": ["cut", "fade", "blur", "strobe"], "default": "cut"},
+  "fit": {"type": "enum", "values": ["shared", "justify"], "default": "shared", "hint": "justify = every ' / ' line scaled to the same width, so a short stat towers over its label ('*32%* / fewer errors'); shared = one type size"}
  },
  "example": {"text": "*Ordinary*", "kicker": "out of the", "entrance": "slam", "role": "condensed"},
  "sfx": [{"at": 0.0, "kind": "kick", "when": {"entrance": ["pop", "strobe"]}},
@@ -57,11 +58,7 @@
   const sans = FAM.has('Inter') ? `'Inter','Inter Display',sans-serif` : `'Inter Display',sans-serif`;
 
   // ── build: kicker + hero lines (words -> chars for the letter cascade) ──
-  const parse = s => s.split(/\s+/).filter(Boolean).map(tok => {
-    const acc = /^\*.*\*[.,!?:;]*$/.test(tok) || /^\*[^*]+\*$/.test(tok);
-    const text = tok.replace(/^\*/, '').replace(/\*([.,!?:;]*)$/, '$1');
-    return { text: caps ? text.toUpperCase() : text, acc };
-  });
+  const parse = s => MG.starWords(s).map(({ t, acc }) => ({ text: caps ? t.toUpperCase() : t, acc }));
   const raw = String(P.text || '').trim();
   let rows = raw.split(/\s*(?:\/|\n)\s*/).map(parse).filter(r => r.length);
   if (!rows.length) rows = [[{ text: ' ', acc: false }]];
@@ -121,7 +118,14 @@
       groups = best.cand;
     }
     fs = fitSize(groups);
-    lines.forEach(el => { el.style.fontSize = fs + 'px'; });
+    if (P.fit === 'justify' && groups.length > 1) {
+      // a justified stack: each line fills the same width, inside one height budget
+      let sz = lines.map(el => Math.min(maxW / Math.max(measure(el), 0.01), 0.24 * H));
+      const tot = sz.reduce((a, b) => a + b, 0) * R.lh, budget = 0.42 * H;
+      if (tot > budget) sz = sz.map(v => v * budget / tot);
+      lines.forEach((el, i) => { el.style.fontSize = sz[i] + 'px'; });
+      fs = Math.max(...sz);
+    } else lines.forEach(el => { el.style.fontSize = fs + 'px'; });
     // Soft two-stage shadow (no outlines): a tight contact shade + a wide falloff.
     // Thin roles (serif/script) get more, so they hold on bright plates.
     const thin = P.role === 'serif' || P.role === 'script', a1 = thin ? 0.42 : 0.28, a2 = thin ? 0.55 : 0.42;
