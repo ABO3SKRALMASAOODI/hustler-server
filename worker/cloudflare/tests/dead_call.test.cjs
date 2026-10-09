@@ -188,14 +188,132 @@ test('expired retryable leases never ask a one-attempt lane to requeue', async (
   }
 });
 
-test('Studio turns and Shorts plans are mutations', async () => {
-  for (const [type, cls] of [['agent_turn', 'ValmeraAgent'], ['shorts_plan', 'ValmeraShorts']]) {
+test('Studio turns are mutations; resumable Shorts plans retry', async () => {
+  for (const [type, cls, kind, attempts] of [
+    ['agent_turn', 'ValmeraAgent', 'outcome_unknown', 0],
+    // run_shorts_plan resumes its saved clips and adopts children by
+    // materialization key on a re-claim, so a lost plan is safe to re-run.
+    ['shorts_plan', 'ValmeraShorts', 'transient_infrastructure', 2],
+  ]) {
     const job = { ...mutation, type };
     const { adapter, callId } = fixture({ job, cls, extra: { disconnectedAt: Date.now() - 5 * MINUTE } });
     adapter.destroy = async () => {};
     const body = await (await abandon(adapter, callId, job)).json();
-    assert.equal(body.envelope.failure.kind, 'outcome_unknown', type);
+    assert.equal(body.envelope.failure.kind, kind, type);
+    assert.equal(body.envelope.failure.max_attempts, attempts, type);
+    assert.equal(body.envelope.retryable, attempts > 0, type);
   }
+});
+
+// Shorts renders route by render group: every child preview/preview_check
+// (agent_tools._child_payload) and bulk shorts finals (backend video.py).
+function renderGroupId(job, group = '3900-0') {
+  const digest = createHash('sha256')
+    .update(`${job.type}:${job.id}:${job.total_claims}`).digest('hex').slice(0, 20);
+  return `cf-render-g${group}-${digest}`;
+}
+
+test('dead render-group shorts renders are abandoned and release their shard', async () => {
+  for (const [type, cls, group] of [['final', 'ValmeraBatch', '3900-0'],
+    ['preview', 'ValmeraInteractive', '3900-1'], ['preview_check', 'ValmeraInteractive', '12-0']]) {
+    const job = { id: 61000, total_claims: 1, project_id: 4000, type };
+    const callId = renderGroupId(job, group);
+    const { adapter, values } = fixture({ job, callId, cls,
+      extra: { disconnectedAt: Date.now() - 5 * MINUTE } });
+    let destroyed = false;
+    adapter.destroy = async () => {
+      assert.equal(values.get('active').callId, `reset:${callId}`);
+      destroyed = true;
+    };
+    const response = await abandon(adapter, callId, job);
+    assert.equal(response.status, 200, type);
+    const body = await response.json();
+    assert.equal(destroyed, true, type);
+    assert.equal(body.abandoned, true);
+    assert.equal(body.envelope.retryable, true);
+    assert.equal(body.envelope.failure.kind, 'transient_infrastructure');
+    assert.equal(body.envelope.failure.max_attempts, 2);
+    assert.equal(values.has('active'), false, type);
+    assert.equal((await adapter.reserve('cf-next-identity', type, Date.now(), Date.now() + MINUTE)).kind,
+      'reserved', type);
+  }
+});
+
+test('render-group identity still proves the exact claim', async () => {
+  const job = { id: 61000, total_claims: 1, project_id: 4000, type: 'final' };
+  const callId = renderGroupId(job);
+  for (const changed of [{ total_claims: 2 }, { id: 61001 }, { type: 'preview' },
+    { type: 'mcp_tool' }, { type: 'index' }]) {
+    const { adapter, values } = fixture({ job, callId, cls: 'ValmeraBatch',
+      extra: { disconnectedAt: Date.now() - 10 * MINUTE } });
+    adapter.destroy = async () => assert.fail('a different claim must not destroy compute');
+    const response = await abandon(adapter, callId, { ...job, ...changed });
+    assert.equal(response.status, 409, JSON.stringify(changed));
+    assert.equal(values.get('active').callId, callId);
+  }
+  // Malformed groups never match, even with the right digest.
+  for (const bad of ['cf-render-g3900-2-', 'cf-render-gx-0-', 'cf-render-g-0-']) {
+    const digest = callId.slice(callId.lastIndexOf('-') + 1);
+    const { adapter } = fixture({ job, callId: `${bad}${digest}`, cls: 'ValmeraBatch',
+      extra: { disconnectedAt: Date.now() - 10 * MINUTE } });
+    adapter.destroy = async () => assert.fail('malformed identity must not destroy compute');
+    assert.equal((await abandon(adapter, `${bad}${digest}`, job)).status, 409, bad);
+  }
+});
+
+test('a render-group call whose response was lost is acknowledged by /complete', async () => {
+  const job = { id: 61002, total_claims: 1, project_id: 4000, type: 'preview' };
+  const callId = renderGroupId(job, '3900-1');
+  const { adapter, values } = fixture({ job, callId, cls: 'ValmeraInteractive',
+    extra: { disconnectedAt: Date.now() - MINUTE } });
+  const response = await adapter.fetch(new Request(`https://container.internal/complete/${callId}`, {
+    method: 'POST', body: JSON.stringify({ job, envelope: { job_completed: true, result: {} } }),
+  }));
+  assert.equal(response.status, 200);
+  assert.equal(values.get(`call:${callId}`).status, 'done');
+  assert.equal(values.has('active'), false);
+});
+
+test('a deploy-lost render whose container was replaced is retried, not budget-exceeded', async () => {
+  for (const [type, cls] of [['final', 'ValmeraBatch'], ['preview', 'ValmeraInteractive'],
+    ['preview_check', 'ValmeraInteractive']]) {
+    const job = { ...mutation, type };
+    // The Worker deploy dropped the handler; the 300 s rollout grace then
+    // replaced the container, so it is observed stopped.
+    const { adapter, values, callId } = fixture({ job, cls, status: 'running' });
+    adapter.getState = async () => ({ status: 'stopped' });
+    adapter.destroy = async () => {};
+    const body = await (await status(adapter, callId)).json();
+    assert.equal(body.status, 'failed', type);
+    assert.match(body.error, /container exited during/);
+    assert.equal(body.envelope.retryable, true, type);
+    assert.equal(body.envelope.failure.kind, 'transient_infrastructure', type);
+    assert.equal(body.envelope.failure.max_attempts, 2, type);
+    assert.match(body.envelope.error, /safe to retry/);
+    assert.equal(values.has('active'), false);
+  }
+});
+
+test('a stopped container during an MCP mutation reports outcome unknown', async () => {
+  const { adapter, callId } = fixture({ extra: { disconnectedAt: Date.now() - MINUTE } });
+  adapter.getState = async () => ({ status: 'stopped_with_code' });
+  adapter.destroy = async () => {};
+  const body = await (await status(adapter, callId)).json();
+  assert.equal(body.status, 'failed');
+  assert.equal(body.envelope.failure.kind, 'outcome_unknown');
+  assert.equal(body.envelope.retryable, false);
+});
+
+test('a real render lease expiry still reports the exhausted processing budget', async () => {
+  const job = { ...mutation, type: 'final' };
+  const { adapter, callId } = fixture({ job, cls: 'ValmeraBatch', status: 'running',
+    extra: { activeUntil: Date.now() - 1 } });
+  adapter.liveRuns.add(callId);
+  adapter.destroy = async () => {};
+  const result = await adapter.expireExecutorLease(callId);
+  assert.equal(result.envelope.retryable, false);
+  assert.equal(result.envelope.failure.kind, 'render_budget_exceeded');
+  assert.match(result.envelope.error, /exceeded its executor lease/);
 });
 
 test('a lost running handler becomes abandonable only after the floor', async () => {

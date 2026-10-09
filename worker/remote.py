@@ -1278,6 +1278,7 @@ def _cloudflare_liveness_row(conn, job_id, stale_s):
                    r.total_claims AS remote_claims,
                    r.provider AS remote_provider,
                    r.call_id AS remote_call_id, r.state AS remote_state,
+                   r.error AS remote_error,
                    (r.last_observed_at IS NULL OR r.last_observed_at
                       < NOW() - make_interval(secs => %s)) AS observed_stale
               FROM video_jobs j
@@ -1285,6 +1286,18 @@ def _cloudflare_liveness_row(conn, job_id, stale_s):
              WHERE j.id = %s""", (stale_s, stale_s, job_id))
         row = cur.fetchone()
         return dict(row) if row else {"job_state": "missing"}
+
+
+_STALE_HEARTBEAT_REASON = "no executor heartbeat for "
+
+
+def _short_reason_detail(text, limit=120):
+    """One printable line, keeping both the error's identity and its tail."""
+    flat = " ".join(re.sub(r"[^\x20-\x7e]", " ", str(text or "")).split())
+    if len(flat) <= limit:
+        return flat
+    head = limit // 3
+    return f"{flat[:head]} ... {flat[-(limit - head - 5):]}"
 
 
 def _cloudflare_dead_call_reason(row, job, call_id):
@@ -1311,12 +1324,56 @@ def _cloudflare_dead_call_reason(row, job, call_id):
                 and str(row.get("remote_call_id")) == str(call_id)):
             return "another provider call owns its claim"
         if row.get("remote_state") in {"failed", "cancelled"}:
-            return f"its executor recorded {row['remote_state']}"
+            # Carry the executor's own cause: a mutation abandoned as
+            # "outcome unknown" otherwise loses why it actually failed.
+            detail = _short_reason_detail(row.get("remote_error"))
+            return (f"its executor recorded {row['remote_state']}"
+                    + (f": {detail}" if detail else ""))
     if row.get("heartbeat_stale") is True \
             and row.get("observed_stale") is not False:
-        return ("no executor heartbeat for "
-                f"{int(config.CLOUDFLARE_DEAD_CALL_STALE_S)}s")
+        return (_STALE_HEARTBEAT_REASON
+                + f"{int(config.CLOUDFLARE_DEAD_CALL_STALE_S)}s")
     return None
+
+
+# (call id, claim) -> [first, last] monotonic times of stale-heartbeat
+# readings. A fresh reading, a terminal outcome or a gap longer than
+# _STALE_SIGHTING_MAX_GAP_S between readings forgets it. Dispatcher threads
+# and the orphan guardian of one process share it; each process confirms on
+# its own readings.
+_STALE_SIGHTINGS = {}
+_STALE_SIGHTINGS_LOCK = threading.Lock()
+# The orphan guardian reads every REMOTE_GUARDIAN_INTERVAL_S (15 s) and an
+# attached dispatcher about every 30 s, so a longer silence means this
+# process stopped observing the call and cannot vouch for what happened.
+_STALE_SIGHTING_MAX_GAP_S = 120.0
+
+
+def _stale_heartbeat_confirmed(call_id, claim, now=None):
+    """True when this stale reading confirms an earlier one.
+
+    The first stale reading only starts the clock. Abandonment needs another
+    stale reading CLOUDFLARE_DEAD_CALL_CONFIRM_S later, so an executor whose
+    heartbeat thread is still reconnecting after a database outage has time
+    to beat again (which forgets the sighting) before anything is destroyed.
+    """
+    now = time.monotonic() if now is None else now
+    key = (str(call_id), claim)
+    with _STALE_SIGHTINGS_LOCK:
+        for other, (_first, last) in list(_STALE_SIGHTINGS.items()):
+            if now - last > _STALE_SIGHTING_MAX_GAP_S:
+                del _STALE_SIGHTINGS[other]
+        seen = _STALE_SIGHTINGS.get(key)
+        if seen is None:
+            _STALE_SIGHTINGS[key] = [now, now]
+            return False
+        seen[1] = now
+        return now - seen[0] >= config.CLOUDFLARE_DEAD_CALL_CONFIRM_S
+
+
+def _forget_stale_sighting(call_id, claim):
+    with _STALE_SIGHTINGS_LOCK:
+        _STALE_SIGHTINGS.pop((str(call_id), claim), None)
 
 
 def _abandon_cloudflare_call(call_id, lane, job, reason):
@@ -1348,6 +1405,10 @@ def _abandon_if_dead(call_id, lane, job, worker_db=None):
     Studio agent turns are left to their lease: the reaper's bounded death
     resume (a fresh pass over the same request) needs the queue row to stay
     running, and a terminal "outcome unknown" here would bypass it.
+    TODO(cloudflare-dead-agent-turns): a dead `unknown` Studio turn still
+    holds its agent shard until its 21,600-s lease. Abandon it here too and
+    call the reaper's death resume (dbx.enqueue_agent_continuation, bounded
+    by death_resume_count) directly instead of waiting for the lease.
     """
     if job.get("id") is None or job.get("total_claims") is None \
             or job.get("type") == "agent_turn":
@@ -1363,13 +1424,23 @@ def _abandon_if_dead(call_id, lane, job, worker_db=None):
     finally:
         if worker_db is None:
             probe.reset()
+    claim = job.get("total_claims")
     reason = _cloudflare_dead_call_reason(row, job, call_id)
     if not reason:
+        _forget_stale_sighting(call_id, claim)
+        return None
+    if reason.startswith(_STALE_HEARTBEAT_REASON) \
+            and not _stale_heartbeat_confirmed(call_id, claim):
+        print(f"[dispatcher] Cloudflare call {call_id} for job {job['id']} "
+              f"shows {reason}; confirming before abandoning it", flush=True)
         return None
     print(f"[dispatcher] Cloudflare call {call_id} for job {job['id']} is "
           f"dead ({reason}); asking its shard to fence and fail it",
           flush=True)
-    return _abandon_cloudflare_call(call_id, lane, job, reason)
+    envelope = _abandon_cloudflare_call(call_id, lane, job, reason)
+    if envelope is not None:
+        _forget_stale_sighting(call_id, claim)
+    return envelope
 
 
 def _release_dead_cloudflare_owner(call_id, lane):

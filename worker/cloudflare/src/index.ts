@@ -121,7 +121,11 @@ const ABANDON_MIN_DISCONNECTED_MS = 120 * 1000;
 // ~8 s cold start plus an 18-23 s proxy re-download on the next call.
 // Batch, Studio-agent and Shorts lanes keep the 60-second default.
 const MODEL_GAP_SLEEP_AFTER = "240s";
-const MUTATING_JOB_TYPES = new Set(["mcp_tool", "agent_turn", "shorts_plan"]);
+// Job types whose lost executor leaves an unknown outcome. A Shorts plan is
+// not one: run_shorts_plan resumes its own saved clips on a re-claim and
+// adopts children through materialization keys, so a retry is safe (and is
+// what an in-process worker death already gets).
+const MUTATING_JOB_TYPES = new Set(["mcp_tool", "agent_turn"]);
 
 function jobIdentity(job: ExecutorJob): JobIdentity {
   const integer = (value: unknown): number | null =>
@@ -223,8 +227,14 @@ async function matchesCompletedJob(callId: string, job: ExecutorJob): Promise<bo
     : job.type.slice(0, 18);
   // Earlier preview calls did not include the project routing key. Their
   // deterministic identity still proves the exact completed claim.
+  // Shorts renders (every child preview/check and bulk shorts finals) carry a
+  // render-group routing key instead. The group only selects the shard; the
+  // digest of type:id:claims is the claim proof, so any well-formed group is
+  // accepted (the call record itself lives only on the routed shard).
   return callId === `cf-${prefix}-${digest}`
     || callId === `cf-${job.type.slice(0, 18)}-${digest}`
+    || (["final", "preview", "preview_check"].includes(job.type)
+      && new RegExp(`^cf-render-g[0-9]+-[01]-${digest}$`).test(callId))
     || (["preview", "preview_check", "filmstrip", "mcp_tool"].includes(job.type)
       && [1, 2].some((slot) => callId ===
         `cf-alt${slot}-${job.type}-p${job.project_id}-${digest}`));
@@ -429,6 +439,10 @@ abstract class ValmeraContainer extends Container<Env> {
         (current) => current.error ?? `Cloudflare ${current.jobType} call abandoned`,
         (current) => abandonedEnvelope(current, current.abandonReason ?? "executor liveness lost"));
     }
+    // `reason` set here is evidence the executor is gone (its container
+    // stopped, or a read-only listen was fenced), not an exhausted budget:
+    // it gets the same outcome as a dispatcher-proven dead call. Only a real
+    // lease expiry keeps the render_budget_exceeded envelope.
     let reason = "";
     if (observed.status === "unknown") {
       // A disconnected read-only listen must not occupy a six-hour edit lane.
@@ -450,6 +464,10 @@ abstract class ValmeraContainer extends Container<Env> {
       return reason || `Cloudflare ${current.jobType} call exceeded its executor lease while ${current.status}${prior}`;
     }, (current, error, fenced) => {
       if (!fenced) return { error, retryable: false };
+      // A deploy that drops a long render's handler and then replaces its
+      // container is infrastructure loss: retry it, never tell the user the
+      // render could not fit its processing limits.
+      if (reason) return abandonedEnvelope(current, reason);
       const render = ["preview", "preview_check", "final"].includes(current.jobType);
       const retryable = !render && (current.jobType !== "mcp_tool" || current.readOnlyRetry === true);
       return { error, retryable, failure: {

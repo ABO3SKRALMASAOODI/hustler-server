@@ -1024,13 +1024,23 @@ CLOUDFLARE_SYNC_BUSY_RETRIES = max(0, min(5, int(os.getenv(
 # Render and Cloudflare publish independently. Source/image mismatch is
 # proven pre-compute admission, so retain the same heartbeated queue lease
 # across a bounded rollout window instead of burning retries/reuploads.
-# The containers' rollout_active_grace_period is 300 s, so a healthy rollout
-# converges inside this window. The old 1800-s wait held 15 jobs for thirty
-# minutes each and then failed them anyway when a release stalled; after
-# this window the job now ends with an explicit retryable "deploy in
-# progress" outcome (nothing ran, so a retry is safe).
+# Two skews share this wait:
+#   * container image skew: the containers' rollout_active_grace_period is
+#     300 s, so a healthy image rollout converges inside this window;
+#   * source skew (_cloudflare_preflight): Render auto-deploys the dispatcher
+#     while deploy-cloudflare-executor.yml still builds two images and then
+#     polls each lane up to 8 x 75 s, so this skew can outlast 300 s.
+# The old 1800-s wait held 15 jobs for thirty minutes each and then failed
+# them anyway when a release stalled. After this window the job ends with an
+# explicit retryable "deploy in progress" outcome (nothing ran, so a retry is
+# safe). A queue-backed media job is first returned to the queue up to
+# CLOUDFLARE_ROLLOUT_MAX_DEFERRALS times without consuming an attempt, so a
+# slow source rollout gets another full window and cannot spend a final's
+# single real retry; MCP tools and Studio turns report it to their caller.
 CLOUDFLARE_ROLLOUT_WAIT_S = max(0.0, min(1800.0, float(os.getenv(
     "CLOUDFLARE_ROLLOUT_WAIT_S", "300"))))
+CLOUDFLARE_ROLLOUT_MAX_DEFERRALS = max(0, min(3, int(os.getenv(
+    "CLOUDFLARE_ROLLOUT_MAX_DEFERRALS", "1"))))
 # Dead-call detection. A Cloudflare call whose /run response was lost is
 # `unknown`: its Python process may still be working, and it heartbeats
 # video_jobs/remote_executions every HEARTBEAT_EVERY_S (20 s) while it does.
@@ -1041,6 +1051,17 @@ CLOUDFLARE_ROLLOUT_WAIT_S = max(0.0, min(1800.0, float(os.getenv(
 # Durable Object independently requires 120 s of disconnection first.
 CLOUDFLARE_DEAD_CALL_STALE_S = max(120.0, min(1800.0, float(os.getenv(
     "CLOUDFLARE_DEAD_CALL_STALE_S", "180"))))
+# A stale heartbeat is absence of evidence, and a PostgreSQL outage makes
+# every live executor look stale: the dispatcher's first query after the
+# database returns can land before the executor's heartbeat thread has
+# reconnected (it sleeps HEARTBEAT_EVERY_S between beats, a beat stuck on a
+# dead socket can take ~60 s to fail, then up to 10 s to reconnect). So a
+# heartbeat-only death is abandoned only when a second stale reading comes
+# at least this long after the first, with no fresh reading in between.
+# Positive records (failed/cancelled executor, moved lease, finished job)
+# need no confirmation.
+CLOUDFLARE_DEAD_CALL_CONFIRM_S = max(30.0, min(600.0, float(os.getenv(
+    "CLOUDFLARE_DEAD_CALL_CONFIRM_S", "90"))))
 CLOUDFLARE_MODAL_FALLBACK = os.getenv(
     "CLOUDFLARE_MODAL_FALLBACK", "0") == "1"
 CLOUDFLARE_MAX_INPUT_BYTES = int(os.getenv(

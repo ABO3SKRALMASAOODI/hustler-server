@@ -26,6 +26,20 @@ def _enable(monkeypatch):
     monkeypatch.setattr(config, "MODAL_EXECUTOR_ENABLED", False)
 
 
+@pytest.fixture(autouse=True)
+def _fresh_stale_sightings():
+    remote._STALE_SIGHTINGS.clear()
+    yield
+    remote._STALE_SIGHTINGS.clear()
+
+
+def _stale_seen_before(call_id, claim=1):
+    """An earlier stale reading, old enough for the next one to confirm."""
+    now = remote.time.monotonic()
+    remote._STALE_SIGHTINGS[(call_id, claim)] = [
+        now - config.CLOUDFLARE_DEAD_CALL_CONFIRM_S - 1, now - 10]
+
+
 class _Response:
     def __init__(self, body, status=200):
         self._body, self.status_code = body, status
@@ -311,6 +325,7 @@ def test_abandon_request_carries_exact_claim_and_reason(monkeypatch):
     monkeypatch.setattr(remote.requests, "post", lambda url, **kw: (
         posted.append((url, kw)) or _Response(
             {"status": "failed", "envelope": envelope, "abandoned": True})))
+    _stale_seen_before(CALL)
     db = _LivenessDb({**ALIVE, "heartbeat_stale": True,
                       "observed_stale": True})
     assert remote._abandon_if_dead(CALL, "mcp", MUTATION, db) == envelope
@@ -336,6 +351,7 @@ def test_refused_or_unconfirmed_abandonment_changes_nothing(
         return response
 
     monkeypatch.setattr(remote.requests, "post", post)
+    _stale_seen_before(CALL)
     db = _LivenessDb({**ALIVE, "heartbeat_stale": True,
                       "observed_stale": True})
     assert remote._abandon_if_dead(CALL, "mcp", MUTATION, db) is None
@@ -439,6 +455,7 @@ def test_guardian_releases_dead_call_with_mutation_aware_outcome(
                                 "retryable": True, "max_attempts": 1}}
     monkeypatch.setattr(remote.requests, "post", lambda *_a, **_k: _Response(
         {"status": "failed", "envelope": envelope, "abandoned": True}))
+    _stale_seen_before(CALL)
     finished = []
     db = _LivenessDb({**ALIVE, "heartbeat_stale": True,
                       "observed_stale": True}, {
@@ -482,6 +499,7 @@ def test_media_jobs_get_one_automatic_retry_after_a_dead_call(monkeypatch):
                             "retryable": True, "max_attempts": 2}}
     monkeypatch.setattr(remote.requests, "post", lambda *_a, **_k: _Response(
         {"status": "failed", "envelope": envelope, "abandoned": True}))
+    _stale_seen_before(CALL)
     db = _LivenessDb({**ALIVE, "heartbeat_stale": True,
                       "observed_stale": True}, {
         dbx.finish_remote_execution: True, dbx.requeue_job: True})
@@ -541,6 +559,7 @@ def _launch_fixture(monkeypatch, owner_status, liveness):
 def test_busy_project_shard_releases_its_dead_owner(monkeypatch):
     owner = {"status": "unknown", "job": {"id": 58049, "type": "mcp_tool",
                                           "project_id": 3177, "total_claims": 1}}
+    _stale_seen_before(CALL)
     abandoned = _launch_fixture(monkeypatch, owner, {
         **ALIVE, "heartbeat_stale": True, "observed_stale": True})
     waiting = dict(MUTATION, id=58050)
@@ -573,3 +592,271 @@ def test_live_busy_owner_is_left_alone(monkeypatch):
     with pytest.raises(remote.CloudflareCapacityBusy):
         remote._run_cloudflare(dict(MUTATION, id=58050))
     assert abandoned == []
+
+
+# ------------------------------------- stale heartbeat needs confirmation ---
+
+def _clocked(monkeypatch):
+    now = [1000.0]
+    monkeypatch.setattr(remote.time, "monotonic", lambda: now[0])
+    return now
+
+
+def _abandon_poster(monkeypatch):
+    posted = []
+    monkeypatch.setattr(remote.requests, "post", lambda url, **kw: (
+        posted.append(kw["json"]) or _Response(
+            {"status": "failed", "abandoned": True,
+             "envelope": {"error": "lost", "retryable": True}})))
+    return posted
+
+
+STALE = {**ALIVE, "heartbeat_stale": True, "observed_stale": True}
+
+
+def test_one_stale_reading_never_destroys_a_call(monkeypatch):
+    _enable(monkeypatch)
+    now = _clocked(monkeypatch)
+    posted = _abandon_poster(monkeypatch)
+    db = _LivenessDb(dict(STALE))
+    assert remote._abandon_if_dead(CALL, "mcp", MUTATION, db) is None
+    now[0] += config.CLOUDFLARE_DEAD_CALL_CONFIRM_S - 1
+    assert remote._abandon_if_dead(CALL, "mcp", MUTATION, db) is None
+    assert posted == []
+    now[0] += 1
+    assert remote._abandon_if_dead(CALL, "mcp", MUTATION, db) is not None
+    assert len(posted) == 1
+    assert posted[0]["reason"].startswith("no executor heartbeat for 180s")
+    # A terminal outcome forgets the call.
+    assert remote._STALE_SIGHTINGS == {}
+
+
+def test_database_outage_cannot_get_a_live_executor_destroyed(monkeypatch):
+    """The first query after an outage sees every heartbeat stale; the
+    executor's reconnecting heartbeat thread beats before confirmation."""
+    _enable(monkeypatch)
+    now = _clocked(monkeypatch)
+    posted = _abandon_poster(monkeypatch)
+    assert remote._abandon_if_dead(CALL, "mcp", MUTATION,
+                                   _LivenessDb(dict(STALE))) is None
+    now[0] += 30
+    assert remote._abandon_if_dead(CALL, "mcp", MUTATION,
+                                   _LivenessDb(dict(ALIVE))) is None
+    now[0] += config.CLOUDFLARE_DEAD_CALL_CONFIRM_S
+    # A later stale reading starts a new clock instead of confirming.
+    assert remote._abandon_if_dead(CALL, "mcp", MUTATION,
+                                   _LivenessDb(dict(STALE))) is None
+    assert posted == []
+
+
+def test_an_unobserved_gap_restarts_confirmation(monkeypatch):
+    _enable(monkeypatch)
+    now = _clocked(monkeypatch)
+    posted = _abandon_poster(monkeypatch)
+    db = _LivenessDb(dict(STALE))
+    assert remote._abandon_if_dead(CALL, "mcp", MUTATION, db) is None
+    now[0] += remote._STALE_SIGHTING_MAX_GAP_S + 1
+    assert remote._abandon_if_dead(CALL, "mcp", MUTATION, db) is None
+    assert posted == []
+    # Guardian-cadence readings keep the restarted first sighting alive.
+    restarted = now[0]
+    while now[0] + 15 - restarted < config.CLOUDFLARE_DEAD_CALL_CONFIRM_S:
+        now[0] += 15
+        assert remote._abandon_if_dead(CALL, "mcp", MUTATION, db) is None
+    now[0] += 15
+    assert remote._abandon_if_dead(CALL, "mcp", MUTATION, db) is not None
+    assert len(posted) == 1
+
+
+def test_sightings_are_per_claim_and_bounded(monkeypatch):
+    _enable(monkeypatch)
+    now = _clocked(monkeypatch)
+    _abandon_poster(monkeypatch)
+    db = _LivenessDb(dict(STALE))
+    remote._abandon_if_dead(CALL, "mcp", MUTATION, db)
+    now[0] += config.CLOUDFLARE_DEAD_CALL_CONFIRM_S
+    # The same call id under a newer claim is a different execution.
+    newer = dict(MUTATION, total_claims=2)
+    assert remote._abandon_if_dead(CALL, "mcp", newer, _LivenessDb(
+        dict(STALE, job_claims=2, remote_claims=2))) is None
+    assert set(remote._STALE_SIGHTINGS) == {(CALL, 1), (CALL, 2)}
+    now[0] += remote._STALE_SIGHTING_MAX_GAP_S + 1
+    remote._stale_heartbeat_confirmed("cf-other-call-identity", 1)
+    assert set(remote._STALE_SIGHTINGS) == {("cf-other-call-identity", 1)}
+
+
+def test_refused_abandonment_keeps_the_confirmed_sighting(monkeypatch):
+    _enable(monkeypatch)
+    now = _clocked(monkeypatch)
+    responses = iter([_Response({"status": "unknown", "abandoned": False}, 409),
+                      _Response({"status": "failed", "abandoned": True,
+                                 "envelope": {"error": "lost"}})])
+    monkeypatch.setattr(remote.requests, "post",
+                        lambda *_a, **_k: next(responses))
+    db = _LivenessDb(dict(STALE))
+    remote._abandon_if_dead(CALL, "mcp", MUTATION, db)
+    now[0] += config.CLOUDFLARE_DEAD_CALL_CONFIRM_S
+    # The shard's own 120-s disconnection floor refused; the next reading
+    # retries at once rather than starting a new confirmation clock.
+    assert remote._abandon_if_dead(CALL, "mcp", MUTATION, db) is None
+    now[0] += 15
+    assert remote._abandon_if_dead(CALL, "mcp", MUTATION, db) == {
+        "error": "lost"}
+
+
+@pytest.mark.parametrize("changes", [
+    {"remote_state": "failed"}, {"job_state": "failed"},
+    {"job_claims": 2}, {"job_state": "missing"},
+])
+def test_positive_records_need_no_confirmation(monkeypatch, changes):
+    _enable(monkeypatch)
+    _clocked(monkeypatch)
+    posted = _abandon_poster(monkeypatch)
+    assert remote._abandon_if_dead(CALL, "mcp", MUTATION, _LivenessDb(
+        {**ALIVE, **changes})) is not None
+    assert len(posted) == 1
+
+
+def test_recorded_executor_failure_keeps_its_cause(monkeypatch):
+    _enable(monkeypatch)
+    posted = _abandon_poster(monkeypatch)
+    cause = ("RuntimeError: ffmpeg exited 1\n" + "frame= 10 fps=0.0\r" * 40
+             + "Error initializing filter 'drawtext'\x00\x1b[0m")
+    assert remote._abandon_if_dead(CALL, "mcp", MUTATION, _LivenessDb(
+        {**ALIVE, "remote_state": "failed", "remote_error": cause})) is not None
+    reason = posted[0]["reason"]
+    assert reason.startswith("its executor recorded failed: RuntimeError")
+    assert reason.endswith("Error initializing filter 'drawtext' [0m")
+    assert " ... " in reason
+    # The Durable Object keeps 160 printable characters of the reason.
+    assert len(reason) <= 160
+    assert all(" " <= ch <= "~" for ch in reason)
+    assert remote._cloudflare_dead_call_reason(
+        {**ALIVE, "remote_state": "cancelled", "remote_error": None},
+        MUTATION, CALL) == "its executor recorded cancelled"
+
+
+def test_liveness_query_reads_the_executor_error():
+    executed = []
+
+    class Cursor:
+        def __enter__(self): return self
+        def __exit__(self, *_a): return False
+        def execute(self, sql, args): executed.append(sql)
+        def fetchone(self): return {"job_state": "running"}
+
+    class Conn:
+        def cursor(self): return Cursor()
+
+    original = dbx.remote_executions_table_ready
+    dbx.remote_executions_table_ready = lambda _c: True
+    try:
+        remote._cloudflare_liveness_row(Conn(), 1, 180.0)
+    finally:
+        dbx.remote_executions_table_ready = original
+    assert "r.error AS remote_error" in executed[0]
+
+
+# -------------------------------------- deploy skew spends no attempt ---
+
+class _QueueDb:
+    def __init__(self, deferred):
+        self.deferred, self.calls = deferred, []
+
+    def run(self, fn, *args, **kwargs):
+        self.calls.append((fn, args, kwargs))
+        if fn is dbx.defer_unlaunched_cloudflare_busy:
+            return self.deferred
+        if fn in (dbx.requeue_job, dbx.finish_job):
+            return True
+        return None
+
+
+def _process_rollout_pending(monkeypatch, job_type, deferred):
+    import main
+    monkeypatch.setattr(main.remote, "stamp_execution_provider",
+                        lambda _db, _job: "cloudflare")
+
+    def runner(_db, job):
+        raise remote._deploy_in_progress(job, "source skew")
+
+    monkeypatch.setattr(main, "_runner_for_job",
+                        lambda _job: (runner, "test"))
+    monkeypatch.setattr(main, "_notify_failure", lambda *_a: None)
+    db = _QueueDb(deferred)
+    main.process_one(db, {"id": 42, "type": job_type, "project_id": 7,
+                          "user_id": 60, "attempts": 1, "total_claims": 3,
+                          "payload": {}})
+    return [(fn, args, kwargs) for fn, args, kwargs in db.calls]
+
+
+@pytest.mark.parametrize("job_type", ["final", "preview", "index"])
+def test_deploy_in_progress_returns_media_to_the_queue_unspent(
+        monkeypatch, job_type):
+    calls = _process_rollout_pending(monkeypatch, job_type, deferred=True)
+    fns = [fn for fn, _a, _k in calls]
+    assert dbx.defer_unlaunched_cloudflare_busy in fns
+    assert dbx.requeue_job not in fns and dbx.finish_job not in fns
+    _fn, args, kwargs = next(c for c in calls
+                             if c[0] is dbx.defer_unlaunched_cloudflare_busy)
+    assert args[:2] == (42, 3)
+    assert args[3] == config.CLOUDFLARE_ROLLOUT_MAX_DEFERRALS == 1
+    assert kwargs == {"counter": "cloudflare_rollout_deferrals"}
+    assert (dbx.bump_metric, ("cloudflare_rollout_deferred",), {}) in calls
+
+
+def test_exhausted_deploy_deferral_falls_back_to_the_bounded_retry(
+        monkeypatch):
+    calls = _process_rollout_pending(monkeypatch, "final", deferred=False)
+    fns = [fn for fn, _a, _k in calls]
+    assert dbx.requeue_job in fns          # attempts 1 < max_attempts 2
+    assert dbx.finish_job not in fns
+
+
+@pytest.mark.parametrize("job_type", ["mcp_tool", "agent_turn"])
+def test_deploy_in_progress_goes_straight_to_live_callers(
+        monkeypatch, job_type):
+    calls = _process_rollout_pending(monkeypatch, job_type, deferred=True)
+    fns = [fn for fn, _a, _k in calls]
+    assert dbx.defer_unlaunched_cloudflare_busy not in fns
+    assert dbx.finish_job in fns and dbx.requeue_job not in fns
+
+
+def test_rollout_deferrals_have_their_own_counter():
+    class Conn:
+        rowcount = 1
+
+        def __init__(self):
+            self.sql = []
+
+        def cursor(self):
+            return self
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+        def execute(self, sql, params):
+            self.sql.append((sql, params))
+
+    busy, rollout = Conn(), Conn()
+    assert dbx.defer_unlaunched_cloudflare_busy(
+        busy, 42, 6, RuntimeError("busy"), 5)
+    assert dbx.defer_unlaunched_cloudflare_busy(
+        rollout, 42, 6, RuntimeError("deploy"), 1,
+        counter="cloudflare_rollout_deferrals")
+    busy_sql, busy_params = busy.sql[0]
+    rollout_sql, rollout_params = rollout.sql[0]
+    assert "cloudflare_rollout_deferrals" not in busy_sql
+    assert "cloudflare_busy_deferrals" not in rollout_sql
+    assert rollout_sql == busy_sql.replace("cloudflare_busy_deferrals",
+                                           "cloudflare_rollout_deferrals")
+    # Both refund the attempt, keep the claim ceiling and delay the reclaim.
+    assert "attempts = GREATEST(0, attempts - 1)" in rollout_sql
+    assert "{cloudflare_busy_deferred}" in rollout_sql
+    assert rollout_params[1:] == (42, 6, 1) and busy_params[1:] == (42, 6, 5)
+    with pytest.raises(ValueError):
+        dbx.defer_unlaunched_cloudflare_busy(
+            Conn(), 42, 6, RuntimeError("x"), 1, counter="attempts")
