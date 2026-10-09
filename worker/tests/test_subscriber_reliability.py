@@ -120,7 +120,19 @@ def test_rollout_wait_keeps_one_claim_and_has_a_hard_deadline(monkeypatch, outco
         with pytest.raises(expected) as error:
             remote._run_cloudflare_with_capacity_wait(job)
         assert now[0] == (15 if outcome == "lease_lost" else 50)
-        assert not failure_policy.decision_for(error.value, "preview").retryable
+        if outcome == "timeout":
+            # Nothing ran, so the end of the window is an explicit, retryable
+            # "deploy in progress" with the ordinary bounded media retry.
+            decision = failure_policy.decision_for(error.value, "preview")
+            assert decision.kind == "provider_rollout_pending"
+            assert decision.retryable and decision.max_attempts == 2
+            assert "Deploy in progress" in str(error.value)
+            assert "nothing changed" in str(error.value)
+        else:
+            # A superseded claim is never retried by this dispatcher.
+            decision = failure_policy.decision_for(error.value, "preview")
+            assert decision.kind == "lease_lost"
+            assert not decision.retryable
     assert len(set(calls)) == 1
     assert job["total_claims"] == 2
 

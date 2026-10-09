@@ -90,7 +90,12 @@ def annotate_request(timings, seconds, role=None, service=None):
         except (TypeError, ValueError):
             egress_bytes = 0
         egress_cost = (egress_bytes / (1024 ** 3)) * CLOUDFLARE_EGRESS_GB
-        tail_s = 60
+        # The Worker passes each lane's sleepAfter (60 s, or 240 s on the
+        # MCP and interactive lanes that bridge model think time).
+        try:
+            tail_s = max(0, int(os.getenv("CLOUDFLARE_IDLE_TAIL_S", "60")))
+        except ValueError:
+            tail_s = 60
         idle_unit = (memory_gib * CLOUDFLARE_GIB_S
                      + disk_gb * CLOUDFLARE_GB_DISK_S)
         gross = active_cost + memory_cost + disk_cost + egress_cost

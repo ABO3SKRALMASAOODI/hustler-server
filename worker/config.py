@@ -1028,8 +1028,8 @@ CLOUDFLARE_SYNCHRONOUS_TYPES = frozenset(
 # Observe an accepted call through its startup phase, then reconnect through
 # the named status route. A Worker deployment can abandon a Durable Object
 # handler after it records `starting` but before it sends `/run`; waiting the
-# full 25-minute MCP envelope for that provably pre-compute state made a
-# trivial get_edl appear hung. Long productive calls continue through status.
+# full MCP lease for that provably pre-compute state made a trivial get_edl
+# appear hung. Long productive calls continue through status.
 CLOUDFLARE_START_OBSERVATION_S = max(30.0, min(300.0, float(os.getenv(
     "CLOUDFLARE_START_OBSERVATION_S", "180"))))
 # A capacity refusal occurs before Cloudflare accepts the call, so it is safe
@@ -1046,11 +1046,53 @@ CLOUDFLARE_BUSY_MAX_DEFERRALS = max(1, min(
 # deliberately share a project shard and a new claim cannot move that shard.
 CLOUDFLARE_BUSY_WAIT_S = max(0.0, min(300.0, float(os.getenv(
     "CLOUDFLARE_BUSY_WAIT_S", "120"))))
+# An id-less synchronous child (fetch_url, stock acquisition, frames) has no
+# queue lease to defer. Its "shard is busy" 429 stored nothing under the
+# refused call id, so it retries on a fresh identity (and therefore another
+# shard) this many times with jittered backoff (~0.5-6 s) before failing.
+CLOUDFLARE_SYNC_BUSY_RETRIES = max(0, min(5, int(os.getenv(
+    "CLOUDFLARE_SYNC_BUSY_RETRIES", "3"))))
 # Render and Cloudflare publish independently. Source/image mismatch is
 # proven pre-compute admission, so retain the same heartbeated queue lease
 # across a bounded rollout window instead of burning retries/reuploads.
+# Two skews share this wait:
+#   * container image skew: the containers' rollout_active_grace_period is
+#     300 s, so a healthy image rollout converges inside this window;
+#   * source skew (_cloudflare_preflight): Render auto-deploys the dispatcher
+#     while deploy-cloudflare-executor.yml still builds two images and then
+#     polls each lane up to 8 x 75 s, so this skew can outlast 300 s.
+# The old 1800-s wait held 15 jobs for thirty minutes each and then failed
+# them anyway when a release stalled. After this window the job ends with an
+# explicit retryable "deploy in progress" outcome (nothing ran, so a retry is
+# safe). A queue-backed media job is first returned to the queue up to
+# CLOUDFLARE_ROLLOUT_MAX_DEFERRALS times without consuming an attempt, so a
+# slow source rollout gets another full window and cannot spend a final's
+# single real retry; MCP tools and Studio turns report it to their caller.
 CLOUDFLARE_ROLLOUT_WAIT_S = max(0.0, min(1800.0, float(os.getenv(
-    "CLOUDFLARE_ROLLOUT_WAIT_S", "1800"))))
+    "CLOUDFLARE_ROLLOUT_WAIT_S", "300"))))
+CLOUDFLARE_ROLLOUT_MAX_DEFERRALS = max(0, min(3, int(os.getenv(
+    "CLOUDFLARE_ROLLOUT_MAX_DEFERRALS", "1"))))
+# Dead-call detection. A Cloudflare call whose /run response was lost is
+# `unknown`: its Python process may still be working, and it heartbeats
+# video_jobs/remote_executions every HEARTBEAT_EVERY_S (20 s) while it does.
+# When neither row has been refreshed for this long (nine missed beats),
+# or the executor recorded a terminal state, or the queue lease moved on,
+# the dispatcher asks the shard to fence (destroy) the container and fail the
+# call: reads and media retry, mutations report "outcome unknown". The
+# Durable Object independently requires 120 s of disconnection first.
+CLOUDFLARE_DEAD_CALL_STALE_S = max(120.0, min(1800.0, float(os.getenv(
+    "CLOUDFLARE_DEAD_CALL_STALE_S", "180"))))
+# A stale heartbeat is absence of evidence, and a PostgreSQL outage makes
+# every live executor look stale: the dispatcher's first query after the
+# database returns can land before the executor's heartbeat thread has
+# reconnected (it sleeps HEARTBEAT_EVERY_S between beats, a beat stuck on a
+# dead socket can take ~60 s to fail, then up to 10 s to reconnect). So a
+# heartbeat-only death is abandoned only when a second stale reading comes
+# at least this long after the first, with no fresh reading in between.
+# Positive records (failed/cancelled executor, moved lease, finished job)
+# need no confirmation.
+CLOUDFLARE_DEAD_CALL_CONFIRM_S = max(30.0, min(600.0, float(os.getenv(
+    "CLOUDFLARE_DEAD_CALL_CONFIRM_S", "90"))))
 CLOUDFLARE_MODAL_FALLBACK = os.getenv(
     "CLOUDFLARE_MODAL_FALLBACK", "0") == "1"
 CLOUDFLARE_MAX_INPUT_BYTES = int(os.getenv(
@@ -1361,14 +1403,41 @@ CLOUDFLARE_EXECUTOR_TIMEOUTS = {
     "final": int(os.getenv("CLOUDFLARE_TIMEOUT_FINAL_S", "21600")),
     "index": int(os.getenv("CLOUDFLARE_TIMEOUT_INDEX_S", "21600")),
     "agent_turn": int(os.getenv("CLOUDFLARE_TIMEOUT_AGENT_S", "21600")),
-    "mcp_tool": int(os.getenv("CLOUDFLARE_TIMEOUT_MCP_S", "21600")),
+    # An MCP tool is orchestration: over 15,106 calls in 14 days it took
+    # p50 6 s, p99 101 s, max 907 s. The old six-hour lease meant one lost
+    # /run response held its project's shard for six hours (36 wall-hours
+    # in 14 days). See cloudflare_timeout_for for the synchronous-child floor.
+    "mcp_tool": int(os.getenv("CLOUDFLARE_TIMEOUT_MCP_S", "1200")),
     "shorts_plan": int(os.getenv("CLOUDFLARE_TIMEOUT_SHORTS_S", "21600")),
 }
+# The other six-hour lanes stay as they are: their duration scales with the
+# source (index p99 1,743 s / max 3,381 s; final max 3,705 s; long canvas
+# previews max 2,176 s), the renderer derives its ffmpeg budget from these
+# leases, and the Studio agent's 3,000 s clock excludes provider TPM sleeps.
+# Dead-call detection, not a shorter lease, is what releases their lost calls.
+# Room for an MCP tool's own work before and after the longest synchronous
+# child call it waits on (e.g. separate_music's first `stems` separation).
+CLOUDFLARE_MCP_CHILD_MARGIN_S = 240
+
+
+def _cloudflare_lease_s(job_type):
+    return max(executor_timeout_for(job_type),
+               CLOUDFLARE_EXECUTOR_TIMEOUTS.get(job_type, 0))
 
 
 def cloudflare_timeout_for(job_type):
-    return max(executor_timeout_for(job_type),
-               CLOUDFLARE_EXECUTOR_TIMEOUTS.get(job_type, 0))
+    if job_type == "mcp_tool":
+        # A parent must outlive every child it can wait on, or its lease
+        # would destroy a healthy orchestrator while the child (which has its
+        # own dispatcher deadline of lease + 60 s) is still working. Today
+        # that floor (1,500 + 60 + 240 = 1,800 s) is above the 1,200 s
+        # orchestration budget; it follows the child budgets automatically.
+        child = max((_cloudflare_lease_s(kind)
+                     for kind in CLOUDFLARE_SYNCHRONOUS_TYPES
+                     if kind != "mcp_tool"), default=0)
+        floor = child + 60 + CLOUDFLARE_MCP_CHILD_MARGIN_S if child else 0
+        return max(CLOUDFLARE_EXECUTOR_TIMEOUTS.get("mcp_tool", 0), floor)
+    return _cloudflare_lease_s(job_type)
 # Port the executor's HTTP server binds (Cloud Run injects $PORT, default 8080).
 EXECUTOR_PORT = int(os.getenv("PORT", "8080"))
 # How many index artifacts (proxy, wav, thumbnails, contact sheets) are PUT to

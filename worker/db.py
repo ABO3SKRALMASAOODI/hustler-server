@@ -846,8 +846,13 @@ def requeue_job(conn, job_id, error, total_claims=None):
         return cur.rowcount > 0
 
 
+_DEFERRAL_COUNTERS = {"cloudflare_busy_deferrals",
+                      "cloudflare_rollout_deferrals"}
+
+
 def defer_unlaunched_cloudflare_busy(conn, job_id, total_claims, error,
-                                     max_deferrals):
+                                     max_deferrals,
+                                     counter="cloudflare_busy_deferrals"):
     """Return a provably unlaunched capacity refusal to the queue.
 
     The ordinary attempt counter is refunded because Cloudflare explicitly
@@ -855,32 +860,36 @@ def defer_unlaunched_cloudflare_busy(conn, job_id, total_claims, error,
     provides the hard bound and gives the next claim a different idempotency
     identity/shard. A payload counter prevents a permanently saturated fleet
     from cycling forever before the absolute ceiling notices it.
+    ``counter`` names that payload counter: a deploy-in-progress refusal has
+    its own, tighter bound (each one already waited a full rollout window).
     """
+    if counter not in _DEFERRAL_COUNTERS:
+        raise ValueError(f"unknown deferral counter {counter!r}")
     with conn.cursor() as cur:
         cur.execute("""UPDATE video_jobs
                        SET state = 'queued',
                            attempts = GREATEST(0, attempts - 1),
-                           error = %s,
+                           error = %%s,
                            payload = jsonb_set(
                              jsonb_set(COALESCE(payload, '{}'::jsonb),
                                '{cloudflare_busy_deferred}', 'true'::jsonb,
                                true),
-                             '{cloudflare_busy_deferrals}',
+                             '{%(counter)s}',
                              to_jsonb(CASE
-                               WHEN payload->>'cloudflare_busy_deferrals'
+                               WHEN payload->>'%(counter)s'
                                       ~ '^[0-9]+$'
                                THEN (payload->>
-                                      'cloudflare_busy_deferrals')::int + 1
+                                      '%(counter)s')::int + 1
                                ELSE 1 END), true),
                            updated_at = NOW()
-                       WHERE id = %s AND state = 'running'
-                         AND total_claims = %s
+                       WHERE id = %%s AND state = 'running'
+                         AND total_claims = %%s
                          AND CASE
-                               WHEN payload->>'cloudflare_busy_deferrals'
+                               WHEN payload->>'%(counter)s'
                                       ~ '^[0-9]+$'
                                THEN (payload->>
-                                      'cloudflare_busy_deferrals')::int
-                               ELSE 0 END < %s""",
+                                      '%(counter)s')::int
+                               ELSE 0 END < %%s""" % {"counter": counter},
                     (error_text.excerpt(error, 2000), job_id, total_claims,
                      max(0, int(max_deferrals))))
         return cur.rowcount > 0

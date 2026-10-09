@@ -112,6 +112,24 @@ def test_cloudflare_cost_uses_measured_cpu_and_provisioned_memory_disk(
         > timings["gross_compute_usd_ceiling"]
 
 
+def test_cloudflare_idle_tail_follows_the_lane_sleep_after(monkeypatch):
+    monkeypatch.setenv("EXECUTOR_PROVIDER", "cloudflare")
+    monkeypatch.setenv("CLOUDFLARE_CONTAINER_PROFILE", "standard-1")
+    monkeypatch.delenv("CLOUDFLARE_IDLE_TAIL_S", raising=False)
+    default = compute_cost.annotate_request({"container_cpu_s": 1}, 10)
+    monkeypatch.setenv("CLOUDFLARE_IDLE_TAIL_S", "240")
+    model_gap = compute_cost.annotate_request({"container_cpu_s": 1}, 10)
+    assert default["configured_idle_tail_s"] == 60
+    assert model_gap["configured_idle_tail_s"] == 240
+    idle_s = 4 * compute_cost.CLOUDFLARE_GIB_S \
+        + 8 * compute_cost.CLOUDFLARE_GB_DISK_S
+    extra = model_gap["gross_compute_usd_with_tail_ceiling"] \
+        - default["gross_compute_usd_with_tail_ceiling"]
+    # Holding a standard-1 four minutes instead of one costs ~$0.0019.
+    assert abs(extra - 180 * idle_s) < 1e-5
+    assert extra < 0.002
+
+
 def test_cloudflare_missing_cpu_measurement_fails_closed_to_vcpu_wall(
         monkeypatch):
     monkeypatch.setenv("EXECUTOR_PROVIDER", "cloudflare")

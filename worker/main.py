@@ -253,6 +253,22 @@ def process_one(worker_db, job):
                       "returned to the queue without consuming its retry "
                       f"budget ({e})", flush=True)
                 return
+        if isinstance(e, remote.CloudflareRolloutPending) \
+                and job["type"] not in ("mcp_tool", "agent_turn"):
+            # A deploy outlasted the in-claim rollout wait and nothing ran.
+            # Give a media job one more full window without spending the
+            # attempt its real failures need (a final has a single retry).
+            # MCP tools and Studio turns have a live caller; it retries.
+            deferred = worker_db.run(
+                dbx.defer_unlaunched_cloudflare_busy, job_id, lease_claim, e,
+                config.CLOUDFLARE_ROLLOUT_MAX_DEFERRALS,
+                counter="cloudflare_rollout_deferrals")
+            if deferred:
+                worker_db.run(dbx.bump_metric, "cloudflare_rollout_deferred")
+                print(f"[job {job_id}] deploy still in progress before launch; "
+                      "returned to the queue without consuming its retry "
+                      f"budget ({e})", flush=True)
+                return
         decision = failure_policy.decision_for(e, job["type"])
         if failure_policy.defer_prerequisite(
                 worker_db, job, e, decision, lease_claim):

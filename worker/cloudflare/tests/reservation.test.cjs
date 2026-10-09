@@ -200,7 +200,8 @@ test('lost read-only audio response is fenced and retryable after 90 seconds', a
   };
   const result = await adapter.expireExecutorLease(callId);
   assert.equal(killed,true); assert.equal(result.status,'failed');
-  assert.equal(result.envelope.failure.max_attempts,2);
+  // The MCP lane never re-claims after one attempt; the caller retries.
+  assert.equal(result.envelope.failure.max_attempts,1);
   assert.equal(result.envelope.retryable,true); assert.equal(values.has('active'),false);
 });
 test('lost mutation response remains fenced while its process is healthy',async()=>{
