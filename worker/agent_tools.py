@@ -7466,6 +7466,12 @@ def _zoom_camera_args(zmode, ramp_s=None, overshoot=None, rotate=None,
                           "ease ramps, landing settle, pulse length, push "
                           "soft-start); a follow is timed by its path and a "
                           "shake by shake_decay.")
+        if zmode in ("landing", "pulse") and vals["ramp_s"] < 0.06:
+            return None, (f"REJECTED: a {zmode} is nothing but its ramp — "
+                          "ramp_s must be at least 0.06 s (it sets how long "
+                          f"the {'settle' if zmode == 'landing' else 'thump'}"
+                          " takes). Omit it for the default "
+                          f"{'0.35' if zmode == 'landing' else '0.3'} s.")
         vals["ramp_s"] = round(min(max(vals["ramp_s"], 0.0), 3.0), 3)
     if "overshoot" in vals:
         if zmode not in ("punch", "ease"):
@@ -23479,7 +23485,8 @@ TOOLS = {
                  "decaying impact shake (strength unused; shake 0.3-0.8). "
                  "Vary mode, strength and spacing — never the same punch on "
                  "a metronome. Knobs: ramp_s = how long the move takes "
-                 "(punch ramp_s=0 is a hard one-frame step), overshoot 0-0.5 "
+                 "(punch ramp_s=0 is a hard one-frame step; a landing or "
+                 "pulse needs >= 0.06), overshoot 0-0.5 "
                  "(punch/ease), rotate = degrees of roll riding the move "
                  "(+ clockwise, 1-3 for a dynamic punch), shake 0-1 with "
                  "shake_hz/shake_decay on ANY mode (punch + shake 0.4 = an "

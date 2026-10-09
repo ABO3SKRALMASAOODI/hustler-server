@@ -429,7 +429,7 @@ def _enabled(filter_text, t):
     if not m:
         return True
     return any(float(a) <= t <= float(b) for a, b in re.findall(
-        r"between\(t,([\d.]+),([\d.]+)\)", m.group(1)))
+        r"between\(t,(-?[\d.]+),(-?[\d.]+)\)", m.group(1)))
 
 
 def _corner_values(filter_text, n):
@@ -474,11 +474,57 @@ def test_shots_without_a_mirror_run_per_frame_over_their_window():
     assert _enabled(chain[0], 1.5) and not _enabled(chain[0], 2.5)
 
 
-def test_always_on_camera_has_no_enable():
+@pytest.mark.parametrize("shifts", [
+    [{"at": 2.0, "ratio": "1:1", "duration_s": 0.8}],
+    [{"at": 2.0, "ratio": "1:1", "duration_s": 0.8},
+     {"at": 5.0, "ratio": "source", "duration_s": 0.5}],
+    [{"at": 1.0, "ratio": "4:5", "duration_s": 0.6},
+     {"at": 3.0, "ratio": "source", "duration_s": 0.6},
+     {"at": 6.0, "ratio": "1:1", "duration_s": 1.0}],
+    [{"at": 0.0, "ratio": "1:1", "duration_s": 0.8}],
+], ids=["hold-to-end", "there-and-back", "back-then-again", "from-zero"])
+def test_an_aspect_shift_push_runs_only_where_it_is_nonzero(shifts):
+    """The shift's push used to force ONE always-on per-frame filter: cubic
+    perspective on every programme frame. It now runs over its own support
+    only, and that support provably contains every non-zero frame."""
+    import screenframe
+    import travel
+    prog = 9.0
+    _w, _h, zpts = screenframe.shift_tracks(shifts, 1080, 1920, prog)
     T = camera.time_var(FPS)
-    shot = camera.Shot(0.0, 9.0, camera.Terms(f"0.1*between({T},1,2)"))
-    (f,) = camera.camera_chain("a", "b", W, H, FPS, [shot], always=True)
-    assert "enable=" not in f and ":eval=frame" in f
+    zexp = travel.path_value_expr(zpts, "v", str(T), 0.0, prog, default=0.0,
+                                  ease="cubic_in_out")
+    a, b = renderer._shift_push_window(zpts, prog)
+    text = camera.seq([camera.time_statement(FPS)], zexp)
+    nonzero = []
+    for n in range(int(prog * FPS) + 1):
+        v = ff_eval(text, {"on": n + 1})
+        if abs(v) > 1e-9:
+            nonzero.append(n / FPS)
+            assert a <= n / FPS <= b, (n / FPS, v, a, b)
+    assert nonzero
+    # tight: it starts on the first moving frame, not at 0
+    assert a >= nonzero[0] - 0.05
+    assert b <= nonzero[-1] + 0.05 or b == prog
+    shot = camera.Shot(a, b, camera.Terms(f"({zexp})"))
+    chain = camera.camera_chain("a", "b", 1080, 1920, FPS, [shot])
+    assert all("enable=" in f for f in chain)
+    if nonzero[0] > 0.5:
+        assert not any(_enabled(f, nonzero[0] - 0.2) for f in chain)
+
+
+def test_an_aspect_shift_in_the_graph_leaves_its_lead_in_untouched():
+    edl = validate_edl({"keep": [[0.0, 8.0]], "effects": {
+        "frame_shifts": [{"id": "s", "at": 4.0, "ratio": "1:1"}]}},
+        8.0).model_dump()
+    g = renderer.build_filtergraph(
+        edl, 8.0, True, Timeline(edl["keep"], []), None, [],
+        {"video": {"duration": 8.0}, "words": [], "sentences": []},
+        preview=False, W=W, H=H, fps=FPS)
+    cams = [f for f in g.split(";") if "perspective=" in f]
+    assert cams and all("enable=" in f for f in cams)
+    assert not any(_enabled(f, 2.0) for f in cams)
+    assert any(_enabled(f, 6.0) for f in cams)
 
 
 def test_graph_without_zooms_has_no_camera():
@@ -730,6 +776,71 @@ def test_add_zoom_writes_the_camera_knobs():
                                 shake_hz=9).startswith("REJECTED")
 
 
+def test_a_landing_or_pulse_cannot_be_given_a_ramp_that_renders_nothing():
+    """A landing/pulse IS its ramp: ramp_s=0 used to validate, report
+    'landing zoom 15%' and render nothing at all."""
+    import agent_tools
+    for mode in ("landing", "pulse"):
+        with pytest.raises(EDLValidationError, match="at least"):
+            _validate({"id": "z", "start": 1.0, "end": 1.5, "mode": mode,
+                       "ramp_s": 0.0})
+        assert _validate({"id": "z", "start": 1.0, "end": 1.5,
+                          "mode": mode, "ramp_s": 0.06})["ramp_s"] == 0.06
+        ctx = _Ctx({"keep": [[0.0, 8.0], [10.0, 20.0]]})
+        res = agent_tools.add_zoom(ctx, 8.0, 8.4, mode=mode, ramp_s=0)
+        assert res.startswith("REJECTED") and "0.06" in res
+        # a hand-made dict that bypassed both still renders its move
+        z = {"id": "z", "start": 1.0, "end": 1.5, "strength": 0.15,
+             "mode": mode, "ramp_s": 0.0}
+        assert max(_z(z, 1.0 + k / 300) for k in range(30)) > 1.05
+
+
+def test_punch_in_on_emphasis_holds_to_the_cut_or_the_phrase(monkeypatch):
+    """Each punch snaps in 60 ms before its word and holds to the nearest
+    natural boundary: the next cut, the sentence's end (+0.1 s), at most
+    2.6 s, never into the next punch; a sentence too short to hold falls
+    back to 0.9 s. The strongest word and spoken numbers slam (overshoot)."""
+    import agent_tools
+
+    class Ctx(_Ctx):
+        def __init__(self, edl, words, sentences):
+            super().__init__(edl)
+            self.index = {"words": words, "sentences": sentences,
+                          "video": {"duration": 30.0}}
+
+        def write_edl(self, edl, desc):
+            validate_edl(dict(edl), 30.0)
+            self.edl = edl
+            return "EDL v1 -> v2: " + desc
+
+    words = [{"w": w, "t0": t, "t1": t + 0.3} for w, t in (
+        ("growth", 2.0), ("business", 8.5), ("customers", 20.0),
+        ("2024", 25.0))]
+    sentences = [{"t0": 1.8, "t1": 3.5}, {"t0": 8.0, "t1": 14.0},
+                 {"t0": 19.5, "t1": 24.4}, {"t0": 24.9, "t1": 25.3}]
+    monkeypatch.setattr(agent_tools, "_get_perception", lambda _c: {})
+    monkeypatch.setattr(agent_tools.perception, "word_stress",
+                        lambda _p, _w: [0.9, 1.0, 0.8, 0.7])
+    monkeypatch.setattr(agent_tools, "_face_at_source_moments",
+                        lambda *_a: {})
+    ctx = Ctx({"keep": [[0.0, 10.0], [12.0, 30.0]]}, words, sentences)
+    res = agent_tools.punch_in_on_emphasis(ctx, count=4, strength=0.15)
+    assert res.startswith("EDL v1 -> v2"), res
+    zs = ctx.edl["effects"]["zooms"]
+    assert [z["start"] for z in zs] == [1.94, 8.44, 17.94, 22.94]
+    # 3.5+0.1 sentence end; the cut at program 10 (the sentence runs on
+    # past it); the 2.6 s cap; a sentence ending 0.36 s in -> 0.9 s hold
+    assert [z["end"] for z in zs] == [3.6, 10.0, 20.54, 23.84]
+    for z in zs:
+        assert z["end"] > z["start"] + 0.2
+        assert z["end"] - z["start"] <= agent_tools.PUNCH_HOLD_MAX_S + 1e-9
+    assert all(a["end"] <= b["start"] for a, b in zip(zs, zs[1:]))
+    # 'business' scored highest; '2024' is a spoken number
+    assert [bool(z.get("overshoot")) for z in zs] == [False, True, False,
+                                                      True]
+    assert all(z.get("mode") is None for z in zs)     # punches
+
+
 def test_add_zoom_schema_offers_the_new_modes_and_knobs():
     import agent_tools
     props = agent_tools.TOOLS["add_zoom"][2]
@@ -758,12 +869,17 @@ def test_stitch_samples_the_camera_curve_when_a_proof_clips_a_zoom():
     assert stitch._zoom_strength_at(punch, 3.0) == pytest.approx(0.3)
 
 
+def _per_frame_sizes(chain):
+    return [sum(len(e) for e in re.findall(r"[xy][0-3]='([^']*)'", f))
+            for f in chain if ":eval=frame" in f]
+
+
 def test_the_camera_text_budget_sheds_shakes_never_zooms(caplog,
                                                          monkeypatch):
-    """Corner expressions are re-parsed every frame, so the camera text is
-    bounded. Over budget, a reel that shakes on every beat sheds its longest
-    shakes first — never a zoom's framing."""
-    monkeypatch.setattr(camera, "TEXT_BUDGET", 60000)
+    """Corner expressions are re-parsed every frame, so one instance's text
+    is bounded. Over budget, a reel that shakes on every beat sheds its
+    longest shakes first — never a zoom's framing."""
+    monkeypatch.setattr(camera, "INSTANCE_TEXT_BUDGET", 15000)
     zooms = []
     for k in range(40):
         z = {"id": f"z{k}", "start": 1.5 * k, "end": 1.5 * k + 1.2,
@@ -774,9 +890,9 @@ def test_the_camera_text_budget_sheds_shakes_never_zooms(caplog,
     shots = [camera.zoom_shot(z, z["start"], z["end"], FPS) for z in zooms]
     with caplog.at_level("WARNING"):
         chain = camera.camera_chain("in", "out", 1080, 1920, FPS, shots)
-    total = sum(len(f) for f in chain)
-    assert total <= camera.TEXT_BUDGET
+    assert max(_per_frame_sizes(chain)) <= camera.INSTANCE_TEXT_BUDGET
     assert "dropped shake" in caplog.text
+    assert "dropped curve" not in caplog.text
     # a bounded number of instances (each allocates a W*H*8-byte map) ...
     assert len(chain) <= camera.MAX_INSTANCES
     # ... and every zoom still frames its hold: on a held frame exactly one
@@ -828,6 +944,56 @@ def test_a_dense_premium_camera_pass_renders(workdir):
 
 
 @needs_ffmpeg
+@pytest.mark.parametrize("under_push", [False, True])
+def test_the_planned_chain_renders_exactly_the_single_filter(workdir,
+                                                            under_push):
+    """End to end: identity frames skipped, holds on build-once instances,
+    moves split across consecutive stretches — and every output frame is
+    bit-identical to ONE per-frame filter carrying every move."""
+    dur, w, h = 6.0, 160, 284
+    path = os.path.join(workdir, "tex_small.mkv")
+    if not os.path.exists(path):
+        subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i",
+                        f"testsrc2=s={w}x{h}:r=30:d={dur}", "-c:v", "ffv1",
+                        "-pix_fmt", "yuv420p", path], check=True)
+    modes = ["punch", "landing", "pulse", "ease", "shake"]
+    zooms = [{"id": "push", "start": 0.0, "end": dur, "strength": 0.05,
+              "mode": "push_in"}] if under_push else []
+    for k in range(5):
+        a = round(0.3 + 1.1 * k, 2)
+        z = {"id": f"p{k}", "start": a, "end": round(a + 0.8, 2),
+             "strength": 0.14, "cx": 0.55, "cy": 0.35, "mode": modes[k]}
+        if z["mode"] == "shake":
+            z = {"id": z["id"], "start": a, "end": z["end"], "mode": "shake"}
+        if z["mode"] == "punch":
+            z.update(overshoot=0.1, rotate=1.5)
+        zooms += [z, {"id": f"l{k}", "start": round(a + 0.8, 2),
+                      "end": round(a + 1.1, 2), "strength": 0.1,
+                      "mode": "landing"}]
+    shots = [camera.zoom_shot(z, z["start"], z["end"], FPS) for z in zooms]
+    import unittest.mock
+    with unittest.mock.patch.object(camera, "GROUP_TEXT_MIN", 1500):
+        chain = camera.camera_chain("sv", "out", w, h, FPS, shots)
+    assert len([f for f in chain if ":eval=frame" in f]) > 1
+    assert under_push or any(":eval=frame" not in f for f in chain)
+    single = camera._filter(
+        "sv", "out", w, h, camera.corner_exprs(
+            w, h, [s.terms for s in shots], True, FPS), True, None, FPS)
+
+    def run(graph):
+        g = "[0:v]format=yuv420p[sv];" + ";".join(graph)
+        r = subprocess.run(["ffmpeg", "-v", "error", "-i", path,
+                            "-filter_complex", g, "-map", "[out]", "-f",
+                            "rawvideo", "-pix_fmt", "gray", "pipe:1"],
+                           capture_output=True)
+        assert r.returncode == 0, r.stderr.decode()[-800:]
+        return np.frombuffer(r.stdout, np.uint8).reshape(-1, h, w)
+    a, b = run(chain), run([single])
+    assert len(a) == int(dur * FPS)
+    assert np.array_equal(a, b)
+
+
+@needs_ffmpeg
 def test_image_insert_ken_burns_is_sub_pixel_and_stays_on_its_frames(
         workdir):
     """A still is where zoompan's whole-pixel crop shimmered worst. The
@@ -875,18 +1041,218 @@ def test_image_insert_ken_burns_is_sub_pixel_and_stays_on_its_frames(
     assert (v > 0.02).sum() == 0 and v.std() < 0.08, (v.min(), v.std())
 
 
+def _render_insert(workdir, src, img, dur, ins, effects=None, preview=False):
+    edl = validate_edl({"keep": [[0.0, 1.0], [1.0, dur]], "inserts": [ins],
+                        "effects": effects or {}}, dur).model_dump()
+    tl = Timeline(edl["keep"], edl["inserts"])
+    g = renderer.build_filtergraph(
+        edl, dur, True, tl, None, [],
+        {"video": {"duration": dur}, "words": [], "sentences": []},
+        preview=preview, W=RW, H=RH, fps=FPS,
+        insert_inputs=[(1, edl["inserts"][0], False)], silence_idx=2)
+    r = subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", src,
+         "-loop", "1", "-t", f"{ins['duration_s']:.3f}", "-r", f"{FPS:.3f}",
+         "-i", img, "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
+         "-filter_complex", g, "-map", "[vout]", "-f", "rawvideo",
+         "-pix_fmt", "gray", "pipe:1", "-map", "[aout]", "-f", "null", "-"],
+        capture_output=True)
+    assert r.returncode == 0, r.stderr.decode()[-2000:]
+    return np.frombuffer(r.stdout, np.uint8).reshape(-1, RH, RW), g
+
+
+@needs_ffmpeg
+@pytest.mark.parametrize("motion", ["pan_left", "zoom_in"])
+def test_insert_motion_moves_the_photo_not_the_look(workdir, motion):
+    """The insert's Ken Burns runs where the per-block zoompan used to: on
+    the spliced programme BEFORE the grade/stylize/custom-filter stage and
+    the shared camera. On the shared camera a vignette slid across the
+    frame with the pan and snapped back at the cut (measured edge means
+    67.5/50.1 -> 49.7/67.9 on flat grey; constant 43.2/43.6 before)."""
+    from PIL import Image
+    dur = 2.0
+    src = _clip_path(workdir, "tex", dur)
+    img = os.path.join(workdir, "grey.png")
+    Image.fromarray(np.full((RH, RW), 128, np.uint8)).convert("RGB").save(img)
+    ins = {"id": "i1", "kind": "image", "asset_key": "grey.png",
+           "at_output_s": 1.0, "duration_s": 3.0, "fit": "crop"}
+    look = {"stylize": [{"id": "v", "kind": "vignette", "intensity": 0.8}]}
+    still, _g = _render_insert(workdir, src, img, dur, ins, look)
+    moving, g = _render_insert(workdir, src, img, dur,
+                               dict(ins, motion=motion), look)
+    # the insert's chain sits on the concat output, before the look
+    assert g.index("[vc]perspective=") < g.index("vignette")
+    assert "[vcins]" in g or "[vcins_c0]" in g
+    for n in range(int(1.0 * FPS) + 2, int(4.0 * FPS) - 2, 7):
+        a, b = moving[n].astype(np.float64), still[n].astype(np.float64)
+        for edge in (np.s_[:, :24], np.s_[:, -24:], np.s_[:24, :],
+                     np.s_[-24:, :]):
+            assert abs(a[edge].mean() - b[edge].mean()) < 0.6, (n, edge)
+
+
+def test_a_user_zoom_over_an_insert_multiplies_with_its_push():
+    """Two chains in series compose: the shared camera magnifies what the
+    insert chain already pushed (1.25 x 1.15), not 1 + 0.25 + 0.15."""
+    edl = validate_edl({
+        "keep": [[0.0, 1.0], [1.0, 2.0]],
+        "inserts": [{"id": "i1", "kind": "image", "asset_key": "a.png",
+                     "at_output_s": 1.0, "duration_s": 3.0,
+                     "motion": "zoom_out"}],
+        "effects": {"zooms": [{"id": "z", "start": 1.0, "end": 3.0,
+                               "strength": 0.15, "ramp_s": 0}]}},
+        2.0).model_dump()
+    tl = Timeline(edl["keep"], edl["inserts"])
+    g = renderer.build_filtergraph(
+        edl, 2.0, True, tl, None, [],
+        {"video": {"duration": 2.0}, "words": [], "sentences": []},
+        preview=False, W=W, H=H, fps=FPS,
+        insert_inputs=[(1, edl["inserts"][0], False)], silence_idx=2)
+    cams = [f for f in g.split(";") if "perspective=" in f]
+    ins = [f for f in cams if f.startswith("[vc]")]
+    shared = [f for f in cams if f.endswith("[vzoom]")]
+    assert len(ins) == 1 and len(shared) == 1
+    n = int(1.0 * FPS)                      # the insert's first frame
+    zi = W / (_corner_values(ins[0], n)[2] - _corner_values(ins[0], n)[0])
+    zs = W / (_corner_values(shared[0], n)[2]
+              - _corner_values(shared[0], n)[0])
+    assert zi == pytest.approx(1.25, abs=1e-6)
+    assert zs == pytest.approx(1.15, abs=1e-6)
+
+
+def test_draft_previews_resample_linearly_finals_stay_cubic():
+    edl = validate_edl({"keep": [[0.0, 4.0]], "effects": {"zooms": [
+        {"id": "z", "start": 1.0, "end": 2.0, "strength": 0.2,
+         "mode": "ease"}]}}, 4.0).model_dump()
+
+    def graph(preview):
+        return renderer.build_filtergraph(
+            edl, 4.0, True, Timeline(edl["keep"], []), None, [],
+            {"video": {"duration": 4.0}, "words": [], "sentences": []},
+            preview=preview, W=W, H=H, fps=FPS)
+    assert "interpolation=linear" in graph(True)
+    assert "interpolation=cubic" in graph(False)
+    token = renderer._PREVIEW_QUALITY.set("approval")
+    try:
+        assert "interpolation=cubic" in graph(True)
+    finally:
+        renderer._PREVIEW_QUALITY.reset(token)
+
+
+def test_old_camera_renders_are_never_spliced_into_new_ones():
+    moved = {"keep": [[0, 5]], "effects": {"zooms": [
+        {"id": "z", "start": 1, "end": 2, "strength": 0.2}]}}
+    plain = {"keep": [[0, 5]], "effects": {}}
+    assert renderer.camera_current({}, plain)
+    assert not renderer.camera_current({}, moved)
+    assert not renderer.camera_current({"cam_v": 0}, moved)
+    assert renderer.camera_current(
+        {"cam_v": renderer.config.CAMERA_VERSION}, moved)
+    kb = {"keep": [[0, 5]], "inserts": [{"id": "i", "motion": "zoom_in"}]}
+    assert not renderer.camera_current({}, kb)
+    assert renderer.camera_current({}, {"keep": [[0, 5]], "inserts": [
+        {"id": "i"}]})
+    shift = {"keep": [[0, 5]], "effects": {"frame_shifts": [
+        {"id": "s", "at": 1, "ratio": "1:1", "zoom": True}]}}
+    assert not renderer.camera_current({}, shift)
+    shift["effects"]["frame_shifts"][0]["zoom"] = False
+    assert renderer.camera_current({}, shift)
+    take = {"keep": [[0, 5]],
+            "overlays": [{"id": "o", "screen": {"x": 0.1}}]}
+    assert not renderer.camera_current({}, take)
+
+
+def test_the_render_stamps_its_camera_version_and_the_splice_checks_it():
+    import inspect
+    src = inspect.getsource(renderer)
+    assert '"cam_v": config.CAMERA_VERSION' in src
+    assert "camera_current(pm, prev_row[\"json\"])" in src
+
+
+def _chain_zoom(chain, n, w=1080):
+    """The magnification the chain applies at frame n (1.0 = no filter)."""
+    on = [f for f in chain if _enabled(f, n / FPS)]
+    assert len(on) <= 1, n
+    if not on:
+        return 1.0
+    c = _corner_values(on[0], n)
+    return w / math.hypot(c[2] - c[0], c[3] - c[1])
+
+
 def test_an_absurdly_dense_pass_degrades_to_steps_not_to_a_failed_render(
         caplog, monkeypatch):
-    monkeypatch.setattr(camera, "TEXT_BUDGET", 120000)
-    zooms = [{"id": f"z{k}", "start": 0.7 * k, "end": 0.7 * k + 0.6,
-              "strength": 0.15, "mode": "ease", "cx": 0.6, "cy": 0.3}
-             for k in range(160)]
+    """Shedding a curve keeps each move's framing: an ease or punch becomes
+    a hard step to the SAME held zoom, a push keeps running from 1.0 to its
+    strength (linear, no soft start), and landings and pulses — which ARE
+    their curve — are never turned into held crops."""
+    monkeypatch.setattr(camera, "INSTANCE_TEXT_BUDGET", 30000)
+    modes = ("ease", "push_in", "landing", "punch", "pulse")
+    zooms = [{"id": f"z{k}", "start": round(0.7 * k, 2),
+              "end": round(0.7 * k + 0.6, 2),
+              "strength": 0.15, "mode": modes[k % len(modes)],
+              "cx": 0.6, "cy": 0.3} for k in range(160)]
+    for z in zooms:
+        if z["mode"] == "push_in":
+            z["end"] = round(z["start"] + 0.6, 2)
+        if z["mode"] == "punch":
+            z["overshoot"] = 0.1
     shots = [camera.zoom_shot(z, z["start"], z["end"], FPS) for z in zooms]
     with caplog.at_level("WARNING"):
         chain = camera.camera_chain("in", "out", 1080, 1920, FPS, shots)
-    assert sum(len(f) for f in chain) <= camera.TEXT_BUDGET
     assert "dropped curve" in caplog.text
     assert len(chain) <= camera.MAX_INSTANCES
+    shed = {line.split()[-1] for line in caplog.text.splitlines()
+            if "dropped curve" in line}
+    by_id = {z["id"]: z for z in zooms}
+    assert not any(by_id[i]["mode"] in ("landing", "pulse") for i in shed)
+    pushes = [i for i in shed if by_id[i]["mode"] == "push_in"]
+    assert pushes, "the dense pass should shed some push soft-starts"
+    for i in pushes:
+        z = by_id[i]
+        n0 = int(round(z["start"] * FPS))
+        n1 = int(round(z["end"] * FPS)) - 1
+        assert _chain_zoom(chain, n0) < 1.01, i            # starts wide
+        assert _chain_zoom(chain, n1) == pytest.approx(    # ends pushed in
+            1.0 + 0.15 * ((n1 / FPS - z["start"]) / 0.6), abs=2e-3)
+    for z in zooms:
+        mid = int(round((z["start"] + 0.3) * FPS))
+        got = _chain_zoom(chain, mid)
+        if z["mode"] in ("ease", "punch"):
+            assert got == pytest.approx(1.15, abs=2e-3), z["id"]
+        if z["mode"] in ("landing", "pulse"):        # back at the wide
+            assert got == pytest.approx(1.0, abs=1e-3), z["id"]
+
+
+def test_touching_moves_plan_fast_and_carry_only_their_own_text():
+    """The new grammar butts moves together (a punch held to the next cut,
+    a landing starting on it) over a long push. Each frame must evaluate
+    only nearby mirrors, and each per-frame instance carry only its own
+    stretch's moves — not every move of the programme."""
+    import time
+    zooms = [{"id": "push", "start": 0.0, "end": 300.0, "strength": 0.06,
+              "mode": "push_in"}]
+    for k in range(150):
+        a = 2.0 * k
+        zooms.append({"id": f"p{k}", "start": a, "end": a + 1.6,
+                      "strength": 0.12, "cx": 0.55, "cy": 0.35})
+        zooms.append({"id": f"l{k}", "start": a + 1.6, "end": a + 2.0,
+                      "strength": 0.1, "mode": "landing"})
+    shots = [camera.zoom_shot(z, z["start"], z["end"], FPS) for z in zooms]
+    t0 = time.monotonic()
+    chain = camera.camera_chain("in", "out", 1080, 1920, FPS, shots)
+    assert time.monotonic() - t0 < 30.0
+    sizes = _per_frame_sizes(chain)
+    assert len(sizes) == camera.MAX_GROUPS
+    one = camera.corner_exprs(1080, 1920, [s.terms for s in shots], True,
+                              FPS)
+    assert max(sizes) < 0.4 * sum(len(e) for e in one)
+    for n in range(0, int(300 * FPS), 97):
+        t = n / FPS
+        want = camera.corners(1080, 1920, [s.mirror(t) for s in shots])
+        on = [f for f in chain if _enabled(f, t)]
+        assert len(on) <= 1, t
+        got = _corner_values(on[0], n) if on else \
+            [0.0, 0.0, 1080.0, 0.0, 0.0, 1920.0, 1080.0, 1920.0]
+        assert max(abs(a - b) for a, b in zip(got, want)) < 1e-4, t
 
 
 @needs_ffmpeg

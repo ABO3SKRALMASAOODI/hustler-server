@@ -217,7 +217,7 @@ def test_a_plain_zoom_graph_keeps_its_framing_and_stays_untargeted():
     w, h = 1280 / 1.3, 720 / 1.3
     x0 = (1280 - w) * 0.5 + 0.5 / 1.3 - 0.5
     y0 = (720 - h) * 0.5 + 0.5 / 1.3 - 0.5
-    assert f"x0='{x0:.6f}':y0='{y0:.6f}'" in g, g
+    assert f"x0='{x0:.10f}':y0='{y0:.10f}'" in g, g
     assert "clip(0.5+" not in g          # untargeted: no aim terms at all
 
 

@@ -49,18 +49,31 @@ the python mirror (zoom_state_at, stitch's proof clipping, the static-hold
 planner below, the tests). They cannot drift: there is one copy of the
 arithmetic.
 
-COST
+COST (measured; this is the price of the sub-pixel camera)
 
-perspective costs real CPU where zoompan was nearly free: ~3 ms/frame to
-rebuild its sampling map (single-threaded, only when the expression is
-evaluated per frame) plus the slice-threaded cubic resample, plus parsing
-the eight corner expressions every frame — and each instance holds a
-W*H*8-byte map. So the camera never runs where nothing moves (timeline
-`enable`: idle frames pass through untouched), frames where it HOLDS (a
-punch after its snap, an ease's plateau) get build-once constant-corner
-instances, and the moving frames are served by a few per-frame instances,
-each carrying only its own stretch of the programme's moves. See
-camera_chain.
+perspective is a generic per-pixel remap and costs real CPU where zoompan
+was nearly free. Per 1080x1920 frame, ONE thread:
+
+                         review box     Apple M (ffmpeg 9)
+  zoompan                  ~2.5 ms         ~0.6 ms
+  cubic, eval=frame        ~31 ms          ~14.6 ms
+  cubic, held (eval=init)  ~27 ms          ~12.6 ms
+  linear, eval=frame       ~13 ms          ~6.5 ms
+
+plus ~32 us per KB of corner text re-parsed on every eval=frame frame.
+Whole graphs (review box): a 60 s short with 15 zooms, filters only, went
+11.6 -> 37.1 s on 1 thread and 5.3 -> 10.1 s on 4, max RSS 247 -> 409 MB;
+a 35 s short with 9 zooms plus x264 veryfast 3.67 -> 5.23 s wall on 4
+threads (+43%). So the camera only runs where something moves: timeline
+`enable` passes every identity frame through untouched (zero cost), the
+longest HOLDS (a punch after its snap, an ease's plateau) get build-once
+constant-corner instances (only ~12% cheaper — the resample dominates —
+so they are reserved for holds long enough to matter), and the moving
+frames are served by a few TIME-LOCAL per-frame instances, each carrying
+only the moves near its own frames. Draft previews (270x480) resample
+linearly, at ~1/16 of these costs; approval previews and finals stay cubic.
+Each instance also holds a W*H*8-byte map (16.6 MB at 1080x1920), which is
+what caps their number. See camera_chain.
 
 ffmpeg's expression parser also has hard limits that shape the text: ~100
 operators in one flat chain, ~100 nesting levels. Sums are balanced trees;
@@ -101,27 +114,42 @@ _SHAKE_MARGIN = 2.0 * 1.05
 
 ROTATE_MAX_DEG = 15.0
 OVERSHOOT_MAX = 0.5
-# A held framing shorter than this stays on the per-frame filter.
-HOLD_MIN_FRAMES = 3
+# A landing or pulse IS its ramp (it is zero once the ramp is over), so it
+# can never be shorter than this: ramp_s=0 would place a move that renders
+# nothing. ~2 frames at 30 fps.
+SETTLE_MIN_S = 0.06
+# A held framing at least this long gets its own build-once instance when
+# instance slots remain; shorter holds ride a per-frame instance (a held
+# frame is only ~12% cheaper, not worth a 16.6 MB map for a few frames).
+HOLD_OWN_MIN_FRAMES = 12
 # Every `perspective` instance allocates its sampling map at graph init:
 # two int32 per pixel, 16.6 MB at 1080x1920, 66 MB at 3840x2160. The chain
 # is therefore a FIXED small number of instances, not one per move: at most
-# MAX_GROUPS per-frame instances (consecutive clusters share one) plus
-# constant-corner instances for the longest holds, all inside LUT_BUDGET.
+# MAX_GROUPS per-frame instances (each serving one stretch of the
+# programme) plus constant-corner instances for the longest holds, all
+# inside LUT_BUDGET.
 LUT_BUDGET_BYTES = 128 * 1024 * 1024
 MAX_GROUPS = 4
 MAX_INSTANCES = 8
-# Characters of camera filter text one graph may carry. The renderer hands
-# graphs over 96 KiB to ffmpeg through a file (argv caps one argument at
-# 128 KiB), so this bounds the per-frame parse work and graph size, not the
-# exec: a plain eased zoom costs ~1.3 KB, a shake ~6 KB, and ~200 eased
-# zooms (a 10-minute programme punched every 3 s) still fit.
-TEXT_BUDGET = 300000
+# Characters of corner-expression text ONE per-frame instance may carry.
+# perspective re-parses all eight corners on every frame it runs (~32 us
+# per KB, measured: 128 KiB is ~4 ms on a frame whose resample costs
+# 13-31 ms). Instances are time-local — a frame's instance carries only the
+# moves near it — so this bounds LOCAL density and the total scales with
+# the programme: a plain eased zoom costs ~1.3 KB, a shake ~6 KB, so ~90
+# eased zooms per instance, ~360 over a long programme's four. Past it the
+# planner sheds texture (camera_chain). Graphs over 96 KiB reach ffmpeg
+# through a file (renderer._graph_args), so this is about time, not argv.
+INSTANCE_TEXT_BUDGET = 128 * 1024
+# Below this much corner text a second per-frame instance saves less parse
+# time than its sampling map costs in memory.
+GROUP_TEXT_MIN = 16 * 1024
 ZOOM_MAX = 10.0                # zoompan's own clamp, kept for parity
 
 # cubic matches zoompan's bicubic sharpness (measured gradient energy 6.69
-# vs 6.69 on a 1.2x face crop); linear is ~5% softer and cheaper. Kept
-# switchable for an overloaded lane, never per edit.
+# vs 6.69 on a 1.2x face crop); linear is ~5% softer and ~2.2x cheaper. The
+# renderer picks linear for draft previews (camera_chain's `interpolation`);
+# CAMERA_INTERPOLATION=linear forces it everywhere for an overloaded lane.
 INTERPOLATION = ("linear" if os.getenv("CAMERA_INTERPOLATION", "").strip()
                  .lower() == "linear" else "cubic")
 
@@ -473,10 +501,12 @@ def ramp_seconds(z, a, b):
         return round(max(min(r, span / 2.0), 0.0), 3)
     if mode in ("push_in", "pull_out"):
         return round(min(PUSH_SOFT_S if r is None else r, span / 2.0), 3)
-    if mode == "landing":
-        return round(min(LANDING_S if r is None else r, span), 3)
-    if mode == "pulse":
-        return round(min(PULSE_S if r is None else r, span), 3)
+    if mode in ("landing", "pulse"):
+        # The move is the ramp: never shorter than SETTLE_MIN_S (the schema
+        # refuses less), never longer than the window.
+        r = (LANDING_S if mode == "landing" else PULSE_S) if r is None \
+            else max(r, SETTLE_MIN_S)
+        return round(min(r, span), 3)
     return 0.0
 
 
@@ -704,7 +734,8 @@ def _sum(terms):
     return _balanced_sum([lit(t) for t in terms])
 
 
-def _filter(in_label, out_label, W, H, exprs, eval_frame, frames, fps):
+def _filter(in_label, out_label, W, H, exprs, eval_frame, frames, fps,
+            interpolation=None):
     names = ("x0", "y0", "x1", "y1", "x2", "y2", "x3", "y3")
     opts = ":".join(f"{n}='{e}'" for n, e in zip(names, exprs))
     en = ""
@@ -714,7 +745,8 @@ def _filter(in_label, out_label, W, H, exprs, eval_frame, frames, fps):
             for n0, n1 in frames]) + "'"
     ev = ":eval=frame" if eval_frame else ""
     return (f"[{in_label}]perspective={opts}:sense=source{ev}"
-            f":interpolation={INTERPOLATION}{en}[{out_label}]")
+            f":interpolation={interpolation or INTERPOLATION}{en}"
+            f"[{out_label}]")
 
 
 def corner_exprs(W, H, terms_list, targeted=True, fps=None):
@@ -848,15 +880,8 @@ def _identity(W, H):
     return [0.0, 0.0, float(W), 0.0, 0.0, float(H), float(W), float(H)]
 
 
-def _clusters(shots, pad):
-    out = []
-    for sh in sorted(shots, key=lambda s: s.a):
-        if out and sh.a - pad <= out[-1][1] + pad:
-            out[-1][1] = max(out[-1][1], sh.b)
-            out[-1][2].append(sh)
-        else:
-            out.append([sh.a, sh.b, [sh]])
-    return out
+def _same(p, q, tol):
+    return max(abs(a - b) for a, b in zip(p, q)) < tol
 
 
 def _runs(frames):
@@ -869,79 +894,127 @@ def _runs(frames):
     return out
 
 
-def _plan_chain(in_label, out_label, W, H, fps, shots, targeted):
+class _Plan:
+    """instances: [(exprs, eval_frame, frame runs)] in chain order.
+    groups: [(text length, shot indices)], one per per-frame instance."""
+    __slots__ = ("instances", "groups")
+
+    def __init__(self):
+        self.instances, self.groups = [], []
+
+
+def _sweep(W, H, fps, shots, targeted):
+    """Every non-identity frame as (n, corners | None, active shot indices).
+
+    A frame needs only the shots whose (one-frame padded) window contains
+    it, so the sweep evaluates exactly those mirrors — O(frames x local
+    density), never O(frames x moves). corners is None when an active shot
+    has no mirror (its frames must run per frame)."""
     pad = 1.0 / fps
     ident = _identity(W, H)
-    max_inst = max(2, min(MAX_INSTANCES,
-                          LUT_BUDGET_BYTES // max(1, int(W) * int(H) * 8)))
-    clusters = []          # (members, moving frame list, holds)
-    for a, b, members in _clusters(shots, pad):
-        n0 = max(0, int(math.floor((a - pad) * fps)))
-        n1 = int(math.ceil((b + pad) * fps))
-        if not all(s.mirror is not None for s in members):
-            clusters.append((members, list(range(n0, n1 + 1)), []))
-            continue
-        # Runs of frames with identical corners. Identity frames need no
-        # filter; a long enough run is a HOLD whose map can be built once.
-        runs = []
-        for n in range(n0, n1 + 1):
-            cs = corners(W, H, [s.mirror(n / fps) for s in members],
+    spans = sorted((max(0, int(math.floor((s.a - pad) * fps))),
+                    int(math.ceil((s.b + pad) * fps)), k)
+                   for k, s in enumerate(shots))
+    out, active, i, n = [], [], 0, 0
+    while i < len(spans) or active:
+        if not active:
+            n = max(n, spans[i][0])
+        while i < len(spans) and spans[i][0] <= n:
+            active.append((spans[i][1], spans[i][2]))
+            i += 1
+        ks = tuple(sorted(k for _n1, k in active))
+        if all(shots[k].mirror is not None for k in ks):
+            cs = corners(W, H, [shots[k].mirror(n / fps) for k in ks],
                          targeted)
-            if max(abs(p - q) for p, q in zip(cs, ident)) < 1e-9:
-                continue
-            if runs and runs[-1][1] == n - 1 and \
-                    max(abs(p - q) for p, q in zip(cs, runs[-1][2])) < 1e-7:
-                runs[-1][1] = n
-            else:
-                runs.append([n, n, cs])
-        moving, holds = [], []
-        for r in runs:
-            if r[1] - r[0] + 1 >= HOLD_MIN_FRAMES:
-                holds.append(r)
-            else:
-                moving.extend(range(r[0], r[1] + 1))
-        clusters.append((members, moving, holds))
-    clusters = [c for c in clusters if c[1] or c[2]]
-    if not clusters:
+            if not _same(cs, ident, 1e-9):
+                out.append((n, cs, ks))
+        else:
+            out.append((n, None, ks))
+        n += 1
+        active = [(n1, k) for n1, k in active if n1 >= n]
+    return out
+
+
+def _plan_chain(W, H, fps, shots, targeted, max_groups, max_instances):
+    """Which `perspective` instance serves which frame.
+
+    Each non-identity frame is served by EXACTLY ONE instance whose text
+    holds every move active on that frame, so the frame sees the summed
+    single-filter maths. Identity frames get no filter at all. The longest
+    constant-corner holds get build-once instances; every other frame goes
+    to one of up to `max_groups` per-frame instances that split the
+    programme into consecutive stretches of roughly equal move text — a
+    stretch carries only its own moves (plus any long move spanning it), so
+    per-frame parse cost follows local density, not programme length."""
+    plan = _Plan()
+    frames = _sweep(W, H, fps, shots, targeted)
+    if not frames:
+        return plan
+    max_inst = max(1, min(max_instances,
+                          LUT_BUDGET_BYTES // max(1, int(W) * int(H) * 8)))
+    runs = []                           # [n0, n1, corners]
+    for n, cs, _ks in frames:
+        if runs and runs[-1][1] == n - 1 and cs is not None and \
+                runs[-1][2] is not None and _same(cs, runs[-1][2], 1e-7):
+            runs[-1][1] = n
+        else:
+            runs.append([n, n, cs])
+    weight = {}
+    for _n, _cs, ks in frames:
+        for k in ks:
+            if k not in weight:
+                weight[k] = 8 * _term_text(shots[k].terms) + 64
+    n_groups = max(1, min(max_groups, max_inst, int(math.ceil(
+        sum(weight.values()) / float(GROUP_TEXT_MIN)))))
+    holds = sorted((r for r in runs if r[2] is not None
+                    and r[1] - r[0] + 1 >= HOLD_OWN_MIN_FRAMES),
+                   key=lambda r: (r[0] - r[1], r[0]))
+    own = holds[:max(0, max_inst - n_groups)]
+    owned = set()
+    for r in own:
+        owned.update(range(r[0], r[1] + 1))
+    per_frame = [f for f in frames if f[0] not in owned]
+    if per_frame:
+        # Consecutive stretches of about equal text, counting each move
+        # once, where it first appears.
+        seen, cum, marks = set(), 0, []
+        for _n, _cs, ks in per_frame:
+            for k in ks:
+                if k not in seen:
+                    seen.add(k)
+                    cum += weight[k]
+            marks.append(cum)
+        stretches = [[]]
+        for f, mark in zip(per_frame, marks):
+            if stretches[-1] and len(stretches) < n_groups and \
+                    mark > cum * len(stretches) / n_groups:
+                stretches.append([])
+            stretches[-1].append(f)
+        for stretch in stretches:
+            ks = sorted({k for _n, _cs, kk in stretch for k in kk})
+            exprs = corner_exprs(W, H, [shots[k].terms for k in ks],
+                                 targeted, fps)
+            plan.instances.append(
+                (exprs, True, _runs([f[0] for f in stretch])))
+            plan.groups.append((sum(len(e) for e in exprs), ks))
+    for r in own:
+        # Ten decimals: at six, perspective's 1/256-px sample rounding could
+        # land a few pixels one grey level off the per-frame evaluation.
+        # At ten a hold renders bit-identically to the single filter.
+        plan.instances.append(([f"{v:.10f}" for v in r[2]], False,
+                               [[r[0], r[1]]]))
+    return plan
+
+
+def _emit(plan, in_label, out_label, W, H, fps, interpolation):
+    if not plan.instances:
         return [f"[{in_label}]null[{out_label}]"]
-    n_groups = min(len(clusters), MAX_GROUPS, max_inst)
-    # The longest holds get their own build-once instance; every other held
-    # frame is served by its group's per-frame instance (same corners).
-    all_holds = sorted((h for c in clusters for h in c[2]),
-                       key=lambda h: h[1] - h[0], reverse=True)
-    own = {id(h) for h in all_holds[:max(0, max_inst - n_groups)]}
-    # Consecutive clusters share a per-frame instance, balanced by how much
-    # expression text each carries (that text is parsed every frame).
-    weights = [sum(len(lit(s.terms.z)) + len(lit(s.terms.rot))
-                   + len(lit(s.terms.dx)) + 1 for s in c[0])
-               for c in clusters]
-    target = sum(weights) / n_groups
-    groups, acc = [[]], 0.0
-    for c, w in zip(clusters, weights):
-        if groups[-1] and acc + w / 2.0 > target * len(groups) and \
-                len(groups) < n_groups:
-            groups.append([])
-        groups[-1].append(c)
-        acc += w
-    plan = []                           # (exprs, eval_frame, frame runs)
-    for group in groups:
-        frames = []
-        for members, moving, holds in group:
-            frames.extend(moving)
-            for h in holds:
-                if id(h) not in own:
-                    frames.extend(range(h[0], h[1] + 1))
-        if frames:
-            exprs = corner_exprs(
-                W, H, [s.terms for c in group for s in c[0]], targeted, fps)
-            plan.append((exprs, True, _runs(sorted(frames))))
-    for h in all_holds:
-        if id(h) in own:
-            plan.append(([f"{v:.6f}" for v in h[2]], False, [[h[0], h[1]]]))
     out, cur = [], in_label
-    for k, (exprs, ev, runs) in enumerate(plan):
-        nxt = out_label if k == len(plan) - 1 else f"{out_label}_c{k}"
-        out.append(_filter(cur, nxt, W, H, exprs, ev, runs, fps))
+    for k, (exprs, ev, runs) in enumerate(plan.instances):
+        nxt = out_label if k == len(plan.instances) - 1 \
+            else f"{out_label}_c{k}"
+        out.append(_filter(cur, nxt, W, H, exprs, ev, runs, fps,
+                           interpolation))
         cur = nxt
     return out
 
@@ -952,33 +1025,57 @@ def _sheddable(shot, key):
     if key == "shake":
         return shake_amount(shot.src) > 0
     if key == "curve":
-        return not ((shot.src.get("mode") or "punch") == "punch"
-                    and _f(shot.src.get("ramp_s")) == 0.0)
+        # landing and pulse ARE their curve (and their text is short):
+        # never shed. A punch/ease/push already stepped has nothing left.
+        return (shot.src.get("mode") or "punch") in (
+            "punch", "ease", "push_in", "pull_out") \
+            and _f(shot.src.get("ramp_s")) != 0.0
     return bool(shot.src.get(key))
 
 
+def _shed(z, keys):
+    """z without the texture `keys` names — never a different framing."""
+    z = {key: v for key, v in z.items() if key not in keys}
+    if keys[0] == "shake" and z.get("mode") == "shake":
+        z["mode"], z["strength"], z["ramp_s"] = "punch", 0.0, 0.0
+    if keys[0] == "curve":
+        # punch / ease: a hard step to the same held framing. push_in /
+        # pull_out: the same push, linear (no soft start) — still from 1.0
+        # to its strength over its window.
+        z.pop("overshoot", None)
+        z["ramp_s"] = 0.0
+    return z
+
+
+_SHED_STAGES = (("shake", "shake_hz", "shake_decay"), ("rotate",),
+                ("curve",))
+
+
 def camera_chain(in_label, out_label, W, H, fps, shots, targeted=True,
-                 always=False):
+                 max_groups=MAX_GROUPS, max_instances=MAX_INSTANCES,
+                 interpolation=None):
     """The shared camera as a chain of `perspective` filters.
 
-    Shots are clustered by time (overlapping windows share one filter — their
-    terms sum, exactly the single-filter maths), and every cluster's filter is
-    enabled only on its own frames, so a frame pays for the expressions of
-    the moves actually happening on it. Inside a cluster whose shots all
-    have mirrors, the frames are classified by their python-computed
-    corners: identity frames get no filter, held frames (constant corners
-    over a run) get a constant-corner instance whose sampling map is built
-    once, and only moving frames evaluate expressions per frame.
+    Every non-identity frame is served by exactly one filter whose text
+    holds every move active on it (overlapping moves sum — the
+    single-filter maths) and every filter is enabled only on its own frames
+    (see _plan_chain). Frames covered only by shots with mirrors are
+    classified by their python-computed corners: identity frames get no
+    filter, the longest holds get build-once constant-corner instances, and
+    the rest are evaluated per frame. Shots without a mirror (takeovers,
+    travelling paths, aspect-shift pushes) run per frame over their window.
 
-    always=True (an aspect shift's push, which can hold anywhere): one
-    filter over everything, evaluated every frame — the old shape.
+    `max_groups` / `max_instances` bound the per-frame and total instance
+    counts (each instance allocates a W*H*8-byte map); `interpolation`
+    overrides INTERPOLATION ('linear' for draft previews).
 
-    Every corner expression is re-parsed per frame, so the text is bounded
-    (TEXT_BUDGET): past it the longest shakes are shed first (the zoom itself
-    stays), then rolls, then eased curves become hard steps at the same
-    framing — and the renderer's log says so. A render that loses a shake
-    beats a render that cannot start. Returns the filter strings, ending on
-    out_label.
+    Every corner expression is re-parsed per frame, so one instance's text
+    is bounded (INSTANCE_TEXT_BUDGET): past it the longest shakes in the
+    over-budget stretch are shed first (the zoom itself stays), then rolls,
+    then eased punch/ease curves become hard steps at the same framing and
+    pushes lose their soft start — and the renderer's log says so. A render
+    that loses a shake beats a render that cannot start. Returns the filter
+    strings, ending on out_label.
     """
     # The graph's fps filters run at fps rounded to 3 decimals (29.970 for
     # NTSC) and the expressions read (on-1)/29.970: the planner's frame
@@ -986,50 +1083,48 @@ def camera_chain(in_label, out_label, W, H, fps, shots, targeted=True,
     fps = round(float(fps), 3)
     if not shots:
         return [f"[{in_label}]null[{out_label}]"]
-    if always:
-        exprs = corner_exprs(W, H, [s.terms for s in shots], targeted, fps)
-        return [_filter(in_label, out_label, W, H, exprs, True, None, fps)]
     shots = list(shots)
-    out = _plan_chain(in_label, out_label, W, H, fps, shots, targeted)
-    # Shed texture, never framing: shakes first (the longest text by far),
-    # then rolls, then — only for an absurdly dense pass — the eased curves
-    # themselves (hard steps at the same framing). A zoom is never dropped.
-    # Shots are shed in batches sized to the overflow (each costs ~8x its
-    # term text, once per corner) and the chain re-planned once per batch.
-    for keys in (("shake", "shake_hz", "shake_decay"), ("rotate",),
-                 ("curve",)):
+
+    def plan_():
+        return _plan_chain(W, H, fps, shots, targeted, max_groups,
+                           max_instances)
+    plan = plan_()
+    # Shed texture, never framing. Shots are shed in batches sized to the
+    # overflow (each costs ~8x its term text, once per corner), only from
+    # the stretches that are over, and the chain re-planned once per batch.
+    for keys in _SHED_STAGES:
         for _round in range(8):
-            over = sum(len(f) for f in out) - TEXT_BUDGET
-            if over <= 0:
+            over = [(size - INSTANCE_TEXT_BUDGET, ks)
+                    for size, ks in plan.groups
+                    if size > INSTANCE_TEXT_BUDGET]
+            if not over:
                 break
-            cand = sorted(((k, s) for k, s in enumerate(shots)
-                           if _sheddable(s, keys[0])),
-                          key=lambda ks: -_term_text(ks[1].terms))
-            if not cand:
+            pool = sorted({k for _o, ks in over for k in ks
+                           if _sheddable(shots[k], keys[0])},
+                          key=lambda k: (-_term_text(shots[k].terms), k))
+            if not pool:
                 break
-            saved = 0
-            for k, s in cand:
-                z = {key: v for key, v in s.src.items() if key not in keys}
-                if keys[0] == "shake" and z.get("mode") == "shake":
-                    z["mode"], z["strength"], z["ramp_s"] = "punch", 0.0, 0.0
-                if keys[0] == "curve":
-                    z = {key: v for key, v in z.items()
-                         if key not in ("overshoot", "mode")}
-                    z["ramp_s"] = 0.0
+            need, saved = 1.1 * sum(o for o, _ks in over), 0
+            for k in pool:
+                s = shots[k]
                 _log.warning("camera text over budget: dropped %s on zoom "
                              "%s", keys[0], s.src.get("id"))
-                shots[k] = s.rebuild(z)
+                shots[k] = s.rebuild(_shed(s.src, keys))
                 saved += 8 * max(0, _term_text(s.terms)
                                  - _term_text(shots[k].terms))
-                if saved >= over * 1.1:
+                if saved >= need:
                     break
-            out = _plan_chain(in_label, out_label, W, H, fps, shots,
-                              targeted)
-    return out
+            plan = plan_()
+    if any(size > INSTANCE_TEXT_BUDGET for size, _ks in plan.groups):
+        _log.warning("camera text still over budget after shedding "
+                     "(%d chars in one instance): rendering it anyway",
+                     max(size for size, _ks in plan.groups))
+    return _emit(plan, in_label, out_label, W, H, fps, interpolation)
 
 
 def _term_text(tm):
-    return sum(len(lit(v)) for v in (tm.z, tm.rot, tm.dx, tm.dy, tm.amp)
+    return sum(len(lit(v)) for v in (tm.z, tm.rot, tm.dx, tm.dy, tm.amp,
+                                     tm.cx, tm.cy)
                if v is not None and _nonzero(v))
 
 

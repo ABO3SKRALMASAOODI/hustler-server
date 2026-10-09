@@ -1020,6 +1020,35 @@ def zoom_state_at(zooms, t, out_duration, size=None):
     return z, _clip01(0.5 + cxo), _clip01(0.5 + cyo)
 
 
+def _shift_push_window(zpts, prog):
+    """(a, b) program seconds outside which an aspect shift's push term
+    (travel.path_value_expr over `zpts` on [0, prog]) is exactly zero, or
+    None. Mirrors the expression's own segment skips: the value is the
+    running sum of each segment's delta, so it is zero before the first
+    moving segment and after a segment that brings it back to zero. A
+    return to zero between two shifts leaves one window spanning both —
+    the expression is one term and must be summed once per frame."""
+    if prog <= 0 or len(zpts) < 2:
+        return None
+    v = float(zpts[0].get("v", 0.0))
+    lo = 0.0 if abs(v) > 1e-4 else None
+    hi = None
+    for p0, p1 in zip(zpts, zpts[1:]):
+        t0, t1 = float(p0["f"]) * prog, float(p1["f"]) * prog
+        dv = float(p1.get("v", 0.0)) - float(p0.get("v", 0.0))
+        if t1 - t0 <= 1e-4 or abs(dv) < 1e-4:
+            continue
+        if lo is None:
+            lo = t0
+        v += dv
+        hi = t1 if abs(v) <= 1e-4 else None
+    if lo is None:
+        return None
+    # The expression rounds its times to the millisecond; pad past that.
+    return max(0.0, lo - 0.01), (prog if hi is None
+                                 else min(prog, hi + 0.01))
+
+
 def _region_parts(parts, in_label, out_label, regions, sw, sh,
                   seg_start, seg_dur, uid):
     """Censor-region chain for ONE source segment, in SOURCE-frame pixels
@@ -1353,6 +1382,29 @@ def transitions_current(meta, edl):
     if not ((edl or {}).get("effects") or {}).get("transition"):
         return True
     return ((meta or {}).get("trans_v") or 0) == config.TRANSITION_VERSION
+
+
+def camera_current(meta, edl):
+    """May this render's pixels be spliced into (or reused for) a newer
+    version's render without mixing two cameras in one video?
+
+    True unless the EDL moves the camera — zooms, a screen takeover's push,
+    an insert's Ken Burns motion, an aspect shift with its push — and the
+    render predates config.CAMERA_VERSION. A pre-camera render with zooms
+    has instant-step zoompan punches; stitching new sub-pixel eased windows
+    into it would put both cameras in one preview until a full re-render.
+    Only the splice/reuse path asks: a cached render served for its own
+    version is self-consistent and keeps its cache.
+    """
+    edl = edl or {}
+    fx = edl.get("effects") or {}
+    moves = bool(fx.get("zooms")) \
+        or any(it.get("motion") for it in edl.get("inserts") or []) \
+        or any(it.get("screen") for it in edl.get("overlays") or []) \
+        or any(sh.get("zoom", True) for sh in fx.get("frame_shifts") or [])
+    if not moves:
+        return True
+    return ((meta or {}).get("cam_v") or 0) == config.CAMERA_VERSION
 
 
 def watermark_font_path():
@@ -1987,17 +2039,14 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                 f":trunc(iw*{cx0:.4f}/2)*2"
                 f":trunc(ih*{cy0:.4f}/2)*2[insvc{j}]")
             ins_in, imode = f"insvc{j}", "pad"
-        # Local camera motion on any insert. zoompan with d=1 emits one output
-        # frame per input frame, so this keeps a still alive and adds a push or
-        # pan to video B-roll without changing its duration, rate, or audio.
-        # No motion keeps the legacy graph byte-identical.
         # Local camera motion on any insert (a push or pan that keeps a
-        # still alive). It is NOT applied here per block any more: it rides
-        # the shared sub-pixel camera below as a Shot on the insert's own
-        # program window (zoompan's whole-pixel crop stair-stepped every
-        # edge of a photo through the push, and a perspective filter per
-        # insert would cost a full-frame sampling map each). No motion keeps
-        # the legacy block graph byte-identical.
+        # still alive). It is NOT applied here per block any more: all
+        # inserts' moves ride ONE sub-pixel camera chain right after the
+        # concat below, as Shots on each insert's program window (zoompan's
+        # whole-pixel crop stair-stepped every edge of a photo through the
+        # push, and a perspective filter per insert would cost a full-frame
+        # sampling map each). No motion keeps the legacy block graph
+        # byte-identical.
         motion = item.get("motion")
         if motion:
             insert_motion.append((j, motion, dur))
@@ -2129,6 +2178,31 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     parts.append(f"{pairs}concat=n={len(blocks)}:v=1:a=1[vc][ac]")
 
     vlabel = "vc"
+    # Draft previews (capped at 480 high) resample the camera linearly:
+    # ~2.2x cheaper, ~5% softer only while a move is on screen. Approval
+    # previews and finals stay cubic (zoompan's sharpness). Stitching only
+    # ever splices a preview of the same quality. See worker/camera.py COST.
+    cam_interp = ("linear" if preview and _PREVIEW_QUALITY.get() != "approval"
+                  else None)
+    if insert_motion:
+        # Insert Ken Burns moves (see the insert loop above): their OWN
+        # camera chain on the spliced programme, at the point in the
+        # processing order where the per-block zoompan used to sit — right
+        # after the splice and BEFORE the post-concat transition, grade,
+        # stylize (vignette/grain/...), custom filters, behind-subject text
+        # and the shared camera. On the shared camera instead, a vignette or
+        # a drawbox border slid and scaled with the photo, and a user zoom
+        # over an insert added to its push instead of multiplying with it.
+        # Inserts never overlap and never hold, so two per-frame instances
+        # at most (one sampling map each). Pans aim, so targeted maths.
+        positions = tl.insert_positions()
+        parts.extend(camera.camera_chain(
+            "vc", "vcins", W, H, fps,
+            [camera.insert_motion_shot(motion, positions[j][0], dur, fps)
+             for j, motion, dur in insert_motion],
+            targeted=True, max_groups=2, max_instances=2,
+            interpolation=cam_interp))
+        vlabel = "vcins"
     if trans_post:
         # Junction list in PROGRAM time. Each side of a junction keeps the
         # per-block rule: it participates only when its own block affords
@@ -2455,7 +2529,6 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     # 1-based, so program time is (on-1)/fps: the same frames the old
     # zoompan's on/fps addressed.
     shots = []
-    cam_always = False
     T = camera.time_var(fps)
     t = str(T)
     for z in zooms:
@@ -2517,15 +2590,6 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                       f"*gt({tvar},{b:.3f})*lt({tvar},{le:.3f})")
         shots.append(camera.Shot(a, max(b, le),
                                  camera.Terms("+".join(zt), cxt, cyt)))
-    # Insert Ken Burns moves, on each insert's program window (see the
-    # insert loop above). Their pans aim, so they need the targeted maths;
-    # targeted with no aim terms is identical to untargeted.
-    if insert_motion:
-        positions = tl.insert_positions()
-        for j, motion, dur in insert_motion:
-            shots.append(camera.insert_motion_shot(
-                motion, positions[j][0], dur, fps))
-        zoom_targeted = True
     shift_w, shift_h, shift_z = ([], [], [])
     if shifts:
         shift_w, shift_h, shift_z = screenframe.shift_tracks(
@@ -2534,16 +2598,18 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             zexp = travel.path_value_expr(
                 shift_z, "v", t, 0.0, tl.out_duration,
                 default=0.0, ease="cubic_in_out")
-            if zexp:
-                shots.append(camera.Shot(0.0, tl.out_duration,
-                                         camera.Terms(f"({zexp})")))
+            win = _shift_push_window(shift_z, tl.out_duration)
+            if zexp and win:
                 # A shift's push can hold across any span of the programme,
-                # so the camera runs as one always-on filter.
-                cam_always = True
+                # so it runs per frame — but only from its first move to
+                # where it returns to zero (or the end): every frame before
+                # the first shift passes through untouched.
+                shots.append(camera.Shot(win[0], win[1],
+                                         camera.Terms(f"({zexp})")))
     if shots:
         parts.extend(camera.camera_chain(
             vlabel, "vzoom", W, H, fps, shots, targeted=zoom_targeted,
-            always=cam_always))
+            interpolation=cam_interp))
         vlabel = "vzoom"
     # ---- screen takeovers (round 55): content pinned INTO the footage ----
     # Emitted after the zoom because the corner path is written in POST-push
@@ -5557,6 +5623,7 @@ def _run_render_job(worker_db, job):
                             and audio_peak_current(pm, prev_row["json"]) \
                             and shaping_current(pm, prev_row["json"]) \
                             and transitions_current(pm, prev_row["json"]) \
+                            and camera_current(pm, prev_row["json"]) \
                             and music_tail_current(pm, prev_row["json"],
                                                    _pout) \
                             and watermark_current(pm, variant, is_paid,
@@ -5896,6 +5963,7 @@ def _run_render_job(worker_db, job):
                   "gfx_shape_v": config.GFX_SHAPING_VERSION,
                   "delivery_v": 1,
                   "trans_v": config.TRANSITION_VERSION,
+                  "cam_v": config.CAMERA_VERSION,
                   "tail_v": config.MUSIC_TAIL_VERSION,
                   "audio_peak_v": 1,
                   "wm_v": (0 if proof_only else

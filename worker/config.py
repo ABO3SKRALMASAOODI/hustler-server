@@ -1832,6 +1832,17 @@ GFX_SHAPING_VERSION = 1
 # again.
 TRANSITION_VERSION = 3  # v3: zoom_punch no longer tmix-blends across concat
 
+# ── The camera (worker/camera.py) ─────────────────────────────────────────
+# Stamped as `cam_v` on every render and compared ONLY where a previous
+# render's pixels are spliced into or reused for a NEW version (stitched
+# previews, picture reuse) and only for EDLs the camera actually moves:
+# zooms, takeover pushes, insert Ken Burns, aspect-shift pushes. v1 is the
+# sub-pixel eased camera; renders before it used zoompan (instant-step
+# punches, whole-pixel framing, inclusive window ends), and a stitch would
+# mix the two cameras in one preview. A render is never re-encoded just for
+# being older when it is served for its OWN version.
+CAMERA_VERSION = 1
+
 # Manual music remains editable past the last scene, but rendered media always
 # stops at the picture/program boundary.  v1 extended overhanging music across
 # generated black frames; v2 clamps only the render window (never the EDL) so

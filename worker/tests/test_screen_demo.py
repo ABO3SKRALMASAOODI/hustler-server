@@ -748,9 +748,25 @@ def test_aspect_shift_zoom_rides_the_existing_zoompan():
         "zooms": [{"id": "z", "start": 1.0, "end": 3.0, "strength": 0.3}],
         "frame_shifts": [{"id": "a", "at": 5.0, "ratio": "1:1",
                           "duration_s": 0.5, "zoom": True}]}})
-    # One always-on camera filter carries the shift's push AND the zoom.
-    assert g.count("perspective=") == 1 and "zoompan" not in g, g
+    # ONE camera stage carries the shift's push AND the zoom (they sum in
+    # its per-frame instance; the zoom's hold may get a build-once one) —
+    # and it is frame-gated: nothing runs before the zoom, between the two
+    # moves, or anywhere a frame would come out unchanged.
+    cams = [f for f in g.split(";") if "perspective=" in f]
+    assert 1 <= len(cams) <= 2 and cams[-1].endswith("[vzoom]"), g
+    assert "zoompan" not in g
     assert "0.3*" in g and "gte(ld(9),1)*lt(ld(9),3)" in g, g
+    assert "0.2188*" in g, g                 # the 1:1 shift's push
+
+    def on(t):
+        spans = []
+        for f in cams:
+            en = re.search(r"enable='([^']*)'", f).group(1)
+            spans += [(float(a), float(b)) for a, b in re.findall(
+                r"between\(t,(-?[\d.]+),(-?[\d.]+)\)", en)]
+        return any(a <= t <= b for a, b in spans)
+    assert not on(0.5) and not on(4.0)
+    assert on(1.05) and on(2.0) and on(5.2) and on(9.0)
 
 
 def test_both_axes_can_shift_without_stranding_a_split_output():

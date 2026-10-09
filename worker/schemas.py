@@ -2234,6 +2234,8 @@ def _check_screen_lock(lock, name, window_s):
 # carried — the same rule `path` and `ease` follow: an agent must never
 # believe it placed a move that does not render.
 ZOOM_RAMP_MAX_S = 3.0
+# A landing or pulse IS its ramp — shorter than ~2 frames it renders nothing.
+ZOOM_SETTLE_MIN_S = 0.06
 ZOOM_OVERSHOOT_MAX = 0.5
 ZOOM_ROTATE_MAX_DEG = 15.0
 ZOOM_SHAKE_HZ = (0.5, 30.0)
@@ -2250,6 +2252,13 @@ def _check_zoom_camera(i, z):
                 f"{where}: `ramp_s` does not apply to mode '{mode}' (a "
                 "travelling zoom is timed by its keyframes; a shake by "
                 "shake_decay).")
+        if mode in ("landing", "pulse") and \
+                float(z.ramp_s) < ZOOM_SETTLE_MIN_S:
+            raise EDLValidationError(
+                f"{where}: a {mode}'s move IS its ramp, so `ramp_s` must be "
+                f"at least {ZOOM_SETTLE_MIN_S}s (it got {z.ramp_s}); omit "
+                "it for the default "
+                f"{'0.35' if mode == 'landing' else '0.3'}s.")
         z.ramp_s = round(min(max(float(z.ramp_s), 0.0), ZOOM_RAMP_MAX_S), 3)
     if z.overshoot is not None:
         if mode not in ("punch", "ease"):
