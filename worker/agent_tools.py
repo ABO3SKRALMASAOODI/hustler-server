@@ -17991,13 +17991,13 @@ def audit_captions(ctx, offset=0, limit=80):
     play_res = renderer.frame_dims(sw, sh, frame.get("ratio") or "source")
     if edl.get("motion"):
         # The render places the captions a graphic does not show clear of the
-        # box it draws, measuring graphics written before that box was stored
-        # (or at another frame shape): the audit measures them the same way
-        # so it compiles the captions the render burns.
+        # box it draws (its footprint), measuring any graphic without one at
+        # this frame shape or with only an estimate: the audit measures them
+        # the same way so it compiles the captions the render burns.
         import motion_layer
         edl = copy.deepcopy(edl)
         try:
-            motion_layer.fill_drawn(edl, *play_res)
+            motion_layer.fill_footprints(edl, *play_res)
         except Exception as exc:  # noqa: BLE001 — unmeasured = old behaviour
             print(f"[audit_captions] graphic boxes unmeasured: {str(exc)[:120]}",
                   flush=True)

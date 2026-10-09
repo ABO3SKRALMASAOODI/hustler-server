@@ -326,9 +326,9 @@ def _apply_owned_sfx(ctx, edl, mid, cues):
 
 
 def _probe_times(item):
-    """Item-local seconds the write-time probe samples."""
-    span = float(item["end"]) - float(item["start"])
-    return [round(span * f, 3) for f in (0.12, 0.35, 0.6, 0.9)]
+    """Item-local seconds the write-time probe samples (the renderer's
+    footprint fill samples the same ones)."""
+    return motion_layer.probe_times(float(item["end"]) - float(item["start"]))
 
 
 def _probe_item(item, W, H, fps=30.0):
@@ -395,29 +395,13 @@ def _probe_full(ctx, edl, item):
 
 
 def _probe_report(ctx, edl, item):
-    """(error, where-note, drawn bbox (x0, y0, x1, y1) fractions or None,
-    ink box — the same without soft scrims/glows — or None)."""
-    err, where, bbox, rep = _probe_full(ctx, edl, item)
-    ink = motion_layer.ink_box(rep) if rep and not err and bbox else None
-    return err, where, bbox, ink
-
-
-def _store_drawn(ctx, edl, item, ink):
-    """Keep the probed ink box on the item (MotionItem.drawn) with the frame
-    aspect it was measured at (drawn_ar): word-level caption muting places
-    the captions it does not show clear of it. No measurement (the browser
-    could not run here, or the composition has no ink) drops a stale one;
-    the renderer measures before it builds captions."""
-    if ink:
-        item["drawn"] = [round(float(v), 3) for v in ink]
-        item["drawn_ar"] = motion_layer.frame_ar(*_canvas_size(ctx, edl))
-    else:
-        item.pop("drawn", None)
-        item.pop("drawn_ar", None)
+    """(error, where-note, drawn bbox (x0, y0, x1, y1) fractions or None)."""
+    err, where, bbox, _rep = _probe_full(ctx, edl, item)
+    return err, where, bbox
 
 
 def _validate_and_probe(ctx, edl, item):
-    err, where, _bbox, _ink = _probe_report(ctx, edl, item)
+    err, where, _bbox = _probe_report(ctx, edl, item)
     return err, where
 
 
@@ -581,8 +565,10 @@ def _mutes_captions(item):
 
 
 def _caption_anchors(ctx, edl, item):
-    """Anchor ys of the transcript captions on screen during the item ([]
-    when there are none, or the item mutes them)."""
+    """Usual anchor ys of the transcript captions on screen during the item
+    ([] when there are none, or the item hides them all: mute_captions=true).
+    The solver prices a spot on their band; word-level captions keep
+    running beside the graphic."""
     caps = edl.get("captions")
     index = getattr(ctx, "index", None) or {}
     if not (isinstance(caps, dict) and caps.get("mode") == "from_transcript") \
@@ -590,7 +576,6 @@ def _caption_anchors(ctx, edl, item):
         return []
     try:
         import captions as caplib
-        import motion_captions
         from timeline import Timeline
         tl = Timeline(edl["keep"], edl.get("inserts") or [], edl.get("speed"))
         others = dict(edl, motion=[m for m in edl.get("motion") or []
@@ -598,13 +583,12 @@ def _caption_anchors(ctx, edl, item):
         words = caplib.transcript_words(others, index, tl,
                                         caplib.effective_caption_mutes(others))
         s, e = float(item["start"]), float(item["end"])
-        style = caps.get("style") if isinstance(caps.get("style"), dict) else {}
         ys = set()
         for w in words:
             if float(w["t1"]) <= s or float(w["t0"]) >= e:
                 continue
             src = (float(w.get("src_t0", 0)) + float(w.get("src_t1", 0))) / 2.0
-            y, _band = motion_captions._placement_for(style or {}, caps.get("placement_track"), src)
+            y, _band = caption_carry.normal_place(edl, src)
             ys.add(round(float(y), 3))
         return sorted(ys)
     except Exception as ex:  # noqa: BLE001 — a lint never blocks the edit
@@ -625,11 +609,11 @@ def _implicit(key, sp):
 
 
 def _relocate(item, spec, box, zones, track, W, H, bands, off_face=True):
-    """Search and verify a clear placement: (patch, real ink box, params) or
-    None. Alternatives the solver cannot predict (another align/side) are
-    probed first, then the cheapest distinct candidates are rendered in one
-    browser session and the first whose REAL ink is off the faces and inside
-    the safe area wins. A second round searches y over what the first one
+    """Search and verify a clear placement: (patch, real ink box, params,
+    the verifying probe report) or None. Alternatives the solver cannot
+    predict (another align/side) are probed first, then the cheapest
+    distinct candidates are rendered in one browser session and the first
+    whose REAL ink is off the faces and inside the safe area wins. A second round searches y over what the first one
     measured, plus a measured ladder of size steps."""
     times = _probe_times(item)
     pspec = spec.get("params") or {}
@@ -677,7 +661,7 @@ def _relocate(item, spec, box, zones, track, W, H, bands, off_face=True):
             if not real:
                 continue
             if not keepout.safe_issues(real, W, H) and not keepout.assess(real, track)["hit"]:
-                return patch, real, trial["params"]
+                return patch, real, trial["params"], rep
             # the real box of that knob setting, for a y-only second round
             dy = float(patch.get("y", ycur)) - ycur if "y" in patch else 0.0
             known.append(({k: v for k, v in patch.items() if k != "y"},
@@ -715,12 +699,25 @@ def _size_ladder(item, spec, W, H, times):
     return out
 
 
+def _set_footprint(item, box, zones, W, H, estimated=False):
+    """Store the item's ONE measurement (MotionItem.footprint): the box the
+    captions keep clear of at its final placement, the frame aspect it was
+    measured at and the face zones of its window (caption_carry reads it).
+    No box drops it: the renderer measures before it builds captions."""
+    if box:
+        item["footprint"] = caption_carry.make_footprint(
+            keepout.rounded(box, 4), W, H, [keepout.rounded(z, 4) for z in zones],
+            estimated=estimated)
+    else:
+        item.pop("footprint", None)
+
+
 def _keep_out(ctx, edl, item, rep):
     """Compare the probed graphic with the speaker's face and the safe area,
     move it to the nearest clear zone when it collides, and record its
     footprint. Mutates ``item``; returns (report text, new where-note or
     None). Never blocks the write: anything that cannot be measured leaves
-    the item as placed."""
+    the item as placed (and unmeasured: the renderer measures it)."""
     item.pop("footprint", None)
     if rep is not None and rep.get("errors"):
         return "", None
@@ -746,9 +743,10 @@ def _keep_out_estimated(ctx, edl, item):
     third's role ran to two lines, and a graze on the estimate still sat on
     his mouth). Templates whose width is their own knob
     (keepout.COLUMN_TEMPLATES) are kept out of the side margins and the
-    button rail too. The estimated box is stored as the footprint, so the
-    motion captions step around the graphic here as well. The reply says
-    the box was estimated."""
+    button rail too. The estimated box is stored as the footprint (flagged
+    ``estimated``), so the caption plan steps around the graphic here as
+    well; the renderer measures the real box before it burns captions. The
+    reply says the box was estimated."""
     template = item["template"]
     spec = motion_templates.spec(template)
     if not keepout.applicable(template, spec, item.get("layer")):
@@ -830,18 +828,22 @@ def _keep_out_estimated(ctx, edl, item):
         notes.append("NOTE (keep-out, estimated): kept as designed (allow_face_overlap), but by "
                      "the template's estimated size it "
                      + " and ".join(keepout.ISSUE_TEXT[i] for i in issues) + ".")
-    item["footprint"] = {"box": keepout.rounded(box, 4), "ar": round(float(W) / float(H), 4),
-                         "faces": [keepout.rounded(z, 4) for z in zones[:8]]}
-    cap = _caption_keepout_note(ctx, edl, item, box, zones, bands, W, H)
-    if cap:
-        notes.append(cap)
+    _set_footprint(item, box, zones, W, H, estimated=True)
     return "".join("\n" + n for n in notes), None
 
 
 def _keep_out_inner(ctx, edl, item, rep):
+    """The keep-out on a probed graphic: its INK box (motion_engine.INK_ALPHA,
+    what hides a face) against the face and the safe area; the stored
+    footprint is the COVER box (COVER_ALPHA, what a caption must clear) of
+    the final placement's probe."""
     W, H = _canvas_size(ctx, edl)
-    box = keepout.settled_ink(rep, _probe_times(item))
+    times = _probe_times(item)
+    box = keepout.settled_ink(rep, times)
     if not box:
+        # nothing opaque enough to hide a face (a light leak, a soft
+        # glow): no keep-out, and the captions clear whatever it covers
+        _set_footprint(item, keepout.cover_box(rep, times), [], W, H)
         return "", None
     template = item["template"]
     spec = motion_templates.spec(template)
@@ -867,7 +869,7 @@ def _keep_out_inner(ctx, edl, item, rep):
         why += [keepout.ISSUE_TEXT[i] for i in issues]
         found = _relocate(item, spec, box, zones, track, W, H, bands, off_face=face_bad)
         if found:
-            patch, real, params = found
+            patch, real, params, rep = found
             old = item.get("params") or {}
             pspec = spec.get("params") or {}
             changes = ", ".join(
@@ -903,35 +905,10 @@ def _keep_out_inner(ctx, edl, item, rep):
     elif allow and issues:
         notes.append("NOTE (keep-out): kept as designed (allow_face_overlap), but it "
                      + " and ".join(keepout.ISSUE_TEXT[i] for i in issues) + ".")
-    item["footprint"] = {"box": keepout.rounded(box, 4), "ar": round(float(W) / float(H), 4),
-                         "faces": [keepout.rounded(z, 4) for z in zones[:8]]}
-    cap = _caption_keepout_note(ctx, edl, item, box, zones, bands, W, H)
-    if cap:
-        notes.append(cap)
+    _set_footprint(item, keepout.cover_box(rep, times) or box, zones, W, H)
     # the INK bounds (type and plates, not soft scrims) are what the safe
     # area and the face are compared with, so they are what the reply reports
     return "".join("\n" + n for n in notes), _where(box)
-
-
-def _caption_keepout_note(ctx, edl, item, box, zones, bands, W, H):
-    """Where the captions go while the graphic is up (the motion caption
-    track steps around a graphic's footprint), or the overlap to fix."""
-    import motion_captions
-    s, e = float(item["start"]), float(item["end"])
-    hits = [y for y in bands if keepout.inter(box, keepout.caption_band(y)) > 0]
-    if not hits:
-        return ""
-    if not motion_captions.look_of(edl):
-        return (f"NOTE (caption placement): it overlaps the caption line (y≈{hits[0]:.2f}) at "
-                f"{s:g}-{e:g}s. Mute the captions for it (mute_captions=true) when it "
-                "carries the spoken words, or move it off the caption band.")
-    zone = keepout.caption_zone(hits[0], [box], zones, keepout.portrait(W, H))
-    if zone:
-        return (f"CAPTIONS: while it is on screen ({s:g}-{e:g}s) the captions step to "
-                f"y {zone[0]:.2f}-{zone[1]:.2f}, clear of it and of the face.")
-    return (f"NOTE (caption placement): it sits on the caption band at {s:g}-{e:g}s and no band clear "
-            "of it and of the face is left for them, so they overlap it. Mute them for it "
-            "(mute_captions=true) when it carries the spoken words, or make it smaller.")
 
 
 # ── caption integrity ─────────────────────────────────────────────────────
@@ -1016,21 +993,24 @@ def _mute_note(edl, index, tl, item, carried):
             f"from the transcript){later}.")
 
 
-def _word_level_notes(edl, index, tl, item):
+def _word_level_notes(edl, index, tl, item, canvas=None):
     """NOTEs for a word-level graphic (mute_captions unset): the words it
-    leaves muted for want of a clear band, and where the rest moved."""
+    leaves muted for want of a clear band, and where the rest moved (the
+    caption plan, worker/caption_carry.py, over its stored footprint)."""
     import captions as caplib
-    rep = caplib.caption_plan(edl, index, tl).report.get(item.get("id"))
+    rep = caplib.caption_plan(edl, index, tl, canvas=canvas).report.get(item.get("id"))
     if not rep:
         return []
     s, e = float(item["start"]), float(item["end"])
     box = rep.get("box")
-    draws = f" (it draws y {box[1]:.2f}-{box[3]:.2f})" if box else ""
     notes = []
     if box is None:
-        # not measured here (the browser could not run): the render measures
-        # it before it places the captions, so there is nothing true to say
+        # not measured here (no footprint): the render measures it before it
+        # places the captions, so there is nothing true to say
         return notes
+    draws = (f" (by its estimated box it draws y {box[1]:.2f}-{box[3]:.2f}; the render "
+             "measures it)" if rep.get("estimated") else
+             f" (it draws y {box[1]:.2f}-{box[3]:.2f})")
     if rep["muted"] and caption_carry.mode(item) == caption_carry.MODE_WORDS:
         notes.append(
             f"NOTE (captions): no caption band is clear of this graphic{draws} and the "
@@ -1116,7 +1096,8 @@ def _caption_integrity_notes(ctx, edl, item):
                 if note:
                     notes.append(note)
             else:
-                notes += _word_level_notes(edl, index, tl, item)
+                notes += _word_level_notes(edl, index, tl, item,
+                                           canvas=_canvas_size(ctx, edl))
         notes += _paraphrase_notes(edl, index, tl, item, lines)
     except Exception as e:  # noqa: BLE001
         print(f"[motion] caption integrity check skipped: {str(e)[:160]}", flush=True)
@@ -1188,13 +1169,8 @@ def add_motion_graphic(ctx, template, start, end=None, params=None, html=None,
     err, where, bbox, rep = _probe_full(ctx, edl, item)
     if err:
         return err
-    placed = json.dumps(item.get("params"), sort_keys=True)
     keep_note, moved_where = _keep_out(ctx, edl, item, rep)
     where = moved_where or where
-    # the probe's ink box is the caption box unless the keep-out moved it
-    # (then the renderer measures the new placement)
-    _store_drawn(ctx, edl, item, motion_layer.ink_box(rep) if rep and bbox and
-                 json.dumps(item.get("params"), sort_keys=True) == placed else None)
     behind_note = ""
     if layer == "behind_subject":
         behind_note, err = _attach_subject_matte(ctx, edl, item, bbox)
@@ -1281,13 +1257,8 @@ def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
     err, where, bbox, rep = _probe_full(ctx, edl, hit)
     if err:
         return err
-    placed = json.dumps(hit.get("params"), sort_keys=True)
     keep_note, moved_where = _keep_out(ctx, edl, hit, rep)
     where = moved_where or where
-    # the probe's ink box is the caption box unless the keep-out moved it
-    # (then the renderer measures the new placement)
-    _store_drawn(ctx, edl, hit, motion_layer.ink_box(rep) if rep and bbox and
-                 json.dumps(hit.get("params"), sort_keys=True) == placed else None)
     behind_note = ""
     if hit.get("layer") == "behind_subject":
         shape = json.dumps([hit.get(k) for k in

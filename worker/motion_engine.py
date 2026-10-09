@@ -438,8 +438,16 @@ def _ffmpeg():
 # the ink plus translucent plates and the dense core of a scrim or glow,
 # where caption letters would read as part of the graphic. Only the falloff
 # tails (shadows, glows, a scrim's edge) stay below it; a caption may sit on
-# those. Word-level caption muting and the motion caption track keep clear
-# of this box, and it is the one stored on the item (MotionItem.footprint).
+# those. This is the box stored on the item (MotionItem.footprint) and the
+# one the caption plan keeps every caption clear of.
+#
+# On the library's examples the two boxes agree within 0.01 of the frame
+# except where a graphic has translucent furniture: the checklist's glass
+# card (+0.05 each side), versus_split's split shading (full width), a
+# scrimmed counter (+0.035 above and below the figure). Comparing the face
+# with COVER would push a scrimmed counter a scrim's core further from the
+# chin (into the caption band); placing captions against INK would set them
+# on the checklist's card.
 INK_ALPHA = 200
 COVER_ALPHA = 102
 VISIBLE_ALPHA = 4

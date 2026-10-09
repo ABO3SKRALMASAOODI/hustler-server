@@ -16,27 +16,31 @@ The contract (MotionItem.mute_captions):
   connector word or two between shown words go with them, and so does a
   quoted phrase that starts up to CARRY_LEAD_S before the graphic). Every
   other spoken word keeps its caption. While the graphic is up those
-  captions sit in a band clear of its drawn box (``MotionItem.drawn``, the
-  write-time probe) and of the speaker's face (the spatial index), found
-  the way the motion captions already place by band. When no band is clear,
-  a template that replaces speech (spec ``mutes_captions``) mutes them — the
-  write reply's NOTE names the words — and any other template keeps the
-  caption where it was.
+  captions sit in the band nearest their usual place that is clear of the
+  box it draws (``MotionItem.footprint``) and of the speaker's face (the
+  zones the write-time face keep-out measured, else the index), preferring
+  a band that clears the hair too. When no band is clear, a template that
+  replaces speech (spec ``mutes_captions``) mutes them — the write reply's
+  NOTE names the words — and any other template keeps the caption where it
+  was.
 - true: the graphic replaces the captions for its whole window (an explicit
   choice; the behaviour every graphic used to have).
 - false: the captions keep running beside it; only a number or a hero word
   it shows (a *starred* word, a counter's value) is not repeated in the
   caption at the same moment. Placement as unset; never muted.
 
-Everything here is a pure function of the EDL, the index and the timeline:
-the libass captions, the motion captions, the write-time lint and the
-sound-off audit all compute the same plan. An item without a drawn box
-(written before the probe stored one, or measured at another frame shape
-than today's: ``drawn_ar``) is treated as old behaviour (a speech-replacing
+Everything here is a pure function of the EDL, the index and the timeline,
+and it is the ONE caption placement pass: the libass captions, the motion
+caption track, the write-time notes, audit_captions and the sound-off audit
+all compute the same plan. The graphic's box is its stored footprint
+(worker/keepout.py writes it on every add/set_motion_graphic: the probe's
+COVER box where a browser runs, the template's estimated box where none
+does). An item without a footprint (or with one measured at another frame
+shape: ``footprint.ar``) is treated as old behaviour (a speech-replacing
 template mutes what it does not carry); the renderer and audit_captions
-fill the box in by probing before they build captions
-(motion_layer.fill_drawn). A composition with no ink (a light leak) has no
-box and never moves or mutes a caption.
+measure it — and any estimated box — before they build captions
+(motion_layer.fill_footprints). A composition with no ink (a light leak)
+has no box and never moves or mutes a caption.
 """
 
 import difflib
@@ -65,10 +69,12 @@ FACE_PAD = 0.01
 # head's face in a 9:16 or 16:9 frame. Haar misses profiles, so "no face
 # found" is not evidence of no face; assuming one only ever blocks a move.
 FACE_PRIOR = (0.2, 0.12, 0.8, 0.5)
-# A detector's face box runs from the brows to the chin; the head (hair,
-# forehead) rises about this share of its height above it.
-HEAD_ABOVE = 0.45
-FACE_NEAR_S = 1.5
+# A face zone (keepout.face_zone) runs from the forehead to the chin; the
+# hair rises about this share of its height above it. A caption moved above
+# the head clears the hair too when a band that tall fits.
+HAIR_UP = 0.3
+# A face measured this far from a moment still speaks for it (any take)
+# when nothing nearer was measured.
 FACE_FAR_S = 6.0
 # A caption that would start this little before an occupying graphic leaves
 # waits for it instead of touching it (the 'computers' under the hook title).
@@ -340,7 +346,11 @@ def carried_indices(word_toks, seq, lead_n=0, solo=frozenset()):
 
 # ── geometry ─────────────────────────────────────────────────────────────
 
-def _frame_wh(edl, index):
+def frame_wh(edl, index, canvas=None):
+    """The output frame (W, H): ``canvas`` when the caller knows it (the
+    renderer), else the EDL's canvas, else the frame fitted to the source."""
+    if canvas:
+        return float(canvas[0]), float(canvas[1])
     canvas = edl.get("canvas")
     if canvas:
         return float(canvas["width"]), float(canvas["height"])
@@ -359,17 +369,11 @@ def _frame_wh(edl, index):
     return 16.0, 9.0
 
 
-def frame_ar(edl, index):
-    """The output frame's aspect as H/W (what a drawn box is stamped with)."""
-    w, h = _frame_wh(edl, index)
-    return h / max(w, 1e-6)
-
-
-def safe_range(edl, index):
-    """Vertical platform-safe text area, as the motion caption template
-    lays it out (worker/motion/templates/caption_motion.html SAFE)."""
-    w, h = _frame_wh(edl, index)
-    ar = h / max(w, 1e-6)
+def safe_range(W, H):
+    """Vertical platform-safe text area of a W x H frame, as the motion
+    caption template lays it out (worker/motion/templates/caption_motion.html
+    SAFE)."""
+    ar = float(H) / max(float(W), 1e-6)
     if ar >= 1.6:
         return 0.08, 0.80
     if ar > 1.15:
@@ -379,104 +383,149 @@ def safe_range(edl, index):
     return 0.07, 0.92
 
 
-# A drawn box measured at another frame shape (stamped ``drawn_ar`` = H/W)
-# says nothing about this one: a template lays out against its canvas, so a
-# box measured at 16:9 is the wrong box after set_frame 9:16.
-DRAWN_AR_TOL = 0.02
+# ── the stored measurement (MotionItem.footprint) ─────────────────────────
+# One measurement per motion item, written by add/set_motion_graphic
+# (worker/keepout.py) and filled in by the renderer for items without one
+# (motion_layer.fill_footprints):
+#   box        the box the graphic draws that captions keep clear of (the
+#              probe's COVER box, motion_engine.COVER_ALPHA), frame fractions;
+#   ar         the frame aspect W/H it was measured at — a template lays out
+#              against its canvas, so after set_frame the box is stale and
+#              is measured again;
+#   faces      the face zones the write-time keep-out measured over the
+#              item's window (exact frames, through crop, zooms and cards);
+#   estimated  true on a lane without a browser: the template's nominal box
+#              (keepout.nominal_ink). The plan trusts it; the renderer, which
+#              has a browser, measures it before it burns captions.
+AR_TOL = 0.02
 
 
-def drawn_fresh(item, ar=None):
-    """Was the item's drawn box measured at this frame aspect (H/W)? An
-    unstamped box is trusted (no shape to compare)."""
-    if ar is None or item.get("drawn_ar") is None:
-        return True
+def frame_ar(W, H):
+    """The aspect (W/H) a footprint is stamped with."""
+    return round(float(W) / max(float(H), 1.0), 4)
+
+
+def make_footprint(box, W, H, faces=(), estimated=False):
+    fp = {"box": [round(float(v), 4) for v in box], "ar": frame_ar(W, H),
+          "faces": [[round(float(v), 4) for v in f[:4]] for f in list(faces)[:8]]}
+    if estimated:
+        fp["estimated"] = True
+    return fp
+
+
+def footprint_fresh(item, ar):
+    """Was the item's footprint measured at this frame aspect (W/H)?"""
+    fp = item.get("footprint")
+    if not isinstance(fp, dict):
+        return False
     try:
-        return abs(float(item["drawn_ar"]) - float(ar)) <= DRAWN_AR_TOL
-    except (TypeError, ValueError):
+        return abs(float(fp["ar"]) - float(ar)) <= AR_TOL
+    except (KeyError, TypeError, ValueError):
         return False
 
 
-def drawn_box(item, ar=None):
-    """The item's drawn box [x0, y0, x1, y1] (frame fractions) or None
-    (never measured, or measured at another frame aspect than ``ar``)."""
-    b = item.get("drawn")
-    try:
-        x0, y0, x1, y1 = (float(v) for v in b)
-    except (TypeError, ValueError):
+def footprint_box(item, ar):
+    """The item's stored box (x0, y0, x1, y1) or None (never measured, or
+    measured at another frame aspect than ``ar``)."""
+    if not footprint_fresh(item, ar):
         return None
-    if not drawn_fresh(item, ar):
+    try:
+        x0, y0, x1, y1 = (float(v) for v in item["footprint"]["box"])
+    except (KeyError, TypeError, ValueError):
         return None
     return (x0, y0, x1, y1) if x1 > x0 and y1 > y0 else None
 
+
+def footprint_faces(item, ar):
+    """The face zones the keep-out stored with a fresh footprint ([])."""
+    if not footprint_fresh(item, ar):
+        return []
+    out = []
+    for f in item["footprint"].get("faces") or []:
+        try:
+            x0, y0, x1, y1 = (float(v) for v in f[:4])
+        except (TypeError, ValueError):
+            continue
+        if x1 > x0 and y1 > y0:
+            out.append((x0, y0, x1, y1))
+    return out
+
+
+def estimated(item):
+    fp = item.get("footprint")
+    return bool(isinstance(fp, dict) and fp.get("estimated"))
+
+
+# ── faces ────────────────────────────────────────────────────────────────
 
 def _in_column(box):
     return box[2] > COLUMN[0] and box[0] < COLUMN[1]
 
 
-def _frame_at(edl, t):
-    frame = edl.get("frame") or {}
-    mode_, focus = frame.get("mode") or "crop", (frame.get("focus_x"), frame.get("focus_y"))
-    for span in frame.get("focus_track") or []:
-        try:
-            if float(span.get("t0")) <= t <= float(span.get("t1")):
-                mode_ = span.get("mode") or mode_
-                focus = (span.get("x") if span.get("x") is not None else focus[0],
-                         span.get("y") if span.get("y") is not None else focus[1])
-                break
-        except (TypeError, ValueError):
-            continue
-    return mode_, focus
+def faces_over(edl, index, tl, a, b, W, H, live=()):
+    """Face ZONES (worker/keepout.face_zone: brow to chin, with a forehead
+    and chin pad; output fractions) over program [a, b] — never empty, an
+    unmeasured face blocks a move:
 
-
-def _face_to_output(edl, index, t, box):
-    """A source-frame face box mapped into the output frame, or None."""
-    video = (index or {}).get("video") or {}
+    1. the zones the write-time keep-out stored with the live graphics'
+       footprints (exact source frames, mapped through the crop, the zoom at
+       each second and any picture card);
+    2. the keep-out's face track over [a, b] from the index's spatial
+       samples (the same mapping);
+    3. the nearest measured face within FACE_FAR_S of the span;
+    4. the talking-head prior (Haar misses profiles: "no face found" is no
+       evidence of no face)."""
+    import keepout
+    ar = frame_ar(W, H)
+    zones = [z for m in live for z in footprint_faces(m, ar)]
+    if zones:
+        return zones
     try:
-        sw, sh = float(video["width"]), float(video["height"])
-    except (KeyError, TypeError, ValueError):
-        return None
-    import renderer
-    frame = edl.get("frame") or {}
-    W, H = renderer.frame_dims(sw, sh, frame.get("ratio") or "source")
-    mode_, focus = _frame_at(edl, t)
-    src, dest = renderer.picture_mapping(sw, sh, W, H, mode_, focus, frame.get("picture"))
-    fx0, fy0, fx1, fy1 = src
-    dx0, dy0, dx1, dy1 = dest
-    x0, y0, x1, y1 = (float(v) for v in box)
-    x0, y0, x1, y1 = max(x0, fx0), max(y0, fy0), min(x1, fx1), min(y1, fy1)
-    if x1 <= x0 or y1 <= y0:
-        return None
-    return (dx0 + (x0 - fx0) / (fx1 - fx0) * (dx1 - dx0),
-            dy0 + (y0 - fy0) / (fy1 - fy0) * (dy1 - dy0),
-            dx0 + (x1 - fx0) / (fx1 - fx0) * (dx1 - dx0),
-            dy0 + (y1 - fy0) / (fy1 - fy0) * (dy1 - dy0))
+        zones = keepout.zones_of(keepout.face_track(edl, index, W, H, a, b))
+    except Exception:  # noqa: BLE001 — unmappable index: the fallbacks answer
+        zones = []
+    if zones:
+        return [tuple(z) for z in zones]
+    far = _faces_far(edl, index, tl, a, b, W, H)
+    return far or [FACE_PRIOR]
 
 
-def faces_near(edl, index, src_lo, src_hi):
-    """Output-frame face boxes measured around a source span: samples inside
-    it (± FACE_NEAR_S), else the nearest measured within FACE_FAR_S, else
-    the talking-head prior. Never empty: an unmeasured face blocks a move."""
-    samples = []
+def _faces_far(edl, index, tl, a, b, W, H):
+    """Zones of the index faces measured within FACE_FAR_S of the source
+    span under program [a, b] (any take), mapped at the span's middle."""
+    import keepout
+    video = (index or {}).get("video") or {}
+    if not video.get("width") or not video.get("height") or edl.get("canvas"):
+        return []
+    lo, hi = _src_near(tl, a), _src_near(tl, b)
+    lo, hi = min(lo, hi), max(lo, hi)
+    mid = (a + b) / 2.0
+    src_mid = _src_near(tl, mid)
+    try:
+        geo = keepout.Geometry(edl, video, W, H, float(tl.out_duration))
+    except Exception:  # noqa: BLE001
+        return []
+    out = []
     for s in (((index or {}).get("spatial") or {}).get("samples") or []):
         try:
-            samples.append((float(s["t"]), s.get("faces") or []))
+            t = float(s["t"])
         except (KeyError, TypeError, ValueError):
             continue
-    for reach in (FACE_NEAR_S, FACE_FAR_S):
-        out = []
-        for t, faces in samples:
-            if src_lo - reach <= t <= src_hi + reach:
-                for f in faces:
-                    try:
-                        m = _face_to_output(edl, index, t, f)
-                    except Exception:  # noqa: BLE001 — unmappable sample
-                        m = None
-                    if m:
-                        h = m[3] - m[1]
-                        out.append((m[0], max(0.0, m[1] - HEAD_ABOVE * h), m[2], m[3]))
-        if out:
-            return out
-    return [FACE_PRIOR]
+        if not lo - FACE_FAR_S <= t <= hi + FACE_FAR_S:
+            continue
+        for f in s.get("faces") or []:
+            try:
+                m = geo.to_output(mid, src_mid, [float(v) for v in f[:4]])
+            except Exception:  # noqa: BLE001 — unmappable sample
+                m = None
+            if m:
+                out.append(tuple(keepout.face_zone(m)))
+    return out
+
+
+def _head(zone):
+    """A face zone with the hair above it (HAIR_UP of its height)."""
+    return (zone[0], zone[1] - HAIR_UP * (zone[3] - zone[1]), zone[2], zone[3])
 
 
 def _subtract(ivs, lo, hi):
@@ -506,15 +555,14 @@ def collides(boxes, y):
                for b in boxes)
 
 
-def clear_band(boxes, faces, safe, normal_y):
-    """{y, b, z, position} of the clear band nearest ``normal_y`` that
-    misses every graphic box and face, or None when none is tall enough."""
+def _free_band(boxes, faces, safe, normal_y):
     ivs = [tuple(safe)]
     for b in boxes:
         if _in_column(b):
             ivs = _subtract(ivs, b[1] - GRAPHIC_PAD, b[3] + GRAPHIC_PAD)
     for f in faces:
-        ivs = _subtract(ivs, f[1] - FACE_PAD, f[3] + FACE_PAD)
+        if _in_column(f):
+            ivs = _subtract(ivs, f[1] - FACE_PAD, f[3] + FACE_PAD)
     best = None
     for a, b in ivs:
         if b - a < MIN_BAND_H - 1e-9:
@@ -524,6 +572,17 @@ def clear_band(boxes, faces, safe, normal_y):
         key = abs(y - normal_y)
         if best is None or key < best[0]:
             best = (key, y, a, b)
+    return best
+
+
+def clear_band(boxes, faces, safe, normal_y):
+    """{y, b, z, position} of the clear band nearest ``normal_y`` that
+    misses every graphic box and face zone (``faces``) reaching the caption
+    column, or None when none is tall enough. A band that also clears the
+    hair above each face (HAIR_UP) wins when one fits; a frame-filling head
+    leaves the band over the hair, which is still used."""
+    best = _free_band(boxes, [_head(f) for f in faces], safe, normal_y) or \
+        _free_band(boxes, faces, safe, normal_y)
     if best is None:
         return None
     _k, y, a, b = best
@@ -590,7 +649,7 @@ class Plan:
     """The caption decision for one EDL's words (see module docstring).
 
     ``hidden[i] = (item id, "carried"|"room"|"unmeasured")`` ("room": no
-    band clear of its drawn box; "unmeasured": no box measured at this frame
+    band clear of its box and the face; "unmeasured": no box measured at this frame
     shape, so it is assumed to sit on the captions); ``placed[i]`` = the band
     dict for a word moved clear of a graphic; ``clamp_spans`` are program
     windows no normally placed caption may hold into (a graphic occupies the
@@ -628,9 +687,14 @@ class Plan:
         return out
 
 
-def plan(edl, index, tl, words):
+def plan(edl, index, tl, words, canvas=None):
     """Plan word-level caption muting and placement for ``words`` (program
-    caption words after the whole-window mutes; see captions.caption_words)."""
+    caption words after the whole-window mutes; see captions.caption_words).
+
+    This is the ONE caption placement pass: the libass captions, the motion
+    caption track, the write-time notes, audit_captions and the sound-off
+    review all read it. ``canvas`` is the output (W, H) when the caller
+    knows it (the renderer); otherwise it is derived from the EDL."""
     p = Plan(words)
     caps = edl.get("captions")
     if not (isinstance(caps, dict) and caps.get("mode") == "from_transcript"):
@@ -642,8 +706,9 @@ def plan(edl, index, tl, words):
         return p
     word_toks = _token_rows([w.get("w") for w in words])
     mids = [_mid(w) for w in words]
-    safe = safe_range(edl, index)
-    ar = frame_ar(edl, index)
+    W, H = frame_wh(edl, index, canvas)
+    safe = safe_range(W, H)
+    ar = frame_ar(W, H)
     for m in items:
         s, e = m["start"], m["end"]
         seq, hero, solo = shown_tokens(m)
@@ -662,7 +727,8 @@ def plan(edl, index, tl, words):
         for i in sorted(carried):
             p.hidden.setdefault(i, (m["id"], "carried"))
         p.report[m["id"]] = {"id": m["id"], "start": s, "end": e, "mode": mode(m),
-                             "box": drawn_box(m, ar),
+                             "box": footprint_box(m, ar),
+                             "estimated": estimated(m),
                              "carried": [words[i] for i in sorted(carried)],
                              "placed": None, "muted": [], "kept": []}
     # Segments: maximal program spans with one set of live graphics.
@@ -676,18 +742,19 @@ def plan(edl, index, tl, words):
         src_at = (float(words[visible[0]].get("src_t0", mids[visible[0]])) if visible
                   else _src_near(tl, (a + b) / 2.0))
         normal_y, _band = normal_place(edl, src_at)
-        known = [bx for bx in (drawn_box(m, ar) for m in live) if bx]
+        known = [bx for bx in (footprint_box(m, ar) for m in live) if bx]
         # An unmeasured box is old behaviour: a speech-replacing word-level
         # graphic is assumed to sit on the captions (no band can be proven
         # clear of it), anything else is assumed to sit elsewhere.
-        assume = [m for m in live if not drawn_box(m, ar) and mode(m) == MODE_WORDS
+        assume = [m for m in live if not footprint_box(m, ar) and mode(m) == MODE_WORDS
                   and replaces_speech(m)]
         if not (collides(known, normal_y) or assume):
             continue
         place = None
         if not assume:
-            src = [float(words[i].get("src_t0", mids[i])) for i in visible] or [src_at]
-            place = clear_band(known, faces_near(edl, index, min(src), max(src)),
+            # clear of the graphics AND the face: the zones the keep-out
+            # measured for these graphics, else the face over this stretch
+            place = clear_band(known, faces_over(edl, index, tl, a, b, W, H, live),
                                safe, normal_y)
         mute = place is None and any(mode(m) == MODE_WORDS and replaces_speech(m)
                                      for m in live)

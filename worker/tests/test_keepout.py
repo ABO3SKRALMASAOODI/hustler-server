@@ -18,13 +18,13 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+import caption_carry  # noqa: E402
 import keepout  # noqa: E402
 import motion_captions  # noqa: E402
 import motion_engine  # noqa: E402
 import motion_templates  # noqa: E402
 import motion_tools  # noqa: E402
-from schemas import (EDLValidationError, default_edl, edl_signature,  # noqa: E402
-                     validate_edl)
+from schemas import default_edl, edl_signature, validate_edl  # noqa: E402
 from timeline import Timeline  # noqa: E402
 
 
@@ -203,17 +203,31 @@ def test_candidates_are_empty_when_the_face_fills_the_frame():
                               mouths=[keepout.mouth_zone(face)]) == []
 
 
+# The caption band clear of a graphic and the face is found by the ONE
+# caption placement pass (caption_carry.clear_band, over keep-out face zones).
+PORTRAIT_SAFE = caption_carry.safe_range(1080, 1920)
+
+
+def _caption_zone(y, graphics, faces, safe=PORTRAIT_SAFE):
+    """(zone_y0, zone_y1, anchor_y), None when the block is already clear,
+    False when no band fits."""
+    if not caption_carry.collides(graphics, y):
+        return None
+    band = caption_carry.clear_band(graphics, faces, safe, y)
+    return (band["z"][0], band["z"][1], band["y"]) if band else False
+
+
 def test_caption_zone_steps_around_the_graphic_and_the_face():
     graphic = (0.1, 0.648, 0.8, 0.78)
     face = keepout.face_zone((0.25, 0.2, 0.75, 0.5))
     # clear: nothing to do
-    assert keepout.caption_zone(0.4, [graphic], [face]) is None
-    z0, z1, y = keepout.caption_zone(0.74, [graphic], [face])
-    assert z1 - z0 >= keepout.CAPTION_ZONE_MIN and z0 >= face[3] and z1 <= graphic[1]
+    assert _caption_zone(0.4, [graphic], [face]) is None
+    z0, z1, y = _caption_zone(0.74, [graphic], [face])
+    assert z1 - z0 >= caption_carry.MIN_BAND_H and z0 >= face[3] and z1 <= graphic[1]
     assert z0 + 0.04 <= y <= z1 - 0.04
     # a frame-filling face and a graphic on the band leave no room
     big = keepout.face_zone((0.0, 0.12, 1.0, 0.58))
-    assert keepout.caption_zone(0.74, [(0.1, 0.62, 0.9, 0.79)], [big]) is False
+    assert _caption_zone(0.74, [(0.1, 0.62, 0.9, 0.79)], [big]) is False
 
 
 # ── the tools ─────────────────────────────────────────────────────────────
@@ -343,9 +357,10 @@ def test_footprint_and_flag_validate_and_old_edls_keep_their_signature():
     edl["motion"][0]["allow_face_overlap"] = True
     m = validate_edl(edl, 10.0).model_dump()["motion"][0]
     assert m["footprint"]["box"] == [0.1, 0.2, 0.9, 1.0] and m["allow_face_overlap"] is True
+    # a measurement, never an authoring choice: an unusable one is dropped
+    # (the renderer measures again), not rejected
     edl["motion"][0]["footprint"]["box"] = [0.1, 0.2]
-    with pytest.raises(EDLValidationError):
-        validate_edl(edl, 10.0)
+    assert validate_edl(edl, 10.0).model_dump()["motion"][0]["footprint"] is None
 
 
 def test_word_slam_x_and_width_default_to_the_historical_layout():
@@ -394,14 +409,19 @@ def test_caption_cues_step_off_a_graphic_footprint_and_off_the_face():
     plain = motion_captions.cues(*_caption_edl(), canvas=(1080, 1920))
     fp = {"box": [0.1, 0.648, 0.8, 0.78], "ar": 0.5625, "faces": [[0.25, 0.2, 0.75, 0.5]]}
     moved = motion_captions.cues(*_caption_edl(fp), canvas=(1080, 1920))
-    assert [c["w"] for c in plain] == [c["w"] for c in moved]
-    for a, b in zip(plain, moved):
+    # the same words (the caption plan starts a new card where the band moves)
+    assert [w for c in plain for w in c["w"]] == [w for c in moved for w in c["w"]]
+    plain_at = {c["s"]: c for c in plain}
+    for b in moved:
         if b["s"] < 4.0 and b["e"] > 2.0:
             z0, z1 = b["z"]
             assert z0 >= 0.5 and z1 <= 0.648 and z0 <= b["y"] <= z1, b
             assert b["b"] == "m"
         else:
-            assert b == a                                        # outside the window: unchanged
+            # outside the window: placed as before (a line before the graphic
+            # never holds into its window)
+            a = plain_at[b["s"]]
+            assert (b["y"], b["b"]) == (a["y"], a["b"]) and "z" not in b and b["e"] <= a["e"]
     assert any("z" in c for c in moved)
     # a footprint measured on another canvas shape (a later 1:1 reframe) is stale
     stale = dict(fp, ar=1.0)
@@ -487,11 +507,18 @@ def test_showcase_graphics_move_off_the_mouth_with_the_real_probe(case):
     out = motion_tools.add_motion_graphic(ctx, template, s, e, params=params, id="g")
     assert "KEEP-OUT: it covered the speaker's mouth" in out, out
     item = ctx.latest_edl()["json"]["motion"][0]
-    box, faces = item["footprint"]["box"], item["footprint"]["faces"]
+    faces = item["footprint"]["faces"]
+    # the INK where it landed (the face keep-out's box)
+    box = keepout.settled_ink(motion_tools._probe_item(item, 1080, 1920),
+                              motion_tools._probe_times(item))
     assert faces and box[1] >= max(f[3] for f in faces) - 0.005, (box, faces)   # below the chin
     assert not keepout.safe_issues(box, 1080, 1920), box
     track = keepout.face_track(ctx._edl, ctx.index, 1080, 1920, s, e)
     assert not keepout.assess(box, track)["hit"]
+    # the stored footprint is what captions keep clear of: the ink plus any
+    # dense scrim core around it (COVER_ALPHA)
+    cover = item["footprint"]["box"]
+    assert cover[1] <= box[1] + 0.002 and cover[3] >= box[3] - 0.002, (cover, box)
 
 
 @needs_browser
@@ -506,6 +533,12 @@ def test_the_probe_reports_ink_without_the_soft_scrim():
     # the scrim spreads the visible box across the frame; the ink is the number
     assert vis[2] - vis[0] > 0.9 and ink[2] - ink[0] < 0.75
     assert ink[1] > vis[1] + 0.05 and ink[3] < vis[3] - 0.05
+    # the box captions keep clear of (stored as the footprint) adds the
+    # scrim's dense core around the number, never its soft falloff
+    cover = keepout.cover_box(rep, motion_tools._probe_times(item))
+    assert len(rep["cover"]) == 4
+    assert cover[1] <= ink[1] and cover[3] >= ink[3] and cover[1] > vis[1] + 0.05
+    assert cover[2] - cover[0] < 0.8
 
 
 # ── a lane without a browser: the template's nominal ink ──────────────────
@@ -618,18 +651,18 @@ def test_without_a_browser_slams_leave_the_button_rail(monkeypatch):
 
 def test_a_failed_keep_out_leaves_the_placement_as_written(monkeypatch):
     monkeypatch.setattr(motion_tools, "_probe_item", _probe_by_y())
-    real = motion_tools._caption_keepout_note
+    real = motion_tools._set_footprint
 
     def boom(*a, **k):
         raise RuntimeError("late failure")
-    monkeypatch.setattr(motion_tools, "_caption_keepout_note", boom)
+    monkeypatch.setattr(motion_tools, "_set_footprint", boom)
     ctx = _thiel_like_ctx()
     out = motion_tools.add_motion_graphic(ctx, "counter", 2.0, 4.0,
                                           params={"value": "140", "y": 0.42}, id="num")
     assert out.startswith("EDL v1") and "KEEP-OUT" not in out, out
     item = ctx.latest_edl()["json"]["motion"][0]
     assert item["params"]["y"] == 0.42 and not item.get("footprint")
-    monkeypatch.setattr(motion_tools, "_caption_keepout_note", real)
+    monkeypatch.setattr(motion_tools, "_set_footprint", real)
 
 
 def test_detect_faces_says_when_it_cannot_measure(tmp_path):
@@ -692,17 +725,18 @@ def test_an_opaque_b_roll_cutaway_hides_the_face():
 def test_a_caption_stepping_above_the_head_clears_the_hair_when_it_can():
     graphic = (0.1, 0.62, 0.8, 0.76)
     face = keepout.face_zone((0.3, 0.42, 0.7, 0.6))        # a head low in the frame
-    z0, z1, y = keepout.caption_zone(0.72, [graphic], [face])
-    hair = face[1] - keepout.HAIR_UP * (face[3] - face[1])
+    z0, z1, y = _caption_zone(0.72, [graphic], [face])
+    hair = face[1] - caption_carry.HAIR_UP * (face[3] - face[1])
     assert z1 <= hair and y <= z1 - 0.04
     # a frame-filling head leaves only the band over the hair: still used
     big = keepout.face_zone((0.1, 0.25, 0.7, 0.6))
-    z0, z1, y = keepout.caption_zone(0.72, [graphic], [big])
-    assert z1 <= big[1] and z1 > big[1] - keepout.HAIR_UP * (big[3] - big[1])
+    z0, z1, y = _caption_zone(0.72, [graphic], [big])
+    assert z1 <= big[1] and z1 > big[1] - caption_carry.HAIR_UP * (big[3] - big[1])
 
 
 def test_caption_zones_stay_inside_the_template_safe_band_off_portrait():
-    z0, z1, _y = keepout.caption_zone(0.8, [(0.1, 0.6, 0.9, 0.95)], [], port=False)
+    z0, z1, _y = _caption_zone(0.8, [(0.1, 0.6, 0.9, 0.95)], [],
+                               safe=caption_carry.safe_range(1920, 1080))
     assert 0.07 <= z0 and z1 <= 0.9
 
 

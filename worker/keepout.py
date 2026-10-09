@@ -41,20 +41,25 @@ there must clear the face by a full CLEARANCE (the estimate can be a wrapped
 line short), and only templates whose width is their own knob
 (COLUMN_TEMPLATES) are also moved out of the margins and the button rail.
 
-Captions: the final ink box (estimated on a browserless lane) and the face
-zones of the window are stored on the item (``footprint``). The
-motion-caption track (motion_captions.cues) moves a cue that would land on
-an on-screen graphic into the nearest band clear of the graphic AND the face
-zones (and the hair above them when there is room), so moving the graphic
-never pushes a caption onto the mouth. Items written before this have no
-footprint and render exactly as before (no render stamp is needed: only new
-writes carry one, and motion-caption programs always render in full).
+Captions: the item stores ONE measurement, ``footprint`` (the box captions
+keep clear of — the probe's COVER box, motion_engine.COVER_ALPHA, at the
+final placement, or the estimated box on a browserless lane, flagged
+``estimated`` — the frame aspect it was measured at and the face zones of
+the window). The caption plan (worker/caption_carry.py, the one placement
+pass for the libass and the motion captions alike) moves the captions a
+graphic does not show into the nearest band clear of that box AND those
+face zones (and the hair above them when there is room), so moving the
+graphic never pushes a caption onto the mouth. The solver itself only
+prices a spot on the caption band (CAPTION_PENALTY): word-level muting
+keeps captions running beside most graphics.
 """
 
 import json
 import math
 import os
 import threading
+
+import caption_carry
 
 # ── the 9:16 platform safe area (output-frame fractions) ──────────────────
 SAFE_X0, SAFE_X1 = 0.06, 0.94
@@ -95,11 +100,7 @@ EXEMPT_TEMPLATES = frozenset(("arrow_callout", "circle_highlight",
 HORIZONTAL_KEYS = ("align", "side")
 
 # ── captions ──────────────────────────────────────────────────────────────
-CAPTION_HALF = 0.045        # estimated half-height of a caption block
-CAPTION_ZONE_MIN = 0.085    # caption_motion ignores a zone under 0.08 H
-CAPTION_COL = (0.15, 0.85)  # where a centred caption block can reach
 CAPTION_PENALTY = 0.2       # solver cost of a spot on the caption band
-HAIR_UP = 0.3               # a face zone's height that the hair adds above it
 
 
 # ── boxes ─────────────────────────────────────────────────────────────────
@@ -763,69 +764,44 @@ COLUMN_TEMPLATES = frozenset(("word_slam", "phrase_build"))
 # ── captions as obstacles ─────────────────────────────────────────────────
 
 def caption_band(y):
-    return (CAPTION_COL[0], y - CAPTION_HALF, CAPTION_COL[1], y + CAPTION_HALF)
-
-
-def caption_zone(y, graphics, faces, port=True):
-    """Where a caption anchored at ``y`` may go while ``graphics`` (boxes)
-    are on screen: None when its block is already clear of them; else
-    (zone_y0, zone_y1, anchor_y) — the band nearest ``y`` that clears every
-    graphic and every face zone reaching the caption column, preferring one
-    that clears the hair above it too (HAIR_UP) — or False when no band of
-    CAPTION_ZONE_MIN fits (the caption stays and overlaps)."""
-    band = caption_band(y)
-    hit = [g for g in graphics if g and inter(g, band) > 0]
-    if not hit:
-        return None
-    heads = [(f[0], f[1] - HAIR_UP * (f[3] - f[1]), f[2], f[3]) for f in faces or [] if f]
-    return _caption_band_free(y, graphics, heads, port) or \
-        _caption_band_free(y, graphics, faces, port)
-
-
-def _caption_band_free(y, graphics, faces, port):
-    # inside caption_motion's own SAFE band on every frame shape (9:16:
-    # 0.08-0.80; 4:5 0.06-0.90; square 0.06-0.92; landscape 0.07-0.92): a
-    # zone it clips under 0.08 H is ignored and the block may land anywhere
-    lo = SAFE_Y0 + 0.02 if port else 0.07
-    hi = SAFE_Y1 if port else 0.90
-    blocks = sorted((max(lo, b[1] - 0.012), min(hi, b[3] + 0.012))
-                    for b in list(graphics) + list(faces or [])
-                    if b and b[2] > CAPTION_COL[0] and b[0] < CAPTION_COL[1])
-    free, cur = [], lo
-    for b0, b1 in blocks:
-        if b0 > cur:
-            free.append((cur, b0))
-        cur = max(cur, b1)
-    if cur < hi:
-        free.append((cur, hi))
-    free = [(a, b) for a, b in free if b - a >= CAPTION_ZONE_MIN]
-    if not free:
-        return False
-
-    def dist(iv):
-        a, b = iv
-        return 0.0 if a + CAPTION_HALF <= y <= b - CAPTION_HALF else \
-            min(abs(y - (a + CAPTION_HALF)), abs(y - (b - CAPTION_HALF)))
-    a, b = min(free, key=dist)
-    anchor = min(max(y, a + min(CAPTION_HALF, (b - a) / 2)), b - min(CAPTION_HALF, (b - a) / 2))
-    return round(a, 4), round(b, 4), round(anchor, 4)
+    """The block a caption anchored at ``y`` occupies (caption_carry's
+    geometry: the one caption placement pass)."""
+    return (caption_carry.COLUMN[0], y - caption_carry.CAP_HALF_H,
+            caption_carry.COLUMN[1], y + caption_carry.CAP_HALF_H)
 
 
 # ── the solver ────────────────────────────────────────────────────────────
 
-def settled_ink(rep, times):
-    """The graphic's settled ink box from a probe report: the union of its
-    ink boxes, leaving out samples inside the entrance (ENTRANCE_S) when at
-    least two later ones exist. Falls back to the visible boxes for a probe
-    without ink."""
-    ink = rep.get("ink")
-    if isinstance(ink, list) and ink and len(ink) == len(times):
-        rows = [(t, b) for t, b in zip(times, ink) if b]
-        late = [b for t, b in rows if t >= ENTRANCE_S]
-        return union(late if len(late) >= 2 else [b for _t, b in rows])
-    if isinstance(ink, list) and ink:
-        return union([b for b in ink if b])
+def settled_box(rep, times, field="ink"):
+    """A settled box from a probe report: the union of its per-time ``field``
+    boxes ("ink": what hides a face, INK_ALPHA; "cover": what a caption must
+    clear, COVER_ALPHA), leaving out samples inside the entrance
+    (ENTRANCE_S) when at least two later ones exist. None when the field
+    holds no box (nothing that dense: a soft glow has no ink). A report
+    without the field (an older probe) falls back to "ink", then to the
+    visible boxes."""
+    for key in ((field, "ink") if field != "ink" else ("ink",)):
+        if key not in rep:
+            continue
+        rows = rep.get(key)
+        if not isinstance(rows, list):
+            break
+        if rows and len(rows) == len(times):
+            rows = [(t, b) for t, b in zip(times, rows) if b]
+            late = [b for t, b in rows if t >= ENTRANCE_S]
+            return union(late if len(late) >= 2 else [b for _t, b in rows])
+        return union([b for b in rows if b])
     return union(rep.get("bboxes") or [])
+
+
+def settled_ink(rep, times):
+    """The graphic's settled INK box (what the face keep-out compares)."""
+    return settled_box(rep, times, "ink")
+
+
+def cover_box(rep, times):
+    """The settled COVER box: what the item stores for the captions."""
+    return settled_box(rep, times, "cover")
 
 
 def applicable(template, spec, layer):

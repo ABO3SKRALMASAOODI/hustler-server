@@ -987,16 +987,18 @@ def transcript_words(edl, index, tl, mutes=None):
     return _drop_muted_words(out, mutes) if mutes else out
 
 
-def caption_plan(edl, index, tl, mutes=None):
+def caption_plan(edl, index, tl, mutes=None, canvas=None):
     """The word-level caption plan (worker/caption_carry.py) over the
     transcript words left after the whole-window mutes. ``plan.caption_words()``
     is what every caption path shows: the words graphics carry dropped, the
-    words they do not show moved clear of them (``place``) or, where nothing
-    is clear of a speech-replacing graphic, muted."""
+    words they do not show moved clear of them and of the face (``place``)
+    or, where nothing is clear of a speech-replacing graphic, muted.
+    ``canvas`` = the output (W, H) when the caller knows it."""
     import caption_carry
     if mutes is None:
         mutes = effective_caption_mutes(edl)
-    return caption_carry.plan(edl, index, tl, transcript_words(edl, index, tl, mutes))
+    return caption_carry.plan(edl, index, tl, transcript_words(edl, index, tl, mutes),
+                              canvas=canvas)
 
 
 def caption_words(edl, index, tl):

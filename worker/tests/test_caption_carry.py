@@ -5,8 +5,8 @@ What is pinned here:
      (case, punctuation, plurals, spelled numbers and *stars* folded); the
      other words stay captioned. A paraphrase that shares one word with the
      sentence does not punch a hole in it.
-  2. Those captions move to a band clear of the graphic's drawn box and the
-     face; with no clear band a speech-replacing template mutes them (and
+  2. Those captions move to a band clear of the graphic's stored footprint
+     box and the face; with no clear band a speech-replacing template mutes them (and
      the write reply names the words), any other template leaves them be.
   3. mute_captions=true is the old whole-window mute; false keeps captions
      running but never repeats a number/hero word the graphic shows.
@@ -76,20 +76,29 @@ def _shown(edl, index):
     return [w["w"] for w in captions.caption_words(edl, index, Timeline(edl["keep"]))]
 
 
-def _slam(start, end, text, kicker="", drawn=(0.1, 0.30, 0.9, 0.42), **kw):
+# The aspect (W/H) a box measured on these 9:16 frames is stamped with.
+AR_9X16 = round(1080 / 1920, 4)
+
+
+def _fp(box, ar=AR_9X16):
+    """A stored footprint (MotionItem.footprint) for a measured box."""
+    return {"box": list(box), "ar": ar, "faces": []}
+
+
+def _slam(start, end, text, kicker="", box=(0.1, 0.30, 0.9, 0.42), ar=AR_9X16, **kw):
     m = {"id": kw.pop("id", "slam"), "template": "word_slam", "start": start, "end": end,
          "params": {"text": text, "kicker": kicker}}
-    if drawn:
-        m["drawn"] = list(drawn)
+    if box:
+        m["footprint"] = _fp(box, ar)
     m.update(kw)
     return m
 
 
-def _counter(start, end, value, label="", drawn=(0.3, 0.42, 0.7, 0.56), **kw):
+def _counter(start, end, value, label="", box=(0.3, 0.42, 0.7, 0.56), ar=AR_9X16, **kw):
     m = {"id": kw.pop("id", "num"), "template": "counter", "start": start, "end": end,
          "params": {"value": value, "label": label}}
-    if drawn:
-        m["drawn"] = list(drawn)
+    if box:
+        m["footprint"] = _fp(box, ar)
     m.update(kw)
     return m
 
@@ -120,7 +129,7 @@ def test_a_paraphrase_sharing_one_word_does_not_punch_a_hole():
              ("date", 1.1, 1.5), ("has", 1.6, 1.8), ("used", 1.8, 2.0),
              ("garbage", 2.1, 2.6)]
     m = {"id": "hook", "template": "phrase_build", "start": 0.0, "end": 3.0,
-         "params": {"rows": rows}, "drawn": [0.1, 0.06, 0.9, 0.24]}
+         "params": {"rows": rows}, "footprint": _fp([0.1, 0.06, 0.9, 0.24])}
     edl = _edl([m], words=words)
     # "computer" is part of a different line, said inside another sentence;
     # "garbage" is the starred hero word, said while it is on screen
@@ -136,7 +145,7 @@ def test_list_rows_take_their_own_words_and_the_connectors_between_them():
     rows = [{"text": "ROCKETS"}, {"text": "supersonic jets"},
             {"text": "underwater cities"}, {"text": "NEW *MEDICINES*"}]
     m = {"id": "list", "template": "phrase_build", "start": 0.0, "end": 5.0,
-         "params": {"rows": rows}, "drawn": [0.1, 0.06, 0.9, 0.3]}
+         "params": {"rows": rows}, "footprint": _fp([0.1, 0.06, 0.9, 0.3])}
     edl = _edl([m], words=words)
     assert _shown(edl, _index(words)) == ["aviation", "and", "the", "green",
                                           "revolution", "and"]
@@ -159,7 +168,7 @@ def test_words_it_does_not_show_stay_captioned_in_place_when_their_band_is_clear
 def test_words_under_a_graphic_on_the_caption_band_move_clear_of_it_and_the_face():
     # the slam sits on the caption band (0.62-0.82); the face is high, so the
     # band between the face and the graphic is clear
-    edl = _edl([_slam(1.9, 3.0, "*140*", drawn=(0.1, 0.62, 0.9, 0.82))])
+    edl = _edl([_slam(1.9, 3.0, "*140*", box=(0.1, 0.62, 0.9, 0.82))])
     ix = _index()
     p = _plan(edl, ix)
     moved = {p.words[i]["w"]: place for i, place in p.placed.items()}
@@ -181,7 +190,7 @@ def test_words_under_a_graphic_on_the_caption_band_move_clear_of_it_and_the_face
     before = [c for c in cues if c["s"] < 1.9]
     assert before and all(c["e"] <= 1.9 + 1e-6 for c in before)
     # the libass path anchors the same words inside the same clear band
-    ass = _edl([_slam(1.9, 3.0, "*140*", drawn=(0.1, 0.62, 0.9, 0.82))], look=None)
+    ass = _edl([_slam(1.9, 3.0, "*140*", box=(0.1, 0.62, 0.9, 0.82))], look=None)
     events, _ = captions.compiled_events(ass, ix, tl, (1080, 1920))
     import re
     for ev in events:
@@ -195,25 +204,25 @@ def test_words_under_a_graphic_on_the_caption_band_move_clear_of_it_and_the_face
 def test_no_clear_band_mutes_under_a_speech_template_and_keeps_captions_under_others():
     # graphic and assumed face fill the whole safe area
     big = (0.1, 0.45, 0.9, 0.85)
-    edl = _edl([_slam(1.9, 3.0, "*140*", drawn=big)])
+    edl = _edl([_slam(1.9, 3.0, "*140*", box=big)])
     ix = _index(faces=None)                      # unmeasured -> talking-head prior
     p = _plan(edl, ix)
     room = sorted(p.words[i]["w"] for i, (_o, why) in p.hidden.items() if why == "room")
     assert room == ["all", "got", "was", "we"]
     assert p.report["slam"]["muted"]
     # a counter is not a speech-replacing template: its captions stay put
-    edl = _edl([_counter(1.9, 3.0, "140", drawn=big)])
+    edl = _edl([_counter(1.9, 3.0, "140", box=big)])
     p = _plan(edl, ix)
     assert not any(why == "room" for _o, why in p.hidden.values())
     assert p.report["num"]["kept"] and not p.clamp_spans
 
 
 def test_an_unmeasured_box_keeps_the_old_behaviour():
-    edl = _edl([_slam(1.9, 3.0, "*140*", drawn=None)])
+    edl = _edl([_slam(1.9, 3.0, "*140*", box=None)])
     p = _plan(edl, _index())
     assert sorted(p.words[i]["w"] for i, (_o, why) in p.hidden.items()
                   if why == "unmeasured") == ["all", "got", "was", "we"]
-    edl = _edl([_counter(1.9, 3.5, "140", drawn=None)])
+    edl = _edl([_counter(1.9, 3.5, "140", box=None)])
     assert _shown(edl, _index()).count("140") == 0        # still no duplicate
     assert "got" in _shown(edl, _index())
 
@@ -284,7 +293,7 @@ def test_sound_off_gaps_name_the_words_the_cause_and_the_fix():
 
 def test_sound_off_gap_from_a_graphic_with_no_clear_band_and_a_manual_mute():
     tl = Timeline([[0.0, 8.0]])
-    edl = _edl([_slam(0.9, 2.75, "*140*", drawn=(0.1, 0.45, 0.9, 0.85))])
+    edl = _edl([_slam(0.9, 2.75, "*140*", box=(0.1, 0.45, 0.9, 0.85))])
     gaps = caption_carry.sound_off_gaps(edl, _index(faces=None), tl)
     assert gaps and gaps[0]["owner"] == "slam" and "caption band" in gaps[0]["fix"]
     manual = _edl()
@@ -329,18 +338,25 @@ def test_renders_before_the_plan_are_stale_only_with_graphics_and_transcript_cap
     assert renderer.carry_current({}, bare)                         # no captions
 
 
-def test_drawn_is_a_measurement_sanitized_or_dropped_never_rejected():
-    ok = _edl([_counter(1.0, 2.0, "140", drawn=(-0.2, 0.4, 1.3, 0.6))])
-    assert ok["motion"][0]["drawn"] == [0.0, 0.4, 1.0, 0.6]
+def test_the_footprint_is_a_measurement_sanitized_or_dropped_never_rejected():
+    ok = _edl([_counter(1.0, 2.0, "140", box=(-0.2, 0.4, 1.3, 0.6))])
+    assert ok["motion"][0]["footprint"]["box"] == [0.0, 0.4, 1.0, 0.6]
     for bad in ([0.5, 0.5, 0.4, 0.6], [1, 2, 3], ["x", 0, 1, 1]):
-        e = _edl([_counter(1.0, 2.0, "140", drawn=None)])
-        e["motion"][0]["drawn"] = bad
-        assert validate_edl(e, 8.0).model_dump()["motion"][0].get("drawn") is None
-    legacy = _edl([_counter(1.0, 2.0, "140", drawn=None)])
-    assert "drawn" not in validate_edl(legacy, 8.0).model_dump(exclude_none=True)["motion"][0]
+        e = _edl([_counter(1.0, 2.0, "140", box=None)])
+        e["motion"][0]["footprint"] = _fp(bad)
+        assert validate_edl(e, 8.0).model_dump()["motion"][0].get("footprint") is None
+    legacy = _edl([_counter(1.0, 2.0, "140", box=None)])
+    assert "footprint" not in validate_edl(legacy, 8.0).model_dump(exclude_none=True)["motion"][0]
+    # the pre-release name of the same measurement (drawn + drawn_ar = H/W)
+    # still reads as the footprint
+    e = _edl([_counter(1.0, 2.0, "140", box=None)])
+    e["motion"][0].update(drawn=[0.1, 0.62, 0.9, 0.82], drawn_ar=round(1920 / 1080, 4))
+    m = validate_edl(e, 8.0).model_dump(exclude_none=True)["motion"][0]
+    assert m["footprint"]["box"] == [0.1, 0.62, 0.9, 0.82] and "drawn" not in m
+    assert m["footprint"]["ar"] == pytest.approx(AR_9X16, abs=1e-3)
 
 
-def test_fill_drawn_measures_only_what_the_plan_needs_once(monkeypatch):
+def test_fill_footprints_measures_only_what_the_plan_needs_once(monkeypatch):
     calls = []
 
     def probe(jobs, times):
@@ -349,20 +365,20 @@ def test_fill_drawn_measures_only_what_the_plan_needs_once(monkeypatch):
                  "bboxes": [[0.0, 0.3, 1.0, 0.7]], "ink": [[0.2, 0.4, 0.8, 0.6]]}
                 for _ in jobs]
     monkeypatch.setattr(motion_engine, "probe", probe)
-    monkeypatch.setattr(motion_layer, "_DRAWN_CACHE", {})
-    edl = _edl([_counter(1.0, 2.0, "140", drawn=None),
-                _counter(3.0, 4.0, "7", drawn=None, id="whole", mute_captions=True),
-                _counter(5.0, 6.0, "9", drawn=(0.1, 0.1, 0.2, 0.2), id="known")])
-    motion_layer.fill_drawn(edl, 1080, 1920)
-    by = {m["id"]: m.get("drawn") for m in edl["motion"]}
+    monkeypatch.setattr(motion_layer, "_FOOTPRINT_CACHE", {})
+    edl = _edl([_counter(1.0, 2.0, "140", box=None),
+                _counter(3.0, 4.0, "7", box=None, id="whole", mute_captions=True),
+                _counter(5.0, 6.0, "9", box=(0.1, 0.1, 0.2, 0.2), id="known")])
+    motion_layer.fill_footprints(edl, 1080, 1920)
+    by = {m["id"]: (m.get("footprint") or {}).get("box") for m in edl["motion"]}
     assert by == {"num": [0.2, 0.4, 0.8, 0.6], "whole": None, "known": [0.1, 0.1, 0.2, 0.2]}
-    again = _edl([_counter(1.0, 2.0, "140", drawn=None)])
-    motion_layer.fill_drawn(again, 540, 960)            # same aspect: cached
-    assert again["motion"][0]["drawn"] == [0.2, 0.4, 0.8, 0.6] and calls == [1]
+    again = _edl([_counter(1.0, 2.0, "140", box=None)])
+    motion_layer.fill_footprints(again, 540, 960)            # same aspect: cached
+    assert again["motion"][0]["footprint"]["box"] == [0.2, 0.4, 0.8, 0.6] and calls == [1]
     # no transcript captions: nothing to place, nothing measured
-    bare = validate_edl(dict(default_edl(8.0), motion=[_counter(1.0, 2.0, "5", drawn=None)]),
+    bare = validate_edl(dict(default_edl(8.0), motion=[_counter(1.0, 2.0, "5", box=None)]),
                         8.0).model_dump()
-    motion_layer.fill_drawn(bare, 1080, 1920)
+    motion_layer.fill_footprints(bare, 1080, 1920)
     assert calls == [1]
 
 
@@ -397,16 +413,17 @@ def test_the_write_stores_the_ink_box_and_says_where_the_captions_go(monkeypatch
                                           params={"text": "*140*"}, id="slam")
     assert out.startswith("EDL v1"), out
     item = ctx.latest_edl()["json"]["motion"][0]
-    assert item["drawn"] == [0.1, 0.62, 0.9, 0.82]          # ink, not the scrim's reach
-    assert item["drawn_ar"] == pytest.approx(1920 / 1080, abs=0.01)   # the shape it fits
+    fp = item["footprint"]
+    assert fp["box"] == [0.1, 0.62, 0.9, 0.82]          # ink, not the scrim's reach
+    assert fp["ar"] == pytest.approx(1080 / 1920, abs=0.01)   # the shape it fits
     assert "Captions for the words it does not show move to y≈" in out, out
     assert "NOTE (captions)" not in out, out
     # a probe that cannot run drops a stale box rather than keeping it
     monkeypatch.setattr(motion_tools, "_probe_item", lambda *a, **k: None)
     motion_tools.set_motion_graphic(ctx, "slam", params={"text": "*one forty*"})
-    assert "drawn" not in ctx.latest_edl()["json"]["motion"][0] or \
-        ctx.latest_edl()["json"]["motion"][0]["drawn"] is None
-    assert ctx.latest_edl()["json"]["motion"][0].get("drawn_ar") is None
+    item = ctx.latest_edl()["json"]["motion"][0]
+    # (a browserless lane estimates the box instead: never the stale one)
+    assert not item.get("footprint") or item["footprint"].get("estimated"), item
 
 
 def test_the_write_names_words_a_graphic_on_the_caption_band_must_mute(monkeypatch):
@@ -434,36 +451,36 @@ def test_a_run_of_connectors_alone_is_not_the_graphics_words():
 
 def test_a_box_measured_at_another_frame_shape_is_not_trusted():
     on_band = (0.1, 0.62, 0.9, 0.82)
-    fresh = _edl([_slam(1.9, 3.0, "*140*", drawn=on_band, drawn_ar=round(1920 / 1080, 4))])
+    fresh = _edl([_slam(1.9, 3.0, "*140*", box=on_band, ar=AR_9X16)])
     p = _plan(fresh, _index())
     assert p.placed and not any(why != "carried" for _o, why in p.hidden.values())
     # the same box stamped at 16:9 means nothing in this 9:16 frame: the
     # speech graphic is assumed to sit on the captions until it is measured
-    stale = _edl([_slam(1.9, 3.0, "*140*", drawn=on_band, drawn_ar=0.5625)])
+    stale = _edl([_slam(1.9, 3.0, "*140*", box=on_band, ar=round(1920 / 1080, 4))])
     p = _plan(stale, _index())
     assert not p.placed and p.report["slam"]["box"] is None
     assert sorted(p.words[i]["w"] for i, (_o, why) in p.hidden.items()
                   if why == "unmeasured") == ["all", "got", "was", "we"]
-    longer = _edl([_slam(0.9, 2.75, "*140*", drawn=on_band, drawn_ar=0.5625)])
+    longer = _edl([_slam(0.9, 2.75, "*140*", box=on_band, ar=round(1920 / 1080, 4))])
     gaps = caption_carry.sound_off_gaps(longer, _index(), Timeline(longer["keep"]))
     assert gaps and gaps[0]["owner"] == "slam", gaps
     assert "no box measured" in gaps[0]["cause"] and "re-save" in gaps[0]["fix"], gaps
 
 
-def test_drawn_ar_is_sanitized_like_the_box():
-    ok = _edl([_counter(1.0, 2.0, "140", drawn_ar=1.77777)])
-    assert ok["motion"][0]["drawn_ar"] == 1.7778
+def test_the_footprint_aspect_is_sanitized_like_the_box():
+    ok = _edl([_counter(1.0, 2.0, "140", ar=0.562512)])
+    assert ok["motion"][0]["footprint"]["ar"] == 0.5625
     for bad in (0.0, -1.0, 1e9, float("nan")):
         e = _edl([_counter(1.0, 2.0, "140")])
-        e["motion"][0]["drawn_ar"] = bad
-        assert validate_edl(e, 8.0).model_dump()["motion"][0].get("drawn_ar") is None
-    # a stamp without a box is no stamp
-    e = _edl([_counter(1.0, 2.0, "140", drawn=None)])
-    e["motion"][0]["drawn_ar"] = 1.7778
-    assert validate_edl(e, 8.0).model_dump()["motion"][0].get("drawn_ar") is None
+        e["motion"][0]["footprint"]["ar"] = bad
+        assert validate_edl(e, 8.0).model_dump()["motion"][0].get("footprint") is None
+    # a stamp without a box is no measurement
+    e = _edl([_counter(1.0, 2.0, "140", box=None)])
+    e["motion"][0]["footprint"] = {"ar": AR_9X16}
+    assert validate_edl(e, 8.0).model_dump()["motion"][0].get("footprint") is None
 
 
-def test_fill_drawn_remeasures_stale_boxes_and_inkless_compositions_get_none(monkeypatch):
+def test_fill_footprints_remeasures_stale_boxes_and_inkless_compositions_get_none(monkeypatch):
     seen = []
 
     def probe(jobs, times):
@@ -473,21 +490,21 @@ def test_fill_drawn_remeasures_stale_boxes_and_inkless_compositions_get_none(mon
                  "ink": [] if "light_leak" in j.label else [[0.2, 0.4, 0.8, 0.6]]}
                 for j in jobs]
     monkeypatch.setattr(motion_engine, "probe", probe)
-    monkeypatch.setattr(motion_layer, "_DRAWN_CACHE", {})
+    monkeypatch.setattr(motion_layer, "_FOOTPRINT_CACHE", {})
     leak = {"id": "leak", "template": "light_leak", "start": 3.0, "end": 4.0, "params": {}}
-    edl = _edl([_counter(1.0, 2.0, "140", drawn=(0.1, 0.1, 0.2, 0.2), drawn_ar=0.5625),
+    edl = _edl([_counter(1.0, 2.0, "140", box=(0.1, 0.1, 0.2, 0.2), ar=round(1920 / 1080, 4)),
                 leak,
-                _counter(5.0, 6.0, "9", drawn=(0.1, 0.1, 0.2, 0.2), id="ok",
-                         drawn_ar=round(1920 / 1080, 4))])
-    motion_layer.fill_drawn(edl, 1080, 1920)
-    by = {m["id"]: (m.get("drawn"), m.get("drawn_ar")) for m in edl["motion"]}
-    assert by["num"] == ([0.2, 0.4, 0.8, 0.6], pytest.approx(1920 / 1080, abs=1e-3))
+                _counter(5.0, 6.0, "9", box=(0.1, 0.1, 0.2, 0.2), id="ok", ar=AR_9X16)])
+    motion_layer.fill_footprints(edl, 1080, 1920)
+    by = {m["id"]: ((m.get("footprint") or {}).get("box"), (m.get("footprint") or {}).get("ar"))
+          for m in edl["motion"]}
+    assert by["num"] == ([0.2, 0.4, 0.8, 0.6], pytest.approx(1080 / 1920, abs=1e-3))
     assert by["leak"] == (None, None)            # soft light: nothing to keep clear of
-    assert by["ok"] == ([0.1, 0.1, 0.2, 0.2], round(1920 / 1080, 4))
+    assert by["ok"] == ([0.1, 0.1, 0.2, 0.2], AR_9X16)
     assert seen == [2]
     # an inkless report never stands in for a box at write time either
-    assert motion_layer.ink_box({"bboxes": [[0, 0, 1, 1]], "ink": []}) is None
-    assert motion_layer.ink_box({"bboxes": [[0, 0.5, 1, 1]]}) == [0, 0.5, 1, 1]
+    assert motion_layer.caption_box({"bboxes": [[0, 0, 1, 1]], "ink": []}, [0.1]) is None
+    assert motion_layer.caption_box({"bboxes": [[0, 0.5, 1, 1]]}, [0.1]) == [0, 0.5, 1, 1]
 
 
 def test_a_line_too_short_to_wait_for_the_exit_starts_on_time():
@@ -536,9 +553,96 @@ def test_a_chart_series_is_drawn_not_printed_so_its_numbers_stay_captioned():
              ("to", 1.1, 1.2), ("61", 1.3, 1.7), ("percent", 1.7, 2.2)]
     chart = {"id": "chart", "template": "line_chart", "start": 0.0, "end": 3.0,
              "params": {"values": ["12", "18", "15", "30", "61"], "value_label": "61%"},
-             "drawn": [0.1, 0.1, 0.9, 0.4]}
+             "footprint": _fp([0.1, 0.1, 0.9, 0.4])}
     edl = _edl([chart], words=words)
     # the end tag prints "61%": that one is not read twice; "12" is only a
     # point on the line
     assert _shown(edl, _index(words)) == ["we", "went", "from", "12", "to"]
     assert ("values", "12") not in caption_carry.graphic_lines(edl["motion"][0])
+
+
+# ── one measurement, one placement pass (with the face keep-out) ─────────
+
+def test_the_plan_steps_around_the_face_zones_the_keep_out_measured():
+    # the keep-out measured the face LOW in this window (a push-in), while
+    # the index only saw it high: the captions clear the measured zone
+    low_face = [0.25, 0.35, 0.75, 0.6]
+    slam = _slam(1.9, 3.0, "*140*", box=(0.1, 0.62, 0.9, 0.82))
+    slam["footprint"]["faces"] = [low_face]
+    edl = _edl([slam])
+    ix = _index()                                   # FACE_HIGH: 0.12-0.30
+    p = _plan(edl, ix)
+    place = next(iter(p.placed.values()))
+    assert place["z"][1] <= low_face[1] - caption_carry.FACE_PAD + 1e-9, place
+    # ...and, with room above the head, clear of the hair as well
+    hair = low_face[1] - caption_carry.HAIR_UP * (low_face[3] - low_face[1])
+    assert place["z"][1] <= hair + 1e-9, place
+    # the burned (libass) captions take the same band as the motion track
+    tl = Timeline(edl["keep"])
+    cues = motion_captions.cues(edl, ix, tl)
+    assert any(c.get("z") == place["z"] for c in cues)
+    ass = _edl([slam], look=None)
+    events, _ = captions.compiled_events(ass, ix, tl, (1080, 1920))
+    import re
+    inside = [int(re.search(r"\\pos\(\d+,(\d+)\)", ev["text"]).group(1)) / 1920
+              for ev in events if 1.9 <= ev["start"] < 3.0]
+    assert inside and all(place["z"][0] <= y <= place["z"][1] for y in inside), inside
+
+
+def test_an_estimated_footprint_places_captions_until_the_render_measures_it(monkeypatch):
+    est = _slam(1.9, 3.0, "*140*", box=(0.1, 0.62, 0.9, 0.82))
+    est["footprint"].update(estimated=True, faces=[[0.25, 0.1, 0.75, 0.3]])
+    edl = _edl([est])
+    p = _plan(edl, _index())
+    assert p.placed and p.report["slam"]["estimated"]
+    # the render lane has a browser: it measures the estimate, keeping the
+    # face zones the keep-out stored at this frame shape
+    monkeypatch.setattr(motion_layer, "_FOOTPRINT_CACHE", {})
+    monkeypatch.setattr(motion_engine, "probe", lambda jobs, times: [
+        {"errors": [], "visible_frames": 4, "samples": 4, "bboxes": [[0, 0.1, 1, 0.3]],
+         "ink": [[0.2, 0.14, 0.8, 0.26]] * 4, "cover": [[0.18, 0.12, 0.82, 0.28]] * 4}
+        for _ in jobs])
+    motion_layer.fill_footprints(edl, 1080, 1920)
+    fp = edl["motion"][0]["footprint"]
+    assert fp["box"] == [0.18, 0.12, 0.82, 0.28] and not fp.get("estimated")
+    assert fp["faces"] == [[0.25, 0.1, 0.75, 0.3]] and fp["ar"] == AR_9X16
+    # the measured box is off the caption band: nothing moves any more
+    assert not _plan(edl, _index()).placed
+    # a probe that cannot run keeps the estimate rather than nothing
+    again = _edl([est])
+    monkeypatch.setattr(motion_layer, "_FOOTPRINT_CACHE", {})
+
+    def down(jobs, times):
+        raise motion_engine.MotionRenderError("no browser")
+    monkeypatch.setattr(motion_engine, "probe", down)
+    motion_layer.fill_footprints(again, 1080, 1920)
+    assert again["motion"][0]["footprint"]["estimated"] is True
+
+
+def test_a_browserless_write_stores_an_estimate_and_says_so(monkeypatch):
+    monkeypatch.setattr(motion_tools, "_probe_item", lambda *a, **k: None)
+    ctx = _Ctx()
+    out = motion_tools.add_motion_graphic(ctx, "word_slam", 1.9, 3.0,
+                                          params={"text": "*140*", "y": 0.7}, id="slam")
+    item = ctx.latest_edl()["json"]["motion"][0]
+    fp = item["footprint"]
+    assert fp["estimated"] is True and fp["ar"] == pytest.approx(AR_9X16, abs=1e-3)
+    assert "KEEP-OUT (estimated)" in out, out          # moved out of the button rail
+    # the caption note over an estimated box says it is one
+    on_band = _slam(1.9, 3.0, "*140*", box=(0.1, 0.62, 0.9, 0.82))
+    on_band["footprint"]["estimated"] = True
+    edl = _edl([on_band])
+    notes = motion_tools._word_level_notes(edl, _index(), Timeline(edl["keep"]),
+                                           edl["motion"][0], canvas=(1080, 1920))
+    assert notes and "by its estimated box" in notes[0], notes
+
+
+def test_the_keep_out_prices_the_caption_band_of_word_level_graphics():
+    edl = _edl()
+    ctx = _Ctx()
+    ctx._edl = edl
+    slam = {"id": "s", "template": "word_slam", "start": 1.9, "end": 3.0,
+            "params": {"text": "*140*"}}
+    # a speech template with mute_captions unset still has captions beside it
+    assert motion_tools._caption_anchors(ctx, edl, slam)
+    assert motion_tools._caption_anchors(ctx, edl, dict(slam, mute_captions=True)) == []

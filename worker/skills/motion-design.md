@@ -178,11 +178,12 @@ LEGIBILITY:
 - Rotate zones between beats — the band above the head, the chest band
   under the chin, beside the face, the header above a card — instead of
   stacking every graphic in the chest band.
-- While a graphic is on screen, the motion captions step out of its way
-  into the nearest band clear of it AND the face (`CAPTIONS: ... step to y
-  ...` in the result). When no band is left (`NOTE (caption placement)`),
-  mute the captions for it when it carries the spoken words, or make it
-  smaller.
+- While a graphic is on screen, the captions for the words it does not show
+  step into the nearest band clear of it AND the face — the zones the
+  keep-out measured — (`Captions for the words it does not show move to
+  y≈…` in the result). When no band is left (`NOTE (captions)`), move it off
+  the caption band or make it smaller; never reach for mute_captions=true
+  to hide the clash.
 - Contrast from a soft shadow (0 2–6 px 12–30 px at 35–60% black), a
   frosted or dark plate, or the grade — not thick outlines or yellow boxes
   by default. Check bright and dark plates in the render.

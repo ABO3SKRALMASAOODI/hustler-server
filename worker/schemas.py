@@ -1771,12 +1771,12 @@ class MotionItem(BaseModel):
     span makes the item content-anchored. A behind item whose mask cannot be
     used at render time degrades to an ordinary above-captions graphic.
 
-    ``footprint`` is what the write-time keep-out measured (worker/
-    keepout.py, written by add/set_motion_graphic, never by hand): the
-    settled ink box on the canvas (the template's estimated box on a lane
-    without a browser) and the speaker's face zones over the window, so the motion caption track can step around the graphic without
-    landing on the mouth. ``allow_face_overlap`` records a deliberate design
-    over the face: the keep-out then leaves the placement alone.
+    ``footprint`` is the item's ONE measurement of where it draws (see
+    MotionFootprint; written by add/set_motion_graphic and the renderer,
+    never by hand): the caption plan (worker/caption_carry.py) moves the
+    captions the graphic does not show clear of it and of the face.
+    ``allow_face_overlap`` records a deliberate design over the face: the
+    face keep-out (worker/keepout.py) then leaves the placement alone.
     """
     id: str = Field(min_length=1, max_length=80)
     template: str = Field(min_length=1, max_length=60)
@@ -1792,13 +1792,6 @@ class MotionItem(BaseModel):
     # whole window; false = captions keep running (a number/hero word it
     # shows is still not repeated).
     mute_captions: Optional[bool] = None
-    # Where the composition draws ([x0,y0,x1,y1] frame fractions), measured
-    # by the write-time probe (never by hand). Word-level caption muting
-    # places the captions the graphic does not show clear of it. drawn_ar is
-    # the frame aspect (H/W) it was measured at: after a frame change the box
-    # is stale and is measured again (worker/caption_carry.py drawn_fresh).
-    drawn: Optional[list] = None
-    drawn_ar: Optional[float] = None
     purpose: Optional[str] = Field(default=None, max_length=300)
     phase_s: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
     full_duration_s: Optional[float] = Field(default=None, gt=0, allow_inf_nan=False)
@@ -1806,15 +1799,78 @@ class MotionItem(BaseModel):
     allow_face_overlap: Optional[bool] = None
     footprint: Optional["MotionFootprint"] = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def _measurement_in(cls, data):
+        """The footprint is a measurement, not an authoring choice: an
+        unusable one is dropped (the renderer measures again), never
+        rejected. A ``drawn`` box with its ``drawn_ar`` (H/W) stamp — the
+        pre-release name of the same measurement — becomes the footprint."""
+        if not isinstance(data, dict):
+            return data
+        data = dict(data)
+        drawn, drawn_ar = data.pop("drawn", None), data.pop("drawn_ar", None)
+        if data.get("footprint") is None and drawn is not None:
+            try:
+                ar = 1.0 / float(drawn_ar)
+            except (TypeError, ValueError, ZeroDivisionError):
+                ar = None
+            data["footprint"] = {"box": drawn, "ar": ar, "faces": []} if ar else None
+        if data.get("footprint") is not None:
+            data["footprint"] = _clean_footprint(data["footprint"])
+        return data
+
+
+def _clean_footprint(fp):
+    """A usable footprint dict (values clamped, junk faces dropped) or None."""
+    if isinstance(fp, BaseModel):
+        fp = fp.model_dump()
+    if not isinstance(fp, dict):
+        return None
+    try:
+        box = [float(v) for v in fp.get("box")]
+        ar = float(fp.get("ar"))
+    except (TypeError, ValueError):
+        return None
+    if len(box) != 4 or not all(math.isfinite(v) for v in box) \
+            or not (math.isfinite(ar) and 0.05 < ar < 20):
+        return None
+    x0, y0, x1, y1 = [round(min(max(v, 0.0), 1.0), 4) for v in box]
+    if x1 <= x0 or y1 <= y0:
+        return None
+    faces = []
+    for f in fp.get("faces") or []:
+        try:
+            r = [float(v) for v in f]
+        except (TypeError, ValueError):
+            continue
+        if len(r) != 4 or not all(math.isfinite(v) for v in r):
+            continue
+        r = [round(min(max(v, -0.5), 1.5), 4) for v in r]
+        if r[2] > r[0] and r[3] > r[1]:
+            faces.append(r)
+    out = {"box": [x0, y0, x1, y1], "ar": round(ar, 4), "faces": faces[:8]}
+    if fp.get("estimated") is True:
+        out["estimated"] = True
+    return out
+
 
 class MotionFootprint(BaseModel):
-    """A motion item's measured place on the canvas (frame fractions):
-    ``box`` its settled ink, ``faces`` the face keep-out zones over its
-    window, ``ar`` the canvas width/height they were measured on (a later
-    aspect change makes them stale, and they are then ignored)."""
+    """A motion item's ONE measurement of where it draws (frame fractions),
+    shared by the face keep-out that writes it and the caption plan that
+    reads it (worker/caption_carry.py):
+
+    ``box``: what the captions keep clear of — the write-time probe's
+    settled COVER box (motion_engine.COVER_ALPHA) at the graphic's final
+    placement; ``estimated`` = true when no browser could probe it (the
+    template's nominal box, keepout.nominal_ink): the renderer measures it
+    before it burns captions. ``ar``: the canvas width/height it was measured
+    on — after an aspect change it is stale and measured again. ``faces``:
+    the face keep-out zones over the item's window."""
     box: List[float]
     ar: float = Field(gt=0, allow_inf_nan=False)
     faces: List[List[float]] = Field(default_factory=list, max_length=8)
+    estimated: Optional[bool] = None
 
 
 class SubjectMatte(BaseModel):
@@ -3088,31 +3144,6 @@ def validate_edl(data, duration=None, *, render_fragment=False):
                 if x1 - x0 < 0.01 or y1 - y0 < 0.01:
                     raise EDLValidationError(f"{label}.box is empty.")
                 mo.box = [x0, y0, x1, y1]
-            if mo.footprint is not None:
-                fp = mo.footprint
-                rects = [fp.box] + list(fp.faces or [])
-                if any(len(r) != 4 for r in rects):
-                    raise EDLValidationError(
-                        f"{label}.footprint boxes must be [x0, y0, x1, y1] fractions.")
-                fp.box = [round(min(max(float(v), 0.0), 1.0), 4) for v in fp.box]
-                fp.faces = [[round(min(max(float(v), -0.5), 1.5), 4) for v in r]
-                            for r in fp.faces or []]
-                fp.ar = round(float(fp.ar), 4)
-            if mo.drawn is not None:
-                # A measurement, not an authoring choice: an unusable one is
-                # dropped (the renderer measures again), never rejected.
-                try:
-                    x0, y0, x1, y1 = [round(min(max(float(v), 0.0), 1.0), 4)
-                                      for v in mo.drawn]
-                    mo.drawn = [x0, y0, x1, y1] if x1 > x0 and y1 > y0 else None
-                except (TypeError, ValueError):
-                    mo.drawn = None
-            if mo.drawn_ar is not None:
-                try:
-                    ar = float(mo.drawn_ar)
-                    mo.drawn_ar = round(ar, 4) if mo.drawn and 0.05 < ar < 20 else None
-                except (TypeError, ValueError):
-                    mo.drawn_ar = None
             if mo.layer != "behind_subject":
                 # A mask only means something on the behind layer; a stale
                 # one left by a layer change is dropped, not rejected.

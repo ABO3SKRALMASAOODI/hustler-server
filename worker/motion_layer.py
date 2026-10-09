@@ -251,14 +251,17 @@ def caption_mute_spans(edl):
             if item.get("mute_captions") is True]
 
 
-# ── drawn boxes for caption placement ────────────────────────────────────
-# Word-level caption muting places the captions a graphic does not show in
-# a band clear of the box it draws. add/set_motion_graphic store that box
-# (MotionItem.drawn, from the write-time probe); an item written before
-# then is measured here, once per composition per process, before the
-# renderer builds its captions.
-_DRAWN_CACHE = {}
-_DRAWN_CACHE_MAX = 256
+# ── footprints for caption placement ─────────────────────────────────────
+# The caption plan (worker/caption_carry.py) places the captions a graphic
+# does not show in a band clear of the box it draws: its stored footprint
+# (MotionItem.footprint). add/set_motion_graphic write it — measured where a
+# browser runs, ESTIMATED from the template on the browserless agent, MCP
+# and shorts lanes. Before the renderer builds its captions it measures,
+# once per composition per process, every item that has none, one measured
+# at another frame shape, or only an estimate (the render lane has the
+# browser), so what burns is placed against the real box.
+_FOOTPRINT_CACHE = {}
+_FOOTPRINT_CACHE_MAX = 256
 
 
 def probe_times(span):
@@ -266,62 +269,54 @@ def probe_times(span):
     return [round(span * f, 3) for f in (0.12, 0.35, 0.6, 0.9)]
 
 
-def union_box(bboxes):
-    """Union [x0, y0, x1, y1] of probe bboxes (None entries skipped),
-    rounded, or None."""
-    bboxes = [b for b in bboxes or [] if b]
-    if not bboxes:
-        return None
-    return [round(min(b[0] for b in bboxes), 3), round(min(b[1] for b in bboxes), 3),
-            round(max(b[2] for b in bboxes), 3), round(max(b[3] for b in bboxes), 3)]
+def caption_box(report, times):
+    """The box captions keep clear of, from one probe report: its settled
+    COVER box (motion_engine.COVER_ALPHA — type, plates and the dense core of
+    a scrim; keepout.cover_box). A composition with nothing that dense (a
+    light leak, a soft glow) draws nothing a caption could collide with:
+    None. An older report falls back to its ink, then its visible boxes."""
+    import keepout
+    box = keepout.cover_box(report, times)
+    return [round(float(v), 4) for v in box] if box else None
 
 
-def ink_box(report):
-    """The box captions keep clear of, from one probe report: the union of
-    its INK boxes (type, plates, solid shapes). A composition with no ink at
-    all (a light leak, a soft glow) draws nothing a caption could collide
-    with: None. A report without an ``ink`` field (an older probe) falls back
-    to the soft coverage boxes."""
-    if "cover" in report:
-        return union_box(report.get("cover"))
-    if "ink" in report:
-        return union_box(report.get("ink"))
-    return union_box(report.get("bboxes"))
-
-
-def frame_ar(W, H):
-    """The aspect (H/W) a drawn box is stamped with (MotionItem.drawn_ar)."""
-    return round(float(H) / max(float(W), 1.0), 4)
-
-
-def fill_drawn(edl, W, H, fps=30.0):
-    """Store a probed ``drawn`` box (and its ``drawn_ar`` frame aspect) on
-    every motion item that matters to the caption plan and has none, or has
-    one measured at another frame shape (in place; returns ``edl``). Only
-    transcript captions use it, and an explicit mute_captions=true hides
-    every caption under the item anyway. A probe that cannot run leaves the
-    item without a box (a stale one is dropped): the plan then keeps the old
-    behaviour for it."""
+def fill_footprints(edl, W, H, fps=30.0):
+    """Measure the footprint box of every motion item that matters to the
+    caption plan and has none, has one measured at another frame shape, or
+    has only an estimate (in place; returns ``edl``). Only transcript
+    captions use it, and an explicit mute_captions=true hides every caption
+    under the item anyway. Face zones the keep-out stored at this frame
+    shape are kept. A probe that cannot run leaves an estimate in place and
+    an item without a box (a stale one is dropped): the plan then keeps the
+    old behaviour for it."""
     import caption_carry
     caps = edl.get("captions")
     if not (isinstance(caps, dict) and caps.get("mode") == "from_transcript"):
         return edl
-    ar = frame_ar(W, H)
+    ar = caption_carry.frame_ar(W, H)
     todo = [m for m in edl.get("motion") or []
             if isinstance(m, dict) and not m.get("_synthetic")
-            and not (m.get("drawn") and caption_carry.drawn_fresh(m, ar))
+            and not (caption_carry.footprint_box(m, ar) and not caption_carry.estimated(m))
             and m.get("mute_captions") is not True and not m.get("phase_s")
             and float(m.get("end", 0)) - float(m.get("start", 0)) >= 0.05]
     if not todo:
         return edl
+    faces = {}
     for m in todo:
-        # a box measured at another frame shape is no evidence here
-        m.pop("drawn", None)
-        m.pop("drawn_ar", None)
+        faces[id(m)] = caption_carry.footprint_faces(m, ar)
+        if not caption_carry.footprint_fresh(m, ar):
+            # measured at another frame shape: no evidence here
+            m.pop("footprint", None)
     # The design canvas at the frame's aspect: fractions do not depend on
     # the pixel size, so previews and finals share one measurement.
     w = 1080
     h = max(2, int(round(w * float(H) / max(float(W), 1.0))))
+
+    def store(m, box):
+        if box:
+            m["footprint"] = caption_carry.make_footprint(box, W, H, faces.get(id(m)) or [])
+        else:
+            m.pop("footprint", None)      # nothing dense: nothing to keep clear of
     jobs, times, keys, pending = [], [], [], []
     for m in todo:
         try:
@@ -332,9 +327,8 @@ def fill_drawn(edl, W, H, fps=30.0):
             continue
         span = float(m["end"]) - float(m["start"])
         key = (job.key(), tuple(probe_times(span)))
-        if key in _DRAWN_CACHE:
-            if _DRAWN_CACHE[key]:
-                m["drawn"], m["drawn_ar"] = list(_DRAWN_CACHE[key]), ar
+        if key in _FOOTPRINT_CACHE:
+            store(m, _FOOTPRINT_CACHE[key])
             continue
         jobs.append(job)
         times.append(probe_times(span))
@@ -344,14 +338,15 @@ def fill_drawn(edl, W, H, fps=30.0):
         return edl
     try:
         reports = motion_engine.probe(jobs, times)
-    except Exception as e:  # noqa: BLE001 — fail open: old caption behaviour
+    except Exception as e:  # noqa: BLE001 — fail open: estimates / old behaviour
         print(f"[render] caption boxes unmeasured ({str(e)[:160]})", flush=True)
         return edl
-    for m, key, rep in zip(pending, keys, reports):
-        box = None if rep.get("errors") else ink_box(rep)
-        if len(_DRAWN_CACHE) >= _DRAWN_CACHE_MAX:
-            _DRAWN_CACHE.clear()
-        _DRAWN_CACHE[key] = box
-        if box:
-            m["drawn"], m["drawn_ar"] = box, ar
+    for m, key, ts, rep in zip(pending, keys, times, reports):
+        if rep.get("errors"):
+            continue                      # the render reports its own error
+        box = caption_box(rep, ts)
+        if len(_FOOTPRINT_CACHE) >= _FOOTPRINT_CACHE_MAX:
+            _FOOTPRINT_CACHE.clear()
+        _FOOTPRINT_CACHE[key] = box
+        store(m, box)
     return edl
