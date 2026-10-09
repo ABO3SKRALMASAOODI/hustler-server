@@ -7497,6 +7497,8 @@ def _zoom_camera_args(zmode, ramp_s=None, overshoot=None, rotate=None,
                               "'shake', or shake=0-1 on another mode.")
             vals[name] = round(min(max(vals[name], lo), hi), 2)
     return vals, None
+
+
 # Round 72: the air a rect-framed zoom leaves around its region — the
 # viewport shows the rect plus this fraction of the rect's own size on each
 # side, so "zoom into the message" lands as a composed close-up with

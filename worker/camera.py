@@ -31,9 +31,10 @@ being one of:
             ease-out over ~0.35 s — momentum through a cut.
   pulse     1.0 -> 1+strength -> 1.0 over ~0.3 s (cubic attack, smooth
             release) — a beat/word thump.
-  shake     smooth value noise (2 octaves, seeded per item — never a sine)
-            with a fast attack and exponential decay. `shake` > 0 adds the
-            same noise to any other mode (a punch that lands as an impact).
+  shake     smooth value noise (seeded per item and axis — never a sine)
+            on x, y and roll, with a fast attack and exponential decay.
+            `shake` > 0 adds the same to any other mode (a punch that lands
+            as an impact).
 
 `rotate` (degrees, + = clockwise on screen) rides the same envelope as the
 zoom. Roll and shake need picture outside the frame, so the camera zooms in
@@ -53,12 +54,17 @@ COST
 perspective costs real CPU where zoompan was nearly free: ~3 ms/frame to
 rebuild its sampling map (single-threaded, only when the expression is
 evaluated per frame) plus the slice-threaded cubic resample, plus parsing
-the eight corner expressions every frame. So the camera never runs where
-nothing moves: shots are clustered by time and each cluster is its own
-filter, bypassed (timeline `enable`) outside its frames; inside a cluster,
-frames where the camera HOLDS (a punch after its snap, an ease's plateau)
-get a constant-corner instance whose map is built once (eval=init), and only
-the frames that actually move pay for the per-frame map.
+the eight corner expressions every frame — and each instance holds a
+W*H*8-byte map. So the camera never runs where nothing moves (timeline
+`enable`: idle frames pass through untouched), frames where it HOLDS (a
+punch after its snap, an ease's plateau) get build-once constant-corner
+instances, and the moving frames are served by a few per-frame instances,
+each carrying only its own stretch of the programme's moves. See
+camera_chain.
+
+ffmpeg's expression parser also has hard limits that shape the text: ~100
+operators in one flat chain, ~100 nesting levels. Sums are balanced trees;
+the deepest expression here nests ~20.
 """
 
 import functools
@@ -68,8 +74,6 @@ import os
 import zlib
 
 _log = logging.getLogger(__name__)
-
-MODES = ("punch", "ease", "push_in", "pull_out", "landing", "pulse", "shake")
 
 # Default move durations, seconds. Measured on the owner's reference reels:
 # snap zooms land in 100-300 ms (expo-out), landings settle in ~350 ms, beat
@@ -277,12 +281,6 @@ def clip(x, lo, hi):
     if _is_x(x, lo, hi):
         return _fn("clip", x, lo, hi)
     return min(max(float(x), float(lo)), float(hi))
-
-
-def between(x, lo, hi):
-    if _is_x(x, lo, hi):
-        return _fn("between", x, lo, hi)
-    return 1.0 if float(lo) <= float(x) <= float(hi) else 0.0
 
 
 def lt(x, y):
@@ -662,6 +660,7 @@ def insert_motion_shot(motion, start, dur, fps):
     its cuts). It rides the shared camera chain instead of a filter per
     insert: every perspective instance costs a W*H*8-byte map, and a photo
     montage can carry dozens of inserts."""
+    fps = round(float(fps), 3)
     start = round(float(start), 3)
     nframes = max(1, int(round(float(dur) * fps)))
     span = round(nframes / float(fps), 6)
@@ -981,7 +980,10 @@ def camera_chain(in_label, out_label, W, H, fps, shots, targeted=True,
     beats a render that cannot start. Returns the filter strings, ending on
     out_label.
     """
-    fps = float(fps)
+    # The graph's fps filters run at fps rounded to 3 decimals (29.970 for
+    # NTSC) and the expressions read (on-1)/29.970: the planner's frame
+    # clock must be that same one.
+    fps = round(float(fps), 3)
     if not shots:
         return [f"[{in_label}]null[{out_label}]"]
     if always:
