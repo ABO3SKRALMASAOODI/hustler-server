@@ -409,3 +409,45 @@ def test_static_frame_reuse_never_drops_a_caption_change(anim, tmp_path, monkeyp
         assert len(fa) == len(fb)
         bad = [i for i, (x, y) in enumerate(zip(fa, fb)) if x != y]
         assert not bad, (look, anim, bad[:10])
+
+
+def _cast_ctx():
+    import spatial
+    ctx = object.__new__(agent_tools.ToolContext)
+    ctx.index = {"video": {"duration": 10, "width": 1080, "height": 1920},
+                 "words": [{"w": w, "t0": i, "t1": i + .5} for i, w in enumerate(
+                     ("this", "measured", "proof", "deserves", "quiet", "type"))],
+                 "shots": [], "speakers": 1}
+    ctx.duration = 10
+    ctx.has_main_video = True
+    ctx.edit_plan = {"steps": ["caption the proof"]}
+    ctx.user_message = "make the typography feel considered"
+    ctx.editing_metrics = {}
+    ctx._last_caption_cast = None
+    ctx._spatial = {"v": spatial.SPATIAL_VERSION, "samples": []}
+    ctx._perception = {"vb_env": []}
+    ctx.latest_edl = lambda: {"version": 1, "json": {"keep": [[0, 10]], "inserts": [], "speed": []}}
+    ctx.written = None
+
+    def write(edl, _desc):
+        ctx.written = edl
+        return "EDL v1 -> v2: captions"
+    ctx.write_edl = write
+    return ctx
+
+
+@pytest.mark.parametrize("preset,look", [("beast", "pop"), ("reels", "editorial"),
+                                         ("documentary", None)])
+def test_director_cast_renders_through_the_matching_motion_look(preset, look, monkeypatch):
+    monkeypatch.setattr(agent_tools, "_motion_captions_on", lambda: True)
+    monkeypatch.setattr(agent_tools.caption_judge, "review", lambda context: {
+        "preset": preset, "style": {"preset": preset}, "confidence": .9,
+        "reason": "fits the brief", "rejected": []})
+    ctx = _cast_ctx()
+    out = agent_tools.add_captions(ctx)
+    style = ctx.written["captions"]["style"]
+    assert style["preset"] == preset
+    assert style.get("motion_look") == look
+    if look:
+        assert f"motion caption look '{look}'" in out
+        assert ctx.written["captions"]["max_words_per_caption"] is None
