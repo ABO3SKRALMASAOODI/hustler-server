@@ -50,8 +50,10 @@ pass for the libass and the motion captions alike) moves the captions a
 graphic does not show into the nearest band clear of that box AND those
 face zones (and the hair above them when there is room), so moving the
 graphic never pushes a caption onto the mouth. The solver itself only
-prices a spot on the caption band (CAPTION_PENALTY): word-level muting
-keeps captions running beside most graphics.
+prices a spot on the caption band (CAPTION_PENALTY for ink on a caption
+block, CAPTION_NEAR_PENALTY where only the stored box, as the plan sees it,
+touches one): word-level muting keeps captions running beside most
+graphics.
 """
 
 import json
@@ -100,7 +102,12 @@ EXEMPT_TEMPLATES = frozenset(("arrow_callout", "circle_highlight",
 HORIZONTAL_KEYS = ("align", "side")
 
 # ── captions ──────────────────────────────────────────────────────────────
-CAPTION_PENALTY = 0.2       # solver cost of a spot on the caption band
+CAPTION_PENALTY = 0.2       # solver cost of ink on a caption block
+# ...or this, when only the stored box (cover + pad, as the caption plan
+# sees it: caption_obstacle) touches one: the plan then has to move or
+# overlap the captions, but a scrim's core grazing them is far less than
+# type sitting on them, and never worth a long move or a face graze.
+CAPTION_NEAR_PENALTY = 0.05
 
 
 # ── boxes ─────────────────────────────────────────────────────────────────
@@ -851,6 +858,17 @@ def caption_band(y):
             caption_carry.COLUMN[1], y + caption_carry.CAP_HALF_H)
 
 
+def caption_obstacle(y, grow=(0.0, 0.0)):
+    """The band a graphic's INK box must stay out of for the caption plan
+    to see no collision with a caption anchored at ``y``: the caption block
+    padded by caption_carry.GRAPHIC_PAD, and by how far the graphic's COVER
+    box (what the plan compares, stored as its footprint) reaches above and
+    below its ink — ``grow`` = (above, below)."""
+    pad = caption_carry.GRAPHIC_PAD
+    return (caption_carry.COLUMN[0], y - caption_carry.CAP_HALF_H - pad - grow[1],
+            caption_carry.COLUMN[1], y + caption_carry.CAP_HALF_H + pad + grow[0])
+
+
 # ── the solver ────────────────────────────────────────────────────────────
 
 def settled_box(rep, times, field="ink"):
@@ -917,6 +935,7 @@ def patch_cost(patch, params, spec):
 
 def candidates(template, spec, params, box, variants, zones, W, H,
                captions=(), predict=True, mouths=(), clear_penalty=CLEAR_PENALTY,
+               near_captions=(),
                require_clear=False):
     """Ranked placements [(cost, patch, predicted box)] off every face (no real
     share of a zone or mouth band, on_face; grazing a zone's CLEARANCE costs
@@ -993,6 +1012,8 @@ def candidates(template, spec, params, box, variants, zones, W, H,
                 cost += clear_penalty
             if any(inter(nb, cb) > 0 for cb in captions):
                 cost += CAPTION_PENALTY
+            elif any(inter(nb, cb) > 0 for cb in near_captions):
+                cost += CAPTION_NEAR_PENALTY
             patch = dict(p)
             if ny is not None and abs(dy) > 1e-9:
                 patch["y"] = ny

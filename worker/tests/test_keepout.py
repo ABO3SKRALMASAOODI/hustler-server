@@ -802,3 +802,22 @@ def test_geometry_maps_the_face_through_a_source_fed_card_and_a_stack():
     outs = geo.to_outputs(1.0, 11.0, face)
     assert len(outs) == 1 and outs[0][4:] == pytest.approx((0.08, 0.035, 0.92, 0.365), abs=1e-3)
     assert 0.08 <= outs[0][0] and outs[0][3] <= 0.6
+
+
+def test_the_solver_prices_the_caption_band_as_the_caption_plan_sees_it():
+    # the stored footprint is the COVER box (ink plus a scrim's core): the
+    # obstacle the solver keeps the INK out of collides exactly when the
+    # caption plan would see the cover box collide with that caption
+    grow = (0.04, 0.06)                     # cover reaches past the ink
+    for y_cap in (0.2, 0.5, 0.74):
+        for k in range(60):
+            top = 0.05 + k * 0.012
+            ink = (0.2, top, 0.8, top + 0.1)
+            cover = (0.2, ink[1] - grow[0], 0.8, ink[3] + grow[1])
+            seen = caption_carry.collides([cover], y_cap)
+            priced = keepout.inter(ink, keepout.caption_obstacle(y_cap, grow)) > 0
+            assert seen == priced, (y_cap, ink)
+    # a graphic outside the caption column never collides either way
+    side = (0.86, 0.6, 0.95, 0.7)
+    assert not caption_carry.collides([side], 0.65)
+    assert keepout.inter(side, keepout.caption_obstacle(0.65)) == 0

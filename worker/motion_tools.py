@@ -620,8 +620,12 @@ def _relocate(item, spec, box, zones, track, W, H, bands, off_face=True):
     the verifying probe report) or None. Alternatives the solver cannot
     predict (another align/side) are probed first, then the cheapest
     distinct candidates are rendered in one browser session and the first
-    whose REAL ink is off the faces and inside the safe area wins. A second round searches y over what the first one
-    measured, plus a measured ladder of size steps."""
+    whose REAL ink is off the faces and inside the safe area wins. A second
+    round searches y over what the first one measured, plus a measured
+    ladder of size steps. ``bands`` = (caption blocks, caption obstacles):
+    ink on a block pays CAPTION_PENALTY; only touching an obstacle
+    (keepout.caption_obstacle: where the caption plan sees the stored box
+    collide) pays CAPTION_NEAR_PENALTY."""
     times = _probe_times(item)
     pspec = spec.get("params") or {}
     alts = []
@@ -645,7 +649,7 @@ def _relocate(item, spec, box, zones, track, W, H, bands, off_face=True):
         cands = keepout.candidates(
             item["template"], spec, item.get("params") or {}, box if rnd == 0 else None,
             variants if rnd == 0 else known, zones, W, H,
-            captions=[keepout.caption_band(y) for y in bands], predict=rnd == 0,
+            captions=bands[0], near_captions=bands[1], predict=rnd == 0,
             mouths=mouths, clear_penalty=keepout.CLEAR_PENALTY if off_face else 0.0)
         picks = keepout.distinct(cands, 6)
         if not picks:
@@ -783,6 +787,7 @@ def _keep_out_estimated(ctx, edl, item):
             why.append(f"covered {what} at {w0:.2f}-{w1:.2f}s")
         why += [keepout.ISSUE_TEXT[i] for i in issues]
         kw = dict(captions=[keepout.caption_band(y) for y in bands],
+                  near_captions=[keepout.caption_obstacle(y) for y in bands],
                   mouths=keepout.zones_of(track, keepout.mouth_zone),
                   clear_penalty=keepout.CLEAR_PENALTY if face_bad else 0.0)
         params0 = item.get("params") or {}
@@ -874,7 +879,15 @@ def _keep_out_inner(ctx, edl, item, rep):
             w0, w1 = hit["when"]
             why.append(f"covered {what} at {w0:.2f}-{w1:.2f}s")
         why += [keepout.ISSUE_TEXT[i] for i in issues]
-        found = _relocate(item, spec, box, zones, track, W, H, bands, off_face=face_bad)
+        # priced exactly as the caption plan will see it: the stored COVER
+        # box reaches past the ink (a scrim's core) by the same margins
+        cover0 = keepout.cover_box(rep, times)
+        grow = ((max(0.0, box[1] - cover0[1]), max(0.0, cover0[3] - box[3]))
+                if cover0 else (0.0, 0.0))
+        found = _relocate(item, spec, box, zones, track, W, H,
+                          ([keepout.caption_band(y) for y in bands],
+                           [keepout.caption_obstacle(y, grow) for y in bands]),
+                          off_face=face_bad)
         if found:
             patch, real, params, rep = found
             old = item.get("params") or {}
@@ -1001,9 +1014,10 @@ def _mute_note(edl, index, tl, item, carried):
 
 
 def _word_level_notes(edl, index, tl, item, canvas=None):
-    """NOTEs for a word-level graphic (mute_captions unset): the words it
-    leaves muted for want of a clear band, and where the rest moved (the
-    caption plan, worker/caption_carry.py, over its stored footprint)."""
+    """NOTEs for a graphic whose captions keep running (mute_captions unset
+    or false): the words it leaves muted for want of a clear band, the
+    captions it leaves overlapping it, and where the rest moved (the caption
+    plan, worker/caption_carry.py, over its stored footprint)."""
     import captions as caplib
     rep = caplib.caption_plan(edl, index, tl, canvas=canvas).report.get(item.get("id"))
     if not rep:
@@ -1025,6 +1039,12 @@ def _word_level_notes(edl, index, tl, item, canvas=None):
             f"a sound-off viewer never reads \"{_runs_said(rep['muted'])}\". Move it off "
             f"the caption band (its y param, e.g. above the head or in the top band) so "
             f"those words stay captioned beside it, or carry them on it.")
+    elif rep["kept"]:
+        notes.append(
+            f"NOTE (captions): it sits on the caption band{draws} and no band clear of it "
+            f"and of the speaker's face is left over {s:g}-{e:g}s, so the captions "
+            f"\"{_runs_said(rep['kept'])}\" stay on their band and touch it. Make it smaller "
+            f"or move it off the caption band (its y param) so they read clear of it.")
     elif rep["placed"] and abs(rep["placed"]["y"] - rep["placed"]["normal_y"]) >= 0.05:
         where = rep["placed"]
         notes.append(

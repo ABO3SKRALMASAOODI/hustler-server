@@ -646,3 +646,14 @@ def test_the_keep_out_prices_the_caption_band_of_word_level_graphics():
     # a speech template with mute_captions unset still has captions beside it
     assert motion_tools._caption_anchors(ctx, edl, slam)
     assert motion_tools._caption_anchors(ctx, edl, dict(slam, mute_captions=True)) == []
+
+
+def test_the_write_says_when_captions_must_stay_on_a_graphic_they_touch():
+    # a counter (not a speech template) on the caption band with no clear
+    # band left: the captions stay put, and the reply says they touch it
+    big = (0.1, 0.45, 0.9, 0.85)
+    edl = _edl([_counter(1.9, 3.0, "140", box=big)])
+    notes = motion_tools._word_level_notes(edl, _index(faces=None), Timeline(edl["keep"]),
+                                           edl["motion"][0], canvas=(1080, 1920))
+    assert notes and "stay on their band and touch it" in notes[0], notes
+    assert '"all we got was"' in notes[0], notes
