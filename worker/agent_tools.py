@@ -27402,12 +27402,15 @@ _COMPACT_CONTRACTS = {
         "the spoken words (hook_title of the spoken hook too). Silent by "
         "default; sfx=true, only for a moment that earns sound, maps its "
         "sound roles onto the approved library (cues listed in the result). "
-        "Pass purpose and a stable id. "
+        "Pass purpose and a stable id. A graphic over the speaker's face or "
+        "outside the 9:16 safe area is moved to clear space (KEEP-OUT in the "
+        "result). "
         "Never invent numbers, brand messages, handles or CTA offers."),
     "set_motion_graphic": (
         "Patch a motion graphic by id: window, params (merged), template, layer, "
         "html, caption muting. Its owned sound cues follow; sfx=true re-derives "
-        "them, sfx=false removes them. Modify instead of remove and re-add."),
+        "them, sfx=false removes them. The face keep-out re-runs on every "
+        "patch. Modify instead of remove and re-add."),
     "list_sound_library": (
         "READ the owner-approved sound library: real recordings by role "
         "(whoosh, swish, impact, riser, shutter, typing, click, pop, tick, "

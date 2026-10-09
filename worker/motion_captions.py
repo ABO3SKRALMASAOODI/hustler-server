@@ -12,6 +12,12 @@ Each cue carries its vertical anchor ``y`` and band ``b`` (t/m/b) from the
 shot-aware placement track (or the style's position/anchor_y). The template
 keeps the whole block inside that band and the platform-safe area, so a
 look never grows onto the face the placement compiler steered around.
+While a motion graphic with a measured ``footprint`` (worker/keepout.py) is
+on screen, a cue whose block would land on it steps into the nearest band
+clear of the graphic AND the face zones measured over its window (an
+explicit zone ``z``), so a graphic that was moved below the chin never
+pushes the caption onto the mouth. Graphics without a footprint (written
+before the keep-out) leave the cues exactly as before.
 Where the spatial index measured the plate, a cue also carries its mean luma
 ``l`` (0-1) so premium looks firm up their scrim and shadow on bright plates.
 At render time the motion layer also measures the picture under every cue
@@ -27,6 +33,7 @@ one segment, not the whole track.
 import bisect
 
 import captions as caplib
+import keepout
 import motion_engine
 
 # look -> phrase grouping + template defaults. ``desc`` is shown to editors.
@@ -153,13 +160,52 @@ def _luma_at(samples, src_t):
     return None if best is None else round(best[1], 2)
 
 
-def cues(edl, index, tl):
+def _canvas_of(edl, index, canvas):
+    if canvas:
+        return float(canvas[0]), float(canvas[1])
+    if edl.get("canvas"):
+        return float(edl["canvas"]["width"]), float(edl["canvas"]["height"])
+    import renderer   # lazy: the renderer imports this module
+    video = (index or {}).get("video") or {}
+    return renderer.frame_dims(int(video.get("width") or 1920), int(video.get("height") or 1080),
+                               (edl.get("frame") or {}).get("ratio", "source"), delivery=True)
+
+
+def _footprints(edl, index, canvas):
+    """[(start, end, ink box, face zones)] of the motion graphics whose
+    write-time footprint was measured on this canvas shape."""
+    items = [m for m in edl.get("motion") or [] if isinstance(m.get("footprint"), dict)]
+    if not items:
+        return [], True
+    W, H = _canvas_of(edl, index, canvas)
+    ar = W / max(1.0, H)
+    out = []
+    for m in items:
+        fp = m["footprint"]
+        try:
+            if abs(float(fp.get("ar") or 0) - ar) > 0.02 or len(fp.get("box") or []) != 4:
+                continue
+            out.append((float(m["start"]), float(m["end"]), tuple(float(v) for v in fp["box"]),
+                        [tuple(float(v) for v in f) for f in fp.get("faces") or [] if len(f) == 4]))
+        except (TypeError, ValueError, KeyError):
+            continue
+    return out, keepout.portrait(W, H)
+
+
+def _band_of(y):
+    return "t" if y < 0.36 else "m" if y < 0.62 else "b"
+
+
+def cues(edl, index, tl, canvas=None):
     """[{s, e, y, b, k, w:[{t, s, e, x}]}] on the program clock, or [] when off.
 
     ``b`` is the placement band (t/m/b) the block must stay inside; ``k`` = 1
     when the line clears hard instead of fading — the next cue follows
     without a pause, or the line ends on a program cut; ``l`` (optional) is
-    the nearest spatial sample's mean plate luma.
+    the nearest spatial sample's mean plate luma; ``z`` (optional) an
+    explicit [y0, y1] zone that keeps the block off an on-screen graphic and
+    the face (see the module doc). ``canvas`` is the output (W, H), derived
+    from the EDL when omitted.
     """
     look = look_of(edl)
     if not look:
@@ -185,6 +231,7 @@ def cues(edl, index, tl):
     emph = {caplib._norm_word(w) for w in (caps.get("emphasis_words") or []) if w}
     upper = bool(style.get("uppercase"))
     lumas = _luma_samples(index)
+    prints, port = _footprints(edl, index, canvas)
     mutes = [(float(a), float(b)) for a, b in caplib.effective_caption_mutes(edl)]
     out = []
     prog_end = float(tl.out_duration)
@@ -219,9 +266,17 @@ def cues(edl, index, tl):
             hit = not caplib._word_keys(w).isdisjoint(emph)
             ws.append({"t": text, "s": round(float(w["t0"]), 3), "e": round(float(w["t1"]), 3),
                        "x": 1 if (hit or caplib._word_has_digit(w["w"])) else 0})
+        zone = None
+        up = [p for p in prints if p[0] < e and p[1] > s]
+        if up:
+            zone = keepout.caption_zone(y, [p[2] for p in up], [f for p in up for f in p[3]], port)
+            if zone:
+                y, band = zone[2], _band_of(zone[2])
         cue = {"s": round(s, 3), "e": round(e, 3), "y": round(y, 4), "b": band,
                "k": 1 if on_cut or (nxt is not None and nxt - e < CONTIGUOUS_S) else 0,
                "w": ws}
+        if zone:
+            cue["z"] = [zone[0], zone[1]]
         luma = _luma_at(lumas, src_mid) if lumas else None
         if luma is not None:
             cue["l"] = luma      # bright plates get a firmer scrim + shadow
@@ -288,14 +343,14 @@ def style_params(edl):
     }
 
 
-def items(edl, index, tl):
+def items(edl, index, tl, canvas=None):
     """Synthetic MotionItem dicts (one per segment) for the caption track.
 
     Raises when this deployment cannot draw them: the renderer then burns the
     ordinary libass captions (the style's preset) instead of none at all."""
     if look_of(edl) and not motion_engine.available():
         raise motion_engine.MotionRenderError("motion captions need the browser engine")
-    allc = cues(edl, index, tl)
+    allc = cues(edl, index, tl, canvas=canvas)
     if not allc:
         return []
     sp = style_params(edl)
@@ -321,7 +376,8 @@ def items(edl, index, tl):
         rebased = [dict({"s": rb(c["s"], s0), "e": rb(c["e"], s0), "y": c["y"], "b": c.get("b", "b"),
                          "k": c.get("k", 0),
                          "w": [dict(w, s=rb(w["s"], s0), e=rb(w["e"], s0)) for w in c["w"]]},
-                        **({"l": c["l"]} if "l" in c else {}))
+                        **({"l": c["l"]} if "l" in c else {}),
+                        **({"z": c["z"]} if "z" in c else {}))
                    for c in seg]
         out.append({"id": f"__captions_{k}", "template": TEMPLATE, "start": round(s0, 3),
                     "end": round(s1, 3), "params": dict(sp, cues=rebased),

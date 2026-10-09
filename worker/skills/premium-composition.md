@@ -84,7 +84,10 @@ LEGIBILITY:
   soft shadow (0 2–6 px 12–30 px at 35–60% black), a frosted or dark plate,
   or the grade.
 - Safe area on 9:16: important type inside x 60–1020 px and y 8–80% of the
-  height; never in the bottom platform band; never across eyes or mouth.
+  height; never in the bottom platform band or the right button rail (x >
+  0.88 between y 0.5 and 0.85); never across eyes or mouth. Motion graphics
+  enforce this on write (the face keep-out moves them and says where; see
+  motion-design), so plan zones per beat and read where each one landed.
 - Check every type state on the actual background in the render, bright
   and dark plates alike. Motion graphics and motion captions firm up their
   own backing (or switch to dark ink) over a measured bright plate, and keep

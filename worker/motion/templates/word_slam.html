@@ -11,7 +11,9 @@
   "y": {"type": "float", "min": 0.12, "max": 0.8, "default": 0.56, "hint": "vertical centre as a frame fraction; keep off the face"},
   "uppercase": {"type": "bool", "default": true, "hint": "caps for grotesk/condensed; serif and script keep the typed case"},
   "exit": {"type": "enum", "values": ["cut", "fade", "blur", "strobe"], "default": "cut"},
-  "fit": {"type": "enum", "values": ["shared", "justify"], "default": "shared", "hint": "justify = every ' / ' line scaled to the same width, so a short stat towers over its label ('*32%* / fewer errors'); shared = one type size"}
+  "fit": {"type": "enum", "values": ["shared", "justify"], "default": "shared", "hint": "justify = every ' / ' line scaled to the same width, so a short stat towers over its label ('*32%* / fewer errors'); shared = one type size"},
+  "x": {"type": "float", "min": 0.3, "max": 0.7, "default": 0.5, "hint": "horizontal centre as a frame fraction; the face keep-out nudges it left of the platform's right button rail"},
+  "width": {"type": "float", "min": 0.4, "max": 0.85, "default": 0.85, "hint": "widest line's width as a frame fraction"}
  },
  "example": {"text": "*Ordinary*", "kicker": "out of the", "entrance": "slam", "role": "condensed"},
  "sfx": [{"at": 0.0, "kind": "kick", "when": {"entrance": ["pop", "strobe"]}},
@@ -86,7 +88,9 @@
   };
 
   // ── layout: one shared size, fitted to ~85% width and a height budget ──
-  const maxW = W * 0.85;
+  // (x 0.5 / width 0.85 are the historical centred 85% layout)
+  const maxW = W * (P.width > 0 ? P.width : 0.85);
+  if (P.x > 0) blk.style.left = (W * P.x - W / 2) + 'px';
   const measure = (el) => { const fs = el.style.fontSize; el.style.fontSize = '100px';
     const w = el.scrollWidth; el.style.fontSize = fs; return w / 100; };
   const fitSize = (groups) => {

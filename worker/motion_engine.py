@@ -423,7 +423,16 @@ def _ffmpeg():
     return shutil.which("ffmpeg") or "ffmpeg"
 
 
-def _alpha_bbox(png_bytes):
+# Alpha at or above which a probed pixel counts as INK: glyphs, strokes,
+# plates and solid shapes. Soft scrims, washes and blooms stay below it (the
+# counter's scrim peaks at .68 = 173), so the ink box is what the type and
+# its solid furniture cover — what a face keep-out compares (keepout.py).
+INK_ALPHA = 200
+
+
+def _alpha_bbox(png_bytes, ink=False):
+    """Visible (alpha >= 4) bbox of a PNG, or with ink=True a pair
+    (visible bbox, ink bbox) from the same decode."""
     from io import BytesIO
     from PIL import Image
     im = Image.open(BytesIO(png_bytes))
@@ -431,7 +440,11 @@ def _alpha_bbox(png_bytes):
         im = im.convert("RGBA")
     a = im.getchannel("A")
     # Threshold through a LUT (C speed) rather than a per-pixel lambda.
-    return a.point([0] * 4 + [255] * 252).getbbox()
+    vis = a.point([0] * 4 + [255] * 252).getbbox()
+    if not ink:
+        return vis
+    return vis, (a.point([0] * INK_ALPHA + [255] * (256 - INK_ALPHA)).getbbox()
+                 if vis else None)
 
 
 def _even_box(x0, y0, x1, y1, W, H):
@@ -743,23 +756,27 @@ async def _probe_all(jobs, times_list, budget_s):
                     cdp = await ctx.new_cdp_session(page)
                     await cdp.send("Emulation.setDefaultBackgroundColorOverride",
                                    {"color": {"r": 0, "g": 0, "b": 0, "a": 0}})
-                    visible, bboxes = 0, []
+                    visible, bboxes, inks = 0, [], []
+
+                    def frac(bb):
+                        return [round(v * 4.0 / dw, 3) if i % 2 == 0 else round(v * 4.0 / dh, 3)
+                                for i, v in enumerate(bb)]
                     for t in times:
                         await page.evaluate("t => window.__mgSeek(t)", float(t))
                         r = await cdp.send("Page.captureScreenshot", {
                             "format": "png", "optimizeForSpeed": True,
                             "clip": {"x": 0, "y": 0, "width": dw, "height": dh, "scale": 0.25}})
-                        bb = _alpha_bbox(base64.b64decode(r["data"]))
+                        bb, ib = _alpha_bbox(base64.b64decode(r["data"]), ink=True)
                         if bb:
                             visible += 1
-                            bboxes.append([round(v * 4.0 / dw, 3) if i % 2 == 0 else round(v * 4.0 / dh, 3)
-                                           for i, v in enumerate(bb)])
+                            bboxes.append(frac(bb))
+                        inks.append(frac(ib) if ib else None)     # one per time
                     errs = await page.evaluate("window.__mgErrors || []")
                     out.append({"errors": [str(e)[:200] for e in errs], "visible_frames": visible,
-                                "samples": len(times), "bboxes": bboxes})
+                                "samples": len(times), "bboxes": bboxes, "ink": inks})
                   except Exception as e:  # noqa: BLE001 — one bad composition
                     out.append({"errors": [str(e).splitlines()[0][:200]], "visible_frames": 0,
-                                "samples": len(times), "bboxes": []})
+                                "samples": len(times), "bboxes": [], "ink": []})
                 finally:
                     await ctx.close()
         finally:
@@ -770,8 +787,9 @@ async def _probe_all(jobs, times_list, budget_s):
 def probe(jobs, times_list, budget_s=60.0):
     """Cheap write-time check: load each composition, seek the given item-local
     times at quarter scale, and report script errors and visible coverage
-    (bboxes as frame fractions). Raises MotionRenderError when the browser
-    itself cannot run."""
+    (bboxes as frame fractions, one per visible moment; ``ink`` one entry per
+    requested time — the box of nearly opaque pixels, INK_ALPHA, or None).
+    Raises MotionRenderError when the browser itself cannot run."""
     if not available():
         raise MotionRenderError("motion graphics renderer unavailable: "
                                 + unavailable_reason())

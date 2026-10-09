@@ -4447,7 +4447,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     if not audio_only and cap_ass_override is None and \
             motion_captions.look_of(edl):
         try:
-            caption_motion_items = motion_captions.items(edl, index, tl)
+            caption_motion_items = motion_captions.items(edl, index, tl, canvas=(W, H))
             ass_path = None
         except Exception as e:  # noqa: BLE001 — fall back to libass captions
             motion_layer.warn(
