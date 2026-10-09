@@ -85,24 +85,45 @@
       while (el.getBoundingClientRect().width > maxW && fs > base * 0.45) { fs *= 0.96; el.style.fontSize = fs + 'px'; }
       return fs;
     };
+    // the role line is secondary text: never below the phone-readable floor.
+    // It shrinks to the floor, then wraps into balanced lines (tracked caps
+    // loosen their tracking first) instead of shrinking to a whisper.
+    const fitRole = (el, base, maxW) => {
+      Object.assign(el.style, { whiteSpace: 'nowrap', maxWidth: '', textWrap: '', letterSpacing: '' });
+      const floor = MG.minType(el);
+      let fs = Math.max(base, floor);
+      el.style.fontSize = fs + 'px';
+      if (fs > base + 0.5 && style === 'clean_bar') el.style.letterSpacing = '.08em';
+      while (el.getBoundingClientRect().width > maxW && fs > Math.max(floor, base * 0.45)) { fs = Math.max(floor, fs * 0.96); el.style.fontSize = fs + 'px'; }
+      if (el.getBoundingClientRect().width > maxW + 1) Object.assign(el.style, { whiteSpace: 'normal', maxWidth: maxW + 'px', textWrap: 'balance' });
+      return fs;
+    };
     let h, blockW;
     if (style === 'clean_bar') {
       const tw = maxBlock - 7 * S - 22 * S;
       const nfs = fit(R.name, 80 * S, tw);
-      if (R.role) fit(R.role, Math.max(22, Math.min(34 * S, nfs * 0.42)), tw);
+      if (R.role) fitRole(R.role, Math.max(22, Math.min(34 * S, nfs * 0.42)), tw);
     } else if (style === 'glass_pill') {
-      const ph = (role ? 134 : 106) * S, d = ph - 22 * S;
+      // the pill grows with a floored role line (two lines of text + its
+      // inset), and the name stays the larger line above it
+      const roleFs = role ? Math.max(33 * S, MG.minType(R.role)) : 0;
+      const nameFs = role ? Math.max(50 * S, roleFs * 1.15) : 54 * S;
+      const ph = Math.max((role ? 134 : 106) * S, role ? nameFs * 1.02 + roleFs * 1.3 + 40 * S : 0), d = ph - 22 * S;
       lt.style.height = ph + 'px';
       R.mono.style.width = R.mono.style.height = d + 'px';
       R.mono.style.fontSize = (d * 0.38) + 'px';
       R.mono.style.margin = right ? `0 ${11 * S}px 0 0` : `0 0 0 ${11 * S}px`;
       R.tc.style.padding = right ? `0 ${20 * S}px 0 ${38 * S}px` : `0 ${38 * S}px 0 ${20 * S}px`;
       const tw = maxBlock - d - 11 * S - 58 * S;
-      fit(R.name, (role ? 50 : 54) * S, tw);
-      if (R.role) fit(R.role, 33 * S, tw);
+      fit(R.name, nameFs, tw);
+      if (R.role) fitRole(R.role, 33 * S, tw);
+      // a long role wraps at the floor: the pill takes the extra line
+      // rather than letting the text run out of its top and bottom
+      const th = R.txt.getBoundingClientRect().height;
+      if (th + 40 * S > ph) lt.style.height = (th + 40 * S) + 'px';
     } else {
       const nfs = fit(R.name, 78 * S, maxBlock);
-      if (R.role) fit(R.role, Math.max(24, nfs * 0.64), maxBlock);
+      if (R.role) fitRole(R.role, Math.max(24, nfs * 0.64), maxBlock);
       const tw = Math.max(R.name.getBoundingClientRect().width, R.role ? R.role.getBoundingClientRect().width : 0);
       R.rule.style.width = Math.max(tw, 200 * S) + 'px';
       R.rule.style.margin = `${14 * S}px 0 ${role ? 10 * S : 0}px`;
@@ -117,6 +138,23 @@
     }
     const b = lt.getBoundingClientRect();
     MG.box = [b.left - 70, b.top - 60, b.right + 70, b.bottom + 80];
+    // a measured bright plate: the glass pill darkens its own glass (a
+    // panel stays dark glass, MG.PANEL_RATIO, never muddy grey); the shadowed
+    // styles get a pocket under the name + role. Dark plates: unchanged.
+    if (R.bk) { R.bk.remove(); R.bk = null; }
+    const tr = MG.rectOf([R.name, R.role]);
+    const nfs = parseFloat(R.name.style.fontSize);
+    if (style === 'glass_pill') {
+      const a = MG.need(MG.rectOf(lt), { ratio: MG.PANEL_RATIO, have: 0.6 });
+      R.plate.style.backgroundColor = a > 0 ? `rgba(16,16,19,${(1 - 0.4 * (1 - a)).toFixed(3)})` : '';
+    } else if (tr) {
+      const a = Math.max(MG.need(MG.rectOf(R.name), { ratio: nfs >= 0.04 * H ? 3 : 4.5 }),
+                         R.role ? MG.need(MG.rectOf(R.role), { ratio: 4.5 }) : 0);
+      if (a > 0) {
+        R.bk = MG.backing(root, tr, a, { pad: [0.22 * nfs, 0.12 * nfs], feather: 0.3 * nfs, radius: 0.22 * nfs });
+        MG.growBox(R.bk.box);
+      }
+    }
     return {
       w: blockW, h,
       nw: R.name.getBoundingClientRect().width, rw: R.role ? R.role.getBoundingClientRect().width : 0,
@@ -134,6 +172,7 @@
   MG.frame(t => {
     if (!G) G = layout();
     const ex = (a, dur) => MG.ease.inExpo(MG.range(t, exitAt + a, dur));
+    if (R.bk) R.bk.style.opacity = (MG.ease.outCubic(MG.range(t, 0.04, 0.3)) * (1 - MG.ease.inCubic(MG.range(t, exitAt, exitDur)))).toFixed(4);
     if (style === 'clean_bar') {
       const b = MG.ease.outExpo(MG.range(t, 0, 0.32)) * (1 - MG.ease.inCubic(MG.range(t, exitAt + exitDur * 0.55, exitDur * 0.45)));
       MG.set(R.bar, { sy: Math.max(0.0001, b), opacity: b > 0.001 ? 1 : 0 });

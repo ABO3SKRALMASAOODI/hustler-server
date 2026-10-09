@@ -217,6 +217,182 @@
   };
   MG.esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
+  // ── legibility: the plate under the graphic ────────────────────────────
+  // MG.plate is the program picture the renderer measured under this item
+  // (worker/plate.py): {c, r, s: [{t, g}]} — a c x r grid of luma (0-255,
+  // row-major; base64 of its bytes, or a plain array) over the design space
+  // at composition seconds t. It is null
+  // when nothing was measured, and every helper below then answers "nothing
+  // to do": a template must render exactly as it did before plates existed,
+  // and on a dark plate it must not change at all.
+  MG.plate = null;
+  const toLin = v => v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+  const toGamma = L => L <= 0.0031308 ? L * 12.92 : 1.055 * Math.pow(L, 1 / 2.4) - 0.055;
+  /** WCAG relative luminance of '#RGB', '#RRGGBB' or 'rgb(a)(...)' (white when unparsable). */
+  MG.luminance = col => {
+    let r = 255, g = 255, b = 255;
+    const s = String(col || '').trim();
+    let m = s.match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i);
+    if (m) {
+      const h = m[1].length === 3 ? m[1].replace(/./g, x => x + x) : m[1];
+      r = parseInt(h.slice(0, 2), 16); g = parseInt(h.slice(2, 4), 16); b = parseInt(h.slice(4, 6), 16);
+    } else if ((m = s.match(/^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)/i))) { r = +m[1]; g = +m[2]; b = +m[3]; }
+    return 0.2126 * toLin(r / 255) + 0.7152 * toLin(g / 255) + 0.0722 * toLin(b / 255);
+  };
+  MG.contrast = (L1, L2) => (Math.max(L1, L2) + 0.05) / (Math.min(L1, L2) + 0.05);
+  /** The plate under rect [x0, y0, x1, y1] (design px) over composition
+   *  seconds [t0, t1] (the nearest moment when none falls inside):
+   *  {mean, lo, hi} as 0-1 luma — the area-weighted mean and 15th / 85th
+   *  percentiles of the cells it covers — or null when unknown. */
+  MG.plateAt = (rect, t0, t1) => {
+    const P = MG.plate;
+    if (!P || !Array.isArray(P.s) || !P.s.length || !rect || !(P.c > 0) || !(P.r > 0)) return null;
+    P.s.forEach(s => {                 // base64 grids decode once, on first use
+      if (typeof s.g !== 'string') return;
+      try { const b = atob(s.g); s.g = Uint8Array.from(b, ch => ch.charCodeAt(0)); } catch (e) { s.g = []; }
+    });
+    const a = t0 == null ? -Infinity : t0, b = t1 == null ? Infinity : t1;
+    let ss = P.s.filter(s => s.t >= a - 1e-6 && s.t <= b + 1e-6);
+    if (!ss.length) {
+      let bd = Infinity;
+      P.s.forEach(s => { const d = s.t < a ? a - s.t : s.t - b; if (d < bd) { bd = d; ss = [s]; } });
+    }
+    const cw = MG.W / P.c, ch = MG.H / P.r;
+    const x0 = clamp(rect[0], 0, MG.W), x1 = clamp(rect[2], 0, MG.W);
+    const y0 = clamp(rect[1], 0, MG.H), y1 = clamp(rect[3], 0, MG.H);
+    if (x1 - x0 < 1 || y1 - y0 < 1) return null;
+    const cells = [];
+    let sw = 0, sv = 0;
+    for (let j = Math.floor(y0 / ch); j <= Math.min(P.r - 1, Math.floor((y1 - 1e-6) / ch)); j++) {
+      const wy = Math.min(y1, (j + 1) * ch) - Math.max(y0, j * ch);
+      if (wy <= 0) continue;
+      for (let i = Math.floor(x0 / cw); i <= Math.min(P.c - 1, Math.floor((x1 - 1e-6) / cw)); i++) {
+        const wx = Math.min(x1, (i + 1) * cw) - Math.max(x0, i * cw);
+        if (wx <= 0) continue;
+        for (const s of ss) {
+          const v = +s.g[j * P.c + i];
+          if (!isFinite(v)) continue;
+          cells.push([v, wx * wy]); sw += wx * wy; sv += v * wx * wy;
+        }
+      }
+    }
+    if (!cells.length || sw <= 0) return null;
+    cells.sort((p, q) => p[0] - q[0]);
+    const pct = f => { let acc = 0; for (const [v, w] of cells) { acc += w; if (acc >= f * sw) return v; } return cells[cells.length - 1][0]; };
+    return { mean: sv / sw / 255, lo: pct(0.15) / 255, hi: pct(0.85) / 255 };
+  };
+  /** How much black (an alpha 0-0.9) the plate under rect needs behind
+   *  light `ink` so the ink reaches `ratio`:1 over the BRIGHT part of the
+   *  plate (its 85th percentile). 0 when unknown, when the plate is already
+   *  dark enough, or for dark ink (darkening is the wrong fix for it).
+   *  o: {ink = '#FFFFFF', ratio = 4.5 (body; 3 for display type), t0, t1,
+   *  have = darkening the template already lays under the ink}. */
+  MG.need = (rect, o = {}) => {
+    const pl = MG.plateAt(rect, o.t0, o.t1);
+    if (!pl) return 0;
+    const Li = MG.luminance(o.ink || '#FFFFFF');
+    if (Li < 0.3) return 0;
+    const Lt = (Li + 0.05) / (o.ratio || 4.5) - 0.05;   // brightest plate the ink reads on
+    const v = pl.hi;
+    if (toLin(v) <= Lt + 1e-9) return 0;
+    let need = Lt <= 0 ? 0.9 : 1 - toGamma(Lt) / v;
+    const have = clamp(+o.have || 0, 0, 0.95);
+    if (have > 0) need = need <= have ? 0 : 1 - (1 - need) / (1 - have);
+    return clamp(need, 0, 0.9);
+  };
+  /** Contrast a translucent dark panel (glass card, pill, plate) aims for
+   *  over a bright plate: about what the same glass shows over dark footage,
+   *  so it stays dark glass instead of turning into a muddy grey card. */
+  MG.PANEL_RATIO = 11;
+  /** Dark ink for light type over a bright plate (MG.darkInk); true when it
+   *  reaches `ratio`:1 over the DARK part of the plate under rect (its 15th
+   *  percentile), i.e. the plate is bright all the way across. */
+  MG.DARK_INK = '#141414';
+  MG.darkInkOK = (rect, o = {}) => {
+    const pl = MG.plateAt(rect, o.t0, o.t1);
+    if (!pl) return false;
+    return MG.contrast(MG.luminance(o.ink || MG.DARK_INK), toLin(pl.lo)) >= (o.ratio || 4.5);
+  };
+  /** A dark pocket behind type over a bright plate: full `alpha` over rect
+   *  (+ pad), a feathered rounded edge. Inserted first in `parent` (page
+   *  coordinates when parent is the root), so it sits behind the type; the
+   *  caller drives its opacity (it starts hidden). o: {pad: [x, y], radius,
+   *  feather} in px. Returns the element; .box is its painted extent. */
+  MG.backing = (parent, rect, alpha, o = {}) => {
+    const pad = o.pad || [24, 14], f = o.feather ?? 26;
+    const x = rect[0] - pad[0], y = rect[1] - pad[1];
+    const w = rect[2] - rect[0] + 2 * pad[0], h = rect[3] - rect[1] + 2 * pad[1];
+    const el = document.createElement('div');
+    el.className = 'mg-backing';
+    const a = clamp(alpha, 0, 0.92).toFixed(3);
+    el.style.cssText = `position:absolute;left:${x.toFixed(1)}px;top:${y.toFixed(1)}px;` +
+      `width:${w.toFixed(1)}px;height:${h.toFixed(1)}px;pointer-events:none;opacity:0;` +
+      `border-radius:${(o.radius ?? Math.min(h / 2, 40)).toFixed(1)}px;background:rgba(0,0,0,${a});` +
+      `box-shadow:0 0 ${f.toFixed(1)}px ${(f * 0.3).toFixed(1)}px rgba(0,0,0,${a})`;
+    (parent || document.body).insertBefore(el, (parent || document.body).firstChild);
+    const ext = f * 0.3 + f;
+    el.box = [x - ext, y - ext, x + w + ext, y + h + ext];
+    return el;
+  };
+  /** Union a rect into MG.box (call after the template set it). */
+  MG.growBox = r => {
+    if (!r) return;
+    const b = MG.box;
+    MG.box = b ? [Math.min(b[0], r[0]), Math.min(b[1], r[1]), Math.max(b[2], r[2]), Math.max(b[3], r[3])] : r.slice();
+    MG.box = [Math.max(0, MG.box[0]), Math.max(0, MG.box[1]), Math.min(MG.W, MG.box[2]), Math.min(MG.H, MG.box[3])];
+  };
+  /** Union of elements' page rects [x0, y0, x1, y1] (null when none). */
+  MG.rectOf = els => {
+    let u = null;
+    (Array.isArray(els) ? els : [els]).forEach(e => {
+      if (!e) return;
+      const r = e.getBoundingClientRect();
+      if (r.width <= 0 && r.height <= 0) return;
+      u = u ? [Math.min(u[0], r.left), Math.min(u[1], r.top), Math.max(u[2], r.right), Math.max(u[3], r.bottom)]
+        : [r.left, r.top, r.right, r.bottom];
+    });
+    return u;
+  };
+
+  // Secondary type (kickers, sub-labels, labels, attributions) is never set
+  // smaller than a phone can read: its cap height is at least MIN_CAP of the
+  // frame height (2.2% on 9:16 = 42 design px; the same fraction of a
+  // shorter frame's height).
+  MG.MIN_CAP = 0.022;
+  const capCtx = document.createElement('canvas').getContext('2d');
+  /** Cap height / font size of el's computed font (0.72 when unmeasurable). */
+  MG.capRatio = el => {
+    const cs = getComputedStyle(el);
+    capCtx.font = `${cs.fontStyle} ${cs.fontWeight} 100px ${cs.fontFamily}`;
+    const r = capCtx.measureText('H').actualBoundingBoxAscent / 100;
+    return r > 0.3 && r < 1.2 ? r : 0.72;
+  };
+  /** The smallest font-size (px) secondary text in el may use. */
+  MG.minType = el => MG.MIN_CAP * MG.H / MG.capRatio(el);
+  /** Raise el's font-size to MG.minType(el) when it is smaller; returns the px size. */
+  MG.floorType = el => {
+    const cur = parseFloat(getComputedStyle(el).fontSize) || 0, m = MG.minType(el);
+    if (cur < m - 0.01) { el.style.fontSize = m.toFixed(2) + 'px'; return m; }
+    return cur;
+  };
+  /** Fit secondary text into `width`: one line from `max` down to the
+   *  floor (MG.minType, or `min` when larger); at the floor it wraps into
+   *  balanced lines instead of shrinking further — only a single word too
+   *  long for the width goes smaller. Returns the px size. */
+  MG.fitSecondary = (el, o = {}) => {
+    const width = o.width || el.parentElement.clientWidth;
+    Object.assign(el.style, { whiteSpace: 'nowrap', maxWidth: '', textWrap: '' });
+    el.style.fontSize = '40px';
+    const floor = Math.max(o.min || 0, MG.minType(el)), hi = Math.max(o.max || floor, floor);
+    let fs = MG.fit(el, { width, min: floor, max: hi, nowrap: true });
+    if (el.scrollWidth > width + 1) {
+      Object.assign(el.style, { whiteSpace: 'normal', maxWidth: width + 'px', textWrap: 'balance' });
+      fs = floor; el.style.fontSize = fs + 'px';
+      while (el.scrollWidth > width + 1 && fs > 12) { fs *= 0.95; el.style.fontSize = fs + 'px'; }
+    }
+    return fs;
+  };
+
   // ── frame driver (called by the renderer) ──────────────────────────────
   window.__mgSeek = t => {
     MG.t = t;

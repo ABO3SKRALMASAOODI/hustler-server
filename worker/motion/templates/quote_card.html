@@ -90,6 +90,14 @@
       Object.assign(by.style, { marginTop: fs * 0.55 + 'px', justifyContent: center ? 'center' : 'flex-start', textShadow: body.style.textShadow });
       Object.assign(rule.style, { width: small * 2.2 + 'px', height: Math.max(2, small * 0.09) + 'px', background: P.accent, marginRight: small * 0.6 + 'px' });
       Object.assign(name.style, { fontFamily: SANS, fontStyle: 'normal', fontWeight: 700, fontSize: small + 'px', letterSpacing: '0.14em', color: P.color, opacity: 0.9 });
+      // the attribution is secondary text: never below the phone-readable
+      // floor (tracking tightens first; a long one wraps instead of shrinking)
+      const floor = MG.minType(name);
+      if (small < floor) {
+        Object.assign(name.style, { fontSize: floor + 'px', letterSpacing: '0.08em' });
+        const room = Math.max(fs * 6, Math.min(W * 0.86, W - 100) - 2 * padX) - small * 2.8;
+        if (name.scrollWidth > room) Object.assign(name.style, { whiteSpace: 'normal', maxWidth: room + 'px', textWrap: 'balance', lineHeight: '1.1' });
+      }
     }
     // card geometry
     const textW = Math.max(...lines.map(l => l.scrollWidth), by ? by.scrollWidth : 0);
@@ -107,7 +115,25 @@
     const shade = P.plate ? 0 : 0.5;
     qm.style.textShadow = shade ? `0 ${qs * 0.02}px ${qs * 0.1}px rgba(0,0,0,${shade})` : 'none';
     MG.box = [Math.max(0, cx - 56), Math.max(0, cy - qs * 0.3 - 40), Math.min(W, cx + cw + 56), Math.min(H, cy + ch + 60)];
+    // a measured bright plate: the glass plate darkens itself (a panel stays
+    // dark glass: MG.PANEL_RATIO); without a plate the quote gets a pocket under its text.
+    // Dark plates: unchanged.
+    if (bk) { bk.remove(); bk = null; }
+    const br = MG.rectOf(lines.concat(by ? [by] : []));
+    if (P.plate) {
+      const a = br ? MG.need(br, { ink: P.color, ratio: MG.PANEL_RATIO, have: 0.74 }) : 0;
+      plateEl.style.background = a > 0 ? `rgba(14,14,16,${(1 - 0.26 * (1 - a)).toFixed(3)})` : '';
+    } else if (br) {
+      const a = MG.need(br, { ink: P.color, ratio: 4.5 });
+      if (a > 0) {
+        bk = MG.backing(card, [br[0] - cx, br[1] - cy, br[2] - cx, br[3] - cy], a,
+          { pad: [0.3 * fs, 0.22 * fs], feather: 0.34 * fs, radius: 0.3 * fs });
+        bk.style.zIndex = '-1';
+        MG.growBox([cx + bk.box[0], cy + bk.box[1], cx + bk.box[2], cy + bk.box[3]]);
+      }
+    }
   };
+  let bk = null;
   layout();
   MG.ready = Promise.all([`italic 400 100px ${SERIF}`, `italic 900 100px ${QFONT}`, `700 40px ${SANS}`].map(f => document.fonts.load(f).catch(() => 0)))
     .then(() => document.fonts.ready).then(layout);
@@ -120,6 +146,7 @@
   MG.active([[0, byT() + 0.5], [Math.max(0, D - exitDur - 0.04), D]]);
   MG.frame(t => {
     if (P.plate) { const k = MG.ease.outCubic(MG.range(t, 0, 0.3)); MG.set(plateEl, { opacity: k, scale: 0.965 + 0.035 * k }); }
+    if (bk) bk.style.opacity = MG.ease.outCubic(MG.range(t, L0, 0.24)).toFixed(4);
     const q = MG.spring(t, 0.04, { stiffness: 260, damping: 18 });
     MG.set(qm, { opacity: MG.range(t, 0.04, 0.1), scale: 0.55 + 0.45 * q, y: (1 - q) * fs * 0.3 });
     lines.forEach((l, i) => {

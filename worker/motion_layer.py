@@ -18,6 +18,13 @@ Failure policy: a motion item that cannot render degrades to "absent" with
 a logged reason recorded on ``LAST_WARNINGS`` rather than failing the whole
 render — the user still gets the edit, and the write tool already proved the
 composition renders when it was added.
+
+Legibility: before rendering, ``prepare_inputs`` asks the renderer's plate
+probe (worker/plate.py) for the program picture at a few moments inside each
+item — every cue of the motion-caption track — and hands each composition
+its grid as ``MG.plate``, so light type over a bright shirt can raise its own
+backing. A probe that fails leaves the item without a plate (rendered exactly
+as before).
 """
 
 import os
@@ -25,6 +32,7 @@ from contextvars import ContextVar
 
 import motion_engine
 import motion_templates
+import plate as plate_mod
 
 LAST_WARNINGS = []
 # Per-render collector (renderer._run_render_job installs one). LAST_WARNINGS
@@ -61,23 +69,103 @@ def program_items(edl, out_duration):
     return out
 
 
+# Plate moments per item: a short graphic is sampled twice, a long one up to
+# PLATE_MAX_PER_ITEM times; a caption cue once at its middle (twice when it
+# is long enough to span a camera move).
+PLATE_MAX_PER_ITEM = 5
+PLATE_EVERY_S = 1.2
+PLATE_CUE_SPLIT_S = 1.6
+
+
+def plate_moments(item):
+    """[(program second, composition second)] at which to measure the plate
+    under ``item``. Composition seconds are what the page's MG.t reads (a
+    windowed fragment's phase included)."""
+    s, e = float(item["start"]), float(item["end"])
+    if item.get("template") == "caption_motion":
+        out = []
+        for c in (item.get("params") or {}).get("cues") or []:
+            try:
+                a, b = float(c["s"]), float(c["e"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if b - a < 0.04:
+                continue
+            ts = [(a + b) / 2.0] if b - a < PLATE_CUE_SPLIT_S else \
+                [a + 0.3 * (b - a), a + 0.75 * (b - a)]
+            out += [(s + x, x) for x in ts if s + x <= e + 1e-6]
+        return out
+    d = e - s
+    if d <= 0:
+        return []
+    phase = float(item.get("phase_s") or 0.0)
+    n = max(2, min(PLATE_MAX_PER_ITEM, int(d / PLATE_EVERY_S) + 1))
+    return [(s + d * (i + 0.5) / n, phase + d * (i + 0.5) / n)
+            for i in range(n)]
+
+
+def measure_plates(items, probe):
+    """{index in items: MG.plate dict} for the items the probe could
+    measure. One probe call for the whole render (moments shared between
+    items are measured once); any failure leaves items without a plate."""
+    if probe is None or not items:
+        return {}
+    plan, want = [], {}
+    for k, item in enumerate(items):
+        try:
+            for prog_t, comp_t in plate_moments(item):
+                key = round(prog_t, 2)
+                want.setdefault(key, None)
+                plan.append((k, key, comp_t))
+        except Exception:  # noqa: BLE001 — that item goes unmeasured
+            continue
+    if not want:
+        return {}
+    keys = sorted(want)
+    try:
+        grids = probe(keys)
+    except Exception as e:  # noqa: BLE001 — fail open: render as before
+        print(f"[render] plate probe failed ({str(e)[:160]}) — graphics "
+              "keep their default contrast", flush=True)
+        return {}
+    st = getattr(probe, "stats", None)
+    if isinstance(st, dict):
+        print(f"[render] plate: {len(keys)} moments ({st.get('cached', 0)} "
+              f"cached, {st.get('decoded', 0)} decoded) in "
+              f"{st.get('seconds', 0.0):.2f}s", flush=True)
+    got = dict(zip(keys, grids or []))
+    cols = getattr(probe, "cols", None)
+    rows = getattr(probe, "rows", None)
+    out = {}
+    for k, key, comp_t in plan:
+        g = got.get(key)
+        if not g or not cols or not rows or len(g) != cols * rows:
+            continue
+        p = out.setdefault(k, {"c": cols, "r": rows, "s": []})
+        p["s"].append({"t": round(comp_t, 3), "g": plate_mod.encode_grid(g)})
+    return out
+
+
 def prepare_inputs(edl, workdir, W, H, fps, out_duration, args, next_idx,
-                   fetch_asset=None, extra_items=None):
+                   fetch_asset=None, extra_items=None, plate=None):
     """Render motion clips and append ffmpeg inputs. Returns (inputs, next_idx)
     with inputs = [(input_index, item, RenderedClip)]. ``extra_items`` are
-    renderer-synthesized items (the motion caption track)."""
+    renderer-synthesized items (the motion caption track); ``plate`` is the
+    renderer's plate probe (worker/plate.Probe) or None."""
     LAST_WARNINGS.clear()
     items = list(extra_items or []) + program_items(edl, out_duration)
     if not items:
         return [], next_idx
+    plates = measure_plates(items, plate)
     asset_locals = {}
     jobs, kept = [], []
-    for item in items:
+    for k, item in enumerate(items):
         try:
             for _k, key in motion_templates.asset_params(item["template"], item.get("params") or {}).items():
                 if key not in asset_locals and fetch_asset is not None:
                     asset_locals[key] = fetch_asset(key)
-            jobs.append(motion_templates.build_job(item, W, H, fps, asset_locals))
+            jobs.append(motion_templates.build_job(item, W, H, fps, asset_locals,
+                                                   plate=plates.get(k)))
             kept.append(item)
         except Exception as e:  # noqa: BLE001 — degrade one item, keep the render
             warn(f"motion '{item.get('id')}' skipped: {str(e)[:200]}")

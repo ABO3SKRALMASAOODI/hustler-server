@@ -269,11 +269,13 @@
 
     if (label) {
       const short = P.label.replace(/\*/g, '').trim().length <= 20;
-      const lmax = Math.max(52, Math.min(short ? 84 : 66, fs * (short ? 0.26 : 0.2))) * Math.min(1.15, Math.max(0.85, P.size));
+      // never below the phone-readable floor for secondary text
+      const lmin = MG.minType(label);
+      const lmax = Math.max(lmin, Math.max(52, Math.min(short ? 84 : 66, fs * (short ? 0.26 : 0.2))) * Math.min(1.15, Math.max(0.85, P.size)));
       const lw = Math.min(SAFE.x1 - SAFE.x0, 940);
       label.style.maxWidth = lw + 'px';
       label.style.textWrap = 'balance';
-      MG.fit(label, { width: lw, height: lmax * 1.1 * 2 + 6, min: Math.min(lmax, 36), max: lmax });
+      MG.fit(label, { width: lw, height: lmax * 1.1 * 2 + 6, min: Math.max(lmin, Math.min(lmax, 36)), max: lmax });
       const gap = Math.max(16, fs * 0.07);
       if (P.label_pos === 'above') labwrap.style.marginBottom = gap * 0.5 + 'px';
       else { rule.style.width = Math.max(90, Math.min(170, fs * 0.5)) + 'px'; rule.style.margin = `${gap}px 0 ${gap * 0.85}px`; }
@@ -285,15 +287,36 @@
     const y = Math.min(SAFE.y1 - h, Math.max(SAFE.y0, H * P.y - h / 2));
     const pad = 40 + fs * (0.12 + 0.1 * P.glow) * k;
     let bx = [x - pad, y - pad - 30, x + w + pad, y + h + pad + 20];
+    // a measured bright plate: the number (display, 3:1) and the label
+    // (body, 4.5:1) first get the template's own soft backdrop, then a
+    // pocket for whatever contrast it still lacks. Dark plates: unchanged.
+    const toPage = q => q && [x + q[0] * k, y + q[1] * k, x + q[2] * k, y + q[3] * k];
+    const numR = MG.rectOf(num), labR = label ? MG.rectOf(label) : null;
+    const needs = have => [MG.need(toPage(numR), { ink: P.color, ratio: 3, have }),
+                           labR ? MG.need(toPage(labR), { ink: '#F7F5F2', ratio: 4.5, have }) : 0];
+    let nd = needs(P.backdrop === 'scrim' ? 0.3 : 0);
+    const autoScrim = P.backdrop !== 'scrim' && (nd[0] > 0 || nd[1] > 0);
+    if (autoScrim) nd = needs(0.3);
+    const bks = [];
+    [[numR, nd[0], fs * 0.2, 0], [labR, nd[1], parseFloat(label ? label.style.fontSize : 0), 0.12]].forEach(([q, a, em, at]) => {
+      if (!q || !(a > 0)) return;
+      const el = MG.backing(stage, q, a, { pad: [0.2 * em, 0.08 * em], feather: 0.3 * em, radius: 0.26 * em });
+      el.style.zIndex = '-1';
+      el.at = at;
+      bks.push(el);
+      const pb = toPage(el.box);
+      bx = [Math.min(bx[0], pb[0]), Math.min(bx[1], pb[1]), Math.max(bx[2], pb[2]), Math.max(bx[3], pb[3])];
+    });
+    const useScrim = P.backdrop === 'scrim' || autoScrim;
     const scrim = MG.$('#scrim');
-    if (P.backdrop === 'scrim') {
+    if (useScrim) {
       const sw = w + 320, sh = h * 1.25 + 300;
       // a 64px gradient scaled up: rasterised once, tiny, then only composited
       scrim.style.transform = `translate(${x + w / 2 - sw / 2}px,${y + h / 2 - sh / 2}px) scale(${sw / 64},${sh / 64})`;
       bx = [Math.min(bx[0], x + w / 2 - sw / 2), Math.min(bx[1], y + h / 2 - sh / 2), Math.max(bx[2], x + w / 2 + sw / 2), Math.max(bx[3], y + h / 2 + sh / 2)];
     } else scrim.remove();
     MG.box = [Math.max(0, bx[0]), Math.max(0, bx[1]), Math.min(W, bx[2]), Math.min(H, bx[3])];
-    return { numwrap, num, core, label, rule, cols, seps, sign, drum, slot, fs, x, y, k, glow, scrim: P.backdrop === 'scrim' ? scrim : null };
+    return { numwrap, num, core, label, rule, cols, seps, sign, drum, slot, fs, x, y, k, glow, scrim: useScrim ? scrim : null, bks };
   }
   MG.ready = fontsReady.then(() => { L = L || layout(); });
 
@@ -380,6 +403,7 @@
     const qx = MG.ease.inCubic(MG.range(t, D - XD, XD));
     MG.set(stage, { x: L.x, y: L.y - qx * 26, scale: L.k, opacity: 1 - qx, blur: qx * 14 });
     if (scrim) scrim.style.opacity = (MG.ease.outCubic(MG.range(t, 0, 0.3)) * (1 - qx)).toFixed(3);
+    L.bks.forEach(el => { el.style.opacity = MG.ease.outCubic(MG.range(t, el.at, 0.16)).toFixed(3); });
   });
 })();
 </script>

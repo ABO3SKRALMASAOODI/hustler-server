@@ -120,9 +120,12 @@
       // inside the ring when it fits on two short lines, otherwise under it
       const insideW = inner * 0.98;
       label.style.width = insideW + 'px';
-      const lmax = Math.max(38, Math.min(48, R * 0.16));
-      const lfs = MG.fit(label, { width: insideW, height: lmax * 1.1 * 2 + 4, min: 30, max: lmax });
-      const inside = !half && P.style === 'ring' && lfs >= 38 && label.getBoundingClientRect().height < R * 0.45;
+      // (never below the phone-readable floor for secondary text)
+      const lfl = MG.minType(label);
+      const lmax = Math.max(lfl, 38, Math.min(48, R * 0.16));
+      const lfs = MG.fit(label, { width: insideW, height: lmax * 1.1 * 2 + 4, min: Math.max(30, lfl), max: lmax });
+      const inside = !half && P.style === 'ring' && lfs >= 38 && label.getBoundingClientRect().height < R * 0.45 &&
+        label.scrollWidth <= insideW + 1;
       if (inside) {
         labTop = numCy + nb.height * 0.42 + 14;
         num.style.transform = `translateY(${numCy - nb.height / 2 - label.getBoundingClientRect().height * 0.5}px)`;
@@ -131,8 +134,8 @@
       } else {
         const wOut = Math.min(SAFE.x1 - SAFE.x0, Math.max(boxW, 760));
         label.style.width = wOut + 'px';
-        const lf = Math.max(44, Math.min(58, R * 0.2));
-        MG.fit(label, { width: wOut, height: lf * 1.1 * 2 + 4, min: 36, max: lf });
+        const lf = Math.max(lfl, 44, Math.min(58, R * 0.2));
+        MG.fit(label, { width: wOut, height: lf * 1.1 * 2 + 4, min: Math.max(36, lfl), max: lf });
         const numBottom = numCy + nb.height * 0.5;
         labTop = P.style === 'gauge' ? Math.max(cy + R * 0.62, numBottom + 10) : half ? Math.max(cy + sw * 1.6 + 26, numBottom + 18) : boxH - pad + 34;
         label.style.left = (cx - wOut / 2) + 'px';

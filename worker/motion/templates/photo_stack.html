@@ -112,10 +112,12 @@
     if (spanX > W - 150) { side *= (W - 150) / spanX; ps = poses(side); }   // x 75-1005 + hold push
     // caption size depends only on the frame: fit it first so the block
     // height below uses its real metrics
-    let fs = 0;
+    let fs = 0, capH = 0;
     if (caption) {
-      MG.fit(capT, { width: W - 140, min: 24, max: Math.min(60, H * 0.065), nowrap: true });
+      // phone-readable floor: a long caption wraps (balanced) instead of shrinking past it
+      MG.fitSecondary(capT, { width: W - 140, max: Math.min(60, H * 0.065) });
       fs = parseFloat(capT.style.fontSize);
+      capH = Math.max(fs * 1.2, capT.getBoundingClientRect().height);
     }
     // vertical extent of the spread around the stack centre (rotated
     // corners included) plus the caption under it; it must sit inside the
@@ -130,13 +132,13 @@
         const hv = (o.h * Math.cos(rr) + o.w * Math.sin(rr)) / 2;
         top = Math.min(top, o.fy - hv); bot = Math.max(bot, o.fy + hv);
       });
-      return { top, bot, capTop: bot + capGap(sd), end: bot + (caption ? capGap(sd) + fs * 1.2 : 0) };
+      return { top, bot, capTop: bot + capGap(sd), end: bot + (caption ? capGap(sd) + capH : 0) };
     };
     let ex = extent(ps, side);
     for (let it = 0; it < 8; it++) {
       const need = ex.end - ex.top, avail = H * (sBot - sTop);
       if (need <= avail) break;
-      const fixed = caption ? 26 + fs * 1.2 + 2 * pad : 2 * pad;
+      const fixed = caption ? 26 + capH + 2 * pad : 2 * pad;
       side *= Math.max(0.5, Math.min(0.98, (avail - fixed) / Math.max(1, need - fixed)));
       ps = poses(side); ex = extent(ps, side);
     }

@@ -110,13 +110,24 @@
       els.lines.forEach((l, i) => { l.mask.style.marginTop = i ? (-fsT * 0.06) + 'px' : '0px'; });
       if (els.lbl) css(els.lbl, { fontSize: small + 'px', marginTop: fsT * 0.16 + 'px', textShadow: shadow(small, 0.55) });
     }
+    // the label and number are secondary text: never below the phone-readable
+    // floor (a long label wraps into balanced lines instead of shrinking)
+    if (els.lbl) MG.fitSecondary(els.lbl, { width: maxW, max: parseFloat(els.lbl.style.fontSize) });
+    if (els.num) MG.floorType(els.num);
     grp.style.transform = 'none';
     const r = grp.getBoundingClientRect();
     G = { w: r.width, h: r.height };
     G.x = (W - G.w) / 2;
     G.y = Math.min(Math.max(H * P.y - G.h / 2, H * 0.07), H * 0.86 - G.h);
     grp.style.left = G.x + 'px'; grp.style.top = G.y + 'px';
-    // chip sits top-left inside the safe area
+    // chip sits top-left inside the safe area; it is a label, so its type
+    // is floored too (a long title wraps rather than running off the frame)
+    if (P.exit === 'collapse') {
+      const cn = num ? chip.firstChild : null;
+      if (cn) MG.floorType(cn);
+      // (the frame's 64px margins, less the chip's own padding + border)
+      MG.fitSecondary(ct, { width: W - 128 - 46 - (cn ? cn.offsetWidth + 14 : 0), max: 33 });
+    }
     css(chip, { left: '64px', top: Math.round(H * 0.085) + 'px' });
     CR = { left: 64, top: Math.round(H * 0.085), height: chip.offsetHeight || 56 };
     const pad = fsT * (S === 'bold_red_italic' ? 0.3 : 0.35);

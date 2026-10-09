@@ -8,6 +8,10 @@
 Writes <out>.mp4 (composited, with the template's sound cues mixed in when
 --sfx is given) and <out>_sheet.jpg (frames at --sheet-times, default ten
 evenly spaced). Without --bg the background is a neutral dark gradient.
+--bg-fit crop [--bg-focus 0.4] cover-crops the footage like a 9:16 edit;
+--plate measures that footage under the item (worker/plate.py) and hands it
+to the composition as MG.plate, exactly as a render does, so bright-plate
+legibility (pockets, dark ink) can be reviewed.
 Used by template authors and reviewers; not part of the render path.
 """
 import argparse
@@ -20,7 +24,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 
 import motion_engine  # noqa: E402
+import motion_layer  # noqa: E402
 import motion_templates  # noqa: E402
+import plate as plate_mod  # noqa: E402
 
 
 def main():
@@ -38,6 +44,9 @@ def main():
     ap.add_argument("--cols", type=int, default=5)
     ap.add_argument("--box", default=None, help="x0,y0,x1,y1 fractions")
     ap.add_argument("--layer-only", action="store_true", help="skip compositing")
+    ap.add_argument("--bg-fit", default="pad", choices=["pad", "crop"])
+    ap.add_argument("--bg-focus", type=float, default=0.5, help="crop focus x (fraction)")
+    ap.add_argument("--plate", action="store_true", help="measure the bg under the item (MG.plate)")
     a = ap.parse_args()
     W, H = [int(v) for v in a.size.lower().split("x")]
     params = json.loads(a.params)
@@ -48,7 +57,16 @@ def main():
     item = {"id": "preview", "template": a.template, "start": 0.0, "end": dur,
             "params": params, "html": html,
             "box": [float(v) for v in a.box.split(",")] if a.box else None}
-    job = motion_templates.build_job(item, W, H, a.fps)
+    plate = None
+    if a.plate and a.bg:
+        def probe(times):
+            frames = plate_mod.decode_gray(a.bg, [a.bg_start + t for t in times])
+            return [plate_mod.canvas_grid(frames[a.bg_start + t], None, W, H, mode=a.bg_fit,
+                                          focus=(a.bg_focus, 0.5))
+                    if (a.bg_start + t) in frames else None for t in times]
+        probe.cols, probe.rows = plate_mod.COLS, plate_mod.grid_rows(W, H)
+        plate = motion_layer.measure_plates([item], probe).get(0)
+    job = motion_templates.build_job(item, W, H, a.fps, plate=plate)
     out_dir = os.path.dirname(os.path.abspath(a.out)) or "."
     os.makedirs(out_dir, exist_ok=True)
     clip = motion_engine.render_jobs([job], out_dir, pages=1)[0]
@@ -60,8 +78,13 @@ def main():
     ff = motion_engine._ffmpeg()
     if a.bg:
         bg = ["-ss", f"{a.bg_start:.3f}", "-t", f"{dur:.3f}", "-i", a.bg]
-        base = (f"[0:v]scale={W}:{H}:force_original_aspect_ratio=decrease,"
-                f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=0x0E0E10,setsar=1,fps={a.fps}[b]")
+        if a.bg_fit == "crop":
+            base = (f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase,"
+                    f"crop={W}:{H}:'clip(iw*{a.bg_focus:.4f}-ow/2,0,iw-ow)':(ih-oh)/2,"
+                    f"setsar=1,fps={a.fps}[b]")
+        else:
+            base = (f"[0:v]scale={W}:{H}:force_original_aspect_ratio=decrease,"
+                    f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=0x0E0E10,setsar=1,fps={a.fps}[b]")
     else:
         bg = ["-f", "lavfi", "-t", f"{dur:.3f}", "-i",
               f"gradients=s={W}x{H}:c0=0x1b2330:c1=0x07080a:x0=0:y0=0:x1={W}:y1={H}:d={dur}:r={a.fps}"]

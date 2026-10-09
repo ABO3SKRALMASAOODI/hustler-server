@@ -246,8 +246,9 @@ def asset_params(name, params):
             if p.get("type") == "asset" and params.get(k)}
 
 
-def build_job(item, out_w, out_h, fps, asset_locals=None):
-    """motion_engine.RenderJob for one MotionItem dict."""
+def build_job(item, out_w, out_h, fps, asset_locals=None, plate=None):
+    """motion_engine.RenderJob for one MotionItem dict. ``plate`` is the
+    measured picture under it (motion_layer.measure_plates), or None."""
     name = item["template"]
     dw, dh = motion_engine.design_size(out_w, out_h)
     full = float(item.get("full_duration_s") or (float(item["end"]) - float(item["start"])))
@@ -265,7 +266,12 @@ def build_job(item, out_w, out_h, fps, asset_locals=None):
             params[key] = None
     body = item.get("html") if name == "html" else motion_engine.template_body(name)
     html = motion_engine.build_document(body, params=params, duration=full, fps=fps,
-                                        design_w=dw, design_h=dh)
+                                        design_w=dw, design_h=dh, plate=plate)
+    if plate and len(html.encode("utf-8")) > motion_engine.MAX_HTML_BYTES:
+        # the plate fails open: it never pushes a composition over the cap
+        # (an authored page near the limit renders as it did without one)
+        html = motion_engine.build_document(body, params=params, duration=full, fps=fps,
+                                            design_w=dw, design_h=dh)
     box = None
     if item.get("box"):
         x0, y0, x1, y1 = item["box"]

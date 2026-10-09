@@ -152,6 +152,15 @@ LEGIBILITY:
 - Contrast from a soft shadow (0 2–6 px 12–30 px at 35–60% black), a
   frosted or dark plate, or the grade — not thick outlines or yellow boxes
   by default. Check bright and dark plates in the render.
+- The renderer measures the picture under every graphic and caption cue.
+  Over a bright plate (a white shirt, a cream tee, a bright wall) light type
+  gets a soft dark pocket sized for 4.5:1 body / 3:1 display contrast; a
+  slam's or marker line's light words switch to dark ink where the plate is
+  bright all the way across; glass cards darken to stay dark glass. Dark
+  plates render unchanged. Placement in clear space still comes first.
+- Secondary text (kickers, sub-labels, labels, attributions) never renders
+  below a cap height of 2.2% of the frame height; a long one wraps instead
+  of shrinking, so keep kickers and sub-labels short.
 
 SOUND PAIRING — graphics are SILENT by default:
 - Most graphics need no sound. Opt a moment in with `sfx=true` only when its
@@ -173,9 +182,10 @@ SOUND PAIRING — graphics are SILENT by default:
   the cues at their suggested gain), or `set_motion_graphic(id,
   sfx=false)` to drop them.
 - Accents: `*one word*` or a `*multi word run*` takes the accent; star 1–2
-  words per line. Over a bright shirt or wall, raise `scrim` on
-  `hook_title`, `glow_title` and `phrase_build` (a soft dark backing) rather
-  than moving the type onto the face.
+  words per line. Over a bright shirt or wall the renderer firms up the
+  backing on its own (see LEGIBILITY); `scrim` on `hook_title`, `glow_title`
+  and `phrase_build` stays a style choice for a softer, wider falloff — never
+  move the type onto the face to escape a bright plate.
 - Typing placed by hand stops with its event: `add_sfx(...,
   dur_s=<seconds of visible typing>)` trims it with a short fade. Long
   library tails (`impact_1`, `ding_1`, `cash_register_1`) already stop at
