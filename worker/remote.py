@@ -15,6 +15,7 @@ we POST is only what the runner needs to identify the work — never asset bytes
 
 import hashlib
 import json
+import random
 import re
 import threading
 import time
@@ -66,13 +67,15 @@ class CloudflareCapacityBusy(CloudflareLaunchUnavailable):
 class CloudflareRolloutPending(CloudflareLaunchUnavailable):
     """A source/role readiness gate proved that no compute was accepted.
 
-    Queue-backed calls wait within their existing lease. Once that bounded
-    admission window ends, ordinary media retries must not start it again.
+    A deploy is in progress. Queue-backed calls wait within their existing
+    lease for CLOUDFLARE_ROLLOUT_WAIT_S. Once that bounded window ends the
+    outcome is an explicit, retryable "deploy in progress": nothing ran, so
+    the caller (or one bounded media retry) may safely try again.
     """
 
     failure_kind = "provider_rollout_pending"
-    retryable = False
-    max_attempts = 0
+    retryable = True
+    max_attempts = 1
     agent_repairable = False
 
 
@@ -781,18 +784,25 @@ def reconcile_remote_execution(worker_db, row):
             call = modal.FunctionCall.from_id(row["call_id"])
             data = call.get(timeout=0.1)
         else:
-            status = _cloudflare_status(
-                row["call_id"], row.get("function_name") or
-                _cloudflare_lane(row.get("type")), timeout=10)
+            lane = row.get("function_name") or \
+                _cloudflare_lane(row.get("type"))
+            status = _cloudflare_status(row["call_id"], lane, timeout=10)
             state = status.get("status")
-            if state in {"submitted", "starting", "running", "unknown",
-                         "stopping"}:
+            if state == "unknown":
+                # A lost /run response is not proof of life, so it earns no
+                # heartbeat; a live executor keeps beating on its own. Fence
+                # and fail the call once PostgreSQL shows it is dead.
+                data = _abandon_if_dead(row["call_id"], lane, job, worker_db)
+                if data is None:
+                    return {"status": "running", "job": job}
+            elif state in {"submitted", "starting", "running", "stopping"}:
                 worker_db.run(
                     dbx.heartbeat_remote_execution, job_id, claim)
                 return {"status": "running", "job": job}
-            if state == "missing":
+            elif state == "missing":
                 return {"status": "unknown", "job": job}
-            data = status.get("envelope")
+            else:
+                data = status.get("envelope")
             if not isinstance(data, dict):
                 raise RemoteExecutorError(
                     f"Cloudflare call {row['call_id']} ended without an "
@@ -1252,14 +1262,155 @@ def _reconcile_completed_cloudflare_call(call_id, lane):
         probe.reset()
 
 
+def _cloudflare_liveness_row(conn, job_id, stale_s):
+    """Read-only liveness evidence for the queue claim behind one call.
+
+    The executor process heartbeats both rows every HEARTBEAT_EVERY_S while
+    it works; the dispatcher no longer refreshes them for an `unknown` call.
+    """
+    if not dbx.remote_executions_table_ready(conn):
+        return None
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT j.state AS job_state, j.total_claims AS job_claims,
+                   (j.heartbeat_at IS NULL OR j.heartbeat_at
+                      < NOW() - make_interval(secs => %s)) AS heartbeat_stale,
+                   r.total_claims AS remote_claims,
+                   r.provider AS remote_provider,
+                   r.call_id AS remote_call_id, r.state AS remote_state,
+                   (r.last_observed_at IS NULL OR r.last_observed_at
+                      < NOW() - make_interval(secs => %s)) AS observed_stale
+              FROM video_jobs j
+              LEFT JOIN remote_executions r ON r.job_id = j.id
+             WHERE j.id = %s""", (stale_s, stale_s, job_id))
+        row = cur.fetchone()
+        return dict(row) if row else {"job_state": "missing"}
+
+
+def _cloudflare_dead_call_reason(row, job, call_id):
+    """Why this call's executor provably cannot still own the claim, or None.
+
+    Durable success is never abandoned (the completion acknowledgement
+    releases it with its real result), and absent evidence means alive.
+    """
+    if not isinstance(row, dict):
+        return None
+    state = row.get("job_state")
+    if state == "missing":
+        return "its queue job no longer exists"
+    claim = job.get("total_claims")
+    if row.get("job_claims") != claim:
+        return "its queue lease moved to a newer claim"
+    if state == "done":
+        return None
+    if state != "running":
+        return f"its queue job is {state}"
+    if row.get("remote_provider") is not None:
+        if not (row.get("remote_claims") == claim
+                and row.get("remote_provider") == "cloudflare"
+                and str(row.get("remote_call_id")) == str(call_id)):
+            return "another provider call owns its claim"
+        if row.get("remote_state") in {"failed", "cancelled"}:
+            return f"its executor recorded {row['remote_state']}"
+    if row.get("heartbeat_stale") is True \
+            and row.get("observed_stale") is not False:
+        return ("no executor heartbeat for "
+                f"{int(config.CLOUDFLARE_DEAD_CALL_STALE_S)}s")
+    return None
+
+
+def _abandon_cloudflare_call(call_id, lane, job, reason):
+    """Ask the shard to fence and fail one dead call; its envelope or None."""
+    try:
+        response = requests.post(
+            f"{config.CLOUDFLARE_EXECUTOR_URL}/calls/{lane}/{call_id}/abandon",
+            json={"job": {key: job.get(key) for key in
+                          ("id", "type", "project_id", "total_claims")},
+                  "reason": reason},
+            headers=_cloudflare_headers(), timeout=60)
+        body = response.json() if response.status_code == 200 else {}
+    except Exception as exc:
+        # The shard may still finish the fence; the next status read sees it.
+        print(f"[dispatcher] Cloudflare abandonment of {call_id} deferred "
+              f"({type(exc).__name__})", flush=True)
+        return None
+    if not isinstance(body, dict):
+        return None
+    envelope = body.get("envelope")
+    if body.get("status") in {"done", "failed"} and isinstance(envelope, dict):
+        return envelope
+    return None
+
+
+def _abandon_if_dead(call_id, lane, job, worker_db=None):
+    """Release one `unknown` queue-backed call whose executor is dead.
+
+    Studio agent turns are left to their lease: the reaper's bounded death
+    resume (a fresh pass over the same request) needs the queue row to stay
+    running, and a terminal "outcome unknown" here would bypass it.
+    """
+    if job.get("id") is None or job.get("total_claims") is None \
+            or job.get("type") == "agent_turn":
+        return None
+    probe = worker_db or dbx.Db()
+    try:
+        row = probe.run(_cloudflare_liveness_row, job["id"],
+                        config.CLOUDFLARE_DEAD_CALL_STALE_S)
+    except Exception as exc:
+        print(f"[dispatcher] Cloudflare liveness check for {call_id} "
+              f"deferred ({type(exc).__name__})", flush=True)
+        return None
+    finally:
+        if worker_db is None:
+            probe.reset()
+    reason = _cloudflare_dead_call_reason(row, job, call_id)
+    if not reason:
+        return None
+    print(f"[dispatcher] Cloudflare call {call_id} for job {job['id']} is "
+          f"dead ({reason}); asking its shard to fence and fail it",
+          flush=True)
+    return _abandon_cloudflare_call(call_id, lane, job, reason)
+
+
+def _release_dead_cloudflare_owner(call_id, lane):
+    """A busy shard's owner may be a dead `unknown` call; release it."""
+    if not isinstance(call_id, str) or not re.fullmatch(
+            r"[a-zA-Z0-9_-]{8,96}", call_id):
+        return False
+    try:
+        status = _cloudflare_status(call_id, lane, timeout=10)
+    except Exception:
+        return False
+    owner = status.get("job") if isinstance(status.get("job"), dict) else {}
+    if status.get("status") != "unknown" or not owner.get("type") \
+            or not all(isinstance(owner.get(key), int) for key in
+                       ("id", "project_id", "total_claims")):
+        return False
+    return _abandon_if_dead(call_id, lane, owner) is not None
+
+
+# Check an `unknown` call's liveness about every 30 s of 2-s status polls.
+_LIVENESS_EVERY_POLLS = 15
+
+
 def _recover_cloudflare_result(call_id, lane, job, deadline):
     """Reconnect a named Container call without launching another instance."""
     last = None
+    unknown_polls = 0
     while time.monotonic() < deadline:
         try:
             status = _cloudflare_status(call_id, lane, timeout=10)
             state = status.get("status")
-            if state in {"submitted", "starting", "running", "unknown"}:
+            if state == "unknown":
+                # Not proof of life: only the executor's own heartbeat keeps
+                # this claim fresh now. Once PostgreSQL proves the executor
+                # dead, the shard fences the container and fails the call.
+                unknown_polls += 1
+                if (unknown_polls - 1) % _LIVENESS_EVERY_POLLS == 0:
+                    abandoned = _abandon_if_dead(call_id, lane, job)
+                    if abandoned is not None:
+                        return abandoned
+            elif state in {"submitted", "starting", "running"}:
                 if job.get("id") is not None:
                     probe = dbx.Db()
                     try:
@@ -1419,8 +1570,12 @@ def _run_cloudflare(job):
                                    "Cloudflare launch refused before /run")
                 if response.status_code == 429 and \
                         "shard is busy" in launch_error.lower():
-                    _reconcile_completed_cloudflare_call(
-                        response_body.get("active_call_id"), lane)
+                    owner = response_body.get("active_call_id")
+                    # Free the shard for this claim's next admission attempt
+                    # when its owner already succeeded or provably died.
+                    if not _reconcile_completed_cloudflare_call(owner, lane) \
+                            and queue_backed:
+                        _release_dead_cloudflare_owner(owner, lane)
                     raise CloudflareCapacityBusy(launch_error)
                 if response.status_code == 503 and launch_error.startswith((
                         "container readiness mismatch ",
@@ -1487,24 +1642,46 @@ def _run_cloud(job, url_override=None):
     return _interpret_executor_data(data, job)
 
 
+def _deploy_in_progress(job, cause):
+    """The explicit retryable outcome after a bounded rollout wait."""
+    kind = str(job.get("type") or "job")
+    error = CloudflareRolloutPending(
+        f"Deploy in progress: Valmera's executor is switching to a new "
+        f"release, so this {kind} was not started and nothing changed. "
+        f"It is safe to retry shortly. ({cause})")
+    if job.get("id") is not None:
+        # Same bound as any transient failure: media get one automatic
+        # retry; an MCP tool or Studio turn hands the retry to its caller.
+        base = {"agent_turn": config.MAX_ATTEMPTS_AGENT,
+                "mcp_tool": config.MAX_ATTEMPTS_MCP}.get(
+                    kind, config.MAX_ATTEMPTS_MEDIA)
+        error.max_attempts = max(1, min(int(base), 2))
+    return error
+
+
 def _run_cloudflare_with_capacity_wait(job):
     """Wait only after a provider proves this fenced call was not accepted.
 
-    Ambiguous launches still reconnect in _run_cloudflare. Never repeat them,
-    never wait after a terminal compute failure, and never wait on a paid
-    synchronous executor. Dispatcher heartbeats continue during admission.
+    Ambiguous launches still reconnect in _run_cloudflare. Never repeat them
+    and never wait after a terminal compute failure. A paid synchronous
+    caller does not wait on a busy shard; it retries a few times on fresh,
+    never-accepted identities (other shards) with short jittered backoff.
+    Dispatcher heartbeats continue during admission.
     """
     queued = job.get("id") is not None
     wait_s = config.CLOUDFLARE_BUSY_WAIT_S if queued else 0
     rollout_wait_s = config.CLOUDFLARE_ROLLOUT_WAIT_S if queued else 0
-    if config.CLOUDFLARE_MODAL_FALLBACK and config.MODAL_EXECUTOR_ENABLED \
-            and job.get("type") in config.MODAL_EXECUTOR_TYPES:
+    modal_alternate = bool(
+        config.CLOUDFLARE_MODAL_FALLBACK and config.MODAL_EXECUTOR_ENABLED
+        and job.get("type") in config.MODAL_EXECUTOR_TYPES)
+    if modal_alternate:
         wait_s = 0  # A configured alternate can serve it immediately.
         rollout_wait_s = 0
     started = time.monotonic()
     deadline = started + wait_s
     rollout_deadline = started + rollout_wait_s
     delay = 2.0
+    sync_busy_retries = 0
     while True:
         try:
             return _run_cloudflare(job)
@@ -1518,8 +1695,19 @@ def _run_cloudflare_with_capacity_wait(job):
             if not rollout and slot < 2 and _cloudflare_alternate_safe(job):
                 job['_cloudflare_admission_slot'] = slot + 1
                 continue
+            if not rollout and not queued and not modal_alternate \
+                    and sync_busy_retries < config.CLOUDFLARE_SYNC_BUSY_RETRIES:
+                # The 429 stored nothing under the refused id, so it was never
+                # accepted. A new nonce is a new identity on another shard.
+                sync_busy_retries += 1
+                job.pop("_cloudflare_sync_nonce", None)
+                time.sleep(random.uniform(0.5, 1.5)
+                           * (2 ** (sync_busy_retries - 1)))
+                continue
             remaining = (rollout_deadline if rollout else deadline) - time.monotonic()
             if remaining <= 0:
+                if rollout:
+                    raise _deploy_in_progress(job, exc) from exc
                 raise
             if rollout:
                 # Give staged containers time to retire, rather than waking
@@ -1762,7 +1950,10 @@ def _run_across_media_egress(job):
     providers = []
     cloudflare_primary = _cloudflare_selected(job)
     if cloudflare_primary:
-        providers.append(("cloudflare", lambda: _run_cloudflare(job)))
+        # Same admission policy as every other id-less child: a provably
+        # unaccepted busy shard retries on a fresh identity before failing.
+        providers.append(("cloudflare",
+                          lambda: _run_cloudflare_with_capacity_wait(job)))
     if config.MODAL_EXECUTOR_ENABLED and (
             not cloudflare_primary or config.CLOUDFLARE_MODAL_FALLBACK):
         providers.append(("modal", lambda: _run_modal(
