@@ -4,6 +4,13 @@ The model may choose the treatment, but it may not choose whether the result
 is checked.  Every immutable EDL write gets a manifest; every complete preview
 gets a version-stamped record.  Rules here identify concrete corruption or a
 missing evidence contract, not subjective effect quotas.
+
+Only ERROR findings are unresolved repairs (status ``repair_required``, the
+Studio export gate, continuation slices).  Craft heuristics — taste notes,
+zoom/SFX purpose metadata, mechanical-pattern and reframe-coverage checks —
+are recorded with severity ``advisory``: durable evidence the editor can act
+on ("advisory: keep if intentional"), never a reason a premium, dense edit
+cannot complete or export.
 """
 
 from __future__ import annotations
@@ -24,14 +31,28 @@ NON_JUSTIFIABLE_FINDINGS = {
     "complete_preview_missing", "caption_render_evidence_missing",
     "corrupt_glyph", "music_starts_after_program", "invalid_music_span",
     "requested_duration_outside_target", "invisible_manual_caption",
-    "requested_transitions_missing",
+    "requested_transitions_missing", "invisible_motion_graphic",
 }
+
+# Craft heuristics, not defects. They stay in the durable record (and in the
+# editor's render result) but never block completion or export: a dense,
+# premium reel with ten aimed zooms and thirteen purposeful sounds used to
+# fail verification on exactly these codes.
+ADVISORY_FINDINGS = {
+    "zoom_missing_purpose", "zoom_unmeasured_target",
+    "zoom_crosses_shots_without_targets", "mechanical_zoom_pattern",
+    "scene_unaware_reframe", "duplicate_broll_window",
+    "music_missing_treatment_purpose", "sfx_missing_trigger",
+    "mechanical_sfx_pattern", "taste_advisory",
+}
+ADVISORY_LABEL = "advisory: keep if intentional"
 
 
 _DEPARTMENTS = {
     "keep": "story", "speed": "story", "inserts": "broll",
     "overlays": "broll", "captions": "captions", "caption_mutes": "captions",
-    "texts": "graphics", "vectors": "graphics", "music": "music",
+    "texts": "graphics", "vectors": "graphics", "motion": "graphics",
+    "music": "music",
     "sfx": "sfx", "voiceover": "audio", "volume": "audio",
     "frame": "reframe", "effects": "motion_color", "source_clean": "cleanup",
     "patches": "cleanup",
@@ -140,15 +161,40 @@ def build_change_manifest(project_id, version, previous, current, change,
 
 
 def _finding(code, department, message, evidence=None, repair=None,
-             severity="error"):
+             severity=None):
+    if severity is None:
+        severity = "advisory" if code in ADVISORY_FINDINGS else "error"
     return {"code": code, "department": department, "severity": severity,
             "message": message, "evidence": evidence or {},
             "repair": repair}
 
 
+def is_blocking(row):
+    """Whether one durable finding is a real defect that must be repaired."""
+    if not isinstance(row, dict):
+        return True
+    return row.get("severity", "error") != "advisory" and \
+        row.get("code") not in ADVISORY_FINDINGS
+
+
+def _motion_strings(value):
+    """Every string inside a motion graphic's params (copy, labels, lists)."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _motion_strings(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _motion_strings(item)
+
+
 def _text_corruption_findings(edl):
     findings = []
     texts = [row.get("text") for row in edl.get("texts") or []]
+    texts += [value for row in edl.get("motion") or []
+              if isinstance(row, dict)
+              for value in _motion_strings(row.get("params") or {})]
     captions = edl.get("captions")
     if isinstance(captions, list):
         texts += [row.get("text") for row in captions]
@@ -391,6 +437,21 @@ def _audio_findings(edl):
                 f"SFX {row.get('id')} has no visible/narrative transition trigger.",
                 {"at": row.get("at"), "asset_key": row.get("storage_key")},
                 "name the on-screen/narrative trigger or remove the sound"))
+    # A motion graphic's owned cue stack ('mg_<id>_sfxN', e.g. one tick per
+    # list item) is ONE designed sound moment that moves with its graphic,
+    # so it counts once in the repetition pattern below.
+    seen_owners = set()
+    collapsed = []
+    for row in sorted(sfx, key=lambda row: float(row.get("at", 0))):
+        sid = str(row.get("id") or "")
+        owner = (sid.rsplit("_sfx", 1)[0]
+                 if sid.startswith("mg_") and "_sfx" in sid else None)
+        if owner:
+            if owner in seen_owners:
+                continue
+            seen_owners.add(owner)
+        collapsed.append(row)
+    sfx = collapsed
     if len(sfx) >= 3:
         ordered = sorted(sfx, key=lambda row: float(row.get("at", 0)))
         gaps = [round(float(b.get("at", 0)) - float(a.get("at", 0)), 2)
@@ -557,9 +618,39 @@ def _request_findings(edl, request_text):
     return findings
 
 
+def _motion_findings(edl):
+    """A motion graphic that starts at/after the program end draws nothing.
+
+    Program-clock graphics survive a later cut unchanged, so shortening the
+    story can strand a title or card past the last frame (and its owned
+    sounds with it). That is an invalid span, like a caption in a cut.
+    """
+    findings = []
+    duration = float(program_duration(edl) or 0.0)
+    for row in edl.get("motion") or []:
+        if not isinstance(row, dict):
+            continue
+        try:
+            start = float(row.get("start", 0))
+        except (TypeError, ValueError):
+            continue
+        if duration > 0 and start >= duration - .05:
+            findings.append(_finding(
+                "invisible_motion_graphic", "graphics",
+                (f"Motion graphic {row.get('id') or '?'} starts at "
+                 f"{start:.2f}s, at/after the {duration:.2f}s program "
+                 "ending, so it never appears."),
+                {"id": row.get("id"), "start": start,
+                 "program_end": duration},
+                ("move it onto the beat it belongs to with "
+                 "set_motion_graphic, or remove it")))
+    return findings
+
+
 def deterministic_findings(edl, index=None, request_text=None):
     return (_text_corruption_findings(edl)
             + _caption_findings(edl)
+            + _motion_findings(edl)
             + _zoom_findings(edl, index or {})
             + _reframe_findings(edl, index or {})
             + _media_findings(edl)
@@ -572,7 +663,12 @@ def build_verification_record(project_id, version, manifest, edl, index,
                               preview=None, proof_ranges=None,
                               visual_findings=None, audio_findings=None,
                               story_findings=None, repairs=None,
-                              justified=None, request_text=None):
+                              justified=None, request_text=None,
+                              advisory_findings=None):
+    """Version-stamped verification. ``visual/audio/story_findings`` are
+    review lines that already passed their reviewer's blocking bar; taste
+    notes and other craft observations go in ``advisory_findings`` and are
+    recorded without ever making the version ``repair_required``."""
     findings = deterministic_findings(edl, index, request_text=request_text)
     for department, rows in (("visual_review", visual_findings or []),
                              ("audio_review", audio_findings or []),
@@ -581,6 +677,10 @@ def build_verification_record(project_id, version, manifest, edl, index,
             findings.append(_finding(
                 "review_finding", department, str(row)[:1000],
                 severity="error", repair="repair or explicitly justify from direct evidence"))
+    for row in advisory_findings or []:
+        findings.append(_finding(
+            "taste_advisory", "craft", str(row)[:1000],
+            severity="advisory", repair=ADVISORY_LABEL))
     preview = preview or {}
     complete_preview = (int(preview.get("edl_version") or -1) == int(version)
                         and not preview.get("scope") == "changes"
@@ -622,7 +722,8 @@ def build_verification_record(project_id, version, manifest, edl, index,
     justified_ids = {str(row.get("finding_id")) for row in (justified or [])
                      if isinstance(row, dict) and row.get("finding_id")}
     unresolved = [row for row in findings
-                  if row["code"] not in justified_codes
+                  if is_blocking(row)
+                  and row["code"] not in justified_codes
                   and row["finding_id"] not in justified_ids]
     justifications = list(justified or [])
     return {
@@ -643,6 +744,7 @@ def build_verification_record(project_id, version, manifest, edl, index,
             if preview.get(key) is not None},
         "findings": findings,
         "unresolved_findings": unresolved,
+        "advisories": [row for row in findings if not is_blocking(row)],
         "repairs": list(repairs or []), "justifications": justifications,
     }
 

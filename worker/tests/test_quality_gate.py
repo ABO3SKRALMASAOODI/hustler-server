@@ -74,12 +74,38 @@ def test_sfx_permission_is_unrestricted_and_spacing_is_advisory():
                                               "make this edit nice")
     assert not any("explicit sound-design request" in x for x in unasked)
     assert any("only 0.20s apart" in x for x in unasked)
+    # Neither sound has a knowable role: say so, never "the same role".
+    assert any("no distinguishable role" in x for x in unasked)
+    assert not any("same role" in x for x in unasked)
+    impacts = default_edl(20.0)
+    impacts["sfx"] = [
+        dict(proposed["sfx"][0], storage_key="sfx/1/kit-impact_hard-ab.wav"),
+        dict(proposed["sfx"][1], storage_key="sfx/1/kit-impact_soft-cd.wav")]
+    assert any("play the same role (hit)" in x for x in
+               quality_gate.advisory_findings(previous, impacts))
 
     spaced = default_edl(20.0)
     spaced["sfx"] = [dict(proposed["sfx"][0]),
                      dict(proposed["sfx"][1], at=7.0)]
     assert quality_gate.advisory_findings(
         previous, spaced, "add sound effects to both visible clicks") == []
+
+
+def test_layered_sfx_of_different_roles_are_one_designed_hit():
+    """Oct 2026: a whoosh pre-rolled into an impact, or a sub under a hit, is
+    standard premium sound design, not a muddy accident."""
+    previous = default_edl(20.0)
+    layered = default_edl(20.0)
+    layered["sfx"] = [
+        {"id": "sx1", "storage_key": "sfx/1/kit-whoosh_hard-ab.wav",
+         "at": 4.8, "gain_db": -6.0},
+        {"id": "sx2", "storage_key": "sfx/1/kit-impact_hard-cd.wav",
+         "at": 5.0, "gain_db": -4.0},
+        {"id": "sx3", "storage_key": "sfx/1/kit-sub_drop-ef.wav",
+         "at": 5.0, "gain_db": -6.0},
+    ]
+    assert not any("apart" in x for x in
+                   quality_gate.advisory_findings(previous, layered))
 
 
 def test_audio_audition_is_not_a_permission_helper():

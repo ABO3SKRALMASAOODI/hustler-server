@@ -41,12 +41,43 @@ def test_motion_finding_preserves_exact_repair_identity():
     finding = report["findings"][0]
     assert finding["target_id"] == "z-proof"
     assert finding["motion_motif"] == "proof_lock"
-    line = preview_critic.repair_lines(report)[0]
+    # Oct 2026: motion is judged from sampled stills, so motion_* findings
+    # are advisory observations. They keep their exact repair identity but
+    # never block delivery or trigger a repair pass.
+    assert report["verdict"] == "pass"
+    assert report["model_verdict"] == "repair"
+    assert preview_critic.repair_lines(report) == []
+    line = preview_critic.advisory_lines(report)[0]
     assert "target=z-proof" in line and "motif=proof_lock" in line
+    assert "advisory: keep if intentional" in line
+    assert "advisory major/motion_path" in preview_critic.summary_line(report)
 
-    untargeted = {"verdict": "repair", "findings": [dict(
-        finding, target_id=None)]}
-    assert preview_critic.repair_lines(untargeted) == []
+
+def test_motion_pacing_and_effect_findings_never_block_from_stills():
+    for category in ("pacing_rhythm", "motion_path", "motion_trigger",
+                     "motion_settle", "effect"):
+        report = preview_critic.parse_report(
+            '{"verdict":"repair","findings":[{"severity":"blocker",'
+            f'"category":"{category}","time_s":3.0,"target_id":"z1",'
+            '"evidence":"tile 4 shows a blown-out white frame",'
+            '"repair":"remove the flash","confidence":0.99}]}')
+        assert report["verdict"] == "pass", category
+        assert preview_critic.repair_lines(report) == [], category
+
+
+def test_only_blocker_or_high_confidence_major_blocks():
+    def one(severity, confidence, category="caption_collision"):
+        return {"verdict": "repair", "findings": [{
+            "severity": severity, "category": category, "time_s": 2.0,
+            "target_id": None, "motion_motif": None,
+            "evidence": "the caption sits across the speaker's mouth",
+            "repair": "move captions below the chin",
+            "confidence": confidence}]}
+    assert preview_critic.repair_lines(one("blocker", .75))
+    assert preview_critic.repair_lines(one("major", .92))
+    assert preview_critic.repair_lines(one("major", .85)) == []
+    assert preview_critic.repair_lines(one("minor", .99)) == []
+    assert preview_critic.advisory_lines(one("major", .85))
 
 
 def test_priority_context_survives_large_supporting_history():
@@ -70,13 +101,30 @@ def test_malformed_or_low_confidence_review_cannot_block_delivery():
     assert preview_critic.repair_lines(report) == []
 
 
-def test_weak_craft_rubric_forces_repair_and_relevance_needs_timed_evidence():
+def test_weak_rubric_alone_never_blocks_and_relevance_needs_timed_evidence():
+    # Oct 2026: a weak rubric dimension (formerly including "restraint") is
+    # context for the editor, not a gate; a major finding blocks only at
+    # MAJOR_BLOCK_CONFIDENCE.
+    weak_only = preview_critic.parse_report(
+        '{"verdict":"repair","findings":['
+        '{"severity":"major","category":"narrative_relevance",'
+        '"time_s":8.4,"evidence":"generic skyline contradicts the named product reveal",'
+        '"repair":"replace it with footage of the product",'
+        '"confidence":0.87}],"rubric":{"retention_energy":{'
+        '"level":"weak","evidence":"one static plate with subtitles",'
+        '"confidence":0.9},"restraint":{"level":"weak",'
+        '"evidence":"busy","confidence":0.95}}}')
+    assert weak_only["verdict"] == "pass"
+    assert weak_only["rubric"]["retention_energy"]["level"] == "weak"
+    assert "restraint" not in weak_only["rubric"]
+    assert preview_critic.repair_lines(weak_only) == []
+
     report = preview_critic.parse_report(
         '{"verdict":"pass","findings":['
         '{"severity":"major","category":"narrative_relevance",'
         '"time_s":8.4,"evidence":"generic skyline contradicts the named product reveal",'
         '"repair":"replace it with footage of the product",'
-        '"confidence":0.87}],"rubric":{"narrative_support":{'
+        '"confidence":0.93}],"rubric":{"narrative_support":{'
         '"level":"weak","evidence":"the cutaway does not show the named subject",'
         '"confidence":0.9}}}')
 
@@ -162,9 +210,13 @@ def test_independent_review_sees_edited_output_and_raw_source(monkeypatch,
     assert "sound=one soft impact then voice" in seen["context"]
     assert "purpose=prove retention collapse" in seen["context"]
     assert "mobile analytics retention graph" in seen["context"]
-    assert "FORMAT-SPECIFIC VISUAL BENCHMARK: podcast_conversation" in \
+    # A 30s 9:16 interview program is a podcast REEL (Oct 2026): the critic
+    # judges it against the short-form reel contract, not the long-form
+    # conversation contract that rejected "constant punch-ins ... or SFX".
+    assert "FORMAT-SPECIFIC VISUAL BENCHMARK: podcast_reel" in \
         seen["context"]
-    assert "speaker-aware framing" in seen["context"]
+    assert "face stays composed and unobstructed" in seen["context"]
+    assert "feature demo" not in seen["context"]
     assert all(os.path.exists(path) for path in seen["paths"])
 
 
@@ -327,6 +379,11 @@ def test_critic_compares_framing_treatment_across_shots(monkeypatch):
     assert report["verdict"] == "pass"
     assert "compare treatment ACROSS SHOTS" in seen["prompt"]
     assert "close shot should normally fill" in seen["prompt"]
+    # Retention energy and finish quality replace the old restraint rubric.
+    assert '"retention_energy"' in seen["prompt"]
+    assert '"finish_quality"' in seen["prompt"]
+    assert "restraint" not in seen["prompt"]
+    assert "STILLS CANNOT PROVE MOTION" in seen["prompt"]
 
 
 def test_new_preview_version_with_proven_craft_defect_gets_repair_decision(

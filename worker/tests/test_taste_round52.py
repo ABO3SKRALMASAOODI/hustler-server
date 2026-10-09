@@ -56,7 +56,39 @@ def _crit(edl, index=None, ask=""):
 print("== the opening ==")
 CAPS = {"mode": "from_transcript"}
 base = {"keep": [[0.0, 40.0]], "effects": {}, "captions": dict(CAPS)}
-check("a well-made reel raises nothing at all", _crit(base) == [])
+# Oct 2026: a captioned plate with no camera move, graphic or sound is the
+# owner's own 2.6/10 short, not a well-made reel. It raises exactly ONE
+# advisory note (flat static delivery); the fixture below adds the minimum
+# design that clears it, so every other finding in this file is still
+# caused by what the test added.
+f = _crit(base)
+check("a captioned plate with a silent mix raises only the flat-delivery note",
+      len(f) == 1 and fired(f, "flat static delivery"))
+designed = dict(base, effects={"zooms": [{"id": "zd", "start": 6.0,
+                                          "end": 8.0, "strength": 0.12,
+                                          "mode": "ease"}]},
+                music=[{"id": "md", "start": 0.0, "storage_key": "library:x",
+                        "gain_db": -18.0, "duck": True}])
+check("a designed reel raises nothing at all", _crit(designed) == [])
+f = _crit(dict(base, music=designed["music"]))
+check("...music alone leaves the picture flagged as static",
+      fired(f, "static picture") and not fired(f, "flat static delivery"))
+f = _crit(dict(base, effects=designed["effects"]))
+check("...a camera move alone leaves the mix flagged as silent",
+      fired(f, "silent mix") and not fired(f, "static picture"))
+f = _crit(dict(base, effects={"frame_shifts": []}),
+          ask="keep it static, no music")
+check("...and an explicit static/no-music ask suppresses it",
+      not any(fired(f, n) for n in ("flat static", "static picture",
+                                    "silent mix")))
+f = _crit(dict(base, keep=[[0.0, 15.0]]))
+check("...a 15s reel is too short to judge as flat",
+      not fired(f, "flat static delivery"))
+wide = {"words": _index()["words"], "video": {"width": 1920, "height": 1080},
+        "shots": [{"t0": 0.0, "t1": 40.0}]}
+f = taste.critique(base, wide, Timeline([[0.0, 40.0]], [], []), 1920, 1080, "")
+check("...and long-form landscape is never asked for reel motion",
+      not fired(f, "flat static delivery"))
 
 f = _crit(dict(base, effects={"fade_in_s": 1.0}))
 check("fade from black on a vertical reel is flagged",
@@ -81,21 +113,44 @@ f = taste.critique(dict(base, effects={"fade_in_s": 1.0, "fade_out_s": 1.0}),
 check("landscape keeps its fades", not fired(f, "fade from BLACK"))
 
 print("== zoom rhythm ==")
-f = _crit(dict(base, effects={"zooms": [{"id": "z1", "start": 0.3, "end": 2.0,
-                                         "strength": 0.4}]}))
-check("a zoom in the first second is flagged", fired(f, "first zoom fires"))
+# Oct 2026 reel profile (taste.REEL_*): a vertical/square output of 120s or
+# less is measured against the owner's premium reel references, where a
+# punched-in hook at 0s IS the pattern interrupt and framing changes every
+# few seconds. These used to be flagged — and, while taste findings blocked
+# verification, a premium-density reel could not ship. Long-form keeps the
+# original limits (checked on the landscape fixture below).
+hook = {"zooms": [{"id": "z1", "start": 0.3, "end": 2.0, "strength": 0.4}]}
+f = _crit(dict(base, effects=hook))
+check("a hook punch in a reel's first second is a device, not a bump",
+      not fired(f, "first zoom fires"))
+f = taste.critique(dict(base, effects=hook), land, Timeline([[0.0, 40.0]], [], []),
+                   1920, 1080, "")
+check("...but on long-form a zoom in the first second is still flagged",
+      fired(f, "first zoom fires"))
 
 five = [{"id": f"z{i}", "start": 2.0 + i * 7.0, "end": 4.0 + i * 7.0,
          "strength": 0.35, "mode": "punch"} for i in range(5)]
 f = _crit(dict(base, effects={"zooms": five}))
-check("five zooms in 40s is flagged as density", fired(f, "zooms across"))
-check("...and identical zooms are flagged as mechanical",
+check("five zooms in a 40s reel is premium density, not over-zooming",
+      not fired(f, "zooms across"))
+check("...but identical zooms are still flagged as mechanical",
       fired(f, "identical"))
+# Past one camera move every 3s the frame never settles, even on a reel.
+sixteen = [{"id": f"z{i}", "start": 0.5 + i * 2.4, "end": 1.9 + i * 2.4,
+            "strength": 0.1 + 0.02 * (i % 4), "mode": "ease"}
+           for i in range(16)]
+f = _crit(dict(base, effects={"zooms": sixteen}))
+check("sixteen zooms in a 40s reel is flagged as density",
+      fired(f, "zooms across"))
 
 two_close = [{"id": "z1", "start": 5.0, "end": 6.0, "strength": 0.3},
-             {"id": "z2", "start": 7.0, "end": 8.0, "strength": 0.5}]
+             {"id": "z2", "start": 6.0, "end": 7.0, "strength": 0.5}]
 f = _crit(dict(base, effects={"zooms": two_close}))
-check("adjacent zooms are flagged", fired(f, "apart"))
+check("adjacent zooms (1s apart) are flagged", fired(f, "apart"))
+two_spaced = [{"id": "z1", "start": 5.0, "end": 6.0, "strength": 0.3},
+              {"id": "z2", "start": 7.0, "end": 8.0, "strength": 0.5}]
+f = _crit(dict(base, effects={"zooms": two_spaced}))
+check("...but two seconds apart is reel rhythm", not fired(f, "apart"))
 
 print("== junction effects ==")
 jump_cuts = {"keep": [[0.0, 4.0], [5.0, 9.0], [10.0, 14.0], [15.0, 19.0],
@@ -114,12 +169,55 @@ f = _crit(scene_scoped, _index(words=40, shots=1))
 check("...and scope='scene' is not", not fired(f, "supposed to be INVISIBLE"))
 
 print("== sound ==")
+# Reel profile: nine purposeful sounds in 40s is ordinary premium sound
+# design; a sound on every second is still carpet.
 sfx = [{"id": f"s{i}", "at": 1.0 + i * 3.0} for i in range(9)]
 f = _crit(dict(base, sfx=sfx))
-check("carpeted sound effects are flagged", fired(f, "sound effects in"))
+check("nine sound events in a 40s reel are not carpet",
+      not fired(f, "sound events in"))
+sfx = [{"id": f"s{i}", "at": 0.5 + i * 1.5} for i in range(25)]
+f = _crit(dict(base, sfx=sfx))
+check("carpeted sound effects are flagged", fired(f, "sound events in"))
 f = _crit(dict(base, sfx=[{"id": "s1", "at": 5.0},
                           {"id": "s2", "at": 5.2}]))
-check("two sfx on the same instant are flagged", fired(f, "muddy"))
+check("two same-role sfx 0.2s apart are flagged as a flam", fired(f, "muddy"))
+f = _crit(dict(base, sfx=[
+    {"id": "s1", "at": 4.8, "storage_key": "sfx/9/kit-whoosh_hard-ab12.wav"},
+    {"id": "s2", "at": 5.0, "storage_key": "sfx/9/kit-impact_hard-cd34.wav"}]))
+check("a whoosh pre-rolled into an impact is a designed layer",
+      not fired(f, "muddy"))
+f = _crit(dict(base, sfx=[
+    {"id": "s1", "at": 5.0, "storage_key": "sfx/a.mp3", "purpose": "hit"},
+    {"id": "s2", "at": 5.02, "storage_key": "sfx/b.mp3", "purpose": "hit"}]))
+check("two different files stacked on one instant are one thicker hit",
+      not fired(f, "muddy"))
+f = _crit(dict(base, sfx=[
+    {"id": "mg_mg1_sfx1", "at": 5.0, "purpose": "pop for motion graphic mg1"},
+    {"id": "mg_mg1_sfx2", "at": 5.3, "purpose": "pop for motion graphic mg1"}]))
+check("a motion graphic's own cue stack is one designed moment",
+      not fired(f, "muddy"))
+# A layered stack is ONE instant, measured from its first sound: alternating
+# whoosh/impact cues every 0.3s used to chain into a single "event" and hid
+# exactly the carpet the density note exists to catch.
+carpet = [{"id": f"c{i}", "at": 1.0 + i * 0.3,
+           "storage_key": ("sfx/9/kit-whoosh_soft-aa.wav" if i % 2 else
+                           "sfx/9/kit-impact_soft-bb.wav")}
+          for i in range(30)]
+check("an alternating whoosh/impact carpet is many events, not one",
+      len(taste.sfx_events(carpet)) >= 10)
+f = _crit(dict(base, keep=[[0.0, 20.0]], sfx=carpet))
+check("...and the reel density note fires on it", fired(f, "sound events in"))
+check("a whoosh into an impact is still one event",
+      len(taste.sfx_events(carpet[:2])) == 1)
+f = _crit(dict(base, sfx=[{"id": "s1", "at": 5.0, "purpose": "accent"},
+                          {"id": "s2", "at": 5.2, "purpose": "accent"}]))
+check("a flam of role-less sounds says so instead of claiming one role",
+      fired(f, "no distinguishable role") and not fired(f, "same role"))
+f = _crit(dict(base, sfx=[
+    {"id": "s1", "at": 5.0, "storage_key": "sfx/9/kit-impact_hard-aa.wav"},
+    {"id": "s2", "at": 5.2, "storage_key": "sfx/9/kit-impact_soft-bb.wav"}]))
+check("a flam of two impacts names the shared role",
+      fired(f, "same role (hit)"))
 
 f = _crit(dict(base, music=[{"id": "m1", "start": 0.0, "end": 20.0,
                              "storage_key": "library:x"}]))
@@ -149,6 +247,8 @@ check("clean edit yields no audit line", taste.audit_line([]) == "")
 line = taste.audit_line(["a", "b", "c", "d", "e", "f"])
 check("audit line caps and counts the rest", "(+2 more)" in line)
 check("audit line tells the agent to re-render", "Re-render" in line)
+check("audit line is labelled advisory, never a mandate",
+      "advisory: keep if intentional" in line and "never block" in line)
 
 print("== caption safe area (vertical platform chrome) ==")
 check("vertical bottom margin clears the UI band",

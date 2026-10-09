@@ -16,6 +16,32 @@ CONTRACT_VERSION = 2
 
 
 _CONTRACTS = {
+    # A Shorts child or a vertical/square program of 120s or less cut from a
+    # podcast/interview. It used to inherit podcast_conversation, whose
+    # long-form guardrails ("constant punch-ins, transitions or SFX turn
+    # conversation into a feature demo") steered every podcast reel toward a
+    # static plate with subtitles; the owner's premium references are the
+    # opposite. The story invariants carry over; the delivery is a designed
+    # short-form piece with its own motion, typography and sound system.
+    "podcast_reel": {
+        "driver": "one complete micro-story from a longer conversation, delivered as a designed short-form piece whose motion, typography and sound carry the speech",
+        "publish_ready": [
+            "the opening lands a pattern interrupt and the hook line within the first seconds, the setup the payoff depends on survives, and the story resolves or ends on a deliberate cliff",
+            "the speaker owns a composed, filled vertical frame, and framing changes (punch-ins, alternate scale, pushes) land on sentence turns, jump cuts and payoffs with stronger moves reserved for stronger lines",
+            "one designed type system (captions with a single accent role plus hero words, numbers and graphics on their spoken beats) and a sound layer (a bed under the voice and SFX edited to the visual events) make it feel finished",
+        ],
+        "visual_review": [
+            "the face stays composed and unobstructed through every reframe, punch-in and graphic; captions and graphics sit in face-free space above the platform UI band",
+            "visible change has rhythm and contrast: framing, type and graphic events vary in scale and timing instead of one static plate with subtitles",
+            "type hierarchy is deliberate (hero vs connector words, one accent role), graphics settle cleanly, and one committed grade/texture runs through the piece",
+        ],
+        "reject_if": [
+            "the clip starts or ends mid-thought, needs missing context, or splices unrelated answers into a synthetic claim",
+            "flat static delivery: one unchanging frame, a half-black or postage-stamp canvas, or a caption-only edit with no camera, type or sound design",
+            "decoration that covers the speaker's face or competes with the spoken line, or a silent mix where the beats needed sound",
+        ],
+        "evidence": ["kept micro-story transcript", "speaker framing per shot", "rendered type and motion states", "actual voice/music/SFX mix"],
+    },
     "podcast_conversation": {
         "driver": "a self-contained argument or exchange that preserves speaker intent",
         "publish_ready": [

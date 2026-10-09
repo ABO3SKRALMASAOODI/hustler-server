@@ -16,8 +16,10 @@ from collections import Counter
 import json
 from typing import Any, Dict, Iterable, List
 
+import taste
 
-SFX_MIN_SPACING_S = 0.35
+
+SFX_MIN_SPACING_S = taste.SFX_MIN_SPACING_S
 
 
 def _items(edl: Dict[str, Any], lane: str) -> List[Dict[str, Any]]:
@@ -153,19 +155,19 @@ def advisory_findings(previous: Dict[str, Any], proposed: Dict[str, Any],
                 gap = float(b.get("at")) - float(a.get("at"))
             except (TypeError, ValueError):
                 continue
-            # A motion graphic's own layered cues (whoosh into pop) are one
-            # designed hit, not two accidental ones.
-            owner_a = str(a.get("id") or "").rsplit("_sfx", 1)[0]
-            owner_b = str(b.get("id") or "").rsplit("_sfx", 1)[0]
-            if owner_a.startswith("mg_") and owner_a == owner_b:
-                continue
-            if gap < SFX_MIN_SPACING_S and (
+            # A motion graphic's own layered cues (whoosh into pop), sounds of
+            # DIFFERENT roles (a whoosh pre-rolled into an impact) and sounds
+            # stacked on one instant are one designed hit, not two
+            # accidental ones (taste.sfx_muddy_pair, shared with the audit).
+            if gap < SFX_MIN_SPACING_S and taste.sfx_muddy_pair(a, b) and (
                     str(a.get("id")) in new_ids or
                     str(b.get("id")) in new_ids):
                 findings.append(
                     f"sound effects {a.get('id') or '?'} and "
-                    f"{b.get('id') or '?'} are only {gap:.2f}s apart. They "
-                    "will read as one muddy/accidental hit; keep one.")
+                    f"{b.get('id') or '?'} are only {gap:.2f}s apart and "
+                    f"{taste.sfx_clash(a, b)}. They will read as one muddy, "
+                    "flammed hit; keep one, or layer different roles "
+                    "(a whoosh whose peak lands on an impact).")
                 break
 
     new_texts = _new_items(previous, proposed, "texts")

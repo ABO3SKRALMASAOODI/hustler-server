@@ -59,6 +59,9 @@ def test_review_uses_full_catalog_and_measured_context(monkeypatch):
     assert all(f'"preset":"{name}"' in seen["user"]
                for name in captions.PRESETS)
     assert "Do not reward novelty" in seen["system"]
+    # Retention energy, not restraint, is the short-form caption standard.
+    assert "RETENTION ENERGY" in seen["system"]
+    assert "restraint" not in seen["system"]
 
 
 def test_review_prefers_complete_real_pixel_catalog(monkeypatch):

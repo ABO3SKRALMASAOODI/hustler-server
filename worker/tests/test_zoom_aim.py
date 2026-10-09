@@ -345,13 +345,14 @@ def test_taste_adjacent_zooms_across_a_cut_are_deliberate():
     """Round 75: the audit's back-to-back-pushes rule made the agent DELETE
     a zoom the user explicitly asked to keep — the pair straddled a scene
     cut, where cut-plus-punch is a standard deliberate move. Same pair on
-    continuous footage still fires."""
+    continuous footage still fires. (Oct 2026: a vertical reel's spacing
+    limit is taste.REEL_ZOOM_MIN_SPACING_S, so the pair is 1.4s apart.)"""
     import taste
     index = {"words": [{"w": f"w{i}", "t0": 0.5 + i * 0.4,
                         "t1": 0.8 + i * 0.4} for i in range(30)],
              "video": {"width": 1080, "height": 1920},
              "shots": [{"t0": 0.0, "t1": 15.0}]}
-    zooms = [{"id": "z1", "start": 7.6, "end": 9.97, "strength": 0.15,
+    zooms = [{"id": "z1", "start": 8.6, "end": 9.97, "strength": 0.15,
               "mode": "ease", "cx": 0.0, "cy": 1.0},
              {"id": "z2", "start": 10.0, "end": 12.0, "strength": 0.15,
               "mode": "ease", "cx": 0.0, "cy": 1.0}]

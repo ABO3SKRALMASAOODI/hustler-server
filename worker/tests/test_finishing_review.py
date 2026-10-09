@@ -21,12 +21,20 @@ def context():
     return ctx, row
 
 
-def test_real_transition_defect_is_found_before_render_and_survives_unrelated_write():
+def test_transition_cadence_is_visible_before_render_as_an_advisory():
+    """Oct 2026: taste findings are advisory craft notes. The cadence risk
+    is still surfaced before render and across unrelated writes, but it is
+    labelled 'advisory: keep if intentional' and never demanded as a
+    repair (it used to force repair loops on premium-density reels)."""
     ctx, row = context()
     messages = []
     finishing_review.refresh(ctx, messages)
-    assert "10 'dip_black' transitions" in messages[-1]['content']
-    assert "set_transitions('none')" in messages[-1]['content']
+    content = messages[-1]['content']
+    assert "10 'dip_black' transitions" in content
+    assert "set_transitions('none')" in content
+    assert 'advisory: keep if intentional' in content
+    assert 'Repair these current findings' not in content
+    assert finishing_review.current_findings(ctx, row) == []
     row['version'] += 1
     row['json']['effects']['grade'] = 'warm'
     finishing_review.refresh(ctx, messages)
@@ -35,13 +43,38 @@ def test_real_transition_defect_is_found_before_render_and_survives_unrelated_wr
     assert "10 'dip_black' transitions" in messages[0]['content']
 
 
+def _corrupt(row):
+    # A real, deterministic defect: a replacement glyph in designed text.
+    row['json']['texts'] = [dict(id='tx1', text='bad \ufffd title',
+                                 start=0.0, end=1.0)]
+
+
+def test_real_defect_is_a_repair_and_survives_unrelated_write():
+    ctx, row = context()
+    _corrupt(row)
+    messages = []
+    finishing_review.refresh(ctx, messages)
+    content = messages[-1]['content']
+    assert 'Repair these current findings' in content
+    assert 'replacement/null glyphs' in content
+    # The craft note rides along, separately labelled.
+    assert 'advisory: keep if intentional' in content
+    row['version'] += 1
+    row['json']['effects']['grade'] = 'warm'
+    finishing_review.refresh(ctx, messages)
+    assert len(messages) == 1
+    assert 'replacement/null glyphs' in messages[0]['content']
+
+
 def test_repair_requires_current_preview_and_pass_does_not_reopen_the_defect():
     ctx, row = context()
+    _corrupt(row)
     finding = {'message': finishing_review.current_findings(ctx, row)[0]}
     ctx.verification_records[73] = dict(complete_preview_passed=True,
                                       unresolved_findings=[finding])
     row['version'] = 74
     row['json']['effects']['transition'] = None
+    row['json']['texts'] = []
     note = finishing_review.directive(ctx)
     assert 'prior-version findings' in note
     assert 'Not yet verified' in note
@@ -49,15 +82,46 @@ def test_repair_requires_current_preview_and_pass_does_not_reopen_the_defect():
                                       unresolved_findings=[])
     note = finishing_review.directive(ctx)
     assert 'finish now with the saved result' in note
-    assert 'dip_black' not in note
+    assert 'glyph' not in note
 
 
 def test_current_justified_finding_is_not_reopened():
     ctx, row = context()
+    _corrupt(row)
     findings = [{'message': f} for f in finishing_review.current_findings(ctx, row)]
+    assert findings
     ctx.verification_records[73] = dict(status='justified', complete_preview_passed=True,
                                       findings=findings, unresolved_findings=[])
     assert 'finish now' in finishing_review.directive(ctx)
+
+
+def test_advisory_record_rows_are_never_presented_as_repairs():
+    ctx, row = context()
+    row['json']['effects']['transition'] = None
+    ctx.verification_records[73] = dict(status='passed', unresolved_findings=[
+        dict(code='taste_advisory', severity='advisory',
+             message='13 sound events in 45s')])
+    note = finishing_review.directive(ctx)
+    assert note is None or 'Repair these current findings' not in note
+
+
+def test_unverified_version_with_advisories_never_reads_as_clear_to_finish():
+    """Before a complete preview there is no evidence either way: the
+    advisory-only directive must not say 'no blocking finding'."""
+    ctx, row = context()
+    note = finishing_review.directive(ctx)
+    assert 'has not been verified yet (render a complete preview)' in note
+    assert 'No blocking finding' not in note
+    assert 'advisory: keep if intentional' in note
+    # Once a complete preview of THIS version passed review, the same
+    # advisories ride along under an honest "no blocking finding".
+    ctx.verification_records[73] = dict(
+        status='repair_required', complete_preview_passed=True,
+        unresolved_findings=[dict(code='taste_advisory', severity='advisory',
+                                  message='10 transitions in 44s')])
+    note = finishing_review.directive(ctx)
+    assert 'No blocking finding is open for this version.' in note
+    assert 'not been verified' not in note
 
 
 def test_new_user_turn_is_not_closed_by_an_old_pass():

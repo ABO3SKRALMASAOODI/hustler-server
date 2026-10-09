@@ -49,7 +49,10 @@ def test_manifest_names_departments_ranges_and_required_evidence():
         manifest["required_verification_evidence"]
 
 
-def test_unmotivated_repetitive_sfx_is_publish_blocking():
+def test_unmotivated_repetitive_sfx_is_recorded_as_advisory():
+    """Oct 2026: purpose metadata and repetition patterns are craft
+    heuristics. They stay in the durable record as advisories but no longer
+    make a version repair_required (premium sound design failed on them)."""
     edl = default_edl(20)
     edl["sfx"] = [
         {"id": f"sx{i}", "storage_key": "audio/whoosh.wav", "at": at,
@@ -58,6 +61,108 @@ def test_unmotivated_repetitive_sfx_is_publish_blocking():
     codes = _codes(edl)
     assert "sfx_missing_trigger" in codes
     assert "mechanical_sfx_pattern" in codes
+    record = quality_verifier.build_verification_record(
+        1, 2, {}, edl, {}, preview={"edl_version": 2, "duration_s": 20})
+    assert record["status"] == "passed"
+    assert {row["code"] for row in record["advisories"]} >= {
+        "sfx_missing_trigger", "mechanical_sfx_pattern"}
+    assert all(row["severity"] == "advisory" for row in record["advisories"])
+
+
+def _premium_reel():
+    """The agent-surface simulation: a 45s 9:16 podcast reel at top human
+    editor density (10 eased aimed zooms, 13 purposeful SFX, a whip, a
+    flash+shake hit, a hook title, reels captions, a music bed)."""
+    words, t = [], 0.2
+    while t < 45:
+        words.append({"w": "word", "t0": round(t, 2), "t1": round(t + .25, 2)})
+        t += .32
+    index = {"video": {"duration": 45.0, "width": 1920, "height": 1080},
+             "words": words, "speakers": 2,
+             "shots": [{"id": "s1", "start": 0, "end": 22},
+                       {"id": "s2", "start": 22, "end": 45}]}
+    zooms = [{"id": f"zm{i + 1}", "start": at, "end": at + 3.6,
+              "strength": .12 + .03 * (i % 3), "mode": "ease", "cx": .5,
+              "cy": .4, "target_measured": True, "purpose": f"beat {i}",
+              "target_evidence_ids": [f"e{i}"]}
+             for i, at in enumerate([1.5, 5.5, 9.5, 13.5, 17.5, 23.0, 27.0,
+                                     31.0, 35.0, 39.0])]
+    sfx = [{"id": f"sx{i + 1}", "at": at, "storage_key": f"k{i % 4}",
+            "gain_db": -10, "purpose": f"hit {i}"}
+           for i, at in enumerate([0.0, 1.5, 5.5, 9.5, 13.5, 17.5, 22.0,
+                                   23.0, 27.0, 31.0, 35.0, 39.0, 43.0])]
+    edl = {"keep": [[0.0, 45.0]], "frame": {"ratio": "9:16", "mode": "crop"},
+           "captions": {"mode": "from_transcript",
+                        "style": {"preset": "reels"}},
+           "effects": {"zooms": zooms,
+                       "transition": {"style": "whip_left",
+                                      "duration_s": .25},
+                       "stylize": [{"id": "st1", "kind": "flash",
+                                    "start": 22.0, "end": 22.3,
+                                    "intensity": .6},
+                                   {"id": "st2", "kind": "shake",
+                                    "start": 22.0, "end": 22.4,
+                                    "intensity": .4}]},
+           "sfx": sfx,
+           "texts": [{"id": "t1", "text": "HOOK", "start": 0.0, "end": 2.5,
+                      "template": "title"}],
+           "music": [{"id": "m1", "storage_key": "mk", "start": 0,
+                      "end": 45, "gain_db": -20, "purpose": "bed"}]}
+    return edl, index
+
+
+def test_premium_density_reel_passes_verification_with_advisories():
+    import taste
+    from timeline import Timeline
+    edl, index = _premium_reel()
+    notes = taste.critique(edl, index, Timeline(edl["keep"], [], []),
+                           src_w=1920, src_h=1080,
+                           user_asked="make a premium viral reel")
+    # No density finding fires on premium reel density any more.
+    for phrase in ("zooms across", "sound events in",
+                   "attention-grabbing devices", "full-frame devices",
+                   "restraint"):
+        assert not any(phrase in note for note in notes), (phrase, notes)
+    record = quality_verifier.build_verification_record(
+        1, 2, {}, edl, index,
+        preview={"edl_version": 2, "storage_key": "x", "caption_pages": [1]},
+        advisory_findings=notes,
+        request_text="make a premium viral reel")
+    assert record["status"] == "passed", record["unresolved_findings"]
+    assert record["unresolved_findings"] == []
+    codes = {row["code"] for row in record["advisories"]}
+    assert "scene_unaware_reframe" in codes
+    assert "taste_advisory" in codes
+
+
+def test_motion_graphic_after_the_program_end_is_an_invalid_span():
+    edl = default_edl(10)
+    edl["motion"] = [{"id": "mg1", "template": "hook_title", "start": 12.0,
+                      "end": 14.0, "params": {"text": "LATE"}},
+                     {"id": "mg2", "template": "hook_title", "start": 1.0,
+                      "end": 3.0, "params": {"text": "ON TIME"}}]
+    rows = [row for row in quality_verifier.deterministic_findings(edl)
+            if row["code"] == "invisible_motion_graphic"]
+    assert [row["evidence"]["id"] for row in rows] == ["mg1"]
+    assert quality_verifier.is_blocking(rows[0])
+    assert "invisible_motion_graphic" in quality_verifier.NON_JUSTIFIABLE_FINDINGS
+
+
+def test_motion_graphic_copy_with_corrupt_glyph_blocks_completion():
+    edl = default_edl(10)
+    edl["motion"] = [{"id": "mg1", "template": "hook_title", "start": 1.0,
+                      "end": 3.0,
+                      "params": {"lines": ["fine", "bad \ufffd word"]}}]
+    assert "corrupt_glyph" in _codes(edl)
+
+
+def test_motion_graphic_owned_cue_stack_is_not_a_mechanical_pattern():
+    edl = default_edl(20)
+    edl["sfx"] = [
+        {"id": f"mg_mg1_sfx{i}", "storage_key": "sfx/1/kit-tick-ab.wav",
+         "at": 2 + i * .3, "gain_db": -10,
+         "purpose": "tick for motion graphic mg1"} for i in range(1, 6)]
+    assert "mechanical_sfx_pattern" not in _codes(edl)
 
 
 def test_repetitive_unmeasured_zooms_are_detected():

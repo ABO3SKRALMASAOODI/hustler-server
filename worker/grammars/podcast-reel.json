@@ -1,0 +1,33 @@
+{
+  "slug": "podcast-reel",
+  "v": 1,
+  "genre": "short-form podcast / interview reel (vertical, 120s or less, Shorts children)",
+  "source": {
+    "measured": "frame-level breakdown of 28 owner-selected premium Instagram reference reels, Oct 2026 (phase-1 refs_* analysis and DESIGN_BRIEF)",
+    "note": "references for craft relationships only; never copy their content, logos or identities"
+  },
+  "identity": "One complete micro-story lifted from a longer conversation — a hook line, the setup it needs, a turn and a payoff — delivered as a DESIGNED short-form piece. The speaker owns a composed vertical frame; a motion, typography and sound system carries the speech: framing changes on sentence turns, hero words and graphics land on the spoken word, and sound is edited to picture. Flat delivery (one static plate with subtitles and a silent mix) is the failure mode, not the safe choice.",
+  "rules": {
+    "story": "keep one complete micro-story: open on its strongest intelligible line, keep the setup the payoff depends on, end on the resolved line or a deliberate cliff; never splice unrelated answers into a synthetic claim; cut dead time and repairable filler word-safely",
+    "hook": "the first second carries a pattern interrupt (a punched-in or pushing frame, a hero title slam, a hit) and the hook line is on screen within about 1.5s; no fade from black",
+    "frame": "fill the vertical frame with the speaker (auto_reframe / focus_track per shot); no half-black or postage-stamp canvas; on two-person footage frame the active speaker",
+    "camera": "framing changes are the rhythm of a talking reel: alternate scale on jump cuts and sentence turns (references change framing every 2-5s), push slowly under an emotional hold, punch on payoffs and numbers; aim every move at the face (add_zoom with measured cx/cy) and vary strength and curve so it never reads as an automated pass",
+    "typography": "one designed type system: captions with a bold sans backbone and ONE accent role (keyword colour or italic serif) on 1-2 words per sentence, placed in face-free space above the platform UI band; hero words, numbers and names land as motion graphics on their spoken onset (add_motion_graphic — list_motion_templates), entrances short and graphic, exits faster than entrances",
+    "motion_graphics": "use the motion layer for the beats that carry the story: hook title, number counters, name/role labels, lists, social/UI cards, callouts; each graphic settles and holds still, never covers the face, and brings its own synced kit sound",
+    "sound": "speech is the lead; a music bed sits roughly 13-20 dB under the voice and can lift into the payoff; SFX are edited to picture — a whoosh pre-rolled so its peak lands on a graphic, pops/ticks on keyword or list reveals, a low hit or sub under a hero landing, a riser into a payoff, a brief stop-down silence before a reveal (built-in kit: list_sfx_kit, add_sfx storage_key='kit:<kind>'); layering different roles on one beat is a designed hit",
+    "transitions": "hard cuts inside one take stay invisible; section turns, hook-to-body and B-roll entries may earn a whip/flash/zoom transition paired with a sound",
+    "finish": "one committed grade with light grain/texture; loudness mastered for social (set_master_loudness); the last frame loops cleanly into the first"
+  },
+  "rubric": {
+    "complete_micro_story": true,
+    "hook_interrupt_in_first_second": true,
+    "speaker_fills_vertical_frame": true,
+    "framing_changes_on_turns_and_payoffs": true,
+    "type_system_with_one_accent_role": true,
+    "hero_moments_designed_on_spoken_onsets": true,
+    "music_bed_under_voice": true,
+    "sfx_edited_to_visual_events": true,
+    "face_and_ui_band_clear": true,
+    "not_caption_only_or_static": true
+  }
+}
