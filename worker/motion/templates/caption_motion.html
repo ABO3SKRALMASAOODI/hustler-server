@@ -16,7 +16,11 @@
 <style>
   .cue{position:absolute;top:0;display:none}
   .cue.on{display:block}
-  .blk{display:inline-block;position:relative;text-wrap:balance;vertical-align:top}
+  .blk{display:inline-block;position:relative;text-wrap:balance;vertical-align:top;isolation:isolate}
+  /* premium looks carry no box: a very soft local scrim (a pocket of grade,
+     invisible on dark footage) keeps near-white type legible on white shirts */
+  .scrim{position:absolute;left:-.7em;right:-.7em;top:-.45em;bottom:-.45em;z-index:-1;pointer-events:none;
+    background:radial-gradient(closest-side,rgba(0,0,0,.30),rgba(0,0,0,.16) 55%,rgba(0,0,0,0))}
   .mg-w{transform-origin:50% 72%}
   .row{display:block;white-space:nowrap}
   .row.wrap{white-space:normal;text-wrap:balance}
@@ -419,6 +423,7 @@
           blk.insertBefore(c.hl, blk.firstChild);
         }
       }
+      if (CFG.premium) blk.insertBefore(MG.el('span', 'scrim'), blk.firstChild);
       // vertical placement: block centre on the anchor, kept inside its
       // measured band (face-safe) and the platform-safe area.
       let r = blk.getBoundingClientRect();
