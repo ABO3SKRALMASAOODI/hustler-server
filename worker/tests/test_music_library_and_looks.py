@@ -140,7 +140,7 @@ def kit(monkeypatch):
 def _engine_on(monkeypatch):
     # The premium looks write browser captions only where the engine exists;
     # pin it on so these tests do not depend on the host's Playwright.
-    monkeypatch.setattr(motion_tools.motion_engine, "available", lambda: True)
+    monkeypatch.setattr(motion_tools.motion_engine, "authorable", lambda: True)
 
 
 @pytest.fixture(autouse=True)
@@ -388,7 +388,7 @@ def test_classic_looks_never_fade_a_vertical_short_from_black():
 # ── apply_look: premium systems ─────────────────────────────────────────
 
 def test_editorial_sets_a_coherent_system_in_one_version(monkeypatch):
-    monkeypatch.setattr(motion_tools.motion_engine, "available", lambda: True)
+    monkeypatch.setattr(motion_tools.motion_engine, "authorable", lambda: True)
     ctx = _Ctx(ratio="9:16")
     seeded = json.loads(json.dumps(ctx._edl))
     seeded["effects"] = {"fade_in_s": 1.0,
@@ -687,7 +687,7 @@ def test_insert_edits_drop_look_sounds_whose_transition_moved(kit):
 
 def test_without_the_browser_engine_captions_fall_back_to_the_preset(
         monkeypatch):
-    monkeypatch.setattr(motion_tools.motion_engine, "available", lambda: False)
+    monkeypatch.setattr(motion_tools.motion_engine, "authorable", lambda: False)
     ctx = _Ctx(ratio="9:16")
     out = agent_tools.apply_look(ctx, "editorial")
     assert out.startswith("EDL v1"), out

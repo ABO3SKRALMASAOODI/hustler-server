@@ -1,224 +1,739 @@
 <!--MG-SPEC {"title": "Motion captions (internal)", "category": "caption", "internal": true,
- "description": "Transcript caption track drawn by the motion engine. Synthesized by the renderer from captions.style.motion_look; not placed directly.",
+ "description": "Transcript caption track drawn by the motion engine. Synthesized by the renderer from captions.style.motion_look (worker/motion_captions.py); not placed directly.",
  "duration": 8, "layer": "below_captions", "mutes_captions": false,
  "params": {
-  "look": {"type": "enum", "values": ["pop", "box", "clean", "serif", "glow", "stack", "mono"], "default": "pop"},
+  "look": {"type": "enum", "values": ["clean", "editorial", "lockup", "pop", "box", "serif", "glow", "stack", "mono"], "default": "clean"},
   "color": {"type": "color", "default": "#FFFFFF"},
-  "accent": {"type": "color", "default": "#FFD84D"},
+  "accent": {"type": "color", "default": null, "hint": "null = the look's own accent"},
   "size": {"type": "float", "min": 0.5, "max": 2.5, "default": 1.0},
   "uppercase": {"type": "bool", "default": false},
-  "align": {"type": "enum", "values": ["center", "left", "right"], "default": "center"}
+  "align": {"type": "enum", "values": ["center", "left", "right"], "default": "center"},
+  "font": {"type": "str", "default": null, "max": 40, "hint": "bundled CSS family for the base role"},
+  "font_weight": {"type": "int", "min": 100, "max": 900, "default": null},
+  "anim": {"type": "enum", "values": ["auto", "none"], "default": "auto", "hint": "none = hard pops, hard clears"}
  },
  "sfx": []} -->
 <style>
-  .cue{position:absolute;left:0;right:0;display:none;text-align:center;padding:0 70px}
+  .cue{position:absolute;top:0;display:none}
   .cue.on{display:block}
-  .blk{display:inline-block;max-width:940px;line-height:1.08}
-  .mg-w{margin:0 .13em;transform-origin:50% 70%;will-change:transform,opacity,filter}
-  /* looks */
-  .L-pop .blk{font-family:'Inter Display',sans-serif;font-weight:900;letter-spacing:-0.025em;
-    paint-order:stroke fill;-webkit-text-stroke:0.075em rgba(0,0,0,.92);
-    text-shadow:0 .06em .18em rgba(0,0,0,.55)}
-  .L-box .blk{font-family:'Inter Display',sans-serif;font-weight:800;letter-spacing:-0.02em;
-    background:rgba(12,12,14,.74);border-radius:.42em;padding:.2em .42em .26em;position:relative;
-    box-shadow:0 .25em .9em rgba(0,0,0,.35);border:1px solid rgba(255,255,255,.08)}
-  .L-box .hl{position:absolute;border-radius:.24em;z-index:0}
+  .blk{display:inline-block;position:relative;text-wrap:balance;vertical-align:top;isolation:isolate}
+  /* premium looks carry no box: a very soft local scrim (a pocket of grade,
+     invisible on dark footage) keeps near-white type legible on white shirts.
+     It hugs the words revealed so far (geometry + opacity set per frame), so
+     no smudge ever sits where nothing is written yet. */
+  .scrim{position:absolute;left:0;top:0;width:0;height:0;z-index:-1;pointer-events:none;opacity:0;
+    background:radial-gradient(closest-side,rgba(0,0,0,.42),rgba(0,0,0,.22) 55%,rgba(0,0,0,0))}
+  /* bright plates (cue luma hint): a firmer shadow core behind near-white type */
+  .cue.lit.L-clean .blk,.cue.lit.L-editorial .blk,.cue.lit.L-serif .blk,.cue.lit.L-lockup .sm{
+    text-shadow:0 1px 3px rgba(0,0,0,.56),0 3px 16px rgba(0,0,0,.56),0 0 44px rgba(0,0,0,.32)}
+  .cue.lit.L-editorial .srf,.cue.lit.L-lockup .hero{
+    text-shadow:0 1px 4px rgba(0,0,0,.52),0 4px 22px rgba(0,0,0,.52),0 0 56px rgba(0,0,0,.30)}
+  .mg-w{transform-origin:50% 72%}
+  .row{display:block;white-space:nowrap}
+  .row.wrap{white-space:normal;text-wrap:balance}
+  /* clean: calm premium sentence case */
+  .L-clean .blk{font-family:'Inter','Inter Display',sans-serif;font-weight:600;letter-spacing:-0.014em;line-height:1.16;
+    text-shadow:0 1px 3px rgba(0,0,0,.42),0 3px 16px rgba(0,0,0,.48),0 0 44px rgba(0,0,0,.28)}
+  .L-clean .blk[data-display]{letter-spacing:-0.02em}
+  /* editorial: tight grotesk + serif-italic emphasis lockups (hard pops) */
+  .L-editorial .blk{font-family:'Inter Display','Inter',sans-serif;font-weight:700;letter-spacing:-0.022em;line-height:1.08;
+    text-shadow:0 1px 3px rgba(0,0,0,.42),0 3px 16px rgba(0,0,0,.48),0 0 44px rgba(0,0,0,.28)}
+  .L-editorial .srf{font-family:'Instrument Serif',serif;font-style:italic;font-weight:400;letter-spacing:-0.012em;
+    text-shadow:0 1px 3px rgba(0,0,0,.40),0 3px 18px rgba(0,0,0,.46),0 0 48px rgba(0,0,0,.26)}
+  .L-editorial .row.hero{line-height:.86}
+  .L-editorial .mg-w.srf.inl{font-size:1.58em;line-height:.6;vertical-align:-0.04em}
+  /* lockup / stack: small connectors over a huge hero word */
+  .L-lockup .blk,.L-stack .blk{line-height:1}
+  .L-lockup .sm{font-family:'Inter Display','Inter',sans-serif;font-weight:700;letter-spacing:.004em;line-height:1.05;
+    text-shadow:0 1px 3px rgba(0,0,0,.42),0 3px 16px rgba(0,0,0,.48),0 0 44px rgba(0,0,0,.28)}
+  .L-lockup .hero{font-family:'Inter Display','Inter',sans-serif;font-weight:900;letter-spacing:-0.04em;line-height:.84;
+    text-shadow:0 2px 5px rgba(0,0,0,.30),0 6px 30px rgba(0,0,0,.42),0 0 70px rgba(0,0,0,.22)}
+  .L-stack .sm{font-family:'Inter Display','Inter',sans-serif;font-weight:800;letter-spacing:-0.006em;line-height:1.05;
+    text-shadow:0 2px 3px rgba(0,0,0,.35),0 3px 14px rgba(0,0,0,.45)}
+  .L-stack .hero{font-family:'Anton','Bebas Neue','Inter Display',sans-serif;font-weight:400;letter-spacing:.004em;line-height:.9;
+    text-shadow:0 3px 5px rgba(0,0,0,.28),0 8px 34px rgba(0,0,0,.42)}
+  /* pop: bold creator punch (the explicit hype look keeps its outline) */
+  .L-pop .mg-w{transform-origin:50% 60%}
+  .L-pop .blk{font-family:'Inter Display',sans-serif;font-weight:900;letter-spacing:-0.022em;line-height:1;white-space:nowrap;
+    paint-order:stroke fill;-webkit-text-stroke:0.085em rgba(0,0,0,.94);
+    text-shadow:0 .05em .16em rgba(0,0,0,.5)}
+  /* box: phrase on a soft dark pill, highlight glides word to word */
+  .L-box .blk{font-family:'Inter Display',sans-serif;font-weight:800;letter-spacing:-0.018em;line-height:1.16;
+    background:rgba(14,14,16,.76);border-radius:.4em;padding:.2em .44em .26em;
+    box-shadow:0 .22em .8em rgba(0,0,0,.32);border:1px solid rgba(255,255,255,.08)}
+  .L-box .blk{word-spacing:.1em}
+  .L-box .hl{position:absolute;border-radius:.2em;z-index:0;left:0;top:0;opacity:0}
   .L-box .mg-w{position:relative;z-index:1}
-  .L-clean .blk{font-family:'Inter','Inter Display',sans-serif;font-weight:600;letter-spacing:-0.012em;
-    text-shadow:0 .05em .35em rgba(0,0,0,.6),0 0 .08em rgba(0,0,0,.35);line-height:1.18}
-  .L-serif .blk{font-family:'Inter Display',sans-serif;font-weight:800;letter-spacing:-0.022em;
-    text-shadow:0 .05em .32em rgba(0,0,0,.55);line-height:1.12}
-  .L-serif .em{font-family:'Instrument Serif',serif;font-style:italic;font-weight:400;font-size:1.38em;
-    letter-spacing:-0.005em;line-height:.9}
-  .L-glow .blk{font-family:'Inter Display',sans-serif;font-weight:900;letter-spacing:-0.022em}
-  .L-stack .blk{font-family:'Inter Display',sans-serif;font-weight:900;letter-spacing:-0.035em;line-height:.98;
-    text-shadow:0 .05em .3em rgba(0,0,0,.55)}
-  .L-stack .row1{font-size:.42em;font-weight:800;letter-spacing:-0.01em;display:block;margin-bottom:.05em;opacity:.95}
-  .L-stack .row2{display:block}
-  .L-mono .blk{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-weight:700;letter-spacing:-0.01em;
-    background:rgba(8,10,12,.78);border-radius:.3em;padding:.22em .5em .28em;border:1px solid rgba(255,255,255,.1)}
-  .L-mono .caret{display:inline-block;width:.55em;height:1em;vertical-align:-.12em;margin-left:.06em}
+  /* dark ink = an identical copy of the text clipped to the highlight rect,
+     so the ink always matches the gliding box exactly (never dark-on-dark) */
+  .L-box .blk.ink{position:absolute;left:0;top:0;margin:0;max-width:none;box-sizing:border-box;
+    background:none;box-shadow:none;border-color:transparent;z-index:2;pointer-events:none;visibility:hidden}
+  /* serif: sans phrase, emphasis words inline in accent serif italic */
+  .L-serif .blk{font-family:'Inter Display','Inter',sans-serif;font-weight:700;letter-spacing:-0.02em;line-height:1.14;
+    text-shadow:0 1px 3px rgba(0,0,0,.42),0 3px 16px rgba(0,0,0,.48),0 0 44px rgba(0,0,0,.28)}
+  .L-serif .em{font-family:'Instrument Serif',serif;font-style:italic;font-weight:400;font-size:1.42em;
+    letter-spacing:-0.006em;line-height:.7;vertical-align:-0.03em}
+  /* glow: whole phrase dim, spoken words light up */
+  .L-glow .blk{font-family:'Inter Display',sans-serif;font-weight:800;letter-spacing:-0.02em;line-height:1.1}
+  /* mono: typewriter on a quiet plate */
+  .L-mono .blk{font-family:'JetBrains Mono','Space Mono','IBM Plex Mono','DejaVu Sans Mono','Noto Sans Mono',ui-monospace,Menlo,monospace;
+    font-weight:700;letter-spacing:-0.01em;line-height:1.26;text-align:left;text-wrap:wrap;padding:.24em .52em .3em}
+  /* the plate grows with the typed line (a terminal pill, not an empty bar) */
+  .L-mono .plate{position:absolute;left:0;top:0;z-index:0;background:rgba(9,11,13,.80);border-radius:.32em;
+    border:1px solid rgba(255,255,255,.10);box-shadow:0 .2em .7em rgba(0,0,0,.30)}
+  .L-mono .mg-w{position:relative;z-index:1}
+  .L-mono .mg-c{visibility:hidden}
+  .L-mono .caret{position:absolute;width:.56em;height:1.02em;left:0;top:0;z-index:2}
 </style>
 <div class="mg-root" id="root"></div>
 <script>
 (() => {
   const P = MG.params, root = MG.$('#root');
-  const look = P.look || 'pop';
-  const accentDefault = {pop:'#FFD84D', box:'#FFD84D', clean:'#FFFFFF', serif:'#F3C96B', glow:'#7CC4FF', stack:'#FFFFFF', mono:'#7CFFB2'}[look];
-  const accent = P.accent || accentDefault;
-  const color = P.color || '#FFFFFF';
-  const baseSize = ({pop:86, box:58, clean:52, serif:62, glow:78, stack:132, mono:48}[look]) * (P.size || 1);
-  const upper = !!P.uppercase || look === 'pop';
-  const cues = (P.cues || []).map((c, i) => {
-    const el = MG.el('div', `cue L-${look}`, null, root);
-    el.style.textAlign = P.align || 'center';
-    const blk = MG.el('div', 'blk', null, el);
-    blk.style.fontSize = baseSize + 'px';
-    blk.style.color = color;
-    if (P.font) blk.style.fontFamily = `'${P.font}', 'Inter Display', sans-serif`;
-    const words = [];
-    let hero = -1;
-    if (look === 'stack') {
-      hero = c.w.findIndex(w => w.x);
-      if (hero < 0) { let best = 0; c.w.forEach((w, k) => { if (w.t.length > c.w[best].t.length) best = k; }); hero = best; }
-      const r1 = MG.el('span', 'row1', null, blk), r2 = MG.el('span', 'row2', null, blk);
-      c.w.forEach((w, k) => {
-        const txt = upper ? w.t.toUpperCase() : w.t;
-        const s = MG.el('span', 'mg-w', txt, k === hero ? r2 : r1);
-        words.push({ el: s, w, hero: k === hero });
-      });
-      if (!r1.childNodes.length) r1.remove();
-    } else {
-      let hl = null;
-      if (look === 'box') { hl = MG.el('span', 'hl', null, blk); hl.style.background = accent; }
-      c.w.forEach((w, k) => {
-        const txt = upper ? w.t.toUpperCase() : w.t;
-        const s = MG.el('span', 'mg-w' + (look === 'serif' && w.x ? ' em' : ''), look === 'mono' ? '' : txt, blk);
-        if (look === 'serif' && w.x) s.style.color = accent;
-        words.push({ el: s, w, txt });
-        if (k < c.w.length - 1) blk.appendChild(document.createTextNode(' '));
-      });
-      if (look === 'mono') { const car = MG.el('span', 'caret', null, blk); car.style.background = accent; c.caret = car; }
-      c.hl = hl;
-    }
-    // Fit: shrink until the block fits the column (and two lines at most).
-    el.classList.add('on');
-    const maxW = 940, singleLine = look === 'pop' || look === 'stack';
-    let fs = baseSize;
-    const lineH = () => blk.getBoundingClientRect().height / fs;
-    for (let it = 0; it < 30; it++) {
-      blk.style.fontSize = fs + 'px';
-      if (look === 'mono') words.forEach(o => o.el.textContent = o.txt);
-      const r = blk.getBoundingClientRect();
-      const lines = Math.round(r.height / (fs * (look === 'clean' ? 1.18 : 1.1)));
-      const tooWide = r.width > maxW + 1 || blk.scrollWidth > maxW + 2;
-      const tooTall = singleLine ? (look === 'stack' ? r.height > fs * 1.75 : lines > 1.2) : lines > 2.2;
-      if (!tooWide && !tooTall) break;
-      fs *= 0.94;
-      if (fs < baseSize * 0.45) break;
-    }
-    if (look === 'pop' || look === 'stack') blk.style.whiteSpace = 'nowrap';
-    if (look === 'stack') {  // hero fills the column
-      const heroEl = words.find(o => o.hero).el;
-      heroEl.parentElement.style.fontSize = '1em';
-    }
-    // vertical anchor (block centre at y fraction), safe-clamped
-    const r = blk.getBoundingClientRect();
-    const yc = MG.clamp(c.y || 0.74, 0.12, 0.86) * MG.H;
-    el.style.top = Math.max(40, yc - r.height / 2) + 'px';
-    if (look === 'mono') {
-      // Freeze the block at its full-text width and type left-to-right so
-      // the line never re-centres while characters appear.
-      blk.style.width = Math.ceil(blk.getBoundingClientRect().width) + 'px';
-      blk.style.textAlign = 'left';
-      words.forEach(o => { o.el.textContent = ''; o.el.style.display = 'none'; });
-    }
-    // measure word boxes for the gliding highlight (relative to the block)
-    if (look === 'box') {
-      const br = blk.getBoundingClientRect();
-      words.forEach(o => { const wr = o.el.getBoundingClientRect(); o.box = [wr.left - br.left, wr.top - br.top, wr.width, wr.height]; });
-    }
-    const rr = el.getBoundingClientRect(), b2 = blk.getBoundingClientRect();
-    c.rect = [b2.left, b2.top, b2.right, b2.bottom];
-    el.classList.remove('on');
-    return Object.assign(c, { el, blk, words, fs });
-  });
-  if (cues.length) {
-    const pad = look === 'glow' ? 70 : look === 'stack' ? 90 : 46;
-    MG.box = [Math.min(...cues.map(c => c.rect[0])) - pad, Math.min(...cues.map(c => c.rect[1])) - pad,
-              Math.max(...cues.map(c => c.rect[2])) + pad, Math.max(...cues.map(c => c.rect[3])) + pad];
-  }
-  // motion windows
-  const W = [];
-  cues.forEach(c => {
-    W.push([c.s - 0.02, c.s + 0.32], [c.e - 0.12, c.e + 0.02]);
-    c.w.forEach(w => {
-      if (look === 'mono') W.push([w.s - 0.02, w.e + 0.04]);
-      else W.push([w.s - 0.03, w.s + (look === 'stack' ? 0.5 : 0.36)]);
-    });
-  });
-  MG.active(W);
+  const LOOKS = ['clean', 'editorial', 'lockup', 'pop', 'box', 'serif', 'glow', 'stack', 'mono'];
+  const look = LOOKS.includes(P.look) ? P.look : 'clean';
+  const fps = MG.fps || 30, F = 1 / fps;
+  const HARD = P.anim === 'none';
+  const W = MG.W, H = MG.H, ar = H / W;
+  // Type scales with the frame: 9:16 is the design space; square and
+  // landscape frames are shorter, so the same px would read huge.
+  const K = Math.min(1, Math.sqrt(H / 1920));
+  // Platform-safe text area (design px).
+  const SAFE = ar >= 1.6 ? { x0: 70, x1: W - 70, y0: 0.08 * H, y1: 0.80 * H }
+    : ar > 1.15 ? { x0: 64, x1: W - 64, y0: 0.06 * H, y1: 0.90 * H }
+    : ar >= 0.95 ? { x0: 80, x1: W - 80, y0: 0.06 * H, y1: 0.92 * H }
+    : { x0: 0.13 * W, x1: 0.87 * W, y0: 0.07 * H, y1: 0.92 * H };
+  const COLW = SAFE.x1 - SAFE.x0;
+  const CFG = {
+    // fs = base font px on 9:16 at size 1; lines = max wrapped lines
+    clean:     { fs: 70, lines: 2, fade: 0.12, accent: '#F3CF8B', premium: true },
+    editorial: { fs: 72, lines: 2, fade: 0.14, accent: null, premium: true, hero: 1.8 },
+    lockup:    { fs: 44, lines: 2, fade: 0.12, accent: null, premium: true, heroMin: 2.3, heroMax: 4.9, mid: 1.6 },
+    pop:       { fs: 94, lines: 1, fade: 0.08, accent: '#FFD84D' },
+    box:       { fs: 62, lines: 2, fade: 0.10, accent: '#FFD84D' },
+    serif:     { fs: 66, lines: 2, fade: 0.14, accent: '#F3C96B', premium: true },
+    glow:      { fs: 74, lines: 2, fade: 0.12, accent: '#7CC4FF' },
+    stack:     { fs: 48, lines: 2, fade: 0.10, accent: '#FFD84D', heroMin: 2.6, heroMax: 5.6, mid: 1.7 },
+    mono:      { fs: 46, lines: 2, fade: 0.10, accent: '#7CFFB2' },
+  }[look];
+  if (ar < 0.95 && CFG.heroMax) { CFG.heroMax *= 0.78; CFG.heroMin = Math.min(CFG.heroMin, CFG.heroMax * 0.6); }
+  // Scrim: pads around the revealed words (x, y in units of the cue font
+  // size), the ease as it grows to a new word, and its strength (x the
+  // gradient's .42 core) on ordinary vs bright plates (luma hint >= LIT).
+  const SCRIM_PAD = [0.6, 0.4], SCRIM_T = 0.08, SCRIM_OP = [0.6, 0.85], LIT = 0.55;
+  const isHex = v => typeof v === 'string' && /^#[0-9A-Fa-f]{6}$/.test(v);
+  const baseColor = isHex(P.color) ? P.color.toUpperCase() : '#FFFFFF';
+  // Premium looks sit on near-white, never stark #FFF (reads printed, not screen).
+  const color = CFG.premium && baseColor === '#FFFFFF' ? '#F8F7F4' : baseColor;
+  const accentSet = isHex(P.accent);
+  const accent = accentSet ? P.accent : (CFG.accent || color);
+  const size = Math.max(0.5, Math.min(2.5, +P.size || 1));
+  const upperAll = !!P.uppercase || look === 'pop' || look === 'lockup';
+  const align = ['left', 'right'].includes(P.align) ? P.align : 'center';
+  const userFont = typeof P.font === 'string' && /^[A-Za-z0-9 ]{2,40}$/.test(P.font) ? P.font : null;
+  const userWeight = +P.font_weight >= 100 && +P.font_weight <= 900 ? Math.round(+P.font_weight / 100) * 100 : null;
 
+  const STOP = new Set(('a an the and or but so to of in on at for with from by as is are was were be been being am ' +
+    'i im i\'m you he she it it\'s its we they me him her us them my your his our their this that these those ' +
+    'do does did not no yes just very really than then there here what which who whom when where why how if ' +
+    'into out up down over about like gonna wanna gotta um uh oh okay ok yeah well also too can could would ' +
+    'should will shall might must have has had get got go going say said thing things kind sort lot').split(' '));
+  const key = s => String(s).toLowerCase().replace(/[^a-z0-9$%'’]/g, '');
+  const tidyHero = s => String(s).replace(/[,;:–—-]+$/, '');
+  const caseOf = (s, up) => up ? s.toUpperCase() : s;
+
+  // Hero: the emphasised word (numbers count) — the longest wins; with no
+  // emphasis and allowFallback, the longest content word, later preferred.
+  // A connector ('out', 'the') never becomes a hero, even when emphasised.
+  function pickHero(ws, allowFallback) {
+    let best = -1, score = -1;
+    ws.forEach((w, k) => {
+      if (!w.x || (STOP.has(key(w.t)) && !/\d/.test(w.t))) return;
+      const sc = 100 + key(w.t).length + k * 0.01;
+      if (sc > score) { score = sc; best = k; }
+    });
+    if (best >= 0 || !allowFallback) return best;
+    ws.forEach((w, k) => {
+      const c = key(w.t);
+      if (!c || c.length < 3 || STOP.has(c)) return;
+      const sc = Math.min(c.length, 11) + (k === ws.length - 1 ? 1.5 : 0) + k * 0.01;
+      if (sc > score) { score = sc; best = k; }
+    });
+    return best;   // -1: a connector-only phrase has no hero
+  }
+
+  // Entrance per look/role: kind + duration + how early it may start.
+  const ENTER = {
+    pop: { d: 0, early: 0 }, ghost: { d: 2 * F, early: 2 * F }, rise: { d: 0.12, early: 0.05 },
+    scale: { d: 0.09, early: 0 }, slam: { d: 0.14, early: 0 }, light: { d: 0.17, early: 0 },
+    glide: { d: 0.11, early: 0 }, type: { d: 0, early: 0 },
+  };
+
+  function lineCount(list) {
+    const rs = list.map(o => o.el.getBoundingClientRect()).sort((a, b) => a.top - b.top);
+    let n = 0, bottom = -1e9;
+    for (const r of rs) {
+      const mid = (r.top + r.bottom) / 2;
+      if (mid > bottom) { n++; bottom = r.bottom; } else bottom = Math.max(bottom, r.bottom);
+    }
+    return n;
+  }
+  const BAND_ZONE = { t: [-0.12, 0.15], m: [-0.19, 0.18], b: [-0.14, 0.08] };
+  function zoneOf(c) {
+    let z0, z1;
+    if (Array.isArray(c.z) && c.z.length === 2) { z0 = +c.z[0]; z1 = +c.z[1]; }
+    else {
+      const y = MG.clamp(+c.y || 0.74, 0.05, 0.95), bz = BAND_ZONE[c.b] || BAND_ZONE.b;
+      z0 = y + bz[0]; z1 = y + bz[1];
+    }
+    const top = Math.max(SAFE.y0, z0 * H), bot = Math.min(SAFE.y1, z1 * H);
+    return bot - top >= 0.08 * H ? [top, bot] : [SAFE.y0, SAFE.y1];
+  }
+
+  // ── build + lay out every cue once: words later reveal IN PLACE ─────────
+  function newWord(parent, text, w, k, role) {
+    const el = MG.el('span', 'mg-w', text, parent);
+    return { el, w, k, role, R: 0, d: 0 };
+  }
+  function space(parent) { parent.appendChild(document.createTextNode(' ')); }
+
+  function buildFlow(c, blk) {
+    const up = upperAll;
+    c.w.forEach((w, k) => {
+      const o = newWord(blk, caseOf(w.t, up), w, k, 'base');
+      if (look === 'clean' && w.x && accent !== color) o.el.style.color = accent;
+      if (look === 'serif' && w.x) { o.el.classList.add('em'); o.el.style.color = accent; o.role = 'em'; }
+      c.words.push(o);
+      if (k < c.w.length - 1) space(blk);
+    });
+    c.flowWords = c.words;
+  }
+
+  function buildEditorial(c, blk) {
+    const n = c.w.length;
+    let hero = pickHero(c.w, false);
+    // a lone exclamation/question word is a beat of its own ("Why?")
+    if (hero < 0 && n === 1 && /[?!]["'”’)]*$/.test(c.w[0].t) && key(c.w[0].t).length >= 2) hero = 0;
+    const mode = hero < 0 ? 'flow' : n === 1 ? 'solo' : hero === n - 1 ? 'below' : hero === 0 ? 'above' : 'inline';
+    c.mode = mode;
+    const heroColor = accentSet ? accent : color;
+    if (mode === 'flow' || mode === 'inline') {
+      c.w.forEach((w, k) => {
+        const o = newWord(blk, caseOf(w.t, upperAll), w, k, k === hero ? 'hero' : 'base');
+        if (k === hero) { o.el.classList.add('srf', 'inl'); o.el.style.color = heroColor; }
+        c.words.push(o);
+        if (k < n - 1) space(blk);
+      });
+      c.flowWords = c.words;
+      return;
+    }
+    const base = MG.el('div', 'row wrap base');
+    const hr = MG.el('div', 'row hero srf');
+    c.heroText = tidyHero(c.w[hero].t);
+    const heroWord = newWord(hr, c.heroText, c.w[hero], hero, 'hero');
+    heroWord.el.classList.add('srf');
+    heroWord.el.style.color = heroColor;
+    const rest = [];
+    c.w.forEach((w, k) => {
+      if (k === hero) return;
+      if (rest.length) space(base);
+      rest.push(newWord(base, caseOf(w.t, upperAll), w, k, 'base'));
+    });
+    if (mode === 'above') { blk.appendChild(hr); blk.appendChild(base); blk.style.textAlign = 'left'; }
+    else if (mode === 'below') { blk.appendChild(base); blk.appendChild(hr); blk.style.textAlign = 'right'; }
+    else { blk.appendChild(hr); blk.style.textAlign = 'center'; }
+    c.base = base; c.heroRow = hr;
+    c.words = rest.concat([heroWord]).sort((a, b) => a.k - b.k);
+    c.flowWords = rest;
+  }
+
+  function buildLockup(c, blk) {
+    let hero = pickHero(c.w, true);
+    // a one-word beat is the hero — unless it is a bare connector ('Yeah',
+    // 'and'), which reads as a mid-size row instead of a slammed 'THE'
+    if (hero < 0 && c.w.length === 1 && (!STOP.has(key(c.w[0].t)) || /[?!]/.test(c.w[0].t))) hero = 0;
+    c.heroK = hero;
+    if (hero < 0) {
+      // connector-only phrase ("but it could"): one mid-size row, no fake hero
+      const row = MG.el('div', 'row wrap sm mid', null, blk);
+      c.w.forEach((w, k) => {
+        if (k) space(row);
+        c.words.push(newWord(row, caseOf(w.t, upperAll), w, k, 'sm'));
+      });
+      c.mid = row; c.heroRow = null;
+      blk.style.textAlign = align;
+      return;
+    }
+    const pre = MG.el('div', 'row wrap sm pre'), hr = MG.el('div', 'row hero'), post = MG.el('div', 'row wrap sm post');
+    const heroUp = upperAll || look === 'stack';
+    c.w.forEach((w, k) => {
+      if (k === hero) {
+        const o = newWord(hr, caseOf(tidyHero(w.t), heroUp), w, k, 'hero');
+        if (w.x && (accentSet || look === 'stack')) o.el.style.color = accent;
+        c.words.push(o);
+        return;
+      }
+      const row = k < hero ? pre : post;
+      if (row.childNodes.length) space(row);
+      c.words.push(newWord(row, caseOf(w.t, upperAll), w, k, 'sm'));
+    });
+    [pre, hr, post].forEach(r => { if (r.childNodes.length) blk.appendChild(r); });
+    c.pre = pre.childNodes.length ? pre : null; c.post = post.childNodes.length ? post : null; c.heroRow = hr;
+    blk.style.textAlign = align;
+  }
+
+  function buildMono(c, blk) {
+    c.plate = MG.el('span', 'plate', null, blk);
+    c.w.forEach((w, k) => {
+      const o = newWord(blk, null, w, k, 'base');
+      o.chars = Array.from(caseOf(w.t, upperAll)).map(ch => MG.el('span', 'mg-c', ch, o.el));
+      c.words.push(o);
+      if (k < c.w.length - 1) space(blk);
+    });
+    c.caret = MG.el('span', 'caret', null, blk);
+    c.caret.style.background = accent;
+    c.flowWords = c.words;
+  }
+
+  function fitFlow(c, base, maxLines, zoneH) {
+    let fs = base;
+    for (let i = 0; i < 26; i++) {
+      c.blk.style.fontSize = fs.toFixed(2) + 'px';
+      const r = c.blk.getBoundingClientRect();
+      const lines = lineCount(c.flowWords.length ? c.flowWords : c.words);
+      const wide = r.width > COLW + 1 || c.blk.scrollWidth > COLW + 2;
+      if (!wide && lines <= maxLines && r.height <= zoneH) break;
+      // a word wider than the column keeps shrinking: never clip off-frame
+      if (fs <= base * (wide ? 0.25 : 0.5)) break;
+      fs *= 0.95;
+    }
+    return fs;
+  }
+
+  const inkCtx = document.createElement('canvas').getContext('2d');
+  // Ink extents of a single-line row: top = ink top below the line-box top,
+  // bottom = ink bottom below the line-box top, lh = line-box height (px).
+  function ink(text, el) {
+    const cs = getComputedStyle(el);
+    const px = parseFloat(cs.fontSize);
+    inkCtx.font = `${cs.fontStyle} ${cs.fontWeight} ${px}px ${cs.fontFamily}`;
+    const mt = inkCtx.measureText(text || 'x');
+    let lh = parseFloat(cs.lineHeight);
+    if (!(lh > 0)) lh = px * 1.1;
+    const fa = mt.fontBoundingBoxAscent, fd = mt.fontBoundingBoxDescent;
+    const baseline = (lh - (fa + fd)) / 2 + fa;
+    return { top: baseline - mt.actualBoundingBoxAscent, bottom: baseline + mt.actualBoundingBoxDescent, lh };
+  }
+
+  function fitEditorial(c, base, zoneH) {
+    let fs = base;
+    for (let i = 0; i < 26; i++) {
+      c.blk.style.fontSize = fs.toFixed(2) + 'px';
+      if (c.heroRow) c.heroRow.style.fontSize = (CFG.hero * (c.mode === 'solo' ? 1.25 : 1)).toFixed(3) + 'em';
+      if (c.heroRow && c.mode !== 'solo') {
+        // Tuck the serif word against the sans row by INK, not by boxes:
+        // the lockup sits a hair apart whatever glyphs meet (digits, caps,
+        // ascenders, descenders), with the serif's big line gap removed.
+        const m = c.mode === 'below' ? 'marginTop' : 'marginBottom';
+        c.heroRow.style[m] = '0px';
+        const hi = ink(c.heroText, c.heroRow), bi = ink(c.base.textContent, c.base);
+        const target = 0.05 * fs;
+        let mg;
+        if (c.mode === 'below') mg = target - hi.top - (bi.lh - bi.bottom);
+        else mg = target - (hi.lh - hi.bottom) - bi.top;
+        c.heroRow.style[m] = mg.toFixed(2) + 'px';
+        c.heroRow.style.paddingRight = c.mode === 'below' ? '0.02em' : '0';
+      }
+      const r = c.blk.getBoundingClientRect();
+      const lines = c.flowWords.length ? lineCount(c.flowWords) : 1;
+      const heroW = c.heroRow ? c.heroRow.scrollWidth : 0;
+      const wide = r.width > COLW + 1 || c.blk.scrollWidth > COLW + 2 || heroW > COLW + 1;
+      if (!wide && lines <= CFG.lines && r.height <= zoneH) break;
+      if (fs <= base * (wide ? 0.25 : 0.5)) break;
+      fs *= 0.95;
+    }
+    return fs;
+  }
+
+  function fitLockup(c, small, zoneH) {
+    const hero = c.heroRow;
+    let k = 1;
+    if (!hero) {
+      for (let i = 0; i < 20; i++) {
+        c.mid.style.fontSize = (small * k * CFG.mid).toFixed(2) + 'px';
+        c.mid.style.maxWidth = COLW + 'px';
+        const r = c.blk.getBoundingClientRect();
+        if (r.height <= zoneH && lineCount(c.words) <= 2 && c.mid.scrollWidth <= COLW + 1) break;
+        if (k <= 0.55) break;
+        k *= 0.93;
+      }
+      c.heroFs = small * k * CFG.mid;
+      return;
+    }
+    for (let i = 0; i < 20; i++) {
+      const sm = small * k;
+      [c.pre, c.post].forEach(r => { if (r) { r.style.fontSize = sm.toFixed(2) + 'px'; r.style.maxWidth = COLW + 'px'; } });
+      // hero: as big as the column allows, inside the ladder [heroMin, heroMax]
+      hero.style.fontSize = (sm * CFG.heroMax).toFixed(2) + 'px';
+      const w = hero.scrollWidth;
+      let hs = sm * CFG.heroMax * Math.min(1, (COLW - 4) / Math.max(1, w));
+      hs = Math.max(sm * CFG.heroMin, hs);
+      hero.style.fontSize = hs.toFixed(2) + 'px';
+      if (hero.scrollWidth > COLW + 1) {        // one very long word: shrink the whole ladder
+        hero.style.fontSize = (hs * (COLW - 4) / hero.scrollWidth).toFixed(2) + 'px';
+      }
+      // tuck connectors onto the hero's cap height (negative leading)
+      if (c.pre) c.pre.style.marginBottom = (look === 'stack' ? 0.02 : -0.02) * parseFloat(hero.style.fontSize) + 'px';
+      if (c.post) c.post.style.marginTop = (look === 'stack' ? 0.06 : 0.05) * parseFloat(hero.style.fontSize) + 'px';
+      const r = c.blk.getBoundingClientRect();
+      const lines = Math.max(c.pre ? lineCount(c.words.filter(o => o.role === 'sm' && o.el.parentElement === c.pre)) : 0,
+                             c.post ? lineCount(c.words.filter(o => o.role === 'sm' && o.el.parentElement === c.post)) : 0);
+      if (r.height <= zoneH && lines <= CFG.lines) break;
+      if (k <= 0.55) break;
+      k *= 0.93;
+    }
+    c.heroFs = parseFloat(hero.style.fontSize);
+  }
+
+  const cues = [];
+  let laidOut = false;
+  function layout() {
+    if (laidOut) return;
+    laidOut = true;
+    (P.cues || []).forEach((src, ci) => {
+      if (!src || !Array.isArray(src.w) || !src.w.length) return;
+      const c = { s: +src.s || 0, e: +src.e || 0, k: !!src.k, y: src.y, b: src.b, z: src.z,
+                  w: src.w.map(w => ({ t: String(w.t || ''), s: +w.s || 0, e: +w.e || 0, x: !!w.x })),
+                  words: [], flowWords: [] };
+      if (c.e - c.s < 0.04) return;
+      // l = plate luma hint (0-1) under the caption, when the pipeline knows it
+      c.lit = CFG.premium && +src.l >= LIT;
+      const el = MG.el('div', `cue L-${look}${c.lit ? ' lit' : ''}`, null, root);
+      el.style.left = SAFE.x0 + 'px'; el.style.width = COLW + 'px'; el.style.textAlign = align;
+      const blk = MG.el('div', 'blk', null, el);
+      blk.style.maxWidth = COLW + 'px';
+      blk.style.color = color;
+      if (userFont && look !== 'mono') {
+        const target = look === 'lockup' || look === 'stack' ? null : blk;
+        (target ? [target] : []).forEach(t => { t.style.fontFamily = `'${userFont}','Inter Display',sans-serif`; });
+        if (userWeight && target) target.style.fontWeight = userWeight;
+      }
+      c.el = el; c.blk = blk;
+      // right-to-left scripts keep their reading order (words are inline
+      // boxes); a stray RTL word inside an LTR phrase keeps the phrase LTR
+      const isRtl = w => /[\u0590-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFF]/.test(w.t);
+      const nRtl = c.w.filter(isRtl).length;
+      if (2 * nRtl > c.w.length || (nRtl && 2 * nRtl === c.w.length && isRtl(c.w[0]))) blk.dir = 'rtl';
+      el.classList.add('on');
+      const zone = zoneOf(c), zoneH = zone[1] - zone[0];
+      const base = CFG.fs * size * K;
+      if (look === 'editorial') { buildEditorial(c, blk); c.fs = fitEditorial(c, base, zoneH); }
+      else if (look === 'lockup' || look === 'stack') {
+        buildLockup(c, blk);
+        if (userFont) {
+          [c.pre, c.post, c.mid].forEach(r => { if (r) r.style.fontFamily = `'${userFont}','Inter Display',sans-serif`; });
+          if (look === 'lockup' && c.heroRow) c.heroRow.style.fontFamily = `'${userFont}','Inter Display',sans-serif`;
+          if (userWeight && look === 'lockup' && c.heroRow) c.heroRow.style.fontWeight = userWeight;
+        }
+        fitLockup(c, base, zoneH); c.fs = base;
+      }
+      else if (look === 'mono') { buildMono(c, blk); c.fs = fitFlow(c, base, CFG.lines, zoneH); }
+      else {
+        buildFlow(c, blk);
+        if (look === 'pop') blk.style.whiteSpace = 'nowrap';
+        c.fs = fitFlow(c, base, CFG.lines, zoneH);
+        if (look === 'box') {
+          c.ink = blk.cloneNode(true);       // the dark copy, before the box joins
+          c.hl = MG.el('span', 'hl', null, blk);
+          c.hl.style.background = accent;
+          blk.insertBefore(c.hl, blk.firstChild);
+        }
+      }
+      if (CFG.premium) c.scrim = blk.insertBefore(MG.el('span', 'scrim'), blk.firstChild);
+      // vertical placement: block centre on the anchor, kept inside its
+      // measured band (face-safe) and the platform-safe area.
+      let r = blk.getBoundingClientRect();
+      const h = r.height, yc = MG.clamp(+c.y || 0.74, 0.05, 0.95) * H;
+      let top = yc - h / 2;
+      if (h <= zoneH) top = MG.clamp(top, zone[0], zone[1] - h);
+      else top = c.b === 't' ? zone[1] - h : c.b === 'm' ? (zone[0] + zone[1] - h) / 2 : zone[0];
+      el.style.top = Math.round(top) + 'px';
+      r = blk.getBoundingClientRect();
+      // word geometry relative to the block's border box (scrim, box
+      // highlight, mono caret) and on the frame (punch/slam headroom)
+      c.words.forEach(o => {
+        const wr = o.el.getBoundingClientRect();
+        o.box = [wr.left - r.left, wr.top - r.top, wr.width, wr.height];
+        o.cx = (wr.left + wr.right) / 2; o.hw = wr.width / 2;
+        if (o.chars) o.cbox = o.chars.map(ch => { const q = ch.getBoundingClientRect(); return [q.right - r.left, q.top - r.top, q.height]; });
+      });
+      c.bl = blk.clientLeft; c.bt = blk.clientTop; c.bw = r.width; c.bh = r.height;
+      if (c.ink) {
+        const ink = c.ink;
+        ink.classList.add('ink');
+        Object.assign(ink.style, { width: r.width + 'px', left: -c.bl + 'px', top: -c.bt + 'px', color: '#0B0B0C' });
+        blk.appendChild(ink);
+        c.inkWords = Array.from(ink.querySelectorAll('.mg-w'));
+        // the copy must sit on the very same pixels; otherwise fall back
+        const off = c.inkWords.length !== c.words.length || c.words.some((o, i) => {
+          const a = o.el.getBoundingClientRect(), b = c.inkWords[i].getBoundingClientRect();
+          return Math.abs(a.left - b.left) > 0.6 || Math.abs(a.top - b.top) > 0.6 || Math.abs(a.width - b.width) > 0.6;
+        });
+        if (off) { ink.remove(); c.ink = null; }
+      }
+      if (look === 'mono') {
+        const f0 = c.words[0].chars[0].getBoundingClientRect();
+        c.caret0 = [f0.left - r.left, f0.top - r.top];
+        c.charH = f0.height;
+        c.blkW = r.width; c.blkH = r.height;
+        c.caret.style.height = (f0.height * 0.78).toFixed(1) + 'px';
+      }
+      c.rect = [r.left, r.top, r.right, r.bottom];
+      el.classList.remove('on');
+      cues.push(c);
+    });
+    cues.sort((a, b) => a.s - b.s);
+    // timing: reveal time + entrance per word, then the motion windows
+    const Wn = [];
+    // A window covers the first frame at/after every change and nothing
+    // more: frames outside all windows re-use the previous capture. Every
+    // window spans MORE than one frame period, so it always contains a frame
+    // whatever the sub-frame phase of the event (ms-rounded word timings, a
+    // lead that is not exactly one frame): a narrower window can fall between
+    // two frames and silently drop the change (a word never shown, a hero
+    // stuck at its ghost opacity).
+    const G = F + 2e-4;
+    const win = (a, b) => Wn.push([a - 1e-4, b]);
+    cues.forEach((c, i) => {
+      const nxt = cues[i + 1];
+      if (nxt && nxt.s < c.e) c.e = nxt.s;            // never two cues at once
+      c.hardOut = HARD || c.k || (nxt && nxt.s - c.e < 0.05);
+      c.fadeD = Math.min(CFG.fade, Math.max(0, (c.e - c.s) * 0.3));
+    });
+    cues.forEach((c, i) => {
+      const prev = cues[i - 1];
+      // a hard swap in continuous speech: the new phrase must not blink
+      const swapIn = !!prev && (prev.k || c.s - prev.e < 0.05);
+      c.words.forEach(o => {
+        let kind = 'pop';
+        if (!HARD) {
+          if (look === 'clean' || look === 'serif') kind = 'rise';
+          else if (look === 'editorial') kind = o.role === 'hero' ? 'ghost' : 'pop';
+          else if (look === 'lockup') kind = o.role === 'hero' ? 'ghost' : 'pop';
+          else if (look === 'stack') kind = o.role === 'hero' ? 'slam' : 'rise';
+          else if (look === 'pop') kind = 'scale';
+          else if (look === 'glow') kind = 'light';
+          else if (look === 'box') kind = 'glide';
+          else if (look === 'mono') kind = 'type';
+        }
+        const en = ENTER[kind];
+        o.kind = kind;
+        o.R = Math.max(c.s, o.w.s - en.early);
+        o.d = en.d;
+        if (kind === 'type') {
+          const n = o.chars.length;
+          o.d = Math.max(0.05, Math.min(n / 32, Math.max(0.05, (o.w.e - o.w.s) * 0.9), 0.4));
+        }
+        if (o.R >= c.e) o.R = Math.max(c.s, c.e - F);
+        // An entrance whose pre-roll was clamped to the cue start begins
+        // where it would have been by then (a word that 'rises' from 0 on
+        // the cue's first frame would leave that frame empty).
+        o.p0 = 0;
+        if (o.d > 0 && (kind === 'rise' || kind === 'slam')) {
+          o.p0 = MG.clamp((o.R - (o.w.s - en.early)) / o.d, 0, 0.6);
+          if (swapIn && o.R <= c.s + 1e-6) {
+            if (kind === 'rise') o.p0 = Math.max(o.p0, 0.4);
+            o.solid = true;                  // slam: full opacity, keep the settle
+          }
+        }
+        // punch / slam overshoot never pushes a word past the frame edge
+        o.smax = o.hw > 0 ? Math.max(1, Math.min(o.cx - 24, W - 24 - o.cx) / o.hw) : 1;
+        win(o.R, o.R + Math.max(o.d, CFG.premium && !HARD ? SCRIM_T : 0) + G);
+      });
+      win(c.s, c.s + (look === 'box' || look === 'mono' ? 0.14 : 0) + G);
+      if (c.hardOut) win(c.e, c.e + G); else win(c.e - c.fadeD, c.e + G);
+      if (look === 'mono' && !HARD) {
+        // caret blinks (2 Hz) only while the line rests
+        const ends = c.words.map(o => o.R + o.d);
+        c.words.forEach((o, k) => {
+          const a = ends[k], b = k + 1 < c.words.length ? c.words[k + 1].R : c.e;
+          for (let tg = a + 0.5; tg < b; tg += 0.5) win(tg, tg + G);
+        });
+      }
+    });
+    MG.active(Wn);
+    if (cues.length) {
+      let pad = look === 'glow' ? 80 : look === 'pop' ? 70 : look === 'stack' ? 120 : 46;
+      if (CFG.premium) pad = Math.max(pad, SCRIM_PAD[0] * Math.max(...cues.map(c => c.fs)) + 4);
+      MG.box = [Math.min(...cues.map(c => c.rect[0])) - pad, Math.min(...cues.map(c => c.rect[1])) - pad,
+                Math.max(...cues.map(c => c.rect[2])) + pad, Math.max(...cues.map(c => c.rect[3])) + pad];
+    }
+  }
+
+  // Fonts must be real before anything is measured.
+  const faces = ["700 60px 'Inter Display'", "800 60px 'Inter Display'", "900 60px 'Inter Display'",
+    "600 60px 'Inter'", "700 60px 'Inter'", "italic 400 60px 'Instrument Serif'", "400 60px 'Anton'",
+    "700 60px 'JetBrains Mono'"];
+  if (userFont) faces.push(`${userWeight || 700} 60px '${userFont}'`);
+  MG.ready = Promise.all(faces.map(f => document.fonts.load(f).catch(() => null)))
+    .then(() => document.fonts.ready).then(() => layout());
+
+  // ── per-frame state ────────────────────────────────────────────────────
   let shown = null;
+  function setWord(o, st) { MG.set(o.el, st); }
   MG.frame(t => {
-    const c = cues.find(c => t >= c.s && t < c.e) || null;
+    layout();
+    let c = null;
+    for (const q of cues) { if (t >= q.s - 1e-6 && t < q.e - 1e-6) { c = q; break; } }
     if (shown && shown !== c) shown.el.classList.remove('on');
     shown = c;
     if (!c) return;
     c.el.classList.add('on');
-    // cue entrance / exit
-    const cin = MG.range(t, c.s, 0.2), cout = MG.range(t, c.e - 0.09, 0.09);
-    const blkState = {};
+    // cue exit: hard clear on a swap, a short fade into a pause
+    let vis = 1, outQ = 0;
+    if (!c.hardOut && c.fadeD > 0) { outQ = MG.range(t, c.e - c.fadeD, c.fadeD); vis = 1 - outQ; }
+    const bs = { opacity: vis };
+    if (outQ > 0 && (look === 'clean' || look === 'serif')) bs.blur = outQ * 3;
     if (look === 'box' || look === 'mono') {
-      const k = MG.spring(t, c.s, { stiffness: 320, damping: 24 });
-      blkState.scale = 0.9 + 0.1 * k; blkState.opacity = Math.min(1, cin * 1.6) * (1 - cout);
-      blkState.y = (1 - k) * 18;
-    } else {
-      blkState.opacity = 1 - cout;
-      if (look === 'clean' || look === 'serif') blkState.blur = cout * 6;
-    }
-    MG.set(c.blk, blkState);
-    let activeIdx = -1;
-    c.words.forEach((o, k) => {
-      const w = o.w;
-      const spoken = t >= w.s - 0.02;
-      if (spoken) activeIdx = k;
-      const st = {};
-      if (look === 'pop') {
-        if (!spoken) { st.opacity = 0; }
-        else {
-          const sp = MG.spring(t, w.s - 0.02, { stiffness: 380, damping: 17 });
-          st.scale = 0.55 + 0.45 * sp; st.y = (1 - sp) * 22; st.opacity = MG.range(t, w.s - 0.02, 0.06);
-          st.blur = (1 - MG.range(t, w.s - 0.02, 0.12)) * 7;
-        }
-      } else if (look === 'clean' || look === 'serif') {
-        if (!spoken) st.opacity = 0;
-        else {
-          const p = MG.ease.outCubic(MG.range(t, w.s - 0.03, look === 'serif' && w.x ? 0.38 : 0.26));
-          st.opacity = p; st.y = (1 - p) * (look === 'serif' && w.x ? 26 : 12); st.blur = (1 - p) * (w.x ? 10 : 6);
-          if (look === 'serif' && w.x) st.scale = 0.86 + 0.14 * MG.spring(t, w.s - 0.03, { stiffness: 220, damping: 13 });
-        }
-      } else if (look === 'glow') {
-        const p = MG.ease.outCubic(MG.range(t, w.s - 0.02, 0.14));
-        st.opacity = 0.36 + 0.64 * p;
-        o.el.style.textShadow = p > 0.01 ? `0 0 ${(0.18 * p).toFixed(3)}em ${accent}, 0 0 ${(0.5 * p).toFixed(3)}em ${accent}` : 'none';
-        if (w.x) st.scale = 1 + 0.08 * MG.spring(t, w.s - 0.02, { stiffness: 260, damping: 12 });
-      } else if (look === 'stack') {
-        if (!spoken) st.opacity = 0;
-        else if (o.hero) {
-          const sp = MG.spring(t, w.s - 0.03, { stiffness: 300, damping: 18 });
-          st.scale = 1 + (1 - sp) * 0.9; st.opacity = MG.range(t, w.s - 0.03, 0.05); st.blur = (1 - MG.range(t, w.s - 0.03, 0.14)) * 12;
-          if (w.x) o.el.style.color = accent;
-        } else {
-          const p = MG.ease.outCubic(MG.range(t, w.s - 0.03, 0.22));
-          st.opacity = p; st.y = (1 - p) * 10;
-        }
-      } else if (look === 'box') {
-        st.opacity = 1;
-      } else if (look === 'mono') {
-        const n = Array.from(o.txt).length;
-        const p = MG.range(t, w.s - 0.02, Math.max(0.08, Math.min(w.e - w.s, n * 0.05)));
-        const shown = Array.from(o.txt).slice(0, Math.ceil(n * p)).join('');
-        o.el.textContent = shown;
-        o.el.style.display = shown ? 'inline-block' : 'none';
-      }
-      MG.set(o.el, st);
-    });
-    // active-word color for pop / box
-    c.words.forEach((o, k) => {
-      if (look === 'pop') o.el.style.color = (k === activeIdx || (o.w.x && k <= activeIdx)) ? accent : color;
-      if (look === 'box') o.el.style.color = k === activeIdx ? '#0B0B0C' : color;
-    });
-    if (look === 'box' && c.hl) {
-      if (activeIdx < 0) { c.hl.style.opacity = 0; }
+      if (HARD) bs.opacity = vis;
       else {
-        const cur = c.words[activeIdx], prev = c.words[Math.max(0, activeIdx - 1)];
-        const g = activeIdx === 0 ? 1 : MG.ease.outCubic(MG.range(t, cur.w.s - 0.02, 0.13));
-        const b = cur.box.map((v, i) => MG.lerp(prev.box[i], v, g));
-        const padX = 0.12 * c.fs, padY = 0.02 * c.fs;
-        Object.assign(c.hl.style, { left: (b[0] - padX) + 'px', top: (b[1] - padY) + 'px',
-          width: (b[2] + 2 * padX) + 'px', height: (b[3] + 2 * padY) + 'px', opacity: 1 });
+        const p = MG.ease.outCubic(MG.range(t, c.s, 0.14));
+        bs.opacity = Math.min(1, MG.range(t, c.s, 0.07)) * vis;
+        bs.scale = 0.965 + 0.035 * p; bs.y = (1 - p) * 8;
       }
+    }
+    MG.set(c.blk, bs);
+
+    let active = -1;
+    c.words.forEach((o, i) => {
+      const on = t >= o.R - 1e-6;
+      if (on) active = i;
+      // p0: an entrance whose pre-roll was clamped starts part-way through
+      const p = on ? MG.range(t, o.R - o.p0 * o.d, o.d) : 0;
+      let op = on ? 1 : 0;
+      switch (o.kind) {
+        case 'pop': break;
+        case 'ghost': op = !on ? 0 : t < o.R + 2 * F - 1e-6 ? 0.38 : 1; break;
+        case 'rise': {
+          if (!on) break;
+          const e = MG.ease.outCubic(p);
+          op = Math.min(1, p * 1.7);
+          setWord(o, { opacity: op, y: (1 - e) * (o.role === 'em' ? 12 : 10), blur: (1 - e) * 7 });
+          break;
+        }
+        case 'scale': {
+          if (!on) break;
+          const e = MG.ease.outCubic(p);
+          setWord(o, { opacity: 1, scale: 1 + Math.min(0.13, o.smax - 1) * (1 - e) });
+          break;
+        }
+        case 'slam': {
+          if (!on) break;
+          const e = MG.ease.outQuart(p);
+          op = o.solid ? 1 : Math.min(1, p * 4);
+          setWord(o, { opacity: op, scale: 1 + Math.min(0.3, o.smax - 1) * (1 - e), blur: (1 - Math.min(1, p * 1.6)) * 5 });
+          break;
+        }
+        case 'light': case 'glide': case 'type': break;
+      }
+      o.op = op;
+      // box/glow show the whole phrase from the cue start; mono types chars
+      if (o.kind === 'light' || o.kind === 'glide') o.el.style.opacity = 1;
+      else if (o.kind !== 'type' && (!on || o.kind === 'pop' || o.kind === 'ghost')) o.el.style.opacity = op;
+    });
+
+    if (c.scrim) {
+      // hug the words revealed so far; grow to each new word over SCRIM_T
+      const rev = c.words.filter(o => t >= o.R - 1e-6);
+      if (!rev.length) c.scrim.style.opacity = 0;
+      else {
+        const lastR = Math.max(...rev.map(o => o.R));
+        const union = ws => ws.reduce((u, o) => u ? [Math.min(u[0], o.box[0]), Math.min(u[1], o.box[1]),
+          Math.max(u[2], o.box[0] + o.box[2]), Math.max(u[3], o.box[1] + o.box[3])]
+          : [o.box[0], o.box[1], o.box[0] + o.box[2], o.box[1] + o.box[3]], null);
+        const nb = union(rev), older = rev.filter(o => o.R < lastR - 1e-6);
+        let b = nb;
+        if (older.length && !HARD) {
+          const q = MG.ease.outCubic(MG.range(t, lastR, SCRIM_T)), pb = union(older);
+          b = nb.map((v, i) => MG.lerp(pb[i], v, q));
+        }
+        const first = rev.reduce((a, o) => (o.R < a.R ? o : a), rev[0]);
+        const px = SCRIM_PAD[0] * c.fs, py = SCRIM_PAD[1] * c.fs;
+        Object.assign(c.scrim.style, {
+          left: (b[0] - px).toFixed(1) + 'px', top: (b[1] - py).toFixed(1) + 'px',
+          width: (b[2] - b[0] + 2 * px).toFixed(1) + 'px', height: (b[3] - b[1] + 2 * py).toFixed(1) + 'px',
+          opacity: (SCRIM_OP[c.lit ? 1 : 0] * first.op).toFixed(3) });
+      }
+    }
+
+    if (look === 'pop') {
+      c.words.forEach((o, i) => { o.el.style.color = (i === active || (o.w.x && i <= active)) ? accent : color; });
+    } else if (look === 'glow') {
+      c.words.forEach((o, i) => {
+        const lit = i <= active;
+        const ramp = HARD ? (lit ? 1 : 0) : MG.range(t, o.R, 0.07);
+        let g = 0;
+        if (lit && !HARD) {
+          const nx = c.words[i + 1];
+          g = MG.ease.outCubic(MG.range(t, o.R, 0.07));
+          if (nx && t >= nx.R) g *= 0.32 + 0.68 * (1 - MG.range(t, nx.R, 0.16));
+        }
+        o.el.style.opacity = (0.36 + 0.64 * (lit ? ramp : 0)).toFixed(3);
+        o.el.style.textShadow = g > 0.01
+          ? `0 0 ${(0.16 * g).toFixed(3)}em ${accent}, 0 0 ${(0.48 * g).toFixed(3)}em ${accent}, 0 .04em .2em rgba(0,0,0,.35)`
+          : '0 .04em .2em rgba(0,0,0,.45)';
+      });
+    } else if (look === 'box') {
+      if (active < 0) {
+        c.hl.style.opacity = 0;
+        if (c.ink) c.ink.style.visibility = 'hidden';
+        c.words.forEach(o => { o.el.style.color = color; });
+      } else {
+        const cur = c.words[active], prev = c.words[Math.max(0, active - 1)];
+        const g = HARD || active === 0 ? 1 : MG.ease.outCubic(MG.range(t, cur.R, 0.11));
+        const b = cur.box.map((v, i) => MG.lerp(prev.box[i], v, g));
+        const px = 0.11 * c.fs, py = 0.015 * c.fs;
+        // highlight rect in the block's border-box coordinates
+        const X = b[0] - px, Y = b[1] - py, BW = b[2] + 2 * px, BH = b[3] + 2 * py;
+        Object.assign(c.hl.style, { left: (X - c.bl).toFixed(1) + 'px', top: (Y - c.bt).toFixed(1) + 'px',
+          width: BW.toFixed(1) + 'px', height: BH.toFixed(1) + 'px', opacity: 1 });
+        if (c.ink) {
+          // dark copy of the text clipped to exactly the box: whatever part
+          // of a word the gliding box covers is dark, the rest stays light
+          const rad = (0.2 * c.fs).toFixed(1);
+          c.ink.style.clipPath = `inset(${Y.toFixed(1)}px ${(c.bw - X - BW).toFixed(1)}px ` +
+            `${(c.bh - Y - BH).toFixed(1)}px ${X.toFixed(1)}px round ${rad}px)`;
+          c.ink.style.visibility = 'visible';
+        } else {
+          // no pixel-exact copy: ink a word only while the box mostly covers it
+          c.words.forEach((o, i) => {
+            o.el.style.color = (i === active && g >= 0.9) || (i === active - 1 && g <= 0.1) ? '#0B0B0C' : color;
+          });
+        }
+      }
+    } else if (look === 'mono') {
+      let caretAt = c.caret0, typing = false;
+      c.words.forEach(o => {
+        const n = o.chars.length;
+        const on = t >= o.R - 1e-6;
+        const p = !on ? 0 : HARD ? 1 : MG.range(t, o.R, o.d);
+        const m = Math.ceil(n * p - 1e-6);
+        o.chars.forEach((ch, j) => { ch.style.visibility = j < m ? 'visible' : 'hidden'; });
+        if (m > 0) caretAt = [o.cbox[m - 1][0] + (m === n ? 0.12 * c.fs : 0.04 * c.fs), o.cbox[m - 1][1]];
+        if (on && p < 1) typing = true;
+      });
+      let blinkOn = true;
+      if (!HARD && !typing) {
+        const lastEnd = Math.max(c.s, ...c.words.filter(o => t >= o.R).map(o => o.R + o.d));
+        blinkOn = Math.floor((t - lastEnd + 1e-6) / 0.5) % 2 === 0;
+      }
+      c.caret.style.left = caretAt[0].toFixed(1) + 'px';
+      c.caret.style.top = (caretAt[1] + 0.1 * c.charH).toFixed(1) + 'px';
+      c.caret.style.opacity = blinkOn ? 1 : 0;
+      const secondLine = caretAt[1] > c.caret0[1] + 0.5 * c.charH;
+      const pw = secondLine ? c.blkW : Math.min(c.blkW, caretAt[0] + 0.56 * c.fs + 0.52 * c.fs);
+      const ph = Math.min(c.blkH, caretAt[1] + c.charH + 0.3 * c.fs);
+      c.plate.style.width = pw.toFixed(1) + 'px';
+      c.plate.style.height = ph.toFixed(1) + 'px';
     }
   });
 })();

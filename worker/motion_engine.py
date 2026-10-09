@@ -136,6 +136,19 @@ def package_installed():
     return True
 
 
+def authorable():
+    """Motion items and motion captions may be written into an EDL for this
+    deployment. The agent lanes that author edits ship no browser; the
+    interactive and batch render lanes that draw them do, and a lane without
+    one falls back (libass captions; graphics skipped with a warning). So the
+    authoring question is "does this deployment ship the engine", answered by
+    the package, never by this process's own Chromium. MOTION_ENGINE=off is
+    the operator kill switch."""
+    if os.getenv("MOTION_ENGINE", "").strip().lower() in ("0", "off", "false", "no"):
+        return False
+    return package_installed()
+
+
 _AVAILABILITY = {"ok": None, "reason": ""}
 _AVAILABILITY_LOCK = threading.Lock()
 _BROWSER_PROBE_TIMEOUT_S = 30.0
