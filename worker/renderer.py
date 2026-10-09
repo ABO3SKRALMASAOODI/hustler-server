@@ -1941,6 +1941,46 @@ def focus_handoff(edge, src_fps, origin, out_fps=None):
     return float(origin) + (round(float(edge) * fps) - 0.5) / fps
 
 
+def _keep_layout_tags(parts, mark, in_label, out_label, uid, fps):
+    """Wrap the stage appended to ``parts`` since ``mark`` (``in_label`` ->
+    ``out_label``) so its frames keep the layout tags of the frames that
+    entered it (picture_cards.LAYOUT_TAG_KEY). zoompan and tmix rebuild
+    their frames without the source frame's metadata, so a source-fed card
+    downstream would find no frame of its run. Both sides are put on one
+    frame grid (the clock zoompan's output already runs on) and the stage's
+    output is laid, opaque, over the tagged frames: identical pixels, the
+    entering frame's tags. Only used when such a card exists."""
+    stage = parts[mark:]
+    del parts[mark:]
+    grid = f"settb=AVTB,setpts=N/{float(fps):.6f}/TB"
+    parts.append(f"[{in_label}]{grid},split[lt{uid}k][lt{uid}w]")
+    parts.extend(p.replace(f"[{in_label}]", f"[lt{uid}w]") for p in stage)
+    parts.append(f"[{out_label}]{grid}[lt{uid}d]")
+    parts.append(f"[lt{uid}k][lt{uid}d]overlay=0:0:eof_action=pass[lt{uid}o]")
+    return f"lt{uid}o"
+
+
+def _render_junctions(edl, index, blk_tags):
+    """transition_junctions on the RENDER blocks. Pieces of one kept segment
+    (split at a focus or picture-card edge) are one EDL block: the junction
+    between them is never a cut. With no split this is exactly
+    transition_junctions(edl, index, n_blocks=len(blk_tags))."""
+    groups = []
+    for k, tag in enumerate(blk_tags):
+        if not groups:
+            groups.append(0)
+        elif tag[0] == "seg" and tag == blk_tags[k - 1]:
+            groups.append(groups[-1])
+        else:
+            groups.append(groups[-1] + 1)
+    n_groups = (groups[-1] + 1) if groups else 0
+    if n_groups == len(blk_tags):
+        return transition_junctions(edl, index, n_blocks=len(blk_tags))
+    real = transition_junctions(edl, index, n_blocks=n_groups)
+    return {k for k in range(len(blk_tags) - 1)
+            if groups[k] != groups[k + 1] and groups[k] in real}
+
+
 def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                       music_inputs, index, preview,
                       W=None, H=None, fps=30.0, frame_mode=None,
@@ -2030,6 +2070,41 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         keep = split_keep
     else:
         handoff_of = {}
+    # Source-fed picture cards (picture_cards.layout_filter) re-compose the
+    # main footage inside their PROGRAM window. A window edge inside a kept
+    # segment splits the local render block there — like a focus edge, the
+    # EDL keeps its real cuts and the timeline does not change.
+    # A card edge on a focus handoff (a camera cut the focus track re-aims
+    # on, split half a frame before the cut frame) takes that split instead:
+    # the first frame of the new shot belongs to the card, not to a sliver
+    # of the old framing.
+    fx_cards = [c for c in ((edl.get("effects") or {}).get("picture_cards")
+                            or []) if picture_cards.source_fed(c)]
+    card_windows = {}
+    if keep and fx_cards:
+        card_edges = set()
+        reach = 1.5 / float(src_fps or fps or 30.0)
+        for card in fx_cards:
+            window = []
+            for t in (float(card["start"]), float(card["end"])):
+                src_t = tl.out_to_src(t)
+                if src_t is not None:
+                    near = [x for x in handoff_of if abs(x - src_t) <= reach]
+                    if near:
+                        x = min(near, key=lambda v: abs(v - src_t))
+                        x_out = tl.src_to_out(x)
+                        t = t if x_out is None else x_out
+                    else:
+                        card_edges.add(round(float(src_t), 6))
+                window.append(t)
+            card_windows[card["id"]] = tuple(window)
+        split_keep = []
+        for s, e in keep:
+            edges = [s] + sorted(x for x in card_edges
+                                 if s + 0.01 < x < e - 0.01) + [e]
+            split_keep.extend((a, b) for a, b in zip(edges, edges[1:])
+                              if b - a > 0.01)
+        keep = split_keep
     # A canvas program (image/clip-only, no main video) has no keep segments and
     # no input [0]: its program is the inserts alone, concatenated on the canvas.
     canvas_prog = not (edl.get("keep") or []) and bool(edl.get("canvas"))
@@ -2080,6 +2155,15 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     # zoompan.
     fx = edl.get("effects") or {}
     zooms = fx.get("zooms") or []
+    # A stacked card shows two regions in two boxes; one camera move would
+    # drag one panel's picture into the other. Zooms meeting a stacked
+    # window do not play (set_picture_card says so when it writes one).
+    stack_windows = [(float(c["start"]), float(c["end"])) for c in fx_cards
+                     if c.get("panels")]
+    if stack_windows and zooms:
+        zooms = [z for z in zooms
+                 if not any(min(b, float(z["end"])) - max(a, float(z["start"]))
+                            > 1e-3 for a, b in stack_windows)]
     regions = fx.get("regions") or []
     speed = edl.get("speed") or []
     stylize = fx.get("stylize") or []
@@ -2154,6 +2238,39 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     seg_out_len = [sum((pe - ps) / f for ps, pe, f in pcs)
                    for pcs in seg_pcs]
 
+    # Which main blocks a source-fed card composes (by the block's program
+    # midpoint — the edges were split above). Consecutive composed blocks
+    # with no insert between them form a RUN, and every frame of a run is
+    # tagged with its name (picture_cards.layout_filter) so the card branch
+    # covers exactly those frames. A spliced insert inside the window ends a
+    # run: it plays full-frame. The walk mirrors the program-order loop below.
+    card_layout, card_runs = {}, {}
+    if fx_cards and n > 0:
+        _at = [tl.ins[j][0] for j in range(len(insert_inputs))]
+        _pre = _prog = 0.0
+        _j = 0
+        order = []                      # ("ins", None) / ("seg", i, mid)
+        for i in range(n):
+            while _j < len(_at) and _at[_j] <= _pre + 1e-6:
+                order.append(("ins", None, None))
+                _prog += float(insert_inputs[_j][1]["duration_s"])
+                _j += 1
+            order.append(("seg", i, _prog + seg_out_len[i] / 2.0))
+            _pre += seg_out_len[i]
+            _prog += seg_out_len[i]
+        for j, card in enumerate(fx_cards):
+            a, b = card_windows.get(card["id"]) or (float(card["start"]),
+                                                    float(card["end"]))
+            panels = picture_cards.card_panels(card)
+            tag = None
+            for kind, i, mid in order:
+                if kind == "seg" and i not in card_layout and a <= mid < b:
+                    if tag is None:
+                        tag = f"c{j}r{len(card_runs.get(card['id'], []))}"
+                        card_runs.setdefault(card["id"], []).append(tag)
+                    card_layout[i] = (panels, tag)
+                else:
+                    tag = None
     sw = sh = None
     seg_prog = []
     if regions:
@@ -2388,6 +2505,13 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             # frame_focus reaches ONLY the main footage: the focus point was
             # measured on the source video, so inserts (below) keep the
             # center crop.
+            if i in card_layout:
+                picture_cards.layout_filter(
+                    parts, f"segv{i}", f"v_seg{i}", W, H, fps,
+                    card_layout[i][0], f"s{i}", src_size=main_src_size,
+                    seg_dur=seg_out_len[i], grade=block_grade,
+                    tag=card_layout[i][1])
+                continue
             seg_focus, seg_mode = _frame_for(*keep[i])
             _normalize_video(parts, f"segv{i}", f"v_seg{i}", W, H, fps,
                              seg_mode, f"s{i}", focus=seg_focus,
@@ -2480,19 +2604,34 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     # program order: inserts splice at their keep boundary, before the
     # segment that starts there (mirrors Timeline)
     blocks, ins_j, pre = [], 0, 0.0
+    # Which EDL block each render block belongs to: focus and card edges
+    # split kept segments into several local blocks, and a junction between
+    # two pieces of one segment is not a cut.
+    edl_keep = [(float(k[0]), float(k[1])) for k in edl.get("keep") or []]
+
+    def _origin(s, e):
+        for j, (a, b) in enumerate(edl_keep):
+            if a - 1e-6 <= s and e <= b + 1e-6:
+                return ("seg", j)
+        return ("local", s)
+
+    blk_tags = []
     at_list = [tl.ins[j][0] for j in range(len(insert_inputs))]
     for i, (s, e) in enumerate(keep):
         while ins_j < len(insert_inputs) and at_list[ins_j] <= pre + 1e-6:
             blocks.append((f"v_ins{ins_j}", f"a_ins{ins_j}",
                            float(insert_inputs[ins_j][1]["duration_s"])))
+            blk_tags.append(("ins", ins_j))
             ins_j += 1
         # seg_out_len, not e - s: a sped segment's block duration is its
         # REMAPPED length (identical to e - s when no speed spans exist).
         blocks.append((f"v_seg{i}", f"a_seg{i}", seg_out_len[i]))
+        blk_tags.append(_origin(s, e))
         pre += seg_out_len[i]
     while ins_j < len(insert_inputs):
         blocks.append((f"v_ins{ins_j}", f"a_ins{ins_j}",
                        float(insert_inputs[ins_j][1]["duration_s"])))
+        blk_tags.append(("ins", ins_j))
         ins_j += 1
 
     # Transitions: a junction effect at every cut/insert boundary, chosen
@@ -2508,7 +2647,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     # changed scene is what a real user shipped and called broken. The set is
     # resolved by timeline.transition_junctions so this and set_transitions'
     # own count can never disagree; scope 'every_cut' returns all of them.
-    junctions = (transition_junctions(edl, index, n_blocks=len(blocks))
+    junctions = (_render_junctions(edl, index, blk_tags)
                  if transition and len(blocks) > 1 else set())
     if transition and len(blocks) > 1 and not junctions:
         transition = None       # nothing qualified — emit clean hard cuts
@@ -2663,9 +2802,19 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                 blur_r = max(6, int(round((W or 1280) * 0.012)))
                 en = "+".join(f"between(t,{a:.3f},{b:.3f})"
                               for a, b in merge_spans(enspans, gap=0.0))
-                parts.append(f"color=c=black:s={W}x{H}:r={fps:.3f}:"
-                             f"d={total_bd:.3f}[wbg]")
-                parts.append(f"[wbg][{vlabel}]overlay="
+                if card_runs:
+                    # The black under the whip is cut from the program's own
+                    # frames, so every frame keeps its timestamp and the
+                    # layout tags a source-fed card is built from.
+                    parts.append(f"[{vlabel}]split[wsrc][wbase]")
+                    parts.append("[wbase]drawbox=x=0:y=0:w=iw:h=ih"
+                                 ":color=black:t=fill[wbg]")
+                    whip_in = "wsrc"
+                else:
+                    parts.append(f"color=c=black:s={W}x{H}:r={fps:.3f}:"
+                                 f"d={total_bd:.3f}[wbg]")
+                    whip_in = vlabel
+                parts.append(f"[wbg][{whip_in}]overlay="
                              f"x='{'+'.join(xterms)}':y=0:"
                              f"eof_action=pass[wov]")
                 parts.append(f"[wov]dblur=angle=0:radius={blur_r}:"
@@ -2705,10 +2854,13 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                         f"{B:.3f}*pow(max(0,1-({T}-{c:.3f})"
                         f"/{td_i:.3f}),2)*{_win(T, c, c + td_i)}")
             if zterms:
+                mark = len(parts)
                 parts.append(f"[{vlabel}]zoompan=z='1+{'+'.join(zterms)}'"
                              f":x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
                              f":d=1:s={W}x{H}:fps={fps:.3f}[vpunch]")
-                vlabel = "vpunch"
+                vlabel = (_keep_layout_tags(parts, mark, vlabel, "vpunch",
+                                            "tp", fps)
+                          if card_runs else "vpunch")
     # effects: grade -> custom grade -> stylize -> zooms -> overlays ->
     # (captions burn) -> (graphics burn) -> fades. Zooms use one zoompan
     # whose z steps up inside each window; do_norm guarantees the frames
@@ -2744,6 +2896,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             en = ""
             win = "1"
         out_lab = f"vsty{si}"
+        mark = len(parts)
         if kind == "grain":
             parts.append(f"[{vlabel}]noise=alls={5 + int(25 * i_)}"
                          f":allf=t+u{en}[{out_lab}]")
@@ -2853,6 +3006,10 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                 f"blocksize=8:search=less[{out_lab}]")
         else:
             continue
+        if card_runs and kind in ("shake", "motion_blur"):
+            # zoompan / tmix drop the frame metadata source cards select by.
+            out_lab = _keep_layout_tags(parts, mark, vlabel, out_lab,
+                                        f"s{si}", fps)
         vlabel = out_lab
 
     # Round 96 — agent-written chains, spliced after the preset stylize so a
@@ -2867,6 +3024,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             continue
         a = cf.get("start")
         out_lab = f"vcusf{ci}"
+        mark = len(parts)
         if a is None:
             parts.append(f"[{vlabel}]{chain}[{out_lab}]")
         else:
@@ -2882,6 +3040,10 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             parts.append(f"[cusB{ci}]{chain}[cusP{ci}]")
             parts.append(f"[cusA{ci}][cusP{ci}]overlay=eof_action=pass"
                          f":enable='between(t,{a:.3f},{b:.3f})'[{out_lab}]")
+        if card_runs:
+            # An agent's chain may rebuild frames without their metadata.
+            out_lab = _keep_layout_tags(parts, mark, vlabel, out_lab,
+                                        f"c{ci}", fps)
         vlabel = out_lab
 
     # ---- words BEHIND the subject (round 60) -----------------------------
@@ -3242,7 +3404,8 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     # their delivery-resolution geometry when the footage opens into a card.
     vlabel = picture_cards.append_graph(
         parts, vlabel, picture_card_inputs, W, H, fps,
-        (edl.get("frame") or {}).get("picture"))
+        (edl.get("frame") or {}).get("picture"),
+        runs=card_runs)
     # Browser-rendered motion design under the dialogue captions...
     vlabel = motion_layer.append_graph(parts, vlabel, motion_inputs,
                                        "below_captions", fps)
@@ -4706,7 +4869,9 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         ramp = tl.ramp_over(float(b["src_start"]), float(b["src_end"]))
         why = (f"speed ramp {ramp[0]} now covers its footage" if ramp else
                "the framing changed since its mask was measured"
-               if b.get("geom") and b["geom"] != geom_now else None)
+               if b.get("geom") and b["geom"] != geom_now else
+               "a source-fed picture card re-frames its footage"
+               if picture_cards.overlaps_source_card(edl, pieces) else None)
         if pieces and why:
             print(f"[render] behind-text {item.get('id')}: {why} — burning "
                   "it as a plain title", flush=True)
@@ -4797,6 +4962,8 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                 why = f"speed ramp {ramp[0]} now covers its footage"
             elif b.get("geom") and b["geom"] != geom_now:
                 why = "the framing changed since its mask was measured"
+            elif picture_cards.overlaps_source_card(edl, pieces):
+                why = "a source-fed picture card re-frames its footage"
             else:
                 try:
                     local = _fetch(b["asset_key"], "matte", next_idx)

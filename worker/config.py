@@ -1951,8 +1951,11 @@ GFX_SHAPING_VERSION = 1
 # pans through one shot. Those renders are known-wrong, and the cache is keyed
 # on EDL VERSION rather than content, so without this stamp she would keep
 # being served the broken file forever. Bump if junction selection changes
-# again.
-TRANSITION_VERSION = 3  # v3: zoom_punch no longer tmix-blends across concat
+# again. v4 (Oct 2026): a kept segment split into several render blocks (at a
+# focus-track handoff or a source-fed picture card's edge) is ONE block for
+# junction selection; before, the block count no longer matched the EDL's and
+# every junction — jump cuts included — got the transition.
+TRANSITION_VERSION = 4  # v4: render blocks split at focus/card edges are not junctions
 
 # ── The camera (worker/camera.py) ─────────────────────────────────────────
 # Stamped as `cam_v` on every render and compared ONLY where a previous

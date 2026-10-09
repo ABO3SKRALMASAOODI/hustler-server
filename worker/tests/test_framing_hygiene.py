@@ -291,7 +291,8 @@ def test_auto_reframe_windows_a_low_resolution_source_with_headline_band():
     # no frames are needed (proxy_path raises): resolution decides first
     res = agent_tools.auto_reframe(ctx, "9:16", "auto")
     frame = ctx.latest_edl()["json"]["frame"]
-    assert frame["mode"] == "pad_blur" and frame["ratio"] == "9:16"
+    # below 720p the bars are near-black, never a blurred self-copy
+    assert frame["mode"] == "pad" and frame["ratio"] == "9:16"
     assert "RESOLUTION-AWARE WINDOW" in res
     assert "4.0x" in res and "TOP band (y 0-0.29)" in res
     assert "kind='headline'" in res

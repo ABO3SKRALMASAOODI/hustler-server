@@ -55,17 +55,29 @@ LAYOUTS FOR 9:16:
   below the face. Alternate tight and medium framings with eased zooms on
   sentence turns (read zooms).
 - **Card on a designed background** (archival 4:3, wide shots that a crop
-  would destroy, two-shot frames): `set_frame(picture=[...])` keeps the wide
-  original inside the portrait canvas, `set_picture_card` gives it rounded
-  corners, a hairline border, a soft shadow and a lift or reveal entrance,
-  and its `background` is designed — `blur` (a blurred, darkened copy of the
-  picture behind the card), a gradient, grain and vignette — read the
-  `set_picture_card` schema for the exact fields. Make the card large — a
-  4:3 picture trimmed toward 1:1 or 4:5 (crop mode with focus, when the
-  sides hold nothing essential) fills 55–70% of the height — and use the
-  remaining space for hero type.
+  would destroy, two-shot frames): `set_picture_card` takes the card's
+  footage straight from the full SOURCE frame — never a re-crop of the 9:16
+  crop — enlarged once and at most 2x. `source='auto'` frames the speaker
+  from the measured face boxes with headroom above the head; a source below
+  720p is shown whole (a 4:3 talk becomes a full-width 4:3 card, ~1.6x,
+  instead of a 3.7x crop that cuts the head). Give it rounded corners, a
+  hairline border, a soft shadow and a lift or reveal entrance. Leave the
+  canvas to the default — a dark tone sampled from the footage glowing to
+  near-black, vignette, and film grain on low-resolution footage — or pick
+  a gradient; a blurred copy of the picture (`blur`) only behind sharp HD
+  footage, never behind archival or sub-720p video, where it reads as a
+  muddy smear. Use the free bands for a headline and hero type.
+- **Speaker + evidence** (the speaker reads a study, shows a tweet, points
+  at a browser or document inset in the source): a stacked card,
+  `set_picture_card(panels=[...])` — the speaker in one box, the evidence
+  region of the SAME source frame in another, both over the window the
+  evidence is discussed. Crop the evidence to what is being read (the
+  highlighted sentence and its source line), so it is legible, and keep the
+  speaker's face in frame the whole time; never a crop that drops the speaker
+  for seconds or slices the inset. Leave a band for the stat or captions;
+  zooms do not play inside a stack.
 - **Two speakers**: shot-aware reframing that cuts to the active speaker, or
-  a stacked layout when both reactions matter.
+  a stacked card when both reactions matter.
 - Never leave a fixed band of the canvas empty for the whole reel.
 
 TYPE SYSTEM — one per video:

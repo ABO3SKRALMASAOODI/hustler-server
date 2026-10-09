@@ -50,6 +50,7 @@ import scope_guard
 # renderer arithmetic, and the tool has to quote the SAME numbers the graph
 # will use — importing the resolver is the only way those two cannot drift.
 import renderer
+import picture_cards
 import sfx_search
 import sfx_judge
 import sheets
@@ -115,6 +116,7 @@ from schemas import (CANVAS_DIMS, CaptionStyle, clean_fingerprint,
                      SCREEN_TAKEOVER_MAX_S, quad_bbox, quad_is_sane)
 from schemas import ANIM_MAX_KEYFRAMES, CAPTION_LEADING_RANGE
 from schemas import master_loudness
+from schemas import PICTURE_CARD_MAX_PANELS
 from timeline import Timeline, card_text_window, insert_windows
 
 # Karaoke grouping: the renderer's legacy clamp (captions.KARAOKE_HARD_MAX,
@@ -7249,6 +7251,15 @@ def _frame_upscale(index, ratio, mode="crop", picture=None):
     return max(W / sw, H / sh)
 
 
+def _window_mode(ctx):
+    """The fit a resolution window uses: near-black bars ('pad') on a source
+    below 720p, the blurred backdrop ('pad_blur') on HD."""
+    video = (getattr(ctx, "index", None) or {}).get("video") or {}
+    return ("pad" if picture_cards.is_lowres(video.get("width"),
+                                             video.get("height"))
+            else "pad_blur")
+
+
 def _window_note(ctx, ratio):
     """Why a FITTED picture is right for this source, and where its free
     headline band is — or '' when a crop to `ratio` would stay under
@@ -7276,8 +7287,11 @@ def _window_note(ctx, ratio):
                  "set_editorial_graphic(kind='headline', box=[0.06,0.08,0.94,"
                  f"{y0 - 0.02:.2f}]) naming the speaker and the claim — and "
                  f"the bottom band (y {y1:.2f}-1) for captions.")
-    return note + (" Full-bleed only if the user asked to fill the screen, "
-                   f"accepting the softness: set_frame('{ratio}', 'crop').")
+    return note + (" For a designed frame instead, set_picture_card(source="
+                   "'auto') shows the whole source as a card on a dark "
+                   "sampled canvas. Full-bleed only if the user asked to fill "
+                   "the screen, accepting the softness: "
+                   f"set_frame('{ratio}', 'crop').")
 
 
 def _zoom_room(ctx, edl, start, end):
@@ -7445,10 +7459,11 @@ def _set_frame(ctx, ratio, mode="crop", focus_x=None, focus_y=None,
             res += (f"\nNOTE: this crop enlarges the source {up:.1f}x on the "
                     "final, so the footage will look soft under sharp "
                     "captions and type. Unless the user asked to fill the "
-                    f"screen, set_frame('{frame.ratio}', 'pad_blur') shows "
-                    "it as a window that enlarges it less, with a free "
-                    "headline band (or a picture card: set_frame with "
-                    "picture=[...], then set_picture_card).")
+                    f"screen, set_frame('{frame.ratio}', "
+                    f"'{_window_mode(ctx)}') shows it as a window that "
+                    "enlarges it less, with a free headline band (or "
+                    "set_picture_card(source='auto'): the whole source as a "
+                    "card on a dark sampled canvas).")
     if frame.mode in ("pad", "pad_blur") and \
             frame.ratio in ("9:16", "1:1", "4:5") and not frame.picture:
         res += ("\n" + window if window else
@@ -7996,7 +8011,9 @@ def auto_reframe(ctx, ratio="9:16", mode="auto"):
         # Resolution decides before any subject is measured: no aim makes a
         # 4x enlargement sharp, and a fitted window carries its own headline
         # band (set_frame appends where it is). An explicit crop still wins.
-        res = set_frame(ctx, ratio, "pad_blur", _measured=True)
+        # Below 720p the bars are near-black, never a blurred self-copy: the
+        # enlarged blur of soft footage reads as a smear (judges, Oct 2026).
+        res = set_frame(ctx, ratio, _window_mode(ctx), _measured=True)
         if res.startswith("EDL v"):
             res += ("\nauto mode chose this window from the source "
                     "RESOLUTION; tell the user the footage is shown whole "
@@ -14583,12 +14600,144 @@ PICTURE_CARD_STYLE_COLORS = {
 }
 
 
-def set_picture_card(ctx, id, start, end, box=None, fit="crop", radius=.045,
+# Where a card's footage comes from: the main SOURCE frame (picture_cards
+# source-fed cards) unless the editor asks for the composed program.
+PICTURE_CARD_SOURCES = ("auto", "full", "program")
+
+
+def _source_spans(edl, start, end):
+    """[(src_t0, src_t1)] of main footage playing in PROGRAM start-end."""
+    tl = Timeline(edl.get("keep") or [], edl.get("inserts") or [],
+                  edl.get("speed") or [])
+    out = []
+    for (s, e), off, L in zip(tl.segs, tl.offsets, tl.seg_out_len):
+        a, b = max(start, off), min(end, off + L)
+        if b - a > 1e-3:
+            sa, sb = tl.out_to_src(a + 1e-4), tl.out_to_src(b - 1e-4)
+            if sa is not None and sb is not None:
+                out.append((sa, sb))
+    return out
+
+
+def _card_faces(ctx, spans):
+    """Face boxes (source fractions) the index measured inside ``spans``:
+    the largest face of every spatial sample there."""
+    samples = (((getattr(ctx, "index", None) or {}).get("spatial") or {})
+               .get("samples") or [])
+    faces = []
+    for sample in samples:
+        try:
+            t = float(sample.get("t"))
+        except (TypeError, ValueError):
+            continue
+        if not any(a - .05 <= t <= b + .05 for a, b in spans):
+            continue
+        boxes = [f for f in sample.get("faces") or [] if f and len(f) == 4]
+        if boxes:
+            faces.append(max(boxes, key=lambda f: (f[2] - f[0]) * (f[3] - f[1])))
+    return faces
+
+
+def _card_canvas(ctx, spans, rect):
+    """(centre, edge) colours of a dark canvas sampled from the footage the
+    card shows — the mean colour of ``rect`` over up to three source frames
+    — or the neutral pair when no frame can be read."""
+    try:
+        from PIL import Image
+        proxy = ctx.proxy_path()
+        times = []
+        for a, b in spans[:3]:
+            times.append((a + b) / 2.0)
+        rgb, got = [0.0, 0.0, 0.0], 0
+        for j, t in enumerate(times[:3]):
+            fp = os.path.join(ctx.workdir, f"card_canvas_{j}.jpg")
+            media.frame_at(proxy, t, fp, width=160)
+            img = Image.open(fp).convert("RGB")
+            w, h = img.size
+            r = rect or [0, 0, 1, 1]
+            img = img.crop((int(r[0] * w), int(r[1] * h),
+                            max(int(r[0] * w) + 1, int(r[2] * w)),
+                            max(int(r[1] * h) + 1, int(r[3] * h))))
+            px = img.resize((1, 1), Image.Resampling.BOX).getpixel((0, 0))
+            rgb = [c + v for c, v in zip(rgb, px)]
+            got += 1
+        if got:
+            return picture_cards.canvas_colours([c / got for c in rgb])
+    except Exception:
+        pass
+    return picture_cards.CANVAS_FALLBACK
+
+
+def _rect_arg(value, what):
+    """A [left, top, right, bottom] fraction list, or a REJECTED string."""
+    try:
+        rect = [float(v) for v in value]
+        if len(rect) != 4:
+            raise ValueError
+    except (TypeError, ValueError):
+        return None, (f"REJECTED: {what} must be [left, top, right, bottom] "
+                      "fractions 0-1.")
+    return rect, None
+
+
+def _resolve_panel(ctx, edl, spans, box, source, fit, canvas):
+    """(box, source rect, fit, report) for one source-fed window, or
+    (None, None, None, error). ``source`` is 'auto' (the speaker: a face-
+    aware crop, or the whole frame of a low-resolution source), 'full' or a
+    rect of the source frame."""
+    video = (getattr(ctx, "index", None) or {}).get("video") or {}
+    try:
+        sw, sh = float(video.get("width") or 0), float(video.get("height") or 0)
+    except (TypeError, ValueError):
+        sw = sh = 0.0
+    W, H = canvas
+    lowres = picture_cards.is_lowres(sw, sh)
+    face, headroom = None, None
+    if isinstance(source, str):
+        if source == "full" or (source == "auto" and lowres):
+            rect = (picture_cards.archival_rect() if lowres
+                    else [0.0, 0.0, 1.0, 1.0])
+            fit = fit or "pad"
+        else:
+            fit = fit or "crop"
+            face = picture_cards.median_face(_card_faces(ctx, spans))
+            if sw and sh and fit == "crop":
+                frame = edl.get("frame") or {}
+                rect, headroom = picture_cards.speaker_rect(
+                    sw, sh, W, H, box, face,
+                    (frame.get("focus_x"), frame.get("focus_y")))
+            else:
+                rect = [0.0, 0.0, 1.0, 1.0]
+    else:
+        rect, err = _rect_arg(source, "source")
+        if err:
+            return None, None, None, err
+        fit = fit or "pad"
+    if not (sw and sh):
+        return box, rect, fit, "source size unknown — the render fits it"
+    box, rect, k = picture_cards.fit_panel(sw, sh, W, H, box, rect, fit)
+    bits = [f"{int(sw)}x{int(sh)} source rect "
+            f"[{', '.join(f'{v:.3f}' for v in rect)}] -> box "
+            f"[{', '.join(f'{v:.3f}' for v in box)}], enlarged {k:.2f}x "
+            f"(cap {picture_cards.SOURCE_UPSCALE_CAP:g}x)"]
+    if face is not None and headroom is not None:
+        bits.append(f"{headroom * 100:.0f}% headroom above the head"
+                    + ("" if headroom >= picture_cards.HEADROOM_MIN - 1e-3
+                       else " (the source's top edge allows no more)"))
+    elif isinstance(source, str) and source == "auto" and not lowres:
+        bits.append("no face measured here — framed on the frame's focus")
+    if lowres and isinstance(source, str):
+        bits.append("low-resolution source shown whole (contain), edge "
+                    "blanking trimmed")
+    return box, rect, fit, "; ".join(bits)
+
+
+def set_picture_card(ctx, id, start, end, box=None, fit=None, radius=.045,
                      border=.001, border_color="#444444", background=None,
                      shadow=.35, entrance="lift", exit="fade", duration_s=.45,
                      motion_motif=None, background_style=None,
                      background_color2=None, background_dim=None, grain=None,
-                     vignette=None):
+                     vignette=None, source=None, panels=None):
     """Create/replace one native footage-only composition in one revision."""
     motion_motif, error = _motion_motif_value(ctx, motion_motif)
     if error:
@@ -14609,6 +14758,103 @@ def set_picture_card(ctx, id, start, end, box=None, fit="crop", radius=.045,
         return ("REJECTED: background_dim only applies to "
                 "background_style='blur' (how far the blurred footage is "
                 "darkened). For a darker gradient pick darker colours.")
+    if fit is not None and str(fit) not in ("crop", "pad"):
+        return "REJECTED: fit must be 'crop' or 'pad'."
+    fit = str(fit) if fit is not None else None
+    edl = json.loads(json.dumps(ctx.latest_edl()["json"]))
+    has_video = bool(edl.get("keep")) and getattr(ctx, "has_main_video", True)
+    if isinstance(source, str):
+        source = source.strip().lower() or None
+        if source not in PICTURE_CARD_SOURCES:
+            return ("REJECTED: source is 'auto' (the speaker, framed from the "
+                    "full source frame), 'full' (the whole source frame), "
+                    "'program' (the composed program picture) or a "
+                    "[left, top, right, bottom] rect of the SOURCE frame.")
+    if panels is not None and source not in (None, "auto"):
+        return ("REJECTED: a stacked card takes its regions from `panels` — "
+                "give each panel its own source, not `source` too.")
+    if source is None:
+        source = "auto" if has_video and not panels else "program"
+    if (source != "program" or panels) and not has_video:
+        return ("REJECTED: source/panels take footage from the main video, "
+                "and this program has none — omit them (the card then shows "
+                "the composed program picture).")
+    report, look_rect = [], None
+    try:
+        s0, e0 = float(start), float(end)
+    except (TypeError, ValueError):
+        return "REJECTED: start and end are program seconds (numbers)."
+    spans = _source_spans(edl, s0, e0) if has_video else []
+    if has_video and (source != "program" or panels) and not spans:
+        return ("REJECTED: no main footage plays between "
+                f"{s0:g}s and {e0:g}s (only spliced media) — a source-fed "
+                "card shows the main video. Pick a window over the footage "
+                "or pass source='program'.")
+    video = (getattr(ctx, "index", None) or {}).get("video") or {}
+    try:
+        canvas = renderer.frame_dims(
+            int(float(video.get("width") or 0)), int(float(video.get("height") or 0)),
+            str((edl.get("frame") or {}).get("ratio") or "source"),
+            delivery=True)
+    except Exception:
+        canvas = (1080, 1920)
+    rows_panels = None
+    card_box = list(box) if box is not None else [.06, .24, .94, .74]
+    card_source = None
+    if panels is not None:
+        if not isinstance(panels, (list, tuple)) or not 2 <= len(panels) <= \
+                PICTURE_CARD_MAX_PANELS:
+            return (f"REJECTED: panels is a list of 2-{PICTURE_CARD_MAX_PANELS}"
+                    " {box, source[, fit]} — one region alone is `source`.")
+        rows_panels = []
+        for k, panel in enumerate(panels):
+            if not isinstance(panel, dict) or panel.get("box") is None:
+                return (f"REJECTED: panel {k + 1} needs a box ([left, top, "
+                        "right, bottom] of the canvas) and a source ('auto' "
+                        "for the speaker, or a rect of the SOURCE frame).")
+            pbox, err = _rect_arg(panel["box"], f"panel {k + 1} box")
+            if err:
+                return err
+            psrc = panel.get("source", "auto")
+            if isinstance(psrc, str):
+                psrc = psrc.strip().lower()
+                if psrc not in ("auto", "full"):
+                    return (f"REJECTED: panel {k + 1} source is 'auto', "
+                            "'full' or a rect of the SOURCE frame.")
+            pfit = panel.get("fit")
+            if pfit is not None and pfit not in ("crop", "pad"):
+                return f"REJECTED: panel {k + 1} fit must be 'crop' or 'pad'."
+            pbox, prect, _pfit, note = _resolve_panel(
+                ctx, edl, spans, pbox, psrc, pfit, canvas)
+            if pbox is None:
+                return note
+            rows_panels.append({"box": pbox, "source": [round(v, 4) for v in prect]})
+            report.append(f"panel {k + 1}: {note}")
+        look_rect = rows_panels[0]["source"]
+    elif source != "program":
+        rbox, rect, rfit, note = _resolve_panel(ctx, edl, spans, card_box,
+                                                source, fit, canvas)
+        if rbox is None:
+            return note
+        card_box, card_source, fit = rbox, [round(v, 4) for v in rect], rfit
+        look_rect = card_source
+        report.append(note)
+    fit = fit or "crop"
+    # The canvas. Named: as asked. Unnamed: a dark canvas sampled from the
+    # footage (its own hue, near-black at the edges), with film grain on a
+    # low-resolution source — never the blur of itself the judges read as a
+    # smear under a soft card.
+    video_lowres = picture_cards.is_lowres(video.get("width"), video.get("height"))
+    sampled = None
+    if style is None and background is None:
+        style = "radial_gradient"
+        background, background_color2 = _card_canvas(
+            ctx, spans or [(0.0, 1.0)], look_rect)
+        sampled = background
+        if vignette is None:
+            vignette = .35
+        if grain is None and video_lowres:
+            grain = .25
     pair = PICTURE_CARD_STYLE_COLORS.get(style)
     if background is None:
         background = pair[0] if pair else "#101012"
@@ -14616,18 +14862,18 @@ def set_picture_card(ctx, id, start, end, box=None, fit="crop", radius=.045,
         background_color2 = pair[1]
     try:
         row = PictureCard.model_validate(dict(
-            id=id,start=start,end=end,box=box or [.06,.24,.94,.74],fit=fit,
+            id=id,start=start,end=end,box=card_box,fit=fit,
             radius=radius,border=border,border_color=border_color,
             background=background,shadow=shadow,entrance=entrance,exit=exit,
             duration_s=duration_s,motion_motif=motion_motif,
             background_style=style,background_color2=background_color2,
             background_dim=background_dim,grain=grain,
-            vignette=vignette)).model_dump()
+            vignette=vignette, source=card_source,
+            panels=rows_panels)).model_dump()
         if row["end"]-row["start"] < .5:
             raise ValueError("Allow at least 0.5 seconds for a footage card")
     except (ValueError,TypeError) as exc:
         return "REJECTED: " + str(exc)[:400]
-    edl = json.loads(json.dumps(ctx.latest_edl()["json"]))
     fx = edl.setdefault("effects", None) or {}
     fx["picture_cards"] = [c for c in fx.get("picture_cards") or [] if c["id"]!=id] + [row]
     edl["effects"] = fx
@@ -14637,15 +14883,80 @@ def set_picture_card(ctx, id, start, end, box=None, fit="crop", radius=.045,
             [row.get("background_style") or f"solid {row['background']}"]
             + (["grain"] if row.get("grain") else [])
             + (["vignette"] if row.get("vignette") else []))
-    res = ctx.write_edl(edl, f"footage card {id} on {start}-{end}s{look}; typography remains outside the picture treatment")
-    if (isinstance(res, str) and res.startswith("EDL v")
-            and not look and row["background"] in ("#101012", "#000000")):
+    what = ("stacked footage card" if row.get("panels") else
+            "footage card from the source frame" if row.get("source") else
+            "footage card")
+    res = ctx.write_edl(edl, f"{what} {id} on {start}-{end}s{look}; typography remains outside the picture treatment")
+    if not (isinstance(res, str) and res.startswith("EDL v")):
+        return res
+    if report:
+        res += "\nFOOTAGE: " + " | ".join(report)
+    if sampled:
+        res += (f"\nCANVAS: sampled from the footage — {row['background']} "
+                f"glowing to {row['background_color2']}, vignette"
+                + (", film grain (low-resolution source)" if row.get("grain")
+                   else "") + ". Pass background/background_style to choose "
+                "another.")
+    if (not look and row["background"] in ("#101012", "#000000")):
         res += ("\nNOTE: the canvas around this card is a flat dark void. "
-                "background_style='blur' (the footage itself, blurred and "
-                "darkened, filling the frame) or a vertical/radial gradient, "
-                "with vignette ~.4, is the premium finish (grain ~.25 adds "
-                "film texture to the final export at ~3-4x the file size).")
+                "Omit background to get a dark canvas sampled from the "
+                "footage, or choose a vertical/radial gradient with vignette "
+                "~.4 (grain ~.25 adds film texture to the final export at "
+                "~3-4x the file size).")
+    if style == "blur" and video_lowres:
+        res += ("\nNOTE: a blurred copy of low-resolution footage reads as a "
+                "muddy smear around the card — a dark sampled canvas (omit "
+                "background_style) or near-black with grain is the finish "
+                "references use for archival footage.")
+    res += "".join("\n" + n for n in _source_card_notes(ctx, row))
     return res
+
+
+def _source_card_notes(ctx, row):
+    """What a source-fed card changes around it: spliced inserts inside it
+    play full-frame, zooms do not play inside a stack, and behind-subject
+    depth measured in the frame's own framing renders in front."""
+    if not (row.get("source") or row.get("panels")):
+        return []
+    edl = ctx.latest_edl()["json"]
+    a, b = float(row["start"]), float(row["end"])
+    notes = []
+    try:
+        tl = Timeline(edl.get("keep") or [], edl.get("inserts") or [],
+                      edl.get("speed") or [])
+        inside = [i for i, (s, e) in insert_windows(edl.get("inserts") or [],
+                                                     tl).items()
+                  if min(b, e) - max(a, s) > 1e-3]
+    except Exception:
+        inside = []
+    if inside:
+        notes.append("NOTE: spliced insert(s) " + ", ".join(map(str, inside))
+                     + " inside this window play full-frame; the card steps "
+                     "aside for them and returns after.")
+    if row.get("panels"):
+        zooms = [z.get("id") for z in (edl.get("effects") or {}).get("zooms")
+                 or [] if min(b, float(z["end"])) - max(a, float(z["start"]))
+                 > 1e-3]
+        if zooms:
+            notes.append("NOTE: zoom(s) " + ", ".join(map(str, zooms))
+                         + " overlap this stacked layout and do NOT play "
+                         "(one camera move would drag one panel into the "
+                         "other). remove_zoom them or move them off the "
+                         "window.")
+    behind = [t.get("id") for t in edl.get("texts") or [] if t.get("behind")] + \
+        [m.get("id") for m in edl.get("motion") or []
+         if m.get("layer") == "behind_subject"]
+    hits = []
+    for item in (edl.get("texts") or []) + (edl.get("motion") or []):
+        if item.get("id") in behind and min(b, float(item["end"])) - \
+                max(a, float(item["start"])) > 1e-3:
+            hits.append(item.get("id"))
+    if hits:
+        notes.append("NOTE: behind-subject item(s) " + ", ".join(map(str, hits))
+                     + " fall inside this card: their mask was measured in "
+                     "the frame's own framing, so they render IN FRONT of the "
+                     "picture there.")
+    return notes
 
 
 def remove_picture_card(ctx, id):
@@ -25058,6 +25369,8 @@ TOOLS = {
                   "and inserts inside a normalized output rectangle on black. Crop/fit "
                   "and focus apply inside it, preserving native audio/transcript timing. "
                   "For a 4:3 picture on 9:16: picture=[0,0.2890625,1,0.7109375]. "
+                  "A rounded card on a designed canvas needs none of this: "
+                  "set_picture_card reads the full source frame itself. "
                   "Captions, headlines and branding stay at the full delivery resolution.",
                   {"ratio": {"type": "string",
                              "enum": ["source", "16:9", "9:16", "1:1",
@@ -25599,23 +25912,41 @@ TOOLS = {
         "box=[left,top,right,bottom] on the output canvas; radius 0-.25 of card short side; "
         "border 0-.015 of canvas short side. entrance/exit none, fade, lift (restrained settle), "
         "or reveal (picture opens/closes inside its rounded window). duration_s .12-1.2. "
-        "Source is frame.picture if present, otherwise the whole composed program. Set frame.picture "
-        "first to preserve a wide original inside portrait; this cannot recover pixels already cropped away. "
-        "Use fit=pad to retain that whole source, crop to fill. Windows must not overlap. Inspect entry, "
-        "settle, exit and the speaker framing. Rounded cards are one purposeful format, not a quota. "
-        "BACKDROP — the canvas around the card: a flat `background` colour leaves a dead void "
-        "(the default, kept for old edits). Prefer a designed backdrop: background_style='blur' "
-        "fills the frame with the card's own footage blurred and darkened (the premium podcast "
-        "look; background_dim 0-.9, default .45, ~.25 on dark footage), 'radial_gradient' glows from `background` behind "
-        "the card out to background_color2, 'vertical_gradient' runs `background` (top) to "
-        "background_color2 (bottom); naming only the style picks a tasteful dark palette. "
-        "vignette 0-1 darkens the edges (~.4). grain 0-1 adds animated film grain: .25 is the "
-        "references' texture. Grain is a FINAL-export finish with a cliff — the encoder smooths "
-        "it out of previews and out of any value below ~.2 entirely, and where it survives it "
-        "costs ~3-4x the file size and ~+0.5s of export per 8s of card at 1080x1920 — so use it "
-        "where film texture is the point, not on every card. Both only on the backdrop, never "
-        "on the footage. background_color2 alone implies vertical_gradient; a knob the chosen "
-        "style cannot draw (color2 on blur/solid, background_dim off blur) is rejected.",
+        "Windows must not overlap. Inspect entry, settle, exit and the speaker framing. Rounded "
+        "cards are one purposeful format, not a quota. "
+        "FOOTAGE — source: the card takes its picture straight from the full SOURCE frame "
+        "(enlarged once, at most 2x), never from the already-cropped 9:16 program. "
+        "Default 'auto' frames the speaker from the index's face boxes (a medium close-up with "
+        ">=8% headroom above the head); on a source below 720p it shows the WHOLE frame "
+        "(contain: the box shrinks to the footage's aspect, edge blanking trimmed) — archival "
+        "4:3 talks belong in a full-width 4:3 card, not a 3.7x crop. 'full' = the whole source "
+        "frame; [left,top,right,bottom] = that rect of the SOURCE frame (look_at gives the "
+        "fractions); 'program' = the composed program picture (frame.picture region) as before. "
+        "fit: 'crop' keeps the box and trims the source rect to it; 'pad' keeps the whole rect "
+        "and shrinks the box around it (the default for 'full' and explicit rects). The result "
+        "reports the rect, box, enlargement and headroom. Spliced inserts inside a source card "
+        "play full-frame and the card returns after them. "
+        "SPEAKER + EVIDENCE — panels: 2-3 {box, source[, fit]} shown at once over the window, "
+        "each box its own rounded window on one canvas, each source its own region of the SAME "
+        "source frame: e.g. [{box:[.04,.06,.96,.46], source:'auto'} (the speaker), "
+        "{box:[.04,.5,.96,.92], source:[.53,.52,.99,.98]} (the screen/study/inset they "
+        "show)]. Use it when the source shows a speaker beside a picture-in-picture screen, "
+        "document or browser that a 9:16 crop would either drop or slice; never crop to the "
+        "evidence and lose the speaker for seconds. Panel boxes must not overlap; zooms do not "
+        "play inside a stack. "
+        "CANVAS — omitted, it is a dark canvas sampled from the footage (its hue, near-black "
+        "at the edges, vignette; film grain on sources below 720p). Name one to override: "
+        "background_style 'radial_gradient' glows from `background` behind the card out to "
+        "background_color2, 'vertical_gradient' runs `background` (top) to background_color2 "
+        "(bottom); a bare `background` is a flat colour; 'blur' fills the frame with the card's "
+        "own footage blurred and darkened (background_dim 0-.9, default .45) — HD footage only: "
+        "on a low-resolution source it reads as a muddy smear. vignette 0-1 darkens the edges "
+        "(~.4). grain 0-1 adds animated film grain: .25 is the references' texture. Grain is a "
+        "FINAL-export finish with a cliff — the encoder smooths it out of previews and out of "
+        "any value below ~.2 entirely, and where it survives it costs ~3-4x the file size and "
+        "~+0.5s of export per 8s of card at 1080x1920. Both only on the backdrop, never on the "
+        "footage. background_color2 alone implies vertical_gradient; a knob the chosen style "
+        "cannot draw (color2 on blur/solid, background_dim off blur) is rejected.",
         {"id":{"type":"string"},"start":{"type":"number"},"end":{"type":"number"},
          "box":{"type":"array","items":{"type":"number"},"minItems":4,"maxItems":4},
          "fit":{"type":"string","enum":["crop","pad"]},"radius":{"type":"number"},
@@ -25628,7 +25959,18 @@ TOOLS = {
                              "enum":["solid","vertical_gradient","radial_gradient","blur"]},
          "background_color2":{"type":"string"},
          "background_dim":{"type":"number"},
-         "grain":{"type":"number"},"vignette":{"type":"number"}}),
+         "grain":{"type":"number"},"vignette":{"type":"number"},
+         "source":{"anyOf":[{"type":"string","enum":["auto","full","program"]},
+                            {"type":"array","items":{"type":"number"},
+                             "minItems":4,"maxItems":4}]},
+         "panels":{"type":"array","minItems":2,"maxItems":3,"items":{
+             "type":"object","properties":{
+                 "box":{"type":"array","items":{"type":"number"},"minItems":4,"maxItems":4},
+                 "source":{"anyOf":[{"type":"string","enum":["auto","full"]},
+                                    {"type":"array","items":{"type":"number"},
+                                     "minItems":4,"maxItems":4}]},
+                 "fit":{"type":"string","enum":["crop","pad"]}},
+             "required":["box","source"]}}}),
     "remove_picture_card": (remove_picture_card,"Remove a footage card by id.",{"id":{"type":"string"}}),
     "set_editorial_graphic": (
         set_editorial_graphic,
@@ -27471,10 +27813,12 @@ _COMPACT_CONTRACTS = {
         "junction: a motion transition template."),
     "set_picture_card": (
         "Footage-only rounded card for start/end program seconds (box, radius, "
-        "border, shadow, entrance/exit). Give it a designed background from the "
-        "schema (blurred darkened copy of the picture, gradient, grain or "
-        "vignette), never a flat black void. Set frame.picture first to keep a "
-        "wide original inside portrait."),
+        "border, shadow, entrance/exit). Its footage comes from the full SOURCE "
+        "frame (source='auto' frames the speaker with headroom; a sub-720p "
+        "source is shown whole), enlarged at most 2x; panels=[{box, source}, "
+        "...] stacks the speaker and the screen/inset they show. The default "
+        "canvas is dark and sampled from the footage; never a flat void, and "
+        "no blurred self-copy on low-resolution footage."),
 }
 
 
