@@ -4561,6 +4561,14 @@ def merge_caption_style(captions, partial):
         st.update(partial)
         if drop_pos:
             st.pop("position", None)
+        # A NEW preset named without a motion look is a request for that
+        # preset to render: a stored motion look (often written by the
+        # automatic default) would otherwise keep drawing over it, silently.
+        # Re-stating the stored preset alongside other fields keeps the look.
+        if partial.get("preset") and "motion_look" not in partial \
+                and st.get("motion_look") \
+                and partial["preset"] != (captions.get("style") or {}).get("preset"):
+            st["motion_look"] = None
         new["style"] = st
         # A stored placement_track has higher render priority than the global
         # style.  Once the caller explicitly fixes a position/anchor, keeping
@@ -4668,6 +4676,19 @@ def set_caption_style(ctx, style=None, emphasis_words=None,
         and any(partial.get(key) is not None
                 for key in ("position", "anchor_y"))
     merged = merge_caption_style(caps, partial)
+    preset_note = ""
+    old_motion = (caps.get("style") or {}).get("motion_look") \
+        if isinstance(caps, dict) else None
+    if old_motion and isinstance(merged, dict) and partial.get("preset") \
+            and "motion_look" not in partial:
+        if not (merged.get("style") or {}).get("motion_look"):
+            preset_note = (f"\nPreset '{partial['preset']}' now renders (motion "
+                           f"look '{old_motion}' switched off; pass motion_look "
+                           "to keep a browser-drawn look).")
+        else:
+            preset_note = (f"\nMotion look '{old_motion}' still renders over "
+                           f"preset '{partial['preset']}' (pass motion_look:null "
+                           "to render the preset itself).")
     motif = None
     if motion_motif is not None:
         motif, motif_err = _motion_motif_value(
@@ -4808,7 +4829,7 @@ def set_caption_style(ctx, style=None, emphasis_words=None,
     result = ctx.write_edl(edl, desc)
     if result.startswith("EDL v"):
         _trace_caption_state(ctx, edl["captions"], "style_update")
-    result += karaoke_note + emph_note + motion_note
+    result += preset_note + karaoke_note + emph_note + motion_note
     if cleared_adaptive_placement:
         result += ("\nCaption placement is locked for the whole video; the "
                    "previous shot-aware position changes were removed.")
@@ -21445,6 +21466,11 @@ def apply_look(ctx, name):
             bit = f"captions preset '{cap_patch['preset']}'"
             if cap_patch.get("size"):
                 bit += f" size {cap_patch['size']}"
+            old_motion = (caps.get("style") or {}).get("motion_look") \
+                if isinstance(caps, dict) else None
+            if old_motion and isinstance(merged, dict) \
+                    and not (merged.get("style") or {}).get("motion_look"):
+                bit += f" (motion look '{old_motion}' switched off)"
             if isinstance(merged, dict):
                 merged["design_version"] = CAPTION_DESIGN_VERSION
                 if emphasis:
@@ -22978,8 +23004,9 @@ TOOLS = {
                           "browser-drawn; see add_captions for them and for "
                           "the preset menu: clean/documentary/broadcast/"
                           "podcast/beast/karaoke/spotlight/elegant/"
-                          "stacked/.../classic; motion_look:null returns to "
-                          "the preset), "
+                          "stacked/.../classic; naming a new preset without "
+                          "motion_look renders that preset, motion_look:null "
+                          "returns to the stored preset), "
                           "'make it red' -> {\"style\":{\"color\":"
                           "\"#FF0000\"}}, 'center the captions' -> "
                           '{"style":{"position":"middle"}}, '

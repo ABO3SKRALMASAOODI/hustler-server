@@ -476,3 +476,40 @@ def test_director_cast_renders_through_the_matching_motion_look(preset, look, mo
     if look:
         assert f"motion caption look '{look}'" in out
         assert ctx.written["captions"]["max_words_per_caption"] is None
+
+
+# ── review fixes ────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("preset", ["documentary", "classic", "karaoke"])
+def test_naming_a_preset_switches_off_a_stored_motion_look(preset):
+    """The automatic default stores {preset, motion_look}; a later explicit
+    preset request must render that preset, not stay a silent no-op."""
+    edl = default_edl(8.0)
+    edl["captions"] = {"mode": "from_transcript",
+                       "style": {"preset": "stacked", "motion_look": "editorial"}}
+    ctx = _ToolCtx(edl)
+    out = agent_tools.set_caption_style(ctx, {"preset": preset})
+    assert out.startswith("EDL v1 -> v2"), out
+    st = ctx.edl["captions"]["style"]
+    assert st["preset"] == preset and not st.get("motion_look")
+    assert f"Preset '{preset}' now renders" in out and "'editorial' switched off" in out
+    assert motion_captions.look_of(validate_edl(ctx.edl, 8.0).model_dump()) is None
+
+
+def test_a_preset_patch_that_names_a_motion_look_keeps_it():
+    edl = default_edl(8.0)
+    edl["captions"] = {"mode": "from_transcript",
+                       "style": {"preset": "stacked", "motion_look": "editorial"}}
+    ctx = _ToolCtx(edl)
+    out = agent_tools.set_caption_style(ctx, {"preset": "beast", "motion_look": "pop"})
+    assert ctx.edl["captions"]["style"]["motion_look"] == "pop"
+    assert "now renders" not in out
+    # a non-preset restyle, or re-stating the stored preset, keeps the look
+    agent_tools.set_caption_style(ctx, {"color": "#FFEEDD"})
+    assert ctx.edl["captions"]["style"]["motion_look"] == "pop"
+    out = agent_tools.set_caption_style(ctx, {"preset": "beast", "size": "l"})
+    assert ctx.edl["captions"]["style"]["motion_look"] == "pop"
+    assert "'pop' still renders over preset 'beast'" in out
+    # and apply_look (a preset family) renders its preset too
+    merged = agent_tools.merge_caption_style(ctx.edl["captions"], {"preset": "impact"})
+    assert merged["style"]["preset"] == "impact" and merged["style"]["motion_look"] is None
