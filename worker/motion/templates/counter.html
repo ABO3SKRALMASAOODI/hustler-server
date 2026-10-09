@@ -1,0 +1,385 @@
+<!--MG-SPEC {"title": "Number counter", "category": "data",
+ "description": "One big hero number that counts up with an expo ease-out (or rolls like an odometer) and lands with a soft bloom, plus an optional label line. Use when the speaker says a striking figure (a price, a percentage, users, years) and the number itself should be the moment.",
+ "duration": 3.0, "layer": "above_captions", "mutes_captions": false,
+ "params": {
+  "value": {"type": "str", "required": true, "max": 24, "hint": "the number exactly as it should finally read: '62,000+', '$1.2B', '340%', '4.9', '10x', '1,000,000 users'. Prefix/suffix, decimals and thousands separator follow how it is written; plain numbers of 10000+ get commas"},
+  "from": {"type": "float", "default": 0, "hint": "start value of the count (e.g. 1990 when the value is a year)"},
+  "label": {"type": "str", "default": "", "max": 60, "hint": "short line under/over the number; wrap a word in *stars* for the serif accent"},
+  "label_pos": {"type": "enum", "values": ["below", "above"], "default": "below"},
+  "style": {"type": "enum", "values": ["count", "odometer"], "default": "count", "hint": "count = digits tick up; odometer = masked digit drums roll and carry like a real counter"},
+  "font": {"type": "enum", "values": ["Inter Display", "Anton", "Bebas Neue", "Archivo Black", "Instrument Serif", "Playfair Display"], "default": "Inter Display"},
+  "color": {"type": "color", "default": "#F7F5F2", "hint": "number colour"},
+  "accent": {"type": "color", "default": "#FFD400", "hint": "bloom, symbols (+ % $) and the label accent"},
+  "glow": {"type": "float", "min": 0, "max": 1, "default": 0.5, "hint": "bloom strength when the number lands"},
+  "backdrop": {"type": "enum", "values": ["none", "scrim"], "default": "none", "hint": "scrim = soft dark falloff behind the number; use it on bright or busy footage"},
+  "align": {"type": "enum", "values": ["center", "left"], "default": "center"},
+  "y": {"type": "float", "min": 0.1, "max": 0.9, "default": 0.4, "hint": "vertical centre as frame fraction"},
+  "size": {"type": "float", "min": 0.5, "max": 1.4, "default": 1.0}
+ },
+ "example": {"value": "62,000+", "label": "creators joined in *one week*"},
+ "sfx": [{"at": 0.05, "kind": "tick"}, {"at": 1.0, "kind": "kick", "gain_db": -11}]} -->
+<style>
+  .scrim{position:absolute;left:0;top:0;width:64px;height:64px;pointer-events:none;will-change:transform,opacity;transform-origin:0 0;
+         background:radial-gradient(closest-side,rgba(0,0,0,.68),rgba(0,0,0,.55) 40%,rgba(0,0,0,.3) 70%,rgba(0,0,0,0))}
+  .stage{position:absolute;left:0;top:0;display:flex;flex-direction:column;align-items:center;transform-origin:0 0;will-change:transform,opacity,filter}
+  .stage.left{align-items:flex-start}
+  .numwrap{position:relative;will-change:transform}
+  .num{position:relative;display:flex;align-items:baseline;white-space:nowrap;line-height:1;color:var(--num);font-variant-numeric:lining-nums}
+  .glow{position:absolute;left:0;top:0;color:var(--accent);will-change:opacity}
+  .glow .aff{color:var(--accent)!important}
+  /* prefix + digits live in a box reserved at the final width: digits grow
+     leftward inside it, so the suffix, label and rule never move */
+  .lead{display:inline-flex;align-items:baseline;justify-content:flex-end;flex:none}
+  .core{display:flex;align-items:baseline}
+  .d{display:inline-block;text-align:center}
+  .s{display:inline-block}
+  .aff{display:inline-block;color:var(--affix)}
+  /* odometer drum: the ghost holds width + baseline, the window clips the
+     rolling digits with a soft mask so nothing spills outside the number */
+  .col{display:inline-block;position:relative;text-align:center}
+  .col .ghost{visibility:hidden}
+  .col .win{position:absolute;left:-.08em;right:-.08em;overflow:hidden}
+  .col .dg{position:absolute;left:.08em;right:.08em;text-align:center;will-change:transform}
+  .labwrap{overflow:hidden;padding:.04em .1em .14em}
+  .label{font-family:'Inter','Inter Display',sans-serif;font-weight:600;color:rgba(247,245,242,.92);
+         letter-spacing:-0.015em;line-height:1.1;text-align:center;will-change:transform;
+         text-shadow:0 2px 4px rgba(0,0,0,.35),0 6px 28px rgba(0,0,0,.5)}
+  .stage.left .label{text-align:left}
+  .acc{font-family:'Instrument Serif',serif;font-style:italic;font-weight:400;color:var(--accent);
+       font-size:1.2em;letter-spacing:-0.005em;line-height:.9}
+  .rule{height:3px;border-radius:2px;background:var(--accent);transform-origin:50% 50%}
+  .stage.left .rule{transform-origin:0 50%}
+</style>
+<div class="mg-root"><div class="scrim" id="scrim"></div><div class="stage" id="stage"></div></div>
+<script>
+(() => {
+  const P = MG.params, D = MG.duration, W = MG.W, H = MG.H;
+  const tall = H / W > 1.45;
+  const SAFE = { x0: 60, x1: W - 60, y0: H * (tall ? 0.08 : 0.06), y1: H * (tall ? 0.80 : 0.94) };
+  const css = document.documentElement.style;
+  const hex = (h, a) => { const n = parseInt(String(h).slice(1), 16); return `rgba(${n >> 16 & 255},${n >> 8 & 255},${n & 255},${a})`; };
+  css.setProperty('--accent', P.accent);
+  css.setProperty('--num', P.color);
+
+  // ── the number, parsed from how it is written ────────────────────────
+  const parse = s => {
+    s = String(s ?? '').trim().replace(/[−–]/g, '-');
+    const m = s.match(/^(.*?)(-?\d(?:[\d,. \u00A0\u202F]*\d)?)(.*)$/);
+    if (!m) return null;
+    const [, pre, body, suf] = m;
+    let dec = '.', grp = '';
+    const hasC = body.includes(','), hasD = body.includes('.'), hasS = /[ \u00A0\u202F]/.test(body);
+    if (hasC && hasD) { dec = body.lastIndexOf(',') > body.lastIndexOf('.') ? ',' : '.'; grp = dec === ',' ? '.' : ','; }
+    else if (hasC) { const p = body.split(','); if (p.length === 2 && p[1].length !== 3) dec = ','; else grp = ','; }
+    else if (hasD && body.split('.').length > 2) { grp = '.'; dec = ','; }
+    if (hasS) grp = '\u202F';
+    let clean = body.replace(/[ \u00A0\u202F]/g, '');
+    if (grp) clean = clean.split(grp).join('');
+    if (dec === ',') clean = clean.replace(',', '.');
+    const v = parseFloat(clean);
+    if (!isFinite(v)) return null;
+    const di = clean.indexOf('.');
+    return { pre, suf, v, decimals: di < 0 ? 0 : clean.length - di - 1, grp, dec };
+  };
+  // a typographic minus (U+2212), never a hyphen, in front of negative numbers
+  const fmt = (v, d, grp, dec) => {
+    const s = Math.abs(v).toFixed(d);
+    let [i, f] = s.split('.');
+    if (grp) i = i.replace(/\B(?=(\d{3})+(?!\d))/g, grp);
+    return (v < 0 && Number(s) !== 0 ? '−' : '') + i + (f ? dec + f : '');
+  };
+  const V = parse(P.value);
+  const to = V ? V.v : 0, from = V ? Number(P.from) || 0 : 0;
+  const decimals = V ? V.decimals : 0;
+  const grp = V ? (V.grp || (Math.max(Math.abs(to), Math.abs(from)) >= 10000 ? ',' : '')) : '';
+  const dec = V ? V.dec : '.';
+  const finalStr = V ? fmt(to, decimals, grp, dec) : String(P.value);
+  const startStr = V ? fmt(from, decimals, grp, dec) : finalStr;
+  const pre = V ? V.pre.trim() : '', suf = V ? V.suf.trim() : '';
+  const sufWord = V && (/^\s/.test(V.suf) && suf.length > 1 || suf.length > 3);
+  const odo = !!V && P.style === 'odometer';
+
+  // ── type ─────────────────────────────────────────────────────────────
+  const FONTS = { 'Inter Display': [900, -0.05], 'Anton': [400, -0.01], 'Bebas Neue': [400, 0],
+    'Archivo Black': [400, -0.04], 'Instrument Serif': [400, -0.03], 'Playfair Display': [900, -0.03] };
+  const [fw, track] = FONTS[P.font] || FONTS['Inter Display'];
+  const fam = `'${P.font}','Inter Display',sans-serif`;
+  const fontsReady = Promise.all([`${fw} 200px '${P.font}'`, `900 200px 'Inter Display'`, `800 60px 'Inter Display'`,
+    `600 40px 'Inter'`, `italic 400 40px 'Instrument Serif'`].map(f => document.fonts.load(f).catch(() => 0)));
+  const cvs = document.createElement('canvas').getContext('2d');
+  const metric = (txt, px, family, weight) => { cvs.font = `${weight} ${px}px ${family}`; return cvs.measureText(txt); };
+  const rich = s => MG.esc(s).replace(/\*([^*]+)\*/g, '<span class="acc">$1</span>');
+  // symbols (+ % $ x) are small and accent-coloured; units (K M B) stay number-coloured
+  const affixKind = a => !a ? null : /^[$€£¥₹₩₽]+$/.test(a) ? 'cur' : /^[%+×x*°#]+$/.test(a) ? 'sup' : 'unit';
+  const AFFIX_EM = { cur: 0.5, sup: 0.5, unit: 0.74 };
+
+  // timing: the count lands at CT (sfx "kick" at 1.0 for the default length)
+  const CT = Math.min(1.0, Math.max(0.5, D * 0.55));
+  const C0 = Math.min(0.05, CT * 0.1);                  // count starts once the number is legible
+  const XD = Math.min(0.22, D * 0.1);                   // exit, faster than the entrance
+  // continuous expo ease-out (plain outExpo jumps 0.1% on its last frame)
+  const EXPO_K = 1 - Math.pow(2, -10);
+  const expo = x => x <= 0 ? 0 : x >= 1 ? 1 : (1 - Math.pow(2, -10 * x)) / EXPO_K;
+  // odometer drive: decelerates to a true stop so the last drum settles into place
+  const valueAt = t => from + (to - from) * (odo ? MG.ease.outQuart : expo)(MG.range(t, C0, CT - C0));
+
+  const stage = MG.$('#stage');
+  let L = null;
+  function digitsHTML(str, slot) {
+    let h = '';
+    for (const ch of str) h += /\d/.test(ch) ? `<span class="d" style="width:${slot}em">${ch}</span>` : `<span class="s">${MG.esc(ch)}</span>`;
+    return h;
+  }
+  function layout() {
+    stage.innerHTML = '';
+    if (P.align === 'left') stage.classList.add('left');
+    const numwrap = MG.el('div', 'numwrap');
+    const num = MG.el('div', 'num', null, numwrap);
+    num.style.fontFamily = fam; num.style.fontWeight = fw;
+    const lead = MG.el('span', 'lead', null, num);
+    const preEl = pre ? MG.el('span', 'aff', pre, lead) : null;
+    const core = MG.el('span', 'core', null, lead);
+    const sufEl = suf ? MG.el('span', 'aff', suf, num) : null;
+    let labwrap = null, label = null, rule = null;
+    if (P.label.trim()) {
+      labwrap = MG.el('div', 'labwrap');
+      label = MG.el('div', 'label', null, labwrap);
+      label.innerHTML = rich(P.label.trim());
+      if (P.label_pos !== 'above') rule = MG.el('div', 'rule');
+    }
+    (P.label_pos === 'above' && label ? [labwrap, numwrap] : [numwrap, rule, labwrap]).forEach(p => p && stage.appendChild(p));
+
+    // the odometer's drum layout covers every digit either end of the roll needs
+    const odoStr = odo ? fmt(Math.max(Math.abs(to), Math.abs(from)), decimals, grp, dec) : '';
+    const signed = odo && (to < 0 || from < 0);
+    // size the number from its widest string (probe at 100px, then scale)
+    const digW = Math.max(...'0123456789'.split('').map(c => metric(c, 100, fam, fw).width)) / 100;
+    const slot = digW + track * 0.6;                        // em: tabular, slightly tight
+    const affW = (a, fs) => {
+      if (!a) return 0;
+      if (a === suf && sufWord) return metric(a, fs * 0.27, "'Inter Display'", 800).width + fs * 0.1;
+      return metric(a, fs * AFFIX_EM[affixKind(a)], fam, fw).width + fs * 0.05;
+    };
+    const widthAt = (fs, str) => {
+      let w = 0;
+      for (const ch of str) w += /\d/.test(ch) ? slot * fs : metric(ch, fs, fam, fw).width + track * fs;
+      return w + affW(pre, fs) + affW(suf, fs);
+    };
+    // a countdown can start wider than it lands: size (and reserve) for the widest
+    const sizeStr = odo ? (signed ? '−' : '') + odoStr
+      : widthAt(100, startStr) > widthAt(100, finalStr) ? startStr : finalStr;
+    const maxFs = Math.min(400 * P.size, (SAFE.y1 - SAFE.y0) * 0.42);
+    const fs = Math.max(40, Math.min(maxFs, 100 * (SAFE.x1 - SAFE.x0 - 40) / widthAt(100, sizeStr)));
+    num.style.fontSize = fs + 'px';
+    num.style.letterSpacing = track + 'em';
+    const digitTop = metric('8', fs, fam, fw).actualBoundingBoxAscent;
+    const styleAffix = (el, a, side) => {
+      if (!el) return;
+      if (side === 'suf' && sufWord) {
+        Object.assign(el.style, { fontSize: '0.27em', fontFamily: "'Inter Display',sans-serif", fontWeight: 800,
+          letterSpacing: '-0.02em', color: 'var(--num)', marginLeft: '.34em' });
+        return;
+      }
+      const k = affixKind(a);
+      el.style.fontSize = AFFIX_EM[k] + 'em';
+      el.style.color = k === 'unit' || P.color.toUpperCase() === P.accent.toUpperCase() ? 'var(--num)' : 'var(--accent)';
+      el.style.margin = side === 'pre' ? '0 .06em 0 0' : '0 0 0 .04em';
+      if (k !== 'unit') el.style.transform = `translateY(${-(digitTop - metric(a, fs * AFFIX_EM[k], fam, fw).actualBoundingBoxAscent)}px)`;
+    };
+    styleAffix(preEl, pre, 'pre');
+    styleAffix(sufEl, suf, 'suf');
+
+    // odometer drums: per column a small pool of digit spans re-placed each
+    // frame inside a masked window (motion blur = sub-samples, no filters)
+    const cols = [], seps = [];
+    let sign = null, drum = null;
+    if (odo) {
+      if (signed) sign = MG.el('span', 's', '−', core);
+      const nd = odoStr.replace(/\D/g, '').length;
+      let di = 0, lastCol = null;
+      for (const ch of odoStr) {
+        if (!/\d/.test(ch)) { seps.push({ el: MG.el('span', 's', ch, core), owner: lastCol }); continue; }
+        const col = MG.el('span', 'col', null, core);
+        col.style.width = slot + 'em';
+        const ghost = MG.el('span', 'ghost', '0', col);
+        const win = MG.el('span', 'win', null, col);
+        lastCol = { col, ghost, win, pool: [], k: nd - 1 - di };
+        cols.push(lastCol);
+        di++;
+      }
+      // the window hugs the real glyph box (+ a fade margin); drum pitch keeps
+      // the neighbouring digits fully outside it at rest
+      const m0 = metric('0', fs, fam, fw);
+      const gTopFromBase = Math.max(...'0123456789'.split('').map(c => metric(c, fs, fam, fw).actualBoundingBoxAscent));
+      const gBotFromBase = Math.max(0, ...'0123456789'.split('').map(c => metric(c, fs, fam, fw).actualBoundingBoxDescent));
+      const probe = MG.el('span', null, null, cols[0].col);
+      Object.assign(probe.style, { display: 'inline-block', width: '0px', height: '0px', verticalAlign: 'baseline' });
+      const base = probe.getBoundingClientRect().top - cols[0].col.getBoundingClientRect().top;
+      probe.remove();
+      const gH = gTopFromBase + gBotFromBase;
+      const fade = gH * 0.2;
+      const winTop = base - gTopFromBase - fade, winH = gH + 2 * fade;
+      const pitch = gH + fade + gH * 0.08;
+      const stop = (fade / winH * 100).toFixed(2);
+      const mask = `linear-gradient(to bottom,transparent 0%,#000 ${stop}%,#000 ${(100 - stop).toFixed(2)}%,transparent 100%)`;
+      // motion blur: one vertical-only Gaussian per drum (an SVG filter whose
+      // deviation follows the drum's speed); off whenever the drum is still
+      const NS = 'http://www.w3.org/2000/svg';
+      const fsvg = document.createElementNS(NS, 'svg');
+      fsvg.setAttribute('width', '0'); fsvg.setAttribute('height', '0');
+      fsvg.style.position = 'absolute';
+      stage.appendChild(fsvg);
+      cols.forEach((c, i) => {
+        Object.assign(c.win.style, { top: winTop + 'px', height: winH + 'px', webkitMaskImage: mask, maskImage: mask });
+        for (let k = 0; k < 2; k++) {
+          const e = MG.el('span', 'dg', '0', c.win);
+          e.style.top = (-winTop) + 'px';
+          c.pool.push(e);
+        }
+        const f = document.createElementNS(NS, 'filter');
+        f.id = 'odo' + i;
+        for (const [a, v] of [['x', '-10%'], ['y', '-30%'], ['width', '120%'], ['height', '160%'], ['color-interpolation-filters', 'sRGB']]) f.setAttribute(a, v);
+        const gb = document.createElementNS(NS, 'feGaussianBlur');
+        gb.setAttribute('stdDeviation', '0 0');
+        f.appendChild(gb); fsvg.appendChild(f);
+        c.blur = gb; c.fid = f.id; c.sigma = -1;
+      });
+      drum = { pitch, m0 };
+    } else core.innerHTML = digitsHTML(sizeStr, slot);
+    // a countdown lands narrower than it starts: keep the landed number centred
+    // in the reserved box (suffix included) instead of hugging its right edge
+    if (!odo && sizeStr !== finalStr) {
+      if (sufEl) lead.appendChild(sufEl);
+      lead.style.justifyContent = P.align === 'left' ? 'flex-start' : 'center';
+    }
+    // reserve the widest string's width: from now on nothing in the lockup reflows
+    lead.style.width = Math.ceil(lead.getBoundingClientRect().width + 1) + 'px';
+
+    // bloom: blurred accent clone of the FINAL number, static -> cached layer
+    let glow = null;
+    if (V && P.glow > 0.01) {
+      glow = num.cloneNode(true);
+      glow.className = 'num glow';
+      MG.$('.core', glow).innerHTML = digitsHTML(finalStr, slot);
+      glow.style.filter = `blur(${(fs * (0.05 + 0.04 * P.glow)).toFixed(1)}px)`;
+      glow.style.position = 'absolute';
+      numwrap.insertBefore(glow, num);
+    }
+    num.style.textShadow = `0 ${(fs * 0.016).toFixed(1)}px ${(fs * 0.05).toFixed(1)}px rgba(0,0,0,.4)`;
+
+    if (label) {
+      const short = P.label.replace(/\*/g, '').trim().length <= 20;
+      const lmax = Math.max(52, Math.min(short ? 84 : 66, fs * (short ? 0.26 : 0.2))) * Math.min(1.15, Math.max(0.85, P.size));
+      const lw = Math.min(SAFE.x1 - SAFE.x0, 940);
+      label.style.maxWidth = lw + 'px';
+      label.style.textWrap = 'balance';
+      MG.fit(label, { width: lw, height: lmax * 1.1 * 2 + 6, min: Math.min(lmax, 36), max: lmax });
+      const gap = Math.max(16, fs * 0.07);
+      if (P.label_pos === 'above') labwrap.style.marginBottom = gap * 0.5 + 'px';
+      else { rule.style.width = Math.max(90, Math.min(170, fs * 0.5)) + 'px'; rule.style.margin = `${gap}px 0 ${gap * 0.85}px`; }
+    }
+    const r = stage.getBoundingClientRect();
+    const k = Math.min(1, (SAFE.x1 - SAFE.x0) / r.width, (SAFE.y1 - SAFE.y0) / r.height);
+    const w = r.width * k, h = r.height * k;
+    const x = P.align === 'left' ? SAFE.x0 : (W - w) / 2;
+    const y = Math.min(SAFE.y1 - h, Math.max(SAFE.y0, H * P.y - h / 2));
+    const pad = 40 + fs * (0.12 + 0.1 * P.glow) * k;
+    let bx = [x - pad, y - pad - 30, x + w + pad, y + h + pad + 20];
+    const scrim = MG.$('#scrim');
+    if (P.backdrop === 'scrim') {
+      const sw = w + 320, sh = h * 1.25 + 300;
+      // a 64px gradient scaled up: rasterised once, tiny, then only composited
+      scrim.style.transform = `translate(${x + w / 2 - sw / 2}px,${y + h / 2 - sh / 2}px) scale(${sw / 64},${sh / 64})`;
+      bx = [Math.min(bx[0], x + w / 2 - sw / 2), Math.min(bx[1], y + h / 2 - sh / 2), Math.max(bx[2], x + w / 2 + sw / 2), Math.max(bx[3], y + h / 2 + sh / 2)];
+    } else scrim.remove();
+    MG.box = [Math.max(0, bx[0]), Math.max(0, bx[1]), Math.min(W, bx[2]), Math.min(H, bx[3])];
+    return { numwrap, num, core, label, rule, cols, seps, sign, drum, slot, fs, x, y, k, glow, scrim: P.backdrop === 'scrim' ? scrim : null };
+  }
+  MG.ready = fontsReady.then(() => { L = L || layout(); });
+
+  MG.active([[0, CT + 0.36], [D - XD - 0.02, D]]);
+  let lastStr = null;
+  // drum positions for a value: the last column turns continuously, every
+  // higher column rolls its carry exactly while the column below turns 9 -> 0,
+  // so every intermediate reading is a real number (1983 -> 2024 reads 19xx, 20xx)
+  const SCALE = Math.pow(10, decimals);
+  const drumPos = (v, cols) => {
+    const N = Math.round(Math.abs(v) * SCALE * 1e6) / 1e6;
+    const out = new Array(cols.length);
+    let lower = N;
+    for (let i = cols.length - 1; i >= 0; i--) {
+      const k = cols[i].k;
+      if (k === 0) { out[i] = N; lower = N; continue; }
+      const n = Math.floor(N / Math.pow(10, k));
+      const pos = n + MG.clamp(lower - 10 * n - 9);
+      out[i] = pos; lower = pos;
+    }
+    return out;
+  };
+  MG.frame(t => {
+    if (!L) L = layout();
+    const { numwrap, core, label, rule, cols, seps, sign, drum, slot, glow, fs, scrim } = L;
+    const pe = MG.ease.outExpo(MG.range(t, 0, 0.55));
+    const q = MG.range(t, CT - 0.02, 0.3), bump = q > 0 && q < 1 ? Math.sin(Math.PI * MG.ease.outQuad(q)) : 0;
+    numwrap.style.transformOrigin = P.align === 'left' ? '0% 60%' : '50% 60%';
+    MG.set(numwrap, { y: (1 - pe) * fs * 0.12, scale: 1 + 0.035 * bump, opacity: 0.5 + 0.5 * MG.range(t, 0, 2 / 30), blur: (1 - MG.ease.outCubic(MG.range(t, 0, 0.12))) * 12 });
+    if (V && !cols.length) {
+      const s = t >= CT ? finalStr : fmt(valueAt(t), decimals, grp, dec);
+      if (s !== lastStr) { core.innerHTML = digitsHTML(s, slot); lastStr = s; }
+    }
+    if (cols.length) {
+      const landed = t >= CT;
+      const hf = 0.5 / MG.fps;
+      const now = drumPos(landed ? to : valueAt(t), cols);
+      const prev = landed ? now : drumPos(valueAt(t - hf), cols), next = landed ? now : drumPos(valueAt(t + hf), cols);
+      const vis = cols.map((c, i) => c.k <= decimals ? 1 : MG.clamp(now[i]));
+      cols.forEach((c, i) => {
+        const pos = now[i];
+        // shutter blur: the drum's travel over one frame, capped at 1.6 digits
+        const travel = Math.min(1.6, Math.abs(next[i] - prev[i]));
+        const b = Math.floor(pos), fr = pos - b;
+        for (let j = 0; j <= 1; j++) {
+          const el = c.pool[j], idx = b + j, yy = j - fr;     // digit b+j sits yy pitches below rest
+          // a leading zero is blank: the column reads empty until the count reaches it
+          const txt = c.k > decimals && idx <= 0 ? '' : String(((idx % 10) + 10) % 10);
+          if (el.textContent !== txt) el.textContent = txt;
+          el.style.transform = `translateY(${(yy * drum.pitch).toFixed(2)}px)`;
+          el.style.opacity = Math.abs(yy) < 0.999 ? 1 : 0;
+        }
+        const sigma = travel < 0.04 ? 0 : Math.round(travel * drum.pitch * 0.32 * 2) / 2;
+        if (sigma !== c.sigma) {
+          c.sigma = sigma;
+          if (sigma > 0) c.blur.setAttribute('stdDeviation', `0 ${sigma}`);
+          c.win.style.filter = sigma > 0 ? `url(#${c.fid})` : 'none';
+        }
+        // a drum spinning faster than the eye reads softens instead of strobing
+        c.win.style.opacity = (1 - 0.32 * MG.ease.smooth(MG.range(travel, 0.5, 0.9))).toFixed(3);
+        const pr = MG.ease.outExpo(MG.range(t, (cols.length - 1 - i) * 0.015, 0.4));
+        c.col.style.transform = `translateY(${((1 - pr) * 0.1).toFixed(4)}em)`;
+      });
+      // separators follow the column on their left: hidden while it reads blank
+      seps.forEach(s => { s.el.style.opacity = s.owner ? vis[cols.indexOf(s.owner)].toFixed(3) : 1; });
+      if (sign) sign.style.opacity = (landed ? to : valueAt(t)) < 0 ? 1 : 0;
+    }
+    if (glow) {
+      const on = MG.ease.outCubic(MG.range(t, CT - 0.1, 0.16));
+      const flash = Math.sin(Math.PI * MG.range(t, CT - 0.04, 0.38)) * 0.9;
+      const go = Math.min(1, 0.85 * P.glow * (on + flash));
+      glow.style.opacity = go.toFixed(3);
+      glow.style.visibility = go > 0.002 ? 'visible' : 'hidden';
+    }
+    if (label) {
+      const pl = MG.ease.outExpo(MG.range(t, 0.12, 0.6));
+      MG.set(label, { y: (1 - pl) * label.offsetHeight * 1.05, opacity: MG.range(t, 0.12, 0.16) });
+    }
+    if (rule) {
+      const pr = MG.ease.outExpo(MG.range(t, 0.28, 0.7));
+      MG.set(rule, { sx: Math.max(0.001, pr), opacity: pr > 0 ? 1 : 0 });
+      rule.style.boxShadow = `0 0 ${12 + 18 * P.glow}px ${hex(P.accent, 0.35 + 0.3 * P.glow)}`;
+    }
+    const qx = MG.ease.inCubic(MG.range(t, D - XD, XD));
+    MG.set(stage, { x: L.x, y: L.y - qx * 26, scale: L.k, opacity: 1 - qx, blur: qx * 14 });
+    if (scrim) scrim.style.opacity = (MG.ease.outCubic(MG.range(t, 0, 0.3)) * (1 - qx)).toFixed(3);
+  });
+})();
+</script>
