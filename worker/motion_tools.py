@@ -471,7 +471,14 @@ def _behind_report(stats, edl, item):
             "and the graphic stays legible.")
     s, e = float(item["start"]), float(item["end"])
     fx = edl.get("effects") or {}
-    if _overlaps(fx.get("picture_cards"), s, e):
+    cards = _overlaps(fx.get("picture_cards"), s, e)
+    if any(c.get("source") or c.get("panels") for c in cards):
+        bits.append(
+            "A footage card framed from the SOURCE is active over this "
+            "window: it re-composes the footage, so the subject mask no "
+            "longer lines up and the graphic renders IN FRONT of the picture "
+            "there. Move it outside the card's window to keep the depth.")
+    elif cards:
         bits.append(
             "A footage card is active over this window: the graphic is part "
             "of the PICTURE now, so it is framed inside the card with the "

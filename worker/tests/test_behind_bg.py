@@ -786,10 +786,22 @@ def test_the_tool_offers_designed_backdrops_with_tasteful_defaults():
             return "EDL v2: " + desc
 
     ctx = Ctx()
+    # Unnamed, the canvas is designed: a dark tone sampled from the footage
+    # (the neutral pair when no frame can be read) glowing to near-black,
+    # vignette; grain only on sub-720p footage (judges, Oct 2026).
     res = agent_tools.set_picture_card(ctx, "p", 1, 3)
     card = ctx.edl["effects"]["picture_cards"][0]
+    assert picture_cards.designed(card)
+    assert card["background_style"] == "radial_gradient"
+    assert (card["background"], card["background_color2"]) == \
+        picture_cards.CANVAS_FALLBACK
+    assert card["vignette"] == .35 and card["grain"] is None
+    assert "CANVAS: sampled" in res
+    # a bare flat colour is still the flat card, with the nudge
+    res = agent_tools.set_picture_card(ctx, "p", 1, 3, background="#101012")
+    card = ctx.edl["effects"]["picture_cards"][0]
     assert card["background"] == "#101012" and not picture_cards.designed(card)
-    assert "background_style='blur'" in res          # the nudge
+    assert "flat dark void" in res
     res = agent_tools.set_picture_card(ctx, "p", 1, 3, background_style="radial_gradient",
                                        grain=.25, vignette=.4)
     card = ctx.edl["effects"]["picture_cards"][0]

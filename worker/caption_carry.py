@@ -516,11 +516,10 @@ def _faces_far(edl, index, tl, a, b, W, H):
             continue
         for f in s.get("faces") or []:
             try:
-                m = geo.to_output(mid, src_mid, [float(v) for v in f[:4]])
+                ms = geo.to_outputs(mid, src_mid, [float(v) for v in f[:4]])
             except Exception:  # noqa: BLE001 — unmappable sample
-                m = None
-            if m:
-                out.append(tuple(keepout.face_zone(m)))
+                ms = []
+            out += [tuple(keepout.face_zone(m)) for m in ms]
     return out
 
 

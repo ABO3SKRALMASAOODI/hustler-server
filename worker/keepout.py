@@ -364,7 +364,73 @@ class Geometry:
         """The face box on the canvas (unclipped, so its zone keeps the
         face's own proportions) followed by the rect of the canvas where
         that picture is visible — (x0, y0, x1, y1, cx0, cy0, cx1, cy1) —
-        or None when none of the face is visible."""
+        or None when none of the face is visible. (A stacked card can show
+        one face in several panels: to_outputs lists them all.)"""
+        outs = self.to_outputs(prog_t, src_t, box)
+        return outs[0] if outs else None
+
+    def to_outputs(self, prog_t, src_t, box):
+        """Every place the face is visible on the canvas, as to_output
+        entries: one, none, or one per panel of a stacked source card."""
+        card = self._source_card_at(prog_t)
+        if card is not None:
+            return self._source_card_outputs(card, prog_t, box)
+        out = self._program_output(prog_t, src_t, box)
+        return [out] if out else []
+
+    def _source_card_at(self, prog_t):
+        import picture_cards
+        for card in self.cards:
+            try:
+                if float(card["start"]) <= prog_t < float(card["end"]) \
+                        and picture_cards.source_fed(card):
+                    return card
+            except (KeyError, TypeError, ValueError):
+                continue
+        return None
+
+    def _source_card_outputs(self, card, prog_t, box):
+        """A source-fed card (picture_cards.layout_filter) draws its SOURCE
+        rect straight onto its box — no frame crop, no program card fit —
+        and the camera then moves the composed canvas (a stacked card's
+        windows are cut out of every zoom); the card shows its box of it."""
+        import picture_cards
+        import renderer   # lazy: the renderer imports the caption track
+        panels = picture_cards.card_panels(card)
+        z, cx, cy = 1.0, 0.5, 0.5
+        if len(panels) == 1:
+            z, cx, cy = renderer.zoom_state_at(self.zooms, prog_t, self.out_duration,
+                                               size=(self.W, self.H))
+        vx, vy = (1.0 - 1.0 / z) * cx, (1.0 - 1.0 / z) * cy
+
+        def zm(r):
+            if z <= 1.0001:
+                return tuple(r)
+            return ((r[0] - vx) * z, (r[1] - vy) * z, (r[2] - vx) * z, (r[3] - vy) * z)
+        out = []
+        for pbox, rect in panels:
+            try:
+                rect = picture_cards.match_rect(rect, pbox, self.sw, self.sh, self.W, self.H)
+                kx = (pbox[2] - pbox[0]) / (rect[2] - rect[0])
+                ky = (pbox[3] - pbox[1]) / (rect[3] - rect[1])
+            except (TypeError, ValueError, ZeroDivisionError):
+                continue
+
+            def place(r):
+                return (pbox[0] + (r[0] - rect[0]) * kx, pbox[1] + (r[1] - rect[1]) * ky,
+                        pbox[0] + (r[2] - rect[0]) * kx, pbox[1] + (r[3] - rect[1]) * ky)
+            b = zm(place(box))
+            # a single card shows the source around its rect at the same
+            # scale (a zoom reveals it); a stack panel shows its rect alone
+            seen = zm(place((0.0, 0.0, 1.0, 1.0))) if len(panels) == 1 else tuple(pbox)
+            clip = (max(seen[0], pbox[0], 0.0), max(seen[1], pbox[1], 0.0),
+                    min(seen[2], pbox[2], 1.0), min(seen[3], pbox[3], 1.0))
+            if min(b[2], clip[2]) <= max(b[0], clip[0]) or min(b[3], clip[3]) <= max(b[1], clip[1]):
+                continue
+            out.append(tuple(b) + tuple(clip))
+        return out
+
+    def _program_output(self, prog_t, src_t, box):
         import renderer   # lazy: the renderer imports the caption track
         focus, mode = self._frame_at(src_t)
         src, dest = renderer.picture_mapping(self.sw, self.sh, self.W, self.H,
@@ -386,6 +452,8 @@ class Geometry:
             try:
                 if not float(card["start"]) <= prog_t < float(card["end"]):
                     continue
+                if (card.get("source") or card.get("panels")):
+                    continue          # source cards: _source_card_outputs
                 fit = self._card_fit(card)
             except (KeyError, TypeError, ValueError):
                 continue
@@ -575,7 +643,7 @@ def face_track(edl, index, W, H, start, end, measure=None):
             out.append((t, []))
             continue
         faces = min(near, key=lambda m: abs(m[0] - t))[2]
-        mapped = [m for m in (geo.to_output(t, src, f) for f in faces) if m]
+        mapped = [m for f in faces for m in geo.to_outputs(t, src, f)]
         out.append((t, mapped))
     return out
 

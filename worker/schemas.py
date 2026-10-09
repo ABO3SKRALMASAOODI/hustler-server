@@ -1313,12 +1313,51 @@ class FrameShift(BaseModel):
 
 PICTURE_CARD_BACKDROPS = ("solid", "vertical_gradient", "radial_gradient",
                           "blur")
+# A stacked (speaker + evidence) card shows this many regions at most.
+PICTURE_CARD_MAX_PANELS = 3
+
+
+def _source_rectangle(value):
+    """[left, top, right, bottom] of the SOURCE frame, in fractions."""
+    if value is None:
+        return None
+    if (len(value) != 4 or not all(math.isfinite(v) for v in value)
+            or not 0 <= value[0] < value[2] <= 1
+            or not 0 <= value[1] < value[3] <= 1
+            or value[2] - value[0] < .04 or value[3] - value[1] < .04):
+        raise ValueError("source must be [left, top, right, bottom] of the "
+                         "source frame within 0..1, at least 4% per axis")
+    return [round(float(v), 4) for v in value]
+
+
+class CardPanel(BaseModel):
+    """One region of the main SOURCE frame (``source``) shown in one box of
+    the canvas (``box``) — a panel of a stacked picture card."""
+    box: List[float]
+    source: List[float]
+
+    @field_validator("box")
+    @classmethod
+    def _box(cls, value):
+        return Frame._picture_rectangle(value)
+
+    @field_validator("source")
+    @classmethod
+    def _source(cls, value):
+        return _source_rectangle(value)
 
 
 class PictureCard(BaseModel):
     """A footage-only card on the program clock; type is composited afterwards.
 
-    The source is frame.picture when set, otherwise the whole program frame.
+    The footage is, by default, the composed program: frame.picture when set,
+    otherwise the whole program frame. ``source`` instead takes it straight
+    from the main SOURCE frame (a [left, top, right, bottom] rect in source
+    fractions) — the pixels a 9:16 crop had already thrown away stay
+    reachable, and the footage is enlarged once, not crop-then-zoom.
+    ``panels`` (2-3) is the stacked layout: each panel shows its own source
+    rect in its own box over the same window (speaker on top, the screen
+    they are reading below); ``box`` then becomes the panels' bounding box.
     box is the destination rectangle, so source framing and card design remain
     independent. No speech, caption, or cut timings change.
 
@@ -1359,11 +1398,42 @@ class PictureCard(BaseModel):
                                    allow_inf_nan=False)
     vignette: Optional[float] = Field(default=None, ge=0, le=1,
                                       allow_inf_nan=False)
+    # Source-fed footage (see the class docstring). None = the program
+    # picture, so every card written before these existed is unchanged.
+    source: Optional[List[float]] = None
+    panels: Optional[List[CardPanel]] = None
 
     @field_validator("box")
     @classmethod
     def _box(cls, value):
         return Frame._picture_rectangle(value)
+
+    @field_validator("source")
+    @classmethod
+    def _source(cls, value):
+        return _source_rectangle(value)
+
+    @model_validator(mode="after")
+    def _panels(self):
+        if not self.panels:
+            self.panels = None
+            return self
+        if not 2 <= len(self.panels) <= PICTURE_CARD_MAX_PANELS:
+            raise ValueError(
+                f"a stacked picture card has 2-{PICTURE_CARD_MAX_PANELS} "
+                "panels (one source region alone is `source`)")
+        boxes = [p.box for p in self.panels]
+        for i, a in enumerate(boxes):
+            for b in boxes[i + 1:]:
+                if (min(a[2], b[2]) - max(a[0], b[0]) > .002 and
+                        min(a[3], b[3]) - max(a[1], b[1]) > .002):
+                    raise ValueError("picture card panels must not overlap")
+        # One canonical shape: the panels carry every rect, and box is
+        # their bounding box (what timing/QA code that reads `box` sees).
+        self.box = [min(b[0] for b in boxes), min(b[1] for b in boxes),
+                    max(b[2] for b in boxes), max(b[3] for b in boxes)]
+        self.source = None
+        return self
 
     @field_validator("background", "border_color")
     @classmethod
@@ -3434,6 +3504,11 @@ def validate_edl(data, duration=None, *, render_fragment=False):
                 _check_span("picture card", card.start, card.end, prog_dur)
                 if card.full_duration_s is not None and (card.phase_s or 0) + card.end - card.start > card.full_duration_s + .01:
                     raise EDLValidationError("Picture-card fragment exceeds its full duration.")
+                if (card.source or card.panels) and not edl.keep:
+                    raise EDLValidationError(
+                        f"Picture card {card.id} takes its footage from the "
+                        "main source (source/panels), but this program has "
+                        "no main video.")
             for a, b in zip(fx.picture_cards, fx.picture_cards[1:]):
                 if b.start < a.end - .001:
                     raise EDLValidationError("Picture-card windows must not overlap.")
@@ -3739,6 +3814,8 @@ def describe_edl(edl_dict, duration=None, src_shape=None):
         if fx.picture_cards:
             bits.append("footage cards " + ", ".join(
                 f"{c.id}@{c.start:g}-{c.end:g}s {c.entrance}/{c.exit}"
+                + (f" stacked x{len(c.panels)}" if c.panels else
+                   " from source" if c.source else "")
                 + (f" on {c.background_style}" if c.background_style else "")
                 + (" +grain" if c.grain else "")
                 + (" +vignette" if c.vignette else "")

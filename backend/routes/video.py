@@ -5026,7 +5026,7 @@ def _final_is_current(meta):
 
 
 # Mirrors worker/config.TRANSITION_VERSION — a worker test asserts they match.
-TRANSITION_VERSION = 3  # v3: zoom_punch no longer tmix-blends across concat
+TRANSITION_VERSION = 4  # v4: render blocks split at focus/card edges are not junctions
 
 
 def _transitions_are_current(meta, edl_has_transition=True):

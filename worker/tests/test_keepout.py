@@ -775,3 +775,30 @@ def test_face_track_follows_the_camera_as_rendered_held_through_a_cut():
     held = [f[3] - f[1] for t, faces in track if 4.91 < t < 5.0 for f in faces]
     assert zoomed and held and min(held) == pytest.approx(max(zoomed), abs=0.002)
     assert min(held) > 0.3 * 1.15
+
+
+def test_geometry_maps_the_face_through_a_source_fed_card_and_a_stack():
+    # a card framed from the SOURCE (layouts): the face lands where the
+    # card's source rect puts it, not where the 9:16 crop had it
+    card = {"id": "c", "start": 0.0, "end": 10.0, "box": [0.04, 0.28, 0.96, 0.67],
+            "fit": "crop", "source": [0.2, 0.1, 0.7, 0.505]}
+    edl = _edl(frame={"ratio": "9:16", "mode": "crop", "focus_x": 0.38}, cards=[card])
+    geo = keepout.Geometry(edl, VIDEO, 1080, 1920, 20.0)
+    face = (0.32, 0.2, 0.48, 0.5)
+    b = geo.to_output(1.0, 11.0, face)
+    import picture_cards
+    rect = picture_cards.match_rect(card["source"], card["box"], 1920, 1080, 1080, 1920)
+    kx = (0.96 - 0.04) / (rect[2] - rect[0])
+    assert b[0] == pytest.approx(0.04 + (0.32 - rect[0]) * kx, abs=1e-3)
+    assert b[4:] == pytest.approx(tuple(card["box"]), abs=1e-3)
+    # a stack shows the speaker in one panel and the evidence in the other:
+    # the face is only where its panel's source rect holds it
+    stack = {"id": "s", "start": 0.0, "end": 10.0, "box": [0.08, 0.035, 0.92, 0.55],
+             "fit": "crop", "panels": [
+                 {"box": [0.08, 0.035, 0.92, 0.365], "source": [0.2, 0.1, 0.6, 0.6]},
+                 {"box": [0.08, 0.385, 0.92, 0.55], "source": [0.55, 0.65, 0.85, 0.83]}]}
+    edl = _edl(frame={"ratio": "9:16", "mode": "crop", "focus_x": 0.38}, cards=[stack])
+    geo = keepout.Geometry(edl, VIDEO, 1080, 1920, 20.0)
+    outs = geo.to_outputs(1.0, 11.0, face)
+    assert len(outs) == 1 and outs[0][4:] == pytest.approx((0.08, 0.035, 0.92, 0.365), abs=1e-3)
+    assert 0.08 <= outs[0][0] and outs[0][3] <= 0.6
