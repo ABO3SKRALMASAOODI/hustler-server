@@ -201,7 +201,9 @@ def cues(edl, index, tl):
             continue
         # Every word spoken: the line clears ON the cut that ends its shot
         # (a hard clear — a hold or fade surviving a jump cut ghosts over
-        # the new framing). A line still speaking across a cut runs on.
+        # the new framing). Cards already break at cuts; one a stored
+        # min_words_per_caption holds across a cut is still speaking, and
+        # runs on.
         on_cut = False
         cut = ch[-1].get("cut")
         if cut is not None and s < cut < e:
@@ -298,8 +300,10 @@ def items(edl, index, tl):
     cuts = caplib.program_cuts(tl)
 
     def led(v):
-        # one frame early, but never back across a cut (see CAPTION_LEAD_S)
-        k = bisect.bisect_right(cuts, v + 1e-6)
+        # one frame early, but never back across a cut (see CAPTION_LEAD_S).
+        # Cue times are rounded to the millisecond and cuts are not (a speed
+        # ramp puts one at 1.53846 s): an edge within 1 ms of a cut is ON it.
+        k = bisect.bisect_right(cuts, v + 1e-3)
         if k and cuts[k - 1] > v - lead + 1e-6:
             return cuts[k - 1]
         return v - lead

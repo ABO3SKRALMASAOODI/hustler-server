@@ -849,6 +849,12 @@ def _continues(prev, cur):
             return False
     except (KeyError, TypeError, ValueError):
         return False
+    # Abutting in the PROGRAM is not enough: a jump cut makes two distant
+    # source tokens neighbours, and "non" + a later "-based" is no word.
+    s1, s0 = prev.get("src_t1"), cur.get("src_t0")
+    if isinstance(s1, (int, float)) and isinstance(s0, (int, float)) \
+            and s0 - s1 > JOIN_MAX_GAP_S:
+        return False
     last = a[-1]
     if _JOIN_HYPHEN.match(b) or _JOIN_SLASH.match(b):
         return last.isalnum()
@@ -932,10 +938,11 @@ def program_cuts(tl):
 
 def _mark_shot_ends(out_words, tl):
     """Stamp each word with ``cut``: the first program cut at or after it
-    ends. A caption whose words are all spoken may hold a beat after its
-    last word, but never across that cut — the line belongs to the shot it
-    was spoken in, and a hold or fade surviving a jump cut ghosts over the
-    new framing. Words are copied only when a cut exists."""
+    ends. The line belongs to the shot it was spoken in: grouping breaks a
+    card at the cut (_cut_between), and a caption whose words are all spoken
+    may hold a beat after its last word, but never across that cut — a hold
+    or fade surviving a jump cut ghosts over the new framing. Words are
+    copied only when a cut exists."""
     cuts = program_cuts(tl)
     if not cuts or not out_words:
         return out_words
@@ -945,6 +952,16 @@ def _mark_shot_ends(out_words, tl):
         k = bisect.bisect_left(cuts, float(w["t1"]) - 1e-3)
         out.append(dict(w, cut=cuts[k]) if k < len(cuts) else w)
     return out
+
+
+def _cut_between(prev, nxt):
+    """Is there a program cut between two consecutive caption words? Only
+    words stamped by _mark_shot_ends say (design-v2 tracks, motion looks).
+    A cut is a phrase break like a breath: the cut usually removed one, and
+    a card that runs across it carries the old shot's words onto the new
+    framing ("of things" | cut | "when")."""
+    cut = prev.get("cut")
+    return cut is not None and cut <= float(nxt["t0"]) + 1e-3
 
 
 def _hold_to_cut(end, word, start):
@@ -963,11 +980,10 @@ def transcript_words(edl, index, tl, mutes=None):
     One pipeline for every caption path (libass presets and the browser
     motion looks): fillers dropped, kept words mapped to program time, insert
     breaks marked, text corrections applied, whisper's split tokens rejoined,
-    then words inside ``mutes`` (program spans) removed. Corrections run
-    before the rejoin because they were authored against the tokens the
-    transcript shows."""
+    then words inside ``mutes`` (program spans) removed. See
+    _corrected_rejoined for how corrections meet the rejoin."""
     out = _mark_insert_breaks(tl.kept_words(_spoken_index_words(index)), tl)
-    out = rejoin_split_words(_corrected(out, edl.get("captions") or {}))
+    out = _corrected_rejoined(out, edl.get("captions") or {})
     return _drop_muted_words(out, mutes) if mutes else out
 
 
@@ -997,7 +1013,7 @@ def heard_words(edl, index, tl, lo, hi):
             out.append({"w": _wget(w, "w"), "t0": o0, "t1": o1,
                         "src_t0": t0, "src_t1": t1,
                         "clipped": tl.src_to_out((t0 + t1) / 2.0) is None})
-    return rejoin_split_words(_corrected(out, edl.get("captions") or {}))
+    return _corrected_rejoined(out, edl.get("captions") or {})
 
 
 def _wget(w, key):
@@ -1018,6 +1034,40 @@ def _corrected(words, caps):
                   for a, b in caps.get("text_fixes") or []]
         return apply_scoped_fixes(words, legacy + caps["corrections"])
     return apply_text_fixes(words, caps.get("text_fixes"))
+
+
+def _corrected_rejoined(words, caps):
+    """Corrections, then the rejoin, then any correction written against a
+    REJOINED word.
+
+    Corrections run first because the ones already stored were authored
+    against the tokens the transcript showed ("-player" -> "player"), and
+    those must keep their effect. But the caption preview now shows the
+    rejoined word, so a correction written from it ("non-player" -> ...)
+    names a token no transcript word had: such a rule — one whose source
+    phrase contains a token that exists only after the rejoin — gets a
+    second pass on the rejoined words. A rule that already applied never
+    reaches that pass, so nothing is corrected twice."""
+    fixed = _corrected(words, caps)
+    joined = rejoin_split_words(fixed)
+    if joined is fixed or not (caps.get("corrections") or caps.get("text_fixes")):
+        return joined
+    new = {_norm_word(w.get("w")) for w in joined} - \
+        {_norm_word(w.get("w")) for w in fixed}
+
+    def late(src):
+        return any(_norm_word(t) in new for t in str(src or "").split())
+
+    pairs = [p for p in caps.get("text_fixes") or []
+             if late(p.get("from") if isinstance(p, dict) else p[0])]
+    rules = [r for r in caps.get("corrections") or [] if late(r.get("from"))]
+    if not (pairs or rules):
+        return joined
+    if caps.get("corrections"):            # same engine as the first pass
+        return apply_scoped_fixes(
+            joined, [{"from": a, "to": b, "preserve_affixes": True}
+                     for a, b in pairs] + rules)
+    return apply_text_fixes(joined, pairs)
 
 
 def events_from_transcript(out_words, max_words=None, line_chars=MAX_LINE_CHARS,
@@ -1049,7 +1099,8 @@ def events_from_transcript(out_words, max_words=None, line_chars=MAX_LINE_CHARS,
         gap = (w["t0"] - group[-1]["t1"]) if group else 0.0
         full = (chars + 1 + len(w["w"]) > limit or
                 (max_words and len(group) >= max_words))
-        if group and (full or gap > 1.2 or w.get("brk")):
+        if group and (full or gap > 1.2 or w.get("brk")
+                      or _cut_between(group[-1], w)):
             flush()
         group.append(w)
         chars += (1 if chars else 0) + len(w["w"])
@@ -1099,7 +1150,8 @@ def events_dynamic(out_words, style=None, max_words=None,
     for w in out_words:
         would = chars + (1 if chars else 0) + len(w["w"])
         if cur and (w["t0"] - cur[-1]["t1"] > 1.2 or len(cur) >= group_n
-                    or would > line_chars or w.get("brk")):
+                    or would > line_chars or w.get("brk")
+                    or _cut_between(cur[-1], w)):
             chunks.append(cur)
             cur, chars = [], 0
             would = len(w["w"])
@@ -1580,7 +1632,7 @@ def _chunk_word_key(word):
 
 def _hard_phrase_break(prev, nxt):
     """Whether two consecutive timed words may never share one card."""
-    if nxt.get("brk"):
+    if nxt.get("brk") or _cut_between(prev, nxt):
         return True
     try:
         gap = float(nxt["t0"]) - float(prev["t1"])

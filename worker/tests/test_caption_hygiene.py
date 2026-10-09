@@ -4,9 +4,10 @@ What is pinned here:
   1. Whisper's split-off tails ("non" + "-player", "32" + "%") are rejoined
      into one written word before grouping, in BOTH caption paths (libass
      presets and the browser motion looks), keeping timing and emphasis.
-  2. A line whose words are all spoken clears ON the next program cut: a
-     hold never survives a jump cut onto the new framing (motion looks and
-     design-v2 libass tracks; historical tracks keep their bytes).
+  2. A card never runs across a program cut, and a line whose words are
+     all spoken clears ON the cut: neither a card nor a hold survives a jump
+     cut onto the new framing (motion looks and design-v2 libass tracks;
+     historical tracks keep their bytes).
   3. Motion-look word reveals are crisp: legible on the first frame,
      settled within two.
   4. add/set_motion_graphic NOTE (never reject) a caption mute over speech
@@ -149,6 +150,43 @@ def test_caption_fingerprint_moves_only_for_transcripts_with_split_tails():
     assert renderer._caption_index_fp(edl, clean) == h.hexdigest()[:16]   # others keep theirs
 
 
+def _shown(edl, words, keep=None):
+    """Program words the caption track shows (text only)."""
+    tl = Timeline(keep or edl["keep"])
+    return [w["w"] for w in captions.transcript_words(edl, {"words": _w(words)}, tl)]
+
+
+def test_corrections_reach_the_rejoined_word_and_keep_their_old_effect():
+    edl = _caption_edl({"preset": "stacked"})
+    # written from the caption preview, which shows the rejoined word
+    edl["captions"]["corrections"] = [{"from": "non-player", "to": "non-gamer"}]
+    assert "non-gamer" in _shown(edl, ELON)
+    edl["captions"]["corrections"] = [{"from": "32%", "to": "32 percent"}]
+    shown = _shown(edl, ELON)
+    assert "32" in shown and "percent" in shown and "32%" not in shown
+    # stored workarounds authored against whisper's tokens keep their effect
+    edl["captions"]["corrections"] = [{"from": "-player", "to": "player"}]
+    assert _shown(edl, ELON)[3:5] == ["non", "player"]
+    # legacy text_fixes pairs (no corrections list) take the same second pass
+    edl["captions"]["corrections"] = None
+    edl["captions"]["text_fixes"] = [["Non-player", "Non-gamer"]]
+    assert "Non-gamer" in _shown(edl, ELON)
+    # a rule that matched before the rejoin never applies twice
+    edl["captions"]["text_fixes"] = None
+    edl["captions"]["corrections"] = [{"from": "colleagues.", "to": "colleagues and more."}]
+    assert _shown(edl, ELON).count("more.") == 1
+
+
+def test_a_jump_cut_never_glues_two_source_tokens():
+    # "non" ends the first keep; the next keep opens on an unrelated split tail
+    words = [("a", 0.0, 0.2), ("non", 0.2, 0.5), ("-based", 3.0, 3.3), ("plan", 3.3, 3.6)]
+    edl = _caption_edl({"preset": "stacked"}, keep=[[0.0, 0.5], [3.0, 6.0]])
+    assert _shown(edl, words) == ["a", "non", "based", "plan"]
+    # the same tokens abutting in the source still rejoin
+    edl = _caption_edl({"preset": "stacked"})
+    assert _shown(edl, [("non", 0.2, 0.5), ("-based", 0.5, 0.8)]) == ["non-based"]
+
+
 # ── 2. lines clear on the cut ────────────────────────────────────────────
 
 # Source: "...some great companies." ends at 1.7; the keep jumps 2.0 -> 3.0,
@@ -180,10 +218,42 @@ def test_motion_cue_hold_ends_on_the_cut_and_clears_hard():
     assert nxt["s"] == pytest.approx(2.15)
 
 
-def test_a_line_still_speaking_runs_on_across_a_cut():
+# Thiel showcase, 10.72 s: "like a lot | of things | when ..." put "of
+# things" on screen in the old shot and carried it onto the new framing.
+# (Its real word timings, shifted so the cut lands on KEEP's 2.0.)
+SPAN_WORDS = [("like", 0.95, 1.15), ("a", 1.15, 1.29), ("lot", 1.29, 1.53),
+              ("of", 1.53, 1.65), ("things", 1.65, 1.93), ("when", 3.11, 3.21),
+              ("we", 3.21, 3.29), ("use", 3.29, 3.47), ("technology", 3.47, 3.95)]
+
+
+def test_a_card_never_runs_across_a_cut():
+    edl = _caption_edl({"motion_look": "editorial"}, keep=KEEP)
+    cues = motion_captions.cues(edl, {"words": _w(SPAN_WORDS)}, Timeline(edl["keep"]))
+    assert not [c for c in cues if c["s"] < 2.0 < c["e"]], cues
+    before = next(c for c in cues if c["w"][-1]["t"] == "things")
+    assert before["e"] == 2.0 and before["k"] == 1
+    assert next(c for c in cues if c["s"] > 2.0)["w"][0]["t"] == "when"
+
+
+@pytest.mark.parametrize("style", [{"preset": "stacked"}, {"preset": "karaoke"},
+                                   {"dynamic": True}, {}])
+def test_v2_libass_cards_never_run_across_a_cut(style):
+    edl = _caption_edl(style, keep=KEEP)
+    events, _ = captions.compiled_events(edl, {"words": _w(SPAN_WORDS)},
+                                         Timeline(edl["keep"]), (1080, 1920))
+    assert events and not [ev for ev in events if ev["start"] < 2.0 < ev["end"]], events
+    # historical tracks keep their grouping (and bytes)
+    old = _caption_edl(style, keep=KEEP, design_version=None)
+    events, _ = captions.compiled_events(old, {"words": _w(SPAN_WORDS)},
+                                         Timeline(old["keep"]), (1080, 1920))
+    assert [ev for ev in events if ev["start"] < 2.0 < ev["end"]], events
+
+
+def test_a_line_held_together_by_min_words_runs_on_across_a_cut():
     words = [("one", 1.5, 1.8), ("long", 1.8, 1.98), ("line", 3.0, 3.3),
              ("continues", 3.3, 3.8)]
     edl = _caption_edl({"motion_look": "editorial"}, keep=KEEP)
+    edl["captions"]["min_words_per_caption"] = 4
     cues = motion_captions.cues(edl, {"words": _w(words)}, Timeline(edl["keep"]))
     spans = [c for c in cues if c["s"] < 2.0 < c["e"]]
     assert spans and spans[0]["w"][-1]["e"] > 2.0     # its words cross the cut
@@ -226,6 +296,43 @@ def test_plain_v2_captions_floor_never_crosses_the_cut():
                                          (1080, 1920))
     yes = next(ev for ev in events if "Yes" in ev["text"])
     assert yes["end"] == pytest.approx(2.0), events
+
+
+def test_the_lead_never_crosses_an_unrounded_cut(monkeypatch):
+    # a 1.3x ramp on the first keep puts the cut at 1.53846 s: cue times are
+    # rounded to the ms, and the line must still clear ON it, not a frame early
+    monkeypatch.setattr(motion_engine, "available", lambda: True)
+    edl = default_edl(6.0)
+    edl["keep"] = KEEP
+    edl["speed"] = [{"id": "sp1", "start": 0.0, "end": 2.0, "factor": 1.3}]
+    edl["captions"] = {"mode": "from_transcript", "design_version": 2,
+                       "style": {"motion_look": "editorial"}}
+    edl = validate_edl(edl, 6.0).model_dump()
+    tl = Timeline(edl["keep"], [], edl["speed"])
+    cut = tl.offsets[1]
+    assert captions.program_cuts(tl) == [round(cut, 4)] and round(cut, 3) != cut
+    items = motion_captions.items(edl, {"words": _w(CUT_WORDS)}, tl)
+    ends = [it["start"] + c["e"] for it in items for c in it["params"]["cues"]
+            if c["w"][-1]["t"] == "companies"]
+    assert ends and ends[0] == pytest.approx(cut, abs=1e-3), (ends, cut)
+
+
+def test_old_renders_never_seed_a_stitch_for_moved_captions():
+    import renderer
+    cur = {"cap_v": renderer.config.CAPTION_TIMING_VERSION}
+    v2_cut = {"keep": KEEP, "captions": {"mode": "from_transcript", "design_version": 2}}
+    v2_one_shot = {"keep": [[0.0, 6.0]],
+                   "captions": {"mode": "from_transcript", "design_version": 2}}
+    look = {"keep": [[0.0, 6.0]], "captions": {"mode": "from_transcript",
+                                               "style": {"motion_look": "clean"}}}
+    historical = {"keep": KEEP, "captions": {"mode": "from_transcript"}}
+    assert not renderer.captions_current({}, v2_cut)
+    assert not renderer.captions_current({"cap_v": 0}, look)   # reveals moved too
+    assert renderer.captions_current(cur, v2_cut) and renderer.captions_current(cur, look)
+    # nothing about these renders moved: they keep stitching
+    assert renderer.captions_current({}, v2_one_shot)
+    assert renderer.captions_current({}, historical)
+    assert renderer.captions_current({}, {"keep": KEEP})
 
 
 def test_historical_tracks_keep_their_holds():

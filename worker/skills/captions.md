@@ -31,8 +31,9 @@ placement or layout change in the rendered preview.
 MOTION LOOKS — `add_captions(mode='from_transcript', style={...})` or
 `set_caption_style` with `style.motion_look`. The browser engine draws the
 captions from the same kept, corrected, mute-filtered words as every other
-caption path, so they follow cuts exactly: a line whose words are all
-spoken clears on the next cut instead of holding onto the new shot.
+caption path, so they follow cuts exactly: a card never runs across a cut,
+and a line whose words are all spoken clears on the cut instead of holding
+onto the new shot.
 - `editorial` — the premium default for podcast and interview reels: tight
   grotesk phrases with a size ladder and an accent role on hero words.
 - `clean` — quiet premium sentence case; each word snaps up out of a short

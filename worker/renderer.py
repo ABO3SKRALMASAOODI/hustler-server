@@ -1636,6 +1636,32 @@ def camera_current(meta, edl):
     return ((meta or {}).get("cam_v") or 0) == config.CAMERA_VERSION
 
 
+def captions_current(meta, edl):
+    """May this render's caption pixels be spliced into (or reused for) a
+    newer version's render?
+
+    True unless the EDL burns transcript captions whose timing moved with
+    config.CAPTION_TIMING_VERSION — a motion look (crisp reveals, lines that
+    clear on cuts) or a design-v2 track over a program with a cut — and the
+    render predates it. Only the splice/reuse path asks, exactly like
+    camera_current: a cached render served for its own version keeps its
+    cache.
+    """
+    edl = edl or {}
+    caps = edl.get("captions")
+    if not (isinstance(caps, dict) and caps.get("mode") == "from_transcript"):
+        return True
+    if ((meta or {}).get("cap_v") or 0) == config.CAPTION_TIMING_VERSION:
+        return True
+    if motion_captions.look_of(edl):
+        return False
+    if caps.get("design_version") != caplib.CAPTION_DESIGN_VERSION:
+        return True
+    return not caplib.program_cuts(Timeline(edl.get("keep") or [],
+                                            edl.get("inserts") or [],
+                                            edl.get("speed")))
+
+
 def look_current(meta):
     """May new pieces be spliced into this cached render (stitched preview)?
 
@@ -6183,6 +6209,7 @@ def _run_render_job(worker_db, job):
                             and shaping_current(pm, prev_row["json"]) \
                             and transitions_current(pm, prev_row["json"]) \
                             and camera_current(pm, prev_row["json"]) \
+                            and captions_current(pm, prev_row["json"]) \
                             and music_tail_current(pm, prev_row["json"],
                                                    _pout) \
                             and watermark_current(pm, variant, is_paid,
@@ -6524,6 +6551,11 @@ def _run_render_job(worker_db, job):
                   "delivery_v": 1,
                   "trans_v": config.TRANSITION_VERSION,
                   "cam_v": config.CAMERA_VERSION,
+                  # A reused picture keeps the caption clock it was drawn
+                  # with (as look_v below).
+                  "cap_v": (reused_visual_meta.get("cap_v") or 0
+                            if reused_visual_meta
+                            else config.CAPTION_TIMING_VERSION),
                   "tail_v": config.MUSIC_TAIL_VERSION,
                   # A reused picture keeps the look it was drawn with.
                   "look_v": (reused_visual_meta.get("look_v") or 0
