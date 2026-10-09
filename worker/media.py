@@ -14,7 +14,112 @@ import config
 
 
 class MediaError(RuntimeError):
-    pass
+    """A failed media command. ``stderr_tail`` (when set) is the last
+    ~STDERR_TAIL_CHARS of the command's real log lines, newest last."""
+    stderr_tail = ""
+
+
+class MediaOOMError(MediaError):
+    """The kernel's out-of-memory killer ended the media process.
+
+    Only raised when BOTH signals agree: the process died of SIGKILL that we
+    did not send, AND a kernel OOM-kill counter (cgroup ``memory.events`` or
+    the VM's ``/proc/vmstat``) moved while it ran. Replaying the identical
+    graph on the identical executor shape fails the same way, so the retry
+    policy treats this as non-retryable on the same shape (``executor_memory``).
+    """
+
+
+# How much of a failed command's stderr survives into the error and the job's
+# failure record. ffmpeg prints the actual cause in its last few lines, but a
+# multi-filter graph can print several hundred characters per line.
+STDERR_TAIL_CHARS = 1500
+
+# Initialisation chatter that is never the cause of a failure but used to fill
+# the whole error excerpt: every libass instance (one per subtitles burn)
+# lists each file it loads from fontsdir and its shaper/provider banner.
+# Production failures shipped 500-character excerpts made only of these lines
+# ("Error opening memory font 'LICENSE-Anton.txt'"), hiding the real stderr.
+_LOG_NOISE = (
+    "Loading font file", "Error opening memory font", "libass API version",
+    "libass source", "Shaper: ", "Using font provider", "Read failed, 21",
+    "fontselect: ", "File size: ",
+)
+
+
+def _is_log_noise(line):
+    return any(marker in line for marker in _LOG_NOISE)
+
+
+def stderr_tail(lines, limit=STDERR_TAIL_CHARS):
+    """The newest real log lines, joined with ' | ', at most ``limit`` chars.
+
+    Noise lines are dropped first; the result keeps whole lines from the end
+    and only cuts the OLDEST kept line when a single line exceeds the budget.
+    """
+    kept = [ln.strip() for ln in lines if ln and ln.strip()
+            and not _is_log_noise(ln)]
+    out, used = [], 0
+    for ln in reversed(kept):
+        add = len(ln) + (3 if out else 0)
+        if used + add > limit:
+            if not out:
+                out.append("…" + ln[-(limit - 1):])
+            break
+        out.append(ln)
+        used += add
+    return " | ".join(reversed(out))
+
+
+def _oom_kill_count():
+    """Kernel OOM kills visible to this process, or None when unreadable.
+
+    cgroup v2 ``memory.events`` counts kills inside this container; the VM's
+    ``/proc/vmstat`` counts them for the whole micro-VM (Cloudflare hides the
+    cgroup files). Either moving during a SIGKILLed encode is the evidence.
+    """
+    total, seen = 0, False
+    for path, key in (("/sys/fs/cgroup/memory.events", "oom_kill"),
+                      ("/proc/vmstat", "oom_kill")):
+        try:
+            with open(path) as fh:
+                for line in fh:
+                    parts = line.split()
+                    if len(parts) == 2 and parts[0] == key:
+                        total += int(parts[1])
+                        seen = True
+        except (OSError, ValueError):
+            continue
+    return total if seen else None
+
+
+def _command_failure(cmd, returncode, lines, oom_before, prefix=None):
+    """The MediaError for a non-zero exit, with the stderr tail attached.
+
+    exit -9 is SIGKILL from outside the process. When an OOM counter moved
+    while it ran, say so plainly: the old message ("ffmpeg failed (exit -9):"
+    followed by libass font chatter) gave neither the operator nor the retry
+    policy any reason to think the graph was simply too large for the box.
+    """
+    tail = stderr_tail(lines)
+    name = os.path.basename(str(cmd[0])) if cmd else "command"
+    if returncode in (-9, 137):
+        after = _oom_kill_count()
+        if oom_before is not None and after is not None and after > oom_before:
+            err = MediaOOMError(
+                f"{name} was killed by the out-of-memory killer (exit "
+                f"{returncode}; {after - oom_before} kernel OOM kill(s) during "
+                "the encode): this render's filter graph needs more memory "
+                "than the executor has. Re-running the same graph on the same "
+                "executor will fail the same way — reduce simultaneous "
+                "full-frame layers or render on a larger executor."
+                + (f" Log tail: {tail}" if tail else ""))
+            err.stderr_tail = tail
+            return err
+    head = prefix or f"{name} failed (exit {returncode})"
+    err = MediaError(f"{head}: {tail}" if tail else head)
+    err.stderr_tail = tail
+    return err
 
 
 # FFmpeg has emitted AV_NOPTS through `-progress` as INT64_MAX, INT64_MIN and
@@ -48,6 +153,7 @@ def run(cmd, timeout=None, progress_cb=None, expected_out_s=None,
     A log line is diagnostics; it must never be able to fail a job.
     """
     timeout = timeout or config.FFMPEG_TIMEOUT_S
+    oom_before = _oom_kill_count()
     if progress_cb and expected_out_s:
         # ffmpeg logs to stderr for the whole encode. Left as its own
         # un-drained PIPE it fills the OS buffer, ffmpeg blocks on write,
@@ -111,7 +217,9 @@ def run(cmd, timeout=None, progress_cb=None, expected_out_s=None,
         wd.start()
         # Keep only real log lines for error reporting — the merged stream is
         # dominated by -progress key=value pairs and ffmpeg's status ticker.
-        tail = collections.deque(maxlen=40)
+        # libass font-loading chatter is dropped here too (see _LOG_NOISE),
+        # so the bounded deque holds the lines that can explain a failure.
+        tail = collections.deque(maxlen=200)
         _noise = ("out_time", "frame=", "fps=", "bitrate=", "total_size=",
                   "speed=", "progress=", "dup_frames=", "drop_frames=",
                   "stream_", "size=")
@@ -148,7 +256,8 @@ def run(cmd, timeout=None, progress_cb=None, expected_out_s=None,
                         pass
                 elif line.startswith("speed="):
                     progress_state["speed"] = line.split("=", 1)[1].strip()
-                elif line and not line.startswith(_noise):
+                elif line and not line.startswith(_noise) \
+                        and not _is_log_noise(line):
                     tail.append(line)
             proc.wait()
         finally:
@@ -164,13 +273,16 @@ def run(cmd, timeout=None, progress_cb=None, expected_out_s=None,
             progress = min(
                 100.0, out_s / max(0.01, expected_out_s) * 100.0)
             speed = progress_state.get("speed") or "unknown"
-            raise MediaError(
+            err = MediaError(
                 f"ffmpeg killed: {kill_reason[0]}; last progress "
                 f"{out_s:.1f}/{expected_out_s:.1f}s ({progress:.1f}%), "
                 f"reported speed {speed}")
+            err.stderr_tail = stderr_tail(tail)
+            raise err
         if proc.returncode != 0:
-            raise MediaError(f"ffmpeg failed (exit {proc.returncode}): "
-                             + " | ".join(list(tail)[-12:]))
+            raise _command_failure(
+                cmd, proc.returncode, tail, oom_before,
+                prefix=f"ffmpeg failed (exit {proc.returncode})")
         return ""
     if cancelled_cb:
         p = subprocess.Popen(cmd, stdout=subprocess.PIPE,
@@ -198,9 +310,9 @@ def run(cmd, timeout=None, progress_cb=None, expected_out_s=None,
                 except Exception:
                     pass
         if p.returncode != 0:
-            tail = (err or "").splitlines()[-12:]
-            raise MediaError(f"{os.path.basename(cmd[0])} failed: "
-                             + " | ".join(tail))
+            raise _command_failure(
+                cmd, p.returncode, (err or "").splitlines(), oom_before,
+                prefix=f"{os.path.basename(cmd[0])} failed")
         return out
     try:
         p = subprocess.run(cmd, capture_output=True, text=True,
@@ -208,8 +320,9 @@ def run(cmd, timeout=None, progress_cb=None, expected_out_s=None,
     except subprocess.TimeoutExpired:
         raise MediaError(f"{os.path.basename(cmd[0])} timed out after {timeout}s")
     if p.returncode != 0:
-        tail = (p.stderr or "").splitlines()[-12:]
-        raise MediaError(f"{os.path.basename(cmd[0])} failed: " + " | ".join(tail))
+        raise _command_failure(
+            cmd, p.returncode, (p.stderr or "").splitlines(), oom_before,
+            prefix=f"{os.path.basename(cmd[0])} failed")
     return p.stdout
 
 

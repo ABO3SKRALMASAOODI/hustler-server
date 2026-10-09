@@ -121,3 +121,38 @@ def test_provider_budget_rejection_is_not_replayed_for_every_user():
         "agent_turn")
     assert llm.kind == "provider_budget_exhausted"
     assert llm.retryable is False
+
+
+def test_kernel_oom_kill_is_not_replayed_on_the_same_executor_shape():
+    """All 8 failed finals in one 72 h window were ffmpeg exit -9 with a kernel
+    OOM kill, each retried once with the identical graph as a generic media
+    error. The same graph on the same box cannot fit the second time."""
+    err = media.MediaOOMError(
+        "ffmpeg was killed by the out-of-memory killer (exit -9; 1 kernel OOM "
+        "kill(s) during the encode): ...")
+    for job_type in ("final", "preview", "preview_check"):
+        d = failure_policy.classify(err, job_type)
+        assert d.kind == "executor_memory"
+        assert d.retryable is False
+        assert d.max_attempts == 0
+        assert d.agent_repairable is True
+    # The message alone (an executor's decision lost across HTTP) still
+    # classifies the same way.
+    d = failure_policy.classify(RuntimeError(str(err)), "final")
+    assert d.kind == "executor_memory" and not d.retryable
+
+
+def test_plain_sigkill_without_oom_evidence_keeps_one_media_retry():
+    d = failure_policy.classify(
+        media.MediaError("ffmpeg failed (exit -9): Stream mapping: ..."), "final")
+    assert d.kind == "media_command"
+    assert d.retryable is True
+
+
+def test_failure_payload_carries_the_stderr_tail():
+    err = media.MediaError("ffmpeg failed (exit 1): x")
+    err.stderr_tail = "[Parsed_overlay_3] Failed to configure input pad"
+    payload = failure_policy.classify(err, "final").payload(err)
+    assert payload["stderr_tail"].endswith("Failed to configure input pad")
+    assert "stderr_tail" not in failure_policy.classify(
+        RuntimeError("boom"), "final").payload(RuntimeError("boom"))
