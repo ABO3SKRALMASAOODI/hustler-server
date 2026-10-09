@@ -1785,10 +1785,32 @@ SCREENING_PAGE_TILES = int(os.getenv("SCREENING_PAGE_TILES", "16"))
 SCREENING_FRAME_PARALLELISM = int(os.getenv(
     "SCREENING_FRAME_PARALLELISM", "4"))
 
-# Final exports: veryfast/CRF20 is effectively transparent for talking-head /
-# screen content and several times faster than the old medium/CRF18.
+# Final exports: veryfast keeps the encode a small share of the render (the
+# filter graph dominates). CRF 18, not 20: finals shipped at 0.6-1.6 Mbps,
+# and every platform re-encodes the upload, so the first generation has to
+# carry the detail the second one will spend. On a 30 s 1080x1920 test the
+# x264 sweep measured veryfast CRF20 848 kbps / VMAF 91.7 vs CRF17 1338 kbps
+# / VMAF 92.7 at no extra encode time (veryfast is not rate-bound here).
 FINAL_PRESET = os.getenv("FINAL_PRESET", "veryfast")
-FINAL_CRF = int(os.getenv("FINAL_CRF", "20"))
+FINAL_CRF = int(os.getenv("FINAL_CRF", "18"))
+
+# Keep spans further apart than this (source seconds) are read through their
+# own bounded input instead of decoding the gap (renderer._keep_clusters).
+# A new input costs a seek plus up to one GOP of preroll, so short gaps stay
+# in one read. 0 disables; MAX bounds the extra demuxer/decoder pairs.
+KEEP_CLUSTER_GAP_S = float(os.getenv("KEEP_CLUSTER_GAP_S", "20"))
+KEEP_CLUSTER_MAX_INPUTS = int(os.getenv("KEEP_CLUSTER_MAX_INPUTS", "8"))
+# Decoder threads per cluster input (0 = ffmpeg's auto). Every input's decoder
+# starts at launch and holds its own frame-thread buffers, so with auto
+# threads peak RSS grew with the cluster count (4K, 8 clusters: +66%). The
+# concat consumes one cluster at a time, so a narrow decoder per input costs
+# no wall time while bounding that growth.
+KEEP_CLUSTER_THREADS = int(os.getenv("KEEP_CLUSTER_THREADS", "2"))
+# Extra peak memory the cluster reads may add, in MB. Each extra read holds a
+# decoder (reference frames) and its queued frames: measured ~30 MB per source
+# megapixel at 2 threads (1080p ~65 MB, 4K ~230 MB per read), so a 1080p
+# source keeps all 8 reads and a 4K source gets 3 (renderer._cluster_input_cap).
+KEEP_CLUSTER_MEM_MB = float(os.getenv("KEEP_CLUSTER_MEM_MB", "512"))
 
 SILENCE_NOISE_DB = "-35dB"
 SILENCE_MIN_S = 0.6
@@ -1948,6 +1970,17 @@ CAMERA_VERSION = 1
 # generated black frames; v2 clamps only the render window (never the EDL) so
 # those known-bad cached previews/finals are rebuilt without the black tail.
 MUSIC_TAIL_VERSION = 2
+
+# The picture pipeline's look. A stitched preview stream-copies the unchanged
+# stretches of the previous preview and splices in newly rendered pieces, so
+# pieces from a different look show a sharpness/tone seam at every splice.
+# A cached render stamped with another look is never stitched into (it is
+# still served, and still reused whole for audio-only changes — a whole old
+# picture has no seam); the next preview renders in full once. Bump when the
+# fit, resampling, grade order or colour handling changes what pixels look
+# like. v1: crop-first lanczos fit + unsharp, block grade, pinned end-card
+# matrix (render-perf round).
+RENDER_LOOK_VERSION = 1
 
 # ── Free-tier watermark (round 41) ────────────────────────────────────────
 # The site's robot in the top-left of the EXPORT, with "edited by valmera

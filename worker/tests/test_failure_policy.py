@@ -121,3 +121,55 @@ def test_provider_budget_rejection_is_not_replayed_for_every_user():
         "agent_turn")
     assert llm.kind == "provider_budget_exhausted"
     assert llm.retryable is False
+
+
+def test_kernel_oom_kill_is_not_replayed_on_the_same_executor_shape():
+    """All 8 failed finals in one 72 h window were ffmpeg exit -9 with a kernel
+    OOM kill, each retried once with the identical graph as a generic media
+    error. The same graph on the same box cannot fit the second time."""
+    err = media.MediaOOMError(
+        "ffmpeg was killed by the out-of-memory killer (exit -9; 1 kernel OOM "
+        "kill(s) during the encode): ...")
+    for job_type in ("final", "preview", "preview_check"):
+        d = failure_policy.classify(err, job_type)
+        assert d.kind == "executor_memory"
+        assert d.retryable is False
+        assert d.max_attempts == 0
+        # An infrastructure limit never licenses rewriting a valid final
+        # (same rule as render_budget_exceeded); a preview may go lighter.
+        assert d.agent_repairable is (job_type != "final")
+    # The message alone (an executor's decision lost across HTTP) still
+    # classifies the same way.
+    d = failure_policy.classify(RuntimeError(str(err)), "final")
+    assert d.kind == "executor_memory" and not d.retryable
+
+
+def test_plain_sigkill_without_oom_evidence_keeps_one_media_retry():
+    d = failure_policy.classify(
+        media.MediaError("ffmpeg failed (exit -9): Stream mapping: ..."), "final")
+    assert d.kind == "media_command"
+    assert d.retryable is True
+
+
+def test_failure_payload_carries_the_stderr_tail():
+    err = media.MediaError("ffmpeg failed (exit 1): x")
+    err.stderr_tail = "[Parsed_overlay_3] Failed to configure input pad"
+    payload = failure_policy.classify(err, "final").payload(err)
+    assert payload["stderr_tail"].endswith("Failed to configure input pad")
+    assert "stderr_tail" not in failure_policy.classify(
+        RuntimeError("boom"), "final").payload(RuntimeError("boom"))
+
+
+def test_attached_executor_decision_keeps_the_stderr_tail():
+    err = media.MediaError("ffmpeg failed (exit 1): x")
+    err.stderr_tail = "[Parsed_overlay_3] Failed to configure input pad"
+    decision = failure_policy.classify(err, "final")
+    remote_err = failure_policy.attach(
+        RuntimeError("ffmpeg failed (exit 1)"), decision,
+        decision.payload(err))
+    assert remote_err.stderr_tail.endswith("Failed to configure input pad")
+    stored = failure_policy.decision_for(remote_err, "final").payload(
+        remote_err)
+    assert stored["stderr_tail"] == err.stderr_tail
+    plain = failure_policy.attach(RuntimeError("x"), decision, {})
+    assert not hasattr(plain, "stderr_tail")

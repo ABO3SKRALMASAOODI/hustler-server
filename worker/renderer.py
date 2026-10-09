@@ -22,6 +22,7 @@ import math
 import os
 import re
 import shutil
+import subprocess
 import time
 import uuid
 
@@ -269,6 +270,25 @@ def grade_custom_chain(gc):
 
 def _enable_expr(spans):
     return "+".join(f"between(t,{s:.2f},{e:.2f})" for s, e in spans)
+
+
+def _reduced_gblur(W, H, sigma):
+    """(down, blur, up) filter strings for a gaussian blur of `sigma` OUTPUT
+    pixels computed at 1/2 or 1/4 resolution and scaled back to WxH.
+
+    A wide blur keeps no detail finer than its own radius, so resampling it
+    is lossless to the eye: glow, halation and dream_blur measured 60-63 dB,
+    59-60 dB and 56-57 dB PSNR against the full-resolution pass, at about a
+    quarter of the cost (1080x1920, 30 s: glow 7.8 s -> 1.8 s, halation
+    13.3 s -> 3.2 s, dream_blur 9.8 s -> 1.5 s). Area down-sampling, a
+    proportionally smaller sigma, bicubic back up. Small sigmas and tiny
+    frames keep the plain full-resolution gblur (down/up empty)."""
+    k = 4 if sigma >= 6 else 2 if sigma >= 2 else 1
+    if k == 1 or not W or not H or min(W, H) < 16 * k:
+        return "", f"gblur=sigma={sigma:.1f}", ""
+    return (f"scale={_even(W / k)}:{_even(H / k)}:flags=area,",
+            f"gblur=sigma={sigma / k:.2f}",
+            f",scale={W}:{H}:flags=bicubic")
 
 
 # ── The screen takeover (round 55) ──────────────────────────────────────────
@@ -768,7 +788,8 @@ def preview_geometry(W, H, fps):
 
 
 def _normalize_video(parts, in_label, out_label, W, H, fps, mode, uid,
-                     focus=None, seg_dur=None, picture=None):
+                     focus=None, seg_dur=None, picture=None, grade=None,
+                     src_size=None):
     """Append graph parts that bring in_label to exactly WxH @ fps, sar 1.
     mode: crop (center-crop), pad (black bars), pad_blur (blurred backdrop).
 
@@ -806,35 +827,123 @@ def _normalize_video(parts, in_label, out_label, W, H, fps, mode, uid,
     no-op — which is what makes it safe to apply unconditionally instead of
     sniffing an ffmpeg version into a filter chain. Verified on both builds
     against the real EDL: 150.60s and 150.53s for 150.48s expected.
+
+    grade (perf round): the global grade chain (already gradelut-baked),
+    applied INSIDE the block instead of once after concat, so it runs where
+    the fewest pixels flow — on the source-resolution crop window before an
+    up-scale, or on the letterboxed content before its bars are padded. The
+    grade is a per-pixel map, so moving it ahead of crop/pad changes nothing
+    and ahead of a resample changes only interpolation order. Bars stay what
+    the post-concat grade made them: they are padded in graded black
+    (_graded_black). build_filtergraph decides when this is allowed at all.
+    src_size: the (w, h) of the frames entering the block when known — it
+    picks the grade position and the up-scale resampler (frame_fit_filter).
     """
     if picture:
         x, y, pw, ph = picture_pixels(W, H, picture)
         inner = f"pic_{uid}"
+        bars = _graded_black(grade) if grade else "black"
         _normalize_video(parts, in_label, inner, pw, ph, fps, mode, uid + "p",
-                         focus=focus, seg_dur=seg_dur)
-        parts.append(f"[{inner}]pad={W}:{H}:{x}:{y}:color=black[{out_label}]")
+                         focus=focus, seg_dur=seg_dur,
+                         grade=grade if bars else None, src_size=src_size)
+        late = f",{grade},format=yuv420p" if grade and not bars else ""
+        parts.append(f"[{inner}]pad={W}:{H}:{x}:{y}:color={bars or 'black'}"
+                     f"{late}[{out_label}]")
         return
     bound = ("" if seg_dur is None
              else f"trim=end={float(seg_dur):.3f},setpts=PTS-STARTPTS,")
     tail = f"fps={fps:.3f},{bound}setsar=1,format=yuv420p"
+    # Where the grade lands when it cannot go earlier: after the block's own
+    # format=yuv420p, i.e. on exactly the frames the post-concat grade saw.
+    late = f",{grade},format=yuv420p" if grade else ""
     if mode == "pad":
-        parts.append(
-            f"[{in_label}]{frame_fit_filter(mode, W, H)},{tail}[{out_label}]")
+        bars = _graded_black(grade) if grade else None
+        if bars:
+            parts.append(
+                f"[{in_label}]{frame_fit_filter(mode, W, H, pad_color=bars, grade=grade)},"
+                f"{tail}[{out_label}]")
+        else:
+            parts.append(
+                f"[{in_label}]{frame_fit_filter(mode, W, H)},{tail}{late}"
+                f"[{out_label}]")
     elif mode == "pad_blur":
-        parts.append(f"[{in_label}]split[pbA{uid}][pbB{uid}]")
+        # The backdrop is footage too, so graded footage on both branches is
+        # the post-concat grade exactly. Grade before the split only when
+        # the source frame is smaller than the canvas.
+        early = bool(grade and src_size
+                     and src_size[0] * src_size[1] < W * H)
+        head = f"format=yuv420p,{grade}," if early else ""
+        parts.append(f"[{in_label}]{head}split[pbA{uid}][pbB{uid}]")
         parts.append(f"[pbA{uid}]scale={W}:{H}:"
                      f"force_original_aspect_ratio=increase,crop={W}:{H},"
                      f"boxblur=20[pbBG{uid}]")
         parts.append(f"[pbB{uid}]scale={W}:{H}:"
                      f"force_original_aspect_ratio=decrease[pbFG{uid}]")
         parts.append(f"[pbBG{uid}][pbFG{uid}]overlay=(W-w)/2:(H-h)/2,"
-                     f"{tail}[{out_label}]")
+                     f"{tail}{'' if early or not grade else late}[{out_label}]")
     else:                              # crop
-        parts.append(f"[{in_label}]{frame_fit_filter(mode, W, H, focus)},"
+        parts.append(f"[{in_label}]"
+                     f"{frame_fit_filter(mode, W, H, focus, src_size=src_size, grade=grade)},"
                      f"{tail}[{out_label}]")
 
 
-def frame_fit_filter(mode, W, H, focus=None, pad_color="black", picture=None):
+_GRADED_BLACK = {}
+
+
+def _graded_black(chain):
+    """The colour the grade turns the bars' black into, as 0xRRGGBB — or None.
+
+    Bars were always padded black and THEN graded with the footage, so a
+    lifted/tinted look tinted the bars too. Grading the content before the
+    pad has to pad in that same colour to stay the same picture. Measured by
+    pushing pad's own black (yuv420p 16/128/128) through the real chain on
+    this build's ffmpeg; any failure returns None and the caller keeps the
+    grade after the pad, exactly as before. Only answers are memoized: a
+    timeout under load must not pin this chain to the slow path for the
+    life of the process.
+    """
+    if chain in _GRADED_BLACK:
+        return _GRADED_BLACK[chain]
+    color = _measure_graded_black(chain)
+    if color is not None:
+        if len(_GRADED_BLACK) >= 64:
+            _GRADED_BLACK.clear()
+        _GRADED_BLACK[chain] = color
+    return color
+
+
+def _measure_graded_black(chain):
+    try:
+        p = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-v", "error", "-f", "rawvideo",
+             "-pix_fmt", "yuv420p", "-s", "2x2", "-i", "-", "-vf",
+             f"format=yuv420p,{chain},format=yuv420p,format=rgb24",
+             "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+            input=bytes([16] * 4 + [128, 128]), capture_output=True,
+            timeout=15)
+        if p.returncode != 0 or len(p.stdout) < 3:
+            return None
+        r, g, b = p.stdout[:3]
+        return f"0x{r:02X}{g:02X}{b:02X}"
+    except Exception:
+        return None
+
+
+# Cover-crop resampling (perf round). A 16:9 podcast cropped into a 9:16 final
+# enlarges a 608x1080 window 1.78x; swscale's default bicubic makes that soft.
+# Lanczos keeps more of the detail the source has, and past the factor below a
+# light luma-only 3x3 unsharp — run on the SOURCE window before the enlargement,
+# where it costs a third of a 5x5 pass at 1080x1920 for the same look —
+# restores the edge contrast the enlargement spreads. Env overrides need no
+# code deploy: UPSCALE_SHARPEN=0 disables the sharpening, UPSCALE_SCALER=bicubic
+# restores the old resampler.
+UPSCALE_SHARPEN = float(os.getenv("UPSCALE_SHARPEN", "0.6"))
+UPSCALE_SHARPEN_MIN_FACTOR = 1.3
+UPSCALE_SCALER = os.getenv("UPSCALE_SCALER", "lanczos")
+
+
+def frame_fit_filter(mode, W, H, focus=None, pad_color="black", picture=None,
+                     src_size=None, grade=None):
     """The scale (+crop or +pad) that maps a SOURCE frame onto the output frame.
 
     Extracted from _normalize_video so that anything which has to land in
@@ -844,18 +953,54 @@ def frame_fit_filter(mode, W, H, focus=None, pad_color="black", picture=None):
     cut out of the wrong part of the picture.
 
     Byte-identical to what _normalize_video emitted before the extraction
-    (several tests compare whole filtergraphs against stored legacy strings).
+    (several tests compare whole filtergraphs against stored legacy strings)
+    whenever src_size is None — which is every caller except the renderer's
+    own main-footage blocks.
     'pad_blur' shares pad's geometry: the picture content lands in the same
     fitted rectangle, and the blurred backdrop behind it is the base picture's
     business, not a mask's.
+
+    src_size (perf round): the (w, h) of the incoming frames. With it, a cover
+    crop cuts its window out of the SOURCE first and scales only that window
+    (_cover_geometry reproduces the scale-then-crop framing to within one
+    output pixel) instead of enlarging the whole 1920x1080 frame to
+    3413x1920 and throwing 68% of it away: 0.83 s -> 0.43 s per 30 s of a
+    1080x1920 final. A window that is ENLARGED resamples with lanczos, and
+    past UPSCALE_SHARPEN_MIN_FACTOR gets a light luma-only unsharp first.
+    grade: a per-pixel chain placed where the fewest pixels flow (see
+    _normalize_video) — before the up-scale on the source window, or on the
+    scaled content before pad mode's bars (padded in pad_color).
     """
     if picture:
         x, y, pw, ph = picture_pixels(W, H, picture)
-        return (frame_fit_filter(mode, pw, ph, focus, pad_color) +
+        return (frame_fit_filter(mode, pw, ph, focus, pad_color,
+                                 src_size=src_size) +
                 f",pad={W}:{H}:{x}:{y}:color={pad_color}")
     if mode in ("pad", "pad_blur"):
-        return (f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
+        graded = f",format=yuv420p,{grade}" if grade else ""
+        return (f"scale={W}:{H}:force_original_aspect_ratio=decrease{graded},"
                 f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color={pad_color}")
+    post = f",format=yuv420p,{grade}" if grade else ""
+    if src_size and src_size[0] and src_size[1]:
+        sw, sh = int(src_size[0]), int(src_size[1])
+        xa, ya, wa, ha, twa, tha, xo, yo = _cover_geometry(sw, sh, W, H,
+                                                           focus)
+        up = max(twa / float(wa), tha / float(ha))
+        early = bool(grade) and wa * ha < W * H
+        pre = f",format=yuv420p,{grade}" if early else ""
+        flags = (f":flags={UPSCALE_SCALER}"
+                 if up > 1.0 + 1e-6 and UPSCALE_SCALER != "bicubic" else "")
+        sharpen = (f",unsharp=3:3:{UPSCALE_SHARPEN:.2f}:3:3:0"
+                   if UPSCALE_SHARPEN > 0 and up >= UPSCALE_SHARPEN_MIN_FACTOR
+                   else "")
+        # min() against the live frame keeps the chain valid even if a
+        # decoder ever delivered frames of another size than the probe said.
+        window = (f"crop='min(iw,{wa})':'min(ih,{ha})'"
+                  f":'min({xa},iw-ow)':'min({ya},ih-oh)'")
+        final = ("" if (twa, tha, xo, yo) == (W, H, 0, 0) else
+                 f",crop={W}:{H}:'min({xo},iw-ow)':'min({yo},ih-oh)'")
+        return (f"{window}{pre}{sharpen},scale={twa}:{tha}{flags}{final}"
+                f"{'' if early else post}")
     fx = focus[0] if focus else None
     fy = focus[1] if focus else None
     if (fx is not None and abs(float(fx) - 0.5) > 1e-6) or \
@@ -868,9 +1013,70 @@ def frame_fit_filter(mode, W, H, focus=None, pad_color="black", picture=None):
         ye = (f"y='clip(ih*{float(fy if fy is not None else 0.5):.4f}"
               f"-oh/2,0,ih-oh)'")
         return (f"scale={W}:{H}:force_original_aspect_ratio=increase,"
-                f"crop={W}:{H}:{xe}:{ye}")
+                f"crop={W}:{H}:{xe}:{ye}{post}")
     return (f"scale={W}:{H}:force_original_aspect_ratio=increase,"
-            f"crop={W}:{H}")
+            f"crop={W}:{H}{post}")
+
+
+def _cover_geometry(sw, sh, W, H, focus=None):
+    """Window-first equivalent of `scale=W:H:force_original_aspect_ratio=
+    increase,crop=W:H[:x:y]` on a sw x sh source.
+
+    Returns (xa, ya, wa, ha, tw, th, xo, yo): crop the even-aligned source
+    window (xa, ya, wa, ha), scale it to tw x th, crop WxH at (xo, yo). The
+    legacy chain scaled the whole frame by tw0/sw (tw0 = round(H*sw/sh)) and
+    cropped at an even offset; the window here spans that same source span
+    plus a small margin, is scaled by the same factor, and the margin start is
+    chosen among a few even positions so the final (even) offset lands where
+    the legacy one did. Simulated over 2,688 source/output/focus shapes the
+    mapping stays within one output pixel of the legacy chain (under half a
+    pixel for every 16:9 -> 9:16 shape); every crop value is even, so yuv420p
+    chroma stays aligned and nothing is rounded again.
+    """
+    def rnd(v):                 # av_rescale's round-half-away-from-zero
+        return int(math.floor(v + 0.5))
+
+    fx = focus[0] if focus else None
+    fy = focus[1] if focus else None
+    tw0, th0 = max(rnd(H * sw / sh), W), max(rnd(W * sh / sw), H)
+
+    def axis(src, t, size, f):
+        # the legacy offset: crop's own expression, lrint, clamp, even floor
+        v = ((t - size) / 2.0 if f is None or abs(float(f) - 0.5) <= 1e-6
+             else t * float(f) - size / 2.0)
+        o = int(round(min(max(v, 0.0), t - size))) & ~1
+        if t == size:                       # this axis is not cropped
+            return 0, src & ~1, t, 0
+        k = t / float(src)
+        x0, x1 = o / k, (o + size) / k
+        lo, hi = int(math.floor(x0)) & ~1, (int(math.ceil(x1)) + 1) & ~1
+        best = None
+        for a in range(8):
+            xa = lo - 2 * a
+            if xa < 0:
+                break
+            for b in range(8):
+                end = hi + 2 * b
+                if end > src:
+                    break
+                wa = end - xa
+                ta = rnd(wa * k)
+                xo = int(round((o - xa * k) * ta / (wa * k) / 2.0)) * 2
+                if xo < 0 or xo + size > ta:
+                    continue
+                # worst misplacement across the row, in output pixels
+                err = k * max(abs(xa + (xo + i + .5) * wa / ta - .5
+                                  - ((o + i + .5) / k - .5))
+                              for i in (0, size - 1))
+                if best is None or err < best[0] - 1e-9:
+                    best = (err, xa, wa, ta, xo)
+        if best is None:        # window touches both edges: legacy shape
+            return 0, src & ~1, rnd((src & ~1) * k), o
+        return best[1:]
+
+    xa, wa, tw, xo = axis(sw, tw0, W, fx)
+    ya, ha, th, yo = axis(sh, th0, H, fy)
+    return xa, ya, wa, ha, tw, th, xo, yo
 
 
 def picture_pixels(W, H, picture=None):
@@ -1190,6 +1396,29 @@ def _endcard_input_args(path, duration_s, fps):
     return ["-stream_loop", "-1", "-t", f"{duration_s:.3f}", "-i", path]
 
 
+# ffprobe colour-matrix name -> the swscale out_color_matrix that writes it.
+_SCALE_MATRIX = {"bt709": "bt709", "smpte170m": "smpte170m",
+                 "bt470bg": "bt470", "fcc": "fcc", "smpte240m": "smpte240m",
+                 "bt2020nc": "bt2020"}
+
+
+def _outro_matrix(src_color_space):
+    """The YUV matrix the end-card join is pinned to, or None to leave it free.
+
+    concat makes every segment share one colour space, and the card branch is
+    born RGB, so nothing anchored the join: ffmpeg settled on "unknown" and
+    converted the programme into it — the BT.601 matrix, under a tag players
+    read as BT.709 on HD. A final with the card came out up to ~3 luma levels
+    off the approval preview (which has no card and keeps the source's
+    matrix), worst where the grade had already left the programme in RGB or
+    in BT.709 YUV. Pinning both sides of the join to the SOURCE's own matrix
+    converts — and tags — the final like the preview. An untagged source has
+    nothing to match and keeps the old free negotiation, which already agrees
+    with its preview.
+    """
+    return _SCALE_MATRIX.get(str(src_color_space or "").strip().lower())
+
+
 def clean_source_key(edl_json, variant, src_sha=None):
     """Round 39 — the REPAINTED source this EDL renders from, or None.
 
@@ -1405,6 +1634,16 @@ def camera_current(meta, edl):
     if not moves:
         return True
     return ((meta or {}).get("cam_v") or 0) == config.CAMERA_VERSION
+
+
+def look_current(meta):
+    """May new pieces be spliced into this cached render (stitched preview)?
+
+    Only when it was drawn with today's picture look (config.
+    RENDER_LOOK_VERSION). An absent stamp predates the stamp and is a
+    different look. Serving or reusing a whole old render is unaffected.
+    """
+    return ((meta or {}).get("look_v") or 0) == config.RENDER_LOOK_VERSION
 
 
 def watermark_font_path():
@@ -1626,14 +1865,14 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                       src_w=None, src_h=None, src_pad=0.0,
                       sfx_inputs=None, outro_s=0.0, card_idx=None,
                       stem_inputs=None,
-                      src_sar=1.0, src_fps=None,
+                      src_sar=1.0, src_fps=None, src_color_space=None,
                       overlay_inputs=None, gfx_ass_path=None,
                       motion_inputs=None,
                       frame_focus=None, robot_idx=None, wm_ass_path=None,
                       wm_anchor_y=None,
                       plate_idx=None, plate_box=None, behind_inputs=None,
                       patch_inputs=None, cap_burn_offset=None,
-                      picture_card_inputs=None):
+                      picture_card_inputs=None, main_video_inputs=None):
     """Input layout: [0] main source video; anullsrc at silence_idx when
     needed (no main audio, image inserts, or silent clip inserts); then one
     input per music item, insert item and voiceover item in EDL order.
@@ -1641,6 +1880,12 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     insert_inputs: [(input_idx, item, has_audio)] aligned with the sorted
     EDL inserts (same order as tl.insert_positions()).
     vo_inputs: [(input_idx, item, vo_duration_s)].
+    main_video_inputs: [(input_idx, src_start, src_end)] — bounded extra
+    reads of the MAIN source, one per distant cluster of keep spans
+    (_keep_clusters). Each segment's picture is tapped from the input whose
+    window holds it, so the gaps between clusters are never decoded; audio
+    still comes from [0]. None (or any segment left uncovered) keeps the
+    single [0:v] split.
     src_pad: seconds of the source whose picture track ran out early (a phone
     screen recording stops writing frames while the screen is static). The last
     frame is held across them, matching what a player shows, what the proxy
@@ -1775,6 +2020,32 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                or bool(behind_inputs)
                or any(s.get("kind") == "shake" for s in stylize))
     mode = frame_mode or (edl.get("frame") or {}).get("mode") or "crop"
+
+    # The global grade (preset, then custom) is a per-pixel map. Run after
+    # concat it graded every pixel of the 1080x1920 canvas through the RGB
+    # round trip colorbalance/curves need — 9.9 s per 30 s of a final, against
+    # 1.1 s on the 608x1080 source window it was cropped from. When every
+    # block is normalized anyway, each block grades its own pixels where they
+    # are fewest (_normalize_video); the picture is the same because nothing
+    # between the blocks and the old position touches a pixel's value —
+    # EXCEPT junction transitions that draw constant colour (dips, flashes,
+    # whips over black) or noise, which the old order graded and the new
+    # would not. Those keep the post-concat grade; zoom_punch is pure
+    # geometry and allowed.
+    _grade_parts = []
+    if fx.get("grade") and fx["grade"] in GRADE_FILTERS:
+        _grade_parts.append(gradelut.fast_chain(GRADE_FILTERS[fx["grade"]]))
+    if grade_custom:
+        _gc = grade_custom_chain(grade_custom)
+        if _gc:
+            _grade_parts.append(gradelut.fast_chain(_gc))
+    block_grade = (",".join(_grade_parts)
+                   if _grade_parts and do_norm
+                   and (not transition or tstyle == "zoom_punch")
+                   and os.getenv("BLOCK_GRADE_DISABLE", "").strip() != "1"
+                   else None)
+    main_src_size = ((int(src_w), int(src_h))
+                     if src_w and src_h else None)
 
     # Censor regions are burned into each SOURCE segment BEFORE any
     # reframe/normalization: their fractions are of the SOURCE frame
@@ -1920,14 +2191,42 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                          f":enable='between(t,{pps:.3f},{ppe:.3f})'"
                          f"[vptc{pj}]")
             vsrc = f"vptc{pj}"
+    # Distant keep clusters read from their own bounded inputs (render_edl
+    # opens them only when nothing touches the [0:v] stream before the trims:
+    # no repaint patches, no picture-track pad). Each segment's video tap
+    # comes from the input that holds it; every frame it receives carries
+    # the same source timestamp (-copyts) the single split delivered.
+    owners = None
+    if main_video_inputs and n > 1 and not patch_inputs and src_pad <= 0:
+        owners = []
+        for seg_a, seg_b in keep:
+            hit = [ix for ix, a, b in main_video_inputs
+                   if a - 0.01 <= seg_a and seg_b <= b + 0.01]
+            if not hit:
+                owners = None
+                break
+            owners.append(hit[0])
+
+    def _video_taps():
+        for ix in dict.fromkeys(owners):
+            segs = [i for i, o in enumerate(owners) if o == ix]
+            if len(segs) == 1:
+                parts.append(f"[{ix}:v]null[vin{segs[0]}]")
+            else:
+                parts.append(f"[{ix}:v]split={len(segs)}"
+                             + "".join(f"[vin{i}]" for i in segs))
+
     if speed and n >= 1:
         # Speed path: every segment needs its own video AND audio tap.
         if n == 1:
             parts.append(f"[{vsrc}]null[vin0]")
             parts.append("[asrc]anull[ain0]")
         else:
-            parts.append(f"[{vsrc}]split=" + str(n)
-                         + "".join(f"[vin{i}]" for i in range(n)))
+            if owners:
+                _video_taps()
+            else:
+                parts.append(f"[{vsrc}]split=" + str(n)
+                             + "".join(f"[vin{i}]" for i in range(n)))
             parts.append("[asrc]asplit=" + str(n)
                          + "".join(f"[ain{i}]" for i in range(n)))
         for i, (s, e) in enumerate(keep):
@@ -1938,8 +2237,11 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                      f"asetpts=PTS-STARTPTS"
                      + (f",{AUDIO_NORM}" if do_norm else "") + "[a_seg0]")
     elif n > 1:
-        parts.append(f"[{vsrc}]split=" + str(n)
-                     + "".join(f"[vin{i}]" for i in range(n)))
+        if owners:
+            _video_taps()
+        else:
+            parts.append(f"[{vsrc}]split=" + str(n)
+                         + "".join(f"[vin{i}]" for i in range(n)))
         parts.append("[asrc]asplit=" + str(n)
                      + "".join(f"[ain{i}]" for i in range(n)))
         for i, (s, e) in enumerate(keep):
@@ -1987,7 +2289,8 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             _normalize_video(parts, f"segv{i}", f"v_seg{i}", W, H, fps,
                              seg_mode, f"s{i}", focus=seg_focus,
                              seg_dur=seg_out_len[i],
-                             picture=(edl.get("frame") or {}).get("picture"))
+                             picture=(edl.get("frame") or {}).get("picture"),
+                             grade=block_grade, src_size=main_src_size)
 
     # insert blocks: trim to their window (source_start_s picks where in
     # the clip the window starts), normalize like everything else
@@ -2052,7 +2355,8 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             insert_motion.append((j, motion, dur))
         _normalize_video(parts, ins_in, f"v_ins{j}", W, H, fps,
                          imode, f"i{j}", seg_dur=dur,
-                         picture=(edl.get("frame") or {}).get("picture"))
+                         picture=(edl.get("frame") or {}).get("picture"),
+                         grade=block_grade)
         if ins_audio:
             if abs(rate - 1.0) > 1e-6:
                 parts.append(
@@ -2308,7 +2612,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     # entering it are exact CFR WxH so on/fps is program time. Overlays sit
     # ABOVE zooms deliberately (a corner PIP must not scale when the footage
     # punches) and BELOW both text layers (words always win).
-    grade = fx.get("grade")
+    grade = None if block_grade else fx.get("grade")
     if grade and grade in GRADE_FILTERS:
         # gradelut turns the per-pixel grade math into baked table filters —
         # same values, several times cheaper — or returns the chain untouched
@@ -2316,7 +2620,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         parts.append(f"[{vlabel}]{gradelut.fast_chain(GRADE_FILTERS[grade])}"
                      "[vgrade]")
         vlabel = "vgrade"
-    if grade_custom:
+    if grade_custom and not block_grade:
         chain = grade_custom_chain(grade_custom)
         if chain:
             parts.append(f"[{vlabel}]{gradelut.fast_chain(chain)}[vgcust]")
@@ -2348,8 +2652,15 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             parts.append(f"[{vlabel}]rgbashift=rh={r}:bh=-{r}{en}"
                          f"[{out_lab}]")
         elif kind == "dream_blur":
-            parts.append(f"[{vlabel}]gblur=sigma={2 + 8 * i_:.1f}{en}"
-                         f"[{out_lab}]")
+            if en:
+                # gblur's own enable keeps the cost inside the window; a
+                # reduced-resolution chain (scale has no enable) would pay
+                # its two resamples on every frame of the programme.
+                parts.append(f"[{vlabel}]gblur=sigma={2 + 8 * i_:.1f}{en}"
+                             f"[{out_lab}]")
+            else:
+                down, blur, up = _reduced_gblur(W, H, 2 + 8 * i_)
+                parts.append(f"[{vlabel}]{down}{blur}{up}[{out_lab}]")
         elif kind == "vhs":
             parts.append(f"[{vlabel}]rgbashift=rh=3:bh=-3{en},"
                          f"noise=alls=12:allf=t{en},"
@@ -2361,8 +2672,11 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             # split -> blur -> screen-blend. blend's enable passes the TOP
             # (first) input through when off, which is the ungraded main —
             # exactly the off state a windowed glow needs.
+            # The bloom is computed at reduced resolution (_reduced_gblur):
+            # a sigma-20 blur has nothing left at full resolution to keep.
+            down, blur, up = _reduced_gblur(W, H, 10 + 25 * i_)
             parts.append(f"[{vlabel}]split[glA{si}][glB{si}]")
-            parts.append(f"[glB{si}]gblur=sigma={10 + 25 * i_:.1f}[glG{si}]")
+            parts.append(f"[glB{si}]{down}{blur}{up}[glG{si}]")
             parts.append(f"[glA{si}][glG{si}]blend=all_mode=screen"
                          f":all_opacity={0.25 + 0.4 * i_:.2f}{en}"
                          f"[{out_lab}]")
@@ -2373,12 +2687,16 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             # diffuse it, then screen it back over the untouched base.
             threshold = int(205 - 45 * i_)
             parts.append(f"[{vlabel}]split[halA{si}][halB{si}]")
+            # Threshold at full resolution (a highlight must not be averaged
+            # away before it is selected), then diffuse and tint the bloom at
+            # reduced resolution — colorbalance's RGB round trip included.
+            down, blur, up = _reduced_gblur(W, H, 8 + 24 * i_)
             parts.append(
                 f"[halB{si}]lutyuv=y='if(gte(val,{threshold}),val,16)'"
-                f":u=128:v=128,gblur=sigma={8 + 24 * i_:.1f},"
+                f":u=128:v=128,{down}{blur},"
                 f"colorbalance=rs={0.18 + 0.24 * i_:.2f}:"
                 f"gs={0.01 + 0.05 * i_:.2f}:bs=-{0.08 + 0.12 * i_:.2f}"
-                f"[halG{si}]")
+                f"{up}[halG{si}]")
             parts.append(
                 f"[halA{si}][halG{si}]blend=all_mode=screen:"
                 f"all_opacity={0.16 + 0.28 * i_:.2f}{en}[{out_lab}]")
@@ -2982,7 +3300,13 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         sar = 1.0 if do_norm else (float(src_sar) or 1.0)
         oW = W if abs(sar - 1.0) < 0.001 else _even(W * sar)
         ofps = fps if (do_norm or not src_fps) else float(src_fps)
-        parts.append(f"[{vlabel}]scale={oW}:{H},setsar=1,"
+        # Both sides of the join are pinned to the source's matrix
+        # (_outro_matrix): an explicit scale converts with the right
+        # coefficients, where a relabel (setparams) would only retag them.
+        pin = _outro_matrix(src_color_space)
+        csp = f":out_color_matrix={pin}:out_range=tv" if pin else ""
+        card_csp = f"scale=out_color_matrix={pin}:out_range=tv," if pin else ""
+        parts.append(f"[{vlabel}]scale={oW}:{H}{csp},setsar=1,"
                      f"format=yuv420p[vprog]")
         # v7: the motion card is a full 9:16 sheet that carries its own
         # margins, so it fills the frame rather than being inset again.
@@ -3000,7 +3324,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         fo = min(config.OUTRO_FADE_OUT_S, outro_s / 3)
         parts.append(f"[ocomp]fade=t=in:st=0:d={fi:.2f},"
                      f"fade=t=out:st={outro_s - fo:.2f}:d={fo:.2f},"
-                     f"format=yuv420p,setsar=1[ovid]")
+                     f"{card_csp}format=yuv420p,setsar=1[ovid]")
         v_final = "vprog"
     else:
         parts.append(f"[{vlabel}]format=yuv420p[vout]")
@@ -3732,6 +4056,49 @@ def _render_asset_source_impl(key, tag, idx, workdir, asset_locals=None):
     return _fetch_into(workdir, key, f"{tag}_{idx}")
 
 
+# Peak memory one extra cluster read holds per source megapixel (decoder
+# reference frames + queued frames, 2 decoder threads). Measured with 4-thread
+# finals on ffmpeg 8.0: 1080p +65 MB, 4K +216..237 MB per extra read.
+_CLUSTER_MB_PER_MPIX = 30.0
+
+
+def _cluster_input_cap(width, height):
+    """How many bounded reads of the source a render may open: every read
+    beyond the first costs memory in proportion to the frame size, so the
+    count is held to KEEP_CLUSTER_MEM_MB of extra peak memory as well as to
+    KEEP_CLUSTER_MAX_INPUTS (1080p: 8 reads, 4K: 3, 8K: none)."""
+    mpix = max(0.1, float(width or 1920) * float(height or 1080) / 1e6)
+    afford = 1 + int(max(0.0, config.KEEP_CLUSTER_MEM_MB)
+                     // (_CLUSTER_MB_PER_MPIX * mpix))
+    return max(1, min(int(config.KEEP_CLUSTER_MAX_INPUTS), afford))
+
+
+def _keep_clusters(keep, gap_s, max_clusters):
+    """Group keep spans (source seconds) into clusters separated by at least
+    `gap_s` of unused source, as sorted (start, end) windows. Spans may be in
+    any program order; a cluster is a source window, not a program range.
+    Past `max_clusters` the closest clusters merge (each cluster is one more
+    demuxer + decoder). gap_s <= 0 disables clustering (one window)."""
+    spans = sorted((float(a), float(b)) for a, b in keep or []
+                   if float(b) - float(a) > 0.01)
+    if not spans:
+        return []
+    if gap_s <= 0:
+        return [(spans[0][0], max(b for _a, b in spans))]
+    clusters = [list(spans[0])]
+    for a, b in spans[1:]:
+        if a - clusters[-1][1] < gap_s:
+            clusters[-1][1] = max(clusters[-1][1], b)
+        else:
+            clusters.append([a, b])
+    while len(clusters) > max(1, int(max_clusters)):
+        k = min(range(len(clusters) - 1),
+                key=lambda i: clusters[i + 1][0] - clusters[i][1])
+        clusters[k][1] = max(clusters[k][1], clusters[k + 1][1])
+        del clusters[k + 1]
+    return [(a, b) for a, b in clusters]
+
+
 def _repair_legacy_insert_boundaries(edl_dict):
     """Snap only legacy off-boundary inserts so an old broken EDL can render.
 
@@ -4048,6 +4415,34 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                                      media.PROXY_SHORT_FRAC * src_dur):
         src_pad = src_dur - vdur
 
+    # Distant keep spans (perf round). The main input seeks once, to the first
+    # keep, and the [0:v] split then decodes EVERY frame up to the last keep:
+    # 12 s of output from two moments 20 minutes apart took 13.4 s instead of
+    # 1.3 s. Each distant cluster of spans gets its own bounded read of the
+    # same file (-ss/-t, 1 s preroll; -copyts is already on, so frames keep
+    # their source timestamps and every trim is unchanged). Audio keeps coming
+    # from [0] — volume automation, stems and loudness see the same track.
+    # Only when nothing rewrites [0:v] before the trims (repaint patches, the
+    # picture-track pad), and never for an audio-only rebuild.
+    main_video_inputs = None
+    if seek_main_source and not patch_inputs and src_pad <= 0 \
+            and not audio_only:
+        clusters = _keep_clusters(
+            edl["keep"], config.KEEP_CLUSTER_GAP_S,
+            _cluster_input_cap(info.get("width"), info.get("height")))
+        if len(clusters) > 1:
+            main_video_inputs = []
+            threads = max(0, int(config.KEEP_CLUSTER_THREADS))
+            for a, b in clusters:
+                seek = max(0.0, a - 1.0)
+                if threads:
+                    extra_inputs += ["-threads:v", str(threads)]
+                extra_inputs += ["-ss", f"{seek:.3f}",
+                                 "-t", f"{b - seek + 1.0:.3f}",
+                                 "-i", src_path]
+                main_video_inputs.append((next_idx, a, b))
+                next_idx += 1
+
     # The end card is its own bounded ffmpeg input — an MP4 in the healthy
     # build, or its PNG poster fallback. No filter conjures a bundled asset out
     # of nothing, and the explicit input -t prevents either branch from ever
@@ -4222,6 +4617,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                               stem_inputs=stem_inputs,
                               src_sar=info.get("sar") or 1.0,
                               src_fps=float(info["fps"]) or fps,
+                              src_color_space=info.get("color_space"),
                               overlay_inputs=overlay_inputs,
                               gfx_ass_path=gfx_path,
                               frame_focus=frame_focus, robot_idx=robot_idx,
@@ -4232,7 +4628,8 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                               patch_inputs=patch_inputs,
                               cap_burn_offset=cap_burn_offset,
                               picture_card_inputs=picture_card_inputs,
-                              motion_inputs=motion_inputs)
+                              motion_inputs=motion_inputs,
+                              main_video_inputs=main_video_inputs)
 
     if audio_only:
         # The same graph the full render would run, minus every chain the
@@ -4260,8 +4657,8 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                   "-crf", "27", "-g", "48", "-keyint_min", "24",
                   "-c:a", "aac", "-b:a", "128k"]
     else:
-        # veryfast/CRF 20 is visually transparent for this content and cuts
-        # export wall time hard vs the old medium/CRF 18 (see README timings).
+        # veryfast keeps export wall time low (the graph, not x264, is the
+        # cost); config.FINAL_CRF sets the delivered quality (see config).
         encode = ["-c:v", "libx264", "-preset", config.FINAL_PRESET,
                   "-crf", str(config.FINAL_CRF), "-g", "120",
                   "-c:a", "aac", "-b:a", "192k"]
@@ -5794,7 +6191,8 @@ def _run_render_job(worker_db, job):
                             asset_locals=asset_locals)
                         if out_dur is not None:
                             reused_visual_meta = pm
-                        if out_dur is None and not want_wm:
+                        if out_dur is None and not want_wm \
+                                and look_current(pm):
                             out_dur = _stitched_preview(
                                 job_id, edl_row, prev_row, prev_asset, index,
                                 src_local, workdir, patch_locals, out_local,
@@ -6121,6 +6519,10 @@ def _run_render_job(worker_db, job):
                   "trans_v": config.TRANSITION_VERSION,
                   "cam_v": config.CAMERA_VERSION,
                   "tail_v": config.MUSIC_TAIL_VERSION,
+                  # A reused picture keeps the look it was drawn with.
+                  "look_v": (reused_visual_meta.get("look_v") or 0
+                             if reused_visual_meta
+                             else config.RENDER_LOOK_VERSION),
                   "audio_peak_v": 1,
                   "wm_v": (0 if proof_only else
                            watermark_version(variant, is_paid, wm_settings)),

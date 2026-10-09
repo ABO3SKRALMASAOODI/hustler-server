@@ -127,3 +127,35 @@ def test_evidence_layout_and_missing_keys_refuse_reuse():
     pages = [{'key':'old.jpg', 'times':[1.,2.]}]
     assert not renderer._matching_evidence_pages(pages, [[1.],[2.]], 'times')
     assert not renderer._matching_evidence_pages([{'times':[1.,2.]}], [[1.,2.]], 'times')
+
+
+def test_pieces_are_only_spliced_into_a_render_of_the_current_look(
+        render_sequence, monkeypatch):
+    """A stitched preview stream-copies the old render around new pieces; a
+    render drawn by an older picture pipeline would show a seam at every
+    splice, so it is re-rendered in full once instead."""
+    run, rows, assets, uploads, deleted, builds, audio, cancel = render_sequence
+    stitches = []
+    monkeypatch.setattr(renderer, '_stitched_preview',
+                        lambda *a, **k: stitches.append(a[0]) or None)
+    run(1)
+    look = renderer.config.RENDER_LOOK_VERSION
+    assert assets[-1]['meta']['look_v'] == look
+    rows[2]['json']['frame'] = {'ratio': '1:1'}
+    run(2)
+    assert stitches == [2]
+    assets[-1]['meta'].pop('look_v')             # rendered before the stamp
+    rows[3] = dict(version=3, json=copy.deepcopy(rows[2]['json']))
+    rows[3]['json']['frame'] = {'ratio': '4:5'}
+    run(3)
+    assert stitches == [2], 'no splice into an older look'
+    assert assets[-1]['meta']['look_v'] == look
+
+
+def test_a_reused_picture_keeps_the_look_it_was_drawn_with(render_sequence):
+    run, rows, assets, uploads, deleted, builds, audio, cancel = render_sequence
+    run(1)
+    assets[-1]['meta']['look_v'] = 0
+    run(2)                                       # sound-only: picture reused
+    assert assets[-1]['meta']['look_v'] == 0
+    assert not renderer.look_current(assets[-1]['meta'])

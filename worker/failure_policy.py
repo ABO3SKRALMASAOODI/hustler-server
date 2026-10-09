@@ -28,6 +28,11 @@ class FailureDecision:
     def payload(self, error):
         out = asdict(self)
         out["error"] = error_text.excerpt(error, 2000)
+        # The command's own last words, kept separately from the message so
+        # a caller that truncates `error` for display still has them.
+        tail = getattr(error, "stderr_tail", "") or ""
+        if tail:
+            out["stderr_tail"] = tail[-media.STDERR_TAIL_CHARS:]
         return out
 
 
@@ -137,6 +142,19 @@ def classify(error, job_type=None):
         return FailureDecision("render_budget_exceeded", False, 0,
                                job_type in ("preview", "preview_check"))
 
+    # The kernel OOM killer ended the encoder (SIGKILL we did not send, plus a
+    # kernel OOM-kill counter that moved — media.MediaOOMError). All 8 failed
+    # finals in one 72 h window were this, each replayed once with the
+    # identical graph on the identical 12 GiB box as a generic media error.
+    # The same graph on the same executor shape cannot fit the second time —
+    # a larger shape can (remote.py switches provider / takes the heavy lane
+    # for this kind). Like render_budget_exceeded, an infrastructure limit is
+    # no reason to rewrite a valid final; a preview may be made lighter.
+    if isinstance(error, media.MediaOOMError) or (
+            "out-of-memory killer" in text and "exit -9" in text):
+        return FailureDecision("executor_memory", False, 0,
+                               job_type in ("preview", "preview_check"))
+
     if any(x in text for x in _INVALID_EDL):
         return FailureDecision("invalid_edl", False, 0, media_edit)
     if any(x in text for x in _DETERMINISTIC_FFMPEG):
@@ -176,6 +194,11 @@ def attach(error, decision, payload=None):
         (payload or {}).get("max_attempts", decision.max_attempts))
     error.agent_repairable = bool(
         (payload or {}).get("agent_repairable", decision.agent_repairable))
+    # The executor's ffmpeg stderr tail rides in the payload; without this
+    # copy every remote failure (i.e. every production render) lost it here.
+    tail = (payload or {}).get("stderr_tail")
+    if tail:
+        error.stderr_tail = str(tail)[-media.STDERR_TAIL_CHARS:]
     return error
 
 

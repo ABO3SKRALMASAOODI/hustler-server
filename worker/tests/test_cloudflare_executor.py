@@ -1145,3 +1145,48 @@ def test_ambiguous_read_only_call_never_changes_identity(monkeypatch):
         remote._run_cloudflare_with_capacity_wait(job)
     assert len(ids) == 1
     assert '_cloudflare_admission_slot' not in job
+
+
+def test_terminal_oom_keeps_its_tail_and_may_switch_provider(monkeypatch):
+    """An OOM-killed encode cannot fit the same Cloudflare shape again, but a
+    larger one can: like executor_capacity it may move to Modal."""
+    monkeypatch.setattr(remote, "check_executor_version",
+                        lambda quiet=True: "")
+    monkeypatch.setattr(dbx, "Db", lambda: pytest.fail("no queue lease"))
+    envelope = {
+        "error": "ffmpeg was killed by the out-of-memory killer (exit -9)",
+        "retryable": False,
+        "failure": {"kind": "executor_memory", "retryable": False,
+                    "max_attempts": 0, "agent_repairable": False,
+                    "stderr_tail": "[out#0] frame=  812 fps= 31"},
+    }
+    with pytest.raises(remote.CloudflareTerminalFailure) as caught:
+        remote._interpret_cloudflare_terminal(
+            envelope, dict(JOB, id=None, total_claims=None))
+    assert caught.value.failure_kind == "executor_memory"
+    assert caught.value.stderr_tail == "[out#0] frame=  812 fps= 31"
+
+    _enable(monkeypatch)
+    monkeypatch.setattr(config, "CLOUDFLARE_MODAL_FALLBACK", True)
+    monkeypatch.setattr(config, "MODAL_EXECUTOR_ENABLED", True)
+    monkeypatch.setattr(config, "MODAL_EXECUTOR_TYPES", frozenset({"frames"}))
+    monkeypatch.setattr(
+        config, "CLOUDFLARE_EXECUTOR_TYPES", frozenset({"frames"}))
+    monkeypatch.setattr(
+        config, "CLOUDFLARE_SYNCHRONOUS_TYPES", frozenset({"frames"}))
+    failure = remote.CloudflareTerminalFailure("killed by OOM")
+    failure.failure_kind = "executor_memory"
+    failure.retryable = False
+    monkeypatch.setattr(
+        remote, "_run_cloudflare",
+        lambda _job: (_ for _ in ()).throw(failure))
+    modal = []
+    monkeypatch.setattr(
+        remote, "_run_modal",
+        lambda job, function_override=None: modal.append(job["type"])
+        or {"keys": []})
+    job = {"id": None, "type": "frames", "project_id": 7,
+           "user_id": 3, "attempts": 0, "total_claims": None,
+           "payload": {"storage_key": "clips/7/a.mp4", "times": [1.0]}}
+    assert remote._run_remote(job) == {"keys": []}
+    assert modal == ["frames"]

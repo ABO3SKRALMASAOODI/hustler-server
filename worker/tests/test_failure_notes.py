@@ -115,3 +115,17 @@ def test_reaper_scan_is_recent_bounded_and_suppresses_stale_agent_notes():
     assert "notified.meta->>'job' = j.id::text" in sql
     assert "newer_agent.type = 'agent_turn'" in sql
     assert params == (500,)
+
+
+def test_oom_killed_final_is_a_service_side_failure_not_a_bad_timeline():
+    import media
+    fake = _FakeDb()
+    err = media.MediaOOMError(
+        "ffmpeg was killed by the out-of-memory killer (exit -9; 1 kernel "
+        "OOM kill(s) during the encode)")
+    worker_main._notify_failure(
+        fake, {"id": 12, "type": "final", "project_id": 3, "payload": {}},
+        err)
+    note = fake.messages[0][2]
+    assert "service-side fix" in note
+    assert "timeline needs to be repaired" not in note
