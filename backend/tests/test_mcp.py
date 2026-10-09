@@ -1978,3 +1978,90 @@ def test_error_diagnostics_do_not_retain_customer_contents():
     assert not any(word in str(detail) for word in ("transcript", "secret@", "https://"))
     internal = mcpmod._public_error_detail("upload_finish", mcpmod._text("internal error. Reference abcdef0123456789.", True))
     assert internal["reference"] == "abcdef0123456789"
+
+
+# ── analysis readiness and the synchronous wait (reliability audit) ──
+
+def _analysis(state="running", progress=50, active=True):
+    return {"id": 44, "state": state, "progress": progress, "active": active}
+
+
+def test_editor_call_waits_for_running_analysis_then_runs(client, monkeypatch):
+    answers = [(False, _analysis()), (False, _analysis(progress=90)),
+               (True, None), (True, None)]
+    monkeypatch.setattr(mcpmod, "_index_ready",
+                        lambda cur, pid: answers.pop(0))
+    monkeypatch.setattr(mcpmod, "INDEX_POLL_S", 0.01)
+    waits = []
+    real_wait = mcpmod._wait
+    monkeypatch.setattr(mcpmod, "_wait", lambda job_id, uid, seconds=None:
+                        waits.append(seconds) or real_wait(job_id, uid, 0))
+    result = rpc(client, "tools/call", STATIC_TOKEN, {
+        "name": "get_transcript", "arguments": {"project_id": 3},
+    }).get_json()["result"]
+    assert result.get("isError") is not True
+    assert "12 sentences." in str(result)
+    assert len(DB["enqueued"]) == 1
+    # The analysis wait comes out of the same synchronous budget.
+    assert waits and waits[0] is not None and waits[0] <= mcpmod.SYNC_WAIT_S
+
+
+def test_analysis_past_the_budget_reports_progress_and_retry(client,
+                                                             monkeypatch):
+    monkeypatch.setattr(mcpmod, "_index_ready",
+                        lambda cur, pid: (False, _analysis(progress=30)))
+    monkeypatch.setattr(mcpmod, "INDEX_WAIT_S", 0.05)
+    monkeypatch.setattr(mcpmod, "INDEX_POLL_S", 0.01)
+    result = rpc(client, "tools/call", STATIC_TOKEN, {
+        "name": "get_transcript", "arguments": {"project_id": 3},
+    }).get_json()["result"]
+    text = result["content"][0]["text"]
+    assert result["isError"] is True
+    assert "No editing job was started" in text
+    assert "Analysis job 44 is 30% done" in text
+    assert "wait_for_job(job_id=44)" in text
+    assert DB["enqueued"] == []
+    raw = mcpmod._run_tool_job({"user_id": 60}, "get_transcript", {},
+                               raw=True, project_id=3)
+    assert raw["retryable"] is True and raw["index_progress"] == 30
+    assert raw["tool_outcome"]["status"] == "prerequisite"
+    assert raw["tool_outcome"]["prerequisite_tool"] == "wait_for_job"
+
+
+def test_control_calls_and_failed_analysis_answer_immediately(monkeypatch):
+    def no_sleep(_s):
+        raise AssertionError("must not wait")
+
+    monkeypatch.setattr(mcpmod.time, "sleep", no_sleep)
+    monkeypatch.setattr(mcpmod, "_index_ready",
+                        lambda cur, pid: (False, _analysis()))
+    state = mcpmod._run_tool_job({"user_id": 60}, "__state__", {},
+                                 raw=True, project_id=3)
+    assert state["code"] == "index_not_ready" and state["retryable"] is True
+    monkeypatch.setattr(mcpmod, "_index_ready", lambda cur, pid: (
+        False, _analysis(state="failed", active=False)))
+    failed = mcpmod._run_tool_job({"user_id": 60}, "get_transcript", {},
+                                  raw=True, project_id=3)
+    assert failed["retryable"] is False
+    assert "index_status" in failed["text"]
+    assert DB["enqueued"] == []
+
+
+def test_sync_wait_covers_a_typical_render_and_backs_off(monkeypatch):
+    if not os.getenv("MCP_SYNC_WAIT_S"):
+        assert mcpmod.SYNC_WAIT_S >= 100
+    clock = {"t": 1000.0}
+    sleeps = []
+    monkeypatch.setattr(mcpmod.time, "time", lambda: clock["t"])
+
+    def sleep(s):
+        sleeps.append(round(s, 2))
+        clock["t"] += s
+
+    monkeypatch.setattr(mcpmod.time, "sleep", sleep)
+    monkeypatch.setattr(mcpmod, "_job_row", lambda job_id, uid: {
+        "id": job_id, "state": "running" if clock["t"] < 1030 else "done"})
+    row = mcpmod._wait(5, 60, seconds=110)
+    assert row["state"] == "done"
+    assert sleeps[0] == mcpmod.POLL_S and max(sleeps) == mcpmod.POLL_MAX_S
+    assert len(sleeps) < 60          # ~150 at a flat 0.2 s for 30 s

@@ -113,13 +113,132 @@ class MotionRenderError(RuntimeError):
     """A motion item could not be rendered; the message is user-relayable."""
 
 
-def available():
-    """True when Playwright and its Chromium are importable/installed."""
+def package_installed():
+    """The Playwright package imports. Every worker image installs it (it is
+    in requirements.txt), including lanes that ship no browser, so this
+    answers "can a motion item be authored here", not "can it render here"."""
     try:
         import playwright  # noqa: F401
     except Exception:
         return False
     return True
+
+
+_AVAILABILITY = {"ok": None, "reason": ""}
+_AVAILABILITY_LOCK = threading.Lock()
+_BROWSER_PROBE_TIMEOUT_S = 30.0
+
+
+def _chromium_executable_path():
+    """Ask Playwright's driver where it would launch Chromium from.
+
+    The driver is the authority (it resolves PLAYWRIGHT_BROWSERS_PATH and the
+    pinned browser revision). It runs in a helper thread because the sync API
+    refuses to start inside a running asyncio loop."""
+    box = {}
+
+    def target():
+        try:
+            from playwright.sync_api import sync_playwright
+            with sync_playwright() as p:
+                box["path"] = p.chromium.executable_path
+        except BaseException as e:  # noqa: BLE001
+            box["error"] = e
+
+    th = threading.Thread(target=target, daemon=True,
+                          name="motion-browser-probe")
+    th.start()
+    th.join(_BROWSER_PROBE_TIMEOUT_S)
+    if th.is_alive():
+        raise TimeoutError("Playwright driver did not answer")
+    if "error" in box:
+        raise box["error"]
+    return box.get("path") or ""
+
+
+def _is_executable(path):
+    return bool(path) and os.path.isfile(path) and os.access(path, os.X_OK)
+
+
+def _browser_installed(executable_path):
+    """Full Chromium, or the headless shell Playwright >=1.49 launches for
+    headless mode from the same browsers directory."""
+    if _is_executable(executable_path):
+        return True
+    marker = os.sep + "chromium-"
+    if marker not in executable_path:
+        return False
+    root = executable_path.split(marker, 1)[0]
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return False
+    for name in names:
+        if not name.startswith("chromium_headless_shell-"):
+            continue
+        for sub in ("chrome-linux", "chrome-mac", "chrome-win"):
+            for exe in ("headless_shell", "headless_shell.exe"):
+                if _is_executable(os.path.join(root, name, sub, exe)):
+                    return True
+    return False
+
+
+def available():
+    """True when THIS process can render: Playwright imports AND its Chromium
+    executable is installed. Checked once per process.
+
+    Importing playwright alone was the old test, and every image passes it —
+    including Cloudflare lanes built without a browser
+    (PLAYWRIGHT_BROWSERS_PATH=/tmp/no-local-browser, FULL_COMPUTE=0). Those
+    lanes then failed late inside the launch with a multi-line driver error.
+    Now they report unavailability up front; ``unavailable_reason()`` says
+    why."""
+    cached = _AVAILABILITY["ok"]
+    if cached is not None:
+        return cached
+    with _AVAILABILITY_LOCK:
+        if _AVAILABILITY["ok"] is not None:
+            return _AVAILABILITY["ok"]
+        if not package_installed():
+            _AVAILABILITY.update(ok=False, reason="the Playwright package is "
+                                 "not installed on this render lane")
+            return False
+        try:
+            path = _chromium_executable_path()
+        except TimeoutError as e:
+            # Unknown is not "no": report unavailable now but ask again on
+            # the next call instead of caching a driver hiccup forever.
+            _AVAILABILITY["reason"] = f"browser probe failed ({e})"
+            return False
+        except Exception as e:  # noqa: BLE001
+            _AVAILABILITY.update(
+                ok=False, reason="the Playwright driver could not start "
+                f"({str(e).splitlines()[0][:160] if str(e) else type(e).__name__})")
+            return False
+        if _browser_installed(path):
+            _AVAILABILITY.update(ok=True, reason="")
+        else:
+            _AVAILABILITY.update(
+                ok=False, reason="headless Chromium is not installed on this "
+                "render lane")
+        return _AVAILABILITY["ok"]
+
+
+def unavailable_reason():
+    """Why available() is False ('' when it is True). Never probes twice: a
+    probe that timed out leaves its reason without caching the answer."""
+    if _AVAILABILITY["ok"] is None and not _AVAILABILITY["reason"]:
+        available()
+    if _AVAILABILITY["ok"] is True:
+        return ""
+    return (_AVAILABILITY["reason"]
+            or "the motion graphics renderer is not available here")
+
+
+def _reset_availability_cache():
+    """Tests and long-lived processes after a browser install."""
+    with _AVAILABILITY_LOCK:
+        _AVAILABILITY.update(ok=None, reason="")
 
 
 def font_faces():
@@ -529,7 +648,8 @@ def render_jobs(jobs, out_dir, pages=None, budget_s=900.0):
     if not jobs:
         return []
     if not available():
-        raise MotionRenderError("motion graphics are not installed on this deployment")
+        raise MotionRenderError("motion graphics renderer unavailable: "
+                                + unavailable_reason())
     os.makedirs(out_dir, exist_ok=True)
     pages = pages or DEFAULT_PAGES
     coro = _render_all(list(jobs), out_dir, pages, budget_s)
@@ -614,7 +734,8 @@ def probe(jobs, times_list, budget_s=60.0):
     (bboxes as frame fractions). Raises MotionRenderError when the browser
     itself cannot run."""
     if not available():
-        raise MotionRenderError("motion graphics are not installed on this deployment")
+        raise MotionRenderError("motion graphics renderer unavailable: "
+                                + unavailable_reason())
     coro = _probe_all(list(jobs), list(times_list), budget_s)
     try:
         asyncio.get_running_loop()

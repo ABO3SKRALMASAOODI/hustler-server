@@ -14,11 +14,35 @@ composition renders when it was added.
 """
 
 import os
+from contextvars import ContextVar
 
 import motion_engine
 import motion_templates
 
 LAST_WARNINGS = []
+# Per-render collector (renderer._run_render_job installs one). LAST_WARNINGS
+# is process-global and cleared by whichever render starts next, so a result
+# built from it could report another job's skips.
+_WARNING_SINK = ContextVar("motion_warning_sink", default=None)
+
+
+def collect_warnings(sink):
+    """Also record this context's skip reasons into ``sink``; returns the
+    token for stop_collecting."""
+    return _WARNING_SINK.set(sink)
+
+
+def stop_collecting(token):
+    _WARNING_SINK.reset(token)
+
+
+def warn(msg):
+    """Log one degraded motion item and record it for the render result."""
+    print(f"[render] {msg}", flush=True)
+    LAST_WARNINGS.append(msg)
+    sink = _WARNING_SINK.get()
+    if sink is not None:
+        sink.append(msg)
 
 
 def program_items(edl, out_duration):
@@ -49,9 +73,7 @@ def prepare_inputs(edl, workdir, W, H, fps, out_duration, args, next_idx,
             jobs.append(motion_templates.build_job(item, W, H, fps, asset_locals))
             kept.append(item)
         except Exception as e:  # noqa: BLE001 — degrade one item, keep the render
-            msg = f"motion '{item.get('id')}' skipped: {str(e)[:200]}"
-            print(f"[render] {msg}", flush=True)
-            LAST_WARNINGS.append(msg)
+            warn(f"motion '{item.get('id')}' skipped: {str(e)[:200]}")
     if not jobs:
         return [], next_idx
     out_dir = os.path.join(workdir, "motion")
@@ -64,9 +86,7 @@ def prepare_inputs(edl, workdir, W, H, fps, out_duration, args, next_idx,
             try:
                 clips.append(motion_engine.render_jobs([job], out_dir)[0])
             except motion_engine.MotionRenderError as e1:
-                msg = f"{job.label} skipped: {str(e1)[:200]}"
-                print(f"[render] {msg}", flush=True)
-                LAST_WARNINGS.append(msg)
+                warn(f"{job.label} skipped: {str(e1)[:200]}")
                 clips.append(None)
         if all(c is None for c in clips):
             print(f"[render] motion layer unavailable: {e}", flush=True)

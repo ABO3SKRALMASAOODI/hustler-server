@@ -856,6 +856,9 @@ def reconcile_remote_execution(worker_db, row):
                            else "superseded"),
                 "job": job, "error": exc,
             }
+        if failure_policy.defer_prerequisite(
+                worker_db, job, exc, decision, claim):
+            return {"status": "requeued", "job": job, "error": exc}
         if decision.retryable and job["attempts"] < decision.max_attempts:
             requeued = worker_db.run(dbx.requeue_job, job_id, exc, claim)
             return {"status": "requeued" if requeued else "superseded",

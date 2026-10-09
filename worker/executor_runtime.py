@@ -46,11 +46,54 @@ def _input_observation(now):
     }
 
 
+# Idle Postgres connections kept between jobs on a warm container. Every
+# request used to open a fresh connection (TCP + TLS + auth to a database in
+# another region) and close it at the end, so each MCP call paid the whole
+# handshake before its first query. Db.run already reconnects once on a
+# dropped connection, and connections are only pooled when idle and healthy.
+_DB_POOL = []
+_DB_POOL_LOCK = threading.Lock()
+_DB_POOL_MAX = max(0, int(os.getenv("EXECUTOR_DB_POOL_MAX", "4")))
+# Comfortably under typical pooler/NAT idle limits; an older connection is
+# closed rather than trusted.
+_DB_POOL_IDLE_S = float(os.getenv("EXECUTOR_DB_POOL_IDLE_S", "240"))
+
+
+def _borrow_db():
+    now = time.monotonic()
+    while True:
+        with _DB_POOL_LOCK:
+            if not _DB_POOL:
+                return dbx.Db()
+            db, idle_since = _DB_POOL.pop()
+        if now - idle_since <= _DB_POOL_IDLE_S:
+            return db
+        db.reset()
+
+
+def _return_db(db):
+    conn = getattr(db, "_conn", None)
+    healthy = conn is not None and not conn.closed
+    if healthy:
+        try:
+            # A no-op unless a transaction was left open; never pool one.
+            conn.rollback()
+            healthy = conn.status == psycopg2.extensions.STATUS_READY
+        except Exception:
+            healthy = False
+    if healthy:
+        with _DB_POOL_LOCK:
+            if len(_DB_POOL) < _DB_POOL_MAX:
+                _DB_POOL.append((db, time.monotonic()))
+                return
+    db.reset()
+
+
 class LeasedDb:
     """Bind every executor progress write to one monotonic queue claim."""
 
     def __init__(self, job_id, total_claims):
-        self._db = dbx.Db()
+        self._db = _borrow_db()
         self._job_id = job_id
         self._total_claims = total_claims
         self._lost = threading.Event()
@@ -70,6 +113,11 @@ class LeasedDb:
 
     def reset(self):
         self._db.reset()
+
+    def release(self):
+        """End of job: keep a healthy connection for the next request."""
+        db, self._db = self._db, dbx.Db()
+        _return_db(db)
 
 
 def ensure_heartbeat():
@@ -337,4 +385,5 @@ def execute(job, runners):
                 pass
         if job_id is not None:
             dbx.untrack_job(job_id)
-        db.reset()
+        release = getattr(db, "release", None)
+        (release or db.reset)()
