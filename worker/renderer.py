@@ -47,7 +47,7 @@ import timeline as timeline_mod
 import travel
 from schemas import (clean_fingerprint, patch_fingerprint, EDLValidationError,
                      is_canvas_program, keep_boundaries, quad_bbox,
-                     speed_pieces, validate_edl)
+                     speed_pieces, subject_matte_geom, validate_edl)
 from timeline import Timeline, merge_spans, transition_junctions
 
 DUCK_DB = -12.0            # music under speech AND program audio under voiceover
@@ -2397,6 +2397,14 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                   else f"trim=start=0:end={b_dur:.3f}"), "setpts=PTS-STARTPTS",
                  f"scale={W}:{H}", "format=gray",
                  f"fps={fps:.3f}"]
+        if item.get("motion"):
+            # The mask's source span ends ~a frame before the graphic does
+            # (it is measured to out_to_src(end - 0.02), rounded), and the
+            # clip stays on screen to its end: hold the last mask frame over
+            # that gap, or the final frame draws the graphic OVER the subject.
+            gap = max(0.0, float(item["motion"][1]["end"]) - b_end)
+            chain.append(f"tpad=stop_mode=clone:stop_duration="
+                         f"{min(gap, 0.1) + 1.0 / max(fps, 1.0):.3f}")
         if b_start > 0.001:
             chain.append(f"tpad=start_duration={b_start:.3f}"
                          f":start_mode=add:color=black")
@@ -3995,9 +4003,25 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     # render: footage cut away, a mask object that will not download, an ASS
     # with nothing to burn. A user who loses the depth still gets their words.
     behind_inputs = []
+    # The framing a mask is stamped with (newer masks only) has to be the
+    # framing it composites into: after a set_frame the mask would cut the
+    # subject out of the old crop's coordinates.
+    geom_now = subject_matte_geom(edl.get("frame"))
     for bi, item in enumerate(behind_texts):
         b = item["behind"]
         pieces = tl.span_to_out(float(b["src_start"]), float(b["src_end"]))
+        # A speed ramp over the mask's footage (added after it was measured)
+        # retimes the picture but not the 1x mask, which would then drift
+        # off the subject: a plain title is the honest fallback.
+        ramp = tl.ramp_over(float(b["src_start"]), float(b["src_end"]))
+        why = (f"speed ramp {ramp[0]} now covers its footage" if ramp else
+               "the framing changed since its mask was measured"
+               if b.get("geom") and b["geom"] != geom_now else None)
+        if pieces and why:
+            print(f"[render] behind-text {item.get('id')}: {why} — burning "
+                  "it as a plain title", flush=True)
+            front_texts.append(item)
+            continue
         ass = None
         if pieces:
             ass = graphics.build_gfx_ass(
@@ -4061,12 +4085,21 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
             pieces = (tl.span_to_out(float(b["src_start"]),
                                      float(b["src_end"])) if b else [])
             why, local = None, None
+            ramp = (tl.ramp_over(float(b["src_start"]), float(b["src_end"]))
+                    if b else None)
             if not b:
                 why = "it carries no subject mask"
             elif not pieces:
                 why = "its footage is no longer in the edit"
             elif len(pieces) > 1:
                 why = "a cut now falls inside its window"
+            elif ramp:
+                # The mask is one 1x clip of source frames; a ramp shortens
+                # (or stretches) that footage's program window, so the
+                # trimmed mask would slide off the subject.
+                why = f"speed ramp {ramp[0]} now covers its footage"
+            elif b.get("geom") and b["geom"] != geom_now:
+                why = "the framing changed since its mask was measured"
             else:
                 try:
                     local = _fetch(b["asset_key"], "matte", next_idx)

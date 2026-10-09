@@ -64,17 +64,41 @@ def _rgb(color):
 
 
 def _smooth(t):
-    return t * t * (3.0 - 2.0 * t)
+    """Smoothstep, IN PLACE on a float32 array (no full-canvas copies)."""
+    import numpy as np
+    sq = np.square(t)
+    t *= -2.0
+    t += 3.0
+    t *= sq
+    return t
+
+
+def _axes(W, H, cx=.5, cy=.5):
+    """Pixel-centre offsets from (cx, cy) as broadcastable float32 axes,
+    (1 x W) and (H x 1): the radial maths below never materializes an
+    int64 mgrid of the whole canvas (a 2160x3840 plate peaked at ~1 GB)."""
+    import numpy as np
+    xx = ((np.arange(W, dtype=np.float32) + np.float32(.5)) / np.float32(W)
+          - np.float32(cx))[None, :]
+    yy = ((np.arange(H, dtype=np.float32) + np.float32(.5)) / np.float32(H)
+          - np.float32(cy))[:, None]
+    return xx, yy
 
 
 def _vignette(W, H, strength):
     """Multiplicative darkening, 1.0 in the middle, falling off toward the
-    corners in the canvas's own aspect (an ellipse on a portrait frame)."""
+    corners in the canvas's own aspect (an ellipse on a portrait frame).
+    H x W float32."""
     import numpy as np
-    yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
-    r = np.hypot((xx + .5) / W - .5, (yy + .5) / H - .5) / np.float32(.7071)
-    fall = _smooth(np.clip((r - .32) / .68, 0, 1))
-    return 1.0 - np.float32(.78 * float(strength)) * fall
+    xx, yy = _axes(W, H)
+    r = np.hypot(xx, yy)
+    r *= np.float32(1 / .7071)
+    r -= np.float32(.32)
+    r *= np.float32(1 / .68)
+    fall = _smooth(np.clip(r, 0, 1, out=r))
+    fall *= np.float32(-.78 * float(strength))
+    fall += np.float32(1.0)
+    return fall
 
 
 def _fill(W, H, spec):
@@ -84,19 +108,23 @@ def _fill(W, H, spec):
     c1 = _rgb(spec.get("background"))
     c2 = (_rgb(spec["background_color2"]) if spec.get("background_color2")
           else c1 * np.float32(.3))
+    img = np.empty((H, W, 3), np.float32)
     if style == "vertical_gradient":
         t = _smooth(np.linspace(0, 1, H, dtype=np.float32))[:, None, None]
-        img = np.broadcast_to(c1 * (1 - t) + c2 * t, (H, W, 3)).copy()
+        img[:] = c1 * (1 - t) + c2 * t
     elif style == "radial_gradient":
         x0, y0, x1, y1 = spec["box"]
         cx, cy = (x0 + x1) / 2 * W, (y0 + y1) / 2 * H
-        yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
-        d = np.hypot(xx - cx, yy - cy)
         far = max(np.hypot(px - cx, py - cy) for px in (0, W) for py in (0, H))
-        t = _smooth(np.clip(d / np.float32(far * .92), 0, 1))[..., None]
-        img = c1 * (1 - t) + c2 * t
+        xx, yy = _axes(W, H, cx / W, cy / H)
+        d = np.hypot(xx * np.float32(W), yy * np.float32(H))
+        d *= np.float32(1 / (far * .92))
+        t = _smooth(np.clip(d, 0, 1, out=d))
+        for ch in range(3):                   # one H x W plane at a time
+            np.multiply(t, c2[ch] - c1[ch], out=img[..., ch])
+            img[..., ch] += c1[ch]
     else:
-        img = np.broadcast_to(c1, (H, W, 3)).astype(np.float32).copy()
+        img[:] = c1
     if spec.get("vignette"):
         img *= _vignette(W, H, spec["vignette"])[..., None]
     return img
@@ -104,11 +132,14 @@ def _fill(W, H, spec):
 
 def _dither(img):
     """Quantize with +-0.5 LSB of fixed-seed noise: smooth gradients never
-    band at 8 bits, and the same design always yields the same pixels."""
+    band at 8 bits, and the same design always yields the same pixels.
+    Consumes ``img`` (dithered in place)."""
     import numpy as np
     rng = np.random.default_rng(GRAIN_SEED)
-    noise = rng.random(img.shape[:2], dtype=np.float32)[..., None] - .5
-    return np.clip(img + noise, 0, 255).astype(np.uint8)
+    noise = rng.random(img.shape[:2], dtype=np.float32)
+    noise -= np.float32(.5)
+    img += noise[..., None]
+    return np.clip(img, 0, 255, out=img).astype(np.uint8)
 
 
 def _geometry_masks(W, H, spec):
@@ -150,12 +181,21 @@ def build_designed_plate(path, W, H, spec):
     import numpy as np
     from PIL import Image
     hole, ring, shade = _geometry_masks(W, H, spec)
-    fill = _fill(W, H, spec)
-    a = np.asarray(hole, np.float32)[..., None] / 255.0
-    s = np.asarray(shade, np.float32)[..., None] / 255.0
-    b = np.asarray(ring, np.float32)[..., None] / 255.0
-    img = fill * (1 - s * a)                 # shadow only where the plate shows
-    img = img * (1 - b) + _rgb(spec.get("border_color", "#444444")) * b
+    img = _fill(W, H, spec)
+    k = np.asarray(shade, np.float32)
+    k *= np.asarray(hole, np.float32)
+    k *= np.float32(-1 / 255.0 ** 2)
+    k += np.float32(1.0)
+    img *= k[..., None]                      # shadow only where the plate shows
+    b = np.asarray(ring, np.float32)
+    b *= np.float32(1 / 255.0)
+    border = _rgb(spec.get("border_color", "#444444"))
+    for ch in range(3):                      # img * (1 - b) + border * b
+        plane = img[..., ch]
+        plane -= border[ch]
+        plane *= 1.0 - b
+        plane += border[ch]
+    del k, b
     rgba = np.dstack([_dither(img), np.asarray(hole, np.uint8)])
     # Fast deflate: the dither makes this a large PNG, decoded once a render.
     Image.fromarray(rgba, "RGBA").save(path, compress_level=1)
@@ -170,17 +210,27 @@ def build_decor(path, mask_path, W, H, spec):
     import numpy as np
     from PIL import Image
     hole, ring, shade = _geometry_masks(W, H, spec)
-    outside = np.asarray(hole, np.float32) / 255.0
-    s = np.asarray(shade, np.float32) / 255.0
-    v = (1.0 - _vignette(W, H, spec["vignette"])) if spec.get("vignette") \
-        else np.zeros((H, W), np.float32)
-    b = np.asarray(ring, np.float32) / 255.0
-    dark = 1.0 - (1.0 - s) * (1.0 - v)        # black: shadow over vignette
-    alpha = b + dark * (1.0 - b)              # hairline on top
-    color = _rgb(spec.get("border_color", "#444444"))[None, None, :] * \
-        (b / np.maximum(alpha, 1e-6))[..., None]
-    rgba = np.dstack([np.clip(color + .5, 0, 255).astype(np.uint8),
-                      np.clip(alpha * outside * 255 + .5, 0, 255).astype(np.uint8)])
+    # In place on H x W float32 planes (a 4K-class canvas stays ~100 MB):
+    # dark = 1 - (1 - shadow) * (1 - vignette)   black: shadow over vignette
+    # alpha = ring + dark * (1 - ring)            hairline on top
+    alpha = np.asarray(shade, np.float32)
+    alpha *= np.float32(-1 / 255.0)
+    alpha += np.float32(1.0)
+    if spec.get("vignette"):
+        alpha *= _vignette(W, H, spec["vignette"])
+    b = np.asarray(ring, np.float32)
+    b *= np.float32(1 / 255.0)
+    alpha *= b - np.float32(1.0)               # -(1-dark)(1-b) ...
+    alpha += np.float32(1.0)                   # ... = b + dark * (1 - b)
+    share = b / np.maximum(alpha, np.float32(1e-6))
+    del b
+    rgba = np.empty((H, W, 4), np.uint8)
+    for ch, c in enumerate(_rgb(spec.get("border_color", "#444444"))):
+        rgba[..., ch] = np.clip(share * c + .5, 0, 255)
+    del share
+    alpha *= np.asarray(hole, np.float32)      # x outside (hole / 255) x 255
+    alpha += np.float32(.5)
+    rgba[..., 3] = np.clip(alpha, 0, 255, out=alpha)
     Image.fromarray(rgba, "RGBA").save(path)
     hole.save(mask_path)
     return path, mask_path
@@ -270,7 +320,14 @@ def _still(length, fps):
 
 def _grain(spec):
     """Temporal luma grain for a backdrop branch ('' when off). Strength 20
-    is Gaussian sigma ~11.5/255; .25 lands on the references' sigma ~3."""
+    is Gaussian sigma ~11.5/255; .25 lands on the references' sigma ~3.
+
+    Measured at the final encode (x264 veryfast CRF 20, 1080x1920, dark
+    radial backdrop): the encoder's dead zone erases grain completely below
+    ~.2 (c0s <= 4) and keeps it from .25 (c0s 5), where the export grows
+    ~3-4x. Coarser (half-resolution) or 2-frame-held grain is NOT cheaper:
+    the first is erased outright, the second doubles the size (mbtree spends
+    more on the reused frames). Previews (smaller, CRF 27) never show it."""
     g = float(spec.get("grain") or 0)
     if g <= 0:
         return ""

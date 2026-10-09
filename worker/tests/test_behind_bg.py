@@ -39,7 +39,8 @@ import renderer                                               # noqa: E402
 import stitch                                                 # noqa: E402
 import timeline as tl_mod                                     # noqa: E402
 from schemas import (EDLValidationError, PictureCard, default_edl,  # noqa: E402
-                     describe_edl, edl_signature, validate_edl)
+                     describe_edl, edl_signature, subject_matte_geom,
+                     validate_edl)
 from timeline import Timeline                                 # noqa: E402
 
 HAVE_FFMPEG = shutil.which("ffmpeg") is not None
@@ -248,6 +249,68 @@ def test_stitching_refuses_behind_graphics():
     assert windows is None and "behind-subject motion" in reason
 
 
+# ── 2b. a speed ramp added later (review: the mask drifted silently) ─────
+
+RAMP = [{"id": "sp1", "start": 1.0, "end": 4.0, "factor": 1.5}]
+
+
+def _btext(start=1.0, end=4.0):
+    return {"id": "tx1", "text": "BEHIND", "start": start, "end": end,
+            "template": "title",
+            "behind": {"asset_key": "matte/1/t.mp4", "src_start": start,
+                       "src_end": end, "fp": "testfp"}}
+
+
+def _remap_speed(edl_in, new_speed):
+    edl = validate_edl(edl_in, SHOT_S).model_dump()
+    old = Timeline(edl["keep"], [], edl.get("speed") or [])
+    edl["speed"] = new_speed
+    notes = tl_mod.remap_program_items(edl, old,
+                                       Timeline(edl["keep"], [], new_speed))
+    return edl, notes
+
+
+def test_ramp_over_finds_only_spans_that_retime_the_footage():
+    tl = Timeline([[0.0, SHOT_S]], [], [
+        {"id": "a", "start": 0.0, "end": 1.0, "factor": 2.0},
+        {"id": "b", "start": 2.0, "end": 3.0, "factor": 1.0},
+        {"id": "c", "start": 4.5, "end": 5.5, "factor": 0.5}])
+    assert tl.ramp_over(1.0, 4.4) is None          # touching / factor 1
+    assert tl.ramp_over(0.5, 2.0) == ("a", 2.0)
+    assert tl.ramp_over(4.0, 4.6) == ("c", 0.5)
+    assert Timeline([[0.0, SHOT_S]], [], []).ramp_over(0, SHOT_S) is None
+
+
+def test_a_ramp_over_a_behind_graphic_is_disclosed_not_claimed_behind():
+    edl, notes = _remap_speed(
+        {"keep": [[0.0, SHOT_S]], "motion": [_mo(start=1.0, end=4.0)]}, RAMP)
+    mo = edl["motion"][0]
+    assert (mo["start"], mo["end"]) == (1.0, 3.0)
+    assert not any("staying behind" in n for n in notes), notes
+    assert any("speed ramp sp1" in n and "ABOVE" in n for n in notes), notes
+    # once disclosed, an unrelated later edit does not repeat it
+    old = Timeline(edl["keep"], [], edl["speed"])
+    edl["keep"] = [[0.0, SHOT_S - 0.5]]
+    again = tl_mod.remap_program_items(
+        edl, old, Timeline(edl["keep"], [], edl["speed"]))
+    assert not any("speed ramp" in n for n in again), again
+    # a ramp elsewhere in the edit changes nothing about the claim
+    edl, notes = _remap_speed(
+        {"keep": [[0.0, SHOT_S]], "motion": [_mo(start=2.0, end=4.0)]},
+        [{"id": "sp2", "start": 0.0, "end": 1.0, "factor": 2.0}])
+    assert any("staying behind the same subject" in n for n in notes), notes
+    assert not any("speed ramp" in n for n in notes), notes
+
+
+def test_a_ramp_over_a_behind_text_is_disclosed_too():
+    edl, notes = _remap_speed({"keep": [[0.0, SHOT_S]], "texts": [_btext()]},
+                              RAMP)
+    assert edl["texts"] and (edl["texts"][0]["start"],
+                             edl["texts"][0]["end"]) == (1.0, 3.0)
+    assert not any("staying behind" in n for n in notes), notes
+    assert any("speed ramp sp1" in n and "plain title" in n for n in notes), notes
+
+
 # ── 3. the composite, in rendered pixels ─────────────────────────────────
 
 def _graph(edl, mask_idx, clip_idx, clip, demoted=False):
@@ -401,6 +464,134 @@ def test_a_canvas_render_path_demotes_behind_items(gfx_clip):
     assert out[0][1]["layer"] == "above_captions" and out[0][1]["behind"] is None
 
 
+@needs_ffmpeg
+def test_the_mask_holds_to_the_graphics_last_frame(shot, mask, gfx_clip, workdir):
+    """The tool measures the mask to out_to_src(end - 0.02), rounded, so its
+    span ends about a frame before the graphic does. That last frame must
+    not draw the graphic over the subject."""
+    item = _mo()
+    item["behind"]["src_end"] = 3.96
+    edl = validate_edl({"keep": [[0.0, SHOT_S]], "motion": [item]},
+                       SHOT_S).model_dump()
+    it = edl["motion"][0]
+    graph = renderer.build_filtergraph(
+        edl, SHOT_S, True, Timeline(edl["keep"], [], []), None, [],
+        {"video": {"duration": SHOT_S}}, preview=False, W=W, H=H,
+        fps=float(FPS), behind_inputs=[(2, {"motion": (1, it, gfx_clip)},
+                                        (1.0, 3.96))],
+        motion_inputs=[(1, it, gfx_clip)])
+    assert "tpad=stop_mode=clone" in graph
+    out = _run(graph, [shot, gfx_clip.path, mask],
+               os.path.join(workdir, "tail.mp4"))
+    t = 3.966                                   # the graphic's last frame
+    frame = _frame_at(out, t)
+    x0, x1 = _subject_cols(_frame_at(shot, t))
+    band = slice(GFX_BAND[0] + 4, GFX_BAND[1] - 4)
+    assert _magenta(frame)[band].mean() > 0.4, "the graphic ended early"
+    assert _magenta(frame)[band, x0 + 8:x1 - 8].mean() < 0.05, \
+        "the last frame printed the graphic over the subject"
+
+
+class _Stop(Exception):
+    pass
+
+
+@pytest.fixture
+def graph_only(monkeypatch, gfx_clip):
+    """render_edl up to the filtergraph: records what reached the behind
+    stage and which masks were fetched, then stops (no encode)."""
+    seen = {"fetched": []}
+    monkeypatch.setattr(motion_engine, "render_jobs",
+                        lambda jobs, out_dir, **k: [gfx_clip for _ in jobs])
+    monkeypatch.setattr(renderer.storage, "download_to",
+                        lambda key, local: seen["fetched"].append(key))
+
+    def _capture(*a, **kw):
+        seen.update(kw)
+        raise _Stop()
+    monkeypatch.setattr(renderer, "build_filtergraph", _capture)
+
+    def run(edl):
+        with pytest.raises(_Stop):
+            renderer.render_edl(edl, {"video": {"duration": SHOT_S},
+                                      "words": [], "sentences": []},
+                                seen["shot"], os.path.join(seen["wd"], "x.mp4"),
+                                seen["wd"], preview=True)
+        return seen
+    seen["run"] = run
+    return seen
+
+
+@needs_ffmpeg
+def test_render_edl_demotes_a_behind_graphic_once_a_ramp_covers_it(
+        shot, workdir, graph_only):
+    graph_only.update(shot=shot, wd=workdir)
+    mo = _mo(start=1.0, end=3.0)
+    mo["behind"].update(src_start=1.0, src_end=4.0)
+    seen = graph_only["run"]({"keep": [[0.0, SHOT_S]], "motion": [mo],
+                              "speed": RAMP})
+    assert seen["behind_inputs"] == [] and seen["fetched"] == []
+    (_i, item, _c), = [m for m in seen["motion_inputs"]
+                       if m[1]["id"] == "mg1"]
+    assert item["layer"] == "above_captions" and item["behind"] is None
+    assert any("speed ramp sp1" in w for w in motion_layer.LAST_WARNINGS), \
+        motion_layer.LAST_WARNINGS
+    # the same edit without the ramp keeps the composite
+    seen = graph_only["run"]({"keep": [[0.0, SHOT_S]], "motion": [_mo()]})
+    assert len(seen["behind_inputs"]) == 1
+
+
+@needs_ffmpeg
+def test_render_edl_burns_a_behind_text_plain_once_a_ramp_covers_it(
+        shot, workdir, graph_only, capsys):
+    graph_only.update(shot=shot, wd=workdir)
+    tx = _btext(1.0, 3.0)
+    tx["behind"].update(src_start=1.0, src_end=4.0)
+    seen = graph_only["run"]({"keep": [[0.0, SHOT_S]], "texts": [tx],
+                              "speed": RAMP})
+    assert seen["behind_inputs"] == [] and seen["fetched"] == []
+    assert "speed ramp sp1" in capsys.readouterr().out
+    seen = graph_only["run"]({"keep": [[0.0, SHOT_S]], "texts": [_btext()]})
+    assert len(seen["behind_inputs"]) == 1
+
+
+def test_the_framing_stamp_tracks_only_what_moves_the_subject():
+    g = subject_matte_geom
+    assert g(None) == g({"ratio": "source", "mode": "crop"})
+    assert g({"ratio": "9:16", "mode": "pad"}) == \
+        g({"ratio": "9:16", "mode": "pad_blur", "focus_x": .2})
+    assert g({"ratio": "9:16"}) == g({"ratio": "9:16", "mode": "crop",
+                                       "focus_x": .5, "focus_y": None})
+    base = g({"ratio": "9:16", "mode": "crop"})
+    for other in ({"ratio": "1:1", "mode": "crop"},
+                  {"ratio": "9:16", "mode": "crop", "focus_x": .3},
+                  {"ratio": "9:16", "mode": "pad"},
+                  {"ratio": "9:16", "mode": "crop",
+                   "picture": [0, .2, 1, .8]}):
+        assert g(other) != base, other
+
+
+@needs_ffmpeg
+def test_render_edl_drops_the_depth_when_the_framing_changed(
+        shot, workdir, graph_only, capsys):
+    graph_only.update(shot=shot, wd=workdir)
+    stale = subject_matte_geom({"ratio": "9:16", "mode": "crop"})
+    mo, tx = _mo(), _btext(1.0, 4.0)
+    mo["behind"]["geom"] = tx["behind"]["geom"] = stale
+    seen = graph_only["run"]({"keep": [[0.0, SHOT_S]], "motion": [mo],
+                              "texts": [tx]})
+    assert seen["behind_inputs"] == []
+    assert any("framing changed" in w for w in motion_layer.LAST_WARNINGS)
+    assert "framing changed" in capsys.readouterr().out
+    # a mask stamped in the CURRENT framing (and an unstamped legacy one)
+    # keeps its composite
+    mo["behind"]["geom"] = subject_matte_geom(None)
+    tx["behind"].pop("geom")
+    seen = graph_only["run"]({"keep": [[0.0, SHOT_S]], "motion": [mo],
+                              "texts": [tx]})
+    assert len(seen["behind_inputs"]) == 2
+
+
 # ── 4. the tool ──────────────────────────────────────────────────────────
 
 class _Ctx:
@@ -520,6 +711,30 @@ def test_the_tool_schema_offers_the_behind_layer():
     spec = agent_tools.TOOLS["add_motion_graphic"]
     assert "behind_subject" in spec[2]["layer"]["enum"]
     assert "behind_subject" in spec[1]
+
+
+@needs_ffmpeg
+def test_the_mask_is_stamped_and_a_reframe_is_disclosed_and_remeasured(
+        shot, workdir, tool_env):
+    ctx = _Ctx(shot, workdir)
+    assert motion_tools.add_motion_graphic(
+        ctx, "hook_title", 1.0, 3.0, params={"text": "X"}, sfx=False,
+        layer="behind_subject").startswith("EDL v")
+    assert ctx._edl["motion"][0]["behind"]["geom"] == subject_matte_geom(None)
+    # Same aspect as the 16:9 shot, but a focus point: the stamp moves.
+    res = agent_tools.set_frame(ctx, "16:9", "crop", focus_x=.3)
+    assert res.startswith("EDL v"), res
+    assert "NOTE: the subject mask behind motion graphic mg1" in res
+    assert "set_motion_graphic" in res
+    # an untouched set_motion_graphic re-measures in the new framing
+    res = motion_tools.set_motion_graphic(ctx, "mg1")
+    assert res.startswith("EDL v"), res
+    assert ctx._edl["motion"][0]["behind"]["geom"] == \
+        subject_matte_geom(ctx._edl["frame"])
+    assert len(tool_env) == 2
+    # a set_frame that keeps the framing says nothing
+    res = agent_tools.set_frame(ctx, "16:9", "crop", focus_x=.3)
+    assert "subject mask" not in res
 
 
 # ── 5. designed picture-card backdrops ───────────────────────────────────
@@ -733,3 +948,57 @@ def test_a_stitched_fragment_matches_the_full_render(tmp_path):
     full = _card_render(tmp_path, card, "full")
     part = _card_render(tmp_path, c, "part", dur=1.5)
     assert np.abs(_f(full, 1.3) - _f(part, .1)).mean() < 4
+
+
+def test_the_tool_never_silently_drops_a_backdrop_knob():
+    class Ctx:
+        index = {"video": {"width": 1920, "height": 1080}}
+        edit_plan = None
+
+        def __init__(self):
+            self.edl = validate_edl(default_edl(4), 4).model_dump()
+
+        def latest_edl(self):
+            return {"json": self.edl}
+
+        def write_edl(self, edl, desc):
+            self.edl = validate_edl(edl, 4).model_dump()
+            return "EDL v2: " + desc
+
+    ctx = Ctx()
+    # a second colour on its own is a gradient, not a flat card
+    res = agent_tools.set_picture_card(ctx, "p", 1, 3, background="#2C303B",
+                                       background_color2="#0A0A0C")
+    card = ctx.edl["effects"]["picture_cards"][0]
+    assert card["background_style"] == "vertical_gradient"
+    assert card["background_color2"] == "#0A0A0C"
+    assert "vertical_gradient" in res and "NOTE" not in res
+    for kw in ({"background_style": "blur", "background_color2": "#000000"},
+               {"background_style": "solid", "background_color2": "#000000"},
+               {"background_style": "radial_gradient", "background_dim": .3},
+               {"background_dim": .3}):
+        before = copy.deepcopy(ctx.edl)
+        res = agent_tools.set_picture_card(ctx, "p", 1, 3, **kw)
+        assert res.startswith("REJECTED"), (kw, res)
+        assert ctx.edl == before
+    assert agent_tools.set_picture_card(
+        ctx, "p", 1, 3, background_style="blur",
+        background_dim=.25).startswith("EDL v")
+    assert ctx.edl["effects"]["picture_cards"][0]["background_dim"] == .25
+
+
+def test_designed_plates_build_without_full_canvas_index_grids(tmp_path,
+                                                                monkeypatch):
+    """A 4K-class plate peaked at ~1 GB through int64 mgrid temporaries; the
+    radial maths now broadcasts two float32 axes."""
+    monkeypatch.setattr(np, "mgrid", None)          # any use would raise
+    spec = PictureCard.model_validate(dict(
+        CARD, background_style="radial_gradient", background="#707888",
+        vignette=.4)).model_dump()
+    a = np.asarray(Image.open(picture_cards.build_designed_plate(
+        str(tmp_path / "r.png"), 320, 568, spec)))
+    assert a[150, 160, :3].mean() > a[4, 4, :3].mean() + 20
+    blur = PictureCard.model_validate(dict(CARD, background_style="blur",
+                                           vignette=.4)).model_dump()
+    picture_cards.build_decor(str(tmp_path / "d.png"), str(tmp_path / "m.png"),
+                              320, 568, blur)

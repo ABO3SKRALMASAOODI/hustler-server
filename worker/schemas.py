@@ -1754,6 +1754,32 @@ class SubjectMatte(BaseModel):
     # executor, "plate" = the photometric fallback. Ride-along metadata so a
     # cache hit can speak honestly about what it is serving.
     method: Optional[str] = None
+    # subject_matte_geom() of the frame the mask was measured in. A later
+    # set_frame (ratio, mode, focus, picture) changes where the subject sits
+    # on the canvas, so the renderer drops the depth when this no longer
+    # matches. None on masks written before the stamp existed (unchecked).
+    geom: Optional[str] = None
+
+
+def subject_matte_geom(frame):
+    """Stamp of the output-framing knobs a subject mask's crop depends on —
+    exactly the ones agent_tools._matte_geometry hands frame_fit_filter,
+    normalized the same way (pad_blur shares pad's geometry; focus only
+    steers a crop; None focus is the centre)."""
+    fr = frame or {}
+    ratio = fr.get("ratio") or "source"
+    mode = (fr.get("mode") or "crop") if ratio != "source" else "crop"
+    mode = "pad" if mode == "pad_blur" else mode
+    focus = None
+    if mode == "crop":
+        fx, fy = fr.get("focus_x"), fr.get("focus_y")
+        fx = .5 if fx is None else round(float(fx), 4)
+        fy = .5 if fy is None else round(float(fy), 4)
+        focus = None if (fx, fy) == (.5, .5) else [fx, fy]
+    pic = fr.get("picture")
+    pic = [round(float(v), 4) for v in pic] if pic else None
+    return hashlib.sha256(json.dumps([ratio, mode, focus, pic]).encode()
+                          ).hexdigest()[:12]
 
 
 # ── Speed spans (round 35): time remapping ───────────────────────────────

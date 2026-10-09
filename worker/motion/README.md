@@ -54,8 +54,11 @@ subject back over it — the references' "magazine cover" depth. Design for it:
 giant type (25–35% of frame height, near full width) whose letters the head
 and shoulders cross, so tops and bottoms stay readable; no box or plate
 behind the words; the graphic is part of the picture, so a zoom scales it and
-a footage card frames it with the picture. If the mask cannot be used at
-render time the item falls back to `above_captions`.
+a footage card frames it with the picture. The mask is frame-for-frame with
+the source at 1x in the framing it was measured in: when it no longer matches
+(a cut inside the window, a speed ramp over its footage, a `set_frame`
+change, a missing mask asset) the item falls back to `above_captions` — the
+edit that causes it says so, and `set_motion_graphic` re-measures.
 
 ## Runtime (MG) — everything must be a pure function of time
 

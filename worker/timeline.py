@@ -202,6 +202,20 @@ class Timeline:
                 return e
         return None
 
+    def ramp_over(self, t0, t1):
+        """(id, factor) of the first speed span that RETIMES source [t0, t1]
+        (factor != 1), or None. A subject mask is frame-for-frame with the
+        source, so once footage is sped or slowed the mask measured on it
+        can no longer follow the picture."""
+        for sp in self.speed:
+            get = (sp.get if isinstance(sp, dict)
+                   else lambda k, _sp=sp: getattr(_sp, k, None))
+            a, b = float(get("start")), float(get("end"))
+            f = float(get("factor") or 1.0)
+            if b > t0 + 1e-3 and a < t1 - 1e-3 and abs(f - 1.0) > 1e-6:
+                return get("id"), f
+        return None
+
     @staticmethod
     def _off_in_pieces(pcs, tt):
         """Offset of source time tt within ONE segment's own pieces
@@ -1362,12 +1376,23 @@ def remap_program_items(edl, old_tl, new_tl):
                         "subject) was removed — too little of the footage it "
                         "was measured on survives the cut.")
                     continue
+                src = (float(behind["src_start"]), float(behind["src_end"]))
+                ramp = new_tl.ramp_over(*src)
                 if (ns, ne) != (tx.get("start"), tx.get("end")):
                     region_notes.append(
                         f"note: text {tx.get('id')} "
                         f"(\"{str(tx.get('text', ''))[:24]}\") moved to "
-                        f"{ns}-{ne}s, staying behind the same subject.")
+                        f"{ns}-{ne}s" + (" with its footage." if ramp else
+                                         ", staying behind the same subject."))
                     tx["start"], tx["end"] = ns, ne
+                if ramp and not old_tl.ramp_over(*src):
+                    region_notes.append(
+                        f"note: text {tx.get('id')} "
+                        f"(\"{str(tx.get('text', ''))[:24]}\") now has speed "
+                        f"ramp {ramp[0]} ({ramp[1]:g}x) over its footage, so "
+                        "its subject mask (measured frame-for-frame at 1x) "
+                        "cannot follow the picture — it burns as a plain title "
+                        "ON TOP of the picture until the ramp is removed.")
                 kept_tx.append(tx)
                 continue
             anchor = tx.get("anchor_insert")
@@ -1465,20 +1490,31 @@ def remap_program_items(edl, old_tl, new_tl):
                         "on is no longer in the edit.")
                     continue
                 ns, ne = moved
+                src = (float(behind["src_start"]), float(behind["src_end"]))
+                ramp = new_tl.ramp_over(*src)
                 if (ns, ne) != (s0, e0):
                     mo["start"], mo["end"] = ns, ne
                     region_notes.append(
                         f"note: motion graphic {mo.get('id')} moved to "
-                        f"{ns}-{ne}s, staying behind the same subject.")
-                if len(pieces) > 1 and len(old_tl.span_to_out(
-                        float(behind["src_start"]),
-                        float(behind["src_end"]))) <= 1:
+                        f"{ns}-{ne}s" + (
+                            " with its footage." if len(pieces) > 1 or ramp
+                            else ", staying behind the same subject."))
+                if len(pieces) > 1 and len(old_tl.span_to_out(*src)) <= 1:
                     region_notes.append(
                         f"note: motion graphic {mo.get('id')} now has a cut "
                         "inside its window, so its subject mask cannot follow "
                         "the picture — it renders ABOVE the footage until it "
                         "is moved back inside one take (set_motion_graphic "
                         "re-measures).")
+                if ramp and not old_tl.ramp_over(*src):
+                    region_notes.append(
+                        f"note: motion graphic {mo.get('id')} now has speed "
+                        f"ramp {ramp[0]} ({ramp[1]:g}x) over its footage, so "
+                        "its subject mask (measured frame-for-frame at 1x) "
+                        "cannot follow the picture — it renders ABOVE the "
+                        "footage until the ramp is removed or the graphic is "
+                        "moved onto footage at normal speed "
+                        "(set_motion_graphic re-measures).")
                 kept_mo.append(mo)
                 continue
             if on_footage:

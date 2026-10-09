@@ -92,7 +92,7 @@ from schemas import (CANVAS_DIMS, CaptionStyle, clean_fingerprint,
                      DEFAULT_CANVAS_FPS,
                      edl_signature, is_canvas_program, keep_boundaries,
                      output_duration, program_duration, validate_edl,
-                     MIN_SPAN_S,
+                     subject_matte_geom, MIN_SPAN_S,
                      GAIN_MIN_DB, GAIN_MAX_DB,
                      INSERT_RATE_MIN, INSERT_RATE_MAX,
                      GRADE_PRESETS, TRANSITION_STYLES, TRANSITION_MIN_S,
@@ -6807,8 +6807,41 @@ def set_volume(ctx, start, end, gain_db):
     return ctx.write_edl(edl, action)
 
 
+def _behind_framing_note(ctx, res):
+    """``res`` plus a note naming every behind-subject item whose mask was
+    measured in a different framing than the one just written (the renderer
+    drops their depth until they are re-placed)."""
+    if not (isinstance(res, str) and res.startswith("EDL v")):
+        return res
+    edl = ctx.latest_edl()["json"]
+    items = ([("text", t.get("id")) for t in edl.get("texts") or []
+              if (t.get("behind") or {}).get("geom")
+              and t["behind"]["geom"] != subject_matte_geom(edl.get("frame"))]
+             + [("motion graphic", m.get("id")) for m in edl.get("motion") or []
+                if (m.get("behind") or {}).get("geom")
+                and m["behind"]["geom"] != subject_matte_geom(edl.get("frame"))])
+    if not items:
+        return res
+    return res + (
+        "\nNOTE: the subject mask behind "
+        + ", ".join(f"{kind} {i}" for kind, i in items)
+        + " was measured in the previous framing and would now cut the "
+        "subject out of the wrong place, so until re-measured "
+        + ("they render" if len(items) > 1 else "it renders")
+        + " IN FRONT of the picture (a text as a plain title). Re-measure in "
+        "this framing — set_motion_graphic(id, layer='behind_subject') for a "
+        "graphic, remove_text + add_text_behind for a text — or set the "
+        "framing back.")
+
+
 def set_frame(ctx, ratio, mode="crop", focus_x=None, focus_y=None,
               _measured=False, focus_track=None, picture=None):
+    return _behind_framing_note(ctx, _set_frame(
+        ctx, ratio, mode, focus_x, focus_y, _measured, focus_track, picture))
+
+
+def _set_frame(ctx, ratio, mode="crop", focus_x=None, focus_y=None,
+               _measured=False, focus_track=None, picture=None):
     payload = {"ratio": str(ratio), "mode": str(mode or "crop")}
     if picture is not None:
         payload["picture"] = picture
@@ -13021,7 +13054,8 @@ def _measure_subject_matte(ctx, edl, s, e, box, words=None):
              "src_end": src_end, "fp": fp,
              "coverage": stats.get("coverage"),
              "fps": stats.get("fps"),
-             "method": stats.get("method")}, stats, None)
+             "method": stats.get("method"),
+             "geom": subject_matte_geom(edl.get("frame"))}, stats, None)
 
 
 def add_text_behind(ctx, text, at_output_s, duration_s=None, template="title",
@@ -13589,6 +13623,20 @@ def set_picture_card(ctx, id, start, end, box=None, fit="crop", radius=.045,
         return error
     style = (str(background_style).strip().lower() or None
              if background_style is not None else None)
+    # A knob the chosen style cannot draw is refused, never silently dropped
+    # (the schema normalizes it away, and the reply would claim a look the
+    # render does not have). A second colour alone means a gradient.
+    if background_color2 is not None and style is None:
+        style = "vertical_gradient"
+    if background_color2 is not None and style not in ("vertical_gradient",
+                                                       "radial_gradient"):
+        return ("REJECTED: background_color2 is a gradient's second colour — "
+                "it only applies with background_style='vertical_gradient' "
+                f"or 'radial_gradient', not '{style}'.")
+    if background_dim is not None and style != "blur":
+        return ("REJECTED: background_dim only applies to "
+                "background_style='blur' (how far the blurred footage is "
+                "darkened). For a darker gradient pick darker colours.")
     pair = PICTURE_CARD_STYLE_COLORS.get(style)
     if background is None:
         background = pair[0] if pair else "#101012"
@@ -13623,7 +13671,8 @@ def set_picture_card(ctx, id, start, end, box=None, fit="crop", radius=.045,
         res += ("\nNOTE: the canvas around this card is a flat dark void. "
                 "background_style='blur' (the footage itself, blurred and "
                 "darkened, filling the frame) or a vertical/radial gradient, "
-                "with grain ~.25 and vignette ~.4, is the premium finish.")
+                "with vignette ~.4, is the premium finish (grain ~.25 adds "
+                "film texture to the final export at ~3-4x the file size).")
     return res
 
 
@@ -23536,8 +23585,13 @@ TOOLS = {
         "look; background_dim 0-.9, default .45, ~.25 on dark footage), 'radial_gradient' glows from `background` behind "
         "the card out to background_color2, 'vertical_gradient' runs `background` (top) to "
         "background_color2 (bottom); naming only the style picks a tasteful dark palette. "
-        "grain 0-1 adds animated film grain (~.25 subtle, .4 visible) and vignette 0-1 darkens "
-        "the edges (~.4) — both on the backdrop only, never on the footage.",
+        "vignette 0-1 darkens the edges (~.4). grain 0-1 adds animated film grain: .25 is the "
+        "references' texture. Grain is a FINAL-export finish with a cliff — the encoder smooths "
+        "it out of previews and out of any value below ~.2 entirely, and where it survives it "
+        "costs ~3-4x the file size and ~+0.5s of export per 8s of card at 1080x1920 — so use it "
+        "where film texture is the point, not on every card. Both only on the backdrop, never "
+        "on the footage. background_color2 alone implies vertical_gradient; a knob the chosen "
+        "style cannot draw (color2 on blur/solid, background_dim off blur) is rejected.",
         {"id":{"type":"string"},"start":{"type":"number"},"end":{"type":"number"},
          "box":{"type":"array","items":{"type":"number"},"minItems":4,"maxItems":4},
          "fit":{"type":"string","enum":["crop","pad"]},"radius":{"type":"number"},

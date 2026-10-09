@@ -78,7 +78,9 @@ user's requested mood, source aspect, music and identity.
   Never leave the canvas around a card as a flat void: `background_style=
   "blur"` fills it with the card's own footage blurred and darkened (the
   premium podcast look), `radial_gradient`/`vertical_gradient` give a graded
-  field; add `grain` ~.25 and `vignette` ~.4 for texture.
+  field; add `vignette` ~.4. `grain` ~.25 is film texture for the final
+  export only (previews and values below ~.2 are smoothed away, and it costs
+  ~3-4x the file size), so use it where texture is the point.
 - **A visible argument:** use `set_editorial_graphic(kind="comparison")` for
   two actual opposing ideas, `metric` for a supported figure plus its meaning,
   `statement` for a specific thesis, `quote` for a faithful short quotation,

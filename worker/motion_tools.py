@@ -25,6 +25,7 @@ import motion_engine
 import motion_templates
 import sfx_kit
 import storage
+from schemas import subject_matte_geom
 
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
 KIT_PREFIX = "kit:"
@@ -333,13 +334,16 @@ def _behind_report(stats, edl, item):
         bits.append("A zoom overlaps this window: the graphic lives in the "
                     "scene, so it scales with the picture.")
     bits.append(
-        "It is bound to that FOOTAGE: a later cut moves it with the shot and "
-        "removes it if the footage is cut away. No speed ramp over it (the "
-        "mask is frame-for-frame with the source). If the mask ever cannot be "
-        "used (a cut lands inside the window, the mask asset is missing) it "
-        "renders as an ordinary above-captions graphic and the render notes "
-        "say so. NEXT: render_preview and check that the subject's edge reads "
-        "cleanly in front of it.")
+        "It is bound to that FOOTAGE and that FRAMING: a later cut moves it "
+        "with the shot and removes it if the footage is cut away. If the "
+        "mask stops matching the picture — a cut lands inside the window, a "
+        "speed ramp is put over its footage, set_frame changes the crop — it "
+        "renders as an ordinary above-captions graphic (the edit that causes "
+        "it says so; set_motion_graphic re-measures). A mask that fails to "
+        "load at render time degrades the same way but only the render log "
+        "records it, so never claim the depth from the EDL alone. NEXT: "
+        "render_preview and check that the subject's edge reads cleanly in "
+        "front of it.")
     return "\n" + "\n".join(bits)
 
 
@@ -504,10 +508,13 @@ def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
         shape = json.dumps([hit.get(k) for k in
                             ("start", "end", "template", "params", "html", "box", "layer")],
                            sort_keys=True)
-        if not hit.get("behind") or shape != old_shape:
+        stale = ((hit.get("behind") or {}).get("geom")
+                 not in (None, subject_matte_geom(edl.get("frame"))))
+        if not hit.get("behind") or shape != old_shape or stale:
             # A new window needs a new mask (it is pixels of that footage);
             # a new design re-measures how much of it the subject crosses
-            # (a cache hit when the window is unchanged).
+            # (a cache hit when the window is unchanged); a mask measured in
+            # a framing set_frame has since replaced is measured again.
             behind_note, err = _attach_subject_matte(ctx, edl, hit, bbox)
             if err:
                 return err
