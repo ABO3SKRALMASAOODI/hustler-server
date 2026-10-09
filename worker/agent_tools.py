@@ -5741,8 +5741,11 @@ def search_sfx(ctx, query, max_seconds=None):
         mx = float(max_seconds) if max_seconds is not None else None
     except (TypeError, ValueError):
         return "REJECTED: max_seconds must be a number."
-    # The synthesized kit is not offered: it failed the owner's listening test.
-    kit_text = ""
+    lib_hits = motion_tools.sound_search(query)
+    kit_text = ("Valmera sound library (approved real recordings — add_sfx(storage_key=<id>, at=..., "
+                "gain_db=<suggested>)):\n- "
+                + "\n- ".join(f"{h['id']} [{h['role']}, {h['duration_s']:g}s, gain {h['gain_db']} dB] — {h['use']}"
+                               for h in lib_hits) + "\n") if lib_hits else ""
     memory = getattr(ctx, "tool_failure_memory", {})
     unavailable_until = memory.get("sfx_auth_retry_at", 0)
     try:
@@ -5773,7 +5776,7 @@ def search_sfx(ctx, query, max_seconds=None):
             return kit_text
         return (f"No sounds matched '{query}'. Use the PHYSICAL name of "
                 "the sound ('whoosh', 'camera shutter', 'keyboard click', "
-                "'pop', 'riser') rather than a mood word, or list_sfx_kit.")
+                "'pop', 'riser') rather than a mood word, or list_sound_library.")
     ctx._sfx_hits = {h["id"]: h for h in hits}
     _remember_search_hits(ctx, "sfx", hits)
     return (kit_text + "Sounds found (each line carries its license terms — relay "
@@ -6420,7 +6423,7 @@ def _resolve_sfx(ctx, storage_key):
     the sound off this clip" is a thing users ask for and the picture is
     simply never used.
     """
-    kit, kit_err = motion_tools.resolve_kit_reference(ctx, storage_key)
+    kit, kit_err = motion_tools.resolve_library_reference(ctx, storage_key)
     if kit or kit_err:
         return kit, kit_err
     asset = ctx.db.run(dbx.asset_by_key, ctx.project_id, storage_key)
@@ -24739,7 +24742,7 @@ TOOL_DOMAINS = {
         "separate_music", "remove_stem_mix", "set_master_loudness",
     },
     "sfx": {
-        "list_sfx_kit",
+        "list_sound_library",
         "search_sfx", "audition_sfx_candidates", "fetch_sfx",
         "add_web_sfx", "add_sfx", "move_sfx", "remove_sfx",
     },
@@ -25040,8 +25043,6 @@ def _tool_disabled(name, model=None):
     if name in ("list_motion_templates", "add_motion_graphic",
                 "set_motion_graphic"):
         return not motion_tools.motion_engine.available()
-    if name == "list_sfx_kit":
-        return True     # synthesized kit withdrawn until real recordings replace it
     return False
 
 

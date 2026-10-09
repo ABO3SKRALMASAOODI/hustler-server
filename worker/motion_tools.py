@@ -23,12 +23,10 @@ import config  # noqa: F401  (kept for parity with other tool modules)
 import db as dbx
 import motion_engine
 import motion_templates
-import sfx_kit
+import sfx_library
 import storage
 
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
-KIT_PREFIX = "kit:"
-DEFAULT_KIT_GAIN_DB = -3.0
 
 
 def _at():
@@ -52,87 +50,79 @@ def _canvas_size(ctx, edl):
                                delivery=True)
 
 
-# ── SFX kit ────────────────────────────────────────────────────────────────
+# ── Sound library (real recordings approved by the owner) ─────────────────
 
-def kit_search(query, limit=6):
-    """Kit sounds whose name/use matches the query words (deterministic)."""
-    q = [w for w in re.split(r"[^a-z0-9]+", str(query or "").lower()) if w]
-    syn = {"woosh": "whoosh", "swoosh": "whoosh", "transition": "whoosh", "boom": "impact",
-           "hit": "impact", "thud": "impact", "bubble": "pop", "button": "click",
-           "keyboard": "typing", "type": "typing", "bell": "ding", "success": "chime",
-           "money": "coin", "cash": "coin", "camera": "shutter", "photo": "shutter",
-           "build": "riser", "tension": "riser", "bass": "sub_drop", "drop": "sub_drop",
-           "error": "glitch", "digital": "glitch", "slide": "swipe", "message": "notification",
-           "ping": "notification", "counter": "tick", "clock": "tick", "slam": "kick", "punch": "kick"}
-    stop = {"a", "an", "and", "in", "on", "of", "the", "for", "to", "with", "sound", "sfx", "effect"}
-    q = [syn.get(w, w) for w in q if w not in stop and len(w) > 2]
-    scored = []
-    for kind, (dur, use) in sfx_kit.KINDS.items():
-        kind_words = set(kind.split("_"))
-        hay_words = kind_words | set(re.split(r"[^a-z0-9]+", use.lower()))
-        score = sum(2 if (w in kind_words or w == kind) else 1 for w in q
-                    if w in hay_words or w == kind)
-        if score:
-            scored.append((score, kind, dur, use))
-    scored.sort(key=lambda r: (-r[0], r[1]))
-    return [{"id": KIT_PREFIX + k, "kind": k, "duration_s": d, "use": u}
-            for _s, k, d, u in scored[:limit]]
+SOUND_PREFIX = sfx_library.REF_PREFIX
 
 
-def ensure_kit_asset(ctx, kind):
-    """Project storage key for a kit sound, synthesizing/uploading once."""
-    if kind not in sfx_kit.KINDS:
-        raise ValueError(f"unknown kit sound '{kind}'. Kit: {', '.join(sorted(sfx_kit.KINDS))}")
-    key = f"sfx/{ctx.project_id}/kit-{kind}-{sfx_kit.fingerprint(kind)}.wav"
+def sound_search(query, limit=6):
+    """Approved library sounds matching the query words (deterministic)."""
+    return [{"id": SOUND_PREFIX + r["id"], "role": r["role"], "duration_s": r["duration_s"],
+             "use": r["use"], "gain_db": r["gain_db"]} for r in sfx_library.search(query, limit)]
+
+
+def ensure_library_asset(ctx, sound_id):
+    """Project storage key for an approved library sound, uploading once."""
+    row = sfx_library.get(sound_id)
+    if not row:
+        raise ValueError(f"unknown sound '{sound_id}'. Library: "
+                         f"{', '.join(r['id'] for r in sfx_library.catalog())}")
+    local = sfx_library.path(sound_id)
+    key = f"sfx/{ctx.project_id}/lib-{sound_id}-{row['sha'][:10]}.flac"
     existing = ctx.db.run(dbx.asset_by_key, ctx.project_id, key)
     if existing:
         return key
-    d = os.path.join(tempfile.gettempdir(), "valmera-sfx-kit", sfx_kit.KIT_VERSION)
-    os.makedirs(d, exist_ok=True)
-    local = os.path.join(d, f"{kind}.wav")
-    if not os.path.exists(local):
-        tmp = local + f".{os.getpid()}.tmp"
-        sfx_kit.render(kind, tmp)
-        os.replace(tmp, local)
     try:
         present = storage.exists(key)
     except Exception:
         present = False
     if not present:
-        storage.upload_file(local, key, "audio/wav")
-    dur = sfx_kit.KINDS[kind][0]
+        storage.upload_file(local, key, "audio/flac")
     ctx.db.run(dbx.insert_asset, ctx.project_id, "music", key,
-               bytes_=os.path.getsize(local), duration_s=dur,
-               meta={"filename": f"{kind}.wav", "source": "valmera-sfx-kit",
-                     "license": "Valmera original (synthesized, no third-party rights)",
-                     "license_note": "Valmera built-in sound kit — free to use in any edit",
-                     "caption": sfx_kit.KINDS[kind][1], "kit_kind": kind,
-                     "kit_version": sfx_kit.KIT_VERSION})
+               bytes_=os.path.getsize(local), duration_s=row["duration_s"],
+               meta={"filename": row["file"], "source": "valmera-sound-library",
+                     "source_url": row["source_url"], "author": row["author"],
+                     "license": row["license"],
+                     "license_note": "CC0 1.0 real recording from Freesound — no attribution required",
+                     "caption": row["use"], "library_sound": sound_id, "role": row["role"]})
     return key
 
 
-def resolve_kit_reference(ctx, storage_key):
-    """(sound_dict, error) for a 'kit:<kind>' reference; (None, None) otherwise."""
-    if not isinstance(storage_key, str) or not storage_key.startswith(KIT_PREFIX):
+def resolve_library_reference(ctx, storage_key):
+    """(sound_dict, error) for a 'sound:<id>' reference; (None, None) otherwise."""
+    if not isinstance(storage_key, str) or not storage_key.startswith(SOUND_PREFIX):
         return None, None
-    kind = storage_key[len(KIT_PREFIX):].strip()
+    sound_id = storage_key[len(SOUND_PREFIX):].strip()
     try:
-        key = ensure_kit_asset(ctx, kind)
+        key = ensure_library_asset(ctx, sound_id)
     except ValueError as e:
         return None, f"REJECTED: {e}"
     except Exception as e:  # noqa: BLE001
-        return None, (f"Could not prepare the kit sound ({str(e)[:160]}). Try again; "
+        return None, (f"Could not prepare the library sound ({str(e)[:160]}). Try again; "
                       "do NOT claim a sound was added.")
-    return {"name": f"{kind} (Valmera kit)", "duration_s": sfx_kit.KINDS[kind][0],
-            "library": True, "storage_key": key}, None
+    row = sfx_library.get(sound_id)
+    return {"name": f"{sound_id} (Valmera sound library)", "duration_s": row["duration_s"],
+            "library": True, "storage_key": key, "gain_db": row["gain_db"]}, None
 
 
-def list_sfx_kit(ctx):
-    rows = [f"- kit:{k} ({d:g}s) — {u}" for k, (d, u) in sfx_kit.KINDS.items()]
-    return ("Valmera built-in sound kit (always available, no licence terms). Place one with "
-            "add_sfx(storage_key='kit:<kind>', at=<program seconds>). Cue the sound where the "
-            "motion LANDS; layer a riser into an impact for a big reveal; keep UI ticks/pops "
-            "quiet (gain -8 to -12 dB).\n" + "\n".join(rows))
+SOUND_POLICY = (
+    "Use sound like a professional editor, never as decoration: only where something "
+    "meaningful happens ON SCREEN — a designed graphic landing, a real section change or "
+    "B-roll entry, the payoff, or a real-world action shown (shutter on a photo, typing under "
+    "typed text, a click on a button press, a cash register on a money figure). Never on "
+    "captions or on ordinary cuts inside a conversation. Sparse: at most about one sound every "
+    "4-5 s (≈4-8 in a 30-45 s short), never the same sound twice within ~3 s, zero is fine "
+    "when nothing earns one. Match the material, keep one family per short, place the peak on "
+    "the visual frame, and mix under the voice at the suggested gain.")
+
+
+def list_sound_library(ctx, role=None):
+    rows = sfx_library.catalog(role or None)
+    if not rows:
+        return "No approved sounds match." if role else "The sound library is empty on this deployment."
+    return ("Valmera sound library — real recordings approved by ear (CC0, no attribution). "
+            "Place with add_sfx(storage_key='sound:<id>', at=<program seconds>, gain_db=<suggested>).\n"
+            + SOUND_POLICY + "\n" + "\n".join("- " + sfx_library.describe(r) for r in rows))
 
 
 # ── motion graphics ───────────────────────────────────────────────────────
@@ -162,22 +152,25 @@ def list_motion_templates(ctx, category=None):
             "'motion-design' for the API).")
 
 
-def _sfx_cues(spec, params, start, end):
+def _sfx_cues(spec, params, start, end, seed=""):
+    """[(time, sound_id, gain_db)] for a template's declared sound roles,
+    mapped onto approved library recordings (roles without one are skipped)."""
     cues = []
-    for c in spec.get("sfx") or []:
-        kind = c.get("kind")
-        if kind not in sfx_kit.KINDS:
+    for n, c in enumerate(spec.get("sfx") or []):
+        row = sfx_library.pick(c.get("kind") or "", seed=f"{seed}:{n}")
+        if not row:
             continue
+        gain = float(c.get("gain_db", row["gain_db"]))
         at = float(c.get("at") or 0.0)
         t = (end + at) if at < 0 else (start + at)
         rep = c.get("repeat")
         if rep and isinstance(params.get(rep.get("param")), list):
-            n = len(params[rep["param"]])
-            for i in range(n):
+            n_items = len(params[rep["param"]])
+            for i in range(n_items):
                 cues.append((round(start + float(rep.get("from", at)) + i * float(rep.get("every", 0.3)), 3),
-                             kind, float(c.get("gain_db", DEFAULT_KIT_GAIN_DB))))
+                             row["id"], gain))
             continue
-        cues.append((round(t, 3), kind, float(c.get("gain_db", DEFAULT_KIT_GAIN_DB))))
+        cues.append((round(t, 3), row["id"], gain))
     return [(t, k, g) for t, k, g in cues if start - 0.01 <= t <= end]
 
 
@@ -193,7 +186,7 @@ def _apply_owned_sfx(ctx, edl, mid, cues):
         if t > prog - 0.05:
             continue
         try:
-            key = ensure_kit_asset(ctx, kind)
+            key = ensure_library_asset(ctx, kind)
         except Exception as e:  # noqa: BLE001
             notes.append(f"sound {kind} unavailable ({str(e)[:80]})")
             continue
@@ -238,9 +231,9 @@ def _validate_and_probe(ctx, edl, item):
     return None, ""
 
 
-# The synthesized kit was rejected by the owner by ear ("cheap, like a 2000s
-# game"). Templates keep their declared sound ROLES so an approved library of
-# real recordings can be mapped onto them, but nothing adds sound by default.
+# Sound is deliberate: templates declare sound ROLES (mapped onto the owner-
+# approved real recordings in worker/sfx_library), but nothing adds sound
+# unless the editor asks for it on a moment that earns it.
 SFX_DEFAULT = False
 
 
@@ -300,7 +293,7 @@ def add_motion_graphic(ctx, template, start, end=None, params=None, html=None,
     items.append(item)
     edl["motion"] = items
     notes = []
-    cues = _sfx_cues(spec, clean, s, e) if (SFX_DEFAULT if sfx is None else sfx) else []
+    cues = _sfx_cues(spec, clean, s, e, seed=mid) if (SFX_DEFAULT if sfx is None else sfx) else []
     if cues:
         notes += _apply_owned_sfx(ctx, edl, mid, cues)
     clamp = ""
@@ -370,7 +363,7 @@ def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
     owned = [s for s in (edl.get("sfx") or []) if str(s.get("id", "")).startswith(_owned_sfx_prefix(id))]
     notes = []
     if sfx is True or (sfx is None and owned and (template is not None or params)):
-        cues = _sfx_cues(motion_templates.spec(hit["template"]), hit["params"], hit["start"], hit["end"])
+        cues = _sfx_cues(motion_templates.spec(hit["template"]), hit["params"], hit["start"], hit["end"], seed=id)
         notes += _apply_owned_sfx(ctx, edl, id, cues)
     elif sfx is False:
         edl["sfx"] = [s for s in (edl.get("sfx") or []) if s not in owned]
@@ -412,7 +405,8 @@ TOOL_SPECS = {
         add_motion_graphic,
         "Place a browser-rendered, After-Effects-grade motion graphic on the PROGRAM clock: "
         "spring/blur entrances, glow, gradients, 3D depth, masks, icon/emoji pops, counters, "
-        "UI cards. One call = a finished composition (silent; add sound deliberately). start/end are program seconds; end defaults to the "
+        "UI cards. One call = a finished composition, silent by default; pass sfx=true only for a "
+        "moment that earns sound (its template cues map to the approved sound library). start/end are program seconds; end defaults to the "
         "template's natural duration. Cue it to the exact word/beat it amplifies (use word "
         "times from get_kept_transcript). layer='above_captions' (default for designed moments) "
         "or 'below_captions'. Templates that replace the spoken words set mute_captions; pass "
@@ -440,10 +434,12 @@ TOOL_SPECS = {
         remove_motion_graphic,
         "Remove one motion graphic by id together with its owned sound cues.",
         {"id": {"type": "string"}}),
-    "list_sfx_kit": (
-        list_sfx_kit,
-        "READ: Valmera's built-in sound-design kit (whooshes, swooshes, pops, clicks, ticks, kicks, "
-        "dings, chimes, notification, coin, risers, impacts, sub drop, glitch, shutter, typing). "
-        "Always available and licence-free; place with add_sfx(storage_key='kit:<kind>', at=...).",
-        {}),
+    "list_sound_library": (
+        list_sound_library,
+        "READ: Valmera's sound library — real recordings approved by ear (whooshes, swish, impact, "
+        "risers, camera shutters, keyboard typing, clicks, pop, tick, ding, glitches, cash register, "
+        "heartbeat) with when to use each and a suggested gain. Place with "
+        "add_sfx(storage_key='sound:<id>', at=...). Sound only on meaningful on-screen moments, sparse "
+        "(≈ one every 4-5 s at most), never on captions.",
+        {"role": {"type": "string", "description": "optional role filter, e.g. whoosh, click, riser"}}),
 }

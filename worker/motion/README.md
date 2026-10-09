@@ -29,14 +29,18 @@ image the renderer serves to the page; the param arrives as a URL or `null`).
 Every non-required param needs a `default`. Keep params few and meaningful;
 good defaults matter more than knobs.
 
-`sfx` lists sound cues relative to the item start. Kinds come from the
-built-in kit (`worker/sfx_kit.py`): whoosh_soft, whoosh_hard, swoosh_up,
-swish_short, swipe, pop_soft, pop_bright, click_ui, tick, kick, ding, chime,
-notification, coin, riser_short, riser_long, impact_soft, impact_hard,
-sub_drop, glitch, shutter, typing. A negative "at" counts back from the item
-end; {"repeat": {"param": "items", "every": 0.3, "from": 0.2}} repeats a cue
-once per list/rows entry. Editors can add/remove them; cue the moment where
-the motion *lands*, not where it starts drifting.
+`sfx` declares sound ROLES relative to the item start (where a sound would
+belong if the editor chooses to add one): whoosh_soft, whoosh_hard, swish_short,
+swipe, pop_soft, click_ui, tick, kick/impact_soft/impact_hard, ding, chime,
+notification, coin, riser_short, riser_long, glitch, shutter, typing,
+heartbeat. Roles map onto the owner-approved REAL recordings in
+`worker/sfx_library/` (`sfx_library.ROLE_ALIASES`); a role with no approved
+recording is skipped. Graphics are silent by default — `add_motion_graphic(...,
+sfx=true)` opts a moment in. A negative "at" counts back from the item end;
+{"repeat": {"param": "items", "every": 0.3, "from": 0.2}} repeats a cue once
+per list/rows entry. Declare at most one or two cues per template, on the
+moment the motion lands — never a sound per word or per caption. Synthesized
+sounds were rejected by the owner and must never be added.
 
 ## The design space
 

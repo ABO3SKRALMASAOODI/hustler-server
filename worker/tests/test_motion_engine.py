@@ -15,7 +15,7 @@ import motion_engine  # noqa: E402
 import motion_layer  # noqa: E402
 import motion_templates  # noqa: E402
 import motion_tools  # noqa: E402
-import sfx_kit  # noqa: E402
+import sfx_library  # noqa: E402
 import stitch  # noqa: E402
 from schemas import (EDLValidationError, default_edl, describe_edl,  # noqa: E402
                      edl_signature, validate_edl)
@@ -193,7 +193,7 @@ class _Ctx:
 
 
 def test_tools_add_set_remove_with_owned_sound_cues(monkeypatch):
-    monkeypatch.setattr(motion_tools, "ensure_kit_asset", lambda ctx, kind: f"sfx/1/kit-{kind}.wav")
+    monkeypatch.setattr(motion_tools, "ensure_library_asset", lambda ctx, sid: f"sfx/1/lib-{sid}.flac")
     monkeypatch.setattr(motion_tools, "_probe_item", lambda item, W, H, fps=30.0:
                         {"errors": [], "visible_frames": 4, "samples": 4, "bboxes": [[.1, .3, .9, .5]]})
     ctx = _Ctx()
@@ -207,6 +207,7 @@ def test_tools_add_set_remove_with_owned_sound_cues(monkeypatch):
     assert edl["motion"][0]["id"] == "mg1" and edl["motion"][0]["end"] == 4.6
     cues = sorted((s["id"], s["at"]) for s in edl["sfx"])
     assert cues == [("mg_mg1_sfx1", 2.0), ("mg_mg1_sfx2", 2.18)]
+    assert all(s["storage_key"].startswith("sfx/1/lib-") for s in edl["sfx"])
     assert motion_tools.set_motion_graphic(ctx, "mg1", start=5.0, end=7.0).startswith("EDL v")
     edl = ctx.latest_edl()["json"]
     assert sorted(s["at"] for s in edl["sfx"]) == [5.0, 5.18]
@@ -225,27 +226,22 @@ def test_tool_rejects_bad_params_and_invisible_compositions(monkeypatch):
     assert out.startswith("REJECTED") and "nothing visible" in out
 
 
-def test_kit_search_and_listing():
-    hits = motion_tools.kit_search("whoosh transition")
-    assert hits and hits[0]["id"].startswith("kit:whoosh")
-    assert motion_tools.kit_search("camera")[0]["kind"] == "shutter"
-    assert "kit:riser_short" in motion_tools.list_sfx_kit(None)
-
-
-# ── sfx kit ─────────────────────────────────────────────────────────────
-
-def test_every_kit_sound_synthesizes_deterministically(tmp_path):
-    import numpy as np
-    for kind in sfx_kit.KINDS:
-        a = sfx_kit.samples(kind)
-        assert a.ndim == 2 and a.shape[1] == 2 and len(a) > 1000, kind
-        peak = float(np.max(np.abs(a)))
-        assert 0.01 < peak <= 0.71, (kind, peak)
-        assert np.isfinite(a).all()
-    a, b = sfx_kit.samples("whoosh_soft"), sfx_kit.samples("whoosh_soft")
-    assert (a == b).all()
-    path = sfx_kit.render("pop_soft", str(tmp_path / "p.wav"))
-    assert os.path.getsize(path) > 1000
+def test_sound_library_is_real_approved_recordings_with_licences():
+    rows = sfx_library.catalog()
+    assert len(rows) >= 20
+    for r in rows:
+        assert r["license"] == "CC0 1.0" and r["source_url"].startswith("https://freesound.org/")
+        assert os.path.exists(sfx_library.path(r["id"]))
+        assert -20 <= r["gain_db"] <= -6
+    lic = open(os.path.join(sfx_library.LIB_DIR, "LICENSES.md")).read()
+    assert all(r["id"] in lic for r in rows)
+    assert sfx_library.get("whoosh_soft_1") and sfx_library.get("../manifest.json") is None
+    assert sfx_library.pick("whoosh_soft", "a")["role"] == "whoosh"      # template role alias
+    assert sfx_library.pick("paper") is None                              # nothing approved -> skipped
+    hits = motion_tools.sound_search("camera photo")
+    assert hits and hits[0]["role"] == "shutter" and hits[0]["id"].startswith("sound:")
+    listing = motion_tools.list_sound_library(None)
+    assert "sound:impact_1" in listing and "never on" in listing.lower()
 
 
 # ── engine (real Chromium) ──────────────────────────────────────────────
