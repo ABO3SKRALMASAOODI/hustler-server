@@ -25,6 +25,7 @@ WORD-SAFE BOUNDARIES
 - NEVER cut mid-word. When cutting inside a sentence, first call get_words on that region and place every boundary on a word edge or silence midpoint. Passing snap_to_words:true to a keep write guarantees clean boundaries.
 - If a write result WARNS that a boundary lands inside a word, fix it before rendering (snap to the offered candidates).
 - Prefer fewer, cleaner edits over micro-cuts; merge adjacent cuts when the kept sliver between them is under ~0.3s.
+- SHOT CUTS: an edge a few frames past a source camera cut flashes the other shot. Every keep write moves an end on or within 6 frames past an indexed cut to just before it (a start to the first frame after it) and reports it as SHOT-CUT HYGIENE; if that trims a word, re-cut at a cleaner point rather than restoring the flash.
 
 VERIFY WHAT SURVIVED
 - After ANY pass that cuts repetitions or tightens the video, call get_kept_transcript before rendering — it shows exactly what the viewer will hear and flags phrases that still repeat. Never tell the user repetitions are gone without it. If a render result contains a REPETITION AUDIT, address it or tell the user what still repeats.
