@@ -230,6 +230,11 @@ def test_a_cut_inside_the_window_is_disclosed():
                         [[0.0, 2.0], [2.5, SHOT_S]])
     assert edl["motion"], "the graphic should survive a partial cut"
     assert any("cut" in n and "ABOVE" in n for n in notes), notes
+    # an unrelated later edit does not repeat the disclosure
+    old = Timeline(edl["keep"], [], [])
+    edl["keep"] = [[0.0, 2.0], [2.5, SHOT_S - 0.5]]
+    again = tl_mod.remap_program_items(edl, old, Timeline(edl["keep"], [], []))
+    assert not any("ABOVE" in n for n in again), again
 
 
 def test_stitching_refuses_behind_graphics():

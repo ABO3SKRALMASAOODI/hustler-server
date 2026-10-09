@@ -1470,7 +1470,9 @@ def remap_program_items(edl, old_tl, new_tl):
                     region_notes.append(
                         f"note: motion graphic {mo.get('id')} moved to "
                         f"{ns}-{ne}s, staying behind the same subject.")
-                if len(pieces) > 1:
+                if len(pieces) > 1 and len(old_tl.span_to_out(
+                        float(behind["src_start"]),
+                        float(behind["src_end"]))) <= 1:
                     region_notes.append(
                         f"note: motion graphic {mo.get('id')} now has a cut "
                         "inside its window, so its subject mask cannot follow "
