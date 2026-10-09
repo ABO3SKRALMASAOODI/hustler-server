@@ -7,7 +7,20 @@ hierarchy and a restrained common motion language.
 import math
 import re
 
+from typography_scenes import FITS, LayoutRejected, bounded, fit_box
+
 KINDS = ("statement", "comparison", "metric", "quote", "chapter", "label", "headline")
+# Validator bounds; agent_tools derives the model-visible schema from these.
+MAX_TEXT_CHARS = 100
+MAX_EYEBROW_CHARS = 32
+MAX_SPEAKER_CHARS = 60
+HEADLINE_FONT_RANGE = (.035, .085)   # fraction of the canvas short edge
+HEADLINE_FONT_SIZE = .052
+HEADLINE_MAX_LINES = 3
+HEADLINE_LEADING = 1.2
+MIN_CARD_FONT = .025
+DEFAULT_BOXES = {"label": (.08, .15, .92, .31), "headline": (.08, .13, .92, .27)}
+DEFAULT_BOX = (.07, .22, .93, .73)
 PALETTES = {
     "ink": ("#101012", "#F4F2EE", "#A3A3A7", "#B9AB91"),
     "paper": ("#F0EEE8", "#171719", "#626166", "#605644"),
@@ -18,34 +31,54 @@ PALETTES = {
 def compose(*, id, kind, text, start, end, secondary=None, eyebrow=None,
             palette="ink", box=None, motion="settle", W=1080, H=1920,
             motion_motif=None, treatment="panel", mute_captions=False,
-            speaker=None, font_size=None):
+            speaker=None, font_size=None, fit="strict"):
+    """fit='strict' rejects; fit='auto' repairs the box (and a headline's
+    size) and reports it in result['fit']['notes']. Every remaining problem
+    is raised together as LayoutRejected."""
+    problems, notes = [], []
+    if fit not in FITS:
+        problems.append("fit must be 'auto' or 'strict'")
+        fit = "strict"
     if not re.fullmatch(r"[a-zA-Z0-9_-]{1,48}", str(id)):
-        raise ValueError("id must be 1–48 letters, numbers, underscores or hyphens")
+        problems.append("id must be 1–48 letters, numbers, underscores or hyphens")
     if kind not in KINDS or palette not in PALETTES or motion not in ("settle", "none") or treatment not in ("panel", "type"):
-        raise ValueError("Choose a listed composition, palette and motion")
-    start, end = float(start), float(end)
-    if not all(math.isfinite(v) for v in (start,end)) or start < 0 or end <= start:
-        raise ValueError("start/end must be a finite program-time window")
+        problems.append("Choose a listed composition, palette and motion")
+    try:
+        start, end = float(start), float(end)
+    except (TypeError, ValueError):
+        start = end = float("nan")
+    timed = all(math.isfinite(v) for v in (start,end)) and start >= 0 and end > start
+    if not timed:
+        problems.append("start/end must be a finite program-time window")
     text = str(text or "").strip()
     secondary = str(secondary or "").strip()
     eyebrow = str(eyebrow or "").strip()
-    if not text or len(text)>100 or len(secondary)>100 or len(eyebrow)>32:
-        raise ValueError("Keep the main/supporting text to 100 characters each and the eyebrow to 32")
+    if not text or len(text)>MAX_TEXT_CHARS or len(secondary)>MAX_TEXT_CHARS or len(eyebrow)>MAX_EYEBROW_CHARS:
+        problems.append(f"Keep the main/supporting text to {MAX_TEXT_CHARS} characters each and the eyebrow to {MAX_EYEBROW_CHARS}"
+                        f" (got {len(text)}/{len(secondary)}/{len(eyebrow)})")
     if kind == "comparison" and not secondary:
-        raise ValueError("A comparison requires both exact terms")
+        problems.append("A comparison requires both exact terms")
     words = len((text+" "+secondary+" "+eyebrow).split())
     minimum = max(1.5, words/3.2 + (.45 if motion=="settle" else .15))
-    if end-start < minimum:
-        raise ValueError(f"Allow at least {minimum:.2f}s to read this composition, or shorten the copy")
+    reads = not timed or end-start >= minimum
+    if not reads:
+        problems.append(f"Allow at least {minimum:.2f}s to read this composition, or shorten the copy"
+                        f" (window is {end-start:.2f}s; end ≥ {start+minimum:.2f})")
     if kind == "headline":
         if secondary or eyebrow:
-            raise ValueError("A headline uses speaker and text, without extra supporting labels")
+            problems.append("A headline uses speaker and text, without extra supporting labels")
         return _headline(id=id, text=text, speaker=speaker, start=start, end=end,
-                         palette=palette, box=box, font_size=font_size, W=W, H=H)
+                         palette=palette if palette in PALETTES else "ink",
+                         box=box, font_size=font_size, W=W, H=H, fit=fit,
+                         problems=problems, notes=notes, check_reading=reads and timed)
     if speaker is not None or font_size is not None:
-        raise ValueError("speaker and font_size belong to kind=headline")
-    from schemas import Frame
-    box = Frame._picture_rectangle(box or ([.08,.15,.92,.31] if kind=="label" else [.07,.22,.93,.73]))
+        problems.append("speaker and font_size belong to kind=headline")
+    box = fit_box(box, DEFAULT_BOXES.get(kind, DEFAULT_BOX), fit, problems,
+                  notes, safe=False)
+    if kind not in KINDS or palette not in PALETTES or not text:
+        raise LayoutRejected(problems)
+    if not timed:
+        start, end = 0., max(minimum, 1.)
     x0,y0,x1,y1 = box
     width,height = x1-x0,y1-y0
     cx,cy=(x0+x1)/2,(y0+y1)/2
@@ -94,8 +127,9 @@ def compose(*, id, kind, text, start, end, secondary=None, eyebrow=None,
             if measured["height"]<=max_height and measured["right"]-measured["left"]<=width*W*.87:
                 break
             row["font_size"]*=.94
-        if row["font_size"] < .025:
-            raise ValueError("Copy is too dense for this card; shorten it or use a larger box")
+        if row["font_size"] < MIN_CARD_FONT:
+            problems.append("Copy is too dense for this card; shorten it or use a larger box"
+                            f" ({key} line)")
         texts.append(row)
 
     if treatment == "panel":
@@ -122,54 +156,92 @@ def compose(*, id, kind, text, start, end, secondary=None, eyebrow=None,
         line("main",text,y0+height*main_y,.145 if kind=="metric" else .092,
              serif=kind=="quote")
         line("detail",secondary,y0+height*.80,.036,muted)
-    return {"texts":texts,"vectors":vectors,"prefix":prefix,"minimum_hold_s":round(minimum,2)}
+    if problems:
+        raise LayoutRejected(problems)
+    return {"texts":texts,"vectors":vectors,"prefix":prefix,"minimum_hold_s":round(minimum,2),
+            "fit":{"mode":fit,"box":list(box),"notes":notes}}
 
 
-def _headline(*, id, text, speaker, start, end, palette, box, font_size, W, H):
+def _headline(*, id, text, speaker, start, end, palette, box, font_size, W, H,
+              fit="strict", problems=None, notes=None, check_reading=True):
     """A persistent, speaker-first heading with measured wrapping and no panel.
 
     Identity is supplied from source evidence by the caller, never inferred
-    here. Keep the name together and wrap the claim at its requested size;
-    don't shrink the entire title to accommodate excess copy.
+    here. Keep the name together and wrap the claim at its requested size.
+    strict never shrinks the title to accommodate excess copy; auto may step
+    the size down to the validated minimum and reports the applied size.
     """
-    from schemas import Frame
     from type_metrics import width
     from typography_scenes import compose as typography
+    problems = [] if problems is None else problems
+    notes = [] if notes is None else notes
     speaker = str(speaker or "").strip()
-    if not speaker or len(speaker)>60 or "\n" in speaker:
-        raise ValueError("Provide the verified speaker name (1–60 characters), or use another kind without attribution")
+    if not speaker or len(speaker)>MAX_SPEAKER_CHARS or "\n" in speaker:
+        problems.append(f"Provide the verified speaker name (1–{MAX_SPEAKER_CHARS} characters), or use another kind without attribution")
+        speaker = speaker.replace("\n", " ")[:MAX_SPEAKER_CHARS] or "?"
     if "\n" in text:
-        raise ValueError("Headline text wraps automatically; omit manual line breaks")
-    size = .052 if font_size is None else float(font_size)
-    if not math.isfinite(size) or not .035 <= size <= .085:
-        raise ValueError("Headline font_size must be .035–.085 of the canvas short edge")
-    box = Frame._picture_rectangle(box or [.08,.13,.92,.27])
-    px = round(min(W,H)*size)
-    room = (box[2]-box[0])*W-12
+        problems.append("Headline text wraps automatically; omit manual line breaks")
+        text = " ".join(text.split())
+    size = bounded(HEADLINE_FONT_SIZE if font_size is None else font_size,
+                   "Headline font_size", HEADLINE_FONT_RANGE, fit, problems, notes)
+    box = fit_box(box, DEFAULT_BOXES["headline"], fit, problems, notes, safe=True)
     fg,accent = PALETTES[palette][1],PALETTES[palette][3]
     name = speaker.rstrip(":")+":"
     pieces = [(name,accent)] + [(word,fg) for word in text.split()]
-    rows=[]; row=[]; used=0
-    gap=width(" ","Inter Display Bold",px)
-    for word,color in pieces:
-        measured=width(word,"Inter Display Bold",px)
-        if measured>room:
-            raise ValueError("Headline name or word exceeds its box; widen the box or shorten the copy")
-        if row and used+gap+measured>room:
-            rows.append({"runs":row});row=[];used=0
-        used += (gap if row else 0)+measured
-        row.append({"text":word,"color":color})
-    if row:rows.append({"runs":row})
-    if len(rows)>3:
-        raise ValueError("Headline needs more than three lines; shorten the claim instead of shrinking it")
+    short = min(W,H)
+    room = (box[2]-box[0])*W-12
+    room_h = (box[3]-box[1])*H
+
+    def wrap(size):
+        px = round(short*size)
+        rows=[]; row=[]; used=0
+        gap=width(" ","Inter Display Bold",px)
+        oversize = False
+        for word,color in pieces:
+            measured=width(word,"Inter Display Bold",px)
+            oversize = oversize or measured>room
+            if row and used+gap+measured>room:
+                rows.append({"runs":row});row=[];used=0
+            used += (gap if row else 0)+measured
+            row.append({"text":word,"color":color})
+        if row:rows.append({"runs":row})
+        tall = len(rows)*px*HEADLINE_LEADING > room_h
+        return rows, oversize, tall
+
+    if size is None:
+        raise LayoutRejected(problems)
+    rows, oversize, tall = wrap(size)
+    if fit == "auto" and (oversize or len(rows)>HEADLINE_MAX_LINES or tall):
+        before = size
+        while (oversize or len(rows)>HEADLINE_MAX_LINES or tall) and size > HEADLINE_FONT_RANGE[0]:
+            size = max(HEADLINE_FONT_RANGE[0], round(size*.94, 4))
+            rows, oversize, tall = wrap(size)
+        if size < before:
+            notes.append(f"Headline font_size {before:g}→{size:g} so the name and claim fit "
+                         f"{len(rows)} line{'s' if len(rows)>1 else ''} inside the box")
+    floor = " even at the minimum font_size" if fit == "auto" else ""
+    if oversize:
+        problems.append("Headline name or word exceeds its box; widen the box or shorten the copy"+floor)
+    if len(rows)>HEADLINE_MAX_LINES:
+        problems.append("Headline needs more than three lines; shorten the claim instead of shrinking it"
+                        f" ({len(rows)} lines{floor})")
+    elif tall:
+        problems.append("Lines exceed the scene height; use fewer lines or a taller box"
+                        f" ({len(rows)} lines need {len(rows)*round(short*size)*HEADLINE_LEADING:.0f}px,"
+                        f" the box allows {room_h:.0f}px{floor})")
     minimum=max(2.,len((name+" "+text).split())/3.2+.15)
-    if end-start<minimum:
-        raise ValueError(f"Allow at least {minimum:.2f}s to read the speaker and headline")
+    if check_reading and end-start<minimum:
+        problems.append(f"Allow at least {minimum:.2f}s to read the speaker and headline"
+                        f" (window is {end-start:.2f}s; end ≥ {start+minimum:.2f})")
+    if problems:
+        raise LayoutRejected(problems)
     result=typography(id=id,start=start,end=end,lines=rows,box=box,align="left",
-                      reveal="still",motion="none",font_size=size,leading=1.2,
-                      mute_captions=False,W=W,H=H)
+                      reveal="still",motion="none",font_size=size,leading=HEADLINE_LEADING,
+                      mute_captions=False,W=W,H=H,fit=fit)
     prefix=f"eg_{id}__"
     for item in result["texts"]:
         item["id"]=item["id"].replace(result["prefix"],prefix,1)
     return {"texts":result["texts"],"vectors":[],"prefix":prefix,
-            "minimum_hold_s":round(minimum,2)}
+            "minimum_hold_s":round(minimum,2),
+            "fit":{"mode":fit,"box":list(box),"font_size":result["fit"]["font_size"],
+                   "notes":notes+result["fit"]["notes"]}}

@@ -16,6 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 SKILLS_DIR = ROOT / "skills"
 TOOLS_SOURCE = ROOT / "agent_tools.py"
+MOTION_TOOLS_SOURCE = ROOT / "motion_tools.py"
 REQUIRED_SECTIONS = (
     "editorial decision principles",
     "evidence to inspect",
@@ -41,14 +42,13 @@ DATED_HISTORY = (
 )
 
 
-def tool_names(path: Path = TOOLS_SOURCE) -> set[str]:
-    """Extract public tool keys without importing the worker dependency tree."""
+def _dict_literal_keys(path: Path, name: str) -> set[str]:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     for node in ast.walk(tree):
         if not isinstance(node, (ast.Assign, ast.AnnAssign)):
             continue
         targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-        if not any(isinstance(target, ast.Name) and target.id == "TOOLS"
+        if not any(isinstance(target, ast.Name) and target.id == name
                    for target in targets):
             continue
         if not isinstance(node.value, ast.Dict):
@@ -57,7 +57,64 @@ def tool_names(path: Path = TOOLS_SOURCE) -> set[str]:
             key.value for key in node.value.keys
             if isinstance(key, ast.Constant) and isinstance(key.value, str)
         }
-    raise ValueError(f"Could not statically locate TOOLS in {path}")
+    raise ValueError(f"Could not statically locate {name} in {path}")
+
+
+def tool_names(path: Path = TOOLS_SOURCE) -> set[str]:
+    """Extract public tool keys without importing the worker dependency tree."""
+    return _dict_literal_keys(path, "TOOLS")
+
+
+def retired_tool_names(path: Path = TOOLS_SOURCE) -> set[str]:
+    """Names popped from TOOLS by agent_tools' `for _retired_tool in (...)`."""
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.For) and isinstance(node.target, ast.Name)
+                and node.target.id == "_retired_tool"
+                and isinstance(node.iter, (ast.Tuple, ast.List))):
+            return {elt.value for elt in node.iter.elts
+                    if isinstance(elt, ast.Constant)
+                    and isinstance(elt.value, str)}
+    return set()
+
+
+def live_tool_names(path: Path = TOOLS_SOURCE,
+                    motion_path: Path = MOTION_TOOLS_SOURCE) -> set[str]:
+    """The live TOOLS registry, statically: the literal plus
+    motion_tools.TOOL_SPECS (merged at import) minus retired names."""
+    names = tool_names(path)
+    if motion_path.exists():
+        names |= _dict_literal_keys(motion_path, "TOOL_SPECS")
+    return names - retired_tool_names(path)
+
+
+_IDENTIFIER = re.compile(r"(?<![\w.\-/])([a-z][a-z0-9]*(?:_[a-z0-9]+)+)(?!\w)")
+_CALL = re.compile(r"(?<![\w.])([a-z][a-z0-9_]*_[a-z0-9_]+)\s*\(")
+
+
+def stale_tool_references(skills_dir: Path = SKILLS_DIR,
+                          tools_path: Path = TOOLS_SOURCE,
+                          motion_path: Path = MOTION_TOOLS_SOURCE
+                          ) -> dict[str, list[str]]:
+    """{skill file: sorted tool names it references that TOOLS lacks}.
+
+    A reference is a function-shaped name (`name(`) or any bare mention of
+    a name that is or was a registered tool (retired tools included), so
+    prose like "use research_music" is caught even without parentheses.
+    """
+    live = live_tool_names(tools_path, motion_path)
+    tool_like = tool_names(tools_path) | retired_tool_names(tools_path)
+    if motion_path.exists():
+        tool_like |= _dict_literal_keys(motion_path, "TOOL_SPECS")
+    found: dict[str, list[str]] = {}
+    for path in sorted(skills_dir.glob("*.md")):
+        text = path.read_text(encoding="utf-8")
+        named = {m.group(1) for m in _IDENTIFIER.finditer(text)} & tool_like
+        called = set(_CALL.findall(text)) - NON_TOOL_CALLS
+        stale = sorted((named | called) - live)
+        if stale:
+            found[path.name] = stale
+    return found
 
 
 def _sections(text: str) -> list[tuple[str, int, str]]:
@@ -121,7 +178,11 @@ def validate_all(skills_dir: Path = SKILLS_DIR,
                  tools_path: Path = TOOLS_SOURCE) -> dict:
     paths = sorted(skills_dir.glob("*.md"))
     known_skills = {path.stem for path in paths}
+    # Structural check: registered names (motion tools included). Retired
+    # names are reported separately by stale_tool_references().
     public_tools = tool_names(tools_path)
+    if MOTION_TOOLS_SOURCE.exists() and tools_path == TOOLS_SOURCE:
+        public_tools |= _dict_literal_keys(MOTION_TOOLS_SOURCE, "TOOL_SPECS")
     failures = {}
     for path in paths:
         try:
@@ -135,6 +196,9 @@ def validate_all(skills_dir: Path = SKILLS_DIR,
         "skills": len(paths),
         "tools": len(public_tools),
         "failures": failures,
+        # Informational here (tests ratchet it): tool names a skill mentions
+        # that the live TOOLS registry no longer serves.
+        "stale_tool_references": stale_tool_references(skills_dir, tools_path),
     }
 
 
@@ -148,6 +212,9 @@ def main() -> int:
     elif result["ok"]:
         print(f"Validated {result['skills']} skills against "
               f"{result['tools']} public tools")
+        for path, names in result["stale_tool_references"].items():
+            print(f"warning: skills/{path} names tools missing from TOOLS: "
+                  + ", ".join(names))
     else:
         for path, errors in result["failures"].items():
             for error in errors:

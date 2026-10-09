@@ -108,6 +108,7 @@ from schemas import (CANVAS_DIMS, CaptionStyle, clean_fingerprint,
                      SCREEN_FRAME_RADIUS_MAX,
                      SCREEN_QUAD_MIN_FRAC, SCREEN_TAKEOVER_MIN_S,
                      SCREEN_TAKEOVER_MAX_S, quad_bbox, quad_is_sane)
+from schemas import ANIM_MAX_KEYFRAMES, CAPTION_LEADING_RANGE
 from timeline import Timeline, card_text_window, insert_windows
 
 # Karaoke grouping: the renderer's legacy clamp (captions.KARAOKE_HARD_MAX,
@@ -4411,7 +4412,8 @@ def _parse_partial_style(style):
                 '"dynamic":true|false,"highlight_color":"#RRGGBB",'
                 '"animation":"none|fade|pop|slide_up|punch|blur_in|whip|flash|rise|drop|elastic|bounce|swing|zoom_blur",'
                 '"font":"<bundled family>","effect":"chroma|chrome|glow",'
-                '"layout":"stack|flow","leading":0.5-2.2,'
+                '"layout":"stack|flow",'
+                f'"leading":{CAPTION_LEADING_RANGE[0]:g}-{CAPTION_LEADING_RANGE[1]:g},'
                 '"emphasis":"big|huge|accent|pop|box|serif|chrome|glow|chroma",'
                 '"emphasis_scale":1.0-3.0,"outline_color":"#RRGGBB",'
                 '"outline_width":0-12,"shadow":0-12,'
@@ -4458,7 +4460,8 @@ def _parse_partial_style(style):
                 '{"preset":"clean|documentary|broadcast|reels|podcast|beast|karaoke|...|classic",'
                 '"color":"#RRGGBB","size":"s|m|l|xl",'
                 '"position":"bottom|top|middle","dynamic":true|false,'
-                '"highlight_color":"#RRGGBB","leading":0.5-2.2,'
+                '"highlight_color":"#RRGGBB",'
+                f'"leading":{CAPTION_LEADING_RANGE[0]:g}-{CAPTION_LEADING_RANGE[1]:g},'
                 '"emphasis_scale":1.0-3.0,"animation":"none|fade|pop|slide_up|punch|blur_in|whip|flash|rise|drop|elastic|bounce|swing|zoom_blur"}.')
     return {k: validated[k] for k in style}
 
@@ -10961,11 +10964,14 @@ def set_overlay_motion(ctx, id, motion, motion_motif=None):
         return motif_err
     ignored = {"x", "y", "scale"} & set(motion) if hit.get("fit") in ("cover", "picture") \
         else set()
-    if ignored:
+    if ignored and not set(motion) - ignored:
         return ("REJECTED: full-frame cover overlays ignore "
                 + ", ".join(sorted(ignored))
                 + ". Animate opacity/rotation, or use a PIP overlay for "
                   "position and scale motion.")
+    # Apply the properties a cover CAN render in this same call and say
+    # exactly what was dropped, instead of rejecting the whole move.
+    motion = {k: v for k, v in motion.items() if k not in ignored}
     before = dict(hit)
     for name in _OVERLAY_MOTION_FIELDS:
         if name not in motion:
@@ -10996,6 +11002,11 @@ def set_overlay_motion(ctx, id, motion, motion_motif=None):
         written += ("\nNote: the existing named entrance/exit still composes "
                     "with these curves; clear or replace it only if the "
                     "combined motion is not intended.")
+    if written.startswith("EDL v") and ignored:
+        written += ("\nNot applied: " + ", ".join(sorted(ignored))
+                    + " — this is a full-frame cover overlay, which always "
+                      "fills the frame. Use a PIP overlay for position/scale "
+                      "motion.")
     return written
 
 
@@ -13558,10 +13569,32 @@ def remove_picture_card(ctx, id):
     return ctx.write_edl(edl, f"removed footage card {id}")
 
 
+def _layout_rejection(exc):
+    """Every layout/argument problem in one reply, so one retry fixes all."""
+    problems = getattr(exc, "problems", None)
+    if problems and len(problems) > 1:
+        return ("REJECTED (nothing saved): fix all of these together: "
+                + " ".join(f"({i}) {p}" for i, p in enumerate(problems, 1)))[:1600]
+    return "REJECTED: " + str(exc)[:600]
+
+
+def _fit_report(written, fit):
+    """Append the applied geometry when fit='auto' had to repair anything."""
+    notes = (fit or {}).get("notes") or []
+    if not notes or not str(written).startswith("EDL v"):
+        return written
+    applied = ", ".join(f"{k}={v!r}" for k, v in (
+        ("font_size", fit.get("font_size")), ("leading", fit.get("leading")),
+        ("box", fit.get("box"))) if v is not None)
+    return (written + "\nfit=auto adjusted: " + "; ".join(notes)
+            + f". Applied {applied}. Inspect the result; pass fit='strict' "
+              "to be rejected instead of adjusted.")
+
+
 def set_editorial_graphic(ctx, id, kind, text, start, end, secondary=None,
                           eyebrow=None, palette="ink", box=None, motion="settle",
                           motion_motif=None, treatment="panel", mute_captions=False,
-                          speaker=None, font_size=None):
+                          speaker=None, font_size=None, fit="auto"):
     motion_motif, error = _motion_motif_value(ctx, motion_motif)
     if error:
         return error
@@ -13577,13 +13610,15 @@ def set_editorial_graphic(ctx, id, kind, text, start, end, secondary=None,
         result=editorial_graphics.compose(id=id,kind=kind,text=text,start=start,end=end,
                  secondary=secondary,eyebrow=eyebrow,palette=palette,box=box,
                  motion=motion,W=W,H=H,motion_motif=motion_motif,treatment=treatment,
-                 mute_captions=mute_captions,speaker=speaker,font_size=font_size)
+                 mute_captions=mute_captions,speaker=speaker,font_size=font_size,
+                 fit=fit)
     except (ValueError,TypeError) as exc:
-        return "REJECTED: "+str(exc)[:400]
+        return _layout_rejection(exc)
     for layer in ("texts","vectors"):
         edl[layer]=[r for r in edl.get(layer) or []
                     if not r.get("id","").startswith(result["prefix"])] + result[layer]
-    return ctx.write_edl(edl, f"designed {kind} {id} in {palette}; editable type and vector layers with {result['minimum_hold_s']:g}s minimum reading time")
+    return _fit_report(ctx.write_edl(edl, f"designed {kind} {id} in {palette}; editable type and vector layers with {result['minimum_hold_s']:g}s minimum reading time"),
+                       result.get("fit"))
 
 
 def remove_editorial_graphic(ctx, id):
@@ -13597,7 +13632,8 @@ def remove_editorial_graphic(ctx, id):
 
 def set_typography_scene(ctx, id, start, end, lines, box=None, align="center",
                          reveal="build", motion="settle", color="#F4F2EE",
-                         font_size=.075, leading=1.16, mute_captions=True):
+                         font_size=.075, leading=1.16, mute_captions=True,
+                         fit="auto"):
     edl = json.loads(json.dumps(ctx.latest_edl()["json"]))
     video = ctx.index.get("video") or {}
     W,H = renderer.frame_dims(int(video.get("width") or 1920),
@@ -13608,12 +13644,14 @@ def set_typography_scene(ctx, id, start, end, lines, box=None, align="center",
     try:
         result = typography_scenes.compose(id=id,start=start,end=end,lines=lines,
             box=box,align=align,reveal=reveal,motion=motion,color=color,
-            font_size=font_size,leading=leading,mute_captions=mute_captions,W=W,H=H)
+            font_size=font_size,leading=leading,mute_captions=mute_captions,W=W,H=H,
+            fit=fit)
     except (ValueError,TypeError,KeyError) as exc:
-        return "REJECTED: " + str(exc)[:400]
+        return _layout_rejection(exc)
     edl["texts"] = [t for t in edl.get("texts") or []
                     if not t.get("id", "").startswith(result["prefix"])] + result["texts"]
-    return ctx.write_edl(edl, f"typography scene {id}: {result['runs']} speech-cued runs with fixed measured placement; inspect face clearance")
+    return _fit_report(ctx.write_edl(edl, f"typography scene {id}: {result['runs']} speech-cued runs with fixed measured placement; inspect face clearance"),
+                       result.get("fit"))
 
 
 def remove_typography_scene(ctx, id):
@@ -21456,7 +21494,22 @@ CAPTION_PRESETS = ["composed", "clean", "documentary", "broadcast", "retro", "ne
                    "podcast", "reels", "beast", "karaoke", "elegant", "spotlight",
                    "stacked", "iridescent", "chrome", "editorial",
                    "fashion", "luxe", "impact", "lyric", "classic"]
-def _direct_short_clips(ctx, clips):
+# Caller-authored short bounds. shorts.py (which imports this module) keeps
+# the worker-side twins CLIP_MIN_S/CLIP_MAX_S; a test pins them equal.
+SHORT_CLIP_MIN_S = 10.0
+SHORT_CLIP_MAX_S = 120.0
+# snap='sentence' moves a boundary to the nearest transcript sentence edge
+# only within this distance; anything further is a real selection problem.
+SHORT_SNAP_TOLERANCE_S = 1.5
+SHORT_SNAP_MODES = ("sentence", "none")
+
+
+def _sentence_snippet(text, words=6):
+    words_ = str(text or "").split()
+    return " ".join(words_[:words]) + ("…" if len(words_) > words else "")
+
+
+def _direct_short_clips(ctx, clips, snap="none"):
     """Validate caller-authored podcast arcs before a shorts job is queued.
 
     MCP uses this path so the outside model, not Valmera's planner or agent,
@@ -21468,73 +21521,104 @@ def _direct_short_clips(ctx, clips):
     natural bound, and the worker creates accepted children sequentially.
     Caller order and descriptive metadata are part of the frozen selection:
     validate them here, but never re-rank or silently truncate them.
+
+    Returns (planned, problems, moves). Every problem across every clip is
+    reported together so one corrected call can succeed. snap='sentence'
+    applies the nearest sentence boundary within SHORT_SNAP_TOLERANCE_S and
+    lists each move; snap='none' keeps the range frozen and only suggests it.
     """
     if not isinstance(clips, list) or not clips:
-        return None, "clips must be a non-empty array"
-    min_clip_s = 10.0
+        return None, ["clips must be a non-empty array"], []
+    if snap not in SHORT_SNAP_MODES:
+        return None, [f"snap must be one of {', '.join(SHORT_SNAP_MODES)}"], []
+    min_clip_s = SHORT_CLIP_MIN_S
     source_duration = float(ctx.duration)
     natural_max = max(1, int(math.floor((source_duration + .05) / min_clip_s)))
     if len(clips) > natural_max:
-        return None, (
+        return None, [
             f"{source_duration:g}s of source can contain at most {natural_max} "
             f"non-overlapping shorts at the {min_clip_s:g}s technical minimum; "
-            f"received {len(clips)} arcs")
+            f"received {len(clips)} arcs"], []
 
-    planned = []
+    sentences = [row for row in (getattr(ctx, "index", {}) or {})
+                 .get("sentences", []) if row.get("t0") is not None
+                 and row.get("t1") is not None]
+    # Transcript/EDL times are rounded to 0.01s. Reuse the same strictly-
+    # inside epsilon as the word-boundary auditor for "already aligned".
+    boundary_epsilon_s = audit.EPS
+
+    def boundary(value, edge):
+        """(nearest boundary time, its sentence) for 't0' or 't1'."""
+        row = min(sentences, key=lambda r: abs(float(r[edge]) - value))
+        return float(row[edge]), row
+
+    planned, problems, moves = [], [], []
     for i, raw in enumerate(clips, 1):
         if not isinstance(raw, dict):
-            return None, f"clip {i} must be an object"
+            problems.append(f"clip {i} must be an object")
+            continue
         try:
             start, end = float(raw["start"]), float(raw["end"])
         except (KeyError, TypeError, ValueError):
-            return None, f"clip {i} needs numeric start and end source seconds"
+            problems.append(f"clip {i} needs numeric start and end source seconds")
+            continue
         if start < 0 or end > source_duration + .05 or end <= start:
-            return None, f"clip {i} range {start:g}-{end:g}s is outside the source"
-        sentences = [row for row in (getattr(ctx, "index", {}) or {})
-                     .get("sentences", []) if row.get("t0") is not None
-                     and row.get("t1") is not None]
+            problems.append(f"clip {i} range {start:g}-{end:g}s is outside the source")
+            continue
+        clip_ok = True
         if sentences:
-            nearest_start = min(
-                (float(row["t0"]) for row in sentences),
-                key=lambda value: abs(value - start))
-            nearest_end = min(
-                (float(row["t1"]) for row in sentences),
-                key=lambda value: abs(value - end))
             # An explicit caller range is frozen editorial input. Validate
-            # that it already names the transcript boundary instead of
-            # silently replacing it with a nearby time; only the later child
-            # seed is allowed to snap mechanically to measured word edges.
-            # Transcript/EDL times are rounded to 0.01s. Reuse the same
-            # strictly-inside epsilon as the word-boundary auditor instead of
-            # inventing a wider editorial snapping tolerance.
-            boundary_epsilon_s = audit.EPS
-            if abs(nearest_start - start) > boundary_epsilon_s:
-                return None, (f"clip {i} starts mid-thought at {start:g}s; "
-                              f"use the sentence boundary {nearest_start:g}s")
-            if abs(nearest_end - end) > boundary_epsilon_s:
-                return None, (f"clip {i} ends mid-thought at {end:g}s; use "
-                              f"the sentence boundary {nearest_end:g}s")
-        if end - start < min_clip_s or end - start > 120:
-            return None, (f"clip {i} must be {min_clip_s:g}-120 seconds, "
-                          f"got {end-start:.1f}s")
+            # that it already names the transcript boundary. Only an explicit
+            # snap='sentence' may move it, by a bounded amount, and every move
+            # is reported back; the child seed later snaps to word edges.
+            for edge, label, verb in (("t0", "start", "starts"),
+                                      ("t1", "end", "ends")):
+                value = start if edge == "t0" else end
+                nearest, row = boundary(value, edge)
+                distance = abs(nearest - value)
+                if distance <= boundary_epsilon_s:
+                    continue
+                if snap == "sentence" and distance <= SHORT_SNAP_TOLERANCE_S:
+                    shift = nearest - value
+                    moves.append(
+                        f"clip {i} {label} {value:g}s→{nearest:g}s "
+                        f"({'+' if shift > 0 else '-'}{abs(shift):.2f}s, "
+                        f"sentence {'start' if edge == 't0' else 'end'}: "
+                        f"\"{_sentence_snippet(row.get('text'))}\")")
+                    if edge == "t0":
+                        start = nearest
+                    else:
+                        end = nearest
+                    continue
+                clip_ok = False
+                hint = (f" (beyond the {SHORT_SNAP_TOLERANCE_S:g}s snap "
+                        "tolerance; choose the boundary deliberately)"
+                        if snap == "sentence" else "")
+                problems.append(f"clip {i} {verb} mid-thought at {value:g}s; "
+                                f"use the sentence boundary {nearest:g}s{hint}")
+        if clip_ok and not (min_clip_s <= end - start <= SHORT_CLIP_MAX_S):
+            problems.append(f"clip {i} must be {min_clip_s:g}-"
+                            f"{SHORT_CLIP_MAX_S:g} seconds, got {end-start:.1f}s")
 
         title = raw.get("title")
         if not isinstance(title, str) or not title.strip():
-            return None, f"clip {i} title must be a non-empty string"
+            problems.append(f"clip {i} title must be a non-empty string")
         hook = raw.get("hook") or ""
         if not isinstance(hook, str):
-            return None, f"clip {i} hook must be a string"
+            problems.append(f"clip {i} hook must be a string")
 
         story = raw.get("story") or {}
-        if not isinstance(story, dict):
-            return None, f"clip {i} story must be an object"
         clean_story = {}
+        if not isinstance(story, dict):
+            problems.append(f"clip {i} story must be an object")
+            story = {}
         for stage in ("setup", "development", "payoff"):
             value = story.get(stage)
             if value is None or value == "":
                 continue
             if not isinstance(value, str):
-                return None, f"clip {i} story.{stage} must be a string"
+                problems.append(f"clip {i} story.{stage} must be a string")
+                continue
             clean_story[stage] = value
 
         raw_score = raw.get("score", 80)
@@ -21543,29 +21627,43 @@ def _direct_short_clips(ctx, clips):
         try:
             score = int(raw_score)
         except (TypeError, ValueError):
-            return None, f"clip {i} score must be an integer from 0 to 100"
-        if score < 0 or score > 100:
-            return None, f"clip {i} score must be an integer from 0 to 100"
+            score = None
+        if score is None or score < 0 or score > 100:
+            problems.append(f"clip {i} score must be an integer from 0 to 100")
         planned.append({
             "start": round(start, 2), "end": round(end, 2),
             "title": title,
             "hook": hook,
             "score": score,
             "story": clean_story,
+            "_n": i,
         })
 
     ordered = sorted(planned, key=lambda clip: clip["start"])
     for left, right in zip(ordered, ordered[1:]):
         if right["start"] < left["end"]:
-            return None, "caller-authored short ranges must not overlap"
-    return planned, None
+            problems.append(
+                "caller-authored short ranges must not overlap: clip "
+                f"{left['_n']} ({left['start']:g}-{left['end']:g}s) and clip "
+                f"{right['_n']} ({right['start']:g}-{right['end']:g}s)")
+    for clip in planned:
+        clip.pop("_n", None)
+    if problems:
+        return None, problems, moves
+    return planned, [], moves
 
 
-def make_shorts(ctx, count=None, style_note=None, clips=None):
+def make_shorts(ctx, count=None, style_note=None, clips=None, snap=None):
     """Kick off the shorts pipeline for THIS project — the chat-path twin of
     the studio's Make shorts button. The heavy work runs as its own
     shorts_plan job so this turn can answer immediately; the board on the
-    project shows the clips as they land."""
+    project shows the clips as they land.
+
+    snap (explicit clips only): 'sentence' moves boundaries to the nearest
+    sentence edge within SHORT_SNAP_TOLERANCE_S and reports every move;
+    'none' rejects misaligned boundaries. Defaults to 'sentence' over MCP,
+    where the model always resubmitted the suggested boundary anyway, and to
+    'none' for the in-house agent."""
     if count is not None and (isinstance(count, bool) or not isinstance(count, int) or count < 1):
         return "CORRECTION_NEEDED: count must be a positive integer."
     if getattr(ctx, "project", {}).get("parent_project_id"):
@@ -21617,11 +21715,17 @@ def make_shorts(ctx, count=None, style_note=None, clips=None):
                 "recipe into selection; make those judgments while directly "
                 "editing the opened child.")
 
-    planned, plan_error = (None, None)
+    planned, moves = None, []
     if clips is not None:
-        planned, plan_error = _direct_short_clips(ctx, clips)
-        if plan_error:
-            return "REJECTED: " + plan_error
+        mode = snap if snap is not None else ("sentence" if is_mcp else "none")
+        planned, problems, moves = _direct_short_clips(ctx, clips, snap=mode)
+        if problems:
+            if len(problems) == 1:
+                return "REJECTED: " + problems[0]
+            return (f"REJECTED (nothing was created): {len(problems)} problems "
+                    "— fix all of them in one call: "
+                    + " ".join(f"({i}) {p}" for i, p in
+                               enumerate(problems, 1)))
 
     payload = _child_payload(ctx, {
         "source": ("mcp_direct" if is_mcp else
@@ -21644,7 +21748,11 @@ def make_shorts(ctx, count=None, style_note=None, clips=None):
                 "full-video visual filmstrips")
     selection = ("uses the story arcs you selected" if planned else
                  f"reviews the {evidence} and picks complete story arcs")
-    return (f"Shorts story search started as job {job_id}. It {selection} and "
+    snapped = ("Snapped to sentence boundaries (snap='sentence'; pass "
+               "snap='none' to reject instead): " + "; ".join(moves) + ". "
+               if moves else "")
+    return (snapped +
+            f"Shorts story search started as job {job_id}. It {selection} and "
             "creates each complete source story as its own LOCKED child "
             "project. It does not style, reframe, caption, add B-roll/music, "
             "or render a creative edit. The resulting cards arrive inside "
@@ -21876,7 +21984,8 @@ _STYLE_PROPS = {
     "font": {"type": "string", "enum": CAPTION_FONTS},
     "effect": {"type": "string", "enum": ["chroma", "chrome", "glow"]},
     "layout": {"type": "string", "enum": ["stack", "flow"]},
-    "leading": {"type": "number"},
+    "leading": {"type": "number", "minimum": CAPTION_LEADING_RANGE[0],
+                "maximum": CAPTION_LEADING_RANGE[1]},
     "emphasis": {"type": "string",
                  "enum": ["big", "huge", "accent", "pop", "box", "serif",
                           "script", "chrome", "glow", "chroma", "none"]},
@@ -21893,13 +22002,22 @@ _STYLE_PROPS = {
     "single_line": {"type": "boolean"},
 }
 
+def _bounded_number(rng):
+    """A JSON-schema number carrying a validator's own (low, high) bounds."""
+    return {"type": "number", "minimum": rng[0], "maximum": rng[1]}
+
+
+_LAYOUT_BOX_PROP = {"type": "array", "minItems": 4, "maxItems": 4,
+                    "items": {"type": "number", "minimum": 0, "maximum": 1}}
+_LAYOUT_FIT_PROP = {"type": "string", "enum": list(typography_scenes.FITS)}
+
 _ANIM_FLOAT_PROP = {
     "anyOf": [
         {"type": "number"},
-        {"type": "array", "minItems": 1,
+        {"type": "array", "minItems": 1, "maxItems": ANIM_MAX_KEYFRAMES,
          "items": {"type": "object",
                    "properties": {
-                       "t": {"type": "number"},
+                       "t": {"type": "number", "minimum": 0},
                        "v": {"type": "number"},
                        "ease": {"type": "string",
                                 "enum": ["linear", "in", "out", "in_out",
@@ -23476,16 +23594,23 @@ TOOLS = {
         "treatment=panel draws a backdrop; type removes the box for integrated editorial typography. "
         "Dialogue captions remain by default. Set mute_captions=true ONLY when this graphic replaces "
         "the spoken text; its own live window then owns the suppression and removal restores captions. "
-        "Reading-time and type-size checks reject overcrowding rather than silently shrinking it. "
+        "fit=auto (default) repairs geometry instead of rejecting: the box is clamped to the frame "
+        "(a headline to the safe area) and a headline steps font_size down until it fits; every change "
+        "is reported. fit=strict rejects instead. Reading time is never shortened. Every problem "
+        "is listed in one reply. "
         "Place in deliberate clear space or use as a meaningful cutaway; inspect the rendered composition.",
         {"id":{"type":"string"},"kind":{"type":"string","enum":list(editorial_graphics.KINDS)},
-         "text":{"type":"string"},"start":{"type":"number"},"end":{"type":"number"},
-         "secondary":{"type":"string"},"eyebrow":{"type":"string"},
-         "speaker":{"type":"string"},"font_size":{"type":"number"},
+         "text":{"type":"string","maxLength":editorial_graphics.MAX_TEXT_CHARS},
+         "start":{"type":"number","minimum":0},"end":{"type":"number"},
+         "secondary":{"type":"string","maxLength":editorial_graphics.MAX_TEXT_CHARS},
+         "eyebrow":{"type":"string","maxLength":editorial_graphics.MAX_EYEBROW_CHARS},
+         "speaker":{"type":"string","maxLength":editorial_graphics.MAX_SPEAKER_CHARS},
+         "font_size":_bounded_number(editorial_graphics.HEADLINE_FONT_RANGE),
          "palette":{"type":"string","enum":list(editorial_graphics.PALETTES)},
-         "box":{"type":"array","items":{"type":"number"},"minItems":4,"maxItems":4},
+         "box":_LAYOUT_BOX_PROP,
          "motion":{"type":"string","enum":["settle","none"]},"motion_motif":{"type":"string"},
-         "treatment":{"type":"string","enum":["panel","type"]},"mute_captions":{"type":"boolean"}}),
+         "treatment":{"type":"string","enum":["panel","type"]},"mute_captions":{"type":"boolean"},
+         "fit":_LAYOUT_FIT_PROP}),
     "remove_editorial_graphic": (remove_editorial_graphic,"Remove an editorial group and its caption suppression.",{"id":{"type":"string"}}),
     "set_typography_scene": (
         set_typography_scene,
@@ -23497,21 +23622,31 @@ TOOLS = {
         "Pair Inter Display Bold with sparse Instrument Serif italic for meaningful contrast, not every word. "
         "A line's size and run scale multiply font_size (fraction of canvas short edge). "
         "box=[left,top,right,bottom] is a measured region; align left/center/right; motion settle/none. "
-        "Oversized/overcrowded lines are rejected instead of silently shrinking or reflowing. "
+        "Keep the box inside the safe area (left/right .045-.955, top/bottom .04-.96). "
+        f"leading is row spacing {typography_scenes.LEADING_RANGE[0]:g}-{typography_scenes.LEADING_RANGE[1]:g} "
+        "(rows never overlap; this is not caption leading). "
+        "fit=auto (default) clamps out-of-range numbers and the box into the safe area, then scales "
+        "font_size down until every row fits, and reports each applied value; fit=strict rejects instead. "
+        "Cue timing is never moved. Every problem is listed in one reply. "
         "mute_captions=true replaces dialogue ONLY in these actual live windows; false for independent labels. "
         "Use real words and cue times from get_kept_transcript. Inspect the opening, build, settled phrase "
         "and face clearance. This is designed typography, not a substitute for selecting a good story.",
-        {"id":{"type":"string"},"start":{"type":"number"},"end":{"type":"number"},
-         "lines":{"type":"array","minItems":1,"maxItems":6,"items":{"type":"object",
-            "properties":{"size":{"type":"number"},"runs":{"type":"array","items":{"type":"object",
-              "properties":{"text":{"type":"string"},"at":{"type":"number"},
+        {"id":{"type":"string"},"start":{"type":"number","minimum":0},"end":{"type":"number"},
+         "lines":{"type":"array","minItems":1,"maxItems":typography_scenes.MAX_LINES,"items":{"type":"object",
+            "properties":{"size":_bounded_number(typography_scenes.LINE_SIZE_RANGE),
+              "runs":{"type":"array","minItems":1,"maxItems":typography_scenes.MAX_RUNS,"items":{"type":"object",
+              "properties":{"text":{"type":"string","minLength":1,"maxLength":typography_scenes.MAX_RUN_CHARS},
+                "at":{"type":"number","minimum":0},
                 "font":{"type":"string","enum":list(TEXT_FONTS)},"italic":{"type":"boolean"},
-                "scale":{"type":"number"},"color":{"type":"string"}},"required":["text"]}}},"required":["runs"]}},
-         "box":{"type":"array","items":{"type":"number"},"minItems":4,"maxItems":4},
+                "scale":_bounded_number(typography_scenes.RUN_SCALE_RANGE),
+                "color":{"type":"string"}},"required":["text"]}}},"required":["runs"]}},
+         "box":_LAYOUT_BOX_PROP,
          "align":{"type":"string","enum":["left","center","right"]},
          "reveal":{"type":"string","enum":["build","still"]},
          "motion":{"type":"string","enum":["settle","none"]},"color":{"type":"string"},
-         "font_size":{"type":"number"},"leading":{"type":"number"},"mute_captions":{"type":"boolean"}}),
+         "font_size":_bounded_number(typography_scenes.FONT_SIZE_RANGE),
+         "leading":_bounded_number(typography_scenes.LEADING_RANGE),
+         "mute_captions":{"type":"boolean"},"fit":_LAYOUT_FIT_PROP}),
     "remove_typography_scene": (remove_typography_scene,"Remove a native typography scene and its owned caption suppression.",{"id":{"type":"string"}}),
     "set_screen_frame": (
         set_screen_frame,
@@ -24612,18 +24747,27 @@ TOOLS = {
                     "one-call auto-scout. An explicit clips array keeps every "
                     "valid non-overlapping story arc; total creation is "
                     "naturally bounded by source duration, not an editorial "
-                    "quota. style_note is "
+                    "quota. Each clip must start and end on transcript "
+                    f"sentence boundaries and last {SHORT_CLIP_MIN_S:g}-"
+                    f"{SHORT_CLIP_MAX_S:g}s; ranges must not overlap. "
+                    "snap='sentence' (the MCP default) moves a boundary to "
+                    "the nearest sentence edge within "
+                    f"{SHORT_SNAP_TOLERANCE_S:g}s and reports every move; "
+                    "snap='none' rejects instead. Every problem across all "
+                    "clips is reported in one reply. style_note is "
                     "reference context for the eventual child editor, not a "
                     "hard-coded recipe.",
-                    {"count": {"type": "integer"},
+                    {"count": {"type": "integer", "minimum": 1},
+                     "snap": {"type": "string",
+                              "enum": list(SHORT_SNAP_MODES)},
                      "style_note": {"type": "string",
                                     "description": "Optional audience or reference context to preserve for the eventual editor."},
                      "clips": {"type": "array",
                                "description": "Caller-authored story arcs. Required over MCP so the connected model chooses the shorts itself.",
                                "items": {"type": "object", "properties": {
-                                   "start": {"type": "number", "description": "Source seconds; start on a complete setup/question boundary."},
-                                   "end": {"type": "number", "description": "Source seconds; end after the payoff resolves."},
-                                   "title": {"type": "string", "description": "Preserved verbatim as the child project/card title."},
+                                   "start": {"type": "number", "minimum": 0, "description": "Source seconds; start on a complete setup/question boundary."},
+                                   "end": {"type": "number", "minimum": 0, "description": "Source seconds; end after the payoff resolves."},
+                                   "title": {"type": "string", "minLength": 1, "description": "Preserved verbatim as the child project/card title."},
                                    "hook": {"type": "string", "description": "Preserved verbatim as caller-authored story context."},
                                    "score": {"type": "integer", "minimum": 0, "maximum": 100},
                                    "story": {"type": "object", "properties": {
@@ -24707,7 +24851,7 @@ TOOL_DOMAINS = {
         "get_transcript", "get_words", "search_transcript",
         "get_kept_transcript", "get_shots", "get_editorial_map",
         "find_visual_moments",
-        "find_silences", "find_repetitions", "suggest_segments",
+        "find_silences",
         "keep_segments", "cut_range", "cut_output_range", "restore_range",
         "cut_silences", "remove_filler_words", "reset_edit", "set_speed",
         "remove_speed",
@@ -25114,9 +25258,10 @@ _COMPACT_CONTRACTS = {
         "mute affects only the clip's audio; still images are already silent. "
         "Read inserts in get_edl first."),
     "look_at": (
-        "Inspect rendered OUTPUT frames. Requires render_preview for the latest "
-        "EDL first. Use look_at_asset for original uploaded pictures; a saved "
-        "timeline alone is not a rendered preview."),
+        "See frames now, no render needed: times=[...] are SOURCE seconds; "
+        "output_times=[...] show the assembled edit (inserts, framing, zoom; "
+        "not captions/text/grade). rendered=true inspects the current EDL's "
+        "preview pixels and needs render_preview first. Uploads: look_at_asset."),
     "look_at_asset": (
         "Inspect an uploaded IMAGE or VIDEO by its exact asset_key from list_assets. "
         "Times are relative to that source. For audio use get_audio_analysis; "

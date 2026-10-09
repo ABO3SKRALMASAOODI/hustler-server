@@ -138,7 +138,10 @@ def anim_bounds(v):
     return float(min(vals)), float(max(vals))
 
 
-def _norm_anim(v, name, lo, hi, max_t=None, max_kfs=24):
+ANIM_MAX_KEYFRAMES = 24
+
+
+def _norm_anim(v, name, lo, hi, max_t=None, max_kfs=ANIM_MAX_KEYFRAMES):
     """Validate + clamp an AnimFloat in place. Constants clamp to [lo, hi];
     keyframe times must be sorted, non-negative and within max_t; values
     clamp. Returns the normalized value (a float, or a list of Keyframe)."""
@@ -215,6 +218,11 @@ def clip_anim(v, new_dur):
 # ------------------------------------------------------------------ #
 #  EDL                                                                 #
 # ------------------------------------------------------------------ #
+
+# Caption line spacing. Below 1.0 stacked caption lines deliberately overlap.
+# agent_tools advertises exactly this range in the caption-style schema.
+CAPTION_LEADING_RANGE = (0.5, 2.2)
+
 
 class CaptionStyle(BaseModel):
     """Burn style. color is #RRGGBB; the renderer converts it to the .ass
@@ -347,10 +355,11 @@ class CaptionStyle(BaseModel):
     def _leading_range(cls, v):
         if v is None:
             return v
-        if not (0.5 <= float(v) <= 2.2):
+        low, high = CAPTION_LEADING_RANGE
+        if not (low <= float(v) <= high):
             raise ValueError(
-                f"leading {v} must be between 0.5 and 2.2 (below 1.0 the "
-                "lines deliberately overlap)")
+                f"leading {v} must be between {low:g} and {high:g} (below 1.0 "
+                "the lines deliberately overlap)")
         return float(v)
 
     @field_validator("emphasis_scale")
@@ -3304,7 +3313,13 @@ def describe_edl(edl_dict, duration=None):
                 bits.append(f"{name}@{ov.start:g}s screen-takeover "
                             f"{ov.duration_s:g}s")
             else:
-                bits.append(f"{name}@{ov.start:g}s {ov.scale:g}w{anim}")
+                # An animated scale is a keyframe list: describe its range,
+                # never format the list itself (that raised TypeError after
+                # the version was already saved).
+                lo, hi = anim_bounds(ov.scale)
+                width = f"{lo:g}" if lo == hi else f"{lo:g}-{hi:g}"
+                anim = anim or ("*" if is_animated(ov.scale) else "")
+                bits.append(f"{name}@{ov.start:g}s {width}w{anim}")
         parts.append(f"overlays x{len(edl.overlays)} ({', '.join(bits)})")
     if edl.texts:
         bits = []
