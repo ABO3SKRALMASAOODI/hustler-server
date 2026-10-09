@@ -1269,8 +1269,11 @@ g_fx = build_filtergraph(fx_edl, 60.0, True, fx_tl, None, [], index,
 check("grade filter lands in the graph as a table (or legacy fallback)",
       "[vgrade]" in g_fx and
       ("lutyuv=" in g_fx or "eq=saturation=1.35:contrast=1.08" in g_fx))
-check("zoom becomes a zoompan window in program time",
-      "zoompan=z='1+0.30*between(on/30.000,2.000,4.000)'" in g_fx)
+# The sub-pixel camera (worker/camera.py) replaced zoompan: one perspective
+# warp whose zoom is 1 + strength * envelope over the program-time window.
+check("zoom becomes a camera window in program time",
+      "perspective=" in g_fx and "1+0.3*" in g_fx
+      and "gte(ld(9),2)*lt(ld(9),4)" in g_fx)
 check("zooms force per-segment normalization to exact frames",
       "scale=720:1280" in g_fx)
 check("video fades out at the end of the program",
@@ -1735,10 +1738,11 @@ g_zm = build_filtergraph(zm_edl, 60.0, True, zm_tl, None, [], index,
                          preview=False, W=720, H=720, fps=30.0,
                          frame_mode=None)
 check("eased zoom uses clip ramps",
-      "clip((on/30.000-1.000)/" in g_zm and
-      "clip((4.000-on/30.000)/" in g_zm)
-check("punch zoom keeps the between step",
-      "0.30*between(on/30.000,5.000,8.000)" in g_zm)
+      "clip((ld(9)-1)/0.5,0,1)" in g_zm and
+      "clip((4-ld(9))/0.5,0,1)" in g_zm)
+check("punch zoom attacks fast and steps out at the window end",
+      "0.3*ifnot(st(7,clip((ld(9)-5)/0.15,0,1))" in g_zm
+      and "gte(ld(9),5)*lt(ld(9),8)" in g_zm)
 pi_edl = validate_edl(
     {"keep": [[0, 20]],
      "effects": {"zooms": [{"id": "z1", "start": 2, "end": 10,
@@ -1748,16 +1752,17 @@ g_pi = build_filtergraph(pi_edl, 60.0, True, Timeline(pi_edl["keep"], []),
                          None, [], index, preview=False, W=720, H=720,
                          fps=30.0, frame_mode=None)
 check("push_in zoom ramps across the window",
-      "0.40*((on/30.000-2.000)/8.000)*between(on/30.000,2.000,10.000)"
-      in g_pi)
+      "1+0.4*" in g_pi and "clip((ld(9)-2)/8,0,1)" in g_pi
+      and "gte(ld(9),2)*lt(ld(9),10)" in g_pi)
 g_kb = build_filtergraph(km_edl, 60.0, True,
                          Timeline(km_edl["keep"], km_edl["inserts"]),
                          None, [], index, preview=False, W=720, H=720,
                          fps=30.0, frame_mode=None,
                          insert_inputs=[(2, km_edl["inserts"][0], False)],
                          silence_idx=1)
-check("image insert motion adds a per-block zoompan",
-      "[v_insn0]zoompan=z='1+0.25*(on/90)'" in g_kb)
+check("image insert motion rides the shared camera over its window",
+      "perspective=" in g_kb
+      and "clip(ld(9)/3,0,1)*0.25*gte(ld(9),0)*lt(ld(9),3)" in g_kb)
 check("motion zoompan feeds the concat block",
       "[v_ins0]" in g_kb)
 g_vm = build_filtergraph(vm_edl, 60.0, True,
@@ -1766,8 +1771,8 @@ g_vm = build_filtergraph(vm_edl, 60.0, True,
                          fps=30.0, frame_mode=None,
                          insert_inputs=[(2, vm_edl["inserts"][0], True)],
                          silence_idx=1)
-check("video insert motion uses the same duration-preserving zoompan",
-      "[v_insn0]zoompan=z='1+0.25*(on/90)'" in g_vm)
+check("video insert motion uses the same shared camera push",
+      "clip(ld(9)/3,0,1)*0.25*gte(ld(9),0)*lt(ld(9),3)" in g_vm)
 
 print("== Round-9 captions: entrance animations ==")
 anim_events = [{"start": 0.0, "end": 2.0, "text": "HELLO"}]

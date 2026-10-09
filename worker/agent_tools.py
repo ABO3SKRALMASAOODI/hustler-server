@@ -72,6 +72,7 @@ import edl_diff
 import timeline as timeline_mod
 import tracker
 import travel
+import camera
 import url_media
 import remote
 import ytaccess
@@ -7642,11 +7643,85 @@ def set_color_grade(ctx, preset):
     return ctx.write_edl(edl, f"color grade set to {p or 'none'}")
 
 
-ZOOM_MODES = ("punch", "ease", "push_in", "pull_out", "follow")
+ZOOM_MODES = ("punch", "ease", "push_in", "pull_out", "landing", "pulse",
+              "shake", "follow")
 ZOOM_MODE_DESC = {"punch": "punch-in", "ease": "eased",
                   "push_in": "Ken Burns push-in",
                   "pull_out": "Ken Burns pull-out",
+                  "landing": "landing (settles after the cut)",
+                  "pulse": "beat-pulse",
+                  "shake": "impact-shake",
                   "follow": "gliding follow"}
+# Mode-specific default strengths when the caller gives none. A pulse is a
+# thump, not a push: 7% reads, 15% wobbles. Everything else keeps the
+# round-67 15% default.
+ZOOM_MODE_STRENGTH = {"pulse": 0.07}
+# A landing is momentum THROUGH a cut; further than this from one it is just
+# a zoom-out in the middle of a shot.
+LANDING_CUT_TOLERANCE_S = 0.2
+
+
+def _zoom_camera_args(zmode, ramp_s=None, overshoot=None, rotate=None,
+                      shake=None, shake_hz=None, shake_decay=None):
+    """(fields, error) for add_zoom's camera knobs — the same ranges and
+    mode rules schemas._check_zoom_camera enforces, refused here with an
+    answer the agent can act on instead of a validation dump."""
+    vals = {}
+    for name, v in (("ramp_s", ramp_s), ("overshoot", overshoot),
+                    ("rotate", rotate), ("shake", shake),
+                    ("shake_hz", shake_hz), ("shake_decay", shake_decay)):
+        if v is None or (isinstance(v, str) and not v.strip()):
+            continue
+        try:
+            vals[name] = float(v)
+        except (TypeError, ValueError):
+            return None, f"REJECTED: {name} must be a number."
+    travel_mode = zmode == "follow"
+    if "ramp_s" in vals:
+        if travel_mode or zmode == "shake":
+            return None, ("REJECTED: ramp_s times a zoom's move (punch snap, "
+                          "ease ramps, landing settle, pulse length, push "
+                          "soft-start); a follow is timed by its path and a "
+                          "shake by shake_decay.")
+        if zmode in ("landing", "pulse") and vals["ramp_s"] < 0.06:
+            return None, (f"REJECTED: a {zmode} is nothing but its ramp — "
+                          "ramp_s must be at least 0.06 s (it sets how long "
+                          f"the {'settle' if zmode == 'landing' else 'thump'}"
+                          " takes). Omit it for the default "
+                          f"{'0.35' if zmode == 'landing' else '0.3'} s.")
+        vals["ramp_s"] = round(min(max(vals["ramp_s"], 0.0), 3.0), 3)
+    if "overshoot" in vals:
+        if zmode not in ("punch", "ease"):
+            return None, ("REJECTED: overshoot only applies to mode 'punch' "
+                          "or 'ease' (the snap passes the target and "
+                          "settles back).")
+        vals["overshoot"] = round(min(max(vals["overshoot"], 0.0), 0.5), 3)
+        if vals["overshoot"] <= 0:
+            vals.pop("overshoot")
+    if "rotate" in vals:
+        if travel_mode or zmode == "shake":
+            return None, ("REJECTED: rotate rides a zoom's own curve "
+                          "(punch/ease/push_in/pull_out/landing/pulse).")
+        vals["rotate"] = round(min(max(vals["rotate"], -15.0), 15.0), 2)
+        if vals["rotate"] == 0:
+            vals.pop("rotate")
+    if "shake" in vals:
+        vals["shake"] = round(min(max(vals["shake"], 0.0), 1.0), 3)
+        if vals["shake"] <= 0:
+            if zmode == "shake":
+                return None, ("REJECTED: a shake zoom needs shake > 0 (0-1; "
+                              "omit it for 0.5).")
+            vals.pop("shake")
+    shaking = zmode == "shake" or "shake" in vals
+    for name, lo, hi in (("shake_hz", 0.5, 30.0), ("shake_decay", 0.0, 30.0)):
+        if name in vals:
+            if not shaking:
+                return None, (f"REJECTED: {name} needs a shake — mode "
+                              "'shake', or shake=0-1 on another mode.")
+            vals[name] = round(min(max(vals[name], lo), hi), 2)
+    return vals, None
+
+
 # Round 72: the air a rect-framed zoom leaves around its region — the
 # viewport shows the rect plus this fraction of the rect's own size on each
 # side, so "zoom into the message" lands as a composed close-up with
@@ -7787,7 +7862,8 @@ def _zoom_provenance(ctx, edl, start, end, purpose=None,
 
 def add_zoom(ctx, start, end, strength=None, mode=None, cx=None, cy=None,
              path=None, rect=None, motion_motif=None, purpose=None,
-             target_evidence_ids=None):
+             target_evidence_ids=None, ramp_s=None, overshoot=None,
+             rotate=None, shake=None, shake_hz=None, shake_decay=None):
     # Round 67 default: 15% (was 25%) — a gentle push the viewer feels
     # rather than sees. Big snaps are opt-in, not the default grammar.
     edl = dict(ctx.latest_edl()["json"])
@@ -7810,10 +7886,16 @@ def add_zoom(ctx, start, end, strength=None, mode=None, cx=None, cy=None,
     zmode = (mode or "ease").strip().lower()
     if zmode not in ZOOM_MODES:
         return (f"REJECTED: mode must be one of {', '.join(ZOOM_MODES)}. "
-                "punch = instant step in/out; ease = smooth ramp in and "
-                "out; push_in / pull_out = continuous Ken Burns drift "
-                "across the window; follow = ramps in and GLIDES its centre "
-                "along `path` (for screen recordings and demos).")
+                "punch = fast expo snap in, hard cut back out; ease = "
+                "smooth ramp in and out; push_in / pull_out = continuous "
+                "slow drift across the window; landing = starts pushed in "
+                "right after a cut and settles; pulse = a ~0.3s thump on a "
+                "beat/word; shake = impact shake; follow = ramps in and "
+                "GLIDES its centre along `path` (screen recordings, demos).")
+    cam, cam_err = _zoom_camera_args(zmode, ramp_s, overshoot, rotate, shake,
+                                     shake_hz, shake_decay)
+    if cam_err:
+        return cam_err
     # Optional zoom TARGET (round 35): fractions of the output frame,
     # (0,0) = top-left. None keeps the legacy center zoom.
     tgt = {}
@@ -7875,7 +7957,7 @@ def add_zoom(ctx, start, end, strength=None, mode=None, cx=None, cy=None,
         tgt = {"cx": scx, "cy": scy}
         rct = [round(v, 3) for v in rr]
     if st is None:
-        st = 0.15
+        st = ZOOM_MODE_STRENGTH.get(zmode, 0.15)
     pts = None
     if zmode == "follow":
         pts, err = _parse_zoom_path(path)
@@ -7913,6 +7995,7 @@ def add_zoom(ctx, start, end, strength=None, mode=None, cx=None, cy=None,
         item["rect"] = rct
     if pts:
         item["path"] = pts
+    item.update(cam)
     zooms.append(item)
     fx["zooms"] = zooms
     edl["effects"] = fx
@@ -7949,13 +8032,28 @@ def add_zoom(ctx, start, end, strength=None, mode=None, cx=None, cy=None,
         aimed += (". NOTE: you passed cx/cy as well as rect — the rect wins "
                   "(it already fixes where the frame lands, and the pin is "
                   "derived from it). Pass rect alone next time")
+    feel = camera.describe(item)
+    strength_txt = ("" if zmode == "shake"
+                    else f" {int(round(st * 100))}%")
     result = ctx.write_edl(
-        edl, f"{ZOOM_MODE_DESC[zmode]} zoom {int(st * 100)}% on {s}-{e}s "
-             f"(output time){aimed} [{item['id']}]")
-    if defaulted_target and result.startswith("EDL v"):
+        edl, f"{ZOOM_MODE_DESC[zmode]} zoom{strength_txt} on {s}-{e}s "
+             f"(output time){aimed}{f' ({feel})' if feel else ''} "
+             f"[{item['id']}]")
+    if defaulted_target and result.startswith("EDL v") \
+            and zmode != "shake":
         result += ("\nQUALITY ADVISORY: no target was supplied, so this zoom "
                    "uses the frame center. Inspect the preview and retarget "
                    "it if the intended subject is elsewhere.")
+    if zmode == "landing" and result.startswith("EDL v"):
+        cuts = [float(b["out_start"])
+                for b in timeline_mod.program_blocks(edl)[1:]]
+        near = min(cuts, key=lambda c: abs(c - s)) if cuts else None
+        if near is None or abs(near - s) > LANDING_CUT_TOLERANCE_S:
+            result += ("\nQUALITY ADVISORY: a landing reads as momentum "
+                       "through a CUT, and this one starts mid-shot"
+                       + (f" (nearest cut {near:g}s)" if near is not None
+                          else " (the program has no internal cut)")
+                       + ". Start it on the cut, or use punch/ease here.")
     return result
 
 
@@ -21191,6 +21289,13 @@ def _face_at_source_moments(ctx, edl, moments):
     return out
 
 
+# punch_in_on_emphasis holds: at least this long, at most this long, ending
+# on the next cut or the sentence's end in between.
+PUNCH_HOLD_MIN_S = 0.6
+PUNCH_HOLD_MAX_S = 2.6
+PUNCH_PEAK_OVERSHOOT = 0.08
+
+
 def punch_in_on_emphasis(ctx, count=None, strength=None):
     """Punch zooms on distributed, meaningful vocal turns in ONE version.
     Every timestamp is a real word time mapped through the current cut —
@@ -21342,12 +21447,34 @@ def punch_in_on_emphasis(ctx, count=None, strength=None):
     hi_score = max(row[0] for row in picked)
     contrast = (float(motion_language.get("contrast"))
                 if motion_language.get("contrast") is not None else .63)
-    for combined_score, w, pt, source_mid, motion_motif, beat_number in picked:
+    sentences = ctx.index.get("sentences") or []
+    starts = [round(max(0.0, row[2] - 0.06), 2) for row in picked]
+    top_score = max(row[0] for row in picked)
+    for k, (combined_score, w, pt, source_mid, motion_motif,
+            beat_number) in enumerate(picked):
         measured = source_mid in targets
         target = targets.get(source_mid) or (0.5, 0.5)
-        # 60ms early so the punch lands ON the word's attack, not after it.
-        s = round(max(0.0, pt - 0.06), 2)
-        e = round(min(prog, s + 0.9), 2)
+        # 60ms early so the punch's expo snap lands ON the word's attack.
+        s = starts[k]
+        # The punch HOLDS to a natural boundary and then cuts back out: the
+        # next cut (invisible there) or the end of the sentence (a phrase
+        # turn, where a step back reads as a second camera angle), never a
+        # fixed 0.9 s that snapped out mid-phrase. Bounded so a long
+        # sentence does not become a punched-in shot.
+        seg = tl.seg_program_range(float(w["t0"]))
+        e = min(prog, s + PUNCH_HOLD_MAX_S,
+                seg[1] if seg else prog)
+        sent = next((x for x in sentences
+                     if float(x["t0"]) - 1e-6 <= float(w["t0"])
+                     <= float(x["t1"]) + 1e-6), None)
+        sent_end = tl.src_to_out(float(sent["t1"])) if sent else None
+        if sent_end is not None and sent_end >= s + PUNCH_HOLD_MIN_S:
+            e = min(e, sent_end + 0.1)
+        else:                            # no usable phrase end: short hold
+            e = min(e, s + 0.9)
+        if k + 1 < len(picked):
+            e = min(e, starts[k + 1] - 0.05)
+        e = round(e, 2)
         if e - s < 0.2:
             continue                     # the word sits at the very end
         if explicit_strength or hi_score <= lo_score:
@@ -21362,6 +21489,11 @@ def punch_in_on_emphasis(ctx, count=None, strength=None):
         item = {"id": _next_item_id(zooms, "zm"), "start": s, "end": e,
                 "strength": st, "cx": target[0], "cy": target[1],
                 "target_measured": measured}
+        # The strongest turn (and any spoken number) slams and settles; the
+        # rest are clean snaps — one grammar, varied emphasis.
+        if len(picked) > 1 and (combined_score >= top_score - 1e-9 or any(
+                ch.isdigit() for ch in str(w.get("w") or ""))):
+            item["overshoot"] = PUNCH_PEAK_OVERSHOOT
         if motion_motif:
             item["motion_motif"] = motion_motif
         zooms.append(item)
@@ -21376,7 +21508,9 @@ def punch_in_on_emphasis(ctx, count=None, strength=None):
         edl, f"{len(placed)} distributed emphasis zoom(s) on meaningful "
              "vocally stressed words")
     if res.startswith("EDL v"):
-        res += ("\nPunch-ins (program time, from measured vocal stress):\n"
+        res += ("\nPunch-ins (program time, from measured vocal stress; "
+                "each snaps in on the word, holds to the next cut or the "
+                "sentence's end, then cuts back out):\n"
                 + "\n".join(f"  '{w['w']}' @ {pt}s, "
                             f"{int(st * 100)}%, "
                             f"{'face target' if measured else 'center fallback'} "
@@ -24533,16 +24667,34 @@ TOOLS = {
                                     "enum": ["vibrant", "warm", "cool", "bw",
                                              "vintage", "cinematic",
                                              "none"]}}),
-    "add_zoom": (add_zoom, "Zoom on a time range of the FINAL edited video "
-                 "(output seconds) only when a named event needs the camera "
-                 "to move: a reveal, a UI target, a punchline, an explicit "
-                 "user beat. A talking-head already in frame does NOT need "
-                 "a punch-in. strength 0.05-4.5 (default 0.15; "
-                 "above 1.0 is a dramatic 2x+ punch). mode: "
-                 "'ease' (default, smooth ramp — use this), "
-                 "'push_in' / 'pull_out' (continuous Ken Burns drift), "
-                 "'punch' (instant snap — ONLY the single biggest peak or "
-                 "an explicit punch-in request, never every few seconds). TWO "
+    "add_zoom": (add_zoom, "Camera move (sub-pixel, eased) on a time range "
+                 "of the FINAL edited video, in output seconds. Use the "
+                 "premium short-form camera grammar — each move has a job "
+                 "and lands on a real beat: "
+                 "'punch' = fast expo snap in (~0.15s), held, hard cut back "
+                 "out at `end` — THE punch-in on a stressed word, number or "
+                 "payoff; end it on the next cut or sentence turn so the "
+                 "step back reads as a second camera, and add overshoot "
+                 "0.05-0.15 for a slam that settles on the biggest beats. "
+                 "'landing' = starts pushed in (strength 0.12-0.18) and "
+                 "settles to the wide in ~0.35s — start it EXACTLY on a cut "
+                 "(end ~start+0.4) so the new shot arrives with momentum. "
+                 "'push_in' = slow continuous push (strength 0.05-0.12) "
+                 "across a long hold (3s+) — keeps a static talking head "
+                 "alive; 'pull_out' = the release/reveal. 'ease' (default) = "
+                 "smooth ramp in, hold, ramp out — a gentle push onto a "
+                 "subject mid-shot. 'pulse' = 1 -> 1+strength -> 1 in ~0.3s "
+                 "on a beat or hit word (strength 0.05-0.08). 'shake' = a "
+                 "decaying impact shake (strength unused; shake 0.3-0.8). "
+                 "Vary mode, strength and spacing — never the same punch on "
+                 "a metronome. Knobs: ramp_s = how long the move takes "
+                 "(punch ramp_s=0 is a hard one-frame step; a landing or "
+                 "pulse needs >= 0.06), overshoot 0-0.5 "
+                 "(punch/ease), rotate = degrees of roll riding the move "
+                 "(+ clockwise, 1-3 for a dynamic punch), shake 0-1 with "
+                 "shake_hz/shake_decay on ANY mode (punch + shake 0.4 = an "
+                 "impact hit). strength 0.05-4.5 (default 0.15; pulse 0.07; "
+                 "above 1.0 is a dramatic 2x+). TWO "
                  "ways to aim, and they answer different requests: "
                  "rect=[x0,y0,x1,y1] (fractions of the output frame, read "
                  "off look_at's grid) FRAMES A REGION — the tool solves "
@@ -24551,8 +24703,8 @@ TOOLS = {
                  "this panel', and its result reports where the region "
                  "lands on screen. cx/cy instead PIN A POINT: that point "
                  "keeps its exact screen position while everything "
-                 "magnifies around it — right for emphasis on a subject "
-                 "that is already well-composed, and wrong for framing a "
+                 "magnifies around it — right for a punch on a face that is "
+                 "already well-composed, and wrong for framing a "
                  "thing near an edge (an edge point stays at the edge at "
                  "any strength — it never slides to centre). Pass rect OR "
                  "cx/cy, not both; if both arrive the rect wins (it already "
@@ -24560,10 +24712,9 @@ TOOLS = {
                  "Omitting all targets uses the frame center and returns a "
                  "quality advisory. Coordinates may come from look_at, the "
                  "filmstrip, user direction, or the editor's own judgment; "
-                 "no prior evidence call is required. Zero zooms is often "
-                 "correct. Do not sprinkle punches on 'important sentences'. "
-                 "punch_in_on_emphasis is only for an explicit punch-in-on-"
-                 "stressed-words request. If the zoom should MOVE while "
+                 "no prior evidence call is required. "
+                 "punch_in_on_emphasis places punches on the measured vocal "
+                 "stress peaks in one call. If the zoom should MOVE while "
                  "pushed in — 'then move it to X', 'keep it and go to the "
                  "next message', 'follow the cursor' — that is ONE "
                  "add_zoom_path (its keyframes take rect too), never a "
@@ -24572,11 +24723,18 @@ TOOLS = {
                   "strength": {"type": "number"},
                   "mode": {"type": "string",
                            "enum": ["punch", "ease", "push_in",
-                                    "pull_out"]},
+                                    "pull_out", "landing", "pulse",
+                                    "shake"]},
                   "cx": {"type": "number"},
                   "cy": {"type": "number"},
                   "rect": {"type": "array",
                            "items": {"type": "number"}},
+                  "ramp_s": {"type": "number"},
+                  "overshoot": {"type": "number"},
+                  "rotate": {"type": "number"},
+                  "shake": {"type": "number"},
+                  "shake_hz": {"type": "number"},
+                  "shake_decay": {"type": "number"},
                   "purpose": {"type": "string",
                               "description": "The nameable narrative or visible reason for this zoom."},
                   "target_evidence_ids": {"type": "array",
@@ -25713,21 +25871,25 @@ TOOLS = {
                         "ground truth; deterministic preview AUDIO CHECK can "
                         "measure the rendered mix without relabeling roles.",
                         {}),
-    "punch_in_on_emphasis": (punch_in_on_emphasis, "ONLY when the user "
-                             "explicitly asked for punch-ins on stressed / "
-                             "important spoken words. Not a default pass, "
-                             "not 'make it high-retention', not a talking-"
-                             "head finish. Writes a sparse, timeline-"
-                             "distributed motion pass on vocally STRESSED "
-                             "words that survive the current cut (stress "
-                             "from the audio, times from real word timestamps). "
-                             "Prefer zero or one hard punch over a sprinkle. "
-                             "Omit count to keep density sparse; omit strength "
-                             "to keep magnitude small. Face targets are used "
-                             "when detected. If you cannot name why a word "
-                             "deserves a camera bump, do not call this — "
-                             "hold the frame or use one add_zoom(mode='ease') "
-                             "on the actual turn.",
+    "punch_in_on_emphasis": (punch_in_on_emphasis, "Emphasis punch-ins on "
+                             "the vocally STRESSED words of speech, in one "
+                             "call — the short-form talking-head emphasis "
+                             "pass (stress measured from the audio, times "
+                             "from real word timestamps that survive the "
+                             "current cut, face targets when detected). "
+                             "Each punch snaps in ON its word with a fast "
+                             "expo ease (~0.15s), holds to the next cut or "
+                             "the end of the sentence, then cuts back out; "
+                             "the strongest turn and spoken numbers settle "
+                             "with a small overshoot. Omitted count/strength "
+                             "are directed from program length and the "
+                             "motion brief (distributed, never clustered on "
+                             "adjacent loud words); explicit values win. "
+                             "Complete the camera with add_zoom: a 'landing' "
+                             "on hard cuts between ideas and a slow "
+                             "'push_in' across long holds — variety, not "
+                             "more punches. Skip it for calm/minimal briefs "
+                             "or footage without speech.",
                              {"count": {"type": "integer"},
                               "strength": {"type": "number"}}),
     "beat_align_cuts": (beat_align_cuts, "THE tool for 'cut to the beat'. "

@@ -37,6 +37,7 @@ import os
 import re
 import subprocess
 
+import camera
 import media
 import travel
 from schemas import MIN_SPAN_S, anim_value
@@ -442,7 +443,9 @@ def _zoom_path_value(item, key, fraction, default):
 
 
 def _zoom_strength_at(item, absolute_t):
-    """Python mirror of the renderer's zoom-strength expressions."""
+    """Python mirror of the renderer's zoom-strength expressions. The eased
+    camera curves come from worker/camera.py — the very code that emits
+    them — so a clipped proof samples the curve the full render draws."""
     start, end = float(item["start"]), float(item["end"])
     span = max(end - start, 1e-9)
     fraction = min(max((absolute_t - start) / span, 0.0), 1.0)
@@ -450,15 +453,18 @@ def _zoom_strength_at(item, absolute_t):
     mode = item.get("mode") or "punch"
     if mode == "path":
         return _zoom_path_value(item, "s", fraction, strength)
-    if mode in ("ease", "follow"):
+    if mode == "follow":
         ramp = max(0.15, min(0.4, span / 4.0))
         return strength * min(max((absolute_t - start) / ramp, 0.0), 1.0) \
             * min(max((end - absolute_t) / ramp, 0.0), 1.0)
-    if mode == "push_in":
-        return strength * fraction
-    if mode == "pull_out":
-        return strength * (1.0 - fraction)
-    return strength
+    return float(camera.zoom_terms(item, float(absolute_t), start, end).z)
+
+
+# Camera fields a clipped zoom cannot carry onto its temporary linear path
+# (the schema rejects them on mode 'path'); the sampled strength already
+# holds the curve, and a proof-only roll/shake is not worth inventing.
+_CAMERA_ONLY_KEYS = ("ramp_s", "overshoot", "rotate", "shake", "shake_hz",
+                     "shake_decay")
 
 
 def _clip_program_zooms(items, w0, w1):
@@ -490,9 +496,24 @@ def _clip_program_zooms(items, w0, w1):
         left_clipped = clipped_start > original_start + 0.001
         right_clipped = clipped_end < original_end - 0.001
         mode = item.get("mode") or "punch"
-        if not (left_clipped or right_clipped) or mode == "punch":
+        if not (left_clipped or right_clipped):
             out.append(shifted)
             continue
+        if mode == "punch" and not any(item.get(k) for k in (
+                "rotate", "shake")):
+            # A punch is held at full strength once its snap is over, and
+            # its exit is a hard step. Cut after the snap, the proof starts
+            # already punched in (no fresh snap); cut inside the snap, it
+            # falls through to the sampled curve below.
+            ramp = camera.ramp_seconds(item, original_start, original_end)
+            if not left_clipped:
+                out.append(shifted)
+                continue
+            if clipped_start >= original_start + ramp - 1e-6:
+                shifted["ramp_s"] = 0.0
+                shifted.pop("overshoot", None)
+                out.append(shifted)
+                continue
 
         # Preserve all authored travel waypoints and the exact corners of the
         # renderer's hidden ease/follow ramp.  Path-mode cubic pieces are
@@ -500,8 +521,12 @@ def _clip_program_zooms(items, w0, w1):
         # not another complete cubic with the same easing name.
         sample_times = {clipped_start, clipped_end}
         span = original_end - original_start
-        if mode in ("ease", "follow"):
+        if mode == "follow":
             ramp = max(0.15, min(0.4, span / 4.0))
+            sample_times.update((original_start + ramp,
+                                 original_end - ramp))
+        elif mode != "path":
+            ramp = camera.ramp_seconds(item, original_start, original_end)
             sample_times.update((original_start + ramp,
                                  original_end - ramp))
         if mode in ("follow", "path"):
@@ -511,7 +536,9 @@ def _clip_program_zooms(items, w0, w1):
         sample_times = sorted(t for t in sample_times
                               if clipped_start - 1e-9 <= t
                               <= clipped_end + 1e-9)
-        if mode == "path" and item.get("ease") not in (None, "linear"):
+        curved = (mode == "path" and item.get("ease") not in (None, "linear")
+                  ) or mode not in ("path", "follow")
+        if curved:
             # The clipped curve is emitted as a linear temporary path. Keep
             # every authored anchor when practical, then repeatedly bisect
             # the largest uncovered interval. Twenty-four samples bound the
@@ -567,6 +594,8 @@ def _clip_program_zooms(items, w0, w1):
         shifted["mode"] = "path"
         shifted["path"] = deduped
         shifted["ease"] = "linear"
+        for key in _CAMERA_ONLY_KEYS:
+            shifted.pop(key, None)
         out.append(shifted)
     return out
 

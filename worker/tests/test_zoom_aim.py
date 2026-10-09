@@ -192,18 +192,34 @@ def test_zoom_state_at_mirrors_the_static_modes():
              "cx": 0.8, "cy": 0.5}
     z, cx, cy = renderer.zoom_state_at([punch], 3.0, 20.0)
     assert abs(z - 1.5) < 1e-9 and abs(cx - 0.8) < 1e-9 and cy == 0.5
-    assert renderer.zoom_state_at([punch], 4.0, 20.0)[0] == 1.5   # inclusive
+    # Round camera: windows are HALF-open — the frame AT `end` belongs to
+    # what follows (usually the next shot's first frame when the zoom ends
+    # on a cut). The old zoompan between() held that frame at 1.5.
+    assert renderer.zoom_state_at([punch], 3.99, 20.0)[0] == 1.5
+    assert renderer.zoom_state_at([punch], 4.0, 20.0) == (1.0, 0.5, 0.5)
     assert renderer.zoom_state_at([punch], 4.01, 20.0) == (1.0, 0.5, 0.5)
+    # The punch's expo snap (0.12 s) is long finished by 3.0: the hold is
+    # EXACTLY the strength, as it was when punch was an instant step.
+    assert renderer.zoom_state_at([punch], 2.0, 20.0)[0] == 1.0   # snap start
     ease = {"id": "z2", "start": 7.5, "end": 9.5, "strength": 1.2,
             "mode": "ease"}
     assert renderer.zoom_state_at([ease], 7.5, 20.0)[0] == 1.0    # ramp edge
-    assert abs(renderer.zoom_state_at([ease], 7.7, 20.0)[0] - 1.6) < 1e-9
+    # Round camera: the ramp is a smootherstep over 0.5 s (was a 0.4 s
+    # linear trapezoid, 1.6 here): u = 0.4 -> 0.31744 of the way.
+    assert abs(renderer.zoom_state_at([ease], 7.7, 20.0)[0]
+               - (1.0 + 1.2 * 0.31744)) < 1e-9
     assert abs(renderer.zoom_state_at([ease], 8.5, 20.0)[0] - 2.2) < 1e-9
     push = {"id": "z3", "start": 0.0, "end": 4.0, "strength": 0.8,
             "mode": "push_in"}
-    assert abs(renderer.zoom_state_at([push], 1.0, 20.0)[0] - 1.2) < 1e-9
+    # A soft (C1) start over the first 0.5 s, then constant speed: a quarter
+    # through, the push is 0.2 of the way (the old linear drift said 0.25).
+    assert abs(renderer.zoom_state_at([push], 1.0, 20.0)[0] - 1.16) < 1e-9
+    assert abs(renderer.zoom_state_at([push], 4.0 - 1e-9, 20.0)[0]
+               - 1.8) < 1e-6
     pull = dict(push, mode="pull_out")
-    assert abs(renderer.zoom_state_at([pull], 1.0, 20.0)[0] - 1.6) < 1e-9
+    assert abs(renderer.zoom_state_at([pull], 1.0, 20.0)[0]
+               - (1.0 + 0.8 * 1.375 / 1.875)) < 1e-9
+    assert abs(renderer.zoom_state_at([pull], 0.0, 20.0)[0] - 1.8) < 1e-9
 
 
 def test_zoom_state_at_adds_overlapping_terms_and_clamps_centre():
