@@ -13,7 +13,7 @@
   "y": {"type": "float", "min": 0.1, "max": 0.9, "default": 0.45, "hint": "vertical centre as frame fraction"}
  },
  "example": {"values": ["12", "14", "13", "19", "24", "22", "35", "48", "61"], "title": "Monthly *revenue*", "value_label": "$61K", "start_label": "Jan", "end_label": "Sep"},
- "sfx": [{"at": 0.12, "kind": "whoosh_soft"}, {"at": 1.15, "kind": "ding"}]} -->
+ "sfx": [{"at": 0.1, "kind": "whoosh_soft"}, {"at": 1.06, "kind": "ding"}]} -->
 <style>
   .card,.plate{position:absolute;left:0;top:0;transform-origin:50% 50%;border-radius:40px;will-change:transform,opacity}
   .plate.glass{background:linear-gradient(165deg,rgba(40,40,48,.8) 0%,rgba(12,12,16,.86) 100%);
@@ -109,7 +109,7 @@
     return d;
   }
 
-  const T_DRAW = 0.16, DRAW = 1.0, LAND = T_DRAW + DRAW;     // 'ding' at 1.15
+  const T_DRAW = 0.14, DRAW = 0.92, LAND = T_DRAW + DRAW;    // 'ding' at 1.06
   let L = null;
   function layout() {
     inner.innerHTML = '';
@@ -174,7 +174,7 @@
     const k = Math.min(1, (SAFE.y1 - SAFE.y0) / cardH);
     const x = (W - cardW) / 2;
     const ty = Math.min(SAFE.y1 - cardH * (1 + k) / 2, Math.max(SAFE.y0 - cardH * (1 - k) / 2, H * P.y - cardH / 2));
-    const m = 84;
+    const m = 72;
     MG.box = [Math.max(0, x - m), Math.max(0, ty + cardH * (1 - k) / 2 - m), Math.min(W, x + cardW + m), Math.min(H, ty + cardH * (1 + k) / 2 + m + 40)];
     // x -> data value (for the live tag)
     const valueAtX = px => {
@@ -187,7 +187,7 @@
   MG.ready = fontsReady.then(() => { L = L || layout(); });
 
   const XD = Math.min(0.26, D * 0.1);
-  MG.active([[0, Math.min(D, LAND + 0.42)], [D - XD - 0.02, D]]);
+  MG.active([[0, Math.min(D, LAND + 0.38)], [D - XD - 0.02, D]]);
   const lastNum = parse(lastRaw);
   MG.frame(t => {
     if (!L) L = layout();
@@ -214,7 +214,7 @@
     [L.dot, L.core].forEach((c, i) => { c.setAttribute('cx', pt.x.toFixed(2)); c.setAttribute('cy', pt.y.toFixed(2)); c.setAttribute('opacity', vis); });
     L.dot.setAttribute('r', Math.max(0, dr).toFixed(2));
     L.core.setAttribute('r', Math.max(0, dr * 0.4).toFixed(2));
-    const pr = MG.range(t, LAND, 0.4);
+    const pr = MG.range(t, LAND, 0.36);
     L.ring.setAttribute('cx', pt.x.toFixed(2)); L.ring.setAttribute('cy', pt.y.toFixed(2));
     L.ring.setAttribute('r', (16 + 46 * MG.ease.outCubic(pr)).toFixed(2));
     L.ring.setAttribute('opacity', pr > 0 && pr < 1 ? ((1 - pr) * 0.9).toFixed(3) : 0);

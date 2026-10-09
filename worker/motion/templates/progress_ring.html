@@ -158,7 +158,7 @@
   MG.ready = fontsReady.then(() => { L = L || layout(); });
 
   const XD = Math.min(0.24, D * 0.1);
-  MG.active([[0, Math.min(D, LAND + 0.42)], [D - XD - 0.02, D]]);
+  MG.active([[0, Math.min(D, LAND + 0.36)], [D - XD - 0.02, D]]);
   const frac = pct / 100;
   MG.frame(t => {
     if (!L) L = layout();
@@ -174,7 +174,7 @@
     MG.draw(L.arc, f);
     L.arc.setAttribute('opacity', f > 0.0005 ? 1 : 0);
     const [hx, hy] = L.pt(SWEEP[0] + SWEEP[1] * f);
-    const q = MG.range(t, LAND - 0.03, 0.36), bump = q > 0 && q < 1 ? Math.sin(Math.PI * q) : 0;
+    const q = MG.range(t, LAND - 0.03, 0.34), bump = q > 0 && q < 1 ? Math.sin(Math.PI * q) : 0;
     const live = MG.range(t, T_FILL, 0.1);
     L.tip.setAttribute('cx', hx.toFixed(2)); L.tip.setAttribute('cy', hy.toFixed(2));
     L.tip.setAttribute('opacity', (live * (f > 0.0005 ? 0.95 : 0)).toFixed(3));

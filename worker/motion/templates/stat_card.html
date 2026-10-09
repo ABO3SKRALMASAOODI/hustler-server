@@ -14,17 +14,18 @@
  "example": {"label": "Net revenue", "value": "$977,424", "delta": "+340%", "caption": "vs. $222,140 last year", "spark": ["10", "14", "12", "20", "26", "24", "38", "52", "61"]},
  "sfx": [{"at": 0.0, "kind": "whoosh_soft"}, {"at": 0.78, "kind": "pop_soft"}, {"at": 1.2, "kind": "ding"}]} -->
 <style>
-  .card,.plate{position:absolute;left:0;top:0;border-radius:44px;transform-origin:50% 100%;will-change:transform,opacity}
-  .plate{overflow:hidden}
+  .card,.plate,.gloss{position:absolute;left:0;top:0;border-radius:44px;transform-origin:50% 100%;will-change:transform,opacity}
+  /* the sheen lives on its own clipped layer: sweeping it never re-blurs the plate's shadow */
+  .gloss{overflow:hidden}
   .plate.glass{background:linear-gradient(160deg,rgba(52,52,62,.8) 0%,rgba(16,16,22,.88) 70%);
-    border:1px solid rgba(255,255,255,.16);box-shadow:inset 0 1px 0 rgba(255,255,255,.16),0 40px 90px rgba(0,0,0,.5)}
+    border:1px solid rgba(255,255,255,.16);box-shadow:inset 0 1px 0 rgba(255,255,255,.16),0 30px 64px rgba(0,0,0,.5)}
   .plate.solid{background:linear-gradient(170deg,#18181e 0%,#0a0a0d 100%);border:1px solid rgba(255,255,255,.1);
-    box-shadow:inset 0 1px 0 rgba(255,255,255,.08),0 40px 90px rgba(0,0,0,.55)}
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.08),0 30px 64px rgba(0,0,0,.55)}
   .plate.light{background:linear-gradient(175deg,#ffffff 0%,#f5f4f2 100%);border:1px solid rgba(0,0,0,.06);
-    box-shadow:0 36px 80px rgba(0,0,0,.3),0 4px 14px rgba(0,0,0,.08)}
+    box-shadow:0 28px 60px rgba(0,0,0,.3),0 4px 14px rgba(0,0,0,.08)}
   .sheen{position:absolute;top:-20%;bottom:-20%;width:38%;left:0;opacity:0;
     background:linear-gradient(100deg,rgba(255,255,255,0) 0%,rgba(255,255,255,.13) 45%,rgba(255,255,255,.2) 50%,rgba(255,255,255,.13) 55%,rgba(255,255,255,0) 100%)}
-  .plate.light .sheen{background:linear-gradient(100deg,rgba(255,255,255,0) 0%,rgba(255,255,255,.75) 50%,rgba(255,255,255,0) 100%)}
+  .gloss.light .sheen{background:linear-gradient(100deg,rgba(255,255,255,0) 0%,rgba(255,255,255,.75) 50%,rgba(255,255,255,0) 100%)}
   .inner{position:relative}
   .lab{display:flex;align-items:center;gap:16px;font-family:'Inter','Inter Display',sans-serif;font-weight:600;color:var(--fg2);
        letter-spacing:-0.01em;white-space:nowrap;line-height:1.1}
@@ -40,7 +41,7 @@
   .cap{font-family:'Inter','Inter Display',sans-serif;font-weight:500;color:var(--fg3);letter-spacing:-0.005em;white-space:nowrap;font-size:34px;line-height:1.1}
   svg.spark{position:absolute;left:0;overflow:visible}
 </style>
-<div class="mg-root"><div class="plate" id="plate"><div class="sheen" id="sheen"></div></div><div class="card" id="card"><div class="inner" id="inner"></div></div></div>
+<div class="mg-root"><div class="plate" id="plate"></div><div class="gloss" id="gloss"><div class="sheen" id="sheen"></div></div><div class="card" id="card"><div class="inner" id="inner"></div></div></div>
 <script>
 (() => {
   const P = MG.params, D = MG.duration, W = MG.W, H = MG.H;
@@ -95,8 +96,8 @@
 
   const fontsReady = Promise.all([`800 60px 'Inter Display'`, `600 40px 'Inter'`, `500 30px 'Inter'`]
     .map(f => document.fonts.load(f).catch(() => 0)));
-  const card = MG.$('#card'), inner = MG.$('#inner'), plate = MG.$('#plate'), sheen = MG.$('#sheen');
-  plate.classList.add(P.style);
+  const card = MG.$('#card'), inner = MG.$('#inner'), plate = MG.$('#plate'), sheen = MG.$('#sheen'), gloss = MG.$('#gloss');
+  plate.classList.add(P.style); gloss.classList.add(P.style);
   const NS = 'http://www.w3.org/2000/svg';
   const sv = (tag, attrs, parent) => { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); if (parent) parent.appendChild(e); return e; };
   function smoothPath(pts) {
@@ -181,13 +182,13 @@
     inner.style.width = cw + 'px'; inner.style.height = h + 'px';
     card.style.padding = pad + 'px'; card.style.width = cardW + 'px';
     const cardH = h + pad * 2;
-    plate.style.width = cardW + 'px'; plate.style.height = cardH + 'px';
+    plate.style.width = gloss.style.width = cardW + 'px'; plate.style.height = gloss.style.height = cardH + 'px';
     const k = Math.min(1, (SAFE.y1 - SAFE.y0) / cardH);
     const x = (W - cardW) / 2;
     // transform origin is the card's bottom centre: keep the scaled card centred on y
     const visTop = Math.min(SAFE.y1 - cardH * k, Math.max(SAFE.y0, H * P.y - cardH * k / 2));
     const ty = visTop - cardH * (1 - k);
-    const m = 100;
+    const m = 84;
     MG.box = [Math.max(0, x - m), Math.max(0, visTop - m), Math.min(W, x + cardW + m), Math.min(H, visTop + cardH * k + m + 30)];
     return { lab, val, pill, cap, sp, x, ty, k, cardW, cardH };
   }
@@ -198,11 +199,16 @@
   MG.frame(t => {
     if (!L) L = layout();
     // 3D tilt-in: the card swings up from lying back, overshoots a touch, settles flat
-    const s = MG.spring(t, 0, { stiffness: 130, damping: 15 });
+    const s = MG.spring(t, 0, { stiffness: 160, damping: 18 });
     const qx = MG.ease.inCubic(MG.range(t, D - XD, XD));
-    const st = { perspective: 1700, x: L.x, y: L.ty + (1 - s) * 120 + qx * 30, rx: (1 - s) * 46 + qx * 8,
+    const rx = (1 - s) * 46 + qx * 8;
+    // 3D only while it visibly tilts: flat layers composite far cheaper
+    const st = { perspective: Math.abs(rx) > 0.12 ? 1700 : 0, x: L.x, y: L.ty + (1 - s) * 120 + qx * 30, rx: Math.abs(rx) > 0.12 ? rx : 0,
                  scale: L.k * (0.9 + 0.1 * s - 0.03 * qx), opacity: (0.25 + 0.75 * MG.range(t, 0, 0.14)) * (1 - qx) };
     MG.set(plate, st);
+    const shOn = t > 0.4 && t < 1.14;
+    gloss.style.display = shOn ? 'block' : 'none';
+    if (shOn) MG.set(gloss, st);
     MG.set(card, Object.assign({ blur: (1 - MG.range(t, 0, 0.18)) * 8 }, st));
     // sheen sweeps once as the card settles
     const sh = MG.range(t, 0.42, 0.7);

@@ -145,7 +145,7 @@
       return w + affW(pre, fs) + affW(suf, fs);
     };
     const maxFs = Math.min(400 * P.size, (SAFE.y1 - SAFE.y0) * 0.42);
-    const fs = Math.max(40, Math.min(maxFs, 100 * (SAFE.x1 - SAFE.x0) / widthAt(100)));
+    const fs = Math.max(40, Math.min(maxFs, 100 * (SAFE.x1 - SAFE.x0 - 40) / widthAt(100)));
     num.style.fontSize = fs + 'px';
     num.style.letterSpacing = track + 'em';
     const digitTop = metric('8', fs, fam, fw).actualBoundingBoxAscent;
@@ -178,7 +178,7 @@
         col.style.width = slot + 'em';
         MG.el('span', 'ghost', '0', col);
         const pool = [];
-        for (let k = 0; k < 12; k++) pool.push(MG.el('span', 'dg', '0', col));
+        for (let k = 0; k < 14; k++) pool.push(MG.el('span', 'dg', '0', col));
         cols.push({ col, pool, startD: +fromDigits[di], endD: +ch, idx: di });
         di++;
       }
@@ -235,7 +235,7 @@
   const XD = Math.min(0.22, D * 0.1);                   // exit, faster than the entrance
   MG.active([[0, CT + 0.36], [D - XD - 0.02, D]]);
   let lastStr = null;
-  const SAMPLES = [[0], [-0.4, -0.2, 0, 0.2, 0.4]];
+  const SAMPLES = [[0], [-0.5, -0.25, 0, 0.25, 0.5]];
   MG.frame(t => {
     if (!L) L = layout();
     const { numwrap, core, label, rule, cols, slot, glow, fs, scrim } = L;
@@ -258,7 +258,7 @@
         return c.startD + c.travel * MG.ease.outQuart(MG.range(tt, c.t0, dur)) + kick;
       };
       const pos = posAt(t), vel = Math.abs(posAt(t + 1 / MG.fps) - pos);
-      const blurLen = Math.min(0.5, vel * 0.6);
+      const blurLen = Math.min(0.32, vel * 0.5);
       const offs = blurLen < 0.04 ? SAMPLES[0] : SAMPLES[1];
       const wgt = offs.length > 1 ? 0.3 : 1;
       let k = 0;
@@ -266,18 +266,19 @@
       for (const o of offs) {
         for (let j = -1; j <= 2; j++) {
           const yy = j - frac - o * blurLen;
-          const a = Math.max(0, 1 - Math.abs(yy) / 0.62);
+          const a = Math.max(0, 1 - Math.abs(yy) / 0.56);
           if (a <= 0 || k >= c.pool.length) continue;
           const el = c.pool[k++];
           el.textContent = String(((base + j) % 10 + 10) % 10);
-          el.style.transform = `translateY(${(yy * STEP).toFixed(4)}em)`;
+          // a fast drum also stretches a little along its travel (reads as motion blur)
+          el.style.transform = `translateY(${(yy * STEP).toFixed(4)}em) scaleY(${(1 + blurLen * 0.6).toFixed(3)})`;
           el.style.opacity = (wgt * Math.pow(a, 1.4)).toFixed(3);
         }
       }
       for (; k < c.pool.length; k++) c.pool[k].style.opacity = 0;
-      const pr = MG.ease.outExpo(MG.range(t, c.t0 * 0.6, 0.45));
-      c.col.style.transform = `translateY(${((1 - pr) * 0.3).toFixed(4)}em)`;
-      c.col.style.opacity = MG.range(t, c.t0 * 0.6, 0.12);
+      const pr = MG.ease.outExpo(MG.range(t, c.t0 * 0.5, 0.4));
+      c.col.style.transform = `translateY(${((1 - pr) * 0.14).toFixed(4)}em)`;
+      c.col.style.opacity = MG.range(t, c.t0 * 0.5, 0.1);
     });
     if (glow) {
       const on = MG.ease.outCubic(MG.range(t, CT - 0.1, 0.16));
