@@ -127,6 +127,41 @@ def test_measure_plates_attaches_grids_and_fails_open():
     assert motion_layer.measure_plates(items, None) == {}
 
 
+def test_clusters_stay_bounded_and_long_programs_spread_their_samples():
+    # dense moments across a minute: several bounded decodes, not one that a
+    # 4K original would run past its timeout
+    ts = [0.4 + 0.8 * i for i in range(75)]
+    cls = plate._clusters(ts)
+    assert len(cls) > 1 and sum(len(c) for c in cls) == len(ts)
+    assert all(c[-1] - c[0] <= plate.MAX_SPAN_S for c in cls)
+    assert plate._clusters([1.0, 2.0, 9.0]) == [[1.0, 2.0], [9.0]]
+    # an even spread keeps both ends (never just the first N moments)
+    assert plate._spread(10, 3) == [0, 4, 9]
+    assert plate._spread(3, 5) == [0, 1, 2]
+
+
+def test_grids_reach_the_page_compactly_and_never_break_the_size_cap(monkeypatch):
+    import base64
+    # a dense one-word caption segment: one grid per cue
+    cues = [{"s": round(0.25 * i, 3), "e": round(0.25 * i + 0.24, 3),
+             "w": [{"t": "w", "s": round(0.25 * i, 3), "e": round(0.25 * i + 0.24, 3)}]}
+            for i in range(48)]
+    item = {"id": "__captions_0", "template": "caption_motion", "start": 0.0, "end": 12.0,
+            "params": {"look": "pop", "cues": cues}}
+    probe = _UniformProbe(231)
+    p = motion_layer.measure_plates([item], probe)[0]
+    assert len(p["s"]) == 48
+    assert list(base64.b64decode(p["s"][0]["g"])) == [231] * (p["c"] * p["r"])
+    job = motion_templates.build_job(item, 1080, 1920, 30, plate=p)
+    assert '"plate"' in job.html
+    assert len(job.html.encode()) < motion_engine.MAX_HTML_BYTES * 0.6
+    # a composition the plate would push over the cap renders without one
+    bare = motion_templates.build_job(item, 1080, 1920, 30)
+    monkeypatch.setattr(motion_engine, "MAX_HTML_BYTES", len(bare.html.encode()) + 100)
+    capped = motion_templates.build_job(item, 1080, 1920, 30, plate=p)
+    assert capped.html == bare.html
+
+
 def test_a_document_without_a_plate_is_unchanged():
     body = "<div class='mg-root'></div>"
     assert motion_engine.build_document(body) == motion_engine.build_document(body, plate=None)
@@ -172,6 +207,14 @@ def test_probe_measures_the_program_through_the_timeline(tmp_path, monkeypatch):
     finally:
         plate.end_source_scope(tok)
     assert prev.stats["decoded"] == 1 and final.stats["cached"] == 1
+    # more moments than the per-render cap: an even spread over the whole
+    # program, answered in place (the list keeps its length)
+    monkeypatch.setattr(plate, "MAX_SAMPLES", 2)
+    spread = plate.Probe(edl, tl, src, (320, 180), 540, 960, tl.out_duration,
+                         frame_mode="crop")
+    got = spread([0.3, 0.6, 1.2, 1.7])
+    assert len(got) == 4 and got[1] is None and got[2] is None
+    assert min(got[0]) >= 245 and max(got[3]) <= 10
 
 
 def test_renderer_builds_a_probe_only_when_the_motion_engine_draws(monkeypatch):
@@ -378,3 +421,22 @@ def test_secondary_text_keeps_a_phone_readable_cap_height():
             " return r.left < -1 || r.right > MG.W + 1; })()"], t=dur * 0.6))
         assert cap >= config_cap() - 0.5, (name, sel, cap)
         assert not overflow, (name, sel)
+
+
+@needs_browser
+def test_glass_pill_keeps_its_name_on_top_and_its_text_inside():
+    """The floored role must not outgrow the name, and a role that wraps at
+    the floor grows the pill instead of spilling out of it."""
+    for role in ("CEO", "on gamers in the operating room"):
+        p = motion_templates.check_params("lower_third", {"name": "Elon Musk", "role": role,
+                                                          "style": "glass_pill"})
+        job = motion_templates.build_job({"id": "lt", "template": "lower_third", "start": 0,
+                                          "end": 3.5, "params": p}, 540, 960, 30)
+        name_fs, role_fs, inside = asyncio.run(_eval(job, [
+            "parseFloat(getComputedStyle(document.querySelector('.name')).fontSize)",
+            "parseFloat(getComputedStyle(document.querySelector('.role')).fontSize)",
+            "(() => { const p = document.querySelector('.plate').getBoundingClientRect();"
+            " return ['.name', '.role'].every(s => { const r = document.querySelector(s).getBoundingClientRect();"
+            " return r.top >= p.top + 4 && r.bottom <= p.bottom - 4; }); })()"], t=2.0))
+        assert name_fs > role_fs * 1.1, (role, name_fs, role_fs)
+        assert inside, role

@@ -267,6 +267,11 @@ def build_job(item, out_w, out_h, fps, asset_locals=None, plate=None):
     body = item.get("html") if name == "html" else motion_engine.template_body(name)
     html = motion_engine.build_document(body, params=params, duration=full, fps=fps,
                                         design_w=dw, design_h=dh, plate=plate)
+    if plate and len(html.encode("utf-8")) > motion_engine.MAX_HTML_BYTES:
+        # the plate fails open: it never pushes a composition over the cap
+        # (an authored page near the limit renders as it did without one)
+        html = motion_engine.build_document(body, params=params, duration=full, fps=fps,
+                                            design_w=dw, design_h=dh)
     box = None
     if item.get("box"):
         x0, y0, x1, y1 = item["box"]

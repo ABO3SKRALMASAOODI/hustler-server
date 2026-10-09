@@ -220,7 +220,8 @@
   // ── legibility: the plate under the graphic ────────────────────────────
   // MG.plate is the program picture the renderer measured under this item
   // (worker/plate.py): {c, r, s: [{t, g}]} — a c x r grid of luma (0-255,
-  // row-major) over the design space at composition seconds t. It is null
+  // row-major; base64 of its bytes, or a plain array) over the design space
+  // at composition seconds t. It is null
   // when nothing was measured, and every helper below then answers "nothing
   // to do": a template must render exactly as it did before plates existed,
   // and on a dark plate it must not change at all.
@@ -246,6 +247,10 @@
   MG.plateAt = (rect, t0, t1) => {
     const P = MG.plate;
     if (!P || !Array.isArray(P.s) || !P.s.length || !rect || !(P.c > 0) || !(P.r > 0)) return null;
+    P.s.forEach(s => {                 // base64 grids decode once, on first use
+      if (typeof s.g !== 'string') return;
+      try { const b = atob(s.g); s.g = Uint8Array.from(b, ch => ch.charCodeAt(0)); } catch (e) { s.g = []; }
+    });
     const a = t0 == null ? -Infinity : t0, b = t1 == null ? Infinity : t1;
     let ss = P.s.filter(s => s.t >= a - 1e-6 && s.t <= b + 1e-6);
     if (!ss.length) {

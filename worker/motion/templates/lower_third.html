@@ -104,17 +104,23 @@
       const nfs = fit(R.name, 80 * S, tw);
       if (R.role) fitRole(R.role, Math.max(22, Math.min(34 * S, nfs * 0.42)), tw);
     } else if (style === 'glass_pill') {
-      // the pill grows with a floored role line (two lines of text + its inset)
+      // the pill grows with a floored role line (two lines of text + its
+      // inset), and the name stays the larger line above it
       const roleFs = role ? Math.max(33 * S, MG.minType(R.role)) : 0;
-      const ph = Math.max((role ? 134 : 106) * S, role ? 50 * S * 1.02 + roleFs * 1.3 + 44 * S : 0), d = ph - 22 * S;
+      const nameFs = role ? Math.max(50 * S, roleFs * 1.15) : 54 * S;
+      const ph = Math.max((role ? 134 : 106) * S, role ? nameFs * 1.02 + roleFs * 1.3 + 40 * S : 0), d = ph - 22 * S;
       lt.style.height = ph + 'px';
       R.mono.style.width = R.mono.style.height = d + 'px';
       R.mono.style.fontSize = (d * 0.38) + 'px';
       R.mono.style.margin = right ? `0 ${11 * S}px 0 0` : `0 0 0 ${11 * S}px`;
       R.tc.style.padding = right ? `0 ${20 * S}px 0 ${38 * S}px` : `0 ${38 * S}px 0 ${20 * S}px`;
       const tw = maxBlock - d - 11 * S - 58 * S;
-      fit(R.name, (role ? 50 : 54) * S, tw);
+      fit(R.name, nameFs, tw);
       if (R.role) fitRole(R.role, 33 * S, tw);
+      // a long role wraps at the floor: the pill takes the extra line
+      // rather than letting the text run out of its top and bottom
+      const th = R.txt.getBoundingClientRect().height;
+      if (th + 40 * S > ph) lt.style.height = (th + 40 * S) + 'px';
     } else {
       const nfs = fit(R.name, 78 * S, maxBlock);
       if (R.role) fitRole(R.role, Math.max(24, nfs * 0.64), maxBlock);

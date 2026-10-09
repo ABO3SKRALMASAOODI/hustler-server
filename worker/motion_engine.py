@@ -340,8 +340,9 @@ def build_document(body, *, params=None, theme=None, duration=1.0, fps=30.0,
     """Wrap template/authored HTML with fonts, the runtime and its inputs.
 
     plate: the measured program picture under the item (worker/plate.py),
-    {c, r, s: [{t, g}]}, exposed as MG.plate. None leaves the document
-    exactly as it was before plates existed."""
+    {c, r, s: [{t, g}]} with g the c x r luma grid (base64 bytes, or a
+    list), exposed as MG.plate. None leaves the document exactly as it was
+    before plates existed."""
     init = {"params": params or {}, "theme": theme or {}, "duration": float(duration),
             "fps": float(fps), "W": int(design_w), "H": int(design_h)}
     if plate:

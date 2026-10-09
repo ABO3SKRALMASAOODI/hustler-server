@@ -125,7 +125,8 @@
     if (P.exit === 'collapse') {
       const cn = num ? chip.firstChild : null;
       if (cn) MG.floorType(cn);
-      MG.fitSecondary(ct, { width: W - 128 - (cn ? cn.offsetWidth + 14 : 0), max: 33 });
+      // (the frame's 64px margins, less the chip's own padding + border)
+      MG.fitSecondary(ct, { width: W - 128 - 46 - (cn ? cn.offsetWidth + 14 : 0), max: 33 });
     }
     css(chip, { left: '64px', top: Math.round(H * 0.085) + 'px' });
     CR = { left: 64, top: Math.round(H * 0.085), height: chip.offsetHeight || 56 };

@@ -32,6 +32,7 @@ from contextvars import ContextVar
 
 import motion_engine
 import motion_templates
+import plate as plate_mod
 
 LAST_WARNINGS = []
 # Per-render collector (renderer._run_render_job installs one). LAST_WARNINGS
@@ -141,7 +142,7 @@ def measure_plates(items, probe):
         if not g or not cols or not rows or len(g) != cols * rows:
             continue
         p = out.setdefault(k, {"c": cols, "r": rows, "s": []})
-        p["s"].append({"t": round(comp_t, 3), "g": [int(v) for v in g]})
+        p["s"].append({"t": round(comp_t, 3), "g": plate_mod.encode_grid(g)})
     return out
 
 

@@ -20,15 +20,20 @@ shot, which is what the type has to survive.
 
 Cost: moments are grouped per media file into clusters of nearby seconds and
 each cluster is ONE bounded, low-resolution grayscale decode (-ss/-t, a few
-frames per second), clusters running concurrently. Every measured moment is
-cached on disk by source content + moment + geometry, so a re-render after an
-unrelated edit decodes nothing.
+frames per second), clusters running concurrently. A cluster never spans more
+than MAX_SPAN_S: a final decodes a 4K original, and one decode across a whole
+captioned minute would run on two threads past its timeout and lose every
+moment. A long program keeps an evenly spread MAX_SAMPLES of its moments (a
+caption cue without its own then reads its neighbour's), so coverage and cost
+stay bounded. Every measured moment is cached on disk by source content +
+moment + geometry, so a re-render after an unrelated edit decodes nothing.
 
 Fail open: any moment that cannot be measured is None, an item with no
 measured moment gets no plate, and a composition without a plate renders
 byte-for-byte as it did before plates existed.
 """
 
+import base64
 import hashlib
 import json
 import os
@@ -47,11 +52,13 @@ COLS = 18                 # grid columns over the 1080-wide design space
 DECODE_W = 320            # decoded frame width (px) before fitting
 SAMPLE_FPS = 8            # frames per second kept from a cluster decode
 CLUSTER_GAP_S = 3.0       # moments closer than this share one decode
-MAX_SAMPLES = 160         # per render, after de-duplication
+MAX_SPAN_S = 6.0          # ...but one decode never covers more than this
+MAX_SAMPLES = 160         # per render, after de-duplication (evenly spread)
 DECODE_TIMEOUT_S = 40.0
 BUDGET_S = 60.0           # the whole probe; anything later is unmeasured
-WORKERS = 3
+WORKERS = max(2, min(4, (os.cpu_count() or 4) // 2))   # x 2 decoder threads
 CACHE_DIR = os.path.join(motion_engine.CACHE_DIR, "plates")
+CACHE_MAX_FILES = 20000   # ~2 KB each; oldest go first
 
 # The main source's identity for the moment cache, set by the render job
 # (the original's sha256 + any cleaned-source key). A preview measures the
@@ -72,6 +79,13 @@ def end_source_scope(token):
 
 def grid_rows(W, H, cols=COLS):
     return max(1, int(round(cols * float(H) / float(W))))
+
+
+def encode_grid(grid):
+    """A grid as the composition receives it: base64 of its row-major bytes
+    (~4x smaller than a JSON list — a caption segment carries one per cue,
+    and a document has a size cap)."""
+    return base64.b64encode(bytes(max(0, min(255, int(v))) for v in grid)).decode("ascii")
 
 
 def _ffmpeg():
@@ -132,14 +146,42 @@ def _cache_put(key, grid):
         pass
 
 
-def _clusters(times, gap=CLUSTER_GAP_S):
+def _cache_prune(max_files=CACHE_MAX_FILES):
+    """Keep the moment cache bounded (it lives beside the motion clip cache,
+    which prunes only its own clips): the oldest moments go first."""
+    try:
+        with os.scandir(CACHE_DIR) as it:
+            files = [(e.stat().st_mtime, e.path) for e in it
+                     if e.name.endswith(".json")]
+        if len(files) <= max_files:
+            return
+        files.sort()
+        for _m, p in files[:len(files) - max_files]:
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+    except Exception:  # noqa: BLE001 — best effort
+        pass
+
+
+def _clusters(times, gap=CLUSTER_GAP_S, span=MAX_SPAN_S):
     out = []
     for t in sorted(set(times)):
-        if out and t - out[-1][-1] <= gap:
+        if out and t - out[-1][-1] <= gap and t - out[-1][0] <= span:
             out[-1].append(t)
         else:
             out.append([t])
     return out
+
+
+def _spread(n, k):
+    """k indices out of range(n), evenly spread, first and last included."""
+    if n <= k:
+        return list(range(n))
+    if k <= 1:
+        return [0]
+    return sorted({int(round(i * (n - 1) / (k - 1))) for i in range(k)})
 
 
 def _pgm_frames(data):
@@ -183,6 +225,8 @@ def decode_gray(path, times, width=DECODE_W, deadline=None):
     lock = threading.Lock()
 
     def one(cl):
+        if deadline is not None and time.monotonic() >= deadline:
+            return              # over budget: the rest stay unmeasured
         a = max(0.0, cl[0] - 0.5 / SAMPLE_FPS)
         span = cl[-1] - a + 1.0 / SAMPLE_FPS
         # PGM frames carry their own size, so nothing has to predict what the
@@ -370,14 +414,19 @@ class Probe:
     def __call__(self, times):
         t_start = time.monotonic()
         deadline = t_start + BUDGET_S
-        times = list(times)[:MAX_SAMPLES]
+        times = list(times)
         out = [None] * len(times)
+        # a long program: an even spread across all of it, never just its
+        # first MAX_SAMPLES moments (the tail would lose its backings)
+        keep = set(_spread(len(times), MAX_SAMPLES))
         plans = []
         for i, t in enumerate(times):
-            try:
-                p = self._plan(float(t))
-            except Exception:  # noqa: BLE001 — that moment is unmeasured
-                p = None
+            p = None
+            if i in keep:
+                try:
+                    p = self._plan(float(t))
+                except Exception:  # noqa: BLE001 — that moment is unmeasured
+                    p = None
             plans.append(p)
         # grids live in the design space: a preview (540x960) and a final
         # (1080x1920) of one edit share every measured moment
@@ -427,6 +476,8 @@ class Probe:
                 self.stats["decoded"] += 1
                 if key:
                     _cache_put(key, g)
-        self.stats["samples"] += len(times)
+        if self.stats["decoded"]:
+            _cache_prune()
+        self.stats["samples"] += len(keep)
         self.stats["seconds"] += time.monotonic() - t_start
         return out

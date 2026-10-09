@@ -3754,7 +3754,8 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
         motion_inputs, next_idx = motion_layer.prepare_inputs(
             edl, workdir, W, H, fps, tl.out_duration, extra_inputs, next_idx,
             fetch_asset=lambda k: _fetch(k, "motion", next_idx),
-            plate=_plate_probe(edl, tl, None, None, W, H, None, None,
+            plate=_plate_probe(edl, tl, None, None, W, H,
+                               (edl.get("frame") or {}).get("mode"), None,
                                insert_locals))
         motion_inputs = motion_layer.demote_behind(
             motion_inputs, "a canvas program has no subject footage")
