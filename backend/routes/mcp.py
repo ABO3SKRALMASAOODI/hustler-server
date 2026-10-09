@@ -792,16 +792,18 @@ Two things are different from a normal tool session, and both matter:
       designed hit), motivated transitions at real turns, B-roll evidence
       on named nouns, a visual change every 0.3-0.6 s.
    f. SOUND: only the approved library — add_sfx(storage_key='sound:<id>',
-      at=..., gain_db=<suggested>) — and only where something meaningful
-      happens on screen: a designed graphic landing, a real section change
-      or B-roll entry (sound:swish_1 on a whip), the payoff (sound:impact_1,
-      once), or a real-world action shown (shutter on a photo, typing under
-      typed text, a click on a button press, a cash register on a money
-      figure). Never on captions or ordinary cuts inside a conversation; at
-      most about one sound every 4-5 s (about 4-8 in a 30-45 s short), never
-      the same sound twice within ~3 s, zero when nothing earns one; one
-      family per short; peaks pre-rolled onto the visual frame; mixed under
-      the voice. search_sfx only for a specific sound the user asks for.
+      at=<the frame it hits>, gain_db=<suggested>; the tool lands each
+      recording's peak on `at`, so never pre-roll by hand) — and only where
+      something meaningful happens on screen: a designed graphic landing, a
+      real section change or B-roll entry (sound:swish_1 on a whip), the
+      payoff (sound:impact_1, once), or a real-world action shown (shutter
+      on a photo, typing under typed text, a click on a button press, a cash
+      register on a money figure). Never on captions or ordinary cuts inside
+      a conversation; at most about one sound every 4-5 s (about 4-8 in a
+      30-45 s short), never the same sound twice within ~3 s, zero when
+      nothing earns one; one family per short; peaks on the visual frame;
+      mixed under the voice. search_sfx only for a specific sound the user
+      asks for.
    g. ENDING: hold the payoff 1.0-1.5 s; a native CTA (comment_cta,
       follow_cta, save_cta) after it only when the user or brief asks for
       one, filled only with the handle, keyword and offer they supplied —

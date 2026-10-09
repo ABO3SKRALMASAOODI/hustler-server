@@ -53,7 +53,9 @@
   "author": "chriskalos",
   "source_url": "https://freesound.org/people/chriskalos/sounds/172779",
   "license": "CC0 1.0",
-  "peak_s": 0.755
+  "peak_s": 0.755,
+  "hit_s": 0.69,
+  "max_s": 1.25
  },
  {
   "id": "riser_1",
@@ -123,7 +125,7 @@
   "author": "roachpowder",
   "source_url": "https://freesound.org/people/roachpowder/sounds/170229",
   "license": "CC0 1.0",
-  "peak_s": 0.192
+  "peak_s": 0.108
  },
  {
   "id": "shutter_2",
@@ -151,7 +153,8 @@
   "author": "ristooooo1",
   "source_url": "https://freesound.org/people/ristooooo1/sounds/539146",
   "license": "CC0 1.0",
-  "peak_s": 1.534
+  "peak_s": 1.534,
+  "align": "start"
  },
  {
   "id": "typing_2",
@@ -165,7 +168,8 @@
   "author": "greenvwbeetle",
   "source_url": "https://freesound.org/people/greenvwbeetle/sounds/423648",
   "license": "CC0 1.0",
-  "peak_s": 1.183
+  "peak_s": 1.183,
+  "align": "start"
  },
  {
   "id": "click_1",
@@ -235,7 +239,8 @@
   "author": "mrbriandesign",
   "source_url": "https://freesound.org/people/mrbriandesign/sounds/159011",
   "license": "CC0 1.0",
-  "peak_s": 0.005
+  "peak_s": 0.005,
+  "max_s": 0.9
  },
  {
   "id": "glitch_1",
@@ -277,7 +282,8 @@
   "author": "MaoDin204",
   "source_url": "https://freesound.org/people/MaoDin204/sounds/721774",
   "license": "CC0 1.0",
-  "peak_s": 0.274
+  "peak_s": 0.274,
+  "max_s": 0.5
  },
  {
   "id": "heartbeat_1",

@@ -21,6 +21,7 @@ it straight out of /state. Never raises: a diff failure returns None and the
 write proceeds — this is telemetry for a highlight, not part of the edit.
 """
 
+import sound_library
 from timeline import Timeline, insert_windows
 
 _GAP = 0.25          # merge flash ranges closer than this (seconds)
@@ -221,7 +222,9 @@ def _change_ranges(prev, new):
     if p != n:
         for k, it in n.items():
             if k not in p or _canon(p[k]) != _canon(it):
-                add(float(it.get("at", 0.0)), float(it.get("at", 0.0)) + 0.6)
+                # a library recording starts early: it runs on past its hit
+                a = float(it.get("at", 0.0))
+                add(a, max(a + 0.6, sound_library.hit_at(it) + 0.3))
         for k, it in p.items():
             if k not in n:
                 add(float(it.get("at", 0.0)), float(it.get("at", 0.0)))

@@ -17,14 +17,33 @@ only where something meaningful happens on screen — a designed graphic
 landing, a real section change/B-roll entry, the payoff, or a real-world
 action shown on screen — never on captions, sparse (about one sound every
 4-5 s at most), mixed under the voice.
+
+Timing: an editor (or template cue) names the moment a recording should
+HIT; ``place`` turns that into the EDL's physical placement. ``peak_s`` is
+the measured loudest moment (the loudest 10 ms), so a whoosh or impact
+starts that much early (skipping into the file when the hit is too close to
+0 s). ``hit_s`` overrides it where the ear hears the hit clearly earlier:
+impact_1's boom reaches full level ~0.69 s in (where the judges heard it)
+and only fluctuates to its loudest 10 ms at 0.755 s. A recording
+with ``"align": "start"`` (typing) plays UNDER its action from its first
+sound instead. ``max_s`` is the measured end of the audible tail (the
+A-weighted envelope 25 dB under its peak, and no sooner than 0.12 s — the
+renderer's stop fade — after it falls 20 dB under): the default play
+length when the editor sets none, so a long boom does not ring under the
+next line. Recordings whose tail already ends with the file (risers end on
+their peak; typing runs to its last keystroke) carry none. The approved
+audio files themselves are never altered.
 """
 
 import hashlib
 import json
 import os
+import re
 
 LIB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sound_library")
 REF_PREFIX = "sound:"
+# Project storage key of an uploaded library recording (see asset_key).
+_KEY_RE = re.compile(r"^sfx/[^/]+/lib-([A-Za-z0-9_]+)-([0-9a-f]{10})\.flac$")
 
 # Older/template role names -> library roles.
 ROLE_ALIASES = {
@@ -88,6 +107,114 @@ def peak_s(sound_id):
     return float(r.get("peak_s") or 0.0) if r else 0.0
 
 
+def hit_s(sound_id):
+    """Seconds from the file start to the moment that lands ON a requested
+    time: the peak for a hit (whoosh, impact, pop) or its measured attack
+    (``hit_s``), 0 for a recording that plays under its action from the
+    first sound ("align": "start")."""
+    r = get(sound_id)
+    if not r or r.get("align") == "start":
+        return 0.0
+    return float(r.get("hit_s") or r.get("peak_s") or 0.0)
+
+
+def max_s(sound_id):
+    """Seconds of the file worth playing by default (its measured audible
+    tail end), or None for the whole recording."""
+    v = (get(sound_id) or {}).get("max_s")
+    return float(v) if v else None
+
+
+def place(sound_id, hit_at, offset_s=0.0, dur_s=None):
+    """EDL placement that lands the recording's hit ON program time hit_at.
+
+    ``at`` is where playback starts (the renderer's clock), hit_s - offset_s
+    before the hit. When that would be before 0 s, playback starts at 0 and
+    skips further into the file so the hit still lands on time. at and
+    offset_s sit on the EDL's 10 ms grid, so the hit lands within 5 ms.
+    dur_s (play length from the start) defaults to the measured tail cap.
+    Returns {"at", "offset_s", "dur_s", "lead_s"}; offset_s/dur_s are None
+    when the file plays from its start / to its natural end."""
+    offset_s = max(0.0, float(offset_s or 0.0))
+    hs = hit_s(sound_id)
+    at = float(hit_at) - max(0.0, hs - offset_s)
+    if at < 0:
+        offset_s -= at
+        at = 0.0
+    at, offset_s = round(at, 2), round(offset_s, 2)
+    if dur_s is None:
+        cap = max_s(sound_id)
+        if cap is not None and cap - offset_s >= 0.05:
+            dur_s = cap - offset_s
+    return {"at": at, "offset_s": offset_s or None,
+            "dur_s": round(dur_s, 3) if dur_s else None,
+            "lead_s": round(max(0.0, hs - offset_s), 3)}
+
+
+def retime(item, hit, keep_length=False):
+    """Move an EDL sfx dict (in place) so its hit lands on program time hit.
+
+    A library recording is re-placed from its hit: the automatic skip into
+    the file (a hit too close to 0 s) and the default tail cap follow the new
+    position, while a deliberate offset_s, or the point in the file a
+    deliberate dur_s stops at, is kept. keep_length (a mechanical re-anchor
+    after a cut or an insert, not an edit of the sound) also leaves a sound
+    with no length set playing to its end, as it did before the move. Any
+    other sound simply starts at hit. Returns the seconds it starts before
+    its hit."""
+    hit = max(0.0, float(hit))
+    sid = id_for_key(item.get("storage_key"))
+    if not sid:
+        item["at"] = round(hit, 2)
+        return 0.0
+    off = float(item.get("offset_s") or 0.0)
+    # Only a hit too close to 0 s forces playback to 0 with a skip no further
+    # than the hit; an offset past the hit (or on a later start) was chosen.
+    base = 0.0 if float(item.get("at") or 0.0) <= 1e-3 and off <= hit_s(sid) + 1e-6 else off
+    cap, dur = max_s(sid), item.get("dur_s")
+    if dur is None:
+        auto = not keep_length
+    else:
+        auto = cap is not None and abs(float(dur) - (cap - off)) < 2e-3
+    pl = place(sid, hit, base, None if auto or dur is None else float(dur))
+    if not auto:
+        # a deliberate length stops at the same point in the file (the same
+        # ring after the hit) however far the skip into it moved
+        pl["dur_s"] = (None if dur is None else
+                       round(max(0.05, off + float(dur) - (pl["offset_s"] or 0.0)), 3))
+    item["at"] = pl["at"]
+    for k in ("offset_s", "dur_s"):
+        if pl[k]:
+            item[k] = pl[k]
+        else:
+            item.pop(k, None)
+    return pl["lead_s"]
+
+
+def asset_key(project_id, sound_id):
+    """The project storage key an approved recording is uploaded under."""
+    return f"sfx/{project_id}/lib-{sound_id}-{get(sound_id)['sha'][:10]}.flac"
+
+
+def id_for_key(storage_key):
+    """The approved recording behind a project storage key, or None. The sha
+    prefix must match, so an upload that happens to be named like one is
+    never mistaken for the library recording."""
+    m = _KEY_RE.match(str(storage_key or ""))
+    r = get(m.group(1)) if m else None
+    return r["id"] if r and r["sha"][:10] == m.group(2) else None
+
+
+def hit_at(item):
+    """Program time an EDL sfx item's hit lands (its ``at`` unless it is a
+    library recording that starts early to peak on time)."""
+    at = float(item.get("at") or 0.0)
+    sid = id_for_key(item.get("storage_key"))
+    if not sid:
+        return at
+    return round(at + max(0.0, hit_s(sid) - float(item.get("offset_s") or 0.0)), 3)
+
+
 def roles():
     return sorted({r["role"] for r in _load()})
 
@@ -123,5 +250,11 @@ def search(query, limit=6):
 
 
 def describe(r):
-    return (f"{REF_PREFIX}{r['id']} [{r['role']}, {r['duration_s']:g}s, suggested gain "
-            f"{r['gain_db']} dB] — {r['use']} (real recording, CC0)")
+    if r.get("align") == "start":
+        timing = "plays from its first sound"
+    else:
+        timing = f"hits {hit_s(r['id']):g}s in"
+    if r.get("max_s"):
+        timing += f", stops by default {float(r['max_s']):g}s in"
+    return (f"{REF_PREFIX}{r['id']} [{r['role']}, {r['duration_s']:g}s, {timing}, suggested "
+            f"gain {r['gain_db']} dB] — {r['use']} (real recording, CC0)")

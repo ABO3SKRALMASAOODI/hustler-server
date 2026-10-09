@@ -129,12 +129,13 @@ THE PREMIUM SHORT-FORM GRAMMAR — targets you can measure in the render:
    money figure). Never on captions or ordinary cuts inside a conversation.
    At most about one sound every 4–5 s (about 4–8 in a 30–45 s short), never
    the same sound twice within ~3 s, and zero when nothing earns one; one
-   family per short, matched to the material; peaks on the visual frame;
-   mixed under the voice. At most ONE impact per short, on the payoff.
-   Parallel beats get the same treatment (three stats in a row: all three
-   sounded, or none). The sound means what it shows: a shutter on a photo or
-   "pictures", a ding on a notification or a result, a cash register on
-   money. Never a whoosh on every caption.
+   family per short, matched to the material; each cue's `at` on the
+   visual frame it hits (the tool lands the peak there); mixed under the
+   voice. At most ONE impact per short, on the payoff. Parallel beats get
+   the same treatment (three stats in a row: all three sounded, or none).
+   The sound means what it shows: a shutter on a photo or "pictures", a ding
+   on a notification or a result, a cash register on money. Never a whoosh
+   on every caption.
    MUSIC only when the user asks for it or supplies a track — never on your
    own initiative (you may suggest a song in the reply); when placed it sits
    13–20 dB under the voice, ducked. Optionally a short stop-down before a
@@ -179,8 +180,8 @@ BUILD ORDER — write in a few atomic passes, not forty serial calls:
    moves bound to the same frames.
 4. Connective tissue: alternating framing on jump cuts, landings on turns,
    motivated transitions, slow pushes on long holds, B-roll as evidence.
-5. Sound: the few library cues the on-screen moments earn, spaced and
-   pre-rolled (read audio).
+5. Sound: the few library cues the on-screen moments earn, spaced, each
+   `at` on the frame it hits (read audio).
 6. Ending, plus the CTA when one was asked for.
 7. Review the rendered motion and sound (read review) and repair.
 

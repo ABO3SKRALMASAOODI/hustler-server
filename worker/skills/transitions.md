@@ -56,9 +56,10 @@ earn one and place it from the library (`list_sound_library`):
 zoom punch, `sound:whoosh_soft_1` or `sound:whoosh_soft_2` into a slide, a
 light leak or a reveal, `sound:glitch_1` under a deliberate glitch, and
 `sound:impact_1` under a flash only when that junction is the payoff or the
-single biggest landing (at most once per short). Pre-roll so the peak lands
-on the cut — about 0.12 s early for `swish_1`, 0.3 s for the soft whooshes —
-pass the suggested gain so it sits under the voice, and give each cue a
+single biggest landing (at most once per short). Put `at` ON the cut: the
+tool starts each recording early by its measured peak so the peak lands
+there (never pre-roll by hand). Pass the suggested gain so it sits under
+the voice, and give each cue a
 `purpose` naming the junction. A run of junctions inside ~3 s gets one
 sound, not one each.
 

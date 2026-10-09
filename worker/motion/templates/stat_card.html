@@ -12,7 +12,7 @@
   "y": {"type": "float", "min": 0.1, "max": 0.9, "default": 0.42, "hint": "vertical centre as frame fraction"}
  },
  "example": {"label": "Net revenue", "value": "$977,424", "delta": "+340%", "caption": "vs. $222,140 last year", "spark": ["10", "14", "12", "20", "26", "24", "38", "52", "61"]},
- "sfx": [{"at": 0.0, "kind": "whoosh_soft"}, {"at": 0.78, "kind": "pop_soft"}]} -->
+ "sfx": [{"at": 0.0, "kind": "whoosh_soft"}, {"at": 0.78, "kind": "pop_soft", "land": {"frac": 0.55, "add": -0.42, "min": 0.22, "max": 0.78}}]} -->
 <style>
   .card,.plate,.gloss{position:absolute;left:0;top:0;border-radius:44px;transform-origin:50% 100%;will-change:transform,opacity}
   /* the sheen lives on its own clipped layer: sweeping it never re-blurs the plate's shadow */

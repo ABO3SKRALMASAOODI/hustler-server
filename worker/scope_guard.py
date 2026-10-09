@@ -21,6 +21,8 @@ import json
 import re
 from typing import Any, Dict, Iterable, List, Set
 
+import sound_library
+
 
 LANE_LABELS = {
     "music": "music selection and mix",
@@ -126,6 +128,15 @@ def _items(edl: Dict[str, Any], lane: str, timeline_changed: bool) -> Any:
     for row in rows:
         for key in time_keys:
             row.pop(key, None)
+        if lane == "sfx" and sound_library.id_for_key(row.get("storage_key")):
+            # A library recording that starts early to HIT its moment skips
+            # into its file near 0 s, so a move re-derives offset_s/dur_s
+            # (sound_library.retime); where it stops in the file is the
+            # sound's own setting, and that stays put.
+            off = float(row.pop("offset_s", None) or 0.0)
+            dur = row.pop("dur_s", None)
+            row["stops_in_file_s"] = (None if dur is None
+                                      else round(off + float(dur), 3))
     return rows
 
 

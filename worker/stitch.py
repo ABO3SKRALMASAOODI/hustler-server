@@ -39,6 +39,7 @@ import subprocess
 
 import camera
 import media
+import sound_library
 import travel
 from schemas import MIN_SPAN_S, anim_value
 
@@ -824,11 +825,27 @@ def window_edl(edl, tl, w0, w1, keep_audio=False):
                 shifted["fade_out_s"] = None
             music.append(shifted)
         e["music"] = music
-        e["sfx"] = [dict(item, at=round(float(item.get("at") or 0.0)
-                                        - w0, 3))
-                    for item in (e.get("sfx") or [])
-                    if w0 - 0.001 <= float(item.get("at") or 0.0)
-                    < w1 - 0.001]
+        sfx = []
+        for item in e.get("sfx") or []:
+            at = float(item.get("at") or 0.0)
+            if w0 - 0.001 <= at < w1 - 0.001:
+                sfx.append(dict(item, at=round(at - w0, 3)))
+                continue
+            # A library recording starts early so its peak HITS on time: one
+            # whose hit falls in the window keeps its hit, skipping the
+            # lead-in that began before the window (as a voiceover does).
+            hit = sound_library.hit_at(item)
+            if not (at < w0 <= hit + 0.001 and hit < w1 - 0.001):
+                continue
+            skipped = w0 - at
+            shifted = dict(item, at=0.0, offset_s=round(
+                float(item.get("offset_s") or 0.0) + skipped, 3))
+            if item.get("dur_s") is not None:
+                if float(item["dur_s"]) - skipped < 0.05:
+                    continue
+                shifted["dur_s"] = round(float(item["dur_s"]) - skipped, 3)
+            sfx.append(shifted)
+        e["sfx"] = sfx
         voiceovers = []
         for item in e.get("voiceover") or []:
             start = float(item.get("start_output_s") or 0.0)

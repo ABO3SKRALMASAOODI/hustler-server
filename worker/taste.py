@@ -45,6 +45,7 @@ fade from black on a reel, captions under the platform UI band.
 
 import re
 
+import sound_library
 from timeline import program_blocks, transition_junctions
 
 # What counts as short-form: a vertical or square output, which on every
@@ -156,6 +157,16 @@ def _num(v, default=0.0):
         return default
 
 
+def sfx_time(item):
+    """Program second a sound effect lands: an approved library recording
+    starts early so its peak HITS then (sound_library.hit_at); any other
+    sound lands where it starts. Spacing and flams are heard at the hit."""
+    try:
+        return sound_library.hit_at(item)
+    except (TypeError, ValueError):
+        return _num(item.get("at"))
+
+
 def _role_in(text):
     words = set(re.split(r"[^a-z0-9]+", str(text or "").lower()))
     for role, vocabulary in _SFX_ROLES:
@@ -188,7 +199,7 @@ def sfx_owner(item):
 def sfx_muddy_pair(a, b):
     """True when two SFX land as one mistimed flam rather than a designed
     layer. Only meaningful for sounds closer than SFX_MIN_SPACING_S."""
-    gap = abs(_num(b.get("at")) - _num(a.get("at")))
+    gap = abs(sfx_time(b) - sfx_time(a))
     if gap >= SFX_MIN_SPACING_S:
         return False
     owner = sfx_owner(a)
@@ -224,14 +235,14 @@ def sfx_events(sfx):
     its layers. Chaining from the last sound instead let a carpet of
     alternating whoosh/impact cues every 0.3s count as a single event."""
     events = []
-    for item in sorted(sfx or [], key=lambda s: _num(s.get("at"))):
+    for item in sorted(sfx or [], key=sfx_time):
         if events:
             event = events[-1]
             owner = sfx_owner(item)
             same_owner = owner and any(sfx_owner(x) == owner for x in event)
             loose = [x for x in event if not (owner and sfx_owner(x) == owner)]
             layered = (bool(loose)
-                       and _num(item.get("at")) - _num(loose[0].get("at"))
+                       and sfx_time(item) - sfx_time(loose[0])
                        < SFX_MIN_SPACING_S
                        and not any(sfx_muddy_pair(x, item) for x in loose))
             if same_owner or layered:
@@ -559,7 +570,7 @@ def critique(edl, index, tl, src_w=None, src_h=None, user_asked=""):
             "wants the fade.")
 
     # ── sound ────────────────────────────────────────────────────────────
-    sfx = sorted((edl.get("sfx") or []), key=lambda s: _num(s.get("at")))
+    sfx = sorted((edl.get("sfx") or []), key=sfx_time)
     # Whether sound design serves the cut is an editorial judgment, not a
     # keyword permission check. Mechanical density and collision findings
     # below remain useful evidence regardless of how the request was phrased.
@@ -576,8 +587,8 @@ def critique(edl, index, tl, src_w=None, src_h=None, user_asked=""):
     stacked = [(a, b) for a, b in zip(sfx, sfx[1:]) if sfx_muddy_pair(a, b)]
     if stacked:
         a, b = stacked[0]
-        add(f"two sound effects {_num(b.get('at')) - _num(a.get('at')):.2f}s "
-            f"apart at {_num(a.get('at')):.1f}s {sfx_clash(a, b)} — they "
+        add(f"two sound effects {sfx_time(b) - sfx_time(a):.2f}s "
+            f"apart at {sfx_time(a):.1f}s {sfx_clash(a, b)} — they "
             "land as one flammed, muddy hit. Keep one, or layer DIFFERENT "
             "roles (a whoosh whose peak lands on an impact) on the same beat.")
 
