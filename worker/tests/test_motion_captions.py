@@ -377,11 +377,25 @@ def test_words_reveal_in_place_and_animation_none_is_a_hard_pop(look, tmp_path):
             assert {r[0]: r for r in onset}[text][1] == 1.0, onset
 
 
-def _framemd5(path):
+def _frames(path, out_dir):
     import subprocess
-    out = subprocess.run([shutil.which("ffmpeg"), "-v", "error", "-i", path, "-f", "framemd5", "-"],
-                         capture_output=True, text=True, check=True).stdout
-    return [ln.split(",")[-1].strip() for ln in out.splitlines() if ln and not ln.startswith("#")]
+    os.makedirs(out_dir, exist_ok=True)
+    subprocess.run([shutil.which("ffmpeg"), "-v", "error", "-y", "-i", path,
+                    os.path.join(out_dir, "%04d.png")], check=True)
+    return sorted(os.path.join(out_dir, f) for f in os.listdir(out_dir))
+
+
+def _changed_pixels(pa, pb):
+    """Pixels that differ visibly (Chrome's partial raster can move one
+    anti-aliased edge column; a dropped caption change moves thousands)."""
+    from PIL import Image, ImageChops
+    with Image.open(pa) as a, Image.open(pb) as b:
+        d = ImageChops.difference(a.convert("RGBA"), b.convert("RGBA"))
+        bands = d.split()
+        worst = bands[0]
+        for band in bands[1:]:
+            worst = ImageChops.lighter(worst, band)
+        return worst.point([0] * 41 + [1] * 215).histogram()[1]
 
 
 @needs_browser
@@ -405,9 +419,11 @@ def test_static_frame_reuse_never_drops_a_caption_change(anim, tmp_path, monkeyp
         a, b = clips[2 * k], clips[2 * k + 1]
         assert a.captured < b.captured, look
         assert (a.x, a.y, a.w, a.h) == (b.x, b.y, b.w, b.h)
-        fa, fb = _framemd5(a.path), _framemd5(b.path)
+        fa = _frames(a.path, str(tmp_path / f"{look}_a"))
+        fb = _frames(b.path, str(tmp_path / f"{look}_b"))
         assert len(fa) == len(fb)
-        bad = [i for i, (x, y) in enumerate(zip(fa, fb)) if x != y]
+        bad = [(i, n) for i, (x, y) in enumerate(zip(fa, fb))
+               if (n := _changed_pixels(x, y)) > 40]
         assert not bad, (look, anim, bad[:10])
 
 
