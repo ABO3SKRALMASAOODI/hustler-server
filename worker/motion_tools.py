@@ -23,7 +23,7 @@ import config  # noqa: F401  (kept for parity with other tool modules)
 import db as dbx
 import motion_engine
 import motion_templates
-import sfx_library
+import sound_library
 import storage
 
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
@@ -52,22 +52,22 @@ def _canvas_size(ctx, edl):
 
 # ── Sound library (real recordings approved by the owner) ─────────────────
 
-SOUND_PREFIX = sfx_library.REF_PREFIX
+SOUND_PREFIX = sound_library.REF_PREFIX
 
 
 def sound_search(query, limit=6):
     """Approved library sounds matching the query words (deterministic)."""
     return [{"id": SOUND_PREFIX + r["id"], "role": r["role"], "duration_s": r["duration_s"],
-             "use": r["use"], "gain_db": r["gain_db"]} for r in sfx_library.search(query, limit)]
+             "use": r["use"], "gain_db": r["gain_db"]} for r in sound_library.search(query, limit)]
 
 
 def ensure_library_asset(ctx, sound_id):
     """Project storage key for an approved library sound, uploading once."""
-    row = sfx_library.get(sound_id)
+    row = sound_library.get(sound_id)
     if not row:
         raise ValueError(f"unknown sound '{sound_id}'. Library: "
-                         f"{', '.join(r['id'] for r in sfx_library.catalog())}")
-    local = sfx_library.path(sound_id)
+                         f"{', '.join(r['id'] for r in sound_library.catalog())}")
+    local = sound_library.path(sound_id)
     key = f"sfx/{ctx.project_id}/lib-{sound_id}-{row['sha'][:10]}.flac"
     existing = ctx.db.run(dbx.asset_by_key, ctx.project_id, key)
     if existing:
@@ -100,7 +100,7 @@ def resolve_library_reference(ctx, storage_key):
     except Exception as e:  # noqa: BLE001
         return None, (f"Could not prepare the library sound ({str(e)[:160]}). Try again; "
                       "do NOT claim a sound was added.")
-    row = sfx_library.get(sound_id)
+    row = sound_library.get(sound_id)
     return {"name": f"{sound_id} (Valmera sound library)", "duration_s": row["duration_s"],
             "library": True, "storage_key": key, "gain_db": row["gain_db"]}, None
 
@@ -117,12 +117,12 @@ SOUND_POLICY = (
 
 
 def list_sound_library(ctx, role=None):
-    rows = sfx_library.catalog(role or None)
+    rows = sound_library.catalog(role or None)
     if not rows:
         return "No approved sounds match." if role else "The sound library is empty on this deployment."
     return ("Valmera sound library — real recordings approved by ear (CC0, no attribution). "
             "Place with add_sfx(storage_key='sound:<id>', at=<program seconds>, gain_db=<suggested>).\n"
-            + SOUND_POLICY + "\n" + "\n".join("- " + sfx_library.describe(r) for r in rows))
+            + SOUND_POLICY + "\n" + "\n".join("- " + sound_library.describe(r) for r in rows))
 
 
 # ── motion graphics ───────────────────────────────────────────────────────
@@ -157,7 +157,7 @@ def _sfx_cues(spec, params, start, end, seed=""):
     mapped onto approved library recordings (roles without one are skipped)."""
     cues = []
     for n, c in enumerate(spec.get("sfx") or []):
-        row = sfx_library.pick(c.get("kind") or "", seed=f"{seed}:{n}")
+        row = sound_library.pick(c.get("kind") or "", seed=f"{seed}:{n}")
         if not row:
             continue
         gain = float(c.get("gain_db", row["gain_db"]))
@@ -232,7 +232,7 @@ def _validate_and_probe(ctx, edl, item):
 
 
 # Sound is deliberate: templates declare sound ROLES (mapped onto the owner-
-# approved real recordings in worker/sfx_library), but nothing adds sound
+# approved real recordings in worker/sound_library), but nothing adds sound
 # unless the editor asks for it on a moment that earns it.
 SFX_DEFAULT = False
 

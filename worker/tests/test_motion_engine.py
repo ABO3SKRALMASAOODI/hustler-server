@@ -15,7 +15,7 @@ import motion_engine  # noqa: E402
 import motion_layer  # noqa: E402
 import motion_templates  # noqa: E402
 import motion_tools  # noqa: E402
-import sfx_library  # noqa: E402
+import sound_library  # noqa: E402
 import stitch  # noqa: E402
 from schemas import (EDLValidationError, default_edl, describe_edl,  # noqa: E402
                      edl_signature, validate_edl)
@@ -227,17 +227,17 @@ def test_tool_rejects_bad_params_and_invisible_compositions(monkeypatch):
 
 
 def test_sound_library_is_real_approved_recordings_with_licences():
-    rows = sfx_library.catalog()
+    rows = sound_library.catalog()
     assert len(rows) >= 20
     for r in rows:
         assert r["license"] == "CC0 1.0" and r["source_url"].startswith("https://freesound.org/")
-        assert os.path.exists(sfx_library.path(r["id"]))
+        assert os.path.exists(sound_library.path(r["id"]))
         assert -20 <= r["gain_db"] <= -6
-    lic = open(os.path.join(sfx_library.LIB_DIR, "LICENSES.md")).read()
+    lic = open(os.path.join(sound_library.LIB_DIR, "LICENSES.md")).read()
     assert all(r["id"] in lic for r in rows)
-    assert sfx_library.get("whoosh_soft_1") and sfx_library.get("../manifest.json") is None
-    assert sfx_library.pick("whoosh_soft", "a")["role"] == "whoosh"      # template role alias
-    assert sfx_library.pick("paper") is None                              # nothing approved -> skipped
+    assert sound_library.get("whoosh_soft_1") and sound_library.get("../manifest.json") is None
+    assert sound_library.pick("whoosh_soft", "a")["role"] == "whoosh"      # template role alias
+    assert sound_library.pick("paper") is None                              # nothing approved -> skipped
     hits = motion_tools.sound_search("camera photo")
     assert hits and hits[0]["role"] == "shutter" and hits[0]["id"].startswith("sound:")
     listing = motion_tools.list_sound_library(None)

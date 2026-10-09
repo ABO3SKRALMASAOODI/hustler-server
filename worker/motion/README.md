@@ -34,7 +34,7 @@ belong if the editor chooses to add one): whoosh_soft, whoosh_hard, swish_short,
 swipe, pop_soft, click_ui, tick, kick/impact_soft/impact_hard, ding, chime,
 notification, coin, riser_short, riser_long, glitch, shutter, typing,
 heartbeat. Roles map onto the owner-approved REAL recordings in
-`worker/sfx_library/` (`sfx_library.ROLE_ALIASES`); a role with no approved
+`worker/sound_library/` (`sound_library.ROLE_ALIASES`); a role with no approved
 recording is skipped. Graphics are silent by default — `add_motion_graphic(...,
 sfx=true)` opts a moment in. A negative "at" counts back from the item end;
 {"repeat": {"param": "items", "every": 0.3, "from": 0.2}} repeats a cue once

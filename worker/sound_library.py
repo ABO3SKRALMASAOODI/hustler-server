@@ -1,6 +1,6 @@
 """Valmera's sound library: real recordings the owner approved by ear.
 
-Every sound in worker/sfx_library/ is a real CC0 recording (Freesound) that
+Every sound in worker/sound_library/ is a real CC0 recording (Freesound) that
 passed the owner's listening audition; synthesized sounds were rejected and
 must never be shipped. manifest.json carries each file's role, when to use
 it, a recommended mix level under speech and the licence trail
@@ -23,7 +23,7 @@ import hashlib
 import json
 import os
 
-LIB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sfx_library")
+LIB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sound_library")
 REF_PREFIX = "sound:"
 
 # Older/template role names -> library roles.

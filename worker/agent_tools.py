@@ -24644,7 +24644,7 @@ TOOLS = {
                                 "items": {"type": "integer"}}}),
 }
 
-# Browser-rendered motion design + built-in sound kit (worker/motion_tools.py).
+# Browser-rendered motion design + the approved real sound library (worker/motion_tools.py).
 TOOLS.update(motion_tools.TOOL_SPECS)
 TOOLS.update(motion_planner.TOOL_SPECS)
 
