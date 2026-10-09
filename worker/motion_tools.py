@@ -172,10 +172,19 @@ def _sfx_cues(spec, params, start, end):
         t = (end + at) if at < 0 else (start + at)
         rep = c.get("repeat")
         if rep and isinstance(params.get(rep.get("param")), list):
-            n = len(params[rep["param"]])
-            for i in range(n):
-                cues.append((round(start + float(rep.get("from", at)) + i * float(rep.get("every", 0.3)), 3),
-                             kind, float(c.get("gain_db", DEFAULT_KIT_GAIN_DB))))
+            entries = params[rep["param"]]
+            for i, entry in enumerate(entries):
+                off = float(rep.get("from", at)) + i * float(rep.get("every", 0.3))
+                # rows may carry their own landing time (e.g. checklist 'at')
+                if rep.get("field") and isinstance(entry, dict):
+                    try:
+                        v = float(str(entry.get(rep["field"])).replace(",", "."))
+                    except (TypeError, ValueError):
+                        v = None
+                    if v is not None and v == v and abs(v) != float("inf"):
+                        v = min(max(v, 0.0), max(0.0, (end - start) - 0.5))   # same clamp as the template
+                        off = v + float(rep.get("offset", 0.0))
+                cues.append((round(start + off, 3), kind, float(c.get("gain_db", DEFAULT_KIT_GAIN_DB))))
             continue
         cues.append((round(t, 3), kind, float(c.get("gain_db", DEFAULT_KIT_GAIN_DB))))
     return [(t, k, g) for t, k, g in cues if start - 0.01 <= t <= end]

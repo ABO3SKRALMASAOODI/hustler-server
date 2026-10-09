@@ -1,0 +1,291 @@
+<!--MG-SPEC {"title": "Marker text", "category": "callout",
+ "description": "A key line set like a premium caption where *starred* words get a highlighter swipe, a hand-drawn underline or a hand-drawn box. Use on the one sentence that carries the point (it replaces the captions while on screen); star only 1-2 words.",
+ "duration": 3.0, "layer": "above_captions", "mutes_captions": true,
+ "params": {
+  "text": {"type": "text", "required": true, "max": 90, "hint": "the line, 3-12 words; wrap the 1-2 key words in *stars* (a *multi word* run works); ' / ' forces a line break"},
+  "style": {"type": "enum", "values": ["marker", "underline", "box"], "default": "marker", "hint": "marker = highlighter swipe behind the word, underline = hand-drawn swoosh under it, box = hand-drawn box around it"},
+  "accent": {"type": "color", "default": "#FFD84D"},
+  "color": {"type": "color", "default": "#FFFFFF"},
+  "font": {"type": "enum", "values": ["sans", "serif", "condensed"], "default": "sans"},
+  "uppercase": {"type": "bool", "default": false},
+  "y": {"type": "float", "min": 0.1, "max": 0.8, "default": 0.64, "hint": "vertical centre, frame fraction"},
+  "size": {"type": "float", "min": 0.6, "max": 1.5, "default": 1.0}
+ },
+ "example": {"text": "Most people *quit* right before it works"},
+ "sfx": [{"at": 0.3, "kind": "swish_short"}]} -->
+<style>
+  .wrap{position:absolute;left:60px;right:60px;display:flex;flex-direction:column;align-items:center;gap:0;
+        filter:drop-shadow(0 3px 14px rgba(0,0,0,.5)) drop-shadow(0 1px 2px rgba(0,0,0,.3))}
+  .line{position:relative;display:block;white-space:nowrap;line-height:1.08;isolation:isolate}
+  .line.sans{font-family:'Inter Display','Inter',sans-serif;font-weight:800;letter-spacing:-.032em}
+  .line.serif{font-family:'Instrument Serif',serif;font-style:italic;font-weight:400;letter-spacing:-.012em;line-height:1.0}
+  .line.condensed{font-family:'Anton','Bebas Neue',sans-serif;font-weight:400;letter-spacing:.004em;line-height:1.06}
+  .mg-w{position:relative;z-index:2;margin-right:.24em;will-change:transform,filter,opacity}
+  .mg-w:last-child{margin-right:0}
+  .serif .mg-w{margin-right:.2em}
+  .mk{position:absolute;z-index:1;transform-origin:0 50%}
+  .gf{margin-left:var(--gpad,0)}
+  .gl{margin-right:calc(.24em + var(--gpad,0))!important}
+  svg.ink{position:absolute;left:0;top:0;overflow:visible;z-index:3}
+</style>
+<div class="mg-root"><div class="wrap" id="wrap"></div><svg class="ink" id="ink"></svg></div>
+<script>
+(() => {
+  const P = MG.params, W = MG.W, H = MG.H, D = MG.duration;
+  const clamp = MG.clamp, lerp = MG.lerp;
+  const smooth = x => x * x * (3 - 2 * x);
+
+  // Tapered hand stroke: dense centerline -> filled outline for any [a, b] slice.
+  function handStroke(pts, o) {
+    const cum = [0];
+    for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]));
+    const L = cum[cum.length - 1] || 1, N = Math.max(3, Math.ceil(L / Math.max(1.5, Math.min(4, L / 240))) + 1);
+    const Pt = []; let j = 0;
+    for (let k = 0; k < N; k++) {
+      const s = L * k / (N - 1);
+      while (j < cum.length - 2 && cum[j + 1] < s) j++;
+      const f = clamp((s - cum[j]) / ((cum[j + 1] - cum[j]) || 1));
+      Pt.push([lerp(pts[j][0], pts[j + 1][0], f), lerp(pts[j][1], pts[j + 1][1], f)]);
+    }
+    const Tn = Pt.map((p, k) => {
+      const a = Pt[Math.max(0, k - 1)], b = Pt[Math.min(N - 1, k + 1)];
+      const tx = b[0] - a[0], ty = b[1] - a[1], l = Math.hypot(tx, ty) || 1;
+      return [tx / l, ty / l];
+    });
+    const w0 = o.w0 ?? 0.3, w1 = o.w1 ?? 0.2;
+    const Wd = Pt.map((p, k) => {
+      const u = k / (N - 1);
+      const a = w0 + (1 - w0) * smooth(clamp(u / (o.tin || 0.15)));
+      const b = w1 + (1 - w1) * smooth(clamp((1 - u) / (o.tout || 0.25)));
+      return o.w * a * b * (1 + (o.jitter ?? 0.1) * MG.noise(u * L / 55 + (o.seed || 0) * 7.31));
+    });
+    const at = f => {
+      const k = Math.min(N - 2, Math.floor(f)), r = f - k;
+      let tx = lerp(Tn[k][0], Tn[k + 1][0], r), ty = lerp(Tn[k][1], Tn[k + 1][1], r);
+      const l = Math.hypot(tx, ty) || 1;
+      return { x: lerp(Pt[k][0], Pt[k + 1][0], r), y: lerp(Pt[k][1], Pt[k + 1][1], r), tx: tx / l, ty: ty / l, w: lerp(Wd[k], Wd[k + 1], r) };
+    };
+    const cap = (c, sg) => {
+      const out = [], h = c.w / 2, nx = -c.ty, ny = c.tx;
+      for (let i = 1; i < 8; i++) {
+        const th = Math.PI * i / 8, cs = Math.cos(th), sn = Math.sin(th);
+        out.push([c.x + sg * (nx * cs + c.tx * sn) * h, c.y + sg * (ny * cs + c.ty * sn) * h]);
+      }
+      return out;
+    };
+    return {
+      L, pts: Pt,
+      d(a, b) {
+        a = clamp(a); b = clamp(b);
+        if (b - a < 1e-4) return '';
+        const fa = a * (N - 1), fb = b * (N - 1) - 1e-6, S = [at(fa)];
+        for (let k = Math.floor(fa) + 1; k < fb; k++) S.push(at(k));
+        S.push(at(fb));
+        const Lf = [], Rt = [];
+        S.forEach(s => { const h = s.w / 2; Lf.push([s.x - s.ty * h, s.y + s.tx * h]); Rt.push([s.x + s.ty * h, s.y - s.tx * h]); });
+        const all = Lf.concat(cap(S[S.length - 1], 1), Rt.reverse(), cap(S[0], -1));
+        return 'M' + all.map(p => p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join('L') + 'Z';
+      },
+    };
+  }
+
+  const wrap = MG.$('#wrap'), ink = MG.$('#ink');
+  const font = P.font, SZ = P.size, style = P.style;
+  const DARK = '#141414';
+  // ── parse: lines, words, starred runs ────────────────────────────────
+  let raw = String(P.text || '').replace(/\s*\/\s*/g, '\n').trim();
+  let lines = raw.split('\n').map(s => s.trim()).filter(Boolean);
+  if (lines.length === 1) {
+    // balance a long single line into 2-3 lines by character count
+    const toks = lines[0].split(/\s+/), len = lines[0].length;
+    const nl = len > 54 ? 3 : len > (font === 'condensed' ? 26 : 22) ? 2 : 1;
+    if (nl > 1) {
+      const target = len / nl, out = [[]]; let acc = 0;
+      toks.forEach(tk => {
+        const cur = out[out.length - 1];
+        if (cur.length && acc + tk.length / 2 > target * out.length && out.length < nl) out.push([]);
+        out[out.length - 1].push(tk); acc += tk.length + 1;
+      });
+      lines = out.map(a => a.join(' '));
+    }
+  }
+  lines = lines.slice(0, 3);
+  let inRun = false;
+  const words = [], groups = [];
+  lines.forEach((L, li) => {
+    const el = MG.el('div', 'line ' + font, null, wrap);
+    el.style.color = P.color;
+    let cur = null;
+    L.split(/\s+/).forEach(tok => {
+      let t = tok, mark = inRun;
+      if (/^\*/.test(t)) { mark = true; inRun = true; t = t.replace(/^\*/, ''); }
+      if (/\*[.,!?:;"')]*$/.test(t)) { t = t.replace(/\*([.,!?:;"')]*)$/, '$1'); inRun = false; mark = true; }
+      t = t.replace(/\*/g, '');
+      if (!t) return;
+      const w = MG.el('span', 'mg-w', P.uppercase ? t.toUpperCase() : t, el);
+      const rec = { el: w, line: li, lineEl: el, mark };
+      words.push(rec);
+      if (mark) {
+        if (!cur) { cur = { words: [], lineEl: el }; groups.push(cur); }
+        cur.words.push(rec);
+      } else cur = null;
+    });
+    if (!inRun) cur = null;
+  });
+  const gpad = { marker: '.1em', underline: '0em', box: '.2em' }[style];
+  wrap.style.setProperty('--gpad', gpad);
+  if (!groups.length && words.length) {
+    // nothing starred: emphasise the longest word so the template still does its job
+    const best = words.reduce((a, b) => (b.el.textContent.length > a.el.textContent.length ? b : a));
+    best.mark = true; groups.push({ words: [best], lineEl: best.lineEl });
+  }
+  groups.forEach(g => { g.words[0].el.classList.add('gf'); g.words[g.words.length - 1].el.classList.add('gl'); });
+  const NS = 'http://www.w3.org/2000/svg';
+  let G = null;
+
+  function layout() {
+    const maxW = W - 120 - 20, base = { sans: 106, serif: 126, condensed: 134 }[font] * SZ;
+    const cap = lines.length === 1 ? base * 1.15 : lines.length === 2 ? base : base * 0.86;
+    const els = MG.$$('.line', wrap);
+    els.forEach(el => MG.fit(el, { width: maxW, min: 34, max: cap, nowrap: true }));
+    const fs = Math.min(...els.map(el => parseFloat(el.style.fontSize)));
+    els.forEach(el => { el.style.fontSize = fs + 'px'; });
+    const hgt = wrap.getBoundingClientRect().height;
+    const top = clamp(MG.H * P.y - hgt / 2, (H / W > 1.5 ? 0.08 : 0.05) * H, (H / W > 1.5 ? 0.8 : 0.95) * H - hgt);
+    wrap.style.top = top + 'px';
+    const shapes = [];
+    groups.forEach((g, gi) => {
+      const rs = g.words.map(w => w.el.getBoundingClientRect());
+      const lr = g.lineEl.getBoundingClientRect();
+      const x0 = Math.min(...rs.map(r => r.left)), x1 = Math.max(...rs.map(r => r.right));
+      const y0 = rs[0].top, y1 = rs[0].bottom, em = fs;
+      const seed = gi * 13 + 5;
+      const shp = { g, x0, x1, y0, y1 };
+      if (style === 'marker') {
+        const mk = MG.el('div', 'mk', null, g.lineEl);
+        const padX = 0.15 * em, topF = font === 'condensed' ? 0.08 : font === 'serif' ? 0.16 : 0.13;
+        const botF = font === 'condensed' ? 0.02 : 0.04;
+        const mx = x0 - lr.left - padX, mw = x1 - x0 + padX * 2, mh = (y1 - y0) * (1 - topF - botF);
+        mk.style.left = mx + 'px'; mk.style.width = mw + 'px';
+        mk.style.top = (y0 - lr.top + (y1 - y0) * topF) + 'px';
+        mk.style.height = mh + 'px';
+        // chisel-tip highlighter stroke: slanted ends, softly uneven edges
+        const svg = document.createElementNS(NS, 'svg');
+        svg.setAttribute('width', mw); svg.setAttribute('height', mh);
+        svg.style.cssText = 'position:absolute;left:0;top:0;overflow:visible';
+        const sl = mh * 0.09, pts = [];
+        const nT = 18;
+        for (let i = 0; i <= nT; i++) { const u = i / nT; pts.push([lerp(sl, mw, u), mh * 0.02 + mh * 0.05 * MG.noise(seed + u * 2.3)]); }
+        pts.push([mw - sl, mh * (0.98 + 0.03 * MG.noise(seed + 7))]);
+        for (let i = nT; i >= 0; i--) { const u = i / nT; pts.push([lerp(0, mw - sl, u), mh * 0.98 + mh * 0.05 * MG.noise(seed + 30 + u * 2.1)]); }
+        const path = document.createElementNS(NS, 'path');
+        path.setAttribute('d', 'M' + pts.map(p => p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join('L') + 'Z');
+        path.setAttribute('fill', P.accent);
+        svg.appendChild(path); mk.appendChild(svg);
+        mk.style.transform = `rotate(${(-1.4 + 0.9 * MG.noise(seed)).toFixed(2)}deg)`;
+        shp.mk = mk; shp.mw = mw; shp.mxAbs = x0 - padX;
+        g.words.forEach(w => { w.el.style.webkitBackgroundClip = 'text'; w.el.style.backgroundClip = 'text'; });
+      } else {
+        const path = document.createElementNS(NS, 'path');
+        path.setAttribute('fill', P.accent);
+        ink.appendChild(path);
+        const pts = [];
+        const sw = Math.max(5, em * (font === 'serif' ? 0.075 : 0.085));
+        if (style === 'underline') {
+          // confident swoosh under the run, then a short return flick slightly lower
+          const by = y0 + (y1 - y0) * (font === 'serif' ? 0.9 : font === 'condensed' ? 0.98 : 0.93);
+          const ax = x0 - 0.06 * em, bx = x1 + 0.1 * em, len = bx - ax;
+          for (let i = 0; i <= 60; i++) {
+            const u = i / 60;
+            pts.push([ax + len * u, by + 0.05 * em * Math.sin(Math.PI * u) * -1 + (u - 0.5) * -0.06 * em + 1.6 * MG.noise(seed + u * 4)]);
+          }
+          const back = Math.min(len * 0.62, len - 0.2 * em);
+          for (let i = 1; i <= 40; i++) {
+            const u = i / 40, x = bx - back * MG.ease.inOutQuad(u);
+            pts.push([x - 0.04 * em * Math.sin(Math.PI * Math.min(1, u * 3)), by + 0.11 * em * smooth(Math.min(1, u * 2.2)) - 0.05 * em * u + 1.2 * MG.noise(seed + 9 + u * 3)]);
+          }
+          shp.st = handStroke(pts, { w: sw, w0: 0.4, tin: 0.08, w1: 0.1, tout: 0.3, seed, jitter: 0.12 });
+          shp.dur = 0.36;
+        } else {
+          // loose hand-drawn box: clockwise from top-left, overshooting the start
+          const px = 0.14 * em, py = 0.03 * em;
+          const bx0 = x0 - px, bx1 = x1 + px, by0 = y0 + (y1 - y0) * 0.06 - py, by1 = y1 - (y1 - y0) * 0.02 + py;
+          const r = 0.16 * em;
+          const corners = [[bx0 + 0.02 * em, by0 + 0.02 * em], [bx1 + 0.03 * em, by0 - 0.05 * em], [bx1 - 0.01 * em, by1 + 0.01 * em], [bx0 - 0.03 * em, by1 + 0.04 * em]];
+          const seg = (a, b, n) => { for (let i = 0; i < n; i++) { const u = i / n; pts.push([lerp(a[0], b[0], u), lerp(a[1], b[1], u)]); } };
+          // round the corners with short quadratic arcs
+          const loopPts = [];
+          const C = corners.concat([corners[0], corners[1]]);
+          for (let k = 1; k <= 4; k++) {
+            const p0 = C[k - 1], p1 = C[k], p2 = C[k + 1];
+            const d0 = Math.hypot(p1[0] - p0[0], p1[1] - p0[1]), d1 = Math.hypot(p2[0] - p1[0], p2[1] - p1[1]);
+            const a = [p1[0] - (p1[0] - p0[0]) / d0 * r, p1[1] - (p1[1] - p0[1]) / d0 * r];
+            const b = [p1[0] + (p2[0] - p1[0]) / d1 * r, p1[1] + (p2[1] - p1[1]) / d1 * r];
+            loopPts.push(a, p1, b);
+          }
+          // start a little into the top edge, end past the start
+          const start = [lerp(corners[0][0], corners[1][0], 0.12), lerp(corners[0][1], corners[1][1], 0.12)];
+          let prev = start;
+          for (let k = 0; k < 4; k++) {
+            const a = loopPts[k * 3], c = loopPts[k * 3 + 1], b = loopPts[k * 3 + 2];
+            seg(prev, a, 24);
+            for (let i = 0; i < 10; i++) { const u = i / 10, m = 1 - u; pts.push([m * m * a[0] + 2 * m * u * c[0] + u * u * b[0], m * m * a[1] + 2 * m * u * c[1] + u * u * b[1]]); }
+            prev = b;
+          }
+          const over = [lerp(corners[0][0], corners[1][0], 0.42), lerp(corners[0][1], corners[1][1], 0.42) - 0.09 * em];
+          seg(prev, over, 26); pts.push(over);
+          // wobble
+          const wob = pts.map((p, i) => [p[0] + 2.4 * MG.noise(seed + i * 0.045), p[1] + 2.4 * MG.noise(seed + 50 + i * 0.045)]);
+          shp.st = handStroke(wob, { w: sw * 0.95, w0: 0.45, tin: 0.04, w1: 0.1, tout: 0.12, seed, jitter: 0.16 });
+          shp.dur = 0.46;
+        }
+        shp.path = path;
+      }
+      shapes.push(shp);
+    });
+    const r = wrap.getBoundingClientRect();
+    let bx = [r.left, r.top, r.right, r.bottom];
+    shapes.forEach(s => { bx = [Math.min(bx[0], s.x0 - 0.3 * fs), Math.min(bx[1], s.y0 - 0.1 * fs), Math.max(bx[2], s.x1 + 0.3 * fs), Math.max(bx[3], s.y1 + 0.3 * fs)]; });
+    MG.box = [bx[0] - 50, bx[1] - 60, bx[2] + 50, bx[3] + 70];
+    return { fs, shapes };
+  }
+
+  const fontsReady = Promise.all(["800 106px 'Inter Display'", "italic 400 126px 'Instrument Serif'", "400 134px 'Anton'"]
+    .map(f => document.fonts.load(f).catch(() => null)));
+  MG.ready = fontsReady.then(() => { G = layout(); });
+
+  const n = words.length, each = Math.min(0.055, 0.3 / Math.max(1, n));
+  const markAt = 0.36, markEach = 0.2;
+  const markDur = style === 'marker' ? 0.3 : style === 'underline' ? 0.36 : 0.46;
+  const enterEnd = Math.max(each * n + 0.2, markAt + markEach * Math.max(0, groups.length - 1) + markDur) + 0.02;
+  const exitDur = Math.min(0.26, D * 0.15), exitAt = D - exitDur;
+  MG.active([[0, Math.min(D, enterEnd)], [Math.max(0, exitAt - 0.02), D]]);
+  MG.frame(t => {
+    if (!G) G = layout();
+    const q = exitDur > 0 ? MG.ease.inCubic(MG.range(t, exitAt, exitDur)) : 0;
+    words.forEach((w, i) => {
+      const t0 = i * each, e = MG.ease.outCubic(MG.range(t, t0, 0.17));
+      MG.set(w.el, { y: (1 - e) * 11 - q * 18, opacity: MG.range(t, t0, 0.08) * (1 - q), blur: (1 - e) * 9 + q * 10 });
+    });
+    G.shapes.forEach((s, gi) => {
+      const p0 = MG.range(t, markAt + gi * markEach, markDur);
+      if (style === 'marker') {
+        const p = MG.ease.outQuart(p0), rev = s.mw * p;
+        s.mk.style.clipPath = p >= 1 ? '' : `inset(-4px ${(s.mw - rev).toFixed(1)}px -4px -4px round ${(0.18 * G.fs).toFixed(1)}px)`;
+        s.mk.style.opacity = (p0 > 0 ? 1 : 0) * (1 - q);
+        // text turns dark where the marker has passed (gradient-clipped fill)
+        s.g.words.forEach(w => {
+          const r = w.el.offsetLeft + w.el.parentElement.getBoundingClientRect().left;
+          const edge = s.mxAbs + rev - r;
+          w.el.style.color = 'transparent';
+          w.el.style.backgroundImage = `linear-gradient(90deg, ${DARK} 0, ${DARK} ${edge.toFixed(1)}px, ${P.color} ${edge.toFixed(1)}px)`;
+        });
+      } else {
+        const p = style === 'underline' ? MG.ease.outCubic(p0) : 0.2 * p0 + 0.8 * MG.ease.outCubic(p0);
+        s.path.setAttribute('d', s.st.d(0, p));
+        s.path.style.opacity = 1 - q;
+      }
+    });
+  });
+})();
+</script>
