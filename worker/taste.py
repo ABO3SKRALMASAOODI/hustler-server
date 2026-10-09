@@ -115,7 +115,9 @@ REEL_MAX_S = 120.0
 REEL_ZOOM_PER_S = 3.0           # flag only past one camera move every 3s
 REEL_ZOOM_MIN_SPACING_S = 1.5   # two pushes closer than this fight
 REEL_ZOOM_MIN_START_S = 0.0     # a punched-in hook at 0s is a device
-REEL_SFX_PER_S = 2.0            # sound EVENTS (a layered stack is one event)
+# Owner policy: sound like a professional editor, never "whoosh wars" — at
+# most about one sound EVENT every 4-5 s (a layered stack is one event).
+REEL_SFX_PER_S = 4.5
 REEL_DEVICE_MIN_SPACING_S = 0.8
 REEL_MAX_SIMULTANEOUS_DEVICES = 4   # punch + flash + shake + zoom = one hit
 
@@ -802,27 +804,15 @@ def critique(edl, index, tl, src_w=None, src_h=None, user_asked=""):
         flat = not picture_moves and not any(w in ask for w in (
             "static", "no zoom", "no motion", "no graphic", "minimal",
             "keep it simple"))
-        silent = not (music or sfx) and not any(w in ask for w in (
-            "no music", "no sound", "no sfx", "silent", "dry"))
-        if flat and silent:
-            add(f"flat static delivery: {out_dur:.0f}s of captions over a "
-                "frame that never moves, in a silent mix — no camera move, "
-                "cutaway or graphic, and no music or SFX. Add framing "
-                "changes on sentence turns (an eased push, a reframe on the "
-                "speaker change), a hook interrupt in the first two seconds, "
-                "and a sound layer (a ducked bed plus accents on the "
-                "authored hits).")
-        elif flat:
+        # A dry mix is legitimate: music is never the agent's choice (the
+        # user supplies or asks for it) and zero SFX is fine when nothing on
+        # screen earns one. Only a frame that never moves is flagged.
+        if flat:
             add(f"static picture: {out_dur:.0f}s with no camera move, "
                 "cutaway or graphic — the frame never moves, so nothing "
                 "marks the sentence turns or the payoff. Add eased pushes or "
                 "a reframe on the turns and one hook interrupt in the first "
                 "two seconds.")
-        elif silent:
-            add(f"silent mix: {out_dur:.0f}s of speech with no music bed and "
-                "no SFX — the picture moves but the sound never does. Add a "
-                "ducked bed and accents only on the authored hits (a whoosh "
-                "into a push, an impact on a graphic landing).")
 
     # ── the RATE of everything, together ─────────────────────────────────
     # Every rule above bounds ONE category, and a viewer does not experience

@@ -118,11 +118,13 @@ def test_premium_density_reel_passes_verification_with_advisories():
     notes = taste.critique(edl, index, Timeline(edl["keep"], [], []),
                            src_w=1920, src_h=1080,
                            user_asked="make a premium viral reel")
-    # No density finding fires on premium reel density any more.
-    for phrase in ("zooms across", "sound events in",
-                   "attention-grabbing devices", "full-frame devices",
-                   "restraint"):
+    # No picture-density finding fires on premium reel density any more.
+    # Sound is held to the owner's sparse policy (≈ one event per 4-5 s), so
+    # 13 sounds in 45 s draws an ADVISORY note — never a blocking one.
+    for phrase in ("zooms across", "attention-grabbing devices",
+                   "full-frame devices", "restraint"):
         assert not any(phrase in note for note in notes), (phrase, notes)
+    assert any("sound events in" in note for note in notes)
     record = quality_verifier.build_verification_record(
         1, 2, {}, edl, index,
         preview={"edl_version": 2, "storage_key": "x", "caption_pages": [1]},
