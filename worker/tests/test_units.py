@@ -4227,13 +4227,13 @@ from agent_tools import (add_sfx, move_sfx, remove_sfx,       # noqa: E402
 # --- the silent-drop guard, applied to sfx ---------------------------------
 # Same lesson as FIT_FIELDS above: a field declared in only SOME layers is
 # dropped without a trace and the agent still reports success.
-SFX_FIELDS = {"id", "storage_key", "at", "gain_db", "purpose", "offset_s"}
+SFX_FIELDS = {"id", "storage_key", "at", "gain_db", "purpose", "offset_s", "dur_s"}
 check("sfx: the item model declares exactly the intended fields",
       SFX_FIELDS == set(schemas.SfxItem.model_fields))
 check("sfx: the EDL model carries an sfx list",
       "sfx" in schemas.EDL.model_fields)
 check("sfx: add_sfx offers source offset as well as placement to the agent",
-      {"storage_key", "at", "gain_db", "purpose", "offset_s"} ==
+      {"storage_key", "at", "gain_db", "purpose", "offset_s", "dur_s"} ==
       set(agent_tools.TOOLS["add_sfx"][2]))
 check("sfx: the write tools are tracked for honesty",
       {"add_sfx", "move_sfx", "remove_sfx"} <= agent_tools.WRITE_TOOLS)
@@ -4355,6 +4355,15 @@ _g_sfx_offset = renderer.build_filtergraph(
                      "offset_s": 148.0}, 171.0)])
 check("sfx: a requested source offset trims and resets its audio clock",
       "atrim=start=148.000,asetpts=PTS-STARTPTS" in _g_sfx_offset)
+_g_sfx_dur = renderer.build_filtergraph(
+    {"keep": [[0.0, 20.0]], "sfx": [{"id": "a", "storage_key": "typing.flac",
+                                     "at": 4.0, "dur_s": 0.6}]},
+    20.0, True, _tl_sfx, None, [], {"words": []}, True,
+    W=1080, H=1920, fps=30.0,
+    sfx_inputs=[(1, {"id": "a", "storage_key": "typing.flac", "at": 4.0,
+                     "dur_s": 0.6}, 3.5)])
+check("sfx: dur_s stops a long recording with its visible event, faded",
+      "atrim=start=0.000:end=0.600,asetpts=PTS-STARTPTS,afade=t=out:st=0.480:d=0.120" in _g_sfx_dur)
 # Peak protection must compensate its lookahead so it cannot shift SFX
 # against the picture while preventing clipping in unmastered mixes.
 check("sfx: peak protection compensates its lookahead",

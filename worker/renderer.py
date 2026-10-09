@@ -3041,6 +3041,13 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         delay = f",adelay={delay_ms}:all=1" if delay_ms > 0 else ""
         offset = max(0.0, float(item.get("offset_s") or 0.0))
         trim = f"atrim=start={offset:.3f},asetpts=PTS-STARTPTS," if offset else ""
+        span = float(item.get("dur_s") or 0.0)
+        if span > 0:
+            # dur_s stops a long recording (a typing run) with its visible
+            # event; the short fade keeps the stop from clicking.
+            fade = min(0.12, span / 3.0)
+            trim = (f"atrim=start={offset:.3f}:end={offset + span:.3f},asetpts=PTS-STARTPTS,"
+                    f"afade=t=out:st={max(0.0, span - fade):.3f}:d={fade:.3f},")
         # No ducking. A normal one-shot plays its full length; offset_s is an
         # explicit exception for taking the requested hit from inside a long
         # extracted audio track. amix still stops its tail at programme end.

@@ -1,0 +1,218 @@
+<!--MG-SPEC {"title": "Social post card", "category": "social",
+ "description": "A generic social post (avatar, name, verified badge, handle, text, optional image, repost/like counts) that tilts in in 3D, settles with a soft shadow and drifts slowly; the like heart pops near the end of the entrance. Use to show a quote, hot take, headline or viral post the speaker is reacting to.",
+ "duration": 3.5, "layer": "above_captions", "mutes_captions": false,
+ "params": {
+  "text": {"type": "text", "required": true, "max": 280, "hint": "the post body; long posts shrink to fit"},
+  "name": {"type": "str", "default": "Studio North", "max": 32},
+  "handle": {"type": "str", "default": "@studionorth", "max": 30},
+  "verified": {"type": "bool", "default": true},
+  "avatar": {"type": "asset", "default": null, "hint": "optional profile photo; otherwise an initial tile"},
+  "image": {"type": "asset", "default": null, "hint": "optional photo attached to the post"},
+  "reposts": {"type": "str", "default": "1,208", "max": 12, "hint": "empty hides it"},
+  "likes": {"type": "str", "default": "12.4K", "max": 12, "hint": "empty hides it; plain integers tick up by one when the heart pops"},
+  "theme": {"type": "enum", "values": ["light", "dark"], "default": "light"},
+  "y": {"type": "float", "min": 0.2, "max": 0.7, "default": 0.45, "hint": "vertical centre as frame fraction (kept inside the platform-safe area)"},
+  "scale": {"type": "float", "min": 0.7, "max": 1.15, "default": 1.0}
+ },
+ "example": {"text": "The best marketing is a product people can't stop talking about. Everything else is rent.", "name": "Studio North", "handle": "@studionorth"},
+ "sfx": [{"at": 0.0, "kind": "whoosh_soft"}, {"at": 1.25, "kind": "pop_soft", "gain_db": -14}]} -->
+<style>
+  .mg-root{font-family:'Inter','Inter Display',system-ui,sans-serif}
+  #card{position:absolute;left:0;top:0;background:var(--bg);border-radius:calc(26 * var(--u));box-shadow:var(--shadow);
+    transform-origin:50% 60%;will-change:transform,opacity;overflow:hidden}
+  #card::after{content:"";position:absolute;inset:0;border-radius:inherit;box-shadow:var(--rim);pointer-events:none}
+  .in{position:relative;padding:calc(18 * var(--u)) calc(20 * var(--u)) calc(14 * var(--u))}
+  .hdr{display:flex;align-items:center;gap:calc(11 * var(--u))}
+  .av{flex:0 0 auto;width:calc(46 * var(--u));height:calc(46 * var(--u));border-radius:50%;overflow:hidden;position:relative;background:var(--tile)}
+  .av img{width:100%;height:100%;object-fit:cover;display:block}
+  .av .lt{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#fff;font-family:'Inter Display','Inter',sans-serif;
+    font-weight:800;font-size:calc(20 * var(--u));letter-spacing:-0.02em}
+  .who{min-width:0;flex:1 1 auto}
+  .nm{display:flex;align-items:center;gap:calc(4 * var(--u));font-size:calc(17 * var(--u));font-weight:700;color:var(--fg);letter-spacing:-0.02em;line-height:1.2;white-space:nowrap}
+  .nm .t{overflow:hidden;text-overflow:ellipsis}
+  .vb{flex:0 0 auto;width:calc(17 * var(--u));height:calc(17 * var(--u))}
+  .vb svg{display:block;width:100%;height:100%}
+  .hd{font-size:calc(15 * var(--u));color:var(--sec);letter-spacing:-0.01em;line-height:1.25;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .more{flex:0 0 auto;width:calc(20 * var(--u));height:calc(20 * var(--u));opacity:.7}
+  .tx{margin-top:calc(12 * var(--u));color:var(--fg);font-weight:400;letter-spacing:-0.014em;line-height:1.32;white-space:pre-line;word-wrap:break-word}
+  .img{margin-top:calc(12 * var(--u));border-radius:calc(16 * var(--u));overflow:hidden;position:relative;box-shadow:inset 0 0 0 1px var(--line)}
+  .img img{display:block;width:100%;height:100%;object-fit:cover}
+  .sep{height:1px;background:var(--line);margin:calc(14 * var(--u)) 0 calc(12 * var(--u))}
+  .mx{display:flex;align-items:center;gap:calc(20 * var(--u));font-size:calc(15 * var(--u));color:var(--sec);letter-spacing:-0.01em}
+  .mx .m{display:flex;align-items:center;gap:calc(6 * var(--u));white-space:nowrap}
+  .mx .m b{color:var(--fg);font-weight:600;font-variant-numeric:tabular-nums}
+  .mx svg{width:calc(21 * var(--u));height:calc(21 * var(--u));overflow:visible}
+  .mx .sp{flex:1 1 auto}
+  .el{will-change:transform,opacity}
+  #shade{position:absolute;inset:0;pointer-events:none;border-radius:inherit;opacity:0}
+</style>
+<div class="mg-root"><div id="card"></div></div>
+<script>
+(() => {
+  const P = MG.params, root = document.documentElement, D = MG.duration;
+  const dark = P.theme === 'dark';
+  const T = dark ? {
+    bg: 'linear-gradient(180deg, #1D1F23, #15171A)', fg: '#F2F3F5', sec: 'rgba(235,238,245,.55)', line: 'rgba(255,255,255,.10)',
+    rim: 'inset 0 0 0 1px rgba(255,255,255,.08), inset 0 1px 0 rgba(255,255,255,.07)',
+    shadow: '0 3px 10px rgba(0,0,0,.35), 0 30px 70px rgba(0,0,0,.55)'
+  } : {
+    bg: 'linear-gradient(180deg, #FFFFFF, #F7F7F9)', fg: '#0F1115', sec: 'rgba(60,64,72,.62)', line: 'rgba(15,17,21,.09)',
+    rim: 'inset 0 0 0 1px rgba(255,255,255,.7), inset 0 -1px 0 rgba(0,0,0,.04)',
+    shadow: '0 3px 10px rgba(0,0,0,.14), 0 30px 70px rgba(0,0,0,.40)'
+  };
+  const tint = '#2F7CF6', heartC = '#F2385A';
+  const name = String(P.name || '').trim() || 'Creator';
+  let hsh = 0; for (const ch of name) hsh = (hsh * 31 + ch.codePointAt(0)) >>> 0;
+  const tiles = [['#5B8DEF', '#3A5BD9'], ['#F2994A', '#E0533D'], ['#34C38F', '#1E8E6E'], ['#A06CF0', '#6B46D6'], ['#F06C9B', '#C2416F'], ['#4FB3D9', '#2C7DA8']];
+  const tl = tiles[hsh % tiles.length];
+  const W = Math.min(950, 900 * P.scale, MG.H * 1.0), u = W / 344;   // H cap for 16:9
+  Object.entries({ '--bg': T.bg, '--fg': T.fg, '--sec': T.sec, '--line': T.line, '--rim': T.rim, '--shadow': T.shadow,
+    '--u': u + 'px', '--tile': `linear-gradient(145deg, ${tl[0]}, ${tl[1]})` }).forEach(([k, v]) => root.style.setProperty(k, v));
+
+  const card = MG.$('#card');
+  card.style.width = W + 'px';
+  const inn = MG.el('div', 'in', null, card);
+  const hdr = MG.el('div', 'hdr el', null, inn);
+  const av = MG.el('div', 'av', null, hdr);
+  if (P.avatar) { const im = MG.el('img', null, null, av); im.src = P.avatar; }
+  else MG.el('div', 'lt', (Array.from(name.replace(/^[@\s]+/, ''))[0] || '•').toUpperCase(), av);
+  const who = MG.el('div', 'who', null, hdr);
+  const nm = MG.el('div', 'nm', null, who);
+  MG.el('span', 't', name, nm);
+  if (P.verified) {
+    const vb = MG.el('span', 'vb', null, nm);
+    const pts = []; for (let i = 0; i < 24; i++) { const a = i / 24 * Math.PI * 2, rr = i % 2 ? 10.2 : 12; pts.push(`${(12 + rr * Math.cos(a)).toFixed(2)},${(12 + rr * Math.sin(a)).toFixed(2)}`); }
+    vb.innerHTML = `<svg viewBox="0 0 24 24"><polygon points="${pts.join(' ')}" fill="${tint}" stroke="${tint}" stroke-width="2.2" stroke-linejoin="round"/>` +
+      `<path d="M7.6 12.3l3 3 5.9-6.3" fill="none" stroke="#fff" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+  }
+  const handle = String(P.handle || '').trim();
+  if (handle) MG.el('div', 'hd', handle.startsWith('@') ? handle : '@' + handle, who);
+  const more = MG.el('div', 'more', null, hdr);
+  more.innerHTML = `<svg viewBox="0 0 24 24" width="100%" height="100%"><g fill="${T.sec}"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></g></svg>`;
+  const tx = MG.el('div', 'tx el', String(P.text || '').trim(), inn);
+  let imgBox = null;
+  if (P.image) { imgBox = MG.el('div', 'img el', null, inn); const im = MG.el('img', null, null, imgBox); im.src = P.image; }
+  const reposts = String(P.reposts || '').trim(), likesRaw = String(P.likes || '').trim();
+  const foot = MG.el('div', 'el', null, inn);
+  if (!reposts && !likesRaw) foot.style.display = 'none';   // no metrics: no footer row
+  MG.el('div', 'sep', null, foot);
+  const mx = MG.el('div', 'mx', null, foot);
+  const ico = {
+    repost: `<svg viewBox="0 0 24 24"><g fill="none" stroke="${T.sec}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 19V8.5a2 2 0 0 1 2-2h8.5"/><path d="M14.5 3.5l3 3-3 3"/><path d="M17 5v10.5a2 2 0 0 1-2 2H6.5"/><path d="M9.5 20.5l-3-3 3-3"/></g></svg>`,
+    share: `<svg viewBox="0 0 24 24"><g fill="none" stroke="${T.sec}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.8v11"/><path d="M8 7.6l4-3.8 4 3.8"/><path d="M5.5 12.5v5.2c0 1.2.9 2.1 2.1 2.1h8.8c1.2 0 2.1-.9 2.1-2.1v-5.2"/></g></svg>`
+  };
+  const heartPath = 'M12 20.3s-7.6-4.6-9.3-9.3C1.4 7.6 3.6 4.4 7 4.4c2.1 0 3.6 1.1 5 3 1.4-1.9 2.9-3 5-3 3.4 0 5.6 3.2 4.3 6.6-1.7 4.7-9.3 9.3-9.3 9.3z';
+  const mk = (svg, label, val) => { const m = MG.el('div', 'm', null, mx); m.innerHTML = svg; if (val) { const b = MG.el('b', null, val, m); MG.el('span', null, label, m); return b; } return null; };
+  if (reposts) mk(ico.repost, 'Reposts', reposts);
+  let likeNum = null, heart = null, heartF = null, burst = null;
+  if (likesRaw) {
+    const m = MG.el('div', 'm', null, mx);
+    m.innerHTML = `<svg viewBox="0 0 24 24"><g class="burst"></g><path class="hf" d="${heartPath}" fill="${heartC}" opacity="0" style="transform-origin:12px 12px"/>` +
+      `<path class="ho" d="${heartPath}" fill="none" stroke="${T.sec}" stroke-width="1.8" stroke-linejoin="round" style="transform-origin:12px 12px"/></svg>`;
+    heart = MG.$('.ho', m); heartF = MG.$('.hf', m); burst = MG.$('.burst', m);
+    let bh = ''; for (let i = 0; i < 6; i++) { const a = i / 6 * Math.PI * 2 - Math.PI / 2; bh += `<circle cx="12" cy="12" r="1.6" fill="${i % 2 ? heartC : '#FFB020'}" data-a="${a}" opacity="0"/>`; }
+    burst.innerHTML = bh + `<circle class="rg" cx="12" cy="12" r="4" fill="none" stroke="${heartC}" stroke-width="1.5" opacity="0"/>`;
+    likeNum = MG.el('b', null, likesRaw, m); MG.el('span', null, 'Likes', m);
+  }
+  MG.el('div', 'sp', null, mx);
+  mk(ico.share, '', '');
+  const isInt = /^\d{1,3}(,\d{3})*$|^\d+$/.test(likesRaw);
+  const fmt = n => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  const likesShown = isInt ? fmt(parseInt(likesRaw.replace(/,/g, ''), 10)) : likesRaw;
+  const likesPlus = isInt ? fmt(parseInt(likesRaw.replace(/,/g, ''), 10) + 1) : likesRaw;
+  if (likeNum) likeNum.textContent = likesShown;
+  const shade = MG.el('div', null, null, card); shade.id = 'shade';
+  shade.style.background = dark ? 'linear-gradient(120deg, rgba(255,255,255,.06), rgba(255,255,255,0) 45%)' : 'linear-gradient(120deg, rgba(255,255,255,.55), rgba(255,255,255,0) 45%)';
+  const els = MG.$$('.el', inn);
+
+  // ── timing ────────────────────────────────────────────────────────────
+  const tLike = 1.25;
+  const exitDur = Math.min(0.28, D * 0.1), exitAt = D - exitDur;
+  // Slow float during the hold, stepped at 6 fps so static frames are
+  // re-used between steps (each step moves well under a pixel).
+  const DF = 6;
+  const drift = t => {
+    const q = Math.floor(t * DF + 1e-6) / DF;
+    return { ry: Math.sin(q * 0.6) * 0.9, rx: Math.sin(q * 0.5 + 1.1) * 0.6, y: Math.sin(q * 0.55 + 0.4) * 4 };
+  };
+  let L = null;
+  const layout = () => {
+    // platform-safe area: y 8%..80% on 9:16 (5%..92% otherwise)
+    const tall = MG.H > MG.W * 1.5, BOT = tall ? 0.80 : 0.92, TOP = tall ? 0.08 : 0.05;
+    // fit the body text: biggest size (21pt → 14pt) that keeps the card inside the safe area
+    const maxCardH = MG.H * (BOT - TOP);
+    if (imgBox) imgBox.style.height = Math.min(176 * u, MG.H * 0.24) + 'px';
+    let fs = 21 * u;
+    for (; fs >= 14 * u; fs -= 0.5 * u) {
+      tx.style.fontSize = fs + 'px';
+      if (card.getBoundingClientRect().height <= maxCardH) break;
+    }
+    if (imgBox && card.getBoundingClientRect().height > maxCardH) {
+      const over = card.getBoundingClientRect().height - maxCardH;
+      imgBox.style.height = Math.max(90 * u, parseFloat(imgBox.style.height) - over) + 'px';
+    }
+    const h = card.getBoundingClientRect().height;
+    const left = (MG.W - W) / 2;
+    let top = MG.H * P.y - h / 2;
+    top = MG.clamp(top, MG.H * TOP, Math.max(MG.H * TOP, MG.H * BOT - h));
+    card.style.left = left + 'px'; card.style.top = top + 'px';
+    L = { h, top };
+    MG.box = [Math.max(0, left - 90), Math.max(0, top - 110), Math.min(MG.W, left + W + 90), Math.min(MG.H, top + h + 140)];
+    const wins = [[0, 1.2], [tLike - 0.02, tLike + 0.75], [exitAt - 0.02, D]];
+    for (let k = Math.ceil(DF * 0.95); k / DF < exitAt; k++) wins.push([k / DF - 1e-4, k / DF + 1 / MG.fps - 2e-4]);
+    MG.active(wins);
+  };
+  document.body.offsetHeight;
+  MG.ready = document.fonts.ready.then(() => { if (!L) layout(); });
+
+  MG.frame(t => {
+    if (!L) layout();
+    // 3D tilt-in: from a steep angle back in depth, settling with a soft overshoot
+    const k = MG.spring(t, 0, { stiffness: 95, damping: 14 });
+    const dr = drift(t), dk = MG.ease.smooth(MG.range(t, 0.55, 0.6));
+    const s = {
+      perspective: 1600,
+      y: (1 - k) * 120 + dr.y * dk,
+      z: (1 - k) * -420,
+      rx: 3 + (1 - k) * 34 + dr.rx * dk,
+      ry: -3 + (1 - k) * -26 + dr.ry * dk,
+      rotate: (1 - k) * -5,
+      opacity: 0.3 + 0.7 * MG.range(t, 0, 0.16),
+      blur: (1 - MG.range(t, 0, 0.22)) * 10
+    };
+    if (t > exitAt) {
+      const q = MG.ease.inCubic(MG.range(t, exitAt, exitDur));
+      s.y -= q * 60; s.z = -q * 200; s.rx -= q * 10; s.opacity *= 1 - q; s.blur = q * 8;
+    }
+    MG.set(card, s);
+    // specular sheen follows the tilt a little
+    shade.style.opacity = MG.clamp(0.6 + (s.ry || 0) * -0.03 + (1 - k) * 0.4);
+    // content settles in just behind the card
+    els.forEach((e, i) => {
+      // content rides in with the card (never an empty plate), settling a beat later
+      const t0 = 0.04 + i * 0.045;
+      MG.set(e, { y: (1 - MG.ease.outCubic(MG.range(t, t0, 0.42))) * 18 * u / 2.6, opacity: 0.35 + 0.65 * MG.range(t, t0, 0.2) });
+    });
+    // like pop
+    if (heart) {
+      const lp = MG.range(t, tLike, 0.07);
+      heartF.setAttribute('opacity', lp.toFixed(3));
+      heart.setAttribute('opacity', (1 - lp).toFixed(3));
+      const hs = t < tLike ? 1 : 0.6 + 0.4 * MG.spring(t, tLike, { stiffness: 420, damping: 15 });
+      heartF.style.transform = `scale(${hs.toFixed(4)})`;
+      const bp = MG.range(t, tLike + 0.02, 0.4), be = MG.ease.outCubic(bp);
+      MG.$$('circle[data-a]', burst).forEach(c => {
+        const a = +c.dataset.a, rr = 9 + 8 * be;
+        c.setAttribute('cx', (12 + Math.cos(a) * rr).toFixed(2)); c.setAttribute('cy', (12 + Math.sin(a) * rr).toFixed(2));
+        c.setAttribute('r', (1.7 * (1 - bp * 0.7)).toFixed(2));
+        c.setAttribute('opacity', bp > 0 && bp < 1 ? (1 - bp).toFixed(3) : 0);
+      });
+      const rg = MG.$('.rg', burst), rp = MG.range(t, tLike, 0.3);
+      rg.setAttribute('r', (4 + 9 * MG.ease.outCubic(rp)).toFixed(2));
+      rg.setAttribute('opacity', rp > 0 && rp < 1 ? (0.8 * (1 - rp)).toFixed(3) : 0);
+      likeNum.textContent = t >= tLike + 0.05 ? likesPlus : likesShown;
+      likeNum.style.color = t >= tLike ? heartC : '';
+    }
+  });
+})();
+</script>

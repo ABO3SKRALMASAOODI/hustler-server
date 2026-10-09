@@ -1,0 +1,271 @@
+<!--MG-SPEC {"title": "Comment keyword CTA", "category": "cta",
+ "description": "'Comment KEYWORD' call to action: a glowing headline, then a comment composer where the keyword is typed with a caret, the send button is pressed (dip + ripple) and the comment lands as posted. Use at the end of a short (or right after the payoff) when the creator offers a guide/link for commenting a word; captions are muted while it shows because the headline carries that line.",
+ "duration": 3.2, "layer": "above_captions", "mutes_captions": true,
+ "params": {
+  "keyword": {"type": "str", "required": true, "max": 24, "hint": "the word viewers should comment, e.g. GUIDE"},
+  "headline": {"type": "str", "default": "Comment \"{keyword}\" and I'll send it to you", "max": 80, "hint": "line above the composer (match what the speaker says); {keyword} becomes the glowing keyword; empty string = no headline"},
+  "placeholder": {"type": "str", "default": "Add a comment…", "max": 32},
+  "accent": {"type": "color", "default": "#FFD400", "hint": "keyword glow colour in the headline"},
+  "theme": {"type": "enum", "values": ["dark", "light"], "default": "dark"},
+  "y": {"type": "float", "min": 0.15, "max": 0.7, "default": 0.48, "hint": "vertical centre of the whole block as frame fraction (kept inside the platform-safe area)"},
+  "scale": {"type": "float", "min": 0.7, "max": 1.0, "default": 1.0, "hint": "1.0 = full safe width"}
+ },
+ "example": {"keyword": "GUIDE"},
+ "sfx": [{"at": 0.45, "kind": "typing", "gain_db": -18, "dur": 0.55}, {"at": 1.2, "kind": "click_ui"}, {"at": 1.34, "kind": "pop_soft"}]} -->
+<style>
+  .mg-root{font-family:'Inter','Inter Display',system-ui,sans-serif}
+  #blk{position:absolute;left:0;top:0}
+  .hl{position:absolute;left:0;top:0;width:100%;text-align:center;font-family:'Inter Display','Inter',sans-serif;font-weight:800;
+    color:#fff;letter-spacing:-0.03em;line-height:1.06;text-wrap:balance;filter:drop-shadow(0 4px 18px rgba(0,0,0,.45))}
+  .hl .mg-w{will-change:transform,filter,opacity}
+  .kw{color:var(--acc)}
+  .plate{position:absolute;background:var(--fill);box-shadow:var(--shadow);overflow:hidden}
+  .plate::after{content:"";position:absolute;inset:0;border-radius:inherit;box-shadow:var(--rim);pointer-events:none}
+  .cmp{left:0;width:100%;height:calc(60 * var(--u));border-radius:calc(30 * var(--u))}
+  .av{position:absolute;width:calc(40 * var(--u));height:calc(40 * var(--u));border-radius:50%;overflow:hidden;
+    background:linear-gradient(140deg,#8E8E93 0%,#636366 100%)}
+  .av svg{position:absolute;inset:0;width:100%;height:100%}
+  .fld{position:absolute;top:0;height:100%;display:flex;align-items:center;font-size:calc(17 * var(--u));letter-spacing:-0.015em;white-space:nowrap}
+  .ph{position:absolute;left:0;color:var(--sec);font-weight:400}
+  .typed{position:relative;color:var(--fg);font-weight:500;display:flex;align-items:center}
+  .caret{display:inline-block;width:calc(2.2 * var(--u));height:calc(22 * var(--u));border-radius:2px;background:var(--tint);margin-left:calc(1 * var(--u))}
+  .snd{position:absolute;width:calc(40 * var(--u));height:calc(40 * var(--u))}
+  .snd .bg{position:absolute;inset:0;border-radius:50%}
+  .snd .off{background:var(--off)}
+  .snd .on{background:var(--tint);opacity:0}
+  .snd svg{position:absolute;inset:0;width:100%;height:100%}
+  .rip{position:absolute;border-radius:50%;border:calc(2.4 * var(--u)) solid var(--tint);opacity:0;pointer-events:none}
+  .flash{position:absolute;border-radius:50%;background:var(--tint);opacity:0;pointer-events:none}
+  .cm{left:0;border-radius:calc(22 * var(--u));display:flex;align-items:center;gap:calc(10 * var(--u));
+    padding:calc(10 * var(--u)) calc(16 * var(--u)) calc(10 * var(--u)) calc(10 * var(--u));opacity:0;transform-origin:0 100%}
+  .cm .av{position:relative;flex:0 0 auto;width:calc(34 * var(--u));height:calc(34 * var(--u))}
+  .cm .who{font-size:calc(13.5 * var(--u));color:var(--fg);font-weight:600;letter-spacing:-0.01em;line-height:1.2}
+  .cm .who span{color:var(--sec);font-weight:400;margin-left:calc(6 * var(--u))}
+  .cm .msg{font-size:calc(17 * var(--u));color:var(--fg);font-weight:500;letter-spacing:-0.015em;line-height:1.25;white-space:nowrap}
+  .cm .ht{flex:0 0 auto;width:calc(20 * var(--u));height:calc(20 * var(--u));margin-left:calc(18 * var(--u))}
+</style>
+<div class="mg-root"><div id="blk"></div></div>
+<script>
+(() => {
+  const P = MG.params, root = document.documentElement, D = MG.duration;
+  const dark = P.theme !== 'light';
+  const T = dark ? {
+    fill: 'linear-gradient(180deg, rgb(40,40,44), rgb(28,28,31))', fg: '#F5F5F7', sec: 'rgba(235,235,245,.5)',
+    rim: 'inset 0 0 0 1px rgba(255,255,255,.08), inset 0 1px 0 rgba(255,255,255,.09)', off: 'rgba(120,120,128,.36)',
+    shadow: '0 2px 6px rgba(0,0,0,.25), 0 16px 44px rgba(0,0,0,.45)', grain: .2, arrowOff: 'rgba(235,235,245,.45)'
+  } : {
+    fill: 'linear-gradient(180deg, rgb(255,255,255), rgb(243,243,246))', fg: '#0B0B0D', sec: 'rgba(60,60,67,.5)',
+    rim: 'inset 0 0 0 1px rgba(255,255,255,.6), inset 0 -1px 0 rgba(0,0,0,.05)', off: 'rgba(120,120,128,.16)',
+    shadow: '0 2px 6px rgba(0,0,0,.10), 0 16px 44px rgba(0,0,0,.32)', grain: .14, arrowOff: 'rgba(60,60,67,.38)'
+  };
+  const tint = '#2F7CF6';
+  Object.entries({ '--fill': T.fill, '--fg': T.fg, '--sec': T.sec, '--rim': T.rim, '--off': T.off,
+    '--shadow': T.shadow, '--grain': T.grain, '--tint': tint, '--acc': P.accent })
+    .forEach(([k, v]) => root.style.setProperty(k, v));
+
+  const W = Math.min(940, 940 * P.scale, MG.H * 0.85), u = W / 344;   // 60 px side margins (+ ring); H cap for 16:9 / 1:1
+  root.style.setProperty('--u', u + 'px');
+  const blk = MG.$('#blk');
+  blk.style.width = W + 'px';
+  blk.style.left = ((MG.W - W) / 2) + 'px';
+  const blkOpacity = 0.95;
+  const person = (c) => `<svg viewBox="0 0 40 40"><circle cx="20" cy="15.5" r="7" fill="${c}"/><path d="M6.5 36c1.6-7.4 7-11 13.5-11s11.9 3.6 13.5 11" fill="${c}"/></svg>`;
+  const kw = String(P.keyword || '').trim();
+
+  // ── headline ──────────────────────────────────────────────────────────
+  const words = [];
+  let hl = null;
+  // typographic quotes/apostrophes for display copy
+  const smart = x => x.replace(/(^|[\s(\[{])"/g, '$1\u201C').replace(/"/g, '\u201D')
+    .replace(/(\w)'(\w)/g, '$1\u2019$2').replace(/(^|[\s(\[{])'/g, '$1\u2018').replace(/'/g, '\u2019');
+  const hText = smart(String(P.headline || '').trim());
+  if (hText) {
+    hl = MG.el('div', 'hl', null, blk);
+    const parts = hText.split('{keyword}');
+    parts.forEach((part, i) => {
+      part.split(/(\s+)/).forEach(tok => {
+        if (!tok) return;
+        if (/^\s+$/.test(tok)) { hl.appendChild(document.createTextNode(' ')); return; }
+        words.push({ el: MG.el('span', 'mg-w', tok, hl), kw: false });
+      });
+      if (i < parts.length - 1) {
+        // keep quotes/punctuation glued to the keyword: merge with neighbours
+        const w = MG.el('span', 'mg-w kw', kw, hl);
+        words.push({ el: w, kw: true });
+      }
+    });
+    // glue: a keyword span directly adjacent to text (e.g. "{keyword}") must
+    // not be separated by margins, so merge such neighbours into one word.
+    for (let i = words.length - 1; i > 0; i--) {
+      const a = words[i - 1].el, b = words[i].el;
+      if (a.nextSibling === b) {
+        const wrap = MG.el('span', 'mg-w', null, null);
+        hl.insertBefore(wrap, a);
+        [a, b].forEach(x => { x.classList.remove('mg-w'); x.style.display = 'inline'; wrap.appendChild(x); });
+        words[i - 1] = { el: wrap, kw: words[i - 1].kw || words[i].kw };
+        words.splice(i, 1);
+      }
+    }
+  }
+
+  // ── posted comment (revealed after send) ─────────────────────────────
+  const cm = MG.el('div', 'plate cm', null, blk);
+  const cav = MG.el('div', 'av', null, cm); cav.innerHTML = person('rgba(255,255,255,.92)');
+  const cbody = MG.el('div', null, null, cm);
+  const who = MG.el('div', 'who', 'You', cbody); MG.el('span', null, 'now', who);
+  MG.el('div', 'msg', kw, cbody);
+  const ht = MG.el('div', 'ht', null, cm);
+  ht.innerHTML = `<svg viewBox="0 0 24 24"><path d="M12 20.5s-7.5-4.6-9.3-9.2C1.4 7.9 3.6 4.5 7.1 4.5c2.1 0 3.6 1.2 4.9 3 1.3-1.8 2.8-3 4.9-3 3.5 0 5.7 3.4 4.4 6.8-1.8 4.6-9.3 9.2-9.3 9.2z" fill="none" stroke="${T.sec}" stroke-width="1.9" stroke-linejoin="round"/></svg>`;
+
+  // ── composer ──────────────────────────────────────────────────────────
+  const cmp = MG.el('div', 'plate cmp', null, blk);
+  const av = MG.el('div', 'av', null, cmp); av.innerHTML = person('rgba(255,255,255,.92)');
+  av.style.left = (10 * u) + 'px'; av.style.top = (10 * u) + 'px';
+  const fld = MG.el('div', 'fld', null, cmp);
+  fld.style.left = (62 * u) + 'px'; fld.style.right = (60 * u) + 'px';
+  const ph = MG.el('div', 'ph', P.placeholder || '', fld);
+  const typed = MG.el('div', 'typed', null, fld);
+  const txt = MG.el('span', null, '', typed);
+  const caret = MG.el('span', 'caret', null, typed);
+  const snd = MG.el('div', 'snd', null, cmp);
+  snd.style.right = (10 * u) + 'px'; snd.style.top = (10 * u) + 'px';
+  const off = MG.el('div', 'bg off', null, snd), on = MG.el('div', 'bg on', null, snd);
+  const arrow = (c) => `<svg viewBox="0 0 40 40"><path d="M20 28.5V12.5M13.2 18.8L20 12l6.8 6.8" fill="none" stroke="${c}" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+  const aOff = MG.el('div', null, null, snd); aOff.innerHTML = arrow(T.arrowOff); aOff.style.cssText = 'position:absolute;inset:0';
+  const aOn = MG.el('div', null, null, snd); aOn.innerHTML = arrow('#fff'); aOn.style.cssText = 'position:absolute;inset:0;opacity:0';
+  const rip = MG.el('div', 'rip', null, blk), flash = MG.el('div', 'flash', null, blk);
+
+  // ── timing ────────────────────────────────────────────────────────────
+  const chars = Array.from(kw);
+  // thumb-typing pace (~11+ keys/s, like the kit 'typing' sound and the
+  // reference composers); every keyword is typed by 0.95 s
+  const tType0 = 0.45, cps = Math.max(11, chars.length / 0.5);
+  const rnd = MG.rand(chars.length * 7 + 3);
+  const keys = chars.map((_, i) => tType0 + Math.max(0, i + 0.15 + (rnd() - 0.5) * 0.4) / cps);
+  keys.sort((a, b) => a - b);
+  const tType1 = keys.length ? keys[keys.length - 1] : tType0;
+  const tSend = 1.2, tPost = 1.33;
+  const exitDur = Math.min(0.26, D * 0.1), exitAt = D - exitDur;
+  // springs snap to rest once settled (|1 - v| < 0.002) so held frames are exact
+  const SK = { kw: { stiffness: 320, damping: 16 }, cmp: { stiffness: 300, damping: 24 }, wake: { stiffness: 420, damping: 24 },
+               press: { stiffness: 380, damping: 15 }, post: { stiffness: 330, damping: 21 } };
+  const SS = {}; Object.keys(SK).forEach(k => { SS[k] = MG.springSettle(SK[k]); });
+  const spr = (t, t0, k) => t - t0 >= SS[k] ? 1 : MG.spring(t, t0, SK[k]);
+
+  let L = null;
+  const layout = () => {
+    let y = 0, hlH = 0;
+    if (hl) {
+      // fit: largest size that keeps the headline to two lines in the column
+      const maxFs = 86 * W / 940, minFs = 36 * W / 940;
+      const lines = () => new Set(words.map(w => Math.round(w.el.offsetTop / 4))).size;
+      let fs = maxFs;
+      for (; fs > minFs; fs -= 2) {
+        hl.style.fontSize = fs + 'px';
+        if (lines() <= 2 && hl.scrollWidth <= W + 1) break;
+      }
+      hlH = hl.getBoundingClientRect().height;
+      y = hlH + 34 * u;
+    }
+    // long keywords: shrink the typed text (and the posted copy) to fit the field
+    txt.textContent = kw;
+    let kfs = 17 * u;
+    while (typed.scrollWidth > fld.clientWidth - 4 * u && kfs > 11 * u) { kfs -= 0.25 * u; fld.style.fontSize = kfs + 'px'; }
+    txt.textContent = '';
+    ph.style.fontSize = (17 * u) + 'px';
+    const msgEl = MG.$('.msg', cm);
+    msgEl.style.fontSize = kfs + 'px';
+    cm.style.maxWidth = W + 'px';
+    const cmH = cm.getBoundingClientRect().height;
+    cm.style.top = y + 'px';
+    const cmpTop = y + cmH + 12 * u;
+    cmp.style.top = cmpTop + 'px';
+    const total = cmpTop + 60 * u;
+    // platform-safe area: y 8%..80% on 9:16 (5%..92% otherwise)
+    const tall = MG.H > MG.W * 1.5, BOT = tall ? 0.80 : 0.92, TOP = tall ? 0.08 : 0.05;
+    let top = MG.H * P.y - total / 2;
+    top = MG.clamp(top, MG.H * TOP, Math.max(MG.H * TOP, MG.H * BOT - total));
+    blk.style.top = top + 'px';
+    // send-button centre in block coords (for ripple)
+    const sx = W - 30 * u, sy = cmpTop + 30 * u;
+    [rip, flash].forEach(e => { e.style.left = sx + 'px'; e.style.top = sy + 'px'; });
+    const x0 = (MG.W - W) / 2;
+    MG.box = [x0 - 60, top - 60, x0 + W + 60, top + total + 110];
+    // moving windows (+ caret blink toggles during waits/holds)
+    // typing only changes the picture on each key press (+ the send button
+    // waking up), so declare those instants instead of the whole span
+    // the keyword bloom settles ~0.65 s after its word lands
+    const kwI = words.findIndex(w => w.kw);
+    const introEnd = Math.max((hl ? 0.12 : 0) + SS.cmp, (words.length - 1) * 0.045 + 0.45, kwI >= 0 ? kwI * 0.045 + 0.06 + SS.kw : 0);
+    const wins = [[0, introEnd + 0.01], [keys.length ? keys[0] - 0.01 : tType0, (keys.length ? keys[0] : tType0) + SS.wake + 0.01],
+                  [tSend - 0.09, Math.max(tSend + SS.press, tPost + SS.post) + 0.01], [exitAt - 0.02, D]];
+    keys.forEach(k => wins.push([k - 1e-4, k + 1 / MG.fps - 2e-4]));
+    for (let b = 0.53; b < D; b += 0.53) wins.push([b - 1e-4, b + 1 / MG.fps - 2e-4]);
+    MG.active(wins);
+    return { cmpTop, total };
+  };
+  document.body.offsetHeight;
+  MG.ready = document.fonts.ready.then(() => { if (!L) L = layout(); });
+
+  MG.frame(t => {
+    if (!L) L = layout();
+    // headline: rise + blur-to-sharp, keyword pops with a bloom
+    words.forEach((w, i) => {
+      const t0 = i * 0.045;
+      const p = MG.ease.outCubic(MG.range(t, t0, 0.34));
+      const s = { y: (1 - p) * 22, opacity: (i === 0 ? 0.3 + 0.7 * MG.range(t, 0, 0.16) : MG.range(t, t0, 0.16)), blur: (1 - MG.range(t, t0, 0.24)) * 9 };
+      if (w.kw) {
+        const k = spr(t, t0 + 0.06, 'kw');
+        s.scale = 1.22 - 0.22 * k;
+        const bloom = MG.range(t, t0 + 0.05, 0.2) * (1 - 0.45 * MG.ease.outCubic(MG.range(t, t0 + 0.25, 0.36)));
+        (w.el.querySelector('.kw') || w.el).style.textShadow = `0 2px 10px rgba(0,0,0,.35), 0 0 ${(10 + 16 * bloom).toFixed(1)}px ${P.accent}${Math.round(110 + 90 * bloom).toString(16).padStart(2, '0')}, 0 0 ${(34 + 40 * bloom).toFixed(1)}px ${P.accent}${Math.round(60 + 60 * bloom).toString(16).padStart(2, '0')}`;
+      }
+      MG.set(w.el, s);
+    });
+    // composer entrance (spring, slight scale) shortly after the headline
+    const tC = hl ? 0.12 : 0;
+    const ce = spr(t, tC, 'cmp');
+    MG.set(cmp, { y: (1 - ce) * 46, scale: 0.94 + 0.06 * Math.min(ce, 1.02),
+                  opacity: hl ? MG.range(t, tC, 0.12) : 0.3 + 0.7 * MG.range(t, 0, 0.12), blur: (1 - MG.range(t, tC, 0.2)) * 8 });
+    // typing
+    let n = 0; while (n < keys.length && t >= keys[n]) n++;
+    const sent = t >= tSend + 0.06;
+    const clearP = MG.range(t, tSend + 0.06, 0.12);
+    txt.textContent = chars.slice(0, n).join('');
+    ph.style.opacity = n > 0 && !sent ? 0 : (sent ? MG.range(t, tSend + 0.17, 0.16) : 1);
+    MG.set(txt, { opacity: sent ? 1 - clearP : 1, y: sent ? -10 * u * clearP : 0 });
+    if (sent && clearP >= 1) txt.textContent = '';
+    // caret: solid while typing, blinking otherwise (0.53 s phases)
+    const typing = t >= tType0 - 0.05 && t <= tType1 + 0.25;
+    caret.style.opacity = (typing || Math.floor(t / 0.53 + 1e-6) % 2 === 0) ? 1 : 0;
+    // send button: off → on with first key, press at tSend, back to off after send
+    const onK = n > 0 ? MG.range(t, keys[0], 0.12) : 0;
+    const offAgain = MG.range(t, tSend + 0.12, 0.16);
+    const onV = onK * (1 - offAgain);
+    on.style.opacity = onV; aOn.style.opacity = onV; aOff.style.opacity = 1 - onV;
+    let ss = 1;
+    if (n > 0 && t < tSend) ss = 0.8 + 0.2 * spr(t, keys[0], 'wake');
+    if (t >= tSend - 0.07) {
+      const dip = MG.ease.inQuad(MG.range(t, tSend - 0.07, 0.07));
+      ss = t < tSend ? 1 - 0.18 * dip : 0.82 + 0.18 * spr(t, tSend, 'press');
+    }
+    MG.set(snd, { scale: ss });
+    // ripple + flash
+    const rp = MG.range(t, tSend, 0.5);
+    const rr = (20 + 34 * MG.ease.outExpo(rp)) * u;
+    MG.set(rip, { x: -rr, y: -rr, opacity: rp > 0 && rp < 1 ? 0.55 * (1 - rp) : 0 });
+    rip.style.width = rip.style.height = (2 * rr) + 'px';
+    const fp = MG.range(t, tSend, 0.28), fr = 22 * u * (1 + 0.5 * fp);
+    MG.set(flash, { x: -fr, y: -fr, opacity: fp > 0 && fp < 1 ? 0.28 * (1 - fp) : 0 });
+    flash.style.width = flash.style.height = (2 * fr) + 'px';
+    // posted comment springs up from the composer
+    if (t >= tPost) {
+      const k = spr(t, tPost, 'post');
+      MG.set(cm, { y: (1 - k) * 34 * u, scale: 0.9 + 0.1 * Math.min(k, 1.03), opacity: MG.range(t, tPost, 0.1), blur: (1 - MG.range(t, tPost, 0.15)) * 6 });
+    } else cm.style.opacity = 0;
+    // exit: everything lifts and fades, faster than it came in
+    const q = t > exitAt ? MG.ease.inCubic(MG.range(t, exitAt, exitDur)) : 0;
+    MG.set(blk, { y: -q * 40, opacity: blkOpacity * (1 - q), blur: q * 6 });
+  });
+})();
+</script>

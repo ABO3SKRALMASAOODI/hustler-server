@@ -680,6 +680,16 @@ class SfxItem(BaseModel):
     # every historical EDL keeps its signature; new authored sounds can be
     # judged later from intent rather than surviving as anonymous noises.
     purpose: Optional[str] = None
+    # Play at most this many seconds of the sound, then a short fade. For a
+    # long recording (a typing run, a riser) that must stop when the visible
+    # event stops; None keeps the one-shot's full natural length.
+    dur_s: Optional[float] = None
+
+    @model_validator(mode="after")
+    def _valid_dur(self):
+        if self.dur_s is not None and (not math.isfinite(self.dur_s) or self.dur_s <= 0):
+            raise ValueError("sfx dur_s must be a positive number of seconds")
+        return self
 
 
 class VolumeItem(BaseModel):

@@ -181,19 +181,67 @@ def _js_float(value):
     return v if v == v and abs(v) != float("inf") else None
 
 
-def _sfx_cues(spec, params, start, end, seed=""):
+def _cue_applies(cue, params):
+    """A cue's optional "when" ({param: value or [values]}) gates it on the
+    item's params, e.g. a kick only for the 'slam' entrance."""
+    cond = cue.get("when")
+    if not isinstance(cond, dict):
+        return True
+    for key, want in cond.items():
+        if params.get(key) not in (want if isinstance(want, list) else [want]):
+            return False
+    return True
+
+
+def _text_len(params, name):
+    v = params.get(name)
+    return len(v.strip()) if isinstance(v, str) else 0
+
+
+def _cue_dur(cue, params):
+    """Seconds the sound may play (None = its full length). "dur" is a number,
+    or {"param", "rate", "min", "max"}: the typing time of a text param at
+    `rate` characters per second, clamped."""
+    d = cue.get("dur")
+    if d is None:
+        return None
+    if isinstance(d, dict):
+        n = _text_len(params, d.get("param"))
+        rate = d.get("rate")
+        if isinstance(rate, str):
+            rate = params.get(rate)
+        try:
+            v = n / float(rate) if n and float(rate or 0) > 0 else float(d.get("min", 0.3))
+            v = min(max(v, float(d.get("min", 0.2))), float(d.get("max", 3.0)))
+        except (TypeError, ValueError):
+            return None
+        return round(v, 3)
+    try:
+        return round(float(d), 3) if float(d) > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _sfx_cues(spec, params, start, end, seed="", with_dur=False):
     """[(time, sound_id, gain_db)] for a template's declared sound roles,
     mapped onto approved library recordings (roles without one are skipped).
-    A cue with ``repeat`` sounds once per entry of a list param: ``from`` +
+    A cue with ``when`` only sounds for matching params. A cue with
+    ``repeat`` sounds once per entry of a list param: ``from`` +
     i*``every``; optional ``fit``/``min_every`` tighten ``every`` to
     (duration - fit)/(n - 1), ``require`` skips rows whose named field is
-    blank, and ``field``/``offset`` use a row's own time."""
+    blank, and ``field``/``offset`` use a row's own time. A ``repeat`` over a
+    text param with ``rate`` (chars/second, a number or a param name) sounds
+    once per ``every`` seconds of typing. ``dur`` caps how long the sound
+    plays (returned as a 4th element when with_dur)."""
     cues = []
     for n, c in enumerate(spec.get("sfx") or []):
+        if not _cue_applies(c, params):
+            continue
         row = sound_library.pick(c.get("kind") or "", seed=f"{seed}:{n}")
         if not row:
             continue
         gain = float(c.get("gain_db", row["gain_db"]))
+        dur = _cue_dur(c, params)
         at = float(c.get("at") or 0.0)
         t = (end + at) if at < 0 else (start + at)
         rep = c.get("repeat")
@@ -216,10 +264,24 @@ def _sfx_cues(spec, params, start, end, seed=""):
                     if v is not None:
                         v = min(max(v, 0.0), max(0.0, (end - start) - 0.5))   # same clamp as the template
                         off = v + float(rep.get("offset", 0.0))
-                cues.append((round(start + off, 3), row["id"], gain))
+                cues.append((round(start + off, 3), row["id"], gain, dur))
             continue
-        cues.append((round(t, 3), row["id"], gain))
-    return [(t, k, g) for t, k, g in cues if start - 0.01 <= t <= end]
+        if rep and isinstance(params.get(rep.get("param")), str) and rep.get("rate") is not None:
+            chars = _text_len(params, rep.get("param"))
+            rate = rep.get("rate")
+            if isinstance(rate, str):
+                rate = params.get(rate)
+            try:
+                rate, every = float(rate or 0), float(rep.get("every", 1.0))
+            except (TypeError, ValueError):
+                rate, every = 0.0, 1.0
+            k = max(1, -(-chars // max(1, int(rate * every)))) if chars and rate > 0 and every > 0 else 1
+            for i in range(min(k, 8)):
+                cues.append((round(start + float(rep.get("from", at)) + i * every, 3), row["id"], gain, dur))
+            continue
+        cues.append((round(t, 3), row["id"], gain, dur))
+    cues = [c for c in cues if start - 0.01 <= c[0] <= end]
+    return cues if with_dur else [c[:3] for c in cues]
 
 
 def _owned_sfx_prefix(mid):
@@ -230,7 +292,9 @@ def _apply_owned_sfx(ctx, edl, mid, cues):
     items = [s for s in (edl.get("sfx") or []) if not str(s.get("id", "")).startswith(_owned_sfx_prefix(mid))]
     prog = _program_duration(edl)
     notes = []
-    for k, (t, kind, gain) in enumerate(cues):
+    for k, cue in enumerate(cues):
+        t, kind, gain = cue[:3]
+        dur = cue[3] if len(cue) > 3 else None
         if t > prog - 0.05:
             continue
         try:
@@ -241,6 +305,8 @@ def _apply_owned_sfx(ctx, edl, mid, cues):
         items.append({"id": f"{_owned_sfx_prefix(mid)}{k + 1}", "storage_key": key,
                       "at": max(0.0, round(t, 3)), "gain_db": gain,
                       "purpose": f"{kind} for motion graphic {mid}"})
+        if dur:
+            items[-1]["dur_s"] = dur
     edl["sfx"] = items
     return notes
 
@@ -463,13 +529,13 @@ def add_motion_graphic(ctx, template, start, end=None, params=None, html=None,
     items.append(item)
     edl["motion"] = items
     notes = []
-    cues = _sfx_cues(spec, clean, s, e, seed=mid) if (SFX_DEFAULT if sfx is None else sfx) else []
+    cues = _sfx_cues(spec, clean, s, e, seed=mid, with_dur=True) if (SFX_DEFAULT if sfx is None else sfx) else []
     if cues:
         notes += _apply_owned_sfx(ctx, edl, mid, cues)
     clamp = ""
     if abs(req[0] - s) > 0.05 or abs(req[1] - e) > 0.05:
         clamp = f"\nCLAMPED: requested {req[0]:g}-{req[1]:g}s into this {prog:g}s program; placed at {s}-{e}s."
-    sound = (f"; sound cues: {', '.join(f'{k}@{t:g}s' for t, k, _g in cues)}" if cues else "")
+    sound = (f"; sound cues: {', '.join(f'{c[1]}@{c[0]:g}s' for c in cues)}" if cues else "")
     depth = " BEHIND the subject" if layer == "behind_subject" else ""
     res = ctx.write_edl(edl, f"motion graphic {template}{depth} at {s}-{e}s [{mid}]{sound}")
     if res.startswith("REJECTED"):
@@ -557,7 +623,7 @@ def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
     owned = [s for s in (edl.get("sfx") or []) if str(s.get("id", "")).startswith(_owned_sfx_prefix(id))]
     notes = []
     if sfx is True or (sfx is None and owned and (template is not None or params)):
-        cues = _sfx_cues(motion_templates.spec(hit["template"]), hit["params"], hit["start"], hit["end"], seed=id)
+        cues = _sfx_cues(motion_templates.spec(hit["template"]), hit["params"], hit["start"], hit["end"], seed=id, with_dur=True)
         notes += _apply_owned_sfx(ctx, edl, id, cues)
     elif sfx is False:
         edl["sfx"] = [s for s in (edl.get("sfx") or []) if s not in owned]

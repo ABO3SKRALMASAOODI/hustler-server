@@ -6531,7 +6531,8 @@ def _resolve_sfx(ctx, storage_key):
             "storage_key": storage_key}, None
 
 
-def add_sfx(ctx, storage_key, at, gain_db=-6.0, purpose=None, offset_s=None):
+def add_sfx(ctx, storage_key, at, gain_db=-6.0, purpose=None, offset_s=None,
+            dur_s=None):
     """Place a one-shot sound at a point in the program timeline."""
     sound, err = _resolve_sfx(ctx, storage_key)
     if err:
@@ -6551,6 +6552,13 @@ def add_sfx(ctx, storage_key, at, gain_db=-6.0, purpose=None, offset_s=None):
         return f"REJECTED: offset_s must be a number, got {offset_s!r}."
     if offset_s < 0:
         return "REJECTED: offset_s must be >= 0 seconds."
+    if dur_s is not None:
+        try:
+            dur_s = float(dur_s)
+        except (TypeError, ValueError):
+            return f"REJECTED: dur_s must be a number of seconds, got {dur_s!r}."
+        if not (0.05 <= dur_s <= 30.0):
+            return "REJECTED: dur_s must be between 0.05 and 30 seconds (omit it for the full sound)."
     edl = dict(ctx.latest_edl()["json"])
     prog = program_duration(edl)
     latest_at = max(0.0, prog - 0.05)
@@ -6609,12 +6617,16 @@ def add_sfx(ctx, storage_key, at, gain_db=-6.0, purpose=None, offset_s=None):
             "purpose": purpose_n}
     if offset_s:
         item["offset_s"] = round(offset_s, 3)
+    if dur_s and not (dur and dur_s >= dur - offset_s):
+        item["dur_s"] = round(dur_s, 3)
     items.append(item)
     edl["sfx"] = items
     note = ""
     # An honest heads-up rather than a silent truncation: the renderer's amix
     # is duration=first, so a tail running past the program end is simply cut.
     remaining = max(0.0, dur - offset_s) if dur else None
+    if remaining and item.get("dur_s"):
+        remaining = min(remaining, item["dur_s"])
     if remaining and at + remaining > prog + 0.05:
         note = (f" NOTE: '{sound['name']}' has {remaining:.2f}s remaining "
                 f"after its {offset_s:.2f}s source offset and the program ends "
@@ -23896,12 +23908,15 @@ TOOLS = {
                 "inside source audio — use it when an extracted clip contains "
                 "the requested hit late in a long track. purpose records the "
                 "nameable visible/editorial event for later final-mix review; "
-                "do not add anonymous decorative sounds. Default -6dB.",
+                "do not add anonymous decorative sounds. dur_s stops a long "
+                "recording (typing, a riser) when its on-screen event stops, "
+                "with a short fade. Default -6dB.",
                 {"storage_key": {"type": "string"},
                  "at": {"type": "number"},
                  "gain_db": {"type": "number"},
                  "purpose": {"type": "string"},
-                 "offset_s": {"type": "number"}}),
+                 "offset_s": {"type": "number"},
+                 "dur_s": {"type": "number"}}),
     "move_sfx": (move_sfx, "Retime an existing sound effect — 'the whoosh is "
                  "too early'. Keeps which sound and how loud. id from "
                  "get_edl.",
@@ -26328,7 +26343,8 @@ _COMPACT_CONTRACTS = {
         "for a specific sound the library lacks; never invented. Pass the "
         "library's suggested gain_db (the -6 dB default is too loud). "
         "Pre-roll so the peak lands on the visual frame (whoosh ~40-50% of "
-        "its length early, riser ends on the moment). purpose names the "
+        "its length early, riser ends on the moment); dur_s stops typing "
+        "when the typing stops. purpose names the "
         "on-screen event. Never on captions or ordinary cuts; about one "
         "sound every 4-5 s at most, none repeated within ~3 s."),
     "add_captions": (

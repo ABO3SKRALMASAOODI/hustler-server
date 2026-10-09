@@ -1,0 +1,215 @@
+<!--MG-SPEC {"title": "Search bar", "category": "social",
+ "description": "A clean pill search bar: the query types in with a caret, then the 'suggestions' list drops down with a stagger (typed part regular, completion bold) and row 'pick' is highlighted and tapped. Use when the speaker says 'I googled\u2026' / 'search for\u2026', or to show what people are asking.",
+ "duration": 3.2, "layer": "above_captions", "mutes_captions": false,
+ "params": {
+  "query": {"type": "str", "required": true, "max": 48},
+  "suggestions": {"type": "list", "default": [], "max_items": 5, "max": 60, "hint": "dropdown rows (best when they start with the query); empty = no dropdown"},
+  "pick": {"type": "int", "min": -1, "max": 4, "default": 0, "hint": "row that gets highlighted + tapped (0-based), -1 = none"},
+  "placeholder": {"type": "str", "default": "Search", "max": 32},
+  "theme": {"type": "enum", "values": ["light", "dark"], "default": "light"},
+  "y": {"type": "float", "min": 0.1, "max": 0.7, "default": 0.32, "hint": "vertical position of the search bar (the dropdown opens below it; the whole block is kept inside the platform-safe area)"},
+  "scale": {"type": "float", "min": 0.7, "max": 1.05, "default": 1.0, "hint": "1.0 = near full safe width"}
+ },
+ "example": {"query": "how to edit short", "suggestions": ["how to edit short videos", "how to edit shorts on iphone", "how to edit short form content fast"], "pick": 0},
+ "sfx": [{"at": 0.45, "kind": "typing", "gain_db": -16, "dur": {"param": "query", "rate": 13, "min": 0.35, "max": 1.0}}, {"at": 2.0, "kind": "click_ui"}]} -->
+<style>
+  .mg-root{font-family:'Inter','Inter Display',system-ui,sans-serif}
+  #grp{position:absolute;left:0;top:0;will-change:transform,opacity}
+  .mat{position:absolute;left:0;background:var(--fill);box-shadow:var(--shadow)}
+  .mat::after{content:"";position:absolute;inset:0;border-radius:inherit;box-shadow:var(--rim);pointer-events:none}
+  .bar{top:0;width:100%;border-radius:999px}
+  .ring{position:absolute;inset:calc(-3 * var(--u));border-radius:999px;box-shadow:0 0 0 calc(3 * var(--u)) var(--ringc);opacity:0;pointer-events:none}
+  .bar .mg{position:absolute;top:50%;width:calc(22 * var(--u));height:calc(22 * var(--u));margin-top:calc(-11 * var(--u))}
+  .q{position:absolute;top:0;bottom:0;display:flex;align-items:center;font-size:calc(18 * var(--u));letter-spacing:-0.015em;white-space:nowrap;overflow:hidden}
+  .ph{position:absolute;left:0;color:var(--sec)}
+  .typed{display:flex;align-items:center;color:var(--fg);font-weight:500}
+  .caret{display:inline-block;width:calc(2.2 * var(--u));height:calc(23 * var(--u));border-radius:2px;background:var(--tint);margin-left:calc(1 * var(--u))}
+  .end{position:absolute;top:50%;width:calc(24 * var(--u));height:calc(24 * var(--u));margin-top:calc(-12 * var(--u))}
+  .end svg{position:absolute;inset:0;width:100%;height:100%}
+  .pn{width:100%;border-radius:calc(24 * var(--u));overflow:hidden;transform-origin:50% 0;will-change:transform,opacity}
+  .row{position:relative;display:flex;align-items:center;gap:calc(13 * var(--u));padding:0 calc(18 * var(--u));will-change:transform,opacity}
+  .row .hl{position:absolute;inset:calc(4 * var(--u)) calc(8 * var(--u));border-radius:calc(14 * var(--u));background:var(--hl);opacity:0}
+  .row svg{position:relative;flex:0 0 auto;width:calc(20 * var(--u));height:calc(20 * var(--u))}
+  .row .lb{position:relative;flex:1 1 auto;min-width:0;font-size:calc(17 * var(--u));letter-spacing:-0.012em;color:var(--fg);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .row .lb b{font-weight:700}
+  .row .lb span{font-weight:400;opacity:.78}
+  .row .div{position:absolute;left:calc(51 * var(--u));right:calc(18 * var(--u));bottom:0;height:1px;background:var(--line)}
+</style>
+<div class="mg-root"><div id="grp"></div></div>
+<script>
+(() => {
+  const P = MG.params, root = document.documentElement, D = MG.duration;
+  const dark = P.theme === 'dark';
+  const tint = '#2F7CF6';
+  const T = dark ? {
+    fill: 'linear-gradient(180deg, rgb(42,42,46), rgb(30,30,33))', fg: '#F5F5F7', sec: 'rgba(235,235,245,.5)', line: 'rgba(255,255,255,.08)',
+    rim: 'inset 0 0 0 1px rgba(255,255,255,.08), inset 0 1px 0 rgba(255,255,255,.09)', hl: 'rgba(255,255,255,.10)',
+    shadow: '0 2px 8px rgba(0,0,0,.3), 0 20px 50px rgba(0,0,0,.45)', ringc: 'rgba(47,124,246,.55)'
+  } : {
+    fill: 'linear-gradient(180deg, rgb(255,255,255), rgb(246,246,248))', fg: '#0B0B0D', sec: 'rgba(60,60,67,.5)', line: 'rgba(60,60,67,.12)',
+    rim: 'inset 0 0 0 1px rgba(255,255,255,.6), inset 0 -1px 0 rgba(0,0,0,.05)', hl: 'rgba(47,124,246,.12)',
+    shadow: '0 2px 8px rgba(0,0,0,.12), 0 20px 50px rgba(0,0,0,.32)', ringc: 'rgba(47,124,246,.45)'
+  };
+  const W = Math.min(940, 900 * P.scale, MG.H * 0.8), u = W / 344;   // 60 px side margins (+ focus ring); H cap for 16:9
+  Object.entries({ '--fill': T.fill, '--fg': T.fg, '--sec': T.sec, '--line': T.line, '--rim': T.rim, '--hl': T.hl,
+    '--shadow': T.shadow, '--ringc': T.ringc, '--tint': tint, '--u': u + 'px' }).forEach(([k, v]) => root.style.setProperty(k, v));
+  const grp = MG.$('#grp');
+  grp.style.width = W + 'px'; grp.style.left = ((MG.W - W) / 2) + 'px';
+  const query = String(P.query || '').trim();
+  const sugg = (P.suggestions || []).map(s => String(s).trim()).filter(Boolean).slice(0, 5);
+  const pick = sugg.length ? Math.min(P.pick, sugg.length - 1) : -1;
+
+  const mag = c => `<svg viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.3" fill="none" stroke="${c}" stroke-width="2.2"/><path d="M15.3 15.3l4.6 4.6" stroke="${c}" stroke-width="2.4" stroke-linecap="round"/></svg>`;
+  // ── bar ───────────────────────────────────────────────────────────────
+  const barH = 58 * u;
+  const bar = MG.el('div', 'mat bar', null, grp);
+  bar.style.height = barH + 'px';
+  const ring = MG.el('div', 'ring', null, bar);
+  const mg = MG.el('div', 'mg', null, bar); mg.innerHTML = mag(T.sec); mg.style.left = (20 * u) + 'px';
+  const q = MG.el('div', 'q', null, bar); q.style.left = (54 * u) + 'px'; q.style.right = (54 * u) + 'px';
+  const ph = MG.el('div', 'ph', P.placeholder || '', q);
+  const typed = MG.el('div', 'typed', null, q);
+  const txt = MG.el('span', null, '', typed);
+  const caret = MG.el('span', 'caret', null, typed);
+  const endMic = MG.el('div', 'end', null, bar); endMic.style.right = (20 * u) + 'px';
+  endMic.innerHTML = `<svg viewBox="0 0 24 24"><rect x="8.6" y="3.2" width="6.8" height="11.6" rx="3.4" fill="none" stroke="${T.sec}" stroke-width="2"/><path d="M5.6 11.2a6.4 6.4 0 0 0 12.8 0M12 17.6v3.4" fill="none" stroke="${T.sec}" stroke-width="2" stroke-linecap="round"/></svg>`;
+  const endX = MG.el('div', 'end', null, bar); endX.style.right = (20 * u) + 'px'; endX.style.opacity = 0;
+  endX.innerHTML = `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="${dark ? 'rgba(235,235,245,.3)' : 'rgba(60,60,67,.3)'}"/><path d="M9 9l6 6M15 9l-6 6" stroke="${dark ? '#1E1E21' : '#fff'}" stroke-width="2" stroke-linecap="round"/></svg>`;
+
+  // ── dropdown ──────────────────────────────────────────────────────────
+  let pn = null;
+  const rows = [];
+  const rowH = 52 * u;
+  if (sugg.length) {
+    pn = MG.el('div', 'mat pn', null, grp);
+    pn.style.top = (barH + 10 * u) + 'px';
+    pn.style.padding = (6 * u) + 'px 0';
+    const arrow = `<svg viewBox="0 0 24 24"><path d="M17 17L7.5 7.5M7.5 15V7.5H15" fill="none" stroke="${T.sec}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+    sugg.forEach((s, i) => {
+      const r = MG.el('div', 'row', null, pn);
+      r.style.height = rowH + 'px';
+      const hl = MG.el('div', 'hl', null, r);
+      const hp = MG.el('div', 'hl', null, r);   // press flash layer
+      r.insertAdjacentHTML('beforeend', mag(T.sec));
+      const lb = MG.el('div', 'lb', null, r);
+      r.insertAdjacentHTML('beforeend', arrow);
+      if (i < sugg.length - 1) MG.el('div', 'div', null, r);
+      rows.push({ r, hl, hp, lb, s, last: '' });
+    });
+  }
+  // label = typed prefix (regular) + completion (bold), like real search UIs
+  const label = (row, typedNow) => {
+    const key = typedNow;
+    if (row.last === key) return;
+    row.last = key;
+    const s = row.s, tl = typedNow.toLowerCase();
+    row.lb.textContent = '';
+    if (tl && s.toLowerCase().startsWith(tl)) {
+      let pre = s.slice(0, typedNow.length);
+      if (row.elide && pre.length > 18) {
+        // long query + long suggestion: elide the shared prefix so the
+        // completion (the informative part) stays in view
+        const cut = pre.lastIndexOf(' ', pre.length - 2);
+        pre = '\u2026' + (cut > 0 && pre.length - cut <= 14 ? pre.slice(cut + 1) : pre.slice(-10));
+      }
+      MG.el('span', null, pre, row.lb);
+      MG.el('b', null, s.slice(typedNow.length), row.lb);
+    } else MG.el('b', null, s, row.lb);
+  };
+
+  // ── timing (fixed so the sound cues line up for any query length) ────
+  const chars = Array.from(query);
+  const tType0 = 0.45, tType1 = Math.min(1.45, tType0 + Math.max(0.35, chars.length / 13));
+  const rnd = MG.rand(chars.length * 13 + 5);
+  const keys = chars.map((_, i) => tType0 + (tType1 - tType0) * Math.min(1, (i + 0.2 + (rnd() - 0.5) * 0.45) / Math.max(1, chars.length))).sort((a, b) => a - b);
+  const tOpen = Math.min(0.8, tType1), tPick = 1.72, tPress = 2.0;
+  const exitDur = Math.min(0.26, D * 0.1), exitAt = D - exitDur;
+  // the press spring snaps to rest once settled so the held frames are exact
+  const pressSettle = MG.springSettle({ stiffness: 420, damping: 16 }), openSettle = MG.springSettle({ stiffness: 320, damping: 26 });
+
+  // what is typed when the panel opens: rows are widest then (more bold),
+  // so fitting that state means no row changes width or ellipsis later
+  const preOpen = chars.slice(0, keys.filter(k => k <= tOpen + 1e-6).length).join('');
+  let L = null;
+  const layout = () => {
+    rows.forEach(r => label(r, preOpen));
+    // long suggestions: shrink every row's type together (floor 13.5pt) before ellipsis
+    let fsr = 17 * u;
+    const over = () => rows.some(r => r.lb.scrollWidth > r.lb.clientWidth + 0.5);
+    while (rows.length && over() && fsr > 13.5 * u) { fsr -= 0.25 * u; rows.forEach(r => { r.lb.style.fontSize = fsr + 'px'; }); }
+    rows.forEach(r => {
+      label(r, query);
+      r.elide = query.length > 18 && r.lb.scrollWidth > r.lb.clientWidth + 0.5;
+      r.last = null;
+    });
+    // long queries: same for the bar
+    let fsq = 18 * u;
+    txt.textContent = query;
+    while (typed.scrollWidth > q.clientWidth - 6 * u && fsq > 15 * u) { fsq -= 0.25 * u; q.style.fontSize = fsq + 'px'; }
+    txt.textContent = '';
+    const total = barH + (pn ? 10 * u + pn.getBoundingClientRect().height : 0);
+    // platform-safe area: y 8%..80% on 9:16 (5%..92% otherwise)
+    const tall = MG.H > MG.W * 1.5, BOT = tall ? 0.80 : 0.92, TOP = tall ? 0.08 : 0.05;
+    let top = MG.H * P.y - barH / 2;
+    top = MG.clamp(top, MG.H * TOP, Math.max(MG.H * TOP, MG.H * BOT - total));
+    grp.style.top = top + 'px';
+    const x0 = (MG.W - W) / 2;
+    MG.box = [Math.max(0, x0 - 70), top - 60, Math.min(MG.W, x0 + W + 70), top + total + 100];
+    const wins = [[0, 0.62], [tOpen - 0.02, tOpen + 0.7], [tPick - 0.02, tPress + 0.06 + pressSettle], [exitAt - 0.02, D]];
+    keys.forEach(k => wins.push([k - 1e-4, k + 1 / MG.fps - 2e-4]));
+    for (let b = 0.53; b < D; b += 0.53) wins.push([b - 1e-4, b + 1 / MG.fps - 2e-4]);
+    MG.active(wins);
+    L = { top };
+  };
+  document.body.offsetHeight;
+  MG.ready = document.fonts.ready.then(() => { if (!L) layout(); });
+
+  MG.frame(t => {
+    if (!L) layout();
+    // bar entrance + focus ring
+    const k = MG.spring(t, 0, { stiffness: 300, damping: 23 });
+    let g = { y: (1 - k) * 40, scale: 0.92 + 0.08 * Math.min(k, 1.02), opacity: 0.3 + 0.7 * MG.range(t, 0, 0.1), blur: (1 - MG.range(t, 0, 0.18)) * 8 };
+    ring.style.opacity = MG.range(t, 0.3, 0.2).toFixed(3);
+    // typing
+    let n = 0; while (n < keys.length && t >= keys[n]) n++;
+    const now = chars.slice(0, n).join('');
+    txt.textContent = now;
+    ph.style.opacity = n ? 0 : 1;
+    // text longer than the field scrolls left so the caret stays in view
+    const off = Math.max(0, typed.scrollWidth - (q.clientWidth - 4 * u));
+    typed.style.transform = off ? `translateX(${(-off).toFixed(1)}px)` : '';
+    const fm = off ? `linear-gradient(90deg, transparent 0, #000 ${22 * u}px)` : '';
+    q.style.webkitMaskImage = fm; q.style.maskImage = fm;
+    const typing = t >= tType0 - 0.05 && t <= tType1 + 0.2;
+    caret.style.opacity = t < 0.3 ? 0 : (typing || Math.floor(t / 0.53 + 1e-6) % 2 === 0) ? 1 : 0;
+    const xk = n ? MG.range(t, keys[0], 0.12) : 0;
+    endX.style.opacity = xk; endMic.style.opacity = 1 - xk;
+    // dropdown
+    if (pn) {
+      const pk = t - tOpen >= openSettle ? 1 : MG.spring(t, tOpen, { stiffness: 320, damping: 26 });
+      MG.set(pn, { y: (1 - Math.min(pk, 1)) * -14 * u, opacity: MG.range(t, tOpen, 0.08) });
+      // the panel unrolls from the top edge instead of popping in as an empty box
+      const rv = MG.ease.outExpo(MG.range(t, tOpen, 0.42));
+      pn.style.clipPath = rv < 1 ? `inset(0 0 ${((1 - rv) * 100).toFixed(2)}% 0 round ${24 * u}px)` : '';
+      rows.forEach((r, i) => {
+        label(r, now);
+        const t0 = tOpen + 0.04 + i * 0.05;
+        MG.set(r.r, { y: (1 - MG.ease.outCubic(MG.range(t, t0, 0.3))) * 14 * u, opacity: MG.range(t, t0, 0.16) });
+        if (i === pick) {
+          r.hl.style.opacity = MG.ease.outCubic(MG.range(t, tPick, 0.16)).toFixed(3);
+          r.hp.style.opacity = (t >= tPress - 0.03 ? MG.range(t, tPress - 0.03, 0.05) * (1 - MG.range(t, tPress + 0.08, 0.3)) : 0).toFixed(3);
+          const ps = t >= tPress - 0.05 && t < tPress + 0.05 ? 1 - 0.035 * MG.ease.outQuad(MG.range(t, tPress - 0.05, 0.07))
+            : t >= tPress + 0.05 ? 0.965 + 0.035 * (t >= tPress + 0.05 + pressSettle ? 1 : MG.spring(t, tPress + 0.05, { stiffness: 420, damping: 16 })) : 1;
+          r.hl.style.transform = r.hp.style.transform = `scale(${ps.toFixed(4)})`;
+          r.lb.style.transform = `scale(${ps.toFixed(4)})`;
+        }
+      });
+    }
+    if (t > exitAt) {
+      const q2 = MG.ease.inCubic(MG.range(t, exitAt, exitDur));
+      g = { y: -q2 * 36, scale: 1 - 0.03 * q2, opacity: 1 - q2, blur: q2 * 6 };
+    }
+    MG.set(grp, g);
+  });
+})();
+</script>
