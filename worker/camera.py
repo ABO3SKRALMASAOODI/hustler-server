@@ -20,7 +20,7 @@ THE CURVES
 Every camera move is `strength * envelope(t)` added to zoom 1, the envelope
 being one of:
 
-  punch     fast expo-out attack (default 0.12 s), hold, hard step out at the
+  punch     fast expo-out attack (default 0.15 s), hold, hard step out at the
             window end (a cut back to the wide — the "second camera" grammar).
             `overshoot` swaps the attack for a back-out that passes the target
             and settles (a slam). ramp_s=0 is the old instant step.
@@ -62,16 +62,19 @@ the frames that actually move pay for the per-frame map.
 """
 
 import functools
+import logging
 import math
 import os
 import zlib
+
+_log = logging.getLogger(__name__)
 
 MODES = ("punch", "ease", "push_in", "pull_out", "landing", "pulse", "shake")
 
 # Default move durations, seconds. Measured on the owner's reference reels:
 # snap zooms land in 100-300 ms (expo-out), landings settle in ~350 ms, beat
 # pulses are ~250-300 ms, impacts shake for a few hundred ms and decay.
-PUNCH_RAMP_S = 0.12
+PUNCH_RAMP_S = 0.15
 PUNCH_OVERSHOOT_RAMP_S = 0.30
 EASE_RAMP_MIN_S, EASE_RAMP_MAX_S = 0.2, 0.5
 PUSH_SOFT_S = 0.5
@@ -96,6 +99,20 @@ ROTATE_MAX_DEG = 15.0
 OVERSHOOT_MAX = 0.5
 # A held framing shorter than this stays on the per-frame filter.
 HOLD_MIN_FRAMES = 3
+# Every `perspective` instance allocates its sampling map at graph init:
+# two int32 per pixel, 16.6 MB at 1080x1920, 66 MB at 3840x2160. The chain
+# is therefore a FIXED small number of instances, not one per move: at most
+# MAX_GROUPS per-frame instances (consecutive clusters share one) plus
+# constant-corner instances for the longest holds, all inside LUT_BUDGET.
+LUT_BUDGET_BYTES = 128 * 1024 * 1024
+MAX_GROUPS = 4
+MAX_INSTANCES = 8
+# Characters of camera filter text one graph may carry. The renderer hands
+# graphs over 96 KiB to ffmpeg through a file (argv caps one argument at
+# 128 KiB), so this bounds the per-frame parse work and graph size, not the
+# exec: a plain eased zoom costs ~1.3 KB, a shake ~6 KB, and ~200 eased
+# zooms (a 10-minute programme punched every 3 s) still fit.
+TEXT_BUDGET = 300000
 ZOOM_MAX = 10.0                # zoompan's own clamp, kept for parity
 
 # cubic matches zoompan's bicubic sharpness (measured gradient energy 6.69
@@ -110,6 +127,10 @@ INTERPOLATION = ("linear" if os.getenv("CAMERA_INTERPOLATION", "").strip()
 _R_ZOOM, _R_ROT, _R_CX, _R_CY = 0, 1, 2, 3
 _R_NX, _R_NI, _R_NW = 4, 5, 6
 _R_U, _R_V = 7, 8
+# Slot 9 holds program time for the whole expression (set first): the time
+# variable is referenced dozens of times per corner, and a corner expression
+# is re-parsed every frame.
+_R_T = 9
 
 
 # --------------------------------------------------------------------------
@@ -119,11 +140,19 @@ _R_U, _R_V = 7, 8
 class X:
     """An ffmpeg expression. Arithmetic with X builds expression text;
     arithmetic on plain floats stays float — so a curve written once is both
-    the emitted filter and its python mirror."""
-    __slots__ = ("s",)
+    the emitted filter and its python mirror.
 
-    def __init__(self, s):
+    `p` is the text's binding: 1 = a sum/difference, 2 = a product/quotient,
+    3 = an atom (number, call, parenthesised group). Operands are wrapped in
+    parentheses only where the parser would otherwise regroup them; ffmpeg's
+    parse_expr re-reads the shorter text as the same tree (+,- and *,/ are
+    left-associative), and expressions are re-parsed for EVERY frame by
+    `perspective`, so the bytes are real time."""
+    __slots__ = ("s", "p")
+
+    def __init__(self, s, p=3):
         self.s = str(s)
+        self.p = p
 
     def __str__(self):
         return self.s
@@ -204,7 +233,15 @@ def _op(op, a, b):
         return b
     if op == "/" and not isinstance(b, X) and float(b) == 1.0:
         return a
-    return X(f"({lit(a)}{op}{lit(b)})")
+    pa = a.p if isinstance(a, X) else 3
+    pb = b.p if isinstance(b, X) else 3
+    if op in ("+", "-"):
+        ta = lit(a)
+        tb = f"({lit(b)})" if (op == "-" and pb <= 1) else lit(b)
+        return X(f"{ta}{op}{tb}", 1)
+    ta = f"({lit(a)})" if pa < 2 else lit(a)
+    tb = f"({lit(b)})" if (pb < 2 or (op == "/" and pb < 3)) else lit(b)
+    return X(f"{ta}{op}{tb}", 2)
 
 
 def _fn(name, *args):
@@ -299,11 +336,18 @@ def pow2(x):
 
 
 def time_var(fps):
-    """Program seconds inside `perspective`. Its `on` counter is 1-BASED
-    (vf_perspective adds 1; zoompan's `on` started at 0), so the old
-    zoompan's on/fps is (on-1)/fps here — every window keeps its exact
-    frames, including the screen-takeover handoff tuned against them."""
-    return X(f"((on-1)/{float(fps):.3f})")
+    """Program seconds inside the camera's corner expressions: a read of
+    slot 9, which every corner expression sets first to (on-1)/fps — see
+    time_statement(). `perspective`'s `on` counter is 1-BASED (zoompan's
+    started at 0), so (on-1)/fps addresses the same frames the old
+    zoompan's on/fps did, including the screen-takeover handoff tuned
+    against them. Terms built on this variable are only valid inside
+    camera_chain / corner_exprs, which is the only place they go."""
+    return X(f"ld({_R_T})")
+
+
+def time_statement(fps):
+    return f"st({_R_T},(on-1)/{float(fps):.3f})"
 
 
 # --------------------------------------------------------------------------
@@ -394,12 +438,6 @@ def value_noise(x, seed):
                 _R_NW, f * f * (3.0 - f * 2.0), with_w))
         return let(_R_NI, floor(xr), with_i)
     return let(_R_NX, x, at)
-
-
-def noise2(x, seed):
-    """Two octaves, normalised to |n| <= 1."""
-    return (value_noise(x, seed) + value_noise(x * 2.03 + 13.7, seed + 5.31)
-            * 0.5) / 1.5
 
 
 def _seed(z, axis):
@@ -565,10 +603,14 @@ def add_shake(out, z, t, a, b):
     env = shake_envelope(z, t, a, b)
     travel = round(s * SHAKE_TRAVEL, 5)
     x = clip(t - a, 0.0, 600.0) * round(hz, 3)
-    out.dx = out.dx + travel * env * noise2(x, _seed(z, "x"))
-    out.dy = out.dy + travel * env * noise2(x, _seed(z, "y"))
+    # One octave per axis: a smooth random walk between fresh lattice
+    # targets every 1/hz s. (A second octave doubled the expression text —
+    # every corner re-parses it every frame — for detail a 30 fps frame
+    # cannot show at impact speeds.)
+    out.dx = out.dx + travel * env * value_noise(x, _seed(z, "x"))
+    out.dy = out.dy + travel * env * value_noise(x, _seed(z, "y"))
     roll = round(math.radians(s * SHAKE_ROLL_DEG), 6)
-    out.rot = out.rot + roll * env * noise2(x * 0.8, _seed(z, "r"))
+    out.rot = out.rot + roll * env * value_noise(x * 0.8, _seed(z, "r"))
     out.amp = out.amp + travel * env
     return out
 
@@ -593,25 +635,74 @@ class Shot:
     """One thing that moves the camera over program window [a, b]: its
     expression Terms (X / str) and, when it has one, `mirror(t)` -> float
     Terms. Shots without a mirror (takeovers, travelling paths, shifts) are
-    rendered correctly but never get the static-hold shortcut."""
-    __slots__ = ("a", "b", "terms", "mirror")
+    rendered correctly but never get the static-hold shortcut. `rebuild`
+    (zoom shots) re-makes the shot from an edited zoom dict — the text
+    budget uses it to shed a shake."""
+    __slots__ = ("a", "b", "terms", "mirror", "rebuild", "src")
 
-    def __init__(self, a, b, terms, mirror=None):
+    def __init__(self, a, b, terms, mirror=None, rebuild=None, src=None):
         self.a, self.b, self.terms, self.mirror = a, b, terms, mirror
+        self.rebuild, self.src = rebuild, src
 
 
 def zoom_shot(z, a, b, fps, targeted=True):
     T = time_var(fps)
     return Shot(a, b, zoom_terms(z, T, a, b, targeted),
                 lambda t, _z=z, _a=a, _b=b: zoom_terms(_z, t, _a, _b,
-                                                       targeted))
+                                                       targeted),
+                rebuild=lambda nz, _a=a, _b=b: zoom_shot(nz, _a, _b, fps,
+                                                         targeted),
+                src=z)
+
+
+def insert_motion_shot(motion, start, dur, fps):
+    """An insert's Ken Burns move as a Shot on the PROGRAM clock: 1 -> 1.25
+    (zoom_in), 1.25 -> 1 (zoom_out), or a 1.15x pan across the frame,
+    constant speed over the insert's own frames (the move starts and ends on
+    its cuts). It rides the shared camera chain instead of a filter per
+    insert: every perspective instance costs a W*H*8-byte map, and a photo
+    montage can carry dozens of inserts."""
+    start = round(float(start), 3)
+    nframes = max(1, int(round(float(dur) * fps)))
+    span = round(nframes / float(fps), 6)
+    end = round(start + float(dur), 3)
+
+    def terms(t):
+        gate = window_gate(t, start, end)
+        prog = clip((t - start) / span, 0.0, 1.0)
+        cx = None
+        if motion == "zoom_in":
+            z = prog * 0.25 * gate
+        elif motion == "zoom_out":
+            z = (0.25 - prog * 0.25) * gate
+        elif motion == "pan_left":
+            z, cx = 0.15 * gate, (0.5 - prog) * gate
+        else:                           # pan_right
+            z, cx = 0.15 * gate, (prog - 0.5) * gate
+        return Terms(z, cx)
+    return Shot(start, end, terms(time_var(fps)), terms)
+
+
+# ffmpeg's expression parser spends one unit of a ~100-deep recursion budget
+# per operator in a flat chain AND per nesting level: 'val+0+0...' fails to
+# parse past ~100 terms (measured). A sum of many moves is therefore emitted
+# as a balanced tree of short chains — depth grows with log(N), never N.
+_CHAIN = 8
+
+
+def _balanced_sum(texts):
+    if len(texts) <= _CHAIN:
+        return "+".join(texts)
+    mid = len(texts) // 2
+    return (f"({_balanced_sum(texts[:mid])})"
+            f"+({_balanced_sum(texts[mid:])})")
 
 
 def _sum(terms):
     terms = [t for t in terms if t is not None and _nonzero(t)]
     if not terms:
         return None
-    return "+".join(lit(t) for t in terms)
+    return _balanced_sum([lit(t) for t in terms])
 
 
 def _filter(in_label, out_label, W, H, exprs, eval_frame, frames, fps):
@@ -619,15 +710,15 @@ def _filter(in_label, out_label, W, H, exprs, eval_frame, frames, fps):
     opts = ":".join(f"{n}='{e}'" for n, e in zip(names, exprs))
     en = ""
     if frames is not None:
-        en = ":enable='" + "+".join(
+        en = ":enable='" + _balanced_sum([
             f"between(t,{(n0 - 0.25) / fps:.4f},{(n1 + 0.25) / fps:.4f})"
-            for n0, n1 in frames) + "'"
+            for n0, n1 in frames]) + "'"
     ev = ":eval=frame" if eval_frame else ""
     return (f"[{in_label}]perspective={opts}:sense=source{ev}"
             f":interpolation={INTERPOLATION}{en}[{out_label}]")
 
 
-def corner_exprs(W, H, terms_list, targeted=True):
+def corner_exprs(W, H, terms_list, targeted=True, fps=None):
     """The eight corner expressions of the camera over summed Terms.
 
     zoom   = clip(1 + sum(z), 1, 10), raised to the cover zoom when the
@@ -659,6 +750,8 @@ def corner_exprs(W, H, terms_list, targeted=True):
     cye = f"clip(0.5+{cy},0,1)" if cy else "0.5"
     moving = bool(rot or amp or dx or dy)
     pre = []
+    if fps is not None:
+        pre.append(time_statement(fps))
     if rot:
         pre.append(f"st({_R_ROT},{rot})")
     if moving:
@@ -777,6 +870,94 @@ def _runs(frames):
     return out
 
 
+def _plan_chain(in_label, out_label, W, H, fps, shots, targeted):
+    pad = 1.0 / fps
+    ident = _identity(W, H)
+    max_inst = max(2, min(MAX_INSTANCES,
+                          LUT_BUDGET_BYTES // max(1, int(W) * int(H) * 8)))
+    clusters = []          # (members, moving frame list, holds)
+    for a, b, members in _clusters(shots, pad):
+        n0 = max(0, int(math.floor((a - pad) * fps)))
+        n1 = int(math.ceil((b + pad) * fps))
+        if not all(s.mirror is not None for s in members):
+            clusters.append((members, list(range(n0, n1 + 1)), []))
+            continue
+        # Runs of frames with identical corners. Identity frames need no
+        # filter; a long enough run is a HOLD whose map can be built once.
+        runs = []
+        for n in range(n0, n1 + 1):
+            cs = corners(W, H, [s.mirror(n / fps) for s in members],
+                         targeted)
+            if max(abs(p - q) for p, q in zip(cs, ident)) < 1e-9:
+                continue
+            if runs and runs[-1][1] == n - 1 and \
+                    max(abs(p - q) for p, q in zip(cs, runs[-1][2])) < 1e-7:
+                runs[-1][1] = n
+            else:
+                runs.append([n, n, cs])
+        moving, holds = [], []
+        for r in runs:
+            if r[1] - r[0] + 1 >= HOLD_MIN_FRAMES:
+                holds.append(r)
+            else:
+                moving.extend(range(r[0], r[1] + 1))
+        clusters.append((members, moving, holds))
+    clusters = [c for c in clusters if c[1] or c[2]]
+    if not clusters:
+        return [f"[{in_label}]null[{out_label}]"]
+    n_groups = min(len(clusters), MAX_GROUPS, max_inst)
+    # The longest holds get their own build-once instance; every other held
+    # frame is served by its group's per-frame instance (same corners).
+    all_holds = sorted((h for c in clusters for h in c[2]),
+                       key=lambda h: h[1] - h[0], reverse=True)
+    own = {id(h) for h in all_holds[:max(0, max_inst - n_groups)]}
+    # Consecutive clusters share a per-frame instance, balanced by how much
+    # expression text each carries (that text is parsed every frame).
+    weights = [sum(len(lit(s.terms.z)) + len(lit(s.terms.rot))
+                   + len(lit(s.terms.dx)) + 1 for s in c[0])
+               for c in clusters]
+    target = sum(weights) / n_groups
+    groups, acc = [[]], 0.0
+    for c, w in zip(clusters, weights):
+        if groups[-1] and acc + w / 2.0 > target * len(groups) and \
+                len(groups) < n_groups:
+            groups.append([])
+        groups[-1].append(c)
+        acc += w
+    plan = []                           # (exprs, eval_frame, frame runs)
+    for group in groups:
+        frames = []
+        for members, moving, holds in group:
+            frames.extend(moving)
+            for h in holds:
+                if id(h) not in own:
+                    frames.extend(range(h[0], h[1] + 1))
+        if frames:
+            exprs = corner_exprs(
+                W, H, [s.terms for c in group for s in c[0]], targeted, fps)
+            plan.append((exprs, True, _runs(sorted(frames))))
+    for h in all_holds:
+        if id(h) in own:
+            plan.append(([f"{v:.6f}" for v in h[2]], False, [[h[0], h[1]]]))
+    out, cur = [], in_label
+    for k, (exprs, ev, runs) in enumerate(plan):
+        nxt = out_label if k == len(plan) - 1 else f"{out_label}_c{k}"
+        out.append(_filter(cur, nxt, W, H, exprs, ev, runs, fps))
+        cur = nxt
+    return out
+
+
+def _sheddable(shot, key):
+    if not (shot.rebuild and shot.src):
+        return False
+    if key == "shake":
+        return shake_amount(shot.src) > 0
+    if key == "curve":
+        return not ((shot.src.get("mode") or "punch") == "punch"
+                    and _f(shot.src.get("ramp_s")) == 0.0)
+    return bool(shot.src.get(key))
+
+
 def camera_chain(in_label, out_label, W, H, fps, shots, targeted=True,
                  always=False):
     """The shared camera as a chain of `perspective` filters.
@@ -792,54 +973,62 @@ def camera_chain(in_label, out_label, W, H, fps, shots, targeted=True,
 
     always=True (an aspect shift's push, which can hold anywhere): one
     filter over everything, evaluated every frame — the old shape.
-    Returns the filter strings, ending on out_label.
+
+    Every corner expression is re-parsed per frame, so the text is bounded
+    (TEXT_BUDGET): past it the longest shakes are shed first (the zoom itself
+    stays), then rolls, then eased curves become hard steps at the same
+    framing — and the renderer's log says so. A render that loses a shake
+    beats a render that cannot start. Returns the filter strings, ending on
+    out_label.
     """
     fps = float(fps)
     if not shots:
         return [f"[{in_label}]null[{out_label}]"]
     if always:
-        exprs = corner_exprs(W, H, [s.terms for s in shots], targeted)
+        exprs = corner_exprs(W, H, [s.terms for s in shots], targeted, fps)
         return [_filter(in_label, out_label, W, H, exprs, True, None, fps)]
-    pad = 1.0 / fps
-    plan = []                           # (exprs, eval_frame, frame runs)
-    ident = _identity(W, H)
-    for a, b, members in _clusters(shots, pad):
-        n0 = max(0, int(math.floor((a - pad) * fps)))
-        n1 = int(math.ceil((b + pad) * fps))
-        exprs = corner_exprs(W, H, [s.terms for s in members], targeted)
-        if not all(s.mirror is not None for s in members):
-            plan.append((exprs, True, [[n0, n1]]))
-            continue
-        # Runs of frames with identical corners. Identity frames need no
-        # filter; a run of >= HOLD_MIN_FRAMES is a hold (map built once);
-        # everything else moves and evaluates its expressions per frame.
-        runs = []
-        for n in range(n0, n1 + 1):
-            cs = corners(W, H, [s.mirror(n / fps) for s in members],
-                         targeted)
-            if max(abs(p - q) for p, q in zip(cs, ident)) < 1e-9:
-                continue
-            if runs and runs[-1][1] == n - 1 and \
-                    max(abs(p - q) for p, q in zip(cs, runs[-1][2])) < 1e-7:
-                runs[-1][1] = n
-            else:
-                runs.append([n, n, cs])
-        moving = []
-        for r0, r1, cs in runs:
-            if r1 - r0 + 1 >= HOLD_MIN_FRAMES:
-                plan.append(([f"{v:.6f}" for v in cs], False, [[r0, r1]]))
-            else:
-                moving.extend(range(r0, r1 + 1))
-        if moving:
-            plan.append((exprs, True, _runs(moving)))
-    out, cur = [], in_label
-    for k, (exprs, ev, runs) in enumerate(plan):
-        nxt = out_label if k == len(plan) - 1 else f"{out_label}_c{k}"
-        out.append(_filter(cur, nxt, W, H, exprs, ev, runs, fps))
-        cur = nxt
-    if not out:
-        return [f"[{in_label}]null[{out_label}]"]
+    shots = list(shots)
+    out = _plan_chain(in_label, out_label, W, H, fps, shots, targeted)
+    # Shed texture, never framing: shakes first (the longest text by far),
+    # then rolls, then — only for an absurdly dense pass — the eased curves
+    # themselves (hard steps at the same framing). A zoom is never dropped.
+    # Shots are shed in batches sized to the overflow (each costs ~8x its
+    # term text, once per corner) and the chain re-planned once per batch.
+    for keys in (("shake", "shake_hz", "shake_decay"), ("rotate",),
+                 ("curve",)):
+        for _round in range(8):
+            over = sum(len(f) for f in out) - TEXT_BUDGET
+            if over <= 0:
+                break
+            cand = sorted(((k, s) for k, s in enumerate(shots)
+                           if _sheddable(s, keys[0])),
+                          key=lambda ks: -_term_text(ks[1].terms))
+            if not cand:
+                break
+            saved = 0
+            for k, s in cand:
+                z = {key: v for key, v in s.src.items() if key not in keys}
+                if keys[0] == "shake" and z.get("mode") == "shake":
+                    z["mode"], z["strength"], z["ramp_s"] = "punch", 0.0, 0.0
+                if keys[0] == "curve":
+                    z = {key: v for key, v in z.items()
+                         if key not in ("overshoot", "mode")}
+                    z["ramp_s"] = 0.0
+                _log.warning("camera text over budget: dropped %s on zoom "
+                             "%s", keys[0], s.src.get("id"))
+                shots[k] = s.rebuild(z)
+                saved += 8 * max(0, _term_text(s.terms)
+                                 - _term_text(shots[k].terms))
+                if saved >= over * 1.1:
+                    break
+            out = _plan_chain(in_label, out_label, W, H, fps, shots,
+                              targeted)
     return out
+
+
+def _term_text(tm):
+    return sum(len(lit(v)) for v in (tm.z, tm.rot, tm.dx, tm.dy, tm.amp)
+               if v is not None and _nonzero(v))
 
 
 def describe(z):

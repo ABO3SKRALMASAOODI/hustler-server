@@ -924,7 +924,7 @@ class ZoomPathPoint(BaseModel):
 
 class ZoomItem(BaseModel):
     """A zoom over a FINAL-program time range (output seconds). mode:
-    'punch' (default: a fast expo-out snap in — 0.12 s — held, then a hard
+    'punch' (default: a fast expo-out snap in — 0.15 s — held, then a hard
     cut back out at the window end), 'ease' (smootherstep ramps in and out
     inside the window), 'push_in' / 'pull_out' (continuous Ken Burns drift
     across the whole window, with a soft start / soft landing), 'landing'

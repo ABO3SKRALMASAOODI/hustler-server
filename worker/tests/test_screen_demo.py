@@ -702,13 +702,15 @@ def test_path_zoom_emits_an_eased_interpolation():
         "ease": "cubic_in_out",
         "path": [{"f": 0.0, "cx": 0.2, "cy": 0.5, "s": 0.0},
                  {"f": 1.0, "cx": 0.8, "cy": 0.5, "s": 0.8}]}]}})
-    # The camera is the sub-pixel perspective chain now; its frame counter
-    # is 1-based, so program time reads (on-1)/fps where zoompan read on/fps.
+    # The camera is the sub-pixel perspective chain now. Program time is
+    # slot 9, set first in every corner expression to (on-1)/fps (the
+    # filter's frame counter is 1-based; zoompan read on/fps).
     assert "perspective=" in g and "zoompan" not in g
+    assert "st(9,(on-1)/30.000)" in g
     # the cubic Hermite curve, applied to the segment's own clip()
-    assert "(3-2*(clip((((on-1)/30.000)-1.000)/4.000,0,1)))" in g, g
+    assert "(3-2*(clip((ld(9)-1.000)/4.000,0,1)))" in g, g
     # the STRENGTH interpolates too (this is what 'path' adds over 'follow')
-    assert "0.8000*" in g and "between(((on-1)/30.000),1.000,5.000)" in g
+    assert "0.8000*" in g and "between(ld(9),1.000,5.000)" in g
 
 
 def test_linear_ease_emits_no_curve():
@@ -748,8 +750,7 @@ def test_aspect_shift_zoom_rides_the_existing_zoompan():
                           "duration_s": 0.5, "zoom": True}]}})
     # One always-on camera filter carries the shift's push AND the zoom.
     assert g.count("perspective=") == 1 and "zoompan" not in g, g
-    assert "(0.3*" in g, g
-    assert "gte(((on-1)/30.000),1)*lt(((on-1)/30.000),3)" in g, g
+    assert "0.3*" in g and "gte(ld(9),1)*lt(ld(9),3)" in g, g
 
 
 def test_both_axes_can_shift_without_stranding_a_split_output():

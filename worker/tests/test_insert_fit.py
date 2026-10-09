@@ -182,12 +182,15 @@ def test_video_insert_motion_is_rendered_locally_without_timing_changes():
     normalized = _edl(ins)
     assert normalized["inserts"][0]["motion"] == "pan_left"
     g = _graph(normalized, [(1, normalized["inserts"][0], True)])
-    # Sub-pixel Ken Burns: a perspective camera at 1.15x whose aim slides
-    # from the right edge to the left over the insert's 120 frames
-    # (perspective's frame counter is 1-based, hence on-1).
-    assert "[v_insn0]perspective=" in g and "zoompan" not in g
-    assert "clip(1+0.15,1,10)" in g
-    assert "clip(0.5+(0.5-((on-1)/120)),0,1)" in g, g
+    # Sub-pixel Ken Burns on the shared camera: a 1.15x pan on the insert's
+    # own program window (10-14 s, 120 frames), its aim sliding from the
+    # right edge to the left; the block itself carries no geometry filter.
+    assert "zoompan" not in g and "[v_ins0]" in g and "[v_insn0]" not in g
+    assert "perspective=" in g
+    assert "0.15*gte(ld(9),10)*lt(ld(9),14)" in g, g
+    assert "(0.5-clip((ld(9)-10)/4,0,1))*gte(ld(9),10)" in g, g
+    # it runs on exactly the insert's frames 300-419 (+-1/4 frame)
+    assert "between(t,9.9917,13.9750)" in g, g
     # The same four-second source/audio windows remain authoritative.
     assert "trim=start=2.000:end=6.000" in g
     assert "atrim=start=2.000:end=6.000" in g

@@ -237,7 +237,8 @@ def _frames(z, extra=0.2):
 def test_emitted_corners_equal_the_python_mirror(z):
     T = camera.time_var(FPS)
     a, b = z["start"], z["end"]
-    exprs = camera.corner_exprs(W, H, [camera.zoom_terms(z, T, a, b)])
+    exprs = camera.corner_exprs(W, H, [camera.zoom_terms(z, T, a, b)],
+                                fps=FPS)
     for n in _frames(z):
         want = camera.corners(W, H, [camera.zoom_terms(z, n / FPS, a, b)])
         got = [ff_eval(e, {"on": n + 1}) for e in exprs]
@@ -250,7 +251,8 @@ def test_overlapping_shots_sum_like_the_single_filter():
     T = camera.time_var(FPS)
     zs = [ZOOM_CASES[1], ZOOM_CASES[3], ZOOM_CASES[10]]
     exprs = camera.corner_exprs(
-        W, H, [camera.zoom_terms(z, T, z["start"], z["end"]) for z in zs])
+        W, H, [camera.zoom_terms(z, T, z["start"], z["end"]) for z in zs],
+        fps=FPS)
     for n in range(20, 100, 3):
         t = n / FPS
         want = camera.corners(W, H, [camera.zoom_terms(
@@ -265,7 +267,7 @@ def test_expressions_stay_finite_far_outside_their_window():
     T = camera.time_var(FPS)
     for z in ZOOM_CASES:
         exprs = camera.corner_exprs(W, H, [camera.zoom_terms(
-            z, T, z["start"], z["end"])])
+            z, T, z["start"], z["end"])], fps=FPS)
         for n in (0, 1, int(600 * FPS), int(3600 * FPS)):
             got = [ff_eval(e, {"on": n + 1}) for e in exprs]
             assert all(math.isfinite(g) for g in got), (z["id"], n)
@@ -277,7 +279,7 @@ def test_no_semicolons_reach_the_filtergraph():
     T = camera.time_var(FPS)
     for z in ZOOM_CASES:
         for e in camera.corner_exprs(W, H, [camera.zoom_terms(
-                z, T, z["start"], z["end"])]):
+                z, T, z["start"], z["end"])], fps=FPS):
             assert ";" not in e and "'" not in e and ":" not in e
 
 
@@ -754,3 +756,175 @@ def test_stitch_samples_the_camera_curve_when_a_proof_clips_a_zoom():
     (late,) = stitch._clip_program_zooms([punch], 3.0, 10.0)
     assert late["ramp_s"] == 0.0 and late.get("mode") is None
     assert stitch._zoom_strength_at(punch, 3.0) == pytest.approx(0.3)
+
+
+def test_the_camera_text_budget_sheds_shakes_never_zooms(caplog,
+                                                         monkeypatch):
+    """Corner expressions are re-parsed every frame, so the camera text is
+    bounded. Over budget, a reel that shakes on every beat sheds its longest
+    shakes first — never a zoom's framing."""
+    monkeypatch.setattr(camera, "TEXT_BUDGET", 60000)
+    zooms = []
+    for k in range(40):
+        z = {"id": f"z{k}", "start": 1.5 * k, "end": 1.5 * k + 1.2,
+             "strength": 0.15, "cx": 0.6, "cy": 0.3}
+        if k % 2:
+            z.update(shake=0.6)
+        zooms.append(z)
+    shots = [camera.zoom_shot(z, z["start"], z["end"], FPS) for z in zooms]
+    with caplog.at_level("WARNING"):
+        chain = camera.camera_chain("in", "out", 1080, 1920, FPS, shots)
+    total = sum(len(f) for f in chain)
+    assert total <= camera.TEXT_BUDGET
+    assert "dropped shake" in caplog.text
+    # a bounded number of instances (each allocates a W*H*8-byte map) ...
+    assert len(chain) <= camera.MAX_INSTANCES
+    # ... and every zoom still frames its hold: on a held frame exactly one
+    # filter is enabled and its corners are the zoom's.
+    for z in zooms:
+        n = int((z["start"] + 0.8) * FPS)
+        on = [f for f in chain if _enabled(f, n / FPS)]
+        assert len(on) == 1, z["id"]
+        want = camera.corners(1080, 1920, [camera.zoom_terms(
+            dict(z, shake=None), n / FPS, z["start"], z["end"])])
+        got = _corner_values(on[0], n)
+        assert max(abs(a - b) for a, b in zip(got, want)) < 1e-4, z["id"]
+
+
+@needs_ffmpeg
+def test_a_dense_premium_camera_pass_renders(workdir):
+    """Forty moves (punches, landings, pulses, pushes, shakes) through the
+    real renderer on a 60 s programme: the graph parses and runs."""
+    dur = 60.0
+    path = os.path.join(workdir, "tex60.mkv")
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i",
+                    f"testsrc2=s={RW}x{RH}:r=30:d={dur}", "-f", "lavfi",
+                    "-i", f"anullsrc=r=48000:cl=stereo:d={dur}",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac",
+                    "-shortest", path], check=True)
+    modes = ["punch", "landing", "pulse", "ease", "push_in", "shake"]
+    zooms = []
+    for k in range(40):
+        z = {"id": f"z{k}", "start": round(1.4 * k + 0.5, 2),
+             "end": round(1.4 * k + 1.7, 2), "strength": 0.15,
+             "mode": modes[k % len(modes)], "cx": 0.55, "cy": 0.35}
+        if z["mode"] == "punch" and k % 4 == 0:
+            z.update(overshoot=0.1, rotate=1.5, shake=0.4)
+        zooms.append(z)
+    edl = validate_edl({"keep": [[0.0, dur]], "effects": {"zooms": zooms}},
+                       dur).model_dump()
+    g = renderer.build_filtergraph(
+        edl, dur, True, Timeline(edl["keep"], []), None, [],
+        {"video": {"duration": dur}, "words": [], "sentences": []},
+        preview=False, W=RW, H=RH, fps=FPS)
+    assert g.count("perspective=") <= camera.MAX_INSTANCES
+    r = subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", path,
+         *renderer._graph_args(g, workdir), "-map", "[vout]",
+         "-f", "rawvideo", "-pix_fmt", "gray", "pipe:1",
+         "-map", "[aout]", "-f", "null", "-"], capture_output=True)
+    assert r.returncode == 0, r.stderr.decode()[-2000:]
+    assert len(r.stdout) == int(dur * FPS) * RW * RH
+
+
+@needs_ffmpeg
+def test_image_insert_ken_burns_is_sub_pixel_and_stays_on_its_frames(
+        workdir):
+    """A still is where zoompan's whole-pixel crop shimmered worst. The
+    insert's push now rides the shared camera on the insert's own program
+    window: monotonic on its frames, untouched footage either side."""
+    from PIL import Image
+    dur = 2.0
+    src = _clip_path(workdir, "tex", dur)
+    img = os.path.join(workdir, "lines.png")
+    Image.fromarray(_card("lines")).convert("RGB").save(img)
+    ins = {"id": "i1", "kind": "image", "asset_key": "lines.png",
+           "at_output_s": 1.0, "duration_s": 3.0, "motion": "zoom_in",
+           "fit": "crop"}
+    edl = validate_edl({"keep": [[0.0, 1.0], [1.0, dur]], "inserts": [ins]},
+                       dur).model_dump()
+    tl = Timeline(edl["keep"], edl["inserts"])
+    g = renderer.build_filtergraph(
+        edl, dur, True, tl, None, [],
+        {"video": {"duration": dur}, "words": [], "sentences": []},
+        preview=False, W=RW, H=RH, fps=FPS,
+        insert_inputs=[(1, edl["inserts"][0], False)], silence_idx=2)
+    assert "zoompan" not in g and g.count("perspective=") == 1
+    r = subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", src,
+         "-loop", "1", "-t", "3.000", "-r", f"{FPS:.3f}", "-i", img,
+         "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
+         "-filter_complex", g, "-map", "[vout]", "-f", "rawvideo",
+         "-pix_fmt", "gray", "pipe:1", "-map", "[aout]", "-f", "null", "-"],
+        capture_output=True)
+    assert r.returncode == 0, r.stderr.decode()[-2000:]
+    frames = np.frombuffer(r.stdout, np.uint8).reshape(-1, RH, RW)
+    plain = _render_gray(src, {"keep": [[0.0, dur]]}, dur)[0]
+    # footage before (0-1 s) and after (4-5 s) the insert is untouched
+    assert np.array_equal(frames[10], plain[10])
+    assert np.array_equal(frames[int(4.5 * FPS)], plain[int(1.5 * FPS)])
+    xs, prev = [], 110.0
+    for f in frames[int(1.0 * FPS):int(4.0 * FPS) - 1].astype(np.float64):
+        row = f[RH // 2 - 100:RH // 2 + 100].mean(axis=0)
+        lo = int(prev) - 12
+        seg = np.clip(row[lo:lo + 24] - 60, 0, None)
+        prev = lo + float((seg * np.arange(24)).sum() / max(seg.sum(), 1e-9))
+        xs.append(prev)
+    v = np.diff(np.array(xs))
+    assert xs[-1] < xs[0] - 5, "the still never pushed in"
+    assert (v > 0.02).sum() == 0 and v.std() < 0.08, (v.min(), v.std())
+
+
+def test_an_absurdly_dense_pass_degrades_to_steps_not_to_a_failed_render(
+        caplog, monkeypatch):
+    monkeypatch.setattr(camera, "TEXT_BUDGET", 120000)
+    zooms = [{"id": f"z{k}", "start": 0.7 * k, "end": 0.7 * k + 0.6,
+              "strength": 0.15, "mode": "ease", "cx": 0.6, "cy": 0.3}
+             for k in range(160)]
+    shots = [camera.zoom_shot(z, z["start"], z["end"], FPS) for z in zooms]
+    with caplog.at_level("WARNING"):
+        chain = camera.camera_chain("in", "out", 1080, 1920, FPS, shots)
+    assert sum(len(f) for f in chain) <= camera.TEXT_BUDGET
+    assert "dropped curve" in caplog.text
+    assert len(chain) <= camera.MAX_INSTANCES
+
+
+@needs_ffmpeg
+def test_a_graph_past_the_argv_limit_goes_through_a_file(workdir):
+    """Linux refuses an argv string over 128 KiB before ffmpeg even starts;
+    a long, densely zoomed programme must still render."""
+    small = renderer._graph_args("[0:v]null[vout]", workdir)
+    assert small == ["-filter_complex", "[0:v]null[vout]"]
+    # a long but parseable expression (balanced: ffmpeg's parser refuses
+    # flat operator chains past ~100)
+    big = "[0:v]drawbox=w=2:h=2:enable='" \
+        + camera._balanced_sum(["0"] * 40000) + "'[vout]"
+    assert len(big) > renderer.GRAPH_ARG_MAX_BYTES
+    flag, path = renderer._graph_args(big, workdir)
+    assert flag in ("-/filter_complex", "-filter_complex_script")
+    assert open(path).read() == big
+    r = subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i",
+                        "testsrc2=s=64x64:d=0.1", flag, path, "-map",
+                        "[vout]", "-f", "null", "-"], capture_output=True)
+    assert r.returncode == 0, r.stderr.decode()[-500:]
+
+
+@needs_ffmpeg
+def test_hundreds_of_moves_still_parse(workdir):
+    """ffmpeg's expression parser gives up on a flat chain of ~100 '+' terms
+    (measured), and a per-frame group carries every move it serves: sums are
+    balanced trees. A 10-minute programme punched every 2 s must parse."""
+    zooms = [{"id": f"z{k}", "start": 2.0 * k, "end": 2.0 * k + 1.5,
+              "strength": 0.15, "mode": ("ease", "punch", "landing")[k % 3],
+              "cx": 0.55, "cy": 0.3} for k in range(300)]
+    shots = [camera.zoom_shot(z, z["start"], z["end"], FPS) for z in zooms]
+    chain = camera.camera_chain("0:v", "vout", 64, 112, FPS, shots)
+    path = os.path.join(workdir, "many.txt")
+    with open(path, "w") as fh:
+        fh.write(";".join(chain))
+    flag = renderer._graph_file_flag()
+    r = subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i",
+                        "testsrc2=s=64x112:r=30:d=0.5", flag, path,
+                        "-map", "[vout]", "-f", "null", "-"],
+                       capture_output=True)
+    assert r.returncode == 0, r.stderr.decode()[-800:]

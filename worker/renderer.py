@@ -70,6 +70,44 @@ def _measure_render_detail(name):
             detail[name] = round(detail.get(name, 0) + time.monotonic() - started, 4)
 
 
+# A filtergraph travels as ONE argv string, and Linux caps a single argument
+# at 128 KiB (MAX_ARG_STRLEN) — past it exec fails before ffmpeg starts. The
+# sub-pixel camera writes per-frame corner expressions, so a long programme
+# with a zoom every few seconds can cross that. Long graphs therefore go
+# through a file: `-/filter_complex FILE` on ffmpeg >= 7 (the shipped static
+# build), `-filter_complex_script FILE` on the older apt fallback build.
+GRAPH_ARG_MAX_BYTES = 96 * 1024
+
+
+def _graph_args(graph, workdir):
+    if len(graph.encode("utf-8")) <= GRAPH_ARG_MAX_BYTES:
+        return ["-filter_complex", graph]
+    path = os.path.join(workdir, f"filtergraph-{uuid.uuid4().hex[:12]}.txt")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(graph)
+    return [_graph_file_flag(), path]
+
+
+_GRAPH_FILE_FLAG = []
+
+
+def _graph_file_flag():
+    if not _GRAPH_FILE_FLAG:
+        flag = "-/filter_complex"
+        try:
+            import subprocess
+            out = subprocess.run(["ffmpeg", "-hide_banner", "-version"],
+                                 capture_output=True, text=True,
+                                 timeout=30).stdout
+            m = re.search(r"ffmpeg version n?(\d+)\.", out)
+            if m and int(m.group(1)) < 7:
+                flag = "-filter_complex_script"
+        except Exception:
+            pass
+        _GRAPH_FILE_FLAG.append(flag)
+    return _GRAPH_FILE_FLAG[0]
+
+
 def _render_media_run(cmd, **kwargs):
     # Includes ranged network reads made inside FFmpeg; never call this
     # "codec time". These detail counters are subsets of the stage walls.
@@ -1902,6 +1940,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     # insert blocks: trim to their window (source_start_s picks where in
     # the clip the window starts), normalize like everything else
     sil_i = 0
+    insert_motion = []                  # (insert index, motion, duration)
     for j, (idx, item, ins_audio) in enumerate(insert_inputs):
         dur = float(item["duration_s"])
         off = float(item.get("source_start_s") or 0.0) \
@@ -1952,32 +1991,19 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         # frame per input frame, so this keeps a still alive and adds a push or
         # pan to video B-roll without changing its duration, rate, or audio.
         # No motion keeps the legacy graph byte-identical.
+        # Local camera motion on any insert (a push or pan that keeps a
+        # still alive). It is NOT applied here per block any more: it rides
+        # the shared sub-pixel camera below as a Shot on the insert's own
+        # program window (zoompan's whole-pixel crop stair-stepped every
+        # edge of a photo through the push, and a perspective filter per
+        # insert would cost a full-frame sampling map each). No motion keeps
+        # the legacy block graph byte-identical.
         motion = item.get("motion")
-        norm_out = f"v_insn{j}" if motion else f"v_ins{j}"
-        _normalize_video(parts, ins_in, norm_out, W, H, fps,
+        if motion:
+            insert_motion.append((j, motion, dur))
+        _normalize_video(parts, ins_in, f"v_ins{j}", W, H, fps,
                          imode, f"i{j}", seg_dur=dur,
                          picture=(edl.get("frame") or {}).get("picture"))
-        if motion:
-            # Sub-pixel Ken Burns (worker/camera.py): a still is where
-            # zoompan's whole-pixel crop shimmered worst — every edge in a
-            # photo stair-stepped through the push. Constant speed on
-            # purpose: the move starts and ends on the block's own cuts.
-            # perspective's frame counter is 1-based, hence (on-1).
-            nframes = max(1, int(round(dur * fps)))
-            prog = camera.X(f"((on-1)/{nframes})")
-            cxt = None
-            if motion == "zoom_in":
-                zt = prog * 0.25
-            elif motion == "zoom_out":
-                zt = 0.25 - prog * 0.25
-            elif motion == "pan_left":
-                zt, cxt = 0.15, 0.5 - prog
-            else:                       # pan_right
-                zt, cxt = 0.15, prog - 0.5
-            parts.extend(camera.camera_chain(
-                norm_out, f"v_ins{j}", W, H, fps,
-                [camera.Shot(0.0, dur, camera.Terms(zt, cxt))],
-                always=True))
         if ins_audio:
             if abs(rate - 1.0) > 1e-6:
                 parts.append(
@@ -2491,6 +2517,15 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                       f"*gt({tvar},{b:.3f})*lt({tvar},{le:.3f})")
         shots.append(camera.Shot(a, max(b, le),
                                  camera.Terms("+".join(zt), cxt, cyt)))
+    # Insert Ken Burns moves, on each insert's program window (see the
+    # insert loop above). Their pans aim, so they need the targeted maths;
+    # targeted with no aim terms is identical to untargeted.
+    if insert_motion:
+        positions = tl.insert_positions()
+        for j, motion, dur in insert_motion:
+            shots.append(camera.insert_motion_shot(
+                motion, positions[j][0], dur, fps))
+        zoom_targeted = True
     shift_w, shift_h, shift_z = ([], [], [])
     if shifts:
         shift_w, shift_h, shift_z = screenframe.shift_tracks(
@@ -3286,7 +3321,7 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
         expected_out_s = (tl.out_duration
                           + music_tail_ext(edl, tl.out_duration) + outro_s)
         cmd = ["ffmpeg", "-y", *extra_inputs,
-               "-filter_complex", graph, "-map", "[aout]",
+               *_graph_args(graph, workdir), "-map", "[aout]",
                "-c:a", "aac", "-b:a", "128k" if preview else "192k",
                "-t", f"{expected_out_s:.3f}", "-movflags", "+faststart",
                "-progress", "pipe:1", "-nostats", out_path]
@@ -3325,7 +3360,7 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
            *(["-filter_complex_threads", "2"] if _base_stage else []),
            *_stable_video_inputs(extra_inputs, decoder_threads=(
                4 if _source_stage else 1 if _base_stage else None)),
-           "-filter_complex", graph, "-map", "[vout]", "-map", "[aout]",
+           *_graph_args(graph, workdir), "-map", "[vout]", "-map", "[aout]",
            *encode, *keyframes, *_output_clock(fps),
            "-t", f"{expected_out_s:.6f}",
            *([] if _base_stage else ["-movflags", "+faststart"]),
@@ -4038,7 +4073,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         expected_out_s = (tl.out_duration
                           + music_tail_ext(edl, tl.out_duration) + outro_s)
         cmd = ["ffmpeg", "-y", *main_input_args, *extra_inputs,
-               "-filter_complex", graph, "-map", "[aout]",
+               *_graph_args(graph, workdir), "-map", "[aout]",
                "-c:a", "aac", "-b:a", "128k" if preview else "192k",
                "-t", f"{expected_out_s:.3f}",
                "-movflags", "+faststart",
@@ -4064,7 +4099,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     expected_out_s = (tl.out_duration
                       + music_tail_ext(edl, tl.out_duration) + outro_s)
     cmd = ["ffmpeg", "-y", *_stable_video_inputs(main_input_args + extra_inputs),
-           "-filter_complex", graph, "-map", "[vout]", "-map", "[aout]",
+           *_graph_args(graph, workdir), "-map", "[vout]", "-map", "[aout]",
            *encode, *_output_clock(fps), "-t", f"{expected_out_s:.3f}",
            "-movflags", "+faststart",
            "-progress", "pipe:1", "-nostats", out_path]

@@ -183,28 +183,29 @@ def _graph(edl_dict, dur=10.0):
 def test_follow_renders_an_interpolated_centre():
     g = _graph(FOLLOW)
     # The camera is a sub-pixel perspective chain; program time inside it is
-    # (on-1)/fps (its frame counter is 1-based, zoompan's was 0-based).
+    # slot 9 = (on-1)/fps (its frame counter is 1-based, zoompan's was
+    # 0-based).
     assert "perspective=" in g and "zoompan" not in g
     # The x centre must MOVE: a clip() ramp keyed on the first leg's window.
-    assert "clip((((on-1)/30.000)-1.000)/2.000,0,1)" in g, g
+    assert "clip((ld(9)-1.000)/2.000,0,1)" in g, g
     # …and it must be a delta from the opening position, not an absolute set.
     assert "0.6000*clip" in g or "0.600*clip" in g, g
     # The y centre only moves on the second leg, so its ramp starts at 3s.
-    assert "clip((((on-1)/30.000)-3.000)/2.000,0,1)" in g, g
+    assert "clip((ld(9)-3.000)/2.000,0,1)" in g, g
 
 
 def test_follow_holds_the_centre_outside_its_window():
     """Every other zoom sums onto 0.5; a follow that forgot its between()
     would drag the whole video off-centre for its entire length."""
     g = _graph(FOLLOW)
-    assert "between(((on-1)/30.000),1.000,5.000)" in g
+    assert "between(ld(9),1.000,5.000)" in g
 
 
 def test_a_plain_zoom_graph_keeps_its_framing_and_stays_untargeted():
     """A legacy punch (no mode, no target) still frames the CENTRE at its
     strength and never picks up a travelling term. Round camera changed the
     emitted text on purpose — the sub-pixel perspective camera replaced
-    zoompan and the punch now snaps in on a 0.12 s expo curve instead of an
+    zoompan and the punch now snaps in on a 0.15 s expo curve instead of an
     instant step — so this pins the framing, not the old characters (render
     caches are keyed on EDL version, not on graph text)."""
     legacy = {"keep": [[0.0, 10.0]],
