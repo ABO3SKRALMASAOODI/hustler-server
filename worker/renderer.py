@@ -4866,7 +4866,13 @@ def _caption_index_fp(edl_json, index):
         return None
     h = hashlib.sha256()
     h.update(b"caption-compiler:program-end-clamp-v1;")
-    for w in (index.get("words") or []):
+    words = index.get("words") or []
+    # Renders burned before split-token rejoining showed whisper's tails
+    # ("-player", a lone "%"). Only transcripts that contain one change
+    # their fingerprint, so every other caption render keeps its cache.
+    if caplib.has_split_words(words):
+        h.update(b"caption-words:rejoin-v1;")
+    for w in words:
         h.update(f"{w.get('w', '')}|{w.get('t0')}|{w.get('t1')};"
                  .encode("utf-8"))
     return h.hexdigest()[:16]

@@ -444,6 +444,209 @@ def _attach_subject_matte(ctx, edl, item, bbox):
     return _behind_report(stats, edl, item), None
 
 
+# ── caption integrity ─────────────────────────────────────────────────────
+# A graphic may mute the captions only when it carries the words being
+# spoken. Showcase review: a '140 characters' counter muted the captions
+# over the punchline's SETUP ("flying cars and all we got was"), so a
+# sound-off viewer read "they promised" and then a number; and a kicker
+# typed from memory ("so we can deal in") contradicted the audio ("so that
+# we can deal in"). Both checks are cheap transcript comparisons. They never
+# refuse a write: the reply NOTEs what the viewer would miss and the fix.
+
+_TOKEN_RE = re.compile(r"[^\W_]+(?:['’][^\W_]+)*")
+# Function words do not decide whether a graphic carries what was said.
+_FUNCTION_WORDS = frozenset((
+    "a an the and or but so to of in on at for with from by as is are was were be been "
+    "being am i i'm you he she it it's its we they me him her us them my your his our "
+    "their this that these those do does did not no yes just very really than then there "
+    "here what which who when where why how if into out up down over about like um uh oh "
+    "okay ok yeah well also too can could would should will might must have has had all "
+    "some any you're we're they're that's there's i've i'd you've").split())
+_NUMBER_WORDS = {w: str(i) for i, w in enumerate(
+    "zero one two three four five six seven eight nine ten eleven twelve thirteen "
+    "fourteen fifteen sixteen seventeen eighteen nineteen twenty".split())}
+_NUMBER_WORDS.update({"thirty": "30", "forty": "40", "fifty": "50", "sixty": "60",
+                      "seventy": "70", "eighty": "80", "ninety": "90", "hundred": "100"})
+# Row fields that position or style a row rather than print words.
+_NON_TEXT_FIELDS = frozenset(("at", "side", "role", "size", "accent", "highlight", "font"))
+# Below this share of the spoken content words on the graphic, a caption
+# mute hides the speech rather than replacing it.
+MUTE_CARRY_MIN = 0.5
+# A graphic line this close to a transcript phrase (difflib ratio over word
+# tokens) but not equal to it is a paraphrase of what is heard.
+PARAPHRASE_RATIO = 0.75
+PARAPHRASE_NEAR_S = 3.0
+
+
+def _norm_token(t):
+    t = t.casefold().replace("’", "'")
+    if t in _FUNCTION_WORDS:
+        return t                       # "this", "does" are not plurals
+    if t.endswith("'s"):
+        t = t[:-2]
+    t = _NUMBER_WORDS.get(t, t)
+    if len(t) > 3 and t.endswith("s") and not t.endswith("ss"):
+        t = t[:-1]                     # "characters" carries "character"
+    return t
+
+
+def _tokens(text):
+    return [_norm_token(t) for t in _TOKEN_RE.findall(str(text or ""))]
+
+
+def _graphic_lines(item):
+    """[(param, text)] the item prints: its text params (list items and row
+    text fields included) and, for authored HTML, the markup's text."""
+    template = item.get("template")
+    try:
+        pspec = motion_templates.spec(template).get("params") or {}
+    except ValueError:
+        pspec = {}
+    out = []
+    for key, val in (item.get("params") or {}).items():
+        kind = (pspec.get(key) or {}).get("type", "str")
+        if key in _NON_TEXT_FIELDS or kind not in ("str", "text", "list", "rows"):
+            continue
+        for v in (val if isinstance(val, list) else [val]):
+            if isinstance(v, dict):
+                out += [(key, str(x)) for f, x in v.items()
+                        if f not in _NON_TEXT_FIELDS and isinstance(x, str)]
+            elif isinstance(v, (str, int, float)) and not isinstance(v, bool):
+                out.append((key, str(v)))
+    if template == "html" and item.get("html"):
+        body = re.sub(r"(?is)<(script|style)\b.*?</\1>", " ", item["html"])
+        out.append(("html", re.sub(r"<[^>]+>", " ", body)))
+    return [(k, v) for k, v in out if _tokens(v)]
+
+
+def _said(words):
+    """Display form of a run of caption words."""
+    return " ".join(str(w["w"]).strip().strip("\"“”").rstrip(".,;:…") for w in words)
+
+
+def _mute_note(edl, index, tl, item, carried):
+    """NOTE when this item's caption mute hides speech it does not carry."""
+    import captions as caplib
+    others = dict(edl, motion=[m for m in edl.get("motion") or []
+                               if m.get("id") != item.get("id")])
+    words = caplib.transcript_words(others, index, tl,
+                                    caplib.effective_caption_mutes(others))
+    s, e = float(item["start"]), float(item["end"])
+    inside = [w for w in words if s <= (float(w["t0"]) + float(w["t1"])) / 2.0 <= e]
+    if not inside:
+        return None
+    toks = [_tokens(w["w"]) for w in inside]
+    content = [t for ts in toks for t in ts if t not in _FUNCTION_WORDS] or \
+        [t for ts in toks for t in ts]
+    missing = [t for t in content if t not in carried]
+    if len(missing) < 2 or len(missing) <= len(content) * (1.0 - MUTE_CARRY_MIN):
+        return None
+    runs, cur = [], []
+    for w, ts in zip(inside, toks):
+        if ts and not any(t in carried for t in ts):
+            cur.append(w)
+        elif cur:
+            runs.append(cur)
+            cur = []
+    if cur:
+        runs.append(cur)
+    gone = " … ".join(_said(r) for r in runs)
+    if len(gone) > 140:
+        gone = gone[:137].rstrip() + "…"
+    first = next((w for w, ts in zip(inside, toks)
+                  if any(t in carried and t not in _FUNCTION_WORDS for t in ts)), None)
+    later = (f", or start it at {float(first['t0']):.2f}s where its own words begin "
+             "so everything before stays captioned"
+             if first is not None and float(first["t0"]) - s >= 0.4 else "")
+    return (f"NOTE (captions): this graphic mutes the captions over {s:g}-{e:g}s but "
+            f"carries only {len(content) - len(missing)} of the {len(content)} words "
+            f"that matter in what is said there, so a sound-off viewer never reads "
+            f"\"{gone}\". Mute only a graphic that carries the spoken words: keep the "
+            f"captions (mute_captions=false), carry those exact words on it (e.g. a "
+            f"kicker/label built from the transcript){later}.")
+
+
+def _verbatim(g, span):
+    """Does graphic token list ``g`` quote ``span`` [(token, clipped)]
+    exactly, allowing it to keep or drop words a cut clipped?"""
+    j = 0
+    for t, clipped in span:
+        if j < len(g) and t == g[j]:
+            j += 1
+        elif not clipped:
+            return False
+    return j == len(g)
+
+
+def _paraphrase_notes(edl, index, tl, item, lines):
+    """NOTEs for graphic lines that nearly quote nearby speech."""
+    import difflib
+    import captions as caplib
+    s, e = float(item["start"]), float(item["end"])
+    words = caplib.heard_words(edl, index, tl, s - PARAPHRASE_NEAR_S, e + PARAPHRASE_NEAR_S)
+    flat = [(t, i) for i, w in enumerate(words) for t in _tokens(w["w"])]
+    seq = [t for t, _i in flat]
+    clip = [(t, bool(words[i].get("clipped"))) for t, i in flat]
+    notes = []
+    for key, text in lines:
+        g = _tokens(text)
+        if not 3 <= len(g) <= 16 or len(seq) < 2:
+            continue
+        best = (0.0, 0, 0)
+        for n in range(max(2, len(g) - 2), len(g) + 3):
+            for i in range(0, len(seq) - n + 1):
+                if _verbatim(g, clip[i:i + n]):
+                    best = (1.0, i, n)
+                    break
+                r = difflib.SequenceMatcher(None, g, seq[i:i + n], autojunk=False).ratio()
+                if r > best[0]:
+                    best = (r, i, n)
+            if best[0] >= 1.0:
+                break
+        r, i, n = best
+        if r >= 1.0 or r < PARAPHRASE_RATIO:
+            continue
+        span = words[flat[i][1]:flat[i + n - 1][1] + 1]
+        quote = _said(span)
+        notes.append(
+            f"NOTE (captions): {key} \"{' '.join(text.split())}\" paraphrases what is said at "
+            f"{float(span[0]['t0']):.2f}-{float(span[-1]['t1']):.2f}s (\"{quote}\"); viewers "
+            f"hear one and read the other. Quote the transcript exactly, e.g. "
+            f"{key}=\"{quote}\".")
+    return notes
+
+
+def _caption_integrity_notes(ctx, edl, item):
+    """Deterministic caption-integrity NOTEs for one written motion item
+    ('' when it is fine, there is no transcript, or anything goes wrong —
+    a lint never blocks the edit it comments on)."""
+    index = getattr(ctx, "index", None) or {}
+    if not index.get("words") or not edl.get("keep"):
+        return ""
+    try:
+        from timeline import Timeline
+        tl = Timeline(edl["keep"], edl.get("inserts") or [], edl.get("speed"))
+        lines = _graphic_lines(item)
+        notes = []
+        mute = item.get("mute_captions")
+        if mute is None:
+            try:
+                mute = bool(motion_templates.spec(item["template"]).get("mutes_captions"))
+            except ValueError:
+                mute = False
+        caps = edl.get("captions")
+        if mute and isinstance(caps, dict) and caps.get("mode") == "from_transcript":
+            carried = {t for _k, v in lines for t in _tokens(v)}
+            note = _mute_note(edl, index, tl, item, carried)
+            if note:
+                notes.append(note)
+        notes += _paraphrase_notes(edl, index, tl, item, lines)
+    except Exception as e:  # noqa: BLE001
+        print(f"[motion] caption integrity check skipped: {str(e)[:160]}", flush=True)
+        return ""
+    return "".join("\n" + n for n in notes)
+
+
 # Sound is deliberate: templates declare sound ROLES (mapped onto the owner-
 # approved real recordings in worker/sound_library), but nothing adds sound
 # unless the editor asks for it on a moment that earns it.
@@ -526,7 +729,7 @@ def add_motion_graphic(ctx, template, start, end=None, params=None, html=None,
     if res.startswith("REJECTED"):
         return res
     return (res + where + clamp + (f"\nNOTE: {'; '.join(notes)}" if notes else "")
-            + behind_note)
+            + behind_note + _caption_integrity_notes(ctx, edl, item))
 
 
 def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
@@ -621,7 +824,7 @@ def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
     if res.startswith("REJECTED"):
         return res
     return (res + where + (f"\nNOTE: {'; '.join(notes)}" if notes else "")
-            + (behind_note or ""))
+            + (behind_note or "") + _caption_integrity_notes(ctx, edl, hit))
 
 
 def remove_motion_graphic(ctx, id):
