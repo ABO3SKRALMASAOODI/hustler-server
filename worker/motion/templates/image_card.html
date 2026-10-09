@@ -1,0 +1,264 @@
+<!--MG-SPEC {"title": "Image card", "category": "layout",
+ "description": "A project photo or screenshot in a rounded 3D card that tilts in, settles at a slight angle and drifts with parallax, with an optional caption and date/source chip. Use when the speaker mentions something the viewer should SEE (evidence photo, headline, product, app screenshot); place it in the face-free part of the frame.",
+ "duration": 3.2, "layer": "above_captions", "mutes_captions": false,
+ "params": {
+  "image": {"type": "asset", "default": null, "hint": "project image (photo, screenshot, document); fills the card (cover)"},
+  "caption": {"type": "str", "default": "", "max": 60, "hint": "optional one-line caption, e.g. 'Model S prototype, 2009'"},
+  "chip": {"type": "str", "default": "", "max": 24, "hint": "optional small tag on the image corner, e.g. '2008' or 'SOURCE: WSJ'"},
+  "style": {"type": "enum", "values": ["clean", "frame", "polaroid"], "default": "clean", "hint": "clean = borderless photo card; frame = dark rounded frame with caption strip; polaroid = white print"},
+  "aspect": {"type": "enum", "values": ["auto", "landscape", "portrait", "square", "wide"], "default": "auto", "hint": "auto keeps the image's own shape (clamped)"},
+  "direction": {"type": "enum", "values": ["right", "left", "bottom"], "default": "right", "hint": "side the card swings in from"},
+  "y": {"type": "float", "min": 0.15, "max": 0.85, "default": 0.36, "hint": "vertical centre as frame fraction (keep it off the face); the card is always kept inside the safe area"},
+  "size": {"type": "float", "min": 0.4, "max": 0.89, "default": 0.78, "hint": "card width as frame-width fraction"},
+  "accent": {"type": "color", "default": "#FF453A", "hint": "chip dot colour"},
+  "exit": {"type": "enum", "values": ["fade", "drop", "cut"], "default": "fade"}
+ },
+ "example": {"caption": "The first prototype, 2009", "chip": "2009"},
+ "sfx": [{"at": 0.11, "kind": "swish_short"}]} -->
+<style>
+  .stage{position:absolute;left:0;top:0;width:100%;height:100%}
+  .card{position:absolute;transform-origin:50% 50%;will-change:transform,opacity,filter;border-radius:30px}
+  .card.clean,.card.frame,.card.polaroid{box-shadow:0 34px 80px -10px rgba(0,0,0,.55),0 12px 28px rgba(0,0,0,.32)}
+  .card.frame{background:linear-gradient(180deg,rgba(38,40,46,.94),rgba(16,17,20,.94));border-radius:38px;padding:14px;border:1px solid rgba(255,255,255,.14)}
+  .card.polaroid{background:#F7F5F0;border-radius:10px;padding:22px 22px 0 22px}
+  .media{position:relative;overflow:hidden;border-radius:30px;background:#1a1c22;isolation:isolate}
+  .card.frame .media{border-radius:26px}
+  .card.polaroid .media{border-radius:3px}
+  .media img{position:absolute;left:0;top:0;width:100%;height:100%;object-fit:cover;will-change:transform}
+  .media::after{content:"";position:absolute;inset:0;border-radius:inherit;box-shadow:inset 0 0 0 1px rgba(255,255,255,.2);pointer-events:none;z-index:4}
+  .card.polaroid .media::after{box-shadow:inset 0 0 0 1px rgba(0,0,0,.08)}
+  .ph{position:absolute;inset:0;background:
+      radial-gradient(120% 90% at 18% 10%,rgba(255,196,120,.35),rgba(255,196,120,0) 55%),
+      radial-gradient(90% 80% at 90% 100%,rgba(90,120,255,.30),rgba(90,120,255,0) 60%),
+      linear-gradient(160deg,#3b3f4c 0%,#1e2128 55%,#121318 100%)}
+  .ph svg{position:absolute;left:50%;top:50%;width:18%;transform:translate(-50%,-50%);opacity:.38}
+  .gloss{position:absolute;inset:-2px;z-index:3;mix-blend-mode:soft-light;pointer-events:none;
+      background:linear-gradient(110deg,rgba(255,255,255,0) 30%,rgba(255,255,255,.75) 48%,rgba(255,255,255,0) 66%);
+      background-size:260% 100%;background-repeat:no-repeat}
+  .scrim{position:absolute;left:0;right:0;bottom:0;height:46%;z-index:2;background:linear-gradient(to top,rgba(0,0,0,.62),rgba(0,0,0,.28) 45%,rgba(0,0,0,0))}
+  .cap{position:absolute;z-index:5;font-family:'Inter Display','Inter',sans-serif;font-weight:700;letter-spacing:-0.02em;color:#fff;white-space:nowrap;line-height:1.08;overflow:hidden;text-overflow:ellipsis}
+  .card.clean .cap{left:34px;bottom:30px;text-shadow:0 2px 14px rgba(0,0,0,.45)}
+  .strip{position:relative;display:flex;align-items:center;overflow:hidden}
+  .card.frame .strip{padding:0 16px}
+  .strip .cap{flex:none}
+  .card.frame .cap{position:relative;color:#F4F2F7}
+  .card.polaroid .cap{position:relative;color:#1B1B1D;font-family:'Caveat','Instrument Serif',serif;font-weight:700;letter-spacing:0;font-style:normal}
+  .card.polaroid .cap.serif{font-family:'Instrument Serif',serif;font-style:italic;font-weight:400}
+  .chip{position:absolute;left:24px;top:24px;z-index:6;display:flex;align-items:center;gap:12px;padding:13px 22px 13px 18px;border-radius:999px;
+      background:rgba(18,18,20,.5);border:1px solid rgba(255,255,255,.18);-webkit-backdrop-filter:blur(14px) saturate(1.4);backdrop-filter:blur(14px) saturate(1.4);
+      font-family:'Inter Display','Inter',sans-serif;font-weight:700;font-size:30px;letter-spacing:.05em;text-transform:uppercase;color:#fff;white-space:nowrap;
+      box-shadow:0 6px 18px rgba(0,0,0,.25);transform-origin:0 50%}
+  .chip i{display:block;width:14px;height:14px;border-radius:50%;background:var(--accent);box-shadow:0 0 10px var(--accent)}
+</style>
+<div class="mg-root"><div class="stage" id="stage"></div></div>
+<script>
+(() => {
+  const P = MG.params, W = MG.W, H = MG.H, D = MG.duration;
+  document.documentElement.style.setProperty('--accent', P.accent);
+  const stage = MG.$('#stage');
+  const style = P.style || 'clean';
+  const card = MG.el('div', 'card ' + style, null, stage);
+  const media = MG.el('div', 'media', null, card);
+  let img = null;
+  if (P.image) {
+    img = MG.el('img', null, null, media);
+    img.alt = '';
+    img.src = P.image;
+  }
+  const ph = MG.el('div', 'ph', null, media);
+  ph.innerHTML = '<svg viewBox="0 0 48 48" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">' +
+    '<rect x="5" y="9" width="38" height="30" rx="5"/><circle cx="17" cy="20" r="3.6"/><path d="M7 35l11-11 8 8 5-5 10 10"/></svg>';
+  if (img) ph.style.display = 'none';
+  const gloss = MG.el('div', 'gloss', null, media);
+  let scrim = null, cap = null, strip = null;
+  const caption = String(P.caption || '').trim();
+  if (caption) {
+    if (style === 'clean') {
+      scrim = MG.el('div', 'scrim', null, media);
+      cap = MG.el('div', 'cap', caption, media);
+    } else {
+      strip = MG.el('div', 'strip', null, card);
+      cap = MG.el('div', 'cap', caption, strip);
+      // handwriting when the script face is installed, else the italic serif
+      const hasCaveat = Array.from(document.fonts).some(f => f.family.replace(/["']/g, '') === 'Caveat');
+      if (style === 'polaroid' && !hasCaveat) cap.classList.add('serif');
+    }
+  }
+  let chip = null;
+  const chipText = String(P.chip || '').trim();
+  if (chipText) {
+    chip = MG.el('div', 'chip', null, media);
+    MG.el('i', null, null, chip);
+    MG.el('span', null, chipText, chip);
+  }
+
+  // ── layout (re-run once the image's natural size is known) ─────────────
+  const ASPECT = { landscape: 4 / 3, portrait: 4 / 5, square: 1, wide: 16 / 9 };
+  let ar = ASPECT.landscape, layoutKey = '', fontsOk = 0;
+  const geo = {};
+  function layout() {
+    if (P.aspect !== 'auto' && ASPECT[P.aspect]) ar = ASPECT[P.aspect];
+    else if (img && img.naturalWidth > 0 && img.naturalHeight > 0) ar = MG.clamp(img.naturalWidth / img.naturalHeight, 0.62, 1.9);
+    const key = ar.toFixed(4) + ':' + fontsOk;
+    if (key === layoutKey) return;
+    layoutKey = key;
+    const padX = style === 'frame' ? 15 : style === 'polaroid' ? 22 : 0;
+    const padTop = style === 'frame' ? 15 : style === 'polaroid' ? 22 : 0;
+    let cw = Math.min(MG.clamp(P.size, 0.4, 0.89) * W, W - 120);
+    // Caption: one line when it fits at a comfortable size, otherwise two
+    // (never truncated, never overflowing the card).
+    const base = style === 'polaroid' ? 62 : style === 'frame' ? 46 : 54;
+    let capLines = 1, capFs = 0;
+    const capW = () => style === 'clean' ? cw - 68 : cw - 2 * padX - 40;
+    const fitCaption = () => {
+      card.style.width = cw + 'px';
+      media.style.width = (cw - 2 * padX) + 'px';
+      cap.style.whiteSpace = 'nowrap'; cap.style.width = ''; cap.style.webkitLineClamp = '';
+      cap.style.display = '';
+      const mx = base * Math.min(1, cw / 840) + 4;
+      // fit with a few px of slack so a 1px rounding never triggers the ellipsis
+      capFs = MG.fit(cap, { width: capW() - 4, min: Math.round(mx * 0.62), max: mx, nowrap: true });
+      capLines = cap.scrollWidth > capW() - 3 ? 2 : 1;
+      if (capLines === 2) {
+        capFs = Math.round(mx * 0.8);
+        Object.assign(cap.style, { fontSize: capFs + 'px', whiteSpace: 'normal', width: capW() + 'px',
+          display: '-webkit-box', webkitBoxOrient: 'vertical', webkitLineClamp: '2', lineHeight: '1.12' });
+        MG.fit(cap, { width: capW(), height: capFs * 1.12 * 2 + 2, min: 22, max: capFs });
+        capFs = parseFloat(cap.style.fontSize);
+      }
+      cap.style.maxWidth = capW() + 'px';
+    };
+    const padBot = style === 'frame' ? 15 : 0;          // frame: bottom padding + border
+    let stripH = 0;
+    const measure = () => {                             // card height for the current width
+      if (cap) fitCaption();
+      const extra = capLines === 2 ? capFs * 1.12 : 0;
+      stripH = caption ? (style === 'frame' ? 92 : style === 'polaroid' ? 112 : 0) + extra : (style === 'polaroid' ? 70 : 0);
+      return (cw - 2 * padX) / ar + padTop + padBot + stripH;
+    };
+    // keep the card inside the safe area (y 8-80% on portrait, where the
+    // platform caption/UI band starts) and within ~60% of the frame height
+    const sTop = H > W ? 0.08 : 0.05, sBot = H > W ? 0.80 : 0.95;
+    const maxH = H * Math.min(H > W ? 0.6 : 0.76, sBot - sTop - 0.04);
+    let ch = measure();
+    // a narrower card can wrap the caption to two lines: re-measure until it fits
+    for (let it = 0; it < 4 && ch > maxH + 0.5; it++) {
+      cw = Math.max(200, (maxH - padTop - padBot - stripH) * ar + 2 * padX);
+      ch = measure();
+    }
+    let mh = (cw - 2 * padX) / ar;
+    media.style.width = (cw - 2 * padX) + 'px';
+    media.style.height = mh + 'px';
+    card.style.width = cw + 'px';
+    if (strip) {
+      strip.style.height = stripH + 'px';
+      strip.style.justifyContent = style === 'polaroid' ? 'center' : 'flex-start';
+      if (style === 'polaroid') cap.style.textAlign = 'center';
+    } else if (style === 'polaroid') {
+      card.style.paddingBottom = stripH + 'px';
+    }
+    if (scrim && capLines === 2) scrim.style.height = '58%';
+    // the hold pose is tilted and pushed in (~3% taller in projection), so
+    // keep a 2% margin inside the safe area
+    const cy = MG.clamp(P.y * H, H * (sTop + 0.02) + ch / 2, H * (sBot - 0.02) - ch / 2);
+    const left = (W - cw) / 2, top = cy - ch / 2;
+    card.style.left = left + 'px';
+    card.style.top = top + 'px';
+    if (chip) {
+      const k = MG.clamp(cw / 840, 0.7, 1);
+      chip.style.transform = `scale(${k})`;
+      chip.dataset.k = k;
+    }
+    Object.assign(geo, { cw, ch, left, top, cy });
+    // capture box: card + shadow + entrance overshoot (perspective growth)
+    // (the entrance comes from depth, so it never projects larger than the
+    // hold pose by more than a few percent)
+    let y0 = top - 0.06 * ch - 60, y1 = top + ch + 0.06 * ch + 115;
+    if (P.direction === 'bottom') y1 = H;
+    MG.box = [0, Math.max(0, y0), W, Math.min(H, y1)];
+  }
+  layout();
+  // Re-layout once the type faces and the image are really loaded (text is
+  // fitted with real metrics, the card takes the photo's own shape).
+  const fontsLoaded = Promise.all(["700 40px 'Inter Display'", "italic 400 40px 'Instrument Serif'", "700 40px 'Caveat'"]
+    .map(f => document.fonts.load(f).catch(() => null))).then(() => { fontsOk = 1; });
+  // The placeholder is only for an image param left empty: a real asset the
+  // browser cannot decode (HEIC, TIFF, huge scans) must fail loudly so the
+  // item is skipped and the agent told, never ship a grey icon card.
+  const imgLoaded = img ? img.decode().catch(() => {
+    const msg = 'image_card: image asset could not be decoded (unsupported format or too large)';
+    window.__mgErrors.push(msg);
+    throw new Error(msg);
+  }) : null;
+  MG.ready = Promise.all([fontsLoaded, imgLoaded]).then(layout);
+
+  // ── choreography ───────────────────────────────────────────────────────
+  const dir = P.direction === 'left' ? -1 : P.direction === 'bottom' ? 0 : 1;
+  const fps = MG.fps;
+  const exitDur = P.exit === 'cut' ? 0 : Math.min(0.3, D * 0.14);
+  const holdEnd = D - exitDur;
+  // The slow hold drift moves < 0.4 px per frame, so after the landing it
+  // updates on every 3rd frame (steps stay under ~1 px, invisible) and the
+  // long hold costs a third of the captures: photo frames are expensive.
+  const settleF = Math.ceil(0.76 * fps), holdEndF = Math.floor(holdEnd * fps), STEP = 3;
+  const wins = [[0, Math.min(D, settleF / fps)]];
+  for (let f = settleF; f <= holdEndF; f += STEP) wins.push([f / fps, f / fps]);
+  if (exitDur > 0) wins.push([Math.max(0, holdEnd - 1 / fps), D]);
+  MG.active(wins);
+  const quant = t => {
+    const f = Math.round(t * fps);
+    if (f <= settleF) return t;
+    return (settleF + Math.floor((Math.min(f, holdEndF) - settleF) / STEP) * STEP) / fps;
+  };
+  const springO = { stiffness: 150, damping: 19 };
+  const ryHold = dir === 0 ? -4 : -dir * 10, rxHold = dir === 0 ? 6 : 5;
+
+  MG.frame(t => {
+    layout();
+    const k = MG.spring(t, 0, springO);                    // 0 → 1 with a light overshoot
+    // constant slow drift through the hold (quantized to the declared step)
+    const hd = MG.range(quant(t), 0.3, Math.max(0.5, holdEnd - 0.3));
+    const s = {
+      perspective: 1700,
+      x: dir * 460 * (1 - k),
+      y: (dir === 0 ? 520 * (1 - k) : 40 * (1 - k)) - 18 * hd,
+      z: -420 * (1 - k),
+      ry: dir === 0 ? ryHold * (1 - hd * 0.6) : dir * 52 * (1 - k) + ryHold * k * (1 - hd * 0.6),
+      rx: dir === 0 ? 58 * (1 - k) + rxHold * k * (1 - hd * 0.5) : 10 * (1 - k) + rxHold * k * (1 - hd * 0.5),
+      rotate: dir === 0 ? -4 * (1 - k) : -dir * 3 * (1 - k),
+      scale: (0.9 + 0.1 * k) * (1 + 0.026 * hd),
+      opacity: 0.18 + 0.82 * MG.range(t, 0, 0.14),
+      blur: Math.max(0, 1 - MG.range(t, 0, 0.26)) * 14,
+    };
+    if (exitDur > 0 && t > holdEnd) {
+      const q = MG.ease.inCubic(MG.range(t, holdEnd, exitDur));
+      if (P.exit === 'drop') {
+        s.y += q * 260; s.rx += q * 22; s.scale *= 1 - 0.06 * q; s.opacity *= 1 - q;
+      } else {
+        s.scale *= 1 - 0.07 * q; s.opacity *= 1 - q; s.blur += q * 12; s.y -= q * 24;
+      }
+    }
+    MG.set(card, s);
+    // parallax: the photo slides slowly against the card's turn
+    const px = (dir || 0.6) * (1.2 - 2.4 * hd), py = 0.6 - 1.2 * hd;
+    (img || ph).style.transform = `scale(1.1) translate3d(${px.toFixed(3)}%, ${py.toFixed(3)}%, 0)`;
+    // specular sweep while the card lands
+    const g = MG.range(t, 0.18, 0.6);
+    gloss.style.backgroundPosition = `${(130 - g * 160).toFixed(2)}% 0`;
+    gloss.style.opacity = g > 0 && g < 1 ? Math.sin(g * Math.PI).toFixed(3) : 0;
+    if (chip) {
+      const ck = MG.spring(t, 0.36, { stiffness: 300, damping: 20 });
+      const kk = parseFloat(chip.dataset.k || 1);
+      chip.style.opacity = MG.range(t, 0.36, 0.07).toFixed(3);
+      chip.style.transform = `scale(${(kk * (0.8 + 0.2 * ck)).toFixed(4)}) translate3d(${(-16 * (1 - ck)).toFixed(2)}px,0,0)`;
+    }
+    if (cap) {
+      const cp = MG.ease.outCubic(MG.range(t, 0.42, 0.3));
+      cap.style.opacity = cp.toFixed(3);
+      cap.style.transform = `translate3d(0,${(12 * (1 - cp)).toFixed(2)}px,0)`;
+      cap.style.filter = cp < 1 ? `blur(${(6 * (1 - cp)).toFixed(2)}px)` : '';
+      if (scrim) scrim.style.opacity = MG.range(t, 0.34, 0.3).toFixed(3);
+    }
+  });
+})();
+</script>

@@ -1,0 +1,89 @@
+<!--MG-SPEC {"title": "Flash transition", "category": "transition",
+ "description": "A 2-8 frame exposure flash that ramps to white (or warm/cool/colour), blows out 0.1 s in and recovers from the edges inward. Use AT a hard cut or hook beat: start the item 0.1 s before the cut (0.2-0.3 s reads as a camera flash, 0.4-0.6 s as an exposure bloom).",
+ "duration": 0.3, "layer": "above_captions", "mutes_captions": false,
+ "params": {
+  "tone": {"type": "enum", "values": ["white", "warm", "cool", "color"], "default": "white", "hint": "warm = film exposure with amber edges; color uses the colour param"},
+  "color": {"type": "color", "default": "#FFD400", "hint": "flash colour when tone is 'color'"},
+  "strength": {"type": "float", "min": 0.3, "max": 1.0, "default": 1.0, "hint": "peak opacity (1 = fully blown out)"},
+  "bloom": {"type": "bool", "default": true, "hint": "recover from the edges inward with a lingering centre glow"},
+  "pattern": {"type": "enum", "values": ["single", "double"], "default": "single", "hint": "double = two quick pops (strobe), needs >= 0.3 s"}
+ },
+ "example": {"tone": "white"},
+ "sfx": [{"at": 0.0, "kind": "swish_short"}]} -->
+<style>
+  #fl{position:absolute;left:0;top:0;width:100%;height:100%;image-rendering:pixelated}
+</style>
+<div class="mg-root"><canvas id="fl"></canvas></div>
+<script>
+(() => {
+  const P = MG.params, W = MG.W, H = MG.H, D = MG.duration, fps = MG.fps;
+  // Smooth full-frame gradients: drawn at quarter resolution and scaled up
+  // (identical after encoding, far cheaper to capture than full-res pixels).
+  const Q = 4, qw = Math.ceil(W / Q), qh = Math.ceil(H / Q);
+  const cv = MG.$('#fl');
+  cv.width = qw; cv.height = qh;
+  const ctx = cv.getContext('2d');
+  const hex = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
+  const mix = (a, b, p) => a.map((v, i) => Math.round(v + (b[i] - v) * p));
+  const TONES = {
+    white: [[255, 255, 255], [238, 243, 255], [255, 252, 246]],
+    warm: [[255, 246, 228], [255, 170, 92], [255, 214, 150]],
+    cool: [[244, 251, 255], [130, 196, 255], [200, 230, 255]],
+  };
+  let core, edge, halo;
+  if (P.tone === 'color') {
+    const c = hex(P.color || '#FFD400');
+    core = mix(c, [255, 255, 255], 0.45); edge = c; halo = mix(c, [255, 255, 255], 0.2);
+  } else [core, edge, halo] = TONES[P.tone] || TONES.white;
+  const rgba = (c, a) => `rgba(${c[0]},${c[1]},${c[2]},${MG.clamp(a).toFixed(3)})`;
+  const S = MG.clamp(P.strength ?? 1, 0.3, 1);
+  const PEAK = Math.min(0.1, D * 0.4);               // the blown-out frame
+  const HOLD = 1 / fps;                              // one frame at full
+  const dbl = P.pattern === 'double' && D >= 0.28;
+  const PEAK2 = PEAK + 3 / fps;
+
+  // exposure envelope 0..1
+  function env(t) {
+    if (t < PEAK) return 0.06 + 0.94 * Math.pow(MG.clamp(t / PEAK), 1.6);
+    if (t <= PEAK + HOLD) return 1;
+    if (dbl && t <= PEAK2 + HOLD) {
+      // drop to ~25% for a frame, then pop back
+      if (t < PEAK2) return MG.lerp(1, 0.22, MG.ease.outQuad(MG.range(t, PEAK + HOLD, (PEAK2 - PEAK - HOLD) * 0.6)));
+      return 0.9;
+    }
+    const st = dbl ? PEAK2 + HOLD : PEAK + HOLD;
+    const p = MG.range(t, st, Math.max(1 / fps, D - st));
+    return (dbl ? 0.9 : 1) * Math.pow(1 - p, 2.1);
+  }
+  const rec = t => MG.range(t, dbl ? PEAK2 : PEAK, Math.max(1 / fps, D - PEAK));
+
+  MG.box = [0, 0, W, H];
+  MG.active([[0, D]]);
+  const cx = qw / 2, cy = qh * 0.46, R = Math.hypot(qw, qh) * 0.62;
+  MG.frame(t => {
+    const a = env(t) * S;
+    const r = rec(t);
+    ctx.clearRect(0, 0, qw, qh);
+    if (a <= 0.002) return;
+    if (P.bloom) {
+      // a warm halo lingers a little longer than the flash itself
+      const ha = Math.max(0, Math.pow(env(Math.max(0, t - 2 / fps)), 1.4) * S * 0.55 - a * 0.25);
+      if (ha > 0.002) {
+        const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, R * 0.8);
+        g.addColorStop(0, rgba(halo, ha)); g.addColorStop(0.45, rgba(halo, ha * 0.4)); g.addColorStop(1, rgba(halo, 0));
+        ctx.fillStyle = g; ctx.fillRect(0, 0, qw, qh);
+      }
+      // edges recover first: the falloff tightens around the centre as the
+      // flash decays
+      const ac = Math.pow(a, 0.75), ae = Math.pow(a, 1.0 + 1.2 * r);
+      const inner = (8 + 30 * (1 - r)) / 100;
+      const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, R);
+      g.addColorStop(0, rgba(core, ac)); g.addColorStop(inner, rgba(core, ac * 0.96)); g.addColorStop(1, rgba(edge, ae));
+      ctx.fillStyle = g; ctx.fillRect(0, 0, qw, qh);
+    } else {
+      ctx.fillStyle = rgba(core, a);
+      ctx.fillRect(0, 0, qw, qh);
+    }
+  });
+})();
+</script>

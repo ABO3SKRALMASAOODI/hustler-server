@@ -1,0 +1,256 @@
+<!--MG-SPEC {"title": "Photo stack", "category": "layout",
+ "description": "Deals 2-5 project photos one by one (every 0.22 s) onto a fanned or messy pile of prints with depth and a table shadow, the last photo on top. Use as a quick visual montage when the speaker lists people, places, products or moments; the three swipe cues fit 3 photos.",
+ "duration": 3.0, "layer": "above_captions", "mutes_captions": false,
+ "params": {
+  "asset_1": {"type": "asset", "default": null, "hint": "first photo dealt (bottom of the stack)"},
+  "asset_2": {"type": "asset", "default": null},
+  "asset_3": {"type": "asset", "default": null},
+  "asset_4": {"type": "asset", "default": null},
+  "asset_5": {"type": "asset", "default": null, "hint": "last photo dealt (top of the stack)"},
+  "caption": {"type": "str", "default": "", "max": 48, "hint": "optional label under the stack, e.g. '2008 - 2024'"},
+  "layout": {"type": "enum", "values": ["fan", "pile"], "default": "fan", "hint": "fan = spread like a hand of cards; pile = messy stack of prints"},
+  "frame": {"type": "enum", "values": ["print", "clean"], "default": "print", "hint": "print = white photo border; clean = borderless rounded cards"},
+  "y": {"type": "float", "min": 0.2, "max": 0.8, "default": 0.38, "hint": "vertical centre of the stack as frame fraction"},
+  "size": {"type": "float", "min": 0.35, "max": 0.75, "default": 0.56, "hint": "card width as frame-width fraction"},
+  "exit": {"type": "enum", "values": ["fade", "cut"], "default": "fade"}
+ },
+ "example": {"caption": "Three companies, one idea"},
+ "sfx": [{"at": 0.09, "kind": "swipe", "gain_db": -4}, {"at": 0.31, "kind": "swipe", "gain_db": -6}, {"at": 0.53, "kind": "swipe", "gain_db": -7}]} -->
+<style>
+  .stack{position:absolute;left:0;top:0;width:100%;height:100%;transform-origin:50% 40%;will-change:transform}
+  .pc{position:absolute;will-change:transform,opacity,filter;transform-origin:50% 50%}
+  .pc.print{background:#F6F4EF;padding:14px;border-radius:7px}
+  .pc.clean{border-radius:26px}
+  .pc .ph-in{position:relative;width:100%;height:100%;overflow:hidden;border-radius:3px;background:#1d1f25}
+  .pc.clean .ph-in{border-radius:26px}
+  .pc.clean .ph-in::after{content:"";position:absolute;inset:0;border-radius:inherit;box-shadow:inset 0 0 0 1px rgba(255,255,255,.2)}
+  .pc.print .ph-in::after{content:"";position:absolute;inset:0;box-shadow:inset 0 0 0 1px rgba(0,0,0,.08)}
+.cap span{display:inline-block}
+  .pc img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+  .pc .pl{position:absolute;inset:0}
+  .pc .pl svg{position:absolute;left:50%;top:50%;width:20%;transform:translate(-50%,-50%);opacity:.36}
+  .pc .shade{position:absolute;inset:0;background:#000;opacity:0;pointer-events:none;border-radius:inherit}
+  .cap{position:absolute;left:0;right:0;text-align:center;font-family:'Inter Display','Inter',sans-serif;font-weight:800;letter-spacing:-0.025em;color:#fff;
+       white-space:nowrap;line-height:1.05;text-shadow:0 3px 18px rgba(0,0,0,.5),0 1px 3px rgba(0,0,0,.35)}
+</style>
+<div class="mg-root"><div class="stack" id="stack"></div><div class="cap" id="cap"><span id="capt"></span></div></div>
+<script>
+(() => {
+  const P = MG.params, W = MG.W, H = MG.H, D = MG.duration, fps = MG.fps;
+  const stack = MG.$('#stack'), capEl = MG.$('#cap'), capT = MG.$('#capt');
+  const srcKeys = ['asset_1', 'asset_2', 'asset_3', 'asset_4', 'asset_5'].filter(k => P[k]);
+  const srcs = srcKeys.map(k => P[k]);
+  const placeholder = srcs.length === 0;
+  const n = placeholder ? 3 : srcs.length;
+  const TINTS = [
+    ['#4a4038', '#211c18', 'rgba(255,190,120,.42)'], ['#34404f', '#151a22', 'rgba(120,170,255,.38)'],
+    ['#3d4436', '#171b14', 'rgba(190,230,140,.32)'], ['#47394b', '#1b151e', 'rgba(240,150,220,.34)'],
+    ['#4b3a36', '#1e1514', 'rgba(255,140,110,.38)']];
+  const ICON = '<svg viewBox="0 0 48 48" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">' +
+    '<rect x="5" y="9" width="38" height="30" rx="5"/><circle cx="17" cy="20" r="3.6"/><path d="M7 35l11-11 8 8 5-5 10 10"/></svg>';
+  const cards = [];
+  for (let i = 0; i < n; i++) {
+    const el = MG.el('div', 'pc ' + (P.frame === 'clean' ? 'clean' : 'print'), null, stack);
+    const inner = MG.el('div', 'ph-in', null, el);
+    let img = null;
+    if (!placeholder) {
+      img = MG.el('img', null, null, inner);
+      img.alt = '';
+      img.src = srcs[i];
+    }
+    const pl = MG.el('div', 'pl', null, inner);
+    const tn = TINTS[i % TINTS.length];
+    pl.style.background = `radial-gradient(110% 90% at 20% 12%, ${tn[2]}, rgba(0,0,0,0) 58%), linear-gradient(155deg, ${tn[0]}, ${tn[1]})`;
+    pl.innerHTML = ICON;
+    if (img) pl.style.display = 'none';
+    const shade = MG.el('div', 'shade', null, el);
+    cards.push({ el, inner, img, pl, shade, ar: [4 / 5, 1, 4 / 3, 3 / 4, 5 / 4][i % 5] });
+  }
+  const caption = String(P.caption || '').trim();
+  capT.textContent = caption;
+
+  // ── layout ──────────────────────────────────────────────────────────────
+  const ENTRY_Y = 0.16;                 // deal path: cards come up from below/side
+  const PILE = [[0, 0, -2.2], [-0.13, 0.05, -8], [0.12, -0.06, 7], [-0.07, -0.08, -4], [0.1, 0.07, 10]];
+  let key = '';
+  const geo = { cw: 0, chMax: 0 };
+  function layout() {
+    cards.forEach(c => {
+      if (c.img && c.img.naturalWidth > 0) c.ar = MG.clamp(c.img.naturalWidth / c.img.naturalHeight, 0.68, 1.5);
+    });
+    const k = cards.map(c => c.ar.toFixed(3)).join(',');
+    if (k === key) return;
+    key = k;
+    const pad = P.frame === 'clean' ? 0 : 14;
+    // every print gets the same AREA (a portrait photo is taller, not bigger)
+    let side = MG.clamp(P.size, 0.35, 0.75) * W * 0.9;
+    const maxH = H * (H > W * 1.2 ? 0.42 : 0.5), maxW = W - 160;
+    cards.forEach(c => {
+      const hh = side / Math.sqrt(c.ar) + 2 * pad, ww = side * Math.sqrt(c.ar) + 2 * pad;
+      side *= Math.min(1, maxH / hh, maxW / ww);
+    });
+    const fanSpan = Math.min(11 * (n - 1), 34);
+    const PILE_N = n === 2 ? [[0, 0, -2.5], [-0.24, 0.07, -9]] : PILE;
+    const poses = sd => cards.map((c, i) => {
+      const w = sd * Math.sqrt(c.ar) + 2 * pad, h = sd / Math.sqrt(c.ar) + 2 * pad;
+      let fx, fy, fr;
+      if (P.layout === 'pile') {
+        const pose = PILE_N[n - 1 - i];
+        fx = pose[0] * sd; fy = pose[1] * sd; fr = pose[2];
+      } else {
+        const a = n > 1 ? -fanSpan / 2 + i * fanSpan / (n - 1) : 0;
+        const R = sd * 1.9;
+        fr = a; fx = R * Math.sin(a * Math.PI / 180); fy = R * (1 - Math.cos(a * Math.PI / 180));
+      }
+      const rr = Math.abs(fr) * Math.PI / 180;
+      const hw = (w * Math.cos(rr) + h * Math.sin(rr)) / 2;
+      return { w, h, fx, fy, fr, x0: fx - hw, x1: fx + hw };
+    });
+    // the whole spread (rotated corners included) must fit the safe column
+    let ps = poses(side);
+    const spanX = Math.max(...ps.map(q => q.x1)) - Math.min(...ps.map(q => q.x0));
+    if (spanX > W - 150) { side *= (W - 150) / spanX; ps = poses(side); }   // x 75-1005 + hold push
+    // caption size depends only on the frame: fit it first so the block
+    // height below uses its real metrics
+    let fs = 0;
+    if (caption) {
+      MG.fit(capT, { width: W - 140, min: 24, max: Math.min(60, H * 0.065), nowrap: true });
+      fs = parseFloat(capT.style.fontSize);
+    }
+    // vertical extent of the spread around the stack centre (rotated
+    // corners included) plus the caption under it; it must sit inside the
+    // safe area (y 8-80% on portrait, where the platform caption/UI band
+    // starts), so shrink the prints when a tall spread cannot fit
+    const sTop = H > W ? 0.095 : 0.065, sBot = H > W ? 0.79 : 0.94;   // margins for the hold push
+    const capGap = sd => 0.04 * sd + 26;
+    const extent = (q, sd) => {
+      let top = 0, bot = 0;
+      q.forEach(o => {
+        const rr = Math.abs(o.fr) * Math.PI / 180;
+        const hv = (o.h * Math.cos(rr) + o.w * Math.sin(rr)) / 2;
+        top = Math.min(top, o.fy - hv); bot = Math.max(bot, o.fy + hv);
+      });
+      return { top, bot, capTop: bot + capGap(sd), end: bot + (caption ? capGap(sd) + fs * 1.2 : 0) };
+    };
+    let ex = extent(ps, side);
+    for (let it = 0; it < 8; it++) {
+      const need = ex.end - ex.top, avail = H * (sBot - sTop);
+      if (need <= avail) break;
+      const fixed = caption ? 26 + fs * 1.2 + 2 * pad : 2 * pad;
+      side *= Math.max(0.5, Math.min(0.98, (avail - fixed) / Math.max(1, need - fixed)));
+      ps = poses(side); ex = extent(ps, side);
+    }
+    const cw = side;                                  // reference width (square print)
+    let chMax = 0;
+    cards.forEach((c, i) => {
+      Object.assign(c, ps[i]);
+      chMax = Math.max(chMax, c.h);
+      c.el.style.width = c.w + 'px';
+      c.el.style.height = c.h + 'px';
+    });
+    const midX = (Math.max(...ps.map(q => q.x1)) + Math.min(...ps.map(q => q.x0))) / 2;
+    cards.forEach(c => { c.fx -= midX; });
+    const spreadY = cards.reduce((m, c) => Math.max(m, Math.abs(c.fy)), 0);
+    const lo = H * sTop - ex.top, hi = H * sBot - ex.end;
+    const cy = lo <= hi ? MG.clamp(P.y * H, lo, hi) : (lo + hi) / 2;
+    cards.forEach(c => {
+      c.left = W / 2 - c.w / 2;
+      c.top = cy - c.h / 2;
+      c.el.style.left = c.left + 'px';
+      c.el.style.top = c.top + 'px';
+    });
+    geo.cw = cw; geo.chMax = chMax; geo.cy = cy;
+    if (caption) {
+      capEl.style.top = (cy + ex.capTop) + 'px';
+      geo.capBottom = cy + ex.end;
+    }
+    // capture box: the spread, its shadows, and the deal path (cards fly in
+    // from below the stack at up to 1.32x scale)
+    const half = Math.max(...cards.map(c => Math.hypot(c.w, c.h) / 2));
+    const y0 = cy - half * 1.1 - spreadY - 40;
+    const y1 = Math.max(cy + ENTRY_Y * H + half * 1.32 + 60, geo.capBottom ? geo.capBottom + 30 : 0);
+    MG.box = [0, Math.max(0, y0), W, Math.min(H, y1)];
+  }
+  layout();
+  // re-layout with real type metrics and the photos' own shapes
+  const fontsLoaded = document.fonts.load("800 40px 'Inter Display'").catch(() => null).then(() => { key = ''; });
+  // placeholders are only for an empty stack: a given photo the browser
+  // cannot decode (HEIC, TIFF, huge scans) fails the item loudly instead
+  const imgsLoaded = placeholder ? null : Promise.all(cards.map((c, i) => c.img.decode().catch(() => {
+    const msg = `photo_stack: ${srcKeys[i]} could not be decoded (unsupported format or too large)`;
+    window.__mgErrors.push(msg);
+    throw new Error(msg);
+  })));
+  MG.ready = Promise.all([fontsLoaded, imgsLoaded]).then(() => { key = ''; layout(); });
+
+  // ── choreography ───────────────────────────────────────────────────────
+  // card i is dealt at T(i); it lands ~0.2 s later (sound cues sit there).
+  // The first card is already in flight on frame 0 (no blank first frame).
+  const T = i => i * 0.22;
+  const dealEnd = T(n - 1) + 0.62;
+  const exitDur = P.exit === 'cut' ? 0 : Math.min(0.28, D * 0.12);
+  const holdEnd = D - exitDur;
+  // After the last card settles the drift is sub-pixel per frame: update it
+  // on every 3rd frame so the hold costs a third of the (expensive) captures.
+  const settleF = Math.ceil(Math.min(dealEnd, holdEnd) * fps), holdEndF = Math.floor(holdEnd * fps), STEP = 3;
+  const wins = [[0, settleF / fps]];
+  for (let f = settleF; f <= holdEndF; f += STEP) wins.push([f / fps, f / fps]);
+  if (exitDur > 0) wins.push([Math.max(0, holdEnd - 1 / fps), D]);
+  MG.active(wins);
+  const quant = t => {
+    const f = Math.round(t * fps);
+    if (f <= settleF) return t;
+    return (settleF + Math.floor((Math.min(f, holdEndF) - settleF) / STEP) * STEP) / fps;
+  };
+  const SPR = { stiffness: 230, damping: 21 };
+
+  MG.frame(t => {
+    layout();
+    const cw = geo.cw;
+    cards.forEach((c, i) => {
+      const t0 = T(i);
+      const k = MG.spring(t, t0, SPR);
+      const side = i % 2 ? -1 : 1;
+      const h = 1 - Math.min(1, k);                  // "height" above the table
+      // bumps: each later landing nudges the cards below it
+      let bx = 0, br = 0;
+      for (let j = i + 1; j < n; j++) {
+        const lt = T(j) + 0.17;
+        if (t > lt) {
+          const e = Math.exp(-(t - lt) * 9) * Math.sin((t - lt) * 30);
+          bx += (j % 2 ? -1 : 1) * 5 * e;
+          br += (j % 2 ? -1 : 1) * 0.6 * e;
+        }
+      }
+      MG.set(c.el, {
+        x: c.fx + side * 0.62 * W * h + bx,
+        y: c.fy + ENTRY_Y * H * h,
+        rotate: c.fr + side * 24 * h + br,
+        scale: 1 + 0.32 * h,
+        opacity: t < t0 ? 0 : 0.35 + 0.65 * MG.range(t, t0, 0.06),
+        blur: (1 - MG.range(t, t0, 0.2)) * 10,
+      });
+      c.el.style.boxShadow =
+        `0 ${(8 + 46 * h).toFixed(1)}px ${(22 + 70 * h).toFixed(1)}px rgba(0,0,0,${(0.42 - 0.18 * h).toFixed(3)}),` +
+        `0 2px 6px rgba(0,0,0,${(0.22 * (1 - h)).toFixed(3)})`;
+      // lower prints darken a touch as more land on top (depth)
+      let above = 0;
+      for (let j = i + 1; j < n; j++) above += MG.ease.outCubic(MG.range(t, T(j) + 0.08, 0.25));
+      c.shade.style.opacity = Math.min(0.32, above * 0.1).toFixed(3);
+    });
+    // constant slow drift of the whole stack through the hold
+    const hd = MG.range(quant(t), Math.min(dealEnd, holdEnd) - 0.4, Math.max(0.5, holdEnd - dealEnd + 0.4));
+    const s = { scale: 1 + 0.024 * hd, rotate: -0.7 * hd, y: -10 * hd };
+    if (exitDur > 0 && t > holdEnd) {
+      const q = MG.ease.inCubic(MG.range(t, holdEnd, exitDur));
+      s.scale *= 1 - 0.07 * q; s.opacity = 1 - q; s.blur = 12 * q; s.y += -20 * q;
+    }
+    MG.set(stack, s);
+    if (caption) {
+      const cp = MG.ease.outCubic(MG.range(t, T(n - 1) + 0.24, 0.3));
+      const cs = { y: 14 * (1 - cp) + (s.y || 0), opacity: cp * (s.opacity ?? 1), blur: 7 * (1 - cp) + (s.blur || 0) };
+      MG.set(capEl, cs);
+    }
+  });
+})();
+</script>
