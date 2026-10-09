@@ -238,8 +238,14 @@ def _validate_and_probe(ctx, edl, item):
     return None, ""
 
 
+# The synthesized kit was rejected by the owner by ear ("cheap, like a 2000s
+# game"). Templates keep their declared sound ROLES so an approved library of
+# real recordings can be mapped onto them, but nothing adds sound by default.
+SFX_DEFAULT = False
+
+
 def add_motion_graphic(ctx, template, start, end=None, params=None, html=None,
-                       layer=None, box=None, mute_captions=None, sfx=True,
+                       layer=None, box=None, mute_captions=None, sfx=None,
                        id=None, purpose=None):
     """Place a premium browser-rendered motion graphic on the program clock."""
     at = _at()
@@ -294,7 +300,7 @@ def add_motion_graphic(ctx, template, start, end=None, params=None, html=None,
     items.append(item)
     edl["motion"] = items
     notes = []
-    cues = _sfx_cues(spec, clean, s, e) if sfx else []
+    cues = _sfx_cues(spec, clean, s, e) if (SFX_DEFAULT if sfx is None else sfx) else []
     if cues:
         notes += _apply_owned_sfx(ctx, edl, mid, cues)
     clamp = ""
@@ -406,8 +412,7 @@ TOOL_SPECS = {
         add_motion_graphic,
         "Place a browser-rendered, After-Effects-grade motion graphic on the PROGRAM clock: "
         "spring/blur entrances, glow, gradients, 3D depth, masks, icon/emoji pops, counters, "
-        "UI cards. One call = a finished composition plus its synced kit sound cues "
-        "(sfx=false to place it silently). start/end are program seconds; end defaults to the "
+        "UI cards. One call = a finished composition (silent; add sound deliberately). start/end are program seconds; end defaults to the "
         "template's natural duration. Cue it to the exact word/beat it amplifies (use word "
         "times from get_kept_transcript). layer='above_captions' (default for designed moments) "
         "or 'below_captions'. Templates that replace the spoken words set mute_captions; pass "

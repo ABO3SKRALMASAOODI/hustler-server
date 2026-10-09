@@ -5741,10 +5741,8 @@ def search_sfx(ctx, query, max_seconds=None):
         mx = float(max_seconds) if max_seconds is not None else None
     except (TypeError, ValueError):
         return "REJECTED: max_seconds must be a number."
-    kit_hits = motion_tools.kit_search(query)
-    kit_text = ("Valmera kit (instant, licence-free — add_sfx(storage_key=<id>, at=...)):\n- "
-                + "\n- ".join(f"{h['id']} ({h['duration_s']:g}s) — {h['use']}" for h in kit_hits)
-                + "\n") if kit_hits else ""
+    # The synthesized kit is not offered: it failed the owner's listening test.
+    kit_text = ""
     memory = getattr(ctx, "tool_failure_memory", {})
     unavailable_until = memory.get("sfx_auth_retry_at", 0)
     try:
@@ -25042,6 +25040,8 @@ def _tool_disabled(name, model=None):
     if name in ("list_motion_templates", "add_motion_graphic",
                 "set_motion_graphic"):
         return not motion_tools.motion_engine.available()
+    if name == "list_sfx_kit":
+        return True     # synthesized kit withdrawn until real recordings replace it
     return False
 
 

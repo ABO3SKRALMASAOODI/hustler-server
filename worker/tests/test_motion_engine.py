@@ -197,8 +197,12 @@ def test_tools_add_set_remove_with_owned_sound_cues(monkeypatch):
     monkeypatch.setattr(motion_tools, "_probe_item", lambda item, W, H, fps=30.0:
                         {"errors": [], "visible_frames": 4, "samples": 4, "bboxes": [[.1, .3, .9, .5]]})
     ctx = _Ctx()
-    out = motion_tools.add_motion_graphic(ctx, "hook_title", 2.0, params={"text": "Hello *world*"})
-    assert out.startswith("EDL v1"), out
+    silent = motion_tools.add_motion_graphic(ctx, "hook_title", 0.5, params={"text": "Quiet"})
+    assert silent.startswith("EDL v1") and not ctx.latest_edl()["json"]["sfx"]   # silent by default
+    assert motion_tools.remove_motion_graphic(ctx, "mg1").startswith("EDL v")
+    out = motion_tools.add_motion_graphic(ctx, "hook_title", 2.0, params={"text": "Hello *world*"},
+                                          sfx=True)
+    assert out.startswith("EDL v3"), out
     edl = ctx.latest_edl()["json"]
     assert edl["motion"][0]["id"] == "mg1" and edl["motion"][0]["end"] == 4.6
     cues = sorted((s["id"], s["at"]) for s in edl["sfx"])
