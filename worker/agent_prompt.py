@@ -224,14 +224,28 @@ def project_state_block(video, index_summary, edl_line, history_lines,
     # that work: a user link/upload, or explicit named-song discovery.
     import sfx_search
     import song_find
+    import music_library
     named = ("A SPECIFIC song they NAME: load acquisition, use find_song "
              "for its link, then fetch_url downloads the pick. "
              if song_find.available() else "")
+    # The CC0 library (restored 2026-10) is the one music source that needs
+    # nothing from the user; it is claimed only when its manifest shipped.
+    if music_library.available():
+        library = ("Music: a built-in CC0 library scores an edit by mood with "
+                   "no upload (list_music_library, then add_library_music; "
+                   "or apply_look with music='auto') — licence-verified, no "
+                   "credit needed. There is no generic catalog search. ")
+        vibe = ("For a genre/vibe request with no link, use the closest "
+                "library mood (say so when their genre is not one of them) "
+                "or a music asset already in the project; ")
+    else:
+        library = "Music: no bundled tracks and no generic catalog search. "
+        vibe = ("For a genre/vibe request with no link, use a music asset "
+                "already in the project or ask for an upload; ")
     lines.append(
-        "Music: no bundled tracks and no generic catalog search. " + named
+        library + named
         + "Any LINK they paste (song URL, YouTube, SoundCloud...) fetch_url "
-          "ingests as music. For a genre/vibe request with no link, use a "
-          "music asset already in the project or ask for an upload; never "
+          "ingests as music. " + vibe + "never "
           "burn turns repeatedly searching. A trending platform sound only "
           "they can provide (upload or a clip carrying it).")
     if sfx_search.available():

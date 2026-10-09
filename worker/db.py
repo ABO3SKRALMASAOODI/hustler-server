@@ -1938,6 +1938,29 @@ def asset_by_key(conn, project_id, storage_key):
         return cur.fetchone()
 
 
+def library_music_used_by_user(conn, user_id, exclude_project_id=None,
+                               limit=24):
+    """CC0 library slugs this user already copied into OTHER projects,
+    newest first (worker/music_library.py registers each copy with
+    meta.library_slug). Lets the library mark and avoid repeats across a
+    user's videos — "do not use the same background music as my previous
+    projects" was a real request."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT a.meta->>'library_slug' AS slug, MAX(a.id) AS last_id
+              FROM assets a
+              JOIN projects p ON p.id = a.project_id
+             WHERE p.user_id = %s
+               AND a.kind = 'music'
+               AND a.meta ? 'library_slug'
+               AND (%s::int IS NULL OR a.project_id <> %s)
+             GROUP BY 1
+             ORDER BY last_id DESC
+             LIMIT %s""", (user_id, exclude_project_id, exclude_project_id,
+                           limit))
+        return [row["slug"] for row in cur.fetchall()]
+
+
 def indexed_clips(conn, project_id, limit=80):
     """Uploaded video clips whose perception pass finished (round 84) —
     every one of these has a filmstrip + transcript in `indexes` keyed by

@@ -152,19 +152,27 @@ def test_a_rewrite_that_still_flips_is_discarded(monkeypatch):
     assert out == _RU_REPLY                    # original, not a second flip
 
 
-# ── the music library: deleted, not retired ──────────────────────────────
+# ── the music library: a catalogue of storage objects, not a pack ────────
 
-def test_music_library_module_is_gone():
-    """2026-08-08: the bundled pack was deleted outright — its 24 tracks
-    were copied to R2 under legacy-music/ and every EDL row in the
-    database rewritten to those plain storage keys, so nothing needs to
-    resolve `library:` ever again."""
-    sys.modules.pop("music_library", None)
-    with pytest.raises(ImportError):
-        importlib.import_module("music_library")
-    assert not os.path.isdir(os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "music"))
+def test_music_library_is_a_whitelist_catalogue_not_a_bundled_pack():
+    """2026-08-08: the bundled pack was deleted — its 24 tracks were copied
+    to R2 under legacy-music/ and every EDL row rewritten to those plain
+    storage keys, so nothing resolves `library:` ever again. 2026-10-09: the
+    CATALOGUE came back (worker/music/manifest.json + licence records) so an
+    autonomous edit can score a reel again; the audio stays out of git and
+    every track's object is a literal legacy-music/ key in the manifest."""
+    import music_library
+    music_dir = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "music")
+    assert sorted(os.listdir(music_dir)) == [
+        "LICENSES.md", "SOURCE_NOTES.md", "manifest.json"]
+    rows = music_library.entries()
+    assert len(rows) == 24
+    assert all(r["storage_key"] == "legacy-music/" + r["file"] for r in rows)
+    assert all(r["license"] == "CC0" for r in rows)
+    # The retired track keeps its licence record but is never offered.
+    assert "upbeat-50-over-the-speed-limit" not in {
+        r["slug"] for r in music_library.catalog()}
 
 
 def test_renderer_treats_every_music_key_as_a_storage_object():
@@ -207,7 +215,7 @@ def test_stale_sfx_scheme_gets_the_honest_web_first_rejection():
 
 def test_unreliable_music_chain_is_retired_but_sfx_search_is_advertised():
     for gone in ("list_sfx_library", "sound_design_pass", "generate_sfx",
-                 "list_music_library", "search_music", "fetch_music",
+                 "search_music", "fetch_music",
                  "research_music", "audition_music_candidates"):
         assert gone not in agent_tools.TOOLS
     assert "search_sfx" in agent_tools.TOOLS
@@ -219,7 +227,8 @@ def test_unreliable_music_chain_is_retired_but_sfx_search_is_advertised():
     assert "no generic catalog search" in state
     assert "search_music" not in state
     assert "search_sfx" in state                # found sounds advertised
-    assert "music library" not in state
+    # The restored CC0 catalogue is advertised (its manifest ships).
+    assert "list_music_library" in state and "add_library_music" in state
 
 
 # ── repairs stay autonomous without hiding incomplete work ─────────────
