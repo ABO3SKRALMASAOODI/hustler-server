@@ -65,7 +65,7 @@
   let hsh = 0; for (const ch of name) hsh = (hsh * 31 + ch.codePointAt(0)) >>> 0;
   const tiles = [['#5B8DEF', '#3A5BD9'], ['#F2994A', '#E0533D'], ['#34C38F', '#1E8E6E'], ['#A06CF0', '#6B46D6'], ['#F06C9B', '#C2416F'], ['#4FB3D9', '#2C7DA8']];
   const tl = tiles[hsh % tiles.length];
-  const W = Math.min(980, 900 * P.scale), u = W / 344;
+  const W = Math.min(950, 900 * P.scale, MG.H * 1.0), u = W / 344;   // H cap for 16:9
   Object.entries({ '--bg': T.bg, '--fg': T.fg, '--sec': T.sec, '--line': T.line, '--rim': T.rim, '--shadow': T.shadow,
     '--u': u + 'px', '--tile': `linear-gradient(145deg, ${tl[0]}, ${tl[1]})` }).forEach(([k, v]) => root.style.setProperty(k, v));
 
@@ -94,6 +94,7 @@
   if (P.image) { imgBox = MG.el('div', 'img el', null, inn); const im = MG.el('img', null, null, imgBox); im.src = P.image; }
   const reposts = String(P.reposts || '').trim(), likesRaw = String(P.likes || '').trim();
   const foot = MG.el('div', 'el', null, inn);
+  if (!reposts && !likesRaw) foot.style.display = 'none';   // no metrics: no footer row
   MG.el('div', 'sep', null, foot);
   const mx = MG.el('div', 'mx', null, foot);
   const ico = {
@@ -155,7 +156,7 @@
     card.style.left = left + 'px'; card.style.top = top + 'px';
     L = { h, top };
     MG.box = [Math.max(0, left - 90), Math.max(0, top - 110), Math.min(MG.W, left + W + 90), Math.min(MG.H, top + h + 140)];
-    const wins = [[0, 0.9], [tLike - 0.02, tLike + 0.48], [exitAt - 0.02, D]];
+    const wins = [[0, 1.2], [tLike - 0.02, tLike + 0.75], [exitAt - 0.02, D]];
     for (let k = Math.ceil(DF * 0.95); k / DF < exitAt; k++) wins.push([k / DF - 1e-4, k / DF + 1 / MG.fps - 2e-4]);
     MG.active(wins);
   };
@@ -172,9 +173,9 @@
       y: (1 - k) * 120 + dr.y * dk,
       z: (1 - k) * -420,
       rx: 3 + (1 - k) * 34 + dr.rx * dk,
-      ry: -4 + (1 - k) * -26 + dr.ry * dk,
+      ry: -3 + (1 - k) * -26 + dr.ry * dk,
       rotate: (1 - k) * -5,
-      opacity: MG.range(t, 0, 0.16),
+      opacity: 0.3 + 0.7 * MG.range(t, 0, 0.16),
       blur: (1 - MG.range(t, 0, 0.22)) * 10
     };
     if (t > exitAt) {
@@ -194,7 +195,7 @@
       const lp = MG.range(t, tLike, 0.07);
       heartF.setAttribute('opacity', lp.toFixed(3));
       heart.setAttribute('opacity', (1 - lp).toFixed(3));
-      const hs = t < tLike ? 1 : 0.6 + 0.4 * MG.spring(t, tLike, { stiffness: 420, damping: 11 });
+      const hs = t < tLike ? 1 : 0.6 + 0.4 * MG.spring(t, tLike, { stiffness: 420, damping: 15 });
       heartF.style.transform = `scale(${hs.toFixed(4)})`;
       const bp = MG.range(t, tLike + 0.02, 0.4), be = MG.ease.outCubic(bp);
       MG.$$('circle[data-a]', burst).forEach(c => {

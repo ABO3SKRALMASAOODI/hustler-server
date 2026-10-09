@@ -49,7 +49,7 @@
   const dark = P.theme !== 'light';
   const T = dark ? { themrim: 'rgba(255,255,255,.07)', them: '#2A2A2E', themfg: '#F5F5F7', sec: 'rgba(235,235,245,.62)', fg: '#F5F5F7', dot: 'rgba(235,235,245,.62)' }
                  : { themrim: 'rgba(0,0,0,0)', them: '#E9E9EC', themfg: '#0B0B0D', sec: 'rgba(60,60,67,.66)', fg: '#0B0B0D', dot: 'rgba(60,60,67,.55)' };
-  const W = Math.min(1000, 900 * P.scale), u = W / 310;
+  const W = Math.min(1000, 900 * P.scale, MG.H * 0.9), u = W / 310;   // H cap for 16:9
   Object.entries({ '--themrim': T.themrim, '--them': T.them, '--themfg': T.themfg, '--sec': T.sec, '--fg': T.fg, '--dot': T.dot, '--u': u + 'px' })
     .forEach(([k, v]) => root.style.setProperty(k, v));
   const vp = MG.$('#vp'), th = MG.$('#th');
@@ -61,7 +61,7 @@
   const rows = (P.messages || []).map(r => ({ text: String(r.text || '').trim(), side: /^(me|right|you|sent)$/i.test(String(r.side || '').trim()) ? 'me' : 'them', at: parseFloat(r.at) }))
     .filter(r => r.text);
   const n = rows.length;
-  const every = n > 1 ? Math.min(0.75, Math.max(0.3, (D - 1.1 - 0.25) / (n - 1))) : 0.75;
+  const every = n > 1 && 0.25 + (n - 1) * 0.75 > D - 0.55 ? Math.max(0.3, (D - 0.8 - 0.25) / (n - 1)) : 0.75;
   let prev = -1;
   rows.forEach((r, i) => {
     let t = isFinite(r.at) && r.at >= 0 ? r.at : 0.25 + i * every;
@@ -148,7 +148,7 @@
     const exitDur = Math.min(0.26, D * 0.1);
     L.exitAt = D - exitDur; L.exitDur = exitDur;
     const wins = [[L.exitAt - 0.02, D]];
-    items.forEach(m => wins.push([(m.ty ? m.tyIn : m.r.t) - 0.02, m.r.t + 0.62]));
+    items.forEach(m => wins.push([(m.ty ? m.tyIn : m.r.t) - 0.02, m.r.t + 0.7]));
     if (rc) wins.push([rows[n - 1].t + 0.3, rows[n - 1].t + 0.65]);
     MG.active(wins);
   };

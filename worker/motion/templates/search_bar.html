@@ -50,7 +50,7 @@
     rim: 'inset 0 0 0 1px rgba(255,255,255,.6), inset 0 -1px 0 rgba(0,0,0,.05)', hl: 'rgba(47,124,246,.12)',
     shadow: '0 2px 8px rgba(0,0,0,.12), 0 20px 50px rgba(0,0,0,.32)', ringc: 'rgba(47,124,246,.45)'
   };
-  const W = Math.min(980, 900 * P.scale), u = W / 344;
+  const W = Math.min(980, 900 * P.scale, MG.H * 0.8), u = W / 344;   // H cap for 16:9
   Object.entries({ '--fill': T.fill, '--fg': T.fg, '--sec': T.sec, '--line': T.line, '--rim': T.rim, '--hl': T.hl,
     '--shadow': T.shadow, '--ringc': T.ringc, '--tint': tint, '--u': u + 'px' }).forEach(([k, v]) => root.style.setProperty(k, v));
   const grp = MG.$('#grp');
@@ -89,11 +89,12 @@
       const r = MG.el('div', 'row', null, pn);
       r.style.height = rowH + 'px';
       const hl = MG.el('div', 'hl', null, r);
+      const hp = MG.el('div', 'hl', null, r);   // press flash layer
       r.insertAdjacentHTML('beforeend', mag(T.sec));
       const lb = MG.el('div', 'lb', null, r);
       r.insertAdjacentHTML('beforeend', arrow);
       if (i < sugg.length - 1) MG.el('div', 'div', null, r);
-      rows.push({ r, hl, lb, s, last: '' });
+      rows.push({ r, hl, hp, lb, s, last: '' });
     });
   }
   // label = typed prefix (regular) + completion (bold), like real search UIs
@@ -135,7 +136,7 @@
     grp.style.top = top + 'px';
     const x0 = (MG.W - W) / 2;
     MG.box = [Math.max(0, x0 - 70), top - 60, Math.min(MG.W, x0 + W + 70), top + total + 100];
-    const wins = [[0, 0.62], [tOpen - 0.02, tOpen + 0.7], [tPick - 0.02, tPress + 0.4], [exitAt - 0.02, D]];
+    const wins = [[0, 0.62], [tOpen - 0.02, tOpen + 0.7], [tPick - 0.02, tPress + 0.7], [exitAt - 0.02, D]];
     keys.forEach(k => wins.push([k - 1e-4, k + 1 / MG.fps - 2e-4]));
     for (let b = 0.53; b < D; b += 0.53) wins.push([b - 1e-4, b + 1 / MG.fps - 2e-4]);
     MG.active(wins);
@@ -148,7 +149,7 @@
     if (!L) layout();
     // bar entrance + focus ring
     const k = MG.spring(t, 0, { stiffness: 300, damping: 23 });
-    let g = { y: (1 - k) * 40, scale: 0.92 + 0.08 * Math.min(k, 1.02), opacity: MG.range(t, 0, 0.1), blur: (1 - MG.range(t, 0, 0.18)) * 8 };
+    let g = { y: (1 - k) * 40, scale: 0.92 + 0.08 * Math.min(k, 1.02), opacity: 0.3 + 0.7 * MG.range(t, 0, 0.1), blur: (1 - MG.range(t, 0, 0.18)) * 8 };
     ring.style.opacity = MG.range(t, 0.3, 0.2).toFixed(3);
     // typing
     let n = 0; while (n < keys.length && t >= keys[n]) n++;
@@ -176,11 +177,11 @@
         const t0 = tOpen + 0.04 + i * 0.05;
         MG.set(r.r, { y: (1 - MG.ease.outCubic(MG.range(t, t0, 0.3))) * 14 * u, opacity: MG.range(t, t0, 0.16) });
         if (i === pick) {
-          const flash = t >= tPress - 0.02 ? 1 + 1.2 * (1 - MG.range(t, tPress + 0.06, 0.3)) : 1;
-          r.hl.style.opacity = (MG.ease.outCubic(MG.range(t, tPick, 0.16)) * flash).toFixed(3);
+          r.hl.style.opacity = MG.ease.outCubic(MG.range(t, tPick, 0.16)).toFixed(3);
+          r.hp.style.opacity = (t >= tPress - 0.03 ? MG.range(t, tPress - 0.03, 0.05) * (1 - MG.range(t, tPress + 0.08, 0.3)) : 0).toFixed(3);
           const ps = t >= tPress - 0.05 && t < tPress + 0.05 ? 1 - 0.035 * MG.ease.outQuad(MG.range(t, tPress - 0.05, 0.07))
             : t >= tPress + 0.05 ? 0.965 + 0.035 * MG.spring(t, tPress + 0.05, { stiffness: 420, damping: 16 }) : 1;
-          r.hl.style.transform = `scale(${ps.toFixed(4)})`;
+          r.hl.style.transform = r.hp.style.transform = `scale(${ps.toFixed(4)})`;
           r.lb.style.transform = `scale(${ps.toFixed(4)})`;
         }
       });

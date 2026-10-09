@@ -72,7 +72,8 @@
     .forEach(([k, v]) => root.style.setProperty(k, v));
 
   // ── geometry (u = px per design point) ───────────────────────────────
-  const u = (isCard ? 2.55 : 2.6) * P.scale;
+  const u = Math.min((isCard ? 2.55 : 2.6) * P.scale, MG.H * (isCard ? 0.0029 : 0.0035));   // H cap for 16:9
+  const K = u / (isCard ? 2.55 : 2.6);   // effective scale (cursor size + path)
   const card = MG.$('#card');
   const cw = isCard ? 214 * u : Math.min(1000, 364 * u);
   let ch = isCard ? 262 * u : 82 * u;
@@ -132,7 +133,7 @@
   if (isCard) { btn.style.marginTop = (16 * u) + 'px'; }
 
   const cur = MG.$('#cur');
-  const cs = 52 * P.scale;
+  const cs = 52 * K;
   cur.innerHTML = `<svg width="${cs * 1.0}" height="${cs * 1.45}" viewBox="0 0 20 29"><path d="M2 1.6v21.6c0 .9 1 1.3 1.7.7l4.6-4.3 3.3 7.6c.3.6 1 .9 1.6.6l2.4-1c.6-.3.9-1 .6-1.6l-3.3-7.4h6.4c.9 0 1.4-1.1.7-1.7L3.7 .9C3 .3 2 .7 2 1.6z" fill="#111" stroke="#fff" stroke-width="1.6" stroke-linejoin="round"/></svg>`;
   const tap = MG.el('div', 'tap', null, MG.$('.mg-root'));
 
@@ -180,16 +181,16 @@
     const br = btn.getBoundingClientRect();
     const bx = br.left + br.width * 0.56, by = br.top + br.height * 0.62;
     L = { bx, by, bw: br.width, bh: br.height, cx, cy,
-          p0: [Math.min(MG.W + 40, bx + 260 * P.scale), by + 300 * P.scale],
-          p1: [bx + 210 * P.scale, by + 40 * P.scale], p2: [bx + 30 * P.scale, by + 70 * P.scale] };
+          p0: [Math.min(MG.W + 40, bx + 260 * K), by + 300 * K],
+          p1: [bx + 210 * K, by + 40 * K], p2: [bx + 30 * K, by + 70 * K] };
     const rr = br.width * 0.75;
     Object.assign(rip.style, { width: 2 * rr + 'px', height: 2 * rr + 'px', left: (br.width * 0.56 - rr) + 'px', top: (br.height * 0.62 - rr) + 'px' });
     const tr = 26 * u;
     Object.assign(tap.style, { width: 2 * tr + 'px', height: 2 * tr + 'px', left: (bx - tr) + 'px', top: (by - tr) + 'px' });
-    const curExtra = P.cursor ? 320 * P.scale : 0;
+    const curExtra = P.cursor ? 320 * K : 0;
     MG.box = [Math.max(0, cx - 70), cy - 60, Math.min(MG.W, Math.max(cx + cw, bx + curExtra) + 70), Math.max(cy + ch, by + curExtra) + 90];
     const wins = [[0, Math.max(0.62, tBadge + 0.45)], [0.5, tRel + 0.55], [exitAt - 0.02, D]];
-    if (P.cursor) wins.push([tRel + 0.4, tRel + 1.15]);
+    if (P.cursor) wins.push([tRel + 0.3, tRel + 0.92]);
     MG.active(wins);
     return L;
   };
@@ -201,7 +202,7 @@
     if (!L) layout();
     // card entrance: spring with a little scale + blur-to-sharp
     const k = MG.spring(t, 0, { stiffness: 300, damping: 22 });
-    let cs0 = { y: (1 - k) * 40, scale: 0.9 + 0.1 * Math.min(k, 1.03), opacity: MG.range(t, 0, 0.1), blur: (1 - MG.range(t, 0, 0.18)) * 8 };
+    let cs0 = { y: (1 - k) * 40, scale: 0.9 + 0.1 * Math.min(k, 1.03), opacity: 0.3 + 0.7 * MG.range(t, 0, 0.1), blur: (1 - MG.range(t, 0, 0.18)) * 8 };
     // ring draws on clockwise
     const rc = MG.$('#rc');
     if (rc) MG.draw(rc, MG.ease.outCubic(MG.range(t, tRing, 0.42)));
@@ -231,8 +232,8 @@
       let sc = 1, op = MG.range(t, tIn, 0.12);
       if (t >= tPress - 0.02 && t < tRel + 0.02) sc = 1 - 0.14 * MG.ease.outQuad(MG.range(t, tPress - 0.02, 0.06));
       else if (t >= tRel + 0.02) sc = 0.86 + 0.14 * MG.spring(t, tRel + 0.02, { stiffness: 400, damping: 18 });
-      const lv = MG.ease.inOutCubic(MG.range(t, tRel + 0.45, 0.6));
-      x += lv * 70 * P.scale; y += lv * 90 * P.scale; op *= 1 - MG.range(t, tRel + 0.6, 0.45);
+      const lv = MG.ease.inOutCubic(MG.range(t, tRel + 0.32, 0.5));
+      x += lv * 70 * K; y += lv * 90 * K; op *= 1 - MG.range(t, tRel + 0.42, 0.4);
       MG.set(cur, { x, y, scale: sc, opacity: op });
     } else {
       const tp = MG.range(t, tPress, 0.4);

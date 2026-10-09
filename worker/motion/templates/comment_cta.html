@@ -63,7 +63,7 @@
     '--shadow': T.shadow, '--grain': T.grain, '--tint': tint, '--acc': P.accent })
     .forEach(([k, v]) => root.style.setProperty(k, v));
 
-  const W = Math.min(980, 940 * P.scale), u = W / 344;
+  const W = Math.min(980, 940 * P.scale, MG.H * 0.85), u = W / 344;   // H cap for 16:9 / 1:1
   root.style.setProperty('--u', u + 'px');
   const blk = MG.$('#blk');
   blk.style.width = W + 'px';
@@ -150,7 +150,7 @@
     let y = 0, hlH = 0;
     if (hl) {
       // fit: largest size that keeps the headline to two lines in the column
-      const maxFs = 86 * P.scale, minFs = 36 * P.scale;
+      const maxFs = 86 * W / 940, minFs = 36 * W / 940;
       const lines = () => new Set(words.map(w => Math.round(w.el.offsetTop / 4))).size;
       let fs = maxFs;
       for (; fs > minFs; fs -= 2) {
@@ -160,6 +160,15 @@
       hlH = hl.getBoundingClientRect().height;
       y = hlH + 34 * u;
     }
+    // long keywords: shrink the typed text (and the posted copy) to fit the field
+    txt.textContent = kw;
+    let kfs = 17 * u;
+    while (typed.scrollWidth > fld.clientWidth - 4 * u && kfs > 11 * u) { kfs -= 0.25 * u; fld.style.fontSize = kfs + 'px'; }
+    txt.textContent = '';
+    ph.style.fontSize = (17 * u) + 'px';
+    const msgEl = MG.$('.msg', cm);
+    msgEl.style.fontSize = kfs + 'px';
+    cm.style.maxWidth = W + 'px';
     const cmH = cm.getBoundingClientRect().height;
     cm.style.top = y + 'px';
     const cmpTop = y + cmH + 12 * u;
@@ -176,8 +185,11 @@
     // moving windows (+ caret blink toggles during waits/holds)
     // typing only changes the picture on each key press (+ the send button
     // waking up), so declare those instants instead of the whole span
-    const wins = [[0, 0.68], [keys.length ? keys[0] - 0.01 : tType0, (keys.length ? keys[0] : tType0) + 0.3],
-                  [tSend - 0.09, tPost + 0.5], [exitAt - 0.02, D]];
+    // the keyword bloom decays for ~0.85 s after its word lands
+    const kwI = words.findIndex(w => w.kw);
+    const introEnd = Math.max(0.68, (words.length - 1) * 0.045 + 0.45, kwI >= 0 ? kwI * 0.045 + 0.92 : 0);
+    const wins = [[0, introEnd], [keys.length ? keys[0] - 0.01 : tType0, (keys.length ? keys[0] : tType0) + 0.3],
+                  [tSend - 0.09, tPost + 0.62], [exitAt - 0.02, D]];
     keys.forEach(k => wins.push([k - 1e-4, k + 1 / MG.fps - 2e-4]));
     for (let b = 0.53; b < D; b += 0.53) wins.push([b - 1e-4, b + 1 / MG.fps - 2e-4]);
     MG.active(wins);
@@ -190,9 +202,9 @@
     if (!L) L = layout();
     // headline: rise + blur-to-sharp, keyword pops with a bloom
     words.forEach((w, i) => {
-      const t0 = 0.04 + i * 0.045;
+      const t0 = i * 0.045;
       const p = MG.ease.outCubic(MG.range(t, t0, 0.34));
-      const s = { y: (1 - p) * 22, opacity: MG.range(t, t0, 0.16), blur: (1 - MG.range(t, t0, 0.24)) * 9 };
+      const s = { y: (1 - p) * 22, opacity: (i === 0 ? 0.3 + 0.7 * MG.range(t, 0, 0.16) : MG.range(t, t0, 0.16)), blur: (1 - MG.range(t, t0, 0.24)) * 9 };
       if (w.kw) {
         const k = MG.spring(t, t0 + 0.06, { stiffness: 320, damping: 16 });
         s.scale = 1.22 - 0.22 * k;
@@ -202,8 +214,10 @@
       MG.set(w.el, s);
     });
     // composer entrance (spring, slight scale) shortly after the headline
-    const ce = MG.spring(t, 0.12, { stiffness: 300, damping: 24 });
-    MG.set(cmp, { y: (1 - ce) * 46, scale: 0.94 + 0.06 * Math.min(ce, 1.02), opacity: MG.range(t, 0.12, 0.12), blur: (1 - MG.range(t, 0.12, 0.2)) * 8 });
+    const tC = hl ? 0.12 : 0;
+    const ce = MG.spring(t, tC, { stiffness: 300, damping: 24 });
+    MG.set(cmp, { y: (1 - ce) * 46, scale: 0.94 + 0.06 * Math.min(ce, 1.02),
+                  opacity: hl ? MG.range(t, tC, 0.12) : 0.3 + 0.7 * MG.range(t, 0, 0.12), blur: (1 - MG.range(t, tC, 0.2)) * 8 });
     // typing
     let n = 0; while (n < keys.length && t >= keys[n]) n++;
     const sent = t >= tSend + 0.06;

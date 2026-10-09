@@ -72,7 +72,7 @@
   root.style.setProperty('--shadow', T.shadow); root.style.setProperty('--grain', T.grain);
   root.style.setProperty('--noise', noise); root.style.setProperty('--dimc', T.dimc);
 
-  const W = Math.min(1010, 960 * P.scale), u = W / 360;
+  const W = Math.min(1010, 960 * P.scale, MG.H * 0.9), u = W / 360;   // H cap keeps 16:9 phone-sized
   root.style.setProperty('--u', u + 'px');
   const stage = MG.$('#stage');
   stage.style.width = W + 'px';
@@ -116,12 +116,12 @@
     let top = MG.H * P.y - blockH / 2;
     top = MG.clamp(top, MG.H * 0.035, Math.max(MG.H * 0.035, MG.H * 0.93 - blockH));
     stage.style.top = top + 'px';
-    travel = Math.min(top + maxH + 30, 240 * P.scale);
+    travel = Math.min(top + maxH + 30, 240 * W / 960);
     const sideX = (MG.W - W) / 2;
     MG.box = [sideX - 70, top - travel - 70, sideX + W + 70, top + blockH + 90];
     exitDur = Math.min(0.26, D * 0.12); exitAt = D - exitDur;
     const wins = [[0, 0.8], [exitAt - 0.02, D]];
-    cards.slice(1).forEach(c => wins.push([c.t0 - 0.02, c.t0 + 0.85]));
+    cards.slice(1).forEach(c => wins.push([c.t0 - 0.06, c.t0 + 0.85]));   // older content fades from t0 - 0.04
     MG.active(wins);
     return true;
   };
@@ -137,7 +137,7 @@
       const s = {
         y: -(1 - p) * travel,
         scale: 0.93 + 0.07 * Math.min(p, 1.02),
-        opacity: MG.range(t, c.t0, 0.08),
+        opacity: k === 0 ? 0.3 + 0.7 * MG.range(t, 0, 0.08) : MG.range(t, c.t0, 0.08),
         blur: (1 - MG.range(t, c.t0, 0.17)) * 7
       };
       // Recede behind every newer card that has arrived (iOS stack): the
