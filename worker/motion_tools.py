@@ -229,10 +229,8 @@ def _sfx_cues(spec, params, start, end, seed="", with_dur=False):
     ``repeat`` sounds once per entry of a list param: ``from`` +
     i*``every``; optional ``fit``/``min_every`` tighten ``every`` to
     (duration - fit)/(n - 1), ``require`` skips rows whose named field is
-    blank, and ``field``/``offset`` use a row's own time. A ``repeat`` over a
-    text param with ``rate`` (chars/second, a number or a param name) sounds
-    once per ``every`` seconds of typing. ``dur`` caps how long the sound
-    plays (returned as a 4th element when with_dur)."""
+    blank, and ``field``/``offset`` use a row's own time. ``dur`` caps how
+    long the sound plays (returned as a 4th element when with_dur)."""
     cues = []
     for n, c in enumerate(spec.get("sfx") or []):
         if not _cue_applies(c, params):
@@ -265,19 +263,6 @@ def _sfx_cues(spec, params, start, end, seed="", with_dur=False):
                         v = min(max(v, 0.0), max(0.0, (end - start) - 0.5))   # same clamp as the template
                         off = v + float(rep.get("offset", 0.0))
                 cues.append((round(start + off, 3), row["id"], gain, dur))
-            continue
-        if rep and isinstance(params.get(rep.get("param")), str) and rep.get("rate") is not None:
-            chars = _text_len(params, rep.get("param"))
-            rate = rep.get("rate")
-            if isinstance(rate, str):
-                rate = params.get(rate)
-            try:
-                rate, every = float(rate or 0), float(rep.get("every", 1.0))
-            except (TypeError, ValueError):
-                rate, every = 0.0, 1.0
-            k = max(1, -(-chars // max(1, int(rate * every)))) if chars and rate > 0 and every > 0 else 1
-            for i in range(min(k, 8)):
-                cues.append((round(start + float(rep.get("from", at)) + i * every, 3), row["id"], gain, dur))
             continue
         cues.append((round(t, 3), row["id"], gain, dur))
     cues = [c for c in cues if start - 0.01 <= c[0] <= end]

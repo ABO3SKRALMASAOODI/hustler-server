@@ -1,0 +1,176 @@
+<!--MG-SPEC {"title": "Typewriter", "category": "type",
+ "description": "Text typed character by character (natural rhythm around cps, pauses after punctuation) with a bar or block cursor, in sans or mono, optionally inside a dark glass pill that grows with the text. Use for a prompt, search, a typed thought or a 'note to self' beat; the cursor blinks three times after typing, then hides.",
+ "duration": 3.0, "layer": "above_captions", "mutes_captions": false,
+ "params": {
+  "text": {"type": "text", "required": true, "max": 140, "hint": "1-3 short lines (newline breaks a line); *star* a word for the accent colour"},
+  "cps": {"type": "float", "min": 8, "max": 80, "default": 28, "hint": "characters per second"},
+  "font": {"type": "enum", "values": ["mono", "sans"], "default": "mono"},
+  "cursor": {"type": "enum", "values": ["bar", "block", "none"], "default": "bar"},
+  "plate": {"type": "bool", "default": false, "hint": "dark glass pill/plate behind the text"},
+  "layout": {"type": "enum", "values": ["center", "left"], "default": "center", "hint": "center = each line re-centres as it types; left = fixed left-aligned layout"},
+  "size": {"type": "float", "min": 0.6, "max": 1.8, "default": 1.0},
+  "color": {"type": "color", "default": "#F8F6F2"},
+  "accent": {"type": "color", "default": "#FFD400"},
+  "y": {"type": "float", "min": 0.1, "max": 0.82, "default": 0.62},
+  "exit": {"type": "enum", "values": ["fade", "cut"], "default": "fade"}
+ },
+ "example": {"text": "how do I make my edits look *expensive*?", "font": "sans", "plate": true},
+ "sfx": [{"at": 0.04, "kind": "typing", "dur": {"param": "text", "rate": "cps", "min": 0.3, "max": 2.3}}]} -->
+<style>
+  .tw{position:absolute;left:0;width:100%}
+  .plate{position:absolute;background:linear-gradient(180deg,rgba(34,35,40,.80),rgba(14,15,18,.84));
+    border:1px solid rgba(255,255,255,.13);box-shadow:0 18px 50px rgba(0,0,0,.38),inset 0 1px 0 rgba(255,255,255,.10);
+    will-change:transform,opacity}
+  .lines{position:absolute;left:0;width:100%}
+  .ln{white-space:pre;position:relative}
+  .ch{white-space:pre}
+  .cur{position:absolute;will-change:opacity,transform}
+  .meas{position:absolute;left:-9999px;top:0;white-space:pre-wrap;visibility:hidden}
+</style>
+<div class="mg-root"><div class="tw" id="tw"><div class="plate" id="plate"></div><div class="lines" id="lines"></div><div class="cur" id="cur"></div></div></div>
+<script>
+(() => {
+  const P = MG.params, W = MG.W, H = MG.H, D = MG.duration;
+  const tw = MG.$('#tw'), plateEl = MG.$('#plate'), linesEl = MG.$('#lines'), cur = MG.$('#cur');
+  const FAM = new Set(Array.from(document.fonts, f => f.family.replace(/["']/g, '')));
+  const mono = P.font === 'mono';
+  const F = mono
+    ? { css: `'JetBrains Mono','IBM Plex Mono','SFMono-Regular',Menlo,Consolas,ui-monospace,monospace`, weight: FAM.has('JetBrains Mono') ? 500 : 500, track: '-0.01em' }
+    : { css: FAM.has('Inter') ? `'Inter','Inter Display',sans-serif` : `'Inter Display',sans-serif`, weight: FAM.has('Inter') ? 600 : 700, track: '-0.018em' };
+  [linesEl].forEach(e => Object.assign(e.style, { fontFamily: F.css, fontWeight: F.weight, letterSpacing: F.track, color: P.color }));
+
+  // ── characters (stars mark accent words and are not typed) ──
+  const chars = [];
+  String(P.text || '').replace(/\r/g, '').trim().split(/(\*[^*\n]+\*)/).forEach(seg => {
+    const acc = /^\*[^*]+\*$/.test(seg);
+    Array.from(acc ? seg.slice(1, -1) : seg).forEach(c => chars.push({ c, acc }));
+  });
+  // natural rhythm: +-25% jitter per key, small holds after punctuation and line ends
+  const rnd = MG.rand(17 + chars.length), cps = Math.max(1, P.cps);
+  const T0 = P.plate ? 0.12 : 0.0;
+  let tt = T0;
+  chars.forEach(ch => {
+    tt += (1 / cps) * (0.75 + 0.5 * rnd());
+    ch.t = tt;
+    if (/[.,!?;:…]/.test(ch.c)) tt += 0.13;
+    if (ch.c === '\n') tt += 0.12;
+  });
+  const typeEnd = chars.length ? chars[chars.length - 1].t : T0;
+
+  // ── layout: pre-break lines once, then type into fixed lines ──
+  const fs = Math.round((mono ? 58 : 64) * P.size * Math.min(1, Math.max(0.62, H / 1920 + 0.12)));
+  const padX = P.plate ? fs * 0.62 : 0, padY = P.plate ? fs * 0.42 : 0;
+  const maxW = Math.min(W * 0.84, W - 120) - 2 * padX;
+  let lines = [], lineH = fs * 1.3;
+  const build = () => {
+    linesEl.textContent = '';
+    const meas = MG.el('div', 'meas', null, tw);
+    Object.assign(meas.style, { fontFamily: F.css, fontWeight: F.weight, letterSpacing: F.track,
+      fontSize: fs + 'px', lineHeight: lineH + 'px', width: maxW + 'px' });
+    const spans = chars.map(ch => { const e = MG.el('span', null, ch.c, meas); e.style.whiteSpace = 'pre-wrap'; return e; });
+    const breakAt = (w) => {
+      meas.style.width = w + 'px';
+      const groups = [];
+      let top = null;
+      spans.forEach((sp, i) => {
+        if (chars[i].c === '\n') { groups.push([]); top = null; return; }
+        const y = sp.offsetTop;
+        if (top === null || Math.abs(y - top) > lineH * 0.5) {
+          if (top !== null || !groups.length) groups.push([]);
+          top = y;
+        }
+        groups[groups.length - 1].push(i);
+      });
+      return groups;
+    };
+    // balanced rag: the narrowest measure that keeps the same line count (no widows)
+    let groups = breakAt(maxW);
+    const n = groups.length;
+    if (n > 1) {
+      let lo = maxW * 0.45, hi = maxW;
+      for (let it = 0; it < 9; it++) { const mid = (lo + hi) / 2; if (breakAt(mid).length > n) lo = mid; else hi = mid; }
+      groups = breakAt(hi);
+    }
+    meas.remove();
+    lines = groups.map(g => {
+      while (g.length && chars[g[g.length - 1]].c === ' ') g.pop();   // no trailing spaces
+      while (g.length && chars[g[0]].c === ' ') g.shift();
+      const el = MG.el('div', 'ln', null, linesEl);
+      Object.assign(el.style, { fontSize: fs + 'px', lineHeight: lineH + 'px', height: lineH + 'px',
+        textAlign: P.layout === 'left' ? 'left' : 'center' });
+      const cs = g.map(i => { const s = MG.el('span', 'ch', chars[i].c, el); if (chars[i].acc) s.style.color = P.accent; return { i, el: s }; });
+      return { el, cs };
+    }).filter((l, k, a) => l.cs.length || k < a.length - 1);
+    if (!lines.length) lines = [{ el: MG.el('div', 'ln', null, linesEl), cs: [] }];
+    // left layout: a fixed column whose width is the longest line
+    if (P.layout === 'left') {
+      const wMax = Math.max(...lines.map(l => l.cs.reduce((a, c) => a + c.el.offsetWidth, 0)), fs);
+      linesEl.style.width = wMax + 'px';
+      linesEl.style.left = (W / 2 - wMax / 2) + 'px';
+    } else { linesEl.style.width = W + 'px'; linesEl.style.left = '0px'; }
+    const blockH = lines.length * lineH;
+    const top0 = Math.min(Math.max(H * P.y - blockH / 2, H * 0.07), H * 0.86 - blockH);
+    linesEl.style.top = top0 + 'px';
+    const shadow = P.plate ? 'none' : `0 ${fs * 0.04}px ${fs * 0.32}px rgba(0,0,0,.55), 0 0 ${fs * 0.06}px rgba(0,0,0,.35)`;
+    linesEl.style.textShadow = shadow;
+    // cursor
+    const cw = P.cursor === 'block' ? fs * 0.56 : Math.max(3, fs * 0.075);
+    Object.assign(cur.style, { width: cw + 'px', height: (P.cursor === 'block' ? fs * 1.08 : fs * 1.02) + 'px',
+      background: P.color, borderRadius: P.cursor === 'block' ? '2px' : (cw / 2) + 'px',
+      boxShadow: P.plate ? 'none' : '0 0 14px rgba(0,0,0,.4)', display: P.cursor === 'none' ? 'none' : 'block' });
+    const fullW = P.layout === 'left' ? parseFloat(linesEl.style.width) : Math.max(...lines.map(l => l.cs.reduce((a, c) => a + c.el.offsetWidth, 0)), fs);
+    MG.box = [Math.max(0, W / 2 - fullW / 2 - padX - 60), Math.max(0, top0 - padY - 60),
+              Math.min(W, W / 2 + fullW / 2 + padX + 60), Math.min(H, top0 + blockH + padY + 70)];
+  };
+  build();
+  MG.ready = document.fonts.load(`${F.weight} ${fs}px ${F.css}`).catch(() => 0).then(() => document.fonts.ready).then(build);
+
+  // ── per frame: reveal typed chars, place cursor, size the plate ──
+  const BLINK = 0.25, exitDur = P.exit === 'fade' ? 0.2 : 0;
+  MG.active([[0, Math.min(D, typeEnd + 0.15 + 6 * BLINK)], [Math.max(0, D - exitDur - 0.04), D]]);
+  MG.frame(t => {
+    let last = null, lastLine = 0, x0 = W, x1 = 0, y0 = H, y1 = 0, any = false;
+    lines.forEach((l, k) => {
+      let shown = 0;
+      l.cs.forEach(c => {
+        const on = chars[c.i].t <= t + 1e-6;
+        if (P.layout === 'left') c.el.style.visibility = on ? 'visible' : 'hidden';
+        else c.el.style.display = on ? '' : 'none';
+        if (on) { shown++; last = c.el; lastLine = k; }
+      });
+      // a line counts as started once any of its chars is typed
+      if (shown) {
+        any = true;
+        const r = l.el.getBoundingClientRect();
+        const first = l.cs[0].el.getBoundingClientRect(), end = l.cs[shown - 1].el.getBoundingClientRect();
+        x0 = Math.min(x0, first.left); x1 = Math.max(x1, end.right); y0 = Math.min(y0, r.top); y1 = Math.max(y1, r.bottom);
+      }
+    });
+    // cursor: after the last typed char, or at the first line's start before typing
+    let cx, cy, l0 = lines[lastLine];
+    const lr = l0.el.getBoundingClientRect();
+    if (last) { const r = last.getBoundingClientRect(); cx = r.right + fs * 0.06; }
+    else cx = P.layout === 'left' ? lr.left : W / 2 - parseFloat(cur.style.width) / 2;
+    cy = lr.top + (lineH - parseFloat(cur.style.height)) / 2 + fs * 0.02;
+    if (!any) { x0 = cx; x1 = cx + parseFloat(cur.style.width); y0 = lr.top; y1 = lr.bottom; }
+    x1 = Math.max(x1, cx + parseFloat(cur.style.width));
+    MG.set(cur, { x: cx, y: cy });
+    cur.style.left = '0px'; cur.style.top = '0px';
+    let co = 1;
+    if (t > typeEnd + 0.15) { const ph = Math.floor((t - typeEnd - 0.15) / BLINK); co = ph >= 6 ? 0 : (ph % 2 === 0 ? 0 : 1); }
+    cur.style.opacity = co;
+    // plate: a pill around the typed extent (grows with the text)
+    if (P.plate) {
+      const pw = Math.max(x1 - x0 + 2 * padX, lineH + 2 * padY * 0.6), ph = y1 - y0 + 2 * padY;
+      const px = (P.layout === 'left' ? x0 - padX : (x0 + x1) / 2 - pw / 2);
+      const radius = Math.min(ph / 2, fs * 0.9);
+      const k = MG.ease.outCubic(MG.range(t, 0, 0.14));
+      Object.assign(plateEl.style, { left: px + 'px', top: (y0 - padY) + 'px', width: pw + 'px', height: ph + 'px', borderRadius: radius + 'px' });
+      MG.set(plateEl, { opacity: k, scale: 0.92 + 0.08 * k });
+    } else plateEl.style.display = 'none';
+    let o = 1;
+    if (exitDur && t > D - exitDur) o = 1 - MG.ease.outQuad(MG.range(t, D - exitDur, exitDur));
+    tw.style.opacity = o;
+  });
+})();
+</script>

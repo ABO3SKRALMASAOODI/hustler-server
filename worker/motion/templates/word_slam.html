@@ -1,0 +1,192 @@
+<!--MG-SPEC {"title": "Word slam", "category": "type",
+ "description": "One huge hero word or 2-3 word phrase (up to ~85% of the width) that lands ON the spoken word - the main 'wow' device. Use it on the single most important word of a beat, at most every 6-8 s; *star* a word for the accent colour and put the spoken connector words in the small kicker. The slam entrance lands 0.2 s after start, so start it 0.2 s before the word.",
+ "duration": 1.5, "layer": "above_captions", "mutes_captions": true,
+ "params": {
+  "text": {"type": "str", "required": true, "max": 40, "hint": "1-3 words; ' / ' forces a line break; wrap a word in *stars* for the accent colour"},
+  "entrance": {"type": "enum", "values": ["pop", "ghost", "strobe", "rise", "slam", "letters"], "default": "pop", "hint": "pop = hard cut on the word; ghost = 2 frames at 35% then snap; strobe = on/off flicker; rise = small rise + blur-to-sharp; slam = 1.5x to 1x impact with shake; letters = per-letter cascade"},
+  "role": {"type": "enum", "values": ["grotesk", "condensed", "serif", "script"], "default": "grotesk", "hint": "grotesk = heavy tight sans; condensed = Anton caps; serif = italic serif; script = formal script"},
+  "color": {"type": "color", "default": "#F8F6F2"},
+  "accent": {"type": "color", "default": "#ED080D"},
+  "kicker": {"type": "str", "default": "", "max": 60, "hint": "optional small connector line above the hero (e.g. 'out of the')"},
+  "y": {"type": "float", "min": 0.12, "max": 0.8, "default": 0.56, "hint": "vertical centre as a frame fraction; keep off the face"},
+  "uppercase": {"type": "bool", "default": true, "hint": "caps for grotesk/condensed; serif and script keep the typed case"},
+  "exit": {"type": "enum", "values": ["cut", "fade", "blur", "strobe"], "default": "cut"}
+ },
+ "example": {"text": "*Ordinary*", "kicker": "out of the", "entrance": "slam", "role": "condensed"},
+ "sfx": [{"at": 0.0, "kind": "kick", "when": {"entrance": ["pop", "strobe"]}},
+         {"at": 0.067, "kind": "kick", "when": {"entrance": ["ghost"]}},
+         {"at": 0.0, "kind": "whoosh_hard", "when": {"entrance": ["slam"]}},
+         {"at": 0.2, "kind": "kick", "when": {"entrance": ["slam"]}},
+         {"at": 0.0, "kind": "pop_soft", "when": {"entrance": ["rise"]}},
+         {"at": 0.0, "kind": "tick", "when": {"entrance": ["letters"]}}]} -->
+<style>
+  .blk{position:absolute;left:0;width:100%;display:flex;flex-direction:column;align-items:center;text-align:center}
+  .kick{white-space:nowrap;line-height:1.05;will-change:opacity,transform}
+  .line{white-space:nowrap;display:block;will-change:transform,opacity,filter}
+  .line .mg-w{margin-right:.2em}
+  .line .mg-w:last-child{margin-right:0}
+  .mg-c{will-change:transform,opacity,filter;transform-origin:50% 62%}
+</style>
+<div class="mg-root"><div class="blk" id="blk"></div></div>
+<script>
+(() => {
+  const P = MG.params, W = MG.W, H = MG.H, D = MG.duration, FPS = MG.fps || 30;
+  const blk = MG.$('#blk');
+  // ── font roles (first bundled family wins; graceful CSS fallbacks) ──
+  const FAM = new Set(Array.from(document.fonts, f => f.family.replace(/["']/g, '')));
+  const first = list => list.find(f => FAM.has(f));
+  const SCRIPTS = ['Pinyon Script', 'Great Vibes', 'Yellowtail', 'Allura', 'Satisfy'];
+  const role = (name) => {
+    if (name === 'condensed') {
+      const f = first(['Anton', 'Bebas Neue']) || 'Anton';
+      return { css: `'${f}','Bebas Neue','Inter Display',sans-serif`, weight: 400, style: 'normal', track: f === 'Anton' ? '0em' : '0.01em', lh: 0.9, caps: true };
+    }
+    if (name === 'serif') {
+      const f = first(['Instrument Serif', 'Playfair Display', 'DM Serif Display']) || 'Instrument Serif';
+      return { css: `'${f}','Playfair Display',Georgia,serif`, weight: f === 'Playfair Display' ? 900 : 400, style: 'italic', track: '-0.02em', lh: 0.92, caps: false };
+    }
+    if (name === 'script') {
+      const f = first(SCRIPTS);
+      if (f) return { css: `'${f}','Instrument Serif',cursive`, weight: 400, style: 'normal', track: '0em', lh: 1.05, caps: false };
+      return { css: `'Instrument Serif','Playfair Display',Georgia,serif`, weight: 400, style: 'italic', track: '-0.015em', lh: 0.95, caps: false };
+    }
+    return { css: `'Inter Display','Inter',sans-serif`, weight: 900, style: 'normal', track: '-0.04em', lh: 0.88, caps: true };
+  };
+  const R = role(P.role);
+  const caps = P.uppercase && R.caps;
+  const sans = FAM.has('Inter') ? `'Inter','Inter Display',sans-serif` : `'Inter Display',sans-serif`;
+
+  // ── build: kicker + hero lines (words -> chars for the letter cascade) ──
+  const parse = s => s.split(/\s+/).filter(Boolean).map(tok => {
+    const acc = /^\*.*\*[.,!?:;]*$/.test(tok) || /^\*[^*]+\*$/.test(tok);
+    const text = tok.replace(/^\*/, '').replace(/\*([.,!?:;]*)$/, '$1');
+    return { text: caps ? text.toUpperCase() : text, acc };
+  });
+  const raw = String(P.text || '').trim();
+  let rows = raw.split(/\s*(?:\/|\n)\s*/).map(parse).filter(r => r.length);
+  if (!rows.length) rows = [[{ text: ' ', acc: false }]];
+  let kick = null;
+  if (String(P.kicker || '').trim()) {
+    kick = MG.el('div', 'kick', String(P.kicker).trim(), blk);
+    kick.style.fontFamily = sans; kick.style.fontWeight = FAM.has('Inter') ? 600 : 700;
+    kick.style.letterSpacing = '-0.02em'; kick.style.color = P.color; kick.style.opacity = 0.94;
+    kick.style.textShadow = '0 2px 14px rgba(0,0,0,.45)';
+  }
+  const hero = MG.el('div', 'hero', null, blk);
+  let lines = [], chars = [];
+  const buildLines = (groups) => {
+    hero.textContent = ''; lines = []; chars = [];
+    groups.forEach(g => {
+      const el = MG.el('div', 'line', null, hero);
+      Object.assign(el.style, { fontFamily: R.css, fontWeight: R.weight, fontStyle: R.style,
+        letterSpacing: R.track, lineHeight: R.lh, color: P.color });
+      g.forEach(w => {
+        const we = MG.el('span', 'mg-w', null, el);
+        if (w.acc) we.style.color = P.accent;
+        Array.from(w.text).forEach(ch => chars.push(MG.el('span', 'mg-c', ch, we)));
+      });
+      lines.push(el);
+    });
+  };
+
+  // ── layout: one shared size, fitted to ~85% width and a height budget ──
+  const maxW = W * 0.85;
+  const measure = (el) => { const fs = el.style.fontSize; el.style.fontSize = '100px';
+    const w = el.scrollWidth; el.style.fontSize = fs; return w / 100; };
+  const fitSize = (groups) => {
+    buildLines(groups);
+    const wmax = Math.max(...lines.map(measure), 0.01);
+    const budget = (groups.length === 1 ? 0.25 : 0.32) * H / (groups.length * R.lh);
+    return Math.max(24, Math.min(maxW / wmax, budget));
+  };
+  let fs = 0, shadow = '';
+  // Every contiguous split of the words into 1-3 lines (or the explicit ' / ' breaks).
+  const splits = (ws) => {
+    const out = [[ws]];
+    for (let a = 1; a < ws.length; a++) {
+      out.push([ws.slice(0, a), ws.slice(a)]);
+      for (let b = a + 1; b < ws.length; b++) out.push([ws.slice(0, a), ws.slice(a, b), ws.slice(b)]);
+    }
+    return out;
+  };
+  const layout = () => {
+    let groups = rows;
+    if (rows.length === 1 && rows[0].length >= 2) {
+      // A long single line reads small: stack it when that makes the type clearly bigger.
+      let best = null;
+      splits(rows[0]).forEach(cand => {
+        const score = fitSize(cand) / Math.pow(1.3, cand.length - 1);   // each extra line must earn 30%
+        if (!best || score > best.score) best = { score, cand };
+      });
+      groups = best.cand;
+    }
+    fs = fitSize(groups);
+    lines.forEach(el => { el.style.fontSize = fs + 'px'; });
+    // Soft two-stage shadow (no outlines): a tight contact shade + a wide falloff.
+    // Thin roles (serif/script) get more, so they hold on bright plates.
+    const thin = P.role === 'serif' || P.role === 'script', a1 = thin ? 0.42 : 0.28, a2 = thin ? 0.55 : 0.42;
+    shadow = `0 ${(fs * 0.015).toFixed(1)}px ${(fs * 0.05).toFixed(1)}px rgba(0,0,0,${a1}), 0 ${(fs * 0.03).toFixed(1)}px ${(fs * 0.16).toFixed(1)}px rgba(0,0,0,${a2})`;
+    lines.forEach(el => { el.style.textShadow = shadow; });
+    if (kick) {
+      let ks = Math.max(26, Math.min(Math.max(0.3 * fs, 0.024 * H), 0.035 * H, 68));
+      kick.style.fontSize = ks + 'px';
+      const kw = kick.scrollWidth;
+      if (kw > maxW) { ks *= maxW / kw; kick.style.fontSize = ks + 'px'; }
+      kick.style.marginBottom = (R.caps ? 0.06 : 0.0) * fs + 'px';
+    }
+    const h = blk.getBoundingClientRect().height;
+    const top = Math.min(Math.max(H * P.y - h / 2, H * 0.06), H * 0.86 - h);
+    blk.style.top = top + 'px';
+    const over = P.entrance === 'slam' ? 0.5 : P.entrance === 'letters' ? 0.5 : 0.08;
+    const r = hero.getBoundingClientRect(), b = blk.getBoundingClientRect();
+    const padY = r.height * over / 2 + fs * 0.25, padX = r.width * over / 2 + fs * 0.2;
+    MG.box = [Math.max(0, r.left - padX), Math.max(0, b.top - padY), Math.min(W, r.right + padX), Math.min(H, b.bottom + padY)];
+  };
+  layout();
+  MG.ready = Promise.all([`${R.weight} ${R.style} 100px ${R.css}`, `700 60px ${sans}`]
+    .map(f => document.fonts.load(f).catch(() => 0))).then(() => document.fonts.ready).then(layout);
+
+  // ── choreography ──
+  const E = P.entrance, frameOf = t => Math.floor(t * FPS + 1e-4);
+  const LAND = 0.2, EACH = 0.045, LETTER = 0.15;
+  const enterEnd = E === 'slam' ? LAND + 0.12 : E === 'letters' ? EACH * chars.length + LETTER
+    : E === 'strobe' ? 7 / FPS : E === 'rise' ? 0.16 : E === 'ghost' ? 0.12 : 0.02;
+  const exitDur = P.exit === 'fade' ? 0.16 : P.exit === 'blur' ? 0.2 : P.exit === 'strobe' ? 6 / FPS : 0;
+  MG.active([[0, Math.min(D, enterEnd + 0.02)], [Math.max(0, D - exitDur - 0.04), D]]);
+  MG.frame(t => {
+    const f = frameOf(t);
+    let s = { opacity: 1 }, ko = 1;
+    if (E === 'ghost') ko = s.opacity = t < 0.067 ? 0.35 : 1;
+    else if (E === 'strobe') ko = s.opacity = (f <= 2 || f === 4 || f >= 6) ? 1 : 0;
+    else if (E === 'rise') {
+      const p = MG.ease.outCubic(MG.range(t, 0, 0.13));
+      ko = MG.range(t, 0, 0.08);
+      s = { opacity: ko, y: (1 - p) * Math.max(10, fs * 0.05), blur: (1 - p) * 9 };
+    } else if (E === 'slam') {
+      const k = MG.ease.inQuad(MG.range(t, 0, LAND));
+      s = { opacity: 0.45 + 0.55 * MG.range(t, 0, 0.05), scale: 1.5 - 0.5 * k, blur: (1 - k) * Math.min(18, fs * 0.05) };
+      if (t >= LAND - 1e-6) {
+        const sh = [[0.012, -0.007], [-0.008, 0.005]][f - frameOf(LAND)];
+        s = { opacity: 1, bright: 1 + 0.35 * (1 - MG.range(t, LAND, 0.12)) };
+        if (sh) { s.x = sh[0] * fs * 1.2; s.y = sh[1] * fs * 1.2; }
+      }
+    } else if (E === 'letters') {
+      chars.forEach((c, i) => {
+        const k = MG.ease.outCubic(MG.range(t, i * EACH, LETTER));
+        MG.set(c, { opacity: MG.range(t, i * EACH, 0.05), scale: 1.5 - 0.5 * k, blur: (1 - k) * Math.min(14, fs * 0.05) });
+      });
+    }
+    MG.set(hero, s);
+    if (kick) MG.set(kick, { opacity: 0.94 * ko });
+    // exits act on the whole block (kicker included), faster than entrances
+    let x = { opacity: 1 };
+    if (exitDur > 0 && t > D - exitDur - 1e-6) {
+      const q = MG.range(t, D - exitDur, exitDur);
+      if (P.exit === 'fade') x.opacity = 1 - MG.ease.outQuad(q);
+      else if (P.exit === 'blur') x = { opacity: 1 - MG.ease.inQuad(q), blur: q * 16, scale: 1 + 0.05 * q };
+      else if (P.exit === 'strobe') x.opacity = Math.round((D - t) * FPS) - 1 >= 3 ? 0 : 1;
+    }
+    MG.set(blk, x);
+  });
+})();
+</script>

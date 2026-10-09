@@ -1,0 +1,141 @@
+<!--MG-SPEC {"title": "Glow title", "category": "type",
+ "description": "A neon/photocopy glow title (1-2 lines, tight caps) that flickers on like a tube igniting, then holds with a soft bloom (wide low-alpha halo plus a slightly soft glyph); optional small mono subline. Use for an edgy or tech hook line or a bold claim; strongest over dark footage (the scrim keeps it legible over bright walls).",
+ "duration": 2.6, "layer": "above_captions", "mutes_captions": false,
+ "params": {
+  "text": {"type": "text", "required": true, "max": 48, "hint": "1-2 short lines; ' / ' or newline breaks a line"},
+  "subline": {"type": "str", "default": "", "max": 60, "hint": "optional small label under the title"},
+  "color": {"type": "color", "default": "#FFFFFF", "hint": "glow colour; white = photocopy glow, a hue = neon"},
+  "font": {"type": "enum", "values": ["grotesk", "condensed", "mono"], "default": "grotesk"},
+  "intensity": {"type": "float", "min": 0.3, "max": 1.5, "default": 1.0, "hint": "bloom strength"},
+  "flicker": {"type": "bool", "default": true, "hint": "strobe flicker-on (false = quick bloom-up)"},
+  "y": {"type": "float", "min": 0.1, "max": 0.82, "default": 0.42},
+  "uppercase": {"type": "bool", "default": true},
+  "exit": {"type": "enum", "values": ["flicker", "fade", "cut"], "default": "flicker"},
+  "scrim": {"type": "float", "min": 0, "max": 1, "default": 0.6, "hint": "soft dark backing so the glow reads over bright footage; 0 = none"}
+ },
+ "example": {"text": "What am I / looking at?", "subline": "after effects // day 01", "color": "#57C7FF"},
+ "sfx": [{"at": 0.0, "kind": "glitch", "when": {"flicker": [true]}},
+         {"at": 0.0, "kind": "swoosh_up", "when": {"flicker": [false]}}]} -->
+<style>
+  .wrap{position:absolute;left:0;width:100%;display:flex;flex-direction:column;align-items:center;text-align:center}
+  .ttl{position:relative}
+  .ttl .ln{display:block;white-space:nowrap}
+  .halo,.core{position:absolute;left:0;top:0;width:100%}
+  .core{position:relative}
+  .halo{pointer-events:none}
+  .halo,.core,.sub{will-change:opacity}
+  .sub{white-space:nowrap;margin-top:.9em}
+  .scrim{position:absolute;pointer-events:none;border-radius:50%;opacity:0;
+    background:radial-gradient(closest-side,rgba(0,0,0,var(--sa)) 0%,rgba(0,0,0,calc(var(--sa) * .62)) 52%,rgba(0,0,0,0) 100%)}
+</style>
+<div class="mg-root"><div class="scrim" id="scrim"></div><div class="wrap" id="wrap"><div class="ttl" id="ttl"><div class="halo" id="halo"></div><div class="core" id="core"></div></div><div class="sub" id="sub"></div></div></div>
+<script>
+(() => {
+  const P = MG.params, W = MG.W, H = MG.H, D = MG.duration;
+  const scrim = MG.$('#scrim');
+  scrim.style.setProperty('--sa', (0.7 * P.scrim).toFixed(3));
+  const wrap = MG.$('#wrap'), ttl = MG.$('#ttl'), halo = MG.$('#halo'), core = MG.$('#core'), sub = MG.$('#sub');
+  const FAM = new Set(Array.from(document.fonts, f => f.family.replace(/["']/g, '')));
+  const F = P.font === 'condensed' ? { css: `'${FAM.has('Anton') ? 'Anton' : 'Bebas Neue'}','Bebas Neue','Inter Display',sans-serif`, weight: 400, track: '0.01em', lh: 0.95 }
+    : P.font === 'mono' ? { css: `'JetBrains Mono','IBM Plex Mono','SFMono-Regular',Menlo,Consolas,ui-monospace,monospace`, weight: 700, track: '-0.02em', lh: 1.05 }
+    : { css: `'Inter Display','Inter',sans-serif`, weight: 800, track: '-0.03em', lh: 0.98 };
+  const monoCss = `'JetBrains Mono','IBM Plex Mono','SFMono-Regular',Menlo,Consolas,ui-monospace,monospace`;
+  const hex = P.color.replace('#', '');
+  const rgb = [0, 2, 4].map(i => parseInt(hex.substr(i, 2), 16));
+  const rgba = a => `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${a})`;
+  // the tube core runs white-hot: mix the glow colour 72% toward white
+  const coreCol = `rgb(${rgb.map(v => Math.round(v + (255 - v) * 0.72)).join(',')})`;
+  let lines = String(P.text || '').replace(/\s*\/\s*/g, '\n').split('\n').map(s => s.trim()).filter(Boolean).slice(0, 2);
+  // a long single line is set as a balanced two-line stack (bigger, reads as a title)
+  if (lines.length === 1 && lines[0].length > 16 && lines[0].includes(' ')) {
+    const ws = lines[0].split(/\s+/);
+    let best = null;
+    for (let k = 1; k < ws.length; k++) {
+      const a = ws.slice(0, k).join(' '), b = ws.slice(k).join(' ');
+      const score = Math.max(a.length, b.length);
+      if (!best || score < best.score) best = { score, a, b };
+    }
+    lines = [best.a, best.b];
+  }
+  [halo, core].forEach(el => {
+    Object.assign(el.style, { fontFamily: F.css, fontWeight: F.weight, letterSpacing: F.track, wordSpacing: '0.06em', lineHeight: F.lh });
+    lines.forEach(L => MG.el('span', 'ln', P.uppercase ? L.toUpperCase() : L, el));
+  });
+  core.style.color = coreCol;
+  halo.style.color = rgba(0.9);
+  const hasSub = !!String(P.subline || '').trim();
+  if (hasSub) {
+    sub.textContent = String(P.subline).trim().toUpperCase();
+    Object.assign(sub.style, { fontFamily: monoCss, fontWeight: 500, letterSpacing: '0.16em', color: coreCol });
+  } else sub.style.display = 'none';
+
+  let fs = 100;
+  const layout = () => {
+    [halo, core].forEach(el => { el.style.fontSize = '100px'; });
+    const wmax = Math.max(...Array.from(core.children, c => c.scrollWidth), 1) / 100;
+    fs = Math.max(40, Math.min((W * 0.84) / wmax, (lines.length > 1 ? 0.075 : 0.1) * H, 210));
+    [halo, core].forEach(el => { el.style.fontSize = fs + 'px'; });
+    const I = P.intensity;
+    // bloom: tight glyph glow + mid halo + very wide low-alpha halo (~12% FH)
+    core.style.textShadow = `0 0 ${(fs * 0.02).toFixed(1)}px ${rgba(0.95)}, 0 0 ${(fs * 0.08).toFixed(1)}px ${rgba(0.75 * Math.min(1, I))}`;
+    core.style.filter = 'blur(0.55px)';
+    halo.style.textShadow = `0 0 ${(fs * 0.22).toFixed(1)}px ${rgba(0.55 * I)}, 0 0 ${(fs * 0.55).toFixed(1)}px ${rgba(0.32 * I)}, 0 0 ${(0.1 * H).toFixed(1)}px ${rgba(0.26 * I)}`;
+    halo.style.filter = `blur(${(fs * 0.035).toFixed(1)}px)`;
+    if (hasSub) {
+      let ss = Math.max(24, Math.min(0.022 * H, fs * 0.3, 44));
+      sub.style.fontSize = ss + 'px';
+      if (sub.scrollWidth > W * 0.84) { ss *= W * 0.84 / sub.scrollWidth; sub.style.fontSize = ss + 'px'; }
+      sub.style.textShadow = `0 0 ${(ss * 0.4).toFixed(1)}px ${rgba(0.7 * I)}, 0 0 ${(ss * 1.4).toFixed(1)}px ${rgba(0.3 * I)}`;
+    }
+    const h = wrap.getBoundingClientRect().height;
+    const top = Math.min(Math.max(H * P.y - h / 2, H * 0.07), H * 0.86 - h);
+    wrap.style.top = top + 'px';
+    const r = wrap.getBoundingClientRect(), g = Math.min(0.1 * H, fs * 1.1) * 0.8;
+    MG.box = [Math.max(0, W / 2 - wmax * fs / 2 - g), Math.max(0, top - g), Math.min(W, W / 2 + wmax * fs / 2 + g), Math.min(H, r.bottom + g)];
+    const padX = 0.5 * fs + 40, padY = 0.7 * fs + 40;
+    Object.assign(scrim.style, { left: (W / 2 - wmax * fs / 2 - padX) + 'px', top: (top - padY) + 'px',
+      width: (wmax * fs + 2 * padX) + 'px', height: (r.height + 2 * padY) + 'px' });
+    if (P.scrim > 0) MG.box = [Math.max(0, Math.min(MG.box[0], W / 2 - wmax * fs / 2 - padX)), Math.max(0, Math.min(MG.box[1], top - padY)),
+      Math.min(W, Math.max(MG.box[2], W / 2 + wmax * fs / 2 + padX)), Math.min(H, Math.max(MG.box[3], r.bottom + padY))];
+  };
+  layout();
+  MG.ready = Promise.all([`${F.weight} 100px ${F.css}`, `500 40px ${monoCss}`].map(f => document.fonts.load(f).catch(() => 0)))
+    .then(() => document.fonts.ready).then(layout);
+
+  // ignition pattern in 30 fps steps (fps-independent): dim, off, on, on, off, off, flash, off, on
+  const IGN = [0.5, 0, 1, 1, 0, 0, 0.7, 0, 1];
+  const OFF = [0, 0.8, 0, 0.45, 0, 0];                 // exit, last six steps
+  const step = t => Math.floor(t * 30 + 1e-4);
+  const ignEnd = P.flicker ? IGN.length / 30 : 0.3;
+  const subT = ignEnd + 0.12;
+  const dipT = D > 2.2 ? Math.min(1.25, D - 0.7) : -1; // one tiny tube dip during the hold
+  const exitDur = P.exit === 'flicker' ? OFF.length / 30 : P.exit === 'fade' ? 0.22 : 0;
+  const wins = [[0, ignEnd + 0.02], [subT - 0.02, subT + (P.flicker ? 0.1 : 0.18)]];
+  if (dipT > 0) wins.push([dipT - 0.02, dipT + 0.12]);
+  if (exitDur) wins.push([Math.max(0, D - exitDur - 0.04), D]);
+  MG.active(wins);
+  MG.frame(t => {
+    let o, hb;
+    if (P.flicker) {
+      const s = step(t);
+      o = s < IGN.length ? IGN[s] : 1;
+      hb = s < IGN.length ? 0.8 : 1;                  // halo runs a touch cooler while igniting
+    } else {
+      o = MG.ease.outCubic(MG.range(t, 0, 0.18));
+      hb = MG.ease.outCubic(MG.range(t, 0.04, 0.3));
+    }
+    if (dipT > 0 && t >= dipT && t < dipT + 0.1) o *= step(t) - step(dipT) === 1 ? 0.35 : 0.8;
+    let so = hasSub ? (P.flicker ? (t < subT ? 0 : step(t - subT) === 1 ? 0 : 1) : MG.range(t, subT, 0.15)) : 0;
+    let x = 1;
+    if (exitDur && t > D - exitDur - 1e-6) {
+      if (P.exit === 'flicker') { const fe = OFF.length - 1 - Math.max(0, Math.round((D - t) * 30) - 1); x = OFF[Math.min(OFF.length - 1, Math.max(0, fe))]; }
+      else x = 1 - MG.ease.outQuad(MG.range(t, D - exitDur, exitDur));
+    }
+    // the backing eases in under the ignition (no strobe) and leaves with the exit
+    scrim.style.opacity = P.scrim > 0 ? (MG.ease.outCubic(MG.range(t, 0, 0.3)) * (exitDur && t > D - exitDur ? 1 - MG.range(t, D - exitDur, exitDur) : 1)).toFixed(4) : 0;
+    core.style.opacity = o * x;
+    halo.style.opacity = o * hb * x;
+    sub.style.opacity = so * x;
+  });
+})();
+</script>

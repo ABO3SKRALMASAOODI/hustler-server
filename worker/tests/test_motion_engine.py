@@ -95,6 +95,9 @@ def test_every_template_spec_parses_and_internal_ones_are_hidden():
         if not spec.get("internal"):
             assert spec.get("example"), f"{name} needs an example for tests/catalog"
             motion_templates.check_params(name, spec["example"])
+        for cue in spec.get("sfx") or []:
+            # every declared role must map onto an owner-approved recording
+            assert sound_library.catalog(cue.get("kind")), (name, cue)
 
 
 # ── timeline / stitch ───────────────────────────────────────────────────
