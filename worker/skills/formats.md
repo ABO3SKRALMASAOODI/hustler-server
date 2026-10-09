@@ -43,7 +43,8 @@ WHAT A PREMIUM EDIT LOOKS LIKE, BY FORMAT:
   that earn them (about one every 4–5 s at most, never on captions or
   ordinary cuts); music only when the user asks for it or supplies a track,
   then ducked 13–20 dB under the voice; word-safe filler and
-  dead-pause cleanup; `set_master_loudness`; a native CTA after the payoff
+  dead-pause cleanup; social mastering (automatic on 9:16/4:5/1:1 — no
+  `set_master_loudness` call needed); a native CTA after the payoff
   only when the user or brief asks for one, built from the handle, keyword
   and offer they supplied (never invented). Hold the face for a vulnerable
   admission — that passage is the deliberate exception.

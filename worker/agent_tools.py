@@ -114,6 +114,7 @@ from schemas import (CANVAS_DIMS, CaptionStyle, clean_fingerprint,
                      SCREEN_QUAD_MIN_FRAC, SCREEN_TAKEOVER_MIN_S,
                      SCREEN_TAKEOVER_MAX_S, quad_bbox, quad_is_sane)
 from schemas import ANIM_MAX_KEYFRAMES, CAPTION_LEADING_RANGE
+from schemas import master_loudness
 from timeline import Timeline, card_text_window, insert_windows
 
 # Karaoke grouping: the renderer's legacy clamp (captions.KARAOKE_HARD_MAX,
@@ -15286,21 +15287,37 @@ def set_grade_custom(ctx, exposure=None, contrast=None, saturation=None,
     return res
 
 
+def _master_state(ctx, edl):
+    """The mastering a render of `edl` will apply, as the agent should read
+    it: the raw EDL field is None on every short that relies on the social
+    default, which reads as "unmastered" when it is not."""
+    vid = (getattr(ctx, "index", None) or {}).get("video") or {}
+    explicit = (edl.get("master") or {}).get("loudness")
+    loud = master_loudness(edl, vid.get("width"), vid.get("height"))
+    return {"loudness": loud or "natural",
+            "set_by": "edl" if explicit else "format default"}
+
+
 def set_master_loudness(ctx, enabled):
-    """Toggle -14 LUFS output mastering (edl['master'])."""
+    """Social mastering on, or the explicit natural opt-out (edl['master'])."""
     on = bool(enabled)
     edl = dict(ctx.latest_edl()["json"])
-    edl["master"] = {"loudness": "social"} if on else None
+    # Off is an explicit 'natural', never None: unset now resolves by format,
+    # and on 9:16/4:5/1:1 that is social — None would silently re-master.
+    edl["master"] = {"loudness": "social"} if on else {"loudness": "natural"}
     if not on:
         return ctx.write_edl(
-            edl, "master loudness removed (the mix ships at its natural "
-                 "level)")
+            edl, "master loudness: natural (the mix ships at its own level, "
+                 "unleveled)")
     res = ctx.write_edl(edl, "master loudness: social (-14 LUFS)")
     if res.startswith("EDL v"):
-        res += ("\nThe final mix is normalized to -14 LUFS with a codec-safe "
-                "-2.0 dBTP ceiling on PREVIEW and EXPORT — "
-                "what the user approves is what ships. It changes loudness, "
-                "not the balance between voice/music/sfx.")
+        res += ("\nThe dialogue is leveled to a steady -18 LUFS before "
+                "music/voiceover/sfx are mixed, then the final mix is "
+                "normalized to -14 LUFS with a codec-safe -2.0 dBTP ceiling "
+                "on PREVIEW and EXPORT — what the user approves is what "
+                "ships. Speakers on different mics meet in the middle; "
+                "music/sfx/voiceover gains sit relative to that leveled "
+                "voice.")
     return res
 
 
@@ -17219,6 +17236,7 @@ def _compact_edl(row, ctx):
         "program_duration_s": round(program_duration(edl), 3),
         "frame": edl.get("frame"),
         "master": edl.get("master"),
+        "mastering": _master_state(ctx, edl),
         "captions": cap_summary,
         "collection_counts": {
             name: len(edl.get(name) or []) for name in collection_names
@@ -20886,7 +20904,7 @@ def _declared_mix_state(ctx, edl):
                  "gain_db": item.get("gain_db"),
                  "purpose": item.get("purpose")}
                 for item in (edl.get("sfx") or [])],
-        "master_loudness": (edl.get("master") or {}).get("loudness"),
+        "master_loudness": _master_state(ctx, edl)["loudness"],
     }
 
 
@@ -25816,14 +25834,22 @@ TOOLS = {
                         "voice_gain_db": {"type": "number"}}),
     "remove_stem_mix": (remove_stem_mix, "Restore the original mixed "
                         "soundtrack (undo separate_music).", {}),
-    "set_master_loudness": (set_master_loudness, "enabled=true normalizes "
-                            "the FINAL MIX to -14 LUFS with a codec-safe "
-                            "-2 dBTP target plus a latency-compensated hard "
-                            "ceiling on preview "
-                            "AND export — the fix for 'the export sounds "
-                            "quiet on TikTok/YouTube'. It changes loudness, "
-                            "not the voice/music/sfx balance. false removes "
-                            "mastering.",
+    "set_master_loudness": (set_master_loudness, "Social mastering: the "
+                            "main dialogue is leveled to a steady -18 LUFS "
+                            "(speakers on different mics meet in the middle) "
+                            "BEFORE music/voiceover/sfx are mixed, then the "
+                            "FINAL MIX is normalized to -14 LUFS with a "
+                            "codec-safe -2 dBTP target plus a latency-"
+                            "compensated hard ceiling, on preview AND export. "
+                            "9:16, 4:5 and 1:1 frames (and portrait sources "
+                            "left at 'source') are mastered BY DEFAULT — no "
+                            "call needed; project_state's mastering shows "
+                            "what applies. enabled=true forces it on any "
+                            "format (the fix for a 16:9 export that sounds "
+                            "quiet on YouTube). enabled=false is the explicit "
+                            "opt-out: the mix ships at its natural, unleveled "
+                            "level — only when the user asks for the "
+                            "original/raw sound.",
                             {"enabled": {"type": "boolean"}}),
     "get_audio_analysis": (get_audio_analysis, "READ: measured musical/"
                            "energy analysis of the source audio (cached "

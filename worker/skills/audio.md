@@ -142,9 +142,15 @@ Without it, offer mute ranges, muting everything, or covering with new music.
 - User CANNOT HEAR the music: check gain, ducking and placement; a
   storage_key starting with 'audio/' is the video's own extracted track.
 
-MASTERING: `set_master_loudness` normalizes the final mix to -14 LUFS on
-preview and export. The AUDIO CHECK measures integrated LUFS, true peak and
-dead air — treat its findings as work.
+MASTERING: 9:16, 4:5 and 1:1 programs (and portrait sources left at
+'source') are mastered by default; `set_master_loudness(enabled=true)` forces
+it on 16:9. Mastering levels the main dialogue to a steady -18 LUFS before
+music/voiceover/sfx are mixed — speakers on different mics meet in the middle
+and every suggested gain sits relative to that voice — then normalizes the
+mix to -14 LUFS on preview and export. `enabled=false` ships the natural,
+unleveled mix: only when the user asks for the original/raw sound. The AUDIO
+CHECK measures integrated LUFS, true peak and dead air — treat its findings
+as work.
 
 ## Common failure modes
 
