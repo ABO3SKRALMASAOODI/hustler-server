@@ -627,7 +627,9 @@ def program_cast_inputs(ctx, edl=None):
     except Exception:
         shape = {"shorts_child": child, "reel": child}
     try:
-        inferred = grammar.classify(index, edl, shorts_child=child)[0]
+        # Reuse the measured shape: program_shape is the expensive part.
+        inferred = grammar.classify(index, edl, shorts_child=child,
+                                    shape=shape)[0]
     except Exception:
         inferred = None
     return inferred, shape

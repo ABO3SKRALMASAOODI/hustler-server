@@ -992,9 +992,13 @@ def status(blueprint):
             "pending_criteria": checks}
 
 
+# Words that name a short-form DELIVERY. Deliberately not "clip" ("cut this
+# podcast clip down to the best 10 minutes", "remove the clips where he
+# coughs") or "vertical" ("no vertical crop please"): both are common in
+# long-form podcast requests, and a measured vertical program of 120s or
+# less is already caught by program["reel"].
 _REEL_WORDS = re.compile(
-    r"\b(?:reels?|shorts|tiktoks?|clips?|vertical|9:16|instagram|"
-    r"youtube short)\b")
+    r"\b(?:reels?|shorts|tiktoks?|9:16|instagram|youtube shorts?)\b")
 
 
 def editorial_family_cast(blueprint, inferred_grammar=None,
@@ -1010,9 +1014,10 @@ def editorial_family_cast(blueprint, inferred_grammar=None,
 
     ``program`` is grammar.program_shape() of the KEPT program. A
     conversation delivered as a reel — a Shorts child, a vertical/square
-    output of 120s or less, or a podcast brief that names a reel/short/clip —
-    is cast to ``podcast_reel`` BEFORE the generic 'podcast' keyword can
-    route it to the long-form podcast_conversation contract.
+    output of 120s or less, or a podcast brief that names a reel, short,
+    TikTok, 9:16 or Instagram delivery — is cast to ``podcast_reel`` BEFORE
+    the generic 'podcast' keyword can route it to the long-form
+    podcast_conversation contract.
     """
     bp = normalize_blueprint(blueprint) or {}
     explicit = str(bp.get("editorial_family") or "").strip()

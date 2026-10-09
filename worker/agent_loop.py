@@ -1069,18 +1069,22 @@ def state_block(ctx, worker_db, denied_tools=(), include_blueprint=True):
     # when the user gives no brief, measured from the exemplar corpus
     # (worker/grammars/). Context, not command: the block itself says the
     # user's words always win. Never allowed to break a turn.
+    # Measured ONCE from the EDL this block already holds: the house style
+    # and the editorial-family cast below both read the kept program.
+    program_edl = edl["json"] if isinstance(edl.get("json"), dict) else None
+    try:
+        inferred_family, program = agent_tools.program_cast_inputs(
+            ctx, program_edl)
+    except Exception as e:
+        print(f"[grammar] program shape failed: {e}", flush=True)
+        inferred_family, program = None, {}
     if ctx.has_main_video:
         try:
             # Classified from the KEPT program: a Shorts child must get the
             # podcast-reel house style, not its parent's long-form one.
-            try:
-                style_edl = ctx.latest_edl()["json"]
-            except Exception:
-                style_edl = None
             style = grammar.plan_block(
-                ctx.index, style_edl if isinstance(style_edl, dict) else None,
-                shorts_child=bool((getattr(ctx, "project", None) or {}).get(
-                    "parent_project_id")))
+                ctx.index, program_edl,
+                shorts_child=bool(program.get("shorts_child")), shape=program)
             if style:
                 block += "\n\n" + style
         except Exception as e:
@@ -1104,9 +1108,7 @@ def state_block(ctx, worker_db, denied_tools=(), include_blueprint=True):
     # while a vague "make it nice" still receives a real quality target.
     family = None
     try:
-        inferred, program = agent_tools.program_cast_inputs(ctx)
-        if not ctx.has_main_video:
-            inferred = None
+        inferred = inferred_family if ctx.has_main_video else None
         cast = director.editorial_family_cast(
             getattr(ctx, "edit_plan", None), inferred, ctx.has_main_video,
             request_text=getattr(ctx, "user_message", None),
@@ -3978,10 +3980,14 @@ def _outcome_meta(ctx, outcome):
                 row.get("category") for row in
                 ((getattr(ctx, "last_visual_critic", None) or {}).get(
                     "findings") or [])],
+            # Same meaning across the Oct 2026 change: the taste audit's
+            # finding count (now advisory). ctx.last_taste holds only the
+            # BLOCKING review lines (critic, audio QC, duplication,
+            # execution gaps), reported under their own key.
             "deterministic_taste_findings": len(
-                getattr(ctx, "last_taste", None) or []),
-            "advisory_taste_findings": len(
                 getattr(ctx, "last_taste_advisory", None) or []),
+            "blocking_review_lines": len(
+                getattr(ctx, "last_taste", None) or []),
             "audio_qc_findings": len(
                 getattr(ctx, "last_audio_qc_findings", None) or []),
             "audio_review_verdict": (

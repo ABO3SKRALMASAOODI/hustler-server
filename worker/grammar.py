@@ -66,6 +66,20 @@ def _shot_span(shot):
     return float(start or 0), float(end or 0)
 
 
+def _merged_spans(spans):
+    """Sorted, disjoint union of (start, end) spans; spans of 1ms or less
+    are dropped (nothing can overlap them by more than 1ms)."""
+    out = []
+    for a, b in sorted((float(a), float(b)) for a, b in spans):
+        if b - a <= .001:
+            continue
+        if out and a <= out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][1], b))
+        else:
+            out.append((a, b))
+    return out
+
+
 def program_shape(index, edl=None, shorts_child=False):
     """Measured shape of the KEPT program (falls back to the source).
 
@@ -97,20 +111,29 @@ def program_shape(index, edl=None, shorts_child=False):
         except Exception:
             tl, out = None, 0.0
         if tl is not None and out > 0:
-            # Midpoint-in-a-keep-segment, by bisection: a long podcast with
-            # hundreds of silence cuts has ~10k words, and this runs on every
-            # state block and review, so no per-word linear segment scan.
-            segs = sorted((float(a), float(b)) for a, b in tl.segs)
+            # Membership by bisection over the merged keep spans: a long
+            # podcast with hundreds of silence cuts has ~10k words and ~1k
+            # shots, and this runs on every state block and review, so no
+            # per-word or per-shot linear segment scan.
+            segs = _merged_spans(tl.segs)
             starts = [a for a, _b in segs]
+            ends = [b for _a, b in segs]
 
             def kept_mid(word):
                 mid = (float(word.get("t0", 0)) + float(word.get("t1", 0))) / 2
                 i = bisect.bisect_right(starts, mid + 1e-6) - 1
                 return i >= 0 and mid <= segs[i][1] + 1e-6
+
+            def kept_shot(shot):
+                # The first span ending after the shot starts is the only
+                # one that can overlap it by more than 1ms (spans are
+                # disjoint, sorted and longer than 1ms).
+                s0, s1 = _shot_span(shot)
+                j = bisect.bisect_right(ends, s0 + .001)
+                return j < len(segs) and \
+                    min(s1, segs[j][1]) > max(s0, segs[j][0]) + .001
             kept = [w for w in words if kept_mid(w)]
-            kept_shots = [s for s in shots if any(
-                min(_shot_span(s)[1], b) > max(_shot_span(s)[0], a) + .001
-                for a, b in segs)]
+            kept_shots = [s for s in shots if kept_shot(s)]
             labelled = {w.get("speaker") for w in kept
                         if w.get("speaker") is not None}
             shape.update({
@@ -155,32 +178,49 @@ def _source_conversation(index):
                             (dur >= 8 * 60 and shots_per_min <= 12))
 
 
-def classify(index, edl=None, shorts_child=False):
+def classify(index, edl=None, shorts_child=False, shape=None):
     """(family_slug, reason) for what this FOOTAGE can become, or
     (None, reason) when no family fits confidently.
 
     Deliberately coarse and honest, decided by measured signals only
     (speech coverage, shot density, duration, output aspect). A wrong
     confident guess costs more than no guess — the agent still has eyes
-    and the user still has words. With an EDL the KEPT program is measured
-    (see program_shape); a speech-led reel cut from a conversation, or any
-    speech-led Shorts child, is a ``podcast-reel``.
+    and the user still has words.
+
+    A REEL (a Shorts child, or a vertical/square program of REEL_MAX_S or
+    less) is its own program, so its KEPT program is measured (see
+    program_shape): a speech-led reel cut from a conversation, with two
+    speakers, or any speech-led Shorts child, is a ``podcast-reel``. Every
+    other edit is classified from the SOURCE, exactly as before: the house
+    style describes the footage, and a landscape podcast must keep its
+    family while the cut is trimmed below the long-form threshold.
+
+    ``shape`` is a precomputed program_shape(index, edl, shorts_child) for
+    callers that already measured it (it is the expensive part).
     """
     if not index:
         return None, "no index"
-    shape = program_shape(index, edl, shorts_child=shorts_child)
+    program = shape
+    if not (isinstance(program, dict) and "duration" in program
+            and "speech_s" in program):
+        program = program_shape(index, edl, shorts_child=shorts_child)
+    reel = bool(program.get("reel"))
+    shape = program
+    if not reel and program.get("from_program"):
+        shape = program_shape(index)
     dur = float(shape["duration"] or 0)
     if dur < 5:
         return None, "footage too short to classify"
     speech_cov = shape["speech_s"] / dur if dur else 0.0
-    if shape["reel"] and speech_cov >= 0.30 and (
-            shape["shorts_child"] or _source_conversation(index)):
+    if reel and speech_cov >= 0.30 and (
+            shape.get("shorts_child") or int(shape.get("speakers") or 0) >= 2
+            or _source_conversation(index)):
         origin = ("a Shorts child of a longer recording"
-                  if shape["shorts_child"] else
+                  if shape.get("shorts_child") else
                   "cut from a conversation/long talk")
         return ("podcast-reel",
-                f"{dur:.0f}s {'vertical' if shape['vertical'] else 'short'} "
-                f"program, speech covers {speech_cov:.0%}, {origin} — a "
+                f"{dur:.0f}s {'vertical' if shape.get('vertical') else 'short'}"
+                f" program, speech covers {speech_cov:.0%}, {origin} — a "
                 "short-form podcast reel, not a long-form conversation")
     shots_per_min = shape["shots"] / (dur / 60.0) if dur else 0.0
 
@@ -231,11 +271,13 @@ def _fmt(v, indent=0):
     return f"{pad}{v}"
 
 
-def plan_block(index, edl=None, shorts_child=False):
+def plan_block(index, edl=None, shorts_child=False, shape=None):
     """The HOUSE STYLE section of the agent's project state, or "" when no
     family classifies. Compact on purpose — identity, the rules that bind,
-    the rubric the self-review will score against, and the user-wins rule."""
-    slug, reason = classify(index, edl, shorts_child=shorts_child)
+    the rubric the self-review will score against, and the user-wins rule.
+    ``shape``: an already-measured program_shape (see classify)."""
+    slug, reason = classify(index, edl, shorts_child=shorts_child,
+                            shape=shape)
     if not slug:
         return ""
     doc = library().get(slug)

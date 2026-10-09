@@ -165,7 +165,7 @@ def advisory_findings(previous: Dict[str, Any], proposed: Dict[str, Any],
                 findings.append(
                     f"sound effects {a.get('id') or '?'} and "
                     f"{b.get('id') or '?'} are only {gap:.2f}s apart and "
-                    "play the same role. They will read as one muddy, "
+                    f"{taste.sfx_clash(a, b)}. They will read as one muddy, "
                     "flammed hit; keep one, or layer different roles "
                     "(a whoosh whose peak lands on an impact).")
                 break

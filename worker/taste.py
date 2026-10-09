@@ -201,20 +201,39 @@ def sfx_muddy_pair(a, b):
     return not (ra and rb and ra != rb)
 
 
+def sfx_clash(a, b):
+    """Why two sounds closer than SFX_MIN_SPACING_S read as one muddy flam
+    (see sfx_muddy_pair), worded from what is actually known about them."""
+    if a.get("storage_key") and a.get("storage_key") == b.get("storage_key"):
+        return "fire the same sound file twice"
+    ra, rb = sfx_role(a), sfx_role(b)
+    if ra and ra == rb:
+        return f"play the same role ({ra})"
+    return ("have no distinguishable role (name each sound's role in its "
+            "purpose, e.g. whoosh vs impact)")
+
+
 def sfx_events(sfx):
     """Sound EVENTS in program order: a motion graphic's owned cue stack, or
-    a layered stack (different roles / one instant), counts once."""
+    a layered stack (different roles / one instant), counts once.
+
+    A layered stack is bounded to ONE instant: every layer lands within
+    SFX_MIN_SPACING_S of the stack's FIRST sound and clashes with none of
+    its layers. Chaining from the last sound instead let a carpet of
+    alternating whoosh/impact cues every 0.3s count as a single event."""
     events = []
     for item in sorted(sfx or [], key=lambda s: _num(s.get("at"))):
         if events:
-            last = events[-1][-1]
+            event = events[-1]
             owner = sfx_owner(item)
-            same_owner = owner and any(sfx_owner(x) == owner
-                                       for x in events[-1])
-            layered = (abs(_num(item.get("at")) - _num(last.get("at")))
-                       < SFX_MIN_SPACING_S and not sfx_muddy_pair(last, item))
+            same_owner = owner and any(sfx_owner(x) == owner for x in event)
+            loose = [x for x in event if not (owner and sfx_owner(x) == owner)]
+            layered = (bool(loose)
+                       and _num(item.get("at")) - _num(loose[0].get("at"))
+                       < SFX_MIN_SPACING_S
+                       and not any(sfx_muddy_pair(x, item) for x in loose))
             if same_owner or layered:
-                events[-1].append(item)
+                event.append(item)
                 continue
         events.append([item])
     return events
@@ -556,9 +575,9 @@ def critique(edl, index, tl, src_w=None, src_h=None, user_asked=""):
     if stacked:
         a, b = stacked[0]
         add(f"two sound effects {_num(b.get('at')) - _num(a.get('at')):.2f}s "
-            f"apart at {_num(a.get('at')):.1f}s play the same role — they land "
-            "as one flammed, muddy hit. Keep one, or layer DIFFERENT roles "
-            "(a whoosh whose peak lands on an impact) on the same beat.")
+            f"apart at {_num(a.get('at')):.1f}s {sfx_clash(a, b)} — they "
+            "land as one flammed, muddy hit. Keep one, or layer DIFFERENT "
+            "roles (a whoosh whose peak lands on an impact) on the same beat.")
 
     music = edl.get("music") or []
     if music and fmt["n_words"] > 20:
@@ -764,6 +783,46 @@ def critique(edl, index, tl, src_w=None, src_h=None, user_asked=""):
                     "measures the footage and either aims the crop at a real "
                     "subject or fits the whole frame in over a blurred "
                     "backdrop.")
+
+    # ── too LITTLE design: flat, static, silent delivery (reels) ─────────
+    # Every rule above flags too much. The owner's own shorts failed the
+    # other way: a clean crop with captions, no camera move, no graphic and
+    # a dry mix (audited at 2.6/10 against 7.5 for the reference reels).
+    # Advisory like the rest; an explicit ask for static/silent wins.
+    if fmt["reel"] and speech_led and out_dur >= 20:
+        aims = {(sp.get("x"), sp.get("y"))
+                for sp in frame.get("focus_track") or []
+                if isinstance(sp, dict)}
+        picture_moves = bool(
+            zooms or fx.get("frame_shifts") or len(aims) > 1 or trans
+            or edl.get("inserts") or edl.get("overlays") or texts
+            or edl.get("vectors") or fx.get("picture_cards")
+            or _motion_moments(edl, out_dur)
+            or any(s.get("start") is not None for s in stylize))
+        flat = not picture_moves and not any(w in ask for w in (
+            "static", "no zoom", "no motion", "no graphic", "minimal",
+            "keep it simple"))
+        silent = not (music or sfx) and not any(w in ask for w in (
+            "no music", "no sound", "no sfx", "silent", "dry"))
+        if flat and silent:
+            add(f"flat static delivery: {out_dur:.0f}s of captions over a "
+                "frame that never moves, in a silent mix — no camera move, "
+                "cutaway or graphic, and no music or SFX. Add framing "
+                "changes on sentence turns (an eased push, a reframe on the "
+                "speaker change), a hook interrupt in the first two seconds, "
+                "and a sound layer (a ducked bed plus accents on the "
+                "authored hits).")
+        elif flat:
+            add(f"static picture: {out_dur:.0f}s with no camera move, "
+                "cutaway or graphic — the frame never moves, so nothing "
+                "marks the sentence turns or the payoff. Add eased pushes or "
+                "a reframe on the turns and one hook interrupt in the first "
+                "two seconds.")
+        elif silent:
+            add(f"silent mix: {out_dur:.0f}s of speech with no music bed and "
+                "no SFX — the picture moves but the sound never does. Add a "
+                "ducked bed and accents only on the authored hits (a whoosh "
+                "into a push, an impact on a graphic landing).")
 
     # ── the RATE of everything, together ─────────────────────────────────
     # Every rule above bounds ONE category, and a viewer does not experience

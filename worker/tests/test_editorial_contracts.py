@@ -152,6 +152,24 @@ def test_reel_shaped_programs_cast_podcast_reel_before_the_podcast_keyword():
         None, "podcast-conversation", True,
         request_text="edit this interview", program=landscape) == \
         "podcast_conversation"
+    # Long-form podcast requests that merely mention a clip, or a vertical
+    # crop they do NOT want, stay on the long-form contract.
+    for request in (
+            "Cut this podcast clip down to the best 10 minutes for YouTube",
+            "edit this interview, remove the clips where he coughs",
+            "podcast episode, no vertical crop please"):
+        landscape_program = dict(landscape, from_program=True)
+        assert director.editorial_family(
+            None, None, True, request_text=request,
+            program=landscape_program) == "podcast_conversation", request
+    # Short-form delivery words still route a conversation to the reel.
+    for request in ("turn this podcast into a TikTok",
+                    "cut a 9:16 short from this interview",
+                    "podcast highlight for Instagram",
+                    "make YouTube Shorts from this podcast"):
+        assert director.editorial_family(
+            None, None, True, request_text=request,
+            program=landscape) == "podcast_reel", request
     # A reel shape alone is not a conversation: other formats still win.
     assert director.editorial_family(
         None, None, True, request_text="cut a cinematic gameplay montage",

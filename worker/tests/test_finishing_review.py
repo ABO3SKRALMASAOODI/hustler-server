@@ -105,6 +105,25 @@ def test_advisory_record_rows_are_never_presented_as_repairs():
     assert note is None or 'Repair these current findings' not in note
 
 
+def test_unverified_version_with_advisories_never_reads_as_clear_to_finish():
+    """Before a complete preview there is no evidence either way: the
+    advisory-only directive must not say 'no blocking finding'."""
+    ctx, row = context()
+    note = finishing_review.directive(ctx)
+    assert 'has not been verified yet (render a complete preview)' in note
+    assert 'No blocking finding' not in note
+    assert 'advisory: keep if intentional' in note
+    # Once a complete preview of THIS version passed review, the same
+    # advisories ride along under an honest "no blocking finding".
+    ctx.verification_records[73] = dict(
+        status='repair_required', complete_preview_passed=True,
+        unresolved_findings=[dict(code='taste_advisory', severity='advisory',
+                                  message='10 transitions in 44s')])
+    note = finishing_review.directive(ctx)
+    assert 'No blocking finding is open for this version.' in note
+    assert 'not been verified' not in note
+
+
 def test_new_user_turn_is_not_closed_by_an_old_pass():
     ctx, row = context()
     ctx.versions_written = []

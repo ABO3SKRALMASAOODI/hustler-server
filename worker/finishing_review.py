@@ -108,8 +108,14 @@ def directive(ctx):
                       "change unrelated passed work while verification is pending."
                     + _advisory_block(advisories))
     if advisories:
-        return (header + "No blocking finding is open for this version."
-                + _advisory_block(advisories))
+        # Before a complete preview there is no evidence either way: saying
+        # "no blocking finding" here would read as permission to finish.
+        if current.get("complete_preview_passed") is True:
+            status = "No blocking finding is open for this version."
+        else:
+            status = ("This version has not been verified yet (render a "
+                      "complete preview).")
+        return header + status + _advisory_block(advisories)
     return None
 
 
