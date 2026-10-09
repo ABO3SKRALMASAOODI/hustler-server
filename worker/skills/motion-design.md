@@ -161,8 +161,11 @@ SOUND PAIRING — graphics are SILENT by default:
   register). `sfx=true` maps the template's declared sound roles onto the
   owner-approved library (`list_sound_library`); roles with no approved
   recording are skipped. Owned cues move and delete with the graphic.
-- The add_motion_graphic result lists each owned cue as sound@time; in
-  `get_edl` they are sfx items whose ids start `mg_<graphic id>_sfx`. Read
+- The add_motion_graphic result lists each owned cue as sound@time — the
+  landing its peak hits (each cue sits on its template's landing frame and
+  the recording starts early by itself); in `get_edl` they are sfx items
+  whose ids start `mg_<graphic id>_sfx`, and their `at` is where the file
+  starts, earlier by its peak. Read
   them against the short's budget — about one sound every 4–5 s at most,
   never the same sound twice within ~3 s — and adjust rather than stack: set
   a level with `set_audio_gain(kind='sfx', id=..., gain_db=...)` after the
@@ -173,18 +176,22 @@ SOUND PAIRING — graphics are SILENT by default:
   words per line. Over a bright shirt or wall, raise `scrim` on
   `hook_title`, `glow_title` and `phrase_build` (a soft dark backing) rather
   than moving the type onto the face.
-- A long recording (typing, a riser) placed by hand stops with its event:
-  `add_sfx(..., dur_s=<seconds of visible typing>)` trims it with a short
-  fade.
+- Typing placed by hand stops with its event: `add_sfx(...,
+  dur_s=<seconds of visible typing>)` trims it with a short fade. Long
+  library tails (`impact_1`, `ding_1`, `cash_register_1`) already stop at
+  their measured fade point; pass dur_s only to change that.
 - A template whose cue repeats (a tick per counter step or per letter)
   stays silent; give the settled figure one sound instead (`cash_register_1`
   on money, `ding_1` on a result).
 - For a moment with no owned cue, place one library sound yourself:
-  `add_sfx(storage_key='sound:<id>', at=..., gain_db=<suggested>)` —
-  `whoosh_soft_1` or `whoosh_soft_2` pre-rolled into a landing, `swish_1`
-  for a quick flick, `impact_1` only on the payoff or the single biggest
-  landing (at most once per short), a riser (`riser_1`–`riser_4`) ending
-  exactly on the payoff frame. Never a whoosh on every caption or graphic.
+  `add_sfx(storage_key='sound:<id>', at=<the landing frame>,
+  gain_db=<suggested>)`. `at` is where the sound HITS: the tool starts the
+  recording early by its measured peak (a riser ends on `at`, typing starts
+  there) and reports where the peak lands, so never pre-roll by hand —
+  `whoosh_soft_1` or `whoosh_soft_2` into a landing, `swish_1` for a quick
+  flick, `impact_1` only on the payoff or the single biggest landing (at
+  most once per short), a riser (`riser_1`–`riser_4`) into the payoff
+  frame. Never a whoosh on every caption or graphic.
 
 TIMING VOCABULARY — name the motion you want, then pick a template param or
 author it:

@@ -106,7 +106,8 @@ def test_motion_design_skill_teaches_templates_timing_runtime_and_review():
 def test_audio_teaches_the_sound_library_and_sparse_usage():
     text = _flat(_skill("audio"))
     for phrase in ("list_sound_library()", "storage_key='sound:<id>'",
-                   "always pass the suggested gain", "sfx=true", "Pre-roll",
+                   "always pass the suggested gain", "sfx=true", "it HITS",
+                   "Never pre-roll by hand",
                    "whoosh_soft_1", "swish_1", "impact_1", "riser_4",
                    "shutter_1", "typing_1", "click_1", "cash_register_1",
                    "heartbeat_1", "Never a whoosh on every caption",

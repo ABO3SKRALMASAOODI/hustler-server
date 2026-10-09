@@ -15,7 +15,8 @@
   "exit": {"type": "enum", "values": ["fade", "cut"], "default": "fade"}
  },
  "example": {"text": "how do I make my edits look *expensive*?", "font": "sans", "plate": true},
- "sfx": [{"at": 0.04, "kind": "typing", "dur": {"param": "text", "rate": "cps", "min": 0.3, "max": 2.3}}]} -->
+ "sfx": [{"at": 0.04, "kind": "typing", "when": {"plate": [false]}, "dur": {"param": "text", "rate": "cps", "min": 0.3, "max": 2.3}},
+         {"at": 0.16, "kind": "typing", "when": {"plate": [true]}, "dur": {"param": "text", "rate": "cps", "min": 0.3, "max": 2.3}}]} -->
 <style>
   .tw{position:absolute;left:0;width:100%}
   .plate{position:absolute;background:linear-gradient(180deg,rgba(34,35,40,.80),rgba(14,15,18,.84));

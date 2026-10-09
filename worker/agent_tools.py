@@ -6630,11 +6630,18 @@ def _resolve_sfx(ctx, storage_key):
 
 def add_sfx(ctx, storage_key, at, gain_db=-6.0, purpose=None, offset_s=None,
             dur_s=None):
-    """Place a one-shot sound at a point in the program timeline."""
+    """Place a one-shot sound at a point in the program timeline.
+
+    For an approved library recording `at` is the moment it HITS (its
+    measured peak; typing starts there): the EDL item starts that much
+    earlier, skipping into the file when the hit is too close to 0 s, and
+    plays to its measured tail cap unless dur_s says otherwise. Any other
+    sound starts at `at`, as it always has."""
     sound, err = _resolve_sfx(ctx, storage_key)
     if err:
         return err
     storage_key = sound["storage_key"]      # a video resolves to its audio
+    lib_id = sound.get("sound_id") or sound_library.id_for_key(storage_key)
     try:
         at = float(at)
     except (TypeError, ValueError):
@@ -6712,9 +6719,35 @@ def add_sfx(ctx, storage_key, at, gain_db=-6.0, purpose=None, offset_s=None,
     item = {"id": sid, "storage_key": storage_key,
             "at": round(at, 2), "gain_db": gain_db,
             "purpose": purpose_n}
+    hit_note = ""
+    if lib_id:
+        # `at` is where the recording HITS: start it early by its peak.
+        asked_off = offset_s
+        full = bool(dur_s and dur and dur_s >= dur - offset_s)
+        pl = sound_library.place(lib_id, at, offset_s, None if full else dur_s)
+        item["at"], offset_s = pl["at"], pl["offset_s"] or 0.0
+        # "all of it" past a tail cap stays explicit so later moves keep it
+        dur_s = ((dur - offset_s if sound_library.max_s(lib_id) else None)
+                 if full else pl["dur_s"])
+        play_end = item["at"] + (dur_s or max(0.0, (dur or 0.0) - offset_s))
+        hit_note = (f"\nHIT: its peak lands at {at:.2f}s"
+                    if sound_library.hit_s(lib_id) > 0 else
+                    f"\nHIT: it starts at {at:.2f}s (plays under the action)")
+        hit_note += f"; it plays {item['at']:.2f}-{play_end:.2f}s"
+        if pl["lead_s"]:
+            hit_note += f" (starts {pl['lead_s']:.2f}s early so the peak lands on time)"
+        if offset_s > asked_off + 1e-6:
+            hit_note += (f"; the hit is too close to 0s for its full "
+                         f"{sound_library.hit_s(lib_id) - asked_off:.2f}s lead-in, so it "
+                         f"starts {offset_s - asked_off:.2f}s into the file")
+        if dur_s and sound_library.max_s(lib_id) \
+                and abs(offset_s + dur_s - sound_library.max_s(lib_id)) < 2e-3:
+            hit_note += ("; its long tail stops at the measured fade point "
+                         "(pass dur_s to let it ring longer)")
+        hit_note += ". move_sfx and later edits use the same hit time."
     if offset_s:
         item["offset_s"] = round(offset_s, 3)
-    if dur_s and not (dur and dur_s >= dur - offset_s):
+    if dur_s and not (dur and dur_s >= dur - offset_s and not lib_id):
         item["dur_s"] = round(dur_s, 3)
     items.append(item)
     edl["sfx"] = items
@@ -6724,15 +6757,17 @@ def add_sfx(ctx, storage_key, at, gain_db=-6.0, purpose=None, offset_s=None,
     remaining = max(0.0, dur - offset_s) if dur else None
     if remaining and item.get("dur_s"):
         remaining = min(remaining, item["dur_s"])
-    if remaining and at + remaining > prog + 0.05:
+    if remaining and item["at"] + remaining > prog + 0.05:
         note = (f" NOTE: '{sound['name']}' has {remaining:.2f}s remaining "
                 f"after its {offset_s:.2f}s source offset and the program ends "
                 f"at {round(prog, 2)}s, so its tail will be cut short.")
     if sound.get("note"):
         note += "\n" + sound["note"]
     result = ctx.write_edl(
-        edl, f"added sfx '{sound['name']}' at {round(at, 2)}s "
-             f"({gain_db:+g}dB) as {sid}"
+        edl, f"added sfx '{sound['name']}' "
+             + (f"hitting at {round(at, 2)}s (starts {item['at']:g}s)"
+                if lib_id and item["at"] != round(at, 2) else f"at {round(at, 2)}s")
+             + f" ({gain_db:+g}dB) as {sid}"
              + (f" from source offset {offset_s:g}s" if offset_s else "")
              + (f" for {purpose_n}" if purpose_n else ""))
     if result.startswith("EDL v"):
@@ -6740,7 +6775,7 @@ def add_sfx(ctx, storage_key, at, gain_db=-6.0, purpose=None, offset_s=None,
             ctx, "sfx_placement", decision="use", asset_key=storage_key,
             element_id=sid, purpose=purpose_n, at=round(at, 2),
             review_stage="timeline")
-    return result + at_note + note
+    return result + at_note + (hit_note if result.startswith("EDL v") else "") + note
 
 
 def remove_sfx(ctx, id):
@@ -6758,7 +6793,9 @@ def remove_sfx(ctx, id):
 
 
 def move_sfx(ctx, id, at):
-    """Retime a sound without changing which sound it is or how loud."""
+    """Retime a sound without changing which sound it is or how loud. As in
+    add_sfx, `at` is where a library recording HITS (it starts early by its
+    peak); any other sound starts at `at`."""
     try:
         at = float(at)
     except (TypeError, ValueError):
@@ -6773,6 +6810,14 @@ def move_sfx(ctx, id, at):
     if at < 0 or at > max(0.0, prog - 0.05):
         return (f"REJECTED: at={at}s is outside the program "
                 f"(0 to {round(prog, 2)}s).")
+    if sound_library.id_for_key(hit.get("storage_key")):
+        old = sound_library.hit_at(hit)
+        lead = sound_library.retime(hit, at)
+        edl["sfx"] = items
+        return ctx.write_edl(
+            edl, f"moved sfx {id} ('{_track_name(ctx, hit['storage_key'])}') "
+                 f"hit {old:g}s -> {round(at, 3):g}s (starts {hit['at']:g}s"
+                 + (f", {lead:.2f}s before its peak)" if lead else ")"))
     old = hit["at"]
     hit["at"] = round(at, 2)
     edl["sfx"] = items
@@ -20883,6 +20928,7 @@ def _declared_mix_state(ctx, edl):
                        "duck_others": item.get("duck_others")}
                       for item in (edl.get("voiceover") or [])],
         "sfx": [{"id": item.get("id"), "at": item.get("at"),
+                 "hit_at": sound_library.hit_at(item),
                  "gain_db": item.get("gain_db"),
                  "purpose": item.get("purpose")}
                 for item in (edl.get("sfx") or [])],
@@ -22515,7 +22561,8 @@ def apply_look(ctx, name, music=None):
             existing_at = []
             for s in sfx:
                 try:
-                    existing_at.append(float(s.get("at") or 0.0))
+                    # where each existing sound HITS (a library one starts early)
+                    existing_at.append(sound_library.hit_at(s))
                 except (TypeError, ValueError):
                     pass
             hero_sfx = sum(1 for s in sfx
@@ -22533,7 +22580,9 @@ def apply_look(ctx, name, music=None):
                 if not row:
                     continue
                 kind = row["id"]
-                at = round(max(0.0, t - sound_library.peak_s(kind)), 3)
+                # peak ON the junction (skipping into the file right at 0 s)
+                pl = sound_library.place(kind, t)
+                at = pl["at"]
                 if at > prog - 0.05:
                     continue
                 try:
@@ -22550,6 +22599,9 @@ def apply_look(ctx, name, music=None):
                             "purpose": (f"{kind} landing on the {style} "
                                         f"scene transition{into} at "
                                         f"{t:.2f}s ('{n}' look)")})
+                for f in ("offset_s", "dur_s"):
+                    if pl[f]:
+                        sfx[-1][f] = pl[f]
                 placed.append(kind)
             silent = len(rows) - len(placed)
             if silent > 0:
@@ -24147,17 +24199,26 @@ TOOLS = {
                 "metadata, and deterministic preview AUDIO CHECK are useful "
                 "evidence; uncertainty is something to judge rather than "
                 "a reason the tool becomes unavailable. "
-                "storage_key is an exact key from fetch_sfx or "
-                "list_assets(kind='music') — never invent one. `at` is an "
-                "OUTPUT-timeline second (the edited program, not source "
-                "time). This is NOT background music: it plays once, for as "
-                "long as the sound is, and never ducks. offset_s starts "
-                "inside source audio — use it when an extracted clip contains "
-                "the requested hit late in a long track. purpose records the "
-                "nameable visible/editorial event for later final-mix review; "
-                "do not add anonymous decorative sounds. dur_s stops a long "
-                "recording (typing, a riser) when its on-screen event stops, "
-                "with a short fade. Default -6dB.",
+                "storage_key is 'sound:<id>' for an approved library "
+                "recording (list_sound_library), or an exact key from "
+                "fetch_sfx or list_assets(kind='music') — never invent one. "
+                "`at` is an OUTPUT-timeline second (the edited program, not "
+                "source time). For a library recording `at` is the moment it "
+                "HITS — the visual frame its peak belongs on: the tool starts "
+                "it early by its measured peak (a riser therefore ends on "
+                "`at`; typing starts at `at`), skips into the file when the "
+                "hit is too close to 0s, and reports where the peak lands and "
+                "the span it plays — never pre-roll by hand. Any other sound "
+                "starts at `at`. This is NOT background music: it plays "
+                "once and never ducks. offset_s starts inside source audio — "
+                "use it when an extracted clip contains the requested hit "
+                "late in a long track. purpose records the nameable "
+                "visible/editorial event for later final-mix review; do not "
+                "add anonymous decorative sounds. dur_s (seconds from where "
+                "it starts playing) stops a long recording (typing) when its "
+                "on-screen event stops, with a short fade; long library tails "
+                "(impact_1) already stop at their measured fade point unless "
+                "dur_s asks for more. Default -6dB.",
                 {"storage_key": {"type": "string"},
                  "at": {"type": "number"},
                  "gain_db": {"type": "number"},
@@ -24166,7 +24227,10 @@ TOOLS = {
                  "dur_s": {"type": "number"}}),
     "move_sfx": (move_sfx, "Retime an existing sound effect — 'the whoosh is "
                  "too early'. Keeps which sound and how loud. id from "
-                 "get_edl.",
+                 "get_edl. `at` means what it means in add_sfx: where a "
+                 "library recording HITS (get_edl's sfx `at` is where its "
+                 "file starts, earlier by its peak), where any other sound "
+                 "starts.",
                  {"id": {"type": "string"}, "at": {"type": "number"}}),
     "remove_sfx": (remove_sfx, "Delete a sound effect by id (from get_edl).",
                    {"id": {"type": "string"}}),
@@ -26624,9 +26688,11 @@ _COMPACT_CONTRACTS = {
         "exact key from list_assets, or from fetch_sfx when the user asked "
         "for a specific sound the library lacks; never invented. Pass the "
         "library's suggested gain_db (the -6 dB default is too loud). "
-        "Pre-roll so the peak lands on the visual frame (whoosh ~40-50% of "
-        "its length early, riser ends on the moment); dur_s stops typing "
-        "when the typing stops. purpose names the "
+        "For a library recording `at` is the frame it HITS: the tool starts "
+        "it early by its measured peak (a riser ends on `at`, typing starts "
+        "there) and caps long tails, so never pre-roll by hand; the result "
+        "says where the peak lands. dur_s stops typing when the typing "
+        "stops. purpose names the "
         "on-screen event. Never on captions or ordinary cuts; about one "
         "sound every 4-5 s at most, none repeated within ~3 s."),
     "add_captions": (
@@ -26667,7 +26733,7 @@ _COMPACT_CONTRACTS = {
         "cuts — report the junction count it returns. Styles dip_black, "
         "dip_white, whip_left/right, zoom_punch, glitch, flash (fast ones "
         "0.15-0.4s). Adds no sound: a real turn may take one add_sfx "
-        "sound:swish_1 peaking on the cut unless a look already placed one "
+        "sound:swish_1 at the cut (it peaks there) unless a look already placed one "
         "there (get_edl sfx); ordinary cuts stay silent. One specific "
         "junction: a motion transition template."),
     "set_picture_card": (

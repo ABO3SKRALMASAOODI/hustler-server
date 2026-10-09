@@ -60,7 +60,7 @@ impact (`impact_1`), riser (`riser_1` to `riser_4`), shutter (`shutter_1`,
 `shutter_2`), typing (`typing_1`, `typing_2`), click (`click_1`, `click_2`),
 pop (`pop_1`), tick (`tick_1`), ding (`ding_1`), glitch (`glitch_1`,
 `glitch_2`), cash (`cash_register_1`), heartbeat (`heartbeat_1`). Place one
-with `add_sfx(storage_key='sound:<id>', at=<program seconds>,
+with `add_sfx(storage_key='sound:<id>', at=<program second it HITS>,
 gain_db=<suggested>, purpose=...)` and always pass the suggested gain: the
 -6 dB default is louder than any library sound should sit. Motion graphics
 are silent by default; `add_motion_graphic(..., sfx=true)` opts one moment
@@ -69,9 +69,9 @@ no approved recording are skipped). Read `get_edl` (sfx) before adding a cue
 so a graphic's owned cue is never doubled.
 
 CUE GRAMMAR — what may get a sound, and with what:
-- A designed graphic or card landing → `whoosh_soft_1` or `whoosh_soft_2`,
-  pre-rolled so the peak lands on the landing frame; a quick word or element
-  flick → `swish_1`.
+- A designed graphic or card landing → `whoosh_soft_1` or `whoosh_soft_2`
+  with `at` on the landing frame; a quick word or element flick →
+  `swish_1`.
 - A real section change or B-roll entry with a designed junction → `swish_1`
   for a whip or zoom punch, a soft whoosh for a slide or light leak, `glitch_1`
   or `glitch_2` only under a deliberate glitch transition.
@@ -103,12 +103,19 @@ CUE GRAMMAR — what may get a sound, and with what:
   events, then check the density: about one every 4–5 s at most.
 
 TIMING — PEAKS LAND ON THE PICTURE:
-- `at` is when the file starts; its peak arrives later. Pre-roll by the
-  sound's attack: whooshes ~40–50% of their length early (about 0.3 s for
-  the soft whooshes, 0.12 s for `swish_1`), risers by their full length so
-  they END on the frame (`riser_2` 1.1 s; `riser_1` and `riser_3` 1.85 s;
-  `riser_4` 1.7 s), pops, ticks, clicks and shutters 0–1 frame early, the
-  impact 0–2 frames early.
+- For a library sound, `at` is the frame it HITS. `add_sfx` starts the
+  recording early by its measured peak (about 0.26–0.48 s for the soft
+  whooshes, 0.07 s for `swish_1`, 0.76 s for `impact_1`; risers by nearly
+  their whole length, so they END on `at`), skips into the file when the
+  hit is too close to 0 s, and reports where the peak lands and the span it
+  plays. Never pre-roll by hand — that lands the peak early by the same
+  amount. Typing is the exception that plays under its action: it starts at
+  `at`. `move_sfx` uses the same hit time; in `get_edl` an sfx `at` is where
+  the file starts. Template cues follow the same rule.
+- Long tails stop at their measured fade point by default (`impact_1` about
+  0.5 s after its hit, `ding_1`, `cash_register_1`), so a boom does not ring
+  under the next line; `dur_s` changes that (seconds from where it starts
+  playing).
 - Tie cues to measured times: word onsets (`get_words` mapped to program
   time), junctions from the program map, graphic landing frames.
 
@@ -154,8 +161,9 @@ dead air — treat its findings as work.
   the material (an impact under a tender admission).
 - Music added on the agent's own initiative, or a CC0 library bed chosen
   when the user never asked for generic background music.
-- Cues whose peak lands after the visual (late whoosh, riser that ends past
-  the payoff); library sounds left at the -6 dB default and masking words.
+- Cues whose peak lands off the visual (a hand pre-roll on top of the
+  tool's, a riser `at` set before the payoff instead of on it); library
+  sounds left at the -6 dB default and masking words.
 - Digital silence under stills or a no-dialogue passage.
 - Gains changed through the wrong layer; duplicate cues stacked on a graphic
   that already owns one.

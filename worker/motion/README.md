@@ -36,7 +36,12 @@ notification, coin, riser_short, riser_long, glitch, shutter, typing,
 heartbeat. Roles map onto the owner-approved REAL recordings in
 `worker/sound_library/` (`sound_library.ROLE_ALIASES`); a role with no approved
 recording is skipped. Graphics are silent by default — `add_motion_graphic(...,
-sfx=true)` opts a moment in. A negative "at" counts back from the item end;
+sfx=true)` opts a moment in. A cue's "at" is the visual landing the sound
+HITS on (its measured peak lands there; the recording starts early by itself,
+and typing starts there), so set it from the composition's own timing, not
+from a file. A negative "at" counts back from the item end; a landing that
+scales with the item length takes {"land": {"frac", "add", "min", "max"}}
+(clamp(duration * frac + add, min, max), e.g. counter's count landing);
 {"repeat": {"param": "items", "every": 0.3, "from": 0.2}} repeats a cue once
 per list/rows entry. Declare at most one or two cues per template, on the
 moment the motion lands — never a sound per word or per caption. Synthesized

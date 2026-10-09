@@ -26,6 +26,32 @@ except ImportError:      # loaded standalone by the backend (importlib):
                                 SCREEN_TAKEOVER_MIN_S, MIN_SPAN_S)
 
 
+_SOUNDS = []
+
+
+def _sound_library():
+    """worker/sound_library (pure) — also when this file is loaded standalone
+    by the backend, where only its path is known — or None if unavailable
+    (library sounds then re-anchor by their start, as plain sounds do)."""
+    if not _SOUNDS:
+        try:
+            import sound_library as mod
+        except ImportError:
+            try:
+                import importlib.util
+                import os
+                spec = importlib.util.spec_from_file_location(
+                    "worker_sound_library",
+                    os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 "sound_library.py"))
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+            except Exception:  # noqa: BLE001
+                mod = None
+        _SOUNDS.append(mod)
+    return _SOUNDS[0]
+
+
 def _ins_tuple(i):
     if isinstance(i, dict):
         return (float(i["at_output_s"]), float(i["duration_s"]))
@@ -1147,13 +1173,26 @@ def remap_program_items(edl, old_tl, new_tl):
         # zero-length span maps to no output pieces and returns None. Map the
         # point itself through the source.
         kept_sfx = []
+        sounds = _sound_library()
         for s in edl["sfx"]:
             s = dict(s)
-            at = float(s["at"])
-            src = old_tl.out_to_src(at)
+            # A library recording starts early so its peak HITS a moment:
+            # that moment is the anchor, and the lead is re-applied after.
+            at = sounds.hit_at(s) if sounds else float(s["at"])
+            lead = at - float(s["at"])
+            src, shift = old_tl.out_to_src(at), 0.0
+            if src is None and lead > 0:
+                # A hit right ON a spliced insert's entry (a junction whoosh)
+                # has no source time: follow the footage it leads in from.
+                src, shift = old_tl.out_to_src(float(s["at"])), lead
             # No source time means the point sits inside a spliced insert;
             # those keep their program position.
-            new_at = new_tl.src_to_out(src) if src is not None else at
+            if src is None:
+                new_at = at
+            else:
+                new_at = new_tl.src_to_out(src)
+                if new_at is not None:
+                    new_at += shift
             if new_at is None:
                 region_notes.append(
                     f"note: sound effect {s.get('id')} was removed — the "
@@ -1163,13 +1202,17 @@ def remap_program_items(edl, old_tl, new_tl):
                 region_notes.append(
                     f"note: sound effect {s.get('id')} moved to "
                     f"{round(new_at, 2)}s so it stays on the same moment.")
-            s["at"] = round(new_at, 2)
+            if sounds:
+                if abs(new_at - at) > 1e-6:
+                    sounds.retime(s, new_at)
+            else:
+                s["at"] = round(new_at, 2)
             # A point past the end of a shortened edit is dropped, not
             # clamped: clamping would pile every orphan onto the last frame.
             # Without this the sfx bounds check in validate_edl rejects the
             # whole CUT — the user asks to trim the end and is told the edit
             # is invalid, over a sound they never mentioned.
-            if s["at"] > max(0.0, prog - 0.05):
+            if round(new_at, 2) > max(0.0, prog - 0.05):
                 region_notes.append(
                     f"note: sound effect {s.get('id')} was removed — it sits "
                     "after the end of the shortened edit.")

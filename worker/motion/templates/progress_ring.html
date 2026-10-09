@@ -12,7 +12,7 @@
   "size": {"type": "float", "min": 0.6, "max": 1.4, "default": 1.0}
  },
  "example": {"percent": 87, "label": "of startups *never* make it"},
- "sfx": [{"at": 0.12, "kind": "tick"}, {"at": 1.2, "kind": "ding"}]} -->
+ "sfx": [{"at": 0.12, "kind": "tick", "land": {"frac": 0.055, "min": 0.05, "max": 0.12}}, {"at": 1.2, "kind": "ding", "land": {"frac": 0.55, "min": 0.5, "max": 1.2}}]} -->
 <style>
   .scrim{position:absolute;left:0;top:0;width:64px;height:64px;pointer-events:none;will-change:transform,opacity;transform-origin:0 0;
          background:radial-gradient(closest-side,rgba(0,0,0,.68),rgba(0,0,0,.55) 40%,rgba(0,0,0,.3) 70%,rgba(0,0,0,0))}

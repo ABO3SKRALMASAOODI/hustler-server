@@ -49,8 +49,8 @@ punch-ins stay silent. A library cue lands on a measured instant only when
 something meaningful happens on screen there: `impact_1` once, on the payoff
 or the single biggest landing; `pop_1` or `tick_1` on a list item that
 appears as a graphic, spaced at least ~3 s from the last one; a riser that
-ENDS on the payoff. At most about one sound every 4–5 s (read audio for
-pre-roll and levels).
+ENDS on the payoff (its `at` is the payoff: the tool starts it early). At
+most about one sound every 4–5 s (read audio for timing and levels).
 
 Every one of these writes concrete timestamps; any number you quote must come
 from the tool result. The reply does not recite them — the timeline shows

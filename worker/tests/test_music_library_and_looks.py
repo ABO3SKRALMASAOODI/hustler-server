@@ -756,3 +756,22 @@ def test_music_fallback_hint_offers_the_library_only_when_it_ships(
     monkeypatch.setattr(music_library, "available", lambda: False)
     hint = agent_loop._nearest_alternative("add some background music")
     assert "list_music_library" not in hint and "CC0" not in hint
+
+
+def test_look_sounds_peak_once_on_their_junction(monkeypatch):
+    # apply_look already pre-rolled by peak_s: the shared placement keeps
+    # exactly that (no second shift, no skip, no cap on a whoosh/swish)
+    monkeypatch.setattr(motion_tools, "ensure_library_asset",
+                        lambda ctx, sid: sound_library.asset_key(ctx.project_id, sid))
+    ctx = _talking_ctx(30.0, [8.0, 18.0], 2.0)
+    out = agent_tools.apply_look(ctx, "creator_punch")
+    assert out.startswith("EDL v1"), out
+    edl = ctx.latest_edl()["json"]
+    tx = [s for s in edl["sfx"] if s["id"].startswith("look_tx")]
+    assert len(tx) == 2
+    entries = [8.0, 20.0]                         # each B-roll's entry cut
+    for s, t in zip(sorted(tx, key=lambda s: s["at"]), entries):
+        sid = sound_library.id_for_key(s["storage_key"])
+        assert s["at"] == round(t - sound_library.peak_s(sid), 2), s
+        assert not s.get("offset_s") and not s.get("dur_s"), s
+        assert abs(sound_library.hit_at(s) - t) <= 0.006, s

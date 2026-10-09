@@ -82,7 +82,7 @@ def ensure_library_asset(ctx, sound_id):
         raise ValueError(f"unknown sound '{sound_id}'. Library: "
                          f"{', '.join(r['id'] for r in sound_library.catalog())}")
     local = sound_library.path(sound_id)
-    key = f"sfx/{ctx.project_id}/lib-{sound_id}-{row['sha'][:10]}.flac"
+    key = sound_library.asset_key(ctx.project_id, sound_id)
     existing = ctx.db.run(dbx.asset_by_key, ctx.project_id, key)
     if existing:
         return key
@@ -116,7 +116,8 @@ def resolve_library_reference(ctx, storage_key):
                       "do NOT claim a sound was added.")
     row = sound_library.get(sound_id)
     return {"name": f"{sound_id} (Valmera sound library)", "duration_s": row["duration_s"],
-            "library": True, "storage_key": key, "gain_db": row["gain_db"]}, None
+            "library": True, "storage_key": key, "gain_db": row["gain_db"],
+            "sound_id": sound_id}, None
 
 
 SOUND_POLICY = (
@@ -135,7 +136,9 @@ def list_sound_library(ctx, role=None):
     if not rows:
         return "No approved sounds match." if role else "The sound library is empty on this deployment."
     return ("Valmera sound library — real recordings approved by ear (CC0, no attribution). "
-            "Place with add_sfx(storage_key='sound:<id>', at=<program seconds>, gain_db=<suggested>).\n"
+            "Place with add_sfx(storage_key='sound:<id>', at=<program second it should HIT>, "
+            "gain_db=<suggested>): the tool starts each recording early by its measured peak "
+            "(typing starts at `at`) and stops long tails at their measured end.\n"
             + SOUND_POLICY + "\n" + "\n".join("- " + sound_library.describe(r) for r in rows))
 
 
@@ -222,9 +225,27 @@ def _cue_dur(cue, params):
         return None
 
 
+def _land_at(land, span, default):
+    """A cue that follows the template's own duration-relative landing
+    (``land``: clamp(span * frac + add, min, max)), e.g. counter's count
+    landing min(1.0, max(0.5, 0.55 * duration))."""
+    try:
+        v = span * float(land.get("frac", 0.0)) + float(land.get("add", 0.0))
+        if land.get("min") is not None:
+            v = max(v, float(land["min"]))
+        if land.get("max") is not None:
+            v = min(v, float(land["max"]))
+    except (TypeError, ValueError, AttributeError):
+        return default
+    return v
+
+
 def _sfx_cues(spec, params, start, end, seed="", with_dur=False):
     """[(time, sound_id, gain_db)] for a template's declared sound roles,
     mapped onto approved library recordings (roles without one are skipped).
+    A cue's time is the visual landing the sound HITS on (_apply_owned_sfx
+    starts the recording early by its peak); ``land`` makes it follow a
+    duration-relative landing instead of the fixed ``at``.
     A cue with ``when`` only sounds for matching params. A cue with
     ``repeat`` sounds once per entry of a list param: ``from`` +
     i*``every``; optional ``fit``/``min_every`` tighten ``every`` to
@@ -241,6 +262,8 @@ def _sfx_cues(spec, params, start, end, seed="", with_dur=False):
         gain = float(c.get("gain_db", row["gain_db"]))
         dur = _cue_dur(c, params)
         at = float(c.get("at") or 0.0)
+        if isinstance(c.get("land"), dict):
+            at = _land_at(c["land"], end - start, at)
         t = (end + at) if at < 0 else (start + at)
         rep = c.get("repeat")
         if rep and isinstance(params.get(rep.get("param")), list):
@@ -287,11 +310,14 @@ def _apply_owned_sfx(ctx, edl, mid, cues):
         except Exception as e:  # noqa: BLE001
             notes.append(f"sound {kind} unavailable ({str(e)[:80]})")
             continue
+        # t is the landing the sound HITS on: start early by its peak.
+        pl = sound_library.place(kind, max(0.0, t), dur_s=dur)
         items.append({"id": f"{_owned_sfx_prefix(mid)}{k + 1}", "storage_key": key,
-                      "at": max(0.0, round(t, 3)), "gain_db": gain,
+                      "at": pl["at"], "gain_db": gain,
                       "purpose": f"{kind} for motion graphic {mid}"})
-        if dur:
-            items[-1]["dur_s"] = dur
+        for f in ("offset_s", "dur_s"):
+            if pl[f]:
+                items[-1][f] = pl[f]
     edl["sfx"] = items
     return notes
 
@@ -520,7 +546,7 @@ def add_motion_graphic(ctx, template, start, end=None, params=None, html=None,
     clamp = ""
     if abs(req[0] - s) > 0.05 or abs(req[1] - e) > 0.05:
         clamp = f"\nCLAMPED: requested {req[0]:g}-{req[1]:g}s into this {prog:g}s program; placed at {s}-{e}s."
-    sound = (f"; sound cues: {', '.join(f'{c[1]}@{c[0]:g}s' for c in cues)}" if cues else "")
+    sound = (f"; sound cues hitting at: {', '.join(f'{c[1]}@{c[0]:g}s' for c in cues)}" if cues else "")
     depth = " BEHIND the subject" if layer == "behind_subject" else ""
     res = ctx.write_edl(edl, f"motion graphic {template}{depth} at {s}-{e}s [{mid}]{sound}")
     if res.startswith("REJECTED"):
@@ -616,7 +642,7 @@ def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
         d = hit["start"] - old_start
         for s in edl.get("sfx") or []:
             if s in owned:
-                s["at"] = round(max(0.0, float(s["at"]) + d), 3)
+                sound_library.retime(s, sound_library.hit_at(s) + d)
     res = ctx.write_edl(edl, f"updated motion graphic {id} ({hit['template']}) at {hit['start']}-{hit['end']}s")
     if res.startswith("REJECTED"):
         return res

@@ -96,13 +96,13 @@ turn; templates are silent unless you pass `sfx=true`.
 Only a junction at a real turn earns a sound, and a run of junctions inside
 ~3 s gets one sound in total. Ordinary cuts inside the conversation get none.
 
-| Move | Tool | Library sound when the turn earns one, peak on the cut |
+| Move | Tool | Library sound when the turn earns one, `at` on the cut (it peaks there) |
 | --- | --- | --- |
 | hard cut on a speech onset | none | none |
-| whip | `set_transitions` `whip_left`/`whip_right`, 0.2-0.3 s | `swish_1`, start about 0.12 s early |
+| whip | `set_transitions` `whip_left`/`whip_right`, 0.2-0.3 s | `swish_1` on the cut |
 | zoom punch | `set_transitions` `zoom_punch` | `swish_1` on the cut (one sound, no second hit) |
 | flash | `flash_transition` or `set_transitions` `flash` 0.15-0.25 s | none, or `impact_1` when the flash is the payoff |
-| light leak | `light_leak` | `whoosh_soft_1` or `whoosh_soft_2`, about 0.3 s early |
+| light leak | `light_leak` | `whoosh_soft_1` or `whoosh_soft_2` on the leak's peak |
 | film burn | `film_burn` | a soft whoosh, or `riser_3` ending on the cut at the one big section change |
 | glitch | `glitch_burst` or `set_transitions` `glitch` | `glitch_1` or `glitch_2` |
 
@@ -155,12 +155,13 @@ sounds at most whatever its Look.
 | Clean Data, Creator Glow | 7 |
 | Kinetic Poster, Mono Noir | 8 |
 
-**Timing and level.** The peak lands on the visual frame: soft whooshes
-start about 0.3 s early, `swish_1` about 0.12 s, risers by their full length
-so they end on the payoff frame (`riser_2` 1.1 s; `riser_1` and `riser_3`
-1.85 s; `riser_4` 1.7 s); shutters, clicks, pops and ticks 0-1 frame early;
-`impact_1` 0-2 frames early. Every sound sits at its suggested gain under
-the voice; lower it rather than mask a word. `impact_1` is used at most once
+**Timing and level.** The peak lands on the visual frame: pass `at` = the
+frame the sound HITS and `add_sfx` starts each library recording early by
+its measured peak (risers end on `at`, typing starts there) and reports
+where the peak lands, so never pre-roll by hand. Long tails (`impact_1`)
+stop at their measured fade point unless `dur_s` asks for more. Every sound
+sits at its suggested gain under the voice; lower it rather than mask a
+word. `impact_1` is used at most once
 per short, on the payoff or the single biggest landing.
 
 Montage cuts are not designed beats: a montage gets at most a sound on its

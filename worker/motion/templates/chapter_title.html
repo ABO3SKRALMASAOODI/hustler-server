@@ -12,10 +12,10 @@
   "exit": {"type": "enum", "values": ["fade", "cut", "collapse"], "default": "fade", "hint": "collapse = shrink into a corner label at 1.6 s and hold it to the end"}
  },
  "example": {"title": "First", "number": "01", "label": "custom animations", "style": "bold_red_italic"},
- "sfx": [{"at": 0.0, "kind": "whoosh_soft", "when": {"style": ["minimal"]}},
+ "sfx": [{"at": 0.22, "kind": "whoosh_soft", "when": {"style": ["minimal"]}},
          {"at": 0.12, "kind": "impact_soft", "when": {"style": ["bold_red_italic"]}},
-         {"at": 0.0, "kind": "swipe", "when": {"style": ["boxed"]}},
-         {"at": 1.6, "kind": "swish_short", "when": {"exit": ["collapse"]}}]} -->
+         {"at": 0.07, "kind": "swipe", "when": {"style": ["boxed"]}},
+         {"at": 1.8, "kind": "swish_short", "when": {"exit": ["collapse"]}, "land": {"frac": 1.0, "add": -0.7, "min": 1.1, "max": 1.8}}]} -->
 <style>
   .grp{position:absolute;left:0;top:0;transform-origin:0 0;will-change:transform,opacity}
   .num{white-space:nowrap}

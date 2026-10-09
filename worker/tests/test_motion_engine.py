@@ -209,7 +209,8 @@ class _Ctx:
 
 
 def test_tools_add_set_remove_with_owned_sound_cues(monkeypatch):
-    monkeypatch.setattr(motion_tools, "ensure_library_asset", lambda ctx, sid: f"sfx/1/lib-{sid}.flac")
+    monkeypatch.setattr(motion_tools, "ensure_library_asset",
+                        lambda ctx, sid: sound_library.asset_key(1, sid))
     monkeypatch.setattr(motion_tools, "_probe_item", lambda item, W, H, fps=30.0:
                         {"errors": [], "visible_frames": 4, "samples": 4, "bboxes": [[.1, .3, .9, .5]]})
     ctx = _Ctx()
@@ -221,12 +222,18 @@ def test_tools_add_set_remove_with_owned_sound_cues(monkeypatch):
     assert out.startswith("EDL v3"), out
     edl = ctx.latest_edl()["json"]
     assert edl["motion"][0]["id"] == "mg1" and edl["motion"][0]["end"] == 4.6
-    cues = sorted((s["id"], s["at"]) for s in edl["sfx"])
-    assert cues == [("mg_mg1_sfx1", 2.0), ("mg_mg1_sfx2", 2.18)]
+    # both cues HIT the title's landing (0.18 s in): each recording starts
+    # early by its own measured peak
+    # (the EDL keeps times on a 10 ms grid, so a hit lands within 5 ms)
+    assert sorted(s["id"] for s in edl["sfx"]) == ["mg_mg1_sfx1", "mg_mg1_sfx2"]
+    for s in edl["sfx"]:
+        sid = sound_library.id_for_key(s["storage_key"])
+        assert s["at"] == round(2.18 - sound_library.peak_s(sid), 2), s
+        assert abs(sound_library.hit_at(s) - 2.18) <= 0.006, s
     assert all(s["storage_key"].startswith("sfx/1/lib-") for s in edl["sfx"])
     assert motion_tools.set_motion_graphic(ctx, "mg1", start=5.0, end=7.0).startswith("EDL v")
     edl = ctx.latest_edl()["json"]
-    assert sorted(s["at"] for s in edl["sfx"]) == [5.0, 5.18]
+    assert all(abs(sound_library.hit_at(s) - 5.18) <= 0.006 for s in edl["sfx"])
     assert motion_tools.remove_motion_graphic(ctx, "mg1").startswith("EDL v")
     edl = ctx.latest_edl()["json"]
     assert edl["motion"] == [] and edl["sfx"] == []
