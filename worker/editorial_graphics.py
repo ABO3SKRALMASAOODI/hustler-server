@@ -19,6 +19,11 @@ HEADLINE_FONT_SIZE = .052
 HEADLINE_MAX_LINES = 3
 HEADLINE_LEADING = 1.2
 MIN_CARD_FONT = .025
+# Card copy wraps in a column CARD_TEXT_COLUMN of the card width, and an EDL
+# text column (TextItem.max_width) must be at least .1 of the frame, so a
+# card narrower than .1/.84 would compose to a layer the EDL rejects.
+CARD_TEXT_COLUMN = .84
+CARD_MIN_WIDTH = .12
 DEFAULT_BOXES = {"label": (.08, .15, .92, .31), "headline": (.08, .13, .92, .27)}
 DEFAULT_BOX = (.07, .22, .93, .73)
 PALETTES = {
@@ -74,7 +79,7 @@ def compose(*, id, kind, text, start, end, secondary=None, eyebrow=None,
     if speaker is not None or font_size is not None:
         problems.append("speaker and font_size belong to kind=headline")
     box = fit_box(box, DEFAULT_BOXES.get(kind, DEFAULT_BOX), fit, problems,
-                  notes, safe=False)
+                  notes, safe=False, min_width=CARD_MIN_WIDTH, label="card box")
     if kind not in KINDS or palette not in PALETTES or not text:
         raise LayoutRejected(problems)
     if not timed:
@@ -105,7 +110,7 @@ def compose(*, id, kind, text, start, end, secondary=None, eyebrow=None,
         # Fit from the actual compiler's block bounds, not only character count.
         row=dict(id=prefix+key,text=copy,start=start,end=end,template="title",
                  x=cx,y=y,font="Instrument Serif" if serif else "Inter Display Bold",
-                 font_size=size,max_width=width*.84,uppercase=False,box=False,
+                 font_size=size,max_width=max(.1,width*CARD_TEXT_COLUMN),uppercase=False,box=False,
                  color=color,outline_width=0,shadow=0,entrance="none",exit="none",
                  mute_captions=bool(mute_captions),motion=movement(y),motion_motif=motion_motif)
         from graphics import _compile_item
@@ -183,7 +188,8 @@ def _headline(*, id, text, speaker, start, end, palette, box, font_size, W, H,
         problems.append("Headline text wraps automatically; omit manual line breaks")
         text = " ".join(text.split())
     size = bounded(HEADLINE_FONT_SIZE if font_size is None else font_size,
-                   "Headline font_size", HEADLINE_FONT_RANGE, fit, problems, notes)
+                   "Headline font_size", HEADLINE_FONT_RANGE, fit, problems, notes,
+                   unit=" of the canvas short edge")
     box = fit_box(box, DEFAULT_BOXES["headline"], fit, problems, notes, safe=True)
     fg,accent = PALETTES[palette][1],PALETTES[palette][3]
     name = speaker.rstrip(":")+":"

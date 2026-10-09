@@ -16,7 +16,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 SKILLS_DIR = ROOT / "skills"
 TOOLS_SOURCE = ROOT / "agent_tools.py"
-MOTION_TOOLS_SOURCE = ROOT / "motion_tools.py"
 REQUIRED_SECTIONS = (
     "editorial decision principles",
     "evidence to inspect",
@@ -42,7 +41,11 @@ DATED_HISTORY = (
 )
 
 
-def _dict_literal_keys(path: Path, name: str) -> set[str]:
+def _dict_literal_keys(path: Path, name: str, _seen: frozenset = frozenset()
+                       ) -> set[str]:
+    """String keys of the module-level dict literal ``name`` in ``path``.
+    ``{**OTHER, ...}`` merges of another literal in the same module are
+    followed; anything else that cannot be read statically raises."""
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     for node in ast.walk(tree):
         if not isinstance(node, (ast.Assign, ast.AnnAssign)):
@@ -53,16 +56,51 @@ def _dict_literal_keys(path: Path, name: str) -> set[str]:
             continue
         if not isinstance(node.value, ast.Dict):
             break
-        return {
-            key.value for key in node.value.keys
-            if isinstance(key, ast.Constant) and isinstance(key.value, str)
-        }
+        keys = set()
+        for key, value in zip(node.value.keys, node.value.values):
+            if key is None and isinstance(value, ast.Name) and value.id not in _seen:
+                keys |= _dict_literal_keys(path, value.id, _seen | {name})
+            elif isinstance(key, ast.Constant) and isinstance(key.value, str):
+                keys.add(key.value)
+        return keys
     raise ValueError(f"Could not statically locate {name} in {path}")
 
 
 def tool_names(path: Path = TOOLS_SOURCE) -> set[str]:
     """Extract public tool keys without importing the worker dependency tree."""
     return _dict_literal_keys(path, "TOOLS")
+
+
+def registered_tool_names(path: Path = TOOLS_SOURCE) -> set[str]:
+    """Every name agent_tools registers, statically: the TOOLS literal, each
+    ``TOOLS.update(<module>.<SPECS>)`` merge (read from ``<module>.py`` next
+    to it) and each ``TOOLS["name"] = ...`` assignment."""
+    names = tool_names(path)
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "update"
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "TOOLS" and len(node.args) == 1):
+            arg = node.args[0]
+            if (isinstance(arg, ast.Attribute)
+                    and isinstance(arg.value, ast.Name)):
+                names |= _dict_literal_keys(path.parent / f"{arg.value.id}.py",
+                                            arg.attr)
+            elif isinstance(arg, ast.Name):
+                names |= _dict_literal_keys(path, arg.id)
+            else:
+                raise ValueError("Cannot statically read TOOLS.update("
+                                 f"{ast.unparse(arg)}) in {path}")
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if (isinstance(target, ast.Subscript)
+                        and isinstance(target.value, ast.Name)
+                        and target.value.id == "TOOLS"
+                        and isinstance(target.slice, ast.Constant)
+                        and isinstance(target.slice.value, str)):
+                    names.add(target.slice.value)
+    return names
 
 
 def retired_tool_names(path: Path = TOOLS_SOURCE) -> set[str]:
@@ -78,14 +116,11 @@ def retired_tool_names(path: Path = TOOLS_SOURCE) -> set[str]:
     return set()
 
 
-def live_tool_names(path: Path = TOOLS_SOURCE,
-                    motion_path: Path = MOTION_TOOLS_SOURCE) -> set[str]:
-    """The live TOOLS registry, statically: the literal plus
-    motion_tools.TOOL_SPECS (merged at import) minus retired names."""
-    names = tool_names(path)
-    if motion_path.exists():
-        names |= _dict_literal_keys(motion_path, "TOOL_SPECS")
-    return names - retired_tool_names(path)
+def live_tool_names(path: Path = TOOLS_SOURCE) -> set[str]:
+    """The live TOOLS registry, statically: every registered name minus the
+    retired ones. CI runs this before worker dependencies are installed;
+    tests compare it with the imported registry."""
+    return registered_tool_names(path) - retired_tool_names(path)
 
 
 _IDENTIFIER = re.compile(r"(?<![\w.\-/])([a-z][a-z0-9]*(?:_[a-z0-9]+)+)(?!\w)")
@@ -94,18 +129,18 @@ _CALL = re.compile(r"(?<![\w.])([a-z][a-z0-9_]*_[a-z0-9_]+)\s*\(")
 
 def stale_tool_references(skills_dir: Path = SKILLS_DIR,
                           tools_path: Path = TOOLS_SOURCE,
-                          motion_path: Path = MOTION_TOOLS_SOURCE
+                          live: set[str] | None = None
                           ) -> dict[str, list[str]]:
     """{skill file: sorted tool names it references that TOOLS lacks}.
 
     A reference is a function-shaped name (`name(`) or any bare mention of
     a name that is or was a registered tool (retired tools included), so
     prose like "use research_music" is caught even without parentheses.
+    ``live`` overrides the static registry (tests pass the imported TOOLS).
     """
-    live = live_tool_names(tools_path, motion_path)
-    tool_like = tool_names(tools_path) | retired_tool_names(tools_path)
-    if motion_path.exists():
-        tool_like |= _dict_literal_keys(motion_path, "TOOL_SPECS")
+    live = live_tool_names(tools_path) if live is None else set(live)
+    tool_like = (registered_tool_names(tools_path)
+                 | retired_tool_names(tools_path) | live)
     found: dict[str, list[str]] = {}
     for path in sorted(skills_dir.glob("*.md")):
         text = path.read_text(encoding="utf-8")
@@ -178,11 +213,9 @@ def validate_all(skills_dir: Path = SKILLS_DIR,
                  tools_path: Path = TOOLS_SOURCE) -> dict:
     paths = sorted(skills_dir.glob("*.md"))
     known_skills = {path.stem for path in paths}
-    # Structural check: registered names (motion tools included). Retired
-    # names are reported separately by stale_tool_references().
-    public_tools = tool_names(tools_path)
-    if MOTION_TOOLS_SOURCE.exists() and tools_path == TOOLS_SOURCE:
-        public_tools |= _dict_literal_keys(MOTION_TOOLS_SOURCE, "TOOL_SPECS")
+    # Structural check: every registered name (merged tool modules
+    # included). Retired names are reported by stale_tool_references().
+    public_tools = registered_tool_names(tools_path)
     failures = {}
     for path in paths:
         try:

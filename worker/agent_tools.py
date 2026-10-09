@@ -10964,8 +10964,17 @@ def set_overlay_motion(ctx, id, motion, motion_motif=None):
         return motif_err
     ignored = {"x", "y", "scale"} & set(motion) if hit.get("fit") in ("cover", "picture") \
         else set()
+    # fit=cover fills the whole frame; fit=picture fills the program's
+    # picture rectangle. Either way x/y/scale cannot move it.
+    fills = ("the whole frame" if hit.get("fit") == "cover"
+             else "the program's picture rectangle")
+    dropped = ("" if not ignored else
+               "\nNot applied: " + ", ".join(sorted(ignored))
+               + f" — overlay {id} has fit={hit.get('fit')}, which always "
+                 f"fills {fills}. Use a PIP overlay for position/scale motion.")
     if ignored and not set(motion) - ignored:
-        return ("REJECTED: full-frame cover overlays ignore "
+        return (f"REJECTED: overlay {id} has fit={hit.get('fit')}; such "
+                f"overlays always fill {fills} and ignore "
                 + ", ".join(sorted(ignored))
                 + ". Animate opacity/rotation, or use a PIP overlay for "
                   "position and scale motion.")
@@ -10992,7 +11001,7 @@ def set_overlay_motion(ctx, id, motion, motion_motif=None):
         hit["motion_motif"] = motif
     if hit == before:
         return (f"NO CHANGE — overlay {id} already has those motion values. "
-                "Do NOT tell the user you changed anything.")
+                "Do NOT tell the user you changed anything." + dropped)
     edl["overlays"] = items
     changed = ", ".join(name for name in _OVERLAY_MOTION_FIELDS
                         if hit.get(name) != before.get(name))
@@ -11002,11 +11011,8 @@ def set_overlay_motion(ctx, id, motion, motion_motif=None):
         written += ("\nNote: the existing named entrance/exit still composes "
                     "with these curves; clear or replace it only if the "
                     "combined motion is not intended.")
-    if written.startswith("EDL v") and ignored:
-        written += ("\nNot applied: " + ", ".join(sorted(ignored))
-                    + " — this is a full-frame cover overlay, which always "
-                      "fills the frame. Use a PIP overlay for position/scale "
-                      "motion.")
+    if written.startswith("EDL v"):
+        written += dropped
     return written
 
 
@@ -13579,13 +13585,19 @@ def _layout_rejection(exc):
 
 
 def _fit_report(written, fit):
-    """Append the applied geometry when fit='auto' had to repair anything."""
+    """Append the applied geometry when fit='auto' had to repair anything.
+    On a rejected write, name the repairs too, so the editor can connect an
+    EDL rejection to the values that were actually submitted."""
     notes = (fit or {}).get("notes") or []
-    if not notes or not str(written).startswith("EDL v"):
+    if not notes:
         return written
     applied = ", ".join(f"{k}={v!r}" for k, v in (
         ("font_size", fit.get("font_size")), ("leading", fit.get("leading")),
         ("box", fit.get("box"))) if v is not None)
+    if not str(written).startswith("EDL v"):
+        return (written + "\nNothing was saved. The rejected layout already "
+                "carried these fit=auto repairs: " + "; ".join(notes)
+                + f" ({applied}).")
     return (written + "\nfit=auto adjusted: " + "; ".join(notes)
             + f". Applied {applied}. Inspect the result; pass fit='strict' "
               "to be rejected instead of adjusted.")
@@ -13598,6 +13610,7 @@ def set_editorial_graphic(ctx, id, kind, text, start, end, secondary=None,
     motion_motif, error = _motion_motif_value(ctx, motion_motif)
     if error:
         return error
+    fit = fit or "auto"   # models often send null for every optional field
     edl = json.loads(json.dumps(ctx.latest_edl()["json"]))
     video = ctx.index.get("video") or {}
     W,H = renderer.frame_dims(int(video.get("width") or 1920),
@@ -13634,6 +13647,7 @@ def set_typography_scene(ctx, id, start, end, lines, box=None, align="center",
                          reveal="build", motion="settle", color="#F4F2EE",
                          font_size=.075, leading=1.16, mute_captions=True,
                          fit="auto"):
+    fit = fit or "auto"   # models often send null for every optional field
     edl = json.loads(json.dumps(ctx.latest_edl()["json"]))
     video = ctx.index.get("video") or {}
     W,H = renderer.frame_dims(int(video.get("width") or 1920),
@@ -23594,6 +23608,7 @@ TOOLS = {
         "treatment=panel draws a backdrop; type removes the box for integrated editorial typography. "
         "Dialogue captions remain by default. Set mute_captions=true ONLY when this graphic replaces "
         "the spoken text; its own live window then owns the suppression and removal restores captions. "
+        f"Card boxes are at least {editorial_graphics.CARD_MIN_WIDTH:g} wide. "
         "fit=auto (default) repairs geometry instead of rejecting: the box is clamped to the frame "
         "(a headline to the safe area) and a headline steps font_size down until it fits; every change "
         "is reported. fit=strict rejects instead. Reading time is never shortened. Every problem "
@@ -23626,8 +23641,10 @@ TOOLS = {
         f"leading is row spacing {typography_scenes.LEADING_RANGE[0]:g}-{typography_scenes.LEADING_RANGE[1]:g} "
         "(rows never overlap; this is not caption leading). "
         "fit=auto (default) clamps out-of-range numbers and the box into the safe area, then scales "
-        "font_size down until every row fits, and reports each applied value; fit=strict rejects instead. "
-        "Cue timing is never moved. Every problem is listed in one reply. "
+        f"font_size down until every row fits (at most {typography_scenes.AUTO_MAX_SHRINK:.0%}, never below "
+        f"{typography_scenes.AUTO_MIN_FONT_SIZE:g}; longer copy is rejected with the size that would fit), "
+        "and reports each applied value; fit=strict rejects instead. A cue before start snaps to start "
+        "(reported); no other cue time is moved. Every problem is listed in one reply. "
         "mute_captions=true replaces dialogue ONLY in these actual live windows; false for independent labels. "
         "Use real words and cue times from get_kept_transcript. Inspect the opening, build, settled phrase "
         "and face clearance. This is designed typography, not a substitute for selecting a good story.",

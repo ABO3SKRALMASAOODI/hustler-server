@@ -158,18 +158,49 @@ def test_keyframe_schema_carries_the_validator_keyframe_limit():
 def test_auto_fit_shrinks_oversized_rows_and_reports_applied_size(dims):
     W, H = dims
     args = _scene(font_size=.18, W=W, H=H,
-                  lines=[{"runs": [{"text": "Everything you think you know"}]},
-                         {"runs": [{"text": "about money", "at": 1}]}])
-    with pytest.raises(scenes.LayoutRejected, match="Line exceeds its box"):
+                  lines=[{"runs": [{"text": "Your money"}]},
+                         {"runs": [{"text": "or your time", "at": 1}]}])
+    with pytest.raises(scenes.LayoutRejected, match="exceed"):
         scenes.compose(**args)
     result = scenes.compose(**args, fit="auto")
     fit = result["fit"]
-    assert fit["font_size"] < .18
+    assert .18 * (1 - scenes.AUTO_MAX_SHRINK) <= fit["font_size"] < .18
     assert any("font_size 0.18→" in n and "fits the box" in n for n in fit["notes"])
     _inside(result["texts"], fit["box"], W, H)
     e = default_edl(4)
     e["texts"] = result["texts"]
     validate_edl(e, 4)
+
+
+def test_auto_fit_never_silently_makes_small_type():
+    # Needs ~61% smaller type: auto stops at its 40% cap and names the size
+    # that would fit, so shrinking that far is the editor's explicit choice.
+    args = _scene(font_size=.18,
+                  lines=[{"runs": [{"text": "Everything you think you know"}]},
+                         {"runs": [{"text": "about money", "at": 1}]}])
+    with pytest.raises(scenes.LayoutRejected) as capped:
+        scenes.compose(**args, fit="auto")
+    problems = capped.value.problems
+    assert any("Line exceeds its box" in p and "at font_size 0.108;" in p
+               and "shrinks at most 40%" in p for p in problems), problems
+    fits = [p for p in problems if p.startswith("As written it fits only at font_size")]
+    assert len(fits) == 1, problems
+    size = float(fits[0].split("font_size ")[1].split(" ")[0])
+    assert size < .18 * (1 - scenes.AUTO_MAX_SHRINK)
+    assert f"pass font_size={size:g}" in fits[0]
+    chosen = scenes.compose(**{**args, "font_size": size}, fit="auto")
+    assert chosen["fit"]["font_size"] == size and chosen["fit"]["notes"] == []
+    _inside(chosen["texts"], chosen["fit"]["box"], 1080, 1920)
+
+    # The default size never drops below AUTO_MIN_FONT_SIZE, and a size the
+    # editor already chose below it is not shrunk at all.
+    for authored, floor in ((.075, scenes.AUTO_MIN_FONT_SIZE), (.045, .045)):
+        long = _scene(font_size=authored, box=[.3, .2, .7, .6],
+                      lines=[{"runs": [{"text": "this is longer than the box"}]}])
+        with pytest.raises(scenes.LayoutRejected, match=f"at font_size {floor:g};"):
+            scenes.compose(**long, fit="auto")
+    with pytest.raises(scenes.LayoutRejected, match="does not shrink type authored at 0.05"):
+        scenes.compose(**long, fit="auto")
 
 
 def test_auto_fit_clamps_box_and_styling_into_range_and_says_so():
@@ -205,18 +236,83 @@ def test_auto_fit_repairs_reversed_and_thin_boxes_but_never_guesses_pixels():
         scenes.compose(**_scene(box=[86, 538, 994, 1267]), fit="auto")
 
 
-def test_auto_fit_never_moves_cue_timing_and_lists_everything_left():
+def test_auto_fit_only_snaps_pre_start_cues_and_lists_everything_left():
     args = _scene(end=1.2, font_size=.25, leading=.5,
-                  lines=[{"runs": [{"text": "too many words to read here", "at": .8}]},
+                  lines=[{"runs": [{"text": "too many words", "at": .8}]},
                          {"runs": [{"text": "bad", "font": "Comic Sans"}]}])
     with pytest.raises(scenes.LayoutRejected) as auto:
         scenes.compose(**args, fit="auto")
     problems = auto.value.problems
-    assert any(p.startswith('Allow 1.32s after the cue for "too many words')
-               for p in problems)
+    assert any(p.startswith('Allow 0.72s after the cue for "too many words')
+               for p in problems), problems
     assert any("bundled font" in p for p in problems)
-    # styling was repaired rather than reported
+    # styling was repaired rather than reported; the cue was not moved
     assert not any("leading" in p or "font_size" in p for p in problems)
+
+    # The single cue repair: a cue before the scene start shows at the start
+    # (reported). Every other cue keeps its authored program time.
+    early = scenes.compose(**_scene(
+        start=2, end=6, lines=[{"runs": [{"text": "Early", "at": 1},
+                                         {"text": "on", "at": 2.5},
+                                         {"text": "time", "at": 3.25}]}]),
+        fit="auto")
+    assert [t["start"] for t in early["texts"]] == [2, 2.5, 3.25]
+    assert early["fit"]["notes"] == [
+        "line 1 run 1 at 1→2 (cues cannot precede the scene start)"]
+    with pytest.raises(scenes.LayoutRejected, match="at must be between 2 and"):
+        scenes.compose(**_scene(start=2, end=6, lines=[{"runs": [
+            {"text": "Early", "at": 1}]}]))
+    tool = agent_tools.TOOLS["set_typography_scene"][1]
+    assert "A cue before start snaps to start" in tool
+    assert "no other cue time is moved" in tool
+
+
+def test_messages_name_the_authored_line_and_run_after_skipped_ones():
+    with pytest.raises(scenes.LayoutRejected) as rejected:
+        scenes.compose(**_scene(font_size=.05, box=[.3, .2, .7, .6], lines=[
+            {"runs": []},
+            {"runs": [{"text": "x", "bogus": 1},
+                      {"text": "y", "scale": .61}]},
+            {"runs": [{"text": "a sentence far too long for this box"}]}]))
+    problems = " ".join(rejected.value.problems)
+    assert "at least one run (line 1)" in problems
+    assert "(line 2 run 1)" in problems
+    assert "line 2 run 2 is 0.0305" not in problems      # .05*.61 is in range
+    assert "(line 3 needs" in problems, problems
+    assert "(line 2 needs" not in problems
+
+
+def test_overflowing_rows_are_one_numbered_problem_not_one_per_line():
+    long = {"runs": [{"text": "This is a fairly long line of words"}]}
+    with pytest.raises(scenes.LayoutRejected) as rejected:
+        scenes.compose(**_scene(font_size=.12, box=[.08, .3, .92, .6],
+                                lines=[long] * 3))
+    wide = [p for p in rejected.value.problems if "Line exceeds its box" in p]
+    assert len(wide) == 1
+    assert all(f"line {i} needs" in wide[0] for i in (1, 2, 3))
+
+
+def test_run_size_floor_keeps_every_size_the_pixel_check_accepted():
+    # .045 * .664 = .02988 authored, but 33px/1080 = .0306 rounded: the old
+    # pixel check accepted it, so neither mode may reject or "hold" it now.
+    args = dict(id="r", start=0, end=4, W=1920, H=1080, font_size=.045,
+                lines=[{"runs": [{"text": "Hello", "scale": .664}]}])
+    strict = scenes.compose(**args)
+    auto = scenes.compose(**args, fit="auto")
+    assert auto["fit"]["notes"] == []
+    assert strict["texts"] == auto["texts"]
+    # The advertised minimum stays valid although it rounds to 32px (.0296).
+    scenes.compose(**{**args, "font_size": scenes.FONT_SIZE_RANGE[0],
+                      "lines": [{"runs": [{"text": "Hello"}]}]})
+    # An authored .29996 that rounds to 325px (.3009) is emitted at the
+    # .3 maximum, never as a layer the EDL rejects.
+    top = scenes.compose(id="t", start=0, end=4, W=1920, H=1080, font_size=.2,
+                         box=[.05, .1, .95, .9],
+                         lines=[{"size": .836, "runs": [{"text": "Hi", "scale": 1.794}]}])
+    assert max(t["font_size"] for t in top["texts"]) <= .3
+    e = default_edl(4)
+    e["texts"] = top["texts"]
+    validate_edl(e, 4)
 
 
 def test_valid_scene_is_byte_identical_in_auto_and_strict():
@@ -230,7 +326,7 @@ def test_valid_scene_is_byte_identical_in_auto_and_strict():
 def test_typography_tool_defaults_to_auto_and_reports_applied_values():
     ctx = _Ctx()
     out = agent_tools.set_typography_scene(
-        ctx, "hook", 0, 4, [{"runs": [{"text": "Everything you think you know"}]}],
+        ctx, "hook", 0, 4, [{"runs": [{"text": "Think bigger"}]}],
         box=[0, .1, 1, .3], font_size=.2, leading=2.5)
     assert out.startswith("EDL v"), out
     assert "fit=auto adjusted:" in out
@@ -241,6 +337,18 @@ def test_typography_tool_defaults_to_auto_and_reports_applied_values():
     clean = agent_tools.set_typography_scene(
         ctx, "calm", 5, 9, [{"runs": [{"text": "Calm"}]}])
     assert clean.startswith("EDL v") and "fit=auto" not in clean
+
+
+def test_layout_tools_treat_null_fit_as_the_auto_default():
+    ctx = _Ctx()
+    out = agent_tools.set_typography_scene(
+        ctx, "hook", 0, 4, [{"runs": [{"text": "Think bigger"}]}],
+        box=[0, .1, 1, .3], font_size=.2, fit=None)
+    assert out.startswith("EDL v") and "fit=auto adjusted:" in out, out
+    out = agent_tools.set_editorial_graphic(
+        ctx, "card", "statement", "Build it", 5, 11, box=[-.1, .2, 1.1, .7],
+        fit=None)
+    assert out.startswith("EDL v") and "fit=auto adjusted:" in out, out
 
 
 def test_typography_tool_strict_rejects_with_every_problem_numbered():
@@ -294,6 +402,46 @@ def test_editorial_auto_clamps_box_and_lists_all_unfixable_problems():
     assert "verified speaker name" in joined
 
 
+CARD_KINDS = [k for k in editorial_graphics.KINDS if k != "headline"]
+_CARD_COPY = {"comparison": dict(text="Rent", secondary="Own"),
+              "metric": dict(text="42%")}
+
+
+@pytest.mark.parametrize("kind", CARD_KINDS)
+@pytest.mark.parametrize("box", [[.5, .2, .52, .7], [.1, .5, .215, .9],
+                                 [.95, .3, .99, .45]])
+def test_auto_fit_thin_cards_always_compose_a_valid_edl(kind, box):
+    copy = _CARD_COPY.get(kind, dict(text="Build it"))
+    result = editorial_graphics.compose(id="g", kind=kind, start=0, end=6,
+                                        box=box, fit="auto", **copy)
+    x0, _, x1, _ = result["fit"]["box"]
+    assert x1 - x0 >= editorial_graphics.CARD_MIN_WIDTH - 1e-9
+    assert "card box [" in " ".join(result["fit"]["notes"])
+    e = default_edl(7)
+    e["texts"], e["vectors"] = result["texts"], result["vectors"]
+    validate_edl(e, 7)
+    with pytest.raises(scenes.LayoutRejected, match="card box must be at least 0.12 wide"):
+        editorial_graphics.compose(id="g", kind=kind, start=0, end=6,
+                                   box=[.1, .5, .215, .9], **copy)
+
+
+def test_thin_card_through_the_tool_is_saved_not_bounced_by_the_edl():
+    ctx = _Ctx()
+    out = agent_tools.set_editorial_graphic(
+        ctx, "g", "statement", "Build it", 0, 6, box=[.5, .2, .52, .7])
+    assert out.startswith("EDL v"), out
+    assert "fit=auto adjusted: card box [0.5,0.2,0.52,0.7]→[0.45,0.2,0.57,0.7]" in out
+
+
+def test_rejected_write_still_names_the_auto_repairs():
+    fit = {"notes": ["box [0,0,1,1]→[0.045,0.04,0.955,0.96]"], "box": [.045, .04, .955, .96]}
+    out = agent_tools._fit_report("REJECTED (EDL v3 unchanged): texts.0 bad", fit)
+    assert out.startswith("REJECTED (EDL v3 unchanged)")
+    assert "Nothing was saved" in out and "box [0,0,1,1]→" in out
+    assert "fit=auto adjusted" not in out
+    assert agent_tools._fit_report("REJECTED: x", {"notes": []}) == "REJECTED: x"
+
+
 def test_editorial_tool_defaults_to_auto_and_reports():
     ctx = _Ctx()
     out = agent_tools.set_editorial_graphic(
@@ -329,9 +477,26 @@ def test_cover_overlay_motion_applies_what_it_can_and_names_what_it_dropped():
         "scale": [{"t": 0, "v": 1}, {"t": 1, "v": 1.2}],
         "opacity": [{"t": 0, "v": 0}, {"t": .2, "v": 1}]})
     assert out.startswith("EDL v"), out
-    assert "Not applied: scale" in out
+    assert "Not applied: scale — overlay ov1 has fit=cover, which always fills the whole frame" in out
     ov = ctx.edl["overlays"][0]
     assert isinstance(ov["opacity"], list) and not isinstance(ov["scale"], list)
+    # A move that changes nothing still names what it dropped.
+    agent_tools.set_overlay_motion(ctx, "ov1", {"opacity": .5})
+    again = agent_tools.set_overlay_motion(ctx, "ov1", {"x": .2, "opacity": .5})
+    assert again.startswith("NO CHANGE") and "Not applied: x" in again, again
+
+
+def test_picture_overlay_motion_names_the_picture_rectangle():
+    ctx = _Ctx(duration=5)
+    ctx.edl["overlays"] = [{"id": "ov2", "asset_key": "image.png", "kind": "image",
+                            "start": 0.0, "duration_s": 2.0, "fit": "picture"}]
+    ctx.edl = validate_edl(ctx.edl, 5).model_dump()
+    out = agent_tools.set_overlay_motion(ctx, "ov2", {"x": .3, "opacity": .5})
+    assert out.startswith("EDL v"), out
+    assert "fit=picture, which always fills the program's picture rectangle" in out
+    assert "full-frame" not in out and "whole frame" not in out
+    only = agent_tools.set_overlay_motion(ctx, "ov2", {"y": .3})
+    assert only.startswith("REJECTED") and "fit=picture" in only and "ignore y" in only
 
 
 # ── 5. make_shorts: one reply, optional sentence snap ──────────────────────
@@ -485,13 +650,38 @@ KNOWN_STALE_SKILL_TOOLS = {
 }
 
 
-def test_static_live_tool_set_matches_runtime_registry():
-    assert skill_validator.live_tool_names() == set(agent_tools.TOOLS)
+def test_ci_static_registry_matches_runtime_registry():
+    # CI validates skills before worker dependencies exist, so it reads the
+    # registry statically. A new registration pattern that it cannot see
+    # must be taught to skill_validator.registered_tool_names.
+    static = skill_validator.live_tool_names()
+    runtime = set(agent_tools.TOOLS)
+    assert static == runtime, ("static registry differs from agent_tools.TOOLS: "
+                               f"missing {sorted(runtime - static)}, "
+                               f"extra {sorted(static - runtime)}")
     assert skill_validator.retired_tool_names() >= {"research_music", "generate_image"}
 
 
+def test_static_registry_follows_every_merge_pattern(tmp_path):
+    (tmp_path / "extra_tools.py").write_text(
+        "BASE = {'base_tool': 1}\nTOOL_SPECS = {**BASE, 'extra_tool': 2}\n",
+        encoding="utf-8")
+    tools = tmp_path / "agent_tools.py"
+    tools.write_text(
+        "import extra_tools\nLOCAL = {'local_tool': 1}\n"
+        "TOOLS = {'core_tool': 1, 'old_tool': 2}\n"
+        "TOOLS.update(extra_tools.TOOL_SPECS)\nTOOLS.update(LOCAL)\n"
+        "TOOLS['late_tool'] = 3\n"
+        "for _retired_tool in ('old_tool',):\n    TOOLS.pop(_retired_tool)\n",
+        encoding="utf-8")
+    assert skill_validator.live_tool_names(tools) == {
+        "core_tool", "base_tool", "extra_tool", "local_tool", "late_tool"}
+
+
 def test_skills_reference_only_tools_in_TOOLS():
-    found = skill_validator.stale_tool_references()
+    # Judged against the imported registry, so a registration the static
+    # reader does not understand cannot fail this ratchet.
+    found = skill_validator.stale_tool_references(live=set(agent_tools.TOOLS))
     new = {skill: sorted(set(names) - set(KNOWN_STALE_SKILL_TOOLS.get(skill, [])))
            for skill, names in found.items()}
     new = {k: v for k, v in new.items() if v}
@@ -510,5 +700,6 @@ def test_stale_reference_scan_catches_bare_and_called_names(tmp_path):
         "Use research_music for a bed, then add_music. Try find_repetitions(). "
         "Then add_motion_graphic(template='x'). Fields like duration_s are fine.",
         encoding="utf-8")
-    found = skill_validator.stale_tool_references(skills)
+    found = skill_validator.stale_tool_references(skills, live=set(agent_tools.TOOLS))
     assert found == {"x.md": ["find_repetitions", "research_music"]}
+    assert skill_validator.stale_tool_references(skills) == found

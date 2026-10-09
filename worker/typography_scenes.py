@@ -6,10 +6,13 @@ The editor supplies the meaning, line breaks and real program cue times.
 
 fit='strict' rejects any out-of-range argument or overflowing layout.
 fit='auto' repairs geometry instead: numeric styling is clamped to its range,
-the box is clamped into the renderer's safe area and font_size is scaled down
-until every row fits. Every repair is reported in ``result['fit']['notes']``
-so nothing changes silently. Either way, every remaining problem is raised at
-once (``LayoutRejected``) so one correction can fix them all.
+the box is clamped into the renderer's safe area, a cue before the scene start
+snaps to the start, and font_size is scaled down until every row fits, by at
+most AUTO_MAX_SHRINK and never below AUTO_MIN_FONT_SIZE (type stays a
+deliberate choice, not a silent casualty of long copy). Every repair is
+reported in ``result['fit']['notes']`` so nothing changes silently. Either
+way, every remaining problem is raised at once (``LayoutRejected``) so one
+correction can fix them all.
 """
 import math
 import re
@@ -30,6 +33,11 @@ SAFE_AREA = (.045, .04, .955, .96)  # renderer edge-safe region [l, t, r, b]
 MIN_BOX_SPAN = .1                  # schemas.Frame._picture_rectangle minimum
 DEFAULT_BOX = (.08, .28, .92, .66)
 FITS = ('auto', 'strict')
+# fit='auto' may shrink the authored font_size by at most this fraction, and
+# never below AUTO_MIN_FONT_SIZE (an authored size already below it is not
+# shrunk). Beyond that the call is rejected with the largest size that fits.
+AUTO_MAX_SHRINK = .4
+AUTO_MIN_FONT_SIZE = .05
 
 
 class LayoutRejected(ValueError):
@@ -46,7 +54,7 @@ class LayoutRejected(ValueError):
         super().__init__(message)
 
 
-def bounded(value, name, rng, fit, problems, notes, where=''):
+def bounded(value, name, rng, fit, problems, notes, where='', unit=''):
     """A float inside rng. auto clamps (and notes it); strict records a
     problem. Non-numbers are always problems. Returns None when unusable."""
     low, high = rng
@@ -54,10 +62,10 @@ def bounded(value, name, rng, fit, problems, notes, where=''):
     try:
         v = float(value)
     except (TypeError, ValueError):
-        problems.append(f'{name} must be a number between {low:g} and {high:g}{place}')
+        problems.append(f'{name} must be a number between {low:g} and {high:g}{unit}{place}')
         return None
     if not math.isfinite(v):
-        problems.append(f'{name} must be between {low:g} and {high:g}{place}')
+        problems.append(f'{name} must be between {low:g} and {high:g}{unit}{place}')
         return None
     if low <= v <= high:
         return v
@@ -65,7 +73,7 @@ def bounded(value, name, rng, fit, problems, notes, where=''):
         clamped = min(max(v, low), high)
         notes.append(f'{name}{place} {v:g}→{clamped:g} (allowed {low:g}–{high:g})')
         return clamped
-    problems.append(f'{name} must be between {low:g} and {high:g}{place}')
+    problems.append(f'{name} must be between {low:g} and {high:g}{unit}{place}')
     return None
 
 
@@ -73,21 +81,23 @@ def _fmt_box(box):
     return '[' + ','.join(f'{v:g}' for v in box) + ']'
 
 
-def _span(a, b, low, high):
+def _span(a, b, low, high, minimum=MIN_BOX_SPAN):
     a, b = min(max(a, low), high), min(max(b, low), high)
-    if b - a < MIN_BOX_SPAN - 1e-9:
-        mid = min(max((a + b) / 2, low + MIN_BOX_SPAN / 2), high - MIN_BOX_SPAN / 2)
-        a, b = mid - MIN_BOX_SPAN / 2, mid + MIN_BOX_SPAN / 2
+    if b - a < minimum - 1e-9:
+        mid = min(max((a + b) / 2, low + minimum / 2), high - minimum / 2)
+        a, b = mid - minimum / 2, mid + minimum / 2
     return a, b
 
 
-def fit_box(box, default, fit, problems, notes, safe=True):
+def fit_box(box, default, fit, problems, notes, safe=True, min_width=MIN_BOX_SPAN,
+            min_height=MIN_BOX_SPAN, label='box'):
     """[left, top, right, bottom] frame fractions for a layout region.
 
     strict: the box must already be a valid picture rectangle (and inside the
-    safe area when ``safe``). auto: reversed edges are swapped, edges are
-    clamped into the safe area (or 0..1), and a region thinner than 10% grows
-    around its centre. Pixel-looking values are never guessed at."""
+    safe area when ``safe``) at least min_width × min_height. auto: reversed
+    edges are swapped, edges are clamped into the safe area (or 0..1), and a
+    region thinner than its minimum grows around its centre. Pixel-looking
+    values are never guessed at."""
     from schemas import Frame
     raw = box or default
     try:
@@ -114,6 +124,11 @@ def fit_box(box, default, fit, problems, notes, safe=True):
             # moving a deliberately authored left/right composition.
             problems.append('Keep the scene inside the frame safe area '
                             f'(box within {left:g}–{right:g} × {top:g}–{bottom:g})')
+        for span, minimum, axis in ((x1 - x0, min_width, 'wide'),
+                                    (y1 - y0, min_height, 'tall')):
+            if span < minimum - 1e-9:
+                problems.append(f'{label} must be at least {minimum:g} {axis} '
+                                f'(got {span:.3g}); enlarge it')
         return values
     if max(abs(v) for v in values) > 1.5:
         problems.append(f'box {_fmt_box(values)} looks like pixels; use frame '
@@ -124,14 +139,16 @@ def fit_box(box, default, fit, problems, notes, safe=True):
         x0, x1 = x1, x0
     if y0 > y1:
         y0, y1 = y1, y0
-    x0, x1 = _span(x0, x1, left, right)
-    y0, y1 = _span(y0, y1, top, bottom)
+    x0, x1 = _span(x0, x1, left, right, min_width)
+    y0, y1 = _span(y0, y1, top, bottom, min_height)
     if all(abs(a - b) <= 1e-9 for a, b in zip((x0, y0, x1, y1), values)):
         return authored
     fixed = [round(v, 4) for v in (x0, y0, x1, y1)]
     where = ('the safe area' if safe else 'the frame')
-    notes.append(f'box {_fmt_box(values)}→{_fmt_box(fixed)} '
-                 f'(kept inside {where}, at least {MIN_BOX_SPAN:g} per axis)')
+    least = (f'{min_width:g} per axis' if min_width == min_height else
+             f'{min_width:g} wide and {min_height:g} tall')
+    notes.append(f'{label} {_fmt_box(values)}→{_fmt_box(fixed)} '
+                 f'(kept inside {where}, at least {least})')
     return fixed
 
 
@@ -220,27 +237,40 @@ def _parse_lines(lines, start, end, motion, reveal, fit, problems, notes):
                             f'Allow {minimum:.2f}s after the cue for '
                             f'"{text[:30]}" (cue at {at:g}s: end ≥ '
                             f'{at + minimum:.2f} or at ≤ {end - minimum:.2f})')
+            # li/ri are the AUTHORED positions: skipped invalid lines or runs
+            # must not shift the numbering of later messages.
             made.append(dict(text=text, at=at, font=family, italic=italic,
-                             scale=1. if scale is None else scale, color=colour))
-        parsed.append(dict(size=1. if size is None else size, runs=made))
+                             scale=1. if scale is None else scale, color=colour,
+                             ri=ri))
+        parsed.append(dict(size=1. if size is None else size, runs=made, li=li))
     if count > MAX_RUNS:
         problems.append(f'Use at most {MAX_RUNS} runs per scene (got {count})')
     return parsed, count
+
+
+def _run_in_range(relative, size, short):
+    """A run is readable when EITHER its authored size (font_size × line size
+    × run scale) or its rounded pixel size is inside RUN_PX_RANGE. Authored:
+    the advertised minimums stay valid despite pixel rounding. Rounded: every
+    size the pixel check always accepted stays accepted."""
+    low, high = RUN_PX_RANGE
+    return (low - 1e-9 <= relative <= high + 1e-9
+            or low - 1e-9 <= size / short <= high + 1e-9)
 
 
 def _measure(parsed, font_size, leading, short, fit, problems=None):
     """Rows at one font_size: (rows, runs held at the readable size bounds)."""
     rows, held = [], []
     low_px, high_px = RUN_PX_RANGE[0] * short, RUN_PX_RANGE[1] * short
-    for li, line in enumerate(parsed, 1):
+    for line in parsed:
+        li = line['li']
         px = round(font_size * short * line['size'])
         made = []
-        for ri, run in enumerate(line['runs'], 1):
+        for run in line['runs']:
+            ri = run['ri']
             size = round(px * run['scale'])
-            # Judge the authored size, not its pixel rounding: the advertised
-            # minimum font_size (and line size/run scale) must stay valid.
             relative = font_size * line['size'] * run['scale']
-            if not RUN_PX_RANGE[0] - 1e-9 <= relative <= RUN_PX_RANGE[1] + 1e-9:
+            if not _run_in_range(relative, size, short):
                 if fit == 'auto':
                     size = min(max(size, math.ceil(low_px)), math.floor(high_px))
                     held.append(f'line {li} run {ri}')
@@ -249,19 +279,44 @@ def _measure(parsed, font_size, leading, short, fit, problems=None):
                                     f'line size (line {li} run {ri} is '
                                     f'{relative:.3g} of the short edge; '
                                     f'allowed {RUN_PX_RANGE[0]:g}–{RUN_PX_RANGE[1]:g})')
+            # An authored size at the top of the range can round one pixel
+            # past it; the emitted layer may never exceed the text maximum.
+            size = min(size, math.floor(high_px + 1e-9))
             made.append(dict(run, px=size, width=width(run['text'], run['font'], size,
                                                         italic=run['italic'])))
         gap = width(' ', 'Inter Display Bold', px)
         row_width = sum(r['width'] for r in made) + gap * (len(made) - 1)
-        rows.append(dict(runs=made, width=row_width, gap=gap,
+        rows.append(dict(runs=made, width=row_width, gap=gap, li=li,
                          height=max([r['px'] for r in made] or [px]) * leading))
     return rows, held
 
 
 def _overflow(rows, room_w, room_h):
-    wide = [i for i, row in enumerate(rows, 1) if row['width'] > room_w]
+    wide = [row for row in rows if row['width'] > room_w]
     tall = sum(r['height'] for r in rows) > room_h
     return wide, tall
+
+
+def _shrink(parsed, font_size, floor, leading, short, room_w, room_h):
+    """Scale the whole scene uniformly (the authored hierarchy between lines
+    and runs survives) until every row fits or ``floor`` is reached.
+    Returns (font_size, rows, held, wide, tall)."""
+    rows, held = _measure(parsed, font_size, leading, short, 'auto')
+    wide, tall = _overflow(rows, room_w, room_h)
+    for _ in range(40):
+        if not (wide or tall):
+            break
+        widest = max(r['width'] for r in rows)
+        total = sum(r['height'] for r in rows)
+        ratio = min(room_w / widest if widest > 0 else 1,
+                    room_h / total if total > 0 else 1)
+        smaller = max(floor, math.floor(font_size * min(ratio, .985) * 1e4) / 1e4)
+        if smaller >= font_size:
+            break
+        font_size = smaller
+        rows, held = _measure(parsed, font_size, leading, short, 'auto')
+        wide, tall = _overflow(rows, room_w, room_h)
+    return font_size, rows, held, wide, tall
 
 
 def compose(*, id, start, end, lines, box=None, align='center',
@@ -288,7 +343,8 @@ def compose(*, id, start, end, lines, box=None, align='center',
     except ValueError as exc:
         problems.append(str(exc))
         color = '#F4F2EE'
-    font_size = bounded(font_size, 'font_size', FONT_SIZE_RANGE, fit, problems, notes)
+    font_size = bounded(font_size, 'font_size', FONT_SIZE_RANGE, fit, problems, notes,
+                        unit=' of the canvas short edge')
     leading = bounded(leading, 'leading', LEADING_RANGE, fit, problems, notes)
     x0, y0, x1, y1 = fit_box(box, DEFAULT_BOX, fit, problems, notes, safe=True)
     if not isinstance(lines, list) or not lines:
@@ -305,44 +361,58 @@ def compose(*, id, start, end, lines, box=None, align='center',
     rows, held = _measure(parsed, font_size, leading, short, fit,
                           problems if fit != 'auto' else None)
     wide, tall = _overflow(rows, room_w, room_h)
+    floor, fits_at = '', None
     if (wide or tall) and fit == 'auto':
-        # Scale the whole scene uniformly so the authored hierarchy between
-        # lines and runs survives; stop at the validated minimum size.
+        # Small type is a design failure, so auto only trims: at most
+        # AUTO_MAX_SHRINK, never below AUTO_MIN_FONT_SIZE. Copy that needs
+        # more is rejected with the size that would fit, so the editor
+        # consciously shortens it, enlarges the box or accepts that size.
         before = font_size
-        for _ in range(40):
-            widest = max(r['width'] for r in rows)
-            total = sum(r['height'] for r in rows)
-            ratio = min(room_w / widest if widest > 0 else 1,
-                        room_h / total if total > 0 else 1)
-            smaller = max(FONT_SIZE_RANGE[0],
-                          math.floor(font_size * min(ratio, .985) * 1e4) / 1e4)
-            if smaller >= font_size:
-                break
-            font_size = smaller
-            rows, held = _measure(parsed, font_size, leading, short, fit)
-            wide, tall = _overflow(rows, room_w, room_h)
-            if not (wide or tall):
-                break
+        limit = max(FONT_SIZE_RANGE[0], before * (1 - AUTO_MAX_SHRINK),
+                    min(before, AUTO_MIN_FONT_SIZE))
+        font_size, rows, held, wide, tall = _shrink(
+            parsed, before, limit, leading, short, room_w, room_h)
         shrink = 1 - font_size / before
-        if shrink > 0:
+        if wide or tall:
+            needed, _, _, still_wide, still_tall = _shrink(
+                parsed, font_size, FONT_SIZE_RANGE[0], leading, short,
+                room_w, room_h)
+            if still_wide or still_tall:
+                floor = ' even at the minimum font_size'
+            else:
+                fits_at = needed
+                floor = (f' at font_size {font_size:g}; '
+                         + (f'fit=auto shrinks at most {AUTO_MAX_SHRINK:.0%} '
+                            f'and never below {AUTO_MIN_FONT_SIZE:g}'
+                            if limit < before else
+                            'fit=auto does not shrink type authored at '
+                            f'{AUTO_MIN_FONT_SIZE:g} or smaller'))
+        elif shrink > 0:
             notes.append(f'font_size {before:g}→{font_size:g} ({shrink:.0%} '
                          'smaller) so every row fits the box'
                          + ('; consider fewer words or a larger box'
-                            if shrink > .35 else ''))
+                            if shrink > .25 else ''))
     if held:
         notes.append('run size held at the readable '
                      f'{RUN_PX_RANGE[0]:g}–{RUN_PX_RANGE[1]:g} short-edge range: '
                      + ', '.join(held))
-    floor = ' even at the minimum font_size' if fit == 'auto' else ''
-    for li in wide:
+    if wide:
+        # One entry for every overflowing row, so the numbered list stays
+        # about distinct fixes rather than repeating the same rule per line.
+        needs = ', '.join(f'line {row["li"]} needs {row["width"]:.0f}px'
+                          for row in wide)
         problems.append('Line exceeds its box; shorten it, break it, or reduce '
-                        f'its explicit size (line {li} needs '
-                        f'{rows[li - 1]["width"]:.0f}px, the box allows '
+                        f'its explicit size ({needs}; the box allows '
                         f'{room_w:.0f}px{floor})')
     if tall:
         problems.append('Lines exceed the scene height; use fewer lines or a '
                         f'taller box (needs {sum(r["height"] for r in rows):.0f}px, '
                         f'the box allows {room_h:.0f}px{floor})')
+    if fits_at is not None:
+        problems.append(f'As written it fits only at font_size {fits_at:g} '
+                        f'({1 - fits_at / before:.0%} below {before:g}): shorten '
+                        'the copy, enlarge the box, or pass '
+                        f'font_size={fits_at:g} to choose that smaller type')
     if problems:
         raise LayoutRejected(problems)
 

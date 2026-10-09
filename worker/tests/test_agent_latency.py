@@ -283,6 +283,12 @@ def test_post_plan_tool_catalog_keeps_capability_but_drops_repeated_handbook():
     full_desc = sum(len(x["function"]["description"]) for x in full)
     compact_desc = sum(len(x["function"]["description"]) for x in compact)
     assert compact_desc < full_desc * 0.25
+    # The compact catalog is resent on every agent turn. Parameter schemas
+    # are not covered by the description ratio, so growth past this budget
+    # (~4% above 72 kB in Oct 2026) must be a deliberate, reviewed decision.
+    assert compact_bytes < 75_000, (
+        f"compact tool catalog is {compact_bytes} bytes; trim schemas or "
+        "raise this budget deliberately")
 
 
 def test_successful_auto_preview_rubric_is_not_reported_as_render_failure(
