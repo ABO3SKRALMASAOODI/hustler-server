@@ -1,0 +1,126 @@
+<!--MG-SPEC {"title": "Light leak", "category": "transition",
+ "description": "Warm film light leak: broad glowing colour washes with a hot core and a deeper rim spill across the frame and fade, like light leaking onto film. Use as a soft transition over a cut (sweep: the leak peaks ~0.5 s in, centre that on the cut) or as a hook/emotional accent that glows in from one edge without covering the face (edge).",
+ "duration": 1.2, "layer": "above_captions", "mutes_captions": false,
+ "params": {
+  "palette": {"type": "enum", "values": ["warm", "sunset", "rose", "cool", "prism"], "default": "warm", "hint": "warm = amber/gold, sunset = orange/pink, rose = pink/peach, cool = teal/blue, prism = film red/orange with a cyan fringe"},
+  "mode": {"type": "enum", "values": ["sweep", "edge"], "default": "sweep", "hint": "sweep crosses the whole frame (transition); edge blooms along one side (accent)"},
+  "from": {"type": "enum", "values": ["right", "left", "top", "bottom"], "default": "right", "hint": "edge the light enters from"},
+  "intensity": {"type": "float", "min": 0.3, "max": 1.0, "default": 0.85}
+ },
+ "example": {"palette": "warm"},
+ "sfx": [{"at": 0.1, "kind": "whoosh_soft"}]} -->
+<style>
+  #lk{position:absolute;left:0;top:0;width:100%;height:100%;image-rendering:pixelated}
+</style>
+<div class="mg-root"><canvas id="lk"></canvas></div>
+<script>
+(() => {
+  const P = MG.params, W = MG.W, H = MG.H, D = MG.duration;
+  // Light leaks are pure soft gradients, so they are drawn at quarter
+  // resolution and scaled up by the compositor (identical look, ~16x less
+  // fill work per frame).
+  const Q = 4, cw = Math.ceil(W / Q), ch = Math.ceil(H / Q);
+  const cv = MG.$('#lk');
+  cv.width = cw; cv.height = ch;
+  const ctx = cv.getContext('2d');
+  const PAL = {
+    // [hot core, main wash, secondary wash, rim spill] (rgb)
+    warm: [[255, 240, 205], [255, 150, 50], [255, 196, 88], [255, 72, 22]],
+    sunset: [[255, 226, 196], [255, 104, 54], [255, 62, 124], [255, 170, 64]],
+    rose: [[255, 232, 238], [255, 118, 170], [255, 170, 146], [255, 64, 110]],
+    cool: [[228, 250, 255], [60, 196, 255], [104, 236, 210], [40, 100, 255]],
+    prism: [[255, 238, 214], [255, 84, 36], [255, 172, 0], [50, 166, 255]],
+  };
+  const C = PAL[P.palette] || PAL.warm;
+  const I = MG.clamp(P.intensity ?? 0.85, 0.3, 1);
+  const edge = P.mode === 'edge';
+  const from = P.from || 'right';
+  const vertical = from === 'top' || from === 'bottom';
+  const L = vertical ? H : W, A = vertical ? W : H;       // travel / cross axes
+  const sgn = (from === 'right' || from === 'bottom') ? -1 : 1;
+  const diag = Math.hypot(W, H);
+
+  // gaussian-like falloff stops: no visible rim, no pin-point centre
+  const FALL = [0, 0.18, 0.34, 0.5, 0.66, 0.82, 1].map(r => [r, Math.exp(-4.2 * r * r) * (1 - r * r * 0.15)]);
+  const grads = {};
+  function grad(ci, a, core) {
+    const key = ci + ':' + a.toFixed(3) + ':' + (core ? 1 : 0);
+    if (grads[key]) return grads[key];
+    const g = ctx.createRadialGradient(0, 0, 0, 0, 0, 1);
+    FALL.forEach(([r, f]) => {
+      const c = core && r < 0.4 ? C[0].map((v, i) => Math.round(v + (C[ci][i] - v) * (r / 0.4))) : C[ci];
+      g.addColorStop(r, `rgba(${c[0]},${c[1]},${c[2]},${(a * f).toFixed(4)})`);
+    });
+    g.addColorStop(1, `rgba(${C[ci][0]},${C[ci][1]},${C[ci][2]},0)`);
+    return (grads[key] = g);
+  }
+  // Leak bands are long along the entry edge and narrow along the travel
+  // axis (light spilling in from the film gate), slightly tilted. off =
+  // offset along travel (frac of L, + = ahead of the group), ac = cross
+  // position (frac of A), ra/rc = radii along/across (frac of diag).
+  const SH = [
+    { off: -0.10, ac: 0.50, ra: 0.46, rc: 0.80, c: 1, a: 0.26, rot: 0 },    // broad ambient lift
+    { off: -0.36, ac: 0.55, ra: 0.20, rc: 0.62, c: 3, a: 0.62, rot: -14 },  // trailing deep rim
+    { off: -0.12, ac: 0.38, ra: 0.26, rc: 0.55, c: 1, a: 0.70, rot: -20 },  // main wash
+    { off: 0.06, ac: 0.74, ra: 0.22, rc: 0.42, c: 2, a: 0.55, rot: 16 },    // secondary wash
+    { off: -0.02, ac: 0.30, ra: 0.10, rc: 0.34, c: 1, a: 0.78, rot: -22, core: true }, // hot streak
+    { off: 0.16, ac: 0.58, ra: 0.12, rc: 0.70, c: 2, a: 0.30, rot: -30 },   // leading spill band
+  ];
+  const PEAK = Math.min(0.5, D * 0.45);
+  // group travel u(t): fast at first, decelerating; mid-frame exactly at PEAK
+  const gamma = Math.log(0.5) / Math.log(MG.clamp(PEAK / D, 0.05, 0.95));
+  const u = t => Math.pow(MG.clamp(t / D), gamma);
+  const env = t => t < PEAK ? MG.ease.outQuad(MG.clamp(t / PEAK))
+    : 1 - MG.ease.inQuad(MG.range(t, PEAK + 0.06 * D, D * 0.94 - PEAK));
+
+  if (edge) {
+    // the accent never reaches past ~half the frame: capture only that side
+    // and feather the canvas to zero before the capture edge
+    const dep = vertical ? 0.42 : 0.55;
+    MG.box = from === 'right' ? [W * (1 - dep), 0, W, H] : from === 'left' ? [0, 0, W * dep, H]
+      : from === 'top' ? [0, 0, W, H * dep] : [0, H * (1 - dep), W, H];
+    const side = { right: 'to left', left: 'to right', top: 'to bottom', bottom: 'to top' }[from];
+    const m = `linear-gradient(${side}, #000 0%, #000 ${(dep * 45).toFixed(1)}%, rgba(0,0,0,0) ${(dep * 96).toFixed(1)}%)`;
+    cv.style.webkitMaskImage = m; cv.style.maskImage = m;
+  } else MG.box = [0, 0, W, H];
+  MG.active([[0, D]]);
+
+  MG.frame(t => {
+    const e = env(t) * I, p = u(t);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, cw, ch);
+    if (e <= 0.002) return;
+    ctx.globalCompositeOperation = 'lighter';         // light adds up
+    SH.forEach((s, i) => {
+      let along, across;
+      if (edge) {
+        // anchored just beyond the entry edge: breathes in and back out
+        const inset = (-0.16 + 0.24 * Math.sin(Math.PI * MG.clamp(p * 0.95 + 0.04))) * L + s.off * 0.35 * L;
+        along = sgn < 0 ? L - inset : inset;
+        across = (s.ac + (p - 0.5) * 0.3 * (i % 2 ? -1 : 1)) * A;
+      } else {
+        const reach = 0.42 * diag;                        // group half-extent along travel
+        const c0 = -reach + p * (L + 2 * reach);          // from fully outside to fully outside
+        const pos = c0 + s.off * L;
+        along = sgn < 0 ? L - pos : pos;
+        across = (s.ac + (p - 0.5) * 0.14 * (i % 2 ? -1 : 1)) * A;
+      }
+      const x = vertical ? across : along, y = vertical ? along : across;
+      const grow = 0.9 + 0.2 * p;
+      const rot = (s.rot + 14 * (p - 0.5) * (i % 2 ? -1 : 1)) * Math.PI / 180;
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.translate(x / Q, y / Q);
+      ctx.rotate(rot);
+      const rAlong = s.ra * diag * grow / Q, rAcross = s.rc * diag * grow / Q;
+      if (vertical) ctx.scale(rAcross, rAlong); else ctx.scale(rAlong, rAcross);
+      ctx.fillStyle = grad(s.c, s.a, s.core);
+      ctx.globalAlpha = MG.clamp(e * (edge ? 0.95 : 1));
+      ctx.beginPath();
+      ctx.arc(0, 0, 1, 0, Math.PI * 2);
+      ctx.fill();
+    });
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+  });
+})();
+</script>

@@ -1,0 +1,144 @@
+<!--MG-SPEC {"title": "Focus spotlight", "category": "callout",
+ "description": "Dims the frame and irises a soft-edged spotlight (ellipse or rounded box) onto one subject or UI element, with an optional draw-on ring and label. Use to point the viewer at something specific: a face in a group shot, a product, a number or a button in a screen recording. x/y/w/h come from look_at frames.",
+ "duration": 2.5, "layer": "below_captions", "mutes_captions": false,
+ "params": {
+  "x": {"type": "float", "min": 0, "max": 1, "default": 0.5, "hint": "spotlight centre x as frame fraction"},
+  "y": {"type": "float", "min": 0, "max": 1, "default": 0.4, "hint": "spotlight centre y as frame fraction"},
+  "w": {"type": "float", "min": 0.05, "max": 1, "default": 0.46, "hint": "spotlight width as frame-width fraction"},
+  "h": {"type": "float", "min": 0.03, "max": 1, "default": 0.26, "hint": "spotlight height as frame-height fraction"},
+  "shape": {"type": "enum", "values": ["ellipse", "rounded"], "default": "ellipse", "hint": "rounded = soft box for UI elements and text"},
+  "label": {"type": "str", "default": "", "max": 40, "hint": "optional short label next to the spotlight"},
+  "dim": {"type": "float", "min": 0.25, "max": 0.9, "default": 0.62, "hint": "how dark the rest of the frame gets"},
+  "feather": {"type": "float", "min": 0, "max": 1, "default": 0.5, "hint": "edge softness"},
+  "ring": {"type": "bool", "default": true, "hint": "thin outline that draws on around the spotlight"},
+  "color": {"type": "color", "default": "#FFFFFF", "hint": "ring and label accent colour"}
+ },
+ "example": {"x": 0.5, "y": 0.42, "label": "Watch his hands"},
+ "sfx": [{"at": 0.05, "kind": "whoosh_soft"}]} -->
+<style>
+  #veil{position:absolute;left:0;top:0;width:100%;height:100%}
+  svg.ring{position:absolute;left:0;top:0;overflow:visible;pointer-events:none}
+  .lab{position:absolute;display:flex;align-items:center;gap:14px;white-space:nowrap;font-family:'Inter Display','Inter',sans-serif;font-weight:700;
+       letter-spacing:-0.015em;color:#fff;text-shadow:0 2px 14px rgba(0,0,0,.55);line-height:1}
+  .lab i{display:block;width:12px;height:12px;border-radius:50%;background:var(--ac);box-shadow:0 0 12px var(--ac);flex:none}
+  .lead{position:absolute;width:2px;background:var(--ac);opacity:.85;transform-origin:50% 0}
+</style>
+<div class="mg-root"><canvas id="veil"></canvas><div class="lead" id="lead"></div><div class="lab" id="lab"><i></i><span id="labt"></span></div></div>
+<script>
+(() => {
+  const P = MG.params, W = MG.W, H = MG.H, D = MG.duration;
+  document.documentElement.style.setProperty('--ac', P.color || '#FFFFFF');
+  // the veil is soft, so it is computed at quarter resolution
+  const Q = 4, qw = Math.ceil(W / Q), qh = Math.ceil(H / Q);
+  const cv = MG.$('#veil');
+  cv.width = qw; cv.height = qh;
+  const ctx = cv.getContext('2d');
+  const cx = MG.clamp(P.x ?? 0.5) * W, cy = MG.clamp(P.y ?? 0.4) * H;
+  const sw = MG.clamp(P.w ?? 0.46, 0.05, 1) * W, sh = MG.clamp(P.h ?? 0.26, 0.03, 1) * H;
+  const rounded = P.shape === 'rounded';
+  const dim = MG.clamp(P.dim ?? 0.62, 0.25, 0.9);
+  const feather = MG.clamp(P.feather ?? 0.5, 0, 1);
+  const blurPx = (6 + feather * 0.22 * Math.min(sw, sh)) / Q;
+
+  // ring (crisp, full resolution SVG)
+  const NS = 'http://www.w3.org/2000/svg';
+  let ringPath = null, svg = null;
+  if (P.ring) {
+    svg = document.createElementNS(NS, 'svg');
+    svg.setAttribute('class', 'ring');
+    svg.setAttribute('width', W); svg.setAttribute('height', H);
+    ringPath = document.createElementNS(NS, 'path');
+    const rx = sw / 2 + 10, ry = sh / 2 + 10;
+    let d;
+    if (rounded) {
+      const r = Math.min(36, Math.min(sw, sh) * 0.22) + 6;
+      const x0 = cx - rx, y0 = cy - ry, x1 = cx + rx, y1 = cy + ry;
+      d = `M${cx},${y0} H${x1 - r} A${r},${r} 0 0 1 ${x1},${y0 + r} V${y1 - r} A${r},${r} 0 0 1 ${x1 - r},${y1} ` +
+          `H${x0 + r} A${r},${r} 0 0 1 ${x0},${y1 - r} V${y0 + r} A${r},${r} 0 0 1 ${x0 + r},${y0} Z`;
+    } else {
+      d = `M${cx},${cy - ry} A${rx},${ry} 0 1 1 ${cx - 0.01},${cy - ry} Z`;
+    }
+    ringPath.setAttribute('d', d);
+    ringPath.setAttribute('fill', 'none');
+    ringPath.setAttribute('stroke', P.color || '#FFFFFF');
+    ringPath.setAttribute('stroke-width', '3');
+    ringPath.setAttribute('stroke-linecap', 'round');
+    ringPath.style.filter = 'drop-shadow(0 0 6px rgba(255,255,255,.35))';
+    svg.appendChild(ringPath);
+    svg.style.transformOrigin = `${cx}px ${cy}px`;
+    MG.$('.mg-root').insertBefore(svg, MG.$('#lead'));
+  }
+
+  // label: below the spotlight when there is room, otherwise above
+  const lab = MG.$('#lab'), labT = MG.$('#labt'), lead = MG.$('#lead');
+  const label = String(P.label || '').trim();
+  let below = true, ly = 0, leadTop = 0, leadH = 0;
+  if (label) {
+    labT.textContent = label;
+    MG.fit(labT, { width: W - 160, min: 26, max: 52, nowrap: true });
+    const lr = lab.getBoundingClientRect();
+    const gap = 70;
+    below = cy + sh / 2 + gap + lr.height < H * 0.8 || cy - sh / 2 - gap - lr.height < H * 0.08;
+    ly = below ? cy + sh / 2 + gap : cy - sh / 2 - gap - lr.height;
+    ly = MG.clamp(ly, H * 0.06, H * 0.9 - lr.height);
+    const lx = MG.clamp(cx - lr.width / 2, 60, W - 60 - lr.width);
+    lab.style.left = lx + 'px';
+    lab.style.top = ly + 'px';
+    leadTop = below ? cy + sh / 2 + 16 : ly + lr.height + 12;
+    leadH = Math.max(0, below ? ly - 12 - leadTop : cy - sh / 2 - 16 - leadTop);
+    lead.style.left = (cx - 1) + 'px';
+    lead.style.top = leadTop + 'px';
+    lead.style.height = leadH + 'px';
+    if (!below) lead.style.transformOrigin = '50% 100%';
+  } else {
+    lab.style.display = 'none';
+    lead.style.display = 'none';
+  }
+
+  function drawVeil(alpha, scale) {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.filter = 'none';
+    ctx.clearRect(0, 0, qw, qh);
+    if (alpha <= 0.002) return;
+    ctx.fillStyle = `rgba(4,5,8,${alpha.toFixed(3)})`;
+    ctx.fillRect(0, 0, qw, qh);
+    ctx.globalCompositeOperation = 'destination-out';
+    ctx.filter = `blur(${blurPx.toFixed(2)}px)`;
+    ctx.fillStyle = '#000';
+    const w = sw * scale / Q, h = sh * scale / Q, x = cx / Q - w / 2, y = cy / Q - h / 2;
+    ctx.beginPath();
+    if (rounded) {
+      const r = Math.min(36, Math.min(sw, sh) * 0.22) * scale / Q;
+      ctx.roundRect(x, y, w, h, r);
+    } else ctx.ellipse(cx / Q, cy / Q, w / 2, h / 2, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.filter = 'none';
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  const exitDur = Math.min(0.3, D * 0.16), holdEnd = D - exitDur;
+  const enterEnd = Math.min(holdEnd, 0.95);
+  MG.box = [0, 0, W, H];
+  MG.active([[0, enterEnd], [Math.max(0, holdEnd - 0.02), D]]);
+  MG.frame(t => {
+    const q = t > holdEnd ? MG.ease.inCubic(MG.range(t, holdEnd, exitDur)) : 0;
+    const a = dim * MG.ease.outCubic(MG.range(t, 0, 0.38)) * (1 - q);
+    const iris = 1 + 0.9 * (1 - MG.ease.outExpo(MG.range(t, 0, 0.6))) + 0.25 * q;
+    drawVeil(a, iris);
+    if (ringPath) {
+      const dp = MG.ease.outCubic(MG.range(t, 0.22, 0.5));
+      MG.draw(ringPath, dp);
+      ringPath.style.opacity = (MG.range(t, 0.22, 0.08) * (1 - q)).toFixed(3);
+      svg.style.transform = `scale(${iris.toFixed(4)})`;
+    }
+    if (label) {
+      const lp = MG.ease.outCubic(MG.range(t, 0.48, 0.32));
+      MG.set(lab, { y: (below ? 14 : -14) * (1 - lp), opacity: lp * (1 - q), blur: 8 * (1 - lp) + 6 * q });
+      const gp = MG.ease.outCubic(MG.range(t, 0.4, 0.3));
+      lead.style.transform = `scaleY(${gp.toFixed(4)})`;
+      lead.style.opacity = (0.85 * (1 - q) * MG.range(t, 0.4, 0.05)).toFixed(3);
+    }
+  });
+})();
+</script>

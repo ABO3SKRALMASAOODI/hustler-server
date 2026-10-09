@@ -1,0 +1,147 @@
+<!--MG-SPEC {"title": "Glitch burst", "category": "transition",
+ "description": "A short digital glitch hit over the whole frame: RGB-split slice bars, displaced signal bands with chromatic edges, pixel-sort smears, compression blocks and a scanline veil, peaking mid-burst. Use centred on a hard cut, a hook pattern-interrupt or a 'tech/AI/broken' beat; 0.15-0.3 s is a hit, up to 0.6 s a breakdown. Change the seed so two glitches in one edit differ.",
+ "duration": 0.35, "layer": "above_captions", "mutes_captions": false,
+ "params": {
+  "palette": {"type": "enum", "values": ["rgb", "mono", "acid"], "default": "rgb", "hint": "rgb = red/cyan split, mono = black/white signal, acid = green/magenta"},
+  "intensity": {"type": "float", "min": 0.2, "max": 1.0, "default": 0.7},
+  "seed": {"type": "int", "min": 1, "max": 999, "default": 7, "hint": "variation; same seed = same glitch"}
+ },
+ "example": {"palette": "rgb"},
+ "sfx": [{"at": 0.0, "kind": "glitch"}]} -->
+<style>
+  #gl{position:absolute;left:0;top:0;width:100%;height:100%;image-rendering:pixelated}
+</style>
+<div class="mg-root"><canvas id="gl"></canvas></div>
+<script>
+(() => {
+  const P = MG.params, W = MG.W, H = MG.H, D = MG.duration, fps = MG.fps;
+  // drawn at half resolution with nearest-neighbour upscale: glitch art is
+  // blocky by nature, and the blocks keep each frame cheap to capture
+  const Q = 2, cw = Math.ceil(W / Q), ch = Math.ceil(H / Q);
+  const cv = MG.$('#gl');
+  cv.width = cw; cv.height = ch;
+  const ctx = cv.getContext('2d');
+  const PALS = {
+    rgb: { a: [255, 42, 79], b: [0, 229, 255], c: [61, 91, 255], hi: [255, 255, 255], dark: [6, 8, 14] },
+    mono: { a: [255, 255, 255], b: [170, 170, 170], c: [90, 90, 90], hi: [255, 255, 255], dark: [0, 0, 0] },
+    acid: { a: [57, 255, 20], b: [255, 43, 214], c: [0, 240, 255], hi: [255, 255, 255], dark: [8, 4, 14] },
+  };
+  const C = PALS[P.palette] || PALS.rgb;
+  const I = MG.clamp(P.intensity ?? 0.7, 0.2, 1);
+  const seed = Math.max(1, Math.round(P.seed || 7));
+  const col = (c, a) => `rgba(${c[0]},${c[1]},${c[2]},${MG.clamp(a).toFixed(3)})`;
+  const nF = Math.max(1, Math.round(D * fps));
+  // energy per frame: ramps in fast, peaks past the middle, drops out hard
+  const energy = f => {
+    const x = (f + 0.5) / nF;
+    return Math.pow(Math.sin(Math.PI * Math.min(1, x * 1.08)), 0.55);
+  };
+  // some states hold for two frames (reads as signal, not noise)
+  const stateOf = f => {
+    const r = MG.rand(seed * 977 + Math.floor(f / 2))();
+    return r < 0.45 ? Math.floor(f / 2) * 2 : f;
+  };
+
+  // the single strongest frame gets the full-frame signal drop
+  let peakF = 0;
+  for (let f = 1; f < nF; f++) if (energy(f) > energy(peakF)) peakF = f;
+
+  MG.box = [0, 0, W, H];
+  MG.active([[0, D]]);
+  MG.frame(t => {
+    const f = Math.min(nF - 1, Math.floor(t * fps + 1e-6));
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.clearRect(0, 0, cw, ch);
+    const e = energy(f) * I;
+    if (e < 0.02) return;
+    const sf = stateOf(f);
+    const R = MG.rand(seed * 7919 + sf * 131);
+
+    if (f === peakF && I >= 0.45) {
+      // signal drop: dim veil, scanlines and a faint channel cast
+      ctx.fillStyle = col(C.dark, 0.16 + 0.16 * e);
+      ctx.fillRect(0, 0, cw, ch);
+      ctx.fillStyle = col(C.dark, 0.18 + 0.2 * e);
+      for (let y = 0; y < ch; y += 2) ctx.fillRect(0, y, cw, 1);
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.fillStyle = col(R() < 0.5 ? C.a : C.b, 0.05 + 0.05 * e);
+      ctx.fillRect(0, 0, cw, ch);
+      ctx.globalCompositeOperation = 'source-over';
+    }
+
+    // the damage clusters in 1-3 tear zones per frame, not sprinkled evenly
+    const nZones = 1 + Math.floor(R() * (1.2 + 1.8 * e));
+    for (let z = 0; z < nZones; z++) {
+      const zy = R() * ch, zh = (60 + R() * 200) * (0.6 + e);
+      const ry = () => zy + (R() - 0.5) * zh;
+
+      // 1. displaced picture slab: dark band shifted sideways, scanlined,
+      //    with red/cyan fringes where the signal broke
+      if (R() < 0.55 + 0.4 * e) {
+        const y = ry(), h = 8 + Math.pow(R(), 1.4) * 70 * (0.5 + e);
+        const shift = (R() < 0.5 ? -1 : 1) * (14 + R() * 80) * e;
+        const x0 = R() < 0.55 ? 0 : R() * cw * 0.45, w = cw - x0;
+        ctx.fillStyle = col(C.dark, 0.28 + 0.32 * e * R());
+        ctx.fillRect(x0 + shift, y, w, h);
+        ctx.fillStyle = col(C.hi, 0.05 + 0.05 * e);
+        for (let yy = y; yy < y + h; yy += 2) ctx.fillRect(x0 + shift, yy, w, 1);
+        const ex = shift > 0 ? x0 + shift : x0 + shift + w * (0.4 + 0.4 * R());
+        ctx.fillStyle = col(C.a, 0.9); ctx.fillRect(ex - 4, y, 4, h);
+        ctx.fillStyle = col(C.b, 0.9); ctx.fillRect(ex + 2, y + 1, 2, h);
+      }
+
+      // 2. chromatic slices: separate red and cyan slivers (never stacked,
+      //    so they stay saturated), plus thin hot lines
+      const nBars = 2 + Math.floor(e * 6 + R() * 3);
+      for (let i = 0; i < nBars; i++) {
+        const y = ry(), h = 1 + Math.floor(Math.pow(R(), 2.4) * 16 * (0.6 + e));
+        const x = R() * cw * 0.85, w = 16 + Math.pow(R(), 1.5) * cw * 0.55;
+        const dx = (4 + R() * 12) * (0.5 + e);
+        const a = 0.55 + 0.4 * R();
+        const pick = R();
+        if (pick < 0.42) {
+          ctx.fillStyle = col(C.a, a); ctx.fillRect(x - dx, y, w * 0.7, h);
+          ctx.fillStyle = col(C.b, a); ctx.fillRect(x + w * 0.35 + dx, y + h + 1, w * 0.65, Math.max(1, h * 0.7));
+        } else if (pick < 0.75) {
+          ctx.fillStyle = col(R() < 0.5 ? C.b : C.c, a); ctx.fillRect(x, y, w, h);
+        } else {
+          ctx.fillStyle = col(C.hi, 0.55 + 0.35 * R()); ctx.fillRect(x, y, w * 1.4, 1);
+        }
+      }
+
+      // 3. pixel-sort smear trailing off one side
+      if (R() < 0.35 + 0.5 * e) {
+        const y = ry(), h = 2 + R() * 10, x = R() * cw * 0.6, w = 80 + R() * cw * 0.5;
+        const c = [C.a, C.b, C.hi][Math.floor(R() * 3)];
+        const g = ctx.createLinearGradient(x, 0, x + w, 0);
+        const left = R() < 0.5;
+        g.addColorStop(left ? 0 : 1, col(c, 0.8));
+        g.addColorStop(left ? 1 : 0, col(c, 0));
+        ctx.fillStyle = g;
+        ctx.fillRect(x, y, w, h);
+      }
+
+      // 4. compression blocks on an 8/12 px grid
+      const B = R() < 0.5 ? 8 : 12, cx = R() * cw;
+      const nBlk = Math.floor(2 + e * 12 * R());
+      for (let i = 0; i < nBlk; i++) {
+        const bx = Math.round((cx + (R() - 0.5) * 200) / B) * B;
+        const by = Math.round(ry() / B) * B;
+        const bw = B * (1 + Math.floor(R() * 4)), bh = B * (1 + Math.floor(R() * 2));
+        const q = R();
+        const c = q < 0.32 ? C.a : q < 0.6 ? C.b : q < 0.8 ? C.dark : q < 0.92 ? C.c : C.hi;
+        ctx.fillStyle = col(c, 0.6 + 0.35 * R());
+        ctx.fillRect(bx, by, bw, bh);
+      }
+    }
+
+    // 5. a thin vertical sync tear now and then
+    if (R() < 0.5 * e + 0.1) {
+      const x = R() * cw, y = R() * ch * 0.7, h = 40 + R() * ch * 0.3;
+      ctx.fillStyle = col(C.b, 0.75); ctx.fillRect(x, y, 1, h);
+      ctx.fillStyle = col(C.a, 0.75); ctx.fillRect(x + 3, y + 6, 1, h * 0.8);
+    }
+  });
+})();
+</script>
