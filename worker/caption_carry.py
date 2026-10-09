@@ -31,9 +31,12 @@ The contract (MotionItem.mute_captions):
 Everything here is a pure function of the EDL, the index and the timeline:
 the libass captions, the motion captions, the write-time lint and the
 sound-off audit all compute the same plan. An item without a drawn box
-(written before the probe stored one) is treated as old behaviour (a
-speech-replacing template mutes what it does not carry); the renderer fills
-the box in by probing before it builds captions (motion_layer.fill_drawn).
+(written before the probe stored one, or measured at another frame shape
+than today's: ``drawn_ar``) is treated as old behaviour (a speech-replacing
+template mutes what it does not carry); the renderer and audit_captions
+fill the box in by probing before they build captions
+(motion_layer.fill_drawn). A composition with no ink (a light leak) has no
+box and never moves or mutes a caption.
 """
 
 import difflib
@@ -217,6 +220,19 @@ def replaces_speech(item):
     return bool(_spec(item).get("mutes_captions"))
 
 
+_SERIES_RE = re.compile(r"\s*[-+]?\d[\d,]*(?:\.\d+)?\s*")
+
+
+def _series_value(v):
+    """One point of a data series: a number, or a number written as a string
+    (templates take series values 'as strings')."""
+    if isinstance(v, bool):
+        return False
+    if isinstance(v, (int, float)):
+        return True
+    return isinstance(v, str) and bool(_SERIES_RE.fullmatch(v))
+
+
 def graphic_lines(item):
     """[(param, text)] the item prints: its text params (list items and row
     text fields included) and, for authored HTML, the markup's text."""
@@ -227,8 +243,10 @@ def graphic_lines(item):
         if kind not in ("str", "text", "list", "rows"):
             continue
         vals = val if isinstance(val, list) else [val]
-        if kind == "list" and vals and all(isinstance(v, (int, float)) for v in vals):
-            continue                   # a data series (chart values), not words
+        if kind == "list" and vals and all(_series_value(v) for v in vals):
+            # a data series (line_chart values, a stat_card spark): drawn as
+            # a line, never printed — "12" said over it is still captioned
+            continue
         for v in vals:
             if isinstance(v, dict):
                 out += [(key, str(x)) for f, x in v.items()
@@ -281,7 +299,9 @@ def carried_indices(word_toks, seq, lead_n=0, solo=frozenset()):
     if seq and flat:
         sm = difflib.SequenceMatcher(None, seq, [t for t, _i in flat], autojunk=False)
         for blk in sm.get_matching_blocks():
-            if blk.size >= 2:
+            # a run of connectors alone ("of the" in "THE END OF THE WORLD"
+            # over "one of the best years") is not the graphic's words
+            if blk.size >= 2 and any(is_content(seq[blk.a + k]) for k in range(blk.size)):
                 idx = {flat[blk.b + k][1] for k in range(blk.size)}
                 if max(idx) >= lead_n:
                     in_run |= idx
@@ -339,6 +359,12 @@ def _frame_wh(edl, index):
     return 16.0, 9.0
 
 
+def frame_ar(edl, index):
+    """The output frame's aspect as H/W (what a drawn box is stamped with)."""
+    w, h = _frame_wh(edl, index)
+    return h / max(w, 1e-6)
+
+
 def safe_range(edl, index):
     """Vertical platform-safe text area, as the motion caption template
     lays it out (worker/motion/templates/caption_motion.html SAFE)."""
@@ -353,12 +379,32 @@ def safe_range(edl, index):
     return 0.07, 0.92
 
 
-def drawn_box(item):
-    """The item's drawn box [x0, y0, x1, y1] (frame fractions) or None."""
+# A drawn box measured at another frame shape (stamped ``drawn_ar`` = H/W)
+# says nothing about this one: a template lays out against its canvas, so a
+# box measured at 16:9 is the wrong box after set_frame 9:16.
+DRAWN_AR_TOL = 0.02
+
+
+def drawn_fresh(item, ar=None):
+    """Was the item's drawn box measured at this frame aspect (H/W)? An
+    unstamped box is trusted (no shape to compare)."""
+    if ar is None or item.get("drawn_ar") is None:
+        return True
+    try:
+        return abs(float(item["drawn_ar"]) - float(ar)) <= DRAWN_AR_TOL
+    except (TypeError, ValueError):
+        return False
+
+
+def drawn_box(item, ar=None):
+    """The item's drawn box [x0, y0, x1, y1] (frame fractions) or None
+    (never measured, or measured at another frame aspect than ``ar``)."""
     b = item.get("drawn")
     try:
         x0, y0, x1, y1 = (float(v) for v in b)
     except (TypeError, ValueError):
+        return None
+    if not drawn_fresh(item, ar):
         return None
     return (x0, y0, x1, y1) if x1 > x0 and y1 > y0 else None
 
@@ -543,7 +589,9 @@ def _said(words):
 class Plan:
     """The caption decision for one EDL's words (see module docstring).
 
-    ``hidden[i] = (item id, "carried"|"room")``; ``placed[i]`` = the band
+    ``hidden[i] = (item id, "carried"|"room"|"unmeasured")`` ("room": no
+    band clear of its drawn box; "unmeasured": no box measured at this frame
+    shape, so it is assumed to sit on the captions); ``placed[i]`` = the band
     dict for a word moved clear of a graphic; ``clamp_spans`` are program
     windows no normally placed caption may hold into (a graphic occupies the
     caption band there); ``wait_spans`` add the whole-window mutes of
@@ -595,6 +643,7 @@ def plan(edl, index, tl, words):
     word_toks = _token_rows([w.get("w") for w in words])
     mids = [_mid(w) for w in words]
     safe = safe_range(edl, index)
+    ar = frame_ar(edl, index)
     for m in items:
         s, e = m["start"], m["end"]
         seq, hero, solo = shown_tokens(m)
@@ -613,7 +662,7 @@ def plan(edl, index, tl, words):
         for i in sorted(carried):
             p.hidden.setdefault(i, (m["id"], "carried"))
         p.report[m["id"]] = {"id": m["id"], "start": s, "end": e, "mode": mode(m),
-                             "box": drawn_box(m),
+                             "box": drawn_box(m, ar),
                              "carried": [words[i] for i in sorted(carried)],
                              "placed": None, "muted": [], "kept": []}
     # Segments: maximal program spans with one set of live graphics.
@@ -627,11 +676,11 @@ def plan(edl, index, tl, words):
         src_at = (float(words[visible[0]].get("src_t0", mids[visible[0]])) if visible
                   else _src_near(tl, (a + b) / 2.0))
         normal_y, _band = normal_place(edl, src_at)
-        known = [bx for bx in (drawn_box(m) for m in live) if bx]
+        known = [bx for bx in (drawn_box(m, ar) for m in live) if bx]
         # An unmeasured box is old behaviour: a speech-replacing word-level
         # graphic is assumed to sit on the captions (no band can be proven
         # clear of it), anything else is assumed to sit elsewhere.
-        assume = [m for m in live if not drawn_box(m) and mode(m) == MODE_WORDS
+        assume = [m for m in live if not drawn_box(m, ar) and mode(m) == MODE_WORDS
                   and replaces_speech(m)]
         if not (collides(known, normal_y) or assume):
             continue
@@ -653,7 +702,7 @@ def plan(edl, index, tl, words):
         for i in visible:
             if mute:
                 owner = next(m for m in live if mode(m) == MODE_WORDS and replaces_speech(m))
-                p.hidden[i] = (owner["id"], "room")
+                p.hidden[i] = (owner["id"], "unmeasured" if owner in assume else "room")
                 p.report[owner["id"]]["muted"].append(words[i])
             else:
                 p.placed[i] = place
@@ -756,7 +805,8 @@ def sound_off_gaps(edl, index, tl, min_gap=SOUND_OFF_GAP_S):
     key = lambda w: (round(float(w["t0"]), 3), str(w.get("w")))  # noqa: E731
     shown = {key(w) for w in p.caption_words()}
     carried = {key(after_mutes[i]) for i, (_o, why) in p.hidden.items() if why == "carried"}
-    room = {key(after_mutes[i]): owner for i, (owner, why) in p.hidden.items() if why == "room"}
+    room = {key(after_mutes[i]): (owner, why) for i, (owner, why) in p.hidden.items()
+            if why in ("room", "unmeasured")}
     screen = _on_screen(edl, tl)
     toks = _token_rows([w.get("w") for w in spoken])
     state = []                         # covered / neutral / uncovered per word
@@ -797,11 +847,18 @@ def _gap(edl, spoken, i0, i1, dur, room, key):
     cause, owner, fix = "hidden", None, "caption those words or show them on a graphic"
     for i in range(i0, i1 + 1):
         if key(spoken[i]) in room:
-            owner = room[key(spoken[i])]
-            cause = (f"motion graphic '{owner}' leaves no caption band clear of it "
-                     "and the face")
-            fix = (f"move '{owner}' off the caption band (its y param) or carry those "
-                   "words on it")
+            owner, why = room[key(spoken[i])]
+            if why == "unmeasured":
+                cause = (f"motion graphic '{owner}' has no box measured at this frame "
+                         "shape, so it is assumed to sit on the caption band (a render "
+                         "measures it)")
+                fix = (f"re-save '{owner}' (set_motion_graphic) so its box is measured, "
+                       "keep it off the caption band, or carry those words on it")
+            else:
+                cause = (f"motion graphic '{owner}' leaves no caption band clear of it "
+                         "and the face")
+                fix = (f"move '{owner}' off the caption band (its y param) or carry "
+                       "those words on it")
             break
     else:
         for m in program_items(edl):

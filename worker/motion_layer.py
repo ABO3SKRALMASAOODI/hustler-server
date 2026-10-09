@@ -274,21 +274,46 @@ def union_box(bboxes):
             round(max(b[2] for b in bboxes), 3), round(max(b[3] for b in bboxes), 3)]
 
 
+def ink_box(report):
+    """The box captions keep clear of, from one probe report: the union of
+    its INK boxes (type, plates, solid shapes). A composition with no ink at
+    all (a light leak, a soft glow) draws nothing a caption could collide
+    with: None. A report without an ``ink`` field (an older probe) falls back
+    to the soft coverage boxes."""
+    if "ink" in report:
+        return union_box(report.get("ink"))
+    return union_box(report.get("bboxes"))
+
+
+def frame_ar(W, H):
+    """The aspect (H/W) a drawn box is stamped with (MotionItem.drawn_ar)."""
+    return round(float(H) / max(float(W), 1.0), 4)
+
+
 def fill_drawn(edl, W, H, fps=30.0):
-    """Store a probed ``drawn`` box on every motion item that matters to the
-    caption plan and has none (in place; returns ``edl``). Only transcript
-    captions use it, and an explicit mute_captions=true hides every caption
-    under the item anyway. A probe that cannot run leaves the item without
-    a box: the plan then keeps the old behaviour for it."""
+    """Store a probed ``drawn`` box (and its ``drawn_ar`` frame aspect) on
+    every motion item that matters to the caption plan and has none, or has
+    one measured at another frame shape (in place; returns ``edl``). Only
+    transcript captions use it, and an explicit mute_captions=true hides
+    every caption under the item anyway. A probe that cannot run leaves the
+    item without a box (a stale one is dropped): the plan then keeps the old
+    behaviour for it."""
+    import caption_carry
     caps = edl.get("captions")
     if not (isinstance(caps, dict) and caps.get("mode") == "from_transcript"):
         return edl
+    ar = frame_ar(W, H)
     todo = [m for m in edl.get("motion") or []
-            if isinstance(m, dict) and not m.get("drawn") and not m.get("_synthetic")
+            if isinstance(m, dict) and not m.get("_synthetic")
+            and not (m.get("drawn") and caption_carry.drawn_fresh(m, ar))
             and m.get("mute_captions") is not True and not m.get("phase_s")
             and float(m.get("end", 0)) - float(m.get("start", 0)) >= 0.05]
     if not todo:
         return edl
+    for m in todo:
+        # a box measured at another frame shape is no evidence here
+        m.pop("drawn", None)
+        m.pop("drawn_ar", None)
     # The design canvas at the frame's aspect: fractions do not depend on
     # the pixel size, so previews and finals share one measurement.
     w = 1080
@@ -305,7 +330,7 @@ def fill_drawn(edl, W, H, fps=30.0):
         key = (job.key(), tuple(probe_times(span)))
         if key in _DRAWN_CACHE:
             if _DRAWN_CACHE[key]:
-                m["drawn"] = list(_DRAWN_CACHE[key])
+                m["drawn"], m["drawn_ar"] = list(_DRAWN_CACHE[key]), ar
             continue
         jobs.append(job)
         times.append(probe_times(span))
@@ -319,10 +344,10 @@ def fill_drawn(edl, W, H, fps=30.0):
         print(f"[render] caption boxes unmeasured ({str(e)[:160]})", flush=True)
         return edl
     for m, key, rep in zip(pending, keys, reports):
-        box = None if rep.get("errors") else union_box(rep.get("ink") or rep.get("bboxes"))
+        box = None if rep.get("errors") else ink_box(rep)
         if len(_DRAWN_CACHE) >= _DRAWN_CACHE_MAX:
             _DRAWN_CACHE.clear()
         _DRAWN_CACHE[key] = box
         if box:
-            m["drawn"] = box
+            m["drawn"], m["drawn_ar"] = box, ar
     return edl

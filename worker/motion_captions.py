@@ -85,6 +85,10 @@ CAPTION_LEAD_S = 0.033
 # A cue whose successor starts within this window swaps with a hard cut;
 # otherwise it clears with a short fade into the pause.
 CONTIGUOUS_S = 0.05
+# A line that waits for a graphic on its band to clear must still hold this
+# long after the wait; a shorter one starts on time instead (a dropped line
+# would be a sound-off gap).
+MIN_WAITED_CUE_S = 0.25
 
 _BAND = {"top": "t", "middle": "m", "bottom": "b"}
 _DEFAULT_Y = {"top": 0.2, "middle": 0.5, "bottom": 0.74}
@@ -213,8 +217,12 @@ def cues(edl, index, tl):
         place = ch[0].get("place")
         if not place:
             for m0, m1 in waits:
-                if m0 <= s < m1 and m1 - s <= caption_carry.START_WAIT_S:
-                    s = m1 + CAPTION_LEAD_S    # lands ON the graphic's exit
+                # lands ON the graphic's exit — unless waiting would leave
+                # the line too short to read (then it touches the exit
+                # rather than vanish: every spoken word stays readable)
+                if m0 <= s < m1 and m1 - s <= caption_carry.START_WAIT_S \
+                        and e - (m1 + CAPTION_LEAD_S) >= MIN_WAITED_CUE_S:
+                    s = m1 + CAPTION_LEAD_S
         if e - s < 0.12:
             continue
         # Every word spoken: the line clears ON the cut that ends its shot

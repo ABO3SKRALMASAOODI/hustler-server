@@ -211,8 +211,8 @@ def test_no_clear_band_mutes_under_a_speech_template_and_keeps_captions_under_ot
 def test_an_unmeasured_box_keeps_the_old_behaviour():
     edl = _edl([_slam(1.9, 3.0, "*140*", drawn=None)])
     p = _plan(edl, _index())
-    assert sorted(p.words[i]["w"] for i, (_o, why) in p.hidden.items() if why == "room") \
-        == ["all", "got", "was", "we"]
+    assert sorted(p.words[i]["w"] for i, (_o, why) in p.hidden.items()
+                  if why == "unmeasured") == ["all", "got", "was", "we"]
     edl = _edl([_counter(1.9, 3.5, "140", drawn=None)])
     assert _shown(edl, _index()).count("140") == 0        # still no duplicate
     assert "got" in _shown(edl, _index())
@@ -398,6 +398,7 @@ def test_the_write_stores_the_ink_box_and_says_where_the_captions_go(monkeypatch
     assert out.startswith("EDL v1"), out
     item = ctx.latest_edl()["json"]["motion"][0]
     assert item["drawn"] == [0.1, 0.62, 0.9, 0.82]          # ink, not the scrim's reach
+    assert item["drawn_ar"] == pytest.approx(1920 / 1080, abs=0.01)   # the shape it fits
     assert "Captions for the words it does not show move to y≈" in out, out
     assert "NOTE (captions)" not in out, out
     # a probe that cannot run drops a stale box rather than keeping it
@@ -405,6 +406,7 @@ def test_the_write_stores_the_ink_box_and_says_where_the_captions_go(monkeypatch
     motion_tools.set_motion_graphic(ctx, "slam", params={"text": "*one forty*"})
     assert "drawn" not in ctx.latest_edl()["json"]["motion"][0] or \
         ctx.latest_edl()["json"]["motion"][0]["drawn"] is None
+    assert ctx.latest_edl()["json"]["motion"][0].get("drawn_ar") is None
 
 
 def test_the_write_names_words_a_graphic_on_the_caption_band_must_mute(monkeypatch):
@@ -414,3 +416,129 @@ def test_the_write_names_words_a_graphic_on_the_caption_band_must_mute(monkeypat
                                           params={"text": "*rockets*"})
     assert "NOTE (captions)" in out and '"flying cars and all we got was"' in out, out
     assert "no caption band is clear of this graphic (it draws y 0.45-0.85)" in out, out
+
+
+# ── review round: what the first cut missed ──────────────────────────────
+
+def test_a_run_of_connectors_alone_is_not_the_graphics_words():
+    # "THE END OF THE WORLD" shares only "of the" with what is said: the
+    # caption keeps the whole sentence
+    words = [("it", 0.1, 0.3), ("was", 0.3, 0.5), ("one", 0.5, 0.8), ("of", 0.8, 0.9),
+             ("the", 0.9, 1.0), ("best", 1.0, 1.3), ("years", 1.3, 1.7)]
+    edl = _edl([_slam(0.0, 2.0, "the end of the world")], words=words)
+    assert _shown(edl, _index(words)) == ["it", "was", "one", "of", "the", "best", "years"]
+    # ...while a run that holds a content word is still the graphic's
+    edl = _edl([_slam(0.0, 2.0, "*best* years")], words=words)
+    assert _shown(edl, _index(words)) == ["it", "was", "one", "of", "the"]
+
+
+def test_a_box_measured_at_another_frame_shape_is_not_trusted():
+    on_band = (0.1, 0.62, 0.9, 0.82)
+    fresh = _edl([_slam(1.9, 3.0, "*140*", drawn=on_band, drawn_ar=round(1920 / 1080, 4))])
+    p = _plan(fresh, _index())
+    assert p.placed and not any(why != "carried" for _o, why in p.hidden.values())
+    # the same box stamped at 16:9 means nothing in this 9:16 frame: the
+    # speech graphic is assumed to sit on the captions until it is measured
+    stale = _edl([_slam(1.9, 3.0, "*140*", drawn=on_band, drawn_ar=0.5625)])
+    p = _plan(stale, _index())
+    assert not p.placed and p.report["slam"]["box"] is None
+    assert sorted(p.words[i]["w"] for i, (_o, why) in p.hidden.items()
+                  if why == "unmeasured") == ["all", "got", "was", "we"]
+    longer = _edl([_slam(0.9, 2.75, "*140*", drawn=on_band, drawn_ar=0.5625)])
+    gaps = caption_carry.sound_off_gaps(longer, _index(), Timeline(longer["keep"]))
+    assert gaps and gaps[0]["owner"] == "slam", gaps
+    assert "no box measured" in gaps[0]["cause"] and "re-save" in gaps[0]["fix"], gaps
+
+
+def test_drawn_ar_is_sanitized_like_the_box():
+    ok = _edl([_counter(1.0, 2.0, "140", drawn_ar=1.77777)])
+    assert ok["motion"][0]["drawn_ar"] == 1.7778
+    for bad in (0.0, -1.0, 1e9, float("nan")):
+        e = _edl([_counter(1.0, 2.0, "140")])
+        e["motion"][0]["drawn_ar"] = bad
+        assert validate_edl(e, 8.0).model_dump()["motion"][0].get("drawn_ar") is None
+    # a stamp without a box is no stamp
+    e = _edl([_counter(1.0, 2.0, "140", drawn=None)])
+    e["motion"][0]["drawn_ar"] = 1.7778
+    assert validate_edl(e, 8.0).model_dump()["motion"][0].get("drawn_ar") is None
+
+
+def test_fill_drawn_remeasures_stale_boxes_and_inkless_compositions_get_none(monkeypatch):
+    seen = []
+
+    def probe(jobs, times):
+        seen.append(len(jobs))
+        return [{"errors": [], "visible_frames": 4, "samples": 4,
+                 "bboxes": [[0.0, 0.0, 1.0, 1.0]],
+                 "ink": [] if "light_leak" in j.label else [[0.2, 0.4, 0.8, 0.6]]}
+                for j in jobs]
+    monkeypatch.setattr(motion_engine, "probe", probe)
+    monkeypatch.setattr(motion_layer, "_DRAWN_CACHE", {})
+    leak = {"id": "leak", "template": "light_leak", "start": 3.0, "end": 4.0, "params": {}}
+    edl = _edl([_counter(1.0, 2.0, "140", drawn=(0.1, 0.1, 0.2, 0.2), drawn_ar=0.5625),
+                leak,
+                _counter(5.0, 6.0, "9", drawn=(0.1, 0.1, 0.2, 0.2), id="ok",
+                         drawn_ar=round(1920 / 1080, 4))])
+    motion_layer.fill_drawn(edl, 1080, 1920)
+    by = {m["id"]: (m.get("drawn"), m.get("drawn_ar")) for m in edl["motion"]}
+    assert by["num"] == ([0.2, 0.4, 0.8, 0.6], pytest.approx(1920 / 1080, abs=1e-3))
+    assert by["leak"] == (None, None)            # soft light: nothing to keep clear of
+    assert by["ok"] == ([0.1, 0.1, 0.2, 0.2], round(1920 / 1080, 4))
+    assert seen == [2]
+    # an inkless report never stands in for a box at write time either
+    assert motion_layer.ink_box({"bboxes": [[0, 0, 1, 1]], "ink": []}) is None
+    assert motion_layer.ink_box({"bboxes": [[0, 0.5, 1, 1]]}) == [0, 0.5, 1, 1]
+
+
+def test_a_line_too_short_to_wait_for_the_exit_starts_on_time():
+    # "computers" begins in the hook's last 0.3 s and the next line follows
+    # straight on: waiting for the exit would leave it no time to be read,
+    # so it is shown rather than dropped
+    words = [("the", 0.1, 0.3), ("1960s", 0.3, 0.9), ("technology", 0.9, 1.5),
+             ("meant", 1.5, 1.9), ("computers.", 2.2, 2.42), ("And", 2.45, 2.7),
+             ("that", 2.7, 2.9), ("was", 2.9, 3.1), ("it", 3.1, 3.4)]
+    hook = {"id": "hook", "template": "word_slam", "start": 0.0, "end": 2.3,
+            "params": {"text": "where did / *progress* go?"}, "mute_captions": True}
+    edl = _edl([hook], words=words)
+    cues = motion_captions.cues(edl, _index(words), Timeline(edl["keep"]))
+    said = [w["t"].lower().strip(".") for c in cues for w in c["w"]]
+    assert "computers" in said
+
+
+def test_a_stitched_preview_re_encodes_captions_a_graphic_change_moved(tmp_path):
+    import renderer
+    words = [("but", 0.0, 0.2), ("it's", 0.2, 0.35), ("not", 0.62, 0.75),
+             ("quite", 0.75, 0.9), ("been", 0.9, 1.05), ("enough", 1.3, 1.8),
+             ("to", 1.9, 2.0), ("take", 2.0, 2.3), ("our", 3.5, 3.7),
+             ("civilization", 3.7, 4.4), ("further.", 4.4, 5.0)]
+    ix = _index(words)
+    prev = _edl([_slam(1.1, 2.4, "*plenty*", kicker="it's not quite been")],
+                look=None, words=words)
+    new = _edl([_slam(1.1, 2.4, "*enough*", kicker="it's not quite been")],
+               look=None, words=words)
+    tl = Timeline(new["keep"])
+    full = captions.build_ass(new, ix, tl, str(tmp_path / "new.ass"), play_res=(1080, 1920))
+    spans = renderer._caption_change_windows(prev, Timeline(prev["keep"]), full, ix,
+                                             str(tmp_path), 1080, 1920, 30.0,
+                                             tl.out_duration)
+    # the kicker said BEFORE the slam left the captions: the card it sat in
+    # (from 0.0 s) is re-encoded, not copied from the previous preview
+    assert spans and min(a for a, _b in spans) < 1.1 - 0.5
+    # the captions after the graphic did not change, and nothing else moves
+    assert all(b <= 3.5 for _a, b in spans)
+    same = renderer._caption_change_windows(new, tl, full, ix, str(tmp_path),
+                                            1080, 1920, 30.0, tl.out_duration)
+    assert same == []
+
+
+def test_a_chart_series_is_drawn_not_printed_so_its_numbers_stay_captioned():
+    words = [("we", 0.1, 0.3), ("went", 0.3, 0.5), ("from", 0.5, 0.7), ("12", 0.8, 1.1),
+             ("to", 1.1, 1.2), ("61", 1.3, 1.7), ("percent", 1.7, 2.2)]
+    chart = {"id": "chart", "template": "line_chart", "start": 0.0, "end": 3.0,
+             "params": {"values": ["12", "18", "15", "30", "61"], "value_label": "61%"},
+             "drawn": [0.1, 0.1, 0.9, 0.4]}
+    edl = _edl([chart], words=words)
+    # the end tag prints "61%": that one is not read twice; "12" is only a
+    # point on the line
+    assert _shown(edl, _index(words)) == ["we", "went", "from", "12", "to"]
+    assert ("values", "12") not in caption_carry.graphic_lines(edl["motion"][0])

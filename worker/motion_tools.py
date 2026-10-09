@@ -356,21 +356,24 @@ def _probe_report(ctx, edl, item):
     if bb:
         x0 = min(b[0] for b in bb); y0 = min(b[1] for b in bb)
         x1 = max(b[2] for b in bb); y1 = max(b[3] for b in bb)
-        ink = motion_layer.union_box(rep.get("ink") or bb)
+        ink = motion_layer.ink_box(rep)
         return (None, f"\nDraws within x {x0:.2f}-{x1:.2f}, y {y0:.2f}-{y1:.2f} of the frame.",
                 (x0, y0, x1, y1), ink)
     return None, "", None, None
 
 
-def _store_drawn(item, ink):
-    """Keep the probed ink box on the item (MotionItem.drawn): word-level
-    caption muting places the captions it does not show clear of it. No
-    measurement (the browser could not run here) drops a stale one; the
-    renderer measures before it builds captions."""
+def _store_drawn(ctx, edl, item, ink):
+    """Keep the probed ink box on the item (MotionItem.drawn) with the frame
+    aspect it was measured at (drawn_ar): word-level caption muting places
+    the captions it does not show clear of it. No measurement (the browser
+    could not run here, or the composition has no ink) drops a stale one;
+    the renderer measures before it builds captions."""
     if ink:
         item["drawn"] = [round(float(v), 3) for v in ink]
+        item["drawn_ar"] = motion_layer.frame_ar(*_canvas_size(ctx, edl))
     else:
         item.pop("drawn", None)
+        item.pop("drawn_ar", None)
 
 
 def _validate_and_probe(ctx, edl, item):
@@ -579,6 +582,10 @@ def _word_level_notes(edl, index, tl, item):
     box = rep.get("box")
     draws = f" (it draws y {box[1]:.2f}-{box[3]:.2f})" if box else ""
     notes = []
+    if box is None:
+        # not measured here (the browser could not run): the render measures
+        # it before it places the captions, so there is nothing true to say
+        return notes
     if rep["muted"] and caption_carry.mode(item) == caption_carry.MODE_WORDS:
         notes.append(
             f"NOTE (captions): no caption band is clear of this graphic{draws} and the "
@@ -734,7 +741,7 @@ def add_motion_graphic(ctx, template, start, end=None, params=None, html=None,
     err, where, bbox, ink = _probe_report(ctx, edl, item)
     if err:
         return err
-    _store_drawn(item, ink)
+    _store_drawn(ctx, edl, item, ink)
     behind_note = ""
     if layer == "behind_subject":
         behind_note, err = _attach_subject_matte(ctx, edl, item, bbox)
@@ -816,7 +823,7 @@ def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
     err, where, bbox, ink = _probe_report(ctx, edl, hit)
     if err:
         return err
-    _store_drawn(hit, ink)
+    _store_drawn(ctx, edl, hit, ink)
     behind_note = ""
     if hit.get("layer") == "behind_subject":
         shape = json.dumps([hit.get(k) for k in

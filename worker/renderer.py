@@ -5481,6 +5481,30 @@ def _timeline_stitch(job_id, prev_edl, new_edl, tl_prev, tl_new, index,
     return out_dur
 
 
+def _caption_change_windows(prev_edl, tl_prev, full_cap, index, workdir, W, H,
+                            fps, out_duration):
+    """Window-mode stitch: [[a, b]] spans of the program where the previous
+    program burned other captions than ``full_cap`` (the new program's ASS).
+
+    A changed graphic or text can change captions OUTSIDE its own window:
+    word-level muting hands a graphic the words said just before it, and a
+    dropped word regroups the caption card it sat in. The copied stretches
+    carry the previous program's captions, so every event the two programs
+    do not burn alike re-encodes too (timeline mode checks the same way)."""
+    if not prev_edl.get("captions") and not full_cap:
+        return []
+    motion_layer.fill_drawn(prev_edl, W, H, fps)
+    prev_cap = caplib.build_ass(prev_edl, index, tl_prev,
+                                os.path.join(workdir, "stitch_cap_prev.ass"),
+                                play_res=(W, H)) if prev_edl.get("captions") else None
+    ev_new = stitch.ass_events(full_cap, with_payload=True) if full_cap else []
+    ev_prev = stitch.ass_events(prev_cap, with_payload=True) if prev_cap else []
+    return [[max(0.0, a), min(out_duration, b)]
+            for a, b in stitch.caption_mismatch_spans(
+                [(0.0, out_duration, 0.0)], ev_prev, ev_new, out_duration)
+            if min(out_duration, b) > max(0.0, a)]
+
+
 def _stitched_preview(job_id, new_row, prev_row, prev_asset, index,
                       src_local, workdir, patch_locals, out_path, preview=True):
     """Try to build this preview by re-encoding only the changed windows and
@@ -5551,6 +5575,9 @@ def _stitched_preview(job_id, new_row, prev_row, prev_asset, index,
         full_cap = caplib.build_ass(new_edl, index, tl_new,
                                     os.path.join(workdir, "stitch_cap.ass"),
                                     play_res=(W, H))
+        windows = list(windows) + _caption_change_windows(
+            prev_edl, tl_prev, full_cap, index, workdir, W, H, fps,
+            tl_new.out_duration)
         fx = new_edl.get("effects") or {}
         junction_zones = []
         tr = fx.get("transition") or None
