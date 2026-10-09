@@ -9,7 +9,8 @@
   "label": {"type": "str", "default": "", "max": 36, "hint": "optional 1-4 word note written beside the loop"},
   "label_side": {"type": "enum", "values": ["auto", "above", "below", "left", "right"], "default": "auto"},
   "style": {"type": "enum", "values": ["loop", "double"], "default": "loop", "hint": "loop = one pass that overshoots its start; double = two loose passes"},
-  "color": {"type": "color", "default": "#FF3B3B"},
+  "color": {"type": "color", "default": "#FF3B3B", "hint": "loop colour"},
+  "label_color": {"type": "color", "default": "#FFFFFF", "hint": "note colour; white reads on any footage"},
   "glow": {"type": "bool", "default": true},
   "size": {"type": "float", "min": 0.6, "max": 1.6, "default": 1.0, "hint": "stroke weight and label size"}
  },
@@ -18,8 +19,8 @@
 <style>
   svg.ink{position:absolute;left:0;top:0;overflow:visible}
   .lab{position:absolute;display:inline-block;white-space:nowrap;font-family:'Caveat','Instrument Serif',serif;font-weight:700;
-       line-height:.95;text-shadow:0 2px 3px rgba(0,0,0,.42),0 3px 18px rgba(0,0,0,.5);will-change:transform,filter,opacity}
-  .lab.serif{font-family:'Instrument Serif',serif;font-style:italic;font-weight:400}
+       line-height:.95;text-shadow:0 2px 4px rgba(0,0,0,.6),0 4px 22px rgba(0,0,0,.55);will-change:transform,filter,opacity}
+  .lab.serif{font-family:'DM Serif Display','Instrument Serif',serif;font-style:italic;font-weight:400;letter-spacing:-.01em}
 </style>
 <div class="mg-root"><svg class="ink" id="ink"><path id="loop"/></svg><div class="lab" id="lab"></div></div>
 <script>
@@ -90,7 +91,7 @@
   ink.style.filter = P.glow ? `drop-shadow(0 0 ${10 * S}px ${hexA(col, 0.7)})` : 'drop-shadow(0 2px 5px rgba(0,0,0,.45))';
   const text = String(P.label || '').trim();
   lab.textContent = text;
-  lab.style.color = col;
+  lab.style.color = P.label_color;
   const hasFace = fam => Array.from(document.fonts).some(f => f.family.replace(/["']/g, '') === fam);
   if (!hasFace('Caveat')) lab.classList.add('serif');
   const safe = H / W > 1.5 ? [60, 0.08 * H, W - 60, 0.80 * H] : [48, 0.06 * H, W - 48, 0.94 * H];
@@ -140,10 +141,14 @@
         if (cx < bb[2] && cx + lw > bb[0] && cy < bb[3] && cy + lh > bb[1]) cost += 1500;
         return { side, x: cx, y: cy, cost };
       };
-      let pick;
-      if (P.label_side !== 'auto') pick = fit(P.label_side);
-      else pick = ['above', 'below', 'right', 'left'].map((s, i) => { const c = fit(s); c.cost += i * 30; return c; })
+      // beside the loop first (the roomier side), so a loop round a face does not put
+      // its note on the forehead; above/below only when the sides are full. An explicit
+      // side is kept unless the frame edge would shove the note onto the loop.
+      const sides = P.cx <= 0.5 ? ['right', 'left'] : ['left', 'right'];
+      const autoPick = sides.concat(['above', 'below']).map((s, i) => { const c = fit(s); c.cost += i * 30; return c; })
         .sort((a, b) => a.cost - b.cost)[0];
+      const want = P.label_side !== 'auto' ? fit(P.label_side) : null;
+      const pick = want && want.cost < 300 ? want : autoPick;
       lab.style.left = pick.x + 'px'; lab.style.top = pick.y + 'px';
       lab.style.transformOrigin = '0% 60%';
       lb = [pick.x, pick.y, pick.x + lw, pick.y + lh, lw];
@@ -155,7 +160,7 @@
     return { st, lb, drawDur: dbl ? 0.62 : 0.44 };
   }
 
-  const fontsReady = Promise.all(["700 104px 'Caveat'", "italic 400 92px 'Instrument Serif'"]
+  const fontsReady = Promise.all(["700 104px 'Caveat'", "italic 400 92px 'DM Serif Display'", "italic 400 92px 'Instrument Serif'"]
     .map(f => document.fonts.load(f).catch(() => null)));
   MG.ready = fontsReady.then(() => { G = layout(); });
 

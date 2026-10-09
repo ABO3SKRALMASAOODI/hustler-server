@@ -127,25 +127,30 @@
       if (len < 90 * S) cost += 800;
       return { side, x: cx, y: cy, cost };
     };
-    let pick;
-    if (P.side !== 'auto') pick = place(P.side);
-    else {
-      const horiz = P.target_x >= 0.5 ? ['left', 'right'] : ['right', 'left'];
-      const vert = P.target_y > 0.55 ? ['above', 'below'] : ['below', 'above'];
-      const order = [horiz[0], vert[0], vert[1], horiz[1]];
-      pick = order.map((s, i) => { const c = place(s); c.cost += i * 25; return c; }).sort((a, b) => a.cost - b.cost)[0];
-    }
-    const side = pick.side;
+    // An explicit side is a preference: if the frame edge pushes the label far off its
+    // spot (or onto the target, or too close for an arrow) the best automatic side wins.
+    const horiz = P.target_x >= 0.5 ? ['left', 'right'] : ['right', 'left'];
+    const vert = P.target_y > 0.55 ? ['above', 'below'] : ['below', 'above'];
+    const order = [horiz[0], vert[0], vert[1], horiz[1]];
+    const autoPick = order.map((s, i) => { const c = place(s); c.cost += i * 25; return c; }).sort((a, b) => a.cost - b.cost)[0];
+    const want = P.side !== 'auto' ? place(P.side) : null;
+    const pick = want && want.cost < 300 ? want : autoPick;
     lab.style.left = pick.x + 'px'; lab.style.top = pick.y + 'px';
-    lab.style.textAlign = side === 'left' ? 'right' : side === 'right' ? 'left' : 'center';
-    // Arrow geometry
+    // Arrow geometry. The arrow leaves from the label edge that really faces the target
+    // (after clamping), so the shaft can never run back through the words.
     const bx = { l: pick.x, t: pick.y, r: pick.x + lw, b: pick.y + lh };
-    let A;
-    if (side === 'left') A = [bx.r + gap, bx.t + lh * 0.55];
-    else if (side === 'right') A = [bx.l - gap, bx.t + lh * 0.55];
-    else if (side === 'above') A = [(bx.l + bx.r) / 2, bx.b + gap * 0.7];
-    else A = [(bx.l + bx.r) / 2, bx.t - gap * 0.7];
-    const exitN = { left: [1, 0], right: [-1, 0], above: [0, 1], below: [0, -1] }[side];
+    const anchorOf = s => s === 'left' ? [bx.r + gap, bx.t + lh * 0.55] : s === 'right' ? [bx.l - gap, bx.t + lh * 0.55]
+      : s === 'above' ? [(bx.l + bx.r) / 2, bx.b + gap * 0.7] : [(bx.l + bx.r) / 2, bx.t - gap * 0.7];
+    const normals = { left: [1, 0], right: [-1, 0], above: [0, 1], below: [0, -1] };
+    const facing = s => {
+      const a = anchorOf(s), n = normals[s], dx = T[0] - a[0], dy = T[1] - a[1];
+      return (dx * n[0] + dy * n[1]) / (Math.hypot(dx, dy) || 1);
+    };
+    let side = pick.side;
+    if (facing(side) < 0.25) side = Object.keys(normals).sort((a, b) => facing(b) - facing(a))[0];
+    lab.style.textAlign = side === 'left' ? 'right' : side === 'right' ? 'left' : 'center';
+    const A = anchorOf(side);
+    const exitN = normals[side];
     let v = [T[0] - A[0], T[1] - A[1]];
     const full = Math.hypot(v[0], v[1]) || 1;
     const endGap = Math.min(18 * S, full * 0.15);

@@ -21,9 +21,10 @@
   .line.serif{font-family:'Instrument Serif',serif;font-style:italic;font-weight:400;letter-spacing:-.012em;line-height:1.0}
   .line.condensed{font-family:'Anton','Bebas Neue',sans-serif;font-weight:400;letter-spacing:.004em;line-height:1.06}
   .mg-w{position:relative;z-index:2;margin-right:.24em;will-change:transform,filter,opacity}
-  .mg-w:last-child{margin-right:0}
+  .mg-w:last-of-type{margin-right:0}
   .serif .mg-w{margin-right:.2em}
-  .mk{position:absolute;z-index:1;transform-origin:0 50%}
+  .mk{position:absolute;z-index:1;transform-origin:50% 50%}
+  .dk{position:absolute;left:0;top:0;white-space:pre;color:#141414;visibility:hidden}
   .gf{margin-left:var(--gpad,0)}
   .gl{margin-right:calc(.24em + var(--gpad,0))!important}
   svg.ink{position:absolute;left:0;top:0;overflow:visible;z-index:3}
@@ -91,13 +92,15 @@
 
   const wrap = MG.$('#wrap'), ink = MG.$('#ink');
   const font = P.font, SZ = P.size * (MG.H < MG.W ? 0.72 : 1), style = P.style;
-  const DARK = '#141414';
   // ── parse: lines, words, starred runs ────────────────────────────────
   let raw = String(P.text || '').replace(/\s+\/\s*|\s*\/\s+/g, '\n').trim();   // ' / ' breaks a line; '24/7' stays
+  raw = raw.replace(/[^\S\n]+/g, ' ');
+  // a *starred run* stays on one line while balancing (NBSP-joined) unless it is a line by itself
+  raw = raw.replace(/\*[^*\n]+\*/g, m => (m.length <= 24 ? m.replace(/ /g, '\u00A0') : m));
   let lines = raw.split('\n').map(s => s.trim()).filter(Boolean);
   if (lines.length === 1) {
     // balance a long single line into 2-3 lines by character count
-    const toks = lines[0].split(/\s+/), len = lines[0].length;
+    const toks = lines[0].split(/ +/), len = lines[0].length;
     const nl = len > 54 ? 3 : len > (font === 'condensed' ? 26 : 22) ? 2 : 1;
     if (nl > 1) {
       const target = len / nl, out = [[]]; let acc = 0;
@@ -163,28 +166,43 @@
       const shp = { g, x0, x1, y0, y1 };
       if (style === 'marker') {
         const mk = MG.el('div', 'mk', null, g.lineEl);
-        const padX = 0.15 * em, topF = font === 'condensed' ? 0.08 : font === 'serif' ? 0.16 : 0.13;
-        const botF = font === 'condensed' ? 0.02 : 0.04;
-        const mx = x0 - lr.left - padX, mw = x1 - x0 + padX * 2, mh = (y1 - y0) * (1 - topF - botF);
+        // the band covers the run's full ink height (cap/ascender line to just under the
+        // baseline) from real font metrics; only descenders may poke out
+        const cs = getComputedStyle(g.words[0].el), cx2 = document.createElement('canvas').getContext('2d');
+        cx2.font = `${cs.fontStyle} ${cs.fontWeight} ${em}px ${cs.fontFamily}`;
+        const fm = cx2.measureText('Hbdfhklt'), L = y1 - y0;
+        const base = fm.fontBoundingBoxAscent ? y0 + (L - fm.fontBoundingBoxAscent - fm.fontBoundingBoxDescent) / 2 + fm.fontBoundingBoxAscent : y0 + 0.86 * L;
+        const asc = fm.actualBoundingBoxAscent || 0.74 * em;
+        const top = base - asc - 0.1 * em, bot = base + (font === 'condensed' ? 0.1 : 0.15) * em;
+        const padX = 0.15 * em;
+        const mx = x0 - lr.left - padX, mw = x1 - x0 + padX * 2, mh = bot - top, my = top - lr.top;
         mk.style.left = mx + 'px'; mk.style.width = mw + 'px';
-        mk.style.top = (y0 - lr.top + (y1 - y0) * topF) + 'px';
-        mk.style.height = mh + 'px';
+        mk.style.top = my + 'px'; mk.style.height = mh + 'px';
         // chisel-tip highlighter stroke: slanted ends, softly uneven edges
         const svg = document.createElementNS(NS, 'svg');
         svg.setAttribute('width', mw); svg.setAttribute('height', mh);
         svg.style.cssText = 'position:absolute;left:0;top:0;overflow:visible';
         const sl = mh * 0.09, pts = [];
         const nT = 18;
-        for (let i = 0; i <= nT; i++) { const u = i / nT; pts.push([lerp(sl, mw, u), mh * 0.02 + mh * 0.05 * MG.noise(seed + u * 2.3)]); }
-        pts.push([mw - sl, mh * (0.98 + 0.03 * MG.noise(seed + 7))]);
-        for (let i = nT; i >= 0; i--) { const u = i / nT; pts.push([lerp(0, mw - sl, u), mh * 0.98 + mh * 0.05 * MG.noise(seed + 30 + u * 2.1)]); }
+        for (let i = 0; i <= nT; i++) { const u = i / nT; pts.push([lerp(sl, mw, u), mh * 0.01 + mh * 0.025 * MG.noise(seed + u * 2.3)]); }
+        pts.push([mw - sl, mh * (0.99 + 0.02 * MG.noise(seed + 7))]);
+        for (let i = nT; i >= 0; i--) { const u = i / nT; pts.push([lerp(0, mw - sl, u), mh * 0.99 + mh * 0.025 * MG.noise(seed + 30 + u * 2.1)]); }
         const path = document.createElementNS(NS, 'path');
         path.setAttribute('d', 'M' + pts.map(p => p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join('L') + 'Z');
         path.setAttribute('fill', P.accent);
         svg.appendChild(path); mk.appendChild(svg);
-        mk.style.transform = `rotate(${(-1.4 + 0.9 * MG.noise(seed)).toFixed(2)}deg)`;
-        shp.mk = mk; shp.mw = mw; shp.mxAbs = x0 - padX;
-        g.words.forEach(w => { w.el.style.webkitBackgroundClip = 'text'; w.el.style.backgroundClip = 'text'; });
+        // slight hand tilt about the middle, never enough to lift an end off the letters
+        const tilt = -1.4 + 0.9 * MG.noise(seed), maxTilt = Math.atan(0.04 * mh / (mw / 2)) * 180 / Math.PI;
+        const ang = Math.sign(tilt) * Math.min(Math.abs(tilt), maxTilt);
+        mk.style.transform = `rotate(${ang.toFixed(2)}deg)`;
+        shp.mk = mk; shp.mw = mw; shp.mh = mh; shp.ang = ang * Math.PI / 180;
+        shp.poly = pts; shp.ctr = [mx + mw / 2, my + mh / 2];   // marker shape (local) and its centre (line coords)
+        // the ink turns dark exactly where it sits on the marker: a dark copy of each word,
+        // clipped every frame to the revealed marker shape
+        g.words.forEach(w => {
+          w.dk = MG.el('span', 'dk', w.el.textContent, w.el);
+          w.org = [w.el.offsetLeft, w.el.offsetTop];
+        });
       } else {
         const path = document.createElementNS(NS, 'path');
         path.setAttribute('fill', P.accent);
@@ -263,28 +281,41 @@
   MG.active([[0, Math.min(D, enterEnd)], [Math.max(0, exitAt - 0.02), D]]);
   MG.frame(t => {
     if (!G) G = layout();
+    // exit: the column (words + marker swipes) and the drawn marks rise and fade as one;
+    // blur goes on the small pieces, not the whole column (much cheaper to render)
     const q = exitDur > 0 ? MG.ease.inCubic(MG.range(t, exitAt, exitDur)) : 0;
+    MG.set(wrap, { y: -q * 18, opacity: 1 - q });
+    MG.set(ink, { y: -q * 18, opacity: 1 - q, blur: q * 10 });
     words.forEach((w, i) => {
       const t0 = i * each, e = MG.ease.outCubic(MG.range(t, t0, 0.17));
-      MG.set(w.el, { y: (1 - e) * 11 - q * 18, opacity: MG.range(t, t0, 0.08) * (1 - q), blur: (1 - e) * 9 + q * 10 });
+      MG.set(w.el, { y: (1 - e) * 11, opacity: MG.range(t, t0, 0.08), blur: (1 - e) * 9 + q * 10 });
     });
     G.shapes.forEach((s, gi) => {
       const p0 = MG.range(t, markAt + gi * markEach, markDur);
       if (style === 'marker') {
         const p = MG.ease.outQuart(p0), rev = s.mw * p;
         s.mk.style.clipPath = p >= 1 ? '' : `inset(-4px ${(s.mw - rev).toFixed(1)}px -4px -4px round ${(0.18 * G.fs).toFixed(1)}px)`;
-        s.mk.style.opacity = (p0 > 0 ? 1 : 0) * (1 - q);
-        // text turns dark where the marker has passed (gradient-clipped fill)
+        s.mk.style.opacity = p0 > 0 ? 1 : 0;
+        s.mk.style.filter = q > 0 ? `blur(${(q * 10).toFixed(2)}px)` : '';
+        // revealed part of the marker shape (local x <= rev), mapped to line coords
+        const c = Math.cos(s.ang), sn = Math.sin(s.ang), shown = [];
+        s.poly.forEach((a, i) => {
+          const b = s.poly[(i + 1) % s.poly.length], ain = a[0] <= rev, bin = b[0] <= rev;
+          if (ain) shown.push(a);
+          if (ain !== bin) shown.push([rev, a[1] + (rev - a[0]) / (b[0] - a[0]) * (b[1] - a[1])]);
+        });
+        const lc = shown.map(([x, y]) => {
+          const dx = x - s.mw / 2, dy = y - s.mh / 2;
+          return [s.ctr[0] + dx * c - dy * sn, s.ctr[1] + dx * sn + dy * c];
+        });
         s.g.words.forEach(w => {
-          const r = w.el.offsetLeft + w.el.parentElement.getBoundingClientRect().left;
-          const edge = s.mxAbs + rev - r;
-          w.el.style.color = 'transparent';
-          w.el.style.backgroundImage = `linear-gradient(90deg, ${DARK} 0, ${DARK} ${edge.toFixed(1)}px, ${P.color} ${edge.toFixed(1)}px)`;
+          const on = lc.length > 2;
+          w.dk.style.visibility = on ? 'visible' : 'hidden';
+          if (on) w.dk.style.clipPath = 'polygon(' + lc.map(v => `${(v[0] - w.org[0]).toFixed(1)}px ${(v[1] - w.org[1]).toFixed(1)}px`).join(',') + ')';
         });
       } else {
         const p = style === 'underline' ? MG.ease.outCubic(p0) : 0.2 * p0 + 0.8 * MG.ease.outCubic(p0);
         s.path.setAttribute('d', s.st.d(0, p));
-        s.path.style.opacity = 1 - q;
       }
     });
   });

@@ -11,7 +11,7 @@
   "size": {"type": "float", "min": 0.7, "max": 1.4, "default": 1.0}
  },
  "example": {"name": "Peter Thiel", "role": "Co-founder, PayPal"},
- "sfx": [{"at": 0.0, "kind": "whoosh_soft"}]} -->
+ "sfx": [{"at": 0.05, "kind": "swipe"}]} -->
 <style>
   .lt{position:absolute;top:0;display:flex;align-items:center}
   .txt{display:flex;flex-direction:column}
@@ -89,7 +89,7 @@
     if (style === 'clean_bar') {
       const tw = maxBlock - 7 * S - 22 * S;
       const nfs = fit(R.name, 80 * S, tw);
-      if (R.role) fit(R.role, Math.max(20, Math.min(31 * S, nfs * 0.4)), tw);
+      if (R.role) fit(R.role, Math.max(22, Math.min(34 * S, nfs * 0.42)), tw);
     } else if (style === 'glass_pill') {
       const ph = (role ? 134 : 106) * S, d = ph - 22 * S;
       lt.style.height = ph + 'px';
@@ -99,7 +99,7 @@
       R.tc.style.padding = right ? `0 ${20 * S}px 0 ${38 * S}px` : `0 ${38 * S}px 0 ${20 * S}px`;
       const tw = maxBlock - d - 11 * S - 58 * S;
       fit(R.name, (role ? 50 : 54) * S, tw);
-      if (R.role) fit(R.role, 29 * S, tw);
+      if (R.role) fit(R.role, 33 * S, tw);
     } else {
       const nfs = fit(R.name, 78 * S, maxBlock);
       if (R.role) fit(R.role, Math.max(24, nfs * 0.64), maxBlock);
