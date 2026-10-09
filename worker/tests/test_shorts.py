@@ -864,11 +864,14 @@ def test_misaligned_caller_range_is_rejected_instead_of_rewritten():
     result = agent_tools.make_shorts(ctx, clips=[{
         "start": 13.7, "end": 29.8, "title": "The direct answer",
         "score": 91,
-    }])
+    }], snap="none")
 
-    assert result.startswith("REJECTED:")
+    assert result.startswith("REJECTED")
     assert "starts mid-thought at 13.7s" in result
     assert "use the sentence boundary 13.4s" in result
+    # Both boundaries are reported together, not one per round trip.
+    assert "ends mid-thought at 29.8s" in result
+    assert "use the sentence boundary 30s" in result
 
 
 def test_caller_metadata_is_not_truncated_at_old_planner_boundaries():
