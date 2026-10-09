@@ -15,7 +15,7 @@
   "exit": {"type": "enum", "values": ["fade", "cut"], "default": "fade"}
  },
  "example": {"caption": "Three companies, one idea"},
- "sfx": [{"at": 0.15, "kind": "swipe", "gain_db": -4}, {"at": 0.37, "kind": "swipe", "gain_db": -6}, {"at": 0.59, "kind": "swipe", "gain_db": -7}]} -->
+ "sfx": [{"at": 0.09, "kind": "swipe", "gain_db": -4}, {"at": 0.31, "kind": "swipe", "gain_db": -6}, {"at": 0.53, "kind": "swipe", "gain_db": -7}]} -->
 <style>
   .stack{position:absolute;left:0;top:0;width:100%;height:100%;transform-origin:50% 40%;will-change:transform}
   .pc{position:absolute;will-change:transform,opacity,filter;transform-origin:50% 50%}
@@ -38,7 +38,8 @@
 (() => {
   const P = MG.params, W = MG.W, H = MG.H, D = MG.duration, fps = MG.fps;
   const stack = MG.$('#stack'), capEl = MG.$('#cap'), capT = MG.$('#capt');
-  const srcs = ['asset_1', 'asset_2', 'asset_3', 'asset_4', 'asset_5'].map(k => P[k]).filter(Boolean);
+  const srcKeys = ['asset_1', 'asset_2', 'asset_3', 'asset_4', 'asset_5'].filter(k => P[k]);
+  const srcs = srcKeys.map(k => P[k]);
   const placeholder = srcs.length === 0;
   const n = placeholder ? 3 : srcs.length;
   const TINTS = [
@@ -108,7 +109,37 @@
     // the whole spread (rotated corners included) must fit the safe column
     let ps = poses(side);
     const spanX = Math.max(...ps.map(q => q.x1)) - Math.min(...ps.map(q => q.x0));
-    if (spanX > W - 110) { side *= (W - 110) / spanX; ps = poses(side); }
+    if (spanX > W - 150) { side *= (W - 150) / spanX; ps = poses(side); }   // x 75-1005 + hold push
+    // caption size depends only on the frame: fit it first so the block
+    // height below uses its real metrics
+    let fs = 0;
+    if (caption) {
+      MG.fit(capT, { width: W - 140, min: 24, max: Math.min(60, H * 0.065), nowrap: true });
+      fs = parseFloat(capT.style.fontSize);
+    }
+    // vertical extent of the spread around the stack centre (rotated
+    // corners included) plus the caption under it; it must sit inside the
+    // safe area (y 8-80% on portrait, where the platform caption/UI band
+    // starts), so shrink the prints when a tall spread cannot fit
+    const sTop = H > W ? 0.095 : 0.065, sBot = H > W ? 0.79 : 0.94;   // margins for the hold push
+    const capGap = sd => 0.04 * sd + 26;
+    const extent = (q, sd) => {
+      let top = 0, bot = 0;
+      q.forEach(o => {
+        const rr = Math.abs(o.fr) * Math.PI / 180;
+        const hv = (o.h * Math.cos(rr) + o.w * Math.sin(rr)) / 2;
+        top = Math.min(top, o.fy - hv); bot = Math.max(bot, o.fy + hv);
+      });
+      return { top, bot, capTop: bot + capGap(sd), end: bot + (caption ? capGap(sd) + fs * 1.2 : 0) };
+    };
+    let ex = extent(ps, side);
+    for (let it = 0; it < 8; it++) {
+      const need = ex.end - ex.top, avail = H * (sBot - sTop);
+      if (need <= avail) break;
+      const fixed = caption ? 26 + fs * 1.2 + 2 * pad : 2 * pad;
+      side *= Math.max(0.5, Math.min(0.98, (avail - fixed) / Math.max(1, need - fixed)));
+      ps = poses(side); ex = extent(ps, side);
+    }
     const cw = side;                                  // reference width (square print)
     let chMax = 0;
     cards.forEach((c, i) => {
@@ -120,8 +151,8 @@
     const midX = (Math.max(...ps.map(q => q.x1)) + Math.min(...ps.map(q => q.x0))) / 2;
     cards.forEach(c => { c.fx -= midX; });
     const spreadY = cards.reduce((m, c) => Math.max(m, Math.abs(c.fy)), 0);
-    const blockH = chMax + spreadY + (caption ? 120 : 0);
-    let cy = MG.clamp(P.y * H, H * 0.07 + chMax / 2 + spreadY, H * 0.86 - blockH + chMax / 2);
+    const lo = H * sTop - ex.top, hi = H * sBot - ex.end;
+    const cy = lo <= hi ? MG.clamp(P.y * H, lo, hi) : (lo + hi) / 2;
     cards.forEach(c => {
       c.left = W / 2 - c.w / 2;
       c.top = cy - c.h / 2;
@@ -130,10 +161,8 @@
     });
     geo.cw = cw; geo.chMax = chMax; geo.cy = cy;
     if (caption) {
-      MG.fit(capT, { width: W - 140, min: 24, max: Math.min(60, H * 0.065), nowrap: true });
-      const fs = parseFloat(capT.style.fontSize);
-      capEl.style.top = (cy + chMax / 2 + spreadY + 0.09 * cw + 34) + 'px';
-      geo.capBottom = cy + chMax / 2 + spreadY + 0.09 * cw + 34 + fs * 1.2;
+      capEl.style.top = (cy + ex.capTop) + 'px';
+      geo.capBottom = cy + ex.end;
     }
     // capture box: the spread, its shadows, and the deal path (cards fly in
     // from below the stack at up to 1.32x scale)
@@ -145,14 +174,19 @@
   layout();
   // re-layout with real type metrics and the photos' own shapes
   const fontsLoaded = document.fonts.load("800 40px 'Inter Display'").catch(() => null).then(() => { key = ''; });
-  const imgsLoaded = placeholder ? null : Promise.all(cards.map(c => c.img.decode().catch(() => {
-    c.img.style.display = 'none'; c.pl.style.display = ''; c.img = null;
+  // placeholders are only for an empty stack: a given photo the browser
+  // cannot decode (HEIC, TIFF, huge scans) fails the item loudly instead
+  const imgsLoaded = placeholder ? null : Promise.all(cards.map((c, i) => c.img.decode().catch(() => {
+    const msg = `photo_stack: ${srcKeys[i]} could not be decoded (unsupported format or too large)`;
+    window.__mgErrors.push(msg);
+    throw new Error(msg);
   })));
   MG.ready = Promise.all([fontsLoaded, imgsLoaded]).then(() => { key = ''; layout(); });
 
   // ── choreography ───────────────────────────────────────────────────────
-  // card i is dealt at T(i); it lands ~0.2 s later (sound cues sit there)
-  const T = i => 0.06 + i * 0.22;
+  // card i is dealt at T(i); it lands ~0.2 s later (sound cues sit there).
+  // The first card is already in flight on frame 0 (no blank first frame).
+  const T = i => i * 0.22;
   const dealEnd = T(n - 1) + 0.62;
   const exitDur = P.exit === 'cut' ? 0 : Math.min(0.28, D * 0.12);
   const holdEnd = D - exitDur;
@@ -193,7 +227,7 @@
         y: c.fy + ENTRY_Y * H * h,
         rotate: c.fr + side * 24 * h + br,
         scale: 1 + 0.32 * h,
-        opacity: MG.range(t, t0, 0.06),
+        opacity: t < t0 ? 0 : 0.35 + 0.65 * MG.range(t, t0, 0.06),
         blur: (1 - MG.range(t, t0, 0.2)) * 10,
       });
       c.el.style.boxShadow =

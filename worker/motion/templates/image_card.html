@@ -8,13 +8,13 @@
   "style": {"type": "enum", "values": ["clean", "frame", "polaroid"], "default": "clean", "hint": "clean = borderless photo card; frame = dark rounded frame with caption strip; polaroid = white print"},
   "aspect": {"type": "enum", "values": ["auto", "landscape", "portrait", "square", "wide"], "default": "auto", "hint": "auto keeps the image's own shape (clamped)"},
   "direction": {"type": "enum", "values": ["right", "left", "bottom"], "default": "right", "hint": "side the card swings in from"},
-  "y": {"type": "float", "min": 0.15, "max": 0.85, "default": 0.36, "hint": "vertical centre as frame fraction (keep it off the face)"},
+  "y": {"type": "float", "min": 0.15, "max": 0.85, "default": 0.36, "hint": "vertical centre as frame fraction (keep it off the face); the card is always kept inside the safe area"},
   "size": {"type": "float", "min": 0.4, "max": 0.89, "default": 0.78, "hint": "card width as frame-width fraction"},
   "accent": {"type": "color", "default": "#FF453A", "hint": "chip dot colour"},
   "exit": {"type": "enum", "values": ["fade", "drop", "cut"], "default": "fade"}
  },
  "example": {"caption": "The first prototype, 2009", "chip": "2009"},
- "sfx": [{"at": 0.04, "kind": "whoosh_soft"}]} -->
+ "sfx": [{"at": 0.11, "kind": "swish_short"}]} -->
 <style>
   .stage{position:absolute;left:0;top:0;width:100%;height:100%}
   .card{position:absolute;transform-origin:50% 50%;will-change:transform,opacity,filter;border-radius:30px}
@@ -128,18 +128,25 @@
       }
       cap.style.maxWidth = capW() + 'px';
     };
-    if (cap) fitCaption();
-    const extra = capLines === 2 ? capFs * 1.12 : 0;
-    const stripH = caption ? (style === 'frame' ? 92 : style === 'polaroid' ? 112 : 0) + extra : (style === 'polaroid' ? 70 : 0);
-    // keep the card inside the safe column and within ~60% of the frame height
-    const maxH = H * (H > W ? 0.6 : 0.78);
-    let mh = (cw - 2 * padX) / ar;
-    if (mh + padTop + stripH > maxH) {
-      mh = maxH - padTop - stripH; cw = mh * ar + 2 * padX;
+    const padBot = style === 'frame' ? 15 : 0;          // frame: bottom padding + border
+    let stripH = 0;
+    const measure = () => {                             // card height for the current width
       if (cap) fitCaption();
+      const extra = capLines === 2 ? capFs * 1.12 : 0;
+      stripH = caption ? (style === 'frame' ? 92 : style === 'polaroid' ? 112 : 0) + extra : (style === 'polaroid' ? 70 : 0);
+      return (cw - 2 * padX) / ar + padTop + padBot + stripH;
+    };
+    // keep the card inside the safe area (y 8-80% on portrait, where the
+    // platform caption/UI band starts) and within ~60% of the frame height
+    const sTop = H > W ? 0.08 : 0.05, sBot = H > W ? 0.80 : 0.95;
+    const maxH = H * Math.min(H > W ? 0.6 : 0.76, sBot - sTop - 0.04);
+    let ch = measure();
+    // a narrower card can wrap the caption to two lines: re-measure until it fits
+    for (let it = 0; it < 4 && ch > maxH + 0.5; it++) {
+      cw = Math.max(200, (maxH - padTop - padBot - stripH) * ar + 2 * padX);
+      ch = measure();
     }
-    mh = (cw - 2 * padX) / ar;
-    const ch = mh + padTop + stripH;
+    let mh = (cw - 2 * padX) / ar;
     media.style.width = (cw - 2 * padX) + 'px';
     media.style.height = mh + 'px';
     card.style.width = cw + 'px';
@@ -151,7 +158,9 @@
       card.style.paddingBottom = stripH + 'px';
     }
     if (scrim && capLines === 2) scrim.style.height = '58%';
-    const cy = MG.clamp(P.y * H, H * 0.06 + ch / 2, H * 0.88 - ch / 2);
+    // the hold pose is tilted and pushed in (~3% taller in projection), so
+    // keep a 2% margin inside the safe area
+    const cy = MG.clamp(P.y * H, H * (sTop + 0.02) + ch / 2, H * (sBot - 0.02) - ch / 2);
     const left = (W - cw) / 2, top = cy - ch / 2;
     card.style.left = left + 'px';
     card.style.top = top + 'px';
@@ -173,7 +182,14 @@
   // fitted with real metrics, the card takes the photo's own shape).
   const fontsLoaded = Promise.all(["700 40px 'Inter Display'", "italic 400 40px 'Instrument Serif'", "700 40px 'Caveat'"]
     .map(f => document.fonts.load(f).catch(() => null))).then(() => { fontsOk = 1; });
-  const imgLoaded = img ? img.decode().catch(() => { img.style.display = 'none'; ph.style.display = ''; img = null; }) : null;
+  // The placeholder is only for an image param left empty: a real asset the
+  // browser cannot decode (HEIC, TIFF, huge scans) must fail loudly so the
+  // item is skipped and the agent told, never ship a grey icon card.
+  const imgLoaded = img ? img.decode().catch(() => {
+    const msg = 'image_card: image asset could not be decoded (unsupported format or too large)';
+    window.__mgErrors.push(msg);
+    throw new Error(msg);
+  }) : null;
   MG.ready = Promise.all([fontsLoaded, imgLoaded]).then(layout);
 
   // ── choreography ───────────────────────────────────────────────────────

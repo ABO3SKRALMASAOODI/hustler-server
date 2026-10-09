@@ -59,11 +59,11 @@
   // offset along travel (frac of L, + = ahead of the group), ac = cross
   // position (frac of A), ra/rc = radii along/across (frac of diag).
   const SH = [
-    { off: -0.10, ac: 0.50, ra: 0.46, rc: 0.80, c: 1, a: 0.26, rot: 0 },    // broad ambient lift
+    { off: -0.10, ac: 0.50, ra: 0.46, rc: 0.80, c: 1, a: 0.34, rot: 0 },    // broad ambient lift
     { off: -0.36, ac: 0.55, ra: 0.20, rc: 0.62, c: 3, a: 0.62, rot: -14 },  // trailing deep rim
     { off: -0.12, ac: 0.38, ra: 0.26, rc: 0.55, c: 1, a: 0.70, rot: -20 },  // main wash
     { off: 0.06, ac: 0.74, ra: 0.22, rc: 0.42, c: 2, a: 0.55, rot: 16 },    // secondary wash
-    { off: -0.02, ac: 0.30, ra: 0.10, rc: 0.34, c: 1, a: 0.78, rot: -22, core: true }, // hot streak
+    { off: -0.02, ac: 0.30, ra: 0.06, rc: 0.62, c: 1, a: 0.52, rot: -22, core: true }, // hot streak (long and thin, never a 'lens object')
     { off: 0.16, ac: 0.58, ra: 0.12, rc: 0.70, c: 2, a: 0.30, rot: -30 },   // leading spill band
   ];
   const PEAK = Math.min(0.5, D * 0.45);

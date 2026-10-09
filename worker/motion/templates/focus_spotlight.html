@@ -14,22 +14,25 @@
   "color": {"type": "color", "default": "#FFFFFF", "hint": "ring and label accent colour"}
  },
  "example": {"x": 0.5, "y": 0.42, "label": "Watch his hands"},
- "sfx": [{"at": 0.05, "kind": "whoosh_soft"}]} -->
+ "sfx": [{"at": 0.08, "kind": "swish_short"}]} -->
 <style>
-  #veil{position:absolute;left:0;top:0;width:100%;height:100%;image-rendering:pixelated}
+  #veil{position:absolute;left:0;top:0;width:100%;height:100%}
   svg.ring{position:absolute;left:0;top:0;overflow:visible;pointer-events:none}
-  .lab{position:absolute;display:flex;align-items:center;gap:14px;white-space:nowrap;font-family:'Inter Display','Inter',sans-serif;font-weight:700;
+  .lab{position:absolute;display:flex;align-items:center;gap:16px;white-space:nowrap;font-family:'Inter Display','Inter',sans-serif;font-weight:700;
        letter-spacing:-0.015em;color:#fff;text-shadow:0 2px 14px rgba(0,0,0,.55);line-height:1}
-  .lab i{display:block;width:12px;height:12px;border-radius:50%;background:var(--ac);box-shadow:0 0 12px var(--ac);flex:none}
-  .lead{position:absolute;width:2px;background:var(--ac);opacity:.85;transform-origin:50% 0}
+  .lab i{display:block;width:15px;height:15px;border-radius:50%;background:var(--ac);box-shadow:0 0 12px var(--ac);flex:none}
+  .lead{position:absolute;width:3px;border-radius:2px;background:var(--ac);opacity:.85;transform-origin:50% 0;box-shadow:0 0 8px rgba(0,0,0,.35)}
 </style>
 <div class="mg-root"><canvas id="veil"></canvas><div class="lead" id="lead"></div><div class="lab" id="lab"><i></i><span id="labt"></span></div></div>
 <script>
 (() => {
   const P = MG.params, W = MG.W, H = MG.H, D = MG.duration;
   document.documentElement.style.setProperty('--ac', P.color || '#FFFFFF');
-  // the veil is soft, so it is computed at quarter resolution
-  const Q = 4, qw = Math.ceil(W / Q), qh = Math.ceil(H / Q);
+  // the veil is soft, so it is computed at reduced resolution and smoothed
+  // up (bilinear); a hard-edged cutout (low feather, UI highlights) uses
+  // half resolution so its rounded edge stays clean
+  const feather = MG.clamp(P.feather ?? 0.5, 0, 1);
+  const Q = feather < 0.25 ? 2 : 4, qw = Math.ceil(W / Q), qh = Math.ceil(H / Q);
   const cv = MG.$('#veil');
   cv.width = qw; cv.height = qh;
   const ctx = cv.getContext('2d');
@@ -37,7 +40,6 @@
   const sw = MG.clamp(P.w ?? 0.46, 0.05, 1) * W, sh = MG.clamp(P.h ?? 0.26, 0.03, 1) * H;
   const rounded = P.shape === 'rounded';
   const dim = MG.clamp(P.dim ?? 0.62, 0.25, 0.9);
-  const feather = MG.clamp(P.feather ?? 0.5, 0, 1);
   const blurPx = (6 + feather * 0.22 * Math.min(sw, sh)) / Q;
 
   // ring (crisp, full resolution SVG)
@@ -75,18 +77,20 @@
   let below = true;
   function placeLabel() {
     labT.textContent = label;
-    MG.fit(labT, { width: W - 160, min: 24, max: Math.min(52, H * 0.06), nowrap: true });
+    MG.fit(labT, { width: W - 160, min: 28, max: Math.min(66, H * 0.06), nowrap: true });
     const lr = lab.getBoundingClientRect();
     const gap = 70;
-    below = cy + sh / 2 + gap + lr.height < H * 0.8 || cy - sh / 2 - gap - lr.height < H * 0.08;
+    // safe area: y 8-80% on portrait (platform caption/UI band below)
+    const sTop = H > W ? 0.08 : 0.05, sBot = H > W ? 0.8 : 0.95;
+    below = cy + sh / 2 + gap + lr.height < H * sBot || cy - sh / 2 - gap - lr.height < H * sTop;
     let ly = below ? cy + sh / 2 + gap : cy - sh / 2 - gap - lr.height;
-    ly = MG.clamp(ly, H * 0.06, H * 0.9 - lr.height);
+    ly = MG.clamp(ly, H * sTop, H * sBot - lr.height);
     const lx = MG.clamp(cx - lr.width / 2, 60, W - 60 - lr.width);
     lab.style.left = lx + 'px';
     lab.style.top = ly + 'px';
     const leadTop = below ? cy + sh / 2 + 16 : ly + lr.height + 12;
     const leadH = Math.max(0, below ? ly - 12 - leadTop : cy - sh / 2 - 16 - leadTop);
-    lead.style.left = (cx - 1) + 'px';
+    lead.style.left = (cx - 1.5) + 'px';
     lead.style.top = leadTop + 'px';
     lead.style.height = leadH + 'px';
     lead.style.transformOrigin = below ? '50% 0' : '50% 100%';

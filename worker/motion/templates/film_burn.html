@@ -1,24 +1,26 @@
 <!--MG-SPEC {"title": "Film burn", "category": "transition",
- "description": "An organic film burn: charred blotches creep in from one edge, a boiling orange-to-white burn floods the frame ~0.35 s in, then cools and dissolves. Use as a bold filmic transition between scenes (put the peak on the cut) or, with low coverage, as a warm edge-burn accent.",
+ "description": "An organic film burn: a translucent deep-red glow creeps in from one edge, blooms into a peach-to-white overexposure that floods the frame ~0.35 s in (the footage stays visible through it), then cools to red and dissolves. Use as a bold filmic transition between scenes (put the peak on the cut) or, with low coverage, as a warm edge-burn accent.",
  "duration": 0.8, "layer": "above_captions", "mutes_captions": false,
  "params": {
   "from": {"type": "enum", "values": ["right", "left", "bottom", "top"], "default": "right", "hint": "edge the burn grows from"},
-  "tone": {"type": "enum", "values": ["fire", "gold", "crimson"], "default": "fire", "hint": "fire = red/orange/white, gold = amber/cream, crimson = deep red/pink"},
+  "tone": {"type": "enum", "values": ["fire", "gold", "crimson"], "default": "fire", "hint": "fire = red/peach/white, gold = amber/cream, crimson = deep red/pink"},
   "coverage": {"type": "float", "min": 0.35, "max": 1.0, "default": 0.85, "hint": "how much of the frame burns at the peak (1 = whole frame)"},
   "seed": {"type": "int", "min": 1, "max": 999, "default": 3, "hint": "shape variation"}
  },
  "example": {"from": "right"},
  "sfx": [{"at": 0.28, "kind": "impact_soft"}]} -->
 <style>
-  #fb{position:absolute;left:0;top:0;width:100%;height:100%;image-rendering:pixelated}
+  #lift{position:absolute;left:0;top:0;width:100%;height:100%;opacity:0}
+  #fb{position:absolute;left:0;top:0;width:100%;height:100%}
 </style>
-<div class="mg-root"><canvas id="fb"></canvas></div>
+<div class="mg-root"><div id="lift"></div><canvas id="fb"></canvas></div>
 <script>
 (() => {
   const P = MG.params, W = MG.W, H = MG.H, D = MG.duration, fps = MG.fps;
   // The burn is a per-pixel noise field computed at quarter resolution and
-  // smoothed up by the compositor (its edges are soft anyway).
-  const Q = 2, cw = Math.ceil(W / Q), ch = Math.ceil(H / Q);
+  // smoothed up (bilinear) by the compositor: its edges and lobes are soft,
+  // so it is indistinguishable from half resolution at a quarter of the work.
+  const Q = 4, cw = Math.ceil(W / Q), ch = Math.ceil(H / Q);
   const cv = MG.$('#fb');
   cv.width = cw; cv.height = ch;
   const ctx = cv.getContext('2d');
@@ -40,16 +42,18 @@
   }
   const fbm = (x, y) => 0.55 * vnoise(x, y) + 0.3 * vnoise(x * 2.03 + 17.1, y * 2.03 + 3.7) + 0.15 * vnoise(x * 4.1 + 5.3, y * 4.1 + 11.9);
 
-  // ── palette: char → deep → hot → bright → core ──────────────────────────
+  // ── palette: deep glow → hot → bright → core, plus the exposure lift ────
+  // Light, not paint: the leading edge is a translucent deep-red glow and the
+  // body a see-through peach/cream overexposure (no dark rim, no char).
   const TONES = {
-    fire: [[22, 7, 2], [170, 30, 8], [255, 104, 0], [255, 196, 64], [255, 247, 224]],
-    gold: [[36, 18, 4], [200, 96, 12], [255, 170, 40], [255, 226, 150], [255, 251, 240]],
-    crimson: [[20, 2, 8], [140, 10, 30], [232, 38, 58], [255, 138, 92], [255, 232, 222]],
+    fire: [[208, 24, 36], [255, 90, 52], [255, 184, 132], [255, 246, 234], [255, 198, 170]],
+    gold: [[206, 92, 14], [255, 160, 44], [255, 220, 150], [255, 251, 240], [255, 222, 170]],
+    crimson: [[160, 8, 44], [236, 40, 74], [255, 140, 134], [255, 236, 234], [255, 160, 172]],
   };
   const T = TONES[P.tone] || TONES.fire;
   // 256-entry colour/alpha LUT over burn intensity 0..1
   const LUT = new Uint8ClampedArray(256 * 4);
-  const STOPS = [[0, 0, 0.0], [0.05, 0, 0.88], [0.13, 1, 0.92], [0.3, 2, 0.95], [0.55, 3, 0.97], [0.85, 4, 1.0], [1, 4, 1.0]];
+  const STOPS = [[0, 0, 0.0], [0.12, 0, 0.3], [0.26, 1, 0.52], [0.45, 2, 0.72], [0.68, 3, 0.86], [0.9, 3, 0.94], [1, 3, 0.96]];
   for (let i = 0; i < 256; i++) {
     const v = i / 255;
     let k = 0;
@@ -80,54 +84,54 @@
   // fade: holds through the flood, then dissolves (bright core lingers)
   const fade = t => 1 - MG.ease.inQuad(MG.range(t, TP + 0.08 * D, Math.max(0.05, D * 0.88 - TP)));
 
-  const NS = 3.0 / (diag / Q);                           // shape noise: cells per diag
+  const NS = 2.2 / (diag / Q);                           // shape noise: cells per diag (large, soft lobes)
   const HS = 7.0 / (diag / Q);                           // heat/texture noise
+  // exposure lift: the whole frame warms and brightens into the peak (reads
+  // as blown film exposure, also beyond the burn's reach)
+  const lift = MG.$('#lift');
+  const ox0 = (O[0] / W * 100).toFixed(1), oy0 = (O[1] / H * 100).toFixed(1);
+  const L = T[4];
+  lift.style.background = `radial-gradient(130% 110% at ${ox0}% ${oy0}%, rgba(${L},1) 0%, rgba(${L},0.75) 45%, rgba(${L},0.45) 100%)`;
+  const liftEnv = t => t < TP ? MG.ease.inQuad(MG.range(t, TP * 0.35, TP * 0.65))
+    : 1 - MG.ease.outQuad(MG.range(t, TP, Math.max(0.05, (D - TP) * 0.55)));
   MG.box = [0, 0, W, H];
   MG.active([[0, D]]);
   MG.frame(t => {
     const r = radius(t), fd = fade(t);
+    // 2-3 frames of near-white blowout right on the peak (hides the cut)
+    const boost = cov > 0.6 ? Math.exp(-Math.pow((t - TP) / 0.045, 2)) : 0;
+    lift.style.opacity = (0.3 * liftEnv(t) + 0.28 * boost).toFixed(3);
     const fr = Math.floor(t * fps);
-    const flick = 0.9 + 0.1 * MG.rand(seed * 13 + fr)();
+    const flick = 0.92 + 0.08 * MG.rand(seed * 13 + fr)();
     const drift = t * 1.8;
-    const soft = 0.24;                                   // colour ramp width (diag units)
+    const soft = 0.40;                                   // colour ramp width (diag units)
     const ox = O[0] / Q, oy = O[1] / Q, inv = Q / diag;
     const late = MG.range(t, TP, Math.max(0.05, D - TP));   // 0 → 1 after the peak
     const dissolve = late * 1.5;
+    // after the peak the light cools fast: cream → peach → deep red, as film does
+    const cool = 1 - 0.62 * MG.ease.outQuad(MG.clamp(late * 1.5));
     let i = 0;
     for (let y = 0; y < ch; y++) {
       const dy = y - oy;
       for (let x = 0; x < cw; x++, i += 4) {
         const dx = x - ox;
         const d = Math.sqrt(dx * dx + dy * dy) * inv;
-        if (d > r + 0.3) { px[i + 3] = 0; continue; }
-        // domain-warped shape noise gives ragged, fingery burn edges
+        if (d > r + 0.16) { px[i + 3] = 0; continue; }
+        // domain-warped shape noise gives soft, organic burn edges
         // noise domains are rotated so the value-noise lattice never reads as a grid
         const rx = 0.866 * x - 0.5 * y, ry = 0.5 * x + 0.866 * y;
         const wx = vnoise(rx * NS * 0.7 + 9.2, ry * NS * 0.7 + drift * 0.5) - 0.5;
-        const n = fbm(rx * NS + wx * 2.2 + drift, ry * NS + wx * 1.6 - drift * 0.6);
-        let v = (r - d + (n - 0.5) * 0.42) / soft;          // > 0: burning
-        if (v <= 0) {
-          // charred blotches race ahead of the front
-          if (v > -0.7) {
-            const bl = vnoise((0.7 * x + 0.71 * y) * NS * 3.4 + 40, (0.71 * x - 0.7 * y) * NS * 3.4 - drift * 1.3);
-            const th = 0.6 - v * 0.35;
-            if (bl > th) {
-              px[i] = T[0][0]; px[i + 1] = T[0][1]; px[i + 2] = T[0][2];
-              px[i + 3] = 235 * fd * MG.clamp((bl - th) * 8);
-              continue;
-            }
-          }
-          px[i + 3] = 0;
-          continue;
-        }
-        // heat varies inside the burn: hot white pockets, orange patches
+        const n = fbm(rx * NS + wx * 1.6 + drift, ry * NS + wx * 1.2 - drift * 0.6);
+        const v = (r - d + (n - 0.5) * 0.28) / soft;    // > 0: burning
+        if (v <= 0) { px[i + 3] = 0; continue; }
+        // heat varies inside the burn: hot white pockets, peach/red patches
         const hx = 0.94 * x + 0.34 * y, hy = -0.34 * x + 0.94 * y;
         const heat = vnoise(hx * HS + drift * 2.2, hy * HS - drift * 1.4) * 0.65 + vnoise(hy * HS * 2.3 + 5, hx * HS * 2.3 + drift * 3) * 0.35;
-        let k = Math.min(1, v) * (0.5 + 0.62 * heat) + Math.max(0, v - 1) * 0.08;
-        k = Math.min(1, k * (1 - 0.2 * late));                // cools a little as it fades
+        let k = Math.min(1, v) * (0.5 + 0.62 * heat) + Math.max(0, v - 1) * 0.1;
+        k = Math.min(1, k * cool + 0.3 * boost * Math.min(1, v));
         const ki = (k * 255) | 0;
         // dissolve: cooler patches fade first, the hottest pockets linger
-        const keep = MG.clamp((heat + 0.75 - dissolve) * 2.6);
+        const keep = MG.clamp((0.6 * heat + 0.4 * n + 0.75 - dissolve) * 1.7);
         px[i] = LUT[ki * 4]; px[i + 1] = LUT[ki * 4 + 1]; px[i + 2] = LUT[ki * 4 + 2];
         px[i + 3] = LUT[ki * 4 + 3] * fd * keep * flick;
       }
