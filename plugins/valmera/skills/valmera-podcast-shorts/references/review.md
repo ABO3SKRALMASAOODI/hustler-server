@@ -29,7 +29,9 @@ at 1x with the sound on, then answer:
 2. **Payoff:** is the payoff designed (type, sound, camera or music) and held
    1.0-1.5 s, and does it resolve the viewer question?
 3. **Targets:** does it meet its Look's targets: change rate, hero moments,
-   picture area, sound on structural events, no digital silence?
+   picture area, sound on designed beats and transitions within the Look's
+   cue budget (neither silent beats nor a sound on every caption or zoom),
+   music as `music_effective` says, and no digital silence?
 4. **Attention:** with the famous name hidden, is the idea still worth
    finishing?
 5. **Clean:** faithful claims and qualifiers, accurate readable captions,
@@ -60,7 +62,8 @@ Keep: everything else, especially the hook and payoff.
 ```
 
 Name the timestamp, the effect on the viewer, the exact change and what not
-to touch. Never send a list of nitpicks or a re-edit request.
+to touch. Never send a list of nitpicks or a re-edit request, and never ask
+for more sound than the Look's cue budget.
 
 ### Golden traits per Look
 

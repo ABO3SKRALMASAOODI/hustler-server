@@ -49,6 +49,10 @@ stronger complete version.
 
 - **Hero tier:** the top 8-12 by hook + payoff (the state script caps hero
   shorts at 12). Never pad: if only five stories clear the bar, make five.
+  Older saved briefs that say "no maximum" are superseded on this point:
+  more strong stories than 12 go to the standard tier only when the run
+  asks for volume, otherwise to the not-selected list with the reason
+  "beyond the hero cap".
 - **Standard tier (optional):** only when the run brief asks for volume. Up to
   8 more, each with `apply_look` + captions + 1-2 designed beats, one render,
   and a spot-check review.
@@ -68,11 +72,17 @@ One `make_shorts(project_id=<parent>, clips=[...])` call with, per clip:
 `start` on the first word of a sentence and `end` just after the payoff's
 final word (both from `get_words`), `title` (the verified speaker-first
 headline, which becomes the card title), `hook`, `story` (setup, development,
-payoff) and `score` (the rank). The tool rejects the first clip that starts or
-ends mid-sentence; check every boundary before calling, and on a rejection fix
-only that clip and resubmit. Then poll `shorts_status` (or `wait_for_job`) until
-the children exist and `run.py add-short` each one with its tier, rank, speaker
-and source range.
+payoff) and `score` = `round(100 * (hook + payoff + visual) / 13)` (0-100,
+higher is better; never the rank, which would invert the order). The tool
+rejects the first clip that starts or ends mid-sentence; check every boundary
+before calling, and on a rejection fix only that clip and resubmit.
+
+Building the children takes about 4-7 minutes. Do not poll: write the briefs
+meanwhile (they need no child ids), then call `shorts_status(parent)` once.
+If the children are not there yet, `wait_for_job(job_id)` at most 3 times,
+then wait a few minutes outside Valmera before the next check. Register each
+child with `run.py add-short` (tier, `--rank` 1 = best, `--score`, speaker,
+source range).
 
 ## Headlines
 
@@ -98,7 +108,7 @@ The example shows the format only; never reuse its copy, cues or claims.
   "look": "kinetic-poster",
   "structure": "fast-conversation",
   "tier": "hero",
-  "music": "auto",
+  "music": "inherit",
   "speaker": "Steve Jobs",
   "headline": "Steve Jobs: Computer fonts have been garbage",
   "structure_reason": "he names concrete typefaces the viewer can see",
@@ -119,5 +129,8 @@ The example shows the format only; never reuse its copy, cues or claims.
 ```
 
 `story` with all four fields, `look`, `structure` and `brief` are required;
-the script rejects a brief over 250 words. Editors convert source cues to
-output time after their cuts.
+the script rejects a brief over 250 words. `music` is `inherit` (the default:
+follow the run switch) unless this short needs an explicit `on` or `off`;
+`run.py assign` prints the resulting `music_effective`, which the editor
+receives with the brief. Editors convert source cues to output time after
+their cuts.

@@ -22,13 +22,13 @@ The coordinator assigns one Look and one structure per short. The editor reads
 
 | Target | Value |
 | --- | --- |
-| Hook interrupt | a designed visual event at 0.0-0.6 s (landing zoom, `hook_title`, `word_slam`, card reveal) with its sound |
+| Hook interrupt | a designed visual event at 0.0-0.6 s (`hook_title`, `word_slam` or a card reveal; a silent landing zoom may ride under it) with one sound |
 | Hook as text | the hook line readable on screen by 1.5 s; it poses the tension, never states the payoff |
 | Visual change | something changes every 0.3-0.6 s (caption cue, graphic, zoom, cut); a structural event (cut, zoom, graphic, B-roll) every 1.5-2.5 s |
 | Hero moments | 2-4 designed beats on exact word cues (Kinetic Poster, Mono Noir, Creator Glow: 3-6) |
 | Payoff | marked (type, sound, camera or music button) and held 1.0-1.5 s before the editorial end |
-| Picture area | full-bleed 1.0 when the face crop needs at most 2x upscale; otherwise a card covering at least 0.55-0.65 of the canvas on a designed background |
-| Sound | SFX on every structural event; no digital silence longer than 0.3 s except a deliberate 50-280 ms stop-down before a reveal |
+| Picture area | full-bleed (1.0) when the face crop needs at most 2x upscale; otherwise a card on a designed backdrop covering at least 0.54 of the canvas (see Card geometry). Only Editorial Serif's square card may go down to 0.48 (gum-02), because its field carries the type |
+| Sound | a sound on each designed beat, within the Look's cue budget (see Sound); no digital silence longer than 0.3 s except a deliberate 50-280 ms stop-down before a reveal |
 | Length | final 15-45 s including the 5 s native ending, so the editorial program is 10-40 s (montage editorial at most 25 s) |
 
 ### Type
@@ -45,27 +45,51 @@ The coordinator assigns one Look and one structure per short. The editor reads
 - One text system on screen at a time. Templates that replace the spoken words
   (`word_slam`, `phrase_build`) mute the captions under them.
 - Safe area on 9:16: x 60-1020 px, y 8-80% of height. Keep the native corner
-  mark and the bottom 20% clear.
+  mark and the bottom 20% clear; no card, caption or graphic below y 0.80.
 
-### Camera (`add_zoom` modes; read its schema for exact fields)
+### Card geometry (1080x1920)
+
+`set_picture_card(box=[left, top, right, bottom], ...)` takes canvas
+fractions. Always pass a designed backdrop: `background_style='blur'` (the
+card's own footage blurred and darkened; `background_dim` about 0.5),
+`'radial_gradient'` or `'vertical_gradient'` (with `background` and
+`background_color2`), plus `grain` about 0.25 and `vignette` about 0.4.
+Never the flat default colour.
+
+| Card | `box` | Area | Headline zone | Captions and hero words |
+| --- | --- | --- | --- | --- |
+| 4:5 at 88% width (950x1188) | [0.06, 0.175, 0.94, 0.794] | 0.54 | y 0.08-0.17 | inside the card's lower third, y 0.62-0.76, in face-free space |
+| 1:1 at full width (1080x1080), for 4:3 archival | [0, 0.21, 1, 0.773] | 0.56 | y 0.08-0.20 | inside the card, y 0.60-0.74, face-free |
+| 1:1 at 92% width (994x994), Editorial Serif only | [0.04, 0.12, 0.96, 0.637] | 0.48 | none | in the field below the card, y 0.66-0.80 |
+
+A wider 4:5 card (up to 92% width, 64.7% of the height) fits only without a
+headline above it and must still end at or above y 0.80. Nothing designed
+goes below y 0.80, the band the platform covers: with the 4:5 and
+full-width cards, captions and hero words therefore sit inside the card.
+
+### Camera (`add_zoom`; read its schema before the first call)
+
+`strength` is the added zoom: 0.15 means 1.15x. Mode names are the schema's
+(`push_in`, not `push`).
 
 | Mode | Use | Numbers |
 | --- | --- | --- |
-| `landing` | just after a hard cut or camera change | 1.12-1.18x easing to 1.0 over 0.35-0.5 s |
-| `punch` | a stressed word | 1.10-1.25x, expo-out over 0.12-0.2 s, optional small overshoot; at least 4 s apart |
-| `pulse` | a beat, laugh or list item | 1.0 to 1.07 to 1.0 over 0.3-0.4 s |
-| `push` | any take longer than about 4 s | 1.00 to 1.04-1.06 across the take |
-| shake | only the single biggest impact | always with `impact_hard` or `kick` |
+| `landing` | the first frame after a hard cut or camera change | strength 0.12-0.18, settles to 1.0 in about 0.35 s; start exactly on the cut, end about 0.4 s later |
+| `punch` | a stressed word, number or payoff | strength 0.10-0.25, about 0.12 s snap, held, steps back out at `end` (the next cut or sentence turn); `overshoot` 0.05-0.15 only on the biggest beat; at least 4 s apart |
+| `pulse` | a beat, laugh or list item | strength 0.05-0.08, in and out in about 0.3 s |
+| `push_in` | any take longer than about 4 s | strength 0.05-0.08 across the take |
+| `shake` (or `shake` 0.3-0.8 on a punch) | only the single biggest impact | always with `impact_hard` or `kick` |
 
-Every still image moves (push or slow pan). Start a zoom after a cut, never
-across it. Aim with `rect` or `cx`/`cy` read off `look_at`'s grid.
+Every still image moves (`push_in` or a slow pan). Start a zoom after a cut,
+never across it. Aim with `rect` or `cx`/`cy` read off `look_at`'s grid.
 
 ### Transitions and their sounds
 
-`set_transitions` sets one base style for all scene junctions (keep
-`scope='scene'` so jump cuts stay invisible). Add 1-2 transition templates
-(`list_motion_templates('transition')`) at the story's turn. Templates bring
-their own sound; for `set_transitions` add the kit sound with `add_sfx`.
+`apply_look` sets a base transition with its own sounds, firing only at real
+scene changes. If you replace it with `set_transitions` (keep `scope='scene'`
+so jump cuts stay invisible), add the kit sound yourself with `add_sfx`. Add
+1-2 transition templates (`list_motion_templates('transition')`) at the
+story's turn; templates bring their own sound.
 
 | Move | Tool | Kit sound, placed so the peak lands on the cut |
 | --- | --- | --- |
@@ -77,30 +101,74 @@ their own sound; for `set_transitions` add the kit sound with `add_sfx`.
 | film burn | `film_burn` | `swoosh_up` into `impact_soft` |
 | glitch | `glitch_burst` or `set_transitions` `glitch` | `glitch` |
 
-### Sound and the music switch
+### Sound
 
-SFX are on in every Look: a sound on each structural event, cued where the
-motion lands (0-3 frames early), never one per caption. Gains: whooshes and
-impacts -6 to -10 dB, pops, ticks, clicks and typing -12 to -16 dB. The voice
-always stays on top. Risers end on the payoff frame (`riser_short` starts
-1.2 s before, `riser_long` 2.6 s). Kit sounds are licence-free: `list_sfx_kit`,
-then `add_sfx(storage_key='kit:<kind>', at=...)`.
+SFX are on in every Look, and they are sparse and structural. A sound goes on
+each **designed beat**: the hook event, a graphic or hero-word entrance, a
+transition or transition template, a B-roll or photo entry, and the payoff.
+No sound on landing zooms, `push_in`, pulses on speech, caption cues or jump
+cuts; a punch gets one only when it is the hero or payoff beat. Cue the peak
+where the motion lands (0-3 frames early).
 
-Music comes from `list_music_library(mood)` + `add_library_music(slug, ...)`
-(CC0; moods upbeat, chill, cinematic, corporate, dramatic, hiphop, ambient,
-inspiring). The run brief sets `music`:
+**Cue budget per 30 s of editorial program** (template cues count):
 
-- **auto** (default): montage and action-opener structures get a quiet
-  library bed; conversation structures stay dry with SFX.
+| Looks | Cues per 30 s |
+| --- | --- |
+| Headline Pro, Editorial Serif, Cinematic Doc | 5-9 |
+| Clean Data, Creator Glow | 8-12 |
+| Kinetic Poster, Mono Noir | 10-16 |
+
+Montage cuts are designed beats too: at most one sound per cut, and a
+montage section may run above the budget. Gains: whooshes and impacts -6 to
+-10 dB; pops, ticks, clicks and typing -12 to -16 dB. The voice always stays
+on top. Risers end on the payoff frame (`riser_short` starts 1.2 s before,
+`riser_long` 2.6 s). Kit sounds are licence-free: `list_sfx_kit`, then
+`add_sfx(storage_key='kit:<kind>', at=...)` (typed calls; not inside
+`apply_edit_batch`).
+
+### Music: the run switch and the brief
+
+The run's switch (`run.py init --music`) decides music for every short:
+
+- **auto** (default): hook-to-silent-montage and silent-action-to-conversation
+  get a quiet library bed; fast- and headline-conversation stay dry with SFX.
 - **on**: a bed under every short in the Look's mood, -20 dB (-18 to -22)
   ducked under speech; it rises when speech stops and ends on a button at
   the payoff.
-- **off**: no music anywhere (the owner's earlier preference). Montages and
-  action openers then carry deliberate SFX plus natural or ambient sound;
-  digital silence is still not allowed.
+- **off**: no music anywhere. This is the owner's earlier preference and what
+  a saved brief saying "no music" means. Montages and action openers then
+  follow **Sound without music** below.
 
-A brief may override the switch per short. Record the track slug in the
-handback so the manifest names it.
+A brief's `music` is `inherit` unless the coordinator writes an explicit `on`
+or `off`; only those override the run switch for that short. `run.py assign`
+prints the result as `music_effective`, and the coordinator hands that value
+to the editor. Editors never re-derive it.
+
+Lay a bed in the Look call itself, `apply_look(name, music=<mood or slug>)`,
+or with `list_music_library(mood)` + `add_library_music(slug, ...)` (CC0;
+moods upbeat, chill, cinematic, corporate, dramatic, hiphop, ambient,
+inspiring). Record the slug in the handback so the manifest names it.
+
+### Sound without music (montage and action openers when music is off)
+
+An ambience bed is not music, so it honours a no-music brief. A montage built
+from stills or silent stock is digital silence until you do this:
+
+1. **Bed.** Keep the natural sound of video inserts that have it. Otherwise
+   lay one ambience or room-tone bed: `search_sfx(query='room tone'`, `'crowd
+   ambience'`, `'city ambience'` or the scene's real place, `max_seconds=30)`,
+   pick a public-domain or attribution licence (never non-commercial),
+   `fetch_sfx`, then `add_sfx` at the montage start at about -22 dB, long
+   enough to span it (add a second copy if it is short). Or carry the
+   source's own room tone, laughter or applause under `add_overlay`
+   cutaways (overlays keep the program audio; trim it with `set_volume` over
+   that source span), never with audible words outside the story.
+2. `riser_long` ending on the final image; `impact_soft` or `sub_drop` on
+   the button.
+3. `shutter` on photos or `whoosh_soft` on clips, one per montage cut.
+4. Check with `audit_audio_mix` and the render's audio check: no digital
+   silence over 0.3 s. Credit the ambience in the handback if its licence
+   asks.
 
 ### Never
 
@@ -124,21 +192,24 @@ structure can wear any Look unless noted.
   persistent, verified, speaker-first headline (`set_editorial_graphic(kind=
   "headline", speaker=..., text=...)`) held through the editorial program.
   No B-roll cutaways and no full-screen interrupting cards. Motion lives in
-  the captions, the camera (landing after every angle change, pushes, 1-3
-  punches), the card reveal and 1-3 designed beats beside or below the picture
-  (at most 2 s each). Best with Headline Pro; also Editorial Serif or Cinematic Doc.
+  the captions, the camera (landing after every angle change, `push_in` on
+  long takes, 1-3 punches), the card reveal and 1-3 designed beats inside the
+  card's face-free space (at most 2 s each). Best with Headline Pro; also
+  Editorial Serif or Cinematic Doc.
 - **hook-to-silent-montage**: a complete spoken premise, then a montage of at
   most 15 s (editorial at most 25 s) anchored by recognizable footage of the
   featured person plus direct, viewer-visible results of the premise. Never
-  an all-product or multi-hop montage. Sound is mandatory: with music auto or
-  on, the bed enters under the last spoken line at about -22 dB, becomes the
-  lead as speech ends and buttons on the final image; cuts land on beats
-  (`beat_align_cuts`) with `whoosh_soft`, `shutter` or `tick`. With music off,
-  build it from natural sound, ambience and SFX.
+  an all-product or multi-hop montage. Sound is mandatory: with a bed
+  (`music_effective` on), it enters under the last spoken line at about
+  -22 dB, becomes the lead as speech ends and buttons on the final image;
+  cuts land on beats (`beat_align_cuts`) with `whoosh_soft`, `shutter` or
+  `tick`. With music off, follow **Sound without music** (ambience bed,
+  riser into the final image, a sound per cut).
 - **silent-action-to-conversation**: 3-4 s of recognizable action by the
   actual subject, then the conversation that pays it off. The action gets
-  sound (natural audio, `riser_short` or `whoosh_soft`, a bed when music
-  allows) and a `hook_title` by 1.5 s.
+  sound (its natural audio or an ambience bed, `riser_short` or
+  `whoosh_soft`, and a library bed when `music_effective` is on) and a
+  `hook_title` by 1.5 s.
 
 ## Choosing a Look
 
@@ -166,25 +237,30 @@ A `custom-<slug>` Look is allowed when the brief spells out every field below.
   italic captions, piano bed whose bass enters on the punchline), gum-06 (the
   floor to beat), `.valmera/podcast-shorts/reference-library/20260909-headline-conversation/`.
 - **Base:** `apply_look('editorial')`.
-- **Canvas:** rounded 4:5 card (1:1 for 4:3 archival) at about 92% width,
-  top near 24% height, on `set_picture_card` background `blur` (blurred,
-  darkened copy of the picture + grain + vignette). Picture area at least
-  0.55. A modern 16:9 single-speaker source may go full-bleed with a soft
-  top gradient under the headline. Card entrance `reveal` at 0.0.
-- **Headline:** `Name: claim`, name in accent (periwinkle #9DB1FF or sand
-  #F1CA97), claim near-white, Inter Display 800, at most 2 lines.
+- **Canvas:** rounded 4:5 card at 88% width, `box` [0.06, 0.175, 0.94,
+  0.794] (picture area 0.54); for 4:3 archival a 1:1 card at full width,
+  `box` [0, 0.21, 1, 0.773] (0.56). Backdrop `background_style='blur'`,
+  `background_dim` about 0.5, grain and vignette. A modern 16:9
+  single-speaker source may go full-bleed (face-aware `set_frame`) with the
+  headline over clear space at the top. Card entrance `reveal` at 0.0.
+- **Headline:** `Name: claim` in the headline zone (y 0.08-0.17; 0.08-0.20
+  over a 1:1 card), name in accent (periwinkle #9DB1FF or sand #F1CA97),
+  claim near-white, Inter Display 800, at most 2 lines.
 - **Captions:** `motion_look` `editorial`; accent sand #F1CA97 or butter
-  #F7E499; serif-italic emphasis on 1 word per phrase; inside the lower card
-  or just below it, never over the mouth.
+  #F7E499; serif-italic emphasis on 1 word per phrase; inside the card's
+  lower third (y 0.62-0.76) in face-free space, never below the card and
+  never over the mouth.
 - **Grade:** warm matte, light grain, soft vignette.
-- **Camera:** `landing` on every angle change; `push` on takes over 4 s;
+- **Camera:** `landing` on every angle change; `push_in` on takes over 4 s;
   `punch` on 1-2 stressed words; `pulse` on the laugh or punchline.
-- **Signature:** payoff hero word below the card (`word_slam` role serif,
-  entrance `ghost` or `rise`) or `marker_text` on the payoff phrase;
+- **Signature:** payoff hero word inside the card's lower third (`word_slam`
+  role serif, entrance `ghost` or `rise`, y about 0.70, captions muted under
+  it) or `marker_text` on the payoff phrase;
   `circle_highlight`/`arrow_callout` when the speaker points at something
   visible; `counter` or `stat_card` only for a spoken number.
-- **Transitions + sound:** hard cuts with landing zooms; `whoosh_soft` at
-  the open; `pop_soft` on hero words; `impact_soft` or `chime` on the payoff.
+- **Transitions + sound:** hard cuts with landing zooms (silent);
+  `whoosh_soft` at the open; `pop_soft` on hero words; `impact_soft` or
+  `chime` on the payoff. Cue budget 5-9 per 30 s.
 - **Music (when on):** chill, cinematic or inspiring at -22 dB; bass or
   swell enters at the turn.
 - **Targets:** change every 0.4-0.7 s; hook at or before 0.6 s; 2-3 hero moments.
@@ -198,13 +274,16 @@ A `custom-<slug>` Look is allowed when the brief spells out every field below.
   strobe exits), gum-11 (sparse serif word in lowercase sans, sub boom at the
   end), orig-06 (fat serif in the scene), orig-14 (serif quote with script accents).
 - **Base:** `apply_look('editorial')`, captions `motion_look` `serif`.
-- **Canvas:** square or 4:5 card at 89-92% width on a textured dark field
-  (gradient or `blur`, olive-black #1F200C or warm charcoal, grain), or
-  full-bleed when the shot has negative space. Type sits in the negative space.
+- **Canvas:** a 4:5 card at 88-92% width (area 0.54-0.59), or a 1:1 card at
+  92% width or more, `box` [0.04, 0.12, 0.96, 0.637] (area 0.48, gum-02),
+  with the type in the field below it; backdrop `background_style=
+  'radial_gradient'` (olive-black #1F200C or warm charcoal) or `'blur'`, with
+  grain and vignette. Or full-bleed when the shot has negative space. Type
+  sits in the negative space, never below y 0.80.
 - **Type:** Inter Display lowercase backbone + Instrument Serif italic for
   1-2 words per sentence in red #ED080D or near-white; ladder up to 7:1.
 - **Grade:** filmic, slightly desaturated warm, grain, vignette.
-- **Camera:** `push` on every long take; `landing` after cuts; at most one `punch`.
+- **Camera:** `push_in` on every long take; `landing` after cuts; at most one `punch`.
 - **Signature:** `phrase_build` lockups for the hook and the turn (small sans
   connector row, large serif hero row, condensed qualifier), placed in face-free
   space with each row's `at` on its spoken onset; 1-2 hero words behind the
@@ -214,6 +293,7 @@ A `custom-<slug>` Look is allowed when the brief spells out every field below.
 - **Transitions + sound:** hard cuts; strobe exits on type; at most one
   `light_leak` at the turn. Template pops and ticks on rows; `whoosh_soft`
   into a behind-subject word; `sub_drop` or `impact_soft` under the payoff.
+  Cue budget 5-9 per 30 s.
 - **Music (when on):** ambient or cinematic at -22 dB.
 - **Targets:** change every 0.35-0.6 s; hook at or before 0.6 s (first
   `phrase_build` row on the first word); 2-4 hero moments.
@@ -228,13 +308,14 @@ A `custom-<slug>` Look is allowed when the brief spells out every field below.
 - **Base:** `apply_look('creator_punch')`, captions `motion_look` `stack`
   (small lead-in over a huge hero word) or `pop`.
 - **Canvas:** full-bleed face-aware 9:16, alternating with rounded floating
-  cards on a dark vignette (`set_picture_card` windows) for evidence; type
-  dominates 25-70% of height.
+  cards for evidence (`set_picture_card` windows, `background_style=
+  'radial_gradient'` dark with vignette); type dominates 25-70% of height.
 - **Type:** Inter Display Black or Archivo condensed caps, tight; accent red
   #D90F17 or gold #FFD400; the payoff word 1.5x the other heroes.
 - **Grade:** desaturated base with selective red and yellow, contrast, grain.
-- **Camera:** `punch` with overshoot on stressed words; `landing` on every
-  cut; `pulse` on beats; one shake on the biggest hit.
+- **Camera:** `punch` on stressed words (overshoot only on the hero and
+  payoff words); `landing` on every cut; `pulse` on beats; one shake on the
+  biggest hit.
 - **Signature:** `word_slam` on 3-5 hero words (start 0.2 s before the word);
   `phrase_build` for the thesis; `versus_split` for a contrast; `image_card`
   or `photo_stack` for licensed evidence; `chapter_title` between list items;
@@ -242,7 +323,7 @@ A `custom-<slug>` Look is allowed when the brief spells out every field below.
 - **Transitions + sound:** `zoom_punch` or whip base; dense but structural:
   `whoosh_hard` on transitions, `kick`/`impact_hard` on slams, `riser_short`
   into the payoff and `sub_drop` after it, with a 100-250 ms stop-down before
-  the payoff word.
+  the payoff word. Cue budget 10-16 per 30 s.
 - **Music (when on):** hiphop, dramatic or upbeat at -18 dB, with the stop-down.
 - **Targets:** change every 0.25-0.45 s; hook at or before 0.3 s; 4-6 hero moments.
 - **Golden traits:** something lands on almost every stressed word, and the payoff is the biggest thing in the short.
@@ -256,21 +337,21 @@ A `custom-<slug>` Look is allowed when the brief spells out every field below.
   (low-key grade, grain), orig-10 (riser into a beat drop).
 - **Base:** `apply_look('cinematic_doc')`, captions `motion_look` `clean`
   (sentence case) with serif hero words.
-- **Canvas:** full-bleed for modern sources; 4:3 archival on a 4:5 or 1:1
-  card filling at least 60% of the height over a `blur` plate; optional
-  letterbox strips for B-roll passages.
+- **Canvas:** full-bleed for modern sources; 4:3 archival on a 4:5 card at
+  88% width or more (about 62% of the height, `box` [0.06, 0.175, 0.94,
+  0.794]) over a `background_style='blur'` backdrop with grain and vignette.
 - **Type:** Inter Tight captions; `glow_title` or `chapter_title` in Bodoni
   Moda or Playfair italic; accent butter #F7E499 or red.
 - **Grade:** teal/orange low-key or warm archival, grain, vignette, highlight bloom.
-- **Camera:** `push` on every take (to about 1.06 over 4-8 s); `landing`
-  after cuts; Ken Burns on every still; rare `punch`.
+- **Camera:** `push_in` on every take (strength about 0.06 over 4-8 s);
+  `landing` after cuts; Ken Burns on every still; rare `punch`.
 - **Signature:** `glow_title` for the premise or a date; `timeline_steps` or
   `chapter_title` for a time jump (1983 to 2010); `image_card`/`photo_stack`
   archival evidence; `quote_card` for the payoff line; `focus_spotlight` on
   one face in a group; `light_leak`/`film_burn` at the turn.
 - **Transitions + sound:** `dip_white` 0.2 s or short flash base; `shutter`
   on photos, `whoosh_soft` into titles, `riser_long` into the turn (once),
-  `impact_soft` on the payoff.
+  `impact_soft` on the payoff. Cue budget 5-9 per 30 s.
 - **Music (when on):** cinematic, inspiring or ambient at -20 dB, swelling
   into the payoff.
 - **Targets:** change every 0.5-0.8 s with a structural event every 2-3 s;
@@ -295,7 +376,8 @@ A `custom-<slug>` Look is allowed when the brief spells out every field below.
   number; red behind-subject keyword; `glitch_burst` at the turn.
 - **Transitions + sound:** white flash on drops, glitch, hard cuts on speech
   onsets; `impact_hard` + `sub_drop` for the hero, `glitch`, `typing` under
-  typewriters, `tick` on counters, `riser_short` into the payoff.
+  typewriters, `tick` on counters, `riser_short` into the payoff. Cue
+  budget 10-16 per 30 s.
 - **Music (when on):** dramatic or hiphop at -18 dB with a stop-down before the payoff.
 - **Targets:** change every 0.3-0.5 s; hook at or before 0.4 s; 3-5 hero moments.
 - **Golden traits:** stark, loud, red only where it matters.
@@ -309,12 +391,13 @@ A `custom-<slug>` Look is allowed when the brief spells out every field below.
   (gradient cards).
 - **Base:** `apply_look('clean_minimal')`, captions `motion_look` `clean`
   (or `box` over busy footage).
-- **Canvas:** full-bleed, or a card on a designed gradient (white to
-  periwinkle, royal blue #1C4DB0) during data beats; UI cards float beside the head.
+- **Canvas:** full-bleed, or a card on a designed gradient during data beats
+  (`background_style='vertical_gradient'`, white to periwinkle or royal blue
+  #1C4DB0); UI cards float beside the head.
 - **Type:** Inter Tight Bold, tight tracking; accent periwinkle #6D93D6 or
   a growth green; numbers big.
 - **Grade:** high-key, clean, neutral, light grain.
-- **Camera:** `push` on talking takes, `pulse` when a card lands, `landing` after cuts.
+- **Camera:** `push_in` on talking takes, `pulse` when a card lands, `landing` after cuts.
 - **Signature:** `counter`, `stat_card`, `bar_compare`, `line_chart`,
   `progress_ring`, `timeline_steps`, `checklist`, `search_bar`, `notification`,
   `chat_bubbles`, `post_card`, `versus_split`, `arrow_callout`. Only for
@@ -322,7 +405,7 @@ A `custom-<slug>` Look is allowed when the brief spells out every field below.
   message or post.
 - **Transitions + sound:** short whips and swipes; `click_ui`, `tick`, `coin`
   for money, `ding` on a result, `typing` under `search_bar`, `notification`
-  for notifications, `whoosh_soft` on cards.
+  for notifications, `whoosh_soft` on cards. Cue budget 8-12 per 30 s.
 - **Music (when on):** corporate or upbeat at -20 dB.
 - **Targets:** change every 0.35-0.6 s; hook at or before 0.6 s; 3-5 data beats.
 - **Golden traits:** the number becomes the picture, and it counts up with a sound.
@@ -347,7 +430,7 @@ A `custom-<slug>` Look is allowed when the brief spells out every field below.
   only when the run brief asks.
 - **Transitions + sound:** `zoom_punch` or whip base plus `flash_transition`
   or `light_leak`; `whoosh_hard`, `pop_bright` on keyword stacks,
-  `riser_short` into the payoff, `impact_soft`.
+  `riser_short` into the payoff, `impact_soft`. Cue budget 8-12 per 30 s.
 - **Music (when on):** upbeat or hiphop at -18 dB.
 - **Targets:** change every 0.3-0.5 s; hook at or before 0.4 s; 3-5 hero moments.
 - **Golden traits:** glowing words build beside the face, so the hook reads before the sentence ends.

@@ -258,6 +258,62 @@ class RunTests(unittest.TestCase):
                    "--file", str(right), "--job-id", "1", "--edl-version", "7",
                    "--duration", "52")
 
+    def test_music_inherits_the_run_switch(self) -> None:
+        # The owner's saved brief says no music: the run is off, and a brief
+        # that does not say otherwise must not bring a bed back.
+        self.ok("init", "--run-dir", self.dir, "--run-id", "pod-1",
+                "--source", "https://youtu.be/x", "--music", "off")
+        self.add("s01", 11)
+        self.add("s02", 12)
+        self.add("s03", 13)
+        self.fails("inherit = follow the run switch", "assign", "--run-dir", self.dir,
+                   "--short-id", "s01", "--brief", self.brief("s01", music="auto"))
+        out = json.loads(self.ok(
+            "assign", "--run-dir", self.dir, "--short-id", "s01", "--brief",
+            self.brief("s01", structure="hook-to-silent-montage")))
+        self.assertEqual((out["music_effective"], out["brief"]["music"]), ("off", "inherit"))
+        out = json.loads(self.ok(
+            "assign", "--run-dir", self.dir, "--short-id", "s02", "--brief",
+            self.brief("s02", structure="hook-to-silent-montage", music="on")))
+        self.assertEqual((out["music_effective"], out["music_why"]), ("on", "brief on"))
+        self.ok("assign", "--run-dir", self.dir, "--short-id", "s03",
+                "--brief", self.brief("s03"))
+        status = json.loads(self.ok("status", "--run-dir", self.dir, "--json"))
+        self.assertEqual({r["short_id"]: r["music"] for r in status["shorts"]},
+                         {"s01": "off", "s02": "on", "s03": "off"})
+        # auto: montage and action openers get a bed, conversation stays dry
+        self.ok("init", "--run-dir", self.dir, "--run-id", "pod-1",
+                "--source", "https://youtu.be/x", "--music", "auto")
+        state = self.state()["shorts"]
+        self.assertEqual((state["s01"]["music_effective"], state["s03"]["music_effective"]),
+                         ("on", "off"))
+        self.assertEqual(state["s01"]["music_why"], "run auto + hook-to-silent-montage")
+
+    def test_manifest_music_none_when_run_is_off_and_brief_inherits(self) -> None:
+        self.ok("init", "--run-dir", self.dir, "--run-id", "pod-1",
+                "--source", "https://youtu.be/x", "--music", "off")
+        self.add("s01", 11)
+        self.ok("assign", "--run-dir", self.dir, "--short-id", "s01", "--brief",
+                self.brief("s01", structure="hook-to-silent-montage"), "--editor", "e1")
+        self.ok("candidate", "--run-dir", self.dir, "--short-id", "s01",
+                "--preview", "p", "--edl-version", "4", "--note", "montage on ambience")
+        self.ok("review", "--run-dir", self.dir, "--short-id", "s01",
+                "--verdict", "ship", "--note", "ok", "--checks", CHECKS)
+        final = self.final("s01", "hook-to-silent-montage")
+        self.ok("export", "--run-dir", self.dir, "--short-id", "s01", "--file", str(final),
+                "--job-id", "3", "--edl-version", "4", "--duration", "29.5",
+                "--width", "1080", "--height", "1920")
+        self.ok("finalize", "--run-dir", self.dir)
+        publishing = json.loads(
+            (Path(self.dir) / "exports" / "publishing-manifest.json").read_text())
+        self.assertEqual(publishing["items"][0]["music"], "none")
+
+    def test_score_is_recorded_and_bounded(self) -> None:
+        self.add("s01", 11, rank=1, score=92)
+        self.assertEqual(self.state()["shorts"]["s01"]["score"], 92)
+        self.fails("0-100", "add-short", "--run-dir", self.dir, "--short-id", "s02",
+                   "--project-id", "12", "--title", "x", "--score", "140")
+
     def test_hero_cap(self) -> None:
         for n in range(run.HERO_CAP):
             self.add(f"h{n:02d}", 100 + n)

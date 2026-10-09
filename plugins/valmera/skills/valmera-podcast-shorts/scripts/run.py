@@ -51,6 +51,11 @@ STRUCTURES = (
     "silent-action-to-conversation",
 )
 MUSIC = ("auto", "on", "off")
+# A brief inherits the run switch unless it says "on" or "off" explicitly.
+MUSIC_BRIEF = ("inherit", "on", "off")
+# Under the run switch "auto", these structures get a quiet library bed and
+# the conversation structures stay dry (SFX only).
+BED_STRUCTURES = ("hook-to-silent-montage", "silent-action-to-conversation")
 CHECKS = ("hook", "payoff", "targets", "attention", "clean")
 TERMINAL = ("exported", "killed", "needs_user_review", "failed_technical")
 STATUSES = ("queued", "editing", "candidate", "fix", "approved") + TERMINAL
@@ -176,6 +181,21 @@ def hms(seconds: float | None) -> str | None:
     return f"{hours}:{minutes:02d}:{rest:04.1f}" if hours else body
 
 
+def effective_music(state: dict, item: dict) -> tuple[str, str]:
+    """('on' | 'off', why) for one short: an explicit brief on/off wins,
+    otherwise the run switch, with "auto" resolved by the structure."""
+    brief_music = (item.get("brief") or {}).get("music") or "inherit"
+    if brief_music in ("on", "off"):
+        return brief_music, f"brief {brief_music}"
+    run_music = state.get("music") or "auto"
+    if run_music in ("on", "off"):
+        return run_music, f"run {run_music}"
+    structure = item.get("structure")
+    if structure in BED_STRUCTURES:
+        return "on", f"run auto + {structure}"
+    return "off", f"run auto + {structure or 'conversation'}"
+
+
 def editors_busy(state: dict) -> dict:
     return {item["editor"]: item["short_id"] for item in state["shorts"].values()
             if item["status"] == "editing" and item.get("editor")}
@@ -208,6 +228,10 @@ def cmd_init(args: argparse.Namespace) -> dict:
                     f"{path} belongs to run {state['run_id']!r}; use a new folder")
             changed = {k: v for k, v in settings.items() if v is not None}
             state.update(changed)
+            for item in state["shorts"].values():
+                if item.get("brief"):
+                    item["music_effective"], item["music_why"] = \
+                        effective_music(state, item)
             state["source_meta"].update({k: v for k, v in meta.items() if v})
             if changed:
                 event(state, "settings", **changed)
@@ -236,6 +260,8 @@ def cmd_add_short(args: argparse.Namespace) -> dict:
         raise StateError("pass both --source-start and --source-end, or neither")
     if args.source_start is not None and args.source_end <= args.source_start:
         raise StateError("--source-end must be after --source-start")
+    if args.score is not None and not 0 <= args.score <= 100:
+        raise StateError("--score is the make_shorts score, 0-100")
     with locked(run_dir(args.run_dir)) as state:
         for other in state["shorts"].values():
             if other["child_project_id"] == args.project_id and \
@@ -260,7 +286,7 @@ def cmd_add_short(args: argparse.Namespace) -> dict:
         }
         item.update({
             "title": text_value(args.title, "--title"), "tier": args.tier,
-            "rank": args.rank, "speaker": args.speaker,
+            "rank": args.rank, "score": args.score, "speaker": args.speaker,
             "source_range_s": ([args.source_start, args.source_end]
                                if args.source_start is not None else
                                (existing or {}).get("source_range_s")),
@@ -296,9 +322,11 @@ def load_brief(path_text: str, short_id: str) -> dict:
     if words > BRIEF_MAX_WORDS:
         raise StateError(f"brief text is {words} words; keep it near 150 "
                          f"(max {BRIEF_MAX_WORDS})")
-    music = payload.get("music", "auto")
-    if music not in MUSIC:
-        raise StateError(f"brief music must be one of {', '.join(MUSIC)}")
+    music = payload.get("music", "inherit")
+    if music not in MUSIC_BRIEF:
+        raise StateError(
+            f"brief music must be one of {', '.join(MUSIC_BRIEF)} (inherit = "
+            "follow the run switch; only on/off override it)")
     beats = payload.get("beats", [])
     if not isinstance(beats, list):
         raise StateError("brief beats must be a list")
@@ -324,6 +352,8 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                     loaded["structure"] != item["structure"] and item["candidates"]:
                 raise StateError("structure cannot change after a candidate exists")
             item.update(loaded)
+        if item.get("brief"):
+            item["music_effective"], item["music_why"] = effective_music(state, item)
         if args.editor is not None:
             editor = text_value(args.editor, "--editor")
             if not item.get("brief"):
@@ -522,6 +552,8 @@ def summary(state: dict) -> dict:
             "edl_version": (item["candidates"][-1]["edl_version"]
                             if item["candidates"] else None),
             "fix_used": item["fix_used"], "title": item["title"],
+            "music": (effective_music(state, item)[0]
+                      if item.get("brief") else None),
         })
     rows.sort(key=lambda r: (r["status"] in TERMINAL, r["short_id"]))
     busy = editors_busy(state)
@@ -571,7 +603,7 @@ def format_status(value: dict) -> str:
     for row in value["shorts"]:
         lines.append(f"  {row['short_id']:<8} {row['status']:<17} "
                      f"{(row['look'] or '-'):<15} {(row['structure'] or '-'):<30} "
-                     f"{row['editor'] or ''}")
+                     f"music {(row['music'] or '-'):<4} {row['editor'] or ''}")
     lines += [f"next: {n}" for n in value["next"]]
     return "\n".join(lines)
 
@@ -584,8 +616,8 @@ def publishing_item(state: dict, item: dict) -> dict:
     story = brief.get("story") or {}
     handback = (item["candidates"][-1].get("handback") or {}) if item["candidates"] else {}
     review = item.get("review") or {}
-    music = handback.get("music") or ("none" if (brief.get("music") or state["music"]) == "off"
-                                      else "not recorded")
+    music = handback.get("music") or (
+        "none" if effective_music(state, item)[0] == "off" else "not recorded")
     first_full = next((i["short_id"] for i in state["shorts"].values()
                        if (i.get("export") or {}).get("verified_full")), None)
     if exp.get("verified_full"):
@@ -780,7 +812,9 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--archival-note")
     p.add_argument("--parent-project-id", type=int)
     p.add_argument("--music", choices=MUSIC,
-                   help="run music switch (default auto: montage beds, dry conversation)")
+                   help="run music switch (default auto: a library bed for montage and "
+                   "action-opener structures, dry with SFX for conversation; off = no "
+                   "music anywhere unless a brief says on)")
     p.add_argument("--max-editors", type=int, help=f"default {DEFAULT_EDITORS}")
     p.add_argument("--max-jobs", type=int, help="Valmera jobs in flight (default = editors)")
     p.add_argument("--min-final-s", type=float, help="default 15")
@@ -791,7 +825,9 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--project-id", required=True, type=int)
     p.add_argument("--title", required=True)
     p.add_argument("--tier", choices=("hero", "standard"), default="hero")
-    p.add_argument("--rank", type=int)
+    p.add_argument("--rank", type=int, help="1 = best story in the run")
+    p.add_argument("--score", type=int,
+                   help="the 0-100 make_shorts score (higher is better)")
     p.add_argument("--speaker")
     p.add_argument("--source-start", type=float)
     p.add_argument("--source-end", type=float)
