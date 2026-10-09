@@ -431,7 +431,20 @@ def probe(path):
     # like the preview the user approved.
     csp = str(v.get("color_space") or "").strip().lower()
     rng = str(v.get("color_range") or "").strip().lower()
+
+    # Where the picture starts on the container clock, and where the earliest
+    # stream does. ffmpeg/x264 encodes with B-frames start their video a frame
+    # after the audio; the renderer lands focus handoffs on real frames with
+    # these (renderer.focus_handoff). None when the container does not say.
+    def _start(row):
+        try:
+            return round(float(row.get("start_time")), 6)
+        except (TypeError, ValueError):
+            return None
+
     return {
+        "video_start": _start(v),
+        "format_start": _start(data.get("format") or {}),
         "color_space": csp if csp and csp not in ("unknown", "reserved")
         else None,
         "color_range": rng if rng in ("tv", "pc") else None,

@@ -68,16 +68,31 @@ def _shots(*cuts):
 
 # ── shot-cut hygiene: keep edges ───────────────────────────────────────────
 
-def test_keep_end_a_few_frames_past_a_cut_snaps_back_onto_it():
+def test_keep_end_a_few_frames_past_a_cut_snaps_back_before_it():
     """The Elon showcase: the last span ended at 152.70, the camera cut at
-    152.65 — two frames of an unrelated wide before the end card."""
+    152.65 — two frames of an unrelated wide before the end card. The end
+    lands half a frame BEFORE the indexed cut: that time is rounded to
+    0.01 s and can sit just past the new shot's first frame."""
     keep, notes = agent_tools._snap_keep_to_shots(
         [[149.6, 152.7]], {"shots": _shots(152.65),
                            "video": {"fps": FPS}})
-    assert keep == [[149.6, 152.65]]
+    assert keep == [[149.6, 152.63]]
     assert notes and "SHOT-CUT HYGIENE" in notes[0]
-    assert "end 152.7->152.65" in notes[0]
-    assert "next shot" in notes[0]
+    assert "end 152.7->152.63 (" in notes[0] and "of the next shot" in notes[0]
+
+
+def test_keep_end_on_a_rounded_cut_still_moves_off_the_new_shot():
+    """The real Elon index puts the Rogan cut at 138.04 for a first frame
+    at 138.0379: an end AT 138.04 still ends on one frame of the new shot."""
+    fps = 30000 / 1001
+    index = {"shots": _shots(138.04), "video": {"fps": fps}}
+    keep, notes = agent_tools._snap_keep_to_shots([[130.7, 138.04]], index)
+    assert keep == [[130.7, 138.02]]
+    assert "(on the cut, cut at 138.04)" in notes[0]
+    # the frame at 138.0045 (old shot) stays, the one at 138.0379 is gone
+    assert 4136 / fps < keep[0][1] < 4137 / fps
+    # idempotent: a second write moves nothing
+    assert agent_tools._snap_keep_to_shots(keep, index) == (keep, [])
 
 
 def test_keep_start_just_before_a_cut_moves_to_the_first_new_frame():
@@ -116,7 +131,7 @@ def test_keep_segments_reports_the_snap_and_the_words_it_trims():
     ctx = _Ctx(shots=_shots(152.65), words=words)
     res = agent_tools.keep_segments(ctx, [[149.6, 152.7]])
     assert res.startswith("EDL v1"), res
-    assert ctx.latest_edl()["json"]["keep"] == [[149.6, 152.65]]
+    assert ctx.latest_edl()["json"]["keep"] == [[149.6, 152.63]]
     assert "SHOT-CUT HYGIENE" in res and "trims 'characters'" in res
 
 
@@ -136,7 +151,7 @@ def test_cut_range_and_cut_output_range_snap_new_edges():
     res = agent_tools.cut_output_range(ctx, 10.05, 15.0)
     assert res.startswith("EDL v"), res
     assert "SHOT-CUT HYGIENE" in res
-    assert ctx.latest_edl()["json"]["keep"][0] == [90.0, 100.0]
+    assert ctx.latest_edl()["json"]["keep"][0] == [90.0, 99.98]
 
 
 def test_no_shots_in_the_index_means_no_snapping():
@@ -172,6 +187,86 @@ def test_focus_track_outer_bounds_and_far_edges_stay_put():
     assert [(sp["t0"], sp["t1"]) for sp in track] == [
         (120.0, 139.6), (139.6, 160.0)]
     assert "SHOT-CUT" not in res
+
+
+# ── focus handoffs land on the real first frame (renderer) ─────────────────
+
+def test_focus_handoff_splits_half_a_frame_before_the_cut_frame():
+    """The judged Elon flash: the index put the Rogan cut at 138.04 (first
+    frame 4137 at 138.0379 on a zero-origin YouTube file) and the renderer
+    split one frame LATER, so frame 4137 kept Elon's crop. Rendered and
+    looked at: the split now lands between frames 4136 and 4137 — and on a
+    one-frame-origin x264 encode between the same two frames shifted."""
+    import renderer
+    fps = 29.97
+    zero = renderer.focus_handoff(138.04, fps, 0.0)
+    assert 4136 / fps < zero < 4137 / fps
+    one = renderer.focus_handoff(138.04, fps, 1 / fps)
+    assert 4137 / fps < one < 4138 / fps
+    # an edge rounded either way names the same frame
+    assert renderer.focus_handoff(138.035, fps, 0.0) == pytest.approx(zero)
+    # unknown origin (VFR): the legacy one-frame rule, byte-identical
+    assert renderer.focus_handoff(3.0, 30.0, None, 30.0) == \
+        pytest.approx(3.0 + 1 / 30)
+
+
+def test_build_filtergraph_uses_the_origin_for_focus_blocks():
+    import renderer
+    from timeline import Timeline
+    edl = default_edl(6.0)
+    edl["keep"] = [[0.0, 6.0]]
+    edl["frame"] = {"ratio": "9:16", "mode": "crop", "focus_track": [
+        {"t0": 0.0, "t1": 3.0, "x": 0.3, "y": 0.5},
+        {"t0": 3.0, "t1": 6.0, "x": 0.7, "y": 0.5}]}
+    edl = validate_edl(edl, 6.0).model_dump()
+    graph = renderer.build_filtergraph(
+        edl, 6.0, True, Timeline(edl["keep"]), None, [], {"words": []},
+        preview=True, W=270, H=480, fps=30.0, frame_mode="crop",
+        src_w=1920, src_h=1080, src_fps=30.0, focus_origin=0.0)
+    # frame 90 (3.000) opens the new block; frame 89 (2.967) closes the old
+    assert "trim=start=0.000:end=2.983" in graph
+    assert "trim=start=2.983:end=6.000" in graph
+    # each block still takes its own span's aim (x 0.3 then x 0.7)
+    blocks = {p.split("]")[0]: p for p in graph.split(";")
+              if p.startswith(("[segv0]", "[segv1]"))}
+    assert "min(270,iw-ow)" in blocks["[segv0"]
+    assert "min(1026,iw-ow)" in blocks["[segv1"]
+
+
+def test_a_keep_junction_on_the_cut_gives_the_new_frame_the_new_aim():
+    """set_transitions exposes a baked camera cut as touching keep spans at
+    the indexed cut; the half-frame before that junction holds the new
+    shot's first frame and must take the new span's aim."""
+    import renderer
+    from timeline import Timeline
+    edl = default_edl(6.0)
+    edl["keep"] = [[0.0, 3.0], [3.0, 6.0]]
+    edl["frame"] = {"ratio": "9:16", "mode": "crop", "focus_track": [
+        {"t0": 0.0, "t1": 3.0, "x": 0.3, "y": 0.5},
+        {"t0": 3.0, "t1": 6.0, "x": 0.7, "y": 0.5}]}
+    edl = validate_edl(edl, 6.0).model_dump()
+    graph = renderer.build_filtergraph(
+        edl, 6.0, True, Timeline(edl["keep"]), None, [], {"words": []},
+        preview=True, W=270, H=480, fps=30.0, frame_mode="crop",
+        src_w=1920, src_h=1080, src_fps=30.0, focus_origin=0.0)
+    blocks = {p.split("]")[0]: p for p in graph.split(";")
+              if p.startswith("[segv")}
+    assert "trim=start=2.983:end=3.000" in graph
+    assert "min(270,iw-ow)" in blocks["[segv0"]       # 0 - 2.983: old aim
+    assert "min(1026,iw-ow)" in blocks["[segv1"]      # 2.983 - 3.0: new
+    assert "min(1026,iw-ow)" in blocks["[segv2"]
+
+
+def test_probe_reports_where_the_picture_starts(tmp_path):
+    import subprocess
+    import media
+    out = str(tmp_path / "clip.mp4")
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+                    "testsrc=size=160x90:rate=30:duration=1", "-c:v",
+                    "libx264", "-pix_fmt", "yuv420p", out], check=True)
+    info = media.probe(out)
+    assert info["video_start"] is not None and info["video_start"] >= 0.0
+    assert info["format_start"] is not None
 
 
 # ── resolution-aware framing ───────────────────────────────────────────────
@@ -356,15 +451,101 @@ def test_crop_edge_review_when_the_slide_would_cut_the_face(tmp_path):
     frames = [_scene(str(tmp_path / f"i{k}.jpg"), 0.533, k) for k in range(3)]
     ctx = _Ctx(width=1920, height=1080)
     # the measured face runs right up to the inset: excluding the band
-    # would cut it, so the aim stays and the editor is told to look
+    # would cut it, so the aim stays and the editor is asked to LOOK — the
+    # detector cannot tell an inset from a door frame, so it never orders a
+    # fit on its own
     focus, note = agent_tools._clear_crop_edges(
         ctx, "9:16", (0.40, 0.45), frames, [[0.33, 0.25, 0.53, 0.6]])
     assert focus == (0.40, 0.45)
-    assert note.startswith("REVIEW REQUIRED") and "sliver" in note
+    assert note.startswith("EDGE BAND (look before acting)")
+    assert "REVIEW REQUIRED" not in note and "look_at" in note
     # a clean picture changes nothing and says nothing
     clean = [_scene(str(tmp_path / f"c{k}.jpg"), None, k) for k in range(3)]
     assert agent_tools._clear_crop_edges(ctx, "9:16", (0.40, 0.45),
                                          clean) == ((0.40, 0.45), "")
+
+
+def test_an_edge_deeper_than_a_sliver_is_scenery_and_left_alone(tmp_path):
+    """Real podcast sets are full of straight static edges — a still
+    speaker's hair line against a curtain, door and window frames. On the
+    Elon showcase source (Rogan studio, t=793) a 35% reach slid the crop
+    off Elon's own head contour 27% inside it and cut into his face. Only a
+    SLIVER (up to CROP_SLIVER_MAX of the crop) is slid off."""
+    frames = [_scene(str(tmp_path / f"d{k}.jpg"), 0.473, k)
+              for k in range(3)]
+    ctx = _Ctx(width=1920, height=1080)
+    # crop x 0.242-0.558: the edge at 0.473 sits 27% inside its right edge
+    assert subject.hard_edge_lines(frames, "x")
+    assert agent_tools._clear_crop_edges(ctx, "9:16", (0.40, 0.45),
+                                         frames) == ((0.40, 0.45), "")
+
+
+def _panels(path, seed=0):
+    """Wood panelling: a straight seam every 5% of the width."""
+    import cv2
+    import numpy as np
+    rng = np.random.default_rng(seed)
+    h, w = 360, 640
+    img = np.full((h, w), 90.0, np.float32)
+    for k in range(20):
+        x0 = int(k * 0.05 * w)
+        img[:, x0:x0 + int(0.025 * w)] = 150.0
+    img += rng.normal(0, 3, (h, w)).astype(np.float32)
+    cv2.ellipse(img, (int(0.41 * w), int(0.45 * h)), (60, 80), 0, 0, 360,
+                210, -1)
+    cv2.imwrite(path, np.clip(img, 0, 255).astype(np.uint8))
+    return path
+
+
+def test_a_pattern_of_lines_is_not_an_inset(tmp_path):
+    frames = [_panels(str(tmp_path / f"p{k}.jpg"), k) for k in range(3)]
+    ctx = _Ctx(width=1920, height=1080)
+    assert len(subject.hard_edge_lines(frames, "x")) >= \
+        agent_tools.CROP_SLIVER_PATTERN_LINES
+    assert agent_tools._clear_crop_edges(ctx, "9:16", (0.40, 0.45),
+                                         frames) == ((0.40, 0.45), "")
+
+
+def test_set_frame_edge_checks_are_bounded_per_camera_position(monkeypatch,
+                                                               tmp_path):
+    """A 24-cut two-camera track is two camera positions: two checks of
+    three frames, not 72 ffmpeg seeks on a framing write."""
+    src = _scene(str(tmp_path / "src.jpg"), None)
+    ctx = _Ctx(width=1920, height=1080, workdir=str(tmp_path))
+    ctx.proxy_path = lambda: "proxy.mp4"
+    grabs = []
+
+    def grab(_proxy, t, out):
+        grabs.append(t)
+        shutil.copyfile(src, out)
+
+    monkeypatch.setattr(agent_tools.media, "frame_at", grab)
+    agent_tools.keep_segments(ctx, [[0.0, 120.0]])
+    track = [{"t0": 5.0 * i, "t1": 5.0 * (i + 1),
+              "x": 0.3 if i % 2 else 0.7, "y": 0.5} for i in range(24)]
+    res = agent_tools.set_frame(ctx, "9:16", "crop", focus_track=track)
+    assert res.startswith("EDL v"), res
+    assert 0 < len(grabs) <= 6
+    # a ratio that crops nothing has no crop edge: no frames at all
+    grabs.clear()
+    agent_tools.set_frame(ctx, "16:9", "crop", 0.4, 0.5)
+    assert grabs == []
+
+
+def test_zoom_over_a_spliced_insert_is_not_capped_by_the_main_source():
+    """Zooms render over the assembled program; a window that shows only an
+    insert (its own resolution) is not limited by the 480p main source."""
+    edl = default_edl(SRC)
+    edl["keep"] = [[0.0, 10.0], [10.0, 20.0]]
+    edl["frame"] = {"ratio": "9:16", "mode": "crop", "focus_x": 0.44}
+    edl["inserts"] = [{"id": "ins1", "at_output_s": 10.0, "duration_s": 4.0,
+                       "asset_key": "broll.mp4", "kind": "video"}]
+    ctx = _Ctx(width=646, height=480, edl=edl)
+    room = agent_tools._zoom_room(ctx, ctx.latest_edl()["json"], 10.5, 13.5)
+    assert room[0] is None
+    # ...while footage around it still is
+    assert agent_tools._zoom_room(ctx, ctx.latest_edl()["json"],
+                                  2.0, 4.0)[0] is not None
 
 
 def test_auto_reframe_aims_the_crop_off_the_inset(monkeypatch, tmp_path):
@@ -415,7 +596,7 @@ def test_shorts_story_seed_accepts_the_shot_snapped_keep(monkeypatch,
         FakeDb(), {"id": 9}, 71, ctx.index, {"start": 140.0, "end": 152.7},
         str(tmp_path))
     assert version == 2 and note.startswith("EDL v1")
-    assert ctx.latest_edl()["json"]["keep"] == [[140.0, 152.65]]
+    assert ctx.latest_edl()["json"]["keep"] == [[140.0, 152.63]]
 
 
 def test_set_frame_keeps_an_authored_aim_but_names_the_sliver(monkeypatch,

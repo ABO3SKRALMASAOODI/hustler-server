@@ -2880,14 +2880,15 @@ _remap_program_items = timeline_mod.remap_program_items
 # the neighbouring shot for those frames: the Oct 2026 Elon showcase ended
 # its last span at 152.70 with the cut at 152.65 and flashed 2 frames of an
 # unrelated wide before the end card. Within this many frames of a cut an
-# edge is moved onto it.
+# edge is moved off it.
 SHOT_SLIVER_FRAMES = 6
 # A snap never leaves a span shorter than this (the span itself would be the
 # flash; it is left for the editor to judge).
 SHOT_SNAP_MIN_SPAN_S = 0.2
-# focus_track edges this close to a camera cut are moved onto it: a crop
-# that re-aims 2 frames after the cut shows the new shot through the old
-# crop (the same showcase, 138.04 vs the cut at 137.98).
+# focus_track edges this close to a camera cut are moved onto it, so the crop
+# re-aims exactly on the cut (renderer.focus_handoff lands an edge on the
+# real first frame of the new shot; an edge a frame or two off shows one shot
+# through the other's crop).
 FOCUS_SHOT_SNAP_S = 0.25
 
 
@@ -2915,13 +2916,16 @@ def _index_fps(index):
 def _snap_keep_to_shots(keep, index, words=None):
     """(keep, notes) with every keep edge pulled off a nearby camera cut.
 
-    An END up to SHOT_SLIVER_FRAMES after a cut moves back onto the cut. A
-    START up to that far before a cut (or less than a frame after it) moves
-    to one frame past it: the indexed cut can sit a frame early on the
-    source clock (renderer.build_filtergraph shifts focus edges by the same
-    frame), so the frame after it is the first one that is surely the new
-    shot. Edges where two spans touch are one continuous source run, not a
-    cut, and are left alone. notes is empty when nothing moved."""
+    An indexed cut is the new shot's first frame index over the frame rate,
+    ROUNDED to 0.01 s — it can sit up to 5 ms past that frame (138.04 for a
+    frame at 138.0379), and a source whose video starts a frame after its
+    audio (ffmpeg/x264 encodes) shows that frame one frame later still. So an
+    END on or up to SHOT_SLIVER_FRAMES after a cut moves to half a frame
+    BEFORE it — clear of the new shot either way — and a START up to that
+    far before a cut (or less than a frame after it) moves to one frame past
+    it, the first frame that is surely the new shot. Edges where two spans
+    touch are one continuous source run, not a cut, and are left alone.
+    notes is empty when nothing moved."""
     cuts = _shot_cuts(index)
     if not cuts or not keep:
         return keep, []
@@ -2946,33 +2950,36 @@ def _snap_keep_to_shots(keep, index, words=None):
                 moved.append(("start", s, first, b))
                 s = first
         if not (i + 1 < len(src) and abs(src[i + 1][0] - e) <= 0.011):
-            b = min((c for c in cuts if c < e <= c + reach), default=None)
-            if b is not None and round(b, 2) < e and \
-                    b - s >= SHOT_SNAP_MIN_SPAN_S:
-                moved.append(("end", e, round(b, 2), b))
-                e = round(b, 2)
+            b = min((c for c in cuts if c - step / 2.0 < e <= c + reach),
+                    default=None)
+            last = round(b - step / 2.0, 2) if b is not None else None
+            if b is not None and last < e - 0.004 and \
+                    last - s >= SHOT_SNAP_MIN_SPAN_S:
+                moved.append(("end", e, last, b))
+                e = last
         span[0], span[1] = s, e
     if not moved:
         return keep, []
     bits = []
     for side, old, new, cut in moved:
-        frames = max(1, int(round(abs(new - old) / step)))
+        frames = int(round((old - cut if side == "end" else cut - old)
+                           / step))
         lo, hi = min(old, new), max(old, new)
         clipped = [str(w.get("w") or "").strip() for w in words or []
                    if float(w.get("t0", 0)) < hi - 0.02
                    and float(w.get("t1", 0)) > lo + 0.02]
+        what = (f"{frames} frame{'s' if frames != 1 else ''} of the "
+                f"{'next' if side == 'end' else 'previous'} shot"
+                if frames > 0 else "on the cut")
         bits.append(
-            f"{side} {old:g}->{new:g} ({frames} frame"
-            f"{'s' if frames != 1 else ''} of the "
-            f"{'next' if side == 'end' else 'previous'} shot, cut at "
-            f"{cut:g})"
+            f"{side} {old:g}->{new:g} ({what}, cut at {cut:g})"
             + (f" — trims '{' '.join(x for x in clipped if x)[:40]}'"
                if any(clipped) else ""))
     return out, [
         f"SHOT-CUT HYGIENE: moved {len(moved)} keep edge"
-        f"{'s' if len(moved) != 1 else ''} onto source camera cuts so no "
-        "span starts or ends with a 1-5 frame flash of the neighbouring "
-        "shot: " + "; ".join(bits) + "."]
+        f"{'s' if len(moved) != 1 else ''} off source camera cuts so no "
+        "span starts or ends with a flash of the neighbouring shot: "
+        + "; ".join(bits) + "."]
 
 
 def _snap_focus_track_to_shots(track, index):
@@ -7230,8 +7237,18 @@ def _zoom_room(ctx, edl, start, end):
     still available before the main footage passes ZOOM_UPSCALE_MAX, after
     the framing's own enlargement (base) and the strongest stack of existing
     zooms inside that window (stacked). room None = nothing to cap (no main
-    video, unknown dimensions, or more room than any zoom can use)."""
+    video, unknown dimensions, a window that shows only spliced inserts —
+    those have their own resolution — or more room than any zoom can use)."""
     if not getattr(ctx, "has_main_video", False):
+        return None, None, 0.0
+    try:
+        footage = [b for b in timeline_mod.program_blocks(edl)
+                   if b.get("kind") == "footage"
+                   and min(float(b["out_end"]), end)
+                   - max(float(b["out_start"]), start) > 1e-3]
+    except Exception:
+        footage = True
+    if not footage:
         return None, None, 0.0
     frame = edl.get("frame") or {}
     modes = {frame.get("mode") or "crop"} | {
@@ -7380,9 +7397,10 @@ def _set_frame(ctx, ratio, mode="crop", focus_x=None, focus_y=None,
             res += (f"\nNOTE: this crop enlarges the source {up:.1f}x on the "
                     "final, so the footage will look soft under sharp "
                     "captions and type. Unless the user asked to fill the "
-                    f"screen, auto_reframe('{frame.ratio}') shows it as a "
-                    "window that enlarges it less, with a free headline "
-                    "band.")
+                    f"screen, set_frame('{frame.ratio}', 'pad_blur') shows "
+                    "it as a window that enlarges it less, with a free "
+                    "headline band (or a picture card: set_frame with "
+                    "picture=[...], then set_picture_card).")
     if frame.mode in ("pad", "pad_blur") and \
             frame.ratio in ("9:16", "1:1", "4:5") and not frame.picture:
         res += ("\n" + window if window else
@@ -7452,26 +7470,41 @@ def _spatial_face_boxes(sidecar, windows):
 # Burned-in bands at the crop edge (judges, Oct 2026). A persistent hard edge
 # inside a crop, this close to its border (share of the crop's width), leaves
 # a sliver of something else down the frame edge for the whole shot: the
-# Elon showcase's browser inset ran 8% deep for 9 s, the archival Jobs door
-# frame a grey strip. The crop slides past it by CROP_SLIVER_MARGIN of the
-# source when the aimed subject stays at least CROP_SLIVER_AIM_INSET inside.
-CROP_SLIVER_MAX = 0.35
+# Elon showcase's browser inset ran 8% deep for 9 s. The crop slides past it
+# by CROP_SLIVER_MARGIN of the source when the aimed subject stays inside the
+# middle of the crop (CROP_SLIVER_AIM_INSET from either edge).
+# A SLIVER is thin. Straight static edges are everywhere in real podcast sets
+# (door and window frames, wall panels, a still speaker's own shoulder or
+# hair line against a curtain): on 132 shots from 22 real sources a 35% reach
+# fired on a quarter of them and pushed faces to the crop's edge (on the Elon
+# showcase source it slid the crop off Elon's own hair line and into his
+# face), while the judged inset sat 8-14% deep. 15% keeps the inset and
+# leaves most scenery alone (13 of 126 shots, each a slide of <= 0.05).
+CROP_SLIVER_MAX = 0.15
 CROP_SLIVER_MARGIN = 0.008
-CROP_SLIVER_AIM_INSET = 0.2
+CROP_SLIVER_AIM_INSET = 0.3
+# This many persistent lines inside one crop is a pattern (wood panelling,
+# blinds, a bookcase), not an inset — nothing to slide off.
+CROP_SLIVER_PATTERN_LINES = 4
 
 
-def _clear_crop_edges(ctx, ratio, focus, frames, faces=(), authored=False):
+def _clear_crop_edges(ctx, ratio, focus, frames, faces=(), authored=False,
+                      lines_cache=None):
     """(focus, note): a crop aimed at `focus` moved off any hard-edged band
     at its edge (subject.hard_edge_lines on `frames`: an inset, a screen, a
     door frame, a letterbox border).
 
     Excluding the band is the cheap, always-available fix — including a
     whole inset rarely fits a 9:16 window. The slide is refused (focus comes
-    back unchanged, with a REVIEW note) when it would push the aim within
-    CROP_SLIVER_AIM_INSET of an edge, cut a measured face box that was in the
-    crop, or bring another band in on the far side. note is '' when the
-    crop's edges are clean. authored=True words the note as advice about an
-    aim the editor chose (set_frame keeps it) rather than as a slide made."""
+    back unchanged, with a note asking for a look) when it would push the aim
+    within CROP_SLIVER_AIM_INSET of an edge, cut a measured face box that was
+    in the crop, or bring another band in on the far side. The detector cannot
+    tell an inset from a door frame, so a refusal is advice to look, never an
+    instruction to fit. note is '' when the crop's edges are clean or the
+    lines are a pattern (CROP_SLIVER_PATTERN_LINES). authored=True words the
+    note as advice about an aim the editor chose (set_frame keeps it) rather
+    than as a slide made. lines_cache (a dict) shares one line measurement
+    between calls on the same frames."""
     video = (getattr(ctx, "index", None) or {}).get("video") or {}
     try:
         sw, sh = int(float(video["width"])), int(float(video["height"]))
@@ -7488,7 +7521,14 @@ def _clear_crop_edges(ctx, ratio, focus, frames, faces=(), authored=False):
         return focus, ""                 # nothing is cropped
     size = hi - lo
     band = CROP_SLIVER_MAX * size
-    lines = [p for p, _run in subject.hard_edge_lines(frames, axis)]
+    if lines_cache is not None and axis in lines_cache:
+        lines = lines_cache[axis]
+    else:
+        lines = [p for p, _run in subject.hard_edge_lines(frames, axis)]
+        if lines_cache is not None:
+            lines_cache[axis] = lines
+    if sum(1 for p in lines if lo < p < hi) >= CROP_SLIVER_PATTERN_LINES:
+        return focus, ""
     near_lo = [p for p in lines if lo < p <= lo + band]
     near_hi = [p for p in lines if hi - band <= p < hi]
     if not near_lo and not near_hi:
@@ -7516,10 +7556,12 @@ def _clear_crop_edges(ctx, ratio, focus, frames, faces=(), authored=False):
     pct = int(round(100 * depth / size))
     if not ok:
         return focus, (
-            f"REVIEW REQUIRED: {what} leaves a {pct}% sliver down the crop's "
-            f"{side} edge for the whole shot, and sliding the crop off it "
-            "would cut the subject. Look at the shot, then fit it (a "
-            "focus_track span with mode='pad_blur'), re-aim, or cut away.")
+            f"EDGE BAND (look before acting): {what} sits {pct}% inside the "
+            f"crop's {side} edge for the whole shot; sliding the crop off it "
+            "would push the subject off-centre, so the aim was kept. Only if "
+            "look_at shows a burned-in inset or screen there (not scenery "
+            "such as a door frame or wall panel): re-aim, fit that span "
+            "(focus_track mode='pad_blur'), or cut away to the inset.")
     moved = list(focus or (0.5, 0.5))
     moved[k] = round(min(max(new_lo + size / 2.0, 0.0), 1.0), 3)
     if authored:
@@ -7533,16 +7575,22 @@ def _clear_crop_edges(ctx, ratio, focus, frames, faces=(), authored=False):
         f"{abs(new_lo - lo):.2f} to exclude it.")
 
 
-# set_frame checks at most this many authored crop spans (three proxy frames
-# each) so a long hand-written track cannot turn a framing write slow.
-EDGE_ADVISORY_MAX_SPANS = 6
+# Every edge check pulls three proxy frames (one ffmpeg seek each, ~0.2-0.5
+# s). Crop spans that share an aim are one camera position — an inset or a
+# door frame belongs to the position, not to each cut back to it — so one
+# check covers them all, and at most this many positions (the longest first)
+# are checked per write: a 40-cut two-camera track costs two checks, not 40.
+EDGE_CHECK_MAX_POSITIONS = 4
 
 
-def _kept_sample_times(keep, t0, t1, n=3):
+def _kept_sample_times(keep, windows, n=3):
     """n source times spread over the footage the viewer actually sees
-    inside t0-t1 (the keep spans clipped to it), or [] when none is shown."""
-    parts = [(max(float(s), t0), min(float(e), t1)) for s, e in keep
-             if min(float(e), t1) - max(float(s), t0) > 0.05]
+    inside the source `windows` [(t0, t1)] (the keep spans clipped to them),
+    or [] when none of it is shown."""
+    parts = [(max(float(s), a), min(float(e), b))
+             for a, b in windows for s, e in keep
+             if min(float(e), b) - max(float(s), a) > 0.05]
+    parts.sort()
     total = sum(b - a for a, b in parts)
     times = []
     for i in range(n if parts else 0):
@@ -7555,13 +7603,57 @@ def _kept_sample_times(keep, t0, t1, n=3):
     return times
 
 
+def _crops_anything(ctx, ratio):
+    """True when a crop to `ratio` discards part of the main source — the
+    only case with a crop EDGE to leave a sliver at."""
+    video = (getattr(ctx, "index", None) or {}).get("video") or {}
+    try:
+        sw, sh = int(float(video["width"])), int(float(video["height"]))
+        W, H = renderer.frame_dims(sw, sh, str(ratio), delivery=True)
+        _kind, x0, y0, x1, y1 = renderer.fit_fractions(sw, sh, W, H, "crop")
+    except (KeyError, TypeError, ValueError, ZeroDivisionError):
+        return False
+    return x1 - x0 < 0.995 or y1 - y0 < 0.995
+
+
+def _edge_check_positions(spans):
+    """Crop spans [(t0, t1, (x, y))] grouped by camera position (aims within
+    the per-shot tracker's own merge distance): [(members, windows)], the
+    positions that fill the most screen time first, at most
+    EDGE_CHECK_MAX_POSITIONS of them."""
+    groups = []
+    for i, (t0, t1, aim) in enumerate(spans):
+        for members, windows, ref in groups:
+            if abs(ref[0] - aim[0]) < 0.06 and abs(ref[1] - aim[1]) < 0.10:
+                members.append(i)
+                windows.append((t0, t1))
+                break
+        else:
+            groups.append(([i], [(t0, t1)], aim))
+    groups.sort(key=lambda g: -sum(b - a for a, b in g[1]))
+    return [(m, w) for m, w, _ref in groups[:EDGE_CHECK_MAX_POSITIONS]]
+
+
+def _edge_frames(ctx, proxy, keep, windows, tag):
+    """Up to three proxy frames from the kept footage inside `windows`."""
+    paths = []
+    for j, t in enumerate(_kept_sample_times(keep, windows)):
+        fp = os.path.join(ctx.workdir, f"{tag}_{j}.jpg")
+        try:
+            media.frame_at(proxy, t, fp)
+            paths.append(fp)
+        except Exception:
+            continue
+    return paths
+
+
 def _edge_band_advisories(ctx, frame, keep):
     """Notes for an AUTHORED crop (set_frame) that leaves a sliver of a
     burned-in band at its edge. The aim stays the editor's — the note names
-    the x that would exclude the band, or says it cannot be excluded without
-    cutting the subject. [] when nothing is cropped, there is no proxy, or
-    the edges are clean."""
-    if frame.ratio == "source":
+    the x that would exclude the band, or asks for a look when it cannot be
+    excluded without pushing the subject off-centre. [] when nothing is
+    cropped, there is no proxy, or the edges are clean."""
+    if frame.ratio == "source" or not _crops_anything(ctx, frame.ratio):
         return []
     track = list(frame.focus_track or [])
     if track:
@@ -7576,6 +7668,9 @@ def _edge_band_advisories(ctx, frame, keep):
                   (frame.focus_x, frame.focus_y))]
     else:
         spans = []
+    spans = [(float(t0), float(t1),
+              tuple(0.5 if v is None else float(v) for v in aim))
+             for t0, t1, aim in spans]
     if not spans:
         return []
     try:
@@ -7584,21 +7679,17 @@ def _edge_band_advisories(ctx, frame, keep):
         return []
     shown = [(float(s), float(e)) for s, e in keep] or [(0.0, ctx.duration)]
     notes = []
-    for i, (t0, t1, aim) in enumerate(spans[:EDGE_ADVISORY_MAX_SPANS]):
-        times = _kept_sample_times(shown, t0, t1)
-        paths = []
-        for j, t in enumerate(times):
-            fp = os.path.join(ctx.workdir, f"edge_set_{i}_{j}.jpg")
-            try:
-                media.frame_at(proxy, t, fp)
-                paths.append(fp)
-            except Exception:
-                continue
-        aim = tuple(0.5 if v is None else float(v) for v in aim)
-        _moved, note = _clear_crop_edges(ctx, frame.ratio, aim, paths,
-                                         authored=True)
-        if note:
-            notes.append(f"{t0:g}-{t1:g}s: {note}")
+    for n, (members, windows) in enumerate(_edge_check_positions(spans)):
+        paths = _edge_frames(ctx, proxy, shown, windows, f"edge_set_{n}")
+        seen, lines = set(), {}
+        for i in members:
+            t0, t1, aim = spans[i]
+            _moved, note = _clear_crop_edges(ctx, frame.ratio, aim, paths,
+                                             authored=True,
+                                             lines_cache=lines)
+            if note and note not in seen:
+                seen.add(note)
+                notes.append(f"{t0:g}-{t1:g}s: {note}")
     return notes
 
 
@@ -7716,26 +7807,27 @@ def _reframe_with_track(ctx, ratio, global_pt, preserve_unmeasured=True):
                       "mode": span_mode})
     if len(spans) < 2:
         return None                      # one aim — the single point serves
-    # Each cropped shot's edges are checked on its own frames: an inset or a
-    # door frame belongs to one camera position, not to the whole video.
+    # Each camera position's crop edges are checked on its own frames: an
+    # inset or a door frame belongs to one position, not to the whole video.
     edge_notes = []
-    for i, sp in enumerate(spans):
-        if sp.get("mode") != "crop" or not proxy:
-            continue
-        paths = []
-        for j, t in enumerate(_kept_sample_times(keep, sp["t0"], sp["t1"])):
-            fp = os.path.join(ctx.workdir, f"edge_{i}_{j}.jpg")
-            try:
-                media.frame_at(proxy, t, fp)
-                paths.append(fp)
-            except Exception:
-                continue
-        aim, note = _clear_crop_edges(
-            ctx, ratio, (sp["x"], sp["y"]), paths,
-            _spatial_face_boxes(sidecar, [[sp["t0"], sp["t1"]]]))
-        if note:
-            sp["x"], sp["y"] = aim
-            edge_notes.append(f"{sp['t0']:g}-{sp['t1']:g}s: {note}")
+    cropped = [sp for sp in spans if sp.get("mode") == "crop"]
+    if proxy and cropped and _crops_anything(ctx, ratio):
+        rows = [(sp["t0"], sp["t1"], (sp["x"], sp["y"])) for sp in cropped]
+        for n, (members, windows) in enumerate(_edge_check_positions(rows)):
+            paths = _edge_frames(ctx, proxy, keep, windows, f"edge_{n}")
+            faces = _spatial_face_boxes(sidecar, windows)
+            seen, lines = set(), {}
+            for i in members:
+                sp = cropped[i]
+                aim, note = _clear_crop_edges(
+                    ctx, ratio, (sp["x"], sp["y"]), paths, faces,
+                    lines_cache=lines)
+                if note:
+                    sp["x"], sp["y"] = aim
+                    if note not in seen:
+                        seen.add(note)
+                        edge_notes.append(
+                            f"{sp['t0']:g}-{sp['t1']:g}s: {note}")
     # Composition state is not editorial state. Older revisions split `keep`
     # at every focus boundary so each ffmpeg segment had one aim. The renderer
     # now performs that split locally (without changing the EDL timeline), so
@@ -24382,9 +24474,9 @@ TOOLS = {
                       "local fixes prefer cut_range/restore_range. "
                       "snap_to_words:true moves boundaries outward to word "
                       "edges so no word is clipped. Every keep write also "
-                      "moves an edge that lands up to 6 frames past a source "
-                      "camera cut onto the cut (no flash of the other shot) "
-                      "and reports it.",
+                      "moves an edge that lands on or up to 6 frames past a "
+                      "source camera cut back off it (no flash of the other "
+                      "shot) and reports it.",
                       {"segments": _seg_schema(),
                        "snap_to_words": {"type": "boolean"}}),
     "cut_range": (cut_range, "Remove ONE source-time range from the current "
@@ -24888,9 +24980,10 @@ TOOLS = {
                      "truncated my video instead of adjusting it' complaint. "
                      "Low-resolution footage a crop would enlarge past ~2.5x "
                      "(480p/archival 4:3) is FITTED as a window instead, with "
-                     "the free headline band reported. Crops slide off "
-                     "burned-in insets and frame edges that would leave a "
-                     "sliver at the crop edge. "
+                     "the free headline band reported. A crop slides off a "
+                     "burned-in inset or border that would leave a thin "
+                     "sliver at its edge (an EDGE BAND note asks you to look "
+                     "when it cannot). "
                      "Pass mode explicitly to force one. Read what it reports "
                      "and repeat THAT.",
                      {"ratio": {"type": "string",

@@ -1858,6 +1858,30 @@ def music_source(key, fetch):
     return fetch(key)
 
 
+def focus_handoff(edge, src_fps, origin, out_fps=None):
+    """Where an INTERNAL focus_track edge splits the local render blocks, on
+    the clock ffmpeg's trim reads.
+
+    The edge names the first frame of the new composition: frame
+    n = round(edge * fps), because a shot cut is PySceneDetect's frame index
+    over the frame rate, rounded to 0.01 s. That frame sits at
+    origin + n / fps, where origin is the picture's first-frame time on the
+    trim clock — 0 on most downloads, one frame on ffmpeg/x264 encodes whose
+    B-frame delay starts the video a frame after the audio. The split goes
+    HALF a frame before it, so neither neighbour can land on the wrong side
+    of a rounded edge or a 3-decimal trim.
+
+    Until Oct 2026 every edge moved one frame later instead. That was right
+    only for one-frame-origin files (project 642); on a zero-origin source the
+    first new-shot frame kept the OLD crop — the judged Elon showcase flash, a
+    misframed Rogan wide for one frame at the 138.04 cut. origin None (VFR,
+    or unknown) keeps that legacy rule."""
+    if origin is None or not src_fps or src_fps <= 0:
+        return edge + 1.0 / max(float(out_fps or src_fps or 30.0), 1.0)
+    fps = float(src_fps)
+    return float(origin) + (round(float(edge) * fps) - 0.5) / fps
+
+
 def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                       music_inputs, index, preview,
                       W=None, H=None, fps=30.0, frame_mode=None,
@@ -1872,7 +1896,8 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                       wm_anchor_y=None,
                       plate_idx=None, plate_box=None, behind_inputs=None,
                       patch_inputs=None, cap_burn_offset=None,
-                      picture_card_inputs=None, main_video_inputs=None):
+                      picture_card_inputs=None, main_video_inputs=None,
+                      focus_origin=None):
     """Input layout: [0] main source video; anullsrc at silence_idx when
     needed (no main audio, image inserts, or silent clip inserts); then one
     input per music item, insert item and voiceover item in EDL order.
@@ -1886,6 +1911,8 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     window holds it, so the gaps between clusters are never decoded; audio
     still comes from [0]. None (or any segment left uncovered) keeps the
     single [0:v] split.
+    focus_origin: where the main picture's first frame sits on the clock its
+    trims read (focus_handoff); None keeps the legacy one-frame handoff.
     src_pad: seconds of the source whose picture track ran out early (a phone
     screen recording stops writing frames while the screen is static). The last
     frame is held across them, matching what a player shows, what the proxy
@@ -1915,27 +1942,26 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                     raw_focus_edges.add(float(span[key]))
                 except (KeyError, TypeError, ValueError):
                     continue
-        # PySceneDetect reports a cut at the PTS of the first new-shot frame,
-        # but ffmpeg's second-based trim at that exact decimal admits the
-        # preceding frame on real CFR sources (project 642: trim start 5.480
-        # cropped frame 136 from the WIDE shot before frame 137's close-up).
-        # Move only INTERNAL composition handoffs one source/output frame
-        # forward. Keeping both local blocks' shared edge shifted preserves
-        # duration while making the old composition own the last old-shot
-        # frame and the new composition own the first new-shot frame. Do not
-        # shift the track's outer bounds: that would invent 40ms blocks at the
-        # beginning/end of every video.
+        # A focus edge names the first frame of the new composition (a shot
+        # cut is PySceneDetect's frame index / fps, rounded to 0.01 s). Each
+        # INTERNAL handoff splits the local blocks where that frame really
+        # sits on the clock trim reads (focus_handoff), so the old
+        # composition owns the last old-shot frame and the new one the first
+        # new-shot frame. Do not shift the track's outer bounds: that would
+        # invent 40ms blocks at the beginning/end of every video.
         ordered_focus_edges = sorted(raw_focus_edges)
-        frame_step = 1.0 / max(float(fps), 1.0)
-        focus_edges = {
-            edge + frame_step for edge in ordered_focus_edges[1:-1]}
+        handoff_of = {
+            focus_handoff(edge, src_fps or fps, focus_origin, fps): edge
+            for edge in ordered_focus_edges[1:-1]}
         split_keep = []
         for s, e in keep:
             edges = [s] + sorted(
-                x for x in focus_edges if s + 0.01 < x < e - 0.01) + [e]
+                x for x in handoff_of if s + 0.01 < x < e - 0.01) + [e]
             split_keep.extend((a, b) for a, b in zip(edges, edges[1:])
                               if b - a > 0.01)
         keep = split_keep
+    else:
+        handoff_of = {}
     # A canvas program (image/clip-only, no main video) has no keep segments and
     # no input [0]: its program is the inserts alone, concatenated on the canvas.
     canvas_prog = not (edl.get("keep") or []) and bool(edl.get("canvas"))
@@ -2264,7 +2290,15 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         def _frame_for(s, e):
             if not _ftrack:
                 return frame_focus, mode
-            m = (s + e) / 2.0
+            # A block bounded by a handoff is judged on the composition's
+            # own clock (the edge it stands for), not the frame-grid split:
+            # one that OPENS at a handoff belongs to the span starting there,
+            # even when a keep junction on the cut closes it a frame later.
+            m = (handoff_of.get(s, s) + handoff_of.get(e, e)) / 2.0
+            if s in handoff_of:
+                m = max(m, handoff_of[s] + 1e-4)
+            if e in handoff_of:
+                m = min(m, handoff_of[e] - 1e-4)
             for sp in _ftrack:
                 try:
                     if float(sp.get("t0", 0)) <= m <= float(sp.get("t1", 0)):
@@ -4200,6 +4234,14 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     main_input_args = (["-copyts", "-ss", f"{source_seek_s:.3f}",
                         "-i", src_path]
                        if seek_main_source else ["-i", src_path])
+    # Where the picture's first frame sits on the clock the main trims read:
+    # -copyts keeps the container's own times; a plain input is shifted so the
+    # earliest stream starts at 0. Focus handoffs land on real frames with it
+    # (focus_handoff). A VFR picture has no frame grid to land on.
+    focus_origin = None
+    if info.get("video_start") is not None and not info.get("vfr"):
+        focus_origin = float(info["video_start"]) - (
+            0.0 if seek_main_source else float(info.get("format_start") or 0.0))
 
     frame = edl.get("frame") or None
     W, H = frame_dims(info["width"], info["height"],
@@ -4629,7 +4671,8 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                               cap_burn_offset=cap_burn_offset,
                               picture_card_inputs=picture_card_inputs,
                               motion_inputs=motion_inputs,
-                              main_video_inputs=main_video_inputs)
+                              main_video_inputs=main_video_inputs,
+                              focus_origin=focus_origin)
 
     if audio_only:
         # The same graph the full render would run, minus every chain the
