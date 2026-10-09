@@ -1432,6 +1432,8 @@ def list_users():
                     -- this shipped, and shown as "unknown" rather than
                     -- guessed — the same honesty rule auth_provider follows.
                     u.device_type, u.device_browser, u.last_seen_at,
+                    (SELECT ws.attribution FROM website_signups ws
+                      WHERE ws.user_id = u.id) AS acquisition,
                     (SELECT o.channel FROM onboarding_responses o
                       WHERE o.user_id = u.id) AS channel,
                     (SELECT o.use_case FROM onboarding_responses o
@@ -1930,7 +1932,12 @@ def acquisition_report():
     try:
         with conn.cursor() as cur:
             cur.execute("SET LOCAL statement_timeout='8s'")
-            return jsonify(report(cur, _scope('u')))
+            data = report(cur, _scope('u'))
+            sources = report(cur, _scope('u'), group_by='source')
+            totals = report(cur, _scope('u'), group_by='all')
+            data.update(sources=sources['rows'], totals=totals['rows'],
+                        sources_truncated=sources['truncated'], reporting_period='all_time')
+            return jsonify(data)
     finally:
         conn.close()
 

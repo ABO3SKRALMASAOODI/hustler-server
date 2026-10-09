@@ -31,7 +31,13 @@ def clean_attribution(value):
     value = value if isinstance(value, dict) else {}
     return {key: clean_touch(value.get(key)) for key in ('first', 'last')}
 
-def report(cur, scope, codes=None):
+def report(cur, scope, codes=None, group_by="link"):
+    if group_by not in {"link", "source", "all"}:
+        raise ValueError("Invalid acquisition grouping")
+    source = "COALESCE(touch->>'source','unknown')" if group_by != "all" else "'all'::text"
+    medium = "COALESCE(touch->>'medium','')" if group_by != "all" else "''::text"
+    campaign = "COALESCE(touch->>'campaign','')" if group_by == "link" else "''::text"
+    code = "COALESCE(touch->>'code','')" if group_by == "link" else "''::text"
     # Payment totals are reduced to one row per user before joining signups.
     # Browser labels describe acquisition; they never establish user identity.
     params = []
@@ -51,9 +57,9 @@ def report(cur, scope, codes=None):
         CROSS JOIN (VALUES ('first'),('last')) AS m(model)
         WHERE u.is_verified=1 AND {scope}
       ), signup AS (
-        SELECT model, COALESCE(touch->>'source','unknown') AS source,
-          COALESCE(touch->>'medium','') AS medium, COALESCE(touch->>'campaign','') AS campaign,
-          COALESCE(touch->>'code','') AS code, count(*) AS signups,
+        SELECT model, {source} AS source,
+          {medium} AS medium, {campaign} AS campaign,
+          {code} AS code, count(*) AS signups,
           count(*) FILTER (WHERE paid) AS paying_users, COALESCE(sum(usd_cents),0) AS revenue_usd_cents
         FROM signup_touches {code_filter} GROUP BY 1,2,3,4,5
       ), visit_touches AS (
@@ -61,9 +67,9 @@ def report(cur, scope, codes=None):
         FROM page_visits CROSS JOIN (VALUES ('first'),('last')) AS m(model)
         WHERE analytics_id IS NOT NULL AND attribution IS NOT NULL
       ), visits AS (
-        SELECT model, COALESCE(touch->>'source','unknown') AS source,
-          COALESCE(touch->>'medium','') AS medium, COALESCE(touch->>'campaign','') AS campaign,
-          COALESCE(touch->>'code','') AS code, count(DISTINCT device_id) AS visitors
+        SELECT model, {source} AS source,
+          {medium} AS medium, {campaign} AS campaign,
+          {code} AS code, count(DISTINCT device_id) AS visitors
         FROM visit_touches {code_filter} GROUP BY 1,2,3,4,5
       )
       SELECT COALESCE(s.model,v.model) AS model, COALESCE(s.source,v.source) AS source,
