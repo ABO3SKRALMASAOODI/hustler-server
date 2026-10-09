@@ -18,6 +18,7 @@ viral"), and steps aside the moment the user asks for anything specific.
 The user's words always win — that rule is printed inside the block itself.
 """
 
+import bisect
 import json
 import os
 
@@ -96,10 +97,17 @@ def program_shape(index, edl=None, shorts_child=False):
         except Exception:
             tl, out = None, 0.0
         if tl is not None and out > 0:
-            kept = [w for w in words if tl.src_to_out(
-                (float(w.get("t0", 0)) + float(w.get("t1", 0))) / 2.0)
-                is not None]
-            segs = [(float(a), float(b)) for a, b in tl.segs]
+            # Midpoint-in-a-keep-segment, by bisection: a long podcast with
+            # hundreds of silence cuts has ~10k words, and this runs on every
+            # state block and review, so no per-word linear segment scan.
+            segs = sorted((float(a), float(b)) for a, b in tl.segs)
+            starts = [a for a, _b in segs]
+
+            def kept_mid(word):
+                mid = (float(word.get("t0", 0)) + float(word.get("t1", 0))) / 2
+                i = bisect.bisect_right(starts, mid + 1e-6) - 1
+                return i >= 0 and mid <= segs[i][1] + 1e-6
+            kept = [w for w in words if kept_mid(w)]
             kept_shots = [s for s in shots if any(
                 min(_shot_span(s)[1], b) > max(_shot_span(s)[0], a) + .001
                 for a, b in segs)]
