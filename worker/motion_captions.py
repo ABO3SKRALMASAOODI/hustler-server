@@ -21,6 +21,8 @@ render concurrently and cache independently: correcting one word re-renders
 one segment, not the whole track.
 """
 
+import bisect
+
 import captions as caplib
 import motion_engine
 
@@ -28,10 +30,10 @@ import motion_engine
 LOOKS = {
     "clean": {"mode": "reveal", "max_words": 6, "target_words": 4, "chars": 32,
               "max_chunk_s": 2.6,
-              "desc": "calm premium sentence case: near-white Inter, soft shadow, each word rises "
-                      "8-10 px out of a blur as it is spoken inside a pre-laid-out phrase, 1-2 "
-                      "emphasis words in a warm accent; phrases fade on pauses (talking heads, "
-                      "interviews, documentary, tutorials)"},
+              "desc": "calm premium sentence case: near-white Inter, soft shadow, each word snaps "
+                      "up out of a short blur (two frames) on its spoken onset inside a pre-laid-out "
+                      "phrase, 1-2 emphasis words in a warm accent; phrases fade on pauses and clear "
+                      "on cuts (talking heads, interviews, documentary, tutorials)"},
     "editorial": {"mode": "reveal", "max_words": 5, "target_words": 3, "chars": 26,
                   "max_chunk_s": 2.2,
                   "desc": "tight bold grotesk with the emphasis word switched to a large serif italic "
@@ -52,7 +54,7 @@ LOOKS = {
     "serif": {"mode": "reveal", "max_words": 5, "target_words": 3, "chars": 26,
               "max_chunk_s": 2.2,
               "desc": "sans phrase whose emphasis words turn into a gold serif italic inline, words "
-                      "rise out of a blur (calm, cinematic, luxury, storytelling)"},
+                      "snap up out of a short blur (calm, cinematic, luxury, storytelling)"},
     "glow": {"mode": "karaoke", "max_words": 4, "target_words": 3, "chars": 24,
              "max_chunk_s": 1.9,
              "desc": "whole phrase visible dim; each spoken word lights up with an accent glow "
@@ -71,7 +73,10 @@ SEGMENT_TARGET_S = 8.0
 SEGMENT_MAX_S = 12.0
 # Captions land one frame BEFORE the spoken onset (measured in the premium
 # references: 0-40 ms early). Applied to the rendered items only; cues()
-# stays on the true program clock.
+# stays on the true program clock. The lead never pulls an edge back across
+# a program cut: a line that ends on a cut clears ON it, and a line whose
+# first word starts just after a cut appears with the new shot, not on the
+# last frame of the old one.
 CAPTION_LEAD_S = 0.033
 # A cue whose successor starts within this window swaps with a hard cut;
 # otherwise it clears with a short fade into the pause.
@@ -93,19 +98,10 @@ def look_of(edl):
 
 
 def _out_words(edl, index, tl):
-    """The kept, corrected, mute-filtered program words (caption truth)."""
-    caps = edl.get("captions") or {}
-    mutes = caplib.effective_caption_mutes(edl)
-    src_words = [w for w in (index.get("words") or [])
-                 if not (w.get("filler") if isinstance(w, dict) else getattr(w, "filler", False))]
-    out = caplib._mark_insert_breaks(tl.kept_words(src_words), tl)
-    if caps.get("corrections"):
-        legacy = [{"from": a, "to": b, "preserve_affixes": True}
-                  for a, b in caps.get("text_fixes") or []]
-        out = caplib.apply_scoped_fixes(out, legacy + caps["corrections"])
-    else:
-        out = caplib.apply_text_fixes(out, caps.get("text_fixes"))
-    return caplib._drop_muted_words(out, mutes)
+    """The kept, corrected, rejoined, mute-filtered program words (caption
+    truth), each stamped with the cut that ends its shot."""
+    words = caplib.transcript_words(edl, index, tl, caplib.effective_caption_mutes(edl))
+    return caplib._mark_shot_ends(words, tl)
 
 
 def _placement_for(style, placement_track, src_mid):
@@ -158,8 +154,9 @@ def cues(edl, index, tl):
     """[{s, e, y, b, k, w:[{t, s, e, x}]}] on the program clock, or [] when off.
 
     ``b`` is the placement band (t/m/b) the block must stay inside; ``k`` = 1
-    when the next cue follows without a pause (hard swap instead of a fade);
-    ``l`` (optional) is the nearest spatial sample's mean plate luma.
+    when the line clears hard instead of fading — the next cue follows
+    without a pause, or the line ends on a program cut; ``l`` (optional) is
+    the nearest spatial sample's mean plate luma.
     """
     look = look_of(edl)
     if not look:
@@ -202,16 +199,25 @@ def cues(edl, index, tl):
                 e = m0
         if e - s < 0.12:
             continue
+        # Every word spoken: the line clears ON the cut that ends its shot
+        # (a hard clear — a hold or fade surviving a jump cut ghosts over
+        # the new framing). Cards already break at cuts; one a stored
+        # min_words_per_caption holds across a cut is still speaking, and
+        # runs on.
+        on_cut = False
+        cut = ch[-1].get("cut")
+        if cut is not None and s < cut < e:
+            e, on_cut = cut, True
         src_mid = (float(ch[0].get("src_t0", s)) + float(ch[-1].get("src_t1", last))) / 2.0
         y, band = _placement_for(style, caps.get("placement_track"), src_mid)
         ws = []
         for w in ch:
             text = caplib._display_word_v2(w["w"], upper)
-            key = caplib._norm_word(w["w"])
+            hit = not caplib._word_keys(w).isdisjoint(emph)
             ws.append({"t": text, "s": round(float(w["t0"]), 3), "e": round(float(w["t1"]), 3),
-                       "x": 1 if (key in emph or caplib._word_has_digit(w["w"])) else 0})
+                       "x": 1 if (hit or caplib._word_has_digit(w["w"])) else 0})
         cue = {"s": round(s, 3), "e": round(e, 3), "y": round(y, 4), "b": band,
-               "k": 1 if nxt is not None and nxt - e < CONTIGUOUS_S else 0,
+               "k": 1 if on_cut or (nxt is not None and nxt - e < CONTIGUOUS_S) else 0,
                "w": ws}
         luma = _luma_at(lumas, src_mid) if lumas else None
         if luma is not None:
@@ -291,14 +297,24 @@ def items(edl, index, tl):
         return []
     sp = style_params(edl)
     lead = CAPTION_LEAD_S
+    cuts = caplib.program_cuts(tl)
+
+    def led(v):
+        # one frame early, but never back across a cut (see CAPTION_LEAD_S).
+        # Cue times are rounded to the millisecond and cuts are not (a speed
+        # ramp puts one at 1.53846 s): an edge within 1 ms of a cut is ON it.
+        k = bisect.bisect_right(cuts, v + 1e-3)
+        if k and cuts[k - 1] > v - lead + 1e-6:
+            return cuts[k - 1]
+        return v - lead
 
     def rb(v, s0):
-        return round(max(0.0, v - lead - s0), 3)
+        return round(max(0.0, led(v) - s0), 3)
 
     out = []
     for k, seg in enumerate(_segments(allc)):
-        s0 = max(0.0, seg[0]["s"] - lead)
-        s1 = max(s0 + 0.1, seg[-1]["e"] - lead)
+        s0 = max(0.0, led(seg[0]["s"]))
+        s1 = max(s0 + 0.1, led(seg[-1]["e"]))
         rebased = [dict({"s": rb(c["s"], s0), "e": rb(c["e"], s0), "y": c["y"], "b": c.get("b", "b"),
                          "k": c.get("k", 0),
                          "w": [dict(w, s=rb(w["s"], s0), e=rb(w["e"], s0)) for w in c["w"]]},

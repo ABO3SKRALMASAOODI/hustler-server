@@ -820,6 +820,256 @@ def _mark_insert_breaks(out_words, tl):
     return out_words
 
 
+# ── Transcript word hygiene ──────────────────────────────────────────────
+# Whisper opens a new timed "word" at every punctuation sub-token, so one
+# written word can come back as two: "non-player" -> "non" + "-player",
+# "32%" -> "32" + "%", "3.5" -> "3" + ".5". Burned as transcribed, a caption
+# read "-player colleagues" (the phrase optimizer had even broken the card
+# between the halves). Continuations are rejoined into the previous word
+# BEFORE grouping, so the written word is timed, chunked, muted and
+# emphasized as one. Each shape needs the previous token to end the way the
+# written word would (a letter/digit, a digit before "%"), so a dash after a
+# comma or a sign after a pause is never glued on.
+_HYPHENS = "-\u2010\u2011"                                   # ASCII + Unicode hyphens
+_JOIN_HYPHEN = re.compile(r"^[-\u2010\u2011](?=[^\W\d_])")     # -player
+_JOIN_HYPHEN_NUM = re.compile(r"^[-\u2010\u2011]\d")           # COVID-19, 737-800
+_JOIN_SLASH = re.compile(r"^[/&][^\W_]")                       # and/or, AT&T, 24/7
+_JOIN_NUMERIC = re.compile(r"^(?:[.,:]\d|[%\u2030\u00b0])")    # 3.5, 1,000, 10:30, 32%
+# Sub-tokens of one written word abut on the clock; a real gap is two words.
+JOIN_MAX_GAP_S = 0.06
+
+
+def _continues(prev, cur):
+    """Whether token ``cur`` is the split-off tail of the word ``prev``."""
+    a, b = str(prev.get("w") or ""), str(cur.get("w") or "")
+    if not a or not b or cur.get("brk"):
+        return False
+    try:
+        if float(cur["t0"]) - float(prev["t1"]) > JOIN_MAX_GAP_S:
+            return False
+    except (KeyError, TypeError, ValueError):
+        return False
+    # Abutting in the PROGRAM is not enough: a jump cut makes two distant
+    # source tokens neighbours, and "non" + a later "-based" is no word.
+    s1, s0 = prev.get("src_t1"), cur.get("src_t0")
+    if isinstance(s1, (int, float)) and isinstance(s0, (int, float)) \
+            and s0 - s1 > JOIN_MAX_GAP_S:
+        return False
+    last = a[-1]
+    if _JOIN_HYPHEN.match(b) or _JOIN_SLASH.match(b):
+        return last.isalnum()
+    if _JOIN_HYPHEN_NUM.match(b):
+        # "COVID-19", "737-800" — never "is -5" (a spoken minus)
+        return last.isdigit() or last.isupper()
+    if _JOIN_NUMERIC.match(b):
+        return last.isdigit()
+    return False
+
+
+def rejoin_split_words(words):
+    """Caption words with whisper's split-off tails glued back on.
+
+    The merged word keeps the first half's start and the tail's end (the
+    written word is spoken across both), and records its transcript tokens
+    as ``parts`` so emphasis naming either half still finds it. A
+    hyphen-led token that cannot be rejoined (the program opens on it, a
+    pause precedes it) loses the stray hyphen instead: no caption line ever
+    starts with "-player". Returns ``words`` itself when nothing changes, so
+    a clean transcript's captions are untouched to the byte."""
+    if not words:
+        return words
+    out, changed = [], False
+    for w in words:
+        if out and _continues(out[-1], w):
+            prev = out[-1]
+            merged = dict(prev, w=str(prev["w"]) + str(w["w"]), t1=w["t1"],
+                          parts=list(prev.get("parts") or [prev["w"]]) + [w["w"]])
+            if "src_t1" in w:
+                merged["src_t1"] = w["src_t1"]
+            out[-1] = merged
+            changed = True
+            continue
+        if _JOIN_HYPHEN.match(str(w.get("w") or "")):
+            w = dict(w, w=str(w["w"])[1:], parts=[w["w"]])
+            changed = True
+        out.append(w)
+    return out if changed else words
+
+
+def has_split_words(words):
+    """Does this transcript carry a token rejoin_split_words would change?
+    (Raw index words, dicts or Word objects, in source time.)"""
+    rows = [w if isinstance(w, dict) else
+            {"w": getattr(w, "w", ""), "t0": getattr(w, "t0", 0.0),
+             "t1": getattr(w, "t1", 0.0)} for w in (words or [])]
+    return rejoin_split_words(rows) is not rows
+
+
+def _word_keys(word):
+    """Emphasis keys of one caption word: its normalized text, plus each
+    transcript token a rejoined word was built from (so an emphasis list
+    naming "non" or "-player" still finds "non-player")."""
+    keys = {_norm_word(word.get("w"))}
+    for part in word.get("parts") or ():
+        keys.add(_norm_word(part))
+        keys.add(_norm_word(str(part).lstrip(_HYPHENS + "/&")))
+    keys.discard("")
+    return keys
+
+
+def program_cuts(tl):
+    """Program seconds where the picture changes shot: every keep join that
+    skips source time and both edges of every spliced insert. A join between
+    two source-contiguous keeps (a split made for an insert or a speed ramp,
+    with nothing between them) is the same shot and no cut."""
+    if not tl or not getattr(tl, "segs", None):
+        return []
+    cuts = set()
+    for i in range(len(tl.segs) - 1):
+        end = tl.offsets[i] + tl.seg_out_len[i]
+        nxt = tl.offsets[i + 1]
+        if nxt - end > 1e-6 or tl.segs[i + 1][0] - tl.segs[i][1] > 1e-3:
+            cuts.update((end, nxt))
+    for ws, wd in tl.insert_positions():
+        cuts.update((ws, ws + wd))
+    return sorted(round(c, 4) for c in cuts
+                  if 1e-3 < c < float(tl.out_duration) - 1e-3)
+
+
+def _mark_shot_ends(out_words, tl):
+    """Stamp each word with ``cut``: the first program cut at or after it
+    ends. The line belongs to the shot it was spoken in: grouping breaks a
+    card at the cut (_cut_between), and a caption whose words are all spoken
+    may hold a beat after its last word, but never across that cut — a hold
+    or fade surviving a jump cut ghosts over the new framing. Words are
+    copied only when a cut exists."""
+    cuts = program_cuts(tl)
+    if not cuts or not out_words:
+        return out_words
+    import bisect
+    out = []
+    for w in out_words:
+        k = bisect.bisect_left(cuts, float(w["t1"]) - 1e-3)
+        out.append(dict(w, cut=cuts[k]) if k < len(cuts) else w)
+    return out
+
+
+def _cut_between(prev, nxt):
+    """Is there a program cut between two consecutive caption words? Only
+    words stamped by _mark_shot_ends say (design-v2 tracks, motion looks).
+    A cut is a phrase break like a breath: the cut usually removed one, and
+    a card that runs across it carries the old shot's words onto the new
+    framing ("of things" | cut | "when")."""
+    cut = prev.get("cut")
+    return cut is not None and cut <= float(nxt["t0"]) + 1e-3
+
+
+def _hold_to_cut(end, word, start):
+    """A display end pulled back to the cut after ``word`` (see
+    _mark_shot_ends). The start never moves, and an end that would collapse
+    the event stays put."""
+    cut = word.get("cut")
+    if cut is not None and start + 0.02 < cut < end:
+        return cut
+    return end
+
+
+def transcript_words(edl, index, tl, mutes=None):
+    """The program words a from_transcript caption track shows, in order.
+
+    One pipeline for every caption path (libass presets and the browser
+    motion looks): fillers dropped, kept words mapped to program time, insert
+    breaks marked, text corrections applied, whisper's split tokens rejoined,
+    then words inside ``mutes`` (program spans) removed. See
+    _corrected_rejoined for how corrections meet the rejoin."""
+    out = _mark_insert_breaks(tl.kept_words(_spoken_index_words(index)), tl)
+    out = _corrected_rejoined(out, edl.get("captions") or {})
+    return _drop_muted_words(out, mutes) if mutes else out
+
+
+def heard_words(edl, index, tl, lo, hi):
+    """Program words AUDIBLE anywhere in program [lo, hi], corrected and
+    rejoined like transcript_words. Unlike caption words (kept when their
+    midpoint survives), a word clipped by a cut still sounds, so it counts:
+    a graphic quoting "used a weird type" over a cut that clipped the "a"
+    is quoting what the viewer hears."""
+    import bisect
+    words = sorted(_spoken_index_words(index), key=lambda w: _wget(w, "t0"))
+    starts = [_wget(w, "t0") for w in words]
+    out, seen = [], set()
+    for (a, b), off, length in zip(tl.segs, tl.offsets, tl.seg_out_len):
+        if off + length < lo or off > hi:
+            continue
+        i = max(0, bisect.bisect_left(starts, a) - 1)
+        for w in words[i:bisect.bisect_left(starts, b)]:
+            t0, t1 = _wget(w, "t0"), _wget(w, "t1")
+            if t1 <= a or t0 >= b or id(w) in seen:
+                continue
+            seen.add(id(w))
+            o0, o1 = tl.src_to_out(max(t0, a)), tl.src_to_out(min(t1, b))
+            if o0 is None or o1 is None or o1 < lo or o0 > hi:
+                continue
+            # clipped: the cut took the word's middle (captions omit it)
+            out.append({"w": _wget(w, "w"), "t0": o0, "t1": o1,
+                        "src_t0": t0, "src_t1": t1,
+                        "clipped": tl.src_to_out((t0 + t1) / 2.0) is None})
+    return _corrected_rejoined(out, edl.get("captions") or {})
+
+
+def _wget(w, key):
+    return w.get(key) if isinstance(w, dict) else getattr(w, key, None)
+
+
+def _spoken_index_words(index):
+    """Index words minus hesitation fillers (never burned; see compiled_events)."""
+    return [w for w in (index.get("words") or [])
+            if not (w.get("filler") if isinstance(w, dict)
+                    else getattr(w, "filler", False))]
+
+
+def _corrected(words, caps):
+    """Caption text corrections (round 52) on program words."""
+    if caps.get("corrections"):
+        legacy = [{"from": a, "to": b, "preserve_affixes": True}
+                  for a, b in caps.get("text_fixes") or []]
+        return apply_scoped_fixes(words, legacy + caps["corrections"])
+    return apply_text_fixes(words, caps.get("text_fixes"))
+
+
+def _corrected_rejoined(words, caps):
+    """Corrections, then the rejoin, then any correction written against a
+    REJOINED word.
+
+    Corrections run first because the ones already stored were authored
+    against the tokens the transcript showed ("-player" -> "player"), and
+    those must keep their effect. But the caption preview now shows the
+    rejoined word, so a correction written from it ("non-player" -> ...)
+    names a token no transcript word had: such a rule — one whose source
+    phrase contains a token that exists only after the rejoin — gets a
+    second pass on the rejoined words. A rule that already applied never
+    reaches that pass, so nothing is corrected twice."""
+    fixed = _corrected(words, caps)
+    joined = rejoin_split_words(fixed)
+    if joined is fixed or not (caps.get("corrections") or caps.get("text_fixes")):
+        return joined
+    new = {_norm_word(w.get("w")) for w in joined} - \
+        {_norm_word(w.get("w")) for w in fixed}
+
+    def late(src):
+        return any(_norm_word(t) in new for t in str(src or "").split())
+
+    pairs = [p for p in caps.get("text_fixes") or []
+             if late(p.get("from") if isinstance(p, dict) else p[0])]
+    rules = [r for r in caps.get("corrections") or [] if late(r.get("from"))]
+    if not (pairs or rules):
+        return joined
+    if caps.get("corrections"):            # same engine as the first pass
+        return apply_scoped_fixes(
+            joined, [{"from": a, "to": b, "preserve_affixes": True}
+                     for a, b in pairs] + rules)
+    return apply_text_fixes(joined, pairs)
+
+
 def events_from_transcript(out_words, max_words=None, line_chars=MAX_LINE_CHARS,
                            single_line=False):
     """out_words: [{'w','t0','t1'}] already in OUTPUT time (kept words only).
@@ -839,7 +1089,8 @@ def events_from_transcript(out_words, max_words=None, line_chars=MAX_LINE_CHARS,
         text = " ".join(w["w"] for w in group)
         lines = _wrap(text, line_chars)[:max_lines]
         start = group[0]["t0"]
-        end = max(group[-1]["t1"], start + MIN_EVENT_S)
+        end = _hold_to_cut(max(group[-1]["t1"], start + MIN_EVENT_S),
+                           group[-1], start)
         events.append({"start": start, "end": end,
                        "text": r"\N".join(_esc(l) for l in lines)})
         group, chars = [], 0
@@ -848,7 +1099,8 @@ def events_from_transcript(out_words, max_words=None, line_chars=MAX_LINE_CHARS,
         gap = (w["t0"] - group[-1]["t1"]) if group else 0.0
         full = (chars + 1 + len(w["w"]) > limit or
                 (max_words and len(group) >= max_words))
-        if group and (full or gap > 1.2 or w.get("brk")):
+        if group and (full or gap > 1.2 or w.get("brk")
+                      or _cut_between(group[-1], w)):
             flush()
         group.append(w)
         chars += (1 if chars else 0) + len(w["w"])
@@ -898,7 +1150,8 @@ def events_dynamic(out_words, style=None, max_words=None,
     for w in out_words:
         would = chars + (1 if chars else 0) + len(w["w"])
         if cur and (w["t0"] - cur[-1]["t1"] > 1.2 or len(cur) >= group_n
-                    or would > line_chars or w.get("brk")):
+                    or would > line_chars or w.get("brk")
+                    or _cut_between(cur[-1], w)):
             chunks.append(cur)
             cur, chars = [], 0
             would = len(w["w"])
@@ -918,6 +1171,8 @@ def events_dynamic(out_words, style=None, max_words=None,
                     else min(w["t1"] + 0.35, nxt_t0)
             else:
                 end = w["t1"] + 0.35
+            if i + 1 == len(chunk):
+                end = _hold_to_cut(end, w, start)
             if end <= start:
                 end = start + 0.12
             text = " ".join(
@@ -1322,7 +1577,7 @@ def _assign_treatments(chunk, emph, p, s=None, rot=None):
                                else "accent")
             treats.append(extra_kind if num_used else number_kind)
             num_used = True
-        elif _norm_word(token) in emph:
+        elif not _word_keys(w).isdisjoint(emph):
             t = palette[rot % len(palette)]
             rot += 1
             if t == "box":
@@ -1377,7 +1632,7 @@ def _chunk_word_key(word):
 
 def _hard_phrase_break(prev, nxt):
     """Whether two consecutive timed words may never share one card."""
-    if nxt.get("brk"):
+    if nxt.get("brk") or _cut_between(prev, nxt):
         return True
     try:
         gap = float(nxt["t0"]) - float(prev["t1"])
@@ -2078,7 +2333,9 @@ def events_premium(out_words, style=None, max_words=None,
         if mode == "static":
             start = chunk[0]["t0"]
             segs.append({"ci": ci, "start": start,
-                         "end": max(hold_end(chunk[-1]), start + MIN_EVENT_S),
+                         "end": _hold_to_cut(
+                             max(hold_end(chunk[-1]), start + MIN_EVENT_S),
+                             chunk[-1], start),
                          "last_i": len(chunk) - 1,
                          # stack+static has no single "spoken" word, so the
                          # entrance plays on the whole block at once.
@@ -2091,7 +2348,7 @@ def events_premium(out_words, style=None, max_words=None,
             if i + 1 < len(chunk):
                 end = max(chunk[i + 1]["t0"], start + 0.08)
             else:
-                end = hold_end(w)
+                end = _hold_to_cut(hold_end(w), w, start)
             if end <= start:
                 end = start + 0.12
             if mode == "reveal":
@@ -2549,23 +2806,17 @@ def compiled_events(edl, index, tl, play_res=BASE_PLAY_RES):
         # the bottom of a reel is the amateur look the whole caption system
         # exists to avoid. The audio is untouched either way; removing the
         # hesitations from the video is a separate, explicit edit.
-        src_words = [w for w in (index.get("words") or [])
-                     if not (w.get("filler") if isinstance(w, dict)
-                             else getattr(w, "filler", False))]
-        out_words = _mark_insert_breaks(tl.kept_words(src_words), tl)
         # Text corrections (round 52) are applied to the DISPLAYED words only,
         # before any grouping, so every preset family inherits them and the
-        # timings they were grouped by never move.
-        if captions.get("corrections"):
-            legacy = [{"from": a, "to": b, "preserve_affixes": True}
-                      for a, b in captions.get("text_fixes") or []]
-            out_words = apply_scoped_fixes(out_words, legacy + captions["corrections"])
-        else:
-            out_words = apply_text_fixes(out_words, captions.get("text_fixes"))
-        # Mutes at the WORD level, same stage (round 96c): grouping then
-        # builds events around the gap, so captions resume at the window's
-        # edge instead of one whole block late.
-        out_words = _drop_muted_words(out_words, mutes)
+        # timings they were grouped by never move. Mutes at the WORD level,
+        # same stage (round 96c): grouping then builds events around the gap,
+        # so captions resume at the window's edge instead of one whole block
+        # late. (transcript_words is shared with the motion caption looks.)
+        out_words = transcript_words(edl, index, tl, mutes)
+        if captions.get("design_version") == CAPTION_DESIGN_VERSION:
+            # v2 lines clear on the cut after their last word (historical
+            # tracks keep their holds, and their bytes).
+            out_words = _mark_shot_ends(out_words, tl)
         global_style = captions.get("style")
         if captions.get("placement_track"):
             events = _positioned_events(

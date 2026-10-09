@@ -31,11 +31,13 @@ placement or layout change in the rendered preview.
 MOTION LOOKS — `add_captions(mode='from_transcript', style={...})` or
 `set_caption_style` with `style.motion_look`. The browser engine draws the
 captions from the same kept, corrected, mute-filtered words as every other
-caption path, so they follow cuts exactly.
+caption path, so they follow cuts exactly: a card never runs across a cut,
+and a line whose words are all spoken clears on the cut instead of holding
+onto the new shot.
 - `editorial` — the premium default for podcast and interview reels: tight
   grotesk phrases with a size ladder and an accent role on hero words.
-- `clean` — quiet premium sentence case; words fade and rise in as spoken.
-  Documentary and calm conversation.
+- `clean` — quiet premium sentence case; each word snaps up out of a short
+  blur (two frames) as it is spoken. Documentary and calm conversation.
 - `lockup` — pre-laid-out stacked lockups; words reveal in place and the
   block never reflows. Designed, poster-like delivery.
 - `serif` — sans phrases whose emphasis words switch to a large serif
@@ -76,7 +78,11 @@ of the line being said) must mute captions for its own window;
 complementary graphics keep them. Template defaults differ, so pass
 `mute_captions` explicitly on `add_motion_graphic` rather than duplicating
 it with `set_caption_mutes`. Never let a caption page and a graphic animate
-in the same band at the same instant.
+in the same band at the same instant. A mute over words the graphic does not
+carry (a counter over its own setup line) leaves sound-off viewers with
+nothing; the write reply NOTEs the words that would vanish. Kickers, labels
+and quotes copy the transcript's exact words — the reply NOTEs a
+paraphrase and quotes the phrase to use.
 
 PLACEMENT LAW: multi-word captions sit in measured clear space — usually
 the lower-middle band above the platform UI, or beside the face in a

@@ -1965,6 +1965,19 @@ TRANSITION_VERSION = 3  # v3: zoom_punch no longer tmix-blends across concat
 # being older when it is served for its OWN version.
 CAMERA_VERSION = 1
 
+# ── Transcript caption timing (caption hygiene, Oct 2026) ─────────────────
+# Stamped as `cap_v` on every render and compared, like `cam_v`, ONLY where a
+# previous render's pixels are spliced into or reused for a NEW version
+# (stitched previews, picture reuse), and only for transcript captions the
+# change moves: a motion look, or a design-v2 track over a program with a
+# cut. v1: a line whose words are all spoken clears ON the next cut instead
+# of holding (and fading) onto the new shot, and the motion looks' word
+# reveals settle within two frames. A stitch from an older render would copy
+# its stale holds into every unchanged stretch. A render served for its OWN
+# version keeps its cache. (Split-token rejoining busts through the caption
+# fingerprint instead — see renderer._caption_index_fp.)
+CAPTION_TIMING_VERSION = 1
+
 # Manual music remains editable past the last scene, but rendered media always
 # stops at the picture/program boundary.  v1 extended overhanging music across
 # generated black frames; v2 clamps only the render window (never the EDL) so

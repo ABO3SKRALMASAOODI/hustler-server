@@ -162,8 +162,13 @@
   }
 
   // Entrance per look/role: kind + duration + how early it may start.
+  // Per-word reveals are crisp, as in the references: a word is legible on
+  // its first frame and settled within two (rise = a 2-frame snap out of a
+  // short blur; slam settles its scale longer but is solid in one frame).
+  // Looks whose identity is the transition keep it: the ghost-snap, the
+  // glow's light-up, the box glide, the typewriter.
   const ENTER = {
-    pop: { d: 0, early: 0 }, ghost: { d: 2 * F, early: 2 * F }, rise: { d: 0.12, early: 0.05 },
+    pop: { d: 0, early: 0 }, ghost: { d: 2 * F, early: 2 * F }, rise: { d: 2 * F, early: 0 },
     scale: { d: 0.09, early: 0 }, slam: { d: 0.14, early: 0 }, light: { d: 0.17, early: 0 },
     glide: { d: 0.11, early: 0 }, type: { d: 0, early: 0 },
   };
@@ -615,9 +620,10 @@
         case 'ghost': op = !on ? 0 : t < o.R + 2 * F - 1e-6 ? 0.38 : 1; break;
         case 'rise': {
           if (!on) break;
+          // legible on its first frame, settled by the second
           const e = MG.ease.outCubic(p);
-          op = Math.min(1, p * 1.7);
-          setWord(o, { opacity: op, y: (1 - e) * (o.role === 'em' ? 12 : 10), blur: (1 - e) * 7 });
+          op = Math.min(1, 0.72 + p * 0.56);
+          setWord(o, { opacity: op, y: (1 - e) * (o.role === 'em' ? 8 : 6), blur: (1 - e) * 3.5 });
           break;
         }
         case 'scale': {
@@ -629,8 +635,9 @@
         case 'slam': {
           if (!on) break;
           const e = MG.ease.outQuart(p);
-          op = o.solid ? 1 : Math.min(1, p * 4);
-          setWord(o, { opacity: op, scale: 1 + Math.min(0.3, o.smax - 1) * (1 - e), blur: (1 - Math.min(1, p * 1.6)) * 5 });
+          // solid within a frame; the scale keeps settling (the slam itself)
+          op = o.solid ? 1 : Math.min(1, 0.55 + p * 4);
+          setWord(o, { opacity: op, scale: 1 + Math.min(0.3, o.smax - 1) * (1 - e), blur: (1 - Math.min(1, p * 2.4)) * 4 });
           break;
         }
         case 'light': case 'glide': case 'type': break;

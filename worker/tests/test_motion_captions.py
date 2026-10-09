@@ -372,10 +372,11 @@ def test_words_reveal_in_place_and_animation_none_is_a_hard_pop(look, tmp_path):
         times = [wb["s"] - 3 * f, wb["s"] + f, wb["s"] + 0.3]
         before, onset, after, live = asyncio.run(_word_states(jobs[0], times))
         assert live == 1
-        # no reflow: every word keeps its position while others appear
+        # no reflow: every word keeps its position while others appear (a
+        # word caught inside its own two-frame entrance is still moving)
         assert [r[0] for r in before] == [r[0] for r in after]
         assert all(abs(p[2] - q[2]) <= 1 and abs(p[3] - q[3]) <= 1
-                   for p, q in zip(before, after)), (before, after)
+                   for p, q in zip(before, after) if q[1] in (0.0, 1.0)), (before, after)
         by_text = {r[0]: r for r in before}
         prev_text, text = cue["w"][k - 1]["t"], cue["w"][k]["t"]
         if look == "lockup":
