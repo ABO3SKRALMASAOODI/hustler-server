@@ -2006,6 +2006,17 @@ MASTER_VERSION = 1
 # treatment changes what such a render looks like.
 LEGIBILITY_VERSION = 1
 
+# Word-level caption muting (worker/caption_carry.py): a motion graphic with
+# mute_captions unset hides only the spoken words it shows, the rest stay
+# captioned clear of its drawn box, a counter's number is never repeated in
+# the caption, and a caption never holds into (or starts just before the
+# exit of) a graphic on the caption band. Stamped as `carry_v` on every
+# render and compared ONLY for transcript-caption EDLs with motion graphics:
+# their older renders muted every caption under a graphic for its whole
+# window (sound-off viewers lost the words it did not show). Everything else
+# keeps its cache. Bump when what such a render shows changes again.
+CAPTION_CARRY_VERSION = 1
+
 # The picture pipeline's look. A stitched preview stream-copies the unchanged
 # stretches of the previous preview and splices in newly rendered pieces, so
 # pieces from a different look show a sharpness/tone seam at every splice.

@@ -388,7 +388,7 @@ def test_a_mute_over_the_setup_names_the_words_that_would_vanish(no_probe):
         mute_captions=True, id="num")
     assert out.startswith("EDL v1"), out                       # a NOTE, never a rejection
     assert "NOTE (captions)" in out and '"flying cars and all we got was"' in out, out
-    assert "mute_captions=false" in out and "start it at 2.80s" in out, out
+    assert "Leave mute_captions unset" in out and "start it at 2.80s" in out, out
     assert ctx.latest_edl()["json"]["motion"][0]["mute_captions"] is True
     # keeping the captions silences the note
     out = motion_tools.set_motion_graphic(ctx, "num", mute_captions=False)
@@ -399,12 +399,19 @@ def test_a_mute_over_the_setup_names_the_words_that_would_vanish(no_probe):
     assert "NOTE (captions)" not in out, out
 
 
-def test_a_template_default_mute_is_checked_too(no_probe):
+def test_a_template_default_mute_is_checked_too(monkeypatch):
+    # unset is word-level now: a slam that shows none of the words keeps
+    # them captioned beside it — unless it leaves no clear band, which the
+    # reply names (here it spans the whole safe area under an assumed face)
     assert motion_templates.spec("word_slam").get("mutes_captions")
+    monkeypatch.setattr(motion_tools, "_probe_item", lambda item, W, H, fps=30.0:
+                        {"errors": [], "visible_frames": 4, "samples": 4,
+                         "bboxes": [[.1, .5, .9, .8]]})
     ctx = _Ctx()
     out = motion_tools.add_motion_graphic(ctx, "word_slam", 1.0, 2.7,
                                           params={"text": "*rockets*"})
     assert "NOTE (captions)" in out and "flying cars" in out, out
+    assert "Move it off the caption band" in out, out
     out = motion_tools.add_motion_graphic(_Ctx(), "word_slam", 1.0, 1.8,
                                           params={"text": "flying *cars*"})
     assert "NOTE (captions)" not in out, out

@@ -19,9 +19,11 @@ import os
 import re
 import tempfile
 
+import caption_carry
 import config  # noqa: F401  (kept for parity with other tool modules)
 import db as dbx
 import motion_engine
+import motion_layer
 import motion_templates
 import sound_library
 import storage
@@ -338,27 +340,41 @@ def _probe_item(item, W, H, fps=30.0):
 
 
 def _probe_report(ctx, edl, item):
-    """(error, where-note, drawn bbox (x0, y0, x1, y1) fractions or None)."""
+    """(error, where-note, drawn bbox (x0, y0, x1, y1) fractions or None,
+    ink box — the same without soft scrims/glows — or None)."""
     W, H = _canvas_size(ctx, edl)
     rep = _probe_item(item, W, H)
     if rep is None:
-        return None, "\nNOTE: the composition could not be pre-checked here; render a preview to inspect it.", None
+        return None, "\nNOTE: the composition could not be pre-checked here; render a preview to inspect it.", None, None
     if rep["errors"]:
         return (f"REJECTED: the composition raised a script error: {rep['errors'][0]}. "
-                "Fix the HTML/params and try again."), "", None
+                "Fix the HTML/params and try again."), "", None, None
     if rep["visible_frames"] == 0:
         return ("REJECTED: the composition drew nothing visible at any sampled moment "
-                "(check text/params, colors with zero alpha, or elements positioned off-frame)."), "", None
+                "(check text/params, colors with zero alpha, or elements positioned off-frame)."), "", None, None
     bb = rep["bboxes"]
     if bb:
         x0 = min(b[0] for b in bb); y0 = min(b[1] for b in bb)
         x1 = max(b[2] for b in bb); y1 = max(b[3] for b in bb)
-        return None, f"\nDraws within x {x0:.2f}-{x1:.2f}, y {y0:.2f}-{y1:.2f} of the frame.", (x0, y0, x1, y1)
-    return None, "", None
+        ink = motion_layer.union_box(rep.get("ink") or bb)
+        return (None, f"\nDraws within x {x0:.2f}-{x1:.2f}, y {y0:.2f}-{y1:.2f} of the frame.",
+                (x0, y0, x1, y1), ink)
+    return None, "", None, None
+
+
+def _store_drawn(item, ink):
+    """Keep the probed ink box on the item (MotionItem.drawn): word-level
+    caption muting places the captions it does not show clear of it. No
+    measurement (the browser could not run here) drops a stale one; the
+    renderer measures before it builds captions."""
+    if ink:
+        item["drawn"] = [round(float(v), 3) for v in ink]
+    else:
+        item.pop("drawn", None)
 
 
 def _validate_and_probe(ctx, edl, item):
-    err, where, _bbox = _probe_report(ctx, edl, item)
+    err, where, _bbox, _ink = _probe_report(ctx, edl, item)
     return err, where
 
 
@@ -471,30 +487,21 @@ def _attach_subject_matte(ctx, edl, item, bbox):
 
 
 # ── caption integrity ─────────────────────────────────────────────────────
-# A graphic may mute the captions only when it carries the words being
-# spoken. Showcase review: a '140 characters' counter muted the captions
-# over the punchline's SETUP ("flying cars and all we got was"), so a
-# sound-off viewer read "they promised" and then a number; and a kicker
-# typed from memory ("so we can deal in") contradicted the audio ("so that
-# we can deal in"). Both checks are cheap transcript comparisons. They never
-# refuse a write: the reply NOTEs what the viewer would miss and the fix.
+# Captions and graphics share one stage (worker/caption_carry.py): with
+# mute_captions unset a graphic hides only the spoken words it shows and the
+# rest stay captioned, moved clear of it. Showcase review found the ways a
+# sound-off viewer still loses speech: an explicit whole-window mute over
+# words the graphic does not carry (a '140 characters' counter over "flying
+# cars and all we got was"), and a speech-replacing graphic on the caption
+# band with no clear band left beside the face. A kicker typed from memory
+# ("so we can deal in") contradicting the audio ("so that we can deal in")
+# is the third. All are cheap transcript comparisons. They never refuse a
+# write: the reply NOTEs what the viewer would miss and the fix.
 
-_TOKEN_RE = re.compile(r"[^\W_]+(?:['’][^\W_]+)*")
-# Function words do not decide whether a graphic carries what was said.
-_FUNCTION_WORDS = frozenset((
-    "a an the and or but so to of in on at for with from by as is are was were be been "
-    "being am i i'm you he she it it's its we they me him her us them my your his our "
-    "their this that these those do does did not no yes just very really than then there "
-    "here what which who when where why how if into out up down over about like um uh oh "
-    "okay ok yeah well also too can could would should will might must have has had all "
-    "some any you're we're they're that's there's i've i'd you've").split())
-_NUMBER_WORDS = {w: str(i) for i, w in enumerate(
-    "zero one two three four five six seven eight nine ten eleven twelve thirteen "
-    "fourteen fifteen sixteen seventeen eighteen nineteen twenty".split())}
-_NUMBER_WORDS.update({"thirty": "30", "forty": "40", "fifty": "50", "sixty": "60",
-                      "seventy": "70", "eighty": "80", "ninety": "90", "hundred": "100"})
-# Row fields that position or style a row rather than print words.
-_NON_TEXT_FIELDS = frozenset(("at", "side", "role", "size", "accent", "highlight", "font"))
+_tokens = caption_carry.tokens
+_FUNCTION_WORDS = caption_carry.FUNCTION_WORDS
+_graphic_lines = caption_carry.graphic_lines
+_said = caption_carry._said
 # Below this share of the spoken content words on the graphic, a caption
 # mute hides the speech rather than replacing it.
 MUTE_CARRY_MIN = 0.5
@@ -504,59 +511,27 @@ PARAPHRASE_RATIO = 0.75
 PARAPHRASE_NEAR_S = 3.0
 
 
-def _norm_token(t):
-    t = t.casefold().replace("’", "'")
-    if t in _FUNCTION_WORDS:
-        return t                       # "this", "does" are not plurals
-    if t.endswith("'s"):
-        t = t[:-2]
-    t = _NUMBER_WORDS.get(t, t)
-    if len(t) > 3 and t.endswith("s") and not t.endswith("ss"):
-        t = t[:-1]                     # "characters" carries "character"
-    return t
-
-
-def _tokens(text):
-    return [_norm_token(t) for t in _TOKEN_RE.findall(str(text or ""))]
-
-
-def _graphic_lines(item):
-    """[(param, text)] the item prints: its text params (list items and row
-    text fields included) and, for authored HTML, the markup's text."""
-    template = item.get("template")
-    try:
-        pspec = motion_templates.spec(template).get("params") or {}
-    except ValueError:
-        pspec = {}
-    out = []
-    for key, val in (item.get("params") or {}).items():
-        kind = (pspec.get(key) or {}).get("type", "str")
-        if key in _NON_TEXT_FIELDS or kind not in ("str", "text", "list", "rows"):
-            continue
-        for v in (val if isinstance(val, list) else [val]):
-            if isinstance(v, dict):
-                out += [(key, str(x)) for f, x in v.items()
-                        if f not in _NON_TEXT_FIELDS and isinstance(x, str)]
-            elif isinstance(v, (str, int, float)) and not isinstance(v, bool):
-                out.append((key, str(v)))
-    if template == "html" and item.get("html"):
-        body = re.sub(r"(?is)<(script|style)\b.*?</\1>", " ", item["html"])
-        out.append(("html", re.sub(r"<[^>]+>", " ", body)))
-    return [(k, v) for k, v in out if _tokens(v)]
-
-
-def _said(words):
-    """Display form of a run of caption words."""
-    return " ".join(str(w["w"]).strip().strip("\"“”").rstrip(".,;:…") for w in words)
+def _runs_said(words, gap=0.5):
+    """'a b … c d' for word dicts, a break wherever speech pauses."""
+    runs, cur = [], []
+    for w in words:
+        if cur and float(w["t0"]) - float(cur[-1]["t1"]) > gap:
+            runs.append(cur)
+            cur = []
+        cur.append(w)
+    if cur:
+        runs.append(cur)
+    out = " … ".join(_said(r) for r in runs)
+    return out if len(out) <= 140 else out[:137].rstrip() + "…"
 
 
 def _mute_note(edl, index, tl, item, carried):
-    """NOTE when this item's caption mute hides speech it does not carry."""
+    """NOTE when this item's explicit whole-window mute hides speech it does
+    not carry."""
     import captions as caplib
     others = dict(edl, motion=[m for m in edl.get("motion") or []
                                if m.get("id") != item.get("id")])
-    words = caplib.transcript_words(others, index, tl,
-                                    caplib.effective_caption_mutes(others))
+    words = caplib.caption_words(others, index, tl)
     s, e = float(item["start"]), float(item["end"])
     inside = [w for w in words if s <= (float(w["t0"]) + float(w["t1"])) / 2.0 <= e]
     if not inside:
@@ -584,12 +559,39 @@ def _mute_note(edl, index, tl, item, carried):
     later = (f", or start it at {float(first['t0']):.2f}s where its own words begin "
              "so everything before stays captioned"
              if first is not None and float(first["t0"]) - s >= 0.4 else "")
-    return (f"NOTE (captions): this graphic mutes the captions over {s:g}-{e:g}s but "
-            f"carries only {len(content) - len(missing)} of the {len(content)} words "
-            f"that matter in what is said there, so a sound-off viewer never reads "
-            f"\"{gone}\". Mute only a graphic that carries the spoken words: keep the "
-            f"captions (mute_captions=false), carry those exact words on it (e.g. a "
-            f"kicker/label built from the transcript){later}.")
+    return (f"NOTE (captions): mute_captions=true hides every caption over {s:g}-{e:g}s "
+            f"but this graphic carries only {len(content) - len(missing)} of the "
+            f"{len(content)} words that matter in what is said there, so a sound-off "
+            f"viewer never reads \"{gone}\". Leave mute_captions unset (the default): "
+            f"only the words it shows leave the captions and the rest stay captioned "
+            f"beside it. Or carry those exact words on it (e.g. a kicker/label built "
+            f"from the transcript){later}.")
+
+
+def _word_level_notes(edl, index, tl, item):
+    """NOTEs for a word-level graphic (mute_captions unset): the words it
+    leaves muted for want of a clear band, and where the rest moved."""
+    import captions as caplib
+    rep = caplib.caption_plan(edl, index, tl).report.get(item.get("id"))
+    if not rep:
+        return []
+    s, e = float(item["start"]), float(item["end"])
+    box = rep.get("box")
+    draws = f" (it draws y {box[1]:.2f}-{box[3]:.2f})" if box else ""
+    notes = []
+    if rep["muted"] and caption_carry.mode(item) == caption_carry.MODE_WORDS:
+        notes.append(
+            f"NOTE (captions): no caption band is clear of this graphic{draws} and the "
+            f"speaker's face over {s:g}-{e:g}s, so the words it does not show are muted: "
+            f"a sound-off viewer never reads \"{_runs_said(rep['muted'])}\". Move it off "
+            f"the caption band (its y param, e.g. above the head or in the top band) so "
+            f"those words stay captioned beside it, or carry them on it.")
+    elif rep["placed"] and abs(rep["placed"]["y"] - rep["placed"]["normal_y"]) >= 0.05:
+        where = rep["placed"]
+        notes.append(
+            f"Captions for the words it does not show move to y≈{where['y']:.2f} while it "
+            f"is up{draws}; the words it shows leave the captions.")
+    return notes
 
 
 def _verbatim(g, span):
@@ -654,18 +656,15 @@ def _caption_integrity_notes(ctx, edl, item):
         tl = Timeline(edl["keep"], edl.get("inserts") or [], edl.get("speed"))
         lines = _graphic_lines(item)
         notes = []
-        mute = item.get("mute_captions")
-        if mute is None:
-            try:
-                mute = bool(motion_templates.spec(item["template"]).get("mutes_captions"))
-            except ValueError:
-                mute = False
         caps = edl.get("captions")
-        if mute and isinstance(caps, dict) and caps.get("mode") == "from_transcript":
-            carried = {t for _k, v in lines for t in _tokens(v)}
-            note = _mute_note(edl, index, tl, item, carried)
-            if note:
-                notes.append(note)
+        if isinstance(caps, dict) and caps.get("mode") == "from_transcript":
+            if caption_carry.mode(item) == caption_carry.MODE_ALL:
+                carried = {t for _k, v in lines for t in _tokens(v)}
+                note = _mute_note(edl, index, tl, item, carried)
+                if note:
+                    notes.append(note)
+            else:
+                notes += _word_level_notes(edl, index, tl, item)
         notes += _paraphrase_notes(edl, index, tl, item, lines)
     except Exception as e:  # noqa: BLE001
         print(f"[motion] caption integrity check skipped: {str(e)[:160]}", flush=True)
@@ -732,9 +731,10 @@ def add_motion_graphic(ctx, template, start, end=None, params=None, html=None,
         item["mute_captions"] = bool(mute_captions)
     if purpose:
         item["purpose"] = " ".join(str(purpose).split())[:300]
-    err, where, bbox = _probe_report(ctx, edl, item)
+    err, where, bbox, ink = _probe_report(ctx, edl, item)
     if err:
         return err
+    _store_drawn(item, ink)
     behind_note = ""
     if layer == "behind_subject":
         behind_note, err = _attach_subject_matte(ctx, edl, item, bbox)
@@ -813,9 +813,10 @@ def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
         hit["purpose"] = " ".join(str(purpose).split())[:300] or None
     if hit["template"] != "html":
         hit.pop("html", None)
-    err, where, bbox = _probe_report(ctx, edl, hit)
+    err, where, bbox, ink = _probe_report(ctx, edl, hit)
     if err:
         return err
+    _store_drawn(hit, ink)
     behind_note = ""
     if hit.get("layer") == "behind_subject":
         shape = json.dumps([hit.get(k) for k in
@@ -873,6 +874,10 @@ def remove_motion_graphic(ctx, id):
 
 _TEMPLATE_PARAM = {"type": "string", "description": "Template name from list_motion_templates, or 'html'."}
 _PARAMS_PARAM = {"type": "object", "description": "Template parameters (see list_motion_templates)."}
+_MUTE_PARAM = {"type": "boolean", "description": (
+    "Omit (default) for word-level: captions drop only the spoken words this graphic "
+    "shows. true = no captions for its whole window; false = captions keep running "
+    "(a number/*starred* word it shows is still not repeated).")}
 
 TOOL_SPECS = {
     "list_motion_templates": (
@@ -897,21 +902,27 @@ TOOL_SPECS = {
         "add_text_behind (same rules: one continuous take, no speed ramp, >=0.4s; refused "
         "with the measured reason when there is no clear subject), and the reply reports how "
         "much of the graphic the subject crosses. Use it for 1-2 hero moments per short, with "
-        "BIG type placed where the speaker's head/shoulders cross it. Templates that replace "
-        "the spoken words set mute_captions; pass "
-        "mute_captions explicitly to override. template='html' takes your own HTML/CSS/JS on the "
+        "BIG type placed where the speaker's head/shoulders cross it. CAPTIONS: leave "
+        "mute_captions unset — the captions drop exactly the spoken words this graphic shows "
+        "(its number, slammed word, quoted kicker or rows) and keep every other spoken word, "
+        "moved to a band clear of the box it draws while it is up; the reply NOTEs words it "
+        "must mute because no band is clear of it and the face (then move it off the caption "
+        "band). mute_captions=true hides every caption for its whole window (only when it "
+        "replaces the whole spoken line); false keeps them all running (a number or *starred* "
+        "word it shows is still not repeated). template='html' takes your own HTML/CSS/JS on the "
         "MG runtime in `html`. The write is rejected if the composition errors or draws nothing.",
         {"template": _TEMPLATE_PARAM, "start": {"type": "number"}, "end": {"type": "number"},
          "params": _PARAMS_PARAM, "html": {"type": "string"},
          "layer": {"type": "string", "enum": list(LAYERS)},
          "box": {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4,
                  "description": "Optional capture region hint [x0,y0,x1,y1] frame fractions."},
-         "mute_captions": {"type": "boolean"}, "sfx": {"type": "boolean"},
+         "mute_captions": _MUTE_PARAM, "sfx": {"type": "boolean"},
          "id": {"type": "string"}, "purpose": {"type": "string"}}),
     "set_motion_graphic": (
         set_motion_graphic,
         "Patch an existing motion graphic by id — window, params (merged into the current ones), "
-        "template, layer, html or caption muting. Its owned sound cues move with it; sfx=true "
+        "template, layer, html or caption muting (mute_captions as in add_motion_graphic; the "
+        "drawn box captions keep clear of is re-measured). Its owned sound cues move with it; sfx=true "
         "re-derives them, sfx=false removes them. A behind_subject graphic whose window "
         "changes is re-measured against its new footage. Modify instead of removing and "
         "re-adding.",
@@ -919,7 +930,7 @@ TOOL_SPECS = {
          "params": _PARAMS_PARAM, "html": {"type": "string"}, "template": {"type": "string"},
          "layer": {"type": "string", "enum": list(LAYERS)},
          "box": {"type": "array", "items": {"type": "number"}},
-         "mute_captions": {"type": "boolean"}, "sfx": {"type": "boolean"},
+         "mute_captions": _MUTE_PARAM, "sfx": {"type": "boolean"},
          "purpose": {"type": "string"}}),
     "remove_motion_graphic": (
         remove_motion_graphic,

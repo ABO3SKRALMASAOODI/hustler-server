@@ -18,6 +18,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import audio_qc
 import audit
 import broll_judge
+import caption_carry
 import caption_judge
 import captions as caplib
 import config
@@ -18057,6 +18058,7 @@ def audit_captions(ctx, offset=0, limit=80):
     caps = edl.get("captions")
     warnings = []
     uncovered = []
+    sound_off = []
     first_late = None
     declared_max_words = None
     single_line_contract = False
@@ -18069,15 +18071,12 @@ def audit_captions(ctx, offset=0, limit=80):
             declared_max_words = None
         single_line_contract = bool(
             (caps.get("style") or {}).get("single_line"))
-        words = tl.kept_words([w for w in ctx.index.get("words") or []
-                               if not w.get("filler")])
-        mutes = caplib.effective_caption_mutes(edl)
-        words = [w for w in words if not any(a <= (w["t0"] + w["t1"])/2 <= b
-                                             for a, b in mutes)]
+        # The words the captions SHOULD show: whole-window mutes applied,
+        # and the words graphics carry handed to them (word-level muting,
+        # worker/caption_carry.py) — those are on screen, not lost.
+        words = caplib.caption_words(edl, ctx.index, tl)
         for word in words:
             mid = (float(word["t0"]) + float(word["t1"])) / 2.0
-            if any(a <= mid <= b for a, b in mutes):
-                continue
             if not any(state["start"] - 0.011 <= mid <= state["end"] + 0.011
                        for state in states):
                 uncovered.append({"word": word.get("w"),
@@ -18090,6 +18089,15 @@ def audit_captions(ctx, offset=0, limit=80):
                     f"first caption starts {first_late:.3f}s after first kept word")
         if uncovered:
             warnings.append(f"{len(uncovered)} spoken word(s) lack caption coverage")
+        try:
+            sound_off = caption_carry.sound_off_gaps(edl, ctx.index, tl)
+        except Exception:  # noqa: BLE001 — the audit reports what it can
+            sound_off = []
+        if sound_off:
+            warnings.append(
+                f"{len(sound_off)} spoken span(s) over "
+                f"{caption_carry.SOUND_OFF_GAP_S:g}s have no caption and no graphic "
+                "showing them (sound_off_gaps)")
     density_violations = [
         {"start": state["start"], "end": state["end"],
          "word_count": state["word_count"],
@@ -18184,6 +18192,7 @@ def audit_captions(ctx, offset=0, limit=80):
         "wrap_violations": wrap_violations[:20],
         "uncovered_words": uncovered[:20],
         "uncovered_word_count": len(uncovered),
+        "sound_off_gaps": sound_off[:10],
         "overlaps": overlaps[:20],
         "warnings": warnings,
         "short_phrase_states": fragment_states,
@@ -26416,7 +26425,9 @@ TOOLS = {
                           "every caption back on. The audio and the cut are "
                           "untouched — only the burned text is hidden. Not "
                           "needed for inserted media or title cards (they "
-                          "are never captioned to begin with).",
+                          "are never captioned to begin with), nor for motion "
+                          "graphics (they hide the words they show and move "
+                          "the rest clear of themselves).",
                           {"spans": {"type": "array",
                                      "items": {"type": "array",
                                                "items": {"type": "number"}}}}),
@@ -26773,7 +26784,10 @@ TOOLS = {
     "audit_captions": (audit_captions, "Mechanically compile and audit the "
                        "CURRENT caption track using the exact ASS artifact "
                        "ffmpeg burns. Reports first-caption lateness, missing "
-                       "spoken-word coverage, true distinct-state overlaps, "
+                       "spoken-word coverage (words a graphic shows count as "
+                       "covered), sound_off_gaps (speech over 0.6 s with no "
+                       "caption and no graphic showing it, with cause and "
+                       "fix), true distinct-state overlaps, "
                        "max_words_seen, max_lines_seen, declared-density and "
                        "single-line wrap violations, exact event pages and "
                        "up to 16 high-information "
@@ -27398,8 +27412,10 @@ _COMPACT_CONTRACTS = {
         "sits 0-3 frames before the spoken onset (get_kept_transcript + "
         "get_words; start earlier by the landing offset the template "
         "description states). layer above_captions (default), below_captions "
-        "or behind_subject. Pass mute_captions explicitly: true when it repeats "
-        "the spoken words (hook_title of the spoken hook too). Silent by "
+        "or behind_subject. Captions: leave mute_captions unset — they drop only "
+        "the spoken words it shows and keep the rest, moved clear of it (keep it "
+        "off the caption band so nothing is muted); true hides every caption in "
+        "its window, false keeps them all (a shown number is still not doubled). Silent by "
         "default; sfx=true, only for a moment that earns sound, maps its "
         "sound roles onto the approved library (cues listed in the result). "
         "Pass purpose and a stable id. "

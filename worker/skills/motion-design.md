@@ -134,13 +134,19 @@ LAYERING AND CAPTIONS:
   thirds, textures, background shapes); `behind_subject` composites the
   graphic behind the person's matte — the giant-word-behind-the-head look —
   and needs a person in frame and no cut inside the window.
-- Captions and a graphic never say the same words twice. Mute defaults
-  differ by template and the listing does not show them, so pass
-  `mute_captions` explicitly: true when the graphic repeats the words being
-  spoken (a word slam or phrase build on its words, a `hook_title` of the
-  spoken hook line, a typewriter of the sentence being said), false when it
-  complements them (a counter beside the speaker, a lower third, an arrow,
-  a CTA).
+- Captions and a graphic never say the same words twice — word by word.
+  Leave `mute_captions` unset (the default): the captions drop exactly the
+  spoken words the graphic shows and keep every other word, moved to a band
+  clear of the graphic's drawn box (and the face) while it is up. Design for
+  it: keep hero graphics OFF the caption band (top band, beside or above the
+  head, behind the subject), so the words a graphic does not show stay
+  captioned where they always are. A word slam or phrase build parked on the
+  caption band with the face above leaves no clear band: its unshown words
+  are muted and the reply NOTEs them — move it. Set `mute_captions`
+  explicitly only to override: true hides every caption for the whole window
+  (a graphic that replaces the entire spoken line); false keeps all captions
+  running beside it (a number or *starred* word it shows is still not
+  repeated).
 - One text system at a time in one region: never stack a hook title, a
   caption page and a lower third in the same band.
 

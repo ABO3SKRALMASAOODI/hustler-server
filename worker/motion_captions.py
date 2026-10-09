@@ -26,6 +26,7 @@ one segment, not the whole track.
 
 import bisect
 
+import caption_carry
 import captions as caplib
 import motion_engine
 
@@ -100,11 +101,14 @@ def look_of(edl):
     return look if look in LOOKS else None
 
 
-def _out_words(edl, index, tl):
+def _out_words(edl, index, tl, carry=None):
     """The kept, corrected, rejoined, mute-filtered program words (caption
-    truth), each stamped with the cut that ends its shot."""
-    words = caplib.transcript_words(edl, index, tl, caplib.effective_caption_mutes(edl))
-    return caplib._mark_shot_ends(words, tl)
+    truth: graphics have taken the words they show and moved the rest clear
+    of themselves, worker/caption_carry.py), each stamped with the cut that
+    ends its shot."""
+    if carry is None:
+        carry = caplib.caption_plan(edl, index, tl)
+    return caplib._mark_shot_ends(carry.caption_words(), tl)
 
 
 def _placement_for(style, placement_track, src_mid):
@@ -167,7 +171,9 @@ def cues(edl, index, tl):
     cfg = LOOKS[look]
     caps = edl["captions"]
     style = dict(caps.get("style") or {})
-    words = _out_words(edl, index, tl)
+    mutes = [(float(a), float(b)) for a, b in caplib.effective_caption_mutes(edl)]
+    carry = caplib.caption_plan(edl, index, tl, mutes)
+    words = _out_words(edl, index, tl, carry)
     if not words:
         return []
     # The look owns its phrase grammar; a stored max_words only narrows it.
@@ -185,7 +191,11 @@ def cues(edl, index, tl):
     emph = {caplib._norm_word(w) for w in (caps.get("emphasis_words") or []) if w}
     upper = bool(style.get("uppercase"))
     lumas = _luma_samples(index)
-    mutes = [(float(a), float(b)) for a, b in caplib.effective_caption_mutes(edl)]
+    # Stretches a graphic holds on the caption band: a line in its usual
+    # place never holds into one, and never starts in the last moments of
+    # one (it waits for the graphic to clear instead of touching it).
+    holds = mutes + [(float(a), float(b)) for a, b in carry.clamp_spans]
+    waits = [(float(a), float(b)) for a, b in carry.clamp_spans + carry.wait_spans]
     out = []
     prog_end = float(tl.out_duration)
     for i, ch in enumerate(chunks):
@@ -197,9 +207,14 @@ def cues(edl, index, tl):
         e = min(e, prog_end)
         # A muted window (a graphic that replaces the captions) starts with
         # the line already gone: the hold never reaches into it.
-        for m0, _m1 in mutes:
+        for m0, _m1 in holds:
             if s < m0 < e:
                 e = m0
+        place = ch[0].get("place")
+        if not place:
+            for m0, m1 in waits:
+                if m0 <= s < m1 and m1 - s <= caption_carry.START_WAIT_S:
+                    s = m1 + CAPTION_LEAD_S    # lands ON the graphic's exit
         if e - s < 0.12:
             continue
         # Every word spoken: the line clears ON the cut that ends its shot
@@ -212,7 +227,12 @@ def cues(edl, index, tl):
         if cut is not None and s < cut < e:
             e, on_cut = cut, True
         src_mid = (float(ch[0].get("src_t0", s)) + float(ch[-1].get("src_t1", last))) / 2.0
-        y, band = _placement_for(style, caps.get("placement_track"), src_mid)
+        if place:
+            # moved clear of a graphic: its band, and a zone the block may
+            # not grow out of (the template's ``z``)
+            y, band = float(place["y"]), place["b"]
+        else:
+            y, band = _placement_for(style, caps.get("placement_track"), src_mid)
         ws = []
         for w in ch:
             text = caplib._display_word_v2(w["w"], upper)
@@ -222,6 +242,8 @@ def cues(edl, index, tl):
         cue = {"s": round(s, 3), "e": round(e, 3), "y": round(y, 4), "b": band,
                "k": 1 if on_cut or (nxt is not None and nxt - e < CONTIGUOUS_S) else 0,
                "w": ws}
+        if place:
+            cue["z"] = list(place["z"])
         luma = _luma_at(lumas, src_mid) if lumas else None
         if luma is not None:
             cue["l"] = luma      # bright plates get a firmer scrim + shadow
@@ -321,7 +343,8 @@ def items(edl, index, tl):
         rebased = [dict({"s": rb(c["s"], s0), "e": rb(c["e"], s0), "y": c["y"], "b": c.get("b", "b"),
                          "k": c.get("k", 0),
                          "w": [dict(w, s=rb(w["s"], s0), e=rb(w["e"], s0)) for w in c["w"]]},
-                        **({"l": c["l"]} if "l" in c else {}))
+                        **({"l": c["l"]} if "l" in c else {}),
+                        **({"z": c["z"]} if "z" in c else {}))
                    for c in seg]
         out.append({"id": f"__captions_{k}", "template": TEMPLATE, "start": round(s0, 3),
                     "end": round(s1, 3), "params": dict(sp, cues=rebased),

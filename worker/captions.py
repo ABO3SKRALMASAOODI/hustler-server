@@ -987,6 +987,25 @@ def transcript_words(edl, index, tl, mutes=None):
     return _drop_muted_words(out, mutes) if mutes else out
 
 
+def caption_plan(edl, index, tl, mutes=None):
+    """The word-level caption plan (worker/caption_carry.py) over the
+    transcript words left after the whole-window mutes. ``plan.caption_words()``
+    is what every caption path shows: the words graphics carry dropped, the
+    words they do not show moved clear of them (``place``) or, where nothing
+    is clear of a speech-replacing graphic, muted."""
+    import caption_carry
+    if mutes is None:
+        mutes = effective_caption_mutes(edl)
+    return caption_carry.plan(edl, index, tl, transcript_words(edl, index, tl, mutes))
+
+
+def caption_words(edl, index, tl):
+    """The program words a from_transcript caption track shows (see
+    caption_plan). Identical to transcript_words(..., mutes) for an EDL
+    without motion graphics."""
+    return caption_plan(edl, index, tl).caption_words()
+
+
 def heard_words(edl, index, tl, lo, hi):
     """Program words AUDIBLE anywhere in program [lo, hi], corrected and
     rejoined like transcript_words. Unlike caption words (kept when their
@@ -2613,8 +2632,9 @@ def effective_caption_mutes(edl):
         if e > s:
             spans.append([s, e])
     if edl.get("motion"):
-        # Motion graphics own their caption suppression the same way designed
-        # text does (explicit mute_captions, else the template's default).
+        # A motion graphic owns a whole-window mute only when it says so
+        # (mute_captions=true). Unset is word-level: it hides just the words
+        # it shows (caption_plan / worker/caption_carry.py).
         try:
             import motion_layer
             spans.extend(motion_layer.caption_mute_spans(edl))
@@ -2692,6 +2712,11 @@ def _clamp_event_ends_to_mutes(events, mutes):
             if float(ev["end"]) - float(ev["start"]) > 0.04]
 
 
+# A run key meaning "the caption style's own placement" (no track, nothing
+# moved): its events are built exactly as the unpositioned path builds them.
+GLOBAL_PLACEMENT = ("__global__", None)
+
+
 def _placement_runs(out_words, track, fallback_position=None,
                     fallback_anchor_y=None):
     """Contiguous word runs sharing one measured caption position.
@@ -2699,21 +2724,30 @@ def _placement_runs(out_words, track, fallback_position=None,
     A modern track always has a least-obstructed fallback. Historical EDLs
     preserve their original omission behaviour, while design-v2 never loses
     spoken words merely because every band carried some visual content.
+    A word moved clear of a graphic (``place``, worker/caption_carry.py)
+    takes that band whatever the track says.
     """
-    if not track:
+    moved = any(w.get("place") for w in out_words)
+    if not track and not moved:
         return []
     spans = [(float(x.get("t0", 0)), float(x.get("t1", 0)),
               x.get("position"), x.get("anchor_y"))
-             for x in track]
+             for x in track or []]
     runs, current, current_key = [], [], None
     for raw in out_words:
         word = dict(raw)
         smid = (float(word.get("src_t0", 0)) +
                 float(word.get("src_t1", 0))) / 2.0
-        placed = next(((p, ay) for a, b, p, ay in spans if a <= smid <= b),
-                      None)
-        key = placed or ((fallback_position, fallback_anchor_y)
-                         if fallback_position else None)
+        if word.get("place"):
+            # moved clear of a graphic (caption_carry): its band wins
+            key = (word["place"]["position"], word["place"]["y"])
+        elif not track:
+            key = GLOBAL_PLACEMENT
+        else:
+            placed = next(((p, ay) for a, b, p, ay in spans if a <= smid <= b),
+                          None)
+            key = placed or ((fallback_position, fallback_anchor_y)
+                             if fallback_position else None)
         if key != current_key or word.get("brk"):
             if current and current_key:
                 runs.append((current_key[0], current_key[1], current))
@@ -2740,6 +2774,9 @@ def _positioned_events(out_words, captions, global_style, play_res):
         fallback_anchor_y=normalized.get("anchor_y") if modern else None)
     events = []
     for pos, anchor_y, words in runs:
+        if (pos, anchor_y) == GLOBAL_PLACEMENT:
+            events.extend(_global_events(words, captions, global_style, play_res))
+            continue
         run_style = dict(global_style or {})
         run_style["position"] = pos
         if anchor_y is not None:
@@ -2784,6 +2821,28 @@ def _positioned_events(out_words, captions, global_style, play_res):
     return [ev for ev in events if float(ev["end"]) > float(ev["start"]) + 0.01]
 
 
+def _global_events(out_words, captions, global_style, play_res):
+    """Transcript events in the caption style's own placement."""
+    if _preset_of(_norm_style(global_style)):
+        return events_premium(
+            out_words, style=global_style,
+            max_words=captions.get("max_words_per_caption"),
+            play_res=play_res,
+            emphasis_words=captions.get("emphasis_words"),
+            design_version=captions.get("design_version"),
+            min_words=captions.get("min_words_per_caption"))
+    if _norm_style(global_style)["dynamic"]:
+        return events_dynamic(
+            out_words, style=global_style,
+            max_words=captions.get("max_words_per_caption"),
+            line_chars=line_chars_for(global_style, play_res),
+            karaoke_group_n=captions.get("karaoke_group_n"))
+    return events_from_transcript(
+        out_words, max_words=captions.get("max_words_per_caption"),
+        line_chars=line_chars_for(global_style, play_res),
+        single_line=bool(_norm_style(global_style).get("single_line")))
+
+
 def compiled_events(edl, index, tl, play_res=BASE_PLAY_RES):
     """EDL captions field -> exact timed events before ASS serialization.
 
@@ -2812,35 +2871,21 @@ def compiled_events(edl, index, tl, play_res=BASE_PLAY_RES):
         # same stage (round 96c): grouping then builds events around the gap,
         # so captions resume at the window's edge instead of one whole block
         # late. (transcript_words is shared with the motion caption looks.)
-        out_words = transcript_words(edl, index, tl, mutes)
+        # Graphics then take the words they SHOW (word-level muting, Oct
+        # 2026): the rest stay captioned, moved clear of the graphic
+        # (worker/caption_carry.py).
+        carry = caption_plan(edl, index, tl, mutes)
+        out_words = carry.caption_words()
         if captions.get("design_version") == CAPTION_DESIGN_VERSION:
             # v2 lines clear on the cut after their last word (historical
             # tracks keep their holds, and their bytes).
             out_words = _mark_shot_ends(out_words, tl)
         global_style = captions.get("style")
-        if captions.get("placement_track"):
+        if captions.get("placement_track") or carry.placed:
             events = _positioned_events(
                 out_words, captions, global_style, play_res)
-        elif _preset_of(_norm_style(global_style)):
-            events = events_premium(
-                out_words, style=global_style,
-                max_words=captions.get("max_words_per_caption"),
-                play_res=play_res,
-                emphasis_words=captions.get("emphasis_words"),
-                design_version=captions.get("design_version"),
-                min_words=captions.get("min_words_per_caption"))
-        elif _norm_style(global_style)["dynamic"]:
-            events = events_dynamic(
-                out_words, style=global_style,
-                max_words=captions.get("max_words_per_caption"),
-                line_chars=line_chars_for(global_style, play_res),
-                karaoke_group_n=captions.get("karaoke_group_n"))
         else:
-            events = events_from_transcript(
-                out_words, max_words=captions.get("max_words_per_caption"),
-                line_chars=line_chars_for(global_style, play_res),
-                single_line=bool(
-                    _norm_style(global_style).get("single_line")))
+            events = _global_events(out_words, captions, global_style, play_res)
         # Make the opening frame carry a caption so a paused player isn't blank
         # (see FIRST_CAPTION_LEAD_IN_S). from_transcript only — dictated caption
         # items keep their authored timing. NOT when an inserted clip opens the
@@ -2852,7 +2897,7 @@ def compiled_events(edl, index, tl, play_res=BASE_PLAY_RES):
         # muted over 0-5.5s, dragging the first caption to 0.0 would burn it
         # straight across the title it was muted to clear.
         mute0 = any(float(m0) <= 0.05 for m0, _m1 in
-                    mutes)
+                    list(mutes) + carry.clamp_spans)
         if events and not opens_on_insert and not mute0 \
                 and 0.0 < events[0]["start"] <= FIRST_CAPTION_LEAD_IN_S:
             events[0]["start"] = 0.0
@@ -2866,7 +2911,8 @@ def compiled_events(edl, index, tl, play_res=BASE_PLAY_RES):
             captions.get("mode") == "from_transcript":
         # Words inside mute windows are already gone (pre-grouping); only
         # display padding can still reach into a window — pull it back.
-        events = _clamp_event_ends_to_mutes(events, mutes)
+        # ...nor into a stretch a graphic holds on the caption band.
+        events = _clamp_event_ends_to_mutes(events, list(mutes) + carry.clamp_spans)
     else:
         events = apply_mutes(events, mutes)
     # Display holds must never outlive the program (or spill into the outro).
