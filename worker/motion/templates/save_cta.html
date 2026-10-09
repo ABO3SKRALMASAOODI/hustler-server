@@ -2,13 +2,13 @@
  "description": "Bookmark save prompt: an outlined bookmark is tapped (optional hand cursor), fills with colour and bursts, next to 'Save this for later'. Use when the speaker gives a list, framework or tip worth rewatching, or as the closing save ask.",
  "duration": 2.6, "layer": "above_captions", "mutes_captions": false,
  "params": {
-  "text": {"type": "str", "default": "Save this for later", "max": 40},
+  "text": {"type": "str", "default": "Save this for later", "max": 40, "hint": "short ask; long copy wraps to two lines"},
   "style": {"type": "enum", "values": ["pill", "icon"], "default": "pill", "hint": "pill = frosted UI pill with icon + text; icon = big standalone bookmark with bold text under it"},
   "accent": {"type": "color", "default": "#FFD400", "hint": "fill + burst colour"},
   "theme": {"type": "enum", "values": ["dark", "light"], "default": "dark", "hint": "pill material"},
   "cursor": {"type": "bool", "default": true, "hint": "hand pointer that taps the bookmark"},
   "x": {"type": "float", "min": 0.2, "max": 0.8, "default": 0.5},
-  "y": {"type": "float", "min": 0.1, "max": 0.85, "default": 0.62, "hint": "vertical centre as frame fraction"},
+  "y": {"type": "float", "min": 0.1, "max": 0.78, "default": 0.62, "hint": "vertical centre as frame fraction (kept inside the platform-safe area)"},
   "scale": {"type": "float", "min": 0.7, "max": 1.4, "default": 1.0}
  },
  "example": {"text": "Save this for later"},
@@ -65,22 +65,25 @@
     (isPill ? '' : `<path d="${bm}" fill="rgba(0,0,0,.28)" transform="translate(0 .9)" style="filter:blur(1.2px)"/>`) +
     `<path id="bmF" d="${bm}" fill="${acc}" opacity="0"/>` +
     `<path id="bmS" d="${bm}" fill="none" stroke="${stroke}" stroke-width="${isPill ? 1.9 : 1.7}" stroke-linejoin="round"/></svg>`;
-  // burst: rays + dots + ring in the icon's coordinate space (3x its size)
+  // burst: short flying dashes (half-step angles) + sparks (whole-step
+  // angles) in the icon's coordinate space (3x its size, 24 units = icon).
+  // Nothing flies toward the copy: right of the icon (pill), below it (icon).
   const burst = MG.el('div', 'burst', null, grp);
   const B = icS * 3;
   burst.style.width = burst.style.height = B + 'px';
-  let bs = `<svg viewBox="-36 -36 72 72" width="${B}" height="${B}" style="overflow:visible">` +
-    `<circle id="ring" cx="0" cy="0" r="10" fill="none" stroke="${acc}" stroke-width="1.6" opacity="0"/>`;
-  for (let i = 0; i < 8; i++) {
-    const a = (i / 8) * Math.PI * 2 - Math.PI / 2;
-    bs += `<line class="ray" x1="0" y1="0" x2="0" y2="0" stroke="${acc}" stroke-width="${i % 2 ? 1.5 : 2.1}" stroke-linecap="round" data-a="${a}" opacity="0"/>`;
-  }
+  const copyA = isPill ? 0 : Math.PI / 2;
+  const clear = a => { let d = Math.abs(((a - copyA) % (2 * Math.PI) + 3 * Math.PI) % (2 * Math.PI) - Math.PI); return d > Math.PI / 6 + 1e-6; };
+  let bs = `<svg viewBox="-36 -36 72 72" width="${B}" height="${B}" style="overflow:visible">`;
   for (let i = 0; i < 8; i++) {
     const a = ((i + 0.5) / 8) * Math.PI * 2 - Math.PI / 2;
-    bs += `<circle class="dot" cx="0" cy="0" r="1.1" fill="${i % 2 ? acc : '#FFFFFF'}" data-a="${a}" opacity="0"/>`;
+    if (clear(a)) bs += `<line class="ray" x1="0" y1="0" x2="0" y2="0" stroke="${acc}" stroke-width="${i % 2 ? 1.5 : 1.9}" stroke-linecap="round" data-a="${a}" data-l="${i % 2 ? 0.8 : 1}" opacity="0"/>`;
+  }
+  for (let i = 0; i < 8; i++) {
+    const a = (i / 8) * Math.PI * 2 - Math.PI / 2;
+    if (clear(a)) bs += `<circle class="dot" cx="0" cy="0" r="1.1" fill="${i % 2 ? acc : (isPill && !dark ? filledStroke : '#FFFFFF')}" data-a="${a}" opacity="0"/>`;
   }
   burst.innerHTML = bs + '</svg>';
-  const rays = MG.$$('.ray', burst), dots = MG.$$('.dot', burst), ring = MG.$('#ring', burst);
+  const rays = MG.$$('.ray', burst), dots = MG.$$('.dot', burst);
   const tx = MG.el('div', 'tx ' + (isPill ? 'pl' : 'big'), String(P.text || '').trim(), grp);
 
   const cur = MG.$('#cur');
@@ -99,15 +102,29 @@
   const layout = () => {
     let gw, gh, icX, icY;
     if (isPill) {
+      const gap = 18 * u;
       tx.style.fontSize = (19 * u) + 'px';
       let tw = tx.getBoundingClientRect().width;
-      const maxTw = Math.min(MG.W - 80, 980 * K) - (36 + 14 + 26 + 26) * u;
-      if (tw > maxTw) { MG.fit(tx, { width: maxTw, min: 11 * u, max: 19 * u, nowrap: true }); tw = tx.getBoundingClientRect().width; }
-      gh = 68 * u; gw = 22 * u + icS + 14 * u + tw + 28 * u;
-      Object.assign(pill.style, { width: gw + 'px', height: gh + 'px', borderRadius: (gh / 2) + 'px' });
+      // the pill stays inside the 60 px side margins
+      const maxTw = Math.min(MG.W - 120, 960 * K) - (22 * u + icS + gap + 28 * u);
+      if (tw > maxTw) {
+        const fs1 = MG.fit(tx, { width: maxTw, min: 11 * u, max: 19 * u, nowrap: true });
+        if (fs1 < 16.5 * u) {
+          // long copy: two balanced lines at a readable size instead of tiny type
+          Object.assign(tx.style, { whiteSpace: 'normal', textWrap: 'balance', width: maxTw + 'px', lineHeight: '1.16' });
+          let fs = 19 * u;
+          for (; fs > 13 * u; fs -= 0.5 * u) { tx.style.fontSize = fs + 'px'; if (Math.round(tx.getBoundingClientRect().height / (fs * 1.16)) <= 2) break; }
+          const rg = document.createRange(); rg.selectNodeContents(tx);
+          tx.style.width = Math.ceil(rg.getBoundingClientRect().width + 2) + 'px';
+        }
+        tw = tx.getBoundingClientRect().width;
+      }
+      const th = tx.getBoundingClientRect().height;
+      gh = Math.max(68 * u, th + 30 * u); gw = 22 * u + icS + gap + tw + 28 * u;
+      Object.assign(pill.style, { width: gw + 'px', height: gh + 'px', borderRadius: (Math.min(gh, 68 * u) / 2) + 'px' });
       icX = 22 * u; icY = (gh - icS) / 2;
-      tx.style.left = (icX + icS + 14 * u) + 'px';
-      tx.style.top = ((gh - tx.getBoundingClientRect().height) / 2) + 'px';
+      tx.style.left = (icX + icS + gap) + 'px';
+      tx.style.top = ((gh - th) / 2) + 'px';
     } else {
       // one line when it fits big enough, else two balanced lines
       const fs1 = MG.fit(tx, { width: MG.W - 140, min: 30 * K, max: 76 * K, nowrap: true });
@@ -120,15 +137,17 @@
         tx.style.width = Math.ceil(rg.getBoundingClientRect().width + 2) + 'px';
       }
       const r = tx.getBoundingClientRect();
-      gw = Math.max(r.width, icS); gh = icS + 22 * u + r.height;
+      gw = Math.max(r.width, icS); gh = icS + 26 * u + r.height;
       icX = (gw - icS) / 2; icY = 0;
-      tx.style.left = ((gw - r.width) / 2) + 'px'; tx.style.top = (icS + 22 * u) + 'px';
+      tx.style.left = ((gw - r.width) / 2) + 'px'; tx.style.top = (icS + 26 * u) + 'px';
     }
     ic.style.left = icX + 'px'; ic.style.top = icY + 'px';
     burst.style.left = (icX + icS / 2 - B / 2) + 'px'; burst.style.top = (icY + icS / 2 - B / 2) + 'px';
     grp.style.width = gw + 'px'; grp.style.height = gh + 'px';
-    let gx = MG.W * P.x - gw / 2; gx = MG.clamp(gx, 40, Math.max(40, MG.W - 40 - gw));
-    let gy = MG.H * P.y - gh / 2; gy = MG.clamp(gy, MG.H * 0.05, Math.max(MG.H * 0.05, MG.H * 0.9 - gh));
+    // platform-safe area: x 60..1020, y 8%..80% on 9:16 (5%..92% otherwise)
+    const tall = MG.H > MG.W * 1.5, BOT = tall ? 0.80 : 0.92, TOP = tall ? 0.08 : 0.05;
+    let gx = MG.W * P.x - gw / 2; gx = MG.clamp(gx, 60, Math.max(60, MG.W - 60 - gw));
+    let gy = MG.H * P.y - gh / 2; gy = MG.clamp(gy, MG.H * TOP, Math.max(MG.H * TOP, MG.H * BOT - gh));
     grp.style.left = gx + 'px'; grp.style.top = gy + 'px';
     const tipX = gx + icX + icS * 0.6, tipY = gy + icY + icS * 0.66;
     L = { tipX, tipY, p0: [tipX + 240 * K, tipY + 330 * K], p1: [tipX + 200 * K, tipY + 60 * K], p2: [tipX + 40 * K, tipY + 80 * K] };
@@ -136,7 +155,7 @@
     MG.box = [Math.max(0, Math.min(gx, gx + icX + icS / 2 - B / 2) - 50), Math.min(gy, gy + icY + icS / 2 - B / 2) - 50,
               Math.min(MG.W, Math.max(gx + gw, tipX + ext) + 60), Math.max(gy + gh, tipY + ext, gy + icY + icS / 2 + B / 2) + 70];
     const wins = [[0, 0.62], [0.36, tFill + 0.62], [exitAt - 0.02, D]];
-    if (P.cursor) wins.push([tFill + 0.3, tFill + 1.1]);
+    if (P.cursor) wins.push([tFill + 0.1, tFill + 0.8]);
     MG.active(wins);
   };
   document.body.offsetHeight;
@@ -159,24 +178,22 @@
     const fp = MG.range(t, tFill, 0.08);
     MG.$('#bmF', ic).setAttribute('opacity', fp.toFixed(3));
     MG.$('#bmS', ic).setAttribute('stroke', fp >= 1 ? filledStroke : stroke);
-    // burst
-    const bp = MG.range(t, tFill + 0.02, 0.42), be = MG.ease.outCubic(bp);
-    rays.forEach((r, i) => {
-      const a = +r.dataset.a, k = isPill ? 0.78 : 1, r0 = (13 + 9 * be) * k, r1 = (13 + 15 * MG.ease.outQuart(MG.range(t, tFill + 0.02, 0.3))) * k;
+    // burst: dashes fly out and shorten to nothing, sparks drift a little further and shrink
+    const bp = MG.range(t, tFill + 0.02, 0.36), be = MG.ease.outCubic(bp);
+    const kb = isPill ? 0.66 : 0.9;
+    rays.forEach(r => {
+      const a = +r.dataset.a, l = +r.dataset.l;
+      const r0 = (14 + 10 * be) * kb, r1 = r0 + 6 * l * (1 - MG.ease.inQuad(bp)) * kb;
       r.setAttribute('x1', (Math.cos(a) * r0).toFixed(2)); r.setAttribute('y1', (Math.sin(a) * r0).toFixed(2));
-      r.setAttribute('x2', (Math.cos(a) * Math.max(r0, r1)).toFixed(2)); r.setAttribute('y2', (Math.sin(a) * Math.max(r0, r1)).toFixed(2));
-      r.setAttribute('opacity', bp > 0 && bp < 1 ? (1 - MG.range(t, tFill + 0.2, 0.24)).toFixed(3) : 0);
+      r.setAttribute('x2', (Math.cos(a) * r1).toFixed(2)); r.setAttribute('y2', (Math.sin(a) * r1).toFixed(2));
+      r.setAttribute('opacity', bp > 0 && bp < 1 ? (1 - MG.range(t, tFill + 0.24, 0.14)).toFixed(3) : 0);
     });
-    dots.forEach((d, i) => {
-      const a = +d.dataset.a, rr = (12 + 17 * be) * (isPill ? 0.78 : 1);
+    dots.forEach(d => {
+      const a = +d.dataset.a, rr = (13 + 13 * be) * kb;
       d.setAttribute('cx', (Math.cos(a) * rr).toFixed(2)); d.setAttribute('cy', (Math.sin(a) * rr).toFixed(2));
-      d.setAttribute('r', (1.3 * (1 - bp * 0.6)).toFixed(2));
-      d.setAttribute('opacity', bp > 0 && bp < 1 ? (1 - bp).toFixed(3) : 0);
+      d.setAttribute('r', (1.35 * (1 - bp * 0.7)).toFixed(2));
+      d.setAttribute('opacity', bp > 0 && bp < 1 ? (1 - MG.ease.inQuad(bp)).toFixed(3) : 0);
     });
-    const rp = MG.range(t, tFill, 0.38);
-    ring.setAttribute('r', (8 + 16 * MG.ease.outCubic(rp)).toFixed(2));
-    ring.setAttribute('opacity', rp > 0 && rp < 1 ? (0.75 * (1 - rp)).toFixed(3) : 0);
-    ring.setAttribute('stroke-width', (2.2 * (1 - rp) + 0.3).toFixed(2));
     // cursor
     if (P.cursor) {
       const tIn = 0.3, tArr = tPress - 0.04;
@@ -185,8 +202,9 @@
       let sc = 1, op = MG.range(t, tIn, 0.12);
       if (t >= tPress - 0.04 && t < tFill) sc = 1 - 0.12 * MG.ease.outQuad(MG.range(t, tPress - 0.04, 0.07));
       else if (t >= tFill) sc = 0.88 + 0.12 * MG.spring(t, tFill, { stiffness: 400, damping: 18 });
-      const lv = MG.ease.inOutCubic(MG.range(t, tFill + 0.35, 0.6));
-      x += lv * 60 * K; y += lv * 90 * K; op *= 1 - MG.range(t, tFill + 0.5, 0.45);
+      // drift off soon after the tap so the filled bookmark reads clearly
+      const lv = MG.ease.inOutCubic(MG.range(t, tFill + 0.12, 0.55));
+      x += lv * 70 * K; y += lv * 100 * K; op *= 1 - MG.range(t, tFill + 0.24, 0.4);
       MG.set(MG.$('#cur'), { x, y, scale: sc, opacity: op });
     }
     if (t > exitAt) {

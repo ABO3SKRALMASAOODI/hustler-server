@@ -10,8 +10,8 @@
   "color": {"type": "color", "default": "#2F7CF6", "hint": "icon tile colour when no icon image"},
   "theme": {"type": "enum", "values": ["light", "dark"], "default": "light"},
   "more": {"type": "list", "default": [], "max_items": 2, "max": 120, "hint": "0-2 follow-up messages from the same sender; each drops in on top (at 1.0 s, then every 0.85 s) and stacks the older ones behind"},
-  "y": {"type": "float", "min": 0.08, "max": 0.85, "default": 0.15, "hint": "vertical centre as frame fraction"},
-  "scale": {"type": "float", "min": 0.7, "max": 1.1, "default": 1.0}
+  "y": {"type": "float", "min": 0.08, "max": 0.75, "default": 0.15, "hint": "vertical centre as frame fraction (kept inside the platform-safe area)"},
+  "scale": {"type": "float", "min": 0.7, "max": 1.0, "default": 1.0, "hint": "1.0 = full phone-banner width"}
  },
  "example": {"app": "Bank", "title": "Payment received", "body": "You received $4,250.00 from Studio North for invoice #1042.", "more": ["You received $1,900.00 from Lumen Labs."]},
  "sfx": [{"at": 0.04, "kind": "notification"},
@@ -72,7 +72,7 @@
   root.style.setProperty('--shadow', T.shadow); root.style.setProperty('--grain', T.grain);
   root.style.setProperty('--noise', noise); root.style.setProperty('--dimc', T.dimc);
 
-  const W = Math.min(1010, 960 * P.scale, MG.H * 0.9), u = W / 360;   // H cap keeps 16:9 phone-sized
+  const W = Math.min(960, 960 * P.scale, MG.H * 0.9), u = W / 360;   // 60 px side margins; H cap keeps 16:9 phone-sized
   root.style.setProperty('--u', u + 'px');
   const stage = MG.$('#stage');
   stage.style.width = W + 'px';
@@ -113,15 +113,18 @@
     const maxH = Math.max(...cards.map(c => c.h));
     peek = 9 * u;
     const blockH = maxH + (cards.length > 1 ? peek * Math.min(2, cards.length - 1) : 0);
+    // platform-safe area: an OS banner may sit high (5%), but never in the
+    // bottom caption/UI zone (80% of a 9:16 frame)
+    const BOT = MG.H > MG.W * 1.5 ? 0.80 : 0.92, TOP = 0.05;
     let top = MG.H * P.y - blockH / 2;
-    top = MG.clamp(top, MG.H * 0.035, Math.max(MG.H * 0.035, MG.H * 0.93 - blockH));
+    top = MG.clamp(top, MG.H * TOP, Math.max(MG.H * TOP, MG.H * BOT - blockH));
     stage.style.top = top + 'px';
     travel = Math.min(top + maxH + 30, 240 * W / 960);
     const sideX = (MG.W - W) / 2;
     MG.box = [sideX - 70, top - travel - 70, sideX + W + 70, top + blockH + 90];
     exitDur = Math.min(0.26, D * 0.12); exitAt = D - exitDur;
     const wins = [[0, 0.8], [exitAt - 0.02, D]];
-    cards.slice(1).forEach(c => wins.push([c.t0 - 0.06, c.t0 + 0.85]));   // older content fades from t0 - 0.04
+    cards.slice(1).forEach(c => wins.push([c.t0 - 0.02, c.t0 + 0.85]));
     MG.active(wins);
     return true;
   };
@@ -137,24 +140,27 @@
       const s = {
         y: -(1 - p) * travel,
         scale: 0.93 + 0.07 * Math.min(p, 1.02),
-        opacity: k === 0 ? 0.3 + 0.7 * MG.range(t, 0, 0.08) : MG.range(t, c.t0, 0.08),
+        opacity: k === 0 ? 0.3 + 0.7 * MG.range(t, 0, 0.08) : MG.range(t, c.t0, 0.05),
         blur: (1 - MG.range(t, c.t0, 0.17)) * 7
       };
       // Recede behind every newer card that has arrived (iOS stack): the
-      // content fades just before the new banner lands, the plate shrinks
-      // to the new banner's height and peeks out below it.
+      // old text stays until the (opaque) new banner has slid over it, then
+      // fades while the plate shrinks to the new banner's height and peeks
+      // out below it. One opacity group: occlusion stays clean.
       let depth = 0, rec = 0, fade = 0, topH = c.h;
       for (let j = k + 1; j < cards.length; j++) {
-        if (t >= cards[j].t0 - 0.04) {
-          const q = MG.spring(t, cards[j].t0 + 0.02, { stiffness: 260, damping: 28 });
+        if (t >= cards[j].t0 + 0.06) {
+          const q = MG.spring(t, cards[j].t0 + 0.08, { stiffness: 260, damping: 28 });
           depth += Math.min(q, 1); rec = Math.max(rec, Math.min(q, 1)); topH = cards[j].h;
-          fade = Math.max(fade, MG.range(t, cards[j].t0 - 0.04, 0.09));
+          fade = Math.max(fade, MG.range(t, cards[j].t0 + 0.10, 0.10));
         }
       }
       if (depth > 0 || fade > 0) {
         const hNow = MG.lerp(c.h, topH, rec);
         c.plate.style.height = hNow + 'px';
         c.ct.style.opacity = 1 - fade;
+        // the fading text never spills below its shrinking plate
+        c.ct.style.clipPath = hNow < c.h - 0.5 ? `inset(0 0 ${(c.h - hNow).toFixed(1)}px 0)` : '';
         c.dim.style.opacity = MG.clamp(depth * 0.55);
         const sc = 1 - 0.055 * depth;
         // keep the plate's bottom peeking `peek` below the card above it
@@ -162,7 +168,7 @@
         s.scale *= sc;
         if (depth > 2.01) s.opacity *= Math.max(0, 1 - (depth - 2) * 2);
       } else {
-        c.plate.style.height = c.h + 'px'; c.ct.style.opacity = 1; c.dim.style.opacity = 0;
+        c.plate.style.height = c.h + 'px'; c.ct.style.opacity = 1; c.dim.style.opacity = 0; c.ct.style.clipPath = '';
       }
       if (t > exitAt) {
         const q = MG.ease.inCubic(MG.range(t, exitAt, exitDur));

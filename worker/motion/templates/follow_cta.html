@@ -10,8 +10,8 @@
   "theme": {"type": "enum", "values": ["dark", "light"], "default": "dark"},
   "cursor": {"type": "bool", "default": true, "hint": "animated pointer that clicks Follow (off = a tap ripple only)"},
   "x": {"type": "float", "min": 0.2, "max": 0.8, "default": 0.5, "hint": "horizontal centre as frame fraction"},
-  "y": {"type": "float", "min": 0.1, "max": 0.85, "default": 0.62, "hint": "vertical centre as frame fraction"},
-  "scale": {"type": "float", "min": 0.7, "max": 1.3, "default": 1.0}
+  "y": {"type": "float", "min": 0.1, "max": 0.78, "default": 0.62, "hint": "vertical centre as frame fraction (kept inside the platform-safe area)"},
+  "scale": {"type": "float", "min": 0.7, "max": 1.3, "default": 1.0, "hint": "the pill is already near full width at 1.0 (larger values mainly grow the card)"}
  },
  "example": {"handle": "@studio.north", "name": "Studio North"},
  "sfx": [{"at": 0.06, "kind": "pop_soft"}, {"at": 1.22, "kind": "click_ui"}, {"at": 1.3, "kind": "pop_soft", "gain_db": -16}]} -->
@@ -72,10 +72,11 @@
     .forEach(([k, v]) => root.style.setProperty(k, v));
 
   // ── geometry (u = px per design point) ───────────────────────────────
-  const u = Math.min((isCard ? 2.55 : 2.6) * P.scale, MG.H * (isCard ? 0.0029 : 0.0035));   // H cap for 16:9
+  // H cap for 16:9; the pill is capped so it stays inside the 60 px side margins
+  const u = Math.min((isCard ? 2.55 : 2.6) * P.scale, MG.H * (isCard ? 0.0029 : 0.0035), isCard ? 1e9 : (MG.W - 120) / 364);
   const K = u / (isCard ? 2.55 : 2.6);   // effective scale (cursor size + path)
   const card = MG.$('#card');
-  const cw = isCard ? 214 * u : Math.min(1000, 364 * u);
+  const cw = isCard ? 214 * u : 364 * u;
   let ch = isCard ? 262 * u : 82 * u;
   card.style.width = cw + 'px'; card.style.height = ch + 'px';
   card.style.borderRadius = (isCard ? 30 * u : ch / 2) + 'px';
@@ -164,7 +165,11 @@
       while (text.scrollWidth + extra > maxW + 0.5 && fs > 11.5 * u) { fs -= 0.25 * u; line.style.fontSize = fs + 'px'; }
     };
     fitLine(nm, nmT, vb ? (5 + (isCard ? 17 : 16)) * u * parseFloat(nm.style.fontSize) / ((isCard ? 18 : 17) * u) : 0);
-    if (hdEl) fitLine(hdEl, hdEl, 0);
+    if (hdEl) {
+      // the handle never outsizes the name: hierarchy holds when the name shrinks
+      hdEl.style.fontSize = Math.min(parseFloat(hdEl.style.fontSize), 0.86 * parseFloat(nm.style.fontSize)) + 'px';
+      fitLine(hdEl, hdEl, 0);
+    }
     if (vb) { const k = parseFloat(nm.style.fontSize) / ((isCard ? 18 : 17) * u); vb.style.width = vb.style.height = ((isCard ? 17 : 16) * u * k) + 'px'; vb.style.marginLeft = (5 * u * k) + 'px'; }
     typedEl.textContent = '';
     if (isCard) {   // card height hugs its content
@@ -172,10 +177,12 @@
       card.style.height = ch + 'px';
     }
     // place card: centre at (x, y), clamped to the safe area
+    // platform-safe area: x 60..1020, y 8%..80% on 9:16 (5%..92% otherwise)
+    const tall = MG.H > MG.W * 1.5, BOT = tall ? 0.80 : 0.92, TOP = tall ? 0.08 : 0.05;
     let cx = MG.W * P.x - cw / 2;
-    cx = MG.clamp(cx, 40, MG.W - 40 - cw);
+    cx = MG.clamp(cx, 60, Math.max(60, MG.W - 60 - cw));
     let cy = MG.H * P.y - ch / 2;
-    cy = MG.clamp(cy, MG.H * 0.05, Math.max(MG.H * 0.05, MG.H * 0.92 - ch));
+    cy = MG.clamp(cy, MG.H * TOP, Math.max(MG.H * TOP, MG.H * BOT - ch));
     card.style.left = cx + 'px'; card.style.top = cy + 'px';
     // cursor path: from lower right, curving to the button centre
     const br = btn.getBoundingClientRect();

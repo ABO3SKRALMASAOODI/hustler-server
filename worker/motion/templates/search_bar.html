@@ -7,8 +7,8 @@
   "pick": {"type": "int", "min": -1, "max": 4, "default": 0, "hint": "row that gets highlighted + tapped (0-based), -1 = none"},
   "placeholder": {"type": "str", "default": "Search", "max": 32},
   "theme": {"type": "enum", "values": ["light", "dark"], "default": "light"},
-  "y": {"type": "float", "min": 0.1, "max": 0.7, "default": 0.32, "hint": "vertical position of the search bar (the dropdown opens below it)"},
-  "scale": {"type": "float", "min": 0.7, "max": 1.2, "default": 1.0}
+  "y": {"type": "float", "min": 0.1, "max": 0.7, "default": 0.32, "hint": "vertical position of the search bar (the dropdown opens below it; the whole block is kept inside the platform-safe area)"},
+  "scale": {"type": "float", "min": 0.7, "max": 1.05, "default": 1.0, "hint": "1.0 = near full safe width"}
  },
  "example": {"query": "how to edit short", "suggestions": ["how to edit short videos", "how to edit shorts on iphone", "how to edit short form content fast"], "pick": 0},
  "sfx": [{"at": 0.45, "kind": "typing", "gain_db": -16}, {"at": 2.0, "kind": "click_ui"}]} -->
@@ -50,7 +50,7 @@
     rim: 'inset 0 0 0 1px rgba(255,255,255,.6), inset 0 -1px 0 rgba(0,0,0,.05)', hl: 'rgba(47,124,246,.12)',
     shadow: '0 2px 8px rgba(0,0,0,.12), 0 20px 50px rgba(0,0,0,.32)', ringc: 'rgba(47,124,246,.45)'
   };
-  const W = Math.min(980, 900 * P.scale, MG.H * 0.8), u = W / 344;   // H cap for 16:9
+  const W = Math.min(940, 900 * P.scale, MG.H * 0.8), u = W / 344;   // 60 px side margins (+ focus ring); H cap for 16:9
   Object.entries({ '--fill': T.fill, '--fg': T.fg, '--sec': T.sec, '--line': T.line, '--rim': T.rim, '--hl': T.hl,
     '--shadow': T.shadow, '--ringc': T.ringc, '--tint': tint, '--u': u + 'px' }).forEach(([k, v]) => root.style.setProperty(k, v));
   const grp = MG.$('#grp');
@@ -105,7 +105,14 @@
     const s = row.s, tl = typedNow.toLowerCase();
     row.lb.textContent = '';
     if (tl && s.toLowerCase().startsWith(tl)) {
-      MG.el('span', null, s.slice(0, typedNow.length), row.lb);
+      let pre = s.slice(0, typedNow.length);
+      if (row.elide && pre.length > 18) {
+        // long query + long suggestion: elide the shared prefix so the
+        // completion (the informative part) stays in view
+        const cut = pre.lastIndexOf(' ', pre.length - 2);
+        pre = '\u2026' + (cut > 0 && pre.length - cut <= 14 ? pre.slice(cut + 1) : pre.slice(-10));
+      }
+      MG.el('span', null, pre, row.lb);
       MG.el('b', null, s.slice(typedNow.length), row.lb);
     } else MG.el('b', null, s, row.lb);
   };
@@ -117,26 +124,38 @@
   const keys = chars.map((_, i) => tType0 + (tType1 - tType0) * Math.min(1, (i + 0.2 + (rnd() - 0.5) * 0.45) / Math.max(1, chars.length))).sort((a, b) => a - b);
   const tOpen = Math.min(0.8, tType1), tPick = 1.72, tPress = 2.0;
   const exitDur = Math.min(0.26, D * 0.1), exitAt = D - exitDur;
+  // the press spring snaps to rest once settled so the held frames are exact
+  const pressSettle = MG.springSettle({ stiffness: 420, damping: 16 }), openSettle = MG.springSettle({ stiffness: 320, damping: 26 });
 
+  // what is typed when the panel opens: rows are widest then (more bold),
+  // so fitting that state means no row changes width or ellipsis later
+  const preOpen = chars.slice(0, keys.filter(k => k <= tOpen + 1e-6).length).join('');
   let L = null;
   const layout = () => {
-    rows.forEach(r => label(r, query));
+    rows.forEach(r => label(r, preOpen));
     // long suggestions: shrink every row's type together (floor 13.5pt) before ellipsis
     let fsr = 17 * u;
     const over = () => rows.some(r => r.lb.scrollWidth > r.lb.clientWidth + 0.5);
     while (rows.length && over() && fsr > 13.5 * u) { fsr -= 0.25 * u; rows.forEach(r => { r.lb.style.fontSize = fsr + 'px'; }); }
+    rows.forEach(r => {
+      label(r, query);
+      r.elide = query.length > 18 && r.lb.scrollWidth > r.lb.clientWidth + 0.5;
+      r.last = null;
+    });
     // long queries: same for the bar
     let fsq = 18 * u;
     txt.textContent = query;
     while (typed.scrollWidth > q.clientWidth - 6 * u && fsq > 15 * u) { fsq -= 0.25 * u; q.style.fontSize = fsq + 'px'; }
     txt.textContent = '';
     const total = barH + (pn ? 10 * u + pn.getBoundingClientRect().height : 0);
+    // platform-safe area: y 8%..80% on 9:16 (5%..92% otherwise)
+    const tall = MG.H > MG.W * 1.5, BOT = tall ? 0.80 : 0.92, TOP = tall ? 0.08 : 0.05;
     let top = MG.H * P.y - barH / 2;
-    top = MG.clamp(top, MG.H * 0.05, Math.max(MG.H * 0.05, MG.H * 0.92 - total));
+    top = MG.clamp(top, MG.H * TOP, Math.max(MG.H * TOP, MG.H * BOT - total));
     grp.style.top = top + 'px';
     const x0 = (MG.W - W) / 2;
     MG.box = [Math.max(0, x0 - 70), top - 60, Math.min(MG.W, x0 + W + 70), top + total + 100];
-    const wins = [[0, 0.62], [tOpen - 0.02, tOpen + 0.7], [tPick - 0.02, tPress + 0.7], [exitAt - 0.02, D]];
+    const wins = [[0, 0.62], [tOpen - 0.02, tOpen + 0.7], [tPick - 0.02, tPress + 0.06 + pressSettle], [exitAt - 0.02, D]];
     keys.forEach(k => wins.push([k - 1e-4, k + 1 / MG.fps - 2e-4]));
     for (let b = 0.53; b < D; b += 0.53) wins.push([b - 1e-4, b + 1 / MG.fps - 2e-4]);
     MG.active(wins);
@@ -167,7 +186,7 @@
     endX.style.opacity = xk; endMic.style.opacity = 1 - xk;
     // dropdown
     if (pn) {
-      const pk = MG.spring(t, tOpen, { stiffness: 320, damping: 26 });
+      const pk = t - tOpen >= openSettle ? 1 : MG.spring(t, tOpen, { stiffness: 320, damping: 26 });
       MG.set(pn, { y: (1 - Math.min(pk, 1)) * -14 * u, opacity: MG.range(t, tOpen, 0.08) });
       // the panel unrolls from the top edge instead of popping in as an empty box
       const rv = MG.ease.outExpo(MG.range(t, tOpen, 0.42));
@@ -180,7 +199,7 @@
           r.hl.style.opacity = MG.ease.outCubic(MG.range(t, tPick, 0.16)).toFixed(3);
           r.hp.style.opacity = (t >= tPress - 0.03 ? MG.range(t, tPress - 0.03, 0.05) * (1 - MG.range(t, tPress + 0.08, 0.3)) : 0).toFixed(3);
           const ps = t >= tPress - 0.05 && t < tPress + 0.05 ? 1 - 0.035 * MG.ease.outQuad(MG.range(t, tPress - 0.05, 0.07))
-            : t >= tPress + 0.05 ? 0.965 + 0.035 * MG.spring(t, tPress + 0.05, { stiffness: 420, damping: 16 }) : 1;
+            : t >= tPress + 0.05 ? 0.965 + 0.035 * (t >= tPress + 0.05 + pressSettle ? 1 : MG.spring(t, tPress + 0.05, { stiffness: 420, damping: 16 })) : 1;
           r.hl.style.transform = r.hp.style.transform = `scale(${ps.toFixed(4)})`;
           r.lb.style.transform = `scale(${ps.toFixed(4)})`;
         }

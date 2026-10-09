@@ -11,7 +11,7 @@
   "reposts": {"type": "str", "default": "1,208", "max": 12, "hint": "empty hides it"},
   "likes": {"type": "str", "default": "12.4K", "max": 12, "hint": "empty hides it; plain integers tick up by one when the heart pops"},
   "theme": {"type": "enum", "values": ["light", "dark"], "default": "light"},
-  "y": {"type": "float", "min": 0.2, "max": 0.8, "default": 0.45, "hint": "vertical centre as frame fraction"},
+  "y": {"type": "float", "min": 0.2, "max": 0.7, "default": 0.45, "hint": "vertical centre as frame fraction (kept inside the platform-safe area)"},
   "scale": {"type": "float", "min": 0.7, "max": 1.15, "default": 1.0}
  },
  "example": {"text": "The best marketing is a product people can't stop talking about. Everything else is rent.", "name": "Studio North", "handle": "@studionorth"},
@@ -137,8 +137,10 @@
   };
   let L = null;
   const layout = () => {
-    // fit the body text: biggest size (20pt → 14pt) that keeps the card inside the frame
-    const maxCardH = Math.min(MG.H * 0.8, MG.H - 120);
+    // platform-safe area: y 8%..80% on 9:16 (5%..92% otherwise)
+    const tall = MG.H > MG.W * 1.5, BOT = tall ? 0.80 : 0.92, TOP = tall ? 0.08 : 0.05;
+    // fit the body text: biggest size (21pt → 14pt) that keeps the card inside the safe area
+    const maxCardH = MG.H * (BOT - TOP);
     if (imgBox) imgBox.style.height = Math.min(176 * u, MG.H * 0.24) + 'px';
     let fs = 21 * u;
     for (; fs >= 14 * u; fs -= 0.5 * u) {
@@ -152,7 +154,7 @@
     const h = card.getBoundingClientRect().height;
     const left = (MG.W - W) / 2;
     let top = MG.H * P.y - h / 2;
-    top = MG.clamp(top, MG.H * 0.05, Math.max(MG.H * 0.05, MG.H * 0.95 - h));
+    top = MG.clamp(top, MG.H * TOP, Math.max(MG.H * TOP, MG.H * BOT - h));
     card.style.left = left + 'px'; card.style.top = top + 'px';
     L = { h, top };
     MG.box = [Math.max(0, left - 90), Math.max(0, top - 110), Math.min(MG.W, left + W + 90), Math.min(MG.H, top + h + 140)];

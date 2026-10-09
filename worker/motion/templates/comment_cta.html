@@ -1,17 +1,17 @@
 <!--MG-SPEC {"title": "Comment keyword CTA", "category": "cta",
- "description": "'Comment KEYWORD' call to action: a glowing headline, then a comment composer where the keyword is typed with a caret, the send button is pressed (dip + ripple) and the comment lands as posted. Use at the end of a short (or right after the payoff) when the creator offers a guide/link for commenting a word.",
- "duration": 3.6, "layer": "above_captions", "mutes_captions": false,
+ "description": "'Comment KEYWORD' call to action: a glowing headline, then a comment composer where the keyword is typed with a caret, the send button is pressed (dip + ripple) and the comment lands as posted. Use at the end of a short (or right after the payoff) when the creator offers a guide/link for commenting a word; captions are muted while it shows because the headline carries that line.",
+ "duration": 3.2, "layer": "above_captions", "mutes_captions": true,
  "params": {
   "keyword": {"type": "str", "required": true, "max": 24, "hint": "the word viewers should comment, e.g. GUIDE"},
-  "headline": {"type": "str", "default": "Comment \"{keyword}\" and I'll send it to you", "max": 80, "hint": "line above the composer; {keyword} becomes the glowing keyword; empty string = no headline"},
+  "headline": {"type": "str", "default": "Comment \"{keyword}\" and I'll send it to you", "max": 80, "hint": "line above the composer (match what the speaker says); {keyword} becomes the glowing keyword; empty string = no headline"},
   "placeholder": {"type": "str", "default": "Add a comment…", "max": 32},
   "accent": {"type": "color", "default": "#FFD400", "hint": "keyword glow colour in the headline"},
   "theme": {"type": "enum", "values": ["dark", "light"], "default": "dark"},
-  "y": {"type": "float", "min": 0.15, "max": 0.85, "default": 0.62, "hint": "vertical centre of the whole block as frame fraction"},
-  "scale": {"type": "float", "min": 0.7, "max": 1.2, "default": 1.0}
+  "y": {"type": "float", "min": 0.15, "max": 0.7, "default": 0.48, "hint": "vertical centre of the whole block as frame fraction (kept inside the platform-safe area)"},
+  "scale": {"type": "float", "min": 0.7, "max": 1.0, "default": 1.0, "hint": "1.0 = full safe width"}
  },
  "example": {"keyword": "GUIDE"},
- "sfx": [{"at": 0.5, "kind": "typing", "gain_db": -16}, {"at": 1.7, "kind": "click_ui"}, {"at": 1.84, "kind": "pop_soft"}]} -->
+ "sfx": [{"at": 0.45, "kind": "typing", "gain_db": -18}, {"at": 1.2, "kind": "click_ui"}, {"at": 1.34, "kind": "pop_soft"}]} -->
 <style>
   .mg-root{font-family:'Inter','Inter Display',system-ui,sans-serif}
   #blk{position:absolute;left:0;top:0}
@@ -63,7 +63,7 @@
     '--shadow': T.shadow, '--grain': T.grain, '--tint': tint, '--acc': P.accent })
     .forEach(([k, v]) => root.style.setProperty(k, v));
 
-  const W = Math.min(980, 940 * P.scale, MG.H * 0.85), u = W / 344;   // H cap for 16:9 / 1:1
+  const W = Math.min(940, 940 * P.scale, MG.H * 0.85), u = W / 344;   // 60 px side margins (+ ring); H cap for 16:9 / 1:1
   root.style.setProperty('--u', u + 'px');
   const blk = MG.$('#blk');
   blk.style.width = W + 'px';
@@ -137,14 +137,20 @@
 
   // ── timing ────────────────────────────────────────────────────────────
   const chars = Array.from(kw);
-  const tSend = 1.7, tType1 = 1.45;
-  // keystrokes always span the typing sound cue (0.5 s → 1.45 s), whatever the keyword length
-  const tType0 = 0.5;
+  // thumb-typing pace (~11+ keys/s, like the kit 'typing' sound and the
+  // reference composers); every keyword is typed by 0.95 s
+  const tType0 = 0.45, cps = Math.max(11, chars.length / 0.5);
   const rnd = MG.rand(chars.length * 7 + 3);
-  const keys = chars.map((_, i) => tType0 + (tType1 - tType0) * Math.min(1, (i + 0.15 + (rnd() - 0.5) * 0.5) / Math.max(1, chars.length)));
+  const keys = chars.map((_, i) => tType0 + Math.max(0, i + 0.15 + (rnd() - 0.5) * 0.4) / cps);
   keys.sort((a, b) => a - b);
-  const tPost = tSend + 0.13;
+  const tType1 = keys.length ? keys[keys.length - 1] : tType0;
+  const tSend = 1.2, tPost = 1.33;
   const exitDur = Math.min(0.26, D * 0.1), exitAt = D - exitDur;
+  // springs snap to rest once settled (|1 - v| < 0.002) so held frames are exact
+  const SK = { kw: { stiffness: 320, damping: 16 }, cmp: { stiffness: 300, damping: 24 }, wake: { stiffness: 420, damping: 24 },
+               press: { stiffness: 380, damping: 15 }, post: { stiffness: 330, damping: 21 } };
+  const SS = {}; Object.keys(SK).forEach(k => { SS[k] = MG.springSettle(SK[k]); });
+  const spr = (t, t0, k) => t - t0 >= SS[k] ? 1 : MG.spring(t, t0, SK[k]);
 
   let L = null;
   const layout = () => {
@@ -175,8 +181,10 @@
     const cmpTop = y + cmH + 12 * u;
     cmp.style.top = cmpTop + 'px';
     const total = cmpTop + 60 * u;
+    // platform-safe area: y 8%..80% on 9:16 (5%..92% otherwise)
+    const tall = MG.H > MG.W * 1.5, BOT = tall ? 0.80 : 0.92, TOP = tall ? 0.08 : 0.05;
     let top = MG.H * P.y - total / 2;
-    top = MG.clamp(top, MG.H * 0.06, Math.max(MG.H * 0.06, MG.H * 0.9 - total));
+    top = MG.clamp(top, MG.H * TOP, Math.max(MG.H * TOP, MG.H * BOT - total));
     blk.style.top = top + 'px';
     // send-button centre in block coords (for ripple)
     const sx = W - 30 * u, sy = cmpTop + 30 * u;
@@ -188,9 +196,9 @@
     // waking up), so declare those instants instead of the whole span
     // the keyword bloom settles ~0.65 s after its word lands
     const kwI = words.findIndex(w => w.kw);
-    const introEnd = Math.max(0.68, (words.length - 1) * 0.045 + 0.45, kwI >= 0 ? kwI * 0.045 + 0.66 : 0);
-    const wins = [[0, introEnd], [keys.length ? keys[0] - 0.01 : tType0, (keys.length ? keys[0] : tType0) + 0.3],
-                  [tSend - 0.09, tPost + 0.62], [exitAt - 0.02, D]];
+    const introEnd = Math.max((hl ? 0.12 : 0) + SS.cmp, (words.length - 1) * 0.045 + 0.45, kwI >= 0 ? kwI * 0.045 + 0.06 + SS.kw : 0);
+    const wins = [[0, introEnd + 0.01], [keys.length ? keys[0] - 0.01 : tType0, (keys.length ? keys[0] : tType0) + SS.wake + 0.01],
+                  [tSend - 0.09, Math.max(tSend + SS.press, tPost + SS.post) + 0.01], [exitAt - 0.02, D]];
     keys.forEach(k => wins.push([k - 1e-4, k + 1 / MG.fps - 2e-4]));
     for (let b = 0.53; b < D; b += 0.53) wins.push([b - 1e-4, b + 1 / MG.fps - 2e-4]);
     MG.active(wins);
@@ -207,7 +215,7 @@
       const p = MG.ease.outCubic(MG.range(t, t0, 0.34));
       const s = { y: (1 - p) * 22, opacity: (i === 0 ? 0.3 + 0.7 * MG.range(t, 0, 0.16) : MG.range(t, t0, 0.16)), blur: (1 - MG.range(t, t0, 0.24)) * 9 };
       if (w.kw) {
-        const k = MG.spring(t, t0 + 0.06, { stiffness: 320, damping: 16 });
+        const k = spr(t, t0 + 0.06, 'kw');
         s.scale = 1.22 - 0.22 * k;
         const bloom = MG.range(t, t0 + 0.05, 0.2) * (1 - 0.45 * MG.ease.outCubic(MG.range(t, t0 + 0.25, 0.36)));
         (w.el.querySelector('.kw') || w.el).style.textShadow = `0 2px 10px rgba(0,0,0,.35), 0 0 ${(10 + 16 * bloom).toFixed(1)}px ${P.accent}${Math.round(110 + 90 * bloom).toString(16).padStart(2, '0')}, 0 0 ${(34 + 40 * bloom).toFixed(1)}px ${P.accent}${Math.round(60 + 60 * bloom).toString(16).padStart(2, '0')}`;
@@ -216,7 +224,7 @@
     });
     // composer entrance (spring, slight scale) shortly after the headline
     const tC = hl ? 0.12 : 0;
-    const ce = MG.spring(t, tC, { stiffness: 300, damping: 24 });
+    const ce = spr(t, tC, 'cmp');
     MG.set(cmp, { y: (1 - ce) * 46, scale: 0.94 + 0.06 * Math.min(ce, 1.02),
                   opacity: hl ? MG.range(t, tC, 0.12) : 0.3 + 0.7 * MG.range(t, 0, 0.12), blur: (1 - MG.range(t, tC, 0.2)) * 8 });
     // typing
@@ -236,10 +244,10 @@
     const onV = onK * (1 - offAgain);
     on.style.opacity = onV; aOn.style.opacity = onV; aOff.style.opacity = 1 - onV;
     let ss = 1;
-    if (n > 0 && t < tSend) ss = 0.8 + 0.2 * MG.spring(t, keys[0], { stiffness: 420, damping: 18 });
+    if (n > 0 && t < tSend) ss = 0.8 + 0.2 * spr(t, keys[0], 'wake');
     if (t >= tSend - 0.07) {
       const dip = MG.ease.inQuad(MG.range(t, tSend - 0.07, 0.07));
-      ss = t < tSend ? 1 - 0.18 * dip : 0.82 + 0.18 * MG.spring(t, tSend, { stiffness: 380, damping: 15 });
+      ss = t < tSend ? 1 - 0.18 * dip : 0.82 + 0.18 * spr(t, tSend, 'press');
     }
     MG.set(snd, { scale: ss });
     // ripple + flash
@@ -252,7 +260,7 @@
     flash.style.width = flash.style.height = (2 * fr) + 'px';
     // posted comment springs up from the composer
     if (t >= tPost) {
-      const k = MG.spring(t, tPost, { stiffness: 330, damping: 21 });
+      const k = spr(t, tPost, 'post');
       MG.set(cm, { y: (1 - k) * 34 * u, scale: 0.9 + 0.1 * Math.min(k, 1.03), opacity: MG.range(t, tPost, 0.1), blur: (1 - MG.range(t, tPost, 0.15)) * 6 });
     } else cm.style.opacity = 0;
     // exit: everything lifts and fades, faster than it came in

@@ -1,14 +1,14 @@
 <!--MG-SPEC {"title": "Chat bubbles", "category": "social",
- "description": "A text-message thread: messages = [{text, side: me|them, at?}] spring in as bubbles (me right/blue, them left/grey with typing dots first) and the thread scrolls up like a real chat. Use to dramatise a conversation, DM or pitch the speaker describes; keep messages short and allow ~0.75 s each.",
+ "description": "A text-message thread: messages = [{text, side: me|them, at?}] spring in as bubbles (me right/blue, them left/grey with typing dots first) and the thread scrolls up like a real chat. Use to dramatise a conversation, DM or pitch the speaker describes; keep messages short and give the item ~0.75 s per message + 1 s (the pop sounds follow that cadence).",
  "duration": 4.0, "layer": "above_captions", "mutes_captions": false,
  "params": {
   "messages": {"type": "rows", "required": true, "fields": ["text", "side", "at"], "max_items": 8, "max": 120,
-    "hint": "[{text, side: me|them, at}] in order; 'at' (optional) = item seconds the bubble lands, otherwise one every 0.75 s from 0.25 s (sounds follow that cadence); allow ~0.75 s per message + 1 s"},
+    "hint": "[{text, side: me|them, at}] in order; 'at' (optional) = item seconds the bubble lands, otherwise one every 0.75 s from 0.25 s. The pop sounds follow that default cadence: give the item >= 0.75 s per message + 1 s and leave 'at' empty, or move the pops to custom landings"},
   "name": {"type": "str", "default": "", "max": 28, "hint": "optional contact name shown above the thread"},
   "time": {"type": "str", "default": "", "max": 28, "hint": "optional timestamp label above the first message, e.g. Today 9:41 AM"},
   "theme": {"type": "enum", "values": ["dark", "light"], "default": "dark"},
-  "y": {"type": "float", "min": 0.3, "max": 0.85, "default": 0.62, "hint": "where the newest message sits (bottom of the thread) as frame fraction"},
-  "scale": {"type": "float", "min": 0.7, "max": 1.3, "default": 1.0}
+  "y": {"type": "float", "min": 0.3, "max": 0.8, "default": 0.62, "hint": "where the newest message sits (bottom of the thread) as frame fraction (kept inside the platform-safe area)"},
+  "scale": {"type": "float", "min": 0.7, "max": 1.05, "default": 1.0, "hint": "1.05 = full safe width"}
  },
  "example": {"messages": [{"text": "did you see the numbers?", "side": "them"}, {"text": "47k views in 2 hours", "side": "me"}, {"text": "wait WHAT", "side": "them"}, {"text": "told you the hook mattered", "side": "me"}]},
  "sfx": [{"at": 0.25, "kind": "pop_soft", "repeat": {"param": "messages", "from": 0.25, "every": 0.75}}]} -->
@@ -49,7 +49,7 @@
   const dark = P.theme !== 'light';
   const T = dark ? { themrim: 'rgba(255,255,255,.07)', them: '#2A2A2E', themfg: '#F5F5F7', sec: 'rgba(235,235,245,.62)', fg: '#F5F5F7', dot: 'rgba(235,235,245,.62)' }
                  : { themrim: 'rgba(0,0,0,0)', them: '#E9E9EC', themfg: '#0B0B0D', sec: 'rgba(60,60,67,.66)', fg: '#0B0B0D', dot: 'rgba(60,60,67,.55)' };
-  const W = Math.min(1000, 900 * P.scale, MG.H * 0.9), u = W / 310;   // H cap for 16:9
+  const W = Math.min(960, 900 * P.scale, MG.H * 0.9), u = W / 310;   // 60 px side margins; H cap for 16:9
   Object.entries({ '--themrim': T.themrim, '--them': T.them, '--themfg': T.themfg, '--sec': T.sec, '--fg': T.fg, '--dot': T.dot, '--u': u + 'px' })
     .forEach(([k, v]) => root.style.setProperty(k, v));
   const vp = MG.$('#vp'), th = MG.$('#th');
@@ -137,8 +137,10 @@
       ev.push({ t: m.r.t, b: m.top + m.h + (i === items.length - 1 ? rcH : 0) });
     });
     ev.sort((a, b) => a.t - b.t);
-    const anchor = MG.H * P.y;
-    const topLimit = MG.H * 0.06;
+    // platform-safe area: y 8%..80% on 9:16 (5%..92% otherwise)
+    const tall = MG.H > MG.W * 1.5, BOT = tall ? 0.80 : 0.92, TOP = tall ? 0.08 : 0.05;
+    const anchor = Math.min(MG.H * P.y, MG.H * BOT);   // the newest bottom (incl. the receipt) sits here
+    const topLimit = MG.H * TOP;
     L = { ev, anchor, base: firstBottom, topLimit };
     vp.style.top = '0px';
     const maxUp = Math.max(...ev.map(e => e.b), firstBottom);
@@ -149,6 +151,7 @@
     L.exitAt = D - exitDur; L.exitDur = exitDur;
     const wins = [[L.exitAt - 0.02, D]];
     items.forEach(m => wins.push([(m.ty ? m.tyIn : m.r.t) - 0.02, m.r.t + 0.7]));
+    if ((hdr || lbl) && ev.length) { const i0 = Math.max(0, ev[0].t - 0.12); wins.push([i0 - 0.02, i0 + 0.3]); }   // header/time intro
     if (rc) wins.push([rows[n - 1].t + 0.3, rows[n - 1].t + 0.65]);
     MG.active(wins);
   };
@@ -162,18 +165,22 @@
     L.ev.forEach(e => { if (t >= e.t) bottom += (e.b - prevB) * Math.min(1, MG.spring(t, e.t, { stiffness: 260, damping: 30 })); prevB = e.b; });
     let ty0 = L.anchor - bottom;
     // header/time fade in with the first item
-    const intro = MG.range(t, Math.max(0, (L.ev[0] ? L.ev[0].t : 0) - 0.12), 0.25);
+    // (a 30% ghost on the first frame, like every template)
+    const i0 = Math.max(0, (L.ev[0] ? L.ev[0].t : 0) - 0.12);
+    const intro = i0 <= 0.02 ? 0.3 + 0.7 * MG.range(t, i0, 0.25) : MG.range(t, i0, 0.25);
     if (hdr) MG.set(hdr, { opacity: intro, y: (1 - MG.ease.outCubic(intro)) * 12 });
     if (lbl) MG.set(lbl, { opacity: intro, y: (1 - MG.ease.outCubic(intro)) * 12 });
     items.forEach(m => {
       const tl = m.r.t;
       // typing indicator
       if (m.ty) {
-        if (t < m.tyIn || t >= tl + 0.1) m.ty.style.opacity = 0;
+        if (t < m.tyIn || t >= tl) m.ty.style.opacity = 0;
         else {
           const k = MG.spring(t, m.tyIn, { stiffness: 420, damping: 24 });
-          const out = MG.range(t, tl - 0.02, 0.09);
-          MG.set(m.ty, { scale: (0.4 + 0.6 * k) * (1 - 0.3 * out), opacity: MG.range(t, m.tyIn, 0.06) * (1 - out) });
+          // gone by the time the bubble starts from the indicator's footprint
+          const out = MG.range(t, tl - 0.05, 0.05);
+          const tin = m.i === 0 && m.tyIn <= 0.02 ? 0.3 + 0.7 * MG.range(t, m.tyIn, 0.06) : MG.range(t, m.tyIn, 0.06);
+          MG.set(m.ty, { scale: (0.4 + 0.6 * k) * (1 - 0.15 * out), opacity: tin * (1 - out) });
           MG.$$('i', m.ty).forEach((d, k2) => {
             const ph = ((t - m.tyIn) / 0.9 - k2 * 0.16) % 1;
             const pulse = Math.max(0, Math.sin(Math.max(0, ph) * Math.PI * 2 - Math.PI / 2) * 0.5 + 0.5);
@@ -182,11 +189,16 @@
           });
         }
       }
-      // bubble
-      if (t < tl) { m.w.style.opacity = 0; return; }
+      // bubble ('them' grows out of the typing indicator's footprint)
+      const fromS = m.r.side === 'me' ? 0.55 : 0.45;
+      const ghost = m.i === 0 && !m.ty;   // first frame: a 30% ghost of the first sent bubble
+      if (t < tl) {
+        if (ghost) MG.set(m.w, { scale: fromS, y: 14 * u, opacity: 0.3 });
+        else m.w.style.opacity = 0;
+        return;
+      }
       const k = MG.spring(t, tl, { stiffness: 360, damping: 21 });
-      const fromS = m.r.side === 'me' ? 0.55 : 0.7;
-      MG.set(m.w, { scale: fromS + (1 - fromS) * k, y: (1 - Math.min(k, 1)) * 14 * u, opacity: MG.range(t, tl, 0.06) });
+      MG.set(m.w, { scale: fromS + (1 - fromS) * k, y: (1 - Math.min(k, 1)) * 14 * u, opacity: ghost ? 0.3 + 0.7 * MG.range(t, tl, 0.06) : MG.range(t, tl, 0.06) });
     });
     if (rc) rc.style.opacity = MG.range(t, rows[n - 1].t + 0.32, 0.25);
     // items that scroll past the top of the safe area fade out
