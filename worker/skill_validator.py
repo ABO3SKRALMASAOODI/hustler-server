@@ -42,7 +42,7 @@ DATED_HISTORY = (
 
 
 # Tool modules merged into TOOLS with TOOLS.update(<module>.TOOL_SPECS).
-EXTRA_TOOL_SOURCES = (ROOT / "motion_tools.py",)
+EXTRA_TOOL_SOURCES = (ROOT / "motion_tools.py", ROOT / "motion_planner.py")
 
 
 def _dict_keys(path: Path, name: str) -> set[str]:

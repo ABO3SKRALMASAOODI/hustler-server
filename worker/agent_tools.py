@@ -82,6 +82,7 @@ import tool_retry
 import webrecord
 import typography_scenes
 import motion_tools
+import motion_planner
 import version as worker_version
 from captions import CAPTION_DESIGN_VERSION, KARAOKE_HARD_MAX
 from schemas import (CANVAS_DIMS, CaptionStyle, clean_fingerprint,
@@ -24644,6 +24645,7 @@ TOOLS = {
 
 # Browser-rendered motion design + built-in sound kit (worker/motion_tools.py).
 TOOLS.update(motion_tools.TOOL_SPECS)
+TOOLS.update(motion_planner.TOOL_SPECS)
 
 # Retired from the live agent/MCP catalog. Functions stay imported so leftover
 # tests and any in-flight payload that still names them can resolve; the model
@@ -24718,6 +24720,7 @@ TOOL_DOMAINS = {
         "get_words",
     },
     "graphics": {
+        "suggest_motion_beats",
         "list_motion_templates", "add_motion_graphic", "set_motion_graphic",
         "remove_motion_graphic",
         "set_typography_scene", "remove_typography_scene",
@@ -24759,6 +24762,7 @@ TOOL_DOMAINS = {
         "add_stock_media",
     },
     "motion": {
+        "suggest_motion_beats",
         "list_motion_templates", "add_motion_graphic", "set_motion_graphic",
         "remove_motion_graphic",
         "set_picture_card", "remove_picture_card",
