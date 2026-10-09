@@ -1275,12 +1275,25 @@ class FrameShift(BaseModel):
     motion_motif: Optional[MotionMotif] = None
 
 
+PICTURE_CARD_BACKDROPS = ("solid", "vertical_gradient", "radial_gradient",
+                          "blur")
+
+
 class PictureCard(BaseModel):
     """A footage-only card on the program clock; type is composited afterwards.
 
     The source is frame.picture when set, otherwise the whole program frame.
     box is the destination rectangle, so source framing and card design remain
     independent. No speech, caption, or cut timings change.
+
+    The canvas around the card is ``background`` (a flat colour) unless a
+    designed backdrop is chosen: ``background_style`` vertical_gradient /
+    radial_gradient (``background`` -> ``background_color2``) or blur (a
+    blurred, darkened copy of the card's own footage filling the canvas,
+    ``background_dim`` deep), optionally textured with animated film
+    ``grain`` and a ``vignette``. All five are Optional-None and normalize
+    back to None when they would draw the flat colour, so every card written
+    before they existed keeps its signature and its exact render graph.
     """
     id: str = Field(min_length=1, max_length=80)
     start: float = Field(ge=0, allow_inf_nan=False)
@@ -1300,6 +1313,16 @@ class PictureCard(BaseModel):
     # replaying an opening each time a cached segment begins.
     phase_s: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
     full_duration_s: Optional[float] = Field(default=None, gt=0, allow_inf_nan=False)
+    # Designed backdrop (see the class docstring). None = the flat colour.
+    background_style: Optional[Literal["solid", "vertical_gradient",
+                                       "radial_gradient", "blur"]] = None
+    background_color2: Optional[str] = None
+    background_dim: Optional[float] = Field(default=None, ge=0, le=.9,
+                                            allow_inf_nan=False)
+    grain: Optional[float] = Field(default=None, ge=0, le=1,
+                                   allow_inf_nan=False)
+    vignette: Optional[float] = Field(default=None, ge=0, le=1,
+                                      allow_inf_nan=False)
 
     @field_validator("box")
     @classmethod
@@ -1312,6 +1335,32 @@ class PictureCard(BaseModel):
         if not re.fullmatch(r"#[0-9A-Fa-f]{6}", value):
             raise ValueError("picture card colors must be #RRGGBB")
         return value.upper()
+
+    @field_validator("background_color2")
+    @classmethod
+    def _color2(cls, value):
+        if value is None:
+            return None
+        if not re.fullmatch(r"#[0-9A-Fa-f]{6}", value):
+            raise ValueError("picture card colors must be #RRGGBB")
+        return value.upper()
+
+    @model_validator(mode="after")
+    def _backdrop(self):
+        # Canonical form: a knob that cannot change the picture is None, so
+        # "solid, no texture" is the historical card in signature and graph.
+        if self.background_style == "solid":
+            self.background_style = None
+        if self.background_style not in ("vertical_gradient",
+                                         "radial_gradient"):
+            self.background_color2 = None
+        if self.background_style != "blur":
+            self.background_dim = None
+        if not self.grain:
+            self.grain = None
+        if not self.vignette:
+            self.vignette = None
+        return self
 
 
 class Effects(BaseModel):
@@ -1661,7 +1710,7 @@ class VectorItem(BaseModel):
     motion_motif: Optional[MotionMotif] = None
 
 
-MOTION_LAYERS = ("above_captions", "below_captions")
+MOTION_LAYERS = ("above_captions", "below_captions", "behind_subject")
 MOTION_HTML_MAX = 60000
 
 
@@ -1678,6 +1727,13 @@ class MotionItem(BaseModel):
     ``phase_s``/``full_duration_s`` are internal: a stitched preview piece
     renders the part of an item that falls in its window, starting
     ``phase_s`` seconds into the composition's own clock.
+
+    ``layer="behind_subject"`` composites the clip INTO the scene: drawn on
+    the picture before the zoom stage and then covered by the measured
+    subject, exactly like add_text_behind's words. ``behind`` is that
+    measured mask (written by add_motion_graphic, never by hand); its SOURCE
+    span makes the item content-anchored. A behind item whose mask cannot be
+    used at render time degrades to an ordinary above-captions graphic.
     """
     id: str = Field(min_length=1, max_length=80)
     template: str = Field(min_length=1, max_length=60)
@@ -1685,12 +1741,14 @@ class MotionItem(BaseModel):
     end: float = Field(gt=0, allow_inf_nan=False)
     params: dict = Field(default_factory=dict)
     html: Optional[str] = Field(default=None, max_length=MOTION_HTML_MAX)
-    layer: Literal["above_captions", "below_captions"] = "above_captions"
+    layer: Literal["above_captions", "below_captions",
+                   "behind_subject"] = "above_captions"
     box: Optional[List[float]] = None
     mute_captions: Optional[bool] = None
     purpose: Optional[str] = Field(default=None, max_length=300)
     phase_s: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
     full_duration_s: Optional[float] = Field(default=None, gt=0, allow_inf_nan=False)
+    behind: Optional["SubjectMatte"] = None
 
 
 class SubjectMatte(BaseModel):
@@ -1705,6 +1763,32 @@ class SubjectMatte(BaseModel):
     # executor, "plate" = the photometric fallback. Ride-along metadata so a
     # cache hit can speak honestly about what it is serving.
     method: Optional[str] = None
+    # subject_matte_geom() of the frame the mask was measured in. A later
+    # set_frame (ratio, mode, focus, picture) changes where the subject sits
+    # on the canvas, so the renderer drops the depth when this no longer
+    # matches. None on masks written before the stamp existed (unchecked).
+    geom: Optional[str] = None
+
+
+def subject_matte_geom(frame):
+    """Stamp of the output-framing knobs a subject mask's crop depends on —
+    exactly the ones agent_tools._matte_geometry hands frame_fit_filter,
+    normalized the same way (pad_blur shares pad's geometry; focus only
+    steers a crop; None focus is the centre)."""
+    fr = frame or {}
+    ratio = fr.get("ratio") or "source"
+    mode = (fr.get("mode") or "crop") if ratio != "source" else "crop"
+    mode = "pad" if mode == "pad_blur" else mode
+    focus = None
+    if mode == "crop":
+        fx, fy = fr.get("focus_x"), fr.get("focus_y")
+        fx = .5 if fx is None else round(float(fx), 4)
+        fy = .5 if fy is None else round(float(fy), 4)
+        focus = None if (fx, fy) == (.5, .5) else [fx, fy]
+    pic = fr.get("picture")
+    pic = [round(float(v), 4) for v in pic] if pic else None
+    return hashlib.sha256(json.dumps([ratio, mode, focus, pic]).encode()
+                          ).hexdigest()[:12]
 
 
 # ── Speed spans (round 35): time remapping ───────────────────────────────
@@ -2820,6 +2904,29 @@ def validate_edl(data, duration=None, *, render_fragment=False):
                 if x1 - x0 < 0.01 or y1 - y0 < 0.01:
                     raise EDLValidationError(f"{label}.box is empty.")
                 mo.box = [x0, y0, x1, y1]
+            if mo.layer != "behind_subject":
+                # A mask only means something on the behind layer; a stale
+                # one left by a layer change is dropped, not rejected.
+                mo.behind = None
+            else:
+                b = mo.behind
+                if b is None or not b.asset_key or not b.fp:
+                    raise EDLValidationError(
+                        f"{label}.layer 'behind_subject' needs a measured "
+                        "subject mask — place it with add_motion_graphic("
+                        "layer='behind_subject'), which measures one.")
+                if canvas_prog:
+                    raise EDLValidationError(
+                        f"{label}.behind needs a main video — a clip/image "
+                        "canvas program has no source footage to cut a "
+                        "subject out of.")
+                b.src_start, b.src_end = _r(b.src_start), _r(b.src_end)
+                _check_span(f"{label}.behind", b.src_start, b.src_end,
+                            duration, min_len=0.2)
+                if b.fps is not None:
+                    b.fps = round(min(max(float(b.fps), 1.0), 120.0), 3)
+                if b.coverage is not None:
+                    b.coverage = round(min(max(float(b.coverage), 0.0), 1.0), 4)
         edl.motion.sort(key=lambda m: (m.start, m.id))
 
     # Caption mutes: PROGRAM-time windows, same clock as texts/stylize. Sorted
@@ -3348,7 +3455,9 @@ def describe_edl(edl_dict, duration=None):
                         f"{moving}")
         parts.append(f"vectors x{len(edl.vectors)} ({', '.join(bits)})")
     if edl.motion:
-        bits = [f"{mo.template}#{mo.id}@{mo.start:g}-{mo.end:g}s" for mo in edl.motion]
+        bits = [f"{mo.template}#{mo.id}@{mo.start:g}-{mo.end:g}s"
+                + (" behind subject" if mo.layer == "behind_subject" else "")
+                for mo in edl.motion]
         parts.append(f"motion x{len(edl.motion)} ({', '.join(bits)})")
     if edl.caption_mutes:
         bits = [f"{s:g}-{e:g}s" for s, e in edl.caption_mutes]
@@ -3387,6 +3496,9 @@ def describe_edl(edl_dict, duration=None):
         if fx.picture_cards:
             bits.append("footage cards " + ", ".join(
                 f"{c.id}@{c.start:g}-{c.end:g}s {c.entrance}/{c.exit}"
+                + (f" on {c.background_style}" if c.background_style else "")
+                + (" +grain" if c.grain else "")
+                + (" +vignette" if c.vignette else "")
                 for c in fx.picture_cards))
         if fx.stylize:
             names = [s.kind + (f"@{s.start:g}-{s.end:g}s"

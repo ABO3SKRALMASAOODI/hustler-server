@@ -47,7 +47,7 @@ import timeline as timeline_mod
 import travel
 from schemas import (clean_fingerprint, patch_fingerprint, EDLValidationError,
                      is_canvas_program, keep_boundaries, quad_bbox,
-                     speed_pieces, validate_edl)
+                     speed_pieces, subject_matte_geom, validate_edl)
 from timeline import Timeline, merge_spans, transition_junctions
 
 DUCK_DB = -12.0            # music under speech AND program audio under voiceover
@@ -2375,6 +2375,10 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     #     what lets the mask be measured on the 540p proxy and still composite
     #     into a 4K export: scaling a MASK softens an edge, where scaling a
     #     cut-out subject would drop a blurry patch into a sharp frame.
+    #
+    # Motion graphics on layer='behind_subject' use the very same composite:
+    # their entry carries {"motion": (clip_input, item, clip)} instead of an
+    # ASS file, and the clip is overlaid on the copy where the words burn.
     for j, (idx, item, win) in enumerate(behind_inputs or []):
         b_start, b_end = win
         b_dur = max(0.05, b_end - b_start)
@@ -2385,9 +2389,22 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         # window the "subject" layer is fully transparent, so the composite is
         # the picture, exactly. Padding in the graph rather than encoding
         # thousands of black frames into the artifact.
-        chain = [f"trim=start=0:end={b_dur:.3f}", "setpts=PTS-STARTPTS",
+        # mask_offset: seconds into the mask where this program's window
+        # begins (a proof fragment that starts mid-window); 0 for every
+        # whole window, which keeps the historical trim.
+        m_off = float(item.get("mask_offset") or 0.0)
+        chain = [(f"trim=start={m_off:.3f}:end={m_off + b_dur:.3f}" if m_off > 0
+                  else f"trim=start=0:end={b_dur:.3f}"), "setpts=PTS-STARTPTS",
                  f"scale={W}:{H}", "format=gray",
                  f"fps={fps:.3f}"]
+        if item.get("motion"):
+            # The mask's source span ends ~a frame before the graphic does
+            # (it is measured to out_to_src(end - 0.02), rounded), and the
+            # clip stays on screen to its end: hold the last mask frame over
+            # that gap, or the final frame draws the graphic OVER the subject.
+            gap = max(0.0, float(item["motion"][1]["end"]) - b_end)
+            chain.append(f"tpad=stop_mode=clone:stop_duration="
+                         f"{min(gap, 0.1) + 1.0 / max(fps, 1.0):.3f}")
         if b_start > 0.001:
             chain.append(f"tpad=start_duration={b_start:.3f}"
                          f":start_mode=add:color=black")
@@ -2396,13 +2413,21 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                          f":stop_mode=add:color=black")
         parts.append(f"[{idx}:v]{','.join(chain)}[bhm{j}]")
         parts.append(f"[{vlabel}]split[bhb{j}][bhf{j}]")
-        # The words, burned on a copy of the picture...
-        parts.append(f"[bhb{j}]subtitles=filename='{item['ass']}'"
-                     f":fontsdir='{caplib.FONTS_DIR}'[bht{j}]")
+        if item.get("motion"):
+            # A browser-rendered motion graphic (layer='behind_subject'),
+            # composited on a copy of the picture in its program window...
+            m_idx, m_item, m_clip = item["motion"]
+            bht = motion_layer.overlay_clip(parts, f"bhb{j}", m_idx, m_item,
+                                            m_clip, fps, f"mgs{j}")
+        else:
+            # The words, burned on a copy of the picture...
+            parts.append(f"[bhb{j}]subtitles=filename='{item['ass']}'"
+                         f":fontsdir='{caplib.FONTS_DIR}'[bht{j}]")
+            bht = f"bht{j}"
         # ...and the subject, lifted off the OTHER copy by the mask and laid
         # back over them.
         parts.append(f"[bhf{j}][bhm{j}]alphamerge[bhfa{j}]")
-        parts.append(f"[bht{j}][bhfa{j}]overlay=0:0:format=auto"
+        parts.append(f"[{bht}][bhfa{j}]overlay=0:0:format=auto"
                      f":eof_action=pass[vbh{j}]")
         vlabel = f"vbh{j}"
 
@@ -3286,6 +3311,8 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
         motion_inputs, next_idx = motion_layer.prepare_inputs(
             edl, workdir, W, H, fps, tl.out_duration, extra_inputs, next_idx,
             fetch_asset=lambda k: _fetch(k, "motion", next_idx))
+        motion_inputs = motion_layer.demote_behind(
+            motion_inputs, "a canvas program has no subject footage")
     graph = build_filtergraph(edl, tl.out_duration, False, tl, ass_path,
                               music_inputs, {}, preview,
                               W=W, H=H, fps=fps, frame_mode=None,
@@ -3977,9 +4004,25 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     # render: footage cut away, a mask object that will not download, an ASS
     # with nothing to burn. A user who loses the depth still gets their words.
     behind_inputs = []
+    # The framing a mask is stamped with (newer masks only) has to be the
+    # framing it composites into: after a set_frame the mask would cut the
+    # subject out of the old crop's coordinates.
+    geom_now = subject_matte_geom(edl.get("frame"))
     for bi, item in enumerate(behind_texts):
         b = item["behind"]
         pieces = tl.span_to_out(float(b["src_start"]), float(b["src_end"]))
+        # A speed ramp over the mask's footage (added after it was measured)
+        # retimes the picture but not the 1x mask, which would then drift
+        # off the subject: a plain title is the honest fallback.
+        ramp = tl.ramp_over(float(b["src_start"]), float(b["src_end"]))
+        why = (f"speed ramp {ramp[0]} now covers its footage" if ramp else
+               "the framing changed since its mask was measured"
+               if b.get("geom") and b["geom"] != geom_now else None)
+        if pieces and why:
+            print(f"[render] behind-text {item.get('id')}: {why} — burning "
+                  "it as a plain title", flush=True)
+            front_texts.append(item)
+            continue
         ass = None
         if pieces:
             ass = graphics.build_gfx_ass(
@@ -4032,6 +4075,56 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
             ass_path = caplib.build_ass(edl, index, tl,
                                         os.path.join(workdir, "captions.ass"),
                                         play_res=(W, H))
+        # ---- behind-subject motion graphics: one mask input per item -------
+        # The same contract as the behind texts above: the mask lands where
+        # its SOURCE span now plays, and anything that stops the composite
+        # from being exact DEGRADES the graphic to an ordinary above-captions
+        # layer instead of failing the render. A cut that now falls inside
+        # the window degrades too: the mask is one continuous clip, so past
+        # the cut it would cut the subject out of the wrong second of video.
+        for k, (m_idx, m_item, m_clip) in enumerate(motion_inputs):
+            if m_item.get("layer") != "behind_subject":
+                continue
+            b = m_item.get("behind") or {}
+            pieces = (tl.span_to_out(float(b["src_start"]),
+                                     float(b["src_end"])) if b else [])
+            why, local = None, None
+            ramp = (tl.ramp_over(float(b["src_start"]), float(b["src_end"]))
+                    if b else None)
+            if not b:
+                why = "it carries no subject mask"
+            elif not pieces:
+                why = "its footage is no longer in the edit"
+            elif len(pieces) > 1:
+                why = "a cut now falls inside its window"
+            elif ramp:
+                # The mask is one 1x clip of source frames; a ramp shortens
+                # (or stretches) that footage's program window, so the
+                # trimmed mask would slide off the subject.
+                why = f"speed ramp {ramp[0]} now covers its footage"
+            elif b.get("geom") and b["geom"] != geom_now:
+                why = "the framing changed since its mask was measured"
+            else:
+                try:
+                    local = _fetch(b["asset_key"], "matte", next_idx)
+                except Exception as e:
+                    why = f"mask unavailable ({str(e)[:120]})"
+            if why:
+                motion_inputs[k] = (m_idx, motion_layer.demote(m_item, why),
+                                    m_clip)
+                continue
+            # Where in the mask this program's window starts: 0 for a whole
+            # window; a proof fragment that begins mid-window skips ahead.
+            a_src = tl.out_to_src(pieces[0][0] + 1e-3)
+            m_off = (max(0.0, float(a_src) - 1e-3 - float(b["src_start"]))
+                     if a_src is not None else 0.0)
+            extra_inputs += ["-i", local]
+            behind_inputs.append((next_idx, {"motion": (m_idx, m_item, m_clip),
+                                             "mask_offset": (round(m_off, 3)
+                                                             if m_off > 0.02 else 0.0)},
+                                  (round(pieces[0][0], 3),
+                                   round(pieces[0][1], 3))))
+            next_idx += 1
     graph = build_filtergraph(edl, src_dur, info["has_audio"], tl, ass_path,
                               music_inputs, index, preview,
                               W=W, H=H, fps=fps, frame_mode=frame_mode,
