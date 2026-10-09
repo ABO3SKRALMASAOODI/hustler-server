@@ -64,7 +64,8 @@
       "stem_mix": null,
       "caption_mutes": [],
       "source_clean": null,
-      "patches": []
+      "patches": [],
+      "motion": []
     }
   },
   {
@@ -170,7 +171,8 @@
       "stem_mix": null,
       "caption_mutes": [],
       "source_clean": null,
-      "patches": []
+      "patches": [],
+      "motion": []
     }
   },
   {
@@ -282,7 +284,8 @@
       "stem_mix": null,
       "caption_mutes": [],
       "source_clean": null,
-      "patches": []
+      "patches": [],
+      "motion": []
     }
   },
   {
@@ -348,7 +351,8 @@
       "stem_mix": null,
       "caption_mutes": [],
       "source_clean": null,
-      "patches": []
+      "patches": [],
+      "motion": []
     }
   },
   {
@@ -420,7 +424,8 @@
       "stem_mix": null,
       "caption_mutes": [],
       "source_clean": null,
-      "patches": []
+      "patches": [],
+      "motion": []
     }
   },
   {
@@ -499,7 +504,8 @@
       "stem_mix": null,
       "caption_mutes": [],
       "source_clean": null,
-      "patches": []
+      "patches": [],
+      "motion": []
     }
   }
 ]
