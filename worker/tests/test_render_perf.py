@@ -247,9 +247,11 @@ def test_block_grade_is_the_same_picture_as_the_post_concat_grade(
     # testsrc2's hard, saturated colour edges are the worst case for grading
     # before vs after a resample or a chroma subsampling step (real 1080p
     # footage measured 43-45 dB luma PSNR, chroma ~50 dB): the difference
-    # lives on edges only and is about a level on average.
+    # lives on edges only and is about a level on average. The production
+    # executors' ffmpeg 8.1 measures 1.9 on vintage's curves where 9.0
+    # measures 1.1; the 99th-percentile and bar checks below stay strict.
     diff = np.abs(a - b)
-    assert float(diff.mean()) < 1.5, float(diff.mean())
+    assert float(diff.mean()) < 2.5, float(diff.mean())
     assert float(np.percentile(diff, 99)) <= 16
     # bars (rows above the picture / letterbox) keep their graded colour
     if frame.get("mode") == "pad" or frame.get("picture"):
