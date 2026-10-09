@@ -107,6 +107,7 @@ def test_placement_track_sets_anchor_and_band_per_cue():
 
 
 def test_items_land_one_frame_early_and_segments_never_overlap(monkeypatch):
+    monkeypatch.setattr(motion_engine, "available", lambda: True)
     monkeypatch.setattr(motion_captions, "SEGMENT_TARGET_S", 2.0)
     monkeypatch.setattr(motion_captions, "SEGMENT_MAX_S", 3.0)
     edl, index, tl = _setup("editorial")
@@ -125,7 +126,15 @@ def test_items_land_one_frame_early_and_segments_never_overlap(monkeypatch):
             assert all(c["s"] - 1e-6 <= w["s"] for w in c["w"])
 
 
-def test_segments_split_where_the_placement_moves():
+def test_items_refuse_without_the_engine_so_libass_captions_burn(monkeypatch):
+    edl, index, tl = _setup("editorial")
+    monkeypatch.setattr(motion_engine, "available", lambda: False)
+    with pytest.raises(motion_engine.MotionRenderError):
+        motion_captions.items(edl, index, tl)
+
+
+def test_segments_split_where_the_placement_moves(monkeypatch):
+    monkeypatch.setattr(motion_engine, "available", lambda: True)
     track = [{"t0": 0.0, "t1": 4.0, "position": "top", "anchor_y": 0.16},
              {"t0": 4.0, "t1": 8.0, "position": "bottom", "anchor_y": 0.8}]
     edl, index, tl = _setup("clean", placement=track)

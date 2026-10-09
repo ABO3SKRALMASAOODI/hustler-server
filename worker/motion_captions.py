@@ -242,7 +242,12 @@ def style_params(edl):
 
 
 def items(edl, index, tl):
-    """Synthetic MotionItem dicts (one per segment) for the caption track."""
+    """Synthetic MotionItem dicts (one per segment) for the caption track.
+
+    Raises when this deployment cannot draw them: the renderer then burns the
+    ordinary libass captions (the style's preset) instead of none at all."""
+    if look_of(edl) and not motion_engine.available():
+        raise motion_engine.MotionRenderError("motion captions need the browser engine")
     allc = cues(edl, index, tl)
     if not allc:
         return []
