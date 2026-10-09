@@ -1,147 +1,147 @@
-# premium-composition — editorial type, rounded footage cards and purposeful motion systems
+# premium-composition — art direction, layouts, typography systems, footage cards on designed backgrounds, legibility
 
 ## Editorial decision principles
 
-For a designed social edit, give the viewer one clear visual idea at a time.
-Choose a picture treatment, a typography relationship and the meaningful beat
-where each changes. Premium is hierarchy, spacing, good footage and controlled
-timing; a palette or effect count cannot supply those decisions.
+A premium social edit has committed art direction: one look, one type
+system with a strong hierarchy, a frame that is designed edge to edge, and
+one clear visual idea at a time that changes on the beat where the meaning
+changes. Premium is hierarchy, scale, placement, good footage and precise
+timing — plus motion and sound bound to the words. A small picture floating
+on a flat black canvas with static text is a clip page, not a premium
+composition.
+
+- Layout: face-aware full-bleed, or the picture as a card on a DESIGNED
+  background — never a flat black void.
+- Typography: a tight bold grotesk backbone plus one accent role (serif
+  italic, script or condensed heavy), near-white type with one accent colour
+  on 1–2 words per sentence, size ladders of 2:1 to 7:1.
+- Legibility from size, placement in clear space and soft shadows or plates,
+  not outlines and boxes.
+- One leader per moment; everything else supports it.
 
 ## Art direction before geometry
 
 A polished render of crude artwork is still crude artwork. Do not construct
-people, food, islands, buildings or products from circles/rectangles as a
-shortcut for an advanced editorial brief. Keep primitives for their real
-strengths: alignment, rules, measured data, masks and useful annotations.
-An intentionally illustrated brief is different; its artwork still needs
-coherent material, shape language and craft, not stock presentation icons.
+people, food, buildings or products from circles and rectangles as a
+shortcut. Keep primitives for their real strengths: alignment, rules,
+measured data, masks, arrows and annotations. Use real imagery, UI mockups
+from the motion library, or photographic cards for objects.
 
-For a visual explanation, decide what the viewer should SEE, not which tool
-to exercise. Inspect real source imagery, then acquire a specific asset when
-it improves the argument. Use a real object/shot at a strong scale, deliberate
-cropping, an intelligible relationship to the words, and one controlled motion
-handoff. A photographic object pasted into the same crowded diagram is not a
-repair. Neither is a sequence of generic stock images. Conceptual imagery must
-be distinguishable from evidence of a real event; don't invent an account,
-endorsement, identity or statistic.
+For a visual explanation, decide what the viewer should SEE, then choose the
+asset or template that shows it at a strong scale with one controlled
+motion handoff. Conceptual imagery must stay distinguishable from evidence of
+a real event; never invent an account, endorsement, identity or statistic.
 
-At phone width the picture, claim and dialogue cannot all compete equally.
-Give the face or meaningful image enough area to matter. Prefer one readable
-claim over a mesh of tiny labels. Show the actual opening and strongest scene
-beside the chosen reference at the SAME display size. Judge image craft,
-hierarchy and motion continuity before checking technical polish. If the
-scene resembles a slide deck or simple game illustration, rebuild that scene;
-changing its palette or easing curve does not address the weakness.
+At phone width the picture, the claim and the dialogue cannot all compete
+equally. Give the face or meaningful image enough area to matter, and one
+readable claim instead of a mesh of tiny labels. Compare the opening and
+strongest scene beside the reference at the same display size.
 
 ## Evidence to inspect
 
-Inspect the opening, actual source framing, complete speech arc, reference
-movement, densest caption, turn and payoff. Transfer a reference's relationships,
-not another creator's watermark or an unrelated visual gimmick. Preserve the
-user's requested mood, source aspect, music and identity.
+Inspect the source framing and face positions per shot, clear space beside
+and above the face, the complete speech arc, the reference's layout and type
+hierarchy, the densest caption state, the turn and the payoff. Transfer a
+reference's relationships, never another creator's watermark, logo or
+wording. Preserve the user's requested mood, aspect, music and identity.
 
 ## Strong treatment patterns
 
-- **Speaker-first headline:** when the brief calls for attribution and the
-  speaker is verified from the source/user, use
-  `set_editorial_graphic(kind="headline", speaker="…", text="…")`.
-  The name leads the sentence, with quiet color distinction; the claim wraps
-  at a readable size in its box, holds still and leaves dialogue enabled.
-  Place it just above the actual picture. `font_size` defaults to .052 of the
-  short canvas edge; don't make the name an unrelated extra badge. Shorten
-  crowded copy instead of shrinking it. State a faithful, specific idea;
-  a paraphrase is not a verbatim quotation. Never infer identity from the
-  stylistic reference. Unknown speakers get an unattributed title instead.
+LAYOUTS FOR 9:16:
+- **Face-aware full-bleed** (the default for modern 16:9 podcasts and
+  talking heads): `auto_reframe` or `set_frame` crop with a shot-aware focus
+  track so each speaker's face sits in the upper-middle with the face around
+  28–40% of the frame height; type lives in the clear space above, beside or
+  below the face. Alternate tight and medium framings with eased zooms on
+  sentence turns (read zooms).
+- **Card on a designed background** (archival 4:3, wide shots that a crop
+  would destroy, two-shot frames): `set_frame(picture=[...])` keeps the wide
+  original inside the portrait canvas, `set_picture_card` gives it rounded
+  corners, a hairline border, a soft shadow and a lift or reveal entrance,
+  and its `background` is designed — `blur` (a blurred, darkened copy of the
+  picture behind the card), a gradient, grain and vignette — read the
+  `set_picture_card` schema for the exact fields. Make the card large — a
+  4:3 picture trimmed toward 1:1 or 4:5 (crop mode with focus, when the
+  sides hold nothing essential) fills 55–70% of the height — and use the
+  remaining space for hero type.
+- **Two speakers**: shot-aware reframing that cuts to the active speaker, or
+  a stacked layout when both reactions matter.
+- Never leave a fixed band of the canvas empty for the whole reel.
 
-- **A phrase built in place:** `set_typography_scene` measures the complete
-  phrase before revealing any part of it. Give deliberate `lines`, each with
-  `runs` containing exact text and its real PROGRAM `at` cue. Runs stay in
-  fixed slots until the scene end. Pair one sans family with a sparse
-  Instrument Serif italic word when that contrast distinguishes setup from
-  consequence; don't alternate fonts mechanically. `align=left/right` places
-  the group in useful negative space beside a speaker. `reveal=build` reveals
-  runs at speech cues; `still` displays the full statement. A run may contain
-  several words. `font_size` is relative to the canvas short edge; line `size`
-  and run `scale` control hierarchy. Overflow is rejected: break or shorten
-  the line instead of making it tiny. Stable id replaces the group; removal
-  restores its owned caption windows. Use `mute_captions=false` for separate
-  topic labels. Use the exposed native setters serially for one project and
-  check each saved receipt. The internal recipe helper is not a public tool.
-- **Picture as an object:** `set_frame(picture=[...])` preserves wide footage
-  on a portrait canvas. `set_picture_card` then gives that footage its own
-  rounded box, hairline border, quiet shadow and a lift/reveal opening or
-  closing. Captions and designed words remain separate and full-resolution.
-  Keep the face large. A card need not occupy the whole video; use it at an
-  evidence shot or story transition, with stillness during sustained dialogue.
-  Inspect source focus before changing the destination box. `fit=pad` preserves
-  the whole picture; `crop` fills and may discard important context.
-- **A visible argument:** use `set_editorial_graphic(kind="comparison")` for
-  two actual opposing ideas, `metric` for a supported figure plus its meaning,
-  `statement` for a specific thesis, `quote` for a faithful short quotation,
-  or `chapter` for an actual turn. Give the real words and cue time. The tool
-  produces editable, measured type/vector layers in one revision; a stable
-  id revises the group. It rejects unreadably short holds and overcrowding.
-  Choose `ink`, `paper`, or `slate` to match the edit. No compulsory cards.
-  `treatment="type"` removes the panel so the words can share a deliberate
-  composition with the picture. Use a panel only when the separation helps;
-  a large empty rectangle around small words is not an advanced design.
-- **A useful label:** `kind="label"` identifies a real person, place, machine
-  or piece of evidence. Its caption coexistence is deliberate. Place its box
-  in measured clear space, not across a face or the existing dialogue band.
-- **Meaning-led type:** quiet phrases carry ordinary speech; a consequential
-  word, number or contrast gets larger type. Native captions offer phrase
-  reveal, semantic `emphasis_words`, active-word color and separate animation.
-  For restrained work use fade/rise or still phrases and modest scale contrast.
-  Elastic/bounce, glow and rotating colors are appropriate only when the
-  reference/brief earns them. Graphics preserve captions by default. Set
-  `mute_captions=true` only when a graphic replaces the spoken words; a
-  complementary comparison or label should not erase the dialogue subtitles.
-  For whole readable phrases with spoken-word tint, use `preset="composed"`.
-  In karaoke mode `animation="fade"` eases tint without hiding already visible
-  words; `none` makes the tint immediate. Inspect actual word boundaries.
-  It shows the phrase together, keeping connectors in context. Use reveal
-  when accumulation itself is the intended motion, not as a universal default.
-- **Movement with a landing:** text and vectors share local keyframes. A small
-  eased translation and opacity change can resolve together in .25–.5s, then
-  hold. Use one leader. Reserve an abrupt scale/cut for an actual reversal;
-  don't make the camera, caption, panel and arrow all bounce independently.
-- **Evidence sequences:** show the actual object/action being discussed, cut
-  on its useful movement, then return to the reaction or insight. One strong
-  relevant shot beats several generic search results. Use overlays for silent
-  evidence over continuing speech; inserts change program timing. Source
-  material and cards are distinct tools; do not substitute generic slides
-  for an unavailable visual fact.
+TYPE SYSTEM — one per video:
+- Captions are the frequent tier (motion looks; read captions). Hero words
+  and numbers are the big tier (7–20% of frame height, motion templates;
+  read motion-design). The accent tier is one role — serif italic, script or
+  condensed heavy — on a few words.
+- Pre-lay the block: a lockup's full layout is computed before any word
+  reveals, so words appear IN PLACE and the block never reflows. Stacked
+  lockups with tight leading (0.85–0.95) may overlap deliberately.
+- Tracking tight on bold sans (−2 to −5%), generous size, mixed case unless
+  the look calls for caps.
 
-`set_editorial_graphic` is a starting composition, not the full language. Its
-ordinary text/vector layers remain individually editable. `font_size` on a
-text item is a fraction of the canvas short side; `max_width` defines its text
-column. Use them with x/y and general motion for custom hierarchy. Do not
-rasterize captions/labels into low-resolution pictures. `set_screen_frame`
-still serves whole-window app demos; it shrinks the finished video including
-its text and is a different operation from a footage-only card.
+LEGIBILITY:
+- Size first; then placement in measured face-free negative space; then a
+  soft shadow (0 2–6 px 12–30 px at 35–60% black), a frosted or dark plate,
+  or the grade.
+- Safe area on 9:16: important type inside x 60–1020 px and y 8–80% of the
+  height; never in the bottom platform band; never across eyes or mouth.
+- Check every type state on the actual background in the render, bright
+  and dark plates alike.
+
+NATIVE TOOLS THAT REMAIN USEFUL:
+- **Speaker-first headline**: `set_editorial_graphic(kind="headline",
+  speaker="…", text="…")` for a verified speaker and a faithful claim. It
+  holds still and keeps dialogue captions. On a reel it should pose the
+  question, never the payoff, and sit inside the designed layout rather than
+  above a small card on black.
+- **A phrase built in place**: `set_typography_scene` measures the complete
+  phrase first, then reveals runs at real PROGRAM `at` cues without moving
+  previous words. Give deliberate `lines` with `runs`; pair one sans family
+  with a sparse Instrument Serif italic word; `align` places the group beside
+  a speaker. Overflow is rejected — shorten instead of shrinking.
+- **A visible argument**: `set_editorial_graphic` kinds comparison, metric,
+  statement, quote, chapter and label produce editable measured type/vector
+  layers; `treatment="type"` removes the panel. For animated equivalents
+  with sound use the motion library (versus_split, stat_card, quote_card,
+  chapter_title, lower_third).
+- **Words behind the subject**: `add_text_behind` (person matte) or a motion
+  graphic with `layer='behind_subject'`; the type must be LARGE so the
+  person crosses the middle of tall glyphs.
+- Graphics preserve captions by default; mute captions only when the graphic
+  says the spoken words.
+
+MOVEMENT WITH A LANDING: text, cards and vectors enter with short graphic
+motion (pop, rise-blur, mask, spring for objects), settle and hold. Use one
+leader; don't make the camera, caption, panel and arrow all move
+independently. Exits are faster than entrances.
+
+EVIDENCE SEQUENCES: show the actual object or action being discussed as
+B-roll or a photo card, cut on its useful movement, then return to the
+reaction. One strong relevant shot beats several generic search results. Use
+overlays for silent evidence over continuing speech; inserts change program
+timing.
 
 ## Common failure modes
 
-Tiny explanatory subtitles under generic PROGRESS/FUTURE headings; the same
-panel on every noun; repeated noisy word effects; disconnected animations;
-rounded cards so small the person disappears; hiding a gesture to show stock;
-flat speech with no chosen focal moment despite a designed-edit brief.
-An entrance replayed at every cue; words re-centering as the phrase builds;
-changing typeface or position merely because another word arrived.
-Behind-subject type requires `add_text_behind` and a verified real matte.
-Perspective galleries/3D cylinders are not supplied by a typography scene.
+Small card on a black void; static headline bars that never change; tiny
+captions shrunk to avoid collisions; generic PROGRESS/FUTURE headings; the
+same panel on every noun; rounded cards so small the face disappears; two or
+three unrelated type systems; words re-centering as a phrase builds; an
+entrance replayed at every cue; type across the face or in the UI band;
+crude primitive illustrations in place of real imagery.
 
 ## Verification procedure
 
-Render and inspect the first visible state, opening midpoint, settled state,
-closing midpoint and the next shot. At phone width read the longest phrase
-without zooming. Check one dominant element, actual word/graphic timing,
-face clearance, stable readable caption position and enough settled reading
-time. Review real audio for joins. Describe one weak moment honestly; a clean
-decode or a favorable self-score does not certify compelling design.
+Render and inspect at phone size the first visible state, every layout
+change, a dense caption moment, each hero moment and the payoff: no flat
+black void, face large and composed, one dominant element per moment, type
+readable on its actual background, nothing in the UI band, words revealing
+in place. Describe one weak moment honestly; a clean decode does not certify
+compelling design.
 
 ## Repair ladder
 
-Improve the chosen moment/hook first → remove generic copy → strengthen the
-picture/type relationship → unify motion and palette → enlarge or simplify
-unreadable information → inspect the revised sequence and its boundaries.
+Strengthen the hook and hero moments → fix the layout (full-bleed or designed
+background) → unify the type system and accent → enlarge or simplify
+unreadable information → move type into clear space → reduce to one leader
+per moment → inspect the revised sequence and its boundaries.

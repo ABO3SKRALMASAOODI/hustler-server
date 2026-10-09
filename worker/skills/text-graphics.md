@@ -1,69 +1,121 @@
-# text-graphics — titles, text behind the subject, title cards, color/corrupt screens, freeze frames
+# text-graphics — native text, kinetic phrases, text behind the subject, vectors, title cards, colour/corrupt screens, freeze frames
 
 ## Editorial decision principles
 
-Graphics clarify hierarchy, information or a real story beat. Use one type/motion system and let stillness win when movement has no explanatory role.
+Designed type is the main motion surface of a short-form edit. For premium
+animated titles, hero words, counters, callouts, UI cards and CTAs, the
+browser motion library is the first choice (read motion-design); the native
+tools here cover text the renderer draws directly, the person-matted
+behind-subject effect, vector annotations, splice-in cards and freezes. All
+of them follow one type system and one motion language per video, bound to
+the exact phrase, object, action or beat they clarify.
 
 ## Evidence to inspect
 
-Inspect exact words/timing, clear space, face/UI geometry, target objects, caption collisions, reading time, path extremes, matte coverage and rendered settle frames.
+Inspect exact words and program timing (`get_kept_transcript`, `get_words`),
+clear space, face and UI geometry, target objects for arrows and rings,
+caption collisions, reading time, path extremes, matte coverage and the
+rendered entrance, settle and exit frames.
 
 ## Strong treatment patterns
 
-SPEECH-CUED TYPE SCENES: `set_typography_scene` composes fixed-position,
-mixed-font rows in one revision. See `premium-composition`. It reserves the
-complete phrase's space, then reveals runs at real program cues without
-moving previous words. Use it for selective serif contrast and type beside a
-subject, not as a mandate to replace every subtitle with a title.
+CHOOSING THE TOOL:
+- Animated hero word, hook title, counter, chart, callout, UI mockup, CTA,
+  photo card, transition texture → `add_motion_graphic` (motion-design).
+- Mixed-font phrase built in fixed positions at speech cues →
+  `set_typography_scene` (premium-composition).
+- Measured editorial layouts (headline, statement, comparison, metric,
+  quote, chapter, label) as editable native layers →
+  `set_editorial_graphic`.
+- Simple dictated titles, labels and stats with keyframed motion →
+  `add_text` / `set_text_motion`.
+- Words genuinely behind a person → `add_text_behind`, or a motion graphic
+  with `layer='behind_subject'`.
 
-MEASURED EDITORIAL COMPOSITIONS: `set_editorial_graphic` makes a statement,
-comparison, metric, quote, chapter, label or speaker-first headline as native editable layers in one
-revision. Read `premium-composition` for selection and picture relationships.
-For kind=headline, pass the source-verified speaker and a faithful claim as
-text. The name starts the sentence; the measured heading holds still, wraps
-without tiny type, draws no panel and keeps dialogue captions. Place its box
-above the actual picture. Never guess identity from a reference.
-For custom layers, font_size is a fraction of the canvas short side and
-max_width is a text-column fraction; these opt-in units avoid guessing preset
-size_scale. Keep type sharp and separate from the footage card.
+TEXT TEMPLATES (`add_text` / `set_text_motion` / `remove_text`): 'title',
+'subtitle', 'lower_third', 'callout', 'big_number', 'quote', 'chapter'.
+Entrances: typewriter, pop, whip, blur_in, and 'none' for instant text.
+Designed text owns caption suppression for its window by default; use
+`mute_captions=false` for an independent label in a separate region.
+`font_size` is a fraction of the canvas short side; `max_width` is a column
+fraction. outline_width=0 and shadow=0 give clean flat type on a panel.
 
-TEXT TEMPLATES (add_text / set_text_motion / remove_text) — designed text burned over program time: 'title' (opening card), 'subtitle' (support line), 'lower_third' (name/context bar), 'callout' (short pointed label), 'big_number' (a huge stat like '10x'), 'quote', 'chapter'. Entrances: typewriter (entrance only), pop, whip, blur_in — and 'none' for INSTANT text ("no effect", "just appear" mean entrance='none' / exit='none'). add_text draws OVER the footage — it does not clear the frame. Dictated titles/labels/stats → add_text; spoken-word captions stay with add_captions. By default designed text owns caption suppression for its live window: captions can be enabled before or after without stacking, and moving/resizing/removing the text carries or removes its mute automatically. Do not create a separate caption_mutes span for the same graphic. Use mute_captions=false for an independent headline in a separate region; dialogue captions remain visible. outline_width=0 and shadow=0 give clean flat type on a solid panel; omitted values retain the template edges.
+GENERAL TEXT MOTION — `motion` on `add_text`, or `set_text_motion(id,
+motion)`, takes element-local x/y/scale/rotation/opacity values or keyframes
+(`[{"t":0,"v":...},{"t":...,"v":...,"ease":"out"}]`); `t` is seconds from
+that text's start. Explicit motion replaces entrance/exit. Express a
+relationship: travel toward the named object, settle into clear space,
+overshoot only a stressed word. Settle, then hold still.
 
-ONE TYPE SYSTEM PER VIDEO. A title in one template, a callout in another, a subtitle in a third, each with unrelated movement, reads as a slide deck. Choose one hierarchy, accent system and motion language, then vary energy only when meaning or music earns it. Keep words few and bind each graphic to the exact phrase, object, action, or beat it clarifies. Put words in the frame's CLEAR space (sky, wall, floor — read it off the filmstrip or look_at), never across a face. Text that simply arrives with a cut can be more confident than decorative movement.
+VECTOR GRAPHICS (`add_vector_graphic` / `set_vector_graphic` /
+`remove_vector_graphic`): rectangle, ellipse, line, arrow, ring, progress.
+- An arrow or ring identifies a REAL visible object, control, statistic or
+  action read off the grid; a panel sits behind words with deliberate
+  padding; progress represents real completion only — never invent 73%.
+- For drawn-on arrows, hand-drawn circles and highlighter sweeps with sound,
+  the motion library (arrow_callout, circle_highlight, marker_text) is the
+  premium route.
+- Revise an existing vector instead of stacking a near-duplicate.
 
-GENERAL TEXT MOTION — `motion` on add_text, or `set_text_motion(id, motion)`, accepts element-local x/y/scale/rotation/opacity values or keyframes (`[{"t":0,"v":...},{"t":...,"v":...,"ease":"out"}]`). `t` is seconds from THAT text's start, so the choreography follows it through timeline moves. x/y are frame fractions and may begin outside 0–1 for an intentional off-frame entrance; scale is relative; opacity is 0–1. Explicit motion replaces entrance/exit — do not stack the preset system on it. Use it to express a relationship: travel toward the object being named, settle into an empty region, overshoot only a genuinely stressed word, or yield on the musical/semantic handoff. A curve is not a reason to keep moving. Render the whole window and judge path, collision, legibility and the frame where it settles. Subject-matted text stays static because its measured matte owns its geometry.
+WORDS BEHIND THE SUBJECT (`add_text_behind`) — a person-matting model cuts
+the subject out per frame and the words pass genuinely behind them.
+- PEOPLE occlude the words (including what they carry); static objects do
+  not. Say exactly that if asked.
+- Arguments are add_text's plus at_output_s + duration_s (2–4 s reads well).
+- It refuses with no person in the window, a subject filling most of the
+  frame, a window crossing a cut, or a speed ramp; relay the reason. It
+  reports how much of the text the subject crosses — near zero means an
+  ordinary title.
+- Behind-subject type is LARGE: the person crosses the middle of tall glyphs
+  while tops and bottoms stay readable. Never shrink it to reduce hidden
+  letters. No zoom, stabilize or speed ramp over the window.
 
-VECTOR GRAPHICS (add_vector_graphic / set_vector_graphic / remove_vector_graphic) — renderer-native rectangle, ellipse, line, arrow, ring and progress primitives. They share text's local x/y/scale/rotation/opacity keyframes, so a label, its panel and its pointing device can speak one motion language without downloading or generating decorative assets.
-- USE RELATIONSHIPS, NOT FILLER. A rectangle is a hierarchy panel or a measured highlight; a line connects or underlines; an arrow/ring identifies a REAL visible object, interface control, statistic or action. If you cannot name the target in the frame, do not point at it.
-- Panels are composed BEHIND the words: add the vector first in the EDL, align its live window and motion with the text, and leave deliberate padding. Progress represents real story/task completion only—never invent 73% because a bar looks active.
-- Bind the graphic to the sequence map's purpose and energy. A restrained settle can share a semantic beat with one light SFX; do not independently animate the words, panel, arrow and camera in four directions. One leader, supporting motion elsewhere.
-- Placement is evidence-led. Use look_at / the filmstrip to aim rings and arrows at the visible target and keep paths clear of faces, source UI labels and captions. Review opening, knots, travel and settled state; a correct midpoint does not prove a correct animation.
-- Prefer revising one existing vector with set_vector_graphic over stacking a near-duplicate. No primitive is required and there is no quantity quota: a quiet shot with no shape is often the professional choice.
+STANDALONE TITLE CARDS (`add_title_card`): a term on its own screen —
+`add_title_card(text, at_output_s, duration_s)` splices a card in (captions
+never land on it; everything after shifts by duration_s). Never fake it with
+a full-frame blur; pass subtitle= for a second line. For a chapter turn
+over continuing footage, `chapter_title` in the motion library is usually
+stronger.
 
-WORDS BEHIND THE SUBJECT (add_text_behind) — "put the title behind me walking", "text behind the subject like modern edits". add_text would put words IN FRONT; this does the real thing: a person-matting model cuts the subject out per frame (temporal state keeps the mask steady on handheld/dark footage) and the words pass genuinely behind.
-- THE CONTRACT: PEOPLE occlude the words (including what they carry); static objects — furniture, walls, parked cars — do NOT. Where words overlap a couch they read as an ordinary title in front of it. That is deliberate; say exactly that if asked, instead of retrying.
-- Arguments are add_text's plus at_output_s + duration_s (2-4s reads well).
-- IT REFUSES ON (relay the reason rather than retrying): no person in the window; a subject filling most of the frame; a window crossing a cut; a speed ramp over that footage. It reports how much of the text the subject actually crosses — near zero means the user will see an ordinary title, so move the text to where they walk or shift the window.
-- CRAFT: behind-subject type is LARGE — the person crosses the MIDDLE of tall glyphs while tops and bottoms stay readable. NEVER shrink the text to reduce hidden letters; enlarge it or shorten the phrase. Do not add a zoom, stabilize or speed ramp over the window. A later cut carries it along; cutting that footage away leaves a plain title.
+PLAIN COLOUR / GRADIENT SCREENS (`add_color_screen`): a white or black flash,
+a coloured interstitial or a gradient backdrop with no text, built locally;
+color2 + direction for a gradient; motion adds a slow push. Words on it →
+`add_text` at the same window, or `add_title_card`.
 
-STANDALONE TITLE CARDS (add_title_card) — a term "on its own screen" / "cut away to just the word and back": ONE call — add_title_card(text, at_output_s, duration_s). Builds the solid card, splices it in, centres the text. A real card is a real cut, so captions never land on it; everything after shifts later by duration_s (2-3s reads well). NEVER fake this with a full-frame blur_region (captions would burn straight over it). Don't stack add_text on a title card — pass subtitle= for a second line.
+CORRUPT / GLITCH SCREENS (`add_corrupt_screen`): the signal "breaks" between
+sections — style 'digital', 'vhs' or 'static', 0.3–1 s, sound=true adds a
+static burst. Different from the `glitch` junction style and the
+`glitch_burst` motion transition.
 
-PLAIN COLOUR / GRADIENT SCREENS (add_color_screen) — a white or black flash, a coloured interstitial, a gradient backdrop with NO text: add_color_screen(at_output_s, duration_s, color) — built instantly and locally; never generate_image for a flat screen. color2 + direction (vertical/horizontal/diagonal/radial) for a gradient; motion adds a slow push. Cuts away like a title card (captions never land on it). Words on it → add_text at the same window, or just add_title_card.
+FREEZE FRAMES (`add_freeze_frame`): freeze the picture and hold big words
+over the blurred, darkened still — a real cut, captions never land on it.
+Right for the 2–3 strongest lines of a sermon or motivational piece; pair it
+with a `shutter` or `impact_soft` cue.
 
-CORRUPT / GLITCH SCREENS (add_corrupt_screen) — the promo/meme move where the signal "breaks" between sections: add_corrupt_screen(at_output_s, duration_s, style, intensity), synthesized locally. style 'digital' (datamosh macroblocks + tearing — default), 'vhs' (tracking band + scanlines), 'static' (TV snow). KEEP IT SHORT: 0.3-1s reads as a punchy hit. sound=true (default) adds a static burst. Different from set_transitions' 'glitch' (a tiny burst at scene changes). Captions never land on it.
-
-FREEZE FRAMES (add_freeze_frame) — the 'pearl' / power-phrase move: freeze the picture and hold it with big centred words over the blurred, darkened still. A real cut, so captions never land on it; mute captions under it is unnecessary. Right for the 2-3 strongest sentences of a sermon or motivational piece.
-
-KINETIC TEXT (add_kinetic_text) — transcript-timed phrase typography over a range. The default `motion_style='composed'` uses one restrained inward settle across the passage and reserves a controlled scale overshoot for `emphasis_words`; this is coherent choreography, not a roulette of entrances. Use `preset` only when the established edit already speaks that legacy animation language, or `still` when cutting and typography carry the energy. The pass places phrases from measured clear bands and mutes duplicate bottom captions only under the phrases it actually creates. Inspect the rendered sequence, not one still: the relevant test is whether each phrase arrives with its speech, avoids the subject, reads before it yields, and makes the next phrase feel intentional.
+KINETIC TEXT (`add_kinetic_text`): transcript-timed phrase typography over a
+range, placed in measured clear bands; `motion_style='composed'` is one
+inward settle with an overshoot reserved for `emphasis_words`; `still` when
+cutting carries the energy. It mutes duplicate bottom captions only under the
+phrases it creates. For premium word-on-onset motion across a whole reel,
+caption motion looks plus hero motion graphics usually read stronger.
 
 ## Common failure modes
 
-- Cheap mixed templates, too many words/levels, face/UI/caption collisions, arrows with no target, mismatched panel/text motion or paths that leave frame.
+- Cheap mixed templates or three unrelated type systems; too many words or
+  levels; type across a face or in the UI band.
+- Arrows with no visible target; invented progress or numbers.
+- Panel and text moving independently; paths that leave the frame.
+- Small behind-subject text the person never crosses.
 
 ## Verification procedure
 
-Review entry, knots/path extremes, settled state and exit on every distinct background; check reading time, geometry, hierarchy and caption suppression.
+Render and review entry, path extremes, settled state and exit on every
+distinct background with `look_at(rendered=true, output_times=[...])`;
+check reading time, geometry, hierarchy, caption suppression and that each
+graphic lands on its word.
 
 ## Repair ladder
 
-Shorten copy → unify hierarchy/type → align panel/vector geometry → reposition/reduce motion → remove unsupported decoration → rerender the complete window.
+Shorten copy → unify hierarchy/type → move to the motion-library equivalent →
+align panel/vector geometry → reposition or reduce motion → remove
+unsupported decoration → rerender the complete window.

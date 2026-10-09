@@ -1,55 +1,142 @@
-# audio — the four layers, sourcing music, sound effects, mixing, loudness
+# audio — sound edited to picture: the four layers, the music bed, the sound kit, cue timing, mixing, loudness
 
 ## Editorial decision principles
 
-Protect intelligibility and narrative causality. Music, SFX, voiceover and source sound are separate layers; add sound only when its role is nameable.
+Premium reels are never silent between words. A music bed sits 13–20 dB under
+the voice, and a sparse, structural layer of sound effects is edited to the
+picture: a whoosh under a graphic entrance with its peak on the landing, pops
+and ticks on reveals, typing under a typewriter, a shutter on a photo, a low
+hit on a hero landing, a riser into the payoff, a short stop-down before a
+reveal. Intelligibility of the voice always wins the mix.
+
+- Every cue binds to a visible or narrative event and lands ON its frame.
+- Music and sound design are the default for short-form reels; a dry passage
+  is a deliberate choice for a specific moment (an admission, a joke that
+  needs room), not the whole piece.
+- Never a whoosh on every caption; structure, not wallpaper.
+- Digital silence in a finished reel reads as broken.
 
 ## Evidence to inspect
 
-Inspect the current EDL, actual asset audio, dialogue windows, musical structure, visible/narrative triggers, rendered AUDIO CHECK measurements and bounded listening evidence.
+Inspect the current EDL (music, sfx, voiceover, volume), every motion graphic
+and its owned cues, junctions and hero moments in the program map, dialogue
+windows (`get_kept_transcript`), the track's structure and beats
+(`get_audio_analysis`), the rendered AUDIO CHECK (loudness, peaks, dead air)
+and any bounded listening evidence.
 
 ## Strong treatment patterns
 
 FOUR DISTINCT LAYERS — never confuse them:
-1. The ORIGINAL footage's audio (the speaker): set_volume adjusts it on SOURCE-time spans. A SPLICED SCENE'S own audio is separate and mutes with set_insert_window(id, mute=true) — so "mute all scenes" = set_volume -60dB on the kept spans PLUS mute=true on every video insert (image inserts are always silent).
-2. MUSIC: add_music — context-aware defaults: a -18dB auto-ducked bed under speech, but the LEAD audio at -4dB with no duck when no speech survives under the window (trust that default on a speechless video). Change track with swap_music; retime/refit with set_music_fit (start/end, loop, fade, offset, duck_mode); remove with remove_music. Music start/end are OUTPUT-timeline positions and default to the whole video. THE CRAFT of choosing and placing music is its own skill — read_skill music before any music decision.
-3. SOUND EFFECTS: add_sfx at a POINT in output time (default -6dB). An sfx fires once, lasts as long as the sound is, never loops, never ducks. 'A whoosh on that cut' / 'add a click' → add_sfx, never add_music with a short span. Retime with move_sfx, delete with remove_sfx.
-4. VOICEOVER: add_voiceover lays uploaded narration over the program, ducking everything else. Remove with remove_voiceover.
-- To make existing music/sfx/voiceover louder or quieter: set_audio_gain (kind 'music'/'sfx'/'voiceover') — NEVER set_volume, which would change the speaker instead.
+1. The ORIGINAL footage's audio (the speaker): `set_volume` on SOURCE-time
+   spans. A spliced scene's own audio mutes with `set_insert_window(id,
+   mute=true)`; image inserts are silent.
+2. MUSIC: a bed under speech, or the lead on a speechless video. Place from
+   the music library when its tools are listed (read music), from the user's
+   upload or link, or from a named song. `add_music` defaults to a -18 dB
+   auto-ducked bed under speech and a -4 dB lead with no duck where no speech
+   survives. Change track with `swap_music`; refit with `set_music_fit`
+   (start/end, loop, fade, offset, duck_mode); remove with `remove_music`.
+   Music start/end are OUTPUT-timeline positions.
+3. SOUND EFFECTS: `add_sfx` at a POINT in output time. A cue fires once,
+   never loops, never ducks. Retime with `move_sfx`, delete with `remove_sfx`.
+4. VOICEOVER: `add_voiceover` lays uploaded narration over the program,
+   ducking everything else.
+- To change music/sfx/voiceover level use `set_audio_gain` (kind 'music',
+  'sfx' or 'voiceover') — never `set_volume`, which changes the speaker.
 
-MUSIC SOURCING — in this order:
-1. The user's own upload or link (list_assets(kind='music'); fetch_url for links) — when they provided a song, that IS the song.
-2. research_music: for a substantial edit, live-search by GENRE/VIBE words ("dark phonk", "lofi chill beat", "cinematic piano") and compare a real candidate slate acoustically in ONE evidence pass → judge the evidence and context → fetch_music(id) downloads the deliberate winner as a project asset. Use search_music alone only for a quick/low-stakes lookup. Tell the user which track you chose and its license line whenever it carries an obligation.
-3. A SPECIFIC song they NAME: find_song(query) searches the web and returns candidate links best-guess first — pick the real thing (the artist's own or "- Topic" channel, or "Official Audio"; never a lyric/sped-up/loop/cover version unless their words asked for one), then fetch_url(url, as_kind='music') downloads it. TELL THE USER which version you grabbed (title + channel) so a wrong pick is one message from fixed. If find_song is unavailable or finds nothing, ask for a link — fetch_url downloads music from anywhere a URL reaches (a song page, YouTube, SoundCloud, a file link).
-4. A TRENDING platform sound is the one thing only the user can provide (upload, or a clip that carries it — extract_audio / pass the clip key straight to add_music): platforms license trend audio inside their own apps only, so the pro flow is: cut the edit TO their sound's beat grid, export, and they attach the platform's licensed version in-app. Offer exactly that; never substitute a soundalike silently.
-- A VIDEO CAN BE A SOUND SOURCE: "use the sound from this clip" WORKS — pass the [video_clip] storage_key straight to add_music (or add_sfx/add_voiceover). Only the sound plays. The only honest no is a genuinely silent clip.
-- If the footage has its own atmosphere (rain, a crowd, a room), keeping it can beat any track — say so.
+THE SOUND KIT — `list_sfx_kit()` lists Valmera's 22 built-in, licence-free
+sounds, always available and instant: whoosh_soft, whoosh_hard, swoosh_up,
+swish_short, swipe, pop_soft, pop_bright, click_ui, tick, kick, ding, chime,
+notification, coin, riser_short, riser_long, impact_soft, impact_hard,
+sub_drop, glitch, shutter, typing. Place one with
+`add_sfx(storage_key='kit:<kind>', at=<program seconds>, gain_db=...,
+purpose=...)`. Motion templates already add their own synced kit cues;
+adjust those gains or pass `sfx=false` rather than stacking duplicates.
 
-"REMOVE THE BACKGROUND MUSIC": get_edl first. Music items → remove_music. NONE → the music is baked into the source, and when separate_music is in your tools that IS the answer: separate_music(music_gain_db=-60) mutes the baked-in music and keeps the speech (voice_gain_db=-60 does the reverse; -12 ducks). Separation is strong but not surgical — use the preview's deterministic AUDIO CHECK and disclose that limitation before promising silence; remove_stem_mix restores the original. Without separate_music, say plainly it isn't available and offer: mute ranges (set_volume), mute everything, or cover with new music.
-- "The music" may be sitting in voiceover — check get_edl and list_assets filenames; fix the layering (remove_voiceover + add_music). A WARNING that a file plays twice (music + voiceover) means remove one.
-- User CANNOT HEAR the music: don't just raise gain. get_edl — a storage_key starting with 'audio/' is the video's OWN extracted track (a mistake): remove_music it and add real music. Otherwise inspect gain_db, ducking, placement and the rendered AUDIO CHECK, then adjust with judgment; repeat as useful.
+CUE GRAMMAR — what goes where:
+- Graphic or card entrance → `whoosh_soft` or `swipe`, pre-rolled so the
+  peak lands on the landing frame.
+- Word, icon or list reveal → `pop_soft`, `pop_bright`, `tick` or
+  `click_ui`, quiet.
+- Typewriter or terminal → `typing`; counter → `tick` run or a `coin` on the
+  final money figure; photo or freeze → `shutter`; phone UI → `notification`
+  or `click_ui`.
+- Hero landing → a low hit: `kick` (word slam), `impact_soft` (reveal),
+  `impact_hard` (the single biggest beat), `sub_drop` (gravity, after a
+  riser).
+- Payoff → `riser_short` (1.2 s) or `riser_long` (2.6 s) ENDING on the
+  payoff frame, then the hit.
+- Transition → `whoosh_hard` or `swoosh_up` peaking on the cut; `glitch`
+  under a glitch.
+- Stop-down: 50–280 ms of near-silence before a reveal — dip the bed with
+  `set_music_fit` or end a cue early — then land the hit.
+- Layering is allowed: a whoosh into an impact on one hero beat is one event.
+- Typical density on a 30–60 s talking reel: a structural cue every 2–4 s,
+  stacked on hero moments, quieter on reveals. Count purposes, not sounds.
 
-SOUND EFFECTS — RIGHT SOUND, RIGHT MOMENT, RIGHT LEVEL (the three ways sfx go wrong):
-- THE MOMENT IS A THING THE VIEWER SEES OR THE MUSIC DOES. Every sfx binds to a nameable event: a whoosh ON a cut or whip (get_edl for the joins), an impact ON the reveal or the strongest word (get_words for its exact start), a riser STARTING ~2s before a drop/cut and RESOLVING exactly on it, a click ON the actual on-screen click, a pop ON a caption/emphasis landing. If you cannot name the on-screen moment a sound marks, the sound does not belong. Free-floating timestamps are how "weird sfx at weird times" happens.
-- NO DECORATION QUOTA. A plan that says SFX `omit` is complete, and an `author` plan may still resolve to zero effects when inspection finds no correlated action worth marking. Never add a whoosh/pop/impact merely to prove sound design happened, to fill silence, or because another effect exists nearby. Existing environmental/gameplay sound often carries the action better than a library effect; preserve it when it already tells the truth.
-- Once music/SFX candidates have been researched, heard/measured and fetched, place them with add_music / add_sfx in the same batch as the picture events they serve. Extract audio from an uploaded video before placing it because extraction creates a separate project asset.
-- Sound-design density is an editorial choice, not an authorization or count gate. Hype, montage, gaming and promo often benefit more than interviews or calm narrative; use as many or as few accents as the brief and preview support.
-- LEVEL: accents usually sit UNDER the voice. Default -6dB is for genuine hits; UI clicks and soft whooshes often sit -10 to -14dB. Use authored levels, deterministic AUDIO CHECK measurements, timing, the brief, user feedback and any explicitly labeled bounded listening evidence; never invent evidence for unheard seconds.
-- SOURCE: add_web_sfx is the one-call path for an exact requested sound: it searches real recordings, downloads the candidate set, measures attack/peak/tail/crest/spectrum/bass/event count, chooses the waveform shape that matches the physical event, and places it at the named program second. For a deliberate multi-sound design, use search_sfx → audition_sfx_candidates(ids, purpose) → fetch_sfx → add_sfx, so an impact, riser, whoosh or click is selected by real transient evidence rather than title order. When configured, the audition also returns a clearly labeled actual-listening comparison; otherwise it explicitly stays waveform-only. Querying by a physical name ("cinematic whoosh", "camera shutter", "keyboard click", "pop") is clearer than a mood word. Relay the real source/license line when it carries an obligation. A sound the user uploads (or one living in a clip they sent) places with add_sfx directly.
-- VERIFY WITH TIMING + AUDIO CHECK: bind each SFX to an exact visible or measured event, then use the preview's deterministic mix measurements and ACTUAL-AUDIO REVIEW when present. Before delivery, be able to state the named event for every SFX; remove any orphan. Never turn a short reviewed window into a claim about the whole program.
+TIMING — PEAKS LAND ON THE PICTURE:
+- `at` is when the file starts; its peak arrives later. Pre-roll by the
+  sound's attack: whooshes ~40–50% of their length early, risers by their
+  full length so they END on the frame, pops/ticks/clicks 0–1 frame early,
+  hits 0–2 frames early.
+- Tie cues to measured times: word onsets (`get_words` mapped to program
+  time), junctions from the program map, graphic landing frames, music
+  transients.
 
-MASTERING: set_master_loudness normalizes the final mix to -14 LUFS on preview AND export — the honest fix for 'the export sounds quiet on TikTok'. The AUDIO CHECK on every preview measures the real numbers (integrated LUFS, true peak, dead air) — treat its findings as work, not commentary.
+LEVELS:
+- Voice is the reference. Bed 13–20 dB under the voice (a library bed at
+  about -18 to -22 dB, ducked); in speechless stretches the music may rise.
+- UI ticks, pops and clicks at -8 to -12 dB; whooshes -6 to -10 dB; hero hits
+  -3 to -6 dB but never masking the hero word itself.
+- `set_music_fit(duck_mode='smooth')` when the bed pumps or swallows the first
+  word after a pause.
+
+OTHER SOURCES:
+- `add_web_sfx` and the search/audition/fetch chain find real recordings for
+  an exact sound the kit lacks (a crowd cheer, a door, rain). Relay licence
+  lines when they carry obligations.
+- A sound the user uploads, or the sound off a clip they sent, places
+  directly with `add_sfx` / `add_music`.
+- Keep real environmental sound when it already tells the truth.
+- TRENDING platform sounds are licensed inside the platform apps only: cut to
+  the user's uploaded copy, export, and they attach the licensed version
+  in-app. Never substitute a soundalike silently.
+
+"REMOVE THE BACKGROUND MUSIC": `get_edl` first. Music items → `remove_music`.
+None → the music is baked into the source; when `separate_music` is listed,
+`separate_music(music_gain_db=-60)` mutes it and keeps the speech (disclose
+that separation is strong but not surgical; `remove_stem_mix` restores).
+Without it, offer mute ranges, muting everything, or covering with new music.
+- "The music" may be sitting in voiceover — fix the layering.
+- User CANNOT HEAR the music: check gain, ducking and placement; a
+  storage_key starting with 'audio/' is the video's own extracted track.
+
+MASTERING: `set_master_loudness` normalizes the final mix to -14 LUFS on
+preview and export. The AUDIO CHECK measures integrated LUFS, true peak and
+dead air — treat its findings as work.
 
 ## Common failure modes
 
-- Music starts too late, ends early, fights speech or contradicts the style.
-- SFX are repetitive decoration with no visible/narrative trigger.
-- Source, music, SFX and voiceover gains are adjusted through the wrong layer.
+- No bed and no sound design on a reel; digital silence between phrases or
+  on montage passages.
+- Cues whose peak lands after the visual (late whoosh, riser that ends past
+  the payoff).
+- A whoosh on every caption or graphic; UI pops loud enough to compete with
+  speech.
+- Bed too loud under the voice, or pumping on short gaps.
+- Gains changed through the wrong layer; duplicate cues stacked on a graphic
+  that already owns them.
 
 ## Verification procedure
 
-Render the latest EDL; validate spans/fades/looping/ducking, inspect AUDIO CHECK, and listen-check the opening, speech, peaks, every changed SFX window, transitions and ending.
+Render; read the AUDIO CHECK (LUFS, peaks, dead air, bed level under speech);
+compare every cue's authored time with its named event and its landing frame
+in dense rendered looks; listen-check (when the reviewer is available) the
+opening, a dense dialogue passage, each hero moment, transitions and the
+ending. Be able to name the event for every cue; remove orphans.
 
 ## Repair ladder
 
-Retime or refit → correct gain/ducking/fades → replace the asset → remove orphan sound → simplify to source sound or silence → render and review again.
+Retime cues to their landing frames → correct gain and ducking → swap a
+cue's kind → remove orphan or duplicate cues → add the missing bed or
+structural cue → refit music ends → render and review again.

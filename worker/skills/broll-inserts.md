@@ -1,8 +1,8 @@
-# broll-inserts — cutaways vs splices, inserting media, moving scenes, stock footage
+# broll-inserts — B-roll as evidence: cutaways vs splices, designed entrances, moving stills, inserting media, stock footage
 
 ## Editorial decision principles
 
-B-roll is story evidence, not wallpaper. Decide whether speech should continue, prefer authentic user footage, and judge all candidates as one coherent sequence.
+B-roll is story evidence, not wallpaper: show the concrete person, thing, place or event the speaker names, on the words that name it, while the voice keeps going. Premium reels cut to evidence often and make each entrance designed — a whip, a light leak or a card entrance with a whoosh — and never leave a still sitting frozen. Decide whether speech should continue, prefer authentic user footage, and judge all candidates as one coherent sequence.
 
 ## Evidence to inspect
 
@@ -13,7 +13,12 @@ Inspect the kept transcript/program clock, source and downloaded frames, candida
 THE CHOICE: does the voice keep going?
 - B-ROLL / CUTAWAY (the most human editing move): the speaker mentions something concrete — SHOW it while their voice keeps going. add_overlay(fit='cover', start, duration_s 2-6) switches the PICTURE while the program's audio and captions keep running. Placement: get_kept_transcript gives each sentence's PROGRAM time — start the cover ON the words that mention the thing.
 - SPLICE (insert_media): PAUSES the program and adds time. Right for "add this clip at the end", "put it between the scenes", a beat between sentences.
-- Taste: map every proposed cutaway to a narrative purpose (proof, context, contrast, reset, payoff). Density follows the story and format rather than a fixed quota; never cover a punchline that earns a face-on delivery, and never use generic wallpaper merely because a search result exists.
+- Taste: map every proposed cutaway to a narrative purpose (proof, context, contrast, scale, time, place, payoff). On a reel, every concrete noun is a candidate for evidence; density follows the story, not a quota. Never cover a punchline, admission or reaction that earns a face-on delivery, and never use generic wallpaper merely because a search result exists.
+
+DESIGNED ENTRANCES AND MOVING STILLS (short-form):
+- Enter B-roll on the word, and when the cutaway marks a turn give it a designed junction — a whip or zoom_punch, a `light_leak` or `flash_transition` motion graphic — with a whoosh whose peak lands on the cut (read transitions). Plain hard cuts are right inside a fast evidence run.
+- Stills never sit frozen: give photos a slow push or drift (`set_overlay_motion` scale/x/y keyframes, or `insert_media` motion='zoom_in'/'zoom_out'/'pan_left'/'pan_right' on a spliced still), or present them as designed cards with `image_card` or `photo_stack` (3D floating cards with a shutter cue).
+- Archival or 4:3 evidence can sit as a card on a designed background instead of a full-frame crop that destroys it (premium-composition).
 
 INSERTING (insert_media): splices an uploaded clip or image at ANY output position — a mid-take position splits the take at a word edge automatically. For clips longer than ~15s NEVER splice the whole thing: look_at_asset first to find the moment, then pass duration_s (2-8s typical) and clip_start_s. If an insert landed wrong, remove_insert its id BEFORE re-inserting — otherwise both play. Both need a storage_key from list_assets — never invent one. Inserted media is not captioned. NEVER splice a STYLE REFERENCE ("watch this", "like this", "use this song/style", a YouTube they asked you to study). If list_assets marks ROLE=edit_reference, or the studio already dropped that clip on the timeline, remove_insert it and study it with look_at_asset / extract_audio instead.
 
@@ -36,12 +41,13 @@ SOURCING B-ROLL THE EDIT NEEDS (when the tools are listed): the podcast-clip mov
 - The workflow for a mention-driven pass: get_kept_transcript → write the moment map (query/routes + why the viewer needs it + PROGRAM time) → research_broll once for the sequence → compare the balanced visual board globally → add chosen media → inspect the downloaded motion frames → place cover cutaways exactly on the words. If a downloaded clip does not actually show what its thumbnail promised, choose another; never rationalize the first hit.
 Fetched/stock media reach the video only when placed (cover overlay or insert); video overlays are SILENT. ALWAYS tell the user which shots were fetched and from where (title + channel/source) — never describe one as something they filmed. QUALITY ADVISORY: corporate-cheesy stock (staged handshakes, watermarked look, 2010 color) often weakens the edit, but it remains the editor's decision. The user's own footage, even rougher, usually beats generic stock; look_at_asset and preview are available to compare palette and junction quality, never prerequisites to placement.
 
-SOURCING ORDER for b-roll: the user's uploads first (list_assets), then whichever of record_website / fetch_url / generate_image are in CAPABILITIES; if none fit, say so and ask for a clip instead of faking one. Offer b-roll when the user asks to "make it more engaging / professional".
+SOURCING ORDER for b-roll: the user's uploads first (list_assets), then whichever of find_footage / search_stock / research_broll / record_website / fetch_url are listed; if none fit, say so and ask for a clip instead of faking one. Generated imagery is not available — never present an illustration or mockup as footage of a real event. Offer b-roll when the user asks to "make it more engaging / professional".
 
 ## Common failure modes
 
 - First-result, irrelevant, repeated, watermarked, corporate-cheap or palette-incompatible footage.
 - Covering a face-dependent payoff, using the wrong clock, or shipping bad entry/exit junctions.
+- Frozen stills, silent designed entrances, or a turn into B-roll with no junction or sound.
 
 ## Verification procedure
 

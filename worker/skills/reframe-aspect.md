@@ -1,8 +1,8 @@
-# reframe-aspect — vertical/square conversion, screen frames, erasing pixels, blurs
+# reframe-aspect — vertical/square conversion, face-aware full-bleed, cards on designed backgrounds, screen frames, erasing pixels, blurs
 
 ## Editorial decision principles
 
-Aspect conversion is shot-aware composition, not one global center crop. Preserve the subject, UI target and visual intent in every distinct scene.
+Aspect conversion is shot-aware composition, not one global center crop. Preserve the subject, UI target and visual intent in every distinct scene. On a vertical reel the frame is designed edge to edge: face-aware full-bleed for talking heads and modern podcasts, or the picture as a card on a designed background when a crop would destroy it — never a small picture on a flat black void.
 
 ## Evidence to inspect
 
@@ -15,7 +15,8 @@ CHANGING ASPECT — TWO DIFFERENT ASKS.
 - "Fit the whole picture / keep the HUD / letterbox / don't crop" → pad_blur. auto_reframe("9:16", mode="pad_blur") or set_frame("9:16", "pad_blur"). Screen recordings and "don't lose the UI" briefs live here.
 - A bare set_frame crop is a DEAD-CENTER window — on an off-center speaker it looks "cut down the middle". set_frame(ratio, mode, focus_x, focus_y) is the manual aim (focus from a look).
 - Use focus_track for shot-specific focus in SOURCE seconds; one fixed focus_x/y alone does not track a moving subject.
-- For an editorial inset on a black canvas, set_frame(ratio="9:16", mode="crop", picture=[0,0.2890625,1,0.7109375]) places a 4:3 picture natively. Fractions are left/top/right/bottom. crop/pad/pad_blur and focus apply INSIDE that rectangle; new text and captions remain sharp on the full output canvas. No source re-encode or re-index is needed. add_overlay(fit="picture") preserves that layout during a B-roll cutaway.
+- PODCAST AND TALKING-HEAD REELS: default to face-aware full-bleed — auto_reframe("9:16", mode="crop") or set_frame with a shot-aware focus_track so each speaker's face sits in the upper-middle at roughly 28–40% of the frame height, leaving clear space for type. Upscaling a 16:9 source to fill 9:16 (about 1.8x) is normal for this look; check sharpness in the render and use enhance_video if needed.
+- PICTURE CARD ON A DESIGNED BACKGROUND (archival 4:3, wide two-shots, evidence a crop would destroy): set_frame(ratio="9:16", mode="crop", picture=[left,top,right,bottom]) places the picture natively (a 4:3 picture at full width is picture=[0,0.2890625,1,0.7109375], about 42% of the height; a taller rect in crop mode with focus on the subject trims it toward 1:1 or 4:5 so the card fills 55–70% of the height, which reads stronger when the sides hold nothing essential). crop/pad/pad_blur and focus apply INSIDE that rectangle; text and captions stay sharp on the full canvas. Then set_picture_card gives it rounded corners, border, shadow and an entrance, and a designed background — a blurred darkened copy of the picture, a gradient, grain or vignette (read the set_picture_card schema) — never a flat black void. add_overlay(fit="picture") preserves that layout during a B-roll cutaway.
 
 MID-VIDEO ASPECT CHANGE (add_aspect_shift): the frame morphs to another ratio mid-video and back (ratio='source'), timing untouched. Remove with remove_aspect_shift.
 
@@ -35,6 +36,7 @@ CURSOR (enhance_cursor): finds the mouse pointer in a screen recording, filters 
 ## Common failure modes
 
 - A global crop tracks one scene then shows a wall/empty region, clips faces, hides UI/text or uses stale coordinates after a cut.
+- A small card floating on flat black for the whole reel, or tiny footage in gratuitous blurred bars.
 
 ## Verification procedure
 

@@ -1,35 +1,80 @@
-# generate-fetch — AI images/video/sfx, downloading from links
+# generate-fetch — acquiring media: links, the built-in sound kit, found sounds, what cannot be generated, animation requests
 
 ## Editorial decision principles
 
-Create or fetch media only for a concrete editorial gap. Preserve provenance, verify the actual rendition and never mistake acquisition for placement.
+Create or fetch media only for a concrete editorial gap. Preserve
+provenance, verify the actual rendition, and never mistake acquisition for
+placement: a turn that fetched but never placed changed nothing the viewer
+sees.
 
 ## Evidence to inspect
 
-Inspect the requested subject/action, source/license metadata, real downloaded/generated frames, dimensions, duration, artifacts, palette and compatibility with adjacent footage.
+Inspect the requested subject or action, source and licence metadata, real
+downloaded frames, dimensions, duration, artifacts, palette and
+compatibility with adjacent footage.
 
 ## Strong treatment patterns
 
-Everything here is gated on CAPABILITIES — if the tool is not listed there, it is not configured on this deployment: say so honestly and offer the closest alternative. Every created/downloaded thing is a project ASSET and reaches the video only when you PLACE it (insert_media / add_overlay / add_music) — a turn that generated but never placed changed nothing the viewer sees.
+Everything here is gated on the tools you actually have: if a tool is not
+listed, it is not configured on this deployment — say so honestly and offer
+the closest alternative. Every created or downloaded thing is a project
+ASSET and reaches the video only when you PLACE it (`insert_media`,
+`add_overlay`, `add_music`, `add_sfx`, or an image param of a motion
+graphic).
 
-GENERATED IMAGES (generate_image): from a text prompt alone; by restyling a FRAME of the main video (from_video_time_s — "give this character a ponytail" repaints that exact frame); or by restyling an uploaded image (from_asset_key). It lands as a full-frame STILL moment (a freeze-frame cutaway) when inserted — typically 2-4s with a Ken Burns motion so it doesn't sit frozen. It does NOT modify or track the moving footage — say that. Flow for "change X about a character/object": find the moment (filmstrip / look_at), restyle that frame, look_at_asset the result to confirm the change actually shows, insert at that moment, render. If the generation fails or doesn't show the requested change, say so — never insert a bad image silently.
+GENERATED IMAGES AND VIDEO: not available. Valmera does not generate AI
+pictures or moving AI footage. Say so once, then use what does exist: the
+user's footage and photos, fetched or stock media, authored motion graphics
+(UI mockups, image and photo cards, charts, type), colour and gradient
+screens, and freeze frames. Never present an illustration or mockup as
+footage of a real event.
 
-GENERATED VIDEO: not available. You cannot generate moving AI footage. Say so once, then edit the uploaded clips or generate a still image and insert it.
+SOUND — kit first:
+- The built-in kit (`list_sfx_kit()`) has 22 instant, licence-free sounds —
+  whooshes, pops, clicks, ticks, kicks, dings, chimes, notification, coin,
+  risers, impacts, sub drop, glitch, shutter, typing — placed with
+  `add_sfx(storage_key='kit:<kind>', at=...)`. Use it for all ordinary sound
+  design (read audio).
+- Found sounds (the search → audition → fetch chain, or `add_web_sfx` for one
+  exact named sound) are for things the kit lacks: a crowd cheer, a specific
+  door, rain, an engine. Relay the licence line when it carries an
+  obligation.
 
-FETCHED SOUND (search_sfx → fetch_sfx): any one-shot the edit needs, found as a REAL recording on the web ("whoosh", "camera shutter", "keyboard click") and downloaded ready for add_sfx. Placement policy lives in the audio skill: every sound on a nameable visible moment, unrequested ones only where the format calls for sound design.
+LINKS (`fetch_url`): when the user pastes a URL for something they want in
+the edit — a song, a clip, a photo — DOWNLOAD IT instead of asking for an
+upload. It handles direct file links and page links (YouTube, TikTok, Vimeo,
+SoundCloud); as_kind='music' pulls audio out of a video page. If the download
+fails, repeat the tool's reason in one clause and CONTINUE the edit with
+what is available. A link they asked you to WATCH or use as style is a
+REFERENCE: study it with `look_at_asset`, never `insert_media` it as
+footage. When `fetch_url` is not listed, say plainly you cannot fetch links
+and ask for the file.
 
-LINKS (fetch_url): when the user pastes a URL for something they want in the edit — a song, a clip, a photo — DOWNLOAD IT instead of asking for an upload. Handles direct file links (Dropbox, Drive, CDN) and page links (YouTube, TikTok, Vimeo, SoundCloud); works out video/audio/image itself; as_kind='music' pulls audio out of a video page. If the download fails the tool says why (YouTube bot wall, private video, too big, dead link) — repeat that reason in one clause and CONTINUE the edit with already-attached music or clips. A failed fetch is not a reason to freeze the picture or wait for an MP3. Never claim you added something you could not fetch. A link they asked you to WATCH / use as style is a REFERENCE: look_at_asset if you already have the file, do not insert_media it as footage. When fetch_url is NOT listed: say plainly you cannot fetch links and ask for the file (the paperclip in chat).
-
-ANIMATION REQUESTS: distinguish generated moving footage from authored motion graphics. Valmera supports kinetic text, animated vector shapes, overlays and image/camera motion through the listed tools; read text-graphics and use those capabilities when they fulfill the brief. Do not refuse motion graphics merely because AI video generation is unavailable. If the request specifically requires newly generated moving characters or footage and no generation tool is available, explain that precise limitation; do not present animated captions as an equivalent cartoon. Choose motion that communicates meaning, not a bundle of decorative effects.
+ANIMATION REQUESTS: distinguish generated moving footage from authored
+motion graphics. Valmera renders After-Effects-grade motion design — animated
+titles, counters, charts, callouts, UI and social mockups, transitions and
+textures, and fully authored HTML compositions on the MG runtime (read
+motion-design) — plus kinetic text, vector shapes, overlays and camera moves.
+Never refuse motion graphics because AI video generation is unavailable. If
+the request specifically needs newly generated characters or footage,
+explain that precise limitation and offer the motion-graphics route.
 
 ## Common failure modes
 
-- Accepting metadata/thumbnail claims without checking the rendition, repeated near-duplicates, artifacts, wrong aspect, weak provenance or placing media before review.
+- Accepting metadata or thumbnail claims without checking the rendition;
+  near-duplicates; wrong aspect; weak provenance.
+- Fetching or generating and never placing.
+- Promising generated imagery that does not exist on this deployment.
+- Using a found sound where an instant kit sound does the job.
 
 ## Verification procedure
 
-Inspect real frames at several moments, probe dimensions/duration, compare against the named purpose and adjacent footage, then review its placed junctions.
+Inspect real frames at several moments, probe dimensions and duration,
+compare against the named purpose and adjacent footage, then review the
+placed junctions and cues in the render.
 
 ## Repair ladder
 
-Try the configured fallback → refine prompt/query → choose another candidate → crop/fit only if content remains valid → ask for an upload → omit rather than fake.
+Try the configured fallback → refine the query → choose another candidate →
+crop or fit only if content remains valid → use a motion-graphics
+equivalent → ask for an upload → omit rather than fake.

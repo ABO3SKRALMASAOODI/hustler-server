@@ -19,6 +19,7 @@ GOING INTO A SCREEN IN THE SHOT (add_screen_takeover): "I filmed my laptop — z
 
 PRODUCT DEMOS (record_website_demo + showcase_demo — only when listed in CAPABILITIES): "record my site and show it off", "make a launch video". The browser actually USES the site with a visible cursor — glides to a button, clicks, waits, types at human speed, scrolls. You write the script as `steps`. Then showcase_demo(asset_key) places the capture and cuts it: a zoom that pushes in and GLIDES from click to click, a click sound on the exact frame of each press, a soft pop on page changes.
 - SCRIPT A STORY, NOT A TOUR: 4-10 steps showing ONE thing working end to end. A demo that clicks everything shows nothing; ask the user what the one moment is if unclear.
+- FINISH IT LIKE A LAUNCH VIDEO: a hook title in the first second, callouts (arrow_callout, circle_highlight) on the control that matters, a `notification` or `stat_card` for the result the product delivers — only results the demo really shows — and a bed under it (read motion-design and audio).
 - LET IT BREATHE: pass `seconds` on a step to hold on a result the viewer needs to read.
 - It records the PUBLIC site and will not type into password or payment fields — offer to demo the public part, or cut a screen recording they upload. Report every step that did not work; never describe a click that missed as if it landed.
 

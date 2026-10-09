@@ -1,59 +1,118 @@
-# effects-grades — color, stylize, enhancement, speed, restraint
+# effects-grades — one committed look: apply_look, grade and grain, stylize, custom chains, enhancement, speed, fades
 
 ## Editorial decision principles
 
-Treat effects and grade as a coherent visual language. Use them to clarify mood, hierarchy or a real story turn; restraint is a valid complete treatment.
+Coherence is the look. Premium reels commit to ONE grade for the whole piece
+— high-key warm, low-key teal/orange, matte filmic, or desaturated B&W with
+one accent colour — finished with fine grain over everything, a vignette or
+highlight bloom when the look calls for it, and a consistent transition and
+typography language. Effects are punctuation inside that look: flashes,
+shakes, glitches and light leaks mark real beats.
+
+- Commit to one look per edit, from the first write.
+- Grade for the footage and the story, and keep skin believable.
+- Effects mark beats; a stack of five full-frame effects on one instant is a
+  fault, not a look.
+- Screen recordings and UI keep their native colour.
 
 ## Evidence to inspect
 
-Inspect representative frames across every scene, skin tones, white balance, exposure, palette, motion energy, source defects and the rendered result at effect boundaries.
+Inspect representative frames from every scene, skin tones, white balance,
+exposure, palette, source defects (dropouts, noise, compression), motion
+energy, the user's reference and the rendered result at every effect
+boundary.
 
 ## Strong treatment patterns
 
-RESTRAINT OFTEN IS THE LOOK. Every device should earn a reason a viewer would notice. A single aggressive full-frame device and a small finishing palette are often enough, while grain + vignette + glow + chroma + shake can read as a fault. These are taste heuristics, not limits: use any number of devices or finishing passes when the brief and result support them.
+LOOKS (`apply_look`) — one call composes caption look, grade, grain,
+transitions and optional music into a single coherent package and reports
+every component it set:
+- `editorial` — premium podcast/interview default: editorial motion captions,
+  warm-neutral grade, fine grain, restrained junctions.
+- `creator_punch` — high-energy creator: punchy captions, vibrant contrast,
+  fast whips/flashes.
+- `cinematic_doc` — story and documentary: filmic contrast, matte blacks,
+  grain, light-leak/burn junctions.
+- `mono_noir` — desaturated B&W with one accent colour on type.
+- `clean_minimal` — quiet product and education: clean captions, neutral
+  grade, minimal texture.
+- Legacy looks `hype`, `clean`, `cinematic`, `luxury`, `meme` remain.
+The descriptions above are the intent of each look; the tool result lists
+the exact components it set — read it before refining. Refine any component
+afterwards with its own tool; do not layer a second
+look on top. On a vertical reel there must be no fade-in from black: if a
+look sets one, remove it with `set_fades`.
 
-"MAKE IT PUNCHY / EXCITING / VIRAL" can be carried by pace, sound and framing: tighter cuts, punch-ins on emphasis, and bold caption rhythm. Aggressive devices are available whenever your judgment says they strengthen the edit; preview their combined result rather than following a fixed count.
+GRADES (`set_color_grade`: vibrant, warm, cool, bw, vintage, cinematic) —
+choose FOR the footage: 'cinematic' crushes and desaturates (night, drama,
+moody interiors; wrong for a bright kitchen or a colourful product);
+'vibrant' for things that should look alive; 'warm' for skin and interiors;
+'cool' for tech and rain; 'bw' for a mono look with an accent in the type.
+`set_grade_custom` adds continuous control after the preset: exposure,
+temperature, tint, shadows and highlights use 0 as neutral; contrast and
+saturation accept small signed deltas (`contrast=0.08` → 1.08x,
+`saturation=-0.08` → 0.92x, 0 clears the axis).
 
-WHEN THE USER LISTS SEVERAL DEVICES ("zoom + flash + shake + glow + speed ramp"), THEY ARE ASKING FOR SEVERAL MOMENTS — a shot list, not a stack. Give each device the beat that earns it and let the rest breathe. Firing three into the same half-second delivers one blown-out instant on an otherwise untouched video.
+GRAIN AND TEXTURE: grain at a low intensity (about 0.15–0.3 on
+`add_stylize` grain) across the whole program reads as film, not noise;
+vignette 0.2–0.4 focuses a talking head; glow on highlights suits hero
+numbers and night footage. Apply texture program-wide so it never pops on
+and off between shots.
 
-GRADES (set_color_grade: vibrant, warm, cool, bw, vintage, cinematic) — choose FOR the footage: 'cinematic' crushes and desaturates — right for night, drama, moody interiors; wrong for a bright kitchen, food, a sunny gym, a colourful product. 'vibrant' for anything that should look alive, 'warm' for skin and interiors, 'cool' for tech and rain, 'bw'/'vintage' only when asked. A UI/screen recording takes NO grade — it is meant to look like itself.
-- set_grade_custom is continuous control applied AFTER the preset. Exposure,
-  temperature, tint, shadows and highlights use 0 as neutral. Contrast and
-  saturation accept SMALL SIGNED DELTAS too: `contrast=0.08` means 1.08x,
-  `saturation=-0.08` means 0.92x, and **0 clears the axis**. An explicit final
-  multiplier >=0.5 still works (`saturation=1.15`). Prefer signed deltas for
-  natural corrections. For monochrome use the explicit `bw` preset; never try
-  to restore ORIGINAL colour with contrast/saturation zero and then compensate
-  with another filter.
+STYLIZE (`add_stylize`): grain, vignette, glow, chromatic, dream_blur, vhs,
+flash, shake, stabilize, motion_blur — windowed, intensity 0–1. Use flash
+(1–2 frames), shake (short, decaying) and chromatic as beat punctuation on
+hero landings, together with the graphic and the hit sound. 'stabilize'
+smooths handheld wobble; 'motion_blur' blurs real movement.
 
-PICTURE QUALITY IS NOT A LOOK. "Make it clearer / sharper / better quality / HD" means enhance_video (sharpen + optional denoise), NOT a grade or contrast bump — and if a grade is already on when they ask for "no filters, just clearer", take the grade off in the same turn. Be straight that it recovers detail, not resolution: 480p stays 480p.
+WHEN THE USER LISTS SEVERAL DEVICES ("zoom + flash + shake + glow + speed
+ramp") they are asking for several MOMENTS — give each device the beat that
+earns it instead of firing them all into one half-second.
 
-STYLIZE (add_stylize): grain, vignette, glow, chromatic, dream_blur, vhs, flash, shake, stabilize, motion_blur — windowed, intensity 0-1. One or two read as a look; five read as a broken TV. 'stabilize' smooths handheld wobble (crops a few percent; cannot fix a whip or a walk). 'motion_blur' adds real blur on movement.
+PICTURE QUALITY IS NOT A LOOK. "Clearer / sharper / HD" means
+`enhance_video` (sharpen + optional denoise), not a grade; it recovers detail,
+not resolution.
 
-WRITE YOUR OWN CHAIN (add_custom_filter) — when the user asks for a look NO preset makes (CRT phosphor, posterize, thermal, selective hue rotation, a duotone), write the ffmpeg chain yourself instead of refusing or faking it with the nearest preset:
-- ONE chain on the single video stream: filters separated by commas. No ';', no '[labels]' (that is graph syntax — the renderer owns the graph), no file access, and the chain must return the same frame size and rate it receives (reframing is set_frame's job).
-- It dry-runs on the real footage BEFORE it stores: a broken chain returns ffmpeg's own error naming the filter at fault — fix the chain, never resend the identical string. An over-heavy chain returns its measured cost — drop the heaviest filter or narrow the window.
-- start/end are program seconds and the moment follows its footage through later cuts, exactly like stylize. Give it a short label ('CRT green') — that is what the user sees in the edit summary.
-- A chain that parses can still look wrong, and only your eyes can tell: after the next preview, look_at output frames inside the window before you describe the effect. Not the look you meant → remove_custom_filter and write a better chain.
-- A custom chain participates in the same visual palette as every other effect. Presets are a fast starting point, while custom chains remain available for combinations or looks they cannot express; judge the composite result instead of counting devices.
-- RECOLOR ONE THING ("make the leaves red", "turn the sky purple", "the car but in black") — the recipe exists, use it: `huesaturation` rotates hue for ONE named color range and holds everything else. Greens toward red/purple: `huesaturation=hue=120:colors=g:strength=8` (hue -180..180 picks the target shade, colors is r/y/g/c/b/m, strength raises selectivity). Desaturate just the car's blues: `huesaturation=saturation=-1:colors=b:strength=10`. Iterate with your eyes as much as useful: apply → preview → look_at a frame WITH the object and one WITHOUT. If colors cannot be separated cleanly in this footage, say plainly what bleeds together instead of quietly reverting.
+WRITE YOUR OWN CHAIN (`add_custom_filter`) for a look no preset makes
+(CRT phosphor, posterize, duotone, selective hue):
+- ONE comma-separated chain on the single video stream; no ';' or
+  '[labels]', no file access, same frame size and rate out as in.
+- It dry-runs on the real footage before storing; fix the chain the error
+  names instead of resending it.
+- start/end are program seconds; give it a short label.
+- After the preview, look at frames inside the window before describing it.
+- RECOLOR ONE THING: `huesaturation` rotates hue for one colour range
+  (`huesaturation=hue=120:colors=g:strength=8`; desaturate just blues with
+  `huesaturation=saturation=-1:colors=b:strength=10`). Check a frame with and
+  without the object.
 
-SPEED (set_speed / remove_speed): 0.25x-4x on a SOURCE range; audio keeps pitch; everything on the program timeline re-anchors automatically. Slow motion below 0.6x visibly steps (frames are duplicated, not synthesized) — prefer 0.6-0.8x and say the tradeoff. An overlapping span replaces the old one.
+SPEED (`set_speed` / `remove_speed`): 0.25–4x on a SOURCE range; audio keeps
+pitch; everything re-anchors. Below 0.6x frames are duplicated, so prefer
+0.6–0.8x and say the trade-off.
 
-LOOKS (apply_look): one call composes a whole aesthetic and reports each component — 'hype' (beast xl captions, vibrant, zoom_punch), 'clean' (podcast captions, ungraded, gentle fades), 'cinematic' (elegant captions, cinematic grade + warmth, dip_black), 'luxury' (luxe captions, warm), 'meme' (impact xl captions, flash cuts, grain). It never touches cuts, music or sfx; refine components with their own tools after.
-
-FADES (set_fades): fade from/to black at the very start/end. A closing fade belongs on long-form and cinematic pieces only — on a reel it plays into the loop. A 1s fade-in on a reel is a second of black at the only moment retention is decided.
-
-RHYTHM (short-form): reserve pattern interrupts for meaningful changes in information, emotion, speaker energy, musical phrase or visual legibility. A punch-in, B-roll beat, freeze-frame or text card should make that change clearer—not merely reset a timer. Let strong faces, reactions and suspense hold; compress lists or escalations when their internal rhythm earns it. ONE dominant device at a time, chosen by what the moment is doing.
+FADES (`set_fades`): a closing fade belongs on long-form and cinematic
+pieces. On a reel it plays into the loop, and a fade-in spends the only
+second where retention is decided on black.
 
 ## Common failure modes
 
-- Repetitive pattern interrupts, crushed highlights/blacks, damaged skin tones, scene-inconsistent grade or effects masking information.
+- Two looks mixed (hype captions over a cinematic grade), or a grade that
+  changes from shot to shot.
+- Crushed highlights or blacks, damaged skin tones, a cinematic crush on
+  bright cheerful footage.
+- Texture that pops on and off; grain so heavy it reads as noise.
+- Five effects on one instant; effects masking information; a fade-in on a
+  reel.
 
 ## Verification procedure
 
-Review representative frames from every distinct scene plus all effect boundaries and motion windows; compare subject, skin, text/UI and palette continuity.
+Review representative rendered frames from every distinct scene plus every
+effect boundary: one consistent grade, believable skin, readable type over
+the graded picture, grain visible but quiet, punctuation effects landing on
+their beats.
 
 ## Repair ladder
 
-Reduce intensity → scope to the intended scene/color → correct custom controls → choose a restrained preset → remove the effect → render every affected scene again.
+Reduce intensity → scope to the intended scene or colour → correct custom
+controls → unify to the one committed look → remove the extra effect → render
+every affected scene again.
