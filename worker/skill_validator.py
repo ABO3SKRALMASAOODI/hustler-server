@@ -41,8 +41,33 @@ DATED_HISTORY = (
 )
 
 
+# Tool modules merged into TOOLS with TOOLS.update(<module>.TOOL_SPECS).
+EXTRA_TOOL_SOURCES = (ROOT / "motion_tools.py",)
+
+
+def _dict_keys(path: Path, name: str) -> set[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if any(isinstance(t, ast.Name) and t.id == name for t in targets) \
+                    and isinstance(node.value, ast.Dict):
+                return {k.value for k in node.value.keys
+                        if isinstance(k, ast.Constant) and isinstance(k.value, str)}
+    return set()
+
+
 def tool_names(path: Path = TOOLS_SOURCE) -> set[str]:
     """Extract public tool keys without importing the worker dependency tree."""
+    extra: set[str] = set()
+    if path == TOOLS_SOURCE:
+        for source in EXTRA_TOOL_SOURCES:
+            if source.exists():
+                extra |= _dict_keys(source, "TOOL_SPECS")
+    return _literal_tool_names(path) | extra
+
+
+def _literal_tool_names(path: Path) -> set[str]:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     for node in ast.walk(tree):
         if not isinstance(node, (ast.Assign, ast.AnnAssign)):
