@@ -69,8 +69,13 @@ LAYOUTS FOR 9:16:
   speaker who moves inside a shot (still while they sway, a smooth glide
   only when a still card would cut the head, never across a cut — each
   shot gets its own framing); a source below
-  720p is shown whole (a 4:3 talk becomes a full-width 4:3 card, ~1.6x,
-  instead of a 3.7x crop that cuts the head). Give it rounded corners, a
+  720p is never a 3.7x crop that cuts the head: one 4:3 archival speaker
+  (box omitted; a two-shot stays whole) gets a full-width, near-square window framed on the face
+  (y .27-.70, ~43% of the frame, ~2.5x — the 37% 4:3 card read as a
+  postage stamp) with the headline band above it and a whole caption band
+  below; fit='pad' shows the whole stage (~1.6x). A thin band of a pillar
+  or frame edge along the card's edge is slid off (EDGE SLIVER names one
+  it cannot clear). Give it rounded corners, a
   hairline border, a soft shadow and an entrance that dissolves the card in
   from the full-frame shot (fade/lift; on a cut, 'none'). Leave the
   canvas to the default — a dark tone sampled from the footage glowing to
@@ -89,8 +94,12 @@ LAYOUTS FOR 9:16:
   evidence is discussed. Crop the evidence to what is being read (the
   highlighted sentence and its source line), so it is legible, and keep the
   speaker's face in frame the whole time (the speaker panel is solved from
-  the face: chin, hair and lead room inside it); never a crop that drops the
-  speaker for seconds or slices the inset. The panels keep a caption band
+  the face: chin, hair and lead room inside it, the face box 8% inside each
+  edge); never a crop that drops the speaker for seconds or slices the
+  inset. Where the source's screen box touches the face, the panel shows a
+  corner of it softened only away from the face, and the result measures a
+  speaker card alone and the speaker full-bleed against the stack — follow
+  a BETTER LAYOUT line. The panels keep a caption band
   between them; leave the band above for the stat; zooms do not play inside
   a stack.
 - **Two speakers**: shot-aware reframing that cuts to the active speaker, or

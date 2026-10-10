@@ -579,6 +579,12 @@ def conceal_jump_cuts(ctx, mode="scale_step", step=None, at=None):
             if k is None:
                 skipped.append((c, why))
                 continue
+            # never a step that opens a sliver of a pillar or frame edge
+            # along the card's edge (picture_cards.sliver_shift)
+            band = atools._step_sliver(ctx, card, k, a_src, b_src, src_w, src_h, W, H)
+            if band:
+                skipped.append((c, band))
+                continue
             t0, t1 = _source_span(tl, a_src, b_src)
             tgt = by_id[card["id"]]
             spans = list(tgt.get("cut_steps") or [])
