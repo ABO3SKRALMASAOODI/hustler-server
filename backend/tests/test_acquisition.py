@@ -114,6 +114,9 @@ def _crm_client(monkeypatch, key):
     conn=MagicMock();cur=conn.cursor.return_value.__enter__.return_value
     cur.fetchone.return_value={'value':hashlib.sha256(key.encode()).hexdigest()}
     monkeypatch.setattr(admin,'get_db',lambda:conn)
+    # The owner's browsers (ever opened the admin) are never people.
+    from admin_metrics import visitors as admin_visitors
+    monkeypatch.setattr(admin_visitors,'internal_ids',lambda cur:['ownerdevice1'])
     admin_db.reset_features()
     return app.test_client(), cur
 
@@ -133,6 +136,7 @@ def test_admin_and_scoped_crm_report_authorization(monkeypatch):
     # referrers classify each browser (link previews are not people).
     assert params[0]==[CODE] and params[-1]==[CODE]
     assert 'facebookexternalhit' in params[1] and 'm.facebook.com' in params[2]
+    assert params[3]==['ownerdevice1'] and 'AS internal' in query
     assert "amount_cents > 0" in query and 'link_previews' in query
     assert client.post('/admin/outreach-conversions',headers={'Authorization':'Bearer '+key},json={'codes':['private@example.com']}).status_code==400
     admin_db.reset_features()

@@ -183,6 +183,8 @@ def messages_without_edit(cur, period, include_owner=False, recent_limit=20):
                          WHERE u.id = ANY(%s)""",
                     (list({r['user_id'] for r in rows}),))
         status = {r["id"]: r["status"] for r in cur.fetchall()}
+    for r in rows:
+        r["status"] = status.get(r["user_id"], "free")
     return {
         "paying": sum(1 for r in rows if r["paying"]),
         "free": sum(1 for r in rows if not r["paying"]),
@@ -190,8 +192,7 @@ def messages_without_edit(cur, period, include_owner=False, recent_limit=20):
         "rows": rows,
         "recent": [{"message_id": r["id"], "project_id": r["project_id"],
                     "customer": {"id": r["user_id"], "email": r["email"],
-                                 "plan": r["plan"],
-                                 "status": status.get(r["user_id"], "free")},
+                                 "plan": r["plan"], "status": r["status"]},
                     "at": defs.iso(r["created_at"]),
                     "reply_kind": r["reply_kind"]}
                    for r in rows[:recent_limit]],

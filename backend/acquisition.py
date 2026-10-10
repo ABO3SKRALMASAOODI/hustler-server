@@ -144,6 +144,12 @@ SOCIAL_LABELS = {'instagram': 'Instagram', 'facebook': 'Facebook',
 SOCIAL_NAMES = set(SOCIAL_LABELS) | {'twitter', 'fb'}
 PAID_MEDIA = {'cpc', 'ppc', 'paid', 'ads', 'paid_social', 'paidsocial'}
 OWN_HOSTS = ('valmera.io',)
+# Steps inside sign-in or checkout, never where someone came from: Google's
+# consent screen links to /legal, a failed Google sign-in returns to /login,
+# and Paddle's checkout can send the buyer back. A touch from one of these is
+# a landing that was not saved, like a touch from valmera.io itself.
+NOT_A_SOURCE_HOSTS = ('accounts.google.com', 'accounts.youtube.com',
+                      'appleid.apple.com', 'paddle.com', 'paddle.io')
 
 
 def _host(value):
@@ -201,7 +207,7 @@ def channel(touch, first_page=None):
                        network=SOCIAL_LABELS.get(network, network.title()))
     if not source:
         return _result('not_recorded')
-    if any(_is(host, own) for own in OWN_HOSTS):
+    if any(_is(host, own) for own in OWN_HOSTS + NOT_A_SOURCE_HOSTS):
         return _result('not_recorded')
 
     # 2. Email.
@@ -302,21 +308,24 @@ def report(cur, scope, codes=None, group_by="link", with_people=False):
         # Classify every browser with the admin's visitor rules (G8) so each
         # row also says how many were people and how many were previews.
         from admin_metrics import db, defs
-        from admin_metrics.visitors import CLASS_SQL
+        from admin_metrics.visitors import CLASS_SQL, internal_ids
         interacted = ('bool_or(COALESCE(pv.interacted, FALSE))'
                       if db.has_column(cur, 'page_visits', 'interacted')
                       else 'FALSE')
         people_cte = f''', d AS (
         SELECT pv.device_id,
           bool_or(COALESCE(pv.user_agent,'') ~* %s) AS robot,
-          FALSE AS internal, count(*) AS pages,
+          count(*) AS pages,
           max(COALESCE(pv.scroll_depth,0)) AS scroll,
           max(COALESCE(pv.time_on_page,0)) AS active_s,
           {interacted} AS interacted,
           bool_or(EXISTS (SELECT 1 FROM website_events e WHERE e.visit_id=pv.analytics_id)) AS clicked,
           bool_and((COALESCE(pv.attribution->'first'->>'code','') <> ''
                     OR COALESCE(pv.attribution->'last'->>'code','') <> '')
-                   AND COALESCE(pv.referrer,'') = ANY(%s)) AS preview_shape
+                   AND COALESCE(pv.referrer,'') = ANY(%s)) AS preview_shape,
+          -- The owner's own browsers are never people (same rule as the
+          -- admin's outreach report).
+          bool_or(pv.device_id = ANY(%s)) AS internal
         FROM page_visits pv
         WHERE pv.analytics_id IS NOT NULL
           AND pv.device_id IN (SELECT device_id FROM visit_touches)
@@ -326,9 +335,10 @@ def report(cur, scope, codes=None, group_by="link", with_people=False):
           count(DISTINCT vt.device_id) FILTER (WHERE dc.cls='person') AS people,
           count(DISTINCT vt.device_id) FILTER (WHERE dc.cls='link_preview') AS link_previews'''
         people_join = 'LEFT JOIN device_class dc ON dc.device_id=vt.device_id'
-        params = params[:1] + [defs.ROBOT_UA, list(defs.PREVIEW_REFERRERS)] \
-            + params[1:] if codes is not None else \
-            [defs.ROBOT_UA, list(defs.PREVIEW_REFERRERS)]
+        classify = [defs.ROBOT_UA, list(defs.PREVIEW_REFERRERS),
+                    list(internal_ids(cur))]
+        params = params[:1] + classify + params[1:] if codes is not None \
+            else classify
     cur.execute(f'''
       WITH payment AS (
         SELECT user_id, bool_or(amount_cents > 0 AND status IN ('paid','completed')) AS paid,

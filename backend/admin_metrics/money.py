@@ -272,10 +272,15 @@ def stopped_paying(cur, period):
                 (period.from_day, period.to_day))
     stopped = int(cur.fetchone()["n"])
     # A paying account that disappears from the next day's snapshot (deleted
-    # or no longer billed) also stopped paying.
+    # or no longer billed) also stopped paying. Only days whose next-day
+    # snapshot has been taken can show a disappearance: until the first
+    # hourly tick of a new day writes its rows, every account is "missing"
+    # from it, and counting those would report every paying customer as
+    # stopped for the first hour of each day.
     cur.execute("""
         SELECT count(*) AS n FROM billing_daily_status prev
          WHERE prev.paying AND prev.day >= %s AND prev.day < %s
+           AND prev.day < (SELECT max(day) FROM billing_daily_status)
            AND NOT EXISTS (SELECT 1 FROM billing_daily_status nxt
                             WHERE nxt.user_id = prev.user_id
                               AND nxt.day = prev.day + 1)""",
@@ -292,6 +297,7 @@ BILLING_PROBLEMS_SQL = """
     SELECT u.id, u.email, u.plan, u.is_subscribed, u.billing_status,
            u.trial_status, u.credits_monthly, u.subscription_id,
            u.billing_synced_at, u.payment_failed_at,
+           {STATUS} AS status,
            CASE
              WHEN u.billing_status = 'canceled' AND u.is_subscribed = 1
                THEN 'canceled_but_subscribed'
@@ -332,7 +338,8 @@ PROBLEM_TEXT = {
 
 
 def billing_problems(cur):
-    cur.execute(BILLING_PROBLEMS_SQL.replace("{CUSTOMER}", defs.customer("u")))
+    cur.execute(BILLING_PROBLEMS_SQL.replace("{CUSTOMER}", defs.customer("u"))
+                .replace("{STATUS}", STATUS_SQL))
     rows = [dict(r) for r in cur.fetchall()]
     cur.execute("""SELECT max(billing_synced_at) AS t FROM users
                     WHERE billing_synced_at IS NOT NULL""")

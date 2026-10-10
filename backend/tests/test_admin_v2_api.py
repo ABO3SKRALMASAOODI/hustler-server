@@ -499,7 +499,7 @@ def customer_routes():
              "device_type": "phone", "status": "paying", "projects": 2,
              "exports": 1, "paid_cents": 1500,
              "last_active_at": datetime(2026, 10, 10, 9, tzinfo=timezone.utc)}]),
-        ("FROM users u LEFT JOIN website_signups ws ON ws.user_id = u.id WHERE u.id = ANY", [
+        ("fp ON TRUE WHERE u.id = ANY", [
             {"id": 7, "created_at": datetime(2026, 10, 9, 8), "has_row": True,
              "attribution": {"first": {"source": "chatgpt.com", "at": 1},
                              "last": None},
@@ -553,7 +553,7 @@ def test_customer_page_contract(app):
             "billing_synced_at": T0, "status": "paying",
             "last_active_at": T0}]),
         ("FROM job_credits", [{"used": 12.5}]),
-        ("FROM users u LEFT JOIN website_signups ws ON ws.user_id = u.id WHERE u.id = ANY", []),
+        ("fp ON TRUE WHERE u.id = ANY", []),
         ("FROM onboarding_responses WHERE user_id = %s", []),
         ("FROM payments p WHERE p.user_id = %s", [
             {"id": 1, "at": datetime(2026, 10, 9, 9), "amount_cents": 1500,

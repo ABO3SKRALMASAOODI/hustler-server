@@ -141,7 +141,8 @@ def billing_mismatches(cur):
             "title": title,
             "detail": f"Our records: {ours}. Paddle: {paddle}.",
             "customer": {"id": r["id"], "email": r["email"],
-                         "plan": r["plan"], "status": "free"},
+                         "plan": r["plan"],
+                         "status": r.get("status") or "free"},
             "project_id": None,
             "occurred_at": defs.iso(r["billing_synced_at"]),
             "href": f"/admin/customers/{r['id']}"})
@@ -170,7 +171,8 @@ def messages_no_edit(cur):
                        "within 15 minutes."),
             "customer": {"id": r["user_id"], "email": r["email"],
                          "plan": r["plan"],
-                         "status": "paying" if paying else "free"},
+                         "status": r.get("status") or
+                         ("paying" if paying else "free")},
             "project_id": r["project_id"],
             "occurred_at": defs.iso(r["created_at"]),
             "href": f"/admin/projects/{r['project_id']}?tab=conversation"})

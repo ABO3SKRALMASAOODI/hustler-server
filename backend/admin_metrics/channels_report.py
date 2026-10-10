@@ -30,6 +30,15 @@ def _tracking_sql(cur):
             else "NULL::text")
 
 
+# The signup browser's first recorded page (the connector rule in
+# acquisition.channel needs it). One definition for Growth and Customers.
+FIRST_PAGE_LATERAL = """LEFT JOIN LATERAL (
+              SELECT pv.page FROM page_visits pv
+               WHERE ws.device_id IS NOT NULL AND pv.device_id = ws.device_id
+                 AND pv.analytics_id IS NOT NULL
+               ORDER BY pv.visited_at LIMIT 1) fp ON TRUE"""
+
+
 def signup_rows(cur, period, extra_where="", extra_params=None):
     """Customer signups in the period with their stored touch and outcomes."""
     params = period.params()
@@ -53,11 +62,7 @@ def signup_rows(cur, period, extra_where="", extra_params=None):
                          WHERE {defs.success('p')} AND p.currency = 'USD'), 0)
                          AS cents
                 FROM payments p WHERE p.user_id = u.id) pay ON TRUE
-          LEFT JOIN LATERAL (
-              SELECT pv.page FROM page_visits pv
-               WHERE ws.device_id IS NOT NULL AND pv.device_id = ws.device_id
-                 AND pv.analytics_id IS NOT NULL
-               ORDER BY pv.visited_at LIMIT 1) fp ON TRUE
+          {FIRST_PAGE_LATERAL}
          WHERE {defs.customer('u')} {where} {extra_where}""", params)
     return [dict(r) for r in cur.fetchall()]
 
@@ -91,6 +96,10 @@ def touch_for(row, model="first"):
             return not_recorded("nothing_sent")
         if touch:
             out = channel(touch, row.get("first_page"))
+            if out["channel"] == "not_recorded":
+                # A touch from valmera.io itself or from a sign-in/checkout
+                # page: the real landing was not saved. Never reason-less.
+                return not_recorded("landing_lost")
             out.update(code=touch.get("code") or None,
                        at=_touch_at(touch),
                        estimated=tracking == "estimated_from_referrer",
@@ -138,8 +147,9 @@ def people_by_channel(cur, period, model="first"):
     out = {}
     for row in visitors.people_rows(cur, period):
         touch = _people_touch(row, model)
-        c = channel(touch, row.get("first_page")) if touch else \
-            not_recorded("landing_lost")
+        c = channel(touch, row.get("first_page")) if touch else None
+        if c is None or c["channel"] == "not_recorded":
+            c = not_recorded("landing_lost")
         bucket = out.setdefault(c["channel"], {"people": 0, "details": {}})
         bucket["people"] += 1
         key = c.get("detail") or c.get("reason") or "unknown"
@@ -344,11 +354,15 @@ def customer_touches(cur, user_ids):
     """{user_id: (first Touch, last Touch, tracking)} for a page of customers."""
     if not user_ids:
         return {}
+    # The first page is read exactly as signup_rows reads it, so a signup
+    # that landed on /mcp/authorize is "AI assistants · Connector" here too,
+    # not "No referrer" (Customers must agree with Growth, G6).
     cur.execute(f"""
         SELECT u.id, u.created_at, (ws.user_id IS NOT NULL) AS has_row,
                ws.attribution, {_tracking_sql(cur)} AS tracking,
-               NULL::text AS first_page
+               fp.page AS first_page
           FROM users u LEFT JOIN website_signups ws ON ws.user_id = u.id
+          {FIRST_PAGE_LATERAL}
          WHERE u.id = ANY(%s)""", (list(user_ids),))
     out = {}
     for r in cur.fetchall():

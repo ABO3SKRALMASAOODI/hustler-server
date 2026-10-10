@@ -319,6 +319,20 @@ def _visitor_status(period):
     return "ok", None
 
 
+def _signed_in_known(period):
+    """Visits say whether the person was signed in only since the tracker
+    release that also sends `interacted` (migration 031 + frontend). Before
+    that every row reads FALSE, which is unknown, not zero (G4)."""
+    since = (_tracking_meta() or {}).get("interaction_since")
+    if not since or period.start is None:
+        return False
+    try:
+        at = datetime.fromisoformat(str(since).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return period.start >= at
+
+
 def people_metric(cur, period, with_spark=True, href=True):
     status, note = _visitor_status(period)
     cls = visitors.classify(cur, period)
@@ -330,7 +344,9 @@ def people_metric(cur, period, with_spark=True, href=True):
                      registry.item("robots", cls["robot"]),
                      registry.item("no_signal_loads", cls["no_signal"]),
                      registry.item("internal", cls["internal"]),
-                     registry.item("returning_customers", cls["signed_in"])]
+                     registry.item("returning_customers",
+                                   cls["signed_in"]
+                                   if _signed_in_known(period) else None)]
     spark = []
     if with_spark and period.to_day:
         sp = ranges.trailing_days(14, period.to_day)
@@ -1047,19 +1063,13 @@ def revenue_billing_problems():
     def compute():
         cur = db.cursor()
         rows, last = money.billing_problems(cur)
-        statuses = {}
-        if rows:
-            cur.execute(f"""SELECT u.id, {money.STATUS_SQL} AS status
-                              FROM users u WHERE u.id = ANY(%s)""",
-                        ([r["id"] for r in rows],))
-            statuses = {r["id"]: r["status"] for r in cur.fetchall()}
         out = []
         for r in rows:
             title, ours, paddle = money.PROBLEM_TEXT.get(
                 r["problem"], (r["problem"], "", ""))
             out.append({"customer": {"id": r["id"], "email": r["email"],
                                      "plan": r["plan"],
-                                     "status": statuses.get(r["id"], "free")},
+                                     "status": r.get("status") or "free"},
                         "problem": title, "ours": ours, "paddle": paddle,
                         "since": defs.iso(r["payment_failed_at"]
                                           or r["billing_synced_at"])})
