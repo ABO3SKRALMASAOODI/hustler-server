@@ -159,7 +159,7 @@ def caption_review_times(edl, index, workdir, duration, max_times=16):
             edl = json.loads(json.dumps(edl))
             motion_layer.fill_footprints(edl, *frame_dims(
                 float(video.get("width") or 1920), float(video.get("height") or 1080),
-                (edl.get("frame") or {}).get("ratio")))
+                (edl.get("frame") or {}).get("ratio")), index=index, tl=tl)
         path = caplib.build_ass(
             edl, index, tl, os.path.join(workdir, "caption_review.ass"))
         states = sorted(set(stitch.ass_events(path))) if path else []
@@ -2011,8 +2011,8 @@ def captions_current(meta, edl):
 
     True unless the EDL burns transcript captions whose timing moved with
     config.CAPTION_TIMING_VERSION — a motion look (crisp reveals, lines that
-    clear on cuts) or a design-v2 track over a program with a cut — and the
-    render predates it. Only the splice/reuse path asks, exactly like
+    clear on cuts) or a design-v2 track (v1: over a program with a cut; v2:
+    any, its cards keep names whole) — and the render predates it. Only the splice/reuse path asks, exactly like
     camera_current: a cached render served for its own version keeps its
     cache.
     """
@@ -2020,12 +2020,15 @@ def captions_current(meta, edl):
     caps = edl.get("captions")
     if not (isinstance(caps, dict) and caps.get("mode") == "from_transcript"):
         return True
-    if ((meta or {}).get("cap_v") or 0) == config.CAPTION_TIMING_VERSION:
+    cap_v = (meta or {}).get("cap_v") or 0
+    if cap_v == config.CAPTION_TIMING_VERSION:
         return True
     if motion_captions.look_of(edl):
         return False
     if caps.get("design_version") != caplib.CAPTION_DESIGN_VERSION:
         return True
+    if cap_v < 2:
+        return False      # v2: name/noun-phrase-aware cards on every v2 track
     return not caplib.program_cuts(Timeline(edl.get("keep") or [],
                                             edl.get("inserts") or [],
                                             edl.get("speed")))
@@ -2047,19 +2050,24 @@ def legibility_current(meta, edl):
 
 
 def carry_current(meta, edl):
-    """Were this render's captions planned with today's word-level muting?
+    """Were this render's captions planned with today's caption plan (one
+    reading path, worker/caption_carry.py)?
 
-    Only transcript-caption EDLs with motion graphics can be stale: before
-    config.CAPTION_CARRY_VERSION every caption under a muting graphic was
-    hidden for its whole window, and a counter's number was read twice.
-    Same grandfathering discipline as legibility_current: everything else
-    keeps its cache, and a missing stamp on such an EDL means the render
-    predates the plan.
+    Only transcript-caption EDLs with motion graphics, and EDLs with a
+    phrase_build lockup (its words now land on their spoken onsets), can be
+    stale: before config.CAPTION_CARRY_VERSION every caption under a muting
+    graphic was hidden for its whole window (v1), and captions ran under a
+    graphic in a different text from the phrase it showed (v2). Same
+    grandfathering discipline as legibility_current: everything else keeps
+    its cache, and a missing stamp on such an EDL means the render predates
+    the plan.
     """
     edl = edl or {}
     caps = edl.get("captions")
-    if not (isinstance(caps, dict) and caps.get("mode") == "from_transcript"
-            and edl.get("motion")):
+    lockup = any(isinstance(m, dict) and m.get("template") == "phrase_build"
+                 for m in edl.get("motion") or [])
+    if not ((isinstance(caps, dict) and caps.get("mode") == "from_transcript"
+             and edl.get("motion")) or lockup):
         return True
     return ((meta or {}).get("carry_v") or 0) == config.CAPTION_CARRY_VERSION
 
@@ -5264,7 +5272,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         # footprint here — none, another frame shape, or only the browserless
         # lane's estimate — are measured now (worker/caption_carry.py).
         if not audio_only:
-            motion_layer.fill_footprints(edl, W, H, fps)
+            motion_layer.fill_footprints(edl, W, H, fps, index=index, tl=tl)
         ass_path = caplib.build_ass(edl, index, tl,
                                     os.path.join(workdir, "captions.ass"),
                                     play_res=(W, H))
@@ -5937,6 +5945,21 @@ def _caption_index_fp(edl_json, index):
     # their fingerprint, so every other caption render keeps its cache.
     if caplib.has_split_words(words):
         h.update(b"caption-words:rejoin-v1;")
+    # Renders burned before a word whose midpoint a cut removed was kept for
+    # its surviving SOUND (Timeline.kept_words rescue) left those words out.
+    # Only programs where a word is rescued change their fingerprint (the
+    # rescued words themselves are mixed in: a speech envelope added to the
+    # index later can move them).
+    if edl_json.get("keep") and words:
+        try:
+            rescued = caplib.rescued_words(index, Timeline(
+                edl_json.get("keep") or [], edl_json.get("inserts") or [],
+                edl_json.get("speed")))
+        except Exception:  # noqa: BLE001 — the fingerprint never fails a render
+            rescued = []
+        if rescued:
+            h.update(("caption-words:heard-v1:" + json.dumps(rescued) + ";")
+                     .encode("utf-8"))
     for w in words:
         h.update(f"{w.get('w', '')}|{w.get('t0')}|{w.get('t1')};"
                  .encode("utf-8"))
@@ -6168,8 +6191,8 @@ def _timeline_stitch(job_id, prev_edl, new_edl, tl_prev, tl_new, index,
     W, H, fps = _composition_geometry(new_edl, src_local, preview)
     # Both programs place their captions clear of the graphics' footprints
     # (worker/caption_carry.py), measured once per composition.
-    motion_layer.fill_footprints(new_edl, W, H, fps)
-    motion_layer.fill_footprints(prev_edl, W, H, fps)
+    motion_layer.fill_footprints(new_edl, W, H, fps, index=index, tl=tl_new)
+    motion_layer.fill_footprints(prev_edl, W, H, fps, index=index, tl=tl_prev)
 
     # Both programs' burned captions, with payloads: plan_timeline PAIRS the
     # events modulo each run's shift and re-encodes any span where the two
@@ -6300,7 +6323,7 @@ def _caption_change_windows(prev_edl, tl_prev, full_cap, index, workdir, W, H,
     do not burn alike re-encodes too (timeline mode checks the same way)."""
     if not prev_edl.get("captions") and not full_cap:
         return []
-    motion_layer.fill_footprints(prev_edl, W, H, fps)
+    motion_layer.fill_footprints(prev_edl, W, H, fps, index=index, tl=tl_prev)
     prev_cap = caplib.build_ass(prev_edl, index, tl_prev,
                                 os.path.join(workdir, "stitch_cap_prev.ass"),
                                 play_res=(W, H)) if prev_edl.get("captions") else None
@@ -6378,7 +6401,7 @@ def _stitched_preview(job_id, new_row, prev_row, prev_asset, index,
         # one would make the piece re-play the insert from its start.
         item_spans += list(timeline_mod.insert_windows(
             new_edl.get("inserts") or [], tl_new).values())
-        motion_layer.fill_footprints(new_edl, W, H, fps)
+        motion_layer.fill_footprints(new_edl, W, H, fps, index=index, tl=tl_new)
         full_cap = caplib.build_ass(new_edl, index, tl_new,
                                     os.path.join(workdir, "stitch_cap.ass"),
                                     play_res=(W, H))
@@ -6711,7 +6734,7 @@ def _render_changed_sections(job_id, edl_row, index, src_local, workdir,
         W, H = frame_dims(1920, 1080,
                           (edl.get("frame") or {}).get("ratio"))
         W, H, _fps = preview_geometry(W, H, 30.0)
-    motion_layer.fill_footprints(edl, W, H, _fps)
+    motion_layer.fill_footprints(edl, W, H, _fps, index=index, tl=tl)
     cap_path = caplib.build_ass(
         edl, index, tl, os.path.join(workdir, "check_full_cap.ass"),
         play_res=(W, H)) if edl.get("captions") else ""

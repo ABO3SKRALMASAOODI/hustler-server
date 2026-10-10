@@ -1973,6 +1973,14 @@ class MotionItem(BaseModel):
     captions the graphic does not show clear of it and of the face.
     ``allow_face_overlap`` records a deliberate design over the face: the
     face keep-out (worker/keepout.py) then leaves the placement alone.
+
+    ``reading`` (lockups whose template ``reads_phrase``; written by the
+    engine — caption_carry.attach_readings at write time and before every
+    render — never by hand): per row, per printed word, the composition
+    second its spoken word starts (null: not said), and the phrase's other
+    words as small ``bridges`` lines set after a row, each on its onset —
+    the one-reading-path contract. A stitched piece keeps the reading of the
+    full program.
     """
     id: str = Field(min_length=1, max_length=80)
     template: str = Field(min_length=1, max_length=60)
@@ -1983,10 +1991,12 @@ class MotionItem(BaseModel):
     layer: Literal["above_captions", "below_captions",
                    "behind_subject"] = "above_captions"
     box: Optional[List[float]] = None
-    # unset = word-level (the captions drop only the spoken words this
-    # graphic shows, worker/caption_carry.py); true = no captions for the
-    # whole window; false = captions keep running (a number/hero word it
-    # shows is still not repeated).
+    # unset = one reading path (the captions drop the spoken words this
+    # graphic shows and yield to it for the phrase it shows, from its first
+    # shown word to its exit; a phrase_build sets that phrase's other words
+    # itself — worker/caption_carry.py); true = no captions for the whole
+    # window; false = captions keep running (a number/hero word it shows is
+    # still not repeated).
     mute_captions: Optional[bool] = None
     purpose: Optional[str] = Field(default=None, max_length=300)
     phase_s: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
@@ -1994,6 +2004,7 @@ class MotionItem(BaseModel):
     behind: Optional["SubjectMatte"] = None
     allow_face_overlap: Optional[bool] = None
     footprint: Optional["MotionFootprint"] = None
+    reading: Optional[dict] = None
 
     @model_validator(mode="before")
     @classmethod
@@ -2014,7 +2025,53 @@ class MotionItem(BaseModel):
             data["footprint"] = {"box": drawn, "ar": ar, "faces": []} if ar else None
         if data.get("footprint") is not None:
             data["footprint"] = _clean_footprint(data["footprint"])
+        if data.get("reading") is not None:
+            data["reading"] = _clean_reading(data["reading"])
         return data
+
+
+def _clean_reading(rd):
+    """A usable lockup reading (see MotionItem.reading) or None: an
+    unusable one is dropped (the engine computes it again), never
+    rejected."""
+    if not isinstance(rd, dict):
+        return None
+
+    def sec(v):
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            return None
+        return round(min(max(v, 0.0), 3600.0), 3) if math.isfinite(v) else None
+    rows = []
+    for row in (rd.get("rows") or [])[:8]:
+        if not isinstance(row, list):
+            return None
+        rows.append([None if v is None else sec(v) for v in row[:24]])
+    bridges = []
+    for b in (rd.get("bridges") or [])[:8]:
+        if not isinstance(b, dict):
+            continue
+        try:
+            after = int(b.get("after", -1))
+        except (TypeError, ValueError):
+            continue
+        words = []
+        for w in (b.get("words") or [])[:24]:
+            if not isinstance(w, dict) or sec(w.get("s")) is None:
+                continue
+            t = " ".join(str(w.get("t") or "").split())[:40]
+            if t:
+                words.append({"t": t, "s": sec(w.get("s"))})
+        if words:
+            bridges.append({"after": max(-1, min(after, 7)), "words": words})
+    if not rows and not bridges:
+        return None
+    try:
+        v = int(rd.get("v") or 1)
+    except (TypeError, ValueError):
+        v = 1
+    return {"v": v, "rows": rows, "bridges": bridges}
 
 
 def _clean_footprint(fp):

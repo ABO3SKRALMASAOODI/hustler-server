@@ -1025,7 +1025,11 @@ def get_kept_transcript(ctx):
     edl = latest["json"]
     tl = Timeline(edl["keep"], edl.get("inserts") or [],
                   edl.get("speed") or [])
-    out_words = tl.kept_words(ctx.index.get("words", []))
+    # Every word the viewer HEARS, including one whose midpoint a pause cut
+    # removed while its sound survived (the captions show the same words).
+    from timeline import Voice
+    out_words = tl.kept_words(ctx.index.get("words", []), rescue=True,
+                              voice=Voice.from_index(ctx.index))
     if not out_words:
         return ("The current edit keeps no transcribed speech."
                 if ctx.index.get("words") else
@@ -18963,7 +18967,7 @@ def audit_captions(ctx, offset=0, limit=80):
         import motion_layer
         edl = copy.deepcopy(edl)
         try:
-            motion_layer.fill_footprints(edl, *play_res)
+            motion_layer.fill_footprints(edl, *play_res, index=ctx.index, tl=tl)
         except Exception as exc:  # noqa: BLE001 — unmeasured = old behaviour
             print(f"[audit_captions] graphic boxes unmeasured: {str(exc)[:120]}",
                   flush=True)
@@ -28527,10 +28531,16 @@ _COMPACT_CONTRACTS = {
         "sits 0-3 frames before the spoken onset (get_kept_transcript + "
         "get_words; start earlier by the landing offset the template "
         "description states). layer above_captions (default), below_captions "
-        "or behind_subject. Captions: leave mute_captions unset — they drop only "
-        "the spoken words it shows and keep the rest, moved clear of it (keep it "
-        "off the caption band so nothing is muted); true hides every caption in "
-        "its window, false keeps them all (a shown number is still not doubled). Silent by "
+        "or behind_subject. Captions: leave mute_captions unset — ONE reading "
+        "path: they drop the spoken words it shows and yield to it for the "
+        "phrase it shows from its first shown word until it leaves (a "
+        "phrase_build sets that phrase's other words in small type on their "
+        "onsets, so quote the transcript in its rows; end any other graphic "
+        "where its words end — the NOTE names words only the sound carries); "
+        "words before it and other sentences stay captioned, moved clear of it "
+        "(keep it off the caption band so nothing is muted); true hides every "
+        "caption in its window, false keeps them all (a shown number is still "
+        "not doubled). Silent by "
         "default; sfx=true, only for a moment that earns sound, maps its "
         "sound roles onto the approved library (cues listed in the result). "
         "Pass purpose and a stable id. A graphic over the speaker's face or "

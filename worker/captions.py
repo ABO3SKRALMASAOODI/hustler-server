@@ -981,10 +981,32 @@ def transcript_words(edl, index, tl, mutes=None):
     motion looks): fillers dropped, kept words mapped to program time, insert
     breaks marked, text corrections applied, whisper's split tokens rejoined,
     then words inside ``mutes`` (program spans) removed. See
-    _corrected_rejoined for how corrections meet the rejoin."""
-    out = _mark_insert_breaks(tl.kept_words(_spoken_index_words(index)), tl)
+    _corrected_rejoined for how corrections meet the rejoin.
+
+    A word is kept when its SOUND is in the kept footage, not only when its
+    midpoint is (Timeline.kept_words rescue: whisper hands a pause to the
+    word after it, so a pause cut took "has", "a", "type" out of "Every
+    computer to date has used a weird type" while every one was heard)."""
+    out = _mark_insert_breaks(kept_program_words(index, tl), tl)
     out = _corrected_rejoined(out, edl.get("captions") or {})
     return _drop_muted_words(out, mutes) if mutes else out
+
+
+def kept_program_words(index, tl):
+    """The index's spoken words (fillers dropped) the program lets the
+    viewer HEAR, in program time: midpoint survivors plus the words a cut
+    kept the sound of, placed where their voice is (Timeline.kept_words
+    rescue with the index's speech envelope)."""
+    from timeline import Voice
+    return tl.kept_words(_spoken_index_words(index), rescue=True,
+                         voice=Voice.from_index(index))
+
+
+def rescued_words(index, tl):
+    """The words kept_program_words adds over the midpoint rule
+    ([(text, program t0)]); the caption fingerprint mixes them in."""
+    return [(w["w"], round(float(w["t0"]), 3))
+            for w in kept_program_words(index, tl) if w.get("heard")]
 
 
 def caption_plan(edl, index, tl, mutes=None, canvas=None):
@@ -1011,10 +1033,13 @@ def caption_words(edl, index, tl):
 def heard_words(edl, index, tl, lo, hi):
     """Program words AUDIBLE anywhere in program [lo, hi], corrected and
     rejoined like transcript_words. Unlike caption words (kept when their
-    midpoint survives), a word clipped by a cut still sounds, so it counts:
-    a graphic quoting "used a weird type" over a cut that clipped the "a"
-    is quoting what the viewer hears."""
+    midpoint or their voice survives), a word clipped by a cut still
+    sounds, so it counts: a graphic quoting "used a weird type" over a cut
+    that clipped the "a" is quoting what the viewer hears. ``clipped`` marks
+    a word the captions leave out."""
     import bisect
+    from timeline import Voice
+    voice = Voice.from_index(index)
     words = sorted(_spoken_index_words(index), key=lambda w: _wget(w, "t0"))
     starts = [_wget(w, "t0") for w in words]
     out, seen = [], set()
@@ -1030,10 +1055,12 @@ def heard_words(edl, index, tl, lo, hi):
             o0, o1 = tl.src_to_out(max(t0, a)), tl.src_to_out(min(t1, b))
             if o0 is None or o1 is None or o1 < lo or o0 > hi:
                 continue
-            # clipped: the cut took the word's middle (captions omit it)
+            # clipped: the cut took the word's middle and its voice
+            # (captions omit it; a word whose sound survived is captioned)
+            clipped = tl.src_to_out((t0 + t1) / 2.0) is None and \
+                tl.heard_part(t0, t1, _wget(w, "w"), voice) is None
             out.append({"w": _wget(w, "w"), "t0": o0, "t1": o1,
-                        "src_t0": t0, "src_t1": t1,
-                        "clipped": tl.src_to_out((t0 + t1) / 2.0) is None})
+                        "src_t0": t0, "src_t1": t1, "clipped": clipped})
     return _corrected_rejoined(out, edl.get("captions") or {})
 
 
@@ -1651,6 +1678,74 @@ def _chunk_word_key(word):
     return _norm_word((word or {}).get("w") or "")
 
 
+# ── names and noun phrases stay on one card ───────────────────────────────
+# "aviation and the Green / Revolution agriculture" read as garbage: the
+# card change split a proper name. A boundary inside a name, a number and
+# what it counts, a determiner or modifier and its noun costs the phrase
+# optimizer this much (no tagger: capitals, digits and suffixes say enough
+# in English, and the costs are soft — punctuation and pauses still win).
+GLUE_NAME = 4.5          # Green | Revolution, Steve | Jobs
+GLUE_NAME_TAIL = 0.8     # Revolution | agriculture (a name modifying a noun)
+GLUE_NUMBER = 1.5        # 140 | characters, 40 | fonts
+GLUE_DETERMINER = 1.6    # every | computer, this | moment
+GLUE_MODIFIER = 0.9      # supersonic | aviation, proportionally | spaced
+# A card may run this share past its character budget to keep a name whole.
+NAME_OVERFLOW = 0.25
+# (articles and the possessives _WEAK_BOUNDARY_WORDS already prices are
+# left to it)
+_DETERMINERS = frozenset((
+    "every", "each", "this", "these", "those", "some", "any", "no", "another",
+    "his", "her", "its"))
+_MODIFIER_ENDS = ("al", "ic", "ive", "ous", "ful", "less", "able", "ible",
+                  "ary", "ian", "ish", "ese", "ly", "ed", "er", "ing")
+_ARTICLES = frozenset(("a", "an", "the")) | _DETERMINERS
+_GLUE_FUNCTION = frozenset((
+    "a an the and or but so to of in on at for with from by as is are was were be "
+    "been am i it we you he she they me him her us them my your his our their this "
+    "that these those do does did not no just very then there here what which who "
+    "when where why how if into out up down over about like have has had will would "
+    "can could should may might must all some any every each it's that's").split())
+
+
+def _bare(token):
+    return str(token or "").strip("\"'“”‘’()[]")
+
+
+def _capitalized(token):
+    t = _bare(token)
+    return bool(t) and t[0].isupper() and t not in ("I", "I'm", "I've", "I'd", "I'll")
+
+
+def _ends_clause(token):
+    t = str(token or "").rstrip("\"'”’ )")
+    return t[-1:] in _STRONG_END + _SOFT_END
+
+
+def _glue(prev, nxt, before=None):
+    """What a card change between ``prev`` and ``nxt`` costs for splitting
+    a name or a noun phrase (0: a free boundary). ``before`` is the word
+    ahead of ``prev``: after an article, two content words are one noun
+    phrase ("a weird | type")."""
+    a, b = str(prev.get("w") or ""), str(nxt.get("w") or "")
+    if not a or not b or _ends_clause(a):
+        return 0.0
+    ka, kb = _bare(a).lower(), _bare(b).lower()
+    if kb in _GLUE_FUNCTION:
+        return 0.0
+    if _capitalized(a) and ka not in _GLUE_FUNCTION:
+        return GLUE_NAME if _capitalized(b) else GLUE_NAME_TAIL
+    if any(c.isdigit() for c in ka):
+        return GLUE_NUMBER
+    if ka in _DETERMINERS:
+        return GLUE_DETERMINER
+    if len(ka) > 4 and ka.endswith(_MODIFIER_ENDS):
+        return GLUE_MODIFIER
+    if before is not None and ka not in _GLUE_FUNCTION and \
+            _bare(before.get("w")).lower() in _ARTICLES and not _ends_clause(before.get("w")):
+        return GLUE_MODIFIER
+    return 0.0
+
+
 def _hard_phrase_break(prev, nxt):
     """Whether two consecutive timed words may never share one card."""
     if nxt.get("brk") or _cut_between(prev, nxt):
@@ -1683,8 +1778,10 @@ def _chunk_region_v2(words, max_w, chunk_chars, p):
 
     The old greedy splitter always filled to the cap.  A human editor instead
     balances card length, breath timing, punctuation and grammar, and will
-    rebalance the previous card to avoid leaving a one-word widow.  Dynamic
-    programming gives that result deterministically in O(words * max_w).
+    rebalance the previous card to avoid leaving a one-word widow, and never
+    splits a name or a noun phrase across two cards when another split
+    reads (_glue).  Dynamic programming gives that result deterministically
+    in O(words * max_w).
     """
     n_words = len(words)
     if not words:
@@ -1703,7 +1800,11 @@ def _chunk_region_v2(words, max_w, chunk_chars, p):
         for j in range(i, min(n_words, i + max_w)):
             token = str(words[j].get("w") or "")
             chars += len(token) + (1 if j > i else 0)
-            if chars > chunk_chars and j > i:
+            over = chars - chunk_chars
+            # past the budget only to keep a name whole (NAME_OVERFLOW)
+            if over > 0 and j > i and (
+                    over > NAME_OVERFLOW * chunk_chars
+                    or _glue(words[j - 1], words[j]) < GLUE_NAME):
                 break
             span = max(0.0, float(words[j].get("t1", 0)) -
                        float(words[i].get("t0", 0)))
@@ -1716,6 +1817,8 @@ def _chunk_region_v2(words, max_w, chunk_chars, p):
             # Prefer the authored target, but make a one-word card expensive
             # unless the preset itself is one-word (spotlight).
             cost = 0.34 * (count - target) ** 2
+            if over > 0:
+                cost += 0.25 * over
             if p.get("min_words") and count < min(int(p["min_words"]), max_w):
                 cost += 20 * (min(int(p["min_words"]), max_w) - count)
             if count == 1 and max_w > 1:
@@ -1742,6 +1845,9 @@ def _chunk_region_v2(words, max_w, chunk_chars, p):
                     cost += 2.1
                 if _chunk_word_key(words[j + 1]) in _WEAK_BOUNDARY_WORDS:
                     cost += 0.8
+                # ...nor split a name or a noun phrase across two cards.
+                cost += _glue(words[j], words[j + 1],
+                              words[j - 1] if j > 0 else None)
             total = cost + rest_cost
             candidate = (total, (j + 1,) + rest_path)
             if candidate < dp[i]:
@@ -2899,7 +3005,7 @@ def compiled_events(edl, index, tl, play_res=BASE_PLAY_RES):
         # muted over 0-5.5s, dragging the first caption to 0.0 would burn it
         # straight across the title it was muted to clear.
         mute0 = any(float(m0) <= 0.05 for m0, _m1 in
-                    list(mutes) + carry.clamp_spans)
+                    list(mutes) + carry.clamp_spans + carry.yield_spans)
         if events and not opens_on_insert and not mute0 \
                 and 0.0 < events[0]["start"] <= FIRST_CAPTION_LEAD_IN_S:
             events[0]["start"] = 0.0
@@ -2913,8 +3019,10 @@ def compiled_events(edl, index, tl, play_res=BASE_PLAY_RES):
             captions.get("mode") == "from_transcript":
         # Words inside mute windows are already gone (pre-grouping); only
         # display padding can still reach into a window — pull it back.
-        # ...nor into a stretch a graphic holds on the caption band.
-        events = _clamp_event_ends_to_mutes(events, list(mutes) + carry.clamp_spans)
+        # ...nor into a stretch a graphic holds on the caption band, nor one
+        # where a graphic owns its phrase (one reading path).
+        events = _clamp_event_ends_to_mutes(
+            events, list(mutes) + carry.clamp_spans + carry.yield_spans)
     else:
         events = apply_mutes(events, mutes)
     # Display holds must never outlive the program (or spill into the outro).

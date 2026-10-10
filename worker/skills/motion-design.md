@@ -76,7 +76,9 @@ CHOOSING A TEMPLATE — confirm names and params with `list_motion_templates()`:
 - Opening and thesis: `hook_title` for the 1–3 line hook readable by 1.5 s;
   `word_slam` for one hero word on its spoken onset (the most common hero
   moment); `phrase_build` for a short lockup assembled word by word on
-  onsets; `glow_title` for a luminous keyword on dark or night footage.
+  onsets (rows quote the transcript; the engine lands each spoken word on
+  its onset and sets the phrase's words the rows leave out as small lines
+  between them); `glow_title` for a luminous keyword on dark or night footage.
 - Reveal grammar: `typewriter` for a typed prompt, definition or terminal
   line (25–40 chars/s with a cursor; `typing` sound under it when it is
   sounded); `text_scramble` for
@@ -143,19 +145,27 @@ LAYERING AND CAPTIONS:
   thirds, textures, background shapes); `behind_subject` composites the
   graphic behind the person's matte — the giant-word-behind-the-head look —
   and needs a person in frame and no cut inside the window.
-- Captions and a graphic never say the same words twice — word by word.
-  Leave `mute_captions` unset (the default): the captions drop exactly the
-  spoken words the graphic shows and keep every other word, moved to a band
-  clear of the graphic's drawn box (and the face) while it is up. Design for
-  it: keep hero graphics OFF the caption band (top band, beside or above the
-  head, behind the subject), so the words a graphic does not show stay
-  captioned where they always are. A word slam or phrase build parked on the
-  caption band with the face above leaves no clear band: its unshown words
-  are muted and the reply NOTEs them — move it. Set `mute_captions`
-  explicitly only to override: true hides every caption for the whole window
-  (a graphic that replaces the entire spoken line); false keeps all captions
-  running beside it (a number or *starred* word it shows is still not
-  repeated).
+- ONE READING PATH: captions and a graphic never say the same words twice,
+  and never show two different texts of one sentence at once.
+  Leave `mute_captions` unset (the default): the captions drop the spoken words
+  the graphic shows, and the graphic owns the phrase it shows from its first
+  shown word until it leaves — the captions yield there. A `phrase_build`
+  sets that phrase's other words in small type between its rows on their
+  onsets; any other graphic leaves them to the sound, so end a word slam or
+  counter where its words end (the reply NOTEs the words and the time).
+  Words said before its first shown word, and other sentences, stay
+  captioned — moved to a band clear of the graphic's drawn box (and the
+  face) while it is up. Design for it: keep hero graphics OFF the caption
+  band (top band, beside or above the head, behind the subject). A word slam
+  or phrase build parked on the caption band with the face above leaves no
+  clear band: other sentences' words are muted and the reply NOTEs them —
+  move it. Set `mute_captions` explicitly only to override: true hides every
+  caption for the whole window (a graphic that replaces the entire spoken
+  line); false keeps all captions running beside it (a number or *starred*
+  word it shows is still not repeated).
+- Lockup rows reveal in reading order: a spoken row's words land on their
+  spoken onsets (never early), a row nobody says on its `at` with its
+  stagger squeezed so it is complete before the next row starts.
 - One text system at a time in one region: never stack a hook title, a
   caption page and a lower third in the same band.
 
