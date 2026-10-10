@@ -1455,8 +1455,22 @@ def headline_band(edl, s, e, W, H, src=None):
     if not tops:
         return None
     top, what = min(tops)
+    return band_top(W, H), top - HEADLINE_GAP, what
+
+
+def band_top(W, H):
+    """The highest a band graphic may reach on a W x H frame: below the 9:16
+    feed header and below the free-tier mark's reserved zone
+    (keepout.watermark_zone, top-left: the judged Jobs kickers at y
+    0.09-0.115 sat on it). A paid export has no mark; its zone is reserved
+    all the same — the edit does not know the tier."""
     safe = HEADLINE_SAFE_TOP if H / max(W, 1) >= 1.6 else HEADLINE_SAFE_TOP_FLAT
-    return safe, top - HEADLINE_GAP, what
+    try:
+        mark = keepout.watermark_zone(W, H)
+        safe = max(safe, float(mark[3]))
+    except Exception:  # noqa: BLE001 — no geometry: the feed header alone
+        pass
+    return round(safe, 4)
 
 
 def _persistent_contract(ctx, edl, item, items, place):
@@ -1533,11 +1547,11 @@ def _yield_report(ctx, edl, item):
                 f"{span:.1f}s.")
     return (f"\nYIELDS: hands its band to the graphics over "
             + ", ".join(f"{a:.2f}-{b:.2f}s" for a, b in wins)
-            + f" (fades out {motion_layer.YIELD_OUT_S:g}s before each lands, back "
-            f"{motion_layer.YIELD_IN_S:g}s after it leaves; gaps under "
-            f"{motion_layer.YIELD_MERGE_S:g}s stay clear) — on screen {shown:.1f}s "
-            f"of {span:.1f}s. Adding, moving or removing a lockup updates this at "
-            "render time.")
+            + f" (swaps on the frame: gone as each lands, back over "
+            f"{motion_layer.YIELD_IN_S:g}s from the frame it leaves; it holds every "
+            f"gap of {motion_layer.YIELD_MERGE_S:g}s or more, so the band is never "
+            f"empty) — on screen {shown:.1f}s of {span:.1f}s. Adding, moving or "
+            "removing a lockup updates this at render time.")
 
 
 def _band_note(ctx, edl, item):
@@ -1606,7 +1620,8 @@ def _band_spill_note(ctx, edl, item, bbox=None):
         if y1 > pic + tol:
             out.append(f"runs {y1 - pic:.3f} onto the top of {what} (y {pic:.3f})")
         if y0 < top - tol:
-            out.append(f"rises into the feed header (above y {top:.3f})")
+            out.append(f"rises into the feed header / the free-tier mark's zone "
+                       f"(above y {top:.3f})")
         if not out:
             return ""
         draws = ("by its estimated box (no browser here; a preview measures it) it draws"

@@ -149,15 +149,23 @@ def measure_plates(items, probe):
 
 # ── the persistent headline band: yielding to other graphics ────────────
 # A persistent template (motion_templates.persistent: the headline of a card
-# or letterbox layout) holds its band for the program. While another graphic
-# occupies that band it fades out (YIELD_OUT_S, ending as the other lands) and
-# comes back YIELD_IN_S after it leaves; two band graphics less than
-# YIELD_MERGE_S apart keep it away (a flash back for half a second is a
-# flicker, not a restore). Decided at render time from the stored footprints,
-# so adding, moving or removing a lockup never leaves a stale headline.
-YIELD_OUT_S = 0.12
-YIELD_IN_S = 0.3
-YIELD_MERGE_S = 1.2
+# or letterbox layout) holds its band for the program. It HOLDS whenever no
+# other graphic occupies that band and swaps on the same frame: it is gone
+# on the frame the other's first ink lands (YIELD_OUT_S 0) and back from the
+# frame it leaves (a YIELD_IN_S return, never a hole). Judged Oct 2026: with
+# a fade out before each landing, a slow return and gaps under 1.2 s kept
+# clear, the Jobs band stood EMPTY at 4.2-4.4, 14.09-15.0, 17.79-18.58 and
+# 32.34-33.04 s and the headline blinked — "a dropped layer". Only a gap
+# shorter than YIELD_MERGE_S (render_qc flags an empty band longer than
+# that) stays yielded, and a graphic landing within YIELD_EDGE_S of the
+# composition's start or end takes the band from (to) that edge: a headline
+# shown for a moment before the hook lands is a flash. Decided at render
+# time from the stored footprints, so adding, moving or removing a lockup
+# never leaves a stale headline.
+YIELD_OUT_S = 0.0
+YIELD_IN_S = 0.1
+YIELD_MERGE_S = 0.15
+YIELD_EDGE_S = 0.6
 # Boxes this close (frame fractions) already read as one crowded band.
 YIELD_PAD = 0.006
 
@@ -260,12 +268,12 @@ def yield_windows(item, items, W, H):
             merged[-1][1] = max(merged[-1][1], b)
         else:
             merged.append([a, b])
-    # a gap at either end of the composition shorter than the merge is no
+    # a gap at either end of the composition shorter than YIELD_EDGE_S is no
     # restore (a stitched piece's own edges are not the composition's)
     full = float(item.get("full_duration_s") or (e - s))
-    if merged and phase <= 1e-6 and merged[0][0] - s < YIELD_MERGE_S:
+    if merged and phase <= 1e-6 and merged[0][0] - s < YIELD_EDGE_S:
         merged[0][0] = s
-    if merged and phase + (e - s) >= full - 1e-3 and e - merged[-1][1] < YIELD_MERGE_S:
+    if merged and phase + (e - s) >= full - 1e-3 and e - merged[-1][1] < YIELD_EDGE_S:
         merged[-1][1] = e
     return [[round(a - s + phase, 3), round(b - s + phase, 3)] for a, b in merged]
 

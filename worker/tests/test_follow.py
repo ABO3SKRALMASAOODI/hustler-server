@@ -504,7 +504,16 @@ def test_a_low_resolution_crop_card_frames_the_speaker():
                                        fit="crop")
     card = ctx._edl["effects"]["picture_cards"][0]
     assert card["source"] != picture_cards.archival_rect() and card["fit"] == "crop"
-    assert "framed on the speaker at most 2x" in res and "enlarged 2.00x" in res
+    # a small archival face is enlarged past 2x to read (judged: Jobs' face
+    # ~6% of the frame) — a medium close-up, never past FACE_UPSCALE_CAP
+    import re
+    k = float(re.search(r"enlarged ([0-9.]+)x", res).group(1))
+    assert picture_cards.SOURCE_UPSCALE_CAP < k <= picture_cards.FACE_UPSCALE_CAP
+    assert "medium close-up" in res and "the card's grain over it" in res
+    face_px = .2 * 480 * k
+    card_h = (.685 - .265) * 1920
+    assert face_px / 1920 >= min(picture_cards.FACE_MIN_FRAME,
+                                 picture_cards.FACE_SHARE_MAX * card_h / 1920) - .005
     # the default stays the whole frame
     ctx = _Ctx(646, 480, samples)
     agent_tools.set_picture_card(ctx, "c", 0, 9, box=[.04, .265, .96, .685])

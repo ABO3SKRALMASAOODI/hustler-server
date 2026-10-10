@@ -205,7 +205,10 @@ def test_render_rounded_picture_sharp_type_and_fragment_phase(tmp_path):
     before,opening,settled=frame(out,.5),frame(out,1.1),frame(out,2)
     assert settled[170,32].max()<55 # rounded corner is backdrop, not footage
     assert settled[280,160,0]>150 # picture remains visible inside its card
-    assert opening[215,160,0]<60 and settled[215,160,0]>150 # actual reveal
+    # The reveal opens as a dissolve of the whole card over the picture
+    # (judges, Oct 2026: never a frame of bare canvas): mid-animation, yet
+    # the footage under the window is never replaced by the empty backdrop.
+    assert 150<opening[215,160,0]<settled[215,160,0]-15
     # The same label occupies the same delivery pixels before/inside the card.
     assert np.logical_xor(before[60:110].min(axis=2)>180,
                          settled[60:110].min(axis=2)>180).mean()<.01

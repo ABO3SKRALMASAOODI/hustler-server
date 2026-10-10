@@ -20,7 +20,9 @@ the flat colour around the card:
   instead, and a decor plate (shadow, vignette, hairline) goes on top.
 
 Film grain is temporal luma noise with a fixed seed (deterministic renders)
-applied to the backdrop only — the footage itself is never re-noised. A card
+applied to the backdrop only — the footage itself is never re-noised, except
+a small face enlarged past SOURCE_UPSCALE_CAP (face_cap) on a grained card,
+which wears a little of the same grain so its softness reads as film. A card
 with none of these options renders through the historical graph, unchanged.
 
 SOURCE-FED CARDS AND STACKED LAYOUTS
@@ -39,6 +41,31 @@ tag in its metadata, and the card is built from exactly the tagged frames
 (_append_source_fed), so it can never disagree with the blocks about which
 frames were composed for it. A spliced insert inside the window plays
 full-frame: the card steps aside for it.
+
+LAYOUT CHANGES NEVER SHOW THE BARE CANVAS (judges, Oct 2026)
+
+A card's entrance used to fade its footage in over its own backdrop, which
+the card drew at full strength from its first frame: the Elon stack opened
+on a frame of empty dark canvas (mean luma 66.6 -> 27.4 in one frame,
+mid-sentence) and closed the same way before a hard cut to a bright shot —
+every judge read it as a dropped frame. Now an animated entrance or exit
+(fade, lift, reveal) DISSOLVES the whole card — backdrop, plate and footage
+as one picture — with the full-frame shot under it:
+
+* a program card is drawn over the program itself, so fading the finished
+  card in over it is the dissolve;
+* a source-fed card's blocks are re-composed, so over its entrance (and
+  exit) the renderer composes the block as the full-frame shot with the
+  panels dissolving in inside their boxes (layout_filter ``under``), and the
+  card fades in over that at the same rate: inside the boxes the picture is
+  exactly the dissolving footage, outside it the backdrop dissolves over the
+  shot. Its footage never slides (a lift is a dissolve here): a moving tile
+  would double the picture under it.
+
+A source-fed card that opens or closes ON A CUT (a camera cut, a jump cut,
+an insert's edge, another card's layout) hard-cuts instead, with its panels
+already populated: a dissolve right after a cut is mush, and a cut is
+already the change. ``entrance``/``exit`` 'none' always hard-cut.
 """
 import hashlib
 import json
@@ -68,11 +95,67 @@ HEADROOM_MIN = .08
 HEADROOM_TARGET = .10
 FACE_SHARE = .30
 HAIR_ABOVE_FACE = .40
+# A small face reads as a figure, not a person: the judged Jobs card (480p
+# archival, enlarged at most 2x) showed a waist-up wide whose face was ~6%
+# of the frame. A face framing whose face would sit under FACE_MIN_FRAME of
+# the FRAME height takes a larger share of its card (up to FACE_SHARE_MAX:
+# a medium close-up) and may be enlarged past SOURCE_UPSCALE_CAP for it —
+# never past FACE_UPSCALE_CAP (lanczos, light sharpening and, on a grained
+# card, the backdrop's grain over the footage keep it from reading soft).
+FACE_MIN_FRAME = .15
+FACE_SHARE_MAX = .40
+FACE_UPSCALE_CAP = 3.0
 
 
 def source_fed(spec):
     """True when the card's footage comes from the main source frame."""
     return bool(spec.get("source") or spec.get("panels"))
+
+
+# Entrances/exits that animate (the card dissolves with the shot under it);
+# 'none' is a cut.
+ANIMATED = ("fade", "lift", "reveal")
+
+
+def edge_s(spec):
+    """The card's entrance/exit length (seconds, program clock)."""
+    start, end = float(spec["start"]), float(spec["end"])
+    full = float(spec.get("full_duration_s") or (end - start))
+    return min(float(spec.get("duration_s", .45)), full * .3)
+
+
+def animation_windows(spec):
+    """(entrance, exit) PROGRAM windows [a, b] the card dissolves over —
+    the whole animation on the card's own clock (``phase_s``: a stitched
+    fragment opened inside the card has its entrance behind it), or None
+    for a cut or an animation outside this piece of the card."""
+    start, end = float(spec["start"]), float(spec["end"])
+    phase = float(spec.get("phase_s") or 0.0)
+    full = float(spec.get("full_duration_s") or (end - start))
+    edge = edge_s(spec)
+    origin = start - phase
+    out = []
+    for key, default, a in (("entrance", "lift", origin),
+                            ("exit", "fade", origin + full - edge)):
+        b = a + edge
+        if spec.get(key, default) in ANIMATED and edge > 1e-3 \
+                and b > start + 1e-3 and a < end - 1e-3:
+            out.append((a, b))
+        else:
+            out.append(None)
+    return tuple(out)
+
+
+def _fade(kind, st, d):
+    """An alpha fade ('in'/'out') from ``st`` over ``d`` seconds of the
+    stream's clock; ``st`` may be negative (the stream opens inside the
+    fade): fade cannot start before zero, so the clock is shifted forward
+    that much and straight back."""
+    shift = max(0.0, -float(st))
+    chain = f",fade=t={kind}:st={st + shift:.6f}:d={d:.6f}:alpha=1"
+    if shift:
+        chain = f",setpts=PTS+{shift:.6f}/TB{chain},setpts=PTS-{shift:.6f}/TB"
+    return chain
 
 
 def source_at(spec, src_t=None):
@@ -141,10 +224,24 @@ def card_panels(spec, src_t=None):
     """[(box, source_rect)] of a source-fed card, [] for a program card.
     ``src_t`` (a SOURCE second) picks a re-aimed card's framing there."""
     if spec.get("panels"):
-        return [(list(p["box"]), list(p["source"])) for p in spec["panels"]]
+        return [(list(p["box"]), panel_source_at(p, src_t))
+                for p in spec["panels"]]
     if spec.get("source"):
         return [(list(spec["box"]), source_at(spec, src_t))]
     return []
+
+
+def panel_source_at(panel, src_t=None):
+    """A stack panel's source rect at SOURCE second ``src_t``: its rect,
+    centred on its follow path where a follow span holds ``src_t``."""
+    rect = list(panel["source"])
+    if src_t is not None and panel.get("follow"):
+        import follow
+        span = follow.span_at(panel["follow"], src_t)
+        c = follow.centre_at(span, src_t) if span else None
+        if c is not None:
+            rect = recentre(rect, c)
+    return rect
 
 
 def card_boxes(spec):
@@ -152,6 +249,62 @@ def card_boxes(spec):
     if spec.get("panels"):
         return [list(p["box"]) for p in spec["panels"]]
     return [list(spec["box"])]
+
+
+# ── The layout's geometry, for caption placement (judges, Oct 2026) ──────
+# Captions anchored on the 0.03 seam between two stacked panels crossed both
+# panels' edges. A caption band must be at least this tall (frame
+# fractions); the panels' edges are lines a caption never sits on.
+CAPTION_BAND_MIN = .06
+
+
+def layout_rects(edl, t):
+    """[[x0, y0, x1, y1], ...] — the rounded windows (each panel of a stack,
+    else the card's box) of every picture card on screen at PROGRAM second
+    ``t``, in frame fractions: what caption placement keeps its lines off
+    (a window's edge is a no-go line). [] on a full-frame picture."""
+    out = []
+    for card in ((edl or {}).get("effects") or {}).get("picture_cards") or []:
+        if not isinstance(card, dict):
+            continue
+        try:
+            a, b = float(card["start"]), float(card["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if a - 1e-6 <= float(t) < b:
+            out += [[float(v) for v in box] for box in card_boxes(card)]
+    return out
+
+
+def layout_edges(edl):
+    """Sorted PROGRAM seconds where the picture's layout changes (a card's
+    start or end): caption placement re-solves on these frames."""
+    out = set()
+    for card in ((edl or {}).get("effects") or {}).get("picture_cards") or []:
+        if not isinstance(card, dict):
+            continue
+        for key in ("start", "end"):
+            try:
+                out.add(round(float(card[key]), 4))
+            except (KeyError, TypeError, ValueError):
+                continue
+    return sorted(out)
+
+
+def free_bands(boxes, top=0.0, bottom=1.0, min_h=CAPTION_BAND_MIN):
+    """[(y0, y1)] full-width bands of the frame between ``top`` and
+    ``bottom`` that no box in ``boxes`` covers, at least ``min_h`` tall —
+    where a caption may sit (layout_rects gives the boxes)."""
+    spans = sorted((max(top, float(b[1])), min(bottom, float(b[3])))
+                   for b in boxes or [] if float(b[3]) > top and float(b[1]) < bottom)
+    out, y = [], float(top)
+    for y0, y1 in spans:
+        if y0 - y >= min_h - 1e-9:
+            out.append((round(y, 4), round(y0, 4)))
+        y = max(y, y1)
+    if bottom - y >= min_h - 1e-9:
+        out.append((round(y, 4), round(float(bottom), 4)))
+    return out
 
 
 def is_lowres(src_w, src_h):
@@ -247,11 +400,31 @@ def median_face(faces):
     return out
 
 
+def face_share(box_h, H):
+    """The share of a card's height (``box_h`` canvas px of an H-tall
+    frame) its speaker's face takes: FACE_SHARE, more in a short card so
+    the face reaches FACE_MIN_FRAME of the frame (at most FACE_SHARE_MAX)."""
+    need = FACE_MIN_FRAME * float(H) / max(1.0, float(box_h))
+    return min(FACE_SHARE_MAX, max(FACE_SHARE, need))
+
+
+def face_cap(face_h, box_h, H, cap=SOURCE_UPSCALE_CAP):
+    """The enlargement a face framing may use: ``cap``, raised as far as a
+    small face (``face_h`` source px) needs to fill face_share of a
+    ``box_h``-px card — never past FACE_UPSCALE_CAP."""
+    try:
+        want = face_share(box_h, H) * float(box_h) / float(face_h)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return cap
+    return max(cap, min(FACE_UPSCALE_CAP, want))
+
+
 def speaker_rect(src_w, src_h, W, H, box, face=None, focus=None,
                  cap=SOURCE_UPSCALE_CAP):
     """A source rect at the box's aspect framing a speaker: the face about
-    FACE_SHARE of the card's height, HEADROOM_TARGET of it clear above the
-    crown (the source's top edge permitting), never enlarged past ``cap``.
+    face_share of the card's height, HEADROOM_TARGET of it clear above the
+    crown (the source's top edge permitting), never enlarged past ``cap``
+    (past it only as far as face_cap lets a small face be read).
     With no face it is the largest such rect centred on ``focus``.
     Returns (rect, headroom) — headroom as a share of the rect's height, or
     None when no face was measured."""
@@ -269,8 +442,10 @@ def speaker_rect(src_w, src_h, W, H, box, face=None, focus=None,
         y0 = _clamp(fy * sh - rh / 2.0, 0.0, sh - rh)
         return [x0 / sw, y0 / sh, (x0 + rw) / sw, (y0 + rh) / sh], None
     fh = (face[3] - face[1]) * sh
-    rh = max(fh / FACE_SHARE, bh / cap)
-    rw = max(rh * a, bw / cap)
+    share = face_share(bh, H)
+    kcap = face_cap(fh, bh, H, cap)
+    rh = max(fh / share, bh / kcap)
+    rw = max(rh * a, bw / kcap)
     rw = min(rw, big)
     rh = rw / a
     cx = (face[0] + face[2]) / 2.0 * sw
@@ -404,6 +579,194 @@ def shot_framings(src_w, src_h, W, H, box, shots, focus_of=None,
     return [(rect, shots_) for rect, shots_, _f, _h in runs]
 
 
+# ── Face-safe panel framing (judges, Oct 2026) ───────────────────────────
+# Owner rule: a card or panel never lets part of the speaker's face leave
+# it. The judged Elon stack chose its speaker rect to end above the source's
+# burned-in browser box: the panel's bottom edge ran through his mouth and
+# chin with the top 45% empty curtain, and Rogan's nose pressed the panel's
+# right edge with a sliver of the browser in the corner. A panel's speaker
+# rect is SOLVED from the measured face track instead:
+#
+# * what it must hold (keep): every measured detector box of the window
+#   (Haar boxes run brow or hairline to the chin, or under it) with PANEL_HAIR of its
+#   height above it, PANEL_CHIN below and PANEL_SIDE either side, at least
+#   PANEL_MARGIN of the rect inside every edge;
+# * its size: the keep region about PANEL_FILL of the rect's height (a
+#   close framing — no empty curtain), never enlarged past face_cap;
+# * its place: the crown HEADROOM_TARGET below the top, and LEAD_ROOM of
+#   the rect's width more room on the side the speaker looks to;
+# * burned-in screen/PIP boxes (insets.py) stay out: of the rects that hold
+#   the face, the one showing the least of them wins — none when one can.
+#   Where the box touches the face itself (the Rogan layout: the browser's
+#   corner sits at the speaker's chin) no rect can leave it out; the face
+#   wins and the result says how much shows.
+PANEL_HAIR = .22
+PANEL_CHIN = .05
+PANEL_SIDE = .06
+PANEL_MARGIN = .03
+PANEL_FILL = .86
+PANEL_FILL_MAX = .94
+LEAD_ROOM = .10
+# A face track that saw the speaker over less than PANEL_SEEN_MIN of the
+# window (a profile the detectors lose) frames with PANEL_UNSEEN_PAD of the
+# face's size more room all round: the unseen stretch may sit a little lower
+# or nearer the edge (the judged Rogan window was measured over 35% of it).
+PANEL_SEEN_MIN = .6
+PANEL_UNSEEN_PAD = .12
+
+
+def panel_keep(faces, pad=0.0):
+    """The region (source fractions) a panel must hold for ``faces``: the
+    union of each box grown by PANEL_HAIR / PANEL_CHIN / PANEL_SIDE (and
+    ``pad`` of its size more all round: room for where it was not seen)."""
+    faces = steady_faces(faces)
+    if not faces:
+        return None
+    keeps = []
+    for f in faces:
+        w, h = f[2] - f[0], f[3] - f[1]
+        keeps.append([f[0] - (PANEL_SIDE + pad) * w, f[1] - (PANEL_HAIR + pad) * h,
+                      f[2] + (PANEL_SIDE + pad) * w, f[3] + (PANEL_CHIN + pad) * h])
+    return [max(0.0, min(k[0] for k in keeps)), max(0.0, min(k[1] for k in keeps)),
+            min(1.0, max(k[2] for k in keeps)), min(1.0, max(k[3] for k in keeps))]
+
+
+def _overlap(a, b):
+    """Area of rects a and b's intersection (same units)."""
+    return max(0.0, min(a[2], b[2]) - max(a[0], b[0])) * \
+        max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+
+
+def crop_trim(rect, a, src_w, src_h):
+    """``rect`` (source fractions) trimmed to pixel aspect ``a`` the way
+    fit_panel's crop trims it: centred across, from the bottom up."""
+    x0, y0, x1, y1 = (float(v) for v in rect)
+    rw, rh = (x1 - x0) * float(src_w), (y1 - y0) * float(src_h)
+    if rh <= 0 or rw <= 0:
+        return [x0, y0, x1, y1]
+    if rw / rh > a:
+        d = (rw - rh * a) / float(src_w) / 2.0
+        return [x0 + d, y0, x1 - d, y1]
+    return [x0, y0, x1, y0 + (rw / a) / float(src_h)]
+
+
+def holds(rect, keep, margin=0.0):
+    """True when ``keep`` lies inside ``rect`` with ``margin`` of the
+    rect's size clear on every side (fractions; a hair of slack)."""
+    mx, my = margin * (rect[2] - rect[0]), margin * (rect[3] - rect[1])
+    return (keep[0] >= rect[0] + mx - 1e-4 and keep[2] <= rect[2] - mx + 1e-4
+            and keep[1] >= rect[1] + my - 1e-4 and keep[3] <= rect[3] - my + 1e-4)
+
+
+def panel_framing(src_w, src_h, W, H, box, faces, looks=(), avoid=(),
+                  cap=SOURCE_UPSCALE_CAP, prefer=None, pad=0.0):
+    """(rect, info) — a source rect at the box's aspect that holds the
+    speaker's face (panel_keep of ``faces``, source fractions) for a panel
+    or card, or (None, info) when no rect of this box's aspect can (the
+    head is taller or wider than the source allows at it). ``looks``: the
+    samples' gaze (-1 screen-left .. +1 right); ``avoid``: burned-in boxes
+    (source fractions) to keep out; ``prefer``: a rect the editor gave —
+    the answer is the nearest framing to it that holds the face (moved and
+    grown only as far as it must).
+
+    info: keep (the held region), lead (-1/0/1), share (the face's share of
+    the rect's height), k (canvas px per source px), inset (the share of
+    the rect an avoided box still covers), moved (prefer was changed), cut
+    (prefer, as the box would show it, did not hold the head).
+    ``pad``: extra room round the head (a share of the face) where the
+    track saw only part of the window.
+
+    ``prefer`` is first trimmed to the box's aspect exactly as fit_panel's
+    crop shows it (centred across, from the bottom up): a rect of another
+    shape that holds the face is the editor's framing, not a cut face."""
+    sw, sh = float(src_w), float(src_h)
+    bw, bh = (box[2] - box[0]) * W, (box[3] - box[1]) * H
+    a = bw / bh
+    big = min(sw, sh * a)                     # the widest rect of this aspect
+    keep = panel_keep(faces, pad)
+    info = {"keep": keep, "lead": 0, "share": None, "k": None, "inset": 0.0,
+            "moved": False, "cut": False}
+    if keep is None:
+        return None, info
+    if prefer is not None:
+        prefer = crop_trim(prefer, a, sw, sh)
+        info["cut"] = not holds(prefer, keep)
+    med = median_face(steady_faces(faces))
+    fh = (med[3] - med[1]) * sh
+    vals = [float(v) for v in looks or () if v is not None]
+    mean = sum(vals) / len(vals) if vals else 0.0
+    lead = -1 if mean <= -.5 else 1 if mean >= .5 else 0
+    info["lead"] = lead
+    kx0, ky0, kx1, ky1 = keep[0] * sw, keep[1] * sh, keep[2] * sw, keep[3] * sh
+    kw, kh = kx1 - kx0, ky1 - ky0
+    m = PANEL_MARGIN
+    # the smallest rect that holds the keep region with its margins (the
+    # source's size permitting; the keep itself it must always hold)
+    rh_min = max(min(sh, max(kh / (1.0 - 2 * m), kh / PANEL_FILL_MAX)),
+                 min(big, kw / (1.0 - 2 * m)) / a, kh, kw / a)
+    kcap = face_cap(fh, bh, H, cap)
+    rh_pref = max(kh / PANEL_FILL, bh / kcap, rh_min)
+    if prefer is not None:
+        ph = (prefer[3] - prefer[1]) * sh
+        rh_pref = max(rh_min, ph)
+    if rh_min * a > big + 1e-6:
+        return None, info                    # the head does not fit this aspect
+    avoid = [[float(v) for v in r] for r in avoid or () if r and len(r) == 4]
+    best = None
+    sizes = sorted({min(big / a, rh_pref)} |
+                   {min(big / a, rh_min + (rh_pref - rh_min) * f)
+                    for f in (0.0, .25, .5, .75)}, reverse=True)
+    # The margin may give way (to the keep region's own edge) where that is
+    # what keeps a burned-in box out, or where the source has no room for
+    # it; a framing with it always wins otherwise.
+    margins = (m, 0.0)
+    # a side where the head reaches the source's own edge has no margin to
+    # keep (the source edge permitting, as speaker_rect's headroom)
+    edge = (keep[0] <= 1e-3, keep[1] <= 1e-3, keep[2] >= 1 - 1e-3,
+            keep[3] >= 1 - 1e-3)
+    for rh, mm in [(rh, mm) for rh in sizes for mm in margins]:
+        rw = rh * a
+        # positions that hold the keep region with its margins
+        xa = max(0.0, kx1 + (0.0 if edge[2] else mm) * rw - rw)
+        xb = min(sw - rw, kx0 - (0.0 if edge[0] else mm) * rw)
+        ya = max(0.0, ky1 + (0.0 if edge[3] else mm) * rh - rh)
+        yb = min(sh - rh, ky0 - (0.0 if edge[1] else mm) * rh)
+        if xa > xb + 1e-6 or ya > yb + 1e-6:
+            continue
+        if prefer is not None:
+            px = prefer[0] * sw + ((prefer[2] - prefer[0]) * sw - rw) / 2.0
+            py = prefer[1] * sh + ((prefer[3] - prefer[1]) * sh - rh) / 2.0
+        else:
+            px = (kx0 + kx1) / 2.0 + lead * LEAD_ROOM * rw - rw / 2.0
+            py = ky0 - HEADROOM_TARGET * rh
+        px, py = _clamp(px, xa, xb), _clamp(py, ya, yb)
+        xs = sorted({xa, xb, px} | {xa + (xb - xa) * i / 12.0 for i in range(13)})
+        ys = sorted({ya, yb, py} | {ya + (yb - ya) * i / 12.0 for i in range(13)})
+        for x0 in xs:
+            for y0 in ys:
+                r = [round(x0 / sw, 4), round(y0 / sh, 4),
+                     round((x0 + rw) / sw, 4), round((y0 + rh) / sh, 4)]
+                cover = sum(_overlap(r, b) for b in avoid) / max(
+                    1e-9, (r[2] - r[0]) * (r[3] - r[1]))
+                # the inset first (a sliver counts), then the composition:
+                # distance from the preferred place, then size from the
+                # preferred size
+                score = (0.0 if cover < 1e-5 else 1.0 + round(cover, 2),
+                         0 if mm == m else 1,
+                         abs(x0 - px) / max(1.0, rw) + abs(y0 - py) / max(1.0, rh)
+                         + abs(rh - rh_pref) / max(1.0, rh_pref))
+                if best is None or score < best[0]:
+                    best = (score, r, rh)
+    if best is None:
+        return None, info
+    rect = [round(v, 4) for v in best[1]]
+    rect = [max(0.0, rect[0]), max(0.0, rect[1]), min(1.0, rect[2]), min(1.0, rect[3])]
+    info.update(share=fh / best[2], k=bw / (best[2] * a), inset=best[0][0],
+                moved=prefer is not None and any(
+                    abs(u - v) > .004 for u, v in zip(rect, prefer)))
+    return rect, info
+
+
 # The designed canvas a card gets when none is chosen: the footage's own
 # hue, desaturated and taken down to a dark tone, glowing out to near-black
 # — a deliberate canvas, not a blurred smear of the picture (judges, Oct
@@ -454,7 +817,22 @@ def _enlarge(k):
     return flags, sharpen
 
 
-def _single_panel(W, H, box, rect, src_size):
+def _footage_grain(k, grain):
+    """Film grain over enlarged FOOTAGE (',' + noise, or ''): only a face
+    framing enlarged past SOURCE_UPSCALE_CAP (face_cap) on a card that
+    grains its backdrop — the same texture over picture and canvas, so the
+    softness of a 3x archival enlargement reads as film, not as blur. A
+    little lighter than the backdrop's (_grain)."""
+    try:
+        g = float(grain or 0.0)
+    except (TypeError, ValueError):
+        g = 0.0
+    if g <= 0 or k <= SOURCE_UPSCALE_CAP + 1e-3:
+        return ""
+    return f",noise=c0s={max(1, round(16 * g))}:c0f=t:c0_seed={GRAIN_SEED}"
+
+
+def _single_panel(W, H, box, rect, src_size, grain=None):
     """One rect onto its box, with the rest of the canvas showing the source
     around it at the same scale (black past the source's edges): a punch-in
     the camera aims inside the card then reveals real neighbouring picture,
@@ -478,10 +856,11 @@ def _single_panel(W, H, box, rect, src_size):
     bottom = min(H, _even(y + h + (vis[3] - rect[3]) * sh * ky))
     flags, sharpen = _enlarge(max(kx, ky))
     return (f"{_crop_expr(vis)}{sharpen},scale={right - left}:{bottom - top}"
-            f"{flags},setsar=1,pad={W}:{H}:{left}:{top}:color=black")
+            f"{flags}{_footage_grain(max(kx, ky), grain)},setsar=1,"
+            f"pad={W}:{H}:{left}:{top}:color=black")
 
 
-def _panel(W, H, box, rect, src_size):
+def _panel(W, H, box, rect, src_size, grain=None):
     """One rect scaled exactly onto its box (w x h), unplaced."""
     _x, _y, w, h = pixels(W, H, box)
     k = 1.0
@@ -490,12 +869,15 @@ def _panel(W, H, box, rect, src_size):
                           W, H)
         k = w / ((rect[2] - rect[0]) * float(src_size[0]))
     flags, sharpen = _enlarge(k)
-    return f"{_crop_expr(rect)}{sharpen},scale={w}:{h}{flags},setsar=1"
+    return (f"{_crop_expr(rect)}{sharpen},scale={w}:{h}{flags}"
+            f"{_footage_grain(k, grain)},setsar=1")
 
 
 def layout_filter(parts, in_label, out_label, W, H, fps, panels, uid,
                   src_size=None, seg_dur=None, grade=None, tag=None,
-                  frames=None, follow_block=None, bounded=False):
+                  frames=None, follow_block=None, bounded=False, under=None,
+                  dissolve=None, panel_follow=None, grain=None,
+                  panel_conceal=None):
     """A main-footage block composed for a source-fed card: every panel's
     source rect scaled once onto its box of a W x H canvas, then the block
     tail _normalize_video uses (CFR, exact length, sar 1, yuv420p). The grade
@@ -513,8 +895,51 @@ def layout_filter(parts, in_label, out_label, W, H, fps, panels, uid,
 
     bounded: the block's rect is a cut step (step_rect) — its follow path was
     planned for the unstepped rect, so the moving rect is held inside the
-    source frame (a wider step near an edge slides inward)."""
+    source frame (a wider step near an edge slides inward).
+
+    under + dissolve (the card's entrance or exit, module docstring): the
+    label of the SAME frames composed as the full-frame program would show
+    them, and [(kind 'in'/'out', start, seconds)] on the block's clock — the
+    block is that full-frame picture with each panel's box dissolving in (or
+    out) over it, tagged like any composed block, so the card cut from it
+    shows exactly the dissolving footage inside its boxes.
+
+    panel_follow (a stack): one follow_block (or None) per panel — a panel
+    whose rect FOLLOWS its speaker inside the shot is drawn by follow.
+    window_chain at its box's size.
+
+    grain: the card's grain — laid over footage enlarged past
+    SOURCE_UPSCALE_CAP (_footage_grain).
+
+    panel_conceal (a stack): one list of burned-in boxes (or None) per
+    panel, softened where the panel shows them (_conceal_chain; a still
+    panel only)."""
     import renderer
+    if under and dissolve:
+        mid = f"lyd{uid}"
+        layout_filter(parts, in_label, mid, W, H, fps, panels, uid,
+                      src_size=src_size, seg_dur=seg_dur, grade=grade,
+                      frames=frames, follow_block=follow_block,
+                      bounded=bounded, panel_follow=panel_follow, grain=grain,
+                      panel_conceal=panel_conceal)
+        wins = [pixels(W, H, box) for box, _rect in panels]
+        labels = [mid] if len(wins) == 1 else \
+            [f"{mid}b{k}" for k in range(len(wins))]
+        if len(wins) > 1:
+            parts.append(f"[{mid}]split={len(wins)}"
+                         + "".join(f"[{lb}]" for lb in labels))
+        fades = "".join(_fade(kind, st, d) for kind, st, d in dissolve)
+        base = under
+        for k, (x, y, w, h) in enumerate(wins):
+            parts.append(f"[{labels[k]}]crop={w}:{h}:{x}:{y},format=yuva420p"
+                         f"{fades}[{mid}t{k}]")
+            parts.append(f"[{base}][{mid}t{k}]overlay={x}:{y}:format=auto"
+                         f"[{mid}u{k}]")
+            base = f"{mid}u{k}"
+        mark = (f",metadata=mode=add:key={LAYOUT_TAG_KEY}:value={tag}"
+                if tag else "")
+        parts.append(f"[{base}]format=yuv420p{mark}[{out_label}]")
+        return
     tail = renderer.block_tail(fps, seg_dur, frames)
     if tag:
         tail += f",metadata=mode=add:key={LAYOUT_TAG_KEY}:value={tag}"
@@ -540,12 +965,13 @@ def layout_filter(parts, in_label, out_label, W, H, fps, panels, uid,
         follow.window_chain(
             parts, in_label, out_label, f"c{uid}", src_size=(sw, sh),
             out_size=(W, H), k=k, ts=ts, ox=ox, oy=oy, length=seg_dur or 0.0,
-            fps=fps, tail=tail, grade=grade, interpolation=interp,
-            sharpen=sharpen, flags=flags, time_map=tmap, key_span=kspan)
+            fps=fps, tail=tail + _footage_grain(k, grain), grade=grade,
+            interpolation=interp, sharpen=sharpen, flags=flags,
+            time_map=tmap, key_span=kspan)
         return
     if len(panels) == 1:
         box, rect = panels[0]
-        parts.append(f"[{in_label}]{head}{_single_panel(W, H, box, rect, src_size)},"
+        parts.append(f"[{in_label}]{head}{_single_panel(W, H, box, rect, src_size, grain)},"
                      f"{tail}[{out_label}]")
         return
     n = len(panels)
@@ -553,15 +979,139 @@ def layout_filter(parts, in_label, out_label, W, H, fps, panels, uid,
                  + "".join(f"[ly{uid}_{k}]" for k in range(n)))
     for k, (box, rect) in enumerate(panels):
         x, y, _w, _h = pixels(W, H, box)
-        chain = _panel(W, H, box, rect, src_size)
+        pf = panel_follow[k] if panel_follow and k < len(panel_follow) else None
+        if pf and src_size and src_size[0] and src_size[1]:
+            _follow_panel(parts, f"ly{uid}_{k}", f"lyf{uid}_{k}", W, H, fps,
+                          box, rect, src_size, pf, seg_dur, frames,
+                          f"{uid}p{k}")
+            chain, src_label = "null", f"lyf{uid}_{k}"
+        else:
+            chain, src_label = _panel(W, H, box, rect, src_size, grain), f"ly{uid}_{k}"
+            hide = panel_conceal[k] if panel_conceal and k < len(panel_conceal) else None
+            if hide and src_size and src_size[0] and src_size[1]:
+                _x, _y, w, h = pixels(W, H, box)
+                shown = match_rect(rect, box, float(src_size[0]),
+                                   float(src_size[1]), W, H)
+                parts.append(f"[ly{uid}_{k}]{chain}[lyq{uid}_{k}]")
+                _conceal_chain(parts, f"lyq{uid}_{k}", f"lyh{uid}_{k}", shown,
+                               hide, w, h, f"lyk{uid}_{k}")
+                chain, src_label = "null", f"lyh{uid}_{k}"
         if k == 0:
-            parts.append(f"[ly{uid}_0]{chain},pad={W}:{H}:{x}:{y}:color=black"
+            parts.append(f"[{src_label}]{chain},pad={W}:{H}:{x}:{y}:color=black"
                          f"[lyc{uid}_0]")
             continue
-        parts.append(f"[ly{uid}_{k}]{chain}[lyp{uid}_{k}]")
+        parts.append(f"[{src_label}]{chain}[lyp{uid}_{k}]")
         parts.append(f"[lyc{uid}_{k - 1}][lyp{uid}_{k}]overlay={x}:{y}"
                      f":shortest=1[lyc{uid}_{k}]")
     parts.append(f"[lyc{uid}_{n - 1}]{tail}[{out_label}]")
+
+
+# A concealed box (CardPanel.conceal) is blurred this strongly (a share of
+# its own short side), darkened to this share of its level and feathered
+# over this share of the panel's short side into the picture around it.
+CONCEAL_BLUR = .25
+CONCEAL_DIM = .45
+CONCEAL_FEATHER = .12
+
+
+def conceal_boxes(rect, regions, w, h):
+    """[(x0, y0, x1, y1, interior sides)] — the parts of ``regions`` (SOURCE
+    fractions) a panel showing ``rect`` at w x h draws, in panel pixels,
+    each grown by the feather on the sides that face the picture (never
+    past the panel), interior = (left, top, right, bottom) feathered."""
+    out = []
+    rx0, ry0, rx1, ry1 = (float(v) for v in rect)
+    f = max(4, int(round(CONCEAL_FEATHER * min(w, h))))
+    for c in regions or []:
+        ix0, iy0 = max(float(c[0]), rx0), max(float(c[1]), ry0)
+        ix1, iy1 = min(float(c[2]), rx1), min(float(c[3]), ry1)
+        if ix1 - ix0 < 1e-4 or iy1 - iy0 < 1e-4:
+            continue
+        px0 = (ix0 - rx0) / (rx1 - rx0) * w
+        py0 = (iy0 - ry0) / (ry1 - ry0) * h
+        px1 = (ix1 - rx0) / (rx1 - rx0) * w
+        py1 = (iy1 - ry0) / (ry1 - ry0) * h
+        inner = (px0 > 1, py0 > 1, px1 < w - 1, py1 < h - 1)
+        x0 = _even(max(0, px0 - f)) if inner[0] else 0
+        y0 = _even(max(0, py0 - f)) if inner[1] else 0
+        x1 = min(w, _even(px1 + f)) if inner[2] else w
+        y1 = min(h, _even(py1 + f)) if inner[3] else h
+        if x1 - x0 >= 4 and y1 - y0 >= 4:
+            out.append((x0, y0, x1, y1, inner))
+    return out
+
+
+def _conceal_chain(parts, in_label, out_label, rect, regions, w, h, uid):
+    """[in_label] (a panel picture, w x h) -> [out_label] with the parts of
+    burned-in boxes it shows softened: blurred, darkened and feathered into
+    the picture — what of the box a face-holding framing could not leave
+    out reads as shadow, never as a second screen."""
+    boxes = conceal_boxes(rect, regions, w, h)
+    if not boxes:
+        parts.append(f"[{in_label}]null[{out_label}]")
+        return
+    f = max(4, int(round(CONCEAL_FEATHER * min(w, h))))
+    parts.append(f"[{in_label}]split={len(boxes) + 1}[{uid}m]"
+                 + "".join(f"[{uid}c{k}]" for k in range(len(boxes))))
+    base = f"{uid}m"
+    for k, (x0, y0, x1, y1, inner) in enumerate(boxes):
+        cw, ch = x1 - x0, y1 - y0
+        r = max(2, min(int(CONCEAL_BLUR * min(cw, ch)), (min(cw, ch) // 2) - 1))
+        rc = max(1, min(r // 2, (min(cw, ch) // 4) - 1))
+        # an eased ramp over the feather on each side facing the picture:
+        # the softened box fades in like a shadow, never a hard-edged block
+        ramps = []
+        if inner[0]:
+            ramps.append(f"X/{f}")
+        if inner[1]:
+            ramps.append(f"Y/{f}")
+        if inner[2]:
+            ramps.append(f"(W-1-X)/{f}")
+        if inner[3]:
+            ramps.append(f"(H-1-Y)/{f}")
+        t = "1"
+        for ramp in ramps:
+            t = f"min({t},{ramp})"
+        t = f"clip({t},0,1)"
+        alpha = f"255*{t}*{t}*(3-2*{t})"
+        parts.append(
+            f"[{uid}c{k}]crop={cw}:{ch}:{x0}:{y0},"
+            f"boxblur=luma_radius={r}:luma_power=2:chroma_radius={rc}:chroma_power=2,"
+            f"lutyuv=y='16+(val-16)*{CONCEAL_DIM:.2f}':u='128+(val-128)*.5'"
+            f":v='128+(val-128)*.5',format=yuva420p,"
+            f"geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='clip({alpha},0,255)'"
+            f"[{uid}s{k}]")
+        nxt = out_label if k == len(boxes) - 1 else f"{uid}o{k}"
+        parts.append(f"[{base}][{uid}s{k}]overlay={x0}:{y0}:format=auto,"
+                     f"format=yuv420p[{nxt}]")
+        base = nxt
+
+
+def _follow_panel(parts, in_label, out_label, W, H, fps, box, rect, src_size,
+                  follow_block, seg_dur, frames, uid):
+    """One stack panel whose rect FOLLOWS its speaker (follow.window_chain
+    at the box's size): the rect's centre moves along the panel's follow
+    path, held inside the source frame (a panel never shows past it)."""
+    import follow
+    import renderer
+    tmap, kspan, ts, cxs, cys, interp = follow_block
+    sw, sh = float(src_size[0]), float(src_size[1])
+    _x, _y, w, h = pixels(W, H, box)
+    rect = match_rect(rect, box, sw, sh, W, H)
+    rw, rh = (rect[2] - rect[0]) * sw, (rect[3] - rect[1]) * sh
+    k = w / rw
+    hx, hy = rw / 2.0 / sw, rh / 2.0 / sh
+    cxs = [min(max(c, hx), 1.0 - hx) if hx < 0.5 else 0.5 for c in cxs]
+    cys = [min(max(c, hy), 1.0 - hy) if hy < 0.5 else 0.5 for c in cys]
+    ox = [cx * sw - rw / 2.0 for cx in cxs]
+    oy = [cy * sh - rh / 2.0 for cy in cys]
+    flags, sharpen = _enlarge(k)
+    follow.window_chain(
+        parts, in_label, out_label, f"c{uid}", src_size=(sw, sh),
+        out_size=(w, h), k=k, ts=ts, ox=ox, oy=oy, length=seg_dur or 0.0,
+        fps=fps, tail=renderer.block_tail(fps, seg_dur, frames), grade=None,
+        interpolation=interp, sharpen=sharpen, flags=flags, time_map=tmap,
+        key_span=kspan)
 
 
 def overlaps_source_card(edl, spans):
@@ -917,6 +1467,21 @@ def _blur_chain(W, H, spec):
             f"scale={W}:{H}:flags=bicubic,setsar=1")
 
 
+def _program_card_fades(spec, phase, full, edge):
+    """A program card's entrance/exit: the WHOLE finished card (backdrop,
+    plate and footage) fading over the program under it — a dissolve from
+    and to the full-frame shot, never its footage fading in over its own
+    already-drawn backdrop (the bare canvas; module docstring). On the
+    card piece's own clock (0 at its start; ``phase`` into the card).
+    '' when neither end animates (the historical graph)."""
+    out = ""
+    if spec.get("entrance", "lift") in ANIMATED:
+        out += _fade("in", -phase, edge)
+    if spec.get("exit", "fade") in ANIMATED:
+        out += _fade("out", full - edge - phase, edge)
+    return ",format=yuva420p" + out if out else ""
+
+
 def _append_designed(parts, vlabel, p, idx, spec, W, H, fps, source_rect):
     """The designed-backdrop variant of append_graph's per-card branch."""
     sx, sy, sw, sh = pixels(W, H, source_rect or [0, 0, 1, 1])
@@ -937,11 +1502,8 @@ def _append_designed(parts, vlabel, p, idx, spec, W, H, fps, source_rect):
     head = f"trim=start={start:.6f}:end={end:.6f},setpts=PTS-STARTPTS+{phase:.6f}/TB,crop={sw}:{sh}:{sx}:{sy}"
     tile = fit
     ent, ext = spec.get("entrance", "lift"), spec.get("exit", "fade")
-    if ent in ("fade", "lift"):
-        tile += f",fade=t=in:st=0:d={edge:.6f}:alpha=1"
-    if ext in ("fade", "lift"):
-        tile += f",fade=t=out:st={full-edge:.6f}:d={edge:.6f}:alpha=1"
     tile += f",setpts=PTS-{phase:.6f}/TB"
+    fades = _program_card_fades(spec, phase, full, edge)
     if blur:
         parts.append(f"[{p}src]{head},split[{p}tsrc][{p}bsrc]")
         parts.append(f"[{p}tsrc]{tile}[{p}tile]")
@@ -971,9 +1533,9 @@ def _append_designed(parts, vlabel, p, idx, spec, W, H, fps, source_rect):
         parts.append(f"[{p}bgtop][{p}mask]alphamerge[{p}clip]")
         parts.append(f"[{p}placed][{p}clip]overlay=0:0:shortest=1:format=auto[{p}framed]")
         parts.append(f"[{idx}:v]format=rgba,{_still(length, fps)}[{p}plate]")
-        parts.append(f"[{p}framed][{p}plate]overlay=0:0:shortest=1:format=auto,setpts=PTS+{start:.6f}/TB[{p}card]")
+        parts.append(f"[{p}framed][{p}plate]overlay=0:0:shortest=1:format=auto{fades},setpts=PTS+{start:.6f}/TB[{p}card]")
     else:
-        parts.append(f"[{p}placed][{p}plate]overlay=0:0:shortest=1:format=auto,setpts=PTS+{start:.6f}/TB[{p}card]")
+        parts.append(f"[{p}placed][{p}plate]overlay=0:0:shortest=1:format=auto{fades},setpts=PTS+{start:.6f}/TB[{p}card]")
     parts.append(f"[{p}pass][{p}card]overlay=0:0:eof_action=repeat:repeatlast=1:enable='gte(t,{start:.6f})*lt(t,{end:.6f})'[{p}out]")
     return f"{p}out"
 
@@ -990,22 +1552,8 @@ LAYOUT_TAG_KEY = "valmera_card"
 SOURCE_CARD_REACH_S = .25
 
 
-def _ye_abs(y, h, H, ent, ext, origin, edge, full):
-    """_append_graph's lift/reveal offset on the PROGRAM clock: t - origin
-    is the time since the full card's start (clipped: a run can open or
-    close a frame either side of the authored window)."""
-    x = f"(t-{origin:.6f})"
-    ye = str(y)
-    if ent in ("lift", "reveal"):
-        distance = h if ent == "reveal" else H*.022
-        ye += f"+{distance:.3f}*pow(clip(1-{x}/{edge:.6f},0,1),3)"
-    if ext in ("lift", "reveal"):
-        distance = h if ext == "reveal" else H*.022
-        ye += f"+{distance:.3f}*pow(clip(({x}-{full-edge:.6f})/{edge:.6f},0,1),3)"
-    return ye
-
-
-def _append_source_fed(parts, vlabel, p, idx, spec, W, H, fps, runs):
+def _append_source_fed(parts, vlabel, p, idx, spec, W, H, fps, runs,
+                       anim=None):
     """A source-fed card (one panel or a stack). layout_filter already put
     every panel's source rect on its box of the program picture; this cuts
     each box back out of the finished program (camera and grade included)
@@ -1020,6 +1568,11 @@ def _append_source_fed(parts, vlabel, p, idx, spec, W, H, fps, runs):
     branch ends and the program passes through (eof_action=pass).
 
     runs: [(tag, program start, program end)] from build_filtergraph.
+    anim: (entrance, exit) program windows the card dissolves over (the
+    renderer composed those blocks as the full-frame shot with the panels
+    dissolving in: layout_filter ``under``), None each for a cut. The
+    WHOLE card fades over them — never its footage over its own backdrop,
+    which showed the bare canvas (module docstring).
 
     MEMORY: overlay's framesync releases no program frame until it knows
     the card branch's NEXT timestamp, and a branch cut from the program
@@ -1033,31 +1586,19 @@ def _append_source_fed(parts, vlabel, p, idx, spec, W, H, fps, runs):
     moving plate would park every frame one run consumes in the next run's
     queue."""
     start, end = float(spec["start"]), float(spec["end"])
-    length = end-start
-    phase = float(spec.get("phase_s") or 0)
-    full = float(spec.get("full_duration_s") or length)
-    edge = min(float(spec.get("duration_s", .45)), full*.3)
-    origin = start - phase             # the full card's start, program clock
     wins = [pixels(W, H, box) for box in card_boxes(spec)]
     n = len(wins)
     blur = spec.get("background_style") == "blur"
     styled = designed(spec)
     grain = _grain(spec)
-    ent, ext = spec.get("entrance", "lift"), spec.get("exit", "fade")
+    # The whole card's dissolve, on the program clock (a fragment that
+    # opens inside a fade has it start before zero: _fade shifts).
     fades = ""
-    # fade's start cannot be negative: a proof fragment that opens inside
-    # the card has its card clock begin before zero. Its fades then run on
-    # a clock shifted forward by that much and shifted straight back (each
-    # frame lands on its own timestamp again).
-    shift = max(0.0, -origin)
-    if ent in ("fade", "lift"):
-        fades += f",fade=t=in:st={origin + shift:.6f}:d={edge:.6f}:alpha=1"
-    if ext in ("fade", "lift"):
-        fades += (f",fade=t=out:st={origin + shift + full - edge:.6f}"
-                  f":d={edge:.6f}:alpha=1")
-    if fades and shift:
-        fades = (f",setpts=PTS+{shift:.6f}/TB{fades}"
-                 f",setpts=PTS-{shift:.6f}/TB")
+    win_in, win_out = anim or (None, None)
+    if win_in:
+        fades += _fade("in", win_in[0], win_in[1] - win_in[0])
+    if win_out:
+        fades += _fade("out", win_out[0], win_out[1] - win_out[0])
     # Each run's trim window on the program clock: its blocks' Timeline
     # span, reached a little either side (the tag, not the clock, decides
     # which frames belong to it).
@@ -1105,8 +1646,8 @@ def _append_source_fed(parts, vlabel, p, idx, spec, W, H, fps, runs):
                      f":function=same_str,split={len(outs)}"
                      + "".join(f"[{o}]" for o in outs))
         for k, (x, y, w, h) in enumerate(wins):
-            parts.append(f"[{q}s{k}]crop={w}:{h}:{x}:{y},setsar=1,format=rgba"
-                         f"{fades}[{q}tile{k}]")
+            # opaque: the footage is exactly the program's inside its box
+            parts.append(f"[{q}s{k}]crop={w}:{h}:{x}:{y},setsar=1[{q}tile{k}]")
         if blur:
             x, y, w, h = wins[0]       # the first panel (the speaker)
             parts.append(f"[{q}b]crop={w}:{h}:{x}:{y},{_blur_chain(W, H, spec)},"
@@ -1121,8 +1662,7 @@ def _append_source_fed(parts, vlabel, p, idx, spec, W, H, fps, runs):
         base = f"{q}bg"
         for k, (x, y, w, h) in enumerate(wins):
             out = f"{q}placed" if k == n - 1 else f"{q}pl{k}"
-            parts.append(f"[{base}][{q}tile{k}]overlay=x={x}:"
-                         f"y='{_ye_abs(y, h, H, ent, ext, origin, edge, full)}'"
+            parts.append(f"[{base}][{q}tile{k}]overlay=x={x}:y={y}"
                          f":format=auto[{out}]")
             base = out
         if blur:
@@ -1142,7 +1682,7 @@ def _append_source_fed(parts, vlabel, p, idx, spec, W, H, fps, runs):
         parts.append(f"[{base}][{plates[r]}]overlay=0:0:eof_action=repeat"
                      + (":shortest=1" if styled and grain and not blur
                         else "") +
-                     f":format=auto,format=yuva420p,"
+                     f":format=auto,format=yuva420p{fades},"
                      f"tpad=start=2:color=black@0,"
                      f"setpts='{lead}'[{q}card]")
         parts.append(f"[{q}pass][{q}card]overlay=0:0:eof_action=pass"
@@ -1152,14 +1692,16 @@ def _append_source_fed(parts, vlabel, p, idx, spec, W, H, fps, runs):
 
 
 def append_graph(parts, vlabel, inputs, W, H, fps, source_rect=None,
-                 runs=None):
+                 runs=None, anim=None):
     """One branch per card over the composed program ``vlabel``.
 
     source_rect is frame.picture: the region of the program a program card
     shows. runs = {card id: [(layout tag, program start, program end), ...]}
     names the runs of render blocks renderer.build_filtergraph composed for
     each source-fed card (_append_source_fed). A source-fed card with no run (its window holds
-    only spliced media) draws nothing.
+    only spliced media) draws nothing. anim = {card id: (entrance window,
+    exit window)} — the dissolves build_filtergraph composed the blocks
+    for (a source-fed card absent from it cuts in and out).
     """
     if not inputs:
         return vlabel
@@ -1170,7 +1712,8 @@ def append_graph(parts, vlabel, inputs, W, H, fps, source_rect=None,
         if source_fed(spec):
             if runs.get(spec.get("id")):
                 vlabel = _append_source_fed(parts, vlabel, p, idx, spec, W, H,
-                                            fps, runs[spec["id"]])
+                                            fps, runs[spec["id"]],
+                                            (anim or {}).get(spec.get("id")))
             continue
         if designed(spec):
             vlabel = _append_designed(parts, vlabel, p, idx, spec, W, H, fps,
@@ -1189,11 +1732,8 @@ def append_graph(parts, vlabel, inputs, W, H, fps, source_rect=None,
                f"scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color={color}")
         chain = f"trim=start={start:.6f}:end={end:.6f},setpts=PTS-STARTPTS+{phase:.6f}/TB,crop={sw}:{sh}:{sx}:{sy},{fit},setsar=1,format=rgba"
         ent, ext = spec.get("entrance","lift"), spec.get("exit","fade")
-        if ent in ("fade","lift"):
-            chain += f",fade=t=in:st=0:d={edge:.6f}:alpha=1"
-        if ext in ("fade","lift"):
-            chain += f",fade=t=out:st={full-edge:.6f}:d={edge:.6f}:alpha=1"
         chain += f",setpts=PTS-{phase:.6f}/TB"
+        fades = _program_card_fades(spec, phase, full, edge)
         parts.append(f"[{p}src]{chain}[{p}tile]")
         parts.append(f"color=c={color}:s={W}x{H}:r={fps}:d={length:.6f}[{p}bg]")
         ye = str(y)
@@ -1222,7 +1762,7 @@ def append_graph(parts, vlabel, inputs, W, H, fps, source_rect=None,
         # every card frame, and [placed] alone decides the card's length —
         # exactly what the window-length looped plate (always the longer
         # input under shortest=1) produced before.
-        parts.append(f"[{p}placed][{p}plate]overlay=0:0:shortest=0:eof_action=repeat:format=auto,"
+        parts.append(f"[{p}placed][{p}plate]overlay=0:0:shortest=0:eof_action=repeat:format=auto{fades},"
                      f"tpad=start=2,setpts=PTS-2+{start:.6f}/TB[{p}card]")
         # trim/setpts and framesync quantize fractional cut clocks differently.
         # The card branch can reach EOF one or two frames before the program

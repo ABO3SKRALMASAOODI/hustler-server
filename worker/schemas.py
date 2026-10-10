@@ -1413,9 +1413,33 @@ def _source_rectangle(value):
 
 class CardPanel(BaseModel):
     """One region of the main SOURCE frame (``source``) shown in one box of
-    the canvas (``box``) — a panel of a stacked picture card."""
+    the canvas (``box``) — a panel of a stacked picture card. ``follow``
+    (Oct 2026): per-shot paths of the rect's CENTRE (FollowSpan) for a
+    speaker panel whose speaker moves inside a shot; the rect keeps its
+    size. None (every panel written before it) is the still rect."""
     box: List[float]
     source: List[float]
+    follow: Optional[List[FollowSpan]] = None
+    # conceal (Oct 2026): burned-in screen/PIP boxes (SOURCE fractions) that
+    # touch the speaker's face, so no framing that holds the face can leave
+    # them out: the panel softens what of them it shows (blurred, darkened,
+    # feathered into the picture) — a shadow, not a second screen. Written
+    # by set_picture_card; None everywhere else.
+    conceal: Optional[List[List[float]]] = None
+
+    @field_validator("follow")
+    @classmethod
+    def _ordered_follow(cls, value):
+        return _follow_spans(value)
+
+    @field_validator("conceal")
+    @classmethod
+    def _conceal(cls, value):
+        if not value:
+            return None
+        if len(value) > 4:
+            raise ValueError("a panel conceals at most 4 boxes")
+        return [_source_rectangle(r) for r in value]
 
     @field_validator("box")
     @classmethod
