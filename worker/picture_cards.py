@@ -98,7 +98,35 @@ def source_at(spec, src_t=None):
             c = follow.centre_at(span, src_t) if span else None
             if c is not None:
                 rect = recentre(rect, c)
+        k = step_scale_at(spec, src_t)
+        if k is not None:
+            rect = step_rect(rect, k)
     return rect
+
+
+def step_scale_at(spec, src_t):
+    """The cut step (PictureCard.cut_steps, written only by the optional
+    conceal_jump_cuts) holding SOURCE second ``src_t``: its scale, or None."""
+    if src_t is None:
+        return None
+    for st in spec.get("cut_steps") or []:
+        try:
+            if float(st["t0"]) - 1e-6 <= float(src_t) <= float(st["t1"]) + 1e-6:
+                k = float(st["scale"])
+                return k if abs(k - 1.0) > 1e-6 else None
+        except (KeyError, TypeError, ValueError):
+            continue
+    return None
+
+
+def step_rect(rect, k):
+    """``rect`` scaled by 1/k around its centre (k > 1 tighter, < 1 wider),
+    kept inside the source frame: a wide step near an edge slides inward
+    rather than showing past it."""
+    x0, y0, x1, y1 = (float(v) for v in rect)
+    w = min(1.0, (x1 - x0) / k)
+    h = min(1.0, (y1 - y0) / k)
+    return recentre([0.0, 0.0, w, h], ((x0 + x1) / 2.0, (y0 + y1) / 2.0))
 
 
 def recentre(rect, centre):
@@ -467,7 +495,7 @@ def _panel(W, H, box, rect, src_size):
 
 def layout_filter(parts, in_label, out_label, W, H, fps, panels, uid,
                   src_size=None, seg_dur=None, grade=None, tag=None,
-                  frames=None, follow_block=None):
+                  frames=None, follow_block=None, bounded=False):
     """A main-footage block composed for a source-fed card: every panel's
     source rect scaled once onto its box of a W x H canvas, then the block
     tail _normalize_video uses (CFR, exact length, sar 1, yuv420p). The grade
@@ -481,7 +509,11 @@ def layout_filter(parts, in_label, out_label, W, H, fps, panels, uid,
     follow.py): (time_map, key_span, key times on the block clock, rect
     centres x, y, interpolation) — the canvas is the same source-at-scale
     picture _single_panel draws, translated every frame so the moving rect
-    lands on the box."""
+    lands on the box.
+
+    bounded: the block's rect is a cut step (step_rect) — its follow path was
+    planned for the unstepped rect, so the moving rect is held inside the
+    source frame (a wider step near an edge slides inward)."""
     import renderer
     tail = renderer.block_tail(fps, seg_dur, frames)
     if tag:
@@ -497,6 +529,10 @@ def layout_filter(parts, in_label, out_label, W, H, fps, panels, uid,
         rect = match_rect(rect, box, sw, sh, W, H)
         rw, rh = (rect[2] - rect[0]) * sw, (rect[3] - rect[1]) * sh
         k = w / rw
+        if bounded:
+            hx, hy = rw / 2.0 / sw, rh / 2.0 / sh
+            cxs = [min(max(c, hx), 1.0 - hx) if hx < 0.5 else 0.5 for c in cxs]
+            cys = [min(max(c, hy), 1.0 - hy) if hy < 0.5 else 0.5 for c in cys]
         # the canvas's top-left on the source, for each rect centre
         ox = [cx * sw - rw / 2.0 - x / k for cx in cxs]
         oy = [cy * sh - rh / 2.0 - y / k for cy in cys]

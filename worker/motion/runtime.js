@@ -463,6 +463,34 @@
     return need;
   };
 
+  // ── yielding: a persistent graphic hands its band to other graphics ────
+  // The renderer (worker/motion_layer.yield_windows) sets MG.yields =
+  // {w: [[a, b], ...], out, in} on a persistent template (the headline band):
+  // composition seconds where another graphic occupies its band. The whole
+  // page fades out over `out` s ending at a, stays gone until b and fades
+  // back over `in` s from b. Unset (every other item) changes nothing.
+  MG.yields = null;
+  /** 0-1 visibility of the page at t under MG.yields (1 when unset). */
+  MG.yieldLevel = t => {
+    const Y = MG.yields;
+    if (!Y || !Array.isArray(Y.w) || !Y.w.length) return 1;
+    const o = Math.max(1e-3, +Y.out || 0.12), n = Math.max(1e-3, +Y.in || 0.3);
+    let v = 1;
+    for (const [a, b] of Y.w) {
+      if (t >= a && t <= b) return 0;
+      if (t < a && t > a - o) v = Math.min(v, ease.inOutQuad((a - t) / o));
+      if (t > b && t < b + n) v = Math.min(v, ease.outCubic((t - b) / n));
+    }
+    return v;
+  };
+  const yieldMoving = (t, fd) => {
+    const Y = MG.yields;
+    if (!Y || !Array.isArray(Y.w) || !Y.w.length) return false;
+    const o = Math.max(1e-3, +Y.out || 0.12), n = Math.max(1e-3, +Y.in || 0.3);
+    return Y.w.some(([a, b]) => (t >= a - o - 1e-6 && t <= a + fd + 1e-6)
+      || (t >= b - 1e-6 && t <= b + n + fd + 1e-6));
+  };
+
   // ── frame driver (called by the renderer) ──────────────────────────────
   window.__mgSeek = t => {
     MG.t = t;
@@ -490,6 +518,11 @@
           if (t * 1000 >= startMs - 1 && (endMs === Infinity || t * 1000 <= endMs + fd * 1000 + 1)) active = true;
         }
       } catch (e) { active = true; }
+    }
+    if (MG.yields) {
+      const v = MG.yieldLevel(t);
+      document.body.style.opacity = v >= 1 ? '' : v.toFixed(4);
+      if (yieldMoving(t, fd)) active = true;
     }
     return active ? 1 : 0;
   };

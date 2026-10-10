@@ -91,6 +91,7 @@ import webrecord
 import typography_scenes
 import motion_tools
 import motion_planner
+import cut_steps
 import music_library
 import sound_library
 import sfx_mix
@@ -28654,6 +28655,9 @@ TOOLS = {
 # Browser-rendered motion design + the approved real sound library (worker/motion_tools.py).
 TOOLS.update(motion_tools.TOOL_SPECS)
 TOOLS.update(motion_planner.TOOL_SPECS)
+# Optional jump-cut concealment (worker/cut_steps.py): a tool the editor
+# chooses when cuts visibly pop — never a default of any look or planner.
+TOOLS.update(cut_steps.TOOL_SPECS)
 # Built-in CC0 music library (worker/music_library.py, worker/music/).
 TOOLS.update(music_library.TOOL_SPECS)
 
@@ -28779,7 +28783,7 @@ TOOL_DOMAINS = {
         "set_picture_card", "remove_picture_card",
         "set_frame", "auto_reframe", "add_zoom", "remove_zoom", "add_zoom_path",
         "remove_zoom_path", "set_text_motion", "set_overlay_motion",
-        "punch_in_on_emphasis",
+        "punch_in_on_emphasis", "conceal_jump_cuts",
         "set_transitions",
         "set_fades", "bind_motion_motif", "add_aspect_shift",
         "remove_aspect_shift", "add_color_screen", "add_corrupt_screen",
@@ -28957,6 +28961,7 @@ REQUIRED_ARGS = {
     "justify_verification_findings": ["finding_ids", "justification"],
     "review_audio": [],
     "punch_in_on_emphasis": [],
+    "conceal_jump_cuts": [],
     "search_sfx": ["query"],
     "audition_sfx_candidates": ["ids", "purpose"],
     "find_footage": ["query"],
@@ -29020,7 +29025,7 @@ WRITE_TOOLS = {"apply_edit_batch", "keep_segments", "cut_range", "cut_output_ran
                "bind_motion_motif",
                "set_grade_custom", "set_master_loudness",
                "separate_music", "remove_stem_mix",
-               "punch_in_on_emphasis", "fetch_sfx",
+               "punch_in_on_emphasis", "conceal_jump_cuts", "fetch_sfx",
                "beat_align_cuts", "apply_look", "fetch_url"}
 
 
@@ -29264,6 +29269,9 @@ _COMPACT_CONTRACTS = {
         "length; explicit values win. Optional, never a required pass: keep "
         "only punches on words the story turns on (a punch on every stressed "
         "word looks childish). Skip for calm/minimal briefs."),
+    "conceal_jump_cuts": (
+        "Optional, never a default: hard 6-10% framing steps on only the "
+        "jump cuts that visibly pop. at=[s] picks cuts; mode='off' undoes."),
     "set_transitions": (
         "One junction style at real scene changes; scope='scene' skips jump "
         "cuts — report the junction count it returns. Styles dip_black, "

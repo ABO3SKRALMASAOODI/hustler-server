@@ -236,6 +236,12 @@ def mode(item):
     return MODE_WORDS
 
 
+def persistent(item):
+    """A persistent template (the headline band, motion_templates.persistent):
+    it carries no spoken words and is placed around like any graphic."""
+    return bool(_spec(item).get("persistent"))
+
+
 def replaces_speech(item):
     """Does the template exist to say the spoken words (spec mutes_captions)?
     Decides the fallback when no caption band is clear of it."""
@@ -804,8 +810,9 @@ def plan(edl, index, tl, words, canvas=None):
             "carried": [words[i] for i in sorted(carried)],
             "placed": None, "muted": [], "kept": [],
             "owns_from": None, "joined": [], "yielded": [], "beside": []}
+        # (the standing headline owns no phrase: captions never yield to it)
         own = owned(m, words, word_toks, mids, pids, carried) \
-            if mode(m) == MODE_WORDS else None
+            if mode(m) == MODE_WORDS and not persistent(m) else None
         if own is None:
             continue
         # One reading path: the phrase this graphic shows is read on it
@@ -994,6 +1001,10 @@ def carried_by(m, words, word_toks, mids, hero_only=None):
     """Indices of the caption words graphic ``m`` shows (see the module
     docstring; MODE_HERO keeps only its hero words unless ``hero_only`` is
     False)."""
+    if persistent(m):
+        # the standing headline is a claim, not the spoken line: it never
+        # takes a word out of the captions it runs beside
+        return set()
     s, e = float(m["start"]), float(m["end"])
     seq, hero, solo = shown_tokens(m)
     # a word still being said as the graphic leaves counts: the graphic
@@ -1203,6 +1214,8 @@ def _on_screen(edl, tl):
     motion graphics and designed texts."""
     out = []
     for m in program_items(edl, tl):
+        if persistent(m):
+            continue                    # a standing claim is not the spoken line
         seq, _hero, _solo = shown_tokens(m)
         out.append((m["start"], m["end"], set(seq), f"motion graphic '{m['id']}'"))
     for t in edl.get("texts") or []:

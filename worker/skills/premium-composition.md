@@ -72,7 +72,11 @@ LAYOUTS FOR 9:16:
   near-black, vignette, and film grain on low-resolution footage — or pick
   a gradient; a blurred copy of the picture (`blur`) only behind sharp HD
   footage, never behind archival or sub-720p video, where it reads as a
-  muddy smear. Use the free bands for a headline and hero type.
+  muddy smear. Use the free bands for a headline and hero type: the band
+  above the card carries ONE persistent `headline` motion graphic (a short
+  third-person claim with one accent span, a who + when kicker; read
+  motion-design) that hero lockups in the band replace and hand back
+  automatically, so the band is never left empty for seconds.
 - **Speaker + evidence** (the speaker reads a study, shows a tweet, points
   at a browser or document inset in the source): a stacked card,
   `set_picture_card(panels=[...])` — the speaker in one box, the evidence
@@ -120,7 +124,9 @@ NATIVE TOOLS THAT REMAIN USEFUL:
   speaker="…", text="…")` for a verified speaker and a faithful claim. It
   holds still and keeps dialogue captions. On a reel it should pose the
   question, never the payoff, and sit inside the designed layout rather than
-  above a small card on black.
+  above a small card on black. It does not yield to other graphics: where
+  hero lockups share the band above a card or letterbox, use the persistent
+  `headline` motion template instead, which steps aside for them.
 - **A phrase built in place**: `set_typography_scene` measures the complete
   phrase first, then reveals runs at real PROGRAM `at` cues without moving
   previous words. Give deliberate `lines` with `runs`; pair one sans family
