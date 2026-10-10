@@ -181,3 +181,46 @@ def test_a_lockup_spilling_out_of_the_band_is_named(monkeypatch):
     out = motion_tools.add_motion_graphic(ctx, "word_slam", 26.0, 27.0,
                                           params={"text": "*one*", "y": 0.48}, id="slam")
     assert "NOTE (band)" not in out, out
+
+
+# ── follow: a turn the frontal index loses is measured ───────────────────
+# The showcase index's spatial samples are frontal-only: Elon's turn to
+# Rogan (136.8-137.8 s) has no face in them, so the dense-index path saw a
+# still speaker and never followed the turn the reframe track fixed on the
+# proxy. A shot whose index loses the face for >= 1 s is measured instead.
+
+def _ix(faces_at):
+    return {"spatial": {"samples": [
+        {"t": t, "faces": [[0.4, 0.2, 0.6, 0.6]] if has else []} for t, has in faces_at]}}
+
+
+def test_the_index_losing_the_face_mid_shot_is_noticed():
+    import follow
+    steady = _ix([(t / 2, True) for t in range(0, 20)])
+    assert not follow.index_loses_face(steady, [(0.0, 10.0)])
+    turned = _ix([(t / 2, t < 14) for t in range(0, 20)])          # lost from 7.0 to the end
+    assert follow.index_loses_face(turned, [(0.0, 10.0)])
+    blink = _ix([(t / 2, t != 8) for t in range(0, 20)])            # one faceless sample
+    assert not follow.index_loses_face(blink, [(0.0, 10.0)])
+    never = _ix([(t / 2, False) for t in range(0, 20)])             # no speaker to lose
+    assert not follow.index_loses_face(never, [(0.0, 10.0)])
+
+
+def test_a_shot_the_index_loses_is_followed_from_the_proxy(monkeypatch):
+    import agent_tools
+    import follow
+
+    class C:
+        index = dict(_ix([(t / 2, t < 14) for t in range(0, 20)]),
+                     video={"width": 1920, "height": 1080})
+
+        def proxy_path(self):
+            return "proxy.mp4"
+    calls = []
+    monkeypatch.setattr(follow, "measure", lambda p, w, a: calls.append(w) or [(0.0, [])])
+    monkeypatch.setattr(follow, "speaker_track", lambda frames, cuts: [(0.0, [0.4, 0.2, 0.6, 0.6], 0.0)])
+    samples, how, _counts = agent_tools._follow_samples(C(), [(0.0, 10.0)])
+    assert how == "measured" and calls, how
+    C.index = dict(_ix([(t / 2, True) for t in range(0, 20)]), video={"width": 1920, "height": 1080})
+    samples, how, _counts = agent_tools._follow_samples(C(), [(0.0, 10.0)])
+    assert how == "index"

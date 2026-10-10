@@ -7925,7 +7925,9 @@ def _merge_windows(windows):
 def _follow_samples(ctx, windows, cuts=()):
     """(samples, source, counts) — the speaker's face over SOURCE
     ``windows`` as [(t, box, look)]: the index's spatial samples when they
-    are dense enough to follow (follow.DENSE_STEP_S), else a write-time face
+    are dense enough to follow (follow.DENSE_STEP_S) and never lose the face
+    mid-shot (follow.index_loses_face: the frontal index cannot see a turn
+    to profile), else a write-time face
     track over just these windows on the proxy (follow.measure at
     follow.SAMPLE_FPS, Haar frontal + profile — OpenCV ships in every
     lane), else the index's sparse samples. source is 'index', 'measured',
@@ -7940,7 +7942,10 @@ def _follow_samples(ctx, windows, cuts=()):
     index = getattr(ctx, "index", None) or {}
     seen = []
     sparse, dense = follow.index_samples(index, windows, seen)
-    if dense:
+    # dense index samples follow a speaker who stays frontal; one the index
+    # loses mid-shot (a turn to profile) is measured on the proxy, whose
+    # profile detector and carry hold the turned face
+    if dense and not follow.index_loses_face(index, windows):
         return sparse, "index", follow.face_counts(seen)
     if follow.too_long(windows):
         return sparse, "too_long", []

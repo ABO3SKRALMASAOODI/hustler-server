@@ -633,6 +633,45 @@ def index_samples(index, windows, frames_out=None):
     return out, dense
 
 
+# A shot whose index samples lose the face this long (a run of samples with
+# no face, between or after samples that found one) is measured on the
+# proxy instead: the index's detector is frontal only, so a speaker turned
+# to profile simply vanishes from it (the judged Elon turn: 136.8-137.8 s
+# had no face in the index while he looked across at Rogan).
+INDEX_LOST_S = 1.0
+
+
+def index_loses_face(index, windows):
+    """True when, inside one of ``windows``, the index's spatial samples
+    find the speaker's face and then lose it for INDEX_LOST_S or longer —
+    a turn to profile (or a lean out) the frontal index cannot follow, which
+    measure() (frontal + profile, carry) can."""
+    samples = (((index or {}).get("spatial") or {}).get("samples")) or []
+    rows = []
+    for s in samples:
+        try:
+            t = float(s.get("t"))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        faces = [f for f in s.get("faces") or [] if f and len(f) == 4
+                 and f[2] > f[0] and f[3] > f[1]]
+        rows.append((t, bool(faces)))
+    rows.sort()
+    for a, b in windows:
+        inside = [(t, f) for t, f in rows if a - .05 <= t <= b + .05]
+        seen, lost_at = False, None
+        for t, has in inside:
+            if has:
+                seen, lost_at = True, None
+            elif seen:
+                lost_at = t if lost_at is None else lost_at
+                if t - lost_at >= INDEX_LOST_S - 1e-6:
+                    return True
+        if seen and lost_at is not None and b - lost_at >= INDEX_LOST_S - 1e-6:
+            return True
+    return False
+
+
 # ═════════════════════════════════════════════════════════════════════════
 # The plan: hold, then glide
 # ═════════════════════════════════════════════════════════════════════════
