@@ -736,3 +736,141 @@ def test_a_busy_alternate_slot_is_not_retried_as_its_own_spread(monkeypatch,
     assert seen[1][1].startswith("cf-alt1-preview-p5-")
     assert seen[2] != seen[1]
     assert seen[2][0] == "batch"
+
+
+# ─────────────────────────── review follow-ups ────────────────────────────
+
+def test_a_nested_childs_capacity_failure_never_replays_its_parent(
+        monkeypatch):
+    """A parent MCP tool or Studio turn that already ran reports its child's
+    exhausted capacity as a terminal envelope. The parent may have changed
+    the project before the child call, so it must never run again on the
+    fenced fallback provider."""
+    monkeypatch.setattr(config, "CLOUDFLARE_MODAL_FALLBACK", True)
+    monkeypatch.setattr(config, "MODAL_EXECUTOR_ENABLED", True)
+    monkeypatch.setattr(config, "MODAL_EXECUTOR_TYPES",
+                        frozenset({"mcp_tool", "agent_turn"}))
+    monkeypatch.setattr(config, "CLOUDFLARE_EXECUTOR_TYPES",
+                        frozenset({"mcp_tool", "agent_turn"}))
+    monkeypatch.setattr(remote, "_run_modal", lambda *_a, **_k: pytest.fail(
+        "a parent that already ran was replayed on Modal"))
+    child_error = remote._capacity_exhausted(dict(MEDIA_JOB), {
+        "started": remote.time.monotonic() - 150, "attempts": 5,
+        "routes": [("interactive", 0), ("batch", 0)],
+        "last": remote.CloudflareCapacityUnavailable(NO_INSTANCE)})
+    # The executor classifies the parent's failure from its text.
+    decision = failure_policy.classify(child_error, "mcp_tool")
+    envelope = {"error": str(child_error), "retryable": decision.retryable,
+                "failure": decision.payload(child_error),
+                "timings": {"total_s": 140.0}}
+    assert envelope["failure"]["kind"] == "provider_capacity_unavailable"
+    monkeypatch.setattr(remote.requests, "post",
+                        lambda *_a, **_k: _Response(envelope))
+    monkeypatch.setattr(remote, "check_executor_version",
+                        lambda quiet=True: "")
+    job = dict(QUEUED_MCP, payload={"tool": "add_stock_media",
+                                    "mutation": True,
+                                    "execution_provider": "cloudflare"})
+
+    class _Lease(_Ledger):
+        """The lease is still ours and the terminal identity is closed:
+        everything a provider switch checks before it may replay."""
+
+        def run(self, fn, *args, **kwargs):
+            _Ledger.events.append((fn, args))
+            if fn is dbx.get_job:
+                return {"id": job["id"], "state": "running",
+                        "total_claims": job["total_claims"]}
+            return True
+
+    monkeypatch.setattr(remote.dbx, "Db", _Lease)
+    with pytest.raises(remote.CloudflareTerminalFailure) as caught:
+        remote._run_remote(job)
+    assert caught.value.failure_kind == "provider_capacity_unavailable"
+    # A startup Cloudflare abandoned before /run still reaches the fallback.
+    abandoned = {"error": "Cloudflare container startup was abandoned "
+                 "before /run", "retryable": True,
+                 "failure": {"kind": "provider_start_abandoned",
+                             "retryable": True}}
+    monkeypatch.setattr(remote.requests, "post",
+                        lambda *_a, **_k: _Response(abandoned))
+    monkeypatch.setattr(config, "CLOUDFLARE_CAPACITY_RETRIES", 0)
+    replayed = []
+    monkeypatch.setattr(remote, "_run_modal", lambda j, *_a, **_k:
+                        replayed.append(j["id"]) or {"ok": "modal"})
+    assert remote._run_remote(dict(job)) == {"ok": "modal"}
+    assert replayed == [job["id"]]
+
+
+class _GuardianDb:
+    def __init__(self):
+        self.calls = []
+
+    def run(self, fn, *args):
+        self.calls.append(fn)
+        if fn in (dbx.finish_remote_execution, dbx.finish_job):
+            return True
+        return None
+
+
+def _refused_row(submitted_at):
+    return {"provider": "cloudflare", "call_id": "cf-mcp-p3419-de27a999983124a9b36f",
+            "function_name": "mcp", "job_id": 62751, "total_claims": 1,
+            "type": "mcp_tool", "project_id": 3419, "user_id": 9,
+            "attempts": 1, "payload": {"tool": "__media__",
+                                       "mutation": False},
+            "submitted_at": submitted_at}
+
+
+@pytest.mark.parametrize("submitted_ago,refused_ago,acts", [
+    # An attached dispatcher reads its refusal within a 2-s poll and closes
+    # the row itself; the guardian waits out the attach grace first.
+    (60, 5, False),
+    # Still open long after the refusal: the dispatcher is gone.
+    (300, 200, True),
+    # A refusal older than this row's launch belongs to an earlier launch
+    # of the same identity; the current one may still start.
+    (100, 200, False),
+])
+def test_guardian_acts_on_a_refusal_only_once_it_is_an_orphan(
+        monkeypatch, submitted_ago, refused_ago, acts):
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc)
+    monkeypatch.setattr(remote, "check_executor_version",
+                        lambda quiet=True: "")
+    monkeypatch.setattr(remote, "_cloudflare_status", lambda *_a, **_k: {
+        "status": "refused",
+        "updatedAt": (now - timedelta(seconds=refused_ago)).isoformat()
+        .replace("+00:00", "Z"),
+        "envelope": {"error": NO_INSTANCE, "safe_to_fallback": True,
+                     "capacity_unavailable": True,
+                     "failure": {"kind": "provider_capacity_unavailable",
+                                 "retryable": True, "max_attempts": 1}}})
+    db = _GuardianDb()
+    event = remote.reconcile_remote_execution(
+        db, _refused_row(now - timedelta(seconds=submitted_ago)))
+    if acts:
+        assert event["status"] == "failed"
+        assert dbx.finish_remote_execution in db.calls
+    else:
+        assert event["status"] == "unknown"
+        assert db.calls == []
+
+
+def test_reconnect_reads_a_readiness_refusal_as_a_rollout(monkeypatch):
+    launches = []
+
+    def post(*_a, **kwargs):
+        launches.append(kwargs["json"]["launch_id"])
+        raise requests.ReadTimeout("observation window ended")
+
+    monkeypatch.setattr(remote.requests, "post", post)
+    monkeypatch.setattr(
+        remote, "_cloudflare_status",
+        lambda *_a, **_k: {"status": "refused", "launchId": launches[-1],
+                           "envelope": {
+            "error": "container readiness mismatch role=executor "
+                     "source=old expected_role=executor expected_source=new",
+            "safe_to_fallback": True}})
+    with pytest.raises(remote.CloudflareRolloutPending):
+        remote._run_cloudflare(dict(QUEUED_MCP))

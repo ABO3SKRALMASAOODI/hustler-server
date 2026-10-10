@@ -291,3 +291,63 @@ test('batch-only work never fails over to the smaller interactive image', async 
   }
   assert.equal(seen.length, 0);
 });
+
+test('a failed-over watch_video can still be acknowledged or abandoned on its media lane', async () => {
+  // /complete and /abandon carry only the claim identity, never the payload.
+  // Rejecting them held the shard (and the dispatcher) until the MCP lease.
+  const { env, seen } = routerEnv();
+  const identity = { id: 62751, total_claims: 1, project_id: 3419, type: 'mcp_tool' };
+  for (const lane of ['interactive', 'batch']) {
+    for (const action of ['complete', 'abandon']) {
+      const response = await exportsObject.default.fetch(new Request(
+        `https://executor.example/calls/${lane}/cf-mcp-p3419-${digest(identity)}/${action}`, {
+          method: 'POST', headers: { authorization: 'Bearer secret' },
+          body: JSON.stringify({ job: identity, envelope: { job_completed: true }, reason: 'dead' }),
+        }), env);
+      assert.equal(response.status, 200, `${lane} ${action}`);
+    }
+  }
+  assert.deepEqual(seen.map((call) => call.url.split('/')[3]),
+    ['complete', 'abandon', 'complete', 'abandon']);
+  // Starting one still needs the watch_video payload.
+  const start = await route(env, 'interactive', `cf-mcp-p3419-${digest(identity)}`,
+    { ...identity, payload: { tool: 'add_text' } });
+  assert.equal(start.status, 400);
+  assert.equal(seen.length, 4);
+});
+
+test('a readiness refusal leaves its own launch\'s refusal, then admits a relaunch', async () => {
+  const { adapter, values } = fixture();
+  adapter.startAndWaitForPorts = async () => {};
+  adapter.containerFetch = async () => new Response(JSON.stringify({
+    status: 'ok', role: 'executor', code_version: 'old-image' }));
+  adapter.env.SOURCE_VERSION = 'new-image';
+  let destroyed = 0;
+  adapter.destroy = async () => { destroyed += 1; };
+  const response = await execute(adapter, mediaChildId, mediaChild, 600, 'launch-0009');
+  assert.equal(response.status, 503);
+  const body = await response.json();
+  assert.match(body.error, /^container readiness mismatch /);
+  assert.equal(body.safe_to_fallback, true);
+  assert.equal(destroyed, 1);
+  assert.equal(values.has('active'), false);
+  const state = await (await status(adapter, mediaChildId)).json();
+  assert.equal(state.status, 'refused');
+  assert.equal(state.launchId, 'launch-0009');
+  assert.deepEqual(state.envelope, body);
+  assert.equal((await adapter.reserve(mediaChildId, 'mcp_media', Date.now(), Date.now() + MINUTE)).kind,
+    'reserved');
+});
+
+test('a readiness refusal whose destroy failed keeps the reset fence', async () => {
+  const { adapter, values } = fixture();
+  adapter.startAndWaitForPorts = async () => {};
+  adapter.containerFetch = async () => { throw new Error('connection refused'); };
+  adapter.destroy = async () => { throw new Error('provider unavailable'); };
+  const response = await execute(adapter, mediaChildId, mediaChild, 600, 'launch-0010');
+  assert.equal(response.status, 503);
+  assert.equal(values.get('active').callId, `reset:${mediaChildId}`);
+  assert.equal(values.get(`call:${mediaChildId}`).status, 'refused');
+  assert.equal((await adapter.reserve('cf-frames-next-call', 'frames', Date.now(), Date.now() + MINUTE)).kind,
+    'busy');
+});

@@ -799,6 +799,33 @@ def _modal_visibility_grace_active(row, now=None):
         < _MODAL_OUTPUT_VISIBILITY_GRACE_S
 
 
+def _cloudflare_refusal_settled(status, row, now=None):
+    """Whether a `refused` record proves this ledger row's launch is orphaned.
+
+    The record names no launch the guardian can match, so it counts only
+    when it was written after this row's launch was recorded (a relaunch of
+    the same identity refreshes submitted_at) and has stood for the attach
+    grace: an attached dispatcher reads its own refusal within one 2-s poll,
+    closes the row and moves on, so a refusal still open after that has no
+    dispatcher left. Anything unparseable keeps the old wait-for-deadline.
+    """
+    try:
+        refused_at = datetime.fromisoformat(
+            str(status.get("updatedAt") or "").replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if refused_at.tzinfo is None:
+        refused_at = refused_at.replace(tzinfo=timezone.utc)
+    submitted = row.get("submitted_at")
+    if not isinstance(submitted, datetime):
+        return False
+    if submitted.tzinfo is None:
+        submitted = submitted.replace(tzinfo=timezone.utc)
+    now = now or datetime.now(timezone.utc)
+    return refused_at >= submitted and (now - refused_at).total_seconds() \
+        >= config.REMOTE_GUARDIAN_ATTACH_GRACE_S
+
+
 def reconcile_remote_execution(worker_db, row):
     """Observe one durable provider call after its dispatcher disappeared.
 
@@ -844,6 +871,13 @@ def reconcile_remote_execution(worker_db, row):
                     dbx.heartbeat_remote_execution, job_id, claim)
                 return {"status": "running", "job": job}
             elif state == "missing":
+                return {"status": "unknown", "job": job}
+            elif state == "refused" and not _cloudflare_refusal_settled(
+                    status, row):
+                # A pre-/run refusal that an attached dispatcher (polling
+                # every 2 s) has not had time to close and route elsewhere,
+                # or an older launch's refusal that a relaunch of the same
+                # identity is replacing. Neither is an orphan yet.
                 return {"status": "unknown", "job": job}
             else:
                 data = status.get("envelope")
@@ -2105,10 +2139,15 @@ def _run_remote(job, url_override=None, modal_function=None):
             # indexing" was classified unknown/non-retryable, then pointlessly
             # replayed on Modal after Cloudflare had already given the correct
             # deterministic answer.
+            # Never "provider_capacity_unavailable": this job's own capacity
+            # refusal is a CloudflareLaunchUnavailable (handled above), so a
+            # terminal envelope of that kind is always a NESTED child's
+            # refusal reported by a parent that already ran (an MCP tool or
+            # Studio turn, possibly after it changed the project). Replaying
+            # that parent elsewhere would run it twice.
             provider_switch_kinds = {
                 "executor_capacity", "provider_budget_exhausted",
                 "provider_start_abandoned", "executor_memory",
-                "provider_capacity_unavailable",
             }
             retryable_fallback_kinds = {
                 "transient_infrastructure", "stalled_io", "media_command",

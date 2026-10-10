@@ -397,29 +397,54 @@ abstract class ValmeraContainer extends Container<Env> {
     }
   }
 
-  private async retireUnreadyContainer(callId: string): Promise<void> {
+  private async retireUnreadyContainer(
+    callId: string, refusal?: JsonObject,
+  ): Promise<void> {
     // stop() only signals SIGTERM in SDK 0.3.7. Await actual destruction of
     // a rejected image before admitting its replacement. Keep an exclusive
     // reset reservation throughout; never destroy another accepted /run.
     const resetId = `reset:${callId}`;
-    const owns = await this.ctx.storage.transaction(async (txn) => {
+    const retiring = await this.ctx.storage.transaction(async (txn) => {
       const state = await txn.get<CallState>(this.stateKey(callId));
       const active = await txn.get<ActiveCall>("active");
-      if (state?.status !== "starting" || active?.callId !== callId) return false;
+      if (!state || state.status !== "starting" || active?.callId !== callId) return null;
+      const stopping: CallState = { ...state, status: "stopping" };
       await txn.put({
-        [this.stateKey(callId)]: { ...state, status: "stopping" },
+        [this.stateKey(callId)]: stopping,
         active: { callId: resetId, expiresAt: Date.now() + 120_000 },
       });
-      return true;
+      return stopping;
     });
-    if (!owns) return;
+    if (!retiring) return;
     let destroyed = false;
     try { await this.destroy(); destroyed = true; }
     catch { /* Retain the reset lease until cleanup can be retried. */ }
     await this.ctx.storage.transaction(async (txn) => {
       const active = await txn.get<ActiveCall>("active");
       if (active?.callId !== resetId) return;
-      await txn.delete(this.stateKey(callId));
+      const key = this.stateKey(callId);
+      const current = await txn.get<CallState>(key);
+      if (refusal && current?.status === "stopping"
+          && current.updatedAt === retiring.updatedAt && !current.abandonReason) {
+        // No /run was sent. Like a startup refusal, leave a `refused`
+        // record (a later launch may reserve the id over it) so a dispatcher
+        // whose launch request already ended reads this outcome instead of
+        // polling a missing call until its lease deadline (31 minutes for
+        // an MCP tool, six hours for a preview).
+        const refusedAt = Date.now();
+        await txn.put({
+          [key]: {
+            status: "refused", jobType: current.jobType,
+            error: String(refusal.error ?? "Cloudflare container image is not ready"),
+            envelope: refusal, updatedAt: new Date(refusedAt).toISOString(),
+            activeUntil: refusedAt,
+            ...(current.launchId ? { launchId: current.launchId } : {}),
+          } satisfies CallState,
+          [this.terminalKey(callId, refusedAt)]: callId,
+        });
+      } else {
+        await txn.delete(key);
+      }
       if (destroyed) await txn.delete("active");
     });
   }
@@ -965,11 +990,12 @@ abstract class ValmeraContainer extends Container<Env> {
     // Modal fallback instead of an older renderer touching a current EDL.
     const readiness = await this.containerReadiness();
     if (!readiness.ok) {
-      await this.retireUnreadyContainer(callId);
-      return json({
+      const refusal = {
         error: readiness.error ?? "Cloudflare container image is not ready",
         safe_to_fallback: true,
-      }, 503);
+      };
+      await this.retireUnreadyContainer(callId, refusal);
+      return json(refusal, 503);
     }
 
     // Track this handler before `running` is persisted, so a status read in
@@ -1157,10 +1183,16 @@ export default {
     const allowed = allowedByLane[lane];
     // watch_video's MCP job is media work that both executor lanes run
     // directly (their `executor` role accepts mcp_tool for __media__ only),
-    // so a capacity refusal on the MCP lane may fail over here.
+    // so a capacity refusal on the MCP lane may fail over here. A completion
+    // acknowledgement or dead-call abandonment of that call carries only the
+    // claim identity (id, type, project, claims), never the payload; it can
+    // start nothing, and the Durable Object accepts it only for the exact
+    // call it stored. Rejecting it here held a failed-over watch_video's
+    // shard, and its dispatcher, until the 31-minute MCP lease expired.
     const mediaTool = jobType === "mcp_tool"
       && (lane === "interactive" || lane === "batch")
-      && (body.job?.payload as JsonObject | undefined)?.tool === "__media__";
+      && (action !== ""
+        || (body.job?.payload as JsonObject | undefined)?.tool === "__media__");
     if (!allowed.has(jobType) && !mediaTool) {
       return json({ error: `job type ${jobType} is not allowed on ${lane}`, safe_to_fallback: true }, 400);
     }
