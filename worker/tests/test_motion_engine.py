@@ -48,6 +48,29 @@ def _mo(mid="mg1", template="hook_title", start=1.0, end=3.0, **params):
 
 # ── schema ──────────────────────────────────────────────────────────────
 
+def test_the_runtime_ships_without_its_comments_and_nothing_else():
+    """Every page carries the runtime without its whole-line comments (round
+    7: a caption segment's plate grids need the room). The stripper is line
+    based, so the runtime must hold no multi-line template literal a '//'
+    line could sit inside; only comment lines are dropped."""
+    path = os.path.join(motion_engine.MOTION_DIR, "runtime.js")
+    src = open(path, encoding="utf-8").read()
+    assert all(line.count("`") % 2 == 0 for line in src.split("\n")), \
+        "a template literal spans lines: strip_line_comments would cut it"
+    out = motion_engine.strip_line_comments(src)
+    kept = set(out.split("\n"))
+    dropped = [ln.strip() for ln in src.split("\n") if ln not in kept and ln.strip()]
+    assert len(out) < 0.8 * len(src)
+    block = False
+    for ln in dropped:
+        if block or ln.startswith("/*"):
+            block = "*/" not in ln          # inside a block comment until it closes
+            continue
+        assert ln.startswith("//"), ln
+    assert motion_engine.strip_line_comments("a();\n  // x\n/* y\n z */\nb(); // keep\n/* z */ c();") == \
+        "a();\nb(); // keep\n/* z */ c();"
+
+
 def test_motion_items_validate_and_keep_old_signatures():
     edl = default_edl(10.0)
     assert edl_signature(validate_edl(edl, 10.0).model_dump()) == edl_signature(

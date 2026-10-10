@@ -302,12 +302,17 @@ LEGIBILITY:
 - Contrast from a soft shadow (0 2–6 px 12–30 px at 35–60% black), a
   frosted or dark plate, or the grade — not thick outlines or yellow boxes
   by default. Check bright and dark plates in the render.
-- The renderer measures the picture under every graphic and caption cue.
-  Over a bright plate (a white shirt, a cream tee, a bright wall) light type
-  gets a soft dark pocket sized for 4.5:1 body / 3:1 display contrast; a
-  slam's or marker line's light words switch to dark ink where the plate is
-  bright all the way across; glass cards darken to stay dark glass. Dark
-  plates render unchanged. Placement in clear space still comes first.
+- The renderer measures the picture under every graphic and caption cue
+  and makes legibility decisions, not boxes (4.5:1 body / 3:1 display):
+  over a plate bright under every word (a white shirt, a cream tee, a bright
+  wall) light type switches to dark ink, its accent deepened in the same
+  hue; where only some words sit on bright (a shirt beside a dark mic) a
+  glyph scrim follows the letterforms; a box only past that, pre-sized to
+  the final block; glass cards darken to stay dark glass. Dark plates render
+  unchanged. Placement in clear space still comes first: a dark, calm spot
+  needs none of it, and scene text (a shirt print, a sign) is a soft
+  keep-out the placement prices. A zoom, punch-in or cut step written over
+  a graphic re-checks it against the face as that move frames it.
 - Secondary text (kickers, sub-labels, labels, attributions) never renders
   below a cap height of 2.2% of the frame height; a long one wraps instead
   of shrinking, so keep kickers and sub-labels short.

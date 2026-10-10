@@ -698,28 +698,29 @@ def test_box_ink_is_a_pixel_exact_copy_clipped_to_the_highlight(tmp_path, monkey
 
 
 @needs_browser
-def test_scrim_hugs_only_the_words_already_spoken(tmp_path, monkeypatch):
+def test_premium_captions_lay_no_box_and_a_pocket_never_grows_per_word(tmp_path, monkeypatch):
+    """Judged (round 5): a translucent rounded scrim grew word by word under
+    the captions and read as a dirty rectangle. A premium look lays nothing
+    under its type on its own; where the plate demands more than a glyph
+    scrim carries (a dim ink over a bright-and-dark plate), the one box is
+    the FINAL block's from its first word on."""
+    import plate as plate_mod
     monkeypatch.setattr(motion_engine, "CACHE_DIR", str(tmp_path / "cache"))
     items, jobs = _custom("clean", WORDS)
     cue = next(c for c in items[0]["params"]["cues"] if len(c["w"]) >= 4)
-    js = """() => { const blk = document.querySelector('.cue.on > .blk');
-        if (!blk) return null;
-        const q = blk.querySelector('.scrim').getBoundingClientRect();
-        return {o: +blk.querySelector('.scrim').style.opacity, l: q.left, r: q.right,
-                words: Array.from(blk.querySelectorAll('.mg-w')).map(e => {
-                  const b = e.getBoundingClientRect();
-                  return [+getComputedStyle(e).opacity, b.left, b.right, b.top]; })}; }"""
-    before = round(cue["s"] - 0.1, 3)
     times = [round(cue["w"][1]["s"] + 0.1, 3), round(cue["e"] - 0.2, 3)]
-    early, late = asyncio.run(_dom(jobs[0], times, js))
-    for st in (early, late):
-        shown = [w for w in st["words"] if w[0] > 0]
-        pad = shown[0][1] - st["l"] if len({w[3] for w in shown}) == 1 else None
-        assert shown and st["o"] > 0
-        if pad is not None:     # one line: the scrim ends one pad past the last spoken word
-            assert st["r"] <= max(w[2] for w in shown) + pad + 2, st
-    hidden = [w for w in early["words"] if w[0] == 0]
-    assert hidden and early["r"] < max(w[2] for w in hidden), early
-    assert early["r"] - early["l"] < late["r"] - late["l"]
-    if before > 0:
-        assert asyncio.run(_dom(jobs[0], [before], js))[0] is None
+    js = """() => { const blk = document.querySelector('.cue.on > .blk'); if (!blk) return null;
+        const pk = blk.querySelector('.pocket'), q = pk && pk.getBoundingClientRect();
+        return {boxes: document.querySelectorAll('.scrim, .mg-backing').length,
+                pocket: pk ? [q.left, q.top, q.right, q.bottom, +pk.style.opacity] : null}; }"""
+    for st in asyncio.run(_dom(jobs[0], times, js)):
+        assert st and st["boxes"] == 0 and st["pocket"] is None, st
+    rows = plate_mod.grid_rows(540, 960)
+    g = [240 if c < plate_mod.COLS // 2 else 15 for _r in range(rows) for c in range(plate_mod.COLS)]
+    pl = {"c": plate_mod.COLS, "r": rows, "s": [{"t": t, "g": g} for t in (0.0, 4.0, 8.0)]}
+    item = dict(items[0], params=dict(items[0]["params"], color="#999999"))
+    job = motion_templates.build_job(item, 540, 960, 30, plate=pl)
+    early, late = asyncio.run(_dom(job, times, js))
+    assert early["pocket"] and late["pocket"], (early, late)
+    assert early["pocket"][4] > 0
+    assert all(abs(a - b) < 0.5 for a, b in zip(early["pocket"][:4], late["pocket"][:4]))

@@ -115,6 +115,12 @@ CAPTION_NEAR_PENALTY = 0.05
 # go mute. Worth a size step or a short move — a counter under the chin that
 # leaves the captions a band beats a bigger one they have to touch.
 CAPTION_NO_ROOM_PENALTY = 0.2
+# ...and up to this for a spot whose ink lies over SCENE TEXT (round 7: a
+# shirt print, a sign, a laptop's stickers — caption_place.scene_boxes), in
+# proportion to the share of the graphic it covers: type on type is the
+# busiest place in the frame, so a move that has the choice takes the calm
+# spot; it never outweighs a face, the safe area or the captions.
+SCENE_PENALTY = 0.12
 
 
 # ── boxes ─────────────────────────────────────────────────────────────────
@@ -1060,7 +1066,7 @@ def patch_cost(patch, params, spec):
 def candidates(template, spec, params, box, variants, zones, W, H,
                captions=(), predict=True, mouths=(), clear_penalty=CLEAR_PENALTY,
                near_captions=(), room=None,
-               require_clear=False):
+               require_clear=False, scene=()):
     """Ranked placements [(cost, patch, predicted box)] off every face (no real
     share of a zone or mouth band, on_face; grazing a zone's CLEARANCE costs
     CLEAR_PENALTY) and inside the safe area. ``variants`` are measured alternatives at the
@@ -1078,7 +1084,8 @@ def candidates(template, spec, params, box, variants, zones, W, H,
     CAPTION_NO_ROOM_PENALTY on top when the caption plan would find no band
     clear of it and the face — the captions would stay on it or go mute — so
     a smaller graphic that leaves them a band wins (the Thiel counter under
-    the chin, Oct 2026)."""
+    the chin, Oct 2026). ``scene``: scene-text boxes (a soft keep-out: up to
+    SCENE_PENALTY by the share of the spot they cover)."""
     pspec = (spec or {}).get("params") or {}
     port = portrait(W, H)
     y_lo, y_hi = (SAFE_Y0, SAFE_Y1) if port else (0.02, 0.98)
@@ -1148,6 +1155,9 @@ def candidates(template, spec, params, box, variants, zones, W, H,
                 on_block = None             # clear of every caption
             if on_block is not None and room is not None and not room(nb):
                 cost += CAPTION_NO_ROOM_PENALTY
+            if scene:
+                cost += SCENE_PENALTY * min(1.0, sum(inter(nb, sb) for sb in scene)
+                                            / max(1e-9, area(nb)))
             patch = dict(p)
             if ny is not None and abs(dy) > 1e-9:
                 patch["y"] = ny

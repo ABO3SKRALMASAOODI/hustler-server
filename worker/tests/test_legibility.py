@@ -443,3 +443,138 @@ def test_glass_pill_keeps_its_name_on_top_and_its_text_inside():
             " return r.top >= p.top + 4 && r.bottom <= p.bottom - 4; }); })()"], t=2.0))
         assert name_fs > role_fs * 1.1, (role, name_fs, role_fs)
         assert inside, role
+
+
+# ── round 7: legibility decisions instead of boxes ──────────────────────
+
+def test_detail_grids_measure_busyness_and_reach_the_page_packed():
+    """A shirt print, a sign or a laptop's stickers is BUSY plate: each
+    moment also carries the per-cell luma deviation, packed into 4-bit
+    levels (half the bytes of the means) so it never costs a long caption
+    segment its plate."""
+    import base64
+    from PIL import Image
+    cols, rows = 4, 2
+    cp = plate.CELL_PX
+    img = Image.new("L", (cols * cp, rows * cp), 128)
+    for x in range(cp):                       # cell (0, 0): stripes; the rest flat
+        for y in range(cp):
+            img.putpixel((x, y), 255 if x % 2 else 0)
+    d = plate.detail_grid(img, cols, rows)
+    assert d[0] >= 120 and d[1:] == [0] * (cols * rows - 1)
+    packed = base64.b64decode(plate.encode_detail([0, 4, 60, 255, 9]))
+    assert list(packed) == [0x01, 0xFF, 0x20]              # levels 0,1 | 15,15 | 2,(pad)
+
+    class Busy(_UniformProbe):
+        def __call__(self, times):
+            out = super().__call__(times)
+            self.last_details = [[40] * (self.cols * self.rows) for _ in times]
+            return out
+    item = {"id": "m", "template": "word_slam", "start": 0.0, "end": 1.0, "params": {}}
+    p = motion_layer.measure_plates([item], Busy(200))[0]
+    assert p["dq"] == plate.DETAIL_STEP and all("d" in s for s in p["s"])
+    assert len(base64.b64decode(p["s"][0]["d"])) == (p["c"] * p["r"] + 1) // 2
+    # a probe without detail grids (an old cache entry) gives plain means
+    assert "dq" not in motion_layer.measure_plates([item], _UniformProbe(200))[0]
+
+
+@needs_browser
+def test_the_page_reads_the_packed_detail_grid():
+    import base64
+    rows = plate.grid_rows(1080, 1920)
+    d = [40] * (plate.COLS * rows)
+    pl = {"c": plate.COLS, "r": rows, "dq": plate.DETAIL_STEP,
+          "s": [{"t": 1.0, "g": base64.b64encode(bytes(_grid(120))).decode(), "d": plate.encode_detail(d)}]}
+    detail, mean = asyncio.run(_eval(_doc_job(pl), [
+        "MG.plateAt([100, 900, 980, 1000]).detail", "MG.plateAt([100, 900, 980, 1000]).mean"]))
+    assert abs(detail - 40 / 255) < 0.005 and abs(mean - 120 / 255) < 0.005
+
+
+LADDER_BODY = ("<div class='mg-root'><div id='a' style=\"position:absolute;left:100px;top:1300px;"
+               "font:800 72px 'Inter Display';color:#F8F7F4;white-space:nowrap\">"
+               "<span class='mg-w'>You</span> <span class='mg-w'>should</span> "
+               "<span class='mg-w' id='acc' style='color:#FF3B30'>required</span></div></div>")
+LADDER = """(() => {
+  const a = document.getElementById('a'), acc = document.getElementById('acc');
+  const res = MG.legible([{ el: a, ratio: 4.5, ink: '#F8F7F4', acc: [acc], accent: '#FF3B30', accRatio: 3 }],
+                         { root: MG.$('.mg-root'), box: { pad: [14, 6], feather: 20, radius: 18 } });
+  return { mode: res.mode, boxes: res.boxes.length, ink: getComputedStyle(a).color,
+           acc: getComputedStyle(acc).color, shadow: a.style.textShadow,
+           box: res.boxes.map(b => [b.style.left, b.style.top, b.style.width, b.style.height]) };
+})()"""
+
+
+def _cols_plate(luma_of_col, W=1080, H=1920):
+    rows = plate.grid_rows(W, H)
+    return {"c": plate.COLS, "r": rows,
+            "s": [{"t": 1.0, "g": [int(luma_of_col(c)) for _r in range(rows) for c in range(plate.COLS)]}]}
+
+
+@needs_browser
+def test_the_legibility_ladder_picks_ink_then_a_glyph_scrim_then_a_box():
+    """MG.legible, judged round 5 (a grey box on Elon's white shirt, a dark
+    smudge round 'incredible'): nothing on a plate that reads; dark ink
+    where the plate is bright under EVERY word (the accent deepened in its
+    own hue — never paled); a glyph scrim where it is bright under some
+    words only; a box only past what a glyph scrim carries."""
+    dark, = asyncio.run(_eval(_doc_job(_cols_plate(lambda c: 20), LADDER_BODY), [LADDER]))
+    assert dark["mode"] == "none" and dark["boxes"] == 0 and "255, 59, 48" in dark["acc"]
+    white, = asyncio.run(_eval(_doc_job(_cols_plate(lambda c: 236), LADDER_BODY), [LADDER]))
+    assert white["mode"] == "dark" and white["boxes"] == 0 and white["shadow"] == "none"
+    assert white["ink"] == "rgb(20, 20, 20)"
+    r, g, b = [int(v) for v in white["acc"][4:-1].split(",")]
+    assert r > 3 * max(g, b, 1) and r <= 255                  # red, never toward white
+    # a gold accent would turn olive long before it read dark: it keeps its
+    # colour and the line takes a glyph scrim instead of dark ink
+    gold, = asyncio.run(_eval(_doc_job(_cols_plate(lambda c: 236), LADDER_BODY.replace("#FF3B30", "#FFC940")),
+                              [LADDER.replace("#FF3B30", "#FFC940")]))
+    assert gold["mode"] == "scrim" and gold["acc"] == "rgb(255, 201, 64)" and gold["boxes"] == 0
+    # the shirt under most words, a dark microphone under the last one
+    mic, = asyncio.run(_eval(_doc_job(_cols_plate(lambda c: 236 if c < 7 else 30), LADDER_BODY), [LADDER]))
+    assert mic["mode"] == "scrim" and mic["boxes"] == 0 and "rgba(0, 0, 0" in mic["shadow"]
+    assert mic["ink"] == "rgb(248, 247, 244)"
+    # a dim ink needs more than letterforms can carry: one box, sized to the
+    # final block (pre-sized; the caller fades it, never grows it)
+    dim = LADDER.replace("'#F8F7F4', acc", "'#999999', acc")
+    heavy, = asyncio.run(_eval(_doc_job(_cols_plate(lambda c: 236 if c < 7 else 30),
+                                        LADDER_BODY.replace("color:#F8F7F4", "color:#999999")), [dim]))
+    assert heavy["mode"] == "box" and heavy["boxes"] == 1
+
+
+@needs_browser
+def test_dark_ink_is_judged_under_a_wash_the_template_keeps():
+    """A template whose own wash stays under dark ink (versus_split's tint)
+    asks MG.legible to judge dark ink on the plate as the wash darkens it:
+    a mid-bright wall that carries #141414 bare does not under a 34% wash."""
+    rect = "[100, 1300, 900, 1380]"
+    bare, washed = asyncio.run(_eval(_doc_job(_cols_plate(lambda c: 170)), [
+        f"MG.darkInkOK({rect})", f"MG.darkInkOK({rect}, {{ have: 0.34 }})"]))
+    assert bare is True and washed is False
+
+
+@needs_browser
+def test_a_slam_landing_flash_lifts_luminance_in_the_same_hue():
+    """Judged (round 5): ENOUGH flashed from gold #FFC940 to lemon for two
+    frames — a brightness filter clips the channels. The landing flash is a
+    lift of the same hue (or none): no frame shows another hue."""
+    import colorsys
+    p = motion_templates.check_params("word_slam", {"text": "*enough*", "kicker": "it's not quite been",
+                                                    "entrance": "slam", "accent": "#FFC940",
+                                                    "role": "condensed", "uppercase": True})
+    job = motion_templates.build_job({"id": "s", "template": "word_slam", "start": 0, "end": 1.6,
+                                      "params": p}, 540, 960, 30)
+    hue0 = colorsys.rgb_to_hls(1.0, 0xC9 / 255, 0x40 / 255)[0]
+    js = """(() => { const w = document.querySelector('.line .mg-w');
+        const els = [w].concat(Array.from(document.querySelectorAll('.line')));
+        return {c: getComputedStyle(w).color, f: els.map(e => e.style.filter || '').join('|')}; })()"""
+    # every frame of the entrance and landing, in one page
+    frames = asyncio.run(_eval(job, [f"(() => {{ window.__mgSeek({k / 30:.4f}); return {js}; }})()"
+                                     for k in range(18)]))
+    seen = set()
+    for k, st in enumerate(frames):
+        assert "brightness" not in st["f"], (k, st)
+        r, g, b = [int(v) / 255 for v in st["c"][4:-1].split(",")[:3]]
+        hue = colorsys.rgb_to_hls(r, g, b)[0]
+        assert abs(hue - hue0) < 0.012, (k, st["c"])
+        seen.add(st["c"])
+    assert len(seen) >= 2                                      # it does flash

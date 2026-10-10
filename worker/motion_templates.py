@@ -296,6 +296,15 @@ def build_job(item, out_w, out_h, fps, asset_locals=None, plate=None,
     html = motion_engine.build_document(body, params=params, duration=full, fps=fps,
                                         design_w=dw, design_h=dh, plate=plate,
                                         yields=yields)
+    if plate and len(html.encode("utf-8")) > motion_engine.MAX_HTML_BYTES \
+            and any("d" in s for s in plate.get("s") or []):
+        # the detail grids go first (the means still decide legibility)
+        plate = dict(plate, s=[{k: v for k, v in s.items() if k != "d"}
+                               for s in plate.get("s") or []])
+        plate.pop("dq", None)
+        html = motion_engine.build_document(body, params=params, duration=full, fps=fps,
+                                            design_w=dw, design_h=dh, plate=plate,
+                                            yields=yields)
     if plate and len(html.encode("utf-8")) > motion_engine.MAX_HTML_BYTES:
         # the plate fails open: it never pushes a composition over the cap
         # (an authored page near the limit renders as it did without one)

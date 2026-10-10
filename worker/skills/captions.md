@@ -188,14 +188,20 @@ READABILITY:
 - Contrast is non-negotiable: check rendered frames at 2–3 caption moments
   on distinct backgrounds; fix with the look's plate or glow, a clearer band,
   or a grade adjustment. Motion looks (clean, editorial, lockup, serif,
-  glow, stack) measure the picture under every cue and guard each word in
-  this order: slide inside the cue's clear band to a darker spot; a tight
-  dark halo for a plate a little too bright, and accent/emphasis words
-  lifted toward white until they read 3:1 on what lies under them; a soft
-  dark local scrim (a blurred shadow, never a card); only then the pocket
-  (a box). Scrims and glows only ever darken a bright plate, never lift it;
-  on dark plates nothing changes. A lone article stays inline with its serif
-  emphasis word ("a *weird*"), never stacked above it.
+  glow, stack) measure the picture under every cue's glyphs and decide —
+  no boxes: slide inside the cue's clear band to a darker, calmer spot;
+  nothing more where the look's own shadow carries it; dark ink where the
+  plate is bright under every word (a white shirt — accent words keep their
+  hue, deepened, never paled toward white); a glyph scrim that follows the
+  letterforms where it is bright under some words only; a box only past
+  that, sized to the final block. Nothing lifts the plate; on dark plates
+  nothing changes. A lone article stays inline with its serif emphasis word
+  ("a *weird*"), never stacked above it.
+- The reading line holds still: every cue sharing a place keeps its first
+  line's baseline on one row (a second line or a stacked serif hero grows
+  down), so one- and two-line cues never hop — inside the band the caption
+  plan cleared of the face, so the row never rises toward a chin. Scene text (a shirt print, a
+  sign, a laptop's stickers) is a soft keep-out the caption plan prices.
 - `audit_captions()` compiles the exact caption artifact and reports
   lateness, uncovered words and overlaps. `render_preview(complete=false)`
   returns caption QA pages of real rendered caption states — judge those

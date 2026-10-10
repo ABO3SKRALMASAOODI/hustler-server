@@ -614,21 +614,29 @@ def test_behind_why_holds_the_renderers_rules(monkeypatch):
 
 
 @needs_browser
-def test_a_spoken_marker_lines_pocket_hugs_the_words_said_so_far():
+def test_a_spoken_marker_line_on_a_white_shirt_takes_ink_not_a_growing_box():
+    """Judged (round 5): Elon's closing line sat in a grey box that grew on
+    every word over his white T-shirt. On a plate bright under every word
+    the line takes dark ink and no box at all; where a box is unavoidable
+    (a dim ink over a bright-and-dark plate) it is the final block's from
+    the first word on, never grown per word."""
     item = _mg("m", "marker_text", 0, 3.2, text="You should be *required*",
                style="underline", accent="#FF3B30")
     timed = dict(item, reading={"v": 1, "rows": [[0.0, 0.8, 1.2, 1.6]], "bridges": []})
     probe = ("() => { const b = document.querySelector('.mg-backing');"
-             " const ws = [...document.querySelectorAll('.wrap .mg-w')]"
-             ".map(w => w.getBoundingClientRect());"
-             " return b ? [b.getBoundingClientRect().width, ws[0].right - ws[0].left,"
-             " Math.max(...ws.map(r => r.right)) - Math.min(...ws.map(r => r.left))] : null; }")
+             " const l = document.querySelector('.wrap .line');"
+             " return {box: b ? [b.getBoundingClientRect().left, b.getBoundingClientRect().width] : null,"
+             " ink: getComputedStyle(l).color}; }")
     first, done = asyncio.run(_eval(timed, [0.4, 2.6], probe, _plate(225)))
-    assert first and done
-    # only 'You' said: the pocket hugs that word, not the whole line
-    assert first[0] < first[1] + 0.5 * (first[2] - first[1])
-    # all said: it covers the line
-    assert done[0] >= done[2]
+    assert first["box"] is None and done["box"] is None
+    assert first["ink"] == done["ink"] == "rgb(20, 20, 20)"
+    cols, rows = 18, 32
+    split = {"c": cols, "r": rows, "s": [{"t": 0.5, "g": plate_mod.encode_grid(
+        [235 if c < cols // 2 else 20 for _r in range(rows) for c in range(cols)])}]}
+    dim = dict(timed, params=dict(timed["params"], color="#999999"))
+    first, done = asyncio.run(_eval(dim, [0.4, 2.6], probe, split))
+    assert first["box"] and done["box"]
+    assert abs(first["box"][0] - done["box"][0]) < 0.5 and abs(first["box"][1] - done["box"][1]) < 0.5
 
 
 def test_a_hero_under_a_camera_zoom_is_narrowed_to_stay_inside_the_frame(probe, monkeypatch):

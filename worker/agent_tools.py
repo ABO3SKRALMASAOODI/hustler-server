@@ -9957,10 +9957,15 @@ def add_zoom(ctx, start, end, strength=None, mode=None, cx=None, cy=None,
     feel = camera.describe(item)
     strength_txt = ("" if zmode == "shake"
                     else f" {int(round(st * 100))}%")
+    # a graphic on screen under the move is checked against the face as
+    # the move frames it (and placed again when it now covers it)
+    camera_notes = motion_tools.keep_out_under_camera(ctx, edl, s, e)
     result = ctx.write_edl(
         edl, f"{ZOOM_MODE_DESC[zmode]} zoom{strength_txt} on {s}-{e}s "
              f"(output time){aimed}{f' ({feel})' if feel else ''} "
              f"[{item['id']}]")
+    if camera_notes and result.startswith("EDL v"):
+        result += "".join("\n" + n for n in camera_notes)
     if cap_note and result.startswith("EDL v"):
         result += "\n" + cap_note
     if defaulted_target and result.startswith("EDL v") \
@@ -10156,14 +10161,15 @@ def add_zoom_path(ctx, keyframes, ease=None, motion_motif=None, purpose=None,
     zooms.append(item)
     fx["zooms"] = zooms
     edl["effects"] = fx
+    camera_notes = motion_tools.keep_out_under_camera(ctx, edl, start, end)
     written = ctx.write_edl(
         edl, f"keyframed zoom on {start}-{end}s (output time), "
              f"{travel.describe(item)}, {ez} [{item['id']}]")
     if not written.startswith("EDL v"):
         return written
-    note = ""
+    note = "".join("\n" + n for n in camera_notes)
     if pts[0].get("s", 0) > 0.02 or pts[-1].get("s", 0) > 0.02:
-        note = ("\nNOTE: this path starts at "
+        note += ("\nNOTE: this path starts at "
                 f"{int(pts[0]['s'] * 100)}% and ends at "
                 f"{int(pts[-1]['s'] * 100)}% zoom, so the frame STEPS in at "
                 f"{start}s and out at {end}s. That is exactly what the "
@@ -25356,9 +25362,19 @@ def punch_in_on_emphasis(ctx, count=None, strength=None):
                 "at the very end of the program. Nothing was written.")
     fx["zooms"] = zooms
     edl["effects"] = fx
+    # each punch frames the face tighter: a graphic on screen under it is
+    # checked against the face as framed and placed again where it now
+    # covers it (as add_zoom does)
+    new_ids = {zid for _w, _pt, zid, *_rest in placed}
+    camera_notes = []
+    for z in zooms:
+        if z.get("id") in new_ids:
+            camera_notes += motion_tools.keep_out_under_camera(ctx, edl, z["start"], z["end"])
     res = ctx.write_edl(
         edl, f"{len(placed)} distributed emphasis zoom(s) on meaningful "
              "vocally stressed words")
+    if res.startswith("EDL v") and camera_notes:
+        res += "".join("\n" + n for n in camera_notes)
     if res.startswith("EDL v"):
         res += ("\nPunch-ins (program time, from measured vocal stress; "
                 "each snaps in on the word, holds to the next cut or the "

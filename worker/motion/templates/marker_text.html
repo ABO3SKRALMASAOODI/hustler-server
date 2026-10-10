@@ -16,7 +16,7 @@
 <style>
   .wrap{position:absolute;left:60px;right:60px;display:flex;flex-direction:column;align-items:center;gap:0;
         filter:drop-shadow(0 3px 14px rgba(0,0,0,.5)) drop-shadow(0 1px 2px rgba(0,0,0,.3))}
-  .wrap.ink-dark{filter:none}
+  .wrap.ink-dark,.wrap.ink-scrim{filter:none}
   .line{position:relative;display:block;white-space:nowrap;line-height:1.08;isolation:isolate}
   .line.sans{font-family:'Inter Display','Inter',sans-serif;font-weight:800;letter-spacing:-.032em}
   .line.serif{font-family:'Instrument Serif',serif;font-style:italic;font-weight:400;letter-spacing:-.012em;line-height:1.0}
@@ -25,7 +25,7 @@
   .mg-w:last-of-type{margin-right:0}
   .serif .mg-w{margin-right:.2em}
   .mk{position:absolute;z-index:1;transform-origin:50% 50%}
-  .dk{position:absolute;left:0;top:0;white-space:pre;color:#141414;visibility:hidden}
+  .dk{position:absolute;left:0;top:0;white-space:pre;color:#141414;visibility:hidden;text-shadow:none!important}
   .gf{margin-left:var(--gpad,0)}
   .gl{margin-right:calc(.24em + var(--gpad,0))!important}
   svg.ink{position:absolute;left:0;top:0;overflow:visible;z-index:3}
@@ -267,29 +267,23 @@
     let bx = [Math.min(...lrs.map(r => r.left)), Math.min(...lrs.map(r => r.top)), Math.max(...lrs.map(r => r.right)), Math.max(...lrs.map(r => r.bottom))];
     shapes.forEach(s => { bx = [Math.min(bx[0], s.x0 - 0.3 * fs), Math.min(bx[1], s.y0 - 0.1 * fs), Math.max(bx[2], s.x1 + 0.3 * fs), Math.max(bx[3], s.y1 + 0.3 * fs)]; });
     MG.box = [bx[0] - 50, bx[1] - 60, bx[2] + 50, bx[3] + 70];
-    // a measured bright plate under the line (body type, 4.5:1): the marker
-    // style turns its light words to dark ink where the plate is bright all
-    // the way across (highlighter on paper); otherwise a pocket goes under
-    // the lines. Unmeasured or dark plates change nothing.
-    let bk = null;
-    const lr = MG.rectOf(MG.$$('.line', wrap));
-    const need = lr ? MG.need(lr, { ink: P.color, ratio: 4.5 }) : 0;
-    if (need > 0) {
-      if (style === 'marker' && MG.darkInkOK(lr, { ratio: 4.5 })) {
-        MG.$$('.line', wrap).forEach(el => { el.style.color = MG.DARK_INK; });
-        wrap.classList.add('ink-dark');      // no dark drop shadow under dark ink
-      } else {
-        bk = MG.backing(MG.$('.mg-root'), lr, need, { pad: [0.2 * fs, 0.06 * fs], feather: 0.3 * fs, radius: 0.24 * fs });
-        MG.growBox(bk.box);
-      }
+    // the measured plate under the line (body type, 4.5:1; MG.legible): dark
+    // ink where it is bright under every weak glyph (highlighter on paper),
+    // else a glyph scrim that follows the letterforms (the wrap's own drop
+    // shadow then stands down: one darkening, not two); a box only past
+    // what a glyph scrim carries, sized to the FINAL lines from the first
+    // word (judged round 5: a grey box that grew word by word on Elon's
+    // white shirt). Unmeasured or dark plates change nothing.
+    const bks = [];
+    wrap.classList.remove('ink-dark', 'ink-scrim');
+    if (MG.plate && MG.luminance(P.color) >= 0.3) {
+      const res = MG.legible(MG.$$('.line', wrap).map(el => ({ el, ratio: 4.5, ink: P.color, base: 0.3 })),
+        { root: MG.$('.mg-root'), box: { pad: [0.2 * fs, 0.06 * fs], feather: 0.3 * fs, radius: 0.24 * fs, join: 0.2 * fs } });
+      if (res.mode === 'dark') wrap.classList.add('ink-dark');      // no dark drop shadow under dark ink
+      else if (res.mode !== 'none') wrap.classList.add('ink-scrim');
+      res.boxes.forEach(bk => { bks.push(bk); MG.growBox(bk.box); });
     }
-    // a spoken line's pocket hugs the words said so far: each word's box,
-    // its x from its line (layout offsets, free of the rise transform)
-    const wordRects = words.map(w => {
-      const lr = w.lineEl.getBoundingClientRect(), x0 = lr.left + w.el.offsetLeft;
-      return [x0, lr.top, x0 + w.el.offsetWidth, lr.bottom];
-    });
-    return { fs, shapes, bk, wordRects, pad: [0.2 * fs, 0.06 * fs] };
+    return { fs, shapes, bks };
   }
 
   const fontsReady = Promise.all(["800 106px 'Inter Display'", "italic 400 126px 'Instrument Serif'", "400 134px 'Anton'"]
@@ -333,28 +327,9 @@
     const q = exitDur > 0 ? MG.ease.inCubic(MG.range(t, exitAt, exitDur)) : 0;
     MG.set(wrap, { y: -q * 18, opacity: 1 - q });
     const b0 = words.length ? words[0].t0 : 0;
-    if (G.bk) {
-      G.bk.style.opacity = (MG.ease.outCubic(MG.range(t, b0, 0.16)) * (1 - q)).toFixed(4);
-      if (onsets) {
-        // the pocket grows with the words said so far (never an empty slab
-        // beside the first word): a rising word's box eases in from its
-        // left edge, and a word that opens a new line eases the pocket down
-        let u = null;
-        words.forEach((w, i) => {
-          if (t < w.t0 - 1e-6) return;
-          const r = G.wordRects[i];
-          if (!u) { u = r.slice(); return; }
-          const k = MG.ease.outCubic(MG.range(t, w.t0, 0.17));
-          const left = r[0] < u[0] ? u[0] - (u[0] - r[0]) * k : u[0];
-          const down = r[3] > u[3] ? u[3] + (r[3] - u[3]) * k : u[3];
-          u = [left, Math.min(u[1], r[1]), Math.max(u[2], r[0] + (r[2] - r[0]) * k), down];
-        });
-        if (u) {
-          Object.assign(G.bk.style, { left: (u[0] - G.pad[0]).toFixed(1) + 'px', top: (u[1] - G.pad[1]).toFixed(1) + 'px',
-            width: (u[2] - u[0] + 2 * G.pad[0]).toFixed(1) + 'px', height: (u[3] - u[1] + 2 * G.pad[1]).toFixed(1) + 'px' });
-        }
-      }
-    }
+    // a box (rare: past what a glyph scrim carries) is the final block's
+    // from the first word on — it never grows or jitters per word
+    G.bks.forEach(bk => { bk.style.opacity = (MG.ease.outCubic(MG.range(t, b0, 0.16)) * (1 - q)).toFixed(4); });
     MG.set(ink, { y: -q * 18, opacity: 1 - q, blur: q * 10 });
     words.forEach(w => {
       const t0 = w.t0, e = MG.ease.outCubic(MG.range(t, t0, 0.17));

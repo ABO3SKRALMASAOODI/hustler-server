@@ -135,6 +135,10 @@ def measure_plates(items, probe):
               f"cached, {st.get('decoded', 0)} decoded) in "
               f"{st.get('seconds', 0.0):.2f}s", flush=True)
     got = dict(zip(keys, grids or []))
+    # the detail grids (plate.Probe.last_details: per-cell luma deviation),
+    # aligned with the means; a probe without them gives none
+    dets = getattr(probe, "last_details", None)
+    detail = dict(zip(keys, dets)) if isinstance(dets, list) and len(dets) == len(keys) else {}
     cols = getattr(probe, "cols", None)
     rows = getattr(probe, "rows", None)
     out = {}
@@ -143,7 +147,12 @@ def measure_plates(items, probe):
         if not g or not cols or not rows or len(g) != cols * rows:
             continue
         p = out.setdefault(k, {"c": cols, "r": rows, "s": []})
-        p["s"].append({"t": round(comp_t, 3), "g": plate_mod.encode_grid(g)})
+        row = {"t": round(comp_t, 3), "g": plate_mod.encode_grid(g)}
+        d = detail.get(key)
+        if d and len(d) == cols * rows:
+            row["d"] = plate_mod.encode_detail(d)
+            p["dq"] = plate_mod.DETAIL_STEP
+        p["s"].append(row)
     return out
 
 

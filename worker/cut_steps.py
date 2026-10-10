@@ -525,6 +525,7 @@ def conceal_jump_cuts(ctx, mode="scale_step", step=None, at=None):
     cards = [dict(cd) for cd in fx.get("picture_cards") or []]
     by_id = {cd.get("id"): cd for cd in cards}
     written, skipped, released_at = [], [], None
+    windows = []                       # program spans a step frames tighter
     for r in sorted(chosen, key=lambda q: float(q["t"])):
         c = float(r["t"])
         if released_at is not None and abs(released_at - c) < 1e-3:
@@ -591,6 +592,7 @@ def conceal_jump_cuts(ctx, mode="scale_step", step=None, at=None):
             spans.append({"t0": t0, "t1": t1, "scale": k})
             tgt["cut_steps"] = spans
             written.append((c, "card", f"card '{card['id']}' {why} until {nxt:.2f}s", r))
+            windows.append((c, nxt))
         else:
             room, zbase, stacked_z = atools._zoom_room(ctx, dict(base, effects=dict(fx, zooms=zooms)), c, nxt)
             strength = st if room is None else min(st, math.floor(max(room, 0.0) * 100) / 100)
@@ -609,6 +611,7 @@ def conceal_jump_cuts(ctx, mode="scale_step", step=None, at=None):
                 skipped.append((c, clash))
                 continue
             zooms.append(item)
+            windows.append((c, nxt))
             written.append((c, "zoom", f"tight {strength * 100:.0f}% until {nxt:.2f}s, aimed "
                                        f"{'at the face' if aim else 'at the centre (no face found)'} "
                                        f"[{item['id']}]", r))
@@ -622,12 +625,21 @@ def conceal_jump_cuts(ctx, mode="scale_step", step=None, at=None):
     if cards:
         fx["picture_cards"] = cards
     base["effects"] = fx
+    # a step frames the face tighter: a graphic on screen under it is checked
+    # against the face as the step frames it and placed again where it now
+    # covers it, as add_zoom does (judged: Thiel's kicker on his chin under
+    # a +12% step)
+    camera_notes = []
+    for a, b in windows:
+        camera_notes += motion_tools.keep_out_under_camera(ctx, base, a, b)
     res = ctx.write_edl(base, f"concealed {len(steps)} popping jump cut(s) with hard "
                               f"{st * 100:.0f}% framing steps (optional cut hygiene)")
     if not str(res).startswith("EDL v"):
         return res
     lines = [f"  {c:.2f}s: {what} — {_fmt_ev(r)}" for c, _kind, what, r in written]
     out = res + "\nCut steps (hard, no motion; each holds to the next cut):\n" + "\n".join(lines)
+    if camera_notes:
+        out += "".join("\n" + n for n in camera_notes)
     ends = {round(float(w[3]["t"]), 2) for w in written if w[1] == "released"}
     ends |= {round(float(z["end"]), 2) for z in zooms if is_step_zoom(z)}
     for cd in cards:

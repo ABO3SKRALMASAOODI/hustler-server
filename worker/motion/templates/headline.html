@@ -40,7 +40,7 @@
   const S = STYLE[P.style] || STYLE.sans;
   const colW = W * P.width, bandH = H * P.height;
   const left = P.align === 'left';
-  let kick = null, claim = null, BK = null;
+  let kick = null, claim = null, BKS = [];
   const build = () => {
     blk.textContent = '';
     blk.style.width = colW + 'px';
@@ -97,12 +97,16 @@
     const ink = [Math.min(...rects.map(b => b.left)), Math.min(...rects.map(b => b.top)),
                  Math.max(...rects.map(b => b.right)), Math.max(...rects.map(b => b.bottom))];
     MG.box = [ink[0] - 30, ink[1] - 30, ink[2] + 30, ink[3] + 30];
-    if (BK) { BK.remove(); BK = null; }
-    // a bright plate under the band (a light letterbox, a pale canvas): a soft pocket
-    const need = MG.need(ink, { ink: P.color, ratio: 3 });
-    if (need > 0) {
-      BK = MG.backing(MG.$('.mg-root'), ink, need, { pad: [0.25 * fs, 0.12 * fs], feather: 0.35 * fs, radius: 0.3 * fs });
-      MG.growBox(BK.box);
+    BKS.forEach(b => b.remove()); BKS = [];
+    // a bright plate under the band (a light letterbox, a pale canvas):
+    // MG.legible — dark ink where it is bright under every word (the
+    // accent deepened in its hue), else a glyph scrim; a box only past that
+    if (MG.plate && MG.luminance(P.color) >= 0.3) {
+      const res = MG.legible([{ el: claim, ratio: 3, ink: P.color, accent: P.accent,
+                                acc: MG.$$('.mg-w', claim).filter(w => w.style.color) }]
+        .concat(kick ? [{ el: kick, ratio: 4.5, ink: P.color }] : []),
+        { root: MG.$('.mg-root'), box: { pad: [0.25 * fs, 0.12 * fs], feather: 0.35 * fs, radius: 0.3 * fs } });
+      res.boxes.forEach(b => { BKS.push(b); MG.growBox(b.box); });
     }
   };
   layout();
@@ -123,7 +127,7 @@
     const b = leave > 0 ? 1 - MG.ease.inCubic(MG.range(t, D - leave, leave)) : 1;
     const y = P.entrance === 'rise' ? (1 - a) * 18 : 0;
     MG.set(blk, { y, opacity: a * b });
-    if (BK) BK.style.opacity = (a * b).toFixed(4);
+    BKS.forEach(bk => { bk.style.opacity = (a * b).toFixed(4); });
   });
 })();
 </script>

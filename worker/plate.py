@@ -35,6 +35,12 @@ caption cue without its own then reads its neighbour's), so coverage and cost
 stay bounded. Every measured moment is cached on disk by source content +
 moment + geometry, so a re-render after an unrelated edit decodes nothing.
 
+Detail (round 7): beside the mean luma each moment carries a DETAIL grid —
+the luma's standard deviation inside every cell (0-255) — so a template can
+tell a calm plate from a busy one (a shirt print, a laptop's stickers, a
+lit sign) under its glyphs and firm up its contact shadow there, and a
+caption can prefer a calm spot when it slides (``MG.plateAt(...).detail``).
+
 Fail open: any moment that cannot be measured is None, an item with no
 measured moment gets no plate, and a composition without a plate renders
 byte-for-byte as it did before plates existed.
@@ -53,8 +59,9 @@ from contextvars import ContextVar
 import motion_engine
 
 # Bump when the grid's meaning changes (cells, geometry, statistic): it is
-# part of every cached moment's key.
-PLATE_VERSION = 1
+# part of every cached moment's key. v2: a moment caches its detail grid
+# (per-cell luma standard deviation) beside the mean.
+PLATE_VERSION = 2
 COLS = 18                 # grid columns over the 1080-wide design space
 DECODE_W = 320            # decoded frame width (px) before fitting
 SAMPLE_FPS = 8            # frames per second kept from a cluster decode
@@ -95,6 +102,22 @@ def encode_grid(grid):
     return base64.b64encode(bytes(max(0, min(255, int(v))) for v in grid)).decode("ascii")
 
 
+# The detail grid reaches the page as 4-bit levels of DETAIL_STEP luma
+# (0-60: a plate busier than that is as busy as it gets for type), two
+# cells to a byte, high nibble first — half the bytes of the mean grid, so
+# a long caption segment never loses its plate to the page size cap.
+DETAIL_STEP = 4
+
+
+def encode_detail(grid):
+    """A detail grid as the composition receives it (``d``; the plate's
+    ``dq`` says the step): base64 of its packed 4-bit levels."""
+    q = [max(0, min(15, int(round(float(v) / DETAIL_STEP)))) for v in grid]
+    if len(q) % 2:
+        q.append(0)
+    return base64.b64encode(bytes((q[i] << 4) | q[i + 1] for i in range(0, len(q), 2))).decode("ascii")
+
+
 def _ffmpeg():
     return motion_engine._ffmpeg()
 
@@ -133,21 +156,27 @@ def _cache_key(fp, local_t, geom):
 
 
 def _cache_get(key):
+    """(mean grid, detail grid or None) of a cached moment, or None."""
     try:
         with open(os.path.join(CACHE_DIR, key + ".json")) as f:
             g = json.load(f)
-        return g if isinstance(g, list) else None
+        if isinstance(g, list):
+            return g, None
+        if isinstance(g, dict) and isinstance(g.get("g"), list):
+            d = g.get("d")
+            return g["g"], (d if isinstance(d, list) else None)
+        return None
     except Exception:  # noqa: BLE001 — a miss
         return None
 
 
-def _cache_put(key, grid):
+def _cache_put(key, grid, detail=None):
     try:
         os.makedirs(CACHE_DIR, exist_ok=True)
         p = os.path.join(CACHE_DIR, key + ".json")
         tmp = p + f".{os.getpid()}.{threading.get_ident()}.tmp"
         with open(tmp, "w") as f:
-            json.dump(grid, f)
+            json.dump({"g": grid, "d": detail} if detail is not None else grid, f)
         os.replace(tmp, p)
     except Exception:  # noqa: BLE001 — caching is best effort
         pass
@@ -267,14 +296,34 @@ def decode_gray(path, times, width=DECODE_W, deadline=None):
     return out
 
 
+CELL_PX = 6               # canvas pixels per grid cell (mean and detail)
+
+
+def detail_grid(canvas, cols, rows):
+    """Per-cell luma standard deviation (row-major ints 0-255) of a canvas
+    laid out CELL_PX pixels per cell, or None without numpy."""
+    try:
+        import numpy as np
+    except Exception:  # noqa: BLE001 — no detail; the means still serve
+        return None
+    a = np.asarray(canvas, dtype=np.float32)
+    if a.shape != (rows * CELL_PX, cols * CELL_PX):
+        return None
+    a = a.reshape(rows, CELL_PX, cols, CELL_PX)
+    sd = a.std(axis=(1, 3))
+    return [int(v) for v in np.clip(np.rint(sd), 0, 255).reshape(-1)]
+
+
 def canvas_grid(img, src_size, W, H, *, mode=None, focus=None, crop=None,
                 picture=None, rotation=0, zoom=(1.0, 0.5, 0.5), cols=COLS,
-                card=None):
+                card=None, detail=False):
     """The program picture's luma grid (row-major ints 0-255, cols x rows)
     for one decoded source frame placed on the W x H canvas the way the
     render places it. ``card`` (a source-fed picture card's spec with its
     ``panels_at``: [(box, source rect)] at this moment) composes the card
-    instead: its backdrop, each panel's rect of the frame in its box."""
+    instead: its backdrop, each panel's rect of the frame in its box.
+    ``detail=True`` returns (means, detail grid or None) — detail_grid of
+    the same canvas."""
     from PIL import Image, ImageFilter
     import renderer   # lazy: renderer imports the motion layer
     rows = grid_rows(W, H, cols)
@@ -296,10 +345,13 @@ def canvas_grid(img, src_size, W, H, *, mode=None, focus=None, crop=None,
         sw = max(1.0, sw * (float(crop[2]) - float(crop[0])))
         sh = max(1.0, sh * (float(crop[3]) - float(crop[1])))
         mode = "pad"
-    CW, CH = cols * 6, rows * 6
+    CW, CH = cols * CELL_PX, rows * CELL_PX
+
+    def out(canvas):
+        means = list(canvas.resize((cols, rows), Image.BOX).tobytes())
+        return (means, detail_grid(canvas, cols, rows)) if detail else means
     if card:
-        canvas = _card_canvas(img, card, CW, CH)
-        return list(canvas.resize((cols, rows), Image.BOX).tobytes())
+        return out(_card_canvas(img, card, CW, CH))
     px, py, pw, ph = renderer.picture_pixels(CW, CH, picture)
     kind, x0, y0, x1, y1 = renderer.fit_fractions(sw, sh, pw, ph, mode, focus)
     w, h = img.size
@@ -332,7 +384,7 @@ def canvas_grid(img, src_size, W, H, *, mode=None, focus=None, crop=None,
                               max(int(vx0 * CW) + 1, int(round((vx0 + 1.0 / z) * CW))),
                               max(int(vy0 * CH) + 1, int(round((vy0 + 1.0 / z) * CH))))) \
             .resize((CW, CH), Image.BOX)
-    return list(canvas.resize((cols, rows), Image.BOX).tobytes())
+    return out(canvas)
 
 
 def _card_canvas(img, card, CW, CH):
@@ -426,6 +478,9 @@ class Probe:
         self.zooms = ((self.edl.get("effects") or {}).get("zooms")) or []
         self._blocks = None
         self.stats = {"samples": 0, "cached": 0, "decoded": 0, "seconds": 0.0}
+        # the detail grids of the last call, aligned with what it returned
+        # (None where a moment has none); the call itself returns the means
+        self.last_details = []
 
     @property
     def rows(self):
@@ -510,6 +565,8 @@ class Probe:
         deadline = t_start + BUDGET_S
         times = list(times)
         out = [None] * len(times)
+        details = [None] * len(times)
+        self.last_details = details
         # a long program: an even spread across all of it, never just its
         # first MAX_SAMPLES moments (the tail would lose its backings)
         keep = set(_spread(len(times), MAX_SAMPLES))
@@ -533,8 +590,10 @@ class Probe:
             fp = ident or fingerprint(path)
             key = _cache_key(fp, mt, [geo_key, geom]) if fp else None
             hit = _cache_get(key) if key else None
-            if hit is not None and len(hit) == self.cols * self.rows:
-                out[i] = hit
+            if hit is not None and len(hit[0]) == self.cols * self.rows:
+                out[i] = hit[0]
+                if hit[1] is not None and len(hit[1]) == self.cols * self.rows:
+                    details[i] = hit[1]
                 self.stats["cached"] += 1
                 continue
             todo.setdefault(path, []).append((i, mt, still, geom, size, key))
@@ -559,18 +618,19 @@ class Probe:
                 if img is None:
                     continue
                 try:
-                    g = canvas_grid(img, size, self.W, self.H, mode=geom.get("mode"),
-                                    focus=geom.get("focus"), crop=geom.get("crop"),
-                                    picture=geom.get("picture"),
-                                    rotation=geom.get("rotation") or 0,
-                                    zoom=geom.get("zoom") or (1.0, 0.5, 0.5),
-                                    cols=self.cols, card=geom.get("card"))
+                    g, d = canvas_grid(img, size, self.W, self.H, mode=geom.get("mode"),
+                                       focus=geom.get("focus"), crop=geom.get("crop"),
+                                       picture=geom.get("picture"),
+                                       rotation=geom.get("rotation") or 0,
+                                       zoom=geom.get("zoom") or (1.0, 0.5, 0.5),
+                                       cols=self.cols, card=geom.get("card"), detail=True)
                 except Exception:  # noqa: BLE001
                     continue
                 out[i] = g
+                details[i] = d
                 self.stats["decoded"] += 1
                 if key:
-                    _cache_put(key, g)
+                    _cache_put(key, g, d)
         if self.stats["decoded"]:
             _cache_prune()
         self.stats["samples"] += len(keep)

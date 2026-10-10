@@ -2090,7 +2090,16 @@ MASTER_VERSION = 1
 # typewriter is a band-wide hero (>= 5% of the frame height on a band-wide
 # plate), marker_text reveals a spoken line on its onsets, and word_slam
 # has the payoff and hero tiers.
-LEGIBILITY_VERSION = 3
+# v4 (round 7 legibility track, Oct 2026): legibility decisions instead of
+# boxes (MG.legible) — from the plate under each word's glyphs: nothing past
+# what the type's own shadow carries, then dark ink where the plate is
+# bright under every word (an accent deepened in its own hue, never paled),
+# then a glyph scrim that follows the letterforms, and a box only past that,
+# pre-sized to the final block (never grown per word). The plate carries a
+# detail (busyness) grid. Caption blocks keep their first line's baseline on
+# one row per place in every segment, and a slam's landing flash is a lift
+# of the same hue.
+LEGIBILITY_VERSION = 4
 
 # Word-level caption muting (worker/caption_carry.py): a motion graphic with
 # mute_captions unset hides only the spoken words it shows, the rest stay
@@ -2119,7 +2128,10 @@ LEGIBILITY_VERSION = 3
 # word said less than a page's minimum (0.12 s) before a placement change
 # appears on the change in the new place instead of being dropped as a
 # too-short page (final review; still unreleased v3).
-CAPTION_CARRY_VERSION = 3
+# v4 (round 7): scene text (a shirt print, a sign, a laptop's stickers that
+# recur at one place: caption_place.scene_text) prices a caption band with
+# a margin, so the plan keeps the captions off it where a free band allows.
+CAPTION_CARRY_VERSION = 4
 
 # Crops and picture cards that follow the speaker's face inside a shot
 # (worker/follow.py, Frame.follow / PictureCard.follow). Stamped as
