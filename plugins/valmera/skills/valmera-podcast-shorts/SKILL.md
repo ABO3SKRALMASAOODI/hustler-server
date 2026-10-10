@@ -33,11 +33,18 @@ the captions cannot — a number, a contrast, an identification, evidence, an
 image. About one hero graphic per 6-8 s at most, graphics on screen for
 under ~50% of the runtime, at most 3 type roles and one accent colour;
 never a re-typeset of the words being heard, never a spoken list as rows
-of text (show the items: real photos or clips, or one big word per item).
-The hook is written from the clip's strongest line or statistic (never a
-generic question) and never shows a word a later graphic slams; the payoff
-locks its number and noun together and holds 0.6-1.5 s after the last
-word. Valmera's render result carries an EARN ITS PLACE advisory naming
+of text (show the items: real photos or clips on their onsets, else one
+accumulating list_build of the noun phrases said). The other half of the
+budget: every thesis line, spoken list or triad, named product or place and
+number gets a beat that adds information, with no body stretch past ~6-8 s
+without one. The hook is written from the clip's strongest line or
+statistic (never a generic question), is a headline that owns its zone
+(`word_slam` `tier='hook'`: the captions wait until it exits) and never
+shows a word a later graphic slams; a counter really counts and shows a
+spoken range as said ('30–40'); the payoff locks its number and noun
+together and holds 0.8-1.5 s after the last word (the natural tail, else
+`add_freeze_frame` audio_mode='hold': the composed last frame over the
+source's room tone; a payoff number ~2 s on screen). Valmera's render result carries an EARN ITS PLACE advisory naming
 what breaks these rules, each with a fix ([looks.md](references/looks.md),
 **Shared grammar**, has the details).
 

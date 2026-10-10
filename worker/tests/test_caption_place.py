@@ -436,3 +436,71 @@ def test_a_word_said_just_before_a_layout_change_is_never_lost():
     p2 = _plan(edl2, _index(words=STATS + early))
     w2 = next(w for w in p2.caption_words() if w["w"] == "than")
     assert w2["t0"] == pytest.approx(5.2) and "t0_said" not in w2
+
+
+def test_scene_text_is_a_recurring_print_off_the_face():
+    """Judged (round 5): Elon's OCCUPY shirt print (a block MSER finds in
+    every sample, too squat for a line of UI text) competed with the
+    captions. Scene text is what recurs at one place, has a real size and
+    sits on no face; it prices a caption band (soft) with a margin."""
+    shirt = [0.353, 0.817, 0.65, 1.0]
+    face = [0.43, 0.2, 0.69, 0.66]
+    samples = [{"t": 120.0 + 0.5 * k, "faces": [face],
+                "text": [shirt, [0.45, 0.3, 0.6, 0.4]] + ([[0.1, 0.1, 0.3, 0.2]] if k == 2 else [])}
+               for k in range(5)]
+    index = {"spatial": {"samples": samples}}
+    got = caption_place.scene_text(index, samples[2])
+    assert got == [tuple(shirt)]                 # not the one-off box, not the face
+    assert caption_place.scene_text(index, dict(samples[2], dense_ui=True)) == []
+    lone = {"spatial": {"samples": [samples[2]]}}
+    assert caption_place.scene_text(lone, samples[2]) == []
+    # a band right over the print pays for it; one clear of it does not
+    soft = [(0.0, 0.79, 1.0, 1.0)]
+    col = caption_place.column(1080, 1920)
+    near = caption_place.choose([(0.62, 0.80)], 0.74, 0.055, 0.08, soft=soft, col=col)
+    clear = caption_place.choose([(0.62, 0.80)], 0.74, 0.055, 0.08, col=col)
+    assert near[3] < clear[3]
+
+
+def test_a_sign_line_is_priced_once_not_as_line_and_scene_text():
+    """A recurring line-shaped sign is line text (_reliable_text) AND scene
+    text: the caption plan prices it once (text_boxes), while a graphic's
+    keep-out still sees it as scene text (scene_boxes)."""
+    sign = [0.3, 0.75, 0.7, 0.8]                 # wide and short: a line
+    shirt = [0.35, 0.86, 0.65, 0.98]             # squat: a print, scene text only
+    ix = _index(faces=False)
+    for smp in ix["spatial"]["samples"]:
+        smp["text"] = [list(sign), list(shirt)]
+    edl = _edl(look="editorial")
+    tl = Timeline(edl["keep"])
+    got = caption_place.text_boxes(edl, ix, tl, 1080, 1920, 2.0, 3.0)
+    scene = caption_place.scene_boxes(edl, ix, tl, 1080, 1920, 2.0, 3.0)
+    assert len(scene) == 2                       # the graphics' keep-out: both
+    assert len(got) == 2                         # line text + the print, once each
+
+
+def test_a_page_clears_as_a_muting_graphic_lands_though_the_next_page_starts_on_its_exit():
+    """Integration (round 7: beats' list over the caption band + the caption
+    plan): Thiel's 'computers but also' held 0.3 s under the list's first
+    item because 'was', said a frame before the list's exit, was counted
+    inside the list's muted segment — so that segment was taken for one
+    still showing captions in the usual place. A word belongs to the
+    segment the plan placed it for (it appears ON the exit)."""
+    words = [("computers", 1.0, 1.4), ("but", 1.4, 1.6), ("also", 1.6, 1.9),
+             ("rockets", 2.0, 2.4), ("and", 2.5, 2.6), ("cities", 2.7, 3.2),
+             ("and", 3.4, 3.5), ("medicines.", 3.6, 4.4), ("It", 4.5, 4.6),
+             ("was", 4.98, 5.2), ("like", 5.2, 5.5), ("a", 5.5, 5.6), ("lot.", 5.6, 6.0)]
+    big = {"id": "list", "template": "word_slam", "start": 2.0, "end": 5.0,
+           "params": {"text": "rockets cities medicines"},
+           "footprint": {"box": [0.05, 0.08, 0.95, 0.92], "ar": AR, "faces": []}}
+    ix = _index(faces=False, words=words)
+    ix["video"] = {"width": 1080, "height": 1920, "fps": 30.0}
+    edl = _edl(motion=[big], words=words, dur=7.0)
+    tl = Timeline(edl["keep"])
+    p = _plan(edl, ix)
+    was = next(i for i, w in enumerate(p.words) if w["w"] == "was")
+    assert was not in p.hidden
+    assert p.hold_limit(1.6, None) == pytest.approx(2.0)
+    cues = motion_captions.cues(edl, ix, tl, canvas=(1080, 1920))
+    first = next(c for c in cues if c["w"][0]["t"] == "computers")
+    assert first["e"] <= 2.0 + 1e-6, first

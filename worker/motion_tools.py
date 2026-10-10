@@ -20,6 +20,7 @@ import re
 import tempfile
 
 import caption_carry
+import caption_place
 import config  # noqa: F401  (kept for parity with other tool modules)
 import db as dbx
 import keepout
@@ -726,7 +727,25 @@ def _implicit(key, sp):
     return 0.5 if key == "x" else sp.get("max") if key in ("width", "size", "scale") else None
 
 
-def _relocate(item, spec, box, zones, track, W, H, bands, off_face=True):
+def _scene_boxes(ctx, edl, item):
+    """Scene text (caption_place.scene_boxes: a shirt print, a sign, a
+    laptop's stickers) on the canvas over the item's window, as a soft
+    keep-out for the solver; [] when unknown."""
+    index = getattr(ctx, "index", None) or {}
+    if not getattr(ctx, "has_main_video", True) or not edl.get("keep"):
+        return []
+    try:
+        from timeline import Timeline
+        W, H = _canvas_size(ctx, edl)
+        tl = Timeline(edl["keep"], edl.get("inserts") or [], edl.get("speed") or [])
+        return caption_place.scene_boxes(edl, index, tl, W, H, float(item["start"]),
+                                         float(item["end"]))
+    except Exception as ex:  # noqa: BLE001 — evidence, never a blocker
+        print(f"[motion] scene text skipped: {str(ex)[:160]}", flush=True)
+        return []
+
+
+def _relocate(item, spec, box, zones, track, W, H, bands, off_face=True, scene=()):
     """Search and verify a clear placement: (patch, real ink box, params,
     the verifying probe report) or None. Alternatives the solver cannot
     predict (another align/side) are probed first, then the cheapest
@@ -773,7 +792,7 @@ def _relocate(item, spec, box, zones, track, W, H, bands, off_face=True):
             picks = fallback
         else:
             kw = dict(captions=bands[0], near_captions=bands[1], predict=rnd == 0,
-                      mouths=mouths,
+                      mouths=mouths, scene=scene,
                       clear_penalty=keepout.CLEAR_PENALTY if off_face else 0.0)
             args = (item["template"], spec, item.get("params") or {},
                     box if rnd == 0 else None, variants if rnd == 0 else known,
@@ -880,6 +899,55 @@ def _keep_out(ctx, edl, item, rep):
         return "", None
 
 
+def keep_out_under_camera(ctx, edl, start, end):
+    """Re-check the graphics on screen over program [start, end] after a
+    camera move (a zoom, a zoom path) was written there: each is compared
+    with the face AS FRAMED UNDER THE MOVE (keepout.face_track maps the face
+    through the zooms), and one the move now pushes the face into is placed
+    again by the same keep-out its own write runs (probed where a browser
+    is, estimated where not). Judged (round 5): Thiel's 'it's not quite
+    been' kicker sat on his chin under a +12% step. Mutates edl['motion'];
+    returns the notes for the tool's reply ([] when nothing collides).
+    Never blocks the camera move."""
+    out = []
+    try:
+        s0, e0 = float(start), float(end)
+        items = [dict(m) for m in edl.get("motion") or []]
+        index = getattr(ctx, "index", None) or {}
+        if not items or not getattr(ctx, "has_main_video", True) or not edl.get("keep"):
+            return out
+        W, H = _canvas_size(ctx, edl)
+        changed = False
+        for k, m in enumerate(items):
+            try:
+                a, b = max(s0, float(m["start"])), min(e0, float(m["end"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+            if b - a < 0.1 or m.get("allow_face_overlap") or m.get("layer") == "behind_subject":
+                continue
+            spec = motion_templates.spec(m["template"])
+            box = (m.get("footprint") or {}).get("box")
+            if not box or not keepout.applicable(m["template"], spec, m.get("layer")):
+                continue
+            track = keepout.face_track(edl, index, W, H, a, b, measure=_face_measure(ctx))
+            if not keepout.assess(tuple(box), track)["hit"]:
+                continue
+            err, _where_note, _bbox, rep = _probe_full(ctx, edl, m)
+            if err:
+                continue
+            note, _moved = _keep_out(ctx, edl, m, rep)
+            items[k] = m
+            changed = True
+            out.append(f"KEEP-OUT under the camera move: graphic '{m.get('id')}' "
+                       f"({m['template']}) met the face as framed at {a:.2f}-{b:.2f}s."
+                       + (note or " It stays as placed: check it in the preview."))
+        if changed:
+            edl["motion"] = items
+    except Exception as ex:  # noqa: BLE001 — a check never blocks the edit
+        print(f"[motion] camera keep-out skipped: {str(ex)[:200]}", flush=True)
+    return out
+
+
 def _attach_reading(ctx, edl, item):
     """Time a word-timed item (spec ``reads_onsets``/``reads_phrase``: a
     lockup, marker_text) to the speech it shows before it is probed and
@@ -961,7 +1029,8 @@ def _keep_out_estimated(ctx, edl, item):
                   near_captions=[keepout.caption_obstacle(y) for y in bands],
                   room=keepout.caption_room(bands, zones, W, H),
                   mouths=keepout.zones_of(track, keepout.mouth_zone),
-                  clear_penalty=keepout.CLEAR_PENALTY if face_bad else 0.0)
+                  clear_penalty=keepout.CLEAR_PENALTY if face_bad else 0.0,
+                  scene=_scene_boxes(ctx, edl, item))
         params0 = item.get("params") or {}
         # another side/align the estimate can draw (the lower third's side)
         variants = []
@@ -1061,7 +1130,7 @@ def _keep_out_inner(ctx, edl, item, rep):
                           ([keepout.caption_band(y) for y in bands],
                            [keepout.caption_obstacle(y, grow) for y in bands],
                            keepout.caption_room(bands, zones, W, H, grow)),
-                          off_face=face_bad)
+                          off_face=face_bad, scene=_scene_boxes(ctx, edl, item))
         if found:
             patch, real, params, rep = found
             old = item.get("params") or {}
@@ -1148,6 +1217,8 @@ def _mute_note(edl, index, tl, item, carried):
     """NOTE when this item's explicit whole-window mute hides speech it does
     not carry."""
     import captions as caplib
+    if caplib.hook_owns_zone(item):
+        return None               # the hook tier owns its zone by design
     others = dict(edl, motion=[m for m in edl.get("motion") or []
                                if m.get("id") != item.get("id")])
     words = caplib.caption_words(others, index, tl)
@@ -1191,8 +1262,12 @@ def _word_level_notes(edl, index, tl, item, canvas=None):
     """NOTEs for a graphic whose captions keep running (mute_captions unset
     or false): the words it leaves muted for want of a clear band, the
     captions it leaves overlapping it, and where the rest moved (the caption
-    plan, worker/caption_carry.py, over its stored footprint)."""
+    plan, worker/caption_carry.py, over its stored footprint). Nothing for
+    the opening hook-tier title: it owns its zone, the captions wait until
+    it exits (captions.hook_owns_zone; the write says HOOK)."""
     import captions as caplib
+    if caplib.hook_owns_zone(item):
+        return []
     rep = caplib.caption_plan(edl, index, tl, canvas=canvas).report.get(item.get("id"))
     if not rep:
         return []
@@ -1691,16 +1766,46 @@ def _hero_fit(ctx, edl, item):
         return ""
 
 
+# The hook tier is the OPENING title: one per short, starting by this
+# program second (captions.HOOK_ZONE_START_S).
+HOOK_TIER_START_S = 1.5
+# ... and holding the captions back no longer than this (the judged hooks
+# were ~2 s; every second past the hook line is speech a sound-off viewer
+# never reads).
+HOOK_TIER_LONG_S = 3.0
+
+
 def _tier_notes(ctx, edl, item):
-    """Advisory lines for the hero and payoff tiers."""
+    """Advisory lines for the hook, hero and payoff tiers."""
     tier = _tier(item.get("params"))
-    if tier not in ("hero", "payoff"):
+    if tier not in ("hook", "hero", "payoff"):
         return []
     others = [m for m in edl.get("motion") or []
               if isinstance(m, dict) and m.get("id") != item.get("id")
               and not motion_templates.persistent(m)
               and not str(m.get("template") or "").startswith("caption")]
     out = []
+    if tier == "hook":
+        twin = [m["id"] for m in others if m.get("template") == "word_slam"
+                and _tier(m.get("params")) == "hook"]
+        if twin:
+            out.append(f"NOTE (tier): '{twin[0]}' is already this short's hook title; the hook "
+                       "tier is the ONE opening headline. Make one of them a display slam.")
+        if float(item.get("start") or 0.0) > HOOK_TIER_START_S + 1e-6:
+            out.append(f"NOTE (tier): the hook tier is the opening title (start it by "
+                       f"{HOOK_TIER_START_S:g}s); at {float(item['start']):g}s it is only a big "
+                       "slam that does not own its zone. Use the display tier here.")
+        elif item.get("mute_captions") is not False:
+            out.append("HOOK: the captions wait until it exits (it owns its zone, so the first "
+                       "seconds have one reading task); mute_captions=false keeps them running "
+                       "beside it.")
+            held = float(item.get("end") or 0.0) - float(item.get("start") or 0.0)
+            if held > HOOK_TIER_LONG_S + 1e-6:
+                out.append(f"NOTE (tier): it holds the captions back for {held:.1f}s — a "
+                           "sound-off viewer reads none of the speech under it. End it with "
+                           f"the hook line (about 1.5-{HOOK_TIER_LONG_S:g}s), or set "
+                           "mute_captions=false.")
+        return out
     if tier == "hero":
         twin = [m["id"] for m in others if _tier(m.get("params")) == "hero"]
         if twin:
@@ -1717,8 +1822,19 @@ def _tier_notes(ctx, edl, item):
         taller = []
         for m in others:
             b = caption_carry.footprint_box(m, ar)
-            if b and (b[3] - b[1]) > h + 0.005 and m.get("layer") != "behind_subject":
-                taller.append((b[3] - b[1], m["id"]))
+            if not b or m.get("layer") == "behind_subject":
+                continue
+            bh = b[3] - b[1]
+            if m.get("template") == "list_build":
+                # an accumulating list is rows, not one lockup: what competes
+                # with the payoff is an item set two lines deep at the list's
+                # type size (a five-row list is tall in small type)
+                p = m.get("params") or {}
+                fs = keepout.list_layout(p, ar)[0]
+                role = str(p.get("role") or "condensed")
+                bh = min(bh, 2 * fs * keepout.LINE_H.get(role, 0.92))
+            if bh > h + 0.005:
+                taller.append((bh, m["id"]))
         if taller:
             th, tid = max(taller)
             out.append(f"NOTE (payoff): '{item['id']}' draws {h:.2f} of the frame height but "
@@ -2538,10 +2654,12 @@ TOOL_SPECS = {
         "beside the face — and the reply says what moved (KEEP-OUT) or why nothing fits (NOTE). "
         "allow_face_overlap=true keeps a deliberate design over the face. NUMBERS land on "
         "their word: a counter completes 20 ms before its spoken number's onset in the "
-        "transcript (the write sets its `land`; a 'reveal' starts there; a count with no room "
-        "to roll starts on the lead-in) and a word_slam whose hero is a figure ('32%', '$1.2B'; "
+        "transcript (the write sets its `land`; a count really counts, 0 -> value over ~0.4 s "
+        "into the word, its window opening 0.45 s before it so it never runs across the setup; "
+        "a 'reveal' starts on the word; a spoken range is value '30–40', each figure landing "
+        "on its own word) and a word_slam whose hero is a figure ('32%', '$1.2B'; "
         "not a name like 'GPT-4') moves onto it — the reply says NUMBER LANDED, and NOTEs a "
-        "count that rolls through the setup or a moved window that now overlaps a neighbour. "
+        "moved window that now overlaps a neighbour. "
         "THE WINDOW: a word-timed graphic (phrase_build, marker_text over a spoken line) "
         "starts on its first visible word (WINDOW), and an entrance or exit within 0.15 s of "
         "a cut moves onto the cut frame so the change is one event (CUT-SNAP; never more than "
@@ -2551,7 +2669,10 @@ TOOL_SPECS = {
         "(look) a second accent, a fourth type role or broadcast furniture in an editorial "
         "Look, with the fix. phrase_build sets only its rows (at most 4, at most 3 sizes: "
         "SIZES); back-to-back slams of one style are a SERIES sharing one size per line. "
-        "TIERS (word_slam tier, optional): 'payoff' locks a number and its noun up in the "
+        "TIERS (word_slam tier, optional): 'hook' is the opening title as a headline (main "
+        "line at 7%+ of the frame height, lead-in small above it) that owns its zone: the "
+        "captions wait until it exits (HOOK; mute_captions=false keeps them); "
+        "'payoff' locks a number and its noun up in the "
         "accent ('*140* / characters') — the short's largest lockup (NOTE (payoff) names a "
         "taller one); 'hero' is ONE giant word per short, behind the speaker by default on a "
         "measured person matte, drawn as a face-safe display slam above the picture when no "

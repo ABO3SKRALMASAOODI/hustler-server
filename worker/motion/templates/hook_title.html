@@ -131,18 +131,23 @@
     MG.box = P.scrim > 0
       ? [Math.max(0, x0 - padX), Math.max(0, r.top - padY), Math.min(MG.W, x1 + padX), Math.min(MG.H, r.bottom + padY)]
       : [r.left - 60, r.top - 60, r.right + 60, r.bottom + 70];
-    // a measured bright plate under the title: a pocket strong enough for
-    // display contrast (3:1), on top of whatever the scrim already gives
-    if (BK) { BK.remove(); BK = null; }
-    const inkR = [x0, r.top, x1, r.bottom];
-    let need = MG.need(inkR, { ink: P.color, ratio: 3, have: 0.3 * 0.78 * P.scrim });
-    if (ACC.short && accentRect()) need = Math.max(need, MG.need(accentRect(), { ink: ACC.color, ratio: heavy ? 3 : 4.5, have: 0.3 * 0.78 * P.scrim }));
-    if (need > 0) {
-      BK = MG.backing(MG.$('.mg-root'), inkR, need, { pad: [0.22 * fs, 0.08 * fs], feather: 0.32 * fs, radius: 0.3 * fs });
-      MG.growBox(BK.box);
+    // a measured bright plate under the title (MG.legible, display 3:1 on
+    // top of what the soft scrim already gives): dark ink where it is
+    // bright under every word (the scrim and drop shadow then stand down,
+    // a tinted accent deepened in its hue), else a glyph scrim; a box only
+    // past what that carries
+    BKS.forEach(b => b.remove()); BKS = []; DARK = false;
+    if (MG.plate && MG.luminance(P.color) >= 0.3) {
+      const accEls = tinted ? words.filter(w => w.acc).map(w => w.el) : [];
+      const res = MG.legible(MG.$$('.line', wrap).map(el => ({ el, ratio: 3, ink: P.color, base: P.shadow > 0 ? 0.15 : 0,
+          acc: accEls.filter(a => el.contains(a)), accent: ACC.color, accRatio: heavy ? 3 : 4.5 })),
+        { have: P.scrim > 0 ? 0.3 * 0.78 * P.scrim : 0, dark: P.treatment === 'none' || tinted,
+          root: MG.$('.mg-root'), box: { pad: [0.22 * fs, 0.08 * fs], feather: 0.32 * fs, radius: 0.3 * fs } });
+      if (res.mode === 'dark') { DARK = true; wrap.style.filter = 'none'; }
+      res.boxes.forEach(b => { BKS.push(b); MG.growBox(b.box); });
     }
   };
-  let BK = null;
+  let BKS = [], DARK = false;
   layout();
   // Fonts load after this script runs: lay out again with real metrics before capture.
   MG.ready = Promise.all([`900 100px '${P.font}'`, `italic 400 100px 'Instrument Serif'`, `italic 800 100px 'Playfair Display'`]
@@ -153,11 +158,12 @@
   const enterEnd = each * words.length + 0.7;
   MG.active([[0, Math.min(D, enterEnd)], [Math.max(0, D - exitDur - 0.02), D]]);
   MG.frame(t => {
-    if (P.scrim > 0 || BK) {
+    if (P.scrim > 0 || BKS.length) {
       const inA = MG.ease.outCubic(MG.range(t, 0, 0.35));
       const outA = exitDur > 0 ? 1 - MG.ease.inCubic(MG.range(t, D - exitDur, exitDur)) : 1;
-      if (P.scrim > 0) scrim.style.opacity = (inA * outA).toFixed(4);
-      if (BK) BK.style.opacity = (inA * outA).toFixed(4);
+      // dark ink never sits in a dark scrim
+      if (P.scrim > 0) scrim.style.opacity = DARK ? 0 : (inA * outA).toFixed(4);
+      BKS.forEach(bk => { bk.style.opacity = (inA * outA).toFixed(4); });
     }
     words.forEach((w, i) => {
       const t0 = i * each;

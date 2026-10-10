@@ -385,19 +385,22 @@ def no_probe(monkeypatch):
 
 def test_a_mute_over_the_setup_names_the_words_that_would_vanish(no_probe):
     ctx = _Ctx()
+    # (a counter no longer sits over its setup: the write opens its window
+    # on its ~0.4 s roll into the number — round 5 judging — so the setup
+    # case is a slam placed early)
     out = motion_tools.add_motion_graphic(
-        ctx, "counter", 1.0, 3.9, params={"value": "140", "label": "*characters*"},
+        ctx, "word_slam", 1.0, 3.9, params={"text": "*characters*"},
         mute_captions=True, id="num")
     assert out.startswith("EDL v1"), out                       # a NOTE, never a rejection
-    assert "NOTE (captions)" in out and '"flying cars and all we got was"' in out, out
-    assert "Leave mute_captions unset" in out and "start it at 2.80s" in out, out
+    assert "NOTE (captions)" in out and '"flying cars and all we got was' in out, out
+    assert "Leave mute_captions unset" in out and "start it at 3.30s" in out, out
     assert ctx.latest_edl()["json"]["motion"][0]["mute_captions"] is True
     # keeping the captions silences the note
     out = motion_tools.set_motion_graphic(ctx, "num", mute_captions=False)
     assert "NOTE (captions)" not in out, out
     # ...and so does a graphic that carries the words being spoken
     out = motion_tools.set_motion_graphic(
-        ctx, "num", start=2.8, mute_captions=True)
+        ctx, "num", start=3.25, mute_captions=True)
     assert "NOTE (captions)" not in out, out
 
 

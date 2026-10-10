@@ -337,6 +337,21 @@ def test_the_payoff_is_named_when_it_is_not_the_largest_lockup(probe):
     assert "NOTE (payoff): 'pay' draws 0.10" in out and "'enough' draws 0.25" in out, out
 
 
+def test_a_tall_accumulating_list_is_rows_not_a_bigger_lockup(probe):
+    """Integration (beats + type system): a five-row list_build is taller
+    than the payoff in small type; the payoff check compares an item set
+    two lines deep at the list's type size, not the whole stack."""
+    lst = _mg("list", "list_build", 3.0, 9.0,
+              rows=[{"text": t} for t in ("rockets", "supersonic aviation",
+                    "green revolution agriculture", "underwater cities", "new medicines")],
+              role="condensed", y=0.64, width=0.8)
+    lst["footprint"] = caption_carry.make_footprint([0.16, 0.48, 0.84, 0.80], W, H, [])
+    ctx = _Ctx(_edl([lst]))
+    out = motion_tools.add_motion_graphic(ctx, "word_slam", 20.0, 21.5, id="pay",
+                                          params={"text": "*140* / characters", "tier": "payoff"})
+    assert "NOTE (payoff)" not in out, out
+
+
 def test_tier_and_typewriter_estimates_for_browserless_lanes():
     spec = motion_templates.spec("word_slam")
     hero = keepout.nominal_ink("word_slam", spec, {"text": "x", "tier": "hero", "y": 0.3})
@@ -614,21 +629,29 @@ def test_behind_why_holds_the_renderers_rules(monkeypatch):
 
 
 @needs_browser
-def test_a_spoken_marker_lines_pocket_hugs_the_words_said_so_far():
+def test_a_spoken_marker_line_on_a_white_shirt_takes_ink_not_a_growing_box():
+    """Judged (round 5): Elon's closing line sat in a grey box that grew on
+    every word over his white T-shirt. On a plate bright under every word
+    the line takes dark ink and no box at all; where a box is unavoidable
+    (a dim ink over a bright-and-dark plate) it is the final block's from
+    the first word on, never grown per word."""
     item = _mg("m", "marker_text", 0, 3.2, text="You should be *required*",
                style="underline", accent="#FF3B30")
     timed = dict(item, reading={"v": 1, "rows": [[0.0, 0.8, 1.2, 1.6]], "bridges": []})
     probe = ("() => { const b = document.querySelector('.mg-backing');"
-             " const ws = [...document.querySelectorAll('.wrap .mg-w')]"
-             ".map(w => w.getBoundingClientRect());"
-             " return b ? [b.getBoundingClientRect().width, ws[0].right - ws[0].left,"
-             " Math.max(...ws.map(r => r.right)) - Math.min(...ws.map(r => r.left))] : null; }")
+             " const l = document.querySelector('.wrap .line');"
+             " return {box: b ? [b.getBoundingClientRect().left, b.getBoundingClientRect().width] : null,"
+             " ink: getComputedStyle(l).color}; }")
     first, done = asyncio.run(_eval(timed, [0.4, 2.6], probe, _plate(225)))
-    assert first and done
-    # only 'You' said: the pocket hugs that word, not the whole line
-    assert first[0] < first[1] + 0.5 * (first[2] - first[1])
-    # all said: it covers the line
-    assert done[0] >= done[2]
+    assert first["box"] is None and done["box"] is None
+    assert first["ink"] == done["ink"] == "rgb(20, 20, 20)"
+    cols, rows = 18, 32
+    split = {"c": cols, "r": rows, "s": [{"t": 0.5, "g": plate_mod.encode_grid(
+        [235 if c < cols // 2 else 20 for _r in range(rows) for c in range(cols)])}]}
+    dim = dict(timed, params=dict(timed["params"], color="#999999"))
+    first, done = asyncio.run(_eval(dim, [0.4, 2.6], probe, split))
+    assert first["box"] and done["box"]
+    assert abs(first["box"][0] - done["box"][0]) < 0.5 and abs(first["box"][1] - done["box"][1]) < 0.5
 
 
 def test_a_hero_under_a_camera_zoom_is_narrowed_to_stay_inside_the_frame(probe, monkeypatch):
@@ -667,3 +690,43 @@ def test_an_accent_on_a_plate_brighter_than_it_is_never_washed_out():
     acc = "() => document.querySelector('.line .mg-w').style.color"
     assert asyncio.run(_eval(slam, [1.0], acc, _plate(225)))[0] in ("#FFC940",
                                                                     "rgb(255, 201, 64)")
+
+
+def test_band_graphics_can_shrink_into_the_band_above_the_larger_archival_card():
+    """Integration (panels + type system): the archival card (y .27-.70)
+    leaves a ~13% headline band; a short slam with its kicker and a counter
+    with its label must be able to narrow into it (word_slam width down to
+    0.3, counter size down to 0.4), as the band NOTE tells the agent to."""
+    assert motion_templates.spec("word_slam")["params"]["width"]["min"] <= 0.3
+    assert motion_templates.spec("counter")["params"]["size"]["min"] <= 0.4
+    slam = motion_templates.check_params("word_slam", {"text": "*Lisa*", "width": 0.3,
+                                                      "kicker": "Apple's 1983 computer"})
+    assert slam["width"] == pytest.approx(0.3)
+    ctr = motion_templates.check_params("counter", {"value": "30–40", "size": 0.4,
+                                                   "label": "fonts on the screen"})
+    assert ctr["size"] == pytest.approx(0.4)
+    box = keepout.nominal_ink("counter", motion_templates.spec("counter"), dict(ctr, y=0.19),
+                              (1080, 1920))
+    assert box[3] - box[1] < 0.13
+
+
+@needs_browser
+def test_a_slam_entrance_stays_inside_the_frame():
+    """Round 7 final review: a wide slam's 1.5x blurred first frames ran
+    past both frame edges (Thiel's ENOUGH at 0.72 of the width; GARBAGE in
+    round 5). The start scale shrinks until the line clears the side edges;
+    a narrow word keeps the full 1.5x impact."""
+    expr = """() => { const h = document.querySelector('.hero'), r = h.getBoundingClientRect();
+        const m = (h.style.transform || '').match(/scale\\(([0-9.]+)\\)/);
+        return {l: r.left, r: r.right, w: window.innerWidth, s: m ? parseFloat(m[1]) : 1}; }"""
+    times = [k / 30 for k in range(7)]
+    wide = _mg("e", "word_slam", 0.0, 1.6, text="*enough*", kicker="it's not quite been",
+               entrance="slam", role="condensed", width=0.72)
+    narrow = _mg("n", "word_slam", 0.0, 1.6, text="*no*", entrance="slam", role="condensed",
+                 width=0.3)
+    out = asyncio.run(_eval(wide, times, expr))
+    assert out[0]["s"] > 1.15, out[0]                          # still an impact
+    for k, st in enumerate(out):
+        assert st["l"] >= 0 and st["r"] <= st["w"], (k, st)
+    first = asyncio.run(_eval(narrow, times[:1], expr))[0]
+    assert first["s"] == pytest.approx(1.5, abs=1e-3), first

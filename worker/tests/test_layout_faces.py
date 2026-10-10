@@ -206,10 +206,39 @@ def test_a_stack_frames_its_speaker_from_the_face_and_opens_the_band(monkeypatch
     card = ctx.card()
     speaker, screen = card["panels"]
     assert _inside(speaker["source"], pc.panel_keep([face]))
-    assert pc._overlap(speaker["source"], INSET) < 1e-4
+    # round 7: the face keeps its 8% margin first; the box sits diagonally
+    # against the chin, so a corner of it shows — never a thin strip along
+    # the edge, and its softening never on the head
+    assert pc.face_margin(speaker["source"], face) >= pc.PANEL_FACE_MARGIN - 1e-3
+    assert pc._thin_strip(speaker["source"], [INSET]) == 0
+    _assert_softening_off_the_head(speaker, face)
     assert screen["box"][1] - speaker["box"][3] >= agent_tools.STACK_CAPTION_GAP - 1e-4
-    assert "face held whole" in res and "kept out of the panel" in res
+    assert "face held whole" in res and "touches the speaker's face" in res
+    assert "LAYOUT (measured)" in res
     assert "the stacked panels get a gutter" in res and "never sit on the seam" in res
+    # a speaker clear of the box keeps it out entirely
+    clear = [0.30, 0.25, 0.42, 0.47]
+    ctx = _faces_ctx(clear, inset=INSET, monkeypatch=monkeypatch)
+    res = agent_tools.set_picture_card(ctx, "s", 0.0, 9.0, panels=[
+        {"box": [0.04, 0.287, 0.96, 0.57], "source": "auto"},
+        {"box": [0.04, 0.60, 0.96, 0.885], "source": "inset"}])
+    speaker = ctx.card()["panels"][0]
+    assert pc._overlap(speaker["source"], INSET) < 1e-4
+    assert "kept out of the panel" in res and "LAYOUT" not in res
+
+
+def _assert_softening_off_the_head(panel, face, box=(0.04, 0.287, 0.96, 0.5525)):
+    """No softened corner of ``panel`` (feather included) lies on the head
+    (panel_keep of ``face``), in canvas px."""
+    keep = pc.panel_keep([face])
+    r = panel["source"]
+    x, y, w, h = pc.pixels(W, H, panel["box"])
+    kx0 = (keep[0] - r[0]) / (r[2] - r[0]) * w
+    ky0 = (keep[1] - r[1]) / (r[3] - r[1]) * h
+    kx1 = (keep[2] - r[0]) / (r[2] - r[0]) * w
+    ky1 = (keep[3] - r[1]) / (r[3] - r[1]) * h
+    for x0, y0, x1, y1, _inner in pc.conceal_boxes(r, panel.get("conceal") or [], w, h):
+        assert min(x1, kx1) - max(x0, kx0) <= 2 or min(y1, ky1) - max(y0, ky0) <= 2
 
 
 def test_a_given_rect_that_cuts_the_face_is_repaired(monkeypatch):
@@ -427,11 +456,16 @@ def test_a_box_touching_the_face_is_concealed_in_the_panel(monkeypatch):
         {"box": [0.04, 0.60, 0.96, 0.885], "source": "inset"}])
     assert res.startswith("EDL v"), res
     speaker = ctx.card()["panels"][0]
-    assert speaker["conceal"] == [pytest.approx(INSET)]
-    assert "softened" in res
-    boxes = pc.conceal_boxes(speaker["source"], speaker["conceal"], 994, 544)
-    (x0, y0, x1, y1, inner) = boxes[0]
-    assert inner[0] and inner[1] and x1 == 994 and y1 == 544   # the corner
+    # round 7: the corner is softened only away from the face — its edge
+    # beside the face is trimmed back, so no smear lies on the head (the
+    # judged dark patch over Rogan's mouth and jaw)
+    (conceal,) = speaker["conceal"]
+    assert conceal[0] > INSET[0] and conceal[2:] == pytest.approx(INSET[2:])
+    assert "softened only away from the face" in res
+    _assert_softening_off_the_head(speaker, face)
+    x, y, w, h = pc.pixels(W, H, speaker["box"])
+    (x0, y0, x1, y1, inner) = pc.conceal_boxes(speaker["source"], [conceal], w, h)[0]
+    assert inner[0] and x1 == w and y1 == h          # the far corner
 
 
 @pytest.mark.skipif(not __import__("shutil").which("ffmpeg"), reason="ffmpeg")

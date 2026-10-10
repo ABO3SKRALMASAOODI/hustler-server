@@ -105,6 +105,21 @@ HAIR_ABOVE_FACE = .40
 FACE_MIN_FRAME = .15
 FACE_SHARE_MAX = .40
 FACE_UPSCALE_CAP = 3.0
+# Archival speaker cards (judges, Oct 2026, round 7): the judged Jobs card
+# (a 646x480 talk in a full-width 4:3 window) was 37% of the frame height on
+# a soft source — a postage stamp in a 9:16 frame. A low-resolution 4:3
+# speaker card defaults to a full-width, squarer window, ARCHIVAL_CARD_BOX:
+# as tall as the two bands around it allow (43% of the frame height) —
+# above it the band for the headline and the hero lockups (.13 below the
+# free-tier mark's zone, keepout.watermark_zone ~.128), below it a whole
+# caption band (caption_carry.MIN_BAND_H .085 clear of the card edge's pad,
+# above the 9:16 safe area's bottom, keepout.SAFE_Y1 .80 — a shorter band
+# sends the captions into the card, over the speaker's headroom). The face
+# keeps its share of the card (face_share), so the enlargement stays where
+# it was (~2.5x on 480p) and the larger window shows more of the speaker,
+# never a softer picture.
+ARCHIVAL_CARD_BOX = [0.06, 0.27, 0.94, 0.70]
+ARCHIVAL_MAX_ASPECT = 1.6
 
 
 def source_fed(spec):
@@ -405,6 +420,16 @@ def median_face(faces):
     return out
 
 
+def is_archival(src_w, src_h):
+    """A low-resolution source no wider than ARCHIVAL_MAX_ASPECT (a 4:3
+    talk): its speaker card defaults to ARCHIVAL_CARD_BOX."""
+    try:
+        return is_lowres(src_w, src_h) and \
+            float(src_w) / float(src_h) <= ARCHIVAL_MAX_ASPECT
+    except (TypeError, ValueError, ZeroDivisionError):
+        return False
+
+
 def face_share(box_h, H):
     """The share of a card's height (``box_h`` canvas px of an H-tall
     frame) its speaker's face takes: FACE_SHARE, more in a short card so
@@ -618,6 +643,77 @@ LEAD_ROOM = .10
 # or nearer the edge (the judged Rogan window was measured over 35% of it).
 PANEL_SEEN_MIN = .6
 PANEL_UNSEEN_PAD = .12
+# ── Framed well, not just safely (judges, Oct 2026, round 7) ─────────────
+# The judged Rogan panel held his head, yet sat it in the panel's
+# lower-right corner under the softened browser corner for 10 s: the
+# solver let "show the least of the box" outrank the composition, and the
+# least box SHARE of a rect is always the biggest rect pushed away from it.
+# Now:
+# * every face box (the steady detector boxes) keeps PANEL_FACE_MARGIN of
+#   the rect inside each edge (the source's own edge permitting) — the
+#   owner-criteria judge's >= 8% — before anything else;
+# * a box that cannot be left out costs its VISIBLE AREA relative to the
+#   face (PANEL_INSET_COST per face area): a tight framing that shows a
+#   small corner beats a wide one that shows a smaller share of a bigger
+#   picture, and the face never moves into a corner to dodge it (the box
+#   pulls the framing at most PANEL_SHIFT_MAX off its composition);
+# * what shows of such a box is a corner, never a thin strip along an edge
+#   (thinner than SLIVER_MAX of the rect: a sliver reads as a fault);
+# * the corner is softened only away from the face (conceal_clear);
+# * lead room goes to the side the speaker looks to only when that side
+#   is clear of the box (room in front of the nose that is all softened
+#   box is no room).
+PANEL_FACE_MARGIN = .08
+PANEL_INSET_COST = 2.5
+# A framing that leaves the box out wins while its distance from the
+# preferred place (in rect sizes: across + down) is at most PANEL_DODGE_MAX;
+# a box no near framing leaves out may pull the framing at most
+# PANEL_SHIFT_MAX off it (the judged Rogan rect was pulled 0.22 to show a
+# smaller corner, and sat him in the panel's lower-right).
+PANEL_DODGE_MAX = .25
+PANEL_SHIFT_MAX = .10
+
+
+def _thin_strip(rect, boxes):
+    """1 when what ``rect`` shows of any of ``boxes`` is a thin strip along
+    its edge (thinner than SLIVER_MAX of the rect's size across it), else
+    0."""
+    w, h = max(rect[2] - rect[0], 1e-9), max(rect[3] - rect[1], 1e-9)
+    for b in boxes or ():
+        ix = min(rect[2], b[2]) - max(rect[0], b[0])
+        iy = min(rect[3], b[3]) - max(rect[1], b[1])
+        if ix > 1e-6 and iy > 1e-6 and min(ix / w, iy / h) < SLIVER_MAX:
+            return 1
+    return 0
+
+
+def face_extent(faces, pad=0.0):
+    """The union of the steady face boxes (source fractions), each grown by
+    ``pad`` of its own size (room for where the track did not see it), or
+    None."""
+    faces = steady_faces(faces)
+    if not faces:
+        return None
+    out = []
+    for f in faces:
+        w, h = f[2] - f[0], f[3] - f[1]
+        out.append([f[0] - pad * w, f[1] - pad * h, f[2] + pad * w, f[3] + pad * h])
+    return [max(0.0, min(o[0] for o in out)), max(0.0, min(o[1] for o in out)),
+            min(1.0, max(o[2] for o in out)), min(1.0, max(o[3] for o in out))]
+
+
+def face_margin(rect, face):
+    """The smallest share of ``rect``'s size between ``face`` and an edge of
+    it (negative when the face crosses that edge); a side where the rect
+    meets the source's own edge counts as clear (the source has no more)."""
+    gaps = []
+    for k in (0, 1):
+        size = max(rect[k + 2] - rect[k], 1e-9)
+        a = (face[k] - rect[k]) / size
+        b = (rect[k + 2] - face[k + 2]) / size
+        gaps.append(1.0 if rect[k] <= 1e-3 else a)
+        gaps.append(1.0 if rect[k + 2] >= 1 - 1e-3 else b)
+    return min(gaps)
 
 
 def panel_keep(faces, pad=0.0):
@@ -674,10 +770,22 @@ def panel_framing(src_w, src_h, W, H, box, faces, looks=(), avoid=(),
     the answer is the nearest framing to it that holds the face (moved and
     grown only as far as it must).
 
+    In order: the head held with PANEL_MARGIN and every face box with
+    PANEL_FACE_MARGIN of the rect inside each edge (each giving way only
+    where the source has no room); a burned-in box left out entirely where
+    any such framing can; then the composition (the preferred place and
+    size), with a box no face-holding framing can leave out costing its
+    visible area per face area (PANEL_INSET_COST) — never the face pushed
+    into a corner to show a smaller share of it.
+
     info: keep (the held region), lead (-1/0/1), share (the face's share of
     the rect's height), k (canvas px per source px), inset (the share of
-    the rect an avoided box still covers), moved (prefer was changed), cut
-    (prefer, as the box would show it, did not hold the head).
+    the rect an avoided box still covers, as 1 + share; 0 when none),
+    moved (prefer was changed), cut (prefer, as the box would show it, did
+    not hold the head), face_margin (the face boxes' smallest margin inside
+    the rect, a share of its size), face_frame (the median face's height as
+    a share of the frame), tier (0: both margins held; 1: the head's only;
+    2: neither — the source has no room), face (the face boxes' union).
     ``pad``: extra room round the head (a share of the face) where the
     track saw only part of the window.
 
@@ -690,7 +798,8 @@ def panel_framing(src_w, src_h, W, H, box, faces, looks=(), avoid=(),
     big = min(sw, sh * a)                     # the widest rect of this aspect
     keep = panel_keep(faces, pad)
     info = {"keep": keep, "lead": 0, "share": None, "k": None, "inset": 0.0,
-            "moved": False, "cut": False}
+            "moved": False, "cut": False, "face_margin": None,
+            "face_frame": None, "tier": None, "face": None}
     if keep is None:
         return None, info
     if prefer is not None:
@@ -698,78 +807,314 @@ def panel_framing(src_w, src_h, W, H, box, faces, looks=(), avoid=(),
         info["cut"] = not holds(prefer, keep)
     med = median_face(steady_faces(faces))
     fh = (med[3] - med[1]) * sh
+    face_area = max(1.0, (med[2] - med[0]) * sw * fh)
+    face = face_extent(faces, pad)
     vals = [float(v) for v in looks or () if v is not None]
     mean = sum(vals) / len(vals) if vals else 0.0
     lead = -1 if mean <= -.5 else 1 if mean >= .5 else 0
     info["lead"] = lead
+    avoid = [[float(v) for v in r] for r in avoid or () if r and len(r) == 4]
+    # lead room in front of the nose that is all burned-in box is no room
+    fw0 = face[2] - face[0]
+    beside = ([face[2], face[1], face[2] + fw0, face[3]] if lead > 0 else
+              [face[0] - fw0, face[1], face[0], face[3]])
+    room = 0 if lead and any(_overlap(beside, b) > 0 for b in avoid) else lead
     kx0, ky0, kx1, ky1 = keep[0] * sw, keep[1] * sh, keep[2] * sw, keep[3] * sh
     kw, kh = kx1 - kx0, ky1 - ky0
-    m = PANEL_MARGIN
-    # the smallest rect that holds the keep region with its margins (the
-    # source's size permitting; the keep itself it must always hold)
-    rh_min = max(min(sh, max(kh / (1.0 - 2 * m), kh / PANEL_FILL_MAX)),
-                 min(big, kw / (1.0 - 2 * m)) / a, kh, kw / a)
+    fx0, fy0, fx1, fy1 = face[0] * sw, face[1] * sh, face[2] * sw, face[3] * sh
+    m, fm = PANEL_MARGIN, PANEL_FACE_MARGIN
+    if max(kh, kw / a) * a > big + 1e-6:
+        return None, info                    # the head does not fit this aspect
+
+    def least(mm, fmm):
+        """The smallest rect height holding the keep region with ``mm`` and
+        the face boxes with ``fmm`` (the source's size permitting)."""
+        need_h = max(kh / (1.0 - 2 * mm), (fy1 - fy0) / (1.0 - 2 * fmm),
+                     kh / PANEL_FILL_MAX)
+        need_w = max(kw / (1.0 - 2 * mm), (fx1 - fx0) / (1.0 - 2 * fmm))
+        return max(min(big / a, need_h), min(big, need_w) / a, kh, kw / a)
+
+    tiers = ((m, fm), (m, 0.0), (0.0, 0.0))
     kcap = face_cap(fh, bh, H, cap)
-    rh_pref = max(kh / PANEL_FILL, bh / kcap, rh_min)
+    rh_pref = max(kh / PANEL_FILL, bh / kcap, least(*tiers[0]))
     if prefer is not None:
         ph = (prefer[3] - prefer[1]) * sh
-        rh_pref = max(rh_min, ph)
-    if rh_min * a > big + 1e-6:
-        return None, info                    # the head does not fit this aspect
-    avoid = [[float(v) for v in r] for r in avoid or () if r and len(r) == 4]
+        rh_pref = max(least(*tiers[0]), ph)
+    rh_pref = min(big / a, rh_pref)
     best = None
-    sizes = sorted({min(big / a, rh_pref)} |
-                   {min(big / a, rh_min + (rh_pref - rh_min) * f)
-                    for f in (0.0, .25, .5, .75)}, reverse=True)
-    # The margin may give way (to the keep region's own edge) where that is
-    # what keeps a burned-in box out, or where the source has no room for
-    # it; a framing with it always wins otherwise.
-    margins = (m, 0.0)
-    # a side where the head reaches the source's own edge has no margin to
-    # keep (the source edge permitting, as speaker_rect's headroom)
-    edge = (keep[0] <= 1e-3, keep[1] <= 1e-3, keep[2] >= 1 - 1e-3,
-            keep[3] >= 1 - 1e-3)
-    for rh, mm in [(rh, mm) for rh in sizes for mm in margins]:
-        rw = rh * a
-        # positions that hold the keep region with its margins
-        xa = max(0.0, kx1 + (0.0 if edge[2] else mm) * rw - rw)
-        xb = min(sw - rw, kx0 - (0.0 if edge[0] else mm) * rw)
-        ya = max(0.0, ky1 + (0.0 if edge[3] else mm) * rh - rh)
-        yb = min(sh - rh, ky0 - (0.0 if edge[1] else mm) * rh)
-        if xa > xb + 1e-6 or ya > yb + 1e-6:
-            continue
-        if prefer is not None:
-            px = prefer[0] * sw + ((prefer[2] - prefer[0]) * sw - rw) / 2.0
-            py = prefer[1] * sh + ((prefer[3] - prefer[1]) * sh - rh) / 2.0
-        else:
-            px = (kx0 + kx1) / 2.0 + lead * LEAD_ROOM * rw - rw / 2.0
-            py = ky0 - HEADROOM_TARGET * rh
-        px, py = _clamp(px, xa, xb), _clamp(py, ya, yb)
-        xs = sorted({xa, xb, px} | {xa + (xb - xa) * i / 12.0 for i in range(13)})
-        ys = sorted({ya, yb, py} | {ya + (yb - ya) * i / 12.0 for i in range(13)})
-        for x0 in xs:
-            for y0 in ys:
-                r = [round(x0 / sw, 4), round(y0 / sh, 4),
-                     round((x0 + rw) / sw, 4), round((y0 + rh) / sh, 4)]
-                cover = sum(_overlap(r, b) for b in avoid) / max(
-                    1e-9, (r[2] - r[0]) * (r[3] - r[1]))
-                # the inset first (a sliver counts), then the composition:
-                # distance from the preferred place, then size from the
-                # preferred size
-                score = (0.0 if cover < 1e-5 else 1.0 + round(cover, 2),
-                         0 if mm == m else 1,
-                         abs(x0 - px) / max(1.0, rw) + abs(y0 - py) / max(1.0, rh)
-                         + abs(rh - rh_pref) / max(1.0, rh_pref))
-                if best is None or score < best[0]:
-                    best = (score, r, rh)
+    for tier, (mm, fmm) in enumerate(tiers):
+        lo = least(mm, fmm)
+        sizes = sorted({rh_pref} | {min(big / a, lo + (rh_pref - lo) * f)
+                                    for f in (0.0, .25, .5, .75)}, reverse=True)
+        for rh in sizes:
+            rw = rh * a
+            # positions that hold the keep and the faces with their margins
+            # (a margin the source has no room for gives way to its edge)
+            xa = max(0.0, min(sw - rw, kx1 + mm * rw - rw),
+                     min(sw - rw, fx1 + fmm * rw - rw))
+            xb = min(sw - rw, max(0.0, kx0 - mm * rw), max(0.0, fx0 - fmm * rw))
+            ya = max(0.0, min(sh - rh, ky1 + mm * rh - rh),
+                     min(sh - rh, fy1 + fmm * rh - rh))
+            yb = min(sh - rh, max(0.0, ky0 - mm * rh), max(0.0, fy0 - fmm * rh))
+            if xa > xb + 1e-6 or ya > yb + 1e-6:
+                continue
+            if prefer is not None:
+                px = prefer[0] * sw + ((prefer[2] - prefer[0]) * sw - rw) / 2.0
+                py = prefer[1] * sh + ((prefer[3] - prefer[1]) * sh - rh) / 2.0
+            else:
+                px = (kx0 + kx1) / 2.0 + room * LEAD_ROOM * rw - rw / 2.0
+                py = ky0 - HEADROOM_TARGET * rh
+            px, py = _clamp(px, xa, xb), _clamp(py, ya, yb)
+            xs = sorted({xa, xb, px} | {xa + (xb - xa) * i / 12.0 for i in range(13)})
+            ys = sorted({ya, yb, py} | {ya + (yb - ya) * i / 12.0 for i in range(13)})
+            for x0 in xs:
+                for y0 in ys:
+                    r = [round(x0 / sw, 4), round(y0 / sh, 4),
+                         round((x0 + rw) / sw, 4), round((y0 + rh) / sh, 4)]
+                    shown = sum(_overlap(r, b) for b in avoid) * sw * sh
+                    away = abs(x0 - px) / max(1.0, rw) + abs(y0 - py) / max(1.0, rh)
+                    out = shown < 1e-5 * sw * sh
+                    # the margins first; a box left out entirely next (unless
+                    # only far off the composition); then no thin strip of a
+                    # box along an edge (a sliver reads as a fault — a corner
+                    # reads as the box); then the composition — a box no
+                    # framing leaves out may pull it at most PANEL_SHIFT_MAX
+                    # — then distance from the preferred place and size plus
+                    # what of the box it shows
+                    score = (tier, 0 if out and away <= PANEL_DODGE_MAX else 1,
+                             0 if out else _thin_strip(r, avoid),
+                             0 if out or away <= PANEL_SHIFT_MAX + 1e-6 else 1,
+                             away + abs(rh - rh_pref) / max(1.0, rh_pref)
+                             + PANEL_INSET_COST * shown / face_area)
+                    if best is None or score < best[0]:
+                        best = (score, r, rh)
+        if best is not None:
+            break
     if best is None:
         return None, info
     rect = [round(v, 4) for v in best[1]]
     rect = [max(0.0, rect[0]), max(0.0, rect[1]), min(1.0, rect[2]), min(1.0, rect[3])]
-    info.update(share=fh / best[2], k=bw / (best[2] * a), inset=best[0][0],
+    area = max(1e-9, (rect[2] - rect[0]) * (rect[3] - rect[1]))
+    cover = sum(_overlap(rect, b) for b in avoid) / area
+    k = bw / (best[2] * a)
+    info.update(share=fh / best[2], k=k,
+                inset=0.0 if cover < 1e-5 else 1.0 + round(cover, 2),
                 moved=prefer is not None and any(
-                    abs(u - v) > .004 for u, v in zip(rect, prefer)))
+                    abs(u - v) > .004 for u, v in zip(rect, prefer)),
+                face_margin=round(face_margin(rect, face_extent(faces)), 3),
+                face_frame=round(fh * k / float(H), 3), tier=best[0][0],
+                face=[round(v, 4) for v in face])
     return rect, info
+
+
+def crop_clear(src_w, src_h, W, H, face, avoid, margin=PANEL_FACE_MARGIN):
+    """(window, shown, strip) — the full-frame crop of a W x H frame (the
+    reframe's window, source fractions) that holds ``face`` with ``margin``
+    of the window inside each side (the source's edge permitting) and shows
+    the least of the ``avoid`` boxes: shown is the share of the window's
+    area they cover (0: left out), strip the share of its width. (None, 1,
+    1) when no window of this shape holds the face."""
+    sw, sh = float(src_w), float(src_h)
+    a = float(W) / float(H)
+    cw, ch = (a * sh / sw, 1.0) if a < sw / sh else (1.0, sw / sh / a)
+    cw, ch = min(1.0, cw), min(1.0, ch)
+    if face is None:
+        return None, 1.0, 1.0
+    lo_x = max(0.0, min(1.0 - cw, face[2] + margin * cw - cw))
+    hi_x = min(1.0 - cw, max(0.0, face[0] - margin * cw))
+    lo_y = max(0.0, min(1.0 - ch, face[3] + margin * ch - ch))
+    hi_y = min(1.0 - ch, max(0.0, face[1] - margin * ch))
+    if lo_x > hi_x + 1e-6 or lo_y > hi_y + 1e-6:
+        return None, 1.0, 1.0
+    cx = (face[0] + face[2]) / 2.0
+    best = None
+    for i in range(25):
+        x0 = lo_x + (hi_x - lo_x) * i / 24.0
+        for j in range(5):
+            y0 = lo_y + (hi_y - lo_y) * j / 4.0
+            win = [x0, y0, x0 + cw, y0 + ch]
+            shown = sum(_overlap(win, b) for b in avoid or ()) / (cw * ch)
+            strip = max([max(0.0, min(win[2], b[2]) - max(win[0], b[0])) / cw
+                         for b in avoid or () if _overlap(win, b) > 0] or [0.0])
+            key = (round(shown, 4), abs(x0 + cw / 2.0 - cx))
+            if best is None or key < best[0]:
+                best = (key, [round(v, 4) for v in win], shown, strip)
+    return best[1], best[2], best[3]
+
+
+# ── Thin high-contrast slivers at a card's edge (judges, Oct 2026, r7) ──
+# A pale stage pillar hugged the Jobs card's left edge for ~20 s at 2-4% of
+# its width — a real part of the set, but against the card's edge it reads
+# as a render fault or an exposed border. A persistent straight edge in the
+# source (subject.hard_edge_lines: a pillar, a door or window frame, a set
+# wall's corner) inside a rect within SLIVER_MAX of the rect's size from
+# one of its edges leaves such a band. The rect slides past it (the line
+# SLIVER_PAD outside the edge, its soft falloff too), size kept, while the
+# head stays held with its margins and no other line comes in; otherwise
+# it is reported. SLIVER_PATTERN_LINES lines or more inside the rect are a
+# pattern (panelling, blinds, a bookcase), never a sliver.
+SLIVER_MAX = .08
+SLIVER_PAD = .02
+SLIVER_PATTERN_LINES = 4
+# A pillar has two edges: sliding past its inner edge can bring its outer
+# one (or a door frame beside it) into the band of the new edge. The slide
+# then clears the whole cluster, up to SLIVER_CHAIN_MAX of the rect's size
+# from its edge (beyond that the band is part of the picture). Seen on the
+# integrated Jobs render: a pale pillar 9% of the card wide along its left
+# edge for ~2.5 s, its inner edge 8.8% in — just past the sliver band, so
+# the slide past its outer edge was refused for 'bringing in another edge'.
+SLIVER_CHAIN_MAX = .15
+
+
+def _keep_gap(rect, keep):
+    """The smallest gap between ``keep`` and an edge of ``rect``, as a share
+    of the rect's size on that axis (negative when it crosses)."""
+    w, h = max(rect[2] - rect[0], 1e-9), max(rect[3] - rect[1], 1e-9)
+    return min((keep[0] - rect[0]) / w, (rect[2] - keep[2]) / w,
+               (keep[1] - rect[1]) / h, (rect[3] - keep[3]) / h)
+
+
+def sliver_shift(rect, lines_x=(), lines_y=(), keep=None, margin=PANEL_MARGIN):
+    """(rect, found) — ``rect`` (source fractions) slid past a hard line
+    that would leave a thin band (under SLIVER_MAX of its size) along one
+    of its edges. found: [(axis, side, depth, moved)] — depth the band's
+    share of the rect's size, moved the slide (0.0 when the rect could not
+    slide: it would cut ``keep``, leave the source or bring another line
+    in, or a band sits on both sides)."""
+    rect = [float(v) for v in rect]
+    found = []
+    for k, lines, sides in ((0, lines_x, ("left", "right")),
+                            (1, lines_y, ("top", "bottom"))):
+        lo, hi = rect[k], rect[k + 2]
+        size = hi - lo
+        if size <= 1e-6:
+            continue
+        inside = [float(p) for p in lines or () if lo < float(p) < hi]
+        if len(inside) >= SLIVER_PATTERN_LINES:
+            continue
+        band = SLIVER_MAX * size
+        # a line just outside an edge counts too: an edge's soft falloff
+        # (archival video smears it over a few pixels) still shows
+        near = [float(p) for p in lines or ()
+                if lo - SLIVER_PAD < float(p) < hi + SLIVER_PAD]
+        near_lo = [p for p in near if p - lo <= band]
+        near_hi = [p for p in near if hi - p <= band]
+        if not near_lo and not near_hi:
+            continue
+        if near_lo and near_hi:
+            found.append((("x", "y")[k], "both", round(min(
+                max(near_lo) - lo, hi - min(near_hi)) / size, 3), 0.0))
+            continue
+        if near_lo:
+            line, side = max(near_lo), sides[0]
+            # a cluster (a pillar's two edges, a frame beside it): past the
+            # outermost line still inside the band of the slid edge
+            while True:
+                more = [float(p) for p in lines or ()
+                        if line < float(p) < line + SLIVER_PAD + band
+                        and float(p) - lo <= SLIVER_CHAIN_MAX * size]
+                if not more:
+                    break
+                line = max(more)
+            shift, depth = line + SLIVER_PAD - lo, max(0.0, line - lo)
+        else:
+            line, side = min(near_hi), sides[1]
+            while True:
+                more = [float(p) for p in lines or ()
+                        if line - SLIVER_PAD - band < float(p) < line
+                        and hi - float(p) <= SLIVER_CHAIN_MAX * size]
+                if not more:
+                    break
+                line = min(more)
+            shift, depth = line - SLIVER_PAD - hi, max(0.0, hi - line)
+        new = list(rect)
+        new[k], new[k + 2] = lo + shift, hi + shift
+        ok = new[k] >= -1e-6 and new[k + 2] <= 1.0 + 1e-6
+        ok = ok and not any(new[k] - SLIVER_PAD + 1e-6 < float(p) < new[k] + band
+                            or new[k + 2] - band < float(p) < new[k + 2] + SLIVER_PAD - 1e-6
+                            for p in lines or ())
+        if ok and keep is not None:
+            # the head stays inside with its margin (or no closer to an
+            # edge than it already was)
+            ok = _keep_gap(new, keep) >= min(margin, _keep_gap(rect, keep)) - 1e-4
+        found.append((("x", "y")[k], side, round(depth / size, 3),
+                      round(shift, 4) if ok else 0.0))
+        if ok:
+            rect = new
+    return [round(v, 4) for v in rect], found
+
+
+# ── A softened corner never lies on the face (judges, Oct 2026, round 7) ─
+# The judged Rogan panel softened the browser corner the face forced in,
+# and the feather (CONCEAL_FEATHER of the panel's short side, grown from the
+# box into the picture) laid a dark smear over his mouth and jaw. What of a
+# box a panel softens is trimmed back from the head (the panel's keep
+# region) by the feather's reach, keeping the side that leaves the most of
+# it; a box whose softening cannot clear the head at all is shown as it is
+# (the face is never under a smear). CONCEAL_MIN_SHARE: a trimmed part
+# smaller than this share of what the panel shows of the box is not worth a
+# patch (a blurred scrap beside a sharp box reads as a fault).
+CONCEAL_MIN_SHARE = .35
+
+
+def conceal_clear(rect, regions, keep, box, src_w, src_h, W, H):
+    """(conceal, trimmed) — the parts of ``regions`` (burned-in boxes,
+    SOURCE fractions) a panel showing ``rect`` in canvas ``box`` softens,
+    each trimmed so that it and its feather stay off ``keep`` (the head).
+    trimmed: True when any part was trimmed back or left sharp for the
+    face. [] when nothing is left to soften."""
+    sw, sh = float(src_w), float(src_h)
+    bw, bh = (box[2] - box[0]) * W, (box[3] - box[1]) * H
+    rw = max(1e-9, (rect[2] - rect[0]) * sw)
+    k = bw / rw
+    f = max(4.0, CONCEAL_FEATHER * min(bw, bh)) / k        # source px
+    fx, fy = f / sw, f / sh
+    out, trimmed = [], False
+    for c in regions or []:
+        ci = [max(c[0], rect[0]), max(c[1], rect[1]),
+              min(c[2], rect[2]), min(c[3], rect[3])]
+        if ci[2] - ci[0] < 1e-4 or ci[3] - ci[1] < 1e-4:
+            continue
+        if keep is None:
+            out.append([round(v, 4) for v in c])
+            continue
+        shown = (ci[2] - ci[0]) * (ci[3] - ci[1])
+
+        def reach(r):
+            # the softened region as drawn: grown by the feather on the
+            # sides facing the picture (not along the panel's own edge)
+            return [r[0] - (fx if r[0] > rect[0] + 1e-4 else 0.0),
+                    r[1] - (fy if r[1] > rect[1] + 1e-4 else 0.0),
+                    r[2] + (fx if r[2] < rect[2] - 1e-4 else 0.0),
+                    r[3] + (fy if r[3] < rect[3] - 1e-4 else 0.0)]
+        def touches(r):
+            # more than a hair of the softening on the head
+            return min(r[2], keep[2]) - max(r[0], keep[0]) > 1e-3 and \
+                min(r[3], keep[3]) - max(r[1], keep[1]) > 1e-3
+        if not touches(reach(ci)):
+            out.append([round(v, 4) for v in c])
+            continue
+        trimmed = True
+        options = [[max(ci[0], keep[2] + fx), ci[1], ci[2], ci[3]],
+                   [ci[0], max(ci[1], keep[3] + fy), ci[2], ci[3]],
+                   [ci[0], ci[1], min(ci[2], keep[0] - fx), ci[3]],
+                   [ci[0], ci[1], ci[2], min(ci[3], keep[1] - fy)]]
+        options = [o for o in options if o[2] - o[0] > 1e-3 and o[3] - o[1] > 1e-3
+                   and not touches(reach(o))]
+        if not options:
+            continue
+        best = max(options, key=lambda o: (o[2] - o[0]) * (o[3] - o[1]))
+        if (best[2] - best[0]) * (best[3] - best[1]) < CONCEAL_MIN_SHARE * shown:
+            continue
+        # stored as the box's part (its own outer edges where untrimmed; the
+        # render clips it to the rect): a CardPanel.conceal rect is at least
+        # 4% of the source per axis
+        part = [best[k] if abs(best[k] - ci[k]) > 1e-6 else float(c[k])
+                for k in range(4)]
+        if part[2] - part[0] < .04 or part[3] - part[1] < .04:
+            continue
+        out.append([round(v, 4) for v in part])
+    return out, trimmed
 
 
 # The designed canvas a card gets when none is chosen: the footage's own
@@ -1044,6 +1389,19 @@ def conceal_boxes(rect, regions, w, h):
         if x1 - x0 >= 4 and y1 - y0 >= 4:
             out.append((x0, y0, x1, y1, inner))
     return out
+
+
+def conceal_canvas(box, rect, regions, W, H):
+    """The softened corners of a panel showing ``rect`` in canvas ``box``
+    (conceal_boxes, feather included) as canvas fractions [x0, y0, x1, y1]
+    — what picture QC keeps faces out of."""
+    try:
+        x, y, w, h = pixels(W, H, box)
+        return [[round((x + b[0]) / float(W), 4), round((y + b[1]) / float(H), 4),
+                 round((x + b[2]) / float(W), 4), round((y + b[3]) / float(H), 4)]
+                for b in conceal_boxes(rect, regions, w, h)]
+    except (TypeError, ValueError, ZeroDivisionError, IndexError):
+        return []
 
 
 def _conceal_chain(parts, in_label, out_label, rect, regions, w, h, uid):

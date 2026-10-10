@@ -42,8 +42,12 @@ HOW TO LOOK AT MOTION — two different renders:
   and caption QA tiles of them. Judge placement, legibility and collisions
   from that result; the complete preview adds the AUDIO CHECK of the whole
   mix and the PICTURE CHECK of its frames: a face within ~6% of the frame's
-  (or its card's) edge, a one-frame pop or a jump that is not on a cut, a
-  missing end card or watermark (finals). It measures the file that ships
+  (or its card's) edge, a one-frame pop or a jump that is not on a cut, an
+  ORPHAN FRAME (a shot of 1-2 frames between two cuts — a crop, card or
+  zoom switch a frame off the source's camera cut), a REFRAME OFF THE CUT
+  or MID-SHOT, a hook that opens on closed eyes or mid-sound (with the
+  nearest clean start, never applied), a missing end card or watermark
+  (finals). It measures the file that ships
   and never changes the edit: repair each finding (look_at the frames it
   names first) or keep it deliberately and say why.
 - `look_at(rendered=true, ...)` reads only a COMPLETE preview of the current
@@ -64,7 +68,9 @@ SCREEN IN THIS ORDER — each item is a yes/no question:
    statistic (not a generic question) and not showing a word a later
    graphic slams? Speaker on screen, facing camera and talking by ~0.3 s,
    on a clean first word (no fragment, no disfluency) with no jump cut in
-   the first 1.5 s? No black, no fade-in, no dead air?
+   the first 1.5 s? Is the hook a headline (main line 7%+ of the frame
+   height) owning its zone — no live caption stacked under it? No black,
+   no fade-in, no dead air?
 2. RHYTHM: scanning the program, does the type keep moving with the
    speech, and does the structure (a graphic, B-roll, a layout shift) move
    where the story turns? Is any zoom or sound there only to fill time
@@ -76,6 +82,11 @@ SCREEN IN THIS ORDER — each item is a yes/no question:
    identification, evidence or an image the captions cannot — with about
    one hero graphic per 6–8 s at most, under ~50% of the runtime, at most 3
    type roles and one accent? Remove any that only restate the caption.
+   And the other half: does every thesis line, spoken list or triad, named
+   product or place and number get a beat that adds information (an image
+   first for concrete nouns, an accumulating list_build, a contrast, a
+   counter that really counts and shows a range as said), with no body
+   stretch past ~6–8 s without one?
 4. CAPTIONS: words appear on onsets; accents on the right 1–2 words; legible
    against every background; no overlap with faces, graphics or the platform
    band; no caption stacked over burned-in text.
@@ -104,7 +115,9 @@ SCREEN IN THIS ORDER — each item is a yes/no question:
 8. LOOK AND LAYOUT: one grade and texture throughout; no flat black void; no
    scene obviously rawer than the rest.
 9. THE END: the payoff is the largest accented lockup (a number with its
-   noun), held 0.6–1.5 s after the last word before the end card, a
+   noun), held 0.8–1.5 s after the last word before the end card (the
+   natural tail, else add_freeze_frame audio_mode='hold'; a big number
+   ~2 s on screen), a
    reaction button 1.0–1.5 s or none, a requested CTA after it (not over
    it), last beat lands clean for the loop.
 10. THE BRIEF: reread the user's message once. Every named item delivered or

@@ -1,0 +1,334 @@
+<!--MG-SPEC {"title": "List build", "category": "type",
+ "description": "An accumulating list for a spoken list or triad: 2-6 items that stack and PERSIST, each landing whole ON its spoken onset (the engine times the rows from the transcript; 'at' is the fallback), the newest in the accent while the earlier ones settle to the ink, and the block clears together at its end - end it on the next beat. Items are the noun phrases the speaker names ('SUPERSONIC AVIATION', 'UNDERWATER CITIES'), never a lone modifier ('UNDERWATER'); 'lead' is a small line above them for a triad's repeated opener ('Let's get') or what the list is. Real images per item come first (research_broll / search_stock); this is the typographic fallback - one block instead of a run of slams replacing each other.",
+ "duration": 3.5, "layer": "above_captions", "mutes_captions": true, "reads_phrase": true,
+ "params": {
+  "rows": {"type": "rows", "required": true, "fields": ["text", "at"], "max_items": 6, "max": 32, "hint": "2-6 items in spoken order, each the noun phrase as said ('supersonic aviation', 1-3 words; *star* a word to keep it in the accent); at = item seconds for an item nobody says (blank = after the previous one) - spoken items land on their spoken onsets"},
+  "lead": {"type": "str", "default": "", "max": 40, "hint": "optional small line above the items, shown with the first one: a triad's repeated opener ('Let's get') or what the list is ('They promised')"},
+  "role": {"type": "enum", "values": ["condensed", "grotesk", "serif"], "default": "condensed", "hint": "the items' type: condensed = Anton caps; grotesk = heavy tight sans; serif = italic serif"},
+  "uppercase": {"type": "bool", "default": true, "hint": "caps for condensed/grotesk; serif keeps the typed case"},
+  "align": {"type": "enum", "values": ["center", "left"], "default": "center"},
+  "x": {"type": "float", "min": 0.3, "max": 0.7, "default": 0.5, "hint": "horizontal centre of the column (frame fraction)"},
+  "y": {"type": "float", "min": 0.12, "max": 0.8, "default": 0.6, "hint": "vertical centre of the full list (frame fraction); keep it off the face"},
+  "width": {"type": "float", "min": 0.4, "max": 0.85, "default": 0.8, "hint": "column width (frame fraction): the widest item fills it; a long item breaks onto two lines when that sets the list clearly bigger"},
+  "height": {"type": "float", "min": 0.12, "max": 0.5, "default": 0.36, "hint": "the most frame height the full list (lead included) may take - lower it to fit a band (e.g. 0.16 above a picture card)"},
+  "color": {"type": "color", "default": "#F8F6F2"},
+  "accent": {"type": "color", "default": "#ED080D", "hint": "the newest item"},
+  "entrance": {"type": "enum", "values": ["pop", "rise"], "default": "pop", "hint": "pop = each item hard-cuts on its word and settles from 4% big; rise = a short rise + blur-to-sharp, readable on the word"},
+  "exit": {"type": "enum", "values": ["cut", "fade", "blur"], "default": "cut"},
+  "scrim": {"type": "float", "min": 0, "max": 1, "default": 0, "hint": "an optional soft dark wash under the block (0 = none, the default: the list decides its own legibility from the plate under its glyphs - nothing, dark ink, then a glyph scrim)"}
+ },
+ "example": {"rows": [{"text": "Rockets"}, {"text": "Supersonic aviation"}, {"text": "Underwater cities"}], "lead": "They promised"}} -->
+<style>
+  .blk{position:absolute;display:flex;flex-direction:column}
+  .lead{white-space:nowrap;line-height:1.05;will-change:opacity}
+  .item{display:flex;flex-direction:column;will-change:transform,opacity,filter}
+  .line{white-space:nowrap;display:block;width:max-content}
+  .line .mg-w{margin-right:.2em}
+  .line .mg-w:last-child{margin-right:0}
+  .scrim{position:absolute;pointer-events:none;border-radius:50%;opacity:0;
+    background:radial-gradient(closest-side,rgba(0,0,0,var(--sa)) 0%,rgba(0,0,0,calc(var(--sa) * .62)) 52%,rgba(0,0,0,0) 100%)}
+</style>
+<div class="mg-root"><div class="scrim" id="scrim"></div><div class="blk" id="blk"></div></div>
+<script>
+(() => {
+  const P = MG.params, W = MG.W, H = MG.H, D = MG.duration, FPS = MG.fps || 30;
+  const blk = MG.$('#blk'), scrim = MG.$('#scrim');
+  scrim.style.setProperty('--sa', (0.8 * (P.scrim || 0)).toFixed(3));
+  // ── type role (first bundled family wins; graceful CSS fallbacks) ──
+  const FAM = new Set(Array.from(document.fonts, f => f.family.replace(/["']/g, '')));
+  const first = list => list.find(f => FAM.has(f));
+  const role = name => {
+    if (name === 'grotesk') return { css: `'Inter Display','Inter',sans-serif`, weight: 900, style: 'normal', track: '-0.035em', lh: 0.9, caps: true, thin: false };
+    if (name === 'serif') {
+      const f = first(['Instrument Serif', 'Playfair Display', 'DM Serif Display']) || 'Instrument Serif';
+      return { css: `'${f}','Playfair Display',Georgia,serif`, weight: f === 'Playfair Display' ? 900 : 400, style: 'italic', track: '-0.015em', lh: 0.94, caps: false, thin: true };
+    }
+    const f = first(['Anton', 'Bebas Neue']) || 'Anton';
+    return { css: `'${f}','Bebas Neue','Inter Display',sans-serif`, weight: 400, style: 'normal', track: '0em', lh: 0.92, caps: true, thin: false };
+  };
+  const R = role(P.role);
+  const caps = P.uppercase && R.caps;
+  const sans = FAM.has('Inter') ? `'Inter','Inter Display',sans-serif` : `'Inter Display',sans-serif`;
+  const num = (v, d) => { const n = parseFloat(v); return isFinite(n) ? n : d; };
+
+  // ── the items, in spoken order (stars keep a word in the accent) ──
+  // The engine's reading (MotionItem.reading): per row, per printed word,
+  // the second its spoken word starts (null: not said). An item lands WHOLE
+  // on its first spoken word.
+  const RD = (P._reading && typeof P._reading === 'object') ? P._reading : null;
+  const RDrows = (RD && Array.isArray(RD.rows)) ? RD.rows : [];
+  const LAND = P.entrance === 'rise' ? 0.06 : 0;   // a rise starts that early: readable ON the word
+  const items = [];
+  (P.rows || []).slice(0, 6).forEach((r, i) => {
+    const words = MG.starWords(r && r.text).map(({ t, acc }) => ({ t: caps ? t.toUpperCase() : t, acc }));
+    if (!words.length) return;
+    const k = Array.isArray(RDrows[i]) ? RDrows[i].map(v => (v == null ? null : num(v, null))).filter(v => v != null) : [];
+    items.push({ words, known: k.length ? Math.max(0, Math.min(...k) - LAND) : null,
+                 at: String((r && r.at) ?? '').trim() });
+  });
+  if (!items.length) items.push({ words: [{ t: '—', acc: false }], known: null, at: '' });
+  // reveal times: a spoken item on its onset; an unspoken one on its 'at'
+  // (blank: an even cadence after the previous one); never before the item above
+  const EVERY = Math.min(0.6, Math.max(0.3, (D - 1.0) / Math.max(1, items.length - 1)));
+  let prev = null;
+  items.forEach(it => {
+    let t = it.known != null ? it.known : it.at !== '' ? Math.max(0, num(it.at, 0)) : (prev == null ? 0 : prev + EVERY);
+    if (prev != null) t = Math.max(t, prev);
+    it.t0 = Math.min(t, Math.max(0, D - 0.1));
+    prev = it.t0;
+  });
+  items.forEach((it, i) => { it.t1 = i + 1 < items.length ? items[i + 1].t0 : Infinity; });
+
+  // ── build: lead line + one block per item (one or two lines) ──
+  let lead = null;
+  if (String(P.lead || '').trim()) {
+    lead = MG.el('div', 'lead', String(P.lead).trim(), blk);
+    Object.assign(lead.style, { fontFamily: sans, fontWeight: FAM.has('Inter') ? 600 : 700,
+      letterSpacing: '-0.02em', color: P.color, opacity: 0.94 });
+  }
+  items.forEach(it => {
+    it.el = MG.el('div', 'item', null, blk);
+    it.split = 0;                                   // 0 = one line; k = second line from word k
+  });
+  const build = it => {
+    it.el.textContent = '';
+    it.lines = [];
+    const groups = it.split ? [it.words.slice(0, it.split), it.words.slice(it.split)] : [it.words];
+    groups.forEach(g => {
+      const el = MG.el('div', 'line', null, it.el);
+      Object.assign(el.style, { fontFamily: R.css, fontWeight: R.weight, fontStyle: R.style,
+        letterSpacing: R.track, lineHeight: R.lh, color: P.color });
+      g.forEach(w => {
+        const we = MG.el('span', 'mg-w', w.t, el);
+        if (w.acc) we.dataset.acc = '1';
+      });
+      it.lines.push(el);
+    });
+  };
+  const widthAt100 = el => { el.style.fontSize = '100px'; return el.scrollWidth / 100; };
+  const widest = it => Math.max(...it.lines.map(widthAt100), 0.01);
+  const balanced = it => {
+    // the two-line break whose wider line is narrowest
+    let best = null;
+    for (let k = 1; k < it.words.length; k++) {
+      it.split = k; build(it);
+      const w = widest(it);
+      if (!best || w < best.w - 1e-6) best = { k, w };
+    }
+    return best;
+  };
+
+  // ── layout: one shared size, fitted to the column and the height budget ──
+  let fs = 40, leadFs = 26, ITEM_GAP = 0.22, BK = null;
+  const BK_PAD = [0.16, 0.06], BK_T = 0.12;
+  const layout = () => {
+    const colW = Math.min(Math.max(0.3, P.width || 0.8) * W, W - 120);
+    const cx = Math.min(Math.max((P.x || 0.5) * W, 60 + colW / 2), W - 60 - colW / 2);
+    const budget = Math.max(0.12, Math.min(0.5, P.height || 0.36)) * H;
+    // at most 8.5% of the frame height a line: a short list is a lockup, not a wall
+    const CAP = 0.085 * H;
+    // the lead takes about LEAD_K of the item size (its line and its gap),
+    // at least LEAD_MIN of the frame height (the phone-readable floor)
+    const LEAD_K = 0.55, LEAD_MIN = 0.03 * H;
+    const sizeFor = () => {
+      const lines = items.reduce((a, it) => a + it.lines.length, 0);
+      const L = lines * R.lh + Math.max(0, items.length - 1) * ITEM_GAP;
+      const wmax = Math.max(...items.map(widest), 0.01);
+      let byH = budget / L;
+      if (lead) { byH = (budget - LEAD_MIN) / L; if (LEAD_K * byH > LEAD_MIN) byH = budget / (L + LEAD_K); }
+      return Math.min(colW / wmax, byH, CAP);
+    };
+    items.forEach(it => { it.split = 0; build(it); });
+    let s = sizeFor();
+    // a long item breaks onto two lines when that sets the list clearly
+    // bigger (each break must earn 15%); the widest item breaks first
+    for (let n = 0; n < items.length; n++) {
+      const cand = items.filter(it => !it.split && it.words.length > 1)
+        .sort((a, b) => widest(b) - widest(a))[0];
+      if (!cand) break;
+      const b = balanced(cand);
+      if (!b) { cand.split = 0; build(cand); break; }
+      cand.split = b.k; build(cand);
+      const s2 = sizeFor();
+      if (s2 >= s * 1.15) s = s2;
+      else { cand.split = 0; build(cand); break; }
+    }
+    fs = Math.max(24, s);
+    blk.style.width = colW + 'px';
+    blk.style.left = (cx - colW / 2) + 'px';
+    const al = P.align === 'left' ? 'flex-start' : 'center';
+    blk.style.alignItems = al;
+    blk.style.textAlign = P.align === 'left' ? 'left' : 'center';
+    const a1 = R.thin ? 0.42 : 0.28, a2 = R.thin ? 0.55 : 0.42;
+    const shadow = `0 ${(fs * 0.015).toFixed(1)}px ${(fs * 0.05).toFixed(1)}px rgba(0,0,0,${a1}), 0 ${(fs * 0.03).toFixed(1)}px ${(fs * 0.16).toFixed(1)}px rgba(0,0,0,${a2})`;
+    items.forEach((it, i) => {
+      it.el.style.alignItems = al;
+      it.el.style.transformOrigin = P.align === 'left' ? '0% 60%' : '50% 60%';
+      it.el.style.marginTop = i ? (ITEM_GAP * fs) + 'px' : '0px';
+      it.lines.forEach((el, j) => {
+        el.style.fontSize = fs + 'px';
+        el.style.textShadow = shadow;
+        el.style.marginTop = '0px';
+        if (j) {
+          // an item's second line hugs its first (tighter than the gap between items)
+          const need = MG.stackGap(it.lines[j - 1], el, { clear: 0.05 * fs, pad: 0.02 * fs });
+          if (need > 0.25) el.style.marginTop = need + 'px';
+        }
+      });
+      if (i) {
+        // glyph-aware: an item never comes near the descenders of the one above
+        const above = items[i - 1].lines[items[i - 1].lines.length - 1];
+        const need = MG.stackGap(above, it.lines[0], { clear: (0.07 + ITEM_GAP) * fs, pad: 0.03 * fs });
+        if (need > 0.25) it.el.style.marginTop = (parseFloat(it.el.style.marginTop) + need) + 'px';
+      }
+    });
+    if (lead) {
+      lead.style.color = P.color;
+      lead.style.textShadow = '0 2px 14px rgba(0,0,0,.45)';
+      leadFs = Math.max(26, Math.min(Math.max(0.38 * fs, 0.024 * H), 0.034 * H, 68));
+      lead.style.fontSize = leadFs + 'px';
+      leadFs = MG.floorType(lead);
+      if (lead.scrollWidth > colW) {
+        leadFs = Math.max(leadFs * colW / lead.scrollWidth, MG.minType(lead));
+        lead.style.fontSize = leadFs + 'px';
+      }
+      lead.style.marginBottom = (0.12 * fs) + 'px';
+      if (items.length) {
+        const need = MG.stackGap(lead, items[0].lines[0], { clear: 0.16 * leadFs, pad: 0.05 * leadFs });
+        if (need > 0.25) lead.style.marginBottom = (parseFloat(lead.style.marginBottom) + need) + 'px';
+      }
+    }
+    // the full list's place: centred on y, inside the frame's safe height
+    const h = blk.getBoundingClientRect().height;
+    const top = Math.min(Math.max(H * (P.y || 0.6) - h / 2, H * 0.06), H * 0.86 - h);
+    blk.style.top = top + 'px';
+    let x0 = W, y0 = H, x1 = 0, y1 = 0;
+    items.forEach(it => {
+      const b = it.el.getBoundingClientRect();
+      it.rect = [b.left, b.top, b.right, b.bottom];
+      x0 = Math.min(x0, b.left - fs * 0.3); x1 = Math.max(x1, b.right + fs * 0.3);
+      y0 = Math.min(y0, b.top - fs * 0.3); y1 = Math.max(y1, b.bottom + fs * 0.35);
+    });
+    if (lead) {
+      const b = lead.getBoundingClientRect();
+      x0 = Math.min(x0, b.left - 20); x1 = Math.max(x1, b.right + 20); y0 = Math.min(y0, b.top - 20);
+    }
+    if (P.scrim > 0) {
+      const px = 0.25 * fs + 50, py = 0.3 * fs + 50;
+      Object.assign(scrim.style, { left: (x0 - px) + 'px', top: (y0 - py) + 'px',
+        width: (x1 - x0 + 2 * px) + 'px', height: (y1 - y0 + 2 * py) + 'px' });
+    }
+    MG.box = [Math.max(0, x0), Math.max(0, y0), Math.min(W, x1), Math.min(H, y1)];
+    legible();
+  };
+  // ── legibility over the measured plate (MG.legible, round 7) ──
+  // The same decision every type template makes (no boxes in an editorial
+  // look): from the plate under each item's GLYPHS over its whole time on
+  // screen (its landing to the block's exit) — nothing where the type's own
+  // shadow carries it; dark ink for the block where the plate is bright
+  // under every weak item (the newest item then wears the accent deepened
+  // in its own hue, and the soft scrim stays off: no dark wash under dark
+  // ink); else a glyph scrim that follows the letterforms; a box only past
+  // that, pre-sized to the full block and growing item by item with it.
+  // The accent as it reads on this plate (MG.accentInk) either way.
+  // per item: it.dark (dark ink chosen under it); accInk the accent on a
+  // light item, accDark on a dark one
+  let accInk = P.accent, accDark = P.accent, dark = false;
+  function legible() {
+    if (BK) { BK.remove(); BK = null; }
+    accInk = P.accent; accDark = P.accent; dark = false;
+    items.forEach(it => { it.dark = false; it.el.style.color = ''; });
+    const els = items.map(it => it.el).concat(lead ? [lead] : []);
+    MG.unlegible(els);
+    if (!MG.plate) return;
+    const all = MG.rectOf(items.map(it => it.el));
+    if (all) accInk = MG.accentInk(all, P.accent, { lc: R.thin ? 45 : 35, t0: items[0].t0, t1: D }).color;
+    if (MG.luminance(P.color) < 0.3) return;            // the editor chose dark ink
+    const have = 0.3 * 0.8 * (P.scrim || 0);
+    const parts = items.map(it => ({ el: it.el, ratio: R.thin ? 4.5 : 3, ink: P.color,
+                                     base: R.thin ? 0.35 : 0.25, t0: it.t0, t1: D }))
+      .concat(lead ? [{ el: lead, ratio: 4.5, ink: P.color, base: 0.15, t0: items[0].t0, t1: D }] : []);
+    const res = MG.legible(parts, { have, root: MG.$('.mg-root'),
+      box: { pad: BK_PAD.map(k => k * fs), feather: 0.3 * fs, radius: 0.28 * fs, join: 2 * fs } });
+    if (res.mode === 'dark') {
+      // MG.legible inked only the weak items (their block element): those
+      // take dark ink, the rest keep the light ink over their darker plate
+      dark = true;
+      items.forEach(it => { it.dark = it.el.style.color !== ''; });
+      const dk = items.filter(it => it.dark).map(it => it.el);
+      accDark = (dk.length && MG.accentOnLight(MG.inkRect(dk), P.accent,
+        { ratio: R.thin ? 4.5 : 3, t0: items[0].t0, t1: D })) || MG.DARK_INK;
+      return;
+    }
+    if (res.mode === 'box' && res.boxes.length) {
+      // one box for the block, grown item by item with the list (placeBK)
+      res.boxes.forEach(bk => bk.remove());
+      BK = MG.backing(MG.$('.mg-root'), MG.rectOf([lead, ...items.map(it => it.el)].filter(Boolean)), res.need,
+        { pad: BK_PAD.map(k => k * fs), feather: 0.3 * fs, radius: 0.28 * fs });
+      MG.growBox(BK.box);
+    }
+  }
+  layout();
+  MG.ready = Promise.all([`${R.weight} ${R.style} 100px ${R.css}`, `600 60px ${sans}`]
+    .map(f => document.fonts.load(f).catch(() => 0))).then(() => document.fonts.ready).then(layout);
+
+  // ── choreography: items land and persist; the newest wears the accent ──
+  const E = P.entrance;
+  const exitDur = P.exit === 'fade' ? 0.18 : P.exit === 'blur' ? 0.22 : 0;
+  const sc0 = items[0].t0;
+  const wins = [[Math.max(0, sc0 - 0.07), sc0 + 0.34]];                     // scrim / lead / pocket in
+  items.forEach(it => wins.push([Math.max(0, it.t0 - 0.02), it.t0 + Math.max(BK_T, 0.16) + 0.04]));
+  if (exitDur) wins.push([Math.max(0, D - exitDur - 0.04), D]);
+  MG.active(wins);
+  const placeBK = t => {
+    const shown = items.filter(it => t >= it.t0 - 1e-6);
+    if (!shown.length) return false;
+    const un = rs => rs.reduce((u, it) => u ? [Math.min(u[0], it.rect[0]), Math.min(u[1], it.rect[1]), Math.max(u[2], it.rect[2]), Math.max(u[3], it.rect[3])] : it.rect.slice(), null);
+    const last = shown[shown.length - 1], older = shown.slice(0, -1);
+    let b = un(shown);
+    if (lead) { const lr = MG.rectOf(lead); if (lr) b = [Math.min(b[0], lr[0]), Math.min(b[1], lr[1]), Math.max(b[2], lr[2]), Math.max(b[3], lr[3])]; }
+    if (older.length) {
+      const q = MG.ease.outCubic(MG.range(t, last.t0, BK_T));
+      let pb = un(older);
+      if (lead) { const lr = MG.rectOf(lead); if (lr) pb = [Math.min(pb[0], lr[0]), Math.min(pb[1], lr[1]), Math.max(pb[2], lr[2]), Math.max(pb[3], lr[3])]; }
+      b = b.map((v, i) => MG.lerp(pb[i], v, q));
+    }
+    const px = BK_PAD[0] * fs, py = BK_PAD[1] * fs;
+    Object.assign(BK.style, { left: (b[0] - px).toFixed(1) + 'px', top: (b[1] - py).toFixed(1) + 'px',
+      width: (b[2] - b[0] + 2 * px).toFixed(1) + 'px', height: (b[3] - b[1] + 2 * py).toFixed(1) + 'px' });
+    return true;
+  };
+  MG.frame(t => {
+    items.forEach(it => {
+      let s;
+      if (t < it.t0 - 1e-6) s = { opacity: 0 };
+      else if (E === 'rise') {
+        const p = MG.ease.outCubic(MG.range(t, it.t0, 0.13));
+        s = { opacity: MG.range(t, it.t0, 0.08), y: (1 - p) * Math.max(8, fs * 0.06), blur: (1 - p) * 8 };
+      } else {
+        // pop: on the landing frame, settling from 4% big
+        const q = MG.ease.outCubic(MG.range(t, it.t0, 0.12));
+        s = { opacity: 1, scale: 1.04 - 0.04 * q };
+      }
+      MG.set(it.el, s);
+      // the newest item wears the accent until the next one lands
+      const newest = t >= it.t0 - 1e-6 && t < it.t1 - 1e-6;
+      const acc = it.dark ? accDark : accInk;
+      it.lines.forEach(el => {
+        el.style.color = newest ? acc : (it.dark ? MG.DARK_INK : P.color);
+        el.querySelectorAll('.mg-w').forEach(w => { w.style.color = w.dataset.acc ? acc : ''; });
+      });
+    });
+    let x = { opacity: 1 };
+    if (exitDur && t > D - exitDur - 1e-6) {
+      const q = MG.range(t, D - exitDur, exitDur);
+      x = P.exit === 'fade' ? { opacity: 1 - MG.ease.outQuad(q) }
+        : { opacity: 1 - MG.ease.inQuad(q), blur: q * 14, y: -q * fs * 0.12 };
+    }
+    MG.set(blk, x);
+    if (lead) lead.style.opacity = t >= sc0 - 1e-6 ? 0.94 : 0;
+    if (P.scrim > 0 && !dark) scrim.style.opacity = (t >= sc0 - 0.05 ? MG.ease.outCubic(MG.range(t, sc0 - 0.05, 0.3)) * (x.opacity ?? 1) : 0).toFixed(4);
+    if (BK) BK.style.opacity = placeBK(t) ? (MG.ease.outCubic(MG.range(t, sc0, 0.12)) * (x.opacity ?? 1)).toFixed(4) : 0;
+  });
+})();
+</script>

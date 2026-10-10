@@ -44,7 +44,7 @@ FONTS_DIR = os.path.join(HERE, "fonts")
 
 # Bump when runtime.js, the document wrapper or capture semantics change:
 # it is part of every cache key.
-ENGINE_VERSION = "mg-3"
+ENGINE_VERSION = "mg-4"
 DESIGN_W = 1080           # templates are authored in a 1080-wide CSS space
 ORIGIN = "https://mg.valmera.invalid"
 MAX_DURATION_S = 120.0
@@ -300,6 +300,34 @@ def _font_css():
 _RUNTIME_CACHE = {}
 
 
+def strip_line_comments(src):
+    """JavaScript without its whole-line comments: ``//`` lines and ``/* */``
+    blocks that start a line (code with a trailing comment is kept). The
+    runtime is documented for its readers, not for every page: its comments
+    are a third of it, and every composition (a caption segment with its
+    plate grids above all) carries the runtime under MAX_HTML_BYTES. Only for
+    sources without multi-line template literals (runtime.js)."""
+    out, block = [], False
+    for line in src.split("\n"):
+        t = line.strip()
+        if block:
+            if "*/" in t:
+                block = False
+                rest = t.split("*/", 1)[1].strip()
+                if rest:
+                    out.append(rest)
+            continue
+        if t.startswith("//"):
+            continue
+        if t.startswith("/*") and "*/" not in t[2:]:
+            block = True
+            continue
+        if t.startswith("/*") and t.endswith("*/"):
+            continue
+        out.append(line)
+    return "\n".join(out)
+
+
 def _runtime_js():
     path = os.path.join(MOTION_DIR, "runtime.js")
     st = os.stat(path)
@@ -307,7 +335,7 @@ def _runtime_js():
     if key not in _RUNTIME_CACHE:
         with open(path, "r", encoding="utf-8") as f:
             _RUNTIME_CACHE.clear()
-            _RUNTIME_CACHE[key] = f.read()
+            _RUNTIME_CACHE[key] = strip_line_comments(f.read())
     return _RUNTIME_CACHE[key]
 
 

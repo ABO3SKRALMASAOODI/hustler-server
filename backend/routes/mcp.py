@@ -793,9 +793,10 @@ Two things are different from a normal tool session, and both matter:
       library only when they ask for generic background music; then ducked
       13-20 dB under the voice. Suggesting a song is fine; choosing one
       unasked is not.
-   c. HOOK: a pattern interrupt within 0.1-0.6 s and the hook line as text by
-      1.5 s — hook_title or word_slam (leave mute_captions unset: the
-      captions drop just the spoken words it shows), off the caption band,
+   c. HOOK: a pattern interrupt within 0.1-0.6 s and the hook line as a headline by
+      1.5 s — word_slam tier='hook' (its starred main line at 7%+ of the
+      frame height; it owns its zone: the captions wait until it exits) or
+      hook_title, off the caption band,
       written from the clip's strongest line or statistic (never a generic
       question) and never showing a word a later graphic slams;
       a punch-in only when the opening earns it, and no reflexive opening
@@ -808,7 +809,13 @@ Two things are different from a normal tool session, and both matter:
       on the moment that clearly earns one (the payoff, the biggest number).
       Graphics are silent by default; pass sfx=true only where the landing
       earns a sound. Numbers, quotes and UI messages come from the
-      transcript or a verified source.
+      transcript or a verified source. COVER THE ARGUMENT: every thesis
+      line, spoken list or triad, named product or place and number gets
+      a beat that adds information, no body stretch past ~6-8 s without
+      one: real images first for concrete nouns (research_broll, one
+      moment per item on its onset, 0.3-0.6 s each); a list as type is ONE
+      accumulating list_build of its noun phrases; a counter really counts
+      and shows a spoken range as said ('30–40').
    e. CONNECTIVE TISSUE: motivated transitions at real turns, B-roll
       evidence on named nouns, a visual change every 0.3-0.6 s (word reveals
       and graphics). A steady, well-framed picture is the camera's default
@@ -838,7 +845,9 @@ Two things are different from a normal tool session, and both matter:
       placement checks. search_sfx only for a specific sound the user asks
       for.
    g. ENDING: the payoff locks its number and noun together and holds
-      0.6-1.5 s after the last word; a native CTA (comment_cta,
+      0.8-1.5 s after the last word (the natural tail, else
+      add_freeze_frame audio_mode='hold': the composed frame over room
+      tone; a payoff number ~2 s on screen); a native CTA (comment_cta,
       follow_cta, save_cta) after it only when the user or brief asks for
       one, filled only with the handle, keyword and offer they supplied —
       never an invented handle, verified badge, keyword or promised

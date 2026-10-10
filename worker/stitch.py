@@ -1083,6 +1083,13 @@ def timeline_atoms(edl, tl):
         # Programme placement and mute do not change this clip's picture.
         content = {k: v for k, v in items[iid].items()
                    if k not in ("id", "at_output_s", "mute")}
+        if isinstance(content.get("hold"), dict):
+            # A payoff hold's picture is the footage block before it,
+            # stopped (renderer.hold_video_parts): re-trim that footage and
+            # the hold shows another frame, so the frame it holds is part
+            # of its content.
+            held = tl.out_to_src(a)
+            content["_held"] = None if held is None else round(held, 3)
         atoms.append((a, b, ("ins", json.dumps(_canon(content), sort_keys=True))))
     return sorted(atoms)
 

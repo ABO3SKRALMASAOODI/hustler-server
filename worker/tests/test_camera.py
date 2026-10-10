@@ -839,6 +839,19 @@ def test_punch_in_on_emphasis_holds_to_the_cut_or_the_phrase(monkeypatch):
     assert [bool(z.get("overshoot")) for z in zs] == [False, True, False,
                                                       True]
     assert all(z.get("mode") is None for z in zs)     # punches
+    # every punch re-checks the graphics on screen under it against the
+    # face as it frames it (as add_zoom does); what moved is in the reply
+    import motion_tools
+    seen = []
+
+    def recheck(c, edl, a, b):
+        seen.append((a, b))
+        return ["KEEP-OUT under the camera move: graphic 'g'."] if a < 5 else []
+    monkeypatch.setattr(motion_tools, "keep_out_under_camera", recheck)
+    ctx = Ctx({"keep": [[0.0, 10.0], [12.0, 30.0]]}, words, sentences)
+    res = agent_tools.punch_in_on_emphasis(ctx, count=4, strength=0.15)
+    assert seen == [(z["start"], z["end"]) for z in ctx.edl["effects"]["zooms"]]
+    assert "KEEP-OUT under the camera move: graphic 'g'." in res
 
 
 def test_add_zoom_schema_offers_the_new_modes_and_knobs():

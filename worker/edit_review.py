@@ -15,8 +15,33 @@ showcase shorts, and every one of them is visible in the EDL plus the index:
   colours, dilute the three that mattered; a stack that re-typesets the
   transcript (a spoken list as rows of text, a typewriter of the words just
   heard) adds nothing.
-- PAYOFF. The punchline needs air before the end card (0.6-1.5 s after the
-  last word) and its number locked up with its noun ('140 / CHARACTERS').
+- BEAT COVERAGE (the budget's complement). Dropping the graphics that only
+  re-typeset the captions left dead stretches exactly where the argument
+  lives: Thiel 14.5-25.0 s over "a narrow cone of progress around the world
+  of bits… computers, internet, mobile", Jobs 22.5-37.2 s over "injecting
+  some liberal arts into these computers. Let's get… Let's get… Let's
+  get…". Every thesis line, spoken list or triad, named product or place
+  and number gets a designed beat that ADDS information (a contrast, an
+  accumulating list, an identification, a number, evidence, an image):
+  about one hero beat per 6-8 s in the body, never more (the budget) and
+  never a body stretch past ~8 s — ~6 s when it holds a list, triad, name
+  or number — with none. A zoom or a sound is not a beat.
+- SHOWABLE MOMENTS. A concrete-noun list, a named product or place and a
+  statistic are candidates for real imagery (research_broll / search_stock
+  where listed, 0.3-0.6 s per item on its onset); re-typesetting the heard
+  words is the logged fallback. A spoken list set as four or more slams
+  replacing each other in one slot reads mechanical (one accumulating
+  list_build instead), and a list item shows its noun ('UNDERWATER
+  CITIES', never a lone 'UNDERWATER').
+- HOOK TIER. The hook title is a headline: its main line at least ~7% of
+  the frame height (word_slam tier='hook', which also owns its zone: the
+  captions wait until it exits) or a headline band — never type no bigger
+  than the captions, and never a live caption stacked under it (Thiel's
+  3%-high hook caps with '1960s technology' fading in beneath them).
+- PAYOFF. The punchline needs air before the end card (0.8-1.5 s after the
+  last word: the source's own tail, else a held frame over room tone —
+  add_freeze_frame audio_mode='hold'; a big payoff number ~2 s on screen)
+  and its number locked up with its noun ('140 / CHARACTERS').
 - IDENTIFY. 'Lisa:' in script reads as a dialogue label, not Apple's 1983
   computer; a broadcast lower third over a famous face is a second text
   system where the hook kicker or the headline band already names them.
@@ -33,8 +58,9 @@ Layout bands (the persistent headline, a set_editorial_graphic headline,
 any text over 80% of the runtime) are not graphics and never count against
 the budget, but their words are the hook's words. The checks never flag the
 guidance's own devices: a kicker naming the speaker and year, an image's
-identifying caption, one big word per list item, a stutter cut, a requested
-CTA after the payoff.
+identifying caption, an accumulating list_build of a spoken list (or up to
+three big words for its items), a stutter cut, a requested CTA after the
+payoff.
 
 Every note is ADVISORY ("keep if intentional"): ``review`` returns notes with
 a concrete fix each and never blocks a render, completion or export.
@@ -81,9 +107,35 @@ RESTATE_MIN_CONTENT = 3      # content words a graphic needs to "restate"
 RESTATE_SHARE = 0.85         # share of them heard around its window
 RESTATE_PAD_S = 2.0
 
+# ── beat coverage (the budget's complement) ──────────────────────────────
+DEAD_GAP_S = 8.0             # a body stretch this long with no designed beat
+ARGUMENT_GAP_S = 6.0         # ... or this long when it holds a list, triad,
+                             # name or number (spoken_beats)
+LAYOUT_BEAT_S = 2.0          # a picture card's entrance reads as a beat this long
+GAP_NOTE_MAX = 3
+SLAM_RUN_MAX = 3             # identical slams replacing each other in one slot
+# The accumulating list: the typographic device for a spoken list or triad
+# (items stack on their onsets as noun phrases). Real imagery comes first.
+LIST_TEMPLATES = frozenset(("list_build",))
+IMAGE_TEMPLATES = frozenset(("image_card", "photo_stack"))
+
+# ── hook tier ─────────────────────────────────────────────────────────────
+HOOK_MIN_FS = 0.07           # the hook's main line, share of the frame height
+HOOK_FS_SLACK = 0.004        # the estimate's error
+# word_slam's em per character (caps, tracking included) by role, measured on
+# the bundled fonts; a mixed-case serif/script line runs a little narrower
+SLAM_EM = {"grotesk": 0.64, "condensed": 0.46, "serif": 0.47, "script": 0.64}
+SLAM_LH = {"grotesk": 0.88, "condensed": 0.9, "serif": 0.92, "script": 1.05}
+SLAM_TWO_LINES_H = 0.32      # word_slam's height budget for 2+ / 1 lines
+SLAM_ONE_LINE_H = 0.25
+
 # ── payoff and ending ─────────────────────────────────────────────────────
-PAYOFF_HOLD_MIN_S = 0.6
+# Judges (round 7): Thiel's punchline got 0.5 s and Elon's laugh 0.55 s;
+# never cut to the end card less than 0.8 s after the last payoff word.
+PAYOFF_HOLD_MIN_S = 0.8
 PAYOFF_HOLD_MAX_S = 1.5
+PAYOFF_HOLD_TARGET_S = 1.0    # what a fix aims for
+PAYOFF_NUMBER_HOLD_S = 2.0   # a big payoff number on screen before the end card
 DEAD_TAIL_S = 3.0
 REACTION_MIN_S = 1.0
 PAYOFF_ZONE = 0.2            # the payoff graphic reaches into the last 20%
@@ -104,12 +156,12 @@ INFO_TEMPLATES = frozenset((
     "notification", "chat_bubbles", "search_bar", "post_card",
     "arrow_callout", "circle_highlight", "focus_spotlight", "checklist",
     "lower_third", "chapter_title", "emoji_pop", "comment_cta",
-    "follow_cta", "save_cta"))
+    "follow_cta", "save_cta")) | LIST_TEMPLATES
 # Lines that annotate a graphic rather than state its claim (a kicker
 # naming the speaker and year, an image's identifying caption or chip).
 SIDE_KEYS = frozenset(("kicker", "label", "role", "sub", "left_sub",
                        "right_sub", "name", "handle", "attribution",
-                       "caption", "chip", "eyebrow"))
+                       "caption", "chip", "eyebrow", "lead"))
 # Disfluencies that must not open a short.
 FILLERS = frozenset(("um", "uh", "uhm", "umm", "er", "erm", "ah", "hmm",
                      "mm", "mhm"))
@@ -149,9 +201,13 @@ _EDITORIAL_ID = re.compile(r"^(eg_.+?__\d+)_\d+$")
 # Within a rank, ORDER decides which notes lead the one-line summary.
 RANKS = {
     "hook_generic_question": 1, "hook_spends_hero_word": 1,
-    "transcript_list": 1, "graphic_budget": 1,
-    "hook_opens_on_fragment": 2, "hook_jump_cut": 2, "payoff_hold": 2,
+    "transcript_list": 1, "graphic_budget": 1, "dead_stretch": 1,
+    "hook_opens_on_fragment": 2, "hook_jump_cut": 2, "hook_small": 2,
+    "hook_shares_zone": 2,
+    "payoff_hold": 2, "payoff_number_hold": 2,
     "payoff_number_without_noun": 2, "restates_captions": 2,
+    "showable_moment": 2, "list_as_slams": 2, "list_item_without_noun": 2,
+    "number_not_as_said": 2,
     "label_reads_as_dialogue": 2, "lower_third_redundant": 2,
     "hook_no_face": 2, "repeated_hero_word": 2, "type_roles": 2,
     "accent_colours": 2, "frame_uncommitted": 2,
@@ -772,7 +828,9 @@ def _restate_notes(ms, prog, hook_ids, payoff):
             ("Show the items instead: one semantic visual insert per item "
              "(a real photo or clip via search_stock or research_broll where "
              "listed, placed with image_card, photo_stack or add_overlay, "
-             "about 0.3-0.6 s each), or one big word per item on its onset."),
+             "about 0.3-0.6 s each on its onset); when nothing truly shows "
+             "them, one accumulating list_build of noun phrases (the items "
+             "stack on their onsets and persist, the newest accented)."),
             {"ids": [m["id"] for m in lists]}))
     if restated:
         first = restated[0]
@@ -819,6 +877,515 @@ def _budget_notes(ms, duration, drop_first, hook_ids=()):
          "evidence or an image and let the captions carry the rest." + hint),
         {"graphics": len(runs), "allowed": allowed,
          "coverage": round(share, 3)})]
+
+
+# ── BEAT COVERAGE (the budget's complement) ───────────────────────────────
+
+def _sb():
+    import spoken_beats
+    return spoken_beats
+
+
+def _overlay_spans(edl):
+    out = []
+    for ov in edl.get("overlays") or []:
+        if not isinstance(ov, dict):
+            continue
+        a = _f(ov.get("start"), None)
+        d = _f(ov.get("duration_s"), None)
+        if a is None or d is None or d <= 0:
+            continue
+        out.append({"start": a, "end": a + d, "kind": "image",
+                    "id": str(ov.get("id") or "overlay")})
+    return out
+
+
+def _insert_spans(prog):
+    """Spliced inserts as real imagery — never a payoff hold
+    (timeline.is_hold_insert): that is the last composed frame held over
+    room tone, the ending's air, not an image and not a beat."""
+    out = []
+    try:
+        import timeline as _tlm
+        items = sorted(getattr(prog.tl, "items", None) or [], key=_tlm._ins_sort_key)
+        for k, (a, d) in enumerate(prog.tl.insert_positions()):
+            if k < len(items) and _tlm.is_hold_insert(items[k]):
+                continue
+            if d > 0:
+                out.append({"start": float(a), "end": float(a) + float(d),
+                            "kind": "image", "id": f"insert{k}"})
+    except Exception:  # noqa: BLE001 — a timeline without inserts has none
+        pass
+    return out
+
+
+def _imagery(edl, ms, prog):
+    """The program's real-imagery spans: cover or picture-in-picture
+    overlays, spliced inserts and the image card templates."""
+    out = _overlay_spans(edl) + _insert_spans(prog)
+    out += [{"start": m["start"], "end": m["end"], "kind": "image", "id": m["id"]}
+            for m in ms if m["template"] in IMAGE_TEMPLATES]
+    return out
+
+
+def _beat_spans(edl, ms, prog, duration):
+    """Every designed beat of the body as [{"start", "end"}]: the designed
+    moments (bands are layout, never beats), real imagery, and a picture
+    card's entrance (a layout change; a card that holds the whole program is
+    the frame, not a beat). Zooms are not beats: a camera move adds no
+    information, and nothing here may be satisfied by one."""
+    spans = [{"start": m["start"], "end": m["end"]} for m in ms]
+    spans += [{"start": s["start"], "end": s["end"]} for s in _imagery(edl, ms, prog)]
+    # a renderer-native vector graphic (an arrow, a ring, an underline on
+    # the evidence) is a designed beat too
+    for v in edl.get("vectors") or []:
+        if isinstance(v, dict):
+            a, b = _f(v.get("start"), None), _f(v.get("end"), None)
+            if a is not None and b is not None and b > a:
+                spans.append({"start": a, "end": b})
+    fx = edl.get("effects") or {}
+    for c in fx.get("picture_cards") or [] if isinstance(fx, dict) else []:
+        if not isinstance(c, dict):
+            continue
+        a, b = _f(c.get("start"), None), _f(c.get("end"), duration)
+        if a is None or b <= a:
+            continue
+        if duration > 0 and b - a >= 0.8 * duration:
+            continue
+        spans.append({"start": a, "end": min(b, a + LAYOUT_BEAT_S)})
+    return sorted(spans, key=lambda s: (s["start"], s["end"]))
+
+
+def _gaps(spans, lo, hi):
+    """Empty stretches of [lo, hi] that no span covers."""
+    out, cur = [], lo
+    for s in spans:
+        if s["end"] <= cur:
+            continue
+        if s["start"] > cur:
+            out.append((cur, min(s["start"], hi)))
+        cur = max(cur, s["end"])
+        if cur >= hi:
+            break
+    if cur < hi:
+        out.append((cur, hi))
+    return [(a, b) for a, b in out if b - a > 1e-6]
+
+
+STRONG = ("list", "triad", "number", "range", "name")
+
+
+def _describe(cands, words):
+    """What a stretch carries, quoted: its lists, triads, numbers, names,
+    then a claim (or its main line)."""
+    sb = _sb()
+    bits = []
+    for c in cands:
+        if c["kind"] == "list":
+            bits.append(f"the spoken list '{_quote(c['text'], 60)}'")
+        elif c["kind"] == "triad":
+            bits.append(f"the triad '{_quote(c['text'], 72)}'")
+        elif c["kind"] in ("number", "range"):
+            bits.append(f"the number '{c['text']}'")
+        elif c["kind"] == "name":
+            bits.append(f"the name '{c['text']}'")
+    claim = next((c for c in cands if c["kind"] == "claim"), None)
+    line = claim or sb.main_line(words, skip=[(c["t0"], c["t1"]) for c in cands
+                                              if c["kind"] == "triad"])
+    if line and not any(c["kind"] in ("list", "triad") and c["t0"] >= line["t0"] - 1e-3
+                        and c["t1"] <= line["t1"] + 1e-3 and len(cands) > 1 for c in cands):
+        bits.insert(0, f"the line '{_quote(line['text'], 84)}'")
+    return bits
+
+
+def _beat_ideas(cands):
+    """A concrete beat per kind of candidate the stretch holds — every one
+    adds information; none is a camera move or a sound."""
+    out = []
+    kinds = {c["kind"] for c in cands}
+    for c in cands:
+        if c["kind"] == "list" and "list" not in [o[0] for o in out]:
+            seen = []
+            for i in c.get("items", []):
+                if i["text"].upper() not in seen:
+                    seen.append(i["text"].upper())
+            items = " / ".join(seen[:5])
+            out.append(("list", f"an accumulating list_build of its items as noun phrases on "
+                                f"their onsets ('{_quote(items, 60)}'), or one real image per "
+                                "item (research_broll or search_stock where listed), 0.3-0.6 s "
+                                "each on its onset"))
+        elif c["kind"] == "triad" and "triad" not in [o[0] for o in out]:
+            out.append(("triad", f"an accumulating three-row list_build on '{c['opener']}…' "
+                                 "(each row on its onset, the newest accented)"))
+        elif c["kind"] in ("number", "range") and "number" not in [o[0] for o in out]:
+            span = (f"value '{int(c['values'][0]) if float(c['values'][0]).is_integer() else c['values'][0]}"
+                    f"–{int(c['values'][1]) if float(c['values'][1]).is_integer() else c['values'][1]}' "
+                    "shows the spoken range") if c["kind"] == "range" else "landing ON the word"
+            out.append(("number", f"a counter on '{c['text']}' ({span})"))
+        elif c["kind"] == "name" and "name" not in [o[0] for o in out]:
+            out.append(("name", f"identify '{c['text']}' (what it is, and a real photo in an "
+                                "image_card where one exists)"))
+    if "claim" in kinds or not (kinds & set(STRONG)):
+        out.append(("claim", "a contrast that gives the line its structure (A vs B, rhyming "
+                             "with an earlier device), or the evidence it rests on"))
+    return [text for _k, text in out]
+
+
+def _dead_stretch_notes(edl, ms, prog, duration, hook_ms):
+    if duration <= 0 or not prog.kept:
+        return []
+    hook_end = max([m["end"] for m in hook_ms] + [HOOK_WINDOW_S])
+    spans = _beat_spans(edl, ms, prog, duration)
+    cands = _sb().candidates(prog.kept)
+    found = []
+    for a, b in _gaps(spans, hook_end, duration):
+        length = b - a
+        if length <= ARGUMENT_GAP_S + 1e-6:
+            continue
+        words = prog.words_between(a, b)
+        if not words:
+            continue
+        inside = [c for c in cands if a - 0.05 <= c["t0"] < b]
+        strong = [c for c in inside if c["kind"] in STRONG]
+        if length <= DEAD_GAP_S + 1e-6 and not strong:
+            continue
+        found.append((a, b, inside, strong, words))
+    if not found:
+        return []
+    parts, ideas = [], []
+    for a, b, inside, _strong, words in found[:GAP_NOTE_MAX]:
+        what = _describe(inside, words)
+        parts.append(f"{b - a:.1f} s ({a:.2f}-{b:.2f}s)"
+                     + (" over " + " and ".join(what[:3]) if what else ""))
+        for idea in _beat_ideas(inside):
+            if idea not in ideas:
+                ideas.append(idea)
+    weighty = any(strong or any(c["kind"] == "claim" for c in inside)
+                  for _a, _b, inside, strong, _w in found)
+    a0 = found[0][0]
+    return [_note(
+        "dead_stretch", a0,
+        ("The body goes " + "; ".join(parts) + " with no designed beat — the "
+         "middle sags exactly where the argument lives."
+         + (f" (+{len(found) - GAP_NOTE_MAX} more)" if len(found) > GAP_NOTE_MAX else "")),
+        ("Give it a designed beat that adds information: " + "; ".join(ideas[:4])
+         + ". About one hero beat every 6-8 s in the body, never more (the "
+         "budget) — a zoom or a sound is not a beat, and captions alone carry a "
+         "stretch only by choice."),
+        {"gaps": [[round(a, 2), round(b, 2)] for a, b, *_r in found]},
+        rank=1 if weighty else 2)]
+
+
+# ── SHOWABLE MOMENTS ──────────────────────────────────────────────────────
+
+def _overlaps(a0, a1, spans, pad=0.3):
+    return [s for s in spans if s["start"] < a1 + pad and s["end"] > a0 - pad]
+
+
+def _typeset_by(c, ms):
+    """The type moments that set a candidate's heard words, or []."""
+    if c["kind"] in ("list", "triad"):
+        toks = set()
+        for it in c.get("items") or []:
+            toks.update(_content(_tokens(it["text"])))
+    else:
+        toks = set(_content(_tokens(c["text"])))
+    out = []
+    for m in _overlaps(c["t0"], c["t1"], ms):
+        if m["template"] in IMAGE_TEMPLATES:
+            continue
+        if toks & set(shown(m["lines"])[0]):
+            out.append(m)
+    return out
+
+
+def _showable_notes(edl, ms, prog, dead_gaps=()):
+    if not prog.kept:
+        return []
+    imagery = _imagery(edl, ms, prog)
+    typeset, bare = [], []
+    cands = _sb().candidates(prog.kept)
+    groups = [(c["t0"], c["t1"]) for c in cands if c["kind"] in ("list", "triad")]
+    for c in cands:
+        if c["kind"] not in ("list", "triad", "name", "number", "range"):
+            continue
+        if c["kind"] == "name" and any(a - 1e-3 <= c["t0"] <= b + 1e-3 for a, b in groups):
+            continue              # a name inside a list is one of its items
+        if _overlaps(c["t0"], c["t1"], imagery):
+            continue
+        by = _typeset_by(c, ms)
+        if c["kind"] in ("number", "range"):
+            # a number set as a graphic is information already; one with
+            # nothing on screen is the dead-stretch note's
+            continue
+        if by:
+            typeset.append((c, by))
+        elif not any(a - 0.05 <= c["t0"] < b for a, b in dead_gaps):
+            bare.append(c)
+    if not (typeset or bare):
+        return []
+    what = []
+    for c, by in typeset[:3]:
+        label = "spoken list" if c["kind"] == "list" else (
+            "triad" if c["kind"] == "triad" else "name")
+        what.append(f"the {label} '{_quote(c['text'], 56)}' ({c['t0']:.1f}s) is set as the "
+                    f"heard words ('{by[0]['id']}')")
+    for c in bare[:max(0, 3 - len(what))]:
+        label = "spoken list" if c["kind"] == "list" else (
+            "triad" if c["kind"] == "triad" else "name")
+        what.append(f"the {label} '{_quote(c['text'], 56)}' ({c['t0']:.1f}s) is left to the captions")
+    return [_note(
+        "showable_moment", (typeset[0][0] if typeset else bare[0])["t0"],
+        "Showable moments carried only by type: " + "; ".join(what) + ".",
+        ("Show them: one real photo or clip per list item, 0.3-0.6 s each on its "
+         "onset (research_broll with one moment per item at its program time, or "
+         "search_stock where listed; add_stock_media, then a cover overlay or an "
+         "image_card / photo_stack run), a named product or place as a 1.5-2 s "
+         "image with an identifying label, a statistic as the evidence it comes "
+         "from. When retrieval finds nothing that truly shows it, keep the type — "
+         "one accumulating list_build of noun phrases — and say so in the reply."),
+        {"typeset": [c["text"] for c, _b in typeset], "bare": [c["text"] for c in bare]},
+        # a list re-typeset as slams or rows is the judged miss; one set as
+        # the accumulating list (the logged fallback), a name its graphic
+        # already identifies, or one left to the captions, is a suggestion
+        rank=2 if any(c["kind"] in ("list", "triad") and
+                      any(m["template"] not in LIST_TEMPLATES for m in by)
+                      for c, by in typeset) else 3)]
+
+
+def _slam_list_notes(ms, prog, hook_ids):
+    """A spoken list set as more than SLAM_RUN_MAX identical slams replacing
+    each other in one slot, and list items shown without their noun."""
+    notes = []
+    runs = [r for r in _series(ms, solo=hook_ids)
+            if r["template"] == "word_slam" and len(r["ids"]) > SLAM_RUN_MAX]
+    if runs:
+        r = runs[0]
+        notes.append(_note(
+            "list_as_slams", r["start"],
+            (f"{len(r['ids'])} word slams replace each other in one slot "
+             f"({r['start']:.1f}-{r['end']:.1f}s: {', '.join(r['ids'][:6])}) — the "
+             "pile-up of the list is lost and the run reads mechanical."),
+            ("Build one accumulating list instead (list_build: the items stack on "
+             "their onsets as noun phrases, the newest accented, and the block "
+             "clears on the next beat) — or show the items as images; keep a run "
+             f"of identical slams to {SLAM_RUN_MAX}."),
+            {"ids": r["ids"]}))
+    # list items: the slams of a run of 3+ and every list_build row
+    items = []
+    by_id = {m["id"]: m for m in ms}
+    for r in _series(ms, solo=hook_ids):
+        if r["template"] == "word_slam" and len(r["ids"]) >= 3:
+            for i in r["ids"]:
+                m = by_id.get(i)
+                if m:
+                    items += [(m, text) for key, text in m["lines"] if key not in SIDE_KEYS]
+    for m in ms:
+        if m["template"] in LIST_TEMPLATES:
+            items += [(m, text) for key, text in m["lines"] if key not in SIDE_KEYS]
+    lone = []
+    for m, text in items:
+        toks = _content(_tokens(text))
+        if not toks:
+            continue
+        last = toks[-1]
+        spoken = prog.words_between(m["start"] - 1.0, m["end"] + 0.5)
+        for k, w in enumerate(spoken):
+            if (_tokens(str(w["w"])) or [""])[-1] != last:
+                continue
+            nxt = spoken[k + 1] if k + 1 < len(spoken) else None
+            raw = str(w["w"]).rstrip()
+            if nxt is None or raw.endswith((",", ".", ";", ":", "?", "!", "…")):
+                break
+            ntoks = _tokens(str(nxt["w"]))
+            if ntoks and _content(ntoks) and _f(nxt["t0"]) - _f(w["t1"]) < 0.4 \
+                    and not any(c.isdigit() for c in ntoks[0]):
+                lone.append((m, _plain(text), f"{_plain(text)} {str(nxt['w']).strip(' ,.;:')}"))
+            break
+    if lone:
+        listed = "; ".join(f"'{a.upper()}' ({m['id']}, said '{b}')" for m, a, b in lone[:3])
+        notes.append(_note(
+            "list_item_without_noun", lone[0][0]["start"],
+            f"List items shown without their noun — {listed}: a lone modifier reads as an adjective.",
+            ("Set noun phrases: " + ", ".join(f"'{b.upper()}'" for _m, _a, b in lone[:3])
+             + " — the item the speaker names, not its first word."),
+            {"items": [b for _m, _a, b in lone]}))
+    return notes
+
+
+def _figures(m):
+    """The numbers a moment's main lines show ({float})."""
+    out = set()
+    for key, text in m["lines"]:
+        if key in SIDE_KEYS:
+            continue
+        for tok in re.findall(r"\d[\d,]*(?:\.\d+)?", str(text)):
+            try:
+                out.add(float(tok.replace(",", "")))
+            except ValueError:
+                pass
+    return out
+
+
+def _number_as_said_notes(ms, prog):
+    """A spoken range ('30, 40 fonts') shown as one of its ends: the caption
+    shows 30 just before the graphic says 40 (judged as a contradiction)."""
+    if not prog.kept:
+        return []
+    for c in _sb().numbers(prog.kept):
+        if c["kind"] != "range":
+            continue
+        lo, hi = c["values"]
+        for m in _overlaps(c["t0"], c["t1"], ms, pad=0.6):
+            figs = _figures(m)
+            if not figs or (any(_close(f, lo) for f in figs) and any(_close(f, hi) for f in figs)):
+                continue
+            if not any(_close(f, lo) or _close(f, hi) for f in figs):
+                continue
+            shows = next(f for f in figs if _close(f, lo) or _close(f, hi))
+            rng = f"{_num(lo)}–{_num(hi)}"
+            return [_note(
+                "number_not_as_said", m["start"],
+                (f"'{m['id']}' shows {_num(shows)} where the speaker says '{c['text']}' — "
+                 f"the caption reads one figure while the graphic says the other."),
+                (f"Show the number as said: a counter with value '{rng}' (each end "
+                 "lands on its own spoken onset), or both figures in the lockup."),
+                {"id": m["id"], "said": c["text"], "range": [lo, hi]})]
+    return []
+
+
+def _close(a, b):
+    return abs(float(a) - float(b)) <= 1e-6 * max(1.0, abs(float(b)))
+
+
+def _num(v):
+    v = float(v)
+    return str(int(v)) if v.is_integer() else f"{v:g}"
+
+
+# ── HOOK TIER ─────────────────────────────────────────────────────────────
+
+def _slam_main_fs(item, aspect=9 / 16.0):
+    """Estimated font size of a display word_slam's lines as a share of the
+    frame height (they share one size), mirroring the template's fit: the
+    widest line fills ``width``, inside a height budget per line count; a
+    single line of several words is stacked when that sets it clearly
+    bigger. None for the other tiers (hook, payoff and hero are sized by
+    their tier) and for an empty text."""
+    p = item.get("params") or {}
+    if str(p.get("tier") or "display") != "display":
+        return None
+    role = str(p.get("role") or "grotesk")
+    em = SLAM_EM.get(role, SLAM_EM["grotesk"])
+    lh = SLAM_LH.get(role, SLAM_LH["grotesk"])
+    width = _f(p.get("width"), 0.85) or 0.85
+    lines = [_plain(ln) for ln in re.split(r"\s*(?:/|\n)\s*", str(p.get("text") or ""))
+             if _plain(ln)]
+    if not lines:
+        return None
+
+    def fit(group):
+        widest = max(len(x) for x in group) or 1
+        budget = (SLAM_ONE_LINE_H if len(group) == 1 else SLAM_TWO_LINES_H) / (len(group) * lh)
+        return min(width * aspect / (widest * em), budget)
+    if len(lines) == 1 and len(lines[0].split()) >= 2:
+        words = lines[0].split()
+        cands = [[lines[0]]] + [[" ".join(words[:a]), " ".join(words[a:])]
+                                for a in range(1, len(words))]
+        best = max(cands, key=lambda g: fit(g) / (1.3 ** (len(g) - 1)))
+        return fit(best)
+    return fit(lines)
+
+
+def _aspect(edl, index=None):
+    """The program frame's width / height."""
+    frame = edl.get("frame") if isinstance(edl.get("frame"), dict) else {}
+    ratio = str((frame or {}).get("ratio") or "source")
+    m = re.fullmatch(r"(\d+(?:\.\d+)?):(\d+(?:\.\d+)?)", ratio)
+    if m and float(m.group(2)) > 0:
+        return float(m.group(1)) / float(m.group(2))
+    canvas = edl.get("canvas") if isinstance(edl.get("canvas"), dict) else {}
+    cw, ch = _f((canvas or {}).get("width")), _f((canvas or {}).get("height"))
+    if cw > 0 and ch > 0:
+        return cw / ch
+    video = (index or {}).get("video") or {}
+    w, h = _f(video.get("width")), _f(video.get("height"))
+    return w / h if w > 0 and h > 0 else 9 / 16.0
+
+
+def _captions_under(edl, m, prog):
+    """The heard words captioned while hook moment ``m`` is up (words it
+    does not show, outside any caption mute), quoted, or ''."""
+    caps = edl.get("captions")
+    if not (isinstance(caps, dict) and caps.get("mode") == "from_transcript") or not prog.kept:
+        return ""
+    mutes = []
+    for raw in edl.get("caption_mutes") or []:
+        try:
+            mutes.append((float(raw[0]), float(raw[1])))
+        except (IndexError, TypeError, ValueError):
+            continue
+    printed = set(_tokens(" ".join(t for _k, t in m["lines"])))
+    heard = []
+    for w in prog.words_between(m["start"], m["end"]):
+        mid = (_f(w["t0"]) + _f(w["t1"])) / 2.0
+        if not m["start"] <= mid <= m["end"] or any(a <= mid <= b for a, b in mutes):
+            continue
+        toks = _content(_tokens(str(w["w"])))
+        if toks and not set(toks) <= printed:
+            heard.append(str(w["w"]).strip())
+    return " ".join(heard)
+
+
+def _hook_size_notes(edl, hook_ms, bands, aspect=9 / 16.0, prog=None):
+    """The hook tier: a hook title is a headline (main line 7%+ of the frame
+    height) that owns its zone — no live caption stacked under it. One note
+    for the first display slam that is too small or shares its zone."""
+    if any(b["start"] <= HOOK_GRAPHIC_START_S + 1e-6 for b in bands):
+        return []                 # a headline band is the hook's zone
+    for m in hook_ms:
+        if m["kind"] != "motion" or m["template"] != "word_slam":
+            continue
+        fs = _slam_main_fs(m["item"], aspect)
+        if fs is None:
+            # the hook tier (and payoff/hero) is sized by its tier; a hook
+            # tier opted out of its zone (mute_captions=false) can still have
+            # the live caption stacked under it
+            import captions as caplib
+            item = m["item"]
+            if str((item.get("params") or {}).get("tier") or "") != "hook" \
+                    or caplib.hook_owns_zone(item) or prog is None:
+                continue
+            fs, small, under = None, False, _captions_under(edl, m, prog)
+            if not under:
+                continue
+        else:
+            small = fs < HOOK_MIN_FS - HOOK_FS_SLACK
+            under = _captions_under(edl, m, prog) if prog is not None else ""
+        if not (small or under):
+            continue
+        said = (f" while the captions run '{_quote(under, 36)}' under it — two sentences "
+                "at once") if under else ""
+        if small:
+            return [_note(
+                "hook_small", m["start"],
+                (f"The hook '{_quote(_main_text(m), 40)}' sets its main line at about "
+                 f"{fs:.1%} of the frame height — no bigger than the captions, so the "
+                 "first second has two reading tasks of one size" + said + "."),
+                ("Make it a headline: word_slam tier='hook' sets the main line (the "
+                 f"*starred* words) at {HOOK_MIN_FS:.0%}+ of the frame height with the "
+                 "lead-in small above it and owns its zone — the captions wait until it "
+                 "exits, never stacked under it; or set the claim in a headline band. "
+                 "Keep it to 2-4 words on the main line."),
+                {"id": m["id"], "main_fs": round(fs, 3), "captions_under": under})]
+        return [_note(
+            "hook_shares_zone", m["start"],
+            (f"The hook '{_quote(_main_text(m), 40)}' is up{said}: the first seconds "
+             "have two reading tasks."),
+            ("Let the hook own its zone: word_slam tier='hook' (the captions wait until "
+             "it exits), or a headline band; never a live caption stacked under it."),
+            {"id": m["id"], "captions_under": under})]
+    return []
 
 
 def _family(name):
@@ -998,6 +1565,22 @@ def _reaction_shot(edl, index, prog):
                for span in (frame or {}).get("focus_track") or [])
 
 
+def _end_hold_s(edl, prog):
+    """Seconds of payoff hold (schemas.InsertItem.hold) spliced at the end
+    of the footage: the last kept frame held over room tone."""
+    try:
+        end = float(sum(prog.tl.seg_out_len))
+    except Exception:  # noqa: BLE001
+        return 0.0
+    out = 0.0
+    for item in edl.get("inserts") or []:
+        if isinstance(item, dict) and item.get("kind") == "image" and \
+                isinstance(item.get("hold"), dict) and \
+                abs(_f(item.get("at_output_s"), -1.0) - end) < 0.02:
+            out += _f(item.get("duration_s"))
+    return out
+
+
 def _payoff_notes(prog, payoff, ms=(), index=None, edl=None):
     notes = []
     dur = prog.duration
@@ -1011,32 +1594,55 @@ def _payoff_notes(prog, payoff, ms=(), index=None, edl=None):
                      if src_end is not None and _f(_get(w, "t0")) >= src_end - 1e-3]
             nxt = min(after, key=lambda w: _f(_get(w, "t0"))) if after else None
             src_dur = _f(((index or {}).get("video") or {}).get("duration"))
-            if nxt is None and keep_end is not None and src_dur > 0 and \
-                    src_dur - keep_end < PAYOFF_HOLD_MIN_S - hold - 1e-6:
-                fix = (f"The source itself ends {max(0.0, src_dur - (src_end or keep_end)):.2f}s "
-                       f"after '{last['w']}', so there is no tail to restore: "
-                       "let the payoff graphic carry the beat into the end "
-                       "card, or end on an earlier line that leaves a pause.")
-            elif nxt is None or keep_end is None:
-                fix = (f"Hold {PAYOFF_HOLD_MIN_S:g}-{PAYOFF_HOLD_MAX_S:g} s "
-                       "after the last word: extend the last keep into the "
-                       "speaker's natural tail or reaction (restore_range).")
+            want = PAYOFF_HOLD_TARGET_S - hold       # seconds of air to add
+            # the source's own tail first (a reaction, the speaker's
+            # natural pause), then a held frame for whatever it lacks
+            if keep_end is None:
+                room = 0.0
+            elif nxt is not None:
+                room = max(0.0, _f(_get(nxt, "t0")) - 0.05 - keep_end)
+            elif src_dur > 0:
+                room = max(0.0, src_dur - 0.05 - keep_end)
             else:
-                room = _f(_get(nxt, "t0")) - 0.05 - keep_end
-                need = PAYOFF_HOLD_MIN_S - hold
-                if room >= need - 1e-6:
-                    fix = (f"Hold {PAYOFF_HOLD_MIN_S:g}-{PAYOFF_HOLD_MAX_S:g} s "
-                           "after the last word: extend the last keep to about "
-                           f"{keep_end + min(room, PAYOFF_HOLD_MAX_S - hold):.2f}s "
-                           f"source (the pause before '{_get(nxt, 'w')}' "
-                           "allows it; restore_range).")
-                else:
-                    fix = (f"The speaker runs on into '{_get(nxt, 'w')}' "
-                           f"{_f(_get(nxt, 't0')) - src_end:.2f}s after "
-                           f"'{last['w']}', so the source has no longer tail: "
-                           "keep the cut and let the payoff graphic hold to "
-                           "the end card, or end on an earlier line that "
-                           "leaves a pause.")
+                room = want
+            ext = round(min(room, want), 2)
+            if ext < 0.1:
+                ext = 0.0                       # too little to restore
+            rest = round(max(0.0, want - ext), 2)
+            hold_call = (f"add_freeze_frame(at_output_s={dur + ext:.2f}, "
+                         f"duration_s={max(0.3, rest):.1f}, "
+                         "audio_mode='hold')")
+            if ext and rest < 0.1:
+                fix = (f"Hold {PAYOFF_HOLD_MIN_S:g}-{PAYOFF_HOLD_MAX_S:g} s "
+                       "after the last word: extend the last keep to about "
+                       f"{keep_end + ext:.2f}s source ("
+                       + (f"the pause before '{_get(nxt, 'w')}' allows it"
+                          if nxt is not None else "the speaker's natural "
+                          "tail or reaction")
+                       + "; restore_range).")
+            elif ext:
+                fix = (f"Hold {PAYOFF_HOLD_MIN_S:g}-{PAYOFF_HOLD_MAX_S:g} s "
+                       f"after the last word: extend the last keep to about "
+                       f"{keep_end + ext:.2f}s source (restore_range; "
+                       + (f"'{_get(nxt, 'w')}' follows" if nxt is not None
+                          else "the source ends")
+                       + f"), then hold the frame for the rest: {hold_call} "
+                       "— the composed frame over room tone, any payoff "
+                       "graphic held over it.")
+            elif nxt is not None:
+                fix = (f"The speaker runs on into '{_get(nxt, 'w')}' "
+                       f"{_f(_get(nxt, 't0')) - (src_end or keep_end):.2f}s "
+                       f"after '{last['w']}', so the source has no longer "
+                       f"tail: hold the frame instead — {hold_call} (the "
+                       "composed frame over the source's room tone, the "
+                       "last words fading into it; the payoff graphic holds "
+                       "over it), or end on an earlier line that leaves a "
+                       "pause.")
+            else:
+                fix = (f"The source itself ends {max(0.0, src_dur - (src_end or keep_end or 0.0)):.2f}s "
+                       f"after '{last['w']}', so there is no tail to "
+                       f"restore: hold the frame — {hold_call} — or end on "
+                       "an earlier line that leaves a pause.")
             notes.append(_note(
                 "payoff_hold", _f(last["t1"]),
                 (f"The payoff gets {max(0.0, hold):.2f}s after '{last['w']}' "
@@ -1057,16 +1663,22 @@ def _payoff_notes(prog, payoff, ms=(), index=None, edl=None):
             a, b = prog.keep[-1]
             inside = [w for w in prog.words
                       if a < (_f(_get(w, "t0")) + _f(_get(w, "t1"))) / 2.0 < b]
-            length = b - a
+            # a payoff hold after it (add_freeze_frame audio_mode='hold') is
+            # the reaction held on its own last frame: it counts
+            length = (b - a) + _end_hold_s(edl or {}, prog)
             if not inside and length < REACTION_MIN_S - 1e-6:
                 notes.append(_note(
                     "reaction_button_short", dur - length,
                     (f"The closing reaction lasts {length:.2f}s — too short to "
                      "read as a reaction before the end card."),
-                    ("Give the reaction 1.0-1.5 s (extend the last keep), "
-                     "framed like that speaker's earlier shot, or end on the "
-                     "line instead."),
+                    ("Give the reaction 1.0-1.5 s (extend the last keep, "
+                     "or hold its last frame over room tone where the "
+                     "source runs into dialogue: add_freeze_frame "
+                     "audio_mode='hold'), framed like that speaker's earlier "
+                     "shot, or end on the line instead."),
                     {"seconds": round(length, 2)}))
+    if payoff is not None and dur > 0:
+        notes += _payoff_number_hold(payoff, dur)
     if payoff is not None and payoff["template"] in (
             "counter", "word_slam", "stat_card", "text:big_number"):
         seq = shown(payoff["lines"])[0]
@@ -1082,6 +1694,43 @@ def _payoff_notes(prog, payoff, ms=(), index=None, edl=None):
                  "the payoff with it."),
                 {"id": payoff["id"]}))
     return notes
+
+
+def _landing(m):
+    """Program second a payoff graphic lands (a counter on its 'land', a
+    slam entrance 0.2 s in, anything else on its start)."""
+    item = m.get("item") or {}
+    p = item.get("params") or {}
+    if m["template"] == "counter":
+        try:
+            import number_reveal
+            return m["start"] + number_reveal.counter_landing(p, m["end"] - m["start"])
+        except Exception:  # noqa: BLE001
+            return m["start"]
+    if m["template"] == "word_slam" and p.get("entrance") == "slam":
+        return m["start"] + 0.2
+    return m["start"]
+
+
+def _payoff_number_hold(payoff, dur):
+    """A big payoff number needs about PAYOFF_NUMBER_HOLD_S on screen before
+    the end card (judged: Thiel's '140 / CHARACTERS' got 1.41 s)."""
+    if not any(any(c.isdigit() for c in t) for t in shown(payoff["lines"])[1]):
+        return []
+    landed = _landing(payoff)
+    held = dur - landed
+    if held >= PAYOFF_NUMBER_HOLD_S - 1e-6:
+        return []
+    return [_note(
+        "payoff_number_hold", landed,
+        (f"The payoff number '{_quote(_main_text(payoff), 28)}' is on screen "
+         f"{max(0.0, held):.2f}s before the end card — a big number needs about "
+         f"{PAYOFF_NUMBER_HOLD_S:g} s to land."),
+        (f"Hold it about {PAYOFF_NUMBER_HOLD_S:g} s: keep it landing on its word "
+         "and extend the last keep into the speaker's tail (restore_range), or "
+         "hold the closing frame under it before the end card (add_freeze_frame "
+         "audio_mode='hold')."),
+        {"id": payoff["id"], "held_s": round(held, 2)})]
 
 
 # ── TRIM RHYTHM ───────────────────────────────────────────────────────────
@@ -1261,6 +1910,12 @@ ASKED = {
     "graphic_budget": ("more graphics", "lots of graphics", "every word",
                        "dense", "busy"),
     "transcript_list": ("list",),
+    "dead_stretch": ("minimal", "fewer graphics", "less graphics", "no graphics",
+                     "only captions", "captions only", "just captions"),
+    "showable_moment": ("no b-roll", "no broll", "no stock", "no images",
+                        "no pictures", "text only", "type only"),
+    "list_as_slams": ("word slams", "one word at a time"),
+    "hook_small": ("small hook", "subtle hook", "small title", "subtle title"),
     "type_roles": ("fonts", "typefaces", "font mix", "mixed type"),
     "accent_colours": ("accent colours", "accent colors", "two colours",
                        "two colors", "colourful", "colorful"),
@@ -1317,6 +1972,24 @@ def review(edl, index=None, force=False, request_text=None):
     except Exception as exc:  # noqa: BLE001
         print(f"[edit_review] budget check skipped: {type(exc).__name__}",
               flush=True)
+    # beat coverage and showable moments hold a DESIGNED short to its own
+    # standard; a plain clip the user only asked to caption or trim is theirs
+    designed = bool(ms or bands_)
+    dead_gaps = []
+    if designed:
+        try:
+            found = _dead_stretch_notes(edl, ms, prog, duration, hook_ms)
+            notes += found
+            dead_gaps = [tuple(g) for n in found for g in n["evidence"]["gaps"]]
+        except Exception as exc:  # noqa: BLE001
+            print(f"[edit_review] beat coverage skipped: {type(exc).__name__}: {exc}",
+                  flush=True)
+    checks = checks + (
+        lambda: _showable_notes(edl, ms, prog, dead_gaps) if designed else [],
+        lambda: _slam_list_notes(ms, prog, hook_ids),
+        lambda: _number_as_said_notes(ms, prog),
+        lambda: _hook_size_notes(edl, hook_ms, bands_, _aspect(edl, index), prog),
+    )
     for check in checks:
         try:
             notes += check()

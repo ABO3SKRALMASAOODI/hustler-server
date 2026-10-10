@@ -82,6 +82,11 @@ MOUTH = (0.22, 0.58, 0.22, 0.08)          # insets: left, top, right, bottom
 # the face across its width) or of the mouth band before it counts as on the
 # face: type tucked under the chin is the chest band, not a collision.
 FACE_HIT = 0.10             # share of the face zone a graphic may not cover
+# ...nor may a graphic lie mostly INSIDE a face zone: on a face that fills the
+# frame (a tight close-up) a small graphic covers under FACE_HIT of the huge
+# zone while sitting on the cheek (round 7 integration: once a counter could
+# shrink to size 0.4, the solver offered spots inside a frame-filling face)
+BOX_ON_FACE = 0.5           # share of the graphic's own box
 MOUTH_HIT = 0.10            # share of the mouth band
 HIT_SHARE = 0.15            # share of the faced moments that must collide
 CLEARANCE = 0.025           # a moved graphic keeps this gap from the zone
@@ -115,6 +120,12 @@ CAPTION_NEAR_PENALTY = 0.05
 # go mute. Worth a size step or a short move — a counter under the chin that
 # leaves the captions a band beats a bigger one they have to touch.
 CAPTION_NO_ROOM_PENALTY = 0.2
+# ...and up to this for a spot whose ink lies over SCENE TEXT (round 7: a
+# shirt print, a sign, a laptop's stickers — caption_place.scene_boxes), in
+# proportion to the share of the graphic it covers: type on type is the
+# busiest place in the frame, so a move that has the choice takes the calm
+# spot; it never outweighs a face, the safe area or the captions.
+SCENE_PENALTY = 0.12
 
 
 # ── boxes ─────────────────────────────────────────────────────────────────
@@ -730,7 +741,8 @@ def zones_of(track, kind=None):
 def on_face(box, zones, mouths=()):
     """The solver's fast version of assess() over merged zones: does a box
     cover a real share of a face zone or a mouth band?"""
-    return any(inter(box, z) >= FACE_HIT * area(z) for z in zones) or \
+    return any(inter(box, z) >= min(FACE_HIT * area(z), BOX_ON_FACE * area(box))
+               for z in zones) or \
         any(inter(box, m) >= MOUTH_HIT * area(m) for m in mouths)
 
 
@@ -738,7 +750,8 @@ def assess(box, track):
     """How a graphic box meets the faces: {'hit': bool, 'mouth': bool,
     'when': (t0, t1) of the colliding seconds, 'face': union of the zones
     it hits} — hit when it covers FACE_HIT of a face zone or MOUTH_HIT of
-    the mouth band in HIT_SHARE of the seconds that show a face."""
+    the mouth band (or lies BOX_ON_FACE inside a face zone) in HIT_SHARE of
+    the seconds that show a face."""
     faced = hits = 0
     mouth = False
     when, zs = [], []
@@ -751,7 +764,8 @@ def assess(box, track):
             fz, mz = face_zone(f), mouth_zone(f)
             a = inter(box, fz) / max(1e-9, area(fz))
             m = inter(box, mz) / max(1e-9, area(mz))
-            if a >= FACE_HIT or m >= MOUTH_HIT:
+            if a >= FACE_HIT or m >= MOUTH_HIT or \
+                    inter(box, fz) >= BOX_ON_FACE * max(1e-9, area(box)):
                 hit = True
                 mouth = mouth or m >= MOUTH_HIT
                 zs.append(fz)
@@ -796,6 +810,9 @@ NOMINAL_INK = {
     "hook_title": (0.07, -0.056, 0.937, 0.069),
     "image_card": (0.104, -0.179, 0.907, 0.171),
     "line_chart": (0.056, -0.229, 0.944, 0.229),
+    # the list's estimate follows its copy (_list_build_ink); this row is the
+    # example's three items under a lead at y 0.5
+    "list_build": (0.2, -0.13, 0.8, 0.13),
     "lower_third": (0.067, -0.044, 0.722, 0.044),
     "marker_text": (0.07, -0.052, 0.937, 0.06),
     "notification": (0.056, -0.173, 0.944, 0.069),
@@ -839,6 +856,10 @@ def nominal_ink(template, spec, params, frame=None):
         return _headline_ink(params or {}, y)
     if template == "typewriter":
         return _typewriter_ink(params or {}, y, frame)
+    if template == "list_build":
+        return _list_build_ink(params or {}, y, frame)
+    if template == "word_slam" and (params or {}).get("tier") == "hook":
+        return _hook_ink(params or {}, y, frame)
     if template == "word_slam" and (params or {}).get("tier") in TIER_INK:
         x0, top, x1, bottom = TIER_INK[params["tier"]]
         kw = min(1.0, k) if params["tier"] == "hero" else k
@@ -859,6 +880,158 @@ def nominal_ink(template, spec, params, frame=None):
 # this is its tallest); the payoff lockup is a justified number over its
 # noun (the Thiel '140 / CHARACTERS' at width 0.85: ~0.33 of the height).
 TIER_INK = {"hero": (0.03, -0.15, 0.97, 0.15), "payoff": (0.075, -0.165, 0.925, 0.165)}
+
+# Type metrics for the copy-sized estimates below (caps, tracking included,
+# in font sizes per character; line height in font sizes), measured on the
+# bundled fonts. An estimate: the probe measures the real box wherever a
+# browser runs, and the renderer before it burns captions.
+EM_PER_CHAR = {"condensed": 0.42, "grotesk": 0.61, "serif": 0.47, "script": 0.64}
+LINE_H = {"condensed": 0.92, "grotesk": 0.88, "serif": 0.94, "script": 1.05}
+CAP_RATIO = 0.72
+
+
+def _words_of(text):
+    return [w for w in str(text or "").replace("*", "").split() if w]
+
+
+def _chars(words):
+    return max(1, len(" ".join(words)))
+
+
+# The hook tier (word_slam.html hookLayout): the rows holding a *starred*
+# word are the main line, broken onto the fewest lines (up to 3) that set
+# its caps at HOOK_CAP of the frame height (lines at most HOOK_LINE, the main
+# block at most HOOK_MAIN); the other rows are a small lead-in.
+HOOK_CAP, HOOK_LINE, HOOK_MAIN = 0.07, 0.11, 0.2
+
+
+def hook_layout(params, aspect=9 / 16.0):
+    """(main font size, main line count, lead font size, lead row count,
+    widest line as a share of the width) of a hook-tier word_slam, as
+    shares of the frame height — the template's hookLayout, estimated."""
+    role = str(params.get("role") or "grotesk")
+    em, lh = EM_PER_CHAR.get(role, 0.64), LINE_H.get(role, 0.88)
+    width = num(params, "width", 0.85) or 0.85
+    rows = [r for r in (ln.strip() for ln in str(params.get("text") or "").replace("\n", " / ")
+                        .split("/")) if r]
+    if not rows:
+        return 0.0, 0, 0.0, 0, 0.0
+    main_idx = [i for i, r in enumerate(rows) if "*" in r] or [len(rows) - 1]
+    a, b = main_idx[0], main_idx[-1]
+    main = rows[a:b + 1]
+    lead = rows[:a] + rows[b + 1:]
+
+    def size(group):
+        widest = max(_chars(g) for g in group)
+        return min(width * aspect / (widest * em), HOOK_LINE, HOOK_MAIN / (len(group) * lh))
+    if len(main) == 1:
+        ws = _words_of(main[0])
+        cands = [[ws]] + [[ws[:i], ws[i:]] for i in range(1, len(ws))] + \
+            [[ws[:i], ws[i:j], ws[j:]] for i in range(1, len(ws)) for j in range(i + 1, len(ws))]
+    else:
+        cands = [[_words_of(r) for r in main]]
+    cands = [c for c in cands if all(c)]
+    want = HOOK_CAP / CAP_RATIO
+    scored = [(c, size(c)) for c in cands]
+    ok = sorted((x for x in scored if x[1] >= want - 1e-4), key=lambda x: (len(x[0]), -x[1]))
+    pick = ok[0] if ok else max(scored, key=lambda x: x[1] / 1.1 ** (len(x[0]) - 1))
+    fs = pick[1]
+    lead_fs = min(max(0.4 * fs, 0.035), 0.05)
+    widest = max([_chars(g) * em * fs / aspect for g in pick[0]]
+                 + [min(width, _chars(_words_of(r)) * em * lead_fs / aspect) for r in lead])
+    return fs, len(pick[0]), lead_fs, len(lead), min(width, widest)
+
+
+def _hook_ink(params, y, frame=None):
+    W, H = frame or (1080, 1920)
+    aspect = W / float(H)
+    role = str(params.get("role") or "grotesk")
+    lh = LINE_H.get(role, 0.88)
+    fs, n, lead_fs, n_lead, w = hook_layout(params, aspect)
+    kick = 0.045 if str(params.get("kicker") or "").strip() else 0.0
+    h = n * fs * lh + n_lead * lead_fs * lh + kick
+    # the ink: the glyphs and their contact shadow
+    pad_y, pad_x = 0.1 * fs, 0.1 * fs / aspect
+    top = min(max(y - h / 2.0, 0.06), 0.86 - h)
+    x = num(params, "x", 0.5)
+    return (max(0.0, x - w / 2.0 - pad_x), max(0.0, top - pad_y),
+            min(1.0, x + w / 2.0 + pad_x), min(1.0, top + h + pad_y))
+
+
+# The accumulating list (list_build.html): one shared size — the widest
+# item fills the column, inside the height budget (lead included) and at
+# most LIST_LINE of the frame height a line; a long item breaks onto two
+# lines when that sets the list 15% bigger.
+LIST_LINE, LIST_GAP = 0.085, 0.22
+LIST_LEAD_K, LIST_LEAD_MIN = 0.55, 0.03   # the lead: ~0.55 of the item size, >= 3% FH
+
+
+def _list_lead_h(params, fs):
+    if not str(params.get("lead") or "").strip():
+        return 0.0
+    return max(LIST_LEAD_MIN, LIST_LEAD_K * fs)
+
+
+def list_layout(params, aspect=9 / 16.0):
+    """(font size as a share of the frame height, line count, widest line as
+    a share of the width) of a list_build, estimated like the page."""
+    role = str(params.get("role") or "condensed")
+    em, lh = EM_PER_CHAR.get(role, 0.46), LINE_H.get(role, 0.92)
+    col = min(max(0.3, num(params, "width", 0.8)), 1.0 - 120.0 / 1080.0)
+    budget = max(0.12, min(0.5, num(params, "height", 0.36)))
+    lead = bool(str(params.get("lead") or "").strip())
+    items = [_words_of(r.get("text") if isinstance(r, dict) else r)
+             for r in (params.get("rows") or [])[:6]]
+    items = [[ws] for ws in items if ws] or [[["-"]]]
+
+    def size(its):
+        lines = sum(len(it) for it in its)
+        widest = max(_chars(ln) for it in its for ln in it)
+        tall = lines * lh + max(0, len(its) - 1) * LIST_GAP
+        by_h = budget / tall
+        if lead:
+            by_h = (budget - LIST_LEAD_MIN) / tall
+            if LIST_LEAD_K * by_h > LIST_LEAD_MIN:
+                by_h = budget / (tall + LIST_LEAD_K)
+        return min(col * aspect / (widest * em), by_h, LIST_LINE)
+    s = size(items)
+    for _ in range(len(items)):
+        cand = sorted((i for i, it in enumerate(items) if len(it) == 1 and len(it[0]) > 1),
+                      key=lambda i: -_chars(items[i][0]))
+        if not cand:
+            break
+        i = cand[0]
+        ws = items[i][0]
+        k = min(range(1, len(ws)), key=lambda k: max(_chars(ws[:k]), _chars(ws[k:])))
+        trial = items[:i] + [[ws[:k], ws[k:]]] + items[i + 1:]
+        s2 = size(trial)
+        if s2 < s * 1.15:
+            break
+        items, s = trial, s2
+    lines = sum(len(it) for it in items)
+    widest = max(_chars(ln) for it in items for ln in it) * em * s / aspect
+    return s, lines, min(col, widest), len(items)
+
+
+def _list_build_ink(params, y, frame=None):
+    W, H = frame or (1080, 1920)
+    aspect = W / float(H)
+    role = str(params.get("role") or "condensed")
+    lh = LINE_H.get(role, 0.92)
+    fs, lines, w, n = list_layout(params, aspect)
+    h = _list_lead_h(params, fs) + fs * (lines * lh + max(0, n - 1) * LIST_GAP)
+    top = min(max(y - h / 2.0, 0.06), 0.86 - h)
+    x = num(params, "x", 0.5)
+    # the ink: the glyphs and their contact shadow (the scrim's soft falloff
+    # is not ink)
+    px, py = 0.15 * fs / aspect, 0.1 * fs
+    if params.get("align") == "left":
+        col = min(max(0.3, num(params, "width", 0.8)), 1.0 - 120.0 / 1080.0)
+        x0 = x - col / 2.0
+        return (max(0.0, x0 - px), max(0.0, top - py), min(1.0, x0 + w + px),
+                min(1.0, top + h + py))
+    return (max(0.0, x - w / 2.0 - px), max(0.0, top - py), min(1.0, x + w / 2.0 + px),
+            min(1.0, top + h + py))
 
 
 def _typewriter_ink(params, y, frame=None):
@@ -953,7 +1126,7 @@ def _lower_third_ink(params, y, k):
 # estimated width is the drawn width whatever the copy, so a lane without a
 # browser can keep them out of the side margins and the button rail as well.
 # Every other template sizes to its copy, and its safe area waits for a probe.
-COLUMN_TEMPLATES = frozenset(("word_slam", "phrase_build"))
+COLUMN_TEMPLATES = frozenset(("word_slam", "phrase_build", "list_build"))
 
 
 # ── captions as obstacles ─────────────────────────────────────────────────
@@ -1060,7 +1233,7 @@ def patch_cost(patch, params, spec):
 def candidates(template, spec, params, box, variants, zones, W, H,
                captions=(), predict=True, mouths=(), clear_penalty=CLEAR_PENALTY,
                near_captions=(), room=None,
-               require_clear=False):
+               require_clear=False, scene=()):
     """Ranked placements [(cost, patch, predicted box)] off every face (no real
     share of a zone or mouth band, on_face; grazing a zone's CLEARANCE costs
     CLEAR_PENALTY) and inside the safe area. ``variants`` are measured alternatives at the
@@ -1078,7 +1251,8 @@ def candidates(template, spec, params, box, variants, zones, W, H,
     CAPTION_NO_ROOM_PENALTY on top when the caption plan would find no band
     clear of it and the face — the captions would stay on it or go mute — so
     a smaller graphic that leaves them a band wins (the Thiel counter under
-    the chin, Oct 2026)."""
+    the chin, Oct 2026). ``scene``: scene-text boxes (a soft keep-out: up to
+    SCENE_PENALTY by the share of the spot they cover)."""
     pspec = (spec or {}).get("params") or {}
     port = portrait(W, H)
     y_lo, y_hi = (SAFE_Y0, SAFE_Y1) if port else (0.02, 0.98)
@@ -1148,6 +1322,9 @@ def candidates(template, spec, params, box, variants, zones, W, H,
                 on_block = None             # clear of every caption
             if on_block is not None and room is not None and not room(nb):
                 cost += CAPTION_NO_ROOM_PENALTY
+            if scene:
+                cost += SCENE_PENALTY * min(1.0, sum(inter(nb, sb) for sb in scene)
+                                            / max(1e-9, area(nb)))
             patch = dict(p)
             if ny is not None and abs(dy) > 1e-9:
                 patch["y"] = ny

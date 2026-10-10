@@ -784,3 +784,29 @@ def test_the_streamed_measure_carries_a_turned_face_but_not_across_a_gap(
         assert all(lk == -1 for _b, lk in frames[t])
     for t in (1.5, 1.75, 2.0, 2.25, 2.5):            # the next kept window
         assert frames[t] == [], t
+
+
+@FFMPEG
+def test_a_sample_is_the_frame_on_screen_at_its_time(tmp_path):
+    """Round 7 final review: ffmpeg's fps filter (rounding to the nearest
+    tick) handed each tick the last frame before the NEXT half tick, ~0.1 s
+    late at 4 fps, so the sample labelled 152.54 s on Elon's short showed
+    Musk's first frame (152.65) and Rogan's crop glided toward Musk's place
+    for the last 1.2 s of his shot. A sample at t is the frame on screen at
+    t: the tick 0.10 s before a camera cut still shows the old shot."""
+    path = tmp_path / "cut.mp4"
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=white:s=64x36:r=30:d=1",
+         "-f", "lavfi", "-i", "color=c=black:s=64x36:r=30:d=1",
+         "-filter_complex", "[0][1]concat=n=2:v=1:a=0", "-c:v", "libx264",
+         "-preset", "veryfast", "-g", "250", "-pix_fmt", "yuv420p", str(path)], check=True)
+    st = {}
+    a, fps = 0.15, follow.SAMPLE_FPS
+    grays = [g.mean() for g in follow._stream_gray(str(path), a, 1.8, fps, 64, 36,
+                                                   time.monotonic() + 60, state=st)]
+    # the grid _sample_plan assumes: frame i at a + i/fps, none missing
+    assert len(grays) >= int(math.floor((1.8 - a) * fps + 1e-6)), (len(grays), st)
+    at = {round(a + i / fps, 2): g for i, g in enumerate(grays)}
+    assert at[0.15] > 200 and at[0.65] > 200
+    assert at[0.9] > 200, "the tick 0.10 s before the cut shows the next shot"
+    assert at[1.15] < 50 and at[1.4] < 50

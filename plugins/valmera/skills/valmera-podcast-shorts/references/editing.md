@@ -38,10 +38,19 @@ cues, and art direction. Call `get_kept_transcript` once and confirm:
 - Frame 0 is clean: the speaker faces camera, the first audio is a whole
   word (not the tail of the previous one, not "if somebody was like,"), and
   the hook plays as one take (no jump cut in the first 1.5 s, at most one in
-  the first 3 s). Move the start to the next clean onset when it is not.
+  the first 3 s). Move the start to the next clean onset when it is not;
+  the PICTURE CHECK names an opening on closed eyes or mid-sound with the
+  nearest clean start (it never moves the cut).
+- Keep tools place every new cut edge audio-safe (out of words, onto the
+  quietest point within ~80 ms) and report it as AUDIO-SAFE CUTS; a cut
+  that "joins running speech" has no pause near it — re-cut at a breath
+  or sentence end unless it sounds clean. snap_to_words:false keeps exact
+  times for a deliberate stutter.
 - The turn changes or deepens the idea and the payoff resolves it. Stop on the
-  strongest sentence; the payoff needs 0.6-1.5 s after its last word before
-  the end card (a reaction button 1.0-1.5 s, or none).
+  strongest sentence; the payoff needs 0.8-1.5 s after its last word before
+  the end card (a reaction button 1.0-1.5 s, or none): the natural tail
+  first, else hold the frame (`add_freeze_frame` audio_mode='hold',
+  duration about 1 s minus the air you have).
 - Trim for rhythm: cut low-information connectors ("it was like a lot of
   things and"), keep 150-250 ms at sentence boundaries, never drop an
   article inside a clause.
@@ -59,12 +68,13 @@ After any cut, read the program words once more (`get_kept_transcript`) and
 write the beats you will execute, in output seconds:
 
 ```text
-hook    0.00  hook_title "Every computer has used *weird* type" kicker "Steve Jobs, 1983" 0.15-2.6 (his strongest line; names him, no lower third; silent)
+hook    0.00  word_slam tier='hook' "Every computer / has used *weird type*" kicker "Steve Jobs, 1983" 0.15-2.6 (his strongest line as a headline that owns its zone: captions wait; names him, no lower third; silent)
 hero 1  6.42  "garbage"   word_slam serif, start 6.22 (lands +0.2, silent; not in the hook)
 turn   14.80  "Lisa"      image_card Apple Lisa photo + label "Apple Lisa, 1983" (identifies the product; silent)
-hero 2 18.60  "40 fonts"  counter style='reveal' value 40 label "fonts on one screen" (silent)
+hero 2 18.60  "30, 40 fonts" counter value '30–40' label "fonts on one screen" (counts into each figure on its word; silent)
+list   26.90  "let's get…" list_build lead "Let's get" rows proportionally spaced fonts / multiple fonts / graphics (each row on its onset, the newest accented; clears on the payoff; silent)
 payoff 33.60  "without one" phrase_build 2 tiers "writing a paper / WITHOUT *ONE*" (the largest accented lockup; silent: the type is the payoff); hold 0.8 s after the last word
-budget  5 graphics in 36 s (one per ~7 s), ~30% of the runtime, 2 type roles, 1 accent
+budget  6 graphics in 36 s (one per ~6 s, no body gap over 8 s), ~35% of the runtime, 2 type roles, 1 accent
 camera  none: steady frame, every jump cut left bare
 sound   none: nothing on screen calls for one (zero is the podcast default); music off (no owner song)
 ```
@@ -124,16 +134,22 @@ after a short pause, then report it.
   exits faster than entrances.
 - A hook written from the clip's strongest line or statistic, with the
   speaker's verified name in its kicker or the headline band.
-- A spoken list shown as items (a real photo or clip per item, 0.3-0.6 s,
-  or one big word per item); a named product labelled for what it is
+- A spoken list shown as items (a real photo or clip per item, 0.3-0.6 s
+  on its onset), else one accumulating `list_build` of the noun phrases
+  said; a triad ("Let's get… / Let's get… / Let's get…") the same, its
+  opener as the `lead`; a named product labelled for what it is
   ("Apple Lisa, 1983") and shown when an image exists.
 - The payoff as the largest accented lockup: number and noun together,
   rhyming with an earlier setup device where one exists.
 - A number lands ON its spoken word, never before it (the write sets a
   counter's `land` on the onset and moves a number slam onto it). A count
-  starts on the lead-in (~0.45 s before the word); a punchline number, or one
-  that is not a growing quantity ('140 characters'), is `counter`
-  `style='reveal'`: no count, a hard cut on the word.
+  really counts, 0 -> value over ~0.4 s into the word (the window opens
+  ~0.45 s before it, so nothing shows across the setup); a spoken range is
+  value '30–40', each figure on its own word; `style='reveal'` (a hard cut
+  on the word) stays for a number that must not move before it lands.
+- Every thesis line, list, triad, name and number gets a beat that adds
+  information; no body stretch past ~6-8 s without one (the review's
+  dead_stretch note names the line and a beat for it).
 - `layer='behind_subject'` only inside one continuous shot (no cut in the window).
 - B-roll that shows the exact noun or action, licensed, with provenance in the
   handback; every still pushes or pans.
@@ -197,7 +213,7 @@ after each operation.
    change rate, hero count, picture area, sounds within budget and spacing
    (list each with its time, on-screen partner and level; `audit_audio_mix`
    reports each sound's level against the voice and its placement checks),
-   no digital silence, payoff held 0.6-1.5 s after the last word.
+   no digital silence, payoff held 0.8-1.5 s after the last word.
 5. Read the render's VERIFICATION ADVISORIES: the EARN ITS PLACE note lists
    a generic or spent hook, a fragment or jump-cut opening, graphics past
    the budget or restating the captions, extra type roles or accents, a
@@ -218,12 +234,12 @@ preview link:
 
 ```text
 s07 · kinetic-poster · fast-conversation · EDL v14 · 1 render
-Hook: hook_title by 1.1s ("Every computer has used weird type", kicker Steve Jobs, 1983), silent
-Heroes: 6.4 garbage slam; 14.8 Apple Lisa photo + label; 18.6 counter 40 fonts
+Hook: hook-tier word_slam by 1.1s ("Every computer has used weird type", kicker Steve Jobs, 1983), silent
+Heroes: 6.4 garbage slam; 14.8 Apple Lisa photo + label; 18.6 counter 30–40 fonts; 26.9 "Let's get…" list_build
 Payoff: 33.6 "writing a paper / WITHOUT ONE" lockup, held 0.8s after the last word
 Camera/sound: no zoom, no sound; music off (no owner song)
 Targets: change ~0.4s, picture card 0.56, 3 heroes, graphics ~30% of runtime
-Weakest: 24-27s "let's get…" build with only captions (a list-build lockup would carry it)
+Weakest: 9-13s "the fonts were…" setup with only captions (the next pass: an image of an early screen)
 Assets: Lisa photo (Wikimedia, CC BY-SA 4.0, credit in handback)
 ```
 

@@ -12,6 +12,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
@@ -506,6 +507,42 @@ class ToolContext:
                 storage.download_to(proxy["storage_key"], local)
             self._proxy_local = local
         return self._proxy_local
+
+    def cut_sound_source(self):
+        """Where cut_audio reads the main video's sound around a cut: a
+        local file or a URL ffmpeg range-reads, or None. Never stages a
+        whole file on a keep write — the 16 kHz audio sidecar (a WAV seeks
+        by byte offset), else a proxy this container already holds, else a
+        ranged read of the proxy. Resolved once per context (a presigned
+        URL again before it expires: an agent turn can outlive it)."""
+        cached = getattr(self, "_cut_sound", False)
+        if cached is not False and (
+                not str(cached or "").startswith(("http://", "https://"))
+                or time.monotonic() - getattr(self, "_cut_sound_t", 0.0)
+                < CUT_SOUND_URL_TTL_S):
+            return cached
+        found = None
+        if getattr(self, "has_main_video", False):
+            for kind in ("audio", "proxy"):
+                try:
+                    asset = self.db.run(dbx.latest_asset, self.project_id,
+                                        kind)
+                    key = (asset or {}).get("storage_key")
+                    if not key:
+                        continue
+                    found = (self._proxy_local if kind == "proxy"
+                             and self._proxy_local else
+                             media_cache.resident(key, self.workdir,
+                                                  f"cutsound_{kind}"
+                                                  + os.path.splitext(key)[1])
+                             or storage.presign_get(key, expires=1800))
+                except Exception:  # noqa: BLE001 — no sound is a fallback
+                    found = None
+                if found:
+                    break
+        self._cut_sound = found
+        self._cut_sound_t = time.monotonic()
+        return found
 
     def latest_edl(self):
         cache = getattr(self, "_call_edl_cache", None)
@@ -3062,13 +3099,79 @@ def _snap_focus_track_to_shots(track, index):
         "frame or two."]
 
 
-def _write_keep(ctx, new_keep, desc, snap_to_words=False,
-                check_regression=False):
-    """Shared tail for every keep-modifying write: optional outward word
-    snapping, insert re-snap + program-item re-anchoring (the shared remap
-    above, speed-aware), the version write, then mid-word boundary warnings
-    (and, for full replacements, mechanical regression warnings) appended to
-    a still SUCCESSFUL result."""
+def _snap_choice(value):
+    """A keep tool's snap_to_words as the tri-state _write_keep reads: None
+    (omitted: audio-safe edges), True (outward to word edges, then
+    audio-safe) or False (the exact times as written)."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        v = value.strip().casefold()
+        if v in ("", "none", "null", "auto"):
+            return None
+        return v in ("true", "1", "yes", "on")
+    return bool(value)
+
+
+# Seconds a keep write may spend reading the source's sound around its new
+# cut edges (cut_audio): a ranged read of a few short windows. Past it the
+# write falls back to the transcript's word edges.
+CUT_SOUND_BUDGET_S = 15.0
+# A presigned sound URL (ToolContext.cut_sound_source, valid 1800 s) is
+# reused this long, then signed again.
+CUT_SOUND_URL_TTL_S = 1500.0
+
+
+def _audio_safe_keep(ctx, keep, prev_keep, words):
+    """(keep, notes, quiet_edges): every NEW cut edge of ``keep`` (one
+    ``prev_keep`` did not have; every cut edge when it is None) placed by
+    cut_audio — out of any word it
+    lands in and onto the quietest point within ~80 ms of where it was
+    written, measured on the source's sound when the context can read it
+    (ToolContext.cut_sound_source), else moved to the word's edge. notes
+    report every move; quiet_edges are the edges the transcript puts inside
+    a word where the sound is quiet (its timing is off), which the mid-word
+    warning must not repeat."""
+    import cut_audio
+    try:
+        edges = cut_audio.cut_edges(keep, ctx.duration, prev_keep)
+    except Exception:  # noqa: BLE001
+        return keep, [], set()
+    if not edges:
+        return keep, [], set()
+    level = None
+    hook = getattr(ctx, "cut_sound_source", None)
+    if callable(hook):
+        try:
+            source = hook()
+        except Exception:  # noqa: BLE001
+            source = None
+        if source:
+            level = cut_audio.source_levels(
+                source, [t for _i, _side, t in edges], ctx.duration,
+                timeout=CUT_SOUND_BUDGET_S)
+    try:
+        # an end may really cut up to a frame either side (the block clock)
+        new, moves, checked = cut_audio.refine_keep(
+            keep, words, ctx.duration, prev_keep, level,
+            end_slack=1.0 / _index_fps(getattr(ctx, "index", None)))
+    except Exception:  # noqa: BLE001 — a placement never fails a write
+        return keep, [], set()
+    quiet = {round(m["old"], 2) for m in moves if m["why"] == "quiet_word"}
+    return ([list(x) for x in new] or keep), cut_audio.report(moves, checked), \
+        quiet
+
+
+def _write_keep(ctx, new_keep, desc, snap_to_words=None,
+                check_regression=False, place_all=False):
+    """Shared tail for every keep-modifying write: audio-safe cut edges
+    (snap_to_words None/True; True first snaps outward to word edges),
+    insert re-snap + program-item re-anchoring (the shared remap above,
+    speed-aware), the version write, then mid-word boundary warnings (and,
+    for full replacements, mechanical regression warnings) appended to a
+    still SUCCESSFUL result. snap_to_words=False writes the exact times.
+    place_all (keep_segments, which restates every edge): every cut edge of
+    the list is placed, not only those the previous keep lacked."""
     words = ctx.index.get("words", [])
     silences = ctx.index.get("silences", [])
     if snap_to_words and words:
@@ -3076,9 +3179,13 @@ def _write_keep(ctx, new_keep, desc, snap_to_words=False,
     new_keep = [x for x in new_keep if x[1] - x[0] >= 0.05]
     if not new_keep:
         return "REJECTED: nothing would survive that keep list."
-    new_keep, shot_notes = _snap_keep_to_shots(new_keep, ctx.index, words)
     prev = ctx.latest_edl()
     prev_keep = prev["json"]["keep"]
+    audio_notes, quiet_edges = [], set()
+    if snap_to_words is not False:
+        new_keep, audio_notes, quiet_edges = _audio_safe_keep(
+            ctx, new_keep, None if place_all else prev_keep, words)
+    new_keep, shot_notes = _snap_keep_to_shots(new_keep, ctx.index, words)
     edl = dict(prev["json"])
     edl["keep"] = new_keep
     speed = edl.get("speed") or []
@@ -3102,10 +3209,11 @@ def _write_keep(ctx, new_keep, desc, snap_to_words=False,
     result = ctx.write_edl(edl, desc)
     if not result.startswith("EDL v"):
         return result
-    if region_notes + shot_notes:
-        result += "\n" + "\n".join(region_notes + shot_notes)
-    warn = audit.boundary_warning_lines(new_keep, words, silences,
-                                        ctx.duration)
+    if region_notes + audio_notes + shot_notes:
+        result += "\n" + "\n".join(region_notes + audio_notes + shot_notes)
+    warn = audit.boundary_warning_lines(
+        [[s, e] for s, e in new_keep], words, silences, ctx.duration,
+        skip=quiet_edges)
     if snap_to_words:
         warn = []   # snapping guarantees word-clean boundaries
     if check_regression:
@@ -3128,7 +3236,7 @@ def _write_keep(ctx, new_keep, desc, snap_to_words=False,
     return result
 
 
-def keep_segments(ctx, segments, snap_to_words=False):
+def keep_segments(ctx, segments, snap_to_words=None):
     if not isinstance(segments, list) or not segments:
         return "REJECTED: segments must be a non-empty array of [start, end]."
     cleaned = []
@@ -3146,10 +3254,11 @@ def keep_segments(ctx, segments, snap_to_words=False):
         ctx, merged,
         f"keep set to {len(merged)} segment(s), {kept}s of "
         f"{ctx.duration}s survives",
-        snap_to_words=bool(snap_to_words), check_regression=True)
+        snap_to_words=_snap_choice(snap_to_words), check_regression=True,
+        place_all=True)
 
 
-def cut_range(ctx, start, end, snap_to_words=False):
+def cut_range(ctx, start, end, snap_to_words=None):
     try:
         s, e = ctx.clamp(start), ctx.clamp(end)
     except ValueError as err:
@@ -3162,10 +3271,10 @@ def cut_range(ctx, start, end, snap_to_words=False):
         return ("REJECTED: cutting {:.2f}-{:.2f} would remove everything "
                 "that's currently kept.".format(s, e))
     return _write_keep(ctx, new, f"cut {s}-{e}s ({e - s:.2f}s removed)",
-                       snap_to_words=bool(snap_to_words))
+                       snap_to_words=_snap_choice(snap_to_words))
 
 
-def restore_range(ctx, start, end, snap_to_words=False):
+def restore_range(ctx, start, end, snap_to_words=None):
     try:
         s, e = ctx.clamp(start), ctx.clamp(end)
     except ValueError as err:
@@ -3175,7 +3284,7 @@ def restore_range(ctx, start, end, snap_to_words=False):
     cur = ctx.latest_edl()["json"]["keep"]
     new = _merge_touching([list(x) for x in cur] + [[s, e]])
     return _write_keep(ctx, new, f"restored {s}-{e}s to the edit",
-                       snap_to_words=bool(snap_to_words))
+                       snap_to_words=_snap_choice(snap_to_words))
 
 
 # Non-lexical hesitation sounds only — safe to remove without changing meaning.
@@ -7440,8 +7549,9 @@ def _window_note(ctx, ratio):
                  f"{y0 - 0.02:.2f}]) naming the speaker and the claim — and "
                  f"the bottom band (y {y1:.2f}-1) for captions.")
     return note + (" For a designed frame instead, set_picture_card(source="
-                   "'auto') shows the whole source as a card on a dark "
-                   "sampled canvas. Full-bleed only if the user asked to fill "
+                   "'auto') makes a card on a dark sampled canvas (a 4:3 "
+                   "speaker framed in a larger near-square window; fit='pad' "
+                   "the whole source). Full-bleed only if the user asked to fill "
                    "the screen, accepting the softness: "
                    f"set_frame('{ratio}', 'crop').")
 
@@ -7632,8 +7742,8 @@ def _set_frame(ctx, ratio, mode="crop", focus_x=None, focus_y=None,
                     f"screen, set_frame('{frame.ratio}', "
                     f"'{_window_mode(ctx)}') shows it as a window that "
                     "enlarges it less, with a free headline band (or "
-                    "set_picture_card(source='auto'): the whole source as a "
-                    "card on a dark sampled canvas).")
+                    "set_picture_card(source='auto'): a card on a dark "
+                    "sampled canvas, a 4:3 speaker framed in a larger window).")
     if frame.mode in ("pad", "pad_blur") and \
             frame.ratio in ("9:16", "1:1", "4:5") and not frame.picture:
         res += ("\n" + window if window else
@@ -8593,9 +8703,9 @@ def _inset_layout_call(card_id, p0, p1, cuts=()):
               "source='inset') fits the whole box alone — no face, so only "
               f"for a beat (under {NO_FACE_MAX_S:g}s of speech) or a stretch "
               "nobody talks over")
-    check = (" (look at the speaker panel: a speaker sitting against the box "
-             "may need a source rect of their own that holds the face clear "
-             "of the panel edge)")
+    check = (" (the speaker panel is solved from the face; where the box "
+             "touches the face, the result measures a speaker card alone and "
+             "the speaker full-bleed against the stack and names the cleanest)")
     if len(pieces) == 1:
         return (f"set_picture_card(id='{card_id}', start={p0:g}, end={p1:g}, "
                 f"panels={json.dumps(stack)}) stacks the speaker over the "
@@ -9109,11 +9219,22 @@ def _auto_reframe(ctx, ratio="9:16", mode="auto", follow=True):
                 # before later cuts is replaced, and follow=false removes it.
                 edl = dict(current)
                 edl["frame"] = dict(current_frame)
+                # ...and its re-aims land ON the source's camera cuts: a
+                # track authored (or seeded) a frame or two off one showed
+                # one shot through the other's crop (round 7: the judged
+                # Elon orphan at 21.867, an edge at 152.63 on a cut at
+                # 152.653). The aims themselves stay.
+                snapped, snap_notes = _snap_focus_track_to_shots(
+                    [dict(sp) for sp in track], getattr(ctx, "index", None))
+                if snap_notes:
+                    edl["frame"]["focus_track"] = snapped
                 edl["frame"]["follow"] = None
                 spans, note = (_follow_frame(ctx, edl, edl["frame"])
                                if want_follow else (None, ""))
                 edl["frame"]["follow"] = spans
-                if (spans or None) != (current_frame.get("follow") or None):
+                note = "\n".join(x for x in [note] + snap_notes if x)
+                if (spans or None) != (current_frame.get("follow") or None) \
+                        or snap_notes:
                     res = ctx.write_edl(
                         edl, f"the {ratio} crop keeps its per-shot track and "
                              + ("follows the speaker inside each shot" if spans
@@ -9836,10 +9957,15 @@ def add_zoom(ctx, start, end, strength=None, mode=None, cx=None, cy=None,
     feel = camera.describe(item)
     strength_txt = ("" if zmode == "shake"
                     else f" {int(round(st * 100))}%")
+    # a graphic on screen under the move is checked against the face as
+    # the move frames it (and placed again when it now covers it)
+    camera_notes = motion_tools.keep_out_under_camera(ctx, edl, s, e)
     result = ctx.write_edl(
         edl, f"{ZOOM_MODE_DESC[zmode]} zoom{strength_txt} on {s}-{e}s "
              f"(output time){aimed}{f' ({feel})' if feel else ''} "
              f"[{item['id']}]")
+    if camera_notes and result.startswith("EDL v"):
+        result += "".join("\n" + n for n in camera_notes)
     if cap_note and result.startswith("EDL v"):
         result += "\n" + cap_note
     if defaulted_target and result.startswith("EDL v") \
@@ -10035,14 +10161,15 @@ def add_zoom_path(ctx, keyframes, ease=None, motion_motif=None, purpose=None,
     zooms.append(item)
     fx["zooms"] = zooms
     edl["effects"] = fx
+    camera_notes = motion_tools.keep_out_under_camera(ctx, edl, start, end)
     written = ctx.write_edl(
         edl, f"keyframed zoom on {start}-{end}s (output time), "
              f"{travel.describe(item)}, {ez} [{item['id']}]")
     if not written.startswith("EDL v"):
         return written
-    note = ""
+    note = "".join("\n" + n for n in camera_notes)
     if pts[0].get("s", 0) > 0.02 or pts[-1].get("s", 0) > 0.02:
-        note = ("\nNOTE: this path starts at "
+        note += ("\nNOTE: this path starts at "
                 f"{int(pts[0]['s'] * 100)}% and ends at "
                 f"{int(pts[-1]['s'] * 100)}% zoom, so the frame STEPS in at "
                 f"{start}s and out at {end}s. That is exactly what the "
@@ -12406,8 +12533,13 @@ def cut_output_range(ctx, start, end):
             return ("REJECTED: that would remove ALL the kept footage. Cut "
                     "a smaller span, or remove the inserts individually and "
                     "reset_edit for the footage.")
+        # The new edges land where the viewer's clock put them, not on the
+        # sound: place them audio-safely like every other keep write.
+        new_keep, audio_notes, _quiet = _audio_safe_keep(
+            ctx, new_keep, keep, ctx.index.get("words") or [])
         new_keep, shot_notes = _snap_keep_to_shots(
             new_keep, ctx.index, ctx.index.get("words"))
+        shot_notes = audio_notes + shot_notes
     else:
         shot_notes = []
     ins_notes = []
@@ -15770,10 +15902,69 @@ def _card_face_samples(ctx, spans):
     return out
 
 
+def _card_group(ctx, edl, spans):
+    """True when any camera shot of a card's window is a GROUP shot in the
+    index's samples (follow.is_group: two or more comparable faces) — a
+    default that frames one speaker would decide who the card shows."""
+    seen = []
+    try:
+        follow.index_samples(getattr(ctx, "index", None) or {},
+                             _merge_windows(spans), seen)
+        counts = follow.face_counts(seen)
+        pieces = _card_pieces(ctx, edl, spans) or [
+            (min(a for a, _b in spans), max(b for _a, b in spans), spans, 0, 0)]
+        return any(follow.is_group(counts, a, b) for a, b, _f, _lo, _hi in pieces)
+    except Exception:
+        return False
+
+
 def _card_faces(ctx, spans):
     """Face boxes (source fractions) the index measured inside ``spans``:
     the largest face of every spatial sample there."""
     return [f for _t, f in _card_face_samples(ctx, spans)]
+
+
+# A picture card's window edge this close (frames) to a cut of the picture
+# — a keep join, an insert edge, an indexed camera cut, a crop switch — moves
+# onto it: a layout change a frame or two off a cut shows one layout on the
+# other shot (judges, round 7: an orphan framing).
+CARD_CUT_SNAP_FRAMES = 2
+
+
+def _snap_window_to_cuts(ctx, edl, s0, e0):
+    """(start, end, notes): a program window's edges, each moved onto the
+    picture's cut (renderer.camera_cuts: where the frame of the new shot
+    begins) when it lands 1-CARD_CUT_SNAP_FRAMES frames off one."""
+    index = getattr(ctx, "index", None) or {}
+    fps = _index_fps(index)
+    try:
+        tl = Timeline([list(k) for k in (edl.get("keep") or [])],
+                      edl.get("inserts") or [], edl.get("speed") or [])
+        cuts = renderer.camera_cuts(edl, index, tl, fps, fps, 0.0)
+    except Exception:  # noqa: BLE001 — a hygiene snap never fails a write
+        return s0, e0, []
+    if not cuts:
+        return s0, e0, []
+    step = 1.0 / fps
+    reach = CARD_CUT_SNAP_FRAMES * step + 1e-3
+    moved = []
+
+    def snap(t, side):
+        c = min(cuts, key=lambda x: abs(x - t))
+        if 0.5 * step < abs(c - t) <= reach:
+            moved.append((side, t, round(c, 3)))
+            return round(c, 3)
+        return t
+    a, b = snap(s0, "start"), snap(e0, "end")
+    if b - a < 0.2:
+        return s0, e0, []
+    if not moved:
+        return s0, e0, []
+    return a, b, [
+        "SHOT-CUT HYGIENE: card window "
+        + ", ".join(f"{side} {old:g}->{new:g}s" for side, old, new in moved)
+        + " moved onto the picture's cut — a layout change a frame or two "
+        "off a cut shows one layout over the other shot for those frames."]
 
 
 def _card_cuts(ctx, edl, spans):
@@ -16010,6 +16201,274 @@ def _window_focus(edl, spans):
     return frame.get("focus_x"), frame.get("focus_y")
 
 
+# The straight edges a framing must clear are measured per contiguous kept
+# stretch (three frames each, a line in two of them, at the edge detector's
+# own width): an archival camera that reframes between takes moves the
+# pillar, and lines measured across takes are no line at all. At most
+# SLIVER_MAX_STRETCHES stretches (the longest) per call, decoded in
+# parallel.
+SLIVER_MAX_STRETCHES = 16
+SLIVER_FRAME_W = 360
+
+
+def _edge_lines(ctx, windows, tag):
+    """(lines_x, lines_y) — the source's persistent straight edges
+    (subject.hard_edge_lines, the auto_reframe edge-band measurement) in
+    SOURCE ``windows`` (kept footage): each window measured on its own (three
+    proxy frames) and the lines of all of them together, or ([], []) without
+    a proxy or footage. Cached per window on the ctx for the turn."""
+    windows = sorted(((float(a), float(b)) for a, b in windows or [] if b - a > .05),
+                     key=lambda w: w[0] - w[1])[:SLIVER_MAX_STRETCHES]
+    if not windows:
+        return [], []
+    cache = getattr(ctx, "_card_line_cache", None)
+    if not isinstance(cache, dict):
+        cache = {}
+        try:
+            ctx._card_line_cache = cache
+        except Exception:
+            pass
+    try:
+        proxy = ctx.proxy_path()
+    except Exception:
+        proxy = None
+    todo = [w for w in windows if (round(w[0], 2), round(w[1], 2)) not in cache]
+    if todo and proxy:
+        workdir = getattr(ctx, "workdir", None) or tempfile.gettempdir()
+
+        def measure(job):
+            n, (a, b) = job
+            try:
+                paths = []
+                for j, f in enumerate((.2, .5, .8)):
+                    fp = os.path.join(workdir, f"{tag}_{n}_{j}.jpg")
+                    try:
+                        media.frame_at(proxy, a + (b - a) * f, fp,
+                                       width=SLIVER_FRAME_W)
+                        paths.append(fp)
+                    except Exception:
+                        continue
+                return ([p for p, _r in subject.hard_edge_lines(paths, "x")],
+                        [p for p, _r in subject.hard_edge_lines(paths, "y")])
+            except Exception:
+                return [], []
+        base = len(cache)
+        with ThreadPoolExecutor(max_workers=min(6, len(todo))) as pool:
+            for w, got in zip(todo, pool.map(measure, [(base + i, w) for i, w in
+                                                     enumerate(todo)])):
+                cache[(round(w[0], 2), round(w[1], 2))] = got
+    xs, ys = set(), set()
+    for w in windows:
+        got = cache.get((round(w[0], 2), round(w[1], 2))) or ([], [])
+        xs.update(got[0])
+        ys.update(got[1])
+    return sorted(xs), sorted(ys)
+
+
+def _clip_windows(spans, a, b):
+    """``spans`` (SOURCE windows) clipped to [a, b]."""
+    return [(max(float(s), a), min(float(e), b)) for s, e in spans
+            if min(float(e), b) - max(float(s), a) > .05]
+
+
+# At most this many held positions of one card are measured for slivers
+# (three proxy frames each), the longest holds (kept footage) first; the
+# rest keep their framing. (Round 7 final review: a card follow of 8 holds
+# measured them in order and never reached the last one — Jobs' payoff
+# 'writing a paper / WITHOUT ONE' sat beside a pale pillar strip for 4 s.)
+SLIVER_MAX_POSITIONS = 10
+
+
+def _clear_slivers(ctx, edl, spans, rect, follows=None, track=None,
+                   what="card", face_floor=None, face_box=None, avoid=()):
+    """(rect, follows, track, note) — a source card's or speaker panel's
+    framing slid off the thin bands a hard straight edge of the source
+    leaves along its edges (picture_cards.sliver_shift), measured over the
+    footage each framing shows: the still rect (per camera shot), each
+    source_track row, and each HELD position of a follow path (consecutive
+    keys at one position slide together, so a held framing never starts to
+    glide), the speaker's measured head kept inside with its margins. A
+    speaker panel passes ``face_floor`` (its face boxes' margin,
+    PANEL_FACE_MARGIN: a slide never takes the face box — ``face_box``, else
+    the measured faces there — closer to an edge than that, or than it
+    already was) and ``avoid`` (the burned-in boxes the framing kept out or
+    showed least of: a slide never shows more of them); a slide that would
+    is refused and named instead. note '' when every edge is clean."""
+    if rect is None or not spans:
+        return rect, follows, track, ""
+    faces = _card_face_samples(ctx, spans)
+    avoid = [list(b) for b in avoid or () if b and len(b) == 4]
+
+    def near_faces(r, lo=None, hi=None):
+        return [f for ft, f in faces
+                if (lo is None or lo - .5 <= ft <= hi + .5)
+                and r[0] <= (f[0] + f[2]) / 2.0 <= r[2]
+                and r[1] <= (f[1] + f[3]) / 2.0 <= r[3]]
+
+    def keep_for(r, lo=None, hi=None):
+        return picture_cards.panel_keep(near_faces(r, lo, hi))
+
+    def slide_ok(old, new, lo=None, hi=None):
+        # never more of a burned-in box, never the face box nearer an edge
+        # than the panel's face margin (or than it already was)
+        if avoid and sum(picture_cards._overlap(new, b) for b in avoid) > \
+                sum(picture_cards._overlap(old, b) for b in avoid) + 1e-6:
+            return False
+        if face_floor is not None:
+            fe = face_box if face_box is not None and not follows else \
+                picture_cards.face_extent(near_faces(old, lo, hi))
+            if fe is not None and picture_cards.face_margin(new, fe) < min(
+                    face_floor, picture_cards.face_margin(old, fe)) - 1e-4:
+                return False
+        return True
+
+    cleared, refused = [], []
+    budget = [SLIVER_MAX_POSITIONS]
+
+    def judged(r, new, found, lo=None, hi=None):
+        if any(abs(u - v) > 1e-4 for u, v in zip(new, r)) and \
+                not slide_ok(r, new, lo, hi):
+            new = [round(float(v), 4) for v in r]
+            found = [(axis, side, depth, 0.0) for axis, side, depth, _m in found]
+        for _axis, side, depth, moved in found:
+            (cleared if moved else refused).append((side, depth, abs(moved)))
+        return new
+
+    def fix(r, windows, lo=None, hi=None):
+        if budget[0] <= 0 or not windows:
+            return r
+        budget[0] -= 1
+        xs, ys = _edge_lines(ctx, windows, "card_edge")
+        new, found = picture_cards.sliver_shift(r, xs, ys, keep_for(r, lo, hi))
+        return judged(r, new, found, lo, hi)
+
+    rect = [round(float(v), 4) for v in rect]
+    if follows:
+        out, holds_all = [], []
+        for span in follows:
+            span = dict(span)
+            keys = [list(k) for k in span.get("k") or []]
+            span["k"] = keys
+            t0, t1 = float(span.get("t0", 0.0)), float(span.get("t1", 0.0))
+            holds = []                    # [[first, last]] key indices
+            for i, key in enumerate(keys):
+                if holds and abs(key[1] - keys[holds[-1][1]][1]) < 1e-4 \
+                        and abs(key[2] - keys[holds[-1][1]][2]) < 1e-4:
+                    holds[-1][1] = i
+                else:
+                    holds.append([i, i])
+            for h, (i, j) in enumerate(holds):
+                lo = float(keys[i][0]) if h else t0
+                hi = float(keys[j][0]) if h < len(holds) - 1 else t1
+                if h:
+                    lo = float(keys[holds[h - 1][1]][0])
+                if h < len(holds) - 1:
+                    hi = float(keys[holds[h + 1][0]][0])
+                wins = _clip_windows(spans, lo, hi)
+                holds_all.append((sum(b - a for a, b in wins), len(out), i, j, lo, hi, wins))
+            out.append(span)
+        # the framings the short dwells on longest are measured first (the
+        # budget skips a passing hold, never the payoff's)
+        for _kept, s_i, i, j, lo, hi, wins in sorted(holds_all, key=lambda h: (-h[0], h[1], h[2])):
+            keys = out[s_i]["k"]
+            cx, cy = float(keys[i][1]), float(keys[i][2])
+            r = picture_cards.recentre(rect, (cx, cy))
+            new = fix(r, wins, lo, hi)
+            dx, dy = new[0] - r[0], new[1] - r[1]
+            for n in range(i, j + 1):
+                keys[n] = [keys[n][0], round(cx + dx, 4), round(cy + dy, 4)]
+        follows = out
+    elif track:
+        out = []
+        for row in track:
+            row = dict(row)
+            lo, hi = float(row["t0"]), float(row["t1"])
+            row["source"] = fix(list(row["source"]), _clip_windows(spans, lo, hi),
+                                lo, hi)
+            out.append(row)
+        track = out
+    else:
+        pieces = _card_pieces(ctx, edl, spans)
+        if len(pieces) == 1:
+            rect = fix(rect, pieces[0][2])
+        elif pieces:
+            # one still rect over several shots: a slide must clear every one
+            lines = [_edge_lines(ctx, fr, "card_edge")
+                     for _a, _b, fr, _lo, _hi in pieces[:SLIVER_MAX_POSITIONS]]
+            new, found = picture_cards.sliver_shift(
+                rect, sorted({p for lx, _ly in lines for p in lx}),
+                sorted({p for _lx, ly in lines for p in ly}), keep_for(rect))
+            rect = judged(rect, new, found)
+    bits = []
+    if cleared:
+        side, depth, moved = max(cleared, key=lambda c: c[1])
+        bits.append(
+            f"EDGE SLIVER CLEARED: a hard straight edge of the source (a pillar, "
+            f"a door or window frame) left a {max(1, round(depth * 100))}%-wide "
+            f"band along the {what}'s {side} edge; the framing slid {moved:.3f} "
+            "past it (size kept, the head still held"
+            + (f"; {len(cleared)} held positions" if len(cleared) > 1 else "") + ")")
+    if refused:
+        side, depth, _m = max(refused, key=lambda c: c[1])
+        bits.append(
+            f"EDGE SLIVER (look before acting): a hard straight edge of the source "
+            f"leaves a {max(1, round(depth * 100))}%-wide band along the {what}'s "
+            f"{side} edge, and sliding past it would cut the speaker's head, "
+            "crowd the face toward an edge, show more of a screen box or bring "
+            "in another edge — look_at it: a scenery edge can stay; a "
+            "sliver that reads as a border wants a source rect of its own")
+    return rect, follows, track, "; ".join(bits)
+
+
+def _step_sliver(ctx, card, k, a_src, b_src, src_w, src_h, W, H):
+    """'' or why a cut step of scale ``k`` on source card ``card`` over
+    SOURCE [a_src, b_src] (cut_steps.conceal_jump_cuts) would open a thin
+    band of a hard straight edge along the card's edge that the card's own
+    framing does not show (a wide step that brings a pillar's edge in)."""
+    a, b = float(a_src), float(b_src)
+    box = card.get("box")
+    if not box:
+        return ""
+    # every framing the step spans: its ends, its middle and each key of a
+    # follow path inside it (a card that glides mid-step can bring the
+    # pillar in after the middle: integrated Jobs render, 25-27 s)
+    times = {a + 1e-3, (a + b) / 2.0, b - 1e-3}
+    for span in card.get("follow") or []:
+        for key in (span.get("k") or []) if isinstance(span, dict) else []:
+            try:
+                if a < float(key[0]) < b:
+                    times.add(float(key[0]))
+            except (TypeError, ValueError, IndexError):
+                continue
+    rects = []
+    for t in sorted(times):
+        r = picture_cards.source_at(card, t)
+        if r:
+            r = picture_cards.match_rect(r, box, src_w, src_h, W, H)
+            if r not in rects:
+                rects.append(r)
+    if not rects:
+        return ""
+    xs, ys = _edge_lines(ctx, [(a, b)], "step_edge")
+    if not (xs or ys):
+        return ""
+    new = []
+    for rect in rects:
+        _r, before = picture_cards.sliver_shift(rect, xs, ys)
+        _r, after = picture_cards.sliver_shift(picture_cards.step_rect(rect, k), xs, ys)
+        # a band the step deepens counts too: a framing slid just past an
+        # edge holds it in its falloff (depth 0), which a wide step opens
+        had = {(f[0], f[1]): f[2] for f in before}
+        new += [f for f in after if f[2] > had.get((f[0], f[1]), -1.0) + 0.005]
+    if not new:
+        return ""
+    _axis, side, depth, _m = max(new, key=lambda f: f[2])
+    return (f"a {'wide' if k < 1 else 'tight'} step here would open a "
+            f"{max(1, round(depth * 100))}%-wide band of a straight edge in the "
+            f"source (a pillar, a frame) along the card's {side} edge, which "
+            "reads as a border — the cut stays bare")
+
+
 def _card_canvas(ctx, spans, rect):
     """(centre, edge) colours of a dark canvas sampled from the footage the
     card shows — the mean colour of ``rect`` over up to three source frames
@@ -16177,9 +16636,20 @@ def _speaker_note(info, k, moved_from=None, concealed=True):
     following panel's is not: its rect moves)."""
     bits = []
     lead = (info or {}).get("lead")
-    bits.append("face held whole with chin and hair margins"
+    fm, ff = (info or {}).get("face_margin"), (info or {}).get("face_frame")
+    held = ""
+    if fm is not None and ff is not None:
+        held = (f" (the face box {max(0.0, min(fm, 1.0)) * 100:.0f}% of the panel "
+                f"or more from its edges, the face {ff * 100:.0f}% of the frame "
+                "height)")
+    bits.append("face held whole with chin and hair margins" + held
                 + (f", lead room to the {'left' if lead < 0 else 'right'} where "
                    "they look" if lead else ""))
+    if (info or {}).get("tier"):
+        bits.append("NOTE: the source has no room for the "
+                    f"{picture_cards.PANEL_FACE_MARGIN * 100:.0f}% face margin "
+                    "on every side at this panel's shape — look at the edge "
+                    "the face is nearest")
     if (info or {}).get("follow"):
         bits.append("the panel FOLLOWS the speaker inside the shot")
     seen = (info or {}).get("seen")
@@ -16190,16 +16660,24 @@ def _speaker_note(info, k, moved_from=None, concealed=True):
     cover = float((info or {}).get("inset") or 0.0)
     if cover >= 1.0:
         share = cover - 1.0
+        if not concealed:
+            how = ("shows it — NOT softened: the panel follows the speaker, so "
+                   "the corner moves; look at it")
+        elif (info or {}).get("conceal") and not (info or {}).get("trimmed"):
+            how = ("shows it, softened (blurred, darkened, feathered in: it "
+                   "reads as shadow, not a second screen)")
+        elif (info or {}).get("conceal"):
+            how = ("shows it, softened only away from the face (the softening "
+                   "and its feather are trimmed back so no smear lies on the "
+                   "head; the box's edge nearest the face shows as it is)")
+        else:
+            how = ("shows it as it is (softening it would lay a smear on the "
+                   "face — the face stays clean)")
         bits.append(
             f"NOTE: the burned-in screen box touches the speaker's face in the "
-            f"source — no framing that holds the face can leave it out, so "
-            f"{max(1, round(share * 100))}% of the panel (a corner) still "
-            + ("shows it, softened (blurred, darkened, feathered in: it reads "
-               "as shadow, not a second screen)" if concealed else
-               "shows it — NOT softened: the panel follows the speaker, so the "
-               "corner moves; look at it")
-            + "; the face wins (owner rule). If that corner still distracts, "
-            "show the speaker full-bleed and the screen as its own cut-in card")
+            f"source — no framing that holds the face with its margins can "
+            f"leave it out, so {max(1, round(share * 100))}% of the panel (a "
+            f"corner) {how}; the face wins (owner rule)")
     elif (info or {}).get("avoid"):
         bits.append("the burned-in screen box kept out of the panel")
     if moved_from is not None:
@@ -16212,6 +16690,73 @@ def _speaker_note(info, k, moved_from=None, concealed=True):
                         "(the head's margins from the panel edge, or the "
                         "burned-in box kept out)")
     return "; ".join(bits)
+
+
+# The speaker + screen fallback (judges, Oct 2026, round 7): where the
+# burned-in box touches the speaker's face, a stack's speaker panel shows a
+# corner of it beside the face. The two other layouts are measured with the
+# same face-first rules — a speaker card alone (the screen's figures carried
+# by stat graphics in the band; the screen a cut-in for the beat it is
+# read) and the speaker full-bleed (the screen as its own cut-in card) —
+# and the result names the cleanest of the three, and why.
+PICTURE_CARD_BOX = [.06, .24, .94, .74]
+
+
+def _stack_layout_note(ctx, edl, spans, canvas, video, info, card_id, start,
+                       end):
+    """The LAYOUT line for a stack whose speaker panel shows a corner of a
+    burned-in box (``info``: its panel_framing info): which of the stack,
+    a speaker card alone and the speaker full-bleed frames the face with
+    its margins and shows the least of the box, measured. '' when it cannot
+    be measured."""
+    try:
+        sw, sh = float(video.get("width") or 0), float(video.get("height") or 0)
+    except (TypeError, ValueError):
+        return ""
+    if not (sw and sh) or not info.get("face"):
+        return ""
+    W, H = canvas
+    corner = max(0.0, float(info.get("inset") or 0.0) - 1.0)
+    avoid = [list(b) for b in info.get("avoid") or []]
+    try:
+        crect, cinfo, _cf, _fail = _panel_speaker(ctx, edl, spans, PICTURE_CARD_BOX,
+                                                  canvas, video)
+    except Exception:
+        crect, cinfo = None, None
+    card = None
+    if crect is not None and cinfo and not cinfo.get("tier"):
+        card = max(0.0, float(cinfo.get("inset") or 0.0) - 1.0)
+    win, shown, strip = picture_cards.crop_clear(sw, sh, W, H, info["face"], avoid)
+    a, b = float(start), float(end)
+    if card is not None and float(cinfo.get("inset") or 0.0) < 1.0:
+        rect = "[" + ", ".join(f"{v:.3f}" for v in crect) + "]"
+        return ("BETTER LAYOUT (measured): a speaker card ALONE leaves the "
+                "screen box out with the face's margins held — "
+                f"set_picture_card(id='{card_id}', start={a:g}, end={b:g}, "
+                f"box={json.dumps(PICTURE_CARD_BOX)}, source={rect}, "
+                "fit='crop'); let stat graphics in the band above carry the "
+                "screen's figures, or cut to the screen alone "
+                "(source='inset') for the beat it is read. This stack keeps "
+                f"a {max(1, round(corner * 100))}% corner of the box beside "
+                "the face.")
+    if win is not None and shown < 1e-5:
+        return ("BETTER LAYOUT (measured): the speaker FULL-BLEED (no card; "
+                f"the reframe's crop at x {win[0]:.2f}-{win[2]:.2f} of the "
+                "source) leaves the screen box out with the face's margins "
+                f"held — remove_picture_card('{card_id}') and show the screen "
+                "as its own cut-in card (set_picture_card source='inset') "
+                "for the beat it is read. This stack keeps a "
+                f"{max(1, round(corner * 100))}% corner of the box beside the "
+                "face.")
+    alone = ("a speaker card alone would show "
+             f"{max(1, round(card * 100))}% of it" if card is not None else
+             "a speaker card alone cannot hold the face with its margins")
+    bleed = (f"the speaker full-bleed a {max(1, round(strip * 100))}%-wide strip "
+             "of it down the frame" if win is not None else
+             "the speaker full-bleed cannot hold the face with its margins")
+    return (f"LAYOUT (measured): this stack is the cleanest layout here — "
+            f"{alone}, {bleed}; the stack shows the box whole in its own "
+            "panel and keeps the speaker's face clean.")
 
 
 def _open_caption_gaps(boxes, gap=STACK_CAPTION_GAP):
@@ -16249,7 +16794,8 @@ def _open_caption_gaps(boxes, gap=STACK_CAPTION_GAP):
 
 def _speaker_panel(ctx, edl, spans, box, source, fit, canvas, video, k):
     """A stack panel that shows the speaker, solved face-first: (box, rect,
-    follow spans or None, note, conceal boxes or None), a REJECTED string when no framing of any
+    follow spans or None, note, conceal boxes or None, framing info), a
+    REJECTED string when no framing of any
     width of this box can hold the face, or None when this is not a
     speaker panel (or no face was measured) — the caller resolves it as
     before. A speaker panel is source 'auto' (crop; a low-resolution
@@ -16307,12 +16853,37 @@ def _speaker_panel(ctx, edl, spans, box, source, fit, canvas, video, k):
         # the follow path moves the rect's centre: keep it on the fitted rect
         frect = picture_cards.recentre(frect, (
             (rect[0] + rect[2]) / 2.0, (rect[1] + rect[3]) / 2.0))
+    # a thin band of a pillar or frame edge along the panel's edge (an
+    # 'auto' panel only: an editor's rect keeps its framing) — never at
+    # the face's margin or by showing more of a burned-in box
+    sliver = ""
+    if prefer is None:
+        frect, follows, _track, sliver = _clear_slivers(
+            ctx, edl, spans, frect, follows, None, what="panel",
+            face_floor=picture_cards.PANEL_FACE_MARGIN, face_box=info.get("face"),
+            avoid=info.get("avoid"))
+        if sliver and info.get("face"):
+            # the note reports the framing as slid
+            area = max(1e-9, (frect[2] - frect[0]) * (frect[3] - frect[1]))
+            cover = sum(picture_cards._overlap(frect, b)
+                        for b in info.get("avoid") or []) / area
+            fe = picture_cards.face_extent([b for _t, b, _l in
+                                            (_panel_samples(ctx, edl, spans)[0] or [])])
+            info = dict(info, inset=0.0 if cover < 1e-5 else 1.0 + round(cover, 2))
+            if fe is not None and not follows:
+                info["face_margin"] = round(picture_cards.face_margin(frect, fe), 3)
     # what of a burned-in box the face forced in is softened in the render
     # (a still panel only: a following panel's rect moves over it)
-    conceal = None
+    conceal, trimmed = None, False
     if float(info.get("inset") or 0.0) >= 1.0 and not follows:
-        conceal = [list(b) for b in info.get("avoid") or []
-                   if picture_cards._overlap(frect, b) > 0] or None
+        # softened, but never over the head: the softening (and its
+        # feather) is trimmed back from the face (conceal_clear)
+        conceal, trimmed = picture_cards.conceal_clear(
+            frect, [b for b in info.get("avoid") or []
+                    if picture_cards._overlap(frect, b) > 0],
+            info.get("keep"), fbox, sw, sh, W, H)
+        conceal = conceal or None
+        info = dict(info, conceal=conceal, trimmed=trimmed)
     note = (f"{int(sw)}x{int(sh)} speaker rect "
             f"[{', '.join(f'{v:.3f}' for v in frect)}] -> box "
             f"[{', '.join(f'{v:.3f}' for v in fbox)}], enlarged {kk:.2f}x; "
@@ -16321,7 +16892,9 @@ def _speaker_panel(ctx, edl, spans, box, source, fit, canvas, video, k):
     if tried != list(box):
         note += (f"; the box narrowed to x {tried[0]:.3f}-{tried[2]:.3f} so the "
                  "speaker's head fits its shape")
-    return fbox, [round(v, 4) for v in frect], follows, note, conceal
+    if sliver:
+        note += "; " + sliver
+    return fbox, [round(v, 4) for v in frect], follows, note, conceal, info
 
 
 def _resolve_panel(ctx, edl, spans, box, source, fit, canvas, follow=False,
@@ -16509,6 +17082,10 @@ def set_picture_card(ctx, id, start, end, box=None, fit=None, radius=.045,
         s0, e0 = float(start), float(end)
     except (TypeError, ValueError):
         return "REJECTED: start and end are program seconds (numbers)."
+    s0, e0, snap_notes = _snap_window_to_cuts(ctx, edl, s0, e0)
+    if snap_notes:
+        start, end = s0, e0
+        report += snap_notes
     spans = _source_spans(edl, s0, e0) if has_video else []
     if has_video and (source != "program" or panels) and not spans:
         return ("REJECTED: no main footage plays between "
@@ -16529,9 +17106,43 @@ def set_picture_card(ctx, id, start, end, box=None, fit=None, radius=.045,
         if err:
             return err
     else:
-        card_box = [.06, .24, .94, .74]
+        card_box = list(PICTURE_CARD_BOX)
     card_source, card_track, card_follow = None, None, None
     video_lowres = picture_cards.is_lowres(video.get("width"), video.get("height"))
+    # (a 9:16 frame only — ARCHIVAL_CARD_BOX is placed between its bands — and
+    # one speaker: a two-shot keeps the whole stage, as a crop would decide
+    # who to frame)
+    archival = (panels is None and source == "auto" and fit in (None, "crop")
+                and spans and picture_cards.is_archival(video.get("width"),
+                                                        video.get("height"))
+                and canvas[1] >= 1.7 * canvas[0])
+    group = archival and bool(_card_faces(ctx, spans)) and \
+        _card_group(ctx, edl, spans)
+    if group and box is None and fit is None:
+        report.append(
+            "archival 4:3 two-shot: the whole stage (two or more people share "
+            "the shot, so a crop would decide who the card shows; fit='crop' "
+            "frames the largest face)")
+    elif archival and box is None and _card_faces(ctx, spans):
+        # an archival 4:3 speaker: a full-width, squarer window framed on
+        # the speaker, not the 4:3 postage stamp of the whole stage
+        card_box, fit = list(picture_cards.ARCHIVAL_CARD_BOX), "crop"
+        report.append(
+            "archival 4:3 speaker: a full-width, squarer window "
+            f"(y {card_box[1]:g}-{card_box[3]:g}, "
+            f"{(card_box[3] - card_box[1]) * 100:.0f}% of the frame height, "
+            "the most that keeps the headline band above it clear of the "
+            "free-tier mark and a whole caption band below it) framed on the "
+            "speaker (pass fit='pad' to show the whole stage as a 4:3 card)")
+    elif archival and not group and box is not None and fit == "crop" and \
+            card_box[3] - card_box[1] < .40 and \
+            (card_box[2] - card_box[0]) * canvas[0] > \
+            1.2 * (card_box[3] - card_box[1]) * canvas[1]:
+        report.append(
+            f"NOTE: this archival speaker card is {(card_box[3] - card_box[1]) * 100:.0f}% "
+            "of the frame height and landscape — omit box for the larger, "
+            f"squarer default window ({picture_cards.ARCHIVAL_CARD_BOX}) with "
+            "the headline and caption bands kept")
     cuts = (_card_cuts(ctx, edl, spans)
             if spans and (source != "program" or panels) else [])
     cut_list = ", ".join(f"{t:g}s" for t in cuts[:3])
@@ -16609,7 +17220,7 @@ def set_picture_card(ctx, id, start, end, box=None, fit=None, radius=.045,
             if isinstance(spk, str):
                 return spk
             if spk:
-                sbox, srect, sfollow, note, sconceal = spk
+                sbox, srect, sfollow, note, sconceal, sinfo = spk
                 row = {"box": sbox, "source": srect}
                 if sfollow:
                     row["follow"] = sfollow
@@ -16617,6 +17228,11 @@ def set_picture_card(ctx, id, start, end, box=None, fit=None, radius=.045,
                     row["conceal"] = sconceal
                 rows_panels.append(row)
                 report.append(f"panel {k + 1}: {note}")
+                if float((sinfo or {}).get("inset") or 0.0) >= 1.0:
+                    layout = _stack_layout_note(ctx, edl, spans, canvas, video,
+                                                sinfo, id, start, end)
+                    if layout:
+                        report.append(layout)
                 continue
             pbox, prect, _pfit, note, _track, _follows = _resolve_panel(
                 ctx, edl, spans, pbox, psrc, pfit, canvas)
@@ -16632,6 +17248,12 @@ def set_picture_card(ctx, id, start, end, box=None, fit=None, radius=.045,
         if rbox is None:
             return note
         card_box, card_source, fit = rbox, [round(v, 4) for v in rect], rfit
+        if source == "auto" and fit == "crop":
+            # a thin band of a pillar or frame edge along the card's edge
+            card_source, card_follow, card_track, sliver = _clear_slivers(
+                ctx, edl, spans, card_source, card_follow, card_track)
+            if sliver:
+                note += "; " + sliver
         look_rect = card_source
         report.append(note)
     fit = fit or "crop"
@@ -17477,7 +18099,239 @@ def _freeze_frame_asset(ctx, src_t, blur=0.0, darken=0.0):
     return key, None
 
 
-def add_freeze_frame(ctx, at_output_s, duration_s=2.5, text=None,
+# Payoff holds (round 7; judges: Thiel's punchline got 0.5 s and Elon's laugh
+# 0.55 s before the end card — the references give a button 0.8-1.5 s).
+HOLD_DEFAULT_S = 1.0
+HOLD_MAX_S = 3.0
+# Room tone: a pause in the source at least this long once ROOM_TONE_EDGE_S
+# is trimmed off both ends (clear of the words around it).
+ROOM_TONE_MIN_S = 0.3
+ROOM_TONE_EDGE_S = 0.08
+ROOM_TONE_REACH_S = 90.0
+
+
+def _room_tone_span(ctx, edl, near_src, dur):
+    """[a, b] source seconds of the source's own room tone for a hold of
+    ``dur`` near SOURCE second ``near_src``, or None. Candidates are the
+    speech gaps (from the words) and the measured quiet spans, each trimmed
+    clear of the words around it and never before the first kept second
+    (where the renderer's source read begins). Measured on the sound when
+    the context can read it (the quietest wins, longer and nearer
+    preferred), else the waveform-quiet ones first."""
+    words = ctx.index.get("words") or []
+    silences = [(float(a), float(b)) for a, b in
+                (ctx.index.get("silences") or []) if b > a]
+    keep = edl.get("keep") or []
+    first = min((float(a) for a, _b in keep), default=0.0)
+    src_dur = float(ctx.duration or 0.0) or None
+    cands = []
+    for g in audit.speech_gaps(words, ctx.duration, min_s=ROOM_TONE_MIN_S
+                               + 2 * ROOM_TONE_EDGE_S, silences=silences):
+        cands.append((float(g["start"]), float(g["end"]),
+                       float(g.get("quiet_frac") or 0.0)))
+    for a, b in silences:
+        cands.append((a, b, 1.0))
+    spans = []
+    for a, b, q in cands:
+        a, b = a + ROOM_TONE_EDGE_S, b - ROOM_TONE_EDGE_S
+        a = max(a, first)
+        if src_dur:
+            b = min(b, src_dur - 0.05)
+        if b - a < ROOM_TONE_MIN_S - 1e-6:
+            continue
+        if abs((a + b) / 2.0 - near_src) > ROOM_TONE_REACH_S:
+            continue
+        spans.append((round(a, 3), round(min(b, a + dur), 3), q))
+    if not spans:
+        return None
+    spans = sorted(set(spans), key=lambda x: abs((x[0] + x[1]) / 2.0
+                                                  - near_src))[:8]
+    levels = {}
+    hook = getattr(ctx, "cut_sound_source", None)
+    if callable(hook):
+        try:
+            import cut_audio
+            source = hook()
+            got = cut_audio.fetch(source, [(a, b) for a, b, _q in spans],
+                                  timeout=CUT_SOUND_BUDGET_S) if source \
+                else {}
+            for (a, b), x in got.items():
+                if len(x):
+                    import numpy as np
+                    r = float(np.sqrt(np.mean(np.square(x, dtype=np.float64))))
+                    levels[(round(a, 3), round(b, 3))] = \
+                        20.0 * math.log10(r + 1e-12)
+        except Exception:  # noqa: BLE001 — unmeasured is a fallback
+            levels = {}
+
+    def score(sp):
+        a, b, q = sp
+        db = levels.get((a, b))
+        short = max(0.0, dur - (b - a))       # looped: a little worse
+        far = abs((a + b) / 2.0 - near_src) / 60.0
+        return ((db if db is not None else -40.0 - 20.0 * q)
+                + 6.0 * short + far)
+    a, b, _q = min(spans, key=score)
+    return [a, b]
+
+
+def _extend_to_end(edl, old_ends, new_end):
+    """Program items that ended with the programme (a payoff graphic held
+    to the end card, a zoom, a text) end with the new one: the hold keeps
+    them over the held frame. ``old_ends``: the programme's end(s) before.
+    Returns the ids moved."""
+    ends = [float(x) for x in (old_ends if isinstance(old_ends, (list, tuple))
+                               else [old_ends])]
+
+    def ended(item):
+        return isinstance(item, dict) and item.get("end") is not None and \
+            any(abs(float(item["end"]) - x) <= 0.06 for x in ends)
+    moved = []
+    for item in edl.get("motion") or []:
+        if ended(item):
+            item["end"] = round(new_end, 3)
+            moved.append(str(item.get("id")))
+    for item in edl.get("texts") or []:
+        if ended(item) and not item.get("anchor_insert"):
+            item["end"] = round(new_end, 2)
+            moved.append(str(item.get("id")))
+    for item in edl.get("vectors") or []:
+        if ended(item):
+            item["end"] = round(new_end, 3)
+            moved.append(str(item.get("id")))
+    fx = edl.get("effects") or {}
+    for z in fx.get("zooms") or []:
+        if ended(z):
+            z["end"] = round(new_end, 2)
+            moved.append(str(z.get("id")))
+    # a windowed finish (grain, a vignette, a custom look) that ran to the
+    # end: the held frame keeps it, or the still would lose its grain
+    # mid-hold. A one-off event (a flash, a shake) keeps its moment.
+    for key in ("stylize", "custom"):
+        for item in fx.get(key) or []:
+            if ended(item) and item.get("start") is not None and \
+                    item.get("kind") not in _HOLD_EVENT_STYLES:
+                item["end"] = round(new_end, 3)
+                moved.append(str(item.get("id") or key))
+    return moved
+
+
+# Stylize kinds that are a moment, not a finish: never stretched over a hold.
+_HOLD_EVENT_STYLES = ("flash", "shake", "motion_blur", "stabilize")
+
+
+def _hold_frame(ctx, edl, at, dur, dim, text=None, subtitle=None,
+                template="title", color=None, accent_color=None, font=None,
+                ignored=()):
+    """add_freeze_frame(audio_mode='hold'): hold the composed frame right
+    before ``at`` (the programme's end when ``at`` is within 0.25 s of it)
+    for ``dur`` seconds, dimmed by ``dim``, over the source's room tone.
+
+    Written as an image insert with ``hold`` (schemas.InsertItem): the
+    renderer clones the previous block's last composed frame (crop, card,
+    grade) and plays the room tone under it; the stored still — the source
+    frame — is the fallback and what the studio shows. Items that ended
+    with the programme (the payoff graphic, a zoom) end with the hold."""
+    edl = copy.deepcopy(edl)
+    keep = [list(k) for k in (edl.get("keep") or [])]
+    inserts = [dict(i) for i in (edl.get("inserts") or [])]
+    speed = edl.get("speed") or []
+    tl = Timeline(keep, inserts, speed)
+    prog = float(tl.out_duration)
+    at_end = at >= prog - 0.25
+    fps = _index_fps(ctx.index)
+    pre_bounds = keep_boundaries(keep, speed)
+    if at_end:
+        target_pre = pre_bounds[-1]
+    else:
+        final_of = {b: b + sum(d for a2, d in tl.ins if a2 <= b + 1e-6)
+                    for b in pre_bounds}
+        target_pre = min(pre_bounds, key=lambda b: abs(final_of[b] - at))
+        if abs(final_of[target_pre] - at) > 0.25:
+            return (f"REJECTED: a hold sits on a cut — {at}s is "
+                    f"{abs(final_of[target_pre] - at):.2f}s from the nearest "
+                    f"one ({final_of[target_pre]:.2f}s). Hold at the end of "
+                    "the programme (the payoff) or on a cut.")
+    # A hold already on this cut is this one, re-timed (a second hold after
+    # it would hold the first one's stored still, not the composed frame).
+    prior = next((i for i in inserts if isinstance(i.get("hold"), dict)
+                  and abs(float(i["at_output_s"]) - target_pre) < 1e-6), None)
+    prog_before = prog
+    if prior is not None:
+        inserts = [i for i in inserts if i is not prior]
+        tl = Timeline(keep, inserts, speed)
+        prog = float(tl.out_duration)
+    if at_end:
+        last_out = prog - 0.5 / fps
+    else:
+        last_out = target_pre + sum(d for a2, d in tl.ins
+                                    if a2 <= target_pre + 1e-6) - 0.5 / fps
+    src_t = tl.out_to_src(max(0.0, last_out))
+    if src_t is None:
+        return ("REJECTED: the frame before that point is inserted media, "
+                "not the main video — a hold holds the footage. Hold where "
+                "the programme shows the speaker.")
+    key, err = _freeze_frame_asset(ctx, src_t, 0.0, dim)
+    if err:
+        return err
+    room = _room_tone_span(ctx, edl, src_t, dur)
+    hold = {"room_tone": room} if room else {}
+    if dim:
+        hold["dim"] = round(float(dim), 3)
+    item = {"id": prior["id"] if prior else _next_item_id(inserts, "ins"),
+            "asset_key": key,
+            "kind": "image", "at_output_s": target_pre, "duration_s": dur,
+            "fit": "crop", "hold": hold}
+    edl["inserts"] = inserts + [item]
+    old_tl = Timeline(keep, inserts, speed)
+    new_tl = Timeline(keep, edl["inserts"], speed)
+    notes = _remap_program_items(edl, old_tl, new_tl)
+    extended = _extend_to_end(edl, (prog, prog_before), prog + dur) \
+        if at_end else []
+    where = ("at the end of the programme" if at_end
+             else f"on the cut at {at:.2f}s")
+    result = ctx.write_edl(
+        edl, f"held the frame {where} for {dur:g}s"
+        + (f", dimmed {dim:g}" if dim else "") + f" [{item['id']}]")
+    if not result.startswith("EDL v"):
+        return result
+    bits = [f"HOLD: the picture stops on the frame the viewer sees "
+            f"(source {src_t:.2f}s, exactly as composed — crop, card and "
+            f"grade) for {dur:g}s {where}"]
+    if room:
+        bits.append(f"with the source's own room tone ({room[0]:.2f}-"
+                    f"{room[1]:.2f}s{', looped' if room[1] - room[0] < dur - 1e-3 else ''}) "
+                    "under it; the last words fade into it over 0.15 s")
+    else:
+        bits.append("over silence (no pause in the source to lift room "
+                    "tone from)")
+    if extended:
+        bits.append("held over it too: " + ", ".join(extended))
+    if ignored:
+        bits.append("ignored for a hold (it is the composed frame, still): "
+                    + ", ".join(ignored))
+    result = result.split(". Before:")[0] + "\n" + "; ".join(bits) + "."
+    if notes:
+        result += "\n" + "\n".join(notes)
+    t = (text or "").strip()
+    if t:
+        win = insert_windows(edl["inserts"], new_tl).get(item["id"])
+        if win:
+            res = add_text(ctx, t, win[0], win[1], template=template,
+                           x=0.5, y=0.46, color=color,
+                           accent_color=accent_color, font=font,
+                           entrance="fade", exit="fade")
+            result += "\n" + str(res).split("\n")[0]
+        sub = (subtitle or "").strip()
+        if sub and win:
+            res = add_text(ctx, sub, win[0], win[1], template="subtitle",
+                           x=0.5, y=0.66, color=color,
+                           entrance="fade", exit="fade")
+            result += "\n" + str(res).split("\n")[0]
+    return result
+
+
+def add_freeze_frame(ctx, at_output_s, duration_s=None, text=None,
                      subtitle=None, blur=0.0, darken=0.0, motion="zoom_in",
                      template="title", color=None, accent_color=None,
                      font=None, audio_mode="pause"):
@@ -17495,14 +18349,29 @@ def add_freeze_frame(ctx, at_output_s, duration_s=2.5, text=None,
     It is a real cut: the programme pauses on the still for `duration_s` and
     everything after shifts later, exactly like a title card — which is why
     captions never land on it and no mute is needed.
+
+    audio_mode='hold' (round 7) is the PAYOFF HOLD: the picture stops on the
+    frame the viewer is looking at — exactly as composed — for duration_s
+    (default 1.0 s) with the source's own room tone under it, so a
+    punchline or a laugh gets air before the end card (_hold_frame).
     """
     try:
         at = float(at_output_s)
     except (TypeError, ValueError):
         return ("REJECTED: at_output_s must be a number — the moment in the "
                 "FINAL edited video to freeze, in seconds.")
+    audio_mode = str(audio_mode or "pause").strip().lower()
+    if audio_mode not in ("pause", "continue", "hold"):
+        return ("REJECTED: audio_mode must be 'pause' (insert a silent hold "
+                "and shift what follows), 'continue' (freeze only the "
+                "picture while the existing speech/audio keeps running) or "
+                "'hold' (hold the composed frame with room tone: the payoff "
+                "button before the end card).")
     try:
-        dur = round(min(max(float(duration_s), 0.3), 10.0), 2)
+        dur = round(min(max(float(
+            duration_s if duration_s is not None
+            else (HOLD_DEFAULT_S if audio_mode == "hold" else 2.5)),
+            0.3), 10.0), 2)
     except (TypeError, ValueError):
         return "REJECTED: duration_s must be a number of seconds."
     try:
@@ -17510,11 +18379,6 @@ def add_freeze_frame(ctx, at_output_s, duration_s=2.5, text=None,
         darken = min(max(float(darken or 0.0), 0.0), 0.85)
     except (TypeError, ValueError):
         return "REJECTED: blur and darken must be numbers 0-1."
-    audio_mode = str(audio_mode or "pause").strip().lower()
-    if audio_mode not in ("pause", "continue"):
-        return ("REJECTED: audio_mode must be 'pause' (insert a silent hold "
-                "and shift what follows) or 'continue' (freeze only the "
-                "picture while the existing speech/audio keeps running).")
     if not ctx.has_main_video:
         return ("REJECTED: there is no main video to freeze a frame from. "
                 "insert_media an image instead.")
@@ -17522,6 +18386,16 @@ def add_freeze_frame(ctx, at_output_s, duration_s=2.5, text=None,
     prog = program_duration(edl)
     if prog <= 0.2:
         return "REJECTED: there is no program yet to freeze."
+    if audio_mode == "hold":
+        return _hold_frame(ctx, edl, at, min(dur, HOLD_MAX_S), darken,
+                           text=text, subtitle=subtitle, template=template,
+                           color=color, accent_color=accent_color, font=font,
+                           # the signature's drift is the legacy freeze's,
+                           # not something the caller asked of a hold
+                           ignored=[n for n, v in (
+                               ("blur", blur),
+                               ("motion", None if motion == "zoom_in"
+                                else motion)) if v])
     at = round(min(max(at, 0.0), max(0.0, prog - 0.05)), 2)
     tl = Timeline([list(k) for k in (edl.get("keep") or [])],
                   edl.get("inserts") or [], edl.get("speed") or [])
@@ -20371,9 +21245,13 @@ def audit_captions(ctx, offset=0, limit=80):
                     state["word_count"] <= 2 for state in states) / len(states) > .6:
                 warnings.append("Most phrase states have only one or two words; review reading cadence")
     unbacked_mutes = []
+    # a hook-tier title owns its window (captions.hook_owns_zone): it is the
+    # text covering the captions it mutes
+    hook_titles = [{"start": a, "end": b, "text": "hook"} for a, b in caplib.hook_zone_spans(edl)]
     for start, end in caplib.effective_caption_mutes(edl):
         cursor = start
-        for text in sorted(edl.get("texts") or [], key=lambda t: t.get("start", 0)):
+        for text in sorted(list(edl.get("texts") or []) + hook_titles,
+                           key=lambda t: t.get("start", 0)):
             if not str(text.get("text") or "").strip():
                 continue
             left, right = float(text.get("start", 0)), float(text.get("end", 0))
@@ -24519,9 +25397,19 @@ def punch_in_on_emphasis(ctx, count=None, strength=None):
                 "at the very end of the program. Nothing was written.")
     fx["zooms"] = zooms
     edl["effects"] = fx
+    # each punch frames the face tighter: a graphic on screen under it is
+    # checked against the face as framed and placed again where it now
+    # covers it (as add_zoom does)
+    new_ids = {zid for _w, _pt, zid, *_rest in placed}
+    camera_notes = []
+    for z in zooms:
+        if z.get("id") in new_ids:
+            camera_notes += motion_tools.keep_out_under_camera(ctx, edl, z["start"], z["end"])
     res = ctx.write_edl(
         edl, f"{len(placed)} distributed emphasis zoom(s) on meaningful "
              "vocally stressed words")
+    if res.startswith("EDL v") and camera_notes:
+        res += "".join("\n" + n for n in camera_notes)
     if res.startswith("EDL v"):
         res += ("\nPunch-ins (program time, from measured vocal stress; "
                 "each snaps in on the word, holds to the next cut or the "
@@ -24724,7 +25612,9 @@ def _beat_align_to_music(ctx, edl, beats, label, tol):
     res = _write_keep(
         ctx, cur,
         f"beat-aligned {moved} cut{'' if moved == 1 else 's'} to {label} "
-        f"(tolerance {tol}s)")
+        f"(tolerance {tol}s)",
+        # the beat IS the placement (already kept out of words)
+        snap_to_words=False)
     if res.startswith("EDL v"):
         res += (f"\nMoved {moved} cut{'' if moved == 1 else 's'} onto the "
                 f"beat; skipped {skipped_word} (would land inside a word) and "
@@ -24822,7 +25712,8 @@ def beat_align_cuts(ctx, tolerance_s=0.35, source=None, bpm=None,
         ctx, new_keep,
         f"beat-aligned {moved} internal cut boundar"
         f"{'y' if moved == 1 else 'ies'} to the {bpm:g} BPM grid "
-        f"(tolerance {tol}s)")
+        f"(tolerance {tol}s)",
+        snap_to_words=False)
     if res.startswith("EDL v"):
         res += (f"\nMoved {moved}; skipped {skipped_word} (would land "
                 f"inside a word) and {skipped_tol} (no beat within {tol}s "
@@ -26344,6 +27235,15 @@ def _batch_framing_advisories(ctx, before, after):
         _keep, moved = _snap_keep_to_shots(after["keep"], index,
                                            index.get("words"))
         notes += moved
+        _keep, _moves, _quiet = _audio_safe_keep(
+            ctx, [list(k) for k in after["keep"]], before.get("keep") or [],
+            index.get("words") or [])
+        if _keep != [list(k) for k in after["keep"]] or _moves:
+            notes += [m.replace("AUDIO-SAFE CUTS: moved", "AUDIO-SAFE CUTS: "
+                                "keep_segments would move")
+                      .replace(" Pass snap_to_words=false to keep exact "
+                               "times.", "")
+                      for m in _moves]
     frame = after.get("frame") or {}
     if frame.get("focus_track") and frame != (before.get("frame") or {}):
         notes += _snap_focus_track_to_shots(frame["focus_track"], index)[1]
@@ -26387,6 +27287,17 @@ def apply_edit_batch(ctx, base_version, operations, operation_id):
         result += "\nThe edit is saved; supported layers play directly in Studio. Inspect changed moments before a full approval preview; this receipt is not visual or audio proof."
     return result
 
+
+# How every keep-writing tool places its NEW cut edges (cut_audio), for
+# their descriptions.
+_AUDIO_SAFE_DOC = (
+    "Each cut edge it writes (keep_segments: every edge of the list) lands "
+    "audio-safe on the source's sound: out of any "
+    "word it falls in, onto the quietest point within ~80 ms (a word's "
+    "release or lead-in up to 0.25 s), never into the word beyond; the "
+    "result reports every move and any cut that joins running speech. "
+    "snap_to_words:true first moves edges outward to word edges with a "
+    "breath; snap_to_words:false keeps your exact times (a stutter cut).")
 
 TOOLS = {
     "apply_edit_batch": (apply_edit_batch,
@@ -26915,13 +27826,12 @@ TOOLS = {
                        "start": {"type": "number"},
                        "end": {"type": "number"},
                        "native_resolution": {"type": "boolean", "description": "Preserve image width up to 1920px; one requested time avoids contact-sheet downscaling."}}),
-    "keep_segments": (keep_segments, "REPLACE the whole keep list: the parts "
-                      "of the SOURCE video that survive, [[start,end],...] "
-                      "in seconds. Everything else is cut. Use only for "
+    "keep_segments": (keep_segments, "REPLACE the keep list (SOURCE "
+                      "[[start,end],...]); new cut edges land audio-safe. "
+                      "Everything else is cut. Use only for "
                       "wholesale restructuring, always after get_edl — for "
                       "local fixes prefer cut_range/restore_range. "
-                      "snap_to_words:true moves boundaries outward to word "
-                      "edges so no word is clipped. Every keep write also "
+                      + _AUDIO_SAFE_DOC + " Every keep write also "
                       "moves an edge that lands on or up to 6 frames past a "
                       "source camera cut back off it (no flash of the other "
                       "shot) and reports it.",
@@ -26929,8 +27839,8 @@ TOOLS = {
                        "snap_to_words": {"type": "boolean"}}),
     "cut_range": (cut_range, "Remove ONE source-time range from the current "
                   "keep set (a local edit — the rest of the edit is "
-                  "untouched). Creates a new EDL version. snap_to_words:true "
-                  "keeps neighbouring words whole. SOURCE seconds of the "
+                  "untouched). Creates a new EDL version. "
+                  + _AUDIO_SAFE_DOC + " SOURCE seconds of the "
                   "main video ONLY — when the user gives times of the "
                   "EDITED video ('cut 12-15 of the video'), or the span "
                   "sits inside an inserted clip, use cut_output_range.",
@@ -26954,7 +27864,8 @@ TOOLS = {
                           "end": {"type": "number"}}),
     "restore_range": (restore_range, "Add a previously-cut source-time range "
                       "back into the keep set (undo one cut without touching "
-                      "the rest). Creates a new EDL version.",
+                      "the rest). Creates a new EDL version. "
+                      + _AUDIO_SAFE_DOC,
                       {"start": {"type": "number"}, "end": {"type": "number"},
                        "snap_to_words": {"type": "boolean"}}),
     "cut_silences": (cut_silences, "ONE-CALL silence trim — THE tool for "
@@ -28027,9 +28938,15 @@ TOOLS = {
         "follow=false keeps one still framing per shot. Without a measurable track it frames "
         "every measured position of the head (index boxes) and re-aims on the cut. On a "
         "source below 720p 'auto' shows the WHOLE frame "
-        "(contain: the box shrinks to the footage's aspect, edge blanking trimmed) — archival "
-        "4:3 talks belong in a full-width 4:3 card, not a 3.7x crop; fit='crop' there frames "
-        "the speaker as a medium close-up and follows them. 'full' = the whole source "
+        "(contain: the box shrinks to the footage's aspect, edge blanking trimmed; never a "
+        "3.7x crop) — except ONE 4:3 archival speaker (no two-shot) in a 9:16 frame, face "
+        "measured, no box: a full-width near-square window (y .27-.70, ~43% of the frame: the most that keeps the "
+        "headline band above and a whole caption band below) framed on the speaker; "
+        "fit='crop' frames the speaker as a medium close-up in any box and follows them, "
+        "fit='pad' always shows the whole frame. A thin band of a pillar or frame edge along "
+        "an 'auto' card's or speaker panel's edge (a straight high-contrast source edge "
+        "within ~8% of it) is slid off once per held framing (never a glide), else named "
+        "(EDGE SLIVER). 'full' = the whole source "
         "frame; [left,top,right,bottom] = that rect of the SOURCE frame (look_at gives the "
         "fractions); 'inset' = the burned-in screen / picture-in-picture box measured in the "
         "window's footage (four straight edges, the same place across frames), shown WHOLE "
@@ -28054,8 +28971,12 @@ TOOLS = {
         "evidence and lose the speaker for seconds. A SPEAKER panel ('auto', or a crop rect "
         "holding most of the measured face) is solved from the face track (measured into its "
         "shot, so a profile turn is carried): the whole head with chin and hair margins, lead "
-        "room where they look, burned-in screen boxes kept out wherever a framing can (where "
-        "the box touches the face the face wins and the result names the corner that shows), "
+        "room where they look, every face box >= 8% of the panel inside each edge first, "
+        "burned-in screen boxes kept out wherever such a framing can (where the box touches "
+        "the face the face wins: the head keeps its composition, the corner that shows is "
+        "never a thin strip and is softened only away from the face, and the result measures "
+        "a speaker card alone and the speaker full-bleed against the stack and names the "
+        "cleanest: BETTER LAYOUT / LAYOUT (measured)), "
         "following a speaker who moves; a given rect that cuts the face is moved and grown only "
         "as far as it must. Stacked panels keep a caption band of >= .065 of the frame height "
         "between them (a narrower gap is opened, and said). Panel boxes must not overlap; zooms "
@@ -28909,8 +29830,9 @@ TOOLS = {
              "end": {"type": "number"}}, "required": ["from", "to"]}]}},
          "operation": {"type": "string", "enum": ["replace", "append", "clear", "list"]},
          "clear": {"type": "boolean"}}),
-    "add_freeze_frame": (add_freeze_frame, "FREEZE the picture on a moment "
-                         "and hold it, optionally with a line of text over "
+    "add_freeze_frame": (add_freeze_frame, "FREEZE the picture and hold it; "
+                         "audio_mode='hold' is the payoff hold before the "
+                         "end card. Optionally with a line of text over "
                          "the held frame — the 'pearl' / power-phrase move: "
                          "the frame stops, blurs and darkens behind big "
                          "centred words, then the video continues. "
@@ -28927,7 +29849,17 @@ TOOLS = {
                          "a full-frame cover while the original speech, "
                          "music and timeline continue — use it when a visual "
                          "must hold over an ongoing phrase without stretching "
-                         "or desynchronizing the audio.",
+                         "or desynchronizing the audio. audio_mode='hold' is "
+                         "the PAYOFF HOLD: at the programme's end (or on a "
+                         "cut) the frame the viewer sees — exactly as "
+                         "composed, crop/card/grade — stops for duration_s "
+                         "(default 1.0; 0.8-1.5 lets a punchline or laugh "
+                         "land before the end card) over the source's own "
+                         "room tone, the last words fading into it; darken "
+                         "dims it under a payoff graphic, which (like any "
+                         "graphic or zoom ending with the programme) holds "
+                         "over it. Use it only when the source has no "
+                         "natural tail to extend (restore_range first).",
                          {"at_output_s": {"type": "number"},
                           "duration_s": {"type": "number"},
                           "text": {"type": "string"},
@@ -28943,7 +29875,8 @@ TOOLS = {
                           "font": {"type": "string",
                                    "enum": list(TEXT_FONTS)},
                           "audio_mode": {"type": "string",
-                                         "enum": ["pause", "continue"]}}),
+                                         "enum": ["pause", "continue",
+                                                  "hold"]}}),
     "add_stylize": (add_stylize, "Layer a windowed finishing effect on the "
                     "program picture: 'grain' (film grain), 'vignette' "
                     "(darkened corners), 'glow' (soft bloom), 'halation' "
@@ -29909,7 +30842,7 @@ _COMPACT_CONTRACTS = {
         "or behind_subject. Captions: leave mute_captions unset — every "
         "heard word reaches the screen once: captions drop the words it shows "
         "and carry the rest beside it, in a free band (quote the transcript in "
-        "rows; end graphics where their words end, per the NOTE). A number "
+        "rows; end graphics where their words end). A number "
         "lands on its spoken word. Silent by "
         "default; sfx=true, only for a moment that earns sound, maps its "
         "sound roles onto the approved library (cues listed in the result). "
@@ -29918,8 +30851,8 @@ _COMPACT_CONTRACTS = {
         "result). A word-timed window starts on its first shown word; an edge "
         "within 0.15 s of a cut snaps to it. accent/color default to the "
         "short's Look (NOTE (look): 2nd accent, 4th type role). word_slam "
-        "tier: payoff (number+noun in the accent) or hero (one per short, "
-        "behind the speaker; face-safe fallback). "
+        "tier: hook (opening headline; captions wait), payoff (number+"
+        "noun, accent) or hero (one per short, behind the speaker). "
         "Never invent numbers, brand messages, handles or CTA offers."),
     "set_motion_graphic": (
         "Patch a motion graphic by id: window, params (merged), template, layer, "
@@ -29998,17 +30931,18 @@ _COMPACT_CONTRACTS = {
     "set_picture_card": (
         "Footage-only rounded card for start/end program seconds (box, radius, "
         "border, shadow, entrance/exit). Its footage comes from the full SOURCE "
-        "frame (source='auto' frames the speaker with headroom and follows a "
-        "speaker who moves inside a shot — still while they sway, a smooth "
-        "glide when a still card would cut the head, never across a cut; a "
-        "sub-720p source is shown whole unless fit='crop'), enlarged at most "
-        "2x (3x for a small archival face); panels=[{box, source}, ...] stacks "
-        "the speaker ('auto': solved from the face — chin, hair, lead room, the "
-        "screen box kept out; captions never on the gutter between panels) "
-        "and the screen they show ('inset': a burned-in screen box, whole). Animated "
-        "entrances/exits dissolve with the full-frame shot. The default "
-        "canvas is dark and sampled from the footage; never a flat void, and "
-        "no blurred self-copy on low-resolution footage."),
+        "frame (source='auto' frames the speaker with headroom, following one "
+        "who moves inside a shot — still while they sway, a glide when a "
+        "still card would cut the head, never across a cut; a "
+        "4:3 sub-720p speaker gets a larger square window, fit='pad' all of "
+        "it; edge slivers slid off), at most 2x (3x for a small archival "
+        "face); panels=[{box, source}, ...] stacks the speaker ('auto': solved "
+        "from the face — 8% margins, lead room, the screen box kept out or "
+        "softened off the face, a better layout named; no captions on the "
+        "gutter) and the screen ('inset': a burned-in box, whole). Animated "
+        "ends dissolve with the full-frame shot. Default canvas: dark, sampled "
+        "from the footage; no flat void, no blurred self-copy of low-res "
+        "footage."),
 }
 
 

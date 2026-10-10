@@ -236,6 +236,27 @@ def test_full_frame_cuts_that_pop_get_hard_alternating_zoom_steps(stubbed):
     assert "Nothing to remove" in out and len(ctx.writes) == n
 
 
+def test_a_step_rechecks_the_graphics_on_screen_under_it(stubbed, monkeypatch):
+    """A step frames the face tighter (judged: Thiel's kicker on his chin
+    under a +12% step): every written step window re-checks the graphics
+    under it against the face as framed, as add_zoom does, and the reply
+    carries what moved."""
+    keep = [[0, 4], [5, 8], [9, 12], [13, 16], [17, 20]]
+    stubbed["popping"] = {5.0, 17.0}
+    seen = []
+
+    def recheck(ctx, edl, a, b):
+        steps = [z for z in (edl.get("effects") or {}).get("zooms") or [] if z.get("cut_step")]
+        seen.append((round(a, 2), round(b, 2), len(steps)))
+        return [f"KEEP-OUT under the camera move: graphic 'g' at {a:.2f}s."] if a < 5 else []
+    monkeypatch.setattr(motion_tools, "keep_out_under_camera", recheck)
+    ctx = _Ctx(_full(keep))
+    out = cut_steps.conceal_jump_cuts(ctx)
+    assert out.startswith("EDL v1"), out
+    assert seen == [(4.0, 7.0, 2), (13.0, 16.0, 2)]          # each window, the steps already in
+    assert "KEEP-OUT under the camera move: graphic 'g' at 4.00s." in out
+
+
 def test_steps_never_touch_an_editors_own_zooms(stubbed):
     keep = [[0, 4], [5, 8], [9, 12]]
     stubbed["popping"] = {5.0, 9.0}

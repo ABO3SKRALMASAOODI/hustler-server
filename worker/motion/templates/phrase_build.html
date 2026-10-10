@@ -193,36 +193,40 @@
       Object.assign(scrim.style, { left: x0 + 'px', top: y0 + 'px', width: (x1 - x0) + 'px', height: (y1 - y0) + 'px' });
     }
     MG.box = [Math.max(0, x0), Math.max(0, y0), Math.min(W, x1), Math.min(H, y1)];
-    // a measured bright plate: a pocket under the rows, growing row by row
-    // as they are revealed. Thin (serif/script) and small rows need 4.5:1,
-    // big heavy rows 3:1, beyond what the scrim already gives.
-    if (BK) { BK.remove(); BK = null; }
-    rows.forEach(r => {
-      const b = r.el.getBoundingClientRect();
-      r.rect = [b.left, b.top, b.right, b.bottom];
+    // a measured bright plate (MG.legible), each row from its reveal on:
+    // thin (serif/script) and small rows need 4.5:1, big heavy rows 3:1,
+    // beyond what the soft scrim already gives — dark ink where the plate
+    // is bright under every word (the accent deepened in its hue, the
+    // scrim standing down), else a glyph scrim; a box only past that,
+    // sized to the final block from the first row on (never per row).
+    BKS.forEach(b => b.remove()); BKS = []; DARK = false;
+    MG.unlegible(rows.map(r => r.el));
+    const have = 0.3 * 0.8 * (P.scrim || 0);
+    const parts = rows.map(r => {
       const body = r.R.thin || r.fs < 0.06 * H;
-      const have = 0.3 * 0.8 * (P.scrim || 0);
-      r.need = MG.need(r.rect, { ink: P.color, ratio: body ? 4.5 : 3, t0: r.t0, t1: D, have });
       // the accent words as they read on this plate (MG.accentInk): a thin
-      // serif or script accent needs APCA Lc 45, a heavy one 35; unchanged
-      // on a plate where it already reads
+      // serif or script accent needs APCA Lc 45, a heavy one 35; brightened
+      // only over a plate too dark for it
       const acc = r.words.filter(w => w.dataset.acc);
-      if (acc.length) {
+      let accent = P.accent;
+      if (acc.length && MG.plate) {
         const ar = MG.rectOf(acc);
         const res = ar ? MG.accentInk(ar, P.accent, { lc: r.R.thin ? 45 : 35, t0: r.t0, t1: D, have }) : null;
-        acc.forEach(w => { w.style.color = res ? res.color : P.accent; });
-        if (res && res.short) r.need = Math.max(r.need, MG.need(ar, { ink: res.color, ratio: r.R.thin ? 4.5 : 3, t0: r.t0, t1: D, have }));
+        accent = res ? res.color : P.accent;
+        acc.forEach(w => { w.style.color = accent; });
       }
+      return { el: r.el, ratio: body ? 4.5 : 3, ink: P.color, acc, accent, t0: r.t0, t1: D,
+               base: r.R.thin ? 0.35 : 0.25 };
     });
-    const need = Math.max(0, ...rows.map(r => r.need));
-    if (need > 0) {
-      const u = MG.rectOf(rows.map(r => r.el));
-      BK = MG.backing(MG.$('.mg-root'), u, need, { pad: BK_PAD.map(k => k * lastFs), feather: 0.3 * lastFs, radius: 0.28 * lastFs });
-      MG.growBox(BK.box);
+    if (MG.plate && MG.luminance(P.color) >= 0.3) {
+      const res = MG.legible(parts, { have, root: MG.$('.mg-root'),
+        box: { pad: BK_PAD.map(k => k * lastFs), feather: 0.3 * lastFs, radius: 0.28 * lastFs, join: 0.4 * lastFs } });
+      DARK = res.mode === 'dark';
+      res.boxes.forEach(b => { BKS.push(b); MG.growBox(b.box); });
     }
   };
-  let BK = null;
-  const BK_PAD = [0.16, 0.05], BK_T = 0.12;
+  let BKS = [], DARK = false;
+  const BK_PAD = [0.16, 0.05];
   layout();
   MG.ready = Promise.all(rows.map(r => document.fonts.load(`${r.R.weight} ${r.R.style} 100px ${r.R.css}`).catch(() => 0)))
     .then(() => document.fonts.ready).then(layout);
@@ -234,22 +238,8 @@
   rows.forEach(r => r.times.forEach(t0 => wins.push([Math.max(0, t0 - 0.02), t0 + IN + 0.02])));
   if (exitDur) wins.push([Math.max(0, D - exitDur - 0.04), D]);
   const sc0 = rows.length ? rows[0].t0 : 0;
-  wins.push([Math.max(0, sc0 - 0.07), sc0 + 0.32]);                                 // scrim / pocket fade-in
-  rows.forEach(r => wins.push([Math.max(0, r.t0 - 0.02), r.t0 + BK_T + 0.04]));      // a pocket grows per row
+  wins.push([Math.max(0, sc0 - 0.07), sc0 + 0.32]);                                 // scrim / box fade-in
   MG.active(wins);
-  // the pocket hugs the rows revealed so far, easing to each new row
-  const placeBK = t => {
-    const shown = rows.filter(r => t >= r.t0 - 1e-6);
-    if (!shown.length) return false;
-    const last = Math.max(...shown.map(r => r.t0)), older = shown.filter(r => r.t0 < last - 1e-6);
-    const un = rs => rs.reduce((u, r) => u ? [Math.min(u[0], r.rect[0]), Math.min(u[1], r.rect[1]), Math.max(u[2], r.rect[2]), Math.max(u[3], r.rect[3])] : r.rect.slice(), null);
-    let b = un(shown);
-    if (older.length) { const q = MG.ease.outCubic(MG.range(t, last, BK_T)), pb = un(older); b = b.map((v, i) => MG.lerp(pb[i], v, q)); }
-    const px = BK_PAD[0] * lastFs, py = BK_PAD[1] * lastFs;
-    Object.assign(BK.style, { left: (b[0] - px).toFixed(1) + 'px', top: (b[1] - py).toFixed(1) + 'px',
-      width: (b[2] - b[0] + 2 * px).toFixed(1) + 'px', height: (b[3] - b[1] + 2 * py).toFixed(1) + 'px' });
-    return true;
-  };
   MG.frame(t => {
     rows.forEach(r => r.words.forEach((w, j) => {
       const t0 = r.times[j];
@@ -269,8 +259,9 @@
         : { opacity: 1 - MG.ease.inQuad(q), blur: q * 14, y: -q * lastFs * 0.12 };
     }
     MG.set(blk, x);
-    if (P.scrim > 0) scrim.style.opacity = (MG.ease.outCubic(MG.range(t, sc0 - 0.05, 0.3)) * (x.opacity ?? 1)).toFixed(4);
-    if (BK) BK.style.opacity = placeBK(t) ? (MG.ease.outCubic(MG.range(t, sc0, 0.12)) * (x.opacity ?? 1)).toFixed(4) : 0;
+    // dark ink never sits in a dark scrim
+    if (P.scrim > 0) scrim.style.opacity = DARK ? 0 : (MG.ease.outCubic(MG.range(t, sc0 - 0.05, 0.3)) * (x.opacity ?? 1)).toFixed(4);
+    BKS.forEach(bk => { bk.style.opacity = (MG.ease.outCubic(MG.range(t, sc0, 0.12)) * (x.opacity ?? 1)).toFixed(4); });
   });
 })();
 </script>
