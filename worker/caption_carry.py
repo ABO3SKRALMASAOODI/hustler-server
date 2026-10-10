@@ -60,6 +60,7 @@ has no box and never moves or mutes a caption.
 """
 
 import difflib
+import math
 import re
 
 MODE_ALL, MODE_WORDS, MODE_HERO = "all", "words", "hero"
@@ -1184,6 +1185,130 @@ def readings(edl, index, tl):
         rd = _reading_of(m, words, word_toks, mids, carried, joined)
         if rd:
             out[m["id"]] = rd
+    return out
+
+
+# A bridge line (one reading path) adds about this much frame height per
+# wrapped line to a lockup; a line wraps at about this many characters.
+BRIDGE_LINE_H = 0.034
+BRIDGE_LINE_CHARS = 34
+
+
+def bridged_box(box, item):
+    """A lockup's ESTIMATED box grown by the bridge lines its reading sets
+    (the block stays centred on its y). Used wherever the box is a nominal
+    estimate rather than a measured footprint: the browserless keep-out and
+    the headline band's yield."""
+    if not box:
+        return box
+    lines = 0
+    for b in ((item or {}).get("reading") or {}).get("bridges") or []:
+        chars = len(" ".join(str(w.get("t") or "") for w in b.get("words") or []))
+        lines += max(1, -(-chars // BRIDGE_LINE_CHARS))
+    if not lines:
+        return box
+    half = BRIDGE_LINE_H * lines / 2.0
+    return (box[0], max(0.0, box[1] - half), box[2], min(1.0, box[3] + half))
+
+
+# How motion/templates/phrase_build.html times its reveals, mirrored for the
+# engine's own questions (when a lockup first draws: the headline band's
+# yield; when it visibly lands: a sound's visual partner).
+LOCKUP_RISE_LEAD_S = 0.06       # a 'rise' word starts this early (readable on it)
+LOCKUP_ROW_GAP_S = 0.25         # an unspoken blank-'at' row follows the last word
+_JS_FLOAT = re.compile(r"^\s*[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
+
+
+def _js_float(v, default):
+    """JavaScript parseFloat(v) (a leading number, else ``default``)."""
+    m = _JS_FLOAT.match(str(v)) if v is not None else None
+    if not m:
+        return default
+    try:
+        n = float(m.group(0))
+    except ValueError:
+        return default
+    return n if math.isfinite(n) else default
+
+
+def lockup_reveals(item, fps=30.0):
+    """Composition seconds at which a phrase_build lockup reveals each of its
+    rows and bridge lines, in reading order — exactly as the page times them
+    from its ``reading``: a spoken row (and a bridge line) from its first
+    spoken word's onset, a row nobody says on its ``at`` (blank: right after
+    the previous row), never before a word above it; a 'rise' entrance
+    starts LOCKUP_RISE_LEAD_S early. The first value is when the lockup
+    first draws a word. [] for any other template."""
+    if not isinstance(item, dict) or item.get("template") != "phrase_build":
+        return []
+    params = item.get("params") or {}
+    rd = item.get("reading") if isinstance(item.get("reading"), dict) else {}
+    rd_rows = rd.get("rows") if isinstance(rd.get("rows"), list) else []
+    bridges = rd.get("bridges") if isinstance(rd.get("bridges"), list) else []
+    lead = LOCKUP_RISE_LEAD_S if params.get("entrance") == "rise" else 0.0
+
+    def onset(v):
+        n = None if v is None else _js_float(v, None)
+        return None if n is None else max(0.0, n - lead)
+
+    rows = []
+
+    def bridge_rows(after):
+        for b in bridges:
+            if not isinstance(b, dict):
+                continue
+            try:
+                if int(b.get("after", -1)) != after:
+                    continue
+            except (TypeError, ValueError):
+                continue
+            ws = [w for w in b.get("words") or []
+                  if isinstance(w, dict) and str(w.get("t") or "").strip()]
+            if ws:
+                rows.append({"known": [onset(w.get("s")) for w in ws], "at": ""})
+
+    bridge_rows(-1)
+    shown = display_rows(item)
+    for i, row in enumerate((params.get("rows") or [])[:4]):
+        words = shown[i] if i < len(shown) else []
+        if words:
+            k = rd_rows[i] if i < len(rd_rows) and isinstance(rd_rows[i], list) else []
+            at = row.get("at") if isinstance(row, dict) else None
+            rows.append({"known": [onset(k[j]) if j < len(k) else None
+                                   for j in range(len(words))],
+                         "at": "" if at is None else str(at).strip()})
+        bridge_rows(i)
+    stagger = max(0.0, _js_float(params.get("word_stagger", 0.14), 0.0) or 0.0)
+
+    def start_of(r):
+        k = [v for v in r["known"] if v is not None]
+        if k:
+            return min(k)
+        return max(0.0, _js_float(r["at"], 0.0)) if r["at"] != "" else None
+
+    out, prev_last, prev_end = [], 0.0, -LOCKUP_ROW_GAP_S
+    for idx, r in enumerate(rows):
+        n = len(r["known"])
+        if any(v is not None for v in r["known"]):
+            cur = next(v for v in r["known"] if v is not None)
+            times = []
+            for v in r["known"]:
+                cur = v if v is not None else cur
+                times.append(cur)
+        else:
+            t0 = (max(0.0, _js_float(r["at"], 0.0)) if r["at"] != ""
+                  else prev_end + LOCKUP_ROW_GAP_S)
+            nxt = start_of(rows[idx + 1]) if idx + 1 < len(rows) else None
+            st = min(stagger, (nxt - t0) / n) if (nxt is not None and nxt > t0) else stagger
+            if st < stagger and st < 2.0 / float(fps or 30.0):
+                st = 0.0
+            times = [t0 + j * st for j in range(n)]
+        clamped = []
+        for t in times:
+            prev_last = max(t, prev_last)
+            clamped.append(prev_last)
+        out.append(round(clamped[0], 4))
+        prev_end = clamped[-1]
     return out
 
 

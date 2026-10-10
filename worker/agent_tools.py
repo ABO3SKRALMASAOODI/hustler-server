@@ -29227,8 +29227,8 @@ _COMPACT_CONTRACTS = {
         "on-screen reason looks childish. Never on captions or ordinary cuts. "
         "Podcast short: zero by default, at most 1-2, each on a visual partner "
         "(~50 ms), never on a payoff word's onset, no puns, no reflexive "
-        "opening whoosh; elsewhere one per 4-5 s at most, none repeated "
-        "within ~3 s."),
+        "opening whoosh; elsewhere about one sound every 4-5 s at most, none "
+        "repeated within ~3 s."),
     "add_captions": (
         "Burned captions: mode='from_transcript', 'off', or dictated items. "
         "Short-form speech: style.motion_look editorial|clean (premium default), "
@@ -29250,7 +29250,7 @@ _COMPACT_CONTRACTS = {
         "editorial (podcast/interview default), creator_punch, cinematic_doc, "
         "mono_noir, clean_minimal; legacy hype, clean, cinematic, luxury, meme. "
         "Places no sound unless transition_sounds=true (sounds are optional, "
-        "never rules). Its music "
+        "never rules); read the receipt before adding junction cues. Its music "
         "option (when listed) lays a library "
         "bed: pass it only when the user asked for background music. One look "
         "per edit; refine components with their own tools; no fade-in on "
@@ -29269,7 +29269,9 @@ _COMPACT_CONTRACTS = {
         "One junction style at real scene changes; scope='scene' skips jump "
         "cuts — report the junction count it returns. Styles dip_black, "
         "dip_white, whip_left/right, zoom_punch, glitch, flash (fast ones "
-        "0.15-0.4s). Adds no sound; ordinary cuts stay silent. One specific "
+        "0.15-0.4s). Adds no sound: a real turn may take one add_sfx "
+        "sound:swish_1 at the cut (it peaks there) unless a look already placed one "
+        "there (get_edl sfx); ordinary cuts stay silent. One specific "
         "junction: a motion transition template."),
     "set_picture_card": (
         "Footage-only rounded card for start/end program seconds (box, radius, "

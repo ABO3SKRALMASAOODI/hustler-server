@@ -862,25 +862,11 @@ def _attach_reading(ctx, edl, item):
         item.pop("reading", None)
 
 
-# A bridge line (one reading path) adds about this much frame height per
-# wrapped line to a lockup; a line wraps at about this many characters.
-BRIDGE_LINE_H = 0.034
-BRIDGE_LINE_CHARS = 34
-
-
-def _bridged(box, item):
-    """A lockup's ESTIMATED box grown by the bridge lines its reading sets
-    (the block stays centred on its y)."""
-    if not box:
-        return box
-    lines = 0
-    for b in (item.get("reading") or {}).get("bridges") or []:
-        chars = len(" ".join(str(w.get("t") or "") for w in b.get("words") or []))
-        lines += max(1, -(-chars // BRIDGE_LINE_CHARS))
-    if not lines:
-        return box
-    half = BRIDGE_LINE_H * lines / 2.0
-    return (box[0], max(0.0, box[1] - half), box[2], min(1.0, box[3] + half))
+# A bridge line (one reading path) grows a lockup's estimated box
+# (caption_carry.bridged_box; the headline band's yield uses it too).
+BRIDGE_LINE_H = caption_carry.BRIDGE_LINE_H
+BRIDGE_LINE_CHARS = caption_carry.BRIDGE_LINE_CHARS
+_bridged = caption_carry.bridged_box
 
 
 def _keep_out_estimated(ctx, edl, item):
@@ -1222,13 +1208,22 @@ def _reading_notes(item, rep):
             "To design them yourself, put those exact words in the rows.")
     if rep.get("yielded"):
         ends = [float(w["t1"]) for w in rep.get("carried") or []]
-        end_at = max(ends) + 0.3 if ends else frm + 0.6
+        last = max(ends) if ends else frm
+        end_at = last + 0.3 if ends else frm + 0.6
+        # a word the graphic yields once its midpoint is under it: the end
+        # that gives the next words back is before the first one's midpoint
+        nxt = [(float(w["t0"]) + float(w["t1"])) / 2.0 for w in rep["yielded"]
+               if float(w["t0"]) >= last - 0.05]
+        if nxt:
+            end_at = min(end_at, min(nxt) - 0.02)
+        end_at = max(end_at, float(item["start"]) + 0.3)
+        fix = (f"End it at {end_at:.2f}s, where its own words end, so those words are "
+               "captioned; or carry" if end_at < e - 0.02 else "Carry")
         notes.append(
             f"NOTE (captions): one reading path — the captions yield to this graphic for "
             f"the phrase it shows from {frm:.2f}s until it leaves at {e:g}s, so a sound-off "
             f"viewer never reads \"{_runs_said(rep['yielded'])}\" (said while it is up). "
-            f"End it at {end_at:.2f}s, where its own words end, so those words are "
-            "captioned; or carry them on it (a kicker/label in the speaker's words); or "
+            f"{fix} them on it (a kicker/label in the speaker's words); or "
             "make it a phrase_build, which sets them in small type.")
     if rep.get("beside"):
         runs = " … ".join(f'"{_said(r)}"' for r in rep["beside"])

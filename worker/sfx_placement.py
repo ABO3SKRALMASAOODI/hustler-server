@@ -253,15 +253,30 @@ def _motion_landings(m):
         times += [c[0] for c in motion_tools._sfx_cues(spec, params, s, e)]
     except Exception:          # noqa: BLE001
         pass
-    for v in params.values():
-        if isinstance(v, list):
-            for row in v:
-                if isinstance(row, dict) and row.get("at") not in (None, ""):
-                    try:
-                        times.append(s + float(str(row["at"]).replace(",", ".")))
-                    except ValueError:
-                        pass
+    import caption_carry
+    reveals = caption_carry.lockup_reveals(m)
+    if reveals:
+        # a lockup's rows land on their spoken onsets (its reading), not on
+        # their fallback 'at' times
+        times += [s + t for t in reveals]
+    else:
+        for v in params.values():
+            if isinstance(v, list):
+                for row in v:
+                    if isinstance(row, dict) and row.get("at") not in (None, ""):
+                        try:
+                            times.append(s + float(str(row["at"]).replace(",", ".")))
+                        except ValueError:
+                            pass
     return sorted({round(t, 3) for t in times if s - 1e-6 <= t <= e + 1e-6})
+
+
+def _standing(m):
+    try:
+        import motion_templates
+        return bool(motion_templates.persistent(m))
+    except Exception:          # noqa: BLE001
+        return False
 
 
 def _shot_of(shots, t):
@@ -297,9 +312,16 @@ def visual_events(edl, index=None):
             c = _shot_of(shots, float(b["src_start"]) + 0.02)
             if a is not None and c is not None and a != c:
                 ev.append((float(b["out_start"]), "a cut to another shot"))
+    prog_end = max((float(b["out_end"]) for b in blocks), default=None)
     for m in edl.get("motion") or []:
         name = f"{m.get('template')} graphic {m.get('id')}"
         land = _motion_landings(m)
+        if _standing(m):
+            # the standing headline (a persistent template) is up from the
+            # first frame to the last: being there is no event, and its
+            # yields are fades — only a mid-program entrance or exit counts
+            land = [t for t in land if t > 0.05
+                    and (prog_end is None or t < prog_end - 0.05)]
         for t in land:
             ev.append((t, f"the {name}"))
     for key, label in (("texts", "text"), ("vectors", "shape")):
@@ -318,6 +340,10 @@ def visual_events(edl, index=None):
     for key, label in (("zooms", "zoom"), ("picture_cards", "picture card"),
                        ("stylize", "effect")):
         for it in fx.get(key) or []:
+            if key == "zooms" and isinstance(it, dict) and it.get("cut_step"):
+                # a concealed jump cut (cut_steps.py) is still an ordinary
+                # cut inside the conversation: never a sound's partner
+                continue
             for f in ("start", "end"):
                 if it.get(f) is not None:
                     ev.append((float(it[f]), f"{label} {it.get('id')}"))

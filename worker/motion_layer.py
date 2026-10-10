@@ -166,7 +166,6 @@ def _band_box(item, W, H):
     """Where an item draws (frame fractions): its fresh footprint, else the
     template's nominal ink estimate, else None (it occupies no band)."""
     import caption_carry
-    import keepout
     ar = caption_carry.frame_ar(W, H)
     box = caption_carry.footprint_box(item, ar)
     if box:
@@ -182,21 +181,19 @@ def _band_box(item, W, H):
     name = item.get("template")
     if not name or name == "html":
         return None
-    try:
-        est = keepout.nominal_ink(name, motion_templates.spec(name),
-                                  item.get("params") or {}, frame=(W, H))
-    except Exception:  # noqa: BLE001 — an unknown box occupies nothing
-        return None
-    return [float(v) for v in est] if est else None
+    return _nominal(item, W, H)
 
 
 def _nominal(item, W, H):
+    """The template's nominal ink estimate (a lockup's grown by the bridge
+    lines its reading sets), or None."""
+    import caption_carry
     import keepout
     try:
-        est = keepout.nominal_ink(item.get("template"),
-                                  motion_templates.spec(item.get("template")),
-                                  item.get("params") or {}, frame=(W, H))
-    except Exception:  # noqa: BLE001
+        est = caption_carry.bridged_box(keepout.nominal_ink(
+            item.get("template"), motion_templates.spec(item.get("template")),
+            item.get("params") or {}, frame=(W, H)), item)
+    except Exception:  # noqa: BLE001 — an unknown box occupies nothing
         return None
     return [float(v) for v in est] if est else None
 
@@ -205,23 +202,17 @@ def _ink_lead(item):
     """Seconds into an item (from its start on the program clock) before it
     draws anything: a phrase build whose first row is revealed on a later
     spoken word leaves its band empty until then (the Jobs 'liberal arts'
-    lockup: 1.17 s), and the headline keeps the band meanwhile. Row ``at``
-    is composition time, so a windowed piece already ``phase_s`` into the
-    composition has that much less to wait."""
-    rows = (item.get("params") or {}).get("rows")
-    if item.get("template") != "phrase_build" or not isinstance(rows, list):
-        return 0.0
-    ats = []
-    for k, row in enumerate(rows):
-        try:
-            ats.append(float((row or {}).get("at")))
-        except (TypeError, ValueError):
-            if k == 0:
-                return 0.0
-    if not ats:
+    lockup: 1.17 s), and the headline keeps the band meanwhile. The reveal
+    is the page's own (caption_carry.lockup_reveals: spoken rows and bridge
+    lines on their onsets from the item's reading, others on their 'at', in
+    reading order) on the composition clock, so a windowed piece already
+    ``phase_s`` into the composition has that much less to wait."""
+    import caption_carry
+    reveals = caption_carry.lockup_reveals(item)
+    if not reveals:
         return 0.0
     phase = float(item.get("phase_s") or 0.0)
-    return max(0.0, min(ats) - phase)
+    return max(0.0, reveals[0] - phase)
 
 
 def _shares_band(a, b, pad=YIELD_PAD):

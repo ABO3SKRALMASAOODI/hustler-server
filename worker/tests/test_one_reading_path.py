@@ -298,8 +298,13 @@ def test_a_graphic_that_is_no_lockup_leaves_the_rest_of_its_phrase_to_the_sound(
     gaps = caption_carry.sound_off_gaps(edl, ix, tl)
     assert gaps and gaps[0]["owner"] == "enough" and "one reading path" in gaps[0]["cause"]
     notes = motion_tools._word_level_notes(edl, ix, tl, edl["motion"][0], canvas=(1080, 1920))
-    assert any("never reads \"to take our civilization to\"" in n and "End it at 2.10s" in n
+    # the end it names gives those words back: before the next word's midpoint
+    # ("to" 1.9-2.0), not "enough"'s end + 0.3 s, which still swallowed "to"
+    assert any("never reads \"to take our civilization to\"" in n and "End it at 1.93s" in n
                for n in notes), notes
+    ended = _edl([[0.0, 6.0]], [dict(slam, end=1.93)], words=words)
+    assert [w["w"] for w in captions.caption_words(ended, ix, tl)] == \
+        ["but", "it's", "to", "take", "our", "civilization", "to", "the", "next", "level."]
     # an explicit false keeps the captions running beside it (unchanged)
     edl = _edl([[0.0, 6.0]], [dict(slam, mute_captions=False)], words=words)
     assert "civilization" in [w["w"] for w in captions.caption_words(edl, ix, tl)]
