@@ -1016,8 +1016,10 @@ def critique(edl, index, tl, src_w=None, src_h=None, user_asked="",
                                   "no camera move", "keep the jump cut")):
         try:
             import jump_cut_report
+            # the note names no covered join's visibility: decode only
+            # the bare ones
             line = jump_cut_report.advisory_line(jump_cut_report.report(
-                edl, index, tl, measure=measure, pop=pop))
+                edl, index, tl, measure=measure, pop=pop, bare_only=True))
         except Exception:
             line = ""
         if line:

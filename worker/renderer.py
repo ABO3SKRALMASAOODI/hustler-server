@@ -4809,6 +4809,16 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                              f":d={d:.2f}")
         parts.append(f"[apre]{','.join(chain) or 'anull'}[{a_prog}]")
 
+    # The mastered sound restamped on its samples wherever the card concat
+    # below does not do it (a card-less programme — every preview — and a
+    # carried score; render polish review, Oct 2026). loudnorm stamps its
+    # frames on its own grid: on the Thiel preview it left a 39 ms hole in
+    # the timestamps at 30 s with no sample missing, so the export's -t cut
+    # the programme's last 39 ms of sound (and the de-click fade-out there)
+    # and the file carried a 39 ms A/V jump for players that honour stamps.
+    # The stream is contiguous from 0 (asetpts=PTS-STARTPTS blocks, amix),
+    # so N/SR is its true clock.
+    restamp = ",asetpts=N/SR/TB" if (not outro_on or carry_music) else ""
     if loud:
         # Master loudness: -14 LUFS with codec-safe true-peak headroom.
         # loudnorm's single pass can miss short nonlinear mixes and AAC can
@@ -4823,12 +4833,12 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         parts.append(f"[{a_prog}]loudnorm=I=-14:TP=-2.0:LRA=11,"
                      "alimiter=limit=0.75:attack=5:release=50:level=0:"
                      "latency=1,"
-                     f"{AUDIO_NORM}[{nxt}]")
+                     f"{AUDIO_NORM}{restamp}[{nxt}]")
         a_prog = nxt
     else:
         nxt = "amst" if outro_on else "aout"
         parts.append(f"[{a_prog}]alimiter=limit=0.75:attack=5:release=50:"
-                     f"level=0:latency=1,{AUDIO_NORM}[{nxt}]")
+                     f"level=0:latency=1,{AUDIO_NORM}{restamp}[{nxt}]")
         a_prog = nxt
 
     if outro_on:

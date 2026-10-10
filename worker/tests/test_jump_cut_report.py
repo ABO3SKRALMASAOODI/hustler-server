@@ -274,3 +274,62 @@ def test_the_tool_output_fits_the_real_showcase_shape():
     text = jcr.format_report(rep)
     assert "6 same-shot jump cut(s) in 32.84s: 2 covered, 4 bare." in text
     assert text.count("options:") == 4
+
+
+# ── review fixes ─────────────────────────────────────────────────────────
+
+def test_the_critic_decodes_only_bare_joins_and_bare_joins_go_first():
+    # 3.5 is covered by a graphic entering on it; 1.0 and 6.5 are bare
+    edl = dict(_edl(), motion=[{"id": "g", "template": "word_slam",
+                                "start": 3.5, "end": 5.0,
+                                "params": {"text": "G"}}])
+    seen = []
+
+    def measure(src_t):
+        seen.append(round(src_t, 2))
+        return None
+
+    def pop(e0, s1, t):
+        seen.append(("pop", t))
+        return None
+    jcr.report(edl, _index(), measure=measure, pop=pop, bare_only=True)
+    assert ("pop", 3.5) not in seen and 3.98 not in seen      # covered: no decode
+    assert ("pop", 1.0) in seen and ("pop", 6.5) in seen
+    # the full report measures every join, bare ones first
+    seen.clear()
+    jcr.report(edl, _index(), pop=pop)
+    assert [s for s in seen] == [("pop", 6.5), ("pop", 1.0), ("pop", 3.5)]
+    # and the critic asks for the bare-only report
+    assert "bare_only=True" in inspect.getsource(taste.critique)
+
+
+def test_a_moved_stutter_step_is_not_news_at_write_time():
+    # cuts at 2, 3 and 6; a 7% step held over the 3-6 block
+    step = {"id": "cs1", "start": 3.0, "end": 6.0, "strength": 0.07,
+            "ramp_s": 0.0, "cut_step": True}
+    before = _edl(keep=[[0, 2], [3, 4], [5, 8], [9, 12]],
+                  effects={"zooms": [step]})
+    assert [r["t"] for r in _rows(before) if "stutter" in r["flags"]] == [3.0, 6.0]
+    # restoring the 2-3 s gap moves the stepped joins (and the step) by 1 s
+    after = _edl(keep=[[0, 4], [5, 8], [9, 12]],
+                 effects={"zooms": [dict(step, start=4.0, end=7.0)]})
+    assert [r["t"] for r in _rows(after) if "stutter" in r["flags"]] == [4.0, 7.0]
+    assert jcr.write_note(before, after, _index()) == ""
+    # a step on a join that had none is still news
+    later = _edl(keep=[[0, 4], [5, 8], [9, 12]],
+                 effects={"zooms": [dict(step, start=7.0, end=10.0)]})
+    assert "(7%) reads as a stutter" in jcr.write_note(
+        _edl(keep=[[0, 4], [5, 8], [9, 12]]), later, _index())
+
+
+def test_a_card_step_names_what_made_it():
+    box = [0.06, 0.3, 0.94, 0.68]
+    framed = {"id": "c", "start": 0, "end": 9.5, "box": box,
+              "source": [0.2, 0.1, 0.9, 0.85], "entrance": "none",
+              "exit": "none", "source_track": [
+                  {"t0": 0.0, "t1": 4.5, "source": [0.2, 0.1, 0.9, 0.85]},
+                  {"t0": 4.5, "t1": 60.0, "source": [0.21, 0.11, 0.86, 0.81]}]}
+    idx = _index(video={"fps": FPS, "width": 646, "height": 480})
+    r = {r["t"]: r for r in _rows(_edl(effects={"picture_cards": [framed]}),
+                                  idx)}[3.5]
+    assert "stutter" in r["flags"] and r["step_of"] == "the card's framing"

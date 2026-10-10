@@ -182,10 +182,11 @@ def _aim_fn(edl):
 
 
 def _card_change(edl, c, dt, e0, s1):
-    """(scale step, shift, stacked) of the picture card live across the cut:
-    its source rect's width ratio - 1 (a cut step), how far the rect's
-    centre moves as a fraction of the rect (a re-aim — a following card
-    drifts a little across any cut) and whether it is a stacked card."""
+    """(scale step, shift, stacked, by) of the picture card live across the
+    cut: its source rect's width ratio - 1, how far the rect's centre moves
+    as a fraction of the rect (a re-aim — a following card drifts a little
+    across any cut), whether it is a stacked card, and what made the step
+    (its cut steps, else its own framing: a source_track span)."""
     import picture_cards
     for cd in ((edl.get("effects") or {}).get("picture_cards") or []):
         if not isinstance(cd, dict):
@@ -193,16 +194,19 @@ def _card_change(edl, c, dt, e0, s1):
         if not (_num(cd.get("start")) <= c - dt and _num(cd.get("end")) >= c + dt):
             continue
         if cd.get("panels"):
-            return 0.0, False, True
+            return 0.0, 0.0, True, None
         if not picture_cards.source_fed(cd):
-            return 0.0, False, False
+            return 0.0, 0.0, False, None
         ra = picture_cards.source_at(cd, e0 - 1e-3)
         rb = picture_cards.source_at(cd, s1 + 1e-3)
         if not ra or not rb:
-            return 0.0, False, False
+            return 0.0, 0.0, False, None
         step, shift = taste.card_reframe(ra, rb)
-        return step, shift, False
-    return 0.0, 0.0, False
+        stepped = (picture_cards.step_scale_at(cd, e0 - 1e-3) is not None
+                   or picture_cards.step_scale_at(cd, s1 + 1e-3) is not None)
+        return step, shift, False, ("the card's cut step" if stepped
+                                    else "the card's framing")
+    return 0.0, 0.0, False, None
 
 
 def _vcentre(z, c):
@@ -239,12 +243,16 @@ def _visibility(row):
 
 
 def report(edl, index, tl=None, fps=None, measure=None, pop=None,
-           captions=True, canvas=None):
+           captions=True, canvas=None, bare_only=False):
     """The report of ``edl``'s jump cuts: {"rows": [...], "camera_changes",
     "contiguous", "inserts", "program_s"}.
 
     measure(src_t) -> face boxes on that exact source frame, or None (the
     index's samples answer); pop(e0, s1, card) -> cut_steps.pop_score or None.
+    Bare joins take the decoding budget first (longest removed source
+    first); bare_only=True (the critic's note, which names no covered join's
+    visibility) decodes nothing for a covered one — every render_preview
+    pays for this, on a ~1 vCPU box.
     captions=False skips the caption blocks (write time)."""
     import renderer
     from timeline import Timeline, transition_junctions
@@ -319,7 +327,8 @@ def report(edl, index, tl=None, fps=None, measure=None, pop=None,
         zb = renderer.zoom_state_at(zooms, c - dt, out_dur)
         za = renderer.zoom_state_at(zooms, c + dt, out_dur)
         zstep = max(za[0], zb[0]) / max(1e-6, min(za[0], zb[0])) - 1.0
-        cstep, card_shift, stacked = _card_change(edl, c, dt, e0, s1)
+        cstep, card_shift, stacked, card_by = _card_change(edl, c, dt,
+                                                           e0, s1)
         row["stacked"] = stacked
         step = max(zstep, cstep)
         row["step"] = round(step, 3)
@@ -330,7 +339,7 @@ def report(edl, index, tl=None, fps=None, measure=None, pop=None,
             ids = [z.get("id") for z in zooms if z.get("id") and (
                 abs(_num(z.get("start")) - c) <= 2 * dt
                 or abs(_num(z.get("end")) - c) <= 2 * dt)]
-            row["step_of"] = ("the card's cut step" if cstep >= zstep
+            row["step_of"] = (card_by if cstep >= zstep
                               else "zoom " + ", ".join(map(str, ids))
                               if ids else "a zoom")
         # a re-aim covers a cut when the viewer sees a new framing: the
@@ -369,14 +378,17 @@ def report(edl, index, tl=None, fps=None, measure=None, pop=None,
         row["removed_words"] = _removed_words(index, e0, s1)
         rows.append(row)
 
-    # evidence, longest removed source first (where a head moves)
-    order = sorted(range(len(rows)), key=lambda k: -rows[k]["skip"])
+    # evidence: bare joins first, then the longest removed source first
+    # (where a head moves); the decoding budget goes to what is uncovered
+    order = sorted(range(len(rows)),
+                   key=lambda k: (rows[k]["covered"], -rows[k]["skip"]))
     for n_, k in enumerate(order):
         r = rows[k]
         (a0, b1) = r["_seg"]
         e0, s1 = r["src"]
+        decode = not (bare_only and r["covered"])
         fb = fa = None
-        if measure is not None and n_ < FACE_MAX:
+        if measure is not None and decode and n_ < FACE_MAX:
             try:
                 fb, fa = measure(e0 - dt), measure(s1 + dt)
             except Exception:  # noqa: BLE001 — a measurement never fails the report
@@ -389,7 +401,7 @@ def report(edl, index, tl=None, fps=None, measure=None, pop=None,
         r["face"] = taste.face_jump(fb, fa) if fb and fa else None
         r["evidence"] = (None if r["face"] is None else
                          "frames" if framed else "index")
-        if pop is not None and n_ < POP_MAX:
+        if pop is not None and decode and n_ < POP_MAX:
             try:
                 r["pop"] = pop(e0, s1, r["t"])
             except Exception:  # noqa: BLE001
@@ -574,12 +586,15 @@ def write_note(prev_edl, new_edl, index):
     except Exception:  # noqa: BLE001 — a note never fails a write
         return ""
 
+    # Keyed by the SOURCE join, not its programme second: a cut or restore
+    # earlier in the programme moves every later cut, and an old stutter
+    # step that merely moved is not news.
     def keyed(rows, flag):
-        return {(r["t"], r["src"]) for r in rows if flag in r["flags"]
+        return {r["src"] for r in rows if flag in r["flags"]
                 and (flag != "hook" or not r["covered"])}
-    hook = [r for r in new if (r["t"], r["src"]) in
+    hook = [r for r in new if r["src"] in
             keyed(new, "hook") - keyed(old, "hook")]
-    stut = [r for r in new if (r["t"], r["src"]) in
+    stut = [r for r in new if r["src"] in
             keyed(new, "stutter") - keyed(old, "stutter")]
     parts = []
     if hook:

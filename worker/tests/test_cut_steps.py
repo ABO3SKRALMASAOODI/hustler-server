@@ -271,6 +271,49 @@ def test_a_card_alternates_its_source_crop_wide_on_a_capped_source(stubbed):
     assert "Also changes framing on (a step ending there): 7s" in out
 
 
+HD_SRC = [0.3, 0.1, 0.7, 0.6337]          # the box's aspect on a 1920x1080 source
+
+
+def _hd_card_ctx(stubbed, monkeypatch, face):
+    keep = [[0, 4], [5, 8], [9, 12], [13, 16]]
+    stubbed["popping"] = {5.0, 13.0}
+    monkeypatch.setattr(motion_tools, "jump_cut_measure",
+                        lambda ctx: (lambda src_t: [list(face)]))
+    edl = _full(keep)
+    edl["effects"] = {"picture_cards": [{"id": "card", "start": 0, "end": 13,
+                                         "box": JOBS_BOX, "source": HD_SRC,
+                                         "entrance": "none", "exit": "none"}]}
+    return _Ctx(edl, 1920, 1080)
+
+
+def test_a_tight_card_step_never_crops_the_speakers_head(stubbed, monkeypatch):
+    # the owner's first complaint: a card that lets part of the face leave the
+    # frame. The crown sits just under the card's top edge here, so 12%
+    # tighter around the card's centre would cut the hair: the step goes wide.
+    ctx = _hd_card_ctx(stubbed, monkeypatch, [0.45, 0.16, 0.55, 0.30])
+    out = cut_steps.conceal_jump_cuts(ctx)
+    assert out.startswith("EDL v1"), out
+    steps = ctx.latest_edl()["json"]["effects"]["picture_cards"][0]["cut_steps"]
+    assert [s["scale"] for s in steps] == [pytest.approx(1 / 1.12, abs=1e-3)] * 2
+    assert "tighter would crop the speaker's head" in out
+    for s in steps:
+        rect = picture_cards.source_at(ctx.latest_edl()["json"]["effects"][
+            "picture_cards"][0], (s["t0"] + s["t1"]) / 2.0)
+        head = picture_cards.head_box([0.45, 0.16, 0.55, 0.30])
+        assert rect[1] <= head[1] and rect[0] <= head[0] and rect[2] >= head[2]
+    # with the head well inside, the same card steps tight as before
+    ctx = _hd_card_ctx(stubbed, monkeypatch, [0.45, 0.30, 0.55, 0.40])
+    out = cut_steps.conceal_jump_cuts(ctx)
+    steps = ctx.latest_edl()["json"]["effects"]["picture_cards"][0]["cut_steps"]
+    assert [s["scale"] for s in steps] == [pytest.approx(1.12)] * 2, out
+    assert "crop the speaker's head" not in out
+    # no face measured is no evidence either way: tight, as before
+    head = cut_steps.tight_step_crops_head(
+        {"box": JOBS_BOX, "source": HD_SRC}, 1.12, [6.0], lambda t: None,
+        1920, 1080, 1080, 1920)
+    assert head is None
+
+
 def test_at_names_the_cuts_and_bad_arguments_are_refused(stubbed):
     keep = [[0, 4], [5, 8], [9, 12]]
     ctx = _Ctx(_full(keep))

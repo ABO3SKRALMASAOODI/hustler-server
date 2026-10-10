@@ -78,6 +78,27 @@ def test_only_a_graph_that_holds_an_edge_fades_it():
     assert f"d={config.OUTRO_AUDIO_TAIL_FADE_S:.2f}" in carded
 
 
+def test_a_card_less_master_is_restamped_on_its_samples():
+    # loudnorm stamps its frames on its own grid: the Thiel preview carried
+    # a 39 ms hole in its audio stamps at 30 s (no sample missing), so the
+    # export's -t cut the programme's last 39 ms — and the de-click fade-out
+    # with them. Every card-less master is restamped on its samples, as the
+    # card concat already did for finals.
+    edl = {"keep": [[1.0, 4.0], [6.0, 9.0]],
+           "frame": {"ratio": "9:16", "mode": "crop"}}
+    for loud in ("social", None):
+        bare = _graph(edl, program_edges=(True, True), loudness=loud)
+        chain = bare[bare.rindex(";", 0, bare.index("[aout]")):
+                     bare.index("[aout]")]
+        assert chain.endswith("asetpts=N/SR/TB"), (loud, chain)
+        assert ("loudnorm" in chain) == (loud == "social")
+    carded = _graph(edl, program_edges=(True, True), outro_s=1.0, card_idx=1)
+    mst = carded[carded.rindex(";", 0, carded.index("[amst]")):
+                 carded.index("[amst]")]
+    assert "asetpts" not in mst                 # the concat restamps it
+    assert "[amst]asetpts=N/SR/TB[aprogc]" in carded
+
+
 def test_render_entry_points_decide_which_edges_a_file_holds():
     import inspect
     src = inspect.getsource(renderer.render_edl)

@@ -104,7 +104,8 @@ punches.
   back — so popping cuts alternate like a second camera. Full frame gets a
   `cut_step` zoom (ramp 0, aimed at the face); a source picture card
   alternates its own SOURCE crop instead (stepping WIDE when the source is
-  near its upscale cap, so a 480p card never softens). `at=[...]` names cuts
+  near its upscale cap, so a 480p card never softens, and wherever tighter
+  would crop the speaker's head). `at=[...]` names cuts
   you saw pop; `mode='off'` removes every step. It is never a default, no
   look or planner writes it, its steps are not counted as camera moves, and
   it is not a reason to add expressive zooms; run it after the cut is final
