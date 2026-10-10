@@ -111,7 +111,10 @@ CHOOSING A TEMPLATE — confirm names and params with `list_motion_templates()`:
   explicit y. The write reports the windows it yields and how long it shows.
   It yields to MOTION graphics only: type placed in its band with add_text,
   set_typography_scene or set_editorial_graphic does not move it, so build
-  every lockup that shares the band as a motion template.
+  every lockup that shares the band as a motion template. A graphic set in
+  that band (with or without a headline) is NOTEd (band) when it spills out
+  of it — onto the top of the card (a phrase_build grows by its small bridge
+  lines) or up into the feed header — narrow it or move its y.
 - Structure: `chapter_title` at a real section turn ("The problem", "Step
   two"); `timeline_steps` for a spoken sequence of dates or steps;
   `checklist` for a spoken list ticking on item by item; `versus_split` for

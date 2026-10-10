@@ -380,7 +380,8 @@ A `custom-<slug>` Look is allowed when the brief spells out every field below.
   on a real section change. Never a push on every take or a landing on every cut.
 - **Signature:** `phrase_build` lockups for the hook and the turn (small sans
   connector row, large serif hero row, condensed qualifier), placed in face-free
-  space with each row's `at` on its spoken onset; 1-2 hero words behind the
+  space with rows quoting the transcript (the engine lands each spoken word on
+  its onset); 1-2 hero words behind the
   subject (`add_motion_graphic(layer='behind_subject')` with `word_slam`, or
   `add_text_behind`) inside one continuous shot; `quote_card` or `marker_text`
   for the payoff.

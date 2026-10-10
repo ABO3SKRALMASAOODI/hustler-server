@@ -148,3 +148,36 @@ def test_the_end_it_at_advice_never_makes_a_flash(monkeypatch):
     notes = mt._word_level_notes(edl, ix, tl, edl["motion"][0], canvas=(1080, 1920))
     said = [n for n in notes if "never reads" in n]
     assert said and "End it at" not in said[0] and "Carry them on it" in said[0], notes
+
+
+# ── the band above a card: lockups grown by bridge lines stay in it ──────
+# The headline band (layout) is the free band above a picture card; a
+# lockup set there grows with its one-reading-path bridge lines (fidelity)
+# and could touch the card (judged on the Jobs 'paper' lockup). The write
+# says so, from the same band the headline uses.
+
+def _band_probe(box):
+    return lambda item, W_, H_, fps=30.0: {
+        "errors": [], "visible_frames": 4, "samples": 4, "bboxes": [list(box)],
+        "ink": [list(box)] * 4}
+
+
+def test_a_lockup_spilling_out_of_the_band_is_named(monkeypatch):
+    from test_headline_band import _Ctx as BandCtx, _card_edl
+    rows = [{"text": "no college student", "role": "sans", "size": "0.6", "at": "0.2"},
+            {"text": "WITHOUT *ONE*", "role": "condensed", "size": "1.4", "at": "1.0"}]
+    ctx = BandCtx(_card_edl())
+    monkeypatch.setattr(motion_tools, "_probe_item", _band_probe((0.12, 0.062, 0.88, 0.335)))
+    out = motion_tools.add_motion_graphic(ctx, "phrase_build", 20.0, 24.0,
+                                          params={"rows": rows, "y": 0.15}, id="paper")
+    assert "NOTE (band)" in out and "onto the top of the picture card" in out \
+        and "rises into the feed header" in out, out
+    # inside the band: nothing to say
+    monkeypatch.setattr(motion_tools, "_probe_item", _band_probe((0.12, 0.09, 0.88, 0.28)))
+    out = motion_tools.set_motion_graphic(ctx, "paper", params={"width": 0.66, "y": 0.19})
+    assert "NOTE (band)" not in out, out
+    # a graphic set ON the card is not a band graphic
+    monkeypatch.setattr(motion_tools, "_probe_item", _band_probe((0.12, 0.40, 0.88, 0.55)))
+    out = motion_tools.add_motion_graphic(ctx, "word_slam", 26.0, 27.0,
+                                          params={"text": "*one*", "y": 0.48}, id="slam")
+    assert "NOTE (band)" not in out, out

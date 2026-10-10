@@ -1571,6 +1571,52 @@ def _band_note(ctx, edl, item):
             "(fades out before it lands and back after it leaves).")
 
 
+def _band_spill_note(ctx, edl, item, bbox=None):
+    """For an ordinary graphic set in the free band above a picture card or a
+    letterboxed picture (headline_band — the band the standing headline
+    holds): a NOTE when it spills out of that band, down onto the top of the
+    picture (a lockup grown by its one-reading-path bridge lines touching
+    the card) or up into the feed header. Advisory; '' otherwise."""
+    if motion_templates.persistent(item) or item.get("layer") == "behind_subject":
+        return ""
+    try:
+        W, H = _canvas_size(ctx, edl)
+        box = caption_carry.footprint_box(item, caption_carry.frame_ar(W, H)) or bbox
+        if not box:
+            return ""
+        video = (getattr(ctx, "index", None) or {}).get("video") or {}
+        src = ((video["width"], video["height"])
+               if video.get("width") and video.get("height") and not edl.get("canvas")
+               else None)
+        band = headline_band(edl, float(item["start"]), float(item["end"]), W, H, src=src)
+        if not band:
+            return ""
+        top, bottom, what = band
+        pic = bottom + HEADLINE_GAP
+        y0, y1 = float(box[1]), float(box[3])
+        if y0 >= pic - BAND_SPILL_MIN_IN:
+            return ""                     # set on the picture, not in the band
+        out = []
+        if y1 > pic + BAND_SPILL_TOL:
+            out.append(f"runs {y1 - pic:.3f} onto the top of {what} (y {pic:.3f})")
+        if y0 < top - BAND_SPILL_TOL:
+            out.append(f"rises into the feed header (above y {top:.3f})")
+        if not out:
+            return ""
+        return (f"\nNOTE (band): it draws y {y0:.3f}-{y1:.3f}, set in the band above {what} "
+                f"(y {top:.3f}-{bottom:.3f}), and {' and '.join(out)}. Narrow it "
+                "(width/size) or move its y so it sits inside the band.")
+    except Exception as e:  # noqa: BLE001 — advice never blocks the write
+        print(f"[motion] band check skipped: {str(e)[:160]}", flush=True)
+        return ""
+
+
+# A graphic counts as set in the band when it starts this far above the
+# picture; it spills when it crosses the band's edges by more than this.
+BAND_SPILL_MIN_IN = 0.02
+BAND_SPILL_TOL = 0.004
+
+
 # Sound is deliberate: templates declare sound ROLES (mapped onto the owner-
 # approved real recordings in worker/sound_library), but nothing adds sound
 # unless the editor asks for it on a moment that earns it.
@@ -1673,7 +1719,7 @@ def add_motion_graphic(ctx, template, start, end=None, params=None, html=None,
     if res.startswith("REJECTED"):
         return res
     tail = (_yield_report(ctx, edl, item) if persistent
-            else _band_note(ctx, edl, item))
+            else _band_note(ctx, edl, item) + _band_spill_note(ctx, edl, item, bbox))
     return (res + where + band_note + keep_note + clamp + number_note
             + (f"\nNOTE: {'; '.join(notes)}" if notes else "")
             + _owned_sfx_checks(ctx, edl, mid)
@@ -1816,7 +1862,7 @@ def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
     if res.startswith("REJECTED"):
         return res
     tail = (_yield_report(ctx, edl, hit) if persistent
-            else _band_note(ctx, edl, hit))
+            else _band_note(ctx, edl, hit) + _band_spill_note(ctx, edl, hit, bbox))
     return (res + where + band_note + keep_note + number_note
             + (f"\nNOTE: {'; '.join(notes)}" if notes else "")
             + (_owned_sfx_checks(ctx, edl, id) if checked else "")
