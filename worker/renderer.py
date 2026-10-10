@@ -159,7 +159,7 @@ def caption_review_times(edl, index, workdir, duration, max_times=16):
             edl = json.loads(json.dumps(edl))
             motion_layer.fill_footprints(edl, *frame_dims(
                 float(video.get("width") or 1920), float(video.get("height") or 1080),
-                (edl.get("frame") or {}).get("ratio")))
+                (edl.get("frame") or {}).get("ratio")), index=index, tl=tl)
         path = caplib.build_ass(
             edl, index, tl, os.path.join(workdir, "caption_review.ass"))
         states = sorted(set(stitch.ass_events(path))) if path else []
@@ -1353,7 +1353,24 @@ def camera_cuts(edl, index, tl, fps=None, src_fps=None, origin=None):
         sfps = 30.0
     out_fps = float(fps or sfps)
 
-    def at_source(x):
+    def at_join(k):
+        """Program seconds of keep edge k (both sides of an insert)."""
+        for i, (s, e) in enumerate(tl.segs):
+            if abs(s - k) <= 1e-6:
+                cuts.add(tl.offsets[i])
+            if abs(e - k) <= 1e-6:
+                cuts.add(tl.offsets[i] + tl.seg_out_len[i])
+
+    def at_source(x, composition=False):
+        if composition:
+            # A crop switch lands where build_filtergraph switches the crop
+            # (composition_edge): on the keep edge it stands for, or on the
+            # handoff of the indexed cut it stands for.
+            kind, value = composition_edge(x, tl.segs, index, sfps)
+            if kind == "join":
+                at_join(value)
+                return
+            x = value
         h = focus_handoff(x, sfps, origin, out_fps)
         for s, e in tl.segs:
             if s + 1e-3 < h < e - 1e-3:
@@ -1385,7 +1402,7 @@ def camera_cuts(edl, index, tl, fps=None, src_fps=None, origin=None):
         for edge in sorted(edges)[1:-1]:
             if _aim_at(track, edge - 1e-3, base) != \
                     _aim_at(track, edge + 1e-3, base):
-                at_source(edge)
+                at_source(edge, composition=True)
     end = float(tl.out_duration)
     return sorted(round(c, 4) for c in cuts if 1e-3 < c < end - 1e-3)
 
@@ -2011,8 +2028,8 @@ def captions_current(meta, edl):
 
     True unless the EDL burns transcript captions whose timing moved with
     config.CAPTION_TIMING_VERSION — a motion look (crisp reveals, lines that
-    clear on cuts) or a design-v2 track over a program with a cut — and the
-    render predates it. Only the splice/reuse path asks, exactly like
+    clear on cuts) or a design-v2 track (v1: over a program with a cut; v2:
+    any, its cards keep names whole) — and the render predates it. Only the splice/reuse path asks, exactly like
     camera_current: a cached render served for its own version keeps its
     cache.
     """
@@ -2020,12 +2037,15 @@ def captions_current(meta, edl):
     caps = edl.get("captions")
     if not (isinstance(caps, dict) and caps.get("mode") == "from_transcript"):
         return True
-    if ((meta or {}).get("cap_v") or 0) == config.CAPTION_TIMING_VERSION:
+    cap_v = (meta or {}).get("cap_v") or 0
+    if cap_v == config.CAPTION_TIMING_VERSION:
         return True
     if motion_captions.look_of(edl):
         return False
     if caps.get("design_version") != caplib.CAPTION_DESIGN_VERSION:
         return True
+    if cap_v < 2:
+        return False      # v2: name/noun-phrase-aware cards on every v2 track
     return not caplib.program_cuts(Timeline(edl.get("keep") or [],
                                             edl.get("inserts") or [],
                                             edl.get("speed")))
@@ -2047,19 +2067,24 @@ def legibility_current(meta, edl):
 
 
 def carry_current(meta, edl):
-    """Were this render's captions planned with today's word-level muting?
+    """Were this render's captions planned with today's caption plan (one
+    reading path, worker/caption_carry.py)?
 
-    Only transcript-caption EDLs with motion graphics can be stale: before
-    config.CAPTION_CARRY_VERSION every caption under a muting graphic was
-    hidden for its whole window, and a counter's number was read twice.
-    Same grandfathering discipline as legibility_current: everything else
-    keeps its cache, and a missing stamp on such an EDL means the render
-    predates the plan.
+    Only transcript-caption EDLs with motion graphics, and EDLs with a
+    phrase_build lockup (its words now land on their spoken onsets), can be
+    stale: before config.CAPTION_CARRY_VERSION every caption under a muting
+    graphic was hidden for its whole window (v1), and captions ran under a
+    graphic in a different text from the phrase it showed (v2). Same
+    grandfathering discipline as legibility_current: everything else keeps
+    its cache, and a missing stamp on such an EDL means the render predates
+    the plan.
     """
     edl = edl or {}
     caps = edl.get("captions")
-    if not (isinstance(caps, dict) and caps.get("mode") == "from_transcript"
-            and edl.get("motion")):
+    lockup = any(isinstance(m, dict) and m.get("template") == "phrase_build"
+                 for m in edl.get("motion") or [])
+    if not ((isinstance(caps, dict) and caps.get("mode") == "from_transcript"
+             and edl.get("motion")) or lockup):
         return True
     return ((meta or {}).get("carry_v") or 0) == config.CAPTION_CARRY_VERSION
 
@@ -2327,6 +2352,182 @@ def focus_handoff(edge, src_fps, origin, out_fps=None):
     return float(origin) + (round(float(edge) * fps) - 0.5) / fps
 
 
+# A focus_track edge this close (source frames) to a keep edge, with no
+# indexed camera cut as close, stands for that keep edge.
+HANDOFF_JOIN_FRAMES = 1.5
+
+
+def _indexed_cut_near(index, t, reach):
+    """The indexed camera cut nearest SOURCE second t within reach, or None."""
+    best = None
+    for shot in (index or {}).get("shots") or []:
+        try:
+            c = float(shot["start"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if c > 0.0 and abs(c - float(t)) <= reach and \
+                (best is None or abs(c - float(t)) < abs(best - float(t))):
+            best = c
+    return best
+
+
+def composition_edge(edge, keep, index, src_fps):
+    """What a focus_track edge stands for: ("cut", c) an indexed camera cut
+    within HANDOFF_JOIN_FRAMES of it, ("join", k) else a keep edge that
+    close, else ("edge", edge).
+
+    focus_handoff reads an edge as a MEASURED camera cut (the new shot's
+    frame index over the frame rate) and splits the render block half a
+    frame before that frame — right for a cut the index measured, so a
+    near indexed cut is the edge the handoff is computed from. An edge with
+    no indexed cut near it is no measurement: it is where the editor (or
+    auto_reframe) switched the crop, and when a keep edge sits that close,
+    the keep edge is the cut it means — the programme's blocks already
+    change there, and the crop switches with them. Splitting on the rounded
+    frame instead gave the last frame before the join the NEXT composition
+    and released the zoom held to it a frame early: the judged Elon pop at
+    21.888 s (focus edge 152.63 on a keep join at 152.63, the source's own
+    cut a frame later at 152.653, an index with no shots). Keep joins are
+    known cuts whether or not the index has shots.
+
+    One exception, only where the index carries NO shot list (shot
+    detection never ran, so a measured cut cannot be told from an edit): a
+    SOURCE-CONTIGUOUS join whose edge names a frame (_names_a_frame) is
+    read as the measured cut it was written from (the 138.04 join, the
+    first Rogan frame 2 ms before it). With a shot list, an edge with no
+    indexed cut near it is editorial wherever it sits; and a join that
+    skips source time is the programme's cut whatever the edge's digits —
+    the measured handoff there gave the last frame before it the next
+    composition (an edge at 10.07 on 30 fps footage split [10.05, 10.07])."""
+    try:
+        fps = float(src_fps or 30.0)
+        edge = float(edge)
+    except (TypeError, ValueError):
+        return "edge", edge
+    fps = fps if fps > 0 else 30.0
+    reach = HANDOFF_JOIN_FRAMES / fps + 1e-9
+    cut = _indexed_cut_near(index, edge, reach)
+    if cut is not None:
+        return "cut", cut
+    spans = [(float(s), float(e)) for s, e in keep or []]
+    best = None
+    for s, e in spans:
+        for k in (s, e):
+            if abs(k - edge) <= reach and (best is None or
+                                           abs(k - edge) < abs(best - edge)):
+                best = k
+    if best is None:
+        return "edge", edge
+    if not (index or {}).get("shots") and _names_a_frame(edge, fps) and \
+            any(abs(e - best) <= 1e-6 for _s, e in spans) and \
+            any(abs(s - best) <= 1e-6 for s, _e in spans):
+        return "edge", edge
+    return "join", best
+
+
+def _names_a_frame(edge, fps):
+    """True when ``edge`` is a frame's time rounded to the hundredth — what
+    a shot cut written from a measured frame index looks like (138.04 for
+    the frame at 138.0379): on a source-contiguous join of an index with no
+    shot list such an edge keeps the measured handoff (the judged Elon
+    flash at the 138.04 join, where the first Rogan frame sat 2 ms before
+    the join). 152.63 names no frame at 29.97 fps (the nearest sit 11 and
+    23 ms away): it is an editorial edge, and the join it sits on is the
+    cut. About a third of all hundredths name a frame at ~30 fps, which is
+    why the test is confined to that one ambiguous case."""
+    n = round(float(edge) * float(fps))
+    return abs(n / float(fps) - float(edge)) <= 0.0051
+
+
+def composition_join(edge, keep, index, src_fps):
+    """The keep edge a focus_track edge stands for (composition_edge), or
+    None when it splits a block on a measured handoff."""
+    kind, value = composition_edge(edge, keep, index, src_fps)
+    return value if kind == "join" else None
+
+
+def composition_handoff(edge, keep, index, src_fps, origin, out_fps=None):
+    """Where a focus_track edge splits the local render blocks
+    (focus_handoff of what it stands for), or None when it stands for a
+    keep edge (composition_edge) and adds no split."""
+    kind, value = composition_edge(edge, keep, index, src_fps)
+    if kind == "join":
+        return None
+    return focus_handoff(value, src_fps, origin, out_fps)
+
+
+def _internal_focus_edges(edl):
+    frame = (edl or {}).get("frame")
+    if not isinstance(frame, dict):
+        return []
+    edges = set()
+    for sp in frame.get("focus_track") or []:
+        if not isinstance(sp, dict):
+            continue
+        for key in ("t0", "t1"):
+            try:
+                edges.add(float(sp[key]))
+            except (KeyError, TypeError, ValueError):
+                continue
+    return sorted(edges)[1:-1]
+
+
+def handoff_affected(edl, index):
+    """True when composition_edge moves a crop switch of this EDL: an
+    internal focus_track edge stands for a keep edge or for an indexed cut
+    it is not exactly on, and the handoff the render used before (on any
+    first-frame origin) differs and fell inside a kept span — a sliver
+    block, or a camera cut, a frame off."""
+    edges = _internal_focus_edges(edl)
+    if not edges:
+        return False
+    keep = [(float(s), float(e)) for s, e in (edl or {}).get("keep") or []]
+    try:
+        fps = float(((index or {}).get("video") or {}).get("fps") or 30.0)
+    except (TypeError, ValueError):
+        fps = 30.0
+    fps = fps if fps > 0 else 30.0
+
+    def inside(h):
+        return h is not None and any(s + 1e-3 < h < e - 1e-3 for s, e in keep)
+    for edge in edges:
+        kind, _value = composition_edge(edge, keep, index, fps)
+        if kind == "edge":
+            continue
+        for origin in (None, 0.0, 1.0 / fps):
+            old = focus_handoff(edge, fps, origin, fps)
+            new = composition_handoff(edge, keep, index, fps, origin, fps)
+            if (new is None or abs(new - old) > 1e-6) and \
+                    (inside(old) or inside(new)):
+                return True
+    return False
+
+
+def handoff_may_matter(edl):
+    """Cheap pre-check (no index): an internal focus_track edge sits near a
+    keep edge, so handoff_current needs the index to decide. "Near" is
+    HANDOFF_JOIN_FRAMES at the lowest frame rate a source plausibly has
+    (10 fps: 0.15 s) — composition_edge's reach grows as the rate falls, and
+    a tighter pre-check served a stale cache for a 15 fps screen recording
+    whose edge sat 0.08 s before its join."""
+    edges = _internal_focus_edges(edl)
+    keep = [(float(s), float(e)) for s, e in (edl or {}).get("keep") or []]
+    reach = HANDOFF_JOIN_FRAMES / 10.0 + 1e-9
+    return any(abs(k - t) <= reach for t in edges for s, e in keep
+               for k in (s, e))
+
+
+def handoff_current(meta, edl, index):
+    """Was this render's crop switched on today's composition joins?
+    True unless handoff_affected(edl, index) and the render predates
+    config.HANDOFF_VERSION (its last frame before such a join showed the
+    next shot's crop, and a zoom held to the join released a frame early).
+    Everything else keeps its cache."""
+    if not handoff_affected(edl, index):
+        return True
+    return ((meta or {}).get("handoff_v") or 0) == config.HANDOFF_VERSION
+
+
 def _keep_layout_tags(parts, mark, in_label, out_label, uid, fps):
     """Wrap the stage appended to ``parts`` since ``mark`` (``in_label`` ->
     ``out_label``) so its frames keep the layout tags of the frames that
@@ -2469,10 +2670,16 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         # composition owns the last old-shot frame and the new one the first
         # new-shot frame. Do not shift the track's outer bounds: that would
         # invent 40ms blocks at the beginning/end of every video.
+        # An edge stands for what is near it (composition_edge): an indexed
+        # cut splits on that cut's handoff; with none, a keep edge switches
+        # the crop ON that edge (the blocks already change there: no split).
         ordered_focus_edges = sorted(raw_focus_edges)
-        handoff_of = {
-            focus_handoff(edge, src_fps or fps, focus_origin, fps): edge
-            for edge in ordered_focus_edges[1:-1]}
+        handoff_of = {}
+        for edge in ordered_focus_edges[1:-1]:
+            h = composition_handoff(edge, keep, index, src_fps or fps,
+                                    focus_origin, fps)
+            if h is not None:
+                handoff_of[h] = edge
         split_keep = []
         for s, e in keep:
             edges = [s] + sorted(
@@ -2725,7 +2932,9 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                         card, mid_src), run[0],
                         follow.span_at(card.get("follow"), mid_src)
                         if card.get("source") and not card.get("panels")
-                        else None)
+                        else None,
+                        picture_cards.step_scale_at(card, mid_src)
+                        is not None)
                 else:
                     run = None
     sw = sh = None
@@ -3129,7 +3338,9 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                     seg_dur=seg_out_len[i], grade=block_grade,
                     tag=card_layout[i][1], frames=blk_frames.get(("seg", i)),
                     follow_block=(_follow_of(i, cspan) + (follow_interp,)
-                                  if cspan and follow.moves(cspan) else None))
+                                  if cspan and follow.moves(cspan) else None),
+                    bounded=bool(len(card_layout[i]) > 3
+                                 and card_layout[i][3]))
                 continue
             seg_focus, seg_mode = _frame_for(*keep[i])
             fspan = (follow.span_at(_fspans, _block_mid(*keep[i]))
@@ -5264,7 +5475,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         # footprint here — none, another frame shape, or only the browserless
         # lane's estimate — are measured now (worker/caption_carry.py).
         if not audio_only:
-            motion_layer.fill_footprints(edl, W, H, fps)
+            motion_layer.fill_footprints(edl, W, H, fps, index=index, tl=tl)
         ass_path = caplib.build_ass(edl, index, tl,
                                     os.path.join(workdir, "captions.ass"),
                                     play_res=(W, H))
@@ -5843,6 +6054,40 @@ def _stream_report(path):
     return " ".join(bits)
 
 
+def picture_qc(edl_json, index, out_path, out_info, variant, want_wm,
+               wm_settings=None, src_shape=None, job_id=None, budget_s=None):
+    """render_qc on a finished render, or None (a render never fails over
+    its own review). The plan reads the EDL exactly as render_edl does
+    (render_plan.canonical_program), on the output's own geometry."""
+    try:
+        import render_qc
+        edl = validate_edl(render_plan.canonical_program(edl_json),
+                           1e9).model_dump()
+        W, H = int(out_info["width"]), int(out_info["height"])
+        fps = float(out_info.get("fps") or 30.0)
+        src_w, src_h = (src_shape or (None, None))[:2]
+        video = (index or {}).get("video") or {}
+        anchor = None
+        if want_wm:
+            anchor = watermark_anchor_y(edl, src_w or video.get("width"),
+                                        src_h or video.get("height"), W, H,
+                                        wm_settings)
+        plan_ = render_qc.plan(
+            edl, index or {}, W=W, H=H, fps=fps,
+            outro_s=outro_seconds(variant == "preview"), want_wm=bool(want_wm),
+            wm_anchor_y=anchor, src_fps=video.get("fps"))
+        res = render_qc.check(out_path, plan_,
+                              budget_s=budget_s or render_qc.BUDGET_S)
+        if res and res.get("findings"):
+            print(f"[render {job_id}] PICTURE QC {variant}: "
+                  + "; ".join(f[:120] for f in res["findings"]), flush=True)
+        return res
+    except Exception as exc:
+        print(f"[render {job_id}] picture QC skipped: {str(exc)[:200]}",
+              flush=True)
+        return None
+
+
 def _verify_render(edl_json, out_path, out_dur, job_id, variant,
                    src_path=None, src_dur=None):
     """Fail a render whose output is the wrong length or newly-black. The EDL
@@ -5937,6 +6182,21 @@ def _caption_index_fp(edl_json, index):
     # their fingerprint, so every other caption render keeps its cache.
     if caplib.has_split_words(words):
         h.update(b"caption-words:rejoin-v1;")
+    # Renders burned before a word whose midpoint a cut removed was kept for
+    # its surviving SOUND (Timeline.kept_words rescue) left those words out.
+    # Only programs where a word is rescued change their fingerprint (the
+    # rescued words themselves are mixed in: a speech envelope added to the
+    # index later can move them).
+    if edl_json.get("keep") and words:
+        try:
+            rescued = caplib.rescued_words(index, Timeline(
+                edl_json.get("keep") or [], edl_json.get("inserts") or [],
+                edl_json.get("speed")))
+        except Exception:  # noqa: BLE001 — the fingerprint never fails a render
+            rescued = []
+        if rescued:
+            h.update(("caption-words:heard-v1:" + json.dumps(rescued) + ";")
+                     .encode("utf-8"))
     for w in words:
         h.update(f"{w.get('w', '')}|{w.get('t0')}|{w.get('t1')};"
                  .encode("utf-8"))
@@ -6168,8 +6428,8 @@ def _timeline_stitch(job_id, prev_edl, new_edl, tl_prev, tl_new, index,
     W, H, fps = _composition_geometry(new_edl, src_local, preview)
     # Both programs place their captions clear of the graphics' footprints
     # (worker/caption_carry.py), measured once per composition.
-    motion_layer.fill_footprints(new_edl, W, H, fps)
-    motion_layer.fill_footprints(prev_edl, W, H, fps)
+    motion_layer.fill_footprints(new_edl, W, H, fps, index=index, tl=tl_new)
+    motion_layer.fill_footprints(prev_edl, W, H, fps, index=index, tl=tl_prev)
 
     # Both programs' burned captions, with payloads: plan_timeline PAIRS the
     # events modulo each run's shift and re-encodes any span where the two
@@ -6300,7 +6560,7 @@ def _caption_change_windows(prev_edl, tl_prev, full_cap, index, workdir, W, H,
     do not burn alike re-encodes too (timeline mode checks the same way)."""
     if not prev_edl.get("captions") and not full_cap:
         return []
-    motion_layer.fill_footprints(prev_edl, W, H, fps)
+    motion_layer.fill_footprints(prev_edl, W, H, fps, index=index, tl=tl_prev)
     prev_cap = caplib.build_ass(prev_edl, index, tl_prev,
                                 os.path.join(workdir, "stitch_cap_prev.ass"),
                                 play_res=(W, H)) if prev_edl.get("captions") else None
@@ -6378,7 +6638,7 @@ def _stitched_preview(job_id, new_row, prev_row, prev_asset, index,
         # one would make the piece re-play the insert from its start.
         item_spans += list(timeline_mod.insert_windows(
             new_edl.get("inserts") or [], tl_new).values())
-        motion_layer.fill_footprints(new_edl, W, H, fps)
+        motion_layer.fill_footprints(new_edl, W, H, fps, index=index, tl=tl_new)
         full_cap = caplib.build_ass(new_edl, index, tl_new,
                                     os.path.join(workdir, "stitch_cap.ass"),
                                     play_res=(W, H))
@@ -6711,7 +6971,7 @@ def _render_changed_sections(job_id, edl_row, index, src_local, workdir,
         W, H = frame_dims(1920, 1080,
                           (edl.get("frame") or {}).get("ratio"))
         W, H, _fps = preview_geometry(W, H, 30.0)
-    motion_layer.fill_footprints(edl, W, H, _fps)
+    motion_layer.fill_footprints(edl, W, H, _fps, index=index, tl=tl)
     cap_path = caplib.build_ass(
         edl, index, tl, os.path.join(workdir, "check_full_cap.ass"),
         play_res=(W, H)) if edl.get("captions") else ""
@@ -7002,6 +7262,12 @@ def _run_render_job(worker_db, job):
                 and legibility_current(cached.get("meta"), edl_row["json"]) \
                 and carry_current(cached.get("meta"), edl_row["json"]) \
                 and follow_current(cached.get("meta"), edl_row["json"]) \
+                and (not handoff_may_matter(edl_row["json"])
+                     or handoff_current(
+                         cached.get("meta"), edl_row["json"],
+                         (worker_db.run(dbx.get_index_by_sha,
+                                        original["sha256"]) or {})
+                         .get("json") or {})) \
                 and watermark_current(cached.get("meta"), variant, is_paid,
                                       wm_settings) \
                 and _audio_model_review_cache_compatible(
@@ -7017,6 +7283,7 @@ def _run_render_job(worker_db, job):
                           "times": cached_meta.get("caption_review_times") or []}]
                         if cached_meta.get("caption_sheet_key") else []),
                     "audio_qc": cached_meta.get("audio_qc"),
+                    "picture_qc": cached_meta.get("picture_qc"),
                     # New renders retain exact program windows. Historical
                     # metadata stored keys only; those clips are still valid
                     # heard evidence and get generic labels on reuse.
@@ -7305,6 +7572,7 @@ def _run_render_job(worker_db, job):
                             and legibility_current(pm, prev_row["json"]) \
                             and carry_current(pm, prev_row["json"]) \
                             and follow_current(pm, prev_row["json"]) \
+                            and handoff_current(pm, prev_row["json"], index) \
                             and watermark_current(pm, variant, is_paid,
                                                   wm_settings) \
                             and (fp_now is None
@@ -7534,6 +7802,15 @@ def _run_render_job(worker_db, job):
         _mark("upload_s")
 
         out_info = media.probe(out_local)
+        # The picture side of the same deterministic review (render_qc):
+        # clipped faces, single-frame jumps off a cut, the end card and the
+        # watermark this variant should carry — measured on the file that
+        # ships, advisory to the editor, never a change to the edit.
+        picture_qc_res = None
+        if not proof_only and variant in ("preview", "final"):
+            picture_qc_res = picture_qc(
+                edl_row["json"], index, out_local, out_info, variant,
+                want_wm, wm_settings, src_shape, job_id)
         # Deterministic measurements are always-on.  When the edit authors
         # music/SFX/voiceover, also cut a few tiny excerpts while the finished
         # render is already local.  The dispatcher can hand those to the
@@ -7633,6 +7910,7 @@ def _run_render_job(worker_db, job):
                   "listen_clips": listen_keys,
                   "audio_model_review": audio_model_review,
                   "audio_qc": audio_qc_res,
+                  "picture_qc": picture_qc_res,
                   "src_sha256": src_sha,
                   **({"stitched_from": stitched_from}
                      if stitched_from is not None else {}),
@@ -7650,6 +7928,10 @@ def _run_render_job(worker_db, job):
                   "trans_v": config.TRANSITION_VERSION,
                   "cam_v": config.CAMERA_VERSION,
                   # A reused picture keeps the follow paths it was drawn with.
+                  # ...and the crop switches it was cut with.
+                  "handoff_v": (reused_visual_meta.get("handoff_v") or 0
+                                if reused_visual_meta
+                                else config.HANDOFF_VERSION),
                   "follow_v": (reused_visual_meta.get("follow_v") or 0
                                if reused_visual_meta
                                else config.FOLLOW_VERSION),
@@ -7715,6 +7997,7 @@ def _run_render_job(worker_db, job):
                 **({"motion_warnings": motion_warnings[:12]}
                    if motion_warnings else {}),
                 "audio_qc": audio_qc_res, "listen_keys": listen_keys,
+                "picture_qc": picture_qc_res,
                 "audio_model_review": audio_model_review}
     except Exception as exc:
         # Successful jobs have always returned stage timings. Failures used to

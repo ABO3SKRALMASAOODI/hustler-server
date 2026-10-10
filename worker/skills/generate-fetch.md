@@ -33,9 +33,10 @@ SOUND — the approved library first:
 - `list_sound_library()` lists the owner-approved real recordings (CC0):
   whooshes, a swish, an impact, risers, camera shutters, keyboard typing,
   clicks, a pop, a tick, a ding, glitches, a cash register and a heartbeat,
-  each with when to use it and a suggested gain. Place one with
-  `add_sfx(storage_key='sound:<id>', at=..., gain_db=<suggested>)`. Use it
-  for all ordinary sound design, sparingly (read audio).
+  each with when to use it and its measured hit level. Place one with
+  `add_sfx(storage_key='sound:<id>', at=...)`, gain_db unset so the tool
+  levels it against the voice at its hit. Use it for all ordinary sound
+  design, sparingly — zero by default in a podcast short (read audio).
 - Found sounds (the search → audition → fetch chain, or `add_web_sfx` for one
   exact named sound) only when the user explicitly asks for a specific sound
   the library lacks: a crowd cheer, a specific door, rain, an engine. Relay

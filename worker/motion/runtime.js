@@ -393,6 +393,104 @@
     return fs;
   };
 
+  // ── glyph-aware leading ────────────────────────────────────────────────
+  // Stacked rows of display type set with negative leading collide where a
+  // descender (y p g, a script swash) of one row meets the caps of the next.
+  // Line boxes cannot see that: the ink of a glyph is not its line box. These
+  // helpers measure the real ink of every glyph — its pen position from the
+  // laid-out DOM, its ink extents from the font (canvas text metrics in the
+  // element's own computed font) — so a template can stack rows as tight as
+  // the glyphs allow and no tighter. Measure before any transform is applied.
+  // The metrics are cached for ONE measurement only: a template's first
+  // layout runs before its web fonts have loaded (canvas then measures the
+  // fallback face under the same font string), and a document-wide cache
+  // would hand those fallback ascents/descents to the real layout after
+  // MG.ready whenever a row kept its size (height-capped hero, clamped kicker).
+  const inkCtx = document.createElement('canvas').getContext('2d');
+  const inkOf = (cache, font, ch) => {
+    const key = font + '\u0000' + ch;
+    let m = cache.get(key);
+    if (!m) {
+      inkCtx.font = font;
+      const r = inkCtx.measureText(ch);
+      m = { l: r.actualBoundingBoxLeft || 0, r: r.actualBoundingBoxRight || 0,
+            a: r.actualBoundingBoxAscent || 0, d: r.actualBoundingBoxDescent || 0,
+            fa: r.fontBoundingBoxAscent };
+      cache.set(key, m);
+    }
+    return m;
+  };
+  /** Ink box [x0, y0, x1, y1] (page px) of every visible glyph in els. */
+  MG.glyphBoxes = els => {
+    const out = [], range = document.createRange(), cache = new Map();
+    (Array.isArray(els) ? els : [els]).forEach(root => {
+      if (!root) return;
+      const walk = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      for (let node = walk.nextNode(); node; node = walk.nextNode()) {
+        const cs = getComputedStyle(node.parentElement);
+        if (cs.display === 'none' || cs.visibility === 'hidden') continue;
+        const font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+        const text = node.data;
+        for (let i = 0; i < text.length;) {
+          const cp = text.codePointAt(i), n = cp > 0xffff ? 2 : 1, ch = text.slice(i, i + n);
+          if (!/\s/.test(ch)) {
+            range.setStart(node, i); range.setEnd(node, i + n);
+            const rc = range.getClientRects()[0];
+            if (rc) {
+              const m = inkOf(cache, font, ch);
+              // the content box's top is the font ascent above the baseline
+              const base = rc.top + (m.fa > 0 ? m.fa : rc.height * 0.8);
+              out.push([rc.left - m.l, base - m.a, rc.left + m.r, base + m.d]);
+            }
+          }
+          i += n;
+        }
+      }
+    });
+    return out;
+  };
+  /** How far (px) `lower` must move down so none of its glyphs comes within
+   *  `clear` px (vertically) of a glyph of `upper` that it overlaps
+   *  horizontally (+`pad` px each side). Negative: that much room to spare;
+   *  -Infinity when no glyphs share a column. o: {clear = 0, pad = 0}. */
+  MG.stackGap = (upper, lower, o = {}) => {
+    const U = MG.glyphBoxes(upper), L = MG.glyphBoxes(lower);
+    const clear = +o.clear || 0, pad = +o.pad || 0;
+    let need = -Infinity;
+    for (const g of U) for (const h of L) {
+      if (h[0] < g[2] + pad && h[2] > g[0] - pad) need = Math.max(need, g[3] + clear - h[1]);
+    }
+    return need;
+  };
+
+  // ── yielding: a persistent graphic hands its band to other graphics ────
+  // The renderer (worker/motion_layer.yield_windows) sets MG.yields =
+  // {w: [[a, b], ...], out, in} on a persistent template (the headline band):
+  // composition seconds where another graphic occupies its band. The whole
+  // page fades out over `out` s ending at a, stays gone until b and fades
+  // back over `in` s from b. Unset (every other item) changes nothing.
+  MG.yields = null;
+  /** 0-1 visibility of the page at t under MG.yields (1 when unset). */
+  MG.yieldLevel = t => {
+    const Y = MG.yields;
+    if (!Y || !Array.isArray(Y.w) || !Y.w.length) return 1;
+    const o = Math.max(1e-3, +Y.out || 0.12), n = Math.max(1e-3, +Y.in || 0.3);
+    let v = 1;
+    for (const [a, b] of Y.w) {
+      if (t >= a && t <= b) return 0;
+      if (t < a && t > a - o) v = Math.min(v, ease.inOutQuad((a - t) / o));
+      if (t > b && t < b + n) v = Math.min(v, ease.outCubic((t - b) / n));
+    }
+    return v;
+  };
+  const yieldMoving = (t, fd) => {
+    const Y = MG.yields;
+    if (!Y || !Array.isArray(Y.w) || !Y.w.length) return false;
+    const o = Math.max(1e-3, +Y.out || 0.12), n = Math.max(1e-3, +Y.in || 0.3);
+    return Y.w.some(([a, b]) => (t >= a - o - 1e-6 && t <= a + fd + 1e-6)
+      || (t >= b - 1e-6 && t <= b + n + fd + 1e-6));
+  };
+
   // ── frame driver (called by the renderer) ──────────────────────────────
   window.__mgSeek = t => {
     MG.t = t;
@@ -420,6 +518,11 @@
           if (t * 1000 >= startMs - 1 && (endMs === Infinity || t * 1000 <= endMs + fd * 1000 + 1)) active = true;
         }
       } catch (e) { active = true; }
+    }
+    if (MG.yields) {
+      const v = MG.yieldLevel(t);
+      document.body.style.opacity = v >= 1 ? '' : v.toFixed(4);
+      if (yieldMoving(t, fd)) active = true;
     }
     return active ? 1 : 0;
   };

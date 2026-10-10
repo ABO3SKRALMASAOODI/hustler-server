@@ -40,9 +40,9 @@ WHAT A PREMIUM EDIT LOOKS LIKE, BY FORMAT:
   accent words; 2–4 hero moments on exact words; zooms only where a
   moment clearly earns one (optional — a steady frame is the default;
   never a move on every cut or sentence); B-roll evidence on named nouns;
-  sound effects only on the few moments that earn them (optional — zero is
-  fine; about one every 4–5 s at most, never on captions or ordinary
-  cuts); music only when the user asks for it or supplies a track,
+  sound effects zero by default, at most 1-2 on structural moments, each
+  with a visual partner and never a pun on the spoken word (optional —
+  zero is fine; never on captions or ordinary cuts); music only when the user asks for it or supplies a track,
   then ducked 13–20 dB under the voice; word-safe filler and
   dead-pause cleanup; social mastering (automatic on 9:16/4:5/1:1 — no
   `set_master_loudness` call needed); a native CTA after the payoff

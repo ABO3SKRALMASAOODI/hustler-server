@@ -206,8 +206,10 @@ def cues(edl, index, tl, canvas=None):
     lumas = _luma_samples(index)
     # Stretches a graphic holds on the caption band: a line in its usual
     # place never holds into one, and never starts in the last moments of
-    # one (it waits for the graphic to clear instead of touching it).
-    holds = mutes + [(float(a), float(b)) for a, b in carry.clamp_spans]
+    # one (it waits for the graphic to clear instead of touching it). A line
+    # never holds into a stretch a graphic owns its phrase either (one
+    # reading path: "that we have" clears as the lockup's "a" lands).
+    holds = mutes + [(float(a), float(b)) for a, b in carry.clamp_spans + carry.yield_spans]
     waits = [(float(a), float(b)) for a, b in carry.clamp_spans + carry.wait_spans]
     out = []
     prog_end = float(tl.out_duration)

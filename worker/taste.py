@@ -47,10 +47,16 @@ finding here counts a missing zoom or a missing sound as a defect or asks
 for one; a bare jump cut is named only when the speaker's head measurably
 jumps across it, and then with options (leave it, B-roll, a framing
 change), never a prescribed zoom.
+
+Sound placement (Oct 10 2026, sfx_placement): a talking short carries at
+most 1-2 sounds and no reflexive opening whoosh, and a sound with no visual
+event at its hit, a bright sound on a payoff word's onset or a literal sound
+pun is named — always to thin or move, never to add.
 """
 
 import re
 
+import sfx_placement
 import sound_library
 from timeline import program_blocks, transition_junctions
 
@@ -79,6 +85,9 @@ JUMP_CUT_MIN_SCALE = 0.08
 JUMP_CUT_MIN_SHIFT = 0.08
 # A crop aim moving this much (source fractions) is a new framing.
 JUMP_CUT_MIN_AIM = 0.03
+# A framing step written by the optional conceal_jump_cuts (cut_steps.py)
+# counts as a framing change on its cut from this size.
+CUT_STEP_MIN = 0.06
 # Jarring cuts named one by one in the note; the rest are counted.
 JUMP_CUT_LIST = 5
 # The step a row's `fix` measures against: the references' tight-camera step.
@@ -324,6 +333,33 @@ def _sfx_repeats(sfx):
     return out
 
 
+# How many per-sound placement notes one critique carries (the budget note
+# comes first); the rest are in audit_audio_mix.
+SFX_PLACEMENT_NOTES = 3
+_SFX_NOTE_ORDER = ("on_payoff_word", "literal_pun", "no_visual_partner",
+                   "opening_whoosh")
+
+
+def _sfx_placement_notes(edl, index):
+    """sfx_placement's findings as critique lines: the talking-short budget,
+    then the worst per-sound notes. Like the other sound findings here they
+    do not depend on how the request was phrased (round 55): whether a sound
+    serves the cut is an editorial judgment, and every note is advisory."""
+    try:
+        got = sfx_placement.check_edl(edl, index)
+    except Exception:          # noqa: BLE001
+        return []
+    out = [got["budget"]["message"]] if got.get("budget") else []
+    rows = []
+    for it in edl.get("sfx") or []:
+        for f in got["items"].get(it.get("id")) or []:
+            rows.append((_SFX_NOTE_ORDER.index(f["code"])
+                         if f["code"] in _SFX_NOTE_ORDER else 9,
+                         f.get("at") or 0.0, f["message"]))
+    out += [m for _o, _t, m in sorted(rows)[:SFX_PLACEMENT_NOTES]]
+    return out
+
+
 def density_limits(fmt):
     """The device-density limits for this format (see REEL_* above)."""
     reel = fmt.get("reel")
@@ -354,6 +390,12 @@ def _motion_moments(edl, out_dur):
             continue
         if str(item.get("template") or "").startswith("caption"):
             continue
+        try:
+            import motion_templates
+            if motion_templates.persistent(item):
+                continue                # the standing headline band is layout
+        except Exception:
+            pass
         start, end = _num(item.get("start")), _num(item.get("end"))
         if out_dur > 0 and end - start >= 0.8 * out_dur:
             continue
@@ -622,8 +664,10 @@ def uncovered_jump_cuts(edl, index, tl, fps=None, measure=None):
     cuts) steps the scale by JUMP_CUT_MIN_SCALE or moves the viewport by
     JUMP_CUT_MIN_SHIFT of the frame, when the crop's aim or mode changes
     (focus_track), when a transition fires on it, or when a full-frame
-    overlay hides it. `fix` is one line of what to do, written so taking
-    the fixes in order alternates tight and wide."""
+    overlay hides it. A cut step written by the optional conceal_jump_cuts
+    (a ``cut_step`` zoom edge, or a card's ``cut_steps`` scaling its source
+    rect) covers its cut from CUT_STEP_MIN. `fix` is one line of what to do,
+    written so taking the fixes in order alternates tight and wide."""
     segs = list(getattr(tl, "segs", None) or [])
     if len(segs) < 2:
         return []
@@ -653,7 +697,8 @@ def uncovered_jump_cuts(edl, index, tl, fps=None, measure=None):
     # face-following path (follow) that moves inside the removed footage
     cards = [cd for cd in fx.get("picture_cards") or []
              if isinstance(cd, dict)
-             and (cd.get("source_track") or cd.get("follow"))]
+             and (cd.get("source_track") or cd.get("follow")
+                  or cd.get("cut_steps"))]
     covers = []
     for ov in edl.get("overlays") or []:
         if ov.get("fit") == "cover" or ov.get("screen"):
@@ -708,6 +753,10 @@ def uncovered_jump_cuts(edl, index, tl, fps=None, measure=None):
         rb = picture_cards.source_at(cd, b)
         if ra is None or rb is None or ra == rb:
             return False
+        # a cut step (conceal_jump_cuts) scales the rect on the cut
+        wa, wb = ra[2] - ra[0], rb[2] - rb[0]
+        if max(wa, wb) / max(1e-6, min(wa, wb)) - 1.0 >= CUT_STEP_MIN - 1e-6:
+            return True
         if not cd.get("follow"):
             return True
         # a following card's rect drifts by a hair across any cut: only a
@@ -746,7 +795,12 @@ def uncovered_jump_cuts(edl, index, tl, fps=None, measure=None):
         scale = max(za[0], zb[0]) / max(1e-6, min(za[0], zb[0])) - 1.0
         shift = max(abs(vcentre(za[0], za[1]) - vcentre(zb[0], zb[1])),
                     abs(vcentre(za[0], za[2]) - vcentre(zb[0], zb[2])))
-        if scale >= JUMP_CUT_MIN_SCALE - 1e-6 or \
+        # a written cut step (conceal_jump_cuts) is a deliberate framing
+        # change on this cut: it counts from CUT_STEP_MIN
+        stepped = any(z.get("cut_step") and (
+            abs(_num(z.get("start")) - c) <= 2 * dt
+            or abs(_num(z.get("end")) - c) <= 2 * dt) for z in zooms)
+        if scale >= (CUT_STEP_MIN if stepped else JUMP_CUT_MIN_SCALE) - 1e-6 or \
                 shift >= JUMP_CUT_MIN_SHIFT - 1e-6:
             continue
         span = {"skip": round(s1 - e0, 2),
@@ -846,8 +900,9 @@ def jump_cut_line(bare):
             "never a rule: only where one of these is genuinely jarring on a "
             "key line, the options are to leave it, cover it with B-roll or "
             "a cutaway, or change the framing on that cut (a crop re-aim, or "
-            "a step of at least ~8% held to the next cut) — never a zoom on "
-            "every cut")
+            "a step of at least ~8% held to the next cut — conceal_jump_cuts "
+            "writes hard alternating steps on just the cuts that pop) — never "
+            "a zoom on every cut")
     if weak:
         one = len(weak) == 1
         parts.append(
@@ -904,7 +959,11 @@ def critique(edl, index, tl, src_w=None, src_h=None, user_asked="",
             "that is dead air at the most expensive moment of the video. "
             "Cut into the strongest line, or move it to the front.")
 
-    zooms = sorted((fx.get("zooms") or []),
+    # cut steps (conceal_jump_cuts) are optional cut hygiene, not camera
+    # moves: the rhythm, spacing, sameness and device counts read only the
+    # zooms an editor chose as moves
+    zooms = sorted((z for z in fx.get("zooms") or []
+                    if not (isinstance(z, dict) and z.get("cut_step"))),
                    key=lambda z: _num(z.get("start")))
     if zooms:
         first = _num(zooms[0].get("start"))
@@ -1063,6 +1122,10 @@ def critique(edl, index, tl, src_w=None, src_h=None, user_asked="",
             f"apart at {sfx_time(a):.1f}s {sfx_clash(a, b)} — they "
             "land as one flammed, muddy hit. Keep one, or layer DIFFERENT "
             "roles (a whoosh whose peak lands on an impact) on the same beat.")
+
+    if sfx:
+        for line in _sfx_placement_notes(edl, index):
+            add(line)
 
     music = edl.get("music") or []
     if music and fmt["n_words"] > 20:

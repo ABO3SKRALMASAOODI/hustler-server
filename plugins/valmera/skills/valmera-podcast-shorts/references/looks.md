@@ -31,7 +31,7 @@ The coordinator assigns one Look and one structure per short. The editor reads
 
 | Target | Value |
 | --- | --- |
-| Hook interrupt | a designed visual event at 0.0-0.6 s (`hook_title`, `word_slam` or a card reveal; a punch-in or landing zoom only when the opening earns it) with at most one sound, only when it earns one |
+| Hook interrupt | a designed visual event at 0.0-0.6 s (`hook_title`, `word_slam` or a card reveal; a punch-in or landing zoom only when the opening earns it) — no reflexive opening whoosh; a sound only when the title has a real entrance that earns one |
 | Hook as text | the hook line complete and readable on screen by 1.5 s (about 5% of frame height or more, not a slow typewriter); it poses the tension, never states or quotes the payoff, never contradicts the words under it |
 | Speaker identity | each speaker named within ~3 s of first appearing (`lower_third` or the headline band: verified name plus role, venue or year) |
 | Meaning | each graphic means what the speaker means: a tick is "achieved" (broken promises and myths take `mark='cross'`), slams go on information-bearing words, never on clichés, and no graphic only recaps an earlier one |
@@ -40,7 +40,7 @@ The coordinator assigns one Look and one structure per short. The editor reads
 | Hero moments | 2-4 designed beats on exact word cues (Kinetic Poster, Mono Noir, Creator Glow: 3-6) |
 | Payoff | marked (type first; a sound or a camera move only when it earns one; the owner's song's button when music is on) and held 1.0-1.5 s before the editorial end |
 | Picture area | full-bleed (1.0) when the face crop needs at most 2x upscale; otherwise a card on a designed backdrop covering at least 0.54 of the canvas (see Card geometry). Only Editorial Serif's square card may go down to 0.48 (gum-02), because its field carries the type |
-| Sound | optional: approved library sounds only on meaningful on-screen moments, zero is fine; at most about one every 4-5 s (a ceiling, usually far fewer), never the same sound within ~3 s, within the Look's budget (see Sound); no digital silence longer than 0.3 s except a deliberate 50-280 ms stop-down before a reveal or a montage passage flagged for the owner's song (see Sound without music) |
+| Sound | optional: zero by default, at most 1-2 approved library sounds on structural on-screen moments, each with a visual partner, none on a payoff word's onset, no literal puns, never the same sound within ~3 s, levelled by the tool (see Sound); no digital silence longer than 0.3 s except a deliberate 50-280 ms stop-down before a reveal or a montage passage flagged for the owner's song (see Sound without music) |
 | Length | final 15-45 s including the 5 s native ending, so the editorial program is 10-40 s (montage editorial at most 25 s) |
 
 ### Type
@@ -54,10 +54,13 @@ The coordinator assigns one Look and one structure per short. The editor reads
 - Accent colour on 1-2 words per sentence, otherwise near-white (#F6F3EE).
   No thick outlines, no default yellow boxes, no emoji spam. Legibility comes
   from size, face-free placement, a soft shadow and the grade.
-- One text system on screen at a time. Templates that replace the spoken words
-  (`word_slam`, `phrase_build`) mute the captions under them. Mute captions
-  only under a graphic that carries the words being spoken, never over a
-  punchline's setup; kickers quote the transcript.
+- One reading path: one text of a sentence on screen at a time. With
+  `mute_captions` unset a graphic owns the phrase it shows from its first
+  shown word to its exit (captions yield; a `phrase_build` sets the phrase's
+  other words in small type itself, so quote the transcript in its rows),
+  while the punchline's setup before it stays captioned. End a `word_slam` or
+  counter where its words end; the reply NOTEs any words only the sound
+  would carry. Kickers and rows quote the transcript word for word.
 - One accent colour for the whole short, passed to every graphic's `accent`;
   at most about 4 template families per short, varied across the batch.
 - Over a bright shirt or wall, raise the template's `scrim` (or move the type
@@ -79,6 +82,11 @@ Never the flat default colour.
 | 4:5 at 88% width (950x1188) | [0.06, 0.175, 0.94, 0.794] | 0.54 | y 0.08-0.17 | inside the card's lower third, y 0.62-0.76, in face-free space |
 | 1:1 at full width (1080x1080), for 4:3 archival | [0, 0.21, 1, 0.773] | 0.56 | y 0.08-0.20 | inside the card, y 0.60-0.74, face-free |
 | 1:1 at 92% width (994x994), Editorial Serif only | [0.04, 0.12, 0.96, 0.637] | 0.48 | none | in the field below the card, y 0.66-0.80 |
+
+The headline zone above a card holds the persistent `headline` motion
+template (or the editorial headline): one per short, written with y omitted
+so it fills that zone; hero lockups placed in the zone replace it and hand it
+back automatically, so it is never empty for seconds.
 
 A wider 4:5 card (up to 92% width, 64.7% of the height) fits only without a
 headline above it and must still end at or above y 0.80. Nothing designed
@@ -138,15 +146,16 @@ The owner rejected decorative "whoosh wars": every sound must be earned by
 something on screen.
 
 **Only the approved library.** `list_sound_library()` lists 21 real
-recordings the owner approved by ear (CC0), with when to use each and a
-suggested gain. Roles and ids: whoosh (`whoosh_soft_1`, `whoosh_soft_2`),
+recordings the owner approved by ear (CC0), with when to use each and its
+measured hit level. Roles and ids: whoosh (`whoosh_soft_1`, `whoosh_soft_2`),
 swish (`swish_1`), impact (`impact_1`), riser (`riser_1`-`riser_4`), shutter
 (`shutter_1`, `shutter_2`), typing (`typing_1`, `typing_2`), click
 (`click_1`, `click_2`), pop (`pop_1`), tick (`tick_1`), ding (`ding_1`),
 glitch (`glitch_1`, `glitch_2`), cash (`cash_register_1`), heartbeat
-(`heartbeat_1`). Place one with `add_sfx(storage_key='sound:<id>', at=...,
-gain_db=<suggested>)` as a typed call, not inside `apply_edit_batch`, and
-always pass the suggested gain (the -6 dB default is too loud). Never
+(`heartbeat_1`). Place one with `add_sfx(storage_key='sound:<id>', at=...)`
+as a typed call, not inside `apply_edit_batch`, and leave gain_db unset: the
+tool levels each recording against the measured voice at its hit and
+reports where it sits (see Timing and level). Never
 `search_sfx`, `add_web_sfx` or any other online sound in these shorts. There
 is no paper sound, no sub drop and no hard whoosh: whips take `swish_1`,
 hits take `impact_1`.
@@ -155,45 +164,48 @@ hits take `impact_1`.
 one moment in and maps the template's sound roles onto the library (roles
 with no approved recording are skipped). Opt in only where the graphic's
 landing earns a sound; a template whose cue repeats (a tick per counter step
-or per letter) stays silent and its settled figure gets one sound instead.
+or per letter) stays silent and its settled figure gets one sound at most,
+on a visual landing in the pause after its spoken number, never on the
+number's onset.
 
 **Where a sound goes.** Only where something meaningful happens on screen:
 the hook graphic landing, a hero graphic landing, a real section change or
 B-roll entry, the payoff, or a real-world action shown on screen (a shutter
 on a photo or still arriving, typing under typed text, a click on a visible
-button press, a cash register on a money figure, a ding on a result).
-Never on captions, jump cuts, ordinary cuts inside the conversation,
-landing zooms, `push_in`, punches or pulses on speech.
+button press, a cash register on a payment shown, a ding on a notification
+card). Something on screen changes within ~50 ms of the hit. Never on
+captions, jump cuts, ordinary cuts inside the conversation, landing zooms,
+`push_in`, punches or pulses on speech; never the reflexive opening whoosh;
+never a bright sound (ding, pop, click, shutter) on the onset of the payoff
+or an emphasis word, where it masks the word; never a literal pun on the
+spoken word (a shutter on 'pictures', a cash register on 'money' with only
+type on screen).
 
 **How many.** Sound effects are optional, never a rule: a sound with no
-clear on-screen reason makes a short look childish. At most about one sound
-every 4-5 s for the whole short (template cues count) — a ceiling, usually
-far fewer — never the same sound twice within ~3 s, and zero is fine for a
-passage or a short where nothing earns one.
-Each Look names a ceiling per short and one consistent family; stay inside
-both and match the material (no impact under a tender admission). A ceiling
-is never a quota, and the spacing rule wins: a 30 s short holds about 6-7
-sounds at most whatever its Look.
-
-| Looks | Sounds per short, at most |
-| --- | --- |
-| Headline Pro, Editorial Serif | 5 |
-| Cinematic Doc | 6 |
-| Clean Data, Creator Glow | 7 |
-| Kinetic Poster, Mono Noir | 8 |
+clear on-screen reason makes a short look childish. A podcast short carries
+zero by default and at most 1-2 for the whole short (template cues count),
+each on a structural moment — the payoff, a real section change — never the
+same sound twice within ~3 s. Each Look names one consistent family to draw
+those one or two from; match the material (no impact under a tender
+admission). The ceiling is never a quota.
 
 **Timing and level.** The peak lands on the visual frame: pass `at` = the
 frame the sound HITS and `add_sfx` starts each library recording early by
 its measured peak (risers end on `at`, typing starts there) and reports
 where the peak lands, so never pre-roll by hand. Long tails (`impact_1`)
-stop at their measured fade point unless `dur_s` asks for more. Every sound
-sits at its suggested gain under the voice; lower it rather than mask a
-word. `impact_1` is used at most once
-per short, on the payoff or the single biggest landing.
+stop at their measured fade point unless `dur_s` asks for more. The level
+is the tool's: with gain_db unset, `add_sfx` (and a graphic's own cues)
+sets each recording against the voice's short-term loudness at its hit —
+whoosh and swish about 8 dB under the voice, ding, pop, click, tick and
+shutter about 10 under, typing 14 under, an impact louder only below
+150 Hz (13 dB under the voice above it, the whole hit at most 8 under) —
+and its MIX line says where it sits; a CHECK names a sound that will be
+inaudible or too hot, or that sits on a payoff word, punning, or with no
+visual partner. `impact_1` is used at most once per short, on the payoff
+or the single biggest landing.
 
-Montage cuts are not designed beats: a montage gets at most a sound on its
-entry, a shutter on a still's arrival now and then (never two within ~3 s),
-and one sound on its final image.
+Montage cuts are not designed beats: a montage gets at most one or two
+sounds in all — on its entry, a still's arrival, or its final image.
 
 ### Music: off unless the owner supplies a song
 
@@ -232,9 +244,8 @@ get an invented music choice. With music off, in this order:
 2. **Design around speech.** Keep the silent stretch short, or lay the
    montage as overlays over the premise's last spoken lines so the voice
    carries it and the montage proper is only the final few seconds.
-3. **A few library sounds, not a bed.** A shutter as a still arrives (never
-   two within ~3 s), a riser ending on the final image, `impact_1` on the
-   button, all inside the short's budget. Never string sounds together to
+3. **One or two library sounds, not a bed.** A shutter as a still arrives,
+   or a riser ending on the final image, inside the short's 1-2 budget. Never string sounds together to
    fill the silence, and never search online for ambience.
 4. **Flag it.** Only when neither works: keep the passage short and write
    the handback `music` as `none - owner to add a song when posting
@@ -340,8 +351,8 @@ A `custom-<slug>` Look is allowed when the brief spells out every field below.
   visible; `counter` or `stat_card` only for a spoken number.
 - **Transitions + sound:** hard cuts (a landing zoom only on a real turn,
   silent). Family, only where a moment earns a sound: `whoosh_soft_1` into the
-  opening card or hook title, `pop_1` on at most one hero word, `impact_1` or
-  `ding_1` on the payoff. At most 5 sounds per short.
+  opening card when it has a real entrance, `impact_1` under the payoff.
+  At most 2 sounds per short, zero by default.
 - **Music (owner's song only, when on):** -22 dB ducked; let its swell land
   at the turn.
 - **Targets:** change every 0.4-0.7 s; hook at or before 0.6 s; 2-3 hero moments.
@@ -369,15 +380,16 @@ A `custom-<slug>` Look is allowed when the brief spells out every field below.
   on a real section change. Never a push on every take or a landing on every cut.
 - **Signature:** `phrase_build` lockups for the hook and the turn (small sans
   connector row, large serif hero row, condensed qualifier), placed in face-free
-  space with each row's `at` on its spoken onset; 1-2 hero words behind the
+  space with rows quoting the transcript (the engine lands each spoken word on
+  its onset); 1-2 hero words behind the
   subject (`add_motion_graphic(layer='behind_subject')` with `word_slam`, or
   `add_text_behind`) inside one continuous shot; `quote_card` or `marker_text`
   for the payoff.
 - **Transitions + sound:** hard cuts; strobe exits on type; at most one
   `light_leak` at the turn. Family, only where a moment earns a sound:
   `whoosh_soft_2` into a behind-subject word or the light leak, `heartbeat_1`
-  or `impact_1` under the payoff; `phrase_build` rows stay silent. At most 5
-  sounds per short.
+  or `impact_1` under the payoff; `phrase_build` rows stay silent. At most 2
+  sounds per short, zero by default.
 - **Music (owner's song only, when on):** -22 dB ducked.
 - **Targets:** change every 0.35-0.6 s; hook at or before 0.6 s (first
   `phrase_build` row on the first word); 2-4 hero moments.
@@ -402,14 +414,14 @@ A `custom-<slug>` Look is allowed when the brief spells out every field below.
   the biggest hit at most. The energy comes from the type — never a landing
   on every cut or a punch on every sentence.
 - **Signature:** `word_slam` on 3-5 hero words (start 0.2 s before the word);
-  `phrase_build` for the thesis; `versus_split` for a contrast; `image_card`
+  `phrase_build` for the thesis; `versus_split` for a contrast (`vs='serif'`
+  for a typographic 'vs' instead of the disc); `image_card`
   or `photo_stack` for licensed evidence; `chapter_title` between list items;
   `glitch_burst` or `flash_transition` at the turn.
 - **Transitions + sound:** `zoom_punch` or whip base. Family, only where a
   moment earns a sound: `swish_1` on the 1-2 real turns, `riser_2` ending on
-  the payoff word after a 100-250 ms stop-down, `impact_1` on the payoff; most
-  slams land silent, at most one more with `pop_1`. At most 8 sounds per
-  short.
+  the payoff word after a 100-250 ms stop-down, `impact_1` on the payoff;
+  slams land silent. At most 2 sounds per short, zero by default.
 - **Music (owner's song only, when on):** -18 dB ducked, with the stop-down.
 - **Targets:** change every 0.25-0.45 s; hook at or before 0.3 s; 4-6 hero moments.
 - **Golden traits:** type lands on almost every stressed word (silently; sound only on the few that earn it), and the payoff is the biggest thing in the short.
@@ -437,9 +449,10 @@ A `custom-<slug>` Look is allowed when the brief spells out every field below.
   archival evidence; `quote_card` for the payoff line; `focus_spotlight` on
   one face in a group; `light_leak`/`film_burn` at the turn.
 - **Transitions + sound:** `dip_white` 0.2 s or short flash base. Family, only
-  where a moment earns a sound: `shutter_2` as an archival photo arrives (not
-  every photo; never two within ~3 s), `whoosh_soft_1` into a title, `riser_1`
-  into the turn (once), `impact_1` on the payoff. At most 6 sounds per short.
+  where a moment earns a sound: `shutter_2` as an archival photo arrives on
+  screen (never on the spoken word 'photo'), `whoosh_soft_1` into a title,
+  `riser_1` into the turn, `impact_1` on the payoff. At most 2 sounds per
+  short, zero by default.
 - **Music (owner's song only, when on):** -20 dB ducked, swelling into the
   payoff.
 - **Targets:** change every 0.5-0.8 s with a structural event every 2-3 s;
@@ -468,8 +481,7 @@ A `custom-<slug>` Look is allowed when the brief spells out every field below.
   onsets. Family, only where a moment earns a sound: `glitch_1` or `glitch_2`
   under a real glitch transition, `typing_1` under a typewriter, `riser_4`
   into the payoff and `impact_1` on it (or `heartbeat_1` on a tense pause); a
-  counter stays silent until one `tick_1` or `ding_1` on the settled number.
-  At most 8 sounds per short.
+  counter stays silent. At most 2 sounds per short, zero by default.
 - **Music (owner's song only, when on):** -18 dB ducked, with a stop-down
   before the payoff.
 - **Targets:** change every 0.3-0.5 s; hook at or before 0.4 s; 3-5 hero moments.
@@ -500,9 +512,9 @@ A `custom-<slug>` Look is allowed when the brief spells out every field below.
   message or post.
 - **Transitions + sound:** short whips and swipes. Family (UI), only where a
   moment earns a sound: `click_1` or `click_2` on a visible press, `typing_2`
-  under `search_bar`, `cash_register_1` on a money figure, `ding_1` on a
-  result or notification, `pop_1` as a card lands; counters count up silently.
-  At most 7 sounds per short.
+  under `search_bar`, `cash_register_1` on a payment card, `ding_1` on a
+  notification card, `pop_1` as a card lands; counters count up silently.
+  At most 2 sounds per short, zero by default.
 - **Music (owner's song only, when on):** -20 dB ducked.
 - **Targets:** change every 0.35-0.6 s; hook at or before 0.6 s; 3-5 data beats.
 - **Golden traits:** the number becomes the picture, and its settled figure lands (one sound at most).
@@ -529,8 +541,8 @@ A `custom-<slug>` Look is allowed when the brief spells out every field below.
   only when the run brief asks.
 - **Transitions + sound:** `zoom_punch` or whip base plus `flash_transition`
   or `light_leak`. Family, only where a moment earns a sound: `swish_1` on the
-  1-2 real turns, `pop_1` on one keyword stack, `riser_2` into the payoff and
-  `impact_1` on it. At most 7 sounds per short.
+  1-2 real turns, `riser_2` into the payoff and `impact_1` on it. At most 2
+  sounds per short, zero by default.
 - **Music (owner's song only, when on):** -18 dB ducked.
 - **Targets:** change every 0.3-0.5 s; hook at or before 0.4 s; 3-5 hero moments.
 - **Golden traits:** glowing words build beside the face, so the hook reads before the sentence ends.

@@ -1,4 +1,17 @@
-"""Word-level caption muting: a graphic hides only the spoken words it shows.
+"""Caption arbitration: one reading path between graphics and captions.
+
+Round 3 (Oct 2026): word-level muting alone still left TWO texts on screen —
+a list reading "ROCKETS / supersonic jets" over captions reading "aviation
+and the Green Revolution agriculture", a lockup building "no college
+student" up top while "three or four years from now" ran at the bottom. So
+a graphic that shows a phrase's words now OWNS that phrase from its first
+shown word until it leaves (``owned``; the section "one reading path"
+below): the captions yield there, a lockup (spec ``reads_phrase``:
+phrase_build) sets the phrase's words its rows leave out in small type on
+their onsets (``MotionItem.reading``), and the words said before its first
+shown word (the setup) and every other phrase keep their captions.
+
+Round 2 (word-level muting):
 
 Showcase judging (Oct 2026): a graphic muted the captions for its WHOLE
 window, so spoken words it did not show vanished for sound-off viewers ("the
@@ -9,13 +22,16 @@ before a phrase build's first row), while a counter that did not mute showed
 
 The contract (MotionItem.mute_captions):
 
-- unset (the default): WORD-LEVEL. The words spoken in the graphic's window
-  that it actually shows — its visible text params matched against the
-  transcript, tolerant of case, punctuation, plurals, numerals vs number
-  words and *starred* accents — are dropped from the captions (one
+- unset (the default): ONE READING PATH. The words spoken in the graphic's
+  window that it actually shows — its visible text params matched against
+  the transcript, tolerant of case, punctuation, plurals, numerals vs
+  number words and *starred* accents — are dropped from the captions (one
   connector word or two between shown words go with them, and so does a
-  quoted phrase that starts up to CARRY_LEAD_S before the graphic). Every
-  other spoken word keeps its caption. While the graphic is up those
+  quoted phrase that starts up to CARRY_LEAD_S before the graphic). The
+  rest of each phrase it shows, said between its first shown word and its
+  exit, yields too: a lockup sets it in small type, any other graphic
+  leaves it to the sound (the write NOTE and the sound-off audit name it).
+  Every other spoken word keeps its caption. While the graphic is up those
   captions sit in the band nearest their usual place that is clear of the
   box it draws (``MotionItem.footprint``) and of the speaker's face (the
   zones the write-time face keep-out measured, else the index), preferring
@@ -44,6 +60,7 @@ has no box and never moves or mutes a caption.
 """
 
 import difflib
+import math
 import re
 
 MODE_ALL, MODE_WORDS, MODE_HERO = "all", "words", "hero"
@@ -218,6 +235,12 @@ def mode(item):
     if m is False:
         return MODE_HERO
     return MODE_WORDS
+
+
+def persistent(item):
+    """A persistent template (the headline band, motion_templates.persistent):
+    it carries no spoken words and is placed around like any graphic."""
+    return bool(_spec(item).get("persistent"))
 
 
 def replaces_speech(item):
@@ -709,14 +732,19 @@ def _said(words):
 class Plan:
     """The caption decision for one EDL's words (see module docstring).
 
-    ``hidden[i] = (item id, "carried"|"room"|"unmeasured")`` ("room": no
-    band clear of its box and the face; "unmeasured": no box measured at this frame
-    shape, so it is assumed to sit on the captions); ``placed[i]`` = the band
-    dict for a word moved clear of a graphic; ``clamp_spans`` are program
-    windows no normally placed caption may hold into (a graphic occupies the
-    caption band there); ``wait_spans`` add the whole-window mutes of
-    motion graphics, which a normally placed caption must not start inside
-    of near their end; ``report`` is per item for notes and audits."""
+    ``hidden[i] = (item id, "carried"|"joined"|"yield"|"room"|"unmeasured")``
+    ("joined": a word the lockup sets in small type because it reads the
+    phrase; "yield": a word of a phrase the graphic shows, said while it is
+    up, that only the sound carries — one reading path; "room": no band
+    clear of its box and the face; "unmeasured": no box measured at this
+    frame shape, so it is assumed to sit on the captions); ``placed[i]`` =
+    the band dict for a word moved clear of a graphic; ``clamp_spans`` are
+    program windows no normally placed caption may hold into (a graphic
+    occupies the caption band there); ``yield_spans`` are the stretches a
+    graphic owns its phrase (a caption from before never holds into one);
+    ``wait_spans`` add the whole-window mutes of motion graphics, which a
+    normally placed caption must not start inside of near their end;
+    ``report`` is per item for notes and audits."""
 
     def __init__(self, words):
         self.words = words
@@ -724,6 +752,7 @@ class Plan:
         self.placed = {}
         self.clamp_spans = []
         self.wait_spans = []
+        self.yield_spans = []
         self.report = {}
 
     def caption_words(self):
@@ -767,31 +796,41 @@ def plan(edl, index, tl, words, canvas=None):
         return p
     word_toks = _token_rows([w.get("w") for w in words])
     mids = [_mid(w) for w in words]
+    pids = phrase_ids(words)
     W, H = frame_wh(edl, index, canvas)
     safe = safe_range(W, H)
     ar = frame_ar(W, H)
     for m in items:
         s, e = m["start"], m["end"]
-        seq, hero, solo = shown_tokens(m)
-        # a word still being said as the graphic leaves counts: the graphic
-        # shows it while it is heard ("140" spoken across a slam's exit)
-        idx = [i for i, t in enumerate(mids) if s - CARRY_LEAD_S <= t and
-               (t <= e or float(words[i]["t0"]) < e - 0.04)]
-        lead_n = sum(1 for i in idx if mids[i] < s)
-        local = carried_indices([word_toks[i] for i in idx], seq, lead_n, solo)
-        carried = {idx[k] for k in local}
-        if mode(m) == MODE_HERO:
-            carried = {i for i in carried if hero & set(word_toks[i])}
-        else:
-            inside = [i for i in idx if mids[i] >= s]
-            carried |= _absorbed(inside, carried, word_toks, words)
+        carried = carried_by(m, words, word_toks, mids)
         for i in sorted(carried):
             p.hidden.setdefault(i, (m["id"], "carried"))
-        p.report[m["id"]] = {"id": m["id"], "start": s, "end": e, "mode": mode(m),
-                             "box": footprint_box(m, ar),
-                             "estimated": estimated(m),
-                             "carried": [words[i] for i in sorted(carried)],
-                             "placed": None, "muted": [], "kept": []}
+        rep = p.report[m["id"]] = {
+            "id": m["id"], "start": s, "end": e, "mode": mode(m),
+            "box": footprint_box(m, ar), "estimated": estimated(m),
+            "carried": [words[i] for i in sorted(carried)],
+            "placed": None, "muted": [], "kept": [],
+            "owns_from": None, "joined": [], "yielded": [], "beside": []}
+        # (the standing headline owns no phrase: captions never yield to it)
+        own = owned(m, words, word_toks, mids, pids, carried) \
+            if mode(m) == MODE_WORDS and not persistent(m) else None
+        if own is None:
+            continue
+        # One reading path: the phrase this graphic shows is read on it
+        # alone from its first shown word to its exit.
+        rep["owns_from"] = own["from"]
+        p.yield_spans.append([own["from"], e])
+        for i in own["absorbed"]:
+            p.hidden.setdefault(i, (m["id"], "carried"))
+        for run in own["joined"]:
+            for i in run:
+                p.hidden.setdefault(i, (m["id"], "joined"))
+            rep["joined"].append([words[i] for i in run])
+        for i in own["yielded"]:
+            p.hidden.setdefault(i, (m["id"], "yield"))
+            rep["yielded"].append(words[i])
+        rep["beside"] = [[words[i] for i in run] for run in own["beside"]]
+    p.yield_spans = _merge(p.yield_spans)
     # Segments: maximal program spans with one set of live graphics.
     cuts = sorted({x for m in items for x in (m["start"], m["end"])})
     for a, b in zip(cuts, cuts[1:]):
@@ -897,6 +936,402 @@ def _absorbed(inside, carried, word_toks, words):
     return out
 
 
+# ── one reading path ─────────────────────────────────────────────────────
+# Judging (Oct 2026, round 3): a list read "ROCKETS / supersonic jets" while
+# the caption under it read "aviation and the Green Revolution agriculture";
+# a lockup built "no college student" up top while the caption carried
+# "three or four years from now" at the bottom, and the eye ping-ponged.
+# Two texts at once, two different readings. The rule: a graphic that shows
+# a phrase's words OWNS that phrase from its first shown word to its exit —
+# the captions yield there. A lockup (spec ``reads_phrase``: phrase_build)
+# sets the phrase's other words in small type in reading order, each on its
+# spoken onset (``MotionItem.reading``), so a sound-off viewer still reads
+# every word; any other graphic leaves them to the sound, and its write
+# NOTE and the sound-off audit name them. Words said before its first shown
+# word (the setup) and other phrases keep their captions.
+
+# A source jump this long (or a program pause) ends a phrase even without
+# punctuation; sentence and clause marks always do.
+PHRASE_GAP_S = 1.5
+PHRASE_PAUSE_S = 1.0
+_PHRASE_END = ".!?…;:"
+# A lockup sets a run of the phrase's other words in small type up to this
+# size; a longer run stays captioned beside it (and its NOTE says so).
+BRIDGE_MAX_WORDS = 14
+BRIDGE_MAX_CHARS = 90
+# A list's "and"/"or" between a shown row and the small run beside it is
+# the graphic's own joint, not words to set. ("but" and "so" carry meaning —
+# "great companies, but not enough" — and are always set.)
+_EDGE_CONJ = frozenset(("and", "or"))
+# A bridge line wraps inside the lockup's column, never inside a name, a
+# number and its noun, or after an article ("the / Green Revolution"); a
+# glued group stays this short so it always fits the column.
+BRIDGE_GLUE_MAX_CHARS = 24
+_BRIDGE_ARTICLES = frozenset(("a", "an", "the"))
+READING_VERSION = 1
+
+
+def reads_phrase(item):
+    """Does the template set a phrase's unshown words itself (lockups)?"""
+    return bool(_spec(item).get("reads_phrase"))
+
+
+def phrase_ids(words):
+    """Per caption word, the index of its phrase (sentence or clause): a
+    new phrase after sentence/clause punctuation, an insert break, a source
+    jump of PHRASE_GAP_S or a program pause of PHRASE_PAUSE_S. Commas do
+    not end one (a list is one phrase)."""
+    out, k = [], 0
+    for i, w in enumerate(words):
+        if i:
+            prev = words[i - 1]
+            raw = str(prev.get("w") or "").rstrip("\"'”’) ")
+            try:
+                gap = float(w["t0"]) - float(prev["t1"])
+                jump = float(w.get("src_t0", w["t0"])) - float(prev.get("src_t1", prev["t1"]))
+            except (KeyError, TypeError, ValueError):
+                gap = jump = 0.0
+            if (raw and raw[-1] in _PHRASE_END) or raw in ("-", "—", "–") or w.get("brk") \
+                    or gap >= PHRASE_PAUSE_S or abs(jump) >= PHRASE_GAP_S:
+                k += 1
+        out.append(k)
+    return out
+
+
+def carried_by(m, words, word_toks, mids, hero_only=None):
+    """Indices of the caption words graphic ``m`` shows (see the module
+    docstring; MODE_HERO keeps only its hero words unless ``hero_only`` is
+    False)."""
+    if persistent(m):
+        # the standing headline is a claim, not the spoken line: it never
+        # takes a word out of the captions it runs beside
+        return set()
+    s, e = float(m["start"]), float(m["end"])
+    seq, hero, solo = shown_tokens(m)
+    # a word still being said as the graphic leaves counts: the graphic
+    # shows it while it is heard ("140" spoken across a slam's exit)
+    idx = [i for i, t in enumerate(mids) if s - CARRY_LEAD_S <= t and
+           (t <= e or float(words[i]["t0"]) < e - 0.04)]
+    lead_n = sum(1 for i in idx if mids[i] < s)
+    local = carried_indices([word_toks[i] for i in idx], seq, lead_n, solo)
+    carried = {idx[k] for k in local}
+    if hero_only is None:
+        hero_only = mode(m) == MODE_HERO
+    if hero_only:
+        return {i for i in carried if hero & set(word_toks[i])}
+    inside = [i for i in idx if mids[i] >= s]
+    return carried | _absorbed(inside, carried, word_toks, words)
+
+
+def _runs(idx):
+    runs = []
+    for i in sorted(idx):
+        if runs and i == runs[-1][-1] + 1:
+            runs[-1].append(i)
+        else:
+            runs.append([i])
+    return runs
+
+
+def owned(m, words, word_toks, mids, pids, carried):
+    """What graphic ``m`` owns (one reading path), or None when it shows no
+    content word of what is said. {"from": program second the captions
+    yield from (its first shown word, or its start), "joined": runs of word
+    indices a lockup sets in small type, "yielded": indices left to the
+    sound (a graphic that is no lockup), "beside": runs too long for a
+    lockup (they stay captioned), "absorbed": list joints dropped}."""
+    if not any(is_content(t) for i in carried for t in word_toks[i]):
+        return None
+    s, e = float(m["start"]), float(m["end"])
+    first = min(carried, key=lambda i: float(words[i]["t0"]))
+    start = max(s, float(words[first]["t0"]))
+    phrases = {pids[i] for i in carried}
+    span = [i for i in range(len(words)) if pids[i] in phrases and i not in carried
+            and float(words[i]["t0"]) >= start - 1e-3 and mids[i] < e]
+    out = {"from": round(start, 3), "joined": [], "yielded": [], "beside": [],
+           "absorbed": []}
+    if not reads_phrase(m):
+        out["yielded"] = span
+        return out
+    for run in _runs(span):
+        while run and run[0] - 1 in carried and \
+                str(words[run[0]].get("w") or "").strip(" ,").lower() in _EDGE_CONJ:
+            out["absorbed"].append(run.pop(0))
+        while run and run[-1] + 1 in carried and \
+                str(words[run[-1]].get("w") or "").strip(" ,").lower() in _EDGE_CONJ:
+            out["absorbed"].append(run.pop())
+        if not run:
+            continue
+        if len(run) > BRIDGE_MAX_WORDS or len(_said([words[i] for i in run])) > BRIDGE_MAX_CHARS:
+            out["beside"].append(run)
+        else:
+            out["joined"].append(run)
+    return out
+
+
+def display_rows(item):
+    """The words each row of a lockup prints, split like the page splits
+    them (MG.starWords: whitespace, *accent* stars dropped)."""
+    out = []
+    for row in (item.get("params") or {}).get("rows") or []:
+        text = row.get("text") if isinstance(row, dict) else None
+        out.append([t.replace("*", "") for t in str(text or "").split()
+                    if t.replace("*", "")])
+    return out
+
+
+def _reading_of(m, words, word_toks, mids, carried, joined):
+    """The ``reading`` of lockup ``m``: per row, per printed word, the
+    composition second its carried spoken word starts (None: not said,
+    e.g. a headline row), and the joined runs as small bridge lines placed
+    after the row of the shown word before them (-1: before the first)."""
+    rows = display_rows(m)
+    s = float(m["start"])
+    flat_d = [(r, j) for r, ws in enumerate(rows) for j in range(len(ws))]
+    toks_d = _token_rows([rows[r][j] for r, j in flat_d])
+    seq = [(t, k) for k, ts in enumerate(toks_d) for t in ts]
+    near = sorted(i for i in carried)
+    flat_w = [(t, i) for i in near for t in word_toks[i]]
+    at = [[None] * len(ws) for ws in rows]
+    row_of = {}
+    if seq and flat_w:
+        sm = difflib.SequenceMatcher(None, [t for t, _k in seq], [t for t, _i in flat_w],
+                                     autojunk=False)
+        for blk in sm.get_matching_blocks():
+            for k in range(blk.size):
+                r, j = flat_d[seq[blk.a + k][1]]
+                i = flat_w[blk.b + k][1]
+                t = round(max(0.0, float(words[i]["t0"]) - s), 3)
+                if at[r][j] is None or t < at[r][j]:
+                    at[r][j] = t
+                row_of.setdefault(i, r)
+    import captions as caplib
+    bridges = []
+    for run in joined:
+        t_first = float(words[run[0]]["t0"])
+        after = -1
+        for i in sorted((i for i in row_of if float(words[i]["t0"]) <= t_first),
+                        key=lambda i: float(words[i]["t0"])):
+            after = row_of[i]
+        ws, group = [], 0          # group: characters glued so far
+        for k, i in enumerate(run):
+            text = str(words[i].get("w") or "").strip().strip("\"“”")
+            if i == run[-1]:
+                text = text.rstrip(".,;:…")
+            if text:
+                w = {"t": text, "s": round(max(0.0, float(words[i]["t0"]) - s), 3)}
+                # a name, a number and its noun, a determiner or an article
+                # and its noun never break across the bridge line's wrap
+                # ("the Green / Revolution" was the caption defect all over
+                # again), as long as the glued group still fits the column
+                if k + 1 < len(run):
+                    nxt = str(words[run[k + 1]].get("w") or "").strip().strip("\"“”")
+                    want = caplib._glue(words[i], words[run[k + 1]],
+                                        words[run[k - 1]] if k else None) \
+                        >= caplib.GLUE_NUMBER or \
+                        text.lower().strip("'’") in _BRIDGE_ARTICLES
+                    span = (group or len(text)) + 1 + len(nxt)
+                    if want and nxt and span <= BRIDGE_GLUE_MAX_CHARS:
+                        w["g"] = 1
+                        group = span
+                    else:
+                        group = 0
+                ws.append(w)
+        if ws:
+            bridges.append({"after": after, "words": ws})
+    if not any(v is not None for row in at for v in row) and not bridges:
+        return None
+    return {"v": READING_VERSION, "rows": at, "bridges": bridges}
+
+
+def readings(edl, index, tl):
+    """{item id: reading} for the whole lockups (``reads_phrase``) of a
+    program: their printed words timed to the spoken onsets and, under
+    transcript captions with mute_captions unset, the phrase's other words
+    joined as bridge lines (see owned). A windowed item (a stitched piece,
+    ``full_duration_s``) keeps the reading its full program gave it."""
+    import captions as caplib
+    items = [m for m in program_items(edl, tl)
+             if reads_phrase(m) and not m.get("full_duration_s")]
+    if not items or not (index or {}).get("words"):
+        return {}
+    words = caplib.transcript_words(edl, index, tl)
+    if not words:
+        return {}
+    word_toks = _token_rows([w.get("w") for w in words])
+    mids = [_mid(w) for w in words]
+    caps = edl.get("captions")
+    cap_words = None
+    if isinstance(caps, dict) and caps.get("mode") == "from_transcript":
+        cap_words = caplib.transcript_words(edl, index, tl,
+                                            caplib.effective_caption_mutes(edl))
+        cap_toks = _token_rows([w.get("w") for w in cap_words])
+        cap_mids = [_mid(w) for w in cap_words]
+        cap_pids = phrase_ids(cap_words)
+        pos = {(round(float(w["t0"]), 3), str(w.get("w"))): i for i, w in enumerate(words)}
+    out = {}
+    for m in items:
+        carried = carried_by(m, words, word_toks, mids, hero_only=False)
+        joined = []
+        if cap_words and mode(m) == MODE_WORDS:
+            c_carried = carried_by(m, cap_words, cap_toks, cap_mids)
+            own = owned(m, cap_words, cap_toks, cap_mids, cap_pids, c_carried)
+            for run in (own or {}).get("joined") or []:
+                mapped = [pos.get((round(float(cap_words[i]["t0"]), 3),
+                                   str(cap_words[i].get("w")))) for i in run]
+                mapped = [i for i in mapped if i is not None]
+                if mapped:
+                    joined.append(mapped)
+        rd = _reading_of(m, words, word_toks, mids, carried, joined)
+        if rd:
+            out[m["id"]] = rd
+    return out
+
+
+# A bridge line (one reading path) adds about this much frame height per
+# wrapped line to a lockup; a line wraps at about this many characters.
+BRIDGE_LINE_H = 0.034
+BRIDGE_LINE_CHARS = 34
+
+
+def bridged_box(box, item):
+    """A lockup's ESTIMATED box grown by the bridge lines its reading sets
+    (the block stays centred on its y). Used wherever the box is a nominal
+    estimate rather than a measured footprint: the browserless keep-out and
+    the headline band's yield."""
+    if not box:
+        return box
+    lines = 0
+    for b in ((item or {}).get("reading") or {}).get("bridges") or []:
+        chars = len(" ".join(str(w.get("t") or "") for w in b.get("words") or []))
+        lines += max(1, -(-chars // BRIDGE_LINE_CHARS))
+    if not lines:
+        return box
+    half = BRIDGE_LINE_H * lines / 2.0
+    return (box[0], max(0.0, box[1] - half), box[2], min(1.0, box[3] + half))
+
+
+# How motion/templates/phrase_build.html times its reveals, mirrored for the
+# engine's own questions (when a lockup first draws: the headline band's
+# yield; when it visibly lands: a sound's visual partner).
+LOCKUP_RISE_LEAD_S = 0.06       # a 'rise' word starts this early (readable on it)
+LOCKUP_ROW_GAP_S = 0.25         # an unspoken blank-'at' row follows the last word
+_JS_FLOAT = re.compile(r"^\s*[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
+
+
+def _js_float(v, default):
+    """JavaScript parseFloat(v) (a leading number, else ``default``)."""
+    m = _JS_FLOAT.match(str(v)) if v is not None else None
+    if not m:
+        return default
+    try:
+        n = float(m.group(0))
+    except ValueError:
+        return default
+    return n if math.isfinite(n) else default
+
+
+def lockup_reveals(item, fps=30.0):
+    """Composition seconds at which a phrase_build lockup reveals each of its
+    rows and bridge lines, in reading order — exactly as the page times them
+    from its ``reading``: a spoken row (and a bridge line) from its first
+    spoken word's onset, a row nobody says on its ``at`` (blank: right after
+    the previous row), never before a word above it; a 'rise' entrance
+    starts LOCKUP_RISE_LEAD_S early. The first value is when the lockup
+    first draws a word. [] for any other template."""
+    if not isinstance(item, dict) or item.get("template") != "phrase_build":
+        return []
+    params = item.get("params") or {}
+    rd = item.get("reading") if isinstance(item.get("reading"), dict) else {}
+    rd_rows = rd.get("rows") if isinstance(rd.get("rows"), list) else []
+    bridges = rd.get("bridges") if isinstance(rd.get("bridges"), list) else []
+    lead = LOCKUP_RISE_LEAD_S if params.get("entrance") == "rise" else 0.0
+
+    def onset(v):
+        n = None if v is None else _js_float(v, None)
+        return None if n is None else max(0.0, n - lead)
+
+    rows = []
+
+    def bridge_rows(after):
+        for b in bridges:
+            if not isinstance(b, dict):
+                continue
+            try:
+                if int(b.get("after", -1)) != after:
+                    continue
+            except (TypeError, ValueError):
+                continue
+            ws = [w for w in b.get("words") or []
+                  if isinstance(w, dict) and str(w.get("t") or "").strip()]
+            if ws:
+                rows.append({"known": [onset(w.get("s")) for w in ws], "at": ""})
+
+    bridge_rows(-1)
+    shown = display_rows(item)
+    for i, row in enumerate((params.get("rows") or [])[:4]):
+        words = shown[i] if i < len(shown) else []
+        if words:
+            k = rd_rows[i] if i < len(rd_rows) and isinstance(rd_rows[i], list) else []
+            at = row.get("at") if isinstance(row, dict) else None
+            rows.append({"known": [onset(k[j]) if j < len(k) else None
+                                   for j in range(len(words))],
+                         "at": "" if at is None else str(at).strip()})
+        bridge_rows(i)
+    stagger = max(0.0, _js_float(params.get("word_stagger", 0.14), 0.0) or 0.0)
+
+    def start_of(r):
+        k = [v for v in r["known"] if v is not None]
+        if k:
+            return min(k)
+        return max(0.0, _js_float(r["at"], 0.0)) if r["at"] != "" else None
+
+    out, prev_last, prev_end = [], 0.0, -LOCKUP_ROW_GAP_S
+    for idx, r in enumerate(rows):
+        n = len(r["known"])
+        if any(v is not None for v in r["known"]):
+            cur = next(v for v in r["known"] if v is not None)
+            times = []
+            for v in r["known"]:
+                cur = v if v is not None else cur
+                times.append(cur)
+        else:
+            t0 = (max(0.0, _js_float(r["at"], 0.0)) if r["at"] != ""
+                  else prev_end + LOCKUP_ROW_GAP_S)
+            nxt = start_of(rows[idx + 1]) if idx + 1 < len(rows) else None
+            st = min(stagger, (nxt - t0) / n) if (nxt is not None and nxt > t0) else stagger
+            if st < stagger and st < 2.0 / float(fps or 30.0):
+                st = 0.0
+            times = [t0 + j * st for j in range(n)]
+        clamped = []
+        for t in times:
+            prev_last = max(t, prev_last)
+            clamped.append(prev_last)
+        out.append(round(clamped[0], 4))
+        prev_end = clamped[-1]
+    return out
+
+
+def attach_readings(edl, index, tl):
+    """Write each whole lockup's ``reading`` (readings) onto its motion item
+    in place — and drop a stale one — before anything measures or renders
+    it. Never raises: a lockup without a reading reveals on its authored
+    ``at`` times, in reading order."""
+    try:
+        got = readings(edl, index, tl)
+    except Exception as e:  # noqa: BLE001
+        print(f"[motion] lockup reading skipped: {str(e)[:160]}", flush=True)
+        return edl
+    for m in edl.get("motion") or []:
+        if not isinstance(m, dict) or m.get("full_duration_s") or not reads_phrase(m):
+            continue
+        if m.get("id") in got:
+            m["reading"] = got[m["id"]]
+        else:
+            m.pop("reading", None)
+    return edl
+
+
 # ── sound-off coverage ───────────────────────────────────────────────────
 
 def _on_screen(edl, tl):
@@ -904,6 +1339,8 @@ def _on_screen(edl, tl):
     motion graphics and designed texts."""
     out = []
     for m in program_items(edl, tl):
+        if persistent(m):
+            continue                    # a standing claim is not the spoken line
         seq, _hero, _solo = shown_tokens(m)
         out.append((m["start"], m["end"], set(seq), f"motion graphic '{m['id']}'"))
     for t in edl.get("texts") or []:
@@ -932,9 +1369,11 @@ def sound_off_gaps(edl, index, tl, min_gap=SOUND_OFF_GAP_S):
     p = plan(edl, index, tl, after_mutes)
     key = lambda w: (round(float(w["t0"]), 3), str(w.get("w")))  # noqa: E731
     shown = {key(w) for w in p.caption_words()}
-    carried = {key(after_mutes[i]) for i, (_o, why) in p.hidden.items() if why == "carried"}
+    # carried: on the graphic; joined: set in small type on the lockup
+    carried = {key(after_mutes[i]) for i, (_o, why) in p.hidden.items()
+               if why in ("carried", "joined")}
     room = {key(after_mutes[i]): (owner, why) for i, (owner, why) in p.hidden.items()
-            if why in ("room", "unmeasured")}
+            if why in ("room", "unmeasured", "yield")}
     screen = _on_screen(edl, tl)
     toks = _token_rows([w.get("w") for w in spoken])
     state = []                         # covered / neutral / uncovered per word
@@ -976,7 +1415,13 @@ def _gap(edl, spoken, i0, i1, dur, room, key):
     for i in range(i0, i1 + 1):
         if key(spoken[i]) in room:
             owner, why = room[key(spoken[i])]
-            if why == "unmeasured":
+            if why == "yield":
+                cause = (f"captions yield to motion graphic '{owner}' while it shows that "
+                         "phrase (one reading path), and it does not print those words")
+                fix = (f"end '{owner}' where its own words end so those words are "
+                       "captioned, carry them on it, or make it a phrase_build (a lockup "
+                       "sets them in small type)")
+            elif why == "unmeasured":
                 cause = (f"motion graphic '{owner}' has no box measured at this frame "
                          "shape, so it is assumed to sit on the caption band (a render "
                          "measures it)")

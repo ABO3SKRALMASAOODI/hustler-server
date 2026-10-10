@@ -30,13 +30,34 @@ Every non-required param needs a `default`. Keep params few and meaningful;
 good defaults matter more than knobs.
 
 `mutes_captions` says the template exists to SAY the spoken words (a slam, a
-phrase build, a marker line, a quote). Captions are word-level either way
-(worker/caption_carry.py): an item with `mute_captions` unset drops only the
-spoken words its visible text params show, and the rest stay captioned in a
-band clear of the box it draws. The flag decides the fallback when no band is
-clear — a speech template mutes those words, any other keeps them in place —
-so every text a template prints must come from its params (that is what the
-captions are matched against).
+phrase build, a marker line, a quote). Captions follow one reading path either
+way (worker/caption_carry.py): an item with `mute_captions` unset drops the
+spoken words its visible text params show and owns the phrase they belong to
+from its first shown word to its exit (the captions yield there); the setup
+before it and other sentences stay captioned in a band clear of the box it
+draws. The flag decides the fallback when no band is clear — a speech template
+mutes those words, any other keeps them in place — so every text a template
+prints must come from its params (that is what the captions are matched
+against).
+
+`reads_phrase` says the template sets the owned phrase's other words itself
+(phrase_build): the engine hands the page `params._reading`
+(MotionItem.reading — per row, per printed word, its spoken onset in item
+seconds or null, and `bridges` [{after: row, words: [{t, s}]}]) and the page
+lays the bridge lines out from the start and reveals every word on its time,
+in reading order.
+
+`persistent: true` marks a LAYOUT template that holds a band for the whole
+program (the `headline` of a card or letterbox layout). The renderer hands
+such an item `MG.yields` — the composition seconds in which another graphic's
+box meets its band (`motion_layer.yield_windows`, from the stored footprints
+or the templates' estimated boxes) — and the runtime fades the whole page out
+before each window and back after it, so the template itself never times
+anything. A persistent item carries no spoken words (captions never drop a
+word for it), is not counted as a designed moment, and its write contract
+lives in `motion_tools._persistent_contract`. One held longer than a clip
+may last (`motion_engine.MAX_DURATION_S`) renders as consecutive pieces on
+the same composition clock (`motion_layer.render_pieces`).
 
 `sfx` declares sound ROLES relative to the item start (where a sound would
 belong if the editor chooses to add one): whoosh_soft, whoosh_hard, swish_short,
@@ -105,6 +126,13 @@ Never use `Date`, `performance.now`, `Math.random`, `setTimeout`,
   `MG.noise(x)`, `MG.rand(seed)` (deterministic), `MG.esc(str)`.
 - Set `MG.box = [x0, y0, x1, y1]` (design px, include glow/shadow/motion
   overshoot) once layout is known so capture is clipped to it.
+- Stacked type: `MG.glyphBoxes(el)` → the ink box of every glyph (pen
+  position from the DOM, ink from the font), and `MG.stackGap(upper, lower,
+  {clear, pad})` → how far `lower` must move down so none of its glyphs comes
+  within `clear` px of a glyph of `upper` in the same column. Tight lockups
+  keep their designed leading and push a row down only where a descender or
+  swash would hit the caps below (phrase_build, word_slam); measure before
+  any transform is applied.
 
 ### Legibility: the plate under the graphic
 

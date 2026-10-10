@@ -30,10 +30,12 @@ at 1x with the sound on, then answer:
    only where it earns one; the owner's song's button when music is on) and
    held 1.0-1.5 s, and does it resolve the viewer question?
 3. **Targets:** does it meet its Look's targets: change rate, hero moments,
-   picture area; sound only from the approved library and only on
-   meaningful on-screen moments, at most about one every 4-5 s and within
-   the Look's ceiling, no sound repeated within ~3 s, nothing on captions,
-   zooms or ordinary cuts; music only if `music_effective` is on and only the
+   picture area; sound only from the approved library, zero by default and
+   at most 1-2 per short, each on a structural on-screen moment with a
+   visual partner within ~50 ms, none on a payoff word's onset, no literal
+   pun on the spoken word, no reflexive opening whoosh, nothing too quiet to
+   hear or masking a word (`audit_audio_mix`), no sound repeated within
+   ~3 s, nothing on captions, zooms or ordinary cuts; music only if `music_effective` is on and only the
    owner's song; no digital silence (a flagged montage passage is noted in
    the handback)?
 4. **Attention:** with the famous name hidden, is the idea still worth
@@ -46,7 +48,9 @@ at 1x with the sound on, then answer:
    (on the payoff), at least ~0.5 s after the last word before the end card,
    nothing over the face or the brand corner, the corner mark and native end
    card untouched, no flash frames, pops, exposed edges or clipped words,
-   rights recorded for every asset?
+   no face at the frame's edge, a clean PICTURE CHECK on the complete
+   preview (each finding repaired or kept with a reason), rights recorded
+   for every asset?
 
 Record it with `run.py review --checks hook=...,payoff=...,targets=...,attention=...,clean=...`.
 
@@ -100,7 +104,10 @@ problems. Fix them in the next briefs rather than reopening shipped shorts.
 After `export_final` completes and the file is downloaded, watch the run's
 first final in full: the native corner mark is legible and clear of faces and
 type, the complete 5 s native Valmera ending is present, the audio plays
-through, and the duration matches. Record it with `run.py export
+through, and the duration matches. The final's PICTURE CHECK (the render
+result's `picture_check`) confirms the end card and, on free-tier exports,
+the corner mark were measured in the file; a missing one is a render fault
+to re-export and report, never something to edit around. Record it with `run.py export
 --verified-full`. Later finals of the same geometry need only the probe that
 `run.py export` already does (file, duration, sha256), unless their layout
 differs. The corner mark and the 5 s end card stay exactly as Valmera
@@ -134,6 +141,7 @@ shipping as the owner's marketing should reach 7 or more; beating the
 references means 8 or more. **K** rewards camera moves that are motivated
 and few, never their count — a steady, well-framed short with no zoom where
 nothing called for one scores on its framing; **S** rewards sounds that are
-placed, sparse and earned, never their count; **M** is scored only when the owner supplied a
+placed, sparse and earned, never their count — a podcast short with no
+sound scores on its clean voice; **M** is scored only when the owner supplied a
 song. These scores are for calibration and owner
 conversations, never a ship gate or a number to stamp on every short.

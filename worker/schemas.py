@@ -1100,6 +1100,12 @@ class ZoomItem(BaseModel):
     shake: Optional[float] = None
     shake_hz: Optional[float] = None
     shake_decay: Optional[float] = None
+    # cut_step (Oct 2026): this zoom is OPTIONAL cut hygiene written by
+    # conceal_jump_cuts — a hard (ramp 0) framing step held from a
+    # same-angle jump cut that visibly pops to the next cut — not an
+    # expressive move: the zoom-rhythm critics leave it out and
+    # conceal_jump_cuts(mode='off') removes it. None on every other zoom.
+    cut_step: Optional[bool] = None
 
 
 # Round 35: the junction library grew past the two dips. Every style is
@@ -1446,6 +1452,31 @@ class CardSourceSpan(BaseModel):
         return self
 
 
+# A source card's optional jump-cut concealment (worker/cut_steps.py): at
+# most this many hard framing steps, each a scale of the card's source rect.
+PICTURE_CARD_MAX_STEPS = 64
+CARD_STEP_SCALE = (0.85, 1.15)
+
+
+class CardCutStep(BaseModel):
+    """One hard framing step of a source-fed card (cut_steps, written only by
+    conceal_jump_cuts): over SOURCE seconds [t0, t1] (the kept footage after
+    a same-angle jump cut, up to the next cut) the card's source rect is
+    scaled by 1/``scale`` around its centre — ``scale`` > 1 is tighter, < 1
+    wider (a low-resolution source already near its enlargement cap steps
+    wide). Nothing animates: the framing changes on the cut and holds."""
+    t0: float = Field(ge=0, allow_inf_nan=False)
+    t1: float = Field(gt=0, allow_inf_nan=False)
+    scale: float = Field(ge=CARD_STEP_SCALE[0], le=CARD_STEP_SCALE[1],
+                         allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def _order(self):
+        if self.t1 <= self.t0:
+            raise ValueError("a card cut step needs t1 > t0")
+        return self
+
+
 class PictureCard(BaseModel):
     """A footage-only card on the program clock; type is composited afterwards.
 
@@ -1511,6 +1542,11 @@ class PictureCard(BaseModel):
     # CENTRE (FollowSpan); the rect keeps its size (source_track's span, else
     # source). Single source cards only.
     follow: Optional[List[FollowSpan]] = None
+    # cut_steps (Oct 2026): OPTIONAL jump-cut concealment, written only by
+    # conceal_jump_cuts — hard alternating framing steps of the source rect
+    # over the footage after a same-angle cut that visibly pops (CardCutStep).
+    # Never a default; single source cards only.
+    cut_steps: Optional[List[CardCutStep]] = None
 
     @field_validator("follow")
     @classmethod
@@ -1531,6 +1567,14 @@ class PictureCard(BaseModel):
     def _panels(self):
         if self.follow is not None and (self.source is None or self.panels):
             self.follow = None
+        if self.cut_steps is not None:
+            if not self.cut_steps or self.source is None or self.panels:
+                self.cut_steps = None
+            elif len(self.cut_steps) > PICTURE_CARD_MAX_STEPS:
+                raise ValueError(f"a picture card has at most "
+                                 f"{PICTURE_CARD_MAX_STEPS} cut steps")
+            else:
+                self.cut_steps.sort(key=lambda sp: sp.t0)
         if self.source_track is not None:
             # A per-shot framing of the ONE source rect: meaningless without
             # it (a program card or a stack), and canonical as None when empty.
@@ -1973,6 +2017,14 @@ class MotionItem(BaseModel):
     captions the graphic does not show clear of it and of the face.
     ``allow_face_overlap`` records a deliberate design over the face: the
     face keep-out (worker/keepout.py) then leaves the placement alone.
+
+    ``reading`` (lockups whose template ``reads_phrase``; written by the
+    engine — caption_carry.attach_readings at write time and before every
+    render — never by hand): per row, per printed word, the composition
+    second its spoken word starts (null: not said), and the phrase's other
+    words as small ``bridges`` lines set after a row, each on its onset —
+    the one-reading-path contract. A stitched piece keeps the reading of the
+    full program.
     """
     id: str = Field(min_length=1, max_length=80)
     template: str = Field(min_length=1, max_length=60)
@@ -1983,10 +2035,12 @@ class MotionItem(BaseModel):
     layer: Literal["above_captions", "below_captions",
                    "behind_subject"] = "above_captions"
     box: Optional[List[float]] = None
-    # unset = word-level (the captions drop only the spoken words this
-    # graphic shows, worker/caption_carry.py); true = no captions for the
-    # whole window; false = captions keep running (a number/hero word it
-    # shows is still not repeated).
+    # unset = one reading path (the captions drop the spoken words this
+    # graphic shows and yield to it for the phrase it shows, from its first
+    # shown word to its exit; a phrase_build sets that phrase's other words
+    # itself — worker/caption_carry.py); true = no captions for the whole
+    # window; false = captions keep running (a number/hero word it shows is
+    # still not repeated).
     mute_captions: Optional[bool] = None
     purpose: Optional[str] = Field(default=None, max_length=300)
     phase_s: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
@@ -1994,6 +2048,7 @@ class MotionItem(BaseModel):
     behind: Optional["SubjectMatte"] = None
     allow_face_overlap: Optional[bool] = None
     footprint: Optional["MotionFootprint"] = None
+    reading: Optional[dict] = None
 
     @model_validator(mode="before")
     @classmethod
@@ -2014,7 +2069,54 @@ class MotionItem(BaseModel):
             data["footprint"] = {"box": drawn, "ar": ar, "faces": []} if ar else None
         if data.get("footprint") is not None:
             data["footprint"] = _clean_footprint(data["footprint"])
+        if data.get("reading") is not None:
+            data["reading"] = _clean_reading(data["reading"])
         return data
+
+
+def _clean_reading(rd):
+    """A usable lockup reading (see MotionItem.reading) or None: an
+    unusable one is dropped (the engine computes it again), never
+    rejected."""
+    if not isinstance(rd, dict):
+        return None
+
+    def sec(v):
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            return None
+        return round(min(max(v, 0.0), 3600.0), 3) if math.isfinite(v) else None
+    rows = []
+    for row in (rd.get("rows") or [])[:8]:
+        if not isinstance(row, list):
+            return None
+        rows.append([None if v is None else sec(v) for v in row[:24]])
+    bridges = []
+    for b in (rd.get("bridges") or [])[:8]:
+        if not isinstance(b, dict):
+            continue
+        try:
+            after = int(b.get("after", -1))
+        except (TypeError, ValueError):
+            continue
+        words = []
+        for w in (b.get("words") or [])[:24]:
+            if not isinstance(w, dict) or sec(w.get("s")) is None:
+                continue
+            t = " ".join(str(w.get("t") or "").split())[:40]
+            if t:
+                words.append(dict({"t": t, "s": sec(w.get("s"))},
+                                  **({"g": 1} if w.get("g") else {})))
+        if words:
+            bridges.append({"after": max(-1, min(after, 7)), "words": words})
+    if not rows and not bridges:
+        return None
+    try:
+        v = int(rd.get("v") or 1)
+    except (TypeError, ValueError):
+        v = 1
+    return {"v": v, "rows": rows, "bridges": bridges}
 
 
 def _clean_footprint(fp):

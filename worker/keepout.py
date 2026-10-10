@@ -759,6 +759,8 @@ NOMINAL_INK = {
     "emoji_pop": (0.5295, -0.073, 0.8665, 0.0955),
     "follow_cta": (0.063, -0.056, 0.937, 0.054),
     "glow_title": (0.085, -0.119, 0.919, 0.121),
+    # the persistent headline's estimate is its BAND (_headline_ink)
+    "headline": (0.08, -0.075, 0.92, 0.075),
     "hook_title": (0.07, -0.056, 0.937, 0.069),
     "image_card": (0.104, -0.179, 0.907, 0.171),
     "line_chart": (0.056, -0.229, 0.944, 0.229),
@@ -776,7 +778,7 @@ NOMINAL_INK = {
     "text_scramble": (0.085, -0.023, 0.911, 0.027),
     "timeline_steps": (0.096, -0.11, 0.889, 0.113),
     "typewriter": (0.178, -0.056, 0.83, 0.056),
-    "versus_split": (0.126, -0.096, 0.852, 0.096),
+    "versus_split": (0.126, -0.042, 0.852, 0.069),
     "word_slam": (0.081, -0.077, 0.922, 0.079),
 }
 
@@ -801,6 +803,8 @@ def nominal_ink(template, spec, params, frame=None):
     dx = (num(params, "x", 0.5) - num(example, "x", xs.get("default", 0.5))) \
         if xs.get("type") == "float" else 0.0
     y = num(params, "y", pspec["y"].get("default", 0.5))
+    if template == "headline":
+        return _headline_ink(params or {}, y)
     if template in ("lower_third", "counter"):
         box = (_lower_third_ink if template == "lower_third" else _counter_ink)(params or {}, y, k)
         if frame and portrait(*frame) and box[3] - box[1] <= CLAMP_BAND[1] - CLAMP_BAND[0]:
@@ -835,6 +839,18 @@ def _counter_ink(params, y, k):
     if params.get("align") == "left":
         return (0.056, y - half, 0.056 + w, y + half)
     return (0.5 - w / 2.0, y - half, 0.5 + w / 2.0, y + half)
+
+
+def _headline_ink(params, y):
+    """The persistent headline holds a BAND: its column (width, centred on x)
+    by the band height it may fill, centred on y. The block it draws is
+    centred inside it (the Jobs example, kicker + two lines: 0.437-0.569 at
+    y 0.5 in the default 0.15 band), so the band is the honest estimate of
+    what another graphic must not share."""
+    w = num(params, "width", 0.84)
+    h = num(params, "height", 0.15)
+    x = num(params, "x", 0.5)
+    return (x - w / 2.0, y - h / 2.0, x + w / 2.0, y + h / 2.0)
 
 
 # The lower third is the graphic placed beside a face by design, and its box

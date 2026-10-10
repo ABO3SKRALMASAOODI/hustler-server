@@ -26,6 +26,7 @@ import keepout
 import motion_engine
 import motion_layer
 import motion_templates
+import sfx_mix
 import sound_library
 import storage
 from schemas import subject_matte_geom
@@ -125,14 +126,21 @@ def resolve_library_reference(ctx, storage_key):
 
 SOUND_POLICY = (
     "Sound effects are optional, never rules: restraint is the default and zero is a fine "
-    "answer. Use one like a professional editor, only where something meaningful happens ON "
-    "SCREEN — a designed graphic landing, a real section change or B-roll entry, the payoff, "
-    "or a real-world action shown (shutter on a photo, typing under typed text, a click on a "
-    "button press, a cash register on a money figure). Never on captions, on ordinary cuts "
-    "inside a conversation, or as a sound per landing or transition. At most about one sound "
-    "every 4-5 s (a ceiling, usually far fewer), never the same sound twice within ~3 s. "
-    "Match the material, keep one family per short, place the peak on the visual frame, and "
-    "mix under the voice at the suggested gain.")
+    "answer — a podcast or talking short carries zero by default and at most 1-2. Use one "
+    "like a professional editor, only where something meaningful happens ON SCREEN within "
+    "~50 ms of its hit — a designed graphic landing, a real section change or B-roll entry, "
+    "the payoff, or a real-world action shown (shutter on a photo being taken, typing under "
+    "typed text, a click on a button press, a cash register on a payment shown). Never on "
+    "captions, on ordinary cuts inside a conversation, or as a sound per landing or "
+    "transition; never a reflexive opening whoosh; never a bright sound (ding, pop, click, "
+    "shutter) on the onset of a payoff or emphasis word; never a literal pun on the spoken "
+    "word (a shutter on 'pictures', a cash register on 'money' with nothing on screen "
+    "showing it). Elsewhere at most about one sound every 4-5 s (a ceiling, usually far "
+    "fewer), never the same sound twice within ~3 s. Match the material, keep one family "
+    "per short and place the peak on the visual frame; leave gain_db unset and add_sfx "
+    "levels the recording against the measured voice at its hit (whoosh/swish ~8 dB under, "
+    "ding/pop/click/tick/shutter ~10 under, typing 14 under, an impact louder only below "
+    "150 Hz).")
 
 
 def list_sound_library(ctx, role=None):
@@ -140,9 +148,10 @@ def list_sound_library(ctx, role=None):
     if not rows:
         return "No approved sounds match." if role else "The sound library is empty on this deployment."
     return ("Valmera sound library — real recordings approved by ear (CC0, no attribution). "
-            "Place with add_sfx(storage_key='sound:<id>', at=<program second it should HIT>, "
-            "gain_db=<suggested>): the tool starts each recording early by its measured peak "
-            "(typing starts at `at`) and stops long tails at their measured end.\n"
+            "Place with add_sfx(storage_key='sound:<id>', at=<program second it should HIT>) "
+            "and gain_db unset: the tool starts each recording early by its measured peak "
+            "(typing starts at `at`), stops long tails at their measured end and levels it "
+            "against the measured voice at its hit.\n"
             + SOUND_POLICY + "\n" + "\n".join("- " + sound_library.describe(r) for r in rows))
 
 
@@ -229,16 +238,26 @@ def _cue_dur(cue, params):
         return None
 
 
-def _land_at(land, span, default):
+def _land_at(land, span, default, params=None):
     """A cue that follows the template's own duration-relative landing
     (``land``: clamp(span * frac + add, min, max)), e.g. counter's count
-    landing min(1.0, max(0.5, 0.55 * duration))."""
+    landing min(1.0, max(0.5, 0.55 * duration)). ``param`` names a float
+    param that, when positive, IS the landing (item seconds) — counter's
+    ``land``, set on the spoken number's onset — capped like the template
+    caps it: ``tail`` {frac, max, add} keeps it span - (min(span * frac,
+    max) + add) clear of the end (counter: its exit plus 0.1 s)."""
     try:
         v = span * float(land.get("frac", 0.0)) + float(land.get("add", 0.0))
         if land.get("min") is not None:
             v = max(v, float(land["min"]))
         if land.get("max") is not None:
             v = min(v, float(land["max"]))
+        p = _js_float((params or {}).get(land["param"])) if land.get("param") else None
+        if p is not None and p > 0:
+            tail = land.get("tail") if isinstance(land.get("tail"), dict) else {}
+            cut = min(span * float(tail.get("frac", 0.0)), float(tail.get("max", span))) \
+                + float(tail.get("add", 0.0))
+            v = min(p, max(0.0, span - cut))
     except (TypeError, ValueError, AttributeError):
         return default
     return v
@@ -267,7 +286,7 @@ def _sfx_cues(spec, params, start, end, seed="", with_dur=False):
         dur = _cue_dur(c, params)
         at = float(c.get("at") or 0.0)
         if isinstance(c.get("land"), dict):
-            at = _land_at(c["land"], end - start, at)
+            at = _land_at(c["land"], end - start, at, params)
         t = (end + at) if at < 0 else (start + at)
         rep = c.get("repeat")
         if rep and isinstance(params.get(rep.get("param")), list):
@@ -301,9 +320,19 @@ def _owned_sfx_prefix(mid):
 
 
 def _apply_owned_sfx(ctx, edl, mid, cues):
+    """Write a graphic's owned cues (ids mg_<mid>_sfxN), each placed so its
+    recording HITS on the cue's landing and levelled against the voice there
+    (sfx_mix.cue_gain: the role's level under the measured voice, the
+    template's own declared gain kept as a bounded offset). Returns notes."""
     items = [s for s in (edl.get("sfx") or []) if not str(s.get("id", "")).startswith(_owned_sfx_prefix(mid))]
     prog = _program_duration(edl)
-    notes = []
+    notes, levels, heard = [], [], None
+    live = [c for c in cues if c[0] <= prog - 0.05]
+    try:
+        voices = sfx_mix.voices_for(ctx, edl, [max(0.0, c[0]) for c in live])
+    except Exception as e:  # noqa: BLE001
+        print(f"[motion] cue levelling skipped: {str(e)[:160]}", flush=True)
+        voices = {}
     for k, cue in enumerate(cues):
         t, kind, gain = cue[:3]
         dur = cue[3] if len(cue) > 3 else None
@@ -314,15 +343,25 @@ def _apply_owned_sfx(ctx, edl, mid, cues):
         except Exception as e:  # noqa: BLE001
             notes.append(f"sound {kind} unavailable ({str(e)[:80]})")
             continue
+        voice = sfx_mix.voice_at(voices, max(0.0, t))
+        g = sfx_mix.cue_gain(kind, voice, gain)
+        if g is None:
+            g = gain
+        else:
+            levels.append(f"{kind}@{t:.2f}s {g:+g} dB")
+            heard = heard or voice
         # t is the landing the sound HITS on: start early by its peak.
         pl = sound_library.place(kind, max(0.0, t), dur_s=dur)
         items.append({"id": f"{_owned_sfx_prefix(mid)}{k + 1}", "storage_key": key,
-                      "at": pl["at"], "gain_db": gain,
+                      "at": pl["at"], "gain_db": g,
                       "purpose": f"{kind} for motion graphic {mid}"})
         for f in ("offset_s", "dur_s"):
             if pl[f]:
                 items[-1][f] = pl[f]
     edl["sfx"] = items
+    if levels:
+        notes.append("sound cues levelled against the voice at their hits: "
+                     + ", ".join(levels) + f" ({sfx_mix.voice_note(heard)})")
     return notes
 
 
@@ -797,6 +836,39 @@ def _keep_out(ctx, edl, item, rep):
         return "", None
 
 
+def _attach_reading(ctx, edl, item):
+    """Time a lockup (spec ``reads_phrase``) to the speech it shows before
+    it is probed and stored: its printed words land on their spoken onsets
+    and, under transcript captions, the phrase's other words join it as
+    small bridge lines (caption_carry.readings — one reading path). The
+    renderer recomputes it for the program as it is then."""
+    if not caption_carry.reads_phrase(item):
+        item.pop("reading", None)
+        return
+    index = getattr(ctx, "index", None) or {}
+    rd = None
+    if index.get("words") and edl.get("keep"):
+        try:
+            from timeline import Timeline
+            tl = Timeline(edl["keep"], edl.get("inserts") or [], edl.get("speed"))
+            probe = dict(edl, motion=[m for m in edl.get("motion") or []
+                                      if m.get("id") != item.get("id")] + [item])
+            rd = caption_carry.readings(probe, index, tl).get(item.get("id"))
+        except Exception as e:  # noqa: BLE001 — the lockup reveals on its 'at' times
+            print(f"[motion] lockup reading skipped: {str(e)[:160]}", flush=True)
+    if rd:
+        item["reading"] = rd
+    else:
+        item.pop("reading", None)
+
+
+# A bridge line (one reading path) grows a lockup's estimated box
+# (caption_carry.bridged_box; the headline band's yield uses it too).
+BRIDGE_LINE_H = caption_carry.BRIDGE_LINE_H
+BRIDGE_LINE_CHARS = caption_carry.BRIDGE_LINE_CHARS
+_bridged = caption_carry.bridged_box
+
+
 def _keep_out_estimated(ctx, edl, item):
     """The keep-out on a lane with no browser to probe the composition. The
     agent, MCP and shorts lanes ship no Chromium, so this is what production
@@ -816,7 +888,8 @@ def _keep_out_estimated(ctx, edl, item):
     if not keepout.applicable(template, spec, item.get("layer")):
         return "", None
     W, H = _canvas_size(ctx, edl)
-    box = keepout.nominal_ink(template, spec, item.get("params") or {}, frame=(W, H))
+    box = _bridged(keepout.nominal_ink(template, spec, item.get("params") or {},
+                                       frame=(W, H)), item)
     if not box:
         return "", None
     s, e = float(item["start"]), float(item["end"])
@@ -853,8 +926,8 @@ def _keep_out_estimated(ctx, edl, item):
                 continue
             cur = params0.get(key, p.get("default"))
             for v in p.get("values") or []:
-                alt = keepout.nominal_ink(template, spec, dict(params0, **{key: v}),
-                                          frame=(W, H))
+                alt = _bridged(keepout.nominal_ink(template, spec, dict(params0, **{key: v}),
+                                                   frame=(W, H)), item)
                 if v != cur and v in ("left", "center", "right") and alt \
                         and keepout.rounded(alt) != keepout.rounded(box):
                     variants.append(({key: v}, alt))
@@ -873,7 +946,8 @@ def _keep_out_estimated(ctx, edl, item):
             changes = ", ".join(f"{k} {_fmt(params0.get(k, _implicit(k, pspec.get(k) or {})))} → "
                                 f"{_fmt(params.get(k))}" for k in sorted(patch))
             item["params"] = params
-            box = keepout.nominal_ink(template, spec, params, frame=(W, H)) or pred
+            box = _bridged(keepout.nominal_ink(template, spec, params, frame=(W, H)),
+                           item) or pred
             place = keepout.where_label(box, zones) if face_bad else ""
             notes.append(
                 f"KEEP-OUT (estimated): by the template's estimated size it {' and '.join(why)}, "
@@ -1079,7 +1153,7 @@ def _word_level_notes(edl, index, tl, item, canvas=None):
         return []
     s, e = float(item["start"]), float(item["end"])
     box = rep.get("box")
-    notes = []
+    notes = _reading_notes(item, rep)
     if box is None:
         # not measured here (no footprint): the render measures it before it
         # places the captions, so there is nothing true to say
@@ -1113,6 +1187,79 @@ def _word_level_notes(edl, index, tl, item, canvas=None):
             f"Captions for the words it does not show move to y≈{where['y']:.2f} while it "
             f"is up{draws}; the words it shows leave the captions.")
     return notes
+
+
+# The shortest graphic the one-reading-path note will suggest ending at.
+YIELD_FIX_MIN_S = 0.8
+
+
+def _reading_notes(item, rep):
+    """One-reading-path NOTEs for a graphic with mute_captions unset (the
+    caption plan's ownership, worker/caption_carry.py): where the captions
+    yield to it, the words a lockup sets in small type, the words only the
+    sound carries, and a run too long to set (two texts at once)."""
+    frm = rep.get("owns_from")
+    if frm is None:
+        return []
+    e = float(item["end"])
+    notes = []
+    if rep.get("joined"):
+        runs = " … ".join(f'"{_said(r)}"' for r in rep["joined"])
+        notes.append(
+            f"One reading path: captions yield to this lockup from {frm:.2f}s (its first "
+            f"shown word) until it leaves at {e:g}s, and the words of that phrase its rows "
+            f"leave out are set in small type between its rows, each on its onset: {runs}. "
+            "To design them yourself, put those exact words in the rows.")
+    if rep.get("yielded"):
+        ends = [float(w["t1"]) for w in rep.get("carried") or []]
+        last = max(ends) if ends else frm
+        end_at = last + 0.3 if ends else frm + 0.6
+        # a word the graphic yields once its midpoint is under it: the end
+        # that gives the next words back is before the first one's midpoint
+        nxt = [(float(w["t0"]) + float(w["t1"])) / 2.0 for w in rep["yielded"]
+               if float(w["t0"]) >= last - 0.05]
+        if nxt:
+            end_at = min(end_at, min(nxt) - 0.02)
+        # an end that leaves the graphic too short to read is no fix
+        fix = (f"End it at {end_at:.2f}s, where its own words end, so those words are "
+               "captioned; or carry"
+               if float(item["start"]) + YIELD_FIX_MIN_S - 1e-3 <= end_at < e - 0.02
+               else "Carry")
+        notes.append(
+            f"NOTE (captions): one reading path — the captions yield to this graphic for "
+            f"the phrase it shows from {frm:.2f}s until it leaves at {e:g}s, so a sound-off "
+            f"viewer never reads \"{_runs_said(rep['yielded'])}\" (said while it is up). "
+            f"{fix} them on it (a kicker/label in the speaker's words); or "
+            "make it a phrase_build, which sets them in small type.")
+    if rep.get("beside"):
+        runs = " … ".join(f'"{_said(r)}"' for r in rep["beside"])
+        notes.append(
+            f"NOTE (captions): {runs} is too long to set in this lockup, so it stays "
+            "captioned beside it — two texts at once. End the lockup before it, or split "
+            "the phrase into two lockups.")
+    return notes
+
+
+def _unsaid_row_notes(item):
+    """NOTE for lockup rows that quote the speech but print a word nobody
+    says there ("supersonic jets" over "supersonic aviation"): viewers hear
+    one and read the other (the item's reading marks unspoken words)."""
+    rd = item.get("reading") or {}
+    out = []
+    for r, (row, times) in enumerate(zip(caption_carry.display_rows(item),
+                                         rd.get("rows") or [])):
+        if not any(t is not None for t in times):
+            continue
+        unsaid = [w for w, t in zip(row, times)
+                  if t is None and any(caption_carry.is_content(x) for x in _tokens(w))]
+        if unsaid:
+            out.append(f"row {r + 1} \"{' '.join(row)}\" prints "
+                       + ", ".join(f"'{w}'" for w in unsaid))
+    if not out:
+        return []
+    return ["NOTE (captions): " + "; ".join(out) + " — not said there, while the rest of "
+            "the row is: viewers hear one thing and read another. Quote the transcript "
+            "(get_kept_transcript) word for word."]
 
 
 def _verbatim(g, span):
@@ -1187,11 +1334,301 @@ def _caption_integrity_notes(ctx, edl, item):
             else:
                 notes += _word_level_notes(edl, index, tl, item,
                                            canvas=_canvas_size(ctx, edl))
-        notes += _paraphrase_notes(edl, index, tl, item, lines)
+        if not motion_templates.persistent(item):
+            # a standing headline is a third-person claim, not a quote
+            notes += _paraphrase_notes(edl, index, tl, item, lines)
+            if caption_carry.reads_phrase(item):
+                notes += _unsaid_row_notes(item)
     except Exception as e:  # noqa: BLE001
         print(f"[motion] caption integrity check skipped: {str(e)[:160]}", flush=True)
         return ""
     return "".join("\n" + n for n in notes)
+
+
+def _number_landing(ctx, edl, item, prog):
+    """Land a number graphic on its spoken number (worker/number_reveal.py):
+    (changed, reply text). Never blocks the write it comments on."""
+    try:
+        import number_reveal
+        changed, note = number_reveal.land(edl, getattr(ctx, "index", None) or {}, item, prog)
+    except Exception as e:  # noqa: BLE001
+        print(f"[motion] number landing skipped: {str(e)[:160]}", flush=True)
+        return False, ""
+    return changed, ("\n" + note if note else "")
+
+
+# ── the persistent headline band (motion_templates.persistent) ────────────
+# Judged Oct 2026: in card and letterbox layouts the band above the picture
+# sat empty for 5-6 s stretches between hero lockups; the references keep a
+# standing claim headline there that hero lockups replace and hand back. A
+# persistent template holds that band for the program and yields it at
+# render time (motion_layer.yield_windows). The write contract keeps it a
+# headline: one at a time, long enough to be a layout element, never muting
+# captions, one accent span, and placed in the free band when no y is given.
+HEADLINE_MIN_S = 4.0
+# The 9:16 feed header (account row, audio chip) sits over the top ~8%.
+HEADLINE_SAFE_TOP = 0.085
+HEADLINE_SAFE_TOP_FLAT = 0.05
+HEADLINE_GAP = 0.012          # clear space kept above the card / picture
+HEADLINE_MIN_BAND = 0.06
+_ACCENT_RE = re.compile(r"\*[^*]+\*")
+
+
+def _letterbox_top(edl, s, e, W, H, src=None):
+    """Top of the letterboxed main picture over program window [s, e] (frame
+    fraction; the highest it reaches), or None when the picture fills the
+    top of the frame there. With the source size it is where the picture
+    really lands — a 'pad'/'pad_blur' fit of a landscape source leaves bars
+    above it with or without a frame.picture rect, and a focus_track shot in
+    'crop' fills the frame — sampled at every keep segment and focus edge
+    in the window; without it, the frame.picture rect."""
+    frame = edl.get("frame") or {}
+    pic = frame.get("picture")
+    pic = pic if pic and len(pic) == 4 else None
+    fallback = float(pic[1]) if pic and float(pic[1]) > 0.02 else None
+    if not src or not edl.get("keep"):
+        return fallback
+    import renderer
+    from timeline import Timeline
+    at = _at()
+    try:
+        sw, sh = float(src[0]), float(src[1])
+        tl = Timeline(edl["keep"], edl.get("inserts") or [], edl.get("speed") or [])
+    except Exception:  # noqa: BLE001 — no geometry: the stored rect
+        return fallback
+    edges = []
+    for span in frame.get("focus_track") or []:
+        for key in ("t0", "t1"):
+            try:
+                edges.append(float(span[key]))
+            except (KeyError, TypeError, ValueError):
+                continue
+    times = []
+    for (a, b), off, L in zip(tl.segs, tl.offsets, tl.seg_out_len):
+        pa, pb = max(off, s), min(off + L, e)
+        if pb - pa < 1e-3:
+            continue
+        sa, sb = tl.out_to_src(pa + 1e-3), tl.out_to_src(pb - 1e-3)
+        if sa is None or sb is None:
+            continue
+        times += [sa, (sa + sb) / 2.0, sb]
+        times += [x + d for x in edges if sa < x < sb for d in (-0.02, 0.02)]
+    if not times:
+        return fallback
+    tops = []
+    for t in times:
+        try:
+            _src, dest = renderer.picture_mapping(
+                sw, sh, W, H, at._frame_mode_at_source(edl, t),
+                at._frame_focus_at_source(edl, t), pic)
+        except Exception:  # noqa: BLE001
+            return fallback
+        tops.append(float(dest[1]))
+    top = min(tops)
+    return top if top > 0.02 else None
+
+
+def headline_band(edl, s, e, W, H, src=None):
+    """(top, bottom, what) of the free band above the picture over program
+    window [s, e] (frame fractions), or None on a full-bleed frame. The
+    picture is a source-fed picture card live over most of the window (the
+    highest one), else the letterboxed main picture (_letterbox_top: a
+    frame.picture rect or a pad fit; ``src`` is the source (w, h))."""
+    tops = []
+    for cd in ((edl.get("effects") or {}).get("picture_cards") or []):
+        if not isinstance(cd, dict):
+            continue
+        try:
+            a, b = float(cd["start"]), float(cd["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if min(b, e) - max(a, s) < 0.5 * (e - s):
+            continue
+        import picture_cards
+        boxes = picture_cards.card_boxes(cd)
+        if boxes:
+            tops.append((min(float(bx[1]) for bx in boxes), "the picture card"))
+    if not tops:
+        top = _letterbox_top(edl, s, e, W, H, src)
+        if top is not None:
+            tops.append((top, "the letterboxed picture"))
+    if not tops:
+        return None
+    top, what = min(tops)
+    safe = HEADLINE_SAFE_TOP if H / max(W, 1) >= 1.6 else HEADLINE_SAFE_TOP_FLAT
+    return safe, top - HEADLINE_GAP, what
+
+
+def _persistent_contract(ctx, edl, item, items, place):
+    """Check and place a persistent (headline) item in place. Returns
+    (error or None, note). ``place``: centre it in the free band (no y was
+    given)."""
+    s, e = float(item["start"]), float(item["end"])
+    if e - s < HEADLINE_MIN_S - 1e-6:
+        return (f"REJECTED: a persistent {item['template']} holds a band for the "
+                f"program (or a chapter): give it at least {HEADLINE_MIN_S:g}s "
+                f"(this window is {e - s:.2f}s). For a short claim use a lockup "
+                "template (word_slam, phrase_build, hook_title)."), ""
+    if item.get("mute_captions") is True:
+        return ("REJECTED: the headline is a standing claim, not the spoken line — "
+                "it never mutes captions. Leave mute_captions unset."), ""
+    item.pop("mute_captions", None)
+    for other in items:
+        if other is item or other.get("id") == item.get("id") \
+                or not motion_templates.persistent(other):
+            continue
+        if min(e, float(other["end"])) - max(s, float(other["start"])) > 0.05:
+            return (f"REJECTED: persistent graphic '{other['id']}' already holds the "
+                    f"band over {float(other['start']):g}-{float(other['end']):g}s — one "
+                    "headline at a time. Change it with set_motion_graphic, or end it "
+                    "before this one starts (one per chapter)."), ""
+    params = item.get("params") or {}
+    accents = _ACCENT_RE.findall(str(params.get("text") or ""))
+    if len(accents) > 1:
+        return ("REJECTED: one accent span per headline (found "
+                f"{', '.join(accents)}). Star the one word or phrase the claim "
+                "turns on."), ""
+    W, H = _canvas_size(ctx, edl)
+    video = (getattr(ctx, "index", None) or {}).get("video") or {}
+    src = ((video["width"], video["height"])
+           if video.get("width") and video.get("height") and not edl.get("canvas")
+           else None)
+    band = headline_band(edl, s, e, W, H, src=src)
+    note = ""
+    if place:
+        if band is None:
+            return ("REJECTED: a persistent headline needs a free band — a picture "
+                    "card (set_picture_card) or a letterbox (frame.picture) leaves "
+                    "one above the picture. On full-bleed footage use hook and beat "
+                    "graphics instead, or pass y to place it deliberately."), ""
+        top, bottom, what = band
+        if bottom - top < HEADLINE_MIN_BAND:
+            return (f"REJECTED: the band above {what} is only {bottom - top:.3f} of the "
+                    f"frame height (y {top:.3f}-{bottom:.3f}); a headline needs "
+                    f"{HEADLINE_MIN_BAND:g}. Lower or shrink the picture, or pass y."), ""
+        params["y"] = round((top + bottom) / 2.0, 4)
+        params["height"] = round(min(0.3, bottom - top), 4)
+        item["params"] = params
+        note = (f"\nHEADLINE: placed in the band above {what} (y {top:.3f}-{bottom:.3f}, "
+                f"centre {params['y']:g}).")
+    return None, note
+
+
+def _yield_report(ctx, edl, item):
+    """One line on how a persistent item shares its band, from the stored
+    footprints (what the renderer will do)."""
+    try:
+        W, H = _canvas_size(ctx, edl)
+        items = motion_layer.program_items(edl, _program_duration(edl))
+        live = next((m for m in items if m.get("id") == item.get("id")), None)
+        if live is None:
+            return ""
+        shown, wins = motion_layer.headline_visible(live, items, W, H)
+    except Exception as ex:  # noqa: BLE001 — a report never blocks the write
+        print(f"[motion] headline report skipped: {str(ex)[:160]}", flush=True)
+        return ""
+    span = float(live["end"]) - float(live["start"])
+    if not wins:
+        return (f"\nYIELDS: nothing else occupies its band — it shows the whole "
+                f"{span:.1f}s.")
+    return (f"\nYIELDS: hands its band to the graphics over "
+            + ", ".join(f"{a:.2f}-{b:.2f}s" for a, b in wins)
+            + f" (fades out {motion_layer.YIELD_OUT_S:g}s before each lands, back "
+            f"{motion_layer.YIELD_IN_S:g}s after it leaves; gaps under "
+            f"{motion_layer.YIELD_MERGE_S:g}s stay clear) — on screen {shown:.1f}s "
+            f"of {span:.1f}s. Adding, moving or removing a lockup updates this at "
+            "render time.")
+
+
+def _band_note(ctx, edl, item):
+    """For an ordinary graphic: which standing headline yields to it."""
+    if motion_templates.persistent(item):
+        return ""
+    try:
+        W, H = _canvas_size(ctx, edl)
+        items = motion_layer.program_items(edl, _program_duration(edl))
+        mine = next((m for m in items if m.get("id") == item.get("id")), None)
+        if mine is None:
+            return ""
+        hits = []
+        # it holds the band from its first ink (a phrase build's first row)
+        lands = float(mine["start"]) + motion_layer._ink_lead(mine)
+        for hl in items:
+            if not motion_templates.persistent(hl):
+                continue
+            wins = motion_layer.yield_windows(hl, items, W, H)
+            s0 = float(hl["start"]) - float(hl.get("phase_s") or 0.0)
+            a1 = max(lands, float(hl["start"]))
+            b1 = min(float(mine["end"]), float(hl["end"]))
+            if b1 - a1 > 0.05 and any(a + s0 <= a1 + 1e-3 and b + s0 >= b1 - 1e-3
+                                      for a, b in wins):
+                hits.append(hl["id"])
+    except Exception:  # noqa: BLE001
+        return ""
+    if not hits:
+        return ""
+    return (f"\nNOTE: headline {', '.join(hits)} yields its band to this graphic "
+            "(fades out before it lands and back after it leaves).")
+
+
+def _band_spill_note(ctx, edl, item, bbox=None):
+    """For an ordinary graphic set in the free band above a picture card or a
+    letterboxed picture (headline_band — the band the standing headline
+    holds): a NOTE when it spills out of that band, down onto the top of the
+    picture (a lockup grown by its one-reading-path bridge lines touching
+    the card) or up into the feed header. Advisory; '' otherwise. A box
+    that is only the template's estimate (the browserless agent, MCP and
+    shorts lanes) is that much less certain: it is named only past the
+    estimate's own error (BAND_SPILL_EST_TOL), and the note says so."""
+    if motion_templates.persistent(item) or item.get("layer") == "behind_subject":
+        return ""
+    try:
+        W, H = _canvas_size(ctx, edl)
+        fp = caption_carry.footprint_box(item, caption_carry.frame_ar(W, H))
+        box = fp or bbox
+        if not box:
+            return ""
+        est = bool(fp) and caption_carry.estimated(item)
+        tol = BAND_SPILL_EST_TOL if est else BAND_SPILL_TOL
+        video = (getattr(ctx, "index", None) or {}).get("video") or {}
+        src = ((video["width"], video["height"])
+               if video.get("width") and video.get("height") and not edl.get("canvas")
+               else None)
+        band = headline_band(edl, float(item["start"]), float(item["end"]), W, H, src=src)
+        if not band:
+            return ""
+        top, bottom, what = band
+        pic = bottom + HEADLINE_GAP
+        y0, y1 = float(box[1]), float(box[3])
+        if y0 >= pic - BAND_SPILL_MIN_IN:
+            return ""                     # set on the picture, not in the band
+        out = []
+        if y1 > pic + tol:
+            out.append(f"runs {y1 - pic:.3f} onto the top of {what} (y {pic:.3f})")
+        if y0 < top - tol:
+            out.append(f"rises into the feed header (above y {top:.3f})")
+        if not out:
+            return ""
+        draws = ("by its estimated box (no browser here; a preview measures it) it draws"
+                 if est else "it draws")
+        return (f"\nNOTE (band): {draws} y {y0:.3f}-{y1:.3f}, set in the band above {what} "
+                f"(y {top:.3f}-{bottom:.3f}), and {' and '.join(out)}. Narrow it "
+                "(width/size) or move its y so it sits inside the band.")
+    except Exception as e:  # noqa: BLE001 — advice never blocks the write
+        print(f"[motion] band check skipped: {str(e)[:160]}", flush=True)
+        return ""
+
+
+# A graphic counts as set in the band when it starts this far above the
+# picture; it spills when it crosses the band's edges by more than this.
+BAND_SPILL_MIN_IN = 0.02
+BAND_SPILL_TOL = 0.004
+# A browserless estimate (keepout.nominal_ink, a lockup's grown by its
+# bridge lines) misses a lockup's real edges by up to ~0.05 of the frame
+# height either way (the showcase lockups: Jobs hook 0.033, paper 0.04,
+# Thiel thesis 0.048, all too tall): only a spill past that is named, or
+# every band lockup in a production lane would be told to shrink.
+BAND_SPILL_EST_TOL = 0.05
 
 
 # Sound is deliberate: templates declare sound ROLES (mapped onto the owner-
@@ -1223,9 +1660,11 @@ def add_motion_graphic(ctx, template, start, end=None, params=None, html=None,
     prog = _program_duration(edl)
     if prog <= 0.3:
         return "REJECTED: there is no program yet — place footage first, then add motion graphics."
+    persistent = motion_templates.persistent(template)
     try:
         s = float(start)
-        e = float(end) if end is not None else s + float(spec.get("duration") or 3.0)
+        e = float(end) if end is not None else (
+            prog if persistent else s + float(spec.get("duration") or 3.0))
     except (TypeError, ValueError):
         return "REJECTED: start/end must be program seconds (numbers)."
     req = (s, e)
@@ -1255,6 +1694,23 @@ def add_motion_graphic(ctx, template, start, end=None, params=None, html=None,
         item["purpose"] = " ".join(str(purpose).split())[:300]
     if allow_face_overlap:
         item["allow_face_overlap"] = True
+    clamp = ""
+    if abs(req[0] - s) > 0.05 or abs(req[1] - e) > 0.05:
+        clamp = f"\nCLAMPED: requested {req[0]:g}-{req[1]:g}s into this {prog:g}s program; placed at {s}-{e}s."
+    band_note = ""
+    if persistent:
+        err, band_note = _persistent_contract(
+            ctx, edl, item, items, place="y" not in (params or {}))
+        if err:
+            return err
+        if sfx:
+            band_note += "\nNOTE: a persistent headline is silent; sfx ignored."
+            sfx = False
+    # a number completes on its spoken word (may move the window or set 'land');
+    # a lockup's reading is timed on the window as it lands
+    _landed, number_note = _number_landing(ctx, edl, item, prog)
+    s, e = item["start"], item["end"]
+    _attach_reading(ctx, edl, item)
     err, where, bbox, rep = _probe_full(ctx, edl, item)
     if err:
         return err
@@ -1271,16 +1727,27 @@ def add_motion_graphic(ctx, template, start, end=None, params=None, html=None,
     cues = _sfx_cues(spec, clean, s, e, seed=mid, with_dur=True) if (SFX_DEFAULT if sfx is None else sfx) else []
     if cues:
         notes += _apply_owned_sfx(ctx, edl, mid, cues)
-    clamp = ""
-    if abs(req[0] - s) > 0.05 or abs(req[1] - e) > 0.05:
-        clamp = f"\nCLAMPED: requested {req[0]:g}-{req[1]:g}s into this {prog:g}s program; placed at {s}-{e}s."
     sound = (f"; sound cues hitting at: {', '.join(f'{c[1]}@{c[0]:g}s' for c in cues)}" if cues else "")
     depth = " BEHIND the subject" if layer == "behind_subject" else ""
     res = ctx.write_edl(edl, f"motion graphic {template}{depth} at {s}-{e}s [{mid}]{sound}")
     if res.startswith("REJECTED"):
         return res
-    return (res + where + keep_note + clamp + (f"\nNOTE: {'; '.join(notes)}" if notes else "")
-            + behind_note + _caption_integrity_notes(ctx, edl, item))
+    tail = (_yield_report(ctx, edl, item) if persistent
+            else _band_note(ctx, edl, item) + _band_spill_note(ctx, edl, item, bbox))
+    return (res + where + band_note + keep_note + clamp + number_note
+            + (f"\nNOTE: {'; '.join(notes)}" if notes else "")
+            + _owned_sfx_checks(ctx, edl, mid)
+            + behind_note + tail + _caption_integrity_notes(ctx, edl, item))
+
+
+def _owned_sfx_checks(ctx, edl, mid):
+    """The placement CHECK lines for a graphic's own sound cues ('' when it
+    has none): agent_tools._sfx_check_lines over mg_<mid>_sfxN."""
+    ids = [s.get("id") for s in edl.get("sfx") or []
+           if str(s.get("id", "")).startswith(_owned_sfx_prefix(mid))]
+    if not ids:
+        return ""
+    return "".join("\n" + c for c in _at()._sfx_check_lines(ctx, edl, ids))
 
 
 def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
@@ -1343,6 +1810,24 @@ def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
             hit.pop("allow_face_overlap", None)
     if hit["template"] != "html":
         hit.pop("html", None)
+    persistent = motion_templates.persistent(hit)
+    band_note = ""
+    if persistent:
+        became = template is not None and not motion_templates.persistent(
+            json.loads(old_shape)[2] or "")
+        err, band_note = _persistent_contract(
+            ctx, edl, hit, items, place=became and "y" not in (params or {}))
+        if err:
+            return err
+        if sfx:
+            band_note += "\nNOTE: a persistent headline is silent; sfx ignored."
+            sfx = False
+    # a number completes on its spoken word (may move the window or set 'land');
+    # a lockup's reading is timed on the window as it lands
+    old_land = (hit.get("params") or {}).get("land")
+    _landed, number_note = _number_landing(ctx, edl, hit, prog)
+    relanded = (hit.get("params") or {}).get("land") != old_land
+    _attach_reading(ctx, edl, hit)
     err, where, bbox, rep = _probe_full(ctx, edl, hit)
     if err:
         return err
@@ -1375,9 +1860,11 @@ def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
     respaced = (bool(owned) and abs(span - old_span) > 1e-6
                 and _sfx_cues(tspec, hit["params"], 0.0, span, seed=id, with_dur=True)
                 != _sfx_cues(tspec, hit["params"], 0.0, old_span, seed=id, with_dur=True))
-    if sfx is True or (sfx is None and owned and (template is not None or params or respaced)):
+    checked = False
+    if sfx is True or (sfx is None and owned and (template is not None or params or respaced or relanded)):
         cues = _sfx_cues(tspec, hit["params"], hit["start"], hit["end"], seed=id, with_dur=True)
         notes += _apply_owned_sfx(ctx, edl, id, cues)
+        checked = True
     elif sfx is False:
         edl["sfx"] = [s for s in (edl.get("sfx") or []) if s not in owned]
     elif owned and abs(hit["start"] - old_start) > 1e-6:
@@ -1388,8 +1875,12 @@ def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
     res = ctx.write_edl(edl, f"updated motion graphic {id} ({hit['template']}) at {hit['start']}-{hit['end']}s")
     if res.startswith("REJECTED"):
         return res
-    return (res + where + keep_note + (f"\nNOTE: {'; '.join(notes)}" if notes else "")
-            + (behind_note or "") + _caption_integrity_notes(ctx, edl, hit))
+    tail = (_yield_report(ctx, edl, hit) if persistent
+            else _band_note(ctx, edl, hit) + _band_spill_note(ctx, edl, hit, bbox))
+    return (res + where + band_note + keep_note + number_note
+            + (f"\nNOTE: {'; '.join(notes)}" if notes else "")
+            + (_owned_sfx_checks(ctx, edl, id) if checked else "")
+            + (behind_note or "") + tail + _caption_integrity_notes(ctx, edl, hit))
 
 
 def remove_motion_graphic(ctx, id):
@@ -1408,9 +1899,9 @@ _PARAMS_PARAM = {"type": "object", "description": "Template parameters (see list
 _ALLOW_FACE_PARAM = {"type": "boolean", "description": (
     "Keep a deliberate placement over the face (skips the keep-out move).")}
 _MUTE_PARAM = {"type": "boolean", "description": (
-    "Omit (default) for word-level: captions drop only the spoken words this graphic "
-    "shows. true = no captions for its whole window; false = captions keep running "
-    "(a number/*starred* word it shows is still not repeated).")}
+    "Omit (default): one reading path, captions drop the words it shows and yield to "
+    "its phrase until it leaves. true = no captions in its window; false = captions "
+    "keep running (a shown number/*starred* word is still not repeated).")}
 
 TOOL_SPECS = {
     "list_motion_templates": (
@@ -1426,7 +1917,9 @@ TOOL_SPECS = {
         "Place a browser-rendered, After-Effects-grade motion graphic on the PROGRAM clock: "
         "spring/blur entrances, glow, gradients, 3D depth, masks, icon/emoji pops, counters, "
         "UI cards. One call = a finished composition, silent by default; pass sfx=true only for a "
-        "moment that earns sound (its template cues map to the approved sound library). start/end are program seconds; end defaults to the "
+        "moment that earns sound (its template cues map to the approved sound library and are "
+        "levelled against the voice at their landings; CHECK lines flag a bright cue on a payoff "
+        "word's onset or more than 1-2 sounds in a talking short). start/end are program seconds; end defaults to the "
         "template's natural duration. Cue it to the exact word/beat it amplifies (use word "
         "times from get_kept_transcript). layer='above_captions' (default for designed moments) "
         "or 'below_captions'. layer='behind_subject' is the premium depth signature: the "
@@ -1444,13 +1937,23 @@ TOOL_SPECS = {
         "replaces the whole spoken line); false keeps them all running (a number or *starred* "
         "word it shows is still not repeated). template='html' takes your own HTML/CSS/JS on the "
         "MG runtime in `html`. The write is rejected if the composition errors or draws nothing. "
+        "HEADLINE BAND: template='headline' is PERSISTENT — the standing claim headline of a "
+        "card or letterbox layout, one per program (end omitted = the program end; y omitted = "
+        "centred in the free band above the card or picture). It yields its band on its own at "
+        "render time (fades out before any graphic in the band lands, back after it leaves), never "
+        "mutes captions and is silent; the reply lists the windows it yields. "
         "FACE KEEP-OUT: the write measures where the graphic draws against the speaker's face "
         "and mouth over its window (through the crop, zooms and cards) and the 9:16 safe area "
         "(6% side margins, the right 12% clear between y 0.5 and 0.85, nothing below y 0.80); a "
         "graphic that covers the face or leaves the safe area is MOVED to the nearest clear zone "
         "with its own y (and x/align/side where it has them) — above the head, below the chin, "
         "beside the face — and the reply says what moved (KEEP-OUT) or why nothing fits (NOTE). "
-        "allow_face_overlap=true keeps a deliberate design over the face.",
+        "allow_face_overlap=true keeps a deliberate design over the face. NUMBERS land on "
+        "their word: a counter completes 20 ms before its spoken number's onset in the "
+        "transcript (the write sets its `land`; a 'reveal' starts there; a count with no room "
+        "to roll starts on the lead-in) and a word_slam whose hero is a figure ('32%', '$1.2B'; "
+        "not a name like 'GPT-4') moves onto it — the reply says NUMBER LANDED, and NOTEs a "
+        "count that rolls through the setup or a moved window that now overlaps a neighbour.",
         {"template": _TEMPLATE_PARAM, "start": {"type": "number"}, "end": {"type": "number"},
          "params": _PARAMS_PARAM, "html": {"type": "string"},
          "layer": {"type": "string", "enum": list(LAYERS)},
@@ -1467,7 +1970,8 @@ TOOL_SPECS = {
         "re-derives them, sfx=false removes them. A behind_subject graphic whose window "
         "changes is re-measured against its new footage. Every patch re-runs the face and "
         "safe-area keep-out (see add_motion_graphic): a y that would cover the face is moved "
-        "and reported; allow_face_overlap=true keeps it (false clears that). Modify instead "
+        "and reported; allow_face_overlap=true keeps it (false clears that). A number "
+        "graphic is re-landed on its spoken number like add_motion_graphic. Modify instead "
         "of removing and re-adding.",
         {"id": {"type": "string"}, "start": {"type": "number"}, "end": {"type": "number"},
          "params": _PARAMS_PARAM, "html": {"type": "string"}, "template": {"type": "string"},
@@ -1483,8 +1987,10 @@ TOOL_SPECS = {
         list_sound_library,
         "READ: Valmera's sound library — real recordings approved by ear (whooshes, swish, impact, "
         "risers, camera shutters, keyboard typing, clicks, pop, tick, ding, glitches, cash register, "
-        "heartbeat) with when to use each and a suggested gain. Place with "
-        "add_sfx(storage_key='sound:<id>', at=<the frame it hits>). Sound only on meaningful "
-        "on-screen moments, sparse (≈ one every 4-5 s at most), never on captions.",
+        "heartbeat) with when to use each and its measured hit level. Place with "
+        "add_sfx(storage_key='sound:<id>', at=<the frame it hits>), gain_db unset so it is "
+        "levelled against the voice. Sound only on meaningful on-screen moments with a visual "
+        "partner: zero by default in a podcast short, at most 1-2 (≈ one every 4-5 s at most "
+        "elsewhere), never on captions, never a pun on the spoken word.",
         {"role": {"type": "string", "description": "optional role filter, e.g. whoosh, click, riser"}}),
 }

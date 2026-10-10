@@ -121,7 +121,13 @@ def test_spoken_numbers_split_over_words_match_the_numeral_on_screen():
              ("one", 0.8, 0.95), ("hundred", 0.95, 1.2), ("forty", 1.2, 1.5),
              ("characters.", 1.5, 2.0)]
     edl = _edl([_counter(0.7, 2.2, "140")], words=words)
-    assert _shown(edl, _index(words)) == ["all", "we", "got", "was", "characters."]
+    # the counter shows "one hundred forty"; "characters" is said while it
+    # is up in the phrase it shows, so the captions yield it (one reading
+    # path: the write NOTE says carry it on the label or end the counter)
+    assert _shown(edl, _index(words)) == ["all", "we", "got", "was"]
+    edl = _edl([_counter(0.7, 2.2, "140", label="characters")], words=words)
+    assert _shown(edl, _index(words)) == ["all", "we", "got", "was"]
+    assert not _plan(edl, _index(words)).report["num"]["yielded"]
 
 
 def test_a_paraphrase_sharing_one_word_does_not_punch_a_hole():
@@ -148,8 +154,19 @@ def test_list_rows_take_their_own_words_and_the_connectors_between_them():
     m = {"id": "list", "template": "phrase_build", "start": 0.0, "end": 5.0,
          "params": {"rows": rows}, "footprint": _fp([0.1, 0.06, 0.9, 0.3])}
     edl = _edl([m], words=words)
-    assert _shown(edl, _index(words)) == ["aviation", "and", "the", "green",
-                                          "revolution", "and"]
+    # one reading path: the list owns its enumeration; the item its rows
+    # leave out is set in the lockup in small type (its list joint "and"
+    # goes with the rows), never as a second text under it
+    assert _shown(edl, _index(words)) == []
+    rep = _plan(edl, _index(words)).report["list"]
+    assert [caption_carry._said(r) for r in rep["joined"]] == \
+        ["aviation and the green revolution"]
+    rd = caption_carry.readings(edl, _index(words), Timeline(edl["keep"]))["list"]
+    assert rd["bridges"] == [{"after": 1, "words": [
+        {"t": "aviation", "s": 1.2}, {"t": "and", "s": 1.7}, {"t": "the", "s": 1.8, "g": 1},
+        {"t": "green", "s": 1.9}, {"t": "revolution", "s": 2.2}]}]
+    # rows land on their spoken onsets; "jets" is never said
+    assert rd["rows"] == [[0.2], [0.7, None], [2.9, 3.4], [3.9, 4.1]]
 
 
 # ── 2. placement clear of the graphic ────────────────────────────────────
@@ -160,7 +177,9 @@ def test_words_it_does_not_show_stay_captioned_in_place_when_their_band_is_clear
     p = _plan(edl, ix)
     shown = [w["w"] for w in p.caption_words()]
     assert "flying" not in shown and "cars" not in shown
-    assert {"they", "promised", "and", "all", "we", "got"} <= set(shown)
+    assert {"they", "promised", "we", "got"} <= set(shown)
+    # "and all", said while it still holds in the phrase it shows, yield
+    assert [w["w"] for w in p.report["slam"]["yielded"]] == ["and", "all"]
     assert not p.placed and not p.clamp_spans          # nothing collides with y≈0.74
     cues = motion_captions.cues(edl, ix, Timeline(edl["keep"]))
     assert all("z" not in c for c in cues)
@@ -250,7 +269,8 @@ def test_a_kicker_said_just_before_its_slam_is_handed_to_it():
              ("to", 1.9, 2.0), ("take", 2.0, 2.3)]
     edl = _edl([_slam(1.1, 2.4, "*enough*", kicker="it's not quite been")], words=words)
     # the words within CARRY_LEAD_S go with the slam; earlier ones stay read
-    assert _shown(edl, _index(words)) == ["but", "it's", "to", "take"]
+    # (and "to take", said while the slam holds its phrase, yield to it)
+    assert _shown(edl, _index(words)) == ["but", "it's"]
     # ...only when the slam's own word carries straight on from them
     edl = _edl([_slam(1.1, 2.4, "*plenty*", kicker="it's not quite been")], words=words)
     assert "not" in _shown(edl, _index(words))
@@ -410,9 +430,10 @@ def _probe_with(box):
 def test_the_write_stores_the_ink_box_and_says_where_the_captions_go(monkeypatch):
     monkeypatch.setattr(motion_tools, "_probe_item", _probe_with((0.1, 0.62, 0.9, 0.82)))
     ctx = _Ctx()
-    out = motion_tools.add_motion_graphic(ctx, "word_slam", 1.9, 3.0,
+    # (placed so the slam already lands on "140": number landing leaves it be)
+    out = motion_tools.add_motion_graphic(ctx, "word_slam", 2.78, 3.3,
                                           params={"text": "*140*"}, id="slam")
-    assert out.startswith("EDL v1"), out
+    assert out.startswith("EDL v1") and "NUMBER LANDED" not in out, out
     item = ctx.latest_edl()["json"]["motion"][0]
     fp = item["footprint"]
     assert fp["box"] == [0.1, 0.62, 0.9, 0.82]          # ink, not the scrim's reach
@@ -708,7 +729,8 @@ def test_a_graphic_up_long_before_its_words_is_told_to_start_on_them():
     edl = _edl([_counter(1.0, 3.9, "140", box=big)])
     notes = motion_tools._word_level_notes(edl, _index(faces=None), Timeline(edl["keep"]),
                                            edl["motion"][0], canvas=(1080, 1920))
-    assert notes and "start it at 2.80s where its own words begin" in notes[0], notes
+    assert notes and any("start it at 2.80s where its own words begin" in n
+                         for n in notes), notes
     # a graphic that starts on its own words gets no such advice
     edl = _edl([_counter(2.75, 3.9, "140", box=big)])
     notes = motion_tools._word_level_notes(edl, _index(faces=None), Timeline(edl["keep"]),

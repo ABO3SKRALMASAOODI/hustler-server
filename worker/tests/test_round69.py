@@ -291,7 +291,7 @@ def test_captions_never_burn_filler_words():
     class _TL:
         out_duration = 10.0
 
-        def kept_words(self, words):
+        def kept_words(self, words, **_rescue):
             return [{"w": w["w"], "t0": w["t0"], "t1": w["t1"]}
                     for w in words]
 

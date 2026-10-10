@@ -2021,7 +2021,11 @@ BLOCK_CLOCK_VERSION = 1
 # its stale holds into every unchanged stretch. A render served for its OWN
 # version keeps its cache. (Split-token rejoining busts through the caption
 # fingerprint instead — see renderer._caption_index_fp.)
-CAPTION_TIMING_VERSION = 1
+# v2: design-v2 cards keep names and noun phrases whole ("the Green
+# Revolution", "140 characters"), so every design-v2 track's cards may have
+# regrouped, with or without a cut. (A word a cut kept the sound of busts
+# through the caption fingerprint, like the rejoin.)
+CAPTION_TIMING_VERSION = 2
 
 # Manual music remains editable past the last scene, but rendered media always
 # stops at the picture/program boundary.  v1 extended overhanging music across
@@ -2048,8 +2052,17 @@ MASTER_VERSION = 1
 # draws on (motion items or a motion caption look): their older renders put
 # white type on white shirts with only a soft shadow. Everything else keeps
 # its cache. Bump when the plate measurement or the templates' bright-plate
-# treatment changes what such a render looks like.
-LEGIBILITY_VERSION = 1
+# treatment changes what such a render looks like — or the templates' type
+# craft does. v2 (punch track, Oct 2026): glyph-aware leading in phrase_build
+# and word_slam (descenders and swashes no longer hit the row below), a
+# counter never reads its landed figure before the landing (and blooms from
+# it), the typewriter's plate arrives with its first glyph, and versus_split's
+# values share one size and line count under a divider no taller than the
+# lettering. Same release: the plate under a graphic in a picture-card
+# layout is the composed card (its backdrop and panels), not the uncropped
+# frame (plate.py) — light words over a card's dark band no longer switch to
+# dark ink because the footage there would have been bright.
+LEGIBILITY_VERSION = 2
 
 # Word-level caption muting (worker/caption_carry.py): a motion graphic with
 # mute_captions unset hides only the spoken words it shows, the rest stay
@@ -2060,7 +2073,13 @@ LEGIBILITY_VERSION = 1
 # their older renders muted every caption under a graphic for its whole
 # window (sound-off viewers lost the words it did not show). Everything else
 # keeps its cache. Bump when what such a render shows changes again.
-CAPTION_CARRY_VERSION = 1
+# v2 (one reading path): a graphic owns the phrase it shows from its first
+# shown word to its exit (captions yield; a phrase_build sets the phrase's
+# other words in small type), lockup words land on their spoken onsets in
+# reading order, and a word a cut kept the sound of is captioned. Lockups
+# (phrase_build) without transcript captions are stamped too: their reveal
+# timing changed.
+CAPTION_CARRY_VERSION = 2
 
 # Crops and picture cards that follow the speaker's face inside a shot
 # (worker/follow.py, Frame.follow / PictureCard.follow). Stamped as
@@ -2070,6 +2089,17 @@ CAPTION_CARRY_VERSION = 1
 # one drawn by an older follow renderer. Everything else keeps its cache.
 # Bump when how a follow path is drawn changes.
 FOLLOW_VERSION = 1
+
+# Crop switches on keep joins (renderer.composition_join, Oct 2026). A
+# focus_track edge with no indexed camera cut near it that sits on (within
+# 1.5 source frames of) a keep edge switches the crop ON that keep edge;
+# before, it was read as a measured cut and split half a frame before the
+# rounded frame, so the last frame before the join showed the next span's
+# crop and a zoom held to the join released a frame early (the judged Elon
+# pop at 21.888 s). Stamped as `handoff_v` and compared — for the served
+# cache and the splice/reuse path — ONLY for EDLs whose render the rule
+# changes (renderer.handoff_affected). Everything else keeps its cache.
+HANDOFF_VERSION = 1
 
 # The picture pipeline's look. A stitched preview stream-copies the unchanged
 # stretches of the previous preview and splices in newly rendered pieces, so

@@ -72,27 +72,46 @@ SIZE LADDER AND ACCENT:
   Legibility comes from size, clear-space placement, soft shadow and the
   grade.
 
-CAPTIONS AND GRAPHICS SHARE ONE STAGE, word by word. On
-`add_motion_graphic` leave `mute_captions` unset: the captions drop exactly
-the spoken words the graphic shows (its number, slammed word, quoted kicker,
-list rows — matched through case, punctuation, plurals, "forty"/"40" and
-*stars*) and keep every other spoken word, so a sound-off viewer reads the
-whole sentence across caption and graphic and never reads a number twice.
-While the graphic is up those captions move to a band clear of the box it
-draws and of the face; where none is clear, a graphic that says the line (word
-slam, phrase build, marker, quote) mutes them and the write reply NOTEs the
-words lost — move the graphic off the caption band (top band, beside the
-head) rather than accept the gap. `mute_captions=true` hides every caption
-for the graphic's whole window (only when it replaces the whole spoken line);
-`false` keeps all captions running beside it (a number or *starred* word it
-shows is still not repeated). Never duplicate it with `set_caption_mutes`.
-Kickers, labels and quotes copy the transcript's exact words — the reply
-NOTEs a paraphrase and quotes the phrase to use.
+CAPTIONS AND GRAPHICS SHARE ONE STAGE — ONE READING PATH. Two texts on
+screen at once that say different things (a list reading "supersonic jets"
+over a caption reading "aviation and the Green Revolution agriculture") is a
+defect, and so is the eye ping-ponging between a lockup up top and the
+caption at the bottom. On `add_motion_graphic` leave `mute_captions` unset:
+the captions drop exactly the spoken words the graphic shows (its number,
+slammed word, quoted kicker, list rows — matched through case, punctuation,
+plurals, "forty"/"40" and *stars*), and the graphic OWNS the phrase it shows
+from its first shown word until it leaves — the captions yield there. A
+`phrase_build` lockup sets that phrase's other words itself, in small type
+between its rows, each on its spoken onset (the reply says which); any other
+graphic leaves them to the sound, and the reply NOTEs the words a sound-off
+viewer would miss with the time to end it so they are captioned. The words
+said before its first shown word (the setup) and every other sentence keep
+their captions, and the setup line clears as the graphic's first word
+lands. So: quote the transcript word for word in rows, kickers and labels
+(the reply NOTEs a paraphrase and an unsaid row word), and end hero graphics
+where their words end. While a graphic is up, captions of other sentences
+move to a band clear of the box it draws and of the face; where none is
+clear, a graphic that says the line (word slam, phrase build, marker, quote)
+mutes them and the write reply NOTEs the words lost — move the graphic off
+the caption band (top band, beside the head) rather than accept the gap.
+`mute_captions=true` hides every caption for the graphic's whole window
+(only when it replaces the whole spoken line); `false` keeps all captions
+running beside it (a number or *starred* word it shows is still not
+repeated). Never duplicate it with `set_caption_mutes`.
+
+HEARD WORDS: captions show every word the viewer hears. A pause cut can take
+a word's transcript midpoint while its sound survives (whisper lends the
+pause to the word after it); that word is still captioned, where its voice
+is. A word whose middle a cut really clipped is not. Cards never split a
+name or a noun phrase ("the Green Revolution", "Steve Jobs", "140
+characters") when another break reads.
 
 SOUND-OFF COVERAGE: no spoken span longer than ~0.6 s may go without
-on-screen text (a caption or a graphic showing those words). Review lists
-every such gap as a "Sound-off gap" advisory with its cause, and
-`audit_captions` returns them as `sound_off_gaps`.
+on-screen text (a caption, a graphic showing those words, or a lockup's
+small bridge line). Review lists every such gap as a "Sound-off gap"
+advisory with its cause (e.g. words a hero graphic holds over while the
+captions yield to it), and `audit_captions` returns them as
+`sound_off_gaps`.
 
 PLACEMENT LAW: multi-word captions sit in measured clear space — usually
 the lower-middle band above the platform UI, or beside the face in a

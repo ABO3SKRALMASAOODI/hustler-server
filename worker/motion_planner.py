@@ -109,10 +109,13 @@ def _sentences(words):
 
 # Library sounds a beat COULD take when the editor asked for sound
 # candidates (sounds=True): owner-approved recordings only, each optional,
-# and repeating cues (a tick per count or per item) stay silent.
+# and repeating cues (a tick per count or per item) stay silent. A podcast
+# short carries 1-2 sounds at most, never a reflexive opening whoosh, never
+# a bright sound on the onset of the word a graphic shows and never a pun
+# on the spoken word (sfx_placement).
 BEAT_SOUNDS = {
-    "hook": "optional: whoosh_soft_1 into the title (sfx=true), only if the opening earns it",
-    "number": "optional: one ding_1 (cash_register_1 on money) on the settled figure; the count itself stays silent",
+    "hook": "silent by default (no reflexive opening whoosh); whoosh_soft_1 (sfx=true) only if the title has a real entrance that earns it",
+    "number": "silent by default; at most one tick_1 on a visual landing in the pause after the spoken number (something on screen must change there), never on its onset (a ding there masks it); the count itself stays silent",
     "number_cluster": "optional: pop_1 on the last value only (a sound per value repeats)",
     "list": "silent (a tick per item repeats within ~3 s); at most pop_1 on the last item",
     "contrast": "optional: swish_1 on the swap",
@@ -181,12 +184,14 @@ def plan(edl, index, density="premium", camera=False, sounds=False):
             _i, val, prefix, suffix, consumed = cl[0]
             to, scale = _display_value(val)
             if free(t):
-                add({"at": round(max(0.0, t - 0.08), 2), "template": "counter", "kind": "number",
+                # the count starts on the lead-in and completes ON the word
+                # (add_motion_graphic sets its landing on the onset)
+                add({"at": round(max(0.0, t - 0.47), 2), "template": "counter", "kind": "number",
                      "end": round(min(prog, t + 2.2), 2),
                      "params": {"to": to, "prefix": prefix, "suffix": (scale + suffix) or "",
                                 "label": None},
                      "text_hint": ctx_words,
-                     "why": f"spoken number '{' '.join(w['w'] for w in words[_i:_i + consumed])}' — make it land as a counter (label = what it measures, from the sentence)"})
+                     "why": f"spoken number '{' '.join(w['w'] for w in words[_i:_i + consumed])}' — make it land as a counter ON the word (label = what it measures, from the sentence; style='reveal' when the number is the punchline)"})
         else:
             rows = []
             for _i, val, prefix, suffix, consumed in cl:

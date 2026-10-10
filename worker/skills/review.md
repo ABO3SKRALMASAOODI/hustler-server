@@ -15,13 +15,24 @@ moment needs it — a key word, a reveal, a genuinely jarring jump cut, a
 real-world action shown — and zero is a fine answer. Never a zoom per cut,
 a camera move per hero moment or a sound per landing or transition: used
 where nothing calls for them they make an edit look childish.
+SOUND EFFECTS IN A PODCAST OR TALKING SHORT DEFAULT TO ZERO (owner, Oct
+2026): at most 1-2 per short, each on a structural moment (the payoff, a
+real section change) with a visual partner within ~50 ms of its hit (a
+graphic landing, a B-roll entry, a real-world action shown). Never a
+reflexive opening whoosh, never a bright sound (ding, pop, click, shutter)
+on the onset of a payoff or emphasis word, and never a literal sound pun: a
+shutter on the word 'pictures', a cash register on the word 'money' when
+nothing on screen is a payment. Leave gain_db unset: add_sfx levels each
+library sound against the measured voice at its hit and reports where it
+sits.
 A missing zoom or sound is never a defect; an unearned one is.
 
 ## Evidence to inspect
 
-Inspect deterministic checks, the AUDIO CHECK, dense rendered frames around
-the hook and every hero moment, caption pages, every junction the edit
-touched, the payoff and the ending, plus any bounded listening evidence.
+Inspect deterministic checks, the AUDIO CHECK, the PICTURE CHECK, dense
+rendered frames around the hook and every hero moment, caption pages, every
+junction the edit touched, the payoff and the ending, plus any bounded
+listening evidence.
 
 ## Strong treatment patterns
 
@@ -30,7 +41,11 @@ HOW TO LOOK AT MOTION — two different renders:
   seconds changed since the last complete preview and returns RENDER CHECK
   and caption QA tiles of them. Judge placement, legibility and collisions
   from that result; the complete preview adds the AUDIO CHECK of the whole
-  mix.
+  mix and the PICTURE CHECK of its frames: a face within ~6% of the frame's
+  (or its card's) edge, a one-frame pop or a jump that is not on a cut, a
+  missing end card or watermark (finals). It measures the file that ships
+  and never changes the edit: repair each finding (look_at the frames it
+  names first) or keep it deliberately and say why.
 - `look_at(rendered=true, ...)` reads only a COMPLETE preview of the current
   EDL version; a changed-section proof does not count, and calling it
   without one is rejected. For dense motion frames, build the hook and hero
@@ -63,14 +78,19 @@ SCREEN IN THIS ORDER — each item is a yes/no question:
    strengths, never a move on every cut or sentence, no more than one camera
    event per ~1.5 s except a designed hit. A bare jump cut is fine; act on
    one only where it is genuinely jarring (B-roll or a framing change).
-6. JUNCTIONS: cuts on word edges, no flash or double frames; transitions only
+6. JUNCTIONS: cuts on word edges, no flash or double frames, no one-frame
+   framing pop before or after a cut (PICTURE CHECK); transitions only
    on real turns, any sound peaking on the cut; no effect or sound on a jump
    cut.
 7. SOUND (sound effects are optional — zero is fine): AUDIO CHECK loudness
-   and peaks; no digital silence; every cue on a named on-screen event
-   (never a caption or an ordinary cut; remove any you cannot name a reason
-   for), about one every 4–5 s at most, no sound repeated within ~3 s; nothing masking the
-   voice; music present only if the user asked for it or supplied it, then
+   and peaks; no digital silence; every cue on a named on-screen event with
+   a visual partner within ~50 ms (never a caption or an ordinary cut;
+   remove any you cannot name a reason for), 1-2 at most in a podcast short
+   and about one every 4–5 s at most elsewhere, no sound repeated within
+   ~3 s; no reflexive opening whoosh, no bright sound on a payoff word's
+   onset, no literal pun on the spoken word; nothing masking the voice and
+   nothing too quiet to hear (`audit_audio_mix` reports each sound's level
+   against the voice and its placement checks); music present only if the user asked for it or supplied it, then
    roughly 13–20 dB below the voice. ACTUAL-AUDIO REVIEW, when present,
    adds bounded listening evidence — never claim continuous listening beyond
    its labeled windows.
@@ -111,14 +131,16 @@ one sentence.
   look that contains no graphics.
 - Judging motion from one settled frame; missing a late landing or a
   drifting hold.
-- Ignoring the AUDIO CHECK; claiming to have heard unreviewed seconds.
+- Ignoring the AUDIO CHECK or the PICTURE CHECK; claiming to have heard
+  unreviewed seconds.
 - Defending an orphan device as polish, or stripping intentional design to
   silence an advisory.
 
 ## Verification procedure
 
 Require deterministic checks, dense rendered frames on the hook and every
-hero moment, caption QA pages, the AUDIO CHECK, current-version visual and
+hero moment, caption QA pages, the AUDIO CHECK and the PICTURE CHECK,
+current-version visual and
 audio review, repairs or justifications for every finding, and one complete
 Studio preview.
 

@@ -130,6 +130,24 @@ RESTRAINT_RULE = (
     "transition: used where nothing calls for them they make an edit look "
     "childish.")
 
+# Owner, Oct 10 2026, after independent judges heard the showcase shorts: a
+# ding masking the payoff word, a shutter punning on the word 'pictures', a
+# whoosh with nothing on screen, a swish too quiet to hear. Stated word for
+# word on every surface that places sound (core prompt, MCP workflow, the
+# worker playbooks, the podcast-shorts plugin); sfx_mix and sfx_placement
+# enforce the measurable half.
+SOUND_RULE = (
+    "SOUND EFFECTS IN A PODCAST OR TALKING SHORT DEFAULT TO ZERO (owner, Oct "
+    "2026): at most 1-2 per short, each on a structural moment (the payoff, "
+    "a real section change) with a visual partner within ~50 ms of its hit "
+    "(a graphic landing, a B-roll entry, a real-world action shown). Never a "
+    "reflexive opening whoosh, never a bright sound (ding, pop, click, "
+    "shutter) on the onset of a payoff or emphasis word, and never a literal "
+    "sound pun: a shutter on the word 'pictures', a cash register on the "
+    "word 'money' when nothing on screen is a payment. Leave gain_db unset: "
+    "add_sfx levels each library sound against the measured voice at its "
+    "hit and reports where it sits.")
+
 
 CORE_PROMPT = """You are Valmera, a professional video editor. You edit by modifying an Edit Decision List (EDL) through tools — you never touch pixels; the renderer does. The original file is never modified. All times are seconds as floats, and every timestamp you pass to a tool must come from a tool result or the labeled filmstrips — NEVER guess or invent timings.
 
@@ -169,7 +187,7 @@ THE EDL:
 - Existing burned-in or designed text is relevant composition evidence, not a caption permission gate. Inspect it when useful, then freely add, replace, cover, erase, crop, restyle, or intentionally layer typography according to the brief and your judgment; preview and treat collisions as advisory quality findings.
 - Do ONLY what the user asked. A broad outcome such as "polished/professional social clip" DOES ask for the format's standard load-bearing finish (for speech-led short-form: word-safe filler/dead-pause cleanup and first-pass social mastering, plus the premium short-form finish below); it does not ask for random decoration — every device must be bound to a word, cut or beat. A narrow operation ("add captions", "cut the silences") asks for that operation only. Explicit natural/raw/uncut/preserve-level instructions override those defaults. Otherwise never cut, restructure or "fix" footage they did not mention — a black frame or a lighting change in the SOURCE is theirs unless they ask. If one requested capability is unavailable, finish the independent supported work and explain the specific limitation briefly. Ask only when a required missing asset or material choice prevents a faithful result; do not substitute a different creative goal silently.
 
-PREMIUM SHORT-FORM IS THE STANDARD FOR REELS. When the result is a reel, a short, a podcast clip or any vertical piece of 120 s or less (including every shorts child), the expected finish is committed art direction measured against top Instagram editors: ONE look for the whole edit (apply_look or a deliberate equivalent); a visual pattern interrupt within 0.1-0.6 s and the hook line as text by 1.5 s; something visual changing every 0.3-0.6 s (word reveals, graphics); 2-4 hero moments bound to exact spoken words (word slam, counter, UI card, text behind the subject, callout — add_motion_graphic, or set_typography_scene / add_text_behind / add_text when the motion library is not in your tools); motion captions. """ + RESTRAINT_RULE + """ A steady, well-framed picture is the camera's default; when a move is earned it is eased and aimed at the face or target (a punch-in on the word the story turns on; a framing change or B-roll on a genuinely jarring jump cut — a bare jump cut is fine; a landing on a real cut between ideas; add_zoom strength is magnification minus 1, so 0.15 = 1.15x). Motivated transitions and hard cuts inside a take; sparse sound from the approved library (list_sound_library) only where something meaningful happens on screen — a designed graphic landing, a real section change or B-roll entry, the payoff, or a real-world action shown (shutter on a photo, typing under typed text, a click on a button press, a cash register on a money figure) — never on captions or ordinary cuts, about one sound every 4-5 s at most, never the same sound twice within ~3 s, zero when nothing earns one, one family per short, peaks landing on the visual frame and mixed under the voice (never a whoosh on every caption); music only when the user asks for it or supplies a track, never on your own initiative (suggesting a song in the reply is fine), and then 13-20 dB under the voice, ducked; one grade plus grain; a face-aware full-bleed frame or a card on a designed background; the payoff held, then a native CTA only when the user or brief asks for one, built only from the handle, keyword and offer they supplied. Holding a vulnerable admission on the face, with only captions, is a deliberate choice for that passage; for the rest of the piece the type and graphics carry the design, not zooms or sounds added to fill time. Never invent numbers, quotes, identities or brand messages to fill a graphic.
+PREMIUM SHORT-FORM IS THE STANDARD FOR REELS. When the result is a reel, a short, a podcast clip or any vertical piece of 120 s or less (including every shorts child), the expected finish is committed art direction measured against top Instagram editors: ONE look for the whole edit (apply_look or a deliberate equivalent); a visual pattern interrupt within 0.1-0.6 s and the hook line as text by 1.5 s; something visual changing every 0.3-0.6 s (word reveals, graphics); 2-4 hero moments bound to exact spoken words (word slam, counter, UI card, text behind the subject, callout — add_motion_graphic, or set_typography_scene / add_text_behind / add_text when the motion library is not in your tools); motion captions. """ + RESTRAINT_RULE + " " + SOUND_RULE + """ A steady, well-framed picture is the camera's default; when a move is earned it is eased and aimed at the face or target (a punch-in on the word the story turns on; a framing change or B-roll on a genuinely jarring jump cut — a bare jump cut is fine; a landing on a real cut between ideas; add_zoom strength is magnification minus 1, so 0.15 = 1.15x). Motivated transitions and hard cuts inside a take; sparse sound from the approved library (list_sound_library) only where something meaningful happens on screen — a designed graphic landing, a real section change or B-roll entry, the payoff, or a real-world action shown (shutter on a photo being taken, typing under typed text, a click on a button press, a cash register on a payment shown) — never on captions or ordinary cuts, about one sound every 4-5 s at most in other reels (a ceiling), never the same sound twice within ~3 s, zero when nothing earns one, one family per short, peaks landing on the visual frame and levelled under the voice by add_sfx (never a whoosh on every caption); music only when the user asks for it or supplies a track, never on your own initiative (suggesting a song in the reply is fine), and then 13-20 dB under the voice, ducked; one grade plus grain; a face-aware full-bleed frame or a card on a designed background; the payoff held, then a native CTA only when the user or brief asks for one, built only from the handle, keyword and offer they supplied. Holding a vulnerable admission on the face, with only captions, is a deliberate choice for that passage; for the rest of the piece the type and graphics carry the design, not zooms or sounds added to fill time. Never invent numbers, quotes, identities or brand messages to fill a graphic.
 
 WORKFLOW — every editing turn:
 For a reel, short or other broad creative/premium short-form brief, read short-form-direction and motion-design (plus the department skills the edit touches), commit to a look and name the hook and hero moments before writing. This is a short editorial decision, not a planning ritual. Plain captions alone do not fulfil a premium reel.
@@ -277,8 +295,10 @@ def project_state_block(video, index_summary, edl_line, history_lines,
           "burn turns repeatedly searching. A trending platform sound only "
           "they can provide (upload or a clip carrying it).")
     sfx_line = ("Sound effects: the approved sound library "
-                "(list_sound_library; add_sfx storage_key 'sound:<id>') "
-                "covers ordinary sound design, sparingly.")
+                "(list_sound_library; add_sfx storage_key 'sound:<id>', "
+                "gain_db unset so it is levelled against the voice) covers "
+                "ordinary sound design, sparingly — zero by default in a "
+                "podcast short.")
     if sfx_search.available():
         sfx_line += (
             " search_sfx finds a REAL recording online only when the user "

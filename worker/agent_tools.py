@@ -2,6 +2,7 @@
 short instructive string the model can act on, every output fits the token
 budget. Write tools create new EDL versions and return one-line diffs."""
 
+import bisect
 import copy
 import difflib
 import hashlib
@@ -17,6 +18,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import audio_qc
+import render_qc
 import audit
 import broll_judge
 import caption_carry
@@ -53,6 +55,7 @@ import scope_guard
 # will use — importing the resolver is the only way those two cannot drift.
 import renderer
 import follow
+import insets
 import picture_cards
 import sfx_search
 import sfx_judge
@@ -89,8 +92,11 @@ import webrecord
 import typography_scenes
 import motion_tools
 import motion_planner
+import cut_steps
 import music_library
 import sound_library
+import sfx_mix
+import sfx_placement
 import version as worker_version
 from captions import CAPTION_DESIGN_VERSION, KARAOKE_HARD_MAX
 from schemas import (CANVAS_DIMS, CaptionStyle, clean_fingerprint,
@@ -247,6 +253,7 @@ class ToolContext:
         self.plan_loaded = False
         self.plan_revised_this_turn = False
         self.last_audio_qc_findings = []
+        self.last_picture_qc_findings = []
         # Whether this editing owner permits a separate model to listen to
         # bounded excerpts from a rendered preview. The in-house Studio
         # editor keeps the historical default. MCP/Codex explicitly turns
@@ -1030,7 +1037,11 @@ def get_kept_transcript(ctx):
     edl = latest["json"]
     tl = Timeline(edl["keep"], edl.get("inserts") or [],
                   edl.get("speed") or [])
-    out_words = tl.kept_words(ctx.index.get("words", []))
+    # Every word the viewer HEARS, including one whose midpoint a pause cut
+    # removed while its sound survived (the captions show the same words).
+    from timeline import Voice
+    out_words = tl.kept_words(ctx.index.get("words", []), rescue=True,
+                              voice=Voice.from_index(ctx.index))
     if not out_words:
         return ("The current edit keeps no transcribed speech."
                 if ctx.index.get("words") else
@@ -6079,8 +6090,8 @@ def search_sfx(ctx, query, max_seconds=None):
         return "REJECTED: max_seconds must be a number."
     lib_hits = motion_tools.sound_search(query)
     kit_text = ("Valmera sound library (approved real recordings — add_sfx(storage_key='sound:<id>', "
-                "at=<the frame it hits>, gain_db=<suggested>)):\n- "
-                + "\n- ".join(f"{h['id']} [{h['role']}, {h['duration_s']:g}s, gain {h['gain_db']} dB] — {h['use']}"
+                "at=<the frame it hits>), gain_db unset so it is levelled against the voice):\n- "
+                + "\n- ".join(f"{h['id']} [{h['role']}, {h['duration_s']:g}s] — {h['use']}"
                                for h in lib_hits) + "\n") if lib_hits else ""
     memory = getattr(ctx, "tool_failure_memory", {})
     unavailable_until = memory.get("sfx_auth_retry_at", 0)
@@ -6793,7 +6804,27 @@ def _resolve_sfx(ctx, storage_key):
             "storage_key": storage_key}, None
 
 
-def add_sfx(ctx, storage_key, at, gain_db=-6.0, purpose=None, offset_s=None,
+# A non-library sound's level when the editor sets none: the schema's and the
+# renderer's fallback (its loudness is unknown, so nothing better exists).
+SFX_DEFAULT_GAIN_DB = -6.0
+
+
+def _sfx_check_lines(ctx, edl, ids):
+    """Advisory placement CHECK lines (sfx_placement) for the sfx `ids` in
+    `edl`. Never raises: a check is evidence, never a write gate."""
+    try:
+        got = sfx_placement.check_edl(edl, getattr(ctx, "index", None) or {},
+                                      ids=set(ids))
+    except Exception as e:      # noqa: BLE001
+        print(f"[sfx] placement check skipped: {str(e)[:160]}", flush=True)
+        return []
+    lines = [f["message"] for i in ids for f in got["items"].get(i, [])]
+    if got.get("budget"):
+        lines.append(got["budget"]["message"])
+    return ["CHECK: " + x for x in lines]
+
+
+def add_sfx(ctx, storage_key, at, gain_db=None, purpose=None, offset_s=None,
             dur_s=None):
     """Place a one-shot sound at a point in the program timeline.
 
@@ -6801,7 +6832,17 @@ def add_sfx(ctx, storage_key, at, gain_db=-6.0, purpose=None, offset_s=None,
     measured peak; typing starts there): the EDL item starts that much
     earlier, skipping into the file when the hit is too close to 0 s, and
     plays to its measured tail cap unless dur_s says otherwise. Any other
-    sound starts at `at`, as it always has."""
+    sound starts at `at`, as it always has.
+
+    gain_db omitted: a library recording is levelled against the measured
+    voice at its hit (sfx_mix: its role's target under the voice), any other
+    sound gets SFX_DEFAULT_GAIN_DB. An explicit gain_db always wins; either
+    way the result reports where it sits against the voice and the
+    placement checks (sfx_placement). A bright library sound landing on a
+    payoff/emphasis word's onset (or ringing into it) is nudged to a visual
+    partner in the neighbouring speech gap when one is within reach — never
+    a pun or a sound whose action is shown on that frame: those are
+    reported and stay."""
     sound, err = _resolve_sfx(ctx, storage_key)
     if err:
         return err
@@ -6811,10 +6852,16 @@ def add_sfx(ctx, storage_key, at, gain_db=-6.0, purpose=None, offset_s=None,
         at = float(at)
     except (TypeError, ValueError):
         return f"REJECTED: at must be a number of seconds, got {at!r}."
-    try:
-        gain_db = float(gain_db)
-    except (TypeError, ValueError):
-        return f"REJECTED: gain_db must be a number, got {gain_db!r}."
+    explicit_gain = gain_db is not None
+    if explicit_gain:
+        try:
+            gain_db = float(gain_db)
+        except (TypeError, ValueError):
+            return f"REJECTED: gain_db must be a number, got {gain_db!r}."
+        if not math.isfinite(gain_db):
+            return f"REJECTED: gain_db must be a number, got {gain_db!r}."
+    else:
+        gain_db = SFX_DEFAULT_GAIN_DB
     try:
         offset_s = 0.0 if offset_s is None else float(offset_s)
     except (TypeError, ValueError):
@@ -6881,6 +6928,53 @@ def add_sfx(ctx, storage_key, at, gain_db=-6.0, purpose=None, offset_s=None,
     if dur and offset_s > max(0.0, dur - 0.05):
         return (f"REJECTED: offset_s={offset_s:g}s is past the usable end of "
                 f"'{sound['name']}' ({dur:.2f}s).")
+    # A bright library sound on the onset of a payoff/emphasis word competes
+    # with the word: move it to a visual partner in the neighbouring speech
+    # gap when there is one (sfx_placement.nudge); otherwise it stays and the
+    # CHECK below says so.
+    nudge_note = ""
+    if lib_id:
+        try:
+            role = (sound_library.get(lib_id) or {}).get("role")
+            index = getattr(ctx, "index", None) or {}
+            words = sfx_placement.program_words(edl, index)
+            ring = sfx_placement.ring_s(lib_id)
+            protected = sfx_placement.protected_words(edl, words)
+            hit_w = sfx_placement.collides(role, at, protected, ring)
+            # a literal pun is wrong at any time: it is reported, not moved;
+            # a sound whose action is shown at `at` (a notification card's
+            # ding, B-roll) belongs to that frame: reported, not moved away
+            if hit_w and (sfx_placement.pun(edl, role, at, words)
+                          or sfx_placement.depicts(edl, role, at)):
+                hit_w = None
+            moved = hit_w and sfx_placement.nudge(
+                sfx_placement.visual_events(edl, index), words, hit_w, role,
+                at, end=max(0.0, latest_at - 0.1), protected=protected,
+                ring=ring)
+        except Exception as e:      # noqa: BLE001
+            print(f"[sfx] nudge skipped: {str(e)[:160]}", flush=True)
+            moved = None
+        if moved:
+            nudge_note = (
+                f"\nNUDGED: {at:.2f}s is the onset of "
+                f"'{sfx_placement.say(hit_w['w'])}' ({hit_w['why']}), where a "
+                f"bright sound masks the word; it now hits at {moved[0]:.2f}s "
+                f"on {moved[1]}, in the speech gap. move_sfx puts it back if "
+                "the overlap is deliberate.")
+            at = moved[0]
+    # Level: a library recording's hit against the measured voice there.
+    voice, mix_line = None, ""
+    if lib_id:
+        voice = sfx_mix.voice_at(sfx_mix.voices_for(ctx, edl, [at]), at)
+        if not explicit_gain:
+            auto = sfx_mix.auto_gain(lib_id, voice["lufs"])
+            if auto is not None:
+                gain_db = auto
+            else:
+                gain_db = float((sound_library.get(lib_id) or {})
+                                .get("gain_db") or SFX_DEFAULT_GAIN_DB)
+        mix_line = sfx_mix.level_line(lib_id, gain_db, voice,
+                                      auto=not explicit_gain)
     item = {"id": sid, "storage_key": storage_key,
             "at": round(at, 2), "gain_db": gain_db,
             "purpose": purpose_n}
@@ -6940,7 +7034,11 @@ def add_sfx(ctx, storage_key, at, gain_db=-6.0, purpose=None, offset_s=None,
             ctx, "sfx_placement", decision="use", asset_key=storage_key,
             element_id=sid, purpose=purpose_n, at=round(at, 2),
             review_stage="timeline")
-    return result + at_note + (hit_note if result.startswith("EDL v") else "") + note
+        checks = _sfx_check_lines(ctx, edl, [sid])
+        return (result + at_note + hit_note + note + nudge_note
+                + (f"\n{mix_line}" if mix_line else "")
+                + "".join("\n" + c for c in checks))
+    return result + at_note + note
 
 
 def remove_sfx(ctx, id):
@@ -6975,20 +7073,35 @@ def move_sfx(ctx, id, at):
     if at < 0 or at > max(0.0, prog - 0.05):
         return (f"REJECTED: at={at}s is outside the program "
                 f"(0 to {round(prog, 2)}s).")
-    if sound_library.id_for_key(hit.get("storage_key")):
+    lib_id = sound_library.id_for_key(hit.get("storage_key"))
+    if lib_id:
         old = sound_library.hit_at(hit)
         lead = sound_library.retime(hit, at)
         edl["sfx"] = items
-        return ctx.write_edl(
+        res = ctx.write_edl(
             edl, f"moved sfx {id} ('{_track_name(ctx, hit['storage_key'])}') "
                  f"hit {old:g}s -> {round(at, 3):g}s (starts {hit['at']:g}s"
                  + (f", {lead:.2f}s before its peak)" if lead else ")"))
-    old = hit["at"]
-    hit["at"] = round(at, 2)
-    edl["sfx"] = items
-    return ctx.write_edl(
-        edl, f"moved sfx {id} ('{_track_name(ctx, hit['storage_key'])}') "
-             f"{old}s -> {hit['at']}s")
+    else:
+        old = hit["at"]
+        hit["at"] = round(at, 2)
+        edl["sfx"] = items
+        res = ctx.write_edl(
+            edl, f"moved sfx {id} ('{_track_name(ctx, hit['storage_key'])}') "
+                 f"{old}s -> {hit['at']}s")
+    if not res.startswith("EDL v"):
+        return res
+    # Same level, new moment: say where it now sits against the voice (the
+    # gain is the editor's; set_audio_gain changes it) and re-check it.
+    if lib_id:
+        voice = sfx_mix.voice_at(sfx_mix.voices_for(ctx, edl, [at]), at)
+        g = hit.get("gain_db")
+        line = sfx_mix.level_line(
+            lib_id, float(SFX_DEFAULT_GAIN_DB if g is None else g), voice,
+            auto=False)
+        if line:
+            res += "\n" + line
+    return res + "".join("\n" + c for c in _sfx_check_lines(ctx, edl, [id]))
 
 
 def swap_music(ctx, id, storage_key):
@@ -7137,9 +7250,19 @@ def set_audio_gain(ctx, kind, id, gain_db):
     hit["gain_db"] = g
     edl[kind] = items
     key = hit.get("storage_key") or hit.get("asset_key") or "?"
-    return ctx.write_edl(
+    res = ctx.write_edl(
         edl, f"{kind} {id} ('{_track_name(ctx, key)}') gain "
              f"{old:+.1f}dB -> {g:+.1f}dB")
+    lib_id = (sound_library.id_for_key(hit.get("storage_key"))
+              if kind == "sfx" else None)
+    if lib_id and res.startswith("EDL v"):
+        # where the new level sits against the voice at the hit
+        t = sound_library.hit_at(hit)
+        voice = sfx_mix.voice_at(sfx_mix.voices_for(ctx, edl, [t]), t)
+        line = sfx_mix.level_line(lib_id, g, voice, auto=False)
+        if line:
+            res += "\n" + line
+    return res
 
 
 def _music_assets(conn, project_id):
@@ -7380,9 +7503,17 @@ def _cap_zoom_strength(ctx, strength, room, base, stacked=0.0):
 
 def set_frame(ctx, ratio, mode="crop", focus_x=None, focus_y=None,
               _measured=False, focus_track=None, picture=None, _follow=False):
-    return _behind_framing_note(ctx, _set_frame(
+    res = _behind_framing_note(ctx, _set_frame(
         ctx, ratio, mode, focus_x, focus_y, _measured, focus_track, picture,
         _follow))
+    if not _measured and isinstance(res, str) and res.startswith("EDL v"):
+        # An authored crop keeps the editor's aim; what it shows is said.
+        try:
+            res += "".join("\n" + n for n in _framing_checks(
+                ctx, measure_faces=False))
+        except Exception:
+            pass
+    return res
 
 
 def _set_frame(ctx, ratio, mode="crop", focus_x=None, focus_y=None,
@@ -8049,15 +8180,20 @@ def _follow_report(ctx, how, failure, stats):
 def _follow_samples(ctx, windows, cuts=()):
     """(samples, source, counts, failure) — the speaker's face over SOURCE
     ``windows`` as [(t, box, look)]: the index's spatial samples when they
-    are dense enough to follow (follow.DENSE_STEP_S), else a face track over
-    just these windows (_measure_faces: follow.measure at follow.SAMPLE_FPS,
-    Haar frontal + profile — on this lane and on the batch media lane).
-    source is 'index', 'measured', 'no_faces' (measured: nobody there),
-    'too_long' (more kept footage than one call measures,
+    are dense enough to follow (follow.DENSE_STEP_S) and never lose the face
+    mid-shot (follow.index_loses_face: the frontal index cannot see a turn
+    to profile), else a face track over just these windows
+    (_measure_faces: follow.measure at follow.SAMPLE_FPS, Haar frontal +
+    profile with optical-flow carry — on this lane and on the batch media
+    lane). source is 'index', 'measured', 'no_faces' (measured: nobody
+    there), 'too_long' (more kept footage than one call measures,
     follow.MAX_MEASURE_S), 'unmeasured' (the track could not be completed
     — ``failure`` says why: the caller must say so) or 'sparse' (no
-    windows). counts: follow.face_counts of the full-frame samples (group
-    shots). ``cuts``: the shot boundaries — each shot is tracked on its own
+    windows). A dense index that loses a turn stays the answer whenever the
+    measurement cannot replace it (too long, unmeasured, nobody found):
+    losing a turn is better than losing the whole follow. counts:
+    follow.face_counts of the full-frame samples (group shots). ``cuts``:
+    the shot boundaries — each shot is tracked on its own
     (follow.speaker_track). Never raises; a measured result is reused for
     the context's life, a failure only inside the same tool call
     (FOLLOW_FAIL_MEMO_S)."""
@@ -8067,8 +8203,13 @@ def _follow_samples(ctx, windows, cuts=()):
     index = getattr(ctx, "index", None) or {}
     seen = []
     sparse, dense = follow.index_samples(index, windows, seen)
-    if dense:
-        return sparse, "index", follow.face_counts(seen), None
+    # dense index samples follow a speaker who stays frontal; one the index
+    # loses mid-shot (a turn to profile) is measured on the proxy, whose
+    # profile detector and carry hold the turned face.
+    indexed = (sparse, "index", follow.face_counts(seen), None) if dense else None
+    if indexed and (not follow.index_loses_face(index, windows)
+                    or follow.too_long(windows)):
+        return indexed
     total = sum(b - a for a, b in windows)
     cuts = sorted({round(float(c), 3) for c in cuts or ()})
     key = (tuple((round(a, 2), round(b, 2)) for a, b in windows), tuple(cuts))
@@ -8090,7 +8231,7 @@ def _follow_samples(ctx, windows, cuts=()):
             hit[3] is None or hit[1] in ("too_long", "no_faces")
             or (hit[5] is token and (token is not None or time.monotonic()
                                      - hit[4] < FOLLOW_FAIL_MEMO_S))):
-        return hit[:4]
+        return _follow_or_index(hit[:4], indexed)
     stats = None
     if follow.too_long(windows):
         out = (sparse, "too_long", [], {"why": "too_long",
@@ -8124,6 +8265,14 @@ def _follow_samples(ctx, windows, cuts=()):
                                                     "footage_s": round(total, 1)})
     cache[key] = out + (time.monotonic(), token)
     _follow_report(ctx, out[1], out[3], stats)
+    return _follow_or_index(out, indexed)
+
+
+def _follow_or_index(out, indexed):
+    """``out`` (a measurement's 4-tuple), or the dense ``indexed`` samples
+    when there are any and the measurement could not replace them."""
+    if indexed and out[1] in ("too_long", "unmeasured", "no_faces"):
+        return indexed
     return out
 
 
@@ -8313,6 +8462,356 @@ def _follow_frame(ctx, edl, frame):
                    "auto_reframe(follow=false) holds one aim per shot.")
 
 
+# ── burned-in screen insets and no-face crops (judges round 3) ──────────
+# A crop that cuts through a burned-in screen box for this long is reported
+# (and slid off it by auto_reframe when the speaker stays framed).
+INSET_CUT_MIN_S = 0.5
+# A crop that shows no face for this long while someone speaks, though the
+# speaker's face is measured elsewhere in the source frame, is reported.
+NO_FACE_MAX_S = 1.0
+# The time grid the checks walk over kept footage.
+FRAMING_CHECK_STEP_S = 0.25
+# An authored crop (set_frame) measures the speaker's face for the no-face
+# check only over this much kept footage (a short); auto_reframe has already
+# measured it.
+FRAMING_CHECK_MEASURE_S = 120.0
+# Canvas boxes of the suggested speaker + screen stack (9:16).
+STACK_SPEAKER_BOX = [0.04, 0.07, 0.96, 0.47]
+STACK_SCREEN_BOX = [0.04, 0.50, 0.96, 0.93]
+
+
+def _inset_boxes(ctx, windows):
+    """insets.boxes over SOURCE ``windows`` measured on the proxy (1 fps),
+    cached on the ctx for the turn. [] when there is no proxy, the footage
+    is longer than one follow measurement, or nothing is found."""
+    windows = _merge_windows(windows)
+    if not windows or follow.too_long(windows):
+        return []
+    key = tuple((round(a, 2), round(b, 2)) for a, b in windows)
+    cache = getattr(ctx, "_inset_cache", None)
+    if not isinstance(cache, dict):
+        cache = {}
+        try:
+            ctx._inset_cache = cache
+        except Exception:
+            pass
+    if key in cache:
+        return cache[key]
+    out = []
+    try:
+        proxy = ctx.proxy_path()
+        out = insets.boxes(insets.measure(proxy, windows),
+                           probe=lambda t, r: insets.frame_has(proxy, t, r))
+    except Exception:
+        out = []
+    cache[key] = out
+    return out
+
+
+def _inset_rect(ctx, spans):
+    """The burned-in screen box on screen longest inside SOURCE ``spans``,
+    or None."""
+    boxes = _inset_boxes(ctx, spans)
+    best, most = None, 0.0
+    for box in boxes:
+        on = sum(insets.present(box, a, b) for a, b in _merge_windows(spans))
+        if on > most + 1e-6:
+            best, most = box, on
+    return best["rect"] if best and most >= .5 else None
+
+
+def _crop_window_at(edl, t, sw, sh, W, H):
+    """[x0, y0, x1, y1] (source fractions) the crop shows at SOURCE second
+    t — the follow path where one holds t, else the focus_track span's (or
+    the frame's) aim — or None where that span is not a crop."""
+    frame = edl.get("frame") or {}
+    c = follow.frame_focus_at(edl, t)
+    if c is None:
+        track = [sp for sp in frame.get("focus_track") or [] if isinstance(sp, dict)]
+        base = (frame.get("focus_x"), frame.get("focus_y"), frame.get("mode") or "crop")
+        x, y, mode = renderer._aim_at(track, t, base)
+        if (mode or "crop") != "crop":
+            return None
+        c = (x, y) if (x is not None or y is not None) else None
+    try:
+        _k, x0, y0, x1, y1 = renderer.fit_fractions(sw, sh, W, H, "crop", c)
+    except Exception:
+        return None
+    return [x0, y0, x1, y1]
+
+
+def _runs(times, step, min_s):
+    """Maximal runs [(t0, t1)] of sorted SOURCE ``times`` (the centres of a
+    ``step`` grid; a missed step is bridged) at least ``min_s`` long."""
+    out = []
+    for t in times:
+        if out and t - out[-1][1] <= 2.01 * step:
+            out[-1][1] = t
+        else:
+            out.append([t, t])
+    return [(a - step / 2.0, b + step / 2.0) for a, b in out
+            if b + step - a >= min_s - 1e-6]
+
+
+def _program_span(tl, a, b):
+    """(program start, program end) of the kept footage in SOURCE [a, b]."""
+    pts = []
+    for s, e in tl.segs:
+        lo, hi = max(a, s), min(b, e)
+        if hi - lo > 1e-3:
+            for t in (lo + 1e-4, hi - 1e-4):
+                p = tl.src_to_out(t)
+                if p is not None:
+                    pts.append(p)
+    return (round(min(pts), 2), round(max(pts), 2)) if pts else None
+
+
+def _inset_layout_call(card_id, p0, p1, cuts=()):
+    """The calls that show a screen box legibly over programme [p0, p1]: a
+    speaker + screen stack per camera shot (one speaker framing frames ONE
+    shot) — the face stays on screen while they talk about it — or, for a
+    beat nobody talks over, one fitted card of the box (it sits still
+    across camera cuts)."""
+    stack = [{"box": STACK_SPEAKER_BOX, "source": "auto"},
+             {"box": STACK_SCREEN_BOX, "source": "inset"}]
+    edges = [p0] + sorted(c for c in cuts if p0 + .3 < c < p1 - .3) + [p1]
+    pieces = list(zip(edges, edges[1:]))[:3]
+    fitted = (f"set_picture_card(id='{card_id}', start={p0:g}, end={p1:g}, "
+              "source='inset') fits the whole box alone — no face, so only "
+              f"for a beat (under {NO_FACE_MAX_S:g}s of speech) or a stretch "
+              "nobody talks over")
+    check = (" (look at the speaker panel: a speaker sitting against the box "
+             "may need a source rect of their own that holds the face clear "
+             "of the panel edge)")
+    if len(pieces) == 1:
+        return (f"set_picture_card(id='{card_id}', start={p0:g}, end={p1:g}, "
+                f"panels={json.dumps(stack)}) stacks the speaker over the "
+                "screen, both legible" + check + "; or " + fitted)
+    return ("one speaker + screen stack per camera shot: " + "; ".join(
+                f"set_picture_card(id='{card_id}_{k + 1}', start={a:g}, end={b:g}, "
+                f"panels={json.dumps(stack)})" for k, (a, b) in enumerate(pieces))
+            + check + "; or " + fitted)
+
+
+def _framing_checks(ctx, apply=False, measure_faces=True):
+    """Notes about the crop the latest EDL draws, measured on the footage:
+    a burned-in screen box (insets.py) cut through by the crop, and a crop
+    with no face for NO_FACE_MAX_S while someone speaks though the
+    speaker's face is in the source frame. ``apply`` (auto_reframe) slides
+    a shot's still crop clear of a box it cuts through when the speaker's
+    face stays inside — one write, said in the note. Everything else is
+    advice naming the fix: a fitted card or a speaker + screen stack of
+    the box (set_picture_card source='inset'), a re-aim, or a cut away.
+    [] when the frame is not a crop of the main video or nothing is found."""
+    edl = ctx.latest_edl()["json"]
+    frame = edl.get("frame") if isinstance(edl.get("frame"), dict) else None
+    if not frame or (frame.get("ratio") or "source") == "source" or \
+            frame.get("picture") or not getattr(ctx, "has_main_video", False):
+        return []
+    if (frame.get("mode") or "crop") != "crop" and not any(
+            (sp or {}).get("mode") == "crop" for sp in frame.get("focus_track") or []):
+        return []
+    index = getattr(ctx, "index", None) or {}
+    video = index.get("video") or {}
+    try:
+        sw, sh = float(video["width"]), float(video["height"])
+        W, H = renderer.frame_dims(sw, sh, str(frame.get("ratio")), delivery=True)
+    except (KeyError, TypeError, ValueError, ZeroDivisionError):
+        return []
+    keep = [(float(s), float(e)) for s, e in edl.get("keep") or []]
+    track = frame.get("focus_track") or []
+    edges = [float(sp[k_]) for sp in track for k_ in ("t0", "t1")]
+    shots = _shot_windows(ctx, keep, edges)
+    if not shots:
+        return []
+    windows = [f for _a, _b, fr, _lo, _hi in shots for f in fr]
+    if follow.too_long(windows):
+        return []
+    boxes = _inset_boxes(ctx, windows)
+    faces = []
+    kept_s = sum(b_ - a_ for a_, b_ in _merge_windows(windows))
+    if measure_faces or kept_s <= FRAMING_CHECK_MEASURE_S:
+        samples, how, _counts, _failure = _follow_samples(
+            ctx, windows, [x for _a, _b, _fr, lo, hi in shots for x in (lo, hi)])
+        faces = samples if how in ("index", "measured") else []
+    # speech as merged SOURCE intervals (each word widened by 0.1 s), looked
+    # up by bisection: a long index holds tens of thousands of words
+    speech = []
+    for w0, w1 in sorted((float(w.get("t0", 0)) - .1, float(w.get("t1", 0)) + .1)
+                         for w in index.get("words") or [] if isinstance(w, dict)):
+        if speech and w0 <= speech[-1][1]:
+            speech[-1][1] = max(speech[-1][1], w1)
+        else:
+            speech.append([w0, w1])
+    speech_starts = [a_ for a_, _b in speech]
+
+    def speaking_at(t):
+        k = bisect.bisect_right(speech_starts, t) - 1
+        return k >= 0 and t <= speech[k][1]
+    tl = Timeline(edl.get("keep") or [], edl.get("inserts") or [],
+                  edl.get("speed") or [])
+    step = FRAMING_CHECK_STEP_S
+    notes, moved, cut_runs = [], [], []
+    # programme seconds where a CAMERA shot begins (a stack's speaker panel
+    # frames one shot): the indexed cuts — a focus_track edge on a
+    # contiguous join (a re-aim inside one shot, Elon's 145.4) would split
+    # one stack into two framings of the same footage, a jump mid-shot.
+    # Only an index without a shot list falls back to the focus edges.
+    cam_shots = _shot_windows(ctx, keep) if index.get("shots") else shots
+    shot_starts = [p[0] for p in (_program_span(tl, a_, b_)
+                                  for a_, b_, _fr, _lo, _hi in cam_shots[1:]) if p]
+    # a source-fed picture card replaces the crop while it is up: what the
+    # crop would show there is never seen
+    carded = []
+    for card in ((edl.get("effects") or {}).get("picture_cards") or []):
+        if isinstance(card, dict) and picture_cards.source_fed(card):
+            try:
+                carded.append((float(card["start"]), float(card["end"])))
+            except (KeyError, TypeError, ValueError):
+                continue
+
+    taken = {str(c.get("id")) for c in ((edl.get("effects") or {}).get("picture_cards")
+                                         or []) if isinstance(c, dict)}
+    card_id = next(f"screen{'' if k == 1 else k}" for k in range(1, 99)
+                   if f"screen{'' if k == 1 else k}" not in taken
+                   and f"screen{'' if k == 1 else k}_1" not in taken)
+
+    def seen(t):
+        if not carded:
+            return True
+        p = tl.src_to_out(t)
+        return p is None or not any(a_ <= p < b_ for a_, b_ in carded)
+    spans = [dict(sp) for sp in frame.get("follow") or [] if isinstance(sp, dict)]
+    for a, b, frags, lo, hi in shots:
+        grid = []
+        for f0, f1 in frags:
+            t = f0 + step / 2.0
+            while t < f1:
+                grid.append(round(t, 3))
+                t += step
+        if not grid:
+            continue
+        cut_at, empty_at = {}, []
+        shot_faces = [s_ for s_ in faces if a - .3 <= s_[0] <= b + .3]
+        for t in grid:
+            win = _crop_window_at(edl, t, sw, sh, W, H)
+            if win is None or not seen(t):
+                continue
+            for k, box in enumerate(boxes):
+                if insets.present(box, t - 1e-3, t + 1e-3) and \
+                        insets.cuts_through(box["rect"], win):
+                    cut_at.setdefault(k, []).append(t)
+            near = [s_ for s_ in shot_faces if abs(s_[0] - t) <= .6]
+            speaking = speaking_at(t)
+            if near and speaking:
+                f = min(near, key=lambda s_: abs(s_[0] - t))[1]
+                cx, cy = (f[0] + f[2]) / 2.0, (f[1] + f[3]) / 2.0
+                if not (win[0] <= cx <= win[2] and win[1] <= cy <= win[3]):
+                    empty_at.append(t)
+        for k, ts in cut_at.items():
+            box = boxes[k]
+            rect = box["rect"]
+            for r0, r1 in _runs(ts, step, INSET_CUT_MIN_S):
+                r1 = min(r1, b)                  # never past the shot
+                prog = _program_span(tl, r0, r1)
+                if not prog:
+                    continue
+                win = _crop_window_at(edl, (r0 + r1) / 2.0, sw, sh, W, H)
+                share = insets.overlap_share(rect, win) if win else 0.0
+                slid = None
+                in_run = [s_[1] for s_ in shot_faces if r0 - .3 <= s_[0] <= r1 + .3]
+                static = not any(follow.moves(sp) for sp in spans
+                                 if follow.span_at([sp], (a + b) / 2.0))
+                if apply and static and in_run and win:
+                    keep_x = (min(f[0] for f in in_run) - .01,
+                              max(f[2] for f in in_run) + .01)
+                    slid = insets.clear_aim(rect, win, keep_x)
+                if slid is not None:
+                    moved.append((lo, hi, a, b, slid, (win[1] + win[3]) / 2.0))
+                    cut_runs.append((k, prog, share, slid))
+                    continue
+                cut_runs.append((k, prog, share, None))
+        for r0, r1 in _runs(empty_at, step, NO_FACE_MAX_S):
+            prog = _program_span(tl, r0, r1)
+            if not prog:
+                continue
+            near = [s_[1] for s_ in shot_faces if r0 - .3 <= s_[0] <= r1 + .3]
+            fx = sorted((f[0] + f[2]) / 2.0 for f in near)
+            box_on = [bx for bx in boxes if insets.present(bx, r0, r1) >= .5]
+            screen = (" The crop shows a burned-in screen box instead: "
+                      + _inset_layout_call(card_id, prog[0], prog[1],
+                                           shot_starts) + "."
+                      if box_on else "")
+            notes.append(
+                f"NO FACE IN THE CROP {prog[0]:g}-{prog[1]:g}s: speech plays for "
+                f"{r1 - r0:.1f}s while the crop shows no face; the speaker's face "
+                f"is measured at x={fx[len(fx) // 2]:.2f} of the source. Re-aim "
+                "this span (set_frame focus_track x, or auto_reframe), or show "
+                "what the crop is on as its own card." + screen)
+    # One note per box and stretch of the programme (a box on screen
+    # across a cut is one piece of evidence), suggesting a card over every
+    # kept moment the box is on screen there.
+    merged = []
+    for k, prog, share, slid in sorted(cut_runs, key=lambda r: (r[0], r[1][0])):
+        if merged and merged[-1][0] == k and (merged[-1][3] is None) == (slid is None) \
+                and prog[0] - merged[-1][1][1] <= .5:
+            m = merged[-1]
+            merged[-1] = (k, (m[1][0], max(m[1][1], prog[1])), max(m[2], share),
+                          m[3] if m[3] is not None else slid)
+        else:
+            merged.append((k, prog, share, slid))
+    for k, prog, share, slid in merged:
+        rect = boxes[k]["rect"]
+        shown = [p for p in (_program_span(tl, a0, a1)
+                             for a0, a1 in boxes[k].get("spans") or []) if p]
+        hit = [(p0, p1) for p0, p1 in sorted(shown)
+               if p0 <= prog[1] + .5 and p1 >= prog[0] - .5]
+        win = [min(p[0] for p in hit), max(p[1] for p in hit)] if hit else list(prog)
+        prog = (max(prog[0], win[0]), min(prog[1], win[1]))
+        for a_, b_ in carded:                  # a card already shows the rest
+            if b_ <= prog[0] + 1e-3:
+                win[0] = max(win[0], b_)
+            elif a_ >= prog[1] - 1e-3:
+                win[1] = min(win[1], a_)
+        call = _inset_layout_call(card_id, win[0], win[1], shot_starts)
+        where = f"[{', '.join(f'{v:.2f}' for v in rect)}]"
+        if slid is not None:
+            notes.append(
+                f"SCREEN INSET CLEARED: a burned-in screen box at {where} of the "
+                f"source was cut through by the crop at {prog[0]:g}-{prog[1]:g}s "
+                f"({share * 100:.0f}% of the frame's width); the shot's crop slid "
+                f"to x={slid:.3f} to leave it out, the speaker's face still "
+                f"inside. To SHOW it instead (on screen {win[0]:g}-{win[1]:g}s): "
+                + call + ".")
+            continue
+        notes.append(
+            f"SCREEN INSET (look before acting): a burned-in screen or "
+            f"picture-in-picture box at {where} of the source is on screen "
+            f"{win[0]:g}-{win[1]:g}s and the crop cuts through it at "
+            f"{prog[0]:g}-{prog[1]:g}s (up to {share * 100:.0f}% of the frame's "
+            "width shows a slice of it); the crop cannot leave it out without "
+            "cutting the speaker. If it is the evidence being talked about: "
+            + call + ". Otherwise cut away from it, or keep it deliberately. "
+            "(A door or picture frame can also read as a box — look_at it "
+            "first.)")
+    if apply and moved:
+        for lo, hi, a, b, x, y in moved:
+            mid = round((a + b) / 2.0, 3)
+            spans = [sp for sp in spans
+                     if not (float(sp.get("t0", 0)) <= mid <= float(sp.get("t1", 0)))]
+            spans.append({"t0": lo, "t1": hi, "k": [[mid, round(x, 4), round(y, 4)]]})
+        spans.sort(key=lambda sp: float(sp["t0"]))
+        new = dict(edl)
+        new["frame"] = dict(frame, follow=spans[:FOLLOW_MAX_SPANS] or None)
+        res = ctx.write_edl(new, "the crop slid clear of a burned-in screen box")
+        if not str(res).startswith("EDL v"):
+            notes = [n for n in notes if not n.startswith("SCREEN INSET CLEARED")]
+            notes.append(f"(the slide off the screen box was not saved: {res[:200]})")
+        else:
+            notes.insert(0, res)
+    return notes
+
+
 def _reframe_with_track(ctx, ratio, global_pt, preserve_unmeasured=True,
                         follow_=False):
     """A crop that FOLLOWS the subject across shot changes, or None when a
@@ -8500,6 +8999,24 @@ def _truthy(v, default=True):
 
 
 def auto_reframe(ctx, ratio="9:16", mode="auto", follow=True):
+    """Convert the output frame to `ratio` and choose HOW honestly
+    (_auto_reframe), then check what the crop shows (_framing_checks): a
+    burned-in screen box it cuts through is slid out of the crop when the
+    speaker stays framed, else named with the card that shows it legibly;
+    a crop with no face while someone speaks is named with the fix."""
+    res = _auto_reframe(ctx, ratio, mode, follow)
+    if isinstance(res, str) and (res.startswith("EDL v")
+                                 or res.startswith("NO CHANGE")):
+        try:
+            # follow=false keeps the aims it wrote: advice only
+            res += "".join("\n" + n for n in _framing_checks(
+                ctx, apply=_truthy(follow)))
+        except Exception:
+            pass
+    return res
+
+
+def _auto_reframe(ctx, ratio="9:16", mode="auto", follow=True):
     """Convert the output frame to `ratio` and choose HOW honestly.
 
     Round 55. This tool only ever cropped, and aimed the crop as well as it
@@ -15204,7 +15721,7 @@ PICTURE_CARD_STYLE_COLORS = {
 
 # Where a card's footage comes from: the main SOURCE frame (picture_cards
 # source-fed cards) unless the editor asks for the composed program.
-PICTURE_CARD_SOURCES = ("auto", "full", "program")
+PICTURE_CARD_SOURCES = ("auto", "full", "program", "inset")
 
 
 def _source_spans(edl, start, end):
@@ -15547,6 +16064,19 @@ def _resolve_panel(ctx, edl, spans, box, source, fit, canvas, follow=False,
     lowres = picture_cards.is_lowres(sw, sh)
     face, headroom, track, follows, moving = None, None, None, None, 0
     follow_failure = None
+    if isinstance(source, str) and source == "inset":
+        # The burned-in screen box (insets.py) measured in this window,
+        # shown WHOLE: a fitted card hugging its aspect, never cropped.
+        rect = _inset_rect(ctx, spans)
+        if rect is None:
+            return (None, None, None,
+                    "REJECTED: no burned-in screen box (a picture-in-picture "
+                    "or screenshot inset with four straight edges) was "
+                    "measured in this window's footage — look_at it and pass "
+                    "its [left, top, right, bottom] rect of the SOURCE frame "
+                    "as source instead.", None, None)
+        source = [float(v) for v in rect]
+        fit = fit or "pad"
     if isinstance(source, str):
         if source == "full" or (source == "auto" and lowres and fit != "crop"):
             rect = (picture_cards.archival_rect() if lowres
@@ -15668,8 +16198,10 @@ def set_picture_card(ctx, id, start, end, box=None, fit=None, radius=.045,
         if source not in PICTURE_CARD_SOURCES:
             return ("REJECTED: source is 'auto' (the speaker, framed from the "
                     "full source frame), 'full' (the whole source frame), "
-                    "'program' (the composed program picture) or a "
-                    "[left, top, right, bottom] rect of the SOURCE frame.")
+                    "'inset' (the burned-in screen box measured in the "
+                    "footage, whole), 'program' (the composed program "
+                    "picture) or a [left, top, right, bottom] rect of the "
+                    "SOURCE frame.")
     if panels is not None and source not in (None, "auto"):
         return ("REJECTED: a stacked card takes its regions from `panels` — "
                 "give each panel its own source, not `source` too.")
@@ -15764,9 +16296,10 @@ def set_picture_card(ctx, id, start, end, box=None, fit=None, radius=.045,
             psrc = panel.get("source", "auto")
             if isinstance(psrc, str):
                 psrc = psrc.strip().lower()
-                if psrc not in ("auto", "full"):
+                if psrc not in ("auto", "full", "inset"):
                     return (f"REJECTED: panel {k + 1} source is 'auto', "
-                            "'full' or a rect of the SOURCE frame.")
+                            "'full', 'inset' (the burned-in screen box) or a "
+                            "rect of the SOURCE frame.")
             pfit = panel.get("fit")
             if pfit is not None and pfit not in ("crop", "pad"):
                 return f"REJECTED: panel {k + 1} fit must be 'crop' or 'pad'."
@@ -15860,7 +16393,35 @@ def set_picture_card(ctx, id, start, end, box=None, fit=None, radius=.045,
                 "background_style) or near-black with grain is the finish "
                 "references use for archival footage.")
     res += "".join("\n" + n for n in _source_card_notes(ctx, row))
+    if source == "inset" and not row.get("panels"):
+        try:
+            res += _faceless_card_note(ctx, edl, id, float(row["start"]),
+                                       float(row["end"]))
+        except Exception:
+            pass
     return res
+
+
+def _faceless_card_note(ctx, edl, card_id, start, end):
+    """A fitted screen card shows no face: say so when speech plays under
+    it for more than NO_FACE_MAX_S (the judged Elon evidence section: 7 s
+    of a host reading with no face on screen), naming the stack that keeps
+    the speaker in view. '' otherwise."""
+    tl = Timeline(edl.get("keep") or [], edl.get("inserts") or [],
+                  edl.get("speed") or [])
+    words = tl.kept_words((getattr(ctx, "index", None) or {}).get("words") or [])
+    spoken = sum(max(0.0, min(float(w["t1"]), end) - max(float(w["t0"]), start))
+                 for w in words)
+    if spoken <= NO_FACE_MAX_S:
+        return ""
+    stack = [{"box": STACK_SPEAKER_BOX, "source": "auto"},
+             {"box": STACK_SCREEN_BOX, "source": "inset"}]
+    return (f"\nNO FACE ON SCREEN: this card shows the screen box alone while "
+            f"{spoken:.1f}s of speech play under it — nobody is seen talking. "
+            "Keep it only for a beat the screen must carry alone; otherwise "
+            f"stack the speaker over it: set_picture_card(id='{card_id}', "
+            f"start={start:g}, end={end:g}, panels={json.dumps(stack)}) "
+            "(one stack per camera shot).")
 
 
 def _source_card_notes(ctx, row):
@@ -19321,7 +19882,7 @@ def audit_captions(ctx, offset=0, limit=80):
         import motion_layer
         edl = copy.deepcopy(edl)
         try:
-            motion_layer.fill_footprints(edl, *play_res)
+            motion_layer.fill_footprints(edl, *play_res, index=ctx.index, tl=tl)
         except Exception as exc:  # noqa: BLE001 — unmeasured = old behaviour
             print(f"[audit_captions] graphic boxes unmeasured: {str(exc)[:120]}",
                   flush=True)
@@ -20365,6 +20926,22 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft"):
                          + " — fix these, or keep one deliberately and say "
                            "why in one clause.")
             note += audio_qc.summary_line(aq)
+            # The PICTURE side (render_qc): the rendered frames themselves —
+            # a face at the frame's or card's edge, a single-frame jump off
+            # a cut, a missing end card or watermark. Advisory like the
+            # audio check: never a change to the edit; the editor repairs
+            # each one or keeps it deliberately and says why.
+            pq = result.get("picture_qc") or {}
+            pqf = pq.get("findings") or []
+            ctx.last_picture_qc_findings = list(pqf[:4])
+            if pqf:
+                ctx.last_taste.extend(
+                    f"picture QC: {finding}" for finding in pqf[:4])
+                note += (" PICTURE CHECK (measured on the rendered frames): "
+                         + "; ".join(pqf[:4])
+                         + " — fix these, or keep one deliberately and say "
+                           "why in one clause.")
+            note += render_qc.summary_line(pq)
             audio_review = _review_render_audio(ctx, row, result)
             if audio_review:
                 reused = (" (reused: rendered audio program unchanged)"
@@ -22950,6 +23527,48 @@ def _declared_mix_state(ctx, edl):
     }
 
 
+def _sfx_mix_audit(ctx, edl, rows):
+    """Annotate the declared sfx rows (in place) with where each library
+    sound sits against the measured voice at its hit (sfx_mix) and its
+    placement findings (sfx_placement); return the warning lines."""
+    warnings = []
+    items = {it.get("id"): it for it in edl.get("sfx") or []}
+    try:
+        lib = {i: sound_library.id_for_key(it.get("storage_key"))
+               for i, it in items.items()}
+        voices = sfx_mix.voices_for(
+            ctx, edl, [sound_library.hit_at(items[i]) for i, sid in lib.items()
+                       if sid])
+        checks = sfx_placement.check_edl(edl, getattr(ctx, "index", None) or {})
+    except Exception as e:      # noqa: BLE001
+        print(f"[sfx] mix audit skipped: {str(e)[:160]}", flush=True)
+        return warnings
+    for row in rows:
+        it = items.get(row.get("id")) or {}
+        sid = lib.get(row.get("id"))
+        row["role"] = sfx_placement.role_of(it)
+        if sid:
+            voice = sfx_mix.voice_at(voices, sound_library.hit_at(it))
+            g = float(it.get("gain_db") if it.get("gain_db") is not None
+                      else SFX_DEFAULT_GAIN_DB)
+            verdict, why = sfx_mix.judge_level(sid, g, voice["lufs"])
+            row["sound_id"] = sid
+            row["mix"] = {"voice_lufs": voice["lufs"],
+                          "voice_measured": bool(voice.get("measured")),
+                          "against_voice": sfx_mix.describe(sid, g, voice),
+                          "role_gain_db": sfx_mix.auto_gain(sid, voice["lufs"]),
+                          "verdict": verdict}
+            if verdict:
+                warnings.append(f"sfx {row.get('id')} ({sid}): {why}")
+        found = checks["items"].get(row.get("id")) or []
+        if found:
+            row["placement"] = [f["code"] for f in found]
+            warnings += [f["message"] for f in found]
+    if checks.get("budget"):
+        warnings.append(checks["budget"]["message"])
+    return warnings
+
+
 def audit_audio_mix(ctx):
     """Authored audio roles and offsets, separate from subjective listening."""
     row = ctx.latest_edl()
@@ -22971,6 +23590,7 @@ def audit_audio_mix(ctx):
             "remove_voiceover and add_music instead—the roles mix differently")
     if not any(state.get(k) for k in ("music", "voiceover", "sfx")):
         warnings.append("no designed audio layers are authored")
+    warnings += _sfx_mix_audit(ctx, edl, state.get("sfx") or [])
     for item in state.get("music") or []:
         rights = item.get("provenance") or {}
         if (rights.get("license_verification_status") !=
@@ -24639,6 +25259,12 @@ def apply_look(ctx, name, music=None, transition_sounds=None):
             cap = max(0, budget - len(sfx)
                       - max(0, LOOK_SFX_HERO_RESERVE - hero_sfx))
             sounded = _look_sound_rows(rows, existing_at, cap)
+            try:
+                # each junction sound is levelled against the voice there
+                voices = sfx_mix.voices_for(ctx, edl,
+                                            [r["t"] for r in sounded])
+            except Exception:       # noqa: BLE001
+                voices = {}
             for i, r in enumerate(sounded):
                 t = r["t"]
                 role = kinds[i % len(kinds)]
@@ -24659,11 +25285,13 @@ def apply_look(ctx, name, music=None, transition_sounds=None):
                     notes.append(f"transition sound {kind} unavailable "
                                  f"({str(e)[:80]}).")
                     continue
-                gain = min(float(gain), float(row["gain_db"]))
+                cue = min(float(gain), float(row["gain_db"]))
+                lev = sfx_mix.cue_gain(kind, sfx_mix.voice_at(voices, t), cue)
                 into = (f" into {r['enters']}" if r["enters"] else
                         f" out of {r['leaves']}" if r["leaves"] else "")
                 sfx.append({"id": f"{LOOK_SFX_PREFIX}{len(placed) + 1}",
-                            "storage_key": key, "at": at, "gain_db": gain,
+                            "storage_key": key, "at": at,
+                            "gain_db": cue if lev is None else lev,
                             "purpose": (f"{kind} landing on the {style} "
                                         f"scene transition{into} at "
                                         f"{t:.2f}s ('{n}' look)")})
@@ -26309,9 +26937,15 @@ TOOLS = {
     "add_sfx": (add_sfx, "Punctuate a MOMENT with a one-shot sound effect — a "
                 "whoosh into a real turn, a click on a shown button press, an "
                 "impact on the payoff. OPTIONAL, never a rule: choose it only "
-                "when the moment clearly earns a sound (most of a talking reel "
-                "carries none; sounds with no clear on-screen reason make an "
-                "edit look childish). Analysis, "
+                "when the moment clearly earns a sound (a podcast or talking "
+                "short carries zero by default and at most 1-2; sounds with "
+                "no clear on-screen reason make an edit look childish). Each "
+                "needs a visual partner (something on screen changes within "
+                "~50 ms of its hit), never sits as a bright sound (ding, pop, "
+                "click, shutter) on the onset of a payoff or emphasis word, "
+                "and never puns on the spoken word (a shutter on 'pictures', "
+                "a cash register on 'money' with nothing on screen showing "
+                "it). Analysis, "
                 "metadata, and deterministic preview AUDIO CHECK are useful "
                 "evidence; uncertainty is something to judge rather than "
                 "a reason the tool becomes unavailable. "
@@ -26334,7 +26968,21 @@ TOOLS = {
                 "it starts playing) stops a long recording (typing) when its "
                 "on-screen event stops, with a short fade; long library tails "
                 "(impact_1) already stop at their measured fade point unless "
-                "dur_s asks for more. Default -6dB.",
+                "dur_s asks for more. gain_db: leave it UNSET for a library "
+                "recording — the tool measures the voice's short-term "
+                "loudness at the hit and sets the gain for the sound's role "
+                "(whoosh/swish ~8 dB under the voice, ding/pop/click/tick/"
+                "shutter ~10 under, typing 14 under, an impact louder only "
+                "below 150 Hz) and reports a MIX line; an explicit gain_db "
+                "wins and is reported the same way. Other sounds default to "
+                "-6dB. The result's CHECK lines flag a sound with no visual "
+                "partner, on a payoff word's onset, a literal pun, a "
+                "reflexive opening whoosh, a level that is inaudible or too "
+                "hot, and more than 1-2 sounds in a talking short; a bright "
+                "library sound on a payoff word's onset is NUDGED to a "
+                "visual partner in the neighbouring speech gap when one is "
+                "within reach (a pun, or a sound whose action is shown on "
+                "that frame, is reported and left where it is).",
                 {"storage_key": {"type": "string"},
                  "at": {"type": "number"},
                  "gain_db": {"type": "number"},
@@ -26504,9 +27152,21 @@ TOOLS = {
                      "the head or lose the composition; a re-aim that can land "
                      "on a jump cut happens on the cut. A speaker who stays "
                      "put gets no motion; a shot with two or more people keeps "
-                     "its aim. follow=false keeps one aim per shot. "
-                     "Pass mode explicitly to force one. Read what it reports "
-                     "and repeat THAT.",
+                     "its aim. follow=false keeps one aim per shot. A tight "
+                     "close-up whose speaker TURNS keeps the leading edge of "
+                     "the face (the nose side) clear of the frame edge — the "
+                     "re-aim happens when the face nears the edge, never on "
+                     "every sway; a turned head the detector loses is tracked "
+                     "through the turn. SCREEN INSETS: a burned-in screen or "
+                     "picture-in-picture box the crop would cut through is "
+                     "slid out of the crop when the speaker stays framed "
+                     "(SCREEN INSET CLEARED), else named with the calls that "
+                     "show it legibly (a speaker + screen stack per camera "
+                     "shot, or for a beat set_picture_card source='inset'). "
+                     "A crop that shows NO FACE "
+                     "for over a second while someone speaks is named with "
+                     "the fix. Pass mode explicitly to force one. Read what "
+                     "it reports and repeat THAT.",
                      {"ratio": {"type": "string",
                                 "enum": ["9:16", "1:1", "4:5", "16:9",
                                          "source"]},
@@ -27040,7 +27700,13 @@ TOOLS = {
         "4:3 talks belong in a full-width 4:3 card, not a 3.7x crop; fit='crop' there frames "
         "the speaker at most 2x and follows them. 'full' = the whole source "
         "frame; [left,top,right,bottom] = that rect of the SOURCE frame (look_at gives the "
-        "fractions); 'program' = the composed program picture (frame.picture region) as before. "
+        "fractions); 'inset' = the burned-in screen / picture-in-picture box measured in the "
+        "window's footage (four straight edges, the same place across frames), shown WHOLE "
+        "and fitted (a screenshot the host reads from is legible this way, never sliced by a "
+        "9:16 crop; auto_reframe names the box and this call when it finds one). Alone it shows "
+        "no face: over more than a second of speech the result says NO FACE ON SCREEN — stack "
+        "the speaker over it with panels instead (below); 'program' = "
+        "the composed program picture (frame.picture region) as before. "
         "fit: 'crop' keeps the box and trims the source rect to it; 'pad' keeps the whole rect "
         "and shrinks the box around it (the default for 'full' and explicit rects). The result "
         "reports the rect, box, enlargement and headroom. One rect frames ONE shot: an 'auto' "
@@ -27051,8 +27717,8 @@ TOOLS = {
         "SPEAKER + EVIDENCE — panels: 2-3 {box, source[, fit]} shown at once over the window, "
         "each box its own rounded window on one canvas, each source its own region of the SAME "
         "source frame: e.g. [{box:[.04,.06,.96,.46], source:'auto'} (the speaker), "
-        "{box:[.04,.5,.96,.92], source:[.53,.52,.99,.98]} (the screen/study/inset they "
-        "show)]. Use it when the source shows a speaker beside a picture-in-picture screen, "
+        "{box:[.04,.5,.96,.92], source:'inset'} (the screen/study/inset they show — or "
+        "its rect)]. Use it when the source shows a speaker beside a picture-in-picture screen, "
         "document or browser that a 9:16 crop would either drop or slice; never crop to the "
         "evidence and lose the speaker for seconds. Panel boxes must not overlap; zooms do not "
         "play inside a stack. "
@@ -27082,14 +27748,14 @@ TOOLS = {
          "background_color2":{"type":"string"},
          "background_dim":{"type":"number"},
          "grain":{"type":"number"},"vignette":{"type":"number"},
-         "source":{"anyOf":[{"type":"string","enum":["auto","full","program"]},
+         "source":{"anyOf":[{"type":"string","enum":["auto","full","program","inset"]},
                             {"type":"array","items":{"type":"number"},
                              "minItems":4,"maxItems":4}]},
          "follow":{"type":"boolean"},
          "panels":{"type":"array","minItems":2,"maxItems":3,"items":{
              "type":"object","properties":{
                  "box":{"type":"array","items":{"type":"number"},"minItems":4,"maxItems":4},
-                 "source":{"anyOf":[{"type":"string","enum":["auto","full"]},
+                 "source":{"anyOf":[{"type":"string","enum":["auto","full","inset"]},
                                     {"type":"array","items":{"type":"number"},
                                      "minItems":4,"maxItems":4}]},
                  "fit":{"type":"string","enum":["crop","pad"]}},
@@ -28134,7 +28800,12 @@ TOOLS = {
                         "provider provenance, rights-capability signals and "
                         "downloaded SHA-256, with explicit null/unknown values. "
                         "Detects the same asset playing twice or a "
-                        "likely song misfiled as voiceover. This state is "
+                        "likely song misfiled as voiceover. Each library "
+                        "sound effect reports where it sits against the "
+                        "measured voice at its hit (and its role level "
+                        "there) plus its placement checks: visual partner, "
+                        "payoff-word onset, literal pun, opening whoosh, "
+                        "the 1-2 budget of a talking short. This state is "
                         "ground truth; deterministic preview AUDIO CHECK can "
                         "measure the rendered mix without relabeling roles.",
                         {}),
@@ -28274,7 +28945,10 @@ TOOLS = {
         "and renders from the original at up to 720x1280 portrait using the final composition "
         "and typography path; draft is the inexpensive 480px preview. The Studio attaches "
         "the complete preview. wait_for_job observes pending work; call render_preview again "
-        "to review its existing result. MCP clients can retrieve it with watch_video or download_url.",
+        "to review its existing result. MCP clients can retrieve it with watch_video or download_url. "
+        "A complete render carries a PICTURE CHECK measured on its own frames: a face within ~6% "
+        "of the frame's (or its card's) edge, a single-frame jump or pop that is not on a cut, a "
+        "missing end card or watermark. Repair each one or keep it deliberately and say why.",
         {"complete": {"type": "boolean"},
          "quality": {"type": "string", "enum": ["draft", "approval"]}}),
     "justify_verification_findings": (
@@ -28357,6 +29031,9 @@ TOOLS = {
 # Browser-rendered motion design + the approved real sound library (worker/motion_tools.py).
 TOOLS.update(motion_tools.TOOL_SPECS)
 TOOLS.update(motion_planner.TOOL_SPECS)
+# Optional jump-cut concealment (worker/cut_steps.py): a tool the editor
+# chooses when cuts visibly pop — never a default of any look or planner.
+TOOLS.update(cut_steps.TOOL_SPECS)
 # Built-in CC0 music library (worker/music_library.py, worker/music/).
 TOOLS.update(music_library.TOOL_SPECS)
 
@@ -28482,7 +29159,7 @@ TOOL_DOMAINS = {
         "set_picture_card", "remove_picture_card",
         "set_frame", "auto_reframe", "add_zoom", "remove_zoom", "add_zoom_path",
         "remove_zoom_path", "set_text_motion", "set_overlay_motion",
-        "punch_in_on_emphasis",
+        "punch_in_on_emphasis", "conceal_jump_cuts",
         "set_transitions",
         "set_fades", "bind_motion_motif", "add_aspect_shift",
         "remove_aspect_shift", "add_color_screen", "add_corrupt_screen",
@@ -28660,6 +29337,7 @@ REQUIRED_ARGS = {
     "justify_verification_findings": ["finding_ids", "justification"],
     "review_audio": [],
     "punch_in_on_emphasis": [],
+    "conceal_jump_cuts": [],
     "search_sfx": ["query"],
     "audition_sfx_candidates": ["ids", "purpose"],
     "find_footage": ["query"],
@@ -28723,7 +29401,7 @@ WRITE_TOOLS = {"apply_edit_batch", "keep_segments", "cut_range", "cut_output_ran
                "bind_motion_motif",
                "set_grade_custom", "set_master_loudness",
                "separate_music", "remove_stem_mix",
-               "punch_in_on_emphasis", "fetch_sfx",
+               "punch_in_on_emphasis", "conceal_jump_cuts", "fetch_sfx",
                "beat_align_cuts", "apply_look", "fetch_url"}
 
 
@@ -28885,10 +29563,13 @@ _COMPACT_CONTRACTS = {
         "sits 0-3 frames before the spoken onset (get_kept_transcript + "
         "get_words; start earlier by the landing offset the template "
         "description states). layer above_captions (default), below_captions "
-        "or behind_subject. Captions: leave mute_captions unset — they drop only "
-        "the spoken words it shows and keep the rest, moved clear of it (keep it "
-        "off the caption band so nothing is muted); true hides every caption in "
-        "its window, false keeps them all (a shown number is still not doubled). Silent by "
+        "or behind_subject. Captions: leave mute_captions unset — one reading "
+        "path: captions drop the words it shows and yield to its phrase from "
+        "its first shown word until it leaves (phrase_build sets the phrase's "
+        "other words small: quote the transcript in its rows; end other "
+        "graphics where their words end, per the NOTE); other words stay "
+        "captioned, clear of it; true hides all captions in its window, false "
+        "keeps them all. A number lands on its spoken word. Silent by "
         "default; sfx=true, only for a moment that earns sound, maps its "
         "sound roles onto the approved library (cues listed in the result). "
         "Pass purpose and a stable id. A graphic over the speaker's face or "
@@ -28903,25 +29584,27 @@ _COMPACT_CONTRACTS = {
     "list_sound_library": (
         "READ the owner-approved sound library: real recordings by role "
         "(whoosh, swish, impact, riser, shutter, typing, click, pop, tick, "
-        "ding, glitch, cash, heartbeat), each with its use and suggested gain. "
-        "Place with add_sfx(storage_key='sound:<id>', at=<the frame it "
-        "hits>, gain_db=<suggested>). Sound only where something meaningful "
-        "happens on screen; about one every 4-5 s at most; never on captions."),
+        "ding, glitch, cash, heartbeat) with their use and measured hit level. "
+        "Place with add_sfx(storage_key='sound:<id>', at=<the frame it hits>), "
+        "gain_db unset. Sound only where something meaningful happens on "
+        "screen: zero by default in a podcast short, at most 1-2 (one per 4-5 s "
+        "at most elsewhere); never on captions or as a pun on the spoken word."),
     "add_sfx": (
         "One-shot sound at an OUTPUT second. storage_key 'sound:<id>' places "
         "an approved library recording (list_sound_library); otherwise an "
         "exact key from list_assets, or from fetch_sfx when the user asked "
-        "for a specific sound the library lacks; never invented. Pass the "
-        "library's suggested gain_db (the -6 dB default is too loud). "
-        "For a library recording `at` is the frame it HITS: the tool starts "
-        "it early by its measured peak (a riser ends on `at`, typing starts "
-        "there) and caps long tails, so never pre-roll by hand; the result "
-        "says where the peak lands. dur_s stops typing when the typing "
-        "stops. purpose names the "
-        "on-screen event. Optional, never a rule: zero is fine, and a sound "
-        "with no clear on-screen reason looks childish. Never on captions or "
-        "ordinary cuts; about one "
-        "sound every 4-5 s at most, none repeated within ~3 s."),
+        "for a specific sound the library lacks; never invented. Leave "
+        "gain_db unset: a library recording is levelled against the voice at "
+        "its hit (MIX/CHECK lines). Its `at` is the frame it HITS: the tool "
+        "starts it early by its measured peak (a riser ends on `at`, typing "
+        "starts there) and caps long tails, so never pre-roll by hand. dur_s "
+        "stops typing when the typing stops. purpose names the on-screen "
+        "event. Optional, never a rule: zero is fine; a sound with no "
+        "on-screen reason looks childish. Never on captions or ordinary cuts. "
+        "Podcast short: zero by default, at most 1-2, each on a visual partner "
+        "(~50 ms), never on a payoff word's onset, no puns, no reflexive "
+        "opening whoosh; elsewhere about one sound every 4-5 s at most, none "
+        "repeated within ~3 s."),
     "add_captions": (
         "Burned captions: mode='from_transcript', 'off', or dictated items. "
         "Short-form speech: style.motion_look editorial|clean (premium default), "
@@ -28952,10 +29635,12 @@ _COMPACT_CONTRACTS = {
         "One-call emphasis pass on vocally stressed words that survive the cut: "
         "each punch snaps in ON its word (~0.12s expo), holds to the next cut "
         "or sentence end, then cuts back out; face-aimed, never clustered on "
-        "adjacent loud words. Omitted count/strength are directed from program "
-        "length; explicit values win. Optional, never a required pass: keep "
+        "adjacent loud words. Optional, never a required pass: keep "
         "only punches on words the story turns on (a punch on every stressed "
         "word looks childish). Skip for calm/minimal briefs."),
+    "conceal_jump_cuts": (
+        "Optional, never a default: hard 6-10% framing steps on only the "
+        "jump cuts that visibly pop. at=[s] picks cuts; mode='off' undoes."),
     "set_transitions": (
         "One junction style at real scene changes; scope='scene' skips jump "
         "cuts — report the junction count it returns. Styles dip_black, "
@@ -28971,8 +29656,8 @@ _COMPACT_CONTRACTS = {
         "speaker who moves inside a shot — still while they sway, a smooth "
         "glide when a still card would cut the head, never across a cut; a "
         "sub-720p source is shown whole unless fit='crop'), enlarged at most "
-        "2x; panels=[{box, source}, "
-        "...] stacks the speaker and the screen/inset they show. The default "
+        "2x; panels=[{box, source}, ...] stacks the speaker ('auto') and the "
+        "screen they show ('inset': a burned-in screen box, whole). The default "
         "canvas is dark and sampled from the footage; never a flat void, and "
         "no blurred self-copy on low-resolution footage."),
 }

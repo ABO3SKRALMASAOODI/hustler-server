@@ -18,6 +18,16 @@ moment needs it — a key word, a reveal, a genuinely jarring jump cut, a
 real-world action shown — and zero is a fine answer. Never a zoom per cut,
 a camera move per hero moment or a sound per landing or transition: used
 where nothing calls for them they make an edit look childish.
+SOUND EFFECTS IN A PODCAST OR TALKING SHORT DEFAULT TO ZERO (owner, Oct
+2026): at most 1-2 per short, each on a structural moment (the payoff, a
+real section change) with a visual partner within ~50 ms of its hit (a
+graphic landing, a B-roll entry, a real-world action shown). Never a
+reflexive opening whoosh, never a bright sound (ding, pop, click, shutter)
+on the onset of a payoff or emphasis word, and never a literal sound pun: a
+shutter on the word 'pictures', a cash register on the word 'money' when
+nothing on screen is a payment. Leave gain_db unset: add_sfx levels each
+library sound against the measured voice at its hit and reports where it
+sits.
 
 - **Bind every graphic to a word or a beat.** The landing frame of a graphic
   sits on the spoken onset (0–3 frames early), never "somewhere in the
@@ -76,19 +86,51 @@ CHOOSING A TEMPLATE — confirm names and params with `list_motion_templates()`:
 - Opening and thesis: `hook_title` for the 1–3 line hook readable by 1.5 s;
   `word_slam` for one hero word on its spoken onset (the most common hero
   moment); `phrase_build` for a short lockup assembled word by word on
-  onsets; `glow_title` for a luminous keyword on dark or night footage.
+  onsets (rows quote the transcript; the engine lands each spoken word on
+  its onset and sets the phrase's words the rows leave out as small lines
+  between them); `glow_title` for a luminous keyword on dark or night footage.
 - Reveal grammar: `typewriter` for a typed prompt, definition or terminal
-  line (25–40 chars/s with a cursor; `typing` sound under it when it is
+  line (25–40 chars/s with a cursor; the first key and its plate land on the
+  item's first frame, so start it on the word; `typing` sound under it when it is
   sounded); `text_scramble` for
   a decode reveal (secrets, tech, "the answer is…"); `marker_text` for a
   highlighter sweep behind the key phrase.
+- Layout: `headline` is the PERSISTENT claim headline of a card or
+  letterbox layout — a short third-person claim with one *accent* span under
+  an optional kicker (who + when). Write one per program (start 0, end
+  omitted = the program end; or one per chapter, never overlapping) with y
+  omitted: the write centres it in the free band above the card or the
+  letterboxed picture and sizes it to that band. It holds the band and
+  YIELDS on its own at render time — fading out just before any graphic that
+  occupies its band lands and back after it leaves (gaps under 1.2 s stay
+  clear, a phrase build yields from its first revealed row) — so hero
+  lockups replace it and hand the band back without any timing on your side.
+  It is silent, never mutes or replaces captions, is not counted as a
+  designed moment, and the write refuses a second overlapping headline, more
+  than one accent span, a window under 4 s and a full-bleed frame without an
+  explicit y. The write reports the windows it yields and how long it shows.
+  It yields to MOTION graphics only: type placed in its band with add_text,
+  set_typography_scene or set_editorial_graphic does not move it, so build
+  every lockup that shares the band as a motion template. A graphic set in
+  that band (with or without a headline) is NOTEd (band) when it spills out
+  of it — onto the top of the card (a phrase_build grows by its small bridge
+  lines) or up into the feed header — narrow it or move its y. Without a
+  browser at write time the box is the template's estimate, which runs a
+  little tall: only a clear spill is named there, and a preview measures it.
 - Structure: `chapter_title` at a real section turn ("The problem", "Step
   two"); `timeline_steps` for a spoken sequence of dates or steps;
   `checklist` for a spoken list ticking on item by item; `versus_split` for
-  a genuine A-versus-B contrast; `quote_card` for a faithful quotation held
+  a genuine A-versus-B contrast (`vs='serif'` sets an italic-serif "vs" as
+  type instead of the disc badge — the editorial choice; keep the two values
+  short, they share one size and one line count); `quote_card` for a faithful quotation held
   long enough to read.
-- Numbers: `counter` when a figure is spoken (expo-out count-up landing on
-  the word); a rapid run of spoken stats as one `word_slam` each with
+- Numbers: `counter` when a figure is spoken. The number completes ON the
+  word: the write sets its `land` 20 ms before the spoken number's onset
+  (never earlier) and says so. A count starts on the lead-in (~0.45 s before
+  the word) so the roll is short, never across the setup; a punchline number,
+  or one that is not a growing quantity ('140 characters'), uses
+  `style='reveal'` — no count, the whole number hard-cuts on at the word; a
+  word_slam whose hero is a figure ('32%', not a name like 'GPT-4') is moved so it lands on the word too. A rapid run of spoken stats as one `word_slam` each with
   `fit='justify'` and the figure over its label (`'*32%* / fewer errors'`,
   pop entrance on the figure's onset); `stat_card` for a metric plus its meaning; `bar_compare` for
   2–4 spoken quantities; `line_chart` for a spoken trend; `progress_ring`
@@ -143,19 +185,31 @@ LAYERING AND CAPTIONS:
   thirds, textures, background shapes); `behind_subject` composites the
   graphic behind the person's matte — the giant-word-behind-the-head look —
   and needs a person in frame and no cut inside the window.
-- Captions and a graphic never say the same words twice — word by word.
-  Leave `mute_captions` unset (the default): the captions drop exactly the
-  spoken words the graphic shows and keep every other word, moved to a band
-  clear of the graphic's drawn box (and the face) while it is up. Design for
-  it: keep hero graphics OFF the caption band (top band, beside or above the
-  head, behind the subject), so the words a graphic does not show stay
-  captioned where they always are. A word slam or phrase build parked on the
-  caption band with the face above leaves no clear band: its unshown words
-  are muted and the reply NOTEs them — move it. Set `mute_captions`
-  explicitly only to override: true hides every caption for the whole window
-  (a graphic that replaces the entire spoken line); false keeps all captions
-  running beside it (a number or *starred* word it shows is still not
-  repeated).
+- ONE READING PATH: captions and a graphic never say the same words twice,
+  and never show two different texts of one sentence at once.
+  Leave `mute_captions` unset (the default): the captions drop the spoken words
+  the graphic shows, and the graphic owns the phrase it shows from its first
+  shown word until it leaves — the captions yield there. A `phrase_build`
+  sets that phrase's other words in small type between its rows on their
+  onsets; any other graphic leaves them to the sound, so end a word slam or
+  counter where its words end (the reply NOTEs the words and the time — before
+  the next word's midpoint; when that would leave it up under 0.8 s it offers
+  carrying the words instead, and a slam that lands straight into its sentence
+  may keep its hold: the words are still heard).
+  Words said before its first shown word, and other sentences, stay
+  captioned — moved to a band clear of the graphic's drawn box (and the
+  face) while it is up. Design for it: keep hero graphics OFF the caption
+  band (top band, beside or above the head, behind the subject). A word slam
+  or phrase build parked on the caption band with the face above leaves no
+  clear band: other sentences' words are muted and the reply NOTEs them —
+  move it. Set `mute_captions` explicitly only to override: true hides every
+  caption for the whole window (a graphic that replaces the entire spoken
+  line); false keeps all captions running beside it (a number or *starred*
+  word it shows is still not repeated).
+- Lockup rows reveal in reading order: a spoken row's words land on their
+  spoken onsets (readable on the word, never before it; a `rise` word
+  starts its short fade 2 frames ahead), a row nobody says on its `at` with its
+  stagger squeezed so it is complete before the next row starts.
 - One text system at a time in one region: never stack a hook title, a
   caption page and a lower third in the same band.
 
@@ -210,21 +264,26 @@ SOUND PAIRING — graphics are SILENT by default:
 - Most graphics need no sound. Opt a moment in with `sfx=true` only when its
   landing is meaningful on screen — the hook title, a hero landing, the
   payoff, or a graphic that shows a real-world action (a photo card's
-  shutter, a typewriter's typing, a UI press's click, a money figure's cash
-  register). `sfx=true` maps the template's declared sound roles onto the
+  shutter, a typewriter's typing, a UI press's click, a payment card's cash
+  register) — never a sound that puns on the spoken word (a shutter on a
+  slam of the word 'pictures'). `sfx=true` maps the template's declared sound roles onto the
   owner-approved library (`list_sound_library`); roles with no approved
-  recording are skipped. Owned cues move and delete with the graphic.
+  recording are skipped. Owned cues move and delete with the graphic, and
+  each is levelled against the measured voice at its landing (the template's
+  own relative level kept as a small offset); the result's NOTE lists the
+  levels and any CHECK (a bright cue on a payoff word's onset, the
+  talking-short budget).
 - The add_motion_graphic result lists each owned cue as sound@time — the
   landing its peak hits (each cue sits on its template's landing frame and
   the recording starts early by itself); in `get_edl` they are sfx items
   whose ids start `mg_<graphic id>_sfx`, and their `at` is where the file
   starts, earlier by its peak. Read
-  them against the short's budget — about one sound every 4–5 s at most,
-  never the same sound twice within ~3 s — and adjust rather than stack: set
-  a level with `set_audio_gain(kind='sfx', id=..., gain_db=...)` after the
-  graphic's params are final (changing params or the template re-derives
-  the cues at their suggested gain), or `set_motion_graphic(id,
-  sfx=false)` to drop them.
+  them against the short's budget — 1-2 in a podcast short, about one
+  sound every 4–5 s at most elsewhere, never the same sound twice within
+  ~3 s — and adjust rather than stack: set a level with
+  `set_audio_gain(kind='sfx', id=..., gain_db=...)` after the graphic's
+  params are final (changing params or the template re-derives and
+  re-levels the cues), or `set_motion_graphic(id, sfx=false)` to drop them.
 - Accents: `*one word*` or a `*multi word run*` takes the accent; star 1–2
   words per line. Over a bright shirt or wall the renderer firms up the
   backing on its own (see LEGIBILITY); `scrim` on `hook_title`, `glow_title`
@@ -235,11 +294,13 @@ SOUND PAIRING — graphics are SILENT by default:
   library tails (`impact_1`, `ding_1`, `cash_register_1`) already stop at
   their measured fade point; pass dur_s only to change that.
 - A template whose cue repeats (a tick per counter step or per letter)
-  stays silent; give the settled figure one sound instead (`cash_register_1`
-  on money, `ding_1` on a result).
+  stays silent; give the settled figure one sound instead, on a visual
+  landing in the pause after its spoken number rather than on the number's
+  onset (a ding on the payoff number masks it), or let the figure land
+  silent.
 - For a moment with no owned cue, place one library sound yourself:
-  `add_sfx(storage_key='sound:<id>', at=<the landing frame>,
-  gain_db=<suggested>)`. `at` is where the sound HITS: the tool starts the
+  `add_sfx(storage_key='sound:<id>', at=<the landing frame>)`, gain_db
+  unset so the tool levels it against the voice. `at` is where the sound HITS: the tool starts the
   recording early by its measured peak (a riser ends on `at`, typing starts
   there) and reports where the peak lands, so never pre-roll by hand —
   `whoosh_soft_1` or `whoosh_soft_2` into a landing, `swish_1` for a quick

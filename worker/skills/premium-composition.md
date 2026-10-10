@@ -72,7 +72,11 @@ LAYOUTS FOR 9:16:
   near-black, vignette, and film grain on low-resolution footage — or pick
   a gradient; a blurred copy of the picture (`blur`) only behind sharp HD
   footage, never behind archival or sub-720p video, where it reads as a
-  muddy smear. Use the free bands for a headline and hero type.
+  muddy smear. Use the free bands for a headline and hero type: the band
+  above the card carries ONE persistent `headline` motion graphic (a short
+  third-person claim with one accent span, a who + when kicker; read
+  motion-design) that hero lockups in the band replace and hand back
+  automatically, so the band is never left empty for seconds.
 - **Speaker + evidence** (the speaker reads a study, shows a tweet, points
   at a browser or document inset in the source): a stacked card,
   `set_picture_card(panels=[...])` — the speaker in one box, the evidence
@@ -93,7 +97,11 @@ TYPE SYSTEM — one per video:
   condensed heavy — on a few words.
 - Pre-lay the block: a lockup's full layout is computed before any word
   reveals, so words appear IN PLACE and the block never reflows. Stacked
-  lockups with tight leading (0.85–0.95) may overlap deliberately.
+  lockups use tight leading (0.85–0.95), but glyphs never collide:
+  `phrase_build`, `word_slam` and its kicker measure every glyph's ink and
+  push a row down just enough that a descender or swash clears the caps
+  below. A crossing is a deliberate choice (`phrase_build leading='overlap'`),
+  never the default.
 - Tracking tight on bold sans (−2 to −5%), generous size, mixed case unless
   the look calls for caps.
 
@@ -116,7 +124,9 @@ NATIVE TOOLS THAT REMAIN USEFUL:
   speaker="…", text="…")` for a verified speaker and a faithful claim. It
   holds still and keeps dialogue captions. On a reel it should pose the
   question, never the payoff, and sit inside the designed layout rather than
-  above a small card on black.
+  above a small card on black. It does not yield to other graphics: where
+  hero lockups share the band above a card or letterbox, use the persistent
+  `headline` motion template instead, which steps aside for them.
 - **A phrase built in place**: `set_typography_scene` measures the complete
   phrase first, then reveals runs at real PROGRAM `at` cues without moving
   previous words. Give deliberate `lines` with `runs`; pair one sans family
@@ -130,9 +140,11 @@ NATIVE TOOLS THAT REMAIN USEFUL:
 - **Words behind the subject**: `add_text_behind` (person matte) or a motion
   graphic with `layer='behind_subject'`; the type must be LARGE so the
   person crosses the middle of tall glyphs.
-- Graphics preserve captions by default, word by word: a motion graphic
-  hides only the spoken words it shows, the rest stay captioned clear of it.
-  Keep hero graphics off the caption band so nothing has to be muted.
+- One reading path by default: a motion graphic hides the spoken words it
+  shows and owns the phrase it shows while it is up (a phrase_build sets the
+  rest of that phrase in small type; end other graphics where their words
+  end); the setup and other sentences stay captioned clear of it. Keep hero
+  graphics off the caption band so nothing has to be muted.
 
 MOVEMENT WITH A LANDING: text, cards and vectors enter with short graphic
 motion (pop, rise-blur, mask, spring for objects), settle and hold. Use one

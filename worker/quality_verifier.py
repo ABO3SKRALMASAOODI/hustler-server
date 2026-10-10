@@ -215,7 +215,10 @@ def _text_corruption_findings(edl):
 
 def _zoom_findings(edl, index):
     findings = []
-    zooms = list(_effects(edl).get("zooms") or [])
+    # cut steps (conceal_jump_cuts) are hygiene, not moves: their purpose,
+    # measured aim and equal strength are by construction
+    zooms = [z for z in _effects(edl).get("zooms") or []
+             if not (isinstance(z, dict) and z.get("cut_step"))]
     try:
         timeline = Timeline(edl.get("keep") or [], edl.get("inserts") or [],
                             edl.get("speed") or [])
@@ -777,7 +780,7 @@ def build_verification_record(project_id, version, manifest, edl, index,
         "proof_ranges": list(proof_ranges or []),
         "render_evidence": {key: preview.get(key) for key in (
             "asset_id", "storage_key", "edl_version", "duration_s", "audio_qc",
-            "audio_model_review", "verify_frames", "sheet_key",
+            "picture_qc", "audio_model_review", "verify_frames", "sheet_key",
             "caption_sheet_key", "caption_pages")
             if preview.get(key) is not None},
         "findings": findings,

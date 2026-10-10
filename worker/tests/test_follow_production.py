@@ -22,6 +22,7 @@ lane — and pin:
 * measure reports every failure mode (no proxy, no OpenCV, no cascades, a
   decode that yields nothing, a stalled decode killed at the budget).
 """
+import math
 import os
 import shutil
 import stat
@@ -730,3 +731,56 @@ def test_the_media_lane_range_reads_the_proxy_instead_of_staging_it(
     out = follow.run_faces_job(None, {"payload": payload})
     assert out["ok"] and out["report"]["source"] == "staged" and staged == [KEY]
     follow.FACE_STORE.clear()
+
+
+def test_the_streamed_measure_carries_a_turned_face_but_not_across_a_gap(
+        monkeypatch, tmp_path):
+    """The production measurement (two streamed passes) carries a face the
+    detector loses through the rest of its window's run of samples, as the
+    per-window decode did — and never into the next kept window across the
+    removed footage between them, though it is within CARRY_MAX_S."""
+    import follow
+    import subject
+    cv2 = subject._cv2()
+    if cv2 is None:
+        pytest.skip("no OpenCV")
+    rng = np.random.default_rng(5)
+    tex = cv2.GaussianBlur(rng.integers(0, 255, size=(60, 50)).astype(np.uint8),
+                           (3, 3), 0)
+    W = follow.DETECT_WIDTH
+    H = max(2, int(round(W * .5625 / 2.0)) * 2)
+
+    def x_at(t):
+        return 200 - int(round(24 * t))              # drifts left 6 px a sample
+
+    def fake_stream(path, a, b, fps, width, height, deadline, cancel=None,
+                    threads=2, state=None):
+        st = state if state is not None else {}
+        st.update(frames=0, rc=0, stderr="", killed=False)
+        for i in range(int(math.floor((b - a) * fps + 1e-6)) + 1):
+            g = np.full((height, width), 90, np.uint8)
+            x = x_at(a + i / fps)
+            g[80:140, x:x + 50] = tex
+            st["frames"] += 1
+            yield g
+
+    def fake_detect(gray, cv2=None, cascades=None, face_px=None, roi=None):
+        x = int(np.argmax(gray[100] != 90))
+        if (200 - x) / 24.0 < .6:                    # frontal until 0.6 s
+            return [([x / W, 80 / H, (x + 50) / W, 140 / H], -1)]
+        return []                                    # then turned: lost
+    monkeypatch.setattr(follow, "_stream_gray", fake_stream)
+    monkeypatch.setattr(follow, "detect", fake_detect)
+    monkeypatch.setattr(subject, "_cascades", lambda cv2: ["stub"])
+    proxy = tmp_path / "proxy.mp4"
+    proxy.write_bytes(b"x")
+    rep = {}
+    frames = dict(follow.measure(str(proxy), [(0.0, 1.0), (1.5, 2.5)], .5625,
+                                 report=rep))
+    assert rep["status"] == "complete" and rep["carried"] >= 2, rep
+    for t in (.75, 1.0):                             # lost, then carried
+        boxes = [b for b, _lk in frames[t]]
+        assert boxes and boxes[0][0] == pytest.approx(x_at(t) / W, abs=.01), t
+        assert all(lk == -1 for _b, lk in frames[t])
+    for t in (1.5, 1.75, 2.0, 2.25, 2.5):            # the next kept window
+        assert frames[t] == [], t

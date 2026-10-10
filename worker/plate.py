@@ -14,7 +14,14 @@ What is measured: the main footage at the mapped source second (or a spliced
 insert at its clip second), fitted onto the canvas the way the render fits it
 (renderer.fit_fractions — crop/pad/pad_blur, frame focus and focus_track, a
 picture frame, an insert's own crop/fit/rotation) and seen through the shared
-camera's viewport at that program second (renderer.zoom_state_at). Grades,
+camera's viewport at that program second (renderer.zoom_state_at). Under a
+source-fed picture card (a card or a speaker + screen stack) the plate is the
+COMPOSED picture: the card's backdrop with each panel's source rect in its
+box (picture_cards.card_panels at that source second — a followed or
+cut-stepped card where it is then), since a graphic in the band above a card
+sits on its dark backdrop, not on the footage a full-frame crop would show
+there (the Elon stack's stat lines turned dark over a dark band because the
+bright neon sign of the uncropped frame was measured under them). Grades,
 overlays, takeovers and other graphics are not drawn: the grid is the plate as
 shot, which is what the type has to survive.
 
@@ -261,10 +268,13 @@ def decode_gray(path, times, width=DECODE_W, deadline=None):
 
 
 def canvas_grid(img, src_size, W, H, *, mode=None, focus=None, crop=None,
-                picture=None, rotation=0, zoom=(1.0, 0.5, 0.5), cols=COLS):
+                picture=None, rotation=0, zoom=(1.0, 0.5, 0.5), cols=COLS,
+                card=None):
     """The program picture's luma grid (row-major ints 0-255, cols x rows)
     for one decoded source frame placed on the W x H canvas the way the
-    render places it."""
+    render places it. ``card`` (a source-fed picture card's spec with its
+    ``panels_at``: [(box, source rect)] at this moment) composes the card
+    instead: its backdrop, each panel's rect of the frame in its box."""
     from PIL import Image, ImageFilter
     import renderer   # lazy: renderer imports the motion layer
     rows = grid_rows(W, H, cols)
@@ -287,6 +297,9 @@ def canvas_grid(img, src_size, W, H, *, mode=None, focus=None, crop=None,
         sh = max(1.0, sh * (float(crop[3]) - float(crop[1])))
         mode = "pad"
     CW, CH = cols * 6, rows * 6
+    if card:
+        canvas = _card_canvas(img, card, CW, CH)
+        return list(canvas.resize((cols, rows), Image.BOX).tobytes())
     px, py, pw, ph = renderer.picture_pixels(CW, CH, picture)
     kind, x0, y0, x1, y1 = renderer.fit_fractions(sw, sh, pw, ph, mode, focus)
     w, h = img.size
@@ -320,6 +333,74 @@ def canvas_grid(img, src_size, W, H, *, mode=None, focus=None, crop=None,
                               max(int(vy0 * CH) + 1, int(round((vy0 + 1.0 / z) * CH))))) \
             .resize((CW, CH), Image.BOX)
     return list(canvas.resize((cols, rows), Image.BOX).tobytes())
+
+
+def _card_canvas(img, card, CW, CH):
+    """A source-fed picture card composed on a CW x CH luma canvas: its
+    backdrop (picture_cards._fill — the gradient or flat colour and the
+    vignette — or, for a 'blur' backdrop, what picture_cards._blur_chain
+    draws: the first panel's footage cover-scaled to the canvas, blurred and
+    its luma dimmed toward 16 by background_dim) with each panel's source
+    rect fitted into its box."""
+    from PIL import Image, ImageFilter
+    import picture_cards
+    w, h = img.size
+
+    def rect_px(rect):
+        x0, y0 = int(float(rect[0]) * w), int(float(rect[1]) * h)
+        return (x0, y0, max(x0 + 1, int(round(float(rect[2]) * w))),
+                max(y0 + 1, int(round(float(rect[3]) * h))))
+    style = card.get("background_style")
+    if style == "blur":
+        dim = card.get("background_dim")
+        k = 1.0 - float(picture_cards.BLUR_DIM_DEFAULT if dim is None else dim)
+        first = next((r for _b, r in card.get("panels_at") or [] if r), None)
+        part = img.crop(rect_px(first)) if first else img
+        pw, ph = part.size
+        s = max(CW / float(pw), CH / float(ph))
+        rw, rh = max(CW, int(round(pw * s))), max(CH, int(round(ph * s)))
+        x0, y0 = (rw - CW) // 2, (rh - CH) // 2
+        canvas = part.resize((rw, rh), Image.BOX).crop((x0, y0, x0 + CW, y0 + CH)) \
+            .filter(ImageFilter.GaussianBlur(max(1.0, min(CW, CH) / 32.0))) \
+            .point(lambda v: max(0, min(255, int(round(16 + (v - 16) * k)))))
+    else:
+        try:
+            rgb = picture_cards._fill(CW, CH, card)
+            lum = rgb[..., 0] * 0.299 + rgb[..., 1] * 0.587 + rgb[..., 2] * 0.114
+            canvas = Image.fromarray(lum.clip(0, 255).astype("uint8"), "L")
+        except Exception:  # noqa: BLE001 — a dark backdrop, as cards default
+            canvas = Image.new("L", (CW, CH), 16)
+    for box, rect in card.get("panels_at") or []:
+        if not box or not rect:
+            continue
+        bx0, by0 = int(round(float(box[0]) * CW)), int(round(float(box[1]) * CH))
+        bw = max(1, int(round((float(box[2]) - float(box[0])) * CW)))
+        bh = max(1, int(round((float(box[3]) - float(box[1])) * CH)))
+        canvas.paste(img.crop(rect_px(rect)).resize((bw, bh), Image.BOX), (bx0, by0))
+    return canvas
+
+
+def _card_at(edl, t, src_t):
+    """The source-fed picture card live at program second ``t`` as the plate
+    sees it ({spec..., panels_at}), or None. Its fade in/out counts as live:
+    a plate that reads the backdrop a few frames early is harmless."""
+    import picture_cards
+    for cd in ((edl.get("effects") or {}).get("picture_cards")) or []:
+        try:
+            if not (isinstance(cd, dict) and picture_cards.source_fed(cd)
+                    and float(cd["start"]) - 1e-6 <= t < float(cd["end"]) - 1e-6):
+                continue
+            panels = picture_cards.card_panels(cd, src_t)
+        except (KeyError, TypeError, ValueError):
+            continue
+        if panels and all(r for _b, r in panels):
+            keep = {k: cd.get(k) for k in ("box", "background", "background_color2",
+                                           "background_style", "background_dim",
+                                           "vignette")}
+            return dict(keep, panels_at=[[[round(float(v), 4) for v in b],
+                                          [round(float(v), 4) for v in r]]
+                                         for b, r in panels])
+    return None
 
 
 class Probe:
@@ -402,6 +483,9 @@ class Probe:
             focus, mode = self._focus_at(src_t)
             geom = {"mode": mode, "focus": list(focus) if focus else None,
                     "picture": self.picture, "zoom": zoom}
+            card = _card_at(self.edl, t, src_t)
+            if card:
+                geom = {"card": card}
             sid = SOURCE_ID.get()
             return (self.src, float(src_t), False, geom, self.src_size,
                     f"src:{sid}" if sid else None)
@@ -479,7 +563,8 @@ class Probe:
                                     focus=geom.get("focus"), crop=geom.get("crop"),
                                     picture=geom.get("picture"),
                                     rotation=geom.get("rotation") or 0,
-                                    zoom=geom["zoom"], cols=self.cols)
+                                    zoom=geom.get("zoom") or (1.0, 0.5, 0.5),
+                                    cols=self.cols, card=geom.get("card"))
                 except Exception:  # noqa: BLE001
                     continue
                 out[i] = g

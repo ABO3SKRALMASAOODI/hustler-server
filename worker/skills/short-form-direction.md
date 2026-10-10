@@ -17,6 +17,16 @@ moment needs it — a key word, a reveal, a genuinely jarring jump cut, a
 real-world action shown — and zero is a fine answer. Never a zoom per cut,
 a camera move per hero moment or a sound per landing or transition: used
 where nothing calls for them they make an edit look childish.
+SOUND EFFECTS IN A PODCAST OR TALKING SHORT DEFAULT TO ZERO (owner, Oct
+2026): at most 1-2 per short, each on a structural moment (the payoff, a
+real section change) with a visual partner within ~50 ms of its hit (a
+graphic landing, a B-roll entry, a real-world action shown). Never a
+reflexive opening whoosh, never a bright sound (ding, pop, click, shutter)
+on the onset of a payoff or emphasis word, and never a literal sound pun: a
+shutter on the word 'pictures', a cash register on the word 'money' when
+nothing on screen is a payment. Leave gain_db unset: add_sfx levels each
+library sound against the measured voice at its hit and reports where it
+sits.
 The type, the graphics and the cuts carry the rhythm; a steady, well-framed
 picture is the camera's default and a clean voice is the mix's.
 
@@ -67,9 +77,12 @@ THE PREMIUM SHORT-FORM GRAMMAR — targets you can measure in the render:
    fade-in from black; remove one with `set_fades` if a look adds it.
 2. HOOK. A visual pattern interrupt lands within 0.1–0.6 s: a `hook_title`
    or `word_slam` on the first strong word, a card reveal, a flash or light
-   leak. A punch-in at 0 s is an option, never a requirement, and at most
-   one sound sits under the opening, only when it earns one (a soft whoosh
-   into the title, via the graphic's `sfx=true`). The hook line is on screen
+   leak. A punch-in at 0 s is an option, never a requirement. The opening
+   carries no reflexive whoosh: a hook already on screen at frame 0 has no
+   entrance for a sound to belong to, and the same opening formula on every
+   short reads as a template. A sound sits under the opening only when the
+   title has a real entrance that earns one (the graphic's `sfx=true`
+   lands it on that entrance). The hook line is on screen
    as text by 1.5 s; the speaker is visible and talking by ~0.3 s. Never open on
    black, a logo, dead air or more than ~3 s of a non-speaker setup. The
    hook text poses the question; it never spoils or quotes the payoff, never
@@ -139,22 +152,28 @@ THE PREMIUM SHORT-FORM GRAMMAR — targets you can measure in the render:
    a rule: most of a talking reel carries none, and a sound with no clear
    on-screen reason makes the edit look childish. Use the owner-approved library
    (`list_sound_library`; place with `add_sfx(storage_key='sound:<id>',
-   at=..., gain_db=<suggested>)`), and only where something meaningful
-   happens on screen: a designed graphic landing, a real section change or B-roll
-   entry, the payoff, or a real-world action shown (shutter on a photo,
-   typing under typed text, a click on a button press, a cash register on a
-   money figure). Never on captions or ordinary cuts inside a conversation.
-   At most about one sound every 4–5 s (a ceiling — no more than about 8 in
-   a 30–45 s short, and usually far fewer), never the same sound twice within
-   ~3 s, and zero when nothing earns one; one
-   family per short, matched to the material; each cue's `at` on the
-   visual frame it hits (the tool lands the peak there); mixed under the
-   voice. At most ONE impact per short, on the payoff. Parallel beats get
-   the same treatment (three stats in a row: all sounded or — usually, and
-   always when they sit inside ~3 s of each other — none).
-   The sound means what it shows: a shutter on a photo or "pictures", a ding
-   on a notification or a result, a cash register on money. Never a whoosh
-   on every caption.
+   at=...)` and gain_db unset — the tool levels each recording against the
+   measured voice at its hit and reports where it sits), and only where
+   something meaningful happens on screen: a designed graphic landing, a
+   real section change or B-roll entry, the payoff, or a real-world action
+   shown (shutter on a photo being taken, typing under typed text, a click
+   on a button press, a cash register on a payment shown). Never on captions
+   or ordinary cuts inside a conversation. A podcast short carries zero by
+   default and at most 1-2; elsewhere at most about one sound every 4–5 s
+   (a ceiling, usually far fewer), never the same sound twice within ~3 s,
+   and zero when nothing earns one; one family per short, matched to the
+   material; each cue's `at` on the visual frame it hits (the tool lands
+   the peak there) with something on screen changing within ~50 ms. At most
+   ONE impact per short, on the payoff — its weight is below 150 Hz, so it
+   may sit under the payoff word; a bright sound (ding, pop, click,
+   shutter) never sits on the payoff word's onset, where it masks the word.
+   Parallel beats get the same treatment (three stats in a row: all
+   sounded or — usually, and always when they sit inside ~3 s of each other
+   — none). The sound means what is SHOWN, never what is said: a shutter on
+   a photo being taken, a ding on a notification card, a cash register on a
+   payment on screen — a shutter on the word "pictures" or a cash register
+   on the word "money" is a literal pun and reads as childish. Never a
+   whoosh on every caption.
    MUSIC only when the user asks for it or supplies a track — never on your
    own initiative (you may suggest a song in the reply); when placed it sits
    13–20 dB under the voice, ducked. Optionally a short stop-down before a
@@ -193,8 +212,11 @@ GRAPHIC CHOICE PLAYBOOK — pick by what the line does, not by habit:
 - A contrast punchline ("promised flying cars … got 140 characters") is a
   two-beat swap: the setup words land as type on their onset, then a hard
   swap to the payoff words on theirs. A `counter` only for a quantity that
-  grows or is counted; it lands ON the spoken number, and that number is not
-  also in the caption at the same moment.
+  grows or is counted; it lands ON the spoken number (the write sets `land`
+  on its onset), starts on the lead-in so it never counts through the setup,
+  and that number is not also in the caption at the same moment. A number
+  that IS the punchline takes `counter` with `style='reveal'` (a hard cut on
+  the word), never a count-up that shows 111, 139 while the setup plays.
 - Items of one list share one type role; only the last may escalate.
 - The hook is the speaker's own strongest line (verbatim, or its sharpest
   words) or a preview of the payoff set as an editorial lockup — not an
@@ -205,8 +227,9 @@ GRAPHIC CHOICE PLAYBOOK — pick by what the line does, not by habit:
   (`layer='behind_subject'`) for at least one hero word when the background
   leaves room; it is the references' most frequent premium device.
 - In a card or letterbox layout, the header band carries a small persistent
-  headline (who + the claim) that beat graphics replace and hand back to; it
-  is never left empty for seconds.
+  headline (who + the claim): one `headline` motion graphic for the program,
+  which yields automatically to the beat graphics in its band and comes
+  back when they leave; the band is never left empty for seconds.
 - No stretch of more than ~3 s with only body captions in the last third:
   build into the payoff (a setup beat, a kicker; a push-in only when the
   moment calls for one), never sag before it.
@@ -225,8 +248,9 @@ BUILD ORDER — write in a few atomic passes, not forty serial calls:
 4. Connective tissue: motivated transitions on real turns and B-roll as
    evidence; a zoom only where a specific moment calls for it (read zooms) —
    never a pass of zooms over every cut or hold.
-5. Sound: the few library cues the on-screen moments earn, spaced, each
-   `at` on the frame it hits (read audio).
+5. Sound: in a podcast short usually none, at most 1-2 library cues on
+   structural moments, each `at` on the frame it hits, its level left to the
+   tool (read audio).
 6. Ending, plus the CTA when one was asked for.
 7. Review the rendered motion and sound (read review) and repair.
 
@@ -277,8 +301,9 @@ grammar: first visual event ≤ 0.6 s; hook text by 1.5 s; 2–4 hero moments
 each landing on its word (a camera move or a sound only where it clearly
 earns one — remove any zoom or sound you cannot name a reason for);
 captions readable at phone size; every sound
-cue on a named on-screen event, about one every 4–5 s at most, no repeat
-within ~3 s; any music the user asked for ducked 13–20 dB under the voice; no
+cue on a named on-screen event with a visual partner, 1-2 at most in a
+podcast short (about one every 4–5 s at most elsewhere), no repeat within
+~3 s, none on a payoff word's onset, none punning on the spoken word; any music the user asked for ducked 13–20 dB under the voice; no
 digital silence; one grade; no flat black void; payoff held; any requested
 CTA after the payoff. Rendered looks need a complete preview of the current
 version: `render_preview(complete=true)`, then dense

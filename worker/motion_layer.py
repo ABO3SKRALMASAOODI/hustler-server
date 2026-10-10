@@ -27,6 +27,7 @@ backing. A probe that fails leaves the item without a plate (rendered exactly
 as before).
 """
 
+import math
 import os
 from contextvars import ContextVar
 
@@ -146,6 +147,171 @@ def measure_plates(items, probe):
     return out
 
 
+# ── the persistent headline band: yielding to other graphics ────────────
+# A persistent template (motion_templates.persistent: the headline of a card
+# or letterbox layout) holds its band for the program. While another graphic
+# occupies that band it fades out (YIELD_OUT_S, ending as the other lands) and
+# comes back YIELD_IN_S after it leaves; two band graphics less than
+# YIELD_MERGE_S apart keep it away (a flash back for half a second is a
+# flicker, not a restore). Decided at render time from the stored footprints,
+# so adding, moving or removing a lockup never leaves a stale headline.
+YIELD_OUT_S = 0.12
+YIELD_IN_S = 0.3
+YIELD_MERGE_S = 1.2
+# Boxes this close (frame fractions) already read as one crowded band.
+YIELD_PAD = 0.006
+
+
+def _band_box(item, W, H):
+    """Where an item draws (frame fractions): its fresh footprint, else the
+    template's nominal ink estimate, else None (it occupies no band)."""
+    import caption_carry
+    ar = caption_carry.frame_ar(W, H)
+    box = caption_carry.footprint_box(item, ar)
+    if box:
+        return [float(v) for v in box]
+    if item.get("box"):
+        # the capture hint bounds what it may draw (an authored page)
+        try:
+            hint = [float(v) for v in item["box"]]
+        except (TypeError, ValueError):
+            hint = None
+        if hint and len(hint) == 4 and hint[2] > hint[0] and hint[3] > hint[1]:
+            return hint
+    name = item.get("template")
+    if not name or name == "html":
+        return None
+    return _nominal(item, W, H)
+
+
+def _nominal(item, W, H):
+    """The template's nominal ink estimate (a lockup's grown by the bridge
+    lines its reading sets), or None."""
+    import caption_carry
+    import keepout
+    try:
+        est = caption_carry.bridged_box(keepout.nominal_ink(
+            item.get("template"), motion_templates.spec(item.get("template")),
+            item.get("params") or {}, frame=(W, H)), item)
+    except Exception:  # noqa: BLE001 — an unknown box occupies nothing
+        return None
+    return [float(v) for v in est] if est else None
+
+
+def _ink_lead(item):
+    """Seconds into an item (from its start on the program clock) before it
+    draws anything: a phrase build whose first row is revealed on a later
+    spoken word leaves its band empty until then (the Jobs 'liberal arts'
+    lockup: 1.17 s), and the headline keeps the band meanwhile. The reveal
+    is the page's own (caption_carry.lockup_reveals: spoken rows and bridge
+    lines on their onsets from the item's reading, others on their 'at', in
+    reading order) on the composition clock, so a windowed piece already
+    ``phase_s`` into the composition has that much less to wait."""
+    import caption_carry
+    reveals = caption_carry.lockup_reveals(item)
+    if not reveals:
+        return 0.0
+    phase = float(item.get("phase_s") or 0.0)
+    return max(0.0, reveals[0] - phase)
+
+
+def _shares_band(a, b, pad=YIELD_PAD):
+    return (min(a[2], b[2]) - max(a[0], b[0]) > -pad
+            and min(a[3], b[3]) - max(a[1], b[1]) > -pad)
+
+
+def yield_windows(item, items, W, H):
+    """Composition-second windows [[a, b], ...] in which the persistent
+    ``item`` hands its band to the other ``items`` (program-clock motion
+    items) whose box meets its own; [] for any other item, or when nothing
+    meets it. Windows closer than YIELD_MERGE_S merge; they are clipped to
+    the item's span."""
+    if not motion_templates.persistent(item):
+        return []
+    # its band: what it drew (the footprint) and the band it may fill
+    boxes = [b for b in (_band_box(item, W, H), _nominal(item, W, H)) if b]
+    if not boxes:
+        return []
+    mine = [min(b[0] for b in boxes), min(b[1] for b in boxes),
+            max(b[2] for b in boxes), max(b[3] for b in boxes)]
+    s, e = float(item["start"]), float(item["end"])
+    phase = float(item.get("phase_s") or 0.0)
+    spans = []
+    for other in items or []:
+        if other is item or other.get("id") == item.get("id") \
+                or other.get("_synthetic") \
+                or str(other.get("template") or "").startswith("caption") \
+                or motion_templates.persistent(other):
+            continue
+        try:
+            a = max(s, float(other["start"]) + _ink_lead(other))
+            b = min(e, float(other["end"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if b - a < 0.05:
+            continue
+        box = _band_box(other, W, H)
+        if box and _shares_band(mine, box):
+            spans.append([a, b])
+    spans.sort()
+    merged = []
+    for a, b in spans:
+        if merged and a - merged[-1][1] < YIELD_MERGE_S:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b])
+    # a gap at either end of the composition shorter than the merge is no
+    # restore (a stitched piece's own edges are not the composition's)
+    full = float(item.get("full_duration_s") or (e - s))
+    if merged and phase <= 1e-6 and merged[0][0] - s < YIELD_MERGE_S:
+        merged[0][0] = s
+    if merged and phase + (e - s) >= full - 1e-3 and e - merged[-1][1] < YIELD_MERGE_S:
+        merged[-1][1] = e
+    return [[round(a - s + phase, 3), round(b - s + phase, 3)] for a, b in merged]
+
+
+def render_pieces(item, fps):
+    """``item`` as the clips the engine renders: [item], or — a persistent
+    item held longer than one clip may last (motion_engine.MAX_DURATION_S:
+    a whole-program headline on a long program) — consecutive frame-aligned
+    pieces on the SAME composition clock (phase_s / full_duration_s, exactly
+    like a stitched preview's pieces), so the band never silently drops out
+    of a long render."""
+    s, e = float(item["start"]), float(item["end"])
+    cap = float(motion_engine.MAX_DURATION_S)
+    if e - s <= cap or not motion_templates.persistent(item) \
+            or item.get("layer") == "behind_subject":
+        return [item]
+    fps = float(fps or 30.0)
+    # two frames of slack: a frame-aligned piece is at most a frame longer
+    n = int(math.ceil((e - s) / (cap - 2.0 / fps)))
+    step_f = (e - s) * fps / n
+    phase = float(item.get("phase_s") or 0.0)
+    full = float(item.get("full_duration_s") or (e - s))
+    edges = [s] + [s + round(k * step_f) / fps for k in range(1, n)] + [e]
+    return [dict(item, start=round(a, 6), end=round(b, 6),
+                 phase_s=round(phase + a - s, 6), full_duration_s=full)
+            for a, b in zip(edges, edges[1:]) if b - a > 1e-6]
+
+
+def yields_doc(windows):
+    """The MG.yields input for build_document (None when there are none)."""
+    if not windows:
+        return None
+    return {"w": windows, "out": YIELD_OUT_S, "in": YIELD_IN_S}
+
+
+def headline_visible(item, items, W, H):
+    """(seconds the persistent item shows, [[a, b], ...] program windows it
+    yields) — for the write tools' report."""
+    s, e = float(item["start"]), float(item["end"])
+    phase = float(item.get("phase_s") or 0.0)
+    wins = [[a + s - phase, b + s - phase]
+            for a, b in yield_windows(item, items, W, H)]
+    hidden = sum(b - a for a, b in wins)
+    return max(0.0, (e - s) - hidden), wins
+
+
 def prepare_inputs(edl, workdir, W, H, fps, out_duration, args, next_idx,
                    fetch_asset=None, extra_items=None, plate=None):
     """Render motion clips and append ffmpeg inputs. Returns (inputs, next_idx)
@@ -164,9 +330,13 @@ def prepare_inputs(edl, workdir, W, H, fps, out_duration, args, next_idx,
             for _k, key in motion_templates.asset_params(item["template"], item.get("params") or {}).items():
                 if key not in asset_locals and fetch_asset is not None:
                     asset_locals[key] = fetch_asset(key)
-            jobs.append(motion_templates.build_job(item, W, H, fps, asset_locals,
-                                                   plate=plates.get(k)))
-            kept.append(item)
+            ydoc = yields_doc(yield_windows(item, items, W, H))
+            pieces = render_pieces(item, fps)
+            built = [motion_templates.build_job(
+                part, W, H, fps, asset_locals, plate=plates.get(k),
+                yields=ydoc) for part in pieces]
+            jobs.extend(built)
+            kept.extend(pieces)
         except Exception as e:  # noqa: BLE001 — degrade one item, keep the render
             warn(f"motion '{item.get('id')}' skipped: {str(e)[:200]}")
     if not jobs:
@@ -280,7 +450,7 @@ def caption_box(report, times):
     return [round(float(v), 4) for v in box] if box else None
 
 
-def fill_footprints(edl, W, H, fps=30.0):
+def fill_footprints(edl, W, H, fps=30.0, index=None, tl=None):
     """Measure the footprint box of every motion item that matters to the
     caption plan and has none, has one measured at another frame shape, or
     has only an estimate (in place; returns ``edl``). Only transcript
@@ -288,8 +458,24 @@ def fill_footprints(edl, W, H, fps=30.0):
     under the item anyway. Face zones the keep-out stored at this frame
     shape are kept. A probe that cannot run leaves an estimate in place and
     an item without a box (a stale one is dropped): the plan then keeps the
-    old behaviour for it."""
+    old behaviour for it.
+
+    With the program's ``index`` and Timeline ``tl``, every whole lockup is
+    first timed to the speech it shows (caption_carry.attach_readings: word
+    onsets and the bridge lines of one reading path), so it is measured and
+    rendered as it will read; a stored box measured without its bridge lines
+    is measured again."""
     import caption_carry
+    if index is not None and tl is not None:
+        before = {m.get("id"): m.get("reading") for m in edl.get("motion") or []
+                  if isinstance(m, dict)}
+        caption_carry.attach_readings(edl, index, tl)
+        for m in edl.get("motion") or []:
+            if isinstance(m, dict) and m.get("reading") != before.get(m.get("id")) \
+                    and isinstance(m.get("footprint"), dict) \
+                    and not m["footprint"].get("estimated"):
+                # the lockup grew or shrank: its box is measured again
+                m["footprint"] = dict(m["footprint"], estimated=True)
     caps = edl.get("captions")
     if not (isinstance(caps, dict) and caps.get("mode") == "from_transcript"):
         return edl

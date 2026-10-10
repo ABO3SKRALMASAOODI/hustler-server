@@ -1,12 +1,13 @@
 <!--MG-SPEC {"title": "Number counter", "category": "data",
- "description": "One big hero number that counts up with an expo ease-out (or rolls like an odometer) and lands with a soft bloom, plus an optional label line. Use when the speaker says a striking figure (a price, a percentage, users, years) and the number itself should be the moment.",
+ "description": "One big hero number that counts up with an expo ease-out, rolls like an odometer, or hard-cuts on whole ('reveal'), and lands with a soft bloom, plus an optional label line. Use when the speaker says a striking figure (a price, a percentage, users, years) and the number itself should be the moment. The number completes exactly on its spoken onset ('land'; add/set_motion_graphic set it from the transcript): a count starts on the lead-in so the roll lasts ~0.3-0.6 s, and a punchline number (or anything that is not a growing quantity, like '140 characters') uses style 'reveal' so nothing gives it away before the word.",
  "duration": 3.0, "layer": "above_captions", "mutes_captions": false,
  "params": {
   "value": {"type": "str", "required": true, "max": 24, "hint": "the number exactly as it should finally read: '62,000+', '$1.2B', '340%', '4.9', '10x', '1,000,000 users'. Prefix/suffix, decimals and thousands separator follow how it is written; plain numbers of 10000+ get commas"},
   "from": {"type": "float", "default": 0, "hint": "start value of the count (e.g. 1990 when the value is a year)"},
   "label": {"type": "str", "default": "", "max": 60, "hint": "short line under/over the number; wrap a word in *stars* for the serif accent"},
   "label_pos": {"type": "enum", "values": ["below", "above"], "default": "below"},
-  "style": {"type": "enum", "values": ["count", "odometer"], "default": "count", "hint": "count = digits tick up; odometer = masked digit drums roll and carry like a real counter"},
+  "style": {"type": "enum", "values": ["count", "odometer", "reveal"], "default": "count", "hint": "count = tabular digits tick up and complete on the landing; odometer = masked digit drums roll and carry like a real counter; reveal = no count: the whole number (and label) hard-cuts on at the landing with a bloom - for punchlines and numbers that are not growing quantities"},
+  "land": {"type": "float", "min": 0, "max": 30, "default": 0, "hint": "item seconds at which the number completes - the spoken number's onset (0 = automatic: 'reveal' cuts on at the item start, a count lands at min(1.0 s, 55% of the item)). add/set_motion_graphic set it from the transcript (20 ms before the word)"},
   "font": {"type": "enum", "values": ["Inter Display", "Anton", "Bebas Neue", "Archivo Black", "Instrument Serif", "Playfair Display"], "default": "Inter Display"},
   "color": {"type": "color", "default": "#F7F5F2", "hint": "number colour"},
   "accent": {"type": "color", "default": "#FFD400", "hint": "bloom, symbols (+ % $) and the label accent"},
@@ -17,14 +18,16 @@
   "size": {"type": "float", "min": 0.5, "max": 1.4, "default": 1.0}
  },
  "example": {"value": "62,000+", "label": "creators joined in *one week*"},
- "sfx": [{"at": 0.05, "kind": "tick"}, {"at": 1.0, "kind": "kick", "gain_db": -11, "land": {"frac": 0.55, "min": 0.5, "max": 1.0}}]} -->
+ "sfx": [{"at": 0.05, "kind": "tick", "when": {"style": ["count", "odometer"]}},
+         {"at": 1.0, "kind": "kick", "gain_db": -11, "when": {"style": ["count", "odometer"]}, "land": {"frac": 0.55, "min": 0.5, "max": 1.0, "param": "land", "tail": {"frac": 0.1, "max": 0.22, "add": 0.1}}},
+         {"at": 0.0, "kind": "kick", "gain_db": -11, "when": {"style": ["reveal"]}, "land": {"param": "land", "tail": {"frac": 0.1, "max": 0.22, "add": 0.1}}}]} -->
 <style>
   .scrim{position:absolute;left:0;top:0;width:64px;height:64px;pointer-events:none;will-change:transform,opacity;transform-origin:0 0;
          background:radial-gradient(closest-side,rgba(0,0,0,.68),rgba(0,0,0,.55) 40%,rgba(0,0,0,.3) 70%,rgba(0,0,0,0))}
   .stage{position:absolute;left:0;top:0;display:flex;flex-direction:column;align-items:center;transform-origin:0 0;will-change:transform,opacity,filter}
   .stage.left{align-items:flex-start}
   .numwrap{position:relative;will-change:transform}
-  .num{position:relative;display:flex;align-items:baseline;white-space:nowrap;line-height:1;color:var(--num);font-variant-numeric:lining-nums}
+  .num{position:relative;display:flex;align-items:baseline;white-space:nowrap;line-height:1;color:var(--num);font-variant-numeric:lining-nums tabular-nums}
   .glow{position:absolute;left:0;top:0;color:var(--accent);will-change:opacity}
   .glow .aff{color:var(--accent)!important}
   /* prefix + digits live in a box reserved at the final width: digits grow
@@ -113,15 +116,34 @@
   const affixKind = a => !a ? null : /^[$€£¥₹₩₽]+$/.test(a) ? 'cur' : /^[%+×x*°#]+$/.test(a) ? 'sup' : 'unit';
   const AFFIX_EM = { cur: 0.5, sup: 0.5, unit: 0.74 };
 
-  // timing: the count lands at CT (sfx "kick" at 1.0 for the default length)
-  const CT = Math.min(1.0, Math.max(0.5, D * 0.55));
-  const C0 = Math.min(0.05, CT * 0.1);                  // count starts once the number is legible
+  // timing: the number completes at CT — the spoken number's onset when the
+  // editor (or the write tool, from the transcript) set 'land'; otherwise a
+  // reveal cuts on at once and a count lands at min(1.0, 55% of the item)
+  // (sfx "kick" at 1.0 for the default length)
+  const reveal = P.style === 'reveal';
   const XD = Math.min(0.22, D * 0.1);                   // exit, faster than the entrance
+  const landP = Number(P.land) > 0 ? Number(P.land) : 0;
+  const CT = landP > 0 ? Math.min(landP, Math.max(0, D - XD - 0.1)) : reveal ? 0 : Math.min(1.0, Math.max(0.5, D * 0.55));
+  const C0 = Math.min(0.05, CT * 0.1);                  // count starts once the number is legible
   // continuous expo ease-out (plain outExpo jumps 0.1% on its last frame)
   const EXPO_K = 1 - Math.pow(2, -10);
   const expo = x => x <= 0 ? 0 : x >= 1 ? 1 : (1 - Math.pow(2, -10 * x)) / EXPO_K;
-  // odometer drive: decelerates to a true stop so the last drum settles into place
-  const valueAt = t => from + (to - from) * (odo ? MG.ease.outQuart : expo)(MG.range(t, C0, CT - C0));
+  // odometer drive: decelerates into the landing; a little constant speed is
+  // kept to the end so the last drum settles ON the landing, not well before
+  const odoEase = x => 0.85 * MG.ease.outQuart(x) + 0.15 * x;
+  const valueAt = t => from + (to - from) * (odo ? odoEase : expo)(MG.range(t, C0, CT - C0));
+  // a count never shows its landed reading early: digits are truncated toward
+  // the start value, so the final figure appears exactly at CT (a one-step
+  // count - '$1B', '1M', '#1' from 0 - holds its start reading until then;
+  // rounding would show the landed figure halfway through the roll)
+  const STEP = Math.pow(10, -(V ? V.decimals : 0));
+  const shown = v => {
+    if (to === from) return v;
+    if (Math.abs(to - from) < STEP - 1e-9) return from;
+    const n = (v - from) / STEP, k = to >= from ? Math.floor(n + 1e-9) : Math.ceil(n - 1e-9);
+    const q = from + k * STEP;
+    return to >= from ? Math.min(q, to - STEP) : Math.max(q, to + STEP);
+  };
 
   const stage = MG.$('#stage');
   let L = null;
@@ -167,7 +189,7 @@
     };
     // a countdown can start wider than it lands: size (and reserve) for the widest
     const sizeStr = odo ? (signed ? '−' : '') + odoStr
-      : widthAt(100, startStr) > widthAt(100, finalStr) ? startStr : finalStr;
+      : !reveal && widthAt(100, startStr) > widthAt(100, finalStr) ? startStr : finalStr;
     const maxFs = Math.min(400 * P.size, (SAFE.y1 - SAFE.y0) * 0.42);
     const fs = Math.max(40, Math.min(maxFs, 100 * (SAFE.x1 - SAFE.x0 - 40) / widthAt(100, sizeStr)));
     num.style.fontSize = fs + 'px';
@@ -320,7 +342,10 @@
   }
   MG.ready = fontsReady.then(() => { L = L || layout(); });
 
-  MG.active([[0, CT + 0.36], [D - XD - 0.02, D]]);
+  // a frame outside these windows reuses the last one: they cover the bloom's
+  // flash (CT .. CT + 0.38) and, for a count, the label rise and rule wipe
+  // (to ~1.0 s) even when an early landing ('land' on the lead-in) ends the count first
+  MG.active(reveal ? [[Math.max(0, CT - 0.04), CT + 0.4], [D - XD - 0.02, D]] : [[0, Math.max(CT + 0.4, 1.0)], [D - XD - 0.02, D]]);
   let lastStr = null;
   // drum positions for a value: the last column turns continuously, every
   // higher column rolls its carry exactly while the column below turns 9 -> 0,
@@ -342,12 +367,19 @@
   MG.frame(t => {
     if (!L) L = layout();
     const { numwrap, core, label, rule, cols, seps, sign, drum, slot, glow, fs, scrim } = L;
-    const pe = MG.ease.outExpo(MG.range(t, 0, 0.55));
-    const q = MG.range(t, CT - 0.02, 0.3), bump = q > 0 && q < 1 ? Math.sin(Math.PI * MG.ease.outQuad(q)) : 0;
+    const on = !reveal || t >= CT - 1e-6;               // a reveal is nothing until it lands
     numwrap.style.transformOrigin = P.align === 'left' ? '0% 60%' : '50% 60%';
-    MG.set(numwrap, { y: (1 - pe) * fs * 0.12, scale: 1 + 0.035 * bump, opacity: 0.5 + 0.5 * MG.range(t, 0, 2 / 30), blur: (1 - MG.ease.outCubic(MG.range(t, 0, 0.12))) * 12 });
+    if (reveal) {
+      // hard cut: the whole number is on the landing frame, settling from 4% big
+      const sq = MG.ease.outCubic(MG.range(t, CT, 0.12));
+      MG.set(numwrap, { scale: 1.04 - 0.04 * sq, opacity: on ? 1 : 0 });
+    } else {
+      const pe = MG.ease.outExpo(MG.range(t, 0, 0.55));
+      const q = MG.range(t, CT - 0.02, 0.3), bump = q > 0 && q < 1 ? Math.sin(Math.PI * MG.ease.outQuad(q)) : 0;
+      MG.set(numwrap, { y: (1 - pe) * fs * 0.12, scale: 1 + 0.035 * bump, opacity: 0.5 + 0.5 * MG.range(t, 0, 2 / 30), blur: (1 - MG.ease.outCubic(MG.range(t, 0, 0.12))) * 12 });
+    }
     if (V && !cols.length) {
-      const s = t >= CT ? finalStr : fmt(valueAt(t), decimals, grp, dec);
+      const s = t >= CT || reveal ? finalStr : fmt(shown(valueAt(t)), decimals, grp, dec);
       if (s !== lastStr) { core.innerHTML = digitsHTML(s, slot); lastStr = s; }
     }
     if (cols.length) {
@@ -385,25 +417,30 @@
       if (sign) sign.style.opacity = (landed ? to : valueAt(t)) < 0 ? 1 : 0;
     }
     if (glow) {
-      const on = MG.ease.outCubic(MG.range(t, CT - 0.1, 0.16));
-      const flash = Math.sin(Math.PI * MG.range(t, CT - 0.04, 0.38)) * 0.9;
-      const go = Math.min(1, 0.85 * P.glow * (on + flash));
+      // the bloom (a blurred copy of the LANDED figure) never anticipates the
+      // landing: it blooms from the landing frame
+      const gon = MG.ease.outCubic(MG.range(t, CT, 0.16));
+      const flash = Math.sin(Math.PI * MG.range(t, CT, 0.38)) * 0.9;
+      const go = on ? Math.min(1, 0.85 * P.glow * (gon + flash)) : 0;
       glow.style.opacity = go.toFixed(3);
       glow.style.visibility = go > 0.002 ? 'visible' : 'hidden';
     }
     if (label) {
-      const pl = MG.ease.outExpo(MG.range(t, 0.12, 0.6));
-      MG.set(label, { y: (1 - pl) * label.offsetHeight * 1.05, opacity: MG.range(t, 0.12, 0.16) });
+      if (reveal) MG.set(label, { opacity: on ? 1 : 0 });
+      else {
+        const pl = MG.ease.outExpo(MG.range(t, 0.12, 0.6));
+        MG.set(label, { y: (1 - pl) * label.offsetHeight * 1.05, opacity: MG.range(t, 0.12, 0.16) });
+      }
     }
     if (rule) {
-      const pr = MG.ease.outExpo(MG.range(t, 0.28, 0.7));
+      const pr = reveal ? (on ? 1 : 0) : MG.ease.outExpo(MG.range(t, 0.28, 0.7));
       MG.set(rule, { sx: Math.max(0.001, pr), opacity: pr > 0 ? 1 : 0 });
       rule.style.boxShadow = `0 0 ${12 + 18 * P.glow}px ${hex(P.accent, 0.35 + 0.3 * P.glow)}`;
     }
     const qx = MG.ease.inCubic(MG.range(t, D - XD, XD));
-    MG.set(stage, { x: L.x, y: L.y - qx * 26, scale: L.k, opacity: 1 - qx, blur: qx * 14 });
-    if (scrim) scrim.style.opacity = (MG.ease.outCubic(MG.range(t, 0, 0.3)) * (1 - qx)).toFixed(3);
-    L.bks.forEach(el => { el.style.opacity = MG.ease.outCubic(MG.range(t, el.at, 0.16)).toFixed(3); });
+    MG.set(stage, { x: L.x, y: L.y - qx * 26, scale: L.k, opacity: on ? 1 - qx : 0, blur: qx * 14 });
+    if (scrim) scrim.style.opacity = ((reveal ? (on ? 1 : 0) : MG.ease.outCubic(MG.range(t, 0, 0.3))) * (1 - qx)).toFixed(3);
+    L.bks.forEach(el => { el.style.opacity = (reveal ? (on ? 1 : 0) : MG.ease.outCubic(MG.range(t, el.at, 0.16))).toFixed(3); });
   });
 })();
 </script>
