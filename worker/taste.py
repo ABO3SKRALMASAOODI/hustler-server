@@ -509,8 +509,11 @@ def uncovered_jump_cuts(edl, index, tl, fps=None):
         except Exception:
             junctions = set()
     import picture_cards
+    # a card that re-aims on the cut: per shot (source_track) or along a
+    # face-following path (follow) that moves inside the removed footage
     cards = [cd for cd in fx.get("picture_cards") or []
-             if isinstance(cd, dict) and cd.get("source_track")]
+             if isinstance(cd, dict)
+             and (cd.get("source_track") or cd.get("follow"))]
     covers = []
     for ov in edl.get("overlays") or []:
         if ov.get("fit") == "cover" or ov.get("screen"):
@@ -535,7 +538,19 @@ def uncovered_jump_cuts(edl, index, tl, fps=None):
     def vcentre(z, c):
         return (1.0 - 1.0 / z) * c + 0.5 / z
 
+    import follow as _follow
+
     def aim(t):
+        # a crop that follows the speaker re-aims on a jump cut when the
+        # speaker moved there (follow.plan): that is the cut's coverage
+        moving = _follow.frame_focus_at(edl, t)
+        if moving is not None:
+            static = _static_aim(t)
+            if static[2] == "crop":
+                return (moving[0], moving[1], "crop")
+        return _static_aim(t)
+
+    def _static_aim(t):
         for sp in track:
             try:
                 if float(sp.get("t0", 0)) <= t <= float(sp.get("t1", 0)):
@@ -547,6 +562,17 @@ def uncovered_jump_cuts(edl, index, tl, fps=None):
             except (TypeError, ValueError):
                 continue
         return base_aim
+
+    def _card_reaims(cd, a, b):
+        ra = picture_cards.source_at(cd, a)
+        rb = picture_cards.source_at(cd, b)
+        if ra is None or rb is None or ra == rb:
+            return False
+        if not cd.get("follow"):
+            return True
+        # a following card's rect drifts by a hair across any cut: only a
+        # re-aim as big as a crop's counts (JUMP_CUT_MIN_AIM)
+        return max(abs(u - v) for u, v in zip(ra, rb)) >= JUMP_CUT_MIN_AIM
 
     def aim_moved(p, q):
         if p[2] != q[2]:
@@ -573,8 +599,7 @@ def uncovered_jump_cuts(edl, index, tl, fps=None):
         if aim_moved(aim(e0 - 1e-3), aim(s1 + 1e-3)):
             continue
         if any(float(cd.get("start", 0)) <= c - dt and float(cd.get("end", 0)) >= c + dt
-               and picture_cards.source_at(cd, e0 - 1e-3)
-               != picture_cards.source_at(cd, s1 + 1e-3) for cd in cards):
+               and _card_reaims(cd, e0 - 1e-3, s1 + 1e-3) for cd in cards):
             continue                    # a source card re-aims on the cut
         zb = renderer.zoom_state_at(zooms, c - dt, out_dur)
         za = renderer.zoom_state_at(zooms, c + dt, out_dur)

@@ -40,6 +40,16 @@ the edge. Holds too short for their moves become pass-through points: a
 speaker who keeps walking gets a steady pan. A shot that needs only one
 hold gets NO follow span (restraint is the default: a still frame).
 
+What the window must hold is keep_box: the whole head when it fits with
+room to spare, else the face, else its centre line — a close-up whose head
+is wider than a 9:16 window would otherwise turn every detector wobble into
+a re-aim. A still shot whose aim cuts the face is nudged (nudge) only as far
+as it must. Each SHOT is tracked on its own (speaker_track), a GROUP shot
+(is_group) is never followed — that would decide who to frame — and a span
+covers its whole shot, so a later cut that keeps more of it finds the path
+(timeline.revealed_follow slows a re-aim hidden on a jump cut that a later
+edit keeps again to a glide).
+
 THE RENDER (window_chain)
 
 A follow block crops the union of every window of the block out of the
@@ -64,6 +74,16 @@ SAMPLE_FPS = 4.0
 DETECT_WIDTH = 448
 # A write never decodes more than this many frames for one tool call.
 MAX_MEASURE_FRAMES = 720
+# ...nor plans from fewer than this many samples a second (below it the
+# blip filter and the smoothing have no neighbours to compare against), so
+# a call measures at most MAX_MEASURE_S of kept footage. Longer edits keep
+# one aim per shot, exactly as before follow existed: decoding a long-form
+# proxy end to end is minutes of tool time in a production lane.
+MIN_MEASURE_FPS = 2.0
+MAX_MEASURE_S = MAX_MEASURE_FRAMES / MIN_MEASURE_FPS
+# Wall-clock safety net for one measurement (a stalled decode): past it
+# the measurement is abandoned whole, never planned from half a track.
+MEASURE_BUDGET_S = 60.0
 # The index's spatial samples are dense enough to plan from at this step.
 DENSE_STEP_S = 0.5
 
@@ -324,19 +344,28 @@ def _decode_gray(path, a, b, fps, width, height, timeout):
     return [buf[i * size:(i + 1) * size].reshape(height, width) for i in range(n)]
 
 
+def too_long(windows):
+    """True when ``windows`` hold more footage than one call measures."""
+    return sum(max(0.0, float(b) - float(a)) for a, b in windows or []) \
+        > MAX_MEASURE_S + 1e-6
+
+
 def measure(path, windows, aspect, fps=SAMPLE_FPS, width=DETECT_WIDTH,
-            timeout=90):
+            timeout=90, budget_s=MEASURE_BUDGET_S):
     """[(t, [(box, look), ...])] every face found at ``fps`` over SOURCE
     ``windows`` [(a, b)] of the video at ``path`` (the proxy), boxes in
     fractions. ``aspect`` = height / width of the picture. Bounded: past
-    MAX_MEASURE_FRAMES the rate drops. [] when nothing can be decoded."""
+    MAX_MEASURE_FRAMES the rate drops (never below MIN_MEASURE_FPS), more
+    than MAX_MEASURE_S of footage is not measured, and a measurement that
+    outruns ``budget_s`` of wall clock is abandoned. [] in all those cases
+    and when nothing can be decoded."""
+    import time
     import subject
     windows = [(float(a), float(b)) for a, b in windows if float(b) - float(a) > .05]
-    if not windows or not path or not os.path.exists(path):
+    if not windows or not path or not os.path.exists(path) or too_long(windows):
         return []
     total = sum(b - a for a, b in windows)
     fps = min(float(fps), MAX_MEASURE_FRAMES / max(total, 1e-6))
-    fps = max(fps, .5)
     cv2 = subject._cv2()
     if cv2 is None:
         return []
@@ -344,9 +373,15 @@ def measure(path, windows, aspect, fps=SAMPLE_FPS, width=DETECT_WIDTH,
     w = int(width) // 2 * 2
     h = max(2, int(round(w * float(aspect) / 2.0)) * 2)
     frames = []
+    deadline = time.monotonic() + float(budget_s)
     for a, b in windows:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return []
         try:
-            grays = _decode_gray(path, a, b, fps, w, h, timeout)
+            grays = _decode_gray(path, a, b, fps, w, h, min(float(timeout), left))
+        except subprocess.TimeoutExpired:
+            return []
         except Exception:
             grays = []
         for i, g in enumerate(grays):
@@ -357,13 +392,28 @@ def measure(path, windows, aspect, fps=SAMPLE_FPS, width=DETECT_WIDTH,
     return frames
 
 
-def speaker_track(frames):
+def speaker_track(frames, cuts=()):
     """[(t, box, look)] of ONE person through ``frames`` (measure's
-    output): detections far off the typical face size are dropped, the
-    track keeps the face nearest the running position (seeded at the
-    median of the largest faces, so one false positive cannot capture it),
-    and isolated blips — a sample far from both its neighbours' positions —
-    are removed."""
+    output). Each SHOT (between ``cuts``, source seconds) is tracked on its
+    own — a camera change never carries the last shot's position into the
+    next, where it could pick a bystander standing where the previous
+    speaker sat: detections far off the shot's typical face size are
+    dropped, the track keeps the face nearest the running position (seeded
+    at the median of the shot's largest faces, so one false positive cannot
+    capture it), and isolated blips — a sample far from both its
+    neighbours' positions in the same shot — are removed."""
+    import bisect
+    cuts = sorted(float(c) for c in cuts or ())
+    shots = {}
+    for t, dets in frames or []:
+        shots.setdefault(bisect.bisect_right(cuts, float(t)), []).append((t, dets))
+    out = []
+    for k in sorted(shots):
+        out += drop_blips(_track_shot(shots[k]))
+    return out
+
+
+def _track_shot(frames):
     biggest = []
     for _t, dets in frames:
         if dets:
@@ -384,7 +434,34 @@ def speaker_track(frames):
             (d[0][0] + d[0][2]) / 2 - prev[0], (d[0][1] + d[0][3]) / 2 - prev[1]))
         out.append((float(t), list(box), int(look)))
         prev = ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
-    return drop_blips(out)
+    return out
+
+
+GROUP_FACE_RATIO = .6     # a second face at least this tall as the first
+GROUP_SHARE = .35         # of a shot's frames with a face: a group shot
+
+
+def face_counts(frames):
+    """[(t, n)] for every frame of ``frames`` (measure's output) with a face:
+    n = faces at least GROUP_FACE_RATIO the height of its largest — two
+    people in the shot, not a poster or a face in the crowd."""
+    out = []
+    for t, dets in frames or []:
+        hs = [d[0][3] - d[0][1] for d in dets or []]
+        if hs:
+            top = max(hs)
+            out.append((float(t), sum(1 for h in hs if h >= GROUP_FACE_RATIO * top)))
+    return out
+
+
+def is_group(counts, t0, t1):
+    """True when [t0, t1] is a GROUP shot: two or more comparable faces in
+    at least GROUP_SHARE of its frames with a face (and in 3 or more). The
+    follow tracks ONE face; in a group shot that would decide who to frame
+    — the static aim keeps that decision where it was made."""
+    inside = [n for t, n in counts or [] if t0 - .05 <= t <= t1 + .05]
+    many = sum(1 for n in inside if n >= 2)
+    return bool(inside) and many >= 3 and many >= GROUP_SHARE * len(inside)
 
 
 def drop_blips(samples, reach_s=.8):
@@ -411,10 +488,11 @@ def drop_blips(samples, reach_s=.8):
     return keep
 
 
-def index_samples(index, windows):
+def index_samples(index, windows, frames_out=None):
     """[(t, box, 0)] from the index's spatial samples inside ``windows``
     (the largest face of each), and whether they are dense enough to plan
-    a follow from (median step <= DENSE_STEP_S)."""
+    a follow from (median step <= DENSE_STEP_S). ``frames_out`` (a list)
+    receives every sample's faces in measure's shape (for face_counts)."""
     samples = (((index or {}).get("spatial") or {}).get("samples")) or []
     out = []
     for s in samples:
@@ -428,6 +506,8 @@ def index_samples(index, windows):
                  and f[2] > f[0] and f[3] > f[1]]
         if boxes:
             out.append((t, list(max(boxes, key=lambda f: (f[2] - f[0]) * (f[3] - f[1]))), 0))
+            if frames_out is not None:
+                frames_out.append((t, [(list(f), 0) for f in boxes]))
     out.sort(key=lambda s: s[0])
     steps = sorted(b[0] - a[0] for a, b in zip(out, out[1:]))
     dense = bool(steps) and steps[len(steps) // 2] <= DENSE_STEP_S + 1e-6
@@ -442,6 +522,30 @@ def head_box(face):
     w, h = face[2] - face[0], face[3] - face[1]
     return [face[0] - HEAD_SIDE * w, face[1] - HAIR_ABOVE_FACE * h,
             face[2] + HEAD_SIDE * w, face[3] + HEAD_BELOW * h]
+
+
+def keep_box(face, ww, wh):
+    """What the window must hold of the speaker, per axis: the whole head
+    (head_box) when it fits with SAFE_MARGIN either side AND leaves the
+    window a dead zone's worth of play, else the face box on the same
+    terms, else only the face's centre line. A tight close-up whose head is
+    wider than a 9:16 window can never be held whole: demanding it turned
+    every detector wobble into a re-aim (a hunting camera, 16 holds in 9 s
+    of Elon), so the window then just keeps the face — or its centre — and
+    the dead zone keeps it still."""
+    head = head_box(face)
+
+    def axis(h0, h1, f0, f1, size, dz):
+        room = (1.0 - dz) * size - 2.0 * SAFE_MARGIN * size
+        if h1 - h0 <= room:
+            return h0, h1
+        if f1 - f0 <= room:
+            return f0, f1
+        c = (f0 + f1) / 2.0
+        return c, c
+    x0, x1 = axis(head[0], head[2], face[0], face[2], ww, DEAD_ZONE[0])
+    y0, y1 = axis(head[1], head[3], face[1], face[3], wh, DEAD_ZONE[1])
+    return [x0, y0, x1, y1]
 
 
 def _isect(a, b):
@@ -505,8 +609,9 @@ def _desired(samples, ww, wh, headroom, lead):
         head = head_box(f)
         dx = (f[0] + f[2]) / 2.0 + lead * ww * max(-1.0, min(1.0, lk))
         dy = head[1] - headroom * wh + wh / 2.0
-        hx = (head[2] + mx - ww / 2.0, head[0] - mx + ww / 2.0)
-        hy = (head[3] + my - wh / 2.0, head[1] - my + wh / 2.0)
+        kb = keep_box(f, ww, wh)
+        hx = (kb[2] + mx - ww / 2.0, kb[0] - mx + ww / 2.0)
+        hy = (kb[3] + my - wh / 2.0, kb[1] - my + wh / 2.0)
         if _empty(hx):                       # a head wider than the window
             hx = ((f[0] + f[2]) / 2.0,) * 2
         if _empty(hy):
@@ -518,6 +623,35 @@ def _desired(samples, ww, wh, headroom, lead):
             hy = (_clip(dy, by),) * 2
         rows.append((t, _clip(dx, bx), _clip(dy, by), hx, hy))
     return rows
+
+
+def nudge(aim, samples, ww, wh, kept=None):
+    """The aim nearest ``aim`` (a window centre, source fractions) that
+    keeps every sample's keep_box inside the window — the least correction
+    of a still shot whose aim cuts the speaker (restraint: the shot keeps
+    the composition it was given, moved only as far as it must). None when
+    no single aim holds them all. ``kept``: only samples on kept footage."""
+    bx, by = _bounds(ww), _bounds(wh)
+    mx, my = SAFE_MARGIN * ww, SAFE_MARGIN * wh
+    ix, iy = bx, by
+    for t, f, _look in samples or []:
+        if kept and not any(float(a) - .05 <= t <= float(b) + .05 for a, b in kept):
+            continue
+        kb = keep_box(f, ww, wh)
+        for axis, raw, bounds in ((0, (kb[2] + mx - ww / 2.0, kb[0] - mx + ww / 2.0), bx),
+                                  (1, (kb[3] + my - wh / 2.0, kb[1] - my + wh / 2.0), by)):
+            band = _isect(raw, bounds)
+            if _empty(band):
+                # past the source's edge (or a window as tall as the
+                # source): as near as the source allows, like _desired
+                band = (_clip((raw[0] + raw[1]) / 2.0, bounds),) * 2
+            if axis == 0:
+                ix = _isect(ix, band)
+            else:
+                iy = _isect(iy, band)
+    if _empty(ix) or _empty(iy):
+        return None
+    return _clip(float(aim[0]), ix), _clip(float(aim[1]), iy)
 
 
 def _holds(rows, ww, wh, dz):
@@ -635,7 +769,7 @@ def _violation(keys, samples, ww, wh, lo=None, hi=None, step=1 / 15.0,
     if not samples or not keys:
         return 0.0, None
     st = np.array([s[0] for s in samples], float)
-    heads = np.array([head_box(s[1]) for s in samples], float)
+    heads = np.array([keep_box(s[1], ww, wh) for s in samples], float)
     a = st[0] if lo is None else max(st[0], lo)
     b = st[-1] if hi is None else min(st[-1], hi)
     if b < a:

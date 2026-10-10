@@ -529,3 +529,144 @@ def test_follow_can_be_switched_off_and_added_to_an_authored_track():
     agent_tools.set_frame(off, "9:16", "crop", .35, .5, focus_track=[
         {"t0": 10.0, "t1": 20.0, "x": .35, "y": .5, "mode": "crop"}])
     assert agent_tools.auto_reframe(off, "9:16", follow=False).startswith("NO CHANGE")
+
+
+# ── review fixes (independent review, Oct 10 2026) ────────────────────────
+
+def test_a_follow_span_covers_its_whole_shot():
+    """The span reaches the cuts around the shot, not just today's kept
+    footage: a later cut that keeps more of the shot finds the path holding
+    there instead of the static aim (a jump inside continuous footage)."""
+    walk = _dense(lambda t: .30 if t < 15 else .55, 10, 20)
+    ctx = _Ctx(1920, 1080, walk, shots=[{"id": 0, "start": 0.0, "end": 25.0},
+                                         {"id": 1, "start": 25.0, "end": 60.0}])
+    agent_tools.set_frame(ctx, "9:16", "crop", .3, .5, _measured=True, _follow=True)
+    span = ctx._edl["frame"]["follow"][0]
+    assert span["t0"] == 0.0 and span["t1"] == 25.0
+    wider = dict(ctx._edl, keep=[[6.0, 22.0]])
+    wider = validate_edl(wider, SRC).model_dump()
+    held = follow.centre_at(span, 10.0)
+    assert follow.frame_focus_at(wider, 7.0) == held          # not the static aim
+    g, _tl = _graph(wider, src=(1920, 1080))
+    trims = [p for p in g.split(";") if "trim=start=" in p and "[segv" in p]
+    assert len(trims) == 1                                    # no mid-shot split
+
+
+def test_a_reaim_hidden_on_a_cut_slows_to_a_glide_when_that_footage_returns():
+    import timeline
+    assert timeline.FOLLOW_GLIDE_MIN_S == follow.MOVE_MIN_S
+    s = _track(lambda t: .30 if t < 5 else .48, 0, 10)
+    keys, info = follow.plan(s, 0, 10, 607.5 / 1920, 1.0, kept=[(0.0, 4.6), (5.4, 10.0)])
+    assert info["hidden"] == 1
+    e = _frame_edl([{"t0": 0.0, "t1": 10.0, "k": keys}], keep=((0.0, 4.6), (5.4, 10.0)))
+    # still cut: untouched
+    same = timeline.revealed_follow(e["frame"]["follow"], e["keep"])
+    assert same[1] == 0 and same[0] == e["frame"]["follow"]
+    # the gap is kept again: the re-aim plays, as a glide, centred where it was
+    old_tl = Timeline(e["keep"], [], [])
+    e["keep"] = [[0.0, 10.0]]
+    notes = timeline.remap_program_items(e, old_tl, Timeline(e["keep"], [], []))
+    span = e["frame"]["follow"][0]
+    moving = follow.moving_windows(span)
+    assert len(moving) == 1 and moving[0][1] - moving[0][0] >= follow.MOVE_MIN_S - 1e-3
+    assert moving[0][0] < 5.0 < moving[0][1]
+    assert any("slowed" in n for n in notes)
+    validate_edl(e, SRC)
+    # a quick move that was already on screen is left as planned
+    seen = [{"t0": 0.0, "t1": 10.0, "k": [[1.0, .3, .5], [1.5, .35, .5], [2.0, .4, .5]]}]
+    assert timeline.revealed_follow(seen, [(0.0, 10.0)])[1] == 2           # no history
+    assert timeline.revealed_follow(seen, [(0.0, 10.0)], [(0.0, 5.0), (5.5, 10.0)])[1] == 0
+
+
+def test_a_group_shot_keeps_its_aim():
+    """Two people side by side: following one would decide who the crop
+    frames — the shot keeps the aim auto_reframe gave it."""
+    samples = [{"t": round(t, 2), "faces": [_face(.30 + (.1 if t > 15 else 0), .35, .2),
+                                            _face(.70, .35, .19)]}
+               for t in np.arange(10, 20 + 1e-9, .25)]
+    ctx = _Ctx(1920, 1080, samples)
+    res = agent_tools.set_frame(ctx, "9:16", "crop", .5, .5, _measured=True, _follow=True)
+    assert ctx._edl["frame"]["follow"] is None
+    assert "two or more people" in res
+
+
+def test_measuring_is_bounded():
+    assert follow.too_long([(0.0, follow.MAX_MEASURE_S + 1)])
+    assert not follow.too_long([(0.0, 60.0)])
+    assert follow.MAX_MEASURE_FRAMES / follow.MAX_MEASURE_S >= follow.MIN_MEASURE_FPS
+    long = _Ctx(1920, 1080, [], keep=((0.0, 59.0),))
+    long.duration = 900.0
+    long.index["video"]["duration"] = 900.0
+    e = default_edl(900.0)
+    e["keep"] = [[0.0, 500.0]]
+    e["frame"] = {"ratio": "9:16", "mode": "crop"}
+    edl = validate_edl(e, 900.0).model_dump()
+    spans, note = agent_tools._follow_frame(long, edl, edl["frame"])
+    assert spans is None and "not measured" in note        # no decode attempted
+
+
+def test_a_follow_reaim_on_a_jump_cut_covers_it():
+    import taste
+    keys = [[4.5, .30, .5], [5.5, .48, .5]]                     # moves inside the gap
+    keep = ((1.0, 4.6), (5.4, 9.0))
+    index = {"video": {"width": 1920, "height": 1080, "fps": 30},
+             "shots": [{"id": 0, "start": 0.0, "end": 60.0}]}
+    plain = _frame_edl(None, keep=keep, focus_x=.3)
+    tl = Timeline(plain["keep"], [], [])
+    bare = [round(b["t"], 2) for b in taste.uncovered_jump_cuts(plain, index, tl, 30)]
+    assert round(tl.offsets[1], 2) in bare
+    followed = _frame_edl([{"t0": 0.0, "t1": 60.0, "k": keys}], keep=keep, focus_x=.3)
+    assert not taste.uncovered_jump_cuts(followed, index, tl, 30)
+
+
+def test_auto_reframe_replaces_or_drops_a_measured_follow():
+    samples = _dense(lambda t: .35 + .25 * min(1.0, max(0.0, t - 14.5)), 10, 20, h=.18)
+    ctx = _Ctx(1920, 1080, samples)
+    agent_tools.set_frame(ctx, "9:16", "crop", .35, .5, focus_track=[
+        {"t0": 10.0, "t1": 20.0, "x": .35, "y": .5, "mode": "crop"}])
+    agent_tools.auto_reframe(ctx, "9:16")
+    assert ctx._edl["frame"]["follow"]
+    res = agent_tools.auto_reframe(ctx, "9:16", follow=False)
+    assert ctx._edl["frame"]["follow"] is None and "holds one aim" in res
+    assert ctx._edl["frame"]["focus_track"][0]["x"] == .35
+
+
+def test_a_close_up_wider_than_the_window_does_not_hunt():
+    """A tight close-up (Elon, Oct 2026): the head is wider than a 9:16
+    window, so it can never be held whole. Demanding it made every detector
+    wobble a re-aim (16 holds in 9 s); the window keeps the face and holds."""
+    rng = np.random.default_rng(7)
+    s = [(round(t, 2), _face(.55 + rng.normal(0, .006), .42, .44), -1)
+         for t in np.arange(0, 9, .25)]
+    keys, info = follow.plan(s, 0, 9, 607.5 / 1920, 1.0)
+    assert keys is None and info["holds"] == 1
+    kb = follow.keep_box(s[0][1], 607.5 / 1920, 1.0)
+    assert kb[2] - kb[0] <= s[0][1][2] - s[0][1][0] + 1e-9   # the face, not the head
+
+
+def test_a_still_shot_that_cuts_the_face_is_nudged_not_recomposed():
+    """An aim that cuts the face moves only as far as it must."""
+    ww = 607.5 / 1920
+    s = [(round(t, 2), _face(.48 + .02 * np.sin(t), .4, .3), 1) for t in np.arange(0, 6, .25)]
+    aim = follow.nudge((.40, .5), s, ww, 1.0)
+    assert aim is not None and aim[0] > .40
+    assert follow._violation([[3.0, aim[0], .5]], s, ww, 1.0)[0] == 0.0
+    assert follow._violation([[3.0, .40, .5]], s, ww, 1.0)[0] > 0
+    # the least move: past the safety margin less and the head is cut again
+    assert follow._violation([[3.0, aim[0] - follow.SAFE_MARGIN * ww - .005, .5]],
+                             s, ww, 1.0)[0] > 0
+    _keys, info = follow.plan(s, 0, 6, ww, 1.0)
+    assert abs(aim[0] - .40) < abs(info["static"][0] - .40)
+
+
+def test_each_shot_is_tracked_on_its_own():
+    """Across a camera cut the track must not carry the last speaker's
+    position: in the next shot it would pick a bystander standing there
+    (and drop the new speaker's first samples as 'blips')."""
+    frames = [(float(t), [(_face(.30, .35, .2), 0)]) for t in np.arange(0, 5, .25)]
+    frames += [(float(t), [(_face(.65, .35, .2), 0), (_face(.30, .35, .11), 0)])
+               for t in np.arange(5, 10, .25)]
+    joint = [b for t, b, _l in follow.speaker_track(frames) if t >= 5]
+    assert any(abs((b[0] + b[2]) / 2 - .30) < .01 for b in joint)    # the old failure
+    per = [b for t, b, _l in follow.speaker_track(frames, cuts=[5.0]) if t >= 5]
+    assert len(per) == 20 and all(abs((b[0] + b[2]) / 2 - .65) < .01 for b in per)

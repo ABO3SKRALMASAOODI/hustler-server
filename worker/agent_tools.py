@@ -7791,22 +7791,30 @@ def _merge_windows(windows):
     return [(a, b) for a, b in out]
 
 
-def _follow_samples(ctx, windows):
-    """(samples, source) — the speaker's face over SOURCE ``windows`` as
-    [(t, box, look)]: the index's spatial samples when they are dense
-    enough to follow (follow.DENSE_STEP_S), else a write-time face track
-    over just these windows on the proxy (follow.measure at
+def _follow_samples(ctx, windows, cuts=()):
+    """(samples, source, counts) — the speaker's face over SOURCE
+    ``windows`` as [(t, box, look)]: the index's spatial samples when they
+    are dense enough to follow (follow.DENSE_STEP_S), else a write-time face
+    track over just these windows on the proxy (follow.measure at
     follow.SAMPLE_FPS, Haar frontal + profile — OpenCV ships in every
-    lane), else the index's sparse samples. source is 'index', 'measured'
-    or 'sparse'. Cached on the ctx for the turn."""
+    lane), else the index's sparse samples. source is 'index', 'measured',
+    'sparse' or 'too_long' (more kept footage than one call measures,
+    follow.MAX_MEASURE_S). counts: follow.face_counts of every measured
+    frame (group shots). ``cuts``: the shot boundaries — each shot is
+    tracked on its own (follow.speaker_track). Cached on the ctx for the
+    turn."""
     windows = _merge_windows(windows)
     if not windows:
-        return [], "sparse"
+        return [], "sparse", []
     index = getattr(ctx, "index", None) or {}
-    sparse, dense = follow.index_samples(index, windows)
+    seen = []
+    sparse, dense = follow.index_samples(index, windows, seen)
     if dense:
-        return sparse, "index"
-    key = tuple((round(a, 2), round(b, 2)) for a, b in windows)
+        return sparse, "index", follow.face_counts(seen)
+    if follow.too_long(windows):
+        return sparse, "too_long", []
+    cuts = sorted({round(float(c), 3) for c in cuts or ()})
+    key = (tuple((round(a, 2), round(b, 2)) for a, b in windows), tuple(cuts))
     cache = getattr(ctx, "_follow_faces", None)
     if not isinstance(cache, dict):
         cache = {}
@@ -7816,15 +7824,15 @@ def _follow_samples(ctx, windows):
             pass
     if key in cache:
         return cache[key]
-    out = (sparse, "sparse")
+    out = (sparse, "sparse", [])
     try:
         video = index.get("video") or {}
         aspect = float(video.get("height") or 0) / float(video.get("width") or 0)
         proxy = ctx.proxy_path()
         frames = follow.measure(proxy, windows, aspect)
-        track = follow.speaker_track(frames)
+        track = follow.speaker_track(frames, cuts)
         if track:
-            out = (track, "measured")
+            out = (track, "measured", follow.face_counts(frames))
     except Exception:
         pass
     cache[key] = out
@@ -7832,11 +7840,15 @@ def _follow_samples(ctx, windows):
 
 
 def _shot_windows(ctx, keep, edges=()):
-    """[(a, b, fragments)] one SOURCE window per camera shot of the kept
-    footage — the kept fragments between consecutive indexed shot cuts (and
-    ``edges``, e.g. focus_track edges) and their bounds. A follow plan never
-    crosses a cut, and spans every jump cut inside its shot (a move there
-    happens on the cut)."""
+    """[(a, b, fragments, lo, hi)] one SOURCE window per camera shot of the
+    kept footage — the kept fragments between consecutive indexed shot cuts
+    (and ``edges``, e.g. focus_track edges), their bounds (a, b) and the
+    shot's own bounds (lo, hi: the cuts around it, the source's ends for the
+    first and last). A follow plan never crosses a cut, and spans every
+    jump cut inside its shot (a move there happens on the cut). A follow
+    span covers the whole SHOT (lo..hi), not just today's kept footage: a
+    later cut that keeps more of the shot must find the path holding there,
+    not the static aim — that would jump inside continuous footage."""
     cuts = set()
     for shot in ((getattr(ctx, "index", None) or {}).get("shots") or [])[1:]:
         try:
@@ -7845,12 +7857,18 @@ def _shot_windows(ctx, keep, edges=()):
             continue
     cuts |= {float(e) for e in edges}
     bounds = [-1e9] + sorted(cuts) + [1e9]
+    try:
+        end = float(getattr(ctx, "duration", None) or 0.0)
+    except (TypeError, ValueError):
+        end = 0.0
     out = []
     for lo, hi in zip(bounds, bounds[1:]):
         frags = sorted((round(max(float(s), lo), 3), round(min(float(e), hi), 3))
                        for s, e in keep if min(float(e), hi) - max(float(s), lo) > .05)
         if frags:
-            out.append((frags[0][0], frags[-1][1], frags))
+            a, b = frags[0][0], frags[-1][1]
+            out.append((a, b, frags, round(max(0.0, min(lo, a)), 3),
+                        round(max(b, hi if hi < 1e8 else max(end, b)), 3)))
     return out
 
 
@@ -7879,21 +7897,33 @@ def _follow_frame(ctx, edl, frame):
     shots = _shot_windows(ctx, keep, edges)
     if not shots:
         return None, ""
-    samples, how = _follow_samples(ctx, [f for _a, _b, fr in shots for f in fr])
+    windows = [f for _a, _b, fr, _lo, _hi in shots for f in fr]
+    samples, how, counts = _follow_samples(
+        ctx, windows, [x for _a, _b, _fr, lo, hi in shots for x in (lo, hi)])
+    if how == "too_long":
+        total = sum(b_ - a_ for a_, b_ in _merge_windows(windows))
+        return None, (f"FOLLOW: not measured — {total:.0f}s of kept footage is "
+                      f"more than one call follows ({follow.MAX_MEASURE_S:.0f}s); "
+                      "each shot keeps one aim.")
     if not samples or how == "sparse":
         return None, ""
     base = (frame.get("focus_x"), frame.get("focus_y"))
-    spans, moving, fixed = [], 0, 0
-    for a, b, frags in shots:
+    spans, moving, fixed, groups = [], 0, 0, 0
+    for a, b, frags, lo, hi in shots:
         mid = (a + b) / 2.0
         span = next((sp for sp in track if float(sp["t0"]) <= mid <= float(sp["t1"])),
                     None)
         if ((span or {}).get("mode") or frame.get("mode") or "crop") != "crop":
             continue
+        if follow.is_group(counts, a, b):
+            # two or more people in the shot: following one would decide
+            # who the crop frames — the shot keeps the aim it was given
+            groups += 1
+            continue
         rows = [s_ for s_ in samples if a - .05 <= s_[0] <= b + .05]
         keys, info = follow.plan(rows, a, b, ww, wh, kept=frags)
         if keys:
-            spans.append({"t0": a, "t1": b, "k": keys})
+            spans.append({"t0": lo, "t1": hi, "k": keys})
             moving += 1
             continue
         if info.get("static") is None:
@@ -7908,11 +7938,13 @@ def _follow_frame(ctx, edl, frame):
             sw, sh, W, H, "crop", (cur[1], cur[2]))
         cur[1], cur[2] = (cx0 + cx1) / 2.0, (cy0 + cy1) / 2.0
         over, _at = follow._violation([cur], rows, ww, wh, kept=frags)
-        sx, sy = info["static"]
+        # moved only as far as it must (the given composition stays), else
+        # to the plan's still aim
+        sx, sy = follow.nudge(cur[1:], rows, ww, wh, kept=frags) or info["static"]
         if over > .005 and follow._violation([[mid, sx, sy]], rows, ww, wh,
                                              kept=frags)[0] < over:
-            spans.append({"t0": a, "t1": b, "k": [[round(mid, 3), round(sx, 4),
-                                                   round(sy, 4)]]})
+            spans.append({"t0": lo, "t1": hi, "k": [[round(mid, 3), round(sx, 4),
+                                                     round(sy, 4)]]})
             fixed += 1
     if len(spans) > FOLLOW_MAX_SPANS:
         # more shots than a frame carries: the moving ones, else none
@@ -7921,8 +7953,11 @@ def _follow_frame(ctx, edl, frame):
         if len(spans) > FOLLOW_MAX_SPANS:
             return None, ("FOLLOW: not applied — the speaker moves inside more "
                           f"than {FOLLOW_MAX_SPANS} shots; each keeps one aim.")
+    group_note = (f"FOLLOW: {groups} shot{'s' if groups != 1 else ''} with two or "
+                  "more people keep{} their aim (the follow frames one speaker)."
+                  .format("" if groups != 1 else "s") if groups else "")
     if not spans:
-        return None, ""
+        return None, group_note
     bits = []
     if moving:
         bits.append(f"the crop FOLLOWS the speaker inside {moving} shot"
@@ -7930,9 +7965,13 @@ def _follow_frame(ctx, edl, frame):
                     "sway, glides when they move — never across a cut)")
     if fixed:
         bits.append(f"{fixed} still shot{'s' if fixed != 1 else ''} re-aimed "
-                    "on the measured face (the old aim cut the head)")
+                    "just far enough to keep the measured face in (the old "
+                    "aim cut it)")
+    if groups:
+        bits.append(f"{groups} shot{'s' if groups != 1 else ''} with two or more "
+                    "people keep their aim")
     return spans, ("FOLLOW: " + "; ".join(bits) + f" — measured on {len(samples)} "
-                   f"face samples ({'index' if how == 'index' else 'proxy, ' + str(int(follow.SAMPLE_FPS)) + ' fps'}). "
+                   f"face samples ({'index' if how == 'index' else 'proxy'}). "
                    "auto_reframe(follow=false) holds one aim per shot.")
 
 
@@ -8196,16 +8235,21 @@ def auto_reframe(ctx, ratio="9:16", mode="auto", follow=True):
 
         keep = current.get("keep") or [[0.0, ctx.duration]]
         if coverage and all(_covered(start, end) for start, end in keep):
-            if want_follow and not current_frame.get("follow") \
-                    and getattr(ctx, "has_main_video", False):
+            if getattr(ctx, "has_main_video", False):
+                # The authored aims stay; the follow inside each shot is
+                # (re)measured on TODAY's kept footage — a path measured
+                # before later cuts is replaced, and follow=false removes it.
                 edl = dict(current)
                 edl["frame"] = dict(current_frame)
-                spans, note = _follow_frame(ctx, edl, edl["frame"])
-                if spans:
-                    edl["frame"]["follow"] = spans
+                edl["frame"]["follow"] = None
+                spans, note = (_follow_frame(ctx, edl, edl["frame"])
+                               if want_follow else (None, ""))
+                edl["frame"]["follow"] = spans
+                if (spans or None) != (current_frame.get("follow") or None):
                     res = ctx.write_edl(
                         edl, f"the {ratio} crop keeps its per-shot track and "
-                             "now follows the speaker inside each shot")
+                             + ("follows the speaker inside each shot" if spans
+                                else "holds one aim per shot"))
                     if res.startswith("EDL v") and note:
                         res += "\n" + note
                     return res
@@ -14976,7 +15020,8 @@ def _card_track(ctx, edl, spans, box, canvas, video):
 
 
 def _card_pieces(ctx, edl, spans):
-    """[(a, b, fragments)] the card window's footage per camera shot: its
+    """[(a, b, fragments, lo, hi)] the card window's footage per camera
+    shot (_shot_windows; lo..hi the shot's own bounds): its
     kept spans grouped between camera cuts (focus_track edges and indexed
     shot cuts). Each shot gets its own framing (a follow span), so the card
     never carries one shot's framing into the next; inside a shot one plan
@@ -14998,11 +15043,13 @@ def _card_dense(ctx, edl, spans):
     pieces = _card_pieces(ctx, edl, spans)
     if not pieces or len(pieces) > PICTURE_CARD_MAX_TRACK:
         return False
-    samples, how = _follow_samples(ctx, [f for _a, _b, fr in pieces for f in fr])
-    if how == "sparse" or not samples:
+    samples, how, _counts = _follow_samples(
+        ctx, [f for _a, _b, fr, _lo, _hi in pieces for f in fr],
+        [x for _a, _b, _fr, lo, hi in pieces for x in (lo, hi)])
+    if how in ("sparse", "too_long") or not samples:
         return False
     return all(any(a - .05 <= x[0] <= b + .05 for x in samples)
-               for a, b, _fr in pieces)
+               for a, b, _fr, _lo, _hi in pieces)
 
 
 def _card_follow(ctx, edl, spans, box, canvas, video):
@@ -15027,8 +15074,10 @@ def _card_follow(ctx, edl, spans, box, canvas, video):
     pieces = _card_pieces(ctx, edl, spans)
     if not pieces or len(pieces) > PICTURE_CARD_MAX_TRACK:
         return None
-    samples, how = _follow_samples(ctx, [f for _a, _b, fr in pieces for f in fr])
-    if how == "sparse" or not samples:
+    samples, how, _counts = _follow_samples(
+        ctx, [f for _a, _b, fr, _lo, _hi in pieces for f in fr],
+        [x for _a, _b, _fr, lo, hi in pieces for x in (lo, hi)])
+    if how in ("sparse", "too_long") or not samples:
         return None
     faces = picture_cards.steady_faces([b for _t, b, _l in samples])
     face = picture_cards.median_face(faces)
@@ -15037,7 +15086,7 @@ def _card_follow(ctx, edl, spans, box, canvas, video):
     base, headroom = picture_cards.speaker_rect(sw, sh, W, H, box, face)
     rw, rh = base[2] - base[0], base[3] - base[1]
     rows, follows, moving = [], [], 0
-    for a, b, frags in pieces:
+    for a, b, frags, lo, hi in pieces:
         own = [x for x in samples if a - .05 <= x[0] <= b + .05]
         keys, info = follow.plan(own, a, b, rw, rh, kept=frags)
         if keys:
@@ -15060,7 +15109,8 @@ def _card_follow(ctx, edl, spans, box, canvas, video):
             rows[-1]["t1"] = round(b, 3)
         else:
             rows.append({"t0": round(a, 3), "t1": round(b, 3), "source": rect})
-        follows.append({"t0": round(a, 3), "t1": round(b, 3), "k": keys})
+        # the span covers the whole shot (see _shot_windows)
+        follows.append({"t0": round(lo, 3), "t1": round(hi, 3), "k": keys})
     track = rows if len({tuple(r["source"]) for r in rows}) > 1 else None
     default = rows[0]["source"] if track is None else \
         [round(v, 4) for v in base]
@@ -26003,7 +26053,8 @@ TOOLS = {
                      "when they move far enough that a still crop would cut "
                      "the head or lose the composition; a re-aim that can land "
                      "on a jump cut happens on the cut. A speaker who stays "
-                     "put gets no motion. follow=false keeps one aim per shot. "
+                     "put gets no motion; a shot with two or more people keeps "
+                     "its aim. follow=false keeps one aim per shot. "
                      "Pass mode explicitly to force one. Read what it reports "
                      "and repeat THAT.",
                      {"ratio": {"type": "string",
