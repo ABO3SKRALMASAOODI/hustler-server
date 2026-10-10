@@ -8487,8 +8487,8 @@ FRAMING_CHECK_STEP_S = 0.25
 # measured it.
 FRAMING_CHECK_MEASURE_S = 120.0
 # Canvas boxes of the suggested speaker + screen stack (9:16): the speaker
-# below the free-tier mark's zone (keepout.watermark_zone), a caption band
-# of STACK_CAPTION_GAP between the panels.
+# below the free-tier mark's zone (keepout.watermark_zone), a gutter of
+# STACK_CAPTION_GAP between the panels (captions: a free band, never it).
 STACK_SPEAKER_BOX = [0.04, 0.13, 0.96, 0.475]
 STACK_SCREEN_BOX = [0.04, 0.54, 0.96, 0.93]
 
@@ -16065,9 +16065,14 @@ PANEL_SHOT_REACH_S = 2.5
 # A burned-in box a speaker panel keeps out: on screen at least this long in
 # the window.
 PANEL_INSET_MIN_S = .25
-# Panels stacked one over the other leave captions a band between them at
-# least this tall (frame fractions; judges, Oct 2026: captions sat on a 0.03
-# seam, crossing both panels' edges).
+# Panels stacked one over the other keep a gutter at least this tall between
+# them (frame fractions; judges, Oct 2026: captions sat on a 0.03 seam,
+# crossing both panels' edges). One design with the caption placement
+# solver (worker/caption_place.py): the gutter is no caption band — a seam
+# is a hard no-go for captions (EDGE_PAD off every panel edge) — so a page
+# is never squeezed onto it; the solver places captions in the largest free
+# band (above the speaker panel when the layout leaves one, else in the
+# speaker panel clear of the face, the screen panel only as a last resort).
 STACK_CAPTION_GAP = .065
 
 
@@ -16211,9 +16216,11 @@ def _speaker_note(info, k, moved_from=None, concealed=True):
 
 def _open_caption_gaps(boxes, gap=STACK_CAPTION_GAP):
     """(boxes, note) — panels stacked one over the other (sharing columns)
-    pulled apart until the band between them is at least ``gap`` of the
-    frame height (each gives up half from its facing edge), so captions
-    there sit in a band of their own, never on a seam."""
+    pulled apart until the gutter between them is at least ``gap`` of the
+    frame height (each gives up half from its facing edge): the panels never
+    read as one block, and no caption is ever set on the seam (the caption
+    solver keeps pages off every panel edge and places them in a free band
+    — picture_cards.free_bands names the same bands)."""
     boxes = [list(b) for b in boxes]
     moved = []
     order = sorted(range(len(boxes)), key=lambda k: boxes[k][1])
@@ -16232,11 +16239,12 @@ def _open_caption_gaps(boxes, gap=STACK_CAPTION_GAP):
         moved.append((i, j, have))
     if not moved:
         return boxes, ""
-    return boxes, ("captions get a band of their own between the stacked "
-                   f"panels: the gap opened to {gap:g} of the frame height "
-                   f"(it was {min(h for _i, _j, h in moved):.3f}); "
-                   "picture_cards.layout_rects names every panel edge for "
-                   "caption placement")
+    return boxes, ("the stacked panels get a gutter: the gap opened to "
+                   f"{gap:g} of the frame height (it was "
+                   f"{min(h for _i, _j, h in moved):.3f}); captions never sit "
+                   "on the seam — the engine places them in a free band "
+                   "(above the speaker panel when the layout leaves one, "
+                   "else in the speaker panel clear of the face)")
 
 
 def _speaker_panel(ctx, edl, spans, box, source, fit, canvas, video, k):
@@ -16589,7 +16597,7 @@ def set_picture_card(ctx, id, start, end, box=None, fit=None, radius=.045,
             if pfit is not None and pfit not in ("crop", "pad"):
                 return f"REJECTED: panel {k + 1} fit must be 'crop' or 'pad'."
             parsed.append((pbox, psrc, pfit))
-        # captions get a band of their own between stacked panels
+        # stacked panels get a gutter (captions are placed in a free band)
         gapped, gap_note = _open_caption_gaps([b for b, _s, _f in parsed])
         if gap_note:
             report.append(gap_note)
@@ -29895,19 +29903,17 @@ _COMPACT_CONTRACTS = {
         "sits 0-3 frames before the spoken onset (get_kept_transcript + "
         "get_words; start earlier by the landing offset the template "
         "description states). layer above_captions (default), below_captions "
-        "or behind_subject. Captions: leave mute_captions unset — one reading "
-        "path: captions drop the words it shows and yield to its phrase from "
-        "its first shown word until it leaves (a phrase_build's rows leave "
-        "the rest to the captions: quote the transcript in its rows; end other "
-        "graphics where their words end, per the NOTE); other words stay "
-        "captioned, clear of it; true hides all captions in its window, false "
-        "keeps them all. A number lands on its spoken word. Silent by "
+        "or behind_subject. Captions: leave mute_captions unset — every "
+        "heard word reaches the screen once: captions drop the words it shows "
+        "and carry the rest beside it, in a free band (quote the transcript in "
+        "rows; end graphics where their words end, per the NOTE). A number "
+        "lands on its spoken word. Silent by "
         "default; sfx=true, only for a moment that earns sound, maps its "
         "sound roles onto the approved library (cues listed in the result). "
         "Pass purpose and a stable id. A graphic over the speaker's face or "
         "outside the 9:16 safe area is moved to clear space (KEEP-OUT in the "
-        "result). A word-timed window starts on its first shown word; edges "
-        "within 0.15 s of a cut snap onto it. accent/color default to the "
+        "result). A word-timed window starts on its first shown word; an edge "
+        "within 0.15 s of a cut snaps to it. accent/color default to the "
         "short's Look (NOTE (look): 2nd accent, 4th type role). word_slam "
         "tier: payoff (number+noun in the accent) or hero (one per short, "
         "behind the speaker; face-safe fallback). "
@@ -29995,8 +30001,8 @@ _COMPACT_CONTRACTS = {
         "sub-720p source is shown whole unless fit='crop'), enlarged at most "
         "2x (3x for a small archival face); panels=[{box, source}, ...] stacks "
         "the speaker ('auto': solved from the face — chin, hair, lead room, the "
-        "screen box kept out — with a caption band between the panels) and the "
-        "screen they show ('inset': a burned-in screen box, whole). Animated "
+        "screen box kept out; captions never on the gutter between panels) "
+        "and the screen they show ('inset': a burned-in screen box, whole). Animated "
         "entrances/exits dissolve with the full-frame shot. The default "
         "canvas is dark and sampled from the footage; never a flat void, and "
         "no blurred self-copy on low-resolution footage."),

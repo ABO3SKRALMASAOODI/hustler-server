@@ -208,19 +208,21 @@ def _nominal(item, W, H):
 
 def _ink_lead(item):
     """Seconds into an item (from its start on the program clock) before it
-    draws anything: a phrase build whose first row is revealed on a later
-    spoken word leaves its band empty until then (the Jobs 'liberal arts'
-    lockup: 1.17 s), and the headline keeps the band meanwhile. The reveal
-    is the page's own (caption_carry.lockup_reveals: spoken rows and bridge
-    lines on their onsets from the item's reading, others on their 'at', in
-    reading order) on the composition clock, so a windowed piece already
-    ``phase_s`` into the composition has that much less to wait."""
+    draws anything: a word-timed item whose first word is revealed on a
+    later spoken onset leaves its band empty until then (the Jobs 'liberal
+    arts' lockup: 1.17 s), and the headline keeps the band meanwhile. The
+    reveal is the page's own (caption_carry.first_reveal: a lockup's rows on
+    their onsets or 'at' in reading order, marker_text's words on their
+    onsets) on the composition clock, so a windowed piece already
+    ``phase_s`` into the composition has that much less to wait. A graphic
+    written since the motion track's WINDOW rule starts on its first word,
+    so this is ~0 for it; it keeps older EDLs from leaving a hole."""
     import caption_carry
-    reveals = caption_carry.lockup_reveals(item)
-    if not reveals:
+    first = caption_carry.first_reveal(item)
+    if first is None:
         return 0.0
     phase = float(item.get("phase_s") or 0.0)
-    return max(0.0, reveals[0] - phase)
+    return max(0.0, first - phase)
 
 
 def _shares_band(a, b, pad=YIELD_PAD):

@@ -6,8 +6,9 @@ captions (judges, Oct 2026).
   speaker looks, burned-in screen boxes kept out where any framing can — the
   face wins where none can (the judged Elon/Rogan panels cut a chin and
   pressed a nose to the edge to stay clear of the browser box).
-* Stacked panels leave captions a band of their own (>= STACK_CAPTION_GAP),
-  and picture_cards.layout_rects / free_bands name the no-go edges.
+* Stacked panels keep a gutter (>= STACK_CAPTION_GAP) that is no caption
+  band: picture_cards.layout_rects / free_bands name the windows and the
+  bands around them exactly as the caption solver (caption_place) does.
 * A small archival face may be enlarged past 2x (face_cap), with grain.
 * render_qc watches layout changes (luma dips/flashes), faces cut by a
   panel edge and an empty headline band.
@@ -22,6 +23,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import agent_tools  # noqa: E402
+import caption_place  # noqa: E402
 import picture_cards as pc  # noqa: E402
 import render_qc  # noqa: E402
 import test_picture_layouts as T  # noqa: E402
@@ -166,9 +168,19 @@ def test_stacked_panels_open_a_caption_band_and_name_their_edges():
     assert pc.layout_rects(e, 2.0) == [boxes[0], boxes[1]]
     assert pc.layout_rects(e, 3.5) == []
     assert pc.layout_edges(e) == [1.0, 3.0]
+    # one design with the caption solver: the gutter is no caption band (a
+    # page never sits on a seam); the band above the speaker panel is
     bands = pc.free_bands(pc.layout_rects(e, 2.0), top=.13, bottom=.8)
-    assert (boxes[0][3], boxes[1][1]) in bands
+    assert not any(a < boxes[0][3] + .02 and b > boxes[1][1] - .02 for a, b in bands)
+    assert bands and bands[0][0] == pytest.approx(.13) and \
+        bands[0][1] == pytest.approx(boxes[0][1] - caption_place.EDGE_PAD)
     assert all(b - a >= pc.CAPTION_BAND_MIN for a, b in bands)
+    rects = caption_place.card_rects(caption_place.live_cards(e, 1.5, 2.5))
+    solver = caption_place.free_bands(caption_place.edge_zones(rects, (0.15, 0.85)),
+                                      (0.13, 0.8), (0.15, 0.85))
+    seam = [(a, b) for a, b in solver
+            if a >= boxes[0][3] - 1e-6 and b <= boxes[1][1] + 1e-6]
+    assert seam and all(b - a < caption_place.min_band(e, 1080, 1920) for a, b in seam)
 
 
 # ── the tool ─────────────────────────────────────────────────────────────
@@ -197,7 +209,7 @@ def test_a_stack_frames_its_speaker_from_the_face_and_opens_the_band(monkeypatch
     assert pc._overlap(speaker["source"], INSET) < 1e-4
     assert screen["box"][1] - speaker["box"][3] >= agent_tools.STACK_CAPTION_GAP - 1e-4
     assert "face held whole" in res and "kept out of the panel" in res
-    assert "captions get a band of their own" in res
+    assert "the stacked panels get a gutter" in res and "never sit on the seam" in res
 
 
 def test_a_given_rect_that_cuts_the_face_is_repaired(monkeypatch):

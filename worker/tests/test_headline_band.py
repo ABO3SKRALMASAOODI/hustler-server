@@ -113,6 +113,20 @@ def test_it_holds_its_band_whenever_nothing_else_does():
     assert doc["out"] == 0.0 and doc["in"] <= motion_layer.YIELD_MERGE_S
 
 
+def test_a_marker_line_in_the_band_yields_from_its_first_spoken_word():
+    # one design with the motion track's word-timed marker_text: the band
+    # holds its headline until the marker's first word is revealed on its
+    # onset (caption_carry.first_reveal), like a lockup's first row
+    mk = {"id": "mk", "template": "marker_text", "start": 10.0, "end": 13.0,
+          "params": {"text": "a narrow cone"},
+          "reading": {"v": 1, "rows": [[0.8, 1.0, 1.3]], "bridges": []},
+          "footprint": _fp([0.09, 0.06, 0.92, 0.24])}
+    hl = _hl(end=37.84)
+    first = caption_carry.first_reveal(mk)
+    assert first == pytest.approx(0.74)
+    assert motion_layer.yield_windows(hl, [hl, mk], W, H) == [[10.74, 13.0]]
+
+
 def test_a_phrase_build_yields_from_its_first_reveal_and_windows_follow_the_phase():
     rows = [{"text": "injecting some", "role": "sans", "size": "0.5", "at": "1.17"},
             {"text": "*liberal arts*", "role": "serif", "size": "1.4", "at": "1.89"}]

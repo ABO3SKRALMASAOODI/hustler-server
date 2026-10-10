@@ -292,10 +292,15 @@ def layout_edges(edl):
 
 
 def free_bands(boxes, top=0.0, bottom=1.0, min_h=CAPTION_BAND_MIN):
-    """[(y0, y1)] full-width bands of the frame between ``top`` and
-    ``bottom`` that no box in ``boxes`` covers, at least ``min_h`` tall —
-    where a caption may sit (layout_rects gives the boxes)."""
-    spans = sorted((max(top, float(b[1])), min(bottom, float(b[3])))
+    """[(y0, y1)] full-width canvas bands of the frame between ``top`` and
+    ``bottom`` that no box in ``boxes`` covers, each kept the caption
+    solver's EDGE_PAD off every window edge (caption_place.edge_zones: a
+    caption never sits on an edge or a seam) and at least ``min_h`` tall —
+    where a caption may sit around the windows (layout_rects gives the
+    boxes). A stack's gutter is no band: the solver never uses it either."""
+    import caption_place
+    pad = caption_place.EDGE_PAD
+    spans = sorted((max(top, float(b[1]) - pad), min(bottom, float(b[3]) + pad))
                    for b in boxes or [] if float(b[3]) > top and float(b[1]) < bottom)
     out, y = [], float(top)
     for y0, y1 in spans:
