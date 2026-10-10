@@ -679,8 +679,10 @@ def panel_framing(src_w, src_h, W, H, box, faces, looks=(), avoid=(),
     kx0, ky0, kx1, ky1 = keep[0] * sw, keep[1] * sh, keep[2] * sw, keep[3] * sh
     kw, kh = kx1 - kx0, ky1 - ky0
     m = PANEL_MARGIN
-    # the smallest rect that holds the keep region with its margins
-    rh_min = max(kh / (1.0 - 2 * m), kw / (1.0 - 2 * m) / a, kh / PANEL_FILL_MAX)
+    # the smallest rect that holds the keep region with its margins (the
+    # source's size permitting; the keep itself it must always hold)
+    rh_min = max(min(sh, max(kh / (1.0 - 2 * m), kh / PANEL_FILL_MAX)),
+                 min(big, kw / (1.0 - 2 * m)) / a, kh, kw / a)
     kcap = face_cap(fh, bh, H, cap)
     rh_pref = max(kh / PANEL_FILL, bh / kcap, rh_min)
     if prefer is not None:
@@ -694,15 +696,20 @@ def panel_framing(src_w, src_h, W, H, box, faces, looks=(), avoid=(),
                    {min(big / a, rh_min + (rh_pref - rh_min) * f)
                     for f in (0.0, .25, .5, .75)}, reverse=True)
     # The margin may give way (to the keep region's own edge) where that is
-    # what keeps a burned-in box out; it never does otherwise.
-    margins = (m, 0.0) if avoid else (m,)
+    # what keeps a burned-in box out, or where the source has no room for
+    # it; a framing with it always wins otherwise.
+    margins = (m, 0.0)
+    # a side where the head reaches the source's own edge has no margin to
+    # keep (the source edge permitting, as speaker_rect's headroom)
+    edge = (keep[0] <= 1e-3, keep[1] <= 1e-3, keep[2] >= 1 - 1e-3,
+            keep[3] >= 1 - 1e-3)
     for rh, mm in [(rh, mm) for rh in sizes for mm in margins]:
         rw = rh * a
         # positions that hold the keep region with its margins
-        xa = max(0.0, kx1 + mm * rw - rw)
-        xb = min(sw - rw, kx0 - mm * rw)
-        ya = max(0.0, ky1 + mm * rh - rh)
-        yb = min(sh - rh, ky0 - mm * rh)
+        xa = max(0.0, kx1 + (0.0 if edge[2] else mm) * rw - rw)
+        xb = min(sw - rw, kx0 - (0.0 if edge[0] else mm) * rw)
+        ya = max(0.0, ky1 + (0.0 if edge[3] else mm) * rh - rh)
+        yb = min(sh - rh, ky0 - (0.0 if edge[1] else mm) * rh)
         if xa > xb + 1e-6 or ya > yb + 1e-6:
             continue
         if prefer is not None:

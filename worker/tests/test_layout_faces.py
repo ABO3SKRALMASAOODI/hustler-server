@@ -346,3 +346,15 @@ def test_a_face_seen_over_little_of_the_window_gets_extra_room(monkeypatch):
     assert res.startswith("EDL v") and "measured over only" in res, res
     rect = ctx.card()["panels"][0]["source"]
     assert _inside(rect, pc.panel_keep([face], pc.PANEL_UNSEEN_PAD))
+
+
+def test_a_head_at_the_sources_edge_is_framed_not_refused():
+    """A close-up whose hair meets the top of the source: the source edge
+    is the limit there (as speaker_rect's headroom), never a refusal."""
+    face = [0.40, 0.03, 0.56, 0.40]
+    rect, info = pc.panel_framing(SW, SH, W, H, PANEL, [face] * 3, [0] * 3)
+    assert rect is not None and rect[1] == 0.0
+    assert _inside(rect, pc.panel_keep([face]))
+    tall = [0.38, 0.02, 0.62, 0.92]                    # nearly the source's height
+    rect, info = pc.panel_framing(SW, SH, W, H, [0.1, 0.2, 0.9, 0.7], [tall], [0])
+    assert rect is not None and _inside(rect, pc.panel_keep([tall]))
