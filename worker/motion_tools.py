@@ -1822,8 +1822,19 @@ def _tier_notes(ctx, edl, item):
         taller = []
         for m in others:
             b = caption_carry.footprint_box(m, ar)
-            if b and (b[3] - b[1]) > h + 0.005 and m.get("layer") != "behind_subject":
-                taller.append((b[3] - b[1], m["id"]))
+            if not b or m.get("layer") == "behind_subject":
+                continue
+            bh = b[3] - b[1]
+            if m.get("template") == "list_build":
+                # an accumulating list is rows, not one lockup: what competes
+                # with the payoff is an item set two lines deep at the list's
+                # type size (a five-row list is tall in small type)
+                p = m.get("params") or {}
+                fs = keepout.list_layout(p, ar)[0]
+                role = str(p.get("role") or "condensed")
+                bh = min(bh, 2 * fs * keepout.LINE_H.get(role, 0.92))
+            if bh > h + 0.005:
+                taller.append((bh, m["id"]))
         if taller:
             th, tid = max(taller)
             out.append(f"NOTE (payoff): '{item['id']}' draws {h:.2f} of the frame height but "

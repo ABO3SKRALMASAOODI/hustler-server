@@ -372,9 +372,10 @@ SOUND PAIRING — graphics are SILENT by default:
   re-levels the cues), or `set_motion_graphic(id, sfx=false)` to drop them.
 - Accents: `*one word*` or a `*multi word run*` takes the accent; star 1–2
   words per line. Over a bright shirt or wall the renderer firms up the
-  backing on its own (see LEGIBILITY); `scrim` on `hook_title`, `glow_title`
-  and `phrase_build` stays a style choice for a softer, wider falloff — never
-  move the type onto the face to escape a bright plate.
+  backing on its own (see LEGIBILITY; `list_build` and the hook tier too);
+  `scrim` on `hook_title`, `glow_title`, `phrase_build` and `list_build`
+  (off by default there) stays a style choice for a softer, wider falloff —
+  never move the type onto the face to escape a bright plate.
 - Typing placed by hand stops with its event: `add_sfx(...,
   dur_s=<seconds of visible typing>)` trims it with a short fade. Long
   library tails (`impact_1`, `ding_1`, `cash_register_1`) already stop at

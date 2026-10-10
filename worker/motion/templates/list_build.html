@@ -15,7 +15,7 @@
   "accent": {"type": "color", "default": "#ED080D", "hint": "the newest item"},
   "entrance": {"type": "enum", "values": ["pop", "rise"], "default": "pop", "hint": "pop = each item hard-cuts on its word and settles from 4% big; rise = a short rise + blur-to-sharp, readable on the word"},
   "exit": {"type": "enum", "values": ["cut", "fade", "blur"], "default": "cut"},
-  "scrim": {"type": "float", "min": 0, "max": 1, "default": 0.4, "hint": "soft dark backing under the block so the items read over bright shirts and walls; 0 = none"}
+  "scrim": {"type": "float", "min": 0, "max": 1, "default": 0, "hint": "an optional soft dark wash under the block (0 = none, the default: the list decides its own legibility from the plate under its glyphs - nothing, dark ink, then a glyph scrim)"}
  },
  "example": {"rows": [{"text": "Rockets"}, {"text": "Supersonic aviation"}, {"text": "Underwater cities"}], "lead": "They promised"}} -->
 <style>
@@ -221,23 +221,49 @@
     MG.box = [Math.max(0, x0), Math.max(0, y0), Math.min(W, x1), Math.min(H, y1)];
     legible();
   };
-  // ── legibility over a measured bright plate ──
-  // The accent as it reads on this plate (MG.accentInk), and a dark pocket
-  // under the items that grows item by item (display type 3:1, a thin
-  // serif 4.5:1; the lead is body type, 4.5:1). Unmeasured or dark plates
-  // change nothing.
-  let accInk = P.accent;
+  // ── legibility over the measured plate (MG.legible, round 7) ──
+  // The same decision every type template makes (no boxes in an editorial
+  // look): from the plate under each item's GLYPHS over its whole time on
+  // screen (its landing to the block's exit) — nothing where the type's own
+  // shadow carries it; dark ink for the block where the plate is bright
+  // under every weak item (the newest item then wears the accent deepened
+  // in its own hue, and the soft scrim stays off: no dark wash under dark
+  // ink); else a glyph scrim that follows the letterforms; a box only past
+  // that, pre-sized to the full block and growing item by item with it.
+  // The accent as it reads on this plate (MG.accentInk) either way.
+  // per item: it.dark (dark ink chosen under it); accInk the accent on a
+  // light item, accDark on a dark one
+  let accInk = P.accent, accDark = P.accent, dark = false;
   function legible() {
     if (BK) { BK.remove(); BK = null; }
-    accInk = P.accent;
+    accInk = P.accent; accDark = P.accent; dark = false;
+    items.forEach(it => { it.dark = false; it.el.style.color = ''; });
+    const els = items.map(it => it.el).concat(lead ? [lead] : []);
+    MG.unlegible(els);
     if (!MG.plate) return;
     const all = MG.rectOf(items.map(it => it.el));
     if (all) accInk = MG.accentInk(all, P.accent, { lc: R.thin ? 45 : 35, t0: items[0].t0, t1: D }).color;
+    if (MG.luminance(P.color) < 0.3) return;            // the editor chose dark ink
     const have = 0.3 * 0.8 * (P.scrim || 0);
-    const need = Math.max(0, ...items.map(it => MG.need(it.rect, { ink: P.color, ratio: R.thin ? 4.5 : 3, t0: it.t0, t1: D, have })),
-      lead ? MG.need(MG.rectOf(lead), { ink: P.color, ratio: 4.5, t0: items[0].t0, t1: D, have }) : 0);
-    if (need > 0) {
-      BK = MG.backing(MG.$('.mg-root'), MG.rectOf([lead, ...items.map(it => it.el)].filter(Boolean)), need,
+    const parts = items.map(it => ({ el: it.el, ratio: R.thin ? 4.5 : 3, ink: P.color,
+                                     base: R.thin ? 0.35 : 0.25, t0: it.t0, t1: D }))
+      .concat(lead ? [{ el: lead, ratio: 4.5, ink: P.color, base: 0.15, t0: items[0].t0, t1: D }] : []);
+    const res = MG.legible(parts, { have, root: MG.$('.mg-root'),
+      box: { pad: BK_PAD.map(k => k * fs), feather: 0.3 * fs, radius: 0.28 * fs, join: 2 * fs } });
+    if (res.mode === 'dark') {
+      // MG.legible inked only the weak items (their block element): those
+      // take dark ink, the rest keep the light ink over their darker plate
+      dark = true;
+      items.forEach(it => { it.dark = it.el.style.color !== ''; });
+      const dk = items.filter(it => it.dark).map(it => it.el);
+      accDark = (dk.length && MG.accentOnLight(MG.inkRect(dk), P.accent,
+        { ratio: R.thin ? 4.5 : 3, t0: items[0].t0, t1: D })) || MG.DARK_INK;
+      return;
+    }
+    if (res.mode === 'box' && res.boxes.length) {
+      // one box for the block, grown item by item with the list (placeBK)
+      res.boxes.forEach(bk => bk.remove());
+      BK = MG.backing(MG.$('.mg-root'), MG.rectOf([lead, ...items.map(it => it.el)].filter(Boolean)), res.need,
         { pad: BK_PAD.map(k => k * fs), feather: 0.3 * fs, radius: 0.28 * fs });
       MG.growBox(BK.box);
     }
@@ -287,9 +313,10 @@
       MG.set(it.el, s);
       // the newest item wears the accent until the next one lands
       const newest = t >= it.t0 - 1e-6 && t < it.t1 - 1e-6;
+      const acc = it.dark ? accDark : accInk;
       it.lines.forEach(el => {
-        el.style.color = newest ? accInk : P.color;
-        el.querySelectorAll('.mg-w').forEach(w => { w.style.color = w.dataset.acc ? accInk : ''; });
+        el.style.color = newest ? acc : (it.dark ? MG.DARK_INK : P.color);
+        el.querySelectorAll('.mg-w').forEach(w => { w.style.color = w.dataset.acc ? acc : ''; });
       });
     });
     let x = { opacity: 1 };
@@ -300,7 +327,7 @@
     }
     MG.set(blk, x);
     if (lead) lead.style.opacity = t >= sc0 - 1e-6 ? 0.94 : 0;
-    if (P.scrim > 0) scrim.style.opacity = (t >= sc0 - 0.05 ? MG.ease.outCubic(MG.range(t, sc0 - 0.05, 0.3)) * (x.opacity ?? 1) : 0).toFixed(4);
+    if (P.scrim > 0 && !dark) scrim.style.opacity = (t >= sc0 - 0.05 ? MG.ease.outCubic(MG.range(t, sc0 - 0.05, 0.3)) * (x.opacity ?? 1) : 0).toFixed(4);
     if (BK) BK.style.opacity = placeBK(t) ? (MG.ease.outCubic(MG.range(t, sc0, 0.12)) * (x.opacity ?? 1)).toFixed(4) : 0;
   });
 })();

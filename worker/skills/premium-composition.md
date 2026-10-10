@@ -73,7 +73,9 @@ LAYOUTS FOR 9:16:
   (box omitted; a two-shot stays whole) gets a full-width, near-square window framed on the face
   (y .27-.70, ~43% of the frame, ~2.5x — the 37% 4:3 card read as a
   postage stamp) with the headline band above it and a whole caption band
-  below; fit='pad' shows the whole stage (~1.6x). A thin band of a pillar
+  below; fit='pad' shows the whole stage (~1.6x). That band is ~13% of the
+  frame: a graphic there fits by its width (word_slam down to 0.3) or size
+  (counter down to 0.4), and a two-line typewriter without its plate. A thin band of a pillar
   or frame edge along the card's edge is slid off (EDGE SLIVER names one
   it cannot clear). Give it rounded corners, a
   hairline border, a soft shadow and an entrance that dissolves the card in

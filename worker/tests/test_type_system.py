@@ -337,6 +337,21 @@ def test_the_payoff_is_named_when_it_is_not_the_largest_lockup(probe):
     assert "NOTE (payoff): 'pay' draws 0.10" in out and "'enough' draws 0.25" in out, out
 
 
+def test_a_tall_accumulating_list_is_rows_not_a_bigger_lockup(probe):
+    """Integration (beats + type system): a five-row list_build is taller
+    than the payoff in small type; the payoff check compares an item set
+    two lines deep at the list's type size, not the whole stack."""
+    lst = _mg("list", "list_build", 3.0, 9.0,
+              rows=[{"text": t} for t in ("rockets", "supersonic aviation",
+                    "green revolution agriculture", "underwater cities", "new medicines")],
+              role="condensed", y=0.64, width=0.8)
+    lst["footprint"] = caption_carry.make_footprint([0.16, 0.48, 0.84, 0.80], W, H, [])
+    ctx = _Ctx(_edl([lst]))
+    out = motion_tools.add_motion_graphic(ctx, "word_slam", 20.0, 21.5, id="pay",
+                                          params={"text": "*140* / characters", "tier": "payoff"})
+    assert "NOTE (payoff)" not in out, out
+
+
 def test_tier_and_typewriter_estimates_for_browserless_lanes():
     spec = motion_templates.spec("word_slam")
     hero = keepout.nominal_ink("word_slam", spec, {"text": "x", "tier": "hero", "y": 0.3})
@@ -675,3 +690,21 @@ def test_an_accent_on_a_plate_brighter_than_it_is_never_washed_out():
     acc = "() => document.querySelector('.line .mg-w').style.color"
     assert asyncio.run(_eval(slam, [1.0], acc, _plate(225)))[0] in ("#FFC940",
                                                                     "rgb(255, 201, 64)")
+
+
+def test_band_graphics_can_shrink_into_the_band_above_the_larger_archival_card():
+    """Integration (panels + type system): the archival card (y .27-.70)
+    leaves a ~13% headline band; a short slam with its kicker and a counter
+    with its label must be able to narrow into it (word_slam width down to
+    0.3, counter size down to 0.4), as the band NOTE tells the agent to."""
+    assert motion_templates.spec("word_slam")["params"]["width"]["min"] <= 0.3
+    assert motion_templates.spec("counter")["params"]["size"]["min"] <= 0.4
+    slam = motion_templates.check_params("word_slam", {"text": "*Lisa*", "width": 0.3,
+                                                      "kicker": "Apple's 1983 computer"})
+    assert slam["width"] == pytest.approx(0.3)
+    ctr = motion_templates.check_params("counter", {"value": "30–40", "size": 0.4,
+                                                   "label": "fonts on the screen"})
+    assert ctr["size"] == pytest.approx(0.4)
+    box = keepout.nominal_ink("counter", motion_templates.spec("counter"), dict(ctr, y=0.19),
+                              (1080, 1920))
+    assert box[3] - box[1] < 0.13

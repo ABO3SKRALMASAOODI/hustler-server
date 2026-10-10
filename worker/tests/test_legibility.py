@@ -345,6 +345,7 @@ LEGIBLE = [
     ("checklist", None),
     ("quote_card", None),
     ("versus_split", None),
+    ("list_build", None),
 ]
 
 
@@ -578,3 +579,33 @@ def test_a_slam_landing_flash_lifts_luminance_in_the_same_hue():
         assert abs(hue - hue0) < 0.012, (k, st["c"])
         seen.add(st["c"])
     assert len(seen) >= 2                                      # it does flash
+
+
+@needs_browser
+def test_list_build_decides_legibility_like_every_type_template(tmp_path):
+    """The accumulating list (beats track) goes through MG.legible like the
+    rest (legibility track): on a white wall the items take dark ink and the
+    newest item a deepened accent of the same hue — no box, no dark wash
+    under dark ink; on a dark plate nothing changes."""
+    spec = motion_templates.spec("list_build")
+    p = motion_templates.check_params("list_build", dict(spec["example"], accent="#FF3B30"))
+    item = {"id": "lb", "template": "list_build", "start": 0.0, "end": 3.5, "params": p}
+    js = """(() => { const lines = Array.from(document.querySelectorAll('.item .line'));
+        const firsts = Array.from(document.querySelectorAll('.item')).map(it => it.querySelector('.line'));
+        return {inks: firsts.map(e => getComputedStyle(e).color),
+                shadow: lines.map(e => e.style.textShadow).join('|'),
+                boxes: document.querySelectorAll('.mg-backing').length,
+                scrim: getComputedStyle(document.querySelector('#scrim')).opacity}; })()"""
+    out = {}
+    for tag, luma in (("white", 236), ("dark", 25)):
+        plates = motion_layer.measure_plates([item], _UniformProbe(luma, 540, 960))
+        job = motion_templates.build_job(item, 540, 960, 30, plate=plates.get(0))
+        out[tag], = asyncio.run(_eval(job, [js], t=3.3))
+    white, dark = out["white"], out["dark"]
+    assert white["boxes"] == 0 and float(white["scrim"]) == 0.0
+    assert all(c == "rgb(20, 20, 20)" for c in white["inks"][:-1]), white
+    r, g, b = [int(v) for v in white["inks"][-1][4:-1].split(",")]
+    assert r > 3 * max(g, b, 1) and g <= 59 and b <= 48      # the accent's hue, never paled
+    assert "none" in white["shadow"]
+    assert dark["boxes"] == 0
+    assert all(c == "rgb(248, 246, 242)" for c in dark["inks"][:-1]), dark

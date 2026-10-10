@@ -901,9 +901,16 @@ def _overlay_spans(edl):
 
 
 def _insert_spans(prog):
+    """Spliced inserts as real imagery — never a payoff hold
+    (timeline.is_hold_insert): that is the last composed frame held over
+    room tone, the ending's air, not an image and not a beat."""
     out = []
     try:
+        import timeline as _tlm
+        items = sorted(getattr(prog.tl, "items", None) or [], key=_tlm._ins_sort_key)
         for k, (a, d) in enumerate(prog.tl.insert_positions()):
+            if k < len(items) and _tlm.is_hold_insert(items[k]):
+                continue
             if d > 0:
                 out.append({"start": float(a), "end": float(a) + float(d),
                             "kind": "image", "id": f"insert{k}"})

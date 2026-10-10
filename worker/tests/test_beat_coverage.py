@@ -798,3 +798,19 @@ def test_the_hook_and_list_estimates_match_a_probe():
         want = keepout.nominal_ink(item["template"], motion_templates.spec(item["template"]),
                                    item["params"])
         assert got and max(abs(a - b) for a, b in zip(got, want)) < 0.05, (item["params"], got, want)
+
+
+def test_a_payoff_hold_is_the_endings_air_not_an_image_or_a_beat():
+    """Integration (cuts + beats): the payoff hold (an image insert with
+    ``hold``, the last composed frame over room tone) is not real imagery
+    and never fills a dead stretch; a real image insert still is both."""
+    words = _body_words()
+    hold = {"id": "ins1", "kind": "image", "asset_key": "local:x.png", "at_output_s": 30.0,
+            "duration_s": 0.8, "hold": {"room_tone": [1.0, 1.4]}}
+    image = {"id": "ins2", "kind": "image", "asset_key": "img/y.png", "at_output_s": 12.0,
+             "duration_s": 1.5}
+    prog = edit_review._Program(_edl(_framing(), inserts=[hold]), {"words": words})
+    assert edit_review._imagery({}, [], prog) == []
+    prog = edit_review._Program(_edl(_framing(), inserts=[image, hold]), {"words": words})
+    spans = edit_review._imagery({}, [], prog)
+    assert [(s["start"], s["end"]) for s in spans] == [(12.0, 13.5)]
