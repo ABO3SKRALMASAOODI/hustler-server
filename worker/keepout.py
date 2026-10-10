@@ -197,6 +197,35 @@ def safe_issues(box, W, H):
     return out
 
 
+def watermark_zone(W=1080, H=1920, anchor_y=None, pad=0.01):
+    """The free-tier watermark's box on a W x H output, in fractions: the
+    robot plus the two-line wordmark at its slid-out position, padded by
+    ``pad``. A reserved zone for text placement (band planner, captions,
+    graphics): a free-tier final burns the mark there, top-left, over the
+    program. Read-only — the mark itself is renderer.watermark_geometry and
+    never moves for a layout. ``anchor_y``: renderer.watermark_anchor_y
+    (lower or scene placement), None for the normal corner."""
+    import config
+    import renderer
+    g = renderer.watermark_geometry(int(W), int(H), anchor_y)
+    fs = g["fontsize"]
+
+    def text_w(text):
+        try:
+            from PIL import ImageFont
+            font = ImageFont.truetype(renderer.watermark_font_path(), fs)
+            return float(font.getlength(text))
+        except Exception:
+            return 0.62 * fs * len(text)
+    words = max(text_w(config.WATERMARK_TEXT), text_w(config.WATERMARK_URL_TEXT))
+    x0, y0 = g["margin_x"], g["margin_y"]
+    x1 = g["x_out"] + words
+    y1 = max(y0 + g["rh"], g["y"] + 2.4 * fs)
+    W, H = float(W), float(H)
+    return [round(max(0.0, x0 / W - pad), 4), round(max(0.0, y0 / H - pad), 4),
+            round(min(1.0, x1 / W + pad), 4), round(min(1.0, y1 / H + pad), 4)]
+
+
 ISSUE_TEXT = {
     "side": "reached into the 6% side margins",
     "rail": "ran into the platform's right button rail (x > 0.88 between y 0.5 and 0.85)",

@@ -864,3 +864,17 @@ def test_the_solver_leaves_the_captions_a_band_rather_than_making_them_touch():
     assert room(best[2]) and not keepout.on_face(best[2], [face], []), best
     # a spot with room costs no more than it did before
     assert any(c[1] == best[1] and abs(c[0] - best[0]) < 1e-9 for c in plain)
+
+
+def test_the_watermark_zone_is_the_marks_top_left_box():
+    # the free-tier mark (robot + "Edited using Valmera AI / valmera.io")
+    # is a reserved zone for text placement; the judged collision: band
+    # kickers at y 0.09-0.115 under the mark
+    import keepout
+    z = keepout.watermark_zone(1080, 1920)
+    assert z[0] == pytest.approx(0.09, abs=.015)
+    assert z[1] == pytest.approx(0.05, abs=.015)
+    assert 0.35 < z[2] < 0.75 and 0.10 < z[3] < 0.15
+    assert keepout.inter(z, [0.2, 0.09, 0.8, 0.115]) > 0
+    low = keepout.watermark_zone(1080, 1920, anchor_y=400)
+    assert low[1] > z[3] - .01 and low[0] == z[0]
