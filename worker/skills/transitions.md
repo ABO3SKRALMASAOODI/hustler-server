@@ -12,13 +12,20 @@ decorates a jump cut.
 - Motivated junctions: section turns, hook → body, B-roll in and out,
   location or speaker changes, chapter titles, the montage-to-face return.
 - Hard cuts inside a take; a jump cut stays bare (fine by default) or,
-  only where its pop distracts, gets alternating framing (see zooms) —
-  never a full-screen effect.
+  only where it is genuinely jarring, takes B-roll or a framing change (see
+  zooms) — never a full-screen effect.
 - A junction at a real turn may carry one library sound, counted in the
   short's sparse budget (about one sound every 4–5 s at most, never the same
   sound twice within ~3 s). Ordinary cuts inside a conversation get none.
 - Vary the junction vocabulary across a reel; never the same effect
   back-to-back on every boundary.
+
+ZOOMS AND SOUND EFFECTS ARE OPTIONAL, NEVER RULES (owner, Oct 2026):
+restraint is the default. Reach for a zoom or a sound only when a specific
+moment needs it — a key word, a reveal, a genuinely jarring jump cut, a
+real-world action shown — and zero is a fine answer. Never a zoom per cut,
+a camera move per hero moment or a sound per landing or transition: used
+where nothing calls for them they make an edit look childish.
 
 ## Evidence to inspect
 
@@ -47,12 +54,14 @@ unless you pass `sfx=true`, which maps their sound roles onto the approved
 library. Use them to vary the vocabulary: a light leak into the
 story, a whip into B-roll, a flash on the reveal.
 
-JUNCTION SOUND: a look from `apply_look` may already place its own
-transition sounds (ids starting `look_tx`) — read its receipt or `get_edl`
-(sfx) first and adjust, move or remove those with `set_audio_gain`,
-`move_sfx` or `remove_sfx` instead of stacking a second sound. When
-`set_transitions` places effects it adds no sound; choose which real turns
-earn one and place it from the library (`list_sound_library`):
+JUNCTION SOUND: `apply_look` places no sound unless it is called with
+`transition_sounds=true` (only when the user asked for transition sounds);
+when it did, its cues carry ids starting `look_tx` — read its receipt or
+`get_edl` (sfx) first and adjust, move or remove those with
+`set_audio_gain`, `move_sfx` or `remove_sfx` instead of stacking a second
+sound. `set_transitions` adds no sound either; most junctions stay silent.
+Where a real turn earns one, place it from the library
+(`list_sound_library`):
 `add_sfx(storage_key='sound:swish_1', at=..., gain_db=-14)` for a whip or
 zoom punch, `sound:whoosh_soft_1` or `sound:whoosh_soft_2` into a slide, a
 light leak or a reveal, `sound:glitch_1` under a deliberate glitch, and
@@ -70,9 +79,10 @@ THE JUMP-CUT LAW:
   continuous shot. Decorating each with a full-screen effect looks broken (a
   whip on all of them fires an effect every couple of seconds through
   footage that never changed scene). Leave jump cuts hard; where one pop
-  genuinely distracts, alternating framing covers it — tight from that cut
-  to the next, wide at the following one (read zooms; zooms are optional,
-  never on every cut); keep `landing` zooms for real cuts between ideas.
+  is genuinely jarring, B-roll or alternating framing covers it — tight
+  from that cut to the next, wide at the following one (read zooms; zooms
+  are optional, never on every cut); keep `landing` zooms for real cuts
+  between ideas.
 - `set_transitions` defaults to scope='scene' and lands only on real shot
   changes and insert boundaries. READ THE RESULT — it says how many junctions
   it used ("7 of 45"); report THAT number, not the cut count.

@@ -50,13 +50,17 @@ After any cut, read the program words once more (`get_kept_transcript`) and
 write the beats you will execute, in output seconds:
 
 ```text
-hook    0.00  landing 0.16 (silent); hook_title "Computers look like *garbage*" 0.15-2.6 (sfx=true: its whoosh + pop, one event)
+hook    0.00  hook_title "Computers look like *garbage*" 0.15-2.6 (silent; the title is the interrupt)
 hero 1  6.42  "garbage"   word_slam serif, start 6.22 (lands +0.2, silent)
-turn   14.80  "ten million" counter 0 -> 10M (silent), punch 0.15
-hero 2 21.10  camera change -> landing (silent); marker_text "whether they look great or not" (silent)
-payoff 33.60  "look great" word_slam; riser_2 and impact_1 at 33.6 (add_sfx `at` is the hit: the riser ends there, the boom lands there); hold to 35.0
-sound   2 events in 35 s (hook 0.15, payoff 32.5-33.6); music off (no owner song)
+turn   14.80  "ten million" counter 0 -> 10M (silent)
+hero 2 21.10  marker_text "whether they look great or not" (silent)
+payoff 33.60  "look great" word_slam + punch 0.12 (the one move: the line the story turns on); ding_1 at 33.6 (add_sfx `at` is the hit); hold to 35.0
+camera  1 zoom (payoff); every jump cut left bare
+sound   1 event in 35 s (payoff); music off (no owner song)
 ```
+
+Most beats are silent and the camera is steady: that is the default, not a
+gap. Each zoom or sound in the sheet names the moment that earns it.
 
 Every timestamp comes from a tool result. Readable frames land on the word's
 audible onset (0-3 frames early); `word_slam` lands 0.2 s after its start;
@@ -73,12 +77,12 @@ recheck every output-timed item.
 | Step | Calls | Notes |
 | --- | --- | --- |
 | Cuts | 0-1 `keep_segments` | only to tighten inside the range |
-| Look | 1 `apply_look(name)`, never with a music option | sets caption look, grade, grain and base transitions; read what it set and remove any transition sound that is not on a real turn |
+| Look | 1 `apply_look(name)`, never with a music option | sets caption look, grade, grain and base transitions, and no sound (never pass `transition_sounds=true` unless the brief asks); read what it set |
 | Captions | 1 `add_captions(mode='from_transcript', style={...})` or `set_caption_style` | `style.motion_look` per Look; `emphasis_words` = the meaning-bearing words; keep the active-word accent if the brief asks |
 | Frame | 1-2 `set_frame` (or `auto_reframe`), `set_picture_card` | full-bleed with a per-shot `focus_track` (source seconds), or a card from looks.md **Card geometry** with `background_style` (`blur` or a gradient), grain and vignette |
 | Headline | 0-1 `set_editorial_graphic(kind="headline", speaker, text)` | headline-conversation only; verified speaker first |
 | Designed beats | 3-6 `add_motion_graphic` | one per beat, silent by default; `sfx=true` only on the hook, the payoff or a graphic showing a real-world action; `purpose` names the beat, stable `id` |
-| Camera | 0-3 `add_zoom` (optional) | only where a moment clearly earns a move (the payoff word, a real turn between ideas); zero is fine; never on every cut, take or sentence. Modes per the Look (schema names) |
+| Camera | 0-3 `add_zoom` (optional) | only where a moment clearly earns a move (the payoff word, a real turn between ideas, a genuinely jarring jump cut); zero is fine; never on every cut, take, sentence or hero moment. Modes per the Look (schema names) |
 | Transitions | 0-1 `set_transitions` | base style, `scope='scene'` |
 | Sound | 0-5 `add_sfx(storage_key='sound:<id>', at=..., gain_db=<suggested>)` (optional) | only meaningful on-screen moments, from your Look's family; zero is fine; the whole short stays at about one sound every 4-5 s at most (template cues count), none repeated within ~3 s |
 | Music | 0-1 `add_music` (after `fetch_url` for a link) | only the owner's song, only when `music_effective` is on; bed -20 dB ducked; a montage's bed leads |
@@ -170,12 +174,12 @@ preview link:
 
 ```text
 s07 · kinetic-poster · fast-conversation · EDL v14 · 1 render
-Hook: 0.2s landing + hook_title whoosh, title by 1.1s ("Why fonts were garbage")
+Hook: hook_title by 1.1s ("Why fonts were garbage"), silent
 Heroes: 6.4 garbage slam; 14.8 counter 10M; 29.0 typeface cycle
-Payoff: 33.6 "look great" slam + riser_2 into impact_1, held 1.3s
-Sound: 2 events, 4 cues (2 template, 2 library); music off (no owner song)
+Payoff: 33.6 "look great" slam + punch 0.12 + ding_1, held 1.3s
+Camera/sound: 1 zoom, 1 sound (both on the payoff); music off (no owner song)
 Targets: change ~0.4s, picture full-bleed, 3 heroes
-Weakest: 18-20s talking head with only captions (push_in 0.05)
+Weakest: 18-20s talking head with only captions (a kicker on "Lisa" would carry it)
 Assets: Lisa photo (Wikimedia, CC BY-SA 4.0, credit in handback)
 ```
 

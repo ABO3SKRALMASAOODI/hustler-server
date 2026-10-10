@@ -37,11 +37,15 @@ def advisory_findings(ctx, row):
     edl = row.get("json") or {}
     index = getattr(ctx, "index", None) or {}
     video = index.get("video") or {}
+    cache = getattr(ctx, "_jumpcut_faces", None) or {}
     findings = taste.critique(
         edl, index, Timeline(edl.get("keep") or [], edl.get("inserts") or [],
                              edl.get("speed") or []),
         src_w=video.get("width"), src_h=video.get("height"),
-        user_asked=quality_verifier.request_text_for(ctx))
+        user_asked=quality_verifier.request_text_for(ctx),
+        # the frames render_preview measured for its jump-cut note, read
+        # back without decoding anything new
+        measure=lambda src_t: cache.get(round(float(src_t), 2)))
     findings += [r["message"] for r in _deterministic(ctx, edl, index)
                  if not quality_verifier.is_blocking(r)]
     return list(dict.fromkeys(findings))

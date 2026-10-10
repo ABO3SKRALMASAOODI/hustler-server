@@ -1,13 +1,18 @@
 """suggest_motion_beats: a premium beat sheet from the kept transcript.
 
-Top short-form editors make something change on screen every 0.3-0.6 s,
-interrupt the scroll in the first half-second, and bind 2-4 hero moments to
-the exact words that carry the story (numbers, lists, contrasts, the
-stressed claim, the call to action). This module finds those anchors in the
-CURRENT program (kept words on the output clock, cuts, long static holds)
-and returns concrete, timed suggestions — template, program time, extracted
-values and the reason — so the editor spends its turns on taste and copy
-instead of searching the transcript.
+Top short-form editors interrupt the scroll in the first half-second and bind
+2-4 hero moments to the exact words that carry the story (numbers, lists,
+contrasts, the stressed claim, the call to action). This module finds those
+anchors in the CURRENT program (kept words on the output clock, cuts, long
+holds) and returns concrete, timed suggestions — template, program time,
+extracted values and the reason — so the editor spends its turns on taste
+and copy instead of searching the transcript.
+
+ZOOMS AND SOUND EFFECTS ARE OPTIONAL, NEVER RULES (owner, Oct 10 2026): the
+sheet suggests graphics only. Camera candidates (``camera=True``) and sound
+candidates (``sounds=True``) are opt-in, and even then they are a short list
+of moments that could earn one — never a landing per cut, a push per hold or
+a sound per beat.
 
 It never writes the EDL and never invents copy or numbers: values come only
 from spoken words, and text fields are left for the editor to author
@@ -102,7 +107,26 @@ def _sentences(words):
     return out
 
 
-def plan(edl, index, density="premium"):
+# Library sounds a beat COULD take when the editor asked for sound
+# candidates (sounds=True): owner-approved recordings only, each optional,
+# and repeating cues (a tick per count or per item) stay silent.
+BEAT_SOUNDS = {
+    "hook": "optional: whoosh_soft_1 into the title (sfx=true), only if the opening earns it",
+    "number": "optional: one ding_1 (cash_register_1 on money) on the settled figure; the count itself stays silent",
+    "number_cluster": "optional: pop_1 on the last value only (a sound per value repeats)",
+    "list": "silent (a tick per item repeats within ~3 s); at most pop_1 on the last item",
+    "contrast": "optional: swish_1 on the swap",
+    "hero_word": "silent unless it is the payoff (impact_1, once per short)",
+    "cta": "optional: click_1 on the visible press (sfx=true)",
+}
+# Camera candidates (camera=True) are a short list, never one per cut or
+# hold: about one per this many program seconds, at least one.
+CAMERA_EVERY_S = 15.0
+# A hold this long with nothing designed on it is reported as a diagnostic.
+LONG_HOLD_S = 3.5
+
+
+def plan(edl, index, density="premium", camera=False, sounds=False):
     """Pure planner: returns a dict with beats and pacing diagnostics."""
     tl = Timeline(edl.get("keep") or [], edl.get("inserts") or [], edl.get("speed") or [])
     src_words = [w for w in (index.get("words") or [])
@@ -127,8 +151,7 @@ def plan(edl, index, density="premium"):
          "end": round(min(prog, max(1.8, (first[-1]["t1"] if first else 2.4) + 0.2), 3.0), 2),
          "params": {"text": None, "y": 0.2},
          "text_hint": hint,
-         "why": "pattern interrupt + hook line on screen within 0.6 s (write a faithful 3-7 word hook; star one accent word)",
-         "sound": "template cues (whoosh_soft + pop_soft)"})
+         "why": "pattern interrupt + hook line on screen within 0.6 s (write a faithful 3-7 word hook; star one accent word)"})
     # 2. numbers -> counter (a cluster of numbers within ~5 s -> one stat stack)
     found = []
     i = 0
@@ -163,8 +186,7 @@ def plan(edl, index, density="premium"):
                      "params": {"to": to, "prefix": prefix, "suffix": (scale + suffix) or "",
                                 "label": None},
                      "text_hint": ctx_words,
-                     "why": f"spoken number '{' '.join(w['w'] for w in words[_i:_i + consumed])}' — make it land as a counter (label = what it measures, from the sentence)",
-                     "sound": "template cues (tick/ding)"})
+                     "why": f"spoken number '{' '.join(w['w'] for w in words[_i:_i + consumed])}' — make it land as a counter (label = what it measures, from the sentence)"})
         else:
             rows = []
             for _i, val, prefix, suffix, consumed in cl:
@@ -175,8 +197,7 @@ def plan(edl, index, density="premium"):
                  "end": round(min(prog, float(words[min(len(words) - 1, last_i)]["t1"]) + 1.8), 2),
                  "params": {"rows": rows},
                  "text_hint": ctx_words,
-                 "why": f"{len(cl)} spoken numbers within 5 s — one stat stack/bar comparison revealing each value on its cue (or stacked counters)",
-                 "sound": "pop/tick per value"})
+                 "why": f"{len(cl)} spoken numbers within 5 s — one stat stack/bar comparison revealing each value on its cue (or stacked counters)"})
     # 3. enumerations -> checklist / phrase_build
     lowered = [_clean(w["w"]).lower() for w in words]
     for k, tok in enumerate(lowered):
@@ -191,8 +212,7 @@ def plan(edl, index, density="premium"):
                          "params": {"items": None},
                          "item_times": [round(float(words[j]["t0"]), 2) for j in [k] + later],
                          "text_hint": " ".join(w["w"] for w in words[k:min(len(words), later[-1] + 8)]),
-                         "why": "spoken enumeration — reveal each item on its cue",
-                         "sound": "tick per item"})
+                         "why": "spoken enumeration — reveal each item on its cue"})
             break
     # 4. contrasts -> versus_split / word_slam
     for s in _sentences(words):
@@ -205,8 +225,7 @@ def plan(edl, index, density="premium"):
                      "end": round(min(prog, float(s[-1]["t1"]) + 0.6), 2),
                      "params": {"left": None, "right": None},
                      "text_hint": text,
-                     "why": f"contrast ('{m.group(0)}') — make the two sides visible",
-                     "sound": "whoosh_hard + kick"})
+                     "why": f"contrast ('{m.group(0)}') — make the two sides visible"})
     # 5. emphasis -> word_slam (spaced)
     emph = {(_clean(w)).lower() for w in ((edl.get("captions") or {}).get("emphasis_words") or [])
             if isinstance(edl.get("captions"), dict)}
@@ -217,8 +236,7 @@ def plan(edl, index, density="premium"):
             add({"at": round(max(0.0, t - 0.03), 2), "template": "word_slam", "kind": "hero_word",
                  "end": round(min(prog, t + 1.2), 2),
                  "params": {"text": _clean(w["w"])},
-                 "why": "stressed/emphasis word — hero word on its onset",
-                 "sound": "kick on the landing"})
+                 "why": "stressed/emphasis word — hero word on its onset"})
     # 6. CTA
     for s in _sentences(words):
         text = " ".join(w["w"] for w in s)
@@ -231,74 +249,133 @@ def plan(edl, index, density="premium"):
             add({"at": round(float(s[0]["t0"]), 2), "template": tpl, "kind": "cta",
                  "end": round(min(prog, float(s[-1]["t1"]) + 1.0), 2),
                  "params": {}, "text_hint": text,
-                 "why": "spoken call to action — show it as native UI", "sound": "template cues"})
-    # 7. cuts -> landing zooms; long holds -> pulse/push
-    camera = []
-    blocks = []
-    acc = 0.0
-    for (s0, s1), L in zip(tl.segs, tl.seg_out_len):
-        blocks.append((acc, acc + L))
-        acc += L
-    for a, b in blocks[1:]:
-        if b - a >= 1.0:
-            camera.append({"at": round(a, 2), "end": round(min(b, a + 0.45), 2), "tool": "add_zoom",
-                           "mode": "landing", "why": "eased landing zoom hides the jump cut and adds energy"})
-    events = sorted(set(round(b["at"], 2) for b in beats) | {round(c["at"], 2) for c in camera}
+                 "why": "spoken call to action — show it as native UI"})
+    beats.sort(key=lambda x: x["at"])
+    if sounds:
+        for b in beats:
+            b["sound"] = BEAT_SOUNDS.get(b["kind"], "silent")
+    # 7. long holds: a diagnostic, not a request for a camera move
+    events = sorted({round(b["at"], 2) for b in beats}
                     | {round(float(w["t0"]), 2) for w in words[::3]})
     holds = []
     last = 0.0
     for t in events + [prog]:
-        if t - last > 3.5:
+        if t - last > LONG_HOLD_S:
             holds.append([round(last, 2), round(t, 2)])
         last = t
-    for a, b in holds:
-        camera.append({"at": round(a + 0.3, 2), "end": round(b, 2), "tool": "add_zoom",
-                       "mode": "push", "why": f"{b - a:.1f}s without a visual change — slow push or a B-roll/graphic beat"})
-    beats.sort(key=lambda x: x["at"])
-    per10 = (len(beats) + len(camera)) / max(prog / 10.0, 0.1)
-    return {"program_s": round(prog, 2), "density": density, "beats": beats, "camera": camera,
-            "long_holds": holds,
+    # 8. camera candidates — only when asked (camera=True), and a short list
+    cam = _camera_candidates(tl, index, beats, holds, prog) if camera else []
+    per10 = (len(beats) + len(cam)) / max(prog / 10.0, 0.1)
+    return {"program_s": round(prog, 2), "density": density, "beats": beats,
+            "camera": cam, "long_holds": holds,
             "designed_events_per_10s": round(per10, 2),
             "note": ("Captions (motion_look) already change every word; these beats add the hero "
                      "layer. Write every text param yourself from the quoted transcript; never "
                      "invent numbers or claims.")}
 
 
-def suggest_motion_beats(ctx, density="premium"):
+def _camera_candidates(tl, index, beats, holds, prog):
+    """A few moments that COULD earn a camera move, strongest first — never
+    one per cut or per hold: about one per CAMERA_EVERY_S of program. Jump
+    cuts inside one take are never candidates (a bare jump cut is fine)."""
+    out = []
+    order = {"number": 0, "hero_word": 1, "contrast": 2}
+    for b in sorted((b for b in beats if b["kind"] in order),
+                    key=lambda b: (order[b["kind"]], b["at"])):
+        out.append({"at": b["at"], "end": round(min(prog, b["end"]), 2), "tool": "add_zoom",
+                    "mode": "punch",
+                    "why": f"optional: a punch on this {b['kind'].replace('_', ' ')} only if it is "
+                           "the line the story turns on (the payoff, the biggest number)"})
+    shots = (index or {}).get("shots") or []
+    if shots:
+        prev_end = None
+        for i, (s0, s1) in enumerate(tl.segs):
+            at = float(tl.offsets[i])
+            if prev_end is not None and \
+                    _shot_of(shots, float(s0) + 0.04) != _shot_of(shots, prev_end - 0.04):
+                out.append({"at": round(at, 2), "end": round(min(prog, at + 0.45), 2),
+                            "tool": "add_zoom", "mode": "landing",
+                            "why": "optional: a landing on this camera change only if it opens "
+                                   "a new idea (skip angle changes inside one thought)"})
+            prev_end = float(s1)
+    for a, b in holds:
+        if b - a >= 2 * LONG_HOLD_S:
+            out.append({"at": round(a + 0.3, 2), "end": round(b, 2), "tool": "add_zoom",
+                        "mode": "push_in",
+                        "why": f"optional: {b - a:.1f}s hold — a graphic or B-roll beat if the story "
+                               "needs one; a slow push_in only if the line builds to something"})
+    cap = max(1, int(prog / CAMERA_EVERY_S))
+    return out[:cap]
+
+
+def _shot_of(shots, t):
+    for k, sh in enumerate(shots):
+        try:
+            a = float(sh.get("start", sh.get("t0")))
+            b = float(sh.get("end", sh.get("t1")))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if a - 1e-6 <= t < b + 1e-6:
+            return sh.get("id", k)
+    return None
+
+
+def _flag(v):
+    return v is True or str(v).strip().lower() in ("true", "1", "yes", "on")
+
+
+def suggest_motion_beats(ctx, density="premium", camera=False, sounds=False):
     """READ: timed premium beat sheet for the current program."""
     if not getattr(ctx, "has_main_video", True):
         return "REJECTED: needs a transcribed main video (no words to plan from)."
     edl = ctx.latest_edl()["json"]
+    camera, sounds = _flag(camera), _flag(sounds)
     try:
-        result = plan(edl, ctx.index or {}, density=density)
+        result = plan(edl, ctx.index or {}, density=density, camera=camera, sounds=sounds)
     except Exception as e:  # noqa: BLE001
         return f"Could not plan beats ({str(e)[:160]})."
-    lines = [f"Program {result['program_s']}s — {len(result['beats'])} hero beats, "
-             f"{len(result['camera'])} camera moves suggested "
-             f"(~{result['designed_events_per_10s']} designed events per 10 s; captions add more)."]
+    lines = [f"Program {result['program_s']}s — {len(result['beats'])} hero beats"
+             + (f", {len(result['camera'])} optional camera candidates" if camera else "")
+             + f" (~{result['designed_events_per_10s']} designed events per 10 s; captions add more)."]
     for b in result["beats"]:
         p = {k: v for k, v in b["params"].items() if v is not None}
         lines.append(f"- {b['at']:.2f}-{b['end']:.2f}s {b['template']} [{b['kind']}] params={json.dumps(p)}"
                      + (f" item_times={b['item_times']}" if b.get("item_times") else "")
-                     + f" — {b['why']}" + (f" | transcript: \"{b['text_hint'][:140]}\"" if b.get("text_hint") else ""))
+                     + f" — {b['why']}"
+                     + (f" | sound: {b['sound']}" if b.get("sound") else "")
+                     + (f" | transcript: \"{b['text_hint'][:140]}\"" if b.get("text_hint") else ""))
     for c in result["camera"]:
         lines.append(f"- {c['at']:.2f}-{c['end']:.2f}s {c['tool']} mode={c['mode']} — {c['why']}")
     if result["long_holds"]:
-        lines.append(f"Long static holds: {result['long_holds']}")
-    lines.append(result["note"] + " Place beats with add_motion_graphic (one call each, "
-                 "sound cues included) and camera moves with add_zoom.")
+        lines.append(f"Long holds (a graphic or B-roll beat if the story needs one; a steady "
+                     f"frame is fine): {result['long_holds']}")
+    lines.append(result["note"] + " Place the beats you agree with via add_motion_graphic, one "
+                 "call each (graphics are silent by default).")
+    if not (camera and sounds):
+        lines.append("Zooms and sound effects are optional, never rules: "
+                     + ("camera=true lists a few moments that could earn a move; " if not camera else "")
+                     + ("sounds=true names the library sound each beat could take; " if not sounds else "")
+                     + "zero of either is a fine answer.")
     return "\n".join(lines)
 
 
 TOOL_SPECS = {
     "suggest_motion_beats": (
         suggest_motion_beats,
-        "READ: a timed premium beat sheet for the CURRENT program: hook interrupt at 0 s, "
-        "counters on spoken numbers (values parsed from the words), checklists on enumerations, "
-        "versus cards on contrasts, hero word slams on emphasis words, native-UI CTAs on spoken "
-        "calls to action, landing zooms after cuts and pushes over long static holds — each with "
-        "program times, template, extracted params and the transcript to paraphrase. Call it "
-        "after the cut and captions are set, then place the beats you agree with.",
+        "READ: a timed premium beat sheet of GRAPHICS for the CURRENT program: hook interrupt at "
+        "0 s, counters on spoken numbers (values parsed from the words), checklists on "
+        "enumerations, versus cards on contrasts, hero word slams on emphasis words, native-UI "
+        "CTAs on spoken calls to action — each with program times, template, extracted params "
+        "and the transcript to paraphrase — plus long holds as a diagnostic. Zooms and sound "
+        "effects are optional, never rules, so both are OFF by default: camera=true adds a short "
+        "list of moments that could earn a camera move (never one per cut or hold), sounds=true "
+        "names the approved library sound each beat could take. Call it after the cut and "
+        "captions are set, then place the beats you agree with.",
         {"density": {"type": "string", "enum": ["premium", "balanced", "minimal"],
-                     "description": "spacing between hero beats (premium ≈ every 2-3 s)"}}),
+                     "description": "spacing between hero beats (premium ≈ every 2-3 s)"},
+         "camera": {"type": "boolean",
+                    "description": "opt in to a few optional camera candidates (default false)"},
+         "sounds": {"type": "boolean",
+                    "description": "opt in to optional library-sound suggestions per beat "
+                                   "(default false)"}}),
 }

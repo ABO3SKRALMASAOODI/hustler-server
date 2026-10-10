@@ -124,14 +124,15 @@ def resolve_library_reference(ctx, storage_key):
 
 
 SOUND_POLICY = (
-    "Use sound like a professional editor, never as decoration: only where something "
-    "meaningful happens ON SCREEN — a designed graphic landing, a real section change or "
-    "B-roll entry, the payoff, or a real-world action shown (shutter on a photo, typing under "
-    "typed text, a click on a button press, a cash register on a money figure). Never on "
-    "captions or on ordinary cuts inside a conversation. Sparse: at most about one sound every "
-    "4-5 s (≈4-8 in a 30-45 s short), never the same sound twice within ~3 s, zero is fine "
-    "when nothing earns one. Match the material, keep one family per short, place the peak on "
-    "the visual frame, and mix under the voice at the suggested gain.")
+    "Sound effects are optional, never rules: restraint is the default and zero is a fine "
+    "answer. Use one like a professional editor, only where something meaningful happens ON "
+    "SCREEN — a designed graphic landing, a real section change or B-roll entry, the payoff, "
+    "or a real-world action shown (shutter on a photo, typing under typed text, a click on a "
+    "button press, a cash register on a money figure). Never on captions, on ordinary cuts "
+    "inside a conversation, or as a sound per landing or transition. At most about one sound "
+    "every 4-5 s (a ceiling, usually far fewer), never the same sound twice within ~3 s. "
+    "Match the material, keep one family per short, place the peak on the visual frame, and "
+    "mix under the voice at the suggested gain.")
 
 
 def list_sound_library(ctx, role=None):
@@ -526,10 +527,16 @@ def _attach_subject_matte(ctx, edl, item, bbox):
 KEEPOUT_FRAME_CAP = 60
 
 
-def _face_measure(ctx):
+# The jump-cut note (taste.uncovered_jump_cuts) measures the two frames either
+# side of a cut; it keeps its own cache so it never spends the keep-out's.
+JUMPCUT_FRAME_CAP = 2 * 24
+
+
+def _face_measure(ctx, cache_attr="_keepout_faces", cap=KEEPOUT_FRAME_CAP):
     """src_t -> face boxes on that exact source frame (keepout.detect_faces),
     or None when this context cannot decode the footage (the index's
-    spatial samples answer instead)."""
+    spatial samples answer instead). Results are cached on the context under
+    ``cache_attr``, at most ``cap`` frames."""
     if not getattr(ctx, "has_main_video", True):
         return None
     try:
@@ -539,11 +546,11 @@ def _face_measure(ctx):
         return None
     if not proxy or not os.path.exists(proxy) or not workdir:
         return None
-    cache = getattr(ctx, "_keepout_faces", None)
+    cache = getattr(ctx, cache_attr, None)
     if cache is None:
         cache = {}
         try:
-            setattr(ctx, "_keepout_faces", cache)
+            setattr(ctx, cache_attr, cache)
         except Exception:  # noqa: BLE001
             pass
 
@@ -552,7 +559,7 @@ def _face_measure(ctx):
         key = round(float(src_t), 2)
         if key in cache:
             return cache[key]
-        if len(cache) >= KEEPOUT_FRAME_CAP:
+        if len(cache) >= cap:
             return None
         fp = os.path.join(workdir, f"keepout_{int(round(key * 100))}.jpg")
         try:
@@ -563,6 +570,12 @@ def _face_measure(ctx):
         cache[key] = faces
         return faces
     return measure
+
+
+def jump_cut_measure(ctx):
+    """The face measure taste.critique uses for its jump-cut note (two frames
+    per cut, its own cache), or None when the footage cannot be decoded."""
+    return _face_measure(ctx, "_jumpcut_faces", JUMPCUT_FRAME_CAP)
 
 
 def _mutes_captions(item):

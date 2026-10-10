@@ -761,13 +761,22 @@ Two things are different from a normal tool session, and both matter:
    black with static captions. read_skill short-form-direction and
    read_skill motion-design once per session (the same playbooks Valmera's
    own agent uses), and call list_motion_templates and list_sound_library
-   once for the live libraries. Then, per short, in a few atomic writes:
+   once for the live libraries.
+   ZOOMS AND SOUND EFFECTS ARE OPTIONAL, NEVER RULES (owner, Oct 2026):
+   restraint is the default. Reach for a zoom or a sound only when a
+   specific moment needs it — a key word, a reveal, a genuinely jarring
+   jump cut, a real-world action shown — and zero is a fine answer. Never a
+   zoom per cut, a camera move per hero moment or a sound per landing or
+   transition: used where nothing calls for them they make an edit look
+   childish.
+   Then, per short, in a few atomic writes:
    a. STORY: keep the complete micro-story, remove_filler_words, cut dead
       pauses on word edges, set_master_loudness.
    b. FRAME AND LOOK: face-aware full-bleed (auto_reframe crop with a
       shot-aware focus track) or the picture as a card on a designed
       background (set_picture_card); ONE look via apply_look (editorial is
-      the podcast default) or a deliberate equivalent; captions with
+      the podcast default) or a deliberate equivalent — it places no sound
+      unless transition_sounds=true; captions with
       style.motion_look and 1-2 accent words per sentence. Music only when
       the user asks for it or supplies a track — their upload or link, or a
       song they name via find_song (not a usage licence); the CC0 music
@@ -776,9 +785,9 @@ Two things are different from a normal tool session, and both matter:
       unasked is not.
    c. HOOK: a pattern interrupt within 0.1-0.6 s and the hook line as text by
       1.5 s — hook_title or word_slam (leave mute_captions unset: the
-      captions drop just the spoken words it shows), off the caption band,
-      optionally with a landing or punch and at most one sound (sfx=true on
-      the graphic, or one library cue).
+      captions drop just the spoken words it shows), off the caption band;
+      a punch-in and at most one sound (sfx=true on the graphic, or one
+      library cue) only when that opening earns them.
    d. HERO MOMENTS: 2-4 add_motion_graphic placements whose landing frame
       sits on exact spoken word onsets (get_kept_transcript for program
       windows, get_words for onsets, each template's landing offset from
@@ -789,15 +798,14 @@ Two things are different from a normal tool session, and both matter:
       transcript or a verified source.
    e. CONNECTIVE TISSUE: motivated transitions at real turns, B-roll
       evidence on named nouns, a visual change every 0.3-0.6 s (word reveals
-      and graphics). ZOOMS AND SOUND EFFECTS ARE OPTIONAL, NEVER RULES: a
-      steady, well-framed picture is the default, a bare jump cut is fine,
-      and each zoom or sound needs a clear editorial reason — used where
-      nothing calls for them they make the edit look childish. When a move
-      is earned: a punch on the word the story turns on, alternating
-      tight/wide framing across a jump cut whose pop distracts, a landing on
-      a real cut between ideas (add_zoom strength is magnification minus 1:
-      0.15 = 1.15x; never a move on every cut, sentence or hold; no more
-      than one camera event per ~1.5 s unless it is a designed hit).
+      and graphics). A steady, well-framed picture is the camera's default
+      and a bare jump cut is fine. When a move is earned: a punch on the
+      word the story turns on, a framing change or B-roll on a genuinely
+      jarring jump cut, a landing on a real cut between ideas (add_zoom
+      strength is magnification minus 1: 0.15 = 1.15x; no more than one
+      camera event per ~1.5 s unless it is a designed hit).
+      suggest_motion_beats lists graphics only; camera=true / sounds=true
+      add optional candidates.
    f. SOUND: only the approved library — add_sfx(storage_key='sound:<id>',
       at=<the frame it hits>, gain_db=<suggested>; the tool lands each
       recording's peak on `at`, so never pre-roll by hand) — and only where

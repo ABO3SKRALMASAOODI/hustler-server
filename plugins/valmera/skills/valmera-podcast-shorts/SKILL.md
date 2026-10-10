@@ -1,22 +1,30 @@
 ---
 name: valmera-podcast-shorts
-description: Turn podcasts and interviews into premium, story-led social shorts with Valmera, using one coordinator and reusable editor subagents, ranked hero stories, reference-derived Looks (motion typography, sound design, eased camera moves), fast batch review and verified local exports. Use when the user asks to make shorts from a podcast or interview with this workflow. Does not publish or operate the downstream CRM.
+description: Turn podcasts and interviews into premium, story-led social shorts with Valmera, using one coordinator and reusable editor subagents, ranked hero stories, reference-derived Looks (motion typography and designed graphics, with sound and camera moves only where a moment earns them), fast batch review and verified local exports. Use when the user asks to make shorts from a podcast or interview with this workflow. Does not publish or operate the downstream CRM.
 ---
 
 # Valmera Podcast Shorts (v9)
 
 Make shorts that look and sound like the best Instagram editors made them,
 and better: a story worth finishing, committed art direction, motion
-typography, and — only where a moment clearly earns them — sound edited to
-picture and eased camera moves. **Zooms and sound effects are optional,
-never rules** (owner, Oct 10): used where nothing calls for them they make a
-short look childish, so a steady, well-framed picture and a clean voice are
-the defaults and every zoom or sound needs a reason you can name. The owner's
-references score about 7.5/10; October's restrained, silent shorts scored
-2.6. v9 replaces restraint with **Looks** ([references/looks.md](references/looks.md)):
-sparse sound from the owner-approved library, the picture fills the frame,
-one render is the norm and review is a quick binary verdict. Superseded v6-v8
-material lives in `legacy/`.
+typography and designed graphics, and — only where a moment clearly earns
+them — sound edited to picture and eased camera moves.
+
+ZOOMS AND SOUND EFFECTS ARE OPTIONAL, NEVER RULES (owner, Oct 2026):
+restraint is the default. Reach for a zoom or a sound only when a specific
+moment needs it — a key word, a reveal, a genuinely jarring jump cut, a
+real-world action shown — and zero is a fine answer. Never a zoom per cut,
+a camera move per hero moment or a sound per landing or transition: used
+where nothing calls for them they make an edit look childish.
+
+A steady, well-framed picture and a clean voice are the defaults, and every
+zoom or sound needs a reason you can name. The owner's references score
+about 7.5/10; October's bare clip pages (small picture, plain captions,
+nothing designed) scored 2.6. v9 answers with **Looks**
+([references/looks.md](references/looks.md)): designed type and graphics on
+the story's words, the picture filling the frame, sparse optional sound from
+the owner-approved library, one render as the norm and review as a quick
+binary verdict. Superseded v6-v8 material lives in `legacy/`.
 
 ## Roles and what to read
 
@@ -46,8 +54,9 @@ disagree, v9 wins on method and the brief wins on preferences.
 - **Superseded:** "no maximum" story counts (use 8-12 heroes; a standard
   tier only when asked); v7 run state (use `scripts/run.py`);
   `premium-design.md`, `additional-reels.md` and `set_typography_scene` as
-  primary direction (use looks.md); restraint defaults, the blanket SFX ban
-  (sound is now sparse and library-only), any `auto` music or library bed
+  primary direction (use looks.md); the bare clip-page defaults, the blanket
+  SFX ban (sound is now optional, sparse and library-only), any `auto` music
+  or library bed
   (music is off without the owner's song), the black canvas, the
   per-candidate evidence path (use review.md) and the score-90 gate.
 
@@ -125,9 +134,11 @@ shutter on a photo, typing under typed text, a click on a button press, a
 cash register on a money figure). Never on captions or ordinary cuts inside
 the conversation. Optional, never a quota: at most about one sound every
 4-5 s (a ceiling, usually far fewer), never the same sound twice within
-~3 s, zero when nothing earns one; one family per short, matched to the material; peaks on the
-visual frame; mixed under the voice at the suggested gain. Motion graphics
-are silent unless the editor passes `sfx=true` (looks.md, **Sound**).
+~3 s, zero when nothing earns one; one family per short, matched to the
+material; peaks on the visual frame; mixed under the voice at the suggested
+gain. Motion graphics are silent unless the editor passes `sfx=true`, and
+`apply_look` places no sound unless called with `transition_sounds=true`
+(looks.md, **Sound**).
 
 **Music is off.** Agents never choose music: no CC0 library bed, no stock
 track, no song picked by taste. It is on only when the owner supplies or

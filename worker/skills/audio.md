@@ -8,6 +8,13 @@ talking reel carries no added sound at all. Music is never your choice to
 make: it goes in only when the user asks for it or supplies a track.
 Intelligibility of the voice always wins the mix.
 
+ZOOMS AND SOUND EFFECTS ARE OPTIONAL, NEVER RULES (owner, Oct 2026):
+restraint is the default. Reach for a zoom or a sound only when a specific
+moment needs it — a key word, a reveal, a genuinely jarring jump cut, a
+real-world action shown — and zero is a fine answer. Never a zoom per cut,
+a camera move per hero moment or a sound per landing or transition: used
+where nothing calls for them they make an edit look childish.
+
 - A sound earns its place only on a designed graphic landing, a real section
   change or B-roll entry, the payoff, or a real-world action shown on screen
   (a shutter on a photo or still, typing under typed text, a click on a
@@ -15,12 +22,10 @@ Intelligibility of the voice always wins the mix.
 - Never a sound on captions, on ordinary cuts inside a conversation (jump
   cuts, angle changes), or on camera moves. Never a whoosh on every caption
   or graphic: sound design is structure, not wallpaper.
-- OPTIONAL, NEVER A RULE (owner, Oct 2026): a sound effect needs a clear
-  editorial reason; used where nothing calls for one it makes the edit look
-  childish. Sparse: at most about one sound every 4–5 s (a ceiling, not a
-  target — no more than about 8 in a 30–45 s short, usually far fewer),
-  never the same sound twice within ~3 s. Zero is a fine answer when nothing
-  on screen earns one.
+- Sparse: at most about one sound every 4–5 s (a ceiling, not a target —
+  no more than about 8 in a 30–45 s short, usually far fewer), never the
+  same sound twice within ~3 s. Zero is a fine answer when nothing on screen
+  earns one.
 - Match the material and keep one sound family per short; the peak lands on
   the visual frame; mix under the voice so no word is masked.
 - Never add music on your own initiative. Suggesting in the reply that a song

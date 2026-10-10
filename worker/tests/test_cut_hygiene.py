@@ -14,8 +14,10 @@ Findings from the showcase shorts, each fixed in the engine:
 * keep joins butted two waveforms (and up to a frame of silence) together —
   each cut between kept spans is an equal-power micro-crossfade centred on
   the cut (renderer.join_fades), without changing any block's length;
-* jump cuts with no framing change — taste.uncovered_jump_cuts names each
-  one with a one-line fix.
+* jump cuts with no framing change — taste.uncovered_jump_cuts measures
+  each one, and (owner, Oct 10 2026: zooms are optional, never a rule) the
+  critic names only those where the speaker's head measurably jumps, with
+  options (leave it, B-roll, a framing change), never a prescribed zoom.
 
 Run:  python -m pytest tests/test_cut_hygiene.py -q     (from worker/)
 """
@@ -338,14 +340,91 @@ def _bare(edl, index=None):
                                      tl)
 
 
-def test_bare_jump_cuts_are_named_with_an_alternating_fix():
+def test_bare_jump_cuts_are_measured_but_never_reported_without_a_jump():
     rows = _bare({"keep": [[0, 4], [5, 8], [9, 12], [13, 16]]})
     assert [r["t"] for r in rows] == [4.0, 7.0, 10.0]
+    # the coverage geometry is still worked out per cut ...
     assert "add_zoom start=4.00 end=7.00 strength=0.12" in rows[0]["fix"]
     assert "covered by the punch above" in rows[1]["fix"]
     assert "add_zoom start=10.00" in rows[2]["fix"]
+    assert [r["skip"] for r in rows] == [1.0, 1.0, 1.0]
+    # ... but with no face evidence nothing says a cut is jarring, and a
+    # bare jump cut is fine: no note at all.
+    assert all(r["jump"] is None and r["jarring"] is None for r in rows)
+    assert taste.jump_cut_line(rows) == ""
+
+
+def _face(cx, w=0.1, top=0.2, h=0.2):
+    return [cx - w / 2, top, cx + w / 2, top + h]
+
+
+def test_face_jump_matches_the_same_person_and_ignores_jitter():
+    steady = taste.face_jump([_face(0.45)], [_face(0.46)])
+    assert steady["shift"] < 0.15 and taste.jarring(steady) is False
+    moved = taste.face_jump([_face(0.45)], [_face(0.6)])
+    assert moved["shift"] >= 1.4 and taste.jarring(moved) is True
+    # the cascades box one steady head tight or loose (Thiel, 865.6 s: one
+    # box 77% taller than the next on the same pose): size is not evidence
+    loose = taste.face_jump([[0.28, 0.18, 0.46, 0.49]],
+                            [[0.33, 0.25, 0.44, 0.43]])
+    assert taste.jarring(loose) is False, loose
+    # two people in one wide shot: each matched to themselves, no jump
+    two = taste.face_jump([_face(0.25), _face(0.75)],
+                          [_face(0.76), _face(0.24)])
+    assert taste.jarring(two) is False
+    assert taste.face_jump([], [_face(0.5)]) is None
+    assert taste.jarring(None) is None
+
+
+def test_only_a_measured_head_jump_is_named_and_with_options_not_a_zoom():
+    keep = [[0, 4], [5, 8], [9, 12]]
+    index = {"video": {"fps": FPS}, "spatial": {"samples": [
+        {"t": 3.8, "faces": [_face(0.40)]},
+        {"t": 5.2, "faces": [_face(0.60)]},     # the head jumps at 4.0
+        {"t": 7.8, "faces": [_face(0.60)]},
+        {"t": 9.3, "faces": [_face(0.61)]},     # steady across 7.0
+    ]}}
+    rows = _bare({"keep": keep}, index)
+    assert [(r["t"], r["jarring"]) for r in rows] == [(4.0, True),
+                                                      (7.0, False)]
     line = taste.jump_cut_line(rows)
-    assert "3 jump cuts" in line and "4s" in line
+    assert line.startswith("1 jump cut where the speaker's head visibly "
+                           "jumps: 4s (the head jumps 2.0 face-widths)")
+    for option in ("leave it", "B-roll", "change the framing",
+                   "zooms are optional, never a rule",
+                   "never a zoom on every cut"):
+        assert option in line, option
+    assert "7s" not in line and "add_zoom" not in line
+    # samples further than JUMP_CUT_FACE_NEAR_S from the cut are no evidence
+    far = {"video": {"fps": FPS}, "spatial": {"samples": [
+        {"t": 2.0, "faces": [_face(0.40)]},
+        {"t": 7.0, "faces": [_face(0.60)]}]}}
+    assert taste.jump_cut_line(_bare({"keep": keep}, far)) == ""
+
+
+def test_real_frames_measure_the_longest_skips_first():
+    seen = []
+
+    def measure(src_t):
+        seen.append(round(src_t, 2))
+        return [_face(0.3)] if src_t < 10 else [_face(0.7)]
+    keep = [[0, 4], [4.5, 8], [12, 15]]          # skips 0.5 s and 4 s
+    edl = validate_edl({"keep": keep}, 60.0).model_dump(exclude_none=True)
+    tl = Timeline(edl["keep"])
+    rows = taste.uncovered_jump_cuts(edl, {"video": {"fps": FPS}}, tl,
+                                     measure=measure)
+    assert [(r["t"], r["skip"], r["jarring"]) for r in rows] == [
+        (4.0, 0.5, False), (7.5, 4.0, True)]
+    assert sorted(seen) == [3.98, 4.52, 7.98, 12.02]  # both sides, each cut
+    old = taste.JUMP_CUT_MEASURE_MAX
+    try:
+        taste.JUMP_CUT_MEASURE_MAX = 1
+        seen.clear()
+        taste.uncovered_jump_cuts(edl, {"video": {"fps": FPS}}, tl,
+                                  measure=measure)
+        assert seen == [7.98, 12.02]              # capped: the longest skip
+    finally:
+        taste.JUMP_CUT_MEASURE_MAX = old
 
 
 def test_a_real_framing_step_covers_a_jump_and_a_5pct_punch_does_not():
@@ -387,8 +466,15 @@ def test_a_weak_punch_is_named_once_and_zoomed_framings_keep_the_step_fix():
         {"id": "w", "start": 2.0, "end": 4.0, "strength": 0.05,
          "mode": "punch", "ramp_s": 0}]}})
     assert [r["t"] for r in rows] == [2.0, 4.0]
-    assert ("2s, 4s — zoom w steps the framing only 5% — raise its "
-            "strength to 0.12") in taste.jump_cut_line(rows)
+    assert rows[0]["fix"] == ("zoom w steps the framing only 5% — raise "
+                              "its strength to 0.12")
+    # A zoom too small to read as a move is a twitch: the note names it
+    # once and asks first for its removal, whatever the cuts' faces do.
+    line = taste.jump_cut_line(rows)
+    assert line == ("zoom w steps the framing less than ~8% at a jump cut, "
+                    "which reads as a twitch rather than a move: remove it "
+                    "(a bare cut is fine), or make the step ≥8% only where "
+                    "the cut is genuinely jarring.")
     # A 1.08x push into a 1.14x punch: a stronger push would SHRINK the
     # step, so the fix is the step itself.
     both = _bare({"keep": [[0, 4], [5, 9]], "effects": {"zooms": [
@@ -407,13 +493,23 @@ def test_a_zoom_running_through_the_cut_is_named():
         rows[0]["fix"] and "end=4.00" in rows[0]["fix"]
 
 
-def test_the_critic_reports_bare_cuts_unless_the_user_said_no_zooms():
+def test_the_critic_names_only_jarring_cuts_unless_the_user_said_no_zooms():
     edl = validate_edl({"keep": [[0, 4], [5, 8], [9, 12]]},
                        60.0).model_dump(exclude_none=True)
     tl = Timeline(edl["keep"])
-    found = taste.critique(edl, {"video": {"fps": FPS}, "words": []}, tl)
-    assert any("jump cuts inside one take" in f for f in found)
-    quiet = taste.critique(edl, {"video": {"fps": FPS}, "words": []}, tl,
+    index = {"video": {"fps": FPS}, "words": []}
+    # bare jump cuts with a steady head (or no evidence) are not a finding
+    assert not any("jump cut" in f for f in taste.critique(edl, index, tl))
+    steady = taste.critique(edl, index, tl, measure=lambda t: [_face(0.5)])
+    assert not any("jump cut" in f for f in steady)
+
+    def jumping(src_t):
+        return [_face(0.35 if src_t < 4.5 else 0.6)]
+    found = taste.critique(edl, index, tl, measure=jumping)
+    line = next(f for f in found if "jump cut" in f)
+    assert "1 jump cut where the speaker's head visibly jumps: 4s" in line
+    assert "add_zoom" not in line
+    quiet = taste.critique(edl, index, tl, measure=jumping,
                            user_asked="cut it tight, no zooms please")
     assert not any("jump cut" in f for f in quiet)
 

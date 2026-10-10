@@ -237,9 +237,11 @@ sequence judge whether the visual language is coherent, every cutaway visibly
 supports its recorded narrative purpose rather than acting as generic stock
 wallpaper, the first frame has hierarchy, and type treatment is intentional
 and consistent. Judge RETENTION ENERGY: for short-form, a visible hook,
-framing/type/graphic changes with rhythm and contrast, and designed emphasis
-on the beats that matter — one static plate with subtitles is weak short-form
-craft, not a safe choice. Judge FINISH QUALITY: a committed grade, a clean
+type/graphic and layout changes with rhythm and contrast, and designed
+emphasis on the beats that matter — one static plate with subtitles is weak
+short-form craft, not a safe choice. Zooms and sound effects are optional,
+never rules: a steady, well-framed picture is not a defect, and a zoom or a
+sound with no clear reason (a move on every cut) weakens the edit. Judge FINISH QUALITY: a committed grade, a clean
 type hierarchy with one accent role, graphics that settle, nothing that looks
 like a placeholder or an unreviewed preset. Feature count is not quality, and
 neither is the absence of features; an irrelevant cutaway is weaker than a

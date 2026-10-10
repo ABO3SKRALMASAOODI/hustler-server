@@ -2980,11 +2980,13 @@ ALTERNATIVE_HINTS = [
     (re.compile(r"(?i)sound.?effects?|\bsfx\b|whoosh|swoosh|swipe|riser|"
                 r"impact|boom|braam|sub.?drop|glitch|zap|ding|chime|buzz|"
                 r"\bclick\b|\bstinger\b|shutter|\bhit\b"),
-     "What I CAN do: drop one-shot sound effects on exact moments — "
-     "whooshes and swipes on cuts, impacts, booms and sub-drops on reveals, "
-     "risers into a transition, plus clicks, pops, glitches, zaps, dings and "
-     "camera shutters — real recorded sounds I find on the web, at any "
-     "volume, and I can move or remove them afterwards."),
+     "What I CAN do: place one-shot sound effects from Valmera's approved "
+     "library of real recordings on the exact moments that earn one — a "
+     "soft whoosh into a title, a swish on a real transition, an impact on "
+     "the payoff, a riser into it, plus clicks, pops, typing, glitches, "
+     "dings and camera shutters — at any volume, and move or remove them "
+     "afterwards; a specific sound the library lacks can come from real "
+     "sounds I find on the web."),
     # speed BEFORE effects: "slow motion" contains 'motion', which the
     # effects regex matches, and the most specific hint must win the scan
     (re.compile(r"(?i)slow.?mo(?:tion)?\b|\bspeed\b|speed.?up|sped|"
@@ -3014,10 +3016,11 @@ ALTERNATIVE_HINTS = [
                 r"grain|vignette|vhs|\blook\b|loud"),
      "What I CAN do: color-grade the whole video (presets plus custom "
      "exposure/contrast/saturation/temperature), punch-in or smooth Ken "
-     "Burns zooms (including aimed at a subject), seven transition styles "
-     "at every cut (dips, whips, zoom-punch, glitch, flash), fade in/out, "
+     "Burns zooms (including aimed at a subject) where a moment earns one, "
+     "seven transition styles at real scene changes (dips, whips, "
+     "zoom-punch, glitch, flash), fade in/out, "
      "stylize effects (film grain, vignette, glow, VHS), beat-aligned "
-     "cuts and automatic punch-ins on the most stressed words, one-call "
+     "cuts and optional punch-ins on the most stressed words, one-call "
      "looks (hype/clean/cinematic/luxury/meme), loudness mastering for "
      "social platforms, karaoke captions, animated caption entrances, and "
      "local push/pan motion on inserted images or video B-roll."),
@@ -3096,12 +3099,14 @@ def _nearest_alternative(user_text):
                     hint = hint.replace(
                         "a licence-free CC0 bed from the built-in library "
                         "by mood (list_music_library), ", "")
-            # A deployment with sfx search off must not offer found sounds.
+            # A deployment with sfx search off must not offer found sounds;
+            # the approved library and the user's own files remain.
             if "sounds I find on the web" in hint \
                     and not sfx_search.available():
-                return ("What I CAN do: place a sound file you upload at an "
-                        "exact moment in the edit, set how loud it is, and "
-                        "move or remove it afterwards.")
+                hint = hint.replace(
+                    "a specific sound the library lacks can come from real "
+                    "sounds I find on the web.",
+                    "a sound file you upload places the same way.")
             return hint
     return None
 

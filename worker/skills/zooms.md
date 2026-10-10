@@ -1,14 +1,19 @@
-# zooms — the optional eased camera: when a move earns its place, punch-ins on emphasis, alternating framing on jump cuts, landings on turns, slow pushes, beat pulses, aiming, travelling paths, crops vs zooms
+# zooms — the optional eased camera: when a move earns its place, punch-ins on emphasis, framing changes on jarring jump cuts, landings on turns, slow pushes, beat pulses, aiming, travelling paths, crops vs zooms
 
 ## Editorial decision principles
 
-ZOOMS ARE OPTIONAL, NEVER A RULE (owner, Oct 2026). A steady, well-framed
-picture is the default and needs no justification; a camera move needs a
-clear editorial reason — the punchline word, the number the story turns
-on, the cut into a new idea, a thing on screen the viewer must look at.
-Used where nothing calls for them, zooms make an edit look childish: a
-punch on every sentence, a push on every hold, a landing on every cut is
-exactly what a professional editor does NOT do. There is no quota, no
+ZOOMS AND SOUND EFFECTS ARE OPTIONAL, NEVER RULES (owner, Oct 2026):
+restraint is the default. Reach for a zoom or a sound only when a specific
+moment needs it — a key word, a reveal, a genuinely jarring jump cut, a
+real-world action shown — and zero is a fine answer. Never a zoom per cut,
+a camera move per hero moment or a sound per landing or transition: used
+where nothing calls for them they make an edit look childish.
+
+A steady, well-framed picture is the default and needs no justification;
+a camera move needs a clear editorial reason — the punchline word, the
+number the story turns on, the cut into a new idea, a thing on screen the
+viewer must look at. A punch on every sentence, a push on every hold, a
+landing on every cut is exactly what a professional editor does NOT do. There is no quota, no
 density target and no "something must move every few seconds" rule for
 the camera — the type, the graphics and the cuts carry the rhythm. A short
 with no zoom at all is finished when nothing in it called for one.
@@ -64,16 +69,18 @@ punches.
   real impacts: a hero slam, a hit.
 - JUMP CUTS: after `cut_silences` a take is full of jump cuts every 1–2 s,
   and a bare jump cut is FINE — it is the accepted grammar of talking-head
-  short-form. Cover one only where its pop genuinely distracts (a big head
-  jump right on a key line), and then with ALTERNATING FRAMING — a punch
-  (hard step, `ramp_s=0` when the schema offers it) from that cut to the
-  next at strength 0.12–0.2, back to the wide at the following cut, aimed
-  at the face — so it reads as a second camera. A cover is a framing step
-  of at least ~8% across the cut (0.05 punches and two zooms of nearly equal
-  strength read as the same frame with the head popping) or a crop move;
-  the render's taste notes list bare jump cuts with a possible fix — an
-  option, never an order. Never cover every jump cut: a camera that moves
-  on every cut looks childish.
+  short-form. Act on one only where it is genuinely jarring (the head
+  visibly jumps right on a key line). The options: leave it, cover it with
+  B-roll or a cutaway, or change the framing on that cut with ALTERNATING
+  FRAMING — a punch (hard step, `ramp_s=0` when the schema offers it) from
+  that cut to the next at strength 0.12–0.2, back to the wide at the
+  following cut, aimed at the face — so it reads as a second camera. A
+  framing change is a step of at least ~8% across the cut (0.05 punches and
+  two zooms of nearly equal strength read as the same frame with the head
+  twitching — remove those) or a crop move. The render's taste notes name a
+  jump cut only when the speaker's head measurably jumps across it, with
+  those options — never an order. Never cover every jump cut: a camera that
+  moves on every cut looks childish.
 - EDGES ON CUTS: a zoom start or end within 4 frames of a cut (a jump, a
   camera change, an insert edge, a crop re-aim, or the programme's last
   frame) is moved ONTO the cut and holds through it: an `ease` ending on a
@@ -85,8 +92,10 @@ punches.
   release BEFORE a cut on purpose, end the zoom at least 0.2 s earlier.
 - On a hero moment the graphic leads; a punch or pulse on the same frame
   as the word slam is optional support for the biggest beat only (and its
-  sound, when that landing earns one) — never a reflex on every graphic. A deliberate hook
-  may open already punched-in or with a landing at 0 s.
+  sound, when that landing earns one) — never a reflex on every graphic,
+  never a camera move per hero moment. A hook may open punched-in or with
+  a landing at 0 s when that opening earns it; the hook title does the
+  interrupting either way.
 - Density is a CEILING, never a target: no more than one camera event per
   ~1.5 s unless it is a designed hit, and in practice far fewer — a handful
   of earned moves in a 30–45 s talking-head short, or none. Rest on an

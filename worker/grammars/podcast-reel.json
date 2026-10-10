@@ -6,27 +6,26 @@
     "measured": "frame-level breakdown of 28 owner-selected premium Instagram reference reels, Oct 2026 (phase-1 refs_* analysis and DESIGN_BRIEF)",
     "note": "references for craft relationships only; never copy their content, logos or identities"
   },
-  "identity": "One complete micro-story lifted from a longer conversation — a hook line, the setup it needs, a turn and a payoff — delivered as a DESIGNED short-form piece. The speaker owns a composed vertical frame; a motion, typography and sound system carries the speech: framing changes on sentence turns, hero words and graphics land on the spoken word, and sound is edited to picture. Flat delivery (one static plate with subtitles and a silent mix) is the failure mode, not the safe choice.",
+  "identity": "One complete micro-story lifted from a longer conversation — a hook line, the setup it needs, a turn and a payoff — delivered as a DESIGNED short-form piece. The speaker owns a composed vertical frame; a typography and motion-graphics system carries the speech: hero words and graphics land on the spoken word. Zooms and sound effects are optional, never rules: restraint is the default, and each zoom or sound is reached for only when a specific moment needs it. A captioned plate with nothing designed on it is the failure mode, not the safe choice.",
   "rules": {
     "story": "keep one complete micro-story: open on its strongest intelligible line, keep the setup the payoff depends on, end on the resolved line or a deliberate cliff; never splice unrelated answers into a synthetic claim; cut dead time and repairable filler word-safely",
-    "hook": "the first second carries a pattern interrupt (a punched-in or pushing frame, a hero title slam, a hit) and the hook line is on screen within about 1.5s; no fade from black",
+    "hook": "the first second carries a pattern interrupt (a hook title or word slam on the first strong word, a card reveal, a flash) and the hook line is on screen within about 1.5s; a punch-in at 0s is an option, never a requirement; no fade from black",
     "frame": "fill the vertical frame with the speaker (auto_reframe / focus_track per shot); no half-black or postage-stamp canvas; on two-person footage frame the active speaker",
-    "camera": "framing changes are the rhythm of a talking reel: alternate scale on jump cuts and sentence turns (references change framing every 2-5s), push slowly under an emotional hold, punch on payoffs and numbers; aim every move at the face (add_zoom with measured cx/cy) and vary strength and curve so it never reads as an automated pass",
+    "camera": "ZOOMS AND SOUND EFFECTS ARE OPTIONAL, NEVER RULES: a steady, well-framed picture is the default and zero zooms is a fine answer. Reach for a zoom only when a specific moment needs it — the word the story turns on, a reveal, a genuinely jarring jump cut — never one per cut, sentence, hold or hero moment; a bare jump cut is fine. When a move is earned, aim it at the face (add_zoom with measured cx/cy), ease it and vary it so it never reads as an automated pass",
     "typography": "one designed type system: captions with a bold sans backbone and ONE accent role (keyword colour or italic serif) on 1-2 words per sentence, placed in face-free space above the platform UI band; hero words, numbers and names land as motion graphics on their spoken onset (add_motion_graphic — list_motion_templates), entrances short and graphic, exits faster than entrances",
-    "motion_graphics": "use the motion layer for the beats that carry the story: hook title, number counters, name/role labels, lists, social/UI cards, callouts; each graphic settles and holds still, never covers the face, and is silent unless the moment earns one library sound",
-    "sound": "speech is the lead; no music unless the user supplied or asked for it (never chosen by the agent); sound effects only from the approved library (list_sound_library, add_sfx storage_key='sound:<id>') and only on meaningful on-screen moments — a graphic landing (peak on the frame), a real section change or B-roll entry, the payoff, or a shown real-world action (shutter, typing, click, cash register); never on captions or ordinary cuts; about one sound every 4-5 s at most; a brief stop-down silence before a reveal",
-    "transitions": "hard cuts inside one take stay invisible; section turns, hook-to-body and B-roll entries may earn a whip/flash/zoom transition paired with a sound",
+    "motion_graphics": "use the motion layer for the beats that carry the story: hook title, number counters, name/role labels, lists, social/UI cards, callouts; each graphic settles and holds still, never covers the face, and is silent unless the moment clearly earns one library sound",
+    "sound": "speech is the lead; no music unless the user supplied or asked for it (never chosen by the agent); sound effects are optional, never rules — zero is a fine answer — and come only from the approved library (list_sound_library, add_sfx storage_key='sound:<id>') where a specific on-screen moment earns one: a graphic landing (peak on the frame), a real section change or B-roll entry, the payoff, or a shown real-world action (shutter, typing, click, cash register); never on captions, ordinary cuts or as a sound per landing or transition; about one sound every 4-5 s at most (a ceiling, usually far fewer); a brief stop-down silence before a reveal",
+    "transitions": "hard cuts inside one take stay invisible; section turns, hook-to-body and B-roll entries may earn a whip/flash/zoom transition, with one library sound only when that turn earns it",
     "finish": "one committed grade with light grain/texture; loudness mastered for social (set_master_loudness); the last frame loops cleanly into the first"
   },
   "rubric": {
     "complete_micro_story": true,
     "hook_interrupt_in_first_second": true,
     "speaker_fills_vertical_frame": true,
-    "framing_changes_on_turns_and_payoffs": true,
     "type_system_with_one_accent_role": true,
     "hero_moments_designed_on_spoken_onsets": true,
-    "music_bed_under_voice": true,
-    "sfx_edited_to_visual_events": true,
+    "zooms_and_sounds_optional_each_with_a_named_reason": true,
+    "no_music_unless_the_user_asked": true,
     "face_and_ui_band_clear": true,
     "not_caption_only_or_static": true
   }

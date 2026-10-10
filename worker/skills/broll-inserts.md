@@ -2,7 +2,7 @@
 
 ## Editorial decision principles
 
-B-roll is story evidence, not wallpaper: show the concrete person, thing, place or event the speaker names, on the words that name it, while the voice keeps going. Premium reels cut to evidence often and make each entrance designed — a whip, a light leak or a card entrance with a whoosh — and never leave a still sitting frozen. Decide whether speech should continue, prefer authentic user footage, and judge all candidates as one coherent sequence.
+B-roll is story evidence, not wallpaper: show the concrete person, thing, place or event the speaker names, on the words that name it, while the voice keeps going. Premium reels cut to evidence often and make each entrance designed — a whip, a light leak or a card entrance, with a sound only when the turn earns one — and never leave a still sitting frozen. Decide whether speech should continue, prefer authentic user footage, and judge all candidates as one coherent sequence.
 
 ## Evidence to inspect
 

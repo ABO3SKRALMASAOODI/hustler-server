@@ -83,8 +83,9 @@ color2 + direction for a gradient; motion adds a slow push. Words on it →
 `add_text` at the same window, or `add_title_card`.
 
 CORRUPT / GLITCH SCREENS (`add_corrupt_screen`): the signal "breaks" between
-sections — style 'digital', 'vhs' or 'static', 0.3–1 s, sound=true adds a
-static burst. Different from the `glitch` junction style and the
+sections — style 'digital', 'vhs' or 'static', 0.3–1 s, silent by
+default; sound=true adds a synthesized static burst, only when the user
+asks for one (it is not a library recording). Different from the `glitch` junction style and the
 `glitch_burst` motion transition.
 
 FREEZE FRAMES (`add_freeze_frame`): freeze the picture and hold big words

@@ -19,6 +19,8 @@ editorial reason, and used where nothing calls for them they make an edit
 look childish. No playbook may turn a camera move or a sound into a quota.
 """
 
+import os
+
 import agent_prompt
 import agent_tools
 
@@ -46,7 +48,7 @@ def test_core_prompt_states_the_premium_short_form_standard():
                    "never the same sound twice within ~3 s",
                    "music only when the user asks for it or supplies a track",
                    "never on your own initiative",
-                   "alternating tight/wide framing across jump cuts",
+                   "a framing change or B-roll on a genuinely jarring jump cut",
                    "strength is magnification minus 1",
                    "never a whoosh on every caption",
                    "deliberate choice for that passage",
@@ -188,6 +190,107 @@ def test_rendered_review_needs_a_complete_preview_everywhere():
         assert "render_preview(complete=true)" in _skill(name), name
 
 
+_ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
+_PLUGIN = os.path.join(_ROOT, "plugins", "valmera", "skills",
+                       "valmera-podcast-shorts")
+
+
+def _read(*parts):
+    with open(os.path.join(*parts), encoding="utf-8") as fh:
+        return fh.read()
+
+
+def _mcp_workflow():
+    text = _read(_ROOT, "backend", "routes", "mcp.py")
+    return text[text.index('WORKFLOW = """'):text.index('INSTRUCTIONS_MODE')]
+
+
+# Phrases that turned a zoom or a sound into a quota or a default. None may
+# come back on any surface (skills, core prompt, MCP workflow, plugin).
+_QUOTAS = (
+    "a camera event every 2", "camera event every 2–4 s",
+    "bigger change (camera move", "bigger change every 2–4 s: a camera",
+    "without a camera move", "keeps a static talking head alive",
+    "so long statements never sit frozen",
+    "jump cuts are covered by alternating framing",
+    "fill dead holds with camera", "with one add_zoom on the same frame",
+    "about 4–8 in a 30–45 s short", "about 4-8 in a 30-45 s short",
+    ": open punched-in", "open already punched-in or with a landing",
+    "a punched-in or pushing frame",
+    "hides the jump cut and adds energy",
+    "each hero moment stacks a camera move",
+    "a look may place its own transition sounds",
+    "a look can place its own transition sounds",
+    "may already place its own transition sounds",
+    "each hero template brings its own cues",
+    "framing changes are the rhythm", "alternate scale on jump cuts",
+    "a bed under the voice and sfx edited", "silent mix where the beats",
+    "the payoff word lands with sound", "always drifting",
+    "riser_2 and impact_1 at", "punch 1.15x at",
+    "replaces restraint with", "restrained, silent shorts")
+
+
+def test_one_restraint_rule_is_stated_verbatim_on_every_surface():
+    """Owner, Oct 10 2026: zooms and sound effects are optional, never
+    rules. The same rule, word for word, reaches Valmera's agent, MCP
+    clients, the worker playbooks and the podcast-shorts plugin."""
+    rule = _flat(agent_prompt.RESTRAINT_RULE)
+    assert rule.startswith("ZOOMS AND SOUND EFFECTS ARE OPTIONAL, NEVER RULES")
+    for phrase in ("restraint is the default", "zero is a fine answer",
+                   "a genuinely jarring jump cut", "a real-world action shown",
+                   "Never a zoom per cut, a camera move per hero moment or a "
+                   "sound per landing or transition", "childish"):
+        assert phrase in rule, phrase
+    surfaces = {"core prompt": agent_prompt.CORE_PROMPT,
+                "mcp workflow": _mcp_workflow(),
+                "plugin SKILL.md": _read(_PLUGIN, "SKILL.md"),
+                "plugin looks.md": _read(_PLUGIN, "references", "looks.md")}
+    for name in ("short-form-direction", "zooms", "audio", "transitions",
+                 "hooks-retention", "motion-design", "review"):
+        surfaces["skill " + name] = _skill(name)
+    for where, text in surfaces.items():
+        assert rule in _flat(text), where
+
+
+def test_no_surface_turns_a_zoom_or_a_sound_into_a_quota():
+    surfaces = {"core prompt": agent_prompt.CORE_PROMPT,
+                "mcp workflow": _mcp_workflow()}
+    for name in agent_prompt.skill_names():
+        surfaces["skill " + name] = _skill(name)
+    for rel in ("SKILL.md", "references/looks.md", "references/editing.md",
+                "references/review.md", "references/selection.md"):
+        surfaces["plugin " + rel] = _read(_PLUGIN, *rel.split("/"))
+    for where, text in surfaces.items():
+        low = _flat(text).lower()
+        for phrase in _QUOTAS:
+            assert phrase.lower() not in low, (where, phrase)
+
+
+def test_house_style_and_contract_never_require_a_zoom_or_a_sound():
+    import editorial_contracts
+    import grammar
+    doc = grammar.library()["podcast-reel"]
+    rules = " ".join(doc["rules"].values()).lower()
+    assert "optional, never rules" in rules
+    assert "framing changes are the rhythm" not in rules
+    assert "every 2-5s" not in rules
+    rubric = doc["rubric"]
+    assert "music_bed_under_voice" not in rubric
+    assert "framing_changes_on_turns_and_payoffs" not in rubric
+    assert "sfx_edited_to_visual_events" not in rubric
+    assert rubric["zooms_and_sounds_optional_each_with_a_named_reason"] is True
+    assert rubric["no_music_unless_the_user_asked"] is True
+    reel = editorial_contracts.contract("podcast_reel")
+    joined = " ".join(reel["publish_ready"] + reel["visual_review"]
+                      + reel["reject_if"]).lower()
+    assert "optional, never rules" in joined
+    assert "a steady frame and a dry mix are not defects" in joined
+    for gone in ("punch-ins, alternate scale, pushes", "a bed under the voice",
+                 "silent mix where the beats needed sound",
+                 "no camera, type or sound design"):
+        assert gone not in joined, gone
+
+
 def test_zooms_and_sounds_are_optional_never_quotas():
     """Owner, Oct 10: unearned zooms and sounds make an edit look childish.
     The playbooks, the core prompt, the MCP workflow and the tool contracts
@@ -196,31 +299,21 @@ def test_zooms_and_sounds_are_optional_never_quotas():
     assert "ZOOMS AND SOUND EFFECTS ARE OPTIONAL, NEVER RULES" in core
     assert "childish" in core
     zooms = _flat(_skill("zooms"))
-    assert "ZOOMS ARE OPTIONAL, NEVER A RULE" in zooms
     assert "a bare jump cut is FINE" in zooms
     assert "Density is a CEILING, never a target" in zooms
+    assert "the head visibly jumps" in zooms
     audio = _flat(_skill("audio"))
-    assert "OPTIONAL, NEVER A RULE" in audio
-    quotas = ("a camera event every 2", "camera event every 2–4 s",
-              "bigger change (camera move", "bigger change every 2–4 s: a camera",
-              "without a camera move", "keeps a static talking head alive",
-              "so long statements never sit frozen",
-              "jump cuts are covered by alternating framing",
-              "fill dead holds with camera", "with one add_zoom on the same frame",
-              "about 4–8 in a 30–45 s short", "about 4-8 in a 30-45 s short")
-    for name in agent_prompt.skill_names():
-        text = _flat(_skill(name))
-        for phrase in quotas:
-            assert phrase not in text, (name, phrase)
+    assert "Zero is a fine answer" in audio
+    assert "a ceiling, not a target" in audio
     contracts = agent_tools._COMPACT_CONTRACTS
     assert "never a rule" in contracts["add_zoom"].lower()
     assert "never a required pass" in contracts["punch_in_on_emphasis"].lower()
     assert "never a rule" in contracts["add_sfx"].lower()
-    import os
-    mcp = open(os.path.join(os.path.dirname(__file__), "..", "..", "backend",
-                            "routes", "mcp.py")).read()
+    assert "no sound unless transition_sounds=true" in contracts["apply_look"]
+    mcp = _mcp_workflow()
     assert "ZOOMS AND SOUND EFFECTS ARE OPTIONAL, NEVER RULES" in mcp
     assert "with one add_zoom on the same frame" not in mcp
+    assert "transition_sounds=true" in mcp
 
 
 def test_zoom_strength_is_taught_as_magnification_minus_one():
