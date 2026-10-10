@@ -7930,7 +7930,8 @@ def _follow_samples(ctx, windows, cuts=()):
     to profile), else a write-time face
     track over just these windows on the proxy (follow.measure at
     follow.SAMPLE_FPS, Haar frontal + profile — OpenCV ships in every
-    lane), else the index's sparse samples. source is 'index', 'measured',
+    lane), else the dense index samples when there are any, else the
+    index's sparse samples. source is 'index', 'measured',
     'sparse' or 'too_long' (more kept footage than one call measures,
     follow.MAX_MEASURE_S). counts: follow.face_counts of every measured
     frame (group shots). ``cuts``: the shot boundaries — each shot is
@@ -7944,9 +7945,14 @@ def _follow_samples(ctx, windows, cuts=()):
     sparse, dense = follow.index_samples(index, windows, seen)
     # dense index samples follow a speaker who stays frontal; one the index
     # loses mid-shot (a turn to profile) is measured on the proxy, whose
-    # profile detector and carry hold the turned face
-    if dense and not follow.index_loses_face(index, windows):
-        return sparse, "index", follow.face_counts(seen)
+    # profile detector and carry hold the turned face. The dense index stays
+    # the answer whenever that measurement cannot replace it (more footage
+    # than one call measures, no proxy, nothing found): losing a turn is
+    # better than losing the whole follow, and the framing checks with it.
+    indexed = (sparse, "index", follow.face_counts(seen)) if dense else None
+    if indexed and (not follow.index_loses_face(index, windows)
+                    or follow.too_long(windows)):
+        return indexed
     if follow.too_long(windows):
         return sparse, "too_long", []
     cuts = sorted({round(float(c), 3) for c in cuts or ()})
@@ -7960,7 +7966,7 @@ def _follow_samples(ctx, windows, cuts=()):
             pass
     if key in cache:
         return cache[key]
-    out = (sparse, "sparse", [])
+    out = indexed or (sparse, "sparse", [])
     try:
         video = index.get("video") or {}
         aspect = float(video.get("height") or 0) / float(video.get("width") or 0)

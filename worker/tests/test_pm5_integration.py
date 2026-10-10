@@ -226,6 +226,35 @@ def test_a_shot_the_index_loses_is_followed_from_the_proxy(monkeypatch):
     assert how == "index"
 
 
+def test_a_lost_face_never_costs_the_dense_index(monkeypatch):
+    # the proxy measurement replaces a dense index that loses a turn only
+    # when it can: more footage than one call measures, or a measurement
+    # that finds nothing, keeps following from the index (it used to come
+    # back 'too_long' / 'sparse': no follow and no framing checks at all)
+    import agent_tools
+    import follow
+
+    long_s = follow.MAX_MEASURE_S + 40.0
+    n = int(long_s * 2)
+
+    class C:
+        index = dict(_ix([(t / 2, not (100 <= t < 110)) for t in range(n)]),
+                     video={"width": 1920, "height": 1080})
+
+        def proxy_path(self):
+            return "proxy.mp4"
+    calls = []
+    monkeypatch.setattr(follow, "measure", lambda p, w, a: calls.append(w) or [])
+    monkeypatch.setattr(follow, "speaker_track", lambda frames, cuts: [])
+    _s, how, _c = agent_tools._follow_samples(C(), [(0.0, long_s)])
+    assert how == "index" and not calls, how
+    # a short program the measurement finds nothing in: still the index
+    C.index = dict(_ix([(t / 2, t < 14) for t in range(0, 20)]),
+                   video={"width": 1920, "height": 1080})
+    _s, how, _c = agent_tools._follow_samples(C(), [(0.0, 10.0)])
+    assert how == "index" and calls, how
+
+
 # ── the plate under a graphic in a card layout is the card's backdrop ────
 # Elon's stack (reframeqc) put the stat slams in the band above the speaker
 # panel (layout's band); the plate probe measured the uncropped frame there
@@ -262,3 +291,4 @@ def test_the_probe_composes_the_card_live_at_that_moment():
     card = plate._card_at(edl, 3.0, 100.0)
     assert card and [p[1] for p in card["panels_at"]] == [[0.155, 0.148, 0.595, 0.6165],
                                                            [0.53, 0.52, 0.98, 0.98]]
+
