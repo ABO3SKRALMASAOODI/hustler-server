@@ -11,53 +11,79 @@ import trial_state
 
 admin_bp = Blueprint('admin', __name__)
 
-ADMIN_EMAIL = "thevalmera@gmail.com"
+# The customer population is defined once, in admin_metrics.defs, and shared
+# by every admin surface (old and /admin/v2). See that module for the rules:
+# accounts created before ADMIN_METRICS_EPOCH, the admin account and any
+# ADMIN_EXCLUDE_EMAILS test accounts are never customers.
+from admin_metrics.defs import (  # noqa: E402
+    ADMIN_EMAIL, METRICS_EPOCH, EXCLUDE_EMAILS, ROBOT_UA)
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  The single SQL expression for "unique visitor".
+#  The single SQL expression for "unique visitor" on the legacy screens.
 #  Uses device_id when available, falls back to ip.
-#  NULLIF ensures empty strings don't count as a valid device_id.
 # ─────────────────────────────────────────────────────────────────────────────
 UNIQUE_VISITOR = "COALESCE(NULLIF(device_id, ''), ip)"
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  Metrics epoch — every account-based metric ignores accounts created before
-#  this date. Everyone who signed up before the product relaunched is either an
-#  old-idea user or one of the long-lived test accounts, and they poison every
-#  number (a manually-credited test account even reads as a "paying subscriber").
-#  Change the date with ADMIN_METRICS_EPOCH=YYYY-MM-DD (e.g. move it earlier to
-#  include more history). For any test account that was created AFTER the epoch,
-#  list its email in ADMIN_EXCLUDE_EMAILS (comma-separated) to drop it too.
-#  Both are operator-set env constants (never user input), so they're inlined
-#  into SQL as validated literals.
-# ─────────────────────────────────────────────────────────────────────────────
-METRICS_EPOCH = os.getenv("ADMIN_METRICS_EPOCH", "2026-07-06").strip()
-if not re.match(r"^\d{4}-\d{2}-\d{2}$", METRICS_EPOCH):
-    METRICS_EPOCH = "2026-07-06"
-# The admin's own account is never a customer, so it's always excluded (even if
-# it was created after the epoch). Any extra test accounts go in
-# ADMIN_EXCLUDE_EMAILS (comma-separated); they're added on top, never replacing
-# the admin exclusion.
-EXCLUDE_EMAILS = [ADMIN_EMAIL.lower()] + [
-    e.strip().lower() for e in os.getenv("ADMIN_EXCLUDE_EMAILS", "").split(",")
-    if e.strip() and e.strip().lower() != ADMIN_EMAIL.lower()]
 
 
 def _scope(alias="u"):
     """Boolean SQL keeping only real, post-relaunch, non-test accounts. Drop it
     into any WHERE/AND/JOIN-ON that touches the users table so old-idea signups
     and test accounts never skew a metric. `alias` is the users-table alias
-    ('' for a bare `users`)."""
-    p = f"{alias}." if alias else ""
-    parts = [f"{p}created_at >= DATE '{METRICS_EPOCH}'"]
-    if EXCLUDE_EMAILS:
-        quoted = ",".join("'" + e.replace("'", "''") + "'" for e in EXCLUDE_EMAILS)
-        parts.append(f"LOWER({p}email) NOT IN ({quoted})")
-    return " AND ".join(parts)
+    ('' for a bare `users`). Same rule as admin_metrics.defs.scope."""
+    from admin_metrics.defs import scope
+    return scope(alias)
 
 
-def get_db():
-    return psycopg2.connect(current_app.config['DATABASE_URL'], cursor_factory=RealDictCursor)
+def get_db(readonly=None):
+    """Admin connection with time limits (R5).
+
+    GET handlers get a read-only autocommit connection: one failed statement
+    never poisons the rest of the request, and no admin page can hold a lock.
+    Writes (billing sync) keep a normal transaction with a generous statement
+    limit. Without these limits a slow query kept running long after the
+    browser and Vercel had given up.
+    """
+    if readonly is None:
+        try:
+            readonly = request.method == 'GET'
+        except RuntimeError:
+            readonly = False
+    if readonly:
+        options = ('-c statement_timeout=8000 -c lock_timeout=2000 '
+                   '-c idle_in_transaction_session_timeout=30000 '
+                   '-c default_transaction_read_only=on')
+    else:
+        options = ('-c statement_timeout=30000 '
+                   '-c idle_in_transaction_session_timeout=60000')
+    conn = psycopg2.connect(current_app.config['DATABASE_URL'],
+                            cursor_factory=RealDictCursor, connect_timeout=5,
+                            options=options)
+    if readonly:
+        conn.autocommit = True
+    return conn
+
+
+def legacy_error_response(e):
+    """JSON errors for the admin blueprints (R5): never Flask's HTML 500."""
+    from werkzeug.exceptions import HTTPException
+    if isinstance(e, HTTPException):
+        return e
+    if isinstance(e, psycopg2.errors.QueryCanceled):
+        return jsonify({'error': 'This report took too long. Try again, or '
+                                 'choose a shorter period.',
+                        'code': 'timeout', 'retryable': True}), 503
+    if isinstance(e, psycopg2.OperationalError):
+        current_app.logger.warning('Admin database unavailable (%s)',
+                                   type(e).__name__)
+        return jsonify({'error': 'The database is busy or restarting. Try '
+                                 'again in a moment.',
+                        'code': 'unavailable', 'retryable': True}), 503
+    current_app.logger.exception('Admin request failed')
+    return jsonify({'error': 'The server hit an error building this page.',
+                    'code': 'internal', 'retryable': True}), 500
+
+
+admin_bp.register_error_handler(Exception, legacy_error_response)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -200,120 +226,11 @@ def admin_required(f):
 
 @admin_bp.route('/track', methods=['POST'])
 def track_visit():
-    # Handle both application/json AND text/plain (sendBeacon fallback)
-    data = request.get_json(silent=True)
-    if not data:
-        try:
-            import json
-            data = json.loads(request.get_data(as_text=True))
-        except Exception:
-            data = {}
-
-    if not isinstance(data, dict):
-        return jsonify({'error': 'invalid payload'}), 400
-    from website_analytics import safe_path, bounded_number
-    page = safe_path(data.get('page', '/'))
-    referrer = data.get('referrer', '')[:500]
-    session_id = data.get('session_id', '')[:64]
-    time_on_page = bounded_number(data.get('time_on_page', 0), 86400)
-    device_id = (data.get('device_id', '') or '')[:64]
-    ip = request.headers.get('X-Forwarded-For', request.remote_addr).split(',')[0].strip()
-    user_agent = request.headers.get('User-Agent', '')[:300]
-
-    # Normalize: empty string → None so DB stores NULL
-    if not device_id.strip():
-        device_id = None
-    if not session_id.strip():
-        session_id = None
-
-    def _parse_referrer(ref):
-        if not ref or ref == '':
-            return 'direct'
-        ref_lower = ref.lower()
-        if any(x in ref_lower for x in ['google.', 'bing.', 'yahoo.', 'duckduckgo.', 'baidu.']):
-            return 'search'
-        if any(x in ref_lower for x in ['facebook.', 'twitter.', 'x.com', 'instagram.', 'linkedin.', 'tiktok.', 'reddit.', 'youtube.']):
-            return 'social'
-        if 'valmera.io' in ref_lower:
-            return 'internal'
-        return 'referral'
-
-    def _parse_device(ua):
-        ua_lower = ua.lower()
-        if any(x in ua_lower for x in ['iphone', 'android', 'mobile', 'blackberry', 'windows phone']):
-            return 'mobile'
-        if any(x in ua_lower for x in ['ipad', 'tablet']):
-            return 'tablet'
-        return 'desktop'
-
-    def _parse_browser(ua):
-        ua_lower = ua.lower()
-        if 'edg/' in ua_lower or 'edge/' in ua_lower:
-            return 'Edge'
-        if 'opr/' in ua_lower or 'opera' in ua_lower:
-            return 'Opera'
-        if 'chrome/' in ua_lower and 'chromium' not in ua_lower:
-            return 'Chrome'
-        if 'firefox/' in ua_lower:
-            return 'Firefox'
-        if 'safari/' in ua_lower and 'chrome' not in ua_lower:
-            return 'Safari'
-        return 'Other'
-
-    def _save(app, page, ip, user_agent, referrer, session_id, time_on_page, device_id):
-        bot_signatures = [
-            'vercel-screenshot', 'googlebot', 'bingbot', 'slurp', 'duckduckbot',
-            'baiduspider', 'yandexbot', 'sogou', 'exabot', 'facebot',
-            'ia_archiver', 'semrushbot', 'ahrefsbot', 'mj12bot', 'dotbot',
-            'bot', 'crawler', 'spider', 'headless', 'notebooklm',
-        ]
-        ua_lower = user_agent.lower()
-        if any(bot in ua_lower for bot in bot_signatures):
-            return
-
-        country = 'Unknown'
-        try:
-            import urllib.request as _ur
-            import json as _json
-            with _ur.urlopen(
-                f'http://ip-api.com/json/{ip}?fields=status,country',
-                timeout=2
-            ) as r:
-                geo = _json.loads(r.read())
-                if geo.get('status') == 'success':
-                    country = geo.get('country', 'Unknown')
-        except Exception:
-            pass
-
-        referrer_source = _parse_referrer(referrer)
-        device_type = _parse_device(user_agent)
-        browser = _parse_browser(user_agent)
-
-        with app.app_context():
-            conn = psycopg2.connect(app.config['DATABASE_URL'], cursor_factory=RealDictCursor)
-            try:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """INSERT INTO page_visits
-                           (page, ip, user_agent, country, referrer, referrer_source,
-                            session_id, device_type, browser, time_on_page, device_id)
-                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-                        (page, ip, user_agent, country, referrer, referrer_source,
-                         session_id, device_type, browser, time_on_page, device_id)
-                    )
-                    conn.commit()
-            finally:
-                conn.close()
-
-    import threading
-    app = current_app._get_current_object()
-    threading.Thread(
-        target=_save,
-        args=(app, page, ip, user_agent, referrer, session_id, time_on_page, device_id),
-        daemon=True
-    ).start()
-
-    return jsonify({'ok': True}), 200
+    """The retired first tracker. It stored IPs, sent them to a third-party
+    geo service over plain HTTP and spawned a thread per hit, unauthenticated.
+    The site has used /admin/journey since 3 Oct 2026: answer 410, store
+    nothing, start nothing."""
+    return '', 410
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -323,30 +240,31 @@ def track_visit():
 @admin_bp.route('/overview', methods=['GET'])
 @admin_required
 def overview():
+    """Legacy business overview (the old admin, kept for one release).
+
+    The retired app builder's `jobs.*` and `credits.*` blocks (13 queries on
+    every 30-second poll, never displayed) are gone. "Today" uses an index
+    range instead of `::date = CURRENT_DATE`, which forced a full scan.
+    """
     conn = get_db()
     try:
         with conn.cursor() as cur:
-            # Every user/subscription count below is scoped to real post-relaunch
-            # accounts — old-idea and test accounts are excluded so the numbers
-            # (especially "paying subscribers") reflect actual customers.
             scope = _scope('')
-            # ── Users ──
-            cur.execute(f"SELECT COUNT(*) AS total FROM users WHERE is_verified = 1 AND {scope}")
-            total_users = cur.fetchone()['total']
+            today = ("created_at >= CURRENT_DATE "
+                     "AND created_at < CURRENT_DATE + 1")
+            cur.execute(f"""
+                SELECT COUNT(*) AS total,
+                       COUNT(*) FILTER (WHERE {today}) AS today,
+                       COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '7 days') AS week,
+                       COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '30 days') AS month,
+                       COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '14 days'
+                                          AND created_at < NOW() - INTERVAL '7 days') AS prev_week
+                  FROM users WHERE is_verified = 1 AND {scope}""")
+            u = cur.fetchone()
+            total_users, new_users_today = u['total'], u['today']
+            new_users_week, new_users_month = u['week'], u['month']
+            prev_week_users = u['prev_week']
 
-            cur.execute(f"SELECT COUNT(*) AS total FROM users WHERE is_verified = 1 AND {scope} AND created_at::date = CURRENT_DATE")
-            new_users_today = cur.fetchone()['total']
-
-            cur.execute(f"SELECT COUNT(*) AS total FROM users WHERE is_verified = 1 AND {scope} AND created_at >= NOW() - INTERVAL '7 days'")
-            new_users_week = cur.fetchone()['total']
-
-            cur.execute(f"SELECT COUNT(*) AS total FROM users WHERE is_verified = 1 AND {scope} AND created_at >= NOW() - INTERVAL '30 days'")
-            new_users_month = cur.fetchone()['total']
-
-            cur.execute(f"SELECT COUNT(*) AS total FROM users WHERE is_verified = 1 AND {scope} AND created_at >= NOW() - INTERVAL '14 days' AND created_at < NOW() - INTERVAL '7 days'")
-            prev_week_users = cur.fetchone()['total']
-
-            # ── Subscriptions ──
             cur.execute(f"SELECT COUNT(*) AS total FROM users WHERE is_subscribed = 1 AND {scope}")
             total_subscribed = cur.fetchone()['total']
 
@@ -357,96 +275,32 @@ def overview():
             """)
             plan_breakdown = {r['plan']: r['count'] for r in cur.fetchall()}
 
-            # ── MRR ────────────────────────────────────────────────────────
-            # This was `{'plus': 20, 'pro': 50, 'ultra': 100}` — three RETIRED
-            # plans. Every live customer is on ai / ai_pro / ai_max, none of
-            # which had an entry, so MRR summed to exactly $0 no matter who
-            # paid. It looked like "nobody has paid", which was true for a
-            # different reason, and the two wrongs agreeing is why it went
-            # unnoticed. Prices now come from billing.PLAN_PRICES_USD, the one
-            # place they are written down.
-            #
-            # And it counts PAYING subscriptions only. A trialling account is
-            # `is_subscribed` from the moment of checkout and has been charged
-            # nothing, so counting it as MRR books revenue for money that may
-            # never arrive — which, on Jul 29 2026, is exactly what it did not
-            # arrive.
+            # MRR from billing.PLAN_PRICES_USD over PAYING subscriptions only
+            # (a trial is not revenue). See _live_mrr.
             mrr = _live_mrr(cur, scope)
             conversion_rate = round((total_subscribed / max(1, total_users)) * 100, 1)
 
-            # ── Jobs ──
-            cur.execute("SELECT COUNT(*) AS total FROM jobs")
-            total_jobs = cur.fetchone()['total']
-
-            cur.execute("SELECT COUNT(*) AS total FROM jobs WHERE created_at::date = CURRENT_DATE")
-            jobs_today = cur.fetchone()['total']
-
-            cur.execute("SELECT COUNT(*) AS total FROM jobs WHERE created_at >= NOW() - INTERVAL '7 days'")
-            jobs_week = cur.fetchone()['total']
-
-            cur.execute("SELECT COUNT(*) AS total FROM jobs WHERE state = 'running'")
-            jobs_running = cur.fetchone()['total']
-
-            cur.execute("SELECT COUNT(*) AS total FROM jobs WHERE state = 'failed' AND created_at::date = CURRENT_DATE")
-            jobs_failed_today = cur.fetchone()['total']
-
-            cur.execute("SELECT COUNT(*) AS total FROM jobs WHERE state = 'completed'")
-            jobs_completed_total = cur.fetchone()['total']
-
-            cur.execute("SELECT COUNT(*) AS total FROM jobs WHERE state = 'failed'")
-            jobs_failed_total = cur.fetchone()['total']
-
-            success_rate = round((jobs_completed_total / max(1, jobs_completed_total + jobs_failed_total)) * 100, 1)
-
             # ── Visits (consistent unique = device_id, fallback ip) ──
             cur.execute(f"""
-                SELECT COUNT(*) AS total,
-                       COUNT(DISTINCT {UNIQUE_VISITOR}) AS unique_total
-                FROM analytics_page_visits WHERE visited_at::date = CURRENT_DATE
+                SELECT COUNT(*) FILTER (WHERE visited_at >= CURRENT_DATE) AS today,
+                       COUNT(DISTINCT {UNIQUE_VISITOR}) FILTER (
+                           WHERE visited_at >= CURRENT_DATE) AS unique_today,
+                       COUNT(*) FILTER (WHERE visited_at >= NOW() - INTERVAL '7 days') AS week,
+                       COUNT(DISTINCT {UNIQUE_VISITOR}) FILTER (
+                           WHERE visited_at >= NOW() - INTERVAL '7 days') AS unique_week,
+                       COUNT(*) AS month,
+                       COUNT(DISTINCT {UNIQUE_VISITOR}) AS unique_month,
+                       COUNT(*) FILTER (WHERE visited_at < NOW() - INTERVAL '7 days'
+                                          AND visited_at >= NOW() - INTERVAL '14 days') AS prev_week
+                  FROM analytics_page_visits
+                 WHERE visited_at >= NOW() - INTERVAL '30 days'
             """)
-            _r = cur.fetchone(); visits_today = _r['total']; unique_today = _r['unique_total']
+            v = cur.fetchone()
+            visits_today, unique_today = v['today'], v['unique_today']
+            visits_week, unique_week = v['week'], v['unique_week']
+            visits_month, unique_month = v['month'], v['unique_month']
+            prev_week_visits = v['prev_week']
 
-            cur.execute(f"""
-                SELECT COUNT(*) AS total,
-                       COUNT(DISTINCT {UNIQUE_VISITOR}) AS unique_total
-                FROM analytics_page_visits WHERE visited_at >= NOW() - INTERVAL '7 days'
-            """)
-            _r = cur.fetchone(); visits_week = _r['total']; unique_week = _r['unique_total']
-
-            cur.execute(f"""
-                SELECT COUNT(*) AS total,
-                       COUNT(DISTINCT {UNIQUE_VISITOR}) AS unique_total
-                FROM analytics_page_visits WHERE visited_at >= NOW() - INTERVAL '30 days'
-            """)
-            _r = cur.fetchone(); visits_month = _r['total']; unique_month = _r['unique_total']
-
-            cur.execute("SELECT COUNT(*) AS total FROM analytics_page_visits WHERE visited_at >= NOW() - INTERVAL '14 days' AND visited_at < NOW() - INTERVAL '7 days'")
-            prev_week_visits = cur.fetchone()['total']
-
-            # ── Credits ──
-            cur.execute("SELECT COALESCE(SUM(credits_used), 0) AS total FROM job_credits WHERE created_at::date = CURRENT_DATE")
-            credits_today = float(cur.fetchone()['total'])
-
-            cur.execute("SELECT COALESCE(SUM(credits_used), 0) AS total FROM job_credits WHERE created_at >= NOW() - INTERVAL '7 days'")
-            credits_week = float(cur.fetchone()['total'])
-
-            cur.execute("SELECT COALESCE(SUM(tokens_used), 0) AS total FROM job_credits")
-            total_tokens = int(cur.fetchone()['total'])
-
-            cur.execute("SELECT COALESCE(SUM(tokens_used), 0) AS total FROM job_credits WHERE created_at::date = CURRENT_DATE")
-            tokens_today = int(cur.fetchone()['total'])
-
-            cur.execute("""
-                SELECT COALESCE(AVG(total_cred), 0) AS avg_credits
-                FROM (
-                    SELECT job_id, SUM(credits_used) AS total_cred
-                    FROM job_credits
-                    GROUP BY job_id
-                ) sub
-            """)
-            avg_credits_per_job = round(float(cur.fetchone()['avg_credits']), 2)
-
-            # ── Trends ──
             def trend(current, previous):
                 if previous == 0:
                     return 100 if current > 0 else 0
@@ -473,16 +327,6 @@ def overview():
                 'mrr': mrr,
                 'conversion_rate': conversion_rate,
             },
-            'jobs': {
-                'total': total_jobs,
-                'today': jobs_today,
-                'week': jobs_week,
-                'running': jobs_running,
-                'failed_today': jobs_failed_today,
-                'completed_total': jobs_completed_total,
-                'failed_total': jobs_failed_total,
-                'success_rate': success_rate,
-            },
             'visits': {
                 'today': visits_today,
                 'unique_today': unique_today,
@@ -492,13 +336,6 @@ def overview():
                 'unique_month': unique_month,
                 'trend_week': visits_trend,
             },
-            'credits': {
-                'consumed_today': credits_today,
-                'consumed_week': credits_week,
-                'total_tokens': total_tokens,
-                'tokens_today': tokens_today,
-                'avg_per_job': avg_credits_per_job,
-            }
         }), 200
     finally:
         conn.close()
@@ -514,7 +351,7 @@ def chart_registrations():
     conn = get_db()
     try:
         with conn.cursor() as cur:
-            cur.execute("SET LOCAL TIME ZONE 'UTC'")
+            cur.execute("SET TIME ZONE 'UTC'")
             cur.execute("""
                 SELECT
                     TO_CHAR(d::date, 'YYYY-MM-DD') AS day,
@@ -570,42 +407,9 @@ def chart_growth():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  CHARTS — Jobs (30d)
-# ─────────────────────────────────────────────────────────────────────────────
-
-@admin_bp.route('/charts/jobs', methods=['GET'])
-@admin_required
-def chart_jobs():
-    conn = get_db()
-    try:
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT
-                    TO_CHAR(d::date, 'YYYY-MM-DD') AS day,
-                    COALESCE(j.total, 0) AS total,
-                    COALESCE(j.completed, 0) AS completed,
-                    COALESCE(j.failed, 0) AS failed
-                FROM generate_series(NOW() - INTERVAL '30 days', NOW(), '1 day') AS d
-                LEFT JOIN (
-                    SELECT
-                        created_at::date AS dt,
-                        COUNT(*) AS total,
-                        COUNT(*) FILTER (WHERE state = 'completed') AS completed,
-                        COUNT(*) FILTER (WHERE state = 'failed') AS failed
-                    FROM jobs WHERE created_at >= NOW() - INTERVAL '30 days'
-                    GROUP BY created_at::date
-                ) j ON j.dt = d::date
-                ORDER BY d
-            """)
-            rows = cur.fetchall()
-        return jsonify({'data': [dict(r) for r in rows]}), 200
-    finally:
-        conn.close()
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 #  CHARTS — Visits (30d)
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 @admin_bp.route('/charts/visits', methods=['GET'])
 @admin_required
@@ -614,7 +418,7 @@ def chart_visits():
     conn = get_db()
     try:
         with conn.cursor() as cur:
-            cur.execute("SET LOCAL TIME ZONE 'UTC'")
+            cur.execute("SET TIME ZONE 'UTC'")
             return jsonify(visits_report(cur, _scope(), METRICS_EPOCH)), 200
     finally:
         conn.close()
@@ -627,7 +431,7 @@ def website_journeys():
     conn = get_db()
     try:
         with conn.cursor() as cur:
-            cur.execute("SET LOCAL statement_timeout='8s'")
+            cur.execute("SET statement_timeout='8s'")
             return jsonify(journey_report(cur, _scope('u'))), 200
     finally:
         conn.close()
@@ -652,40 +456,9 @@ def track_journey():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  CHARTS — Credits (30d)
-# ─────────────────────────────────────────────────────────────────────────────
-
-@admin_bp.route('/charts/credits', methods=['GET'])
-@admin_required
-def chart_credits():
-    conn = get_db()
-    try:
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT
-                    TO_CHAR(d::date, 'YYYY-MM-DD') AS day,
-                    COALESCE(c.credits, 0) AS credits,
-                    COALESCE(c.tokens, 0) AS tokens
-                FROM generate_series(NOW() - INTERVAL '30 days', NOW(), '1 day') AS d
-                LEFT JOIN (
-                    SELECT
-                        created_at::date AS dt,
-                        ROUND(SUM(credits_used)::numeric, 2) AS credits,
-                        SUM(tokens_used) AS tokens
-                    FROM job_credits WHERE created_at >= NOW() - INTERVAL '30 days'
-                    GROUP BY created_at::date
-                ) c ON c.dt = d::date
-                ORDER BY d
-            """)
-            rows = cur.fetchall()
-        return jsonify({'data': [dict(r) for r in rows]}), 200
-    finally:
-        conn.close()
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 #  CHARTS — MRR Over Time (30d)
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 @admin_bp.route('/charts/mrr', methods=['GET'])
 @admin_required
@@ -973,132 +746,9 @@ def billing_sync_now():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  AI / ENGINE PERFORMANCE
-# ─────────────────────────────────────────────────────────────────────────────
-
-@admin_bp.route('/engine-stats', methods=['GET'])
-@admin_required
-def engine_stats():
-    conn = get_db()
-    try:
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT
-                    COALESCE(AVG(total_tokens), 0) AS avg_tokens,
-                    COALESCE(AVG(total_credits), 0) AS avg_credits,
-                    COALESCE(MAX(total_tokens), 0) AS max_tokens,
-                    COALESCE(MIN(total_tokens), 0) AS min_tokens
-                FROM (
-                    SELECT job_id,
-                        SUM(tokens_used) AS total_tokens,
-                        SUM(credits_used) AS total_credits
-                    FROM job_credits
-                    GROUP BY job_id
-                ) sub
-            """)
-            token_stats = cur.fetchone()
-
-            cur.execute("""
-                SELECT
-                    COALESCE(SUM(input_tokens), 0) AS total_input,
-                    COALESCE(SUM(output_tokens), 0) AS total_output,
-                    COALESCE(SUM(cache_write_tokens), 0) AS total_cache_write,
-                    COALESCE(SUM(cache_read_tokens), 0) AS total_cache_read,
-                    COALESCE(SUM(tokens_used), 0) AS total_all
-                FROM job_credits
-            """)
-            token_breakdown = cur.fetchone()
-
-            cur.execute("""
-                SELECT
-                    EXTRACT(HOUR FROM created_at) AS hour,
-                    COUNT(*) AS count
-                FROM jobs
-                WHERE created_at >= NOW() - INTERVAL '30 days'
-                GROUP BY hour
-                ORDER BY hour
-            """)
-            hourly = [{'hour': int(r['hour']), 'count': r['count']} for r in cur.fetchall()]
-
-            cur.execute("""
-                SELECT
-                    TO_CHAR(d::date, 'YYYY-MM-DD') AS day,
-                    COALESCE(j.completed, 0) AS completed,
-                    COALESCE(j.failed, 0) AS failed,
-                    CASE WHEN COALESCE(j.completed, 0) + COALESCE(j.failed, 0) > 0
-                        THEN ROUND(COALESCE(j.completed, 0)::numeric /
-                            (COALESCE(j.completed, 0) + COALESCE(j.failed, 0)) * 100, 1)
-                        ELSE 100
-                    END AS success_rate
-                FROM generate_series(NOW() - INTERVAL '7 days', NOW(), '1 day') AS d
-                LEFT JOIN (
-                    SELECT
-                        created_at::date AS dt,
-                        COUNT(*) FILTER (WHERE state = 'completed') AS completed,
-                        COUNT(*) FILTER (WHERE state = 'failed') AS failed
-                    FROM jobs WHERE created_at >= NOW() - INTERVAL '7 days'
-                    GROUP BY created_at::date
-                ) j ON j.dt = d::date
-                ORDER BY d
-            """)
-            daily_success = [dict(r) for r in cur.fetchall()]
-
-            cur.execute("""
-                SELECT COALESCE(AVG(turns), 0) AS avg_turns
-                FROM (
-                    SELECT job_id, COUNT(*) AS turns
-                    FROM job_credits
-                    GROUP BY job_id
-                ) sub
-            """)
-            avg_turns = round(float(cur.fetchone()['avg_turns']), 1)
-
-            cur.execute("""
-                SELECT
-                    TO_CHAR(d::date, 'YYYY-MM-DD') AS day,
-                    COALESCE(t.input_tokens, 0) AS input_tokens,
-                    COALESCE(t.output_tokens, 0) AS output_tokens,
-                    COALESCE(t.cache_read, 0) AS cache_read,
-                    COALESCE(t.cache_write, 0) AS cache_write
-                FROM generate_series(NOW() - INTERVAL '30 days', NOW(), '1 day') AS d
-                LEFT JOIN (
-                    SELECT
-                        created_at::date AS dt,
-                        SUM(input_tokens) AS input_tokens,
-                        SUM(output_tokens) AS output_tokens,
-                        SUM(cache_read_tokens) AS cache_read,
-                        SUM(cache_write_tokens) AS cache_write
-                    FROM job_credits WHERE created_at >= NOW() - INTERVAL '30 days'
-                    GROUP BY created_at::date
-                ) t ON t.dt = d::date
-                ORDER BY d
-            """)
-            token_trend = [dict(r) for r in cur.fetchall()]
-
-        return jsonify({
-            'avg_tokens_per_job': round(float(token_stats['avg_tokens']), 0),
-            'avg_credits_per_job': round(float(token_stats['avg_credits']), 2),
-            'max_tokens_job': int(token_stats['max_tokens']),
-            'min_tokens_job': int(token_stats['min_tokens']),
-            'avg_turns_per_job': avg_turns,
-            'token_breakdown': {
-                'input': int(token_breakdown['total_input']),
-                'output': int(token_breakdown['total_output']),
-                'cache_write': int(token_breakdown['total_cache_write']),
-                'cache_read': int(token_breakdown['total_cache_read']),
-                'total': int(token_breakdown['total_all']),
-            },
-            'hourly_distribution': hourly,
-            'daily_success_rate': daily_success,
-            'token_trend': token_trend,
-        }), 200
-    finally:
-        conn.close()
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 #  USER BEHAVIOR / RETENTION COHORTS
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 @admin_bp.route('/retention', methods=['GET'])
 @admin_required
@@ -1200,7 +850,7 @@ def engagement():
             """)
             segments = {r['segment']: r['user_count'] for r in cur.fetchall()}
 
-            cur.execute("SELECT COUNT(DISTINCT j.user_id) AS dau FROM video_jobs j JOIN users u ON u.id = j.user_id WHERE j.created_at::date = CURRENT_DATE AND " + scope_u)
+            cur.execute("SELECT COUNT(DISTINCT j.user_id) AS dau FROM video_jobs j JOIN users u ON u.id = j.user_id WHERE j.created_at >= CURRENT_DATE AND j.created_at < CURRENT_DATE + 1 AND " + scope_u)
             dau = cur.fetchone()['dau']
 
             cur.execute("SELECT COUNT(DISTINCT j.user_id) AS wau FROM video_jobs j JOIN users u ON u.id = j.user_id WHERE j.created_at >= NOW() - INTERVAL '7 days' AND " + scope_u)
@@ -1486,59 +1136,9 @@ def list_users():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  JOBS TABLE
-# ─────────────────────────────────────────────────────────────────────────────
-
-@admin_bp.route('/jobs', methods=['GET'])
-@admin_required
-def list_jobs():
-    page     = int(request.args.get('page', 1))
-    per_page = int(request.args.get('per_page', 20))
-    state    = request.args.get('state', '')
-    offset   = (page - 1) * per_page
-
-    conn = get_db()
-    try:
-        with conn.cursor() as cur:
-            where  = ""
-            params = []
-            if state:
-                where = "WHERE j.state = %s"
-                params.append(state)
-
-            cur.execute(f"SELECT COUNT(*) AS total FROM jobs j {where}", params)
-            total = cur.fetchone()['total']
-
-            cur.execute(f"""
-                SELECT
-                    j.job_id, j.title, j.state, j.created_at, j.updated_at,
-                    u.email AS user_email, u.plan AS user_plan,
-                    COALESCE(SUM(jc.credits_used), 0) AS credits_used,
-                    COALESCE(SUM(jc.tokens_used), 0) AS tokens_used,
-                    COUNT(jc.id) AS turns
-                FROM jobs j
-                LEFT JOIN users u ON u.id = j.user_id
-                LEFT JOIN job_credits jc ON jc.job_id = j.job_id
-                {where}
-                GROUP BY j.job_id, j.title, j.state, j.created_at, j.updated_at, u.email, u.plan
-                ORDER BY j.created_at DESC
-                LIMIT %s OFFSET %s
-            """, params + [per_page, offset])
-            rows = cur.fetchall()
-
-        return jsonify({
-            'jobs': [dict(r) for r in rows],
-            'total': total,
-            'page': page,
-            'per_page': per_page,
-        }), 200
-    finally:
-        conn.close()
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 #  TOP USERS
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 @admin_bp.route('/top-users', methods=['GET'])
 @admin_required
@@ -1741,162 +1341,10 @@ def session_stats():
         conn.close()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  BUILDS LIST (admin — all jobs with user info, paginated)
-# ─────────────────────────────────────────────────────────────────────────────
-
-@admin_bp.route('/builds', methods=['GET'])
-@admin_required
-def list_builds():
-    page     = int(request.args.get('page', 1))
-    per_page = int(request.args.get('per_page', 30))
-    state    = request.args.get('state', '').strip()
-    search   = request.args.get('search', '').strip()
-    offset   = (page - 1) * per_page
-
-    conn = get_db()
-    try:
-        with conn.cursor() as cur:
-            where_parts = []
-            params = []
-            if state:
-                where_parts.append("j.state = %s")
-                params.append(state)
-            if search:
-                where_parts.append("(u.email ILIKE %s OR j.title ILIKE %s)")
-                params.extend([f"%{search}%", f"%{search}%"])
-            where = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
-
-            cur.execute(f"SELECT COUNT(*) AS total FROM jobs j LEFT JOIN users u ON u.id = j.user_id {where}", params)
-            total = cur.fetchone()["total"]
-
-            cur.execute(f"""
-                SELECT j.job_id, j.title, j.state, j.created_at,
-                       u.email AS user_email, u.plan,
-                       COALESCE(SUM(jc.credits_used), 0) AS credits_used,
-                       COALESCE(SUM(jc.tokens_used), 0) AS tokens_used,
-                       COUNT(jc.id) AS turns
-                FROM jobs j
-                LEFT JOIN users u ON u.id = j.user_id
-                LEFT JOIN job_credits jc ON jc.job_id = j.job_id
-                {where}
-                GROUP BY j.job_id, j.title, j.state, j.created_at, u.email, u.plan
-                ORDER BY j.created_at DESC
-                LIMIT %s OFFSET %s
-            """, params + [per_page, offset])
-            rows = cur.fetchall()
-
-        return jsonify({
-            "builds": [dict(r) for r in rows],
-            "total": total,
-            "page": page,
-            "per_page": per_page,
-        }), 200
-    finally:
-        conn.close()
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  JOB CONVERSATION VIEWER
-# ─────────────────────────────────────────────────────────────────────────────
-
-@admin_bp.route('/job/<job_id>/conversation', methods=['GET'])
-@admin_required
-def job_conversation(job_id):
-    """Returns messages + metadata for a specific job for admin viewing."""
-    import json as _json
-
-    OUTPUTS_DIR = os.path.join(
-        os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")),
-        "outputs"
-    )
-
-    job_folder = os.path.join(OUTPUTS_DIR, job_id)
-    if not os.path.isdir(job_folder):
-        return jsonify({"error": "Job not found"}), 404
-
-    messages = []
-    messages_path = os.path.join(job_folder, "messages.jsonl")
-    if os.path.exists(messages_path):
-        with open(messages_path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    try:
-                        messages.append(_json.loads(line))
-                    except Exception:
-                        pass
-
-    state_data = {}
-    state_path = os.path.join(job_folder, "state.json")
-    if os.path.exists(state_path):
-        try:
-            with open(state_path) as f:
-                state_data = _json.load(f)
-        except Exception:
-            pass
-
-    meta = {}
-    meta_path = os.path.join(job_folder, "meta.json")
-    if os.path.exists(meta_path):
-        try:
-            with open(meta_path) as f:
-                meta = _json.load(f)
-        except Exception:
-            pass
-
-    prompt_text = ""
-    prompt_path = os.path.join(job_folder, "prompt.txt")
-    if os.path.exists(prompt_path):
-        try:
-            with open(prompt_path, "r", encoding="utf-8") as f:
-                prompt_text = f.read()
-        except Exception:
-            pass
-
-    dist_dir = os.path.join(job_folder, "dist")
-    has_preview = os.path.isdir(dist_dir)
-    preview_url = f"/auth/preview/{job_id}/" if has_preview else None
-
-    conn = get_db()
-    try:
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT j.title, j.state, j.created_at, j.updated_at,
-                       u.email AS user_email, u.plan,
-                       COALESCE(SUM(jc.credits_used), 0) AS credits_used,
-                       COALESCE(SUM(jc.tokens_used), 0) AS tokens_used,
-                       COUNT(jc.id) AS turns
-                FROM jobs j
-                LEFT JOIN users u ON u.id = j.user_id
-                LEFT JOIN job_credits jc ON jc.job_id = j.job_id
-                WHERE j.job_id = %s
-                GROUP BY j.job_id, j.title, j.state, j.created_at, j.updated_at, u.email, u.plan
-            """, (job_id,))
-            row = cur.fetchone()
-    finally:
-        conn.close()
-
-    if not row:
-        return jsonify({"error": "Job not in database"}), 404
-
-    return jsonify({
-        "job_id": job_id,
-        "title": row["title"],
-        "state": row["state"],
-        "created_at": str(row["created_at"]),
-        "updated_at": str(row["updated_at"]) if row["updated_at"] else None,
-        "user_email": row["user_email"],
-        "plan": row["plan"],
-        "credits_used": float(row["credits_used"]),
-        "tokens_used": int(row["tokens_used"]),
-        "turns": int(row["turns"]),
-        "model": meta.get("model", "unknown"),
-        "prompt": prompt_text,
-        "messages": messages,
-        "preview_url": preview_url,
-        "has_preview": has_preview,
-    }), 200
+# Retired app-builder endpoints (engine-stats, builds, jobs,
+# job/<id>/conversation, charts/jobs, charts/credits) were removed: they read
+# the empty `jobs` table or a deleted folder, one crashed, and no screen used
+# them. Their URLs now answer 404.
 
 
 @admin_bp.route('/editing-provider-readiness', methods=['POST'])
@@ -1915,7 +1363,7 @@ def conversion_report():
     conn = get_db()
     try:
         with conn.cursor() as cur:
-            cur.execute("SET LOCAL statement_timeout = '15s'")
+            cur.execute("SET statement_timeout = '15s'")
             return jsonify(read_report(cur, _scope('u')))
     except Exception:
         current_app.logger.exception('Conversion report unavailable')
@@ -1931,7 +1379,7 @@ def acquisition_report():
     conn = get_db()
     try:
         with conn.cursor() as cur:
-            cur.execute("SET LOCAL statement_timeout='8s'")
+            cur.execute("SET statement_timeout='8s'")
             data = report(cur, _scope('u'))
             sources = report(cur, _scope('u'), group_by='source')
             totals = report(cur, _scope('u'), group_by='all')
@@ -1960,12 +1408,17 @@ def outreach_conversions():
     conn = get_db()
     try:
         with conn.cursor() as cur:
-            cur.execute("SET LOCAL statement_timeout='8s'")
+            cur.execute("SET statement_timeout='8s'")
             cur.execute("SELECT value FROM app_kv WHERE key='outreach_conversion_key_sha256'")
             row = cur.fetchone()
             digest = hashlib.sha256(auth[7:].encode()).hexdigest()
             if not row or not hmac.compare_digest(str(row['value']), digest):
                 return jsonify({'error': 'unauthorized'}), 401
-            return jsonify(report(cur, _scope('u'), list(set(codes))))
+            # Version 2: every v1 key keeps its name and meaning (`visitors`
+            # stays the raw browser count for the transition), and each row
+            # adds `people` and `link_previews` (Meta's DM previews are not
+            # people), plus `channel` and `campaign_label`.
+            return jsonify(report(cur, _scope('u'), list(set(codes)),
+                                  with_people=True))
     finally:
         conn.close()
