@@ -6078,6 +6078,23 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     picture_card_inputs, next_idx = picture_cards.prepare_inputs(
         edl, workdir, W, H, fps, extra_inputs, next_idx)
     motion_inputs = []
+    hero_masks = {}
+
+    def _hero_behind_why(m):
+        # A hero word's clip is drawn at head height for its behind-subject
+        # composite, so a mask that cannot be fetched must be known BEFORE
+        # the clip renders: then the hero becomes its face-safe display slam
+        # (motion_layer.hero_front). Found after, it could only be dropped —
+        # and the words it carries with it.
+        why = motion_layer.behind_why(edl, tl, m, geom_now)
+        key = (m.get("behind") or {}).get("asset_key")
+        if why or not key:
+            return why
+        try:
+            hero_masks[key] = _fetch(key, "matte", next_idx)
+        except Exception as e:  # noqa: BLE001 — the swap is the fallback
+            return f"mask unavailable ({str(e)[:120]})"
+        return None
     if not audio_only:
         motion_inputs, next_idx = motion_layer.prepare_inputs(
             edl, workdir, W, H, fps, tl.out_duration, extra_inputs, next_idx,
@@ -6087,7 +6104,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                                (info["width"], info["height"]), W, H,
                                frame_mode, frame_focus, insert_locals,
                                bool(caption_motion_items)),
-            behind_why=lambda m: motion_layer.behind_why(edl, tl, m, geom_now))
+            behind_why=_hero_behind_why)
         if caption_motion_items and not any(
                 str(it.get("id", "")).startswith("__captions_")
                 for _i, it, _c in motion_inputs):
@@ -6114,7 +6131,8 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
             why, local = motion_layer.behind_why(edl, tl, m_item, geom_now), None
             if not why:
                 try:
-                    local = _fetch(b["asset_key"], "matte", next_idx)
+                    local = (hero_masks.get(b.get("asset_key"))
+                             or _fetch(b["asset_key"], "matte", next_idx))
                 except Exception as e:
                     why = f"mask unavailable ({str(e)[:120]})"
             if why:

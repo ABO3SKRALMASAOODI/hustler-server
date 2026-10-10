@@ -429,8 +429,8 @@ def demote(item, why):
     word at head height, so above the picture it would cover the face —
     it is not drawn (None). The renderer swaps a hero it can tell will not
     composite for its face-safe display slam BEFORE drawing it
-    (prepare_inputs' behind_why, hero_front); only a mask that fails to
-    download after that lands here."""
+    (prepare_inputs' behind_why, hero_front — the renderer's check fetches
+    the mask itself), so this is a last guard."""
     if is_hero(item):
         warn(f"hero word '{item.get('id')}' not drawn: it cannot sit behind the "
              f"subject ({why}), and drawn above the picture it would cover the face")

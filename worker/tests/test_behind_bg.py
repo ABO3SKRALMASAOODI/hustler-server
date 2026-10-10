@@ -1018,3 +1018,36 @@ def test_designed_plates_build_without_full_canvas_index_grids(tmp_path,
                                            vignette=.4)).model_dump()
     picture_cards.build_decor(str(tmp_path / "d.png"), str(tmp_path / "m.png"),
                               320, 568, blur)
+
+
+@needs_ffmpeg
+def test_a_hero_whose_mask_cannot_be_fetched_renders_as_its_display_slam(
+        shot, workdir, gfx_clip, monkeypatch):
+    """The mask is fetched BEFORE the hero's clip renders: a missing mask
+    swaps the hero for its stored face-safe display slam (hero_front). Found
+    only after the giant head-height word was drawn, the hero could only be
+    dropped — and the words it carries with it."""
+    monkeypatch.setattr(
+        renderer.storage, "download_to",
+        lambda key, local: (_ for _ in ()).throw(RuntimeError("no such object")))
+    jobs_seen = []
+
+    def fake_render(jobs, out_dir, **k):
+        jobs_seen.extend(jobs)
+        return [gfx_clip for _ in jobs]
+    monkeypatch.setattr(motion_engine, "render_jobs", fake_render)
+    hero = dict(_mo(), id="hero1", template="word_slam",
+                params={"text": "*ENOUGH*", "tier": "hero", "y": 0.3})
+    hero["behind"] = dict(hero["behind"], method="person",
+                          fallback={"x": 0.5, "y": 0.66, "width": 0.8})
+    out = os.path.join(workdir, "hero_missing_mask.mp4")
+    dur = renderer.render_edl({"keep": [[0.0, SHOT_S]], "motion": [hero]},
+                              {"video": {"duration": SHOT_S}, "words": [],
+                               "sentences": []}, shot, out, workdir, preview=True)
+    assert dur and abs(dur - SHOT_S) < 1.5
+    heroes = [j for j in jobs_seen if "ENOUGH" in j.html]
+    assert heroes and '"tier": "display"' in heroes[0].html, \
+        "the hero was dropped instead of drawn as its display slam"
+    assert any("display slam" in w and "mask unavailable" in w
+               for w in motion_layer.LAST_WARNINGS), motion_layer.LAST_WARNINGS
+    assert not any("not drawn" in w for w in motion_layer.LAST_WARNINGS)
