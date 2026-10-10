@@ -477,3 +477,30 @@ def test_a_sign_line_is_priced_once_not_as_line_and_scene_text():
     scene = caption_place.scene_boxes(edl, ix, tl, 1080, 1920, 2.0, 3.0)
     assert len(scene) == 2                       # the graphics' keep-out: both
     assert len(got) == 2                         # line text + the print, once each
+
+
+def test_a_page_clears_as_a_muting_graphic_lands_though_the_next_page_starts_on_its_exit():
+    """Integration (round 7: beats' list over the caption band + the caption
+    plan): Thiel's 'computers but also' held 0.3 s under the list's first
+    item because 'was', said a frame before the list's exit, was counted
+    inside the list's muted segment — so that segment was taken for one
+    still showing captions in the usual place. A word belongs to the
+    segment the plan placed it for (it appears ON the exit)."""
+    words = [("computers", 1.0, 1.4), ("but", 1.4, 1.6), ("also", 1.6, 1.9),
+             ("rockets", 2.0, 2.4), ("and", 2.5, 2.6), ("cities", 2.7, 3.2),
+             ("and", 3.4, 3.5), ("medicines.", 3.6, 4.4), ("It", 4.5, 4.6),
+             ("was", 4.98, 5.2), ("like", 5.2, 5.5), ("a", 5.5, 5.6), ("lot.", 5.6, 6.0)]
+    big = {"id": "list", "template": "word_slam", "start": 2.0, "end": 5.0,
+           "params": {"text": "rockets cities medicines"},
+           "footprint": {"box": [0.05, 0.08, 0.95, 0.92], "ar": AR, "faces": []}}
+    ix = _index(faces=False, words=words)
+    ix["video"] = {"width": 1080, "height": 1920, "fps": 30.0}
+    edl = _edl(motion=[big], words=words, dur=7.0)
+    tl = Timeline(edl["keep"])
+    p = _plan(edl, ix)
+    was = next(i for i, w in enumerate(p.words) if w["w"] == "was")
+    assert was not in p.hidden
+    assert p.hold_limit(1.6, None) == pytest.approx(2.0)
+    cues = motion_captions.cues(edl, ix, tl, canvas=(1080, 1920))
+    first = next(c for c in cues if c["w"][0]["t"] == "computers")
+    assert first["e"] <= 2.0 + 1e-6, first

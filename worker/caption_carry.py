@@ -793,6 +793,7 @@ class Plan:
         self.yield_spans = []
         self.segments = []
         self._seg_places = None
+        self._seg_of = None
         self.report = {}
 
     def hold_limit(self, start, place=None):
@@ -812,16 +813,26 @@ class Plan:
 
     def _places_in(self, k):
         """The places (band dicts, None = usual) of the caption words shown
-        from inside segment ``k``."""
+        from inside segment ``k`` — each word in the segment plan() placed
+        it for (``_seg_of``: a word said within two frames before a change
+        belongs to the layout after it, so a graphic's segment is never
+        taken for one that still shows captions because a word of the next
+        page starts a frame before its exit; judged: Thiel's 'computers but
+        also' held 0.3 s under the list's first item)."""
         if self._seg_places is None:
             import bisect
             starts = [a for a, _b, _st in self.segments]
             self._seg_places = [[] for _ in self.segments]
+            seg_of = self._seg_of if self._seg_of is not None and \
+                len(self._seg_of) == len(self.words) else None
             for i, w in enumerate(self.words):
                 if i in self.hidden:
                     continue
-                t = max(float(w["t0"]), self.shown_at.get(i, float(w["t0"])))
-                j = bisect.bisect_right(starts, t + 1e-6) - 1
+                if seg_of is not None:
+                    j = seg_of[i]
+                else:
+                    t = max(float(w["t0"]), self.shown_at.get(i, float(w["t0"])))
+                    j = bisect.bisect_right(starts, t + 1e-6) - 1
                 if 0 <= j < len(self._seg_places):
                     pl = self.placed.get(i)
                     if pl not in self._seg_places[j]:
@@ -1310,6 +1321,7 @@ def plan(edl, index, tl, words, canvas=None):
     moved = _onto_next_layout(p, words, bounds, seg_of, state, caplib.program_cuts(tl))
     _smooth_flips(p, edl, index, tl, W, H, col, bounds, seg_of, state, info)
     p.segments = [(bounds[k], bounds[k + 1], state[k]) for k in range(nseg)]
+    p._seg_of = list(seg_of)
     for a, b, st in p.segments:
         if st is not None:
             p.clamp_spans.append([a, b])

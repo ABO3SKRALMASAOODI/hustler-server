@@ -2136,6 +2136,10 @@ LEGIBILITY_VERSION = 4
 # v4 (round 7): scene text (a shirt print, a sign, a laptop's stickers that
 # recur at one place: caption_place.scene_text) prices a caption band with
 # a margin, so the plan keeps the captions off it where a free band allows.
+# Also v4 (round 7 integration, same release): the hook tier owns its zone
+# (its words appear as it exits), and a page before a muting graphic clears
+# as it lands even when the next page's first word is said a frame before
+# its exit (that word belongs to the layout after it).
 CAPTION_CARRY_VERSION = 4
 
 # Crops and picture cards that follow the speaker's face inside a shot
