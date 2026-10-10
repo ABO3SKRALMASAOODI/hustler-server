@@ -768,8 +768,11 @@ def uncovered_jump_cuts(edl, index, tl, fps=None, measure=None):
             # shrink the step, so that keeps the general line.
             weak = None
             if min(zb[0], za[0]) < 1.02:
+                # (a beat pulse is a rhythm device, not a cover: never
+                # named as a twitch)
                 weak = next((z for z in zooms if z.get("id") in edge
-                             and (z.get("mode") or "punch") != "shake"
+                             and (z.get("mode") or "punch")
+                             not in ("shake", "pulse")
                              and _num(z.get("strength"), 0.25)
                              < JUMP_CUT_FIX_STRENGTH - 1e-6), None)
             st = (JUMP_CUT_FIX_STRENGTH if room is None
@@ -940,8 +943,9 @@ def critique(edl, index, tl, src_w=None, src_h=None, user_asked="",
             s, m = next(iter(shapes))
             add(f"all {len(zooms)} zooms are the identical {int(s * 100)}% "
                 f"'{m}' — repetition with no variation reads as an automated "
-                "pass, not an edit. Vary strength and mode (a slow push_in "
-                "under a line, one hard punch on the peak).")
+                "pass, not an edit. Keep only the moves a moment earns (zooms "
+                "are optional, never a rule) and vary those (a slow push_in "
+                "under a line that builds, one punch on the peak).")
 
     # ── jump cuts ────────────────────────────────────────────────────────
     # A bare jump cut is the accepted grammar of a talking-head short and is

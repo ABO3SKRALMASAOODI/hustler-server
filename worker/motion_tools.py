@@ -574,8 +574,23 @@ def _face_measure(ctx, cache_attr="_keepout_faces", cap=KEEPOUT_FRAME_CAP):
 
 def jump_cut_measure(ctx):
     """The face measure taste.critique uses for its jump-cut note (two frames
-    per cut, its own cache), or None when the footage cannot be decoded."""
-    return _face_measure(ctx, "_jumpcut_faces", JUMPCUT_FRAME_CAP)
+    per cut, its own cache), or None when the context has no main video.
+
+    LAZY: render_preview hands this to every critique, and most renders have
+    no bare jump cut to measure, so the proxy is only resolved (leased or
+    downloaded) on the first frame actually asked for. A context that cannot
+    decode the footage then answers None per moment and the index's samples
+    stand in, exactly as an eager None would have."""
+    if not getattr(ctx, "has_main_video", True):
+        return None
+    state = {}
+
+    def measure(src_t):
+        if "fn" not in state:
+            state["fn"] = _face_measure(ctx, "_jumpcut_faces",
+                                        JUMPCUT_FRAME_CAP)
+        return state["fn"](src_t) if state["fn"] else None
+    return measure
 
 
 def _mutes_captions(item):

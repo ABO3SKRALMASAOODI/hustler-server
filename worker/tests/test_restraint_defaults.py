@@ -34,7 +34,7 @@ def test_no_tool_adds_a_sound_or_a_camera_move_unless_asked():
     # motion graphics: silent unless sfx=true
     assert motion_tools.SFX_DEFAULT is False
     assert _default(motion_tools.add_motion_graphic, "sfx") is None
-    # the corrupt screen's synthesized hiss is not a library recording
+    # the corrupt screen is silent unless asked (and then library-only)
     assert _default(agent_tools.add_corrupt_screen, "sound") is False
     # the beat sheet suggests graphics; camera and sound are opt-in
     assert _default(motion_planner.plan, "camera") is False
@@ -123,3 +123,109 @@ def test_too_many_zooms_or_a_repeated_sound_are_the_findings_instead():
     found = taste.critique(edl, _index(), Timeline(keep, [], []),
                            1080, 1920, "")
     assert any("the same sound plays twice" in f for f in found), found
+
+
+# ── review fixes (independent review, Oct 10 2026) ───────────────────────
+
+class _GlitchCtx:
+    """Just enough context for add_corrupt_screen's EDL bookkeeping."""
+    project_id = 7
+
+    def __init__(self):
+        self.edl = {"keep": [[0.0, 20.0]], "inserts": []}
+
+    def latest_edl(self):
+        import copy
+        return {"json": copy.deepcopy(self.edl), "version": 1}
+
+
+def _patch_glitch(monkeypatch, ctx, built, sounds):
+    def asset(_ctx, style, k, dur, sound):
+        built.append(sound)
+        return "generated_video/7/glitch-x.mp4", None
+
+    def insert(_ctx, key, at, duration_s=None):
+        ctx.edl["inserts"].append({"id": "in1", "storage_key": key,
+                                   "at_output_s": float(at),
+                                   "duration_s": float(duration_s)})
+        return "EDL v2 — inserted the clip. Before: x"
+
+    def sfx(_ctx, storage_key, at, gain_db=-6.0, purpose=None,
+            offset_s=None, dur_s=None):
+        sounds.append({"storage_key": storage_key, "at": at,
+                       "gain_db": gain_db, "dur_s": dur_s})
+        return "EDL v3 — added sfx"
+    monkeypatch.setattr(agent_tools, "_corrupt_glitch_asset", asset)
+    monkeypatch.setattr(agent_tools, "insert_media", insert)
+    monkeypatch.setattr(agent_tools, "add_sfx", sfx)
+
+
+def test_corrupt_screen_sound_is_an_approved_library_recording(monkeypatch):
+    import sound_library
+    ctx, built, sounds = _GlitchCtx(), [], []
+    _patch_glitch(monkeypatch, ctx, built, sounds)
+    # default: silent clip, no sound placed, and the result says so
+    out = agent_tools.add_corrupt_screen(ctx, 5.0)
+    assert built == [False] and sounds == [], (built, sounds)
+    assert "it is silent" in out and "sound=true" in out
+    # asked: still a SILENT clip (no synthesized hiss) plus one library cue
+    # starting on the screen's first frame and stopping with it
+    ctx2, built, sounds = _GlitchCtx(), [], []
+    _patch_glitch(monkeypatch, ctx2, built, sounds)
+    out = agent_tools.add_corrupt_screen(ctx2, 5.0, duration_s=0.6,
+                                         sound=True)
+    assert built == [False], built
+    assert [s["storage_key"] for s in sounds] == ["sound:glitch_1"]
+    hit = sounds[0]["at"] - sound_library.hit_s("glitch_1")
+    assert abs(hit - 5.0) < 1e-6, sounds
+    assert sounds[0]["dur_s"] <= 0.6 and sounds[0]["gain_db"] == -14.0
+    assert "approved glitch recording" in out and "EDL v3" in out
+    # a longer screen takes the longer recording
+    ctx3, built, sounds = _GlitchCtx(), [], []
+    _patch_glitch(monkeypatch, ctx3, built, sounds)
+    agent_tools.add_corrupt_screen(ctx3, 5.0, duration_s=1.0, sound="true")
+    assert [s["storage_key"] for s in sounds] == ["sound:glitch_2"]
+    assert sounds[0]["dur_s"] <= 1.0
+    desc = agent_tools.TOOLS["add_corrupt_screen"][1]
+    assert "synthesized" not in desc and "approved library glitch" in desc
+
+
+def test_jump_cut_measure_never_touches_the_proxy_until_a_frame_is_asked():
+    class Ctx:
+        has_main_video = True
+        workdir = "/nonexistent"
+        calls = 0
+
+        def proxy_path(self):
+            Ctx.calls += 1
+            raise RuntimeError("no proxy available")
+    ctx = Ctx()
+    measure = motion_tools.jump_cut_measure(ctx)
+    assert measure is not None and Ctx.calls == 0
+    # a reel with no jump cut never asks: the proxy is never leased
+    keep = [[0.0, 40.0]]
+    edl = _reel(keep)
+    taste.critique(edl, _index(), Timeline(keep, [], []), 1080, 1920, "",
+                   measure=measure)
+    assert Ctx.calls == 0
+    # asked, an undecodable context answers None and the index stands in
+    assert measure(3.0) is None and measure(4.0) is None
+    assert Ctx.calls == 1
+    no_video = type("NoVideo", (), {"has_main_video": False})()
+    assert motion_tools.jump_cut_measure(no_video) is None
+
+
+def test_restraint_worded_directions_are_not_promises_to_add_a_sound():
+    import director
+    for text in ("sparse library sounds only where a moment earns one; "
+                 "zero is fine",
+                 "zooms are optional, never a rule",
+                 "a punch only if a moment earns it"):
+        assert director._direction_mode(text) == "preserve", text
+    assert director._direction_mode("no SFX") == "omit"
+    assert director._direction_mode(
+        "one impact on the payoff, a shutter on the photo") == "author"
+    # the look summaries the agent reads never promise a sound
+    for name, look in agent_tools.LOOKS.items():
+        low = str(look.get("summary") or "").lower()
+        assert "whoosh" not in low and "burst" not in low, name

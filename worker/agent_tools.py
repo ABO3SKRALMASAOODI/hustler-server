@@ -15620,17 +15620,31 @@ def add_corrupt_screen(ctx, at_output_s, duration_s=0.6, style="digital",
         k = max(0.0, min(1.0, float(intensity)))
     except (TypeError, ValueError):
         return "REJECTED: intensity must be a number 0-1."
-    snd = bool(sound)
+    snd = sound is True or str(sound).strip().lower() in ("true", "1", "yes",
+                                                          "on")
 
-    key, err = _corrupt_glitch_asset(ctx, st, k, dur, snd)
+    # The clip is always built SILENT. Owner policy: sound effects come only
+    # from the approved library (synthesized sounds were rejected), so
+    # sound=true lays an approved glitch recording on the screen instead of
+    # the old synthesized hiss (which _corrupt_filtergraph can still build).
+    key, err = _corrupt_glitch_asset(ctx, st, k, dur, False)
     if err:
         return err
+    before = {i.get("id") for i in (ctx.latest_edl()["json"].get("inserts")
+                                    or [])}
     placed = insert_media(ctx, key, at, duration_s=dur)
     if not placed.startswith("EDL v"):
         return placed
-    heard = ("a burst of static/hiss plays over it" if snd
-             else "it is silent")
     result = placed.split(". Before:")[0]
+    heard = (f"it is silent (the program pauses {dur}s with no sound; "
+             "sound=true lays the approved glitch recording under it when "
+             "the break earns one)")
+    if snd:
+        heard = _corrupt_screen_sound(ctx, before, dur, st)
+        if heard.startswith("EDL v"):
+            result += "\n" + heard.split("\n", 1)[0]
+            heard = ("the approved glitch recording plays under it "
+                     "(remove_sfx to drop it)")
     result += (f"\nThis is a {st} corrupt-screen glitch ({dur}s) — a full-frame "
                f"digital-corruption beat; {heard}. It is inserted media, so no "
                "spoken-word captions appear on it (nothing overlaps). Great as "
@@ -15638,6 +15652,38 @@ def add_corrupt_screen(ctx, at_output_s, duration_s=0.6, style="digital",
                "reads as a hit, longer starts to feel broken). Raise intensity "
                "for a harsher break, lower it for a subtle flicker.")
     return result
+
+
+def _corrupt_screen_sound(ctx, before_ids, dur, style):
+    """Lay an approved library glitch recording on the corrupt screen just
+    inserted (the insert whose id is not in ``before_ids``): glitch_1 under a
+    short screen, glitch_2 under a longer one, starting on its first frame
+    and stopping with it. Returns add_sfx's result, or a sentence saying why
+    the screen stays silent."""
+    sid = "glitch_1" if dur <= 0.7 else "glitch_2"
+    row = sound_library.get(sid)
+    if not row:
+        return f"it is silent (the approved {sid} recording is unavailable)"
+    edl = ctx.latest_edl()["json"]
+    inserts = edl.get("inserts") or []
+    item = next((i for i in inserts if i.get("id") not in before_ids), None)
+    win = None
+    if item is not None:
+        win = insert_windows(inserts, Timeline(
+            [list(k) for k in (edl.get("keep") or [])], inserts,
+            edl.get("speed") or [])).get(item["id"])
+    if not win:
+        return ("it is silent (its program position could not be resolved — "
+                f"add_sfx storage_key='sound:{sid}' at its first frame)")
+    start, end = win
+    play = min(float(row.get("duration_s") or dur), max(0.05, end - start))
+    res = add_sfx(ctx, f"sound:{sid}", at=start + sound_library.hit_s(sid),
+                  gain_db=float(row.get("gain_db") or -14.0),
+                  purpose=f"approved {sid} under the {style} corrupt screen",
+                  dur_s=round(play, 2))
+    if res.startswith("EDL v"):
+        return res
+    return f"it is silent (the glitch sound was not placed: {res[:160]})"
 
 
 def add_title_card(ctx, text, at_output_s, duration_s=2.2, template="title",
@@ -23247,7 +23293,7 @@ LOOKS = {
         "summary": ("ivory sans captions whose key words turn gold serif "
                     "italic, matte filmic grade (lifted blacks, soft "
                     "highlights, gentle desaturation), light grain + "
-                    "vignette, soft white dips with an airy whoosh"),
+                    "vignette, soft white dips"),
         "captions": {"motion_look": "serif", "preset": "editorial",
                      "color": "#F5F1EA", "highlight_color": "#F2C94C",
                      "size": "l"},
@@ -23270,8 +23316,7 @@ LOOKS = {
     "creator_punch": {
         "system": True,
         "summary": ("bold uppercase pop captions with a yellow active word, "
-                    "vibrant punchy grade, zoom-punch scene transitions on a "
-                    "hard whoosh"),
+                    "vibrant punchy grade, zoom-punch scene transitions"),
         "captions": {"motion_look": "pop", "preset": "reels",
                      "color": "#FFFFFF", "highlight_color": "#FFD400",
                      "size": "m"},
@@ -23323,7 +23368,7 @@ LOOKS = {
         "system": True,
         "summary": ("high-contrast black-and-white, stacked captions whose "
                     "hero word slams in (key words red), heavy grain + "
-                    "vignette, glitch transitions with a digital burst"),
+                    "vignette, glitch transitions"),
         "captions": {"motion_look": "stack", "preset": "impact",
                      "color": "#F7F7F5", "highlight_color": "#ED080D",
                      "size": "m"},
@@ -27049,8 +27094,10 @@ TOOLS = {
                            "reads as a hit; longer feels genuinely broken). "
                            "intensity 0-1 = how harsh (default 0.7). Silent "
                            "by default (sound effects are optional, never "
-                           "rules); sound=true adds a synthesized static/hiss "
-                           "burst — only when the user asks for one. "
+                           "rules) — the program pauses on it with no sound; "
+                           "sound=true lays the approved library glitch "
+                           "recording under it (glitch_1, or glitch_2 on a "
+                           "screen over 0.7s) when the break earns one. "
                            "No captions ever land on it (inserted media).",
                            {"at_output_s": {"type": "number"},
                             "duration_s": {"type": "number"},

@@ -84,9 +84,10 @@ color2 + direction for a gradient; motion adds a slow push. Words on it →
 
 CORRUPT / GLITCH SCREENS (`add_corrupt_screen`): the signal "breaks" between
 sections — style 'digital', 'vhs' or 'static', 0.3–1 s, silent by
-default; sound=true adds a synthesized static burst, only when the user
-asks for one (it is not a library recording). Different from the `glitch` junction style and the
-`glitch_burst` motion transition.
+default (the program pauses on it with no sound); sound=true lays the
+approved library glitch recording under it when the break earns one.
+Different from the `glitch` junction style and the `glitch_burst` motion
+transition.
 
 FREEZE FRAMES (`add_freeze_frame`): freeze the picture and hold big words
 over the blurred, darkened still — a real cut, captions never land on it.
