@@ -133,7 +133,8 @@ REGISTRY = {
         "lock.", section="funnel"),
     "blocker_paywall_chat": _m(
         "Saw \"subscribe to edit\"", "People in the group whose editor "
-        "message got the subscription-required reply.", section="funnel"),
+        "message was answered with a subscribe or out-of-credits reply.",
+        section="funnel"),
     "blocker_plans_seen": _m(
         "Saw the plans", "People in the group shown the plan cards.",
         section="funnel"),

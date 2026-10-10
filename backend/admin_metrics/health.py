@@ -392,6 +392,10 @@ def health_page(cur, period, include_owner=False):
     }
 
 
+def _n(count, singular, plural=None):
+    return f"{count} {singular if count == 1 else (plural or singular + 's')}"
+
+
 def _range_words(period):
     return {"today": "today", "yesterday": "yesterday"}.get(
         period.key, "in this period")
@@ -410,8 +414,8 @@ def health_items(cur, period, money_failing=None, failed_payments=None):
                   "how": d["how"], "value": n,
                   "status": "good" if n == 0 else
                   ("warning" if n < 5 else "critical"),
-                  "text": (f"{n} failures ({people} people) {words}" if n
-                           else f"None {words}"),
+                  "text": (f"{_n(n, 'failure')} ({_n(people, 'person', 'people')}) "
+                           f"{words}" if n else f"None {words}"),
                   "href": f"/admin/health?range={r}#failures"})
     u = uploads(cur, period, recent_limit=0)
     n = u["failed_people"]
@@ -420,7 +424,7 @@ def health_items(cur, period, money_failing=None, failed_payments=None):
                   "how": d["how"], "value": n,
                   "status": "good" if n == 0 else
                   ("warning" if n < 5 else "critical"),
-                  "text": (f"{n} {'person' if n == 1 else 'people'} {words}"
+                  "text": (f"{_n(n, 'person', 'people')} {words}"
                            if n else f"None {words}"),
                   "href": f"/admin/health?range={r}#uploads"})
     failing = money_failing if money_failing is not None else 0
@@ -430,8 +434,9 @@ def health_items(cur, period, money_failing=None, failed_payments=None):
     items.append({"key": "payment_problems", "label": d["label"],
                   "how": d["how"], "value": n,
                   "status": "good" if n == 0 else "warning",
-                  "text": (f"{failing} failing now, {failed} failed charges "
-                           f"{words}" if n else "None"),
+                  "text": (f"{failing} failing now, "
+                           f"{_n(failed, 'failed charge')} {words}"
+                           if n else "None"),
                   "href": f"/admin/revenue?range={r}#payments"})
     m = messages_without_edit(cur, period, recent_limit=0)
     n = m["paying"] + m["free"]
@@ -440,7 +445,7 @@ def health_items(cur, period, money_failing=None, failed_payments=None):
                   "how": d["how"], "value": n,
                   "status": "critical" if m["paying"] else
                   ("warning" if m["free"] else "good"),
-                  "text": (f"{n} messages ({m['paying']} from paying "
+                  "text": (f"{_n(n, 'message')} ({m['paying']} from paying "
                            f"customers) {words}" if n else f"None {words}"),
                   "href": f"/admin/health?range={r}#messages"})
     e = engine(cur)

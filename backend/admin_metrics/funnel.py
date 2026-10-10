@@ -69,6 +69,17 @@ def stage_counts(cur, period):
     return {k: int(row.get(k) or 0) for k, _ in STAGES}
 
 
+# The reply to an editor message was a paywall: "subscribe" or "out of
+# credits". (The subscription_required notes posted when a free account
+# uploads are the upload lock, not a reply to a message, so they need a
+# preceding editor message to count here.)
+PAYWALL_REPLY = """(reply.meta->>'kind' = 'subscription_required'
+    OR reply.meta->>'subscribe_required' = 'true'
+    OR reply.meta->>'trial_cap_reached' = 'true'
+    OR reply.meta->>'free_trial_exhausted' = 'true'
+    OR reply.meta->>'credits_exhausted' = 'true')"""
+
+
 def blockers(cur, period):
     cur.execute(f"""
         WITH c AS (SELECT u.id FROM users u
@@ -88,9 +99,14 @@ def blockers(cur, period):
                                  'trial_gate_shown'))) AS plans_seen,
           count(*) FILTER (WHERE EXISTS (
               SELECT 1 FROM projects p
-                JOIN chat_messages cm ON cm.session_id = p.chat_session_id
-               WHERE p.user_id = c.id AND cm.role = 'assistant'
-                 AND cm.meta->>'kind' = 'subscription_required'))
+                JOIN chat_messages um ON um.session_id = p.chat_session_id
+                                     AND um.role = 'user'
+                CROSS JOIN LATERAL (
+                    SELECT r.meta FROM chat_messages r
+                     WHERE r.session_id = um.session_id AND r.id > um.id
+                       AND r.role = 'assistant'
+                     ORDER BY r.id LIMIT 1) reply
+               WHERE p.user_id = c.id AND {PAYWALL_REPLY}))
               AS paywall_chat
         FROM c""", period.params())
     row = cur.fetchone() or {}

@@ -2088,27 +2088,31 @@ LEGACY_DETAIL_CAP = 4 * 1024 * 1024
 def _json_size(value, memo):
     key = id(value)
     if key not in memo:
-        memo[key] = len(json.dumps(value, default=str))
+        memo[key] = len(json.dumps(value, default=str, separators=(",", ":")))
     return memo[key]
 
 
 def _cap_legacy_detail(out, cap=LEGACY_DETAIL_CAP):
     """Keep the legacy inspector under `cap` bytes, cheapest losses first.
 
-    Sizes are estimated per distinct list (memoised by identity) so a turn
-    whose activity is shared by 60 slices is measured once, not serialised.
+    Sizes are measured per distinct list (memoised by identity) so a turn
+    whose activity is shared by 60 slices is measured once, never serialised
+    60 times; everything else in the response is measured exactly.
     """
     memo = {}
+    shared = ("activity", "assistant_messages")
 
     def turns_size():
-        return sum(_json_size(t["activity"], memo)
-                   + _json_size(t["assistant_messages"], memo) + 600
-                   for t in out["turns"])
+        total = 0
+        for t in out["turns"]:
+            rest = {k: v for k, v in t.items() if k not in shared}
+            total += len(json.dumps(rest, default=str, separators=(",", ":")))
+            total += sum(_json_size(t[k], memo) for k in shared) + 40
+        return total
 
     def other_size():
-        return sum(_json_size(out[k], memo) for k in
-                   ("messages", "edls", "jobs", "assets", "children",
-                    "shorts_board", "upload_events"))
+        return len(json.dumps({k: v for k, v in out.items() if k != "turns"},
+                              default=str, separators=(",", ":")))
 
     reasons = []
     if turns_size() + other_size() > cap:
@@ -2121,17 +2125,14 @@ def _cap_legacy_detail(out, cap=LEGACY_DETAIL_CAP):
             seen.add(key)
         reasons.append("repeated activity of continued requests")
     if turns_size() + other_size() > cap:
-        memo.pop(id(out["jobs"]), None)
         out["jobs"] = [dict(j, payload=None, result=None,
                             body_omitted=True) for j in out["jobs"]]
         reasons.append("job payloads and results")
     if turns_size() + other_size() > cap:
-        memo.pop(id(out["edls"]), None)
         out["edls"] = [dict(e, json=None) if i >= 20 else e
                        for i, e in enumerate(out["edls"])]
         reasons.append("versions older than the latest 20")
     if turns_size() + other_size() > cap:
-        memo.pop(id(out["messages"]), None)
         out["messages"] = out["messages"][-500:]
         reasons.append("messages older than the latest 500")
     if reasons:
