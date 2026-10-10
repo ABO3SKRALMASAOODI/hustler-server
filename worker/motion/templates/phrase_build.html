@@ -1,5 +1,5 @@
 <!--MG-SPEC {"title": "Phrase build", "category": "type",
- "description": "A pre-laid-out typographic lockup (up to 4 rows mixing sans, serif, script, condensed and mono at a 2:1-7:1 size ladder, tight negative leading) whose words appear IN PLACE as they are spoken - the block never reflows. Use it for a key sentence instead of captions: set each row's 'at' to its spoken onset (item seconds) and place the block in face-free space with x/y/width/align.",
+ "description": "A pre-laid-out typographic lockup (up to 4 rows mixing sans, serif, script, condensed and mono at a 2:1-7:1 size ladder, rows stacked as tight as their measured glyphs allow without touching) whose words appear IN PLACE as they are spoken - the block never reflows. Use it for a key sentence instead of captions: set each row's 'at' to its spoken onset (item seconds) and place the block in face-free space with x/y/width/align.",
  "duration": 3.0, "layer": "above_captions", "mutes_captions": true,
  "params": {
   "rows": {"type": "rows", "required": true, "fields": ["text", "role", "size", "accent", "at"], "max_items": 4, "max": 48, "hint": "up to 4 rows: text; role sans|serif|script|condensed|mono; size relative (e.g. 0.5, 1, 1.6; ladder up to 7:1); accent '1' tints the row (or *star* single words); at = row reveal time in item seconds (blank = right after the previous row)"},
@@ -12,6 +12,7 @@
   "entrance": {"type": "enum", "values": ["pop", "ghost", "rise"], "default": "pop", "hint": "pop = hard cut per word; ghost = 2 frames at 35% then snap; rise = small rise + blur-to-sharp"},
   "word_stagger": {"type": "float", "min": 0.0, "max": 0.6, "default": 0.14, "hint": "seconds between words inside a row (0 = the whole row at once)"},
   "exit": {"type": "enum", "values": ["cut", "fade", "blur"], "default": "cut"},
+  "leading": {"type": "enum", "values": ["clear", "overlap"], "default": "clear", "hint": "clear = rows sit as tight as their measured glyphs allow and never touch (a descender or swash never hits the row below); overlap = the designed negative leading as-is, rows may cross (a script swash dipping into the row below) - only when that collision is the design"},
   "scrim": {"type": "float", "min": 0, "max": 1, "default": 0.45, "hint": "soft dark backing under the block so thin serif/script rows read over bright shirts and walls; 0 = none"}
  },
  "example": {"rows": [{"text": "Your", "role": "script", "size": "1.1", "at": "0"},
@@ -89,8 +90,13 @@
     const maxSize = Math.max(...rows.map(r => r.size));
     // widest row fills the column; the block stays under ~52% of the frame height
     // and the biggest row under ~20% FH
-    const k = Math.min(colW / wUnit, 0.52 * H / hUnit, 0.2 * H / (100 * maxSize));
-    rows.forEach((r, i) => {
+    let k = Math.min(colW / wUnit, 0.52 * H / hUnit, 0.2 * H / (100 * maxSize));
+    // the column is placed first: rows only collide where their glyphs share a column
+    blk.style.width = colW + 'px';
+    blk.style.left = (cx - colW / 2) + 'px';
+    blk.style.alignItems = P.align === 'left' ? 'flex-start' : P.align === 'right' ? 'flex-end' : 'center';
+    blk.style.textAlign = P.align;
+    const setRows = k => rows.forEach((r, i) => {
       const fs = 100 * r.size * k;
       r.fs = fs;
       r.el.style.fontSize = fs + 'px';
@@ -102,11 +108,23 @@
         r.el.style.marginTop = (prev.R.gap * prev.fs - 0.02 * Math.min(prev.fs, fs)) + 'px';
       }
     });
+    setRows(k);
+    if (P.leading !== 'overlap') {
+      // glyph-aware leading: keep the designed tightness, but push a row down
+      // just enough that no glyph of it comes near a glyph of the row above
+      // in the same column (descenders onto caps, a swash onto the next row)
+      const clearRows = () => rows.forEach((r, i) => {
+        if (!i) return;
+        const prev = rows[i - 1], m = Math.min(prev.fs, r.fs);
+        const need = MG.stackGap(prev.el, r.el, { clear: 0.07 * m, pad: 0.03 * m });
+        if (need > 0.25) r.el.style.marginTop = (parseFloat(r.el.style.marginTop) + need) + 'px';
+      });
+      clearRows();
+      // the pushed block still keeps the ~52% height budget
+      const h0 = blk.getBoundingClientRect().height;
+      if (h0 > 0.52 * H) { k *= 0.52 * H / h0; setRows(k); clearRows(); }
+    }
     lastFs = Math.max(...rows.map(r => r.fs));
-    blk.style.width = colW + 'px';
-    blk.style.left = (cx - colW / 2) + 'px';
-    blk.style.alignItems = P.align === 'left' ? 'flex-start' : P.align === 'right' ? 'flex-end' : 'center';
-    blk.style.textAlign = P.align;
     const h = blk.getBoundingClientRect().height;
     const top = Math.min(Math.max(H * P.y - h / 2, H * 0.06), H * 0.86 - h);
     blk.style.top = top + 'px';

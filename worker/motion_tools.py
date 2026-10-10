@@ -229,16 +229,21 @@ def _cue_dur(cue, params):
         return None
 
 
-def _land_at(land, span, default):
+def _land_at(land, span, default, params=None):
     """A cue that follows the template's own duration-relative landing
     (``land``: clamp(span * frac + add, min, max)), e.g. counter's count
-    landing min(1.0, max(0.5, 0.55 * duration))."""
+    landing min(1.0, max(0.5, 0.55 * duration)). ``param`` names a float
+    param that, when positive, IS the landing (item seconds) — counter's
+    ``land``, set on the spoken number's onset."""
     try:
         v = span * float(land.get("frac", 0.0)) + float(land.get("add", 0.0))
         if land.get("min") is not None:
             v = max(v, float(land["min"]))
         if land.get("max") is not None:
             v = min(v, float(land["max"]))
+        p = _js_float((params or {}).get(land["param"])) if land.get("param") else None
+        if p is not None and p > 0:
+            v = min(p, max(0.0, span))
     except (TypeError, ValueError, AttributeError):
         return default
     return v
@@ -267,7 +272,7 @@ def _sfx_cues(spec, params, start, end, seed="", with_dur=False):
         dur = _cue_dur(c, params)
         at = float(c.get("at") or 0.0)
         if isinstance(c.get("land"), dict):
-            at = _land_at(c["land"], end - start, at)
+            at = _land_at(c["land"], end - start, at, params)
         t = (end + at) if at < 0 else (start + at)
         rep = c.get("repeat")
         if rep and isinstance(params.get(rep.get("param")), list):
@@ -1194,6 +1199,18 @@ def _caption_integrity_notes(ctx, edl, item):
     return "".join("\n" + n for n in notes)
 
 
+def _number_landing(ctx, edl, item, prog):
+    """Land a number graphic on its spoken number (worker/number_reveal.py):
+    (changed, reply text). Never blocks the write it comments on."""
+    try:
+        import number_reveal
+        changed, note = number_reveal.land(edl, getattr(ctx, "index", None) or {}, item, prog)
+    except Exception as e:  # noqa: BLE001
+        print(f"[motion] number landing skipped: {str(e)[:160]}", flush=True)
+        return False, ""
+    return changed, ("\n" + note if note else "")
+
+
 # Sound is deliberate: templates declare sound ROLES (mapped onto the owner-
 # approved real recordings in worker/sound_library), but nothing adds sound
 # unless the editor asks for it on a moment that earns it.
@@ -1255,6 +1272,12 @@ def add_motion_graphic(ctx, template, start, end=None, params=None, html=None,
         item["purpose"] = " ".join(str(purpose).split())[:300]
     if allow_face_overlap:
         item["allow_face_overlap"] = True
+    clamp = ""
+    if abs(req[0] - s) > 0.05 or abs(req[1] - e) > 0.05:
+        clamp = f"\nCLAMPED: requested {req[0]:g}-{req[1]:g}s into this {prog:g}s program; placed at {s}-{e}s."
+    # a number completes on its spoken word (may move the window or set 'land')
+    _landed, number_note = _number_landing(ctx, edl, item, prog)
+    s, e = item["start"], item["end"]
     err, where, bbox, rep = _probe_full(ctx, edl, item)
     if err:
         return err
@@ -1271,15 +1294,13 @@ def add_motion_graphic(ctx, template, start, end=None, params=None, html=None,
     cues = _sfx_cues(spec, clean, s, e, seed=mid, with_dur=True) if (SFX_DEFAULT if sfx is None else sfx) else []
     if cues:
         notes += _apply_owned_sfx(ctx, edl, mid, cues)
-    clamp = ""
-    if abs(req[0] - s) > 0.05 or abs(req[1] - e) > 0.05:
-        clamp = f"\nCLAMPED: requested {req[0]:g}-{req[1]:g}s into this {prog:g}s program; placed at {s}-{e}s."
     sound = (f"; sound cues hitting at: {', '.join(f'{c[1]}@{c[0]:g}s' for c in cues)}" if cues else "")
     depth = " BEHIND the subject" if layer == "behind_subject" else ""
     res = ctx.write_edl(edl, f"motion graphic {template}{depth} at {s}-{e}s [{mid}]{sound}")
     if res.startswith("REJECTED"):
         return res
-    return (res + where + keep_note + clamp + (f"\nNOTE: {'; '.join(notes)}" if notes else "")
+    return (res + where + keep_note + clamp + number_note
+            + (f"\nNOTE: {'; '.join(notes)}" if notes else "")
             + behind_note + _caption_integrity_notes(ctx, edl, item))
 
 
@@ -1343,6 +1364,10 @@ def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
             hit.pop("allow_face_overlap", None)
     if hit["template"] != "html":
         hit.pop("html", None)
+    # a number completes on its spoken word (may move the window or set 'land')
+    old_land = (hit.get("params") or {}).get("land")
+    _landed, number_note = _number_landing(ctx, edl, hit, prog)
+    relanded = (hit.get("params") or {}).get("land") != old_land
     err, where, bbox, rep = _probe_full(ctx, edl, hit)
     if err:
         return err
@@ -1375,7 +1400,7 @@ def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
     respaced = (bool(owned) and abs(span - old_span) > 1e-6
                 and _sfx_cues(tspec, hit["params"], 0.0, span, seed=id, with_dur=True)
                 != _sfx_cues(tspec, hit["params"], 0.0, old_span, seed=id, with_dur=True))
-    if sfx is True or (sfx is None and owned and (template is not None or params or respaced)):
+    if sfx is True or (sfx is None and owned and (template is not None or params or respaced or relanded)):
         cues = _sfx_cues(tspec, hit["params"], hit["start"], hit["end"], seed=id, with_dur=True)
         notes += _apply_owned_sfx(ctx, edl, id, cues)
     elif sfx is False:
@@ -1388,7 +1413,8 @@ def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
     res = ctx.write_edl(edl, f"updated motion graphic {id} ({hit['template']}) at {hit['start']}-{hit['end']}s")
     if res.startswith("REJECTED"):
         return res
-    return (res + where + keep_note + (f"\nNOTE: {'; '.join(notes)}" if notes else "")
+    return (res + where + keep_note + number_note
+            + (f"\nNOTE: {'; '.join(notes)}" if notes else "")
             + (behind_note or "") + _caption_integrity_notes(ctx, edl, hit))
 
 
@@ -1450,7 +1476,11 @@ TOOL_SPECS = {
         "graphic that covers the face or leaves the safe area is MOVED to the nearest clear zone "
         "with its own y (and x/align/side where it has them) — above the head, below the chin, "
         "beside the face — and the reply says what moved (KEEP-OUT) or why nothing fits (NOTE). "
-        "allow_face_overlap=true keeps a deliberate design over the face.",
+        "allow_face_overlap=true keeps a deliberate design over the face. NUMBERS land on "
+        "their word: a counter completes 20 ms before its spoken number's onset in the "
+        "transcript (the write sets its `land`; a 'reveal' starts there; a count with no room "
+        "to roll starts on the lead-in) and a word_slam showing a number moves onto it — the "
+        "reply says NUMBER LANDED, and NOTEs a count that rolls through the setup.",
         {"template": _TEMPLATE_PARAM, "start": {"type": "number"}, "end": {"type": "number"},
          "params": _PARAMS_PARAM, "html": {"type": "string"},
          "layer": {"type": "string", "enum": list(LAYERS)},
@@ -1467,7 +1497,8 @@ TOOL_SPECS = {
         "re-derives them, sfx=false removes them. A behind_subject graphic whose window "
         "changes is re-measured against its new footage. Every patch re-runs the face and "
         "safe-area keep-out (see add_motion_graphic): a y that would cover the face is moved "
-        "and reported; allow_face_overlap=true keeps it (false clears that). Modify instead "
+        "and reported; allow_face_overlap=true keeps it (false clears that). A number "
+        "graphic is re-landed on its spoken number like add_motion_graphic. Modify instead "
         "of removing and re-adding.",
         {"id": {"type": "string"}, "start": {"type": "number"}, "end": {"type": "number"},
          "params": _PARAMS_PARAM, "html": {"type": "string"}, "template": {"type": "string"},

@@ -106,6 +106,11 @@ after a short pause, then report it.
   shot; 1-2 accent words per phrase.
 - Hero type at 8-30% of frame height on the exact word; hold 0.8-1.6 s;
   exits faster than entrances.
+- A number lands ON its spoken word, never before it (the write sets a
+  counter's `land` on the onset and moves a number slam onto it). A count
+  starts on the lead-in (~0.45 s before the word); a punchline number, or one
+  that is not a growing quantity ('140 characters'), is `counter`
+  `style='reveal'`: no count, a hard cut on the word.
 - `layer='behind_subject'` only inside one continuous shot (no cut in the window).
 - B-roll that shows the exact noun or action, licensed, with provenance in the
   handback; every still pushes or pans.

@@ -181,12 +181,14 @@ def plan(edl, index, density="premium", camera=False, sounds=False):
             _i, val, prefix, suffix, consumed = cl[0]
             to, scale = _display_value(val)
             if free(t):
-                add({"at": round(max(0.0, t - 0.08), 2), "template": "counter", "kind": "number",
+                # the count starts on the lead-in and completes ON the word
+                # (add_motion_graphic sets its landing on the onset)
+                add({"at": round(max(0.0, t - 0.47), 2), "template": "counter", "kind": "number",
                      "end": round(min(prog, t + 2.2), 2),
                      "params": {"to": to, "prefix": prefix, "suffix": (scale + suffix) or "",
                                 "label": None},
                      "text_hint": ctx_words,
-                     "why": f"spoken number '{' '.join(w['w'] for w in words[_i:_i + consumed])}' — make it land as a counter (label = what it measures, from the sentence)"})
+                     "why": f"spoken number '{' '.join(w['w'] for w in words[_i:_i + consumed])}' — make it land as a counter ON the word (label = what it measures, from the sentence; style='reveal' when the number is the punchline)"})
         else:
             rows = []
             for _i, val, prefix, suffix, consumed in cl:

@@ -393,6 +393,72 @@
     return fs;
   };
 
+  // ── glyph-aware leading ────────────────────────────────────────────────
+  // Stacked rows of display type set with negative leading collide where a
+  // descender (y p g, a script swash) of one row meets the caps of the next.
+  // Line boxes cannot see that: the ink of a glyph is not its line box. These
+  // helpers measure the real ink of every glyph — its pen position from the
+  // laid-out DOM, its ink extents from the font (canvas text metrics in the
+  // element's own computed font) — so a template can stack rows as tight as
+  // the glyphs allow and no tighter. Measure before any transform is applied.
+  const inkCtx = document.createElement('canvas').getContext('2d');
+  const inkCache = new Map();
+  const inkOf = (font, ch) => {
+    const key = font + '\u0000' + ch;
+    let m = inkCache.get(key);
+    if (!m) {
+      inkCtx.font = font;
+      const r = inkCtx.measureText(ch);
+      m = { l: r.actualBoundingBoxLeft || 0, r: r.actualBoundingBoxRight || 0,
+            a: r.actualBoundingBoxAscent || 0, d: r.actualBoundingBoxDescent || 0,
+            fa: r.fontBoundingBoxAscent };
+      inkCache.set(key, m);
+    }
+    return m;
+  };
+  /** Ink box [x0, y0, x1, y1] (page px) of every visible glyph in els. */
+  MG.glyphBoxes = els => {
+    const out = [], range = document.createRange();
+    (Array.isArray(els) ? els : [els]).forEach(root => {
+      if (!root) return;
+      const walk = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      for (let node = walk.nextNode(); node; node = walk.nextNode()) {
+        const cs = getComputedStyle(node.parentElement);
+        if (cs.display === 'none' || cs.visibility === 'hidden') continue;
+        const font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+        const text = node.data;
+        for (let i = 0; i < text.length;) {
+          const cp = text.codePointAt(i), n = cp > 0xffff ? 2 : 1, ch = text.slice(i, i + n);
+          if (!/\s/.test(ch)) {
+            range.setStart(node, i); range.setEnd(node, i + n);
+            const rc = range.getClientRects()[0];
+            if (rc) {
+              const m = inkOf(font, ch);
+              // the content box's top is the font ascent above the baseline
+              const base = rc.top + (m.fa > 0 ? m.fa : rc.height * 0.8);
+              out.push([rc.left - m.l, base - m.a, rc.left + m.r, base + m.d]);
+            }
+          }
+          i += n;
+        }
+      }
+    });
+    return out;
+  };
+  /** How far (px) `lower` must move down so none of its glyphs comes within
+   *  `clear` px (vertically) of a glyph of `upper` that it overlaps
+   *  horizontally (+`pad` px each side). Negative: that much room to spare;
+   *  -Infinity when no glyphs share a column. o: {clear = 0, pad = 0}. */
+  MG.stackGap = (upper, lower, o = {}) => {
+    const U = MG.glyphBoxes(upper), L = MG.glyphBoxes(lower);
+    const clear = +o.clear || 0, pad = +o.pad || 0;
+    let need = -Infinity;
+    for (const g of U) for (const h of L) {
+      if (h[0] < g[2] + pad && h[2] > g[0] - pad) need = Math.max(need, g[3] + clear - h[1]);
+    }
+    return need;
+  };
+
   // ── frame driver (called by the renderer) ──────────────────────────────
   window.__mgSeek = t => {
     MG.t = t;

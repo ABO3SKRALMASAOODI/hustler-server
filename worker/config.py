@@ -2025,8 +2025,14 @@ MASTER_VERSION = 1
 # draws on (motion items or a motion caption look): their older renders put
 # white type on white shirts with only a soft shadow. Everything else keeps
 # its cache. Bump when the plate measurement or the templates' bright-plate
-# treatment changes what such a render looks like.
-LEGIBILITY_VERSION = 1
+# treatment changes what such a render looks like — or the templates' type
+# craft does. v2 (punch track, Oct 2026): glyph-aware leading in phrase_build
+# and word_slam (descenders and swashes no longer hit the row below), a
+# counter never reads its landed figure before the landing (and blooms from
+# it), the typewriter's plate arrives with its first glyph, and versus_split's
+# values share one size and line count under a divider no taller than the
+# lettering.
+LEGIBILITY_VERSION = 2
 
 # Word-level caption muting (worker/caption_carry.py): a motion graphic with
 # mute_captions unset hides only the spoken words it shows, the rest stay

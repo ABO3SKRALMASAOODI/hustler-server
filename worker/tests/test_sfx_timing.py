@@ -534,8 +534,9 @@ def test_cue_landings_follow_each_templates_own_timing():
     got = [t for t, k, _g, _d in _cues("chapter_title", {"title": "Part two", "exit": "collapse"},
                                         0.0, 2.6) if k == "swish_1"]
     assert got == [pytest.approx(1.8)]
-    # typewriter: typing starts with the first character (later on a plate)
-    for plate, at in ((False, 0.04), (True, 0.16)):
+    # typewriter: typing starts with the first character, on the first frame
+    # (a plate arrives with that character, never ahead of it)
+    for plate, at in ((False, 0.0), (True, 0.0)):
         got = _cues("typewriter", {"text": "hello world", "plate": plate}, 0.0, 3.0)
         assert [round(t, 3) for t, _k, _g, _d in got] == [at], plate
 
