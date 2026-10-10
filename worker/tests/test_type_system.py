@@ -708,3 +708,25 @@ def test_band_graphics_can_shrink_into_the_band_above_the_larger_archival_card()
     box = keepout.nominal_ink("counter", motion_templates.spec("counter"), dict(ctr, y=0.19),
                               (1080, 1920))
     assert box[3] - box[1] < 0.13
+
+
+@needs_browser
+def test_a_slam_entrance_stays_inside_the_frame():
+    """Round 7 final review: a wide slam's 1.5x blurred first frames ran
+    past both frame edges (Thiel's ENOUGH at 0.72 of the width; GARBAGE in
+    round 5). The start scale shrinks until the line clears the side edges;
+    a narrow word keeps the full 1.5x impact."""
+    expr = """() => { const h = document.querySelector('.hero'), r = h.getBoundingClientRect();
+        const m = (h.style.transform || '').match(/scale\\(([0-9.]+)\\)/);
+        return {l: r.left, r: r.right, w: window.innerWidth, s: m ? parseFloat(m[1]) : 1}; }"""
+    times = [k / 30 for k in range(7)]
+    wide = _mg("e", "word_slam", 0.0, 1.6, text="*enough*", kicker="it's not quite been",
+               entrance="slam", role="condensed", width=0.72)
+    narrow = _mg("n", "word_slam", 0.0, 1.6, text="*no*", entrance="slam", role="condensed",
+                 width=0.3)
+    out = asyncio.run(_eval(wide, times, expr))
+    assert out[0]["s"] > 1.15, out[0]                          # still an impact
+    for k, st in enumerate(out):
+        assert st["l"] >= 0 and st["r"] <= st["w"], (k, st)
+    first = asyncio.run(_eval(narrow, times[:1], expr))[0]
+    assert first["s"] == pytest.approx(1.5, abs=1e-3), first

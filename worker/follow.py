@@ -144,8 +144,18 @@ SIZE_BAND = (0.45, 2.2)
 ROI_PAD = (0.9, 0.6)
 # The measurement's identity: the FACE_STORE key and the remote handshake
 # (an executor running another version measures differently). 3: lost
-# faces are carried by optical flow (carry).
-FACES_VERSION = 3
+# faces are carried by optical flow (carry). 4: a sample at t is the frame
+# ON SCREEN at t (SAMPLE_VF): before, ffmpeg's fps filter (rounding to the
+# nearest tick) handed each tick the last frame BEFORE the next half tick,
+# ~0.1 s late at 4 fps, so the last sample before a camera cut could show
+# the next shot (round 7 final review: Elon's crop glided toward Musk's
+# position for the last 1.2 s of Rogan's shot and cut the back of his head).
+FACES_VERSION = 4
+# ...the decode that samples it: round=up hands tick i the last frame at or
+# before it, start_time=0 fills tick 0 with the first frame (a seek lands
+# up to a frame past A), so grid frame i is A + i/fps as _sample_plan
+# assumes, and the frame count is unchanged.
+SAMPLE_VF = "fps={fps:.4f}:start_time=0:round=up"
 
 # ── the plan (fractions of the WINDOW, per axis) ─────────────────────────
 DEAD_ZONE = (0.14, 0.10)     # drift the camera ignores around a held aim
@@ -698,7 +708,8 @@ def _sample_plan(A, B, fps, k, windows, cuts):
 
 def _stream_gray(path, a, b, fps, width, height, deadline, cancel=None,
                  threads=2, state=None):
-    """Yield the grayscale frames of SOURCE [a, b] at ``fps`` as they decode;
+    """Yield the grayscale frames of SOURCE [a, b] at ``fps`` as they decode
+    (frame i: the one on screen at a + i/fps, SAMPLE_VF);
     stops (and kills ffmpeg) at ``deadline`` (time.monotonic) or when
     ``cancel`` is set. ``state`` receives the frame count, the exit code and
     the tail of ffmpeg's stderr."""
@@ -707,7 +718,7 @@ def _stream_gray(path, a, b, fps, width, height, deadline, cancel=None,
     cmd = ["ffmpeg", "-v", "error", "-nostdin", "-threads", str(max(1, int(threads))),
            "-ss", f"{max(0.0, a):.3f}", "-i", path, "-t", f"{max(0.05, b - a):.3f}",
            "-an", "-sn", "-dn", "-map", "0:v:0",
-           "-vf", f"fps={fps:.4f},scale={width}:{height},format=gray",
+           "-vf", SAMPLE_VF.format(fps=fps) + f",scale={width}:{height},format=gray",
            "-f", "rawvideo", "-pix_fmt", "gray", "-"]
     state = state if state is not None else {}
     state.update(frames=0, rc=None, stderr="", killed=False)

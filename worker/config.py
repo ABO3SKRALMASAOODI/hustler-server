@@ -2104,6 +2104,9 @@ MASTER_VERSION = 1
 # the word and enters with that roll (a stored count no longer climbs across its setup), and shows a
 # spoken range ('30–40') with each figure on its own word; word_slam has the
 # hook tier and the list_build template exists.
+# Also v4 (round 7 final review, same release): a slam entrance's oversized
+# first frames stay inside the picture (the start scale shrinks below 1.5x
+# for a wide line).
 LEGIBILITY_VERSION = 4
 
 # Word-level caption muting (worker/caption_carry.py): a motion graphic with

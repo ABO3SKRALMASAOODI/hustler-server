@@ -212,6 +212,32 @@ def test_held_positions_slide_together_and_never_start_to_glide(monkeypatch):
     assert r[0] == pytest.approx(0.25 + pc.SLIVER_PAD) and f is None
 
 
+def test_the_longest_holds_are_measured_first(monkeypatch):
+    """Round 7 final review: Jobs' card follow had 8 held positions and the
+    budget (SLIVER_MAX_POSITIONS) ran out in key order, so the last hold —
+    the payoff, 4 s — was never measured and kept a pale pillar strip along
+    the card's edge. The holds the short dwells on longest go first."""
+    seen = []
+
+    def lines(ctx, windows, tag):
+        seen.append(windows)
+        return ([0.25], []) if windows and windows[0][0] >= 14.8 else ([], [])
+    monkeypatch.setattr(agent_tools, "_edge_lines", lines)
+    samples = [{"t": 10.0 + i * .5, "faces": [[0.45, 0.2, 0.6, 0.45]]}
+               for i in range(32)]
+    ctx = T._Ctx(646, 480, samples)
+    rect = [0.24, 0.05, 0.84, 0.75]                  # centred on x .54
+    n = agent_tools.SLIVER_MAX_POSITIONS + 2         # more short holds than the budget
+    keys = [[10.5 + 0.4 * i, .60 if i % 2 else .62, .4] for i in range(n)]
+    keys.append([16.0, .54, .4])                     # the long last hold (to 25 s)
+    follows = [{"t0": 10.0, "t1": 25.0, "k": keys}]
+    _r, f, _t, note = agent_tools._clear_slivers(ctx, ctx._edl, [(10.0, 25.0)],
+                                                 rect, follows)
+    assert f[0]["k"][-1][1] == pytest.approx(.54 + 0.01 + pc.SLIVER_PAD)
+    assert "EDGE SLIVER CLEARED" in note
+    assert len(seen) == agent_tools.SLIVER_MAX_POSITIONS
+
+
 def test_a_panel_holds_still_while_its_speaker_sways(monkeypatch):
     """Stable framing: a speaker who only sways gets one still panel (no
     follow path, no hunting); one who moves gets a path."""

@@ -16272,8 +16272,11 @@ def _clip_windows(spans, a, b):
 
 
 # At most this many held positions of one card are measured for slivers
-# (three proxy frames each); the rest keep their framing.
-SLIVER_MAX_POSITIONS = 6
+# (three proxy frames each), the longest holds (kept footage) first; the
+# rest keep their framing. (Round 7 final review: a card follow of 8 holds
+# measured them in order and never reached the last one — Jobs' payoff
+# 'writing a paper / WITHOUT ONE' sat beside a pale pillar strip for 4 s.)
+SLIVER_MAX_POSITIONS = 10
 
 
 def _clear_slivers(ctx, edl, spans, rect, follows=None, track=None,
@@ -16341,10 +16344,11 @@ def _clear_slivers(ctx, edl, spans, rect, follows=None, track=None,
 
     rect = [round(float(v), 4) for v in rect]
     if follows:
-        out = []
+        out, holds_all = [], []
         for span in follows:
             span = dict(span)
             keys = [list(k) for k in span.get("k") or []]
+            span["k"] = keys
             t0, t1 = float(span.get("t0", 0.0)), float(span.get("t1", 0.0))
             holds = []                    # [[first, last]] key indices
             for i, key in enumerate(keys):
@@ -16360,14 +16364,19 @@ def _clear_slivers(ctx, edl, spans, rect, follows=None, track=None,
                     lo = float(keys[holds[h - 1][1]][0])
                 if h < len(holds) - 1:
                     hi = float(keys[holds[h + 1][0]][0])
-                cx, cy = float(keys[i][1]), float(keys[i][2])
-                r = picture_cards.recentre(rect, (cx, cy))
-                new = fix(r, _clip_windows(spans, lo, hi), lo, hi)
-                dx, dy = new[0] - r[0], new[1] - r[1]
-                for n in range(i, j + 1):
-                    keys[n] = [keys[n][0], round(cx + dx, 4), round(cy + dy, 4)]
-            span["k"] = keys
+                wins = _clip_windows(spans, lo, hi)
+                holds_all.append((sum(b - a for a, b in wins), len(out), i, j, lo, hi, wins))
             out.append(span)
+        # the framings the short dwells on longest are measured first (the
+        # budget skips a passing hold, never the payoff's)
+        for _kept, s_i, i, j, lo, hi, wins in sorted(holds_all, key=lambda h: (-h[0], h[1], h[2])):
+            keys = out[s_i]["k"]
+            cx, cy = float(keys[i][1]), float(keys[i][2])
+            r = picture_cards.recentre(rect, (cx, cy))
+            new = fix(r, wins, lo, hi)
+            dx, dy = new[0] - r[0], new[1] - r[1]
+            for n in range(i, j + 1):
+                keys[n] = [keys[n][0], round(cx + dx, 4), round(cy + dy, 4)]
         follows = out
     elif track:
         out = []
