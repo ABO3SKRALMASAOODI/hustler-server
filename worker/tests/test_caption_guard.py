@@ -125,6 +125,11 @@ def test_the_guard_decides_ink_before_any_box_and_never_touches_a_dark_plate(tmp
     assert max(_rgb(white["ink"])) < 60
     (r, g, b), = [_rgb(c) for c in white["accents"]]
     assert r > 2.5 * max(g, b, 1) and r + g + b <= 255 + 59 + 48      # red, never paler
+    # with no accent set the serif hero carries the base ink inline: it goes
+    # dark with the rest (never a near-white word left bare on the shirt)
+    plain = asyncio.run(_state(_item(LINE, accent=None), _plate(lambda r: 238)))
+    assert plain["dark"] and plain["accents"], plain
+    assert all(max(_rgb(c)) < 60 for c in plain["accents"]), plain
     # bright under one word, dark under the other (a shirt and a microphone):
     # no dark ink (it would vanish over the dark part), a glyph scrim that
     # follows the letterforms, still no box
@@ -181,19 +186,21 @@ BASELINE = """() => {
     if (best === null || b < best) best = b;
   });
   const r = cue.querySelector('.blk').getBoundingClientRect();
-  return {base: best, h: r.height};
+  return {base: best, h: r.height, top: r.top / innerHeight, bottom: r.bottom / innerHeight};
 }"""
 
 
-def _cues_item(cues, y=0.755, b="b"):
+def _cues_item(cues, y=0.755, b="b", size=None):
     out = []
     for k, (t0, words) in enumerate(cues):
         ws = [{"t": t, "s": round(t0 + 0.1 * j, 3), "e": round(t0 + 0.1 * j + 0.08, 3), "x": x}
               for j, (t, x) in enumerate(words)]
         out.append({"s": t0, "e": round(t0 + 0.9, 3), "y": y, "b": b, "k": 0, "w": ws})
+    params = {"look": "editorial", "accent": "#FF3B30", "cues": out}
+    if size is not None:
+        params["size"] = size
     return {"id": "__captions_0", "template": "caption_motion", "start": 0.0,
-            "end": round(cues[-1][0] + 1.0, 3),
-            "params": {"look": "editorial", "accent": "#FF3B30", "cues": out}}
+            "end": round(cues[-1][0] + 1.0, 3), "params": params}
 
 
 async def _baselines(item, times):
@@ -232,4 +239,36 @@ def test_the_reading_line_holds_still_across_line_counts_and_segments(tmp_path, 
     b = asyncio.run(_baselines(plain, [0.7, 1.7]))
     assert a[1]["h"] > 1.6 * a[0]["h"]                       # the lockup really is taller
     rows = [s["base"] for s in a + b]
+    assert max(rows) - min(rows) <= 1.5, rows
+
+
+@needs_browser
+def test_a_steady_row_stays_inside_the_band_the_plan_cleared(tmp_path, monkeypatch):
+    """Review (round 7): the steady row was raised until the look's tallest
+    block fit the template's zone, so at size l every bottom-band caption
+    rose ~70 px past the band the caption plan had proven clear of the
+    face (caption_carry.CAP_HALF_H around its anchor) — toward the chin.
+    A cue the plan did not solve a zone for keeps inside that band on the
+    face's side: below the anchor's band top for a bottom band, above its
+    band bottom for a top band; one-line cues still share one row."""
+    import caption_carry
+    monkeypatch.setattr(motion_engine, "CACHE_DIR", str(tmp_path / "cache"))
+    half = caption_carry.CAP_HALF_H
+    one = [("We", 0), ("went", 0), ("home", 0)]
+    lockup = [("Totally", 0), ("utterly", 0), ("incredible", 1)]
+    hero_first = [("incredible", 1), ("it", 0), ("was", 0)]
+    cues = [(0.1, one), (1.1, lockup), (2.1, hero_first), (3.1, [("then", 0), ("we", 0), ("left", 0)])]
+    times = [0.7, 1.7, 2.7, 3.7]
+    for y, size in ((0.77, 1.2), (0.74, 1.45)):
+        got = asyncio.run(_baselines(_cues_item(cues, y=y, size=size), times))
+        # (a lockup taller than the band down to the 9:16 safe bottom sits
+        # on that bottom, as it always has)
+        # (give or take a line box's leading above the ink: 0.006)
+        assert all(g["top"] >= y - half - 0.007 or abs(g["bottom"] - 0.80) < 0.003
+                   for g in got), (y, size, got)
+        assert got[0]["top"] >= y - half - 0.007 and got[2]["top"] >= y - half - 0.007, got
+        assert abs(got[0]["base"] - got[3]["base"]) <= 1.5, got
+    top = asyncio.run(_baselines(_cues_item(cues, y=0.2, b="t"), times))
+    assert all(g["top"] >= 0.2 - half - 0.007 and g["bottom"] <= 0.2 + half + 0.002 for g in top), top
+    rows = [top[k]["base"] for k in (0, 1, 3)]
     assert max(rows) - min(rows) <= 1.5, rows

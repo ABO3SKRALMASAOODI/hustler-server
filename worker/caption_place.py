@@ -353,8 +353,17 @@ def _mapped(edl, index, tl, W, H, a, b, field):
     src_mid, sample = _near_sample(index, tl, a, b)
     if sample is None:
         return []
-    boxes = (_reliable_text(sample) if field == "text" else
-             scene_text(index, sample) if field == "scene" else list(sample.get(field) or []))
+    if field == "text":
+        boxes = _reliable_text(sample)
+    elif field in ("scene", "scene_only"):
+        boxes = scene_text(index, sample)
+        if field == "scene_only":
+            # beside line text the caption plan already prices (a sign's
+            # line counted once, not twice)
+            lines = {tuple(float(v) for v in bx[:4]) for bx in _reliable_text(sample)}
+            boxes = [bx for bx in boxes if tuple(bx) not in lines]
+    else:
+        boxes = list(sample.get(field) or [])
     if not boxes:
         return []
     mid = (a + b) / 2.0
@@ -379,16 +388,19 @@ def _mapped(edl, index, tl, W, H, a, b, field):
 def text_boxes(edl, index, tl, W, H, a, b):
     """Source text visible on the canvas over program [a, b] (soft): line
     text, and scene text grown by SCENE_PAD (scene_boxes)."""
-    return _mapped(edl, index, tl, W, H, a, b, "text") + scene_boxes(edl, index, tl, W, H, a, b)
+    return _mapped(edl, index, tl, W, H, a, b, "text") + \
+        scene_boxes(edl, index, tl, W, H, a, b, lines=False)
 
 
-def scene_boxes(edl, index, tl, W, H, a, b, pad=SCENE_PAD):
+def scene_boxes(edl, index, tl, W, H, a, b, pad=SCENE_PAD, lines=True):
     """Scene text (a shirt print, a sign, stickers: scene_text) visible on
     the canvas over program [a, b], grown by ``pad`` (frame height; the
-    same share of the width) — a soft keep-out."""
+    same share of the width) — a soft keep-out. ``lines=False`` leaves out
+    the line-shaped blocks _reliable_text already gives (text_boxes)."""
     px = pad * float(H) / max(float(W), 1.0)
     return [(x0 - px, y0 - pad, x1 + px, y1 + pad)
-            for x0, y0, x1, y1 in _mapped(edl, index, tl, W, H, a, b, "scene")]
+            for x0, y0, x1, y1 in _mapped(edl, index, tl, W, H, a, b,
+                                          "scene" if lines else "scene_only")]
 
 
 def prop_zones(edl, index, tl, W, H, a, b):

@@ -24525,9 +24525,19 @@ def punch_in_on_emphasis(ctx, count=None, strength=None):
                 "at the very end of the program. Nothing was written.")
     fx["zooms"] = zooms
     edl["effects"] = fx
+    # each punch frames the face tighter: a graphic on screen under it is
+    # checked against the face as framed and placed again where it now
+    # covers it (as add_zoom does)
+    new_ids = {zid for _w, _pt, zid, *_rest in placed}
+    camera_notes = []
+    for z in zooms:
+        if z.get("id") in new_ids:
+            camera_notes += motion_tools.keep_out_under_camera(ctx, edl, z["start"], z["end"])
     res = ctx.write_edl(
         edl, f"{len(placed)} distributed emphasis zoom(s) on meaningful "
              "vocally stressed words")
+    if res.startswith("EDL v") and camera_notes:
+        res += "".join("\n" + n for n in camera_notes)
     if res.startswith("EDL v"):
         res += ("\nPunch-ins (program time, from measured vocal stress; "
                 "each snaps in on the word, holds to the next cut or the "

@@ -460,3 +460,20 @@ def test_scene_text_is_a_recurring_print_off_the_face():
     near = caption_place.choose([(0.62, 0.80)], 0.74, 0.055, 0.08, soft=soft, col=col)
     clear = caption_place.choose([(0.62, 0.80)], 0.74, 0.055, 0.08, col=col)
     assert near[3] < clear[3]
+
+
+def test_a_sign_line_is_priced_once_not_as_line_and_scene_text():
+    """A recurring line-shaped sign is line text (_reliable_text) AND scene
+    text: the caption plan prices it once (text_boxes), while a graphic's
+    keep-out still sees it as scene text (scene_boxes)."""
+    sign = [0.3, 0.75, 0.7, 0.8]                 # wide and short: a line
+    shirt = [0.35, 0.86, 0.65, 0.98]             # squat: a print, scene text only
+    ix = _index(faces=False)
+    for smp in ix["spatial"]["samples"]:
+        smp["text"] = [list(sign), list(shirt)]
+    edl = _edl(look="editorial")
+    tl = Timeline(edl["keep"])
+    got = caption_place.text_boxes(edl, ix, tl, 1080, 1920, 2.0, 3.0)
+    scene = caption_place.scene_boxes(edl, ix, tl, 1080, 1920, 2.0, 3.0)
+    assert len(scene) == 2                       # the graphics' keep-out: both
+    assert len(got) == 2                         # line text + the print, once each

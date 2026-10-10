@@ -542,6 +542,17 @@ def test_the_legibility_ladder_picks_ink_then_a_glyph_scrim_then_a_box():
 
 
 @needs_browser
+def test_dark_ink_is_judged_under_a_wash_the_template_keeps():
+    """A template whose own wash stays under dark ink (versus_split's tint)
+    asks MG.legible to judge dark ink on the plate as the wash darkens it:
+    a mid-bright wall that carries #141414 bare does not under a 34% wash."""
+    rect = "[100, 1300, 900, 1380]"
+    bare, washed = asyncio.run(_eval(_doc_job(_cols_plate(lambda c: 170)), [
+        f"MG.darkInkOK({rect})", f"MG.darkInkOK({rect}, {{ have: 0.34 }})"]))
+    assert bare is True and washed is False
+
+
+@needs_browser
 def test_a_slam_landing_flash_lifts_luminance_in_the_same_hue():
     """Judged (round 5): ENOUGH flashed from gold #FFC940 to lemon for two
     frames — a brightness filter clips the channels. The landing flash is a
@@ -556,9 +567,11 @@ def test_a_slam_landing_flash_lifts_luminance_in_the_same_hue():
     js = """(() => { const w = document.querySelector('.line .mg-w');
         const els = [w].concat(Array.from(document.querySelectorAll('.line')));
         return {c: getComputedStyle(w).color, f: els.map(e => e.style.filter || '').join('|')}; })()"""
+    # every frame of the entrance and landing, in one page
+    frames = asyncio.run(_eval(job, [f"(() => {{ window.__mgSeek({k / 30:.4f}); return {js}; }})()"
+                                     for k in range(18)]))
     seen = set()
-    for k in range(0, 18):
-        st, = asyncio.run(_eval(job, [js], t=round(k / 30, 4)))
+    for k, st in enumerate(frames):
         assert "brightness" not in st["f"], (k, st)
         r, g, b = [int(v) / 255 for v in st["c"][4:-1].split(",")[:3]]
         hue = colorsys.rgb_to_hls(r, g, b)[0]

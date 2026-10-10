@@ -311,8 +311,8 @@ LEGIBILITY:
   the final block; glass cards darken to stay dark glass. Dark plates render
   unchanged. Placement in clear space still comes first: a dark, calm spot
   needs none of it, and scene text (a shirt print, a sign) is a soft
-  keep-out the placement prices. A zoom written over a graphic re-checks it
-  against the face as the zoom frames it.
+  keep-out the placement prices. A zoom, punch-in or cut step written over
+  a graphic re-checks it against the face as that move frames it.
 - Secondary text (kickers, sub-labels, labels, attributions) never renders
   below a cap height of 2.2% of the frame height; a long one wraps instead
   of shrinking, so keep kickers and sub-labels short.

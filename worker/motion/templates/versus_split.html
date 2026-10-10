@@ -179,7 +179,9 @@
       if (!MG.plate) return;
       const res = MG.legible([{ el: o.t, ratio: 3, ink: '#FFFFFF', base: 0.3 }]
         .concat(o.s ? [{ el: o.s, ratio: 4.5, ink: '#E6E6E6', base: 0.3 }] : []),
-        { have: 0.15, root, box: { pad: [0.16 * fs, 0.1 * fs], feather: 0.28 * fs, radius: 0.2 * fs, join: 0.4 * fs } });
+        // the wash stays under dark ink too (it never stands down): judge
+        // dark ink on the plate as the wash darkens its core
+        { have: 0.15, under: P.tint ? 0.22 : 0.34, root, box:{ pad: [0.16 * fs, 0.1 * fs], feather: 0.28 * fs, radius: 0.2 * fs, join: 0.4 * fs } });
       res.boxes.forEach(b => { o.bks.push(b); MG.growBox(b.box); });
     });
     return { lw: lr.width, rw: rr.width };

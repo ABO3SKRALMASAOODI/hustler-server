@@ -430,6 +430,23 @@
   // segment is its own page). Lockup/stack hero ladders vary too much for
   // one nominal block: a run of their cues sharing a place shares the row
   // its own tallest block allows.
+  // The caption plan (worker/caption_carry.py) proves a place clear of the
+  // faces, graphics and the watermark's box for a block within CAP_HALF_H
+  // of its anchor; a cue it did not solve a zone for (no z: the usual
+  // place) keeps inside that band — a bottom band down to its zone's foot
+  // (the safe area), a top or middle band on both sides — so a steady row
+  // never carries every caption toward a chin, a graphic or the mark the
+  // plan kept them off (review: a size-l editorial row rose ~70 px past
+  // it). A block taller than that band centres on it, as blocks always did.
+  const PLAN_HALF = 0.055, BAND_SLACK = 0.006;   // caption_carry.CAP_HALF_H
+  function rowRange(c) {
+    let lo = c.zone[0], hi = c.zone[1];
+    if (!(Array.isArray(c.z) && c.z.length === 2)) {
+      lo = Math.max(lo, c.yc - PLAN_HALF * H);
+      if (c.b === 't' || c.b === 'm') hi = Math.min(hi, c.yc + PLAN_HALF * H);
+    }
+    return [lo, hi];
+  }
   const fontAscent = el => {
     const cs = getComputedStyle(el);
     inkCtx.font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
@@ -505,19 +522,25 @@
         c.el.style.top = Math.round(top) + 'px';
       });
       if (!fits.length) continue;
-      const c0 = fits[0];
+      const c0 = fits[0], [lo0, hi0] = rowRange(c0);
       let B;
       if (nom) {
-        B = Math.min(c0.yc - nom.one.h / 2 + nom.one.fb, c0.zone[1] - nom.tall.h + nom.tall.fb);
-        B = Math.max(B, c0.zone[0] + nom.one.fb);
+        B = Math.min(c0.yc - nom.one.h / 2 + nom.one.fb, hi0 - nom.tall.h + nom.tall.fb);
+        B = Math.max(B, lo0 + nom.one.fb);
       } else {
         const one = fits.reduce((a, c) => (c.h < a.h ? c : a), fits[0]);
         B = one.yc - one.h / 2 + one.fb;
-        B = Math.min(B, ...fits.map(c => c.zone[1] - c.h + c.fb));
-        B = Math.max(B, ...fits.map(c => c.zone[0] + c.fb));
+        B = Math.min(B, ...fits.map(c => rowRange(c)[1] - c.h + c.fb));
+        B = Math.max(B, ...fits.map(c => rowRange(c)[0] + c.fb));
       }
       fits.forEach(c => {
-        const top = MG.clamp(B - c.fb, c.zone[0], c.zone[1] - c.h);
+        // a block whose first line sits higher in it than the row's (a
+        // serif hero over its sans row) stays inside the band too — give or
+        // take its line box's leading above the ink (BAND_SLACK) — reading
+        // a few px lower rather than reach toward the face
+        const [lo, hi] = rowRange(c), lo2 = lo < c.zone[0] + 0.5 ? lo : lo - BAND_SLACK * H;
+        const top = MG.clamp(hi - lo >= c.h ? MG.clamp(B - c.fb, lo2, hi - c.h) : (lo + hi - c.h) / 2,
+                             c.zone[0], c.zone[1] - c.h);
         c.el.style.top = Math.round(top) + 'px';
       });
       if (POCKET_LOOKS.includes(look) && MG.plate) slideRun(fits);
@@ -540,8 +563,8 @@
     if (!(n0 > NEED_OK)) return;
     let lo = -Infinity, hi = Infinity;
     run.forEach((c, k) => {
-      const r = rects[k];
-      let a = c.zone[0] - r[1], b = c.zone[1] - r[3];
+      const r = rects[k], [zl, zh] = rowRange(c);
+      let a = Math.min(0, zl - r[1]), b = Math.max(0, zh - r[3]);
       if (!(Array.isArray(c.z) && c.z.length === 2)) { a = Math.max(a, -SLIDE * H); b = Math.min(b, SLIDE * H); }
       lo = Math.max(lo, a, SAFE.y0 - r[1]); hi = Math.min(hi, b, SAFE.y1 - r[3]);
     });
@@ -620,6 +643,9 @@
       if (deep.every(([, col]) => col)) {
         blk.classList.add('dk');
         blk.style.color = MG.DARK_INK;
+        // a word that carries the base ink inline (an editorial serif hero
+        // with no accent set) goes dark with the rest
+        c.words.forEach(o => { if (!(o.acc && isHex(o.acc)) && o.el.style.color) o.el.style.color = MG.DARK_INK; });
         deep.forEach(([o, col]) => { o.el.style.color = col; o.acc = col; });
         return;
       }

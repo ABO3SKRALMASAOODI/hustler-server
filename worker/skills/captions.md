@@ -199,7 +199,8 @@ READABILITY:
   ("a *weird*"), never stacked above it.
 - The reading line holds still: every cue sharing a place keeps its first
   line's baseline on one row (a second line or a stacked serif hero grows
-  down), so one- and two-line cues never hop. Scene text (a shirt print, a
+  down), so one- and two-line cues never hop — inside the band the caption
+  plan cleared of the face, so the row never rises toward a chin. Scene text (a shirt print, a
   sign, a laptop's stickers) is a soft keep-out the caption plan prices.
 - `audit_captions()` compiles the exact caption artifact and reports
   lateness, uncovered words and overlaps. `render_preview(complete=false)`

@@ -360,12 +360,14 @@
   MG.PANEL_RATIO = 11;
   /** Dark ink for light type over a bright plate (MG.darkInk); true when it
    *  reaches `ratio`:1 over the DARK part of the plate under rect (its 15th
-   *  percentile), i.e. the plate is bright all the way across. */
+   *  percentile), i.e. the plate is bright all the way across. o.have: the
+   *  darkening a template keeps under the type even as dark ink (a wash). */
   MG.DARK_INK = '#141414';
   MG.darkInkOK = (rect, o = {}) => {
     const pl = MG.plateAt(rect, o.t0, o.t1);
     if (!pl) return false;
-    return MG.contrast(MG.luminance(o.ink || MG.DARK_INK), toLin(pl.lo)) >= (o.ratio || 4.5);
+    const keep = 1 - clamp(+o.have || 0, 0, 0.95);
+    return MG.contrast(MG.luminance(o.ink || MG.DARK_INK), toLin(pl.lo * keep)) >= (o.ratio || 4.5);
   };
   /** A dark pocket behind type over a bright plate: full `alpha` over rect
    *  (+ pad), a feathered rounded edge. Inserted first in `parent` (page
@@ -540,7 +542,7 @@
   MG.accentOnLight = (rect, accent, o = {}) => {
     const pl = MG.plateAt(rect, o.t0, o.t1);
     if (!pl) return null;
-    const Lb = toLin(pl.lo), ratio = o.ratio || 3, hue = hueOf(accent);
+    const Lb = toLin(pl.lo * (1 - clamp(+o.have || 0, 0, 0.95))), ratio = o.ratio || 3, hue = hueOf(accent);
     const max = hue != null && hue >= 30 && hue <= 80 ? MG.DEEPEN_WARM : MG.DEEPEN_MAX;
     for (let k = 0; k <= max + 1e-9; k += 0.05) {
       const c = k > 0 ? MG.deepen(accent, k) : accent, Lc = MG.luminance(c);
@@ -554,7 +556,9 @@
    *  the part's own text shadow gives beside its strokes, 0-1)}] — one per
    *  line or block.
    *  o: {t0, t1, dark = true (dark ink allowed), have (darkening the
-   *  template already lays under its type: its own soft scrim), root (the
+   *  template already lays under its type: its own soft scrim), under (the
+   *  part of that darkening which stays under dark ink: a wash the template
+   *  does not stand down; 0 when it hides its scrim for dark ink), root (the
    *  box's parent), box: {pad: [x, y], feather, radius, join} px}. Weak parts (need past
    *  MG.NEED_OK) get, in order: dark ink (all of them, when the plate is
    *  bright under every weak glyph and every accent keeps its hue), else a
@@ -582,10 +586,10 @@
     // by word (a line across a white shirt and a dark microphone is no
     // place for dark ink, though the shirt is most of it)
     if (o.dark !== false) {
-      if (weak.every(p => MG.darkInkWords(p.el, { ratio: p.ratio, t0: p.t0, t1: p.t1 }))) {
+      if (weak.every(p => MG.darkInkWords(p.el, { ratio: p.ratio, t0: p.t0, t1: p.t1, have: o.under }))) {
         const deep = [];
         const ok = weak.every(p => !p.acc.length || !p.accent || (() => {
-          const c = MG.accentOnLight(MG.inkRect(p.acc), p.accent, { ratio: p.accRatio || p.ratio, t0: p.t0, t1: p.t1 });
+          const c = MG.accentOnLight(MG.inkRect(p.acc), p.accent, { ratio: p.accRatio || p.ratio, t0: p.t0, t1: p.t1, have: o.under });
           if (c) deep.push([p, c]);
           return !!c;
         })());

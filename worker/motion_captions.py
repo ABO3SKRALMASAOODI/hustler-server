@@ -32,7 +32,8 @@ hue, never paled), else a glyph scrim that follows the letterforms, and a
 box only past that, sized to the final block. Every cue sharing a place
 keeps its first line's baseline on one row (a second line grows down), the
 same in every segment, so captions never hop between one- and two-line
-cues.
+cues; a cue with no solved zone keeps that row inside the band the plan
+cleared around its anchor (caption_carry.CAP_HALF_H) on the face's side.
 
 The caption track is split at natural gaps into segments of ~6–10 s. Each
 segment is an independent RenderJob carrying only its own cues, so segments
