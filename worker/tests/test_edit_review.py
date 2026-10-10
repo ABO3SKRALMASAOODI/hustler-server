@@ -195,6 +195,15 @@ def test_a_stat_run_counts_as_one_designed_moment():
     assert "graphic_budget" not in _codes(edl)
 
 
+def test_one_big_word_per_list_item_is_one_designed_moment():
+    run = [_mg(f"item{k}", "word_slam", 3.0 + k * 1.3, 3.6 + k * 1.3,
+               text=f"*{w}*", role="condensed")
+           for k, w in enumerate(("ROCKETS", "SUPERSONIC", "UNDERWATER",
+                                  "MEDICINES"))]
+    edl = _edl(motion=run + _slams(3, 7.0, start=12.0))
+    assert "graphic_budget" not in _codes(edl)
+
+
 def test_graphics_over_half_the_runtime_are_over_budget():
     long_ones = [_mg("a", "word_slam", 1.0, 9.0, text="*one*"),
                  _mg("b", "word_slam", 12.0, 21.0, text="*two*")]
@@ -314,6 +323,17 @@ def test_a_punchline_without_air_before_the_end_card_is_flagged():
     assert "payoff_hold" not in _codes(_edl(dur=31.0), {"words": words})
     tail = _note(_edl(dur=34.0), "payoff_hold", {"words": words})
     assert "dead tail" in tail["message"]
+
+
+def test_the_payoff_hold_fix_reads_how_much_tail_the_source_has():
+    words = _words(FILLER)                      # 'w99' ends at 30.18
+    roomy = words + [{"w": "Next", "t0": 31.4, "t1": 31.7}]
+    note = _note(_edl(dur=30.5), "payoff_hold", {"words": roomy})
+    assert "extend the last keep to about" in note["fix"] and "'Next'" in note["fix"]
+    tight = words + [{"w": "Not", "t0": 30.6, "t1": 30.8}]
+    note = _note(_edl(dur=30.5), "payoff_hold", {"words": tight})
+    assert "runs on into 'Not'" in note["fix"]
+    assert "payoff graphic hold to the end card" in note["fix"]
 
 
 def test_a_closing_reaction_under_a_second_is_flagged():

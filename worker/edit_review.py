@@ -62,7 +62,8 @@ FRAGMENT_MIN_S = 0.03        # a kept word tail shorter than this is a graze
 
 # ── graphic budget ────────────────────────────────────────────────────────
 GRAPHIC_EVERY_S = 6.0        # at most one designed graphic per ~6-8 s
-SERIES_GAP_S = 0.35          # same-template graphics this close are one run
+SERIES_GAP_S = 1.0           # same-template graphics this close are one run
+                             # (a stat run, one big word per list item)
 MAX_COVERAGE = 0.50          # at most ~50% of the runtime under graphics
 MAX_TYPE_ROLES = 3
 MAX_ACCENTS = 1
@@ -868,14 +869,36 @@ def _payoff_notes(prog, payoff):
         last = max(prog.kept, key=lambda w: _f(w["t1"]))
         hold = dur - _f(last["t1"])
         if hold < PAYOFF_HOLD_MIN_S - 1e-6:
+            src_end = _f(last.get("src_t1"), None)
+            keep_end = prog.keep[-1][1] if prog.keep else None
+            after = [w for w in prog.words
+                     if src_end is not None and _f(_get(w, "t0")) >= src_end - 1e-3]
+            nxt = min(after, key=lambda w: _f(_get(w, "t0"))) if after else None
+            if nxt is None or keep_end is None:
+                fix = (f"Hold {PAYOFF_HOLD_MIN_S:g}-{PAYOFF_HOLD_MAX_S:g} s "
+                       "after the last word: extend the last keep into the "
+                       "speaker's natural tail or reaction (restore_range).")
+            else:
+                room = _f(_get(nxt, "t0")) - 0.05 - keep_end
+                need = PAYOFF_HOLD_MIN_S - hold
+                if room >= need - 1e-6:
+                    fix = (f"Hold {PAYOFF_HOLD_MIN_S:g}-{PAYOFF_HOLD_MAX_S:g} s "
+                           "after the last word: extend the last keep to about "
+                           f"{keep_end + min(room, PAYOFF_HOLD_MAX_S - hold):.2f}s "
+                           f"source (the pause before '{_get(nxt, 'w')}' "
+                           "allows it; restore_range).")
+                else:
+                    fix = (f"The speaker runs on into '{_get(nxt, 'w')}' "
+                           f"{_f(_get(nxt, 't0')) - src_end:.2f}s after "
+                           f"'{last['w']}', so the source has no longer tail: "
+                           "keep the cut and let the payoff graphic hold to "
+                           "the end card, or end on an earlier line that "
+                           "leaves a pause.")
             notes.append(_note(
                 "payoff_hold", _f(last["t1"]),
                 (f"The payoff gets {max(0.0, hold):.2f}s after '{last['w']}' "
                  "before the end card — the punchline has no air."),
-                (f"Hold {PAYOFF_HOLD_MIN_S:g}-{PAYOFF_HOLD_MAX_S:g} s after the "
-                 "last word: extend the last keep into the speaker's natural "
-                 "tail or reaction (restore_range)."),
-                {"hold_s": round(hold, 2), "last_word": last["w"]}))
+                fix, {"hold_s": round(hold, 2), "last_word": last["w"]}))
         elif hold > DEAD_TAIL_S:
             notes.append(_note(
                 "payoff_hold", _f(last["t1"]),
