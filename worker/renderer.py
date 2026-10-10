@@ -2106,6 +2106,16 @@ def follow_current(meta, edl):
     return ((meta or {}).get("follow_v") or 0) == config.FOLLOW_VERSION
 
 
+def cards_current(meta, edl):
+    """Was this render's picture-card layout drawn by today's cards
+    (config.CARD_LAYOUT_VERSION)? Only EDLs that carry a picture card can be
+    stale; everything else keeps its cache."""
+    cards = (((edl or {}).get("effects") or {}).get("picture_cards")) or []
+    if not any(isinstance(c, dict) for c in cards):
+        return True
+    return ((meta or {}).get("card_v") or 0) == config.CARD_LAYOUT_VERSION
+
+
 def look_current(meta):
     """May new pieces be spliced into this cached render (stitched preview)?
 
@@ -2723,6 +2733,15 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     fx_cards = [c for c in ((edl.get("effects") or {}).get("picture_cards")
                             or []) if picture_cards.source_fed(c)]
     card_windows = {}
+    # Where the footage itself cuts to another shot (focus edges and their
+    # handoffs, follow spans): a card edge there is a cut, never a dissolve.
+    cam_edges = set(handoff_of) | {float(x) for x in follow_edges}
+    for span in focus_track:
+        for key in ("t0", "t1"):
+            try:
+                cam_edges.add(float(span[key]))
+            except (KeyError, TypeError, ValueError):
+                continue
     if keep and fx_cards:
         card_edges = set()
         reach = 1.5 / float(src_fps or fps or 30.0)
@@ -2740,6 +2759,15 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                         card_edges.add(round(float(src_t), 6))
                 window.append(t)
             card_windows[card["id"]] = tuple(window)
+            # The dissolve's inner edge (the entrance's end, the exit's
+            # start) splits the block too: the blocks composed as the shot
+            # with the panels dissolving in are exactly the animation's.
+            ent_w, ext_w = picture_cards.animation_windows(card)
+            for t in ((ent_w or (None, None))[1], (ext_w or (None, None))[0]):
+                if t is not None and window[0] + .02 < t < window[1] - .02:
+                    src_t = tl.out_to_src(t)
+                    if src_t is not None:
+                        card_edges.add(round(float(src_t), 6))
         split_keep = []
         for s, e in keep:
             edges = [s] + sorted(x for x in card_edges
@@ -2899,6 +2927,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     # run's span lets its card branch wait for exactly that stretch of the
     # program (picture_cards._append_source_fed MEMORY).
     card_layout, card_runs = {}, {}
+    card_blocks, card_anim, card_dissolve = {}, {}, {}
     if fx_cards and n > 0:
         _at = [tl.ins[j][0] for j in range(len(insert_inputs))]
         _pre = _prog = 0.0
@@ -2934,9 +2963,48 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                         if card.get("source") and not card.get("panels")
                         else None,
                         picture_cards.step_scale_at(card, mid_src)
-                        is not None)
+                        is not None,
+                        [follow.span_at(p.get("follow"), mid_src)
+                         for p in card.get("panels") or []] or None)
+                    card_blocks.setdefault(card["id"], []).append(i)
                 else:
                     run = None
+        # Which end of each card DISSOLVES (picture_cards module docstring):
+        # an animated end whose neighbouring block is the same footage
+        # running on — the same kept span, no camera cut, no other card's
+        # layout. Every other animated end cuts in with its panels
+        # already populated. The blocks under a dissolve are composed as the
+        # shot with the panels dissolving in (layout_filter ``under``).
+        seg_t0 = {i: t0 for kind, i, t0 in order if kind == "seg"}
+        pos = {i: k for k, (kind, i, _t) in enumerate(order) if kind == "seg"}
+        cam_reach = 1.5 / float(src_fps or fps or 30.0)
+
+        def _runs_on(i, j):
+            """Block j plays the footage of block i on, uncut."""
+            if not (0 <= j < n) or j in card_layout or \
+                    abs(pos.get(i, -9) - pos.get(j, -9)) != 1:
+                return False
+            a, b = (i, j) if i < j else (j, i)
+            seam = float(keep[b][0])
+            return (abs(float(keep[a][1]) - seam) < 1e-3
+                    and not any(abs(seam - x) <= cam_reach for x in cam_edges))
+        for card in fx_cards:
+            blocks = card_blocks.get(card["id"])
+            if not blocks:
+                continue
+            ent_w, ext_w = picture_cards.animation_windows(card)
+            if ent_w and not _runs_on(blocks[0], blocks[0] - 1):
+                ent_w = None
+            if ext_w and not _runs_on(blocks[-1], blocks[-1] + 1):
+                ext_w = None
+            card_anim[card["id"]] = (ent_w, ext_w)
+            for i in blocks:
+                t0, L = seg_t0[i], seg_out_len[i]
+                rows = [(kind, w[0] - t0, w[1] - w[0])
+                        for kind, w in (("in", ent_w), ("out", ext_w))
+                        if w and t0 < w[1] - 1e-3 and t0 + L > w[0] + 1e-3]
+                if rows:
+                    card_dissolve[i] = rows
     sw = sh = None
     seg_prog = []
     if regions:
@@ -3326,41 +3394,56 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             return (tmap, None if tmap is None else (0.0, e_ - s_),
                     [t - s_ for t in ts_], xs_, ys_)
 
+        def _full_frame(i, in_label, out_label, uid):
+            """Block i composed as the program shows it full-frame."""
+            seg_focus, seg_mode = _frame_for(*keep[i])
+            fspan = (follow.span_at(_fspans, _block_mid(*keep[i]))
+                     if _fspans and seg_mode == "crop" else None)
+            if fspan and main_src_size and follow.moves(fspan):
+                _follow_video(parts, in_label, out_label, W, H, fps,
+                              uid, _follow_of(i, fspan), seg_out_len[i],
+                              blk_frames.get(("seg", i)), main_src_size,
+                              (edl.get("frame") or {}).get("picture"),
+                              block_grade, follow_interp)
+                return
+            if fspan:
+                # one held position: the static crop, aimed there
+                seg_focus = follow.centre_at(fspan, _block_mid(*keep[i]))
+            _normalize_video(parts, in_label, out_label, W, H, fps,
+                             seg_mode, uid, focus=seg_focus,
+                             seg_dur=seg_out_len[i],
+                             frames=blk_frames.get(("seg", i)),
+                             picture=(edl.get("frame") or {}).get("picture"),
+                             grade=block_grade, src_size=main_src_size)
+
         for i in range(n):
             # frame_focus reaches ONLY the main footage: the focus point was
             # measured on the source video, so inserts (below) keep the
             # center crop.
             if i in card_layout:
                 cspan = card_layout[i][2] if len(card_layout[i]) > 2 else None
+                pspans = card_layout[i][4] if len(card_layout[i]) > 4 else None
+                under, seg_in = None, f"segv{i}"
+                if i in card_dissolve:
+                    # the shot itself, for the panels to dissolve over
+                    parts.append(f"[segv{i}]split[segv{i}u][segv{i}l]")
+                    _full_frame(i, f"segv{i}u", f"v_seg{i}u", f"s{i}u")
+                    under, seg_in = f"v_seg{i}u", f"segv{i}l"
                 picture_cards.layout_filter(
-                    parts, f"segv{i}", f"v_seg{i}", W, H, fps,
+                    parts, seg_in, f"v_seg{i}", W, H, fps,
                     card_layout[i][0], f"s{i}", src_size=main_src_size,
                     seg_dur=seg_out_len[i], grade=block_grade,
                     tag=card_layout[i][1], frames=blk_frames.get(("seg", i)),
                     follow_block=(_follow_of(i, cspan) + (follow_interp,)
                                   if cspan and follow.moves(cspan) else None),
                     bounded=bool(len(card_layout[i]) > 3
-                                 and card_layout[i][3]))
+                                 and card_layout[i][3]),
+                    under=under, dissolve=card_dissolve.get(i),
+                    panel_follow=[_follow_of(i, sp) + (follow_interp,)
+                                  if sp and follow.moves(sp) else None
+                                  for sp in pspans] if pspans else None)
                 continue
-            seg_focus, seg_mode = _frame_for(*keep[i])
-            fspan = (follow.span_at(_fspans, _block_mid(*keep[i]))
-                     if _fspans and seg_mode == "crop" else None)
-            if fspan and main_src_size and follow.moves(fspan):
-                _follow_video(parts, f"segv{i}", f"v_seg{i}", W, H, fps,
-                              f"s{i}", _follow_of(i, fspan), seg_out_len[i],
-                              blk_frames.get(("seg", i)), main_src_size,
-                              (edl.get("frame") or {}).get("picture"),
-                              block_grade, follow_interp)
-                continue
-            if fspan:
-                # one held position: the static crop, aimed there
-                seg_focus = follow.centre_at(fspan, _block_mid(*keep[i]))
-            _normalize_video(parts, f"segv{i}", f"v_seg{i}", W, H, fps,
-                             seg_mode, f"s{i}", focus=seg_focus,
-                             seg_dur=seg_out_len[i],
-                             frames=blk_frames.get(("seg", i)),
-                             picture=(edl.get("frame") or {}).get("picture"),
-                             grade=block_grade, src_size=main_src_size)
+            _full_frame(i, f"segv{i}", f"v_seg{i}", f"s{i}")
 
     # insert blocks: trim to their window (source_start_s picks where in
     # the clip the window starts), normalize like everything else
@@ -4267,7 +4350,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     vlabel = picture_cards.append_graph(
         parts, vlabel, picture_card_inputs, W, H, fps,
         (edl.get("frame") or {}).get("picture"),
-        runs=card_runs)
+        runs=card_runs, anim=card_anim)
     # Browser-rendered motion design under the dialogue captions...
     vlabel = motion_layer.append_graph(parts, vlabel, motion_inputs,
                                        "below_captions", fps)
@@ -7262,6 +7345,7 @@ def _run_render_job(worker_db, job):
                 and legibility_current(cached.get("meta"), edl_row["json"]) \
                 and carry_current(cached.get("meta"), edl_row["json"]) \
                 and follow_current(cached.get("meta"), edl_row["json"]) \
+                and cards_current(cached.get("meta"), edl_row["json"]) \
                 and (not handoff_may_matter(edl_row["json"])
                      or handoff_current(
                          cached.get("meta"), edl_row["json"],
@@ -7572,6 +7656,7 @@ def _run_render_job(worker_db, job):
                             and legibility_current(pm, prev_row["json"]) \
                             and carry_current(pm, prev_row["json"]) \
                             and follow_current(pm, prev_row["json"]) \
+                            and cards_current(pm, prev_row["json"]) \
                             and handoff_current(pm, prev_row["json"], index) \
                             and watermark_current(pm, variant, is_paid,
                                                   wm_settings) \
@@ -7935,6 +8020,10 @@ def _run_render_job(worker_db, job):
                   "follow_v": (reused_visual_meta.get("follow_v") or 0
                                if reused_visual_meta
                                else config.FOLLOW_VERSION),
+                  # ...and the card layouts it was drawn with.
+                  "card_v": (reused_visual_meta.get("card_v") or 0
+                             if reused_visual_meta
+                             else config.CARD_LAYOUT_VERSION),
                   # A reused picture keeps the block clock it was cut on.
                   "clock_v": (reused_visual_meta.get("clock_v") or 0
                               if reused_visual_meta

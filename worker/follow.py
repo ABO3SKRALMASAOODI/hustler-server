@@ -323,14 +323,20 @@ def frame_focus_at(edl, src_t):
 
 
 def edges(edl):
-    """SOURCE seconds where a follow span starts or ends (frame and source
-    cards): the renderer splits its blocks there, so every block follows
+    """SOURCE seconds where a follow span starts or ends (frame, source
+    cards and stack panels): the renderer splits its blocks there, so every block follows
     at most one span."""
     out = set()
     spans = list(frame_spans(edl))
     for card in ((edl or {}).get("effects") or {}).get("picture_cards") or []:
         if isinstance(card, dict) and card.get("source") and not card.get("panels"):
             spans += [sp for sp in card.get("follow") or [] if isinstance(sp, dict)]
+        elif isinstance(card, dict) and card.get("panels"):
+            # a stack panel that follows its speaker (CardPanel.follow)
+            for panel in card["panels"]:
+                if isinstance(panel, dict):
+                    spans += [sp for sp in panel.get("follow") or []
+                              if isinstance(sp, dict)]
     for sp in spans:
         for key in ("t0", "t1"):
             try:

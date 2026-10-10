@@ -39,6 +39,31 @@ tag in its metadata, and the card is built from exactly the tagged frames
 (_append_source_fed), so it can never disagree with the blocks about which
 frames were composed for it. A spliced insert inside the window plays
 full-frame: the card steps aside for it.
+
+LAYOUT CHANGES NEVER SHOW THE BARE CANVAS (judges, Oct 2026)
+
+A card's entrance used to fade its footage in over its own backdrop, which
+the card drew at full strength from its first frame: the Elon stack opened
+on a frame of empty dark canvas (mean luma 66.6 -> 27.4 in one frame,
+mid-sentence) and closed the same way before a hard cut to a bright shot —
+every judge read it as a dropped frame. Now an animated entrance or exit
+(fade, lift, reveal) DISSOLVES the whole card — backdrop, plate and footage
+as one picture — with the full-frame shot under it:
+
+* a program card is drawn over the program itself, so fading the finished
+  card in over it is the dissolve;
+* a source-fed card's blocks are re-composed, so over its entrance (and
+  exit) the renderer composes the block as the full-frame shot with the
+  panels dissolving in inside their boxes (layout_filter ``under``), and the
+  card fades in over that at the same rate: inside the boxes the picture is
+  exactly the dissolving footage, outside it the backdrop dissolves over the
+  shot. Its footage never slides (a lift is a dissolve here): a moving tile
+  would double the picture under it.
+
+A source-fed card that opens or closes ON A CUT (a camera cut, a jump cut,
+an insert's edge, another card's layout) hard-cuts instead, with its panels
+already populated: a dissolve right after a cut is mush, and a cut is
+already the change. ``entrance``/``exit`` 'none' always hard-cut.
 """
 import hashlib
 import json
@@ -73,6 +98,52 @@ HAIR_ABOVE_FACE = .40
 def source_fed(spec):
     """True when the card's footage comes from the main source frame."""
     return bool(spec.get("source") or spec.get("panels"))
+
+
+# Entrances/exits that animate (the card dissolves with the shot under it);
+# 'none' is a cut.
+ANIMATED = ("fade", "lift", "reveal")
+
+
+def edge_s(spec):
+    """The card's entrance/exit length (seconds, program clock)."""
+    start, end = float(spec["start"]), float(spec["end"])
+    full = float(spec.get("full_duration_s") or (end - start))
+    return min(float(spec.get("duration_s", .45)), full * .3)
+
+
+def animation_windows(spec):
+    """(entrance, exit) PROGRAM windows [a, b] the card dissolves over —
+    the whole animation on the card's own clock (``phase_s``: a stitched
+    fragment opened inside the card has its entrance behind it), or None
+    for a cut or an animation outside this piece of the card."""
+    start, end = float(spec["start"]), float(spec["end"])
+    phase = float(spec.get("phase_s") or 0.0)
+    full = float(spec.get("full_duration_s") or (end - start))
+    edge = edge_s(spec)
+    origin = start - phase
+    out = []
+    for key, default, a in (("entrance", "lift", origin),
+                            ("exit", "fade", origin + full - edge)):
+        b = a + edge
+        if spec.get(key, default) in ANIMATED and edge > 1e-3 \
+                and b > start + 1e-3 and a < end - 1e-3:
+            out.append((a, b))
+        else:
+            out.append(None)
+    return tuple(out)
+
+
+def _fade(kind, st, d):
+    """An alpha fade ('in'/'out') from ``st`` over ``d`` seconds of the
+    stream's clock; ``st`` may be negative (the stream opens inside the
+    fade): fade cannot start before zero, so the clock is shifted forward
+    that much and straight back."""
+    shift = max(0.0, -float(st))
+    chain = f",fade=t={kind}:st={st + shift:.6f}:d={d:.6f}:alpha=1"
+    if shift:
+        chain = f",setpts=PTS+{shift:.6f}/TB{chain},setpts=PTS-{shift:.6f}/TB"
+    return chain
 
 
 def source_at(spec, src_t=None):
@@ -141,10 +212,24 @@ def card_panels(spec, src_t=None):
     """[(box, source_rect)] of a source-fed card, [] for a program card.
     ``src_t`` (a SOURCE second) picks a re-aimed card's framing there."""
     if spec.get("panels"):
-        return [(list(p["box"]), list(p["source"])) for p in spec["panels"]]
+        return [(list(p["box"]), panel_source_at(p, src_t))
+                for p in spec["panels"]]
     if spec.get("source"):
         return [(list(spec["box"]), source_at(spec, src_t))]
     return []
+
+
+def panel_source_at(panel, src_t=None):
+    """A stack panel's source rect at SOURCE second ``src_t``: its rect,
+    centred on its follow path where a follow span holds ``src_t``."""
+    rect = list(panel["source"])
+    if src_t is not None and panel.get("follow"):
+        import follow
+        span = follow.span_at(panel["follow"], src_t)
+        c = follow.centre_at(span, src_t) if span else None
+        if c is not None:
+            rect = recentre(rect, c)
+    return rect
 
 
 def card_boxes(spec):
@@ -495,7 +580,8 @@ def _panel(W, H, box, rect, src_size):
 
 def layout_filter(parts, in_label, out_label, W, H, fps, panels, uid,
                   src_size=None, seg_dur=None, grade=None, tag=None,
-                  frames=None, follow_block=None, bounded=False):
+                  frames=None, follow_block=None, bounded=False, under=None,
+                  dissolve=None, panel_follow=None):
     """A main-footage block composed for a source-fed card: every panel's
     source rect scaled once onto its box of a W x H canvas, then the block
     tail _normalize_video uses (CFR, exact length, sar 1, yuv420p). The grade
@@ -513,8 +599,43 @@ def layout_filter(parts, in_label, out_label, W, H, fps, panels, uid,
 
     bounded: the block's rect is a cut step (step_rect) — its follow path was
     planned for the unstepped rect, so the moving rect is held inside the
-    source frame (a wider step near an edge slides inward)."""
+    source frame (a wider step near an edge slides inward).
+
+    under + dissolve (the card's entrance or exit, module docstring): the
+    label of the SAME frames composed as the full-frame program would show
+    them, and [(kind 'in'/'out', start, seconds)] on the block's clock — the
+    block is that full-frame picture with each panel's box dissolving in (or
+    out) over it, tagged like any composed block, so the card cut from it
+    shows exactly the dissolving footage inside its boxes.
+
+    panel_follow (a stack): one follow_block (or None) per panel — a panel
+    whose rect FOLLOWS its speaker inside the shot is drawn by follow.
+    window_chain at its box's size."""
     import renderer
+    if under and dissolve:
+        mid = f"lyd{uid}"
+        layout_filter(parts, in_label, mid, W, H, fps, panels, uid,
+                      src_size=src_size, seg_dur=seg_dur, grade=grade,
+                      frames=frames, follow_block=follow_block,
+                      bounded=bounded, panel_follow=panel_follow)
+        wins = [pixels(W, H, box) for box, _rect in panels]
+        labels = [mid] if len(wins) == 1 else \
+            [f"{mid}b{k}" for k in range(len(wins))]
+        if len(wins) > 1:
+            parts.append(f"[{mid}]split={len(wins)}"
+                         + "".join(f"[{lb}]" for lb in labels))
+        fades = "".join(_fade(kind, st, d) for kind, st, d in dissolve)
+        base = under
+        for k, (x, y, w, h) in enumerate(wins):
+            parts.append(f"[{labels[k]}]crop={w}:{h}:{x}:{y},format=yuva420p"
+                         f"{fades}[{mid}t{k}]")
+            parts.append(f"[{base}][{mid}t{k}]overlay={x}:{y}:format=auto"
+                         f"[{mid}u{k}]")
+            base = f"{mid}u{k}"
+        mark = (f",metadata=mode=add:key={LAYOUT_TAG_KEY}:value={tag}"
+                if tag else "")
+        parts.append(f"[{base}]format=yuv420p{mark}[{out_label}]")
+        return
     tail = renderer.block_tail(fps, seg_dur, frames)
     if tag:
         tail += f",metadata=mode=add:key={LAYOUT_TAG_KEY}:value={tag}"
@@ -553,15 +674,49 @@ def layout_filter(parts, in_label, out_label, W, H, fps, panels, uid,
                  + "".join(f"[ly{uid}_{k}]" for k in range(n)))
     for k, (box, rect) in enumerate(panels):
         x, y, _w, _h = pixels(W, H, box)
-        chain = _panel(W, H, box, rect, src_size)
+        pf = panel_follow[k] if panel_follow and k < len(panel_follow) else None
+        if pf and src_size and src_size[0] and src_size[1]:
+            _follow_panel(parts, f"ly{uid}_{k}", f"lyf{uid}_{k}", W, H, fps,
+                          box, rect, src_size, pf, seg_dur, frames,
+                          f"{uid}p{k}")
+            chain, src_label = "null", f"lyf{uid}_{k}"
+        else:
+            chain, src_label = _panel(W, H, box, rect, src_size), f"ly{uid}_{k}"
         if k == 0:
-            parts.append(f"[ly{uid}_0]{chain},pad={W}:{H}:{x}:{y}:color=black"
+            parts.append(f"[{src_label}]{chain},pad={W}:{H}:{x}:{y}:color=black"
                          f"[lyc{uid}_0]")
             continue
-        parts.append(f"[ly{uid}_{k}]{chain}[lyp{uid}_{k}]")
+        parts.append(f"[{src_label}]{chain}[lyp{uid}_{k}]")
         parts.append(f"[lyc{uid}_{k - 1}][lyp{uid}_{k}]overlay={x}:{y}"
                      f":shortest=1[lyc{uid}_{k}]")
     parts.append(f"[lyc{uid}_{n - 1}]{tail}[{out_label}]")
+
+
+def _follow_panel(parts, in_label, out_label, W, H, fps, box, rect, src_size,
+                  follow_block, seg_dur, frames, uid):
+    """One stack panel whose rect FOLLOWS its speaker (follow.window_chain
+    at the box's size): the rect's centre moves along the panel's follow
+    path, held inside the source frame (a panel never shows past it)."""
+    import follow
+    import renderer
+    tmap, kspan, ts, cxs, cys, interp = follow_block
+    sw, sh = float(src_size[0]), float(src_size[1])
+    _x, _y, w, h = pixels(W, H, box)
+    rect = match_rect(rect, box, sw, sh, W, H)
+    rw, rh = (rect[2] - rect[0]) * sw, (rect[3] - rect[1]) * sh
+    k = w / rw
+    hx, hy = rw / 2.0 / sw, rh / 2.0 / sh
+    cxs = [min(max(c, hx), 1.0 - hx) if hx < 0.5 else 0.5 for c in cxs]
+    cys = [min(max(c, hy), 1.0 - hy) if hy < 0.5 else 0.5 for c in cys]
+    ox = [cx * sw - rw / 2.0 for cx in cxs]
+    oy = [cy * sh - rh / 2.0 for cy in cys]
+    flags, sharpen = _enlarge(k)
+    follow.window_chain(
+        parts, in_label, out_label, f"c{uid}", src_size=(sw, sh),
+        out_size=(w, h), k=k, ts=ts, ox=ox, oy=oy, length=seg_dur or 0.0,
+        fps=fps, tail=renderer.block_tail(fps, seg_dur, frames), grade=None,
+        interpolation=interp, sharpen=sharpen, flags=flags, time_map=tmap,
+        key_span=kspan)
 
 
 def overlaps_source_card(edl, spans):
@@ -917,6 +1072,21 @@ def _blur_chain(W, H, spec):
             f"scale={W}:{H}:flags=bicubic,setsar=1")
 
 
+def _program_card_fades(spec, phase, full, edge):
+    """A program card's entrance/exit: the WHOLE finished card (backdrop,
+    plate and footage) fading over the program under it — a dissolve from
+    and to the full-frame shot, never its footage fading in over its own
+    already-drawn backdrop (the bare canvas; module docstring). On the
+    card piece's own clock (0 at its start; ``phase`` into the card).
+    '' when neither end animates (the historical graph)."""
+    out = ""
+    if spec.get("entrance", "lift") in ANIMATED:
+        out += _fade("in", -phase, edge)
+    if spec.get("exit", "fade") in ANIMATED:
+        out += _fade("out", full - edge - phase, edge)
+    return ",format=yuva420p" + out if out else ""
+
+
 def _append_designed(parts, vlabel, p, idx, spec, W, H, fps, source_rect):
     """The designed-backdrop variant of append_graph's per-card branch."""
     sx, sy, sw, sh = pixels(W, H, source_rect or [0, 0, 1, 1])
@@ -937,11 +1107,8 @@ def _append_designed(parts, vlabel, p, idx, spec, W, H, fps, source_rect):
     head = f"trim=start={start:.6f}:end={end:.6f},setpts=PTS-STARTPTS+{phase:.6f}/TB,crop={sw}:{sh}:{sx}:{sy}"
     tile = fit
     ent, ext = spec.get("entrance", "lift"), spec.get("exit", "fade")
-    if ent in ("fade", "lift"):
-        tile += f",fade=t=in:st=0:d={edge:.6f}:alpha=1"
-    if ext in ("fade", "lift"):
-        tile += f",fade=t=out:st={full-edge:.6f}:d={edge:.6f}:alpha=1"
     tile += f",setpts=PTS-{phase:.6f}/TB"
+    fades = _program_card_fades(spec, phase, full, edge)
     if blur:
         parts.append(f"[{p}src]{head},split[{p}tsrc][{p}bsrc]")
         parts.append(f"[{p}tsrc]{tile}[{p}tile]")
@@ -971,9 +1138,9 @@ def _append_designed(parts, vlabel, p, idx, spec, W, H, fps, source_rect):
         parts.append(f"[{p}bgtop][{p}mask]alphamerge[{p}clip]")
         parts.append(f"[{p}placed][{p}clip]overlay=0:0:shortest=1:format=auto[{p}framed]")
         parts.append(f"[{idx}:v]format=rgba,{_still(length, fps)}[{p}plate]")
-        parts.append(f"[{p}framed][{p}plate]overlay=0:0:shortest=1:format=auto,setpts=PTS+{start:.6f}/TB[{p}card]")
+        parts.append(f"[{p}framed][{p}plate]overlay=0:0:shortest=1:format=auto{fades},setpts=PTS+{start:.6f}/TB[{p}card]")
     else:
-        parts.append(f"[{p}placed][{p}plate]overlay=0:0:shortest=1:format=auto,setpts=PTS+{start:.6f}/TB[{p}card]")
+        parts.append(f"[{p}placed][{p}plate]overlay=0:0:shortest=1:format=auto{fades},setpts=PTS+{start:.6f}/TB[{p}card]")
     parts.append(f"[{p}pass][{p}card]overlay=0:0:eof_action=repeat:repeatlast=1:enable='gte(t,{start:.6f})*lt(t,{end:.6f})'[{p}out]")
     return f"{p}out"
 
@@ -990,22 +1157,8 @@ LAYOUT_TAG_KEY = "valmera_card"
 SOURCE_CARD_REACH_S = .25
 
 
-def _ye_abs(y, h, H, ent, ext, origin, edge, full):
-    """_append_graph's lift/reveal offset on the PROGRAM clock: t - origin
-    is the time since the full card's start (clipped: a run can open or
-    close a frame either side of the authored window)."""
-    x = f"(t-{origin:.6f})"
-    ye = str(y)
-    if ent in ("lift", "reveal"):
-        distance = h if ent == "reveal" else H*.022
-        ye += f"+{distance:.3f}*pow(clip(1-{x}/{edge:.6f},0,1),3)"
-    if ext in ("lift", "reveal"):
-        distance = h if ext == "reveal" else H*.022
-        ye += f"+{distance:.3f}*pow(clip(({x}-{full-edge:.6f})/{edge:.6f},0,1),3)"
-    return ye
-
-
-def _append_source_fed(parts, vlabel, p, idx, spec, W, H, fps, runs):
+def _append_source_fed(parts, vlabel, p, idx, spec, W, H, fps, runs,
+                       anim=None):
     """A source-fed card (one panel or a stack). layout_filter already put
     every panel's source rect on its box of the program picture; this cuts
     each box back out of the finished program (camera and grade included)
@@ -1020,6 +1173,11 @@ def _append_source_fed(parts, vlabel, p, idx, spec, W, H, fps, runs):
     branch ends and the program passes through (eof_action=pass).
 
     runs: [(tag, program start, program end)] from build_filtergraph.
+    anim: (entrance, exit) program windows the card dissolves over (the
+    renderer composed those blocks as the full-frame shot with the panels
+    dissolving in: layout_filter ``under``), None each for a cut. The
+    WHOLE card fades over them — never its footage over its own backdrop,
+    which showed the bare canvas (module docstring).
 
     MEMORY: overlay's framesync releases no program frame until it knows
     the card branch's NEXT timestamp, and a branch cut from the program
@@ -1033,31 +1191,19 @@ def _append_source_fed(parts, vlabel, p, idx, spec, W, H, fps, runs):
     moving plate would park every frame one run consumes in the next run's
     queue."""
     start, end = float(spec["start"]), float(spec["end"])
-    length = end-start
-    phase = float(spec.get("phase_s") or 0)
-    full = float(spec.get("full_duration_s") or length)
-    edge = min(float(spec.get("duration_s", .45)), full*.3)
-    origin = start - phase             # the full card's start, program clock
     wins = [pixels(W, H, box) for box in card_boxes(spec)]
     n = len(wins)
     blur = spec.get("background_style") == "blur"
     styled = designed(spec)
     grain = _grain(spec)
-    ent, ext = spec.get("entrance", "lift"), spec.get("exit", "fade")
+    # The whole card's dissolve, on the program clock (a fragment that
+    # opens inside a fade has it start before zero: _fade shifts).
     fades = ""
-    # fade's start cannot be negative: a proof fragment that opens inside
-    # the card has its card clock begin before zero. Its fades then run on
-    # a clock shifted forward by that much and shifted straight back (each
-    # frame lands on its own timestamp again).
-    shift = max(0.0, -origin)
-    if ent in ("fade", "lift"):
-        fades += f",fade=t=in:st={origin + shift:.6f}:d={edge:.6f}:alpha=1"
-    if ext in ("fade", "lift"):
-        fades += (f",fade=t=out:st={origin + shift + full - edge:.6f}"
-                  f":d={edge:.6f}:alpha=1")
-    if fades and shift:
-        fades = (f",setpts=PTS+{shift:.6f}/TB{fades}"
-                 f",setpts=PTS-{shift:.6f}/TB")
+    win_in, win_out = anim or (None, None)
+    if win_in:
+        fades += _fade("in", win_in[0], win_in[1] - win_in[0])
+    if win_out:
+        fades += _fade("out", win_out[0], win_out[1] - win_out[0])
     # Each run's trim window on the program clock: its blocks' Timeline
     # span, reached a little either side (the tag, not the clock, decides
     # which frames belong to it).
@@ -1105,8 +1251,8 @@ def _append_source_fed(parts, vlabel, p, idx, spec, W, H, fps, runs):
                      f":function=same_str,split={len(outs)}"
                      + "".join(f"[{o}]" for o in outs))
         for k, (x, y, w, h) in enumerate(wins):
-            parts.append(f"[{q}s{k}]crop={w}:{h}:{x}:{y},setsar=1,format=rgba"
-                         f"{fades}[{q}tile{k}]")
+            # opaque: the footage is exactly the program's inside its box
+            parts.append(f"[{q}s{k}]crop={w}:{h}:{x}:{y},setsar=1[{q}tile{k}]")
         if blur:
             x, y, w, h = wins[0]       # the first panel (the speaker)
             parts.append(f"[{q}b]crop={w}:{h}:{x}:{y},{_blur_chain(W, H, spec)},"
@@ -1121,8 +1267,7 @@ def _append_source_fed(parts, vlabel, p, idx, spec, W, H, fps, runs):
         base = f"{q}bg"
         for k, (x, y, w, h) in enumerate(wins):
             out = f"{q}placed" if k == n - 1 else f"{q}pl{k}"
-            parts.append(f"[{base}][{q}tile{k}]overlay=x={x}:"
-                         f"y='{_ye_abs(y, h, H, ent, ext, origin, edge, full)}'"
+            parts.append(f"[{base}][{q}tile{k}]overlay=x={x}:y={y}"
                          f":format=auto[{out}]")
             base = out
         if blur:
@@ -1142,7 +1287,7 @@ def _append_source_fed(parts, vlabel, p, idx, spec, W, H, fps, runs):
         parts.append(f"[{base}][{plates[r]}]overlay=0:0:eof_action=repeat"
                      + (":shortest=1" if styled and grain and not blur
                         else "") +
-                     f":format=auto,format=yuva420p,"
+                     f":format=auto,format=yuva420p{fades},"
                      f"tpad=start=2:color=black@0,"
                      f"setpts='{lead}'[{q}card]")
         parts.append(f"[{q}pass][{q}card]overlay=0:0:eof_action=pass"
@@ -1152,14 +1297,16 @@ def _append_source_fed(parts, vlabel, p, idx, spec, W, H, fps, runs):
 
 
 def append_graph(parts, vlabel, inputs, W, H, fps, source_rect=None,
-                 runs=None):
+                 runs=None, anim=None):
     """One branch per card over the composed program ``vlabel``.
 
     source_rect is frame.picture: the region of the program a program card
     shows. runs = {card id: [(layout tag, program start, program end), ...]}
     names the runs of render blocks renderer.build_filtergraph composed for
     each source-fed card (_append_source_fed). A source-fed card with no run (its window holds
-    only spliced media) draws nothing.
+    only spliced media) draws nothing. anim = {card id: (entrance window,
+    exit window)} — the dissolves build_filtergraph composed the blocks
+    for (a source-fed card absent from it cuts in and out).
     """
     if not inputs:
         return vlabel
@@ -1170,7 +1317,8 @@ def append_graph(parts, vlabel, inputs, W, H, fps, source_rect=None,
         if source_fed(spec):
             if runs.get(spec.get("id")):
                 vlabel = _append_source_fed(parts, vlabel, p, idx, spec, W, H,
-                                            fps, runs[spec["id"]])
+                                            fps, runs[spec["id"]],
+                                            (anim or {}).get(spec.get("id")))
             continue
         if designed(spec):
             vlabel = _append_designed(parts, vlabel, p, idx, spec, W, H, fps,
@@ -1189,11 +1337,8 @@ def append_graph(parts, vlabel, inputs, W, H, fps, source_rect=None,
                f"scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color={color}")
         chain = f"trim=start={start:.6f}:end={end:.6f},setpts=PTS-STARTPTS+{phase:.6f}/TB,crop={sw}:{sh}:{sx}:{sy},{fit},setsar=1,format=rgba"
         ent, ext = spec.get("entrance","lift"), spec.get("exit","fade")
-        if ent in ("fade","lift"):
-            chain += f",fade=t=in:st=0:d={edge:.6f}:alpha=1"
-        if ext in ("fade","lift"):
-            chain += f",fade=t=out:st={full-edge:.6f}:d={edge:.6f}:alpha=1"
         chain += f",setpts=PTS-{phase:.6f}/TB"
+        fades = _program_card_fades(spec, phase, full, edge)
         parts.append(f"[{p}src]{chain}[{p}tile]")
         parts.append(f"color=c={color}:s={W}x{H}:r={fps}:d={length:.6f}[{p}bg]")
         ye = str(y)
@@ -1222,7 +1367,7 @@ def append_graph(parts, vlabel, inputs, W, H, fps, source_rect=None,
         # every card frame, and [placed] alone decides the card's length —
         # exactly what the window-length looped plate (always the longer
         # input under shortest=1) produced before.
-        parts.append(f"[{p}placed][{p}plate]overlay=0:0:shortest=0:eof_action=repeat:format=auto,"
+        parts.append(f"[{p}placed][{p}plate]overlay=0:0:shortest=0:eof_action=repeat:format=auto{fades},"
                      f"tpad=start=2,setpts=PTS-2+{start:.6f}/TB[{p}card]")
         # trim/setpts and framesync quantize fractional cut clocks differently.
         # The card branch can reach EOF one or two frames before the program

@@ -929,10 +929,14 @@ def test_blur_lift_never_shows_footage_outside_the_window(tmp_path):
                 duration_s=.6)
     out = _card_render(tmp_path, card, "lift")
     # 0.1s into the lift the tile hangs below its window; the backdrop has to
-    # cover that overhang (the window's bottom edge is y=.7 -> row 398)
+    # cover that overhang (the window's bottom edge is y=.7 -> row 398). The
+    # whole card dissolves in over the footage (never a bare canvas), so
+    # there it is already part backdrop — a leaked tile would be footage.
     f = _f(out, 1.1)
-    below = f[402:416, 60:260]
-    assert abs(below - np.array(SRC_COLOR)).max(axis=2).min() > 30
+    below = f[399:405, 60:260]
+    assert abs(below - np.array(SRC_COLOR)).max(axis=2).min() > 8
+    settled = _f(out, 2)[402:416, 60:260]
+    assert abs(settled - np.array(SRC_COLOR)).max(axis=2).min() > 30
 
 
 @needs_ffmpeg

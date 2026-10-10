@@ -2101,6 +2101,15 @@ FOLLOW_VERSION = 1
 # changes (renderer.handoff_affected). Everything else keeps its cache.
 HANDOFF_VERSION = 1
 
+# Picture-card layouts (worker/picture_cards.py). Stamped as `card_v` on
+# every render and compared ONLY for EDLs that carry a picture card: older
+# renders opened and closed a card by fading its footage in over its own
+# backdrop — a frame of bare dark canvas mid-sentence (judges, Oct 2026) —
+# where today's dissolve the whole card with the full-frame shot (or cut in
+# populated on a cut), and their stack panels may cut the speaker's face.
+# Everything else keeps its cache. Bump when what a card looks like changes.
+CARD_LAYOUT_VERSION = 1
+
 # The picture pipeline's look. A stitched preview stream-copies the unchanged
 # stretches of the previous preview and splices in newly rendered pieces, so
 # pieces from a different look show a sharpness/tone seam at every splice.
