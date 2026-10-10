@@ -135,6 +135,30 @@ def test_a_word_whose_voice_was_cut_stays_out():
     assert got and got[0]["src_t0"] >= 21.2
 
 
+def test_the_rescue_finds_kept_parts_by_bisection_on_a_long_source():
+    # every word a cut removed is asked about — most of a long source — so
+    # sorted keeps are bisected; the answer is the full scan's, word for word
+    import random
+    rnd = random.Random(7)
+    words, t = [], 0.0
+    while t < 1800:
+        d = rnd.uniform(0.12, 1.6)
+        words.append({"w": "word", "t0": round(t, 3), "t1": round(t + d, 3)})
+        t += d + rnd.uniform(0.0, 0.3)
+    keep, s = [], 50.0
+    for _k in range(120):
+        keep.append([round(s, 3), round(s + rnd.uniform(0.4, 3.0), 3)])
+        s = keep[-1][1] + rnd.uniform(0.05, 6.0)
+    fast = Timeline(keep)
+    scan = Timeline(keep)
+    scan._seg_starts = False                  # the linear scan
+    got = fast.kept_words(words, rescue=True)
+    assert got == scan.kept_words(words, rescue=True)
+    assert any(w.get("heard") for w in got)
+    for t0, t1 in ((49.0, 50.02), (keep[3][1] - 0.2, keep[4][0] + 0.2), (1790.0, 1795.0)):
+        assert fast._segs_over(t0, t1) == scan._segs_over(t0, t1)
+
+
 def test_captions_and_the_kept_transcript_show_the_heard_words():
     edl = _edl(JOBS_KEEP)
     ix = _index(JOBS)
@@ -350,10 +374,46 @@ def test_a_bridge_line_never_wraps_inside_a_name():
     edl = _edl([[0.0, 4.0]], [m], words=words)
     rd = caption_carry.readings(edl, _index(words), Timeline(edl["keep"]))["list"]
     (bridge,) = rd["bridges"]
+    # ...nor after its article ("the / Green Revolution")
     assert [(w["t"], w.get("g")) for w in bridge["words"]] == [
-        ("the", None), ("Green", 1), ("Revolution", None), ("agriculture", None)]
+        ("the", 1), ("Green", 1), ("Revolution", None), ("agriculture", None)]
     assert validate_edl(dict(edl, motion=[dict(m, reading=rd)]), 9.0).model_dump()[
         "motion"][0]["reading"]["bridges"][0]["words"][1]["g"] == 1
+
+
+def test_a_glued_bridge_group_always_fits_the_column():
+    # a run of capitalised words is glued only while the group stays short
+    # enough to fit the lockup's column (a nowrap group never overflows it)
+    names = "the United States Department Of Health And Human Services".split()
+    words = [("rockets", 0.2, 0.6)] + [(n, 0.7 + 0.2 * k, 0.88 + 0.2 * k)
+                                       for k, n in enumerate(names)] + \
+        [("and", 2.6, 2.7), ("new", 2.7, 2.9), ("medicines.", 2.9, 3.3)]
+    rows = [{"text": "ROCKETS"}, {"text": "NEW *MEDICINES*"}]
+    m = {"id": "list", "template": "phrase_build", "start": 0.0, "end": 3.6,
+         "params": {"rows": rows}}
+    edl = _edl([[0.0, 4.0]], [m], words=words)
+    rd = caption_carry.readings(edl, _index(words), Timeline(edl["keep"]))["list"]
+    (bridge,) = rd["bridges"]
+    groups, cur = [], []
+    for w in bridge["words"]:
+        cur.append(w["t"])
+        if not w.get("g"):
+            groups.append(" ".join(cur))
+            cur = []
+    assert " ".join(groups) == " ".join(names)
+    assert len(groups) > 1 and all(len(g) <= caption_carry.BRIDGE_GLUE_MAX_CHARS
+                                   for g in groups), groups
+
+
+def test_but_and_so_are_set_on_the_lockup_not_dropped_as_list_joints():
+    words = [("great", 0.2, 0.5), ("companies", 0.5, 1.0), ("but", 1.1, 1.3),
+             ("not", 1.3, 1.5), ("quite", 1.5, 1.8), ("enough.", 1.8, 2.3)]
+    rows = [{"text": "great companies"}, {"text": "*ENOUGH*"}]
+    m = {"id": "pb", "template": "phrase_build", "start": 0.0, "end": 2.6,
+         "params": {"rows": rows}}
+    edl = _edl([[0.0, 3.0]], [m], words=words)
+    rd = caption_carry.readings(edl, _index(words), Timeline(edl["keep"]))["pb"]
+    assert [" ".join(w["t"] for w in b["words"]) for b in rd["bridges"]] == ["but not quite"]
 
 
 def test_mute_true_and_false_keep_their_contracts_and_still_time_the_rows():
@@ -492,3 +552,15 @@ def test_spoken_rows_land_on_their_onsets_and_bridges_sit_between_rows():
     # bridges are small type, smaller than every row
     rows_fs = [r["fs"] for r in st[-1] if not r["bridge"]]
     assert all(r["fs"] < min(rows_fs) for r in st[-1] if r["bridge"])
+
+
+@needs_browser
+def test_a_rising_word_is_readable_on_its_spoken_onset():
+    # 'rise' fades a word in over 80 ms: started on the onset it would be
+    # unreadable for the first frames of the word it shows
+    reading = {"v": 1, "rows": [[0.7, 0.92, 1.28]], "bridges": []}
+    job = _job(PAPER_ROWS[:1], reading, end=2.0, entrance="rise")
+    st = asyncio.run(_states(job, [0.6, 0.7, 0.92]))
+    assert st[0][0]["words"] == [0, 0, 0]          # never early by more than the landing
+    assert st[1][0]["words"] == [1, 0, 0]          # "no" readable on its onset
+    assert st[2][0]["words"] == [1, 1, 0]

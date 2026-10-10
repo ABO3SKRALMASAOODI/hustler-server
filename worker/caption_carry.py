@@ -952,8 +952,14 @@ _PHRASE_END = ".!?…;:"
 BRIDGE_MAX_WORDS = 14
 BRIDGE_MAX_CHARS = 90
 # A list's "and"/"or" between a shown row and the small run beside it is
-# the graphic's own joint, not words to set.
-_EDGE_CONJ = frozenset(("and", "or", "but", "so"))
+# the graphic's own joint, not words to set. ("but" and "so" carry meaning —
+# "great companies, but not enough" — and are always set.)
+_EDGE_CONJ = frozenset(("and", "or"))
+# A bridge line wraps inside the lockup's column, never inside a name, a
+# number and its noun, or after an article ("the / Green Revolution"); a
+# glued group stays this short so it always fits the column.
+BRIDGE_GLUE_MAX_CHARS = 24
+_BRIDGE_ARTICLES = frozenset(("a", "an", "the"))
 READING_VERSION = 1
 
 
@@ -977,7 +983,7 @@ def phrase_ids(words):
                 jump = float(w.get("src_t0", w["t0"])) - float(prev.get("src_t1", prev["t1"]))
             except (KeyError, TypeError, ValueError):
                 gap = jump = 0.0
-            if raw[-1:] in _PHRASE_END or raw in ("-", "—", "–") or w.get("brk") \
+            if (raw and raw[-1] in _PHRASE_END) or raw in ("-", "—", "–") or w.get("brk") \
                     or gap >= PHRASE_PAUSE_S or abs(jump) >= PHRASE_GAP_S:
                 k += 1
         out.append(k)
@@ -1095,20 +1101,29 @@ def _reading_of(m, words, word_toks, mids, carried, joined):
         for i in sorted((i for i in row_of if float(words[i]["t0"]) <= t_first),
                         key=lambda i: float(words[i]["t0"])):
             after = row_of[i]
-        ws = []
+        ws, group = [], 0          # group: characters glued so far
         for k, i in enumerate(run):
             text = str(words[i].get("w") or "").strip().strip("\"“”")
             if i == run[-1]:
                 text = text.rstrip(".,;:…")
             if text:
                 w = {"t": text, "s": round(max(0.0, float(words[i]["t0"]) - s), 3)}
-                # a name, a number and its noun, a determiner and its noun
-                # never break across the bridge line's wrap ("the Green /
-                # Revolution" was the caption defect all over again)
-                if k + 1 < len(run) and caplib._glue(
-                        words[i], words[run[k + 1]],
-                        words[run[k - 1]] if k else None) >= caplib.GLUE_NUMBER:
-                    w["g"] = 1
+                # a name, a number and its noun, a determiner or an article
+                # and its noun never break across the bridge line's wrap
+                # ("the Green / Revolution" was the caption defect all over
+                # again), as long as the glued group still fits the column
+                if k + 1 < len(run):
+                    nxt = str(words[run[k + 1]].get("w") or "").strip().strip("\"“”")
+                    want = caplib._glue(words[i], words[run[k + 1]],
+                                        words[run[k - 1]] if k else None) \
+                        >= caplib.GLUE_NUMBER or \
+                        text.lower().strip("'’") in _BRIDGE_ARTICLES
+                    span = (group or len(text)) + 1 + len(nxt)
+                    if want and nxt and span <= BRIDGE_GLUE_MAX_CHARS:
+                        w["g"] = 1
+                        group = span
+                    else:
+                        group = 0
                 ws.append(w)
         if ws:
             bridges.append({"after": after, "words": ws})

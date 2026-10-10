@@ -164,7 +164,8 @@ LAYERING AND CAPTIONS:
   line); false keeps all captions running beside it (a number or *starred*
   word it shows is still not repeated).
 - Lockup rows reveal in reading order: a spoken row's words land on their
-  spoken onsets (never early), a row nobody says on its `at` with its
+  spoken onsets (readable on the word, never before it; a `rise` word
+  starts its short fade 2 frames ahead), a row nobody says on its `at` with its
   stagger squeezed so it is complete before the next row starts.
 - One text system at a time in one region: never stack a hook title, a
   caption page and a lower third in the same band.

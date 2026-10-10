@@ -413,12 +413,34 @@ class Timeline:
             return self.offsets[i] + tt - s
         return self.offsets[i] + self._off_in_pieces(pcs, tt)
 
+    def _segs_over(self, t0, t1):
+        """Indices of the keep segments overlapping source [t0, t1], in
+        order. Captions ask this of EVERY transcript word a cut removed —
+        most of a long source — so sorted keeps are searched by bisection
+        instead of scanned (an unsorted keep list is scanned)."""
+        starts = getattr(self, "_seg_starts", None)
+        if starts is None:
+            starts = [s for s, _e in self.segs]
+            if any(b[0] < a[0] or b[1] < a[1] for a, b in zip(self.segs, self.segs[1:])):
+                starts = False
+            self._seg_starts = starts
+        if starts is False:
+            return [i for i, (s, e) in enumerate(self.segs) if s < t1 and e > t0]
+        import bisect
+        j = bisect.bisect_left(starts, t1) - 1
+        out = []
+        while j >= 0 and self.segs[j][1] > t0:
+            out.append(j)
+            j -= 1
+        return out[::-1]
+
     def heard_part(self, t0, t1, token, voice=None):
         """(segment index, voiced source onset, source end) of the kept part
         of a word whose MIDPOINT a cut removed but whose sound survives it,
         or None. See kept_words(rescue=True) and voiced_part."""
         parts = []
-        for i, (s, e) in enumerate(self.segs):
+        for i in self._segs_over(t0, t1):
+            s, e = self.segs[i]
             lo, hi = max(t0, s), min(t1, e)
             if hi - lo >= RESCUE_MIN_PART_S:
                 parts.append((lo, hi, i))

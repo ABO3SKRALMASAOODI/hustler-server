@@ -60,6 +60,10 @@
   const RD = (P._reading && typeof P._reading === 'object') ? P._reading : null;
   const RDrows = (RD && Array.isArray(RD.rows)) ? RD.rows : [];
   const RDbridges = (RD && Array.isArray(RD.bridges)) ? RD.bridges : [];
+  // a 'rise' word fades in over 80 ms: it starts that much ahead of its
+  // spoken onset so it is readable ON the word (pop and ghost show on it)
+  const LAND = P.entrance === 'rise' ? 0.06 : 0;
+  const onset = v => { const n = v == null ? null : num(v, null); return n == null ? null : Math.max(0, n - LAND); };
   const BR = { css: `'Inter Display','Inter',sans-serif`, weight: 600, style: 'normal', track: '-0.01em', lh: 1.08, gap: 0, opt: 1 };
   const rows = [];
   const bridgeRows = after => RDbridges.filter(b => Number(b.after) === after).forEach(b => {
@@ -83,7 +87,7 @@
       if (!w.g) grp = null;
       return sp;
     });
-    if (words.length) rows.push({ el, R: BR, words, size: 0, bridge: true, at: '', known: ws.map(w => num(w.s, null)) });
+    if (words.length) rows.push({ el, R: BR, words, size: 0, bridge: true, at: '', known: ws.map(w => onset(w.s)) });
     else el.remove();
   });
   bridgeRows(-1);
@@ -103,7 +107,7 @@
     if (words.length) {
       const k = Array.isArray(RDrows[i]) ? RDrows[i] : [];
       rows.push({ el, R, words, size: Math.min(4, Math.max(0.2, num(r.size, 1))) * R.opt,
-        at: String(r.at ?? '').trim(), known: words.map((_, j) => k[j] == null ? null : num(k[j], null)) });
+        at: String(r.at ?? '').trim(), known: words.map((_, j) => onset(k[j])) });
     } else el.remove();
     bridgeRows(i);
   });

@@ -163,7 +163,7 @@ def test_list_rows_take_their_own_words_and_the_connectors_between_them():
         ["aviation and the green revolution"]
     rd = caption_carry.readings(edl, _index(words), Timeline(edl["keep"]))["list"]
     assert rd["bridges"] == [{"after": 1, "words": [
-        {"t": "aviation", "s": 1.2}, {"t": "and", "s": 1.7}, {"t": "the", "s": 1.8},
+        {"t": "aviation", "s": 1.2}, {"t": "and", "s": 1.7}, {"t": "the", "s": 1.8, "g": 1},
         {"t": "green", "s": 1.9}, {"t": "revolution", "s": 2.2}]}]
     # rows land on their spoken onsets; "jets" is never said
     assert rd["rows"] == [[0.2], [0.7, None], [2.9, 3.4], [3.9, 4.1]]
