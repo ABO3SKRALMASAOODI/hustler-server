@@ -64,7 +64,7 @@ hero 1  6.42  "garbage"   word_slam serif, start 6.22 (lands +0.2, silent; not i
 turn   14.80  "Lisa"      image_card Apple Lisa photo + label "Apple Lisa, 1983" (identifies the product; silent)
 hero 2 18.60  "40 fonts"  counter style='reveal' value 40 label "fonts on one screen" (silent)
 payoff 33.60  "without one" phrase_build 2 tiers "writing a paper / WITHOUT *ONE*" (the largest accented lockup; silent: the type is the payoff); hold 0.8 s after the last word
-budget  4 graphics in 36 s, ~35% of the runtime, 2 type roles, 1 accent
+budget  5 graphics in 36 s (one per ~7 s), ~30% of the runtime, 2 type roles, 1 accent
 camera  none: steady frame, every jump cut left bare
 sound   none: nothing on screen calls for one (zero is the podcast default); music off (no owner song)
 ```
@@ -222,7 +222,7 @@ Hook: hook_title by 1.1s ("Every computer has used weird type", kicker Steve Job
 Heroes: 6.4 garbage slam; 14.8 Apple Lisa photo + label; 18.6 counter 40 fonts
 Payoff: 33.6 "writing a paper / WITHOUT ONE" lockup, held 0.8s after the last word
 Camera/sound: no zoom, no sound; music off (no owner song)
-Targets: change ~0.4s, picture card 0.56, 3 heroes, graphics 35% of runtime
+Targets: change ~0.4s, picture card 0.56, 3 heroes, graphics ~30% of runtime
 Weakest: 24-27s "let's get…" build with only captions (a list-build lockup would carry it)
 Assets: Lisa photo (Wikimedia, CC BY-SA 4.0, credit in handback)
 ```
