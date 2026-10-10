@@ -512,9 +512,13 @@ class ToolContext:
         local file or a URL ffmpeg range-reads, or None. Never stages a
         whole file on a keep write — the 16 kHz audio sidecar (a WAV seeks
         by byte offset), else a proxy this container already holds, else a
-        ranged read of the proxy. Resolved once per context."""
+        ranged read of the proxy. Resolved once per context (a presigned
+        URL again before it expires: an agent turn can outlive it)."""
         cached = getattr(self, "_cut_sound", False)
-        if cached is not False:
+        if cached is not False and (
+                not str(cached or "").startswith(("http://", "https://"))
+                or time.monotonic() - getattr(self, "_cut_sound_t", 0.0)
+                < CUT_SOUND_URL_TTL_S):
             return cached
         found = None
         if getattr(self, "has_main_video", False):
@@ -536,6 +540,7 @@ class ToolContext:
                 if found:
                     break
         self._cut_sound = found
+        self._cut_sound_t = time.monotonic()
         return found
 
     def latest_edl(self):
@@ -3111,6 +3116,9 @@ def _snap_choice(value):
 # cut edges (cut_audio): a ranged read of a few short windows. Past it the
 # write falls back to the transcript's word edges.
 CUT_SOUND_BUDGET_S = 15.0
+# A presigned sound URL (ToolContext.cut_sound_source, valid 1800 s) is
+# reused this long, then signed again.
+CUT_SOUND_URL_TTL_S = 1500.0
 
 
 def _audio_safe_keep(ctx, keep, prev_keep, words):
@@ -17736,12 +17744,29 @@ def _extend_to_end(edl, old_ends, new_end):
         if ended(item) and not item.get("anchor_insert"):
             item["end"] = round(new_end, 2)
             moved.append(str(item.get("id")))
+    for item in edl.get("vectors") or []:
+        if ended(item):
+            item["end"] = round(new_end, 3)
+            moved.append(str(item.get("id")))
     fx = edl.get("effects") or {}
     for z in fx.get("zooms") or []:
         if ended(z):
             z["end"] = round(new_end, 2)
             moved.append(str(z.get("id")))
+    # a windowed finish (grain, a vignette, a custom look) that ran to the
+    # end: the held frame keeps it, or the still would lose its grain
+    # mid-hold. A one-off event (a flash, a shake) keeps its moment.
+    for key in ("stylize", "custom"):
+        for item in fx.get(key) or []:
+            if ended(item) and item.get("start") is not None and \
+                    item.get("kind") not in _HOLD_EVENT_STYLES:
+                item["end"] = round(new_end, 3)
+                moved.append(str(item.get("id") or key))
     return moved
+
+
+# Stylize kinds that are a moment, not a finish: never stretched over a hold.
+_HOLD_EVENT_STYLES = ("flash", "shake", "motion_blur", "stabilize")
 
 
 def _hold_frame(ctx, edl, at, dur, dim, text=None, subtitle=None,
@@ -17856,7 +17881,7 @@ def _hold_frame(ctx, edl, at, dur, dim, text=None, subtitle=None,
 
 
 def add_freeze_frame(ctx, at_output_s, duration_s=None, text=None,
-                     subtitle=None, blur=0.0, darken=0.0, motion=None,
+                     subtitle=None, blur=0.0, darken=0.0, motion="zoom_in",
                      template="title", color=None, accent_color=None,
                      font=None, audio_mode="pause"):
     """FREEZE THE PICTURE on a moment and hold it — with an optional line of
@@ -17914,10 +17939,12 @@ def add_freeze_frame(ctx, at_output_s, duration_s=None, text=None,
         return _hold_frame(ctx, edl, at, min(dur, HOLD_MAX_S), darken,
                            text=text, subtitle=subtitle, template=template,
                            color=color, accent_color=accent_color, font=font,
-                           ignored=[n for n, v in (("blur", blur),
-                                                   ("motion", motion)) if v])
-    if motion is None:
-        motion = "zoom_in"          # the legacy freeze keeps its slow drift
+                           # the signature's drift is the legacy freeze's,
+                           # not something the caller asked of a hold
+                           ignored=[n for n, v in (
+                               ("blur", blur),
+                               ("motion", None if motion == "zoom_in"
+                                else motion)) if v])
     at = round(min(max(at, 0.0), max(0.0, prog - 0.05)), 2)
     tl = Timeline([list(k) for k in (edl.get("keep") or [])],
                   edl.get("inserts") or [], edl.get("speed") or [])

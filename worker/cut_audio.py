@@ -52,6 +52,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 
 REACH_S = 0.08          # how far an edge may move (the judges' ±80 ms)
 CROSSFADE_S = 0.012     # what renderer.JOIN_XFADE_S mixes at a cut
@@ -442,15 +443,21 @@ def _windows(times, duration=None):
 def fetch(source, windows, timeout=30.0, ffmpeg="ffmpeg"):
     """{(a, b): mono float32 samples at SR} for each window of ``source``
     (a local path or a URL ffmpeg can range-read). One ffmpeg process per
-    MAX_INPUTS windows; a window that fails to decode is left out."""
+    MAX_INPUTS windows; a window that fails to decode is left out.
+    ``timeout`` bounds the whole read, not each process: a keep write over
+    a slow remote file falls back to the transcript instead of stalling."""
     out = {}
     windows = list(windows)
     if not source or not windows:
         return out
     import numpy as np
+    deadline = time.monotonic() + float(timeout)
     tmp = tempfile.mkdtemp(prefix="cutaudio_")
     try:
         for k in range(0, len(windows), MAX_INPUTS):
+            left = deadline - time.monotonic()
+            if left <= 0.5:
+                break
             chunk = windows[k:k + MAX_INPUTS]
             cmd = [ffmpeg, "-v", "error", "-nostdin", "-y"]
             for a, b in chunk:
@@ -462,7 +469,7 @@ def fetch(source, windows, timeout=30.0, ffmpeg="ffmpeg"):
                 cmd += ["-map", f"{j}:a:0", "-ac", "1", "-ar", str(SR),
                         "-f", "f32le", p]
             try:
-                subprocess.run(cmd, capture_output=True, timeout=timeout,
+                subprocess.run(cmd, capture_output=True, timeout=left,
                                check=False)
             except Exception:
                 continue

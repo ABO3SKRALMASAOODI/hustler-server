@@ -1383,6 +1383,13 @@ def findings(res, plan_):
                      + (f"; drops '{' '.join(adv['drops'])}'" if adv.get("drops")
                         else "")
                      + ").")
+        if adv.get("drops"):
+            # a later start that loses the hook's first words is a worse
+            # hook than a blink: say what it costs
+            offer += (" That start cuts the hook's opening words — keep the "
+                      "current start unless the line still reads without "
+                      "them" + (" (frame 0 is open: a blink after it reads "
+                                "natural)." if a > 0 else "."))
         out.append(
             f"HOOK OPENS ON CLOSED EYES {_t(a, fps):.2f}-{_t(a + n, fps):.2f}s: "
             f"the speaker's eyes are closed for {n} frames of the opening the "

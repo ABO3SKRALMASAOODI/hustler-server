@@ -241,10 +241,34 @@ def test_a_context_without_sound_still_never_cuts_a_word():
 
 def test_a_story_seed_is_the_same_cut_within_the_audio_safe_reach():
     import shorts
-    assert shorts._same_story_cut([[10.02, 29.4]], ([[10.0, 29.33]],))
-    assert not shorts._same_story_cut([[10.0, 29.9]], ([[10.0, 29.33]],))
+    assert shorts._same_story_cut([[10.02, 29.4]], ([[10.0, 29.33]],), 30.0)
+    # the placement's tail reach and the camera-cut snap after it compound
+    # (0.25 s into a release, then pulled 6 frames off a cut): still the
+    # seed — refusing it failed the whole short
+    assert shorts._same_story_cut([[10.0, 29.78]], ([[10.0, 29.33]],), 30.0)
+    assert not shorts._same_story_cut([[10.0, 30.5]], ([[10.0, 29.33]],),
+                                      30.0)
     assert not shorts._same_story_cut([[10.0, 20.0], [21.0, 29.3]],
-                                      ([[10.0, 29.33]],))
+                                      ([[10.0, 29.33]],), 30.0)
+
+
+def test_the_sound_read_keeps_to_its_budget_in_total(monkeypatch):
+    # a keep write never stalls on a slow remote read: the budget bounds
+    # the whole read (not each ffmpeg call), and what it could not read
+    # falls back to the transcript's word edges
+    import types
+    clock, calls = [0.0], []
+
+    def stalled(cmd, capture_output=True, timeout=None, check=False):
+        calls.append(timeout)
+        clock[0] += timeout                     # a read that hangs to it
+    monkeypatch.setattr(cut_audio, "time",
+                        types.SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(cut_audio.subprocess, "run", stalled)
+    windows = [(float(k), k + 0.5) for k in range(cut_audio.MAX_INPUTS + 5)]
+    assert cut_audio.fetch("https://example.invalid/a.wav", windows,
+                           timeout=10.0) == {}
+    assert calls == [10.0]                      # the second chunk never ran
 
 
 # ── 4. the payoff hold ───────────────────────────────────────────────────
@@ -269,7 +293,7 @@ def test_a_hold_holds_the_composed_last_frame_over_room_tone(monkeypatch,
                                                             tmp_path):
     ctx = _hold_ctx(monkeypatch, tmp_path)
     res = agent_tools.add_freeze_frame(ctx, 9.2, audio_mode="hold",
-                                       darken=0.3, motion="zoom_in")
+                                       darken=0.3, motion="pan_left")
     assert res.startswith("EDL v"), res
     ins = ctx._edl["inserts"]
     assert len(ins) == 1 and ins[0]["kind"] == "image"
@@ -300,6 +324,84 @@ def test_a_second_hold_retimes_the_first(monkeypatch, tmp_path):
     # the payoff graphic follows the hold to the new end
     assert ctx._edl["motion"][0]["end"] == pytest.approx(10.6)
     assert before[0]["end"] == 9.2
+
+
+def test_a_hold_keeps_every_finish_that_ran_to_the_end():
+    edl = {"motion": [{"id": "m", "start": 7.0, "end": 9.2}],
+           "texts": [{"id": "t", "start": 8.0, "end": 9.2},
+                     {"id": "tb", "start": 8.0, "end": 9.2,
+                      "anchor_insert": "ins9"}],
+           "vectors": [{"id": "v", "start": 8.5, "end": 9.2}],
+           "effects": {"zooms": [{"id": "z", "start": 8.0, "end": 9.18}],
+                       "stylize": [{"id": "g", "kind": "grain",
+                                    "start": 2.0, "end": 9.2},
+                                   {"id": "f", "kind": "flash",
+                                    "start": 9.0, "end": 9.2},
+                                   {"id": "w", "kind": "vignette",
+                                    "start": None, "end": None}],
+                       "custom": [{"id": "c", "start": 5.0, "end": 9.21}]}}
+    moved = agent_tools._extend_to_end(edl, 9.2, 10.2)
+    assert sorted(moved) == ["c", "g", "m", "t", "v", "z"]
+    assert edl["vectors"][0]["end"] == 10.2
+    assert edl["effects"]["stylize"][0]["end"] == 10.2
+    # a flash is a moment, not a finish; a whole-programme look needs none
+    assert edl["effects"]["stylize"][1]["end"] == 9.2
+    assert edl["effects"]["stylize"][2]["end"] is None
+    assert edl["texts"][1]["end"] == 9.2
+
+
+def test_no_transition_lands_on_the_join_into_a_hold():
+    from timeline import transition_junctions
+    hold = {"id": "ins1", "asset_key": "k.png", "kind": "image",
+            "at_output_s": 9.0, "duration_s": 1.0, "hold": {}}
+    edl = {"keep": [[0.0, 5.0], [8.0, 12.0]], "inserts": [hold],
+           "effects": {"transition": {"style": "dip_black",
+                                      "duration_s": 0.3,
+                                      "scope": "every_cut"}}}
+    # blocks: seg, seg, hold — the join into the hold is the held frame
+    # itself, never a cut
+    assert transition_junctions(edl, {}) == {0}
+    still = dict(hold)
+    still.pop("hold")
+    assert transition_junctions(dict(edl, inserts=[still]), {}) == {0, 1}
+    edl["effects"]["transition"]["scope"] = "scene"
+    assert 1 not in transition_junctions(
+        edl, {"shots": [{"id": 0, "start": 0.0, "end": 100.0}]})
+
+
+def test_a_stitched_preview_never_reuses_a_hold_of_other_footage():
+    import stitch
+    from timeline import Timeline
+
+    def atoms(end):
+        edl = {"keep": [[0.0, end]], "inserts": [
+            {"id": "ins1", "asset_key": "k.png", "kind": "image",
+             "at_output_s": end, "duration_s": 1.0,
+             "hold": {"room_tone": [20.0, 21.0]}}]}
+        tl = Timeline(edl["keep"], edl["inserts"], [])
+        return [a for a in stitch.timeline_atoms(edl, tl) if a[2][0] == "ins"]
+    # restore_range on the last keep: the hold now stops a later frame, so
+    # its pixels cannot be copied from the previous preview
+    assert atoms(5.0)[0][2] != atoms(5.3)[0][2]
+    assert atoms(5.0)[0][2] == atoms(5.0)[0][2]
+
+
+def test_a_hold_after_a_short_reaction_gives_it_its_second():
+    import edit_review
+    words = [{"w": f"w{i}", "t0": 0.2 + 0.3 * i, "t1": 0.48 + 0.3 * i}
+             for i in range(100)]
+    edl = {"keep": [[0.0, 30.5], [33.0, 33.6]], "inserts": [], "speed": [],
+           "texts": [], "motion": [], "sfx": [], "music": [],
+           "frame": {"ratio": "9:16", "mode": "crop", "focus_x": 0.5},
+           "effects": {"grade": "warm", "zooms": []}}
+    codes = [n["code"] for n in edit_review.review(edl, {"words": words})]
+    assert "reaction_button_short" in codes
+    # the note's own fix: hold the reaction's last frame
+    edl["inserts"] = [{"id": "ins1", "asset_key": "k.png", "kind": "image",
+                       "at_output_s": 31.1, "duration_s": 0.6,
+                       "hold": {"room_tone": [31.0, 32.0]}}]
+    codes = [n["code"] for n in edit_review.review(edl, {"words": words})]
+    assert "reaction_button_short" not in codes
 
 
 def test_a_hold_mid_programme_sits_on_a_cut(monkeypatch, tmp_path):
@@ -433,6 +535,9 @@ def test_the_clean_start_is_offered_on_a_word_onset_never_applied():
                                plan)
     assert lines[0].startswith("HOOK OPENS ON CLOSED EYES 0.10-0.37s")
     assert "129.65" in lines[0] and "nothing was moved" in lines[0]
+    # a later start that drops the hook's first words says what it costs
+    assert "cuts the hook's opening words" in lines[0]
+    assert "frame 0 is open" in lines[0]
     lines = render_qc.findings({"hook_sound": [-18.0, -55.0]}, plan)
     assert lines[0].startswith("HOOK OPENS MID-SOUND")
 

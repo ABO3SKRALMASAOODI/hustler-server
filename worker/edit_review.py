@@ -1003,6 +1003,22 @@ def _reaction_shot(edl, index, prog):
                for span in (frame or {}).get("focus_track") or [])
 
 
+def _end_hold_s(edl, prog):
+    """Seconds of payoff hold (schemas.InsertItem.hold) spliced at the end
+    of the footage: the last kept frame held over room tone."""
+    try:
+        end = float(sum(prog.tl.seg_out_len))
+    except Exception:  # noqa: BLE001
+        return 0.0
+    out = 0.0
+    for item in edl.get("inserts") or []:
+        if isinstance(item, dict) and item.get("kind") == "image" and \
+                isinstance(item.get("hold"), dict) and \
+                abs(_f(item.get("at_output_s"), -1.0) - end) < 0.02:
+            out += _f(item.get("duration_s"))
+    return out
+
+
 def _payoff_notes(prog, payoff, ms=(), index=None, edl=None):
     notes = []
     dur = prog.duration
@@ -1085,7 +1101,9 @@ def _payoff_notes(prog, payoff, ms=(), index=None, edl=None):
             a, b = prog.keep[-1]
             inside = [w for w in prog.words
                       if a < (_f(_get(w, "t0")) + _f(_get(w, "t1"))) / 2.0 < b]
-            length = b - a
+            # a payoff hold after it (add_freeze_frame audio_mode='hold') is
+            # the reaction held on its own last frame: it counts
+            length = (b - a) + _end_hold_s(edl or {}, prog)
             if not inside and length < REACTION_MIN_S - 1e-6:
                 notes.append(_note(
                     "reaction_button_short", dur - length,
