@@ -369,3 +369,32 @@ def test_a_one_word_question_or_sentence_is_a_beat_not_an_orphan():
     chunks = captions._premium_chunks_v2(ws, 5, 26, p)
     page = next(c for c in chunks if any(w["w"] == "on." for w in c))
     assert page[-1]["w"] == "on." and len(page) > 1 and "Then" not in [w["w"] for w in page]
+
+
+def test_a_face_zone_mapped_past_a_card_window_never_blocks_the_canvas(monkeypatch):
+    # integration fix (round 7 showcase, Jobs): the face track mapped a zone
+    # to y 0.47-0.99 — off the bottom of a single card at y 0.30-0.68 (a
+    # padded face, or a false detection outside what the card frames). The
+    # card shows only its source rect, so the zone is not on screen below
+    # it; unclipped it took the band under the card and every caption
+    # climbed into the card over the speaker's hair.
+    card = {"id": "card", "start": 0.0, "end": 9.0, "box": [0.06, 0.304, 0.94, 0.676],
+            "entrance": "none", "exit": "none", "source": [0.28, 0.1, 0.85, 0.67]}
+    edl = _edl([card])
+    ix = _index()
+    head = (0.36, 0.41, 0.64, 0.56)
+    stray = (0.53, 0.47, 1.0, 0.99)
+    monkeypatch.setattr(caption_carry, "faces_over", lambda *a, **k: [head, stray])
+    p = _plan(edl, ix)
+    # the captions keep the canvas band under the card, never the card's top
+    assert all(st is None or st["y"] > 0.676 for _a, _b, st in p.segments), p.segments
+    assert not p.hidden
+    assert all(pl["y"] > 0.676 for pl in p.placed.values())
+    # the clipping itself: a zone keeps only what a window shows, a zone
+    # outside every window goes, and a full-frame stretch is left alone
+    rects = [tuple(card["box"])]
+    assert caption_carry._in_windows([stray], rects) == [(0.53, 0.47, 0.94, 0.676)]
+    assert caption_carry._in_windows([(0.1, 0.8, 0.5, 0.95)], rects) == []
+    assert caption_carry._in_windows([stray], []) == [stray]
+    clipped = caption_carry._chins([head, stray], rects)
+    assert max(z[3] for z in clipped) <= 0.676 + 1e-9

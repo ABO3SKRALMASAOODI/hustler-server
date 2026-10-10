@@ -903,6 +903,44 @@ def _off_content(faces, screens):
     return out or [FACE_PRIOR]
 
 
+def _in_windows(zones, rects):
+    """Zones on a card layout clipped to the card windows they show through
+    (picture_cards.card_boxes): a card shows only its source rect, so a face
+    zone mapped past a window's edge — padded by keepout.face_zone, a chin
+    pad, or a false detection outside what the card frames — is not on
+    screen there and never blocks the canvas around the card (Jobs: a zone
+    mapped to y 0.47-0.99, off the bottom of his card, took the band below
+    it, so every caption climbed into the card over his hair). A zone that
+    meets no window is dropped. With no window (a full-frame stretch) the
+    zones are returned as they are."""
+    if not rects:
+        return list(zones)
+    out = []
+    for z in zones:
+        for x0, y0, x1, y1 in rects:
+            c = (max(z[0], x0), max(z[1], y0), min(z[2], x1), min(z[3], y1))
+            if c[2] - c[0] > 1e-3 and c[3] - c[1] > 1e-3:
+                out.append(c)
+    return out
+
+
+def _card_faces(edl, index, tl, a, b, W, H, live, screens, rects):
+    """The face zones a caption keeps clear of over a card segment: the
+    faces over [a, b] less any on a stack's content panel, clipped to the
+    card windows (_in_windows), else the talking-head prior in each window."""
+    faces = _off_content(faces_over(edl, index, tl, a, _inside(a, b), W, H, live), screens)
+    if rects:
+        faces = [f for f in faces if f != FACE_PRIOR]
+        faces = _in_windows(faces, rects) or _prior_in_cards(rects)
+    return faces
+
+
+def _chins(faces, rects):
+    """caption_place.chin of each face, kept inside the windows it shows in."""
+    import caption_place
+    return _in_windows([caption_place.chin(f) for f in faces], rects)
+
+
 def _prior_in_cards(rects):
     """The talking-head prior (FACE_PRIOR) inside each card window: under a
     card the face is in a panel, never on the canvas around it."""
@@ -1128,25 +1166,19 @@ def plan(edl, index, tl, words, canvas=None):
         if (lcards or after) and not blocked:
             # a card layout: its edges and seams, the faces in its panels
             # and the watermark are no place for the usual anchor either
-            faces = _off_content(faces_over(edl, index, tl, a, _inside(a, b), W, H, live),
-                                 screens)
-            if faces == [FACE_PRIOR]:
-                faces = _prior_in_cards(rects)
+            faces = _card_faces(edl, index, tl, a, b, W, H, live, screens, rects)
             blocked = caption_place.hits(lo, hi, edges + screens + ([wm] if wm else []) +
-                                         [caption_place.chin(f) for f in faces], col)
+                                         _chins(faces, rects), col)
         if faces is not None:
-            info[k] = {"y": normal_y, "zones": hard + [caption_place.chin(f) for f in faces]}
+            info[k] = {"y": normal_y, "zones": hard + _chins(faces, rects)}
         if not blocked:
             prev_pick = None
             continue
         place = None
         if not assume:
             if faces is None:
-                faces = _off_content(faces_over(edl, index, tl, a, _inside(a, b), W, H, live),
-                                     screens)
-                if faces == [FACE_PRIOR] and rects:
-                    faces = _prior_in_cards(rects)
-            chins = [caption_place.chin(f) for f in faces]
+                faces = _card_faces(edl, index, tl, a, b, W, H, live, screens, rects)
+            chins = _chins(faces, rects)
             info[k] = {"y": normal_y, "zones": hard + chins}
             one_line = max(MIN_BAND_H * 0.75, caption_place.line_height(edl, W, H) * 1.15)
             pick = None

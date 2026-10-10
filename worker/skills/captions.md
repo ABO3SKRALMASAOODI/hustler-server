@@ -120,7 +120,9 @@ THE PLACEMENT SOLVER re-solves on the exact frames of every graphic, card
 and layout change (worker/caption_place.py): card and panel EDGES and the
 SEAMS between stacked panels, a stack's content panel (the screen, page or
 document it shows — no text set on text, unless no other band is free: a
-heard word is never lost for it), the face with its chin, props the index
+heard word is never lost for it), the face with its chin (on a card, only
+inside the window it shows through — the canvas around a card holds no
+face), props the index
 knows, every live graphic's box and the free-tier watermark's corner are
 hard no-go; a band shorter than ~1.4 caption lines is no band; the
 largest free band wins (a placement span you wrote, e.g. 'between the
