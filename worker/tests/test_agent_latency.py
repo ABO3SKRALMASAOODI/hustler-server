@@ -287,8 +287,11 @@ def test_post_plan_tool_catalog_keeps_capability_but_drops_repeated_handbook():
     # The compact catalog is resent on every agent turn. Parameter schemas
     # are not covered by the description ratio, so growth past this budget
     # must be a deliberate, reviewed decision. (Raised from 75 kB in Oct 2026
-    # for the motion-graphics, beat-planning and sound-library tools.)
-    assert compact_bytes < 82_000, (
+    # for the motion-graphics, beat-planning and sound-library tools; to 83 kB
+    # at the premium-motion integration for the conceal_jump_cuts tool, the
+    # one-reading-path caption contract, voice-levelled sound and inset
+    # panels, after trimming ~670 bytes of compact prose.)
+    assert compact_bytes < 83_000, (
         f"compact tool catalog is {compact_bytes} bytes; trim schemas or "
         "raise this budget deliberately")
 
