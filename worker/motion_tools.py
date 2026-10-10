@@ -25,6 +25,7 @@ import db as dbx
 import keepout
 import motion_engine
 import motion_layer
+import motion_look
 import motion_templates
 import sfx_mix
 import sound_library
@@ -552,12 +553,55 @@ def _attach_subject_matte(ctx, edl, item, bbox):
     if e - s < BEHIND_MIN_S:
         return None, (f"REJECTED: the window is under {BEHIND_MIN_S}s — too "
                       "short for anyone to pass in front of a graphic.")
-    behind, stats, err = _at()._measure_subject_matte(
-        ctx, edl, s, e, _matte_box(item, bbox), words=_BEHIND_WORDS)
+    box = _matte_box(item, bbox)
+    if box is None and item.get("template") != "html":
+        # no browser here (the agent, MCP and shorts lanes): the template's
+        # estimated box, so the crossing numbers are still measured
+        try:
+            est = keepout.nominal_ink(item["template"], motion_templates.spec(item["template"]),
+                                      item.get("params") or {}, frame=_canvas_size(ctx, edl))
+            box = _matte_box({}, est) if est else None
+        except Exception:  # noqa: BLE001
+            box = None
+    try:
+        behind, stats, err = _at()._measure_subject_matte(
+            ctx, edl, s, e, box, words=_BEHIND_WORDS)
+    except Exception as ex:  # noqa: BLE001 — storage or the executor failed
+        print(f"[motion] subject matte failed: {str(ex)[:200]}", flush=True)
+        return None, (f"REJECTED: the subject could not be measured here "
+                      f"({str(ex)[:160]}). Nothing was changed. "
+                      + _BEHIND_WORDS["refuse_alt"])
     if err:
         return None, err
+    if _tier(item.get("params")) == "hero":
+        # a giant word behind the speaker is only safe on a mask that holds
+        # the person: the photometric fallback loses a still speaker's face
+        # (it read 4% coverage on the Thiel lecture and the word crossed his
+        # eyes), so the hero tier takes the person model's mask or none
+        cov = float(stats.get("coverage") or behind.get("coverage") or 0.0)
+        method = stats.get("method") or behind.get("method")
+        if method == "plate" or stats.get("fell_back") or cov < HERO_MIN_COVERAGE:
+            why = ("only the photometric mask could be built, which loses a still speaker"
+                   if method == "plate" or stats.get("fell_back") else
+                   f"the subject covers only {cov * 100:.1f}% of the frame")
+            return None, f"REJECTED: no person mask a hero word can sit behind: {why}."
+        # ...and only where the render can composite it there (a crop that
+        # follows the speaker, a source-fed card): the renderer's own rules
+        try:
+            from timeline import Timeline
+            tl = Timeline(edl["keep"], edl.get("inserts") or [], edl.get("speed") or [])
+            off = motion_layer.behind_why(edl, tl, dict(item, behind=behind))
+        except Exception as ex:  # noqa: BLE001
+            off = f"its window could not be checked ({str(ex)[:120]})"
+        if off:
+            return None, f"REJECTED: the render could not set a hero word behind the speaker: {off}."
     item["behind"] = behind
     return _behind_report(stats, edl, item), None
+
+
+# A hero word goes behind the speaker only on a person-model mask that
+# covers at least this share of the frame on average over its window.
+HERO_MIN_COVERAGE = 0.08
 
 
 # ── face and safe-area keep-out (worker/keepout.py) ───────────────────────
@@ -837,11 +881,12 @@ def _keep_out(ctx, edl, item, rep):
 
 
 def _attach_reading(ctx, edl, item):
-    """Time a lockup (spec ``reads_phrase``) to the speech it shows before
-    it is probed and stored: its printed words land on their spoken onsets
-    (caption_carry.readings; the phrase's other words stay captioned beside
-    it). The renderer recomputes it for the program as it is then."""
-    if not caption_carry.reads_phrase(item):
+    """Time a word-timed item (spec ``reads_onsets``/``reads_phrase``: a
+    lockup, marker_text) to the speech it shows before it is probed and
+    stored: its printed words land on their spoken onsets
+    (caption_carry.readings; a lockup's phrase's other words stay captioned
+    beside it). The renderer recomputes it for the program as it is then."""
+    if not caption_carry.reads_onsets(item):
         item.pop("reading", None)
         return
     index = getattr(ctx, "index", None) or {}
@@ -861,8 +906,9 @@ def _attach_reading(ctx, edl, item):
         item.pop("reading", None)
 
 
-# A bridge line (one reading path) grows a lockup's estimated box
-# (caption_carry.bridged_box; the headline band's yield uses it too).
+# A stored bridge line grew a lockup's estimated box (caption_carry.
+# bridged_box); a lockup sets none since round 4 (LOCKUP_SETS_BRIDGES), so
+# this is the box itself for every reading written now.
 BRIDGE_LINE_H = caption_carry.BRIDGE_LINE_H
 BRIDGE_LINE_CHARS = caption_carry.BRIDGE_LINE_CHARS
 _bridged = caption_carry.bridged_box
@@ -1340,6 +1386,456 @@ def _number_landing(ctx, edl, item, prog):
     return changed, ("\n" + note if note else "")
 
 
+# ── the window: its first visible word and the cut (round 4 judging) ──────
+# Jobs' 'lisa' lockup started at 14.6 s but drew its first word at 14.99 s
+# ('paper': 32.34 -> 33.04), so the band above the card sat empty under an
+# invisible graphic. Thiel's thesis cleared at 20.45, the shot jumped at
+# 20.52 and the typewriter's plate arrived at 20.62: three events in 170 ms
+# read as choppy. The rules: a word-timed item's window starts on its first
+# visible word, and an entrance or exit within SNAP_CUT_S of a cut moves
+# onto the cut frame so the change is one event — never moving a
+# word-timed reveal off its word by more than that (caption_carry.
+# READING_SNAP_S shows a word that close after the window's start at the
+# start). A number graphic keeps its entrance on its spoken number
+# (number_reveal); only its exit snaps.
+SNAP_CUT_S = 0.15
+SNAP_SAY_S = 0.02            # a snap under a frame is made, not reported
+FIRST_WORD_MIN_S = 0.04
+SNAP_MIN_ITEM_S = 0.3
+
+
+def _program_cuts(ctx, edl):
+    """Program seconds where the picture changes: the timeline's cuts (keep
+    joins that skip source time, insert edges), the index's camera cuts
+    inside kept spans, and picture-card edges (a layout change)."""
+    cuts = set()
+    try:
+        import timeline as timeline_mod
+        tl = timeline_mod.Timeline(edl.get("keep") or [], edl.get("inserts") or [],
+                                   edl.get("speed") or [])
+        cuts.update(round(c, 3) for c in timeline_mod.cut_points(tl))
+        prog = float(tl.out_duration)
+        for sh in (getattr(ctx, "index", None) or {}).get("shots") or []:
+            try:
+                t = tl.src_to_out(float(sh["start"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+            if t is not None and 1e-3 < t < prog - 1e-3:
+                cuts.add(round(float(t), 3))
+        for cd in ((edl.get("effects") or {}).get("picture_cards") or []):
+            for k in ("start", "end"):
+                try:
+                    v = float(cd[k])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if 1e-3 < v < prog - 1e-3:
+                    cuts.add(round(v, 3))
+    except Exception as e:  # noqa: BLE001 — a snap never blocks a write
+        print(f"[motion] cut snap skipped: {str(e)[:160]}", flush=True)
+    return sorted(cuts)
+
+
+def _number_timed(item):
+    """A number graphic whose entrance lands on its spoken number."""
+    tpl = item.get("template")
+    if tpl == "counter":
+        return True
+    if tpl == "word_slam":
+        try:
+            import number_reveal
+            return bool(number_reveal._slam_figure((item.get("params") or {}).get("text")))
+        except Exception:  # noqa: BLE001
+            return False
+    return False
+
+
+def _shift_unspoken_at(item, d):
+    """Keep a lockup's unspoken rows on their program moment when its start
+    moves by +d seconds (their 'at' is item-relative)."""
+    rows = (item.get("params") or {}).get("rows")
+    if not isinstance(rows, list):
+        return
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        at = str(row.get("at") or "").strip()
+        if not at:
+            continue
+        try:
+            v = float(at)
+        except ValueError:
+            continue
+        row["at"] = f"{max(0.0, v - d):.3f}".rstrip("0").rstrip(".") or "0"
+
+
+def _last_reveal(item):
+    """Program second of a word-timed item's last reveal, or None."""
+    r = caption_carry.lockup_reveals(item) or caption_carry.onset_reveals(item)
+    if not r:
+        return None
+    return float(item["start"]) - float(item.get("phase_s") or 0.0) + max(r)
+
+
+def _on_first_word(ctx, edl, item):
+    """Start a word-timed item (a lockup, marker_text with a reading) on its
+    first visible word. Mutates ``item``; returns the reply line ('' when it
+    already starts there)."""
+    fr = caption_carry.first_reveal(item)
+    if fr is None or fr <= FIRST_WORD_MIN_S or item.get("phase_s"):
+        return ""
+    s, e = float(item["start"]), float(item["end"])
+    new_s = round(s + fr, 3)
+    if e - new_s < SNAP_MIN_ITEM_S:
+        return ""
+    item["start"] = new_s
+    _shift_unspoken_at(item, new_s - s)
+    _attach_reading(ctx, edl, item)
+    return (f"\nWINDOW: starts on its first visible word at {new_s:g}s, not {s:g}s — "
+            f"nothing of it showed for the first {new_s - s:.2f}s.")
+
+
+def _snap_to_cuts(ctx, edl, item, prog):
+    """Move an entrance or exit within SNAP_CUT_S of a cut onto the cut.
+    Mutates ``item``; returns the reply line ('' when nothing moved)."""
+    if motion_templates.persistent(item) or item.get("phase_s"):
+        return ""
+    cuts = _program_cuts(ctx, edl)
+    if not cuts:
+        return ""
+    s, e = float(item["start"]), float(item["end"])
+
+    def near(t):
+        c = min(cuts, key=lambda x: abs(x - t))
+        return c if 1e-3 < abs(c - t) <= SNAP_CUT_S + 1e-6 else None
+    bits = []
+    word_timed = caption_carry.reads_onsets(item)
+    c = near(s) if not _number_timed(item) else None
+    if c is not None and e - c >= SNAP_MIN_ITEM_S:
+        item["start"] = round(c, 3)
+        if word_timed:
+            _shift_unspoken_at(item, c - s)
+            _attach_reading(ctx, edl, item)
+        if abs(c - s) >= SNAP_SAY_S:
+            bits.append(f"entrance {s:g} → {c:g}s")
+    c = near(e)
+    s2 = float(item["start"])
+    if c is not None and c - s2 >= SNAP_MIN_ITEM_S and c <= prog + 1e-6:
+        last = _last_reveal(item) if word_timed else None
+        if last is None or c >= last + 0.1:
+            item["end"] = round(c, 3)
+            if abs(c - e) >= SNAP_SAY_S:
+                bits.append(f"exit {e:g} → {c:g}s")
+    if not bits:
+        return ""
+    return (f"\nCUT-SNAP: {' and '.join(bits)}, onto the cut so the change reads as one "
+            "event (never more than "
+            f"{SNAP_CUT_S:g}s off its word).")
+
+
+# ── type tiers: display (default), payoff, hero ──────────────────────────
+# Judged Oct 2026 (round 4): the strongest references set ONE hero word per
+# short at 20-30% of the frame height, behind the speaker's head; our
+# largest type (ENOUGH) was ~13%, laid over him. And the payoff ('140' alone,
+# plain white) was not the short's largest, accented lockup. word_slam's
+# ``tier``: 'hero' is the giant word, behind the subject by default (a
+# measured matte) and, where no matte can be had, drawn above the picture at
+# the display tier and kept off the face like any slam (the safe fallback);
+# 'payoff' locks the number and its noun up together in the accent.
+# Both are OPTIONAL: the agent reaches for them where the moment earns it.
+
+def _tier(params):
+    return str((params or {}).get("tier") or "display")
+
+
+def _hero_fallback(ctx, edl, item, why):
+    """Draw a hero word whose matte cannot be measured above the picture at
+    the display tier, re-probed and kept off the face. Mutates ``item``;
+    returns (error, where-note, reply line)."""
+    reason = " ".join(str(why or "").replace("REJECTED:", "").split())[:220].rstrip(" .")
+    item["layer"] = "above_captions"
+    item.pop("behind", None)
+    try:
+        item["params"] = motion_templates.check_params(
+            item["template"], dict(item.get("params") or {}, tier="display"),
+            html=item.get("html"))
+    except ValueError as e:
+        return f"REJECTED: {e}", "", ""
+    err, where, _bbox, rep = _probe_full(ctx, edl, item)
+    if err:
+        return err, "", ""
+    keep_note, moved = _keep_out(ctx, edl, item, rep)
+    return None, moved or where, (
+        "\nHERO FALLBACK: the hero tier sits behind the speaker, and it cannot go there "
+        f"here ({reason}). It is drawn above the picture at the display tier instead, kept "
+        "clear of the face." + keep_note)
+
+
+_HERO_OFF_NOTE = ("\nHERO: the hero tier is a word behind the speaker; on layer '{layer}' it "
+                  "would be a word up to 30% of the frame height over the picture, so it is a "
+                  "display slam. Leave layer unset for the hero.")
+
+
+def _store_hero_front(ctx, edl, item):
+    """Measure where a hero word that went behind the speaker would sit as
+    a face-safe display slam above the picture (the _hero_fallback placement,
+    on a copy) and store it on its mask (SubjectMatte.fallback): a render
+    that cannot composite it behind the subject draws it there
+    (motion_layer.hero_front) instead of a giant word over the face."""
+    if not item.get("behind"):
+        return
+    alt = json.loads(json.dumps(item))
+    alt.pop("behind", None)
+    alt.pop("footprint", None)
+    try:
+        err, _where, note = _hero_fallback(ctx, edl, alt, "")
+    except Exception as e:  # noqa: BLE001 — the render then leaves it out
+        print(f"[motion] hero fallback placement skipped: {str(e)[:160]}", flush=True)
+        return
+    if err or "NOTE (keep-out): it covered" in note:
+        # no face-safe place for it above the picture: the render leaves it
+        # out rather than draw it over the face
+        return
+    p = alt.get("params") or {}
+    place = {k: p[k] for k in ("x", "y", "width") if isinstance(p.get(k), (int, float))}
+    if place:
+        item["behind"] = dict(item["behind"], fallback=place)
+
+
+HERO_Y_DEFAULT = 0.3
+
+
+def _camera_at(ctx, edl):
+    """t -> (z, x0, y0): the shared camera's zoom and the top-left of its
+    viewport (frame fractions) at program second t (renderer.zoom_state_at
+    on the zooms as the render plays them). A behind_subject graphic is
+    composited BEFORE the zoom stage, so its frame fractions are pre-zoom:
+    a point p shows at (p - x0) * z."""
+    import renderer
+    from timeline import Timeline
+    tl = Timeline(edl["keep"], edl.get("inserts") or [], edl.get("speed") or [])
+    zooms = keepout.camera_zooms(edl, getattr(ctx, "index", None) or {}, tl)
+    size, dur = _canvas_size(ctx, edl), float(tl.out_duration)
+
+    def at(t):
+        z, cx, cy = renderer.zoom_state_at(zooms, t, dur, size=size)
+        z = max(1.0, float(z))
+        return z, (1.0 - 1.0 / z) * cx, (1.0 - 1.0 / z) * cy
+    return at
+
+
+def _hero_y(ctx, edl, item):
+    """Head height over the item's window (pre-zoom frame fraction, as a
+    behind_subject graphic is drawn): where a hero word behind the speaker
+    reads as depth — the head crosses the middle of its letters. The median
+    eye line of the largest face per moment, else HERO_Y_DEFAULT."""
+    try:
+        W, H = _canvas_size(ctx, edl)
+        track = keepout.face_track(edl, getattr(ctx, "index", None) or {}, W, H,
+                                   float(item["start"]), float(item["end"]),
+                                   measure=_face_measure(ctx)) \
+            if getattr(ctx, "has_main_video", True) else []
+        cam = _camera_at(ctx, edl) if track else None
+        ys = []
+        for t, faces in track:
+            if not faces:
+                continue
+            f = max(faces, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]))
+            z, _x0, y0 = cam(t)
+            # the face track is what the viewer sees (after the zoom)
+            ys.append(y0 + (f[1] + 0.42 * (f[3] - f[1])) / z)
+        ys.sort()
+        if ys:
+            return round(min(0.62, max(0.16, ys[len(ys) // 2])), 3)
+    except Exception as e:  # noqa: BLE001
+        print(f"[motion] hero height skipped: {str(e)[:160]}", flush=True)
+    return HERO_Y_DEFAULT
+
+
+# A hero word keeps this margin from the frame's sides once the camera's
+# zoom has scaled it (it is drawn before the zoom).
+HERO_EDGE = 0.03
+HERO_BAND = 0.94          # the band at width 0.85 (word_slam.html)
+
+
+def _hero_fit(ctx, edl, item):
+    """Narrow (and re-centre) a hero word behind the speaker so the camera's
+    zoom over its window never pushes its letters past the frame's sides:
+    the band must sit inside every moment's viewport, HERO_EDGE in. Mutates
+    item['params'] (width, x); returns the reply line ('' when it fits)."""
+    try:
+        cam = _camera_at(ctx, edl)
+        s, e = float(item["start"]), float(item["end"])
+        n = max(2, int((e - s) / 0.1) + 1)
+        lo, hi, zmax = 0.0, 1.0, 1.0
+        for i in range(n):
+            z, x0, _y0 = cam(s + (e - s) * i / (n - 1))
+            lo, hi, zmax = max(lo, x0 + HERO_EDGE / z), min(hi, x0 + (1.0 - HERO_EDGE) / z), max(zmax, z)
+        if zmax <= 1.005 or hi <= lo:
+            return ""
+        p = item.get("params") or {}
+        width = float(p.get("width") or 0.85)
+        x = float(p.get("x") or 0.5)
+        band = HERO_BAND * min(1.0, width / 0.85)
+        if x - band / 2 >= lo - 1e-4 and x + band / 2 <= hi + 1e-4:
+            return ""
+        band = min(band, hi - lo)
+        width = round(max(0.4, min(width, 0.85 * band / HERO_BAND)), 3)
+        band = HERO_BAND * width / 0.85
+        x = round(min(0.7, max(0.3, min(max(x, lo + band / 2), hi - band / 2))), 3)
+        item["params"] = dict(p, width=width, x=x)
+        return (f"\nHERO: the camera zooms to {zmax:.2f}x over its window and it is drawn "
+                f"before the zoom, so it is set narrower (width {width:g}, x {x:g}) to keep its "
+                "letters inside the frame.")
+    except Exception as ex:  # noqa: BLE001
+        print(f"[motion] hero fit skipped: {str(ex)[:160]}", flush=True)
+        return ""
+
+
+def _tier_notes(ctx, edl, item):
+    """Advisory lines for the hero and payoff tiers."""
+    tier = _tier(item.get("params"))
+    if tier not in ("hero", "payoff"):
+        return []
+    others = [m for m in edl.get("motion") or []
+              if isinstance(m, dict) and m.get("id") != item.get("id")
+              and not motion_templates.persistent(m)
+              and not str(m.get("template") or "").startswith("caption")]
+    out = []
+    if tier == "hero":
+        twin = [m["id"] for m in others if _tier(m.get("params")) == "hero"]
+        if twin:
+            out.append(f"NOTE (tier): '{twin[0]}' is already this short's hero word; the "
+                       "references set ONE per short. Make one of them a display slam.")
+        return out
+    try:
+        W, H = _canvas_size(ctx, edl)
+        ar = caption_carry.frame_ar(W, H)
+        mine = caption_carry.footprint_box(item, ar)
+        if not mine:
+            return out
+        h = mine[3] - mine[1]
+        taller = []
+        for m in others:
+            b = caption_carry.footprint_box(m, ar)
+            if b and (b[3] - b[1]) > h + 0.005 and m.get("layer") != "behind_subject":
+                taller.append((b[3] - b[1], m["id"]))
+        if taller:
+            th, tid = max(taller)
+            out.append(f"NOTE (payoff): '{item['id']}' draws {h:.2f} of the frame height but "
+                       f"'{tid}' draws {th:.2f} — the payoff is the short's largest lockup. "
+                       f"Widen it (width) or bring '{tid}' down.")
+    except Exception as e:  # noqa: BLE001
+        print(f"[motion] payoff check skipped: {str(e)[:160]}", flush=True)
+    return out
+
+
+# ── series: parallel graphics share one size (motion_look.series_runs) ────
+
+def _attach_series(edl, items):
+    """Hand every member of a parallel run its series (MotionItem.series on
+    the item dicts the probe builds from and the EDL stores). Returns each
+    item's series as it was before ({id: json})."""
+    before = {m.get("id"): json.dumps(m.get("series"), sort_keys=True)
+              for m in items or [] if isinstance(m, dict)}
+    try:
+        motion_look.attach_series(items)
+    except Exception as e:  # noqa: BLE001 — a series never blocks a write
+        print(f"[motion] series skipped: {str(e)[:160]}", flush=True)
+    return before
+
+
+def _series_refresh(edl, item, before=None):
+    """After the write: the run ``item`` belongs to, the stored boxes of the
+    siblings whose series changed marked for re-measuring (their size
+    follows the series), and the reply line."""
+    try:
+        items = edl.get("motion") or []
+        motion_look.attach_series(items)
+        for m in items:
+            # a sibling's size follows its series: a changed one is measured
+            # again before captions are placed around it
+            if isinstance(m, dict) and m.get("id") != item.get("id") \
+                    and isinstance(m.get("footprint"), dict) \
+                    and json.dumps(m.get("series"), sort_keys=True) \
+                    != (before or {}).get(m.get("id"), "null"):
+                m["footprint"] = dict(m["footprint"], estimated=True)
+        ser = item.get("series")
+        if not ser:
+            return ""
+        ids = ser.get("ids") or []
+        line = (f"\nSERIES: {', '.join(ids)} are one parallel run — they share one type size "
+                "per line, one baseline and one column, so no member's label jumps in size.")
+        mine = item.get("params") or {}
+        off = [m["id"] for m in items if isinstance(m, dict) and m.get("id") in ids
+               and m.get("id") != item.get("id")
+               and any(abs(float((m.get("params") or {}).get(k, 0) or 0)
+                           - float(mine.get(k, 0) or 0)) > 0.011 for k in ("y", "x", "width"))]
+        if off:
+            line += (f" NOTE (series): {', '.join(off)} sit at another y/x/width than "
+                     f"'{item['id']}'; give the run one placement.")
+        return line
+    except Exception as e:  # noqa: BLE001
+        print(f"[motion] series note skipped: {str(e)[:160]}", flush=True)
+        return ""
+
+
+def _look_notes(ctx, edl, item, filled):
+    """The Look lines: what the short's Look filled in, and the coherence
+    advisories (motion_look.coherence_notes) plus the tiers'."""
+    out = []
+    try:
+        if filled:
+            out.append("LOOK: from the short's Look: " + ", ".join(
+                f"{k} {v}" for k, v in sorted(filled.items())) + ".")
+        out += motion_look.coherence_notes(edl, item)
+        out += _tier_notes(ctx, edl, item)
+    except Exception as e:  # noqa: BLE001 — advice never blocks the write
+        print(f"[motion] look check skipped: {str(e)[:160]}", flush=True)
+    return "".join("\n" + n for n in out)
+
+
+# ── phrase_build hygiene ──────────────────────────────────────────────────
+# Cap a lockup at MAX_SIZE_LEVELS distinct row sizes: the closest pair (by
+# ratio) merges at its geometric mean until it fits. The page applies the
+# same merge (phrase_build.html) to an EDL written before this rule.
+MAX_SIZE_LEVELS = 3
+
+
+def size_levels(sizes, cap=MAX_SIZE_LEVELS):
+    """{size: level} mapping each row size (rounded to 0.01) onto at most
+    ``cap`` levels."""
+    vals = sorted({round(float(v), 2) for v in sizes if float(v) > 0})
+    lv = [(v, [v]) for v in vals]
+    while len(lv) > cap:
+        k = min(range(len(lv) - 1), key=lambda i: (lv[i + 1][0] / lv[i][0], i))
+        (a, ma), (b, mb) = lv[k], lv[k + 1]
+        lv[k:k + 2] = [(round((a * b) ** 0.5, 2), ma + mb)]
+    return {m: v for v, ms in lv for m in ms}
+
+
+def _cap_size_levels(item):
+    """Merge a phrase_build's row sizes down to MAX_SIZE_LEVELS (in place);
+    returns the reply line."""
+    if item.get("template") != "phrase_build":
+        return ""
+    rows = (item.get("params") or {}).get("rows") or []
+    sizes = []
+    for r in rows:
+        try:
+            sizes.append(min(4.0, max(0.2, float(str(r.get("size") or 1)))))
+        except (TypeError, ValueError):
+            sizes.append(1.0)
+    if len({round(v, 2) for v in sizes}) <= MAX_SIZE_LEVELS:
+        return ""
+    lv = size_levels(sizes)
+    before = [f"{v:g}" for v in sizes]
+    for r, v in zip(rows, sizes):
+        r["size"] = f"{lv[round(v, 2)]:g}"
+    return (f"\nSIZES: {len(set(before))} size levels ({', '.join(before)}) merged to "
+            f"{MAX_SIZE_LEVELS} ({', '.join(r['size'] for r in rows)}): a lockup reads as a "
+            "designed ladder up to 3 sizes, a pile past that.")
+
+
 # ── the persistent headline band (motion_templates.persistent) ────────────
 # Judged Oct 2026: in card and letterbox layouts the band above the picture
 # sat empty for 5-6 s stretches between hero lockups; the references keep a
@@ -1572,8 +2068,7 @@ def _band_spill_note(ctx, edl, item, bbox=None):
     """For an ordinary graphic set in the free band above a picture card or a
     letterboxed picture (headline_band — the band the standing headline
     holds): a NOTE when it spills out of that band, down onto the top of the
-    picture (a lockup grown by its one-reading-path bridge lines touching
-    the card) or up into the feed header. Advisory; '' otherwise. A box
+    picture (a tall lockup touching the card) or up into the feed header. Advisory; '' otherwise. A box
     that is only the template's estimate (the browserless agent, MCP and
     shorts lanes) is that much less certain: it is named only past the
     estimate's own error (BAND_SPILL_EST_TOL), and the note says so."""
@@ -1621,8 +2116,7 @@ def _band_spill_note(ctx, edl, item, bbox=None):
 # picture; it spills when it crosses the band's edges by more than this.
 BAND_SPILL_MIN_IN = 0.02
 BAND_SPILL_TOL = 0.004
-# A browserless estimate (keepout.nominal_ink, a lockup's grown by its
-# bridge lines) misses a lockup's real edges by up to ~0.05 of the frame
+# A browserless estimate (keepout.nominal_ink) misses a lockup's real edges by up to ~0.05 of the frame
 # height either way (the showcase lockups: Jobs hook 0.033, paper 0.04,
 # Thiel thesis 0.048, all too tall): only a spill past that is named, or
 # every band lockup in a production lane would be told to shrink.
@@ -1651,10 +2145,23 @@ def add_motion_graphic(ctx, template, start, end=None, params=None, html=None,
         except ValueError:
             return "REJECTED: params must be a JSON object."
     try:
-        clean = motion_templates.check_params(template, params or {}, html=html)
+        motion_templates.check_params(template, params or {}, html=html)
     except ValueError as e:
         return f"REJECTED: {e}"
     edl = json.loads(json.dumps(ctx.latest_edl()["json"]))
+    # one type system: an accent (ink, font role) the editor did not pass
+    # comes from the short's Look, never from the template's own default
+    look_fill = {}
+    try:
+        look_fill = motion_look.look_defaults(edl, template, spec, params or {})
+    except Exception as e:  # noqa: BLE001 — the Look never blocks a write
+        print(f"[motion] look defaults skipped: {str(e)[:160]}", flush=True)
+    try:
+        clean = motion_templates.check_params(template, dict(look_fill, **(params or {})),
+                                              html=html)
+    except ValueError:
+        look_fill = {}
+        clean = motion_templates.check_params(template, params or {}, html=html)
     prog = _program_duration(edl)
     if prog <= 0.3:
         return "REJECTED: there is no program yet — place footage first, then add motion graphics."
@@ -1677,9 +2184,17 @@ def add_motion_graphic(ctx, template, start, end=None, params=None, html=None,
         mid = str(id)
     else:
         mid = at._next_item_id(items, "mg")
-    layer = layer or spec.get("layer") or "above_captions"
+    hero = _tier(clean) == "hero"
+    hero_y = hero and "y" not in (params or {})
+    layer = layer or ("behind_subject" if hero else None) or spec.get("layer") or "above_captions"
     if layer not in LAYERS:
         return f"REJECTED: layer must be one of {', '.join(LAYERS)}."
+    hero_note = ""
+    if hero and layer != "behind_subject":
+        # the hero tier is a word BEHIND the speaker; above the picture it
+        # would be a word up to 30% of the frame height over the face
+        clean, hero, hero_y = dict(clean, tier="display"), False, False
+        hero_note = _HERO_OFF_NOTE.format(layer=layer)
     item = {"id": mid, "template": template, "start": s, "end": e, "params": clean,
             "layer": layer}
     if template == "html":
@@ -1704,11 +2219,19 @@ def add_motion_graphic(ctx, template, start, end=None, params=None, html=None,
         if sfx:
             band_note += "\nNOTE: a persistent headline is silent; sfx ignored."
             sfx = False
+    if hero_y:
+        # a hero word sits at head height (the head crosses its letters)
+        item["params"] = dict(item["params"], y=_hero_y(ctx, edl, item))
     # a number completes on its spoken word (may move the window or set 'land');
-    # a lockup's reading is timed on the window as it lands
+    # a lockup's reading is timed on the window as it lands; a word-timed
+    # window starts on its first visible word and an edge near a cut snaps
     _landed, number_note = _number_landing(ctx, edl, item, prog)
-    s, e = item["start"], item["end"]
+    size_note = _cap_size_levels(item)
     _attach_reading(ctx, edl, item)
+    window_note = _on_first_word(ctx, edl, item) + _snap_to_cuts(ctx, edl, item, prog)
+    s, e = item["start"], item["end"]
+    fit_note = _hero_fit(ctx, edl, item) if hero else ""
+    series_before = _attach_series(edl, items + [item])
     err, where, bbox, rep = _probe_full(ctx, edl, item)
     if err:
         return err
@@ -1718,9 +2241,21 @@ def add_motion_graphic(ctx, template, start, end=None, params=None, html=None,
     if layer == "behind_subject":
         behind_note, err = _attach_subject_matte(ctx, edl, item, bbox)
         if err:
-            return err
+            if not hero:
+                return err
+            # the hero tier's safe fallback: no usable matte here, so the
+            # word is drawn above the picture at the display tier and kept
+            # clear of the face like any slam
+            err, where, behind_note = _hero_fallback(ctx, edl, item, err)
+            if err:
+                return err
+            layer = item["layer"]
+        elif hero:
+            _store_hero_front(ctx, edl, item)
+            hero_note += fit_note
     items.append(item)
     edl["motion"] = items
+    series_note = _series_refresh(edl, item, series_before)
     notes = []
     cues = _sfx_cues(spec, clean, s, e, seed=mid, with_dur=True) if (SFX_DEFAULT if sfx is None else sfx) else []
     if cues:
@@ -1732,10 +2267,12 @@ def add_motion_graphic(ctx, template, start, end=None, params=None, html=None,
         return res
     tail = (_yield_report(ctx, edl, item) if persistent
             else _band_note(ctx, edl, item) + _band_spill_note(ctx, edl, item, bbox))
-    return (res + where + band_note + keep_note + clamp + number_note
+    return (res + where + band_note + keep_note + clamp + number_note + size_note
+            + window_note + series_note + hero_note
             + (f"\nNOTE: {'; '.join(notes)}" if notes else "")
             + _owned_sfx_checks(ctx, edl, mid)
-            + behind_note + tail + _caption_integrity_notes(ctx, edl, item))
+            + behind_note + tail + _caption_integrity_notes(ctx, edl, item)
+            + _look_notes(ctx, edl, item, look_fill))
 
 
 def _owned_sfx_checks(ctx, edl, mid):
@@ -1795,6 +2332,18 @@ def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
         if layer not in LAYERS:
             return f"REJECTED: layer must be one of {', '.join(LAYERS)}."
         hit["layer"] = layer
+    elif _tier(hit["params"]) == "hero" and _tier(json.loads(old_shape)[3]) != "hero":
+        # a word made the hero sits behind the speaker by default (falls
+        # back above the picture when no matte can be measured), at head
+        # height unless a y is passed
+        hit["layer"] = "behind_subject"
+        if "y" not in (params or {}):
+            hit["params"] = dict(hit["params"], y=_hero_y(ctx, edl, hit))
+    hero_note = ""
+    if _tier(hit["params"]) == "hero" and hit.get("layer") != "behind_subject":
+        # the hero tier is a word BEHIND the speaker (see add_motion_graphic)
+        hit["params"] = dict(hit["params"], tier="display")
+        hero_note = _HERO_OFF_NOTE.format(layer=hit.get("layer") or "above_captions")
     if box is not None:
         hit["box"] = box or None
     if mute_captions is not None:
@@ -1821,11 +2370,17 @@ def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
             band_note += "\nNOTE: a persistent headline is silent; sfx ignored."
             sfx = False
     # a number completes on its spoken word (may move the window or set 'land');
-    # a lockup's reading is timed on the window as it lands
+    # a lockup's reading is timed on the window as it lands; a word-timed
+    # window starts on its first visible word and an edge near a cut snaps
     old_land = (hit.get("params") or {}).get("land")
     _landed, number_note = _number_landing(ctx, edl, hit, prog)
     relanded = (hit.get("params") or {}).get("land") != old_land
+    size_note = _cap_size_levels(hit)
     _attach_reading(ctx, edl, hit)
+    window_note = _on_first_word(ctx, edl, hit) + _snap_to_cuts(ctx, edl, hit, prog)
+    fit_note = (_hero_fit(ctx, edl, hit)
+                if _tier(hit["params"]) == "hero" and hit.get("layer") == "behind_subject" else "")
+    series_before = _attach_series(edl, items)
     err, where, bbox, rep = _probe_full(ctx, edl, hit)
     if err:
         return err
@@ -1845,10 +2400,24 @@ def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
             # a framing set_frame has since replaced is measured again.
             behind_note, err = _attach_subject_matte(ctx, edl, hit, bbox)
             if err:
-                return err
+                if _tier(hit.get("params")) != "hero":
+                    return err
+                # a hero word whose new window has no usable matte: the
+                # safe fallback (above the picture, display tier, face-safe)
+                err, where, behind_note = _hero_fallback(ctx, edl, hit, err)
+                if err:
+                    return err
+            elif _tier(hit.get("params")) == "hero":
+                _store_hero_front(ctx, edl, hit)
+        elif _tier(hit.get("params")) == "hero" \
+                and not (hit.get("behind") or {}).get("fallback"):
+            _store_hero_front(ctx, edl, hit)
+        if hit.get("layer") == "behind_subject":
+            hero_note += fit_note
     else:
         hit.pop("behind", None)
     edl["motion"] = items
+    series_note = _series_refresh(edl, hit, series_before)
     owned = [s for s in (edl.get("sfx") or []) if str(s.get("id", "")).startswith(_owned_sfx_prefix(id))]
     notes = []
     tspec = motion_templates.spec(hit["template"])
@@ -1875,10 +2444,12 @@ def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
         return res
     tail = (_yield_report(ctx, edl, hit) if persistent
             else _band_note(ctx, edl, hit) + _band_spill_note(ctx, edl, hit, bbox))
-    return (res + where + band_note + keep_note + number_note
+    return (res + where + band_note + keep_note + number_note + size_note
+            + window_note + series_note + hero_note
             + (f"\nNOTE: {'; '.join(notes)}" if notes else "")
             + (_owned_sfx_checks(ctx, edl, id) if checked else "")
-            + (behind_note or "") + tail + _caption_integrity_notes(ctx, edl, hit))
+            + (behind_note or "") + tail + _caption_integrity_notes(ctx, edl, hit)
+            + _look_notes(ctx, edl, hit, {}))
 
 
 def remove_motion_graphic(ctx, id):
@@ -1888,6 +2459,10 @@ def remove_motion_graphic(ctx, id):
         have = ", ".join(m.get("id", "?") for m in edl.get("motion") or []) or "none"
         return f"REJECTED: no motion graphic '{id}'. Existing: {have}."
     edl["motion"] = items
+    # the run it belonged to is re-derived: a sibling's size follows its
+    # series, so a changed one is measured again
+    _series_refresh(edl, {"id": id}, {m.get("id"): json.dumps(m.get("series"), sort_keys=True)
+                                      for m in items if isinstance(m, dict)})
     edl["sfx"] = [s for s in (edl.get("sfx") or []) if not str(s.get("id", "")).startswith(_owned_sfx_prefix(id))]
     return ctx.write_edl(edl, f"removed motion graphic {id} and its sound cues")
 
@@ -1954,7 +2529,21 @@ TOOL_SPECS = {
         "transcript (the write sets its `land`; a 'reveal' starts there; a count with no room "
         "to roll starts on the lead-in) and a word_slam whose hero is a figure ('32%', '$1.2B'; "
         "not a name like 'GPT-4') moves onto it — the reply says NUMBER LANDED, and NOTEs a "
-        "count that rolls through the setup or a moved window that now overlaps a neighbour.",
+        "count that rolls through the setup or a moved window that now overlaps a neighbour. "
+        "THE WINDOW: a word-timed graphic (phrase_build, marker_text over a spoken line) "
+        "starts on its first visible word (WINDOW), and an entrance or exit within 0.15 s of "
+        "a cut moves onto the cut frame so the change is one event (CUT-SNAP; never more than "
+        "0.15 s off its word; a number's entrance stays on its number). ONE TYPE SYSTEM: an "
+        "accent/color you do not pass comes from the short's Look (the captions' highlight "
+        "colour, else the accent its graphics wear; LOOK in the reply), and the reply NOTEs "
+        "(look) a second accent, a fourth type role or broadcast furniture in an editorial "
+        "Look, with the fix. phrase_build sets only its rows (at most 4, at most 3 sizes: "
+        "SIZES); back-to-back slams of one style are a SERIES sharing one size per line. "
+        "TIERS (word_slam tier, optional): 'payoff' locks a number and its noun up in the "
+        "accent ('*140* / characters') — the short's largest lockup (NOTE (payoff) names a "
+        "taller one); 'hero' is ONE giant word per short, behind the speaker by default on a "
+        "measured person matte, drawn as a face-safe display slam above the picture when no "
+        "person matte can be had (HERO FALLBACK).",
         {"template": _TEMPLATE_PARAM, "start": {"type": "number"}, "end": {"type": "number"},
          "params": _PARAMS_PARAM, "html": {"type": "string"},
          "layer": {"type": "string", "enum": list(LAYERS)},
@@ -1972,8 +2561,10 @@ TOOL_SPECS = {
         "changes is re-measured against its new footage. Every patch re-runs the face and "
         "safe-area keep-out (see add_motion_graphic): a y that would cover the face is moved "
         "and reported; allow_face_overlap=true keeps it (false clears that). A number "
-        "graphic is re-landed on its spoken number like add_motion_graphic. Modify instead "
-        "of removing and re-adding.",
+        "graphic is re-landed on its spoken number like add_motion_graphic; the window, "
+        "cut-snap, size, series, tier and Look checks re-run too (a word made tier='hero' "
+        "goes behind the speaker unless layer is passed). Modify instead of removing and "
+        "re-adding.",
         {"id": {"type": "string"}, "start": {"type": "number"}, "end": {"type": "number"},
          "params": _PARAMS_PARAM, "html": {"type": "string"}, "template": {"type": "string"},
          "layer": {"type": "string", "enum": list(LAYERS)},

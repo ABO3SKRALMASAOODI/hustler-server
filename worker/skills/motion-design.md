@@ -87,12 +87,28 @@ CHOOSING A TEMPLATE — confirm names and params with `list_motion_templates()`:
   `word_slam` for one hero word on its spoken onset (the most common hero
   moment); `phrase_build` for a short lockup assembled word by word on
   onsets (rows quote the transcript; the engine lands each spoken word on
-  its onset and sets the phrase's words the rows leave out as small lines
-  between them); `glow_title` for a luminous keyword on dark or night footage.
-- Reveal grammar: `typewriter` for a typed prompt, definition or terminal
-  line (25–40 chars/s with a cursor; the first key and its plate land on the
-  item's first frame, so start it on the word; `typing` sound under it when it is
-  sounded); `text_scramble` for
+  its onset; at most 4 rows in at most 3 sizes — a 4th size is merged and
+  the reply says SIZES; the words the rows leave out stay with the
+  captions); `glow_title` for a luminous keyword on dark or night footage.
+- Type tiers (`word_slam` `tier`, optional — only where the moment earns
+  it): `payoff` is the short's closing lockup, the number and its noun
+  locked up together in the accent (`'*140* / characters'`, justified) —
+  make it the largest lockup of the short (the reply NOTEs a taller one);
+  `hero` is ONE giant word per short (a line up to 30% of the frame height
+  on a short word) set BEHIND the speaker: the write measures a person
+  matte and, when it cannot (a cut in the window, no person model, a still
+  speaker the photometric mask loses, a crop that follows the speaker),
+  draws it as a display slam above the picture, clear of the face, and says
+  HERO FALLBACK; a later edit that stops it going behind renders that same
+  face-safe slam, never the giant word over the face. It is placed at head
+  height so the head crosses the middle of the letters, and narrowed under a
+  camera zoom (it is drawn before the zoom) so no letter leaves the frame.
+- Reveal grammar: `typewriter` only as a band-wide hero — type at least 5%
+  of the frame height on a plate spanning the band, a few short words that
+  ARE the beat (never a small label: a small mono line on a pill reads like
+  a code tooltip; 25–40 chars/s with a cursor; the first key and its plate
+  land on the item's first frame, so start it on the word; `typing` sound
+  under it when it is sounded); `text_scramble` for
   a decode reveal (secrets, tech, "the answer is…"); `marker_text` for a
   highlighter sweep behind the key phrase.
 - Layout: `headline` is the PERSISTENT claim headline of a card or
@@ -139,7 +155,9 @@ CHOOSING A TEMPLATE — confirm names and params with `list_motion_templates()`:
   `style='reveal'` — no count, the whole number hard-cuts on at the word; a
   word_slam whose hero is a figure ('32%', not a name like 'GPT-4') is moved so it lands on the word too. A rapid run of spoken stats as one `word_slam` each with
   `fit='justify'` and the figure over its label (`'*32%* / fewer errors'`,
-  pop entrance on the figure's onset); `stat_card` for a metric plus its meaning; `bar_compare` for
+  pop entrance on the figure's onset) — back-to-back slams of one style are
+  a SERIES: they share one size per line, one baseline and one column (the
+  reply says SERIES; give the run one y/x/width); `stat_card` for a metric plus its meaning; `bar_compare` for
   2–4 spoken quantities; `line_chart` for a spoken trend; `progress_ring`
   for a spoken percentage or completion. Numbers come from the transcript
   or a verified source only.
@@ -168,6 +186,18 @@ CHOOSING A TEMPLATE — confirm names and params with `list_motion_templates()`:
   These go ON a real junction; one library sound may peak on it when the
   turn earns it (read transitions).
 
+ONE TYPE SYSTEM PER SHORT (the Look): one accent colour — the captions'
+highlight colour when the Look set one — on every graphic, and at most three
+type roles (grotesk, condensed, serif, script, mono, hand) across the short.
+A graphic added without `accent` (or `color`) takes the short's; a font role
+the editor did not choose that would be a fourth role is swapped for one the
+short uses. The reply NOTEs (look) a second accent, a fourth role, a
+broadcast `clean_bar` lower third or a highlighter `marker_text` in an
+editorial Look, each with its fix — advisory, never a rejection. Accent words
+the picture under them would sink (a thin red italic over a charcoal shirt)
+are lifted toward white at render time, keeping the hue; on a plate where
+they read nothing changes.
+
 CUING TO THE WORD:
 - Find the onset as above, then set `start` so the template's LANDING
   frame falls 0–3 frames (0–0.1 s) before it. A template's description in
@@ -178,6 +208,13 @@ CUING TO THE WORD:
 - `end` is when the moment releases: usually at the next phrase or the next
   leader, rarely more than 2.5 s for a hero word. Omit it to use the
   template's natural duration.
+- The write tidies the window: a word-timed graphic (`phrase_build`,
+  `marker_text` on a spoken line) starts on its first visible word (WINDOW),
+  and an entrance or exit within 0.15 s of a cut moves onto the cut so the
+  change reads as one event (CUT-SNAP) — never more than 0.15 s off its
+  word; a number's entrance stays on its spoken number. `marker_text` over a
+  spoken line reveals each word on its onset and draws a run's mark once it
+  has been said.
 - Pass `purpose` naming the word or event ("slam on 'garbage' at 14.2 s")
   and a stable `id` so later passes can `set_motion_graphic` it.
 - Rhythm across the reel: aim for a visual change every 0.3–0.6 s (word
@@ -199,7 +236,8 @@ LAYERING AND CAPTIONS:
   it shows included — beside it, in a band clear of its drawn box, the face
   and any card layout. A `phrase_build` no longer sets the phrase's other
   words in small type between its rows (the judged 6-line piles): keep its
-  rows to the words that matter (2 tiers for a payoff) and the captions carry
+  rows to the words that matter (at most 4 rows in at most 3 sizes; 2 tiers
+  for a payoff) and the captions carry
   the rest; the reply names them and, where it does not make a flash under
   0.8 s, the end that keeps the graphic to its own words. Design for it: keep
   hero graphics OFF the caption band (top band, beside or above the head,

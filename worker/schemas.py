@@ -2074,6 +2074,11 @@ class MotionItem(BaseModel):
     allow_face_overlap: Optional[bool] = None
     footprint: Optional["MotionFootprint"] = None
     reading: Optional[dict] = None
+    # A parallel run's shared sizing (worker/motion_look.attach_series;
+    # written by the engine at write time and before every render, never by
+    # hand): {"texts": the members' texts in order, "i": this member's
+    # index, "ids": the members' ids}. A stitched piece keeps its own.
+    series: Optional[dict] = None
 
     @model_validator(mode="before")
     @classmethod
@@ -2096,7 +2101,31 @@ class MotionItem(BaseModel):
             data["footprint"] = _clean_footprint(data["footprint"])
         if data.get("reading") is not None:
             data["reading"] = _clean_reading(data["reading"])
+        if data.get("series") is not None:
+            data["series"] = _clean_series(data["series"])
         return data
+
+
+def _clean_series(sr):
+    """A usable series (see MotionItem.series) or None: an unusable one is
+    dropped (the engine derives it again), never rejected."""
+    if not isinstance(sr, dict):
+        return None
+    texts = sr.get("texts")
+    ids = sr.get("ids") or []
+    if not isinstance(texts, list) or not 2 <= len(texts) <= 8 \
+            or not all(isinstance(t, str) for t in texts):
+        return None
+    try:
+        i = int(sr.get("i"))
+    except (TypeError, ValueError):
+        return None
+    if not 0 <= i < len(texts):
+        return None
+    out = {"texts": [t[:120] for t in texts], "i": i}
+    if isinstance(ids, list) and len(ids) == len(texts):
+        out["ids"] = [str(x)[:80] for x in ids]
+    return out
 
 
 def _clean_reading(rd):
@@ -2220,6 +2249,27 @@ class SubjectMatte(BaseModel):
     # on the canvas, so the renderer drops the depth when this no longer
     # matches. None on masks written before the stamp existed (unchecked).
     geom: Optional[str] = None
+    # A hero word's (word_slam tier='hero') face-safe placement as a display
+    # slam above the picture ({"x", "y", "width"} frame fractions), measured
+    # by its write: where the render cannot composite it behind the subject
+    # it draws there (motion_layer.hero_front), never as a giant word over
+    # the face. None for every other item.
+    fallback: Optional[dict] = None
+
+    @field_validator("fallback", mode="before")
+    @classmethod
+    def _fallback_in(cls, v):
+        if not isinstance(v, dict):
+            return None
+        out = {}
+        for k, lo, hi in (("x", 0.0, 1.0), ("y", 0.0, 1.0), ("width", 0.05, 1.0)):
+            try:
+                f = float(v[k])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if f == f and lo <= f <= hi:
+                out[k] = round(f, 4)
+        return out or None
 
 
 def subject_matte_geom(frame):

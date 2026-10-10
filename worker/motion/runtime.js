@@ -300,6 +300,44 @@
     if (have > 0) need = need <= have ? 0 : 1 - (1 - need) / (1 - have);
     return clamp(need, 0, 0.9);
   };
+  /** '#RRGGBB' mixed toward white by k (0-1): same hue, lighter. */
+  MG.lift = (col, k) => {
+    const m = String(col || '').trim().match(/^#([0-9a-f]{6})$/i);
+    if (!m) return col;
+    const n = parseInt(m[1], 16), f = c => Math.round(c + (255 - c) * clamp(k, 0, 1));
+    return '#' + [n >> 16 & 255, n >> 8 & 255, n & 255].map(c => f(c).toString(16).padStart(2, '0')).join('').toUpperCase();
+  };
+  /** APCA |Lc| of luminance Lt on Lb. */
+  MG.apca = (Lt, Lb) => {
+    const soft = Y => (Y < 0.022 ? Y + Math.pow(0.022 - Y, 1.414) : Y);
+    const t = soft(Math.max(0, Lt)), b = soft(Math.max(0, Lb));
+    if (b > t) { const S = (Math.pow(b, 0.56) - Math.pow(t, 0.57)) * 1.14; return S < 0.1 ? 0 : (S - 0.027) * 100; }
+    const S = (Math.pow(b, 0.65) - Math.pow(t, 0.62)) * 1.14;
+    return S > -0.1 ? 0 : -(S + 0.027) * 100;
+  };
+  MG.DARK_PLATE = 0.12;
+  MG.LIT_PLATE = 0.7;
+  /** The accent as it reads on the plate (README: MG.accentInk). */
+  MG.accentInk = (rect, accent, o = {}) => {
+    const out = { color: accent, lifted: 0, short: false };
+    const pl = MG.plateAt(rect, o.t0, o.t1);
+    if (!pl || pl.mean <= MG.DARK_PLATE) return out;
+    const lc = o.lc || 35, max = o.max ?? 0.6;
+    const keep = 1 - clamp(+o.have || 0, 0, 0.95);
+    const bg = toLin(pl.mean * keep);
+    // lifting toward white only helps an accent brighter than the plate:
+    // where the plate is as bright as the accent, or its bright part is lit
+    // (a lit wall, a projector screen around a head), a paler accent just
+    // washes out into it — the template's pocket / dark-ink pass handles it
+    if (bg >= MG.luminance(accent) || pl.hi * keep >= MG.LIT_PLATE) return out;
+    const reads = c => MG.apca(MG.luminance(c), bg) >= lc;
+    if (reads(accent)) return out;
+    for (let k = 0.04; k <= max + 1e-9; k += 0.04) {
+      const c = MG.lift(accent, k);
+      if (MG.luminance(c) > bg && reads(c)) return { color: c, lifted: +k.toFixed(2), short: false };
+    }
+    return { color: MG.lift(accent, max), lifted: max, short: true };
+  };
   /** Contrast a translucent dark panel (glass card, pill, plate) aims for
    *  over a bright plate: about what the same glass shows over dark footage,
    *  so it stays dark glass instead of turning into a muddy grey card. */

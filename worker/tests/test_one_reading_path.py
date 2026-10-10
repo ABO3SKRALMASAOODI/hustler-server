@@ -351,10 +351,13 @@ def test_a_paraphrased_row_is_named_in_the_write_note():
                                           params={"rows": rows}, id="list")
     assert "row 2 \"supersonic jets\" prints 'jets'" in out, out
     stored = edl["motion"][0]
-    # the stored item carries its reading (rows on onsets, no bridge rows:
-    # "aviation" is captioned beside it)
-    assert stored["reading"]["rows"][0] == [0.2]
+    # the stored item carries its reading (rows on onsets; no bridge lines:
+    # "aviation" stays with the captions). Its window starts on its first
+    # visible word ("rockets" at 0.2 s), so the rows are timed from there.
+    assert stored["start"] == pytest.approx(0.2)
+    assert stored["reading"]["rows"][0] == [0.0]
     assert stored["reading"]["bridges"] == []
+    assert "WINDOW: starts on its first visible word at 0.2s" in out, out
     del m
 
 
@@ -387,6 +390,27 @@ def test_but_and_so_are_captioned_beside_the_lockup():
     ix = _index(words)
     tl = Timeline(edl["keep"])
     assert [w["w"] for w in captions.caption_words(edl, ix, tl)] == ["but", "not", "quite"]
+
+
+def test_a_lockup_sets_no_bridge_lines_its_skipped_words_are_captioned():
+    # the Thiel list: 'the Green Revolution agriculture' between two rows
+    # used to become a 1.3%-of-frame bridge line; it is captioned now
+    words = [("rockets", 0.2, 0.6), ("and", 0.6, 0.7), ("the", 0.8, 0.9),
+             ("Green", 0.9, 1.1), ("Revolution", 1.1, 1.5), ("agriculture", 1.5, 2.0),
+             ("and", 2.0, 2.1), ("new", 2.1, 2.3), ("medicines.", 2.3, 2.9)]
+    rows = [{"text": "ROCKETS"}, {"text": "NEW *MEDICINES*"}]
+    m = {"id": "list", "template": "phrase_build", "start": 0.0, "end": 3.2,
+         "params": {"rows": rows},
+         "footprint": {"box": [0.1, 0.5, 0.9, 0.62], "ar": round(1080 / 1920, 4), "faces": []}}
+    edl = _edl([[0.0, 4.0]], [m], words=words)
+    ix = _index(words)
+    tl = Timeline(edl["keep"])
+    rd = caption_carry.readings(edl, ix, tl)["list"]
+    assert rd["bridges"] == []
+    shown = [w["w"] for w in captions.caption_words(edl, ix, tl)]
+    assert ["the", "Green", "Revolution", "agriculture"] == \
+        [w for w in shown if w in ("the", "Green", "Revolution", "agriculture")]
+    assert not caption_carry.sound_off_gaps(edl, ix, tl)
 
 
 def test_mute_true_and_false_keep_their_contracts_and_still_time_the_rows():
@@ -503,26 +527,38 @@ def test_unspoken_rows_reveal_in_reading_order_within_their_at_times():
 
 
 @needs_browser
-def test_spoken_rows_land_on_their_onsets_and_bridges_sit_between_rows():
+def test_spoken_rows_land_on_their_onsets_and_old_bridges_are_not_drawn():
+    # a reading stored before round 4 still names bridge lines: the page sets
+    # only the rows (the captions carry the rest)
     reading = {"v": 1, "rows": [[0.7, 0.92, 1.28], [3.28, 3.5, 3.66], [3.9, 4.2]],
                "bridges": [{"after": 0, "words": [{"t": t, "s": 1.6 + 0.1 * i} for i, t in
-                                                  enumerate("three or four years from now".split())]},
-                           {"after": 2, "words": [{"t": "of", "s": 4.36}, {"t": "these", "s": 4.46},
-                                                  {"t": "things", "s": 4.58}]}]}
+                                                  enumerate("three or four years from now".split())]}]}
     job = _job(PAPER_ROWS, reading, end=5.3, y=0.3)
     st = asyncio.run(_states(job, [0.65, 0.95, 1.65, 3.3, 4.5, 5.2]))
-    kinds = [r["bridge"] for r in st[-1]]
-    assert kinds == [False, True, False, False, True]       # reading order in the block
+    assert [r["bridge"] for r in st[-1]] == [False, False, False]
     assert st[0][0]["words"] == [0, 0, 0]                    # 'at' 0.7: nothing before the onset
     assert st[1][0]["words"] == [1, 1, 0]                    # "no college" at 0.7 / 0.92
-    assert st[2][1]["words"][:1] == [1] and st[2][2]["words"] == [0, 0, 0]
-    assert st[3][2]["words"] == [1, 0, 0]
-    assert st[4][4]["words"] == [1, 1, 0] and st[5][4]["words"] == [1, 1, 1]
+    assert st[2][1]["words"] == [0, 0, 0]
+    assert st[3][1]["words"] == [1, 0, 0] and st[3][2]["words"] == [0, 0]
+    assert st[5][2]["words"] == [1, 1]
     # pre-laid-out: nothing moves while words land
     assert [r["top"] for r in st[0]] == [r["top"] for r in st[-1]]
-    # bridges are small type, smaller than every row
-    rows_fs = [r["fs"] for r in st[-1] if not r["bridge"]]
-    assert all(r["fs"] < min(rows_fs) for r in st[-1] if r["bridge"])
+
+
+@needs_browser
+def test_a_lockup_merges_more_than_three_sizes_into_three():
+    rows = [{"text": "ROCKETS", "role": "condensed", "size": "1.2", "at": "0"},
+            {"text": "supersonic aviation", "role": "serif", "size": "0.8", "at": "0.1"},
+            {"text": "underwater cities", "role": "sans", "size": "0.75", "at": "0.2"},
+            {"text": "NEW *MEDICINES*", "role": "condensed", "size": "1.0", "at": "0.3"}]
+    st = asyncio.run(_states(_job(rows, end=2.0), [1.5]))[0]
+    # rows 2 and 3 (0.8 serif, 0.75 sans) share one level: their optical
+    # sizes keep the role ratio (serif 1.1, sans 1.0), nothing else changes
+    fs = [r["fs"] for r in st]
+    assert fs[1] / fs[2] == pytest.approx(1.1, rel=0.01)
+    assert fs[0] / fs[3] == pytest.approx(1.2, rel=0.01)
+    assert motion_tools.size_levels([1.2, 0.8, 0.75, 1.0]) == \
+        {1.2: 1.2, 0.8: 0.77, 0.75: 0.77, 1.0: 1.0}
 
 
 @needs_browser

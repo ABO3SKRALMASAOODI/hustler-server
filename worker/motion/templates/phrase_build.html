@@ -1,8 +1,8 @@
 <!--MG-SPEC {"title": "Phrase build", "category": "type",
- "description": "A pre-laid-out typographic lockup (up to 4 rows mixing sans, serif, script, condensed and mono at a 2:1-7:1 size ladder, rows stacked as tight as their measured glyphs allow without touching) whose words appear IN PLACE as they are spoken - the block never reflows. Use it for a key sentence instead of captions: quote the transcript in the rows and place the block in face-free space with x/y/width/align. Words reveal in reading order: a spoken row's words land on their spoken onsets (the engine times them from the transcript; 'at' is the fallback for rows nobody says). While it is up it owns the phrase it shows: captions yield from its first shown word, and the phrase's words the rows leave out are set in small type between the rows, each on its onset.",
+ "description": "A pre-laid-out typographic lockup (up to 4 rows in at most 3 sizes, mixing sans, serif, script, condensed and mono at a 2:1-7:1 size ladder, rows stacked as tight as their measured glyphs allow without touching) whose words appear IN PLACE as they are spoken - the block never reflows. Use it for a key sentence instead of captions: quote the transcript in the rows and place the block in face-free space with x/y/width/align. Words reveal in reading order: a spoken row's words land on their spoken onsets (the engine times them from the transcript; 'at' is the fallback for rows nobody says), and its window starts on its first visible word. It sets only its rows: the phrase's words the rows leave out stay with the captions. More than 3 distinct row sizes merge into 3.",
  "duration": 3.0, "layer": "above_captions", "mutes_captions": true, "reads_phrase": true,
  "params": {
-  "rows": {"type": "rows", "required": true, "fields": ["text", "role", "size", "accent", "at"], "max_items": 4, "max": 48, "hint": "up to 4 rows in reading order: text (the speaker's exact words); role sans|serif|script|condensed|mono; size relative (e.g. 0.5, 1, 1.6; ladder up to 7:1); accent '1' tints the row (or *star* single words); at = row reveal time in item seconds for a row nobody says (blank = right after the previous row) - spoken rows land on their spoken onsets"},
+  "rows": {"type": "rows", "required": true, "fields": ["text", "role", "size", "accent", "at"], "max_items": 4, "max": 48, "hint": "up to 4 rows in reading order: text (the speaker's exact words); role sans|serif|script|condensed|mono; size relative (e.g. 0.5, 1, 1.6; ladder up to 7:1; at most 3 distinct sizes); accent '1' tints the row (or *star* single words); at = row reveal time in item seconds for a row nobody says (blank = right after the previous row) - spoken rows land on their spoken onsets"},
   "align": {"type": "enum", "values": ["left", "center", "right"], "default": "center"},
   "x": {"type": "float", "min": 0.15, "max": 0.85, "default": 0.5, "hint": "horizontal centre of the block's column (frame fraction)"},
   "y": {"type": "float", "min": 0.12, "max": 0.8, "default": 0.56, "hint": "vertical centre of the block (frame fraction)"},
@@ -56,42 +56,29 @@
 
   // ── build every row in its final place (hidden words keep their space) ──
   // The engine's reading (MotionItem.reading): per row, per word, the
-  // second its spoken word starts (null: not said), and the phrase's other
-  // words as small bridge lines after a row - one reading path.
+  // second its spoken word starts (null: not said). The lockup sets only its
+  // rows: the phrase's words they leave out stay with the captions (round 4:
+  // small bridge lines grew lockups into 6-line piles in 5 sizes).
   const RD = (P._reading && typeof P._reading === 'object') ? P._reading : null;
   const RDrows = (RD && Array.isArray(RD.rows)) ? RD.rows : [];
-  const RDbridges = (RD && Array.isArray(RD.bridges)) ? RD.bridges : [];
   // a 'rise' word fades in over 80 ms: it starts that much ahead of its
   // spoken onset so it is readable ON the word (pop and ghost show on it)
   const LAND = P.entrance === 'rise' ? 0.06 : 0;
   const onset = v => { const n = v == null ? null : num(v, null); return n == null ? null : Math.max(0, n - LAND); };
-  const BR = { css: `'Inter Display','Inter',sans-serif`, weight: 600, style: 'normal', track: '-0.01em', lh: 1.08, gap: 0, opt: 1 };
+  // at most 3 distinct row sizes: the closest pair (by ratio) merges at its
+  // geometric mean until 3 are left (motion_tools.size_levels does the same
+  // at write time; this keeps an older EDL's lockup a 3-size ladder)
+  const r2 = v => Math.round(v * 100) / 100;
+  const sizes = (P.rows || []).slice(0, 4).map(r => r2(Math.min(4, Math.max(0.2, num(r.size, 1)))));
+  let LV = [...new Set(sizes)].sort((a, b) => a - b).map(v => ({ v, m: [v] }));
+  while (LV.length > 3) {
+    let k = 0;
+    for (let i = 1; i < LV.length - 1; i++) if (LV[i + 1].v / LV[i].v < LV[k + 1].v / LV[k].v - 1e-9) k = i;
+    const a = LV[k], b = LV[k + 1];
+    LV.splice(k, 2, { v: r2(Math.sqrt(a.v * b.v)), m: a.m.concat(b.m) });
+  }
+  const level = v => { const l = LV.find(x => x.m.includes(r2(v))); return l ? l.v : v; };
   const rows = [];
-  const bridgeRows = after => RDbridges.filter(b => Number(b.after) === after).forEach(b => {
-    const el = MG.el('div', 'row bridge', null, blk);
-    Object.assign(el.style, { fontFamily: BR.css, fontWeight: BR.weight, fontStyle: BR.style,
-      letterSpacing: BR.track, lineHeight: BR.lh, color: P.color, whiteSpace: 'normal',
-      width: 'auto', textWrap: 'balance' });
-    const ws = (b.words || []).filter(w => String(w.t || '').trim());
-    // spaces between the words: a bridge line wraps inside the column, but
-    // never inside a name or a number and its noun (g: glued to the next;
-    // a glued run sits in one no-wrap group)
-    let grp = null;
-    const words = ws.map((w, j) => {
-      if (j) (grp || el).appendChild(document.createTextNode(' '));
-      if (w.g && !grp) {
-        grp = MG.el('span', 'glue', null, el);
-        grp.style.whiteSpace = 'nowrap';
-      }
-      const sp = MG.el('span', 'mg-w', String(w.t), grp || el);
-      sp.style.marginRight = '0';
-      if (!w.g) grp = null;
-      return sp;
-    });
-    if (words.length) rows.push({ el, R: BR, words, size: 0, bridge: true, at: '', known: ws.map(w => onset(w.s)) });
-    else el.remove();
-  });
-  bridgeRows(-1);
   (P.rows || []).slice(0, 4).forEach((r, i) => {
     const want = String(r.role || 'sans').toLowerCase();
     const name = ROLE[want] ? want : 'sans';
@@ -101,18 +88,18 @@
       letterSpacing: R.track, lineHeight: R.lh, color: truthy(r.accent) ? P.accent : P.color });
     const words = MG.starWords(r.text).map(({ t, acc }) => {
       const w = MG.el('span', 'mg-w', t, el);
-      if (acc) w.style.color = P.accent;
+      if (acc) { w.style.color = P.accent; w.dataset.acc = '1'; }
       return w;
     });
+    if (truthy(r.accent)) words.forEach(w => { w.dataset.acc = '1'; });
     // 'size' is optical: a 1.0 script row reads as big as a 1.0 sans row
     if (words.length) {
       const k = Array.isArray(RDrows[i]) ? RDrows[i] : [];
-      rows.push({ el, R, words, size: Math.min(4, Math.max(0.2, num(r.size, 1))) * R.opt,
+      rows.push({ el, R, words, size: level(Math.min(4, Math.max(0.2, num(r.size, 1)))) * R.opt,
         at: String(r.at ?? '').trim(), known: words.map((_, j) => onset(k[j])) });
     } else el.remove();
-    bridgeRows(i);
   });
-  const authored = rows.filter(r => !r.bridge);
+  const authored = rows;
   // reveal times, in READING order: a spoken row's words land on their
   // spoken onsets (a word nobody says lands with the one before it); a row
   // nobody says uses its 'at' (blank: right after the previous row) with
@@ -144,7 +131,6 @@
 
   // ── layout: one base scale for the whole ladder ──
   let lastFs = 40;
-  const GROW = 1.3;
   const layout = () => {
     if (!authored.length) return;
     const colW = Math.min(P.width * W, W - 120);
@@ -154,34 +140,29 @@
     const hUnit = authored.reduce((a, r) => a + 100 * r.size * r.R.lh, 0);
     const maxSize = Math.max(...authored.map(r => r.size));
     // widest row fills the column; the block stays under ~52% of the frame height
-    // and the biggest row under ~20% FH (bridge lines wrap inside the column)
+    // and the biggest row under ~20% FH
     let k = Math.min(colW / wUnit, 0.52 * H / hUnit, 0.2 * H / (100 * maxSize));
     // the column is placed first: rows only collide where their glyphs share a column
     blk.style.width = colW + 'px';
     blk.style.left = (cx - colW / 2) + 'px';
     blk.style.alignItems = P.align === 'left' ? 'flex-start' : P.align === 'right' ? 'flex-end' : 'center';
     blk.style.textAlign = P.align;
-    const sizeRows = (kk, bfs) => {
-      authored.forEach(r => { r.fs = 100 * r.size * kk; });
+    const sizeRows = (kk) => {
       rows.forEach((r, i) => {
-        if (r.bridge) { r.fs = bfs; r.el.style.maxWidth = (0.92 * colW) + 'px'; }
-        const fs = r.fs;
+        const fs = r.fs = 100 * r.size * kk;
         r.el.style.fontSize = fs + 'px';
         const a1 = r.R.thin ? 0.42 : 0.28, a2 = r.R.thin ? 0.55 : 0.42;
         r.el.style.textShadow = `0 ${(fs * 0.015).toFixed(1)}px ${(fs * 0.05).toFixed(1)}px rgba(0,0,0,${a1}), 0 ${(fs * 0.03).toFixed(1)}px ${(fs * 0.16).toFixed(1)}px rgba(0,0,0,${a2})`;
-        // negative leading / tucks: a script row dips into the row below it;
-        // a bridge line sits in clear space between its rows
+        // negative leading / tucks: a script row dips into the row below it
         if (i > 0) {
           const prev = rows[i - 1];
-          r.el.style.marginTop = (r.bridge || prev.bridge) ? (0.18 * bfs) + 'px'
-            : (prev.R.gap * prev.fs - 0.02 * Math.min(prev.fs, fs)) + 'px';
+          r.el.style.marginTop = (prev.R.gap * prev.fs - 0.02 * Math.min(prev.fs, fs)) + 'px';
         }
       });
     };
-    // glyph-aware leading: keep the designed tightness, but push a row (or a
-    // bridge line) down just enough that no glyph of it comes near a glyph of
-    // the row above in the same column (descenders onto caps, a swash onto
-    // the next row)
+    // glyph-aware leading: keep the designed tightness, but push a row down
+    // just enough that no glyph of it comes near a glyph of the row above in
+    // the same column (descenders onto caps, a swash onto the next row)
     const clearRows = () => {
       if (P.leading === 'overlap') return;
       rows.forEach((r, i) => {
@@ -191,35 +172,12 @@
         if (need > 0.25) r.el.style.marginTop = (parseFloat(r.el.style.marginTop) + need) + 'px';
       });
     };
-    const fit = (kk, b) => { sizeRows(kk, b); clearRows(); };
-    // bridge lines: small type, about half the smallest row, readable on a phone
-    const bfsOf = kk => Math.min(0.04 * H, Math.max(0.024 * H, 0.45 * 100 * kk * Math.min(...authored.map(r => r.size))));
-    let bfs = bfsOf(k);
-    fit(k, bfs);
-    const bridges = rows.filter(r => r.bridge);
-    // the block's height without its bridge lines (the designed ladder)
-    const bare = () => {
-      bridges.forEach(r => { r.el.style.display = 'none'; });
-      const h = blk.getBoundingClientRect().height;
-      bridges.forEach(r => { r.el.style.display = ''; });
-      return h;
-    };
+    const fit = kk => { sizeRows(kk); clearRows(); };
+    fit(k);
     if (P.leading !== 'overlap') {
       // the pushed ladder still keeps the ~52% height budget
-      const h0 = bare();
-      if (h0 > 0.52 * H) { k *= 0.52 * H / h0; bfs = bfsOf(k); fit(k, bfs); }
-    }
-    if (bridges.length) {
-      // the lockup keeps about the footprint it was designed at: bridge lines
-      // may add GROW of its height, beyond that the whole ladder scales down
-      const hb = blk.getBoundingClientRect().height;
-      const h0 = bare();
-      if (h0 > 0 && hb > GROW * h0) {
-        const f = Math.max(0.55, GROW * h0 / hb);
-        k *= f;
-        bfs = Math.max(0.022 * H, bfs * f);
-        fit(k, bfs);
-      }
+      const h0 = blk.getBoundingClientRect().height;
+      if (h0 > 0.52 * H) { k *= 0.52 * H / h0; fit(k); }
     }
     lastFs = Math.max(...rows.map(r => r.fs));
     const h = blk.getBoundingClientRect().height;
@@ -243,7 +201,18 @@
       const b = r.el.getBoundingClientRect();
       r.rect = [b.left, b.top, b.right, b.bottom];
       const body = r.R.thin || r.fs < 0.06 * H;
-      r.need = MG.need(r.rect, { ink: P.color, ratio: body ? 4.5 : 3, t0: r.t0, t1: D, have: 0.3 * 0.8 * (P.scrim || 0) });
+      const have = 0.3 * 0.8 * (P.scrim || 0);
+      r.need = MG.need(r.rect, { ink: P.color, ratio: body ? 4.5 : 3, t0: r.t0, t1: D, have });
+      // the accent words as they read on this plate (MG.accentInk): a thin
+      // serif or script accent needs APCA Lc 45, a heavy one 35; unchanged
+      // on a plate where it already reads
+      const acc = r.words.filter(w => w.dataset.acc);
+      if (acc.length) {
+        const ar = MG.rectOf(acc);
+        const res = ar ? MG.accentInk(ar, P.accent, { lc: r.R.thin ? 45 : 35, t0: r.t0, t1: D, have }) : null;
+        acc.forEach(w => { w.style.color = res ? res.color : P.accent; });
+        if (res && res.short) r.need = Math.max(r.need, MG.need(ar, { ink: res.color, ratio: r.R.thin ? 4.5 : 3, t0: r.t0, t1: D, have }));
+      }
     });
     const need = Math.max(0, ...rows.map(r => r.need));
     if (need > 0) {

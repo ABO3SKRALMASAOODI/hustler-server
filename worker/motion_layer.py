@@ -321,15 +321,34 @@ def headline_visible(item, items, W, H):
 
 
 def prepare_inputs(edl, workdir, W, H, fps, out_duration, args, next_idx,
-                   fetch_asset=None, extra_items=None, plate=None):
+                   fetch_asset=None, extra_items=None, plate=None, behind_why=None):
     """Render motion clips and append ffmpeg inputs. Returns (inputs, next_idx)
     with inputs = [(input_index, item, RenderedClip)]. ``extra_items`` are
     renderer-synthesized items (the motion caption track); ``plate`` is the
-    renderer's plate probe (worker/plate.Probe) or None."""
+    renderer's plate probe (worker/plate.Probe) or None. ``behind_why(item)``
+    says why a behind_subject item cannot composite behind the subject here
+    (None when it can): a hero word that cannot is drawn as its face-safe
+    display slam instead (hero_front), decided before anything renders."""
     LAST_WARNINGS.clear()
     items = list(extra_items or []) + program_items(edl, out_duration)
+    if behind_why is not None:
+        swapped = []
+        for item in items:
+            if is_hero(item):
+                try:
+                    why = behind_why(item)
+                except Exception as e:  # noqa: BLE001 — never the render
+                    why = f"its mask could not be checked ({str(e)[:120]})"
+                if why:
+                    item = hero_front(item, why)
+                    if item is None:
+                        continue
+            swapped.append(item)
+        items = swapped
     if not items:
         return [], next_idx
+    import motion_look
+    motion_look.attach_series(items)
     plates = measure_plates(items, plate)
     asset_locals = {}
     jobs, kept = [], []
@@ -403,7 +422,17 @@ def demote(item, why):
     """A behind_subject item drawn as an ordinary above-captions graphic.
 
     The words-behind contract, applied to graphics: losing the depth is a
-    disappointment, losing the graphic (or the render) is a broken product."""
+    disappointment, losing the graphic (or the render) is a broken product.
+    A hero word (is_hero) is the exception: its clip was drawn as the giant
+    word at head height, so above the picture it would cover the face —
+    it is not drawn (None). The renderer swaps a hero it can tell will not
+    composite for its face-safe display slam BEFORE drawing it
+    (prepare_inputs' behind_why, hero_front); only a mask that fails to
+    download after that lands here."""
+    if is_hero(item):
+        warn(f"hero word '{item.get('id')}' not drawn: it cannot sit behind the "
+             f"subject ({why}), and drawn above the picture it would cover the face")
+        return None
     msg = (f"motion '{item.get('id')}' rendered above the picture instead of "
            f"behind the subject: {why}")
     print(f"[render] {msg}", flush=True)
@@ -413,10 +442,79 @@ def demote(item, why):
 
 def demote_behind(inputs, why):
     """``inputs`` with every behind_subject item demoted (a render path
-    that has no behind-subject stage, e.g. a canvas program)."""
-    return [(idx, demote(item, why), clip)
-            if item.get("layer") == "behind_subject" else (idx, item, clip)
-            for idx, item, clip in inputs or []]
+    that has no behind-subject stage, e.g. a canvas program); a hero clip
+    that cannot be demoted safely is left out (demote)."""
+    out = []
+    for idx, item, clip in inputs or []:
+        if item.get("layer") == "behind_subject":
+            item = demote(item, why)
+            if item is None:
+                continue
+        out.append((idx, item, clip))
+    return out
+
+
+# ── the hero tier off its subject (word_slam tier='hero') ─────────────────
+# A hero word is set up to 30% of the frame height at head height so the
+# speaker's head crosses it. Drawn above the picture it would sit across
+# the face — the owner's top complaint — so wherever the render cannot
+# composite it behind the subject it becomes the face-safe display slam its
+# write measured (SubjectMatte.fallback), or is not drawn at all.
+
+def is_hero(item):
+    """A behind_subject word_slam in the hero tier."""
+    return (isinstance(item, dict) and item.get("layer") == "behind_subject"
+            and str((item.get("params") or {}).get("tier") or "") == "hero")
+
+
+def hero_front(item, why):
+    """``item`` (a hero, is_hero) as the display slam above the picture at
+    the face-safe placement its write stored, or None (not drawn) when it
+    has none."""
+    fb = (item.get("behind") or {}).get("fallback")
+    if isinstance(fb, dict) and fb:
+        place = {k: fb[k] for k in ("x", "y", "width") if k in fb}
+        warn(f"hero word '{item.get('id')}' drawn as a display slam above the picture, "
+             f"clear of the face, instead of behind the subject: {why}")
+        return dict(item, layer="above_captions", behind=None,
+                    params=dict(item.get("params") or {}, tier="display", **place))
+    warn(f"hero word '{item.get('id')}' not drawn: it cannot sit behind the subject "
+         f"({why}) and has no face-safe placement stored (set_motion_graphic re-measures it)")
+    return None
+
+
+def behind_why(edl, tl, item, geom_now=None):
+    """Why the behind_subject ``item`` cannot composite behind the subject
+    in this program (None when it can, the mask download aside) — the
+    renderer's rules: the mask is one continuous 1x clip of its source span
+    in the framing it was measured in."""
+    import follow
+    import picture_cards
+    from schemas import subject_matte_geom
+    b = item.get("behind") or {}
+    if not b:
+        return "it carries no subject mask"
+    a_src, b_src = float(b["src_start"]), float(b["src_end"])
+    pieces = tl.span_to_out(a_src, b_src)
+    if not pieces:
+        return "its footage is no longer in the edit"
+    if len(pieces) > 1:
+        return "a cut now falls inside its window"
+    ramp = tl.ramp_over(a_src, b_src)
+    if ramp:
+        # The mask is one 1x clip of source frames; a ramp shortens (or
+        # stretches) that footage's program window, so the trimmed mask
+        # would slide off the subject.
+        return f"speed ramp {ramp[0]} now covers its footage"
+    if geom_now is None:
+        geom_now = subject_matte_geom(edl.get("frame"))
+    if b.get("geom") and b["geom"] != geom_now:
+        return "the framing changed since its mask was measured"
+    if picture_cards.overlaps_source_card(edl, pieces):
+        return "a source-fed picture card re-frames its footage"
+    if follow.moves_during(edl, [(a_src, b_src)]):
+        return "the crop follows the speaker across its footage"
+    return None
 
 
 def caption_mute_spans(edl):
@@ -471,12 +569,24 @@ def fill_footprints(edl, W, H, fps=30.0, index=None, tl=None):
     behaviour for it (a graphic that says the line is assumed to sit on the
     captions).
 
-    With the program's ``index`` and Timeline ``tl``, every whole lockup is
-    first timed to the speech it shows (caption_carry.attach_readings: its
-    words land on their spoken onsets; an old stored reading's bridge lines
-    are dropped), so it is measured and rendered as it will read; a stored
-    box measured with another reading is measured again."""
+    With the program's ``index`` and Timeline ``tl``, every whole word-timed
+    item (a lockup, marker_text) is first timed to the speech it shows
+    (caption_carry.attach_readings: its words land on their spoken onsets;
+    an old stored reading's bridge lines are dropped), so it is measured and
+    rendered as it will read; a stored box measured under another reading
+    is measured again. A run of parallel slams gets its series first
+    (motion_look.attach_series)."""
     import caption_carry
+    import motion_look
+    # a parallel run's members share one size (word_slam series); a member
+    # whose series changed since its box was stored (a sibling removed or
+    # moved by another tool) is measured again
+    series_was = {id(m): m.get("series") for m in edl.get("motion") or [] if isinstance(m, dict)}
+    motion_look.attach_series(edl.get("motion") or [])
+    for m in edl.get("motion") or []:
+        if isinstance(m, dict) and m.get("series") != series_was.get(id(m)) \
+                and isinstance(m.get("footprint"), dict) and not m["footprint"].get("estimated"):
+            m["footprint"] = dict(m["footprint"], estimated=True)
     if index is not None and tl is not None:
         before = {m.get("id"): m.get("reading") for m in edl.get("motion") or []
                   if isinstance(m, dict)}

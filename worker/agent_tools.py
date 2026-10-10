@@ -29883,8 +29883,8 @@ _COMPACT_CONTRACTS = {
         "description states). layer above_captions (default), below_captions "
         "or behind_subject. Captions: leave mute_captions unset — one reading "
         "path: captions drop the words it shows and yield to its phrase from "
-        "its first shown word until it leaves (phrase_build sets the phrase's "
-        "other words small: quote the transcript in its rows; end other "
+        "its first shown word until it leaves (a phrase_build's rows leave "
+        "the rest to the captions: quote the transcript in its rows; end other "
         "graphics where their words end, per the NOTE); other words stay "
         "captioned, clear of it; true hides all captions in its window, false "
         "keeps them all. A number lands on its spoken word. Silent by "
@@ -29892,7 +29892,11 @@ _COMPACT_CONTRACTS = {
         "sound roles onto the approved library (cues listed in the result). "
         "Pass purpose and a stable id. A graphic over the speaker's face or "
         "outside the 9:16 safe area is moved to clear space (KEEP-OUT in the "
-        "result). "
+        "result). A word-timed window starts on its first shown word; edges "
+        "within 0.15 s of a cut snap onto it. accent/color default to the "
+        "short's Look (NOTE (look): 2nd accent, 4th type role). word_slam "
+        "tier: payoff (number+noun in the accent) or hero (one per short, "
+        "behind the speaker; face-safe fallback). "
         "Never invent numbers, brand messages, handles or CTA offers."),
     "set_motion_graphic": (
         "Patch a motion graphic by id: window, params (merged), template, layer, "
