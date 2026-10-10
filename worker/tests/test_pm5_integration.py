@@ -224,3 +224,41 @@ def test_a_shot_the_index_loses_is_followed_from_the_proxy(monkeypatch):
     C.index = dict(_ix([(t / 2, True) for t in range(0, 20)]), video={"width": 1920, "height": 1080})
     samples, how, _counts = agent_tools._follow_samples(C(), [(0.0, 10.0)])
     assert how == "index"
+
+
+# ── the plate under a graphic in a card layout is the card's backdrop ────
+# Elon's stack (reframeqc) put the stat slams in the band above the speaker
+# panel (layout's band); the plate probe measured the uncropped frame there
+# (the bright neon sign), so word_slam switched its light words to dark ink
+# — black type on the dark backdrop. The plate is now the composed card.
+
+def test_a_card_layout_plate_is_the_backdrop_and_the_panels():
+    import plate
+    from PIL import Image
+    img = Image.new("L", (320, 180), 255)                       # a bright frame
+    img.paste(0, (160, 0, 320, 180))                            # right half black
+    rows = plate.grid_rows(1080, 1920)
+    card = {"box": [0.04, 0.3, 0.96, 0.6], "background": "#241414",
+            "background_color2": "#0A0606", "background_style": "radial_gradient",
+            "vignette": 0.35,
+            "panels_at": [[[0.04, 0.3, 0.96, 0.6], [0.0, 0.0, 0.5, 1.0]]]}   # the white half
+    g = plate.canvas_grid(img, (1920, 1080), 1080, 1920, mode="crop", card=card)
+    band = g[2 * plate.COLS:(int(0.25 * rows)) * plate.COLS]   # the band above the card
+    inside = g[(int(0.45 * rows)) * plate.COLS:(int(0.45 * rows) + 1) * plate.COLS]
+    assert max(band) < 60                                       # the dark backdrop
+    assert min(inside[2:-2]) > 200                              # the panel shows the white half
+    full = plate.canvas_grid(img, (1920, 1080), 1080, 1920, mode="crop", focus=(0.2, 0.5))
+    assert min(full[2 * plate.COLS:int(0.25 * rows) * plate.COLS]) > 200   # what it measured before
+
+
+def test_the_probe_composes_the_card_live_at_that_moment():
+    import plate
+    edl = {"effects": {"picture_cards": [
+        {"id": "s", "start": 2.0, "end": 6.0, "box": [0.04, 0.245, 0.96, 0.88],
+         "panels": [{"box": [0.04, 0.245, 0.96, 0.555], "source": [0.155, 0.148, 0.595, 0.6165]},
+                    {"box": [0.04, 0.587, 0.96, 0.883], "source": [0.53, 0.52, 0.98, 0.98]}],
+         "background": "#241C14", "background_style": "radial_gradient"}]}}
+    assert plate._card_at(edl, 1.0, 100.0) is None
+    card = plate._card_at(edl, 3.0, 100.0)
+    assert card and [p[1] for p in card["panels_at"]] == [[0.155, 0.148, 0.595, 0.6165],
+                                                           [0.53, 0.52, 0.98, 0.98]]

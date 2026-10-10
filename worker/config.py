@@ -2035,7 +2035,10 @@ MASTER_VERSION = 1
 # counter never reads its landed figure before the landing (and blooms from
 # it), the typewriter's plate arrives with its first glyph, and versus_split's
 # values share one size and line count under a divider no taller than the
-# lettering.
+# lettering. Same release: the plate under a graphic in a picture-card
+# layout is the composed card (its backdrop and panels), not the uncropped
+# frame (plate.py) — light words over a card's dark band no longer switch to
+# dark ink because the footage there would have been bright.
 LEGIBILITY_VERSION = 2
 
 # Word-level caption muting (worker/caption_carry.py): a motion graphic with
