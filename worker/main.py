@@ -269,6 +269,21 @@ def process_one(worker_db, job):
                       "returned to the queue without consuming its retry "
                       f"budget ({e})", flush=True)
                 return
+        if isinstance(e, remote.CloudflareCapacityUnavailable) \
+                and job["type"] not in ("mcp_tool", "agent_turn"):
+            # Every capacity route was refused before /run, so nothing ran.
+            # Like a stalled rollout, give a media job another full round
+            # later without spending the attempt its real failures need.
+            deferred = worker_db.run(
+                dbx.defer_unlaunched_cloudflare_busy, job_id, lease_claim, e,
+                config.CLOUDFLARE_CAPACITY_MAX_DEFERRALS,
+                counter="cloudflare_capacity_deferrals")
+            if deferred:
+                worker_db.run(dbx.bump_metric, "cloudflare_capacity_deferred")
+                print(f"[job {job_id}] Cloudflare had no container before "
+                      "launch; returned to the queue without consuming its "
+                      f"retry budget ({e})", flush=True)
+                return
         decision = failure_policy.decision_for(e, job["type"])
         if failure_policy.defer_prerequisite(
                 worker_db, job, e, decision, lease_claim):

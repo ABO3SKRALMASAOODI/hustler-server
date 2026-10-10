@@ -31,6 +31,11 @@ def test_mcp_failure_categories_separate_actionable_root_causes():
     assert snapshot.mcp_failure_category(
         "there is no container instance that can be provided"
     ) == "cloudflare_container_unavailable"
+    # The dispatcher's final summary after every capacity route was refused.
+    assert snapshot.mcp_failure_category(
+        "Cloudflare could not provide a container for this mcp_tool: every "
+        "launch was refused before anything ran"
+    ) == "cloudflare_container_unavailable"
     assert snapshot.mcp_failure_category(
         "This project's video hasn't finished analyzing yet"
     ) == "project_not_indexed"

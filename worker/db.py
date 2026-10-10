@@ -847,7 +847,8 @@ def requeue_job(conn, job_id, error, total_claims=None):
 
 
 _DEFERRAL_COUNTERS = {"cloudflare_busy_deferrals",
-                      "cloudflare_rollout_deferrals"}
+                      "cloudflare_rollout_deferrals",
+                      "cloudflare_capacity_deferrals"}
 
 
 def defer_unlaunched_cloudflare_busy(conn, job_id, total_claims, error,
