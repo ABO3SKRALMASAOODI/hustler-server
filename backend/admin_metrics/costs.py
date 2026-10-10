@@ -22,6 +22,43 @@ def _env_float(name, default):
         return float(default)
 
 
+# The plan stress test covers the plans on sale today first, then the
+# grandfathered prices existing subscribers keep. (It used to list only the
+# grandfathered three, so the plans actually sold were never tested.)
+STRESS_PLANS = (
+    ("mcp_connect", "MCP Connect", "current"),
+    ("advanced", "Advanced Editor", "current"),
+    ("ai", "Creator", "grandfathered"),
+    ("ai_pro", "Pro", "grandfathered"),
+    ("ai_max", "Frontier", "grandfathered"),
+)
+
+
+def stress_test(storage_rate):
+    """Each plan used to its full credit allowance, plus 5 GB of storage."""
+    rows = []
+    reserve = 5.0 * storage_rate
+    for plan, label, tier in STRESS_PLANS:
+        allowance = int(credits.PLAN_MONTHLY_LIMITS.get(plan) or 0)
+        prices = billing.PLAN_PRICES_USD.get(plan)
+        if not allowance or not prices:
+            continue
+        metered = allowance * model_prices.USD_PER_CREDIT
+        for cadence, revenue in (("monthly", float(prices["monthly"])),
+                                 ("annual", float(prices["yearly"]) / 12.0)):
+            if revenue <= 0:
+                continue
+            margin = (revenue - (metered + reserve)) / revenue * 100.0
+            rows.append({
+                "plan": plan, "label": label, "tier": tier,
+                "cadence": cadence, "credits": allowance,
+                "monthly_revenue_usd": round(revenue, 2),
+                "max_metered_cost_usd": round(metered, 2),
+                "storage_reserve_usd": round(reserve, 3),
+                "gross_margin_pct": round(margin, 1)})
+    return rows
+
+
 def compute(cur):
     """The full /admin/video/costs payload plus the owner/customer split."""
     from routes.admin_video import (_cost_expr, PRICE_IN_PER_M,
@@ -115,23 +152,7 @@ def compute(cur):
     margin_excl = ((cash_30d - customers_cost) / cash_30d * 100.0
                    if cash_30d > 0 else None)
 
-    plan_scenarios = []
-    reserve = 5.0 * storage_rate
-    labels = {"ai": "Creator", "ai_pro": "Pro", "ai_max": "Frontier"}
-    for plan in ("ai", "ai_pro", "ai_max"):
-        allowance = int(credits.PLAN_MONTHLY_LIMITS[plan])
-        metered = allowance * model_prices.USD_PER_CREDIT
-        prices = billing.PLAN_PRICES_USD[plan]
-        for cadence, revenue in (("monthly", float(prices["monthly"])),
-                                 ("annual", float(prices["yearly"]) / 12.0)):
-            margin = (revenue - (metered + reserve)) / revenue * 100.0
-            plan_scenarios.append({
-                "plan": plan, "label": labels[plan], "cadence": cadence,
-                "credits": allowance,
-                "monthly_revenue_usd": round(revenue, 2),
-                "max_metered_cost_usd": round(metered, 2),
-                "storage_reserve_usd": round(reserve, 3),
-                "gross_margin_pct": round(margin, 1)})
+    plan_scenarios = stress_test(storage_rate)
 
     def _day(r):
         return {**r, "day": r["day"].isoformat(),
