@@ -116,6 +116,16 @@ TIGHT_FACE_SHARE = 0.6
 # long; carried boxes keep the look they were last seen with.
 CARRY_MAX_S = 2.0
 CARRY_MIN_POINTS = 6
+# ...and never across a picture cut between two samples: a measured
+# window spans every camera cut of the kept footage, and optical flow can
+# "track" a face's features into the next shot wherever similar texture
+# sits there — a ghost box a follow plan (or the picture check) would take
+# for that shot's speaker. Two samples whose pixels change by more than
+# CARRY_CUT_STEP on CARRY_CUT_SHARE of the frame are a cut: the Elon
+# source's camera cuts measure 0.70-0.83, its turning close-ups at 4 fps
+# stay under 0.16.
+CARRY_CUT_STEP = 30
+CARRY_CUT_SHARE = 0.35
 # The detector box runs brow to chin; the head the window must keep is the
 # hair above it (more than picture_cards' 0.40: a big-haired speaker looking
 # down showed his hair at a held card's top edge), the ears either side and
@@ -389,19 +399,31 @@ def _flow_shift(cv2, np, a, b, box):
     return float(np.median(d[:, 0])) / w, float(np.median(d[:, 1])) / h
 
 
+def cut_between(a, b):
+    """True when grey frames ``a`` and ``b`` (same size) are two different
+    shots: most of the picture steps hard between them (CARRY_CUT_*)."""
+    import numpy as np
+    if a is None or b is None or getattr(a, "shape", None) != getattr(b, "shape", None):
+        return True
+    d = np.abs(a.astype(np.int16) - b.astype(np.int16))
+    return float((d > CARRY_CUT_STEP).mean()) >= CARRY_CUT_SHARE
+
+
 def carry(times, grays, dets, cv2=None):
     """``dets`` (one list of (box, look) per frame of one decoded run) with
     every face the detector lost CARRIED by optical flow: forward from its
     last detection and back from its next, each at most CARRY_MAX_S from a
     real detection, into frames where nothing found overlaps it (a false
-    positive elsewhere in the frame does not stop it). Detections are left
-    as found; a carried box keeps the look it was last seen with."""
+    positive elsewhere in the frame does not stop it), and never across a
+    picture cut between two samples (cut_between). Detections are left as
+    found; a carried box keeps the look it was last seen with."""
     import numpy as np
     cv2 = cv2 or __import__("subject")._cv2()
     n = len(dets)
     if cv2 is None or n < 2 or len(grays) != n:
         return dets
     out = [list(d) for d in dets]
+    cut = [False] + [cut_between(grays[i - 1], grays[i]) for i in range(1, n)]
 
     def moved(box, a, b):
         d = _flow_shift(cv2, np, grays[a], grays[b], box)
@@ -414,6 +436,8 @@ def carry(times, grays, dets, cv2=None):
         live = []                         # (box, look, time of detection)
         prev = None
         for i in order:
+            if prev is not None and cut[max(i, prev)]:
+                live = []                 # a new shot: nothing carries over
             if prev is not None:
                 kept = []
                 for box, look, t_real in live:

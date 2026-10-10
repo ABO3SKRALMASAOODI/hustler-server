@@ -57,6 +57,7 @@ MAX_FINDINGS = 6
 ENDCARD_MIN_NCC = 0.80
 ROBOT_MIN_NCC = 0.60
 ROBOT_MIN_PX = 40           # a robot shorter than this is not measured
+ROBOT_SAMPLES = 6           # frames the watermark is read on (one seek each)
 BUDGET_S = 60.0
 MAX_FULL_PASS_S = 180.0     # programmes longer than this skip the frame pass
                             # and sample faces on keyframes
@@ -103,9 +104,30 @@ def plan(edl, index, *, W, H, fps, outro_s=0.0, want_wm=False,
     # only when its measured footprint covers much of the frame: a caption
     # or a lower third is a region, and exempting it would hide a pop on
     # its edge.
-    layers = list(edl.get("typography_scenes") or []) + \
-        list(fx.get("picture_cards") or []) + list(edl.get("overlays") or []) + \
-        list(fx.get("frame_shifts") or [])
+    layers = list(fx.get("picture_cards") or [])
+    # Overlays (a B-roll cutaway is a cover overlay) and aspect shifts are
+    # timed by a start and a duration: both edges are deliberate, and an
+    # aspect shift's whole morph is.
+    for item in edl.get("overlays") or []:
+        try:
+            a = float(item["start"])
+            layers.append({"start": a, "end": a + float(item["duration_s"])})
+        except (KeyError, TypeError, ValueError):
+            continue
+    for item in fx.get("frame_shifts") or []:
+        try:
+            a = float(item["at"])
+            b = a + float(item.get("duration_s") or 0.0)
+        except (KeyError, TypeError, ValueError):
+            continue
+        events.append((renderer.first_frame_at(a, fps) - 1,
+                       renderer.first_frame_at(b, fps) + 3))
+    for item in edl.get("vectors") or []:
+        try:
+            if float(item.get("width") or 0) * float(item.get("height") or 0) >= .4:
+                layers.append(item)
+        except (AttributeError, TypeError, ValueError):
+            continue
     # A finishing effect (a flash, a shake, an agent's own filter chain) may
     # change the whole picture anywhere inside its window: all of it is
     # deliberate.
@@ -148,8 +170,25 @@ def plan(edl, index, *, W, H, fps, outro_s=0.0, want_wm=False,
     cards = []
     for c in fx.get("picture_cards") or []:
         try:
-            cards.append((float(c["start"]), float(c["end"]),
-                          [float(v) for v in c["box"]]))
+            # a stacked card's footage sits in its panels' boxes
+            areas = [[float(v) for v in p["box"]] for p in c.get("panels") or []] \
+                or [[float(v) for v in c["box"]]]
+            cards.append((float(c["start"]), float(c["end"]), areas))
+        except (KeyError, TypeError, ValueError, AttributeError):
+            continue
+    # Programme windows whose picture is not the speaker's framing: spliced
+    # inserts (B-roll, title and colour cards — a canvas programme is all
+    # inserts) and full-frame overlay cutaways. A face in a stock clip is
+    # nobody the editor framed.
+    others = [(float(ws), float(ws) + float(wd))
+              for ws, wd in tl.insert_positions()]
+    for item in edl.get("overlays") or []:
+        if not isinstance(item, dict) or item.get("screen") or \
+                item.get("fit") not in ("cover", "picture"):
+            continue
+        try:
+            a = float(item["start"])
+            others.append((a, a + float(item["duration_s"])))
         except (KeyError, TypeError, ValueError):
             continue
     wm = None
@@ -164,7 +203,7 @@ def plan(edl, index, *, W, H, fps, outro_s=0.0, want_wm=False,
             # the programme's last frame cuts to the end card (or the loop)
             "end_frame": int(round(float(program_s) * fps)),
             "cut_frames": cut_frames, "events": events, "cards": cards,
-            "watermark": wm, "endcard": endcard}
+            "others": others, "watermark": wm, "endcard": endcard}
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -346,26 +385,34 @@ def clipped_faces(samples, plan_):
         # the mark is the speaker
         mark = ((wm["x"] + wm["w"] / 2.0) / plan_["W"],
                 (wm["y"] + wm["h"] / 2.0) / plan_["H"])
+    others = plan_.get("others") or []
     rows = []
     for t, dets in samples:
         if mark:
             dets = [d for d in dets or []
                     if not (d[0][0] <= mark[0] <= d[0][2]
                             and d[0][1] <= mark[1] <= d[0][3])]
-        if not dets:
+        if not dets or any(a <= t < b for a, b in others):
             rows.append((t, None))
             continue
         card = next((c for c in cards if c[0] <= t < c[1]), None)
-        area = card[2] if card else [0.0, 0.0, 1.0, 1.0]
-        inside = [d for d in dets
-                  if area[0] - .02 <= (d[0][0] + d[0][2]) / 2 <= area[2] + .02
-                  and area[1] - .02 <= (d[0][1] + d[0][3]) / 2 <= area[3] + .02]
+        areas = card[2] if card else [[0.0, 0.0, 1.0, 1.0]]
+        if areas and not isinstance(areas[0], (list, tuple)):
+            areas = [areas]                    # a plan written before panels
+
+        def area_of(box):
+            cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+            return next((ar for ar in areas
+                         if ar[0] - .02 <= cx <= ar[2] + .02
+                         and ar[1] - .02 <= cy <= ar[3] + .02), None)
+        inside = [(d, area_of(d[0])) for d in dets]
+        inside = [(d, ar) for d, ar in inside if ar is not None]
         if not inside:
             rows.append((t, None))
             continue
-        top = max(d[0][3] - d[0][1] for d in inside)
+        top = max(d[0][3] - d[0][1] for d, _ar in inside)
         worst = None
-        for box, look in inside:
+        for (box, look), area in inside:
             if box[3] - box[1] < .6 * top:
                 continue
             aw, ah = area[2] - area[0], area[3] - area[1]
@@ -483,11 +530,20 @@ def robot_match(path, plan_, deadline):
     if alpha.sum() < 30:
         return None
     luma = cv2.cvtColor(rgba[:, :, :3], cv2.COLOR_BGR2GRAY)
+    # ROBOT_SAMPLES frames spread over the programme, one seek each: a
+    # decode of the whole programme for six frames was minutes on a long
+    # final, and a pipe that yields a frame per minute of video cannot be
+    # stopped by the budget between frames.
     span = max(.5, plan_["program_s"] - 1.0)
-    fps = min(2.0, 6.0 / span)
-    got = _gray_frames(path, w, h, fps, ss=.5, t=span,
-                       extra_vf=f"crop={w}:{h}:{int(wm['x'])}:{int(wm['y'])},",
-                       deadline=deadline)
+    got = []
+    for k in range(ROBOT_SAMPLES):
+        if time.monotonic() > deadline:
+            break
+        t = .5 + span * (k + .5) / ROBOT_SAMPLES
+        got += _gray_frames(
+            path, w, h, None, ss=t,
+            extra_vf=(f"crop={w}:{h}:{int(wm['x'])}:{int(wm['y'])},"
+                      "select='eq(n,0)',"), deadline=deadline)[:1]
     if not got:
         return 0.0
     scores = sorted(_ncc(g, luma, alpha) for g in got)

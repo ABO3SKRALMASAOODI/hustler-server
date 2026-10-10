@@ -2380,8 +2380,17 @@ def composition_edge(edge, keep, index, src_fps):
     and released the zoom held to it a frame early: the judged Elon pop at
     21.888 s (focus edge 152.63 on a keep join at 152.63, the source's own
     cut a frame later at 152.653, an index with no shots). Keep joins are
-    known cuts whether or not the index has shots. An edge that names a
-    frame (_names_a_frame) is read as the measured cut it was written from."""
+    known cuts whether or not the index has shots.
+
+    One exception, only where the index carries NO shot list (shot
+    detection never ran, so a measured cut cannot be told from an edit): a
+    SOURCE-CONTIGUOUS join whose edge names a frame (_names_a_frame) is
+    read as the measured cut it was written from (the 138.04 join, the
+    first Rogan frame 2 ms before it). With a shot list, an edge with no
+    indexed cut near it is editorial wherever it sits; and a join that
+    skips source time is the programme's cut whatever the edge's digits —
+    the measured handoff there gave the last frame before it the next
+    composition (an edge at 10.07 on 30 fps footage split [10.05, 10.07])."""
     try:
         fps = float(src_fps or 30.0)
         edge = float(edge)
@@ -2392,25 +2401,32 @@ def composition_edge(edge, keep, index, src_fps):
     cut = _indexed_cut_near(index, edge, reach)
     if cut is not None:
         return "cut", cut
+    spans = [(float(s), float(e)) for s, e in keep or []]
     best = None
-    for s, e in keep or []:
-        for k in (float(s), float(e)):
+    for s, e in spans:
+        for k in (s, e):
             if abs(k - edge) <= reach and (best is None or
                                            abs(k - edge) < abs(best - edge)):
                 best = k
-    if best is not None and not _names_a_frame(edge, fps):
-        return "join", best
-    return "edge", edge
+    if best is None:
+        return "edge", edge
+    if not (index or {}).get("shots") and _names_a_frame(edge, fps) and \
+            any(abs(e - best) <= 1e-6 for _s, e in spans) and \
+            any(abs(s - best) <= 1e-6 for s, _e in spans):
+        return "edge", edge
+    return "join", best
 
 
 def _names_a_frame(edge, fps):
     """True when ``edge`` is a frame's time rounded to the hundredth — what
     a shot cut written from a measured frame index looks like (138.04 for
-    the frame at 138.0379): such an edge keeps the measured handoff even
-    with no shot in the index (the judged Elon flash at the 138.04 join,
-    where the first Rogan frame sat 2 ms before the join). 152.63 names
-    no frame at 29.97 fps (the nearest sit 11 and 23 ms away): it is an
-    editorial edge, and the join it sits on is the cut."""
+    the frame at 138.0379): on a source-contiguous join of an index with no
+    shot list such an edge keeps the measured handoff (the judged Elon
+    flash at the 138.04 join, where the first Rogan frame sat 2 ms before
+    the join). 152.63 names no frame at 29.97 fps (the nearest sit 11 and
+    23 ms away): it is an editorial edge, and the join it sits on is the
+    cut. About a third of all hundredths name a frame at ~30 fps, which is
+    why the test is confined to that one ambiguous case."""
     n = round(float(edge) * float(fps))
     return abs(n / float(fps) - float(edge)) <= 0.0051
 
@@ -2481,10 +2497,15 @@ def handoff_affected(edl, index):
 
 def handoff_may_matter(edl):
     """Cheap pre-check (no index): an internal focus_track edge sits near a
-    keep edge, so handoff_current needs the index to decide."""
+    keep edge, so handoff_current needs the index to decide. "Near" is
+    HANDOFF_JOIN_FRAMES at the lowest frame rate a source plausibly has
+    (10 fps: 0.15 s) — composition_edge's reach grows as the rate falls, and
+    a tighter pre-check served a stale cache for a 15 fps screen recording
+    whose edge sat 0.08 s before its join."""
     edges = _internal_focus_edges(edl)
     keep = [(float(s), float(e)) for s, e in (edl or {}).get("keep") or []]
-    return any(abs(k - t) <= 0.07 for t in edges for s, e in keep
+    reach = HANDOFF_JOIN_FRAMES / 10.0 + 1e-9
+    return any(abs(k - t) <= reach for t in edges for s, e in keep
                for k in (s, e))
 
 

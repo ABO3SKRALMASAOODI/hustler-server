@@ -2,6 +2,7 @@
 short instructive string the model can act on, every output fits the token
 budget. Write tools create new EDL versions and return one-line diffs."""
 
+import bisect
 import copy
 import difflib
 import hashlib
@@ -8091,24 +8092,30 @@ def _program_span(tl, a, b):
 
 
 def _inset_layout_call(card_id, p0, p1, cuts=()):
-    """The calls that show a screen box legibly over programme [p0, p1]: one
-    fitted card of the box (it sits still across camera cuts), or a speaker
-    + screen stack per camera shot (one speaker framing frames ONE shot)."""
+    """The calls that show a screen box legibly over programme [p0, p1]: a
+    speaker + screen stack per camera shot (one speaker framing frames ONE
+    shot) — the face stays on screen while they talk about it — or, for a
+    beat nobody talks over, one fitted card of the box (it sits still
+    across camera cuts)."""
     stack = [{"box": STACK_SPEAKER_BOX, "source": "auto"},
              {"box": STACK_SCREEN_BOX, "source": "inset"}]
     edges = [p0] + sorted(c for c in cuts if p0 + .3 < c < p1 - .3) + [p1]
     pieces = list(zip(edges, edges[1:]))[:3]
     fitted = (f"set_picture_card(id='{card_id}', start={p0:g}, end={p1:g}, "
-              "source='inset') shows the whole box fitted and legible")
+              "source='inset') fits the whole box alone — no face, so only "
+              f"for a beat (under {NO_FACE_MAX_S:g}s of speech) or a stretch "
+              "nobody talks over")
+    check = (" (look at the speaker panel: a speaker sitting against the box "
+             "may need a source rect of their own that holds the face clear "
+             "of the panel edge)")
     if len(pieces) == 1:
-        return (fitted + f", or set_picture_card(id='{card_id}', start={p0:g}, "
-                f"end={p1:g}, panels={json.dumps(stack)}) stacks the speaker "
-                "over the screen")
-    return (fitted + " (one card across the camera cut"
-            f"{'s' if len(pieces) > 2 else ''}), or one speaker + screen stack "
-            "per camera shot: " + "; ".join(
+        return (f"set_picture_card(id='{card_id}', start={p0:g}, end={p1:g}, "
+                f"panels={json.dumps(stack)}) stacks the speaker over the "
+                "screen, both legible" + check + "; or " + fitted)
+    return ("one speaker + screen stack per camera shot: " + "; ".join(
                 f"set_picture_card(id='{card_id}_{k + 1}', start={a:g}, end={b:g}, "
-                f"panels={json.dumps(stack)})" for k, (a, b) in enumerate(pieces)))
+                f"panels={json.dumps(stack)})" for k, (a, b) in enumerate(pieces))
+            + check + "; or " + fitted)
 
 
 def _framing_checks(ctx, apply=False, measure_faces=True):
@@ -8152,16 +8159,32 @@ def _framing_checks(ctx, apply=False, measure_faces=True):
         samples, how, _counts = _follow_samples(
             ctx, windows, [x for _a, _b, _fr, lo, hi in shots for x in (lo, hi)])
         faces = samples if how in ("index", "measured") else []
-    words = [(float(w.get("t0", 0)), float(w.get("t1", 0)))
-             for w in index.get("words") or []
-             if isinstance(w, dict)]
+    # speech as merged SOURCE intervals (each word widened by 0.1 s), looked
+    # up by bisection: a long index holds tens of thousands of words
+    speech = []
+    for w0, w1 in sorted((float(w.get("t0", 0)) - .1, float(w.get("t1", 0)) + .1)
+                         for w in index.get("words") or [] if isinstance(w, dict)):
+        if speech and w0 <= speech[-1][1]:
+            speech[-1][1] = max(speech[-1][1], w1)
+        else:
+            speech.append([w0, w1])
+    speech_starts = [a_ for a_, _b in speech]
+
+    def speaking_at(t):
+        k = bisect.bisect_right(speech_starts, t) - 1
+        return k >= 0 and t <= speech[k][1]
     tl = Timeline(edl.get("keep") or [], edl.get("inserts") or [],
                   edl.get("speed") or [])
     step = FRAMING_CHECK_STEP_S
     notes, moved, cut_runs = [], [], []
-    # programme seconds where a camera shot (or a re-aimed span) begins
+    # programme seconds where a CAMERA shot begins (a stack's speaker panel
+    # frames one shot): the indexed cuts — a focus_track edge on a
+    # contiguous join (a re-aim inside one shot, Elon's 145.4) would split
+    # one stack into two framings of the same footage, a jump mid-shot.
+    # Only an index without a shot list falls back to the focus edges.
+    cam_shots = _shot_windows(ctx, keep) if index.get("shots") else shots
     shot_starts = [p[0] for p in (_program_span(tl, a_, b_)
-                                  for a_, b_, _fr, _lo, _hi in shots[1:]) if p]
+                                  for a_, b_, _fr, _lo, _hi in cam_shots[1:]) if p]
     # a source-fed picture card replaces the crop while it is up: what the
     # crop would show there is never seen
     carded = []
@@ -8204,7 +8227,7 @@ def _framing_checks(ctx, apply=False, measure_faces=True):
                         insets.cuts_through(box["rect"], win):
                     cut_at.setdefault(k, []).append(t)
             near = [s_ for s_ in shot_faces if abs(s_[0] - t) <= .6]
-            speaking = any(w0 - .1 <= t <= w1 + .1 for w0, w1 in words)
+            speaking = speaking_at(t)
             if near and speaking:
                 f = min(near, key=lambda s_: abs(s_[0] - t))[1]
                 cx, cy = (f[0] + f[2]) / 2.0, (f[1] + f[3]) / 2.0
@@ -15875,7 +15898,35 @@ def set_picture_card(ctx, id, start, end, box=None, fit=None, radius=.045,
                 "background_style) or near-black with grain is the finish "
                 "references use for archival footage.")
     res += "".join("\n" + n for n in _source_card_notes(ctx, row))
+    if source == "inset" and not row.get("panels"):
+        try:
+            res += _faceless_card_note(ctx, edl, id, float(row["start"]),
+                                       float(row["end"]))
+        except Exception:
+            pass
     return res
+
+
+def _faceless_card_note(ctx, edl, card_id, start, end):
+    """A fitted screen card shows no face: say so when speech plays under
+    it for more than NO_FACE_MAX_S (the judged Elon evidence section: 7 s
+    of a host reading with no face on screen), naming the stack that keeps
+    the speaker in view. '' otherwise."""
+    tl = Timeline(edl.get("keep") or [], edl.get("inserts") or [],
+                  edl.get("speed") or [])
+    words = tl.kept_words((getattr(ctx, "index", None) or {}).get("words") or [])
+    spoken = sum(max(0.0, min(float(w["t1"]), end) - max(float(w["t0"]), start))
+                 for w in words)
+    if spoken <= NO_FACE_MAX_S:
+        return ""
+    stack = [{"box": STACK_SPEAKER_BOX, "source": "auto"},
+             {"box": STACK_SCREEN_BOX, "source": "inset"}]
+    return (f"\nNO FACE ON SCREEN: this card shows the screen box alone while "
+            f"{spoken:.1f}s of speech play under it — nobody is seen talking. "
+            "Keep it only for a beat the screen must carry alone; otherwise "
+            f"stack the speaker over it: set_picture_card(id='{card_id}', "
+            f"start={start:g}, end={end:g}, panels={json.dumps(stack)}) "
+            "(one stack per camera shot).")
 
 
 def _source_card_notes(ctx, row):
@@ -26543,9 +26594,10 @@ TOOLS = {
                      "through the turn. SCREEN INSETS: a burned-in screen or "
                      "picture-in-picture box the crop would cut through is "
                      "slid out of the crop when the speaker stays framed "
-                     "(SCREEN INSET CLEARED), else named with the call that "
-                     "shows it legibly (set_picture_card source='inset', or "
-                     "a speaker + screen stack). A crop that shows NO FACE "
+                     "(SCREEN INSET CLEARED), else named with the calls that "
+                     "show it legibly (a speaker + screen stack per camera "
+                     "shot, or for a beat set_picture_card source='inset'). "
+                     "A crop that shows NO FACE "
                      "for over a second while someone speaks is named with "
                      "the fix. Pass mode explicitly to force one. Read what "
                      "it reports and repeat THAT.",
@@ -27085,7 +27137,9 @@ TOOLS = {
         "fractions); 'inset' = the burned-in screen / picture-in-picture box measured in the "
         "window's footage (four straight edges, the same place across frames), shown WHOLE "
         "and fitted (a screenshot the host reads from is legible this way, never sliced by a "
-        "9:16 crop; auto_reframe names the box and this call when it finds one); 'program' = "
+        "9:16 crop; auto_reframe names the box and this call when it finds one). Alone it shows "
+        "no face: over more than a second of speech the result says NO FACE ON SCREEN — stack "
+        "the speaker over it with panels instead (below); 'program' = "
         "the composed program picture (frame.picture region) as before. "
         "fit: 'crop' keeps the box and trims the source rect to it; 'pad' keeps the whole rect "
         "and shrinks the box around it (the default for 'full' and explicit rects). The result "

@@ -599,3 +599,164 @@ def test_long_footage_is_sampled_by_seeks(tmp_path, monkeypatch):
     monkeypatch.setattr(insets, "SEEK_PAST_S", 3.0)
     rows = insets.measure(out, [(0.0, 2.5), (3.0, 6.0)], fps=1.0)
     assert [r[0] for r in rows] == [0.5, 1.5, 3.0, 4.0, 5.0]
+
+
+# ── review fixes ───────────────────────────────────────────────────────────
+
+def _blocks(edl, index, fps=30.0):
+    import re
+    graph = renderer.build_filtergraph(
+        edl, 200.0, True, Timeline(edl["keep"]), None, [], index,
+        preview=True, W=270, H=480, fps=fps, frame_mode="crop",
+        src_w=1920, src_h=1080, src_fps=fps, focus_origin=0.0)
+    return re.findall(r"trim=start=([0-9.]+):end=([0-9.]+)\[", graph) or \
+        re.findall(r"trim=start=([0-9.]+):end=([0-9.]+)", graph)
+
+
+@pytest.mark.parametrize("shots", [[], [{"id": 1, "start": 0.0, "end": 200.0}]])
+def test_a_frame_named_edge_on_a_skip_join_still_switches_on_it(shots):
+    """10.07 at 30 fps sits 3 ms after the frame at 10.0667: read as a
+    measured cut it split [10.05, 10.07] and that last frame before the
+    jump cut took the next span's crop — the judged pop, at an edge whose
+    digits happen to name a frame. A join that skips source time is the
+    programme's cut whatever the digits."""
+    edl = _focus_edl([(5.0, 10.07), (20.0, 25.0)], 10.07)
+    index = {"words": [], "shots": shots}
+    assert renderer.composition_join(10.07, edl["keep"], index, 30.0) == 10.07
+    trims = _blocks(edl, index)
+    assert ("10.050", "10.070") not in trims
+    assert ("5.000", "10.070") in trims
+
+
+def test_with_a_shot_list_an_unindexed_edge_on_a_contiguous_join_is_the_join():
+    """A shot list means detection ran: an edge with no indexed cut near it
+    is editorial even where its digits name a frame. Only an index without
+    one keeps the measured reading (the 138.04 case)."""
+    keep = [(130.7, 138.04), (138.04, 138.58)]
+    assert renderer.composition_join(138.04, keep, {}, 29.97) is None
+    single = {"shots": [{"id": 1, "start": 0.0, "end": 200.0}]}
+    assert renderer.composition_join(138.04, keep, single, 29.97) == 138.04
+
+
+def test_a_carried_face_never_crosses_a_picture_cut():
+    """Optical flow can 'track' a face's features into the next shot; the
+    carry stops at a sample pair whose picture changes wholesale."""
+    import follow
+    rng = np.random.default_rng(5)
+    import cv2
+    tex = cv2.GaussianBlur(rng.integers(0, 255, size=(60, 50)).astype(np.uint8),
+                           (3, 3), 0)
+    frames, times = [], []
+    for i in range(8):
+        # shot A for 4 samples, then shot B: another background, the same
+        # textured patch where the face was (flow would follow it)
+        g = np.full((252, 448), 90 if i < 4 else 200, np.uint8)
+        g[80:140, 200:250] = tex
+        frames.append(g)
+        times.append(round(i * .25, 3))
+    box = [200 / 448, 80 / 252, 250 / 448, 140 / 252]
+    dets = [[(list(box), 0)] if i == 0 else [] for i in range(8)]
+    out = follow.carry(times, frames, dets)
+    assert all(out[i] for i in range(1, 4))          # carried inside shot A
+    assert not any(out[i] for i in range(4, 8))      # never into shot B
+    assert follow.cut_between(frames[3], frames[4])
+    assert not follow.cut_between(frames[2], frames[3])
+
+
+def test_the_plan_knows_overlays_shifts_inserts_and_stacked_panels():
+    import render_qc
+    edl = default_edl(30.0)
+    edl["overlays"] = [{"id": "b1", "asset_key": "k", "kind": "video",
+                        "start": 2.0, "duration_s": 1.5, "fit": "cover"}]
+    edl["effects"] = {"frame_shifts": [{"id": "s1", "at": 5.0, "ratio": "1:1",
+                                        "duration_s": 0.8}],
+                      "picture_cards": [{"id": "c", "start": 8.0, "end": 10.0,
+                                         "panels": [
+                                             {"box": [.04, .07, .96, .47],
+                                              "source": [.0, .0, .5, 1.0]},
+                                             {"box": [.04, .5, .96, .93],
+                                              "source": [.5, .5, 1.0, 1.0]}]}]}
+    edl = validate_edl(edl, 30.0).model_dump()
+    p = render_qc.plan(edl, {}, W=270, H=480, fps=30.0)
+    end = renderer.first_frame_at(3.5, 30.0)          # the cutaway's return
+    assert any(a <= end <= b for a, b in p["events"])
+    mid = renderer.first_frame_at(5.4, 30.0)          # inside the morph
+    assert any(a <= mid <= b for a, b in p["events"])
+    assert (2.0, 3.5) in p["others"]
+    (card,) = p["cards"]
+    assert card[2] == [[.04, .07, .96, .47], [.04, .5, .96, .93]]
+    # a face inside the B-roll window is nobody the editor framed
+    edge_face = ([0.0, .3, .2, .45], 0)
+    samples = [(t, [edge_face]) for t in (2.25, 2.75, 3.25)]
+    assert render_qc.clipped_faces(samples, p) == []
+    assert render_qc.clipped_faces([(t, [edge_face]) for t in (12.0, 12.5)], p)
+    # inside the stack the speaker panel's edge is the edge
+    in_panel = ([.05, .2, .3, .4], 0)                  # 1% from the panel's left
+    hits = render_qc.clipped_faces([(t, [in_panel]) for t in (8.5, 9.0)], p)
+    assert hits and hits[0][2] == "left"
+
+
+def test_the_watermark_is_read_by_seeks_not_a_whole_decode(monkeypatch, tmp_path):
+    """Six frames of a long final decoded the whole programme (minutes), in
+    a pipe the budget could not interrupt between frames."""
+    import render_qc
+    calls = []
+
+    def fake(src, w, h, fps, ss=None, t=None, extra_vf="", deadline=None):
+        calls.append((fps, ss, t, extra_vf))
+        return [np.zeros((h, w), np.uint8)]
+    monkeypatch.setattr(render_qc, "_gray_frames", fake)
+    robot = renderer.robot_path()
+    if not robot or not os.path.exists(robot):
+        pytest.skip("no watermark robot bundled")
+    f = tmp_path / "x.mp4"
+    f.write_bytes(b"")
+    plan = {"program_s": 1800.0, "W": 1080, "H": 1920,
+            "watermark": {"x": 30, "y": 40, "w": 90, "h": 120, "robot": robot}}
+    render_qc.robot_match(str(f), plan, __import__("time").monotonic() + 30)
+    assert len(calls) == render_qc.ROBOT_SAMPLES
+    assert all(c[0] is None and c[1] is not None and c[2] is None
+               and "eq(n,0)" in c[3] for c in calls)
+    assert max(c[1] for c in calls) < 1800.0
+
+
+def test_a_fitted_screen_card_over_speech_says_nobody_is_seen(monkeypatch):
+    import agent_tools
+    ctx = _Ctx(_crop_edl(.42), words=_words())
+    monkeypatch.setattr(agent_tools, "_inset_rect", lambda c, spans: list(INSET))
+    res = agent_tools.set_picture_card(ctx, "screen", 0.0, 6.0, source="inset")
+    assert res.startswith("EDL v") and "NO FACE ON SCREEN" in res
+    assert "panels=" in res and "'inset'" in res.replace('"', "'")
+    # a beat with no speech under it is the screen's to carry
+    ctx = _Ctx(_crop_edl(.42))
+    res = agent_tools.set_picture_card(ctx, "screen", 0.0, 6.0, source="inset")
+    assert "NO FACE ON SCREEN" not in res
+
+
+def test_the_screen_advice_splits_stacks_at_camera_cuts_only(monkeypatch):
+    """A focus edge on a contiguous join (a re-aim inside one shot) must
+    not split the speaker + screen stack: two framings of one shot jump."""
+    import agent_tools
+    edl = _crop_edl(.76, keep=((10.0, 14.0), (14.0, 20.0)))
+    edl["frame"]["focus_track"] = [{"t0": 0.0, "t1": 14.0, "x": .76, "y": .5},
+                                   {"t0": 14.0, "t1": 200.0, "x": .74, "y": .5}]
+    ctx = _Ctx(edl, words=_words(), shots=[{"id": 1, "start": 0.0, "end": 200.0}])
+    box = {"rect": list(INSET), "spans": [(10.0, 20.0)], "seen": 10}
+    monkeypatch.setattr(agent_tools, "_inset_boxes", lambda c, w: [box])
+    monkeypatch.setattr(agent_tools, "_follow_samples",
+                        lambda c, w, cuts=(): (_faces(.42), "measured", []))
+    text = "\n".join(agent_tools._framing_checks(ctx))
+    assert "screen_1" not in text and "panels=" in text
+    # the stack leads; the faceless fitted card is the fallback for a beat
+    assert text.index("panels=") < text.index("source='inset') fits")
+
+
+def test_the_cache_precheck_reaches_as_far_as_a_low_rate_join():
+    """At 15 fps 1.5 frames is 0.1 s: an edge 0.08 s before its join is
+    the join (the old handoff split [9.9, 10.0], a frame of the next crop),
+    so the cheap pre-check must ask the index."""
+    edl = _focus_edl([(5.0, 10.0), (20.0, 25.0)], 9.92)
+    index = {"video": {"fps": 15.0}}
+    assert renderer.composition_join(9.92, edl["keep"], index, 15.0) == 10.0
+    assert renderer.handoff_affected(edl, index)
+    assert renderer.handoff_may_matter(edl)
