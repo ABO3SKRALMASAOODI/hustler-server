@@ -25,8 +25,16 @@ showcase shorts, and every one of them is visible in the EDL plus the index:
 - RESTRAINT (owner rule). Zooms and sound effects are optional, never rules:
   a barely visible push is neither a move nor a steady frame. Nothing here
   ever asks for a zoom or a sound; its zoom notes only offer removal.
-- FRAME. A full-bleed plate with no committed grade (a taste call, offered
-  with a card or letterbox as the alternative, never a default).
+- FRAME. A designed short left full-bleed with no committed grade (a taste
+  call, offered with a card or letterbox as the alternative, never a
+  default; a plain clip the user only asked to caption or trim is theirs).
+
+Layout bands (the persistent headline, a set_editorial_graphic headline,
+any text over 80% of the runtime) are not graphics and never count against
+the budget, but their words are the hook's words. The checks never flag the
+guidance's own devices: a kicker naming the speaker and year, an image's
+identifying caption, one big word per list item, a stutter cut, a requested
+CTA after the payoff.
 
 Every note is ADVISORY ("keep if intentional"): ``review`` returns notes with
 a concrete fix each and never blocks a render, completion or export.
@@ -62,8 +70,10 @@ FRAGMENT_MIN_S = 0.03        # a kept word tail shorter than this is a graze
 
 # ── graphic budget ────────────────────────────────────────────────────────
 GRAPHIC_EVERY_S = 6.0        # at most one designed graphic per ~6-8 s
-SERIES_GAP_S = 1.0           # same-template graphics this close are one run
-                             # (a stat run, one big word per list item)
+SERIES_GAP_S = 1.5           # same-template graphics this close are one run
+                             # (a stat run, one big word per spoken list
+                             # item: items are often said 1-1.5 s apart);
+                             # the hook is never part of a run
 MAX_COVERAGE = 0.50          # at most ~50% of the runtime under graphics
 MAX_TYPE_ROLES = 3
 MAX_ACCENTS = 1
@@ -99,9 +109,11 @@ INFO_TEMPLATES = frozenset((
 STAR_ACCENT_TEMPLATES = frozenset((
     "word_slam", "phrase_build", "hook_title", "headline", "glow_title",
     "typewriter", "text_scramble"))
-# Lines that annotate a graphic rather than state its claim.
+# Lines that annotate a graphic rather than state its claim (a kicker
+# naming the speaker and year, an image's identifying caption or chip).
 SIDE_KEYS = frozenset(("kicker", "label", "role", "sub", "left_sub",
-                       "right_sub", "name", "handle", "attribution"))
+                       "right_sub", "name", "handle", "attribution",
+                       "caption", "chip", "eyebrow"))
 # Disfluencies that must not open a short.
 FILLERS = frozenset(("um", "uh", "uhm", "umm", "er", "erm", "ah", "hmm",
                      "mm", "mhm"))
@@ -118,6 +130,24 @@ _CLAUSE_END = re.compile(r"[.?!…,;:]['\"”’)]*$")
 # One capitalised word alone on a line, ending in a colon ('Lisa:'): it reads
 # as a speaker label. A full name ('Steve Jobs:') IS a speaker label.
 _LABEL_LINE = re.compile(r"^\s*\*?([A-Z][\w'’.\-]*)\*?\s*:\s*$")
+# Editorial label words that legitimately end in a colon ('Lesson: ship
+# faster', 'Myth:', 'Step:'): a device, not a mislabelled name.
+LABEL_WORDS = frozenset((
+    "note", "tip", "tips", "rule", "rules", "lesson", "lessons", "fact",
+    "facts", "step", "myth", "truth", "reality", "answer", "question",
+    "problem", "solution", "result", "results", "before", "after", "today",
+    "then", "now", "why", "how", "what", "spoiler", "warning", "hint", "fix",
+    "goal", "plan", "bonus", "update", "breaking", "q", "a", "pro", "pros",
+    "con", "cons", "yes", "no", "example", "quote", "source", "context",
+    "verdict", "takeaway", "summary", "tldr", "next", "first", "second",
+    "third", "last", "finally", "reminder", "key", "secret", "mistake",
+    "hack", "idea", "point", "claim", "reason", "proof", "data",
+    "study", "stat", "stats", "translation", "meanwhile", "plot", "twist"))
+# A speaker label in front of a headline or hook ('Peter Thiel: …'): the
+# name is attribution, not part of the claim the hook makes.
+_SPEAKER_PREFIX = re.compile(
+    r"^\s*(?:[A-Z][\w'’.\-]*\s+){0,3}[A-Z][\w'’.\-]*\s*:\s*(?:/\s*)?(?=\S)")
+_EDITORIAL_ID = re.compile(r"^(eg_.+?__\d+)_\d+$")
 
 # Importance: rank 1 are the judges' major misses, 3 the finishing notes.
 # Within a rank, ORDER decides which notes lead the one-line summary.
@@ -224,14 +254,19 @@ def _motion_lines(item):
         return lines
 
 
-def moments(edl, duration=None):
-    """The program's designed graphic moments, in start order:
-    [{"id", "kind", "template", "category", "start", "end", "lines",
-    "item"}]. A whole-program layer (a caption track, a texture spanning the
-    program), the persistent headline band and transition textures are not
-    moments; ``headline`` returns the headline band separately."""
+def _layers(edl, duration=None):
+    """(moments, bands) of the program's designed text and graphics.
+
+    Moments are the designed graphic moments, in start order: [{"id",
+    "kind", "template", "category", "start", "end", "lines", "item"}].
+    Bands are the layout layers that carry text for (nearly) the whole
+    program — the persistent headline template, a set_editorial_graphic
+    headline, any text layer over 80% of the runtime — as [{"id", "start",
+    "end", "lines"}]: layout, not graphics, so they are never budgeted, but
+    their words still count for the hook. Caption tracks, transition and
+    texture layers are neither."""
     dur = _duration(edl) if duration is None else float(duration)
-    out = []
+    out, bands = [], []
     for item in edl.get("motion") or []:
         if not isinstance(item, dict):
             continue
@@ -240,36 +275,72 @@ def moments(edl, duration=None):
         category = str(spec.get("category") or ("custom" if tpl == "html" else ""))
         if tpl.startswith("caption") or category in ("caption", "transition"):
             continue
-        if spec.get("persistent"):
-            continue
         start = _f(item.get("start"))
         end = _f(item.get("end"), dur) if item.get("end") is not None else dur
-        if dur > 0 and (start >= dur - 0.05 or end - start >= 0.8 * dur):
+        if spec.get("persistent") or (
+                dur > 0 and end - start >= 0.8 * dur and start < dur - 0.05):
+            lines = _motion_lines(item)
+            if lines:
+                bands.append({"id": str(item.get("id") or tpl), "start": start,
+                              "end": min(end, dur) if dur else end,
+                              "lines": lines})
+            continue
+        if dur > 0 and start >= dur - 0.05:
             continue
         out.append({"id": str(item.get("id") or tpl), "kind": "motion",
                     "template": tpl, "category": category,
                     "start": start, "end": min(end, dur) if dur else end,
                     "lines": _motion_lines(item), "item": item})
-    seen = set()
+    groups, order = {}, []
     for item in edl.get("texts") or []:
         if not isinstance(item, dict) or not str(item.get("text") or "").strip():
             continue
         start, end = _f(item.get("start")), _f(item.get("end"))
         key = (round(start, 2), round(end, 2))
-        if key in seen:             # a title + subtitle pair is one moment
-            for m in out:
-                if m["kind"] == "text" and (round(m["start"], 2),
-                                            round(m["end"], 2)) == key:
-                    m["lines"].append(("text", str(item["text"])))
+        text = str(item["text"])
+        # set_editorial_graphic writes one text layer per WORD
+        # ('eg_<id>__<row>_<word>'): a row reads as one line
+        row = _EDITORIAL_ID.match(str(item.get("id") or ""))
+        row = row.group(1) if row else None
+        group = groups.get(key)
+        if group is None:          # a title + subtitle pair is one moment
+            tpl = "text:" + str(item.get("template") or "title")
+            group = groups[key] = {
+                "id": str(item.get("id") or tpl), "kind": "text",
+                "template": tpl, "category": "type", "start": start,
+                "end": end, "lines": [], "item": item, "_row": None}
+            order.append(key)
+        if row is not None and row == group["_row"] and group["lines"]:
+            group["lines"][-1] = ("text", group["lines"][-1][1] + " " + text)
+        else:
+            group["lines"].append(("text", text))
+        group["_row"] = row
+    for key in order:
+        m = groups[key]
+        m.pop("_row", None)
+        if dur > 0 and m["end"] - m["start"] >= 0.8 * dur \
+                and m["start"] < dur - 0.05:
+            bands.append({"id": m["id"], "start": m["start"],
+                          "end": min(m["end"], dur), "lines": m["lines"]})
             continue
-        seen.add(key)
-        tpl = "text:" + str(item.get("template") or "title")
-        out.append({"id": str(item.get("id") or tpl), "kind": "text",
-                    "template": tpl, "category": "type",
-                    "start": start, "end": end,
-                    "lines": [("text", str(item["text"]))], "item": item})
+        if dur > 0 and m["start"] >= dur - 0.05:
+            continue
+        out.append(m)
     out.sort(key=lambda m: (m["start"], m["end"]))
-    return out
+    bands.sort(key=lambda b: b["start"])
+    return out, bands
+
+
+def moments(edl, duration=None):
+    """The program's designed graphic moments, in start order (see
+    ``_layers``); headline bands and other whole-program layers are not
+    moments."""
+    return _layers(edl, duration)[0]
+
+
+def bands(edl, duration=None):
+    """The whole-program text bands (headline layers), see ``_layers``."""
+    return _layers(edl, duration)[1]
 
 
 def headline(edl):
@@ -292,23 +363,41 @@ def shown(lines, value_keys=("value",)):
     """(content tokens in order, hero tokens) of a moment's lines. Hero:
     numbers, *starred* words and a counter's value — or, with nothing
     starred, the one content word of a single-word claim (an unstarred slam).
-    Kickers, labels and other side lines are never hero words."""
+    Kickers, labels, captions and other side lines are never hero words —
+    not even their numbers ('Steve Jobs, 1983' in a kicker and 'Apple Lisa,
+    1983' in an image caption identify, they do not slam)."""
     seq, hero, starred_any = [], set(), False
     main = []
     for key, text in lines:
         toks = _tokens(text)
         seq += [t for t in _content(toks)]
-        hero.update(t for t in toks if any(c.isdigit() for c in t))
         if key in value_keys:
             hero.update(_content(toks))
+        if key in SIDE_KEYS:
+            continue
+        hero.update(t for t in toks if any(c.isdigit() for c in t))
         for starred in _STAR_RE.findall(str(text)):
             starred_any = True
             hero.update(_content(_tokens(starred)))
-        if key not in SIDE_KEYS:
-            main += _content(toks)
+        main += _content(toks)
     if not starred_any and len(set(main)) == 1:
         hero.update(main)
     return seq, hero
+
+
+def _claim(text):
+    """A hook or headline line without its speaker label ('Peter Thiel: …')."""
+    return _SPEAKER_PREFIX.sub("", _plain(text), count=1)
+
+
+def _main_tokens(lines):
+    """Content tokens of a moment's claim lines (no side lines, no speaker
+    label): what a hook or headline actually shows the viewer."""
+    out = []
+    for key, text in lines:
+        if key not in SIDE_KEYS:
+            out += _content(_tokens(_claim(text)))
+    return out
 
 
 def _main_text(m):
@@ -338,16 +427,24 @@ class _Program:
                 voice = None
             self.kept = self.tl.kept_words(self.words, rescue=True, voice=voice)
 
-    def joins(self):
+    def joins(self, covered=False):
         """[(i, program_t, src_end, src_start)] for every real cut between
-        kept spans (a split at the same source time is no cut)."""
+        kept spans (a split at the same source time is no cut). A cut with
+        an insert spliced at it (B-roll, a clip) is left out unless
+        ``covered``: the viewer never sees the two takes meet."""
         out = []
+        pre = 0.0
+        ins_at = [at for at, _d in (getattr(self.tl, "ins", None) or [])]
         for i in range(len(self.keep) - 1):
+            if i < len(self.tl.seg_out_len):
+                pre += self.tl.seg_out_len[i]
             a_end, b_start = self.keep[i][1], self.keep[i + 1][0]
             if abs(b_start - a_end) < 0.02:
                 continue
             t = self.tl.offsets[i + 1] if i + 1 < len(self.tl.offsets) else None
             if t is None:
+                continue
+            if not covered and any(abs(at - pre) < 0.05 for at in ins_at):
                 continue
             out.append((i, float(t), a_end, b_start))
         return out
@@ -373,14 +470,15 @@ def _hook_moments(ms):
             and m["template"] not in ("lower_third", "text:lower_third")]
 
 
-def _hook_question_notes(hook_ms, head):
-    sources = list(hook_ms)
-    if head is not None and _f(head.get("start")) <= HOOK_GRAPHIC_START_S:
-        sources.append({"id": str(head.get("id") or "headline"),
-                        "start": _f(head.get("start")),
-                        "lines": _motion_lines(head)})
-    for m in sources:
-        text = _plain(_main_text(m))
+def _hook_bands(bands):
+    return [b for b in bands if b["start"] <= HOOK_GRAPHIC_START_S + 1e-6]
+
+
+def _hook_question_notes(hook_ms, bands):
+    for m in list(hook_ms) + _hook_bands(bands):
+        # 'Peter Thiel: Where did progress go?' is still a generic question:
+        # the speaker label is attribution, not something the question names
+        text = _claim(_main_text(m))
         if not text.rstrip(" .…\"'”’").endswith("?"):
             continue
         if any(c.isdigit() for c in text) or _names_something(text):
@@ -413,20 +511,23 @@ def _names_something(text):
                for w in words[1:])
 
 
-def _hero_repeat_notes(ms, hook_ms, head):
+def _hero_repeat_notes(ms, hook_ms, bands):
     notes = []
     hook_ids = {m["id"] for m in hook_ms}
     hook_tokens = {}
-    for m in hook_ms:
-        for tok in shown(m["lines"])[0]:
+    # What the opening SHOWS: the hook graphics' and an opening headline
+    # band's claim words. A kicker naming the speaker and year is not a
+    # spent word.
+    for m in list(hook_ms) + _hook_bands(bands):
+        for tok in _main_tokens(m["lines"]):
             hook_tokens.setdefault(tok, m)
     earlier = []                  # (moment, hero tokens) of later graphics
-    if head is not None:
-        hero = shown(_motion_lines(head))[1]
+    for band in bands:
+        if band["start"] <= HOOK_GRAPHIC_START_S + 1e-6:
+            continue              # already read as the hook
+        hero = shown(band["lines"])[1]
         if hero:
-            earlier.append(({"id": str(head.get("id") or "headline"),
-                             "start": _f(head.get("start")),
-                             "template": "headline"}, hero))
+            earlier.append((dict(band, template="headline"), hero))
     spent, repeated = [], []
     for m in ms:
         if m["id"] in hook_ids or m["template"] in (
@@ -559,11 +660,15 @@ def _hook_open_notes(edl, index, prog):
 
 # ── GRAPHIC BUDGET ────────────────────────────────────────────────────────
 
-def _series(ms):
-    """Moments with same-template runs (a stat run) merged into one."""
+def _series(ms, solo=()):
+    """Moments with same-template runs (a stat run, one big word per list
+    item) merged into one. Moments whose id is in ``solo`` (the hook) stand
+    alone: a hook slam followed by a list run is two moments."""
     out = []
     for m in ms:
         if out and out[-1]["template"] == m["template"] and \
+                m["id"] not in solo and \
+                not any(i in solo for i in out[-1]["ids"]) and \
                 m["start"] - out[-1]["end"] <= SERIES_GAP_S:
             out[-1] = dict(out[-1], end=max(out[-1]["end"], m["end"]),
                            ids=out[-1]["ids"] + [m["id"]])
@@ -688,10 +793,10 @@ def _restate_notes(ms, prog, hook_ids, payoff):
     return notes, {m["id"] for m in lists + restated}
 
 
-def _budget_notes(ms, duration, drop_first):
+def _budget_notes(ms, duration, drop_first, hook_ids=()):
     if duration <= 0 or not ms:
         return []
-    runs = _series(ms)
+    runs = _series(ms, solo=hook_ids)
     allowed = max(2, int(math.ceil(duration / GRAPHIC_EVERY_S - 1e-9)))
     covered = _coverage(ms, duration)
     share = covered / duration
@@ -829,7 +934,7 @@ def _type_notes(edl, ms):
     return notes
 
 
-def _identify_notes(ms, hook_ms, head):
+def _identify_notes(ms, hook_ms):
     notes = []
     hook_ids = {m["id"] for m in hook_ms}
     for m in ms:
@@ -838,7 +943,7 @@ def _identify_notes(ms, hook_ms, head):
         for key, text in m["lines"]:
             for line in re.split(r"\s*(?:/|\n)\s*", str(text)):
                 hit = _LABEL_LINE.match(line)
-                if hit:
+                if hit and hit.group(1).lower() not in LABEL_WORDS:
                     name = hit.group(1)
                     notes.append(_note(
                         "label_reads_as_dialogue", m["start"],
@@ -855,9 +960,9 @@ def _identify_notes(ms, hook_ms, head):
     return notes
 
 
-def _lower_third_notes(ms, hook_ms, head):
+def _lower_third_notes(ms, hook_ms, bands):
     thirds = [m for m in ms if m["template"] in ("lower_third", "text:lower_third")]
-    if not thirds or not (hook_ms or head is not None):
+    if not thirds or not (hook_ms or bands):
         return []
     m = thirds[0]
     text = " / ".join(t for _k, t in m["lines"])
@@ -874,7 +979,36 @@ def _lower_third_notes(ms, hook_ms, head):
 
 # ── PAYOFF ────────────────────────────────────────────────────────────────
 
-def _payoff_notes(prog, payoff):
+def _tail_filled(ms, prog, t0):
+    """Is the program after ``t0`` (the last word) mostly carried by a
+    designed moment (a requested CTA, the payoff lockup) or a spliced clip?
+    Then it is not a dead tail."""
+    dur = prog.duration
+    if dur - t0 <= 0:
+        return True
+    spans = [{"start": max(t0, m["start"]), "end": m["end"]}
+             for m in ms if m["end"] > t0]
+    try:
+        spans += [{"start": max(t0, a), "end": a + d}
+                  for a, d in prog.tl.insert_positions() if a + d > t0]
+    except Exception:  # noqa: BLE001
+        pass
+    return _coverage(spans, dur) >= 0.5 * (dur - t0)
+
+
+def _reaction_shot(edl, index, prog):
+    a, prev_end = prog.keep[-1][0], prog.keep[-2][1]
+    if abs(a - prev_end) >= 0.02:
+        return True
+    before, after = _shot_at(index, a - 0.01), _shot_at(index, a + 0.01)
+    if before is not None and after is not None and before != after:
+        return True
+    frame = edl.get("frame") if isinstance(edl.get("frame"), dict) else {}
+    return any(abs(_f(_get(span, "t0"), -1.0) - a) < 0.05
+               for span in (frame or {}).get("focus_track") or [])
+
+
+def _payoff_notes(prog, payoff, ms=(), index=None, edl=None):
     notes = []
     dur = prog.duration
     if prog.kept and dur > 0:
@@ -886,7 +1020,14 @@ def _payoff_notes(prog, payoff):
             after = [w for w in prog.words
                      if src_end is not None and _f(_get(w, "t0")) >= src_end - 1e-3]
             nxt = min(after, key=lambda w: _f(_get(w, "t0"))) if after else None
-            if nxt is None or keep_end is None:
+            src_dur = _f(((index or {}).get("video") or {}).get("duration"))
+            if nxt is None and keep_end is not None and src_dur > 0 and \
+                    src_dur - keep_end < PAYOFF_HOLD_MIN_S - hold - 1e-6:
+                fix = (f"The source itself ends {max(0.0, src_dur - (src_end or keep_end)):.2f}s "
+                       f"after '{last['w']}', so there is no tail to restore: "
+                       "let the payoff graphic carry the beat into the end "
+                       "card, or end on an earlier line that leaves a pause.")
+            elif nxt is None or keep_end is None:
                 fix = (f"Hold {PAYOFF_HOLD_MIN_S:g}-{PAYOFF_HOLD_MAX_S:g} s "
                        "after the last word: extend the last keep into the "
                        "speaker's natural tail or reaction (restore_range).")
@@ -911,7 +1052,7 @@ def _payoff_notes(prog, payoff):
                 (f"The payoff gets {max(0.0, hold):.2f}s after '{last['w']}' "
                  "before the end card — the punchline has no air."),
                 fix, {"hold_s": round(hold, 2), "last_word": last["w"]}))
-        elif hold > DEAD_TAIL_S:
+        elif hold > DEAD_TAIL_S and not _tail_filled(ms, prog, _f(last["t1"])):
             notes.append(_note(
                 "payoff_hold", _f(last["t1"]),
                 (f"{hold:.1f}s run on after the last word ('{last['w']}') "
@@ -919,7 +1060,10 @@ def _payoff_notes(prog, payoff):
                 (f"Trim the tail to {PAYOFF_HOLD_MIN_S:g}-{PAYOFF_HOLD_MAX_S:g} s "
                  "after the last word (a reaction may take ~1.5 s)."),
                 {"hold_s": round(hold, 2), "last_word": last["w"]}))
-        if len(prog.keep) >= 2:
+        # A closing reaction is its own shot: a separate take after a real
+        # cut, a camera change, or the frame re-aimed at the listener. A
+        # keep merely split at the same source time is the line's own tail.
+        if len(prog.keep) >= 2 and _reaction_shot(edl or {}, index or {}, prog):
             a, b = prog.keep[-1]
             inside = [w for w in prog.words
                       if a < (_f(_get(w, "t0")) + _f(_get(w, "t1"))) / 2.0 < b]
@@ -952,13 +1096,17 @@ def _payoff_notes(prog, payoff):
 
 # ── TRIM RHYTHM ───────────────────────────────────────────────────────────
 
+def _norm(word):
+    return re.sub(r"[^\w']", "", str(word or "").lower())
+
+
 def _trim_notes(prog):
     if not prog.kept:
         return []
     collisions, dropped = [], []
     rescued = [(str(w["w"]), _f(w.get("src_t0"))) for w in prog.kept
                if w.get("heard")]
-    for i, t, a_end, b_start in prog.joins():
+    for i, t, a_end, b_start in prog.joins(covered=True):
         before = [w for w in prog.kept if _f(w["t1"]) <= t + 1e-3]
         after = [w for w in prog.kept if _f(w["t0"]) >= t - 1e-3]
         if not before or not after:
@@ -975,8 +1123,15 @@ def _trim_notes(prog):
                     tok == str(_get(w, "w")) and w0 - 1e-3 <= s0 <= w1 + 1e-3
                     for tok, s0 in rescued):
                 removed.append(str(_get(w, "w")))
-        toks = [re.sub(r"[^\w']", "", r.lower()) for r in removed]
-        if 1 <= len(toks) <= 2 and all(tk in CLAUSE_WORDS for tk in toks) \
+        toks = [_norm(r) for r in removed]
+        # A stutter or restart cut ('of the [the] world', '[to] to go')
+        # removes a repeat of the words either side: nothing is lost.
+        n = len(toks)
+        kept_before = [_norm(w["w"]) for w in before[-n:]] if n else []
+        kept_after = [_norm(w["w"]) for w in after[:n]] if n else []
+        repeat = bool(n) and (toks == kept_before or toks == kept_after)
+        if 1 <= n <= 2 and not repeat \
+                and all(tk in CLAUSE_WORDS for tk in toks) \
                 and not _CLAUSE_END.search(str(prev["w"]).strip()) \
                 and not _CLAUSE_END.search(removed[-1].strip()):
             dropped.append((t, prev["w"], " ".join(removed), nxt["w"]))
@@ -1055,7 +1210,12 @@ def _zoom_notes(edl, prog):
 
 # ── FRAME ─────────────────────────────────────────────────────────────────
 
-def _frame_notes(edl, index, duration):
+def _frame_notes(edl, index, duration, designed=True):
+    # Only a designed short (graphics or a headline band) is held to the
+    # premium frame-and-grade standard: a plain clip the user only asked to
+    # caption or trim is theirs ("do only what the user asked").
+    if not designed:
+        return []
     fx = edl.get("effects") or {}
     if fx.get("grade") or fx.get("grade_custom") or fx.get("custom"):
         return []
@@ -1137,23 +1297,23 @@ def review(edl, index=None, force=False, request_text=None):
     if not force and not short_form(edl, index, duration):
         return []
     prog = _Program(edl, index)
-    ms = moments(edl, duration)
-    head = headline(edl)
+    ms, bands_ = _layers(edl, duration)
     hook_ms = _hook_moments(ms)
     hook_ids = {m["id"] for m in hook_ms}
     payoff = _payoff_moment(ms, duration)
     notes = []
     checks = (
-        lambda: _hook_question_notes(hook_ms, head),
-        lambda: _hero_repeat_notes(ms, hook_ms, head),
+        lambda: _hook_question_notes(hook_ms, bands_),
+        lambda: _hero_repeat_notes(ms, hook_ms, bands_),
         lambda: _hook_open_notes(edl, index, prog),
-        lambda: _payoff_notes(prog, payoff),
-        lambda: _identify_notes(ms, hook_ms, head),
-        lambda: _lower_third_notes(ms, hook_ms, head),
+        lambda: _payoff_notes(prog, payoff, ms, index, edl),
+        lambda: _identify_notes(ms, hook_ms),
+        lambda: _lower_third_notes(ms, hook_ms, bands_),
         lambda: _type_notes(edl, ms),
         lambda: _trim_notes(prog),
         lambda: _zoom_notes(edl, prog),
-        lambda: _frame_notes(edl, index, duration),
+        lambda: _frame_notes(edl, index, duration,
+                             designed=bool(ms or bands_)),
     )
     restated_ids = set()
     try:
@@ -1163,7 +1323,7 @@ def review(edl, index=None, force=False, request_text=None):
         print(f"[edit_review] restate check skipped: {type(exc).__name__}",
               flush=True)
     try:
-        notes += _budget_notes(ms, duration, restated_ids)
+        notes += _budget_notes(ms, duration, restated_ids, hook_ids)
     except Exception as exc:  # noqa: BLE001
         print(f"[edit_review] budget check skipped: {type(exc).__name__}",
               flush=True)

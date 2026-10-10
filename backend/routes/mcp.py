@@ -795,7 +795,9 @@ Two things are different from a normal tool session, and both matter:
       unasked is not.
    c. HOOK: a pattern interrupt within 0.1-0.6 s and the hook line as text by
       1.5 s — hook_title or word_slam (leave mute_captions unset: the
-      captions drop just the spoken words it shows), off the caption band;
+      captions drop just the spoken words it shows), off the caption band,
+      written from the clip's strongest line or statistic (never a generic
+      question) and never showing a word a later graphic slams;
       a punch-in only when the opening earns it, and no reflexive opening
       whoosh — a sound only when the title has a real entrance that earns
       one.
@@ -835,7 +837,8 @@ Two things are different from a normal tool session, and both matter:
       on the visual frame. audit_audio_mix lists each sound's level and
       placement checks. search_sfx only for a specific sound the user asks
       for.
-   g. ENDING: hold the payoff 1.0-1.5 s; a native CTA (comment_cta,
+   g. ENDING: the payoff locks its number and noun together and holds
+      0.6-1.5 s after the last word; a native CTA (comment_cta,
       follow_cta, save_cta) after it only when the user or brief asks for
       one, filled only with the handle, keyword and offer they supplied —
       never an invented handle, verified badge, keyword or promised

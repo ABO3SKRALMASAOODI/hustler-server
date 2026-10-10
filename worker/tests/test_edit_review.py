@@ -344,11 +344,28 @@ def test_the_payoff_hold_fix_reads_how_much_tail_the_source_has():
 
 def test_a_closing_reaction_under_a_second_is_flagged():
     words = _words(FILLER)
-    short = _edl(keep=[[0.0, 30.5], [30.5, 31.1]])
+    # a separate take after a real cut
+    short = _edl(keep=[[0.0, 30.5], [33.0, 33.6]])
     note = _note(short, "reaction_button_short", {"words": words})
     assert note["evidence"]["seconds"] == 0.6
-    held = _edl(keep=[[0.0, 30.5], [30.5, 31.8]])
+    held = _edl(keep=[[0.0, 30.5], [33.0, 34.3]])
     assert "reaction_button_short" not in _codes(held, {"words": words})
+    # Elon: the same source time, but the frame re-aims at the listener
+    # (a new focus span) or the camera changes: still a reaction shot
+    reaimed = _edl(keep=[[0.0, 30.5], [30.5, 31.1]])
+    reaimed["frame"]["focus_track"] = [{"t0": 0.0, "t1": 30.5, "x": 0.4},
+                                       {"t0": 30.5, "t1": 40.0, "x": 0.57}]
+    assert "reaction_button_short" in _codes(reaimed, {"words": words})
+    shots = {"words": words, "shots": [{"id": 0, "start": 0.0, "end": 30.5},
+                                       {"id": 1, "start": 30.5, "end": 60.0}]}
+    assert "reaction_button_short" in _codes(
+        _edl(keep=[[0.0, 30.5], [30.5, 31.1]]), shots)
+
+
+def test_a_keep_split_at_the_same_source_time_is_no_reaction():
+    words = _words(FILLER)
+    split = _edl(keep=[[0.0, 30.5], [30.5, 31.1]])     # the line's own tail
+    assert "reaction_button_short" not in _codes(split, {"words": words})
 
 
 def test_a_payoff_number_needs_its_noun():
@@ -460,13 +477,139 @@ def test_no_note_ever_asks_for_a_zoom_or_a_sound():
 # ── 7. frame ─────────────────────────────────────────────────────────────
 
 def test_full_bleed_without_a_grade_is_a_taste_note():
-    note = _note(_edl(grade=None), "frame_uncommitted")
+    designed = [_mg("a", "word_slam", 6.0, 7.0, text="*one*")]
+    note = _note(_edl(grade=None, motion=designed), "frame_uncommitted")
     assert "taste call, not a default" in note["fix"]
-    assert "frame_uncommitted" not in _codes(_edl(grade="warm"))
-    carded = _edl(grade=None)
+    assert "frame_uncommitted" not in _codes(_edl(grade="warm", motion=designed))
+    # a plain clip the user only asked to caption or trim is theirs
+    assert "frame_uncommitted" not in _codes(_edl(grade=None))
+    carded = _edl(grade=None, motion=designed)
     carded["effects"]["picture_cards"] = [
         {"id": "card", "start": 0.0, "end": 30.0, "box": [0.06, 0.3, 0.94, 0.68]}]
     assert "frame_uncommitted" not in _codes(carded)
+
+
+# ── 7b. the guidance's own devices draw no note ──────────────────────────
+
+def test_a_kicker_naming_speaker_and_year_spends_no_hero_word():
+    # the playbook's example: kicker 'Steve Jobs, 1983' and later an image
+    # card identifying 'Apple Lisa, 1983' — both identify, neither slams
+    hook = _mg("hook", "hook_title", 0.0, 2.6,
+               text="Every computer has used *weird* type",
+               kicker="Steve Jobs, 1983")
+    lisa = _mg("lisa", "image_card", 14.8, 17.0, caption="Apple Lisa, 1983")
+    assert _codes(_edl(motion=[hook, lisa])) == []
+    # a number in the hook's CLAIM still spends a later number slam
+    spend = _mg("hook", "hook_title", 0.0, 2.6, text="*140* characters?")
+    num = _mg("num", "counter", 26.0, 28.0, value="140", label="characters")
+    assert "hook_spends_hero_word" in _codes(_edl(motion=[spend, num]))
+
+
+def test_a_list_run_after_a_hook_slam_is_one_moment_at_speech_spacing():
+    hook = _mg("hook", "hook_title", 0.0, 2.24,
+               text="They promised us *flying cars*")
+    # list items said ~1.75 s apart: gaps of 1.1 s between the slams
+    items = [_mg(f"i{k}", "word_slam", 3.07 + k * 1.75, 3.70 + k * 1.75,
+                 text=f"*{w}*")
+             for k, w in enumerate(("ROCKETS", "SUPERSONIC", "UNDERWATER",
+                                    "MEDICINES"))]
+    rest = [_mg("vs", "versus_split", 11.3, 14.7, left="1960s", right="TODAY"),
+            _mg("e", "word_slam", 20.0, 21.6, text="*enough*"),
+            _mg("n", "counter", 28.6, 30.0, value="140", label="characters")]
+    assert "graphic_budget" not in _codes(_edl(motion=[hook] + items + rest))
+    runs = edit_review._series(edit_review.moments(_edl(motion=[hook] + items)),
+                               solo={"hook"})
+    assert [r["ids"] for r in runs] == [["hook"], ["i0", "i1", "i2", "i3"]]
+    # a word_slam hook never joins the run that follows it
+    slam_hook = dict(hook, template="word_slam")
+    runs = edit_review._series(edit_review.moments(_edl(motion=[slam_hook] + items)),
+                               solo={"hook"})
+    assert runs[0]["ids"] == ["hook"]
+
+
+def _editorial_headline(text, dur=30.0, speaker="Peter Thiel", per_row=5):
+    """The text layers set_editorial_graphic(kind='headline') writes: one
+    'title' layer PER WORD, ids 'eg_<id>__<row>_<word>', the speaker label
+    first, all over the whole window (built by hand so the test does not
+    depend on font metrics)."""
+    words = [speaker + ":"] + text.split()
+    return [{"id": f"eg_hl__{k // per_row}_{k % per_row}", "template": "title",
+             "text": w, "start": 0.0, "end": dur}
+            for k, w in enumerate(words)]
+
+
+def test_an_editorial_headline_band_is_layout_but_still_the_hook():
+    claim = _editorial_headline("They promised us flying cars")
+    edl = _edl(texts=claim,
+               motion=[_mg(f"s{k}", "word_slam", 5 + 8 * k, 6 + 8 * k,
+                           text=f"*w{k}*") for k in range(3)])
+    # the whole-program headline is not a graphic over 100% of the runtime
+    assert "graphic_budget" not in _codes(edl)
+    assert [m["id"] for m in edit_review.moments(edl)] == ["s0", "s1", "s2"]
+    band = edit_review.bands(edl)
+    # each row of per-word layers reads as one line
+    assert [t for _k, t in band[0]["lines"]] == [
+        "Peter Thiel: They promised us flying", "cars"]
+    # 'Peter Thiel: Where did progress go?' is still a generic question
+    generic = _editorial_headline("Where did progress go?")
+    note = _note(_edl(texts=generic), "hook_generic_question")
+    assert note["rank"] == 1 and "Where did progress go?" in note["message"]
+    # and a headline that shows the word a later slam spends is a spent hook
+    spent = _edl(texts=_editorial_headline("Computer fonts were garbage"),
+                 motion=[_mg("g", "word_slam", 13.24, 14.1, text="*garbage*")])
+    assert "hook_spends_hero_word" in _codes(spent)
+
+
+def test_the_editorial_headline_layers_match_what_the_tool_writes():
+    # the hand-built layers above follow editorial_graphics' id scheme
+    import editorial_graphics
+    real = editorial_graphics.compose(
+        id="hl", kind="headline", text="They promised us flying cars",
+        start=0, end=30, secondary=None, eyebrow=None, palette="ink", box=None,
+        motion="settle", W=1080, H=1920, motion_motif=None, treatment="panel",
+        mute_captions=False, speaker="Peter Thiel", font_size=None, fit="auto")
+    texts = real["texts"]
+    assert texts[0]["text"] == "Peter Thiel:"
+    assert all(edit_review._EDITORIAL_ID.match(t["id"]) for t in texts)
+    band = edit_review.bands(_edl(texts=texts))
+    assert " ".join(t for _k, t in band[0]["lines"]) == \
+        "Peter Thiel: They promised us flying cars"
+
+
+def test_a_stutter_cut_drops_no_clause_word():
+    words = ([{"w": "of", "t0": 0.2, "t1": 0.4}, {"w": "the", "t0": 0.45, "t1": 0.6},
+              {"w": "the", "t0": 0.7, "t1": 0.85}, {"w": "world.", "t0": 0.9, "t1": 1.3}]
+             + _words(FILLER, start=1.5))
+    edl = _edl(keep=[[0.0, 0.65], [0.86, 31.0]])
+    assert "clause_word_dropped" not in _codes(edl, {"words": words})
+
+
+def test_an_editorial_label_with_a_colon_is_not_a_dialogue_label():
+    lesson = _mg("l", "phrase_build", 10.0, 12.0,
+                 rows=[{"text": "Lesson:"}, {"text": "*ship* faster"}])
+    assert "label_reads_as_dialogue" not in _codes(_edl(motion=[lesson]))
+
+
+def test_a_requested_cta_in_the_tail_is_not_a_dead_tail():
+    words = _words(FILLER)                      # last word ends at 30.18
+    cta = _mg("cta", "save_cta", 30.5, 34.0)
+    assert "payoff_hold" not in _codes(_edl(motion=[cta], dur=34.0),
+                                       {"words": words})
+    assert "payoff_hold" in _codes(_edl(dur=34.0), {"words": words})
+
+
+def test_the_payoff_hold_fix_is_honest_when_the_source_ends():
+    words = _words(FILLER)
+    idx = {"words": words, "video": {"duration": 30.5}}
+    note = _note(_edl(dur=30.5), "payoff_hold", idx)
+    assert "source itself ends" in note["fix"] and "restore_range" not in note["fix"]
+
+
+def test_a_jump_cut_under_a_spliced_insert_is_not_a_hook_jump_cut():
+    edl = _edl(keep=[[0.0, 0.8], [1.5, 30.0]])
+    edl["inserts"] = [{"id": "b1", "at_output_s": 0.8, "duration_s": 1.2,
+                       "storage_key": "x.mp4"}]
+    assert "hook_jump_cut" not in _codes(edl, {"words": _words(FILLER)})
 
 
 # ── 8. advisory plumbing ─────────────────────────────────────────────────
@@ -601,6 +744,12 @@ def test_worker_skills_plugin_and_core_prompt_carry_the_same_rules():
         assert "taste call" in text
         assert "lower third" in text or "lower_third" in text
     assert "150-250 ms" in worker["cutting"]
+    # the MCP workflow (what plugin and MCP editors read first) agrees
+    mcp = _read(_ROOT, "backend", "routes", "mcp.py")
+    assert "strongest line or statistic" in mcp and "generic question" in mcp
+    assert "a word a later graphic slams" in mcp
+    assert "holds 0.6-1.5 s after the last word" in mcp
+    assert "hold the payoff 1.0-1.5 s" not in mcp
     assert "earn its place" in worker["review"]
     assert "earn its place" in plugin["references/review.md"]
     # the playbook examples no longer spend the hero word in the hook
