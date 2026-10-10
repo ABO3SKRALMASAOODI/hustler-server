@@ -230,6 +230,8 @@ def test_visual_only_freeze_keeps_program_clock_and_audio(monkeypatch):
                       "scale": 1.0, "fit": "cover"}
     assert "speech, source audio, music" in result
     assert "Nothing after it shifts" in result
+    # an explicit motion=None is a still freeze, never the legacy drift
+    assert "Ken Burns" not in result
 
 
 def test_new_inserts_preserve_the_whole_asset_by_default():

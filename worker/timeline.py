@@ -58,6 +58,16 @@ def _ins_tuple(i):
     return (float(i.at_output_s), float(i.duration_s))
 
 
+def is_hold_insert(i):
+    """Is this insert a payoff hold (schemas.InsertItem.hold): an image the
+    renderer replaces with the previous block's last composed frame?"""
+    if isinstance(i, dict):
+        kind, hold = i.get("kind"), i.get("hold")
+    else:
+        kind, hold = getattr(i, "kind", None), getattr(i, "hold", None)
+    return kind == "image" and isinstance(hold, dict)
+
+
 def _ins_sort_key(i):
     """Program order of the inserts, and ONLY at_output_s decides it.
 
@@ -2094,6 +2104,16 @@ def transition_junctions(edl, index, n_blocks=None):
             # junction k sits at the START of block k+1
             if any(abs(starts[k + 1] - e) < 0.06 for e in ends):
                 protected.add(k)
+    # A PAYOFF HOLD IS NOT A CUT either (round 7): the renderer shows the
+    # footage block before it stopped on its last composed frame
+    # (renderer.hold_video_parts), so a dip or a whip there would break the
+    # one join the hold exists to hide.
+    ins_sorted = sorted(inserts, key=_ins_sort_key)
+    for k in range(n_junctions):
+        kind, j = blocks[k + 1]
+        if kind == "ins" and blocks[k][0] == "seg" and j < len(ins_sorted) \
+                and is_hold_insert(ins_sorted[j]):
+            protected.add(k)
 
     if scope == "every_cut":
         return selected(set(range(n_junctions)) - protected)

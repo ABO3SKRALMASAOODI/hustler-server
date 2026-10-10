@@ -112,8 +112,10 @@ the speaker's meaning.
 THE PAYOFF: the largest accented lockup in the short, the number and its
 noun together ("140 / CHARACTERS", never a bare 140), face-safe. Where the
 story set up a device earlier, rhyme with it (a 1960s-vs-TODAY split pays
-off as FLYING CARS vs 140 CHARACTERS). Hold 0.6–1.5 s after the last word
-before the end card instead of cutting away on the last syllable; a sound
+off as FLYING CARS vs 140 CHARACTERS). Hold 0.8–1.5 s after the last word
+before the end card instead of cutting away on the last syllable (the
+source's natural tail, else a held frame over room tone:
+add_freeze_frame audio_mode='hold'); a sound
 or a camera move joins only when the landing clearly earns one, and a
 reaction button gets 1.0–1.5 s or is left out.
 
@@ -138,7 +140,7 @@ than forcing an abrupt cut.
 - Hook text that prints the payoff, a generic question, or a word a later
   graphic slams; no hook text at all.
 - An opening on a word fragment, a disfluency, a jump cut or a profile.
-- A payoff number without its noun, or under 0.6 s of air before the end
+- A payoff number without its noun, or under 0.8 s of air before the end
   card.
 - Long static stretches between graphics; or changes on a timer that ignore
   what is being said.
@@ -150,7 +152,7 @@ Watch the opening without assumed context and measure: first visual event
 time, hook text visible by 1.5 s, speaker on screen and facing camera by
 ~0.3 s, no cut in the first 1.5 s. Scan the program for holds over ~2 s
 without design. Trace each escalation to the payoff, check the payoff hold
-(0.6–1.5 s after the last word), the CTA placement and the loop frame in
+(0.8–1.5 s after the last word), the CTA placement and the loop frame in
 the complete preview. Read the render's EARN ITS PLACE advisory: it names a
 generic or spent hook, a fragment opening and a short payoff hold by time
 (advisory: keep if intentional).

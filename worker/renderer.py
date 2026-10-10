@@ -70,6 +70,12 @@ AUDIO_NORM = "aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo"
 # off the clock a join may still gap, so those sides fade over JOIN_FADE_S.
 JOIN_XFADE_S = 0.012
 JOIN_FADE_S = 0.006
+# Payoff holds (round 7): the kept sound fades into the hold's room tone
+# over this long (a word's or a laugh's decay, never a chop), and the room
+# tone itself fades in over HOLD_TONE_FADE_S.
+HOLD_FADE_S = 0.15
+HOLD_TONE_FADE_S = 0.05
+HOLD_DIM_EASE_S = 0.3
 _RENDER_DETAIL = ContextVar("render_detail", default=None)
 _RENDER_JOB_TYPE = ContextVar("render_job_type", default=None)
 CANVAS_MAX_DIRECT_INPUTS = 8
@@ -870,6 +876,62 @@ def same_shot_tail(e, index, src_fps, out_fps, src_end, edges=()):
     if any(lo < float(x) <= hi for x in edges or ()):
         return 0.0
     return round(reach, 6)
+
+
+def hold_room_tone(item):
+    """(start, end) source seconds of a hold insert's room tone, or None."""
+    hold = (item or {}).get("hold") if isinstance(item, dict) else None
+    if not isinstance(hold, dict) or (item or {}).get("kind") != "image":
+        return None
+    rt = hold.get("room_tone")
+    try:
+        a, b = float(rt[0]), float(rt[1])
+    except (TypeError, ValueError, IndexError):
+        return None
+    return (a, b) if b - a >= 0.05 else None
+
+
+def hold_video_parts(in_label, out_label, prev_frames, frames, dim=None,
+                     tag="h"):
+    """Filtergraph parts that turn the previous block (``in_label``) into a
+    hold block (``out_label``): its last frame, cloned to ``frames`` frames,
+    dimmed by ``dim`` (0-0.85: luma and chroma scaled toward black) over
+    HOLD_DIM_EASE_S so the dim reads as a settle, never a cut."""
+    last = max(0, int(prev_frames) - 1)
+    n = max(1, int(frames))
+    still = (f"trim=start_frame={last},setpts=PTS-STARTPTS,"
+             f"tpad=stop_mode=clone:stop={n},"
+             f"trim=end_frame={n},setpts=PTS-STARTPTS,setsar=1,"
+             "format=yuv420p")
+    try:
+        k = 1.0 - min(max(float(dim or 0.0), 0.0), 0.85)
+    except (TypeError, ValueError):
+        k = 1.0
+    if k >= 0.999:
+        return [f"[{in_label}]{still}[{out_label}]"]
+    return [
+        f"[{in_label}]{still},split[{tag}a][{tag}b]",
+        f"[{tag}b]lutyuv=y='16+(val-16)*{k:.3f}'"
+        f":u='128+(val-128)*{k:.3f}':v='128+(val-128)*{k:.3f}'[{tag}d]",
+        f"[{tag}a][{tag}d]blend=all_expr='A+(B-A)*min(T/{HOLD_DIM_EASE_S:g},1)'"
+        f",format=yuv420p[{out_label}]"]
+
+
+def hold_audio_chain(room_tone, length):
+    """The filter chain (no labels) that turns a tap of the programme's
+    source sound into a hold's room tone: its [start, end] span, looped
+    when shorter than the hold, faded in, exactly ``length`` long."""
+    a, b = room_tone
+    L = float(length)
+    span = b - a
+    loop = ""
+    if span < L - 1e-3:
+        loop = f",aloop=loop=-1:size={max(1, int(span * 48000))}"
+    fade = min(HOLD_TONE_FADE_S, L / 4.0)
+    return (f"atrim=start={a:.3f}:end={b:.3f},asetpts=PTS-STARTPTS,"
+            f"{AUDIO_NORM}{loop},atrim=start=0:end={L:.6f},"
+            f"afade=t=in:st=0:d={fade:.3f}:curve=qsin,"
+            f"apad=whole_dur={L:.6f},atrim=start=0:end={L:.6f}")
 
 
 def edge_fades(total_s, head=True, tail=True, fade_in=0.0, fade_out=0.0,
@@ -2947,8 +3009,14 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             for v in edl.get("volume", []))
         parts.append(f"[{asrc}]anull{vol_filters}[asrc]")
 
+    # Payoff holds (round 7): an image insert carrying ``hold`` plays the
+    # main source's room tone instead of a silent slice (hold_room_tone).
+    rt_js = [j for j, (_idx, it, hs) in enumerate(insert_inputs)
+             if not hs and n > 0 and hold_room_tone(it) is not None]
+    rt_taps = "".join(f"[art{j}]" for j in rt_js)
     # anullsrc slices for silent blocks (image inserts / clips without audio)
-    n_silent_blocks = sum(1 for _idx, _it, hs in insert_inputs if not hs)
+    n_silent_blocks = sum(1 for j, (_idx, _it, hs) in enumerate(insert_inputs)
+                          if not hs and j not in rt_js)
     if n_silent_blocks:
         if n_silent_blocks == 1:
             parts.append(f"[{silence_idx}:a]anull[sil0]")
@@ -3240,6 +3308,24 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             crossfade=not speed and bool(blk_len))
     else:
         jx_l = jx_r = jf_l = jf_r = [0.0] * n
+    # Payoff holds (round 7): a hold insert right after a kept segment shows
+    # that block's LAST composed frame (crop, card, grade), and the
+    # segment's sound fades into the hold's room tone over HOLD_FADE_S (a
+    # word's or a laugh's decay) instead of the few-ms insert fade.
+    hold_prev = {}                      # insert j -> segment i it holds
+    for k, (kind, idx, _L) in enumerate(order):
+        if kind != "ins" or k == 0 or order[k - 1][0] != "seg":
+            continue
+        it = insert_inputs[idx][1]
+        i_prev = order[k - 1][1]
+        if it.get("kind") == "image" and isinstance(it.get("hold"), dict) \
+                and blk_frames.get(("seg", i_prev)) \
+                and blk_frames.get(("ins", idx)):
+            hold_prev[idx] = i_prev
+            if has_audio or stem_inputs:
+                L_prev = a_spans[i_prev][1] - a_spans[i_prev][0]
+                jf_r[i_prev] = max(jf_r[i_prev], math.floor(
+                    min(HOLD_FADE_S, L_prev / 4.0) * 1000.0 + 1e-6) / 1000.0)
 
     def _join_fade_text(i, off, L):
         """The afade chain of segment i's join treatment, on a stream whose
@@ -3479,28 +3565,31 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         # Speed path: every segment needs its own video AND audio tap.
         if n == 1:
             parts.append(f"[{vsrc}]null[vin0]")
-            parts.append("[asrc]anull[ain0]")
+            parts.append(f"[asrc]asplit={1 + len(rt_js)}[ain0]{rt_taps}"
+                         if rt_js else "[asrc]anull[ain0]")
         else:
             if owners:
                 _video_taps()
             else:
                 parts.append(f"[{vsrc}]split=" + str(n)
                              + "".join(f"[vin{i}]" for i in range(n)))
-            parts.append("[asrc]asplit=" + str(n)
-                         + "".join(f"[ain{i}]" for i in range(n)))
+            parts.append("[asrc]asplit=" + str(n + len(rt_js))
+                         + "".join(f"[ain{i}]" for i in range(n)) + rt_taps)
         for i, (s, e) in enumerate(keep):
             _seg_pieces_video_audio(i, f"vin{i}", f"ain{i}", s, e)
     elif n == 1:
         _seg_video(0, vsrc, keep[0][0], keep[0][1])
-        _seg_audio(0, "asrc")
+        if rt_js:
+            parts.append(f"[asrc]asplit={1 + len(rt_js)}[ain0]{rt_taps}")
+        _seg_audio(0, "ain0" if rt_js else "asrc")
     elif n > 1:
         if owners:
             _video_taps()
         else:
             parts.append(f"[{vsrc}]split=" + str(n)
                          + "".join(f"[vin{i}]" for i in range(n)))
-        parts.append("[asrc]asplit=" + str(n)
-                     + "".join(f"[ain{i}]" for i in range(n)))
+        parts.append("[asrc]asplit=" + str(n + len(rt_js))
+                     + "".join(f"[ain{i}]" for i in range(n)) + rt_taps)
         for i, (s, e) in enumerate(keep):
             _seg_video(i, f"vin{i}", s, e)
             _seg_audio(i, f"ain{i}")
@@ -3618,8 +3707,30 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     # the clip the window starts), normalize like everything else
     sil_i = 0
     insert_motion = []                  # (insert index, motion, duration)
+    seg_vlab = {}                       # segment i -> its block's label
     for j, (idx, item, ins_audio) in enumerate(insert_inputs):
         dur = float(item["duration_s"])
+        if j in hold_prev:
+            # The held frame: the previous block's last frame, cloned for
+            # this block's frames (hold_video_parts), dimmed when asked.
+            i_prev = hold_prev[j]
+            parts.append(f"[v_seg{i_prev}]split[v_seg{i_prev}h][vhold{j}]")
+            seg_vlab[i_prev] = f"v_seg{i_prev}h"
+            parts.extend(hold_video_parts(
+                f"vhold{j}", f"v_ins{j}", blk_frames[("seg", i_prev)],
+                blk_frames[("ins", j)], (item.get("hold") or {}).get("dim"),
+                tag=f"hd{j}"))
+            V = blk_len.get(("ins", j))
+            if j in rt_js:
+                parts.append(f"[art{j}]" + hold_audio_chain(
+                    hold_room_tone(item), V if V is not None else dur)
+                    + f"[a_ins{j}]")
+            else:
+                end = f"{V:.6f}" if V is not None else f"{dur:.3f}"
+                parts.append(f"[sil{sil_i}]atrim=start=0:end={end},"
+                             f"asetpts=PTS-STARTPTS,{AUDIO_NORM}[a_ins{j}]")
+                sil_i += 1
+            continue
         off = float(item.get("source_start_s") or 0.0) \
             if item["kind"] != "image" else 0.0
         # rate (round 76): the spliced clip plays FASTER in place — the
@@ -3696,6 +3807,12 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                              f":end={off + dur:.3f},"
                              f"asetpts=PTS-STARTPTS,{AUDIO_NORM},"
                              f"{pad}[a_ins{j}]")
+        elif j in rt_js:
+            # a hold with no composed frame before it: its stored still,
+            # with the room tone all the same
+            parts.append(f"[art{j}]" + hold_audio_chain(
+                hold_room_tone(item), V if V is not None else dur)
+                + f"[a_ins{j}]")
         else:
             end = f"{V:.6f}" if V is not None else f"{dur:.3f}"
             parts.append(f"[sil{sil_i}]atrim=start=0:end={end},"
@@ -3728,7 +3845,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         # seg_out_len, not e - s: a sped segment's block duration is its
         # REMAPPED length (identical to e - s when no speed spans exist).
         # On the block clock, its exact frames.
-        blocks.append((f"v_seg{i}", f"a_seg{i}",
+        blocks.append((seg_vlab.get(i, f"v_seg{i}"), f"a_seg{i}",
                        blk_len.get(("seg", i), seg_out_len[i])))
         blk_tags.append(_origin(s, e))
         pre += seg_out_len[i]

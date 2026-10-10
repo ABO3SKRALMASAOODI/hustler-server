@@ -15,8 +15,10 @@ showcase shorts, and every one of them is visible in the EDL plus the index:
   colours, dilute the three that mattered; a stack that re-typesets the
   transcript (a spoken list as rows of text, a typewriter of the words just
   heard) adds nothing.
-- PAYOFF. The punchline needs air before the end card (0.6-1.5 s after the
-  last word) and its number locked up with its noun ('140 / CHARACTERS').
+- PAYOFF. The punchline needs air before the end card (0.8-1.5 s after the
+  last word: the source's own tail, else a held frame over room tone —
+  add_freeze_frame audio_mode='hold') and its number locked up with its
+  noun ('140 / CHARACTERS').
 - IDENTIFY. 'Lisa:' in script reads as a dialogue label, not Apple's 1983
   computer; a broadcast lower third over a famous face is a second text
   system where the hook kicker or the headline band already names them.
@@ -82,8 +84,11 @@ RESTATE_SHARE = 0.85         # share of them heard around its window
 RESTATE_PAD_S = 2.0
 
 # ── payoff and ending ─────────────────────────────────────────────────────
-PAYOFF_HOLD_MIN_S = 0.6
+# Judges (round 7): Thiel's punchline got 0.5 s and Elon's laugh 0.55 s;
+# never cut to the end card less than 0.8 s after the last payoff word.
+PAYOFF_HOLD_MIN_S = 0.8
 PAYOFF_HOLD_MAX_S = 1.5
+PAYOFF_HOLD_TARGET_S = 1.0    # what a fix aims for
 DEAD_TAIL_S = 3.0
 REACTION_MIN_S = 1.0
 PAYOFF_ZONE = 0.2            # the payoff graphic reaches into the last 20%
@@ -998,6 +1003,22 @@ def _reaction_shot(edl, index, prog):
                for span in (frame or {}).get("focus_track") or [])
 
 
+def _end_hold_s(edl, prog):
+    """Seconds of payoff hold (schemas.InsertItem.hold) spliced at the end
+    of the footage: the last kept frame held over room tone."""
+    try:
+        end = float(sum(prog.tl.seg_out_len))
+    except Exception:  # noqa: BLE001
+        return 0.0
+    out = 0.0
+    for item in edl.get("inserts") or []:
+        if isinstance(item, dict) and item.get("kind") == "image" and \
+                isinstance(item.get("hold"), dict) and \
+                abs(_f(item.get("at_output_s"), -1.0) - end) < 0.02:
+            out += _f(item.get("duration_s"))
+    return out
+
+
 def _payoff_notes(prog, payoff, ms=(), index=None, edl=None):
     notes = []
     dur = prog.duration
@@ -1011,32 +1032,55 @@ def _payoff_notes(prog, payoff, ms=(), index=None, edl=None):
                      if src_end is not None and _f(_get(w, "t0")) >= src_end - 1e-3]
             nxt = min(after, key=lambda w: _f(_get(w, "t0"))) if after else None
             src_dur = _f(((index or {}).get("video") or {}).get("duration"))
-            if nxt is None and keep_end is not None and src_dur > 0 and \
-                    src_dur - keep_end < PAYOFF_HOLD_MIN_S - hold - 1e-6:
-                fix = (f"The source itself ends {max(0.0, src_dur - (src_end or keep_end)):.2f}s "
-                       f"after '{last['w']}', so there is no tail to restore: "
-                       "let the payoff graphic carry the beat into the end "
-                       "card, or end on an earlier line that leaves a pause.")
-            elif nxt is None or keep_end is None:
-                fix = (f"Hold {PAYOFF_HOLD_MIN_S:g}-{PAYOFF_HOLD_MAX_S:g} s "
-                       "after the last word: extend the last keep into the "
-                       "speaker's natural tail or reaction (restore_range).")
+            want = PAYOFF_HOLD_TARGET_S - hold       # seconds of air to add
+            # the source's own tail first (a reaction, the speaker's
+            # natural pause), then a held frame for whatever it lacks
+            if keep_end is None:
+                room = 0.0
+            elif nxt is not None:
+                room = max(0.0, _f(_get(nxt, "t0")) - 0.05 - keep_end)
+            elif src_dur > 0:
+                room = max(0.0, src_dur - 0.05 - keep_end)
             else:
-                room = _f(_get(nxt, "t0")) - 0.05 - keep_end
-                need = PAYOFF_HOLD_MIN_S - hold
-                if room >= need - 1e-6:
-                    fix = (f"Hold {PAYOFF_HOLD_MIN_S:g}-{PAYOFF_HOLD_MAX_S:g} s "
-                           "after the last word: extend the last keep to about "
-                           f"{keep_end + min(room, PAYOFF_HOLD_MAX_S - hold):.2f}s "
-                           f"source (the pause before '{_get(nxt, 'w')}' "
-                           "allows it; restore_range).")
-                else:
-                    fix = (f"The speaker runs on into '{_get(nxt, 'w')}' "
-                           f"{_f(_get(nxt, 't0')) - src_end:.2f}s after "
-                           f"'{last['w']}', so the source has no longer tail: "
-                           "keep the cut and let the payoff graphic hold to "
-                           "the end card, or end on an earlier line that "
-                           "leaves a pause.")
+                room = want
+            ext = round(min(room, want), 2)
+            if ext < 0.1:
+                ext = 0.0                       # too little to restore
+            rest = round(max(0.0, want - ext), 2)
+            hold_call = (f"add_freeze_frame(at_output_s={dur + ext:.2f}, "
+                         f"duration_s={max(0.3, rest):.1f}, "
+                         "audio_mode='hold')")
+            if ext and rest < 0.1:
+                fix = (f"Hold {PAYOFF_HOLD_MIN_S:g}-{PAYOFF_HOLD_MAX_S:g} s "
+                       "after the last word: extend the last keep to about "
+                       f"{keep_end + ext:.2f}s source ("
+                       + (f"the pause before '{_get(nxt, 'w')}' allows it"
+                          if nxt is not None else "the speaker's natural "
+                          "tail or reaction")
+                       + "; restore_range).")
+            elif ext:
+                fix = (f"Hold {PAYOFF_HOLD_MIN_S:g}-{PAYOFF_HOLD_MAX_S:g} s "
+                       f"after the last word: extend the last keep to about "
+                       f"{keep_end + ext:.2f}s source (restore_range; "
+                       + (f"'{_get(nxt, 'w')}' follows" if nxt is not None
+                          else "the source ends")
+                       + f"), then hold the frame for the rest: {hold_call} "
+                       "— the composed frame over room tone, any payoff "
+                       "graphic held over it.")
+            elif nxt is not None:
+                fix = (f"The speaker runs on into '{_get(nxt, 'w')}' "
+                       f"{_f(_get(nxt, 't0')) - (src_end or keep_end):.2f}s "
+                       f"after '{last['w']}', so the source has no longer "
+                       f"tail: hold the frame instead — {hold_call} (the "
+                       "composed frame over the source's room tone, the "
+                       "last words fading into it; the payoff graphic holds "
+                       "over it), or end on an earlier line that leaves a "
+                       "pause.")
+            else:
+                fix = (f"The source itself ends {max(0.0, src_dur - (src_end or keep_end or 0.0)):.2f}s "
+                       f"after '{last['w']}', so there is no tail to "
+                       f"restore: hold the frame — {hold_call} — or end on "
+                       "an earlier line that leaves a pause.")
             notes.append(_note(
                 "payoff_hold", _f(last["t1"]),
                 (f"The payoff gets {max(0.0, hold):.2f}s after '{last['w']}' "
@@ -1057,15 +1101,19 @@ def _payoff_notes(prog, payoff, ms=(), index=None, edl=None):
             a, b = prog.keep[-1]
             inside = [w for w in prog.words
                       if a < (_f(_get(w, "t0")) + _f(_get(w, "t1"))) / 2.0 < b]
-            length = b - a
+            # a payoff hold after it (add_freeze_frame audio_mode='hold') is
+            # the reaction held on its own last frame: it counts
+            length = (b - a) + _end_hold_s(edl or {}, prog)
             if not inside and length < REACTION_MIN_S - 1e-6:
                 notes.append(_note(
                     "reaction_button_short", dur - length,
                     (f"The closing reaction lasts {length:.2f}s — too short to "
                      "read as a reaction before the end card."),
-                    ("Give the reaction 1.0-1.5 s (extend the last keep), "
-                     "framed like that speaker's earlier shot, or end on the "
-                     "line instead."),
+                    ("Give the reaction 1.0-1.5 s (extend the last keep, "
+                     "or hold its last frame over room tone where the "
+                     "source runs into dialogue: add_freeze_frame "
+                     "audio_mode='hold'), framed like that speaker's earlier "
+                     "shot, or end on the line instead."),
                     {"seconds": round(length, 2)}))
     if payoff is not None and payoff["template"] in (
             "counter", "word_slam", "stat_card", "text:big_number"):

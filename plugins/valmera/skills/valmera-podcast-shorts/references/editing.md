@@ -38,10 +38,19 @@ cues, and art direction. Call `get_kept_transcript` once and confirm:
 - Frame 0 is clean: the speaker faces camera, the first audio is a whole
   word (not the tail of the previous one, not "if somebody was like,"), and
   the hook plays as one take (no jump cut in the first 1.5 s, at most one in
-  the first 3 s). Move the start to the next clean onset when it is not.
+  the first 3 s). Move the start to the next clean onset when it is not;
+  the PICTURE CHECK names an opening on closed eyes or mid-sound with the
+  nearest clean start (it never moves the cut).
+- Keep tools place every new cut edge audio-safe (out of words, onto the
+  quietest point within ~80 ms) and report it as AUDIO-SAFE CUTS; a cut
+  that "joins running speech" has no pause near it — re-cut at a breath
+  or sentence end unless it sounds clean. snap_to_words:false keeps exact
+  times for a deliberate stutter.
 - The turn changes or deepens the idea and the payoff resolves it. Stop on the
-  strongest sentence; the payoff needs 0.6-1.5 s after its last word before
-  the end card (a reaction button 1.0-1.5 s, or none).
+  strongest sentence; the payoff needs 0.8-1.5 s after its last word before
+  the end card (a reaction button 1.0-1.5 s, or none): the natural tail
+  first, else hold the frame (`add_freeze_frame` audio_mode='hold',
+  duration about 1 s minus the air you have).
 - Trim for rhythm: cut low-information connectors ("it was like a lot of
   things and"), keep 150-250 ms at sentence boundaries, never drop an
   article inside a clause.
@@ -197,7 +206,7 @@ after each operation.
    change rate, hero count, picture area, sounds within budget and spacing
    (list each with its time, on-screen partner and level; `audit_audio_mix`
    reports each sound's level against the voice and its placement checks),
-   no digital silence, payoff held 0.6-1.5 s after the last word.
+   no digital silence, payoff held 0.8-1.5 s after the last word.
 5. Read the render's VERIFICATION ADVISORIES: the EARN ITS PLACE note lists
    a generic or spent hook, a fragment or jump-cut opening, graphics past
    the budget or restating the captions, extra type roles or accents, a

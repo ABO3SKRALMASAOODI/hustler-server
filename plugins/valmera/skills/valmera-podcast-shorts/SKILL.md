@@ -36,8 +36,9 @@ never a re-typeset of the words being heard, never a spoken list as rows
 of text (show the items: real photos or clips, or one big word per item).
 The hook is written from the clip's strongest line or statistic (never a
 generic question) and never shows a word a later graphic slams; the payoff
-locks its number and noun together and holds 0.6-1.5 s after the last
-word. Valmera's render result carries an EARN ITS PLACE advisory naming
+locks its number and noun together and holds 0.8-1.5 s after the last
+word (the natural tail, else `add_freeze_frame` audio_mode='hold': the
+composed last frame over the source's room tone). Valmera's render result carries an EARN ITS PLACE advisory naming
 what breaks these rules, each with a fix ([looks.md](references/looks.md),
 **Shared grammar**, has the details).
 

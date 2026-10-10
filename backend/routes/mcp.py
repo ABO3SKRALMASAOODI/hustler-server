@@ -838,7 +838,9 @@ Two things are different from a normal tool session, and both matter:
       placement checks. search_sfx only for a specific sound the user asks
       for.
    g. ENDING: the payoff locks its number and noun together and holds
-      0.6-1.5 s after the last word; a native CTA (comment_cta,
+      0.8-1.5 s after the last word (the natural tail, else
+      add_freeze_frame audio_mode='hold': the composed frame over room
+      tone); a native CTA (comment_cta,
       follow_cta, save_cta) after it only when the user or brief asks for
       one, filled only with the handle, keyword and offer they supplied —
       never an invented handle, verified badge, keyword or promised
