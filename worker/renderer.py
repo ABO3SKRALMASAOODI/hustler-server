@@ -2725,7 +2725,9 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                         card, mid_src), run[0],
                         follow.span_at(card.get("follow"), mid_src)
                         if card.get("source") and not card.get("panels")
-                        else None)
+                        else None,
+                        picture_cards.step_scale_at(card, mid_src)
+                        is not None)
                 else:
                     run = None
     sw = sh = None
@@ -3129,7 +3131,9 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                     seg_dur=seg_out_len[i], grade=block_grade,
                     tag=card_layout[i][1], frames=blk_frames.get(("seg", i)),
                     follow_block=(_follow_of(i, cspan) + (follow_interp,)
-                                  if cspan and follow.moves(cspan) else None))
+                                  if cspan and follow.moves(cspan) else None),
+                    bounded=bool(len(card_layout[i]) > 3
+                                 and card_layout[i][3]))
                 continue
             seg_focus, seg_mode = _frame_for(*keep[i])
             fspan = (follow.span_at(_fspans, _block_mid(*keep[i]))

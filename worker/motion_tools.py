@@ -1187,11 +1187,164 @@ def _caption_integrity_notes(ctx, edl, item):
             else:
                 notes += _word_level_notes(edl, index, tl, item,
                                            canvas=_canvas_size(ctx, edl))
-        notes += _paraphrase_notes(edl, index, tl, item, lines)
+        if not motion_templates.persistent(item):
+            # a standing headline is a third-person claim, not a quote
+            notes += _paraphrase_notes(edl, index, tl, item, lines)
     except Exception as e:  # noqa: BLE001
         print(f"[motion] caption integrity check skipped: {str(e)[:160]}", flush=True)
         return ""
     return "".join("\n" + n for n in notes)
+
+
+# ── the persistent headline band (motion_templates.persistent) ────────────
+# Judged Oct 2026: in card and letterbox layouts the band above the picture
+# sat empty for 5-6 s stretches between hero lockups; the references keep a
+# standing claim headline there that hero lockups replace and hand back. A
+# persistent template holds that band for the program and yields it at
+# render time (motion_layer.yield_windows). The write contract keeps it a
+# headline: one at a time, long enough to be a layout element, never muting
+# captions, one accent span, and placed in the free band when no y is given.
+HEADLINE_MIN_S = 4.0
+# The 9:16 feed header (account row, audio chip) sits over the top ~8%.
+HEADLINE_SAFE_TOP = 0.085
+HEADLINE_SAFE_TOP_FLAT = 0.05
+HEADLINE_GAP = 0.012          # clear space kept above the card / picture
+HEADLINE_MIN_BAND = 0.06
+_ACCENT_RE = re.compile(r"\*[^*]+\*")
+
+
+def headline_band(edl, s, e, W, H):
+    """(top, bottom, what) of the free band above the picture over program
+    window [s, e] (frame fractions), or None on a full-bleed frame. The
+    picture is a source-fed picture card live over most of the window (the
+    highest one), else the letterbox picture rect (frame.picture)."""
+    tops = []
+    for cd in ((edl.get("effects") or {}).get("picture_cards") or []):
+        if not isinstance(cd, dict):
+            continue
+        try:
+            a, b = float(cd["start"]), float(cd["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if min(b, e) - max(a, s) < 0.5 * (e - s):
+            continue
+        import picture_cards
+        boxes = picture_cards.card_boxes(cd)
+        if boxes:
+            tops.append((min(float(bx[1]) for bx in boxes), "the picture card"))
+    if not tops:
+        pic = (edl.get("frame") or {}).get("picture")
+        if pic and len(pic) == 4 and float(pic[1]) > 0.02:
+            tops.append((float(pic[1]), "the letterboxed picture"))
+    if not tops:
+        return None
+    top, what = min(tops)
+    safe = HEADLINE_SAFE_TOP if H / max(W, 1) >= 1.6 else HEADLINE_SAFE_TOP_FLAT
+    return safe, top - HEADLINE_GAP, what
+
+
+def _persistent_contract(ctx, edl, item, items, place):
+    """Check and place a persistent (headline) item in place. Returns
+    (error or None, note). ``place``: centre it in the free band (no y was
+    given)."""
+    s, e = float(item["start"]), float(item["end"])
+    if e - s < HEADLINE_MIN_S - 1e-6:
+        return (f"REJECTED: a persistent {item['template']} holds a band for the "
+                f"program (or a chapter): give it at least {HEADLINE_MIN_S:g}s "
+                f"(this window is {e - s:.2f}s). For a short claim use a lockup "
+                "template (word_slam, phrase_build, hook_title)."), ""
+    if item.get("mute_captions") is True:
+        return ("REJECTED: the headline is a standing claim, not the spoken line — "
+                "it never mutes captions. Leave mute_captions unset."), ""
+    item.pop("mute_captions", None)
+    for other in items:
+        if other is item or other.get("id") == item.get("id") \
+                or not motion_templates.persistent(other):
+            continue
+        if min(e, float(other["end"])) - max(s, float(other["start"])) > 0.05:
+            return (f"REJECTED: persistent graphic '{other['id']}' already holds the "
+                    f"band over {float(other['start']):g}-{float(other['end']):g}s — one "
+                    "headline at a time. Change it with set_motion_graphic, or end it "
+                    "before this one starts (one per chapter)."), ""
+    params = item.get("params") or {}
+    accents = _ACCENT_RE.findall(str(params.get("text") or ""))
+    if len(accents) > 1:
+        return ("REJECTED: one accent span per headline (found "
+                f"{', '.join(accents)}). Star the one word or phrase the claim "
+                "turns on."), ""
+    W, H = _canvas_size(ctx, edl)
+    band = headline_band(edl, s, e, W, H)
+    note = ""
+    if place:
+        if band is None:
+            return ("REJECTED: a persistent headline needs a free band — a picture "
+                    "card (set_picture_card) or a letterbox (frame.picture) leaves "
+                    "one above the picture. On full-bleed footage use hook and beat "
+                    "graphics instead, or pass y to place it deliberately."), ""
+        top, bottom, what = band
+        if bottom - top < HEADLINE_MIN_BAND:
+            return (f"REJECTED: the band above {what} is only {bottom - top:.3f} of the "
+                    f"frame height (y {top:.3f}-{bottom:.3f}); a headline needs "
+                    f"{HEADLINE_MIN_BAND:g}. Lower or shrink the picture, or pass y."), ""
+        params["y"] = round((top + bottom) / 2.0, 4)
+        params["height"] = round(min(0.3, bottom - top), 4)
+        item["params"] = params
+        note = (f"\nHEADLINE: placed in the band above {what} (y {top:.3f}-{bottom:.3f}, "
+                f"centre {params['y']:g}).")
+    return None, note
+
+
+def _yield_report(ctx, edl, item):
+    """One line on how a persistent item shares its band, from the stored
+    footprints (what the renderer will do)."""
+    try:
+        W, H = _canvas_size(ctx, edl)
+        items = motion_layer.program_items(edl, _program_duration(edl))
+        live = next((m for m in items if m.get("id") == item.get("id")), None)
+        if live is None:
+            return ""
+        shown, wins = motion_layer.headline_visible(live, items, W, H)
+    except Exception as ex:  # noqa: BLE001 — a report never blocks the write
+        print(f"[motion] headline report skipped: {str(ex)[:160]}", flush=True)
+        return ""
+    span = float(live["end"]) - float(live["start"])
+    if not wins:
+        return (f"\nYIELDS: nothing else occupies its band — it shows the whole "
+                f"{span:.1f}s.")
+    return (f"\nYIELDS: hands its band to the graphics over "
+            + ", ".join(f"{a:.2f}-{b:.2f}s" for a, b in wins)
+            + f" (fades out {motion_layer.YIELD_OUT_S:g}s before each lands, back "
+            f"{motion_layer.YIELD_IN_S:g}s after it leaves; gaps under "
+            f"{motion_layer.YIELD_MERGE_S:g}s stay clear) — on screen {shown:.1f}s "
+            f"of {span:.1f}s. Adding, moving or removing a lockup updates this at "
+            "render time.")
+
+
+def _band_note(ctx, edl, item):
+    """For an ordinary graphic: which standing headline yields to it."""
+    if motion_templates.persistent(item):
+        return ""
+    try:
+        W, H = _canvas_size(ctx, edl)
+        items = motion_layer.program_items(edl, _program_duration(edl))
+        mine = next((m for m in items if m.get("id") == item.get("id")), None)
+        if mine is None:
+            return ""
+        hits = []
+        for hl in items:
+            if not motion_templates.persistent(hl):
+                continue
+            wins = motion_layer.yield_windows(hl, items, W, H)
+            s0 = float(hl["start"]) - float(hl.get("phase_s") or 0.0)
+            if any(a + s0 <= float(mine["start"]) + 1e-3 and b + s0 >= float(mine["end"]) - 1e-3
+                   for a, b in wins):
+                hits.append(hl["id"])
+    except Exception:  # noqa: BLE001
+        return ""
+    if not hits:
+        return ""
+    return (f"\nNOTE: headline {', '.join(hits)} yields its band to this graphic "
+            "(fades out before it lands and back after it leaves).")
 
 
 # Sound is deliberate: templates declare sound ROLES (mapped onto the owner-
@@ -1223,9 +1376,11 @@ def add_motion_graphic(ctx, template, start, end=None, params=None, html=None,
     prog = _program_duration(edl)
     if prog <= 0.3:
         return "REJECTED: there is no program yet — place footage first, then add motion graphics."
+    persistent = motion_templates.persistent(template)
     try:
         s = float(start)
-        e = float(end) if end is not None else s + float(spec.get("duration") or 3.0)
+        e = float(end) if end is not None else (
+            prog if persistent else s + float(spec.get("duration") or 3.0))
     except (TypeError, ValueError):
         return "REJECTED: start/end must be program seconds (numbers)."
     req = (s, e)
@@ -1255,6 +1410,15 @@ def add_motion_graphic(ctx, template, start, end=None, params=None, html=None,
         item["purpose"] = " ".join(str(purpose).split())[:300]
     if allow_face_overlap:
         item["allow_face_overlap"] = True
+    band_note = ""
+    if persistent:
+        err, band_note = _persistent_contract(
+            ctx, edl, item, items, place="y" not in (params or {}))
+        if err:
+            return err
+        if sfx:
+            band_note += "\nNOTE: a persistent headline is silent; sfx ignored."
+            sfx = False
     err, where, bbox, rep = _probe_full(ctx, edl, item)
     if err:
         return err
@@ -1279,8 +1443,11 @@ def add_motion_graphic(ctx, template, start, end=None, params=None, html=None,
     res = ctx.write_edl(edl, f"motion graphic {template}{depth} at {s}-{e}s [{mid}]{sound}")
     if res.startswith("REJECTED"):
         return res
-    return (res + where + keep_note + clamp + (f"\nNOTE: {'; '.join(notes)}" if notes else "")
-            + behind_note + _caption_integrity_notes(ctx, edl, item))
+    tail = (_yield_report(ctx, edl, item) if persistent
+            else _band_note(ctx, edl, item))
+    return (res + where + band_note + keep_note + clamp
+            + (f"\nNOTE: {'; '.join(notes)}" if notes else "")
+            + behind_note + tail + _caption_integrity_notes(ctx, edl, item))
 
 
 def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
@@ -1343,6 +1510,18 @@ def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
             hit.pop("allow_face_overlap", None)
     if hit["template"] != "html":
         hit.pop("html", None)
+    persistent = motion_templates.persistent(hit)
+    band_note = ""
+    if persistent:
+        became = template is not None and not motion_templates.persistent(
+            json.loads(old_shape)[2] or "")
+        err, band_note = _persistent_contract(
+            ctx, edl, hit, items, place=became and "y" not in (params or {}))
+        if err:
+            return err
+        if sfx:
+            band_note += "\nNOTE: a persistent headline is silent; sfx ignored."
+            sfx = False
     err, where, bbox, rep = _probe_full(ctx, edl, hit)
     if err:
         return err
@@ -1388,8 +1567,11 @@ def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
     res = ctx.write_edl(edl, f"updated motion graphic {id} ({hit['template']}) at {hit['start']}-{hit['end']}s")
     if res.startswith("REJECTED"):
         return res
-    return (res + where + keep_note + (f"\nNOTE: {'; '.join(notes)}" if notes else "")
-            + (behind_note or "") + _caption_integrity_notes(ctx, edl, hit))
+    tail = (_yield_report(ctx, edl, hit) if persistent
+            else _band_note(ctx, edl, hit))
+    return (res + where + band_note + keep_note
+            + (f"\nNOTE: {'; '.join(notes)}" if notes else "")
+            + (behind_note or "") + tail + _caption_integrity_notes(ctx, edl, hit))
 
 
 def remove_motion_graphic(ctx, id):
@@ -1444,6 +1626,11 @@ TOOL_SPECS = {
         "replaces the whole spoken line); false keeps them all running (a number or *starred* "
         "word it shows is still not repeated). template='html' takes your own HTML/CSS/JS on the "
         "MG runtime in `html`. The write is rejected if the composition errors or draws nothing. "
+        "HEADLINE BAND: template='headline' is PERSISTENT — the standing claim headline of a "
+        "card or letterbox layout, one per program (end omitted = the program end; y omitted = "
+        "centred in the free band above the card or picture). It yields its band on its own at "
+        "render time (fades out before any graphic in the band lands, back after it leaves), never "
+        "mutes captions and is silent; the reply lists the windows it yields. "
         "FACE KEEP-OUT: the write measures where the graphic draws against the speaker's face "
         "and mouth over its window (through the crop, zooms and cards) and the 9:16 safe area "
         "(6% side margins, the right 12% clear between y 0.5 and 0.85, nothing below y 0.80); a "

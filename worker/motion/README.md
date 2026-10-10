@@ -38,6 +38,16 @@ clear — a speech template mutes those words, any other keeps them in place —
 so every text a template prints must come from its params (that is what the
 captions are matched against).
 
+`persistent: true` marks a LAYOUT template that holds a band for the whole
+program (the `headline` of a card or letterbox layout). The renderer hands
+such an item `MG.yields` — the composition seconds in which another graphic's
+box meets its band (`motion_layer.yield_windows`, from the stored footprints
+or the templates' estimated boxes) — and the runtime fades the whole page out
+before each window and back after it, so the template itself never times
+anything. A persistent item carries no spoken words (captions never drop a
+word for it), is not counted as a designed moment, and its write contract
+lives in `motion_tools._persistent_contract`.
+
 `sfx` declares sound ROLES relative to the item start (where a sound would
 belong if the editor chooses to add one): whoosh_soft, whoosh_hard, swish_short,
 swipe, pop_soft, click_ui, tick, kick/impact_soft/impact_hard, ding, chime,

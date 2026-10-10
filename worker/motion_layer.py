@@ -146,6 +146,143 @@ def measure_plates(items, probe):
     return out
 
 
+# ── the persistent headline band: yielding to other graphics ────────────
+# A persistent template (motion_templates.persistent: the headline of a card
+# or letterbox layout) holds its band for the program. While another graphic
+# occupies that band it fades out (YIELD_OUT_S, ending as the other lands) and
+# comes back YIELD_IN_S after it leaves; two band graphics less than
+# YIELD_MERGE_S apart keep it away (a flash back for half a second is a
+# flicker, not a restore). Decided at render time from the stored footprints,
+# so adding, moving or removing a lockup never leaves a stale headline.
+YIELD_OUT_S = 0.12
+YIELD_IN_S = 0.3
+YIELD_MERGE_S = 1.2
+# Boxes this close (frame fractions) already read as one crowded band.
+YIELD_PAD = 0.006
+
+
+def _band_box(item, W, H):
+    """Where an item draws (frame fractions): its fresh footprint, else the
+    template's nominal ink estimate, else None (it occupies no band)."""
+    import caption_carry
+    import keepout
+    ar = caption_carry.frame_ar(W, H)
+    box = caption_carry.footprint_box(item, ar)
+    if box:
+        return [float(v) for v in box]
+    name = item.get("template")
+    if not name or name == "html":
+        return None
+    try:
+        est = keepout.nominal_ink(name, motion_templates.spec(name),
+                                  item.get("params") or {}, frame=(W, H))
+    except Exception:  # noqa: BLE001 — an unknown box occupies nothing
+        return None
+    return [float(v) for v in est] if est else None
+
+
+def _nominal(item, W, H):
+    import keepout
+    try:
+        est = keepout.nominal_ink(item.get("template"),
+                                  motion_templates.spec(item.get("template")),
+                                  item.get("params") or {}, frame=(W, H))
+    except Exception:  # noqa: BLE001
+        return None
+    return [float(v) for v in est] if est else None
+
+
+def _ink_lead(item):
+    """Seconds into an item before it draws anything: a phrase build whose
+    first row is revealed on a later spoken word leaves its band empty until
+    then (the Jobs 'liberal arts' lockup: 1.17 s), and the headline keeps the
+    band meanwhile."""
+    rows = (item.get("params") or {}).get("rows")
+    if item.get("template") != "phrase_build" or not isinstance(rows, list):
+        return 0.0
+    ats = []
+    for k, row in enumerate(rows):
+        try:
+            ats.append(float((row or {}).get("at")))
+        except (TypeError, ValueError):
+            if k == 0:
+                return 0.0
+    return max(0.0, min(ats)) if ats else 0.0
+
+
+def _shares_band(a, b, pad=YIELD_PAD):
+    return (min(a[2], b[2]) - max(a[0], b[0]) > -pad
+            and min(a[3], b[3]) - max(a[1], b[1]) > -pad)
+
+
+def yield_windows(item, items, W, H):
+    """Composition-second windows [[a, b], ...] in which the persistent
+    ``item`` hands its band to the other ``items`` (program-clock motion
+    items) whose box meets its own; [] for any other item, or when nothing
+    meets it. Windows closer than YIELD_MERGE_S merge; they are clipped to
+    the item's span."""
+    if not motion_templates.persistent(item):
+        return []
+    # its band: what it drew (the footprint) and the band it may fill
+    boxes = [b for b in (_band_box(item, W, H), _nominal(item, W, H)) if b]
+    if not boxes:
+        return []
+    mine = [min(b[0] for b in boxes), min(b[1] for b in boxes),
+            max(b[2] for b in boxes), max(b[3] for b in boxes)]
+    s, e = float(item["start"]), float(item["end"])
+    phase = float(item.get("phase_s") or 0.0)
+    spans = []
+    for other in items or []:
+        if other is item or other.get("id") == item.get("id") \
+                or other.get("_synthetic") \
+                or str(other.get("template") or "").startswith("caption") \
+                or motion_templates.persistent(other):
+            continue
+        try:
+            a = max(s, float(other["start"]) + _ink_lead(other))
+            b = min(e, float(other["end"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if b - a < 0.05:
+            continue
+        box = _band_box(other, W, H)
+        if box and _shares_band(mine, box):
+            spans.append([a, b])
+    spans.sort()
+    merged = []
+    for a, b in spans:
+        if merged and a - merged[-1][1] < YIELD_MERGE_S:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b])
+    # a gap at either end of the composition shorter than the merge is no
+    # restore (a stitched piece's own edges are not the composition's)
+    full = float(item.get("full_duration_s") or (e - s))
+    if merged and phase <= 1e-6 and merged[0][0] - s < YIELD_MERGE_S:
+        merged[0][0] = s
+    if merged and phase + (e - s) >= full - 1e-3 and e - merged[-1][1] < YIELD_MERGE_S:
+        merged[-1][1] = e
+    return [[round(a - s + phase, 3), round(b - s + phase, 3)] for a, b in merged]
+
+
+def yields_doc(windows):
+    """The MG.yields input for build_document (None when there are none)."""
+    if not windows:
+        return None
+    return {"w": windows, "out": YIELD_OUT_S, "in": YIELD_IN_S}
+
+
+def headline_visible(item, items, W, H):
+    """(seconds the persistent item shows, [[a, b], ...] program windows it
+    yields) — for the write tools' report."""
+    s, e = float(item["start"]), float(item["end"])
+    phase = float(item.get("phase_s") or 0.0)
+    wins = [[a + s - phase, b + s - phase]
+            for a, b in yield_windows(item, items, W, H)]
+    hidden = sum(b - a for a, b in wins)
+    return max(0.0, (e - s) - hidden), wins
+
+
 def prepare_inputs(edl, workdir, W, H, fps, out_duration, args, next_idx,
                    fetch_asset=None, extra_items=None, plate=None):
     """Render motion clips and append ffmpeg inputs. Returns (inputs, next_idx)
@@ -164,8 +301,9 @@ def prepare_inputs(edl, workdir, W, H, fps, out_duration, args, next_idx,
             for _k, key in motion_templates.asset_params(item["template"], item.get("params") or {}).items():
                 if key not in asset_locals and fetch_asset is not None:
                     asset_locals[key] = fetch_asset(key)
-            jobs.append(motion_templates.build_job(item, W, H, fps, asset_locals,
-                                                   plate=plates.get(k)))
+            jobs.append(motion_templates.build_job(
+                item, W, H, fps, asset_locals, plate=plates.get(k),
+                yields=yields_doc(yield_windows(item, items, W, H))))
             kept.append(item)
         except Exception as e:  # noqa: BLE001 — degrade one item, keep the render
             warn(f"motion '{item.get('id')}' skipped: {str(e)[:200]}")

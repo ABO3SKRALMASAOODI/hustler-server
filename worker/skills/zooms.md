@@ -81,6 +81,21 @@ punches.
   jump cut only when the speaker's head measurably jumps across it, with
   those options — never an order. Never cover every jump cut: a camera that
   moves on every cut looks childish.
+- CUT HYGIENE IS NOT A ZOOM: when the render shows same-angle jump cuts
+  visibly POPPING (pause removal on one locked camera — the head and hands
+  jump inside a constant frame, typically a static archival or single-camera
+  talk), `conceal_jump_cuts()` is the optional tool: it measures every bare
+  same-angle cut (a head jump, or a picture change well above the speaker's
+  own motion) and writes HARD, non-animated framing steps of 6-10% (default
+  8%) on just the ones that pop, each held to the next cut, where it steps
+  back — so popping cuts alternate like a second camera. Full frame gets a
+  `cut_step` zoom (ramp 0, aimed at the face); a source picture card
+  alternates its own SOURCE crop instead (stepping WIDE when the source is
+  near its upscale cap, so a 480p card never softens). `at=[...]` names cuts
+  you saw pop; `mode='off'` removes every step. It is never a default, no
+  look or planner writes it, its steps are not counted as camera moves, and
+  it is not a reason to add expressive zooms; run it after the cut is final
+  and re-run it after re-cutting.
 - EDGES ON CUTS: a zoom start or end within 4 frames of a cut (a jump, a
   camera change, an insert edge, a crop re-aim, or the programme's last
   frame) is moved ONTO the cut and holds through it: an `ease` ending on a

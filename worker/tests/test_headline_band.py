@@ -1,0 +1,312 @@
+"""The persistent headline band of card and letterbox layouts (judges, Oct
+2026): the band above the picture sat empty for 5-6 s stretches between hero
+lockups, where the references keep a standing claim headline that hero
+lockups replace and hand back.
+
+The `headline` motion template is PERSISTENT (motion_templates.persistent):
+it holds its band for the program and yields it at render time
+(motion_layer.yield_windows -> MG.yields) to any graphic whose box meets the
+band — fading out before that graphic lands and back after it leaves — and
+the write contract (motion_tools._persistent_contract) keeps it a headline.
+
+Run:  python -m pytest tests/test_headline_band.py -q     (from worker/)
+"""
+import json
+import os
+import subprocess
+import sys
+
+import pytest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import caption_carry  # noqa: E402
+import keepout  # noqa: E402
+import motion_engine  # noqa: E402
+import motion_layer  # noqa: E402
+import motion_templates  # noqa: E402
+import motion_tools  # noqa: E402
+import taste  # noqa: E402
+from schemas import default_edl, validate_edl  # noqa: E402
+from timeline import Timeline  # noqa: E402
+
+W, H = 1080, 1920
+AR = caption_carry.frame_ar(W, H)
+
+
+def _browser_ok():
+    try:
+        return motion_engine.available()
+    except Exception:  # noqa: BLE001
+        return False
+
+
+needs_browser = pytest.mark.skipif(not _browser_ok(), reason="no headless Chromium")
+
+
+def _fp(box):
+    return caption_carry.make_footprint(box, W, H, [])
+
+
+def _hl(start=0.0, end=30.0, **params):
+    p = motion_templates.check_params("headline", dict(
+        {"text": "The case for *beautiful* type on computers",
+         "kicker": "Steve Jobs, 1983", "y": 0.19, "height": 0.2}, **params))
+    return {"id": "hl", "template": "headline", "start": start, "end": end, "params": p,
+            "footprint": _fp([0.2, 0.09, 0.8, 0.29])}
+
+
+def _lock(mid, start, end, box=(0.08, 0.06, 0.92, 0.24), **kw):
+    item = {"id": mid, "template": "word_slam", "start": start, "end": end,
+            "params": motion_templates.check_params("word_slam", {"text": "x", "y": 0.15}),
+            "footprint": _fp(list(box))}
+    item.update(kw)
+    return item
+
+
+# ── the template ──────────────────────────────────────────────────────────
+
+def test_headline_is_a_silent_persistent_layout_template():
+    spec = motion_templates.spec("headline")
+    assert spec["persistent"] is True and spec["category"] == "layout"
+    assert spec["sfx"] == [] and not spec.get("mutes_captions")
+    assert motion_templates.persistent("headline")
+    assert motion_templates.persistent({"template": "headline"})
+    assert not motion_templates.persistent("word_slam")
+    assert not motion_templates.persistent({"template": "html"})
+    row = next(t for t in motion_templates.catalog() if t["name"] == "headline")
+    assert row["persistent"] is True and "YIELDS" in row["description"]
+
+
+def test_the_estimate_of_a_headline_is_its_band():
+    spec = motion_templates.spec("headline")
+    box = keepout.nominal_ink("headline", spec, {"y": 0.19, "height": 0.2, "width": 0.8})
+    assert box == pytest.approx((0.1, 0.09, 0.9, 0.29))
+
+
+# ── yielding ──────────────────────────────────────────────────────────────
+
+def test_it_yields_to_graphics_in_its_band_and_merges_short_gaps():
+    hl = _hl()
+    items = [hl,
+             _lock("hook", 0.4, 4.0),                 # near the start: from 0
+             _lock("b", 4.5, 6.0),                     # 0.5 s later: merged
+             _lock("low", 8.0, 9.0, box=(0.1, 0.72, 0.9, 0.8)),   # caption band
+             _lock("c", 12.0, 13.0),
+             _lock("d", 14.0, 15.0),                   # 1.0 s gap: merged
+             _lock("e", 18.0, 29.2),                   # near the end: to it
+             {"id": "cap", "template": "caption_motion", "start": 0, "end": 30,
+              "params": {}, "_synthetic": True}]
+    wins = motion_layer.yield_windows(hl, items, W, H)
+    assert wins == [[0.0, 6.0], [12.0, 15.0], [18.0, 30.0]]
+    shown, prog = motion_layer.headline_visible(hl, items, W, H)
+    assert shown == pytest.approx(30 - 6 - 3 - 12)
+    assert prog == wins                                 # starts at 0: same clock
+    # only a persistent item yields; a gap of 1.2 s or more is a restore
+    assert motion_layer.yield_windows(items[1], items, W, H) == []
+    wins = motion_layer.yield_windows(hl, [hl, _lock("c", 12.0, 13.0),
+                                           _lock("d", 14.3, 15.0)], W, H)
+    assert wins == [[12.0, 13.0], [14.3, 15.0]]
+
+
+def test_a_phrase_build_yields_from_its_first_reveal_and_windows_follow_the_phase():
+    rows = [{"text": "injecting some", "role": "sans", "size": "0.5", "at": "1.17"},
+            {"text": "*liberal arts*", "role": "serif", "size": "1.4", "at": "1.89"}]
+    pb = {"id": "arts", "template": "phrase_build", "start": 21.3, "end": 25.21,
+          "params": motion_templates.check_params("phrase_build", {"rows": rows, "y": 0.15}),
+          "footprint": _fp([0.09, 0.06, 0.92, 0.24])}
+    hl = _hl(end=37.84)
+    assert motion_layer.yield_windows(hl, [hl, pb], W, H) == [[22.47, 25.21]]
+    # a stitched piece starting 20 s into the composition: composition seconds
+    piece = dict(hl, start=0.0, end=10.0, phase_s=20.0, full_duration_s=37.84)
+    pb2 = dict(pb, start=1.3, end=5.21)
+    assert motion_layer.yield_windows(piece, [piece, pb2], W, H) == [[22.47, 25.21]]
+
+
+def test_an_unmeasured_graphic_yields_by_its_estimated_box():
+    hl = _hl()
+    slam = {"id": "s", "template": "word_slam", "start": 5.0, "end": 6.0,
+            "params": motion_templates.check_params("word_slam", {"text": "GARBAGE", "y": 0.15})}
+    low = {"id": "l", "template": "word_slam", "start": 8.0, "end": 9.0,
+           "params": motion_templates.check_params("word_slam", {"text": "x", "y": 0.7})}
+    assert motion_layer.yield_windows(hl, [hl, slam, low], W, H) == [[5.0, 6.0]]
+
+
+def test_build_document_carries_yields_only_when_there_are_some():
+    a = motion_engine.build_document("<div></div>", duration=2.0)
+    assert motion_engine.build_document("<div></div>", duration=2.0, yields=None) == a
+    assert motion_engine.build_document("<div></div>", duration=2.0,
+                                        yields=motion_layer.yields_doc([])) == a
+    b = motion_engine.build_document("<div></div>", duration=2.0,
+                                     yields=motion_layer.yields_doc([[0.5, 1.0]]))
+    assert '"yields": {"w": [[0.5, 1.0]], "out": 0.12, "in": 0.3}' in b
+
+
+@needs_browser
+def test_the_runtime_fades_the_page_out_and_back_around_a_yield(tmp_path, monkeypatch):
+    monkeypatch.setattr(motion_engine, "CACHE_DIR", str(tmp_path / "cache"))
+    item = dict(_hl(end=3.0), footprint=None)
+    job = motion_templates.build_job(item, 540, 960, 30,
+                                     yields=motion_layer.yields_doc([[1.0, 2.0]]))
+    clip = motion_engine.render_jobs([job], str(tmp_path / "out"), pages=1)[0]
+    assert not clip.empty and clip.captured < clip.frames      # holds are re-used
+    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", clip.path, "-f", "rawvideo",
+                          "-pix_fmt", "rgba", "-"], capture_output=True).stdout
+    n = clip.w * clip.h * 4
+    alpha = [max(raw[i * n + 3:(i + 1) * n:4]) for i in range(len(raw) // n)]
+    assert alpha[24] > 200                  # 0.8 s: on screen
+    assert alpha[30] == 0 and alpha[45] == 0 and alpha[60] == 0   # 1.0-2.0 s: yielded
+    assert 0 < alpha[63] < alpha[72]        # coming back over 0.3 s
+    assert alpha[75] > 200                  # back
+
+
+# ── captions and critics ──────────────────────────────────────────────────
+
+def _words(text, t0=1.0, step=0.4):
+    out = []
+    for k, w in enumerate(text.split()):
+        out.append({"w": w, "t0": t0 + k * step, "t1": t0 + k * step + 0.3,
+                    "src_t0": t0 + k * step, "src_t1": t0 + k * step + 0.3})
+    return out
+
+
+def test_a_headline_never_takes_spoken_words_out_of_the_captions():
+    edl = default_edl(30.0)
+    edl["captions"] = {"mode": "from_transcript"}
+    edl["motion"] = [_hl()]
+    words = _words("computer fonts were garbage and beautiful type matters")
+    tl = Timeline(edl["keep"])
+    plan = caption_carry.plan(edl, {"words": words}, tl, words)
+    assert plan.hidden == {}
+    # the same text on a lockup takes the words it shows
+    edl["motion"] = [dict(_lock("s", 0.0, 30.0), params=motion_templates.check_params(
+        "word_slam", {"text": "*garbage*", "y": 0.15}))]
+    plan = caption_carry.plan(edl, {"words": words}, tl, words)
+    assert any(owner == "s" for owner, _why in plan.hidden.values())
+
+
+def test_the_headline_is_layout_not_a_designed_moment():
+    edl = validate_edl(dict(default_edl(40.0), motion=[_hl(end=12.0), _lock("s", 2.0, 3.0)]),
+                       40.0).model_dump()
+    moments = [m["id"] for m in taste._motion_moments(edl, 40.0)]
+    assert moments == ["s"]
+
+
+# ── the write contract ────────────────────────────────────────────────────
+
+class _Ctx:
+    project_id = 1
+    has_main_video = True
+
+    def __init__(self, edl, duration=60.0):
+        self.duration = duration
+        self.index = {"video": {"width": 646, "height": 480, "fps": 30.0},
+                      "words": [], "shots": [{"id": 1, "start": 0.0, "end": 60.0}]}
+        self._edl = validate_edl(edl, duration).model_dump()
+        self.writes = []
+
+    def latest_edl(self):
+        return {"version": len(self.writes) + 1, "json": json.loads(json.dumps(self._edl))}
+
+    def write_edl(self, edl, description):
+        self._edl = validate_edl(edl, self.duration).model_dump()
+        self.writes.append(description)
+        return f"EDL v{len(self.writes)} -> v{len(self.writes) + 1}: {description}"
+
+
+def _probe(item, W_, H_, fps=30.0):
+    p = item.get("params") or {}
+    y, h = float(p.get("y", 0.5)), float(p.get("height", 0.12))
+    box = [0.2, round(y - h / 2, 4), 0.8, round(y + h / 2, 4)]
+    return {"errors": [], "visible_frames": 4, "samples": 4, "bboxes": [box], "ink": [box] * 4}
+
+
+def _card_edl(prog=38.0):
+    edl = default_edl(60.0)
+    edl["keep"] = [[0.0, prog]]
+    edl["frame"] = {"ratio": "9:16", "mode": "crop"}
+    edl["effects"] = {"picture_cards": [{
+        "id": "card", "start": 0.0, "end": prog, "box": [0.06, 0.3042, 0.94, 0.6758],
+        "source": [0.19, 0.077, 0.955, 0.85], "entrance": "none", "exit": "none"}]}
+    return edl
+
+
+TEXT = {"text": "The case for *beautiful* type on computers", "kicker": "Steve Jobs, 1983"}
+
+
+def test_add_places_the_headline_in_the_band_above_the_card(monkeypatch):
+    monkeypatch.setattr(motion_tools, "_probe_item", _probe)
+    ctx = _Ctx(_card_edl())
+    out = motion_tools.add_motion_graphic(ctx, "headline", 0.0, params=dict(TEXT), id="hl")
+    assert out.startswith("EDL v1"), out
+    item = ctx.latest_edl()["json"]["motion"][0]
+    assert item["end"] == pytest.approx(38.0)                  # holds for the program
+    top, bottom = motion_tools.HEADLINE_SAFE_TOP, 0.3042 - motion_tools.HEADLINE_GAP
+    assert item["params"]["y"] == pytest.approx((top + bottom) / 2, abs=1e-3)
+    assert item["params"]["height"] == pytest.approx(bottom - top, abs=1e-3)
+    assert item.get("mute_captions") is None
+    assert "HEADLINE: placed in the band above the picture card" in out
+    assert "YIELDS: nothing else occupies its band" in out
+    assert not ctx.latest_edl()["json"].get("sfx")
+    # a lockup in the band is told the headline yields to it, and the
+    # headline's own report then names the window
+    out = motion_tools.add_motion_graphic(ctx, "word_slam", 10.0, 11.0,
+                                          params={"text": "GARBAGE", "y": 0.18}, id="slam")
+    assert "headline hl yields its band to this graphic" in out, out
+    out = motion_tools.set_motion_graphic(ctx, "hl", params={"text": "Jobs on *type*"})
+    assert "YIELDS: hands its band to the graphics over 10.00-11.00s" in out, out
+
+
+def test_the_contract_keeps_it_a_headline(monkeypatch):
+    monkeypatch.setattr(motion_tools, "_probe_item", _probe)
+    ctx = _Ctx(_card_edl())
+    out = motion_tools.add_motion_graphic(ctx, "headline", 0.0, 3.0, params=dict(TEXT))
+    assert out.startswith("REJECTED") and "at least 4" in out
+    out = motion_tools.add_motion_graphic(ctx, "headline", 0.0, params=dict(TEXT),
+                                          mute_captions=True)
+    assert out.startswith("REJECTED") and "never mutes captions" in out
+    out = motion_tools.add_motion_graphic(ctx, "headline", 0.0, params=dict(
+        TEXT, text="*Two* accents is *noise*"))
+    assert out.startswith("REJECTED") and "one accent span" in out
+    assert motion_tools.add_motion_graphic(ctx, "headline", 0.0, 20.0, params=dict(TEXT),
+                                           id="a").startswith("EDL v1")
+    out = motion_tools.add_motion_graphic(ctx, "headline", 19.0, params=dict(TEXT))
+    assert out.startswith("REJECTED") and "one headline at a time" in out
+    # one per chapter is fine
+    assert motion_tools.add_motion_graphic(ctx, "headline", 20.0, params=dict(TEXT),
+                                           id="b").startswith("EDL v2")
+    out = motion_tools.set_motion_graphic(ctx, "b", start=18.0)
+    assert out.startswith("REJECTED") and "one headline at a time" in out
+
+
+def test_full_bleed_needs_a_deliberate_y(monkeypatch):
+    monkeypatch.setattr(motion_tools, "_probe_item", _probe)
+    edl = default_edl(60.0)
+    edl["keep"] = [[0.0, 30.0]]
+    edl["frame"] = {"ratio": "9:16", "mode": "crop"}
+    ctx = _Ctx(edl)
+    out = motion_tools.add_motion_graphic(ctx, "headline", 0.0, params=dict(TEXT))
+    assert out.startswith("REJECTED") and "needs a free band" in out
+    out = motion_tools.add_motion_graphic(ctx, "headline", 0.0, params=dict(TEXT, y=0.12))
+    assert out.startswith("EDL v1"), out
+    # a letterbox picture leaves a band too
+    edl["frame"] = {"ratio": "9:16", "mode": "pad", "picture": [0.0, 0.3, 1.0, 0.7]}
+    ctx = _Ctx(edl)
+    out = motion_tools.add_motion_graphic(ctx, "headline", 0.0, params=dict(TEXT))
+    assert "above the letterboxed picture" in out, out
+
+
+def test_a_program_long_headline_stays_program_long_through_a_recut():
+    from timeline import PINNED_MOTION_TEMPLATES, remap_program_items
+    assert set(PINNED_MOTION_TEMPLATES) == {
+        n for n in motion_templates.names() if motion_templates.persistent(n)}
+    edl = validate_edl(dict(default_edl(60.0), keep=[[0.0, 30.0]],
+                            motion=[_hl(end=30.0), _lock("s", 20.0, 21.0)]),
+                       60.0).model_dump()
+    old = Timeline(edl["keep"])
+    edl["keep"] = [[0.0, 10.0], [12.0, 40.0]]          # 2 s out, 10 s more at the end
+    remap_program_items(edl, old, Timeline(edl["keep"]))
+    hl = next(m for m in edl["motion"] if m["id"] == "hl")
+    slam = next(m for m in edl["motion"] if m["id"] == "s")
+    assert (hl["start"], hl["end"]) == (0.0, 38.0)
+    assert (slam["start"], slam["end"]) == (18.0, 19.0)  # a cued moment follows its words

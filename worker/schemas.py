@@ -1100,6 +1100,12 @@ class ZoomItem(BaseModel):
     shake: Optional[float] = None
     shake_hz: Optional[float] = None
     shake_decay: Optional[float] = None
+    # cut_step (Oct 2026): this zoom is OPTIONAL cut hygiene written by
+    # conceal_jump_cuts — a hard (ramp 0) framing step held from a
+    # same-angle jump cut that visibly pops to the next cut — not an
+    # expressive move: the zoom-rhythm critics leave it out and
+    # conceal_jump_cuts(mode='off') removes it. None on every other zoom.
+    cut_step: Optional[bool] = None
 
 
 # Round 35: the junction library grew past the two dips. Every style is
@@ -1446,6 +1452,31 @@ class CardSourceSpan(BaseModel):
         return self
 
 
+# A source card's optional jump-cut concealment (worker/cut_steps.py): at
+# most this many hard framing steps, each a scale of the card's source rect.
+PICTURE_CARD_MAX_STEPS = 64
+CARD_STEP_SCALE = (0.85, 1.15)
+
+
+class CardCutStep(BaseModel):
+    """One hard framing step of a source-fed card (cut_steps, written only by
+    conceal_jump_cuts): over SOURCE seconds [t0, t1] (the kept footage after
+    a same-angle jump cut, up to the next cut) the card's source rect is
+    scaled by 1/``scale`` around its centre — ``scale`` > 1 is tighter, < 1
+    wider (a low-resolution source already near its enlargement cap steps
+    wide). Nothing animates: the framing changes on the cut and holds."""
+    t0: float = Field(ge=0, allow_inf_nan=False)
+    t1: float = Field(gt=0, allow_inf_nan=False)
+    scale: float = Field(ge=CARD_STEP_SCALE[0], le=CARD_STEP_SCALE[1],
+                         allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def _order(self):
+        if self.t1 <= self.t0:
+            raise ValueError("a card cut step needs t1 > t0")
+        return self
+
+
 class PictureCard(BaseModel):
     """A footage-only card on the program clock; type is composited afterwards.
 
@@ -1511,6 +1542,11 @@ class PictureCard(BaseModel):
     # CENTRE (FollowSpan); the rect keeps its size (source_track's span, else
     # source). Single source cards only.
     follow: Optional[List[FollowSpan]] = None
+    # cut_steps (Oct 2026): OPTIONAL jump-cut concealment, written only by
+    # conceal_jump_cuts — hard alternating framing steps of the source rect
+    # over the footage after a same-angle cut that visibly pops (CardCutStep).
+    # Never a default; single source cards only.
+    cut_steps: Optional[List[CardCutStep]] = None
 
     @field_validator("follow")
     @classmethod
@@ -1531,6 +1567,14 @@ class PictureCard(BaseModel):
     def _panels(self):
         if self.follow is not None and (self.source is None or self.panels):
             self.follow = None
+        if self.cut_steps is not None:
+            if not self.cut_steps or self.source is None or self.panels:
+                self.cut_steps = None
+            elif len(self.cut_steps) > PICTURE_CARD_MAX_STEPS:
+                raise ValueError(f"a picture card has at most "
+                                 f"{PICTURE_CARD_MAX_STEPS} cut steps")
+            else:
+                self.cut_steps.sort(key=lambda sp: sp.t0)
         if self.source_track is not None:
             # A per-shot framing of the ONE source rect: meaningless without
             # it (a program card or a stack), and canonical as None when empty.

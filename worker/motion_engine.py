@@ -336,17 +336,24 @@ def design_size(width, height):
 
 
 def build_document(body, *, params=None, theme=None, duration=1.0, fps=30.0,
-                   design_w=DESIGN_W, design_h=1920, plate=None):
+                   design_w=DESIGN_W, design_h=1920, plate=None, yields=None):
     """Wrap template/authored HTML with fonts, the runtime and its inputs.
 
     plate: the measured program picture under the item (worker/plate.py),
     {c, r, s: [{t, g}]} with g the c x r luma grid (base64 bytes, or a
     list), exposed as MG.plate. None leaves the document exactly as it was
-    before plates existed."""
+    before plates existed.
+
+    yields: a persistent graphic's hand-over windows (worker/motion_layer.
+    yield_windows), {w: [[a, b], ...], out, in} in composition seconds,
+    exposed as MG.yields — the runtime fades the whole page out before each
+    window and back after it. None (every other item) adds nothing."""
     init = {"params": params or {}, "theme": theme or {}, "duration": float(duration),
             "fps": float(fps), "W": int(design_w), "H": int(design_h)}
     if plate:
         init["plate"] = plate
+    if yields and yields.get("w"):
+        init["yields"] = yields
     return (
         "<!doctype html><html><head><meta charset='utf-8'>"
         f"<style>{_font_css()}\n:root{{--W:{int(design_w)}px;--H:{int(design_h)}px}}{BASE_CSS}</style>"

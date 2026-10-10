@@ -1,0 +1,129 @@
+<!--MG-SPEC {"title": "Persistent headline", "category": "layout", "persistent": true,
+ "description": "The standing claim headline of a CARD or LETTERBOX layout: a short third-person claim (one *accent* span) under an optional small kicker (who + when), held in the free band above the picture for the whole program. It YIELDS on its own: while another graphic occupies its band it fades out (0.12 s, gone before that graphic lands) and fades back 0.3 s after it leaves, so hero lockups replace it and hand the band back. Gaps under 1.2 s between band graphics stay clear (no flicker). Write ONE per program (start 0, end omitted = the program end; or one per chapter, never overlapping) with y omitted so the write centres it in the band above the card/picture. Silent; never mutes captions. Not for full-bleed frames with no free band.",
+ "duration": 30.0, "layer": "above_captions", "mutes_captions": false,
+ "params": {
+  "text": {"type": "str", "required": true, "max": 80, "hint": "the claim, 3-12 words, third person ('Jobs called 1983 computer fonts *garbage*'); at most one *accent* span"},
+  "kicker": {"type": "str", "default": "", "max": 40, "hint": "optional small line above it: who + when ('Steve Jobs, 1983')"},
+  "style": {"type": "enum", "values": ["sans", "serif", "condensed"], "default": "sans", "hint": "sans = heavy grotesk sentence case; serif = Instrument Serif; condensed = tall condensed caps"},
+  "accent_style": {"type": "enum", "values": ["color", "serif"], "default": "color", "hint": "the accent span in the accent colour, or also set in italic serif"},
+  "x": {"type": "float", "min": 0.2, "max": 0.8, "default": 0.5, "hint": "horizontal centre of the block (frame fraction)"},
+  "y": {"type": "float", "min": 0.06, "max": 0.94, "default": 0.15, "hint": "vertical centre of the block (frame fraction); omit it and the write centres the block in the band above the card or picture"},
+  "width": {"type": "float", "min": 0.4, "max": 0.88, "default": 0.84, "hint": "column width (frame fraction)"},
+  "height": {"type": "float", "min": 0.05, "max": 0.3, "default": 0.15, "hint": "the band height the block may fill (frame fraction); the write sets it from the band"},
+  "size": {"type": "float", "min": 0.5, "max": 1.4, "default": 1.0, "hint": "type scale; the claim never exceeds the band"},
+  "align": {"type": "enum", "values": ["center", "left"], "default": "center"},
+  "color": {"type": "color", "default": "#F5F3EF"},
+  "accent": {"type": "color", "default": "#FF5A36"},
+  "entrance": {"type": "enum", "values": ["fade", "rise", "none"], "default": "fade"},
+  "exit": {"type": "enum", "values": ["fade", "cut"], "default": "fade"}
+ },
+ "example": {"text": "Jobs called 1983 computer fonts *garbage*", "kicker": "Steve Jobs, 1983", "y": 0.15},
+ "sfx": []} -->
+<style>
+  .blk{position:absolute;display:flex;flex-direction:column}
+  .kick{display:block;white-space:nowrap;font-family:'Inter Display','Inter',sans-serif;font-weight:700;
+    letter-spacing:-0.01em;line-height:1.05;opacity:.86}
+  .claim{display:block;width:max-content;max-width:100%}
+  .acc-serif{font-family:'Instrument Serif',serif!important;font-style:italic;font-weight:400!important;
+    letter-spacing:-0.01em;font-size:1.12em}
+</style>
+<div class="mg-root"><div class="blk" id="blk"></div></div>
+<script>
+(() => {
+  const P = MG.params, W = MG.W, H = MG.H, D = MG.duration;
+  const blk = MG.$('#blk');
+  const STYLE = {
+    sans: { css: `'Inter Display','Inter',sans-serif`, weight: 800, track: '-0.025em', lh: 1.04, upper: false },
+    serif: { css: `'Instrument Serif','Playfair Display',Georgia,serif`, weight: 400, track: '-0.012em', lh: 1.0, upper: false },
+    condensed: { css: `'Anton','Bebas Neue','Inter Display',sans-serif`, weight: 400, track: '0.005em', lh: 0.98, upper: true },
+  };
+  const S = STYLE[P.style] || STYLE.sans;
+  const colW = W * P.width, bandH = H * P.height;
+  const left = P.align === 'left';
+  let kick = null, claim = null, BK = null;
+  const build = () => {
+    blk.textContent = '';
+    blk.style.width = colW + 'px';
+    blk.style.alignItems = left ? 'flex-start' : 'center';
+    blk.style.textAlign = left ? 'left' : 'center';
+    kick = null;
+    if (String(P.kicker || '').trim()) {
+      kick = MG.el('div', 'kick', String(P.kicker).trim(), blk);
+      kick.style.color = P.color;
+    }
+    claim = MG.el('div', 'claim', null, blk);
+    Object.assign(claim.style, { fontFamily: S.css, fontWeight: S.weight, letterSpacing: S.track,
+      lineHeight: S.lh, color: P.color, textWrap: 'balance', whiteSpace: 'normal' });
+    MG.starWords(P.text).forEach(({ t, acc }) => {
+      const w = MG.el('span', 'mg-w', S.upper ? t.toUpperCase() : t, claim);
+      if (acc) {
+        w.style.color = P.accent;
+        if (P.accent_style === 'serif' && P.style !== 'serif') w.classList.add('acc-serif');
+      }
+      claim.appendChild(document.createTextNode(' '));
+    });
+  };
+  const layout = () => {
+    build();
+    let kh = 0;
+    if (kick) {
+      kick.style.fontSize = '40px';
+      MG.fitSecondary(kick, { width: colW, max: Math.max(MG.minType(kick), 46 * P.size) });
+      kh = kick.getBoundingClientRect().height;
+    }
+    const gap = kick ? Math.max(6, 0.012 * H * P.size) : 0;
+    if (kick) kick.style.marginBottom = gap + 'px';
+    // the claim: as large as fits the column and the band, in balanced lines
+    // (two for a short claim, three at most) and a step below hero type
+    const room = Math.max(40, bandH - kh - gap);
+    const hi = Math.min(84 * P.size, room), lo = Math.min(28, hi);
+    const maxLines = Array.from(String(P.text || '').replace(/\*/g, '')).length <= 50 ? 2 : 3;
+    let fs = hi;
+    for (; fs > lo; fs *= 0.97) {
+      claim.style.fontSize = fs + 'px';
+      const r = claim.getBoundingClientRect();
+      const lines = Math.round(r.height / (fs * S.lh));
+      if (r.height <= room + 0.5 && claim.scrollWidth <= colW + 1 && lines <= maxLines) break;
+    }
+    fs = Math.max(fs, lo);
+    claim.style.fontSize = fs + 'px';
+    const r0 = blk.getBoundingClientRect();
+    blk.style.left = (W * P.x - colW / 2) + 'px';
+    blk.style.top = (H * P.y - r0.height / 2) + 'px';
+    // the ink, not the column: what the band holds
+    const wordRects = MG.$$('.mg-w', claim).map(e => e.getBoundingClientRect());
+    const kr = kick ? kick.getBoundingClientRect() : null;
+    const rects = wordRects.concat(kr ? [kr] : []);
+    const ink = [Math.min(...rects.map(b => b.left)), Math.min(...rects.map(b => b.top)),
+                 Math.max(...rects.map(b => b.right)), Math.max(...rects.map(b => b.bottom))];
+    MG.box = [ink[0] - 30, ink[1] - 30, ink[2] + 30, ink[3] + 30];
+    if (BK) { BK.remove(); BK = null; }
+    // a bright plate under the band (a light letterbox, a pale canvas): a soft pocket
+    const need = MG.need(ink, { ink: P.color, ratio: 3 });
+    if (need > 0) {
+      BK = MG.backing(MG.$('.mg-root'), ink, need, { pad: [0.25 * fs, 0.12 * fs], feather: 0.35 * fs, radius: 0.3 * fs });
+      MG.growBox(BK.box);
+    }
+  };
+  layout();
+  MG.ready = Promise.all([`${S.weight} 100px ${S.css.split(',')[0]}`, `700 40px 'Inter Display'`,
+                          `italic 400 100px 'Instrument Serif'`]
+    .map(f => document.fonts.load(f).catch(() => 0))).then(() => document.fonts.ready).then(layout);
+
+  // entrance and exit only; the standing hold re-uses one frame, and the
+  // runtime's yield envelope (MG.yields) hands the band to other graphics
+  const enter = P.entrance === 'none' ? 0 : Math.min(0.45, D * 0.25);
+  const leave = P.exit === 'fade' ? Math.min(0.3, D * 0.2) : 0;
+  const wins = [];
+  if (enter > 0) wins.push([0, enter]);
+  if (leave > 0) wins.push([Math.max(0, D - leave - 0.02), D]);
+  MG.active(wins.length ? wins : [[0, 0]]);
+  MG.frame(t => {
+    const a = enter > 0 ? MG.ease.outCubic(MG.range(t, 0, enter)) : 1;
+    const b = leave > 0 ? 1 - MG.ease.inCubic(MG.range(t, D - leave, leave)) : 1;
+    const y = P.entrance === 'rise' ? (1 - a) * 18 : 0;
+    MG.set(blk, { y, opacity: a * b });
+    if (BK) BK.style.opacity = (a * b).toFixed(4);
+  });
+})();
+</script>

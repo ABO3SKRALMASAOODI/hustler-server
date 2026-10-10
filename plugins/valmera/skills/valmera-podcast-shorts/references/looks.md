@@ -80,6 +80,11 @@ Never the flat default colour.
 | 1:1 at full width (1080x1080), for 4:3 archival | [0, 0.21, 1, 0.773] | 0.56 | y 0.08-0.20 | inside the card, y 0.60-0.74, face-free |
 | 1:1 at 92% width (994x994), Editorial Serif only | [0.04, 0.12, 0.96, 0.637] | 0.48 | none | in the field below the card, y 0.66-0.80 |
 
+The headline zone above a card holds the persistent `headline` motion
+template (or the editorial headline): one per short, written with y omitted
+so it fills that zone; hero lockups placed in the zone replace it and hand it
+back automatically, so it is never empty for seconds.
+
 A wider 4:5 card (up to 92% width, 64.7% of the height) fits only without a
 headline above it and must still end at or above y 0.80. Nothing designed
 goes below y 0.80, the band the platform covers: with the 4:5 and

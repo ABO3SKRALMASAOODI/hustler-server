@@ -91,6 +91,22 @@ def spec(name):
     return s
 
 
+def persistent(item_or_name):
+    """True for a PERSISTENT template (spec ``persistent``: the headline band
+    of a card/letterbox layout): it holds for the program, yields its band
+    to other graphics at render time (motion_layer.yield_windows), never
+    hides a spoken word and is not a designed moment for the density and
+    budget critics."""
+    name = item_or_name.get("template") if isinstance(item_or_name, dict) \
+        else item_or_name
+    if not name or name == "html":
+        return False
+    try:
+        return bool(spec(name).get("persistent"))
+    except ValueError:
+        return False
+
+
 def catalog(category=None):
     """Compact list for tool descriptions / list_motion_templates."""
     out = []
@@ -107,10 +123,13 @@ def catalog(category=None):
                 if key in p:
                     d[key] = p[key]
             params[k] = d
-        out.append({"name": n, "title": s.get("title", n), "category": s.get("category"),
-                    "description": s.get("description", ""), "duration": s.get("duration"),
-                    "layer": s.get("layer"), "params": params,
-                    "sfx": [c.get("kind") for c in s.get("sfx") or []]})
+        row = {"name": n, "title": s.get("title", n), "category": s.get("category"),
+               "description": s.get("description", ""), "duration": s.get("duration"),
+               "layer": s.get("layer"), "params": params,
+               "sfx": [c.get("kind") for c in s.get("sfx") or []]}
+        if s.get("persistent"):
+            row["persistent"] = True
+        out.append(row)
     return out
 
 
@@ -246,9 +265,12 @@ def asset_params(name, params):
             if p.get("type") == "asset" and params.get(k)}
 
 
-def build_job(item, out_w, out_h, fps, asset_locals=None, plate=None):
+def build_job(item, out_w, out_h, fps, asset_locals=None, plate=None,
+              yields=None):
     """motion_engine.RenderJob for one MotionItem dict. ``plate`` is the
-    measured picture under it (motion_layer.measure_plates), or None."""
+    measured picture under it (motion_layer.measure_plates), or None;
+    ``yields`` a persistent item's hand-over windows (motion_layer.
+    yield_windows), or None."""
     name = item["template"]
     dw, dh = motion_engine.design_size(out_w, out_h)
     full = float(item.get("full_duration_s") or (float(item["end"]) - float(item["start"])))
@@ -266,12 +288,13 @@ def build_job(item, out_w, out_h, fps, asset_locals=None, plate=None):
             params[key] = None
     body = item.get("html") if name == "html" else motion_engine.template_body(name)
     html = motion_engine.build_document(body, params=params, duration=full, fps=fps,
-                                        design_w=dw, design_h=dh, plate=plate)
+                                        design_w=dw, design_h=dh, plate=plate,
+                                        yields=yields)
     if plate and len(html.encode("utf-8")) > motion_engine.MAX_HTML_BYTES:
         # the plate fails open: it never pushes a composition over the cap
         # (an authored page near the limit renders as it did without one)
         html = motion_engine.build_document(body, params=params, duration=full, fps=fps,
-                                            design_w=dw, design_h=dh)
+                                            design_w=dw, design_h=dh, yields=yields)
     box = None
     if item.get("box"):
         x0, y0, x1, y1 = item["box"]

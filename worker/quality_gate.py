@@ -117,8 +117,11 @@ def advisory_findings(previous: Dict[str, Any], proposed: Dict[str, Any],
     """Return human/actionable risks without blocking the EDL delta."""
     findings: List[str] = []
 
-    new_zooms = _new_items(previous, proposed, "zooms")
-    all_zooms = _items(proposed, "zooms")
+    # cut steps (conceal_jump_cuts) are hygiene steps held cut to cut, not
+    # authored moves: they are not advised on as zooms
+    new_zooms = [z for z in _new_items(previous, proposed, "zooms")
+                 if not z.get("cut_step")]
+    all_zooms = [z for z in _items(proposed, "zooms") if not z.get("cut_step")]
     for zoom in new_zooms:
         zid = zoom.get("id") or "new zoom"
         mode = zoom.get("mode") or "punch"

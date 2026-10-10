@@ -220,6 +220,12 @@ def mode(item):
     return MODE_WORDS
 
 
+def persistent(item):
+    """A persistent template (the headline band, motion_templates.persistent):
+    it carries no spoken words and is placed around like any graphic."""
+    return bool(_spec(item).get("persistent"))
+
+
 def replaces_speech(item):
     """Does the template exist to say the spoken words (spec mutes_captions)?
     Decides the fallback when no caption band is clear of it."""
@@ -780,7 +786,11 @@ def plan(edl, index, tl, words, canvas=None):
         lead_n = sum(1 for i in idx if mids[i] < s)
         local = carried_indices([word_toks[i] for i in idx], seq, lead_n, solo)
         carried = {idx[k] for k in local}
-        if mode(m) == MODE_HERO:
+        if persistent(m):
+            # the standing headline is a claim, not the spoken line: it
+            # never takes a word out of the captions it runs beside
+            carried = set()
+        elif mode(m) == MODE_HERO:
             carried = {i for i in carried if hero & set(word_toks[i])}
         else:
             inside = [i for i in idx if mids[i] >= s]
@@ -904,6 +914,8 @@ def _on_screen(edl, tl):
     motion graphics and designed texts."""
     out = []
     for m in program_items(edl, tl):
+        if persistent(m):
+            continue                    # a standing claim is not the spoken line
         seq, _hero, _solo = shown_tokens(m)
         out.append((m["start"], m["end"], set(seq), f"motion graphic '{m['id']}'"))
     for t in edl.get("texts") or []:

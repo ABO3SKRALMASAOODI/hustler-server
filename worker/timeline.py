@@ -551,6 +551,13 @@ def remap_program_span(old_tl, new_tl, s, e):
     return round(pieces[0][0], 2), round(pieces[-1][1], 2)
 
 
+# Motion templates whose MG-SPEC is ``persistent`` (the headline band,
+# motion_templates.persistent). Named here because this module is shared
+# with the backend, which does not load the motion registry; a test keeps
+# the two in step.
+PINNED_MOTION_TEMPLATES = ("headline",)
+
+
 def remap_program_items(edl, old_tl, new_tl):
     """Re-anchor every program-time collection after the program's time base
     changed — a keep write, a speed write, or ANY insert add/move/resize/
@@ -1510,9 +1517,18 @@ def remap_program_items(edl, old_tl, new_tl):
         # cuts, like behind-subject text. Over spliced media they ride the
         # insert's shift; otherwise they clamp like vectors.
         kept_mo = []
+        old_prog = round(old_tl.out_duration, 2)
         for mo in edl["motion"]:
             mo = dict(mo)
             s0, e0 = float(mo["start"]), float(mo["end"])
+            if mo.get("template") in PINNED_MOTION_TEMPLATES and \
+                    s0 <= 0.05 and e0 >= old_prog - 0.05:
+                # a persistent headline held for the whole program stays
+                # the whole program (it is layout, not a cued moment)
+                if (s0, e0) != (0.0, prog):
+                    mo["start"], mo["end"] = 0.0, prog
+                kept_mo.append(mo)
+                continue
             on_footage = (old_tl.out_to_src(s0) is not None
                           and old_tl.out_to_src(e0) is not None)
             behind = (mo.get("behind")

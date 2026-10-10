@@ -82,6 +82,20 @@ CHOOSING A TEMPLATE — confirm names and params with `list_motion_templates()`:
   sounded); `text_scramble` for
   a decode reveal (secrets, tech, "the answer is…"); `marker_text` for a
   highlighter sweep behind the key phrase.
+- Layout: `headline` is the PERSISTENT claim headline of a card or
+  letterbox layout — a short third-person claim with one *accent* span under
+  an optional kicker (who + when). Write one per program (start 0, end
+  omitted = the program end; or one per chapter, never overlapping) with y
+  omitted: the write centres it in the free band above the card or the
+  letterboxed picture and sizes it to that band. It holds the band and
+  YIELDS on its own at render time — fading out just before any graphic that
+  occupies its band lands and back after it leaves (gaps under 1.2 s stay
+  clear, a phrase build yields from its first revealed row) — so hero
+  lockups replace it and hand the band back without any timing on your side.
+  It is silent, never mutes or replaces captions, is not counted as a
+  designed moment, and the write refuses a second overlapping headline, more
+  than one accent span, a window under 4 s and a full-bleed frame without an
+  explicit y. The write reports the windows it yields and how long it shows.
 - Structure: `chapter_title` at a real section turn ("The problem", "Step
   two"); `timeline_steps` for a spoken sequence of dates or steps;
   `checklist` for a spoken list ticking on item by item; `versus_split` for

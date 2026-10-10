@@ -205,8 +205,9 @@ GRAPHIC CHOICE PLAYBOOK — pick by what the line does, not by habit:
   (`layer='behind_subject'`) for at least one hero word when the background
   leaves room; it is the references' most frequent premium device.
 - In a card or letterbox layout, the header band carries a small persistent
-  headline (who + the claim) that beat graphics replace and hand back to; it
-  is never left empty for seconds.
+  headline (who + the claim): one `headline` motion graphic for the program,
+  which yields automatically to the beat graphics in its band and comes
+  back when they leave; the band is never left empty for seconds.
 - No stretch of more than ~3 s with only body captions in the last third:
   build into the payoff (a setup beat, a kicker; a push-in only when the
   moment calls for one), never sag before it.
