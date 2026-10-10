@@ -68,11 +68,19 @@
       letterSpacing: BR.track, lineHeight: BR.lh, color: P.color, whiteSpace: 'normal',
       width: 'auto', textWrap: 'balance' });
     const ws = (b.words || []).filter(w => String(w.t || '').trim());
-    // spaces between the words: a bridge line wraps inside the column
+    // spaces between the words: a bridge line wraps inside the column, but
+    // never inside a name or a number and its noun (g: glued to the next;
+    // a glued run sits in one no-wrap group)
+    let grp = null;
     const words = ws.map((w, j) => {
-      if (j) el.appendChild(document.createTextNode(' '));
-      const sp = MG.el('span', 'mg-w', String(w.t), el);
+      if (j) (grp || el).appendChild(document.createTextNode(' '));
+      if (w.g && !grp) {
+        grp = MG.el('span', 'glue', null, el);
+        grp.style.whiteSpace = 'nowrap';
+      }
+      const sp = MG.el('span', 'mg-w', String(w.t), grp || el);
       sp.style.marginRight = '0';
+      if (!w.g) grp = null;
       return sp;
     });
     if (words.length) rows.push({ el, R: BR, words, size: 0, bridge: true, at: '', known: ws.map(w => num(w.s, null)) });

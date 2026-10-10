@@ -2062,7 +2062,8 @@ def _clean_reading(rd):
                 continue
             t = " ".join(str(w.get("t") or "").split())[:40]
             if t:
-                words.append({"t": t, "s": sec(w.get("s"))})
+                words.append(dict({"t": t, "s": sec(w.get("s"))},
+                                  **({"g": 1} if w.get("g") else {})))
         if words:
             bridges.append({"after": max(-1, min(after, 7)), "words": words})
     if not rows and not bridges:

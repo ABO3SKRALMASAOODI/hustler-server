@@ -340,6 +340,22 @@ def test_a_paraphrased_row_is_named_in_the_write_note():
     del m
 
 
+def test_a_bridge_line_never_wraps_inside_a_name():
+    words = [("rockets", 0.2, 0.6), ("and", 0.6, 0.7), ("the", 0.8, 0.9),
+             ("Green", 0.9, 1.1), ("Revolution", 1.1, 1.5), ("agriculture", 1.5, 2.0),
+             ("and", 2.0, 2.1), ("new", 2.1, 2.3), ("medicines.", 2.3, 2.9)]
+    rows = [{"text": "ROCKETS"}, {"text": "NEW *MEDICINES*"}]
+    m = {"id": "list", "template": "phrase_build", "start": 0.0, "end": 3.2,
+         "params": {"rows": rows}}
+    edl = _edl([[0.0, 4.0]], [m], words=words)
+    rd = caption_carry.readings(edl, _index(words), Timeline(edl["keep"]))["list"]
+    (bridge,) = rd["bridges"]
+    assert [(w["t"], w.get("g")) for w in bridge["words"]] == [
+        ("the", None), ("Green", 1), ("Revolution", None), ("agriculture", None)]
+    assert validate_edl(dict(edl, motion=[dict(m, reading=rd)]), 9.0).model_dump()[
+        "motion"][0]["reading"]["bridges"][0]["words"][1]["g"] == 1
+
+
 def test_mute_true_and_false_keep_their_contracts_and_still_time_the_rows():
     for mute in (True, False):
         edl = _edl([[0.0, 7.0]], [_paper(mute_captions=mute)], words=PAPER)

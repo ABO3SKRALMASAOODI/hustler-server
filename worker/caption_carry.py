@@ -1087,6 +1087,7 @@ def _reading_of(m, words, word_toks, mids, carried, joined):
                 if at[r][j] is None or t < at[r][j]:
                     at[r][j] = t
                 row_of.setdefault(i, r)
+    import captions as caplib
     bridges = []
     for run in joined:
         t_first = float(words[run[0]]["t0"])
@@ -1095,12 +1096,20 @@ def _reading_of(m, words, word_toks, mids, carried, joined):
                         key=lambda i: float(words[i]["t0"])):
             after = row_of[i]
         ws = []
-        for i in run:
+        for k, i in enumerate(run):
             text = str(words[i].get("w") or "").strip().strip("\"“”")
             if i == run[-1]:
                 text = text.rstrip(".,;:…")
             if text:
-                ws.append({"t": text, "s": round(max(0.0, float(words[i]["t0"]) - s), 3)})
+                w = {"t": text, "s": round(max(0.0, float(words[i]["t0"]) - s), 3)}
+                # a name, a number and its noun, a determiner and its noun
+                # never break across the bridge line's wrap ("the Green /
+                # Revolution" was the caption defect all over again)
+                if k + 1 < len(run) and caplib._glue(
+                        words[i], words[run[k + 1]],
+                        words[run[k - 1]] if k else None) >= caplib.GLUE_NUMBER:
+                    w["g"] = 1
+                ws.append(w)
         if ws:
             bridges.append({"after": after, "words": ws})
     if not any(v is not None for row in at for v in row) and not bridges:
