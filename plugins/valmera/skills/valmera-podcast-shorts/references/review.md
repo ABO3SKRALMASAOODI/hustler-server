@@ -46,7 +46,9 @@ at 1x with the sound on, then answer:
    (on the payoff), at least ~0.5 s after the last word before the end card,
    nothing over the face or the brand corner, the corner mark and native end
    card untouched, no flash frames, pops, exposed edges or clipped words,
-   rights recorded for every asset?
+   no face at the frame's edge, a clean PICTURE CHECK on the complete
+   preview (each finding repaired or kept with a reason), rights recorded
+   for every asset?
 
 Record it with `run.py review --checks hook=...,payoff=...,targets=...,attention=...,clean=...`.
 
@@ -100,7 +102,10 @@ problems. Fix them in the next briefs rather than reopening shipped shorts.
 After `export_final` completes and the file is downloaded, watch the run's
 first final in full: the native corner mark is legible and clear of faces and
 type, the complete 5 s native Valmera ending is present, the audio plays
-through, and the duration matches. Record it with `run.py export
+through, and the duration matches. The final's PICTURE CHECK (the render
+result's `picture_check`) confirms the end card and, on free-tier exports,
+the corner mark were measured in the file; a missing one is a render fault
+to re-export and report, never something to edit around. Record it with `run.py export
 --verified-full`. Later finals of the same geometry need only the probe that
 `run.py export` already does (file, duration, sha256), unless their layout
 differs. The corner mark and the 5 s end card stay exactly as Valmera

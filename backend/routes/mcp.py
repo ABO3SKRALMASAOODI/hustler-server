@@ -1982,6 +1982,12 @@ def _t_wait_for_job(tok, args):
             receipt.update(state="superseded", superseded_by=result["superseded_by"])
         elif not receipt["asset_id"]:
             receipt["state"] = "asset_unavailable"
+        # The worker's rendered-output picture check (render_qc): clipped
+        # faces, single-frame jumps off a cut, a missing end card or
+        # watermark. Advisory evidence the editor must address.
+        picture = (result.get("picture_qc") or {}).get("findings") or []
+        if picture:
+            receipt["picture_check"] = [str(f) for f in picture[:6]]
         return {"content": [{"type": "text", "text": identity + json.dumps(receipt)}],
                 "structuredContent": {"job": job_status, "render": receipt}, "isError": False}
     if row["type"] == "index":

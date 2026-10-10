@@ -16,6 +16,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import audio_qc
+import render_qc
 import audit
 import broll_judge
 import caption_carry
@@ -52,6 +53,7 @@ import scope_guard
 # will use — importing the resolver is the only way those two cannot drift.
 import renderer
 import follow
+import insets
 import picture_cards
 import sfx_search
 import sfx_judge
@@ -243,6 +245,7 @@ class ToolContext:
         self.plan_loaded = False
         self.plan_revised_this_turn = False
         self.last_audio_qc_findings = []
+        self.last_picture_qc_findings = []
         # Whether this editing owner permits a separate model to listen to
         # bounded excerpts from a rendered preview. The in-house Studio
         # editor keeps the historical default. MCP/Codex explicitly turns
@@ -7375,9 +7378,17 @@ def _cap_zoom_strength(ctx, strength, room, base, stacked=0.0):
 
 def set_frame(ctx, ratio, mode="crop", focus_x=None, focus_y=None,
               _measured=False, focus_track=None, picture=None, _follow=False):
-    return _behind_framing_note(ctx, _set_frame(
+    res = _behind_framing_note(ctx, _set_frame(
         ctx, ratio, mode, focus_x, focus_y, _measured, focus_track, picture,
         _follow))
+    if not _measured and isinstance(res, str) and res.startswith("EDL v"):
+        # An authored crop keeps the editor's aim; what it shows is said.
+        try:
+            res += "".join("\n" + n for n in _framing_checks(
+                ctx, measure_faces=False))
+        except Exception:
+            pass
+    return res
 
 
 def _set_frame(ctx, ratio, mode="crop", focus_x=None, focus_y=None,
@@ -7975,6 +7986,334 @@ def _follow_frame(ctx, edl, frame):
                    "auto_reframe(follow=false) holds one aim per shot.")
 
 
+# ── burned-in screen insets and no-face crops (judges round 3) ──────────
+# A crop that cuts through a burned-in screen box for this long is reported
+# (and slid off it by auto_reframe when the speaker stays framed).
+INSET_CUT_MIN_S = 0.5
+# A crop that shows no face for this long while someone speaks, though the
+# speaker's face is measured elsewhere in the source frame, is reported.
+NO_FACE_MAX_S = 1.0
+# The time grid the checks walk over kept footage.
+FRAMING_CHECK_STEP_S = 0.25
+# An authored crop (set_frame) measures the speaker's face for the no-face
+# check only over this much kept footage (a short); auto_reframe has already
+# measured it.
+FRAMING_CHECK_MEASURE_S = 120.0
+# Canvas boxes of the suggested speaker + screen stack (9:16).
+STACK_SPEAKER_BOX = [0.04, 0.07, 0.96, 0.47]
+STACK_SCREEN_BOX = [0.04, 0.50, 0.96, 0.93]
+
+
+def _inset_boxes(ctx, windows):
+    """insets.boxes over SOURCE ``windows`` measured on the proxy (1 fps),
+    cached on the ctx for the turn. [] when there is no proxy, the footage
+    is longer than one follow measurement, or nothing is found."""
+    windows = _merge_windows(windows)
+    if not windows or follow.too_long(windows):
+        return []
+    key = tuple((round(a, 2), round(b, 2)) for a, b in windows)
+    cache = getattr(ctx, "_inset_cache", None)
+    if not isinstance(cache, dict):
+        cache = {}
+        try:
+            ctx._inset_cache = cache
+        except Exception:
+            pass
+    if key in cache:
+        return cache[key]
+    out = []
+    try:
+        proxy = ctx.proxy_path()
+        out = insets.boxes(insets.measure(proxy, windows),
+                           probe=lambda t, r: insets.frame_has(proxy, t, r))
+    except Exception:
+        out = []
+    cache[key] = out
+    return out
+
+
+def _inset_rect(ctx, spans):
+    """The burned-in screen box on screen longest inside SOURCE ``spans``,
+    or None."""
+    boxes = _inset_boxes(ctx, spans)
+    best, most = None, 0.0
+    for box in boxes:
+        on = sum(insets.present(box, a, b) for a, b in _merge_windows(spans))
+        if on > most + 1e-6:
+            best, most = box, on
+    return best["rect"] if best and most >= .5 else None
+
+
+def _crop_window_at(edl, t, sw, sh, W, H):
+    """[x0, y0, x1, y1] (source fractions) the crop shows at SOURCE second
+    t — the follow path where one holds t, else the focus_track span's (or
+    the frame's) aim — or None where that span is not a crop."""
+    frame = edl.get("frame") or {}
+    c = follow.frame_focus_at(edl, t)
+    if c is None:
+        track = [sp for sp in frame.get("focus_track") or [] if isinstance(sp, dict)]
+        base = (frame.get("focus_x"), frame.get("focus_y"), frame.get("mode") or "crop")
+        x, y, mode = renderer._aim_at(track, t, base)
+        if (mode or "crop") != "crop":
+            return None
+        c = (x, y) if (x is not None or y is not None) else None
+    try:
+        _k, x0, y0, x1, y1 = renderer.fit_fractions(sw, sh, W, H, "crop", c)
+    except Exception:
+        return None
+    return [x0, y0, x1, y1]
+
+
+def _runs(times, step, min_s):
+    """Maximal runs [(t0, t1)] of sorted SOURCE ``times`` (the centres of a
+    ``step`` grid; a missed step is bridged) at least ``min_s`` long."""
+    out = []
+    for t in times:
+        if out and t - out[-1][1] <= 2.01 * step:
+            out[-1][1] = t
+        else:
+            out.append([t, t])
+    return [(a - step / 2.0, b + step / 2.0) for a, b in out
+            if b + step - a >= min_s - 1e-6]
+
+
+def _program_span(tl, a, b):
+    """(program start, program end) of the kept footage in SOURCE [a, b]."""
+    pts = []
+    for s, e in tl.segs:
+        lo, hi = max(a, s), min(b, e)
+        if hi - lo > 1e-3:
+            for t in (lo + 1e-4, hi - 1e-4):
+                p = tl.src_to_out(t)
+                if p is not None:
+                    pts.append(p)
+    return (round(min(pts), 2), round(max(pts), 2)) if pts else None
+
+
+def _inset_layout_call(card_id, p0, p1, cuts=()):
+    """The calls that show a screen box legibly over programme [p0, p1]: one
+    fitted card of the box (it sits still across camera cuts), or a speaker
+    + screen stack per camera shot (one speaker framing frames ONE shot)."""
+    stack = [{"box": STACK_SPEAKER_BOX, "source": "auto"},
+             {"box": STACK_SCREEN_BOX, "source": "inset"}]
+    edges = [p0] + sorted(c for c in cuts if p0 + .3 < c < p1 - .3) + [p1]
+    pieces = list(zip(edges, edges[1:]))[:3]
+    fitted = (f"set_picture_card(id='{card_id}', start={p0:g}, end={p1:g}, "
+              "source='inset') shows the whole box fitted and legible")
+    if len(pieces) == 1:
+        return (fitted + f", or set_picture_card(id='{card_id}', start={p0:g}, "
+                f"end={p1:g}, panels={json.dumps(stack)}) stacks the speaker "
+                "over the screen")
+    return (fitted + " (one card across the camera cut"
+            f"{'s' if len(pieces) > 2 else ''}), or one speaker + screen stack "
+            "per camera shot: " + "; ".join(
+                f"set_picture_card(id='{card_id}_{k + 1}', start={a:g}, end={b:g}, "
+                f"panels={json.dumps(stack)})" for k, (a, b) in enumerate(pieces)))
+
+
+def _framing_checks(ctx, apply=False, measure_faces=True):
+    """Notes about the crop the latest EDL draws, measured on the footage:
+    a burned-in screen box (insets.py) cut through by the crop, and a crop
+    with no face for NO_FACE_MAX_S while someone speaks though the
+    speaker's face is in the source frame. ``apply`` (auto_reframe) slides
+    a shot's still crop clear of a box it cuts through when the speaker's
+    face stays inside — one write, said in the note. Everything else is
+    advice naming the fix: a fitted card or a speaker + screen stack of
+    the box (set_picture_card source='inset'), a re-aim, or a cut away.
+    [] when the frame is not a crop of the main video or nothing is found."""
+    edl = ctx.latest_edl()["json"]
+    frame = edl.get("frame") if isinstance(edl.get("frame"), dict) else None
+    if not frame or (frame.get("ratio") or "source") == "source" or \
+            frame.get("picture") or not getattr(ctx, "has_main_video", False):
+        return []
+    if (frame.get("mode") or "crop") != "crop" and not any(
+            (sp or {}).get("mode") == "crop" for sp in frame.get("focus_track") or []):
+        return []
+    index = getattr(ctx, "index", None) or {}
+    video = index.get("video") or {}
+    try:
+        sw, sh = float(video["width"]), float(video["height"])
+        W, H = renderer.frame_dims(sw, sh, str(frame.get("ratio")), delivery=True)
+    except (KeyError, TypeError, ValueError, ZeroDivisionError):
+        return []
+    keep = [(float(s), float(e)) for s, e in edl.get("keep") or []]
+    track = frame.get("focus_track") or []
+    edges = [float(sp[k_]) for sp in track for k_ in ("t0", "t1")]
+    shots = _shot_windows(ctx, keep, edges)
+    if not shots:
+        return []
+    windows = [f for _a, _b, fr, _lo, _hi in shots for f in fr]
+    if follow.too_long(windows):
+        return []
+    boxes = _inset_boxes(ctx, windows)
+    faces = []
+    kept_s = sum(b_ - a_ for a_, b_ in _merge_windows(windows))
+    if measure_faces or kept_s <= FRAMING_CHECK_MEASURE_S:
+        samples, how, _counts = _follow_samples(
+            ctx, windows, [x for _a, _b, _fr, lo, hi in shots for x in (lo, hi)])
+        faces = samples if how in ("index", "measured") else []
+    words = [(float(w.get("t0", 0)), float(w.get("t1", 0)))
+             for w in index.get("words") or []
+             if isinstance(w, dict)]
+    tl = Timeline(edl.get("keep") or [], edl.get("inserts") or [],
+                  edl.get("speed") or [])
+    step = FRAMING_CHECK_STEP_S
+    notes, moved, cut_runs = [], [], []
+    # programme seconds where a camera shot (or a re-aimed span) begins
+    shot_starts = [p[0] for p in (_program_span(tl, a_, b_)
+                                  for a_, b_, _fr, _lo, _hi in shots[1:]) if p]
+    # a source-fed picture card replaces the crop while it is up: what the
+    # crop would show there is never seen
+    carded = []
+    for card in ((edl.get("effects") or {}).get("picture_cards") or []):
+        if isinstance(card, dict) and picture_cards.source_fed(card):
+            try:
+                carded.append((float(card["start"]), float(card["end"])))
+            except (KeyError, TypeError, ValueError):
+                continue
+
+    taken = {str(c.get("id")) for c in ((edl.get("effects") or {}).get("picture_cards")
+                                         or []) if isinstance(c, dict)}
+    card_id = next(f"screen{'' if k == 1 else k}" for k in range(1, 99)
+                   if f"screen{'' if k == 1 else k}" not in taken
+                   and f"screen{'' if k == 1 else k}_1" not in taken)
+
+    def seen(t):
+        if not carded:
+            return True
+        p = tl.src_to_out(t)
+        return p is None or not any(a_ <= p < b_ for a_, b_ in carded)
+    spans = [dict(sp) for sp in frame.get("follow") or [] if isinstance(sp, dict)]
+    for a, b, frags, lo, hi in shots:
+        grid = []
+        for f0, f1 in frags:
+            t = f0 + step / 2.0
+            while t < f1:
+                grid.append(round(t, 3))
+                t += step
+        if not grid:
+            continue
+        cut_at, empty_at = {}, []
+        shot_faces = [s_ for s_ in faces if a - .3 <= s_[0] <= b + .3]
+        for t in grid:
+            win = _crop_window_at(edl, t, sw, sh, W, H)
+            if win is None or not seen(t):
+                continue
+            for k, box in enumerate(boxes):
+                if insets.present(box, t - 1e-3, t + 1e-3) and \
+                        insets.cuts_through(box["rect"], win):
+                    cut_at.setdefault(k, []).append(t)
+            near = [s_ for s_ in shot_faces if abs(s_[0] - t) <= .6]
+            speaking = any(w0 - .1 <= t <= w1 + .1 for w0, w1 in words)
+            if near and speaking:
+                f = min(near, key=lambda s_: abs(s_[0] - t))[1]
+                cx, cy = (f[0] + f[2]) / 2.0, (f[1] + f[3]) / 2.0
+                if not (win[0] <= cx <= win[2] and win[1] <= cy <= win[3]):
+                    empty_at.append(t)
+        for k, ts in cut_at.items():
+            box = boxes[k]
+            rect = box["rect"]
+            for r0, r1 in _runs(ts, step, INSET_CUT_MIN_S):
+                r1 = min(r1, b)                  # never past the shot
+                prog = _program_span(tl, r0, r1)
+                if not prog:
+                    continue
+                win = _crop_window_at(edl, (r0 + r1) / 2.0, sw, sh, W, H)
+                share = insets.overlap_share(rect, win) if win else 0.0
+                slid = None
+                in_run = [s_[1] for s_ in shot_faces if r0 - .3 <= s_[0] <= r1 + .3]
+                static = not any(follow.moves(sp) for sp in spans
+                                 if follow.span_at([sp], (a + b) / 2.0))
+                if apply and static and in_run and win:
+                    keep_x = (min(f[0] for f in in_run) - .01,
+                              max(f[2] for f in in_run) + .01)
+                    slid = insets.clear_aim(rect, win, keep_x)
+                if slid is not None:
+                    moved.append((lo, hi, a, b, slid, (win[1] + win[3]) / 2.0))
+                    cut_runs.append((k, prog, share, slid))
+                    continue
+                cut_runs.append((k, prog, share, None))
+        for r0, r1 in _runs(empty_at, step, NO_FACE_MAX_S):
+            prog = _program_span(tl, r0, r1)
+            if not prog:
+                continue
+            near = [s_[1] for s_ in shot_faces if r0 - .3 <= s_[0] <= r1 + .3]
+            fx = sorted((f[0] + f[2]) / 2.0 for f in near)
+            box_on = [bx for bx in boxes if insets.present(bx, r0, r1) >= .5]
+            screen = (" The crop shows a burned-in screen box instead: "
+                      + _inset_layout_call(card_id, prog[0], prog[1],
+                                           shot_starts) + "."
+                      if box_on else "")
+            notes.append(
+                f"NO FACE IN THE CROP {prog[0]:g}-{prog[1]:g}s: speech plays for "
+                f"{r1 - r0:.1f}s while the crop shows no face; the speaker's face "
+                f"is measured at x={fx[len(fx) // 2]:.2f} of the source. Re-aim "
+                "this span (set_frame focus_track x, or auto_reframe), or show "
+                "what the crop is on as its own card." + screen)
+    # One note per box and stretch of the programme (a box on screen
+    # across a cut is one piece of evidence), suggesting a card over every
+    # kept moment the box is on screen there.
+    merged = []
+    for k, prog, share, slid in sorted(cut_runs, key=lambda r: (r[0], r[1][0])):
+        if merged and merged[-1][0] == k and (merged[-1][3] is None) == (slid is None) \
+                and prog[0] - merged[-1][1][1] <= .5:
+            m = merged[-1]
+            merged[-1] = (k, (m[1][0], max(m[1][1], prog[1])), max(m[2], share),
+                          m[3] if m[3] is not None else slid)
+        else:
+            merged.append((k, prog, share, slid))
+    for k, prog, share, slid in merged:
+        rect = boxes[k]["rect"]
+        shown = [p for p in (_program_span(tl, a0, a1)
+                             for a0, a1 in boxes[k].get("spans") or []) if p]
+        hit = [(p0, p1) for p0, p1 in sorted(shown)
+               if p0 <= prog[1] + .5 and p1 >= prog[0] - .5]
+        win = [min(p[0] for p in hit), max(p[1] for p in hit)] if hit else list(prog)
+        prog = (max(prog[0], win[0]), min(prog[1], win[1]))
+        for a_, b_ in carded:                  # a card already shows the rest
+            if b_ <= prog[0] + 1e-3:
+                win[0] = max(win[0], b_)
+            elif a_ >= prog[1] - 1e-3:
+                win[1] = min(win[1], a_)
+        call = _inset_layout_call(card_id, win[0], win[1], shot_starts)
+        where = f"[{', '.join(f'{v:.2f}' for v in rect)}]"
+        if slid is not None:
+            notes.append(
+                f"SCREEN INSET CLEARED: a burned-in screen box at {where} of the "
+                f"source was cut through by the crop at {prog[0]:g}-{prog[1]:g}s "
+                f"({share * 100:.0f}% of the frame's width); the shot's crop slid "
+                f"to x={slid:.3f} to leave it out, the speaker's face still "
+                f"inside. To SHOW it instead (on screen {win[0]:g}-{win[1]:g}s): "
+                + call + ".")
+            continue
+        notes.append(
+            f"SCREEN INSET (look before acting): a burned-in screen or "
+            f"picture-in-picture box at {where} of the source is on screen "
+            f"{win[0]:g}-{win[1]:g}s and the crop cuts through it at "
+            f"{prog[0]:g}-{prog[1]:g}s (up to {share * 100:.0f}% of the frame's "
+            "width shows a slice of it); the crop cannot leave it out without "
+            "cutting the speaker. If it is the evidence being talked about: "
+            + call + ". Otherwise cut away from it, or keep it deliberately. "
+            "(A door or picture frame can also read as a box — look_at it "
+            "first.)")
+    if apply and moved:
+        for lo, hi, a, b, x, y in moved:
+            mid = round((a + b) / 2.0, 3)
+            spans = [sp for sp in spans
+                     if not (float(sp.get("t0", 0)) <= mid <= float(sp.get("t1", 0)))]
+            spans.append({"t0": lo, "t1": hi, "k": [[mid, round(x, 4), round(y, 4)]]})
+        spans.sort(key=lambda sp: float(sp["t0"]))
+        new = dict(edl)
+        new["frame"] = dict(frame, follow=spans[:FOLLOW_MAX_SPANS] or None)
+        res = ctx.write_edl(new, "the crop slid clear of a burned-in screen box")
+        if not str(res).startswith("EDL v"):
+            notes = [n for n in notes if not n.startswith("SCREEN INSET CLEARED")]
+            notes.append(f"(the slide off the screen box was not saved: {res[:200]})")
+        else:
+            notes.insert(0, res)
+    return notes
+
+
 def _reframe_with_track(ctx, ratio, global_pt, preserve_unmeasured=True,
                         follow_=False):
     """A crop that FOLLOWS the subject across shot changes, or None when a
@@ -8162,6 +8501,24 @@ def _truthy(v, default=True):
 
 
 def auto_reframe(ctx, ratio="9:16", mode="auto", follow=True):
+    """Convert the output frame to `ratio` and choose HOW honestly
+    (_auto_reframe), then check what the crop shows (_framing_checks): a
+    burned-in screen box it cuts through is slid out of the crop when the
+    speaker stays framed, else named with the card that shows it legibly;
+    a crop with no face while someone speaks is named with the fix."""
+    res = _auto_reframe(ctx, ratio, mode, follow)
+    if isinstance(res, str) and (res.startswith("EDL v")
+                                 or res.startswith("NO CHANGE")):
+        try:
+            # follow=false keeps the aims it wrote: advice only
+            res += "".join("\n" + n for n in _framing_checks(
+                ctx, apply=_truthy(follow)))
+        except Exception:
+            pass
+    return res
+
+
+def _auto_reframe(ctx, ratio="9:16", mode="auto", follow=True):
     """Convert the output frame to `ratio` and choose HOW honestly.
 
     Round 55. This tool only ever cropped, and aimed the crop as well as it
@@ -14863,7 +15220,7 @@ PICTURE_CARD_STYLE_COLORS = {
 
 # Where a card's footage comes from: the main SOURCE frame (picture_cards
 # source-fed cards) unless the editor asks for the composed program.
-PICTURE_CARD_SOURCES = ("auto", "full", "program")
+PICTURE_CARD_SOURCES = ("auto", "full", "program", "inset")
 
 
 def _source_spans(edl, start, end):
@@ -15202,6 +15559,19 @@ def _resolve_panel(ctx, edl, spans, box, source, fit, canvas, follow=False,
     W, H = canvas
     lowres = picture_cards.is_lowres(sw, sh)
     face, headroom, track, follows, moving = None, None, None, None, 0
+    if isinstance(source, str) and source == "inset":
+        # The burned-in screen box (insets.py) measured in this window,
+        # shown WHOLE: a fitted card hugging its aspect, never cropped.
+        rect = _inset_rect(ctx, spans)
+        if rect is None:
+            return (None, None, None,
+                    "REJECTED: no burned-in screen box (a picture-in-picture "
+                    "or screenshot inset with four straight edges) was "
+                    "measured in this window's footage — look_at it and pass "
+                    "its [left, top, right, bottom] rect of the SOURCE frame "
+                    "as source instead.", None, None)
+        source = [float(v) for v in rect]
+        fit = fit or "pad"
     if isinstance(source, str):
         if source == "full" or (source == "auto" and lowres and fit != "crop"):
             rect = (picture_cards.archival_rect() if lowres
@@ -15319,8 +15689,10 @@ def set_picture_card(ctx, id, start, end, box=None, fit=None, radius=.045,
         if source not in PICTURE_CARD_SOURCES:
             return ("REJECTED: source is 'auto' (the speaker, framed from the "
                     "full source frame), 'full' (the whole source frame), "
-                    "'program' (the composed program picture) or a "
-                    "[left, top, right, bottom] rect of the SOURCE frame.")
+                    "'inset' (the burned-in screen box measured in the "
+                    "footage, whole), 'program' (the composed program "
+                    "picture) or a [left, top, right, bottom] rect of the "
+                    "SOURCE frame.")
     if panels is not None and source not in (None, "auto"):
         return ("REJECTED: a stacked card takes its regions from `panels` — "
                 "give each panel its own source, not `source` too.")
@@ -15410,9 +15782,10 @@ def set_picture_card(ctx, id, start, end, box=None, fit=None, radius=.045,
             psrc = panel.get("source", "auto")
             if isinstance(psrc, str):
                 psrc = psrc.strip().lower()
-                if psrc not in ("auto", "full"):
+                if psrc not in ("auto", "full", "inset"):
                     return (f"REJECTED: panel {k + 1} source is 'auto', "
-                            "'full' or a rect of the SOURCE frame.")
+                            "'full', 'inset' (the burned-in screen box) or a "
+                            "rect of the SOURCE frame.")
             pfit = panel.get("fit")
             if pfit is not None and pfit not in ("crop", "pad"):
                 return f"REJECTED: panel {k + 1} fit must be 'crop' or 'pad'."
@@ -20007,6 +20380,22 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft"):
                          + " — fix these, or keep one deliberately and say "
                            "why in one clause.")
             note += audio_qc.summary_line(aq)
+            # The PICTURE side (render_qc): the rendered frames themselves —
+            # a face at the frame's or card's edge, a single-frame jump off
+            # a cut, a missing end card or watermark. Advisory like the
+            # audio check: never a change to the edit; the editor repairs
+            # each one or keeps it deliberately and says why.
+            pq = result.get("picture_qc") or {}
+            pqf = pq.get("findings") or []
+            ctx.last_picture_qc_findings = list(pqf[:4])
+            if pqf:
+                ctx.last_taste.extend(
+                    f"picture QC: {finding}" for finding in pqf[:4])
+                note += (" PICTURE CHECK (measured on the rendered frames): "
+                         + "; ".join(pqf[:4])
+                         + " — fix these, or keep one deliberately and say "
+                           "why in one clause.")
+            note += render_qc.summary_line(pq)
             audio_review = _review_render_audio(ctx, row, result)
             if audio_review:
                 reused = (" (reused: rendered audio program unchanged)"
@@ -26146,9 +26535,20 @@ TOOLS = {
                      "the head or lose the composition; a re-aim that can land "
                      "on a jump cut happens on the cut. A speaker who stays "
                      "put gets no motion; a shot with two or more people keeps "
-                     "its aim. follow=false keeps one aim per shot. "
-                     "Pass mode explicitly to force one. Read what it reports "
-                     "and repeat THAT.",
+                     "its aim. follow=false keeps one aim per shot. A tight "
+                     "close-up whose speaker TURNS keeps the leading edge of "
+                     "the face (the nose side) clear of the frame edge — the "
+                     "re-aim happens when the face nears the edge, never on "
+                     "every sway; a turned head the detector loses is tracked "
+                     "through the turn. SCREEN INSETS: a burned-in screen or "
+                     "picture-in-picture box the crop would cut through is "
+                     "slid out of the crop when the speaker stays framed "
+                     "(SCREEN INSET CLEARED), else named with the call that "
+                     "shows it legibly (set_picture_card source='inset', or "
+                     "a speaker + screen stack). A crop that shows NO FACE "
+                     "for over a second while someone speaks is named with "
+                     "the fix. Pass mode explicitly to force one. Read what "
+                     "it reports and repeat THAT.",
                      {"ratio": {"type": "string",
                                 "enum": ["9:16", "1:1", "4:5", "16:9",
                                          "source"]},
@@ -26682,7 +27082,11 @@ TOOLS = {
         "4:3 talks belong in a full-width 4:3 card, not a 3.7x crop; fit='crop' there frames "
         "the speaker at most 2x and follows them. 'full' = the whole source "
         "frame; [left,top,right,bottom] = that rect of the SOURCE frame (look_at gives the "
-        "fractions); 'program' = the composed program picture (frame.picture region) as before. "
+        "fractions); 'inset' = the burned-in screen / picture-in-picture box measured in the "
+        "window's footage (four straight edges, the same place across frames), shown WHOLE "
+        "and fitted (a screenshot the host reads from is legible this way, never sliced by a "
+        "9:16 crop; auto_reframe names the box and this call when it finds one); 'program' = "
+        "the composed program picture (frame.picture region) as before. "
         "fit: 'crop' keeps the box and trims the source rect to it; 'pad' keeps the whole rect "
         "and shrinks the box around it (the default for 'full' and explicit rects). The result "
         "reports the rect, box, enlargement and headroom. One rect frames ONE shot: an 'auto' "
@@ -26693,8 +27097,8 @@ TOOLS = {
         "SPEAKER + EVIDENCE — panels: 2-3 {box, source[, fit]} shown at once over the window, "
         "each box its own rounded window on one canvas, each source its own region of the SAME "
         "source frame: e.g. [{box:[.04,.06,.96,.46], source:'auto'} (the speaker), "
-        "{box:[.04,.5,.96,.92], source:[.53,.52,.99,.98]} (the screen/study/inset they "
-        "show)]. Use it when the source shows a speaker beside a picture-in-picture screen, "
+        "{box:[.04,.5,.96,.92], source:'inset'} (the screen/study/inset they show — or "
+        "its rect)]. Use it when the source shows a speaker beside a picture-in-picture screen, "
         "document or browser that a 9:16 crop would either drop or slice; never crop to the "
         "evidence and lose the speaker for seconds. Panel boxes must not overlap; zooms do not "
         "play inside a stack. "
@@ -26724,14 +27128,14 @@ TOOLS = {
          "background_color2":{"type":"string"},
          "background_dim":{"type":"number"},
          "grain":{"type":"number"},"vignette":{"type":"number"},
-         "source":{"anyOf":[{"type":"string","enum":["auto","full","program"]},
+         "source":{"anyOf":[{"type":"string","enum":["auto","full","program","inset"]},
                             {"type":"array","items":{"type":"number"},
                              "minItems":4,"maxItems":4}]},
          "follow":{"type":"boolean"},
          "panels":{"type":"array","minItems":2,"maxItems":3,"items":{
              "type":"object","properties":{
                  "box":{"type":"array","items":{"type":"number"},"minItems":4,"maxItems":4},
-                 "source":{"anyOf":[{"type":"string","enum":["auto","full"]},
+                 "source":{"anyOf":[{"type":"string","enum":["auto","full","inset"]},
                                     {"type":"array","items":{"type":"number"},
                                      "minItems":4,"maxItems":4}]},
                  "fit":{"type":"string","enum":["crop","pad"]}},
@@ -27916,7 +28320,10 @@ TOOLS = {
         "and renders from the original at up to 720x1280 portrait using the final composition "
         "and typography path; draft is the inexpensive 480px preview. The Studio attaches "
         "the complete preview. wait_for_job observes pending work; call render_preview again "
-        "to review its existing result. MCP clients can retrieve it with watch_video or download_url.",
+        "to review its existing result. MCP clients can retrieve it with watch_video or download_url. "
+        "A complete render carries a PICTURE CHECK measured on its own frames: a face within ~6% "
+        "of the frame's (or its card's) edge, a single-frame jump or pop that is not on a cut, a "
+        "missing end card or watermark. Repair each one or keep it deliberately and say why.",
         {"complete": {"type": "boolean"},
          "quality": {"type": "string", "enum": ["draft", "approval"]}}),
     "justify_verification_findings": (
@@ -28613,8 +29020,9 @@ _COMPACT_CONTRACTS = {
         "speaker who moves inside a shot — still while they sway, a smooth "
         "glide when a still card would cut the head, never across a cut; a "
         "sub-720p source is shown whole unless fit='crop'), enlarged at most "
-        "2x; panels=[{box, source}, "
-        "...] stacks the speaker and the screen/inset they show. The default "
+        "2x; source='inset' shows a burned-in screen box whole; panels=[{box, "
+        "source}, ...] stacks the speaker and the screen/inset they show "
+        "(source='inset' on a panel). The default "
         "canvas is dark and sampled from the footage; never a flat void, and "
         "no blurred self-copy on low-resolution footage."),
 }
