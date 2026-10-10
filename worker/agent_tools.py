@@ -93,6 +93,7 @@ import typography_scenes
 import motion_tools
 import motion_planner
 import cut_steps
+import jump_cut_report
 import music_library
 import sound_library
 import sfx_mix
@@ -617,6 +618,16 @@ class ToolContext:
                 f"Before: {before}. After: {after}.")
         if advisories:
             line += "\n" + quality_gate.advisory_message(version, advisories)
+        # Jump cuts this write put in the hook, or framing steps too small to
+        # read as a cut (index evidence only; never blocks, never adds a zoom).
+        if self.has_main_video:
+            try:
+                note = jump_cut_report.write_note(prev["json"], normalized,
+                                                  self.index)
+            except Exception:  # noqa: BLE001 — a note never fails a write
+                note = ""
+            if note:
+                line += "\n" + note
 
         # Cycle detection. A turn that removes what it just added and adds it
         # back has made no progress, and left alone it will keep going: one
@@ -20908,7 +20919,8 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft"):
                     src_w=(ctx.index.get("video") or {}).get("width"),
                     src_h=(ctx.index.get("video") or {}).get("height"),
                     user_asked=ctx.user_message or "",
-                    measure=motion_tools.jump_cut_measure(ctx))
+                    measure=motion_tools.jump_cut_measure(ctx),
+                    pop=jump_cut_report.pop_measure(ctx, edl))
                 ctx.last_taste_advisory = list(findings)
                 note += taste.audit_line(findings)
             except Exception:
@@ -29639,8 +29651,9 @@ _COMPACT_CONTRACTS = {
         "only punches on words the story turns on (a punch on every stressed "
         "word looks childish). Skip for calm/minimal briefs."),
     "conceal_jump_cuts": (
-        "Optional, never a default: hard 6-10% framing steps on only the "
-        "jump cuts that visibly pop. at=[s] picks cuts; mode='off' undoes."),
+        "mode='report' lists every jump cut (evidence, cover, options), "
+        "writes nothing. Optional, never a default: hard 10-15% steps on "
+        "cuts that visibly pop; at=[s] picks; mode='off' undoes."),
     "set_transitions": (
         "One junction style at real scene changes; scope='scene' skips jump "
         "cuts — report the junction count it returns. Styles dip_black, "

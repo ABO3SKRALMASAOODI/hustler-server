@@ -44,9 +44,11 @@ fade from black on a reel, captions under the platform UI band.
 
 Owner, Oct 10 2026: ZOOMS AND SOUND EFFECTS ARE OPTIONAL, NEVER RULES. No
 finding here counts a missing zoom or a missing sound as a defect or asks
-for one; a bare jump cut is named only when the speaker's head measurably
-jumps across it, and then with options (leave it, B-roll, a framing
-change), never a prescribed zoom.
+for one; a bare jump cut is named (jump_cut_report) only when the speaker
+visibly jumps across it, it sits in the hook, a graphic change sits within
+reach of it or a step on it is too small to read as a cut — and then with
+options (leave it, a graphic change on it, B-roll, restore or re-cut the
+join, a framing step), never a prescribed zoom.
 
 Sound placement (Oct 10 2026, sfx_placement): a talking short carries at
 most 1-2 sounds and no reflexive opening whoosh, and a sound with no visual
@@ -76,26 +78,28 @@ ZOOM_PER_S = 11.0
 ZOOM_MIN_START_S = 1.2
 
 # Jump-cut coverage (cut hygiene, Oct 2026). A jump cut inside one take reads
-# as an edit only when the framing changes across it: the owner's references
-# step the scale by at least ~8% (alternating tight and wide) or move the
-# crop. The judged showcase shorts left cuts bare, or "covered" them with 5%
-# punches that read as the same frame with the head popping.
-JUMP_CUT_MIN_SCALE = 0.08
+# as an edit only when the framing changes across it: a step of the scale or
+# a move of the crop. The judged showcase shorts left cuts bare, "covered"
+# them with 5% punches that read as the same frame with the head popping,
+# and (round 4) with 7.4% card steps that still read as a stutter, not a
+# cut: a step counts from 10% (jump_cut_report.STUTTER_STEP).
+JUMP_CUT_MIN_SCALE = 0.10
 # Viewport centre travel (fraction of the frame) that reads as a reframe.
 JUMP_CUT_MIN_SHIFT = 0.08
 # A crop aim moving this much (source fractions) is a new framing.
 JUMP_CUT_MIN_AIM = 0.03
 # A framing step written by the optional conceal_jump_cuts (cut_steps.py)
 # counts as a framing change on its cut from this size.
-CUT_STEP_MIN = 0.06
-# Jarring cuts named one by one in the note; the rest are counted.
+CUT_STEP_MIN = 0.10
+# Cuts named one by one in the jump-cut note; the rest are counted.
 JUMP_CUT_LIST = 5
 # The step a row's `fix` measures against: the references' tight-camera step.
 JUMP_CUT_FIX_STRENGTH = 0.12
 # Owner, Oct 10 2026: zooms are optional, never a rule — a bare jump cut is
-# the accepted grammar of a talking-head short and is never a defect. The
-# advisory names a jump cut only when it is genuinely JARRING: the speaker's
-# head measurably jumps across it — the face centre travels at least
+# the accepted grammar of a talking-head short and is never a defect. A cut
+# is JARRING (conceal_jump_cuts' pick; the jump-cut report also reads the
+# picture change across it) when the speaker's head measurably jumps across
+# it — the face centre travels at least
 # JUMP_CUT_JAR_SHIFT of the face's width (height for a vertical move) —
 # measured on the frames either side of the cut (a caller's ``measure``) or
 # on the index's face samples within JUMP_CUT_FACE_NEAR_S of it in the same
@@ -109,7 +113,7 @@ JUMP_CUT_FACE_NEAR_S = 0.6
 # each), longest skipped source first: a long skip is where a head moves.
 JUMP_CUT_MEASURE_MAX = 10
 # Framing x zoom never enlarges the source past this (agent_tools caps zoom
-# writes there): below an 8% step of room a punch cannot cover a cut.
+# writes there): below a 10% step of room a punch cannot cover a cut.
 _ZOOM_UPSCALE_MAX = 3.0
 
 SFX_PER_S = 8.0
@@ -645,15 +649,30 @@ def _judge_jumps(rows, index, measure, fps):
     return rows
 
 
+def card_reframe(ra, rb):
+    """(step, shift) of a card's SOURCE rect across a cut: the width ratio
+    - 1 (a cut step) and how far the picture moves, as a fraction of what
+    the card shows."""
+    wa, wb = ra[2] - ra[0], rb[2] - rb[0]
+    ha, hb = ra[3] - ra[1], rb[3] - rb[1]
+    step = max(wa, wb) / max(1e-6, min(wa, wb)) - 1.0
+    shift = max(abs((ra[0] + ra[2]) - (rb[0] + rb[2])) / 2.0
+                / max(1e-6, min(wa, wb)),
+                abs((ra[1] + ra[3]) - (rb[1] + rb[3])) / 2.0
+                / max(1e-6, min(ha, hb)))
+    return step, shift
+
+
 def uncovered_jump_cuts(edl, index, tl, fps=None, measure=None):
     """Jump cuts the picture leaves bare, in programme order:
     [{"t", "before", "after", "fix", "skip", "jump", "jarring"}]
     (before/after = (zoom, cx, cy); skip = source seconds the cut removes;
     jump = face_jump across it or None; jarring = True/False/None).
 
-    A bare jump cut is FINE by default — this lists them so the critic can
-    name the few that are genuinely jarring (``jarring``), never so every cut
-    gets a zoom. ``measure(src_t)`` -> face boxes on that exact source frame
+    A bare jump cut is FINE by default — this lists them so the optional
+    conceal_jump_cuts can pick the few that genuinely pop (``jarring``),
+    never so every cut gets a zoom (the critic's note is the jump-cut
+    report's: jump_cut_report.advisory_line). ``measure(src_t)`` -> face boxes on that exact source frame
     (or None) supplies the evidence; the index's spatial samples near the
     cut stand in where it cannot.
 
@@ -753,15 +772,14 @@ def uncovered_jump_cuts(edl, index, tl, fps=None, measure=None):
         rb = picture_cards.source_at(cd, b)
         if ra is None or rb is None or ra == rb:
             return False
-        # a cut step (conceal_jump_cuts) scales the rect on the cut
-        wa, wb = ra[2] - ra[0], rb[2] - rb[0]
-        if max(wa, wb) / max(1e-6, min(wa, wb)) - 1.0 >= CUT_STEP_MIN - 1e-6:
-            return True
-        if not cd.get("follow"):
-            return True
-        # a following card's rect drifts by a hair across any cut: only a
-        # re-aim as big as a crop's counts (JUMP_CUT_MIN_AIM)
-        return max(abs(u - v) for u, v in zip(ra, rb)) >= JUMP_CUT_MIN_AIM
+        # a cut step (conceal_jump_cuts) scales the rect on the cut; under
+        # CUT_STEP_MIN a step is a stutter, not a framing change (the judged
+        # 7.4% card steps), and only the picture moving re-aims the card —
+        # by JUMP_CUT_MIN_SHIFT of what it shows: a following card's rect
+        # drifts by a hair across any cut (card_reframe)
+        step, shift = card_reframe(ra, rb)
+        return step >= CUT_STEP_MIN - 1e-6 or \
+            shift >= JUMP_CUT_MIN_SHIFT - 1e-6
 
     def aim_moved(p, q):
         if p[2] != q[2]:
@@ -863,64 +881,20 @@ def uncovered_jump_cuts(edl, index, tl, fps=None, measure=None):
             else:
                 fix = (f"the framing steps only {zb[0]:.2f}x → "
                        f"{za[0]:.2f}x ({scale * 100:.0f}%){who} — make that "
-                       "step ≥8%, or release to the wide on the cut")
+                       "step ≥10%, or release to the wide on the cut")
         found.append({"t": round(c, 2), "before": zb, "after": za,
                       "fix": fix, **span})
     return _judge_jumps(found, index, measure, fps)
 
 
-def jump_cut_line(bare):
-    """The advisory sentence for uncovered_jump_cuts' rows, or ''.
-
-    A bare jump cut is fine and goes unmentioned. Two kinds of row are worth
-    a note: a cut where the speaker's head measurably jumps (``jarring``),
-    named with the editor's options — never a prescribed zoom — and a zoom
-    already sitting on a cut that steps the framing too little to read as a
-    move (it reads as a twitch), which is better removed."""
-    weak = []
-    for r in bare:
-        m = re.match(r"zoom (\S+) steps the framing only", r.get("fix") or "")
-        if m and m.group(1) not in weak:
-            weak.append(m.group(1))
-    jar = [r for r in bare if r.get("jarring")]
-    parts = []
-    if jar:
-        head = jar[:JUMP_CUT_LIST]
-        more = len(jar) - len(head)
-
-        def where(r):
-            return (f"{r['t']:g}s (the head jumps {r['jump']['shift']:.1f} "
-                    "face-widths)")
-        parts.append(
-            f"{len(jar)} jump cut{'s' if len(jar) != 1 else ''} where the "
-            "speaker's head visibly jumps: "
-            + ", ".join(where(r) for r in head)
-            + (f" (+{more} more)" if more else "")
-            + ". A bare jump cut is fine by default and zooms are optional, "
-            "never a rule: only where one of these is genuinely jarring on a "
-            "key line, the options are to leave it, cover it with B-roll or "
-            "a cutaway, or change the framing on that cut (a crop re-aim, or "
-            "a step of at least ~8% held to the next cut — conceal_jump_cuts "
-            "writes hard alternating steps on just the cuts that pop) — never "
-            "a zoom on every cut")
-    if weak:
-        one = len(weak) == 1
-        parts.append(
-            f"zoom{'' if one else 's'} {', '.join(weak)} step"
-            f"{'s' if one else ''} the framing less than ~8% at a jump cut, "
-            "which reads as a twitch rather than a move: remove "
-            f"{'it' if one else 'them'} (a bare cut is fine), or make the "
-            "step ≥8% only where the cut is genuinely jarring")
-    return "; ".join(parts) + ("." if parts else "")
-
-
 def critique(edl, index, tl, src_w=None, src_h=None, user_asked="",
-             measure=None):
+             measure=None, pop=None):
     """Craft findings for a rendered EDL. Returns a list of one-line strings.
 
-    ``measure(src_t)`` -> face boxes on that exact source frame (or None) is
-    optional evidence for the jump-cut note (uncovered_jump_cuts); without
-    it the index's face samples are used.
+    ``measure(src_t)`` -> face boxes on that exact source frame (or None) and
+    ``pop(e0, s1, t)`` -> the picture change across a join (cut_steps.
+    pop_score, or None) are optional evidence for the jump-cut note
+    (jump_cut_report); without them the index's face samples are used.
 
     `user_asked` is the user's own message for this turn, lowercased by the
     caller or not — it is only ever used to SUPPRESS a finding, never to raise
@@ -1034,14 +1008,16 @@ def critique(edl, index, tl, src_w=None, src_h=None, user_asked="",
     # ── jump cuts ────────────────────────────────────────────────────────
     # A bare jump cut is the accepted grammar of a talking-head short and is
     # never a defect (owner, Oct 10 2026: zooms are optional, never a rule).
-    # Only a cut where the speaker's head measurably jumps is named, with the
-    # editor's options, and a zoom too small to read as a move is named for
-    # removal (jump_cut_line).
+    # The jump-cut report (jump_cut_report.py) names only a cut inside the
+    # hook, a framing step too small to read as a cut (a stutter), a graphic
+    # change within reach of a bare cut, and a bare cut that visibly jumps —
+    # each with the editor's options, never a prescribed zoom.
     if not any(k in ask for k in ("no zoom", "without zoom", "no punch",
                                   "no camera move", "keep the jump cut")):
         try:
-            line = jump_cut_line(
-                uncovered_jump_cuts(edl, index, tl, measure=measure))
+            import jump_cut_report
+            line = jump_cut_report.advisory_line(jump_cut_report.report(
+                edl, index, tl, measure=measure, pop=pop))
         except Exception:
             line = ""
         if line:

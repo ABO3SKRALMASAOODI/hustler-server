@@ -124,16 +124,18 @@ KEEP = [[0, 4], [5, 8], [9, 12]]
 
 
 def test_a_written_step_covers_its_cut_and_its_release():
-    step = {"id": "cs1", "start": 4.0, "end": 7.0, "strength": 0.06, "ramp_s": 0.0,
+    step = {"id": "cs1", "start": 4.0, "end": 7.0, "strength": 0.12, "ramp_s": 0.0,
             "cut_step": True}
     assert _bare({"keep": KEEP}) == [4.0, 7.0]
     assert _bare({"keep": KEEP, "effects": {"zooms": [step]}}) == []
-    # the same 6% as an ordinary zoom is too small to read as a framing change
-    plain = dict(step, cut_step=None)
-    assert _bare({"keep": KEEP, "effects": {"zooms": [plain]}}) == [4.0, 7.0]
+    # round 4: a step under 10% stutters (the judged 7.4% card steps) — no cover
+    small = dict(step, strength=0.07)
+    assert _bare({"keep": KEEP, "effects": {"zooms": [small]}}) == [4.0, 7.0]
     card = {"id": "c", "start": 0, "end": 10, "box": JOBS_BOX, "source": JOBS_SRC,
-            "cut_steps": [{"t0": 5.0, "t1": 8.0, "scale": 0.926}]}
+            "cut_steps": [{"t0": 5.0, "t1": 8.0, "scale": round(1 / 1.12, 4)}]}
     assert _bare({"keep": KEEP, "effects": {"picture_cards": [card]}}) == []
+    assert _bare({"keep": KEEP, "effects": {"picture_cards": [dict(card, cut_steps=[
+        {"t0": 5.0, "t1": 8.0, "scale": 0.926}])]}}) == [4.0, 7.0]
     assert _bare({"keep": KEEP, "effects": {"picture_cards": [
         dict(card, cut_steps=None)]}}) == [4.0, 7.0]
 
@@ -213,7 +215,7 @@ def test_full_frame_cuts_that_pop_get_hard_alternating_zoom_steps(stubbed):
     zooms = ctx.latest_edl()["json"]["effects"]["zooms"]
     assert [(z["start"], z["end"]) for z in zooms] == [(4.0, 7.0), (13.0, 16.0)]
     for z in zooms:
-        assert z["cut_step"] is True and z["ramp_s"] == 0.0 and z["strength"] == 0.08
+        assert z["cut_step"] is True and z["ramp_s"] == 0.0 and z["strength"] == 0.12
         assert (z.get("mode") or "punch") == "punch" and z["cy"] == 0.35
         assert z["cx"] in (None, 0.5)           # a centred x is stored canonically
         assert z["target_measured"] is True and z["id"].startswith("cs")
@@ -258,9 +260,9 @@ def test_a_card_alternates_its_source_crop_wide_on_a_capped_source(stubbed):
     fx = ctx.latest_edl()["json"]["effects"]
     assert not fx.get("zooms")
     steps = fx["picture_cards"][0]["cut_steps"]
-    assert steps == [{"t0": 5.0, "t1": 8.0, "scale": pytest.approx(1 / 1.08, abs=1e-3)},
-                     {"t0": 13.0, "t1": 16.0, "scale": pytest.approx(1 / 1.08, abs=1e-3)}]
-    assert "wide 8%" in out and "tighter would soften it" in out
+    assert steps == [{"t0": 5.0, "t1": 8.0, "scale": pytest.approx(1 / 1.12, abs=1e-3)},
+                     {"t0": 13.0, "t1": 16.0, "scale": pytest.approx(1 / 1.12, abs=1e-3)}]
+    assert "wide 12%" in out and "tighter would soften it" in out
     # every stepped cut now reads as a framing change to the critic
     edl = validate_edl(ctx.latest_edl()["json"], 60.0).model_dump(exclude_none=True)
     tl = Timeline(edl["keep"])
@@ -290,7 +292,8 @@ def test_conceal_is_a_registered_optional_tool_and_never_a_default():
     assert "conceal_jump_cuts" in agent_tools.WRITE_TOOLS
     desc = agent_tools.TOOLS["conceal_jump_cuts"][1]
     assert "OPTIONAL" in desc and "never a default" in desc
-    assert agent_tools.TOOLS["conceal_jump_cuts"][2]["mode"]["enum"] == ["scale_step", "off"]
+    assert agent_tools.TOOLS["conceal_jump_cuts"][2]["mode"]["enum"] == [
+        "report", "scale_step", "off"]
     # nothing that runs by default writes a cut step: looks, planners,
     # directors and the shorts pipeline never name the tool or the flag
     for name in ("motion_planner.py", "director.py", "shorts.py", "motion_captions.py",

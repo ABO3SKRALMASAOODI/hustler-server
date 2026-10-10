@@ -16,8 +16,10 @@ Findings from the showcase shorts, each fixed in the engine:
   the cut (renderer.join_fades), without changing any block's length;
 * jump cuts with no framing change — taste.uncovered_jump_cuts measures
   each one, and (owner, Oct 10 2026: zooms are optional, never a rule) the
-  critic names only those where the speaker's head measurably jumps, with
-  options (leave it, B-roll, a framing change), never a prescribed zoom.
+  critic's jump-cut report names only those where the speaker visibly
+  jumps, a cut in the hook and a step too small to read as a cut, with
+  options (leave it, move a graphic change, restore or re-cut the join, a
+  framing step), never a prescribed zoom (tests/test_jump_cut_report.py).
 
 Run:  python -m pytest tests/test_cut_hygiene.py -q     (from worker/)
 """
@@ -33,6 +35,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import camera                                                 # noqa: E402
+import jump_cut_report                                        # noqa: E402
 import renderer                                               # noqa: E402
 import stitch                                                 # noqa: E402
 import taste                                                  # noqa: E402
@@ -351,7 +354,13 @@ def test_bare_jump_cuts_are_measured_but_never_reported_without_a_jump():
     # ... but with no face evidence nothing says a cut is jarring, and a
     # bare jump cut is fine: no note at all.
     assert all(r["jump"] is None and r["jarring"] is None for r in rows)
-    assert taste.jump_cut_line(rows) == ""
+    assert _note({"keep": [[0, 4], [5, 8], [9, 12], [13, 16]]}) == ""
+
+
+def _note(edl, index=None):
+    edl = validate_edl(edl, 60.0).model_dump(exclude_none=True)
+    return jump_cut_report.advisory_line(jump_cut_report.report(
+        edl, index or {"video": {"fps": FPS}}))
 
 
 def _face(cx, w=0.1, top=0.2, h=0.2):
@@ -387,19 +396,18 @@ def test_only_a_measured_head_jump_is_named_and_with_options_not_a_zoom():
     rows = _bare({"keep": keep}, index)
     assert [(r["t"], r["jarring"]) for r in rows] == [(4.0, True),
                                                       (7.0, False)]
-    line = taste.jump_cut_line(rows)
-    assert line.startswith("1 jump cut where the speaker's head visibly "
-                           "jumps: 4s (the head jumps 2.0 face-widths)")
-    for option in ("leave it", "B-roll", "change the framing",
-                   "zooms are optional, never a rule",
-                   "never a zoom on every cut"):
+    line = _note({"keep": keep}, index)
+    assert line.startswith("jump cuts: 1 bare jump cut where the speaker "
+                           "visibly jumps: 4s"), line
+    for option in ("leave it", "move a graphic change onto the cut",
+                   "restore or re-cut the join", "never a rule"):
         assert option in line, option
     assert "7s" not in line and "add_zoom" not in line
     # samples further than JUMP_CUT_FACE_NEAR_S from the cut are no evidence
     far = {"video": {"fps": FPS}, "spatial": {"samples": [
         {"t": 2.0, "faces": [_face(0.40)]},
         {"t": 7.0, "faces": [_face(0.60)]}]}}
-    assert taste.jump_cut_line(_bare({"keep": keep}, far)) == ""
+    assert _note({"keep": keep}, far) == ""
 
 
 def test_real_frames_measure_the_longest_skips_first():
@@ -468,13 +476,14 @@ def test_a_weak_punch_is_named_once_and_zoomed_framings_keep_the_step_fix():
     assert [r["t"] for r in rows] == [2.0, 4.0]
     assert rows[0]["fix"] == ("zoom w steps the framing only 5% — raise "
                               "its strength to 0.12")
-    # A zoom too small to read as a move is a twitch: the note names it
-    # once and asks first for its removal, whatever the cuts' faces do.
-    line = taste.jump_cut_line(rows)
-    assert line == ("zoom w steps the framing less than ~8% at a jump cut, "
-                    "which reads as a twitch rather than a move: remove it "
-                    "(a bare cut is fine), or make the step ≥8% only where "
-                    "the cut is genuinely jarring.")
+    # A step too small to read as a cut is a stutter: the note names it and
+    # asks first for its removal, whatever the cuts' faces do.
+    line = _note({"keep": [[0, 2], [3, 5], [6, 9]], "effects": {"zooms": [
+        {"id": "w", "start": 2.0, "end": 4.0, "strength": 0.05,
+         "mode": "punch", "ramp_s": 0}]}})
+    assert line.startswith("jump cuts: the framing steps only 5% at 2s, 4s "
+                           "— under ~10% a step reads as a stutter, not a "
+                           "cut: remove it (a bare cut is fine)"), line
     # A 1.08x push into a 1.14x punch: a stronger push would SHRINK the
     # step, so the fix is the step itself.
     both = _bare({"keep": [[0, 4], [5, 9]], "effects": {"zooms": [
@@ -482,7 +491,7 @@ def test_a_weak_punch_is_named_once_and_zoomed_framings_keep_the_step_fix():
          "mode": "push_in"},
         {"id": "b", "start": 4.0, "end": 7.0, "strength": 0.14,
          "mode": "punch", "ramp_s": 0}]}})
-    assert len(both) == 1 and "make that step ≥8%" in both[0]["fix"]
+    assert len(both) == 1 and "make that step ≥10%" in both[0]["fix"]
 
 
 def test_a_zoom_running_through_the_cut_is_named():
@@ -507,7 +516,7 @@ def test_the_critic_names_only_jarring_cuts_unless_the_user_said_no_zooms():
         return [_face(0.35 if src_t < 4.5 else 0.6)]
     found = taste.critique(edl, index, tl, measure=jumping)
     line = next(f for f in found if "jump cut" in f)
-    assert "1 jump cut where the speaker's head visibly jumps: 4s" in line
+    assert "1 bare jump cut where the speaker visibly jumps: 4s" in line
     assert "add_zoom" not in line
     quiet = taste.critique(edl, index, tl, measure=jumping,
                            user_asked="cut it tight, no zooms please")

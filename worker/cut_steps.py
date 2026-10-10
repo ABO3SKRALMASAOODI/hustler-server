@@ -16,8 +16,17 @@ render path writes it, and a bare jump cut stays the accepted grammar.
 WHAT IT WRITES
 
 Cut hygiene, not expressive camera: nothing animates. On each selected cut
-the framing STEPS by ``step`` (6-10%, default 8%) and holds to the next cut,
-where it steps back — so consecutive popping cuts alternate tight / wide.
+the framing STEPS by ``step`` (10-15%, default 12%) and holds to the next
+cut, where it steps back — so consecutive popping cuts alternate tight /
+wide. Round 4 (Oct 2026): the judged 7.4% steps on the Jobs card read as a
+stutter, not a cut — under ~10% a step is worse than a bare cut.
+
+THE REPORT COMES FIRST
+
+``mode='report'`` writes nothing: it lists every same-shot join with how
+visible its jump is, what already covers it and the editor's options
+(jump_cut_report.py) — leave it, move a graphic change onto it, restore or
+re-cut the join, or this step on that one cut.
 
 * full-frame footage: a ``cut_step`` zoom — mode punch, ramp_s 0 (an instant
   step), aimed at the speaker's face, from the cut to the next cut. The
@@ -48,10 +57,11 @@ import json
 import math
 import os
 
-STEP_DEFAULT = 0.08
-STEP_MIN, STEP_MAX = 0.06, 0.10
+STEP_DEFAULT = 0.12
+STEP_MIN, STEP_MAX = 0.10, 0.15
 # A step this small still reads as a framing change on a hard cut (taste
-# counts a written cut step as cover from here; an expressive zoom needs 8%).
+# counts a written cut step as cover from here, like an expressive zoom);
+# under it the frame stutters (jump_cut_report.STUTTER_STEP).
 CUT_STEP_MIN = STEP_MIN
 # At most this many cuts are measured on real frames per call.
 MEASURE_MAX = 24
@@ -349,16 +359,21 @@ def _fmt_ev(row):
 
 
 def conceal_jump_cuts(ctx, mode="scale_step", step=None, at=None):
-    """Write (or remove) the optional cut steps; see the module docstring."""
+    """Report (mode='report'), write or remove (mode='off') the optional
+    cut steps; see the module docstring."""
     import renderer
     import taste
     from timeline import Timeline
     atools = _at()
     mode = str(mode or "scale_step").strip().lower()
-    if mode not in ("scale_step", "off"):
-        return ("REJECTED: mode is 'scale_step' (write hard alternating framing "
-                "steps on the same-angle cuts that visibly pop) or 'off' (remove "
-                "them all).")
+    if mode not in ("scale_step", "off", "report"):
+        return ("REJECTED: mode is 'report' (list every same-shot jump cut with "
+                "its evidence and options; writes nothing), 'scale_step' (write "
+                "hard alternating framing steps on the same-angle cuts that "
+                "visibly pop) or 'off' (remove them all).")
+    if mode == "report":
+        import jump_cut_report
+        return jump_cut_report.tool_report(ctx)
     cur = json.loads(json.dumps(ctx.latest_edl()["json"]))
     base, nz, nc = strip(cur)
     if mode == "off":
@@ -375,8 +390,8 @@ def conceal_jump_cuts(ctx, mode="scale_step", step=None, at=None):
         return f"REJECTED: step is a number {STEP_MIN:g}-{STEP_MAX:g} (default {STEP_DEFAULT:g})."
     if not STEP_MIN - 1e-9 <= st <= STEP_MAX + 1e-9:
         return (f"REJECTED: step {st:g} is outside {STEP_MIN:g}-{STEP_MAX:g}: below "
-                f"{STEP_MIN:g} the cut still reads as the same frame popping, above "
-                f"{STEP_MAX:g} it reads as a zoom.")
+                f"{STEP_MIN:g} the frame stutters (the same frame popping, not a "
+                f"cut), above {STEP_MAX:g} it reads as a zoom.")
     targets = None
     if at not in (None, "", []):
         try:
@@ -564,10 +579,16 @@ def conceal_jump_cuts(ctx, mode="scale_step", step=None, at=None):
 TOOL_SPECS = {
     "conceal_jump_cuts": (
         conceal_jump_cuts,
-        "OPTIONAL cut hygiene — never a default: hide same-angle jump cuts that "
+        "OPTIONAL cut hygiene — never a default. mode='report' FIRST: it lists "
+        "every same-shot jump cut (how visible the jump is, what already covers "
+        "it — a graphic in/out, a caption change, a step — the hook and stutter "
+        "flags, and the options: leave it, move a graphic change onto it, "
+        "restore or re-cut the join, or a step) and writes nothing. "
+        "mode='scale_step' hides same-angle jump cuts that "
         "VISIBLY POP (pause removal on one camera: the head or hands jump inside a "
         "constant frame) with HARD, non-animated framing steps. Each selected cut "
-        "steps the framing by `step` (0.06-0.10, default 0.08) and holds it to the "
+        "steps the framing by `step` (0.10-0.15, default 0.12; under ~10% a step "
+        "stutters) and holds it to the "
         "next cut, where it steps back, so consecutive cuts alternate tight/wide "
         "like a second camera. Full-frame footage gets a cut-step zoom (ramp 0, "
         "aimed at the face); a source picture card alternates its SOURCE crop "
@@ -579,7 +600,7 @@ TOOL_SPECS = {
         "only when the render shows cuts popping (typically a static archival or "
         "single-camera talk tightened by pause removal), after the cut is final. "
         "Re-running replaces earlier steps; mode='off' removes them all.",
-        {"mode": {"type": "string", "enum": ["scale_step", "off"]},
+        {"mode": {"type": "string", "enum": ["report", "scale_step", "off"]},
          "step": {"type": "number"},
          "at": {"type": "array", "items": {"type": "number"}}}),
 }
