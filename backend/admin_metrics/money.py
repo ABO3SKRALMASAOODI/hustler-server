@@ -285,6 +285,9 @@ def stopped_paying(cur, period):
 
 # ── Billing problems (the hourly DB-vs-Paddle contradiction list) ───────
 
+# Customers only (G2): three pre-relaunch accounts with a subscription Paddle
+# does not recognise are old test/grandfathered rows, not customers; the old
+# /admin/billing page still lists every account.
 BILLING_PROBLEMS_SQL = """
     SELECT u.id, u.email, u.plan, u.is_subscribed, u.billing_status,
            u.trial_status, u.credits_monthly, u.subscription_id,
@@ -304,13 +307,14 @@ BILLING_PROBLEMS_SQL = """
                THEN 'subscribed_without_id'
            END AS problem
       FROM users u
-     WHERE (u.billing_status = 'canceled' AND u.is_subscribed = 1)
+     WHERE ((u.billing_status = 'canceled' AND u.is_subscribed = 1)
         OR (u.billing_status IN ('past_due','paused') AND u.credits_monthly > 0)
         OR (u.billing_status = 'not_in_paddle')
         OR (u.trial_status = 'converted' AND NOT EXISTS (
                SELECT 1 FROM payments p WHERE p.user_id = u.id
                   AND p.status = 'completed' AND p.amount_cents > 0))
-        OR (u.is_subscribed = 1 AND u.subscription_id IS NULL)
+        OR (u.is_subscribed = 1 AND u.subscription_id IS NULL))
+       AND {CUSTOMER}
      ORDER BY u.id"""
 
 PROBLEM_TEXT = {
@@ -328,7 +332,7 @@ PROBLEM_TEXT = {
 
 
 def billing_problems(cur):
-    cur.execute(BILLING_PROBLEMS_SQL)
+    cur.execute(BILLING_PROBLEMS_SQL.replace("{CUSTOMER}", defs.customer("u")))
     rows = [dict(r) for r in cur.fetchall()]
     cur.execute("""SELECT max(billing_synced_at) AS t FROM users
                     WHERE billing_synced_at IS NOT NULL""")

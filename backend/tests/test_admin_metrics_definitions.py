@@ -223,3 +223,29 @@ def test_health_pills_use_the_documented_thresholds(monkeypatch):
     assert items["messages_without_edit"]["status"] == "critical"
     assert items["editing_engine"]["status"] == "good"
     assert all(i["href"].startswith("/admin/") for i in items.values())
+
+
+def test_billing_problems_and_money_use_the_customer_population():
+    from admin_metrics import money
+
+    class Cur:
+        def __init__(self):
+            self.sql = []
+
+        def execute(self, sql, params=None):
+            self.sql.append(" ".join(sql.split()))
+
+        def fetchall(self):
+            return []
+
+        def fetchone(self):
+            return {"t": None}
+    cur = Cur()
+    rows, last = money.billing_problems(cur)
+    assert rows == [] and last is None
+    assert "u.is_verified = 1" in cur.sql[0] and "{CUSTOMER}" not in cur.sql[0]
+    # Paying and MRR are the same population by construction.
+    assert defs.paying("u") in money.STATUS_SQL
+    assert money.plan_tier("mcp_connect") == "current"
+    assert money.plan_tier("ai") == "grandfathered"
+    assert money.plan_tier("ultra") == "retired"
