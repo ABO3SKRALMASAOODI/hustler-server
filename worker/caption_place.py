@@ -29,8 +29,10 @@ HARD no-go zones (a caption block never touches one):
     the margin feeds crop): the caption column never reaches into it.
 
 SOFT costs (a band may hold them, at a price): source text under the band
-(a screen share's UI, a sign), and sitting over a panel's picture instead of
-the canvas around it. A stack's CONTENT panel is hard while any other band
+(a screen share's UI, a sign) or beside it (SCENE TEXT, round 7: a shirt
+print or a laptop's stickers, recurring at one place, priced with a margin
+— scene_boxes), and sitting over a panel's picture instead of the canvas
+around it. A stack's CONTENT panel is hard while any other band
 is free; with none, its inside is the last resort before a heard word is
 muted (caption_carry.plan).
 
@@ -243,6 +245,77 @@ def _reliable_text(sample):
     return out
 
 
+# SCENE TEXT (round 7, judged round 5: Elon's huge white OCCUPY shirt print
+# right under the captions and the hook; Thiel's laptop stickers under the
+# payoff). Print in the picture that is not a line of UI text — a T-shirt
+# slogan, a sign, a laptop's stickers — fails _reliable_text's line shape,
+# yet it is the most eye-catching type in the frame. A text block the index
+# finds again at the same place in neighbouring samples (SCENE_S source
+# seconds, IoU SCENE_IOU), of a real size, and not on a measured face is
+# scene text: a SOFT keep-out, grown by SCENE_PAD, so a caption band or a
+# moved graphic keeps clear of it where a free place allows, never at the
+# price of a face or a heard word.
+SCENE_S = 3.0
+SCENE_IOU = 0.5
+SCENE_MIN_W, SCENE_MIN_H, SCENE_MAX_AREA = 0.05, 0.03, 0.2
+SCENE_PAD = 0.025
+
+
+def _box_iou(a, b):
+    ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+    iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+    i = ix * iy
+    u = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - i
+    return i / u if u > 0 else 0.0
+
+
+def _boxes_of(sample, field):
+    out = []
+    for box in sample.get(field) or []:
+        try:
+            out.append(tuple(float(v) for v in box[:4]))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def scene_text(index, sample):
+    """The scene-text blocks of one spatial ``sample`` (source fractions):
+    its text boxes of a real size that recur in another sample within
+    SCENE_S and sit on no face measured near it. [] for a dense UI frame
+    (its text is content, priced as such by _reliable_text)."""
+    if not sample or sample.get("dense_ui"):
+        return []
+    samples = ((index or {}).get("spatial") or {}).get("samples") or []
+    try:
+        t0 = float(sample["t"])
+    except (KeyError, TypeError, ValueError):
+        return []
+    near = []
+    for s in samples:
+        try:
+            dt = abs(float(s["t"]) - t0)
+        except (KeyError, TypeError, ValueError):
+            continue
+        if dt <= SCENE_S:
+            near.append((dt, s))
+    faces = [f for _dt, s in near for f in _boxes_of(s, "faces")]
+    out = []
+    for box in _boxes_of(sample, "text"):
+        w, h = box[2] - box[0], box[3] - box[1]
+        if w < SCENE_MIN_W or h < SCENE_MIN_H or w * h > SCENE_MAX_AREA:
+            continue
+        if any(_box_iou(box, f) > 0.05 and
+               max(0.0, min(box[2], f[2]) - max(box[0], f[0])) *
+               max(0.0, min(box[3], f[3]) - max(box[1], f[1])) > 0.3 * w * h for f in faces):
+            continue
+        if any(s is not sample and dt > 1e-6 and
+               any(_box_iou(box, o) >= SCENE_IOU for o in _boxes_of(s, "text"))
+               for dt, s in near):
+            out.append(box)
+    return out
+
+
 def _near_sample(index, tl, a, b):
     """(source second at the window's middle, the index spatial sample
     nearest it within keepout.NEAR_S) or (None, None)."""
@@ -280,7 +353,8 @@ def _mapped(edl, index, tl, W, H, a, b, field):
     src_mid, sample = _near_sample(index, tl, a, b)
     if sample is None:
         return []
-    boxes = _reliable_text(sample) if field == "text" else list(sample.get(field) or [])
+    boxes = (_reliable_text(sample) if field == "text" else
+             scene_text(index, sample) if field == "scene" else list(sample.get(field) or []))
     if not boxes:
         return []
     mid = (a + b) / 2.0
@@ -303,8 +377,18 @@ def _mapped(edl, index, tl, W, H, a, b, field):
 
 
 def text_boxes(edl, index, tl, W, H, a, b):
-    """Source text visible on the canvas over program [a, b] (soft)."""
-    return _mapped(edl, index, tl, W, H, a, b, "text")
+    """Source text visible on the canvas over program [a, b] (soft): line
+    text, and scene text grown by SCENE_PAD (scene_boxes)."""
+    return _mapped(edl, index, tl, W, H, a, b, "text") + scene_boxes(edl, index, tl, W, H, a, b)
+
+
+def scene_boxes(edl, index, tl, W, H, a, b, pad=SCENE_PAD):
+    """Scene text (a shirt print, a sign, stickers: scene_text) visible on
+    the canvas over program [a, b], grown by ``pad`` (frame height; the
+    same share of the width) — a soft keep-out."""
+    px = pad * float(H) / max(float(W), 1.0)
+    return [(x0 - px, y0 - pad, x1 + px, y1 + pad)
+            for x0, y0, x1, y1 in _mapped(edl, index, tl, W, H, a, b, "scene")]
 
 
 def prop_zones(edl, index, tl, W, H, a, b):

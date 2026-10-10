@@ -436,3 +436,27 @@ def test_a_word_said_just_before_a_layout_change_is_never_lost():
     p2 = _plan(edl2, _index(words=STATS + early))
     w2 = next(w for w in p2.caption_words() if w["w"] == "than")
     assert w2["t0"] == pytest.approx(5.2) and "t0_said" not in w2
+
+
+def test_scene_text_is_a_recurring_print_off_the_face():
+    """Judged (round 5): Elon's OCCUPY shirt print (a block MSER finds in
+    every sample, too squat for a line of UI text) competed with the
+    captions. Scene text is what recurs at one place, has a real size and
+    sits on no face; it prices a caption band (soft) with a margin."""
+    shirt = [0.353, 0.817, 0.65, 1.0]
+    face = [0.43, 0.2, 0.69, 0.66]
+    samples = [{"t": 120.0 + 0.5 * k, "faces": [face],
+                "text": [shirt, [0.45, 0.3, 0.6, 0.4]] + ([[0.1, 0.1, 0.3, 0.2]] if k == 2 else [])}
+               for k in range(5)]
+    index = {"spatial": {"samples": samples}}
+    got = caption_place.scene_text(index, samples[2])
+    assert got == [tuple(shirt)]                 # not the one-off box, not the face
+    assert caption_place.scene_text(index, dict(samples[2], dense_ui=True)) == []
+    lone = {"spatial": {"samples": [samples[2]]}}
+    assert caption_place.scene_text(lone, samples[2]) == []
+    # a band right over the print pays for it; one clear of it does not
+    soft = [(0.0, 0.79, 1.0, 1.0)]
+    col = caption_place.column(1080, 1920)
+    near = caption_place.choose([(0.62, 0.80)], 0.74, 0.055, 0.08, soft=soft, col=col)
+    clear = caption_place.choose([(0.62, 0.80)], 0.74, 0.055, 0.08, col=col)
+    assert near[3] < clear[3]

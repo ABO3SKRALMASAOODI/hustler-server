@@ -213,66 +213,67 @@
     MG.box = [Math.max(0, r.left - padX), Math.max(0, b.top - padY), Math.min(W, r.right + padX), Math.min(H, b.bottom + padY)];
     legible();
   };
-  // ── legibility over a measured bright plate ──
-  // Light ink (the colour, never the accent) on a plate too bright for it:
-  // where the plate is bright all the way across, the light words switch
-  // to dark ink (a red or dark accent reads on it as print does); otherwise
-  // a pocket darkens the plate under the light words only, so a saturated
-  // accent is never sunk into grey. Hero lines are display type (3:1), the
-  // kicker is body type (4.5:1). Unmeasured or dark plates change nothing.
+  // ── legibility over the measured plate (MG.legible, round 7) ──
+  // From the plate under the GLYPHS of each line and the kicker: nothing
+  // where it reads; dark ink where the plate is bright under every weak
+  // glyph (the accent kept in its hue, deepened until it reads); else a
+  // glyph scrim that follows the letterforms; a box only past what a glyph
+  // scrim can carry, pre-sized to the block. Hero lines are display type
+  // (3:1), the kicker body type (4.5:1). Unmeasured or dark plates change
+  // nothing.
   let BKS = [];
+  const REST = new Map();      // element -> its resting ink ('#RRGGBB'), for the landing flash
   const lightInk = MG.luminance(P.color) >= 0.3;
-  // (MG.need answers 0 for a dark ink, so a red accent never asks for a pocket)
+  const hexOf = c => {
+    const m = String(c || '').match(/\d+(\.\d+)?/g);
+    return m && m.length >= 3 ? '#' + m.slice(0, 3).map(v => Math.round(+v).toString(16).padStart(2, '0')).join('').toUpperCase() : null;
+  };
   function legible() {
     BKS.forEach(el => el.remove()); BKS = [];
-    if (!MG.plate) return;
-    const words = el => Array.from(el.querySelectorAll('.mg-w'));
-    // the accent as it reads on this plate (MG.accentInk): a thin serif or
-    // script accent needs APCA Lc 45, a heavy one 35; lifted toward white
-    // only where the plate would sink it (round 4), unchanged where it reads
-    let accInk = P.accent;
-    const accWords = lines.flatMap(el => words(el).filter(w => w.style.color));
-    const accRect = accWords.length ? MG.rectOf(accWords) : null;
-    if (accRect) {
-      const thin = P.role === 'serif' || P.role === 'script';
-      accInk = MG.accentInk(accRect, P.accent, { lc: thin ? 45 : 35 }).color;
-      accWords.forEach(w => { w.style.color = accInk; });
+    MG.unlegible(lines.concat(kick ? [kick] : []));
+    if (MG.plate) {
+      const words = el => Array.from(el.querySelectorAll('.mg-w'));
+      // the accent as it reads on this plate (MG.accentInk): a thin serif or
+      // script accent needs APCA Lc 45, a heavy one 35; brightened only on
+      // a plate dark enough to sink it, never paled over a lit one
+      let accInk = P.accent;
+      const accWords = lines.flatMap(el => words(el).filter(w => w.style.color));
+      const accRect = accWords.length ? MG.rectOf(accWords) : null;
+      if (accRect) {
+        const thin = P.role === 'serif' || P.role === 'script';
+        accInk = MG.accentInk(accRect, P.accent, { lc: thin ? 45 : 35 }).color;
+        accWords.forEach(w => { w.style.color = accInk; });
+      }
+      if (lightInk) {
+        // base: what each part's own soft shadow already gives (above)
+        const thin = P.role === 'serif' || P.role === 'script';
+        const parts = lines.map(el => ({ el, ratio: 3, ink: P.color, accent: accInk, base: thin ? 0.35 : 0.25,
+                                         acc: words(el).filter(w => w.style.color) }))
+          .concat(kick ? [{ el: kick, ratio: 4.5, ink: P.color, base: 0.15 }] : []);
+        const res = MG.legible(parts, { root: MG.$('.mg-root'),
+          box: { pad: [0.2 * fs, 0.06 * fs], feather: 0.3 * fs, radius: 0.24 * fs } });
+        res.boxes.forEach(bk => { BKS.push(bk); MG.growBox(bk.box); });
+      }
     }
-    const darkAccent = MG.luminance(accInk) < 0.3;
-    if (!lightInk) return;
-    const parts = lines.map(el => {
-      const pw = words(el).filter(w => !w.style.color), aw = words(el).filter(w => w.style.color);
-      return { el, rect: MG.rectOf(words(el)), acc: aw.length > 0, ratio: 3,
-        need: Math.max(pw.length ? MG.need(MG.rectOf(pw), { ink: P.color, ratio: 3 }) : 0,
-                       aw.length ? MG.need(MG.rectOf(aw), { ink: accInk, ratio: 3 }) : 0) };
-    }).concat(kick ? [{ el: kick, rect: MG.rectOf(kick), acc: false, ratio: 4.5,
-                        need: MG.need(MG.rectOf(kick), { ink: P.color, ratio: 4.5 }) }] : [])
-      .filter(q => q.rect);
-    const weak = parts.filter(q => q.need > 0);
-    if (!weak.length) return;
-    const u = MG.rectOf(weak.map(q => q.el));
-    if ((darkAccent || !weak.some(q => q.acc)) && MG.darkInkOK(u, { ratio: Math.max(...weak.map(q => q.ratio)) })) {
-      weak.forEach(q => {
-        q.el.style.color = MG.DARK_INK;
-        q.el.style.textShadow = `0 0 ${(parseFloat(q.el.style.fontSize) * 0.12).toFixed(1)}px rgba(255,255,255,.22)`;
-      });
-      return;
-    }
-    // one pocket per run of adjacent weak parts (no overlapping double-dark bands)
-    const runs = [];
-    parts.slice().sort((a, b) => a.rect[1] - b.rect[1]).forEach(q => {
-      if (q.need <= 0) { runs.push(null); return; }
-      const last = runs[runs.length - 1];
-      if (last) { last.push(q); } else runs.push([q]);
-    });
-    runs.filter(Boolean).forEach(run => {
-      const rc = run.reduce((v, q) => [Math.min(v[0], q.rect[0]), Math.min(v[1], q.rect[1]), Math.max(v[2], q.rect[2]), Math.max(v[3], q.rect[3])], run[0].rect.slice());
-      const em = Math.min(...run.map(q => parseFloat(q.el.style.fontSize)));
-      const bk = MG.backing(MG.$('.mg-root'), rc, Math.max(...run.map(q => q.need)),
-        { pad: [0.2 * em, 0.06 * em], feather: 0.3 * em, radius: 0.24 * em });
-      BKS.push(bk); MG.growBox(bk.box);
+    REST.clear();
+    lines.forEach(el => {
+      REST.set(el, hexOf(getComputedStyle(el).color));
+      el.querySelectorAll('.mg-w').forEach(w => { if (w.style.color) REST.set(w, hexOf(getComputedStyle(w).color)); });
     });
   }
+  // The slam's landing flash is a luminance lift of the SAME hue (each
+  // light ink mixed toward white, MG.lift), never a brightness filter: a
+  // filter clips the gold #FFC940 into lemon for two frames (judged, round
+  // 5). Dark ink takes no flash.
+  let flashK = 0;
+  const flash = k => {
+    if (Math.abs(k - flashK) < 1e-4) return;
+    flashK = k;
+    REST.forEach((c, el) => {
+      if (!c || MG.luminance(c) < 0.3) return;
+      el.style.color = k > 0 ? MG.lift(c, k) : c;
+    });
+  };
   layout();
   MG.ready = Promise.all([`${R.weight} ${R.style} 100px ${R.css}`, `700 60px ${sans}`]
     .map(f => document.fonts.load(f).catch(() => 0))).then(() => document.fonts.ready).then(layout);
@@ -298,9 +299,10 @@
       s = { opacity: 0.45 + 0.55 * MG.range(t, 0, 0.05), scale: 1.5 - 0.5 * k, blur: (1 - k) * Math.min(18, fs * 0.05) };
       if (t >= LAND - 1e-6) {
         const sh = [[0.012, -0.007], [-0.008, 0.005]][f - frameOf(LAND)];
-        s = { opacity: 1, bright: 1 + 0.35 * (1 - MG.range(t, LAND, 0.12)) };
+        s = { opacity: 1 };
         if (sh) { s.x = sh[0] * fs * 1.2; s.y = sh[1] * fs * 1.2; }
       }
+      flash(t >= LAND - 1e-6 ? 0.35 * (1 - MG.range(t, LAND, 0.12)) : 0);
     } else if (E === 'letters') {
       chars.forEach((c, i) => {
         const k = MG.ease.outCubic(MG.range(t, i * EACH, LETTER));

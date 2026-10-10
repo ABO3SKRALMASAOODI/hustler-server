@@ -83,8 +83,11 @@ The coordinator assigns one Look and one structure per short. The editor reads
   word over the face). Back-to-back stat
   slams of one style share one size per line automatically. `typewriter` is
   a band-wide hero (5%+ of the frame height on a plate), never a small label.
-- Over a bright shirt or wall, raise the template's `scrim` (or move the type
-  to darker space); white type on a white shirt is a defect.
+- Over a bright shirt or wall the renderer decides legibility itself — dark
+  ink in the same accent hue, else a glyph scrim on the letterforms, never a
+  grey box; placing the type in darker, calmer space (off a shirt print or
+  a sign) is still the first and best fix. Never add a `scrim` to fight a
+  bright plate: it reads as a smudge.
 - Safe area on 9:16: x 60-1020 px (captions: 97-983, the feeds' ~9% side crop), y 8-80% of height. Keep the native corner
   mark and the bottom 20% clear; no card, caption or graphic below y 0.80.
 

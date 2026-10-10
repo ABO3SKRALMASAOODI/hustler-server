@@ -17,19 +17,14 @@
   .cue{position:absolute;top:0;display:none}
   .cue.on{display:block}
   .blk{display:inline-block;position:relative;text-wrap:balance;vertical-align:top;isolation:isolate}
-  /* premium looks carry no box: a very soft local scrim (a pocket of grade,
-     invisible on dark footage) keeps near-white type legible on white shirts.
-     It hugs the words revealed so far (geometry + opacity set per frame), so
-     no smudge ever sits where nothing is written yet. */
-  .scrim{position:absolute;left:0;top:0;width:0;height:0;z-index:-1;pointer-events:none;opacity:0;
-    background:radial-gradient(closest-side,rgba(0,0,0,.42),rgba(0,0,0,.22) 55%,rgba(0,0,0,0))}
-  /* measured bright plate (MG.plate): the scrim becomes a pocket — full,
-     even darkening under the revealed words with a feathered rounded edge,
-     strong enough for 4.5:1 (alpha + geometry set per cue / per frame) */
-  .scrim.pocket{background:var(--pk)}
-  /* guard 3: soft dark scrim (blurred edge); guard 2: tight dark halo */
-  .scrim.soft{background:var(--sk)}
-  .blk.halo,.blk.halo *{text-shadow:0 0 .045em rgba(0,0,0,.9),0 .02em .14em rgba(0,0,0,.78),0 0 .5em rgba(0,0,0,.34)!important}
+  /* premium looks carry no box (round 7): over a measured plate too bright
+     for the ink, either dark ink (a plate bright under every glyph: a white
+     shirt) or a GLYPH SCRIM — stacked tight shadows that follow the
+     letterforms, as strong as the plate needs (--gs). A pocket (a box,
+     pre-sized to the final block) only past what a glyph scrim carries. */
+  .blk.gscrim,.blk.gscrim *{text-shadow:var(--gs)!important}
+  .blk.dk,.blk.dk *{text-shadow:none!important}
+  .pocket{position:absolute;z-index:-1;pointer-events:none;opacity:0}
   /* bright plates (cue luma hint): a firmer shadow core behind near-white type */
   .cue.lit.L-clean .blk,.cue.lit.L-editorial .blk,.cue.lit.L-serif .blk,.cue.lit.L-lockup .sm{
     text-shadow:0 1px 3px rgba(0,0,0,.56),0 3px 16px rgba(0,0,0,.56),0 0 44px rgba(0,0,0,.32)}
@@ -123,23 +118,24 @@
     mono:      { fs: 46, lines: 2, fade: 0.10, accent: '#7CFFB2' },
   }[look];
   if (ar < 0.95 && CFG.heroMax) { CFG.heroMax *= 0.78; CFG.heroMin = Math.min(CFG.heroMin, CFG.heroMax * 0.6); }
-  // Scrim: pads around the revealed words (x, y in units of the cue font
-  // size), the ease as it grows to a new word, and its strength (x the
-  // gradient's .42 core) on ordinary vs bright plates (luma hint >= LIT).
-  const SCRIM_PAD = [0.6, 0.4], SCRIM_T = 0.08, SCRIM_OP = [0.6, 0.85], LIT = 0.55;
-  // Pocket (a measured bright plate under a light-ink look): pads, feather
-  // and corner radius in units of the cue font size. Box/pop/mono carry
-  // their own plate or outline and never need one.
+  // The capture box's reach past the glyphs for the premium looks' soft
+  // shadows and a glyph scrim (x, in units of the cue font size).
+  const SCRIM_PAD = [0.6, 0.4];
+  // A cue whose plate luma hint (l, from the spatial index) is at least
+  // this sets its soft shadows firmer (the 'lit' class).
+  const LIT = 0.55;
+  // Pocket (a box: only past what a glyph scrim carries, MG.GLYPH_MAX):
+  // pads, feather and corner radius in units of the cue font size.
+  // Box/pop/mono carry their own plate or outline and never need one.
   const POCKET_PAD = [0.3, 0.12], POCKET_FEATHER = 0.3, POCKET_R = 0.32;
-  // Legibility guard, in order: 1 slide inside the zone to the darkest
-  // spot; 2 tight halo + accents lifted to 3:1; 3 soft scrim; 4 pocket.
-  const NEED_OK = 0.12, HALO_MAX = 0.3, SOFT_MAX = 0.62, SLIDE = 0.03, MOVE_W = 0.6;
-  const SOFT_PAD = [0.7, 0.5], SOFT_BLUR = 0.42, SOFT_R = 0.6, ACCENT_RATIO = 3;
-  const lin = v => v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
-  const hexMix = (a, b, k) => '#' + [1, 3, 5].map(i => {
-    const x = parseInt(a.slice(i, i + 2), 16), y = parseInt(b.slice(i, i + 2), 16);
-    return Math.round(x + (y - x) * k).toString(16).padStart(2, '0');
-  }).join('').toUpperCase();
+  // Legibility, in order (round 7): 1 the run slides inside its zone to a
+  // darker, calmer spot; 2 dark ink on a plate bright under every glyph;
+  // 3 a glyph scrim; 4 the pocket. Accents keep their hue: deepened as
+  // dark ink, brightened only over a plate too dark for them.
+  const NEED_OK = MG.NEED_OK, SLIDE = 0.03, MOVE_W = 0.6, ACCENT_RATIO = 3;
+  // The darkening each look's default text shadow gives beside a stroke
+  // (MG.legible's ``base``): a plate needing no more than this keeps it.
+  const SHADOW_BASE = { clean: 0.35, editorial: 0.35, lockup: 0.35, serif: 0.35, stack: 0.3, glow: 0.15 };
   const POCKET_LOOKS = ['clean', 'editorial', 'lockup', 'serif', 'glow', 'stack'];
   const isHex = v => typeof v === 'string' && /^#[0-9A-Fa-f]{6}$/.test(v);
   const baseColor = isHex(P.color) ? P.color.toUpperCase() : '#FFFFFF';
@@ -422,6 +418,231 @@
     c.heroFs = parseFloat(hero.style.fontSize);
   }
 
+  // ── placement: the reading line stays put (round 7) ───────────────────
+  // Judged round 5: blocks were centred on their anchor, so a two-line cue
+  // sat 30-60 px above a one-line one and the captions hopped cue to cue.
+  // Now every cue keeps its FIRST line's baseline on one row per place
+  // (anchor, band, zone): the row a one-line cue centred on the anchor
+  // reads on, raised only as far as the look's tallest block (its CFG.lines
+  // rows; editorial: a sans row over its serif hero) needs to grow DOWN
+  // from it inside the zone. The row is a function of the place and the
+  // look alone, so it is the same in every segment of the track (each
+  // segment is its own page). Lockup/stack hero ladders vary too much for
+  // one nominal block: a run of their cues sharing a place shares the row
+  // its own tallest block allows.
+  const fontAscent = el => {
+    const cs = getComputedStyle(el);
+    inkCtx.font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+    const m = inkCtx.measureText('Hxg');
+    return m.fontBoundingBoxAscent > 0 ? m.fontBoundingBoxAscent : parseFloat(cs.fontSize) * 0.8;
+  };
+  // the page y of the first (top) line's baseline of a cue's block: the
+  // highest word baseline (an inline serif word sits a hair lower)
+  function firstBaseline(c) {
+    const range = document.createRange();
+    let best = null;
+    c.words.forEach(o => {
+      const walk = document.createTreeWalker(o.el, NodeFilter.SHOW_TEXT);
+      const node = walk.nextNode();
+      if (!node || !node.data.length) return;
+      range.setStart(node, 0); range.setEnd(node, Math.min(node.data.length, 1));
+      const rc = range.getClientRects()[0];
+      if (!rc) return;
+      const b = rc.top + fontAscent(o.el);
+      if (best === null || b < best) best = b;
+    });
+    if (best !== null) return best;
+    const r = c.blk.getBoundingClientRect();
+    return r.top + 0.8 * r.height;
+  }
+  // The look's nominal blocks at its base size: one line {h, fb} and the
+  // tallest it sets {h, fb} (fb: first baseline below the block top).
+  let NOM = null;
+  function nominal(base) {
+    if (NOM) return NOM;
+    const probe = ws => {
+      const el = MG.el('div', `cue L-${look} on`, null, root);
+      el.style.left = SAFE.x0 + 'px'; el.style.width = COLW + 'px'; el.style.textAlign = align;
+      const blk = MG.el('div', 'blk', null, el);
+      blk.style.maxWidth = COLW + 'px';
+      if (userFont && look !== 'mono' && look !== 'lockup' && look !== 'stack') {
+        blk.style.fontFamily = `'${userFont}','Inter Display',sans-serif`;
+        if (userWeight) blk.style.fontWeight = userWeight;
+      }
+      const c = { w: ws.map(([t, x]) => ({ t, s: 0, e: 0, x: !!x })), words: [], flowWords: [], el, blk };
+      if (look === 'editorial') { buildEditorial(c, blk); fitEditorial(c, base, 1e6); }
+      else if (look === 'mono') { buildMono(c, blk); blk.style.fontSize = base.toFixed(2) + 'px'; }
+      else { buildFlow(c, blk); blk.style.fontSize = base.toFixed(2) + 'px'; }
+      const r = blk.getBoundingClientRect(), out = { h: r.height, fb: firstBaseline(c) - r.top };
+      out.pitch = parseFloat(getComputedStyle(blk).lineHeight) || base * 1.12;
+      el.remove();
+      return out;
+    };
+    // ink-extreme words (ascender, cap, descenders): a real cue's ink tuck
+    // never makes it taller than these by more than the slack
+    const one = probe([['Hdgjy']]);
+    let tall = { h: one.h + Math.max(0, CFG.lines - 1) * one.pitch, fb: one.fb };
+    if (look === 'editorial') {
+      const lk = probe([['Hdgjy'], ['Hdgjy', 1]]);         // a sans row over its serif hero
+      if (lk.h > tall.h) tall = lk;
+    }
+    tall = { h: tall.h + 0.08 * base, fb: tall.fb };
+    NOM = { one, tall };
+    return NOM;
+  }
+  function placeRuns(list, base) {
+    const nom = look === 'lockup' || look === 'stack' ? null : nominal(base);
+    let i = 0;
+    while (i < list.length) {
+      let j = i + 1;
+      while (j < list.length && list[j].key === list[i].key) j++;
+      const run = list.slice(i, j);
+      i = j;
+      const fits = run.filter(c => c.h <= c.zoneH);
+      run.filter(c => c.h > c.zoneH).forEach(c => {
+        // a block taller than its zone: as before, by its band
+        const top = c.b === 't' ? c.zone[1] - c.h : c.b === 'm' ? (c.zone[0] + c.zone[1] - c.h) / 2 : c.zone[0];
+        c.el.style.top = Math.round(top) + 'px';
+      });
+      if (!fits.length) continue;
+      const c0 = fits[0];
+      let B;
+      if (nom) {
+        B = Math.min(c0.yc - nom.one.h / 2 + nom.one.fb, c0.zone[1] - nom.tall.h + nom.tall.fb);
+        B = Math.max(B, c0.zone[0] + nom.one.fb);
+      } else {
+        const one = fits.reduce((a, c) => (c.h < a.h ? c : a), fits[0]);
+        B = one.yc - one.h / 2 + one.fb;
+        B = Math.min(B, ...fits.map(c => c.zone[1] - c.h + c.fb));
+        B = Math.max(B, ...fits.map(c => c.zone[0] + c.fb));
+      }
+      fits.forEach(c => {
+        const top = MG.clamp(B - c.fb, c.zone[0], c.zone[1] - c.h);
+        c.el.style.top = Math.round(top) + 'px';
+      });
+      if (POCKET_LOOKS.includes(look) && MG.plate) slideRun(fits);
+    }
+  }
+  // Legibility, step 1 (placement): a run whose plate is too bright for
+  // its ink slides together inside its zone to a darker, calmer spot — a
+  // short step when its place was not proven clear, anywhere in a zone the
+  // caption plan solved (z) — so the reading line still holds still.
+  function slideRun(run) {
+    const rects = run.map(c => { const r = c.blk.getBoundingClientRect(); return [r.left, r.top, r.right, r.bottom]; });
+    const needAt = dy => Math.max(...run.map((c, k) => {
+      const r = rects[k], rr = [r[0], r[1] + dy, r[2], r[3] + dy];
+      let n = MG.need(rr, { ink: color, ratio: 4.5, t0: c.s, t1: c.e });
+      const pl = MG.plateAt(rr, c.s, c.e);
+      if (pl && pl.detail != null && pl.detail > MG.DETAIL_BUSY) n += 0.5 * (pl.detail - MG.DETAIL_BUSY);
+      return n;
+    }));
+    const n0 = needAt(0);
+    if (!(n0 > NEED_OK)) return;
+    let lo = -Infinity, hi = Infinity;
+    run.forEach((c, k) => {
+      const r = rects[k];
+      let a = c.zone[0] - r[1], b = c.zone[1] - r[3];
+      if (!(Array.isArray(c.z) && c.z.length === 2)) { a = Math.max(a, -SLIDE * H); b = Math.min(b, SLIDE * H); }
+      lo = Math.max(lo, a, SAFE.y0 - r[1]); hi = Math.min(hi, b, SAFE.y1 - r[3]);
+    });
+    if (!(hi >= lo)) return;
+    let best = [n0, 0];
+    for (let dy = lo; dy <= hi + 1e-6; dy += Math.max(4, 0.01 * H)) {
+      const n = needAt(dy) + MOVE_W * Math.abs(dy) / H;
+      if (n < best[0] - 1e-6) best = [n, dy];
+    }
+    const nb = best[1] ? needAt(best[1]) : n0;
+    if (best[1] && (nb <= NEED_OK || nb <= n0 - 0.15))
+      run.forEach(c => { c.el.style.top = Math.round(parseFloat(c.el.style.top) + best[1]) + 'px'; });
+  }
+
+  // ── legibility, steps 2-4 (round 7): ink, a glyph scrim, then a box ────
+  // From the plate under the cue's GLYPHS: dark ink where it is bright
+  // under all of them (a white shirt), the accent kept in its hue and
+  // deepened until it reads; else a glyph scrim that follows the
+  // letterforms; a box (the pocket) only past what a glyph scrim carries,
+  // sized to the FINAL block from its first word. No rectangle scrim, no
+  // blurred halo, no accent paled toward white over a lit plate.
+  function guard(c) {
+    const blk = c.blk, r = blk.getBoundingClientRect();
+    // word geometry relative to the block's border box (box highlight, mono
+    // caret) and on the frame (punch/slam headroom)
+    c.words.forEach(o => {
+      const wr = o.el.getBoundingClientRect();
+      o.box = [wr.left - r.left, wr.top - r.top, wr.width, wr.height];
+      o.cx = (wr.left + wr.right) / 2; o.hw = wr.width / 2;
+      if (o.chars) o.cbox = o.chars.map(ch => { const q = ch.getBoundingClientRect(); return [q.right - r.left, q.top - r.top, q.height]; });
+    });
+    c.bl = blk.clientLeft; c.bt = blk.clientTop; c.bw = r.width; c.bh = r.height;
+    if (c.ink) {
+      const ink = c.ink;
+      ink.classList.add('ink');
+      Object.assign(ink.style, { width: r.width + 'px', left: -c.bl + 'px', top: -c.bt + 'px', color: '#0B0B0C' });
+      blk.appendChild(ink);
+      c.inkWords = Array.from(ink.querySelectorAll('.mg-w'));
+      // the copy must sit on the very same pixels; otherwise fall back
+      const off = c.inkWords.length !== c.words.length || c.words.some((o, i) => {
+        const a = o.el.getBoundingClientRect(), b = c.inkWords[i].getBoundingClientRect();
+        return Math.abs(a.left - b.left) > 0.6 || Math.abs(a.top - b.top) > 0.6 || Math.abs(a.width - b.width) > 0.6;
+      });
+      if (off) { ink.remove(); c.ink = null; }
+    }
+    if (look === 'mono') {
+      const f0 = c.words[0].chars[0].getBoundingClientRect();
+      c.caret0 = [f0.left - r.left, f0.top - r.top];
+      c.charH = f0.height;
+      c.blkW = r.width; c.blkH = r.height;
+      c.caret.style.height = (f0.height * 0.78).toFixed(1) + 'px';
+    }
+    c.rect = [r.left, r.top, r.right, r.bottom];
+    c.need = 0; c.dim = false;
+    if (!POCKET_LOOKS.includes(look) || !MG.plate) return;
+    const els = c.words.map(o => o.el), accs = c.words.filter(o => o.acc && isHex(o.acc));
+    const plain = c.words.filter(o => !(o.acc && isHex(o.acc))).map(o => o.el);
+    // an accent over a plate too dark for it brightens in its own hue
+    // (MG.accentInk: never over a lit plate, where it would only wash out)
+    accs.forEach(o => {
+      const res = MG.accentInk(MG.inkRect(o.el), o.acc, { lc: o.role === 'hero' || o.role === 'em' ? 45 : 35, t0: c.s, t1: c.e });
+      if (res.color !== o.acc) { o.el.style.color = res.color; o.acc = res.color; }
+    });
+    const need = plain.length ? MG.glyphNeed(plain, { ink: color, ratio: 4.5, t0: c.s, t1: c.e }) : 0;
+    const accNeed = accs.length ? Math.max(...accs.map(o => MG.glyphNeed(o.el, { ink: o.acc, ratio: ACCENT_RATIO, t0: c.s, t1: c.e }))) : 0;
+    const n = Math.max(need, accNeed);
+    if (!(n > NEED_OK)) return;
+    c.dim = true;
+    // the look's own soft shadow already carries this much (a glyph scrim
+    // replaces it, so it never sets in weaker)
+    if (!(n > (SHADOW_BASE[look] || 0))) return;
+    // 2. dark ink, the plate bright under every glyph and every accent
+    // still reading in its own hue
+    if (MG.luminance(color) >= 0.3 && MG.darkInkWords(els, { ratio: 4.5, t0: c.s, t1: c.e })) {
+      const deep = accs.map(o => [o, MG.accentOnLight(MG.inkRect(o.el), o.acc, { ratio: ACCENT_RATIO, t0: c.s, t1: c.e })]);
+      if (deep.every(([, col]) => col)) {
+        blk.classList.add('dk');
+        blk.style.color = MG.DARK_INK;
+        deep.forEach(([o, col]) => { o.el.style.color = col; o.acc = col; });
+        return;
+      }
+    }
+    // 3. a glyph scrim, as strong as the plate needs
+    if (n <= MG.GLYPH_MAX + 1e-9) {
+      blk.classList.add('gscrim');
+      blk.style.setProperty('--gs', MG.glyphScrimShadow(n));
+      c.gs = n;
+      return;
+    }
+    // 4. the pocket: one feathered box under the FINAL block, from its
+    // first word (never grown per word)
+    c.need = n;
+    const a = Math.min(0.92, n).toFixed(3), f = POCKET_FEATHER * c.fs;
+    const px = POCKET_PAD[0] * c.fs, py = POCKET_PAD[1] * c.fs;
+    c.pocket = blk.insertBefore(MG.el('span', 'pocket'), blk.firstChild);
+    Object.assign(c.pocket.style, { left: (-px - c.bl).toFixed(1) + 'px', top: (-py - c.bt).toFixed(1) + 'px',
+      width: (r.width + 2 * px).toFixed(1) + 'px', height: (r.height + 2 * py).toFixed(1) + 'px',
+      borderRadius: (POCKET_R * c.fs).toFixed(1) + 'px', background: `rgba(0,0,0,${a})`,
+      boxShadow: `0 0 ${f.toFixed(1)}px ${(0.3 * f).toFixed(1)}px rgba(0,0,0,${a})` });
+  }
+
   const cues = [];
   let laidOut = false;
   function layout() {
@@ -476,104 +697,19 @@
           blk.insertBefore(c.hl, blk.firstChild);
         }
       }
-      if (CFG.premium) c.scrim = blk.insertBefore(MG.el('span', 'scrim'), blk.firstChild);
-      // vertical placement: block centre on the anchor, kept inside its
-      // measured band (face-safe) and the platform-safe area.
-      let r = blk.getBoundingClientRect();
-      const h = r.height, yc = MG.clamp(+c.y || 0.74, 0.05, 0.95) * H;
-      let top = yc - h / 2;
-      if (h <= zoneH) top = MG.clamp(top, zone[0], zone[1] - h);
-      else top = c.b === 't' ? zone[1] - h : c.b === 'm' ? (zone[0] + zone[1] - h) / 2 : zone[0];
-      el.style.top = Math.round(top) + 'px';
-      if (POCKET_LOOKS.includes(look) && MG.plate) {
-        const r0 = blk.getBoundingClientRect();
-        const needAt = dy => MG.need([r0.left, r0.top + dy, r0.right, r0.bottom + dy],
-                                     { ink: color, ratio: 4.5, t0: c.s, t1: c.e });
-        const n0 = needAt(0);
-        if (n0 > NEED_OK && r0.height <= zoneH) {
-          let lo = zone[0] - r0.top, hi = zone[1] - r0.bottom;
-          if (!(Array.isArray(c.z) && c.z.length === 2)) { lo = Math.max(lo, -SLIDE * H); hi = Math.min(hi, SLIDE * H); }
-          lo = Math.max(lo, SAFE.y0 - r0.top); hi = Math.min(hi, SAFE.y1 - r0.bottom);
-          let best = [n0, 0];
-          for (let dy = lo; dy <= hi + 1e-6; dy += Math.max(4, 0.01 * H)) {
-            const n = needAt(dy) + MOVE_W * Math.abs(dy) / H;
-            if (n < best[0] - 1e-6) best = [n, dy];
-          }
-          const nb = best[1] ? needAt(best[1]) : n0;
-          if (best[1] && (nb <= NEED_OK || nb <= n0 - 0.15)) el.style.top = Math.round(top + best[1]) + 'px';
-        }
-      }
-      r = blk.getBoundingClientRect();
-      // word geometry relative to the block's border box (scrim, box
-      // highlight, mono caret) and on the frame (punch/slam headroom)
-      c.words.forEach(o => {
-        const wr = o.el.getBoundingClientRect();
-        o.box = [wr.left - r.left, wr.top - r.top, wr.width, wr.height];
-        o.cx = (wr.left + wr.right) / 2; o.hw = wr.width / 2;
-        if (o.chars) o.cbox = o.chars.map(ch => { const q = ch.getBoundingClientRect(); return [q.right - r.left, q.top - r.top, q.height]; });
-      });
-      c.bl = blk.clientLeft; c.bt = blk.clientTop; c.bw = r.width; c.bh = r.height;
-      if (c.ink) {
-        const ink = c.ink;
-        ink.classList.add('ink');
-        Object.assign(ink.style, { width: r.width + 'px', left: -c.bl + 'px', top: -c.bt + 'px', color: '#0B0B0C' });
-        blk.appendChild(ink);
-        c.inkWords = Array.from(ink.querySelectorAll('.mg-w'));
-        // the copy must sit on the very same pixels; otherwise fall back
-        const off = c.inkWords.length !== c.words.length || c.words.some((o, i) => {
-          const a = o.el.getBoundingClientRect(), b = c.inkWords[i].getBoundingClientRect();
-          return Math.abs(a.left - b.left) > 0.6 || Math.abs(a.top - b.top) > 0.6 || Math.abs(a.width - b.width) > 0.6;
-        });
-        if (off) { ink.remove(); c.ink = null; }
-      }
-      if (look === 'mono') {
-        const f0 = c.words[0].chars[0].getBoundingClientRect();
-        c.caret0 = [f0.left - r.left, f0.top - r.top];
-        c.charH = f0.height;
-        c.blkW = r.width; c.blkH = r.height;
-        c.caret.style.height = (f0.height * 0.78).toFixed(1) + 'px';
-      }
-      c.rect = [r.left, r.top, r.right, r.bottom];
-      // guard 2-4 from the measured plate under the block (need: the black
-      // light ink asks for to reach 4.5:1; 0 = unchanged)
-      const need = POCKET_LOOKS.includes(look) ? MG.need(c.rect, { ink: color, ratio: 4.5, t0: c.s, t1: c.e }) : 0;
-      c.need = need > SOFT_MAX ? need : 0;
-      c.softA = need > HALO_MAX && !c.need ? Math.min(0.85, need + 0.1) : 0;
-      c.dim = need > NEED_OK;
-      if (need > NEED_OK && need <= HALO_MAX) blk.classList.add('halo');
-      const under = c.need || 0.85 * c.softA || 0;
-      c.words.forEach(o => {
-        if (!o.acc || !isHex(o.acc)) return;
-        const wr = [r.left + o.box[0], r.top + o.box[1], r.left + o.box[0] + o.box[2], r.top + o.box[1] + o.box[3]];
-        const pl = MG.plateAt(wr, c.s, c.e);
-        if (!pl) return;
-        const Lp = lin(pl.hi * (1 - under));
-        const ok = col => MG.luminance(col) > Lp && MG.contrast(MG.luminance(col), Lp) >= ACCENT_RATIO;
-        if (ok(o.acc)) return;
-        for (const k of [0.15, 0.3, 0.45, 0.6, 0.75, 0.9]) {
-          const col = hexMix(o.acc, '#FFFFFF', k);
-          if (ok(col)) { o.el.style.color = col; o.acc = col; break; }
-        }
-      });
-      if (c.softA > 0) {
-        if (!c.scrim) c.scrim = blk.insertBefore(MG.el('span', 'scrim'), blk.firstChild);
-        c.scrim.classList.add('soft');
-        Object.assign(c.scrim.style, { borderRadius: (SOFT_R * c.fs).toFixed(1) + 'px',
-          filter: `blur(${(SOFT_BLUR * c.fs).toFixed(1)}px)` });
-        c.scrim.style.setProperty('--sk', `rgba(0,0,0,${c.softA.toFixed(3)})`);
-      }
-      if (c.need > 0) {
-        if (!c.scrim) c.scrim = blk.insertBefore(MG.el('span', 'scrim'), blk.firstChild);
-        const a = c.need.toFixed(3), f = POCKET_FEATHER * c.fs;
-        c.scrim.classList.add('pocket');
-        Object.assign(c.scrim.style, { borderRadius: (POCKET_R * c.fs).toFixed(1) + 'px',
-          boxShadow: `0 0 ${f.toFixed(1)}px ${(0.3 * f).toFixed(1)}px rgba(0,0,0,${a})` });
-        c.scrim.style.setProperty('--pk', `rgba(0,0,0,${a})`);
-      }
-      el.classList.remove('on');
+      // vertical placement waits for the whole track (placeRuns): a run of
+      // cues sharing one place keeps its FIRST LINE's baseline still
+      const r0 = blk.getBoundingClientRect();
+      c.zone = zone; c.zoneH = zoneH;
+      c.h = r0.height; c.fb = firstBaseline(c) - r0.top;
+      c.yc = MG.clamp(+c.y || 0.74, 0.05, 0.95) * H;
+      c.key = JSON.stringify([c.y, c.b, c.z || null]);
       cues.push(c);
     });
     cues.sort((a, b) => a.s - b.s);
+    placeRuns(cues, CFG.fs * size * K);
+    cues.forEach(c => guard(c));
+    cues.forEach(c => c.el.classList.remove('on'));
     // timing: reveal time + entrance per word, then the motion windows
     const Wn = [];
     // A window covers the first frame at/after every change; frames outside
@@ -625,7 +761,7 @@
         }
         // punch / slam overshoot never pushes a word past the frame edge
         o.smax = o.hw > 0 ? Math.max(1, Math.min(o.cx - 24, W - 24 - o.cx) / o.hw) : 1;
-        win(o.R, o.R + Math.max(o.d, (CFG.premium || c.need > 0) && !HARD ? SCRIM_T : 0) + G);
+        win(o.R, o.R + o.d + G);
       });
       win(c.s, c.s + (look === 'box' || look === 'mono' ? 0.14 : 0) + G);
       if (c.hardOut) win(c.e, c.e + G); else win(c.e - c.fadeD, c.e + G);
@@ -642,10 +778,10 @@
     if (cues.length) {
       let pad = look === 'glow' ? 80 : look === 'pop' ? 70 : look === 'stack' ? 120 : 46;
       if (CFG.premium) pad = Math.max(pad, SCRIM_PAD[0] * Math.max(...cues.map(c => c.fs)) + 4);
+      const gs = cues.filter(c => c.gs > 0);
+      if (gs.length) pad = Math.max(pad, 0.6 * Math.max(...gs.map(c => c.fs * (CFG.hero || 1))) + 4);
       const pk = cues.filter(c => c.need > 0);
       if (pk.length) pad = Math.max(pad, (POCKET_PAD[0] + 1.4 * POCKET_FEATHER) * Math.max(...pk.map(c => c.fs)) + 4);
-      const sk = cues.filter(c => c.softA > 0);
-      if (sk.length) pad = Math.max(pad, (SOFT_PAD[0] + 3 * SOFT_BLUR) * Math.max(...sk.map(c => c.fs)) + 4);
       MG.box = [Math.min(...cues.map(c => c.rect[0])) - pad, Math.min(...cues.map(c => c.rect[1])) - pad,
                 Math.max(...cues.map(c => c.rect[2])) + pad, Math.max(...cues.map(c => c.rect[3])) + pad];
     }
@@ -725,32 +861,12 @@
       else if (o.kind !== 'type' && (!on || o.kind === 'pop' || o.kind === 'ghost')) o.el.style.opacity = op;
     });
 
-    if (c.scrim) {
-      // hug the words revealed so far; grow to each new word over SCRIM_T
-      // (glow shows its whole phrase from the cue start: so does its pocket)
+    if (c.pocket) {
+      // the pocket is the final block's from the first word on: it never
+      // grows or jitters per word (glow shows its whole phrase at once)
       const rev = look === 'glow' ? c.words : c.words.filter(o => t >= o.R - 1e-6);
-      if (!rev.length) c.scrim.style.opacity = 0;
-      else {
-        const lastR = Math.max(...rev.map(o => o.R));
-        const union = ws => ws.reduce((u, o) => u ? [Math.min(u[0], o.box[0]), Math.min(u[1], o.box[1]),
-          Math.max(u[2], o.box[0] + o.box[2]), Math.max(u[3], o.box[1] + o.box[3])]
-          : [o.box[0], o.box[1], o.box[0] + o.box[2], o.box[1] + o.box[3]], null);
-        const nb = union(rev), older = rev.filter(o => o.R < lastR - 1e-6);
-        let b = nb;
-        if (older.length && !HARD) {
-          const q = MG.ease.outCubic(MG.range(t, lastR, SCRIM_T)), pb = union(older);
-          b = nb.map((v, i) => MG.lerp(pb[i], v, q));
-        }
-        const first = rev.reduce((a, o) => (o.R < a.R ? o : a), rev[0]);
-        const pad = c.need > 0 ? POCKET_PAD : c.softA > 0 ? SOFT_PAD : SCRIM_PAD;
-        const px = pad[0] * c.fs, py = pad[1] * c.fs;
-        const op = c.need > 0 || c.softA > 0 ? (look === 'glow' ? 1 : first.op)
-          : SCRIM_OP[c.lit ? 1 : 0] * first.op;
-        Object.assign(c.scrim.style, {
-          left: (b[0] - px).toFixed(1) + 'px', top: (b[1] - py).toFixed(1) + 'px',
-          width: (b[2] - b[0] + 2 * px).toFixed(1) + 'px', height: (b[3] - b[1] + 2 * py).toFixed(1) + 'px',
-          opacity: op.toFixed(3) });
-      }
+      const first = rev.length ? rev.reduce((a, o) => (o.R < a.R ? o : a), rev[0]) : null;
+      c.pocket.style.opacity = first ? (look === 'glow' ? 1 : first.op).toFixed(3) : 0;
     }
 
     if (look === 'pop') {

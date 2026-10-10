@@ -11,7 +11,7 @@ evenly spaced). Without --bg the background is a neutral dark gradient.
 --bg-fit crop [--bg-focus 0.4] cover-crops the footage like a 9:16 edit;
 --plate measures that footage under the item (worker/plate.py) and hands it
 to the composition as MG.plate, exactly as a render does, so bright-plate
-legibility (pockets, dark ink) can be reviewed.
+legibility (dark ink, glyph scrims) can be reviewed.
 Used by template authors and reviewers; not part of the render path.
 """
 import argparse

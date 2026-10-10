@@ -20,6 +20,7 @@ import re
 import tempfile
 
 import caption_carry
+import caption_place
 import config  # noqa: F401  (kept for parity with other tool modules)
 import db as dbx
 import keepout
@@ -726,7 +727,25 @@ def _implicit(key, sp):
     return 0.5 if key == "x" else sp.get("max") if key in ("width", "size", "scale") else None
 
 
-def _relocate(item, spec, box, zones, track, W, H, bands, off_face=True):
+def _scene_boxes(ctx, edl, item):
+    """Scene text (caption_place.scene_boxes: a shirt print, a sign, a
+    laptop's stickers) on the canvas over the item's window, as a soft
+    keep-out for the solver; [] when unknown."""
+    index = getattr(ctx, "index", None) or {}
+    if not getattr(ctx, "has_main_video", True) or not edl.get("keep"):
+        return []
+    try:
+        from timeline import Timeline
+        W, H = _canvas_size(ctx, edl)
+        tl = Timeline(edl["keep"], edl.get("inserts") or [], edl.get("speed") or [])
+        return caption_place.scene_boxes(edl, index, tl, W, H, float(item["start"]),
+                                         float(item["end"]))
+    except Exception as ex:  # noqa: BLE001 — evidence, never a blocker
+        print(f"[motion] scene text skipped: {str(ex)[:160]}", flush=True)
+        return []
+
+
+def _relocate(item, spec, box, zones, track, W, H, bands, off_face=True, scene=()):
     """Search and verify a clear placement: (patch, real ink box, params,
     the verifying probe report) or None. Alternatives the solver cannot
     predict (another align/side) are probed first, then the cheapest
@@ -773,7 +792,7 @@ def _relocate(item, spec, box, zones, track, W, H, bands, off_face=True):
             picks = fallback
         else:
             kw = dict(captions=bands[0], near_captions=bands[1], predict=rnd == 0,
-                      mouths=mouths,
+                      mouths=mouths, scene=scene,
                       clear_penalty=keepout.CLEAR_PENALTY if off_face else 0.0)
             args = (item["template"], spec, item.get("params") or {},
                     box if rnd == 0 else None, variants if rnd == 0 else known,
@@ -880,6 +899,55 @@ def _keep_out(ctx, edl, item, rep):
         return "", None
 
 
+def keep_out_under_camera(ctx, edl, start, end):
+    """Re-check the graphics on screen over program [start, end] after a
+    camera move (a zoom, a zoom path) was written there: each is compared
+    with the face AS FRAMED UNDER THE MOVE (keepout.face_track maps the face
+    through the zooms), and one the move now pushes the face into is placed
+    again by the same keep-out its own write runs (probed where a browser
+    is, estimated where not). Judged (round 5): Thiel's 'it's not quite
+    been' kicker sat on his chin under a +12% step. Mutates edl['motion'];
+    returns the notes for the tool's reply ([] when nothing collides).
+    Never blocks the camera move."""
+    out = []
+    try:
+        s0, e0 = float(start), float(end)
+        items = [dict(m) for m in edl.get("motion") or []]
+        index = getattr(ctx, "index", None) or {}
+        if not items or not getattr(ctx, "has_main_video", True) or not edl.get("keep"):
+            return out
+        W, H = _canvas_size(ctx, edl)
+        changed = False
+        for k, m in enumerate(items):
+            try:
+                a, b = max(s0, float(m["start"])), min(e0, float(m["end"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+            if b - a < 0.1 or m.get("allow_face_overlap") or m.get("layer") == "behind_subject":
+                continue
+            spec = motion_templates.spec(m["template"])
+            box = (m.get("footprint") or {}).get("box")
+            if not box or not keepout.applicable(m["template"], spec, m.get("layer")):
+                continue
+            track = keepout.face_track(edl, index, W, H, a, b, measure=_face_measure(ctx))
+            if not keepout.assess(tuple(box), track)["hit"]:
+                continue
+            err, _where_note, _bbox, rep = _probe_full(ctx, edl, m)
+            if err:
+                continue
+            note, _moved = _keep_out(ctx, edl, m, rep)
+            items[k] = m
+            changed = True
+            out.append(f"KEEP-OUT under the camera move: graphic '{m.get('id')}' "
+                       f"({m['template']}) met the face as framed at {a:.2f}-{b:.2f}s."
+                       + (note or " It stays as placed: check it in the preview."))
+        if changed:
+            edl["motion"] = items
+    except Exception as ex:  # noqa: BLE001 — a check never blocks the edit
+        print(f"[motion] camera keep-out skipped: {str(ex)[:200]}", flush=True)
+    return out
+
+
 def _attach_reading(ctx, edl, item):
     """Time a word-timed item (spec ``reads_onsets``/``reads_phrase``: a
     lockup, marker_text) to the speech it shows before it is probed and
@@ -961,7 +1029,8 @@ def _keep_out_estimated(ctx, edl, item):
                   near_captions=[keepout.caption_obstacle(y) for y in bands],
                   room=keepout.caption_room(bands, zones, W, H),
                   mouths=keepout.zones_of(track, keepout.mouth_zone),
-                  clear_penalty=keepout.CLEAR_PENALTY if face_bad else 0.0)
+                  clear_penalty=keepout.CLEAR_PENALTY if face_bad else 0.0,
+                  scene=_scene_boxes(ctx, edl, item))
         params0 = item.get("params") or {}
         # another side/align the estimate can draw (the lower third's side)
         variants = []
@@ -1061,7 +1130,7 @@ def _keep_out_inner(ctx, edl, item, rep):
                           ([keepout.caption_band(y) for y in bands],
                            [keepout.caption_obstacle(y, grow) for y in bands],
                            keepout.caption_room(bands, zones, W, H, grow)),
-                          off_face=face_bad)
+                          off_face=face_bad, scene=_scene_boxes(ctx, edl, item))
         if found:
             patch, real, params, rep = found
             old = item.get("params") or {}

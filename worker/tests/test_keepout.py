@@ -878,3 +878,67 @@ def test_the_watermark_zone_is_the_marks_top_left_box():
     assert keepout.inter(z, [0.2, 0.09, 0.8, 0.115]) > 0
     low = keepout.watermark_zone(1080, 1920, anchor_y=400)
     assert low[1] > z[3] - .01 and low[0] == z[0]
+
+
+# ── round 7: scene text is a soft keep-out ─────────────────────────────
+
+def test_the_solver_prefers_a_spot_off_scene_text():
+    """Judged (round 5): Elon's white OCCUPY print under the captions and
+    the hook. A graphic the solver places takes the calm spot when a short
+    move gets there; scene text is priced (SCENE_PENALTY by the share of the
+    spot it covers), never forbidden, and never outweighs a face."""
+    spec = motion_templates.spec("word_slam")
+    params = {"y": 0.64}
+    ink = (0.2, 0.62, 0.8, 0.66)                         # a one-line hook
+    plain = keepout.candidates("word_slam", spec, params, ink, [], [], 1080, 1920, clear_penalty=0.0)
+    assert plain[0][2] == ink                            # nothing to move for
+    print_box = (0.0, 0.6, 1.0, 0.7)                     # a shirt print right under it
+    priced = keepout.candidates("word_slam", spec, params, ink, [], [], 1080, 1920,
+                                clear_penalty=0.0, scene=[print_box])
+    moved = priced[0][2]
+    assert keepout.inter(moved, print_box) == 0 and abs(moved[1] - ink[1]) < 0.1
+    # a print too far to escape cheaply stays a price, not a move
+    tall = (0.0, 0.3, 1.0, 0.8)
+    stay = keepout.candidates("word_slam", spec, params, ink, [], [], 1080, 1920,
+                              clear_penalty=0.0, scene=[tall])
+    assert stay[0][2] == ink
+    # and it never outweighs a face
+    face = (0.25, 0.4, 0.75, 0.58)
+    zones = [keepout.face_zone(face)]
+    off = keepout.candidates("word_slam", spec, params, ink, [], zones, 1080, 1920,
+                             scene=[(0.0, 0.65, 1.0, 0.8)])
+    assert off and not keepout.on_face(off[0][2], zones)
+
+
+def test_a_camera_move_rechecks_the_graphics_under_it(monkeypatch):
+    """A zoom written after a graphic re-checks it against the face as the
+    zoom frames it, and places it again with the write's own keep-out."""
+    import motion_tools
+    calls = []
+
+    class Ctx:
+        has_main_video = True
+        index = {"video": {"width": 1920, "height": 1080}}
+    edl = {"keep": [[0.0, 10.0]], "frame": {"ratio": "9:16", "mode": "crop"},
+           "motion": [{"id": "g", "template": "word_slam", "start": 2.0, "end": 4.0, "params": {"y": 0.5},
+                       "footprint": {"box": [0.15, 0.45, 0.85, 0.6]}},
+                      {"id": "far", "template": "word_slam", "start": 8.0, "end": 9.0, "params": {},
+                       "footprint": {"box": [0.15, 0.45, 0.85, 0.6]}}]}
+    monkeypatch.setattr(keepout, "face_track", lambda e, i, W, H, a, b, measure=None:
+                        [(a + 0.1 * k, [(0.3, 0.2, 0.7, 0.56)]) for k in range(10)])
+    monkeypatch.setattr(motion_tools, "_face_measure", lambda ctx: None)
+    monkeypatch.setattr(motion_tools, "_probe_full", lambda ctx, e, m: (None, "", None, None))
+
+    def keep(ctx, e, m, rep):
+        calls.append(m["id"])
+        m["params"] = dict(m["params"], y=0.68)
+        return "\nKEEP-OUT (estimated): moved below the chin (y 0.5 → 0.68).", None
+    monkeypatch.setattr(motion_tools, "_keep_out", keep)
+    notes = motion_tools.keep_out_under_camera(Ctx(), edl, 1.5, 5.0)
+    assert calls == ["g"] and len(notes) == 1 and "'g'" in notes[0]
+    assert edl["motion"][0]["params"]["y"] == 0.68 and edl["motion"][1]["params"] == {}
+    # clear of the face under the move: nothing re-placed, nothing said
+    monkeypatch.setattr(keepout, "face_track", lambda e, i, W, H, a, b, measure=None:
+                        [(a + 0.1 * k, [(0.3, 0.05, 0.7, 0.3)]) for k in range(10)])
+    calls.clear()
+    assert motion_tools.keep_out_under_camera(Ctx(), edl, 1.5, 5.0) == [] and calls == []

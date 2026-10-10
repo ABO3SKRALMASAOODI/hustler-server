@@ -22,12 +22,17 @@ an explicit zone ``z`` the block may not grow out of). A line never holds
 its place across a layout change (Plan.hold_limit), and a line waiting for
 a graphic to clear waits at most two frames.
 Where the spatial index measured the plate, a cue also carries its mean luma
-``l`` (0-1) so premium looks firm up their scrim and shadow on bright plates.
-At render time the motion layer also measures the picture under every cue
-(worker/plate.py, ``MG.plate``) and the template guards each word in order:
-it slides inside its zone to a darker spot, then adds a tight dark halo and
-lifts accent words toward white until they read 3:1, then a soft dark local
-scrim, and only then the pocket (a box).
+``l`` (0-1) so premium looks firm up their shadow on bright plates. At
+render time the motion layer also measures the picture under every cue
+(worker/plate.py, ``MG.plate``: luma and busyness) and the template makes
+legibility decisions, not boxes (round 7): a run of cues slides inside its
+zone to a darker, calmer spot; past what the look's own shadow carries, dark
+ink where the plate is bright under every word (accents deepened in their
+hue, never paled), else a glyph scrim that follows the letterforms, and a
+box only past that, sized to the final block. Every cue sharing a place
+keeps its first line's baseline on one row (a second line grows down), the
+same in every segment, so captions never hop between one- and two-line
+cues.
 
 The caption track is split at natural gaps into segments of ~6–10 s. Each
 segment is an independent RenderJob carrying only its own cues, so segments
