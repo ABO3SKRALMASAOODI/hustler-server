@@ -383,7 +383,7 @@ def _hook_question_notes(hook_ms, head):
         text = _plain(_main_text(m))
         if not text.rstrip(" .…\"'”’").endswith("?"):
             continue
-        if any(c.isdigit() for c in text):
+        if any(c.isdigit() for c in text) or _names_something(text):
             continue
         first = (_tokens(text) or [""])[0]
         generic = first in WH_WORDS
@@ -399,6 +399,18 @@ def _hook_question_notes(hook_ms, head):
              "something specific."),
             {"id": m["id"], "text": text}, rank=1 if generic else 2)]
     return []
+
+
+def _names_something(text):
+    """Does a (mixed-case) question name someone or something — a
+    capitalised word past the first ('Why did Apple kill the Lisa?')? An
+    all-caps line cannot say, so it names nothing here."""
+    letters = [c for c in text if c.isalpha()]
+    if not letters or all(c.isupper() for c in letters):
+        return False
+    words = re.findall(r"[A-Za-z][\w'’]*", text)
+    return any(w[0].isupper() and w not in ("I", "I'm", "I’m", "I've", "I'd")
+               for w in words[1:])
 
 
 def _hero_repeat_notes(ms, hook_ms, head):

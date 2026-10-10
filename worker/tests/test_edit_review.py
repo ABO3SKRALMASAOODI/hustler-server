@@ -88,8 +88,14 @@ def test_a_specific_claim_or_a_numbered_question_is_a_fine_hook():
                              text="They promised us / *flying cars*…")])
     numbered = _edl(motion=[_mg("hook", "hook_title", 0.0, 2.3,
                                 text="Why do *9 in 10* startups fail?")])
+    named = _edl(motion=[_mg("hook", "hook_title", 0.0, 2.3,
+                             text="Why did Apple kill the *Lisa*?")])
+    shouting = _edl(motion=[_mg("hook", "hook_title", 0.0, 2.3,
+                                text="WHERE DID PROGRESS GO?")])
     assert "hook_generic_question" not in _codes(claim)
     assert "hook_generic_question" not in _codes(numbered)
+    assert "hook_generic_question" not in _codes(named)
+    assert "hook_generic_question" in _codes(shouting)
 
 
 def test_a_claim_question_without_a_number_ranks_below_a_wh_question():
