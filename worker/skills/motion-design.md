@@ -100,11 +100,14 @@ CHOOSING A TEMPLATE — confirm names and params with `list_motion_templates()`:
   an optional kicker (who + when). Write one per program (start 0, end
   omitted = the program end; or one per chapter, never overlapping) with y
   omitted: the write centres it in the free band above the card or the
-  letterboxed picture and sizes it to that band. It holds the band and
-  YIELDS on its own at render time — fading out just before any graphic that
-  occupies its band lands and back after it leaves (gaps under 1.2 s stay
-  clear, a phrase build yields from its first revealed row) — so hero
-  lockups replace it and hand the band back without any timing on your side.
+  letterboxed picture and sizes it to that band (the band starts below the
+  feed header AND the free-tier watermark's zone). It holds the band and
+  YIELDS on its own at render time — gone on the frame any graphic that
+  occupies its band lands, back from the frame it leaves (it holds every gap
+  of 0.15 s or more: the band is never left empty; a phrase build yields
+  from its first revealed row) — so hero lockups replace it and hand the
+  band back without any timing on your side. Start each band graphic on its
+  first visible word: the PICTURE CHECK names an empty band over 0.15 s.
   It is silent, never mutes or replaces captions, is not counted as a
   designed moment, and the write refuses a second overlapping headline, more
   than one accent span, a window under 4 s and a full-bleed frame without an
@@ -114,7 +117,8 @@ CHOOSING A TEMPLATE — confirm names and params with `list_motion_templates()`:
   every lockup that shares the band as a motion template. A graphic set in
   that band (with or without a headline) is NOTEd (band) when it spills out
   of it — onto the top of the card (a phrase_build grows by its small bridge
-  lines) or up into the feed header — narrow it or move its y. Without a
+  lines) or up into the feed header / the watermark's zone (top-left, where
+  a free-tier final burns the mark) — narrow it or move its y. Without a
   browser at write time the box is the template's estimate, which runs a
   little tall: only a clear spill is named there, and a preview measures it.
 - Structure: `chapter_title` at a real section turn ("The problem", "Step

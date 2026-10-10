@@ -467,14 +467,19 @@
   // The renderer (worker/motion_layer.yield_windows) sets MG.yields =
   // {w: [[a, b], ...], out, in} on a persistent template (the headline band):
   // composition seconds where another graphic occupies its band. The whole
-  // page fades out over `out` s ending at a, stays gone until b and fades
-  // back over `in` s from b. Unset (every other item) changes nothing.
+  // page fades out over `out` s ending at a (0: gone on a's frame), stays
+  // gone until b and fades back over `in` s from b. Unset (every other item)
+  // changes nothing.
   MG.yields = null;
+  // A 0 s swap (the headline gone on the frame the other lands) is a real
+  // length, not "unset".
+  const yieldLen = (v, dflt) => (v === undefined || v === null || isNaN(+v))
+    ? dflt : Math.max(1e-3, +v);
   /** 0-1 visibility of the page at t under MG.yields (1 when unset). */
   MG.yieldLevel = t => {
     const Y = MG.yields;
     if (!Y || !Array.isArray(Y.w) || !Y.w.length) return 1;
-    const o = Math.max(1e-3, +Y.out || 0.12), n = Math.max(1e-3, +Y.in || 0.3);
+    const o = yieldLen(Y.out, 0.12), n = yieldLen(Y.in, 0.3);
     let v = 1;
     for (const [a, b] of Y.w) {
       if (t >= a && t <= b) return 0;
@@ -486,7 +491,7 @@
   const yieldMoving = (t, fd) => {
     const Y = MG.yields;
     if (!Y || !Array.isArray(Y.w) || !Y.w.length) return false;
-    const o = Math.max(1e-3, +Y.out || 0.12), n = Math.max(1e-3, +Y.in || 0.3);
+    const o = yieldLen(Y.out, 0.12), n = yieldLen(Y.in, 0.3);
     return Y.w.some(([a, b]) => (t >= a - o - 1e-6 && t <= a + fd + 1e-6)
       || (t >= b - 1e-6 && t <= b + n + fd + 1e-6));
   };

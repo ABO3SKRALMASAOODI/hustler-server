@@ -172,8 +172,8 @@ def test_a_lockup_spilling_out_of_the_band_is_named(monkeypatch):
                                           params={"rows": rows, "y": 0.15}, id="paper")
     assert "NOTE (band)" in out and "onto the top of the picture card" in out \
         and "rises into the feed header" in out, out
-    # inside the band: nothing to say
-    monkeypatch.setattr(motion_tools, "_probe_item", _band_probe((0.12, 0.09, 0.88, 0.28)))
+    # inside the band (below the free-tier mark's zone): nothing to say
+    monkeypatch.setattr(motion_tools, "_probe_item", _band_probe((0.12, 0.135, 0.88, 0.285)))
     out = motion_tools.set_motion_graphic(ctx, "paper", params={"width": 0.66, "y": 0.19})
     assert "NOTE (band)" not in out, out
     # a graphic set ON the card is not a band graphic
@@ -304,9 +304,11 @@ def test_the_probe_composes_the_card_live_at_that_moment():
 def test_a_browserless_estimate_is_named_only_past_its_own_error(monkeypatch):
     # production agent, MCP and shorts lanes have no browser at write time:
     # a lockup's box there is the template's estimate, which runs ~0.03-0.05
-    # taller than the real block. The Jobs hook (a real 0.087-0.273 in this
-    # band) estimates 0.054-0.306 — it must not be told to shrink; a block
-    # set grossly into the header still is, and the note says it estimated
+    # taller than the real block. The band now starts below the free-tier
+    # mark's zone (judged: the Jobs kicker at y 0.09-0.115 sat on the mark):
+    # the hook as judged (y .18, estimated 0.054-0.306) is named; set lower
+    # (y .21) its estimate is inside the band's own error — it must not be
+    # told to shrink — and a block set grossly into the header still is
     from test_headline_band import _Ctx as BandCtx, _card_edl
     rows = [{"text": "Steve Jobs, 1983", "role": "sans", "size": "0.45", "at": "0"},
             {"text": "computer fonts were", "role": "serif", "size": "0.8", "at": ""},
@@ -318,6 +320,8 @@ def test_a_browserless_estimate_is_named_only_past_its_own_error(monkeypatch):
                                           id="hook")
     item = ctx.latest_edl()["json"]["motion"][0]
     assert item["footprint"].get("estimated"), item.get("footprint")
+    assert "free-tier mark's zone" in out, out
+    out = motion_tools.set_motion_graphic(ctx, "hook", params={"y": 0.21})
     assert "NOTE (band)" not in out, out
     out = motion_tools.set_motion_graphic(ctx, "hook", params={"y": 0.12})
     assert "NOTE (band): by its estimated box" in out and "feed header" in out, out

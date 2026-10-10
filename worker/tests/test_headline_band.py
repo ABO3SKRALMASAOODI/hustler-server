@@ -86,27 +86,31 @@ def test_the_estimate_of_a_headline_is_its_band():
 
 # ── yielding ──────────────────────────────────────────────────────────────
 
-def test_it_yields_to_graphics_in_its_band_and_merges_short_gaps():
+def test_it_holds_its_band_whenever_nothing_else_does():
+    """Judged Oct 2026: the Jobs band stood empty at 4.2-4.4, 14.09-15.0,
+    17.79-18.58 and 32.34-33.04 s — gaps under 1.2 s were kept clear. The
+    headline now comes back for every gap of YIELD_MERGE_S (0.15 s) or more
+    and swaps on the frame; only its composition's edges take a landing
+    within YIELD_EDGE_S."""
     hl = _hl()
     items = [hl,
-             _lock("hook", 0.4, 4.0),                 # near the start: from 0
-             _lock("b", 4.5, 6.0),                     # 0.5 s later: merged
+             _lock("hook", 0.4, 4.2),                 # near the start: from 0
+             _lock("b", 4.4, 6.0),                     # 0.2 s later: back between
              _lock("low", 8.0, 9.0, box=(0.1, 0.72, 0.9, 0.8)),   # caption band
              _lock("c", 12.0, 13.0),
-             _lock("d", 14.0, 15.0),                   # 1.0 s gap: merged
-             _lock("e", 18.0, 29.2),                   # near the end: to it
+             _lock("d", 13.1, 15.0),                   # 0.1 s gap: stays yielded
+             _lock("e", 18.0, 29.6),                   # near the end: to it
              {"id": "cap", "template": "caption_motion", "start": 0, "end": 30,
               "params": {}, "_synthetic": True}]
     wins = motion_layer.yield_windows(hl, items, W, H)
-    assert wins == [[0.0, 6.0], [12.0, 15.0], [18.0, 30.0]]
+    assert wins == [[0.0, 4.2], [4.4, 6.0], [12.0, 15.0], [18.0, 30.0]]
     shown, prog = motion_layer.headline_visible(hl, items, W, H)
-    assert shown == pytest.approx(30 - 6 - 3 - 12)
+    assert shown == pytest.approx(30 - 4.2 - 1.6 - 3 - 12)
     assert prog == wins                                 # starts at 0: same clock
-    # only a persistent item yields; a gap of 1.2 s or more is a restore
     assert motion_layer.yield_windows(items[1], items, W, H) == []
-    wins = motion_layer.yield_windows(hl, [hl, _lock("c", 12.0, 13.0),
-                                           _lock("d", 14.3, 15.0)], W, H)
-    assert wins == [[12.0, 13.0], [14.3, 15.0]]
+    # the swap is on the frame: gone as the other lands, back as it leaves
+    doc = motion_layer.yields_doc(wins)
+    assert doc["out"] == 0.0 and doc["in"] <= motion_layer.YIELD_MERGE_S
 
 
 def test_a_phrase_build_yields_from_its_first_reveal_and_windows_follow_the_phase():
@@ -139,7 +143,7 @@ def test_build_document_carries_yields_only_when_there_are_some():
                                         yields=motion_layer.yields_doc([])) == a
     b = motion_engine.build_document("<div></div>", duration=2.0,
                                      yields=motion_layer.yields_doc([[0.5, 1.0]]))
-    assert '"yields": {"w": [[0.5, 1.0]], "out": 0.12, "in": 0.3}' in b
+    assert '"yields": {"w": [[0.5, 1.0]], "out": 0.0, "in": 0.1}' in b
 
 
 @needs_browser
@@ -154,10 +158,10 @@ def test_the_runtime_fades_the_page_out_and_back_around_a_yield(tmp_path, monkey
                           "-pix_fmt", "rgba", "-"], capture_output=True).stdout
     n = clip.w * clip.h * 4
     alpha = [max(raw[i * n + 3:(i + 1) * n:4]) for i in range(len(raw) // n)]
-    assert alpha[24] > 200                  # 0.8 s: on screen
+    assert alpha[24] > 200 and alpha[29] > 200   # on screen up to the swap
     assert alpha[30] == 0 and alpha[45] == 0 and alpha[60] == 0   # 1.0-2.0 s: yielded
-    assert 0 < alpha[63] < alpha[72]        # coming back over 0.3 s
-    assert alpha[75] > 200                  # back
+    assert 0 < alpha[61] < alpha[64]        # back from the frame it is free
+    assert alpha[64] > 200
 
 
 # ── captions and critics ──────────────────────────────────────────────────
@@ -241,7 +245,10 @@ def test_add_places_the_headline_in_the_band_above_the_card(monkeypatch):
     assert out.startswith("EDL v1"), out
     item = ctx.latest_edl()["json"]["motion"][0]
     assert item["end"] == pytest.approx(38.0)                  # holds for the program
-    top, bottom = motion_tools.HEADLINE_SAFE_TOP, 0.3042 - motion_tools.HEADLINE_GAP
+    # below the feed header AND the free-tier mark's zone (judged: the
+    # Jobs kickers at y 0.09-0.115 sat on the mark)
+    top, bottom = motion_tools.band_top(1080, 1920), 0.3042 - motion_tools.HEADLINE_GAP
+    assert top >= keepout.watermark_zone(1080, 1920)[3] > motion_tools.HEADLINE_SAFE_TOP
     assert item["params"]["y"] == pytest.approx((top + bottom) / 2, abs=1e-3)
     assert item["params"]["height"] == pytest.approx(bottom - top, abs=1e-3)
     assert item.get("mute_captions") is None
@@ -375,7 +382,7 @@ def test_a_headline_longer_than_one_clip_renders_in_pieces_on_one_clock(tmp_path
     assert all(j.duration <= motion_engine.MAX_DURATION_S for j in hl_jobs)
     assert [round(j.t0, 3) for j in hl_jobs] == [round(p["start"], 3) for p in pieces]
     marks = {j.html.split('"yields": ')[1].split("}")[0] for j in hl_jobs}
-    assert marks == {'{"w": [[150.0, 152.0]], "out": 0.12, "in": 0.3'}
+    assert marks == {'{"w": [[150.0, 152.0]], "out": 0.0, "in": 0.1'}
     spans = [(it["start"], it["end"]) for _i, it, _c in inputs if it["template"] == "headline"]
     assert spans == [(p["start"], p["end"]) for p in pieces]
 
@@ -393,7 +400,7 @@ def test_a_pad_letterbox_leaves_a_band_without_a_picture_rect(monkeypatch):
     item = ctx.latest_edl()["json"]["motion"][0]
     top = (1.0 - (9 / 16) / (16 / 9)) / 2.0                 # the 16:9 picture's top
     assert item["params"]["y"] == pytest.approx(
-        (motion_tools.HEADLINE_SAFE_TOP + top - motion_tools.HEADLINE_GAP) / 2, abs=2e-3)
+        (motion_tools.band_top(1080, 1920) + top - motion_tools.HEADLINE_GAP) / 2, abs=2e-3)
     # a shot the focus track crops full-frame leaves no free band
     edl["frame"]["focus_track"] = [{"t0": 0.0, "t1": 12.0, "mode": "pad"},
                                    {"t0": 12.0, "t1": 30.0, "mode": "crop"}]

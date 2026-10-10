@@ -27,6 +27,22 @@ it is measurable in two cheap passes over the rendered file:
     clear both edges is never reported for touching one, a turned face only
     on the side it looks to (the back of a head may meet the edge), and
     nothing covering the watermark's robot is a face.
+  * LAYOUT CHANGES (judges, Oct 2026: the Elon stack opened and closed on
+    a frame of bare dark canvas — mean luma 66.6 -> 27.4 in one frame) —
+    every picture card's entrance and exit is watched on the same pass's
+    mean luma: a dissolve must be gradual, so any single-frame drop or
+    flash of more than LUMA_JUMP inside it is a glitch; a card that cuts
+    in or out may change level on its cut frame, never blink (dark for a
+    frame or three and back).
+  * FACES INSIDE EVERY PANEL (owner rule) — on the face samples: the head
+    (the detector box with hair, chin and side margins, as picture_cards.
+    panel_keep frames it) of the largest face in a picture card's panel
+    must lie inside that panel; the chin and the sides inside the frame of
+    a full-frame crop (a close-up may lose the top of the hair there).
+  * THE HEADLINE BAND — where a persistent headline holds a band, the band
+    is read on frames of its own: no ink there for longer than
+    BAND_EMPTY_S (between graphics, before the headline's return) is a
+    hole the viewer reads as a dropped layer.
   * BRANDING — the end card (when the variant carries one) is compared
     with the card the renderer composes, and the free-tier robot (when the
     variant should carry the watermark) with the robot image, both by
@@ -42,7 +58,7 @@ import os
 import subprocess
 import time
 
-QC_VERSION = 1
+QC_VERSION = 2
 DIFF_W = 64                 # width of the frame-difference pass
 GLOBAL_SHARE = 0.45         # share of the tiny frame that must change...
 GLOBAL_LEVEL = 20.0         # ...with a mean |diff| at least this (0-255)
@@ -61,6 +77,21 @@ ROBOT_SAMPLES = 6           # frames the watermark is read on (one seek each)
 BUDGET_S = 60.0
 MAX_FULL_PASS_S = 180.0     # programmes longer than this skip the frame pass
                             # and sample faces on keyframes
+LUMA_JUMP = 0.5             # a frame-to-frame mean-luma change past this share
+LUMA_FLOOR = 24.0           # ...between levels, the brighter above this
+LAYOUT_REACH = 2            # frames either side of a layout change watched
+# The head a panel must hold around a detector box (picture_cards.
+# panel_keep's margins) and how far past an edge it may reach (a share of the
+# panel) before it is a cut face.
+HEAD_HAIR = .22
+HEAD_CHIN = .05
+HEAD_SIDE = .06
+CUT_TOL = .015
+BAND_W = 240                # width the headline band is read at
+BAND_STEP = 36              # a pixel this far off its row's median is ink
+BAND_INK = .003             # ...and this share of the band of it is text
+BAND_EMPTY_S = .15          # an empty band longer than this is a hole
+BAND_OPEN_S = .5            # ...except an entrance at the very start
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -191,6 +222,81 @@ def plan(edl, index, *, W, H, fps, outro_s=0.0, want_wm=False,
             others.append((a, a + float(item["duration_s"])))
         except (KeyError, TypeError, ValueError):
             continue
+    end_frame = int(round(float(program_s) * fps))
+    # Layout changes: each picture card's start and end, with the frames its
+    # dissolve spans (an animated end the renderer cuts — on a cut of the
+    # edit — is a cut here too).
+    layout = []
+    import picture_cards
+    for c in fx.get("picture_cards") or []:
+        try:
+            ent, ext = picture_cards.animation_windows(c)
+            c0, c1 = float(c["start"]), float(c["end"])
+        except (KeyError, TypeError, ValueError, AttributeError):
+            continue
+        for t, w, opening in ((c0, ent, True), (c1, ext, False)):
+            n = renderer.first_frame_at(t, fps)
+            if n <= 1 or n >= end_frame - 1:
+                continue
+            on_cut = any(abs(n - cf) <= 1 for cf in cut_frames)
+            d = 0 if (w is None or on_cut) else \
+                max(1, int(round((w[1] - w[0]) * fps)))
+            lo, hi = (n, n + d) if opening else (n - d, n)
+            layout.append({"t": round(t, 3), "lo": lo, "hi": hi,
+                           "kind": "dissolve" if d else "cut",
+                           "id": c.get("id"), "opening": opening})
+    # Deliberate whole-picture fades the layout watch leaves alone: the
+    # programme's fade in/out, and junction transitions that dip or flash.
+    still = []
+    try:
+        fi = float(fx.get("fade_in_s") or 0.0)
+        fo = float(fx.get("fade_out_s") or 0.0)
+    except (TypeError, ValueError):
+        fi = fo = 0.0
+    if fi > 0:
+        still.append((0, int(math.ceil(fi * fps)) + 1))
+    if fo > 0:
+        still.append((end_frame - int(math.ceil(fo * fps)) - 1, end_frame))
+    if trans and str((trans or {}).get("style") or "").startswith(("dip", "flash")):
+        reach = int(math.ceil(float((trans or {}).get("duration_s") or .5)
+                              * fps)) + 1
+        still += [(n - reach, n + reach) for n in cut_frames]
+    # The persistent headline's band: where it draws (its footprint) over
+    # its window — a hole there is read on the render (band_gaps).
+    bands = []
+    try:
+        import caption_carry
+        import motion_templates
+        ar = caption_carry.frame_ar(int(W), int(H))
+        for m in edl.get("motion") or []:
+            if not isinstance(m, dict) or not motion_templates.persistent(m):
+                continue
+            # the whole band it holds (its y and height), full width, below
+            # the free-tier mark's zone (the mark itself is not the band's
+            # ink); else where it draws
+            prm = m.get("params") or {}
+            box = None
+            try:
+                y, h = float(prm["y"]), float(prm["height"])
+                top = y - h / 2.0
+                try:
+                    import keepout
+                    top = max(top, float(keepout.watermark_zone(int(W), int(H))[3]))
+                except Exception:
+                    pass
+                if y + h / 2.0 - top > .02:
+                    box = [.06, top, .94, y + h / 2.0]
+            except (KeyError, TypeError, ValueError):
+                box = None
+            box = box or caption_carry.footprint_box(m, ar)
+            if not box:
+                import motion_layer
+                box = motion_layer._band_box(m, int(W), int(H))
+            if box:
+                bands.append({"t0": float(m["start"]), "t1": float(m["end"]),
+                              "box": [float(v) for v in box], "id": m.get("id")})
+    except Exception:
+        bands = []
     wm = None
     if want_wm:
         g = renderer.watermark_geometry(int(W), int(H), wm_anchor_y)
@@ -201,9 +307,10 @@ def plan(edl, index, *, W, H, fps, outro_s=0.0, want_wm=False,
         endcard = {"path": renderer.endcard_path(), "s": float(outro_s)}
     return {"program_s": float(program_s), "fps": fps, "W": int(W), "H": int(H),
             # the programme's last frame cuts to the end card (or the loop)
-            "end_frame": int(round(float(program_s) * fps)),
+            "end_frame": end_frame,
             "cut_frames": cut_frames, "events": events, "cards": cards,
-            "others": others, "watermark": wm, "endcard": endcard}
+            "others": others, "watermark": wm, "endcard": endcard,
+            "layout": layout, "still": still, "bands": bands}
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -235,9 +342,10 @@ def _tiny_h(W, H, w):
     return max(2, int(round(w * float(H) / float(W) / 2.0)) * 2)
 
 
-def frame_changes(path, program_s, W, H, deadline):
+def frame_changes(path, program_s, W, H, deadline, lumas=None):
     """[(level, share)] per programme frame k >= 1: the mean |change| from
-    frame k-1 (0-255) and the share of the tiny frame that changed."""
+    frame k-1 (0-255) and the share of the tiny frame that changed.
+    ``lumas`` (a list) receives every frame's mean luma (frame 0 on)."""
     import numpy as np
     w, h = DIFF_W, _tiny_h(W, H, DIFF_W)
     cmd = ["ffmpeg", "-v", "error", "-nostdin", "-threads", "4",
@@ -247,6 +355,8 @@ def frame_changes(path, program_s, W, H, deadline):
            "-f", "rawvideo", "-pix_fmt", "gray", "-"]
     out, prev = [], None
     for f in _stream(cmd, w, h, deadline):
+        if lumas is not None:
+            lumas.append(float(f.mean()))
         f = f.astype(np.int16)
         if prev is not None:
             d = np.abs(f - prev)
@@ -307,6 +417,171 @@ def jumps(changes, plan_):
             seen.add(row[1])
             uniq.append(row)
     return uniq
+
+
+def layout_glitches(lumas, plan_):
+    """[(kind, frame, luma before, luma after, card id)] — at a picture
+    card's layout change, a single-frame mean-luma drop ('dip') or rise
+    ('flash') of more than LUMA_JUMP inside a dissolve (which must be
+    gradual), or a blink at a cut (dark for a frame or three, then back).
+    A cut's own change of level on its frame is the cut. Programme fades
+    and dip/flash junction transitions are deliberate."""
+    out, seen = [], set()
+    n = len(lumas or [])
+    still = plan_.get("still") or []
+    for edge in plan_.get("layout") or []:
+        lo = max(1, int(edge["lo"]) - LAYOUT_REACH)
+        hi = min(n - 1, int(edge["hi"]) + LAYOUT_REACH)
+        for k in range(lo, hi + 1):
+            if any(a <= k <= b for a, b in still):
+                continue
+            a, b = lumas[k - 1], lumas[k]
+            if max(a, b) < LUMA_FLOOR:
+                continue
+            drop = b < (1.0 - LUMA_JUMP) * a
+            flash = a < (1.0 - LUMA_JUMP) * b
+            if not (drop or flash):
+                continue
+            if edge["kind"] == "cut":
+                # the cut's own step is the cut; a blink comes back
+                back = lumas[k + 1:k + 4]
+                if not (drop and back and max(back) >= (1.0 - LUMA_JUMP / 2) * a):
+                    continue
+            key = (edge.get("id"), edge["lo"])
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(("dip" if drop else "flash", k, round(a, 1), round(b, 1),
+                        edge.get("id")))
+    return out
+
+
+def _head(box):
+    """The head a panel must hold around a detector box (fractions)."""
+    w, h = box[2] - box[0], box[3] - box[1]
+    return [box[0] - HEAD_SIDE * w, box[1] - HEAD_HAIR * h,
+            box[2] + HEAD_SIDE * w, box[3] + HEAD_CHIN * h]
+
+
+def cut_faces(samples, plan_):
+    """[(t0, t1, side, over, where)] runs of samples whose main face's head
+    (_head: hair, chin, sides) reaches past the edge of the picture-card
+    panel (or card) it sits in by more than CUT_TOL of that panel — or, on
+    a full-frame crop, past the frame's bottom or sides: a cut face (the
+    owner's rule). A turned face is judged on its leading side; ``over``
+    the largest overreach seen (a share of the area)."""
+    cards = plan_.get("cards") or []
+    wm = plan_.get("watermark") or {}
+    mark = None
+    if wm.get("w") and plan_.get("W") and plan_.get("H"):
+        mark = ((wm["x"] + wm["w"] / 2.0) / plan_["W"],
+                (wm["y"] + wm["h"] / 2.0) / plan_["H"])
+    others = plan_.get("others") or []
+    rows = []
+    for t, dets in samples:
+        dets = [d for d in dets or [] if not (mark and d[0][0] <= mark[0] <= d[0][2]
+                                              and d[0][1] <= mark[1] <= d[0][3])]
+        if not dets or any(a <= t < b for a, b in others):
+            rows.append((t, None))
+            continue
+        card = next((c for c in cards if c[0] <= t < c[1]), None)
+        areas = card[2] if card else [[0.0, 0.0, 1.0, 1.0]]
+        if areas and not isinstance(areas[0], (list, tuple)):
+            areas = [areas]
+        top = max(d[0][3] - d[0][1] for d in dets)
+        worst = None
+        for box, look in dets:
+            if box[3] - box[1] < .6 * top:
+                continue
+            cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+            area = next((ar for ar in areas if ar[0] - .02 <= cx <= ar[2] + .02
+                         and ar[1] - .02 <= cy <= ar[3] + .02), None)
+            if area is None:
+                continue
+            head = _head(box)
+            aw, ah = area[2] - area[0], area[3] - area[1]
+            sides = []
+            if look <= 0:
+                sides.append(("left", (area[0] - head[0]) / aw))
+            if look >= 0:
+                sides.append(("right", (head[2] - area[2]) / aw))
+            sides.append(("bottom", (head[3] - area[3]) / ah))
+            if card:
+                sides.append(("top", (area[1] - head[1]) / ah))
+            for side, over in sides:
+                if over > CUT_TOL and (worst is None or over > worst[1]):
+                    worst = (side, over)
+        rows.append((t, worst))
+    runs, cur = [], None
+    for t, hit in rows:
+        if hit and cur and cur["side"] == hit[0]:
+            cur["t1"], cur["n"] = t, cur["n"] + 1
+            cur["over"] = max(cur["over"], hit[1])
+            continue
+        if cur and cur["n"] >= CLIP_RUN:
+            runs.append(cur)
+        cur = ({"t0": t, "t1": t, "side": hit[0], "over": hit[1], "n": 1}
+               if hit else None)
+    if cur and cur["n"] >= CLIP_RUN:
+        runs.append(cur)
+    out = []
+    for r in runs:
+        where = "frame"
+        if any(c[0] <= r["t0"] < c[1] for c in cards):
+            card = next(c for c in cards if c[0] <= r["t0"] < c[1])
+            where = "panel" if len(card[2]) > 1 else "card"
+        out.append((r["t0"], r["t1"], r["side"], round(r["over"], 3), where))
+    return out
+
+
+def band_ink(path, band, W, H, deadline, fps=None):
+    """[(t, ink share)] per programme frame inside ``band``'s window: the
+    share of the band's pixels that stand off their row's median by
+    BAND_STEP or more (type against a smooth backdrop)."""
+    import numpy as np
+    x0, y0, x1, y1 = band["box"]
+    bx, by = int(max(0.0, x0) * W) // 2 * 2, int(max(0.0, y0) * H) // 2 * 2
+    bw = max(2, int((min(1.0, x1) - max(0.0, x0)) * W) // 2 * 2)
+    bh = max(2, int((min(1.0, y1) - max(0.0, y0)) * H) // 2 * 2)
+    w = BAND_W
+    h = max(2, int(round(w * bh / float(bw) / 2.0)) * 2)
+    t0, t1 = float(band["t0"]), float(band["t1"])
+    cmd = ["ffmpeg", "-v", "error", "-nostdin", "-threads", "4",
+           "-ss", f"{t0:.3f}", "-i", path, "-t", f"{max(.05, t1 - t0):.3f}",
+           "-an", "-sn", "-dn", "-map", "0:v:0",
+           "-vf", f"crop={bw}:{bh}:{bx}:{by},scale={w}:{h}:flags=area,format=gray",
+           "-f", "rawvideo", "-pix_fmt", "gray", "-"]
+    out = []
+    step = 1.0 / float(fps or 30.0)
+    for i, f in enumerate(_stream(cmd, w, h, deadline)):
+        g = f.astype(np.int16)
+        med = np.median(g, axis=1, keepdims=True)
+        out.append((round(t0 + i * step, 3),
+                    float((np.abs(g - med) >= BAND_STEP).mean())))
+    return out
+
+
+def band_gaps(ink, fps=30.0):
+    """[(t0, t1)] runs of frames with no ink (under BAND_INK) longer than
+    BAND_EMPTY_S — the headline band standing empty. The opening frames
+    before the first graphic draws (an entrance from nothing at the very
+    start, under BAND_OPEN_S) are not a dropped layer."""
+    out, run = [], None
+    step = 1.0 / float(fps or 30.0)
+    first = ink[0][0] if ink else 0.0
+
+    def close(r):
+        if r and r[1] + step - r[0] > BAND_EMPTY_S + 1e-6 and not (
+                r[0] <= first + 1e-6 and r[1] + step - r[0] < BAND_OPEN_S):
+            out.append((round(r[0], 2), round(r[1] + step, 2)))
+    for t, share in ink or []:
+        if share < BAND_INK:
+            run = [run[0], t] if run else [t, t]
+            continue
+        close(run)
+        run = None
+    close(run)
+    return out
 
 
 def face_samples(path, program_s, W, H, deadline, keyframes=False):
@@ -568,6 +843,7 @@ def check(path, plan_, budget_s=BUDGET_S):
     fps, W, H = plan_["fps"], plan_["W"], plan_["H"]
     prog = plan_["program_s"]
     res = {"version": QC_VERSION, "findings": [], "jumps": [], "clipped": [],
+           "cut": [], "layout": [], "band": [],
            "endcard": None, "watermark": None, "faces": 0, "skipped": []}
     # Cheapest and most important first: the branding a final must carry,
     # then the faces, then the full-rate frame pass (shorts only — a long
@@ -587,14 +863,23 @@ def check(path, plan_, budget_s=BUDGET_S):
                                keyframes=prog > MAX_FULL_PASS_S)
         res["faces"] = sum(1 for _t_, d in samples if d)
         res["clipped"] = [list(c) for c in clipped_faces(samples, plan_)]
+        res["cut"] = [list(c) for c in cut_faces(samples, plan_)]
     except Exception as exc:
         res["skipped"].append(f"faces: {str(exc)[:80]}")
     if prog <= MAX_FULL_PASS_S:
         try:
-            changes = frame_changes(path, prog, W, H, deadline)
+            lumas = []
+            changes = frame_changes(path, prog, W, H, deadline, lumas=lumas)
             res["jumps"] = [list(j) for j in jumps(changes, plan_)]
+            res["layout"] = [list(g) for g in layout_glitches(lumas, plan_)]
         except Exception as exc:
             res["skipped"].append(f"jumps: {str(exc)[:80]}")
+        for band in plan_.get("bands") or []:
+            try:
+                res["band"] += [list(g) + [band.get("id")] for g in band_gaps(
+                    band_ink(path, band, W, H, deadline, fps), fps)]
+            except Exception as exc:
+                res["skipped"].append(f"band: {str(exc)[:80]}")
     else:
         res["skipped"].append(f"jumps: a {prog:.0f}s programme is past the "
                               f"{MAX_FULL_PASS_S:.0f}s frame pass")
@@ -638,7 +923,31 @@ def findings(res, plan_):
                 "picture changes on a frame that is not a cut of the edit — a "
                 "framing pop, or a camera cut inside the source the edit does "
                 "not know; look_at it")
+    for kind, fr, a, b, cid in res.get("layout") or []:
+        out.append(
+            f"LAYOUT {'DIP' if kind == 'dip' else 'FLASH'} at {_t(fr, fps):.2f}s "
+            f"(frame {fr}): the picture's mean luma "
+            f"{'drops' if kind == 'dip' else 'jumps'} {a:.0f} -> {b:.0f} in one "
+            f"frame where picture card {cid} opens or closes — a layout change "
+            "must dissolve from/to the full-frame shot or cut to populated "
+            "panels, never show the bare canvas; look_at it")
+    for t0, t1, side, over, where in res.get("cut") or []:
+        out.append(
+            f"FACE CUT BY THE {where.upper()} EDGE {t0:.1f}-{t1:.1f}s: the "
+            f"speaker's {'chin' if side == 'bottom' else 'hair' if side == 'top' else side + ' side'} "
+            f"runs {100 * over:.0f}% past the {where}'s {side} edge — re-solve "
+            "the card's source rect from the face (set_picture_card source="
+            "'auto'), re-aim the crop, or cut away")
+    for t0, t1, bid in res.get("band") or []:
+        out.append(
+            f"EMPTY HEADLINE BAND {t0:.2f}-{t1:.2f}s: the band headline {bid} "
+            f"holds is blank for {t1 - t0:.2f}s — a dropped layer to the viewer; "
+            "the headline holds whenever no graphic occupies the band (start "
+            "each graphic on its first visible word)")
+    cut_runs = res.get("cut") or []
     for t0, t1, side, gap in res.get("clipped") or []:
+        if any(c[2] == side and c[0] <= t1 and t0 <= c[1] for c in cut_runs):
+            continue                          # reported as a cut face
         out.append(
             f"FACE AT THE {side.upper()} EDGE {t0:.1f}-{t1:.1f}s: the speaker's "
             f"face comes within {100 * gap:.0f}% of the "
@@ -661,5 +970,6 @@ def summary_line(res):
         bits.append(f"watermark {'present' if res['watermark'] >= ROBOT_MIN_NCC else 'MISSING'}")
     if not res.get("findings"):
         return (" PICTURE CHECK: clean (" + ", ".join(bits) +
-                "; no clipped face, no single-frame jump off a cut).") if bits else ""
+                "; no clipped or cut face, no single-frame jump off a cut, "
+                "no dip at a layout change).") if bits else ""
     return ""
