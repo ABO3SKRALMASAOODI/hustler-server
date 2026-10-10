@@ -2,7 +2,7 @@
 
 ## Editorial decision principles
 
-B-roll is story evidence, not wallpaper: show the concrete person, thing, place or event the speaker names, on the words that name it, while the voice keeps going. Premium reels cut to evidence often and make each entrance designed — a whip, a light leak or a card entrance with a whoosh — and never leave a still sitting frozen. Decide whether speech should continue, prefer authentic user footage, and judge all candidates as one coherent sequence.
+B-roll is story evidence, not wallpaper: show the concrete person, thing, place or event the speaker names, on the words that name it, while the voice keeps going. Premium reels cut to evidence often and make each entrance designed — a whip, a light leak or a card entrance, with a sound only when the turn earns one — and never leave a still sitting frozen. Decide whether speech should continue, prefer authentic user footage, and judge all candidates as one coherent sequence.
 
 ## Evidence to inspect
 
@@ -16,7 +16,7 @@ THE CHOICE: does the voice keep going?
 - Taste: map every proposed cutaway to a narrative purpose (proof, context, contrast, scale, time, place, payoff). On a reel, every concrete noun is a candidate for evidence; density follows the story, not a quota. Never cover a punchline, admission or reaction that earns a face-on delivery, and never use generic wallpaper merely because a search result exists.
 
 DESIGNED ENTRANCES AND MOVING STILLS (short-form):
-- Enter B-roll on the word, and when the cutaway marks a turn give it a designed junction — a whip or zoom_punch, a `light_leak` or `flash_transition` motion graphic — and, within the sparse sound budget, one library whoosh or swish whose peak lands on the cut (read transitions). Plain hard cuts are right inside a fast evidence run.
+- Enter B-roll on the word, and when the cutaway marks a turn give it a designed junction — a whip or zoom_punch, a `light_leak` or `flash_transition` motion graphic — with a library whoosh or swish peaking on the cut only when that turn earns a sound (sound effects are optional, never rules; most entries stay silent; read transitions). Plain hard cuts are right inside a fast evidence run.
 - Stills never sit frozen: give photos a slow push or drift (`set_overlay_motion` scale/x/y keyframes, or `insert_media` motion='zoom_in'/'zoom_out'/'pan_left'/'pan_right' on a spliced still), or present them as designed cards with `image_card` or `photo_stack` (3D floating cards; `sfx=true` gives the card a shutter when the photo's arrival earns one).
 - Archival or 4:3 evidence can sit as a card on a designed background instead of a full-frame crop that destroys it (premium-composition).
 

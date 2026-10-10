@@ -3,8 +3,9 @@
 ## Editorial decision principles
 
 Emphasis is where the speaker's meaning lands; beats are where the music
-lands. Premium reels bind their camera moves, hero graphics and sound cues to
-those measured instants, 0–3 frames early. Measure first, then let the
+lands. Premium reels bind their hero graphics — and the few camera moves
+and sound cues a moment earns — to those measured instants, 0–3 frames
+early. Measure first, then let the
 strongest words get the strongest treatment and vary the rest so the
 rhythm never feels mechanical.
 
@@ -22,7 +23,7 @@ to measure a SONG; when that song is in the edit it also prints beat times in
 PROGRAM seconds, ready for cuts, cues, pulses and graphics.
 
 EMPHASIS WORDS: `suggest_emphasis()` lists measured stressed words, numbers
-and distinctive terms verbatim. Use them three ways at once on a reel:
+and distinctive terms verbatim. Use them where they help on a reel:
 - caption accent words (`emphasis_words`, 1–2 per sentence);
 - camera (optional — only where a word clearly earns a move): a punch-in
   on the single strongest word or the payoff, `pulse` on a rhythmic list
@@ -79,5 +80,6 @@ and the rhythm varies.
 ## Repair ladder
 
 Correct the grid → move to the actual onset → vary or remove weak accents →
-align camera, graphic and sound to one frame → rebuild the cut structure →
+align graphic (and any camera move or sound) to one frame → remove accents
+nothing earns → rebuild the cut structure →
 verify the complete rhythmic arc.

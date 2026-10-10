@@ -22,23 +22,26 @@ _CONTRACTS = {
     # conversation into a feature demo") steered every podcast reel toward a
     # static plate with subtitles; the owner's premium references are the
     # opposite. The story invariants carry over; the delivery is a designed
-    # short-form piece with its own motion, typography and sound system.
+    # short-form piece carried by typography and motion graphics. Owner,
+    # Oct 10 2026: zooms and sound effects are OPTIONAL, NEVER RULES — the
+    # contract never asks for a camera move or a sound, and a missing one is
+    # never a reason to reject.
     "podcast_reel": {
-        "driver": "one complete micro-story from a longer conversation, delivered as a designed short-form piece whose motion, typography and sound carry the speech",
+        "driver": "one complete micro-story from a longer conversation, delivered as a designed short-form piece whose typography and motion graphics carry the speech",
         "publish_ready": [
             "the opening lands a pattern interrupt and the hook line within the first seconds, the setup the payoff depends on survives, and the story resolves or ends on a deliberate cliff",
-            "the speaker owns a composed, filled vertical frame, and framing changes (punch-ins, alternate scale, pushes) land on sentence turns, jump cuts and payoffs with stronger moves reserved for stronger lines",
-            "one designed type system (captions with a single accent role plus hero words, numbers and graphics on their spoken beats) and a sound layer (a bed under the voice and SFX edited to the visual events) make it feel finished",
+            "the speaker owns a composed, filled vertical frame; zooms and sound effects are optional, never rules — a steady frame is the default, and any zoom or library sound present has a reason you can name (a key word, a reveal, a genuinely jarring jump cut, a real-world action shown)",
+            "one designed type system (captions with a single accent role plus hero words, numbers and graphics on their spoken beats) makes it feel finished; music only when the user supplied or asked for it",
         ],
         "visual_review": [
-            "the face stays composed and unobstructed through every reframe, punch-in and graphic; captions and graphics sit in face-free space above the platform UI band",
-            "visible change has rhythm and contrast: framing, type and graphic events vary in scale and timing instead of one static plate with subtitles",
+            "the face stays composed and unobstructed through every reframe, card, zoom and graphic; captions and graphics sit in face-free space above the platform UI band",
+            "visible change has rhythm and contrast: type and graphic events vary in scale and timing instead of one static plate with subtitles",
             "type hierarchy is deliberate (hero vs connector words, one accent role), graphics settle cleanly, and one committed grade/texture runs through the piece",
         ],
         "reject_if": [
             "the clip starts or ends mid-thought, needs missing context, or splices unrelated answers into a synthetic claim",
-            "flat static delivery: one unchanging frame, a half-black or postage-stamp canvas, or a caption-only edit with no camera, type or sound design",
-            "decoration that covers the speaker's face or competes with the spoken line, or a silent mix where the beats needed sound",
+            "flat static delivery: a half-black or postage-stamp canvas, or a caption-only edit with no designed type or graphics (a steady frame and a dry mix are not defects)",
+            "decoration that covers the speaker's face or competes with the spoken line, or zooms and sounds used where nothing calls for them (a move on every cut, a sound on every landing) so the edit looks childish",
         ],
         "evidence": ["kept micro-story transcript", "speaker framing per shot", "rendered type and motion states", "actual voice/music/SFX mix"],
     },

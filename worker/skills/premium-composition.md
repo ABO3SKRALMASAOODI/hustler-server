@@ -6,7 +6,8 @@ A premium social edit has committed art direction: one look, one type
 system with a strong hierarchy, a frame that is designed edge to edge, and
 one clear visual idea at a time that changes on the beat where the meaning
 changes. Premium is hierarchy, scale, placement, good footage and precise
-timing — plus motion and sound bound to the words. A small picture floating
+timing — plus motion bound to the words (a zoom or a sound only where a
+moment earns one: they are optional, never rules). A small picture floating
 on a flat black canvas with static text is a clip page, not a premium
 composition.
 

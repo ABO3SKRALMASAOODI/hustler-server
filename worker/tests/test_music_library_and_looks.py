@@ -353,7 +353,7 @@ def test_every_look_component_is_a_real_renderable_value():
 
 def test_classic_hype_on_landscape_is_unchanged_plus_real_sound_design(kit):
     ctx = _Ctx(ratio="16:9")
-    out = agent_tools.apply_look(ctx, "hype")
+    out = agent_tools.apply_look(ctx, "hype", transition_sounds=True)
     assert out.startswith("EDL v1"), out
     edl = ctx.latest_edl()["json"]
     st = edl["captions"]["style"]
@@ -426,7 +426,7 @@ def test_editorial_sets_a_coherent_system_in_one_version(monkeypatch):
 def test_switching_systems_replaces_texture_grade_and_owned_sounds(kit):
     ctx = _Ctx(ratio="9:16", duration=40.0,
                edl=_broll_edl(40.0, [10.0, 22.0]))
-    out = agent_tools.apply_look(ctx, "creator_punch")
+    out = agent_tools.apply_look(ctx, "creator_punch", transition_sounds=True)
     assert out.startswith("EDL v1"), out
     edl = ctx.latest_edl()["json"]
     tx = [s for s in edl["sfx"] if s["id"].startswith("look_tx")]
@@ -447,7 +447,7 @@ def test_switching_systems_replaces_texture_grade_and_owned_sounds(kit):
     edl2 = json.loads(json.dumps(edl))
     edl2["sfx"].append(user_sound)
     ctx._edl = validate_edl(edl2, ctx.duration).model_dump()
-    out = agent_tools.apply_look(ctx, "mono_noir")
+    out = agent_tools.apply_look(ctx, "mono_noir", transition_sounds=True)
     assert out.startswith("EDL v2"), out
     edl = ctx.latest_edl()["json"]
     fx = edl["effects"]
@@ -474,7 +474,7 @@ def test_switching_systems_replaces_texture_grade_and_owned_sounds(kit):
 def test_dense_scene_changes_get_a_time_spaced_subset(kit):
     cuts = [4.0, 8.0, 12.0, 16.0, 20.0, 24.0, 28.0, 32.0]
     ctx = _Ctx(ratio="9:16", duration=40.0, edl=_broll_edl(40.0, cuts, 1.0))
-    out = agent_tools.apply_look(ctx, "creator_punch")
+    out = agent_tools.apply_look(ctx, "creator_punch", transition_sounds=True)
     assert out.startswith("EDL v1"), out
     edl = ctx.latest_edl()["json"]
     tr = edl["effects"]["transition"]
@@ -589,7 +589,7 @@ def test_four_brolls_in_36s_stay_inside_the_sound_budget(kit, name):
     # 30s talk + four 1.5s B-rolls = 36s with 8 junctions in in/out pairs
     # 1.5s apart. Before: 7 look sounds, "7 sound effects in 36s".
     ctx = _talking_ctx(30.0, [5.0, 10.0, 15.0, 20.0], 1.5)
-    out = agent_tools.apply_look(ctx, name)
+    out = agent_tools.apply_look(ctx, name, transition_sounds=True)
     assert out.startswith("EDL v1"), out
     edl = ctx.latest_edl()["json"]
     assert not _sound_or_cadence_findings(ctx, edl)
@@ -611,10 +611,11 @@ def test_two_brolls_plus_the_recommended_hero_stay_inside_the_budget(kit,
                                                                     monkeypatch):
     monkeypatch.setattr(motion_tools, "_probe_item", lambda *a, **k: None)
     ctx = _talking_ctx(30.0, [8.0, 18.0], 2.0)    # 34s program
-    out = agent_tools.apply_look(ctx, "creator_punch")
+    out = agent_tools.apply_look(ctx, "creator_punch", transition_sounds=True)
     assert out.startswith("EDL v1"), out
     assert "HERO MOMENTS" in out and "hook_title" in out
-    assert "Sound budget: 2 of 4" in out
+    assert "Ceiling for this 34s cut: 4 sound effects (2 placed)" in out
+    assert "a maximum, not a target" in out
     res = motion_tools.add_motion_graphic(
         ctx, "hook_title", 0.3, params={"text": "This changed *everything*"}, sfx=True)
     assert res.startswith("EDL v2"), res
@@ -625,7 +626,7 @@ def test_two_brolls_plus_the_recommended_hero_stay_inside_the_budget(kit,
 
 def test_long_programs_get_more_sounds_but_never_past_the_budget(kit):
     ctx = _talking_ctx(60.0, [10.0, 20.0, 30.0, 40.0, 50.0], 2.0)  # 70s
-    out = agent_tools.apply_look(ctx, "creator_punch")
+    out = agent_tools.apply_look(ctx, "creator_punch", transition_sounds=True)
     edl = ctx.latest_edl()["json"]
     tx = [s for s in edl["sfx"] if s["id"].startswith("look_tx")]
     budget = int(70 / taste.SFX_PER_S)
@@ -641,7 +642,7 @@ def test_look_sounds_respect_existing_sounds_and_their_budget(kit):
     seeded["sfx"] = [{"id": "sx1", "storage_key": "sfx/7/kit-pop_soft.wav",
                       "at": 7.6, "gain_db": -8.0, "purpose": "user hit"}]
     ctx._edl = validate_edl(seeded, ctx.duration).model_dump()
-    agent_tools.apply_look(ctx, "creator_punch")
+    agent_tools.apply_look(ctx, "creator_punch", transition_sounds=True)
     edl = ctx.latest_edl()["json"]
     tx = [s for s in edl["sfx"] if s["id"].startswith("look_tx")]
     # the user's sound already marks the first entry: only the second rings
@@ -651,7 +652,7 @@ def test_look_sounds_respect_existing_sounds_and_their_budget(kit):
                       "at": 1.0 + 6 * i, "gain_db": -8.0} for i in range(3)]
     ctx = _talking_ctx(30.0, [8.0, 18.0], 2.0)
     ctx._edl = validate_edl(seeded, ctx.duration).model_dump()
-    out = agent_tools.apply_look(ctx, "creator_punch")
+    out = agent_tools.apply_look(ctx, "creator_punch", transition_sounds=True)
     edl = ctx.latest_edl()["json"]
     assert not [s for s in edl["sfx"] if s["id"].startswith("look_tx")]
     assert "4 of 4 scene transition(s) left unsounded" in out
@@ -659,7 +660,7 @@ def test_look_sounds_respect_existing_sounds_and_their_budget(kit):
 
 def test_insert_edits_drop_look_sounds_whose_transition_moved(kit):
     ctx = _talking_ctx(30.0, [8.0, 18.0], 2.0)
-    agent_tools.apply_look(ctx, "creator_punch")
+    agent_tools.apply_look(ctx, "creator_punch", transition_sounds=True)
     before = [s for s in ctx.latest_edl()["json"]["sfx"]
               if s["id"].startswith("look_tx")]
     assert len(before) == 2
@@ -764,7 +765,7 @@ def test_look_sounds_peak_once_on_their_junction(monkeypatch):
     monkeypatch.setattr(motion_tools, "ensure_library_asset",
                         lambda ctx, sid: sound_library.asset_key(ctx.project_id, sid))
     ctx = _talking_ctx(30.0, [8.0, 18.0], 2.0)
-    out = agent_tools.apply_look(ctx, "creator_punch")
+    out = agent_tools.apply_look(ctx, "creator_punch", transition_sounds=True)
     assert out.startswith("EDL v1"), out
     edl = ctx.latest_edl()["json"]
     tx = [s for s in edl["sfx"] if s["id"].startswith("look_tx")]
@@ -775,3 +776,56 @@ def test_look_sounds_peak_once_on_their_junction(monkeypatch):
         assert s["at"] == round(t - sound_library.peak_s(sid), 2), s
         assert not s.get("offset_s") and not s.get("dur_s"), s
         assert abs(sound_library.hit_at(s) - t) <= 0.006, s
+
+
+# ── apply_look: no sound unless asked (owner, Oct 10 2026) ──────────────
+# Zooms and sound effects are optional, never rules: a look places NO sound
+# unless the caller passes transition_sounds=true (the ability is kept and
+# budgeted above), and no look ever writes a zoom.
+
+@pytest.mark.parametrize("name", sorted(agent_tools.LOOKS))
+def test_no_look_places_a_sound_or_a_zoom_by_default(kit, name):
+    ctx = _talking_ctx(30.0, [8.0, 18.0], 2.0)
+    out = agent_tools.apply_look(ctx, name)
+    assert out.startswith("EDL v1"), out
+    edl = ctx.latest_edl()["json"]
+    assert not edl.get("sfx") and kit == [], (name, edl.get("sfx"))
+    assert not (edl.get("effects") or {}).get("zooms"), name
+    assert "places sounds only when transition_sounds=true" in out
+    if agent_tools.LOOKS[name].get("transition_sfx") \
+            and (edl.get("effects") or {}).get("transition"):
+        assert "no transition sounds placed" in out, name
+    if agent_tools.LOOKS[name].get("system"):
+        # the hero-moment receipt offers sound as an option, never a budget
+        # to spend
+        assert "Sound effects are optional, never rules" in out, name
+        assert "a maximum, not a target" in out, name
+        assert "brings its own cues" not in out, name
+
+
+def test_reapplying_keeps_requested_look_sounds_only_where_they_still_fire(kit):
+    ctx = _talking_ctx(30.0, [8.0, 18.0], 2.0)
+    agent_tools.apply_look(ctx, "creator_punch", transition_sounds=True)
+    asked = [s["id"] for s in ctx.latest_edl()["json"]["sfx"]]
+    assert asked == ["look_tx1", "look_tx2"]
+    # a later default call (another refinement) neither adds nor strips the
+    # sounds the user asked for while their transitions still fire ...
+    agent_tools.apply_look(ctx, "editorial")
+    assert [s["id"] for s in ctx.latest_edl()["json"]["sfx"]] == asked
+    # ... false removes them, and a look with hard cuts drops them too
+    out = agent_tools.apply_look(ctx, "editorial", transition_sounds=False)
+    assert not ctx.latest_edl()["json"].get("sfx")
+    assert "removed 2 earlier look transition sound(s)" in out
+    ctx2 = _talking_ctx(30.0, [8.0, 18.0], 2.0)
+    agent_tools.apply_look(ctx2, "creator_punch", transition_sounds="true")
+    agent_tools.apply_look(ctx2, "clean_minimal")
+    assert not ctx2.latest_edl()["json"].get("sfx")
+
+
+def test_transition_sounds_is_an_explicit_boolean_option():
+    schema = agent_tools.TOOLS["apply_look"][2]
+    assert schema["transition_sounds"]["type"] == "boolean"
+    assert "Omit" in schema["transition_sounds"]["description"]
+    desc = agent_tools.TOOLS["apply_look"][1]
+    assert "places NO sound unless transition_sounds=true" in desc
+    assert "cuts with whooshes" not in desc

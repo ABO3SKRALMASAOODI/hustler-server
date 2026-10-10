@@ -26,9 +26,9 @@ at 1x with the sound on, then answer:
 
 1. **Hook:** does a designed moment land by 0.6 s, with the hook line
    readable by 1.5 s, and would a stranger keep watching?
-2. **Payoff:** is the payoff designed (type, sound or camera; the owner's
-   song's button when music is on) and held 1.0-1.5 s, and does it resolve
-   the viewer question?
+2. **Payoff:** is the payoff designed (type first; a sound or a camera move
+   only where it earns one; the owner's song's button when music is on) and
+   held 1.0-1.5 s, and does it resolve the viewer question?
 3. **Targets:** does it meet its Look's targets: change rate, hero moments,
    picture area; sound only from the approved library and only on
    meaningful on-screen moments, at most about one every 4-5 s and within
@@ -67,25 +67,26 @@ still appears in the manifest.
 ```text
 s07 fix · EDL v14
 18.2-20.4s: two seconds of talking head with captions only; the turn "ten million" has no beat.
-Change: counter 0 -> 10M on "ten million" (cue 18.6, silent), punch 1.15x at 18.6.
+Change: counter 0 -> 10M on "ten million" (cue 18.6, silent); no zoom or sound needed.
 Keep: everything else, especially the hook and payoff.
 ```
 
 Name the timestamp, the effect on the viewer, the exact change and what not
 to touch. Never send a list of nitpicks or a re-edit request, and never ask
-for more sound than the Look's ceiling; removing a sound that nothing on
-screen earns is always a fair fix.
+for a zoom or a sound as the fix for a flat moment (a beat of type or a
+graphic is); removing a zoom or sound that nothing on screen earns is always
+a fair fix.
 
 ### Golden traits per Look
 
 | Look | Ship only if |
 | --- | --- |
-| Headline Pro | big face on a designed card, a still headline, captions that perform, the payoff lands with sound |
+| Headline Pro | big face on a designed card, a still headline, captions that perform, the payoff lands |
 | Editorial Serif | a quiet field, serif contrast on the right word, depth behind the subject |
 | Kinetic Poster | type lands on almost every stressed word (sound only on the few that earn it); the payoff is the biggest event |
-| Cinematic Doc | graded, textured, always drifting; archive feels like film |
-| Mono Noir | stark monochrome, red only where it matters, a few sounds that hit with weight |
-| Clean Data | numbers become pictures, and a settled figure lands with one sound |
+| Cinematic Doc | graded and textured; archive feels like film |
+| Mono Noir | stark monochrome, red only where it matters, any sound hits with weight |
+| Clean Data | numbers become pictures, and a settled figure lands (one sound at most) |
 | Creator Glow | glowing words build beside the face; the hook reads before the sentence ends |
 
 ### Batch view

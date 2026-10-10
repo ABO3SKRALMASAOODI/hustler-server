@@ -12,10 +12,15 @@ makes each of those impossible to miss.
 - Open on the strongest intelligible line or frame, with design on it from
   frame one.
 - Keep the viewer's eyes moving with purpose: word cues, graphics, B-roll,
-  layout — each bound to what is being said. Zooms and sound effects are
-  optional and only where a moment clearly earns them; used as filler they
-  make the edit look childish.
+  layout — each bound to what is being said.
 - Never bait without payoff; never spoil the payoff in the hook text.
+
+ZOOMS AND SOUND EFFECTS ARE OPTIONAL, NEVER RULES (owner, Oct 2026):
+restraint is the default. Reach for a zoom or a sound only when a specific
+moment needs it — a key word, a reveal, a genuinely jarring jump cut, a
+real-world action shown — and zero is a fine answer. Never a zoom per cut,
+a camera move per hero moment or a sound per landing or transition: used
+where nothing calls for them they make an edit look childish.
 
 ## Evidence to inspect
 
@@ -36,11 +41,11 @@ THE HOOK — 0 to 1.5 s:
   Trim the lead-in so the first kept sentence IS the hook; when the payoff
   line sits later, open on the tension it answers and pose it as hook type.
   Keep the minimum context to be understood.
-- PATTERN INTERRUPT within 0.1–0.6 s: open already punched-in or with a
-  landing at 0 s, a `hook_title` or `word_slam` on the first strong word, a
-  flash or light leak, with at most one library sound under it when the
-  landing earns one (a soft whoosh into the title). The speaker is on screen
-  and talking by ~0.3 s.
+- PATTERN INTERRUPT within 0.1–0.6 s: a `hook_title` or `word_slam` on
+  the first strong word, a card reveal, a flash or light leak. A punch-in at
+  0 s is an option, never a requirement, and at most one library sound sits
+  under the opening, only when its landing earns one (a soft whoosh into
+  the title). The speaker is on screen and talking by ~0.3 s.
 - HOOK TEXT by 1.5 s: the hook line (or its sharpest 2–6 words) as designed
   type, posed as the question or tension — never the answer.
 - FIRST FRAME is the thumbnail: sharp, composed, designed, never black or

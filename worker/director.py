@@ -292,9 +292,17 @@ def _direction_mode(value):
     text = re.sub(r"\s+", " ", str(value or "")).strip().casefold()
     if not text:
         return "preserve"
+    # Owner, Oct 10 2026: zooms and sound effects are optional, never rules.
+    # A direction written in that voice ("only where a moment earns one;
+    # zero is fine") is restraint, not a promise the EDL must contain one.
     if any(phrase in text for phrase in (
             "optional", "if useful", "if it helps", "only if earned",
             "only when earned", "use if needed", "as needed",
+            "never a rule", "never rules", "zero is fine",
+            "zero is a fine", "none is fine", "if a moment earns",
+            "where a moment earns", "when a moment earns",
+            "only where earned", "only if a moment", "only when a moment",
+            "only where a moment",
             "preserve existing", "keep existing", "leave as is",
             "keep the source", "keep source", "natural color",
             "natural colour", "keep the base picture", "stay on speaker",

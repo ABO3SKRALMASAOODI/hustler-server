@@ -9,6 +9,14 @@ eases and sound cues have to be inspected in the rendered frames around the
 moment they happen. The bar is the owner's premium references, not "nothing
 is broken".
 
+ZOOMS AND SOUND EFFECTS ARE OPTIONAL, NEVER RULES (owner, Oct 2026):
+restraint is the default. Reach for a zoom or a sound only when a specific
+moment needs it — a key word, a reveal, a genuinely jarring jump cut, a
+real-world action shown — and zero is a fine answer. Never a zoom per cut,
+a camera move per hero moment or a sound per landing or transition: used
+where nothing calls for them they make an edit look childish.
+A missing zoom or sound is never a defect; an unearned one is.
+
 ## Evidence to inspect
 
 Inspect deterministic checks, the AUDIO CHECK, dense rendered frames around
@@ -53,8 +61,8 @@ SCREEN IN THIS ORDER — each item is a yes/no question:
    every zoom? Remove any you cannot. Each one aimed at the face or target,
    eased (no steps or drift), landings only on cuts between ideas, varied
    strengths, never a move on every cut or sentence, no more than one camera
-   event per ~1.5 s except a designed hit. A bare jump cut is fine; cover
-   one only where its pop distracts.
+   event per ~1.5 s except a designed hit. A bare jump cut is fine; act on
+   one only where it is genuinely jarring (B-roll or a framing change).
 6. JUNCTIONS: cuts on word edges, no flash or double frames; transitions only
    on real turns, any sound peaking on the cut; no effect or sound on a jump
    cut.

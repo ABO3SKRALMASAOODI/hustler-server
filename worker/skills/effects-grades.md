@@ -38,10 +38,12 @@ set:
   grade, minimal texture.
 - Legacy looks `hype`, `clean`, `cinematic`, `luxury`, `meme` remain.
 The descriptions above are the intent of each look; the tool result lists
-the exact components it set — read it before refining. A look can place its
-own transition sounds: check its receipt or `get_edl` (sfx) before adding
-junction cues, and adjust or remove the look's own cues rather than stacking
-(read audio for the sparse sound rules). Where the schema lists a music
+the exact components it set — read it before refining. A look places no
+sound unless it is called with `transition_sounds=true` (only when the user
+asked for transition sounds; sound effects are optional, never rules); when
+it did, check its receipt or `get_edl` (sfx) before adding junction cues,
+and adjust or remove the look's own cues rather than stacking (read audio
+for the sparse sound rules). Where the schema lists a music
 option, pass it only when the user explicitly asked for generic background
 music — never on your own initiative (read music). Refine any component
 afterwards with its own tool; do not layer a second look on top. On a

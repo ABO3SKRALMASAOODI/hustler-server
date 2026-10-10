@@ -12,12 +12,20 @@ your job is to choose the right composition, bind it to the exact spoken
 frame, give it one clear role, decide whether the moment earns a sound,
 and check the rendered motion.
 
+ZOOMS AND SOUND EFFECTS ARE OPTIONAL, NEVER RULES (owner, Oct 2026):
+restraint is the default. Reach for a zoom or a sound only when a specific
+moment needs it — a key word, a reveal, a genuinely jarring jump cut, a
+real-world action shown — and zero is a fine answer. Never a zoom per cut,
+a camera move per hero moment or a sound per landing or transition: used
+where nothing calls for them they make an edit look childish.
+
 - **Bind every graphic to a word or a beat.** The landing frame of a graphic
   sits on the spoken onset (0–3 frames early), never "somewhere in the
   sentence". A graphic that lands late reads as an error.
 - **One leader per moment.** In any half-second one element leads (the hero
-  word, the card, the counter). Camera, captions and sound support it. Two
-  graphics fighting for the same instant cancel each other.
+  word, the card, the counter). Captions support it; a camera move or a
+  sound joins only when the moment earns one. Two graphics fighting for the
+  same instant cancel each other.
 - **Typography carries the motion.** A tight bold grotesk backbone plus ONE
   accent role (serif italic, script or condensed heavy) and ONE accent
   colour on 1–2 words per sentence. Size ladders of 2:1 to 7:1 between

@@ -15980,7 +15980,7 @@ def _corrupt_glitch_asset(ctx, style, intensity, dur, sound):
 
 
 def add_corrupt_screen(ctx, at_output_s, duration_s=0.6, style="digital",
-                       intensity=0.7, sound=True):
+                       intensity=0.7, sound=False):
     """Cut to a full-frame CORRUPT / glitch screen for a beat, then return to
     the footage — a datamosh-style transition between sections. Synthesized
     locally (no image/video generation), so it is always available and free."""
@@ -16007,17 +16007,31 @@ def add_corrupt_screen(ctx, at_output_s, duration_s=0.6, style="digital",
         k = max(0.0, min(1.0, float(intensity)))
     except (TypeError, ValueError):
         return "REJECTED: intensity must be a number 0-1."
-    snd = bool(sound)
+    snd = sound is True or str(sound).strip().lower() in ("true", "1", "yes",
+                                                          "on")
 
-    key, err = _corrupt_glitch_asset(ctx, st, k, dur, snd)
+    # The clip is always built SILENT. Owner policy: sound effects come only
+    # from the approved library (synthesized sounds were rejected), so
+    # sound=true lays an approved glitch recording on the screen instead of
+    # the old synthesized hiss (which _corrupt_filtergraph can still build).
+    key, err = _corrupt_glitch_asset(ctx, st, k, dur, False)
     if err:
         return err
+    before = {i.get("id") for i in (ctx.latest_edl()["json"].get("inserts")
+                                    or [])}
     placed = insert_media(ctx, key, at, duration_s=dur)
     if not placed.startswith("EDL v"):
         return placed
-    heard = ("a burst of static/hiss plays over it" if snd
-             else "it is silent")
     result = placed.split(". Before:")[0]
+    heard = (f"it is silent (the program pauses {dur}s with no sound; "
+             "sound=true lays the approved glitch recording under it when "
+             "the break earns one)")
+    if snd:
+        heard = _corrupt_screen_sound(ctx, before, dur, st)
+        if heard.startswith("EDL v"):
+            result += "\n" + heard.split("\n", 1)[0]
+            heard = ("the approved glitch recording plays under it "
+                     "(remove_sfx to drop it)")
     result += (f"\nThis is a {st} corrupt-screen glitch ({dur}s) — a full-frame "
                f"digital-corruption beat; {heard}. It is inserted media, so no "
                "spoken-word captions appear on it (nothing overlaps). Great as "
@@ -16025,6 +16039,38 @@ def add_corrupt_screen(ctx, at_output_s, duration_s=0.6, style="digital",
                "reads as a hit, longer starts to feel broken). Raise intensity "
                "for a harsher break, lower it for a subtle flicker.")
     return result
+
+
+def _corrupt_screen_sound(ctx, before_ids, dur, style):
+    """Lay an approved library glitch recording on the corrupt screen just
+    inserted (the insert whose id is not in ``before_ids``): glitch_1 under a
+    short screen, glitch_2 under a longer one, starting on its first frame
+    and stopping with it. Returns add_sfx's result, or a sentence saying why
+    the screen stays silent."""
+    sid = "glitch_1" if dur <= 0.7 else "glitch_2"
+    row = sound_library.get(sid)
+    if not row:
+        return f"it is silent (the approved {sid} recording is unavailable)"
+    edl = ctx.latest_edl()["json"]
+    inserts = edl.get("inserts") or []
+    item = next((i for i in inserts if i.get("id") not in before_ids), None)
+    win = None
+    if item is not None:
+        win = insert_windows(inserts, Timeline(
+            [list(k) for k in (edl.get("keep") or [])], inserts,
+            edl.get("speed") or [])).get(item["id"])
+    if not win:
+        return ("it is silent (its program position could not be resolved — "
+                f"add_sfx storage_key='sound:{sid}' at its first frame)")
+    start, end = win
+    play = min(float(row.get("duration_s") or dur), max(0.05, end - start))
+    res = add_sfx(ctx, f"sound:{sid}", at=start + sound_library.hit_s(sid),
+                  gain_db=float(row.get("gain_db") or -14.0),
+                  purpose=f"approved {sid} under the {style} corrupt screen",
+                  dur_s=round(play, 2))
+    if res.startswith("EDL v"):
+        return res
+    return f"it is silent (the glitch sound was not placed: {res[:160]})"
 
 
 def add_title_card(ctx, text, at_output_s, duration_s=2.2, template="title",
@@ -19942,7 +19988,8 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft"):
                     edl, ctx.index, tl,
                     src_w=(ctx.index.get("video") or {}).get("width"),
                     src_h=(ctx.index.get("video") or {}).get("height"),
-                    user_asked=ctx.user_message or "")
+                    user_asked=ctx.user_message or "",
+                    measure=motion_tools.jump_cut_measure(ctx))
                 ctx.last_taste_advisory = list(findings)
                 note += taste.audit_line(findings)
             except Exception:
@@ -23183,6 +23230,9 @@ def punch_in_on_emphasis(ctx, count=None, strength=None):
                                if motif else "")
                             for w, pt, zid, target, measured, st, motif, beat
                             in placed))
+        res += ("\nZooms are optional, never rules: keep only the punches "
+                "on words the story turns on and remove_zoom the rest — "
+                "zero is a fine answer.")
         if not explicit_count:
             res += (f"\nMotion density was directed from the {prog:g}s "
                     f"program/brief; selected moments stay ~{spacing:.1f}s "
@@ -23567,16 +23617,23 @@ def suggest_emphasis(ctx):
 #   first second is the only one every viewer watches, and a short loops),
 #   and hype's declared-but-never-read `sound_design` is real now as
 #   `transition_sfx`: an approved library whoosh lands on a budgeted, spaced subset of the
-#   scene transitions it fires (see LOOK_SFX_HERO_RESERVE).
+#   scene transitions it fires (see LOOK_SFX_HERO_RESERVE) — only when the
+#   caller passes transition_sounds=true (see below).
 # * The premium SYSTEMS ("system": True) set a coherent whole in one call:
 #   browser-drawn motion captions (captions.style.motion_look) in the look's
 #   colours over a matching libass preset (used alone where the browser
 #   engine is unavailable), one committed grade (preset + continuous values
 #   that REPLACE any earlier custom grade), texture (grain/vignette/
 #   halation, replacing earlier whole-program texture), one scene-transition
-#   style with paired kit sounds, no fade from black on vertical, and — only
-#   when asked (music='auto', a mood or a slug) — a ducked CC0 library bed.
-#   They return the hero-moment templates to place next.
+#   style, no fade from black on vertical, and — only when asked
+#   (music='auto', a mood or a slug) — a ducked CC0 library bed. They return
+#   the hero-moment templates to place next.
+#
+# Owner, Oct 10 2026: ZOOMS AND SOUND EFFECTS ARE OPTIONAL, NEVER RULES. A
+# look places NO sound unless asked: transition_sounds=true sounds a budgeted,
+# spaced subset of its transitions with its paired library family (the
+# ability is kept); false removes the look's earlier sounds; omitted places
+# none and keeps earlier look sounds only where their transition still fires.
 #
 # Every component is an ordinary EDL field the user could have set one call
 # at a time, and the result names each one. A key absent = leave that axis
@@ -23627,7 +23684,7 @@ LOOKS = {
         "summary": ("ivory sans captions whose key words turn gold serif "
                     "italic, matte filmic grade (lifted blacks, soft "
                     "highlights, gentle desaturation), light grain + "
-                    "vignette, soft white dips with an airy whoosh"),
+                    "vignette, soft white dips"),
         "captions": {"motion_look": "serif", "preset": "editorial",
                      "color": "#F5F1EA", "highlight_color": "#F2C94C",
                      "size": "l"},
@@ -23650,8 +23707,7 @@ LOOKS = {
     "creator_punch": {
         "system": True,
         "summary": ("bold uppercase pop captions with a yellow active word, "
-                    "vibrant punchy grade, zoom-punch scene transitions on a "
-                    "hard whoosh"),
+                    "vibrant punchy grade, zoom-punch scene transitions"),
         "captions": {"motion_look": "pop", "preset": "reels",
                      "color": "#FFFFFF", "highlight_color": "#FFD400",
                      "size": "m"},
@@ -23703,7 +23759,7 @@ LOOKS = {
         "system": True,
         "summary": ("high-contrast black-and-white, stacked captions whose "
                     "hero word slams in (key words red), heavy grain + "
-                    "vignette, glitch transitions with a digital burst"),
+                    "vignette, glitch transitions"),
         "captions": {"motion_look": "stack", "preset": "impact",
                      "color": "#F7F7F5", "highlight_color": "#ED080D",
                      "size": "m"},
@@ -23880,7 +23936,8 @@ def _prune_stray_look_sfx(ctx, edl):
     edl["sfx"] = kept
     return [f"Removed look transition sound(s) {', '.join(gone)} — the scene "
             "transition they landed on is no longer there after this change. "
-            "Re-apply the look to sound the current transitions."]
+            "Re-apply the look with transition_sounds=true to sound the "
+            "current transitions (only if the user wants them)."]
 
 
 def _look_portrait(ctx, edl):
@@ -23962,10 +24019,25 @@ def _look_music_choice(look, music):
     return ("track", track), None
 
 
-def apply_look(ctx, name, music=None):
-    """Compose one look — captions/grade/texture/transitions(+sounds)/fades
-    and optionally a library music bed — in a single EDL version, reporting
-    every component it set."""
+def _look_sounds_flag(v):
+    """transition_sounds as True / False / None (omitted)."""
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return v
+    t = str(v).strip().lower()
+    if t in ("true", "1", "yes", "on"):
+        return True
+    if t in ("false", "0", "no", "off", "none"):
+        return False
+    return None
+
+
+def apply_look(ctx, name, music=None, transition_sounds=None):
+    """Compose one look — captions/grade/texture/transitions/fades, and only
+    when asked a library music bed (music=) or transition sounds
+    (transition_sounds=true) — in a single EDL version, reporting every
+    component it set."""
     n = (name or "").strip().lower()
     look = LOOKS.get(n)
     if not look:
@@ -23976,6 +24048,7 @@ def apply_look(ctx, name, music=None):
     music_req, music_err = _look_music_choice(look, music)
     if music_err:
         return music_err
+    sounds_req = _look_sounds_flag(transition_sounds)
     system = bool(look.get("system"))
     row = ctx.latest_edl()
     edl = json.loads(json.dumps(row["json"]))
@@ -24163,21 +24236,36 @@ def apply_look(ctx, name, music=None):
                 fx["stylize"] = sts
                 set_bits.append(f"stylize {skind} {sint:g}")
     edl["effects"] = fx
-    # Scene-transition sounds. The look owns its transition, so it owns the
-    # sounds that sit on it: earlier look sounds are replaced, user sounds
-    # are never touched.
+    # Scene-transition sounds — only when asked (transition_sounds=true).
+    # The look owns its transition, so it owns the sounds that sit on it:
+    # asked, earlier look sounds are replaced; false removes them; omitted,
+    # none are placed and earlier ones stay only where their transition
+    # still fires. User sounds are never touched.
     if "transition" in look:
         old = [dict(s) for s in (edl.get("sfx") or [])]
         sfx = [s for s in old
                if not str(s.get("id") or "").startswith(LOOK_SFX_PREFIX)]
-        dropped = len(old) - len(sfx)
         rows, cadence_note = _look_transition_rows(ctx, edl)
         if cadence_note:
             notes.append(cadence_note + ".")
         spec = look.get("transition_sfx")
+        if sounds_req is None:
+            # keep earlier look sounds that still lead into a firing
+            # transition of THIS look (the stray check the insert tools use)
+            probe = dict(edl, sfx=old)
+            _prune_stray_look_sfx(ctx, probe)
+            sfx = list(probe.get("sfx") or [])
+        dropped = len(old) - len(sfx)
         placed = []
         prog = program_duration(edl)
-        if spec and rows:
+        if not sounds_req:
+            if spec and rows:
+                notes.append(
+                    "no transition sounds placed — sound effects are "
+                    "optional, never rules. Pass transition_sounds=true "
+                    "only when the user asked for them, or place one "
+                    "library cue (add_sfx) on the real turn that earns one.")
+        elif spec and rows:
             kinds, gain = spec
             style = (look.get("transition") or ("", 0))[0]
             existing_at = []
@@ -24239,7 +24327,8 @@ def apply_look(ctx, name, music=None):
                 f"the {look['transition'][0]} transition fires only where "
                 "the footage really changes (B-roll/inserts or a new shot) "
                 "and this cut has none yet — it lands automatically once "
-                "media is inserted; re-apply the look then to sound it.")
+                "media is inserted; re-apply the look with "
+                "transition_sounds=true then to sound it.")
         if placed:
             set_bits.append(f"{len(placed)} transition sound(s) "
                             f"({', '.join(sorted(set(placed)))})")
@@ -24309,8 +24398,8 @@ def apply_look(ctx, name, music=None):
         if notes:
             res += "\n" + "\n".join("Note: " + x for x in notes)
         res += ("\napply_look never touches cuts; it changes music only when "
-                "music= is passed, and the only sounds it places are its own "
-                "transition sounds (look_tx*).")
+                "music= is passed and places sounds only when "
+                "transition_sounds=true (its own look_tx* cues).")
         if music_placed:
             res += (" Music licence: CC0 1.0 public domain — no credit "
                     "required.")
@@ -24332,14 +24421,17 @@ def apply_look(ctx, name, music=None):
                 prog_now = program_duration(edl)
                 n_sfx = len(edl.get("sfx") or [])
                 budget = _look_sfx_budget(prog_now)
-                res += (f"\nSound budget: {n_sfx} of {budget} sound effects "
-                        f"used for this {prog_now:.0f}s cut. Each hero "
-                        "template brings its own cues; once the budget is "
-                        "spent, place further heroes with sfx=false.")
+                res += ("\nSound effects are optional, never rules: graphics "
+                        "are silent by default — opt a hero in (sfx=true) "
+                        "only where its landing earns a sound. Ceiling for "
+                        f"this {prog_now:.0f}s cut: {budget} sound effects "
+                        f"({n_sfx} placed) — a maximum, not a target; zero "
+                        "is fine.")
         if system and not music_placed and music_req is None \
                 and not edl.get("music"):
-            res += ("\nThis edit has no music: apply_look(name, "
-                    "music='auto') or add_library_music lays a CC0 bed.")
+            res += ("\nMusic: none. Only when the user asks for background "
+                    "music, music='auto' (or add_library_music) lays a CC0 "
+                    "bed — never on your own initiative.")
     return res
 
 
@@ -27410,9 +27502,12 @@ TOOLS = {
                            "at_output_s is PROGRAM seconds; everything after "
                            "shifts later by duration_s. Keep it SHORT (0.3-1s "
                            "reads as a hit; longer feels genuinely broken). "
-                           "intensity 0-1 = how harsh (default 0.7). sound "
-                           "(default true) plays a matching static/hiss burst "
-                           "over the glitch; set false for a silent flicker. "
+                           "intensity 0-1 = how harsh (default 0.7). Silent "
+                           "by default (sound effects are optional, never "
+                           "rules) — the program pauses on it with no sound; "
+                           "sound=true lays the approved library glitch "
+                           "recording under it (glitch_1, or glitch_2 on a "
+                           "screen over 0.7s) when the break earns one. "
                            "No captions ever land on it (inserted media).",
                            {"at_output_s": {"type": "number"},
                             "duration_s": {"type": "number"},
@@ -27746,12 +27841,15 @@ TOOLS = {
                                for n, lk in LOOKS.items() if lk.get("system"))
                    + ". A system "
                    "draws captions with the browser motion engine, REPLACES "
-                   "the earlier look's custom grade, whole-video texture and "
-                   "transition sounds, never puts a fade from black on a "
-                   "vertical short, and returns hero-moment templates to "
-                   "place next with add_motion_graphic. CLASSIC looks: "
-                   "'hype' (beast xl captions, vibrant, zoom_punch cuts with "
-                   "whooshes), 'clean' (clean white size-led captions, "
+                   "the earlier look's custom grade and whole-video texture, "
+                   "never puts a fade from black on a vertical short, and "
+                   "returns hero-moment templates to place next with "
+                   "add_motion_graphic. A look places NO sound unless "
+                   "transition_sounds=true (sound effects are optional, "
+                   "never rules): then a spaced few of its transitions take "
+                   "an approved library sound. CLASSIC looks: "
+                   "'hype' (beast xl captions, vibrant, zoom_punch cuts), "
+                   "'clean' (clean white size-led captions, "
                    "ungraded), 'cinematic' (elegant captions, cinematic "
                    "grade + warmth, dip_black), 'luxury' (luxe captions, "
                    "warm), 'meme' (impact xl captions, flash cuts, grain); "
@@ -27773,7 +27871,14 @@ TOOLS = {
                               "chill, cinematic, corporate, dramatic, "
                               "hiphop, ambient, inspiring); or an exact "
                               "slug from list_music_library. Omit to leave "
-                              "music unchanged."}}),
+                              "music unchanged."},
+                    "transition_sounds": {
+                        "type": "boolean",
+                        "description": "Opt in to library sounds on a "
+                        "spaced few of the look's scene transitions — only "
+                        "when the user asked for transition sounds. Omit "
+                        "(default) to place none; false removes the look's "
+                        "earlier ones."}}),
     "get_edl": (get_edl, "Current EDL JSON and version. Large timelines "
                 "return a compact index instead of invalid truncated JSON. "
                 "Request top-level sections such as ['captions','overlays'] "
@@ -28479,8 +28584,9 @@ _COMPACT_CONTRACTS = {
         "transitions, reporting every component. Premium: "
         "editorial (podcast/interview default), creator_punch, cinematic_doc, "
         "mono_noir, clean_minimal; legacy hype, clean, cinematic, luxury, meme. "
-        "Its transitions may carry their own sounds: read the receipt before "
-        "adding junction cues. Its music option (when listed) lays a library "
+        "Places no sound unless transition_sounds=true (sounds are optional, "
+        "never rules); read the receipt before adding junction cues. Its music "
+        "option (when listed) lays a library "
         "bed: pass it only when the user asked for background music. One look "
         "per edit; refine components with their own tools; no fade-in on "
         "vertical reels (set_fades)."),

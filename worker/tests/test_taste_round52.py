@@ -56,20 +56,29 @@ def _crit(edl, index=None, ask=""):
 print("== the opening ==")
 CAPS = {"mode": "from_transcript"}
 base = {"keep": [[0.0, 40.0]], "effects": {}, "captions": dict(CAPS)}
-# Oct 2026: a captioned plate whose frame never moves is the owner's own
+# Oct 2026: a captioned plate with nothing designed on it is the owner's own
 # 2.6/10 short, not a well-made reel. It raises exactly ONE advisory note
 # (static picture). A dry mix is NOT flagged: music is never the agent's
 # choice and zero SFX is fine when nothing on screen earns one. The fixture
-# below adds the minimum design that clears it, so every other finding in
-# this file is still caused by what the test added.
+# below adds the minimum design that clears it — a hook title — so every
+# other finding in this file is still caused by what the test added.
 f = _crit(base)
 check("a captioned plate that never moves raises only the static-picture note",
       len(f) == 1 and fired(f, "static picture"))
-designed = dict(base, effects={"zooms": [{"id": "zd", "start": 6.0,
-                                          "end": 8.0, "strength": 0.12,
-                                          "mode": "ease"}]})
-check("a designed reel raises nothing at all, even with a dry mix",
+check("...and the note never asks for a zoom or a sound",
+      fired(f, "a zoom or a sound is never the missing piece")
+      and not fired(f, "add_zoom") and not fired(f, "no camera move"))
+designed = dict(base, motion=[{"id": "hook", "template": "hook_title",
+                               "start": 0.2, "end": 2.4}])
+check("a designed reel raises nothing at all, even with a dry mix and no zoom",
       _crit(designed) == [])
+# Owner, Oct 10 2026: zooms are optional, never rules — a zoom is never the
+# fix for a reel with nothing designed on it, so it does not clear the note.
+zoomed = dict(base, effects={"zooms": [{"id": "zd", "start": 6.0,
+                                        "end": 8.0, "strength": 0.12,
+                                        "mode": "ease"}]})
+check("...and a zoom alone does not stand in for design",
+      fired(_crit(zoomed), "static picture"))
 f = _crit(dict(base, music=[{"id": "md", "start": 0.0, "storage_key": "library:x",
                              "gain_db": -18.0, "duck": True}]))
 check("...music alone leaves the picture flagged as static",

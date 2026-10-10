@@ -36,11 +36,17 @@ Round 2026-10 (premium motion). Findings here are ADVISORY craft notes: they
 are shown in the render result labelled "advisory: keep if intentional" and
 never become blocking verification findings, repair loops or an export gate.
 The density limits are per FORMAT: a vertical/square reel of REEL_MAX_S or
-less is measured against premium short-form references (a camera, type or
-sound event every few seconds, a whoosh layered into an impact, a hook punch
-at 0s), not against long-form restraint. The guards that caught real
+less is measured against premium short-form references (type and graphics
+changing every few seconds, a whoosh layered into an impact, a hook punch
+at 0s allowed), not against long-form restraint. The guards that caught real
 failures stay: transitions on every jump cut, identical-zoom repetition,
 fade from black on a reel, captions under the platform UI band.
+
+Owner, Oct 10 2026: ZOOMS AND SOUND EFFECTS ARE OPTIONAL, NEVER RULES. No
+finding here counts a missing zoom or a missing sound as a defect or asks
+for one; a bare jump cut is named only when the speaker's head measurably
+jumps across it, and then with options (leave it, B-roll, a framing
+change), never a prescribed zoom.
 """
 
 import re
@@ -73,16 +79,35 @@ JUMP_CUT_MIN_SCALE = 0.08
 JUMP_CUT_MIN_SHIFT = 0.08
 # A crop aim moving this much (source fractions) is a new framing.
 JUMP_CUT_MIN_AIM = 0.03
-# Bare cuts named one by one in the note; the rest are counted.
+# Jarring cuts named one by one in the note; the rest are counted.
 JUMP_CUT_LIST = 5
-# The punch a fix line asks for: the references' tight-camera step.
+# The step a row's `fix` measures against: the references' tight-camera step.
 JUMP_CUT_FIX_STRENGTH = 0.12
+# Owner, Oct 10 2026: zooms are optional, never a rule — a bare jump cut is
+# the accepted grammar of a talking-head short and is never a defect. The
+# advisory names a jump cut only when it is genuinely JARRING: the speaker's
+# head measurably jumps across it — the face centre travels at least
+# JUMP_CUT_JAR_SHIFT of the face's width (height for a vertical move) —
+# measured on the frames either side of the cut (a caller's ``measure``) or
+# on the index's face samples within JUMP_CUT_FACE_NEAR_S of it in the same
+# take. With no face evidence a cut is never reported. On the showcase
+# sources a steady head across a cut measured 0.02-0.25 face widths
+# (detector jitter plus a small lean) and the one visible head jump (Jobs,
+# 1758.6 -> 1762.0 s) about 0.5.
+JUMP_CUT_JAR_SHIFT = 0.3
+JUMP_CUT_FACE_NEAR_S = 0.6
+# At most this many cuts are measured on real frames per pass (two frames
+# each), longest skipped source first: a long skip is where a head moves.
+JUMP_CUT_MEASURE_MAX = 10
 # Framing x zoom never enlarges the source past this (agent_tools caps zoom
 # writes there): below an 8% step of room a punch cannot cover a cut.
 _ZOOM_UPSCALE_MAX = 3.0
 
 SFX_PER_S = 8.0
 SFX_MIN_SPACING_S = 0.35
+# The same sound twice inside this window reads as a pattern, not an accent
+# (owner policy: never the same sound twice within ~3 s).
+SFX_REPEAT_S = 3.0
 
 # Programme seconds per junction effect, below which transitions stop marking
 # anything and become the thing being watched. Defined HERE and imported by
@@ -131,7 +156,10 @@ HOOK_DEAD_AIR_S = 1.5
 # output of REEL_MAX_S or less is judged against THAT density. 120s matches
 # the podcast_reel editorial contract, so the contract and the audit agree.
 REEL_MAX_S = 120.0
-REEL_ZOOM_PER_S = 3.0           # flag only past one camera move every 3s
+# Owner, Oct 10 2026: zooms are optional, never a rule; a handful of earned
+# moves in a 30-45 s short, or none. Past one every ~6 s the camera itself
+# becomes the thing being watched ("childish").
+REEL_ZOOM_PER_S = 6.0           # flag past one camera move every ~6s
 REEL_ZOOM_MIN_SPACING_S = 1.5   # two pushes closer than this fight
 REEL_ZOOM_MIN_START_S = 0.0     # a punched-in hook at 0s is a device
 # Owner policy: sound like a professional editor, never "whoosh wars" — at
@@ -268,6 +296,32 @@ def sfx_events(sfx):
                 continue
         events.append([item])
     return events
+
+
+
+def _sound_file(item):
+    """The recording a cue plays: its library id, else its storage key."""
+    try:
+        sid = sound_library.id_for_key(item.get("storage_key"))
+    except Exception:  # noqa: BLE001
+        sid = None
+    return sid or str(item.get("storage_key") or "") or None
+
+
+def _sfx_repeats(sfx):
+    """[(a, b)] pairs of the SAME recording hitting within SFX_REPEAT_S of
+    each other, outside one motion graphic's own cue stack."""
+    out, last = [], {}
+    for item in sorted(sfx or [], key=sfx_time):
+        key = _sound_file(item)
+        if not key:
+            continue
+        prev = last.get(key)
+        if prev is not None and sfx_time(item) - sfx_time(prev) < SFX_REPEAT_S \
+                and not (sfx_owner(prev) and sfx_owner(prev) == sfx_owner(item)):
+            out.append((prev, item))
+        last[key] = item
+    return out
 
 
 def density_limits(fmt):
@@ -471,9 +525,95 @@ def _crop_room(edl, index):
     return _ZOOM_UPSCALE_MAX / base - 1.0
 
 
-def uncovered_jump_cuts(edl, index, tl, fps=None):
+def face_jump(before, after):
+    """How far the speaker's head jumps between two frames, or None.
+
+    ``before`` / ``after``: face boxes [x0, y0, x1, y1] (frame fractions),
+    largest first, on the last frame before a cut and the first after it.
+    Returns {"shift": travel of the face centre in face widths}. The same
+    person is the closest pair (two speakers in one wide shot never read as
+    one head jumping across the frame). The cascades box one steady head
+    tight or loose from frame to frame (the Thiel showcase: one box 77%
+    taller than the next on the same pose), so box SIZE is not evidence and
+    the travel is measured against the larger box."""
+    best = None
+    for a in [f for f in before or [] if f and len(f) == 4][:2]:
+        for b in [f for f in after or [] if f and len(f) == 4][:2]:
+            wa, ha = a[2] - a[0], a[3] - a[1]
+            wb, hb = b[2] - b[0], b[3] - b[1]
+            if min(wa, ha, wb, hb) <= 0:
+                continue
+            dx = abs((a[0] + a[2]) - (b[0] + b[2])) / 2.0 / max(wa, wb)
+            dy = abs((a[1] + a[3]) - (b[1] + b[3])) / 2.0 / max(ha, hb)
+            shift = max(dx, dy)
+            if best is None or shift < best:
+                best = shift
+    if best is None:
+        return None
+    return {"shift": round(best, 3)}
+
+
+def jarring(jump):
+    """True / False for a face_jump result, None when nothing was measured."""
+    if not jump:
+        return None
+    return bool(jump["shift"] >= JUMP_CUT_JAR_SHIFT - 1e-9)
+
+
+def _sample_faces(index, lo, hi, near):
+    """Face boxes of the index spatial sample nearest ``near`` inside
+    [lo, hi] (source seconds, one kept segment), or None."""
+    best = None
+    for s in ((index or {}).get("spatial") or {}).get("samples") or []:
+        try:
+            t = float(s["t"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if lo - 1e-6 <= t <= hi + 1e-6 and (
+                best is None or abs(t - near) < abs(best[0] - near)):
+            best = (t, s.get("faces") or [])
+    if best is None:
+        return None
+    return sorted((f for f in best[1] if f and len(f) == 4),
+                  key=lambda f: -(f[2] - f[0]) * (f[3] - f[1]))
+
+
+def _judge_jumps(rows, index, measure, fps):
+    """Fill each row's "jump" / "jarring" from face evidence either side of
+    its cut: real frames (``measure(src_t)`` -> boxes or None) for the
+    JUMP_CUT_MEASURE_MAX rows that skip the most source, the index's samples
+    otherwise. Drops the private source-span keys."""
+    dt = 0.5 / fps
+    order = sorted(range(len(rows)), key=lambda k: -rows[k]["skip"])
+    measured = set(order[:JUMP_CUT_MEASURE_MAX]) if measure else set()
+    for k, r in enumerate(rows):
+        (a0, e0), (s1, b1) = r.pop("_before"), r.pop("_after")
+        fb = fa = None
+        if k in measured:
+            try:
+                fb, fa = measure(e0 - dt), measure(s1 + dt)
+            except Exception:  # noqa: BLE001 — a measurement never fails the audit
+                fb = fa = None
+        if fb is None:
+            fb = _sample_faces(index, max(a0, e0 - JUMP_CUT_FACE_NEAR_S), e0, e0)
+        if fa is None:
+            fa = _sample_faces(index, s1, min(b1, s1 + JUMP_CUT_FACE_NEAR_S), s1)
+        r["jump"] = face_jump(fb, fa) if fb and fa else None
+        r["jarring"] = jarring(r["jump"])
+    return rows
+
+
+def uncovered_jump_cuts(edl, index, tl, fps=None, measure=None):
     """Jump cuts the picture leaves bare, in programme order:
-    [{"t", "before", "after", "fix"}] (before/after = (zoom, cx, cy)).
+    [{"t", "before", "after", "fix", "skip", "jump", "jarring"}]
+    (before/after = (zoom, cx, cy); skip = source seconds the cut removes;
+    jump = face_jump across it or None; jarring = True/False/None).
+
+    A bare jump cut is FINE by default — this lists them so the critic can
+    name the few that are genuinely jarring (``jarring``), never so every cut
+    gets a zoom. ``measure(src_t)`` -> face boxes on that exact source frame
+    (or None) supplies the evidence; the index's spatial samples near the
+    cut stand in where it cannot.
 
     A jump cut is a keep join that skips source time with no insert between
     and — when the index has shots — the same shot on both sides (a camera
@@ -609,12 +749,15 @@ def uncovered_jump_cuts(edl, index, tl, fps=None):
         if scale >= JUMP_CUT_MIN_SCALE - 1e-6 or \
                 shift >= JUMP_CUT_MIN_SHIFT - 1e-6:
             continue
+        span = {"skip": round(s1 - e0, 2),
+                "_before": (float(segs[i][0]), e0),
+                "_after": (s1, float(segs[i + 1][1]))}
         if released_at is not None and abs(released_at - c) < 1e-3:
             # The previous fix's punch releases back to the wide here.
             released_at = None
             found.append({"t": round(c, 2), "before": zb, "after": za,
                           "fix": "covered by the punch above releasing "
-                                 "to the wide here"})
+                                 "to the wide here", **span})
             continue
         released_at = None
         nxt = next((x for x in cuts if x > c + 0.2), None)
@@ -650,8 +793,11 @@ def uncovered_jump_cuts(edl, index, tl, fps=None):
             # shrink the step, so that keeps the general line.
             weak = None
             if min(zb[0], za[0]) < 1.02:
+                # (a beat pulse is a rhythm device, not a cover: never
+                # named as a twitch)
                 weak = next((z for z in zooms if z.get("id") in edge
-                             and (z.get("mode") or "punch") != "shake"
+                             and (z.get("mode") or "punch")
+                             not in ("shake", "pulse")
                              and _num(z.get("strength"), 0.25)
                              < JUMP_CUT_FIX_STRENGTH - 1e-6), None)
             st = (JUMP_CUT_FIX_STRENGTH if room is None
@@ -665,35 +811,61 @@ def uncovered_jump_cuts(edl, index, tl, fps=None):
                        f"{za[0]:.2f}x ({scale * 100:.0f}%){who} — make that "
                        "step ≥8%, or release to the wide on the cut")
         found.append({"t": round(c, 2), "before": zb, "after": za,
-                      "fix": fix})
-    return found
+                      "fix": fix, **span})
+    return _judge_jumps(found, index, measure, fps)
 
 
 def jump_cut_line(bare):
-    """The advisory sentence for uncovered_jump_cuts' rows, or ''."""
-    if not bare:
-        return ""
-    groups = []                         # [[times], fix] in order
+    """The advisory sentence for uncovered_jump_cuts' rows, or ''.
+
+    A bare jump cut is fine and goes unmentioned. Two kinds of row are worth
+    a note: a cut where the speaker's head measurably jumps (``jarring``),
+    named with the editor's options — never a prescribed zoom — and a zoom
+    already sitting on a cut that steps the framing too little to read as a
+    move (it reads as a twitch), which is better removed."""
+    weak = []
     for r in bare:
-        if groups and groups[-1][1] == r["fix"]:
-            groups[-1][0].append(r["t"])
-        else:
-            groups.append([[r["t"]], r["fix"]])
-    head = groups[:JUMP_CUT_LIST]
-    more = sum(len(g[0]) for g in groups[JUMP_CUT_LIST:])
-    return (f"{len(bare)} jump cut{'s' if len(bare) != 1 else ''} inside one "
-            "take keep the same framing on both sides (no ≥8% scale step or "
-            "crop move). That is FINE by default: zooms are optional, never "
-            "a rule, and a camera that moves on every cut looks childish — "
-            "leave these bare unless one pops distractingly on a key line, "
-            "and cover only THAT one (a 5% punch reads as no change): "
-            + "; ".join(", ".join(f"{t:g}s" for t in ts) + f" — {fix}"
-                        for ts, fix in head)
-            + (f"; (+{more} more)" if more else "") + ".")
+        m = re.match(r"zoom (\S+) steps the framing only", r.get("fix") or "")
+        if m and m.group(1) not in weak:
+            weak.append(m.group(1))
+    jar = [r for r in bare if r.get("jarring")]
+    parts = []
+    if jar:
+        head = jar[:JUMP_CUT_LIST]
+        more = len(jar) - len(head)
+
+        def where(r):
+            return (f"{r['t']:g}s (the head jumps {r['jump']['shift']:.1f} "
+                    "face-widths)")
+        parts.append(
+            f"{len(jar)} jump cut{'s' if len(jar) != 1 else ''} where the "
+            "speaker's head visibly jumps: "
+            + ", ".join(where(r) for r in head)
+            + (f" (+{more} more)" if more else "")
+            + ". A bare jump cut is fine by default and zooms are optional, "
+            "never a rule: only where one of these is genuinely jarring on a "
+            "key line, the options are to leave it, cover it with B-roll or "
+            "a cutaway, or change the framing on that cut (a crop re-aim, or "
+            "a step of at least ~8% held to the next cut) — never a zoom on "
+            "every cut")
+    if weak:
+        one = len(weak) == 1
+        parts.append(
+            f"zoom{'' if one else 's'} {', '.join(weak)} step"
+            f"{'s' if one else ''} the framing less than ~8% at a jump cut, "
+            "which reads as a twitch rather than a move: remove "
+            f"{'it' if one else 'them'} (a bare cut is fine), or make the "
+            "step ≥8% only where the cut is genuinely jarring")
+    return "; ".join(parts) + ("." if parts else "")
 
 
-def critique(edl, index, tl, src_w=None, src_h=None, user_asked=""):
+def critique(edl, index, tl, src_w=None, src_h=None, user_asked="",
+             measure=None):
     """Craft findings for a rendered EDL. Returns a list of one-line strings.
+
+    ``measure(src_t)`` -> face boxes on that exact source frame (or None) is
+    optional evidence for the jump-cut note (uncovered_jump_cuts); without
+    it the index's face samples are used.
 
     `user_asked` is the user's own message for this turn, lowercased by the
     caller or not — it is only ever used to SUPPRESS a finding, never to raise
@@ -747,9 +919,10 @@ def critique(edl, index, tl, src_w=None, src_h=None, user_asked=""):
     if out_dur > 0 and len(zooms) > max(2, int(out_dur / limits["zoom_per_s"])):
         add(f"{len(zooms)} zooms across {out_dur:.0f}s is roughly one every "
             f"{out_dur / max(1, len(zooms)):.1f}s — when the frame never "
-            "settles, no single move reads as emphasis. Keep the moves that "
-            "land on sentence turns, jump cuts and payoffs, and let the "
-            "frame hold between them.")
+            "settles, no single move reads as emphasis. Zooms are optional, "
+            "never a rule: keep only the moves whose reason you can name (the "
+            "payoff, the word the story turns on) and let the frame hold "
+            "between them — fewer is usually better.")
     # A push that lands ON a cut is not fighting the one before it: the cut
     # resets the eye, and cut-plus-punch is a deliberate, standard move.
     # Round 75: without this exemption, a scene-3 message zoom ending at
@@ -795,22 +968,25 @@ def critique(edl, index, tl, src_w=None, src_h=None, user_asked=""):
             s, m = next(iter(shapes))
             add(f"all {len(zooms)} zooms are the identical {int(s * 100)}% "
                 f"'{m}' — repetition with no variation reads as an automated "
-                "pass, not an edit. Vary strength and mode (a slow push_in "
-                "under a line, one hard punch on the peak).")
+                "pass, not an edit. Keep only the moves a moment earns (zooms "
+                "are optional, never a rule) and vary those (a slow push_in "
+                "under a line that builds, one punch on the peak).")
 
-    # ── jump cuts the framing leaves bare ────────────────────────────────
-    # The cut-hygiene judges (Oct 2026): a jump cut inside one take with no
-    # framing change of at least ~8% (or a crop move) across it pops the
-    # head in place. Named one by one, each with a possible fix — advisory
-    # only: the owner wants zooms optional, never a rule.
+    # ── jump cuts ────────────────────────────────────────────────────────
+    # A bare jump cut is the accepted grammar of a talking-head short and is
+    # never a defect (owner, Oct 10 2026: zooms are optional, never a rule).
+    # Only a cut where the speaker's head measurably jumps is named, with the
+    # editor's options, and a zoom too small to read as a move is named for
+    # removal (jump_cut_line).
     if not any(k in ask for k in ("no zoom", "without zoom", "no punch",
                                   "no camera move", "keep the jump cut")):
         try:
-            bare = uncovered_jump_cuts(edl, index, tl)
+            line = jump_cut_line(
+                uncovered_jump_cuts(edl, index, tl, measure=measure))
         except Exception:
-            bare = []
-        if bare:
-            add(jump_cut_line(bare))
+            line = ""
+        if line:
+            add(line)
 
     # ── junction effects ─────────────────────────────────────────────────
     trans = fx.get("transition") or None
@@ -868,9 +1044,18 @@ def critique(edl, index, tl, src_w=None, src_h=None, user_asked=""):
     if out_dur > 0 and len(sound_events) > max(
             3, int(out_dur / limits["sfx_per_s"])):
         add(f"{len(sound_events)} sound events in {out_dur:.0f}s — accents "
-            "stop being accents when they never stop. Tie each sound to an "
-            "authored visual event (a graphic landing, a punch, a cut, a "
-            "reveal) and drop the ones that are not.")
+            "stop being accents when they never stop. Sound effects are "
+            "optional, never a rule: keep only the sounds whose on-screen "
+            "event you can name (a graphic landing, a real section change, "
+            "the payoff, a real-world action shown) and drop the rest — zero "
+            "is a fine answer.")
+    repeats = _sfx_repeats(sfx)
+    if repeats:
+        a, b = repeats[0]
+        add(f"the same sound plays twice {sfx_time(b) - sfx_time(a):.1f}s "
+            f"apart (at {sfx_time(a):.1f}s and {sfx_time(b):.1f}s) — inside "
+            f"~{SFX_REPEAT_S:g}s a repeat reads as a pattern, not an accent. "
+            "Keep one, or let parallel beats go silent together.")
     stacked = [(a, b) for a, b in zip(sfx, sfx[1:]) if sfx_muddy_pair(a, b)]
     if stacked:
         a, b = stacked[0]
@@ -1084,34 +1269,37 @@ def critique(edl, index, tl, src_w=None, src_h=None, user_asked=""):
                     "subject or fits the whole frame in over a blurred "
                     "backdrop.")
 
-    # ── too LITTLE design: flat, static, silent delivery (reels) ─────────
+    # ── too LITTLE design: a captioned plate (reels) ─────────────────────
     # Every rule above flags too much. The owner's own shorts failed the
-    # other way: a clean crop with captions, no camera move, no graphic and
-    # a dry mix (audited at 2.6/10 against 7.5 for the reference reels).
-    # Advisory like the rest; an explicit ask for static/silent wins.
+    # other way: a clean crop with captions and nothing designed on it
+    # (audited at 2.6/10 against 7.5 for the reference reels). What was
+    # missing is design — a hook title, a graphic on the turn, a cutaway —
+    # never a zoom or a sound (owner, Oct 10 2026: they are optional, never
+    # rules), so a zoom neither clears this note nor is ever its fix.
+    # Advisory like the rest; an explicit ask for static/minimal wins.
     if fmt["reel"] and speech_led and out_dur >= 20:
         aims = {(sp.get("x"), sp.get("y"))
                 for sp in frame.get("focus_track") or []
                 if isinstance(sp, dict)}
-        picture_moves = bool(
-            zooms or fx.get("frame_shifts") or len(aims) > 1 or trans
+        designed = bool(
+            fx.get("frame_shifts") or len(aims) > 1 or trans
             or edl.get("inserts") or edl.get("overlays") or texts
             or edl.get("vectors") or fx.get("picture_cards")
             or _motion_moments(edl, out_dur)
             or any(s.get("start") is not None for s in stylize))
-        flat = not picture_moves and not any(w in ask for w in (
+        flat = not designed and not any(w in ask for w in (
             "static", "no zoom", "no motion", "no graphic", "minimal",
             "keep it simple"))
         # A dry mix is legitimate: music is never the agent's choice (the
         # user supplies or asks for it) and zero SFX is fine when nothing on
-        # screen earns one. Only a frame that never moves is flagged.
+        # screen earns one.
         if flat:
-            add(f"static picture: {out_dur:.0f}s with no camera move, "
-                "cutaway or graphic — the frame never moves, so nothing "
-                "marks the sentence turns or the payoff. Add one hook "
-                "interrupt in the first two seconds and a graphic or a "
-                "reframe on the real turns (a zoom only where a moment "
-                "clearly earns one — never as filler).")
+            add(f"static picture: {out_dur:.0f}s of captions only — no hook "
+                "title, graphic, cutaway or layout change marks the hook, the "
+                "sentence turns or the payoff. Add a hook interrupt (a hook "
+                "title or word slam) in the first two seconds and a graphic "
+                "or cutaway on the real turns. A steady frame is fine: a zoom "
+                "or a sound is never the missing piece.")
 
     # ── the RATE of everything, together ─────────────────────────────────
     # Every rule above bounds ONE category, and a viewer does not experience
