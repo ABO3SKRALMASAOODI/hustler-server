@@ -28946,6 +28946,8 @@ TOOLS = {
         "and typography path; draft is the inexpensive 480px preview. The Studio attaches "
         "the complete preview. wait_for_job observes pending work; call render_preview again "
         "to review its existing result. MCP clients can retrieve it with watch_video or download_url. "
+        "On a short its VERIFICATION ADVISORIES carry an EARN ITS PLACE note (hook, graphic "
+        "budget, payoff hold), advisory: act on what hurts this short, never with a zoom or a sound. "
         "A complete render carries a PICTURE CHECK measured on its own frames: a face within ~6% "
         "of the frame's (or its card's) edge, a single-frame jump or pop that is not on a cut, a "
         "missing end card or watermark. Repair each one or keep it deliberately and say why.",

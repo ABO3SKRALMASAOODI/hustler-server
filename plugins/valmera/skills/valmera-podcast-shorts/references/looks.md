@@ -32,14 +32,16 @@ The coordinator assigns one Look and one structure per short. The editor reads
 | Target | Value |
 | --- | --- |
 | Hook interrupt | a designed visual event at 0.0-0.6 s (`hook_title`, `word_slam` or a card reveal; a punch-in or landing zoom only when the opening earns it) — no reflexive opening whoosh; a sound only when the title has a real entrance that earns one |
-| Hook as text | the hook line complete and readable on screen by 1.5 s (about 5% of frame height or more, not a slow typewriter); it poses the tension, never states or quotes the payoff, never contradicts the words under it |
-| Speaker identity | each speaker named within ~3 s of first appearing (`lower_third` or the headline band: verified name plus role, venue or year) |
-| Meaning | each graphic means what the speaker means: a tick is "achieved" (broken promises and myths take `mark='cross'`), slams go on information-bearing words, never on clichés, and no graphic only recaps an earlier one |
-| Graphic choice | contrast punchlines as a two-beat swap (setup words, then payoff words, each on its onset); counters only for counted or growing quantities and landing ON the number; list items share one type role; zones rotate (above head, beside face, chest, header) and stay off the face; at least one hero word behind the subject when the background allows; no caption-only stretch over ~3 s in the last third |
+| Hook as text | the hook line complete and readable on screen by 1.5 s (about 5% of frame height or more, not a slow typewriter), PAYOFF-LED: the clip's strongest line or statistic as a specific claim the ending completes ("They promised us flying cars…" before "…all we got was 140 characters"), never a generic question ("WHERE DID PROGRESS GO?"), never the punchline itself, never a word a later graphic slams (GARBAGE in the hook and again as the slam at 13 s lands flat), never contradicting the words under it |
+| Hook frame | frame 0 shows the speaker facing camera on a clean word onset (no tail of the previous word, no "if somebody was like,"); no jump cut inside the first 1.5 s, at most one in the first 3 s. A 1.5-2 s cold-open tease of the punchline only when it exists as its own clip asset (kept footage plays in source order) |
+| Speaker identity | each speaker named within ~3 s of first appearing, in the hook's kicker or the headline band (verified name plus role, venue or year); a famous speaker needs no broadcast `lower_third`, which stacks a second text system on the chest |
+| Meaning | each graphic means what the speaker means: a tick is "achieved" (broken promises and myths take `mark='cross'`), slams go on information-bearing words, never on clichés, and no graphic only recaps an earlier one. Proper nouns and products are identified ("Apple Lisa, 1983" as a label, the product shown when an image exists), never set as "Lisa:" with a colon |
+| Graphic budget (earn its place) | every graphic adds what the captions cannot: a number, a contrast, an identification, evidence, an image. About one hero graphic per 6-8 s at most, on screen under ~50% of the runtime (the persistent headline band is layout), at most 3 type roles and one accent. Never a lockup or typewriter of the words being heard; a spoken list gets semantic visual inserts (a real photo or clip per item, 0.3-0.6 s, via `search_stock`/`research_broll` into `image_card`, `photo_stack` or a cover overlay) or one big word per item, never rows of text. The render's EARN ITS PLACE advisory names what breaks this |
+| Graphic choice | contrast punchlines as a two-beat swap (setup words, then payoff words, each on its onset); counters only for counted or growing quantities and landing ON the number; zones rotate (above head, beside face, chest, header) and stay off the face; at least one hero word behind the subject when the background allows; no caption-only stretch over ~3 s in the last third (a kicker or setup beat that adds information, or a cutaway) |
 | Visual change | something changes every 0.3-0.6 s (caption cue, graphic, cut); a structural event (cut, graphic, B-roll) every 1.5-2.5 s. Zooms and sounds never fill this: they are optional, only where a moment earns them |
-| Hero moments | 2-4 designed beats on exact word cues (Kinetic Poster, Mono Noir, Creator Glow: 3-6) |
-| Payoff | marked (type first; a sound or a camera move only when it earns one; the owner's song's button when music is on) and held 1.0-1.5 s before the editorial end |
-| Picture area | full-bleed (1.0) when the face crop needs at most 2x upscale; otherwise a card on a designed backdrop covering at least 0.54 of the canvas (see Card geometry). Only Editorial Serif's square card may go down to 0.48 (gum-02), because its field carries the type |
+| Hero moments | 2-4 designed beats on exact word cues (Kinetic Poster, Mono Noir, Creator Glow: 3-5), always inside the graphic budget |
+| Payoff | the largest accented lockup in the short, number and noun together ("140 / CHARACTERS"), rhyming with an earlier setup device where one exists (1960s vs TODAY pays off as FLYING CARS vs 140 CHARACTERS); type first, a sound or a camera move only when it earns one, the owner's song's button when music is on; held 0.6-1.5 s after the last word before the end card; a reaction button 1.0-1.5 s or none |
+| Picture area | full-bleed (1.0) when the face crop needs at most 2x upscale and the plate is clean; otherwise a card on a designed backdrop covering at least 0.54 of the canvas (see Card geometry). A busy or washed-out plate (a bright projector screen, a cluttered set) commits to a frame — a card on a textured canvas or a letterbox with a headline band — and a grade: a taste call per short, not a default. Only Editorial Serif's square card may go down to 0.48 (gum-02), because its field carries the type |
 | Sound | optional: zero by default, at most 1-2 approved library sounds on structural on-screen moments, each with a visual partner, none on a payoff word's onset, no literal puns, never the same sound within ~3 s, levelled by the tool (see Sound); no digital silence longer than 0.3 s except a deliberate 50-280 ms stop-down before a reveal or a montage passage flagged for the owner's song (see Sound without music) |
 | Length | final 15-45 s including the 5 s native ending, so the editorial program is 10-40 s (montage editorial at most 25 s) |
 
@@ -62,7 +64,8 @@ The coordinator assigns one Look and one structure per short. The editor reads
   counter where its words end; the reply NOTEs any words only the sound
   would carry. Kickers and rows quote the transcript word for word.
 - One accent colour for the whole short, passed to every graphic's `accent`;
-  at most about 4 template families per short, varied across the batch.
+  at most 3 type roles (backbone, accent role, numbers); at most about 4
+  template families per short, varied across the batch.
 - Over a bright shirt or wall, raise the template's `scrim` (or move the type
   to darker space); white type on a white shirt is a defect.
 - Safe area on 9:16: x 60-1020 px, y 8-80% of height. Keep the native corner
@@ -262,6 +265,10 @@ every caption or cut, or the same sound twice within ~3 s; a zoom or sound
 you cannot name a reason for; music the owner
 did not supply; any change to the corner mark or the native end card; a
 graphic over the face for more than 1 s; a headline that spoils the payoff;
+a generic question hook, or a hook that shows a later graphic's hero word;
+a graphic that only restates the caption, or a spoken list set as rows of
+text; a broadcast lower third over a famous face; a payoff number without
+its noun;
 a number, quote, notification, chat or post that the source does not
 support; another creator's logo, footage or identity.
 
@@ -423,8 +430,8 @@ A `custom-<slug>` Look is allowed when the brief spells out every field below.
   the payoff word after a 100-250 ms stop-down, `impact_1` on the payoff;
   slams land silent. At most 2 sounds per short, zero by default.
 - **Music (owner's song only, when on):** -18 dB ducked, with the stop-down.
-- **Targets:** change every 0.25-0.45 s; hook at or before 0.3 s; 4-6 hero moments.
-- **Golden traits:** type lands on almost every stressed word (silently; sound only on the few that earn it), and the payoff is the biggest thing in the short.
+- **Targets:** change every 0.25-0.45 s (the `stack`/`pop` captions perform every stressed word); hook at or before 0.3 s; 3-5 hero moments inside the graphic budget.
+- **Golden traits:** the captions perform almost every stressed word (silently; sound only on the few that earn it), the hero graphics add information, and the payoff is the biggest thing in the short.
 
 ### Cinematic Doc
 

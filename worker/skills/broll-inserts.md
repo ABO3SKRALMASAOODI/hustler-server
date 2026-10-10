@@ -14,6 +14,7 @@ THE CHOICE: does the voice keep going?
 - B-ROLL / CUTAWAY (the most human editing move): the speaker mentions something concrete — SHOW it while their voice keeps going. add_overlay(fit='cover', start, duration_s 2-6) switches the PICTURE while the program's audio and captions keep running. Placement: get_kept_transcript gives each sentence's PROGRAM time — start the cover ON the words that mention the thing.
 - SPLICE (insert_media): PAUSES the program and adds time. Right for "add this clip at the end", "put it between the scenes", a beat between sentences.
 - Taste: map every proposed cutaway to a narrative purpose (proof, context, contrast, scale, time, place, payoff). On a reel, every concrete noun is a candidate for evidence; density follows the story, not a quota. Never cover a punchline, admission or reaction that earns a face-on delivery, and never use generic wallpaper merely because a search result exists.
+- ENUMERATIONS AND NAMED THINGS ARE THE MOST SHOWABLE MOMENTS: a spoken list ("rockets, supersonic aviation, underwater cities, new medicines") gets one semantic visual insert per item — a real photo or clip, 0.3–0.6 s each, graded to match, as quick cover overlays or an `image_card` / `photo_stack` run — never a stack of the same words as text. A named product or place gets an identifying label ("Apple Lisa, 1983") and, when a real image exists, a 1.5–2 s insert of it. When a speaker reads from a screen or document, crop to the highlighted sentence and name its source.
 
 DESIGNED ENTRANCES AND MOVING STILLS (short-form):
 - Enter B-roll on the word, and when the cutaway marks a turn give it a designed junction — a whip or zoom_punch, a `light_leak` or `flash_transition` motion graphic — with a library whoosh or swish peaking on the cut only when that turn earns a sound (sound effects are optional, never rules; most entries stay silent; read transitions). Plain hard cuts are right inside a fast evidence run.
@@ -46,6 +47,7 @@ SOURCING ORDER for b-roll: the user's uploads first (list_assets), then whicheve
 ## Common failure modes
 
 - First-result, irrelevant, repeated, watermarked, corporate-cheap or palette-incompatible footage.
+- A spoken list or a named product left as typography when real imagery of it exists.
 - Covering a face-dependent payoff, using the wrong clock, or shipping bad entry/exit junctions.
 - Frozen stills, a turn into B-roll with no designed junction, or a sound on every cutaway (whoosh wars).
 

@@ -50,7 +50,10 @@ wording. Preserve the user's requested mood, aspect, music and identity.
 
 LAYOUTS FOR 9:16:
 - **Face-aware full-bleed** (the default for modern 16:9 podcasts and
-  talking heads): `auto_reframe` or `set_frame` crop with a shot-aware focus
+  talking heads when the plate is clean; a busy or washed-out plate — a
+  bright projector screen, a cluttered set — reads better as a card on a
+  textured canvas or a letterbox with a headline band, with a committed
+  grade, a taste call per short): `auto_reframe` or `set_frame` crop with a shot-aware focus
   track so each speaker's face sits in the upper-middle with the face around
   28–40% of the frame height; type lives in the clear space above, beside or
   below the face. `auto_reframe` also follows a speaker who leans or steps
@@ -122,9 +125,12 @@ LEGIBILITY:
 NATIVE TOOLS THAT REMAIN USEFUL:
 - **Speaker-first headline**: `set_editorial_graphic(kind="headline",
   speaker="…", text="…")` for a verified speaker and a faithful claim. It
-  holds still and keeps dialogue captions. On a reel it should pose the
-  question, never the payoff, and sit inside the designed layout rather than
-  above a small card on black. It does not yield to other graphics: where
+  holds still and keeps dialogue captions. On a reel it is a specific
+  third-person claim from the clip's strongest line that the payoff
+  completes — never a generic question, never the punchline or a word a
+  later graphic slams — and sits inside the designed layout rather than
+  above a small card on black. It also carries the speaker's name, so a
+  broadcast lower third is unnecessary. It does not yield to other graphics: where
   hero lockups share the band above a card or letterbox, use the persistent
   `headline` motion template instead, which steps aside for them.
 - **A phrase built in place**: `set_typography_scene` measures the complete
@@ -160,7 +166,8 @@ timing.
 ## Common failure modes
 
 Small card on a black void; static headline bars that never change; tiny
-captions shrunk to avoid collisions; generic PROGRESS/FUTURE headings; the
+captions shrunk to avoid collisions; generic PROGRESS/FUTURE headings; a
+lockup that re-typesets the transcript instead of adding information; the
 same panel on every noun; rounded cards so small the face disappears; two or
 three unrelated type systems; words re-centering as a phrase builds; an
 entrance replayed at every cue; type across the face or in the UI band;

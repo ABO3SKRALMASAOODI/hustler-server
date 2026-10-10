@@ -531,3 +531,58 @@ def test_odd_data_never_raises():
 def test_an_edl_without_graphics_or_words_draws_no_graphic_notes():
     notes = edit_review.review(_edl(), {})
     assert notes == []
+
+
+# ── 9. the guidance says the same thing on every surface ─────────────────
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_PLUGIN = os.path.join(_ROOT, "plugins", "valmera", "skills",
+                       "valmera-podcast-shorts")
+
+
+def _flat(text):
+    return " ".join(text.replace("–", "-").split()).lower()
+
+
+def _read(*parts):
+    with open(os.path.join(*parts), encoding="utf-8") as fh:
+        return _flat(fh.read())
+
+
+def test_worker_skills_plugin_and_core_prompt_carry_the_same_rules():
+    import agent_prompt
+    worker = {name: _flat(agent_prompt.read_skill_text(name))
+              for name in ("short-form-direction", "hooks-retention",
+                           "motion-design", "review", "cutting")}
+    plugin = {rel: _read(_PLUGIN, *rel.split("/"))
+              for rel in ("SKILL.md", "references/looks.md",
+                          "references/editing.md", "references/review.md",
+                          "references/selection.md")}
+    core = _flat(agent_prompt.CORE_PROMPT)
+    sfd, looks = worker["short-form-direction"], plugin["references/looks.md"]
+    for text in (sfd, looks, core, plugin["SKILL.md"]):
+        assert "strongest line or statistic" in text
+        assert "generic question" in text
+        assert "earn" in text and "its place" in text
+        assert "0.6-1.5 s" in text
+    for text in (sfd, looks):
+        assert "never restyle the transcript as a list" in text or \
+            "a spoken list gets semantic visual inserts" in text
+        assert "one big word per item" in text
+        assert "at most 3 type roles" in text and "one accent" in text
+        assert "50% of the runtime" in text
+        assert "apple lisa, 1983" in text
+        assert "taste call" in text
+        assert "lower third" in text or "lower_third" in text
+    assert "150-250 ms" in worker["cutting"]
+    assert "earn its place" in worker["review"]
+    assert "earn its place" in plugin["references/review.md"]
+    # the playbook examples no longer spend the hero word in the hook
+    editing = plugin["references/editing.md"]
+    assert 'hook_title "computers look like *garbage*"' not in editing
+    assert '"why fonts were garbage"' not in editing
+    assert "what is money actually worth" not in plugin["references/selection.md"]
+    # the old "pose the question" hook rule is gone everywhere
+    for text in list(worker.values()) + list(plugin.values()):
+        assert "hook text poses the question" not in text
+        assert "posed as the question or tension" not in text

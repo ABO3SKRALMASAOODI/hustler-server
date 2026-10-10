@@ -11,9 +11,13 @@ makes each of those impossible to miss.
 
 - Open on the strongest intelligible line or frame, with design on it from
   frame one.
+- Write the hook from the payoff: the clip's strongest line or statistic as
+  a specific claim the ending completes, never a generic question, and never
+  a word a later graphic slams.
 - Keep the viewer's eyes moving with purpose: word cues, graphics, B-roll,
-  layout — each bound to what is being said.
-- Never bait without payoff; never spoil the payoff in the hook text.
+  layout — each bound to what is being said, each adding something the
+  captions cannot.
+- Never bait without payoff; never print the punchline in the hook text.
 
 ZOOMS AND SOUND EFFECTS ARE OPTIONAL, NEVER RULES (owner, Oct 2026):
 restraint is the default. Reach for a zoom or a sound only when a specific
@@ -48,10 +52,31 @@ THE HOOK — 0 to 1.5 s:
   same whoosh on every short is a template. At most one library sound sits
   under the opening, only when the title has a real entrance that earns
   one. The speaker is on screen and talking by ~0.3 s.
-- HOOK TEXT by 1.5 s: the hook line (or its sharpest 2–6 words) as designed
-  type, posed as the question or tension — never the answer.
+- HOOK TEXT by 1.5 s, PAYOFF-LED: write it from the clip's strongest line
+  or statistic — a specific third-person claim the ending pays off. A
+  lecture that ends on "…all we got was 140 characters" opens on "They
+  promised us flying cars…" and lets the ending complete it; a study clip
+  leads with its number. Never a generic question ("WHERE DID PROGRESS
+  GO?"): a question works only when it names something specific (a number,
+  a name, a claim). Set the payoff up without printing its punchline.
+- NEVER SPEND A LATER HERO WORD: the hook must not show the word a later
+  graphic slams. GARBAGE in the hook and the same GARBAGE slam at 13 s makes
+  the real moment land as a repeat. Leave the word for the moment it is
+  spoken, or transform the later instance (a quote card with attribution
+  and year, the evidence on screen).
+- COLD OPEN (optional): a 1.5–2 s tease of the punchline before the setup,
+  only when the punchline exists as its own clip asset (`insert_media` at
+  0); kept footage always plays in source order, so otherwise the
+  payoff-led hook text carries the tease.
+- NAME THE SPEAKER in the hook's kicker or the headline band (a verified
+  name, plus the year on archival footage). A broadcast lower third over a
+  famous face is a second text system competing with the hook: skip it.
 - FIRST FRAME is the thumbnail: sharp, composed, designed, never black or
-  half-faded. No fade-in, no logo, no dead air, no non-speaker setup longer
+  half-faded, and the speaker faces camera (not in profile, not mid-blink).
+  The first audio is a clean word onset — never the tail of the previous
+  word or a disfluency ("if somebody was like,") — and the hook plays as
+  one take: no jump cut inside the first 1.5 s, at most one cut in the
+  first 3 s. No fade-in, no logo, no dead air, no non-speaker setup longer
   than ~3 s.
 - SAY THE HOOK BACK in the reply: one clause naming what you opened on.
 
@@ -65,22 +90,32 @@ RHYTHM — the middle:
 - Vary the interval: cluster changes on dense ideas and lists, let a real
   admission or reaction hold on the face with only captions.
 - MIDDLE DISCIPLINE: every sentence earns its place — repetition, hedging,
-  throat-clearing and second takes go (cutting owns the mechanics). A 34 s
-  reel that keeps moving beats a 58 s reel with the same content.
+  throat-clearing, low-information connectors ("it was like a lot of things
+  and", "I think that's kind of a tell that") and second takes go, while
+  sentence boundaries keep a 150–250 ms breath (cutting owns the
+  mechanics). No stretch over ~3 s without a new idea. A 34 s reel that
+  keeps moving beats a 58 s reel with the same content.
 
 HERO MOMENTS — 2 to 4 per reel, on exact words: the claim, the number, the
-turn, the payoff. Each gets one leader graphic; a camera move or a sound on
-the same frame only when that landing clearly earns it, within the sparse
-budget (motion-design has the templates and timing; zooms and audio the
-rules for the optional camera and sound).
+turn, the payoff. Each gets one leader graphic that EARNS ITS PLACE — it
+adds what the captions cannot (a number, a contrast, an identification,
+evidence, an image), at most about one per 6–8 s, never a re-typeset of
+the words being heard (short-form-direction has the budget). A camera move
+or a sound on the same frame only when that landing clearly earns it,
+within the sparse budget (motion-design has the templates and timing;
+zooms and audio the rules for the optional camera and sound).
 
 OPEN LOOPS: a hook that asks ("this mistake cost me $40k") needs its answer
 to arrive. Choose when to answer for tension and comprehension; never distort
 the speaker's meaning.
 
-THE PAYOFF: hold it 1.0–1.5 s with an accent — a scale-in, a colour change,
-the short's one impact, or the music's button when the user supplied music —
-instead of cutting away on the last syllable.
+THE PAYOFF: the largest accented lockup in the short, the number and its
+noun together ("140 / CHARACTERS", never a bare 140), face-safe. Where the
+story set up a device earlier, rhyme with it (a 1960s-vs-TODAY split pays
+off as FLYING CARS vs 140 CHARACTERS). Hold 0.6–1.5 s after the last word
+before the end card instead of cutting away on the last syllable; a sound
+or a camera move joins only when the landing clearly earns one, and a
+reaction button gets 1.0–1.5 s or is left out.
 
 CTA AS NATIVE UI: after the payoff has landed, in the last 2–4 s, use
 `comment_cta` (a typed comment keyword), `follow_cta` (follow → following)
@@ -100,7 +135,11 @@ than forcing an abrupt cut.
 
 - First visual event after 1 s; a silent or black opening; a long setup by
   someone other than the speaker.
-- Hook text that prints the payoff; no hook text at all.
+- Hook text that prints the payoff, a generic question, or a word a later
+  graphic slams; no hook text at all.
+- An opening on a word fragment, a disfluency, a jump cut or a profile.
+- A payoff number without its noun, or under 0.6 s of air before the end
+  card.
 - Long static stretches between graphics; or changes on a timer that ignore
   what is being said.
 - Payoff cut off before it lands; CTA covering the payoff; dead tail.
@@ -108,14 +147,18 @@ than forcing an abrupt cut.
 ## Verification procedure
 
 Watch the opening without assumed context and measure: first visual event
-time, hook text visible by 1.5 s, speaker on screen by ~0.3 s. Scan the
-program for holds over ~2 s without design. Trace each escalation to the
-payoff, check the payoff hold, the CTA placement and the loop frame in the
-complete preview.
+time, hook text visible by 1.5 s, speaker on screen and facing camera by
+~0.3 s, no cut in the first 1.5 s. Scan the program for holds over ~2 s
+without design. Trace each escalation to the payoff, check the payoff hold
+(0.6–1.5 s after the last word), the CTA placement and the loop frame in
+the complete preview. Read the render's EARN ITS PLACE advisory: it names a
+generic or spent hook, a fragment opening and a short payoff hold by time
+(advisory: keep if intentional).
 
 ## Repair ladder
 
-Move a clearer promise to the front → add the interrupt and hook text →
+Move a clearer promise to the front → rewrite the hook from the payoff's
+line or statistic → add the interrupt and hook text →
 restore minimum setup → fill dead holds with word cues or a graphic → compress
 sagging beats → protect and accent the payoff → place the CTA after it →
 rescreen from frame one.

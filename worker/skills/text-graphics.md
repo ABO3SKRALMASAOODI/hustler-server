@@ -106,6 +106,10 @@ caption motion looks plus hero motion graphics usually read stronger.
 
 - Cheap mixed templates or three unrelated type systems; too many words or
   levels; type across a face or in the UI band.
+- Type that only re-typesets the words being heard (a spoken list as rows,
+  a typewriter of the line just said) instead of adding a number, a
+  contrast, an identification, evidence or an image; a product name set
+  with a colon ("Lisa:") so it reads as a dialogue label.
 - Arrows with no visible target; invented progress or numbers.
 - Panel and text moving independently; paths that leave the frame.
 - Small behind-subject text the person never crosses.
