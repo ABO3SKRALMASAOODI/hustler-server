@@ -7,6 +7,7 @@ endpoints compute each section in its own try (R8): a failed section is
 reported in meta.section_errors and marked status 'error', and the rest of
 the page still renders.
 """
+import dataclasses
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -319,6 +320,15 @@ def _visitor_status(period):
     return "ok", None
 
 
+def _tracked_part(period):
+    """The part of `period` since visits were tracked (None if none)."""
+    if period.end is not None and period.end <= defs.VISITS_SINCE:
+        return None
+    if period.start is not None and period.start >= defs.VISITS_SINCE:
+        return period
+    return dataclasses.replace(period, start=defs.VISITS_SINCE)
+
+
 def _signed_in_known(period):
     """Visits say whether the person was signed in only since the tracker
     release that also sends `interacted` (migration 031 + frontend). Before
@@ -420,10 +430,23 @@ def summary():
             if sg["status"] == "error" or pp["status"] == "error":
                 return registry.error_metric("signup_rate")
             status, note = _visitor_status(period)
-            value = defs.pct(sg["value"], pp["value"]) \
-                if pp["value"] else None
-            prev = defs.pct(sg["previous"], pp["previous"]) \
-                if pp.get("previous") else None
+            # People are only counted since visits were tracked, so the
+            # signups on top of the fraction must cover the same time. Over
+            # a period that starts earlier the rate is computed over the
+            # tracked part only (never 357%).
+            value, prev = None, None
+            if status == "partial":
+                tracked = _tracked_part(period)
+                value = defs.pct(signups_count(cur, tracked), pp["value"]) \
+                    if pp["value"] else None
+                note = ("Signups since 3 Oct ÷ people since 3 Oct: visitors "
+                        "are counted from 3 Oct 2026, so earlier signups are "
+                        "left out of this rate.")
+            elif status == "ok":
+                value = defs.pct(sg["value"], pp["value"]) \
+                    if pp["value"] else None
+                prev = defs.pct(sg["previous"], pp["previous"]) \
+                    if pp.get("previous") else None
             if value is None and status == "ok":
                 status, note = "unavailable", "No people visited yet."
             return registry.metric("signup_rate", value, prev, status=status,
@@ -680,8 +703,9 @@ def acquisition_pages():
     limit = _int_arg("limit", 30, 1, 100)
 
     def compute():
-        return {"data": {"rows": channels_report.landing_pages(
-            db.cursor(), period, limit)}, "errors": []}
+        return {"data": channels_report.landing_pages(db.cursor(), period,
+                                                      limit),
+                "errors": []}
 
     value, computed_at, age = _cached("pages", dict(_args()), compute)
     return _respond(value["data"], period, computed_at=computed_at,
@@ -913,7 +937,8 @@ def revenue():
                     "stopped_paying", None, status="unavailable",
                     note=("Counted from daily billing snapshots, which start "
                           + (f"on {ranges.day_label(since)}." if since else
-                             "once migration 032 is applied.")))
+                             "with this release's database update. The first "
+                             "number appears the day after.")))
             return registry.metric("stopped_paying", v,
                                    money.stopped_paying(cur, comp))
         tiles["stopped_paying"] = s.run("stopped_paying", stopped_tile,

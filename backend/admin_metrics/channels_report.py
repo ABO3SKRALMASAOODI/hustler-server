@@ -5,6 +5,7 @@ classifier the CRM endpoint uses, so the admin and the CRM can never disagree
 about a label. A signup without a usable source always carries a reason
 (plan §4.4); "unknown" no longer exists.
 """
+import dataclasses
 from statistics import median
 
 import acquisition
@@ -191,6 +192,8 @@ def acquisition_report(cur, period, model="first"):
     people = people_by_channel(cur, period, model) if tracked_people else {}
     classes = visitors.classify(cur, period) if tracked_people else None
     previews = (classes or {}).get("link_preview", 0)
+    rate_people, rate_signups, rate_since = _rate_window(
+        cur, period, model, signups, people)
 
     rows = []
     for key, label in CHANNELS:
@@ -226,8 +229,9 @@ def acquisition_report(cur, period, model="first"):
             "signups": signups_n,
             # A rate needs people and signups measured the same way; "not
             # recorded" signups have no matching people, so it has none.
-            "signup_rate": (defs.pct(signups_n, p)
-                            if p and key != "not_recorded" else None),
+            # Both sides of the rate cover the same time: since sources
+            # were recorded (7 Oct) when the period starts earlier.
+            "signup_rate": _channel_rate(key, rate_signups, rate_people),
             "paying": sum(1 for s in in_channel if s["paid"]),
             "collected_usd": round(sum(defs.usd(s["cents"])
                                        for s in in_channel), 2),
@@ -241,7 +245,40 @@ def acquisition_report(cur, period, model="first"):
     if period.is_all or period.start < defs.SOURCES_SINCE:
         before = before_tracking(signups)
     return {"model": model, "coverage": coverage(signups), "channels": rows,
+            "rate_since": rate_since,
             "told_vs_measured": told, "before_tracking": before}
+
+
+def _rate_window(cur, period, model, signups, people):
+    """(people by channel, signups, since) to compute signup rates from.
+
+    Visitors are classified from 3 Oct but signup sources only from 7 Oct
+    12:34 UTC. Over a period that starts earlier, a rate of all its signups
+    over all its people would mix two windows, so rates use the part since
+    sources were recorded (`since`, ISO), or are unavailable (None) when the
+    period ends before that.
+    """
+    if period.end is not None and period.end <= defs.SOURCES_SINCE:
+        return None, [], None
+    if not period.is_all and period.start >= defs.SOURCES_SINCE:
+        return people, signups, None
+    window = dataclasses.replace(period, start=defs.SOURCES_SINCE)
+    since = ranges.naive(defs.SOURCES_SINCE)
+    return (people_by_channel(cur, window, model),
+            [s for s in signups if s["created_at"] >= since],
+            defs.iso(defs.SOURCES_SINCE))
+
+
+def _channel_rate(key, signups, people):
+    """A rate needs people and signups measured the same way; "not recorded"
+    signups have no matching people, so it has none."""
+    if people is None or key == "not_recorded":
+        return None
+    p = people.get(key, {}).get("people", 0)
+    if not p:
+        return None
+    n = sum(1 for s in signups if s["touch"]["channel"] == key)
+    return defs.pct(n, p)
 
 
 def _detail_label(channel_key, detail_key):
@@ -311,35 +348,56 @@ def summary_channels(cur, period):
                 "reasons": cov["not_recorded"]}}
 
 
+# Pages inside the product (sign-in, sign-in returns, checkout, account,
+# studio) are where a returning customer arrives, not a landing page: the
+# landing page is a person's first page in the period that is not one of these.
+APP_PAGES = (r"^/(login|register|verify|verify-email|enter-password|"
+             r"google-callback|github-callback|reset-password|change-password|"
+             r"purchase-success|paddle-checkout|checkout|account|studio|cancel"
+             r")(/|$)")
+
+
 def landing_pages(cur, period, limit=30):
-    """Q-PAGES: first page of each person, median active time, later signups."""
+    """Q-PAGES: first page of each person, median active time, later signups.
+
+    Returns {"rows": [...], "app_only_people": n}: people whose pages in the
+    period were all sign-in or app pages are counted apart, not listed.
+    """
     if period.end is not None and period.end <= defs.VISITS_SINCE:
-        return []
+        return {"rows": [], "app_only_people": None}
     extra = """,
-               (array_agg(v.page ORDER BY v.visited_at))[1] AS first_page,
-               min(v.visited_at) AS first_at"""
+               (array_agg(v.page ORDER BY v.visited_at)
+                    FILTER (WHERE v.page !~ %(app_pages)s))[1] AS first_page,
+               min(v.visited_at) FILTER (WHERE v.page !~ %(app_pages)s)
+                   AS first_at"""
     cur.execute(f"""WITH {visitors.browsers_cte(cur, extra_cols=extra)},
         ppl AS (SELECT d.device_id, d.first_page, d.first_at FROM d
                  WHERE {visitors.CLASS_SQL} = 'person'),
         lp AS (SELECT p.device_id, p.first_page, p.first_at,
                       sum(v.active_s) AS active_s
-                 FROM ppl p JOIN v ON v.device_id = p.device_id
-                                  AND v.page = p.first_page
+                 FROM ppl p LEFT JOIN v ON v.device_id = p.device_id
+                                       AND v.page = p.first_page
                 GROUP BY 1, 2, 3)
         SELECT lp.first_page AS page, count(*) AS people,
                percentile_cont(0.5) WITHIN GROUP (ORDER BY lp.active_s)
                    AS active_median_s,
-               count(*) FILTER (WHERE EXISTS (
+               count(*) FILTER (WHERE lp.first_page IS NOT NULL AND EXISTS (
                    SELECT 1 FROM website_signups ws
                      JOIN users u ON u.id = ws.user_id
                     WHERE ws.device_id = lp.device_id
                       AND u.created_at >= lp.first_at
                       AND {defs.customer('u')})) AS signups
-          FROM lp GROUP BY 1 ORDER BY 2 DESC, 1 LIMIT %(limit)s""",
-                visitors.params(cur, period, limit=int(limit)))
-    out = []
+          FROM lp GROUP BY 1
+         ORDER BY (lp.first_page IS NULL) DESC, 2 DESC, 1
+         LIMIT %(limit)s""",
+                visitors.params(cur, period, limit=int(limit) + 1,
+                                app_pages=APP_PAGES))
+    out, app_only = [], 0
     for r in cur.fetchall():
         people = int(r["people"])
+        if r["page"] is None:
+            app_only = people
+            continue
         signups = int(r["signups"])
         med = r["active_median_s"]
         out.append({"page": r["page"], "people": people,
@@ -347,7 +405,7 @@ def landing_pages(cur, period, limit=30):
                     else None,
                     "signups": signups,
                     "signup_share": defs.pct(signups, people)})
-    return out
+    return {"rows": out[:int(limit)], "app_only_people": app_only}
 
 
 def customer_touches(cur, user_ids):

@@ -74,12 +74,17 @@ def day_label(day):
     return f"{day.day} {MONTHS[day.month - 1]}"
 
 
-def span_label(first, last):
+def span_label(first, last, current_year=None):
+    """"6–10 Oct", "28 Sep – 3 Oct"; years are added when the span crosses a
+    year ("6 Sep 2025 – 10 Oct 2026") or lies outside `current_year`."""
+    if first.year != last.year:
+        return f"{day_label(first)} {first.year} – {day_label(last)} {last.year}"
+    year = f" {last.year}" if current_year and last.year != current_year else ""
     if first == last:
-        return day_label(first)
-    if first.year == last.year and first.month == last.month:
-        return f"{first.day}–{last.day} {MONTHS[last.month - 1]}"
-    return f"{day_label(first)} – {day_label(last)}"
+        return day_label(first) + year
+    if first.month == last.month:
+        return f"{first.day}–{last.day} {MONTHS[last.month - 1]}{year}"
+    return f"{day_label(first)} – {day_label(last)}{year}"
 
 
 def week_label(monday):
@@ -221,7 +226,7 @@ def parse(args, default="30d", allow_all=False, now=None):
     if (last - first).days + 1 > MAX_CUSTOM_DAYS:
         raise RangeError(f"Choose at most {MAX_CUSTOM_DAYS} days.")
     return make_period("custom", first, last, now,
-                       label=span_label(first, last))
+                       label=span_label(first, last, today.year))
 
 
 def trailing_days(n, end_day=None, now=None):

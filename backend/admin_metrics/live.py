@@ -8,7 +8,10 @@ from admin_metrics import defs, registry, visitors
 LIVE_WINDOW = "5 minutes"
 
 
-def live(cur):
+def people_now(cur):
+    """Browsers active on a page in the last 5 minutes, without robots, link
+    previews or the owner's devices. One definition for Live and the phone
+    widget's "active now"."""
     ids = visitors.internal_ids(cur)
     refs = list(defs.PREVIEW_REFERRERS)
     cur.execute(f"""
@@ -25,7 +28,12 @@ def live(cur):
                     AND COALESCE(pv.referrer,'') = ANY(%(refs)s)
                     AND COALESCE(pv.scroll_depth, 0) = 0)""",
                 {"robot": defs.ROBOT_UA, "ids": ids, "refs": refs})
-    people_now = int(cur.fetchone()["n"])
+    return int(cur.fetchone()["n"])
+
+
+def live(cur):
+    ids = visitors.internal_ids(cur)
+    now_n = people_now(cur)
     cur.execute(f"""SELECT count(*) AS n FROM users u
                      WHERE u.last_seen_at >= NOW() - INTERVAL '{LIVE_WINDOW}'
                        AND {defs.customer('u')}""")
@@ -71,6 +79,6 @@ def live(cur):
         hits.append({"at": defs.iso(r["visited_at"]), "page": r["page"],
                      "device_type": r["device_type"], "channel": c["channel"],
                      "active_s": int(r["active_s"]), "class": cls})
-    return {"people_now": registry.metric("people_now", people_now),
+    return {"people_now": registry.metric("people_now", now_n),
             "signed_in_now": registry.metric("signed_in_now", signed_in),
             "running": running, "recent_hits": hits}

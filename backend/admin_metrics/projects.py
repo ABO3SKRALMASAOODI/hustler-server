@@ -683,10 +683,21 @@ def enforce_cap(out, cap=SIZE_CAP):
             break
     if dropped:
         out["truncated"] = True
+        words = {"turns": "agent steps", "messages": "the latest messages",
+                 "jobs": "the job list", "versions": "the version list",
+                 "shorts": "the shorts list"}
+        still = []
+        if "messages" in dropped:
+            still.append("the conversation still loads page by page")
+        if "versions" in dropped:
+            still.append("a version still opens by its number")
+        if "jobs" in dropped:
+            still.append("a job still opens by its id")
         out["truncated_reason"] = (
             "This project is very large, so these parts were left out to keep "
-            "the page fast: " + ", ".join(dropped)
-            + ". Open their tabs to load them.")
+            "the page fast: " + ", ".join(words.get(d, d) for d in dropped)
+            + "." + (" " + "; ".join(still).capitalize() + "." if still
+                     else ""))
     return out
 
 

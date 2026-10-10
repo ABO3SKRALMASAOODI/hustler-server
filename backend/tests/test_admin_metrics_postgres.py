@@ -134,9 +134,12 @@ def test_funnel_counts_the_group_that_signed_up_in_the_period(cur):
     """)
     period = ranges.make_period("custom", date(2026, 10, 1), date(2026, 10, 9),
                                 now=datetime(2026, 10, 11, tzinfo=timezone.utc))
+    # User 2 uploaded but never asked; user 3 asked from an AI app without
+    # uploading: "lost" is who stopped, not uploaded − asked_edit (0).
     assert funnel.stage_counts(cur, period) == {
         "signed_up": 4, "uploaded": 2, "asked_edit": 2, "exported": 1,
-        "paid": 1}
+        "paid": 1, "lost": {"uploaded": 2, "asked_edit": 1, "exported": 1,
+                            "paid": 0}}
 
 
 def test_every_signup_without_a_source_has_a_reason(cur, monkeypatch):

@@ -437,13 +437,15 @@ def test_outreach_separates_previews_from_people(app, monkeypatch):
 
 def test_landing_pages_contract(app, monkeypatch):
     monkeypatch.setattr(channels_report, "landing_pages",
-                        lambda cur, p, limit: [{"page": "/", "people": 84,
-                                                "active_median_s": 15,
-                                                "signups": 46,
-                                                "signup_share": 54.8}])
+                        lambda cur, p, limit: {
+                            "rows": [{"page": "/", "people": 84,
+                                      "active_median_s": 15, "signups": 46,
+                                      "signup_share": 54.8}],
+                            "app_only_people": 9})
     d = get(app, "/admin/v2/acquisition/pages?range=30d&limit=5").json["data"]
     assert set(d["rows"][0]) == {"page", "people", "active_median_s",
                                  "signups", "signup_share"}
+    assert d["app_only_people"] == 9
 
 
 # ── 9–10. funnel ─────────────────────────────────────────────────────────
@@ -451,7 +453,8 @@ def test_funnel_stages_never_lose_a_negative_number(app, monkeypatch):
     monkeypatch.setattr(visitors, "classify", lambda cur, p: dict(CLASSES))
     monkeypatch.setattr(funnel_mod, "stage_counts", lambda cur, p: {
         "signed_up": 100, "uploaded": 60, "asked_edit": 30, "exported": 5,
-        "paid": 8})
+        "paid": 8, "lost": {"uploaded": 40, "asked_edit": 32, "exported": 26,
+                            "paid": 2}})
     monkeypatch.setattr(funnel_mod, "blockers", lambda cur, p: {
         "upload_failed": 3, "paywall_upload": 40, "plans_seen": 50,
         "paywall_chat": 20})
@@ -465,7 +468,13 @@ def test_funnel_stages_never_lose_a_negative_number(app, monkeypatch):
         "signed_up", "uploaded", "asked_edit", "exported", "paid"]
     assert stages["uploaded"]["pct_of_first"] == 60.0
     assert stages["uploaded"]["lost"] == 40
-    assert stages["paid"]["lost"] == 0                 # 8 paid > 5 exported
+    # 5 exported: 3 of them paid (2 lost here), and 5 paid without exporting.
+    assert (stages["paid"]["lost"], stages["paid"]["continued"],
+            stages["paid"]["skipped"], stages["paid"]["pct_of_prev"]) == \
+        (2, 3, 5, 60.0)
+    assert stages["asked_edit"]["pct_of_prev"] == round(28 / 60 * 100, 1)
+    assert all(s["pct_of_prev"] is None or s["pct_of_prev"] <= 100
+               for s in d["stages"])
     assert stages["signed_up"]["lost"] is None
     assert "not_reached=uploaded" in stages["uploaded"]["lost_href"]
     assert_metric(d["people_same_period"], "people")
@@ -883,3 +892,107 @@ def test_every_v2_route_is_read_only_and_admin_gated():
         assert r.methods - {"HEAD", "OPTIONS"} == {"GET"}, r.rule
         view = app.view_functions[r.endpoint]
         assert view.__wrapped__ is not None, r.rule      # admin_required
+
+
+# ── Integration review: numbers that must agree with their own definitions ──
+def test_signup_rate_never_divides_all_signups_by_tracked_visitors(
+        app, monkeypatch):
+    """6 Jul → today used to read 357%: 1,687 signups ÷ people counted only
+    since 3 Oct. The rate now covers the tracked part on both sides."""
+    summary_fixtures(monkeypatch)
+    monkeypatch.setattr(visitors, "classify",
+                        lambda cur, p: dict(CLASSES, person=500))
+    seen = []
+
+    def signups(cur, p):
+        seen.append(p.start)
+        return 100 if p.start >= datetime(2026, 10, 3, 16, 7, 35,
+                                          tzinfo=timezone.utc) else 1687
+    monkeypatch.setattr(admin_v2, "signups_count", signups)
+    today = ranges.local_today()
+    d = get(app, "/admin/v2/summary?range=custom&from=2026-07-06"
+                 f"&to={today.isoformat()}").json["data"]
+    by = {k["key"]: k for k in d["kpis"]}
+    assert by["signups"]["value"] == 1687          # the whole period
+    rate = by["signup_rate"]
+    assert rate["value"] == 20.0                   # 100 since 3 Oct ÷ 500
+    assert rate["status"] == "partial" and "3 Oct" in rate["note"]
+    assert rate["previous"] is None
+    assert rate["value"] <= 100
+
+
+def test_channel_rates_use_one_window_when_the_period_starts_before_sources(
+        app, monkeypatch):
+    acquisition_fixtures(monkeypatch)
+    since = datetime(2026, 10, 7, 12, 34, 12, tzinfo=timezone.utc)
+    g = {"source": "www.google.com", "medium": "organic", "at": 1}
+    whole = [{"device_id": f"w{i}", "first_attribution": {"first": g,
+                                                         "last": g},
+              "first_referrer": "www.google.com", "first_page": "/"}
+             for i in range(4)]
+    monkeypatch.setattr(visitors, "people_rows", lambda cur, p: (
+        whole[:1] if p.start is not None and p.start >= since else whole))
+    d = get(app, "/admin/v2/acquisition?range=30d").json["data"]
+    by = {c["channel"]: c for c in d["channels"]}
+    assert by["search"]["people"] == 4             # the whole period
+    assert by["search"]["signup_rate"] == 100.0    # 1 signup ÷ 1 person since 7 Oct
+    assert d["rate_since"] == "2026-10-07T12:34:12Z"
+    today = get(app, "/admin/v2/acquisition?range=today").json["data"]
+    assert today["rate_since"] is None
+
+
+def test_span_labels_say_the_year_when_it_is_not_obvious():
+    assert ranges.span_label(date(2025, 9, 6), date(2026, 10, 10)) == \
+        "6 Sep 2025 – 10 Oct 2026"
+    assert ranges.span_label(date(2026, 9, 28), date(2026, 10, 3), 2026) == \
+        "28 Sep – 3 Oct"
+    assert ranges.span_label(date(2025, 3, 1), date(2025, 3, 9), 2026) == \
+        "1–9 Mar 2025"
+    p = ranges.parse({"range": "custom", "from": "2025-09-06",
+                      "to": "2026-10-10"}, now=T0)
+    assert p.label == "6 Sep 2025 – 10 Oct 2026"
+
+
+def test_landing_pages_skip_sign_in_and_app_pages():
+    import re
+    assert re.search(channels_report.APP_PAGES, "/google-callback/[redacted]")
+    for page in ("/login", "/verify", "/studio", "/paddle-checkout/x",
+                 "/purchase-success"):
+        assert re.search(channels_report.APP_PAGES, page), page
+    for page in ("/", "/tools/color-grade-video", "/subscribe", "/mcp",
+                 "/login-help", "/blog/studio-tips"):
+        assert not re.search(channels_report.APP_PAGES, page), page
+    cur = FakeCursor([("array_agg(v.page", [
+        {"page": None, "people": 9, "active_median_s": None, "signups": 0},
+        {"page": "/", "people": 85, "active_median_s": 15.2, "signups": 46},
+        {"page": "/tools/x", "people": 70, "active_median_s": 84.0,
+         "signups": 4}])])
+    db.reset_features()
+    import admin_metrics.visitors as v
+    orig = v.internal_ids
+    v.internal_ids = lambda c: []
+    try:
+        period = ranges.make_period("30d", date(2026, 9, 11),
+                                    date(2026, 10, 10), now=T0)
+        out = channels_report.landing_pages(cur, period, limit=2)
+    finally:
+        v.internal_ids = orig
+    assert out["app_only_people"] == 9
+    assert [r["page"] for r in out["rows"]] == ["/", "/tools/x"]
+    sql = next(s for s in cur.sql if "array_agg" in s)
+    assert "FILTER (WHERE v.page !~ %(app_pages)s)" in sql
+
+
+def test_a_large_project_says_what_still_opens():
+    out = {"turns": [], "messages": {"rows": [], "has_more": False,
+                                     "before_id": None, "total": 0},
+           "jobs": {"rows": [], "total": 0},
+           "versions": [{"version": i, "summary": "x" * 3000}
+                        for i in range(600)],
+           "shorts": [], "truncated": False, "truncated_reason": None}
+    capped = projects.enforce_cap(out, cap=256 * 1024)
+    assert capped["truncated"] and capped["versions"] == []
+    assert "the version list" in capped["truncated_reason"]
+    assert "a version still opens by its number" in \
+        capped["truncated_reason"].lower()
+    assert "Open their tabs" not in capped["truncated_reason"]

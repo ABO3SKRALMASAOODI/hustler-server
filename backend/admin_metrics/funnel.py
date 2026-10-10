@@ -48,25 +48,40 @@ def stage_predicate(stage, u="u"):
 
 
 def _cohort_counts_sql(group_expr=None):
+    """Per-person stage flags once, then counts. `lost_<stage>` is the
+    people who reached the stage before and not this one: exactly the list
+    the "lost here" link opens (reached=<previous>&not_reached=<stage>)."""
     group_col = f"{group_expr} AS grp," if group_expr else ""
     group_by = "GROUP BY 1" if group_expr else ""
     return f"""
         WITH c AS (SELECT u.id, u.created_at FROM users u
                     WHERE {defs.customer('u')}
-                      AND u.created_at >= %(start)s AND u.created_at < %(end)s)
-        SELECT {group_col} count(*) AS signed_up,
-          count(*) FILTER (WHERE {stage_predicate('uploaded', 'c')}) AS uploaded,
-          count(*) FILTER (WHERE {stage_predicate('asked_edit', 'c')})
-              AS asked_edit,
-          count(*) FILTER (WHERE {stage_predicate('exported', 'c')}) AS exported,
-          count(*) FILTER (WHERE {stage_predicate('paid', 'c')}) AS paid
-        FROM c {group_by}"""
+                      AND u.created_at >= %(start)s AND u.created_at < %(end)s),
+        f AS (SELECT c.id, c.created_at,
+                     {stage_predicate('uploaded', 'c')} AS up,
+                     {stage_predicate('asked_edit', 'c')} AS ae,
+                     {stage_predicate('exported', 'c')} AS ex,
+                     {stage_predicate('paid', 'c')} AS pd
+                FROM c)
+        SELECT {group_col.replace('c.created_at', 'f.created_at')} count(*) AS signed_up,
+          count(*) FILTER (WHERE up) AS uploaded,
+          count(*) FILTER (WHERE ae) AS asked_edit,
+          count(*) FILTER (WHERE ex) AS exported,
+          count(*) FILTER (WHERE pd) AS paid,
+          count(*) FILTER (WHERE NOT up) AS lost_uploaded,
+          count(*) FILTER (WHERE up AND NOT ae) AS lost_asked_edit,
+          count(*) FILTER (WHERE ae AND NOT ex) AS lost_exported,
+          count(*) FILTER (WHERE ex AND NOT pd) AS lost_paid
+        FROM f {group_by}"""
 
 
 def stage_counts(cur, period):
+    """{stage: people reached, "lost": {stage: reached previous, not this}}."""
     cur.execute(_cohort_counts_sql(), period.params())
     row = cur.fetchone() or {}
-    return {k: int(row.get(k) or 0) for k, _ in STAGES}
+    out = {k: int(row.get(k) or 0) for k, _ in STAGES}
+    out["lost"] = {k: int(row.get(f"lost_{k}") or 0) for k, _ in STAGES[1:]}
+    return out
 
 
 # The reply to an editor message was a paywall: "subscribe" or "out of
@@ -171,12 +186,21 @@ def funnel(cur, period, people_metric):
         d = registry.definition(reg)
         value = counts[key]
         prev = counts[prev_key] if prev_key else None
+        # Stages are not nested (someone can pay without exporting), so the
+        # step-to-step numbers come from people, not from subtracting counts:
+        # `lost` reached the step before and not this one (the "lost here"
+        # list), `continued` reached both, `skipped` reached this one without
+        # the step before. pct_of_prev = continued ÷ previous, never > 100%.
+        lost = counts["lost"][key] if prev_key else None
+        continued = (prev - lost) if prev_key else None
         stages.append({
             "key": key, "label": d["label"], "how": d["how"],
             "value": value,
             "pct_of_first": defs.pct(value, first),
-            "pct_of_prev": defs.pct(value, prev) if prev_key else None,
-            "lost": max(prev - value, 0) if prev_key else None,
+            "pct_of_prev": defs.pct(continued, prev) if prev_key else None,
+            "lost": lost,
+            "continued": continued,
+            "skipped": max(value - continued, 0) if prev_key else None,
             "href": _href(period, "" if key == "signed_up"
                           else f"&reached={key}"),
             "lost_href": (_href(period,
