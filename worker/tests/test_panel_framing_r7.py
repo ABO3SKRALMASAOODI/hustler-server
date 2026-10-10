@@ -369,3 +369,50 @@ def test_the_archival_default_is_for_one_speaker_in_a_vertical_frame():
         ctx = T._Ctx(646, 480, one, edl=e)
         res = agent_tools.set_picture_card(ctx, "c", 0, 9)
         assert ctx.card()["fit"] == "pad" and "archival 4:3" not in res, ratio
+
+
+# ── integration: a whole pillar, and a step over a follow glide ──────────
+
+def test_a_pillar_with_two_edges_is_slid_off_whole():
+    """Integrated Jobs render (round 7): a pale pillar 9% of the card wide
+    along its left edge — its inner edge just past the sliver band — stayed
+    for ~2.5 s because sliding past its outer edge 'brought in another
+    edge'. The slide clears the cluster (both edges), the head still held."""
+    rect = [0.194, 0.095, 0.739, 0.732]
+    new, found = pc.sliver_shift(rect, [0.192, 0.242], [])
+    assert new[0] == pytest.approx(0.242 + pc.SLIVER_PAD)
+    assert new[2] - new[0] == pytest.approx(rect[2] - rect[0])
+    assert found and found[0][:2] == ("x", "left") and found[0][3] > 0
+    # ...never past what would cut the head, and never a band deeper than
+    # SLIVER_CHAIN_MAX (that is the picture)
+    kept, found = pc.sliver_shift(rect, [0.192, 0.242], [], keep=[0.25, 0.2, 0.5, 0.6])
+    assert kept == rect and found[0][3] == 0
+    assert pc.sliver_shift(rect, [0.192, 0.242, 0.33], [])[0][0] == pytest.approx(0.262)
+
+
+def test_a_wide_step_is_checked_on_every_framing_of_a_follow_glide(monkeypatch):
+    """A step is judged on each framing it spans, not only its middle: a
+    card gliding left mid-step brought the pillar in after the middle."""
+    monkeypatch.setattr(agent_tools, "_edge_lines",
+                        lambda ctx, windows, tag: ([0.19], []))
+    card = dict(T.CARD, box=[0.06, 0.27, 0.94, 0.70], fit="crop",
+                source=[0.30, 0.08, 0.85, 0.75],
+                follow=[{"t0": 0.0, "t1": 100.0,
+                         "k": [[10.0, 0.575, 0.4], [10.5, 0.575, 0.4],
+                               [11.5, 0.49, 0.4], [12.0, 0.49, 0.4]]}])
+    # the middle (11.0) sits mid-glide and stays clear wide; the end (12.0)
+    # frames x .215-.765, which a wide step opens to .182: the line comes in
+    why = agent_tools._step_sliver(None, card, 0.8929, 10.0, 12.0, 646, 480, W, H)
+    assert "wide step" in why and "left edge" in why, why
+
+
+def test_a_wide_step_that_opens_an_edge_held_in_the_falloff_stays_bare(monkeypatch):
+    """A framing slid just past a pillar keeps its edge in the falloff band
+    (depth 0); a wide step that brings it inside is a new band, not the
+    same one (integrated Jobs render, 25-27 s)."""
+    monkeypatch.setattr(agent_tools, "_edge_lines",
+                        lambda ctx, windows, tag: ([0.172], []))
+    card = dict(T.CARD, box=[0.06, 0.27, 0.94, 0.70], fit="crop",
+                source=[0.192, 0.0, 0.737, 0.637])
+    why = agent_tools._step_sliver(None, card, 0.8929, 10.0, 12.0, 646, 480, W, H)
+    assert "wide step" in why and "left edge" in why, why

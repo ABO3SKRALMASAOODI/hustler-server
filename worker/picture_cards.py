@@ -956,6 +956,14 @@ def crop_clear(src_w, src_h, W, H, face, avoid, margin=PANEL_FACE_MARGIN):
 SLIVER_MAX = .08
 SLIVER_PAD = .02
 SLIVER_PATTERN_LINES = 4
+# A pillar has two edges: sliding past its inner edge can bring its outer
+# one (or a door frame beside it) into the band of the new edge. The slide
+# then clears the whole cluster, up to SLIVER_CHAIN_MAX of the rect's size
+# from its edge (beyond that the band is part of the picture). Seen on the
+# integrated Jobs render: a pale pillar 9% of the card wide along its left
+# edge for ~2.5 s, its inner edge 8.8% in — just past the sliver band, so
+# the slide past its outer edge was refused for 'bringing in another edge'.
+SLIVER_CHAIN_MAX = .15
 
 
 def _keep_gap(rect, keep):
@@ -999,9 +1007,25 @@ def sliver_shift(rect, lines_x=(), lines_y=(), keep=None, margin=PANEL_MARGIN):
             continue
         if near_lo:
             line, side = max(near_lo), sides[0]
+            # a cluster (a pillar's two edges, a frame beside it): past the
+            # outermost line still inside the band of the slid edge
+            while True:
+                more = [float(p) for p in lines or ()
+                        if line < float(p) < line + SLIVER_PAD + band
+                        and float(p) - lo <= SLIVER_CHAIN_MAX * size]
+                if not more:
+                    break
+                line = max(more)
             shift, depth = line + SLIVER_PAD - lo, max(0.0, line - lo)
         else:
             line, side = min(near_hi), sides[1]
+            while True:
+                more = [float(p) for p in lines or ()
+                        if line - SLIVER_PAD - band < float(p) < line
+                        and hi - float(p) <= SLIVER_CHAIN_MAX * size]
+                if not more:
+                    break
+                line = min(more)
             shift, depth = line - SLIVER_PAD - hi, max(0.0, hi - line)
         new = list(rect)
         new[k], new[k + 2] = lo + shift, hi + shift

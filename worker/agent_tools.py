@@ -16416,19 +16416,41 @@ def _step_sliver(ctx, card, k, a_src, b_src, src_w, src_h, W, H):
     SOURCE [a_src, b_src] (cut_steps.conceal_jump_cuts) would open a thin
     band of a hard straight edge along the card's edge that the card's own
     framing does not show (a wide step that brings a pillar's edge in)."""
-    mid = (float(a_src) + float(b_src)) / 2.0
-    rect = picture_cards.source_at(card, mid)
+    a, b = float(a_src), float(b_src)
     box = card.get("box")
-    if not rect or not box:
+    if not box:
         return ""
-    rect = picture_cards.match_rect(rect, box, src_w, src_h, W, H)
-    xs, ys = _edge_lines(ctx, [(float(a_src), float(b_src))], "step_edge")
+    # every framing the step spans: its ends, its middle and each key of a
+    # follow path inside it (a card that glides mid-step can bring the
+    # pillar in after the middle: integrated Jobs render, 25-27 s)
+    times = {a + 1e-3, (a + b) / 2.0, b - 1e-3}
+    for span in card.get("follow") or []:
+        for key in (span.get("k") or []) if isinstance(span, dict) else []:
+            try:
+                if a < float(key[0]) < b:
+                    times.add(float(key[0]))
+            except (TypeError, ValueError, IndexError):
+                continue
+    rects = []
+    for t in sorted(times):
+        r = picture_cards.source_at(card, t)
+        if r:
+            r = picture_cards.match_rect(r, box, src_w, src_h, W, H)
+            if r not in rects:
+                rects.append(r)
+    if not rects:
+        return ""
+    xs, ys = _edge_lines(ctx, [(a, b)], "step_edge")
     if not (xs or ys):
         return ""
-    _r, before = picture_cards.sliver_shift(rect, xs, ys)
-    _r, after = picture_cards.sliver_shift(picture_cards.step_rect(rect, k), xs, ys)
-    had = {(f[0], f[1]) for f in before}
-    new = [f for f in after if (f[0], f[1]) not in had]
+    new = []
+    for rect in rects:
+        _r, before = picture_cards.sliver_shift(rect, xs, ys)
+        _r, after = picture_cards.sliver_shift(picture_cards.step_rect(rect, k), xs, ys)
+        # a band the step deepens counts too: a framing slid just past an
+        # edge holds it in its falloff (depth 0), which a wide step opens
+        had = {(f[0], f[1]): f[2] for f in before}
+        new += [f for f in after if f[2] > had.get((f[0], f[1]), -1.0) + 0.005]
     if not new:
         return ""
     _axis, side, depth, _m = max(new, key=lambda f: f[2])
