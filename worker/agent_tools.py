@@ -51,6 +51,7 @@ import scope_guard
 # renderer arithmetic, and the tool has to quote the SAME numbers the graph
 # will use — importing the resolver is the only way those two cannot drift.
 import renderer
+import follow
 import picture_cards
 import sfx_search
 import sfx_judge
@@ -117,6 +118,7 @@ from schemas import (CANVAS_DIMS, CaptionStyle, clean_fingerprint,
                      SCREEN_TAKEOVER_MAX_S, quad_bbox, quad_is_sane)
 from schemas import ANIM_MAX_KEYFRAMES, CAPTION_LEADING_RANGE
 from schemas import master_loudness
+from schemas import FOLLOW_MAX_SPANS
 from schemas import PICTURE_CARD_MAX_PANELS, PICTURE_CARD_MAX_TRACK, _source_rectangle
 from timeline import Timeline, card_text_window, insert_windows
 
@@ -1943,13 +1945,18 @@ def _look_at_output(ctx, output_times, question):
             float(o.get("start") or 0.0) + float(o.get("duration_s") or 0.0))
            for o in (edl["json"].get("overlays") or []) if o.get("screen")]
     frames, labels = [], []
+    src_of = {i: s for i, k, s, _lb in plan if k == "main"}
     for i in sorted(results):
         fp, lb = results[i]
         t = wants[i]
         try:
             blk = _block_at(t)
+            # a crop that follows the speaker is where its path is then
+            focus_i = gfocus
+            if i in src_of and follow.frame_focus_at(edl["json"], src_of[i]) is not None:
+                focus_i = _frame_focus_at_source(edl["json"], src_of[i])
             fp, sfx = _fit_and_zoom_frame(
-                ctx.workdir, i, fp, t, canvas, gmode, gfocus, fxz,
+                ctx.workdir, i, fp, t, canvas, gmode, focus_i, fxz,
                 prog_end, blk["kind"] == "footage",
                 crop=blk.get("crop"), fit=blk.get("fit"),
                 picture=frame_cfg.get("picture"))
@@ -7367,13 +7374,15 @@ def _cap_zoom_strength(ctx, strength, room, base, stacked=0.0):
 
 
 def set_frame(ctx, ratio, mode="crop", focus_x=None, focus_y=None,
-              _measured=False, focus_track=None, picture=None):
+              _measured=False, focus_track=None, picture=None, _follow=False):
     return _behind_framing_note(ctx, _set_frame(
-        ctx, ratio, mode, focus_x, focus_y, _measured, focus_track, picture))
+        ctx, ratio, mode, focus_x, focus_y, _measured, focus_track, picture,
+        _follow))
 
 
 def _set_frame(ctx, ratio, mode="crop", focus_x=None, focus_y=None,
-               _measured=False, focus_track=None, picture=None):
+               _measured=False, focus_track=None, picture=None,
+               _follow=False):
     payload = {"ratio": str(ratio), "mode": str(mode or "crop")}
     if picture is not None:
         payload["picture"] = picture
@@ -7417,8 +7426,16 @@ def _set_frame(ctx, ratio, mode="crop", focus_x=None, focus_y=None,
         aimed = (f", crop centered on ({frame.focus_x if frame.focus_x is not None else 0.5:g}, "
                  f"{frame.focus_y if frame.focus_y is not None else 0.5:g}) "
                  "of the source frame")
+    follow_note = ""
+    if _follow and getattr(ctx, "has_main_video", False):
+        spans, follow_note = _follow_frame(ctx, edl, edl["frame"])
+        if spans:
+            edl["frame"]["follow"] = spans
+            aimed += "; the crop follows the speaker inside the shot"
     res = ctx.write_edl(
         edl, f"output frame set to {frame.ratio} ({frame.mode}){aimed}")
+    if follow_note and res.startswith("EDL v"):
+        res += "\n" + follow_note
     if (res.startswith("EDL v") and frame.mode == "crop"
             and frame.focus_x is None and frame.focus_y is None
             and frame.ratio in ("9:16", "1:1", "4:5")
@@ -7762,7 +7779,204 @@ def _edge_band_advisories(ctx, frame, keep):
     return notes
 
 
-def _reframe_with_track(ctx, ratio, global_pt, preserve_unmeasured=True):
+# ── crops and cards that follow the speaker (worker/follow.py) ───────────
+
+def _merge_windows(windows):
+    out = []
+    for a, b in sorted((float(a), float(b)) for a, b in windows if b - a > .05):
+        if out and a <= out[-1][1] + .3:
+            out[-1][1] = max(out[-1][1], b)
+        else:
+            out.append([a, b])
+    return [(a, b) for a, b in out]
+
+
+def _follow_samples(ctx, windows, cuts=()):
+    """(samples, source, counts) — the speaker's face over SOURCE
+    ``windows`` as [(t, box, look)]: the index's spatial samples when they
+    are dense enough to follow (follow.DENSE_STEP_S), else a write-time face
+    track over just these windows on the proxy (follow.measure at
+    follow.SAMPLE_FPS, Haar frontal + profile — OpenCV ships in every
+    lane), else the index's sparse samples. source is 'index', 'measured',
+    'sparse' or 'too_long' (more kept footage than one call measures,
+    follow.MAX_MEASURE_S). counts: follow.face_counts of every measured
+    frame (group shots). ``cuts``: the shot boundaries — each shot is
+    tracked on its own (follow.speaker_track). Cached on the ctx for the
+    turn."""
+    windows = _merge_windows(windows)
+    if not windows:
+        return [], "sparse", []
+    index = getattr(ctx, "index", None) or {}
+    seen = []
+    sparse, dense = follow.index_samples(index, windows, seen)
+    if dense:
+        return sparse, "index", follow.face_counts(seen)
+    if follow.too_long(windows):
+        return sparse, "too_long", []
+    cuts = sorted({round(float(c), 3) for c in cuts or ()})
+    key = (tuple((round(a, 2), round(b, 2)) for a, b in windows), tuple(cuts))
+    cache = getattr(ctx, "_follow_faces", None)
+    if not isinstance(cache, dict):
+        cache = {}
+        try:
+            ctx._follow_faces = cache
+        except Exception:
+            pass
+    if key in cache:
+        return cache[key]
+    out = (sparse, "sparse", [])
+    try:
+        video = index.get("video") or {}
+        aspect = float(video.get("height") or 0) / float(video.get("width") or 0)
+        proxy = ctx.proxy_path()
+        frames = follow.measure(proxy, windows, aspect)
+        track = follow.speaker_track(frames, cuts)
+        if track:
+            out = (track, "measured", follow.face_counts(frames))
+    except Exception:
+        pass
+    cache[key] = out
+    return out
+
+
+def _shot_windows(ctx, keep, edges=()):
+    """[(a, b, fragments, lo, hi)] one SOURCE window per camera shot of the
+    kept footage — the kept fragments between consecutive indexed shot cuts
+    (and ``edges``, e.g. focus_track edges), their bounds (a, b) and the
+    shot's own bounds (lo, hi: the cuts around it, the source's ends for the
+    first and last). A follow plan never crosses a cut, and spans every
+    jump cut inside its shot (a move there happens on the cut). A follow
+    span covers the whole SHOT (lo..hi), not just today's kept footage: a
+    later cut that keeps more of the shot must find the path holding there,
+    not the static aim — that would jump inside continuous footage."""
+    cuts = set()
+    for shot in ((getattr(ctx, "index", None) or {}).get("shots") or [])[1:]:
+        try:
+            cuts.add(float(shot["start"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+    cuts |= {float(e) for e in edges}
+    bounds = [-1e9] + sorted(cuts) + [1e9]
+    try:
+        end = float(getattr(ctx, "duration", None) or 0.0)
+    except (TypeError, ValueError):
+        end = 0.0
+    out = []
+    for lo, hi in zip(bounds, bounds[1:]):
+        frags = sorted((round(max(float(s), lo), 3), round(min(float(e), hi), 3))
+                       for s, e in keep if min(float(e), hi) - max(float(s), lo) > .05)
+        if frags:
+            a, b = frags[0][0], frags[-1][1]
+            out.append((a, b, frags, round(max(0.0, min(lo, a)), 3),
+                        round(max(b, hi if hi < 1e8 else max(end, b)), 3)))
+    return out
+
+
+def _follow_frame(ctx, edl, frame):
+    """(follow spans or None, note) for a crop ``frame`` (a Frame dict):
+    one face-following path per shot whose speaker moves enough inside it
+    that one held aim would let the head drift out (follow.plan), and a
+    one-key span re-aiming a still shot whose current aim would cut the
+    head. Shots that hold still keep their aim. Pure framing: the keep
+    list, the timeline and every caption time are untouched."""
+    video = (getattr(ctx, "index", None) or {}).get("video") or {}
+    try:
+        sw, sh = float(video["width"]), float(video["height"])
+        W, H = renderer.frame_dims(sw, sh, str(frame.get("ratio")), delivery=True)
+    except (KeyError, TypeError, ValueError, ZeroDivisionError):
+        return None, ""
+    if frame.get("picture"):
+        _x, _y, W, H = renderer.picture_pixels(W, H, frame["picture"])
+    k = max(W / sw, H / sh)
+    ww, wh = (W / k) / sw, (H / k) / sh
+    if ww >= .995 and wh >= .995:
+        return None, ""
+    keep = [(float(s), float(e)) for s, e in edl.get("keep") or []]
+    track = frame.get("focus_track") or []
+    edges = [float(sp[k_]) for sp in track for k_ in ("t0", "t1")]
+    shots = _shot_windows(ctx, keep, edges)
+    if not shots:
+        return None, ""
+    windows = [f for _a, _b, fr, _lo, _hi in shots for f in fr]
+    samples, how, counts = _follow_samples(
+        ctx, windows, [x for _a, _b, _fr, lo, hi in shots for x in (lo, hi)])
+    if how == "too_long":
+        total = sum(b_ - a_ for a_, b_ in _merge_windows(windows))
+        return None, (f"FOLLOW: not measured — {total:.0f}s of kept footage is "
+                      f"more than one call follows ({follow.MAX_MEASURE_S:.0f}s); "
+                      "each shot keeps one aim.")
+    if not samples or how == "sparse":
+        return None, ""
+    base = (frame.get("focus_x"), frame.get("focus_y"))
+    spans, moving, fixed, groups = [], 0, 0, 0
+    for a, b, frags, lo, hi in shots:
+        mid = (a + b) / 2.0
+        span = next((sp for sp in track if float(sp["t0"]) <= mid <= float(sp["t1"])),
+                    None)
+        if ((span or {}).get("mode") or frame.get("mode") or "crop") != "crop":
+            continue
+        if follow.is_group(counts, a, b):
+            # two or more people in the shot: following one would decide
+            # who the crop frames — the shot keeps the aim it was given
+            groups += 1
+            continue
+        rows = [s_ for s_ in samples if a - .05 <= s_[0] <= b + .05]
+        keys, info = follow.plan(rows, a, b, ww, wh, kept=frags)
+        if keys:
+            spans.append({"t0": lo, "t1": hi, "k": keys})
+            moving += 1
+            continue
+        if info.get("static") is None:
+            continue
+        # A still shot keeps its aim unless that aim cuts the head.
+        aim = (span or {}).get("x"), (span or {}).get("y")
+        aim = (aim[0] if aim[0] is not None else base[0],
+               aim[1] if aim[1] is not None else base[1])
+        cur = [mid, .5 if aim[0] is None else float(aim[0]),
+               .5 if aim[1] is None else float(aim[1])]
+        _k, cx0, cy0, cx1, cy1 = renderer.fit_fractions(
+            sw, sh, W, H, "crop", (cur[1], cur[2]))
+        cur[1], cur[2] = (cx0 + cx1) / 2.0, (cy0 + cy1) / 2.0
+        over, _at = follow._violation([cur], rows, ww, wh, kept=frags)
+        # moved only as far as it must (the given composition stays), else
+        # to the plan's still aim
+        sx, sy = follow.nudge(cur[1:], rows, ww, wh, kept=frags) or info["static"]
+        if over > .005 and follow._violation([[mid, sx, sy]], rows, ww, wh,
+                                             kept=frags)[0] < over:
+            spans.append({"t0": lo, "t1": hi, "k": [[round(mid, 3), round(sx, 4),
+                                                     round(sy, 4)]]})
+            fixed += 1
+    if len(spans) > FOLLOW_MAX_SPANS:
+        # more shots than a frame carries: the moving ones, else none
+        spans = [sp for sp in spans if len(sp["k"]) > 1]
+        fixed = 0
+        if len(spans) > FOLLOW_MAX_SPANS:
+            return None, ("FOLLOW: not applied — the speaker moves inside more "
+                          f"than {FOLLOW_MAX_SPANS} shots; each keeps one aim.")
+    group_note = (f"FOLLOW: {groups} shot{'s' if groups != 1 else ''} with two or "
+                  "more people keep{} their aim (the follow frames one speaker)."
+                  .format("" if groups != 1 else "s") if groups else "")
+    if not spans:
+        return None, group_note
+    bits = []
+    if moving:
+        bits.append(f"the crop FOLLOWS the speaker inside {moving} shot"
+                    f"{'s' if moving != 1 else ''} (holds still while they "
+                    "sway, glides when they move — never across a cut)")
+    if fixed:
+        bits.append(f"{fixed} still shot{'s' if fixed != 1 else ''} re-aimed "
+                    "just far enough to keep the measured face in (the old "
+                    "aim cut it)")
+    if groups:
+        bits.append(f"{groups} shot{'s' if groups != 1 else ''} with two or more "
+                    "people keep their aim")
+    return spans, ("FOLLOW: " + "; ".join(bits) + f" — measured on {len(samples)} "
+                   f"face samples ({'index' if how == 'index' else 'proxy'}). "
+                   "auto_reframe(follow=false) holds one aim per shot.")
+
+
+def _reframe_with_track(ctx, ratio, global_pt, preserve_unmeasured=True,
+                        follow_=False):
     """A crop that FOLLOWS the subject across shot changes, or None when a
     single point serves (one shot, one position, or anything unmeasurable).
 
@@ -7908,12 +8122,20 @@ def _reframe_with_track(ctx, ratio, global_pt, preserve_unmeasured=True):
     edl["frame"] = {"ratio": str(ratio), "mode": "crop",
                     "focus_x": med[0], "focus_y": med[1],
                     "focus_track": spans}
+    follow_note = ""
+    if follow_:
+        fspans, follow_note = _follow_frame(ctx, edl, edl["frame"])
+        if fspans:
+            edl["frame"]["follow"] = fspans
     res = ctx.write_edl(
         edl, f"output frame set to {ratio} (crop) — the crop FOLLOWS the "
              f"subject across {len(spans)} camera positions, re-aiming at "
-             "shot cuts")
+             "shot cuts" + ("; inside a shot it follows the speaker"
+                            if edl["frame"].get("follow") else ""))
     if not res.startswith("EDL v"):
         return None                      # validation refused — fall back
+    if follow_note:
+        res += "\n" + follow_note
     fitted = sum(1 for sp in spans if sp.get("mode") == "pad_blur")
     res += (f"\nMeasured per shot: the subject sits in different places in "
             f"different shots (e.g. two speakers), so ONE fixed crop would "
@@ -7931,7 +8153,15 @@ def _reframe_with_track(ctx, ratio, global_pt, preserve_unmeasured=True):
     return res
 
 
-def auto_reframe(ctx, ratio="9:16", mode="auto"):
+def _truthy(v, default=True):
+    if v is None:
+        return default
+    if isinstance(v, str):
+        return v.strip().lower() not in ("false", "0", "no", "off", "none", "")
+    return bool(v)
+
+
+def auto_reframe(ctx, ratio="9:16", mode="auto", follow=True):
     """Convert the output frame to `ratio` and choose HOW honestly.
 
     Round 55. This tool only ever cropped, and aimed the crop as well as it
@@ -7954,7 +8184,12 @@ def auto_reframe(ctx, ratio="9:16", mode="auto"):
 
     mode='auto' (the default) picks crop or pad_blur from those two numbers.
     An explicit mode always wins — asking for a crop gets a crop.
+
+    follow (Oct 2026, default on): inside each shot the crop FOLLOWS the
+    speaker's face (worker/follow.py) — still while they sway, a smooth
+    glide when they move, never across a cut. False keeps one aim per shot.
     """
+    want_follow = _truthy(follow)
     if str(ratio) == "source":
         return set_frame(ctx, "source")
     mode = str(mode or "auto").lower()
@@ -8000,6 +8235,24 @@ def auto_reframe(ctx, ratio="9:16", mode="auto"):
 
         keep = current.get("keep") or [[0.0, ctx.duration]]
         if coverage and all(_covered(start, end) for start, end in keep):
+            if getattr(ctx, "has_main_video", False):
+                # The authored aims stay; the follow inside each shot is
+                # (re)measured on TODAY's kept footage — a path measured
+                # before later cuts is replaced, and follow=false removes it.
+                edl = dict(current)
+                edl["frame"] = dict(current_frame)
+                edl["frame"]["follow"] = None
+                spans, note = (_follow_frame(ctx, edl, edl["frame"])
+                               if want_follow else (None, ""))
+                edl["frame"]["follow"] = spans
+                if (spans or None) != (current_frame.get("follow") or None):
+                    res = ctx.write_edl(
+                        edl, f"the {ratio} crop keeps its per-shot track and "
+                             + ("follows the speaker inside each shot" if spans
+                                else "holds one aim per shot"))
+                    if res.startswith("EDL v") and note:
+                        res += "\n" + note
+                    return res
             return ("NO CHANGE — the current frame already has an authored "
                     f"per-shot focus_track covering every kept interval at "
                     f"{ratio}. Preserved that mixed composition instead of "
@@ -8109,7 +8362,8 @@ def auto_reframe(ctx, ratio="9:16", mode="auto"):
             len(spatial_pts) >= 2:
         local_pt = subject.median_point(spatial_pts)
         track_res = _reframe_with_track(
-            ctx, ratio, local_pt, preserve_unmeasured=True)
+            ctx, ratio, local_pt, preserve_unmeasured=True,
+            follow_=want_follow)
         if track_res is not None:
             return track_res
 
@@ -8162,7 +8416,8 @@ def auto_reframe(ctx, ratio="9:16", mode="auto"):
             # would median between the positions (the Aug 8 wall crops), so
             # measure per shot and let the crop re-aim at cuts.
             track_res = _reframe_with_track(
-                ctx, ratio, pt, preserve_unmeasured=(mode == "auto"))
+                ctx, ratio, pt, preserve_unmeasured=(mode == "auto"),
+                follow_=want_follow)
             if track_res is not None:
                 return track_res
         # Only judge one global crop after shot-specific composition has had
@@ -8184,7 +8439,7 @@ def auto_reframe(ctx, ratio="9:16", mode="auto"):
         pt, edge_note = _clear_crop_edges(
             ctx, ratio, pt, frames, _spatial_face_boxes(sidecar, keep))
         res = set_frame(ctx, ratio, "crop", focus_x=pt[0], focus_y=pt[1],
-                        _measured=True)
+                        _measured=True, _follow=want_follow)
         if res.startswith("EDL v") and edge_note:
             res += "\n" + edge_note
         pt = face_pt
@@ -14764,6 +15019,104 @@ def _card_track(ctx, edl, spans, box, canvas, video):
     return default, track, headroom
 
 
+def _card_pieces(ctx, edl, spans):
+    """[(a, b, fragments, lo, hi)] the card window's footage per camera
+    shot (_shot_windows; lo..hi the shot's own bounds): its
+    kept spans grouped between camera cuts (focus_track edges and indexed
+    shot cuts). Each shot gets its own framing (a follow span), so the card
+    never carries one shot's framing into the next; inside a shot one plan
+    spans every jump cut."""
+    frame = edl.get("frame") if isinstance(edl.get("frame"), dict) else {}
+    edges = []
+    for span in (frame or {}).get("focus_track") or []:
+        for key in ("t0", "t1"):
+            try:
+                edges.append(float(span[key]))
+            except (KeyError, TypeError, ValueError):
+                continue
+    return _shot_windows(ctx, spans, edges)
+
+
+def _card_dense(ctx, edl, spans):
+    """True when a dense face track covers every shot of the card's window
+    (every piece has a sample): _card_follow can frame each shot itself."""
+    pieces = _card_pieces(ctx, edl, spans)
+    if not pieces or len(pieces) > PICTURE_CARD_MAX_TRACK:
+        return False
+    samples, how, _counts = _follow_samples(
+        ctx, [f for _a, _b, fr, _lo, _hi in pieces for f in fr],
+        [x for _a, _b, _fr, lo, hi in pieces for x in (lo, hi)])
+    if how in ("sparse", "too_long") or not samples:
+        return False
+    return all(any(a - .05 <= x[0] <= b + .05 for x in samples)
+               for a, b, _fr, _lo, _hi in pieces)
+
+
+def _card_follow(ctx, edl, spans, box, canvas, video):
+    """(rect, source_track rows or None, follow spans, face, headroom,
+    moving) for an 'auto' single source card framed from a DENSE face
+    track (_follow_samples: the index's when dense, else measured on the
+    proxy), or None without one. Every piece of footage (one per shot)
+    is framed as a medium close-up of the speaker (picture_cards.
+    speaker_rect on the median face, never enlarged past the cap); a
+    piece where the speaker moves enough that one held framing would let
+    the head drift out FOLLOWS them (follow.plan), the others hold the
+    framing that keeps their measured head inside. Each piece carries a
+    follow span (one key when still), so the render splits its blocks on
+    every cut and each shot keeps its own framing."""
+    try:
+        sw, sh = float(video.get("width") or 0), float(video.get("height") or 0)
+    except (TypeError, ValueError):
+        return None
+    if not (sw and sh):
+        return None
+    W, H = canvas
+    pieces = _card_pieces(ctx, edl, spans)
+    if not pieces or len(pieces) > PICTURE_CARD_MAX_TRACK:
+        return None
+    samples, how, _counts = _follow_samples(
+        ctx, [f for _a, _b, fr, _lo, _hi in pieces for f in fr],
+        [x for _a, _b, _fr, lo, hi in pieces for x in (lo, hi)])
+    if how in ("sparse", "too_long") or not samples:
+        return None
+    faces = picture_cards.steady_faces([b for _t, b, _l in samples])
+    face = picture_cards.median_face(faces)
+    if face is None:
+        return None
+    base, headroom = picture_cards.speaker_rect(sw, sh, W, H, box, face)
+    rw, rh = base[2] - base[0], base[3] - base[1]
+    rows, follows, moving = [], [], 0
+    for a, b, frags, lo, hi in pieces:
+        own = [x for x in samples if a - .05 <= x[0] <= b + .05]
+        keys, info = follow.plan(own, a, b, rw, rh, kept=frags)
+        if keys:
+            moving += 1
+            centre = keys[0][1:]
+        elif info.get("static") is not None:
+            centre = info["static"]
+            keys = [[round((a + b) / 2.0, 3), round(centre[0], 4), round(centre[1], 4)]]
+        else:
+            pf = picture_cards.median_face(picture_cards.steady_faces(
+                [x[1] for x in own]))
+            if pf is not None:
+                r, _h = picture_cards.speaker_rect(sw, sh, W, H, box, pf)
+                centre = ((r[0] + r[2]) / 2.0, (r[1] + r[3]) / 2.0)
+            else:
+                centre = ((base[0] + base[2]) / 2.0, (base[1] + base[3]) / 2.0)
+            keys = [[round((a + b) / 2.0, 3), round(centre[0], 4), round(centre[1], 4)]]
+        rect = [round(v, 4) for v in picture_cards.recentre(base, centre)]
+        if rows and rows[-1]["source"] == rect and abs(rows[-1]["t1"] - a) < 1e-3:
+            rows[-1]["t1"] = round(b, 3)
+        else:
+            rows.append({"t0": round(a, 3), "t1": round(b, 3), "source": rect})
+        # the span covers the whole shot (see _shot_windows)
+        follows.append({"t0": round(lo, 3), "t1": round(hi, 3), "k": keys})
+    track = rows if len({tuple(r["source"]) for r in rows}) > 1 else None
+    default = rows[0]["source"] if track is None else \
+        [round(v, 4) for v in base]
+    return default, track, follows, face, headroom, moving
+
+
 def _window_focus(edl, spans):
     """The reframe's aim over ``spans``: the one focus_track span covering
     them, else the frame's own focus (source fractions; None = centre)."""
@@ -14830,14 +15183,17 @@ def _rect_arg(value, what, source=False):
     return rect, None
 
 
-def _resolve_panel(ctx, edl, spans, box, source, fit, canvas, follow=False):
-    """(box, source rect, fit, report, source_track) for one source-fed
-    window, or (None, None, None, error, None). ``source`` is 'auto' (the
-    speaker: a face-aware crop holding every measured position of the head,
-    or the whole frame of a low-resolution source), 'full' or a rect of the
-    source frame. ``follow`` (a single card, not a stack panel) lets 'auto'
-    re-aim shot by shot (source_track) where the speaker moves between
-    takes."""
+def _resolve_panel(ctx, edl, spans, box, source, fit, canvas, follow=False,
+                   track_face=True):
+    """(box, source rect, fit, report, source_track, follow spans) for one
+    source-fed window, or (None, None, None, error, None, None). ``source``
+    is 'auto' (the speaker: a face-aware crop, or the whole frame of a
+    low-resolution source unless fit='crop' asks for the speaker), 'full'
+    or a rect of the source frame. ``follow`` (a single card, not a stack
+    panel) lets 'auto' frame every shot itself and FOLLOW a speaker who
+    moves inside one (_card_follow, from a dense face track); without a
+    dense track it re-aims shot by shot (source_track) where the speaker
+    moves between takes."""
     video = (getattr(ctx, "index", None) or {}).get("video") or {}
     try:
         sw, sh = float(video.get("width") or 0), float(video.get("height") or 0)
@@ -14845,9 +15201,9 @@ def _resolve_panel(ctx, edl, spans, box, source, fit, canvas, follow=False):
         sw = sh = 0.0
     W, H = canvas
     lowres = picture_cards.is_lowres(sw, sh)
-    face, headroom, track = None, None, None
+    face, headroom, track, follows, moving = None, None, None, None, 0
     if isinstance(source, str):
-        if source == "full" or (source == "auto" and lowres):
+        if source == "full" or (source == "auto" and lowres and fit != "crop"):
             rect = (picture_cards.archival_rect() if lowres
                     else [0.0, 0.0, 1.0, 1.0])
             fit = fit or "pad"
@@ -14855,7 +15211,12 @@ def _resolve_panel(ctx, edl, spans, box, source, fit, canvas, follow=False):
             fit = fit or "crop"
             faces = _card_faces(ctx, spans)
             face = picture_cards.median_face(faces)
-            if sw and sh and fit == "crop" and follow:
+            dense = (_card_follow(ctx, edl, spans, box, canvas, video)
+                     if sw and sh and fit == "crop" and follow and track_face
+                     else None)
+            if dense:
+                rect, track, follows, face, headroom, moving = dense
+            elif sw and sh and fit == "crop" and follow:
                 rect, track, headroom = _card_track(ctx, edl, spans, box, canvas, video)
             elif sw and sh and fit == "crop":
                 rect, headroom = picture_cards.framing_rect(
@@ -14865,10 +15226,10 @@ def _resolve_panel(ctx, edl, spans, box, source, fit, canvas, follow=False):
     else:
         rect, err = _rect_arg(source, "source", source=True)
         if err:
-            return None, None, None, err, None
+            return None, None, None, err, None, None
         fit = fit or "pad"
     if not (sw and sh):
-        return box, rect, fit, "source size unknown — the render fits it", None
+        return box, rect, fit, "source size unknown — the render fits it", None, None
     box0 = list(box)
     box, rect, k = picture_cards.fit_panel(sw, sh, W, H, box, rect, fit)
     if track:
@@ -14891,7 +15252,18 @@ def _resolve_panel(ctx, edl, spans, box, source, fit, canvas, follow=False):
                        else " (the source's top edge allows no more)"))
     elif isinstance(source, str) and source == "auto" and not lowres:
         bits.append("no face measured here — framed on the frame's focus")
-    if track:
+    if follows is not None:
+        shots = len(follows)
+        bits.append(
+            (f"the card FOLLOWS the speaker inside {moving} of {shots} shot"
+             f"{'s' if shots != 1 else ''} (still while they sway, a smooth "
+             "glide when they move, never across a cut)" if moving else
+             f"the speaker holds still: one framing per shot ({shots})")
+            + " — framed from a dense face track")
+        if track:
+            cuts = sum(1 for a, b in zip(track, track[1:]) if a["source"] != b["source"])
+            bits.append(f"re-aimed on {cuts} cut{'s' if cuts != 1 else ''}")
+    elif track:
         cuts = sum(1 for a, b in zip(track, track[1:]) if a["source"] != b["source"])
         bits.append(f"the speaker moves between takes, so the card re-aims on "
                     f"{cuts} cut{'s' if cuts != 1 else ''} "
@@ -14899,10 +15271,13 @@ def _resolve_panel(ctx, edl, spans, box, source, fit, canvas, follow=False):
                     "holding every measured position of the head; never mid-shot)")
     elif isinstance(source, str) and source == "auto" and not lowres and face is not None:
         bits.append("one framing holds every measured position of the head")
-    if lowres and isinstance(source, str):
+    if lowres and isinstance(source, str) and fit != "crop":
         bits.append("low-resolution source shown whole (contain), edge "
                     "blanking trimmed")
-    return box, rect, fit, "; ".join(bits), track
+    elif lowres and isinstance(source, str):
+        bits.append(f"low-resolution source framed on the speaker at most "
+                    f"{picture_cards.SOURCE_UPSCALE_CAP:g}x")
+    return box, rect, fit, "; ".join(bits), track, follows
 
 
 def set_picture_card(ctx, id, start, end, box=None, fit=None, radius=.045,
@@ -14910,8 +15285,11 @@ def set_picture_card(ctx, id, start, end, box=None, fit=None, radius=.045,
                      shadow=.35, entrance="lift", exit="fade", duration_s=.45,
                      motion_motif=None, background_style=None,
                      background_color2=None, background_dim=None, grain=None,
-                     vignette=None, source=None, panels=None):
-    """Create/replace one native footage-only composition in one revision."""
+                     vignette=None, source=None, panels=None, follow=True):
+    """Create/replace one native footage-only composition in one revision.
+    follow (default on): an 'auto' card follows a speaker who moves inside
+    a shot (_card_follow); False keeps one still framing per shot."""
+    track_face = _truthy(follow)
     motion_motif, error = _motion_motif_value(ctx, motion_motif)
     if error:
         return error
@@ -14978,11 +15356,18 @@ def set_picture_card(ctx, id, start, end, box=None, fit=None, radius=.045,
             return err
     else:
         card_box = [.06, .24, .94, .74]
-    card_source, card_track = None, None
+    card_source, card_track, card_follow = None, None, None
     video_lowres = picture_cards.is_lowres(video.get("width"), video.get("height"))
     cuts = (_card_cuts(ctx, edl, spans)
             if spans and (source != "program" or panels) else [])
     cut_list = ", ".join(f"{t:g}s" for t in cuts[:3])
+    if panels is None and source == "auto" and cuts and not video_lowres \
+            and (fit in (None, "crop")) and track_face \
+            and _card_dense(ctx, edl, spans):
+        # a dense face track frames every shot itself (one follow span per
+        # shot: the render splits its blocks on each cut), so the card
+        # stays framed from the source across the cuts
+        cuts = []
     if panels is None and source == "auto" and cuts and not video_lowres \
             and _shots_reframe(ctx, edl, spans, cuts):
         # every cut is a reframe edge the render splits its blocks on, and
@@ -15031,7 +15416,7 @@ def set_picture_card(ctx, id, start, end, box=None, fit=None, radius=.045,
             pfit = panel.get("fit")
             if pfit is not None and pfit not in ("crop", "pad"):
                 return f"REJECTED: panel {k + 1} fit must be 'crop' or 'pad'."
-            pbox, prect, _pfit, note, _track = _resolve_panel(
+            pbox, prect, _pfit, note, _track, _follows = _resolve_panel(
                 ctx, edl, spans, pbox, psrc, pfit, canvas)
             if pbox is None:
                 return note
@@ -15039,8 +15424,9 @@ def set_picture_card(ctx, id, start, end, box=None, fit=None, radius=.045,
             report.append(f"panel {k + 1}: {note}")
         look_rect = rows_panels[0]["source"]
     elif source != "program":
-        rbox, rect, rfit, note, card_track = _resolve_panel(
-            ctx, edl, spans, card_box, source, fit, canvas, follow=True)
+        rbox, rect, rfit, note, card_track, card_follow = _resolve_panel(
+            ctx, edl, spans, card_box, source, fit, canvas, follow=True,
+            track_face=track_face)
         if rbox is None:
             return note
         card_box, card_source, fit = rbox, [round(v, 4) for v in rect], rfit
@@ -15075,7 +15461,8 @@ def set_picture_card(ctx, id, start, end, box=None, fit=None, radius=.045,
             background_style=style,background_color2=background_color2,
             background_dim=background_dim,grain=grain,
             vignette=vignette, source=card_source,
-            panels=rows_panels, source_track=card_track)).model_dump()
+            panels=rows_panels, source_track=card_track,
+            follow=card_follow)).model_dump()
         if row["end"]-row["start"] < .5:
             raise ValueError("Allow at least 0.5 seconds for a footage card")
     except (ValueError,TypeError) as exc:
@@ -22481,7 +22868,11 @@ def review_audio(ctx, asset_key=None, times=None, output_times=None,
 
 
 def _frame_focus_at_source(edl, source_t):
-    """The crop focus the renderer uses for a source moment."""
+    """The crop focus the renderer uses for a source moment (a crop that
+    follows the speaker: where its path is then)."""
+    moving = follow.frame_focus_at(edl, source_t)
+    if moving is not None and _frame_mode_at_source(edl, source_t) == "crop":
+        return moving
     frame = edl.get("frame") or {}
     base = (frame.get("focus_x"), frame.get("focus_y"))
     for span in frame.get("focus_track") or []:
@@ -25619,7 +26010,9 @@ TOOLS = {
                   "For a 4:3 picture on 9:16: picture=[0,0.2890625,1,0.7109375]. "
                   "A rounded card on a designed canvas needs none of this: "
                   "set_picture_card reads the full source frame itself. "
-                  "Captions, headlines and branding stay at the full delivery resolution.",
+                  "Captions, headlines and branding stay at the full delivery resolution. "
+                  "set_frame writes STILL aims: it drops a face-following path auto_reframe "
+                  "measured (call auto_reframe again to re-measure one).",
                   {"ratio": {"type": "string",
                              "enum": ["source", "16:9", "9:16", "1:1",
                                       "4:5"]},
@@ -25653,13 +26046,23 @@ TOOLS = {
                      "burned-in inset or border that would leave a thin "
                      "sliver at its edge (an EDGE BAND note asks you to look "
                      "when it cannot). "
+                     "FOLLOW (default on): inside each shot the crop follows "
+                     "the speaker's face, measured on the kept footage (4 fps) "
+                     "— it holds STILL while they sway and glides (eased, "
+                     "speed-limited, never a whip, never across a cut) only "
+                     "when they move far enough that a still crop would cut "
+                     "the head or lose the composition; a re-aim that can land "
+                     "on a jump cut happens on the cut. A speaker who stays "
+                     "put gets no motion; a shot with two or more people keeps "
+                     "its aim. follow=false keeps one aim per shot. "
                      "Pass mode explicitly to force one. Read what it reports "
                      "and repeat THAT.",
                      {"ratio": {"type": "string",
                                 "enum": ["9:16", "1:1", "4:5", "16:9",
                                          "source"]},
                       "mode": {"type": "string",
-                               "enum": ["auto", "crop", "pad", "pad_blur"]}}),
+                               "enum": ["auto", "crop", "pad", "pad_blur"]},
+                      "follow": {"type": "boolean"}}),
     "start_media_sequence": (
         start_media_sequence,
         "Start a NEW media-only sequence from one uploaded video clip or image, "
@@ -26174,12 +26577,18 @@ TOOLS = {
         "cards are one purposeful format, not a quota. "
         "FOOTAGE — source: the card takes its picture straight from the full SOURCE frame "
         "(enlarged once, at most 2x), never from the already-cropped 9:16 program. "
-        "Default 'auto' frames the speaker from the index's face boxes (a medium close-up with "
-        ">=8% headroom above the head) so EVERY measured position of the head stays inside the "
-        "card, and where the speaker moves between takes it re-aims on the cut (one framing "
-        "per take, never mid-shot; the result says how many); on a source below 720p it shows the WHOLE frame "
+        "Default 'auto' frames the speaker as a medium close-up (>=8% headroom above the "
+        "head) from a face track measured on the window's kept footage (4 fps) and FOLLOWS "
+        "a speaker who moves inside a shot: the card holds STILL while they sway and glides "
+        "(eased, speed-limited, never a whip) only when a still framing would cut the head; "
+        "a re-aim that can land on a jump cut happens on the cut; every camera shot gets its "
+        "own framing and nothing moves across a cut (the result says how many shots follow). "
+        "follow=false keeps one still framing per shot. Without a measurable track it frames "
+        "every measured position of the head (index boxes) and re-aims on the cut. On a "
+        "source below 720p 'auto' shows the WHOLE frame "
         "(contain: the box shrinks to the footage's aspect, edge blanking trimmed) — archival "
-        "4:3 talks belong in a full-width 4:3 card, not a 3.7x crop. 'full' = the whole source "
+        "4:3 talks belong in a full-width 4:3 card, not a 3.7x crop; fit='crop' there frames "
+        "the speaker at most 2x and follows them. 'full' = the whole source "
         "frame; [left,top,right,bottom] = that rect of the SOURCE frame (look_at gives the "
         "fractions); 'program' = the composed program picture (frame.picture region) as before. "
         "fit: 'crop' keeps the box and trims the source rect to it; 'pad' keeps the whole rect "
@@ -26226,6 +26635,7 @@ TOOLS = {
          "source":{"anyOf":[{"type":"string","enum":["auto","full","program"]},
                             {"type":"array","items":{"type":"number"},
                              "minItems":4,"maxItems":4}]},
+         "follow":{"type":"boolean"},
          "panels":{"type":"array","minItems":2,"maxItems":3,"items":{
              "type":"object","properties":{
                  "box":{"type":"array","items":{"type":"number"},"minItems":4,"maxItems":4},
@@ -28093,9 +28503,11 @@ _COMPACT_CONTRACTS = {
     "set_picture_card": (
         "Footage-only rounded card for start/end program seconds (box, radius, "
         "border, shadow, entrance/exit). Its footage comes from the full SOURCE "
-        "frame (source='auto' frames the speaker with headroom, keeps every "
-        "measured head position inside and re-aims on a cut where the speaker "
-        "moved; a sub-720p source is shown whole), enlarged at most 2x; panels=[{box, source}, "
+        "frame (source='auto' frames the speaker with headroom and follows a "
+        "speaker who moves inside a shot — still while they sway, a smooth "
+        "glide when a still card would cut the head, never across a cut; a "
+        "sub-720p source is shown whole unless fit='crop'), enlarged at most "
+        "2x; panels=[{box, source}, "
         "...] stacks the speaker and the screen/inset they show. The default "
         "canvas is dark and sampled from the footage; never a flat void, and "
         "no blurred self-copy on low-resolution footage."),

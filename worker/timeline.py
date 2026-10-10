@@ -1624,7 +1624,85 @@ def remap_program_items(edl, old_tl, new_tl):
                     "on the same moment.")
             kept_mu.append([ns, ne])
         edl["caption_mutes"] = kept_mu
+    region_notes += _reveal_follow(edl, getattr(new_tl, "segs", None)
+                                   or edl.get("keep") or [],
+                                   getattr(old_tl, "segs", None))
     return region_notes
+
+
+# follow.MOVE_MIN_S: the shortest glide a face-following crop plays on screen
+# (kept equal by tests; this module stays importable by the backend alone).
+FOLLOW_GLIDE_MIN_S = 0.8
+
+
+def revealed_follow(spans, keep, old_keep=None, glide=FOLLOW_GLIDE_MIN_S):
+    """(spans, n) — face-following paths (frame.follow / a card's follow,
+    worker/follow.py) whose quick re-aims now PLAY: follow.plan hides a
+    re-aim inside footage the edit had cut (a jump cut), as short as that
+    gap. When a later edit keeps that footage again the re-aim would whip
+    across the screen, so each move shorter than ``glide`` that now
+    overlaps kept footage by more than a frame — and did not before
+    (``old_keep``; a move already on screen, a walk's pan, is left as
+    planned) — is stretched to ``glide`` (as far as its neighbouring keys
+    allow), centred where it was. n is the number of moves slowed. Pure:
+    no measuring, no other key moves."""
+    kept = [(float(a), float(b)) for a, b in keep or []]
+    was = None if old_keep is None else [(float(a), float(b)) for a, b in old_keep]
+
+    def shows(a, b, segs):
+        return any(min(b, e) - max(a, s) > 1.0 / 30.0 for s, e in segs)
+    out, n = [], 0
+    for sp in spans or []:
+        if not isinstance(sp, dict):
+            out.append(sp)
+            continue
+        try:
+            keys = [[float(k[0]), float(k[1]), float(k[2])] for k in sp.get("k") or []]
+            t0, t1 = float(sp.get("t0")), float(sp.get("t1"))
+        except (TypeError, ValueError, IndexError):
+            out.append(sp)
+            continue
+        changed = False
+        for i in range(len(keys) - 1):
+            a, b = keys[i][0], keys[i + 1][0]
+            if keys[i][1:] == keys[i + 1][1:] or b - a >= glide - 1e-3:
+                continue
+            if not shows(a, b, kept) or (was is not None and shows(a, b, was)):
+                continue
+            lo = keys[i - 1][0] + .04 if i > 0 else min(a, t0)
+            hi = keys[i + 2][0] - .04 if i + 2 < len(keys) else max(b, t1)
+            c = (a + b) / 2.0
+            na, nb = max(lo, c - glide / 2.0), min(hi, c + glide / 2.0)
+            if nb - na < glide:          # blocked on one side: lean the other
+                na = max(lo, nb - glide)
+                nb = min(hi, na + glide)
+            na, nb = round(min(na, a), 3), round(max(nb, b), 3)
+            if nb - na <= (b - a) + 1e-3:
+                continue
+            keys[i][0], keys[i + 1][0] = na, nb
+            changed = True
+            n += 1
+        out.append(dict(sp, k=keys) if changed else sp)
+    return out, n
+
+
+def _reveal_follow(edl, keep, old_keep=None):
+    """revealed_follow over the frame's and every card's follow paths."""
+    total = 0
+    frame = edl.get("frame")
+    if isinstance(frame, dict) and frame.get("follow"):
+        frame["follow"], n = revealed_follow(frame["follow"], keep, old_keep)
+        total += n
+    for card in (edl.get("effects") or {}).get("picture_cards") or []:
+        if isinstance(card, dict) and card.get("follow"):
+            card["follow"], n = revealed_follow(card["follow"], keep, old_keep)
+            total += n
+    if not total:
+        return []
+    return [f"note: {total} face-following re-aim{'s' if total != 1 else ''} "
+            "that happened on a jump cut now play{} on screen (that footage is "
+            "kept again) — slowed to a {:g}s glide.".format(
+                "s" if total == 1 else "", FOLLOW_GLIDE_MIN_S)]
 
 
 def _shot_at(shots, t):

@@ -279,7 +279,9 @@ def _reframe_findings(edl, index):
     if frame.get("ratio") in (None, "source") or frame.get("mode") != "crop":
         return []
     shots = list((index or {}).get("shots") or [])
-    track = list(frame.get("focus_track") or [])
+    # a measured face-following span (frame.follow) is shot-specific framing
+    track = list(frame.get("focus_track") or []) + [
+        sp for sp in frame.get("follow") or [] if isinstance(sp, dict)]
     timeline = Timeline(edl.get("keep") or [], edl.get("inserts") or [],
                         edl.get("speed") or [])
     active = [(shot, max(float(shot.get("start", 0)), s),

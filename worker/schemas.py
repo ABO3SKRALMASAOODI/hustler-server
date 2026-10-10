@@ -737,6 +737,62 @@ class FocusSpan(BaseModel):
         return round(min(max(float(v), 0.0), 1.0), 3)
 
 
+# A follow path (worker/follow.py): at most this many spans (one per shot)
+# and keys per span.
+FOLLOW_MAX_SPANS = 64
+FOLLOW_MAX_KEYS = 120
+
+
+class FollowSpan(BaseModel):
+    """One shot's face-following path (worker/follow.py): over SOURCE
+    seconds [t0, t1] the crop window (Frame.follow) or the card's source
+    rect (PictureCard.follow) is centred on a monotone cubic through
+    ``k`` = [[t, x, y], ...] — SOURCE seconds and source-frame fractions —
+    held before the first key and after the last. Written once from a
+    measured face track, so every render lane draws the same motion. A
+    span never crosses a cut: the renderer splits its blocks on its edges."""
+    t0: float = Field(ge=0, allow_inf_nan=False)
+    t1: float = Field(gt=0, allow_inf_nan=False)
+    k: List[List[float]]
+
+    @field_validator("k")
+    @classmethod
+    def _keys(cls, value):
+        out = []
+        for key in value or []:
+            if len(key) != 3 or not all(math.isfinite(float(v)) for v in key):
+                raise ValueError("follow keys are [t, x, y] (source seconds, "
+                                 "fractions of the source frame)")
+            t = round(float(key[0]), 3)
+            if out and t <= out[-1][0]:
+                raise ValueError("follow keys must be in time order")
+            out.append([t, round(min(max(float(key[1]), 0.0), 1.0), 4),
+                        round(min(max(float(key[2]), 0.0), 1.0), 4)])
+        if not out:
+            raise ValueError("a follow span needs at least one key")
+        if len(out) > FOLLOW_MAX_KEYS:
+            raise ValueError(f"a follow span has at most {FOLLOW_MAX_KEYS} keys")
+        return out
+
+    @model_validator(mode="after")
+    def _span(self):
+        if self.t1 <= self.t0:
+            raise ValueError("a follow span needs t1 > t0")
+        if self.k[0][0] < self.t0 - .5 or self.k[-1][0] > self.t1 + .5:
+            raise ValueError("follow keys must lie inside their span")
+        return self
+
+
+def _follow_spans(value):
+    """Ordered, non-overlapping, bounded; None when empty."""
+    spans = sorted(value or [], key=lambda sp: sp.t0)
+    if any(b.t0 < a.t1 - .001 for a, b in zip(spans, spans[1:])):
+        raise ValueError("follow spans must not overlap")
+    if len(spans) > FOLLOW_MAX_SPANS:
+        raise ValueError(f"at most {FOLLOW_MAX_SPANS} follow spans")
+    return spans or None
+
+
 class Frame(BaseModel):
     """Output frame. ratio 'source' keeps the original aspect ratio; anything
     else is achieved by crop (center-crop + scale), pad (fit + black bars) or
@@ -761,6 +817,11 @@ class Frame(BaseModel):
     focus_x: Optional[float] = None
     focus_y: Optional[float] = None
     focus_track: Optional[List[FocusSpan]] = None
+    # follow (Oct 2026): per-shot face-following paths for the crop (see
+    # FollowSpan / worker/follow.py). Inside a span the crop window's centre
+    # follows the path instead of the static aim; crop-mode blocks only.
+    # None keeps every stored EDL's signature and render unchanged.
+    follow: Optional[List[FollowSpan]] = None
     # Optional destination rectangle on the output canvas, in fractions.
     # Crop/fit and source focus apply INSIDE it; the exterior stays black.
     # This preserves the source/transcript clock for portrait editorial layouts.
@@ -785,6 +846,20 @@ class Frame(BaseModel):
         if any(b.t0 < a.t1 - .001 for a,b in zip(spans, spans[1:])):
             raise ValueError("focus_track spans must not overlap")
         return spans or None
+
+    @field_validator("follow")
+    @classmethod
+    def _ordered_follow(cls, value):
+        return _follow_spans(value)
+
+    @model_validator(mode="after")
+    def _follow_needs_a_crop(self):
+        # A whole-frame ('source') or fitted frame has no window to move.
+        if self.follow and (self.ratio == "source" or self.mode != "crop"
+                            and not any((sp.mode or self.mode) == "crop"
+                                        for sp in self.focus_track or [])):
+            self.follow = None
+        return self
 
     @field_validator("focus_x", "focus_y")
     @classmethod
@@ -1432,6 +1507,15 @@ class PictureCard(BaseModel):
     source: Optional[List[float]] = None
     panels: Optional[List[CardPanel]] = None
     source_track: Optional[List[CardSourceSpan]] = None
+    # follow (Oct 2026): per-shot face-following paths of the source rect's
+    # CENTRE (FollowSpan); the rect keeps its size (source_track's span, else
+    # source). Single source cards only.
+    follow: Optional[List[FollowSpan]] = None
+
+    @field_validator("follow")
+    @classmethod
+    def _ordered_follow(cls, value):
+        return _follow_spans(value)
 
     @field_validator("box")
     @classmethod
@@ -1445,6 +1529,8 @@ class PictureCard(BaseModel):
 
     @model_validator(mode="after")
     def _panels(self):
+        if self.follow is not None and (self.source is None or self.panels):
+            self.follow = None
         if self.source_track is not None:
             # A per-shot framing of the ONE source rect: meaningless without
             # it (a program card or a stack), and canonical as None when empty.

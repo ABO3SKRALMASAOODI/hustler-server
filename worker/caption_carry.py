@@ -451,11 +451,11 @@ def face_geometry(edl):
               for o in edl.get("overlays") or [] if isinstance(o, dict)
               and (o.get("fit") == "cover" or o.get("screen"))]
     cards = [{k: c.get(k) for k in ("start", "end", "box", "fit", "source", "panels",
-                                    "source_track")}
+                                    "source_track", "follow")}
              for c in (fx or {}).get("picture_cards") or [] if isinstance(c, dict)]
     frame = edl.get("frame") if isinstance(edl.get("frame"), dict) else {}
     frame = {k: (frame or {}).get(k) for k in ("ratio", "mode", "focus_x", "focus_y",
-                                               "focus_track", "picture")}
+                                               "focus_track", "follow", "picture")}
     blob = json.dumps(_canon({"keep": keep, "speed": edl.get("speed") or [],
                               "inserts": inserts, "covers": covers, "frame": frame,
                               "zooms": (fx or {}).get("zooms") or [], "cards": cards,

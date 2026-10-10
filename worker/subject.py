@@ -79,6 +79,22 @@ def _faces_in(cv2, cascades, gray):
     return hits
 
 
+def _distinct(hits):
+    """``hits`` (biggest first) without boxes that mostly overlap a bigger
+    one: the frontal and profile cascades both firing on one face are one
+    face, not a group shot."""
+    out = []
+    for x, y, w, h in hits:
+        for X, Y, W, H in out:
+            ix = max(0, min(x + w, X + W) - max(x, X))
+            iy = max(0, min(y + h, Y + H) - max(y, Y))
+            if ix * iy > .3 * min(w * h, W * H):
+                break
+        else:
+            out.append((x, y, w, h))
+    return out
+
+
 def _energy_point(np, gray):
     """Centroid of gradient energy: where the DETAIL is.
 
@@ -140,7 +156,15 @@ def points_from_frames(paths, max_width=640):
             gray = cv2.equalizeHist(gray)
         except Exception:
             continue
-        faces = _faces_in(cv2, cascades, gray) if cascades else []
+        faces = _distinct(_faces_in(cv2, cascades, gray)) if cascades else []
+        if not faces and len(cascades) > 1:
+            # The profile cascade finds faces turned screen-LEFT; a speaker
+            # turned the other way (toward a slide, an interviewer) is found
+            # on the mirrored frame — Oct 2026, a Thiel lecture fell back to
+            # pad_blur because no frame of him turned right was "a face".
+            flip = cv2.flip(gray, 1)
+            faces = _distinct([(w - x - fw, y, fw, fh) for x, y, fw, fh
+                               in _faces_in(cv2, cascades[1:], flip)])
         if len(faces) == 1:
             # Face size alone cannot identify the speaker in a group shot.
             x, y, fw, fh = faces[0]

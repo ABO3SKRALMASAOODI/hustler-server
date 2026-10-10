@@ -352,6 +352,11 @@ class Geometry:
         self.focus = ((frame or {}).get("focus_x"), (frame or {}).get("focus_y"))
         self.track = (frame or {}).get("focus_track") or []
         self.picture = (frame or {}).get("picture")
+        # a crop that FOLLOWS the speaker (worker/follow.py): the window's
+        # centre at each source moment, so faces stay where the follow put
+        # them
+        import follow
+        self.follow = follow.frame_spans(edl)
         self.W, self.H = int(W), int(H)
         fx = edl.get("effects") or {}
         # the camera as it renders (renderer.camera_zooms: edges near a cut
@@ -361,6 +366,15 @@ class Geometry:
         self.out_duration = float(out_duration)
 
     def _frame_at(self, src_t):
+        focus, mode = self._static_frame_at(src_t)
+        if self.follow and mode == "crop":
+            import follow
+            span = follow.span_at(self.follow, src_t)
+            if span:
+                return follow.centre_at(span, src_t), mode
+        return focus, mode
+
+    def _static_frame_at(self, src_t):
         for sp in self.track:
             try:
                 if float(sp.get("t0", 0)) <= src_t <= float(sp.get("t1", 0)):

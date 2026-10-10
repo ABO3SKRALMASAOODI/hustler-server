@@ -2039,6 +2039,15 @@ LEGIBILITY_VERSION = 1
 # keeps its cache. Bump when what such a render shows changes again.
 CAPTION_CARRY_VERSION = 1
 
+# Crops and picture cards that follow the speaker's face inside a shot
+# (worker/follow.py, Frame.follow / PictureCard.follow). Stamped as
+# `follow_v` on every render and compared ONLY for EDLs that carry a follow
+# path: a render made by a pipeline that did not draw it (an older lane
+# validates the field away and renders the static crop) is stale, and so is
+# one drawn by an older follow renderer. Everything else keeps its cache.
+# Bump when how a follow path is drawn changes.
+FOLLOW_VERSION = 1
+
 # The picture pipeline's look. A stitched preview stream-copies the unchanged
 # stretches of the previous preview and splices in newly rendered pieces, so
 # pieces from a different look show a sharpness/tone seam at every splice.
