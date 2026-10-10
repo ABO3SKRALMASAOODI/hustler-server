@@ -15,8 +15,9 @@ decorates a jump cut.
   only where it is genuinely jarring, takes B-roll or a framing change (see
   zooms) — never a full-screen effect.
 - A junction at a real turn may carry one library sound, counted in the
-  short's sparse budget (about one sound every 4–5 s at most, never the same
-  sound twice within ~3 s). Ordinary cuts inside a conversation get none.
+  short's sparse budget (a podcast short: zero by default, at most 1-2;
+  elsewhere about one sound every 4–5 s at most, never the same sound twice
+  within ~3 s). Ordinary cuts inside a conversation get none.
 - Vary the junction vocabulary across a reel; never the same effect
   back-to-back on every boundary.
 
@@ -26,6 +27,16 @@ moment needs it — a key word, a reveal, a genuinely jarring jump cut, a
 real-world action shown — and zero is a fine answer. Never a zoom per cut,
 a camera move per hero moment or a sound per landing or transition: used
 where nothing calls for them they make an edit look childish.
+SOUND EFFECTS IN A PODCAST OR TALKING SHORT DEFAULT TO ZERO (owner, Oct
+2026): at most 1-2 per short, each on a structural moment (the payoff, a
+real section change) with a visual partner within ~50 ms of its hit (a
+graphic landing, a B-roll entry, a real-world action shown). Never a
+reflexive opening whoosh, never a bright sound (ding, pop, click, shutter)
+on the onset of a payoff or emphasis word, and never a literal sound pun: a
+shutter on the word 'pictures', a cash register on the word 'money' when
+nothing on screen is a payment. Leave gain_db unset: add_sfx levels each
+library sound against the measured voice at its hit and reports where it
+sits.
 
 ## Evidence to inspect
 
@@ -62,14 +73,15 @@ when it did, its cues carry ids starting `look_tx` — read its receipt or
 sound. `set_transitions` adds no sound either; most junctions stay silent.
 Where a real turn earns one, place it from the library
 (`list_sound_library`):
-`add_sfx(storage_key='sound:swish_1', at=..., gain_db=-14)` for a whip or
+`add_sfx(storage_key='sound:swish_1', at=...)` for a whip or
 zoom punch, `sound:whoosh_soft_1` or `sound:whoosh_soft_2` into a slide, a
 light leak or a reveal, `sound:glitch_1` under a deliberate glitch, and
 `sound:impact_1` under a flash only when that junction is the payoff or the
 single biggest landing (at most once per short). Put `at` ON the cut: the
 tool starts each recording early by its measured peak so the peak lands
-there (never pre-roll by hand). Pass the suggested gain so it sits under
-the voice, and give each cue a
+there (never pre-roll by hand). Leave gain_db unset: the tool levels it
+against the measured voice at the cut (a swish or whoosh about 8 dB under
+it) and reports where it sits. Give each cue a
 `purpose` naming the junction. A run of junctions inside ~3 s gets one
 sound, not one each.
 

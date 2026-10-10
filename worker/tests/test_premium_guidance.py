@@ -114,7 +114,7 @@ def test_motion_design_skill_teaches_templates_timing_runtime_and_review():
 def test_audio_teaches_the_sound_library_and_sparse_usage():
     text = _flat(_skill("audio"))
     for phrase in ("list_sound_library()", "storage_key='sound:<id>'",
-                   "always pass the suggested gain", "sfx=true", "it HITS",
+                   "leave gain_db unset", "sfx=true", "it HITS",
                    "Never pre-roll by hand",
                    "whoosh_soft_1", "swish_1", "impact_1", "riser_4",
                    "shutter_1", "typing_1", "click_1", "cash_register_1",
@@ -345,7 +345,7 @@ def test_compact_contracts_carry_the_creative_menus():
                  "set_picture_card", "look_at"):
         assert name in contracts, name
     assert "'sound:<id>'" in contracts["add_sfx"]
-    assert "suggested gain_db" in contracts["add_sfx"]
+    assert "gain_db unset" in contracts["add_sfx"]
     assert "about one sound every 4-5 s" in contracts["add_sfx"]
     assert "sound:<id>" in contracts["list_sound_library"]
     assert "Silent by default" in contracts["add_motion_graphic"]

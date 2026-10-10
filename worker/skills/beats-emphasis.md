@@ -50,10 +50,13 @@ analysis warns the file is broken, say so.
 SOUND ON EMPHASIS IS RARE: emphasis alone never earns a sound — captions and
 punch-ins stay silent. A library cue lands on a measured instant only when
 something meaningful happens on screen there: `impact_1` once, on the payoff
-or the single biggest landing; `pop_1` or `tick_1` on a list item that
-appears as a graphic, spaced at least ~3 s from the last one; a riser that
-ENDS on the payoff (its `at` is the payoff: the tool starts it early). At
-most about one sound every 4–5 s (read audio for timing and levels).
+or the single biggest landing (its weight is below 150 Hz, so it may sit
+under the word); `pop_1` or `tick_1` on a list item that appears as a
+graphic, spaced at least ~3 s from the last one and never on the onset of
+an emphasis word (a bright sound there masks the word); a riser that ENDS
+on the payoff (its `at` is the payoff: the tool starts it early). A podcast
+short carries 1-2 at most; elsewhere at most about one sound every 4–5 s
+(read audio for timing and levels).
 
 Every one of these writes concrete timestamps; any number you quote must come
 from the tool result. The reply does not recite them — the timeline shows

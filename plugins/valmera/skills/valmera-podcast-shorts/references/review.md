@@ -30,10 +30,12 @@ at 1x with the sound on, then answer:
    only where it earns one; the owner's song's button when music is on) and
    held 1.0-1.5 s, and does it resolve the viewer question?
 3. **Targets:** does it meet its Look's targets: change rate, hero moments,
-   picture area; sound only from the approved library and only on
-   meaningful on-screen moments, at most about one every 4-5 s and within
-   the Look's ceiling, no sound repeated within ~3 s, nothing on captions,
-   zooms or ordinary cuts; music only if `music_effective` is on and only the
+   picture area; sound only from the approved library, zero by default and
+   at most 1-2 per short, each on a structural on-screen moment with a
+   visual partner within ~50 ms, none on a payoff word's onset, no literal
+   pun on the spoken word, no reflexive opening whoosh, nothing too quiet to
+   hear or masking a word (`audit_audio_mix`), no sound repeated within
+   ~3 s, nothing on captions, zooms or ordinary cuts; music only if `music_effective` is on and only the
    owner's song; no digital silence (a flagged montage passage is noted in
    the handback)?
 4. **Attention:** with the famous name hidden, is the idea still worth
@@ -139,6 +141,7 @@ shipping as the owner's marketing should reach 7 or more; beating the
 references means 8 or more. **K** rewards camera moves that are motivated
 and few, never their count — a steady, well-framed short with no zoom where
 nothing called for one scores on its framing; **S** rewards sounds that are
-placed, sparse and earned, never their count; **M** is scored only when the owner supplied a
+placed, sparse and earned, never their count — a podcast short with no
+sound scores on its clean voice; **M** is scored only when the owner supplied a
 song. These scores are for calibration and owner
 conversations, never a ship gate or a number to stamp on every short.

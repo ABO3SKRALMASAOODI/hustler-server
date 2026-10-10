@@ -17,6 +17,17 @@ real-world action shown — and zero is a fine answer. Never a zoom per cut,
 a camera move per hero moment or a sound per landing or transition: used
 where nothing calls for them they make an edit look childish.
 
+SOUND EFFECTS IN A PODCAST OR TALKING SHORT DEFAULT TO ZERO (owner, Oct
+2026): at most 1-2 per short, each on a structural moment (the payoff, a
+real section change) with a visual partner within ~50 ms of its hit (a
+graphic landing, a B-roll entry, a real-world action shown). Never a
+reflexive opening whoosh, never a bright sound (ding, pop, click, shutter)
+on the onset of a payoff or emphasis word, and never a literal sound pun:
+a shutter on the word 'pictures', a cash register on the word 'money' when
+nothing on screen is a payment. Leave gain_db unset: add_sfx levels each
+library sound against the measured voice at its hit and reports where it
+sits.
+
 A steady, well-framed picture and a clean voice are the defaults, and every
 zoom or sound needs a reason you can name. The owner's references score
 about 7.5/10; October's bare clip pages (small picture, plain captions,
@@ -126,17 +137,22 @@ disagree, v9 wins on method and the brief wins on preferences.
 ## Sound and music
 
 **Sound** comes only from the owner-approved library of real recordings
-(`list_sound_library`; `add_sfx(storage_key='sound:<id>', at=...,
-gain_db=<suggested>)`), never from online search. It goes only where
-something meaningful happens on screen: a designed graphic landing, a real
+(`list_sound_library`; `add_sfx(storage_key='sound:<id>', at=...)` with
+gain_db unset), never from online search. A podcast short carries zero by
+default and at most 1-2, each on a structural moment where something on
+screen changes within ~50 ms of the hit: a designed graphic landing, a real
 section change or B-roll entry, the payoff, or a real-world action shown (a
-shutter on a photo, typing under typed text, a click on a button press, a
-cash register on a money figure). Never on captions or ordinary cuts inside
-the conversation. Optional, never a quota: at most about one sound every
-4-5 s (a ceiling, usually far fewer), never the same sound twice within
-~3 s, zero when nothing earns one; one family per short, matched to the
-material; peaks on the visual frame; mixed under the voice at the suggested
-gain. Motion graphics are silent unless the editor passes `sfx=true`, and
+shutter on a photo being taken, typing under typed text, a click on a
+button press, a cash register on a payment shown). Never on captions or
+ordinary cuts inside the conversation, never the reflexive opening whoosh,
+never a bright sound (ding, pop, click, shutter) on the payoff word's
+onset, never a literal pun on the spoken word. Never the same sound twice
+within ~3 s; one family per short, matched to the material; peaks on the
+visual frame. `add_sfx` levels each recording against the measured voice
+at its hit (whoosh and swish about 8 dB under, ding, pop, click and
+shutter about 10 under, an impact louder only below 150 Hz) and reports
+where it sits; `audit_audio_mix` lists every sound's level and placement
+checks. Motion graphics are silent unless the editor passes `sfx=true`, and
 `apply_look` places no sound unless called with `transition_sounds=true`
 (looks.md, **Sound**).
 

@@ -18,6 +18,16 @@ moment needs it — a key word, a reveal, a genuinely jarring jump cut, a
 real-world action shown — and zero is a fine answer. Never a zoom per cut,
 a camera move per hero moment or a sound per landing or transition: used
 where nothing calls for them they make an edit look childish.
+SOUND EFFECTS IN A PODCAST OR TALKING SHORT DEFAULT TO ZERO (owner, Oct
+2026): at most 1-2 per short, each on a structural moment (the payoff, a
+real section change) with a visual partner within ~50 ms of its hit (a
+graphic landing, a B-roll entry, a real-world action shown). Never a
+reflexive opening whoosh, never a bright sound (ding, pop, click, shutter)
+on the onset of a payoff or emphasis word, and never a literal sound pun: a
+shutter on the word 'pictures', a cash register on the word 'money' when
+nothing on screen is a payment. Leave gain_db unset: add_sfx levels each
+library sound against the measured voice at its hit and reports where it
+sits.
 
 - **Bind every graphic to a word or a beat.** The landing frame of a graphic
   sits on the spoken onset (0–3 frames early), never "somewhere in the
@@ -229,21 +239,26 @@ SOUND PAIRING — graphics are SILENT by default:
 - Most graphics need no sound. Opt a moment in with `sfx=true` only when its
   landing is meaningful on screen — the hook title, a hero landing, the
   payoff, or a graphic that shows a real-world action (a photo card's
-  shutter, a typewriter's typing, a UI press's click, a money figure's cash
-  register). `sfx=true` maps the template's declared sound roles onto the
+  shutter, a typewriter's typing, a UI press's click, a payment card's cash
+  register) — never a sound that puns on the spoken word (a shutter on a
+  slam of the word 'pictures'). `sfx=true` maps the template's declared sound roles onto the
   owner-approved library (`list_sound_library`); roles with no approved
-  recording are skipped. Owned cues move and delete with the graphic.
+  recording are skipped. Owned cues move and delete with the graphic, and
+  each is levelled against the measured voice at its landing (the template's
+  own relative level kept as a small offset); the result's NOTE lists the
+  levels and any CHECK (a bright cue on a payoff word's onset, the
+  talking-short budget).
 - The add_motion_graphic result lists each owned cue as sound@time — the
   landing its peak hits (each cue sits on its template's landing frame and
   the recording starts early by itself); in `get_edl` they are sfx items
   whose ids start `mg_<graphic id>_sfx`, and their `at` is where the file
   starts, earlier by its peak. Read
-  them against the short's budget — about one sound every 4–5 s at most,
-  never the same sound twice within ~3 s — and adjust rather than stack: set
-  a level with `set_audio_gain(kind='sfx', id=..., gain_db=...)` after the
-  graphic's params are final (changing params or the template re-derives
-  the cues at their suggested gain), or `set_motion_graphic(id,
-  sfx=false)` to drop them.
+  them against the short's budget — 1-2 in a podcast short, about one
+  sound every 4–5 s at most elsewhere, never the same sound twice within
+  ~3 s — and adjust rather than stack: set a level with
+  `set_audio_gain(kind='sfx', id=..., gain_db=...)` after the graphic's
+  params are final (changing params or the template re-derives and
+  re-levels the cues), or `set_motion_graphic(id, sfx=false)` to drop them.
 - Accents: `*one word*` or a `*multi word run*` takes the accent; star 1–2
   words per line. Over a bright shirt or wall the renderer firms up the
   backing on its own (see LEGIBILITY); `scrim` on `hook_title`, `glow_title`
@@ -254,11 +269,13 @@ SOUND PAIRING — graphics are SILENT by default:
   library tails (`impact_1`, `ding_1`, `cash_register_1`) already stop at
   their measured fade point; pass dur_s only to change that.
 - A template whose cue repeats (a tick per counter step or per letter)
-  stays silent; give the settled figure one sound instead (`cash_register_1`
-  on money, `ding_1` on a result).
+  stays silent; give the settled figure one sound instead, on a visual
+  landing in the pause after its spoken number rather than on the number's
+  onset (a ding on the payoff number masks it), or let the figure land
+  silent.
 - For a moment with no owned cue, place one library sound yourself:
-  `add_sfx(storage_key='sound:<id>', at=<the landing frame>,
-  gain_db=<suggested>)`. `at` is where the sound HITS: the tool starts the
+  `add_sfx(storage_key='sound:<id>', at=<the landing frame>)`, gain_db
+  unset so the tool levels it against the voice. `at` is where the sound HITS: the tool starts the
   recording early by its measured peak (a riser ends on `at`, typing starts
   there) and reports where the peak lands, so never pre-roll by hand —
   `whoosh_soft_1` or `whoosh_soft_2` into a landing, `swish_1` for a quick

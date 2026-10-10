@@ -4270,11 +4270,15 @@ check("sfx: a valid one-shot validates", _ok.sfx[0].at == 5.0)
 check("sfx: gain defaults to -6dB", _ok.sfx[0].gain_db == -6.0)
 # Three layers, one number. A default that drifts between the schema, the tool
 # and the renderer means the stored EDL and the rendered audio disagree.
+# (Oct 2026: add_sfx's gain_db is optional — a library recording is levelled
+# against the voice at its hit — and any other sound falls back to the same
+# -6 dB the schema and the renderer use.)
 import inspect as _insp                                       # noqa: E402
 check("sfx: schema, tool and renderer agree on the default gain",
       schemas.SfxItem.model_fields["gain_db"].default == -6.0
       and _insp.signature(agent_tools.add_sfx)
-          .parameters["gain_db"].default == -6.0
+          .parameters["gain_db"].default is None
+      and agent_tools.SFX_DEFAULT_GAIN_DB == -6.0
       and "item.get('gain_db', -6.0)" in _insp.getsource(
           renderer.build_filtergraph))
 expect_reject("sfx past the end of the program",

@@ -12,11 +12,20 @@ deterministically so a short does not repeat the same file mechanically.
 Template sound cues written with the older role names are mapped through
 ROLE_ALIASES; a cue whose role has no approved recording is skipped.
 
-Usage policy (enforced by guidance and review, not by this module): sound
-only where something meaningful happens on screen — a designed graphic
-landing, a real section change/B-roll entry, the payoff, or a real-world
-action shown on screen — never on captions, sparse (about one sound every
-4-5 s at most), mixed under the voice.
+Usage policy (guidance, review and sfx_placement's advisory checks): sound
+only where something meaningful happens on screen within ~50 ms of the hit —
+a designed graphic landing, a real section change/B-roll entry, the payoff,
+or a real-world action shown on screen — never on captions, never a bright
+sound on a payoff word's onset, never a literal pun on the spoken word;
+zero by default in a podcast short and at most 1-2 (about one every 4-5 s
+at most elsewhere).
+
+Levels: ``hit_lufs`` / ``hit_lufs_hp150`` are each recording's measured hit
+loudness (sfx_mix.measure_recording); add_sfx and template cues set the gain
+from the voice at the hit (sfx_mix). ``gain_db`` is the older absolute
+suggestion under a ~-20 LUFS voice: the scale template cue gains were
+authored on (sfx_mix.cue_gain keeps their offsets from it) and the gain an
+unmeasured recording falls back to.
 
 Timing: an editor (or template cue) names the moment a recording should
 HIT; ``place`` turns that into the EDL's physical placement. ``peak_s`` is
@@ -256,5 +265,11 @@ def describe(r):
         timing = f"hits {hit_s(r['id']):g}s in"
     if r.get("max_s"):
         timing += f", stops by default {float(r['max_s']):g}s in"
-    return (f"{REF_PREFIX}{r['id']} [{r['role']}, {r['duration_s']:g}s, {timing}, suggested "
-            f"gain {r['gain_db']} dB] — {r['use']} (real recording, CC0)")
+    if r.get("hit_lufs") is not None:
+        # add_sfx sets the gain from the voice at the hit (sfx_mix); the
+        # listing gives the recording's own level so the range is legible
+        level = f"hit {float(r['hit_lufs']):g} LUFS, levelled against the voice"
+    else:
+        level = f"suggested gain {r['gain_db']} dB"
+    return (f"{REF_PREFIX}{r['id']} [{r['role']}, {r['duration_s']:g}s, {timing}, {level}] "
+            f"— {r['use']} (real recording, CC0)")

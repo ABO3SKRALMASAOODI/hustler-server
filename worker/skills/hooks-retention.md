@@ -43,9 +43,11 @@ THE HOOK — 0 to 1.5 s:
   Keep the minimum context to be understood.
 - PATTERN INTERRUPT within 0.1–0.6 s: a `hook_title` or `word_slam` on
   the first strong word, a card reveal, a flash or light leak. A punch-in at
-  0 s is an option, never a requirement, and at most one library sound sits
-  under the opening, only when its landing earns one (a soft whoosh into
-  the title). The speaker is on screen and talking by ~0.3 s.
+  0 s is an option, never a requirement. No reflexive opening whoosh: a
+  title already on screen at frame 0 has no entrance for a sound, and the
+  same whoosh on every short is a template. At most one library sound sits
+  under the opening, only when the title has a real entrance that earns
+  one. The speaker is on screen and talking by ~0.3 s.
 - HOOK TEXT by 1.5 s: the hook line (or its sharpest 2–6 words) as designed
   type, posed as the question or tension — never the answer.
 - FIRST FRAME is the thumbnail: sharp, composed, designed, never black or

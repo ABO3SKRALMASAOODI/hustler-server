@@ -15,19 +15,32 @@ real-world action shown — and zero is a fine answer. Never a zoom per cut,
 a camera move per hero moment or a sound per landing or transition: used
 where nothing calls for them they make an edit look childish.
 
+SOUND EFFECTS IN A PODCAST OR TALKING SHORT DEFAULT TO ZERO (owner, Oct
+2026): at most 1-2 per short, each on a structural moment (the payoff, a
+real section change) with a visual partner within ~50 ms of its hit (a
+graphic landing, a B-roll entry, a real-world action shown). Never a
+reflexive opening whoosh, never a bright sound (ding, pop, click, shutter)
+on the onset of a payoff or emphasis word, and never a literal sound pun: a
+shutter on the word 'pictures', a cash register on the word 'money' when
+nothing on screen is a payment. Leave gain_db unset: add_sfx levels each
+library sound against the measured voice at its hit and reports where it
+sits.
+
 - A sound earns its place only on a designed graphic landing, a real section
   change or B-roll entry, the payoff, or a real-world action shown on screen
-  (a shutter on a photo or still, typing under typed text, a click on a
-  button press, a cash register on a money figure).
+  (a shutter on a photo being taken, typing under typed text, a click on a
+  button press, a cash register on a payment shown) — and it needs a visual
+  partner: something on screen changes within ~50 ms of its hit.
 - Never a sound on captions, on ordinary cuts inside a conversation (jump
   cuts, angle changes), or on camera moves. Never a whoosh on every caption
   or graphic: sound design is structure, not wallpaper.
-- Sparse: at most about one sound every 4–5 s (a ceiling, not a target —
-  no more than about 8 in a 30–45 s short, usually far fewer), never the
-  same sound twice within ~3 s. Zero is a fine answer when nothing on screen
-  earns one.
+- Sparse: a podcast or talking short carries zero sounds by default and at
+  most 1-2. Elsewhere at most about one sound every 4–5 s (a ceiling, not a
+  target, usually far fewer), never the same sound twice within ~3 s. Zero
+  is a fine answer when nothing on screen earns one.
 - Match the material and keep one sound family per short; the peak lands on
-  the visual frame; mix under the voice so no word is masked.
+  the visual frame; the sound sits under the voice so no word is masked, and
+  a bright sound stays off the onset of the payoff word itself.
 - Never add music on your own initiative. Suggesting in the reply that a song
   would help is fine; choosing one is not.
 - No digital silence: under silent inserts, stills or a no-dialogue passage,
@@ -62,15 +75,17 @@ FOUR DISTINCT LAYERS — never confuse them:
   'sfx' or 'voiceover') — never `set_volume`, which changes the speaker.
 
 THE SOUND LIBRARY — `list_sound_library()` lists the owner-approved real
-recordings (CC0, no attribution) with when to use each and a suggested gain.
+recordings (CC0, no attribution) with when to use each and its measured hit
+level.
 Roles and ids: whoosh (`whoosh_soft_1`, `whoosh_soft_2`), swish (`swish_1`),
 impact (`impact_1`), riser (`riser_1` to `riser_4`), shutter (`shutter_1`,
 `shutter_2`), typing (`typing_1`, `typing_2`), click (`click_1`, `click_2`),
 pop (`pop_1`), tick (`tick_1`), ding (`ding_1`), glitch (`glitch_1`,
 `glitch_2`), cash (`cash_register_1`), heartbeat (`heartbeat_1`). Place one
 with `add_sfx(storage_key='sound:<id>', at=<program second it HITS>,
-gain_db=<suggested>, purpose=...)` and always pass the suggested gain: the
--6 dB default is louder than any library sound should sit. Motion graphics
+purpose=...)` and leave gain_db unset: the tool levels the recording against
+the measured voice at its hit and reports it in a MIX line (see LEVELS).
+Motion graphics
 are silent by default; `add_motion_graphic(..., sfx=true)` opts one moment
 in by mapping the template's sound roles onto library recordings (roles with
 no approved recording are skipped). Read `get_edl` (sfx) before adding a cue
@@ -84,14 +99,21 @@ CUE GRAMMAR — what may get a sound, and with what:
   for a whip or zoom punch, a soft whoosh for a slide or light leak, `glitch_1`
   or `glitch_2` only under a deliberate glitch transition.
 - The payoff or the single biggest landing → `impact_1`, at most once per
-  short; a riser (`riser_1`–`riser_4`) may lead into it and must END on the
-  frame. `heartbeat_1` only for a tense pause or emotional beat that the
+  short (its weight is in the sub, so it may sit under the payoff word); a
+  riser (`riser_1`–`riser_4`) may lead into it and must END on the frame. A
+  bright sound (ding, pop, click, tick, shutter, cash, glitch) never lands
+  on the onset of the payoff or an emphasis word: the word is the payoff,
+  and a ding there masks it. Let the type carry it, or put the sound in the
+  speech gap after the line where the picture changes. `heartbeat_1` only for a tense pause or emotional beat that the
   picture holds.
-- Real-world actions shown on screen → `shutter_1`/`shutter_2` on a photo,
-  still or freeze; `typing_1`/`typing_2` under typed text; `click_1`/`click_2`
-  on a visible button press; `pop_1` on a bubble, emoji or list item
-  appearing; `tick_1` on a counter or timeline step; `ding_1` on a result or
-  notification; `cash_register_1` on a money figure.
+- Real-world actions shown on screen → `shutter_1`/`shutter_2` on a photo
+  being taken or a freeze; `typing_1`/`typing_2` under typed text;
+  `click_1`/`click_2` on a visible button press; `pop_1` on a bubble, emoji
+  or list item appearing; `tick_1` on a counter or timeline step; `ding_1`
+  on a notification shown; `cash_register_1` on a payment shown.
+- Never a literal sound pun: the sound names an action ON SCREEN, never the
+  word being said. A shutter on the spoken word 'pictures' or a cash
+  register on 'money' with only text on screen is the childish version.
 - Repeating template cues (a counter's tick run, a tick per letter) break the
   ~3 s rule: leave that graphic silent and give its settled figure one sound.
 - One family per short: soft whooshes plus one impact for a talking reel;
@@ -128,9 +150,18 @@ TIMING — PEAKS LAND ON THE PICTURE:
   time), junctions from the program map, graphic landing frames.
 
 LEVELS:
-- Voice is the reference. Library sounds sit at their suggested gain
-  (roughly -9 to -17 dB) under the voice; lower one rather than let it mask a
-  word.
+- Voice is the reference, measured where the sound hits. `add_sfx` (and a
+  graphic's owned cues, and look transition sounds) set each library
+  recording's gain from the voice's short-term loudness at its hit — after
+  the dialogue leveller on a mastered short — so it sits at its role level:
+  whoosh and swish about 8 dB under the voice (6-10), a riser 9 under, ding,
+  pop, tick, click, shutter, cash and glitch about 10 under, typing 14
+  under, and an impact or heartbeat louder only below 150 Hz (13 dB under
+  the voice above 150 Hz, the whole hit at most 8 dB under). The MIX line
+  reports the gain and where it sits; a CHECK flags a sound that will be
+  inaudible or too hot. An explicit gain_db wins and is reported the same
+  way (`set_audio_gain` too), and `audit_audio_mix` lists every sound's
+  level against the voice with its placement checks.
 - When the user asked for music: the bed sits 13–20 dB under the voice,
   ducked; in speechless stretches it may rise. `set_music_fit(duck_mode=
   'smooth')` when the bed pumps or swallows the first word after a pause.
@@ -161,7 +192,7 @@ MASTERING: 9:16, 4:5 and 1:1 programs (and portrait sources left at
 'source') are mastered by default; `set_master_loudness(enabled=true)` forces
 it on 16:9. Mastering levels the main dialogue to a steady -20 LUFS before
 music/voiceover/sfx are mixed — speakers on different mics meet in the middle
-and every suggested gain sits relative to that voice — then normalizes the
+and every sound level is set relative to that voice — then normalizes the
 mix to -14 LUFS on preview and export. `enabled=false` ships the natural,
 unleveled mix: only when the user asks for the original/raw sound. The AUDIO
 CHECK measures integrated LUFS, true peak and dead air — treat its findings
@@ -170,14 +201,19 @@ as work.
 ## Common failure modes
 
 - Whoosh wars: a sound on every caption, cut, zoom or graphic; the same
-  sound twice within ~3 s; more than about one sound every 4–5 s.
+  sound twice within ~3 s; more than 1-2 sounds in a podcast short.
+- The reflexive opening whoosh on a hook that is already on screen at frame
+  0; a sound with no visual partner within ~50 ms.
+- A ding on the payoff word, or hit just before it and ringing into its
+  onset (it masks the punchline it should sell); a shutter on the word
+  'pictures' (a literal pun).
 - Sounds where nothing meaningful happens on screen, or a sound that fights
   the material (an impact under a tender admission).
 - Music added on the agent's own initiative, or a CC0 library bed chosen
   when the user never asked for generic background music.
 - Cues whose peak lands off the visual (a hand pre-roll on top of the
-  tool's, a riser `at` set before the payoff instead of on it); library
-  sounds left at the -6 dB default and masking words.
+  tool's, a riser `at` set before the payoff instead of on it); a hand-set
+  gain the MIX line calls inaudible or too hot.
 - Digital silence under stills or a no-dialogue passage.
 - Gains changed through the wrong layer; duplicate cues stacked on a graphic
   that already owns one.
@@ -185,16 +221,22 @@ as work.
 ## Verification procedure
 
 Render; read the AUDIO CHECK (LUFS, peaks, dead air, bed level under speech
-when music exists); list every cue with its program time and named on-screen
-event, then check the spacing (about one every 4–5 s at most, no repeat
-within ~3 s) and that each peak lands on its frame in dense rendered looks;
+when music exists); `audit_audio_mix` lists every cue with its level
+against the voice and its placement checks (visual partner, payoff word,
+pun, opening whoosh, the talking-short budget — the partner check reads the
+edit's own graphics, B-roll entries, shot changes and zooms, and inside
+video B-roll the clip's own action counts); check the spacing (1-2 in a
+podcast short, about one every 4–5 s at most elsewhere, no repeat within
+~3 s) and that each peak lands on its frame in dense rendered looks;
 listen-check (when the reviewer is available) the opening, a dense dialogue
 passage, each sounded moment and the ending. Remove any cue whose event you
 cannot name.
 
 ## Repair ladder
 
-Remove orphan, duplicate and caption-bound cues → thin to about one sound
-every 4–5 s → retime cues to their landing frames → correct gain and ducking
+Remove orphan, duplicate, caption-bound and pun cues → thin to 1-2 in a
+podcast short (about one sound every 4–5 s elsewhere) → retime cues to their
+landing frames, off payoff-word onsets → clear hand-set gains so the tool
+levels them, correct ducking
 → swap a cue for the one that matches the on-screen action → restore natural
 sound under a silent passage → refit music ends → render and review again.
