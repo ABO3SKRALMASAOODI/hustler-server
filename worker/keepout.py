@@ -211,12 +211,15 @@ def watermark_zone(W=1080, H=1920, anchor_y=None, pad=0.01):
     fs = g["fontsize"]
 
     def text_w(text):
+        # libass sizes a font by its line height (ascent + descent), not
+        # its em, so the measured advance is scaled by that ratio
         try:
             from PIL import ImageFont
             font = ImageFont.truetype(renderer.watermark_font_path(), fs)
-            return float(font.getlength(text))
+            asc, desc = font.getmetrics()
+            return float(font.getlength(text)) * fs / max(1.0, asc + desc)
         except Exception:
-            return 0.62 * fs * len(text)
+            return 0.5 * fs * len(text)
     words = max(text_w(config.WATERMARK_TEXT), text_w(config.WATERMARK_URL_TEXT))
     x0, y0 = g["margin_x"], g["margin_y"]
     x1 = g["x_out"] + words
