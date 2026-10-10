@@ -405,12 +405,63 @@ def frame_ar(W, H):
     return round(float(W) / max(float(H), 1.0), 4)
 
 
-def make_footprint(box, W, H, faces=(), estimated=False):
+def make_footprint(box, W, H, faces=(), estimated=False, geo=None):
     fp = {"box": [round(float(v), 4) for v in box], "ar": frame_ar(W, H),
           "faces": [[round(float(v), 4) for v in f[:4]] for f in list(faces)[:8]]}
     if estimated:
         fp["estimated"] = True
+    if faces and geo:
+        fp["geo"] = str(geo)
     return fp
+
+
+def _canon(v):
+    if isinstance(v, dict):
+        return {k: _canon(x) for k, x in v.items() if x is not None}
+    if isinstance(v, (list, tuple)):
+        return [_canon(x) for x in v]
+    if isinstance(v, float):
+        return round(v, 4)
+    return v
+
+
+def face_geometry(edl):
+    """A short stamp of everything that decides where the speaker's face sits
+    on the program canvas: the program map (kept spans, contiguous pieces
+    merged; speed; inserts and full-frame overlays, which hide it), the
+    frame (crop, aim, focus track, picture region), the zooms and the
+    picture cards. Face zones stored with a footprint (``geo``) are evidence
+    only while the stamp still matches."""
+    import hashlib
+    import json
+    keep = []
+    for span in edl.get("keep") or []:
+        try:
+            s, e = float(span[0]), float(span[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if keep and abs(keep[-1][1] - s) < 1e-3:
+            keep[-1][1] = e
+        else:
+            keep.append([s, e])
+    fx = edl.get("effects") if isinstance(edl.get("effects"), dict) else {}
+    inserts = [[i.get("at_output_s"), i.get("duration_s"), i.get("fit"), i.get("kind")]
+               for i in edl.get("inserts") or [] if isinstance(i, dict)]
+    covers = [[o.get("start"), o.get("duration_s"), o.get("fit"), bool(o.get("screen"))]
+              for o in edl.get("overlays") or [] if isinstance(o, dict)
+              and (o.get("fit") == "cover" or o.get("screen"))]
+    cards = [{k: c.get(k) for k in ("start", "end", "box", "fit", "source", "panels",
+                                    "source_track")}
+             for c in (fx or {}).get("picture_cards") or [] if isinstance(c, dict)]
+    frame = edl.get("frame") if isinstance(edl.get("frame"), dict) else {}
+    frame = {k: (frame or {}).get(k) for k in ("ratio", "mode", "focus_x", "focus_y",
+                                               "focus_track", "picture")}
+    blob = json.dumps(_canon({"keep": keep, "speed": edl.get("speed") or [],
+                              "inserts": inserts, "covers": covers, "frame": frame,
+                              "zooms": (fx or {}).get("zooms") or [], "cards": cards,
+                              "canvas": edl.get("canvas")}),
+                      sort_keys=True, separators=(",", ":"))
+    return hashlib.sha1(blob.encode()).hexdigest()[:12]
 
 
 def footprint_fresh(item, ar):
@@ -436,9 +487,14 @@ def footprint_box(item, ar):
     return (x0, y0, x1, y1) if x1 > x0 and y1 > y0 else None
 
 
-def footprint_faces(item, ar):
-    """The face zones the keep-out stored with a fresh footprint ([])."""
+def footprint_faces(item, ar, geo=None):
+    """The face zones the keep-out stored with a fresh footprint ([]). With
+    ``geo`` (face_geometry of the EDL now), zones stamped with another
+    picture geometry are stale: []."""
     if not footprint_fresh(item, ar):
+        return []
+    stamp = item["footprint"].get("geo")
+    if geo and stamp and stamp != geo:
         return []
     out = []
     for f in item["footprint"].get("faces") or []:
@@ -469,15 +525,20 @@ def faces_over(edl, index, tl, a, b, W, H, live=()):
 
     1. the zones the write-time keep-out stored with the live graphics'
        footprints (exact source frames, mapped through the crop, the zoom at
-       each second and any picture card);
+       each second and any picture card) — only while the picture they were
+       measured on is still the picture (``footprint.geo``, face_geometry):
+       a zoom, re-cut, reframe or card added after the graphic (the usual
+       order: graphics, then camera) moves the face without re-measuring
+       them, and stale zones would park a caption on the face;
     2. the keep-out's face track over [a, b] from the index's spatial
-       samples (the same mapping);
+       samples (the same mapping, on the EDL as it is now);
     3. the nearest measured face within FACE_FAR_S of the span;
     4. the talking-head prior (Haar misses profiles: "no face found" is no
        evidence of no face)."""
     import keepout
     ar = frame_ar(W, H)
-    zones = [z for m in live for z in footprint_faces(m, ar)]
+    geo = face_geometry(edl)
+    zones = [z for m in live for z in footprint_faces(m, ar, geo)]
     if zones:
         return zones
     try:

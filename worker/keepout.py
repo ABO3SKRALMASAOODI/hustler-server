@@ -52,7 +52,9 @@ face zones (and the hair above them when there is room), so moving the
 graphic never pushes a caption onto the mouth. The solver itself only
 prices a spot on the caption band (CAPTION_PENALTY for ink on a caption
 block, CAPTION_NEAR_PENALTY where only the stored box, as the plan sees it,
-touches one): word-level muting keeps captions running beside most
+touches one, and CAPTION_NO_ROOM_PENALTY on top where the plan would find
+no band clear of it and the face, so the captions would stay on it or go
+mute — caption_room): word-level muting keeps captions running beside most
 graphics.
 """
 
@@ -108,6 +110,11 @@ CAPTION_PENALTY = 0.2       # solver cost of ink on a caption block
 # overlap the captions, but a scrim's core grazing them is far less than
 # type sitting on them, and never worth a long move or a face graze.
 CAPTION_NEAR_PENALTY = 0.05
+# ...plus this wherever the caption plan would find NO band clear of the
+# graphic and the face for those captions (caption_room): they stay on it or
+# go mute. Worth a size step or a short move — a counter under the chin that
+# leaves the captions a band beats a bigger one they have to touch.
+CAPTION_NO_ROOM_PENALTY = 0.2
 
 
 # ── boxes ─────────────────────────────────────────────────────────────────
@@ -381,7 +388,7 @@ class Geometry:
         entries: one, none, or one per panel of a stacked source card."""
         card = self._source_card_at(prog_t)
         if card is not None:
-            return self._source_card_outputs(card, prog_t, box)
+            return self._source_card_outputs(card, prog_t, box, src_t)
         out = self._program_output(prog_t, src_t, box)
         return [out] if out else []
 
@@ -396,14 +403,16 @@ class Geometry:
                 continue
         return None
 
-    def _source_card_outputs(self, card, prog_t, box):
+    def _source_card_outputs(self, card, prog_t, box, src_t=None):
         """A source-fed card (picture_cards.layout_filter) draws its SOURCE
         rect straight onto its box — no frame crop, no program card fit —
         and the camera then moves the composed canvas (a stacked card's
-        windows are cut out of every zoom); the card shows its box of it."""
+        windows are cut out of every zoom); the card shows its box of it.
+        A re-aimed card (source_track) shows the rect of the shot at
+        ``src_t``."""
         import picture_cards
         import renderer   # lazy: the renderer imports the caption track
-        panels = picture_cards.card_panels(card)
+        panels = picture_cards.card_panels(card, src_t)
         z, cx, cy = 1.0, 0.5, 0.5
         if len(panels) == 1:
             z, cx, cy = renderer.zoom_state_at(self.zooms, prog_t, self.out_duration,
@@ -858,6 +867,23 @@ def caption_band(y):
             caption_carry.COLUMN[1], y + caption_carry.CAP_HALF_H)
 
 
+def caption_room(ys, zones, W, H, grow=(0.0, 0.0)):
+    """A test for a candidate INK box: True when the caption plan, seeing
+    the cover box around it (``grow`` = how far the cover reaches above and
+    below the ink), still finds a band clear of it and of the face ``zones``
+    for every caption anchor in ``ys`` it touches — the captions MOVE beside
+    it — and False when they would have to stay touching it or go mute
+    (caption_carry.plan: 'kept' / 'room')."""
+    safe = caption_carry.safe_range(W, H)
+
+    def ok(nb):
+        cover = (nb[0], nb[1] - grow[0], nb[2], nb[3] + grow[1])
+        return all(not caption_carry.collides([cover], y)
+                   or caption_carry.clear_band([cover], zones, safe, y) is not None
+                   for y in ys)
+    return ok
+
+
 def caption_obstacle(y, grow=(0.0, 0.0)):
     """The band a graphic's INK box must stay out of for the caption plan
     to see no collision with a caption anchored at ``y``: the caption block
@@ -935,7 +961,7 @@ def patch_cost(patch, params, spec):
 
 def candidates(template, spec, params, box, variants, zones, W, H,
                captions=(), predict=True, mouths=(), clear_penalty=CLEAR_PENALTY,
-               near_captions=(),
+               near_captions=(), room=None,
                require_clear=False):
     """Ranked placements [(cost, patch, predicted box)] off every face (no real
     share of a zone or mouth band, on_face; grazing a zone's CLEARANCE costs
@@ -949,7 +975,12 @@ def candidates(template, spec, params, box, variants, zones, W, H,
     safe-area fix passes 0 (the design already sat that close).
     ``require_clear`` keeps only spots a full CLEARANCE off every zone (an
     ESTIMATED box, whose real ink can run a wrapped line taller than the
-    template's example: a graze on the estimate is a collision on screen)."""
+    template's example: a graze on the estimate is a collision on screen).
+    ``room`` (caption_room): a spot touching a caption pays
+    CAPTION_NO_ROOM_PENALTY on top when the caption plan would find no band
+    clear of it and the face — the captions would stay on it or go mute — so
+    a smaller graphic that leaves them a band wins (the Thiel counter under
+    the chin, Oct 2026)."""
     pspec = (spec or {}).get("params") or {}
     port = portrait(W, H)
     y_lo, y_hi = (SAFE_Y0, SAFE_Y1) if port else (0.02, 0.98)
@@ -1010,10 +1041,15 @@ def candidates(template, spec, params, box, variants, zones, W, H,
                 if require_clear:
                     continue
                 cost += clear_penalty
-            if any(inter(nb, cb) > 0 for cb in captions):
+            on_block = any(inter(nb, cb) > 0 for cb in captions)
+            if on_block:
                 cost += CAPTION_PENALTY
             elif any(inter(nb, cb) > 0 for cb in near_captions):
                 cost += CAPTION_NEAR_PENALTY
+            else:
+                on_block = None             # clear of every caption
+            if on_block is not None and room is not None and not room(nb):
+                cost += CAPTION_NO_ROOM_PENALTY
             patch = dict(p)
             if ny is not None and abs(dy) > 1e-9:
                 patch["y"] = ny

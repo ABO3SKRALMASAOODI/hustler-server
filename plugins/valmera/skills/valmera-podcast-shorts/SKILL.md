@@ -7,7 +7,11 @@ description: Turn podcasts and interviews into premium, story-led social shorts 
 
 Make shorts that look and sound like the best Instagram editors made them,
 and better: a story worth finishing, committed art direction, motion
-typography, sound edited to picture and eased camera moves. The owner's
+typography, and — only where a moment clearly earns them — sound edited to
+picture and eased camera moves. **Zooms and sound effects are optional,
+never rules** (owner, Oct 10): used where nothing calls for them they make a
+short look childish, so a steady, well-framed picture and a clean voice are
+the defaults and every zoom or sound needs a reason you can name. The owner's
 references score about 7.5/10; October's restrained, silent shorts scored
 2.6. v9 replaces restraint with **Looks** ([references/looks.md](references/looks.md)):
 sparse sound from the owner-approved library, the picture fills the frame,
@@ -119,9 +123,9 @@ something meaningful happens on screen: a designed graphic landing, a real
 section change or B-roll entry, the payoff, or a real-world action shown (a
 shutter on a photo, typing under typed text, a click on a button press, a
 cash register on a money figure). Never on captions or ordinary cuts inside
-the conversation. At most about one sound every 4-5 s (about 4-8 in a
-30-45 s short), never the same sound twice within ~3 s, zero when nothing
-earns one; one family per short, matched to the material; peaks on the
+the conversation. Optional, never a quota: at most about one sound every
+4-5 s (a ceiling, usually far fewer), never the same sound twice within
+~3 s, zero when nothing earns one; one family per short, matched to the material; peaks on the
 visual frame; mixed under the voice at the suggested gain. Motion graphics
 are silent unless the editor passes `sfx=true` (looks.md, **Sound**).
 

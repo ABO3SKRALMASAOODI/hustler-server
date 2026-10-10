@@ -303,7 +303,8 @@ def fill_footprints(edl, W, H, fps=30.0):
         return edl
     faces = {}
     for m in todo:
-        faces[id(m)] = caption_carry.footprint_faces(m, ar)
+        faces[id(m)] = (caption_carry.footprint_faces(m, ar),
+                        (m.get("footprint") or {}).get("geo"))
         if not caption_carry.footprint_fresh(m, ar):
             # measured at another frame shape: no evidence here
             m.pop("footprint", None)
@@ -314,7 +315,8 @@ def fill_footprints(edl, W, H, fps=30.0):
 
     def store(m, box):
         if box:
-            m["footprint"] = caption_carry.make_footprint(box, W, H, faces.get(id(m)) or [])
+            zones, geo = faces.get(id(m)) or ([], None)
+            m["footprint"] = caption_carry.make_footprint(box, W, H, zones, geo=geo)
         else:
             m.pop("footprint", None)      # nothing dense: nothing to keep clear of
     jobs, times, keys, pending = [], [], [], []

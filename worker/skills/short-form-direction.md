@@ -7,20 +7,24 @@ committed art direction. The owner's reference reels — the bar Valmera must
 meet and beat — share a measurable grammar: a pattern interrupt in the first
 half-second, the hook line readable as text by 1.5 s, something visual
 changing every 0.3–0.6 s, 2–4 designed hero moments on exact spoken words,
-motion typography instead of static subtitles, eased camera moves, sparse
-sound edited to picture, one committed grade with grain, and a frame with no
-dead black. A podcast clip with plain captions on a small card
+motion typography instead of static subtitles, sparse sound edited to
+picture, one committed grade with grain, and a frame with no dead black.
+Camera moves and sound effects are OPTIONAL tools, never rules (owner, Oct
+2026): each needs a clear editorial reason, and used where nothing calls for
+them they make the edit look childish. The type, the graphics and the cuts
+carry the rhythm; a steady, well-framed picture is the camera's default. A podcast clip with plain captions on a small card
 over black is a clip page, not a premium reel.
 
 - Story first: the reel still needs setup → development/turn → payoff, and
   every design decision serves that spine.
 - Commit to ONE look per edit and keep it from frame one to the CTA.
-- Design density is the expected state for vertical reels of 120 s or less
-  (including podcast shorts children). Stillness is a deliberate choice for a
-  specific passage — a vulnerable admission held on the face, a laugh, a
-  silence after a reveal — not the default for the whole piece.
+- Designed TYPE is the expected state for vertical reels of 120 s or less
+  (including podcast shorts children): motion captions, a hook line, hero
+  moments on their words. A bare clip page is not the bar. That density
+  comes from type and graphics — not from zooms or sounds added to fill time.
 - Every device is bound to a word, a beat or a cut, and carries a purpose.
-  Dense is good; random is not.
+  Purposeful is good; random is not — and a zoom or a sound with no clear
+  reason is random.
 - Never invent facts: numbers, quotes, identities, brand messages and
   metrics come from the transcript, the user or a verified source.
 
@@ -71,20 +75,21 @@ THE PREMIUM SHORT-FORM GRAMMAR — targets you can measure in the render:
    new on-screen speaker when they first appear. Names come from the title,
    metadata or the user, never a guess.
 3. RHYTHM. Something visual changes every 0.3–0.6 s — motion-caption word
-   reveals on onsets count — and a bigger change (camera move, graphic,
-   B-roll, layout shift) arrives every 2–4 s. No static hold longer than
-   ~2 s without a designed reason. Vary the interval with the speech:
-   cluster on dense ideas, breathe on a real admission. One graphic state
-   holds about 3–4 s at most (then it restates, shrinks to a corner label or
-   leaves); no stretch of the middle third goes more than ~5 s without a
-   camera move or a word-bound beat.
+   reveals on onsets count — and the structure moves with the speech: a
+   graphic, a B-roll cut or a layout shift where the story turns. Vary the
+   interval with the speech: cluster on dense ideas, breathe on a real
+   admission. One graphic state holds about 3–4 s at most (then it
+   restates, shrinks to a corner label or leaves); no stretch of the middle
+   third goes more than ~5 s without a word-bound beat. Never fill a quiet
+   stretch with a zoom or a sound just to make something move.
 4. HERO MOMENTS. Choose 2–4 per reel, each bound to the exact spoken word:
    a hero word slam, a counter on a spoken number, a UI card when the speaker
    describes a message or search, text behind the subject, a callout circle
    or arrow on a visible thing, a chapter title on a real turn. Each hero
-   moment stacks ONE leader graphic + an eased camera move on the same
-   frame, plus one sound only when the landing earns it within the density
-   limit in 8. Slam the information-bearing word ("not enough", "40", the
+   moment has ONE leader graphic; a camera move or a sound on the same
+   frame is optional support, only where that landing clearly earns it
+   (the payoff, the single biggest number) and within the limits in 6
+   and 8. Slam the information-bearing word ("not enough", "40", the
    name), never a cliché ("next level"). A graphic's meaning must match the
    claim: a checklist tick means achieved, so broken promises, myths and
    don'ts take `mark='cross'`; a versus split means opposition; a counter
@@ -105,30 +110,37 @@ THE PREMIUM SHORT-FORM GRAMMAR — targets you can measure in the render:
    words being spoken — never over a punchline's setup, which a sound-off
    viewer must read. Kickers and labels quote the transcript, not a
    paraphrase. (Read captions.)
-6. CAMERA. `add_zoom` strength is magnification − 1 (0.15 = 1.15x; above
-   1.0 is a 2x+ zoom). Punch-ins (strength 0.08–0.18) on emphasis words;
-   alternating framing across jump cuts (tight from one cut to the next,
-   wide at the following one); a `landing` (0.12–0.18, starting exactly on
-   the cut) on cuts between ideas and B-roll returns; `push_in` (0.05–0.12)
-   across holds of 3 s or more; `pulse` (0.05–0.08) where music drives;
-   `shake` only on impacts. Always aimed at the face or target off the
-   tenths grid, varied in strength, never metronomic, and no more than one
+6. CAMERA — OPTIONAL. A steady, well-framed picture is the default; add a
+   zoom only where it clearly serves a moment, and zero zooms is a
+   legitimate result. `add_zoom` strength is magnification − 1 (0.15 =
+   1.15x; above 1.0 is a 2x+ zoom). The moves, for when one is earned: a
+   punch-in (strength 0.08–0.18) on the word the story turns on;
+   alternating framing across a jump cut whose pop distracts (tight from
+   one cut to the next, wide at the following one) — a bare jump cut is
+   fine; a `landing` (0.12–0.18, starting exactly on the cut) on a real
+   turn between ideas; `push_in` (0.05–0.12) across a hold that builds to
+   something; `pulse` (0.05–0.08) where music drives; `shake` only on
+   impacts. Always aimed at the face or target off the tenths grid, varied
+   in strength, never metronomic, never as filler, and no more than one
    camera event per ~1.5 s unless it is a designed hit. (Read zooms.)
 7. TRANSITIONS. Motivated junctions only — section turns, hook → body,
    B-roll in and out, location changes — each may carry one library sound
    peaking on the junction (`swish_1` for a whip, a soft whoosh for a slide)
    within the density limit. Hard cuts inside a continuous take carry no
-   sound; jump cuts are covered by alternating framing, not effects. (Read
-   transitions.)
-8. SOUND EDITED TO PICTURE, SPARINGLY. Use the owner-approved library
+   sound; a jump cut stays bare, or — only where its pop distracts — takes
+   alternating framing, never an effect. (Read transitions.)
+8. SOUND EDITED TO PICTURE, SPARINGLY — OPTIONAL. Sound effects are never
+   a rule: most of a talking reel carries none, and a sound with no clear
+   on-screen reason makes the edit look childish. Use the owner-approved library
    (`list_sound_library`; place with `add_sfx(storage_key='sound:<id>',
    at=..., gain_db=<suggested>)`), and only where something meaningful
    happens on screen: a designed graphic landing, a real section change or B-roll
    entry, the payoff, or a real-world action shown (shutter on a photo,
    typing under typed text, a click on a button press, a cash register on a
    money figure). Never on captions or ordinary cuts inside a conversation.
-   At most about one sound every 4–5 s (about 4–8 in a 30–45 s short), never
-   the same sound twice within ~3 s, and zero when nothing earns one; one
+   At most about one sound every 4–5 s (a ceiling — no more than about 8 in
+   a 30–45 s short, and usually far fewer), never the same sound twice within
+   ~3 s, and zero when nothing earns one; one
    family per short, matched to the material; each cue's `at` on the
    visual frame it hits (the tool lands the peak there); mixed under the
    voice. At most ONE impact per short, on the payoff. Parallel beats get
@@ -189,7 +201,8 @@ GRAPHIC CHOICE PLAYBOOK — pick by what the line does, not by habit:
   headline (who + the claim) that beat graphics replace and hand back to; it
   is never left empty for seconds.
 - No stretch of more than ~3 s with only body captions in the last third:
-  build into the payoff (a push-in, a setup beat), never sag before it.
+  build into the payoff (a setup beat, a kicker; a push-in only when the
+  moment calls for one), never sag before it.
 - A reaction tail at the end holds at least ~1 s, or is left out.
 - After cutting, re-read the kept transcript once: no dangling "But/And" at
   a join, no claim that needs context you removed.
@@ -200,10 +213,11 @@ BUILD ORDER — write in a few atomic passes, not forty serial calls:
    vertical frame.
 2. Frame and look: reframe or card layout, `apply_look`, caption
    `motion_look`; music only if the user asked for it or supplied a track.
-3. Hook and hero moments: motion graphics on exact word onsets, camera
-   moves bound to the same frames.
-4. Connective tissue: alternating framing on jump cuts, landings on turns,
-   motivated transitions, slow pushes on long holds, B-roll as evidence.
+3. Hook and hero moments: motion graphics on exact word onsets (a camera
+   move on the same frame only where the moment earns one).
+4. Connective tissue: motivated transitions on real turns and B-roll as
+   evidence; a zoom only where a specific moment calls for it (read zooms) —
+   never a pass of zooms over every cut or hold.
 5. Sound: the few library cues the on-screen moments earn, spaced, each
    `at` on the frame it hits (read audio).
 6. Ending, plus the CTA when one was asked for.
@@ -235,10 +249,13 @@ fades on reels, digital silence) and justify intentional visual density.
   sound repeated within ~3 s; music added that the user never asked for.
 - Mixed looks (hype captions on a cinematic grade, three type systems).
 - Decoration not bound to words: graphics, zooms and whooshes on a timer.
+- Zooms or sounds used where nothing calls for them — a punch on every
+  sentence, a push on every hold, a landing on every jump cut, a whoosh on
+  every graphic: the edit looks childish.
 - A hero moment where four things animate independently instead of one
   leader with support.
-- Restraint as a blanket default; or density that buries a vulnerable
-  moment that should have been held.
+- A clip page by default (no designed type, no hero moments); or density
+  that buries a vulnerable moment that should have been held.
 - Headline that spoils the payoff; payoff cut off before it lands; CTA over
   the payoff; captions muted over the setup of the punchline.
 - An unnamed speaker; a tick on an unfulfilled promise; the same template set
@@ -249,9 +266,10 @@ fades on reels, digital silence) and justify intentional visual density.
 ## Verification procedure
 
 Screen the complete preview as one experience, then measure against the
-grammar: first visual event ≤ 0.6 s; hook text by 1.5 s; no hold over ~2 s
-without design; 2–4 hero moments each landing on its word with camera (and a
-sound only where it earns one); captions readable at phone size; every sound
+grammar: first visual event ≤ 0.6 s; hook text by 1.5 s; 2–4 hero moments
+each landing on its word (a camera move or a sound only where it clearly
+earns one — remove any zoom or sound you cannot name a reason for);
+captions readable at phone size; every sound
 cue on a named on-screen event, about one every 4–5 s at most, no repeat
 within ~3 s; any music the user asked for ducked 13–20 dB under the voice; no
 digital silence; one grade; no flat black void; payoff held; any requested
@@ -264,7 +282,7 @@ hero moment, and the AUDIO CHECK for the mix (read review).
 
 Fix the story spine → strengthen the hook (interrupt + text by 1.5 s) →
 re-bind mistimed hero moments to their onsets → commit the look (one caption
-system, one grade) → fill dead holds with camera or word cues → thin the
-sound to the moments that earn it → fix layout (full-bleed or designed
+system, one grade) → fill dead holds with word cues or a graphic → thin
+zooms and sounds to the moments that clearly earn them → fix layout (full-bleed or designed
 background) → simplify any moment with two leaders → render and review
 again.

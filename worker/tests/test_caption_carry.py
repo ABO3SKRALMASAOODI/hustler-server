@@ -28,6 +28,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 import caption_carry  # noqa: E402
 import captions  # noqa: E402
 import config  # noqa: E402
+import keepout  # noqa: E402
 import motion_captions  # noqa: E402
 import motion_engine  # noqa: E402
 import motion_layer  # noqa: E402
@@ -589,6 +590,44 @@ def test_the_plan_steps_around_the_face_zones_the_keep_out_measured():
     assert inside and all(place["z"][0] <= y <= place["z"][1] for y in inside), inside
 
 
+def test_stored_face_zones_go_stale_when_the_picture_changes():
+    # the keep-out stored the face zone (stamped with the picture geometry
+    # it measured) at the graphic's write; a zoom added afterwards moved the
+    # face, and the stored zone was never re-measured. The stale zone is no
+    # evidence: the plan clears the face where the index puts it NOW.
+    stored = [0.3, 0.1, 0.7, 0.28]                  # where the face was
+    slam = _slam(1.9, 3.0, "*140*", box=(0.1, 0.62, 0.9, 0.82))
+    slam["footprint"]["faces"] = [stored]
+    before = _edl([slam])
+    slam["footprint"]["geo"] = caption_carry.face_geometry(before)
+    now = [{"t": t, "faces": [[0.3, 0.33, 0.7, 0.5]]} for t in (0.5, 2.0, 3.5, 5.0)]
+    ix = _index(faces=now)
+    # the same picture: the stored zone is trusted
+    same = _edl([slam])
+    assert same["motion"][0]["footprint"]["geo"] == caption_carry.face_geometry(same)
+    place = next(iter(_plan(same, ix).placed.values()))
+    assert place["z"][0] >= stored[3]
+    face_now = keepout.face_zone((0.3, 0.33, 0.7, 0.5))
+    assert place["z"][0] < face_now[3]             # it would sit on the face now
+    # a zoom later: the stored zone is stale and the face is cleared where it is
+    zoomed = _edl([slam], dur=8.0)
+    zoomed["effects"] = dict(zoomed.get("effects") or {}, zooms=[
+        {"id": "z", "start": 1.0, "end": 3.5, "strength": 0.05, "mode": "punch",
+         "cy": 0.4}])
+    zoomed = validate_edl(zoomed, 8.0).model_dump()
+    assert caption_carry.face_geometry(zoomed) != slam["footprint"]["geo"]
+    p = _plan(zoomed, ix)
+    assert p.placed
+    for place in p.placed.values():
+        live = keepout.zones_of(keepout.face_track(zoomed, ix, 1080, 1920, 1.9, 3.0))
+        for z in live:
+            assert place["z"][1] <= z[1] or place["z"][0] >= z[3], (place, z)
+    # an unstamped footprint (written before the stamp) is trusted as before
+    old = dict(slam, footprint={k: v for k, v in slam["footprint"].items() if k != "geo"})
+    assert caption_carry.footprint_faces(_edl([old])["motion"][0], AR_9X16,
+                                         caption_carry.face_geometry(zoomed))
+
+
 def test_an_estimated_footprint_places_captions_until_the_render_measures_it(monkeypatch):
     est = _slam(1.9, 3.0, "*140*", box=(0.1, 0.62, 0.9, 0.82))
     est["footprint"].update(estimated=True, faces=[[0.25, 0.1, 0.75, 0.3]])
@@ -627,6 +666,8 @@ def test_a_browserless_write_stores_an_estimate_and_says_so(monkeypatch):
     item = ctx.latest_edl()["json"]["motion"][0]
     fp = item["footprint"]
     assert fp["estimated"] is True and fp["ar"] == pytest.approx(AR_9X16, abs=1e-3)
+    # the face zones carry the stamp of the picture they were measured on
+    assert fp["faces"] and fp["geo"] == caption_carry.face_geometry(ctx.latest_edl()["json"])
     assert "KEEP-OUT (estimated)" in out, out          # moved out of the button rail
     # the caption note over an estimated box says it is one
     on_band = _slam(1.9, 3.0, "*140*", box=(0.1, 0.62, 0.9, 0.82))
@@ -657,3 +698,19 @@ def test_the_write_says_when_captions_must_stay_on_a_graphic_they_touch():
                                            edl["motion"][0], canvas=(1080, 1920))
     assert notes and "stay on their band and touch it" in notes[0], notes
     assert '"all we got was"' in notes[0], notes
+
+
+def test_a_graphic_up_long_before_its_words_is_told_to_start_on_them():
+    # the Thiel counter: up from "flying cars" (1.0 s) while "140" is only
+    # said at 2.8 s; nothing clear of it is left, so the setup's captions
+    # touch it — the reply offers starting it on its own words
+    big = (0.1, 0.45, 0.9, 0.85)
+    edl = _edl([_counter(1.0, 3.9, "140", box=big)])
+    notes = motion_tools._word_level_notes(edl, _index(faces=None), Timeline(edl["keep"]),
+                                           edl["motion"][0], canvas=(1080, 1920))
+    assert notes and "start it at 2.80s where its own words begin" in notes[0], notes
+    # a graphic that starts on its own words gets no such advice
+    edl = _edl([_counter(2.75, 3.9, "140", box=big)])
+    notes = motion_tools._word_level_notes(edl, _index(faces=None), Timeline(edl["keep"]),
+                                           edl["motion"][0], canvas=(1080, 1920))
+    assert not any("where its own words begin" in n for n in notes), notes

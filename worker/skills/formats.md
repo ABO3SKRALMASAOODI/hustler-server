@@ -37,11 +37,12 @@ WHAT A PREMIUM EDIT LOOKS LIKE, BY FORMAT:
   pattern interrupt and hook text by 1.5 s; one committed look (`apply_look`
   `editorial` is the default starting point); face-aware full-bleed or a card
   on a designed background; motion captions (`editorial` or `clean`) with
-  accent words; 2–4 hero moments on exact words; alternating framing on
-  jump cuts, landings on turns, punches on emphasis, pushes on holds;
-  B-roll evidence on named nouns; a few library sound cues on the moments
-  that earn them (about one every 4–5 s at most, never on captions or
-  ordinary cuts); music only when the user asks for it or supplies a track,
+  accent words; 2–4 hero moments on exact words; zooms only where a
+  moment clearly earns one (optional — a steady frame is the default;
+  never a move on every cut or sentence); B-roll evidence on named nouns;
+  sound effects only on the few moments that earn them (optional — zero is
+  fine; about one every 4–5 s at most, never on captions or ordinary
+  cuts); music only when the user asks for it or supplies a track,
   then ducked 13–20 dB under the voice; word-safe filler and
   dead-pause cleanup; social mastering (automatic on 9:16/4:5/1:1 — no
   `set_master_loudness` call needed); a native CTA after the payoff
@@ -50,7 +51,8 @@ WHAT A PREMIUM EDIT LOOKS LIKE, BY FORMAT:
   admission — that passage is the deliberate exception.
 - **Talking-head reel / creator** — the same grammar, often higher energy:
   `creator_punch` or `editorial`, `pop`/`stack` captions for punchy
-  delivery, faster camera rhythm, more UI and data graphics.
+  delivery, more UI and data graphics (zooms and sounds still only where
+  earned).
 - **Long-form interview or podcast (horizontal, minutes long)** — story-first
   cutting, readable subtitles (`documentary` or `clean`), occasional
   evidence cutaways and chapter titles at real turns, a quiet bed only when

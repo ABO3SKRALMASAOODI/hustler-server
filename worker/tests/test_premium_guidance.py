@@ -11,6 +11,12 @@ of real recordings, placed sparsely on meaningful on-screen moments (never
 "whoosh wars"), and music only when the user asks for it or supplies a track.
 The rejected synthesized kit and the "every reel carries a music bed" default
 must not come back.
+
+Zooms and sound effects are OPTIONAL, NEVER RULES (owner, Oct 10 2026): the
+premium grammar is carried by type, graphics and cuts; a steady, well-framed
+picture and a clean voice are the defaults, each zoom or sound needs a clear
+editorial reason, and used where nothing calls for them they make an edit
+look childish. No playbook may turn a camera move or a sound into a quota.
 """
 
 import agent_prompt
@@ -180,6 +186,41 @@ def test_rendered_review_needs_a_complete_preview_everywhere():
         assert "complete" in text, name
     for name in ("review", "motion-design", "zooms", "captions"):
         assert "render_preview(complete=true)" in _skill(name), name
+
+
+def test_zooms_and_sounds_are_optional_never_quotas():
+    """Owner, Oct 10: unearned zooms and sounds make an edit look childish.
+    The playbooks, the core prompt, the MCP workflow and the tool contracts
+    say so, and none prescribes a camera move per cut, take or interval."""
+    core = agent_prompt.CORE_PROMPT
+    assert "ZOOMS AND SOUND EFFECTS ARE OPTIONAL, NEVER RULES" in core
+    assert "childish" in core
+    zooms = _flat(_skill("zooms"))
+    assert "ZOOMS ARE OPTIONAL, NEVER A RULE" in zooms
+    assert "a bare jump cut is FINE" in zooms
+    assert "Density is a CEILING, never a target" in zooms
+    audio = _flat(_skill("audio"))
+    assert "OPTIONAL, NEVER A RULE" in audio
+    quotas = ("a camera event every 2", "camera event every 2–4 s",
+              "bigger change (camera move", "bigger change every 2–4 s: a camera",
+              "without a camera move", "keeps a static talking head alive",
+              "so long statements never sit frozen",
+              "jump cuts are covered by alternating framing",
+              "fill dead holds with camera", "with one add_zoom on the same frame",
+              "about 4–8 in a 30–45 s short", "about 4-8 in a 30-45 s short")
+    for name in agent_prompt.skill_names():
+        text = _flat(_skill(name))
+        for phrase in quotas:
+            assert phrase not in text, (name, phrase)
+    contracts = agent_tools._COMPACT_CONTRACTS
+    assert "never a rule" in contracts["add_zoom"].lower()
+    assert "never a required pass" in contracts["punch_in_on_emphasis"].lower()
+    assert "never a rule" in contracts["add_sfx"].lower()
+    import os
+    mcp = open(os.path.join(os.path.dirname(__file__), "..", "..", "backend",
+                            "routes", "mcp.py")).read()
+    assert "ZOOMS AND SOUND EFFECTS ARE OPTIONAL, NEVER RULES" in mcp
+    assert "with one add_zoom on the same frame" not in mcp
 
 
 def test_zoom_strength_is_taught_as_magnification_minus_one():

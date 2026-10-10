@@ -75,12 +75,29 @@ def source_fed(spec):
     return bool(spec.get("source") or spec.get("panels"))
 
 
-def card_panels(spec):
-    """[(box, source_rect)] of a source-fed card, [] for a program card."""
+def source_at(spec, src_t=None):
+    """The source rect a single-rect card shows at SOURCE second ``src_t``:
+    the ``source_track`` span holding it (the card re-aims shot by shot),
+    else ``source``. None for a program card or a stack."""
+    if not spec.get("source") or spec.get("panels"):
+        return None
+    if src_t is not None:
+        for span in spec.get("source_track") or []:
+            try:
+                if float(span["t0"]) - 1e-6 <= float(src_t) <= float(span["t1"]) + 1e-6:
+                    return list(span["source"])
+            except (KeyError, TypeError, ValueError):
+                continue
+    return list(spec["source"])
+
+
+def card_panels(spec, src_t=None):
+    """[(box, source_rect)] of a source-fed card, [] for a program card.
+    ``src_t`` (a SOURCE second) picks a re-aimed card's framing there."""
     if spec.get("panels"):
         return [(list(p["box"]), list(p["source"])) for p in spec["panels"]]
     if spec.get("source"):
-        return [(list(spec["box"]), list(spec["source"]))]
+        return [(list(spec["box"]), source_at(spec, src_t))]
     return []
 
 
@@ -216,6 +233,129 @@ def speaker_rect(src_w, src_h, W, H, box, face=None, focus=None,
     y0 = _clamp(crown - HEADROOM_TARGET * rh, 0.0, sh - rh)
     rect = [x0 / sw, y0 / sh, (x0 + rw) / sw, (y0 + rh) / sh]
     return rect, (crown - y0) / rh
+
+
+# The head around a detector box (which runs brow to chin): the hair above
+# it (HAIR_ABOVE_FACE), the ears and hair either side, the chin and collar
+# below. A card framing keeps every measured head of its shot inside.
+HEAD_SIDE = .15
+HEAD_BELOW = .35
+# A detection less than half or more than twice the median face of its
+# stretch is another face (a poster, a passer-by), not the speaker moving.
+FACE_OUTLIER = 2.0
+# Shots whose speaker sits alike share one framing: joining them may cost
+# at most this much of either one's own framing (a wider rect covering both
+# positions), and must leave each shot's speaker within SHARE_CENTRE of the
+# card's width from its centre (a speaker pushed to the card's edge is a
+# composition to re-aim, even when a wide rect still holds the head). Past
+# either the card re-aims on the cut between them.
+SHARE_GROW = 1.15
+SHARE_CENTRE = .18
+
+
+def head_box(face):
+    """The head (hair, ears, chin) around one detector face box."""
+    w, h = face[2] - face[0], face[3] - face[1]
+    return [face[0] - HEAD_SIDE * w, face[1] - HAIR_ABOVE_FACE * h,
+            face[2] + HEAD_SIDE * w, face[3] + HEAD_BELOW * h]
+
+
+def steady_faces(faces):
+    """``faces`` without detections far off the median size."""
+    med = median_face(faces)
+    if med is None:
+        return []
+    mh = max(med[3] - med[1], 1e-6)
+    return [f for f in faces if f and len(f) == 4 and f[2] > f[0] and f[3] > f[1]
+            and 1.0 / FACE_OUTLIER <= (f[3] - f[1]) / mh <= FACE_OUTLIER]
+
+
+def framing_rect(src_w, src_h, W, H, box, faces, focus=None,
+                 cap=SOURCE_UPSCALE_CAP):
+    """A source rect at the box's aspect that keeps EVERY measured position
+    of the speaker's head over a stretch inside the card (judges, Oct 2026:
+    a card framed on the median face let the head drift out of it when the
+    speaker leaned or stepped). Sized like speaker_rect on the median face,
+    then grown (aspect kept, inside the source) until the union of the head
+    boxes fits under HEADROOM_TARGET of headroom, centred on that union.
+    Returns (rect, headroom) like speaker_rect."""
+    faces = steady_faces(faces)
+    face = median_face(faces)
+    rect, headroom = speaker_rect(src_w, src_h, W, H, box, face, focus, cap)
+    if face is None:
+        return rect, headroom
+    sw, sh = float(src_w), float(src_h)
+    bw, bh = (box[2] - box[0]) * W, (box[3] - box[1]) * H
+    a = bw / bh
+    big = min(sw, sh * a)
+    heads = [head_box(f) for f in faces]
+    need = [max(0.0, min(h[0] for h in heads)), max(0.0, min(h[1] for h in heads)),
+            min(1.0, max(h[2] for h in heads)), min(1.0, max(h[3] for h in heads))]
+    rw, rh = (rect[2] - rect[0]) * sw, (rect[3] - rect[1]) * sh
+    nw, nh = (need[2] - need[0]) * sw, (need[3] - need[1]) * sh
+    rh2 = max(rh, nh / (1.0 - HEADROOM_TARGET), nw * 1.04 / a)
+    rw2 = min(rh2 * a, big)
+    rh2 = rw2 / a
+    if rw2 <= rw + 1e-6 and rect[0] * sw <= need[0] * sw + 1e-6 \
+            and rect[2] * sw >= need[2] * sw - 1e-6 \
+            and rect[1] * sh <= need[1] * sh + 1e-6 \
+            and rect[3] * sh >= need[3] * sh - 1e-6:
+        return rect, headroom          # the median framing already holds them
+    cx = (need[0] + need[2]) / 2.0 * sw
+    x0 = _clamp(cx - rw2 / 2.0, 0.0, sw - rw2)
+    y0 = _clamp(need[1] * sh - HEADROOM_TARGET * rh2, 0.0, sh - rh2)
+    out = [x0 / sw, y0 / sh, (x0 + rw2) / sw, (y0 + rh2) / sh]
+    crown = need[1] * sh
+    return out, (crown - y0) / rh2
+
+
+def shot_framings(src_w, src_h, W, H, box, shots, focus_of=None,
+                  cap=SOURCE_UPSCALE_CAP):
+    """One framing per run of alike shots: [(rect, [shot, ...])] in order.
+
+    ``shots`` = [(shot, faces)] (a shot is any hashable span; faces its
+    measured face boxes, source fractions). Consecutive shots share a rect
+    while the framing of both together is at most SHARE_GROW of either's
+    own (the speaker sits alike): a steady speaker gets ONE framing for the
+    whole card, one who moves between takes gets the card re-aimed on the
+    cut where the move happened, never mid-shot. A shot with no face joins
+    the run before it (or after, at the start)."""
+    focus_of = focus_of or (lambda _shot: None)
+    runs = []                           # [rect, [shots], faces, own height]
+
+    def centred(rect, faces):
+        face = median_face(steady_faces(faces))
+        if face is None:
+            return True
+        w = max(rect[2] - rect[0], 1e-6)
+        return abs((face[0] + face[2]) / 2.0 - (rect[0] + rect[2]) / 2.0) <= SHARE_CENTRE * w
+
+    for shot, faces in shots:
+        faces = list(faces or [])
+        if not faces:
+            if runs:
+                runs[-1][1].append(shot)
+            else:
+                rect, _h = framing_rect(src_w, src_h, W, H, box, [], focus_of(shot), cap)
+                runs.append([rect, [shot], [], None])
+            continue
+        own, _h = framing_rect(src_w, src_h, W, H, box, faces, focus_of(shot), cap)
+        if runs:
+            prev = runs[-1]
+            if not prev[2]:
+                prev[0], prev[2], prev[3] = own, faces, own[3] - own[1]
+                prev[1].append(shot)
+                continue
+            both, _h = framing_rect(src_w, src_h, W, H, box, prev[2] + faces,
+                                    focus_of(shot), cap)
+            if both[3] - both[1] <= SHARE_GROW * max(own[3] - own[1], prev[3]) + 1e-9 \
+                    and centred(both, faces) and centred(both, prev[2]):
+                prev[0], prev[2] = both, prev[2] + faces
+                prev[3] = max(prev[3], own[3] - own[1])
+                prev[1].append(shot)
+                continue
+        runs.append([own, [shot], faces, own[3] - own[1]])
+    return [(rect, shots_) for rect, shots_, _f, _h in runs]
 
 
 # The designed canvas a card gets when none is chosen: the footage's own

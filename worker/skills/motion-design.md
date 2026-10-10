@@ -124,9 +124,10 @@ CUING TO THE WORD:
 - Pass `purpose` naming the word or event ("slam on 'garbage' at 14.2 s")
   and a stable `id` so later passes can `set_motion_graphic` it.
 - Rhythm across the reel: aim for a visual change every 0.3–0.6 s (word
-  reveals in motion captions count), a bigger change every 2–4 s (camera
-  move, graphic, B-roll, layout) and 2–4 hero moments. Avoid metronomic
-  spacing: cluster on dense ideas, let a real admission breathe.
+  reveals in motion captions count), the structure moving where the story
+  turns (a graphic, B-roll, a layout shift) and 2–4 hero moments. Zooms and
+  sounds are optional support, never filler (read zooms, audio). Avoid
+  metronomic spacing: cluster on dense ideas, let a real admission breathe.
 
 LAYERING AND CAPTIONS:
 - `layer='above_captions'` (default for designed moments) puts the graphic

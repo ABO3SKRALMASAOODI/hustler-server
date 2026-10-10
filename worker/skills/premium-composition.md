@@ -52,13 +52,15 @@ LAYOUTS FOR 9:16:
   talking heads): `auto_reframe` or `set_frame` crop with a shot-aware focus
   track so each speaker's face sits in the upper-middle with the face around
   28–40% of the frame height; type lives in the clear space above, beside or
-  below the face. Alternate tight and medium framings with eased zooms on
-  sentence turns (read zooms).
+  below the face. A zoom is optional: use one only where a moment clearly
+  earns it (read zooms) — a steady, well-framed picture is the default.
 - **Card on a designed background** (archival 4:3, wide shots that a crop
   would destroy, two-shot frames): `set_picture_card` takes the card's
   footage straight from the full SOURCE frame — never a re-crop of the 9:16
   crop — enlarged once and at most 2x. `source='auto'` frames the speaker
-  from the measured face boxes with headroom above the head; a source below
+  from the measured face boxes with headroom above the head, holding every
+  measured position of the head inside the card and re-aiming on the cut
+  where the speaker moved between takes (never mid-shot); a source below
   720p is shown whole (a 4:3 talk becomes a full-width 4:3 card, ~1.6x,
   instead of a 3.7x crop that cuts the head). Give it rounded corners, a
   hairline border, a soft shadow and a lift or reveal entrance. Leave the

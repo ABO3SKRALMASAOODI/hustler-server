@@ -78,9 +78,9 @@ recheck every output-timed item.
 | Frame | 1-2 `set_frame` (or `auto_reframe`), `set_picture_card` | full-bleed with a per-shot `focus_track` (source seconds), or a card from looks.md **Card geometry** with `background_style` (`blur` or a gradient), grain and vignette |
 | Headline | 0-1 `set_editorial_graphic(kind="headline", speaker, text)` | headline-conversation only; verified speaker first |
 | Designed beats | 3-6 `add_motion_graphic` | one per beat, silent by default; `sfx=true` only on the hook, the payoff or a graphic showing a real-world action; `purpose` names the beat, stable `id` |
-| Camera | 3-6 `add_zoom` | `landing`, `punch`, `pulse`, `push_in` per the Look (schema names) |
+| Camera | 0-3 `add_zoom` (optional) | only where a moment clearly earns a move (the payoff word, a real turn between ideas); zero is fine; never on every cut, take or sentence. Modes per the Look (schema names) |
 | Transitions | 0-1 `set_transitions` | base style, `scope='scene'` |
-| Sound | 0-5 `add_sfx(storage_key='sound:<id>', at=..., gain_db=<suggested>)` | only meaningful on-screen moments, from your Look's family; the whole short stays at about one sound every 4-5 s at most (template cues count), none repeated within ~3 s |
+| Sound | 0-5 `add_sfx(storage_key='sound:<id>', at=..., gain_db=<suggested>)` (optional) | only meaningful on-screen moments, from your Look's family; zero is fine; the whole short stays at about one sound every 4-5 s at most (template cues count), none repeated within ~3 s |
 | Music | 0-1 `add_music` (after `fetch_url` for a link) | only the owner's song, only when `music_effective` is on; bed -20 dB ducked; a montage's bed leads |
 | Sound without music | 0-3 | montage or action opener with music off: natural sound, design around speech, a few library sounds, or a flag (looks.md) |
 
@@ -120,7 +120,9 @@ after a short pause, then report it.
 - A whoosh on every caption; sounds on captions, landing zooms, `push_in`,
   pulses on speech, jump cuts or ordinary cuts in the conversation; any
   sound outside the approved library; a punch every sentence (keep 4 s
-  between punches); a zoom across a cut.
+  between punches); a zoom across a cut; a landing on every cut or a
+  `push_in` on every take; any zoom or sound you cannot name a reason for
+  (they make the short look childish — leave the frame steady instead).
 - Graphics over the face for more than 1 s, under the corner brand mark,
   or below y 0.80.
 - Music of any kind when `music_effective` is off (no CC0 library bed, no

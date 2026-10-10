@@ -1347,6 +1347,30 @@ class CardPanel(BaseModel):
         return _source_rectangle(value)
 
 
+# A source card re-aims per shot (PictureCard.source_track): at most this many
+# spans, one per kept segment of its window.
+PICTURE_CARD_MAX_TRACK = 64
+
+
+class CardSourceSpan(BaseModel):
+    """One shot's framing of a source-fed card: over SOURCE seconds
+    [t0, t1] the card shows ``source`` (a rect of the source frame)."""
+    t0: float = Field(ge=0, allow_inf_nan=False)
+    t1: float = Field(gt=0, allow_inf_nan=False)
+    source: List[float]
+
+    @field_validator("source")
+    @classmethod
+    def _source(cls, value):
+        return _source_rectangle(value)
+
+    @model_validator(mode="after")
+    def _order(self):
+        if self.t1 <= self.t0:
+            raise ValueError("a card source span needs t1 > t0")
+        return self
+
+
 class PictureCard(BaseModel):
     """A footage-only card on the program clock; type is composited afterwards.
 
@@ -1358,8 +1382,13 @@ class PictureCard(BaseModel):
     ``panels`` (2-3) is the stacked layout: each panel shows its own source
     rect in its own box over the same window (speaker on top, the screen
     they are reading below); ``box`` then becomes the panels' bounding box.
-    box is the destination rectangle, so source framing and card design remain
-    independent. No speech, caption, or cut timings change.
+    ``source_track`` (with ``source``) re-aims the card shot by shot: each
+    span names the source rect shown over SOURCE seconds [t0, t1] (one kept
+    segment of the window; the render composes each block with the rect of
+    the span holding its midpoint, ``source`` everywhere else), so a speaker
+    who moves between takes stays framed — the framing only ever changes on
+    a cut. box is the destination rectangle, so source framing and card design
+    remain independent. No speech, caption, or cut timings change.
 
     The canvas around the card is ``background`` (a flat colour) unless a
     designed backdrop is chosen: ``background_style`` vertical_gradient /
@@ -1402,6 +1431,7 @@ class PictureCard(BaseModel):
     # picture, so every card written before these existed is unchanged.
     source: Optional[List[float]] = None
     panels: Optional[List[CardPanel]] = None
+    source_track: Optional[List[CardSourceSpan]] = None
 
     @field_validator("box")
     @classmethod
@@ -1415,6 +1445,16 @@ class PictureCard(BaseModel):
 
     @model_validator(mode="after")
     def _panels(self):
+        if self.source_track is not None:
+            # A per-shot framing of the ONE source rect: meaningless without
+            # it (a program card or a stack), and canonical as None when empty.
+            if not self.source_track or self.source is None or self.panels:
+                self.source_track = None
+            elif len(self.source_track) > PICTURE_CARD_MAX_TRACK:
+                raise ValueError(f"a picture card's source_track has at most "
+                                 f"{PICTURE_CARD_MAX_TRACK} spans")
+            else:
+                self.source_track.sort(key=lambda sp: sp.t0)
         if not self.panels:
             self.panels = None
             return self
@@ -1922,6 +1962,9 @@ def _clean_footprint(fp):
     out = {"box": [x0, y0, x1, y1], "ar": round(ar, 4), "faces": faces[:8]}
     if fp.get("estimated") is True:
         out["estimated"] = True
+    geo = fp.get("geo")
+    if out["faces"] and isinstance(geo, str) and 0 < len(geo) <= 32:
+        out["geo"] = geo
     return out
 
 
@@ -1936,11 +1979,15 @@ class MotionFootprint(BaseModel):
     template's nominal box, keepout.nominal_ink): the renderer measures it
     before it burns captions. ``ar``: the canvas width/height it was measured
     on — after an aspect change it is stale and measured again. ``faces``:
-    the face keep-out zones over the item's window."""
+    the face keep-out zones over the item's window, valid while ``geo`` (the
+    picture geometry they were measured on) still matches the EDL."""
     box: List[float]
     ar: float = Field(gt=0, allow_inf_nan=False)
     faces: List[List[float]] = Field(default_factory=list, max_length=8)
     estimated: Optional[bool] = None
+    # caption_carry.face_geometry of the picture the face zones were
+    # measured on: the zones are evidence only while it still matches
+    geo: Optional[str] = Field(default=None, max_length=32)
 
 
 class SubjectMatte(BaseModel):

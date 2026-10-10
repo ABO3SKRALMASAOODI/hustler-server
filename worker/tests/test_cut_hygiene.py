@@ -599,3 +599,18 @@ def test_the_end_card_follows_the_last_frame_whole(rendered_card):
     assert frames[k].mean() < 8                        # the card's first
     assert len(rendered_card["audio"]) / 48000.0 == pytest.approx(
         len(frames) / FPS, abs=0.002)
+
+
+def test_a_source_card_re_aiming_on_the_cut_covers_it():
+    # a picture card that re-aims per take (source_track) changes the
+    # framing on the cut between its takes: not a bare jump cut
+    card = {"id": "c", "start": 0.0, "end": 7.0, "box": [.06, .3, .94, .7],
+            "fit": "crop", "source": [0.2, 0.0, 0.8, 1.0],
+            "source_track": [{"t0": 0.0, "t1": 4.0, "source": [0.0, 0.0, 0.6, 1.0]},
+                             {"t0": 5.0, "t1": 8.0, "source": [0.4, 0.0, 1.0, 1.0]}]}
+    rows = _bare({"keep": [[0, 4], [5, 8]], "effects": {"picture_cards": [card]}})
+    assert rows == []
+    # the same card holding one framing across the cut leaves it bare
+    still = dict(card, source_track=[dict(card["source_track"][0], t1=8.0)])
+    assert [r["t"] for r in _bare({"keep": [[0, 4], [5, 8]],
+                                   "effects": {"picture_cards": [still]}})] == [4.0]

@@ -777,21 +777,27 @@ Two things are different from a normal tool session, and both matter:
    c. HOOK: a pattern interrupt within 0.1-0.6 s and the hook line as text by
       1.5 s — hook_title or word_slam (leave mute_captions unset: the
       captions drop just the spoken words it shows), off the caption band,
-      with a landing or punch and at most one sound (sfx=true on the
-      graphic, or one library cue).
+      optionally with a landing or punch and at most one sound (sfx=true on
+      the graphic, or one library cue).
    d. HERO MOMENTS: 2-4 add_motion_graphic placements whose landing frame
       sits on exact spoken word onsets (get_kept_transcript for program
       windows, get_words for onsets, each template's landing offset from
-      list_motion_templates), each with one add_zoom on the same frame.
+      list_motion_templates). A zoom on the same frame is optional — only
+      on the moment that clearly earns one (the payoff, the biggest number).
       Graphics are silent by default; pass sfx=true only where the landing
       earns a sound. Numbers, quotes and UI messages come from the
       transcript or a verified source.
-   e. CONNECTIVE TISSUE: alternating tight/wide framing across jump cuts,
-      landings on cuts between ideas, punches on emphasis words, push_in
-      across long holds (add_zoom strength is magnification minus 1: 0.15 =
-      1.15x; no more than one camera event per ~1.5 s unless it is a
-      designed hit), motivated transitions at real turns, B-roll evidence
-      on named nouns, a visual change every 0.3-0.6 s.
+   e. CONNECTIVE TISSUE: motivated transitions at real turns, B-roll
+      evidence on named nouns, a visual change every 0.3-0.6 s (word reveals
+      and graphics). ZOOMS AND SOUND EFFECTS ARE OPTIONAL, NEVER RULES: a
+      steady, well-framed picture is the default, a bare jump cut is fine,
+      and each zoom or sound needs a clear editorial reason — used where
+      nothing calls for them they make the edit look childish. When a move
+      is earned: a punch on the word the story turns on, alternating
+      tight/wide framing across a jump cut whose pop distracts, a landing on
+      a real cut between ideas (add_zoom strength is magnification minus 1:
+      0.15 = 1.15x; never a move on every cut, sentence or hold; no more
+      than one camera event per ~1.5 s unless it is a designed hit).
    f. SOUND: only the approved library — add_sfx(storage_key='sound:<id>',
       at=<the frame it hits>, gain_db=<suggested>; the tool lands each
       recording's peak on `at`, so never pre-roll by hand) — and only where
@@ -800,9 +806,9 @@ Two things are different from a normal tool session, and both matter:
       payoff (sound:impact_1, once), or a real-world action shown (shutter
       on a photo, typing under typed text, a click on a button press, a cash
       register on a money figure). Never on captions or ordinary cuts inside
-      a conversation; at most about one sound every 4-5 s (about 4-8 in a
-      30-45 s short), never the same sound twice within ~3 s, zero when
-      nothing earns one; one family per short; peaks on the visual frame;
+      a conversation; at most about one sound every 4-5 s (a ceiling, not a
+      target: usually far fewer), never the same sound twice within ~3 s,
+      zero when nothing earns one; one family per short; peaks on the visual frame;
       mixed under the voice. search_sfx only for a specific sound the user
       asks for.
    g. ENDING: hold the payoff 1.0-1.5 s; a native CTA (comment_cta,

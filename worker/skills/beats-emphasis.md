@@ -24,8 +24,9 @@ PROGRAM seconds, ready for cuts, cues, pulses and graphics.
 EMPHASIS WORDS: `suggest_emphasis()` lists measured stressed words, numbers
 and distinctive terms verbatim. Use them three ways at once on a reel:
 - caption accent words (`emphasis_words`, 1–2 per sentence);
-- camera: punch-ins on the strongest, alternating framing across jump
-  cuts, `pulse` on rhythmic list beats (read zooms);
+- camera (optional — only where a word clearly earns a move): a punch-in
+  on the single strongest word or the payoff, `pulse` on a rhythmic list
+  beat when music drives (read zooms);
 - hero graphics on the 2–4 biggest, with a sound only where the landing
   earns one (read motion-design and audio).
 The strongest word gets the biggest move; adjacent loud words do not each
@@ -33,9 +34,10 @@ get a bump — vary strength and skip some.
 
 PUNCH-INS (`punch_in_on_emphasis`): writes one measured pass of punches on
 stressed words that survive the cut, aimed at detected faces, with spacing
-that avoids adjacent bumps. On a reel it is a valid first pass; inspect it
-and hand-tune the top moments (strength, timing, mode) rather than accepting
-uniform punches. Explicit count/strength remain available.
+that avoids adjacent bumps. It is optional, never a required pass: a punch
+on every stressed word looks childish. When you use it, pass a small count,
+keep only the punches on words that carry the story and hand-tune them
+(strength, timing, mode). Explicit count/strength remain available.
 
 BEAT-ALIGNED CUTS (`beat_align_cuts`): snaps internal cut points to the
 beat — the SONG the viewer hears when the edit has music. It MOVES existing

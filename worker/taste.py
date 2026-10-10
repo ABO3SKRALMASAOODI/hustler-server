@@ -508,6 +508,9 @@ def uncovered_jump_cuts(edl, index, tl, fps=None):
             junctions = transition_junctions(edl, index)
         except Exception:
             junctions = set()
+    import picture_cards
+    cards = [cd for cd in fx.get("picture_cards") or []
+             if isinstance(cd, dict) and cd.get("source_track")]
     covers = []
     for ov in edl.get("overlays") or []:
         if ov.get("fit") == "cover" or ov.get("screen"):
@@ -569,6 +572,10 @@ def uncovered_jump_cuts(edl, index, tl, fps=None):
             continue
         if aim_moved(aim(e0 - 1e-3), aim(s1 + 1e-3)):
             continue
+        if any(float(cd.get("start", 0)) <= c - dt and float(cd.get("end", 0)) >= c + dt
+               and picture_cards.source_at(cd, e0 - 1e-3)
+               != picture_cards.source_at(cd, s1 + 1e-3) for cd in cards):
+            continue                    # a source card re-aims on the cut
         zb = renderer.zoom_state_at(zooms, c - dt, out_dur)
         za = renderer.zoom_state_at(zooms, c + dt, out_dur)
         scale = max(za[0], zb[0]) / max(1e-6, min(za[0], zb[0])) - 1.0
@@ -651,14 +658,13 @@ def jump_cut_line(bare):
     more = sum(len(g[0]) for g in groups[JUMP_CUT_LIST:])
     return (f"{len(bare)} jump cut{'s' if len(bare) != 1 else ''} inside one "
             "take keep the same framing on both sides (no ≥8% scale step or "
-            "crop move), so the head visibly pops: "
+            "crop move). That is FINE by default: zooms are optional, never "
+            "a rule, and a camera that moves on every cut looks childish — "
+            "leave these bare unless one pops distractingly on a key line, "
+            "and cover only THAT one (a 5% punch reads as no change): "
             + "; ".join(", ".join(f"{t:g}s" for t in ts) + f" — {fix}"
                         for ts, fix in head)
-            + (f"; (+{more} more)" if more else "")
-            + ". Optional: cover only the cuts whose pop distracts — "
-              "alternate tight and wide across consecutive jump cuts, or "
-              "re-aim the crop (a 5% punch reads as no change); a bare jump "
-              "cut is fine, and zooms are never a rule.")
+            + (f"; (+{more} more)" if more else "") + ".")
 
 
 def critique(edl, index, tl, src_w=None, src_h=None, user_asked=""):
@@ -1077,9 +1083,10 @@ def critique(edl, index, tl, src_w=None, src_h=None, user_asked=""):
         if flat:
             add(f"static picture: {out_dur:.0f}s with no camera move, "
                 "cutaway or graphic — the frame never moves, so nothing "
-                "marks the sentence turns or the payoff. Add eased pushes or "
-                "a reframe on the turns and one hook interrupt in the first "
-                "two seconds.")
+                "marks the sentence turns or the payoff. Add one hook "
+                "interrupt in the first two seconds and a graphic or a "
+                "reframe on the real turns (a zoom only where a moment "
+                "clearly earns one — never as filler).")
 
     # ── the RATE of everything, together ─────────────────────────────────
     # Every rule above bounds ONE category, and a viewer does not experience

@@ -821,3 +821,46 @@ def test_the_solver_prices_the_caption_band_as_the_caption_plan_sees_it():
     side = (0.86, 0.6, 0.95, 0.7)
     assert not caption_carry.collides([side], 0.65)
     assert keepout.inter(side, keepout.caption_obstacle(0.65)) == 0
+
+
+def test_geometry_maps_the_face_through_a_re_aimed_cards_shot_rect():
+    # a card that re-aims per shot (source_track): the face lands where THAT
+    # shot's rect puts it
+    card = {"id": "c", "start": 0.0, "end": 20.0, "box": [0.04, 0.28, 0.96, 0.67],
+            "fit": "crop", "source": [0.2, 0.1, 0.7, 0.505],
+            "source_track": [{"t0": 10.0, "t1": 20.0, "source": [0.2, 0.1, 0.7, 0.505]},
+                             {"t0": 25.0, "t1": 35.0, "source": [0.0, 0.1, 0.5, 0.505]}]}
+    edl = _edl(keep=((10.0, 20.0), (25.0, 35.0)),
+               frame={"ratio": "9:16", "mode": "crop", "focus_x": 0.38}, cards=[card])
+    geo = keepout.Geometry(edl, VIDEO, 1080, 1920, 20.0)
+    face = (0.3, 0.2, 0.4, 0.45)
+    first = geo.to_output(1.0, 11.0, face)
+    second = geo.to_output(11.0, 26.0, face)
+    # the second shot's rect sits 0.2 of the source further left: the same
+    # source face lands further right on the card
+    assert second[0] > first[0] + 0.1
+
+
+def test_the_solver_leaves_the_captions_a_band_rather_than_making_them_touch():
+    # the Thiel counter: moved below a big face onto the caption band, the
+    # cheapest spot leaves the captions no band clear of it and the face
+    # (they would touch it); priced as the caption plan sees it, the solver
+    # takes a spot that leaves them one
+    import motion_templates
+    spec = motion_templates.spec("counter")
+    params = {"value": "140", "y": 0.5, "size": 1.0}
+    face = (0.25, 0.15, 0.75, 0.47)
+    ink = (0.2, 0.4, 0.8, 0.6)                    # centred on y 0.5
+    grow = (0.03, 0.045)                          # its scrim's core
+    ys = [0.74]
+    kw = dict(captions=[keepout.caption_band(y) for y in ys],
+              near_captions=[keepout.caption_obstacle(y, grow) for y in ys])
+    room = keepout.caption_room(ys, [face], 1080, 1920, grow)
+    plain = keepout.candidates("counter", spec, params, ink, [], [face], 1080, 1920, **kw)
+    priced = keepout.candidates("counter", spec, params, ink, [], [face], 1080, 1920,
+                                room=room, **kw)
+    assert not room(plain[0][2])
+    best = priced[0]
+    assert room(best[2]) and not keepout.on_face(best[2], [face], []), best
+    # a spot with room costs no more than it did before
+    assert any(c[1] == best[1] and abs(c[0] - best[0]) < 1e-9 for c in plain)

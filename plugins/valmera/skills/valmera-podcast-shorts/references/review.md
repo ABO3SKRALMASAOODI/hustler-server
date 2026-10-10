@@ -40,7 +40,9 @@ at 1x with the sound on, then answer:
    finishing?
 5. **Clean:** faithful claims and qualifiers, accurate readable captions
    (none muted over a punchline's setup), speakers named, graphics that mean
-   what is said, no white type on white clothing, at most one impact sound
+   what is said, no zoom or sound without a reason you can name (unearned
+   zooms and sounds look childish — zero of either is fine), no white type
+   on white clothing, at most one impact sound
    (on the payoff), at least ~0.5 s after the last word before the end card,
    nothing over the face or the brand corner, the corner mark and native end
    card untouched, no flash frames, pops, exposed edges or clipped words,
@@ -128,7 +130,9 @@ orig-17); 9-10 the best in the set (orig-04, orig-05, gum-03, gum-09).
 
 Premium references average 7.5, the top five 8.2. A hero short worth
 shipping as the owner's marketing should reach 7 or more; beating the
-references means 8 or more. **S** rewards sounds that are placed, sparse and
-earned, never their count; **M** is scored only when the owner supplied a
+references means 8 or more. **K** rewards camera moves that are motivated
+and few, never their count — a steady, well-framed short with no zoom where
+nothing called for one scores on its framing; **S** rewards sounds that are
+placed, sparse and earned, never their count; **M** is scored only when the owner supplied a
 song. These scores are for calibration and owner
 conversations, never a ship gate or a number to stamp on every short.

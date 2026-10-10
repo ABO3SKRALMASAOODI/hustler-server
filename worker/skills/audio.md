@@ -15,7 +15,10 @@ Intelligibility of the voice always wins the mix.
 - Never a sound on captions, on ordinary cuts inside a conversation (jump
   cuts, angle changes), or on camera moves. Never a whoosh on every caption
   or graphic: sound design is structure, not wallpaper.
-- Sparse: at most about one sound every 4–5 s (about 4–8 in a 30–45 s short),
+- OPTIONAL, NEVER A RULE (owner, Oct 2026): a sound effect needs a clear
+  editorial reason; used where nothing calls for one it makes the edit look
+  childish. Sparse: at most about one sound every 4–5 s (a ceiling, not a
+  target — no more than about 8 in a 30–45 s short, usually far fewer),
   never the same sound twice within ~3 s. Zero is a fine answer when nothing
   on screen earns one.
 - Match the material and keep one sound family per short; the peak lands on

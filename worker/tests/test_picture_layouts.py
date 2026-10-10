@@ -675,3 +675,139 @@ def test_source_card_blocks_run_on_the_block_clock(tmp_path):
     frames = [int(p.split("trim=end_frame=")[1].split(",")[0])
               for p in graph.split(";") if "trim=end_frame=" in p]
     assert sum(frames) == renderer.first_frame_at(tl.out_duration, 30)
+
+
+# ── a card that follows the speaker (owner, Oct 10: "the card doesn't
+# adjust with the face, occasionally part of the face moves out") ────────
+
+BOX = [.06, .3, .94, .7]
+
+
+def _holds(rect, face):
+    h = picture_cards.head_box(face)
+    return (rect[0] <= max(h[0], 0) + 1e-6 and rect[2] >= min(h[2], 1) - 1e-6
+            and rect[1] <= max(h[1], 0) + 1e-6 and rect[3] >= min(h[3], 1) - 1e-6)
+
+
+def test_one_framing_holds_every_measured_position_of_the_head():
+    centred = [.45, .25, .55, .45]
+    steady = [centred] * 3
+    # a steady speaker keeps exactly the median framing
+    assert picture_cards.framing_rect(1920, 1080, 1080, 1920, BOX, steady)[0] == \
+        picture_cards.speaker_rect(1920, 1080, 1080, 1920, BOX, centred)[0]
+    # the median framing let a lean to the left leave the card...
+    lean = [.15, .30, .25, .50]
+    median_rect, _ = picture_cards.speaker_rect(
+        1920, 1080, 1080, 1920, BOX, picture_cards.median_face(steady + [lean]))
+    assert not _holds(median_rect, lean)
+    # ...the framing holds every position, at the box's aspect
+    rect, headroom = picture_cards.framing_rect(1920, 1080, 1080, 1920, BOX,
+                                                steady + [lean])
+    assert all(_holds(rect, f) for f in steady + [lean])
+    a = (BOX[2] - BOX[0]) * 1080 / ((BOX[3] - BOX[1]) * 1920)
+    assert (rect[2] - rect[0]) * 1920 / ((rect[3] - rect[1]) * 1080) == \
+        pytest.approx(a, rel=1e-3)
+    assert headroom >= picture_cards.HEADROOM_MIN
+    # a stray detection far off the speaker's size (a poster) does not
+    # drag the framing
+    poster = [.85, .05, .88, .1]
+    assert picture_cards.framing_rect(1920, 1080, 1080, 1920, BOX,
+                                      steady + [poster])[0] == \
+        picture_cards.framing_rect(1920, 1080, 1080, 1920, BOX, steady)[0]
+
+
+def test_shots_share_a_framing_until_the_speaker_moves():
+    still = [[.45, .25, .55, .45]] * 3
+    nudge = [[.46, .25, .56, .45]] * 3
+    moved = [[.12, .28, .22, .48]] * 3
+    runs = picture_cards.shot_framings(
+        1920, 1080, 1080, 1920, BOX,
+        [("a", still), ("b", nudge), ("gap", []), ("c", moved), ("d", moved)])
+    # a nudge shares the framing; the move re-aims ONCE, on the cut to "c";
+    # a shot with no face rides with the one before it
+    assert [shots for _r, shots in runs] == [["a", "b", "gap"], ["c", "d"]]
+    assert all(_holds(runs[0][0], f) for f in still + nudge)
+    assert all(_holds(runs[1][0], f) for f in moved)
+    assert not _holds(runs[0][0], moved[0])
+
+
+def test_an_auto_card_re_aims_on_the_cut_where_the_speaker_moved():
+    # two kept takes (source 10-20, 25-35): centred, then far to the left
+    samples = [{"t": t, "faces": [[.45, .25, .55, .45]]} for t in (11, 14, 18)]
+    samples += [{"t": t, "faces": [[.10, .28, .20, .48]]} for t in (26, 30, 34)]
+    ctx = _Ctx(1920, 1080, samples=samples)
+    res = agent_tools.set_picture_card(ctx, "c", 0, 20, box=BOX)
+    card = ctx.card()
+    track = card["source_track"]
+    assert [(r["t0"], r["t1"]) for r in track] == [(10.0, 20.0), (25.0, 35.0)]
+    assert _holds(track[0]["source"], [.45, .25, .55, .45])
+    assert _holds(track[1]["source"], [.10, .28, .20, .48])
+    assert not _holds(track[0]["source"], [.10, .28, .20, .48])
+    # the default rect (blocks no span names) holds the head everywhere
+    assert _holds(card["source"], [.45, .25, .55, .45])
+    assert _holds(card["source"], [.10, .28, .20, .48])
+    assert "re-aims on 1 cut" in res
+    # a steady speaker gets one framing and no track
+    still = [{"t": t, "faces": [[.45, .25, .55, .45]]} for t in (11, 18, 26, 34)]
+    ctx = _Ctx(1920, 1080, samples=still)
+    res = agent_tools.set_picture_card(ctx, "c", 0, 20, box=BOX)
+    assert ctx.card()["source_track"] is None and "re-aims" not in res
+
+
+def test_each_block_of_a_re_aimed_card_is_composed_with_its_shots_rect(tmp_path):
+    left, right = [0, 0, .5, 1], [.5, 0, 1, 1]
+    card = dict(CARD, start=1.0, end=3.0, fit="crop", source=[0, 0, 1, 1],
+                source_track=[{"t0": .5, "t1": 2.37, "source": left},
+                              {"t0": 3.13, "t1": 6.0, "source": right}])
+    e = _edl([card])
+    graph, _args, _tl = _graph(e, tmp_path)
+    tagged = [p for p in graph.split(";") if "valmera_card:value=c0r0" in p
+              and "mode=add" in p]
+    assert len(tagged) == 2
+    a, b = (picture_cards.card_panels(e["effects"]["picture_cards"][0], t)
+            for t in (1.9, 4.0))
+    assert a[0][1] == left and b[0][1] == right
+    # the two blocks crop different regions of the source
+    crops = [p.split("]", 1)[1].split(",scale=")[0] for p in tagged]
+    assert crops[0] != crops[1]
+
+
+def test_source_track_is_canonical_and_bounded():
+    e = _edl([dict(CARD, source=[0, 0, 1, 1], source_track=[
+        {"t0": 3.13, "t1": 6.0, "source": [.5, 0, 1, 1]},
+        {"t0": .5, "t1": 2.37, "source": [0, 0, .5, 1]}])])
+    track = e["effects"]["picture_cards"][0]["source_track"]
+    assert [r["t0"] for r in track] == [.5, 3.13]          # sorted
+    # meaningless without the one source rect: dropped, never rejected
+    e = _edl([dict(CARD, source_track=[{"t0": .5, "t1": 2.0,
+                                        "source": [0, 0, .5, 1]}])])
+    assert e["effects"]["picture_cards"][0]["source_track"] is None
+    with pytest.raises((ValueError, EDLValidationError)):
+        _edl([dict(CARD, source=[0, 0, 1, 1], source_track=[
+            {"t0": 2.0, "t1": 1.0, "source": [0, 0, .5, 1]}])])
+    # a card without a track keeps its signature
+    plain = _edl([dict(CARD, source=[0, 0, 1, 1])])
+    legacy = dict(plain)
+    legacy["effects"] = dict(plain["effects"], picture_cards=[
+        {k: v for k, v in plain["effects"]["picture_cards"][0].items()
+         if k != "source_track"}])
+    assert edl_signature(plain) == edl_signature(legacy)
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg required")
+def test_a_re_aimed_card_shows_each_shots_region_on_screen(tmp_path):
+    """The card spans a cut (1.87): the first take frames the source's red
+    left third, the second its blue right third — the card re-aims on the
+    cut and nowhere else."""
+    card = dict(CARD, start=1.0, end=4.0, source=[0, 0, 1, 1], fit="crop",
+                box=[.05, .3, .95, .55],
+                source_track=[{"t0": .5, "t1": 2.37, "source": [0, 0, .3, 1]},
+                              {"t0": 3.13, "t1": 6.0, "source": [.7, 0, 1, 1]}])
+    frames = _render(tmp_path, _edl([card]))
+    y = int(.42 * 568)
+    on = [(i, f) for i, f in enumerate(frames) if _is_card(f)]
+    first = [f for i, f in on if i < round(1.87 * 30)]
+    second = [f for i, f in on if i > round(1.87 * 30) + 1]
+    assert len(first) > 20 and len(second) > 40
+    assert all(f[2][y, 160] > 150 and f[1][y, 160] < 150 for f in first)   # red
+    assert all(f[1][y, 160] > 150 and f[2][y, 160] < 150 for f in second)  # blue

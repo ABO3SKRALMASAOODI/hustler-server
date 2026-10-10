@@ -11,8 +11,9 @@ decorates a jump cut.
 
 - Motivated junctions: section turns, hook → body, B-roll in and out,
   location or speaker changes, chapter titles, the montage-to-face return.
-- Hard cuts inside a take; jump cuts get alternating framing (see zooms),
-  not full-screen effects.
+- Hard cuts inside a take; a jump cut stays bare (fine by default) or,
+  only where its pop distracts, gets alternating framing (see zooms) —
+  never a full-screen effect.
 - A junction at a real turn may carry one library sound, counted in the
   short's sparse budget (about one sound every 4–5 s at most, never the same
   sound twice within ~3 s). Ordinary cuts inside a conversation get none.
@@ -68,9 +69,10 @@ THE JUMP-CUT LAW:
   removed pause — often 40+ — and every one is a JUMP CUT inside the same
   continuous shot. Decorating each with a full-screen effect looks broken (a
   whip on all of them fires an effect every couple of seconds through
-  footage that never changed scene). Cover jump cuts with alternating
-  framing instead — tight from one cut to the next, wide at the following
-  one (read zooms); keep `landing` zooms for cuts between ideas.
+  footage that never changed scene). Leave jump cuts hard; where one pop
+  genuinely distracts, alternating framing covers it — tight from that cut
+  to the next, wide at the following one (read zooms; zooms are optional,
+  never on every cut); keep `landing` zooms for real cuts between ideas.
 - `set_transitions` defaults to scope='scene' and lands only on real shot
   changes and insert boundaries. READ THE RESULT — it says how many junctions
   it used ("7 of 45"); report THAT number, not the cut count.

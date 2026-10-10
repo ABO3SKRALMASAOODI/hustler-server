@@ -11,8 +11,10 @@ makes each of those impossible to miss.
 
 - Open on the strongest intelligible line or frame, with design on it from
   frame one.
-- Keep the viewer's eyes moving with purpose: word cues, camera, graphics,
-  B-roll, layout — each bound to what is being said.
+- Keep the viewer's eyes moving with purpose: word cues, graphics, B-roll,
+  layout — each bound to what is being said. Zooms and sound effects are
+  optional and only where a moment clearly earns them; used as filler they
+  make the edit look childish.
 - Never bait without payoff; never spoil the payoff in the hook text.
 
 ## Evidence to inspect
@@ -47,23 +49,23 @@ THE HOOK — 0 to 1.5 s:
 - SAY THE HOOK BACK in the reply: one clause naming what you opened on.
 
 RHYTHM — the middle:
-- A visual change every 0.3–0.6 s (motion-caption word reveals count) and a
-  bigger change every 2–4 s: a camera move (punch on emphasis, a framing
-  change across a jump cut, a landing on a turn, push on a hold), a graphic,
-  B-roll evidence, a layout shift.
+- A visual change every 0.3–0.6 s (motion-caption word reveals count) and
+  the structure moving with the speech: a graphic, B-roll evidence or a
+  layout shift where the story turns. A camera move only where a specific
+  moment calls for one (the payoff word, a real turn) — never to fill time.
 - Diagnose dead stretches by missing information, contrast or anticipation:
   a long hold with nothing changing is a design gap, not restraint.
 - Vary the interval: cluster changes on dense ideas and lists, let a real
-  admission or reaction hold on the face with only captions and a slow push.
+  admission or reaction hold on the face with only captions.
 - MIDDLE DISCIPLINE: every sentence earns its place — repetition, hedging,
   throat-clearing and second takes go (cutting owns the mechanics). A 34 s
   reel that keeps moving beats a 58 s reel with the same content.
 
 HERO MOMENTS — 2 to 4 per reel, on exact words: the claim, the number, the
-turn, the payoff. Each gets one leader graphic and an eased camera move on
-the same frame, plus one sound only when the landing earns it within the
-sparse budget (motion-design has the templates and timing; audio the sound
-rules).
+turn, the payoff. Each gets one leader graphic; a camera move or a sound on
+the same frame only when that landing clearly earns it, within the sparse
+budget (motion-design has the templates and timing; zooms and audio the
+rules for the optional camera and sound).
 
 OPEN LOOPS: a hook that asks ("this mistake cost me $40k") needs its answer
 to arrive. Choose when to answer for tension and comprehension; never distort
@@ -107,6 +109,6 @@ complete preview.
 ## Repair ladder
 
 Move a clearer promise to the front → add the interrupt and hook text →
-restore minimum setup → fill dead holds with camera or word cues → compress
+restore minimum setup → fill dead holds with word cues or a graphic → compress
 sagging beats → protect and accent the payoff → place the CTA after it →
 rescreen from frame one.

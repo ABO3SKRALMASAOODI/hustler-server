@@ -117,7 +117,7 @@ from schemas import (CANVAS_DIMS, CaptionStyle, clean_fingerprint,
                      SCREEN_TAKEOVER_MAX_S, quad_bbox, quad_is_sane)
 from schemas import ANIM_MAX_KEYFRAMES, CAPTION_LEADING_RANGE
 from schemas import master_loudness
-from schemas import PICTURE_CARD_MAX_PANELS, _source_rectangle
+from schemas import PICTURE_CARD_MAX_PANELS, PICTURE_CARD_MAX_TRACK, _source_rectangle
 from timeline import Timeline, card_text_window, insert_windows
 
 # Karaoke grouping: the renderer's legacy clamp (captions.KARAOKE_HARD_MAX,
@@ -14696,6 +14696,74 @@ def _one_framing(ctx, spans, cuts):
     return True
 
 
+def _card_shots(edl, spans):
+    """``spans`` split at the focus_track edges inside them: the render
+    splits its blocks on every such edge (renderer focus handoffs), so a
+    source card may take a framing of its own on each piece — one per shot
+    of a reframed multi-camera window, one per kept segment otherwise."""
+    frame = edl.get("frame") if isinstance(edl.get("frame"), dict) else {}
+    edges = set()
+    for span in (frame or {}).get("focus_track") or []:
+        for key in ("t0", "t1"):
+            try:
+                edges.add(float(span[key]))
+            except (KeyError, TypeError, ValueError):
+                continue
+    out = []
+    for a, b in spans:
+        cuts = [a] + sorted(x for x in edges if a + .1 < x < b - .1) + [b]
+        out += [(x, y) for x, y in zip(cuts, cuts[1:]) if y - x > 1e-3]
+    return out
+
+
+def _shots_reframe(ctx, edl, spans, cuts):
+    """True when an 'auto' card can frame every shot of its window itself:
+    each camera cut inside it sits on a focus_track edge (where the render
+    splits its blocks and a source_track span can change the rect) and every
+    shot has a measured face to frame."""
+    shots = _card_shots(edl, spans)
+    edges = {round(b, 3) for (_a, b) in shots[:-1]}
+    if any(not any(abs(c - e) <= .1 for e in edges) for c in cuts):
+        return False
+    samples = _card_face_samples(ctx, spans)
+    return all(any(a - .05 <= t <= b + .05 for t, _f in samples) for a, b in shots)
+
+
+def _card_track(ctx, edl, spans, box, canvas, video):
+    """(default rect, source_track rows or None, report) for an 'auto'
+    single source card: one framing per run of alike shots
+    (picture_cards.shot_framings), each holding every measured position of
+    the speaker's head in its shots, the card re-aimed only on the cuts
+    between runs. The default rect (blocks outside every span, e.g. after a
+    later re-cut) holds the head everywhere the window measured it."""
+    sw, sh = float(video.get("width") or 0), float(video.get("height") or 0)
+    W, H = canvas
+    samples = _card_face_samples(ctx, spans)
+    shots = _card_shots(edl, spans)
+    rows = [(shot, [f for t, f in samples if shot[0] - .05 <= t <= shot[1] + .05])
+            for shot in shots]
+    default, headroom = picture_cards.framing_rect(
+        sw, sh, W, H, box, [f for _t, f in samples], _window_focus(edl, spans))
+    if not samples:
+        return default, None, headroom      # nothing measured to follow
+    runs = picture_cards.shot_framings(
+        sw, sh, W, H, box, rows, focus_of=lambda shot: _window_focus(edl, [shot]))
+    if len(runs) < 2:
+        rect = runs[0][0] if runs else default
+        return rect, None, headroom
+    track = []
+    for rect, members in runs:
+        for t0, t1 in members:
+            r = [round(v, 4) for v in rect]
+            if track and track[-1]["source"] == r and abs(track[-1]["t1"] - t0) < 1e-3:
+                track[-1]["t1"] = round(t1, 3)
+            else:
+                track.append({"t0": round(t0, 3), "t1": round(t1, 3), "source": r})
+    if len(track) > PICTURE_CARD_MAX_TRACK:
+        return default, None, headroom
+    return default, track, headroom
+
+
 def _window_focus(edl, spans):
     """The reframe's aim over ``spans``: the one focus_track span covering
     them, else the frame's own focus (source fractions; None = centre)."""
@@ -14762,11 +14830,14 @@ def _rect_arg(value, what, source=False):
     return rect, None
 
 
-def _resolve_panel(ctx, edl, spans, box, source, fit, canvas):
-    """(box, source rect, fit, report) for one source-fed window, or
-    (None, None, None, error). ``source`` is 'auto' (the speaker: a face-
-    aware crop, or the whole frame of a low-resolution source), 'full' or a
-    rect of the source frame."""
+def _resolve_panel(ctx, edl, spans, box, source, fit, canvas, follow=False):
+    """(box, source rect, fit, report, source_track) for one source-fed
+    window, or (None, None, None, error, None). ``source`` is 'auto' (the
+    speaker: a face-aware crop holding every measured position of the head,
+    or the whole frame of a low-resolution source), 'full' or a rect of the
+    source frame. ``follow`` (a single card, not a stack panel) lets 'auto'
+    re-aim shot by shot (source_track) where the speaker moves between
+    takes."""
     video = (getattr(ctx, "index", None) or {}).get("video") or {}
     try:
         sw, sh = float(video.get("width") or 0), float(video.get("height") or 0)
@@ -14774,7 +14845,7 @@ def _resolve_panel(ctx, edl, spans, box, source, fit, canvas):
         sw = sh = 0.0
     W, H = canvas
     lowres = picture_cards.is_lowres(sw, sh)
-    face, headroom = None, None
+    face, headroom, track = None, None, None
     if isinstance(source, str):
         if source == "full" or (source == "auto" and lowres):
             rect = (picture_cards.archival_rect() if lowres
@@ -14782,20 +14853,34 @@ def _resolve_panel(ctx, edl, spans, box, source, fit, canvas):
             fit = fit or "pad"
         else:
             fit = fit or "crop"
-            face = picture_cards.median_face(_card_faces(ctx, spans))
-            if sw and sh and fit == "crop":
-                rect, headroom = picture_cards.speaker_rect(
-                    sw, sh, W, H, box, face, _window_focus(edl, spans))
+            faces = _card_faces(ctx, spans)
+            face = picture_cards.median_face(faces)
+            if sw and sh and fit == "crop" and follow:
+                rect, track, headroom = _card_track(ctx, edl, spans, box, canvas, video)
+            elif sw and sh and fit == "crop":
+                rect, headroom = picture_cards.framing_rect(
+                    sw, sh, W, H, box, faces, _window_focus(edl, spans))
             else:
                 rect = [0.0, 0.0, 1.0, 1.0]
     else:
         rect, err = _rect_arg(source, "source", source=True)
         if err:
-            return None, None, None, err
+            return None, None, None, err, None
         fit = fit or "pad"
     if not (sw and sh):
-        return box, rect, fit, "source size unknown — the render fits it"
+        return box, rect, fit, "source size unknown — the render fits it", None
+    box0 = list(box)
     box, rect, k = picture_cards.fit_panel(sw, sh, W, H, box, rect, fit)
+    if track:
+        # every shot's framing goes onto the SAME box at the same scale
+        fitted = []
+        for row in track:
+            b2, r2, _k2 = picture_cards.fit_panel(sw, sh, W, H, box0, row["source"], fit)
+            if any(abs(u - v) > 1e-3 for u, v in zip(b2, box)):
+                fitted = None
+                break
+            fitted.append(dict(row, source=[round(v, 4) for v in r2]))
+        track = fitted or None
     bits = [f"{int(sw)}x{int(sh)} source rect "
             f"[{', '.join(f'{v:.3f}' for v in rect)}] -> box "
             f"[{', '.join(f'{v:.3f}' for v in box)}], enlarged {k:.2f}x "
@@ -14806,10 +14891,18 @@ def _resolve_panel(ctx, edl, spans, box, source, fit, canvas):
                        else " (the source's top edge allows no more)"))
     elif isinstance(source, str) and source == "auto" and not lowres:
         bits.append("no face measured here — framed on the frame's focus")
+    if track:
+        cuts = sum(1 for a, b in zip(track, track[1:]) if a["source"] != b["source"])
+        bits.append(f"the speaker moves between takes, so the card re-aims on "
+                    f"{cuts} cut{'s' if cuts != 1 else ''} "
+                    f"({len({tuple(r['source']) for r in track})} framings, each "
+                    "holding every measured position of the head; never mid-shot)")
+    elif isinstance(source, str) and source == "auto" and not lowres and face is not None:
+        bits.append("one framing holds every measured position of the head")
     if lowres and isinstance(source, str):
         bits.append("low-resolution source shown whole (contain), edge "
                     "blanking trimmed")
-    return box, rect, fit, "; ".join(bits)
+    return box, rect, fit, "; ".join(bits), track
 
 
 def set_picture_card(ctx, id, start, end, box=None, fit=None, radius=.045,
@@ -14885,11 +14978,17 @@ def set_picture_card(ctx, id, start, end, box=None, fit=None, radius=.045,
             return err
     else:
         card_box = [.06, .24, .94, .74]
-    card_source = None
+    card_source, card_track = None, None
     video_lowres = picture_cards.is_lowres(video.get("width"), video.get("height"))
     cuts = (_card_cuts(ctx, edl, spans)
             if spans and (source != "program" or panels) else [])
     cut_list = ", ".join(f"{t:g}s" for t in cuts[:3])
+    if panels is None and source == "auto" and cuts and not video_lowres \
+            and _shots_reframe(ctx, edl, spans, cuts):
+        # every cut is a reframe edge the render splits its blocks on, and
+        # every shot has a measured face: the card frames each shot itself
+        # (source_track), so it can stay framed from the source
+        cuts = []
     if (panels is None and source == "auto" and cuts and not video_lowres
             and not _one_framing(ctx, spans, cuts)):
         # One rect shows the same region of every shot: framed on one camera
@@ -14932,7 +15031,7 @@ def set_picture_card(ctx, id, start, end, box=None, fit=None, radius=.045,
             pfit = panel.get("fit")
             if pfit is not None and pfit not in ("crop", "pad"):
                 return f"REJECTED: panel {k + 1} fit must be 'crop' or 'pad'."
-            pbox, prect, _pfit, note = _resolve_panel(
+            pbox, prect, _pfit, note, _track = _resolve_panel(
                 ctx, edl, spans, pbox, psrc, pfit, canvas)
             if pbox is None:
                 return note
@@ -14940,8 +15039,8 @@ def set_picture_card(ctx, id, start, end, box=None, fit=None, radius=.045,
             report.append(f"panel {k + 1}: {note}")
         look_rect = rows_panels[0]["source"]
     elif source != "program":
-        rbox, rect, rfit, note = _resolve_panel(ctx, edl, spans, card_box,
-                                                source, fit, canvas)
+        rbox, rect, rfit, note, card_track = _resolve_panel(
+            ctx, edl, spans, card_box, source, fit, canvas, follow=True)
         if rbox is None:
             return note
         card_box, card_source, fit = rbox, [round(v, 4) for v in rect], rfit
@@ -14976,7 +15075,7 @@ def set_picture_card(ctx, id, start, end, box=None, fit=None, radius=.045,
             background_style=style,background_color2=background_color2,
             background_dim=background_dim,grain=grain,
             vignette=vignette, source=card_source,
-            panels=rows_panels)).model_dump()
+            panels=rows_panels, source_track=card_track)).model_dump()
         if row["end"]-row["start"] < .5:
             raise ValueError("Allow at least 0.5 seconds for a footage card")
     except (ValueError,TypeError) as exc:
@@ -25367,9 +25466,11 @@ TOOLS = {
                      "max_seconds": {"type": "number"},
                      "allow_none": {"type": "boolean"}}),
     "add_sfx": (add_sfx, "Punctuate a MOMENT with a one-shot sound effect — a "
-                "whoosh on a cut, a click on a beat, an impact on a reveal. "
-                "Choose it when the brief, format, timing, or your editorial "
-                "judgment says sound design improves the cut. Analysis, "
+                "whoosh into a real turn, a click on a shown button press, an "
+                "impact on the payoff. OPTIONAL, never a rule: choose it only "
+                "when the moment clearly earns a sound (most of a talking reel "
+                "carries none; sounds with no clear on-screen reason make an "
+                "edit look childish). Analysis, "
                 "metadata, and deterministic preview AUDIO CHECK are useful "
                 "evidence; uncertainty is something to judge rather than "
                 "a reason the tool becomes unavailable. "
@@ -25915,9 +26016,14 @@ TOOLS = {
                                              "vintage", "cinematic",
                                              "none"]}}),
     "add_zoom": (add_zoom, "Camera move (sub-pixel, eased) on a time range "
-                 "of the FINAL edited video, in output seconds. Use the "
-                 "premium short-form camera grammar — each move has a job "
-                 "and lands on a real beat: "
+                 "of the FINAL edited video, in output seconds. OPTIONAL, "
+                 "never a rule: a steady, well-framed picture is the "
+                 "default, and a zoom needs a clear editorial reason (the "
+                 "word the story turns on, a real cut between ideas, a "
+                 "thing the viewer must look at) — zooms where nothing "
+                 "calls for them make an edit look childish, so never one "
+                 "on every cut, sentence or hold. When a move is earned, "
+                 "each one has a job and lands on a real beat: "
                  "'punch' = fast expo snap in (~0.15s), held, hard cut back "
                  "out at `end` — THE punch-in on a stressed word, number or "
                  "payoff; end it on the next cut or sentence turn so the "
@@ -25927,8 +26033,8 @@ TOOLS = {
                  "settles to the wide in ~0.35s — start it EXACTLY on a cut "
                  "(end ~start+0.4) so the new shot arrives with momentum. "
                  "'push_in' = slow continuous push (strength 0.05-0.12) "
-                 "across a long hold (3s+) — keeps a static talking head "
-                 "alive; 'pull_out' = the release/reveal. 'ease' (default) = "
+                 "across a long hold (3s+) that builds toward something; "
+                 "'pull_out' = the release/reveal. 'ease' (default) = "
                  "smooth ramp in, hold, ramp out — a gentle push onto a "
                  "subject mid-shot. An edge within 4 frames of a cut lands "
                  "ON the cut and holds through it: no ramp straddles a cut, "
@@ -26069,7 +26175,9 @@ TOOLS = {
         "FOOTAGE — source: the card takes its picture straight from the full SOURCE frame "
         "(enlarged once, at most 2x), never from the already-cropped 9:16 program. "
         "Default 'auto' frames the speaker from the index's face boxes (a medium close-up with "
-        ">=8% headroom above the head); on a source below 720p it shows the WHOLE frame "
+        ">=8% headroom above the head) so EVERY measured position of the head stays inside the "
+        "card, and where the speaker moves between takes it re-aims on the cut (one framing "
+        "per take, never mid-shot; the result says how many); on a source below 720p it shows the WHOLE frame "
         "(contain: the box shrinks to the footage's aspect, edge blanking trimmed) — archival "
         "4:3 talks belong in a full-width 4:3 card, not a 3.7x crop. 'full' = the whole source "
         "frame; [left,top,right,bottom] = that rect of the SOURCE frame (look_at gives the "
@@ -26077,7 +26185,8 @@ TOOLS = {
         "fit: 'crop' keeps the box and trims the source rect to it; 'pad' keeps the whole rect "
         "and shrinks the box around it (the default for 'full' and explicit rects). The result "
         "reports the rect, box, enlargement and headroom. One rect frames ONE shot: an 'auto' "
-        "window that crosses a camera cut to a differently framed shot keeps the program picture "
+        "window across a camera cut the reframe re-aims on (focus_track) frames each shot "
+        "itself; across any other cut to a differently framed shot it keeps the program picture "
         "(it follows the reframe) and says so — give each shot its own card for source framing. "
         "Spliced inserts inside a source card play full-frame and the card returns after them. "
         "SPEAKER + EVIDENCE — panels: 2-3 {box, source[, fit]} shown at once over the window, "
@@ -27180,11 +27289,13 @@ TOOLS = {
                              "are directed from program length and the "
                              "motion brief (distributed, never clustered on "
                              "adjacent loud words); explicit values win. "
-                             "Complete the camera with add_zoom: a 'landing' "
-                             "on hard cuts between ideas and a slow "
-                             "'push_in' across long holds — variety, not "
-                             "more punches. Skip it for calm/minimal briefs "
-                             "or footage without speech.",
+                             "OPTIONAL, never a required pass: zooms need a "
+                             "clear editorial reason, and a punch on every "
+                             "stressed word looks childish — pass a small "
+                             "count and keep only the punches on words the "
+                             "story turns on. Skip it for calm/minimal briefs, "
+                             "footage without speech, or when the type "
+                             "already carries the moment.",
                              {"count": {"type": "integer"},
                               "strength": {"type": "number"}}),
     "beat_align_cuts": (beat_align_cuts, "THE tool for 'cut to the beat'. "
@@ -27839,10 +27950,12 @@ def _compact_description(description):
 
 _COMPACT_CONTRACTS = {
     "add_zoom": (
-        "Camera move, OUTPUT seconds. mode: punch=expo snap-in on a stressed "
+        "Camera move, OUTPUT seconds. Optional, never a rule: only where a "
+        "moment clearly earns one (unmotivated zooms look childish). mode: "
+        "punch=expo snap-in on a stressed "
         "word, hard cut out at end (end on a cut or sentence turn); landing="
         "start ON a cut, settles from 0.12-0.18; push_in=slow 0.05-0.12 push "
-        "over 3s+ holds; pulse=0.3s beat thump; shake=impact; ease=gentle "
+        "over a 3s+ hold that builds; pulse=0.3s beat thump; shake=impact; ease=gentle "
         "push. rect frames a region; cx/cy pins a point. ramp_s, overshoot, "
         "rotate, shake shape the move."),
     "apply_edit_batch": (
@@ -27932,7 +28045,9 @@ _COMPACT_CONTRACTS = {
         "there) and caps long tails, so never pre-roll by hand; the result "
         "says where the peak lands. dur_s stops typing when the typing "
         "stops. purpose names the "
-        "on-screen event. Never on captions or ordinary cuts; about one "
+        "on-screen event. Optional, never a rule: zero is fine, and a sound "
+        "with no clear on-screen reason looks childish. Never on captions or "
+        "ordinary cuts; about one "
         "sound every 4-5 s at most, none repeated within ~3 s."),
     "add_captions": (
         "Burned captions: mode='from_transcript', 'off', or dictated items. "
@@ -27964,9 +28079,9 @@ _COMPACT_CONTRACTS = {
         "each punch snaps in ON its word (~0.12s expo), holds to the next cut "
         "or sentence end, then cuts back out; face-aimed, never clustered on "
         "adjacent loud words. Omitted count/strength are directed from program "
-        "length; explicit values win. Then complete the camera with add_zoom "
-        "(landing on cuts between ideas, push_in on long holds). Skip for "
-        "calm/minimal briefs."),
+        "length; explicit values win. Optional, never a required pass: keep "
+        "only punches on words the story turns on (a punch on every stressed "
+        "word looks childish). Skip for calm/minimal briefs."),
     "set_transitions": (
         "One junction style at real scene changes; scope='scene' skips jump "
         "cuts — report the junction count it returns. Styles dip_black, "
@@ -27978,8 +28093,9 @@ _COMPACT_CONTRACTS = {
     "set_picture_card": (
         "Footage-only rounded card for start/end program seconds (box, radius, "
         "border, shadow, entrance/exit). Its footage comes from the full SOURCE "
-        "frame (source='auto' frames the speaker with headroom; a sub-720p "
-        "source is shown whole), enlarged at most 2x; panels=[{box, source}, "
+        "frame (source='auto' frames the speaker with headroom, keeps every "
+        "measured head position inside and re-aims on a cut where the speaker "
+        "moved; a sub-720p source is shown whole), enlarged at most 2x; panels=[{box, source}, "
         "...] stacks the speaker and the screen/inset they show. The default "
         "canvas is dark and sampled from the footage; never a flat void, and "
         "no blurred self-copy on low-resolution footage."),

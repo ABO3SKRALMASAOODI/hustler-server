@@ -2618,7 +2618,6 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         for j, card in enumerate(fx_cards):
             a, b = card_windows.get(card["id"]) or (float(card["start"]),
                                                     float(card["end"]))
-            panels = picture_cards.card_panels(card)
             run = None
             for kind, i, t0 in order:
                 mid = None if kind != "seg" else t0 + seg_out_len[i] / 2.0
@@ -2628,7 +2627,10 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                         run = [tag, t0, t0]
                         card_runs.setdefault(card["id"], []).append(run)
                     run[2] = t0 + seg_out_len[i]
-                    card_layout[i] = (panels, run[0])
+                    # a re-aimed card (source_track) frames each block with
+                    # the span holding the block's own source midpoint
+                    card_layout[i] = (picture_cards.card_panels(
+                        card, (keep[i][0] + keep[i][1]) / 2.0), run[0])
                 else:
                     run = None
     sw = sh = None

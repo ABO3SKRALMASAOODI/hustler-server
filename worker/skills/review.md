@@ -39,24 +39,29 @@ SCREEN IN THIS ORDER — each item is a yes/no question:
 1. THE OPEN (rendered 0.0, 0.2, 0.6, 1.5): first visual event by 0.6 s?
    Hook text readable by 1.5 s? Speaker on screen and talking by ~0.3 s? No
    black, no fade-in, no dead air?
-2. RHYTHM: scanning the program, is anything static for more than ~2 s
-   without a designed reason? Does a bigger change arrive every 2–4 s?
+2. RHYTHM: scanning the program, does the type keep moving with the
+   speech, and does the structure (a graphic, B-roll, a layout shift) move
+   where the story turns? Is any zoom or sound there only to fill time
+   (remove it)?
 3. HERO MOMENTS (dense frames each): does one leader land on its word
-   (0–3 frames early), with camera (and any sound) on the same frame, clear
+   (0–3 frames early), with any camera move or sound on the same frame, clear
    of the face and the UI band, readable at phone size, and exit cleanly?
 4. CAPTIONS: words appear on onsets; accents on the right 1–2 words; legible
    against every background; no overlap with faces, graphics or the platform
    band; no caption stacked over burned-in text.
-5. CAMERA: each zoom aimed at the face or target, eased (no steps or drift),
-   jump cuts covered by alternating framing, landings only on cuts between
-   ideas, varied strengths, no more than one camera event per ~1.5 s except
-   a designed hit.
+5. CAMERA (optional — zero zooms is fine): can you name the reason for
+   every zoom? Remove any you cannot. Each one aimed at the face or target,
+   eased (no steps or drift), landings only on cuts between ideas, varied
+   strengths, never a move on every cut or sentence, no more than one camera
+   event per ~1.5 s except a designed hit. A bare jump cut is fine; cover
+   one only where its pop distracts.
 6. JUNCTIONS: cuts on word edges, no flash or double frames; transitions only
    on real turns, any sound peaking on the cut; no effect or sound on a jump
    cut.
-7. SOUND: AUDIO CHECK loudness and peaks; no digital silence; every cue on
-   a named on-screen event (never a caption or an ordinary cut), about one
-   every 4–5 s at most, no sound repeated within ~3 s; nothing masking the
+7. SOUND (sound effects are optional — zero is fine): AUDIO CHECK loudness
+   and peaks; no digital silence; every cue on a named on-screen event
+   (never a caption or an ordinary cut; remove any you cannot name a reason
+   for), about one every 4–5 s at most, no sound repeated within ~3 s; nothing masking the
    voice; music present only if the user asked for it or supplied it, then
    roughly 13–20 dB below the voice. ACTUAL-AUDIO REVIEW, when present,
    adds bounded listening evidence — never claim continuous listening beyond

@@ -28,11 +28,11 @@ The coordinator assigns one Look and one structure per short. The editor reads
 | Speaker identity | each speaker named within ~3 s of first appearing (`lower_third` or the headline band: verified name plus role, venue or year) |
 | Meaning | each graphic means what the speaker means: a tick is "achieved" (broken promises and myths take `mark='cross'`), slams go on information-bearing words, never on clichés, and no graphic only recaps an earlier one |
 | Graphic choice | contrast punchlines as a two-beat swap (setup words, then payoff words, each on its onset); counters only for counted or growing quantities and landing ON the number; list items share one type role; zones rotate (above head, beside face, chest, header) and stay off the face; at least one hero word behind the subject when the background allows; no caption-only stretch over ~3 s in the last third |
-| Visual change | something changes every 0.3-0.6 s (caption cue, graphic, zoom, cut); a structural event (cut, zoom, graphic, B-roll) every 1.5-2.5 s |
+| Visual change | something changes every 0.3-0.6 s (caption cue, graphic, cut); a structural event (cut, graphic, B-roll) every 1.5-2.5 s. Zooms and sounds never fill this: they are optional, only where a moment earns them |
 | Hero moments | 2-4 designed beats on exact word cues (Kinetic Poster, Mono Noir, Creator Glow: 3-6) |
 | Payoff | marked (type, sound or camera; the owner's song's button when music is on) and held 1.0-1.5 s before the editorial end |
 | Picture area | full-bleed (1.0) when the face crop needs at most 2x upscale; otherwise a card on a designed backdrop covering at least 0.54 of the canvas (see Card geometry). Only Editorial Serif's square card may go down to 0.48 (gum-02), because its field carries the type |
-| Sound | approved library sounds only on meaningful on-screen moments: at most about one every 4-5 s (about 4-8 per short), never the same sound within ~3 s, within the Look's budget (see Sound); no digital silence longer than 0.3 s except a deliberate 50-280 ms stop-down before a reveal or a montage passage flagged for the owner's song (see Sound without music) |
+| Sound | optional: approved library sounds only on meaningful on-screen moments, zero is fine; at most about one every 4-5 s (a ceiling, usually far fewer), never the same sound within ~3 s, within the Look's budget (see Sound); no digital silence longer than 0.3 s except a deliberate 50-280 ms stop-down before a reveal or a montage passage flagged for the owner's song (see Sound without music) |
 | Length | final 15-45 s including the 5 s native ending, so the editorial program is 10-40 s (montage editorial at most 25 s) |
 
 ### Type
@@ -79,15 +79,23 @@ full-width cards, captions and hero words therefore sit inside the card.
 
 ### Camera (`add_zoom`; read its schema before the first call)
 
+**Zooms are optional, never a rule** (owner, Oct 10). A steady, well-framed
+picture is the default; each zoom needs a reason you can name (the payoff
+word, the number the story turns on, a real turn between ideas). Zooms used
+where nothing calls for them make a short look childish: never a landing
+on every cut, a `push_in` on every take or a punch on every sentence. Each
+Look's **Camera** line below lists the moves that suit it when a moment
+earns one — a menu, not a quota; zero zooms is a fine result.
+
 `strength` is the added zoom: 0.15 means 1.15x. Mode names are the schema's
 (`push_in`, not `push`).
 
 | Mode | Use | Numbers |
 | --- | --- | --- |
-| `landing` | the first frame after a hard cut or camera change | strength 0.12-0.18, settles to 1.0 in about 0.35 s; start exactly on the cut, end about 0.4 s later |
+| `landing` | the first frame after a hard cut into a new idea (not every angle change) | strength 0.12-0.18, settles to 1.0 in about 0.35 s; start exactly on the cut, end about 0.4 s later |
 | `punch` | a stressed word, number or payoff | strength 0.10-0.25, about 0.12 s snap, held, steps back out at `end` (the next cut or sentence turn); `overshoot` 0.05-0.15 only on the biggest beat; at least 4 s apart |
 | `pulse` | a beat, laugh or list item | strength 0.05-0.08, in and out in about 0.3 s |
-| `push_in` | any take longer than about 4 s | strength 0.05-0.08 across the take |
+| `push_in` | a take longer than about 4 s that builds toward something (not every long take) | strength 0.05-0.08 across the take |
 | `shake` (or `shake` 0.3-0.8 on a punch) | only the single biggest impact | with the short's one `impact_1` on that frame |
 
 Every still image moves (`push_in` or a slow pan). Start a zoom after a cut,
@@ -149,9 +157,11 @@ button press, a cash register on a money figure, a ding on a result).
 Never on captions, jump cuts, ordinary cuts inside the conversation,
 landing zooms, `push_in`, punches or pulses on speech.
 
-**How many.** At most about one sound every 4-5 s for the whole short, so
-about 4-8 in a 30-45 s short (template cues count), never the same sound
-twice within ~3 s, and zero is fine for a passage where nothing earns one.
+**How many.** Sound effects are optional, never a rule: a sound with no
+clear on-screen reason makes a short look childish. At most about one sound
+every 4-5 s for the whole short (template cues count) — a ceiling, usually
+far fewer — never the same sound twice within ~3 s, and zero is fine for a
+passage or a short where nothing earns one.
 Each Look names a ceiling per short and one consistent family; stay inside
 both and match the material (no impact under a tender admission). A ceiling
 is never a quota, and the spacing rule wins: a 30 s short holds about 6-7
@@ -249,10 +259,10 @@ structure can wear any Look unless noted.
   persistent, verified, speaker-first headline (`set_editorial_graphic(kind=
   "headline", speaker=..., text=...)`) held through the editorial program.
   No B-roll cutaways and no full-screen interrupting cards. Motion lives in
-  the captions, the camera (landing after every angle change, `push_in` on
-  long takes, 1-3 punches), the card reveal and 1-3 designed beats inside the
-  card's face-free space (at most 2 s each). Best with Headline Pro; also
-  Editorial Serif or Cinematic Doc.
+  the captions, the card reveal and 1-3 designed beats inside the card's
+  face-free space (at most 2 s each); a camera move only where a moment earns
+  it (at most 1-3 in the short, never one on every angle change or take).
+  Best with Headline Pro; also Editorial Serif or Cinematic Doc.
 - **hook-to-silent-montage**: a complete spoken premise, then a montage of at
   most 15 s (editorial at most 25 s) anchored by recognizable footage of the
   featured person plus direct, viewer-visible results of the premise. Never
@@ -310,14 +320,16 @@ A `custom-<slug>` Look is allowed when the brief spells out every field below.
   lower third (y 0.62-0.76) in face-free space, never below the card and
   never over the mouth.
 - **Grade:** warm matte, light grain, soft vignette.
-- **Camera:** `landing` on every angle change; `push_in` on takes over 4 s;
-  `punch` on 1-2 stressed words; `pulse` on the laugh or punchline.
+- **Camera (optional, only where earned):** a `punch` on the 1-2 words the
+  story turns on; a `landing` on a real turn between ideas; a `pulse` on the
+  laugh or punchline. Never a landing on every angle change or a push on
+  every take.
 - **Signature:** payoff hero word inside the card's lower third (`word_slam`
   role serif, entrance `ghost` or `rise`, y about 0.70, captions muted under
   it) or `marker_text` on the payoff phrase;
   `circle_highlight`/`arrow_callout` when the speaker points at something
   visible; `counter` or `stat_card` only for a spoken number.
-- **Transitions + sound:** hard cuts with landing zooms (silent). Family:
+- **Transitions + sound:** hard cuts (a landing zoom only on a real turn, silent). Family:
   `whoosh_soft_1` into the opening card or hook title, `pop_1` on at most one
   hero word, `impact_1` or `ding_1` on the payoff. At most 5 sounds per short.
 - **Music (owner's song only, when on):** -22 dB ducked; let its swell land
@@ -342,7 +354,9 @@ A `custom-<slug>` Look is allowed when the brief spells out every field below.
 - **Type:** Inter Display lowercase backbone + Instrument Serif italic for
   1-2 words per sentence in red #ED080D or near-white; ladder up to 7:1.
 - **Grade:** filmic, slightly desaturated warm, grain, vignette.
-- **Camera:** `push_in` on every long take; `landing` after cuts; at most one `punch`.
+- **Camera (optional, only where earned):** a slow `push_in` on the take
+  that builds to the turn or the payoff; at most one `punch`; a `landing` only
+  on a real section change. Never a push on every take or a landing on every cut.
 - **Signature:** `phrase_build` lockups for the hook and the turn (small sans
   connector row, large serif hero row, condensed qualifier), placed in face-free
   space with each row's `at` on its spoken onset; 1-2 hero words behind the
@@ -372,9 +386,10 @@ A `custom-<slug>` Look is allowed when the brief spells out every field below.
 - **Type:** Inter Display Black or Archivo condensed caps, tight; accent red
   #D90F17 or gold #FFD400; the payoff word 1.5x the other heroes.
 - **Grade:** desaturated base with selective red and yellow, contrast, grain.
-- **Camera:** `punch` on stressed words (overshoot only on the hero and
-  payoff words); `landing` on every cut; `pulse` on beats; one shake on the
-  biggest hit.
+- **Camera (optional, only where earned):** a `punch` on the hero and
+  payoff words (overshoot only there); a `pulse` on a real beat; one shake on
+  the biggest hit at most. The energy comes from the type — never a landing
+  on every cut or a punch on every sentence.
 - **Signature:** `word_slam` on 3-5 hero words (start 0.2 s before the word);
   `phrase_build` for the thesis; `versus_split` for a contrast; `image_card`
   or `photo_stack` for licensed evidence; `chapter_title` between list items;
@@ -402,8 +417,9 @@ A `custom-<slug>` Look is allowed when the brief spells out every field below.
 - **Type:** Inter Tight captions; `glow_title` or `chapter_title` in Bodoni
   Moda or Playfair italic; accent butter #F7E499 or red.
 - **Grade:** teal/orange low-key or warm archival, grain, vignette, highlight bloom.
-- **Camera:** `push_in` on every take (strength about 0.06 over 4-8 s);
-  `landing` after cuts; Ken Burns on every still; rare `punch`.
+- **Camera (optional, only where earned):** a slow `push_in` (strength
+  about 0.06 over 4-8 s) on the take that carries the story's weight, not on
+  every take; Ken Burns on every still; rare `punch`.
 - **Signature:** `glow_title` for the premise or a date; `timeline_steps` or
   `chapter_title` for a time jump (1983 to 2010); `image_card`/`photo_stack`
   archival evidence; `quote_card` for the payoff line; `focus_spotlight` on
@@ -430,7 +446,9 @@ A `custom-<slug>` Look is allowed when the brief spells out every field below.
 - **Type:** condensed caps (Anton, Bebas, Archivo condensed) for heroes in
   red #ED080D; white Inter Bold for 1-3-word captions; mono for code and numbers.
 - **Grade:** high-contrast monochrome with one red accent, heavier grain, vignette.
-- **Camera:** `punch` on hits (shake on the biggest), `landing` after cuts, `pulse` on beats.
+- **Camera (optional, only where earned):** a `punch` on the few real hits
+  (shake on the biggest at most); a `pulse` on a real beat. Never a landing
+  after every cut.
 - **Signature:** `word_slam` with `strobe` or `ghost` entrances; `text_scramble`
   or `typewriter` for numbers and technical terms; `counter` for a spoken
   number; red behind-subject keyword; `glitch_burst` at the turn.
@@ -459,7 +477,9 @@ A `custom-<slug>` Look is allowed when the brief spells out every field below.
 - **Type:** Inter Tight Bold, tight tracking; accent periwinkle #6D93D6 or
   a growth green; numbers big.
 - **Grade:** high-key, clean, neutral, light grain.
-- **Camera:** `push_in` on talking takes, `pulse` when a card lands, `landing` after cuts.
+- **Camera (optional, only where earned):** a `pulse` when the key card
+  lands; a `push_in` only on a take that builds to a number. Never a move on
+  every cut or take.
 - **Signature:** `counter`, `stat_card`, `bar_compare`, `line_chart`,
   `progress_ring`, `timeline_steps`, `checklist`, `search_bar`, `notification`,
   `chat_bubbles`, `post_card`, `versus_split`, `arrow_callout`. Only for
@@ -487,7 +507,9 @@ A `custom-<slug>` Look is allowed when the brief spells out every field below.
 - **Type:** Inter Display Black or ExtraBold, white plus gold #FFC21A
   glowing accent words, emphasis about 3:1.
 - **Grade:** low-key, contrasty, warm highlights, bloom.
-- **Camera:** `punch` on keywords, `landing` after cuts, zoom-blur or whip into B-roll.
+- **Camera (optional, only where earned):** a `punch` on the one or two
+  keywords the story turns on; zoom-blur or whip into B-roll at a real turn.
+  Never a landing after every cut.
 - **Signature:** `hook_title` (treatment `glow`) beside the face; `glow_title`;
   `phrase_build`; `arrow_callout` or `circle_highlight`; `photo_stack`;
   `focus_spotlight`. CTA templates (`follow_cta`, `save_cta`, `comment_cta`)
