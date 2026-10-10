@@ -114,7 +114,9 @@ CHOOSING A TEMPLATE — confirm names and params with `list_motion_templates()`:
   every lockup that shares the band as a motion template. A graphic set in
   that band (with or without a headline) is NOTEd (band) when it spills out
   of it — onto the top of the card (a phrase_build grows by its small bridge
-  lines) or up into the feed header — narrow it or move its y.
+  lines) or up into the feed header — narrow it or move its y. Without a
+  browser at write time the box is the template's estimate, which runs a
+  little tall: only a clear spill is named there, and a preview measures it.
 - Structure: `chapter_title` at a real section turn ("The problem", "Step
   two"); `timeline_steps` for a spoken sequence of dates or steps;
   `checklist` for a spoken list ticking on item by item; `versus_split` for

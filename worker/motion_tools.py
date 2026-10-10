@@ -1576,14 +1576,20 @@ def _band_spill_note(ctx, edl, item, bbox=None):
     letterboxed picture (headline_band — the band the standing headline
     holds): a NOTE when it spills out of that band, down onto the top of the
     picture (a lockup grown by its one-reading-path bridge lines touching
-    the card) or up into the feed header. Advisory; '' otherwise."""
+    the card) or up into the feed header. Advisory; '' otherwise. A box
+    that is only the template's estimate (the browserless agent, MCP and
+    shorts lanes) is that much less certain: it is named only past the
+    estimate's own error (BAND_SPILL_EST_TOL), and the note says so."""
     if motion_templates.persistent(item) or item.get("layer") == "behind_subject":
         return ""
     try:
         W, H = _canvas_size(ctx, edl)
-        box = caption_carry.footprint_box(item, caption_carry.frame_ar(W, H)) or bbox
+        fp = caption_carry.footprint_box(item, caption_carry.frame_ar(W, H))
+        box = fp or bbox
         if not box:
             return ""
+        est = bool(fp) and caption_carry.estimated(item)
+        tol = BAND_SPILL_EST_TOL if est else BAND_SPILL_TOL
         video = (getattr(ctx, "index", None) or {}).get("video") or {}
         src = ((video["width"], video["height"])
                if video.get("width") and video.get("height") and not edl.get("canvas")
@@ -1597,13 +1603,15 @@ def _band_spill_note(ctx, edl, item, bbox=None):
         if y0 >= pic - BAND_SPILL_MIN_IN:
             return ""                     # set on the picture, not in the band
         out = []
-        if y1 > pic + BAND_SPILL_TOL:
+        if y1 > pic + tol:
             out.append(f"runs {y1 - pic:.3f} onto the top of {what} (y {pic:.3f})")
-        if y0 < top - BAND_SPILL_TOL:
+        if y0 < top - tol:
             out.append(f"rises into the feed header (above y {top:.3f})")
         if not out:
             return ""
-        return (f"\nNOTE (band): it draws y {y0:.3f}-{y1:.3f}, set in the band above {what} "
+        draws = ("by its estimated box (no browser here; a preview measures it) it draws"
+                 if est else "it draws")
+        return (f"\nNOTE (band): {draws} y {y0:.3f}-{y1:.3f}, set in the band above {what} "
                 f"(y {top:.3f}-{bottom:.3f}), and {' and '.join(out)}. Narrow it "
                 "(width/size) or move its y so it sits inside the band.")
     except Exception as e:  # noqa: BLE001 — advice never blocks the write
@@ -1615,6 +1623,12 @@ def _band_spill_note(ctx, edl, item, bbox=None):
 # picture; it spills when it crosses the band's edges by more than this.
 BAND_SPILL_MIN_IN = 0.02
 BAND_SPILL_TOL = 0.004
+# A browserless estimate (keepout.nominal_ink, a lockup's grown by its
+# bridge lines) misses a lockup's real edges by up to ~0.05 of the frame
+# height either way (the showcase lockups: Jobs hook 0.033, paper 0.04,
+# Thiel thesis 0.048, all too tall): only a spill past that is named, or
+# every band lockup in a production lane would be told to shrink.
+BAND_SPILL_EST_TOL = 0.05
 
 
 # Sound is deliberate: templates declare sound ROLES (mapped onto the owner-

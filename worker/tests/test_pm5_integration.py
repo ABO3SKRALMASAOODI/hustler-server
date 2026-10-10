@@ -292,3 +292,24 @@ def test_the_probe_composes_the_card_live_at_that_moment():
     assert card and [p[1] for p in card["panels_at"]] == [[0.155, 0.148, 0.595, 0.6165],
                                                            [0.53, 0.52, 0.98, 0.98]]
 
+
+def test_a_browserless_estimate_is_named_only_past_its_own_error(monkeypatch):
+    # production agent, MCP and shorts lanes have no browser at write time:
+    # a lockup's box there is the template's estimate, which runs ~0.03-0.05
+    # taller than the real block. The Jobs hook (a real 0.087-0.273 in this
+    # band) estimates 0.054-0.306 — it must not be told to shrink; a block
+    # set grossly into the header still is, and the note says it estimated
+    from test_headline_band import _Ctx as BandCtx, _card_edl
+    rows = [{"text": "Steve Jobs, 1983", "role": "sans", "size": "0.45", "at": "0"},
+            {"text": "computer fonts were", "role": "serif", "size": "0.8", "at": ""},
+            {"text": "*GARBAGE*", "role": "condensed", "size": "1.5", "at": "0.3"}]
+    ctx = BandCtx(_card_edl())
+    monkeypatch.setattr(motion_tools, "_probe_item", lambda item, W_, H_, fps=30.0: None)
+    out = motion_tools.add_motion_graphic(ctx, "phrase_build", 0.0, 4.2,
+                                          params={"rows": rows, "y": 0.18, "width": 0.82},
+                                          id="hook")
+    item = ctx.latest_edl()["json"]["motion"][0]
+    assert item["footprint"].get("estimated"), item.get("footprint")
+    assert "NOTE (band)" not in out, out
+    out = motion_tools.set_motion_graphic(ctx, "hook", params={"y": 0.12})
+    assert "NOTE (band): by its estimated box" in out and "feed header" in out, out
