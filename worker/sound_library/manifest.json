@@ -11,7 +11,9 @@
   "author": "SlavicMagic",
   "source_url": "https://freesound.org/people/SlavicMagic/sounds/446010",
   "license": "CC0 1.0",
-  "peak_s": 0.484
+  "peak_s": 0.484,
+  "hit_lufs": -15.5,
+  "hit_lufs_hp150": -22.7
  },
  {
   "id": "whoosh_soft_2",
@@ -25,7 +27,9 @@
   "author": "D4XX",
   "source_url": "https://freesound.org/people/D4XX/sounds/607250",
   "license": "CC0 1.0",
-  "peak_s": 0.263
+  "peak_s": 0.263,
+  "hit_lufs": -10.6,
+  "hit_lufs_hp150": -12.5
  },
  {
   "id": "swish_1",
@@ -39,7 +43,9 @@
   "author": "ihitokage",
   "source_url": "https://freesound.org/people/ihitokage/sounds/395368",
   "license": "CC0 1.0",
-  "peak_s": 0.069
+  "peak_s": 0.069,
+  "hit_lufs": -17.0,
+  "hit_lufs_hp150": -17.1
  },
  {
   "id": "impact_1",
@@ -55,7 +61,9 @@
   "license": "CC0 1.0",
   "peak_s": 0.755,
   "hit_s": 0.69,
-  "max_s": 1.25
+  "max_s": 1.25,
+  "hit_lufs": -9.0,
+  "hit_lufs_hp150": -13.5
  },
  {
   "id": "riser_1",
@@ -69,7 +77,9 @@
   "author": "Rizzard",
   "source_url": "https://freesound.org/people/Rizzard/sounds/561207",
   "license": "CC0 1.0",
-  "peak_s": 1.828
+  "peak_s": 1.828,
+  "hit_lufs": -13.3,
+  "hit_lufs_hp150": -15.8
  },
  {
   "id": "riser_2",
@@ -83,7 +93,9 @@
   "author": "magnuswaker",
   "source_url": "https://freesound.org/people/magnuswaker/sounds/531729",
   "license": "CC0 1.0",
-  "peak_s": 0.982
+  "peak_s": 0.982,
+  "hit_lufs": -12.9,
+  "hit_lufs_hp150": -14.5
  },
  {
   "id": "riser_3",
@@ -97,7 +109,9 @@
   "author": "neezen.",
   "source_url": "https://freesound.org/people/neezen./sounds/503799",
   "license": "CC0 1.0",
-  "peak_s": 1.812
+  "peak_s": 1.812,
+  "hit_lufs": -13.7,
+  "hit_lufs_hp150": -13.8
  },
  {
   "id": "riser_4",
@@ -111,7 +125,9 @@
   "author": "neezen.",
   "source_url": "https://freesound.org/people/neezen./sounds/503812",
   "license": "CC0 1.0",
-  "peak_s": 1.656
+  "peak_s": 1.656,
+  "hit_lufs": -7.7,
+  "hit_lufs_hp150": -26.3
  },
  {
   "id": "shutter_1",
@@ -125,7 +141,9 @@
   "author": "roachpowder",
   "source_url": "https://freesound.org/people/roachpowder/sounds/170229",
   "license": "CC0 1.0",
-  "peak_s": 0.108
+  "peak_s": 0.108,
+  "hit_lufs": -19.4,
+  "hit_lufs_hp150": -19.4
  },
  {
   "id": "shutter_2",
@@ -139,7 +157,9 @@
   "author": "mitkonikov",
   "source_url": "https://freesound.org/people/mitkonikov/sounds/398412",
   "license": "CC0 1.0",
-  "peak_s": 0.156
+  "peak_s": 0.156,
+  "hit_lufs": -14.9,
+  "hit_lufs_hp150": -14.9
  },
  {
   "id": "typing_1",
@@ -154,7 +174,9 @@
   "source_url": "https://freesound.org/people/ristooooo1/sounds/539146",
   "license": "CC0 1.0",
   "peak_s": 1.534,
-  "align": "start"
+  "align": "start",
+  "hit_lufs": -21.5,
+  "hit_lufs_hp150": -21.5
  },
  {
   "id": "typing_2",
@@ -169,7 +191,9 @@
   "source_url": "https://freesound.org/people/greenvwbeetle/sounds/423648",
   "license": "CC0 1.0",
   "peak_s": 1.183,
-  "align": "start"
+  "align": "start",
+  "hit_lufs": -20.4,
+  "hit_lufs_hp150": -20.4
  },
  {
   "id": "click_1",
@@ -183,7 +207,9 @@
   "author": "Sillyslimeball",
   "source_url": "https://freesound.org/people/Sillyslimeball/sounds/333575",
   "license": "CC0 1.0",
-  "peak_s": 0.168
+  "peak_s": 0.168,
+  "hit_lufs": -25.1,
+  "hit_lufs_hp150": -25.2
  },
  {
   "id": "click_2",
@@ -197,7 +223,9 @@
   "author": "pillwave",
   "source_url": "https://freesound.org/people/pillwave/sounds/423958",
   "license": "CC0 1.0",
-  "peak_s": 0.149
+  "peak_s": 0.149,
+  "hit_lufs": -23.7,
+  "hit_lufs_hp150": -24.1
  },
  {
   "id": "pop_1",
@@ -211,7 +239,9 @@
   "author": "greenvwbeetle",
   "source_url": "https://freesound.org/people/greenvwbeetle/sounds/244654",
   "license": "CC0 1.0",
-  "peak_s": 0.033
+  "peak_s": 0.033,
+  "hit_lufs": -16.5,
+  "hit_lufs_hp150": -16.5
  },
  {
   "id": "tick_1",
@@ -225,7 +255,9 @@
   "author": "DeltaCode",
   "source_url": "https://freesound.org/people/DeltaCode/sounds/668355",
   "license": "CC0 1.0",
-  "peak_s": 0.02
+  "peak_s": 0.02,
+  "hit_lufs": -23.2,
+  "hit_lufs_hp150": -23.8
  },
  {
   "id": "ding_1",
@@ -240,7 +272,9 @@
   "source_url": "https://freesound.org/people/mrbriandesign/sounds/159011",
   "license": "CC0 1.0",
   "peak_s": 0.005,
-  "max_s": 0.9
+  "max_s": 0.9,
+  "hit_lufs": -5.8,
+  "hit_lufs_hp150": -5.8
  },
  {
   "id": "glitch_1",
@@ -254,7 +288,9 @@
   "author": "smokevhstapes",
   "source_url": "https://freesound.org/people/smokevhstapes/sounds/347180",
   "license": "CC0 1.0",
-  "peak_s": 0.161
+  "peak_s": 0.161,
+  "hit_lufs": -14.0,
+  "hit_lufs_hp150": -14.2
  },
  {
   "id": "glitch_2",
@@ -268,7 +304,9 @@
   "author": "JacksonMiller0",
   "source_url": "https://freesound.org/people/JacksonMiller0/sounds/237605",
   "license": "CC0 1.0",
-  "peak_s": 0.101
+  "peak_s": 0.101,
+  "hit_lufs": -15.0,
+  "hit_lufs_hp150": -17.7
  },
  {
   "id": "cash_register_1",
@@ -283,7 +321,9 @@
   "source_url": "https://freesound.org/people/MaoDin204/sounds/721774",
   "license": "CC0 1.0",
   "peak_s": 0.274,
-  "max_s": 0.5
+  "max_s": 0.5,
+  "hit_lufs": -15.2,
+  "hit_lufs_hp150": -15.2
  },
  {
   "id": "heartbeat_1",
@@ -297,6 +337,8 @@
   "author": "Lunardrive",
   "source_url": "https://freesound.org/people/Lunardrive/sounds/22417",
   "license": "CC0 1.0",
-  "peak_s": 0.03
+  "peak_s": 0.03,
+  "hit_lufs": -12.9,
+  "hit_lufs_hp150": -30.7
  }
 ]

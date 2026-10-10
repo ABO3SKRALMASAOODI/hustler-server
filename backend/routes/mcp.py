@@ -769,6 +769,16 @@ Two things are different from a normal tool session, and both matter:
    zoom per cut, a camera move per hero moment or a sound per landing or
    transition: used where nothing calls for them they make an edit look
    childish.
+   SOUND EFFECTS IN A PODCAST OR TALKING SHORT DEFAULT TO ZERO (owner, Oct
+   2026): at most 1-2 per short, each on a structural moment (the payoff, a
+   real section change) with a visual partner within ~50 ms of its hit (a
+   graphic landing, a B-roll entry, a real-world action shown). Never a
+   reflexive opening whoosh, never a bright sound (ding, pop, click,
+   shutter) on the onset of a payoff or emphasis word, and never a literal
+   sound pun: a shutter on the word 'pictures', a cash register on the word
+   'money' when nothing on screen is a payment. Leave gain_db unset:
+   add_sfx levels each library sound against the measured voice at its hit
+   and reports where it sits.
    Then, per short, in a few atomic writes:
    a. STORY: keep the complete micro-story, remove_filler_words, cut dead
       pauses on word edges, set_master_loudness.
@@ -786,8 +796,9 @@ Two things are different from a normal tool session, and both matter:
    c. HOOK: a pattern interrupt within 0.1-0.6 s and the hook line as text by
       1.5 s — hook_title or word_slam (leave mute_captions unset: the
       captions drop just the spoken words it shows), off the caption band;
-      a punch-in and at most one sound (sfx=true on the graphic, or one
-      library cue) only when that opening earns them.
+      a punch-in only when the opening earns it, and no reflexive opening
+      whoosh — a sound only when the title has a real entrance that earns
+      one.
    d. HERO MOMENTS: 2-4 add_motion_graphic placements whose landing frame
       sits on exact spoken word onsets (get_kept_transcript for program
       windows, get_words for onsets, each template's landing offset from
@@ -806,19 +817,24 @@ Two things are different from a normal tool session, and both matter:
       camera event per ~1.5 s unless it is a designed hit).
       suggest_motion_beats lists graphics only; camera=true / sounds=true
       add optional candidates.
-   f. SOUND: only the approved library — add_sfx(storage_key='sound:<id>',
-      at=<the frame it hits>, gain_db=<suggested>; the tool lands each
-      recording's peak on `at`, so never pre-roll by hand) — and only where
-      something meaningful happens on screen: a designed graphic landing, a
-      real section change or B-roll entry (sound:swish_1 on a whip), the
-      payoff (sound:impact_1, once), or a real-world action shown (shutter
-      on a photo, typing under typed text, a click on a button press, a cash
-      register on a money figure). Never on captions or ordinary cuts inside
-      a conversation; at most about one sound every 4-5 s (a ceiling, not a
-      target: usually far fewer), never the same sound twice within ~3 s,
-      zero when nothing earns one; one family per short; peaks on the visual frame;
-      mixed under the voice. search_sfx only for a specific sound the user
-      asks for.
+   f. SOUND: zero by default in a podcast short, at most 1-2. Only the
+      approved library — add_sfx(storage_key='sound:<id>', at=<the frame it
+      hits>) with gain_db unset; the tool lands each recording's peak on
+      `at`, so never pre-roll by hand; it levels each recording against the
+      measured voice at its hit and reports MIX and CHECK lines — and only
+      where something meaningful happens on screen within ~50 ms of the
+      hit: a designed graphic landing, a real section change or B-roll
+      entry (sound:swish_1 on a whip), the payoff (sound:impact_1, once),
+      or a real-world action shown (shutter on a photo being taken, typing
+      under typed text, a click on a button press, a cash register on a
+      payment shown). Never on captions or ordinary cuts inside a conversation,
+      never a bright sound on the payoff word's onset, never a literal pun
+      on the spoken word; elsewhere at most about one sound every 4-5 s (a
+      ceiling, not a target: usually far fewer), never the same sound twice
+      within ~3 s, zero when nothing earns one; one family per short; peaks
+      on the visual frame. audit_audio_mix lists each sound's level and
+      placement checks. search_sfx only for a specific sound the user asks
+      for.
    g. ENDING: hold the payoff 1.0-1.5 s; a native CTA (comment_cta,
       follow_cta, save_cta) after it only when the user or brief asks for
       one, filled only with the handle, keyword and offer they supplied —

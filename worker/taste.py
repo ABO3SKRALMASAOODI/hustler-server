@@ -47,10 +47,16 @@ finding here counts a missing zoom or a missing sound as a defect or asks
 for one; a bare jump cut is named only when the speaker's head measurably
 jumps across it, and then with options (leave it, B-roll, a framing
 change), never a prescribed zoom.
+
+Sound placement (Oct 10 2026, sfx_placement): a talking short carries at
+most 1-2 sounds and no reflexive opening whoosh, and a sound with no visual
+event at its hit, a bright sound on a payoff word's onset or a literal sound
+pun is named — always to thin or move, never to add.
 """
 
 import re
 
+import sfx_placement
 import sound_library
 from timeline import program_blocks, transition_junctions
 
@@ -321,6 +327,33 @@ def _sfx_repeats(sfx):
                 and not (sfx_owner(prev) and sfx_owner(prev) == sfx_owner(item)):
             out.append((prev, item))
         last[key] = item
+    return out
+
+
+# How many per-sound placement notes one critique carries (the budget note
+# comes first); the rest are in audit_audio_mix.
+SFX_PLACEMENT_NOTES = 3
+_SFX_NOTE_ORDER = ("on_payoff_word", "literal_pun", "no_visual_partner",
+                   "opening_whoosh")
+
+
+def _sfx_placement_notes(edl, index):
+    """sfx_placement's findings as critique lines: the talking-short budget,
+    then the worst per-sound notes. Like the other sound findings here they
+    do not depend on how the request was phrased (round 55): whether a sound
+    serves the cut is an editorial judgment, and every note is advisory."""
+    try:
+        got = sfx_placement.check_edl(edl, index)
+    except Exception:          # noqa: BLE001
+        return []
+    out = [got["budget"]["message"]] if got.get("budget") else []
+    rows = []
+    for it in edl.get("sfx") or []:
+        for f in got["items"].get(it.get("id")) or []:
+            rows.append((_SFX_NOTE_ORDER.index(f["code"])
+                         if f["code"] in _SFX_NOTE_ORDER else 9,
+                         f.get("at") or 0.0, f["message"]))
+    out += [m for _o, _t, m in sorted(rows)[:SFX_PLACEMENT_NOTES]]
     return out
 
 
@@ -1063,6 +1096,10 @@ def critique(edl, index, tl, src_w=None, src_h=None, user_asked="",
             f"apart at {sfx_time(a):.1f}s {sfx_clash(a, b)} — they "
             "land as one flammed, muddy hit. Keep one, or layer DIFFERENT "
             "roles (a whoosh whose peak lands on an impact) on the same beat.")
+
+    if sfx:
+        for line in _sfx_placement_notes(edl, index):
+            add(line)
 
     music = edl.get("music") or []
     if music and fmt["n_words"] > 20:

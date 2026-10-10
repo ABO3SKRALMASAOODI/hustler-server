@@ -26,6 +26,7 @@ import keepout
 import motion_engine
 import motion_layer
 import motion_templates
+import sfx_mix
 import sound_library
 import storage
 from schemas import subject_matte_geom
@@ -125,14 +126,21 @@ def resolve_library_reference(ctx, storage_key):
 
 SOUND_POLICY = (
     "Sound effects are optional, never rules: restraint is the default and zero is a fine "
-    "answer. Use one like a professional editor, only where something meaningful happens ON "
-    "SCREEN — a designed graphic landing, a real section change or B-roll entry, the payoff, "
-    "or a real-world action shown (shutter on a photo, typing under typed text, a click on a "
-    "button press, a cash register on a money figure). Never on captions, on ordinary cuts "
-    "inside a conversation, or as a sound per landing or transition. At most about one sound "
-    "every 4-5 s (a ceiling, usually far fewer), never the same sound twice within ~3 s. "
-    "Match the material, keep one family per short, place the peak on the visual frame, and "
-    "mix under the voice at the suggested gain.")
+    "answer — a podcast or talking short carries zero by default and at most 1-2. Use one "
+    "like a professional editor, only where something meaningful happens ON SCREEN within "
+    "~50 ms of its hit — a designed graphic landing, a real section change or B-roll entry, "
+    "the payoff, or a real-world action shown (shutter on a photo being taken, typing under "
+    "typed text, a click on a button press, a cash register on a payment shown). Never on "
+    "captions, on ordinary cuts inside a conversation, or as a sound per landing or "
+    "transition; never a reflexive opening whoosh; never a bright sound (ding, pop, click, "
+    "shutter) on the onset of a payoff or emphasis word; never a literal pun on the spoken "
+    "word (a shutter on 'pictures', a cash register on 'money' with nothing on screen "
+    "showing it). Elsewhere at most about one sound every 4-5 s (a ceiling, usually far "
+    "fewer), never the same sound twice within ~3 s. Match the material, keep one family "
+    "per short and place the peak on the visual frame; leave gain_db unset and add_sfx "
+    "levels the recording against the measured voice at its hit (whoosh/swish ~8 dB under, "
+    "ding/pop/click/tick/shutter ~10 under, typing 14 under, an impact louder only below "
+    "150 Hz).")
 
 
 def list_sound_library(ctx, role=None):
@@ -140,9 +148,10 @@ def list_sound_library(ctx, role=None):
     if not rows:
         return "No approved sounds match." if role else "The sound library is empty on this deployment."
     return ("Valmera sound library — real recordings approved by ear (CC0, no attribution). "
-            "Place with add_sfx(storage_key='sound:<id>', at=<program second it should HIT>, "
-            "gain_db=<suggested>): the tool starts each recording early by its measured peak "
-            "(typing starts at `at`) and stops long tails at their measured end.\n"
+            "Place with add_sfx(storage_key='sound:<id>', at=<program second it should HIT>) "
+            "and gain_db unset: the tool starts each recording early by its measured peak "
+            "(typing starts at `at`), stops long tails at their measured end and levels it "
+            "against the measured voice at its hit.\n"
             + SOUND_POLICY + "\n" + "\n".join("- " + sound_library.describe(r) for r in rows))
 
 
@@ -301,9 +310,19 @@ def _owned_sfx_prefix(mid):
 
 
 def _apply_owned_sfx(ctx, edl, mid, cues):
+    """Write a graphic's owned cues (ids mg_<mid>_sfxN), each placed so its
+    recording HITS on the cue's landing and levelled against the voice there
+    (sfx_mix.cue_gain: the role's level under the measured voice, the
+    template's own declared gain kept as a bounded offset). Returns notes."""
     items = [s for s in (edl.get("sfx") or []) if not str(s.get("id", "")).startswith(_owned_sfx_prefix(mid))]
     prog = _program_duration(edl)
-    notes = []
+    notes, levels, heard = [], [], None
+    live = [c for c in cues if c[0] <= prog - 0.05]
+    try:
+        voices = sfx_mix.voices_for(ctx, edl, [max(0.0, c[0]) for c in live])
+    except Exception as e:  # noqa: BLE001
+        print(f"[motion] cue levelling skipped: {str(e)[:160]}", flush=True)
+        voices = {}
     for k, cue in enumerate(cues):
         t, kind, gain = cue[:3]
         dur = cue[3] if len(cue) > 3 else None
@@ -314,15 +333,25 @@ def _apply_owned_sfx(ctx, edl, mid, cues):
         except Exception as e:  # noqa: BLE001
             notes.append(f"sound {kind} unavailable ({str(e)[:80]})")
             continue
+        voice = sfx_mix.voice_at(voices, max(0.0, t))
+        g = sfx_mix.cue_gain(kind, voice, gain)
+        if g is None:
+            g = gain
+        else:
+            levels.append(f"{kind}@{t:.2f}s {g:+g} dB")
+            heard = heard or voice
         # t is the landing the sound HITS on: start early by its peak.
         pl = sound_library.place(kind, max(0.0, t), dur_s=dur)
         items.append({"id": f"{_owned_sfx_prefix(mid)}{k + 1}", "storage_key": key,
-                      "at": pl["at"], "gain_db": gain,
+                      "at": pl["at"], "gain_db": g,
                       "purpose": f"{kind} for motion graphic {mid}"})
         for f in ("offset_s", "dur_s"):
             if pl[f]:
                 items[-1][f] = pl[f]
     edl["sfx"] = items
+    if levels:
+        notes.append("sound cues levelled against the voice at their hits: "
+                     + ", ".join(levels) + f" ({sfx_mix.voice_note(heard)})")
     return notes
 
 
@@ -1280,7 +1309,18 @@ def add_motion_graphic(ctx, template, start, end=None, params=None, html=None,
     if res.startswith("REJECTED"):
         return res
     return (res + where + keep_note + clamp + (f"\nNOTE: {'; '.join(notes)}" if notes else "")
+            + _owned_sfx_checks(ctx, edl, mid)
             + behind_note + _caption_integrity_notes(ctx, edl, item))
+
+
+def _owned_sfx_checks(ctx, edl, mid):
+    """The placement CHECK lines for a graphic's own sound cues ('' when it
+    has none): agent_tools._sfx_check_lines over mg_<mid>_sfxN."""
+    ids = [s.get("id") for s in edl.get("sfx") or []
+           if str(s.get("id", "")).startswith(_owned_sfx_prefix(mid))]
+    if not ids:
+        return ""
+    return "".join("\n" + c for c in _at()._sfx_check_lines(ctx, edl, ids))
 
 
 def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
@@ -1375,9 +1415,11 @@ def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
     respaced = (bool(owned) and abs(span - old_span) > 1e-6
                 and _sfx_cues(tspec, hit["params"], 0.0, span, seed=id, with_dur=True)
                 != _sfx_cues(tspec, hit["params"], 0.0, old_span, seed=id, with_dur=True))
+    checked = False
     if sfx is True or (sfx is None and owned and (template is not None or params or respaced)):
         cues = _sfx_cues(tspec, hit["params"], hit["start"], hit["end"], seed=id, with_dur=True)
         notes += _apply_owned_sfx(ctx, edl, id, cues)
+        checked = True
     elif sfx is False:
         edl["sfx"] = [s for s in (edl.get("sfx") or []) if s not in owned]
     elif owned and abs(hit["start"] - old_start) > 1e-6:
@@ -1389,6 +1431,7 @@ def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
     if res.startswith("REJECTED"):
         return res
     return (res + where + keep_note + (f"\nNOTE: {'; '.join(notes)}" if notes else "")
+            + (_owned_sfx_checks(ctx, edl, id) if checked else "")
             + (behind_note or "") + _caption_integrity_notes(ctx, edl, hit))
 
 
@@ -1426,7 +1469,9 @@ TOOL_SPECS = {
         "Place a browser-rendered, After-Effects-grade motion graphic on the PROGRAM clock: "
         "spring/blur entrances, glow, gradients, 3D depth, masks, icon/emoji pops, counters, "
         "UI cards. One call = a finished composition, silent by default; pass sfx=true only for a "
-        "moment that earns sound (its template cues map to the approved sound library). start/end are program seconds; end defaults to the "
+        "moment that earns sound (its template cues map to the approved sound library and are "
+        "levelled against the voice at their landings; CHECK lines flag a bright cue on a payoff "
+        "word's onset or more than 1-2 sounds in a talking short). start/end are program seconds; end defaults to the "
         "template's natural duration. Cue it to the exact word/beat it amplifies (use word "
         "times from get_kept_transcript). layer='above_captions' (default for designed moments) "
         "or 'below_captions'. layer='behind_subject' is the premium depth signature: the "
@@ -1483,8 +1528,10 @@ TOOL_SPECS = {
         list_sound_library,
         "READ: Valmera's sound library — real recordings approved by ear (whooshes, swish, impact, "
         "risers, camera shutters, keyboard typing, clicks, pop, tick, ding, glitches, cash register, "
-        "heartbeat) with when to use each and a suggested gain. Place with "
-        "add_sfx(storage_key='sound:<id>', at=<the frame it hits>). Sound only on meaningful "
-        "on-screen moments, sparse (≈ one every 4-5 s at most), never on captions.",
+        "heartbeat) with when to use each and its measured hit level. Place with "
+        "add_sfx(storage_key='sound:<id>', at=<the frame it hits>), gain_db unset so it is "
+        "levelled against the voice. Sound only on meaningful on-screen moments with a visual "
+        "partner: zero by default in a podcast short, at most 1-2 (≈ one every 4-5 s at most "
+        "elsewhere), never on captions, never a pun on the spoken word.",
         {"role": {"type": "string", "description": "optional role filter, e.g. whoosh, click, riser"}}),
 }

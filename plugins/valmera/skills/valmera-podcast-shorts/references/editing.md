@@ -19,7 +19,8 @@ state between them; re-read only after a cut or a rejection.
 - `list_motion_templates()`: the live template list with params and sound
   cues. Params change; never guess them from memory or from these docs.
 - `list_sound_library()`: the owner-approved real recordings with their use
-  and suggested gain. These are the only sounds you use: never `search_sfx`,
+  and measured hit level (add_sfx levels each against the voice). These are
+  the only sounds you use: never `search_sfx`,
   `add_web_sfx` or a music library, and never a song you chose.
 - Read a tool's schema before its first use. Do not read Valmera backend
   source code to guess EDL fields; typed tools and `get_edl` show the shapes.
@@ -54,13 +55,15 @@ hook    0.00  hook_title "Computers look like *garbage*" 0.15-2.6 (silent; the t
 hero 1  6.42  "garbage"   word_slam serif, start 6.22 (lands +0.2, silent)
 turn   14.80  "ten million" counter 0 -> 10M (silent)
 hero 2 21.10  marker_text "whether they look great or not" (silent)
-payoff 33.60  "look great" word_slam + punch 0.12 (the one move: the line the story turns on); ding_1 at 33.6 (add_sfx `at` is the hit); hold to 35.0
+payoff 33.60  "look great" word_slam + punch 0.12 (the one move: the line the story turns on); silent: the type is the payoff (no ding on the word itself, it would mask it); hold to 35.0
 camera  1 zoom (payoff); every jump cut left bare
-sound   1 event in 35 s (payoff); music off (no owner song)
+sound   none: nothing on screen calls for one (zero is the podcast default); music off (no owner song)
 ```
 
 Most beats are silent and the camera is steady: that is the default, not a
-gap. Each zoom or sound in the sheet names the moment that earns it.
+gap. Each zoom or sound in the sheet names the moment that earns it; a
+sound also names its visual partner (what changes on screen within ~50 ms
+of its hit) and never sits on the payoff word's onset.
 
 Every timestamp comes from a tool result. Readable frames land on the word's
 audible onset (0-3 frames early); `word_slam` lands 0.2 s after its start;
@@ -84,9 +87,9 @@ recheck every output-timed item.
 | Designed beats | 3-6 `add_motion_graphic` | one per beat, silent by default; `sfx=true` only on the hook, the payoff or a graphic showing a real-world action; `purpose` names the beat, stable `id` |
 | Camera | 0-3 `add_zoom` (optional) | only where a moment clearly earns a move (the payoff word, a real turn between ideas, a genuinely jarring jump cut); zero is fine; never on every cut, take, sentence or hero moment. Modes per the Look (schema names) |
 | Transitions | 0-1 `set_transitions` | base style, `scope='scene'` |
-| Sound | 0-5 `add_sfx(storage_key='sound:<id>', at=..., gain_db=<suggested>)` (optional) | only meaningful on-screen moments, from your Look's family; zero is fine; the whole short stays at about one sound every 4-5 s at most (template cues count), none repeated within ~3 s |
+| Sound | 0-2 `add_sfx(storage_key='sound:<id>', at=...)` with gain_db unset (optional) | zero by default; at most 1-2 per short (template cues count), each on a structural moment with a visual partner, from your Look's family, none on a payoff word's onset, no literal puns, none repeated within ~3 s; the tool levels each against the voice and its MIX/CHECK lines say where it sits |
 | Music | 0-1 `add_music` (after `fetch_url` for a link) | only the owner's song, only when `music_effective` is on; bed -20 dB ducked; a montage's bed leads |
-| Sound without music | 0-3 | montage or action opener with music off: natural sound, design around speech, a few library sounds, or a flag (looks.md) |
+| Sound without music | 0-2 | montage or action opener with music off: natural sound, design around speech, one or two library sounds, or a flag (looks.md) |
 
 Plain layer changes you already know the shape of may go together in one
 `apply_edit_batch`; prefer typed tools when unsure, and place library
@@ -109,18 +112,23 @@ after a short pause, then report it.
 - `layer='behind_subject'` only inside one continuous shot (no cut in the window).
 - B-roll that shows the exact noun or action, licensed, with provenance in the
   handback; every still pushes or pans.
-- A sound only where something meaningful happens on screen (the hook
-  graphic, a hero landing that earns it, a real turn or B-roll entry, the
-  payoff, or a real-world action shown: a shutter on a photo, typing under
-  typed text, a click on a press, a cash register on money), at most about
-  one every 4-5 s, never the same sound within ~3 s, from your Look's
-  family and at its suggested gain; a stop-down of 50-280 ms before a
+- A sound only where something meaningful happens on screen (a hero
+  landing that earns it, a real turn or B-roll entry, the payoff, or a
+  real-world action shown: a shutter on a photo being taken, typing under
+  typed text, a click on a press, a cash register on a payment shown),
+  zero by default and at most 1-2 per short, never the same sound within
+  ~3 s, from your Look's family and at the level the tool sets; a stop-down of 50-280 ms before a
   reveal is a choice, longer digital silence is a defect unless the passage
   is flagged for the owner's song.
 
 ### Don't
 
 - A picture band on a flat black canvas, or a fade from black on frame 1.
+- The reflexive opening whoosh; a ding, pop or shutter on the payoff word's
+  onset (it masks the word); a literal sound pun (a shutter on the word
+  'pictures', a cash register on 'money' with only type on screen); a
+  sound with nothing changing on screen within ~50 ms; a hand-set gain the
+  MIX line calls inaudible or too hot.
 - A whoosh on every caption; sounds on captions, landing zooms, `push_in`,
   pulses on speech, jump cuts or ordinary cuts in the conversation; any
   sound outside the approved library; a punch every sentence (keep 4 s
@@ -158,8 +166,9 @@ after each operation.
 3. `audit_captions` once if you changed captions; read the render's warnings.
 4. Measure against your Look's targets: hook at or before 0.6 s, visual
    change rate, hero count, picture area, sounds within budget and spacing
-   (list each with its time and on-screen event), no digital silence,
-   payoff held.
+   (list each with its time, on-screen partner and level; `audit_audio_mix`
+   reports each sound's level against the voice and its placement checks),
+   no digital silence, payoff held.
 
 Fix real defects (clipped words, collisions, unreadable or wrong captions,
 digital silence, a sound with no on-screen event, an exposed edge or
@@ -176,8 +185,8 @@ preview link:
 s07 · kinetic-poster · fast-conversation · EDL v14 · 1 render
 Hook: hook_title by 1.1s ("Why fonts were garbage"), silent
 Heroes: 6.4 garbage slam; 14.8 counter 10M; 29.0 typeface cycle
-Payoff: 33.6 "look great" slam + punch 0.12 + ding_1, held 1.3s
-Camera/sound: 1 zoom, 1 sound (both on the payoff); music off (no owner song)
+Payoff: 33.6 "look great" slam + punch 0.12, held 1.3s
+Camera/sound: 1 zoom (on the payoff), no sound; music off (no owner song)
 Targets: change ~0.4s, picture full-bleed, 3 heroes
 Weakest: 18-20s talking head with only captions (a kicker on "Lisa" would carry it)
 Assets: Lisa photo (Wikimedia, CC BY-SA 4.0, credit in handback)

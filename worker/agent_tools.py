@@ -90,6 +90,8 @@ import motion_tools
 import motion_planner
 import music_library
 import sound_library
+import sfx_mix
+import sfx_placement
 import version as worker_version
 from captions import CAPTION_DESIGN_VERSION, KARAOKE_HARD_MAX
 from schemas import (CANVAS_DIMS, CaptionStyle, clean_fingerprint,
@@ -6074,8 +6076,8 @@ def search_sfx(ctx, query, max_seconds=None):
         return "REJECTED: max_seconds must be a number."
     lib_hits = motion_tools.sound_search(query)
     kit_text = ("Valmera sound library (approved real recordings — add_sfx(storage_key='sound:<id>', "
-                "at=<the frame it hits>, gain_db=<suggested>)):\n- "
-                + "\n- ".join(f"{h['id']} [{h['role']}, {h['duration_s']:g}s, gain {h['gain_db']} dB] — {h['use']}"
+                "at=<the frame it hits>), gain_db unset so it is levelled against the voice):\n- "
+                + "\n- ".join(f"{h['id']} [{h['role']}, {h['duration_s']:g}s] — {h['use']}"
                                for h in lib_hits) + "\n") if lib_hits else ""
     memory = getattr(ctx, "tool_failure_memory", {})
     unavailable_until = memory.get("sfx_auth_retry_at", 0)
@@ -6788,7 +6790,27 @@ def _resolve_sfx(ctx, storage_key):
             "storage_key": storage_key}, None
 
 
-def add_sfx(ctx, storage_key, at, gain_db=-6.0, purpose=None, offset_s=None,
+# A non-library sound's level when the editor sets none: the schema's and the
+# renderer's fallback (its loudness is unknown, so nothing better exists).
+SFX_DEFAULT_GAIN_DB = -6.0
+
+
+def _sfx_check_lines(ctx, edl, ids):
+    """Advisory placement CHECK lines (sfx_placement) for the sfx `ids` in
+    `edl`. Never raises: a check is evidence, never a write gate."""
+    try:
+        got = sfx_placement.check_edl(edl, getattr(ctx, "index", None) or {},
+                                      ids=set(ids))
+    except Exception as e:      # noqa: BLE001
+        print(f"[sfx] placement check skipped: {str(e)[:160]}", flush=True)
+        return []
+    lines = [f["message"] for i in ids for f in got["items"].get(i, [])]
+    if got.get("budget"):
+        lines.append(got["budget"]["message"])
+    return ["CHECK: " + x for x in lines]
+
+
+def add_sfx(ctx, storage_key, at, gain_db=None, purpose=None, offset_s=None,
             dur_s=None):
     """Place a one-shot sound at a point in the program timeline.
 
@@ -6796,7 +6818,15 @@ def add_sfx(ctx, storage_key, at, gain_db=-6.0, purpose=None, offset_s=None,
     measured peak; typing starts there): the EDL item starts that much
     earlier, skipping into the file when the hit is too close to 0 s, and
     plays to its measured tail cap unless dur_s says otherwise. Any other
-    sound starts at `at`, as it always has."""
+    sound starts at `at`, as it always has.
+
+    gain_db omitted: a library recording is levelled against the measured
+    voice at its hit (sfx_mix: its role's target under the voice), any other
+    sound gets SFX_DEFAULT_GAIN_DB. An explicit gain_db always wins; either
+    way the result reports where it sits against the voice and the
+    placement checks (sfx_placement). A bright library sound landing on a
+    payoff/emphasis word's onset is nudged to a visual partner in the
+    neighbouring speech gap when one is within reach."""
     sound, err = _resolve_sfx(ctx, storage_key)
     if err:
         return err
@@ -6806,10 +6836,16 @@ def add_sfx(ctx, storage_key, at, gain_db=-6.0, purpose=None, offset_s=None,
         at = float(at)
     except (TypeError, ValueError):
         return f"REJECTED: at must be a number of seconds, got {at!r}."
-    try:
-        gain_db = float(gain_db)
-    except (TypeError, ValueError):
-        return f"REJECTED: gain_db must be a number, got {gain_db!r}."
+    explicit_gain = gain_db is not None
+    if explicit_gain:
+        try:
+            gain_db = float(gain_db)
+        except (TypeError, ValueError):
+            return f"REJECTED: gain_db must be a number, got {gain_db!r}."
+        if not math.isfinite(gain_db):
+            return f"REJECTED: gain_db must be a number, got {gain_db!r}."
+    else:
+        gain_db = SFX_DEFAULT_GAIN_DB
     try:
         offset_s = 0.0 if offset_s is None else float(offset_s)
     except (TypeError, ValueError):
@@ -6876,6 +6912,48 @@ def add_sfx(ctx, storage_key, at, gain_db=-6.0, purpose=None, offset_s=None,
     if dur and offset_s > max(0.0, dur - 0.05):
         return (f"REJECTED: offset_s={offset_s:g}s is past the usable end of "
                 f"'{sound['name']}' ({dur:.2f}s).")
+    # A bright library sound on the onset of a payoff/emphasis word competes
+    # with the word: move it to a visual partner in the neighbouring speech
+    # gap when there is one (sfx_placement.nudge); otherwise it stays and the
+    # CHECK below says so.
+    nudge_note = ""
+    if lib_id:
+        try:
+            role = (sound_library.get(lib_id) or {}).get("role")
+            index = getattr(ctx, "index", None) or {}
+            words = sfx_placement.program_words(edl, index)
+            hit_w = sfx_placement.collides(
+                role, at, sfx_placement.protected_words(edl, words))
+            # a literal pun is wrong at any time: it is reported, not moved
+            if hit_w and sfx_placement.pun(edl, role, at, words):
+                hit_w = None
+            moved = hit_w and sfx_placement.nudge(
+                sfx_placement.visual_events(edl, index), words, hit_w, role,
+                at, end=max(0.0, latest_at - 0.1))
+        except Exception as e:      # noqa: BLE001
+            print(f"[sfx] nudge skipped: {str(e)[:160]}", flush=True)
+            moved = None
+        if moved:
+            nudge_note = (
+                f"\nNUDGED: {at:.2f}s is the onset of "
+                f"'{sfx_placement.say(hit_w['w'])}' ({hit_w['why']}), where a "
+                f"bright sound masks the word; it now hits at {moved[0]:.2f}s "
+                f"on {moved[1]}, in the speech gap. move_sfx puts it back if "
+                "the overlap is deliberate.")
+            at = moved[0]
+    # Level: a library recording's hit against the measured voice there.
+    voice, mix_line = None, ""
+    if lib_id:
+        voice = sfx_mix.voice_at(sfx_mix.voices_for(ctx, edl, [at]), at)
+        if not explicit_gain:
+            auto = sfx_mix.auto_gain(lib_id, voice["lufs"])
+            if auto is not None:
+                gain_db = auto
+            else:
+                gain_db = float((sound_library.get(lib_id) or {})
+                                .get("gain_db") or SFX_DEFAULT_GAIN_DB)
+        mix_line = sfx_mix.level_line(lib_id, gain_db, voice,
+                                      auto=not explicit_gain)
     item = {"id": sid, "storage_key": storage_key,
             "at": round(at, 2), "gain_db": gain_db,
             "purpose": purpose_n}
@@ -6935,7 +7013,11 @@ def add_sfx(ctx, storage_key, at, gain_db=-6.0, purpose=None, offset_s=None,
             ctx, "sfx_placement", decision="use", asset_key=storage_key,
             element_id=sid, purpose=purpose_n, at=round(at, 2),
             review_stage="timeline")
-    return result + at_note + (hit_note if result.startswith("EDL v") else "") + note
+        checks = _sfx_check_lines(ctx, edl, [sid])
+        return (result + at_note + hit_note + nudge_note
+                + (f"\n{mix_line}" if mix_line else "")
+                + "".join("\n" + c for c in checks) + note)
+    return result + at_note + note
 
 
 def remove_sfx(ctx, id):
@@ -6970,20 +7052,35 @@ def move_sfx(ctx, id, at):
     if at < 0 or at > max(0.0, prog - 0.05):
         return (f"REJECTED: at={at}s is outside the program "
                 f"(0 to {round(prog, 2)}s).")
-    if sound_library.id_for_key(hit.get("storage_key")):
+    lib_id = sound_library.id_for_key(hit.get("storage_key"))
+    if lib_id:
         old = sound_library.hit_at(hit)
         lead = sound_library.retime(hit, at)
         edl["sfx"] = items
-        return ctx.write_edl(
+        res = ctx.write_edl(
             edl, f"moved sfx {id} ('{_track_name(ctx, hit['storage_key'])}') "
                  f"hit {old:g}s -> {round(at, 3):g}s (starts {hit['at']:g}s"
                  + (f", {lead:.2f}s before its peak)" if lead else ")"))
-    old = hit["at"]
-    hit["at"] = round(at, 2)
-    edl["sfx"] = items
-    return ctx.write_edl(
-        edl, f"moved sfx {id} ('{_track_name(ctx, hit['storage_key'])}') "
-             f"{old}s -> {hit['at']}s")
+    else:
+        old = hit["at"]
+        hit["at"] = round(at, 2)
+        edl["sfx"] = items
+        res = ctx.write_edl(
+            edl, f"moved sfx {id} ('{_track_name(ctx, hit['storage_key'])}') "
+                 f"{old}s -> {hit['at']}s")
+    if not res.startswith("EDL v"):
+        return res
+    # Same level, new moment: say where it now sits against the voice (the
+    # gain is the editor's; set_audio_gain changes it) and re-check it.
+    if lib_id:
+        voice = sfx_mix.voice_at(sfx_mix.voices_for(ctx, edl, [at]), at)
+        g = hit.get("gain_db")
+        line = sfx_mix.level_line(
+            lib_id, float(SFX_DEFAULT_GAIN_DB if g is None else g), voice,
+            auto=False)
+        if line:
+            res += "\n" + line
+    return res + "".join("\n" + c for c in _sfx_check_lines(ctx, edl, [id]))
 
 
 def swap_music(ctx, id, storage_key):
@@ -7132,9 +7229,19 @@ def set_audio_gain(ctx, kind, id, gain_db):
     hit["gain_db"] = g
     edl[kind] = items
     key = hit.get("storage_key") or hit.get("asset_key") or "?"
-    return ctx.write_edl(
+    res = ctx.write_edl(
         edl, f"{kind} {id} ('{_track_name(ctx, key)}') gain "
              f"{old:+.1f}dB -> {g:+.1f}dB")
+    lib_id = (sound_library.id_for_key(hit.get("storage_key"))
+              if kind == "sfx" else None)
+    if lib_id and res.startswith("EDL v"):
+        # where the new level sits against the voice at the hit
+        t = sound_library.hit_at(hit)
+        voice = sfx_mix.voice_at(sfx_mix.voices_for(ctx, edl, [t]), t)
+        line = sfx_mix.level_line(lib_id, g, voice, auto=False)
+        if line:
+            res += "\n" + line
+    return res
 
 
 def _music_assets(conn, project_id):
@@ -22592,6 +22699,48 @@ def _declared_mix_state(ctx, edl):
     }
 
 
+def _sfx_mix_audit(ctx, edl, rows):
+    """Annotate the declared sfx rows (in place) with where each library
+    sound sits against the measured voice at its hit (sfx_mix) and its
+    placement findings (sfx_placement); return the warning lines."""
+    warnings = []
+    items = {it.get("id"): it for it in edl.get("sfx") or []}
+    try:
+        lib = {i: sound_library.id_for_key(it.get("storage_key"))
+               for i, it in items.items()}
+        voices = sfx_mix.voices_for(
+            ctx, edl, [sound_library.hit_at(items[i]) for i, sid in lib.items()
+                       if sid])
+        checks = sfx_placement.check_edl(edl, getattr(ctx, "index", None) or {})
+    except Exception as e:      # noqa: BLE001
+        print(f"[sfx] mix audit skipped: {str(e)[:160]}", flush=True)
+        return warnings
+    for row in rows:
+        it = items.get(row.get("id")) or {}
+        sid = lib.get(row.get("id"))
+        row["role"] = sfx_placement.role_of(it)
+        if sid:
+            voice = sfx_mix.voice_at(voices, sound_library.hit_at(it))
+            g = float(it.get("gain_db") if it.get("gain_db") is not None
+                      else SFX_DEFAULT_GAIN_DB)
+            verdict, why = sfx_mix.judge_level(sid, g, voice["lufs"])
+            row["sound_id"] = sid
+            row["mix"] = {"voice_lufs": voice["lufs"],
+                          "voice_measured": bool(voice.get("measured")),
+                          "against_voice": sfx_mix.describe(sid, g, voice),
+                          "role_gain_db": sfx_mix.auto_gain(sid, voice["lufs"]),
+                          "verdict": verdict}
+            if verdict:
+                warnings.append(f"sfx {row.get('id')} ({sid}): {why}")
+        found = checks["items"].get(row.get("id")) or []
+        if found:
+            row["placement"] = [f["code"] for f in found]
+            warnings += [f["message"] for f in found]
+    if checks.get("budget"):
+        warnings.append(checks["budget"]["message"])
+    return warnings
+
+
 def audit_audio_mix(ctx):
     """Authored audio roles and offsets, separate from subjective listening."""
     row = ctx.latest_edl()
@@ -22613,6 +22762,7 @@ def audit_audio_mix(ctx):
             "remove_voiceover and add_music instead—the roles mix differently")
     if not any(state.get(k) for k in ("music", "voiceover", "sfx")):
         warnings.append("no designed audio layers are authored")
+    warnings += _sfx_mix_audit(ctx, edl, state.get("sfx") or [])
     for item in state.get("music") or []:
         rights = item.get("provenance") or {}
         if (rights.get("license_verification_status") !=
@@ -24281,6 +24431,12 @@ def apply_look(ctx, name, music=None, transition_sounds=None):
             cap = max(0, budget - len(sfx)
                       - max(0, LOOK_SFX_HERO_RESERVE - hero_sfx))
             sounded = _look_sound_rows(rows, existing_at, cap)
+            try:
+                # each junction sound is levelled against the voice there
+                voices = sfx_mix.voices_for(ctx, edl,
+                                            [r["t"] for r in sounded])
+            except Exception:       # noqa: BLE001
+                voices = {}
             for i, r in enumerate(sounded):
                 t = r["t"]
                 role = kinds[i % len(kinds)]
@@ -24301,11 +24457,13 @@ def apply_look(ctx, name, music=None, transition_sounds=None):
                     notes.append(f"transition sound {kind} unavailable "
                                  f"({str(e)[:80]}).")
                     continue
-                gain = min(float(gain), float(row["gain_db"]))
+                cue = min(float(gain), float(row["gain_db"]))
+                lev = sfx_mix.cue_gain(kind, sfx_mix.voice_at(voices, t), cue)
                 into = (f" into {r['enters']}" if r["enters"] else
                         f" out of {r['leaves']}" if r["leaves"] else "")
                 sfx.append({"id": f"{LOOK_SFX_PREFIX}{len(placed) + 1}",
-                            "storage_key": key, "at": at, "gain_db": gain,
+                            "storage_key": key, "at": at,
+                            "gain_db": cue if lev is None else lev,
                             "purpose": (f"{kind} landing on the {style} "
                                         f"scene transition{into} at "
                                         f"{t:.2f}s ('{n}' look)")})
@@ -25951,9 +26109,15 @@ TOOLS = {
     "add_sfx": (add_sfx, "Punctuate a MOMENT with a one-shot sound effect — a "
                 "whoosh into a real turn, a click on a shown button press, an "
                 "impact on the payoff. OPTIONAL, never a rule: choose it only "
-                "when the moment clearly earns a sound (most of a talking reel "
-                "carries none; sounds with no clear on-screen reason make an "
-                "edit look childish). Analysis, "
+                "when the moment clearly earns a sound (a podcast or talking "
+                "short carries zero by default and at most 1-2; sounds with "
+                "no clear on-screen reason make an edit look childish). Each "
+                "needs a visual partner (something on screen changes within "
+                "~50 ms of its hit), never sits as a bright sound (ding, pop, "
+                "click, shutter) on the onset of a payoff or emphasis word, "
+                "and never puns on the spoken word (a shutter on 'pictures', "
+                "a cash register on 'money' with nothing on screen showing "
+                "it). Analysis, "
                 "metadata, and deterministic preview AUDIO CHECK are useful "
                 "evidence; uncertainty is something to judge rather than "
                 "a reason the tool becomes unavailable. "
@@ -25976,7 +26140,20 @@ TOOLS = {
                 "it starts playing) stops a long recording (typing) when its "
                 "on-screen event stops, with a short fade; long library tails "
                 "(impact_1) already stop at their measured fade point unless "
-                "dur_s asks for more. Default -6dB.",
+                "dur_s asks for more. gain_db: leave it UNSET for a library "
+                "recording — the tool measures the voice's short-term "
+                "loudness at the hit and sets the gain for the sound's role "
+                "(whoosh/swish ~8 dB under the voice, ding/pop/click/tick/"
+                "shutter ~10 under, typing 14 under, an impact louder only "
+                "below 150 Hz) and reports a MIX line; an explicit gain_db "
+                "wins and is reported the same way. Other sounds default to "
+                "-6dB. The result's CHECK lines flag a sound with no visual "
+                "partner, on a payoff word's onset, a literal pun, a "
+                "reflexive opening whoosh, a level that is inaudible or too "
+                "hot, and more than 1-2 sounds in a talking short; a bright "
+                "library sound on a payoff word's onset is NUDGED to a "
+                "visual partner in the neighbouring speech gap when one is "
+                "within reach.",
                 {"storage_key": {"type": "string"},
                  "at": {"type": "number"},
                  "gain_db": {"type": "number"},
@@ -27776,7 +27953,12 @@ TOOLS = {
                         "provider provenance, rights-capability signals and "
                         "downloaded SHA-256, with explicit null/unknown values. "
                         "Detects the same asset playing twice or a "
-                        "likely song misfiled as voiceover. This state is "
+                        "likely song misfiled as voiceover. Each library "
+                        "sound effect reports where it sits against the "
+                        "measured voice at its hit (and its role level "
+                        "there) plus its placement checks: visual partner, "
+                        "payoff-word onset, literal pun, opening whoosh, "
+                        "the 1-2 budget of a talking short. This state is "
                         "ground truth; deterministic preview AUDIO CHECK can "
                         "measure the rendered mix without relabeling roles.",
                         {}),
@@ -28545,25 +28727,30 @@ _COMPACT_CONTRACTS = {
     "list_sound_library": (
         "READ the owner-approved sound library: real recordings by role "
         "(whoosh, swish, impact, riser, shutter, typing, click, pop, tick, "
-        "ding, glitch, cash, heartbeat), each with its use and suggested gain. "
-        "Place with add_sfx(storage_key='sound:<id>', at=<the frame it "
-        "hits>, gain_db=<suggested>). Sound only where something meaningful "
-        "happens on screen; about one every 4-5 s at most; never on captions."),
+        "ding, glitch, cash, heartbeat), each with its use and measured hit "
+        "level. Place with add_sfx(storage_key='sound:<id>', at=<the frame it "
+        "hits>), gain_db unset: the tool levels it against the voice. Sound "
+        "only where something meaningful happens on screen; zero by default "
+        "in a podcast short, at most 1-2 (about one every 4-5 s at most "
+        "elsewhere); never on captions; never a pun on the spoken word."),
     "add_sfx": (
         "One-shot sound at an OUTPUT second. storage_key 'sound:<id>' places "
         "an approved library recording (list_sound_library); otherwise an "
         "exact key from list_assets, or from fetch_sfx when the user asked "
-        "for a specific sound the library lacks; never invented. Pass the "
-        "library's suggested gain_db (the -6 dB default is too loud). "
-        "For a library recording `at` is the frame it HITS: the tool starts "
+        "for a specific sound the library lacks; never invented. Leave "
+        "gain_db unset for a library recording: the tool levels it against "
+        "the measured voice at its hit and reports MIX and CHECK lines (an "
+        "explicit gain_db wins). For a library recording `at` is the frame it HITS: the tool starts "
         "it early by its measured peak (a riser ends on `at`, typing starts "
         "there) and caps long tails, so never pre-roll by hand; the result "
         "says where the peak lands. dur_s stops typing when the typing "
         "stops. purpose names the "
         "on-screen event. Optional, never a rule: zero is fine, and a sound "
         "with no clear on-screen reason looks childish. Never on captions or "
-        "ordinary cuts; about one "
-        "sound every 4-5 s at most, none repeated within ~3 s."),
+        "ordinary cuts. A podcast short: zero by default, at most 1-2, each "
+        "with a visual partner within ~50 ms, none on a payoff word's "
+        "onset, no literal puns, no reflexive opening whoosh; elsewhere "
+        "about one sound every 4-5 s at most, none repeated within ~3 s."),
     "add_captions": (
         "Burned captions: mode='from_transcript', 'off', or dictated items. "
         "Short-form speech: style.motion_look editorial|clean (premium default), "
