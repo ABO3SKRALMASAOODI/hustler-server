@@ -33,6 +33,7 @@ from routes.planner import planner_bp
 from routes.newsletter import newsletter_bp, start_newsletter_scheduler
 from routes.video import video_bp
 from routes.admin_video import admin_video_bp
+from routes.admin_v2 import admin_v2_bp
 from routes.onboarding import onboarding_bp
 from routes.mcp import mcp_bp
 from routes.mcp_oauth import mcp_oauth_bp
@@ -237,6 +238,8 @@ def create_app():
     app.register_blueprint(newsletter_bp, url_prefix='/newsletter')
     app.register_blueprint(video_bp)
     app.register_blueprint(admin_video_bp)
+    # The rebuilt admin API (/admin/v2/*): read-only, time-limited, JSON errors.
+    app.register_blueprint(admin_v2_bp)
     # No url_prefix: this blueprint owns routes under BOTH /onboarding and
     # /admin, so the prefixes live on the routes themselves.
     app.register_blueprint(onboarding_bp)
