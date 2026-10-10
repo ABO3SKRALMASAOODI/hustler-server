@@ -1,12 +1,12 @@
 <!--MG-SPEC {"title": "Typewriter", "category": "type",
- "description": "Text typed character by character (natural rhythm around cps, pauses after punctuation) with a bar or block cursor, in sans or mono, optionally inside a dark glass pill that appears with the first character and grows with the text (the first key lands on the item's first frame, so start it on the word). Use for a prompt, search, a typed thought or a 'note to self' beat; the cursor blinks three times after typing, then hides.",
+ "description": "A band-wide typed hero: text typed character by character (natural rhythm around cps, pauses after punctuation) with a bar or block cursor, in sans or mono, at least 5% of the frame height, on a dark glass plate spanning the band that appears with the first character (the first key lands on the item's first frame, so start it on the word). Use for a prompt, a definition or a typed thought that IS the beat - never as a small label (a small mono line on a pill reads like a code tooltip); keep it to a few short words. The cursor blinks three times after typing, then hides.",
  "duration": 3.0, "layer": "above_captions", "mutes_captions": false,
  "params": {
   "text": {"type": "text", "required": true, "max": 140, "hint": "1-3 short lines (newline breaks a line); *star* a word for the accent colour"},
   "cps": {"type": "float", "min": 8, "max": 80, "default": 28, "hint": "characters per second"},
   "font": {"type": "enum", "values": ["mono", "sans"], "default": "mono"},
   "cursor": {"type": "enum", "values": ["bar", "block", "none"], "default": "bar"},
-  "plate": {"type": "bool", "default": false, "hint": "dark glass pill/plate behind the text"},
+  "plate": {"type": "bool", "default": true, "hint": "dark glass plate spanning the band behind the text (false = a soft shadow only)"},
   "layout": {"type": "enum", "values": ["center", "left"], "default": "center", "hint": "center = each line re-centres as it types; left = fixed left-aligned layout"},
   "size": {"type": "float", "min": 0.6, "max": 1.8, "default": 1.0},
   "color": {"type": "color", "default": "#F8F6F2"},
@@ -59,9 +59,13 @@
   const typeEnd = chars.length ? chars[chars.length - 1].t : 0;
 
   // ── layout: pre-break lines once, then type into fixed lines ──
-  const fs = Math.round((mono ? 58 : 64) * P.size * Math.min(1, Math.max(0.62, H / 1920 + 0.12)));
+  // a band-wide hero, never a tooltip: the type is at least 5% of the
+  // frame height (round 4: Thiel's 2.5% mono line on a pill)
+  const fs = Math.round(Math.max(0.05 * H, (mono ? 58 : 64) * P.size * Math.min(1, Math.max(0.62, H / 1920 + 0.12))));
   const padX = P.plate ? fs * 0.62 : 0, padY = P.plate ? fs * 0.42 : 0;
-  const maxW = Math.min(W * 0.84, W - 120) - 2 * padX;
+  // the band: inside the 9:16 safe area (clear of the right button rail)
+  const bandW = Math.min(W * 0.76, W - 120);
+  const maxW = bandW - 2 * padX;
   let lines = [], lineH = fs * 1.3;
   const build = () => {
     linesEl.textContent = '';
@@ -120,8 +124,16 @@
       background: P.color, borderRadius: P.cursor === 'block' ? '2px' : (cw / 2) + 'px',
       boxShadow: P.plate ? 'none' : '0 0 14px rgba(0,0,0,.4)', display: P.cursor === 'none' ? 'none' : 'block' });
     const fullW = P.layout === 'left' ? parseFloat(linesEl.style.width) : Math.max(...lines.map(l => l.cs.reduce((a, c) => a + c.el.offsetWidth, 0)), fs);
-    MG.box = [Math.max(0, W / 2 - fullW / 2 - padX - 60), Math.max(0, top0 - padY - 60),
-              Math.min(W, W / 2 + fullW / 2 + padX + 60), Math.min(H, top0 + blockH + padY + 70)];
+    // the plate spans the band (the column the text was broken into)
+    if (P.plate) {
+      Object.assign(plateEl.style, { left: (W / 2 - bandW / 2) + 'px', top: (top0 - padY) + 'px',
+        width: bandW + 'px', height: (blockH + 2 * padY) + 'px', borderRadius: Math.min(fs * 0.5, 36) + 'px',
+        transformOrigin: '50% 0%' });
+      plateEl.dataset.top = String(top0 - padY);
+    }
+    const boxW = P.plate ? bandW / 2 : fullW / 2 + padX;
+    MG.box = [Math.max(0, W / 2 - boxW - 60), Math.max(0, top0 - padY - 60),
+              Math.min(W, W / 2 + boxW + 60), Math.min(H, top0 + blockH + padY + 70)];
   };
   build();
   MG.ready = document.fonts.load(`${F.weight} ${fs}px ${F.css}`).catch(() => 0).then(() => document.fonts.ready).then(build);
@@ -160,16 +172,14 @@
     let co = 1;
     if (t > typeEnd + 0.15) { const ph = Math.floor((t - typeEnd - 0.15) / BLINK); co = ph >= 6 ? 0 : (ph % 2 === 0 ? 0 : 1); }
     cur.style.opacity = co;
-    // plate: a pill around the typed extent (grows with the text)
+    // plate: the band the typed lines fill — band-wide from the first glyph
+    // (opaque on that frame; only its scale settles), one line deeper as
+    // each new line starts
     if (P.plate) {
-      const pw = Math.max(x1 - x0 + 2 * padX, lineH + 2 * padY * 0.6), ph = y1 - y0 + 2 * padY;
-      const px = (P.layout === 'left' ? x0 - padX : (x0 + x1) / 2 - pw / 2);
-      const radius = Math.min(ph / 2, fs * 0.9);
-      // the plate arrives WITH the first glyph (opaque on that frame) and
-      // only settles its scale; it then grows with the typed extent
       const k = MG.ease.outCubic(MG.range(t, 0, 0.1));
-      Object.assign(plateEl.style, { left: px + 'px', top: (y0 - padY) + 'px', width: pw + 'px', height: ph + 'px', borderRadius: radius + 'px' });
-      MG.set(plateEl, { opacity: any ? 1 : 0, scale: 0.96 + 0.04 * k });
+      const top = parseFloat(plateEl.dataset.top), h = any ? (y1 - y0) + 2 * padY : lineH + 2 * padY;
+      Object.assign(plateEl.style, { top: (any ? y0 - padY : top) + 'px', height: h + 'px' });
+      MG.set(plateEl, { opacity: any ? 1 : 0, scale: 0.985 + 0.015 * k });
     } else plateEl.style.display = 'none';
     let o = 1;
     if (exitDur && t > D - exitDur) o = 1 - MG.ease.outQuad(MG.range(t, D - exitDur, exitDur));

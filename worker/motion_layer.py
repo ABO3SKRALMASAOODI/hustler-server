@@ -322,6 +322,8 @@ def prepare_inputs(edl, workdir, W, H, fps, out_duration, args, next_idx,
     items = list(extra_items or []) + program_items(edl, out_duration)
     if not items:
         return [], next_idx
+    import motion_look
+    motion_look.attach_series(items)
     plates = measure_plates(items, plate)
     asset_locals = {}
     jobs, kept = [], []
@@ -460,12 +462,16 @@ def fill_footprints(edl, W, H, fps=30.0, index=None, tl=None):
     an item without a box (a stale one is dropped): the plan then keeps the
     old behaviour for it.
 
-    With the program's ``index`` and Timeline ``tl``, every whole lockup is
-    first timed to the speech it shows (caption_carry.attach_readings: word
-    onsets and the bridge lines of one reading path), so it is measured and
-    rendered as it will read; a stored box measured without its bridge lines
-    is measured again."""
+    With the program's ``index`` and Timeline ``tl``, every whole word-timed
+    item (a lockup, marker_text) is first timed to the speech it shows
+    (caption_carry.attach_readings: its words' spoken onsets), so it is
+    measured and rendered as it will read; a stored box measured under
+    another reading is measured again. A run of parallel slams gets its
+    series first (motion_look.attach_series)."""
     import caption_carry
+    import motion_look
+    # a parallel run's members share one size (word_slam series)
+    motion_look.attach_series(edl.get("motion") or [])
     if index is not None and tl is not None:
         before = {m.get("id"): m.get("reading") for m in edl.get("motion") or []
                   if isinstance(m, dict)}

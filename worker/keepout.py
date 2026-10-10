@@ -837,6 +837,13 @@ def nominal_ink(template, spec, params, frame=None):
     y = num(params, "y", pspec["y"].get("default", 0.5))
     if template == "headline":
         return _headline_ink(params or {}, y)
+    if template == "typewriter":
+        return _typewriter_ink(params or {}, y, frame)
+    if template == "word_slam" and (params or {}).get("tier") in TIER_INK:
+        x0, top, x1, bottom = TIER_INK[params["tier"]]
+        kw = 1.0 if params["tier"] == "hero" else k
+        return (0.5 + dx - (0.5 - x0) * kw, y + top * kw, 0.5 + dx + (x1 - 0.5) * kw,
+                y + bottom * kw)
     if template in ("lower_third", "counter"):
         box = (_lower_third_ink if template == "lower_third" else _counter_ink)(params or {}, y, k)
         if frame and portrait(*frame) and box[3] - box[1] <= CLAMP_BAND[1] - CLAMP_BAND[0]:
@@ -845,6 +852,33 @@ def nominal_ink(template, spec, params, frame=None):
         return box
     x0, top, x1, bottom = row
     return (0.5 + dx - (0.5 - x0) * k, y + top * k, 0.5 + dx + (x1 - 0.5) * k, y + bottom * k)
+
+
+# word_slam's tiers (round 4): the hero word fills ~94% of the width at up
+# to 30% of the frame height (a short word; a long one is width-bound, so
+# this is its tallest); the payoff lockup is a justified number over its
+# noun (the Thiel '140 / CHARACTERS' at width 0.85: ~0.33 of the height).
+TIER_INK = {"hero": (0.03, -0.15, 0.97, 0.15), "payoff": (0.075, -0.165, 0.925, 0.165)}
+
+
+def _typewriter_ink(params, y, frame=None):
+    """The typewriter is a band-wide hero (round 4): type at least 5% of the
+    frame height broken into a column 0.76 of the width (inside the 9:16
+    safe area), on a plate that spans the band; its height follows the
+    copy's line count."""
+    W, H = frame or (1080, 1920)
+    mono = str(params.get("font") or "mono") == "mono"
+    base = (58 if mono else 64) * num(params, "size", 1.0) * min(1.0, max(0.62, H / 1920 + 0.12))
+    fs = max(0.05 * H, base)
+    plate = params.get("plate", True) is not False
+    pad_x, pad_y = (0.62 * fs, 0.42 * fs) if plate else (0.0, 0.0)
+    col = min(0.76 * W, W - 120)
+    per = max(4, int((col - 2 * pad_x) / ((0.6 if mono else 0.52) * fs)))
+    text = str(params.get("text") or "").replace("*", "")
+    lines = sum(max(1, -(-len(part.strip()) // per)) for part in text.split("\n") if part.strip()) or 1
+    half = (lines * 1.3 * fs + 2 * pad_y) / 2.0 / H
+    half_w = (col / 2.0 if plate else min(col / 2.0, len(text) * (0.6 if mono else 0.52) * fs / 2.0)) / W
+    return (0.5 - half_w, y - half, 0.5 + half_w, y + half)
 
 
 # The counter's box is set by its copy too: a short figure is drawn huge

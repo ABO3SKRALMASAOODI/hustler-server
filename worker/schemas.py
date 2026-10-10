@@ -2049,6 +2049,11 @@ class MotionItem(BaseModel):
     allow_face_overlap: Optional[bool] = None
     footprint: Optional["MotionFootprint"] = None
     reading: Optional[dict] = None
+    # A parallel run's shared sizing (worker/motion_look.attach_series;
+    # written by the engine at write time and before every render, never by
+    # hand): {"texts": the members' texts in order, "i": this member's
+    # index, "ids": the members' ids}. A stitched piece keeps its own.
+    series: Optional[dict] = None
 
     @model_validator(mode="before")
     @classmethod
@@ -2071,7 +2076,31 @@ class MotionItem(BaseModel):
             data["footprint"] = _clean_footprint(data["footprint"])
         if data.get("reading") is not None:
             data["reading"] = _clean_reading(data["reading"])
+        if data.get("series") is not None:
+            data["series"] = _clean_series(data["series"])
         return data
+
+
+def _clean_series(sr):
+    """A usable series (see MotionItem.series) or None: an unusable one is
+    dropped (the engine derives it again), never rejected."""
+    if not isinstance(sr, dict):
+        return None
+    texts = sr.get("texts")
+    ids = sr.get("ids") or []
+    if not isinstance(texts, list) or not 2 <= len(texts) <= 8 \
+            or not all(isinstance(t, str) for t in texts):
+        return None
+    try:
+        i = int(sr.get("i"))
+    except (TypeError, ValueError):
+        return None
+    if not 0 <= i < len(texts):
+        return None
+    out = {"texts": [t[:120] for t in texts], "i": i}
+    if isinstance(ids, list) and len(ids) == len(texts):
+        out["ids"] = [str(x)[:80] for x in ids]
+    return out
 
 
 def _clean_reading(rd):

@@ -40,12 +40,24 @@ mutes those words, any other keeps them in place — so every text a template
 prints must come from its params (that is what the captions are matched
 against).
 
-`reads_phrase` says the template sets the owned phrase's other words itself
-(phrase_build): the engine hands the page `params._reading`
-(MotionItem.reading — per row, per printed word, its spoken onset in item
-seconds or null, and `bridges` [{after: row, words: [{t, s}]}]) and the page
-lays the bridge lines out from the start and reveals every word on its time,
-in reading order.
+`reads_phrase` marks a LOCKUP (phrase_build): the engine hands the page
+`params._reading` (MotionItem.reading — per row, per printed word, its spoken
+onset in item seconds or null) and the page reveals every word on its time,
+in reading order. A lockup sets only its rows: the owned phrase's other words
+stay with the captions beside it (round 4 judging: small "bridge" lines grew
+lockups into 6-line piles in 5 sizes; a stored reading's `bridges` are
+ignored), and its rows use at most 3 sizes. `reads_onsets` marks a template
+that reveals ONE text on its spoken onsets (marker_text): its reading is one
+row of the printed words in reading order, and a line more than half
+unsaid keeps the template's authored build. For both, a word within 0.15 s
+after the item's start shows at the start (the write puts the window on its
+first visible word, or on a cut just before it — motion_tools: one event).
+
+A run of parallel `word_slam`s (same role, fit, case, tier and line count,
+each starting within 0.75 s of the previous one's end) is a SERIES
+(`motion_look.attach_series`, MotionItem.series): the page gets
+`params._series` = {texts, i, ids} and sizes every line by the smallest fit
+of that line across the members, so labels share one size and baseline.
 
 `persistent: true` marks a LAYOUT template that holds a band for the whole
 program (the `headline` of a card or letterbox layout). The renderer hands
@@ -150,12 +162,30 @@ Templates read it under their OWN laid-out boxes:
   is darkening the template already lays there. 0 = nothing to do.
 - `MG.darkInkOK(rect, {ratio})` — the plate is bright all the way across, so
   `MG.DARK_INK` reads on it (slams, marker lines).
+- `MG.accentInk(rect, accent, {lc, have, t0, t1, max})` → `{color, lifted,
+  short}`: the accent as it reads on the plate — unchanged with no plate, a
+  dark one (mean luma <= `MG.DARK_PLATE`, 0.12) or where it reaches APCA
+  `lc` (35 heavy display, 45 thin serif/script strokes) against the plate's
+  mean; otherwise lifted toward white (hue kept) by the least step that
+  does, `short` when even `max` (0.6) falls short (set it heavier, or back
+  it with `MG.need` using the lifted colour). `MG.apca(Lt, Lb)` is the |Lc|
+  it uses; `MG.lift(hex, k)` the tint.
 - `MG.backing(parent, rect, alpha, {pad, feather, radius})` — a feathered
   dark pocket behind type (starts hidden; the template drives its opacity;
   `.box` is its painted extent for `MG.growBox`).
 
 The contract: with no plate, or a dark one, a template renders exactly as it
 did before plates existed — compute `need` and change nothing when it is 0.
+
+### One type system
+
+A short holds one Look (worker/motion_look.py): one accent (the captions'
+highlight colour, else the accent its graphics wear) and at most three type
+roles (grotesk, condensed, serif, script, mono, hand). add_motion_graphic
+fills an accent/ink the editor did not pass from that Look, and its reply
+NOTEs a second accent, a fourth role, a broadcast `clean_bar` lower third or
+a highlighter marker in an editorial Look. Templates take their colours from
+`accent`/`color` params — never hard-code a second accent.
 
 Secondary text (kickers, sub-labels, labels, attributions, chips) keeps a cap
 height of at least `MG.MIN_CAP` (2.2%) of the frame height: `MG.minType(el)`

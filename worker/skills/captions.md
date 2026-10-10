@@ -81,8 +81,8 @@ the captions drop exactly the spoken words the graphic shows (its number,
 slammed word, quoted kicker, list rows — matched through case, punctuation,
 plurals, "forty"/"40" and *stars*), and the graphic OWNS the phrase it shows
 from its first shown word until it leaves — the captions yield there. A
-`phrase_build` lockup sets that phrase's other words itself, in small type
-between its rows, each on its spoken onset (the reply says which); any other
+`phrase_build` lockup sets only its rows: the phrase's other words stay
+captioned beside it, clear of its box (the reply says which); any other
 graphic leaves them to the sound, and the reply NOTEs the words a sound-off
 viewer would miss with the time to end it so they are captioned. The words
 said before its first shown word (the setup) and every other sentence keep
@@ -107,8 +107,7 @@ name or a noun phrase ("the Green Revolution", "Steve Jobs", "140
 characters") when another break reads.
 
 SOUND-OFF COVERAGE: no spoken span longer than ~0.6 s may go without
-on-screen text (a caption, a graphic showing those words, or a lockup's
-small bridge line). Review lists every such gap as a "Sound-off gap"
+on-screen text (a caption or a graphic showing those words). Review lists every such gap as a "Sound-off gap"
 advisory with its cause (e.g. words a hero graphic holds over while the
 captions yield to it), and `audit_captions` returns them as
 `sound_off_gaps`.

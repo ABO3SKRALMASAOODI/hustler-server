@@ -280,6 +280,9 @@ def build_job(item, out_w, out_h, fps, asset_locals=None, plate=None,
     if item.get("reading"):
         # the engine's timing of a lockup to the speech (MotionItem.reading)
         params["_reading"] = item["reading"]
+    if item.get("series"):
+        # a parallel run's shared sizing (MotionItem.series)
+        params["_series"] = item["series"]
     assets = {}
     for key, storage_key in asset_params(name, params).items():
         local = (asset_locals or {}).get(storage_key)

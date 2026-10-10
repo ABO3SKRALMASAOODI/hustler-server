@@ -969,11 +969,31 @@ _EDGE_CONJ = frozenset(("and", "or"))
 BRIDGE_GLUE_MAX_CHARS = 24
 _BRIDGE_ARTICLES = frozenset(("a", "an", "the"))
 READING_VERSION = 1
+# Judged Oct 2026 (round 4): the lockups grew piles of micro bridge type
+# (Thiel's list to 6 lines in 5 sizes, 'the Green Revolution / agriculture'
+# at ~1.3% of the frame height; Jobs' payoff likewise). A lockup no longer
+# sets the phrase's other words: they stay with the captions (owned():
+# "beside"), and the lockup is only its designed rows. The bridge machinery
+# is kept behind this switch (stored readings with bridges still parse).
+LOCKUP_SETS_BRIDGES = False
+# A word-timed reveal within this much after its item's start shows AT the
+# start: the write puts a lockup's window on its first visible word, or on a
+# cut up to this far before it (motion_tools: one event, not a cut and then
+# a word two frames later) — never further off its word than this.
+READING_SNAP_S = 0.15
 
 
 def reads_phrase(item):
     """Does the template set a phrase's unshown words itself (lockups)?"""
     return bool(_spec(item).get("reads_phrase"))
+
+
+def reads_onsets(item):
+    """Does the template reveal its printed words on their spoken onsets
+    (spec ``reads_onsets``: marker_text's lines; every ``reads_phrase``
+    lockup too)? Such an item gets a ``reading`` (MotionItem.reading)."""
+    sp = _spec(item)
+    return bool(sp.get("reads_phrase") or sp.get("reads_onsets"))
 
 
 def phrase_ids(words):
@@ -1062,18 +1082,34 @@ def owned(m, words, word_toks, mids, pids, carried):
             out["absorbed"].append(run.pop())
         if not run:
             continue
-        if len(run) > BRIDGE_MAX_WORDS or len(_said([words[i] for i in run])) > BRIDGE_MAX_CHARS:
+        if not LOCKUP_SETS_BRIDGES or len(run) > BRIDGE_MAX_WORDS \
+                or len(_said([words[i] for i in run])) > BRIDGE_MAX_CHARS:
+            # the captions carry the words the rows leave out
             out["beside"].append(run)
         else:
             out["joined"].append(run)
     return out
 
 
+_LINE_BREAK_RE = re.compile(r"\s+/\s*|\s*/\s+")
+ONSET_TEXT_MAX_LINES = 3
+
+
 def display_rows(item):
     """The words each row of a lockup prints, split like the page splits
-    them (MG.starWords: whitespace, *accent* stars dropped)."""
+    them (MG.starWords: whitespace, *accent* stars dropped). A template that
+    reveals one text on its onsets (``reads_onsets``: marker_text) is ONE
+    row of its words in reading order, its ' / ' breaks dropped like the
+    page drops them (at most ONSET_TEXT_MAX_LINES lines)."""
+    params = item.get("params") or {}
+    if not params.get("rows") and _spec(item).get("reads_onsets"):
+        text = _LINE_BREAK_RE.sub("\n", str(params.get("text") or "")).strip()
+        lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
+        words = [t.replace("*", "") for ln in lines[:ONSET_TEXT_MAX_LINES]
+                 for t in ln.split() if t.replace("*", "")]
+        return [words] if words else []
     out = []
-    for row in (item.get("params") or {}).get("rows") or []:
+    for row in params.get("rows") or []:
         text = row.get("text") if isinstance(row, dict) else None
         out.append([t.replace("*", "") for t in str(text or "").split()
                     if t.replace("*", "")])
@@ -1102,6 +1138,8 @@ def _reading_of(m, words, word_toks, mids, carried, joined):
                 r, j = flat_d[seq[blk.a + k][1]]
                 i = flat_w[blk.b + k][1]
                 t = round(max(0.0, float(words[i]["t0"]) - s), 3)
+                if t <= READING_SNAP_S:
+                    t = 0.0             # on the window's first frame (a cut)
                 if at[r][j] is None or t < at[r][j]:
                     at[r][j] = t
                 row_of.setdefault(i, r)
@@ -1145,14 +1183,16 @@ def _reading_of(m, words, word_toks, mids, carried, joined):
 
 
 def readings(edl, index, tl):
-    """{item id: reading} for the whole lockups (``reads_phrase``) of a
-    program: their printed words timed to the spoken onsets and, under
-    transcript captions with mute_captions unset, the phrase's other words
-    joined as bridge lines (see owned). A windowed item (a stitched piece,
-    ``full_duration_s``) keeps the reading its full program gave it."""
+    """{item id: reading} for the whole word-timed items (``reads_onsets``:
+    phrase_build lockups, marker_text) of a program: their printed words
+    timed to the spoken onsets (a reveal within READING_SNAP_S of the
+    item's start shows at the start) and — only when LOCKUP_SETS_BRIDGES —
+    a lockup's phrase's other words joined as bridge lines (see owned). A
+    windowed item (a stitched piece, ``full_duration_s``) keeps the reading
+    its full program gave it."""
     import captions as caplib
     items = [m for m in program_items(edl, tl)
-             if reads_phrase(m) and not m.get("full_duration_s")]
+             if reads_onsets(m) and not m.get("full_duration_s")]
     if not items or not (index or {}).get("words"):
         return {}
     words = caplib.transcript_words(edl, index, tl)
@@ -1173,7 +1213,8 @@ def readings(edl, index, tl):
     for m in items:
         carried = carried_by(m, words, word_toks, mids, hero_only=False)
         joined = []
-        if cap_words and mode(m) == MODE_WORDS:
+        if cap_words and mode(m) == MODE_WORDS and reads_phrase(m) \
+                and LOCKUP_SETS_BRIDGES:
             c_carried = carried_by(m, cap_words, cap_toks, cap_mids)
             own = owned(m, cap_words, cap_toks, cap_mids, cap_pids, c_carried)
             for run in (own or {}).get("joined") or []:
@@ -1244,7 +1285,10 @@ def lockup_reveals(item, fps=30.0):
     params = item.get("params") or {}
     rd = item.get("reading") if isinstance(item.get("reading"), dict) else {}
     rd_rows = rd.get("rows") if isinstance(rd.get("rows"), list) else []
-    bridges = rd.get("bridges") if isinstance(rd.get("bridges"), list) else []
+    # the page sets only its rows (round 4): a stored reading's bridge lines
+    # are not drawn, so they reveal nothing
+    bridges = (rd.get("bridges") if isinstance(rd.get("bridges"), list) else []) \
+        if LOCKUP_SETS_BRIDGES else []
     lead = LOCKUP_RISE_LEAD_S if params.get("entrance") == "rise" else 0.0
 
     def onset(v):
@@ -1312,6 +1356,44 @@ def lockup_reveals(item, fps=30.0):
     return out
 
 
+# A word of an onset-timed line starts its short rise this early.
+ONSET_RISE_LEAD_S = 0.06
+
+
+def onset_reveals(item):
+    """Composition seconds at which a ``reads_onsets`` template that is not
+    a lockup (marker_text) reveals each printed word, mirroring the page:
+    a word ONSET_RISE_LEAD_S before its spoken onset, a word nobody says
+    with the word before it (leading ones with the first said word), never
+    before a word before it. [] when fewer than half its printed words are
+    said (the page keeps its own authored 0.3 s build) or it is a lockup
+    (lockup_reveals)."""
+    if not isinstance(item, dict) or reads_phrase(item) or not reads_onsets(item):
+        return []
+    rd = item.get("reading") if isinstance(item.get("reading"), dict) else {}
+    rows = rd.get("rows") if isinstance(rd.get("rows"), list) else []
+    n = sum(len(r) for r in display_rows(item))
+    flat = [v for row in rows if isinstance(row, list) for v in row][:n]
+    known = [None if v is None else _js_float(v, None) for v in flat]
+    known = [None if v is None else max(0.0, v - ONSET_RISE_LEAD_S) for v in known]
+    if not n or 2 * sum(1 for v in known if v is not None) < n:
+        return []
+    known += [None] * (n - len(known))
+    cur = next(v for v in known if v is not None)
+    out = []
+    for v in known:
+        cur = max(cur, v) if v is not None else cur
+        out.append(round(cur, 4))
+    return out
+
+
+def first_reveal(item):
+    """When a word-timed item first draws a word (composition seconds), or
+    None when its reveals are not word-timed."""
+    r = lockup_reveals(item) or onset_reveals(item)
+    return r[0] if r else None
+
+
 def attach_readings(edl, index, tl):
     """Write each whole lockup's ``reading`` (readings) onto its motion item
     in place — and drop a stale one — before anything measures or renders
@@ -1323,7 +1405,7 @@ def attach_readings(edl, index, tl):
         print(f"[motion] lockup reading skipped: {str(e)[:160]}", flush=True)
         return edl
     for m in edl.get("motion") or []:
-        if not isinstance(m, dict) or m.get("full_duration_s") or not reads_phrase(m):
+        if not isinstance(m, dict) or m.get("full_duration_s") or not reads_onsets(m):
             continue
         if m.get("id") in got:
             m["reading"] = got[m["id"]]
@@ -1419,8 +1501,8 @@ def _gap(edl, spoken, i0, i1, dur, room, key):
                 cause = (f"captions yield to motion graphic '{owner}' while it shows that "
                          "phrase (one reading path), and it does not print those words")
                 fix = (f"end '{owner}' where its own words end so those words are "
-                       "captioned, carry them on it, or make it a phrase_build (a lockup "
-                       "sets them in small type)")
+                       "captioned, carry them on it, or make it a phrase_build (the "
+                       "words its rows leave out stay captioned beside it)")
             elif why == "unmeasured":
                 cause = (f"motion graphic '{owner}' has no box measured at this frame "
                          "shape, so it is assumed to sit on the caption band (a render "

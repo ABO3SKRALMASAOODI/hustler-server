@@ -155,16 +155,15 @@ def test_list_rows_take_their_own_words_and_the_connectors_between_them():
          "params": {"rows": rows}, "footprint": _fp([0.1, 0.06, 0.9, 0.3])}
     edl = _edl([m], words=words)
     # one reading path: the list owns its enumeration; the item its rows
-    # leave out is set in the lockup in small type (its list joint "and"
-    # goes with the rows), never as a second text under it
-    assert _shown(edl, _index(words)) == []
+    # leave out stays with the captions (round 4: no small bridge type in
+    # the lockup), its list joint "and" goes with the rows
+    assert _shown(edl, _index(words)) == ["aviation", "and", "the", "green", "revolution"]
     rep = _plan(edl, _index(words)).report["list"]
-    assert [caption_carry._said(r) for r in rep["joined"]] == \
+    assert rep["joined"] == []
+    assert [caption_carry._said(r) for r in rep["beside"]] == \
         ["aviation and the green revolution"]
     rd = caption_carry.readings(edl, _index(words), Timeline(edl["keep"]))["list"]
-    assert rd["bridges"] == [{"after": 1, "words": [
-        {"t": "aviation", "s": 1.2}, {"t": "and", "s": 1.7}, {"t": "the", "s": 1.8, "g": 1},
-        {"t": "green", "s": 1.9}, {"t": "revolution", "s": 2.2}]}]
+    assert rd["bridges"] == []
     # rows land on their spoken onsets; "jets" is never said
     assert rd["rows"] == [[0.2], [0.7, None], [2.9, 3.4], [3.9, 4.1]]
 

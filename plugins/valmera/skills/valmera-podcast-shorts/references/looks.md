@@ -56,13 +56,24 @@ The coordinator assigns one Look and one structure per short. The editor reads
   from size, face-free placement, a soft shadow and the grade.
 - One reading path: one text of a sentence on screen at a time. With
   `mute_captions` unset a graphic owns the phrase it shows from its first
-  shown word to its exit (captions yield; a `phrase_build` sets the phrase's
-  other words in small type itself, so quote the transcript in its rows),
-  while the punchline's setup before it stays captioned. End a `word_slam` or
+  shown word to its exit (captions yield; a `phrase_build` sets only its
+  rows — at most 4, in at most 3 sizes — and the phrase's other words stay
+  captioned beside it, so quote the transcript in its rows), while the
+  punchline's setup before it stays captioned. End a `word_slam` or
   counter where its words end; the reply NOTEs any words only the sound
   would carry. Kickers and rows quote the transcript word for word.
-- One accent colour for the whole short, passed to every graphic's `accent`;
-  at most about 4 template families per short, varied across the batch.
+- One accent colour for the whole short, passed to every graphic's `accent`
+  (a graphic added without one takes the short's Look accent — the captions'
+  highlight colour), at most 3 type roles per short (grotesk, condensed,
+  serif, script, mono: the write NOTEs a 4th or a second accent), and at
+  most about 4 template families per short, varied across the batch.
+- Payoff and hero tiers are optional `word_slam` tiers, for the moment that
+  earns them: `tier='payoff'` locks a number and its noun up in the accent
+  (`'*140* / characters'`), the largest lockup of the short; `tier='hero'` is
+  ONE giant word per short behind the speaker (it falls back to a face-safe
+  display slam when no person matte can be measured). Back-to-back stat
+  slams of one style share one size per line automatically. `typewriter` is
+  a band-wide hero (5%+ of the frame height on a plate), never a small label.
 - Over a bright shirt or wall, raise the template's `scrim` (or move the type
   to darker space); white type on a white shirt is a defect.
 - Safe area on 9:16: x 60-1020 px, y 8-80% of height. Keep the native corner

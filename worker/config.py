@@ -2062,7 +2062,14 @@ MASTER_VERSION = 1
 # layout is the composed card (its backdrop and panels), not the uncropped
 # frame (plate.py) — light words over a card's dark band no longer switch to
 # dark ink because the footage there would have been bright.
-LEGIBILITY_VERSION = 2
+# v3 (round 4 motion track, Oct 2026): one type system — phrase_build sets
+# only its rows (no bridge lines) in at most 3 sizes, a series of parallel
+# word_slams shares one size per line, an accent the plate would sink is
+# lifted (and a thin serif accent set heavier) by MG.accentInk, the
+# typewriter is a band-wide hero (>= 5% of the frame height on a band-wide
+# plate), marker_text reveals a spoken line on its onsets, and word_slam
+# has the payoff and hero tiers.
+LEGIBILITY_VERSION = 3
 
 # Word-level caption muting (worker/caption_carry.py): a motion graphic with
 # mute_captions unset hides only the spoken words it shows, the rest stay
@@ -2079,7 +2086,10 @@ LEGIBILITY_VERSION = 2
 # reading order, and a word a cut kept the sound of is captioned. Lockups
 # (phrase_build) without transcript captions are stamped too: their reveal
 # timing changed.
-CAPTION_CARRY_VERSION = 2
+# v3 (round 4): a lockup no longer sets the phrase's other words as small
+# bridge lines — the captions carry them beside it — and a word-timed
+# reveal within 0.15 s after its window's start shows at the start.
+CAPTION_CARRY_VERSION = 3
 
 # Crops and picture cards that follow the speaker's face inside a shot
 # (worker/follow.py, Frame.follow / PictureCard.follow). Stamped as

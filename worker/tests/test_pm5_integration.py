@@ -41,6 +41,8 @@ def test_a_number_lands_before_its_reading_is_timed(monkeypatch):
 
 import asyncio  # noqa: E402
 
+import pytest  # noqa: E402
+
 import caption_carry  # noqa: E402
 import motion_layer  # noqa: E402
 import motion_templates  # noqa: E402
@@ -61,8 +63,9 @@ def _pb(rows, reading=None, start=0.0, end=5.3, **params):
 
 
 def test_reveals_follow_the_reading_not_the_fallback_at_times():
-    # rows: bridge(-1), row 0, bridge(0), row 1, row 2 in reading order
-    assert caption_carry.lockup_reveals(_pb(PAPER_ROWS, SPOKEN)) == [0.4, 0.7, 1.6, 3.28, 3.9]
+    # rows in reading order; a stored reading's bridge lines are not drawn
+    # (round 4: a lockup sets only its rows), so they reveal nothing
+    assert caption_carry.lockup_reveals(_pb(PAPER_ROWS, SPOKEN)) == [0.7, 3.28, 3.9]
     # no reading: the rows' own 'at' times
     assert caption_carry.lockup_reveals(_pb(PAPER_ROWS)) == [0.7, 3.28, 3.9]
     # a 'rise' word starts 0.06 s early; reading order is never broken
@@ -75,17 +78,18 @@ def test_reveals_follow_the_reading_not_the_fallback_at_times():
 
 def test_the_headline_yields_from_the_lockups_first_spoken_word():
     lock = _pb(PAPER_ROWS, SPOKEN, start=10.0, end=15.3)
-    assert motion_layer._ink_lead(lock) == 0.4          # the leading bridge line
+    assert motion_layer._ink_lead(lock) == 0.7          # the first spoken row
     unread = _pb(PAPER_ROWS, start=10.0, end=15.3)
     assert motion_layer._ink_lead(unread) == 0.7        # the first row's 'at'
-    # a stitched piece 1 s into the composition waits that much less
+    # a stitched piece 0.5 s into the composition waits that much less
+    assert motion_layer._ink_lead(dict(lock, phase_s=0.5)) == pytest.approx(0.2)
     assert motion_layer._ink_lead(dict(lock, phase_s=1.0)) == 0.0
 
 
 def test_a_sound_partner_is_a_spoken_row_landing():
     lock = _pb(PAPER_ROWS, SPOKEN, start=10.0, end=15.3)
     lands = sfx_placement._motion_landings(lock)
-    assert 13.28 in lands and 13.9 in lands and 10.4 in lands
+    assert 13.28 in lands and 13.9 in lands and 10.7 in lands and 10.4 not in lands
     # the fallback 'at' of a spoken row is no landing any more
     lock2 = _pb([dict(PAPER_ROWS[0], at="0.2")] + PAPER_ROWS[1:], SPOKEN, start=10.0, end=15.3)
     assert 10.2 not in sfx_placement._motion_landings(lock2)
