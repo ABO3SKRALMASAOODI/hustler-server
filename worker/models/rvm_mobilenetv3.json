@@ -12,8 +12,8 @@
   "server_side_only": true,
   "sha256": "88d4531297118f595bf2fd60f6f566aec2e559393802d1f436c380f0cbbd2828",
   "bytes": 14975696,
-  "images": ["vision"],
+  "images": ["batch", "vision"],
   "env": "MATTE_RVM_MODEL",
   "runtime": "onnxruntime CPUExecutionProvider (personseg.rvm_stream)",
-  "notes": "The batch image already downloads this exact release asset in its FULL_COMPUTE step (Dockerfile.cloudflare); the sidecar runner verifies the sha256 at load, so a different file reads as model_missing, never as this version. GPL-3.0: used on our own servers, never distributed to users."
+  "notes": "The batch image downloads this exact release asset in its FULL_COMPUTE step (Dockerfile.cloudflare); its baker step then finds the file present and refuses the build unless its sha256 and size match this pin, so the lane that serves matte.person sidecars while the vision lane is dark is checked at build as well as at load (a different file reads as model_missing, never as this version). GPL-3.0: used on our own servers, never distributed to users."
 }

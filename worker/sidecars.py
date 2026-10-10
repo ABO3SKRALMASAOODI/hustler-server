@@ -93,7 +93,10 @@ _MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 # absent); ``defaults`` are merged under the caller's params before keying,
 # so None and the explicit defaults share one cache entry. ``ms_per_frame``
 # is the batch-lane cost (RVM measured, config.py MATTE_RVM_BUDGET note) and
-# feeds estimate_s; ``group_s`` is how much footage one call measures.
+# feeds estimate_s; ``group_s`` is how much footage one call measures, and
+# ``group_max_s`` (faces) lets a long source's request fit in SIDECAR_SHARDS
+# calls: a launch made from a container that sleeps soon after (the index
+# job's) keeps only its in-flight calls, never a queue held in memory.
 _KIND_SPECS = {
     "matte.person": {
         "model": "rvm_mobilenetv3",
@@ -113,6 +116,7 @@ _KIND_SPECS = {
         "defaults": {"fps": 10.0, "det_w": 320, "score": 0.6, "nms": 0.3,
                      "top_k": 50},
         "rate": "fps", "ms_per_frame": 6.0, "group_s": 600.0,
+        "group_max_s": 1800.0,
     },
 }
 # Seconds a launch costs beyond compute (admission, cold start, staging).
@@ -575,8 +579,14 @@ def _classify(listing, prefix):
 _READY = {}          # chunk key -> validated manifest
 _LISTINGS = {}       # prefix -> (fetched_at, classified)
 _MARKERS = {}        # marker object key -> (fetched_at, dict | None)
+_LIST_FAILED = {}    # prefix -> when a LIST last failed (monotonic)
 _CACHE_LOCK = threading.Lock()
 _CACHE_MAX = 8192    # entries per cache: a long-lived lane re-reads, never grows
+# After a failed LIST the prefix reads as absent for this long without asking
+# the store again: a reader that asks once per moment (keep-out walks a
+# program in steps) must not pay the client's timeouts at every step while
+# the bucket is slow or unreachable.
+_LIST_FAIL_COOLDOWN_S = 30.0
 
 
 def _bounded(cache):
@@ -589,6 +599,11 @@ def _reset_caches():
         _READY.clear()
         _LISTINGS.clear()
         _MARKERS.clear()
+        _LIST_FAILED.clear()
+
+
+class StoreUnavailable(RuntimeError):
+    """A LIST of this prefix failed moments ago; not asked again yet."""
 
 
 def _listing(store, kind, source_sha, fresh=False):
@@ -598,10 +613,20 @@ def _listing(store, kind, source_sha, fresh=False):
         hit = _LISTINGS.get(prefix)
         if hit and not fresh and now - hit[0] < _LIST_TTL_S:
             return hit[1]
-    got = _classify(store.list(prefix), prefix)
+        failed_at = _LIST_FAILED.get(prefix)
+        if failed_at is not None and now - failed_at < _LIST_FAIL_COOLDOWN_S:
+            raise StoreUnavailable(f"{prefix}: store unreachable moments ago")
+    try:
+        got = _classify(store.list(prefix), prefix)
+    except Exception:
+        with _CACHE_LOCK:
+            _bounded(_LIST_FAILED)
+            _LIST_FAILED[prefix] = time.monotonic()
+        raise
     with _CACHE_LOCK:
         _bounded(_LISTINGS)
         _LISTINGS[prefix] = (time.monotonic(), got)
+        _LIST_FAILED.pop(prefix, None)
     return got
 
 
@@ -676,16 +701,21 @@ def _chunk_state(store, handle, chunk, listing, now):
     return "absent", None, None
 
 
-def _states(handle, fresh=False):
+def _states(handle, fresh=False, strict=False):
     """{chunk key: (status, manifest, failed marker)}; all absent without a
-    store or for a kind this code does not produce."""
+    store or for a kind this code does not produce. ``strict``: a store that
+    cannot be listed raises instead (ensure() never launches on unknown)."""
     store = _store()
     if store is None or handle.kind not in _KIND_SPECS or not handle.chunks:
         return {c.key: ("absent", None, None) for c in handle.chunks}
     try:
         listing = _listing(store, handle.kind, handle.source_sha, fresh)
     except Exception as e:  # noqa: BLE001 — unknown is not ready
-        _log(f"list failed ({str(e)[:120]}); reading {handle.kind} as absent")
+        if strict:
+            raise
+        if not isinstance(e, StoreUnavailable):
+            _log(f"list failed ({str(e)[:120]}); reading {handle.kind} "
+                 "as absent")
         return {c.key: ("absent", None, None) for c in handle.chunks}
     now = time.time()
     with _CACHE_LOCK:
@@ -737,16 +767,34 @@ def ensure(kind, source, ranges, priority="interactive", params=None):
                     priority=priority, params=canonical_params(resolved))
     if sp is None or not chunks:
         return handle
+    if not _launchable(source):
+        # A job on this ref could only fail (the child sizes its decode from
+        # these fields); answering "absent" keeps the window free to retry
+        # once the caller has a probed proxy.
+        _log(f"{kind}: source {str(source.sha256)[:12]} has no usable "
+             f"proxy geometry ({source.width}x{source.height}@{source.fps}, "
+             f"key {source.storage_key!r}); nothing launched")
+        return handle
     try:
         if _store() is None:
             return handle
-        states = _states(handle)
+        states = _states(handle, strict=True)
         todo = [c for c in chunks if states[c.key][0] == "absent"]
         if todo:
             _launcher().submit(handle, source, todo)
     except Exception as e:  # noqa: BLE001 — a write never fails on analysis
-        _log(f"ensure {kind} failed to launch ({str(e)[:160]})")
+        _log(f"ensure {kind} launched nothing ({str(e)[:160]})")
     return handle
+
+
+def _launchable(source):
+    try:
+        return (bool(source.sha256)
+                and str(source.storage_key or "") not in ("", "None")
+                and int(source.width) > 0 and int(source.height) > 0
+                and float(source.fps) > 0 and float(source.duration_s) > 0)
+    except (TypeError, ValueError):
+        return False
 
 
 def chunk_status(handle):
@@ -860,13 +908,7 @@ def _download(store, handle, chunk, m, dest_dir):
     finally:
         if os.path.exists(tmp):
             os.remove(tmp)
-    try:
-        if time.time() - float(m.get("created_at") or 0) > _TOUCH_AFTER_S:
-            for k in (data_key(handle.kind, handle.source_sha, key, ext),
-                      manifest_key(handle.kind, handle.source_sha, key)):
-                store.touch(k)
-    except Exception:  # noqa: BLE001
-        pass
+    _touch_if_old(store, handle.kind, handle.source_sha, dict(m, ext=ext))
     return path
 
 
@@ -887,7 +929,7 @@ def estimate_s(handle):
         params = {}
     fps = _rate(handle.kind, params)
     warm = float(params.get("warmup_s") or 0.0)
-    groups = _group(todo, sp["group_s"])
+    groups = _group(todo, _group_span(handle.kind, todo))
     costs = sorted((sum((c.t1 - c.t0 + warm) * fps for c in g)
                     * sp["ms_per_frame"] / 1000.0 for g in groups),
                    reverse=True)
@@ -971,20 +1013,54 @@ def read_json_chunk(kind, source_sha, manifest):
         if len(_JSON_DATA) >= _JSON_DATA_MAX:
             _JSON_DATA.pop(next(iter(_JSON_DATA)))
         _JSON_DATA[key] = val
+    # A read is a use: refresh an old chunk for the 90-day lifecycle rule,
+    # as fetch() does, or a source keep-out reads every day would expire.
+    _touch_if_old(store, kind, source_sha, manifest)
     return val
+
+
+def _touch_if_old(store, kind, source_sha, manifest):
+    try:
+        if time.time() - float(manifest.get("created_at") or 0) \
+                <= _TOUCH_AFTER_S:
+            return
+        key = manifest["key"]
+        for k in (data_key(kind, source_sha, key, manifest.get("ext")),
+                  manifest_key(kind, source_sha, key)):
+            store.touch(k)
+    except Exception:  # noqa: BLE001 — best effort
+        pass
 
 
 def faces_near(source_sha, shots, duration_s, src_t, near_s=1.0):
     """Face boxes ([x0, y0, x1, y1] fractions) of the ready faces.yunet
     sample nearest ``src_t`` within ``near_s``, as [(box, score)]; None when
-    no ready sidecar covers the moment (unknown is not "no face")."""
-    lo, hi = max(0.0, src_t - near_s), src_t + near_s
+    no ready sidecar covers the moment (unknown is not "no face").
+
+    Only samples of the SAME shot speak for the moment: when the moment's
+    own chunk is not ready, a neighbour's sample across a cut would place
+    the face where another camera had it."""
+    starts = []
+    for s in shots or ():
+        try:
+            starts.append(float(s))
+        except (TypeError, ValueError):
+            continue
+    shot_a = max([0.0] + [s for s in starts if s <= src_t + 1e-6])
+    shot_b = min([float(duration_s)] + [s for s in starts if s > src_t + 1e-6])
+    lo = max(0.0, src_t - near_s, shot_a)
+    hi = min(src_t + near_s, shot_b)
+    if hi <= lo:
+        return None
     best = None
     for _c, m in ready_chunks("faces.yunet", source_sha, shots, duration_s,
                               [(lo, hi)]):
         data = read_json_chunk("faces.yunet", source_sha, m) or {}
         for s in data.get("samples") or []:
-            dt = abs(float(s.get("t", -1e9)) - src_t)
+            t = float(s.get("t", -1e9))
+            if not shot_a - 1e-3 <= t < shot_b - 1e-3:
+                continue
+            dt = abs(t - src_t)
             if dt <= near_s and (best is None or dt < best[0]):
                 best = (dt, s)
     if best is None:
@@ -1060,6 +1136,19 @@ def _shards():
         return max(1, int(config.SIDECAR_SHARDS))
     except Exception:  # noqa: BLE001
         return 3
+
+
+def _group_span(kind, chunks):
+    """Seconds of footage per call for a first launch of ``chunks``: the
+    kind's ``group_s``, stretched up to ``group_max_s`` so the whole request
+    needs at most SIDECAR_SHARDS calls (one chunk of slack for packing)."""
+    sp = _KIND_SPECS[kind]
+    base = float(sp["group_s"])
+    cap = float(sp.get("group_max_s") or base)
+    if cap <= base:
+        return base
+    total = sum(c.t1 - c.t0 for c in chunks)
+    return min(cap, max(base, total / _shards() + CHUNK_MAX_S))
 
 
 def _group(chunks, group_s):
@@ -1163,10 +1252,9 @@ class _Launcher:
     # -- submit (never touches the network)
     def submit(self, handle, source, chunks, attempt=1, slot=None, delay=0.0,
                requeues=0):
-        sp = _KIND_SPECS[handle.kind]
         first = attempt == 1 and requeues == 0 and slot is None
         if first:
-            groups = _group(chunks, sp["group_s"])
+            groups = _group(chunks, _group_span(handle.kind, chunks))
         elif attempt > 1:
             # A retry splits its group (at most RETRY_SPLIT calls), so one
             # chunk that kills its shard twice takes down only its window.

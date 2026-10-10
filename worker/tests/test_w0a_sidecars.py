@@ -340,8 +340,10 @@ def test_a_refused_launch_is_requeued_not_counted(monkeypatch, tmp_path,
 def test_interactive_runs_before_queued_prefetch(monkeypatch, tmp_path):
     order = []
     gate = threading.Event()
+    busy = threading.Event()
 
     def execute(source, payload):
+        busy.set()
         if not gate.is_set():
             gate.wait(10)
         order.append(payload["priority"])
@@ -353,7 +355,7 @@ def test_interactive_runs_before_queued_prefetch(monkeypatch, tmp_path):
     try:
         src = _src("x.mp4", dur=90.0)
         sidecars.ensure("matte.person", src, [(0, 15)], priority="backfill")
-        time.sleep(0.2)                              # first call is running
+        assert busy.wait(10)                         # first call is running
         sidecars.ensure("matte.person", src, [(30, 45)], priority="prefetch")
         sidecars.ensure("matte.person", src, [(60, 75)],
                         priority="interactive")
@@ -596,8 +598,10 @@ def test_within_a_priority_the_longest_group_runs_first(monkeypatch,
     shard is, so long chunks start before short ones of the same priority."""
     order = []
     gate = threading.Event()
+    busy = threading.Event()
 
     def execute(source, payload):
+        busy.set()
         if not gate.is_set():
             gate.wait(10)
         c = payload["chunks"][0]
@@ -610,7 +614,7 @@ def test_within_a_priority_the_longest_group_runs_first(monkeypatch,
     try:
         src = _src("x.mp4", dur=200.0, shots=(5.0, 9.0, 60.0, 74.0, 140.0))
         sidecars.ensure("matte.person", src, [(0, 5)])        # blocks the worker
-        time.sleep(0.2)
+        assert busy.wait(10)          # the worker holds it before the rest
         sidecars.ensure("matte.person", src, [(5, 9)])        # 4 s
         sidecars.ensure("matte.person", src, [(60, 74)])      # 14 s
         sidecars.ensure("matte.person", src, [(140, 150)])    # 15 s chunk
@@ -619,3 +623,126 @@ def test_within_a_priority_the_longest_group_runs_first(monkeypatch,
         assert order == [5.0, 15.0, 14.0, 4.0]
     finally:
         w0a_support.uninstall(launcher)
+
+
+# ── degraded stores, foreign shots, long sources (review fixes) ─────────
+
+class _DeadStore(sidecars.LocalStore):
+    """A bucket that cannot be listed (a slow or partitioned R2)."""
+
+    def __init__(self, root):
+        super().__init__(root)
+        self.lists = 0
+
+    def list(self, prefix):
+        self.lists += 1
+        raise OSError("connect timeout")
+
+
+def test_an_unlistable_store_is_asked_once_and_launches_nothing(tmp_path):
+    store = _DeadStore(str(tmp_path / "dead"))
+    calls = []
+    sidecars.use_store(store)
+    sidecars.use_launcher(sidecars._Launcher(
+        execute=lambda s, p: calls.append(p) or {}, workers=1))
+    try:
+        src = _src("p.mp4", dur=30.0)
+        h = sidecars.ensure("faces.yunet", src, [(0, 30)])
+        assert store.lists == 1 and calls == []       # unknown never launches
+        t = time.monotonic()
+        for _ in range(200):          # a reader walking a program in steps
+            assert sidecars.status(h) == "absent"
+            assert sidecars.faces_near(src.sha256, src.shots, 30.0, 4.0) \
+                is None
+        assert time.monotonic() - t < 2.0
+        assert store.lists == 1                       # within the cool-down
+    finally:
+        sidecars.use_store(None)
+        sidecars.use_launcher(None)
+
+
+def test_a_source_without_proxy_geometry_launches_nothing(tmp_path):
+    calls = []
+    sidecars.use_store(sidecars.LocalStore(str(tmp_path / "s")))
+    sidecars.use_launcher(sidecars._Launcher(
+        execute=lambda s, p: calls.append(p) or {}, workers=1))
+    try:
+        for bad in (dict(w=0), dict(h=0), dict(fps=0.0)):
+            h = sidecars.ensure("matte.person", _src("p.mp4", dur=8.0, **bad),
+                                [(0, 8)])
+            assert h.chunks and sidecars.status(h) == "absent"
+        none_key = sidecars.source_from("ab" * 32, None, {
+            "duration": 8.0, "fps": 25, "width": 320, "height": 180})
+        sidecars.ensure("matte.person", none_key, [(0, 8)])
+        assert calls == []
+    finally:
+        sidecars.use_store(None)
+        sidecars.use_launcher(None)
+
+
+def test_faces_near_never_borrows_a_sample_across_a_cut(local, clip):
+    """The moment's own shot is not measured (its chunk failed): a sample a
+    few frames away on the far side of the cut must not answer for it."""
+    store, launcher = local
+    src = _src(clip, shots=(3.0,))
+    h = sidecars.ensure("faces.yunet", src, [(3.0, 6)])     # shot 2 only
+    sidecars.wait([h], 60)
+    assert sidecars.faces_near(src.sha256, src.shots, 6.0, 3.2)  # same shot
+    assert sidecars.faces_near(src.sha256, src.shots, 6.0, 2.95) is None
+    assert sidecars.faces_near(src.sha256, src.shots, 6.0, 2.0) is None
+
+
+def test_a_long_faces_request_fits_in_one_call_per_shard(monkeypatch,
+                                                          tmp_path):
+    """Prefetch after an index runs in a container that sleeps a minute
+    after the job: every call must be in flight at once, none left queued
+    in that process's memory."""
+    seen = []
+    gate = threading.Event()
+
+    def execute(source, payload):
+        seen.append(round(sum(c["t1"] - c["t0"] for c in payload["chunks"])))
+        gate.wait(10)
+        return {"chunks": {c["key"]: {"status": "ready"}
+                           for c in payload["chunks"]}}
+    _store, launcher = w0a_support.install(monkeypatch, tmp_path,
+                                           execute=execute, workers=3)
+    try:
+        shots = tuple(float(s) for s in range(37, 3600, 41))
+        src = _src("x.mp4", dur=3600.0, shots=shots)
+        h = sidecars.ensure("faces.yunet", src, [(0, 3600)],
+                            priority="prefetch")
+        deadline = time.monotonic() + 10
+        while len(seen) < 3 and time.monotonic() < deadline:
+            time.sleep(0.05)
+        with launcher._cv:
+            queued = list(launcher._queue)
+        gate.set()
+        assert launcher.join(30)
+        assert len(seen) == 3 and queued == []
+        assert sum(seen) == 3600 and max(seen) <= 1800
+        # a short source keeps the kind's ordinary group size
+        assert sidecars._group_span("faces.yunet", h.chunks[:10]) == 600.0
+        assert sidecars._group_span("matte.person", h.chunks) == 15.0
+    finally:
+        gate.set()
+        w0a_support.uninstall(launcher)
+
+
+def test_reading_an_old_faces_chunk_refreshes_its_last_use(local, clip):
+    store, launcher = local
+    src = _src(clip)
+    h = sidecars.ensure("faces.yunet", src, [(0, 6)])
+    assert sidecars.wait([h], 60)[h.chunks[0].key] == "ready"
+    mkey = sidecars.manifest_key("faces.yunet", src.sha256, h.chunks[0].key)
+    m = json.loads(store.get_bytes(mkey))
+    touched = []
+    store.touch = lambda key: touched.append(key)
+    sidecars.read_json_chunk("faces.yunet", src.sha256, m)
+    assert touched == []                                   # fresh: no write
+    sidecars._JSON_DATA.clear()
+    sidecars.read_json_chunk("faces.yunet", src.sha256,
+                             dict(m, created_at=time.time() - 40 * 86400))
+    assert sorted(touched) == sorted([
+        mkey, sidecars.data_key("faces.yunet", src.sha256, m["key"],
+                                m["ext"])])

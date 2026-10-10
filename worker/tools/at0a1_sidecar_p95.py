@@ -140,6 +140,38 @@ def repeat_hit(handles, sources, trial, store, n=10):
             "mean_s": round(statistics.mean(times), 3)}
 
 
+def projection(handles, metas, shards, rate_ms):
+    """What the measured work costs on production shards: every chunk's
+    model frames (kept + discarded warm-up), grouped into calls exactly as
+    the launcher groups them and handed longest first to the first free
+    shard. ``projected_s`` is that busiest shard at ``rate_ms`` per frame
+    (config.py: RVM measured 128 ms/frame at 960x540 on standard-4); it
+    EXCLUDES admission, cold start, staging and model load, so the real p95
+    can only be higher."""
+    import sidecars
+    groups = []
+    for h in handles:
+        for g in sidecars._group(list(h.chunks),
+                                 sidecars._group_span(h.kind, h.chunks)):
+            n = 0
+            for c in g:
+                m = metas.get(c.key) or {}
+                fps = float(m.get("fps") or 0)
+                n += int(m.get("frames") or 0) + int(round(
+                    float(m.get("warmup_s") or 0) * fps))
+            groups.append((sum(c.t1 - c.t0 for c in g), n))
+    loads = [0] * max(1, shards)
+    for _work, n in sorted(groups, key=lambda g: -g[0]):
+        loads[loads.index(min(loads))] += n
+    total = sum(n for _w, n in groups)
+    return {"calls": len(groups), "model_frames": total,
+            "busiest_shard_frames": max(loads),
+            "even_split_frames": round(total / max(1, shards)),
+            "rate_ms": rate_ms,
+            "projected_s": round(max(loads) * rate_ms / 1000.0, 1),
+            "excludes": "admission, cold start, staging, model load"}
+
+
 def cleanup(store, handles):
     import sidecars
     keys = []
@@ -161,6 +193,8 @@ def main(argv=None):
     ap.add_argument("--threads", type=int, default=4)
     ap.add_argument("--shards", type=int, default=3)
     ap.add_argument("--budget", type=float, default=600.0)
+    ap.add_argument("--rate-ms", type=float, default=128.0,
+                    help="production RVM ms/frame for the projection")
     ap.add_argument("--cleanup", action="store_true")
     ap.add_argument("--json")
     args = ap.parse_args(argv)
@@ -215,18 +249,21 @@ def main(argv=None):
             row["retries"] = launcher.stats["retries"]
             if i == 0:
                 row["repeat"] = repeat_hit(handles, sources, trial, store)
-                ms, cpu, frames = [], [], 0
+                ms, cpu, frames, metas = [], [], 0, {}
                 for h in handles:
                     for r in sidecars.fetch(h, os.path.join(
                             workdir or tempfile.gettempdir(), "f")):
                         ms.append(r["meta"].get("ms_per_frame") or 0)
                         cpu.append(r["meta"].get("cpu_ms_per_frame") or 0)
                         frames += int(r["meta"].get("frames") or 0)
+                        metas[r["key"]] = r["meta"]
                 row["frames"] = frames
                 row["rvm_ms_per_frame_mean"] = round(statistics.mean(ms), 1) \
                     if ms else None
                 row["rvm_cpu_ms_per_frame_mean"] = round(
                     statistics.mean(cpu), 1) if cpu else None
+                report["projection"] = projection(handles, metas, args.shards,
+                                                  args.rate_ms)
             report["trials"].append(row)
             print(json.dumps(row), flush=True)
         walls = [t["wall_s"] for t in report["trials"]]

@@ -44,7 +44,7 @@ jobs:
           print('sidecar kinds:', sorted(analysis_jobs.CHILD_RUNNERS))
           "
 
-      - name: process cold start (container to /health, stub settings)
+      - name: process cold start (container to /health, stub settings) <= 45 s
         run: |
           start=$(date +%s.%N)
           docker run -d --name vision -p 8080:8080 \
@@ -52,12 +52,20 @@ jobs:
             -e S3_ENDPOINT=http://stub.invalid -e S3_ACCESS_KEY_ID=stub \
             -e S3_SECRET_ACCESS_KEY=stub -e S3_BUCKET=stub \
             -e REMOTE_EXECUTOR_SECRET=stub valmera-vision:check
+          healthy=0
           for i in $(seq 1 120); do
-            if curl -fsS localhost:8080/health >/dev/null 2>&1; then break; fi
+            if curl -fsS localhost:8080/health >/dev/null 2>&1; then healthy=1; break; fi
             sleep 0.5
           done
           end=$(date +%s.%N)
-          curl -fsS localhost:8080/health | head -c 600; echo
-          echo "cold start to /health: $(echo "$end - $start" | bc) s"
+          elapsed=$(python3 -c "print(round($end - $start, 1))")
           docker logs vision | tail -20
+          if [ "$healthy" != 1 ]; then
+            docker rm -f vision
+            echo "::error::vision container never answered /health"; exit 1
+          fi
+          curl -fsS localhost:8080/health | head -c 600; echo
           docker rm -f vision
+          echo "cold start to /health: ${elapsed} s (bar: 45 s)"
+          python3 -c "import sys; sys.exit(0 if $elapsed <= 45 else 1)" \
+            || { echo "::error::vision cold start ${elapsed} s exceeds 45 s"; exit 1; }

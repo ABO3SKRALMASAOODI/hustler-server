@@ -2571,7 +2571,11 @@ def run_sidecar_remote(project_id, payload, user_id=None):
     job = {"id": None, "type": "sidecar", "project_id": project_id,
            "user_id": user_id, "attempts": 0, "payload": payload}
     if desired_execution_provider(job) != "cloudflare":
-        raise RemoteExecutorError(
+        # Nothing was sent anywhere: a refusal, not a lost chunk. The
+        # launcher leaves the chunks absent instead of spending both attempts
+        # and fencing the windows off as failed for hours.
+        import sidecars
+        raise sidecars.SidecarUnavailable(
             "sidecar analysis runs remotely only on Cloudflare")
     if payload.get("slot") is not None:
         job["_cloudflare_sync_nonce"] = _sidecar_nonce(payload["slot"])

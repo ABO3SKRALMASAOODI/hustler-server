@@ -104,6 +104,39 @@ def test_run_sidecar_remote_falls_back_from_a_dark_vision_lane(monkeypatch):
     assert calls == ["batch"]
 
 
+def test_a_provider_other_than_cloudflare_is_a_refusal_not_a_loss(
+        monkeypatch, tmp_path):
+    """Percent routing or a stale type list can pick another provider for a
+    call: nothing ran, so the chunks stay absent (no attempts spent, no
+    6-hour failed marker) and the next ensure() can launch them."""
+    import sidecars
+    monkeypatch.setattr(remote, "desired_execution_provider",
+                        lambda job: "modal")
+    monkeypatch.setattr(remote, "_run_cloudflare_with_capacity_wait",
+                        lambda job: pytest.fail("must not launch"))
+    with pytest.raises(sidecars.SidecarUnavailable):
+        remote.run_sidecar_remote(7, {"slot": 0, "chunks": []})
+
+    store = sidecars.LocalStore(str(tmp_path / "store"))
+    sidecars.use_store(store)
+    launcher = sidecars._Launcher(
+        execute=lambda src, payload: remote.run_sidecar_remote(7, payload),
+        workers=1)
+    sidecars.use_launcher(launcher)
+    try:
+        src = sidecars.SourceRef("cd" * 32, "k.mp4", 10.0, 25.0, 320, 180, 7)
+        h = sidecars.ensure("faces.yunet", src, [(0, 10)])
+        assert launcher.join(30)
+        assert launcher.stats["calls"] == 1
+        assert launcher.stats["retries"] == 0 and launcher.stats["failed"] == 0
+        assert sidecars.status(h) == "absent"
+        assert not [k for k in store.list("sidecars/")
+                    if k.endswith((".failed.json", ".pending.json"))]
+    finally:
+        sidecars.use_launcher(None)
+        sidecars.use_store(None)
+
+
 def test_executor_skew_fault_answers_like_a_skewed_lane(monkeypatch):
     import faultinject
     monkeypatch.setattr(remote, "_run_cloudflare_with_capacity_wait",
@@ -220,6 +253,28 @@ def test_every_image_runs_the_baker_and_vision_is_onnx_only():
     assert "models/" not in ignore and "tools/" in ignore
 
 
+def test_the_modal_agent_image_context_carries_the_baker_inputs():
+    """Modal builds Dockerfile.agent-base from a context filtered by an
+    ignore list. Every file the baker step COPYs must survive that filter,
+    or `modal deploy` fails at the COPY (the DR fallback could not build);
+    ordinary source must still stay out of the dependency layers."""
+    modal = pytest.importorskip("modal")
+    import modal_app
+    # Modal turns an ignore list into exactly this matcher (dockerignore
+    # rules, `!` re-includes); True means the file is left out.
+    ignored = modal.FilePatternMatcher(*modal_app.AGENT_CONTEXT_IGNORE)
+    needed = ["requirements.txt", "models.lock", "models/bake.py"]
+    needed += [f"models/{p.name}" for p in (WORKER / "models").glob("*.json")]
+    needed += [f"requirements.d/{p.name}"
+               for p in (WORKER / "requirements.d").glob("*.txt")]
+    assert [p for p in needed if ignored(Path(p))] == []
+    for source in ("config.py", "renderer.py", "models/__init__.py",
+                   "tests/test_w0a_lanes.py"):
+        assert ignored(Path(source)), source
+    # the executor image's dependency context is unchanged
+    assert modal_app.DEPENDENCY_CONTEXT_IGNORE == ["**", "!requirements.txt"]
+
+
 def _bake():
     sys.path.insert(0, str(WORKER / "models"))
     try:
@@ -240,7 +295,9 @@ def test_models_lock_is_clean_and_matches_the_specs():
     assert "f12e12798e8314f7c074a6656816c048dcc95b7a" in y["url"]
     r = specs["rvm_mobilenetv3"]
     assert r["licence"] == "GPL-3.0" and r["server_side_only"] is True
-    assert r["images"] == ["vision"]
+    # batch serves matte.person while the vision lane is dark: its RVM (from
+    # the FULL_COMPUTE step) is verified against the pin at build
+    assert r["images"] == ["batch", "vision"]
     import sidecars
     assert sidecars.spec("faces.yunet")["model_version"] == "2023mar"
     assert config.YUNET_MODEL.endswith(y["file"])
