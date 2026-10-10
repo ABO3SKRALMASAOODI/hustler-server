@@ -1,0 +1,905 @@
+{
+ "canvas": {
+  "duration": null,
+  "old_dump": {
+   "canvas": {
+    "bg_color": "#000000",
+    "fps": 30.0,
+    "height": 1920,
+    "width": 1080
+   },
+   "caption_mutes": [],
+   "captions": null,
+   "effects": null,
+   "frame": null,
+   "inserts": [
+    {
+     "asset_key": "media/p/a.png",
+     "at_output_s": 0.0,
+     "crop": null,
+     "duration_s": 4.0,
+     "fit": null,
+     "hold": null,
+     "id": "c1",
+     "kind": "image",
+     "motion": null,
+     "motion_motif": null,
+     "mute": null,
+     "rate": null,
+     "rotation": null,
+     "source_start_s": null,
+     "split_parent": null
+    },
+    {
+     "asset_key": "media/p/b.png",
+     "at_output_s": 4.0,
+     "crop": null,
+     "duration_s": 3.0,
+     "fit": null,
+     "hold": null,
+     "id": "c2",
+     "kind": "image",
+     "motion": null,
+     "motion_motif": null,
+     "mute": null,
+     "rate": null,
+     "rotation": null,
+     "source_start_s": null,
+     "split_parent": null
+    }
+   ],
+   "keep": [],
+   "master": null,
+   "motion": [],
+   "music": [
+    {
+     "duck": true,
+     "duck_mode": null,
+     "end": 7.0,
+     "fade_in_s": null,
+     "fade_out_s": null,
+     "gain_db": -18.0,
+     "id": "cm",
+     "loop": null,
+     "mute": null,
+     "offset_s": null,
+     "purpose": null,
+     "start": 0.0,
+     "storage_key": "library:calm"
+    }
+   ],
+   "overlays": [],
+   "patches": [],
+   "sfx": [],
+   "source_clean": null,
+   "speed": [],
+   "split_keep_boundaries": null,
+   "stem_mix": null,
+   "texts": [],
+   "vectors": [],
+   "voiceover": [],
+   "volume": []
+  },
+  "raw": {
+   "canvas": {
+    "bg_color": "#000000",
+    "fps": 30.0,
+    "height": 1920,
+    "width": 1080
+   },
+   "caption_mutes": [],
+   "captions": null,
+   "effects": null,
+   "frame": null,
+   "inserts": [
+    {
+     "asset_key": "media/p/a.png",
+     "at_output_s": 0.0,
+     "duration_s": 4.0,
+     "id": "c1",
+     "kind": "image"
+    },
+    {
+     "asset_key": "media/p/b.png",
+     "at_output_s": 4.0,
+     "duration_s": 3.0,
+     "id": "c2",
+     "kind": "image"
+    }
+   ],
+   "keep": [],
+   "master": null,
+   "motion": [],
+   "music": [
+    {
+     "end": 7.0,
+     "id": "cm",
+     "start": 0.0,
+     "storage_key": "library:calm"
+    }
+   ],
+   "overlays": [],
+   "patches": [],
+   "sfx": [],
+   "source_clean": null,
+   "speed": [],
+   "split_keep_boundaries": null,
+   "stem_mix": null,
+   "texts": [],
+   "vectors": [],
+   "voiceover": [],
+   "volume": []
+  },
+  "signature_sha256": "67730efb1878a5ae269fe1e6439daa71551a6bb0bc3cfb03acc8a653dbeb6d4a"
+ },
+ "default": {
+  "duration": 30.0,
+  "old_dump": {
+   "canvas": null,
+   "caption_mutes": [],
+   "captions": null,
+   "effects": null,
+   "frame": null,
+   "inserts": [],
+   "keep": [
+    [
+     0.0,
+     30.0
+    ]
+   ],
+   "master": null,
+   "motion": [],
+   "music": [],
+   "overlays": [],
+   "patches": [],
+   "sfx": [],
+   "source_clean": null,
+   "speed": [],
+   "split_keep_boundaries": null,
+   "stem_mix": null,
+   "texts": [],
+   "vectors": [],
+   "voiceover": [],
+   "volume": []
+  },
+  "raw": {
+   "canvas": null,
+   "caption_mutes": [],
+   "captions": null,
+   "effects": null,
+   "frame": null,
+   "inserts": [],
+   "keep": [
+    [
+     0.0,
+     30.0
+    ]
+   ],
+   "master": null,
+   "motion": [],
+   "music": [],
+   "overlays": [],
+   "patches": [],
+   "sfx": [],
+   "source_clean": null,
+   "speed": [],
+   "split_keep_boundaries": null,
+   "stem_mix": null,
+   "texts": [],
+   "vectors": [],
+   "voiceover": [],
+   "volume": []
+  },
+  "signature_sha256": "38bff35097d5d95a6e20dd4521e32d59fd0f35bf0481242397ce2ceb1792a7b7"
+ },
+ "legacy_v2": {
+  "duration": 30.0,
+  "old_dump": {
+   "canvas": null,
+   "caption_mutes": [],
+   "captions": {
+    "corrections": null,
+    "design_version": null,
+    "emphasis_mode": null,
+    "emphasis_words": [
+     "money",
+     "insane"
+    ],
+    "karaoke_group_n": null,
+    "max_words_per_caption": 4,
+    "min_words_per_caption": null,
+    "mode": "from_transcript",
+    "motion_motif": null,
+    "placement_track": null,
+    "style": {
+     "anchor_y": null,
+     "animation": null,
+     "background_color": null,
+     "background_opacity": null,
+     "color": "#FFFFFF",
+     "dynamic": null,
+     "effect": null,
+     "emphasis": null,
+     "emphasis_scale": null,
+     "font": null,
+     "highlight_color": null,
+     "layout": null,
+     "leading": null,
+     "motion_look": null,
+     "outline_color": null,
+     "outline_width": null,
+     "position": null,
+     "preset": "podcast",
+     "shadow": null,
+     "single_line": null,
+     "size": "l",
+     "size_scale": null,
+     "text_align": null,
+     "tracking": null,
+     "uppercase": null
+    },
+    "text_fixes": null
+   },
+   "effects": {
+    "custom": null,
+    "fade_in_s": null,
+    "fade_out_s": 1.5,
+    "frame_shifts": null,
+    "grade": "cinematic",
+    "grade_custom": null,
+    "picture_cards": null,
+    "regions": [
+     {
+      "end": null,
+      "h": 0.1,
+      "id": "r1",
+      "mode": "blur",
+      "start": null,
+      "w": 0.2,
+      "x": 0.1,
+      "y": 0.1
+     }
+    ],
+    "screen_frame": null,
+    "stylize": null,
+    "transition": {
+     "duration_s": 0.3,
+     "junctions": null,
+     "motion_motif": null,
+     "scope": "scene",
+     "style": "dip_black"
+    },
+    "zooms": [
+     {
+      "cut_step": null,
+      "cx": null,
+      "cy": null,
+      "ease": null,
+      "end": 4.0,
+      "id": "z1",
+      "mode": "ease",
+      "motion_motif": null,
+      "overshoot": null,
+      "path": null,
+      "purpose": null,
+      "ramp_s": null,
+      "rect": null,
+      "rotate": null,
+      "shake": null,
+      "shake_decay": null,
+      "shake_hz": null,
+      "start": 2.0,
+      "strength": 0.3,
+      "target_evidence_ids": null,
+      "target_measured": null
+     }
+    ]
+   },
+   "frame": {
+    "focus_track": null,
+    "focus_x": null,
+    "focus_y": null,
+    "follow": null,
+    "mode": "crop",
+    "picture": null,
+    "ratio": "9:16"
+   },
+   "inserts": [
+    {
+     "asset_key": "media/p/img.png",
+     "at_output_s": 10.0,
+     "crop": null,
+     "duration_s": 3.0,
+     "fit": null,
+     "hold": null,
+     "id": "i1",
+     "kind": "image",
+     "motion": "zoom_in",
+     "motion_motif": null,
+     "mute": null,
+     "rate": null,
+     "rotation": null,
+     "source_start_s": null,
+     "split_parent": null
+    }
+   ],
+   "keep": [
+    [
+     0.0,
+     10.0
+    ],
+    [
+     12.5,
+     30.0
+    ]
+   ],
+   "master": null,
+   "motion": [],
+   "music": [
+    {
+     "duck": true,
+     "duck_mode": null,
+     "end": 27.5,
+     "fade_in_s": 1.0,
+     "fade_out_s": 2.0,
+     "gain_db": -18.0,
+     "id": "m1",
+     "loop": true,
+     "mute": null,
+     "offset_s": null,
+     "purpose": null,
+     "start": 0.0,
+     "storage_key": "library:x"
+    }
+   ],
+   "overlays": [],
+   "patches": [],
+   "sfx": [
+    {
+     "at": 10.0,
+     "dur_s": null,
+     "gain_db": -6.0,
+     "id": "x1",
+     "offset_s": null,
+     "purpose": null,
+     "storage_key": "sfx:whoosh-1"
+    }
+   ],
+   "source_clean": null,
+   "speed": [],
+   "split_keep_boundaries": null,
+   "stem_mix": null,
+   "texts": [],
+   "vectors": [],
+   "voiceover": [],
+   "volume": [
+    {
+     "end": 6.0,
+     "gain_db": -20.0,
+     "start": 5.0
+    }
+   ]
+  },
+  "raw": {
+   "captions": {
+    "emphasis_words": [
+     "money",
+     "insane"
+    ],
+    "max_words_per_caption": 4,
+    "mode": "from_transcript",
+    "style": {
+     "color": "#FFFFFF",
+     "preset": "podcast",
+     "size": "l"
+    }
+   },
+   "effects": {
+    "fade_out_s": 1.5,
+    "grade": "cinematic",
+    "regions": [
+     {
+      "h": 0.1,
+      "id": "r1",
+      "mode": "blur",
+      "w": 0.2,
+      "x": 0.1,
+      "y": 0.1
+     }
+    ],
+    "transition": {
+     "duration_s": 0.3,
+     "style": "dip_black"
+    },
+    "zooms": [
+     {
+      "end": 4.0,
+      "id": "z1",
+      "mode": "ease",
+      "start": 2.0,
+      "strength": 0.3
+     }
+    ]
+   },
+   "frame": {
+    "mode": "crop",
+    "ratio": "9:16"
+   },
+   "inserts": [
+    {
+     "asset_key": "media/p/img.png",
+     "at_output_s": 10.0,
+     "duration_s": 3.0,
+     "id": "i1",
+     "kind": "image",
+     "motion": "zoom_in"
+    }
+   ],
+   "keep": [
+    [
+     0.0,
+     10.0
+    ],
+    [
+     12.5,
+     30.0
+    ]
+   ],
+   "music": [
+    {
+     "duck": true,
+     "end": 27.5,
+     "fade_in_s": 1.0,
+     "fade_out_s": 2.0,
+     "gain_db": -18.0,
+     "id": "m1",
+     "loop": true,
+     "start": 0.0,
+     "storage_key": "library:x"
+    }
+   ],
+   "sfx": [
+    {
+     "at": 10.0,
+     "gain_db": -6.0,
+     "id": "x1",
+     "storage_key": "sfx:whoosh-1"
+    }
+   ],
+   "volume": [
+    {
+     "end": 6.0,
+     "gain_db": -20.0,
+     "start": 5.0
+    }
+   ]
+  },
+  "signature_sha256": "c09c298a559f42c3a5455ff8c79627a28439c7a7de9fe005802d31dc29f423f0"
+ },
+ "motion_texts_vectors": {
+  "duration": 25.0,
+  "old_dump": {
+   "canvas": null,
+   "caption_mutes": [
+    [
+     4.0,
+     7.0
+    ]
+   ],
+   "captions": null,
+   "effects": {
+    "custom": null,
+    "fade_in_s": null,
+    "fade_out_s": null,
+    "frame_shifts": null,
+    "grade": null,
+    "grade_custom": null,
+    "picture_cards": null,
+    "regions": null,
+    "screen_frame": null,
+    "stylize": [
+     {
+      "end": 6.0,
+      "id": "s1",
+      "intensity": 0.4,
+      "kind": "grain",
+      "motion_motif": null,
+      "start": 1.0
+     }
+    ],
+    "transition": null,
+    "zooms": []
+   },
+   "frame": null,
+   "inserts": [],
+   "keep": [
+    [
+     0.0,
+     25.0
+    ]
+   ],
+   "master": null,
+   "motion": [
+    {
+     "allow_face_overlap": null,
+     "behind": null,
+     "box": [
+      0.1,
+      0.1,
+      0.9,
+      0.5
+     ],
+     "end": 7.0,
+     "footprint": null,
+     "full_duration_s": null,
+     "html": "<div id='a'>Hi</div>",
+     "id": "mg1",
+     "layer": "above_captions",
+     "mute_captions": false,
+     "params": {},
+     "phase_s": null,
+     "purpose": "hero word",
+     "reading": null,
+     "series": null,
+     "start": 4.0,
+     "template": "html"
+    },
+    {
+     "allow_face_overlap": null,
+     "behind": null,
+     "box": null,
+     "end": 12.0,
+     "footprint": null,
+     "full_duration_s": null,
+     "html": "<div>x</div>",
+     "id": "mg2",
+     "layer": "below_captions",
+     "mute_captions": null,
+     "params": {},
+     "phase_s": null,
+     "purpose": null,
+     "reading": null,
+     "series": null,
+     "start": 9.0,
+     "template": "html"
+    }
+   ],
+   "music": [],
+   "overlays": [],
+   "patches": [],
+   "sfx": [],
+   "source_clean": null,
+   "speed": [],
+   "split_keep_boundaries": null,
+   "stem_mix": null,
+   "texts": [
+    {
+     "accent_color": null,
+     "anchor_insert": null,
+     "behind": null,
+     "box": null,
+     "color": null,
+     "end": 3.0,
+     "entrance": null,
+     "exit": null,
+     "font": null,
+     "font_size": null,
+     "id": "t1",
+     "italic": null,
+     "max_width": null,
+     "motion": null,
+     "motion_motif": null,
+     "mute_captions": null,
+     "outline_width": null,
+     "shadow": null,
+     "size_scale": null,
+     "start": 1.0,
+     "template": "title",
+     "text": "Hello",
+     "text_align": null,
+     "tracking": null,
+     "uppercase": null,
+     "x": null,
+     "y": null
+    }
+   ],
+   "vectors": [
+    {
+     "background_color": null,
+     "color": "#FF0000",
+     "end": 5.0,
+     "height": 0.08,
+     "id": "v1",
+     "kind": "rectangle",
+     "motion": null,
+     "motion_motif": null,
+     "opacity": 1.0,
+     "rounding": null,
+     "start": 2.0,
+     "stroke_color": null,
+     "stroke_width": null,
+     "value": null,
+     "width": 0.25,
+     "x": 0.1,
+     "y": 0.1
+    }
+   ],
+   "voiceover": [],
+   "volume": []
+  },
+  "raw": {
+   "caption_mutes": [
+    [
+     4.0,
+     7.0
+    ]
+   ],
+   "effects": {
+    "stylize": [
+     {
+      "end": 6.0,
+      "id": "s1",
+      "intensity": 0.4,
+      "kind": "grain",
+      "start": 1.0
+     }
+    ]
+   },
+   "keep": [
+    [
+     0.0,
+     25.0
+    ]
+   ],
+   "motion": [
+    {
+     "box": [
+      0.1,
+      0.1,
+      0.9,
+      0.5
+     ],
+     "end": 7.0,
+     "html": "<div id='a'>Hi</div>",
+     "id": "mg1",
+     "mute_captions": false,
+     "purpose": "hero word",
+     "start": 4.0,
+     "template": "html"
+    },
+    {
+     "end": 12.0,
+     "html": "<div>x</div>",
+     "id": "mg2",
+     "layer": "below_captions",
+     "start": 9.0,
+     "template": "html"
+    }
+   ],
+   "texts": [
+    {
+     "end": 3.0,
+     "id": "t1",
+     "start": 1.0,
+     "template": "title",
+     "text": "Hello"
+    }
+   ],
+   "vectors": [
+    {
+     "color": "#FF0000",
+     "end": 5.0,
+     "h": 0.2,
+     "id": "v1",
+     "kind": "rectangle",
+     "start": 2.0,
+     "w": 0.3,
+     "x": 0.1,
+     "y": 0.1
+    }
+   ]
+  },
+  "signature_sha256": "6f9ee32c8c664ce1590684df10b1b1a14b7cd36c69d351364c8187b0e769bf12"
+ },
+ "music_variants": {
+  "duration": 40.0,
+  "old_dump": {
+   "canvas": null,
+   "caption_mutes": [],
+   "captions": null,
+   "effects": {
+    "custom": null,
+    "fade_in_s": null,
+    "fade_out_s": null,
+    "frame_shifts": null,
+    "grade": null,
+    "grade_custom": null,
+    "picture_cards": null,
+    "regions": null,
+    "screen_frame": null,
+    "stylize": null,
+    "transition": {
+     "duration_s": 0.2,
+     "junctions": [
+      0,
+      2
+     ],
+     "motion_motif": null,
+     "scope": "every_cut",
+     "style": "flash"
+    },
+    "zooms": []
+   },
+   "frame": null,
+   "inserts": [],
+   "keep": [
+    [
+     0.0,
+     40.0
+    ]
+   ],
+   "master": null,
+   "motion": [],
+   "music": [
+    {
+     "duck": true,
+     "duck_mode": null,
+     "end": 20.0,
+     "fade_in_s": null,
+     "fade_out_s": null,
+     "gain_db": -18.0,
+     "id": null,
+     "loop": null,
+     "mute": null,
+     "offset_s": null,
+     "purpose": null,
+     "start": 0.0,
+     "storage_key": "library:no-id"
+    },
+    {
+     "duck": true,
+     "duck_mode": "smooth",
+     "end": 39.0,
+     "fade_in_s": null,
+     "fade_out_s": null,
+     "gain_db": -14.0,
+     "id": "m2",
+     "loop": null,
+     "mute": true,
+     "offset_s": 12.5,
+     "purpose": "bed under the hook",
+     "start": 5.0,
+     "storage_key": "media/p/song.mp3"
+    }
+   ],
+   "overlays": [],
+   "patches": [],
+   "sfx": [],
+   "source_clean": null,
+   "speed": [],
+   "split_keep_boundaries": null,
+   "stem_mix": null,
+   "texts": [],
+   "vectors": [],
+   "voiceover": [],
+   "volume": []
+  },
+  "raw": {
+   "effects": {
+    "transition": {
+     "duration_s": 0.2,
+     "junctions": [
+      0,
+      2
+     ],
+     "scope": "every_cut",
+     "style": "flash"
+    }
+   },
+   "keep": [
+    [
+     0.0,
+     40.0
+    ]
+   ],
+   "music": [
+    {
+     "end": 20.0,
+     "start": 0.0,
+     "storage_key": "library:no-id"
+    },
+    {
+     "duck": true,
+     "duck_mode": "smooth",
+     "end": 39.0,
+     "gain_db": -14.0,
+     "id": "m2",
+     "mute": true,
+     "offset_s": 12.5,
+     "purpose": "bed under the hook",
+     "start": 5.0,
+     "storage_key": "media/p/song.mp3"
+    }
+   ]
+  },
+  "signature_sha256": "d270413897ce2b9d8fa69206588f8f492d91f83b9acfd9468d774baf9d0e515f"
+ },
+ "speed_master": {
+  "duration": 20.0,
+  "old_dump": {
+   "canvas": null,
+   "caption_mutes": [],
+   "captions": null,
+   "effects": {
+    "custom": null,
+    "fade_in_s": 0.5,
+    "fade_out_s": null,
+    "frame_shifts": null,
+    "grade": "warm",
+    "grade_custom": null,
+    "picture_cards": null,
+    "regions": null,
+    "screen_frame": null,
+    "stylize": null,
+    "transition": null,
+    "zooms": []
+   },
+   "frame": null,
+   "inserts": [],
+   "keep": [
+    [
+     0.0,
+     20.0
+    ]
+   ],
+   "master": {
+    "loudness": "social"
+   },
+   "motion": [],
+   "music": [],
+   "overlays": [],
+   "patches": [],
+   "sfx": [],
+   "source_clean": null,
+   "speed": [
+    {
+     "end": 6.0,
+     "factor": 2.0,
+     "id": "sp1",
+     "motion_motif": null,
+     "start": 2.0
+    }
+   ],
+   "split_keep_boundaries": null,
+   "stem_mix": null,
+   "texts": [],
+   "vectors": [],
+   "voiceover": [],
+   "volume": []
+  },
+  "raw": {
+   "effects": {
+    "fade_in_s": 0.5,
+    "grade": "warm"
+   },
+   "keep": [
+    [
+     0.0,
+     20.0
+    ]
+   ],
+   "master": {
+    "loudness": "social"
+   },
+   "speed": [
+    {
+     "end": 6.0,
+     "factor": 2.0,
+     "id": "sp1",
+     "start": 2.0
+    }
+   ]
+  },
+  "signature_sha256": "d9fcac40b0cb1d3c8b757b245693f2c6e31bad9344710f56591d955bc1343723"
+ }
+}

@@ -12,11 +12,15 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+import schemas as _schemas_mod
+import tools_ext
 
 import audio_qc
 import render_qc
@@ -27322,7 +27326,7 @@ TOOLS = {
                     "keep", "speed", "inserts", "frame", "captions",
                     "caption_mutes", "texts", "vectors", "music", "sfx",
                     "voiceover", "volume", "master", "effects", "overlays", "canvas",
-                    "motion"]},
+                    "motion"] + (["fx"] if _schemas_mod.FX_AUTHORABLE_TYPES else [])},
                 "id": {"type": "string", "description": "Existing item id for upsert/remove; omit for whole-layer set."},
                 "value": {"description": "set: complete layer value (array for texts/inserts/music). upsert: one item object merged by id. reorder: all insert ids. Read get_edl for exact shapes."}},
                 "required": ["action", "layer"]}}}),
@@ -30685,6 +30689,9 @@ def _tool_disabled(name, model=None):
     """Tools whose backing service is not configured are hidden entirely —
     the model must never see (or advertise) a capability that would only
     return 'unavailable'."""
+    ext = tools_ext.is_disabled(name)
+    if ext is not None:
+        return ext
     if name == "edit_shorts":
         return True
     if name == "review_audio":
@@ -31322,3 +31329,10 @@ def _execute(ctx, name, args):
     ctx.last_structured_tool_outcome = outcome.to_dict()
     ctx._executing_tool = previous_executing_tool
     return outcome.render_text()
+
+
+# Department tools (worker/tools_ext/, worker/devices/INTERFACES.md §7). The
+# one Wave 0 loader call: new verbs register themselves into TOOLS,
+# TOOL_DOMAINS and the load_tools enums from their own modules, outside the
+# core compact catalog. Keep this the last statement of the module.
+tools_ext.install(sys.modules[__name__])

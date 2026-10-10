@@ -65,7 +65,8 @@
       "caption_mutes": [],
       "source_clean": null,
       "patches": [],
-      "motion": []
+      "motion": [],
+      "fx": []
     }
   },
   {
@@ -153,7 +154,8 @@
           "duration_s": 0.3,
           "scope": "every_cut",
           "junctions": null,
-          "motion_motif": null
+          "motion_motif": null,
+          "per_junction": null
         },
         "regions": null,
         "stylize": null,
@@ -172,7 +174,8 @@
       "caption_mutes": [],
       "source_clean": null,
       "patches": [],
-      "motion": []
+      "motion": [],
+      "fx": []
     }
   },
   {
@@ -287,7 +290,8 @@
       "caption_mutes": [],
       "source_clean": null,
       "patches": [],
-      "motion": []
+      "motion": [],
+      "fx": []
     }
   },
   {
@@ -354,7 +358,8 @@
       "caption_mutes": [],
       "source_clean": null,
       "patches": [],
-      "motion": []
+      "motion": [],
+      "fx": []
     }
   },
   {
@@ -427,7 +432,8 @@
       "caption_mutes": [],
       "source_clean": null,
       "patches": [],
-      "motion": []
+      "motion": [],
+      "fx": []
     }
   },
   {
@@ -508,7 +514,8 @@
       "caption_mutes": [],
       "source_clean": null,
       "patches": [],
-      "motion": []
+      "motion": [],
+      "fx": []
     }
   }
 ]

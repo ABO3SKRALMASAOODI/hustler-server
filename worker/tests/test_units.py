@@ -1504,7 +1504,8 @@ check("transition survives validation",
                                           "duration_s": 0.3,
                                           "scope": "scene",
                                           "junctions": None,
-                                          "motion_motif": None})
+                                          "motion_motif": None,
+                                          "per_junction": None})
 # Round 48: an EDL written before `scope` existed reads as 'scene'. Every one
 # of those carries the every-cut defect, so defaulting them to the fixed
 # behaviour repairs them on their next render instead of grandfathering a bug.

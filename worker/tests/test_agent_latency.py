@@ -268,8 +268,13 @@ def test_first_call_is_allowed_to_cut():
 
 
 def test_post_plan_tool_catalog_keeps_capability_but_drops_repeated_handbook():
-    full = agent_tools.openai_tools("any-model")
-    compact = agent_tools.openai_tools("any-model", compact=True)
+    # The CORE catalog: department tools (worker/tools_ext) page in through
+    # load_tools and carry their own per-department budget
+    # (tests/test_w0_seams.py), so they never count against this one.
+    import tools_ext
+    core = tools_ext.core_names(agent_tools.TOOLS)
+    full = agent_tools.openai_tools("any-model", names=core)
+    compact = agent_tools.openai_tools("any-model", compact=True, names=core)
     assert [x["function"]["name"] for x in compact] == [
         x["function"]["name"] for x in full]
     assert [x["function"]["parameters"] for x in compact] == [

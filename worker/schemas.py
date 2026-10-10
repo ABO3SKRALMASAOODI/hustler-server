@@ -7,9 +7,13 @@ at src/types/edl.ts — keep the two in sync.
 """
 
 import hashlib
+import importlib
+import importlib.util
 import json
 import math
+import os
 import re
+import sys
 from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
 from pydantic import AfterValidator, BaseModel, Field, field_validator, model_validator
@@ -73,6 +77,126 @@ class EDLValidationError(ValueError):
 
 def _r(t):
     return round(float(t), 2)
+
+
+# ------------------------------------------------------------------ #
+#  Registration seams (Wave 0 interface pass)                          #
+# ------------------------------------------------------------------ #
+# worker/devices/INTERFACES.md §4. Parallel tracks add EDL.fx members and
+# fill the typed slots below by dropping a file into worker/fx_schemas/;
+# nobody edits this module for that. Everything here is inert when the
+# package holds no member: EDL.fx accepts only its empty default and every
+# slot only None, so no EDL ever written changes its signature, its cached
+# renders or its validity.
+#
+# Loaded by FILE PATH, like the backend loads this module: the package name
+# is "fx_schemas" on the worker and "<host>__fx_schemas" anywhere else, so
+# the backend (which imports this file as `worker_schemas`, without the
+# worker directory on sys.path) gets the same registry.
+def _load_fx_registry():
+    root = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "fx_schemas")
+    pkg_name = ("fx_schemas" if __name__ == "schemas"
+                else f"{__name__}__fx_schemas")
+    pkg = sys.modules.get(pkg_name)
+    if pkg is None:
+        spec = importlib.util.spec_from_file_location(
+            pkg_name, os.path.join(root, "__init__.py"),
+            submodule_search_locations=[root])
+        pkg = importlib.util.module_from_spec(spec)
+        sys.modules[pkg_name] = pkg
+        try:
+            spec.loader.exec_module(pkg)
+        except BaseException:
+            sys.modules.pop(pkg_name, None)
+            raise
+    members, slots, owners = [], {}, {}
+    for fname in sorted(os.listdir(root)):
+        if not fname.endswith(".py") or fname.startswith("_"):
+            continue
+        mod = importlib.import_module(f"{pkg_name}.{fname[:-3]}")
+        for cls in getattr(mod, "FX_MEMBERS", ()) or ():
+            if not (isinstance(cls, type) and issubclass(cls, pkg.FxItemBase)):
+                raise TypeError(f"fx_schemas/{fname}: {cls!r} is not an "
+                                "FxItemBase subclass")
+            members.append(cls)
+        for slot, annotation in (getattr(mod, "FIELD_TYPES", None)
+                                 or {}).items():
+            if slot not in pkg.FIELD_SLOTS:
+                raise ValueError(f"fx_schemas/{fname}: unknown slot {slot}")
+            if slot in slots:
+                raise ValueError(f"fx_schemas/{fname}: slot {slot} is "
+                                 f"already owned by {owners[slot]}")
+            slots[slot], owners[slot] = annotation, fname
+    tags = {}
+    for cls in members:
+        tag = cls.model_fields["type"].default
+        if not isinstance(tag, str) or not tag:
+            raise TypeError(f"{cls.__name__} needs type: Literal[<tag>] = "
+                            "<tag>")
+        if tag in tags:
+            raise ValueError(f"fx type {tag!r} is registered twice "
+                             f"({tags[tag].__name__}, {cls.__name__})")
+        bad = set(cls.STAGES) - set(pkg.FX_STAGES)
+        if bad or not cls.STAGES:
+            raise ValueError(f"{cls.__name__}.STAGES must be a non-empty "
+                             f"subset of {pkg.FX_STAGES}")
+        tags[tag] = cls
+    return pkg, tuple(members), slots
+
+
+_FX_PKG, FX_MEMBERS, _FX_SLOT_TYPES = _load_fx_registry()
+FX_STAGES = _FX_PKG.FX_STAGES
+FX_TYPES = tuple(cls.model_fields["type"].default for cls in FX_MEMBERS)
+FX_AUTHORABLE_TYPES = tuple(cls.model_fields["type"].default
+                            for cls in FX_MEMBERS if cls.AUTHORABLE)
+FxItemBase = _FX_PKG.FxItemBase
+
+
+def _unavailable(what):
+    def check(value):
+        if value is None:
+            return value
+        raise ValueError(f"{what} is not available in this build.")
+    return check
+
+
+def _slot(name):
+    """The Optional annotation for one typed slot: its owner's type, or a
+    None-only placeholder until a track registers one."""
+    annotation = _FX_SLOT_TYPES.get(name)
+    if annotation is None:
+        return Optional[Annotated[Any, AfterValidator(_unavailable(name))]]
+    return Optional[annotation]
+
+
+if not FX_MEMBERS:
+    FxItem = Annotated[Any, AfterValidator(_unavailable(
+        "EDL.fx items (no fx type is registered)"))]
+elif len(FX_MEMBERS) == 1:
+    FxItem = FX_MEMBERS[0]
+else:
+    FxItem = Annotated[Union[FX_MEMBERS], Field(discriminator="type")]
+
+
+def strip_unknown_fx(edl_dict):
+    """(edl_dict, dropped_ids): fx items whose type this build does not
+    register removed. For the RENDER path only (a lane older than the writer
+    must degrade one device, never fail the render); authoring keeps
+    rejecting unknown types."""
+    items = (edl_dict or {}).get("fx")
+    if not isinstance(items, list):
+        return edl_dict, []
+    keep, dropped = [], []
+    for item in items:
+        if isinstance(item, dict) and item.get("type") in FX_TYPES:
+            keep.append(item)
+        else:
+            dropped.append(str((item or {}).get("id") if isinstance(item, dict)
+                               else item))
+    if not dropped:
+        return edl_dict, []
+    return {**edl_dict, "fx": keep}, dropped
 
 
 # ------------------------------------------------------------------ #
@@ -650,6 +774,15 @@ class MusicItem(BaseModel):
     # split below the other". The renderer skips muted pieces before
     # fetching them; None (every earlier EDL) keeps signatures and renders.
     mute: Optional[bool] = None
+    # Wave 0 (owner rule: agents never choose music). Who chose this track.
+    # None reads as "legacy" (every item written before the field existed):
+    # it still renders; no migration rewrites stored EDLs. Enforcement on
+    # NEW writes lives in the music gate, not here (INTERFACES.md §4.3).
+    provenance: Optional[Literal["user_upload", "user_named",
+                                 "user_picked_library", "legacy"]] = None
+    # Music-bus automation (drops, gaps, ducks bound to the RhythmMap).
+    # Typed slot, owned through fx_schemas (Wave 2); None-only until then.
+    automation: _slot("MusicItem.automation") = None
 
 
 class SfxItem(BaseModel):
@@ -1197,6 +1330,9 @@ class TransitionSpec(BaseModel):
     # full-screen effect onto every scene change in a dense montage.
     junctions: Optional[List[int]] = None
     motion_motif: Optional[MotionMotif] = None
+    # Per-junction styles (Wave 1, 1D: set_junction). Typed slot owned
+    # through fx_schemas; None-only until registered.
+    per_junction: _slot("TransitionSpec.per_junction") = None
 
 
 REGION_MODES = ("blur", "pixelate", "black")
@@ -2112,6 +2248,11 @@ class MotionItem(BaseModel):
     # hand): {"texts": the members' texts in order, "i": this member's
     # index, "ids": the members' ids}. A stitched piece keeps its own.
     series: Optional[dict] = None
+    # Wave 0 typed slots, owned through fx_schemas; None-only until a track
+    # registers them. composite = {blend, fill, ghost, stage, region} (1C);
+    # anchor = attachment to a tracked point/plane (Wave 3).
+    composite: _slot("MotionItem.composite") = None
+    anchor: _slot("MotionItem.anchor") = None
 
     @model_validator(mode="before")
     @classmethod
@@ -2612,6 +2753,11 @@ class EDL(BaseModel):
     # 39s file seven times, then timed out). Empty list, so edl_signature
     # drops it and every earlier EDL keeps its signature and cached renders.
     patches: List[PatchItem] = Field(default_factory=list)
+    # Wave 0 — registered effect items (worker/fx_schemas/, INTERFACES.md
+    # §4): a discriminated union on `type`, compiled at the FX stages by
+    # fxgraph. Empty list, so edl_signature drops it and every earlier EDL
+    # keeps its signature and cached renders.
+    fx: List[FxItem] = Field(default_factory=list)
 
 
 def default_edl(duration):
@@ -3941,6 +4087,53 @@ def validate_edl(data, duration=None, *, render_fragment=False):
                 f"patches[{i}] carries no regions — the export could never "
                 "rebuild its full-res twin. Remove the patch instead.")
 
+    # Registered effect items (Wave 0 seam; INTERFACES.md §4). Generic
+    # checks here, member-specific ones in each member's check().
+    if edl.fx:
+        seen_fx = set()
+        music_ids = {m.id for m in edl.music if m.id}
+        check_ctx = _FX_PKG.FxCheckContext(
+            edl, prog_dur, None if canvas_prog else duration, canvas_prog,
+            render_fragment)
+        for i, it in enumerate(edl.fx):
+            label = f"fx[{i}]"
+            if it.id in seen_fx:
+                raise EDLValidationError(f"{label}.id must be unique.")
+            seen_fx.add(it.id)
+            if it.stage not in type(it).STAGES:
+                raise EDLValidationError(
+                    f"{label}: a {it.type} item runs at "
+                    f"{', '.join(type(it).STAGES)}, not {it.stage}.")
+            if it.stage in _FX_PKG.PICTURE_STAGES:
+                if it.start is None or it.end is None:
+                    raise EDLValidationError(
+                        f"{label}: a {it.stage} item needs start and end "
+                        "(program seconds).")
+                it.start, it.end = _r(it.start), _r(it.end)
+                it.end = _check_span(label, it.start, it.end, prog_dur,
+                                     min_len=0.01)
+            elif it.stage == "junction":
+                if it.at is None:
+                    raise EDLValidationError(
+                        f"{label}: a junction item names its cut by at "
+                        "(program seconds).")
+                it.at = _r(it.at)
+                if not 0.0 <= it.at <= prog_dur + 0.01:
+                    raise EDLValidationError(
+                        f"{label}.at {it.at} is outside the program "
+                        f"(0 to {round(prog_dur, 2)}s).")
+            elif it.stage == "music_bus":
+                if not it.music_id or it.music_id not in music_ids:
+                    raise EDLValidationError(
+                        f"{label}: music_id must name a music item id.")
+            try:
+                it.check(check_ctx)
+            except ValueError as e:
+                raise EDLValidationError(f"{label}: {e}")
+        edl.fx.sort(key=lambda f: (FX_STAGES.index(f.stage),
+                                   f.start if f.start is not None
+                                   else (f.at or 0.0), f.id))
+
     return edl
 
 
@@ -4218,6 +4411,10 @@ def describe_edl(edl_dict, duration=None, src_shape=None):
             + (f" @{p.src_start:g}-{p.src_end:g}s")
             for p in edl.patches for r in p.regions)
         parts.append(f"erased from the source (windowed): {pat}")
+    if edl.fx:
+        # Per item, like music and sfx: a moved or retuned device must read
+        # differently in the diff the agent quotes back.
+        parts.append("fx: " + "; ".join(f.describe() for f in edl.fx))
     return ", ".join(parts)
 
 

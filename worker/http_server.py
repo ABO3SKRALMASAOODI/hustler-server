@@ -33,6 +33,7 @@ import follow
 import frameserve
 import indexer
 import inpaint
+import jobs_ext
 import matte
 import renderer
 import screenmatch
@@ -119,6 +120,10 @@ COMPUTE_RUNNERS = {
     "search": song_find.run_search_job,
     "ytprobe": ytaccess.run_probe_job,
 }
+# Wave 0 seam (worker/jobs_ext/, worker/devices/INTERFACES.md §3): job kinds
+# registered by their own modules (sidecar analysis first). Compute roles
+# only; a kind that would shadow one above fails here at import.
+jobs_ext.merge_into(COMPUTE_RUNNERS)
 
 # Orchestration roles expose exactly one job family each. They scale
 # independently and cannot be tricked into borrowing another pool merely by

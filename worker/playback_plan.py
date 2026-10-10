@@ -73,6 +73,18 @@ def compile_plan(edl, source_key="source"):
                 effects=edl.get("effects") or {}, overlays=edl.get("overlays") or [])
 
 
+def _canon(value, top=False):
+    """edl_signature's rule: nested None-valued keys dropped; at the top
+    level an absent layer and its empty default are the same."""
+    if top and value in (None, [], {}):
+        return None
+    if isinstance(value, dict):
+        return {k: _canon(v) for k, v in value.items() if v is not None}
+    if isinstance(value, list):
+        return [_canon(v) for v in value]
+    return value
+
+
 def changed_work(before, after):
     """Conservative dependency scopes; never treats unrecognized fields as free.
 
@@ -83,7 +95,12 @@ def changed_work(before, after):
     a, b = canonical_program(before), canonical_program(after)
     old, new = compile_plan(a), compile_plan(b)
     duration = max(old["duration"], new["duration"])
-    changed = sorted(k for k in set(a) | set(b) if a.get(k) != b.get(k))
+    # An absent field and its empty default are the same programme (the
+    # rule edl_signature uses): an EDL stored before a field existed (fx,
+    # patches, a motion item's composite, ...) must not report that layer as
+    # changed against its own re-validated dump.
+    changed = sorted(k for k in set(a) | set(b)
+                     if _canon(a.get(k), True) != _canon(b.get(k), True))
     visual = [k for k in changed if k not in AUDIO_LAYERS]
     # A new frame can switch the format-default mastering on or off.
     audio_changed = any(k in changed for k in (*AUDIO_LAYERS, "keep", "inserts", "speed")) \
