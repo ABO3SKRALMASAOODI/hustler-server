@@ -255,7 +255,8 @@
           "crop": null,
           "mute": null,
           "fit": null,
-          "rotation": null
+          "rotation": null,
+          "hold": null
         },
         {
           "id": "ins2",
@@ -271,7 +272,8 @@
           "crop": null,
           "mute": null,
           "fit": null,
-          "rotation": null
+          "rotation": null,
+          "hold": null
         }
       ],
       "voiceover": [],

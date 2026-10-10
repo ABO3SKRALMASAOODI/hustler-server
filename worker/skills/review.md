@@ -42,8 +42,12 @@ HOW TO LOOK AT MOTION — two different renders:
   and caption QA tiles of them. Judge placement, legibility and collisions
   from that result; the complete preview adds the AUDIO CHECK of the whole
   mix and the PICTURE CHECK of its frames: a face within ~6% of the frame's
-  (or its card's) edge, a one-frame pop or a jump that is not on a cut, a
-  missing end card or watermark (finals). It measures the file that ships
+  (or its card's) edge, a one-frame pop or a jump that is not on a cut, an
+  ORPHAN FRAME (a shot of 1-2 frames between two cuts — a crop, card or
+  zoom switch a frame off the source's camera cut), a REFRAME OFF THE CUT
+  or MID-SHOT, a hook that opens on closed eyes or mid-sound (with the
+  nearest clean start, never applied), a missing end card or watermark
+  (finals). It measures the file that ships
   and never changes the edit: repair each finding (look_at the frames it
   names first) or keep it deliberately and say why.
 - `look_at(rendered=true, ...)` reads only a COMPLETE preview of the current
@@ -104,7 +108,8 @@ SCREEN IN THIS ORDER — each item is a yes/no question:
 8. LOOK AND LAYOUT: one grade and texture throughout; no flat black void; no
    scene obviously rawer than the rest.
 9. THE END: the payoff is the largest accented lockup (a number with its
-   noun), held 0.6–1.5 s after the last word before the end card, a
+   noun), held 0.8–1.5 s after the last word before the end card (the
+   natural tail, else add_freeze_frame audio_mode='hold'), a
    reaction button 1.0–1.5 s or none, a requested CTA after it (not over
    it), last beat lands clean for the loop.
 10. THE BRIEF: reread the user's message once. Every named item delivered or

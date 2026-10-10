@@ -10,7 +10,7 @@ import hashlib
 import json
 import math
 import re
-from typing import Annotated, List, Literal, Optional, Union
+from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
 from pydantic import AfterValidator, BaseModel, Field, field_validator, model_validator
 
@@ -925,6 +925,39 @@ class InsertItem(BaseModel):
     fit: Optional[Literal["crop", "pad", "pad_blur"]] = None
     # Per-scene orientation repair. None keeps historical signatures stable.
     rotation: Optional[int] = None
+    # hold (round 7, payoff hold): this still is a HELD PROGRAMME FRAME — the
+    # renderer shows the frame right before it exactly as composed (crop,
+    # card, grade) instead of the stored still, dimmed by ``dim`` (0-0.85),
+    # with the main source's own room tone (``room_tone``: [start, end]
+    # source seconds, looped when shorter than the hold) under it instead of
+    # digital silence. The stored image is the fallback wherever no
+    # composed frame precedes it (and what the studio shows). None (every
+    # EDL before it) renders byte-identically.
+    hold: Optional[Dict[str, Any]] = None
+
+    @field_validator("hold")
+    @classmethod
+    def _chk_hold(cls, v):
+        if v is None:
+            return None
+        if not isinstance(v, dict):
+            raise ValueError("hold must be {room_tone: [a, b] | null, dim: 0-0.85}")
+        out = {}
+        rt = v.get("room_tone")
+        if rt is not None:
+            if not isinstance(rt, (list, tuple)) or len(rt) != 2:
+                raise ValueError("hold.room_tone must be [start, end] source seconds")
+            a, b = round(max(0.0, float(rt[0])), 3), round(float(rt[1]), 3)
+            if b - a < 0.05:
+                raise ValueError("hold.room_tone must span at least 0.05 s")
+            out["room_tone"] = [a, b]
+        dim = v.get("dim")
+        if dim is not None and float(dim) > 0:
+            out["dim"] = round(min(max(float(dim), 0.0), 0.85), 3)
+        unknown = set(v) - {"room_tone", "dim"}
+        if unknown:
+            raise ValueError(f"hold has unknown keys {sorted(unknown)}")
+        return out
 
     @field_validator("rate")
     @classmethod

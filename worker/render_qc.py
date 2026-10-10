@@ -61,7 +61,7 @@ import os
 import subprocess
 import time
 
-QC_VERSION = 2
+QC_VERSION = 3              # v3: orphan shots, reframes off a cut, the hook frame
 DIFF_W = 64                 # width of the frame-difference pass
 GLOBAL_SHARE = 0.45         # share of the tiny frame that must change...
 GLOBAL_LEVEL = 20.0         # ...with a mean |diff| at least this (0-255)
@@ -80,6 +80,19 @@ ROBOT_SAMPLES = 6           # frames the watermark is read on (one seek each)
 BUDGET_S = 60.0
 MAX_FULL_PASS_S = 180.0     # programmes longer than this skip the frame pass
                             # and sample faces on keyframes
+ORPHAN_FRAMES = 2           # a shot this short between two cuts is an orphan
+REFRAME_REACH = 3           # a crop switch 1-3 frames off a cut is off the cut
+HOOK_LOOK_S = 0.6           # the opening the feed shows first
+HOOK_REF_S = 1.5            # frames read to learn this face's open eyes
+HOOK_W = 720                # width the hook frames are read at
+EYE_NEIGHBORS = 12          # strict: a closed lid seldom passes for an eye
+EYE_CLOSED_RUN = 4          # frames (~0.13 s): a blink, not a detector miss
+EYE_OPEN_SHARE = 0.3        # ...judged only where this share reads 2 eyes
+HOOK_FACE_MIN = 0.12        # a face this wide (share of the frame) or more
+HOOK_SOUND_MS = (5, 12)     # the first sound read (just after the edge fade:
+                            # an opening on a clean onset is quiet here)
+HOOK_SOUND_DB = -30.0       # louder than this, and well over the floor,
+HOOK_SOUND_OVER = 15.0      # ...is a programme opening mid-sound
 LUMA_JUMP = 0.5             # a frame-to-frame mean-luma change past this share
 LUMA_FLOOR = 24.0           # ...between levels, the brighter above this
 LAYOUT_REACH = 2            # frames either side of a layout change watched
@@ -210,13 +223,17 @@ def plan(edl, index, *, W, H, fps, outro_s=0.0, want_wm=False,
                 # the whole picture's level (the layout watch leaves it be)
                 deliberate.append((n + lo - 1, n + hi + 1))
     trans = fx.get("transition")
+    trans_windows = []
     if trans:
         try:
             reach = int(math.ceil(float((trans or {}).get("duration_s") or .5)
                                   * fps)) + 1
         except (AttributeError, TypeError, ValueError):
             reach = int(fps // 2)
-        events += [(n - reach, n + reach) for n in cut_frames]
+        trans_windows = [(n - reach, n + reach) for n in cut_frames]
+        events += trans_windows
+    reframes, true_cuts, has_shots = _reframes(edl, index, tl, fps, src_fps,
+                                               origin)
     cards = []
     for c in fx.get("picture_cards") or []:
         try:
@@ -364,7 +381,122 @@ def plan(edl, index, *, W, H, fps, outro_s=0.0, want_wm=False,
             "end_frame": end_frame,
             "cut_frames": cut_frames, "events": events, "cards": cards,
             "others": others, "watermark": wm, "endcard": endcard,
-            "layout": layout, "still": still, "bands": bands}
+            "layout": layout, "still": still, "bands": bands,
+            "trans_windows": trans_windows, "reframes": reframes,
+            "true_cuts": true_cuts, "has_shots": has_shots,
+            "hook": _hook_plan(edl, index, tl)}
+
+
+def _reframes(edl, index, tl, fps, src_fps, origin):
+    """(reframes, true cut frames, has_shots). reframes: [(frame, source
+    second, kind)] — where the crop re-aims (an internal focus_track edge
+    that changes the aim, a frame-follow span edge) on the frame the
+    renderer switches it (composition_handoff / focus_handoff), leaving out
+    those it lands on a keep join. True cuts: where the PICTURE cuts — keep
+    joins that skip source time, insert edges, indexed camera cuts — never
+    a crop switch itself."""
+    import renderer
+    import captions as caplib
+    sfps = float(src_fps or ((index or {}).get("video") or {}).get("fps")
+                 or fps or 30.0)
+    o = 0.0 if origin is None else origin
+    segs = getattr(tl, "segs", None) or []
+
+    def frame_of_source(h):
+        for s, e in segs:
+            if s + 1e-3 < h < e - 1e-3:
+                p = tl.src_to_out(h)
+                return None if p is None else renderer.first_frame_at(p, fps)
+        return None
+    true = set()
+    try:
+        true.update(renderer.first_frame_at(c, fps)
+                    for c in caplib.program_cuts(tl))
+    except Exception:
+        pass
+    shots = []
+    for shot in (index or {}).get("shots") or []:
+        try:
+            c = float(shot["start"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if c > 0.0:
+            shots.append(c)
+            f = frame_of_source(renderer.focus_handoff(c, sfps, o, fps))
+            if f is not None:
+                true.add(f)
+    out = []
+    frame = edl.get("frame") if isinstance(edl.get("frame"), dict) else {}
+    track = [sp for sp in (frame or {}).get("focus_track") or []
+             if isinstance(sp, dict)]
+    if track:
+        base = (frame.get("focus_x"), frame.get("focus_y"),
+                frame.get("mode") or "crop")
+        edges = set()
+        for sp in track:
+            for key in ("t0", "t1"):
+                try:
+                    edges.add(float(sp[key]))
+                except (KeyError, TypeError, ValueError):
+                    continue
+        for edge in sorted(edges)[1:-1]:
+            if renderer._aim_at(track, edge - 1e-3, base) == \
+                    renderer._aim_at(track, edge + 1e-3, base):
+                continue
+            try:
+                h = renderer.composition_handoff(edge, segs, index, sfps, o,
+                                                 fps)
+            except Exception:
+                h = None
+            f = frame_of_source(h) if h is not None else None
+            if f is not None:
+                out.append((f, round(edge, 3), "focus"))
+    try:
+        import follow
+        spans = [sp for sp in follow.frame_spans(edl) if isinstance(sp, dict)]
+    except Exception:
+        spans = []
+    edges = set()
+    for sp in spans:
+        for key in ("t0", "t1"):
+            try:
+                edges.add(round(float(sp[key]), 3))
+            except (KeyError, TypeError, ValueError):
+                continue
+    for edge in sorted(edges):
+        if any(abs(edge - x) <= 1e-3 for _f, x, _k in out):
+            continue
+        if not any(s + 2.0 / sfps < edge < e - 2.0 / sfps for s, e in segs):
+            continue
+        f = frame_of_source(renderer.focus_handoff(edge, sfps, o, fps))
+        if f is not None:
+            out.append((f, edge, "follow"))
+    return sorted(out), sorted(true), bool(shots)
+
+
+def _hook_plan(edl, index, tl):
+    """What the hook check needs: the first kept SOURCE second and the words
+    around it, when the programme opens on the main footage; else None."""
+    keep = edl.get("keep") or []
+    try:
+        if not keep or any(float(a) <= 1e-3 for a, _d in tl.insert_positions()):
+            return None
+        src0 = float(keep[0][0])
+    except Exception:
+        return None
+    words = []
+    for w in (index or {}).get("words") or []:
+        try:
+            t0, t1 = float(w["t0"]), float(w["t1"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if src0 - 1.0 <= t0 <= src0 + 3.0:
+            words.append({"w": str(w.get("w") or ""), "t0": t0, "t1": t1})
+    music = bool(edl.get("music") or [
+        s for s in edl.get("sfx") or []
+        if isinstance(s, dict) and s.get("at") is not None
+        and float(s["at"]) < 0.5])
+    return {"src0": src0, "words": words, "music": music}
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -419,23 +551,13 @@ def frame_changes(path, program_s, W, H, deadline, lumas=None):
     return out
 
 
-def jumps(changes, plan_):
-    """Global jumps off the edit's cuts: [(kind, frame, near_cut_frame)]
-    with kind 'pop' (a frame that lasted one frame between two jumps) or
-    'jump' (one jump not on a cut or a deliberate event)."""
+def _global_test(changes):
+    """is_global(k): is changes[k] (the change INTO frame k+1) a global
+    jump — most of the tiny frame moved, by a lot, far past the local
+    median change?"""
     import numpy as np
     n = len(changes)
-    if not n:
-        return []
-    lv = np.array([c[0] for c in changes])
-    cuts = set(plan_.get("cut_frames") or [])
-    last = plan_.get("end_frame")
-    if last is not None:
-        cuts.add(int(last))
-    events = plan_.get("events") or []
-
-    def frame(k):                      # changes[k] is the jump INTO frame k+1
-        return k + 1
+    lv = np.array([c[0] for c in changes]) if n else np.zeros(0)
 
     def is_global(k):
         if not 0 <= k < n:
@@ -447,6 +569,77 @@ def jumps(changes, plan_):
         near = np.concatenate([lv[lo:max(lo, k - 1)], lv[min(hi, k + 2):hi]])
         base = float(np.median(near)) if len(near) else 0.0
         return level >= SPIKE_RATIO * max(base, 1.0)
+    return is_global
+
+
+def orphans(changes, plan_):
+    """Shots that last 1-ORPHAN_FRAMES frames between two whole-picture
+    changes — a flash of another framing or shot, whatever the plan calls
+    them (judges, round 7: the crop switched one frame before the source's
+    camera cut, and both changes sat on 'cuts' of the edit, so the pop
+    check passed it). [(first frame, frames, reframe source second or
+    None)]. The programme's first frame and the end card's cut count as
+    changes; deliberate whole-picture moments (fades, flashes, shakes,
+    junction transitions, full-frame layers' edges) are left alone."""
+    n = len(changes)
+    if not n:
+        return []
+    is_global = _global_test(changes)
+    marks = [0] + [k + 1 for k in range(n) if is_global(k)]
+    last = plan_.get("end_frame")
+    if last is not None and int(last) > marks[-1]:
+        marks.append(int(last))
+    quiet = list(plan_.get("still") or []) + \
+        list(plan_.get("trans_windows") or [])
+    reframes = plan_.get("reframes") or []
+    out = []
+    for a, b in zip(marks, marks[1:]):
+        if not 1 <= b - a <= ORPHAN_FRAMES:
+            continue
+        if any(lo <= b + 1 and a - 1 <= hi for lo, hi in quiet):
+            continue
+        why = next((src for fr, src, _k in reframes if a - 1 <= fr <= b + 1),
+                   None)
+        out.append((a, b - a, why))
+    return out
+
+
+def reframes_off_cut(plan_):
+    """Crop switches the edit places off the picture's cuts (plan only):
+    [(kind, frame, cut frame or None, source second, what)] — 'off' when a
+    switch lands 1-REFRAME_REACH frames from a cut (a sliver of one
+    framing on the other shot), 'mid' when a focus re-aim sits inside a
+    shot of an index that lists its shots (a visible jump with no cut)."""
+    cuts = plan_.get("true_cuts") or []
+    out = []
+    for fr, src, kind in plan_.get("reframes") or []:
+        near = min(cuts, key=lambda c: abs(c - fr)) if cuts else None
+        d = abs(near - fr) if near is not None else None
+        if d is not None and 1 <= d <= REFRAME_REACH:
+            out.append(("off", fr, near, src, kind))
+        elif kind == "focus" and plan_.get("has_shots") and \
+                (d is None or d > REFRAME_REACH):
+            out.append(("mid", fr, None, src, kind))
+    return out
+
+
+def jumps(changes, plan_):
+    """Global jumps off the edit's cuts: [(kind, frame, near_cut_frame)]
+    with kind 'pop' (a frame that lasted one frame between two jumps) or
+    'jump' (one jump not on a cut or a deliberate event)."""
+    n = len(changes)
+    if not n:
+        return []
+    cuts = set(plan_.get("cut_frames") or [])
+    last = plan_.get("end_frame")
+    if last is not None:
+        cuts.add(int(last))
+    events = plan_.get("events") or []
+
+    def frame(k):                      # changes[k] is the jump INTO frame k+1
+        return k + 1
+
+    is_global = _global_test(changes)
 
     def deliberate(fr):
         return fr in cuts or any(a <= fr <= b for a, b in events)
@@ -471,6 +664,137 @@ def jumps(changes, plan_):
             seen.add(row[1])
             uniq.append(row)
     return uniq
+
+
+def eye_counts(path, plan_, deadline, cv2=None):
+    """[(eyes, face)] for the programme's first HOOK_REF_S: per frame, the
+    eyes a strict Haar eye cascade finds inside the largest face
+    (None when there is none, or it is too small to judge). A closed lid
+    seldom passes the strict cascade; an open frontal eye nearly always
+    does — so a run of frames without two eyes, on a face whose other
+    frames show two, is closed eyes (a blink), not a detector miss."""
+    import follow
+    import subject
+    cv2 = cv2 or subject._cv2()
+    if cv2 is None:
+        return []
+    eye = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_eye.xml")
+    if eye.empty():
+        return []
+    W, H, fps = plan_["W"], plan_["H"], float(plan_.get("fps") or 30.0)
+    w = HOOK_W
+    h = _tiny_h(W, H, w)
+    n = int(round(HOOK_REF_S * fps))
+    cmd = ["ffmpeg", "-v", "error", "-nostdin", "-i", path,
+           "-frames:v", str(n), "-an", "-sn", "-dn", "-map", "0:v:0",
+           "-vf", f"scale={w}:{h},format=gray",
+           "-f", "rawvideo", "-pix_fmt", "gray", "-"]
+    out = []
+    for g in _stream(cmd, w, h, deadline):
+        faces = follow.detect(g, cv2=cv2)
+        if not faces:
+            out.append((None, None))
+            continue
+        box = max(faces, key=lambda f: f[0][2] - f[0][0])[0]
+        fw = box[2] - box[0]
+        if fw < HOOK_FACE_MIN:
+            out.append((None, box))
+            continue
+        x0, y0 = int(box[0] * w), int(box[1] * h)
+        x1, y1 = int(box[2] * w), int(box[3] * h)
+        roi = cv2.equalizeHist(
+            g[y0 + int(.15 * (y1 - y0)):y0 + int(.55 * (y1 - y0)), x0:x1])
+        px = max(1, x1 - x0)
+        found = eye.detectMultiScale(roi, 1.05, EYE_NEIGHBORS,
+                                     minSize=(max(10, px // 9),) * 2,
+                                     maxSize=(max(11, px // 3),) * 2)
+        out.append((len(found), box))
+    return out
+
+
+def closed_eyes(counts, fps):
+    """(first closed frame, frames closed, first open frame or None) when
+    the speaker's eyes are closed in the opening HOOK_LOOK_S — frame 0
+    itself, or a blink of EYE_CLOSED_RUN+ frames starting in it — on a face
+    whose frames in HOOK_REF_S show two eyes at least EYE_OPEN_SHARE of the
+    time; else None (open, or not measurable)."""
+    judged = [(k, e) for k, (e, _b) in enumerate(counts) if e is not None]
+    if len(judged) < max(6, len(counts) // 3):
+        return None
+    if sum(1 for _k, e in judged if e >= 2) < EYE_OPEN_SHARE * len(judged):
+        return None
+    look = int(round(HOOK_LOOK_S * fps))
+    closed = [k for k, e in judged if e <= 1]
+    runs, start, prev = [], None, None
+    for k in closed:
+        if start is not None and k == prev + 1:
+            prev = k
+            continue
+        if start is not None:
+            runs.append((start, prev + 1))
+        start = prev = k
+    if start is not None:
+        runs.append((start, prev + 1))
+    for a, b in runs:
+        if a >= look:
+            break
+        if (a == 0 and b - a >= 2) or b - a >= EYE_CLOSED_RUN:
+            opened = None
+            for k in range(b, len(counts) - 2):
+                if all(counts[j][0] is not None and counts[j][0] >= 2
+                       for j in (k, k + 1, k + 2)):
+                    opened = k
+                    break
+            return (a, b - a, opened)
+    return None
+
+
+def opening_sound(path, deadline):
+    """(dB of the programme's first sound, the floor of its first 0.5 s),
+    read on HOOK_SOUND_MS after the de-click edge fade; None unread."""
+    import numpy as np
+    if time.monotonic() > deadline:
+        return None
+    sr = 16000
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-v", "error", "-nostdin", "-i", path, "-t", "0.5",
+             "-map", "0:a:0", "-ac", "1", "-ar", str(sr), "-f", "f32le", "-"],
+            capture_output=True, timeout=30)
+    except Exception:
+        return None
+    x = np.frombuffer(proc.stdout or b"", np.float32)
+    a, b = (int(sr * ms / 1000) for ms in HOOK_SOUND_MS)
+    if len(x) < sr // 4:
+        return None
+
+    def db(seg):
+        r = float(np.sqrt(np.mean(np.square(seg, dtype=np.float64))))
+        return 20.0 * math.log10(r + 1e-9)
+    first = db(x[a:b])
+    hop = sr // 50
+    floor = min(db(x[i:i + hop]) for i in range(0, len(x) - hop + 1, hop))
+    return round(first, 1), round(floor, 1)
+
+
+def hook_advice(plan_, closed, fps):
+    """The clean start an eyes-closed opening is offered (never applied):
+    the first open-eye frame as a source second, and the first word onset
+    from there."""
+    hook = plan_.get("hook") or {}
+    if not hook or closed is None or closed[2] is None:
+        return None
+    src0 = float(hook["src0"])
+    t_open = src0 + closed[2] / float(fps)
+    words = hook.get("words") or []
+    nxt = next((w for w in sorted(words, key=lambda w: w["t0"])
+                if w["t0"] >= t_open - 0.02), None)
+    dropped = [w["w"] for w in words if src0 - 0.02 <= w["t0"] < t_open - 0.02]
+    start = t_open if nxt is None else max(t_open, nxt["t0"] - 0.03)
+    return {"start": round(start, 2), "open": round(t_open, 2),
+            "word": nxt["w"] if nxt else None,
+            "word_t0": round(nxt["t0"], 2) if nxt else None,
+            "drops": dropped}
 
 
 def layout_glitches(lumas, plan_):
@@ -917,6 +1241,7 @@ def check(path, plan_, budget_s=BUDGET_S):
     fps, W, H = plan_["fps"], plan_["W"], plan_["H"]
     prog = plan_["program_s"]
     res = {"version": QC_VERSION, "findings": [], "jumps": [], "clipped": [],
+           "orphans": [],
            "cut": [], "layout": [], "band": [],
            "endcard": None, "watermark": None, "faces": 0, "skipped": []}
     # Cheapest and most important first: the branding a final must carry,
@@ -940,11 +1265,33 @@ def check(path, plan_, budget_s=BUDGET_S):
         res["cut"] = [list(c) for c in cut_faces(samples, plan_)]
     except Exception as exc:
         res["skipped"].append(f"faces: {str(exc)[:80]}")
+    res["reframes"] = []
+    try:
+        res["reframes"] = [list(r) for r in reframes_off_cut(plan_)]
+    except Exception as exc:
+        res["skipped"].append(f"reframes: {str(exc)[:80]}")
+    if plan_.get("hook"):
+        try:
+            closed = closed_eyes(eye_counts(path, plan_, deadline), fps)
+            if closed:
+                res["hook_eyes"] = list(closed)
+                res["hook_advice"] = hook_advice(plan_, closed, fps)
+        except Exception as exc:
+            res["skipped"].append(f"hook eyes: {str(exc)[:80]}")
+        if not plan_["hook"].get("music"):
+            try:
+                snd = opening_sound(path, deadline)
+                if snd and snd[0] > HOOK_SOUND_DB and \
+                        snd[0] > snd[1] + HOOK_SOUND_OVER:
+                    res["hook_sound"] = list(snd)
+            except Exception as exc:
+                res["skipped"].append(f"hook sound: {str(exc)[:80]}")
     if prog <= MAX_FULL_PASS_S:
         try:
             lumas = []
             changes = frame_changes(path, prog, W, H, deadline, lumas=lumas)
             res["jumps"] = [list(j) for j in jumps(changes, plan_)]
+            res["orphans"] = [list(o) for o in orphans(changes, plan_)]
             res["layout"] = [list(g) for g in layout_glitches(lumas, plan_)]
         except Exception as exc:
             res["skipped"].append(f"jumps: {str(exc)[:80]}")
@@ -997,6 +1344,58 @@ def findings(res, plan_):
                 "picture changes on a frame that is not a cut of the edit — a "
                 "framing pop, or a camera cut inside the source the edit does "
                 "not know; look_at it")
+    for fr, frames, src in res.get("orphans") or []:
+        if any(j[1] in range(fr - 1, fr + frames + 1)
+               for j in res.get("jumps") or []):
+            continue                            # reported as a pop/jump
+        why = (f" — the crop switch at source {src:g}s is not on the "
+               "source's camera cut" if src is not None else "")
+        out.append(
+            f"ORPHAN FRAME{'S' if frames > 1 else ''} at {_t(fr, fps):.2f}s "
+            f"(frame {fr}{f'-{fr + frames - 1}' if frames > 1 else ''}): a "
+            f"shot that lasts {frames} frame{'s' if frames > 1 else ''} "
+            f"between two cuts{why}; look_at the frames either side and put "
+            "the switch (focus_track/follow edge, card window, zoom, keep "
+            "edge) on the cut")
+    for kind, fr, cut, src, what in res.get("reframes") or []:
+        if kind == "off":
+            out.append(
+                f"REFRAME OFF THE CUT at {_t(fr, fps):.2f}s: the {what} "
+                f"switch at source {src:g}s lands {abs(fr - cut)} frame"
+                f"{'s' if abs(fr - cut) != 1 else ''} from the picture's cut "
+                f"at {_t(cut, fps):.2f}s — an orphan framing; move the edge "
+                "onto the cut")
+        else:
+            out.append(
+                f"REFRAME MID-SHOT at {_t(fr, fps):.2f}s: the crop re-aims "
+                f"(focus_track edge at source {src:g}s) with no cut there — "
+                "a visible jump; put the edge on a camera cut or a keep "
+                "join, or remove it")
+    if res.get("hook_eyes"):
+        a, n, opened = res["hook_eyes"]
+        adv = res.get("hook_advice") or {}
+        offer = ""
+        if adv:
+            offer = (f" The nearest clean start is source {adv['start']:.2f}s "
+                     f"(eyes open from {adv['open']:.2f}s"
+                     + (f", on the onset of '{adv['word']}'" if adv.get("word")
+                        else "")
+                     + (f"; drops '{' '.join(adv['drops'])}'" if adv.get("drops")
+                        else "")
+                     + ").")
+        out.append(
+            f"HOOK OPENS ON CLOSED EYES {_t(a, fps):.2f}-{_t(a + n, fps):.2f}s: "
+            f"the speaker's eyes are closed for {n} frames of the opening the "
+            "feed shows first." + offer + " The first cut is the editor's: "
+            "nothing was moved — keep it if the moment reads natural")
+    if res.get("hook_sound"):
+        first, floor = res["hook_sound"]
+        out.append(
+            f"HOOK OPENS MID-SOUND: the programme's first sound plays at "
+            f"{first:.0f} dB ({first - floor:.0f} dB over its quiet) — the "
+            "first keep starts inside a word or a breath. Start it in the "
+            "pause before the first word (keep tools place a new start "
+            "there; get_words for the onset)")
     for kind, fr, a, b, cid in res.get("layout") or []:
         out.append(
             f"LAYOUT {'DIP' if kind == 'dip' else 'FLASH'} at {_t(fr, fps):.2f}s "
@@ -1046,5 +1445,5 @@ def summary_line(res):
     if not res.get("findings"):
         return (" PICTURE CHECK: clean (" + ", ".join(bits) +
                 "; no clipped or cut face, no single-frame jump off a cut, "
-                "no dip at a layout change).") if bits else ""
+                "no orphan frame, no dip at a layout change).") if bits else ""
     return ""

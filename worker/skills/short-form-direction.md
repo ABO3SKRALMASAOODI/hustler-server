@@ -217,8 +217,9 @@ THE PREMIUM SHORT-FORM GRAMMAR — targets you can measure in the render:
    the bottom platform band.
 12. ENDING AND CTA. The payoff is the largest accented lockup in the short,
    its number and noun together ("140 / CHARACTERS"), rhyming with an
-   earlier setup device where one exists. Hold 0.6–1.5 s after the last
-   word before the end card (never cut on the last syllable), with a type
+   earlier setup device where one exists. Hold 0.8–1.5 s after the last
+   word before the end card (never cut on the last syllable; the natural
+   tail, else add_freeze_frame audio_mode='hold' over room tone), with a type
    accent (scale, colour; the one impact or the music's button only when
    the landing earns it) and land so the reel loops. A reaction button
    gets 1.0–1.5 s, framed like that speaker's earlier shot, or is left
@@ -362,7 +363,7 @@ cannot (the EARN ITS PLACE advisory names the ones that don't); every sound
 cue on a named on-screen event with a visual partner, 1-2 at most in a
 podcast short (about one every 4–5 s at most elsewhere), no repeat within
 ~3 s, none on a payoff word's onset, none punning on the spoken word; any music the user asked for ducked 13–20 dB under the voice; no
-digital silence; one grade; no flat black void; payoff held 0.6–1.5 s
+digital silence; one grade; no flat black void; payoff held 0.8–1.5 s
 after the last word; any requested CTA after the payoff. Rendered looks
 need a complete preview of the current
 version: `render_preview(complete=true)`, then dense

@@ -103,9 +103,15 @@ def nearest_silence_midpoint(silences, t):
     return best
 
 
-def boundary_warning_lines(keep, words, silences, duration=None):
+def boundary_warning_lines(keep, words, silences, duration=None, skip=()):
+    """WARNING lines for keep boundaries inside words. ``skip``: boundary
+    times (hundredths) already judged clean on the source's sound — the
+    transcript puts a word there but the sound is quiet (cut_audio)."""
     lines = []
+    skip = {round(float(t), 2) for t in skip or ()}
     for hit in midword_boundaries(keep, words, duration):
+        if round(float(hit["boundary"]), 2) in skip:
+            continue
         cands = [f"{hit['t0']:.2f} (word start)", f"{hit['t1']:.2f} (word end)"]
         mid = nearest_silence_midpoint(silences, hit["boundary"])
         if mid is not None:

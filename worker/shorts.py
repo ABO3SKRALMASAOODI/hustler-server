@@ -994,6 +994,26 @@ def _add_short_intro(conn, session_id, content, materialization_key):
          "shorts_materialization_key": materialization_key})
 
 
+def _same_story_cut(keep, candidates):
+    """Is ``keep`` one of the deterministic word-snapped seeds, up to the
+    audio-safe placement keep_segments gives each new edge on the source's
+    sound (cut_audio: within its reach of the word edge, never across a
+    word)? The same spans, every edge that close."""
+    import cut_audio
+    reach = cut_audio.TAIL_REACH_S + 0.02
+    try:
+        got = [(float(a), float(b)) for a, b in keep or []]
+    except (TypeError, ValueError):
+        return False
+    for cand in candidates:
+        want = [(float(a), float(b)) for a, b in cand or []]
+        if got and len(got) == len(want) and all(
+                abs(a - c) <= reach + 1e-6 and abs(b - d) <= reach + 1e-6
+                for (a, b), (c, d) in zip(got, want)):
+            return True
+    return False
+
+
 def _seed_story_child(worker_db, job, child_id, index, clip, workdir,
                       materialization_key=None):
     """Cut the parent's chosen story and nothing else.
@@ -1023,8 +1043,8 @@ def _seed_story_child(worker_db, job, child_id, index, clip, workdir,
         expected_keep = agent_tools._snap_keep_to_shots(
             word_keep, index, index.get("words"))[0]
         before = ctx.latest_edl()
-        if (before.get("json") or {}).get("keep") in (expected_keep,
-                                                       word_keep):
+        if _same_story_cut((before.get("json") or {}).get("keep"),
+                           (expected_keep, word_keep)):
             return (before["version"],
                     "recovered existing word-snapped story seed")
         result = agent_tools.execute(
@@ -1032,7 +1052,8 @@ def _seed_story_child(worker_db, job, child_id, index, clip, workdir,
             {"segments": [[clip["start"], clip["end"]]],
              "snap_to_words": True})
         row = ctx.latest_edl()
-        if (row.get("json") or {}).get("keep") != expected_keep:
+        if not _same_story_cut((row.get("json") or {}).get("keep"),
+                               (expected_keep,)):
             raise RuntimeError(
                 "story seed did not produce the deterministic word-snapped "
                 "source range")
