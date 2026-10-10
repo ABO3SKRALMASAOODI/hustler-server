@@ -797,6 +797,53 @@ def _keep_out(ctx, edl, item, rep):
         return "", None
 
 
+def _attach_reading(ctx, edl, item):
+    """Time a lockup (spec ``reads_phrase``) to the speech it shows before
+    it is probed and stored: its printed words land on their spoken onsets
+    and, under transcript captions, the phrase's other words join it as
+    small bridge lines (caption_carry.readings — one reading path). The
+    renderer recomputes it for the program as it is then."""
+    if not caption_carry.reads_phrase(item):
+        item.pop("reading", None)
+        return
+    index = getattr(ctx, "index", None) or {}
+    rd = None
+    if index.get("words") and edl.get("keep"):
+        try:
+            from timeline import Timeline
+            tl = Timeline(edl["keep"], edl.get("inserts") or [], edl.get("speed"))
+            probe = dict(edl, motion=[m for m in edl.get("motion") or []
+                                      if m.get("id") != item.get("id")] + [item])
+            rd = caption_carry.readings(probe, index, tl).get(item.get("id"))
+        except Exception as e:  # noqa: BLE001 — the lockup reveals on its 'at' times
+            print(f"[motion] lockup reading skipped: {str(e)[:160]}", flush=True)
+    if rd:
+        item["reading"] = rd
+    else:
+        item.pop("reading", None)
+
+
+# A bridge line (one reading path) adds about this much frame height per
+# wrapped line to a lockup; a line wraps at about this many characters.
+BRIDGE_LINE_H = 0.034
+BRIDGE_LINE_CHARS = 34
+
+
+def _bridged(box, item):
+    """A lockup's ESTIMATED box grown by the bridge lines its reading sets
+    (the block stays centred on its y)."""
+    if not box:
+        return box
+    lines = 0
+    for b in (item.get("reading") or {}).get("bridges") or []:
+        chars = len(" ".join(str(w.get("t") or "") for w in b.get("words") or []))
+        lines += max(1, -(-chars // BRIDGE_LINE_CHARS))
+    if not lines:
+        return box
+    half = BRIDGE_LINE_H * lines / 2.0
+    return (box[0], max(0.0, box[1] - half), box[2], min(1.0, box[3] + half))
+
+
 def _keep_out_estimated(ctx, edl, item):
     """The keep-out on a lane with no browser to probe the composition. The
     agent, MCP and shorts lanes ship no Chromium, so this is what production
@@ -816,7 +863,8 @@ def _keep_out_estimated(ctx, edl, item):
     if not keepout.applicable(template, spec, item.get("layer")):
         return "", None
     W, H = _canvas_size(ctx, edl)
-    box = keepout.nominal_ink(template, spec, item.get("params") or {}, frame=(W, H))
+    box = _bridged(keepout.nominal_ink(template, spec, item.get("params") or {},
+                                       frame=(W, H)), item)
     if not box:
         return "", None
     s, e = float(item["start"]), float(item["end"])
@@ -853,8 +901,8 @@ def _keep_out_estimated(ctx, edl, item):
                 continue
             cur = params0.get(key, p.get("default"))
             for v in p.get("values") or []:
-                alt = keepout.nominal_ink(template, spec, dict(params0, **{key: v}),
-                                          frame=(W, H))
+                alt = _bridged(keepout.nominal_ink(template, spec, dict(params0, **{key: v}),
+                                                   frame=(W, H)), item)
                 if v != cur and v in ("left", "center", "right") and alt \
                         and keepout.rounded(alt) != keepout.rounded(box):
                     variants.append(({key: v}, alt))
@@ -873,7 +921,8 @@ def _keep_out_estimated(ctx, edl, item):
             changes = ", ".join(f"{k} {_fmt(params0.get(k, _implicit(k, pspec.get(k) or {})))} → "
                                 f"{_fmt(params.get(k))}" for k in sorted(patch))
             item["params"] = params
-            box = keepout.nominal_ink(template, spec, params, frame=(W, H)) or pred
+            box = _bridged(keepout.nominal_ink(template, spec, params, frame=(W, H)),
+                           item) or pred
             place = keepout.where_label(box, zones) if face_bad else ""
             notes.append(
                 f"KEEP-OUT (estimated): by the template's estimated size it {' and '.join(why)}, "
@@ -1079,7 +1128,7 @@ def _word_level_notes(edl, index, tl, item, canvas=None):
         return []
     s, e = float(item["start"]), float(item["end"])
     box = rep.get("box")
-    notes = []
+    notes = _reading_notes(item, rep)
     if box is None:
         # not measured here (no footprint): the render measures it before it
         # places the captions, so there is nothing true to say
@@ -1113,6 +1162,64 @@ def _word_level_notes(edl, index, tl, item, canvas=None):
             f"Captions for the words it does not show move to y≈{where['y']:.2f} while it "
             f"is up{draws}; the words it shows leave the captions.")
     return notes
+
+
+def _reading_notes(item, rep):
+    """One-reading-path NOTEs for a graphic with mute_captions unset (the
+    caption plan's ownership, worker/caption_carry.py): where the captions
+    yield to it, the words a lockup sets in small type, the words only the
+    sound carries, and a run too long to set (two texts at once)."""
+    frm = rep.get("owns_from")
+    if frm is None:
+        return []
+    e = float(item["end"])
+    notes = []
+    if rep.get("joined"):
+        runs = " … ".join(f'"{_said(r)}"' for r in rep["joined"])
+        notes.append(
+            f"One reading path: captions yield to this lockup from {frm:.2f}s (its first "
+            f"shown word) until it leaves at {e:g}s, and the words of that phrase its rows "
+            f"leave out are set in small type between its rows, each on its onset: {runs}. "
+            "To design them yourself, put those exact words in the rows.")
+    if rep.get("yielded"):
+        ends = [float(w["t1"]) for w in rep.get("carried") or []]
+        end_at = max(ends) + 0.3 if ends else frm + 0.6
+        notes.append(
+            f"NOTE (captions): one reading path — the captions yield to this graphic for "
+            f"the phrase it shows from {frm:.2f}s until it leaves at {e:g}s, so a sound-off "
+            f"viewer never reads \"{_runs_said(rep['yielded'])}\" (said while it is up). "
+            f"End it at {end_at:.2f}s, where its own words end, so those words are "
+            "captioned; or carry them on it (a kicker/label in the speaker's words); or "
+            "make it a phrase_build, which sets them in small type.")
+    if rep.get("beside"):
+        runs = " … ".join(f'"{_said(r)}"' for r in rep["beside"])
+        notes.append(
+            f"NOTE (captions): {runs} is too long to set in this lockup, so it stays "
+            "captioned beside it — two texts at once. End the lockup before it, or split "
+            "the phrase into two lockups.")
+    return notes
+
+
+def _unsaid_row_notes(item):
+    """NOTE for lockup rows that quote the speech but print a word nobody
+    says there ("supersonic jets" over "supersonic aviation"): viewers hear
+    one and read the other (the item's reading marks unspoken words)."""
+    rd = item.get("reading") or {}
+    out = []
+    for r, (row, times) in enumerate(zip(caption_carry.display_rows(item),
+                                         rd.get("rows") or [])):
+        if not any(t is not None for t in times):
+            continue
+        unsaid = [w for w, t in zip(row, times)
+                  if t is None and any(caption_carry.is_content(x) for x in _tokens(w))]
+        if unsaid:
+            out.append(f"row {r + 1} \"{' '.join(row)}\" prints "
+                       + ", ".join(f"'{w}'" for w in unsaid))
+    if not out:
+        return []
+    return ["NOTE (captions): " + "; ".join(out) + " — not said there, while the rest of "
+            "the row is: viewers hear one thing and read another. Quote the transcript "
+            "(get_kept_transcript) word for word."]
 
 
 def _verbatim(g, span):
@@ -1188,6 +1295,8 @@ def _caption_integrity_notes(ctx, edl, item):
                 notes += _word_level_notes(edl, index, tl, item,
                                            canvas=_canvas_size(ctx, edl))
         notes += _paraphrase_notes(edl, index, tl, item, lines)
+        if caption_carry.reads_phrase(item):
+            notes += _unsaid_row_notes(item)
     except Exception as e:  # noqa: BLE001
         print(f"[motion] caption integrity check skipped: {str(e)[:160]}", flush=True)
         return ""
@@ -1255,6 +1364,7 @@ def add_motion_graphic(ctx, template, start, end=None, params=None, html=None,
         item["purpose"] = " ".join(str(purpose).split())[:300]
     if allow_face_overlap:
         item["allow_face_overlap"] = True
+    _attach_reading(ctx, edl, item)
     err, where, bbox, rep = _probe_full(ctx, edl, item)
     if err:
         return err
@@ -1343,6 +1453,7 @@ def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
             hit.pop("allow_face_overlap", None)
     if hit["template"] != "html":
         hit.pop("html", None)
+    _attach_reading(ctx, edl, hit)
     err, where, bbox, rep = _probe_full(ctx, edl, hit)
     if err:
         return err
@@ -1408,9 +1519,9 @@ _PARAMS_PARAM = {"type": "object", "description": "Template parameters (see list
 _ALLOW_FACE_PARAM = {"type": "boolean", "description": (
     "Keep a deliberate placement over the face (skips the keep-out move).")}
 _MUTE_PARAM = {"type": "boolean", "description": (
-    "Omit (default) for word-level: captions drop only the spoken words this graphic "
-    "shows. true = no captions for its whole window; false = captions keep running "
-    "(a number/*starred* word it shows is still not repeated).")}
+    "Omit (default): one reading path, captions drop the words it shows and yield to "
+    "its phrase until it leaves. true = no captions in its window; false = captions "
+    "keep running (a shown number/*starred* word is still not repeated).")}
 
 TOOL_SPECS = {
     "list_motion_templates": (

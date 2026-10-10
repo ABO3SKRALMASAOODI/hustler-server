@@ -54,10 +54,13 @@ The coordinator assigns one Look and one structure per short. The editor reads
 - Accent colour on 1-2 words per sentence, otherwise near-white (#F6F3EE).
   No thick outlines, no default yellow boxes, no emoji spam. Legibility comes
   from size, face-free placement, a soft shadow and the grade.
-- One text system on screen at a time. Templates that replace the spoken words
-  (`word_slam`, `phrase_build`) mute the captions under them. Mute captions
-  only under a graphic that carries the words being spoken, never over a
-  punchline's setup; kickers quote the transcript.
+- One reading path: one text of a sentence on screen at a time. With
+  `mute_captions` unset a graphic owns the phrase it shows from its first
+  shown word to its exit (captions yield; a `phrase_build` sets the phrase's
+  other words in small type itself, so quote the transcript in its rows),
+  while the punchline's setup before it stays captioned. End a `word_slam` or
+  counter where its words end; the reply NOTEs any words only the sound
+  would carry. Kickers and rows quote the transcript word for word.
 - One accent colour for the whole short, passed to every graphic's `accent`;
   at most about 4 template families per short, varied across the batch.
 - Over a bright shirt or wall, raise the template's `scrim` (or move the type

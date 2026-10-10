@@ -141,6 +141,130 @@ def card_text_window(card_start, card_end):
     return round(card_start + pad, 2), round(card_end - pad, 2)
 
 
+# ── words a cut kept the SOUND of (kept_words(rescue=True)) ───────────────
+# A kept part of a word shorter than this is a boundary graze, not a word.
+RESCUE_MIN_PART_S = 0.04
+# Whisper's word intervals swallow the pause BEFORE a word: a word this much
+# longer than it takes to say (spoken_s) holds a silence, and without an
+# envelope its voice is taken to sit at the END of the interval.
+RESCUE_LONG_EXTRA_S = 0.15
+# The kept part must hold this much of the word's voice to be heard.
+RESCUE_VOICED_S = 0.06
+# The stored envelope (worker/perception.py vb_env) indexes analysis frames
+# by WINDOW START; a frame's sound is centred half an FFT window later.
+VOICE_CENTER_S = 1024 / 22050
+# Voiced = this share of the local speech level (the 80th percentile of the
+# envelope within VOICE_CONTEXT_S), and never below VOICE_FLOOR.
+VOICE_REL = 0.3
+VOICE_FLOOR = 0.05
+VOICE_CONTEXT_S = 3.0
+
+
+def spoken_s(token):
+    """Roughly how long ``token`` takes to say (seconds)."""
+    n = sum(1 for c in str(token or "") if c.isalnum())
+    return min(0.55, max(0.12, 0.055 * n + 0.08))
+
+
+class Voice:
+    """The index's speech-band envelope (perception sidecar ``vb_env``, a
+    0-1 peak-pooled amplitude at ``vb_env_fps``): where in a word's interval
+    the speaker's voice actually is. Pure Python — the backend loads this
+    module standalone."""
+
+    def __init__(self, env, fps):
+        self.env = [float(v or 0.0) for v in env]
+        self.fps = float(fps)
+
+    @classmethod
+    def from_index(cls, index):
+        p = (index or {}).get("perception") if isinstance(index, dict) else None
+        if not isinstance(p, dict):
+            return None
+        env, fps = p.get("vb_env"), p.get("vb_env_fps")
+        try:
+            fps = float(fps)
+        except (TypeError, ValueError):
+            return None
+        if not env or not isinstance(env, list) or fps <= 0:
+            return None
+        return cls(env, fps)
+
+    def _bin(self, t):
+        return int((t - VOICE_CENTER_S) * self.fps)
+
+    def covers(self, a, b):
+        return self._bin(a) >= 0 and self._bin(b) < len(self.env)
+
+    def threshold(self, a, b):
+        lo = max(0, self._bin(a - VOICE_CONTEXT_S))
+        hi = min(len(self.env), self._bin(b + VOICE_CONTEXT_S) + 1)
+        ctx = sorted(self.env[lo:hi]) or [0.0]
+        ref = ctx[min(len(ctx) - 1, int(0.8 * len(ctx)))]
+        return max(VOICE_FLOOR, VOICE_REL * ref)
+
+    def voiced(self, a, b, thr):
+        """(seconds of [a, b] in voiced bins, first voiced source time)."""
+        if b <= a:
+            return 0.0, None
+        step = 1.0 / self.fps
+        total, first = 0.0, None
+        k = max(0, self._bin(a))
+        while k < len(self.env):
+            s = k * step + VOICE_CENTER_S
+            e = s + step
+            if s >= b:
+                break
+            if self.env[k] >= thr:
+                ov = min(b, e) - max(a, s)
+                if ov > 0:
+                    total += ov
+                    first = max(a, s) if first is None else first
+            k += 1
+        return total, first
+
+
+def voiced_part(parts, t0, t1, token, voice=None):
+    """(lo, hi, segment, onset) of the kept part [lo, hi] of word [t0, t1]
+    that holds its voice, or None. ``parts`` = [(lo, hi, segment)].
+
+    With an envelope that hears the voice, the part with the most voiced
+    seconds wins (ties: the later one), and the word's onset is its first
+    voiced moment there. An envelope that hears voice only in the CUT says
+    the word is gone. Without an envelope (or one silent over the word), a
+    word no longer than it takes to say had its middle clipped and stays
+    out; a longer one holds the pause before it, so its voice is the last
+    spoken_s of the interval."""
+    if voice is not None and voice.covers(t0, t1):
+        thr = voice.threshold(t0, t1)
+        total = voice.voiced(t0, t1, thr)[0]
+        best = None
+        for lo, hi, i in parts:
+            secs, first = voice.voiced(lo, hi, thr)
+            if best is None or secs >= best[0] - 1e-9:
+                best = (secs, lo, hi, i, first)
+        # most of the voice must be in that part: a keep starting on the
+        # last 60 ms of "say" keeps a sliver of it, not the word
+        if best[0] >= max(RESCUE_VOICED_S, 0.5 * total):
+            secs, lo, hi, i, first = best
+            return lo, hi, i, max(lo, first if first is not None else lo)
+        if total >= RESCUE_VOICED_S:
+            return None                 # the voice is in what was cut
+    d = spoken_s(token)
+    if t1 - t0 <= d + RESCUE_LONG_EXTRA_S:
+        return None
+    v0 = t1 - d
+    best = None
+    for lo, hi, i in parts:
+        ov = min(hi, t1) - max(lo, v0)
+        if best is None or ov >= best[0] - 1e-9:
+            best = (ov, lo, hi, i)
+    if best is None or best[0] < min(0.08, 0.5 * d):
+        return None
+    _ov, lo, hi, i = best
+    return lo, hi, i, max(lo, t1 - 1.6 * d)
+
+
 class Timeline:
     def __init__(self, keep, inserts=None, speed=None):
         """keep: sorted, non-overlapping [[s, e], ...] in source seconds.
@@ -279,10 +403,71 @@ class Timeline:
                     out.append((a, b))
         return out
 
-    def kept_words(self, words):
+    def _seg_out(self, i, t):
+        """Program time of source time ``t`` inside segment ``i`` (resolved
+        in THAT segment, never the earlier one sharing a boundary)."""
+        s, e = self.segs[i]
+        tt = min(max(t, s), e)
+        pcs = self.pieces[i]
+        if len(pcs) == 1 and pcs[0][2] == 1.0:
+            return self.offsets[i] + tt - s
+        return self.offsets[i] + self._off_in_pieces(pcs, tt)
+
+    def _segs_over(self, t0, t1):
+        """Indices of the keep segments overlapping source [t0, t1], in
+        order. Captions ask this of EVERY transcript word a cut removed —
+        most of a long source — so sorted keeps are searched by bisection
+        instead of scanned (an unsorted keep list is scanned)."""
+        starts = getattr(self, "_seg_starts", None)
+        if starts is None:
+            starts = [s for s, _e in self.segs]
+            if any(b[0] < a[0] or b[1] < a[1] for a, b in zip(self.segs, self.segs[1:])):
+                starts = False
+            self._seg_starts = starts
+        if starts is False:
+            return [i for i, (s, e) in enumerate(self.segs) if s < t1 and e > t0]
+        import bisect
+        j = bisect.bisect_left(starts, t1) - 1
+        out = []
+        while j >= 0 and self.segs[j][1] > t0:
+            out.append(j)
+            j -= 1
+        return out[::-1]
+
+    def heard_part(self, t0, t1, token, voice=None):
+        """(segment index, voiced source onset, source end) of the kept part
+        of a word whose MIDPOINT a cut removed but whose sound survives it,
+        or None. See kept_words(rescue=True) and voiced_part."""
+        parts = []
+        for i in self._segs_over(t0, t1):
+            s, e = self.segs[i]
+            lo, hi = max(t0, s), min(t1, e)
+            if hi - lo >= RESCUE_MIN_PART_S:
+                parts.append((lo, hi, i))
+        if not parts:
+            return None
+        got = voiced_part(parts, t0, t1, token, voice)
+        if got is None:
+            return None
+        lo, hi, i, onset = got
+        return i, onset, hi
+
+    def kept_words(self, words, rescue=False, voice=None):
         """Words (objects or dicts with t0/t1) whose midpoint survives the
         cut, with output-mapped times. Returns [{'w', 't0', 't1'}] in output
-        time, in order."""
+        time, in order.
+
+        ``rescue`` (captions and the kept transcript): ALSO keep a word whose
+        midpoint a cut removed when its SOUND is in the kept footage. Whisper
+        hands the silence before a word to the word (Jobs, 1983: "has"
+        1692.96-1694.10 is spoken at 1693.96-1694.10), so a pause cut takes
+        the word's midpoint while every syllable plays: the old rule burned
+        "Every computer to date / used / weird / on the screen" over audible
+        "has", "a" and "type". ``voice`` is the speech-band envelope
+        (Voice.from_index) that decides which kept part holds the voice;
+        without one a long word's voice is assumed at its END. A rescued word
+        carries ``heard`` = True; a word whose middle was really clipped
+        (normal length, no voice in the kept part) stays out."""
         out = []
         for w in words:
             t0 = w["t0"] if isinstance(w, dict) else w.t0
@@ -291,6 +476,13 @@ class Timeline:
             mid = (t0 + t1) / 2.0
             o = self.src_to_out(mid)
             if o is None:
+                got = self.heard_part(float(t0), float(t1), token, voice) \
+                    if rescue else None
+                if got is not None:
+                    i, onset, end = got
+                    out.append({"w": token, "t0": self._seg_out(i, onset),
+                                "t1": self._seg_out(i, end),
+                                "src_t0": onset, "src_t1": end, "heard": True})
                 continue
             o0 = self.src_to_out(t0)
             o1 = self.src_to_out(t1)

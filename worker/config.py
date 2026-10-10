@@ -1998,7 +1998,11 @@ BLOCK_CLOCK_VERSION = 1
 # its stale holds into every unchanged stretch. A render served for its OWN
 # version keeps its cache. (Split-token rejoining busts through the caption
 # fingerprint instead — see renderer._caption_index_fp.)
-CAPTION_TIMING_VERSION = 1
+# v2: design-v2 cards keep names and noun phrases whole ("the Green
+# Revolution", "140 characters"), so every design-v2 track's cards may have
+# regrouped, with or without a cut. (A word a cut kept the sound of busts
+# through the caption fingerprint, like the rejoin.)
+CAPTION_TIMING_VERSION = 2
 
 # Manual music remains editable past the last scene, but rendered media always
 # stops at the picture/program boundary.  v1 extended overhanging music across
@@ -2037,7 +2041,13 @@ LEGIBILITY_VERSION = 1
 # their older renders muted every caption under a graphic for its whole
 # window (sound-off viewers lost the words it did not show). Everything else
 # keeps its cache. Bump when what such a render shows changes again.
-CAPTION_CARRY_VERSION = 1
+# v2 (one reading path): a graphic owns the phrase it shows from its first
+# shown word to its exit (captions yield; a phrase_build sets the phrase's
+# other words in small type), lockup words land on their spoken onsets in
+# reading order, and a word a cut kept the sound of is captioned. Lockups
+# (phrase_build) without transcript captions are stamped too: their reveal
+# timing changed.
+CAPTION_CARRY_VERSION = 2
 
 # Crops and picture cards that follow the speaker's face inside a shot
 # (worker/follow.py, Frame.follow / PictureCard.follow). Stamped as

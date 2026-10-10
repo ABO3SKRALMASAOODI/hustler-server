@@ -130,9 +130,11 @@ NATIVE TOOLS THAT REMAIN USEFUL:
 - **Words behind the subject**: `add_text_behind` (person matte) or a motion
   graphic with `layer='behind_subject'`; the type must be LARGE so the
   person crosses the middle of tall glyphs.
-- Graphics preserve captions by default, word by word: a motion graphic
-  hides only the spoken words it shows, the rest stay captioned clear of it.
-  Keep hero graphics off the caption band so nothing has to be muted.
+- One reading path by default: a motion graphic hides the spoken words it
+  shows and owns the phrase it shows while it is up (a phrase_build sets the
+  rest of that phrase in small type; end other graphics where their words
+  end); the setup and other sentences stay captioned clear of it. Keep hero
+  graphics off the caption band so nothing has to be muted.
 
 MOVEMENT WITH A LANDING: text, cards and vectors enter with short graphic
 motion (pop, rise-blur, mask, spring for objects), settle and hold. Use one

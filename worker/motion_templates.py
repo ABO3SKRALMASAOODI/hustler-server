@@ -255,6 +255,9 @@ def build_job(item, out_w, out_h, fps, asset_locals=None, plate=None):
     span = float(item["end"]) - float(item["start"])
     phase = float(item.get("phase_s") or 0.0)
     params = dict(item.get("params") or {})
+    if item.get("reading"):
+        # the engine's timing of a lockup to the speech (MotionItem.reading)
+        params["_reading"] = item["reading"]
     assets = {}
     for key, storage_key in asset_params(name, params).items():
         local = (asset_locals or {}).get(storage_key)

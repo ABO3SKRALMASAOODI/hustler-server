@@ -64,7 +64,8 @@ gap. Each zoom or sound in the sheet names the moment that earns it.
 
 Every timestamp comes from a tool result. Readable frames land on the word's
 audible onset (0-3 frames early); `word_slam` lands 0.2 s after its start;
-`phrase_build` rows take item-relative `at` times. Check shot changes with
+`phrase_build` rows quote the transcript and land on their spoken onsets
+by themselves (`at` times only matter for a row nobody says). Check shot changes with
 `get_shots`, and batch `look_at(times=[...])` into one call to see the faces
 and the negative space you will design into.
 

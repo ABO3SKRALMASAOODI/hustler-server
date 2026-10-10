@@ -329,8 +329,10 @@ def test_old_renders_never_seed_a_stitch_for_moved_captions():
     assert not renderer.captions_current({}, v2_cut)
     assert not renderer.captions_current({"cap_v": 0}, look)   # reveals moved too
     assert renderer.captions_current(cur, v2_cut) and renderer.captions_current(cur, look)
+    # v2 cards keep names whole on every design-v2 track, cut or not
+    assert not renderer.captions_current({"cap_v": 1}, v2_one_shot)
+    assert renderer.captions_current(cur, v2_one_shot)
     # nothing about these renders moved: they keep stitching
-    assert renderer.captions_current({}, v2_one_shot)
     assert renderer.captions_current({}, historical)
     assert renderer.captions_current({}, {"keep": KEEP})
 

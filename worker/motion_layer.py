@@ -280,7 +280,7 @@ def caption_box(report, times):
     return [round(float(v), 4) for v in box] if box else None
 
 
-def fill_footprints(edl, W, H, fps=30.0):
+def fill_footprints(edl, W, H, fps=30.0, index=None, tl=None):
     """Measure the footprint box of every motion item that matters to the
     caption plan and has none, has one measured at another frame shape, or
     has only an estimate (in place; returns ``edl``). Only transcript
@@ -288,8 +288,24 @@ def fill_footprints(edl, W, H, fps=30.0):
     under the item anyway. Face zones the keep-out stored at this frame
     shape are kept. A probe that cannot run leaves an estimate in place and
     an item without a box (a stale one is dropped): the plan then keeps the
-    old behaviour for it."""
+    old behaviour for it.
+
+    With the program's ``index`` and Timeline ``tl``, every whole lockup is
+    first timed to the speech it shows (caption_carry.attach_readings: word
+    onsets and the bridge lines of one reading path), so it is measured and
+    rendered as it will read; a stored box measured without its bridge lines
+    is measured again."""
     import caption_carry
+    if index is not None and tl is not None:
+        before = {m.get("id"): m.get("reading") for m in edl.get("motion") or []
+                  if isinstance(m, dict)}
+        caption_carry.attach_readings(edl, index, tl)
+        for m in edl.get("motion") or []:
+            if isinstance(m, dict) and m.get("reading") != before.get(m.get("id")) \
+                    and isinstance(m.get("footprint"), dict) \
+                    and not m["footprint"].get("estimated"):
+                # the lockup grew or shrank: its box is measured again
+                m["footprint"] = dict(m["footprint"], estimated=True)
     caps = edl.get("captions")
     if not (isinstance(caps, dict) and caps.get("mode") == "from_transcript"):
         return edl
