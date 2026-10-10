@@ -283,9 +283,13 @@
         MG.growBox(bk.box);
       }
     }
-    // a spoken line's pocket grows line by line with the words said so far
-    const lineRects = MG.$$('.line', wrap).map(el => { const r = el.getBoundingClientRect(); return [r.left, r.top, r.right, r.bottom]; });
-    return { fs, shapes, bk, lineRects, pad: [0.2 * fs, 0.06 * fs] };
+    // a spoken line's pocket hugs the words said so far: each word's box,
+    // its x from its line (layout offsets, free of the rise transform)
+    const wordRects = words.map(w => {
+      const lr = w.lineEl.getBoundingClientRect(), x0 = lr.left + w.el.offsetLeft;
+      return [x0, lr.top, x0 + w.el.offsetWidth, lr.bottom];
+    });
+    return { fs, shapes, bk, wordRects, pad: [0.2 * fs, 0.06 * fs] };
   }
 
   const fontsReady = Promise.all(["800 106px 'Inter Display'", "italic 400 126px 'Instrument Serif'", "400 134px 'Anton'"]
@@ -332,9 +336,20 @@
     if (G.bk) {
       G.bk.style.opacity = (MG.ease.outCubic(MG.range(t, b0, 0.16)) * (1 - q)).toFixed(4);
       if (onsets) {
-        const up = G.lineRects.filter((r, li) => words.some(w => w.line === li && t >= w.t0 - 1e-6));
-        if (up.length) {
-          const u = up.reduce((a, r) => [Math.min(a[0], r[0]), Math.min(a[1], r[1]), Math.max(a[2], r[2]), Math.max(a[3], r[3])]);
+        // the pocket grows with the words said so far (never an empty slab
+        // beside the first word): a rising word's box eases in from its
+        // left edge, and a word that opens a new line eases the pocket down
+        let u = null;
+        words.forEach((w, i) => {
+          if (t < w.t0 - 1e-6) return;
+          const r = G.wordRects[i];
+          if (!u) { u = r.slice(); return; }
+          const k = MG.ease.outCubic(MG.range(t, w.t0, 0.17));
+          const left = r[0] < u[0] ? u[0] - (u[0] - r[0]) * k : u[0];
+          const down = r[3] > u[3] ? u[3] + (r[3] - u[3]) * k : u[3];
+          u = [left, Math.min(u[1], r[1]), Math.max(u[2], r[0] + (r[2] - r[0]) * k), down];
+        });
+        if (u) {
           Object.assign(G.bk.style, { left: (u[0] - G.pad[0]).toFixed(1) + 'px', top: (u[1] - G.pad[1]).toFixed(1) + 'px',
             width: (u[2] - u[0] + 2 * G.pad[0]).toFixed(1) + 'px', height: (u[3] - u[1] + 2 * G.pad[1]).toFixed(1) + 'px' });
         }

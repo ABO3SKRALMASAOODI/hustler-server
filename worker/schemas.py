@@ -2224,6 +2224,27 @@ class SubjectMatte(BaseModel):
     # on the canvas, so the renderer drops the depth when this no longer
     # matches. None on masks written before the stamp existed (unchecked).
     geom: Optional[str] = None
+    # A hero word's (word_slam tier='hero') face-safe placement as a display
+    # slam above the picture ({"x", "y", "width"} frame fractions), measured
+    # by its write: where the render cannot composite it behind the subject
+    # it draws there (motion_layer.hero_front), never as a giant word over
+    # the face. None for every other item.
+    fallback: Optional[dict] = None
+
+    @field_validator("fallback", mode="before")
+    @classmethod
+    def _fallback_in(cls, v):
+        if not isinstance(v, dict):
+            return None
+        out = {}
+        for k, lo, hi in (("x", 0.0, 1.0), ("y", 0.0, 1.0), ("width", 0.05, 1.0)):
+            try:
+                f = float(v[k])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if f == f and lo <= f <= hi:
+                out[k] = round(f, 4)
+        return out or None
 
 
 def subject_matte_geom(frame):

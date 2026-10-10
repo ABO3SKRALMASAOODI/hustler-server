@@ -59,6 +59,18 @@ each starting within 0.75 s of the previous one's end) is a SERIES
 `params._series` = {texts, i, ids} and sizes every line by the smallest fit
 of that line across the members, so labels share one size and baseline.
 
+word_slam's `hero` tier is a word up to 30% of the frame height composited
+BEHIND the subject (layer behind_subject, which draws before the zoom
+stage): its band is 94% of the width at `width` 0.85 and scales with it, so
+the write narrows a hero a camera zoom would push past the frame's sides
+(motion_tools._hero_fit). Its mask carries `fallback` — the face-safe
+display-slam placement the write measured — and wherever the render cannot
+composite it behind the subject (`motion_layer.behind_why`: a cut, a ramp,
+a new framing, a source-fed card, a crop that follows the speaker) it draws
+that display slam instead (`motion_layer.hero_front`, decided before the
+clip renders); a hero with no placement, or whose mask fails to download,
+is not drawn — never the giant word over the face.
+
 `persistent: true` marks a LAYOUT template that holds a band for the whole
 program (the `headline` of a card or letterbox layout). The renderer hands
 such an item `MG.yields` — the composition seconds in which another graphic's
@@ -164,7 +176,10 @@ Templates read it under their OWN laid-out boxes:
   `MG.DARK_INK` reads on it (slams, marker lines).
 - `MG.accentInk(rect, accent, {lc, have, t0, t1, max})` → `{color, lifted,
   short}`: the accent as it reads on the plate — unchanged with no plate, a
-  dark one (mean luma <= `MG.DARK_PLATE`, 0.12) or where it reaches APCA
+  dark one (mean luma <= `MG.DARK_PLATE`, 0.12), one as bright as the
+  accent or brighter, or one whose bright part is lit (85th percentile >=
+  `MG.LIT_PLATE`, 0.7: a paler accent would only wash out there — the
+  template's pocket / dark-ink pass handles it) or where it reaches APCA
   `lc` (35 heavy display, 45 thin serif/script strokes) against the plate's
   mean; otherwise lifted toward white (hue kept) by the least step that
   does, `short` when even `max` (0.6) falls short (set it heavier, or back

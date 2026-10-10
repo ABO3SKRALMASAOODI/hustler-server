@@ -97,9 +97,12 @@ CHOOSING A TEMPLATE — confirm names and params with `list_motion_templates()`:
   `hero` is ONE giant word per short (a line up to 30% of the frame height
   on a short word) set BEHIND the speaker: the write measures a person
   matte and, when it cannot (a cut in the window, no person model, a still
-  speaker the photometric mask loses), draws it as a display slam above the
-  picture, clear of the face, and says HERO FALLBACK. Place a hero at head
-  height so the head crosses the middle of the letters.
+  speaker the photometric mask loses, a crop that follows the speaker),
+  draws it as a display slam above the picture, clear of the face, and says
+  HERO FALLBACK; a later edit that stops it going behind renders that same
+  face-safe slam, never the giant word over the face. It is placed at head
+  height so the head crosses the middle of the letters, and narrowed under a
+  camera zoom (it is drawn before the zoom) so no letter leaves the frame.
 - Reveal grammar: `typewriter` only as a band-wide hero — type at least 5%
   of the frame height on a plate spanning the band, a few short words that
   ARE the beat (never a small label: a small mono line on a pill reads like

@@ -11,7 +11,8 @@ The short's Look, as the motion tools read it (``short_look``):
 - accent: the captions' highlight colour when one is set (a Look applied
   with apply_look, or set_caption_style), else the accent its graphics
   already wear (most graphics, earliest on a tie), else none yet;
-- ink: the light type colour most of its graphics wear;
+- ink: the light type colour most of its type graphics wear (INK_TEMPLATES:
+  a circle's stroke or an app card's brand colour is not type);
 - roles: the type roles its graphics use, in first-use order (grotesk,
   condensed, serif, script, mono, hand).
 
@@ -55,6 +56,33 @@ ALWAYS_ACCENT = frozenset(("marker_text", "lower_third", "counter", "progress_ri
                            "checklist", "chapter_title"))
 # Captions motion looks that are editorial systems (no broadcast furniture)
 EDITORIAL_LOOKS = frozenset(("editorial", "serif", "clean", "stack"))
+# Templates whose ``color`` is the TYPE ink. Elsewhere ``color`` is a stroke
+# (circle_highlight), a flash (flash_transition) or an app's brand colour
+# (notification): it neither votes for the Look's ink nor takes it.
+INK_TEMPLATES = frozenset(("chapter_title", "counter", "glow_title", "headline", "hook_title",
+                           "marker_text", "phrase_build", "quote_card", "text_scramble",
+                           "typewriter", "word_slam"))
+# The Look's ink is a LIGHT type colour (WCAG relative luminance): a dark ink
+# one graphic set for a paper card is not the short's ink over footage.
+INK_MIN_LUMINANCE = 0.3
+
+
+def _luminance(c):
+    def lin(v):
+        v /= 255.0
+        return v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4
+    r, g, b = (int(c[i:i + 2], 16) for i in (1, 3, 5))
+    return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+
+
+def _ink(m):
+    """The light type ink a motion item wears (#RRGGBB upper case), or None."""
+    if m.get("template") not in INK_TEMPLATES:
+        return None
+    c = (m.get("params") or {}).get("color")
+    if not (isinstance(c, str) and _HEX.match(c)) or _luminance(c) < INK_MIN_LUMINANCE:
+        return None
+    return c.upper()
 
 
 def _role(v):
@@ -125,7 +153,8 @@ def item_accent(item):
     c = p.get("accent")
     if not (isinstance(c, str) and _HEX.match(c)):
         return None
-    worn = t in ALWAYS_ACCENT
+    # a payoff lockup sets every hero line in the accent (word_slam tier)
+    worn = t in ALWAYS_ACCENT or (t == "word_slam" and p.get("tier") == "payoff")
     if not worn:
         for k in ("text", "label", "kicker", "left", "right"):
             if _has_star(p.get(k)):
@@ -150,11 +179,19 @@ def _graphics(edl, skip_id=None):
     return sorted(out, key=lambda m: (float(m.get("start") or 0.0), str(m.get("id"))))
 
 
+def _chromatic(c):
+    """A colour with a hue (not a white, grey or black)."""
+    r, g, b = (int(c[i:i + 2], 16) for i in (1, 3, 5))
+    return max(r, g, b) - min(r, g, b) >= 48
+
+
 def caption_accent(edl):
+    """The captions' highlight colour when it is an accent (a hue: a white
+    or grey highlight over grey captions is no accent for the graphics)."""
     caps = edl.get("captions")
     if isinstance(caps, dict):
         c = (caps.get("style") or {}).get("highlight_color")
-        if isinstance(c, str) and _HEX.match(c):
+        if isinstance(c, str) and _HEX.match(c) and _chromatic(c):
             return c.upper()
     return None
 
@@ -179,10 +216,10 @@ def short_look(edl, skip_id=None):
             src = None
     inks = {}
     for k, m in enumerate(items):
-        c = (m.get("params") or {}).get("color")
-        if isinstance(c, str) and _HEX.match(c):
-            n, first = inks.get(c.upper(), (0, k))
-            inks[c.upper()] = (n + 1, first)
+        c = _ink(m)
+        if c:
+            n, first = inks.get(c, (0, k))
+            inks[c] = (n + 1, first)
     ink = min(inks, key=lambda c: (-inks[c][0], inks[c][1])) if inks else None
     roles = []
     for m in items:
@@ -217,7 +254,8 @@ def look_defaults(edl, template, spec, given, skip_id=None):
 
     - ``accent`` (a colour param the template has, not passed): the Look's
       accent, so a template default never adds a second accent;
-    - ``color``: the Look's ink, when at least two graphics already wear it;
+    - ``color`` (a type template's ink, INK_TEMPLATES): the Look's ink, when
+      at least two graphics already wear it;
     - the font-role knob (``role``/``font``), not passed, whose default
       would be a role past the third: the closest role the short already
       uses that the template offers.
@@ -231,11 +269,10 @@ def look_defaults(edl, template, spec, given, skip_id=None):
     if look["accent"] and (pspec.get("accent") or {}).get("type") == "color" \
             and "accent" not in given:
         out["accent"] = look["accent"]
-    if look["ink"] and (pspec.get("color") or {}).get("type") == "color" \
-            and "color" not in given:
+    if look["ink"] and template in INK_TEMPLATES \
+            and (pspec.get("color") or {}).get("type") == "color" and "color" not in given:
         items = _graphics(edl, skip_id)
-        wear = sum(1 for m in items
-                   if str((m.get("params") or {}).get("color") or "").upper() == look["ink"])
+        wear = sum(1 for m in items if _ink(m) == look["ink"])
         if wear >= 2:
             out["color"] = look["ink"]
     key, values = _role_param(template, spec)

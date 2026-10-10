@@ -316,13 +316,20 @@
     return S > -0.1 ? 0 : -(S + 0.027) * 100;
   };
   MG.DARK_PLATE = 0.12;
+  MG.LIT_PLATE = 0.7;
   /** The accent as it reads on the plate (README: MG.accentInk). */
   MG.accentInk = (rect, accent, o = {}) => {
     const out = { color: accent, lifted: 0, short: false };
     const pl = MG.plateAt(rect, o.t0, o.t1);
     if (!pl || pl.mean <= MG.DARK_PLATE) return out;
     const lc = o.lc || 35, max = o.max ?? 0.6;
-    const bg = toLin(pl.mean * (1 - clamp(+o.have || 0, 0, 0.95)));
+    const keep = 1 - clamp(+o.have || 0, 0, 0.95);
+    const bg = toLin(pl.mean * keep);
+    // lifting toward white only helps an accent brighter than the plate:
+    // where the plate is as bright as the accent, or its bright part is lit
+    // (a lit wall, a projector screen around a head), a paler accent just
+    // washes out into it — the template's pocket / dark-ink pass handles it
+    if (bg >= MG.luminance(accent) || pl.hi * keep >= MG.LIT_PLATE) return out;
     const reads = c => MG.apca(MG.luminance(c), bg) >= lc;
     if (reads(accent)) return out;
     for (let k = 0.04; k <= max + 1e-9; k += 0.04) {

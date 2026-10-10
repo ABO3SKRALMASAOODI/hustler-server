@@ -585,6 +585,16 @@ def _attach_subject_matte(ctx, edl, item, bbox):
                    if method == "plate" or stats.get("fell_back") else
                    f"the subject covers only {cov * 100:.1f}% of the frame")
             return None, f"REJECTED: no person mask a hero word can sit behind: {why}."
+        # ...and only where the render can composite it there (a crop that
+        # follows the speaker, a source-fed card): the renderer's own rules
+        try:
+            from timeline import Timeline
+            tl = Timeline(edl["keep"], edl.get("inserts") or [], edl.get("speed") or [])
+            off = motion_layer.behind_why(edl, tl, dict(item, behind=behind))
+        except Exception as ex:  # noqa: BLE001
+            off = f"its window could not be checked ({str(ex)[:120]})"
+        if off:
+            return None, f"REJECTED: the render could not set a hero word behind the speaker: {off}."
     item["behind"] = behind
     return _behind_report(stats, edl, item), None
 
@@ -1573,32 +1583,130 @@ def _hero_fallback(ctx, edl, item, why):
         return err, "", ""
     keep_note, moved = _keep_out(ctx, edl, item, rep)
     return None, moved or where, (
-        "\nHERO FALLBACK: the hero tier sits behind the speaker, and no subject matte "
-        f"could be measured here ({reason}). It is drawn above the picture at the display "
-        "tier instead, kept clear of the face." + keep_note)
+        "\nHERO FALLBACK: the hero tier sits behind the speaker, and it cannot go there "
+        f"here ({reason}). It is drawn above the picture at the display tier instead, kept "
+        "clear of the face." + keep_note)
+
+
+_HERO_OFF_NOTE = ("\nHERO: the hero tier is a word behind the speaker; on layer '{layer}' it "
+                  "would be a word up to 30% of the frame height over the picture, so it is a "
+                  "display slam. Leave layer unset for the hero.")
+
+
+def _store_hero_front(ctx, edl, item):
+    """Measure where a hero word that went behind the speaker would sit as
+    a face-safe display slam above the picture (the _hero_fallback placement,
+    on a copy) and store it on its mask (SubjectMatte.fallback): a render
+    that cannot composite it behind the subject draws it there
+    (motion_layer.hero_front) instead of a giant word over the face."""
+    if not item.get("behind"):
+        return
+    alt = json.loads(json.dumps(item))
+    alt.pop("behind", None)
+    alt.pop("footprint", None)
+    try:
+        err, _where, note = _hero_fallback(ctx, edl, alt, "")
+    except Exception as e:  # noqa: BLE001 — the render then leaves it out
+        print(f"[motion] hero fallback placement skipped: {str(e)[:160]}", flush=True)
+        return
+    if err or "NOTE (keep-out): it covered" in note:
+        # no face-safe place for it above the picture: the render leaves it
+        # out rather than draw it over the face
+        return
+    p = alt.get("params") or {}
+    place = {k: p[k] for k in ("x", "y", "width") if isinstance(p.get(k), (int, float))}
+    if place:
+        item["behind"] = dict(item["behind"], fallback=place)
 
 
 HERO_Y_DEFAULT = 0.3
 
 
+def _camera_at(ctx, edl):
+    """t -> (z, x0, y0): the shared camera's zoom and the top-left of its
+    viewport (frame fractions) at program second t (renderer.zoom_state_at
+    on the zooms as the render plays them). A behind_subject graphic is
+    composited BEFORE the zoom stage, so its frame fractions are pre-zoom:
+    a point p shows at (p - x0) * z."""
+    import renderer
+    from timeline import Timeline
+    tl = Timeline(edl["keep"], edl.get("inserts") or [], edl.get("speed") or [])
+    zooms = keepout.camera_zooms(edl, getattr(ctx, "index", None) or {}, tl)
+    size, dur = _canvas_size(ctx, edl), float(tl.out_duration)
+
+    def at(t):
+        z, cx, cy = renderer.zoom_state_at(zooms, t, dur, size=size)
+        z = max(1.0, float(z))
+        return z, (1.0 - 1.0 / z) * cx, (1.0 - 1.0 / z) * cy
+    return at
+
+
 def _hero_y(ctx, edl, item):
-    """Head height over the item's window (frame fraction): where a hero
-    word behind the speaker reads as depth — the head crosses the middle of
-    its letters. The median eye line of the largest face per moment, else
-    HERO_Y_DEFAULT."""
+    """Head height over the item's window (pre-zoom frame fraction, as a
+    behind_subject graphic is drawn): where a hero word behind the speaker
+    reads as depth — the head crosses the middle of its letters. The median
+    eye line of the largest face per moment, else HERO_Y_DEFAULT."""
     try:
         W, H = _canvas_size(ctx, edl)
         track = keepout.face_track(edl, getattr(ctx, "index", None) or {}, W, H,
                                    float(item["start"]), float(item["end"]),
                                    measure=_face_measure(ctx)) \
             if getattr(ctx, "has_main_video", True) else []
-        ys = sorted(f[1] + 0.42 * (f[3] - f[1]) for _t, faces in track if faces
-                    for f in [max(faces, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]))])
+        cam = _camera_at(ctx, edl) if track else None
+        ys = []
+        for t, faces in track:
+            if not faces:
+                continue
+            f = max(faces, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]))
+            z, _x0, y0 = cam(t)
+            # the face track is what the viewer sees (after the zoom)
+            ys.append(y0 + (f[1] + 0.42 * (f[3] - f[1])) / z)
+        ys.sort()
         if ys:
             return round(min(0.62, max(0.16, ys[len(ys) // 2])), 3)
     except Exception as e:  # noqa: BLE001
         print(f"[motion] hero height skipped: {str(e)[:160]}", flush=True)
     return HERO_Y_DEFAULT
+
+
+# A hero word keeps this margin from the frame's sides once the camera's
+# zoom has scaled it (it is drawn before the zoom).
+HERO_EDGE = 0.03
+HERO_BAND = 0.94          # the band at width 0.85 (word_slam.html)
+
+
+def _hero_fit(ctx, edl, item):
+    """Narrow (and re-centre) a hero word behind the speaker so the camera's
+    zoom over its window never pushes its letters past the frame's sides:
+    the band must sit inside every moment's viewport, HERO_EDGE in. Mutates
+    item['params'] (width, x); returns the reply line ('' when it fits)."""
+    try:
+        cam = _camera_at(ctx, edl)
+        s, e = float(item["start"]), float(item["end"])
+        n = max(2, int((e - s) / 0.1) + 1)
+        lo, hi, zmax = 0.0, 1.0, 1.0
+        for i in range(n):
+            z, x0, _y0 = cam(s + (e - s) * i / (n - 1))
+            lo, hi, zmax = max(lo, x0 + HERO_EDGE / z), min(hi, x0 + (1.0 - HERO_EDGE) / z), max(zmax, z)
+        if zmax <= 1.005 or hi <= lo:
+            return ""
+        p = item.get("params") or {}
+        width = float(p.get("width") or 0.85)
+        x = float(p.get("x") or 0.5)
+        band = HERO_BAND * min(1.0, width / 0.85)
+        if x - band / 2 >= lo - 1e-4 and x + band / 2 <= hi + 1e-4:
+            return ""
+        band = min(band, hi - lo)
+        width = round(max(0.4, min(width, 0.85 * band / HERO_BAND)), 3)
+        band = HERO_BAND * width / 0.85
+        x = round(min(0.7, max(0.3, min(max(x, lo + band / 2), hi - band / 2))), 3)
+        item["params"] = dict(p, width=width, x=x)
+        return (f"\nHERO: the camera zooms to {zmax:.2f}x over its window and it is drawn "
+                f"before the zoom, so it is set narrower (width {width:g}, x {x:g}) to keep its "
+                "letters inside the frame.")
+    except Exception as ex:  # noqa: BLE001
+        print(f"[motion] hero fit skipped: {str(ex)[:160]}", flush=True)
+        return ""
 
 
 def _tier_notes(ctx, edl, item):
@@ -2084,6 +2192,12 @@ def add_motion_graphic(ctx, template, start, end=None, params=None, html=None,
     layer = layer or ("behind_subject" if hero else None) or spec.get("layer") or "above_captions"
     if layer not in LAYERS:
         return f"REJECTED: layer must be one of {', '.join(LAYERS)}."
+    hero_note = ""
+    if hero and layer != "behind_subject":
+        # the hero tier is a word BEHIND the speaker; above the picture it
+        # would be a word up to 30% of the frame height over the face
+        clean, hero, hero_y = dict(clean, tier="display"), False, False
+        hero_note = _HERO_OFF_NOTE.format(layer=layer)
     item = {"id": mid, "template": template, "start": s, "end": e, "params": clean,
             "layer": layer}
     if template == "html":
@@ -2119,6 +2233,7 @@ def add_motion_graphic(ctx, template, start, end=None, params=None, html=None,
     _attach_reading(ctx, edl, item)
     window_note = _on_first_word(ctx, edl, item) + _snap_to_cuts(ctx, edl, item, prog)
     s, e = item["start"], item["end"]
+    fit_note = _hero_fit(ctx, edl, item) if hero else ""
     series_before = _attach_series(edl, items + [item])
     err, where, bbox, rep = _probe_full(ctx, edl, item)
     if err:
@@ -2138,6 +2253,9 @@ def add_motion_graphic(ctx, template, start, end=None, params=None, html=None,
             if err:
                 return err
             layer = item["layer"]
+        elif hero:
+            _store_hero_front(ctx, edl, item)
+            hero_note += fit_note
     items.append(item)
     edl["motion"] = items
     series_note = _series_refresh(edl, item, series_before)
@@ -2153,7 +2271,7 @@ def add_motion_graphic(ctx, template, start, end=None, params=None, html=None,
     tail = (_yield_report(ctx, edl, item) if persistent
             else _band_note(ctx, edl, item) + _band_spill_note(ctx, edl, item, bbox))
     return (res + where + band_note + keep_note + clamp + number_note + size_note
-            + window_note + series_note
+            + window_note + series_note + hero_note
             + (f"\nNOTE: {'; '.join(notes)}" if notes else "")
             + _owned_sfx_checks(ctx, edl, mid)
             + behind_note + tail + _caption_integrity_notes(ctx, edl, item)
@@ -2224,6 +2342,11 @@ def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
         hit["layer"] = "behind_subject"
         if "y" not in (params or {}):
             hit["params"] = dict(hit["params"], y=_hero_y(ctx, edl, hit))
+    hero_note = ""
+    if _tier(hit["params"]) == "hero" and hit.get("layer") != "behind_subject":
+        # the hero tier is a word BEHIND the speaker (see add_motion_graphic)
+        hit["params"] = dict(hit["params"], tier="display")
+        hero_note = _HERO_OFF_NOTE.format(layer=hit.get("layer") or "above_captions")
     if box is not None:
         hit["box"] = box or None
     if mute_captions is not None:
@@ -2258,6 +2381,8 @@ def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
     size_note = _cap_size_levels(hit)
     _attach_reading(ctx, edl, hit)
     window_note = _on_first_word(ctx, edl, hit) + _snap_to_cuts(ctx, edl, hit, prog)
+    fit_note = (_hero_fit(ctx, edl, hit)
+                if _tier(hit["params"]) == "hero" and hit.get("layer") == "behind_subject" else "")
     series_before = _attach_series(edl, items)
     err, where, bbox, rep = _probe_full(ctx, edl, hit)
     if err:
@@ -2285,6 +2410,13 @@ def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
                 err, where, behind_note = _hero_fallback(ctx, edl, hit, err)
                 if err:
                     return err
+            elif _tier(hit.get("params")) == "hero":
+                _store_hero_front(ctx, edl, hit)
+        elif _tier(hit.get("params")) == "hero" \
+                and not (hit.get("behind") or {}).get("fallback"):
+            _store_hero_front(ctx, edl, hit)
+        if hit.get("layer") == "behind_subject":
+            hero_note += fit_note
     else:
         hit.pop("behind", None)
     edl["motion"] = items
@@ -2316,7 +2448,7 @@ def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
     tail = (_yield_report(ctx, edl, hit) if persistent
             else _band_note(ctx, edl, hit) + _band_spill_note(ctx, edl, hit, bbox))
     return (res + where + band_note + keep_note + number_note + size_note
-            + window_note + series_note
+            + window_note + series_note + hero_note
             + (f"\nNOTE: {'; '.join(notes)}" if notes else "")
             + (_owned_sfx_checks(ctx, edl, id) if checked else "")
             + (behind_note or "") + tail + _caption_integrity_notes(ctx, edl, hit)
@@ -2330,6 +2462,10 @@ def remove_motion_graphic(ctx, id):
         have = ", ".join(m.get("id", "?") for m in edl.get("motion") or []) or "none"
         return f"REJECTED: no motion graphic '{id}'. Existing: {have}."
     edl["motion"] = items
+    # the run it belonged to is re-derived: a sibling's size follows its
+    # series, so a changed one is measured again
+    _series_refresh(edl, {"id": id}, {m.get("id"): json.dumps(m.get("series"), sort_keys=True)
+                                      for m in items if isinstance(m, dict)})
     edl["sfx"] = [s for s in (edl.get("sfx") or []) if not str(s.get("id", "")).startswith(_owned_sfx_prefix(id))]
     return ctx.write_edl(edl, f"removed motion graphic {id} and its sound cues")
 

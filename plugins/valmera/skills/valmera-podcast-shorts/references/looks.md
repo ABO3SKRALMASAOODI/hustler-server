@@ -71,7 +71,8 @@ The coordinator assigns one Look and one structure per short. The editor reads
   earns them: `tier='payoff'` locks a number and its noun up in the accent
   (`'*140* / characters'`), the largest lockup of the short; `tier='hero'` is
   ONE giant word per short behind the speaker (it falls back to a face-safe
-  display slam when no person matte can be measured). Back-to-back stat
+  display slam wherever it cannot go behind the speaker — never a giant
+  word over the face). Back-to-back stat
   slams of one style share one size per line automatically. `typewriter` is
   a band-wide hero (5%+ of the frame height on a plate), never a small label.
 - Over a bright shirt or wall, raise the template's `scrim` (or move the type

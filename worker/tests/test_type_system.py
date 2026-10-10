@@ -461,3 +461,209 @@ def test_an_accent_the_plate_would_sink_is_lifted_and_unchanged_without_a_plate(
     acc = "() => document.querySelector('.line .mg-w').style.color"
     assert asyncio.run(_eval(slam, [1.0], acc, _plate(12)))[0] in ("#FF5A36",
                                                                    "rgb(255, 90, 54)")
+
+
+# ── review fixes (round 4 motion track) ──────────────────────────────────
+
+def test_the_looks_ink_is_a_light_type_ink():
+    # a circle's stroke, a flash and an app card's brand colour are not type:
+    # two red circle highlights never make a new hook title red
+    items = [_mg("c1", "circle_highlight", 1, 2, cx=0.5, cy=0.5),
+             _mg("c2", "circle_highlight", 3, 4, cx=0.5, cy=0.5),
+             _mg("w", "word_slam", 5, 6, text="hi", color="#F8F6F2")]
+    edl = _edl(items, look=None)
+    assert motion_look.short_look(edl)["ink"] == "#F8F6F2"
+    assert "color" not in motion_look.look_defaults(
+        edl, "hook_title", motion_templates.spec("hook_title"), {"text": "x"})   # one wearer
+    # a white caption highlight is no accent for the graphics
+    assert motion_look.short_look(_edl(items, accent="#FFFFFF"))["accent"] is None
+    # a dark ink (a paper card's) is not the short's ink over footage
+    dark = [_mg("a", "word_slam", 1, 2, text="a", color="#111111"),
+            _mg("b", "word_slam", 3, 4, text="b", color="#111111")]
+    assert motion_look.short_look(_edl(dark, look=None))["ink"] is None
+    # and a non-type template's colour is never filled from the Look
+    two = _edl([_mg("a", "word_slam", 1, 2, text="a", color="#F8F6F2"),
+                _mg("b", "word_slam", 3, 4, text="b", color="#F8F6F2")], look=None)
+    assert motion_look.look_defaults(two, "hook_title", motion_templates.spec("hook_title"),
+                                     {"text": "x"}).get("color") == "#F8F6F2"
+    assert "color" not in motion_look.look_defaults(
+        two, "notification", motion_templates.spec("notification"), {})
+
+
+def test_removing_a_member_rederives_its_runs_series(probe):
+    ctx = _Ctx(_edl([_stat("st1", 8.7, 10.56, "*32%* / fewer errors"),
+                     _stat("st2", 10.56, 12.42, "*24%* / faster"),
+                     _stat("st3", 12.42, 15.38, "*26%* / better overall")]))
+    motion_tools.set_motion_graphic(ctx, "st1")
+    assert ctx.item("st3")["series"]["ids"] == ["st1", "st2", "st3"]
+    motion_tools.remove_motion_graphic(ctx, "st2")
+    # st1 and st3 are 1.86 s apart: no longer a run, and not sized as one
+    assert ctx.item("st1").get("series") is None and ctx.item("st3").get("series") is None
+
+
+def test_a_changed_series_is_measured_again_before_the_captions_are_placed():
+    import motion_layer
+    items = [_stat("st1", 8.7, 10.56, "*32%* / fewer errors"),
+             _stat("st3", 12.42, 15.38, "*26%* / better overall")]
+    stale = {"texts": ["*32%* / fewer errors", "*24%* / faster"], "i": 0,
+             "ids": ["st1", "st2"]}
+    items[0]["series"] = stale
+    items[0]["footprint"] = caption_carry.make_footprint([0.3, 0.1, 0.7, 0.25], W, H, [])
+    edl = _edl(items)
+    edl["captions"] = None                      # only the series pass runs
+    motion_layer_edl = motion_layer.fill_footprints(edl, W, H)
+    st1 = motion_layer_edl["motion"][0]
+    assert "series" not in st1 and st1["footprint"]["estimated"] is True
+
+
+def test_a_hero_on_a_layer_above_the_picture_is_a_display_slam(probe):
+    ctx = _Ctx(_edl())
+    out = motion_tools.add_motion_graphic(ctx, "word_slam", 10.0, 11.5, id="h",
+                                          layer="above_captions",
+                                          params={"text": "*enough*", "tier": "hero"})
+    it = ctx.item("h")
+    assert it["layer"] == "above_captions" and it["params"]["tier"] == "display"
+    assert "HERO: the hero tier is a word behind the speaker" in out, out
+    out = motion_tools.set_motion_graphic(ctx, "h", params={"tier": "hero"},
+                                          layer="below_captions")
+    assert ctx.item("h")["params"]["tier"] == "display" and "HERO:" in out, out
+
+
+def _fake_matte(monkeypatch, method="person", coverage=0.31):
+    import agent_tools
+
+    def measure(ctx, edl, s, e, box, words=None):
+        return ({"asset_key": "matte/1/x.mp4", "src_start": s, "src_end": e, "fp": "x",
+                 "coverage": coverage, "method": method},
+                {"ok": True, "coverage": coverage, "method": method}, None)
+    monkeypatch.setattr(agent_tools, "_measure_subject_matte", measure)
+
+
+def test_a_hero_behind_the_speaker_stores_its_face_safe_display_placement(probe, monkeypatch):
+    _fake_matte(monkeypatch)
+    ctx = _Ctx(_edl())
+    motion_tools.add_motion_graphic(ctx, "word_slam", 20.0, 21.5, id="h",
+                                    params={"text": "*more*", "tier": "hero"})
+    it = ctx.item("h")
+    assert it["layer"] == "behind_subject"
+    fb = it["behind"]["fallback"]
+    assert set(fb) == {"x", "y", "width"} and 0.0 <= fb["y"] <= 1.0
+
+
+def test_a_hero_the_render_could_not_set_behind_falls_back_at_write(probe, monkeypatch):
+    import follow
+    _fake_matte(monkeypatch)
+    # a crop that follows the speaker across the window: the renderer would
+    # drop the depth, so the write draws the face-safe display slam instead
+    monkeypatch.setattr(follow, "moves_during", lambda edl, spans: True)
+    ctx = _Ctx(_edl())
+    out = motion_tools.add_motion_graphic(ctx, "word_slam", 20.0, 21.5, id="h",
+                                          params={"text": "*more*", "tier": "hero"})
+    it = ctx.item("h")
+    assert it["layer"] == "above_captions" and it["params"]["tier"] == "display"
+    assert "HERO FALLBACK" in out and "follows the speaker" in out, out
+
+
+def test_the_render_never_draws_a_hero_over_the_face(monkeypatch):
+    import motion_engine as me
+    import motion_layer
+    hero = _mg("h", "word_slam", 1.0, 2.5, text="*more*", tier="hero", y=0.3)
+    hero.update(layer="behind_subject",
+                behind={"asset_key": "matte/1/x.mp4", "src_start": 1.0, "src_end": 2.5,
+                        "fp": "x", "method": "person",
+                        "fallback": {"x": 0.5, "y": 0.66, "width": 0.8}})
+    bare = dict(hero, id="h2", behind=dict(hero["behind"], fallback=None))
+    rendered = []
+
+    def fake_render(jobs, out_dir):
+        rendered.extend(jobs)
+        return [me.RenderedClip(path=f"/tmp/{i}.mov", x=0, y=0, w=10, h=10, frames=1,
+                                captured=1, cached=True, seconds=0.0) for i in range(len(jobs))]
+    monkeypatch.setattr(me, "render_jobs", fake_render)
+    edl = {"motion": [hero, bare]}
+    inputs, _ = motion_layer.prepare_inputs(edl, "/tmp", W, H, 30, 10.0, [], 1,
+                                            behind_why=lambda m: "a test reason")
+    # the stored placement, as a display slam above the picture; the hero with
+    # none is not drawn at all
+    assert [(it["id"], it["layer"], it["params"]["tier"], it["params"]["y"])
+            for _i, it, _c in inputs] == [("h", "above_captions", "display", 0.66)]
+    assert '"tier": "display"' in rendered[0].html
+    # a hero whose mask fails after its clip was drawn is left out, never
+    # demoted over the face; any other graphic still demotes
+    assert motion_layer.demote(hero, "mask unavailable") is None
+    other = dict(_mg("o", "word_slam", 1, 2, text="x"), layer="behind_subject")
+    assert motion_layer.demote(other, "x")["layer"] == "above_captions"
+    clip = inputs[0][2]
+    assert [it["id"] for _i, it, _c in motion_layer.demote_behind(
+        [(1, hero, clip), (2, other, clip)], "canvas")] == ["o"]
+
+
+def test_behind_why_holds_the_renderers_rules(monkeypatch):
+    import follow
+    import motion_layer
+    item = {"layer": "behind_subject", "behind": {"asset_key": "k", "src_start": 6.2,
+                                                  "src_end": 7.0, "fp": "x"}}
+    tl = Timeline([[0.0, 5.0], [6.0, 12.0]])
+    assert motion_layer.behind_why({}, tl, item) is None
+    assert "cut now falls" in motion_layer.behind_why(
+        {}, Timeline([[0.0, 6.5], [6.6, 12.0]]), item)
+    assert "no longer in the edit" in motion_layer.behind_why({}, Timeline([[0.0, 5.0]]), item)
+    assert "no subject mask" in motion_layer.behind_why({}, tl, {"layer": "behind_subject"})
+    monkeypatch.setattr(follow, "moves_during", lambda edl, spans: True)
+    assert "follows the speaker" in motion_layer.behind_why({}, tl, item)
+
+
+@needs_browser
+def test_a_spoken_marker_lines_pocket_hugs_the_words_said_so_far():
+    item = _mg("m", "marker_text", 0, 3.2, text="You should be *required*",
+               style="underline", accent="#FF3B30")
+    timed = dict(item, reading={"v": 1, "rows": [[0.0, 0.8, 1.2, 1.6]], "bridges": []})
+    probe = ("() => { const b = document.querySelector('.mg-backing');"
+             " const ws = [...document.querySelectorAll('.wrap .mg-w')]"
+             ".map(w => w.getBoundingClientRect());"
+             " return b ? [b.getBoundingClientRect().width, ws[0].right - ws[0].left,"
+             " Math.max(...ws.map(r => r.right)) - Math.min(...ws.map(r => r.left))] : null; }")
+    first, done = asyncio.run(_eval(timed, [0.4, 2.6], probe, _plate(225)))
+    assert first and done
+    # only 'You' said: the pocket hugs that word, not the whole line
+    assert first[0] < first[1] + 0.5 * (first[2] - first[1])
+    # all said: it covers the line
+    assert done[0] >= done[2]
+
+
+def test_a_hero_under_a_camera_zoom_is_narrowed_to_stay_inside_the_frame(probe, monkeypatch):
+    # composited before the zoom stage: a 1.12x step punch-in over its window
+    # would push a 94%-wide word past both sides of the frame
+    _fake_matte(monkeypatch)
+    edl = _edl()
+    edl["effects"] = dict(edl.get("effects") or {}, zooms=[
+        {"id": "z5", "start": 19.5, "end": 22.0, "strength": 0.12, "cy": 0.3, "ramp_s": 0.0}])
+    ctx = _Ctx(edl)
+    out = motion_tools.add_motion_graphic(ctx, "word_slam", 20.0, 21.5, id="h",
+                                          params={"text": "*enough*", "tier": "hero"})
+    it = ctx.item("h")
+    assert it["layer"] == "behind_subject" and "zooms to 1.12x" in out, out
+    cam = motion_tools._camera_at(ctx, ctx.latest_edl()["json"])
+    z, x0, _y0 = cam(20.7)
+    band = motion_tools.HERO_BAND * it["params"]["width"] / 0.85
+    left, right = it["params"]["x"] - band / 2, it["params"]["x"] + band / 2
+    assert (left - x0) * z >= motion_tools.HERO_EDGE - 1e-3
+    assert (right - x0) * z <= 1 - motion_tools.HERO_EDGE + 1e-3
+    # the estimate the browserless lanes use narrows with it
+    est = keepout.nominal_ink("word_slam", motion_templates.spec("word_slam"), it["params"])
+    assert est[2] - est[0] == pytest.approx(band, abs=0.01)
+    # no zoom: the full band, untouched
+    ctx2 = _Ctx(_edl())
+    out = motion_tools.add_motion_graphic(ctx2, "word_slam", 20.0, 21.5, id="h",
+                                          params={"text": "*enough*", "tier": "hero"})
+    assert ctx2.item("h")["params"]["width"] == 0.85 and "zooms" not in out
+
+
+@needs_browser
+def test_an_accent_on_a_plate_brighter_than_it_is_never_washed_out():
+    # a yellow hero word over a lit projector screen: lifting it toward white
+    # only loses contrast (round 4 review: ENOUGH rendered #FFE7AB)
+    slam = _mg("s", "word_slam", 0, 1.5, text="*enough*", role="condensed", accent="#FFC940")
+    acc = "() => document.querySelector('.line .mg-w').style.color"
+    assert asyncio.run(_eval(slam, [1.0], acc, _plate(225)))[0] in ("#FFC940",
+                                                                    "rgb(255, 201, 64)")

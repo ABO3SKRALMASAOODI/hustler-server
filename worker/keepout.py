@@ -841,7 +841,7 @@ def nominal_ink(template, spec, params, frame=None):
         return _typewriter_ink(params or {}, y, frame)
     if template == "word_slam" and (params or {}).get("tier") in TIER_INK:
         x0, top, x1, bottom = TIER_INK[params["tier"]]
-        kw = 1.0 if params["tier"] == "hero" else k
+        kw = min(1.0, k) if params["tier"] == "hero" else k
         return (0.5 + dx - (0.5 - x0) * kw, y + top * kw, 0.5 + dx + (x1 - 0.5) * kw,
                 y + bottom * kw)
     if template in ("lower_third", "counter"):
@@ -854,8 +854,8 @@ def nominal_ink(template, spec, params, frame=None):
     return (0.5 + dx - (0.5 - x0) * k, y + top * k, 0.5 + dx + (x1 - 0.5) * k, y + bottom * k)
 
 
-# word_slam's tiers (round 4): the hero word fills ~94% of the width at up
-# to 30% of the frame height (a short word; a long one is width-bound, so
+# word_slam's tiers (round 4): the hero word fills ~94% of the width (at
+# width 0.85; narrower with it) at up to 30% of the frame height (a short word; a long one is width-bound, so
 # this is its tallest); the payoff lockup is a justified number over its
 # noun (the Thiel '140 / CHARACTERS' at width 0.85: ~0.33 of the height).
 TIER_INK = {"hero": (0.03, -0.15, 0.97, 0.15), "payoff": (0.075, -0.165, 0.925, 0.165)}

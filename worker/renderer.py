@@ -4887,7 +4887,8 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
             fetch_asset=lambda k: _fetch(k, "motion", next_idx),
             plate=_plate_probe(edl, tl, None, None, W, H,
                                (edl.get("frame") or {}).get("mode"), None,
-                               insert_locals))
+                               insert_locals),
+            behind_why=lambda m: "a canvas program has no subject footage")
         motion_inputs = motion_layer.demote_behind(
             motion_inputs, "a canvas program has no subject footage")
     # Base stages are lossless building blocks: the final composition alone
@@ -5801,7 +5802,8 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
             plate=_plate_probe(edl, tl, src_path,
                                (info["width"], info["height"]), W, H,
                                frame_mode, frame_focus, insert_locals,
-                               bool(caption_motion_items)))
+                               bool(caption_motion_items)),
+            behind_why=lambda m: motion_layer.behind_why(edl, tl, m, geom_now))
         if caption_motion_items and not any(
                 str(it.get("id", "")).startswith("__captions_")
                 for _i, it, _c in motion_inputs):
@@ -5819,42 +5821,24 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         # layer instead of failing the render. A cut that now falls inside
         # the window degrades too: the mask is one continuous clip, so past
         # the cut it would cut the subject out of the wrong second of video.
+        # (motion_layer.behind_why holds the rules; a hero word that breaks
+        # one was already drawn as its face-safe display slam above)
         for k, (m_idx, m_item, m_clip) in enumerate(motion_inputs):
             if m_item.get("layer") != "behind_subject":
                 continue
             b = m_item.get("behind") or {}
-            pieces = (tl.span_to_out(float(b["src_start"]),
-                                     float(b["src_end"])) if b else [])
-            why, local = None, None
-            ramp = (tl.ramp_over(float(b["src_start"]), float(b["src_end"]))
-                    if b else None)
-            if not b:
-                why = "it carries no subject mask"
-            elif not pieces:
-                why = "its footage is no longer in the edit"
-            elif len(pieces) > 1:
-                why = "a cut now falls inside its window"
-            elif ramp:
-                # The mask is one 1x clip of source frames; a ramp shortens
-                # (or stretches) that footage's program window, so the
-                # trimmed mask would slide off the subject.
-                why = f"speed ramp {ramp[0]} now covers its footage"
-            elif b.get("geom") and b["geom"] != geom_now:
-                why = "the framing changed since its mask was measured"
-            elif picture_cards.overlaps_source_card(edl, pieces):
-                why = "a source-fed picture card re-frames its footage"
-            elif follow.moves_during(edl, [(float(b["src_start"]),
-                                            float(b["src_end"]))]):
-                why = "the crop follows the speaker across its footage"
-            else:
+            why, local = motion_layer.behind_why(edl, tl, m_item, geom_now), None
+            if not why:
                 try:
                     local = _fetch(b["asset_key"], "matte", next_idx)
                 except Exception as e:
                     why = f"mask unavailable ({str(e)[:120]})"
             if why:
+                # (None: a hero clip that cannot be drawn safely above)
                 motion_inputs[k] = (m_idx, motion_layer.demote(m_item, why),
                                     m_clip)
                 continue
+            pieces = tl.span_to_out(float(b["src_start"]), float(b["src_end"]))
             # Where in the mask this program's window starts: 0 for a whole
             # window; a proof fragment that begins mid-window skips ahead.
             a_src = tl.out_to_src(pieces[0][0] + 1e-3)
@@ -5867,6 +5851,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                                   (round(pieces[0][0], 3),
                                    round(pieces[0][1], 3))))
             next_idx += 1
+        motion_inputs = [mi for mi in motion_inputs if mi[1] is not None]
     def _graph(**extra):
         return build_filtergraph(edl, src_dur, info["has_audio"], tl, ass_path,
                                  music_inputs, index, preview,
