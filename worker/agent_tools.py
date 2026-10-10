@@ -11,6 +11,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -162,6 +163,9 @@ class ToolContext:
         self.canvas_ratio = "16:9"
         self.workdir = workdir
         self._proxy_local = None
+        # the proxy's storage key (immutable, content-addressed): the face
+        # track's identity across contexts, lanes and child projects
+        self._proxy_key = None
         # {gen, row} while mcp_exec runs ONE call (see latest_edl); None
         # everywhere else, so agent turns keep their always-fresh reads.
         self._call_edl_cache = None
@@ -482,6 +486,7 @@ class ToolContext:
             proxy = self.db.run(dbx.latest_asset, self.project_id, "proxy")
             if not proxy:
                 raise RuntimeError("no proxy available")
+            self._proxy_key = proxy["storage_key"]
             # Served from the per-container cache when possible: contexts are
             # evicted between calls, and every child short shares its
             # parent's proxy object, so a per-context download was repeated
@@ -7434,7 +7439,7 @@ def _set_frame(ctx, ratio, mode="crop", focus_x=None, focus_y=None,
             aimed += "; the crop follows the speaker inside the shot"
     res = ctx.write_edl(
         edl, f"output frame set to {frame.ratio} ({frame.mode}){aimed}")
-    if follow_note and res.startswith("EDL v"):
+    if follow_note and res.startswith(("EDL v", "NO CHANGE")):
         res += "\n" + follow_note
     if (res.startswith("EDL v") and frame.mode == "crop"
             and frame.focus_x is None and frame.focus_y is None
@@ -7791,28 +7796,238 @@ def _merge_windows(windows):
     return [(a, b) for a, b in out]
 
 
+# Where the face track is measured (follow.py, "WHY IT IS BUILT THIS WAY").
+# Footage shorter than this is measured on the calling lane only (a media
+# lane round trip would cost more than it saves).
+FOLLOW_REMOTE_MIN_S = 12.0
+# The media lane's own measuring budget (4 vCPU: ~6x a standard-1 pass).
+FOLLOW_REMOTE_BUDGET_S = 150.0
+# A failed measurement is not retried within this long (the same tool call
+# asks twice: _card_dense, then _card_follow); a later call retries and
+# resumes from what was measured.
+FOLLOW_FAIL_MEMO_S = 30.0
+
+
+def _proxy_key(ctx):
+    """The proxy's storage key, or None (a context without a database)."""
+    key = getattr(ctx, "_proxy_key", None)
+    if key:
+        return key
+    db = getattr(ctx, "db", None)
+    if db is None or getattr(ctx, "project_id", None) is None:
+        return None
+    try:
+        row = db.run(dbx.latest_asset, ctx.project_id, "proxy")
+    except Exception:
+        return None
+    key = (row or {}).get("storage_key")
+    if key:
+        try:
+            ctx._proxy_key = key
+        except Exception:
+            pass
+    return key
+
+
+def _proxy_identity(ctx, path):
+    key = _proxy_key(ctx)
+    if key:
+        return key
+    try:
+        st = os.stat(path)
+        return f"file:{os.path.realpath(path)}:{st.st_size}:{st.st_mtime_ns}"
+    except (OSError, TypeError):
+        return f"file:{path}"
+
+
+class _RemoteFaces:
+    """The face track measured on the batch media lane (follow.run_faces_job)
+    in a background thread. ``done`` is set once the store holds a complete
+    track for the request (the local pass then stops); ``finished`` once the
+    call returned at all. Whatever arrives — even after the tool call that
+    started it returned — goes into follow.FACE_STORE."""
+
+    def __init__(self, ctx, storage_key, windows, aspect, cuts):
+        self.done = threading.Event()
+        self.finished = threading.Event()
+        self.error = None
+        self.seconds = None
+        self.skey = follow.FACE_STORE.key(storage_key)
+        self.windows = list(windows)
+        self.payload = {"storage_key": storage_key,
+                        "windows": [[round(a, 3), round(b, 3)] for a, b in windows],
+                        "aspect": float(aspect), "cuts": list(cuts or ()),
+                        "fps": follow.SAMPLE_FPS, "width": follow.DETECT_WIDTH,
+                        "budget_s": FOLLOW_REMOTE_BUDGET_S,
+                        "faces_version": follow.FACES_VERSION}
+        self.project_id = getattr(ctx, "project_id", None)
+        self.user_id = (getattr(ctx, "job", None) or {}).get("user_id")
+        self.thread = threading.Thread(target=self._run, daemon=True,
+                                       name="follow-faces-remote")
+
+    def start(self):
+        self.started = time.monotonic()
+        self.thread.start()
+        return self
+
+    def _run(self):
+        try:
+            res = remote.run_faces_remote(self.project_id, self.payload,
+                                          user_id=self.user_id)
+            if not isinstance(res, dict):
+                raise RuntimeError("the media lane returned no face track")
+            if int(res.get("faces_version") or 0) != follow.FACES_VERSION:
+                raise RuntimeError(
+                    f"the media lane measures faces v{res.get('faces_version')}, "
+                    f"this lane v{follow.FACES_VERSION} (mid-deploy)")
+            follow.FACE_STORE.add(self.skey, follow.unpack_frames(res.get("frames")),
+                                  res.get("roi_times"))
+            if follow.FACE_STORE.uncovered(self.skey, self.windows):
+                rep = res.get("report") or {}
+                raise RuntimeError(f"the media lane's track is incomplete "
+                                   f"({rep.get('why') or 'no reason given'})")
+            self.done.set()
+        except Exception as exc:
+            self.error = (f"{type(exc).__name__}: {exc}" if str(exc)
+                          else type(exc).__name__)[:200]
+        finally:
+            self.seconds = round(time.monotonic() - self.started, 2)
+            self.finished.set()
+
+
+def _measure_faces(ctx, windows, aspect, cuts):
+    """(frames, roi_times, failure, stats): the face track over SOURCE
+    ``windows`` — what FACE_STORE already holds, else measured now on this
+    lane (follow.measure) and, when the footage is worth the round trip, on
+    the batch media lane at the same time (whichever completes first;
+    both run the same code, so the samples agree). failure is None when
+    every window has a complete track, else {"why", "detail", "measured_s",
+    "footage_s", "remote"} — the caller says so, never plans from it."""
+    started = time.monotonic()
+    total = sum(b - a for a, b in windows)
+    stats = {"footage_s": round(total, 2), "lane": None, "local": None,
+             "remote": None}
+    key = _proxy_key(ctx)
+    job = None
+    if key and total >= FOLLOW_REMOTE_MIN_S:
+        todo = follow.FACE_STORE.uncovered(follow.FACE_STORE.key(key), windows)
+        try:
+            available = bool(todo) and remote.faces_available()
+        except Exception:
+            available = False
+        if available:
+            # before the local proxy download: the media lane reads its own copy
+            job = _RemoteFaces(ctx, key, todo, aspect, cuts).start()
+    proxy, proxy_err = None, None
+    try:
+        proxy = ctx.proxy_path()
+    except Exception as exc:
+        proxy_err = (f"{type(exc).__name__}: {exc}" if str(exc)
+                     else type(exc).__name__)[:160]
+    skey = follow.FACE_STORE.key(key or _proxy_identity(ctx, proxy))
+    todo = follow.FACE_STORE.uncovered(skey, windows)
+    local = {}
+    if not todo:
+        stats["lane"] = "cached"
+    elif proxy:
+        frames = follow.measure(
+            proxy, todo, aspect, cuts=cuts, report=local,
+            budget_s=max(1.0, started + follow.MEASURE_BUDGET_S - time.monotonic()),
+            cancel=job.done if job else None)
+        follow.FACE_STORE.add(skey, frames, local.get("roi_times"))
+        stats["local"] = {k: local.get(k) for k in (
+            "status", "why", "frames", "coarse", "fine", "fine_total",
+            "elapsed_s", "cpu_s", "threads")}
+    left = follow.FACE_STORE.uncovered(skey, windows)
+    if left and job is not None:
+        job.finished.wait(max(0.0, started + follow.MEASURE_BUDGET_S - time.monotonic()))
+        left = follow.FACE_STORE.uncovered(skey, windows)
+    if job is not None:
+        stats["remote"] = ("complete" if job.done.is_set() else
+                           job.error or "still running")
+        if job.seconds is not None:
+            stats["remote_s"] = job.seconds
+    if stats["lane"] is None and not left:
+        stats["lane"] = ("remote" if job is not None and job.done.is_set()
+                         and local.get("status") != "complete" else "local")
+    frames, roi = follow.FACE_STORE.samples(skey, windows)
+    stats["elapsed_s"] = round(time.monotonic() - started, 2)
+    if not left:
+        return frames, roi, None, stats
+    why = local.get("why")
+    detail = local.get("detail") or ""
+    if not proxy:
+        why, detail = "no_proxy", proxy_err or "no proxy"
+    elif local.get("decode_error"):
+        why, detail = "decode", local["decode_error"]
+    elif why in ("budget", "cancelled"):
+        why = "budget"
+    elif why is None:
+        # the pass ran to its end and the footage is still not covered: the
+        # proxy has no frames there
+        why, detail = "decode", (f"no frames at {left[0][0]:.1f}-"
+                                 f"{left[0][1]:.1f}s of the proxy")
+    remote_note = None
+    if job is not None and not job.done.is_set():
+        remote_note = (f"failed ({job.error})" if job.error else
+                       f"still running after {follow.MEASURE_BUDGET_S:.0f}s")
+    elif job is None and key and total >= FOLLOW_REMOTE_MIN_S:
+        remote_note = "not available on this deployment"
+    failure = {"why": why, "detail": str(detail)[:200],
+               "footage_s": round(total, 1),
+               "measured_s": round(follow.measured_s(frames, windows), 1),
+               "elapsed_s": stats["elapsed_s"], "remote": remote_note}
+    return frames, roi, failure, stats
+
+
+def _follow_report(ctx, how, failure, stats):
+    """One log line and one reliability counter per measured outcome (admin
+    reads metrics_counters): follow_track_<lane> when a track was measured,
+    follow_unmeasured_<why> when it was not, follow_no_faces."""
+    if how == "measured":
+        name = f"follow_track_{(stats or {}).get('lane') or 'local'}"
+    elif how == "no_faces":
+        name = "follow_no_faces"
+    else:
+        name = f"follow_unmeasured_{(failure or {}).get('why') or 'unknown'}"
+    _metric(ctx, name)
+    try:
+        print(f"[follow] project={getattr(ctx, 'project_id', None)} {name} "
+              f"failure={json.dumps(failure, default=str) if failure else None} "
+              f"stats={json.dumps(stats, default=str) if stats else None}",
+              flush=True)
+    except Exception:
+        pass
+    if getattr(ctx, "db", None) is not None:
+        try:
+            ctx.db.run(dbx.bump_metric, name)
+        except Exception:
+            pass
+
+
 def _follow_samples(ctx, windows, cuts=()):
-    """(samples, source, counts) — the speaker's face over SOURCE
+    """(samples, source, counts, failure) — the speaker's face over SOURCE
     ``windows`` as [(t, box, look)]: the index's spatial samples when they
-    are dense enough to follow (follow.DENSE_STEP_S), else a write-time face
-    track over just these windows on the proxy (follow.measure at
-    follow.SAMPLE_FPS, Haar frontal + profile — OpenCV ships in every
-    lane), else the index's sparse samples. source is 'index', 'measured',
-    'sparse' or 'too_long' (more kept footage than one call measures,
-    follow.MAX_MEASURE_S). counts: follow.face_counts of every measured
-    frame (group shots). ``cuts``: the shot boundaries — each shot is
-    tracked on its own (follow.speaker_track). Cached on the ctx for the
-    turn."""
+    are dense enough to follow (follow.DENSE_STEP_S), else a face track over
+    just these windows (_measure_faces: follow.measure at follow.SAMPLE_FPS,
+    Haar frontal + profile — on this lane and on the batch media lane).
+    source is 'index', 'measured', 'no_faces' (measured: nobody there),
+    'too_long' (more kept footage than one call measures,
+    follow.MAX_MEASURE_S), 'unmeasured' (the track could not be completed
+    — ``failure`` says why: the caller must say so) or 'sparse' (no
+    windows). counts: follow.face_counts of the full-frame samples (group
+    shots). ``cuts``: the shot boundaries — each shot is tracked on its own
+    (follow.speaker_track). Never raises; a measured result is reused for
+    the turn, a failure for FOLLOW_FAIL_MEMO_S."""
     windows = _merge_windows(windows)
     if not windows:
-        return [], "sparse", []
+        return [], "sparse", [], None
     index = getattr(ctx, "index", None) or {}
     seen = []
     sparse, dense = follow.index_samples(index, windows, seen)
     if dense:
-        return sparse, "index", follow.face_counts(seen)
-    if follow.too_long(windows):
-        return sparse, "too_long", []
+        return sparse, "index", follow.face_counts(seen), None
+    total = sum(b - a for a, b in windows)
     cuts = sorted({round(float(c), 3) for c in cuts or ()})
     key = (tuple((round(a, 2), round(b, 2)) for a, b in windows), tuple(cuts))
     cache = getattr(ctx, "_follow_faces", None)
@@ -7822,21 +8037,90 @@ def _follow_samples(ctx, windows, cuts=()):
             ctx._follow_faces = cache
         except Exception:
             pass
-    if key in cache:
-        return cache[key]
-    out = (sparse, "sparse", [])
-    try:
+    hit = cache.get(key)
+    if hit is not None and (hit[3] is None
+                            or time.monotonic() - hit[4] < FOLLOW_FAIL_MEMO_S):
+        return hit[:4]
+    stats = None
+    if follow.too_long(windows):
+        out = (sparse, "too_long", [], {"why": "too_long",
+                                        "footage_s": round(total, 1)})
+    else:
         video = index.get("video") or {}
-        aspect = float(video.get("height") or 0) / float(video.get("width") or 0)
-        proxy = ctx.proxy_path()
-        frames = follow.measure(proxy, windows, aspect)
-        track = follow.speaker_track(frames, cuts)
-        if track:
-            out = (track, "measured", follow.face_counts(frames))
-    except Exception:
-        pass
-    cache[key] = out
+        try:
+            aspect = float(video.get("height") or 0) / float(video.get("width") or 0)
+        except (TypeError, ValueError, ZeroDivisionError):
+            aspect = 0.0
+        if not aspect > 0:
+            out = (sparse, "unmeasured", [], {"why": "no_size",
+                                              "footage_s": round(total, 1)})
+        else:
+            try:
+                frames, roi, failure, stats = _measure_faces(ctx, windows, aspect, cuts)
+            except Exception as exc:
+                frames, roi, stats = [], set(), None
+                failure = {"why": "error", "footage_s": round(total, 1),
+                           "detail": f"{type(exc).__name__}: {exc}"[:200]}
+            if failure:
+                out = (sparse, "unmeasured", [], failure)
+            else:
+                track = follow.speaker_track(frames, cuts)
+                if track:
+                    out = (track, "measured", follow.face_counts(
+                        [fr for fr in frames if fr[0] not in roi]), None)
+                else:
+                    out = (sparse, "no_faces", [], {"why": "no_faces",
+                                                    "samples": len(frames),
+                                                    "footage_s": round(total, 1)})
+    cache[key] = out + (time.monotonic(),)
+    _follow_report(ctx, out[1], out[3], stats)
     return out
+
+
+_FOLLOW_WHY = {
+    "no_proxy": "the proxy video could not be opened ({detail})",
+    "no_size": "the index does not record the source's picture size",
+    "no_opencv": "the face detector (OpenCV) is missing on this executor",
+    "no_cascades": "the face detector's model files are missing on this executor",
+    "decode": "the proxy could not be decoded ({detail})",
+    "budget": ("the face track did not finish in time on this executor "
+               "({measured_s:.0f} of {footage_s:.0f}s of kept footage measured "
+               "in {elapsed_s:.0f}s)"),
+    "error": "the face measurement failed ({detail})",
+}
+
+
+def _follow_note(failure, what="crop"):
+    """The tool-result line for a follow that was NOT measured: what was
+    not done, why, and what still holds — never a silent still frame."""
+    failure = failure or {}
+    why = failure.get("why")
+    hold = ("each shot keeps one aim" if what == "crop"
+            else "it holds one framing per shot")
+    if why == "too_long":
+        return (f"FOLLOW: not measured — {failure.get('footage_s', 0):.0f}s of kept "
+                f"footage is more than one call follows "
+                f"({follow.MAX_MEASURE_S:.0f}s); {hold}.")
+    if why == "no_faces":
+        return (f"FOLLOW: no face found in the kept footage "
+                f"({failure.get('samples', 0)} frames measured) — nothing to "
+                f"follow; {hold}.")
+    fields = {"detail": "", "measured_s": 0.0, "footage_s": 0.0, "elapsed_s": 0.0}
+    fields.update({k: v for k, v in failure.items() if v is not None})
+    try:
+        reason = _FOLLOW_WHY.get(why, "the face measurement failed ({detail})") \
+            .format(**fields)
+    except (KeyError, ValueError, TypeError):
+        reason = f"the face measurement failed ({why})"
+    if failure.get("remote"):
+        reason += f"; the media-lane measurement {failure['remote']}"
+    note = (f"FOLLOW: not measured — {reason}. The {what} does NOT follow the "
+            f"speaker: {hold}, which can let a moving speaker's head drift "
+            "toward the edge — check the framing with look_at.")
+    if why == "budget":
+        note += (" Calling the tool again resumes the measurement (what was "
+                 "measured is kept).")
+    return note
 
 
 def _shot_windows(ctx, keep, edges=()):
@@ -7898,14 +8182,12 @@ def _follow_frame(ctx, edl, frame):
     if not shots:
         return None, ""
     windows = [f for _a, _b, fr, _lo, _hi in shots for f in fr]
-    samples, how, counts = _follow_samples(
+    samples, how, counts, failure = _follow_samples(
         ctx, windows, [x for _a, _b, _fr, lo, hi in shots for x in (lo, hi)])
-    if how == "too_long":
-        total = sum(b_ - a_ for a_, b_ in _merge_windows(windows))
-        return None, (f"FOLLOW: not measured — {total:.0f}s of kept footage is "
-                      f"more than one call follows ({follow.MAX_MEASURE_S:.0f}s); "
-                      "each shot keeps one aim.")
-    if not samples or how == "sparse":
+    if how in ("too_long", "unmeasured", "no_faces"):
+        # never a silent still crop: the result says the follow is missing
+        return None, _follow_note(failure, "crop")
+    if not samples or how not in ("index", "measured"):
         return None, ""
     base = (frame.get("focus_x"), frame.get("focus_y"))
     spans, moving, fixed, groups = [], 0, 0, 0
@@ -8250,16 +8532,19 @@ def auto_reframe(ctx, ratio="9:16", mode="auto", follow=True):
                         edl, f"the {ratio} crop keeps its per-shot track and "
                              + ("follows the speaker inside each shot" if spans
                                 else "holds one aim per shot"))
-                    if res.startswith("EDL v") and note:
+                    if res.startswith(("EDL v", "NO CHANGE")) and note:
                         res += "\n" + note
                     return res
+            else:
+                note = ""
             return ("NO CHANGE — the current frame already has an authored "
                     f"per-shot focus_track covering every kept interval at "
                     f"{ratio}. Preserved that mixed composition instead of "
                     "downgrading it to one global crop/fit; change the mode "
                     "or ratio explicitly if uniform framing is intended. "
                     "Track coverage alone does not verify active-speaker identity; "
-                    "inspect frames and dialogue when that identity is uncertain.")
+                    "inspect frames and dialogue when that identity is uncertain."
+                    + (f"\n{note}" if note else ""))
     if mode in ("pad", "pad_blur"):
         # pad modes never discard picture, so there is nothing to aim.
         return set_frame(ctx, ratio, mode, _measured=True)
@@ -15038,25 +15323,28 @@ def _card_pieces(ctx, edl, spans):
 
 
 def _card_dense(ctx, edl, spans):
-    """True when a dense face track covers every shot of the card's window
-    (every piece has a sample): _card_follow can frame each shot itself."""
+    """(dense, failure): dense is True when a dense face track covers every
+    shot of the card's window (every piece has a sample): _card_follow can
+    frame each shot itself. failure: why the track could not be measured
+    (_follow_samples), or None."""
     pieces = _card_pieces(ctx, edl, spans)
     if not pieces or len(pieces) > PICTURE_CARD_MAX_TRACK:
-        return False
-    samples, how, _counts = _follow_samples(
+        return False, None
+    samples, how, _counts, failure = _follow_samples(
         ctx, [f for _a, _b, fr, _lo, _hi in pieces for f in fr],
         [x for _a, _b, _fr, lo, hi in pieces for x in (lo, hi)])
-    if how in ("sparse", "too_long") or not samples:
-        return False
+    if how not in ("index", "measured") or not samples:
+        return False, failure
     return all(any(a - .05 <= x[0] <= b + .05 for x in samples)
-               for a, b, _fr, _lo, _hi in pieces)
+               for a, b, _fr, _lo, _hi in pieces), None
 
 
 def _card_follow(ctx, edl, spans, box, canvas, video):
-    """(rect, source_track rows or None, follow spans, face, headroom,
-    moving) for an 'auto' single source card framed from a DENSE face
-    track (_follow_samples: the index's when dense, else measured on the
-    proxy), or None without one. Every piece of footage (one per shot)
+    """((rect, source_track rows or None, follow spans, face, headroom,
+    moving) or None, failure) for an 'auto' single source card framed from
+    a DENSE face track (_follow_samples: the index's when dense, else
+    measured on the proxy) — None without one; failure says why the track
+    could not be measured (None when it was, or was never attempted). Every piece of footage (one per shot)
     is framed as a medium close-up of the speaker (picture_cards.
     speaker_rect on the median face, never enlarged past the cap); a
     piece where the speaker moves enough that one held framing would let
@@ -15067,22 +15355,22 @@ def _card_follow(ctx, edl, spans, box, canvas, video):
     try:
         sw, sh = float(video.get("width") or 0), float(video.get("height") or 0)
     except (TypeError, ValueError):
-        return None
+        return None, None
     if not (sw and sh):
-        return None
+        return None, None
     W, H = canvas
     pieces = _card_pieces(ctx, edl, spans)
     if not pieces or len(pieces) > PICTURE_CARD_MAX_TRACK:
-        return None
-    samples, how, _counts = _follow_samples(
+        return None, None
+    samples, how, _counts, failure = _follow_samples(
         ctx, [f for _a, _b, fr, _lo, _hi in pieces for f in fr],
         [x for _a, _b, _fr, lo, hi in pieces for x in (lo, hi)])
-    if how in ("sparse", "too_long") or not samples:
-        return None
+    if how not in ("index", "measured") or not samples:
+        return None, failure
     faces = picture_cards.steady_faces([b for _t, b, _l in samples])
     face = picture_cards.median_face(faces)
     if face is None:
-        return None
+        return None, None
     base, headroom = picture_cards.speaker_rect(sw, sh, W, H, box, face)
     rw, rh = base[2] - base[0], base[3] - base[1]
     rows, follows, moving = [], [], 0
@@ -15114,7 +15402,7 @@ def _card_follow(ctx, edl, spans, box, canvas, video):
     track = rows if len({tuple(r["source"]) for r in rows}) > 1 else None
     default = rows[0]["source"] if track is None else \
         [round(v, 4) for v in base]
-    return default, track, follows, face, headroom, moving
+    return (default, track, follows, face, headroom, moving), None
 
 
 def _window_focus(edl, spans):
@@ -15202,6 +15490,7 @@ def _resolve_panel(ctx, edl, spans, box, source, fit, canvas, follow=False,
     W, H = canvas
     lowres = picture_cards.is_lowres(sw, sh)
     face, headroom, track, follows, moving = None, None, None, None, 0
+    follow_failure = None
     if isinstance(source, str):
         if source == "full" or (source == "auto" and lowres and fit != "crop"):
             rect = (picture_cards.archival_rect() if lowres
@@ -15211,9 +15500,10 @@ def _resolve_panel(ctx, edl, spans, box, source, fit, canvas, follow=False,
             fit = fit or "crop"
             faces = _card_faces(ctx, spans)
             face = picture_cards.median_face(faces)
-            dense = (_card_follow(ctx, edl, spans, box, canvas, video)
-                     if sw and sh and fit == "crop" and follow and track_face
-                     else None)
+            dense, follow_failure = (
+                _card_follow(ctx, edl, spans, box, canvas, video)
+                if sw and sh and fit == "crop" and follow and track_face
+                else (None, None))
             if dense:
                 rect, track, follows, face, headroom, moving = dense
             elif sw and sh and fit == "crop" and follow:
@@ -15271,6 +15561,9 @@ def _resolve_panel(ctx, edl, spans, box, source, fit, canvas, follow=False,
                     "holding every measured position of the head; never mid-shot)")
     elif isinstance(source, str) and source == "auto" and not lowres and face is not None:
         bits.append("one framing holds every measured position of the head")
+    if follow_failure and follows is None:
+        # never a silent still card: say the follow is missing, and why
+        bits.append(_follow_note(follow_failure, "card"))
     if lowres and isinstance(source, str) and fit != "crop":
         bits.append("low-resolution source shown whole (contain), edge "
                     "blanking trimmed")
@@ -15361,13 +15654,15 @@ def set_picture_card(ctx, id, start, end, box=None, fit=None, radius=.045,
     cuts = (_card_cuts(ctx, edl, spans)
             if spans and (source != "program" or panels) else [])
     cut_list = ", ".join(f"{t:g}s" for t in cuts[:3])
+    dense_failure = None
     if panels is None and source == "auto" and cuts and not video_lowres \
-            and (fit in (None, "crop")) and track_face \
-            and _card_dense(ctx, edl, spans):
-        # a dense face track frames every shot itself (one follow span per
-        # shot: the render splits its blocks on each cut), so the card
-        # stays framed from the source across the cuts
-        cuts = []
+            and (fit in (None, "crop")) and track_face:
+        dense, dense_failure = _card_dense(ctx, edl, spans)
+        if dense:
+            # a dense face track frames every shot itself (one follow span
+            # per shot: the render splits its blocks on each cut), so the
+            # card stays framed from the source across the cuts
+            cuts = []
     if panels is None and source == "auto" and cuts and not video_lowres \
             and _shots_reframe(ctx, edl, spans, cuts):
         # every cut is a reframe edge the render splits its blocks on, and
@@ -15388,6 +15683,9 @@ def set_picture_card(ctx, id, start, end, box=None, fit=None, radius=.045,
             "shot. For a card framed from the source, give each shot its own "
             "card (split the window at the cut), or pass source='full' or a "
             "rect to show one region of every shot.")
+        if dense_failure:
+            # the card would have been framed from a face track per shot
+            report.append(_follow_note(dense_failure, "card"))
     elif cuts and (panels is not None or not isinstance(source, str)):
         report.append(
             f"NOTE: this window crosses a camera cut (source {cut_list}); "

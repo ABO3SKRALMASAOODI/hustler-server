@@ -71,8 +71,8 @@ three-call remote limit.
    CLOUDFLARE_EXECUTOR_ENABLED=1
    CLOUDFLARE_EXECUTOR_URL=https://<worker>.workers.dev
    CLOUDFLARE_EXECUTOR_PERCENT=100
-   CLOUDFLARE_EXECUTOR_TYPES=preview,preview_check,final,index,filmstrip,agent_turn,mcp_tool,shorts_plan,capture,frames,track,matte,smatch,clean,stems,fetch,search,stock_acquire,ytprobe,mcp_media
-   CLOUDFLARE_SYNCHRONOUS_TYPES=capture,frames,track,matte,smatch,clean,stems,fetch,search,stock_acquire,ytprobe,mcp_media
+   CLOUDFLARE_EXECUTOR_TYPES=preview,preview_check,final,index,filmstrip,agent_turn,mcp_tool,shorts_plan,capture,frames,track,matte,smatch,clean,stems,fetch,search,stock_acquire,ytprobe,mcp_media,faces
+   CLOUDFLARE_SYNCHRONOUS_TYPES=capture,frames,track,matte,smatch,clean,stems,fetch,search,stock_acquire,ytprobe,mcp_media,faces
    CLOUDFLARE_MODAL_FALLBACK=0
    CLOUDFLARE_MAX_INPUT_BYTES=4294967296
    CLOUDFLARE_STREAM_SOURCE_MIN_DURATION_S=3600
