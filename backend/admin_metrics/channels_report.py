@@ -132,7 +132,13 @@ def complete_touch(t):
 
 
 def _people_touch(row, model):
+    # First model: the source the browser first came from (its first row in
+    # the period carries the browser's first touch). Latest model: the latest
+    # touch as of its last row in the period, so a person who came back from
+    # a new source is counted there, the same way signups switch models.
     attribution = row.get("first_attribution")
+    if model == "last" and isinstance(row.get("last_attribution"), dict):
+        attribution = row["last_attribution"]
     if attribution is None:
         # Visits before 7 Oct 12:34 carried no labels: fall back to the
         # referrer host the tracker stored (empty means no referrer).

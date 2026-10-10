@@ -43,17 +43,23 @@ class Cur:
 def test_stopped_paying_ignores_the_day_whose_next_snapshot_is_not_taken(
         monkeypatch):
     monkeypatch.setattr(money, "snapshots_since", lambda cur: date(2026, 10, 1))
-    cur = Cur([("prev.paying AND NOT cur.paying", [{"n": 0}]),
-               ("NOT EXISTS (SELECT 1 FROM billing_daily_status nxt",
-                [{"n": 0}])])
+    cur = Cur([("FROM steps s", [{"n": 0}])])
     period = ranges.make_period(
         "today", date(2026, 10, 11), date(2026, 10, 11),
         now=datetime(2026, 10, 10, 20, 30, tzinfo=timezone.utc))
     assert money.stopped_paying(cur, period) == 0
-    gone = next(s for s in cur.sql if "nxt.user_id" in s)
+    sql = cur.sql[-1]
     # Between Dubai midnight and the first hourly tick there is no row for
-    # today at all; yesterday's paying customers must not read as "stopped".
-    assert "prev.day < (SELECT max(day) FROM billing_daily_status)" in gone
+    # today at all, and a day the billing tick never ran has none either:
+    # only captured days are compared, each with the captured day before it,
+    # so neither reads as every paying customer stopping (one query, no
+    # "day + 1" that a missing day would turn into a false alarm).
+    assert len(cur.sql) == 1
+    assert "lag(day) OVER (ORDER BY day)" in sql
+    assert "SELECT DISTINCT day FROM billing_daily_status" in sql
+    assert "day + 1" not in sql
+    assert cur.params[-1] == {"from": date(2026, 10, 11),
+                              "to": date(2026, 10, 11)}
 
 
 # ── Customers agree with Growth about where a signup came from ──────────
@@ -165,3 +171,35 @@ def test_a_message_without_an_edit_says_what_the_customer_got_back():
         "They got a other kind reply instead of an edit."
     assert attention.reply_detail(None) == \
         "No editing work followed within 15 minutes."
+
+
+# ── "Latest" model: people move with their latest touch, like signups ───
+def test_latest_model_counts_people_by_their_latest_touch():
+    g = {"source": "www.google.com", "medium": "organic", "at": 1}
+    c = {"source": "chatgpt.com", "medium": "", "at": 2}
+    row = {"first_attribution": {"first": g, "last": g},
+           "last_attribution": {"first": g, "last": c},
+           "first_referrer": "", "first_page": "/"}
+    assert channels_report._people_touch(row, "first") == g
+    assert channels_report._people_touch(row, "last") == c
+    # A row without the latest attribution (older callers) still works.
+    row.pop("last_attribution")
+    assert channels_report._people_touch(row, "last") == g
+
+
+# ── Live: a hit the tracker marked as touched is a person's ─────────────
+def test_live_counts_an_interacted_hit_as_a_person(monkeypatch):
+    from admin_metrics import live
+    monkeypatch.setattr(db, "has_column", lambda c, t, col: True)
+    monkeypatch.setattr(live.visitors, "internal_ids", lambda c: [])
+    hit = {"visited_at": AFTER, "page": "/", "device_type": "mobile",
+           "referrer": "", "attribution": None, "active_s": 4, "scroll": 0,
+           "interacted": True, "clicked": False}
+    cur = Cur([("count(DISTINCT pv.device_id)", [{"n": 1}]),
+               ("u.last_seen_at >= NOW()", [{"n": 0}]),
+               ("GROUP BY 1 ORDER BY 1", []),
+               ("ORDER BY pv.visited_at DESC LIMIT 50", [hit])])
+    out = live.live(cur)
+    assert out["recent_hits"][0]["class"] == "person"
+    assert "COALESCE(pv.interacted, FALSE) AS interacted" in cur.sql[-1]
+    assert "user_agent" not in out["recent_hits"][0]

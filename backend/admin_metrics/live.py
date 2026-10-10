@@ -3,7 +3,7 @@
 No IP addresses and no user agents ever leave this module.
 """
 from acquisition import channel
-from admin_metrics import defs, registry, visitors
+from admin_metrics import db, defs, registry, visitors
 
 LIVE_WINDOW = "5 minutes"
 
@@ -48,10 +48,16 @@ def live(cur):
                 "label": defs.JOB_LABELS.get(r["type"], r["type"]),
                 "running": int(r["running"]), "queued": int(r["queued"])}
                for r in cur.fetchall()]
-    cur.execute("""
+    # A touch, click, key or scroll the tracker reported (migration 031)
+    # makes a hit a person's, exactly as it does on every other page.
+    interacted = ("COALESCE(pv.interacted, FALSE)"
+                  if db.has_column(cur, "page_visits", "interacted")
+                  else "FALSE")
+    cur.execute(f"""
         SELECT pv.visited_at, pv.page, pv.device_type, pv.referrer,
                pv.attribution, COALESCE(pv.time_on_page, 0) AS active_s,
                COALESCE(pv.scroll_depth, 0) AS scroll,
+               {interacted} AS interacted,
                EXISTS (SELECT 1 FROM website_events e
                         WHERE e.visit_id = pv.analytics_id) AS clicked
           FROM page_visits pv
@@ -69,8 +75,8 @@ def live(cur):
         c = channel(touch, r["page"]) if touch else {"channel": "not_recorded"}
         coded = bool(att and any((att.get(k) or {}).get("code")
                                  for k in ("first", "last")))
-        if r["scroll"] or r["clicked"] or r["active_s"] > \
-                defs.PERSON_ACTIVE_SECONDS:
+        if r.get("interacted") or r["scroll"] or r["clicked"] or \
+                r["active_s"] > defs.PERSON_ACTIVE_SECONDS:
             cls = "person"
         elif coded and (r["referrer"] or "") in defs.PREVIEW_REFERRERS:
             cls = "link_preview"

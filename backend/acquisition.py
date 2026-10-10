@@ -84,6 +84,9 @@ AI_ASSISTANTS = (
     ('claude.ai', 'claude'), ('claude', 'claude'),
     ('gemini.google.com', 'gemini'), ('bard.google.com', 'gemini'),
     ('gemini', 'gemini'),
+    # Google's AI tools are not Google Search (checked before Search).
+    ('notebooklm.google.com', 'notebooklm'), ('notebooklm', 'notebooklm'),
+    ('aistudio.google.com', 'aistudio'),
     ('perplexity.ai', 'perplexity'), ('perplexity', 'perplexity'),
     ('copilot.microsoft.com', 'copilot'), ('copilot', 'copilot'),
     ('chat.deepseek.com', 'deepseek'), ('deepseek.com', 'deepseek'),
@@ -98,6 +101,7 @@ AI_LABELS = {'chatgpt': 'ChatGPT', 'claude': 'Claude', 'gemini': 'Gemini',
              'perplexity': 'Perplexity', 'copilot': 'Copilot',
              'deepseek': 'DeepSeek', 'grok': 'Grok', 'meta_ai': 'Meta AI',
              'mistral': 'Mistral', 'poe': 'Poe', 'you': 'You.com',
+             'notebooklm': 'NotebookLM', 'aistudio': 'Google AI Studio',
              'mcp': 'Connector (MCP)'}
 
 EMAIL_HOSTS = (('mail.google.com', 'gmail'), ('outlook.live.com', 'outlook'),
@@ -141,7 +145,16 @@ SOCIAL_LABELS = {'instagram': 'Instagram', 'facebook': 'Facebook',
                  'threads': 'Threads', 'pinterest': 'Pinterest',
                  'snapchat': 'Snapchat', 'telegram': 'Telegram',
                  'whatsapp': 'WhatsApp', 'discord': 'Discord'}
-SOCIAL_NAMES = set(SOCIAL_LABELS) | {'twitter', 'fb'}
+# Short utm_source names apps add themselves. Instagram tags every bio link
+# `utm_source=ig&utm_medium=social&utm_content=link_in_bio`, which would
+# otherwise read as a website called "ig".
+SOCIAL_ALIASES = {'twitter': 'x', 'fb': 'facebook', 'ig': 'instagram',
+                  'insta': 'instagram', 'yt': 'youtube'}
+SOCIAL_NAMES = set(SOCIAL_LABELS) | set(SOCIAL_ALIASES)
+# A link tagged utm_medium=social from a network not listed above is still
+# social (e.g. utm_source=bluesky&utm_medium=social).
+SOCIAL_MEDIA = {'social', 'social_media', 'social-media', 'socialmedia',
+                'social_network', 'social-network', 'sm'}
 PAID_MEDIA = {'cpc', 'ppc', 'paid', 'ads', 'paid_social', 'paidsocial'}
 OWN_HOSTS = ('valmera.io',)
 # Steps inside sign-in or checkout, never where someone came from: Google's
@@ -200,6 +213,7 @@ def channel(touch, first_page=None):
     # 1. Outreach: a recipient code, or a link tagged as outreach/DM.
     if code or medium in ('outreach', 'dm'):
         network = host or 'instagram'
+        network = SOCIAL_ALIASES.get(network, network)
         key = '' if campaign.lower() in UNTAGGED_CAMPAIGNS else campaign
         return _result('outreach', key or 'untagged', campaign_label(campaign),
                        campaign=key or 'untagged',
@@ -260,7 +274,7 @@ def channel(touch, first_page=None):
     # 5. Social (hosts, in-app browser labels, Android app packages).
     platform = None
     if source in SOCIAL_NAMES:
-        platform = {'twitter': 'x', 'fb': 'facebook'}.get(source, source)
+        platform = SOCIAL_ALIASES.get(source, source)
     else:
         for domain, key in SOCIAL:
             if _is(host, domain):
@@ -273,6 +287,10 @@ def channel(touch, first_page=None):
         if content == 'in_app':
             return _result('social', platform, f'{label} (in-app)')
         return _result('social', platform, label)
+    if medium in SOCIAL_MEDIA and source not in ('direct', '(direct)', 'none'):
+        name = host or source
+        label = name if '.' in name else name.replace('_', ' ').title()
+        return _result('social', name, label)
 
     # 7. No referrer (checked before "other" so 'direct' is never a host).
     if source in ('direct', '(direct)', 'none'):

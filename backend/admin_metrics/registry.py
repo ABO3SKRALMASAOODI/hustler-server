@@ -59,8 +59,9 @@ REGISTRY = {
         "ratio, not each person's path.",
         unit="percent", polarity=UP, section="signups"),
     "channel_people": _m(
-        "People", "People whose first page in the period came from this "
-        "channel.", polarity=UP, section="signups"),
+        "People", "People in the period whose browser first came from this "
+        "channel (or latest, if you switch). Robots, link previews and your "
+        "devices left out.", polarity=UP, section="signups"),
     "channel_signups": _m(
         "Signups", "Signups in the period whose first recorded source (or "
         "latest, if you switch) is this channel.", polarity=UP,

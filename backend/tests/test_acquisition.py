@@ -72,11 +72,32 @@ def test_outreach_code_keeps_the_campaign_it_was_sent_with():
      ('outreach', 'untagged', 'Untagged')),
     (None, ('not_recorded', None, None)),
     ({'source': 'valmera.io'}, ('not_recorded', None, None)),
+    # Instagram tags every bio link itself; that is Instagram, not a
+    # website called "ig".
+    ({'source': 'ig', 'medium': 'social', 'content': 'link_in_bio'},
+     ('social', 'instagram', 'Instagram')),
+    ({'source': 'yt', 'medium': 'social'}, ('social', 'youtube', 'YouTube')),
+    ({'source': 'bluesky', 'medium': 'social'}, ('social', 'bluesky', 'Bluesky')),
+    ({'source': 'bsky.app', 'medium': 'social'}, ('social', 'bsky.app', 'bsky.app')),
+    ({'source': 'bsky.app', 'medium': 'referral'},
+     ('other_website', 'bsky.app', 'bsky.app')),
+    # Google's AI tools are AI assistants, not Google Search.
+    ({'source': 'notebooklm.google.com', 'medium': 'organic'},
+     ('ai_assistant', 'notebooklm', 'NotebookLM')),
+    ({'source': 'aistudio.google.com', 'medium': 'organic'},
+     ('ai_assistant', 'aistudio', 'Google AI Studio')),
+    ({'source': 'scholar.google.com', 'medium': 'organic'}, ('search', 'google', 'Google')),
 ])
 def test_one_server_side_classifier(touch_, expected):
     c = channel(touch_)
     assert (c['channel'], c['detail'], c['detail_label']) == expected
     assert c['channel_label'] == dict(CHANNELS)[c['channel']]
+
+
+def test_an_outreach_link_tagged_ig_names_instagram():
+    c = channel({'source': 'ig', 'medium': 'outreach', 'campaign': 'spring',
+                 'code': CODE})
+    assert (c['channel'], c['network']) == ('outreach', 'Instagram')
 
 
 def test_mcp_connector_landing_is_an_ai_assistant():

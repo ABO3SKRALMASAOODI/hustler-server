@@ -142,7 +142,8 @@ def classify_by_day(cur, period):
 
 
 def people_rows(cur, period):
-    """One row per person-class browser with its first row in the period.
+    """One row per person-class browser with its first row in the period
+    (and the attribution its latest row carried, for the "latest" model).
 
     Used for channel and landing-page attribution of people."""
     if period.end is not None and period.end <= defs.VISITS_SINCE:
@@ -150,12 +151,15 @@ def people_rows(cur, period):
     extra = """,
                (array_agg(v.attribution ORDER BY v.visited_at))[1]
                    AS first_attribution,
+               (array_agg(v.attribution ORDER BY v.visited_at DESC))[1]
+                   AS last_attribution,
                (array_agg(v.referrer ORDER BY v.visited_at))[1]
                    AS first_referrer,
                (array_agg(v.page ORDER BY v.visited_at))[1] AS first_page,
                min(v.visited_at) AS first_at"""
     cur.execute(f"""WITH {browsers_cte(cur, extra_cols=extra)}
-        SELECT d.device_id, d.first_attribution, d.first_referrer,
+        SELECT d.device_id, d.first_attribution, d.last_attribution,
+               d.first_referrer,
                d.first_page, d.first_at, d.signed_in
           FROM d WHERE {CLASS_SQL} = 'person'""", params(cur, period))
     return [dict(r) for r in cur.fetchall()]

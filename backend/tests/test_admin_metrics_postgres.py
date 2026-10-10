@@ -107,6 +107,31 @@ def test_each_browser_gets_exactly_one_class(cur):
                       "clicker_00001", "codedhuman001"}
 
 
+def test_stopped_paying_bridges_a_day_without_snapshots(cur, monkeypatch):
+    from admin_metrics import money
+    cur.execute("""
+      CREATE TEMP TABLE billing_daily_status(day date, user_id int,
+        paying boolean, monthly_value_cents int DEFAULT 0,
+        PRIMARY KEY (day, user_id));
+      -- Three paying on 1 Oct; the billing tick never ran on 2 Oct; on 3 Oct
+      -- user 2 cancelled and user 3's account is gone; 4 Oct (today) has no
+      -- snapshot yet.
+      INSERT INTO billing_daily_status(day, user_id, paying) VALUES
+        ('2026-10-01', 1, true), ('2026-10-01', 2, true),
+        ('2026-10-01', 3, true), ('2026-10-03', 1, true),
+        ('2026-10-03', 2, false);""")
+    monkeypatch.setattr(money, "snapshots_since",
+                        lambda c: date(2026, 9, 30))
+    now = datetime(2026, 10, 4, 6, tzinfo=timezone.utc)
+
+    def stopped(first, last):
+        return money.stopped_paying(
+            cur, ranges.make_period("custom", first, last, now=now))
+    assert stopped(date(2026, 10, 2), date(2026, 10, 3)) == 2
+    assert stopped(date(2026, 10, 2), date(2026, 10, 2)) == 0
+    assert stopped(date(2026, 10, 4), date(2026, 10, 4)) == 0
+
+
 def test_funnel_counts_the_group_that_signed_up_in_the_period(cur):
     cur.execute("""
       INSERT INTO users(id, email, is_verified, created_at) VALUES

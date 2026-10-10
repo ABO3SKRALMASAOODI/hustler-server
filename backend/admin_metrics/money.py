@@ -262,30 +262,27 @@ def stopped_paying(cur, period):
     since = snapshots_since(cur)
     if not since or since > period.from_day - timedelta(days=1):
         return None
+    # Each snapshot day is compared with the snapshot day before it, so only
+    # days that were actually captured count: a customer paying on one and
+    # not paying (or no longer billed, or deleted: absent) on the next has
+    # stopped. A day with no snapshot at all (the hour after Dubai midnight
+    # before the first tick, or a day the billing tick never ran) is skipped
+    # and bridged, never read as every paying customer stopping.
     cur.execute("""
-        SELECT count(DISTINCT cur.user_id) AS n
-          FROM billing_daily_status prev
-          JOIN billing_daily_status cur
-            ON cur.user_id = prev.user_id AND cur.day = prev.day + 1
-         WHERE prev.paying AND NOT cur.paying
-           AND cur.day >= %s AND cur.day <= %s""",
-                (period.from_day, period.to_day))
-    stopped = int(cur.fetchone()["n"])
-    # A paying account that disappears from the next day's snapshot (deleted
-    # or no longer billed) also stopped paying. Only days whose next-day
-    # snapshot has been taken can show a disappearance: until the first
-    # hourly tick of a new day writes its rows, every account is "missing"
-    # from it, and counting those would report every paying customer as
-    # stopped for the first hour of each day.
-    cur.execute("""
-        SELECT count(*) AS n FROM billing_daily_status prev
-         WHERE prev.paying AND prev.day >= %s AND prev.day < %s
-           AND prev.day < (SELECT max(day) FROM billing_daily_status)
-           AND NOT EXISTS (SELECT 1 FROM billing_daily_status nxt
-                            WHERE nxt.user_id = prev.user_id
-                              AND nxt.day = prev.day + 1)""",
-                (period.from_day - timedelta(days=1), period.to_day))
-    return stopped + int(cur.fetchone()["n"])
+        WITH days AS (
+          SELECT DISTINCT day FROM billing_daily_status WHERE day <= %(to)s),
+        steps AS (
+          SELECT day, lag(day) OVER (ORDER BY day) AS prev_day FROM days)
+        SELECT count(DISTINCT prev.user_id) AS n
+          FROM steps s
+          JOIN billing_daily_status prev
+            ON prev.day = s.prev_day AND prev.paying
+          LEFT JOIN billing_daily_status nxt
+            ON nxt.day = s.day AND nxt.user_id = prev.user_id
+         WHERE s.day >= %(from)s AND s.prev_day IS NOT NULL
+           AND (nxt.user_id IS NULL OR NOT nxt.paying)""",
+                {"from": period.from_day, "to": period.to_day})
+    return int(cur.fetchone()["n"])
 
 
 # ── Billing problems (the hourly DB-vs-Paddle contradiction list) ───────
