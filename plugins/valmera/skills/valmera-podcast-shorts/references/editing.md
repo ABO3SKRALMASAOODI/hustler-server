@@ -35,8 +35,16 @@ cues, and art direction. Call `get_kept_transcript` once and confirm:
   interviewer setup, tighten inside the selected range with `keep_segments`
   so it starts closer to the answer; a faithful on-screen context line may
   carry the question.
+- Frame 0 is clean: the speaker faces camera, the first audio is a whole
+  word (not the tail of the previous one, not "if somebody was like,"), and
+  the hook plays as one take (no jump cut in the first 1.5 s, at most one in
+  the first 3 s). Move the start to the next clean onset when it is not.
 - The turn changes or deepens the idea and the payoff resolves it. Stop on the
-  strongest sentence; the payoff needs 1.0-1.5 s of hold before the end.
+  strongest sentence; the payoff needs 0.6-1.5 s after its last word before
+  the end card (a reaction button 1.0-1.5 s, or none).
+- Trim for rhythm: cut low-information connectors ("it was like a lot of
+  things and"), keep 150-250 ms at sentence boundaries, never drop an
+  article inside a clause.
 - Keep every qualifier ("I think", "probably", "in our case"). Never splice
   words into a claim the person did not make, reorder causes, or turn caution
   into certainty. Cuts remove setup and filler, not meaning.
@@ -51,17 +59,20 @@ After any cut, read the program words once more (`get_kept_transcript`) and
 write the beats you will execute, in output seconds:
 
 ```text
-hook    0.00  hook_title "Computers look like *garbage*" 0.15-2.6 (silent; the title is the interrupt)
-hero 1  6.42  "garbage"   word_slam serif, start 6.22 (lands +0.2, silent)
-turn   14.80  "ten million" counter 0 -> 10M (silent)
-hero 2 21.10  marker_text "whether they look great or not" (silent)
-payoff 33.60  "look great" word_slam + punch 0.12 (the one move: the line the story turns on); silent: the type is the payoff (no ding on the word itself, it would mask it); hold to 35.0
-camera  1 zoom (payoff); every jump cut left bare
+hook    0.00  hook_title "Every computer has used *weird* type" kicker "Steve Jobs, 1983" 0.15-2.6 (his strongest line; names him, no lower third; silent)
+hero 1  6.42  "garbage"   word_slam serif, start 6.22 (lands +0.2, silent; not in the hook)
+turn   14.80  "Lisa"      image_card Apple Lisa photo + label "Apple Lisa, 1983" (identifies the product; silent)
+hero 2 18.60  "40 fonts"  counter style='reveal' value 40 label "fonts on one screen" (silent)
+payoff 33.60  "without one" phrase_build 2 tiers "writing a paper / WITHOUT *ONE*" (the largest accented lockup; silent: the type is the payoff); hold 0.8 s after the last word
+budget  5 graphics in 36 s (one per ~7 s), ~30% of the runtime, 2 type roles, 1 accent
+camera  none: steady frame, every jump cut left bare
 sound   none: nothing on screen calls for one (zero is the podcast default); music off (no owner song)
 ```
 
 Most beats are silent and the camera is steady: that is the default, not a
-gap. Each zoom or sound in the sheet names the moment that earns it; a
+gap. Every graphic in the sheet adds what the captions cannot (a number, a
+contrast, an identification, evidence, an image); the captions carry the
+rest of the words. Each zoom or sound in the sheet names the moment that earns it; a
 sound also names its visual partner (what changes on screen within ~50 ms
 of its hit) and never sits on the payoff word's onset.
 
@@ -85,7 +96,7 @@ recheck every output-timed item.
 | Captions | 1 `add_captions(mode='from_transcript', style={...})` or `set_caption_style` | `style.motion_look` per Look; `emphasis_words` = the meaning-bearing words; keep the active-word accent if the brief asks |
 | Frame | 1-2 `auto_reframe` (or `set_frame`), `set_picture_card` | full-bleed with a per-shot `focus_track` (source seconds), or a card from looks.md **Card geometry** with `background_style` (`blur` or a gradient), grain and vignette; `auto_reframe` and an `'auto'` card follow a speaker who leans or steps inside a shot (still while they sway, a glide only when a still frame would cut the head; a turned close-up keeps its nose side clear) — a hand-written `set_frame` aim is still and drops that. A burned-in screenshot or screen share the host reads from is never cropped through and never shown without the speaker for more than a second while they talk: act on SCREEN INSET / NO FACE IN THE CROP notes with the call they name (a speaker + screen stack per camera shot, `panels=[{..., source:'auto'}, {..., source:'inset'}]`, so the speaker stays on screen while they talk — the speaker panel is solved from the face track: whole head, chin and hair margins, lead room, the screen box kept out where any framing can, and a caption band of its own between the panels; `set_picture_card(source='inset')` alone only for a beat — over speech it reports NO FACE ON SCREEN), and keep captions and graphics clear of the card. A card's fade/lift entrance and exit dissolve the whole card with the full-frame shot (never a frame of bare canvas); on a cut use `'none'` |
 | Headline | 0-1 `set_editorial_graphic(kind="headline", speaker, text)`, or with a card 0-1 `add_motion_graphic(template='headline', start=0, params={text, kicker})` | the editorial headline for headline-conversation (verified speaker first; it never moves); on a card layout whose band also carries hero lockups, the persistent `headline` template instead: end and y omitted, it sits in the band above the card and yields to every motion-graphic lockup there by itself (not to add_text or typography scenes, so band lockups are motion templates), so the band is never empty for seconds |
-| Designed beats | 3-6 `add_motion_graphic` | one per beat, silent by default; `sfx=true` only on the hook, the payoff or a graphic showing a real-world action; `purpose` names the beat, stable `id` |
+| Designed beats | 2-5 `add_motion_graphic` | one per beat that EARNS ITS PLACE: about one hero graphic per 6-8 s at most, under ~50% of the runtime, at most 3 type roles and one accent; never a lockup or typewriter of the words being heard, never a spoken list as rows of text (insert the items instead); silent by default; `sfx=true` only on the hook, the payoff or a graphic showing a real-world action; `purpose` names the beat, stable `id` |
 | Camera | 0-3 `add_zoom` (optional) | only where a moment clearly earns a move (the payoff word, a real turn between ideas, a genuinely jarring jump cut); zero is fine; never on every cut, take, sentence or hero moment. Modes per the Look (schema names) |
 | Cut hygiene | `conceal_jump_cuts(mode='report')` first, then 0-1 `conceal_jump_cuts()` (optional) | the report writes nothing: every same-shot jump cut with how visible it is, what covers it, the hook (first 1.5 s) and stutter (<10% step) flags and the options — leave it, move a graphic change onto it, restore/re-cut the join, or a step. Steps only when the render shows same-angle jump cuts visibly popping (a locked single camera tightened by pause removal, e.g. an archival card): hard 10-15% framing steps on just the cuts that measurably pop, alternating to the next cut (a card steps its source crop, wide on a 480p source or wherever tighter would crop the head); not a zoom and not counted as one; after the cut is final; `mode='off'` removes it |
 | Transitions | 0-1 `set_transitions` | base style, `scope='scene'` |
@@ -111,6 +122,13 @@ after a short pause, then report it.
   shot; 1-2 accent words per phrase.
 - Hero type at 8-30% of frame height on the exact word; hold 0.8-1.6 s;
   exits faster than entrances.
+- A hook written from the clip's strongest line or statistic, with the
+  speaker's verified name in its kicker or the headline band.
+- A spoken list shown as items (a real photo or clip per item, 0.3-0.6 s,
+  or one big word per item); a named product labelled for what it is
+  ("Apple Lisa, 1983") and shown when an image exists.
+- The payoff as the largest accented lockup: number and noun together,
+  rhyming with an earlier setup device where one exists.
 - A number lands ON its spoken word, never before it (the write sets a
   counter's `land` on the onset and moves a number slam onto it). A count
   starts on the lead-in (~0.45 s before the word); a punchline number, or one
@@ -144,6 +162,10 @@ after a short pause, then report it.
   (they make the short look childish — leave the frame steady instead).
 - Graphics over the face for more than 1 s, under the corner brand mark,
   or below y 0.80.
+- A generic question hook; a hook that shows a word a later graphic slams;
+  a broadcast lower third over a famous face; a product name set as
+  "Name:"; a graphic that only re-typesets the words being heard; more than
+  3 type roles or a second accent colour; a payoff number without its noun.
 - Music of any kind when `music_effective` is off (no CC0 library bed, no
   song you chose), anything but the owner's song when it is on, or a
   montage of digital silence (use **Sound without music**).
@@ -175,7 +197,13 @@ after each operation.
    change rate, hero count, picture area, sounds within budget and spacing
    (list each with its time, on-screen partner and level; `audit_audio_mix`
    reports each sound's level against the voice and its placement checks),
-   no digital silence, payoff held.
+   no digital silence, payoff held 0.6-1.5 s after the last word.
+5. Read the render's VERIFICATION ADVISORIES: the EARN ITS PLACE note lists
+   a generic or spent hook, a fragment or jump-cut opening, graphics past
+   the budget or restating the captions, extra type roles or accents, a
+   short payoff hold and colliding sentences, each with a fix. Act on the
+   ones that hurt this short (advisory: keep if intentional); none of them
+   is ever fixed by adding a zoom or a sound.
 
 Fix real defects (clipped words, collisions, unreadable or wrong captions,
 digital silence, a sound with no on-screen event, an exposed edge or
@@ -190,12 +218,12 @@ preview link:
 
 ```text
 s07 · kinetic-poster · fast-conversation · EDL v14 · 1 render
-Hook: hook_title by 1.1s ("Why fonts were garbage"), silent
-Heroes: 6.4 garbage slam; 14.8 counter 10M; 29.0 typeface cycle
-Payoff: 33.6 "look great" slam + punch 0.12, held 1.3s
-Camera/sound: 1 zoom (on the payoff), no sound; music off (no owner song)
-Targets: change ~0.4s, picture full-bleed, 3 heroes
-Weakest: 18-20s talking head with only captions (a kicker on "Lisa" would carry it)
+Hook: hook_title by 1.1s ("Every computer has used weird type", kicker Steve Jobs, 1983), silent
+Heroes: 6.4 garbage slam; 14.8 Apple Lisa photo + label; 18.6 counter 40 fonts
+Payoff: 33.6 "writing a paper / WITHOUT ONE" lockup, held 0.8s after the last word
+Camera/sound: no zoom, no sound; music off (no owner song)
+Targets: change ~0.4s, picture card 0.56, 3 heroes, graphics ~30% of runtime
+Weakest: 24-27s "let's get…" build with only captions (a list-build lockup would carry it)
 Assets: Lisa photo (Wikimedia, CC BY-SA 4.0, credit in handback)
 ```
 

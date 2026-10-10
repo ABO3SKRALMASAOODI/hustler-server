@@ -9,7 +9,10 @@ it answers five questions with yes, not because someone wrote 90.
 Read what Valmera already reports: render warnings, `audit_captions` (late or
 missing words, overlaps), and `audit_audio_mix` when music or sound changed.
 A Tier-0 defect goes straight back to the editor as a fix; it is not a matter
-of taste.
+of taste. The render result's VERIFICATION ADVISORIES also carry an EARN
+ITS PLACE note (a generic or spent hook, a fragment or jump-cut opening,
+graphics past the budget or restating the captions, a short payoff hold):
+advisory, but read it before answering questions 1, 2 and 5.
 
 ## Tier 1: editor self-check
 
@@ -25,10 +28,14 @@ freed editors start their next shorts. For each one, `watch_video(render=false)`
 at 1x with the sound on, then answer:
 
 1. **Hook:** does a designed moment land by 0.6 s, with the hook line
-   readable by 1.5 s, and would a stranger keep watching?
-2. **Payoff:** is the payoff designed (type first; a sound or a camera move
-   only where it earns one; the owner's song's button when music is on) and
-   held 1.0-1.5 s, and does it resolve the viewer question?
+   readable by 1.5 s, written from the clip's strongest line or statistic
+   (not a generic question, not showing a later hero word), on a clean
+   first frame (speaker facing camera, a whole first word, no jump cut in
+   the first 1.5 s), and would a stranger keep watching?
+2. **Payoff:** is the payoff the largest accented lockup (number and noun
+   together; a sound or a camera move only where it earns one; the owner's
+   song's button when music is on), held 0.6-1.5 s after the last word,
+   and does it resolve the viewer question?
 3. **Targets:** does it meet its Look's targets: change rate, hero moments,
    picture area; sound only from the approved library, zero by default and
    at most 1-2 per short, each on a structural on-screen moment with a
@@ -41,11 +48,15 @@ at 1x with the sound on, then answer:
 4. **Attention:** with the famous name hidden, is the idea still worth
    finishing?
 5. **Clean:** faithful claims and qualifiers, accurate readable captions
-   (none muted over a punchline's setup), speakers named, graphics that mean
-   what is said, no zoom or sound without a reason you can name (unearned
+   (none muted over a punchline's setup), speakers named (in the kicker or
+   headline band, no broadcast lower third over a famous face), graphics
+   that mean what is said and each add what the captions cannot (about one
+   per 6-8 s at most, under ~50% of the runtime, at most 3 type roles and
+   one accent, no transcript re-typeset, no spoken list as rows of text,
+   products identified), no zoom or sound without a reason you can name (unearned
    zooms and sounds look childish — zero of either is fine), no white type
    on white clothing, at most one impact sound
-   (on the payoff), at least ~0.5 s after the last word before the end card,
+   (on the payoff), 0.6-1.5 s after the last word before the end card,
    nothing over the face or the brand corner, the corner mark and native end
    card untouched, no flash frames, pops, exposed edges or clipped words,
    no face at the frame's edge, a clean PICTURE CHECK on the complete
@@ -87,7 +98,7 @@ a fair fix.
 | --- | --- |
 | Headline Pro | big face on a designed card, a still headline, captions that perform, the payoff lands |
 | Editorial Serif | a quiet field, serif contrast on the right word, depth behind the subject |
-| Kinetic Poster | type lands on almost every stressed word (sound only on the few that earn it); the payoff is the biggest event |
+| Kinetic Poster | captions perform almost every stressed word (sound only on the few that earn it), hero graphics add information; the payoff is the biggest event |
 | Cinematic Doc | graded and textured; archive feels like film |
 | Mono Noir | stark monochrome, red only where it matters, any sound hits with weight |
 | Clean Data | numbers become pictures, and a settled figure lands (one sound at most) |

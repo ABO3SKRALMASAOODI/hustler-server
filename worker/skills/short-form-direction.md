@@ -40,6 +40,9 @@ picture is the camera's default and a clean voice is the mix's.
 - Every device is bound to a word, a beat or a cut, and carries a purpose.
   Purposeful is good; random is not — and a zoom or a sound with no clear
   reason is random.
+- Every graphic EARNS ITS PLACE: it adds what the captions cannot — a
+  number, a contrast, an identification, evidence, an image. A graphic that
+  only re-typesets the words being heard is decoration.
 - Never invent facts: numbers, quotes, identities, brand messages and
   metrics come from the transcript, the user or a verified source.
 
@@ -85,14 +88,24 @@ THE PREMIUM SHORT-FORM GRAMMAR — targets you can measure in the render:
    lands it on that entrance). The hook line is on screen
    as text by 1.5 s; the speaker is visible and talking by ~0.3 s. Never open on
    black, a logo, dead air or more than ~3 s of a non-speaker setup. The
-   hook text poses the question; it never spoils or quotes the payoff, never
-   contradicts the words spoken under it, and is complete and large (about
-   5% of frame height or more) by 1.5 s — not a slow typewriter line. The
-   speaker's face is fully in frame. (Read hooks-retention.)
-   NAME THE SPEAKER within ~3 s with a `lower_third` (a verified name plus
-   role, venue or year — the year matters on archival footage) and name each
-   new on-screen speaker when they first appear. Names come from the title,
-   metadata or the user, never a guess.
+   hook text is PAYOFF-LED: the clip's strongest line or statistic as a
+   specific claim the ending completes ("They promised us flying cars…"
+   for a clip that ends on "…all we got was 140 characters"), never a
+   generic question ("WHERE DID PROGRESS GO?"), never the punchline itself,
+   never a word a later graphic slams, and never contradicting the words
+   spoken under it. It is complete and large (about 5% of frame height or
+   more) by 1.5 s — not a slow typewriter line. Frame 0 shows the speaker
+   facing camera, fully in frame, on a clean word onset (no fragment of the
+   previous word, no disfluency), and the hook plays as one take: no jump
+   cut in the first 1.5 s, at most one in the first 3 s. (Read
+   hooks-retention.)
+   NAME THE SPEAKER in the hook's kicker or the headline band (a verified
+   name plus role, venue or year — the year matters on archival footage);
+   a broadcast `lower_third` over a famous speaker is unnecessary and
+   stacks a second text system on the chest. Use one only for a new
+   on-screen speaker that no kicker or headline names, clear of the face
+   and the caption band. Names come from the title, metadata or the user,
+   never a guess.
 3. RHYTHM. Something visual changes every 0.3–0.6 s — motion-caption word
    reveals on onsets count — and the structure moves with the speech: a
    graphic, a B-roll cut or a layout shift where the story turns. Vary the
@@ -114,12 +127,13 @@ THE PREMIUM SHORT-FORM GRAMMAR — targets you can measure in the render:
    don'ts take `mark='cross'`; a versus split means opposition; a counter
    lands ON its spoken number. Never a graphic that only recaps what an
    earlier one already showed. (Read motion-design.)
-   ART DIRECTION: one design system per short — 2–3 font roles, ONE accent
-   colour passed to every graphic's `accent`, one container style, one
-   entrance vocabulary; at most about 4 template families in a short, and
-   vary them across a batch so shorts from one episode don't look stamped
-   from one template. Match the material (no iOS-style widgets on a 1983
-   talk; an archival piece takes a period treatment).
+   ART DIRECTION: one design system per short — at most 3 type roles (a
+   backbone, one accent role, one for numbers), ONE accent colour passed to
+   every graphic's `accent`, one container style, one entrance vocabulary;
+   at most about 4 template families in a short, and vary them across a
+   batch so shorts from one episode don't look stamped from one template.
+   Match the material (no iOS-style widgets on a 1983 talk; an archival
+   piece takes a period treatment).
 5. CAPTIONS. Browser motion captions via `style.motion_look`: `editorial`
    or `clean` as the premium default for podcast and interview speech,
    `lockup` or `serif` for editorial accents, `pop` or `stack` for hype,
@@ -186,6 +200,11 @@ THE PREMIUM SHORT-FORM GRAMMAR — targets you can measure in the render:
 10. LAYOUT. Face-aware full-bleed 9:16 with a shot-aware focus track, or the
    picture as a card on a designed background (blurred copy of the picture,
    gradient, grain or vignette) — never a small card on a flat black void.
+   COMMIT TO A FRAME AND A GRADE when the plate is busy or washed out (a
+   bright projector screen, a cluttered set): a card on a textured canvas or
+   a letterbox with a headline band, plus one committed grade; full-bleed
+   only when the plate is clean. A taste call made per short, not a
+   default.
    The face fills roughly 28–40% of the frame height in full-bleed. A
    low-resolution source (crop-to-fill would enlarge it more than ~2.5x,
    e.g. 480p archival) is presented as a card or window on a designed
@@ -196,17 +215,46 @@ THE PREMIUM SHORT-FORM GRAMMAR — targets you can measure in the render:
 11. LEGIBILITY. Size, placement in face-free clear space, soft shadows or
    plates; important type inside x 60–1020 px and y 8–80% on 9:16, away from
    the bottom platform band.
-12. ENDING AND CTA. Keep at least ~0.5 s of the speaker's natural tail
-   after the last word before the end card (never cut on the last
-   syllable). Hold the payoff 1.0–1.5 s with an accent (scale,
-   colour, the one impact, or the music's button when the user supplied
-   music) and land so the reel loops. A native-UI CTA — `comment_cta`,
+12. ENDING AND CTA. The payoff is the largest accented lockup in the short,
+   its number and noun together ("140 / CHARACTERS"), rhyming with an
+   earlier setup device where one exists. Hold 0.6–1.5 s after the last
+   word before the end card (never cut on the last syllable), with a type
+   accent (scale, colour; the one impact or the music's button only when
+   the landing earns it) and land so the reel loops. A reaction button
+   gets 1.0–1.5 s, framed like that speaker's earlier shot, or is left
+   out. A native-UI CTA — `comment_cta`,
    `follow_cta` or `save_cta` — goes in the last 2–4 s,
    never over the payoff, and only when the user or brief asks for one,
    using the handle, keyword and offer they supplied (owner marketing reels
    supply them in the brief). Never invent a handle, a verified badge, a
    comment keyword or a promised resource; `save_cta` is the identity-free
    option.
+
+EARN ITS PLACE — the graphic budget (the owner's references never add a
+graphic that does not serve the moment):
+- Every graphic adds information the captions do not: a number, a
+  contrast, an identification, evidence, an image. A lockup or typewriter
+  of the words being heard adds nothing — let the captions carry the line.
+- At most about one hero graphic per 6–8 s and graphics on screen for at
+  most ~50% of the runtime (a persistent headline band is layout, not a
+  graphic); a rapid run of spoken stats is one designed moment.
+- At most 3 type roles and one accent colour per short.
+- NEVER RESTYLE THE TRANSCRIPT AS A LIST: a spoken enumeration (rockets,
+  supersonic aviation, underwater cities, new medicines) gets semantic
+  visual inserts — a real photo or clip per item, 0.3–0.6 s each, via
+  `search_stock` or `research_broll` when they are listed, placed with
+  `image_card`, `photo_stack` or `add_overlay` — or one big word per item
+  on its onset (a run of word slams), never a stack of small rows.
+- IDENTIFY PROPER NOUNS AND PRODUCTS: label what a name is ("Apple Lisa,
+  1983"), and show it when an image exists. Never set a product name with a
+  colon ("Lisa:" reads as a dialogue label or a person).
+- The hook never spends a later hero word, and no hero word is slammed
+  twice; a deliberate callback transforms it (struck through, recoloured,
+  completed by the payoff).
+- The render's VERIFICATION ADVISORIES carry an EARN ITS PLACE note listing
+  what breaks these rules, each with a fix (advisory: keep if
+  intentional). It never asks for a zoom or a sound, and neither should
+  the repair.
 
 GRAPHIC CHOICE PLAYBOOK — pick by what the line does, not by habit:
 - A contrast punchline ("promised flying cars … got 140 characters") is a
@@ -220,7 +268,7 @@ GRAPHIC CHOICE PLAYBOOK — pick by what the line does, not by habit:
 - Items of one list share one type role; only the last may escalate.
 - The hook is the speaker's own strongest line (verbatim, or its sharpest
   words) or a preview of the payoff set as an editorial lockup — not an
-  invented question banner.
+  invented question banner, and never the word a later slam spends.
 - Rotate the zone a graphic uses (above the head, beside the face, the chest
   band, a header band) — never the same zone more than twice running — and
   keep every graphic off the face and mouth. Use text BEHIND the subject
@@ -231,9 +279,9 @@ GRAPHIC CHOICE PLAYBOOK — pick by what the line does, not by habit:
   which yields automatically to the beat graphics in its band and comes
   back when they leave; the band is never left empty for seconds.
 - No stretch of more than ~3 s with only body captions in the last third:
-  build into the payoff (a setup beat, a kicker; a push-in only when the
-  moment calls for one), never sag before it.
-- A reaction tail at the end holds at least ~1 s, or is left out.
+  build into the payoff (a setup beat or a kicker that adds information; a
+  push-in only when the moment calls for one), never sag before it.
+- A reaction tail at the end holds 1.0–1.5 s, or is left out.
 - After cutting, re-read the kept transcript once: no dangling "But/And" at
   a join, no claim that needs context you removed.
 
@@ -289,8 +337,17 @@ fades on reels, digital silence) and justify intentional visual density.
   that buries a vulnerable moment that should have been held.
 - Headline that spoils the payoff; payoff cut off before it lands; CTA over
   the payoff; captions muted over the setup of the punchline.
-- An unnamed speaker; a tick on an unfulfilled promise; the same template set
-  on every short of a batch; white type on a white shirt.
+- A generic question hook; a hook that spends the hero word a later slam
+  repeats; an opening on a word fragment, a disfluency, a profile or a
+  jump cut.
+- Graphics that re-typeset the transcript (a spoken list as rows of small
+  text, a typewriter of the words just heard), more than one hero graphic
+  every ~6 s, five type roles and two accents in one short.
+- A payoff number without its noun; a punchline cut 0.5 s after its last
+  word; a 0.6 s reaction button.
+- An unnamed speaker, or a broadcast lower third stacked over a famous
+  face; a product set as "Name:"; a tick on an unfulfilled promise; the
+  same template set on every short of a batch; white type on a white shirt.
 - Invented numbers, fabricated UI claims, or a CTA with an invented handle,
   keyword or offer; stopping before the rendered preview has been watched.
 
@@ -300,19 +357,22 @@ Screen the complete preview as one experience, then measure against the
 grammar: first visual event ≤ 0.6 s; hook text by 1.5 s; 2–4 hero moments
 each landing on its word (a camera move or a sound only where it clearly
 earns one — remove any zoom or sound you cannot name a reason for);
-captions readable at phone size; every sound
+captions readable at phone size; every graphic adds what the captions
+cannot (the EARN ITS PLACE advisory names the ones that don't); every sound
 cue on a named on-screen event with a visual partner, 1-2 at most in a
 podcast short (about one every 4–5 s at most elsewhere), no repeat within
 ~3 s, none on a payoff word's onset, none punning on the spoken word; any music the user asked for ducked 13–20 dB under the voice; no
-digital silence; one grade; no flat black void; payoff held; any requested
-CTA after the payoff. Rendered looks need a complete preview of the current
+digital silence; one grade; no flat black void; payoff held 0.6–1.5 s
+after the last word; any requested CTA after the payoff. Rendered looks
+need a complete preview of the current
 version: `render_preview(complete=true)`, then dense
 `look_at(rendered=true, output_times=[...])` frames on the hook and every
 hero moment, and the AUDIO CHECK for the mix (read review).
 
 ## Repair ladder
 
-Fix the story spine → strengthen the hook (interrupt + text by 1.5 s) →
+Fix the story spine → strengthen the hook (payoff-led text by 1.5 s on a
+clean, facing first frame) → drop graphics that only restate the captions →
 re-bind mistimed hero moments to their onsets → commit the look (one caption
 system, one grade) → fill dead holds with word cues or a graphic → thin
 zooms and sounds to the moments that clearly earn them → fix layout (full-bleed or designed

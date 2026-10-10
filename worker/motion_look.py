@@ -142,15 +142,34 @@ def item_roles(item):
     return out
 
 
+def template_accent(template):
+    """The accent a template draws when no ``accent`` is passed (its spec's
+    default colour), or None."""
+    if not template or template == "html":
+        return None
+    try:
+        import motion_templates
+        sp = motion_templates.spec(template) or {}
+    except Exception:  # noqa: BLE001 — an unknown template has no accent
+        return None
+    p = (sp.get("params") or {}).get("accent") or {}
+    d = p.get("default") if p.get("type") == "color" else None
+    return d if isinstance(d, str) and _HEX.match(d) else None
+
+
 def item_accent(item):
     """The accent colour a motion item visibly wears (#RRGGBB upper case), or
-    None (no accent param, or nothing on it takes the accent)."""
+    None (nothing on it takes the accent). With no ``accent`` passed it wears
+    its template's default (template_accent) — the page draws that, so the
+    write's NOTE (look) and the edit review (edit_review) count it."""
     t = item.get("template")
     p = item.get("params") or {}
     if t == "versus_split":
         c = p.get("right_color")
         return c.upper() if isinstance(c, str) and _HEX.match(c) else None
     c = p.get("accent")
+    if c is None or c == "":
+        c = template_accent(t)
     if not (isinstance(c, str) and _HEX.match(c)):
         return None
     # a payoff lockup sets every hero line in the accent (word_slam tier)

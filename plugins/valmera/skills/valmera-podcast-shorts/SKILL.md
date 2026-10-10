@@ -28,6 +28,19 @@ nothing on screen is a payment. Leave gain_db unset: add_sfx levels each
 library sound against the measured voice at its hit and reports where it
 sits.
 
+EVERY GRAPHIC EARNS ITS PLACE (owner and judges, Oct 2026): it adds what
+the captions cannot — a number, a contrast, an identification, evidence, an
+image. About one hero graphic per 6-8 s at most, graphics on screen for
+under ~50% of the runtime, at most 3 type roles and one accent colour;
+never a re-typeset of the words being heard, never a spoken list as rows
+of text (show the items: real photos or clips, or one big word per item).
+The hook is written from the clip's strongest line or statistic (never a
+generic question) and never shows a word a later graphic slams; the payoff
+locks its number and noun together and holds 0.6-1.5 s after the last
+word. Valmera's render result carries an EARN ITS PLACE advisory naming
+what breaks these rules, each with a fix ([looks.md](references/looks.md),
+**Shared grammar**, has the details).
+
 A steady, well-framed picture and a clean voice are the defaults, and every
 zoom or sound needs a reason you can name. The owner's references score
 about 7.5/10; October's bare clip pages (small picture, plain captions,
@@ -121,8 +134,11 @@ disagree, v9 wins on method and the brief wins on preferences.
   put required credits in the handback. Never use another creator's logo,
   footage, music or identity, or present archival footage as the exact event
   discussed.
-- **Speaker-first, verified headlines** (`Name: claim`). If identity is
-  uncertain, omit the name; never borrow one from a reference or earlier run.
+- **Speaker-first, verified headlines** (`Name: claim`, the claim taken
+  from the clip's strongest line, never a generic question). The name lives
+  in the headline or the hook's kicker, so a famous speaker needs no
+  broadcast lower third. If identity is uncertain, omit the name; never
+  borrow one from a reference or earlier run.
 - **Branding.** Every final keeps the native corner watermark ("Edited
   using Valmera AI") and the complete 5-second native Valmera end card
   exactly as Valmera renders them: never cropped, covered, trimmed,

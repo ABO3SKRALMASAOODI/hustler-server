@@ -49,6 +49,13 @@ sits.
   chat or post card depicts what the speaker describes, with generic names,
   and never invents a real brand's message, endorsement, follower count or
   revenue figure.
+- **Every graphic earns its place.** It adds what the captions cannot — a
+  number, a contrast, an identification, evidence, an image — at most about
+  one hero graphic per 6–8 s, under ~50% of the runtime, in at most 3 type
+  roles and one accent. Never re-typeset the words being heard as a lockup
+  or typewriter, and never set a spoken list as rows of text (show the
+  items, or one big word per item). The hook never shows a word a later
+  graphic slams (short-form-direction, EARN ITS PLACE).
 - **Restraint is a deliberate passage, not the default.** Holding a
   vulnerable admission on the face with only captions is a choice you make
   for that moment — and the surrounding passages still carry motion.
@@ -164,7 +171,8 @@ CHOOSING A TEMPLATE — confirm names and params with `list_motion_templates()`:
 - Pointing: `arrow_callout` and `circle_highlight` aim at a VISIBLE target
   read off the grid; `focus_spotlight` darkens everything except the
   subject or region for a reveal; `lower_third` names a verified person,
-  place or role.
+  place or role — not a famous speaker the hook kicker or headline band
+  already names.
 - Social and UI (Apple/SaaS-style mockups with an animated cursor; a click
   sound only on a visible press, when sounded): `notification` when the
   speaker describes a message or alert;
@@ -411,6 +419,9 @@ the engine scales it to the output. Runtime summary:
 
 - A graphic that lands a beat late, or on a filler word instead of the
   meaning word.
+- A graphic that only restates the caption (a typewriter of the words just
+  heard, a stack of the spoken list), the hook's hero word slammed again,
+  a payoff number without its noun.
 - Two leaders at once: a hook title, a word slam and a caption page all
   animating in the same half-second.
 - Hard-coded params from memory instead of the listing, producing rejected
