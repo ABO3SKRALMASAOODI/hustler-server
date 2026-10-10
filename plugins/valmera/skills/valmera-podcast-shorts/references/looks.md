@@ -32,7 +32,7 @@ The coordinator assigns one Look and one structure per short. The editor reads
 | Target | Value |
 | --- | --- |
 | Hook interrupt | a designed visual event at 0.0-0.6 s (`hook_title`, `word_slam` or a card reveal; a punch-in or landing zoom only when the opening earns it) — no reflexive opening whoosh; a sound only when the title has a real entrance that earns one |
-| Hook as text | the hook line complete and readable on screen by 1.5 s as a HEADLINE (`word_slam` `tier='hook'`: the *starred* main line at 7%+ of the frame height, the lead-in small above it, owning its zone — the captions wait until it exits — or a headline band; never type no bigger than the captions with a live caption under it, never a slow typewriter), PAYOFF-LED: the clip's strongest line or statistic as a specific claim the ending completes ("They promised us flying cars…" before "…all we got was 140 characters"), never a generic question ("WHERE DID PROGRESS GO?"), never the punchline itself, never a word a later graphic slams (GARBAGE in the hook and again as the slam at 13 s lands flat), never contradicting the words under it |
+| Hook as text | the hook line complete and readable on screen by 1.5 s as a HEADLINE (`word_slam` `tier='hook'`: the *starred* main line at 7%+ of the frame height, the lead-in small above it, owning its zone — the captions wait until it exits — or a headline band whose main line measured at least 1.2x the caption cap height (Card geometry: a band under ~0.10 never does); never type no bigger than the captions with a live caption under it, never a slow typewriter), PAYOFF-LED: the clip's strongest line or statistic as a specific claim the ending completes ("They promised us flying cars…" before "…all we got was 140 characters"), never a generic question ("WHERE DID PROGRESS GO?"), never the punchline itself, never a word a later graphic slams (GARBAGE in the hook and again as the slam at 13 s lands flat), never contradicting the words under it |
 | Hook frame | frame 0 shows the speaker facing camera on a clean word onset (no tail of the previous word, no "if somebody was like,"); no jump cut inside the first 1.5 s, at most one in the first 3 s. A 1.5-2 s cold-open tease of the punchline only when it exists as its own clip asset (kept footage plays in source order) |
 | Speaker identity | each speaker named within ~3 s of first appearing, in the hook's kicker or the headline band (verified name plus role, venue or year); a famous speaker needs no broadcast `lower_third`, which stacks a second text system on the chest |
 | Meaning | each graphic means what the speaker means: a tick is "achieved" (broken promises and myths take `mark='cross'`), slams go on information-bearing words, never on clichés, and no graphic only recaps an earlier one. Proper nouns and products are identified ("Apple Lisa, 1983" as a label, the product shown when an image exists), never set as "Lisa:" with a colon |
@@ -40,8 +40,8 @@ The coordinator assigns one Look and one structure per short. The editor reads
 | Graphic choice | contrast punchlines as a two-beat swap (setup words, then payoff words, each on its onset); counters only for counted or growing quantities and landing ON the number; zones rotate (above head, beside face, chest, header) and stay off the face; at most one hero word behind the subject (`tier='hero'`), optional, only where the moment earns it and the background allows; no caption-only stretch over ~3 s in the last third (a kicker or setup beat that adds information, or a cutaway) |
 | Visual change | something changes every 0.3-0.6 s (caption cue, graphic, cut); a structural event (cut, graphic, B-roll) every 1.5-2.5 s. Zooms and sounds never fill this: they are optional, only where a moment earns them |
 | Hero moments | 2-4 designed beats on exact word cues (Kinetic Poster, Mono Noir, Creator Glow: 3-5), always inside the graphic budget |
-| Payoff | the largest accented lockup in the short, number and noun together ("140 / CHARACTERS"), rhyming with an earlier setup device where one exists (1960s vs TODAY pays off as FLYING CARS vs 140 CHARACTERS); type first, a sound or a camera move only when it earns one, the owner's song's button when music is on; held 0.8-1.5 s after the last word before the end card (else a held frame over room tone; a payoff number about 2 s on screen); a reaction button 1.0-1.5 s or none |
-| Picture area | full-bleed (1.0) when the face crop needs at most 2x upscale and the plate is clean; otherwise a card on a designed backdrop covering at least 0.54 of the canvas (see Card geometry). A busy or washed-out plate (a bright projector screen, a cluttered set) commits to a frame — a card on a textured canvas or a letterbox with a headline band — and a grade: a taste call per short, not a default. Only Editorial Serif's square card may go down to 0.48 (gum-02), because its field carries the type |
+| Payoff | the largest accented lockup in the short, number and noun together ("140 / CHARACTERS"), rhyming with an earlier setup device where one exists (1960s vs TODAY pays off as FLYING CARS vs 140 CHARACTERS); type first, a sound or a camera move only when it earns one, the owner's song's button when music is on; held 0.8-1.5 s after the last word before the end card (the natural tail chosen at selection; else a 0.5x slow tail on the last ~0.4 s of air — on a card layout `add_freeze_frame` has no composed hold; a payoff number about 2 s on screen). Its cap height is measured against every earlier lockup on render 1 (pre-render size estimates run 2-3x off); a reaction button 1.0-1.5 s or none |
+| Picture area | full-bleed (1.0) when the face crop needs at most 2x upscale and the plate is clean; otherwise a card on a designed backdrop covering at least 0.54 of the canvas (see Card geometry; measured once per source in the framing pilot, never assumed). A busy or washed-out plate (a bright projector screen, a cluttered set) commits to a frame — a card on a textured canvas or a letterbox with a headline band — and a grade: a taste call per short, not a default. Only Editorial Serif's square card may go down to 0.48 (gum-02), because its field carries the type |
 | Sound | optional: zero by default, at most 1-2 approved library sounds on structural on-screen moments, each with a visual partner, none on a payoff word's onset, no literal puns, never the same sound within ~3 s, levelled by the tool (see Sound); no digital silence longer than 0.3 s except a deliberate 50-280 ms stop-down before a reveal or a montage passage flagged for the owner's song (see Sound without music) |
 | Length | final 15-45 s including the 5 s native ending, so the editorial program is 10-40 s (montage editorial at most 25 s) |
 
@@ -90,8 +90,18 @@ The coordinator assigns one Look and one structure per short. The editor reads
   ONE giant word per short behind the speaker (it falls back to a face-safe
   display slam wherever it cannot go behind the speaker — never a giant
   word over the face). Back-to-back stat
-  slams of one style share one size per line automatically. `typewriter` is
+  slams of one style share one size per line automatically (give the payoff
+  a different role or tier so it can be the largest). `typewriter` is
   a band-wide hero (5%+ of the frame height on a plate), never a small label.
+- Template parameters that misled the Oct 2026 editors: `phrase_build` row
+  `size` is a relative NUMBER ('0.5', '1', '1.6'; ladder up to 7:1) — 's',
+  'm', 'l', 'xl' are accepted and ignored, so every row renders the same
+  small size; `chapter_title` draws '01' unless `number` is '' (pass '' for a
+  single chapter); `headline` text takes no ' / ' line break (it prints the
+  slash); `timeline_steps` and `glow_title` have no size; a `counter`
+  label renders white whatever its colour. Size and position estimates in
+  write results are not the render: judge type sizes only on rendered
+  frames.
 - Over a bright shirt or wall the renderer decides legibility itself — dark
   ink in the same accent hue, else a glyph scrim on the letterforms, never a
   grey box; placing the type in darker, calmer space (off a shirt print or
@@ -109,23 +119,46 @@ card's own footage blurred and darkened; `background_dim` about 0.5),
 `background_color2`), plus `grain` about 0.25 and `vignette` about 0.4.
 Never the flat default colour.
 
-| Card | `box` | Area | Headline zone | Captions and hero words |
-| --- | --- | --- | --- | --- |
-| 4:5 at 88% width (950x1188) | [0.06, 0.175, 0.94, 0.794] | 0.54 | y 0.08-0.17 | inside the card's lower third, y 0.62-0.76, in face-free space |
-| 1:1 at full width (1080x1080), for 4:3 archival | [0, 0.21, 1, 0.773] | 0.56 | y 0.08-0.20 | inside the card, y 0.60-0.74, face-free |
-| 1:1 at 92% width (994x994), Editorial Serif only | [0.04, 0.12, 0.96, 0.637] | 0.48 | none | in the field below the card, y 0.66-0.80 |
+**What the engine enforces (Oct 2026; the earlier table ignored it and
+cost a whole run).** Band graphics never go above y 0.128: the free-tier
+mark's reserved zone (the mark sits top-left, x 0.09-0.50, y 0.05-0.128,
+and its zone is kept clear across the width on every tier). The headline
+band therefore runs from y 0.128 to the card's top minus 0.012; the
+`headline` template refuses a band under 0.06 and otherwise shrinks its
+text to fit (at most 84 px x `size`, size up to 1.4, two lines up to 50
+characters, three beyond). A band under about 0.10 renders the claim
+smaller than 3% captions, which fails the hook (7 of 9 Oct shorts). The old
+4:5 row ([0.06, 0.175, 0.94, 0.794], headline zone y 0.08-0.17) leaves a
+0.035 band: the template refuses it, and lowering the card to make room
+drops the picture below the floor (8 of 9 Oct shorts). Use these rows, and
+let the framing pilot's measurement overrule them:
 
-The headline zone above a card holds the persistent `headline` motion
-template (or the editorial headline): one per short, written with y omitted
-so it fills that zone; hero lockups placed in the zone replace it and hand it
-back automatically, so it is never empty for seconds. Started at 0 it is the
-hook on frame 0 and is written complete there (no fade-in) unless an
-entrance is passed.
+| Layout | `box` | Area | Band above | Hook and name | Captions and hero words |
+| --- | --- | --- | --- | --- | --- |
+| No band, 4:5 at 81% (measured, Oct 2026 s08: a 460 px phone-call window with its picture-in-picture erased, ~1.9x) | [0.095, 0.13, 0.905, 0.795] | 0.54 | none | hook-tier `word_slam` on frame 0, name in its kicker | inside the card's lower band, y 0.70-0.78, clear of the chin; lockups in the card's face-free space |
+| Band + 1:1 at full width (16:9 modern sources, 4:3 archival) | [0, 0.24, 1, 0.794] | 0.55 | y 0.128-0.228: `onscreen_headline` of at most 36 characters, two lines, `size` 1.1-1.2, no kicker | a hook-tier `word_slam` names the speaker unless the band's main line measured at least 1.2x the caption cap height | inside the card, y 0.62-0.76, face-free |
+| 1:1 at 92%, Editorial Serif only | [0.04, 0.135, 0.96, 0.652] | 0.48 | none | `phrase_build` hook in the field | in the field below the card, y 0.68-0.80 |
 
-A wider 4:5 card (up to 92% width, 64.7% of the height) fits only without a
-headline above it and must still end at or above y 0.80. Nothing designed
-goes below y 0.80, the band the platform covers: with the 4:5 and
-full-width cards, captions and hero words therefore sit inside the card.
+A kicker above the band's claim costs about 0.035 of height (card top 0.265,
+area 0.53, under the floor): put the name in the hook's kicker instead. A
+4:3 card with `box` omitted gets the engine's window [0.06, 0.27, 0.94,
+0.70] (area 0.38, under the floor): always pass a box. A full-width 1:1 card
+needs a square crop around the speaker of at least 540 source pixels to
+stay at or under 2x; a narrower source (a phone call, a picture-in-picture
+guest) takes the no-band row.
+
+The band above a card holds the persistent `headline` motion template (or
+the editorial headline): one per short, written with y omitted so it fills
+that band; hero lockups placed in the band replace it and hand it back
+automatically, so it is never empty for seconds. Lockups placed in the band
+must fit inside it (they otherwise run over the card's top edge). Started
+at 0 the headline is on frame 0 and written complete there (no fade-in)
+unless an entrance is passed; with a hook-tier `word_slam` on frame 0 the
+headline yields to it and returns as it exits.
+
+Nothing designed goes below y 0.80, the band the platform covers: with
+these cards, captions and hero words sit inside the card. A card's top never
+rises into the mark's zone (y 0.128 on the left half).
 
 ### Camera (`add_zoom`; read its schema before the first call)
 
@@ -364,15 +397,20 @@ A `custom-<slug>` Look is allowed when the brief spells out every field below.
   italic captions, piano bed whose bass enters on the punchline), gum-06 (the
   floor to beat), `.valmera/podcast-shorts/reference-library/20260909-headline-conversation/`.
 - **Base:** `apply_look('editorial')`.
-- **Canvas:** rounded 4:5 card at 88% width, `box` [0.06, 0.175, 0.94,
-  0.794] (picture area 0.54); for 4:3 archival a 1:1 card at full width,
-  `box` [0, 0.21, 1, 0.773] (0.56). Backdrop `background_style='blur'`,
+- **Canvas:** the band + full-width 1:1 card, `box` [0, 0.24, 1, 0.794]
+  (picture area 0.55), for 16:9 modern and 4:3 archival sources; on a
+  narrow source (a phone call, a picture-in-picture guest) the no-band 4:5
+  card [0.095, 0.13, 0.905, 0.795] (0.54) with the hook and lockups inside
+  it (Card geometry). Backdrop `background_style='blur'`,
   `background_dim` about 0.5, grain and vignette. A modern 16:9
   single-speaker source may go full-bleed (face-aware `set_frame`) with the
   headline over clear space at the top. Card entrance `reveal` at 0.0.
-- **Headline:** `Name: claim` in the headline zone (y 0.08-0.17; 0.08-0.20
-  over a 1:1 card), name in accent (periwinkle #9DB1FF or sand #F1CA97),
-  claim near-white, Inter Display 800, at most 2 lines.
+- **Headline:** the brief's `onscreen_headline` (at most 36 characters) in
+  the band y 0.128-0.228, `size` 1.1-1.2, two lines at most, no kicker;
+  name in accent (periwinkle #9DB1FF or sand #F1CA97) when it is in the
+  band, claim near-white, Inter Display 800. The hook on frame 0 is a
+  hook-tier `word_slam` carrying the name in its kicker unless the pilot
+  measured the band's main line at 1.2x the captions or more.
 - **Captions:** `motion_look` `editorial`; accent sand #F1CA97 or butter
   #F7E499; serif-italic emphasis on 1 word per phrase; inside the card's
   lower third (y 0.62-0.76) in face-free space, never below the card and
@@ -405,7 +443,7 @@ A `custom-<slug>` Look is allowed when the brief spells out every field below.
   end), orig-06 (fat serif in the scene), orig-14 (serif quote with script accents).
 - **Base:** `apply_look('editorial')`, captions `motion_look` `serif`.
 - **Canvas:** a 4:5 card at 88-92% width (area 0.54-0.59), or a 1:1 card at
-  92% width or more, `box` [0.04, 0.12, 0.96, 0.637] (area 0.48, gum-02),
+  92% width or more, `box` [0.04, 0.135, 0.96, 0.652] (area 0.48, gum-02),
   with the type in the field below it; backdrop `background_style=
   'radial_gradient'` (olive-black #1F200C or warm charcoal) or `'blur'`, with
   grain and vignette. Or full-bleed when the shot has negative space. Type
@@ -473,9 +511,11 @@ A `custom-<slug>` Look is allowed when the brief spells out every field below.
   (low-key grade, grain), orig-10 (riser into a beat drop).
 - **Base:** `apply_look('cinematic_doc')`, captions `motion_look` `clean`
   (sentence case) with serif hero words.
-- **Canvas:** full-bleed for modern sources; 4:3 archival on a 4:5 card at
-  88% width or more (about 62% of the height, `box` [0.06, 0.175, 0.94,
-  0.794]) over a `background_style='blur'` backdrop with grain and vignette.
+- **Canvas:** full-bleed for modern sources; 4:3 archival on the band +
+  full-width 1:1 card [0, 0.24, 1, 0.794], or the no-band 4:5 card
+  [0.095, 0.13, 0.905, 0.795] when the type lives inside the card (Card
+  geometry), over a `background_style='blur'` backdrop with grain and
+  vignette. The grade is the Look: check it is visible on render 1.
 - **Type:** Inter Tight captions; `glow_title` or `chapter_title` in Bodoni
   Moda or Playfair italic; accent butter #F7E499 or red.
 - **Grade:** teal/orange low-key or warm archival, grain, vignette, highlight bloom.

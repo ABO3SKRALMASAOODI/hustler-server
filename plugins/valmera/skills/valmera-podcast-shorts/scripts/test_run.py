@@ -223,9 +223,114 @@ class RunTests(unittest.TestCase):
         self.assertEqual(status["editors"]["idle"], 0)
         self.ok("candidate", "--run-dir", self.dir, "--short-id", "s02",
                 "--preview", "p", "--edl-version", "3", "--note", "n")
-        self.ok("assign", "--run-dir", self.dir, "--short-id", "s04", "--editor", "e2")
         text = self.ok("status", "--run-dir", self.dir)
-        self.assertIn("review candidates: s02", text)
+        self.assertIn("review candidates first: s02 (first-candidate gate", text)
+        self.assertNotIn("hand 1 short", text)
+        # the first candidate is reviewed before a 4th short goes out
+        self.fails("first-candidate gate", "assign", "--run-dir", self.dir,
+                   "--short-id", "s04", "--editor", "e2")
+        self.ok("review", "--run-dir", self.dir, "--short-id", "s02",
+                "--verdict", "fix", "--note", "12s: payoff too small; word_slam payoff")
+        self.ok("assign", "--run-dir", self.dir, "--short-id", "s04", "--editor", "e2")
+
+    def test_gate_can_be_skipped_for_a_proven_source(self) -> None:
+        for n in range(1, 5):
+            self.add(f"s0{n}", 10 + n)
+            self.ok("assign", "--run-dir", self.dir, "--short-id", f"s0{n}",
+                    "--brief", self.brief(f"s0{n}"))
+        for n in range(1, 4):
+            self.ok("assign", "--run-dir", self.dir, "--short-id", f"s0{n}",
+                    "--editor", f"e{n}")
+        self.ok("candidate", "--run-dir", self.dir, "--short-id", "s01",
+                "--preview", "p", "--edl-version", "3", "--note", "n")
+        self.ok("assign", "--run-dir", self.dir, "--short-id", "s04", "--editor", "e1",
+                "--no-gate")
+        self.assertTrue(self.state()["gate_skipped"])
+
+    def test_candidate_needs_no_slot(self) -> None:
+        # An editor launched beyond the pool (or a fix pass) records its
+        # finished candidate directly instead of waiting for a slot.
+        for n in range(1, 5):
+            self.add(f"s0{n}", 10 + n)
+            self.ok("assign", "--run-dir", self.dir, "--short-id", f"s0{n}",
+                    "--brief", self.brief(f"s0{n}"))
+        for n in range(1, 4):
+            self.ok("assign", "--run-dir", self.dir, "--short-id", f"s0{n}",
+                    "--editor", f"e{n}")
+        self.ok("candidate", "--run-dir", self.dir, "--short-id", "s04",
+                "--preview", "p", "--edl-version", "5", "--note", "n", "--editor", "e4")
+        state = self.state()
+        self.assertEqual(state["shorts"]["s04"]["status"], "candidate")
+        self.assertEqual(state["shorts"]["s04"]["candidates"][0]["editor"], "e4")
+        self.assertTrue(any(e["type"] == "assigned" and e.get("implicit")
+                            for e in state["events"]))
+        self.ok("review", "--run-dir", self.dir, "--short-id", "s04",
+                "--verdict", "fix", "--note", "9s: caption on the chin; move it")
+        self.ok("candidate", "--run-dir", self.dir, "--short-id", "s04",
+                "--preview", "p2", "--edl-version", "7", "--note", "fixed",
+                "--editor", "e4-fix")
+        self.assertEqual(self.state()["shorts"]["s04"]["status"], "candidate")
+        self.add("s05", 15)
+        self.fails("record the brief", "candidate", "--run-dir", self.dir,
+                   "--short-id", "s05", "--preview", "p", "--edl-version", "2",
+                   "--note", "n")
+
+    def test_brief_beat_gap_is_checked(self) -> None:
+        self.add("s01", 11)
+        beats = [{"role": "hook", "cue": "a", "source_s": 459.5, "move": "slam"},
+                 {"role": "payoff", "cue": "b", "source_s": 505.0, "move": "lockup"}]
+        self.fails("459.5-505.0 s (45.5 s) with no beat", "assign", "--run-dir",
+                   self.dir, "--short-id", "s01", "--brief",
+                   self.brief("s01", beats=beats))
+        out = json.loads(self.ok(
+            "assign", "--run-dir", self.dir, "--short-id", "s01", "--brief",
+            self.brief("s01", beats=beats,
+                       beat_gap_reason="470-500 is cut in the edit")))
+        self.assertEqual(out["brief"]["max_beat_gap_s"], 45.5)
+        dense = beats[:1] + [{"role": "turn", "cue": "c", "source_s": 470.0},
+                             {"role": "hero", "cue": "d", "source_s": 482.0},
+                             {"role": "hero", "cue": "e", "source_s": 494.0}] + beats[1:]
+        out = json.loads(self.ok("assign", "--run-dir", self.dir, "--short-id", "s01",
+                                 "--brief", self.brief("s01", beats=dense)))
+        self.assertEqual(out["brief"]["max_beat_gap_s"], 12.0)
+
+    def test_register_records_a_whole_slate(self) -> None:
+        folder = self.root / "assignments"
+        folder.mkdir()
+        for n, project in ((1, 21), (2, 22)):
+            sid = f"s0{n}"
+            payload = json.loads(Path(self.brief(sid)).read_text())
+            payload.update(child_project_id=project, rank=n, score=90 - n,
+                           child_title=f"Steve Jobs: claim {n}",
+                           source_window_s=[459.31, 470.0])
+            (folder / f"{sid}.json").write_text(json.dumps(payload))
+        out = json.loads(self.ok("register", "--run-dir", self.dir,
+                                 "--assignments", str(folder)))
+        self.assertEqual(out["registered"], 2)
+        shorts = self.state()["shorts"]
+        self.assertEqual((shorts["s02"]["child_project_id"], shorts["s02"]["rank"],
+                          shorts["s02"]["score"], shorts["s02"]["title"]),
+                         (22, 2, 88, "Steve Jobs: claim 2"))
+        self.assertEqual(shorts["s01"]["look"], "kinetic-poster")
+        self.assertEqual(shorts["s01"]["source_range_s"], [459.31, 470.0])
+        # one bad brief writes nothing
+        bad = json.loads((folder / "s02.json").read_text())
+        bad["look"] = "neon"
+        (folder / "s03.json").write_text(json.dumps({**bad, "short_id": "s03",
+                                                     "child_project_id": 23}))
+        self.fails("look must be one of", "register", "--run-dir", self.dir,
+                   "--assignments", str(folder))
+        self.assertNotIn("s03", self.state()["shorts"])
+
+    def test_publishing_md_with_nothing_exported(self) -> None:
+        self.add("s01", 11)
+        self.to_candidate("s01", "e1")
+        self.ok("review", "--run-dir", self.dir, "--short-id", "s01",
+                "--verdict", "kill", "--note", "card below the floor")
+        self.ok("finalize", "--run-dir", self.dir)
+        markdown = (Path(self.dir) / "exports" / "PUBLISHING.md").read_text()
+        self.assertIn("No final was exported in this run", markdown)
+        self.assertNotIn("Every file below is a verified final", markdown)
 
     def test_brief_and_note_validation(self) -> None:
         self.add("s01", 11)

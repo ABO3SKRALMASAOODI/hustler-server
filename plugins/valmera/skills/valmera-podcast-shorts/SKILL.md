@@ -42,9 +42,9 @@ statistic (never a generic question), is a headline that owns its zone
 (`word_slam` `tier='hook'`: the captions wait until it exits) and never
 shows a word a later graphic slams; a counter really counts and shows a
 spoken range as said ('30–40'); the payoff locks its number and noun
-together and holds 0.8-1.5 s after the last word (the natural tail, else
-`add_freeze_frame` audio_mode='hold': the composed last frame over the
-source's room tone; a payoff number ~2 s on screen). Valmera's render result carries an EARN ITS PLACE advisory naming
+together and holds 0.8-1.5 s after the last word (the natural tail, chosen
+at selection; `add_freeze_frame` has no composed hold on a card layout, see
+editing.md **Known Valmera limits**; a payoff number ~2 s on screen). Valmera's render result carries an EARN ITS PLACE advisory naming
 what breaks these rules, each with a fix ([looks.md](references/looks.md),
 **Shared grammar**, has the details).
 
@@ -61,12 +61,13 @@ binary verdict. Superseded v6-v8 material lives in `legacy/`.
 
 - **Coordinator (you):** this file, [selection.md](references/selection.md),
   [looks.md](references/looks.md) and [review.md](references/review.md).
-  You select, brief, review, export and write the manifest. You do not edit
-  shorts yourself.
+  You select, run the framing pilot, brief, review, export and write the
+  manifest. Beyond the pilot's frame you do not edit shorts yourself.
 - **Editors:** [editing.md](references/editing.md), the Shared grammar,
   structure and Look sections of looks.md, one brief, its `music_effective`
   and, when that is on, the owner's song. Default **three editors**, reused:
-  a finished editor takes the next brief at once. Raise the pool (and `--max-jobs`) to 4-6
+  a finished editor takes the next brief once the run's first candidate has
+  a verdict (the first-candidate gate). Raise the pool (and `--max-jobs`) to 4-6
   when renders return in about a minute with no "shard is busy" errors.
 - Everyone runs on the session's current model (in Codex, `gpt-6.1-sol`).
 
@@ -100,34 +101,60 @@ disagree, v9 wins on method and the brief wins on preferences.
    is a new run.
 2. **Acquire and index once.** `create_project(kind='shorts')`, upload the
    source as `original` (`upload_start`/`upload_finish`; download a URL
-   locally once if Valmera cannot fetch it). Indexing takes about 15-20 min:
+   locally once if Valmera cannot fetch it; with yt-dlp fetch the video and
+   the `en-orig` captions in separate calls, so a caption 429 cannot block the
+   download). Indexing takes about 20-25 min and shows "0%" while queued:
    do not poll. Meanwhile read selection.md and looks.md and draft candidates
    from the platform's captions if it has them; then check `index_status` about every 5
-   minutes (a shell `sleep 300` between checks).
+   minutes. Waiting: the harness blocks a foreground `sleep`; run
+   `sleep 300` with `run_in_background` and continue when it reports done.
 3. **Select hero stories** ([selection.md](references/selection.md)): read
    the full transcript once, rank by hook and payoff, keep the top 8-12
    (fewer if fewer clear the bar), a standard tier only when asked, and a
-   one-line reason for every story left out.
+   one-line reason for every story left out. Look at 3-4 source frames
+   first: what the picture allows (a call window, a picture-in-picture,
+   UI, logos, a 4:3 archive) decides the layouts and so the Looks.
 4. **Materialize once.** One `make_shorts` call with verified sentence
    boundaries and a 0-100 score.
-5. **Brief** while the children build (4-7 min): for each short a Look, a
+5. **Pilot the frame and the export path once per source** (selection.md,
+   **Framing pilot**; about 15 min, 1 render, 1 export) on the rank-1 child
+   whenever a short will use a card or letterbox or the source has
+   obstacles: set the layout the briefs will use, render, measure picture
+   area and headline vs caption cap height on a native frame, and export it
+   once. Save `selection/framing.json`; every brief copies it. If no layout
+   meets the Look floors, change the Looks and structures to one that does
+   (looks.md, **Card geometry**); if Valmera cannot render or export the
+   proven layout, stop here and report the product defect (**Stop the
+   line**). Oct 2026: 8 of 9 shorts died on a frame the pilot would have
+   caught in the first 20 minutes.
+6. **Brief.** Draft while the children build (4-7 min), finish with the
+   pilot's measurements (Looks and layouts it allows): for each short a Look, a
    structure and a 150-word brief with a beat sheet (hook, turn, payoff,
-   2-4 hero moments with exact word cues), saved as
-   `assignments/<id>.json`. Then one `shorts_status(parent)`,
-   `run.py add-short` per child and `run.py assign --brief`.
-6. **Edit.** Hand each editor one short (`run.py assign --editor`) with its
-   brief, `music_effective` and `music_song`. Editors execute in batched
-   calls, render one preview, self-check with `watch_video` and rendered
-   `look_at`, fix only the weakest moment and hand back a note of at most 10
-   lines. Record it with `run.py candidate` and refill that editor.
-7. **Review** ([review.md](references/review.md)) in batches as candidates
-   arrive: five yes/no questions, then **ship**, **one targeted fix** or
-   **kill**, recorded with `run.py review`.
-8. **Export.** `export_final(project_id, edl_version)`, `wait_for_job`,
+   2-4 hero moments with exact word cues, no source gap over 12 s),
+   saved as `assignments/<id>.json` with `child_project_id`, `rank`,
+   `score` and the pilot's `framing`. Then one `shorts_status(parent)` and
+   one `run.py register --assignments <run>/assignments` (it rejects a brief
+   whose beats leave a long gap).
+7. **Edit.** Hand each editor one short (`run.py assign --editor`) with its
+   brief, `music_effective` and `music_song`; run exactly `max_editors`
+   editors. Editors execute in batched calls, render once, self-check with
+   rendered `look_at` (editing.md step 5), fix only the weakest moment and
+   hand back a note of at most 10 lines, recorded by the editor itself with
+   `run.py candidate --editor <name>` (no slot needed).
+8. **Review** ([review.md](references/review.md)) each candidate as it
+   arrives, before any new short goes out: five yes/no questions, then
+   **ship**, **one targeted fix** or **kill**, recorded with `run.py review`.
+   **First-candidate gate:** `run.py` hands out no more than `max_editors`
+   shorts until the run's first review. If a verdict names a cause the shorts
+   in flight share (layout, source, template, a Valmera tool), fix the
+   framing recipe and the open briefs before the next hand-out, or stop the
+   line.
+9. **Export** only a short whose latest review is **ship** on that exact
+   EDL version: `export_final(project_id, edl_version)`, `wait_for_job`,
    `download_url(kind='final', edl_version=...)`, save as
    `exports/<structure>__<short_id>__<slug>.mp4`, then `run.py export`
    (it computes the sha256). Watch the first final in full (`--verified-full`).
-9. **Manifest.** `run.py finalize --not-selected <file>` writes
+10. **Manifest.** `run.py finalize --not-selected <file>` writes
    `exports/manifest.json`, `publishing-manifest.json` and `PUBLISHING.md`
    in the format the publisher already reads.
 
@@ -190,15 +217,38 @@ around speech, or, when neither works, are flagged in the handback for the
 owner to add a song when posting (looks.md, **Sound without music**). Never
 invent a music choice.
 
+## Stop the line (the runs exist to upgrade Valmera)
+
+The owner's priority is upgrading Valmera; a podcast run is how its defects
+are found, not a deadline to edit around them. Run one podcast at a time.
+When the pilot, the first review or two editors hit the same Valmera defect
+(a tool that errors, a template that renders type smaller than captions, a
+layout the engine refuses, an export that fails), stop handing out shorts:
+record the unstarted ones with `run.py exception --status failed_technical`
+and the next action "revive after Valmera fix: <defect>", write the defect
+with its evidence (call, arguments, error text, job id) into the report, and
+end the run. Editing nine shorts around a defect costs hours and ships
+nothing (Oct 2026: 2 h 55 min, 729 editor calls, 25 renders, 0 exports).
+
 ## Efficiency rules
 
 - Per short: about 25-40 Valmera calls, at most 2 renders, at most 3
   `wait_for_job` calls per render. Savings come from polling, verification
   and bookkeeping; never drop a planned beat to save calls.
+- **Hard stops.** Two renders is a ceiling, never a target: a defect found
+  after render 2 goes into the handback, not into a third render (5 of 9
+  Oct shorts rendered 3-4 times and were killed anyway). The same operation
+  failing twice, or about 60 calls on one short, means stop working around
+  it: hand back `blocked` with the error text, and the coordinator records
+  `failed_technical` instead of a review.
 - `render_preview` now waits longer. Never poll in a loop, never re-render
   an unchanged version, never use a heartbeat or scheduled task. Long waits
   (indexing, `make_shorts`, exports) are checked every few minutes, not
-  every few seconds.
+  every few seconds (a backgrounded `sleep`, never a foreground one).
+- Reviews go before new edits in any shared queue: a verdict can change every
+  open brief, and a candidate waiting for review is the run's most valuable
+  information (Oct 2026: the first candidate waited 49 min while five more
+  shorts were started with its defect).
 - At most `max_jobs` Valmera jobs in flight (default 3). Writes to one child
   are serial; independent children proceed in parallel.
 - Reuse the parent source and index. No local re-encodes, local ASR, frame
@@ -209,14 +259,28 @@ invent a music choice.
   failure gets one retry, then `run.py exception` and move on.
 - To resume, read `run.py status --json` and `shorts_status(parent)`.
 
+## Known Valmera limits
+
+Tools change; the live schema wins over any doc. As of Oct 2026 several
+tools behave differently from what these references once assumed (no
+`source` on `set_picture_card`, no composed freeze hold, `apply_edit_batch`
+failing once motion graphics or erase patches exist, `watch_video` returning
+no link, the headline band starting below the free-tier mark). editing.md
+**Known Valmera limits** lists each with the working path. Read it before the
+pilot and before editing; never spend more than two calls rediscovering one.
+
 ## Run state (`scripts/run.py`, `--help` on each command)
 
-`init` · `add-short` · `assign` · `candidate` · `review` (ship | fix | kill)
-· `export` · `exception` · `status [--json]` · `finalize`, run with
-`python3`. It locks `run.json` (editors may record their own candidates),
-enforces the hero cap, one fix per short, brief and note limits, the export
-name and length, and that every short is accounted for. It never scores
-taste.
+`init` · `register` (add-short + brief for a whole assignments folder) ·
+`add-short` · `assign` · `candidate` · `review` (ship | fix | kill) ·
+`export` · `exception` · `status [--json]` · `finalize`, run with
+`python3`. It locks `run.json` (editors record their own candidates, from
+`queued` or `fix` too, without holding a slot), enforces the hero cap, one
+fix per short, brief and note limits, beat coverage in the brief, the
+first-candidate gate, the export name and length, and that every short is
+accounted for. It never scores taste. Editors save their note and handback
+as `candidates/<id>-note.txt` and `candidates/<id>-handback.json`, never in
+a session scratchpad.
 
 ## Completion report
 
