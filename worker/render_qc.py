@@ -41,7 +41,9 @@ it is measurable in two cheap passes over the rendered file:
     (the detector box with hair, chin and side margins, as picture_cards.
     panel_keep frames it) of the largest face in a picture card's panel
     must lie inside that panel; the chin and the sides inside the frame of
-    a full-frame crop (a close-up may lose the top of the hair there).
+    a full-frame crop (a close-up may lose the top of the hair there). And
+    no face lies under a panel's softened corner (CardPanel.conceal, its
+    feather included: the judged smear over Rogan's jaw).
   * THE HEADLINE BAND — where a persistent headline holds a band, the band
     is read on frames of its own: no ink there for longer than
     BAND_EMPTY_S (between graphics, before the headline's return) is a
@@ -242,6 +244,22 @@ def plan(edl, index, *, W, H, fps, outro_s=0.0, want_wm=False,
         except (KeyError, TypeError, ValueError):
             continue
     end_frame = int(round(float(program_s) * fps))
+    # Softened corners (a burned-in box a still speaker panel could not leave
+    # out, CardPanel.conceal) as canvas zones, feather included: no face may
+    # sit under one (judges, Oct 2026, round 7: a smear over Rogan's jaw).
+    softened = []
+    try:
+        import picture_cards as _pc
+        for c in fx.get("picture_cards") or []:
+            a, b = float(c["start"]), float(c["end"])
+            for pn in c.get("panels") or []:
+                if pn.get("conceal") and not pn.get("follow"):
+                    zones = _pc.conceal_canvas(pn["box"], pn["source"],
+                                               pn["conceal"], W, H)
+                    if zones:
+                        softened.append((a, b, zones))
+    except Exception:
+        softened = []
     # Layout changes: each picture card's start and end, with the frames its
     # dissolve spans (an animated end the renderer cuts — on a cut of the
     # edit — is a cut here too).
@@ -364,7 +382,8 @@ def plan(edl, index, *, W, H, fps, outro_s=0.0, want_wm=False,
             "end_frame": end_frame,
             "cut_frames": cut_frames, "events": events, "cards": cards,
             "others": others, "watermark": wm, "endcard": endcard,
-            "layout": layout, "still": still, "bands": bands}
+            "layout": layout, "still": still, "bands": bands,
+            "softened": softened}
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -598,6 +617,50 @@ def cut_faces(samples, plan_):
             where = "panel" if len(card[2]) > 1 else "card"
         out.append((r["t0"], r["t1"], r["side"], round(r["over"], 3), where))
     return out
+
+
+# A face whose box lies this much (a share of its area) under a panel's
+# softened corner, for CLIP_RUN samples running, is a face under a smear.
+SOFT_HIT = .10
+
+
+def softened_faces(samples, plan_):
+    """[(t0, t1, share)] runs of samples whose main face lies under a stack
+    panel's softened corner (plan 'softened': canvas zones, feather in) by
+    more than SOFT_HIT of the face's area — the softening of a burned-in box
+    smeared over the speaker. ``share`` the most seen."""
+    zones = plan_.get("softened") or []
+    if not zones:
+        return []
+    others = plan_.get("others") or []         # inserts play full-frame
+    rows = []
+    for t, dets in samples:
+        live = [z for a, b, zs in zones if a <= t < b for z in zs] \
+            if not any(a <= t < b for a, b in others) else []
+        hit = None
+        if live and dets:
+            top = max(d[0][3] - d[0][1] for d in dets)
+            for box, _look in dets:
+                if box[3] - box[1] < .6 * top:
+                    continue
+                area = max(1e-9, (box[2] - box[0]) * (box[3] - box[1]))
+                share = sum(max(0.0, min(box[2], z[2]) - max(box[0], z[0]))
+                            * max(0.0, min(box[3], z[3]) - max(box[1], z[1]))
+                            for z in live) / area
+                if share > SOFT_HIT and (hit is None or share > hit):
+                    hit = share
+        rows.append((t, hit))
+    runs, cur = [], None
+    for t, hit in rows:
+        if hit is not None:
+            cur = [cur[0], t, cur[2] + 1, max(cur[3], hit)] if cur else [t, t, 1, hit]
+            continue
+        if cur and cur[2] >= CLIP_RUN:
+            runs.append((cur[0], cur[1], round(cur[3], 3)))
+        cur = None
+    if cur and cur[2] >= CLIP_RUN:
+        runs.append((cur[0], cur[1], round(cur[3], 3)))
+    return runs
 
 
 def band_ink(path, band, W, H, deadline, fps=None):
@@ -917,7 +980,7 @@ def check(path, plan_, budget_s=BUDGET_S):
     fps, W, H = plan_["fps"], plan_["W"], plan_["H"]
     prog = plan_["program_s"]
     res = {"version": QC_VERSION, "findings": [], "jumps": [], "clipped": [],
-           "cut": [], "layout": [], "band": [],
+           "cut": [], "softened": [], "layout": [], "band": [],
            "endcard": None, "watermark": None, "faces": 0, "skipped": []}
     # Cheapest and most important first: the branding a final must carry,
     # then the faces, then the full-rate frame pass (shorts only — a long
@@ -938,6 +1001,7 @@ def check(path, plan_, budget_s=BUDGET_S):
         res["faces"] = sum(1 for _t_, d in samples if d)
         res["clipped"] = [list(c) for c in clipped_faces(samples, plan_)]
         res["cut"] = [list(c) for c in cut_faces(samples, plan_)]
+        res["softened"] = [list(c) for c in softened_faces(samples, plan_)]
     except Exception as exc:
         res["skipped"].append(f"faces: {str(exc)[:80]}")
     if prog <= MAX_FULL_PASS_S:
@@ -1012,6 +1076,13 @@ def findings(res, plan_):
             f"runs {100 * over:.0f}% past the {where}'s {side} edge — re-solve "
             "the card's source rect from the face (set_picture_card source="
             "'auto'), re-aim the crop, or cut away")
+    for t0, t1, share in res.get("softened") or []:
+        out.append(
+            f"FACE UNDER A SOFTENED CORNER {t0:.1f}-{t1:.1f}s: {100 * share:.0f}% "
+            "of the speaker's face lies under the panel's softened corner (the "
+            "burned-in box its framing could not leave out) — a smear on the "
+            "face; set_picture_card again (an 'auto' speaker panel trims the "
+            "softening off the head) or show the speaker another way")
     for t0, t1, bid in res.get("band") or []:
         out.append(
             f"EMPTY HEADLINE BAND {t0:.2f}-{t1:.2f}s: the band the persistent "

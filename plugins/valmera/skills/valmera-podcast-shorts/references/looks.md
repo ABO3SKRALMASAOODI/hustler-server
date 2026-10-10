@@ -68,6 +68,15 @@ The coordinator assigns one Look and one structure per short. The editor reads
   never on a panel edge or the seam between panels, never on the chin, on
   the screen panel only when nothing else is free; usually the band above
   the speaker panel. Do not pin a `placement_track` between panels.
+- A stack's speaker panel is framed from the face (the face box 8% inside
+  each panel edge; a screen box touching the face shows as a corner,
+  softened only away from the face). When the reply says `BETTER LAYOUT
+  (measured)`, use it (a speaker card alone with the figures as stat
+  graphics, or the speaker full-bleed with the screen as its own cut-in);
+  an `EDGE SLIVER` note is a pillar or frame edge at a card's border — look
+  at it. A 4:3 archival speaker card with `box` omitted gets the engine's
+  larger window (full width, y 0.27-0.70) with the headline band above and
+  a caption band below.
 - One accent colour for the whole short, passed to every graphic's `accent`
   (a graphic added without one takes the short's Look accent — the captions'
   highlight colour), at most 3 type roles per short — a backbone, one
