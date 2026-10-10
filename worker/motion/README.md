@@ -114,6 +114,13 @@ Never use `Date`, `performance.now`, `Math.random`, `setTimeout`,
   `MG.noise(x)`, `MG.rand(seed)` (deterministic), `MG.esc(str)`.
 - Set `MG.box = [x0, y0, x1, y1]` (design px, include glow/shadow/motion
   overshoot) once layout is known so capture is clipped to it.
+- Stacked type: `MG.glyphBoxes(el)` → the ink box of every glyph (pen
+  position from the DOM, ink from the font), and `MG.stackGap(upper, lower,
+  {clear, pad})` → how far `lower` must move down so none of its glyphs comes
+  within `clear` px of a glyph of `upper` in the same column. Tight lockups
+  keep their designed leading and push a row down only where a descender or
+  swash would hit the caps below (phrase_build, word_slam); measure before
+  any transform is applied.
 
 ### Legibility: the plate under the graphic
 

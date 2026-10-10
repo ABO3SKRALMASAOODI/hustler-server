@@ -193,8 +193,11 @@ GRAPHIC CHOICE PLAYBOOK — pick by what the line does, not by habit:
 - A contrast punchline ("promised flying cars … got 140 characters") is a
   two-beat swap: the setup words land as type on their onset, then a hard
   swap to the payoff words on theirs. A `counter` only for a quantity that
-  grows or is counted; it lands ON the spoken number, and that number is not
-  also in the caption at the same moment.
+  grows or is counted; it lands ON the spoken number (the write sets `land`
+  on its onset), starts on the lead-in so it never counts through the setup,
+  and that number is not also in the caption at the same moment. A number
+  that IS the punchline takes `counter` with `style='reveal'` (a hard cut on
+  the word), never a count-up that shows 111, 139 while the setup plays.
 - Items of one list share one type role; only the last may escalate.
 - The hook is the speaker's own strongest line (verbatim, or its sharpest
   words) or a preview of the payoff set as an editorial lockup — not an

@@ -93,7 +93,11 @@ TYPE SYSTEM — one per video:
   condensed heavy — on a few words.
 - Pre-lay the block: a lockup's full layout is computed before any word
   reveals, so words appear IN PLACE and the block never reflows. Stacked
-  lockups with tight leading (0.85–0.95) may overlap deliberately.
+  lockups use tight leading (0.85–0.95), but glyphs never collide:
+  `phrase_build`, `word_slam` and its kicker measure every glyph's ink and
+  push a row down just enough that a descender or swash clears the caps
+  below. A crossing is a deliberate choice (`phrase_build leading='overlap'`),
+  never the default.
 - Tracking tight on bold sans (−2 to −5%), generous size, mixed case unless
   the look calls for caps.
 

@@ -80,17 +80,25 @@ CHOOSING A TEMPLATE — confirm names and params with `list_motion_templates()`:
   its onset and sets the phrase's words the rows leave out as small lines
   between them); `glow_title` for a luminous keyword on dark or night footage.
 - Reveal grammar: `typewriter` for a typed prompt, definition or terminal
-  line (25–40 chars/s with a cursor; `typing` sound under it when it is
+  line (25–40 chars/s with a cursor; the first key and its plate land on the
+  item's first frame, so start it on the word; `typing` sound under it when it is
   sounded); `text_scramble` for
   a decode reveal (secrets, tech, "the answer is…"); `marker_text` for a
   highlighter sweep behind the key phrase.
 - Structure: `chapter_title` at a real section turn ("The problem", "Step
   two"); `timeline_steps` for a spoken sequence of dates or steps;
   `checklist` for a spoken list ticking on item by item; `versus_split` for
-  a genuine A-versus-B contrast; `quote_card` for a faithful quotation held
+  a genuine A-versus-B contrast (`vs='serif'` sets an italic-serif "vs" as
+  type instead of the disc badge — the editorial choice; keep the two values
+  short, they share one size and one line count); `quote_card` for a faithful quotation held
   long enough to read.
-- Numbers: `counter` when a figure is spoken (expo-out count-up landing on
-  the word); a rapid run of spoken stats as one `word_slam` each with
+- Numbers: `counter` when a figure is spoken. The number completes ON the
+  word: the write sets its `land` 20 ms before the spoken number's onset
+  (never earlier) and says so. A count starts on the lead-in (~0.45 s before
+  the word) so the roll is short, never across the setup; a punchline number,
+  or one that is not a growing quantity ('140 characters'), uses
+  `style='reveal'` — no count, the whole number hard-cuts on at the word; a
+  word_slam whose hero is a figure ('32%', not a name like 'GPT-4') is moved so it lands on the word too. A rapid run of spoken stats as one `word_slam` each with
   `fit='justify'` and the figure over its label (`'*32%* / fewer errors'`,
   pop entrance on the figure's onset); `stat_card` for a metric plus its meaning; `bar_compare` for
   2–4 spoken quantities; `line_chart` for a spoken trend; `progress_ring`

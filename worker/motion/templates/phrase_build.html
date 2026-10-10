@@ -1,5 +1,5 @@
 <!--MG-SPEC {"title": "Phrase build", "category": "type",
- "description": "A pre-laid-out typographic lockup (up to 4 rows mixing sans, serif, script, condensed and mono at a 2:1-7:1 size ladder, tight negative leading) whose words appear IN PLACE as they are spoken - the block never reflows. Use it for a key sentence instead of captions: quote the transcript in the rows and place the block in face-free space with x/y/width/align. Words reveal in reading order: a spoken row's words land on their spoken onsets (the engine times them from the transcript; 'at' is the fallback for rows nobody says). While it is up it owns the phrase it shows: captions yield from its first shown word, and the phrase's words the rows leave out are set in small type between the rows, each on its onset.",
+ "description": "A pre-laid-out typographic lockup (up to 4 rows mixing sans, serif, script, condensed and mono at a 2:1-7:1 size ladder, rows stacked as tight as their measured glyphs allow without touching) whose words appear IN PLACE as they are spoken - the block never reflows. Use it for a key sentence instead of captions: quote the transcript in the rows and place the block in face-free space with x/y/width/align. Words reveal in reading order: a spoken row's words land on their spoken onsets (the engine times them from the transcript; 'at' is the fallback for rows nobody says). While it is up it owns the phrase it shows: captions yield from its first shown word, and the phrase's words the rows leave out are set in small type between the rows, each on its onset.",
  "duration": 3.0, "layer": "above_captions", "mutes_captions": true, "reads_phrase": true,
  "params": {
   "rows": {"type": "rows", "required": true, "fields": ["text", "role", "size", "accent", "at"], "max_items": 4, "max": 48, "hint": "up to 4 rows in reading order: text (the speaker's exact words); role sans|serif|script|condensed|mono; size relative (e.g. 0.5, 1, 1.6; ladder up to 7:1); accent '1' tints the row (or *star* single words); at = row reveal time in item seconds for a row nobody says (blank = right after the previous row) - spoken rows land on their spoken onsets"},
@@ -12,6 +12,7 @@
   "entrance": {"type": "enum", "values": ["pop", "ghost", "rise"], "default": "pop", "hint": "pop = hard cut per word; ghost = 2 frames at 35% then snap; rise = small rise + blur-to-sharp"},
   "word_stagger": {"type": "float", "min": 0.0, "max": 0.6, "default": 0.14, "hint": "seconds between words inside an unspoken row (0 = the whole row at once); squeezed so a row is complete before the next row starts"},
   "exit": {"type": "enum", "values": ["cut", "fade", "blur"], "default": "cut"},
+  "leading": {"type": "enum", "values": ["clear", "overlap"], "default": "clear", "hint": "clear = rows sit as tight as their measured glyphs allow and never touch (a descender or swash never hits the row below); overlap = the designed negative leading as-is, rows may cross (a script swash dipping into the row below) - only when that collision is the design"},
   "scrim": {"type": "float", "min": 0, "max": 1, "default": 0.45, "hint": "soft dark backing under the block so thin serif/script rows read over bright shirts and walls; 0 = none"}
  },
  "example": {"rows": [{"text": "Your", "role": "script", "size": "1.1", "at": "0"},
@@ -155,6 +156,7 @@
     // widest row fills the column; the block stays under ~52% of the frame height
     // and the biggest row under ~20% FH (bridge lines wrap inside the column)
     let k = Math.min(colW / wUnit, 0.52 * H / hUnit, 0.2 * H / (100 * maxSize));
+    // the column is placed first: rows only collide where their glyphs share a column
     blk.style.width = colW + 'px';
     blk.style.left = (cx - colW / 2) + 'px';
     blk.style.alignItems = P.align === 'left' ? 'flex-start' : P.align === 'right' ? 'flex-end' : 'center';
@@ -176,22 +178,47 @@
         }
       });
     };
+    // glyph-aware leading: keep the designed tightness, but push a row (or a
+    // bridge line) down just enough that no glyph of it comes near a glyph of
+    // the row above in the same column (descenders onto caps, a swash onto
+    // the next row)
+    const clearRows = () => {
+      if (P.leading === 'overlap') return;
+      rows.forEach((r, i) => {
+        if (!i) return;
+        const prev = rows[i - 1], m = Math.min(prev.fs, r.fs);
+        const need = MG.stackGap(prev.el, r.el, { clear: 0.07 * m, pad: 0.03 * m });
+        if (need > 0.25) r.el.style.marginTop = (parseFloat(r.el.style.marginTop) + need) + 'px';
+      });
+    };
+    const fit = (kk, b) => { sizeRows(kk, b); clearRows(); };
     // bridge lines: small type, about half the smallest row, readable on a phone
-    let bfs = Math.min(0.04 * H, Math.max(0.024 * H, 0.45 * 100 * k * Math.min(...authored.map(r => r.size))));
-    sizeRows(k, bfs);
+    const bfsOf = kk => Math.min(0.04 * H, Math.max(0.024 * H, 0.45 * 100 * kk * Math.min(...authored.map(r => r.size))));
+    let bfs = bfsOf(k);
+    fit(k, bfs);
     const bridges = rows.filter(r => r.bridge);
+    // the block's height without its bridge lines (the designed ladder)
+    const bare = () => {
+      bridges.forEach(r => { r.el.style.display = 'none'; });
+      const h = blk.getBoundingClientRect().height;
+      bridges.forEach(r => { r.el.style.display = ''; });
+      return h;
+    };
+    if (P.leading !== 'overlap') {
+      // the pushed ladder still keeps the ~52% height budget
+      const h0 = bare();
+      if (h0 > 0.52 * H) { k *= 0.52 * H / h0; bfs = bfsOf(k); fit(k, bfs); }
+    }
     if (bridges.length) {
       // the lockup keeps about the footprint it was designed at: bridge lines
       // may add GROW of its height, beyond that the whole ladder scales down
       const hb = blk.getBoundingClientRect().height;
-      bridges.forEach(r => { r.el.style.display = 'none'; });
-      const h0 = blk.getBoundingClientRect().height;
-      bridges.forEach(r => { r.el.style.display = ''; });
+      const h0 = bare();
       if (h0 > 0 && hb > GROW * h0) {
         const f = Math.max(0.55, GROW * h0 / hb);
         k *= f;
         bfs = Math.max(0.022 * H, bfs * f);
-        sizeRows(k, bfs);
+        fit(k, bfs);
       }
     }
     lastFs = Math.max(...rows.map(r => r.fs));

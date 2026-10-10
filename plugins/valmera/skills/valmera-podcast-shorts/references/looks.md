@@ -405,7 +405,8 @@ A `custom-<slug>` Look is allowed when the brief spells out every field below.
   the biggest hit at most. The energy comes from the type — never a landing
   on every cut or a punch on every sentence.
 - **Signature:** `word_slam` on 3-5 hero words (start 0.2 s before the word);
-  `phrase_build` for the thesis; `versus_split` for a contrast; `image_card`
+  `phrase_build` for the thesis; `versus_split` for a contrast (`vs='serif'`
+  for a typographic 'vs' instead of the disc); `image_card`
   or `photo_stack` for licensed evidence; `chapter_title` between list items;
   `glitch_burst` or `flash_transition` at the turn.
 - **Transitions + sound:** `zoom_punch` or whip base. Family, only where a
