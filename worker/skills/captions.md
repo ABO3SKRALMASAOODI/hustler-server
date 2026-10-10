@@ -130,8 +130,9 @@ panels', is overridden where it lands on a seam). In a speaker + screen
 stack the captions usually take the band above the speaker panel. A page
 never carries its place across a layout change onto the new layout: it ends
 there, and a word said within two frames before the change appears with
-the new layout (never later). Pages of one connector word ("and", "that",
-"on") join their line.
+the new layout (never later) — so does a word said less than a page's
+minimum (0.12 s) before it, rather than flash or be lost. Pages of one
+connector word ("and", "that", "on") join their line.
 
 LEGACY PRESET FAMILIES (`style.preset`) remain available and are the right
 choice for subtitles and specific grammars:

@@ -398,3 +398,41 @@ def test_a_face_zone_mapped_past_a_card_window_never_blocks_the_canvas(monkeypat
     assert caption_carry._in_windows([stray], []) == [stray]
     clipped = caption_carry._chins([head, stray], rects)
     assert max(z[3] for z in clipped) <= 0.676 + 1e-9
+
+
+def test_a_word_said_just_before_a_layout_change_is_never_lost():
+    # final review (round 7 showcase, Elon): 'than' (14.66-15.40) starts
+    # 0.10 s before the last stat slam leaves at 14.76 — more than two
+    # frames, so it kept the slam stretch's place (the screen panel), its
+    # page was cut at the change after 0.10 s and the cue builder dropped a
+    # page that short: a heard word never reached the screen. A word that
+    # would show for less than a page's minimum before a placement change
+    # appears ON the change, in the new layout's place, with its line.
+    words = STATS + [("than", 5.46, 6.2), ("their", 6.2, 6.42),
+                     ("non-player", 6.42, 6.98), ("colleagues.", 6.98, 7.44)]
+    st3 = _slam("st3", 3.8, 5.56, "*26%* / better overall")
+    edl = _edl([_stack(2.0, 7.6)], motion=[st3], words=words, dur=9.0)
+    ix = _index(words=words)
+    tl = Timeline(edl["keep"])
+    p = _plan(edl, ix)
+    said = {w["w"]: w for w in p.caption_words()}
+    assert "than" in said
+    than = said["than"]
+    # on the change, never more than a page's minimum after its onset
+    assert than["t0"] == pytest.approx(5.56)
+    assert than["t0"] - than["t0_said"] <= caption_carry.MIN_PAGE_S + 1e-6
+    # in the layout's place after the slam, with the rest of its line
+    assert than.get("place") == said["their"].get("place")
+    cues = motion_captions.cues(edl, ix, tl, canvas=(1080, 1920))
+    shown = [w["t"].lower() for c in cues for w in c["w"]]
+    for w in ("than", "their", "non-player", "colleagues"):
+        assert w in shown, (w, [[x["t"] for x in c["w"]] for c in cues])
+    first = next(c for c in cues if any(w["t"].lower() == "than" for w in c["w"]))
+    assert first["s"] == pytest.approx(5.56, abs=1e-3)
+    assert first["e"] - first["s"] >= caption_carry.MIN_PAGE_S
+    # a word said well before the change keeps its own moment and place
+    early = [("than", 5.2, 6.2)] + words[-3:]
+    edl2 = _edl([_stack(2.0, 7.6)], motion=[st3], words=STATS + early, dur=9.0)
+    p2 = _plan(edl2, _index(words=STATS + early))
+    w2 = next(w for w in p2.caption_words() if w["w"] == "than")
+    assert w2["t0"] == pytest.approx(5.2) and "t0_said" not in w2

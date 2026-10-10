@@ -2115,7 +2115,10 @@ LEGIBILITY_VERSION = 3
 # panel, faces with their chin, props and the watermark, re-solving at every
 # layout change. Transcript-caption EDLs with picture cards are stamped too.
 # A word-timed reveal (a lockup's rows, marker_text's line) within 0.15 s
-# after its window's start shows at the start (round 6 motion track).
+# after its window's start shows at the start (round 6 motion track). A
+# word said less than a page's minimum (0.12 s) before a placement change
+# appears on the change in the new place instead of being dropped as a
+# too-short page (final review; still unreleased v3).
 CAPTION_CARRY_VERSION = 3
 
 # Crops and picture cards that follow the speaker's face inside a shot

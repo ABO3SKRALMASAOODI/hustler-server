@@ -35,8 +35,10 @@ named (the write NOTE, ``heard_unshown``, the sound-off audit); under any
 other graphic they stay where they were. Placement is re-solved at every
 layout change — a graphic's or card's edges, a cut inside a card — and a
 page never holds its place across one (``Plan.hold_limit``); a word said
-within two frames before the change appears ON it; one or two words a
-change would strand take their line's place when it is clear for them.
+within two frames before the change appears ON it (and one said less than a
+page's minimum before it, MIN_PAGE_S, rather than flash or be lost); one or
+two words a change would strand take their line's place when it is clear
+for them.
 
 Everything here is a pure function of the EDL, the index and the timeline,
 and it is the ONE caption placement pass: the libass captions, the motion
@@ -770,7 +772,9 @@ class Plan:
     sit on the captions); ``placed[i]`` = the band dict for a word moved
     clear of a graphic or of a card layout's edges; ``shown_at[i]`` = the
     program second a word snapped forward onto a layout change appears
-    (never more than caption_place.SNAP_FRAMES late); ``clamp_spans`` are
+    (never more than caption_place.SNAP_FRAMES late — or MIN_PAGE_S, for a
+    word that would otherwise show for less than a page before the change
+    and be dropped: _onto_next_layout); ``clamp_spans`` are
     program windows a caption from before may not hold into (a graphic
     occupies the caption band there, or the placement changes);
     ``yield_spans`` and ``wait_spans`` are kept for older callers and are
@@ -843,7 +847,11 @@ class Plan:
                 word["place"] = dict(place)
             if i in self.shown_at and self.shown_at[i] > float(w["t0"]):
                 word["t0_said"] = float(w["t0"])
-                word["t0"] = round(min(self.shown_at[i], float(w["t1"]) - 0.01), 4)
+                word["t0"] = round(self.shown_at[i], 4)
+                # a word that ended before the change it waits for still
+                # gets a moment on screen (never a start before the change)
+                if float(w["t1"]) < word["t0"] + 0.01:
+                    word["t1"] = round(word["t0"] + 0.01, 4)
             out.append(word)
             prev_hidden, prev_place = False, place
         return out
@@ -959,6 +967,60 @@ def _prior_in_cards(rects):
 # lower third arrives), they take the other side's place — when it is clear
 # for them where they are said — instead of flashing as an orphan page.
 SMOOTH_MAX_WORDS = 2
+# The shortest caption page the caption track draws (motion_captions.cues
+# drops a shorter one as a flash). A word said less than this before a
+# placement change it cannot hold across would get a shorter page in the
+# old place — or none, a heard word lost (final review, round 7: Elon's
+# 'than', 0.10 s before the last stat slam left) — so it appears ON the
+# change in the new layout's place instead (_onto_next_layout).
+MIN_PAGE_S = 0.12
+
+
+def _next_layout(bounds, state, k):
+    """The first segment after ``k`` that has a length (zero-length
+    segments sit where two edges meet), or None."""
+    for j in range(k + 1, len(state)):
+        if bounds[j + 1] - bounds[j] >= 1e-3:
+            return j
+    return None
+
+
+def _onto_next_layout(p, words, bounds, seg_of, state, cuts=()):
+    """Move each visible word that would START a page less than MIN_PAGE_S
+    before a placement change (the next segment places the captions
+    elsewhere, and does not mute them) into the segment after it: it takes
+    that segment's place and appears on the change (plan's shown_at). A word
+    starts a page after a hidden word (a graphic's), a word in another place
+    or a break the captions take anyway (_line_break); one inside a running
+    line is shown on its page, which began earlier. Returns {word index: the
+    place it had}; _smooth_flips may still hand it back to its line's place
+    where that place is clear after the change."""
+    moved = {}
+    prev = None
+    for i, w in enumerate(words):
+        if i in p.hidden:
+            continue
+        j, prev = prev, i
+        if j is not None and j == i - 1 and p.placed.get(j) == p.placed.get(i) \
+                and not _line_break(words[j], w, cuts):
+            continue
+        t0 = float(w["t0"])
+        k = seg_of[i]
+        while True:
+            nk = _next_layout(bounds, state, k)
+            if nk is None or not t0 < bounds[nk] < t0 + MIN_PAGE_S - 1e-6:
+                break
+            nxt = state[nk]
+            here = p.placed.get(i)
+            if nxt == "mute" or nxt == here:
+                break
+            moved.setdefault(i, here)
+            seg_of[i] = k = nk
+            if nxt is None:
+                p.placed.pop(i, None)
+            else:
+                p.placed[i] = nxt
+    return moved
 
 
 def _line_break(prev, nxt, cuts):
@@ -1233,20 +1295,25 @@ def plan(edl, index, tl, words, canvas=None):
             for m in live:
                 p.report[m["id"]]["placed"] = p.report[m["id"]]["placed"] or \
                     dict(place, normal_y=round(normal_y, 4))
+    import captions as caplib
+    moved = _onto_next_layout(p, words, bounds, seg_of, state, caplib.program_cuts(tl))
     _smooth_flips(p, edl, index, tl, W, H, col, bounds, seg_of, state, info)
     p.segments = [(bounds[k], bounds[k + 1], state[k]) for k in range(nseg)]
     for a, b, st in p.segments:
         if st is not None:
             p.clamp_spans.append([a, b])
     # a word said within two frames before a layout change it is placed
-    # for appears ON the change (the page never flips early)
+    # for appears ON the change (the page never flips early) — and so does
+    # one moved there because its page before the change would be too short
+    # to draw (_onto_next_layout), unless it went back to its line's place
     prev = None
     for i, w in enumerate(words):
         if i in p.hidden:
             continue
         place = p.placed.get(i)
         k = seg_of[i]
-        if prev is not None and place != prev[1] and k < nseg and \
+        rescued = i in moved and place != moved[i]
+        if (rescued or (prev is not None and place != prev[1])) and k < nseg and \
                 float(w["t0"]) < bounds[k] and k > 0:
             p.shown_at[i] = bounds[k]
         prev = (i, place)

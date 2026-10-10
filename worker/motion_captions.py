@@ -253,7 +253,7 @@ def cues(edl, index, tl, canvas=None):
                 if m0 <= s < m1 and m1 - s <= caption_carry.START_WAIT_S \
                         and e - (m1 + CAPTION_LEAD_S) >= MIN_WAITED_CUE_S:
                     s = m1 + CAPTION_LEAD_S
-        if e - s < 0.12 - 1e-6:
+        if e - s < caption_carry.MIN_PAGE_S - 1e-6:
             continue
         # Every word spoken: the line clears ON the cut that ends its shot
         # (a hard clear — a hold or fade surviving a jump cut ghosts over
