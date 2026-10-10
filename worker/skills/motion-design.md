@@ -105,9 +105,12 @@ CHOOSING A TEMPLATE — confirm names and params with `list_motion_templates()`:
   YIELDS on its own at render time — gone on the frame any graphic that
   occupies its band lands, back from the frame it leaves (it holds every gap
   of 0.15 s or more: the band is never left empty; a phrase build yields
-  from its first revealed row) — so hero lockups replace it and hand the
-  band back without any timing on your side. Start each band graphic on its
-  first visible word: the PICTURE CHECK names an empty band over 0.15 s.
+  from its first revealed row; a graphic within 0.6 s of the headline's own
+  start or end takes the band from/to that edge) — so hero lockups replace
+  it and hand the band back without any timing on your side. Start each
+  band graphic on its first visible word and keep every row inside the
+  band: the PICTURE CHECK names an empty band over 0.15 s (a row drawn up
+  in the watermark's zone leaves the band itself empty).
   It is silent, never mutes or replaces captions, is not counted as a
   designed moment, and the write refuses a second overlapping headline, more
   than one accent span, a window under 4 s and a full-bleed frame without an

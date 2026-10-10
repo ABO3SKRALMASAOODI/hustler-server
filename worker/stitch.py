@@ -1185,9 +1185,10 @@ def plan_timeline(prev_edl, new_edl, tl_prev, tl_new, out_duration,
     if ((prev_edl.get("frame") or {}).get("focus_track")
             and prev_edl.get("keep") != new_edl.get("keep")):
         return None, None, "changed segment midpoint can select a different tracked crop"
+    import follow
     if prev_edl.get("keep") != new_edl.get("keep") and any(
             ((e.get("frame") or {}).get("follow")
-             or any(isinstance(c, dict) and c.get("follow")
+             or any(follow.card_follows(c)
                     for c in ((e.get("effects") or {}).get("picture_cards") or [])))
             for e in (prev_edl, new_edl)):
         # a follow block snaps its holds on its own union frame: the same

@@ -16155,8 +16155,10 @@ def _panel_speaker(ctx, edl, spans, box, canvas, video, prefer=None,
     return rect, info, follows, failure
 
 
-def _speaker_note(info, k, moved_from=None):
-    """The tool-result words for a solved speaker panel."""
+def _speaker_note(info, k, moved_from=None, concealed=True):
+    """The tool-result words for a solved speaker panel. ``concealed``:
+    the corner a burned-in box forces in is softened in the render (a
+    following panel's is not: its rect moves)."""
     bits = []
     lead = (info or {}).get("lead")
     bits.append("face held whole with chin and hair margins"
@@ -16176,15 +16178,23 @@ def _speaker_note(info, k, moved_from=None):
             f"NOTE: the burned-in screen box touches the speaker's face in the "
             f"source — no framing that holds the face can leave it out, so "
             f"{max(1, round(share * 100))}% of the panel (a corner) still "
-            "shows it, softened (blurred, darkened, feathered in: it reads as "
-            "shadow, not a second screen); the face wins (owner rule). If that "
-            "corner still distracts, show the speaker full-bleed and the screen "
-            "as its own cut-in card")
+            + ("shows it, softened (blurred, darkened, feathered in: it reads "
+               "as shadow, not a second screen)" if concealed else
+               "shows it — NOT softened: the panel follows the speaker, so the "
+               "corner moves; look at it")
+            + "; the face wins (owner rule). If that corner still distracts, "
+            "show the speaker full-bleed and the screen as its own cut-in card")
     elif (info or {}).get("avoid"):
         bits.append("the burned-in screen box kept out of the panel")
     if moved_from is not None:
-        bits.append("the given rect cut the speaker's face — moved/grown to "
-                    f"[{', '.join(f'{v:.3f}' for v in moved_from)}] to hold it")
+        to = f"[{', '.join(f'{v:.3f}' for v in moved_from)}]"
+        if (info or {}).get("cut"):
+            bits.append(f"the given rect cut the speaker's face — moved/grown "
+                        f"to {to} to hold it")
+        else:
+            bits.append(f"the given rect held the face; adjusted to {to} "
+                        "(the head's margins from the panel edge, or the "
+                        "burned-in box kept out)")
     return "; ".join(bits)
 
 
@@ -16278,18 +16288,20 @@ def _speaker_panel(ctx, edl, spans, box, source, fit, canvas, video, k):
         # the follow path moves the rect's centre: keep it on the fitted rect
         frect = picture_cards.recentre(frect, (
             (rect[0] + rect[2]) / 2.0, (rect[1] + rect[3]) / 2.0))
-    note = (f"{int(sw)}x{int(sh)} speaker rect "
-            f"[{', '.join(f'{v:.3f}' for v in frect)}] -> box "
-            f"[{', '.join(f'{v:.3f}' for v in fbox)}], enlarged {kk:.2f}x; "
-            + _speaker_note(info, k, moved_from=frect if info.get("moved") else None))
-    if tried != list(box):
-        note += (f"; the box narrowed to x {tried[0]:.3f}-{tried[2]:.3f} so the "
-                 "speaker's head fits its shape")
     # what of a burned-in box the face forced in is softened in the render
+    # (a still panel only: a following panel's rect moves over it)
     conceal = None
     if float(info.get("inset") or 0.0) >= 1.0 and not follows:
         conceal = [list(b) for b in info.get("avoid") or []
                    if picture_cards._overlap(frect, b) > 0] or None
+    note = (f"{int(sw)}x{int(sh)} speaker rect "
+            f"[{', '.join(f'{v:.3f}' for v in frect)}] -> box "
+            f"[{', '.join(f'{v:.3f}' for v in fbox)}], enlarged {kk:.2f}x; "
+            + _speaker_note(info, k, moved_from=frect if info.get("moved") else None,
+                            concealed=not follows))
+    if tried != list(box):
+        note += (f"; the box narrowed to x {tried[0]:.3f}-{tried[2]:.3f} so the "
+                 "speaker's head fits its shape")
     return fbox, [round(v, 4) for v in frect], follows, note, conceal
 
 

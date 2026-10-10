@@ -91,6 +91,29 @@ def test_an_editors_rect_that_cuts_the_chin_moves_only_as_far_as_it_must():
     assert pc._overlap(rect, given) > .5 * (given[2] - given[0]) * (given[3] - given[1])
 
 
+def test_an_editors_rect_of_another_shape_that_holds_the_face_is_not_cut():
+    """A look_at rect taller than the box is the editor's framing: it is
+    trimmed to the box as fit='crop' shows it (from the bottom up) and the
+    face it holds is never reported as cut."""
+    face = [0.40, 0.30, 0.52, 0.52]
+    given = [0.25, 0.10, 0.70, 0.90]
+    rect, info = pc.panel_framing(SW, SH, W, H, PANEL, [face], [0], prefer=given)
+    assert not info["cut"] and _inside(rect, pc.panel_keep([face]))
+    a, b = _aspect(rect, PANEL)
+    assert a == pytest.approx(b, rel=.01)
+    # its width and top are the editor's (a nudge for the margins at most)
+    assert rect[0] == pytest.approx(given[0], abs=.01)
+    assert rect[2] == pytest.approx(given[2], abs=.01)
+    assert rect[1] == pytest.approx(given[1], abs=.02)
+    note = agent_tools._speaker_note(info, 0, moved_from=rect)
+    assert "cut the speaker's face" not in note and "held the face" in note
+    # a rect that does cut the face says so
+    _r, info = pc.panel_framing(SW, SH, W, H, PANEL, [face], [0],
+                                prefer=[0.35, 0.0, 0.75, 0.4])
+    assert info["cut"] and info["moved"]
+    assert "cut the speaker's face" in agent_tools._speaker_note(info, 0, moved_from=_r)
+
+
 def test_no_framing_of_this_shape_holds_a_head_taller_than_the_source_allows():
     face = [0.40, 0.02, 0.60, 0.95]                    # a head filling the frame
     rect, info = pc.panel_framing(SW, SH, W, H, [0.04, 0.4, 0.96, 0.5], [face], [0])
@@ -198,7 +221,11 @@ def test_a_screen_rect_is_left_alone(monkeypatch):
         {"box": [0.04, 0.287, 0.96, 0.57], "source": "auto"},
         {"box": [0.04, 0.65, 0.96, 0.885], "source": INSET, "fit": "crop"}])
     assert res.startswith("EDL v"), res
-    assert ctx.card()["panels"][1]["source"] != INSET or True
+    # the screen panel is resolved as before (cropped to its box's shape
+    # inside the given rect), never re-solved around the speaker's face
+    r = ctx.card()["panels"][1]["source"]
+    assert INSET[0] - 1e-3 <= r[0] and r[2] <= INSET[2] + 1e-3
+    assert INSET[1] - 1e-3 <= r[1] and r[3] <= INSET[3] + 1e-3
     assert "panel 2: 1920x1080 source rect" in res
 
 
@@ -253,6 +280,15 @@ def test_qc_flags_a_dip_inside_a_dissolve_and_a_blink_at_a_cut():
     assert render_qc.layout_glitches(blink, plan)[0][0] == "dip"
     lines = render_qc.findings({"layout": [list(hit)]}, {"fps": 30.0})
     assert lines and lines[0].startswith("LAYOUT DIP at 1.00s")
+    # a short (4-frame) dissolve from a bright shot to a dark card halves
+    # the level on its last frame by design: its steps are even, no glitch
+    short = {"layout": [{"t": 1.0, "lo": 30, "hi": 33, "kind": "dissolve",
+                         "id": "s", "opening": True}], "still": []}
+    fast = [140.0] * 30 + [110.0, 80.0, 50.0, 20.0] + [20.0] * 30
+    assert render_qc.layout_glitches(fast, short) == []
+    # ...while a frame of bare canvas inside it still is one
+    fast[31] = 12.0
+    assert render_qc.layout_glitches(fast, short)[0][0] == "dip"
 
 
 def test_qc_flags_a_face_cut_by_its_panel_edge():
@@ -278,9 +314,20 @@ def test_qc_flags_an_empty_headline_band_longer_than_150ms():
     ink += [(round((99 + i) / fps, 3), .2) for i in range(30)]
     gaps = render_qc.band_gaps(ink, fps)
     assert gaps == [(2.0, 2.2)]
-    # an entrance from nothing at the very start is not a dropped layer
+    # an entrance from nothing at the very start is not a dropped layer,
+    # nor the headline's own yield at either edge (motion_layer.YIELD_EDGE_S)
+    import motion_layer
+    assert render_qc.BAND_EDGE_S >= motion_layer.YIELD_EDGE_S
     opening = [(round(i / fps, 3), 0.0) for i in range(5)] + ink[5:]
     assert render_qc.band_gaps(opening, fps) == gaps
+    edge = int(motion_layer.YIELD_EDGE_S * fps) - 1
+    held = [(t, 0.0 if i < edge else v) for i, (t, v) in enumerate(ink)]
+    held += [(round((129 + i) / fps, 3), 0.0) for i in range(edge)]
+    assert render_qc.band_gaps(held, fps) == gaps
+    # ...but a hole that long mid-band is one
+    mid = ink[:40] + [(round((40 + i) / fps, 3), 0.0) for i in range(edge)] + \
+        [(round((40 + edge + i) / fps, 3), .2) for i in range(10)]
+    assert len(render_qc.band_gaps(mid, fps)) == 1
 
 
 def test_the_qc_plan_knows_layout_changes_and_the_band(tmp_path):
@@ -298,6 +345,64 @@ def test_the_qc_plan_knows_layout_changes_and_the_band(tmp_path):
     assert kinds == {(2.0, "dissolve"), (8.0, "cut")}
     (band,) = p["bands"]
     assert band["box"][1] >= 0.128 - 1e-3 and band["box"][3] == pytest.approx(.27)
+
+
+def test_the_qc_plan_judges_edges_the_renderer_cuts_as_cuts(tmp_path):
+    """Two cards meeting mid-segment cut (the renderer never dissolves into
+    another card's layout), and a timed flash at a layout change is
+    deliberate: neither may read as a dip/flash glitch (a blocking QC line)."""
+    e = default_edl(60.0)
+    e["keep"] = [[0.0, 20.0]]
+    e["frame"] = {"ratio": "9:16", "mode": "crop"}
+    a = dict(T.CARD, id="a", start=2.0, end=6.0, source=[0, 0, 1, 1],
+             entrance="fade", exit="fade", duration_s=.3)
+    b = dict(T.CARD, id="b", start=6.0, end=9.0, source=[0, 0, 1, 1],
+             entrance="fade", exit="fade", duration_s=.3)
+    e["effects"] = {"picture_cards": [a, b],
+                    "stylize": [{"id": "fl", "kind": "flash", "start": 8.9,
+                                 "end": 9.2}]}
+    e = validate_edl(e, 60.0).model_dump()
+    p = render_qc.plan(e, {}, W=1080, H=1920, fps=30.0)
+    kinds = {(x["id"], x["t"]): x["kind"] for x in p["layout"]}
+    assert kinds[("a", 2.0)] == "dissolve"
+    assert kinds[("a", 6.0)] == "cut" and kinds[("b", 6.0)] == "cut"
+    # the flash at b's exit: a level change there is not a layout glitch
+    n = 270
+    lumas = [60.0] * n + [180.0, 60.0] + [60.0] * 30
+    assert render_qc.layout_glitches(lumas, p) == []
+
+
+def test_a_following_stack_panel_counts_as_a_follow_everywhere():
+    import follow
+    import timeline
+    path = [{"t0": 0.0, "t1": 10.0, "k": [[4.0, .3, .5], [6.0, .5, .5]]}]
+    card = dict(T.CARD, start=1.0, end=6.0, panels=[
+        {"box": [.05, .3, .95, .55], "source": [.1, .1, .5, .9], "follow": path},
+        {"box": [.05, .62, .95, .9], "source": [.6, 0, 1, 1]}])
+    assert follow.card_follows(card) and follow.card_spans(card) == path
+    e = {"effects": {"picture_cards": [card]}}
+    assert follow.moves_during(e, [(4.5, 5.0)])
+    # a re-aim hidden on a jump cut slows to a glide when the cut is undone
+    s = [(t / 4.0, [.25 if t < 20 else .43, .3, .37 if t < 20 else .55, .5], 0)
+         for t in range(0, 41)]
+    keys, info = follow.plan(s, 0, 10, 607.5 / 1920, 1.0, kept=[(0.0, 4.6), (5.4, 10.0)])
+    assert info["hidden"] == 1
+    card["panels"][0]["follow"] = [{"t0": 0.0, "t1": 10.0, "k": keys}]
+    edl = {"effects": {"picture_cards": [card]}}
+    notes = timeline._reveal_follow(edl, [(0.0, 10.0)], [(0.0, 4.6), (5.4, 10.0)])
+    assert notes and "slowed" in notes[0]
+    moving = follow.moving_windows(card["panels"][0]["follow"][0])
+    assert len(moving) == 1 and moving[0][1] - moving[0][0] >= follow.MOVE_MIN_S - 1e-3
+    # a re-cut stitched preview re-renders a following panel's blocks
+    import stitch
+    from timeline import Timeline
+    short = dict(card, end=5.0)
+    prev = T._edl([short])
+    new = T._edl([short], keep=((0.5, 2.37), (3.13, 6.0), (6.9, 8.0)))
+    tl0 = Timeline(prev["keep"], [], [])
+    tl1 = Timeline(new["keep"], [], [])
+    windows, _runs, why = stitch.plan_timeline(prev, new, tl0, tl1, tl1.out_duration)
+    assert windows is None and "face-following" in why
 
 
 # ── the corner a face forces in ──────────────────────────────────────────

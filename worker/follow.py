@@ -315,6 +315,23 @@ def frame_spans(edl):
     return [sp for sp in frame.get("follow") or [] if isinstance(sp, dict)]
 
 
+def card_spans(card):
+    """Every follow span a picture card carries: its own (a single source
+    card) and each stack panel's (CardPanel.follow)."""
+    if not isinstance(card, dict):
+        return []
+    out = [sp for sp in card.get("follow") or [] if isinstance(sp, dict)]
+    for panel in card.get("panels") or []:
+        if isinstance(panel, dict):
+            out += [sp for sp in panel.get("follow") or [] if isinstance(sp, dict)]
+    return out
+
+
+def card_follows(card):
+    """True when a picture card (or one of its panels) follows a path."""
+    return bool(card_spans(card))
+
+
 def frame_focus_at(edl, src_t):
     """The crop centre the frame's follow gives at SOURCE second src_t, or
     None where no follow span holds it (the static aim applies)."""
@@ -352,8 +369,7 @@ def moves_during(edl, src_windows):
     off the picture there."""
     spans = list(frame_spans(edl))
     for card in ((edl or {}).get("effects") or {}).get("picture_cards") or []:
-        if isinstance(card, dict):
-            spans += [sp for sp in card.get("follow") or [] if isinstance(sp, dict)]
+        spans += card_spans(card)
     for sp in spans:
         for a, b in moving_windows(sp):
             if any(min(b, float(e)) - max(a, float(s)) > 1e-3 for s, e in src_windows):

@@ -31,9 +31,12 @@ it is measurable in two cheap passes over the rendered file:
     a frame of bare dark canvas — mean luma 66.6 -> 27.4 in one frame) —
     every picture card's entrance and exit is watched on the same pass's
     mean luma: a dissolve must be gradual, so any single-frame drop or
-    flash of more than LUMA_JUMP inside it is a glitch; a card that cuts
-    in or out may change level on its cut frame, never blink (dark for a
-    frame or three and back).
+    flash of more than LUMA_JUMP inside it (and well past its even step)
+    is a glitch; a card that cuts in or out — on a cut of the edit, another
+    card's edge or a focus/follow span edge, where the renderer cuts too —
+    may change level on its cut frame, never blink (dark for a frame or
+    three and back). Timed flashes, cutaways and full-frame graphics at
+    the same moment are deliberate.
   * FACES INSIDE EVERY PANEL (owner rule) — on the face samples: the head
     (the detector box with hair, chin and side margins, as picture_cards.
     panel_keep frames it) of the largest face in a picture card's panel
@@ -80,6 +83,8 @@ MAX_FULL_PASS_S = 180.0     # programmes longer than this skip the frame pass
 LUMA_JUMP = 0.5             # a frame-to-frame mean-luma change past this share
 LUMA_FLOOR = 24.0           # ...between levels, the brighter above this
 LAYOUT_REACH = 2            # frames either side of a layout change watched
+LUMA_STEP_X = 2.0           # a dissolve's step past this many even steps...
+LUMA_STEP_MIN = 8.0         # ...and this many levels is not the dissolve
 # The head a panel must hold around a detector box (picture_cards.
 # panel_keep's margins) and how far past an edge it may reach (a share of the
 # panel) before it is a cut face.
@@ -91,7 +96,10 @@ BAND_W = 240                # width the headline band is read at
 BAND_STEP = 36              # a pixel this far off its row's median is ink
 BAND_INK = .003             # ...and this share of the band of it is text
 BAND_EMPTY_S = .15          # an empty band longer than this is a hole
-BAND_OPEN_S = .5            # ...except an entrance at the very start
+BAND_EDGE_S = .65           # ...except at the band's very start or end:
+                            # a graphic landing (leaving) this close to the
+                            # headline's own edge takes the band from (to)
+                            # it (motion_layer.YIELD_EDGE_S, + a frame)
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -118,6 +126,7 @@ def plan(edl, index, *, W, H, fps, outro_s=0.0, want_wm=False,
             continue
     cut_frames = sorted({renderer.first_frame_at(c, fps) for c in cuts})
     events = []                   # (frame lo, frame hi) deliberate changes
+    deliberate = []               # ...of them, those not the cards' own
     try:
         zooms = renderer.camera_zooms(edl, index, tl, fps, src_fps, origin)
     except Exception:
@@ -153,6 +162,7 @@ def plan(edl, index, *, W, H, fps, outro_s=0.0, want_wm=False,
             continue
         events.append((renderer.first_frame_at(a, fps) - 1,
                        renderer.first_frame_at(b, fps) + 3))
+        deliberate.append(events[-1])
     for item in edl.get("vectors") or []:
         try:
             if float(item.get("width") or 0) * float(item.get("height") or 0) >= .4:
@@ -167,10 +177,14 @@ def plan(edl, index, *, W, H, fps, outro_s=0.0, want_wm=False,
             continue
         a = item.get("start")
         b = item.get("end")
+        timed = a is not None or b is not None
         a = 0.0 if a is None else float(a)
         b = float(program_s) if b is None else float(b)
         events.append((renderer.first_frame_at(a, fps) - 1,
                        renderer.first_frame_at(b, fps) + 3))
+        if timed:
+            # a timed flash or shake (a whole-programme look never dips)
+            deliberate.append(events[-1])
     for item in edl.get("motion") or []:
         if not isinstance(item, dict):
             continue
@@ -181,6 +195,7 @@ def plan(edl, index, *, W, H, fps, outro_s=0.0, want_wm=False,
             area = 1.0
         if area >= .4:
             layers.append(item)
+    card_items = {id(c) for c in fx.get("picture_cards") or []}
     for item in layers:
         if not isinstance(item, dict):
             continue
@@ -190,6 +205,10 @@ def plan(edl, index, *, W, H, fps, outro_s=0.0, want_wm=False,
             except (KeyError, TypeError, ValueError):
                 continue
             events.append((n + lo, n + hi))
+            if id(item) not in card_items:
+                # a cutaway, a full-frame graphic: its own edge may change
+                # the whole picture's level (the layout watch leaves it be)
+                deliberate.append((n + lo - 1, n + hi + 1))
     trans = fx.get("transition")
     if trans:
         try:
@@ -228,17 +247,51 @@ def plan(edl, index, *, W, H, fps, outro_s=0.0, want_wm=False,
     # edit — is a cut here too).
     layout = []
     import picture_cards
+    # Where the renderer cuts an animated end too (build_filtergraph): on a
+    # cut of the edit, on another card's edge (its layout is the
+    # neighbour) and on a focus-track or follow-span edge (the footage's
+    # own shot change). Judged as a cut there, never as a dissolve.
+    cut_like = set(cut_frames)
+    edge_t = []
+    for c in fx.get("picture_cards") or []:
+        try:
+            edge_t.append((id(c), float(c["start"])))
+            edge_t.append((id(c), float(c["end"])))
+        except (KeyError, TypeError, ValueError, AttributeError):
+            continue
+    src_edges = []
+    try:
+        import follow
+        src_edges += [float(x) for x in follow.edges(edl)]
+    except Exception:
+        pass
+    for span in ((edl.get("frame") or {}).get("focus_track") or []):
+        for key in ("t0", "t1"):
+            try:
+                src_edges.append(float(span[key]))
+            except (KeyError, TypeError, ValueError, AttributeError):
+                continue
+    for x in src_edges:
+        try:
+            p = tl.src_to_out(x)
+        except Exception:
+            p = None
+        if p is not None:
+            cut_like.add(renderer.first_frame_at(p, fps))
     for c in fx.get("picture_cards") or []:
         try:
             ent, ext = picture_cards.animation_windows(c)
             c0, c1 = float(c["start"]), float(c["end"])
         except (KeyError, TypeError, ValueError, AttributeError):
             continue
+        others_at = [renderer.first_frame_at(t, fps)
+                     for cid, t in edge_t if cid != id(c)]
         for t, w, opening in ((c0, ent, True), (c1, ext, False)):
             n = renderer.first_frame_at(t, fps)
             if n <= 1 or n >= end_frame - 1:
                 continue
-            on_cut = any(abs(n - cf) <= 1 for cf in cut_frames)
+            on_cut = any(abs(n - cf) <= 1 for cf in cut_like) or \
+                any(abs(n - o) <= 1 for o in others_at)
             d = 0 if (w is None or on_cut) else \
                 max(1, int(round((w[1] - w[0]) * fps)))
             lo, hi = (n, n + d) if opening else (n - d, n)
@@ -257,6 +310,7 @@ def plan(edl, index, *, W, H, fps, outro_s=0.0, want_wm=False,
         still.append((0, int(math.ceil(fi * fps)) + 1))
     if fo > 0:
         still.append((end_frame - int(math.ceil(fo * fps)) - 1, end_frame))
+    still += deliberate
     if trans and str((trans or {}).get("style") or "").startswith(("dip", "flash")):
         reach = int(math.ceil(float((trans or {}).get("duration_s") or .5)
                               * fps)) + 1
@@ -425,13 +479,22 @@ def layout_glitches(lumas, plan_):
     ('flash') of more than LUMA_JUMP inside a dissolve (which must be
     gradual), or a blink at a cut (dark for a frame or three, then back).
     A cut's own change of level on its frame is the cut. Programme fades
-    and dip/flash junction transitions are deliberate."""
+    and dip/flash junction transitions are deliberate. A dissolve's step is
+    a glitch only past LUMA_STEP_X times the even step of its whole change
+    too: a short dissolve from a bright shot to a dark card halves the
+    level on its last frame by design."""
     out, seen = [], set()
     n = len(lumas or [])
     still = plan_.get("still") or []
     for edge in plan_.get("layout") or []:
         lo = max(1, int(edge["lo"]) - LAYOUT_REACH)
         hi = min(n - 1, int(edge["hi"]) + LAYOUT_REACH)
+        if hi < lo:
+            continue
+        # the even per-frame step of the dissolve's whole change
+        span = max(1, int(edge["hi"]) - int(edge["lo"]) + 1)
+        even = abs(lumas[min(n - 1, int(edge["hi"]))]
+                   - lumas[max(0, int(edge["lo"]) - 1)]) / span
         for k in range(lo, hi + 1):
             if any(a <= k <= b for a, b in still):
                 continue
@@ -442,6 +505,9 @@ def layout_glitches(lumas, plan_):
             flash = a < (1.0 - LUMA_JUMP) * b
             if not (drop or flash):
                 continue
+            if edge["kind"] != "cut" and \
+                    abs(b - a) <= max(LUMA_STEP_X * even, LUMA_STEP_MIN):
+                continue                      # the dissolve's own even step
             if edge["kind"] == "cut":
                 # the cut's own step is the cut; a blink comes back
                 back = lumas[k + 1:k + 4]
@@ -563,17 +629,25 @@ def band_ink(path, band, W, H, deadline, fps=None):
 
 def band_gaps(ink, fps=30.0):
     """[(t0, t1)] runs of frames with no ink (under BAND_INK) longer than
-    BAND_EMPTY_S — the headline band standing empty. The opening frames
-    before the first graphic draws (an entrance from nothing at the very
-    start, under BAND_OPEN_S) are not a dropped layer."""
+    BAND_EMPTY_S — the headline band standing empty. A run at the band's
+    very start or end under BAND_EDGE_S is the headline's own yield to a
+    graphic landing (leaving) at its edge (motion_layer.yield_windows: a
+    headline shown for a moment there is a flash), not a dropped layer."""
     out, run = [], None
     step = 1.0 / float(fps or 30.0)
     first = ink[0][0] if ink else 0.0
+    last = ink[-1][0] if ink else 0.0
 
     def close(r):
-        if r and r[1] + step - r[0] > BAND_EMPTY_S + 1e-6 and not (
-                r[0] <= first + 1e-6 and r[1] + step - r[0] < BAND_OPEN_S):
-            out.append((round(r[0], 2), round(r[1] + step, 2)))
+        if not r:
+            return
+        length = r[1] + step - r[0]
+        if length <= BAND_EMPTY_S + 1e-6:
+            return
+        if length < BAND_EDGE_S and (r[0] <= first + 1e-6
+                                     or r[1] >= last - 1e-6):
+            return
+        out.append((round(r[0], 2), round(r[1] + step, 2)))
     for t, share in ink or []:
         if share < BAND_INK:
             run = [run[0], t] if run else [t, t]
@@ -940,8 +1014,9 @@ def findings(res, plan_):
             "'auto'), re-aim the crop, or cut away")
     for t0, t1, bid in res.get("band") or []:
         out.append(
-            f"EMPTY HEADLINE BAND {t0:.2f}-{t1:.2f}s: the band headline {bid} "
-            f"holds is blank for {t1 - t0:.2f}s — a dropped layer to the viewer; "
+            f"EMPTY HEADLINE BAND {t0:.2f}-{t1:.2f}s: the band the persistent "
+            f"headline '{bid}' holds is blank for {t1 - t0:.2f}s — a dropped "
+            "layer to the viewer; "
             "the headline holds whenever no graphic occupies the band (start "
             "each graphic on its first visible word)")
     cut_runs = res.get("cut") or []

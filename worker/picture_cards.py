@@ -637,6 +637,19 @@ def _overlap(a, b):
         max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
 
 
+def crop_trim(rect, a, src_w, src_h):
+    """``rect`` (source fractions) trimmed to pixel aspect ``a`` the way
+    fit_panel's crop trims it: centred across, from the bottom up."""
+    x0, y0, x1, y1 = (float(v) for v in rect)
+    rw, rh = (x1 - x0) * float(src_w), (y1 - y0) * float(src_h)
+    if rh <= 0 or rw <= 0:
+        return [x0, y0, x1, y1]
+    if rw / rh > a:
+        d = (rw - rh * a) / float(src_w) / 2.0
+        return [x0 + d, y0, x1 - d, y1]
+    return [x0, y0, x1, y0 + (rw / a) / float(src_h)]
+
+
 def holds(rect, keep, margin=0.0):
     """True when ``keep`` lies inside ``rect`` with ``margin`` of the
     rect's size clear on every side (fractions; a hair of slack)."""
@@ -658,18 +671,26 @@ def panel_framing(src_w, src_h, W, H, box, faces, looks=(), avoid=(),
 
     info: keep (the held region), lead (-1/0/1), share (the face's share of
     the rect's height), k (canvas px per source px), inset (the share of
-    the rect an avoided box still covers), moved (prefer was changed).
+    the rect an avoided box still covers), moved (prefer was changed), cut
+    (prefer, as the box would show it, did not hold the head).
     ``pad``: extra room round the head (a share of the face) where the
-    track saw only part of the window."""
+    track saw only part of the window.
+
+    ``prefer`` is first trimmed to the box's aspect exactly as fit_panel's
+    crop shows it (centred across, from the bottom up): a rect of another
+    shape that holds the face is the editor's framing, not a cut face."""
     sw, sh = float(src_w), float(src_h)
     bw, bh = (box[2] - box[0]) * W, (box[3] - box[1]) * H
     a = bw / bh
     big = min(sw, sh * a)                     # the widest rect of this aspect
     keep = panel_keep(faces, pad)
     info = {"keep": keep, "lead": 0, "share": None, "k": None, "inset": 0.0,
-            "moved": False}
+            "moved": False, "cut": False}
     if keep is None:
         return None, info
+    if prefer is not None:
+        prefer = crop_trim(prefer, a, sw, sh)
+        info["cut"] = not holds(prefer, keep)
     med = median_face(steady_faces(faces))
     fh = (med[3] - med[1]) * sh
     vals = [float(v) for v in looks or () if v is not None]
