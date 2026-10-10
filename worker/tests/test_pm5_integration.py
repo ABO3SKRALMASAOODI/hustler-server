@@ -126,3 +126,25 @@ def test_lockup_reveals_match_the_page():
             assert after["words"][0] == 1, (rows, reading, k, t)
             if t > 0.012:
                 assert before["words"][0] == 0, (rows, reading, k, t)
+
+
+def test_the_end_it_at_advice_never_makes_a_flash(monkeypatch):
+    # "ENOUGH" lands and "to take our civilization" follows at once: ending
+    # the slam before "to" would leave it up for 0.43 s, a flash — the note
+    # offers carrying the words instead
+    import motion_tools as mt
+    from test_one_reading_path import _edl, _index
+    from timeline import Timeline
+    words = [("it's", 4.9, 5.0), ("not", 5.0, 5.1), ("quite", 5.1, 5.2),
+             ("been", 5.2, 5.3), ("enough", 5.45, 5.62), ("to", 5.66, 5.74),
+             ("take", 5.74, 5.95), ("our", 5.95, 6.1), ("civilization", 6.1, 6.6),
+             ("to", 6.6, 6.7), ("the", 7.0, 7.1), ("next", 7.1, 7.3), ("level.", 7.3, 7.8)]
+    slam = {"id": "enough", "template": "word_slam", "start": 5.25, "end": 6.9,
+            "params": {"text": "*enough*"},
+            "footprint": {"box": [0.1, 0.3, 0.9, 0.42], "ar": round(1080 / 1920, 4), "faces": []}}
+    edl = _edl([[0.0, 9.0]], [slam], words=words)
+    ix = _index(words)
+    tl = Timeline(edl["keep"])
+    notes = mt._word_level_notes(edl, ix, tl, edl["motion"][0], canvas=(1080, 1920))
+    said = [n for n in notes if "never reads" in n]
+    assert said and "End it at" not in said[0] and "Carry them on it" in said[0], notes

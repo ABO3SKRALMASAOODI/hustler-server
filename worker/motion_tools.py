@@ -1189,6 +1189,10 @@ def _word_level_notes(edl, index, tl, item, canvas=None):
     return notes
 
 
+# The shortest graphic the one-reading-path note will suggest ending at.
+YIELD_FIX_MIN_S = 0.8
+
+
 def _reading_notes(item, rep):
     """One-reading-path NOTEs for a graphic with mute_captions unset (the
     caption plan's ownership, worker/caption_carry.py): where the captions
@@ -1216,9 +1220,11 @@ def _reading_notes(item, rep):
                if float(w["t0"]) >= last - 0.05]
         if nxt:
             end_at = min(end_at, min(nxt) - 0.02)
-        end_at = max(end_at, float(item["start"]) + 0.3)
+        # an end that leaves the graphic too short to read is no fix
         fix = (f"End it at {end_at:.2f}s, where its own words end, so those words are "
-               "captioned; or carry" if end_at < e - 0.02 else "Carry")
+               "captioned; or carry"
+               if float(item["start"]) + YIELD_FIX_MIN_S - 1e-3 <= end_at < e - 0.02
+               else "Carry")
         notes.append(
             f"NOTE (captions): one reading path — the captions yield to this graphic for "
             f"the phrase it shows from {frm:.2f}s until it leaves at {e:g}s, so a sound-off "

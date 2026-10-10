@@ -187,7 +187,10 @@ LAYERING AND CAPTIONS:
   shown word until it leaves — the captions yield there. A `phrase_build`
   sets that phrase's other words in small type between its rows on their
   onsets; any other graphic leaves them to the sound, so end a word slam or
-  counter where its words end (the reply NOTEs the words and the time).
+  counter where its words end (the reply NOTEs the words and the time — before
+  the next word's midpoint; when that would leave it up under 0.8 s it offers
+  carrying the words instead, and a slam that lands straight into its sentence
+  may keep its hold: the words are still heard).
   Words said before its first shown word, and other sentences, stay
   captioned — moved to a band clear of the graphic's drawn box (and the
   face) while it is up. Design for it: keep hero graphics OFF the caption
