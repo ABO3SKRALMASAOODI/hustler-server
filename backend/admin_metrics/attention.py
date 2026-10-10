@@ -7,6 +7,22 @@ from admin_metrics import defs, health, money, projects
 
 TYPES = ("failed_job", "stuck_job", "upload_failed", "payment_failing",
          "billing_mismatch", "message_no_edit")
+
+# What the customer got back instead of an edit, in words (the same names
+# the Health page uses: "Concierge reply", "Subscription notice").
+REPLY_WORDS = {"subscription_required": "the subscription notice",
+               "concierge": "a concierge reply", "canned": "a canned reply",
+               "index_ready": "the video-ready message",
+               "tray_submitted": "the uploads-received note"}
+
+
+def reply_detail(kind):
+    if not kind:
+        return "No editing work followed within 15 minutes."
+    words = REPLY_WORDS.get(kind) or f"a {kind.replace('_', ' ')} reply"
+    return f"They got {words} instead of an edit."
+
+
 TYPE_LABELS = {"failed_job": "Failed", "stuck_job": "Stuck",
                "upload_failed": "Upload refused",
                "payment_failing": "Payment failing",
@@ -166,9 +182,7 @@ def messages_no_edit(cur):
             "title": ("A paying customer's message didn't start an edit"
                       if paying else "A free customer's message didn't start "
                       "an edit"),
-            "detail": (f"Reply: {r['reply_kind'].replace('_', ' ')}"
-                       if r.get("reply_kind") else "No editing work followed "
-                       "within 15 minutes."),
+            "detail": reply_detail(r.get("reply_kind")),
             "customer": {"id": r["user_id"], "email": r["email"],
                          "plan": r["plan"],
                          "status": r.get("status") or

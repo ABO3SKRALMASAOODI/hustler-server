@@ -153,3 +153,15 @@ def _fresh_features():
     db.reset_features()
     yield
     db.reset_features()
+
+
+# ── Integration review: attention rows say what happened in words ────────
+def test_a_message_without_an_edit_says_what_the_customer_got_back():
+    assert attention.reply_detail("concierge") == \
+        "They got a concierge reply instead of an edit."
+    assert attention.reply_detail("subscription_required") == \
+        "They got the subscription notice instead of an edit."
+    assert attention.reply_detail("other_kind") == \
+        "They got a other kind reply instead of an edit."
+    assert attention.reply_detail(None) == \
+        "No editing work followed within 15 minutes."
