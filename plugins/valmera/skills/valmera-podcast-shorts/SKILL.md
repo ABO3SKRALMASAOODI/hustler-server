@@ -43,8 +43,8 @@ statistic (never a generic question), is a headline that owns its zone
 shows a word a later graphic slams; a counter really counts and shows a
 spoken range as said ('30–40'); the payoff locks its number and noun
 together and holds 0.8-1.5 s after the last word (the natural tail, chosen
-at selection; `add_freeze_frame` has no composed hold on a card layout, see
-editing.md **Known Valmera limits**; a payoff number ~2 s on screen). Valmera's render result carries an EARN ITS PLACE advisory naming
+at selection, else `add_freeze_frame` audio_mode='hold': the composed last
+frame over the source's room tone; a payoff number ~2 s on screen). Valmera's render result carries an EARN ITS PLACE advisory naming
 what breaks these rules, each with a fix ([looks.md](references/looks.md),
 **Shared grammar**, has the details).
 
@@ -261,13 +261,15 @@ nothing (Oct 2026: 2 h 55 min, 729 editor calls, 25 renders, 0 exports).
 
 ## Known Valmera limits
 
-Tools change; the live schema wins over any doc. As of Oct 2026 several
-tools behave differently from what these references once assumed (no
-`source` on `set_picture_card`, no composed freeze hold, `apply_edit_batch`
-failing once motion graphics or erase patches exist, `watch_video` returning
-no link, the headline band starting below the free-tier mark). editing.md
-**Known Valmera limits** lists each with the working path. Read it before the
-pilot and before editing; never spend more than two calls rediscovering one.
+Tools change; the live server schema wins over any doc. A client caches
+`tools/list` when it connects, so a long-lived session can miss parameters
+the server added since (Oct 2026: `set_picture_card` `source`/`panels`/
+`follow`, `add_freeze_frame` audio_mode 'hold'); start a fresh session to
+refresh it. Real limits as of Oct 2026 (`watch_video` returning no link, the
+headline band starting below the free-tier mark, captions inside cards) are
+in editing.md **Known Valmera limits** with the working path. Read it before
+the pilot and before editing; never spend more than two calls rediscovering
+one.
 
 ## Run state (`scripts/run.py`, `--help` on each command)
 

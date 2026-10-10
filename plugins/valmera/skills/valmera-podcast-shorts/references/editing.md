@@ -61,10 +61,11 @@ cues, and art direction. Call `get_kept_transcript` once and confirm:
 - The turn changes or deepens the idea and the payoff resolves it. Stop on the
   strongest sentence; the payoff needs 0.8-1.5 s after its last word before
   the end card (a reaction button 1.0-1.5 s, or none): the natural tail
-  first (the brief's end leaves it), else slow the last ~0.4 s of air with
-  `set_speed` 0.5x (slower steps). Never `add_freeze_frame` on a card
-  layout: it has no composed hold ('continue' covers the card with the raw
-  source frame).
+  first (the brief's end leaves it), else `add_freeze_frame`
+  audio_mode='hold' (the COMPOSED last frame — card, type and all — over the
+  source's room tone; check it on render 1), or slow the last ~0.4 s of air
+  with `set_speed` 0.5x. Never audio_mode 'continue' for a payoff hold: it
+  plays on under the raw source frame.
 - Trim for rhythm: cut low-information connectors ("it was like a lot of
   things and"), keep 150-250 ms at sentence boundaries, never drop an
   article inside a clause.
@@ -300,10 +301,7 @@ slot. A `blocked` handback is recorded the same way, its first line
 
 | Symptom | Working path |
 | --- | --- |
-| `set_picture_card` rejects a source rect; its schema has no `source`/`panels`; `source='auto'` framed the whole stage | write the card (box, `source` rect, backdrop) with `apply_edit_batch` set on the `effects` layer, copying the shape from `get_edl` and the pilot's `framing.json`, before any erase, overlay or graphic |
-| `apply_edit_batch` returns "internal error" once the EDL has motion graphics, and "referenced asset is not available" once it has erase patches or stock overlays | settle frame, cuts and card first; afterwards change them with typed tools, or remove the blocking items, batch, re-add (count it against the 60-call stop) |
-| `export_final` says "no renderable footage" for an EDL with motion graphics (backend cannot import the motion modules) | the pilot's export proves whether today's deployment exports; if it fails, stop the line — never edit around it |
-| `add_freeze_frame` has no 'hold'; 'continue' covers the card with the raw source frame | natural tail chosen at selection, else `set_speed` 0.5x on the last ~0.4 s of air |
+| a tool's schema in YOUR client lacks a parameter these docs name (e.g. `set_picture_card` `source`/`panels`/`follow`, `add_freeze_frame` audio_mode 'hold') | your client cached `tools/list` when it connected; the server has them (Oct 2026). Start a fresh session to refresh the tool list; until then write the card with `apply_edit_batch` on the `effects` layer, copying the shape from `get_edl` and `framing.json` |
 | `watch_video(render=false)` returns a receipt without a link, frames or audio | rendered `look_at` batch + one native frame + `audit_captions` + `review_audio` |
 | `look_at` without `rendered=true` ignores picture cards and erase patches | judge framing only on rendered frames; `native_resolution` takes one time per call |
 | the `headline` template refuses a band under 0.06 and shrinks its text to fit the band (often below caption size) | looks.md **Card geometry**: band y 0.128-0.228 over a full-width card, at most 36 characters, or no band and a hook-tier `word_slam` |
