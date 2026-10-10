@@ -12,17 +12,22 @@ Each cue carries its vertical anchor ``y`` and band ``b`` (t/m/b) from the
 shot-aware placement track (or the style's position/anchor_y). The template
 keeps the whole block inside that band and the platform-safe area, so a
 look never grows onto the face the placement compiler steered around.
-While a motion graphic is on screen, the words come from the caption plan
-(worker/caption_carry.py — the same pass the libass captions use): the words
-it shows leave the captions, and a cue whose block would land on its stored
-footprint takes the plan's band clear of the graphic AND the face zones the
-keep-out measured (an explicit zone ``z`` the block may not grow out of), so
-a graphic moved below the chin never pushes the caption onto the mouth.
+While a motion graphic or a picture card is on screen, the words come from
+the caption plan (worker/caption_carry.py — the same pass the libass
+captions use): the words a graphic shows leave the captions, every other
+heard word stays, and a cue whose usual place would touch a graphic's box,
+a card or panel edge or seam, a stack's content panel, a face with its
+chin or the watermark takes the plan's free band (worker/caption_place.py;
+an explicit zone ``z`` the block may not grow out of). A line never holds
+its place across a layout change (Plan.hold_limit), and a line waiting for
+a graphic to clear waits at most two frames.
 Where the spatial index measured the plate, a cue also carries its mean luma
 ``l`` (0-1) so premium looks firm up their scrim and shadow on bright plates.
 At render time the motion layer also measures the picture under every cue
-(worker/plate.py, ``MG.plate``): a light-ink look whose own block sits on a
-plate too bright for 4.5:1 turns its scrim into a pocket dark enough for it.
+(worker/plate.py, ``MG.plate``) and the template guards each word in order:
+it slides inside its zone to a darker spot, then adds a tight dark halo and
+lifts accent words toward white until they read 3:1, then a soft dark local
+scrim, and only then the pocket (a box).
 
 The caption track is split at natural gaps into segments of ~6–10 s. Each
 segment is an independent RenderJob carrying only its own cues, so segments
@@ -175,8 +180,10 @@ def cues(edl, index, tl, canvas=None):
     without a pause, or the line ends on a program cut; ``l`` (optional) is
     the nearest spatial sample's mean plate luma; ``z`` (optional) an
     explicit [y0, y1] zone that keeps the block off an on-screen graphic and
-    the face (see the module doc). ``canvas`` is the output (W, H), derived
-    from the EDL when omitted.
+    the face (see the module doc); ``f`` = 1 when the line starts ON a
+    layout change its place flips at (rendered without the one-frame
+    lead). ``canvas`` is the output (W, H), derived from the EDL when
+    omitted.
     """
     look = look_of(edl)
     if not look:
@@ -209,10 +216,17 @@ def cues(edl, index, tl, canvas=None):
     # one (it waits for the graphic to clear instead of touching it). A line
     # never holds into a stretch a graphic owns its phrase either (one
     # reading path: "that we have" clears as the lockup's "a" lands).
-    holds = mutes + [(float(a), float(b)) for a, b in carry.clamp_spans + carry.yield_spans]
+    holds = mutes + [(float(a), float(b)) for a, b in carry.yield_spans]
     waits = [(float(a), float(b)) for a, b in carry.clamp_spans + carry.wait_spans]
     out = []
     prog_end = float(tl.out_duration)
+    # layout changes where the captions' place changes: a line starting on
+    # one appears WITH the new layout, never a frame early (items: no lead)
+    flips, prev_st = [], None
+    for a, _b, st in carry.segments:
+        if st != prev_st:
+            flips.append(a)
+        prev_st = st
     for i, ch in enumerate(chunks):
         s = float(ch[0]["t0"])
         last = float(ch[-1]["t1"])
@@ -226,6 +240,11 @@ def cues(edl, index, tl, canvas=None):
             if s < m0 < e:
                 e = m0
         place = ch[0].get("place")
+        # ...and never carries its place across a layout change onto the
+        # new layout (the plan re-solves placement there)
+        lim = carry.hold_limit(max(s, float(ch[-1]["t0"])), place)
+        if s < lim < e:
+            e = lim
         if not place:
             for m0, m1 in waits:
                 # lands ON the graphic's exit — unless waiting would leave
@@ -234,7 +253,7 @@ def cues(edl, index, tl, canvas=None):
                 if m0 <= s < m1 and m1 - s <= caption_carry.START_WAIT_S \
                         and e - (m1 + CAPTION_LEAD_S) >= MIN_WAITED_CUE_S:
                     s = m1 + CAPTION_LEAD_S
-        if e - s < 0.12:
+        if e - s < 0.12 - 1e-6:
             continue
         # Every word spoken: the line clears ON the cut that ends its shot
         # (a hard clear — a hold or fade surviving a jump cut ghosts over
@@ -263,6 +282,8 @@ def cues(edl, index, tl, canvas=None):
                "w": ws}
         if place:
             cue["z"] = list(place["z"])
+        if any(abs(s - f) < 1e-3 for f in flips):
+            cue["f"] = 1
         luma = _luma_at(lumas, src_mid) if lumas else None
         if luma is not None:
             cue["l"] = luma      # bright plates get a firmer scrim + shadow
@@ -342,11 +363,15 @@ def items(edl, index, tl, canvas=None):
     sp = style_params(edl)
     lead = CAPTION_LEAD_S
     cuts = caplib.program_cuts(tl)
+    flips = [c["s"] for c in allc if c.get("f")]
 
     def led(v):
-        # one frame early, but never back across a cut (see CAPTION_LEAD_S).
+        # one frame early, but never back across a cut (see CAPTION_LEAD_S)
+        # nor off a layout change the line flips its place on (cues: f).
         # Cue times are rounded to the millisecond and cuts are not (a speed
         # ramp puts one at 1.53846 s): an edge within 1 ms of a cut is ON it.
+        if any(abs(v - f) < 1e-3 for f in flips):
+            return v
         k = bisect.bisect_right(cuts, v + 1e-3)
         if k and cuts[k - 1] > v - lead + 1e-6:
             return cuts[k - 1]

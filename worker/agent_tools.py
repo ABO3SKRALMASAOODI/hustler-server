@@ -20252,6 +20252,7 @@ def audit_captions(ctx, offset=0, limit=80):
     warnings = []
     uncovered = []
     sound_off = []
+    unshown = []
     first_late = None
     declared_max_words = None
     single_line_contract = False
@@ -20284,13 +20285,18 @@ def audit_captions(ctx, offset=0, limit=80):
             warnings.append(f"{len(uncovered)} spoken word(s) lack caption coverage")
         try:
             sound_off = caption_carry.sound_off_gaps(edl, ctx.index, tl)
+            unshown = caption_carry.heard_unshown(edl, ctx.index, tl)
         except Exception:  # noqa: BLE001 — the audit reports what it can
-            sound_off = []
+            sound_off, unshown = [], []
         if sound_off:
             warnings.append(
                 f"{len(sound_off)} spoken span(s) over "
                 f"{caption_carry.SOUND_OFF_GAP_S:g}s have no caption and no graphic "
                 "showing them (sound_off_gaps)")
+        if len(unshown) > len(sound_off):
+            warnings.append(
+                f"{len(unshown)} heard span(s) never reach the screen, however short "
+                "(heard_unshown: every heard word should, once)")
     density_violations = [
         {"start": state["start"], "end": state["end"],
          "word_count": state["word_count"],
@@ -20386,6 +20392,7 @@ def audit_captions(ctx, offset=0, limit=80):
         "uncovered_words": uncovered[:20],
         "uncovered_word_count": len(uncovered),
         "sound_off_gaps": sound_off[:10],
+        "heard_unshown": unshown[:20],
         "overlaps": overlaps[:20],
         "warnings": warnings,
         "short_phrase_states": fragment_states,
@@ -29238,7 +29245,9 @@ TOOLS = {
                        "spoken-word coverage (words a graphic shows count as "
                        "covered), sound_off_gaps (speech over 0.6 s with no "
                        "caption and no graphic showing it, with cause and "
-                       "fix), true distinct-state overlaps, "
+                       "fix), heard_unshown (every such span however short: "
+                       "every heard word should reach the screen once), "
+                       "true distinct-state overlaps, "
                        "max_words_seen, max_lines_seen, declared-density and "
                        "single-line wrap violations, exact event pages and "
                        "up to 16 high-information "

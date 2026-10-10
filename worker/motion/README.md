@@ -30,22 +30,23 @@ Every non-required param needs a `default`. Keep params few and meaningful;
 good defaults matter more than knobs.
 
 `mutes_captions` says the template exists to SAY the spoken words (a slam, a
-phrase build, a marker line, a quote). Captions follow one reading path either
-way (worker/caption_carry.py): an item with `mute_captions` unset drops the
-spoken words its visible text params show and owns the phrase they belong to
-from its first shown word to its exit (the captions yield there); the setup
-before it and other sentences stay captioned in a band clear of the box it
-draws. The flag decides the fallback when no band is clear — a speech template
-mutes those words, any other keeps them in place — so every text a template
+phrase build, a marker line, a quote). Every heard word reaches the screen
+once either way (worker/caption_carry.py): an item drops from the captions the
+spoken words its visible text params show, and every other heard word stays
+captioned in a band clear of the box it draws, the face and any card layout
+(worker/caption_place.py). The flag decides the fallback when no band is
+clear — a speech template mutes those words and names them (the write NOTE,
+`heard_unshown`), any other keeps them in place — so every text a template
 prints must come from its params (that is what the captions are matched
 against).
 
-`reads_phrase` says the template sets the owned phrase's other words itself
+`reads_phrase` says the template is a lockup that reads a phrase row by row
 (phrase_build): the engine hands the page `params._reading`
 (MotionItem.reading — per row, per printed word, its spoken onset in item
-seconds or null, and `bridges` [{after: row, words: [{t, s}]}]) and the page
-lays the bridge lines out from the start and reveals every word on its time,
-in reading order.
+seconds or null) and the page reveals every word on its time, in reading
+order. Its `bridges` are always [] now: the phrase's words the rows leave out
+are captioned beside the lockup, never set as micro bridge rows inside it (an
+old stored reading with bridges still validates; the render recomputes it).
 
 `persistent: true` marks a LAYOUT template that holds a band for the whole
 program (the `headline` of a card or letterbox layout). The renderer hands

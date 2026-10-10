@@ -154,9 +154,12 @@ def test_grids_reach_the_page_compactly_and_never_break_the_size_cap(monkeypatch
     assert list(base64.b64decode(p["s"][0]["g"])) == [231] * (p["c"] * p["r"])
     job = motion_templates.build_job(item, 1080, 1920, 30, plate=p)
     assert '"plate"' in job.html
-    assert len(job.html.encode()) < motion_engine.MAX_HTML_BYTES * 0.6
-    # a composition the plate would push over the cap renders without one
+    # the grids themselves are compact (a quarter of the cap for 48 cues),
+    # and the whole page stays well under it
     bare = motion_templates.build_job(item, 1080, 1920, 30)
+    assert len(job.html.encode()) - len(bare.html.encode()) < motion_engine.MAX_HTML_BYTES * 0.25
+    assert len(job.html.encode()) < motion_engine.MAX_HTML_BYTES * 0.65
+    # a composition the plate would push over the cap renders without one
     monkeypatch.setattr(motion_engine, "MAX_HTML_BYTES", len(bare.html.encode()) + 100)
     capped = motion_templates.build_job(item, 1080, 1920, 30, plate=p)
     assert capped.html == bare.html

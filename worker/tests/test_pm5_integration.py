@@ -23,14 +23,15 @@ def test_a_number_lands_before_its_reading_is_timed(monkeypatch):
                                           params={"text": "*140*"}, id="slam")
     item = ctx.latest_edl()["json"]["motion"][0]
     assert (item["start"], item["end"]) == (2.78, 3.88), item
-    assert out.index("NUMBER LANDED") < out.index("NOTE (captions)"), out
-    # "characters" is said while the moved slam is up: the reading names it
-    # and the exit the slam really has
-    assert "until it leaves at 3.88s" in out and '"characters' in out, out
-    # the end it names gives "characters" back (before its midpoint, 3.6 s)
-    assert "End it at 3.58s" in out, out
+    assert out.index("NUMBER LANDED") < out.index("Captions carry the words"), out
+    # "characters" is said while the moved slam is up: the captions carry it
+    # beside the slam, and the note names it
+    assert '"characters' in out and "NOTE (captions)" not in out, out
+    # the end it names keeps the slam to its own word (before the midpoint
+    # of "characters", 3.6 s) — the exit the slam really has, after landing
+    assert "end it at 3.58s" in out, out
     again = motion_tools.set_motion_graphic(ctx, "slam", end=3.58)
-    assert "NOTE (captions)" not in again and "NUMBER LANDED" not in again, again
+    assert "Captions carry" not in again and "NUMBER LANDED" not in again, again
 
 
 # ── a lockup's reveal times: one definition for the page and the engine ──
@@ -131,7 +132,7 @@ def test_lockup_reveals_match_the_page():
 def test_the_end_it_at_advice_never_makes_a_flash(monkeypatch):
     # "ENOUGH" lands and "to take our civilization" follows at once: ending
     # the slam before "to" would leave it up for 0.43 s, a flash — the note
-    # offers carrying the words instead
+    # names the words the captions carry and offers no such end
     import motion_tools as mt
     from test_one_reading_path import _edl, _index
     from timeline import Timeline
@@ -146,8 +147,8 @@ def test_the_end_it_at_advice_never_makes_a_flash(monkeypatch):
     ix = _index(words)
     tl = Timeline(edl["keep"])
     notes = mt._word_level_notes(edl, ix, tl, edl["motion"][0], canvas=(1080, 1920))
-    said = [n for n in notes if "never reads" in n]
-    assert said and "End it at" not in said[0] and "Carry them on it" in said[0], notes
+    said = [n for n in notes if "Captions carry the words" in n]
+    assert said and "end it at" not in said[0] and "to take our civilization to" in said[0], notes
 
 
 # ── the band above a card: lockups grown by bridge lines stay in it ──────

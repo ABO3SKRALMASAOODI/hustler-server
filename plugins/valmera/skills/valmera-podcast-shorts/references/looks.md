@@ -54,18 +54,22 @@ The coordinator assigns one Look and one structure per short. The editor reads
 - Accent colour on 1-2 words per sentence, otherwise near-white (#F6F3EE).
   No thick outlines, no default yellow boxes, no emoji spam. Legibility comes
   from size, face-free placement, a soft shadow and the grade.
-- One reading path: one text of a sentence on screen at a time. With
-  `mute_captions` unset a graphic owns the phrase it shows from its first
-  shown word to its exit (captions yield; a `phrase_build` sets the phrase's
-  other words in small type itself, so quote the transcript in its rows),
-  while the punchline's setup before it stays captioned. End a `word_slam` or
-  counter where its words end; the reply NOTEs any words only the sound
-  would carry. Kickers and rows quote the transcript word for word.
+- Every heard word reaches the screen once. With `mute_captions` unset a
+  graphic takes the words it shows and the captions carry every other word
+  beside it, in a band clear of it (a `phrase_build` no longer sets micro
+  bridge rows: its rows carry the words that matter, the captions the rest).
+  End a `word_slam` or counter where its words end; the reply NOTEs the
+  words the captions carry beside it and any it had to mute (carry those on
+  it as a kicker). Kickers and rows quote the transcript word for word.
+- Captions in a card or speaker + screen stack are placed by the engine:
+  never on a panel edge or the seam between panels, never on the chin, on
+  the screen panel only when nothing else is free; usually the band above
+  the speaker panel. Do not pin a `placement_track` between panels.
 - One accent colour for the whole short, passed to every graphic's `accent`;
   at most about 4 template families per short, varied across the batch.
 - Over a bright shirt or wall, raise the template's `scrim` (or move the type
   to darker space); white type on a white shirt is a defect.
-- Safe area on 9:16: x 60-1020 px, y 8-80% of height. Keep the native corner
+- Safe area on 9:16: x 60-1020 px (captions: 97-983, the feeds' ~9% side crop), y 8-80% of height. Keep the native corner
   mark and the bottom 20% clear; no card, caption or graphic below y 0.80.
 
 ### Card geometry (1080x1920)
@@ -345,8 +349,8 @@ A `custom-<slug>` Look is allowed when the brief spells out every field below.
   laugh or punchline. Never a landing on every angle change or a push on
   every take.
 - **Signature:** payoff hero word inside the card's lower third (`word_slam`
-  role serif, entrance `ghost` or `rise`, y about 0.70, captions muted under
-  it) or `marker_text` on the payoff phrase;
+  role serif, entrance `ghost` or `rise`, y about 0.70, the words it shows
+  leaving the captions) or `marker_text` on the payoff phrase;
   `circle_highlight`/`arrow_callout` when the speaker points at something
   visible; `counter` or `stat_card` only for a spoken number.
 - **Transitions + sound:** hard cuts (a landing zoom only on a real turn,
