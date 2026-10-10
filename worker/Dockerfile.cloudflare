@@ -101,6 +101,17 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends fonts-noto-color-emoji \
     && rm -rf /var/lib/apt/lists/*
 
+# Pinned models (Wave 0 track 0A, ROADMAP A8): models/bake.py reads
+# models/*.json, refuses any model whose licence is not commercial-use or
+# whose sha256/size differs from models.lock, and installs
+# requirements.d/<image>.txt when present. YuNet (0.23 MB) is in every image;
+# the RVM/u2net step above stays as it was.
+COPY models.lock /app/models.lock
+COPY requirements.d/ /app/requirements.d/
+COPY models/ /app/models/
+RUN python /app/models/bake.py --dest /app/models \
+      --image "$(if [ "$FULL_COMPUTE" = "1" ]; then echo batch; else echo interactive; fi)"
+
 # Wrangler/BuildKit has reused a stale COPY layer during a production
 # Containers rollout even though the worker checkout changed.  The content
 # fingerprint is injected by the deploy workflow; changing it invalidates this

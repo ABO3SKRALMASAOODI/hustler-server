@@ -1,0 +1,24 @@
+{
+  "_comment": [
+    "R2 lifecycle for the product bucket's Wave 0 caches (track 0A; ROADMAP §8: 90 days since last use).",
+    "Readers refresh an object older than 30 days when they use it (sidecars._download, clip_store._refresh),",
+    "so an age rule of 90 days IS 'last use + 90 days'. Not applied by any workflow: an operator adds these",
+    "rules once with `npx wrangler r2 bucket lifecycle add <bucket> <id> <prefix> --expire-days 90`",
+    "(never `lifecycle set`, which REPLACES every existing rule on the bucket).",
+    "Shape: the `rules` array wrangler's `r2 bucket lifecycle set --file` accepts."
+  ],
+  "rules": [
+    {
+      "id": "sidecars-90d-since-last-use",
+      "enabled": true,
+      "conditions": {"prefix": "sidecars/"},
+      "deleteObjectsTransition": {"condition": {"maxAge": 7776000, "type": "Age"}}
+    },
+    {
+      "id": "motion-clips-90d-since-last-use",
+      "enabled": true,
+      "conditions": {"prefix": "motion-clips/"},
+      "deleteObjectsTransition": {"condition": {"maxAge": 7776000, "type": "Age"}}
+    }
+  ]
+}

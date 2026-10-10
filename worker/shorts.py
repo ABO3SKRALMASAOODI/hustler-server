@@ -1263,6 +1263,10 @@ def run_shorts_plan(worker_db, job):
         # The source-audio sidecar too: without it a child's review_audio had
         # no source sound to hear (137 refusals across 19% of shorts).
         audio = worker_db.run(dbx.latest_asset, project_id, "audio")
+        # Wave 0 track 0A: prefetch the person matte for the kept ranges of
+        # the top-ranked shorts (gated by SIDECAR_PREFETCH; never raises).
+        import sidecars
+        sidecars.prefetch_top_shorts(project_id, original, proxy, index, clips)
         n = len(clips)
         # The scout creates RAW STORY CUTS. No caption preset, crop, grade,
         # zoom, B-roll, music, final render, or other creative choice belongs

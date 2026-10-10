@@ -1,0 +1,63 @@
+name: build-vision-image
+
+# Builds the DARK ValmeraVision image (worker/Dockerfile.vision) to measure it.
+# Manual only. It never pushes, publishes or deploys anything, and it reads no
+# secrets: the vision lane stays out of production until the owner sets the
+# repository variable VALMERA_VISION_LANE to '1' (worker/devices/INTERFACES.md
+# §2.6). ROADMAP 0A perf bars: image <= 3 GB, process cold start <= 45 s.
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: check pinned models, licences and requirements.d
+        run: python3 worker/models/bake.py --check
+
+      - name: build the image locally (not pushed)
+        run: docker build -f worker/Dockerfile.vision -t valmera-vision:check worker
+
+      - name: image size against the 3 GB budget
+        run: |
+          size=$(docker image inspect valmera-vision:check --format '{{.Size}}')
+          echo "vision image: $size bytes ($((size / 1048576)) MiB)"
+          test "$size" -le 3221225472 || { echo "::error::vision image exceeds 3 GB"; exit 1; }
+
+      - name: baked models verify against models.lock inside the image
+        run: |
+          docker run --rm --entrypoint python valmera-vision:check -c "
+          import json, hashlib, os
+          lock = json.load(open('/app/models.lock'))['models']
+          for name in ('rvm_mobilenetv3', 'yunet'):
+              e = lock[name]; p = os.path.join('/app/models', e['file'])
+              h = hashlib.sha256(open(p, 'rb').read()).hexdigest()
+              assert h == e['sha256'], (name, h)
+              print(name, 'ok', os.path.getsize(p))
+          import analysis_jobs
+          print('sidecar kinds:', sorted(analysis_jobs.CHILD_RUNNERS))
+          "
+
+      - name: process cold start (container to /health, stub settings)
+        run: |
+          start=$(date +%s.%N)
+          docker run -d --name vision -p 8080:8080 \
+            -e DATABASE_URL=postgresql://stub/stub -e SKIP_DB_INIT=1 \
+            -e S3_ENDPOINT=http://stub.invalid -e S3_ACCESS_KEY_ID=stub \
+            -e S3_SECRET_ACCESS_KEY=stub -e S3_BUCKET=stub \
+            -e REMOTE_EXECUTOR_SECRET=stub valmera-vision:check
+          for i in $(seq 1 120); do
+            if curl -fsS localhost:8080/health >/dev/null 2>&1; then break; fi
+            sleep 0.5
+          done
+          end=$(date +%s.%N)
+          curl -fsS localhost:8080/health | head -c 600; echo
+          echo "cold start to /health: $(echo "$end - $start" | bc) s"
+          docker logs vision | tail -20
+          docker rm -f vision

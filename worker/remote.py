@@ -1127,6 +1127,9 @@ def _cloudflare_lane(job_type):
     if job_type in {"preview", "preview_check", "filmstrip", "frames",
                     "mcp_media"}:
         return "interactive"
+    if job_type == "sidecar" and config.VISION_LANE_ENABLED:
+        # The DARK ValmeraVision lane (INTERFACES.md §2.6); batch otherwise.
+        return "vision"
     if job_type in {"agent_turn", "mcp_tool", "shorts_plan"}:
         return {"agent_turn": "agent", "mcp_tool": "mcp",
                 "shorts_plan": "shorts"}[job_type]
@@ -2507,6 +2510,81 @@ def run_faces_remote(project_id, payload, user_id=None):
     if desired_execution_provider(job) != "cloudflare":
         raise RemoteExecutorError(
             "the face track runs remotely only on Cloudflare")
+    return _run_cloudflare_with_capacity_wait(job)
+
+
+def sidecar_available():
+    """Can sidecar analysis (worker/sidecars.py, track 0A) run remotely?
+    Cloudflare only, like the follow's faces: the batch lane (or the dark
+    vision lane once deployed) is the one place that holds the pinned
+    models with CPU to spare. False means sidecars.ensure runs the job in
+    this process only where no remote compute is configured at all (a
+    single-box development setup); production never computes locally."""
+    return bool(config.CLOUDFLARE_EXECUTOR_ENABLED
+                and config.CLOUDFLARE_EXECUTOR_URL
+                and "sidecar" in config.CLOUDFLARE_SYNCHRONOUS_TYPES)
+
+
+def sidecar_slot(nonce):
+    """The batch shard slot an id-less sidecar call lands on: the first 8 hex
+    digits of its call digest modulo SIDECAR_SHARDS. cloudflare/src/index.ts
+    (sidecarSlot) applies the same formula to the call id."""
+    digest = hashlib.sha256(f"sidecar:sync:{nonce}".encode("utf-8")) \
+        .hexdigest()[:20]
+    return int(digest[:8], 16) % max(1, config.SIDECAR_SHARDS)
+
+
+def _sidecar_nonce(slot):
+    """A fresh synchronous-call nonce whose call id lands on ``slot``
+    (_cloudflare_call_id hashes "sidecar:sync:<nonce>"), so a group of
+    chunks spreads over distinct shards and a retry runs elsewhere."""
+    want = int(slot) % max(1, config.SIDECAR_SHARDS)
+    for _ in range(256):
+        nonce = uuid.uuid4().hex
+        if sidecar_slot(nonce) == want:
+            return nonce
+    return uuid.uuid4().hex
+
+
+def _sidecar_skew(payload, why):
+    return {"ok": False, "skew": True, "why": why,
+            "chunks": {c.get("key"): {"status": "failed",
+                                      "reason": "executor_skew",
+                                      "retryable": False}
+                       for c in payload.get("chunks") or []}}
+
+
+def run_sidecar_remote(project_id, payload, user_id=None):
+    """Run one sidecar group (analysis_jobs.run_sidecar_job) remotely.
+
+    Synchronous, no job row — the matte/faces shape. The payload carries the
+    model id/version/format this caller keyed the chunks with; the executor
+    refuses a mismatch (the generalised version handshake), so a lane on
+    other code can never write a manifest under these keys. ``slot`` picks
+    the shard. While the vision lane is dark (or refuses before running),
+    the batch lane serves it. Raises like every remote call; the sidecar
+    launcher decides what a failure costs (one retry elsewhere)."""
+    import faultinject
+    if faultinject.fault("executor_skew"):
+        return _sidecar_skew(payload, "injected executor_skew: the lane "
+                             "reports other sidecar code")
+    job = {"id": None, "type": "sidecar", "project_id": project_id,
+           "user_id": user_id, "attempts": 0, "payload": payload}
+    if desired_execution_provider(job) != "cloudflare":
+        raise RemoteExecutorError(
+            "sidecar analysis runs remotely only on Cloudflare")
+    if payload.get("slot") is not None:
+        job["_cloudflare_sync_nonce"] = _sidecar_nonce(payload["slot"])
+    try:
+        return _run_cloudflare_with_capacity_wait(job)
+    except CloudflareLaunchUnavailable:
+        if _cloudflare_lane_for(job) != "vision":
+            raise
+    # Nothing ran on the vision lane (not deployed, or no capacity): the
+    # degrade ladder's next rung is the batch lane, under a fresh identity.
+    job["_cloudflare_lane"] = "batch"
+    job.pop("_cloudflare_admission_slot", None)
+    job["_cloudflare_sync_nonce"] = _sidecar_nonce(payload.get("slot") or 0)
     return _run_cloudflare_with_capacity_wait(job)
 
 

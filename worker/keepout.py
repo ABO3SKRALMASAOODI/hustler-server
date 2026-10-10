@@ -605,6 +605,34 @@ def _index_faces(index, src_t, seg):
     return filter_faces([(b, 1) for b in best[1].get("faces") or []])
 
 
+def yunet_faces(index, src_t):
+    """Faces of the ready faces.yunet sidecar sample nearest ``src_t``
+    (within NEAR_S), filtered like a measured frame; None when the flag is
+    off or no ready sidecar speaks for the moment (Wave 0 track 0A).
+
+    A read only: a write never waits on, or launches, analysis here. YuNet
+    is one detector, so a box counts as two-detector support (filter_faces)
+    only when it is confident (score >= 0.8)."""
+    import config
+    if not getattr(config, "YUNET_KEEPOUT", False):
+        return None
+    try:
+        import sidecars
+        sha = sidecars.index_source_sha(index)
+        video = (index or {}).get("video") or {}
+        if not sha or not video.get("duration"):
+            return None
+        shots = [s.get("start") for s in (index or {}).get("shots") or []
+                 if isinstance(s, dict)]
+        got = sidecars.faces_near(sha, shots, float(video["duration"]),
+                                  float(src_t), near_s=NEAR_S)
+    except Exception:  # noqa: BLE001 — the index samples are a fine fallback
+        return None
+    if got is None:
+        return None
+    return filter_faces([(b, 2 if score >= 0.8 else 1) for b, score in got])
+
+
 def _agrees(a, b):
     cx, cy = (a[0] + a[2]) / 2.0, (a[1] + a[3]) / 2.0
     return _iou(a, b) >= 0.2 or (b[0] <= cx <= b[2] and b[1] <= cy <= b[3])
@@ -697,6 +725,8 @@ def face_track(edl, index, W, H, start, end, measure=None):
             continue
         seg = _segment_of(tl, src)
         faces = measure(src) if measure else None
+        if faces is None:
+            faces = yunet_faces(index, src)
         if faces is None:
             faces = _index_faces(index, src, seg)
         moments.append((t, (seg, _shot_at((index or {}).get("shots"), src)), faces or []))

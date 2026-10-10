@@ -1,0 +1,58 @@
+# ValmeraVision (DARK; worker/devices/INTERFACES.md §2.6, ROADMAP Wave 0 0A):
+# the ONNX analysis lane for `sidecar` jobs (person mattes, face boxes, and
+# later-wave landmarks/depth/objects). Built only by the manual
+# build-vision-image workflow; deployed only when the repository variable
+# VALMERA_VISION_LANE == '1' merges cloudflare/vision.jsonc. The owner has not
+# approved that, so production runs sidecars on the batch lane instead.
+#
+# What is deliberately NOT here: Chromium, Whisper weights, torch/Demucs, the
+# YouTube PO-token stack. The lane runs sidecar analysis only (index.ts
+# VISION_TYPES), so its image stays small (budget <= 3 GB) and starts fast.
+FROM public.ecr.aws/docker/library/python:3.11-slim-bookworm
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       ca-certificates fontconfig fonts-dejavu-core xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+# The same static ffmpeg 8.1 as every executor image (decode of the proxy,
+# H.264 encode of mask chunks).
+ARG FFMPEG_STATIC=1
+RUN if [ "$FFMPEG_STATIC" = "1" ]; then \
+      python -c "import urllib.request; urllib.request.urlretrieve('https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-linux64-gpl-8.1.tar.xz', '/tmp/ff.tar.xz')" \
+      && tar -xJf /tmp/ff.tar.xz -C /tmp \
+      && install -m755 /tmp/ffmpeg-*/bin/ffmpeg /usr/local/bin/ffmpeg \
+      && install -m755 /tmp/ffmpeg-*/bin/ffprobe /usr/local/bin/ffprobe \
+      && rm -rf /tmp/ff.tar.xz /tmp/ffmpeg-*; \
+    else \
+      apt-get update && apt-get install -y --no-install-recommends ffmpeg \
+      && rm -rf /var/lib/apt/lists/*; \
+    fi
+
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Every model this lane runs, pinned by sha256 and licence-checked
+# (models/bake.py; models.lock). requirements.d/vision.txt carries the
+# lane-only runtimes later waves add (pinned with ==).
+COPY models.lock /app/models.lock
+COPY requirements.d/ /app/requirements.d/
+COPY models/ /app/models/
+RUN python /app/models/bake.py --image vision --dest /app/models
+
+ARG SOURCE_VERSION=unknown
+RUN printf '%s\n' "$SOURCE_VERSION" > /opt/valmera-source-version
+
+COPY . .
+
+ENV PYTHONUNBUFFERED=1 \
+    WORKER_ROLE=executor \
+    EXECUTOR_PROVIDER=cloudflare \
+    WORKER_TMP_DIR=/tmp/valmera \
+    HF_HOME=/tmp/hf \
+    PLAYWRIGHT_BROWSERS_PATH=/tmp/no-local-browser \
+    TORCH_HOME=/tmp/no-local-torch \
+    PORT=8080
+
+CMD ["python", "http_server.py"]

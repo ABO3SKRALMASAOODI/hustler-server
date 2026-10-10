@@ -56,6 +56,14 @@ ENV PYTHONUNBUFFERED=1 \
     PLAYWRIGHT_BROWSERS_PATH=/tmp/no-local-browser \
     TORCH_HOME=/tmp/no-local-torch
 
+# Pinned models (Wave 0 track 0A, ROADMAP A8; worker/models/bake.py checks
+# licence, sha256 and size against models.lock). Only YuNet (0.23 MB) is
+# baked here: keep-out and free space read face boxes on every lane.
+COPY models.lock /app/models.lock
+COPY requirements.d/ /app/requirements.d/
+COPY models/ /app/models/
+RUN python /app/models/bake.py --image agent --dest /app/models
+
 # Modal ignores this build-context copy and adds the source as a separate
 # layer; Cloudflare builds the same Dockerfile directly and needs the runtime
 # package plus the role-selecting HTTP entry point in the image.
