@@ -115,7 +115,7 @@ def _sentences(words):
 # on the spoken word (sfx_placement).
 BEAT_SOUNDS = {
     "hook": "silent by default (no reflexive opening whoosh); whoosh_soft_1 (sfx=true) only if the title has a real entrance that earns it",
-    "number": "silent by default; at most one tick_1 in the gap after the spoken number, never on its onset (a ding there masks it); the count itself stays silent",
+    "number": "silent by default; at most one tick_1 on a visual landing in the pause after the spoken number (something on screen must change there), never on its onset (a ding there masks it); the count itself stays silent",
     "number_cluster": "optional: pop_1 on the last value only (a sound per value repeats)",
     "list": "silent (a tick per item repeats within ~3 s); at most pop_1 on the last item",
     "contrast": "optional: swish_1 on the swap",

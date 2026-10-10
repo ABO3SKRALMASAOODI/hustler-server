@@ -138,8 +138,8 @@ The owner rejected decorative "whoosh wars": every sound must be earned by
 something on screen.
 
 **Only the approved library.** `list_sound_library()` lists 21 real
-recordings the owner approved by ear (CC0), with when to use each and a
-its measured hit level. Roles and ids: whoosh (`whoosh_soft_1`, `whoosh_soft_2`),
+recordings the owner approved by ear (CC0), with when to use each and its
+measured hit level. Roles and ids: whoosh (`whoosh_soft_1`, `whoosh_soft_2`),
 swish (`swish_1`), impact (`impact_1`), riser (`riser_1`-`riser_4`), shutter
 (`shutter_1`, `shutter_2`), typing (`typing_1`, `typing_2`), click
 (`click_1`, `click_2`), pop (`pop_1`), tick (`tick_1`), ding (`ding_1`),
@@ -157,7 +157,8 @@ one moment in and maps the template's sound roles onto the library (roles
 with no approved recording are skipped). Opt in only where the graphic's
 landing earns a sound; a template whose cue repeats (a tick per counter step
 or per letter) stays silent and its settled figure gets one sound at most,
-in the gap after its spoken number, never on the number's onset.
+on a visual landing in the pause after its spoken number, never on the
+number's onset.
 
 **Where a sound goes.** Only where something meaningful happens on screen:
 the hook graphic landing, a hero graphic landing, a real section change or

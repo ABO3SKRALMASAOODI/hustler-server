@@ -250,9 +250,10 @@ SOUND PAIRING — graphics are SILENT by default:
   library tails (`impact_1`, `ding_1`, `cash_register_1`) already stop at
   their measured fade point; pass dur_s only to change that.
 - A template whose cue repeats (a tick per counter step or per letter)
-  stays silent; give the settled figure one sound instead, in the gap after
-  its spoken number rather than on the number's onset (a ding on the payoff
-  number masks it), or let the figure land silent.
+  stays silent; give the settled figure one sound instead, on a visual
+  landing in the pause after its spoken number rather than on the number's
+  onset (a ding on the payoff number masks it), or let the figure land
+  silent.
 - For a moment with no owned cue, place one library sound yourself:
   `add_sfx(storage_key='sound:<id>', at=<the landing frame>)`, gain_db
   unset so the tool levels it against the voice. `at` is where the sound HITS: the tool starts the

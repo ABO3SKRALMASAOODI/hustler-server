@@ -204,8 +204,9 @@ as work.
   sound twice within ~3 s; more than 1-2 sounds in a podcast short.
 - The reflexive opening whoosh on a hook that is already on screen at frame
   0; a sound with no visual partner within ~50 ms.
-- A ding on the payoff word (it masks the punchline it should sell); a
-  shutter on the word 'pictures' (a literal pun).
+- A ding on the payoff word, or hit just before it and ringing into its
+  onset (it masks the punchline it should sell); a shutter on the word
+  'pictures' (a literal pun).
 - Sounds where nothing meaningful happens on screen, or a sound that fights
   the material (an impact under a tender admission).
 - Music added on the agent's own initiative, or a CC0 library bed chosen
@@ -222,7 +223,9 @@ as work.
 Render; read the AUDIO CHECK (LUFS, peaks, dead air, bed level under speech
 when music exists); `audit_audio_mix` lists every cue with its level
 against the voice and its placement checks (visual partner, payoff word,
-pun, opening whoosh, the talking-short budget); check the spacing (1-2 in a
+pun, opening whoosh, the talking-short budget — the partner check reads the
+edit's own graphics, B-roll entries, shot changes and zooms, and inside
+video B-roll the clip's own action counts); check the spacing (1-2 in a
 podcast short, about one every 4–5 s at most elsewhere, no repeat within
 ~3 s) and that each peak lands on its frame in dense rendered looks;
 listen-check (when the reviewer is available) the opening, a dense dialogue

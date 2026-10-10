@@ -6825,8 +6825,10 @@ def add_sfx(ctx, storage_key, at, gain_db=None, purpose=None, offset_s=None,
     sound gets SFX_DEFAULT_GAIN_DB. An explicit gain_db always wins; either
     way the result reports where it sits against the voice and the
     placement checks (sfx_placement). A bright library sound landing on a
-    payoff/emphasis word's onset is nudged to a visual partner in the
-    neighbouring speech gap when one is within reach."""
+    payoff/emphasis word's onset (or ringing into it) is nudged to a visual
+    partner in the neighbouring speech gap when one is within reach — never
+    a pun or a sound whose action is shown on that frame: those are
+    reported and stay."""
     sound, err = _resolve_sfx(ctx, storage_key)
     if err:
         return err
@@ -6922,14 +6924,19 @@ def add_sfx(ctx, storage_key, at, gain_db=None, purpose=None, offset_s=None,
             role = (sound_library.get(lib_id) or {}).get("role")
             index = getattr(ctx, "index", None) or {}
             words = sfx_placement.program_words(edl, index)
-            hit_w = sfx_placement.collides(
-                role, at, sfx_placement.protected_words(edl, words))
-            # a literal pun is wrong at any time: it is reported, not moved
-            if hit_w and sfx_placement.pun(edl, role, at, words):
+            ring = sfx_placement.ring_s(lib_id)
+            protected = sfx_placement.protected_words(edl, words)
+            hit_w = sfx_placement.collides(role, at, protected, ring)
+            # a literal pun is wrong at any time: it is reported, not moved;
+            # a sound whose action is shown at `at` (a notification card's
+            # ding, B-roll) belongs to that frame: reported, not moved away
+            if hit_w and (sfx_placement.pun(edl, role, at, words)
+                          or sfx_placement.depicts(edl, role, at)):
                 hit_w = None
             moved = hit_w and sfx_placement.nudge(
                 sfx_placement.visual_events(edl, index), words, hit_w, role,
-                at, end=max(0.0, latest_at - 0.1))
+                at, end=max(0.0, latest_at - 0.1), protected=protected,
+                ring=ring)
         except Exception as e:      # noqa: BLE001
             print(f"[sfx] nudge skipped: {str(e)[:160]}", flush=True)
             moved = None
@@ -7014,9 +7021,9 @@ def add_sfx(ctx, storage_key, at, gain_db=None, purpose=None, offset_s=None,
             element_id=sid, purpose=purpose_n, at=round(at, 2),
             review_stage="timeline")
         checks = _sfx_check_lines(ctx, edl, [sid])
-        return (result + at_note + hit_note + nudge_note
+        return (result + at_note + hit_note + note + nudge_note
                 + (f"\n{mix_line}" if mix_line else "")
-                + "".join("\n" + c for c in checks) + note)
+                + "".join("\n" + c for c in checks))
     return result + at_note + note
 
 
@@ -26153,7 +26160,8 @@ TOOLS = {
                 "hot, and more than 1-2 sounds in a talking short; a bright "
                 "library sound on a payoff word's onset is NUDGED to a "
                 "visual partner in the neighbouring speech gap when one is "
-                "within reach.",
+                "within reach (a pun, or a sound whose action is shown on "
+                "that frame, is reported and left where it is).",
                 {"storage_key": {"type": "string"},
                  "at": {"type": "number"},
                  "gain_db": {"type": "number"},

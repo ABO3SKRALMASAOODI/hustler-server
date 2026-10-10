@@ -15,9 +15,13 @@ the remaining sounds did wrong on the showcase shorts:
 
 So a sound needs (1) a VISUAL PARTNER: a graphic landing, entrance or exit,
 a cut or B-roll entry, a zoom or card edge within ~50 ms of its hit (a
-whoosh, swish or riser accompanies a movement, so within 0.12 s); (2) to
-stay OFF a payoff or emphasis word's onset energy when it is bright (ding,
-pop, tick, click, shutter, cash, glitch over the word's first 300 ms) —
+whoosh, swish or riser accompanies a movement, so within 0.12 s); inside
+video B-roll (an insert or video overlay) the clip's own action can be the
+partner — a website demo's recorded click — and no EDL event marks it, so
+the check is silent there; (2) to stay OFF a payoff or emphasis word's
+onset energy when it is bright (ding, pop, tick, click, shutter, cash,
+glitch over the word's first 300 ms, or hit just before it and still
+ringing into it: ring_s) —
 payoff/emphasis words are the spoken words a designed graphic shows and the
 captions' emphasis words; (3) no literal pun: foley that names the spoken
 word under it (shutter/'pictures', cash register/'money') while nothing on
@@ -26,7 +30,8 @@ reflexive opening whoosh.
 
 Pure functions over (edl, index words): add_sfx/move_sfx report them at
 write time (add_sfx also nudges a bright sound off a protected onset when a
-speech gap with its own visual partner is within reach), template cues are
+speech gap with its own visual partner is within reach — never a pun or a
+sound whose action is shown on that frame), template cues are
 reported when written, audit_audio_mix lists them, and taste.critique turns
 them into advisory notes. Every finding is advisory evidence, never a write
 gate: the editor (or the user) may keep a sound deliberately.
@@ -41,6 +46,12 @@ SWEEP_PARTNER_S = 0.12      # a whoosh/swish/riser accompanies a movement
 GRID_S = 0.006              # the EDL keeps sfx on a 10 ms grid
 ONSET_GUARD_S = 0.03        # just before a protected onset still collides
 ONSET_PROTECT_S = 0.30      # the word's first 300 ms carry its consonants
+# A bright sound that hits just BEFORE a protected onset still rings into
+# it: the recording's audible decay after its hit (manifest duration or tail
+# cap, minus the hit), capped here — a ding hit 0.15 s early is still loud
+# on the word's first consonant. Unknown recordings ring RING_DEFAULT_S.
+RING_MAX_S = 0.2
+RING_DEFAULT_S = 0.1
 PUN_BEFORE_S = 0.30         # a sound this close before a word is "on" it
 PUN_AFTER_S = 0.15
 GAP_MIN_S = 0.12            # a speech gap a nudged sound may sit in
@@ -140,12 +151,16 @@ def sound_id(item):
 
 def role_of(item):
     """The library role of an sfx item (its recording's role, else a
-    keyword match on its key and purpose), or None."""
+    keyword match on its key and purpose), or None. A purpose add_sfx
+    filled in from the visual storyboard ('punctuate visible event: ...')
+    describes the picture, not the sound, so it is not read."""
     sid = sound_id(item)
     if sid:
         return (sound_library.get(sid) or {}).get("role")
-    hay = " ".join(str((item or {}).get(k) or "")
-                   for k in ("storage_key", "purpose")).lower()
+    purpose = str((item or {}).get("purpose") or "")
+    if purpose.lower().startswith("punctuate visible event:"):
+        purpose = ""
+    hay = (str((item or {}).get("storage_key") or "") + " " + purpose).lower()
     words = set(re.split(r"[^a-z]+", hay))
     for role, vocab in _ROLE_VOCAB:
         if any(v in words for v in vocab):
@@ -155,6 +170,16 @@ def role_of(item):
 
 def hit_time(item):
     return float(sound_library.hit_at(item))
+
+
+def ring_s(sid):
+    """Seconds a recording stays loud after its hit (capped at RING_MAX_S):
+    how far before a protected onset a bright hit still masks it."""
+    r = sound_library.get(sid) if sid else None
+    if not r:
+        return RING_DEFAULT_S
+    end = float(r.get("max_s") or r.get("duration_s") or 0.0)
+    return max(0.0, min(RING_MAX_S, end - sound_library.hit_s(sid)))
 
 
 def program_words(edl, index):
@@ -302,6 +327,30 @@ def visual_events(edl, index=None):
     return sorted(ev)
 
 
+def inside_other_footage(edl, t):
+    """Whether program second t sits inside B-roll the edit cannot see into:
+    a VIDEO insert or video overlay. Its own action (a recorded click in a
+    website demo, a door slamming in a clip) is a real visual partner that
+    no EDL event marks, so the partner check stays silent there."""
+    from timeline import program_blocks
+    try:
+        for b in program_blocks(edl):
+            if (b["kind"] == "insert" and (b.get("media") or "video") == "video"
+                    and b["out_start"] - 1e-3 <= t <= b["out_end"] + 1e-3):
+                return True
+    except Exception:          # noqa: BLE001
+        pass
+    for it in edl.get("overlays") or []:
+        try:
+            s = float(it["start"])
+            if (it.get("kind") or "video") == "video" \
+                    and s - 1e-3 <= t <= s + float(it.get("duration_s") or 0):
+                return True
+        except (KeyError, TypeError, ValueError):
+            continue
+    return False
+
+
 def depicts(edl, role, t):
     """Whether something on screen at program second t shows `role`'s
     action: a B-roll insert or overlay (any), or a motion graphic whose own
@@ -373,9 +422,10 @@ def protected_words(edl, words):
                 out.setdefault(round(float(w["t0"]), 3), dict(
                     w, why=f"the {m.get('template')} graphic "
                            f"{m.get('id')} shows it"))
-    caps = edl.get("captions") or {}
-    emph = {_norm(x) for x in (caps.get("emphasis_words") or [])
-            if isinstance(caps, dict)} - {""}
+    # Dictated captions (a list of items) carry no emphasis words.
+    caps = edl.get("captions")
+    caps = caps if isinstance(caps, dict) else {}
+    emph = {_norm(x) for x in (caps.get("emphasis_words") or [])} - {""}
     for w in words:
         if _norm(w["w"]) in emph:
             out.setdefault(round(float(w["t0"]), 3),
@@ -385,17 +435,36 @@ def protected_words(edl, words):
 
 # ── the checks ────────────────────────────────────────────────────────────
 
-def talking_short(edl, words):
+def _short_shape(edl, index=None):
+    """Whether the OUTPUT picture is vertical or square: the frame ratio,
+    or for 'source'/unset the source picture (a phone-shot podcast kept at
+    its own shape) — a canvas program's canvas."""
+    frame = edl.get("frame") or {}
+    ratio = (frame.get("ratio") if isinstance(frame, dict) else None) or "source"
+    if ratio in ("9:16", "4:5", "1:1"):
+        return True
+    if ratio != "source":
+        return False
+    canvas = edl.get("canvas") if isinstance(edl.get("canvas"), dict) else None
+    video = (index or {}).get("video") or {}
+    w, h = ((canvas.get("width"), canvas.get("height")) if canvas
+            and not edl.get("keep") else (video.get("width"), video.get("height")))
+    try:
+        w, h = float(w or 0), float(h or 0)
+    except (TypeError, ValueError):
+        return False
+    return bool(w > 0 and h > 0 and h >= w * 0.95)
+
+
+def talking_short(edl, words, index=None):
     """A vertical/square short of TALKING_SHORT_MAX_S or less carried by
     speech — the podcast-short case the owner's zero-sound default is for."""
     from schemas import program_duration
-    frame = edl.get("frame") or {}
-    ratio = frame.get("ratio") if isinstance(frame, dict) else None
     try:
         dur = float(program_duration(edl))
     except Exception:          # noqa: BLE001
         return False
-    return (ratio in ("9:16", "4:5", "1:1") and 0 < dur <= TALKING_SHORT_MAX_S
+    return (_short_shape(edl, index) and 0 < dur <= TALKING_SHORT_MAX_S
             and len(words) >= TALKING_SHORT_MIN_WORDS)
 
 
@@ -413,13 +482,16 @@ def partner(events, role, hit):
     return ev, bool(ev and abs(ev[0] - hit) <= tol)
 
 
-def collides(role, hit, protected):
-    """The protected word whose onset a bright sound lands on, or None."""
+def collides(role, hit, protected, ring=0.0):
+    """The protected word whose onset a bright sound lands on, or None.
+    `ring` (ring_s) extends the window before the onset: a recording that
+    hits just before the word still rings over its first consonants."""
     if role not in BRIGHT_ROLES:
         return None
+    lead = ONSET_GUARD_S + GRID_S + max(0.0, float(ring or 0.0))
     for w in protected:
         o = float(w["t0"])
-        if o - ONSET_GUARD_S - GRID_S <= hit <= o + ONSET_PROTECT_S:
+        if o - lead <= hit <= o + ONSET_PROTECT_S:
             return w
     return None
 
@@ -454,11 +526,13 @@ def speech_gaps(words, a, b, end=None):
     return out
 
 
-def nudge(events, words, word, role, hit, end=None):
+def nudge(events, words, word, role, hit, end=None, protected=None, ring=0.0):
     """(new_hit, label) — a visual partner inside a speech gap next to the
-    protected word, clear of its onset, within NUDGE_REACH_S; or None.
+    protected word, clear of its onset (and of every other protected onset
+    in `protected`, ring included), within NUDGE_REACH_S; or None.
     `end` (the last second a sound may hit) closes the final gap."""
     o = float(word["t0"])
+    guard = list(protected or []) + [word]
     best = None
     for g0, g1 in speech_gaps(words, o - NUDGE_REACH_S, o + NUDGE_REACH_S,
                               end=end):
@@ -468,6 +542,8 @@ def nudge(events, words, word, role, hit, end=None):
             if end is not None and t > end:
                 continue
             if o - ONSET_GUARD_S - 0.05 <= t <= o + ONSET_PROTECT_S:
+                continue
+            if collides(role, t, guard, ring):
                 continue
             if abs(t - o) > NUDGE_REACH_S:
                 continue
@@ -488,14 +564,17 @@ def check_item(edl, item, words, events=None, protected=None, talking=None,
     events = visual_events(edl, index) if events is None else events
     protected = protected_words(edl, words) if protected is None else protected
     if talking is None:
-        talking = talking_short(edl, words)
+        talking = talking_short(edl, words, index)
     role = role_of(item)
     hit = hit_time(item)
     sid = item.get("id") or "?"
     name = f"sfx {sid} ({_fmt_role(role)})"
     found = []
     ev, ok = partner(events, role, hit)
-    if not ok:
+    # Inside video B-roll the clip's own action can be the partner (a
+    # website demo's recorded click); the edit cannot see it, so it does
+    # not guess.
+    if not ok and not inside_other_footage(edl, hit):
         near = (f"; nearest: {ev[1]} at {ev[0]:.2f}s" if ev else "")
         found.append({
             "code": "no_visual_partner", "id": sid, "at": round(hit, 2),
@@ -504,8 +583,11 @@ def check_item(edl, item, words, events=None, protected=None, talking=None,
                 f"{int(round((SWEEP_PARTNER_S if role in SWEEP_ROLES else PARTNER_S) * 1000))}"
                 f" ms{near} — a sound with nothing on screen to belong to is "
                 "decoration. Land it on the frame where something changes "
-                "(move_sfx) or remove it (remove_sfx).")})
-    w = collides(role, hit, protected)
+                "(move_sfx) or remove it (remove_sfx); keep it only if the "
+                "footage itself shows an action on that frame (the check "
+                "sees the edit's graphics, B-roll, shot changes and zooms, "
+                "not the action inside a shot).")})
+    w = collides(role, hit, protected, ring_s(sound_id(item)))
     if w:
         found.append({
             "code": "on_payoff_word", "id": sid, "at": round(hit, 2),
@@ -543,7 +625,7 @@ def check_edl(edl, index=None, words=None, ids=None):
     words = program_words(edl, index) if words is None else words
     events = visual_events(edl, index)
     protected = protected_words(edl, words)
-    talking = talking_short(edl, words)
+    talking = talking_short(edl, words, index)
     items = {}
     for it in edl.get("sfx") or []:
         if ids is not None and it.get("id") not in ids:

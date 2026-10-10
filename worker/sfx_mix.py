@@ -253,25 +253,45 @@ def _lufs(values):
 
 
 def _pieces(edl, a, b):
-    """[(program_start, program_len, src_start | None)] covering program
-    [a, b]: footage spans of the cut, inserts as silence (None)."""
-    from timeline import Timeline, program_blocks
+    """[(program_start, program_len, src_start | None, src_len)] covering
+    program [a, b] in program order: each constant-rate piece of the kept
+    footage (a speed span plays src_len of source in program_len), inserts
+    as silence (None)."""
+    from timeline import Timeline
     tl = Timeline(edl.get("keep") or [], edl.get("inserts") or [],
                   edl.get("speed") or [])
     out = []
-    for blk in program_blocks(edl):
-        s, e = max(a, blk["out_start"]), min(b, blk["out_end"])
-        if e - s < 0.02:
-            continue
-        if blk["kind"] == "footage":
-            src = tl.out_to_src(min(s + 1e-3, e))
-            if src is None:
-                continue
-            src = max(float(blk["src_start"]), src - 1e-3)
-            out.append((s, e - s, src))
-        else:
-            out.append((s, e - s, None))
-    return out
+    for pcs, off in zip(tl.pieces, tl.offsets):
+        t = off
+        for ps, pe, f in pcs:
+            plen = (pe - ps) / f
+            s, e = max(a, t), min(b, t + plen)
+            if e - s >= 0.02:
+                out.append((s, e - s, ps + (s - t) * f, (e - s) * f))
+            elif e - s > 1e-3:
+                # a sliver plays as silence so the concat keeps its clock
+                out.append((s, e - s, None, e - s))
+            t += plen
+    for start, dur in tl.insert_positions():
+        s, e = max(a, start), min(b, start + dur)
+        if e - s > 1e-3:
+            out.append((s, e - s, None, e - s))
+    return sorted(out, key=lambda p: p[0])
+
+
+def _atempo(rate):
+    """An atempo chain for a playback rate (each stage 0.5-2.0), or ''."""
+    if abs(rate - 1.0) < 0.01:
+        return ""
+    stages = []
+    while rate > 2.0:
+        stages.append(2.0)
+        rate /= 2.0
+    while rate < 0.5:
+        stages.append(0.5)
+        rate /= 0.5
+    stages.append(rate)
+    return "".join(f"atempo={r:.5f}," for r in stages)
 
 
 def _ffmpeg_bin():
@@ -284,14 +304,17 @@ def _probe_blocks(media, pieces, timeout=60):
     if not pieces or len(pieces) > MAX_PIECES:
         return None
     args, chains = [], []
-    for k, (_t, dur, src) in enumerate(pieces):
+    for k, (_t, dur, src, src_len) in enumerate(pieces):
+        tempo = ""
         if src is None:
             args += ["-f", "lavfi", "-t", f"{dur:.3f}",
                      "-i", "anullsrc=r=48000:cl=stereo"]
         else:
-            args += ["-ss", f"{src:.3f}", "-t", f"{dur:.3f}", "-i", media]
+            # a speed span plays src_len of source in dur of program
+            args += ["-ss", f"{src:.3f}", "-t", f"{src_len:.3f}", "-i", media]
+            tempo = _atempo(src_len / dur)
         chains.append(f"[{k}:a]aresample=48000,aformat=sample_fmts=fltp:"
-                      f"channel_layouts=stereo,apad=whole_dur={dur:.3f},"
+                      f"channel_layouts=stereo,{tempo}apad=whole_dur={dur:.3f},"
                       f"atrim=end={dur:.3f}[p{k}]")
     tmp = tempfile.mkdtemp(prefix="sfxmix-")
     path = os.path.join(tmp, "m.txt")
@@ -421,7 +444,10 @@ def is_mastered(ctx, edl):
 
 
 def voices_for(ctx, edl, hits):
-    """voice_levels for a tool context: its proxy, its mastering."""
+    """voice_levels for a tool context: its proxy, its mastering. Nothing to
+    measure (no hits) never touches the proxy — it may be a download."""
+    if not hits:
+        return {}
     media, why = media_for(ctx)
     if not media:
         return {round(float(h), 3): nominal(why) for h in hits or []}

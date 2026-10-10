@@ -524,3 +524,124 @@ def test_no_surface_prescribes_a_pun_or_a_fixed_gain():
         low = _flat(text).lower()
         for phrase in retired:
             assert phrase.lower() not in low, (where, phrase)
+
+
+# ── review fixes (Oct 10): every lane, every caption kind ─────────────
+
+def test_dictated_captions_do_not_switch_the_checks_off():
+    # a list of caption items carries no emphasis words; the checks still run
+    edl = _thiel_edl([_lib("ding_1", 31.46, id="s3")])
+    edl["captions"] = [{"text": "we got 140", "start": 31.0, "end": 32.0}]
+    codes, _ = _codes(edl, THIEL_WORDS)
+    assert codes["s3"] == {"on_payoff_word"}
+
+
+def test_nothing_to_level_never_touches_the_proxy():
+    class NoProxy(_Ctx):
+        def proxy_path(self):
+            raise AssertionError("proxy fetched with nothing to measure")
+    ctx = NoProxy(_edl([[0.0, 30.0]]), media="unused.mp4")
+    assert sfx_mix.voices_for(ctx, ctx._edl, []) == {}
+    ctx.db = type("D", (), {"run": lambda self, fn, *a, **k: None})()
+    state = agent_tools._declared_mix_state(ctx, ctx._edl)
+    assert agent_tools._sfx_mix_audit(ctx, ctx._edl, state["sfx"]) == []
+
+
+def test_a_sound_inside_video_broll_is_not_asked_for_a_partner():
+    # a website demo's click sounds sync to the recorded clicks inside the
+    # inserted clip: real partners no EDL event marks
+    words = _words([(f"w{i}", 1.0 + i * 0.4, 1.3 + i * 0.4) for i in range(60)])
+    demo = {"id": "ins1", "asset_key": "video/7/demo.mp4", "kind": "video",
+            "at_output_s": 10.0, "source_start_s": 0.0, "duration_s": 8.0}
+    click = {"id": "sx1", "storage_key": "legacy-sfx/click.wav", "at": 13.37,
+             "gain_db": -13.0}
+    edl = _edl([[0.0, 10.0], [10.0, 30.0]], inserts=[demo], sfx=[click])
+    codes, _ = _codes(edl, words)
+    assert "no_visual_partner" not in codes.get("sx1", set())
+    # the same click over a still image (or the speaker) still needs one
+    still = dict(demo, kind="image", asset_key="image/7/still.png")
+    edl = _edl([[0.0, 10.0], [10.0, 30.0]], inserts=[still], sfx=[click])
+    assert "no_visual_partner" in _codes(edl, words)[0]["sx1"]
+
+
+def test_a_bright_hit_just_before_the_payoff_onset_still_rings_into_it():
+    # ding_1 rings ~1 s: 0.15 s before '140' it is loud on the word's onset
+    edl = _thiel_edl([_lib("ding_1", 31.31, id="s3")])
+    assert "on_payoff_word" in _codes(edl, THIEL_WORDS)[0]["s3"]
+    # a short tick decays in ~60 ms: 0.15 s early is clear of the word
+    edl = _thiel_edl([_lib("tick_1", 31.31, id="s3")])
+    assert "on_payoff_word" not in _codes(edl, THIEL_WORDS)[0].get("s3", set())
+    assert sfx_placement.ring_s("ding_1") == sfx_placement.RING_MAX_S
+    assert sfx_placement.ring_s("tick_1") < 0.07
+
+
+def test_a_nudge_never_lands_on_another_protected_onset():
+    # the only partner in reach (a graphic landing at the end of the pause
+    # after '140') sits on the onset of another shown word, 'rockets'
+    word_140 = {"w": "140", "t0": 10.5, "t1": 10.9, "why": "shown"}
+    rockets = {"w": "rockets", "t0": 11.6, "t1": 12.1, "why": "shown"}
+    events = [(11.6, "the slam graphic r")]
+    words = _words([("we", 10.0, 10.2), ("got", 10.2, 10.4),
+                    ("140", 10.5, 10.9), ("rockets", 11.6, 12.1)])
+    assert sfx_placement.nudge(events, words, word_140, "ding", 10.5,
+                               protected=[word_140, rockets],
+                               ring=sfx_placement.ring_s("ding_1")) is None
+    # without the second protected word the gap end was taken
+    assert sfx_placement.nudge(events, words, word_140, "ding", 10.5) == \
+        (11.6, "the slam graphic r")
+
+
+def test_a_portrait_source_kept_at_its_shape_is_a_talking_short():
+    words = _words([(f"w{i}", 1.0 + i * 0.4, 1.3 + i * 0.4) for i in range(60)])
+    edl = validate_edl({"keep": [[0.0, 30.0]]}, 60.0).model_dump(exclude_none=True)
+    assert sfx_placement.talking_short(
+        edl, words, {"video": {"width": 1080, "height": 1920}})
+    assert not sfx_placement.talking_short(
+        edl, words, {"video": {"width": 1920, "height": 1080}})
+    three = [_lib("swish_1", 5.0, id="a"), _lib("pop_1", 12.0, id="b"),
+             _lib("impact_1", 20.0, id="c")]
+    got = sfx_placement.check_edl(
+        dict(edl, sfx=three),
+        {"words": words, "video": {"width": 1080, "height": 1920}})
+    assert got["talking"] and got["budget"]["count"] == 3
+
+
+def test_a_storyboard_purpose_does_not_name_the_sound():
+    item = {"id": "sx1", "storage_key": "sfx/7/upload-123.wav", "at": 3.0,
+            "purpose": "punctuate visible event: a man holds a camera"}
+    assert sfx_placement.role_of(item) is None
+    assert sfx_placement.role_of(dict(item, purpose="camera shutter on the photo")) \
+        == "shutter"
+
+
+@needs_ffmpeg
+def test_voice_under_a_speed_span_is_measured_on_the_retimed_program(tmp_path):
+    # source: 6 s loud, then 24 s 12 dB quieter; the loud part plays at 2x,
+    # so program 3-27 is the quiet part
+    src = _speechlike(str(tmp_path / "s.wav"), [(6.0, 0.0), (24.0, -12.0)])
+    plain = _edl([[0.0, 30.0]])
+    fast = _edl([[0.0, 30.0]], speed=[{"id": "sp1", "start": 0.0, "end": 6.0, "factor": 2.0}])
+    pieces = sfx_mix._pieces(fast, 0.0, 12.0)
+    assert pieces[0][:4] == pytest.approx((0.0, 3.0, 0.0, 6.0))
+    assert pieces[1][2] == pytest.approx(6.0) and pieces[1][0] == pytest.approx(3.0)
+    v_fast = sfx_mix.voice_levels(src, fast, [6.0], mastered=False)[6.0]
+    v_quiet = sfx_mix.voice_levels(src, plain, [15.0], mastered=False)[15.0]
+    assert v_fast["measured"] and v_quiet["measured"]
+    # program 6.0 under the speed span is source 9.0: the quiet voice
+    assert abs(v_fast["lufs"] - v_quiet["lufs"]) <= 1.0, (v_fast, v_quiet)
+
+
+def test_a_sound_on_its_shown_action_is_reported_not_moved(lib):
+    # a ding as a notification card lands on the word it shows: the action
+    # is on screen, so the tool leaves it there and says what it costs
+    words = THIEL_WORDS + _words([("so", 33.0, 33.2)])
+    edl = _edl([[0.0, 36.0]], motion=[
+        {"id": "note", "template": "notification", "start": 31.46, "end": 32.6,
+         "params": {"title": "140 characters"}},
+        {"id": "end", "template": "marker_text", "start": 32.6, "end": 35.0,
+         "params": {"text": "flying cars"}}])
+    ctx = _Ctx(edl, words=words)
+    out = agent_tools.add_sfx(ctx, "sound:ding_1", at=31.46)
+    assert "NUDGED" not in out, out
+    assert abs(sound_library.hit_at(ctx.sfx("sx1")) - 31.46) <= GRID
+    assert "CHECK:" in out and "'140'" in out
