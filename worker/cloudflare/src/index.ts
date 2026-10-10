@@ -18,7 +18,10 @@ interface JobIdentity {
 }
 
 interface CallState {
-  status: "submitted" | "starting" | "running" | "unknown" | "stopping" | "done" | "failed";
+  // `refused`: startup failed before any /run (no container instance, a
+  // retiring sidecar). Nothing ran; a later launch may reuse the id.
+  status: "submitted" | "starting" | "running" | "unknown" | "stopping" | "done" | "failed"
+    | "refused";
   jobType: string;
   updatedAt: string;
   activeUntil: number;
@@ -35,6 +38,10 @@ interface CallState {
   // Queue identity of the claim that owns this call. A dispatcher refused
   // with "shard is busy" reads it to check whether the owner is still alive.
   job?: JobIdentity;
+  // The dispatcher's nonce for the launch request that created this state.
+  // A reconnect trusts a `refused` record only when it names its own launch,
+  // never an older refusal of the same call id.
+  launchId?: string;
 }
 
 interface ActiveCall {
@@ -86,6 +93,11 @@ const INTERACTIVE_TYPES = new Set([
 const BATCH_TYPES = new Set([
   "index", "final", "capture", "track", "matte", "smatch", "clean",
   "stems", "fetch", "search", "stock_acquire", "ytprobe", "faces",
+  // Capacity failover only: when the interactive class cannot provide a
+  // container, the dispatcher may start the same media job here. The batch
+  // image is the interactive image built with FULL_COMPUTE=1 (a superset)
+  // under the same `executor` role.
+  "frames", "mcp_media", "preview", "preview_check", "filmstrip",
 ]);
 const AGENT_TYPES = new Set(["agent_turn"]);
 const MCP_TYPES = new Set(["mcp_tool"]);
@@ -95,6 +107,15 @@ const SYNCHRONOUS_TYPES = new Set([
   "fetch", "search", "stock_acquire", "ytprobe", "mcp_media", "faces",
 ]);
 const CALL_ID = /^[a-zA-Z0-9_-]{8,96}$/;
+const LAUNCH_ID = /^[a-zA-Z0-9_-]{8,64}$/;
+// What the Containers runtime and SDK say when no container could be
+// started for a Durable Object. Nothing ran; the dispatcher may start the
+// same claim under another identity or lane.
+const CAPACITY_REFUSALS = [
+  "there is no container instance",
+  "requesting too many containers per second",
+  "throttling the container service",
+];
 const SHARD_COUNTS = {
   interactive: 20, batch: 8, agent: 5, mcp: 20, shorts: 8,
 } as const;
@@ -149,6 +170,23 @@ function retryAttempts(jobType: string): number {
   // after its first attempt (MAX_ATTEMPTS_MCP = MAX_ATTEMPTS_AGENT = 1). A
   // requeue there strands the row `queued` forever; their caller retries.
   return jobType === "mcp_tool" || jobType === "agent_turn" ? 1 : 2;
+}
+
+function startupRefusal(jobType: string, error: unknown): JsonObject {
+  // Answer for a startup that failed before /run. `safe_to_fallback` is the
+  // dispatcher's established proof of no acceptance; the structured flag and
+  // failure kind let it retry elsewhere rather than fail the user's job.
+  const message = String(error);
+  const lowered = message.toLowerCase();
+  const capacity = CAPACITY_REFUSALS.some((marker) => lowered.includes(marker));
+  return {
+    error: message, safe_to_fallback: true, retryable: true,
+    ...(capacity ? { capacity_unavailable: true } : {}),
+    failure: {
+      kind: capacity ? "provider_capacity_unavailable" : "provider_start_abandoned",
+      retryable: true, max_attempts: retryAttempts(jobType), agent_repairable: false,
+    },
+  };
 }
 
 function abandonedEnvelope(state: CallState, reason: string): JsonObject {
@@ -245,9 +283,10 @@ async function matchesCompletedJob(callId: string, job: ExecutorJob): Promise<bo
     || callId === `cf-${job.type.slice(0, 18)}-${digest}`
     || (["final", "preview", "preview_check"].includes(job.type)
       && new RegExp(`^cf-render-g[0-9]+-[01]-${digest}$`).test(callId))
-    || (["preview", "preview_check", "filmstrip", "mcp_tool"].includes(job.type)
-      && [1, 2].some((slot) => callId ===
-        `cf-alt${slot}-${job.type}-p${job.project_id}-${digest}`));
+    // Alternate admission identities: a busy media shard, or any job type
+    // spread off a Durable Object that could not provide a container.
+    || [1, 2].some((slot) => callId ===
+      `cf-alt${slot}-${job.type}-p${job.project_id}-${digest}`);
 }
 
 abstract class ValmeraContainer extends Container<Env> {
@@ -368,29 +407,54 @@ abstract class ValmeraContainer extends Container<Env> {
     }
   }
 
-  private async retireUnreadyContainer(callId: string): Promise<void> {
+  private async retireUnreadyContainer(
+    callId: string, refusal?: JsonObject,
+  ): Promise<void> {
     // stop() only signals SIGTERM in SDK 0.3.7. Await actual destruction of
     // a rejected image before admitting its replacement. Keep an exclusive
     // reset reservation throughout; never destroy another accepted /run.
     const resetId = `reset:${callId}`;
-    const owns = await this.ctx.storage.transaction(async (txn) => {
+    const retiring = await this.ctx.storage.transaction(async (txn) => {
       const state = await txn.get<CallState>(this.stateKey(callId));
       const active = await txn.get<ActiveCall>("active");
-      if (state?.status !== "starting" || active?.callId !== callId) return false;
+      if (!state || state.status !== "starting" || active?.callId !== callId) return null;
+      const stopping: CallState = { ...state, status: "stopping" };
       await txn.put({
-        [this.stateKey(callId)]: { ...state, status: "stopping" },
+        [this.stateKey(callId)]: stopping,
         active: { callId: resetId, expiresAt: Date.now() + 120_000 },
       });
-      return true;
+      return stopping;
     });
-    if (!owns) return;
+    if (!retiring) return;
     let destroyed = false;
     try { await this.destroy(); destroyed = true; }
     catch { /* Retain the reset lease until cleanup can be retried. */ }
     await this.ctx.storage.transaction(async (txn) => {
       const active = await txn.get<ActiveCall>("active");
       if (active?.callId !== resetId) return;
-      await txn.delete(this.stateKey(callId));
+      const key = this.stateKey(callId);
+      const current = await txn.get<CallState>(key);
+      if (refusal && current?.status === "stopping"
+          && current.updatedAt === retiring.updatedAt && !current.abandonReason) {
+        // No /run was sent. Like a startup refusal, leave a `refused`
+        // record (a later launch may reserve the id over it) so a dispatcher
+        // whose launch request already ended reads this outcome instead of
+        // polling a missing call until its lease deadline (31 minutes for
+        // an MCP tool, six hours for a preview).
+        const refusedAt = Date.now();
+        await txn.put({
+          [key]: {
+            status: "refused", jobType: current.jobType,
+            error: String(refusal.error ?? "Cloudflare container image is not ready"),
+            envelope: refusal, updatedAt: new Date(refusedAt).toISOString(),
+            activeUntil: refusedAt,
+            ...(current.launchId ? { launchId: current.launchId } : {}),
+          } satisfies CallState,
+          [this.terminalKey(callId, refusedAt)]: callId,
+        });
+      } else {
+        await txn.delete(key);
+      }
       if (destroyed) await txn.delete("active");
     });
   }
@@ -442,7 +506,7 @@ abstract class ValmeraContainer extends Container<Env> {
     callId: string, now = Date.now(),
   ): Promise<CallState | null> {
     const observed = await this.callState(callId);
-    if (!observed || ["done", "failed"].includes(observed.status)) return observed;
+    if (!observed || ["done", "failed", "refused"].includes(observed.status)) return observed;
     if (observed.status === "stopping" && observed.abandonReason) {
       // A dead-call fence whose destroy failed: finish it with its own outcome.
       return this.fenceAndFail(callId, observed, now,
@@ -702,6 +766,7 @@ abstract class ValmeraContainer extends Container<Env> {
     now: number,
     activeUntil: number,
     identity?: JobIdentity,
+    launchId?: string,
   ): Promise<Reservation> {
     // A Durable Object may interleave requests at await points. Keep the
     // call-id check and per-shard admission lock in one storage transaction,
@@ -711,10 +776,13 @@ abstract class ValmeraContainer extends Container<Env> {
       if (existing?.status === "done" || existing?.status === "failed") {
         return { kind: "terminal", state: existing };
       }
-      if (existing && existing.jobType !== jobType) {
+      // A refusal accepted nothing, so the same id may launch again (a
+      // rollout wait retries its exact identity).
+      const live = existing?.status === "refused" ? undefined : existing;
+      if (live && live.jobType !== jobType) {
         return { kind: "conflict" };
       }
-      if (existing) return { kind: "existing", state: existing };
+      if (live) return { kind: "existing", state: live };
 
       const active = await txn.get<ActiveCall>("active");
       if (active && active.expiresAt > now) {
@@ -737,6 +805,7 @@ abstract class ValmeraContainer extends Container<Env> {
         status: "submitted", jobType,
         updatedAt: new Date().toISOString(), activeUntil,
         ...(identity ? { job: identity } : {}),
+        ...(launchId ? { launchId } : {}),
       };
       await txn.put({
         [this.stateKey(callId)]: state,
@@ -759,13 +828,21 @@ abstract class ValmeraContainer extends Container<Env> {
         return json({ error: String(error) }, 503);
       }
       const readiness = await this.containerReadiness();
+      // The probe Durable Object is one more name than the lane has shards,
+      // and every lane's max_instances equals its shard count. Left to idle
+      // out (240 s on interactive/MCP) it holds an instance a customer shard
+      // may need, and the deploy workflow's next probe 75 s later would read
+      // the same old image instead of the rollout. It serves nothing else.
+      try { await this.destroy(); }
+      catch { /* Idle expiry still reclaims it. */ }
       return json(readiness.body ?? { error: readiness.error }, readiness.ok ? 200 : 503);
     }
     const statusMatch = url.pathname.match(/^\/status\/([^/]+)$/);
     if (request.method === "GET" && statusMatch && CALL_ID.test(statusMatch[1])) {
       let state = await this.expireStaleStart(statusMatch[1]);
       if (state?.status === "running") state = await this.noteLostHandler(statusMatch[1]);
-      if (state?.status !== "done" && state?.status !== "failed") {
+      if (state?.status !== "done" && state?.status !== "failed"
+          && state?.status !== "refused") {
         state = await this.expireExecutorLease(statusMatch[1]);
       }
       return state ? json(state) : json({ status: "missing" }, 404);
@@ -793,8 +870,12 @@ abstract class ValmeraContainer extends Container<Env> {
     }
     const callId = executeMatch[1];
 
-    const body = (await request.json()) as { job?: ExecutorJob; timeout_s?: number };
+    const body = (await request.json()) as {
+      job?: ExecutorJob; timeout_s?: number; launch_id?: unknown;
+    };
     const job = body.job;
+    const launchId = typeof body.launch_id === "string" && LAUNCH_ID.test(body.launch_id)
+      ? body.launch_id : undefined;
     const queueBacked = Number.isInteger(job?.id)
       && Number.isInteger(job?.total_claims);
     const synchronous = job?.id == null && job?.total_claims == null
@@ -810,7 +891,7 @@ abstract class ValmeraContainer extends Container<Env> {
     const activeUntil = now + timeoutSeconds * 1000;
     const identity = jobIdentity(job);
     let reservation = await this.reserve(
-      callId, job.type, now, activeUntil, identity,
+      callId, job.type, now, activeUntil, identity, launchId,
     );
     if (reservation.kind === "reset") {
       // The prior dispatch lease has expired. Its /run may still occupy this
@@ -834,7 +915,7 @@ abstract class ValmeraContainer extends Container<Env> {
       }, expiredAt);
       await this.release(reservation.resetId);
       reservation = await this.reserve(
-        callId, job.type, Date.now(), activeUntil, identity,
+        callId, job.type, Date.now(), activeUntil, identity, launchId,
       );
     }
     if (reservation.kind === "terminal") {
@@ -876,6 +957,7 @@ abstract class ValmeraContainer extends Container<Env> {
         readOnly: job.type === "mcp_tool" && job.payload?.mutation === false,
         job: identity,
         updatedAt: new Date().toISOString(), activeUntil,
+        ...(launchId ? { launchId } : {}),
       });
       await this.startAndWaitForPorts({
         ports: [8080],
@@ -883,19 +965,33 @@ abstract class ValmeraContainer extends Container<Env> {
         cancellationOptions: { portReadyTimeoutMS: 120_000, instanceGetTimeoutMS: 30_000 },
       });
     } catch (error) {
-      const current = await this.callState(callId);
-      if (current?.status === "done" || current?.status === "failed") {
-        return json(current.envelope ?? {
-          error: current.error ?? "Cloudflare call ended during startup",
+      // No /run request was sent. Record the refusal (rather than deleting
+      // the call) so a dispatcher whose launch request already timed out
+      // learns it on reconnect instead of polling a missing call until its
+      // deadline. A later launch may reserve the same id over it.
+      const refusal = startupRefusal(job.type, error);
+      const refusedAt = Date.now();
+      const terminal = await this.ctx.storage.transaction(async (txn) => {
+        const current = (await txn.get<CallState>(stateKey)) ?? null;
+        if (current?.status === "done" || current?.status === "failed") return current;
+        await txn.put({
+          [stateKey]: {
+            status: "refused", jobType: job.type, error: String(error),
+            envelope: refusal, updatedAt: new Date(refusedAt).toISOString(),
+            activeUntil: refusedAt, ...(launchId ? { launchId } : {}),
+          } satisfies CallState,
+          [this.terminalKey(callId, refusedAt)]: callId,
+        });
+        const active = await txn.get<ActiveCall>("active");
+        if (active?.callId === callId) await txn.delete("active");
+        return null;
+      });
+      if (terminal) {
+        return json(terminal.envelope ?? {
+          error: terminal.error ?? "Cloudflare call ended during startup",
         });
       }
-      // No /run request was sent. The dispatcher may safely use Modal.
-      await this.ctx.storage.delete(stateKey);
-      await this.release(callId);
-      return json({
-        error: String(error),
-        safe_to_fallback: true,
-      }, 503);
+      return json(refusal, 503);
     }
 
     // Wrangler activates Worker code before every old Container instance is
@@ -904,11 +1000,12 @@ abstract class ValmeraContainer extends Container<Env> {
     // Modal fallback instead of an older renderer touching a current EDL.
     const readiness = await this.containerReadiness();
     if (!readiness.ok) {
-      await this.retireUnreadyContainer(callId);
-      return json({
+      const refusal = {
         error: readiness.error ?? "Cloudflare container image is not ready",
         safe_to_fallback: true,
-      }, 503);
+      };
+      await this.retireUnreadyContainer(callId, refusal);
+      return json(refusal, 503);
     }
 
     // Track this handler before `running` is persisted, so a status read in
@@ -1094,7 +1191,19 @@ export default {
       shorts: SHORTS_TYPES,
     };
     const allowed = allowedByLane[lane];
-    if (!allowed.has(jobType)) {
+    // watch_video's MCP job is media work that both executor lanes run
+    // directly (their `executor` role accepts mcp_tool for __media__ only),
+    // so a capacity refusal on the MCP lane may fail over here. A completion
+    // acknowledgement or dead-call abandonment of that call carries only the
+    // claim identity (id, type, project, claims), never the payload; it can
+    // start nothing, and the Durable Object accepts it only for the exact
+    // call it stored. Rejecting it here held a failed-over watch_video's
+    // shard, and its dispatcher, until the 31-minute MCP lease expired.
+    const mediaTool = jobType === "mcp_tool"
+      && (lane === "interactive" || lane === "batch")
+      && (action !== ""
+        || (body.job?.payload as JsonObject | undefined)?.tool === "__media__");
+    if (!allowed.has(jobType) && !mediaTool) {
       return json({ error: `job type ${jobType} is not allowed on ${lane}`, safe_to_fallback: true }, 400);
     }
     return stub.fetch(`https://container.internal/${action || "execute"}/${callId}`, {

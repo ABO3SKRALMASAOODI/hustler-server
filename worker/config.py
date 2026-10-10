@@ -1052,6 +1052,23 @@ CLOUDFLARE_BUSY_WAIT_S = max(0.0, min(300.0, float(os.getenv(
 # shard) this many times with jittered backoff (~0.5-6 s) before failing.
 CLOUDFLARE_SYNC_BUSY_RETRIES = max(0, min(5, int(os.getenv(
     "CLOUDFLARE_SYNC_BUSY_RETRIES", "3"))))
+# "There is no container instance that can be provided to this durable
+# object": the Containers runtime searched ~30 s for an instance and found
+# none, before any /run. Nothing ran, so the dispatcher retries the same
+# claim under fresh Durable Object identities (another shard of the lane,
+# then another suitable lane) with jittered backoff, for at most this many
+# extra launches inside this window, before the fenced fallback (where
+# enabled) or an honest retryable failure. Each refusal itself takes 30 s or
+# more, so the window, not the count, is the usual bound.
+CLOUDFLARE_CAPACITY_WAIT_S = max(0.0, min(600.0, float(os.getenv(
+    "CLOUDFLARE_CAPACITY_WAIT_S", "150"))))
+CLOUDFLARE_CAPACITY_RETRIES = max(0, min(8, int(os.getenv(
+    "CLOUDFLARE_CAPACITY_RETRIES", "4"))))
+# A queue-backed media job whose every capacity route was refused goes back
+# to the queue this many times without spending its attempt (nothing ran).
+# MCP tools and Studio turns have a live caller and report it instead.
+CLOUDFLARE_CAPACITY_MAX_DEFERRALS = max(0, min(3, int(os.getenv(
+    "CLOUDFLARE_CAPACITY_MAX_DEFERRALS", "1"))))
 # Render and Cloudflare publish independently. Source/image mismatch is
 # proven pre-compute admission, so retain the same heartbeated queue lease
 # across a bounded rollout window instead of burning retries/reuploads.

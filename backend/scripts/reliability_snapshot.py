@@ -41,7 +41,8 @@ def mcp_failure_category(error):
         return "modal_billing_or_limit"
     if "readiness mismatch" in text:
         return "executor_version_mismatch"
-    if "no container instance" in text:
+    if "no container instance" in text \
+            or "could not provide a container" in text:
         return "cloudflare_container_unavailable"
     if "hasn't finished analyzing" in text or "has not finished analyzing" in text:
         return "project_not_indexed"

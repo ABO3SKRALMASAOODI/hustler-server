@@ -79,8 +79,51 @@ class CloudflareRolloutPending(CloudflareLaunchUnavailable):
     agent_repairable = False
 
 
+class CloudflareCapacityUnavailable(CloudflareLaunchUnavailable):
+    """Cloudflare could not provide a container before any /run was sent.
+
+    The Containers runtime answers "there is no container instance that can
+    be provided to this durable object" (or rate-limits container starts)
+    after its own ~30-s instance search, and a startup it abandoned before
+    /run ends as provider_start_abandoned. Either way the Durable Object
+    stored no accepted call, so the same claim may start under another
+    Durable Object identity, on another suitable lane, or on the fenced
+    fallback provider. When every route is refused, the final instance says
+    so plainly and is retryable: nothing ran and nothing changed.
+    """
+
+    failure_kind = "provider_capacity_unavailable"
+    retryable = True
+    max_attempts = 1
+    agent_repairable = False
+
+
+class _CloudflareRefused(Exception):
+    """A reconnect found the call's own pre-/run refusal tombstone."""
+
+    def __init__(self, body):
+        super().__init__(str((body or {}).get("error") or
+                             "Cloudflare refused the call before /run"))
+        self.body = body if isinstance(body, dict) else {}
+
+
 class CloudflareTerminalFailure(RemoteExecutorError):
     """A named Cloudflare call ended; an alternate provider is now safe."""
+
+
+# Messages the Containers runtime and SDK use when no container could be
+# started for a Durable Object. The adapter also flags these structurally
+# (capacity_unavailable); the text keeps an older adapter classifiable.
+_CAPACITY_REFUSAL_TEXT = (
+    "there is no container instance",
+    "requesting too many containers per second",
+    "throttling the container service",
+)
+
+
+def _capacity_refusal_text(text):
+    lowered = str(text or "").lower()
+    return any(marker in lowered for marker in _CAPACITY_REFUSAL_TEXT)
 
 
 # The last version skew observed against the executor, or "" when the two
@@ -756,6 +799,33 @@ def _modal_visibility_grace_active(row, now=None):
         < _MODAL_OUTPUT_VISIBILITY_GRACE_S
 
 
+def _cloudflare_refusal_settled(status, row, now=None):
+    """Whether a `refused` record proves this ledger row's launch is orphaned.
+
+    The record names no launch the guardian can match, so it counts only
+    when it was written after this row's launch was recorded (a relaunch of
+    the same identity refreshes submitted_at) and has stood for the attach
+    grace: an attached dispatcher reads its own refusal within one 2-s poll,
+    closes the row and moves on, so a refusal still open after that has no
+    dispatcher left. Anything unparseable keeps the old wait-for-deadline.
+    """
+    try:
+        refused_at = datetime.fromisoformat(
+            str(status.get("updatedAt") or "").replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if refused_at.tzinfo is None:
+        refused_at = refused_at.replace(tzinfo=timezone.utc)
+    submitted = row.get("submitted_at")
+    if not isinstance(submitted, datetime):
+        return False
+    if submitted.tzinfo is None:
+        submitted = submitted.replace(tzinfo=timezone.utc)
+    now = now or datetime.now(timezone.utc)
+    return refused_at >= submitted and (now - refused_at).total_seconds() \
+        >= config.REMOTE_GUARDIAN_ATTACH_GRACE_S
+
+
 def reconcile_remote_execution(worker_db, row):
     """Observe one durable provider call after its dispatcher disappeared.
 
@@ -801,6 +871,13 @@ def reconcile_remote_execution(worker_db, row):
                     dbx.heartbeat_remote_execution, job_id, claim)
                 return {"status": "running", "job": job}
             elif state == "missing":
+                return {"status": "unknown", "job": job}
+            elif state == "refused" and not _cloudflare_refusal_settled(
+                    status, row):
+                # A pre-/run refusal that an attached dispatcher (polling
+                # every 2 s) has not had time to close and route elsewhere,
+                # or an older launch's refusal that a relaunch of the same
+                # identity is replacing. Neither is an orphan yet.
                 return {"status": "unknown", "job": job}
             else:
                 data = status.get("envelope")
@@ -1056,6 +1133,32 @@ def _cloudflare_lane(job_type):
     return "batch"
 
 
+def _cloudflare_lane_for(job):
+    """The lane this dispatch uses: its home lane unless it failed over."""
+    return job.get("_cloudflare_lane") or _cloudflare_lane(job.get("type"))
+
+
+def _cloudflare_failover_lanes(job):
+    """Other lanes that can run this exact job after a capacity refusal.
+
+    Only strict capability matches are listed. The batch image is the
+    interactive image built with FULL_COMPUTE=1 (a superset) under the same
+    `executor` role, so media work moves interactive -> batch. Never the
+    reverse: interactive lacks the YouTube PO-token provider, segmentation
+    models and Demucs that fetch/search/matte/stems need. A watch_video
+    (`__media__`) is media work that both executor lanes run directly; every
+    other MCP tool, Studio turn and Shorts plan needs its own role's image.
+    """
+    job_type = job.get("type")
+    if job_type in {"frames", "mcp_media", "preview", "preview_check",
+                    "filmstrip"}:
+        return ("batch",)
+    if job_type == "mcp_tool" \
+            and (job.get("payload") or {}).get("tool") == "__media__":
+        return ("interactive", "batch")
+    return ()
+
+
 def _record_remote_execution_with_retry(ledger, job, provider, call_id,
                                         function_name, timeout_s):
     """Durably publish one provider call identity, boundedly.
@@ -1120,8 +1223,17 @@ def _cloudflare_call_id(job):
     digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
     job_type = str(job.get("type") or "job")
     admission_slot = job.get('_cloudflare_admission_slot', 0)
-    if admission_slot in (1, 2) and _cloudflare_alternate_safe(job):
-        return f"cf-alt{admission_slot}-{job_type}-p{int(job['project_id'])}-{digest}"
+    # A capacity refusal proves the pinned Durable Object could not get a
+    # container, so any job may spread to an alternate identity: there is no
+    # warm process (or project cache) left on the refused shard to preserve.
+    if admission_slot in (1, 2) and (
+            _cloudflare_alternate_safe(job)
+            or job.get("_cloudflare_capacity_spread")):
+        try:
+            alt_project = max(0, int(job.get("project_id")))
+        except (TypeError, ValueError):
+            alt_project = 0
+        return f"cf-alt{admission_slot}-{job_type}-p{alt_project}-{digest}"
     group = str((job.get("payload") or {}).get("render_group") or "")
     if job_type in {"final", "preview", "preview_check"} and re.fullmatch(r"[0-9]+-[01]", group):
         return f"cf-render-g{group}-{digest}"
@@ -1468,8 +1580,23 @@ def _release_dead_cloudflare_owner(call_id, lane):
 _LIVENESS_EVERY_POLLS = 15
 
 
+def _refusal_for_launch(status, launch_id):
+    """The refusal body when this status is our own launch's refusal.
+
+    A call id can be refused, then launched again (a rollout wait reuses its
+    identity). Only a refusal stamped with this request's launch nonce proves
+    this request was refused; an older one says nothing about a request that
+    may still be on its way, so it counts as "not observable yet".
+    """
+    if status.get("status") != "refused" or not launch_id \
+            or status.get("launchId") != launch_id:
+        return None
+    return status.get("envelope") or status
+
+
 def _recover_cloudflare_result(call_id, lane, job, deadline):
     """Reconnect a named Container call without launching another instance."""
+    launch_id = job.get("_cloudflare_launch_id")
     last = None
     unknown_polls = 0
     while time.monotonic() < deadline:
@@ -1501,6 +1628,16 @@ def _recover_cloudflare_result(call_id, lane, job, deadline):
                     return envelope
                 raise RemoteExecutorError(
                     f"Cloudflare call {call_id} ended without an envelope")
+            elif state == "refused":
+                # The Durable Object's own record that this launch's startup
+                # failed before /run (no container instance, rollout skew).
+                # Its handler wrote it, so this request is no longer in
+                # flight: the launch is proven unaccepted.
+                refusal = _refusal_for_launch(status, launch_id)
+                if refusal is not None:
+                    raise _CloudflareRefused(refusal)
+                last = RemoteExecutorError(
+                    f"Cloudflare call {call_id} is not observable yet")
             elif state == "missing":
                 # This function is entered only after a launch POST became
                 # ambiguous. Even repeated missing reads cannot prove a lost
@@ -1523,6 +1660,8 @@ def _recover_cloudflare_result(call_id, lane, job, deadline):
                                 "retryable": False}
                 finally:
                     probe.reset()
+        except _CloudflareRefused:
+            raise
         except Exception as exc:
             last = exc
         time.sleep(2)
@@ -1532,6 +1671,9 @@ def _recover_cloudflare_result(call_id, lane, job, deadline):
     try:
         status = _cloudflare_status(call_id, lane, timeout=10)
         state = status.get("status")
+        refusal = _refusal_for_launch(status, launch_id)
+        if refusal is not None:
+            raise _CloudflareRefused(refusal)
         if state in {"done", "failed"}:
             envelope = status.get("envelope")
             if isinstance(envelope, dict):
@@ -1546,10 +1688,59 @@ def _recover_cloudflare_result(call_id, lane, job, deadline):
             last = RemoteExecutorError(
                 f"Cloudflare call {call_id} remained {state} through its "
                 "executor deadline")
+    except _CloudflareRefused:
+        raise
     except Exception as exc:
         last = exc
     raise RemoteExecutorError(
         f"Cloudflare call {call_id} could not be recovered: {last}") from last
+
+
+def _refused_before_run(job, call_id, lane, status_code, body):
+    """Close one provably unaccepted launch and raise its exact kind.
+
+    Reached from the launch response itself, or from a reconnect that found
+    the Durable Object's own refusal tombstone. Either way no /run was sent.
+    """
+    queue_backed = job.get("id") is not None
+    if queue_backed:
+        ledger = dbx.Db()
+        try:
+            ledger.run(dbx.finish_remote_execution, job["id"],
+                       job.get("total_claims"), "cancelled",
+                       body.get("error") or "Cloudflare launch refused",
+                       "cloudflare", call_id)
+        except Exception:
+            pass
+        finally:
+            ledger.reset()
+        dbx.unmark_remote_owned(job["id"])
+    launch_error = str(body.get("error") or
+                       "Cloudflare launch refused before /run")
+    if status_code == 429 and "shard is busy" in launch_error.lower():
+        owner = body.get("active_call_id")
+        # Free the shard for this claim's next admission attempt
+        # when its owner already succeeded or provably died.
+        if not _reconcile_completed_cloudflare_call(owner, lane) \
+                and queue_backed:
+            _release_dead_cloudflare_owner(owner, lane)
+        raise CloudflareCapacityBusy(launch_error)
+    if body.get("capacity_unavailable") is True \
+            or _capacity_refusal_text(launch_error):
+        # The Containers runtime searched for an instance and found none.
+        # Nothing was accepted; the caller spreads, fails over, or reports.
+        raise CloudflareCapacityUnavailable(launch_error)
+    if status_code == 503 and launch_error.startswith((
+            "container readiness mismatch ",
+            "container readiness failed:",
+            "Cloudflare container image is not ready",
+            "Error: Internal error hitting the containers service",
+            "Error: Container sidecar is shutting down")):
+        # A retiring sidecar can reject startAndWaitForPorts.
+        # Only this 503 + no-acceptance proof is safe to wait on;
+        # an ambiguous /run failure must reconnect instead.
+        raise CloudflareRolloutPending(launch_error)
+    raise CloudflareLaunchUnavailable(launch_error)
 
 
 def _run_cloudflare(job):
@@ -1571,7 +1762,7 @@ def _run_cloudflare(job):
             f"Cloudflare preflight failed before launch: {exc}") from exc
 
     call_id = _cloudflare_call_id(job)
-    lane = _cloudflare_lane(job.get("type"))
+    lane = _cloudflare_lane_for(job)
     timeout_s = config.cloudflare_timeout_for(job.get("type")) + 60
     if queue_backed and dbx.mark_remote_owned(job["id"]) is False:
         raise CloudflareLaunchUnavailable(
@@ -1589,10 +1780,24 @@ def _run_cloudflare(job):
             ledger.reset()
 
     deadline = time.monotonic() + timeout_s
+    # Names this one launch request, so a reconnect can tell its own refusal
+    # from an older refusal of the same call id.
+    launch_id = uuid.uuid4().hex
+    job["_cloudflare_launch_id"] = launch_id
+
+    def recover():
+        try:
+            return _recover_cloudflare_result(call_id, lane, job, deadline)
+        except _CloudflareRefused as refused:
+            # The reconnect found this call's own refusal: its startup
+            # failed before /run, exactly like an immediate 503.
+            _refused_before_run(job, call_id, lane, 503, refused.body)
+
     try:
         response = requests.post(
             f"{config.CLOUDFLARE_EXECUTOR_URL}/calls/{lane}/{call_id}",
-            json={"job": _job_payload(job), "timeout_s": timeout_s},
+            json={"job": _job_payload(job), "timeout_s": timeout_s,
+                  "launch_id": launch_id},
             headers=_cloudflare_headers(),
             # The named call remains recoverable after this observation
             # request ends. Reconnect early enough to detect a rollout-
@@ -1603,7 +1808,7 @@ def _run_cloudflare(job):
     except requests.RequestException:
         if queue_backed:
             dbx.remote_launch_recorded(job["id"])
-        data = _recover_cloudflare_result(call_id, lane, job, deadline)
+        data = recover()
     else:
         if queue_backed:
             dbx.remote_launch_recorded(job["id"])
@@ -1627,55 +1832,22 @@ def _run_cloudflare(job):
                 response_body = response.json()
             except ValueError:
                 response_body = {}
+            if not isinstance(response_body, dict):
+                response_body = {}
             if response_body.get("safe_to_fallback"):
-                if queue_backed:
-                    ledger = dbx.Db()
-                    try:
-                        ledger.run(dbx.finish_remote_execution, job["id"],
-                                   job.get("total_claims"), "cancelled",
-                                   response_body.get("error") or
-                                   "Cloudflare launch refused",
-                                   "cloudflare", call_id)
-                    except Exception:
-                        pass
-                    finally:
-                        ledger.reset()
-                    dbx.unmark_remote_owned(job["id"])
-                launch_error = str(response_body.get("error") or
-                                   "Cloudflare launch refused before /run")
-                if response.status_code == 429 and \
-                        "shard is busy" in launch_error.lower():
-                    owner = response_body.get("active_call_id")
-                    # Free the shard for this claim's next admission attempt
-                    # when its owner already succeeded or provably died.
-                    if not _reconcile_completed_cloudflare_call(owner, lane) \
-                            and queue_backed:
-                        _release_dead_cloudflare_owner(owner, lane)
-                    raise CloudflareCapacityBusy(launch_error)
-                if response.status_code == 503 and launch_error.startswith((
-                        "container readiness mismatch ",
-                        "container readiness failed:",
-                        "Cloudflare container image is not ready",
-                        "Error: Internal error hitting the containers service",
-                        "Error: Container sidecar is shutting down")):
-                    # A retiring sidecar can reject startAndWaitForPorts.
-                    # Only this 503 + no-acceptance proof is safe to wait on;
-                    # an ambiguous /run failure below must reconnect instead.
-                    raise CloudflareRolloutPending(launch_error)
-                raise CloudflareLaunchUnavailable(launch_error)
+                _refused_before_run(job, call_id, lane,
+                                    response.status_code, response_body)
             # The Worker may have lost its side of an already-running
             # container request. Reconnect to the deterministic call before
             # considering any physical retry.
-            return _interpret_cloudflare_terminal(
-                _recover_cloudflare_result(call_id, lane, job, deadline),
-                job)
+            return _interpret_cloudflare_terminal(recover(), job)
         try:
             data = response.json()
         except ValueError:
             # A proxy can replace a successful response with a non-JSON
             # body after /run was accepted. Recover the same named call;
             # never fail the edit or replay a mutation from this alone.
-            data = _recover_cloudflare_result(call_id, lane, job, deadline)
+            data = recover()
     return _interpret_cloudflare_terminal(data, job)
 
 
@@ -1734,6 +1906,119 @@ def _deploy_in_progress(job, cause):
     return error
 
 
+def _capacity_route(job, retry):
+    """(lane, admission slot) for the retry-th launch after a refusal.
+
+    Retry 1 spreads to another Durable Object of the same lane (its project
+    or call-id shard is pinned). Retry 2 fails over to the next suitable lane,
+    whose container class has its own instance pool. Later retries alternate
+    between them, cycling identities, until the bounded budget ends.
+    """
+    home = _cloudflare_lane(job.get("type"))
+    lanes = (home,) + tuple(_cloudflare_failover_lanes(job))
+    if retry == 1 or len(lanes) == 1:
+        return home, retry % 3
+    if retry % 2 == 0:
+        other = lanes[1 + ((retry // 2 - 1) % (len(lanes) - 1))]
+        return other, ((retry // 2 - 1) // (len(lanes) - 1)) % 3
+    return home, (retry // 2 + 1) % 3
+
+
+def _capacity_delay(retry):
+    """Jittered exponential backoff; the first spread is near-immediate.
+
+    Each refusal already includes the runtime's own ~30-s instance search, so
+    a fresh identity is tried at once, then 2, 4, 8, 16, 20 s (+/-50%).
+    """
+    if retry <= 1:
+        return random.uniform(0.25, 1.0)
+    return min(20.0, 2.0 * (2 ** (retry - 2))) * random.uniform(0.5, 1.5)
+
+
+def _capacity_exhausted(job, state):
+    """The honest final outcome once every capacity route was refused."""
+    kind = str(job.get("type") or "job")
+    lanes = []
+    for lane, _slot in state["routes"]:
+        if lane not in lanes:
+            lanes.append(lane)
+    elapsed = time.monotonic() - state["started"]
+    cause = _short_reason_detail(state["last"], 160)
+    error = CloudflareCapacityUnavailable(
+        f"Cloudflare could not provide a container for this {kind}: every "
+        f"launch was refused before anything ran ({state['attempts']} "
+        f"attempt(s) on the {' and '.join(lanes)} "
+        f"lane{'s' if len(lanes) > 1 else ''} over {elapsed:.0f}s; last: "
+        f"{cause}). Nothing ran and nothing changed; it is safe to retry in "
+        "a minute.")
+    if job.get("id") is not None:
+        # Same bound as a deploy-in-progress refusal: media get one
+        # automatic retry; MCP tools and Studio turns hand it to the caller.
+        base = {"agent_turn": config.MAX_ATTEMPTS_AGENT,
+                "mcp_tool": config.MAX_ATTEMPTS_MCP}.get(
+                    kind, config.MAX_ATTEMPTS_MEDIA)
+        error.max_attempts = max(1, min(int(base), 2))
+    return error
+
+
+def _retry_after_capacity_refusal(job, exc, state, queued, window_end):
+    """Prepare the next fenced launch route, or raise the final outcome.
+
+    Every refusal handled here is proven pre-/run: the Durable Object kept
+    no accepted call and the ledger row is closed, so a new identity can
+    never double-execute. Queue-backed waits re-check the lease.
+    """
+    now = time.monotonic()
+    if state is None:
+        state = {"started": now, "attempts": 0,
+                 "routes": [(_cloudflare_lane_for(job),
+                             job.get("_cloudflare_admission_slot", 0))],
+                 "deadline": window_end}
+    state["attempts"] += 1
+    state["last"] = exc
+    retry = state["attempts"]
+    refused = (_cloudflare_lane_for(job),
+               job.get("_cloudflare_admission_slot", 0))
+    # A busy shard may already have moved this claim to an alternate slot;
+    # never spend a retry on the identity that was just refused.
+    state["route"] = state.get("route", 0) + 1
+    lane, slot = _capacity_route(job, state["route"])
+    if (lane, slot) == refused:
+        state["route"] += 1
+        lane, slot = _capacity_route(job, state["route"])
+    delay = _capacity_delay(retry)
+    if retry > config.CLOUDFLARE_CAPACITY_RETRIES \
+            or now + delay >= state["deadline"]:
+        raise _capacity_exhausted(job, state) from exc
+    print(f"[dispatcher] Cloudflare could not provide a container for "
+          f"{job.get('type')} {job.get('id')} on "
+          f"{_cloudflare_lane_for(job)} ({_short_reason_detail(exc, 120)}); "
+          f"nothing ran, retrying on {lane} slot {slot} in {delay:.1f}s",
+          flush=True)
+    time.sleep(delay)
+    if queued:
+        probe = dbx.Db()
+        try:
+            if not probe.run(dbx.lease_is_current, job["id"],
+                             job.get("total_claims")):
+                raise dbx.JobLeaseLost(
+                    "job lease changed during capacity retry")
+        finally:
+            probe.reset()
+        job["_cloudflare_capacity_spread"] = True
+    else:
+        # An id-less child's identity is its nonce; a fresh one is a new,
+        # never-accepted call on (usually) another shard.
+        job.pop("_cloudflare_sync_nonce", None)
+    if lane == _cloudflare_lane(job.get("type")):
+        job.pop("_cloudflare_lane", None)
+    else:
+        job["_cloudflare_lane"] = lane
+    job["_cloudflare_admission_slot"] = slot
+    state["routes"].append((lane, slot))
+    return state
+
+
 def _run_cloudflare_with_capacity_wait(job):
     """Wait only after a provider proves this fenced call was not accepted.
 
@@ -1741,7 +2026,9 @@ def _run_cloudflare_with_capacity_wait(job):
     and never wait after a terminal compute failure. A paid synchronous
     caller does not wait on a busy shard; it retries a few times on fresh,
     never-accepted identities (other shards) with short jittered backoff.
-    Dispatcher heartbeats continue during admission.
+    When Cloudflare cannot provide a container at all, the same claim moves
+    across Durable Objects and suitable lanes (_retry_after_capacity_refusal)
+    within a bounded window. Dispatcher heartbeats continue during admission.
     """
     queued = job.get("id") is not None
     wait_s = config.CLOUDFLARE_BUSY_WAIT_S if queued else 0
@@ -1757,9 +2044,37 @@ def _run_cloudflare_with_capacity_wait(job):
     rollout_deadline = started + rollout_wait_s
     delay = 2.0
     sync_busy_retries = 0
+    capacity = None
+    # No new launch starts after this point. It is measured from the first
+    # launch and never exceeds the job's own provider budget; an id-less
+    # child also stays inside the margin its parent MCP lease reserves above
+    # the child's lease, so a late successful route cannot outlive the
+    # parent that waits for it.
+    capacity_window = min(config.CLOUDFLARE_CAPACITY_WAIT_S,
+                          config.cloudflare_timeout_for(job.get("type")))
+    if not queued:
+        capacity_window = min(capacity_window,
+                              config.CLOUDFLARE_MCP_CHILD_MARGIN_S - 60)
+    capacity_end = started + max(0.0, capacity_window)
     while True:
         try:
             return _run_cloudflare(job)
+        except CloudflareCapacityUnavailable as exc:
+            capacity = _retry_after_capacity_refusal(
+                job, exc, capacity, queued, capacity_end)
+            continue
+        except CloudflareTerminalFailure as exc:
+            # A startup Cloudflare abandoned before /run is the same "no
+            # container could be started" outcome, already terminal under
+            # this identity; the next route uses a new one.
+            if getattr(exc, "failure_kind", None) != \
+                    "provider_start_abandoned":
+                raise
+            if queued:
+                dbx.unmark_remote_owned(job["id"])
+            capacity = _retry_after_capacity_refusal(
+                job, exc, capacity, queued, capacity_end)
+            continue
         except (CloudflareCapacityBusy, CloudflareRolloutPending) as exc:
             rollout = isinstance(exc, CloudflareRolloutPending)
             # Only an explicit pre-launch busy refusal permits a different
@@ -1824,6 +2139,12 @@ def _run_remote(job, url_override=None, modal_function=None):
             # indexing" was classified unknown/non-retryable, then pointlessly
             # replayed on Modal after Cloudflare had already given the correct
             # deterministic answer.
+            # Never "provider_capacity_unavailable": this job's own capacity
+            # refusal is a CloudflareLaunchUnavailable (handled above), so a
+            # terminal envelope of that kind is always a NESTED child's
+            # refusal reported by a parent that already ran (an MCP tool or
+            # Studio turn, possibly after it changed the project). Replaying
+            # that parent elsewhere would run it twice.
             provider_switch_kinds = {
                 "executor_capacity", "provider_budget_exhausted",
                 "provider_start_abandoned", "executor_memory",
@@ -1880,7 +2201,7 @@ def _run_remote(job, url_override=None, modal_function=None):
                     # this bookkeeping repair.
                     recorded = _record_remote_execution_with_retry(
                         probe, job, "cloudflare", call_id,
-                        _cloudflare_lane(job.get("type")),
+                        _cloudflare_lane_for(job),
                         config.cloudflare_timeout_for(job.get("type")) + 60)
                     if recorded:
                         closed = probe.run(
@@ -2312,10 +2633,29 @@ def run_mcp_media_remote(project_id, payload, user_id=None):
     """
     if (payload or {}).get("tool") != "__media__":
         raise ValueError("MCP media offload accepts __media__ only")
+    if config.WORKER_ROLE in {"executor", "batch_executor"}:
+        # A media executor is the encode's destination. Sending it on again
+        # recursed through every interactive shard (Aug 30-Oct 10 2026)
+        # until Cloudflare refused a container; mcp_media.prepare encodes
+        # locally there, so reaching this line is a bug, never a fallback.
+        raise RemoteExecutorError(
+            "a media executor must encode MCP media itself, not re-dispatch it")
     job = {"id": None, "type": "mcp_media", "project_id": project_id,
            "user_id": user_id, "attempts": 0, "payload": payload}
     if _cloudflare_selected(job):
-        return _run_remote(job)
+        try:
+            return _run_remote(job)
+        except CloudflareLaunchUnavailable:
+            # Nothing ran. The fenced fallback runs the same resolved encode
+            # as its legacy mcp_tool shape, only where operators allow it.
+            if not (config.CLOUDFLARE_MODAL_FALLBACK
+                    and config.MODAL_EXECUTOR_ENABLED
+                    and "mcp_tool" in config.MODAL_EXECUTOR_TYPES):
+                raise
+            print("[dispatcher] Cloudflare could not start the MCP media "
+                  "encode; running it once on Modal", flush=True)
+            return _run_modal(dict(job, type="mcp_tool"),
+                              function_override="preview")
     if config.MODAL_EXECUTOR_ENABLED:
         legacy = dict(job, type="mcp_tool")
         return _run_modal(legacy, function_override="preview")

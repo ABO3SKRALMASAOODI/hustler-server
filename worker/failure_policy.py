@@ -45,6 +45,17 @@ _TRANSIENT = (
     "name resolution", "network is unreachable",
 )
 
+# Cloudflare could not provide a container before any /run (the runtime's
+# own words, the dispatcher's final summary, and a startup it abandoned).
+# Nothing ran, so the unchanged job may run again; remote.py has already
+# spread it across Durable Objects and lanes before this verdict.
+_PROVIDER_CAPACITY = (
+    "there is no container instance",
+    "requesting too many containers per second",
+    "throttling the container service",
+    "cloudflare could not provide a container",
+)
+
 _INVALID_EDL = (
     "edl version", "edl validation", "invalid edl", "invalid keep",
     "invalid speed", "invalid frame", "invalid transition",
@@ -170,6 +181,9 @@ def classify(error, job_type=None):
         return FailureDecision("stalled_io", True,
                                min(_base_attempts(job_type), 2),
                                job_type in ("preview", "preview_check"))
+    if any(x in text for x in _PROVIDER_CAPACITY):
+        return FailureDecision("provider_capacity_unavailable", True,
+                               min(_base_attempts(job_type), 2), False)
     if any(x in text for x in _TRANSIENT):
         return FailureDecision("transient_infrastructure", True,
                                min(_base_attempts(job_type), 2), False)

@@ -71,6 +71,32 @@ class Unavailable(RuntimeError):
     """Something the caller can act on — returned as text, never a traceback."""
 
 
+# Roles whose process is itself media compute (Cloudflare interactive/batch
+# and Modal executors). An MCP encode reaching one of them runs right there.
+MEDIA_EXECUTOR_ROLES = frozenset({"executor", "batch_executor"})
+
+
+def is_media_executor():
+    return config.WORKER_ROLE in MEDIA_EXECUTOR_ROLES
+
+
+def trusted_media_child(ctx):
+    """True only for the id-less encode child our orchestrator launched.
+
+    That child is reachable only through the authenticated executor route
+    (run_mcp_media_remote), never through a queued MCP job, so its hidden
+    ``_resolved_*`` arguments were written by our own code. A queued call
+    (it has an id) carries the MCP client's raw arguments and must resolve
+    the media itself.
+    """
+    job = getattr(ctx, "job", None) or {}
+    if job.get("id") is not None:
+        return False
+    if os.getenv("EXECUTOR_PROVIDER") == "modal":
+        return True
+    return is_media_executor() and job.get("type") == "mcp_media"
+
+
 def _mb(n):
     n = n or 0
     # "0.0 MB" on a 40 KB clip reads as an empty file, and the model then
@@ -379,10 +405,12 @@ def prepare(ctx, args, inline_max_bytes):
         return {"text": f"REJECTED: {e}", "is_error": True}
 
     # Hidden resolved fields are transport data, never caller authority. An
-    # MCP client can send arbitrary JSON arguments, so honor them only inside
-    # the Modal executor process that our dispatcher launched.
+    # MCP client can send arbitrary JSON arguments, so honor them only in the
+    # id-less media child our own orchestrator launched (see
+    # trusted_media_child).
+    media_executor = is_media_executor()
     resolved = (args.get("_resolved_asset")
-                if os.getenv("EXECUTOR_PROVIDER") == "modal" else None)
+                if trusted_media_child(ctx) else None)
     preview_receipt = None
     if isinstance(resolved, dict) and resolved.get("storage_key"):
         # The warm dispatcher already resolved the current preview/source and
@@ -485,10 +513,23 @@ def prepare(ctx, args, inline_max_bytes):
     # encode to a Cloudflare media container. Sending the whole queue job to a
     # media lane would make a timeline watch pay for the preview wait before a
     # short encode.
-    if resolved is None:
+    #
+    # A media executor IS that container, so it encodes here and never sends
+    # the encode on. From Aug 30 to Oct 10 2026 the Cloudflare child ignored
+    # _resolved_asset (honored on Modal only), re-resolved, saw
+    # mcp_media_available() and launched ANOTHER child on another interactive
+    # shard, which did the same: every windowed watch_video chained cold
+    # standard-3 containers until Cloudflare refused one ("there is no
+    # container instance", "shard is busy", "throttling the container
+    # service") and the whole chain failed. All 37 windowed watches in those
+    # six weeks failed; not one re-encode succeeded.
+    if resolved is None and not media_executor:
         import remote
         if remote.mcp_media_available():
-            remote_args = dict(args)
+            # Never forward a caller's own _resolved_* fields: only the
+            # values this orchestrator resolved may cross to the child.
+            remote_args = {key: value for key, value in args.items()
+                           if not str(key).startswith("_resolved_")}
             remote_args["_resolved_asset"] = {
                 field: asset.get(field) for field in
                 ("storage_key", "bytes", "duration_s", "height", "fps")
