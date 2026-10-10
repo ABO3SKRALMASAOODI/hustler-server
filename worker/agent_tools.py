@@ -23911,8 +23911,10 @@ def audit_audio_mix(ctx):
         warnings.append(
             "EDL has voiceover but no music; if this file is actually a song, "
             "remove_voiceover and add_music instead—the roles mix differently")
-    if not any(state.get(k) for k in ("music", "voiceover", "sfx")):
-        warnings.append("no designed audio layers are authored")
+    # No music, voiceover or sounds is a complete mix, not a defect: sounds
+    # are optional and music is the owner's to supply — a warning here read
+    # as "add some" (the owner's whoosh-war complaint).
+    dialogue_only = not any(state.get(k) for k in ("music", "voiceover", "sfx"))
     warnings += _sfx_mix_audit(ctx, edl, state.get("sfx") or [])
     for item in state.get("music") or []:
         rights = item.get("provenance") or {}
@@ -23945,6 +23947,7 @@ def audit_audio_mix(ctx):
         "mix": state,
         "duplicate_cross_role_assets": doubled,
         "warnings": warnings,
+        "dialogue_only": dialogue_only,
         "latest_preview_matches_version": bool(preview_asset),
         "latest_preview_audio_qc": (preview_meta.get("audio_qc")
                                     if preview_asset else None),

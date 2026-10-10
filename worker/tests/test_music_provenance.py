@@ -324,6 +324,16 @@ def test_mix_audit_uses_current_version_asset_not_stale_session_memory(
     assert audited["latest_preview_audio_qc"] == {"source": "asset-row"}
 
 
+def test_a_dialogue_only_mix_is_complete_not_a_warning(tmp_path):
+    # sounds are optional and music is the owner's to supply: a short with
+    # neither must not be told it is missing "designed audio layers"
+    ctx = _Ctx([], {"music": [], "voiceover": [], "sfx": [], "master": {}},
+               tmp_path)
+    audited = json.loads(agent_tools.audit_audio_mix(ctx))
+    assert audited["dialogue_only"] is True
+    assert not any("audio layer" in w for w in audited["warnings"]), audited
+
+
 def test_fetch_persists_content_hash_and_raw_provider_fields(
         tmp_path, monkeypatch):
     ctx = _Ctx([], {"music": [], "voiceover": [], "sfx": []}, tmp_path)
