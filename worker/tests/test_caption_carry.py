@@ -405,15 +405,19 @@ def test_fill_footprints_measures_only_what_the_plan_needs_once(monkeypatch):
                 _counter(5.0, 6.0, "9", box=(0.1, 0.1, 0.2, 0.2), id="known")])
     motion_layer.fill_footprints(edl, 1080, 1920)
     by = {m["id"]: (m.get("footprint") or {}).get("box") for m in edl["motion"]}
-    assert by == {"num": [0.2, 0.4, 0.8, 0.6], "whole": None, "known": [0.1, 0.1, 0.2, 0.2]}
+    # mute_captions=true no longer hides a whole window (every heard word
+    # reaches the screen once): the words it does not show are placed
+    # against its real box like any other graphic's, so it is measured too
+    assert by == {"num": [0.2, 0.4, 0.8, 0.6], "whole": [0.2, 0.4, 0.8, 0.6],
+                  "known": [0.1, 0.1, 0.2, 0.2]}
     again = _edl([_counter(1.0, 2.0, "140", box=None)])
     motion_layer.fill_footprints(again, 540, 960)            # same aspect: cached
-    assert again["motion"][0]["footprint"]["box"] == [0.2, 0.4, 0.8, 0.6] and calls == [1]
+    assert again["motion"][0]["footprint"]["box"] == [0.2, 0.4, 0.8, 0.6] and calls == [2]
     # no transcript captions: nothing to place, nothing measured
     bare = validate_edl(dict(default_edl(8.0), motion=[_counter(1.0, 2.0, "5", box=None)]),
                         8.0).model_dump()
     motion_layer.fill_footprints(bare, 1080, 1920)
-    assert calls == [1]
+    assert calls == [2]
 
 
 class _Ctx:

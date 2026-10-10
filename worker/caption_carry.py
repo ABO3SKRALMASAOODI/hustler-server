@@ -27,15 +27,16 @@ usual place unless that place, on the frames it is up, touches a graphic's
 stored box (MotionItem.footprint), a card or panel edge or seam, a stack's
 content panel, a face with its chin (the write-time zones and the index's
 evidence together), a prop the index knows or the watermark's corner; then
-it takes the best free band (the largest, at least ~1.4 lines tall). Where
-no band is free of a graphic that replaces speech (spec ``mutes_captions``)
-or was asked to (true), its words are muted and named (the write NOTE,
-``heard_unshown``, the sound-off audit); under any other graphic they stay
-where they were. Placement is re-solved at every layout change — a
-graphic's or card's edges, a cut inside a card — and a page never holds its
-place across one (``Plan.hold_limit``); a word said within two frames
-before the change appears ON it; one or two words a change would strand
-take their line's place when it is clear for them.
+it takes the best free band (the largest, at least ~1.4 lines tall) — and,
+with none on the canvas, the inside of a stack's content panel rather than
+lose a heard word. Where no band is free of a graphic that replaces speech
+(spec ``mutes_captions``) or was asked to (true), its words are muted and
+named (the write NOTE, ``heard_unshown``, the sound-off audit); under any
+other graphic they stay where they were. Placement is re-solved at every
+layout change — a graphic's or card's edges, a cut inside a card — and a
+page never holds its place across one (``Plan.hold_limit``); a word said
+within two frames before the change appears ON it; one or two words a
+change would strand take their line's place when it is clear for them.
 
 Everything here is a pure function of the EDL, the index and the timeline,
 and it is the ONE caption placement pass: the libass captions, the motion
@@ -64,6 +65,9 @@ CARRY_LEAD_S = 0.5
 # Connector words between shown words go with them (one or two of "and",
 # "the", "of" left alone as a flashing card are noise, not speech).
 ABSORB_MAX = 2
+# A printed word this long may stand for a longer spoken word it starts
+# ("tech" for "technology") — inside a run of the graphic's words only.
+ABBREV_MIN = 4
 # Caption geometry (frame fractions): a two-line block around its anchor,
 # the smallest band the motion caption template lays a block into, the
 # column a centred caption occupies, and the clearances kept from graphics
@@ -322,12 +326,25 @@ def carried_indices(word_toks, seq, lead_n=0, solo=frozenset()):
     content = {t for t in seq if is_content(t)}
     flat = [(t, i) for i, ts in enumerate(word_toks) for t in ts]
     in_run, lead_runs = set(), []
+    # inside a run, a printed word may be the spoken word cut short
+    # ("information tech" over "information technology"): a run is never
+    # built of a clipped word alone, and only runs read it that way
+    clipped = sorted((t for t in content if len(t) >= ABBREV_MIN and t.isalpha()),
+                     key=len, reverse=True)
+
+    def run_token(t):
+        if t in content:
+            return t
+        return next((c for c in clipped if len(t) >= len(c) + 2 and t.startswith(c)), t)
     if seq and flat:
-        sm = difflib.SequenceMatcher(None, seq, [t for t, _i in flat], autojunk=False)
+        sm = difflib.SequenceMatcher(None, seq, [run_token(t) for t, _i in flat],
+                                     autojunk=False)
         for blk in sm.get_matching_blocks():
             # a run of connectors alone ("of the" in "THE END OF THE WORLD"
             # over "one of the best years") is not the graphic's words
-            if blk.size >= 2 and any(is_content(seq[blk.a + k]) for k in range(blk.size)):
+            if blk.size >= 2 and any(is_content(seq[blk.a + k]) and
+                                     flat[blk.b + k][0] == seq[blk.a + k]
+                                     for k in range(blk.size)):
                 idx = {flat[blk.b + k][1] for k in range(blk.size)}
                 if max(idx) >= lead_n:
                     in_run |= idx
@@ -770,6 +787,7 @@ class Plan:
         self.wait_spans = []
         self.yield_spans = []
         self.segments = []
+        self._seg_places = None
         self.report = {}
 
     def hold_limit(self, start, place=None):
@@ -777,11 +795,33 @@ class Plan:
         band dict, None = its usual place) must clear by: the start of the
         first later segment where the captions sit elsewhere (another band,
         their usual place after a band, or muted) — a page never carries its
-        place across a layout change onto the new layout. inf when none."""
-        for a, _b, st in self.segments:
-            if a > start + 1e-3 and st != place:
+        place across a layout change onto the new layout. A segment where a
+        word is still shown at ``place`` (one or two words a change would
+        strand keep their line's place: _smooth_flips) is not such a change:
+        a page reaching into it is not cut off before its own last words.
+        inf when none."""
+        for k, (a, _b, st) in enumerate(self.segments):
+            if a > start + 1e-3 and st != place and place not in self._places_in(k):
                 return a
         return float("inf")
+
+    def _places_in(self, k):
+        """The places (band dicts, None = usual) of the caption words shown
+        from inside segment ``k``."""
+        if self._seg_places is None:
+            import bisect
+            starts = [a for a, _b, _st in self.segments]
+            self._seg_places = [[] for _ in self.segments]
+            for i, w in enumerate(self.words):
+                if i in self.hidden:
+                    continue
+                t = max(float(w["t0"]), self.shown_at.get(i, float(w["t0"])))
+                j = bisect.bisect_right(starts, t + 1e-6) - 1
+                if 0 <= j < len(self._seg_places):
+                    pl = self.placed.get(i)
+                    if pl not in self._seg_places[j]:
+                        self._seg_places[j].append(pl)
+        return self._seg_places[k] if k < len(self._seg_places) else []
 
     def caption_words(self):
         """The words the captions show: hidden ones dropped, the first word
@@ -847,6 +887,20 @@ def _inside(a, b):
     """The end of a segment's face query: a hair before its last instant,
     which belongs to the next layout (a card's end frame is the full shot)."""
     return b - 0.02 if b - a > 0.06 else b
+
+
+def _off_content(faces, screens):
+    """Face zones less those centred inside a stack's content panel
+    (caption_place.content_zones: the panel was told apart BY having no face
+    in its source rect). A face there is a far take's face mapped through
+    the panel (_faces_far: any take within FACE_FAR_S), not one the viewer
+    sees — it would block the panel's clear space for nothing."""
+    if not screens:
+        return faces
+    out = [f for f in faces if not any(
+        z[0] <= (f[0] + f[2]) / 2.0 <= z[2] and z[1] <= (f[1] + f[3]) / 2.0 <= z[3]
+        for z in screens)]
+    return out or [FACE_PRIOR]
 
 
 def _prior_in_cards(rects):
@@ -1074,7 +1128,8 @@ def plan(edl, index, tl, words, canvas=None):
         if (lcards or after) and not blocked:
             # a card layout: its edges and seams, the faces in its panels
             # and the watermark are no place for the usual anchor either
-            faces = faces_over(edl, index, tl, a, _inside(a, b), W, H, live)
+            faces = _off_content(faces_over(edl, index, tl, a, _inside(a, b), W, H, live),
+                                 screens)
             if faces == [FACE_PRIOR]:
                 faces = _prior_in_cards(rects)
             blocked = caption_place.hits(lo, hi, edges + screens + ([wm] if wm else []) +
@@ -1087,7 +1142,8 @@ def plan(edl, index, tl, words, canvas=None):
         place = None
         if not assume:
             if faces is None:
-                faces = faces_over(edl, index, tl, a, _inside(a, b), W, H, live)
+                faces = _off_content(faces_over(edl, index, tl, a, _inside(a, b), W, H, live),
+                                     screens)
                 if faces == [FACE_PRIOR] and rects:
                     faces = _prior_in_cards(rects)
             chins = [caption_place.chin(f) for f in faces]
@@ -1104,6 +1160,19 @@ def plan(edl, index, tl, words, canvas=None):
                                             prev=prev_pick)
                 if pick:
                     break
+            if not pick and screens:
+                # the last resort before muting heard words (or leaving them
+                # on a seam): a stack's content panel, inside its edges and
+                # priced like source text under the caption — every heard
+                # word reaches the screen once (Elon: 'and scored' between
+                # two stat slams, the speaker's face filling his panel)
+                loose = gzones + edges + ([wm] if wm else []) + props + chins
+                pick = caption_place.choose(caption_place.free_bands(loose, safe, col),
+                                            normal_y, CAP_HALF_H, one_line,
+                                            list(soft) + list(screens), rects, col,
+                                            prev=prev_pick)
+                if pick:
+                    info[k] = {"y": normal_y, "zones": loose}
             if pick:
                 y, ba, bb, _score = pick
                 z0, z1 = max(ba, y - ZONE_HALF_H), min(bb, y + ZONE_HALF_H)

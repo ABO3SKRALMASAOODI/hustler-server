@@ -62,9 +62,9 @@ The coordinator assigns one Look and one structure per short. The editor reads
   words the captions carry beside it and any it had to mute (carry those on
   it as a kicker). Kickers and rows quote the transcript word for word.
 - Captions in a card or speaker + screen stack are placed by the engine:
-  never on a panel edge or the seam between panels, never on the screen
-  panel, never on the chin; usually the band above the speaker panel. Do
-  not pin a `placement_track` between panels.
+  never on a panel edge or the seam between panels, never on the chin, on
+  the screen panel only when nothing else is free; usually the band above
+  the speaker panel. Do not pin a `placement_track` between panels.
 - One accent colour for the whole short, passed to every graphic's `accent`;
   at most about 4 template families per short, varied across the batch.
 - Over a bright shirt or wall, raise the template's `scrim` (or move the type

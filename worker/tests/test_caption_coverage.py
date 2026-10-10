@@ -173,3 +173,25 @@ def test_an_old_stored_reading_with_bridges_still_validates():
     # ...and the render recomputes it without them
     caption_carry.attach_readings(edl, _index(PAPER), Timeline(edl["keep"]))
     assert edl["motion"][0]["reading"]["bridges"] == []
+
+
+def test_a_printed_word_cut_short_is_read_inside_a_run_only():
+    # the split prints 'information tech' for 'information technology': the
+    # captions do not say it a second time beside it
+    words = [("it", 0.1, 0.2), ("just", 0.2, 0.4), ("means", 0.4, 0.8),
+             ("information", 0.9, 1.5), ("technology.", 1.5, 2.2)]
+    vs = {"id": "vs", "template": "versus_split", "start": 0.0, "end": 2.5,
+          "params": {"left": "1960s", "right": "TODAY", "left_sub": "rockets, cures",
+                     "right_sub": "information tech"},
+          "footprint": _fp((0.0, 0.665, 1.0, 0.796))}
+    p = _assert_every_word_once(_edl([vs], words), _index(words))
+    assert [w["w"] for w in p.caption_words()] == ["it", "just", "means"]
+    # a clipped word never makes a run on its own ('the tech' over 'the
+    # technology'), and a one-word line never reads a longer spoken word
+    for printed in ("the tech", "tech"):
+        sp = [("the", 0.1, 0.3), ("technology", 0.3, 1.0), ("works", 1.0, 1.4)]
+        slam = {"id": "s", "template": "word_slam", "start": 0.0, "end": 1.6,
+                "params": {"text": printed}, "footprint": _fp((0.1, 0.1, 0.9, 0.25))}
+        edl = _edl([slam], sp)
+        p = captions.caption_plan(edl, _index(sp), Timeline(edl["keep"]))
+        assert "technology" in [w["w"] for w in p.caption_words()], printed

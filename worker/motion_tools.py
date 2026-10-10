@@ -641,9 +641,8 @@ def _mutes_captions(item):
 
 def _caption_anchors(ctx, edl, item):
     """Usual anchor ys of the transcript captions on screen during the item
-    ([] when there are none, or the item hides them all: mute_captions=true).
-    The solver prices a spot on their band; word-level captions keep
-    running beside the graphic."""
+    ([] when there are none). The solver prices a spot on their band; the
+    captions keep running beside the graphic whatever its mute_captions."""
     caps = edl.get("captions")
     index = getattr(ctx, "index", None) or {}
     if not (isinstance(caps, dict) and caps.get("mode") == "from_transcript") \

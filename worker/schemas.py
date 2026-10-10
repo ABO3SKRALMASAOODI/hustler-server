@@ -2035,12 +2035,13 @@ class MotionItem(BaseModel):
     layer: Literal["above_captions", "below_captions",
                    "behind_subject"] = "above_captions"
     box: Optional[List[float]] = None
-    # unset = one reading path (the captions drop the spoken words this
-    # graphic shows and yield to it for the phrase it shows, from its first
-    # shown word to its exit; a phrase_build sets that phrase's other words
-    # itself — worker/caption_carry.py); true = no captions for the whole
-    # window; false = captions keep running (a number/hero word it shows is
-    # still not repeated).
+    # unset = word-level (the captions drop the spoken words this graphic
+    # shows and keep every other heard word beside it, in a band clear of it
+    # — worker/caption_carry.py: every heard word reaches the screen once);
+    # true = the same (no graphic mutes a whole window any more), except that
+    # where no band is clear of it the words it does not show are muted (and
+    # named) even when its template does not say the line; false = captions
+    # keep running (a number/hero word it shows is still not repeated).
     mute_captions: Optional[bool] = None
     purpose: Optional[str] = Field(default=None, max_length=300)
     phase_s: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)

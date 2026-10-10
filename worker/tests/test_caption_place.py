@@ -7,7 +7,9 @@ What is pinned here (worker/caption_place.py through caption_carry.plan):
      largest free band — the empty band above the speaker panel — clear of
      the free-tier watermark's corner.
   2. A stack's content panel (no face in its source rect while the other
-     panel has one: the screen share) never takes a caption.
+     panel has one: the screen share) never takes a caption while another
+     band is free; with none, its inside does, rather than a heard word be
+     muted (review fix).
   3. The face blocks with its chin; write-time zones and the index's face
      evidence both count (Haar misses profiles).
   4. Placement is re-solved at every layout change: a page never carries
@@ -284,3 +286,86 @@ def test_a_one_word_connector_page_joins_its_line():
     assert any([w["w"] for w in c] == ["great", "companies", "and"] or
                [w["w"] for w in c] == ["and"] for c in chunks)
     assert max(len(c) for c in captions._premium_chunks_v2(ws, 2, 26, dict(p, max_words=2))) <= 2
+
+
+# ── review fixes (round 6) ────────────────────────────────────────────────
+
+STATS = [("were", 2.2, 2.4), ("24%", 2.4, 2.9), ("faster,", 2.9, 3.3), ("and", 3.4, 3.48),
+         ("scored", 3.48, 3.76), ("26%", 3.8, 4.4), ("better", 4.4, 4.9),
+         ("overall.", 4.9, 5.4)]
+
+
+def _slam(id_, start, end, text, box=(0.29, 0.10, 0.71, 0.27)):
+    return {"id": id_, "template": "word_slam", "start": start, "end": end,
+            "params": {"text": text}, "footprint": {"box": list(box), "ar": AR, "faces": []}}
+
+
+def test_with_no_canvas_band_a_word_is_set_on_the_screen_panel_not_muted():
+    # Elon: 'and scored' between two stat slams that hold the top band, the
+    # speaker's face filling his panel, the screen below — the screen panel
+    # (inside its edges) is the last resort before a heard word is lost
+    st2 = _slam("st2", 2.4, 3.8, "*24%* / faster")
+    st3 = _slam("st3", 3.8, 5.6, "*26%* / better overall")
+    edl = _edl([_stack(2.0, 6.0)], motion=[st2, st3], words=STATS, dur=8.0)
+    ix = _index(words=STATS)
+    tl = Timeline(edl["keep"])
+    p = _plan(edl, ix)
+    said = {p.words[i]["w"]: i for i in range(len(p.words))}
+    for w in ("and", "scored"):
+        i = said[w]
+        assert i not in p.hidden and i in p.placed, (w, p.hidden.get(i))
+        z0, z1 = p.placed[i]["z"]
+        # on the screen panel, inside its edges, never the seam or the face
+        assert z0 >= SCREEN[1] + caption_place.EDGE_PAD - 1e-6 and z1 <= 0.80 + 1e-6
+    assert caption_carry.heard_unshown(edl, ix, tl) == []
+    # a canvas band, where one is free, still wins over the screen
+    p2 = _plan(_edl([_stack()], track=BETWEEN), ix)
+    assert all(pl["y"] < SPEAKER[1] for pl in p2.placed.values())
+
+
+def test_a_page_keeps_its_place_until_its_last_word_is_said():
+    # a lower third ends mid-line: 'then.' is said after it, alone, and keeps
+    # its line's moved place (one or two stranded words join their line); the
+    # line's page must not clear before 'then.' is said (a libass page is one
+    # event: it would vanish under the word), nor blink between two states
+    words = [("we", 0.2, 0.4), ("were", 0.4, 0.6), ("really", 0.6, 0.9), ("fast", 0.9, 1.3),
+             ("and", 1.32, 1.5), ("then.", 1.5, 1.7), ("Everyone", 2.0, 2.3),
+             ("saw", 2.3, 2.5), ("it", 2.5, 2.7), ("happen.", 2.7, 3.0)]
+    lt = {"id": "name", "template": "lower_third", "start": 0.1, "end": 1.45,
+          "params": {"name": "Elon Musk", "role": "on The Joe Rogan Experience"},
+          "footprint": {"box": [0.067, 0.68, 0.681, 0.80], "ar": AR, "faces": []}}
+    ix = _index(faces=False, words=words)
+    ix["video"] = {"width": 1080, "height": 1920, "fps": 30.0}
+    for look in (None, "stacked"):
+        edl = _edl(motion=[lt], words=words, look=None, dur=5.0)
+        edl["captions"]["style"] = {"preset": look} if look else {"size": "m"}
+        tl = Timeline(edl["keep"])
+        p = captions.caption_plan(edl, ix, tl, canvas=(1080, 1920))
+        then = next(i for i, w in enumerate(p.words) if w["w"] == "then.")
+        assert p.placed.get(then) and p.placed[then] == p.placed.get(then - 1)
+        evs, _ = captions.compiled_events(edl, ix, tl, play_res=(1080, 1920))
+        moved = [ev for ev in evs if ev["start"] < 1.5]
+        # something of the moved line is up while 'then.' is said
+        assert any(ev["start"] <= 1.5 + 1e-6 and ev["end"] >= 1.6 for ev in evs), \
+            [(ev["start"], ev["end"]) for ev in evs]
+        # and no blink: the line's states run edge to edge until it clears
+        ends = sorted({round(ev["end"], 2) for ev in moved})
+        starts = {round(ev["start"], 2) for ev in evs}
+        assert all(e in starts or e >= 1.7 - 1e-6 for e in ends), (ends, sorted(starts))
+
+
+def test_a_one_word_question_or_sentence_is_a_beat_not_an_orphan():
+    p = {"mode": "reveal", "max_words": 5, "target_words": 3, "max_chunk_s": 2.2}
+    for alone in ("Why?", "No!", "No."):
+        ws = [{"w": "I", "t0": 0.0, "t1": 0.1}, {"w": "asked", "t0": 0.1, "t1": 0.4},
+              {"w": "him.", "t0": 0.4, "t1": 0.8}, {"w": alone, "t0": 1.4, "t1": 1.7},
+              {"w": "He", "t0": 2.4, "t1": 2.5}, {"w": "laughed.", "t0": 2.5, "t1": 3.0}]
+        chunks = captions._premium_chunks_v2(ws, 5, 26, p)
+        assert [w["w"] for w in chunks[1]] == [alone], [[w["w"] for w in c] for c in chunks]
+    # a sentence-final connector trails its own sentence, never the next
+    ws = [{"w": "what", "t0": 0.0, "t1": 0.2}, {"w": "he", "t0": 0.2, "t1": 0.3},
+          {"w": "worked", "t0": 0.3, "t1": 0.6}, {"w": "on.", "t0": 1.3, "t1": 1.5},
+          {"w": "Then", "t0": 1.9, "t1": 2.1}, {"w": "nothing.", "t0": 2.1, "t1": 2.6}]
+    chunks = captions._premium_chunks_v2(ws, 5, 26, p)
+    page = next(c for c in chunks if any(w["w"] == "on." for w in c))
+    assert page[-1]["w"] == "on." and len(page) > 1 and "Then" not in [w["w"] for w in page]

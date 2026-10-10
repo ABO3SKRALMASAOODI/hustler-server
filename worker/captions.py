@@ -1890,8 +1890,16 @@ ORPHAN_WORDS = _GLUE_FUNCTION | frozenset(_WEAK_BOUNDARY_WORDS)
 ORPHAN_JOIN_GAP_S = 1.2
 
 
+def _ends_sentence(word):
+    return str((word or {}).get("w") or "").rstrip("\"'”’) ")[-1:] in _STRONG_END
+
+
 def _orphan(chunk):
-    return len(chunk) == 1 and _chunk_word_key(chunk[0]) in ORPHAN_WORDS
+    """A one-word connector page — not a one-word question or exclamation
+    ('Why?', 'No!'), which is a beat of its own."""
+    if len(chunk) != 1 or _chunk_word_key(chunk[0]) not in ORPHAN_WORDS:
+        return False
+    return str(chunk[0].get("w") or "").rstrip("\"'”’) ")[-1:] not in "?!"
 
 
 def _joinable(a, b, max_w):
@@ -1923,8 +1931,12 @@ def _merge_orphans(chunks, max_w):
             continue
         nxt = out[i + 1] if i + 1 < len(out) else None
         prv = out[i - 1] if i else None
-        fwd = nxt is not None and _joinable(out[i], nxt, max_w)
-        back = prv is not None and _joinable(prv, out[i], max_w)
+        # never across a sentence end: a word that ends its sentence ('on.')
+        # trails the last page only, one that opens a sentence leads the next
+        fwd = nxt is not None and not _ends_sentence(out[i][0]) and \
+            _joinable(out[i], nxt, max_w)
+        back = prv is not None and not _ends_sentence(prv[-1]) and \
+            _joinable(prv, out[i], max_w)
         if fwd and back:
             gf = float(nxt[0]["t0"]) - float(out[i][0]["t1"])
             gb = float(out[i][0]["t0"]) - float(prv[-1]["t1"])

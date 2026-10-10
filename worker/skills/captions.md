@@ -119,9 +119,10 @@ collision-aware placement adapt by shot. Only single-word looks (or the
 THE PLACEMENT SOLVER re-solves on the exact frames of every graphic, card
 and layout change (worker/caption_place.py): card and panel EDGES and the
 SEAMS between stacked panels, a stack's content panel (the screen, page or
-document it shows — no text set on text), the face with its chin, props the
-index knows, every live graphic's box and the free-tier watermark's corner
-are hard no-go; a band shorter than ~1.4 caption lines is no band; the
+document it shows — no text set on text, unless no other band is free: a
+heard word is never lost for it), the face with its chin, props the index
+knows, every live graphic's box and the free-tier watermark's corner are
+hard no-go; a band shorter than ~1.4 caption lines is no band; the
 largest free band wins (a placement span you wrote, e.g. 'between the
 panels', is overridden where it lands on a seam). In a speaker + screen
 stack the captions usually take the band above the speaker panel. A page

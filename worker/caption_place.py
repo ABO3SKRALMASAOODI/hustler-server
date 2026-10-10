@@ -30,7 +30,9 @@ HARD no-go zones (a caption block never touches one):
 
 SOFT costs (a band may hold them, at a price): source text under the band
 (a screen share's UI, a sign), and sitting over a panel's picture instead of
-the canvas around it.
+the canvas around it. A stack's CONTENT panel is hard while any other band
+is free; with none, its inside is the last resort before a heard word is
+muted (caption_carry.plan).
 
 A free band shorter than MIN_BAND_LINES caption lines (or the template's own
 MIN_BAND_H) is no band. Among the rest the LARGEST wins, less a small price
@@ -322,11 +324,13 @@ PANEL_FACE_S = 6.0
 def content_zones(cards, index, tl, a, b):
     """The panels of the live stacked cards that show CONTENT — a screen,
     a page, a document: no face in their source rect while another panel
-    of the same card has one — padded. A caption never sits on the evidence
-    a stack shows (Elon's captions set over the article's text); it sits on
-    the canvas around the panels, or in the speaker's panel clear of the
-    face. A single card is the picture itself, and a stack with no face
-    measured anywhere near it tells nothing apart: [] for both."""
+    of the same card has one — padded. A caption does not sit on the
+    evidence a stack shows (Elon's captions set over the article's text); it
+    sits on the canvas around the panels, or in the speaker's panel clear of
+    the face — and only where neither is free, inside the content panel's
+    edges, rather than a heard word be lost (caption_carry.plan). A single
+    card is the picture itself, and a stack with no face measured anywhere
+    near it tells nothing apart: [] for both."""
     import picture_cards
     samples = ((index or {}).get("spatial") or {}).get("samples") or []
     if not samples:

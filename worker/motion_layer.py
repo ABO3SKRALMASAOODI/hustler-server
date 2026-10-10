@@ -412,10 +412,11 @@ def demote_behind(inputs, why):
 
 
 def caption_mute_spans(edl):
-    """Program windows where a motion item owns the WHOLE caption area: only
-    an explicit mute_captions=true. Unset is word-level — the graphic hides
-    just the spoken words it shows (worker/caption_carry.py) — and false
-    keeps the captions running beside it."""
+    """Program windows of the motion items with an explicit
+    mute_captions=true. No caption path mutes them as a whole any more
+    (round 6, every heard word reaches the screen once): the caption plan
+    (worker/caption_carry.py) hides just the words a graphic shows and mutes
+    others only where no band is clear of it, naming them."""
     return [[float(item["start"]), float(item["end"])]
             for item in edl.get("motion") or []
             if item.get("mute_captions") is True]
@@ -454,17 +455,19 @@ def fill_footprints(edl, W, H, fps=30.0, index=None, tl=None):
     """Measure the footprint box of every motion item that matters to the
     caption plan and has none, has one measured at another frame shape, or
     has only an estimate (in place; returns ``edl``). Only transcript
-    captions use it, and an explicit mute_captions=true hides every caption
-    under the item anyway. Face zones the keep-out stored at this frame
-    shape are kept. A probe that cannot run leaves an estimate in place and
-    an item without a box (a stale one is dropped): the plan then keeps the
-    old behaviour for it.
+    captions use it — mute_captions=true items included: they no longer hide
+    a whole window, so the captions they do not show are placed against
+    their real box too. Face zones the keep-out stored at this frame shape
+    are kept. A probe that cannot run leaves an estimate in place and an
+    item without a box (a stale one is dropped): the plan then keeps the old
+    behaviour for it (a graphic that says the line is assumed to sit on the
+    captions).
 
     With the program's ``index`` and Timeline ``tl``, every whole lockup is
-    first timed to the speech it shows (caption_carry.attach_readings: word
-    onsets and the bridge lines of one reading path), so it is measured and
-    rendered as it will read; a stored box measured without its bridge lines
-    is measured again."""
+    first timed to the speech it shows (caption_carry.attach_readings: its
+    words land on their spoken onsets; an old stored reading's bridge lines
+    are dropped), so it is measured and rendered as it will read; a stored
+    box measured with another reading is measured again."""
     import caption_carry
     if index is not None and tl is not None:
         before = {m.get("id"): m.get("reading") for m in edl.get("motion") or []
@@ -483,7 +486,7 @@ def fill_footprints(edl, W, H, fps=30.0, index=None, tl=None):
     todo = [m for m in edl.get("motion") or []
             if isinstance(m, dict) and not m.get("_synthetic")
             and not (caption_carry.footprint_box(m, ar) and not caption_carry.estimated(m))
-            and m.get("mute_captions") is not True and not m.get("phase_s")
+            and not m.get("phase_s")
             and float(m.get("end", 0)) - float(m.get("start", 0)) >= 0.05]
     if not todo:
         return edl
