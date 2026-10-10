@@ -18,7 +18,9 @@ where nothing calls for them they make an edit look childish.
 SOUND EFFECTS IN A PODCAST OR TALKING SHORT DEFAULT TO ZERO (owner, Oct
 2026): at most 1-2 per short, each on a structural moment (the payoff, a
 real section change) with a visual partner within ~50 ms of its hit (a
-graphic landing, a B-roll entry, a real-world action shown). Never a
+graphic landing — a lockup's row lands on its spoken word, not its fallback
+`at` — a B-roll entry, a real-world action shown; a standing headline being
+on screen and a concealed jump cut's framing step are not partners). Never a
 reflexive opening whoosh, never a bright sound (ding, pop, click, shutter)
 on the onset of a payoff or emphasis word, and never a literal sound pun: a
 shutter on the word 'pictures', a cash register on the word 'money' when
