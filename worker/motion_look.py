@@ -53,15 +53,15 @@ ROLE_ORDER = ("grotesk", "condensed", "serif", "script", "mono", "hand")
 # or an accent row.
 ALWAYS_ACCENT = frozenset(("marker_text", "lower_third", "counter", "progress_ring",
                            "stat_card", "bar_compare", "line_chart", "timeline_steps",
-                           "checklist", "chapter_title"))
+                           "checklist", "chapter_title", "list_build"))
 # Captions motion looks that are editorial systems (no broadcast furniture)
 EDITORIAL_LOOKS = frozenset(("editorial", "serif", "clean", "stack"))
 # Templates whose ``color`` is the TYPE ink. Elsewhere ``color`` is a stroke
 # (circle_highlight), a flash (flash_transition) or an app's brand colour
 # (notification): it neither votes for the Look's ink nor takes it.
 INK_TEMPLATES = frozenset(("chapter_title", "counter", "glow_title", "headline", "hook_title",
-                           "marker_text", "phrase_build", "quote_card", "text_scramble",
-                           "typewriter", "word_slam"))
+                           "list_build", "marker_text", "phrase_build", "quote_card",
+                           "text_scramble", "typewriter", "word_slam"))
 # The Look's ink is a LIGHT type colour (WCAG relative luminance): a dark ink
 # one graphic set for a paper card is not the short's ink over footage.
 INK_MIN_LUMINANCE = 0.3
@@ -112,6 +112,10 @@ def item_roles(item):
         if str(p.get("kicker") or "").strip():
             add("grotesk")
         add(_role(p.get("role") or "grotesk") or "grotesk")
+    elif t == "list_build":
+        if str(p.get("lead") or "").strip():
+            add("grotesk")
+        add(_role(p.get("role") or "condensed") or "condensed")
     elif t == "hook_title":
         add(_role(p.get("font") or "Inter Display") or "grotesk")
         if p.get("treatment", "serif") == "serif" and _has_star(p.get("text")):

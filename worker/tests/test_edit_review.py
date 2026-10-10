@@ -778,11 +778,17 @@ def test_worker_skills_plugin_and_core_prompt_carry_the_same_rules():
         assert "strongest line or statistic" in text
         assert "generic question" in text
         assert "earn" in text and "its place" in text
-        assert "0.8-1.5 s" in text
+        assert "0.8-1.5 s" in text and "0.6-1.5 s" not in text
+        # beat coverage, the budget's other half (round 5 judging)
+        assert "list_build" in text and "6-8 s" in text
     for text in (sfd, looks):
-        assert "never restyle the transcript as a list" in text or \
+        assert "showable moments" in text or \
             "a spoken list gets semantic visual inserts" in text
-        assert "one big word per item" in text
+        # a spoken list as type is ONE accumulating list_build of its noun
+        # phrases, never a run of slams replacing each other
+        assert "accumulating" in text and "one big word per item" not in text.replace(
+            "never one big word per item", "")
+        assert "underwater cities" in text and "tier='hook'" in text
         assert "at most 3 type roles" in text and "one accent" in text
         assert "50% of the runtime" in text
         assert "apple lisa, 1983" in text
@@ -794,6 +800,7 @@ def test_worker_skills_plugin_and_core_prompt_carry_the_same_rules():
     assert "strongest line or statistic" in mcp and "generic question" in mcp
     assert "a word a later graphic slams" in mcp
     assert "holds 0.8-1.5 s after the last word" in mcp
+    assert "tier='hook'" in mcp and "list_build" in mcp
     assert "hold the payoff 1.0-1.5 s" not in mcp
     assert "earn its place" in worker["review"]
     assert "earn its place" in plugin["references/review.md"]

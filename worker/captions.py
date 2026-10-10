@@ -2787,6 +2787,43 @@ def write_ass(events, path, global_style=None, play_res=BASE_PLAY_RES):
 MUTE_GRAZE_S = 0.15
 
 
+# The hook tier is the OPENING title: it owns its zone only when it starts
+# by this program second (a misplaced one later mutes nothing).
+HOOK_ZONE_START_S = 1.5
+
+
+def hook_owns_zone(item):
+    """Is ``item`` the opening hook-tier title that owns its zone (word_slam
+    tier='hook' starting by HOOK_ZONE_START_S, mute_captions not false)? The
+    captions wait until it exits: the judged hooks had the live caption fade
+    in right under the title, two sentences at once in the first second."""
+    if not isinstance(item, dict) or item.get("template") != "word_slam":
+        return False
+    if item.get("mute_captions") is False:
+        return False
+    if str((item.get("params") or {}).get("tier") or "") != "hook":
+        return False
+    try:
+        return float(item.get("start") or 0.0) <= HOOK_ZONE_START_S + 1e-6
+    except (TypeError, ValueError):
+        return False
+
+
+def hook_zone_spans(edl):
+    """[[start, end]] program windows of the hook-tier titles (hook_owns_zone)."""
+    out = []
+    for m in (edl.get("motion") or []):
+        if not hook_owns_zone(m):
+            continue
+        try:
+            s, e = float(m["start"]), float(m["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if e > s:
+            out.append([s, e])
+    return out
+
+
 def effective_caption_mutes(edl):
     """Explicit mute spans plus suppression owned by live text items.
 
@@ -2817,7 +2854,10 @@ def effective_caption_mutes(edl):
     # reaches the screen once): whatever its mute_captions, it hides just
     # the words it shows, and the rest stay captioned clear of it — or, with
     # no band clear of it and the face, are muted word by word and named
-    # (caption_plan / worker/caption_carry.py).
+    # (caption_plan / worker/caption_carry.py). The one exception is the
+    # opening hook title set at the hook tier: it owns its zone for its
+    # window (hook_owns_zone), so the first seconds have one reading task.
+    spans += hook_zone_spans(edl)
     merged = []
     for s, e in sorted(spans):
         if merged and s <= merged[-1][1] + 0.001:

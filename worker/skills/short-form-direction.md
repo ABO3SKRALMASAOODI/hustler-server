@@ -93,8 +93,13 @@ THE PREMIUM SHORT-FORM GRAMMAR — targets you can measure in the render:
    for a clip that ends on "…all we got was 140 characters"), never a
    generic question ("WHERE DID PROGRESS GO?"), never the punchline itself,
    never a word a later graphic slams, and never contradicting the words
-   spoken under it. It is complete and large (about 5% of frame height or
-   more) by 1.5 s — not a slow typewriter line. Frame 0 shows the speaker
+   spoken under it. It is a HEADLINE by 1.5 s — not a slow typewriter
+   line: `word_slam` with `tier='hook'` sets the *starred* main line at 7%+
+   of the frame height (caps) with the lead-in small above it ("They
+   promised us / *flying cars*…") and owns its zone — the captions wait
+   until it exits, so the first seconds have one reading task — or the
+   claim stands in a headline band. Never hook type no bigger than the
+   captions with a live caption fading in under it. Frame 0 shows the speaker
    facing camera, fully in frame, on a clean word onset (no fragment of the
    previous word, no disfluency), and the hook plays as one take: no jump
    cut in the first 1.5 s, at most one in the first 3 s. (Read
@@ -217,9 +222,10 @@ THE PREMIUM SHORT-FORM GRAMMAR — targets you can measure in the render:
    the bottom platform band.
 12. ENDING AND CTA. The payoff is the largest accented lockup in the short,
    its number and noun together ("140 / CHARACTERS"), rhyming with an
-   earlier setup device where one exists. Hold 0.8–1.5 s after the last
-   word before the end card (never cut on the last syllable; the natural
-   tail, else add_freeze_frame audio_mode='hold' over room tone), with a type
+   earlier setup device where one exists. Hold it after the last spoken
+   word before the end card — about 0.8–1.5 s, and about 2 s on screen for a
+   big payoff number (never cut on the last syllable; the natural tail, else
+   add_freeze_frame audio_mode='hold' over room tone), with a type
    accent (scale, colour; the one impact or the music's button only when
    the landing earns it) and land so the reel loops. A reaction button
    gets 1.0–1.5 s, framed like that speaker's earlier shot, or is left
@@ -240,12 +246,31 @@ graphic that does not serve the moment):
   most ~50% of the runtime (a persistent headline band is layout, not a
   graphic); a rapid run of spoken stats is one designed moment.
 - At most 3 type roles and one accent colour per short.
-- NEVER RESTYLE THE TRANSCRIPT AS A LIST: a spoken enumeration (rockets,
-  supersonic aviation, underwater cities, new medicines) gets semantic
-  visual inserts — a real photo or clip per item, 0.3–0.6 s each, via
-  `search_stock` or `research_broll` when they are listed, placed with
-  `image_card`, `photo_stack` or `add_overlay` — or one big word per item
-  on its onset (a run of word slams), never a stack of small rows.
+- BEAT COVERAGE, the budget's other half: dropping what restates the
+  captions must not leave the argument bare. Every thesis or claim line,
+  spoken list or triad, named product or place and number gets a designed
+  beat that ADDS information — a contrast that gives the line its structure
+  (BITS vs ATOMS), an accumulating list, an identification, a number,
+  evidence, an image — with no more than ~6–8 s between hero beats in the
+  body (never more than one per 6–8 s either). A zoom or a sound is not a
+  beat. The review names each dead stretch with the line it holds and a
+  beat for it; `suggest_motion_beats` lists the candidates and the gaps.
+- SHOWABLE MOMENTS: a concrete-noun list, a named product or place and a
+  statistic are candidates for real imagery first — one photo or clip per
+  list item, 0.3–0.6 s each on its onset (`research_broll` with one moment
+  per item at its program time, or `search_stock`; `add_stock_media`, then
+  `add_overlay`, `image_card` or `photo_stack`), a product or place as a
+  1.5–2 s image with an identifying label, a statistic as the evidence it
+  comes from. Re-typesetting heard words is the fallback, and the reply
+  says retrieval found nothing that truly shows them.
+- A SPOKEN LIST OR TRIAD AS TYPE is ONE accumulating `list_build`: the
+  items stack and persist, each landing whole on its spoken onset, the
+  newest in the accent, and the block clears on the next beat (a triad's
+  repeated opener, "Let's get…", is its small `lead`). Items are the noun
+  phrases said ("UNDERWATER CITIES", "SUPERSONIC AVIATION"), never a lone
+  modifier ("UNDERWATER"). Never a run of four or more slams replacing each
+  other in one slot (it reads mechanical and loses the pile-up), never a
+  stack of small rows of the words being heard.
 - IDENTIFY PROPER NOUNS AND PRODUCTS: label what a name is ("Apple Lisa,
   1983"), and show it when an image exists. Never set a product name with a
   colon ("Lisa:" reads as a dialogue label or a person).
@@ -260,12 +285,14 @@ graphic that does not serve the moment):
 GRAPHIC CHOICE PLAYBOOK — pick by what the line does, not by habit:
 - A contrast punchline ("promised flying cars … got 140 characters") is a
   two-beat swap: the setup words land as type on their onset, then a hard
-  swap to the payoff words on theirs. A `counter` only for a quantity that
-  grows or is counted; it lands ON the spoken number (the write sets `land`
-  on its onset), starts on the lead-in so it never counts through the setup,
-  and that number is not also in the caption at the same moment. A number
-  that IS the punchline takes `counter` with `style='reveal'` (a hard cut on
-  the word), never a count-up that shows 111, 139 while the setup plays.
+  swap to the payoff words on theirs. A `counter` really counts: 0 → value
+  over ~0.4 s, an expo ease-out landing ON the spoken number (the write sets
+  `land` on its onset and opens the window 0.45 s before it), so it never
+  counts through the setup, and that number is not also in the caption at
+  the same moment. Show a number as said: "30, 40 fonts" is value '30–40',
+  each figure landing on its own word — never one end of it while the
+  caption reads the other. `style='reveal'` (a hard cut on the word) stays
+  available for a number that must not move before it lands.
 - Items of one list share one type role; only the last may escalate.
 - The hook is the speaker's own strongest line (verbatim, or its sharpest
   words) or a preview of the payoff set as an editorial lockup — not an
@@ -345,7 +372,11 @@ fades on reels, digital silence) and justify intentional visual density.
   text, a typewriter of the words just heard), more than one hero graphic
   every ~6 s, five type roles and two accents in one short.
 - A payoff number without its noun; a punchline cut 0.5 s after its last
-  word; a 0.6 s reaction button.
+  word; a big payoff number on screen under 2 s; a 0.6 s reaction button.
+- A dead stretch: 9–15 s of body captions over the thesis, a triad or a
+  list while the beats sit elsewhere; a spoken list as a run of slams
+  replacing each other, or items without their noun ("UNDERWATER"); a
+  counter that hard-cuts on fully formed, or shows "40" over "30, 40".
 - An unnamed speaker, or a broadcast lower third stacked over a famous
   face; a product set as "Name:"; a tick on an unfulfilled promise; the
   same template set on every short of a batch; white type on a white shirt.
@@ -363,8 +394,10 @@ cannot (the EARN ITS PLACE advisory names the ones that don't); every sound
 cue on a named on-screen event with a visual partner, 1-2 at most in a
 podcast short (about one every 4–5 s at most elsewhere), no repeat within
 ~3 s, none on a payoff word's onset, none punning on the spoken word; any music the user asked for ducked 13–20 dB under the voice; no
-digital silence; one grade; no flat black void; payoff held 0.8–1.5 s
-after the last word; any requested CTA after the payoff. Rendered looks
+digital silence; one grade; no flat black void; no body stretch past
+~6–8 s without a beat that adds information; the hook a headline that owns
+its zone; payoff held 0.8–1.5 s after the last word (a big number ~2 s on
+screen); any requested CTA after the payoff. Rendered looks
 need a complete preview of the current
 version: `render_preview(complete=true)`, then dense
 `look_at(rendered=true, output_times=[...])` frames on the hook and every
@@ -375,7 +408,8 @@ hero moment, and the AUDIO CHECK for the mix (read review).
 Fix the story spine → strengthen the hook (payoff-led text by 1.5 s on a
 clean, facing first frame) → drop graphics that only restate the captions →
 re-bind mistimed hero moments to their onsets → commit the look (one caption
-system, one grade) → fill dead holds with word cues or a graphic → thin
+system, one grade) → give each dead stretch over the argument a beat that
+adds information (an image, an accumulating list, a contrast, a number) → thin
 zooms and sounds to the moments that clearly earn them → fix layout (full-bleed or designed
 background) → simplify any moment with two leaders → render and review
 again.

@@ -13,11 +13,17 @@ around the item (digits, or words: "forty", "one hundred and forty",
 "1.2 billion", "nineteen eighty-three") and:
 
 - counter: ``land`` (the item second the number completes) is set LEAD_S
-  before the onset. A count that would roll for less than MIN_ROLL_S starts
-  earlier, on the lead-in; a 'reveal' (the hard cut for punchline numbers)
-  starts on the landing itself, so nothing of it is up during the setup.
-  A long roll over the setup and a count on an item marked as the payoff are
-  pointed out (style='reveal' is the fix the tool does not impose).
+  before the onset. The count really counts (0 -> value, a ~0.4 s expo
+  ease-out: the template rolls only its last ``roll`` seconds and enters
+  with them), so it never runs across the setup: a count that would roll
+  for less than MIN_ROLL_S, or whose window opens more than LONG_ROLL_S
+  before its word, starts ROLL_S before the word instead (round 5 judging:
+  Jobs' '40' hard-cut on fully formed and read as a static number). A
+  'reveal' (a hard cut for a number that must not move before its word)
+  starts on the landing itself.
+- a spoken RANGE ('30, 40 fonts' -> value '30–40'): each figure lands on its
+  own word — ``land_first`` on the first, ``land`` on the second (judged: a
+  caption read '30' just before the graphic said '40').
 - word_slam whose hero shows a figure ('32%', '$1.2B'; not a name such as
   'GPT-4'): the item moves so its entrance lands on the onset (the slam's
   impact 0.2 s in, a ghost's snap 2 frames in).
@@ -35,8 +41,10 @@ LEAD_S = 0.02            # where a moved landing goes: 20 ms before the word
 MAX_LEAD_S = 0.04        # the most a landing may anticipate the word
 LATE_S = 0.004           # rounding slack after the onset (times are ms-rounded)
 MIN_ROLL_S = 0.25        # a count shorter than this reads as a flicker
-ROLL_S = 0.45            # the roll a moved count gets (0.3-0.6 s reads well)
-LONG_ROLL_S = 0.8        # longer rolls count through the setup: say so
+ROLL_S = 0.45            # a moved count's window opens this long before its word
+                         # (the template's 0.4 s roll, entering with it)
+LONG_ROLL_S = 0.8        # a window opening longer before its word is trimmed to ROLL_S
+RANGE_GAP_S = 1.5        # a range's second figure is said within this of its first
 MIN_HOLD_S = 0.5         # the landed number should stay this long
 MIN_ITEM_S = 0.3         # a moved item never gets shorter than this
 MAX_LAND_S = 30.0        # the counter's 'land' param range (its MG-SPEC max)
@@ -215,6 +223,22 @@ def _match(spoken, targets):
     return any(_same(a, b) for a in spoken["values"] for b in targets)
 
 
+_RANGE = re.compile(r"^\s*(.*?\d[\d,.\u00a0\u202f]*)\s*(?:[–—]|-|\s+to\s+)\s*"
+                    r"(\d[\d,.\u00a0\u202f]*\D*)$", re.I)
+
+
+def range_values(text):
+    """(first targets, second targets) of a counter value written as a
+    spoken range ('30–40', '30-40', '30 to 40'), or None."""
+    m = _RANGE.match(str(text or "").replace("−", "-"))
+    if not m:
+        return None
+    a, b = target_values(m.group(1)), target_values(m.group(2))
+    if not a or not b:
+        return None
+    return a, b
+
+
 def counter_landing(params, span):
     """Item second the counter template completes its number (its CT)."""
     try:
@@ -254,10 +278,6 @@ def _words(edl, index, s, e):
     return caplib.heard_words(edl, index, tl, max(0.0, s - SEARCH_BEFORE_S), e + SEARCH_AFTER_S)
 
 
-def _payoff(item):
-    return bool(re.search(r"pay-?off|punch ?line|joke|button", str(item.get("purpose") or ""), re.I))
-
-
 def _f(v):
     return f"{v:.2f}s"
 
@@ -273,7 +293,8 @@ def land(edl, index, item, prog):
         return False, ""
     params = item.get("params") or {}
     figure = params.get("value") if tpl == "counter" else _slam_figure(params.get("text"))
-    targets = target_values(figure) if figure else None
+    rng = range_values(figure) if tpl == "counter" and figure else None
+    targets = (rng[0] | rng[1]) if rng else (target_values(figure) if figure else None)
     if not targets:
         return False, ""
     s, e = float(item["start"]), float(item["end"])
@@ -282,7 +303,9 @@ def land(edl, index, item, prog):
     except Exception as err:  # noqa: BLE001  (a lint never blocks the edit)
         print(f"[motion] number landing skipped: {str(err)[:160]}", flush=True)
         return False, ""
-    if tpl == "counter":
+    if tpl == "counter" and rng:
+        changed, note = _land_range(item, params, spoken, figure, rng, prog)
+    elif tpl == "counter":
         changed, note = _land_counter(item, params, spoken, figure, prog)
     else:
         changed, note = _land_slam(item, params, spoken, figure, prog)
@@ -327,15 +350,14 @@ def _land_counter(item, params, spoken, figure, prog):
     hit = _nearest(spoken, landing)
     notes = []
     if hit is None:
-        if _payoff(item) and not reveal:
-            notes.append(f"NOTE (number): a counting '{figure}' on the payoff shows its climb "
-                         "before the line lands; style='reveal' hard-cuts the number on the word.")
-        return False, "\n".join(notes)
+        return False, ""
     onset, said = hit["t0"], hit["said"]
     target = round(onset - LEAD_S, 3)
     changed = False
-    if not _on_time(landing, onset):
-        before = landing
+    before = landing
+    on_time = _on_time(landing, onset)
+    long_roll = not reveal and (landing if on_time else target) - s > LONG_ROLL_S
+    if not on_time or long_roll:
         if reveal:
             # the hard cut IS the item start: nothing of it shows during the setup
             ns = max(0.0, target)
@@ -348,8 +370,10 @@ def _land_counter(item, params, spoken, figure, prog):
             params["land"] = round(max(0.0, target - ns), 3)
         else:
             roll = target - s
-            if roll < MIN_ROLL_S:
-                # too little time to count: start on the lead-in instead
+            if roll < MIN_ROLL_S or roll > LONG_ROLL_S:
+                # a count rolls ~0.4 s into its word: its window opens
+                # ROLL_S before it (too little time to count, or a window
+                # that would sit empty across the setup)
                 ns = max(0.0, target - ROLL_S)
                 item["start"] = round(ns, 3)
                 roll = target - ns
@@ -364,24 +388,58 @@ def _land_counter(item, params, spoken, figure, prog):
         if abs(e - e0) > 1e-6:
             moved += f"; it now ends at {_f(e)} (was {_f(e0)}) so the landed number holds"
         what = "cuts on" if reveal else "completes"
+        how = "" if reveal else (" It counts up over the last ~0.4 s into the word and shows "
+                                 "nothing before, so the setup is never given away.")
         notes.append(f"NUMBER LANDED: '{figure}' now {what} at {_f(target)}, 20 ms before "
                      f"\"{said}\" is said at {_f(onset)} (it would have read in full at "
-                     f"{_f(before)}){moved}. A number never completes before its word.")
-    if not reveal:
-        roll = counter_landing(params, e - s)
-        if roll > LONG_ROLL_S:
-            notes.append(f"NOTE (number): the count rolls for {roll:.2f}s before \"{said}\", so "
-                         f"viewers read the climbing figure over the setup. Start it about "
-                         f"{ROLL_S:g}s before the word ({_f(max(0.0, target - ROLL_S))}) for a "
-                         f"short roll, or use style='reveal' to hard-cut it on the word.")
-        elif _payoff(item):
-            notes.append(f"NOTE (number): '{figure}' is the payoff; a count shows its climb "
-                         "first. style='reveal' hard-cuts the number on the word.")
+                     f"{_f(before)}){moved}. A number never completes before its word." + how)
     if e - onset < MIN_HOLD_S:
         notes.append(f"NOTE (number): it holds only {max(0.0, e - onset):.2f}s after "
                      f"\"{said}\"; end it at {_f(min(prog, onset + 0.8))} or later so the "
                      "landed number reads.")
     return changed, "\n".join(notes)
+
+
+def _land_range(item, params, spoken, figure, rng, prog):
+    """A spoken range: the first figure lands on its word (land_first), the
+    second on its own (land), the window opening ROLL_S before the first."""
+    s, e = float(item["start"]), float(item["end"])
+    s0, e0 = s, e
+    pairs = []
+    for i, a in enumerate(spoken):
+        if not _match(a, rng[0]):
+            continue
+        b = next((x for x in spoken[i + 1:] if _match(x, rng[1])
+                  and 0.0 < x["t0"] - a["t0"] <= RANGE_GAP_S), None)
+        if b is not None:
+            pairs.append((a, b))
+    if not pairs:
+        return False, (f"NOTE (number): '{figure}' is a range, but its two figures are not "
+                       "said one after the other near it; a range is shown as said, each "
+                       "figure on its own word.")
+    a, b = min(pairs, key=lambda p: abs(p[0]["t0"] - (s + ROLL_S)))
+    t1, t2 = round(a["t0"] - LEAD_S, 3), round(b["t0"] - LEAD_S, 3)
+    reveal = params.get("style") == "reveal"
+    ns = s
+    if reveal:
+        ns = max(0.0, t1)
+    elif not (MIN_ROLL_S <= t1 - s <= LONG_ROLL_S):
+        ns = max(0.0, t1 - ROLL_S)
+    want_lf, want_l = round(max(0.0, t1 - ns), 3), round(min(MAX_LAND_S, max(0.0, t2 - ns)), 3)
+    ne = e if e >= t2 + MIN_HOLD_S else min(prog, t2 + MIN_HOLD_S)
+    if abs(ns - s) < 1e-6 and abs(ne - e) < 1e-6 and \
+            abs(float(params.get("land_first") or 0) - want_lf) <= MAX_LEAD_S and \
+            abs(float(params.get("land") or 0) - want_l) <= MAX_LEAD_S:
+        return False, ""
+    item["start"], item["end"] = round(ns, 3), round(ne, 3)
+    params["land_first"], params["land"] = want_lf, want_l
+    item["params"] = params
+    moved = f"; it now starts at {_f(ns)} (was {_f(s0)})" if abs(ns - s0) > 1e-6 else ""
+    if abs(ne - e0) > 1e-6:
+        moved += f"; it now ends at {_f(ne)} (was {_f(e0)}) so the landed range holds"
+    return True, (f"NUMBER LANDED: the range '{figure}' is shown as said — its first figure "
+                  f"lands at {_f(t1)} on \"{a['said']}\", the second at {_f(t2)} on "
+                  f"\"{b['said']}\"{moved}.")
 
 
 def _land_slam(item, params, spoken, figure, prog):

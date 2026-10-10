@@ -21214,9 +21214,13 @@ def audit_captions(ctx, offset=0, limit=80):
                     state["word_count"] <= 2 for state in states) / len(states) > .6:
                 warnings.append("Most phrase states have only one or two words; review reading cadence")
     unbacked_mutes = []
+    # a hook-tier title owns its window (captions.hook_owns_zone): it is the
+    # text covering the captions it mutes
+    hook_titles = [{"start": a, "end": b, "text": "hook"} for a, b in caplib.hook_zone_spans(edl)]
     for start, end in caplib.effective_caption_mutes(edl):
         cursor = start
-        for text in sorted(edl.get("texts") or [], key=lambda t: t.get("start", 0)):
+        for text in sorted(list(edl.get("texts") or []) + hook_titles,
+                           key=lambda t: t.get("start", 0)):
             if not str(text.get("text") or "").strip():
                 continue
             left, right = float(text.get("start", 0)), float(text.get("end", 0))
@@ -30807,7 +30811,7 @@ _COMPACT_CONTRACTS = {
         "or behind_subject. Captions: leave mute_captions unset — every "
         "heard word reaches the screen once: captions drop the words it shows "
         "and carry the rest beside it, in a free band (quote the transcript in "
-        "rows; end graphics where their words end, per the NOTE). A number "
+        "rows; end graphics where their words end). A number "
         "lands on its spoken word. Silent by "
         "default; sfx=true, only for a moment that earns sound, maps its "
         "sound roles onto the approved library (cues listed in the result). "
@@ -30816,8 +30820,8 @@ _COMPACT_CONTRACTS = {
         "result). A word-timed window starts on its first shown word; an edge "
         "within 0.15 s of a cut snaps to it. accent/color default to the "
         "short's Look (NOTE (look): 2nd accent, 4th type role). word_slam "
-        "tier: payoff (number+noun in the accent) or hero (one per short, "
-        "behind the speaker; face-safe fallback). "
+        "tier: hook (opening headline; captions wait), payoff (number+"
+        "noun, accent) or hero (one per short, behind the speaker). "
         "Never invent numbers, brand messages, handles or CTA offers."),
     "set_motion_graphic": (
         "Patch a motion graphic by id: window, params (merged), template, layer, "

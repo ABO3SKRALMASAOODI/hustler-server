@@ -2099,6 +2099,11 @@ MASTER_VERSION = 1
 # detail (busyness) grid. Caption blocks keep their first line's baseline on
 # one row per place in every segment, and a slam's landing flash is a lift
 # of the same hue.
+# Also v4 (round 7 beats track, merged into the same release): the counter
+# really counts — with a spoken landing it rolls only its last ~0.4 s into
+# the word and enters with that roll (a stored count no longer climbs across its setup), and shows a
+# spoken range ('30–40') with each figure on its own word; word_slam has the
+# hook tier and the list_build template exists.
 LEGIBILITY_VERSION = 4
 
 # Word-level caption muting (worker/caption_carry.py): a motion graphic with

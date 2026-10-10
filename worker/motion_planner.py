@@ -17,6 +17,14 @@ a sound per beat.
 It never writes the EDL and never invents copy or numbers: values come only
 from spoken words, and text fields are left for the editor to author
 (``text_hint`` quotes the transcript it should paraphrase faithfully).
+
+BEAT COVERAGE (round 5 judging): the beats that ADD information are ranked
+first — a spoken list or triad becomes ONE accumulating list_build of its
+noun phrases (with each item's onset and an image query per item: real
+imagery first, 0.3-0.6 s each on its onset), a spoken range one counter
+showing it as said ('30–40'), a named product or place an identification
+with a real image — and a body stretch longer than BEAT_GAP_S with no beat
+is reported (``beat_gaps``): about one hero beat per 6-8 s, never more.
 """
 
 import json
@@ -118,6 +126,8 @@ BEAT_SOUNDS = {
     "number": "silent by default; at most one tick_1 on a visual landing in the pause after the spoken number (something on screen must change there), never on its onset (a ding there masks it); the count itself stays silent",
     "number_cluster": "optional: pop_1 on the last value only (a sound per value repeats)",
     "list": "silent (a tick per item repeats within ~3 s); at most pop_1 on the last item",
+    "triad": "silent (a sound per row repeats)",
+    "name": "silent",
     "contrast": "optional: swish_1 on the swap",
     "hero_word": "silent unless it is the payoff (impact_1, once per short)",
     "cta": "optional: click_1 on the visible press (sfx=true)",
@@ -127,6 +137,11 @@ BEAT_SOUNDS = {
 CAMERA_EVERY_S = 15.0
 # A hold this long with nothing designed on it is reported as a diagnostic.
 LONG_HOLD_S = 3.5
+# A body stretch this long with no beat is a dead stretch (edit_review's
+# DEAD_GAP_S): about one hero beat per 6-8 s, never more.
+BEAT_GAP_S = 8.0
+LIST_HOLD_S = 1.2            # a list_build holds this long past its last item
+NAME_BEATS_MAX = 2
 
 
 def plan(edl, index, density="premium", camera=False, sounds=False):
@@ -150,11 +165,14 @@ def plan(edl, index, density="premium", camera=False, sounds=False):
     # 1. hook interrupt
     first = _sentences(words[:40])[0] if words else []
     hint = " ".join(w["w"] for w in first[:14])
-    add({"at": 0.0, "template": "hook_title", "kind": "hook",
+    add({"at": 0.0, "template": "word_slam", "kind": "hook",
          "end": round(min(prog, max(1.8, (first[-1]["t1"] if first else 2.4) + 0.2), 3.0), 2),
-         "params": {"text": None, "y": 0.2},
+         "params": {"text": None, "tier": "hook"},
          "text_hint": hint,
-         "why": "pattern interrupt + hook line on screen within 0.6 s (write a faithful 3-7 word hook; star one accent word)"})
+         "why": "pattern interrupt + the hook line as a headline within 0.6 s: tier='hook' sets "
+                "the *starred* main line at 7%+ of the frame height under a small lead-in and "
+                "owns its zone (the captions wait until it exits); write it from the clip's "
+                "strongest line or statistic, 'lead-in / *main line*'"})
     # 2. numbers -> counter (a cluster of numbers within ~5 s -> one stat stack)
     found = []
     i = 0
@@ -173,6 +191,14 @@ def plan(edl, index, density="premium", camera=False, sounds=False):
             clusters[-1].append(f)
         else:
             clusters.append([f])
+    try:
+        import spoken_beats
+        # the words as heard (a word whose sound a pause cut kept counts:
+        # 'agriculture AND underwater cities' is still a list)
+        cands = spoken_beats.candidates(tl.kept_words(src_words, rescue=True))
+    except Exception:  # noqa: BLE001 — a reader that fails suggests nothing
+        cands = []
+    ranges = {round(c["t0"], 2): c for c in cands if c["kind"] == "range"}
     for cl in clusters:
         i0 = cl[0][0]
         t = float(words[i0]["t0"])
@@ -180,6 +206,22 @@ def plan(edl, index, density="premium", camera=False, sounds=False):
             continue
         last_i = cl[-1][0] + cl[-1][4]
         ctx_words = " ".join(w["w"] for w in words[max(0, i0 - 6): min(len(words), last_i + 8)])
+        rng = ranges.get(round(t, 2))
+        if rng is not None and len(cl) == 2:
+            (lo, lo_sc), (hi, hi_sc) = (_display_value(f[1]) for f in cl)
+            # one prefix, scale and unit for the pair, as the counter reads a
+            # range: '$15 or $20 million' is '$15–20M', '30, 40%' is '30–40%'
+            lo = f"{cl[0][2]}{lo}{lo_sc if lo_sc != hi_sc else ''}"
+            hi = f"{hi}{hi_sc}{cl[1][3]}"
+            if free(t):
+                add({"at": round(max(0.0, t - 0.47), 2), "template": "counter", "kind": "number",
+                     "end": round(min(prog, rng["t1"] + 2.0), 2),
+                     "params": {"value": f"{lo}–{hi}", "label": None},
+                     "text_hint": ctx_words,
+                     "why": f"spoken range '{rng['text']}' — show it as said: one counter with value "
+                            f"'{lo}–{hi}', each figure landing on its own word (the write sets "
+                            "land_first and land); never one end of it while the caption reads the other"})
+            continue
         if len(cl) == 1:
             _i, val, prefix, suffix, consumed = cl[0]
             to, scale = _display_value(val)
@@ -188,10 +230,9 @@ def plan(edl, index, density="premium", camera=False, sounds=False):
                 # (add_motion_graphic sets its landing on the onset)
                 add({"at": round(max(0.0, t - 0.47), 2), "template": "counter", "kind": "number",
                      "end": round(min(prog, t + 2.2), 2),
-                     "params": {"to": to, "prefix": prefix, "suffix": (scale + suffix) or "",
-                                "label": None},
+                     "params": {"value": f"{prefix}{to}{scale}{suffix}", "label": None},
                      "text_hint": ctx_words,
-                     "why": f"spoken number '{' '.join(w['w'] for w in words[_i:_i + consumed])}' — make it land as a counter ON the word (label = what it measures, from the sentence; style='reveal' when the number is the punchline)"})
+                     "why": f"spoken number '{' '.join(w['w'] for w in words[_i:_i + consumed])}' — make it land as a counter ON the word: it counts 0 -> value over ~0.4 s into it (label = what it measures, from the sentence)"})
         else:
             rows = []
             for _i, val, prefix, suffix, consumed in cl:
@@ -219,6 +260,54 @@ def plan(edl, index, density="premium", camera=False, sounds=False):
                          "text_hint": " ".join(w["w"] for w in words[k:min(len(words), later[-1] + 8)]),
                          "why": "spoken enumeration — reveal each item on its cue"})
             break
+    # 3b. spoken lists and triads -> ONE accumulating list_build of their
+    # noun phrases (never a run of slams replacing each other); a concrete
+    # list's items are image candidates first (imagery: one per item, on its
+    # onset)
+    for c in cands:
+        if c["kind"] not in ("list", "triad"):
+            continue
+        items = (c.get("items") or [])[:6]
+        if len(items) < 3:
+            continue
+        t = float(items[0]["t0"])
+        if any(b["kind"] in ("list", "triad") and b["at"] - 0.5 <= t <= b["end"] for b in beats) \
+                or not free(t):
+            continue
+        triad = c["kind"] == "triad"
+        beat = {"at": round(t, 2), "template": "list_build", "kind": c["kind"],
+                "end": round(min(prog, float(c["t1"]) + LIST_HOLD_S), 2),
+                "params": {"rows": [{"text": it["text"]} for it in items],
+                           "lead": c.get("opener") if triad else None},
+                "item_times": [round(float(it["t0"]), 2) for it in items],
+                "text_hint": c["text"],
+                "why": (f"{'triad' if triad else 'spoken list'} — one accumulating list_build: "
+                        "each item lands whole on its onset and persists (the newest accented), "
+                        "the block clears on the next beat; items are the noun phrases said")}
+        if not triad:
+            beat["imagery"] = [{"query": it["text"], "at": round(float(it["t0"]), 2),
+                                "duration_s": 0.5} for it in items]
+            beat["why"] += ("; real images first: research_broll with one moment per item at "
+                            "its onset (0.3-0.6 s each), the list_build when nothing truly shows them")
+        add(beat)
+    # 3c. a named product, place or person -> an identification with a real
+    # image (optional, at most NAME_BEATS_MAX)
+    named = 0
+    for c in cands:
+        if c["kind"] != "name" or named >= NAME_BEATS_MAX:
+            continue
+        t = float(c["t0"])
+        if any(b["at"] - 0.3 <= t <= b["end"] for b in beats) or not (1.0 < t < prog - 1.0) \
+                or not free(t):
+            continue
+        add({"at": round(t, 2), "template": "image_card", "kind": "name",
+             "end": round(min(prog, t + 1.8), 2), "params": {"caption": None},
+             "imagery": [{"query": c["text"], "at": round(t, 2), "duration_s": 1.8}],
+             "text_hint": c["text"],
+             "why": f"named '{c['text']}' — identify it: a real image of it (research_broll or "
+                    "search_stock) with an identifying label, 1.5-2 s on the name; skip it when "
+                    "nothing truly shows it"})
+        named += 1
     # 4. contrasts -> versus_split / word_slam
     for s in _sentences(words):
         text = " ".join(w["w"] for w in s)
@@ -272,11 +361,26 @@ def plan(edl, index, density="premium", camera=False, sounds=False):
     cam = _camera_candidates(tl, index, beats, holds, prog) if camera else []
     per10 = (len(beats) + len(cam)) / max(prog / 10.0, 0.1)
     return {"program_s": round(prog, 2), "density": density, "beats": beats,
-            "camera": cam, "long_holds": holds,
+            "camera": cam, "long_holds": holds, "beat_gaps": beat_gaps(beats, prog),
             "designed_events_per_10s": round(per10, 2),
             "note": ("Captions (motion_look) already change every word; these beats add the hero "
                      "layer. Write every text param yourself from the quoted transcript; never "
                      "invent numbers or claims.")}
+
+
+def beat_gaps(beats, prog, hook_end=None):
+    """Body stretches longer than BEAT_GAP_S with no suggested beat
+    [[start, end]] (after the hook, before the program's last second)."""
+    spans = sorted((float(b["at"]), float(b.get("end", b["at"]))) for b in beats
+                   if b.get("kind") != "hook")
+    hook = [float(b.get("end", 0.0)) for b in beats if b.get("kind") == "hook"]
+    cur = hook_end if hook_end is not None else (max(hook) if hook else 1.5)
+    out = []
+    for a, b in spans + [(prog, prog)]:
+        if a - cur > BEAT_GAP_S:
+            out.append([round(cur, 2), round(a, 2)])
+        cur = max(cur, b)
+    return out
 
 
 def _camera_candidates(tl, index, beats, holds, prog):
@@ -346,11 +450,17 @@ def suggest_motion_beats(ctx, density="premium", camera=False, sounds=False):
         p = {k: v for k, v in b["params"].items() if v is not None}
         lines.append(f"- {b['at']:.2f}-{b['end']:.2f}s {b['template']} [{b['kind']}] params={json.dumps(p)}"
                      + (f" item_times={b['item_times']}" if b.get("item_times") else "")
+                     + (f" imagery={json.dumps(b['imagery'])}" if b.get("imagery") else "")
                      + f" — {b['why']}"
                      + (f" | sound: {b['sound']}" if b.get("sound") else "")
                      + (f" | transcript: \"{b['text_hint'][:140]}\"" if b.get("text_hint") else ""))
     for c in result["camera"]:
         lines.append(f"- {c['at']:.2f}-{c['end']:.2f}s {c['tool']} mode={c['mode']} — {c['why']}")
+    if result.get("beat_gaps"):
+        lines.append(f"Dead stretches (over {BEAT_GAP_S:g} s with no beat: give the line there a "
+                     "beat that ADDS information — a contrast, an accumulating list, a number, "
+                     f"an identification or an image; a zoom or a sound is not a beat): "
+                     f"{result['beat_gaps']}")
     if result["long_holds"]:
         lines.append(f"Long holds (a graphic or B-roll beat if the story needs one; a steady "
                      f"frame is fine): {result['long_holds']}")
