@@ -1850,6 +1850,13 @@ HEADLINE_SAFE_TOP = 0.085
 HEADLINE_SAFE_TOP_FLAT = 0.05
 HEADLINE_GAP = 0.012          # clear space kept above the card / picture
 HEADLINE_MIN_BAND = 0.06
+# A headline that starts this close to the program's start opens it: it is
+# the hook on frame 0, the thumbnail, so it is written complete there
+# (entrance 'none') unless the editor passed an entrance — the template's
+# default fade left the band empty on frame 0 and half-faded for ~0.3 s
+# (final review, round 7 Jobs; hooks-retention: the first frame is never
+# half-faded, no fade-in).
+HEADLINE_OPENS_S = 0.05
 _ACCENT_RE = re.compile(r"\*[^*]+\*")
 
 
@@ -2219,6 +2226,11 @@ def add_motion_graphic(ctx, template, start, end=None, params=None, html=None,
         if sfx:
             band_note += "\nNOTE: a persistent headline is silent; sfx ignored."
             sfx = False
+        if s <= HEADLINE_OPENS_S and "entrance" not in (params or {}):
+            item["params"] = dict(item["params"], entrance="none")
+            band_note += ("\nHEADLINE: it opens the program, so it is on screen complete "
+                          "from frame 0 (the thumbnail; no fade-in). Pass entrance to "
+                          "animate it in.")
     if hero_y:
         # a hero word sits at head height (the head crosses its letters)
         item["params"] = dict(item["params"], y=_hero_y(ctx, edl, item))

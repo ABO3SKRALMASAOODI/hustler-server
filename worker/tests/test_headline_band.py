@@ -460,3 +460,22 @@ def test_a_phrase_build_in_the_band_is_told_the_headline_yields_from_its_first_r
     out = motion_tools.add_motion_graphic(ctx, "phrase_build", 20.0, 24.0,
                                           params={"rows": rows, "y": 0.18}, id="arts")
     assert "headline hl yields its band to this graphic" in out, out
+
+
+def test_a_headline_that_opens_the_program_is_complete_on_frame_0(monkeypatch):
+    # final review (round 7 Jobs): the standing headline IS the hook, and
+    # the template's default fade left frame 0 — the thumbnail — with an
+    # empty band and the hook half-faded for ~0.3 s
+    monkeypatch.setattr(motion_tools, "_probe_item", _probe)
+    ctx = _Ctx(_card_edl())
+    out = motion_tools.add_motion_graphic(ctx, "headline", 0.0, params=dict(TEXT), id="hl")
+    item = ctx.latest_edl()["json"]["motion"][0]
+    assert item["params"]["entrance"] == "none" and "complete from frame 0" in out, out
+    # the editor's own entrance is kept, and a chapter headline later in the
+    # program keeps the template's fade
+    ctx = _Ctx(_card_edl())
+    motion_tools.add_motion_graphic(ctx, "headline", 0.0, 20.0,
+                                    params=dict(TEXT, entrance="rise"), id="a")
+    out = motion_tools.add_motion_graphic(ctx, "headline", 20.0, params=dict(TEXT), id="b")
+    got = {m["id"]: m["params"]["entrance"] for m in ctx.latest_edl()["json"]["motion"]}
+    assert got == {"a": "rise", "b": "fade"} and "frame 0" not in out

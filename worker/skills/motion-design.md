@@ -124,7 +124,9 @@ CHOOSING A TEMPLATE — confirm names and params with `list_motion_templates()`:
   omitted = the program end; or one per chapter, never overlapping) with y
   omitted: the write centres it in the free band above the card or the
   letterboxed picture and sizes it to that band (the band starts below the
-  feed header AND the free-tier watermark's zone). It holds the band and
+  feed header AND the free-tier watermark's zone). A headline that opens
+  the program is the hook on frame 0, the thumbnail: the write sets it
+  complete there (entrance 'none') unless you pass an entrance. It holds the band and
   YIELDS on its own at render time — gone on the frame any graphic that
   occupies its band lands, back from the frame it leaves (it holds every gap
   of 0.15 s or more: the band is never left empty; a phrase build yields

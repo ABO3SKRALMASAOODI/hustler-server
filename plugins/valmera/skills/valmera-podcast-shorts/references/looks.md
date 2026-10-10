@@ -106,7 +106,9 @@ Never the flat default colour.
 The headline zone above a card holds the persistent `headline` motion
 template (or the editorial headline): one per short, written with y omitted
 so it fills that zone; hero lockups placed in the zone replace it and hand it
-back automatically, so it is never empty for seconds.
+back automatically, so it is never empty for seconds. Started at 0 it is the
+hook on frame 0 and is written complete there (no fade-in) unless an
+entrance is passed.
 
 A wider 4:5 card (up to 92% width, 64.7% of the height) fits only without a
 headline above it and must still end at or above y 0.80. Nothing designed
