@@ -1,5 +1,5 @@
 <!--MG-SPEC {"title": "Word slam", "category": "type",
- "description": "One huge hero word or 2-3 word phrase (up to ~85% of the width) that lands ON the spoken word - the main 'wow' device. Use it on the single most important word of a beat, at most every 6-8 s; *star* a word for the accent colour and put the spoken connector words in the small kicker. The slam entrance lands 0.2 s after start, so start it 0.2 s before the word. Back-to-back slams of the same style form a series and share one size per line. tier='payoff' locks a figure and its noun up in the accent ('*140* / characters'); tier='hero' is the short's ONE giant word behind the speaker.",
+ "description": "One huge hero word or 2-3 word phrase (up to ~85% of the width) that lands ON the spoken word - the main 'wow' device. Use it on the single most important word of a beat, at most every 6-8 s; *star* a word for the accent colour and put the spoken connector words in the small kicker. The slam entrance lands 0.2 s after start, so start it 0.2 s before the word. Back-to-back slams of the same style form a series and share one size per line. tier='hook' is the opening headline: its *starred* main line at 7%+ of the frame height with the lead-in small above it, and the captions wait until it exits (it owns its zone); tier='payoff' locks a figure and its noun up in the accent ('*140* / characters'); tier='hero' is the short's ONE giant word behind the speaker.",
  "duration": 1.5, "layer": "above_captions", "mutes_captions": true,
  "params": {
   "text": {"type": "str", "required": true, "max": 40, "hint": "1-3 words; ' / ' forces a line break; wrap a word in *stars* for the accent colour"},
@@ -14,7 +14,7 @@
   "fit": {"type": "enum", "values": ["shared", "justify"], "default": "shared", "hint": "justify = every ' / ' line scaled to the same width, so a short stat towers over its label ('*32%* / fewer errors'); shared = one type size"},
   "x": {"type": "float", "min": 0.3, "max": 0.7, "default": 0.5, "hint": "horizontal centre as a frame fraction; the face keep-out nudges it left of the platform's right button rail"},
   "width": {"type": "float", "min": 0.4, "max": 0.85, "default": 0.85, "hint": "widest line's width as a frame fraction"},
-  "tier": {"type": "enum", "values": ["display", "payoff", "hero"], "default": "display", "hint": "display = the slam as fitted by fit/width; payoff = the short's closing lockup: a number and its noun locked up together ('*140* / characters'), every hero line in the accent, justified - make it the largest lockup of the short; hero = ONE giant word per short (line up to 30% of the frame height on a short word; a long word is width-bound; 94% of the width at width 0.85) set behind the speaker: add_motion_graphic defaults its layer to behind_subject and, when it cannot go behind the speaker (no person matte, a crop that follows the speaker), draws it as a display slam above the picture, clear of the face. Both optional - only where the moment earns it"}
+  "tier": {"type": "enum", "values": ["display", "hook", "payoff", "hero"], "default": "display", "hint": "display = the slam as fitted by fit/width; hook = the opening title as a headline (start it by 1.5 s): the line(s) holding the *starred* words are the main line, broken onto up to 3 lines so its type is at least ~7% of the frame height (caps), the other ' / ' lines a small lead-in (e.g. 'They promised us / *flying cars*'); the captions are muted while it is up, so the first seconds have one reading task (mute_captions=false keeps them running beside it); payoff = the short's closing lockup: a number and its noun locked up together ('*140* / characters'), every hero line in the accent, justified - make it the largest lockup of the short; hero = ONE giant word per short (line up to 30% of the frame height on a short word; a long word is width-bound; 94% of the width at width 0.85) set behind the speaker: add_motion_graphic defaults its layer to behind_subject and, when it cannot go behind the speaker (no person matte, a crop that follows the speaker), draws it as a display slam above the picture, clear of the face. Both optional - only where the moment earns it"}
  },
  "example": {"text": "*Ordinary*", "kicker": "out of the", "entrance": "slam", "role": "condensed"},
  "sfx": [{"at": 0.0, "kind": "kick", "when": {"entrance": ["pop", "strobe"]}},
@@ -60,7 +60,7 @@
   const caps = P.uppercase && R.caps;
   // tiers: display (as fitted), payoff (number + noun in the accent,
   // justified), hero (the one giant word: wider column, taller budget)
-  const TIER = P.tier || 'display', HERO = TIER === 'hero', PAYOFF = TIER === 'payoff';
+  const TIER = P.tier || 'display', HERO = TIER === 'hero', PAYOFF = TIER === 'payoff', HOOK = TIER === 'hook';
   const sans = FAM.has('Inter') ? `'Inter','Inter Display',sans-serif` : `'Inter Display',sans-serif`;
 
   // ── build: kicker + hero lines (words -> chars for the letter cascade) ──
@@ -76,10 +76,11 @@
   }
   const hero = MG.el('div', 'hero', null, blk);
   let lines = [], chars = [];
-  const buildLines = (groups) => {
+  const buildLines = (groups, small = []) => {
     hero.textContent = ''; lines = []; chars = [];
-    groups.forEach(g => {
+    groups.forEach((g, gi) => {
       const el = MG.el('div', 'line', null, hero);
+      if (small[gi]) el.dataset.small = '1';
       Object.assign(el.style, { fontFamily: R.css, fontWeight: R.weight, fontStyle: R.style,
         letterSpacing: R.track, lineHeight: R.lh, color: P.color });
       g.forEach(w => {
@@ -137,8 +138,49 @@
     }
     return out;
   };
+  // ── the hook tier: a headline that owns its zone ──
+  // The rows holding a *starred* word are the main line (no star: the last
+  // row); the rows around it are a small lead-in. The main line takes the
+  // fewest lines (up to 3) that set its caps at HOOK_CAP of the frame
+  // height, inside HOOK_LINE / HOOK_MAIN budgets; when no split reaches it,
+  // the biggest (each extra line must earn 10%).
+  const HOOK_CAP = 0.07, HOOK_LINE = 0.11, HOOK_MAIN = 0.2;
+  const hookLayout = () => {
+    let mi = rows.map((r, i) => (r.some(w => w.acc) ? i : -1)).filter(i => i >= 0);
+    if (!mi.length) mi = [rows.length - 1];
+    const a = mi[0], b = mi[mi.length - 1];
+    const before = rows.slice(0, a), main = rows.slice(a, b + 1), after = rows.slice(b + 1);
+    const cands = main.length === 1 ? splits(main[0]).filter(c => c.length <= 3) : [main];
+    const probe = MG.el('div', 'line', null, blk);
+    Object.assign(probe.style, { fontFamily: R.css, fontWeight: R.weight, fontStyle: R.style,
+      letterSpacing: R.track, lineHeight: R.lh, position: 'absolute', visibility: 'hidden', fontSize: '100px' });
+    const wOf = ws => { probe.textContent = ''; ws.forEach(w => MG.el('span', 'mg-w', w.text, probe)); return probe.scrollWidth / 100; };
+    probe.textContent = 'H';
+    const cap = MG.capRatio(probe);
+    const sizeOf = c => Math.max(24, Math.min(maxW / Math.max(...c.map(wOf), 0.01), HOOK_LINE * H, HOOK_MAIN * H / (c.length * R.lh)));
+    const scored = cands.map(c => ({ c, s: sizeOf(c) }));
+    probe.remove();
+    const want = HOOK_CAP * H / cap;
+    let pick = scored.filter(x => x.s >= want - 0.5).sort((p, q) => p.c.length - q.c.length || q.s - p.s)[0];
+    if (!pick) pick = scored.slice().sort((p, q) => q.s / Math.pow(1.1, q.c.length - 1) - p.s / Math.pow(1.1, p.c.length - 1))[0];
+    const groups = before.concat(pick.c, after);
+    const small = before.map(() => true).concat(pick.c.map(() => false), after.map(() => true));
+    buildLines(groups, small);
+    fs = pick.s;
+    const leadMax = Math.min(Math.max(0.4 * fs, 0.035 * H), 0.05 * H);
+    lines.forEach(el => {
+      if (!el.dataset.small) { el.style.fontSize = fs + 'px'; return; }
+      el.style.fontSize = '100px';
+      const w = el.scrollWidth / 100;
+      el.style.fontSize = Math.max(24, Math.min(leadMax, maxW / Math.max(w, 0.01))) + 'px';
+      MG.floorType(el);
+    });
+  };
   const layout = () => {
     let groups = rows;
+    if (HOOK) {
+      hookLayout();
+    } else {
     if (rows.length === 1 && rows[0].length >= 2 && !SER) {
       // A long single line reads small: stack it when that makes the type clearly bigger.
       let best = null;
@@ -171,11 +213,15 @@
       }
       lines.forEach(el => { el.style.fontSize = fs + 'px'; });
     }
+    }
     // Soft two-stage shadow (no outlines): a tight contact shade + a wide falloff.
     // Thin roles (serif/script) get more, so they hold on bright plates.
     const thin = P.role === 'serif' || P.role === 'script', a1 = thin ? 0.42 : 0.28, a2 = thin ? 0.55 : 0.42;
     shadow = `0 ${(fs * 0.015).toFixed(1)}px ${(fs * 0.05).toFixed(1)}px rgba(0,0,0,${a1}), 0 ${(fs * 0.03).toFixed(1)}px ${(fs * 0.16).toFixed(1)}px rgba(0,0,0,${a2})`;
-    lines.forEach(el => { el.style.textShadow = shadow; });
+    lines.forEach(el => {
+      const lf = parseFloat(el.style.fontSize) || fs;
+      el.style.textShadow = lf === fs ? shadow : `0 ${(lf * 0.015).toFixed(1)}px ${(lf * 0.05).toFixed(1)}px rgba(0,0,0,${a1}), 0 ${(lf * 0.03).toFixed(1)}px ${(lf * 0.16).toFixed(1)}px rgba(0,0,0,${a2})`;
+    });
     if (kick) {
       kick.style.color = P.color; kick.style.textShadow = '0 2px 14px rgba(0,0,0,.45)';
       Object.assign(kick.style, { whiteSpace: 'nowrap', maxWidth: '', textWrap: '' });

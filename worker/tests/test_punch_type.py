@@ -137,8 +137,12 @@ def test_a_count_completes_on_its_spoken_number(probe):
     landing = it["start"] + number_reveal.counter_landing(it["params"], it["end"] - it["start"])
     assert onset - number_reveal.MAX_LEAD_S <= landing <= onset
     assert landing == pytest.approx(onset - number_reveal.LEAD_S, abs=0.002)
-    # the roll is 1.58 s over the setup: the reply says so and offers reveal
-    assert "rolls for" in out and "style='reveal'" in out, out
+    # it would have counted for 1.58 s over the setup: the window now opens
+    # ROLL_S before the word, so the count really counts (~0.4 s) into it and
+    # nothing of it shows during the setup (round 5 judging)
+    assert it["start"] == pytest.approx(onset - number_reveal.LEAD_S - number_reveal.ROLL_S, abs=0.002)
+    assert it["params"]["land"] == pytest.approx(number_reveal.ROLL_S, abs=0.002)
+    assert "counts up over the last ~0.4 s" in out and "style='reveal'" not in out, out
     # a count that would have no time to roll starts on the lead-in instead
     out = motion_tools.set_motion_graphic(ctx, "num", start=onset - 0.1)
     it = ctx.item("num")
@@ -164,10 +168,12 @@ def test_a_reveal_cuts_on_with_the_word_and_nothing_shows_during_the_setup(probe
 def test_on_time_numbers_and_numbers_nobody_says_are_left_alone(probe):
     ctx = _Ctx()
     onset = _onset(ctx, "140")
-    out = motion_tools.add_motion_graphic(ctx, "counter", onset - 1.0, onset + 1.5, id="num",
+    # the automatic landing (0.5 s into a 0.9 s item) is on the word, and
+    # its roll is short: the editor's timing stands
+    out = motion_tools.add_motion_graphic(ctx, "counter", onset - 0.5, onset + 0.4, id="num",
                                           params={"value": "140"})
     assert "NUMBER LANDED" not in out
-    assert ctx.item("num")["start"] == pytest.approx(onset - 1.0)
+    assert ctx.item("num")["start"] == pytest.approx(onset - 0.5)
     assert ctx.item("num")["params"]["land"] == 0
     out = motion_tools.add_motion_graphic(ctx, "counter", 30.0, 32.0, id="other",
                                           params={"value": "87%"})

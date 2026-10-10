@@ -40,10 +40,12 @@ clear — a speech template mutes those words and names them (the write NOTE,
 prints must come from its params (that is what the captions are matched
 against).
 
-`reads_phrase` marks a LOCKUP (phrase_build): the engine hands the page
-`params._reading` (MotionItem.reading — per row, per printed word, its spoken
-onset in item seconds or null) and the page reveals every word on its time,
-in reading order. A lockup sets only its rows, in at most 3 sizes: its
+`reads_phrase` marks a LOCKUP (phrase_build, list_build): the engine hands
+the page `params._reading` (MotionItem.reading — per row, per printed word,
+its spoken onset in item seconds or null) and the page reveals every word on
+its time, in reading order (list_build reveals each row WHOLE on its first
+spoken word and keeps it: the accumulating list; caption_carry.list_reveals
+mirrors its timing). A lockup sets only its rows, in at most 3 sizes: its
 `bridges` are always [] now — the phrase's words the rows leave out are
 captioned beside the lockup (every heard word reaches the screen once),
 never set as micro bridge rows inside it (round 4 judging: they grew lockups

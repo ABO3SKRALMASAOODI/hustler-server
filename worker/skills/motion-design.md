@@ -53,9 +53,15 @@ sits.
   number, a contrast, an identification, evidence, an image — at most about
   one hero graphic per 6–8 s, under ~50% of the runtime, in at most 3 type
   roles and one accent. Never re-typeset the words being heard as a lockup
-  or typewriter, and never set a spoken list as rows of text (show the
-  items, or one big word per item). The hook never shows a word a later
-  graphic slams (short-form-direction, EARN ITS PLACE).
+  or typewriter. A spoken list shows its items as images first; as type it
+  is ONE accumulating `list_build` of the noun phrases said, never a run of
+  slams replacing each other or a stack of small rows. The hook never shows
+  a word a later graphic slams (short-form-direction, EARN ITS PLACE).
+- **Cover the argument.** The budget has a second half: every thesis line,
+  spoken list or triad, named product or place and number gets a beat that
+  ADDS information (a contrast, an accumulating list, an identification, a
+  number, evidence, an image), with no more than ~6–8 s between hero beats
+  in the body. A zoom or a sound is not a beat.
 - **Restraint is a deliberate passage, not the default.** Holding a
   vulnerable admission on the face with only captions is a choice you make
   for that moment — and the surrounding passages still carry motion.
@@ -90,7 +96,8 @@ for depth titles, `add_text` with keyframed motion for hero words,
 sound grammar.
 
 CHOOSING A TEMPLATE — confirm names and params with `list_motion_templates()`:
-- Opening and thesis: `hook_title` for the 1–3 line hook readable by 1.5 s;
+- Opening and thesis: `word_slam` with `tier='hook'` (below) or
+  `hook_title` for the 1–3 line hook readable by 1.5 s;
   `word_slam` for one hero word on its spoken onset (the most common hero
   moment); `phrase_build` for a short lockup assembled word by word on
   onsets (rows quote the transcript; the engine lands each spoken word on
@@ -98,7 +105,14 @@ CHOOSING A TEMPLATE — confirm names and params with `list_motion_templates()`:
   the reply says SIZES; the words the rows leave out stay with the
   captions); `glow_title` for a luminous keyword on dark or night footage.
 - Type tiers (`word_slam` `tier`, optional — only where the moment earns
-  it): `payoff` is the short's closing lockup, the number and its noun
+  it): `hook` is the opening title as a HEADLINE (start it by 1.5 s): the
+  ' / ' line(s) holding the *starred* words are the main line, broken onto
+  up to 3 lines so its caps reach ~7% of the frame height, the other lines a
+  small lead-in above it ("They promised us / *flying cars*…"), the kicker
+  naming the speaker above that; it OWNS ITS ZONE — the captions wait until
+  it exits (the reply says HOOK; mute_captions=false keeps them running
+  beside it), so the first seconds have one reading task. `payoff` is the
+  short's closing lockup, the number and its noun
   locked up together in the accent (`'*140* / characters'`, justified) —
   make it the largest lockup of the short (the reply NOTEs a taller one);
   `hero` is ONE giant word per short (a line up to 30% of the frame height
@@ -151,17 +165,30 @@ CHOOSING A TEMPLATE — confirm names and params with `list_motion_templates()`:
   little tall: only a clear spill is named there, and a preview measures it.
 - Structure: `chapter_title` at a real section turn ("The problem", "Step
   two"); `timeline_steps` for a spoken sequence of dates or steps;
-  `checklist` for a spoken list ticking on item by item; `versus_split` for
+  `list_build` for a spoken list or triad as type: the items (the noun
+  phrases said, 1–3 words: "SUPERSONIC AVIATION", never a lone
+  "SUPERSONIC") stack and persist, each landing whole on its spoken onset
+  (the engine times the rows from the transcript), the newest in the
+  accent; `lead` carries a triad's repeated opener ("Let's get") or what
+  the list is; end it on the next beat so the block clears there; `height`
+  fits it into a band (0.16 above a card). Real images per item come first
+  (`research_broll` with one moment per item at its onset, 0.3–0.6 s each);
+  `checklist` for steps or rules achieved (a tick means done; myths and
+  broken promises take `mark='cross'`); `versus_split` for
   a genuine A-versus-B contrast (`vs='serif'` sets an italic-serif "vs" as
   type instead of the disc badge — the editorial choice; keep the two values
   short, they share one size and one line count); `quote_card` for a faithful quotation held
   long enough to read.
 - Numbers: `counter` when a figure is spoken. The number completes ON the
   word: the write sets its `land` 20 ms before the spoken number's onset
-  (never earlier) and says so. A count starts on the lead-in (~0.45 s before
-  the word) so the roll is short, never across the setup; a punchline number,
-  or one that is not a growing quantity ('140 characters'), uses
-  `style='reveal'` — no count, the whole number hard-cuts on at the word; a
+  (never earlier) and says so. It REALLY COUNTS — 0 → value over ~0.4 s
+  (`roll`), an expo ease-out — and enters with its roll: the write opens the
+  window ~0.45 s before the word, so nothing of it shows across the setup.
+  A spoken range is shown as said: "30, 40 fonts" is value '30–40', the
+  first figure landing on its word (`land_first`, set by the write) and the
+  second counting on to its own — never one end of it while the caption
+  reads the other. `style='reveal'` (no count, a hard cut on the word)
+  stays for a number that must not move before it lands; a
   word_slam whose hero is a figure ('32%', not a name like 'GPT-4') is moved so it lands on the word too. A rapid run of spoken stats as one `word_slam` each with
   `fit='justify'` and the figure over its label (`'*32%* / fewer errors'`,
   pop entrance on the figure's onset) — back-to-back slams of one style are
@@ -424,6 +451,9 @@ the engine scales it to the output. Runtime summary:
 - A graphic that only restates the caption (a typewriter of the words just
   heard, a stack of the spoken list), the hook's hero word slammed again,
   a payoff number without its noun.
+- A dead stretch over the thesis or a triad; a spoken list as five slams
+  replacing each other in one slot, or an item without its noun; a counter
+  that hard-cuts on fully formed; hook caps no bigger than the captions.
 - Two leaders at once: a hook title, a word slam and a caption page all
   animating in the same half-second.
 - Hard-coded params from memory instead of the listing, producing rejected

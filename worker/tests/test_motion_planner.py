@@ -99,7 +99,7 @@ def test_tool_formats_never_writes_and_offers_camera_and_sound_as_options():
     calls = []
     ctx = _ctx(_words(TEXT), EDL, calls)
     out = motion_planner.suggest_motion_beats(ctx)
-    assert "hook_title" in out and not calls
+    assert 'word_slam [hook] params={"tier": "hook"}' in out and not calls
     assert "add_zoom" not in out and "sound:" not in out
     assert "Zooms and sound effects are optional, never rules" in out
     assert "camera=true" in out and "sounds=true" in out

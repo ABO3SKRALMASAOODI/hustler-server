@@ -8,7 +8,7 @@ Pinned here, one block per rule:
      the runtime under graphics, more than 3 type roles, a second accent,
      a graphic that only re-typesets the words being heard, a spoken list set
      as a text stack.
-  3. PAYOFF: under 0.6 s of air after the last word (or a dead tail), a
+  3. PAYOFF: under 0.8 s of air after the last word (or a dead tail), a
      closing reaction under 1 s, a payoff number without its noun.
   4. IDENTIFY: 'Lisa:' alone on a line; a broadcast lower third beside a
      hook or headline.
@@ -359,7 +359,7 @@ def test_the_budget_names_the_restating_graphics_as_first_cuts():
 def test_a_punchline_without_air_before_the_end_card_is_flagged():
     words = _words(FILLER)                      # last word ends at 30.18
     note = _note(_edl(dur=30.5), "payoff_hold", {"words": words})
-    assert note["evidence"]["hold_s"] == 0.32 and "0.6-1.5 s" in note["fix"]
+    assert note["evidence"]["hold_s"] == 0.32 and "0.8-1.5 s" in note["fix"]
     assert "payoff_hold" not in _codes(_edl(dur=31.0), {"words": words})
     tail = _note(_edl(dur=34.0), "payoff_hold", {"words": words})
     assert "dead tail" in tail["message"]
@@ -767,11 +767,17 @@ def test_worker_skills_plugin_and_core_prompt_carry_the_same_rules():
         assert "strongest line or statistic" in text
         assert "generic question" in text
         assert "earn" in text and "its place" in text
-        assert "0.6-1.5 s" in text
+        assert "0.8-1.5 s" in text and "0.6-1.5 s" not in text
+        # beat coverage, the budget's other half (round 5 judging)
+        assert "list_build" in text and "6-8 s" in text
     for text in (sfd, looks):
-        assert "never restyle the transcript as a list" in text or \
+        assert "showable moments" in text or \
             "a spoken list gets semantic visual inserts" in text
-        assert "one big word per item" in text
+        # a spoken list as type is ONE accumulating list_build of its noun
+        # phrases, never a run of slams replacing each other
+        assert "accumulating" in text and "one big word per item" not in text.replace(
+            "never one big word per item", "")
+        assert "underwater cities" in text and "tier='hook'" in text
         assert "at most 3 type roles" in text and "one accent" in text
         assert "50% of the runtime" in text
         assert "apple lisa, 1983" in text
@@ -782,7 +788,8 @@ def test_worker_skills_plugin_and_core_prompt_carry_the_same_rules():
     mcp = _read(_ROOT, "backend", "routes", "mcp.py")
     assert "strongest line or statistic" in mcp and "generic question" in mcp
     assert "a word a later graphic slams" in mcp
-    assert "holds 0.6-1.5 s after the last word" in mcp
+    assert "holds 0.8-1.5 s after the last word" in mcp
+    assert "tier='hook'" in mcp and "list_build" in mcp
     assert "hold the payoff 1.0-1.5 s" not in mcp
     assert "earn its place" in worker["review"]
     assert "earn its place" in plugin["references/review.md"]

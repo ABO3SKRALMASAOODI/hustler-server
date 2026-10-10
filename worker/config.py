@@ -2090,7 +2090,12 @@ MASTER_VERSION = 1
 # typewriter is a band-wide hero (>= 5% of the frame height on a band-wide
 # plate), marker_text reveals a spoken line on its onsets, and word_slam
 # has the payoff and hero tiers.
-LEGIBILITY_VERSION = 3
+# v4 (round 7 beats track, Oct 2026): the counter really counts — with a
+# spoken landing it rolls only its last ~0.4 s into the word and enters with
+# that roll (a stored count no longer climbs across its setup), and shows a
+# spoken range ('30–40') with each figure on its own word; word_slam has the
+# hook tier and the list_build template exists.
+LEGIBILITY_VERSION = 4
 
 # Word-level caption muting (worker/caption_carry.py): a motion graphic with
 # mute_captions unset hides only the spoken words it shows, the rest stay

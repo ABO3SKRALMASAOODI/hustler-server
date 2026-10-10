@@ -1179,7 +1179,17 @@ def plan(edl, index, tl, words, canvas=None):
     bounds = _segment_bounds(edl, tl, items, cards)
     snap = caption_place.snap_s(((index or {}).get("video") or {}).get("fps") or 30.0)
     import bisect
-    seg_of = [max(0, bisect.bisect_right(bounds, float(w["t0"]) + snap) - 1) for w in words]
+    # a word that starts under the opening hook-tier title but is mostly
+    # said after it (the title owns its zone; captions.hook_owns_zone) is
+    # placed for the layout after it and appears as it exits
+    import captions as caplib
+    hooks = caplib.hook_zone_spans(edl)
+
+    def _after_hook(w):
+        t0 = float(w["t0"])
+        return next((b for a, b in hooks if a - 1e-6 <= t0 < b), None)
+    seg_of = [max(0, bisect.bisect_right(bounds, (_after_hook(w) or float(w["t0"])) + snap) - 1)
+              for w in words]
     col = caption_place.column(W, H, COLUMN)
     min_h = caption_place.min_band(edl, W, H, MIN_BAND_H)
     nseg = max(0, len(bounds) - 1)
@@ -1317,6 +1327,10 @@ def plan(edl, index, tl, words, canvas=None):
                 float(w["t0"]) < bounds[k] and k > 0:
             p.shown_at[i] = bounds[k]
         prev = (i, place)
+    for i, w in enumerate(words):
+        b = None if i in p.hidden else _after_hook(w)
+        if b is not None:
+            p.shown_at[i] = max(p.shown_at.get(i, 0.0), b)
     p.clamp_spans = _merge(p.clamp_spans)
     return p
 
@@ -1643,7 +1657,10 @@ def lockup_reveals(item, fps=30.0):
     spoken word's onset, a row nobody says on its ``at`` (blank: right after
     the previous row), never before a word above it; a 'rise' entrance
     starts LOCKUP_RISE_LEAD_S early. The first value is when the lockup
-    first draws a word. [] for any other template."""
+    first draws a word. A list_build reveals each item WHOLE (list_reveals).
+    [] for any other template."""
+    if isinstance(item, dict) and item.get("template") == "list_build":
+        return list_reveals(item)
     if not isinstance(item, dict) or item.get("template") != "phrase_build":
         return []
     params = item.get("params") or {}
@@ -1717,6 +1734,50 @@ def lockup_reveals(item, fps=30.0):
             clamped.append(prev_last)
         out.append(round(clamped[0], 4))
         prev_end = clamped[-1]
+    return out
+
+
+# How motion/templates/list_build.html times its items, mirrored: an item
+# lands WHOLE on its first spoken word (a 'rise' LOCKUP_RISE_LEAD_S early),
+# an unspoken one on its 'at' or an even cadence after the item above.
+LIST_MAX_ITEMS = 6
+LIST_EVERY_S = (0.3, 0.6)
+
+
+def list_reveals(item):
+    """Composition seconds at which a list_build reveals each of its items,
+    exactly as the page times them from its ``reading``."""
+    params = item.get("params") or {}
+    rd = item.get("reading") if isinstance(item.get("reading"), dict) else {}
+    rd_rows = rd.get("rows") if isinstance(rd.get("rows"), list) else []
+    lead = LOCKUP_RISE_LEAD_S if params.get("entrance") == "rise" else 0.0
+    try:
+        dur = float(item.get("end")) - float(item.get("start"))
+    except (TypeError, ValueError):
+        dur = 3.5
+    shown = display_rows(item)
+    items = []
+    for i, row in enumerate((params.get("rows") or [])[:LIST_MAX_ITEMS]):
+        if not (shown[i] if i < len(shown) else []):
+            continue
+        k = rd_rows[i] if i < len(rd_rows) and isinstance(rd_rows[i], list) else []
+        known = [v for v in (_js_float(x, None) if x is not None else None for x in k)
+                 if v is not None]
+        at = row.get("at") if isinstance(row, dict) else None
+        items.append((max(0.0, min(known) - lead) if known else None,
+                      "" if at is None else str(at).strip()))
+    if not items:
+        return []
+    every = min(LIST_EVERY_S[1], max(LIST_EVERY_S[0], (dur - 1.0) / max(1, len(items) - 1)))
+    out, prev = [], None
+    for known, at in items:
+        t = known if known is not None else (max(0.0, _js_float(at, 0.0)) if at != ""
+                                             else (0.0 if prev is None else prev + every))
+        if prev is not None:
+            t = max(t, prev)
+        t = min(t, max(0.0, dur - 0.1))
+        out.append(round(t, 4))
+        prev = t
     return out
 
 
@@ -1821,6 +1882,9 @@ def sound_off_gaps(edl, index, tl, min_gap=SOUND_OFF_GAP_S):
     room = {key(after_mutes[i]): (owner, why) for i, (owner, why) in p.hidden.items()
             if why in ("room", "unmeasured")}
     screen = _on_screen(edl, tl)
+    # the hook-tier title owns its zone by design (captions.hook_owns_zone):
+    # what is said under it is the hook's moment, not a lost caption
+    hooks = caplib.hook_zone_spans(edl)
     toks = _token_rows([w.get("w") for w in spoken])
     state = []                         # covered / neutral / uncovered per word
     for w, ts in zip(spoken, toks):
@@ -1828,7 +1892,8 @@ def sound_off_gaps(edl, index, tl, min_gap=SOUND_OFF_GAP_S):
         mid = _mid(w)
         on = [lab for s, e, tset, lab in screen if s <= mid <= e and tset & set(ts)]
         content = any(is_content(t) for t in ts)
-        if k in shown or k in carried or (on and content):
+        if k in shown or k in carried or (on and content) or \
+                any(s <= mid <= e for s, e in hooks):
             state.append("covered")
         elif not content:
             state.append("neutral")

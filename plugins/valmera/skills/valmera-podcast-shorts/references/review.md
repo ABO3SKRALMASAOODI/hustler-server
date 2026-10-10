@@ -34,7 +34,7 @@ at 1x with the sound on, then answer:
    the first 1.5 s), and would a stranger keep watching?
 2. **Payoff:** is the payoff the largest accented lockup (number and noun
    together; a sound or a camera move only where it earns one; the owner's
-   song's button when music is on), held 0.6-1.5 s after the last word,
+   song's button when music is on), held 0.8-1.5 s after the last word,
    and does it resolve the viewer question?
 3. **Targets:** does it meet its Look's targets: change rate, hero moments,
    picture area; sound only from the approved library, zero by default and
@@ -56,7 +56,7 @@ at 1x with the sound on, then answer:
    products identified), no zoom or sound without a reason you can name (unearned
    zooms and sounds look childish — zero of either is fine), no white type
    on white clothing, at most one impact sound
-   (on the payoff), 0.6-1.5 s after the last word before the end card,
+   (on the payoff), 0.8-1.5 s after the last word before the end card,
    nothing over the face or the brand corner, the corner mark and native end
    card untouched, no flash frames, pops, exposed edges or clipped words,
    no face at the frame's edge, a clean PICTURE CHECK on the complete
