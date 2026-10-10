@@ -31,9 +31,11 @@ WHAT A ROW SAYS
 * flags: a jump cut inside the hook's first HOOK_S seconds, and a framing
   step under STUTTER_STEP (it reads as a stutter, not a cut);
 * options: leave it; move a graphic change that sits within NEAR_S onto the
-  cut; restore a short removed pause (one continuous take) or re-cut the
-  join; and, optional and rare, a hard step of at least STEP_OPTION on that
-  one cut (conceal_jump_cuts at=[t]).
+  cut — only where the write's own cut snap would keep it there (_move_ok:
+  an entrance stays on its word, a number on its spoken number, an exit
+  after a word-timed item's last reveal); restore a short removed pause
+  (one continuous take) or re-cut the join; and, optional and rare, a hard
+  step of at least STEP_OPTION on that one cut (conceal_jump_cuts at=[t]).
 
 WHERE AGENTS SEE IT
 
@@ -66,6 +68,16 @@ _NO_STEP = 0.01
 ON_CUT_FRAMES = 1.5
 # A graphic edge this close to a jump cut could move onto it.
 NEAR_S = 0.40
+# ...but the report offers only a move the write keeps (one design with the
+# motion write's cut snap, motion_tools._snap_to_cuts): a graphic's ENTRANCE
+# is cued to its word, so it moves onto a cut at most ENTRANCE_MOVE_S off it
+# (= motion_tools.SNAP_CUT_S; the write already snaps a motion graphic that
+# close) and a number's entrance never leaves its spoken number; an EXIT may
+# move the whole NEAR_S, but never to before a word-timed item's last reveal
+# (+EXIT_AFTER_REVEAL_S) or leave the item under MIN_ITEM_S on screen.
+ENTRANCE_MOVE_S = 0.15
+EXIT_AFTER_REVEAL_S = 0.1
+MIN_ITEM_S = 0.3
 # A removed stretch this short can be restored: one continuous take.
 RESTORE_MAX_S = 0.6
 # Head travel (face widths): taste.JUMP_CUT_JAR_SHIFT is a visible jump;
@@ -126,6 +138,56 @@ def _graphic_edges(edl, out_dur):
             add("card", cd, _num(cd.get("start"), None), _num(cd.get("end"), None),
                 f"picture card '{cd.get('id')}'")
     return rows
+
+
+def _number_timed(item):
+    """A number graphic whose entrance lands on its spoken number (a counter,
+    a word_slam whose hero is a figure) — motion_tools._number_timed."""
+    tpl = item.get("template")
+    if tpl == "counter":
+        return True
+    if tpl == "word_slam":
+        try:
+            import number_reveal
+            return bool(number_reveal._slam_figure((item.get("params") or {}).get("text")))
+        except Exception:  # noqa: BLE001
+            return False
+    return False
+
+
+def _move_ok(item, kind, how, t, c):
+    """Would moving this graphic edge from program second ``t`` onto the cut
+    at ``c`` keep the write's own timing rules (motion_tools._snap_to_cuts)?
+    (ok, why-not). An entrance moves at most ENTRANCE_MOVE_S off its word
+    and never off a spoken number; an exit never lands before a word-timed
+    item's last reveal (+EXIT_AFTER_REVEAL_S); either leaves the item at
+    least MIN_ITEM_S on screen. An item the report cannot find moves freely."""
+    d = c - t
+    if not isinstance(item, dict):
+        return True, ""
+    s, e = _num(item.get("start"), None), _num(item.get("end"), None)
+    if how == "enters":
+        if kind == "motion" and _number_timed(item):
+            return False, "a number enters on its spoken number"
+        if abs(d) > ENTRANCE_MOVE_S + 1e-6:
+            return False, (f"its entrance is cued to its word; {abs(d):.2f}s off it "
+                           f"is more than {ENTRANCE_MOVE_S:g}s")
+        if e is not None and e - c < MIN_ITEM_S:
+            return False, "it would be too short to read"
+        return True, ""
+    if s is not None and c - s < MIN_ITEM_S:
+        return False, "it would be too short to read"
+    if kind == "motion" and d < 0:
+        try:
+            import caption_carry
+            r = caption_carry.lockup_reveals(item) or caption_carry.onset_reveals(item)
+        except Exception:  # noqa: BLE001
+            r = []
+        if r and s is not None:
+            last = s - _num(item.get("phase_s"), 0.0) + max(r)
+            if c < last + EXIT_AFTER_REVEAL_S:
+                return False, "it would leave before its last word lands"
+    return True, ""
 
 
 def caption_edges(edl, index, tl, canvas=None):
@@ -290,6 +352,11 @@ def report(edl, index, tl=None, fps=None, measure=None, pop=None,
             a = _num(ov.get("start"))
             covers.append((a, a + _num(ov.get("duration_s")), ov.get("id")))
     edges = _graphic_edges(edl, out_dur)
+    by_id = {}
+    for key, kind in (("motion", "motion"), ("texts", "text"), ("vectors", "vector")):
+        for it in edl.get(key) or []:
+            if isinstance(it, dict):
+                by_id[(kind, str(it.get("id") or "?"))] = it
     cap_edges = caption_edges(edl, index, tl, canvas) if captions else None
     aim = _aim_fn(edl)
     # junction k sits between render blocks k and k+1 (inserts are blocks)
@@ -368,8 +435,10 @@ def report(edl, index, tl=None, fps=None, measure=None, pop=None,
             if abs(d) <= on_cut + 1e-6:
                 row["covers"].append(f"{label} {how}")
             elif abs(d) <= NEAR_S and kind in ("motion", "text", "vector"):
+                ok, why = _move_ok(by_id.get((kind, iid)), kind, how, t, c)
                 row["near"].append({"label": label, "kind": kind, "id": iid,
-                                    "how": how, "at": t, "delta": round(d, 2)})
+                                    "how": how, "at": t, "delta": round(d, 2),
+                                    "movable": ok, "why_not": why})
         if cap_edges and any(abs(t - c) <= on_cut + 1e-6 for t in cap_edges):
             row["softens"].append("a caption block changes on the cut")
         if c < HOOK_S:
@@ -428,7 +497,8 @@ def _options(r):
     opts.append("leave it (a bare jump cut is fine)")
     if r["visibility"] == "visible":
         opts.append("cover it with B-roll or a cutaway")
-    for nb in sorted(r["near"], key=lambda q: abs(q["delta"])):
+    for nb in sorted((q for q in r["near"] if q.get("movable", True)),
+                     key=lambda q: abs(q["delta"])):
         which = "start" if nb["how"] == "enters" else "end"
         tool = ("set_motion_graphic" if nb["kind"] == "motion" else
                 "its own tool")
@@ -524,7 +594,7 @@ def advisory_line(rep):
     hook = [r for r in rows if "hook" in r["flags"] and not r["covered"]]
     stut = [r for r in rows if "stutter" in r["flags"]]
     bare = [r for r in rows if not r["covered"]]
-    near = [r for r in bare if r["near"]]
+    near = [r for r in bare if any(q.get("movable", True) for q in r["near"])]
     vis = [r for r in bare if r["visibility"] == "visible"]
     parts = []
 
@@ -545,7 +615,8 @@ def advisory_line(rep):
         parts.append(f"{len(vis)} bare jump cut{'s' if len(vis) != 1 else ''} "
                      f"where the speaker visibly jumps: {ts(vis)}")
     for r in near[:2]:
-        nb = min(r["near"], key=lambda q: abs(q["delta"]))
+        nb = min((q for q in r["near"] if q.get("movable", True)),
+                 key=lambda q: abs(q["delta"]))
         side = "before" if nb["delta"] < 0 else "after"
         parts.append(f"{nb['label']} {nb['how']} {abs(nb['delta']):.2f}s {side} "
                      f"the {r['t']:g}s cut — moving that change onto the cut "

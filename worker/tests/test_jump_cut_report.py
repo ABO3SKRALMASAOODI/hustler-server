@@ -106,19 +106,49 @@ def test_a_step_under_ten_percent_is_a_stutter_and_from_ten_it_covers():
 def test_a_graphic_change_on_the_cut_covers_it_and_one_near_it_is_an_option():
     motion = [{"id": "g", "template": "word_slam", "start": 3.48, "end": 5.0,
                "params": {"text": "G"}},
-              {"id": "h", "template": "word_slam", "start": 6.75, "end": 8.0,
+              {"id": "h", "template": "word_slam", "start": 6.62, "end": 8.0,
                "params": {"text": "H"}}]
     edl = dict(_edl(), motion=motion)
     rows = {r["t"]: r for r in _rows(edl)}
     assert rows[3.5]["covered"] and "graphic 'g' (word_slam) enters" in rows[3.5]["covers"]
     assert not rows[6.5]["covered"]
     near = rows[6.5]["near"][0]
-    assert (near["id"], near["how"], near["delta"]) == ("h", "enters", 0.25)
-    assert any(o.startswith("move graphic 'h' (word_slam)'s start from 6.75s onto "
+    assert (near["id"], near["how"], near["delta"], near["movable"]) == \
+        ("h", "enters", 0.12, True)
+    assert any(o.startswith("move graphic 'h' (word_slam)'s start from 6.62s onto "
                             "the cut (set_motion_graphic start=6.50)")
                for o in rows[6.5]["options"])
     line = jcr.advisory_line(jcr.report(edl, _index()))
-    assert "graphic 'h' (word_slam) enters 0.25s after the 6.5s cut" in line
+    assert "graphic 'h' (word_slam) enters 0.12s after the 6.5s cut" in line
+
+
+def test_the_report_offers_only_the_moves_the_write_keeps():
+    # one design with the motion write's cut snap (motion_tools._snap_to_cuts):
+    # an entrance is cued to its word, so the report never offers moving it
+    # further than the write's own snap would; a number's entrance stays on
+    # its spoken number; an exit may move the whole NEAR_S
+    import motion_tools
+    assert jcr.ENTRANCE_MOVE_S == motion_tools.SNAP_CUT_S
+    assert jcr.MIN_ITEM_S == motion_tools.SNAP_MIN_ITEM_S
+    far = [{"id": "h", "template": "word_slam", "start": 6.75, "end": 8.0,
+            "params": {"text": "H"}}]
+    rep = jcr.report(dict(_edl(), motion=far), _index())
+    r = {r["t"]: r for r in rep["rows"]}[6.5]
+    assert r["near"] and r["near"][0]["movable"] is False
+    assert "cued to its word" in r["near"][0]["why_not"]
+    assert not any(o.startswith("move ") for o in r["options"])
+    assert "moving that change onto the cut" not in jcr.advisory_line(rep)
+    num = [{"id": "n", "template": "word_slam", "start": 6.6, "end": 8.0,
+            "params": {"text": "*40%*"}}]
+    r = {r["t"]: r for r in _rows(dict(_edl(), motion=num))}[6.5]
+    assert r["near"][0]["movable"] is False and "spoken number" in r["near"][0]["why_not"]
+    # an exit 0.3 s before a cut may move onto it
+    ex = [{"id": "x", "template": "word_slam", "start": 5.2, "end": 6.2,
+           "params": {"text": "X"}}]
+    r = {r["t"]: r for r in _rows(dict(_edl(), motion=ex))}[6.5]
+    assert r["near"][0]["how"] == "leaves" and r["near"][0]["movable"] is True
+    assert any(o.startswith("move graphic 'x' (word_slam)'s end from 6.20s onto the cut")
+               for o in r["options"])
     # a picture card entering or leaving on the cut is a layout change
     card = {"id": "c", "start": 3.5, "end": 9.5, "box": [0.06, 0.3, 0.94, 0.68]}
     rows = {r["t"]: r for r in _rows(_edl(effects={"picture_cards": [card]}))}

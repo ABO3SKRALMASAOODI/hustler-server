@@ -88,7 +88,11 @@ punches.
   changing there only softens it), the flags (a cut inside the hook's first
   1.5 s; a step under ~10%, which stutters) and the options, most
   restrained first: leave it; move a graphic change that sits within 0.4 s
-  onto the cut (one event instead of two); restore a short removed pause
+  onto the cut (one event instead of two — only a move the write keeps: an
+  exit anywhere in that reach once its last word has landed, an entrance
+  at most 0.15 s, since it is cued to its word and a motion write already
+  snaps that close; a number's entrance never leaves its spoken number);
+  restore a short removed pause
   (one continuous take) or re-cut the join on a still head; and — optional
   and rare — a hard ≥12% step on that one cut. The render's taste notes
   carry the flagged, near-miss and visibly jumping cuts with those options,
