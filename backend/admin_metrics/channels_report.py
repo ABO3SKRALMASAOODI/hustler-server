@@ -227,6 +227,11 @@ def acquisition_report(cur, period, model="first"):
         if not tracked_people:
             for d in details.values():
                 d["people"] = None
+        # Each detail's rate (Google, ChatGPT, a campaign) covers the same
+        # days as its channel's rate, so the two can be compared.
+        for dkey, d in details.items():
+            d["signup_rate"] = _detail_rate(key, dkey, rate_signups,
+                                            rate_people)
         signups_n = len(in_channel)
         rows.append({
             "channel": key, "label": label,
@@ -284,6 +289,24 @@ def _channel_rate(key, signups, people):
     if not p:
         return None
     n = sum(1 for s in signups if s["touch"]["channel"] == key)
+    return defs.pct(n, p)
+
+
+def _detail_key(touch):
+    return touch.get("detail") or touch.get("reason") or "unknown"
+
+
+def _detail_rate(key, detail, signups, people):
+    """A detail's signup rate over the same window as _channel_rate: people
+    counted from 3 Oct over signups with a source from 7 Oct would understate
+    it (Google 12.7% under Search 25.5% on 11 Oct)."""
+    if people is None or key == "not_recorded":
+        return None
+    p = people.get(key, {}).get("details", {}).get(detail, 0)
+    if not p:
+        return None
+    n = sum(1 for s in signups if s["touch"]["channel"] == key
+            and _detail_key(s["touch"]) == detail)
     return defs.pct(n, p)
 
 
