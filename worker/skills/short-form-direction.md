@@ -242,9 +242,9 @@ graphic that does not serve the moment):
 - NEVER RESTYLE THE TRANSCRIPT AS A LIST: a spoken enumeration (rockets,
   supersonic aviation, underwater cities, new medicines) gets semantic
   visual inserts — a real photo or clip per item, 0.3–0.6 s each, via
-  `search_stock` or `research_broll` placed with `image_card`,
-  `photo_stack` or `add_overlay` — or one big word per item on its onset,
-  never a stack of small rows.
+  `search_stock` or `research_broll` when they are listed, placed with
+  `image_card`, `photo_stack` or `add_overlay` — or one big word per item
+  on its onset (a run of word slams), never a stack of small rows.
 - IDENTIFY PROPER NOUNS AND PRODUCTS: label what a name is ("Apple Lisa,
   1983"), and show it when an image exists. Never set a product name with a
   colon ("Lisa:" reads as a dialogue label or a person).

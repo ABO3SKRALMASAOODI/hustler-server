@@ -669,9 +669,9 @@ def _restate_notes(ms, prog, hook_ids, payoff):
              f"{items}. It adds nothing the captions don't, at the most "
              "showable moment of the clip."),
             ("Show the items instead: one semantic visual insert per item "
-             "(a real photo or clip via search_stock or research_broll, placed "
-             "with image_card, photo_stack or add_overlay, about 0.3-0.6 s "
-             "each), or one big word per item on its onset."),
+             "(a real photo or clip via search_stock or research_broll where "
+             "listed, placed with image_card, photo_stack or add_overlay, "
+             "about 0.3-0.6 s each), or one big word per item on its onset."),
             {"ids": [m["id"] for m in lists]}))
     if restated:
         first = restated[0]
