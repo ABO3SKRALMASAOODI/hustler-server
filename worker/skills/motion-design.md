@@ -113,8 +113,8 @@ CHOOSING A TEMPLATE — confirm names and params with `list_motion_templates()`:
   set_typography_scene or set_editorial_graphic does not move it, so build
   every lockup that shares the band as a motion template. A graphic set in
   that band (with or without a headline) is NOTEd (band) when it spills out
-  of it — onto the top of the card (a phrase_build grows by its small bridge
-  lines) or up into the feed header — narrow it or move its y. Without a
+  of it — onto the top of the card or up into the feed header — narrow it or
+  move its y. Without a
   browser at write time the box is the template's estimate, which runs a
   little tall: only a clear spill is named there, and a preview measures it.
 - Structure: `chapter_title` at a real section turn ("The problem", "Step
@@ -185,27 +185,23 @@ LAYERING AND CAPTIONS:
   thirds, textures, background shapes); `behind_subject` composites the
   graphic behind the person's matte — the giant-word-behind-the-head look —
   and needs a person in frame and no cut inside the window.
-- ONE READING PATH: captions and a graphic never say the same words twice,
-  and never show two different texts of one sentence at once.
-  Leave `mute_captions` unset (the default): the captions drop the spoken words
-  the graphic shows, and the graphic owns the phrase it shows from its first
-  shown word until it leaves — the captions yield there. A `phrase_build`
-  sets that phrase's other words in small type between its rows on their
-  onsets; any other graphic leaves them to the sound, so end a word slam or
-  counter where its words end (the reply NOTEs the words and the time — before
-  the next word's midpoint; when that would leave it up under 0.8 s it offers
-  carrying the words instead, and a slam that lands straight into its sentence
-  may keep its hold: the words are still heard).
-  Words said before its first shown word, and other sentences, stay
-  captioned — moved to a band clear of the graphic's drawn box (and the
-  face) while it is up. Design for it: keep hero graphics OFF the caption
-  band (top band, beside or above the head, behind the subject). A word slam
-  or phrase build parked on the caption band with the face above leaves no
-  clear band: other sentences' words are muted and the reply NOTEs them —
-  move it. Set `mute_captions` explicitly only to override: true hides every
-  caption for the whole window (a graphic that replaces the entire spoken
-  line); false keeps all captions running beside it (a number or *starred*
-  word it shows is still not repeated).
+- EVERY HEARD WORD REACHES THE SCREEN ONCE: captions and a graphic never
+  say the same words twice, and no heard word is left to the sound.
+  Leave `mute_captions` unset (the default): the captions drop the spoken
+  words the graphic shows and keep every other word — the rest of the phrase
+  it shows included — beside it, in a band clear of its drawn box, the face
+  and any card layout. A `phrase_build` no longer sets the phrase's other
+  words in small type between its rows (the judged 6-line piles): keep its
+  rows to the words that matter (2 tiers for a payoff) and the captions carry
+  the rest; the reply names them and, where it does not make a flash under
+  0.8 s, the end that keeps the graphic to its own words. Design for it: keep
+  hero graphics OFF the caption band (top band, beside or above the head,
+  behind the subject). A word slam or phrase build parked on the caption
+  band with the face above leaves no clear band: the words it does not show
+  are muted and the reply NOTEs them — carry them on it (a kicker) or move
+  it. `mute_captions=true` no longer hides a whole window (it acts as unset);
+  false keeps all captions running beside it (a number or *starred* word it
+  shows is still not repeated).
 - Lockup rows reveal in reading order: a spoken row's words land on their
   spoken onsets (readable on the word, never before it; a `rise` word
   starts its short fade 2 frames ahead), a row nobody says on its `at` with its
@@ -242,11 +238,12 @@ LEGIBILITY:
   under the chin, beside the face, the header above a card — instead of
   stacking every graphic in the chest band.
 - While a graphic is on screen, the captions for the words it does not show
-  step into the nearest band clear of it AND the face — the zones the
-  keep-out measured — (`Captions for the words it does not show move to
-  y≈…` in the result). When no band is left (`NOTE (captions)`), move it off
-  the caption band or make it smaller; never reach for mute_captions=true
-  to hide the clash.
+  (every heard word reaches the screen once — a lockup's left-out words
+  included; no micro bridge rows) step into the best band clear of it, the
+  face and any card layout (`Captions for the words it does not show move
+  to y≈…` in the result). When no band is left (`NOTE (captions)`), carry
+  those words on it (a kicker) or move it off the caption band; mute_captions
+  =true no longer hides the clash.
 - Contrast from a soft shadow (0 2–6 px 12–30 px at 35–60% black), a
   frosted or dark plate, or the grade — not thick outlines or yellow boxes
   by default. Check bright and dark plates in the render.

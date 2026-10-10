@@ -8,8 +8,10 @@ What is pinned here:
   2. Those captions move to a band clear of the graphic's stored footprint
      box and the face; with no clear band a speech-replacing template mutes them (and
      the write reply names the words), any other template leaves them be.
-  3. mute_captions=true is the old whole-window mute; false keeps captions
-     running but never repeats a number/hero word the graphic shows.
+  3. mute_captions=true no longer mutes a whole window (round 6: every
+     heard word reaches the screen once): it hides the words the graphic
+     shows like unset, and mutes the rest only where no band is clear of it;
+     false keeps captions running but never repeats a number/hero word.
   4. Captions never hold into, or start just before the exit of, a graphic
      that occupies their band.
   5. A spoken span over 0.6 s with no caption and no graphic showing it is a
@@ -121,13 +123,14 @@ def test_spoken_numbers_split_over_words_match_the_numeral_on_screen():
              ("one", 0.8, 0.95), ("hundred", 0.95, 1.2), ("forty", 1.2, 1.5),
              ("characters.", 1.5, 2.0)]
     edl = _edl([_counter(0.7, 2.2, "140")], words=words)
-    # the counter shows "one hundred forty"; "characters" is said while it
-    # is up in the phrase it shows, so the captions yield it (one reading
-    # path: the write NOTE says carry it on the label or end the counter)
-    assert _shown(edl, _index(words)) == ["all", "we", "got", "was"]
+    # the counter shows "one hundred forty"; "characters", said while it is
+    # up but not on it, stays captioned (every heard word reaches the screen)
+    assert _shown(edl, _index(words)) == ["all", "we", "got", "was", "characters."]
+    assert [[w["w"] for w in r] for r in _plan(edl, _index(words)).report["num"]["captioned"]] \
+        == [["characters."]]
     edl = _edl([_counter(0.7, 2.2, "140", label="characters")], words=words)
     assert _shown(edl, _index(words)) == ["all", "we", "got", "was"]
-    assert not _plan(edl, _index(words)).report["num"]["yielded"]
+    assert not _plan(edl, _index(words)).report["num"]["captioned"]
 
 
 def test_a_paraphrase_sharing_one_word_does_not_punch_a_hole():
@@ -154,17 +157,15 @@ def test_list_rows_take_their_own_words_and_the_connectors_between_them():
     m = {"id": "list", "template": "phrase_build", "start": 0.0, "end": 5.0,
          "params": {"rows": rows}, "footprint": _fp([0.1, 0.06, 0.9, 0.3])}
     edl = _edl([m], words=words)
-    # one reading path: the list owns its enumeration; the item its rows
-    # leave out is set in the lockup in small type (its list joint "and"
-    # goes with the rows), never as a second text under it
-    assert _shown(edl, _index(words)) == []
+    # the list takes its rows and the joints between them; the item its rows
+    # leave out stays CAPTIONED (the lockup no longer sets it in micro type)
+    assert _shown(edl, _index(words)) == ["aviation", "and", "the", "green", "revolution", "and"]
     rep = _plan(edl, _index(words)).report["list"]
-    assert [caption_carry._said(r) for r in rep["joined"]] == \
-        ["aviation and the green revolution"]
+    assert [caption_carry._said(r) for r in rep["captioned"]] == \
+        ["aviation and the green revolution and"]
+    assert rep["joined"] == [] and rep["yielded"] == []
     rd = caption_carry.readings(edl, _index(words), Timeline(edl["keep"]))["list"]
-    assert rd["bridges"] == [{"after": 1, "words": [
-        {"t": "aviation", "s": 1.2}, {"t": "and", "s": 1.7}, {"t": "the", "s": 1.8, "g": 1},
-        {"t": "green", "s": 1.9}, {"t": "revolution", "s": 2.2}]}]
+    assert rd["bridges"] == []
     # rows land on their spoken onsets; "jets" is never said
     assert rd["rows"] == [[0.2], [0.7, None], [2.9, 3.4], [3.9, 4.1]]
 
@@ -177,9 +178,10 @@ def test_words_it_does_not_show_stay_captioned_in_place_when_their_band_is_clear
     p = _plan(edl, ix)
     shown = [w["w"] for w in p.caption_words()]
     assert "flying" not in shown and "cars" not in shown
-    assert {"they", "promised", "we", "got"} <= set(shown)
-    # "and all", said while it still holds in the phrase it shows, yield
-    assert [w["w"] for w in p.report["slam"]["yielded"]] == ["and", "all"]
+    assert {"they", "promised", "we", "got", "and", "all"} <= set(shown)
+    # "and all", said while it is up in the phrase it shows, stay captioned
+    assert [caption_carry._said(r) for r in p.report["slam"]["captioned"]] == ["and all"]
+    assert not p.report["slam"]["yielded"]
     assert not p.placed and not p.clamp_spans          # nothing collides with y≈0.74
     cues = motion_captions.cues(edl, ix, Timeline(edl["keep"]))
     assert all("z" not in c for c in cues)
@@ -249,10 +251,14 @@ def test_an_unmeasured_box_keeps_the_old_behaviour():
 
 # ── 3. explicit intent ───────────────────────────────────────────────────
 
-def test_true_is_the_whole_window_and_false_keeps_captions_but_never_repeats_a_number():
+def test_true_hides_what_it_shows_and_false_keeps_captions_but_never_repeats_a_number():
+    # round 6: no graphic mutes a whole window; true hides the words it
+    # shows, and the rest stay captioned (clear of it)
     whole = _edl([_counter(1.9, 3.95, "140", label="characters", mute_captions=True)])
-    assert captions.effective_caption_mutes(whole) == [[1.9, 3.95]]
-    assert not {"got", "was", "140", "characters."} & set(_shown(whole, _index()))
+    assert captions.effective_caption_mutes(whole) == []
+    shown = _shown(whole, _index())
+    assert not {"140", "characters."} & set(shown)
+    assert {"got", "was"} <= set(shown)
     keep = _edl([_counter(1.9, 3.95, "140", label="characters", mute_captions=False)])
     assert captions.effective_caption_mutes(keep) == []
     shown = _shown(keep, _index())
@@ -269,8 +275,8 @@ def test_a_kicker_said_just_before_its_slam_is_handed_to_it():
              ("to", 1.9, 2.0), ("take", 2.0, 2.3)]
     edl = _edl([_slam(1.1, 2.4, "*enough*", kicker="it's not quite been")], words=words)
     # the words within CARRY_LEAD_S go with the slam; earlier ones stay read
-    # (and "to take", said while the slam holds its phrase, yield to it)
-    assert _shown(edl, _index(words)) == ["but", "it's"]
+    # (and "to take", said while the slam is up, stay captioned beside it)
+    assert _shown(edl, _index(words)) == ["but", "it's", "to", "take"]
     # ...only when the slam's own word carries straight on from them
     edl = _edl([_slam(1.1, 2.4, "*plenty*", kicker="it's not quite been")], words=words)
     assert "not" in _shown(edl, _index(words))
@@ -278,38 +284,44 @@ def test_a_kicker_said_just_before_its_slam_is_handed_to_it():
 
 # ── 4. timing against the graphic ────────────────────────────────────────
 
-def test_a_caption_waits_for_an_occupying_graphic_to_clear_instead_of_touching_it():
+def test_a_word_is_never_revealed_more_than_two_frames_late_for_a_graphic():
+    # judged: a page flip snapped to a change made 'has' 0.2 s late. A line
+    # in its usual place starting just before a graphic on its band leaves
+    # waits at most two frames; one further off is placed clear of it and
+    # shows on its own onset
     words = [("the", 0.1, 0.3), ("1960s", 0.3, 0.9), ("technology", 0.9, 1.5),
              ("meant", 1.5, 1.9), ("computers", 2.17, 2.7), ("but", 2.8, 3.0)]
-    hook = {"id": "hook", "template": "word_slam", "start": 0.0, "end": 2.3,
-            "params": {"text": "where did / *progress* go?"}, "mute_captions": True}
+    hook = _slam(0.0, 2.3, "where did / *progress* go?", box=(0.1, 0.62, 0.9, 0.82),
+                 id="hook", mute_captions=True)
     edl = _edl([hook], words=words)
     cues = motion_captions.cues(edl, _index(words), Timeline(edl["keep"]))
-    first = cues[0]
-    assert first["w"][0]["t"].lower().startswith("computers")
-    assert first["s"] >= 2.3 + motion_captions.CAPTION_LEAD_S - 1e-6
-    items = motion_captions.items(validate_edl(edl, 8.0).model_dump(), _index(words),
-                                  Timeline(edl["keep"]))
-    assert items[0]["start"] >= 2.3 - 1e-6           # rendered ON the exit, not before
+    onsets = {w["t"].lower(): w["s"] for c in cues for w in c["w"]}
+    for t, a, _b in words:
+        assert onsets[t.lower()] - a <= 2 / 30 + 0.01, t
+    assert caption_carry.START_WAIT_S <= 2 / 30 + 0.01
 
 
 # ── 5. sound-off coverage ────────────────────────────────────────────────
 
 def test_sound_off_gaps_name_the_words_the_cause_and_the_fix():
     tl = Timeline([[0.0, 8.0]])
+    # true no longer hides what the graphic does not show: no gap
     whole = _edl([_counter(0.9, 3.95, "140", label="characters", mute_captions=True)])
-    gaps = caption_carry.sound_off_gaps(whole, _index(), tl)
+    assert caption_carry.sound_off_gaps(whole, _index(), tl) == []
+    # ...unless no band is clear of it and the face: then those words go,
+    # and the gap names them, the graphic and the fix
+    big = _counter(0.9, 3.95, "140", label="characters", mute_captions=True,
+                   box=(0.1, 0.45, 0.9, 0.85))
+    gaps = caption_carry.sound_off_gaps(_edl([big]), _index(faces=None), tl)
     assert len(gaps) == 1
     g = gaps[0]
     assert g["said"] == "flying cars and all we got"        # content words bound it
-    assert g["owner"] == "num" and "mute_captions=true" in g["cause"]
-    assert "unset" in g["fix"] and g["duration_s"] > caption_carry.SOUND_OFF_GAP_S
+    assert g["owner"] == "num" and "no caption band" in g["cause"]
+    assert "caption band" in g["fix"] and g["duration_s"] > caption_carry.SOUND_OFF_GAP_S
     # word level: every word is either captioned or on the graphic
     auto = _edl([_counter(0.9, 3.95, "140", label="characters")])
     assert caption_carry.sound_off_gaps(auto, _index(), tl) == []
-    # a short whole-window mute over a single word is under the threshold
-    short = _edl([_counter(2.8, 3.3, "99", mute_captions=True)])
-    assert caption_carry.sound_off_gaps(short, _index(), tl) == []
+    assert caption_carry.heard_unshown(auto, _index(), tl) == []
 
 
 def test_sound_off_gap_from_a_graphic_with_no_clear_band_and_a_manual_mute():
@@ -324,8 +336,9 @@ def test_sound_off_gap_from_a_graphic_with_no_clear_band_and_a_manual_mute():
 
 
 def test_sound_off_gaps_are_an_advisory_finding_never_a_repair():
-    whole = _edl([_counter(0.9, 3.95, "140", label="characters", mute_captions=True)])
-    rows = [r for r in quality_verifier.deterministic_findings(whole, _index())
+    whole = _edl([_counter(0.9, 3.95, "140", label="characters", mute_captions=True,
+                           box=(0.1, 0.45, 0.9, 0.85))])
+    rows = [r for r in quality_verifier.deterministic_findings(whole, _index(faces=None))
             if r["code"] == "sound_off_gap"]
     assert len(rows) == 1 and not quality_verifier.is_blocking(rows[0])
     assert "flying cars" in rows[0]["message"] and rows[0]["evidence"]["gaps"]
@@ -530,14 +543,13 @@ def test_fill_footprints_remeasures_stale_boxes_and_inkless_compositions_get_non
 
 
 def test_a_line_too_short_to_wait_for_the_exit_starts_on_time():
-    # "computers" begins in the hook's last 0.3 s and the next line follows
-    # straight on: waiting for the exit would leave it no time to be read,
-    # so it is shown rather than dropped
+    # "computers" begins in the hook's last 0.1 s and the next line follows
+    # straight on: it is shown, never dropped
     words = [("the", 0.1, 0.3), ("1960s", 0.3, 0.9), ("technology", 0.9, 1.5),
              ("meant", 1.5, 1.9), ("computers.", 2.2, 2.42), ("And", 2.45, 2.7),
              ("that", 2.7, 2.9), ("was", 2.9, 3.1), ("it", 3.1, 3.4)]
-    hook = {"id": "hook", "template": "word_slam", "start": 0.0, "end": 2.3,
-            "params": {"text": "where did / *progress* go?"}, "mute_captions": True}
+    hook = _slam(0.0, 2.3, "where did / *progress* go?", box=(0.1, 0.62, 0.9, 0.82),
+                 id="hook", mute_captions=True)
     edl = _edl([hook], words=words)
     cues = motion_captions.cues(edl, _index(words), Timeline(edl["keep"]))
     said = [w["t"].lower().strip(".") for c in cues for w in c["w"]]
@@ -705,9 +717,11 @@ def test_the_keep_out_prices_the_caption_band_of_word_level_graphics():
     ctx._edl = edl
     slam = {"id": "s", "template": "word_slam", "start": 1.9, "end": 3.0,
             "params": {"text": "*140*"}}
-    # a speech template with mute_captions unset still has captions beside it
+    # a speech template with mute_captions unset still has captions beside it,
+    # and so has one asked to mute them (every heard word reaches the screen)
     assert motion_tools._caption_anchors(ctx, edl, slam)
-    assert motion_tools._caption_anchors(ctx, edl, dict(slam, mute_captions=True)) == []
+    assert motion_tools._caption_anchors(ctx, edl, dict(slam, mute_captions=True)) == \
+        motion_tools._caption_anchors(ctx, edl, slam)
 
 
 def test_the_write_says_when_captions_must_stay_on_a_graphic_they_touch():

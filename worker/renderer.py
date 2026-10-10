@@ -2044,8 +2044,8 @@ def captions_current(meta, edl):
         return False
     if caps.get("design_version") != caplib.CAPTION_DESIGN_VERSION:
         return True
-    if cap_v < 2:
-        return False      # v2: name/noun-phrase-aware cards on every v2 track
+    if cap_v < 3:
+        return False      # v2: name/noun-phrase-aware cards; v3: orphan pages joined
     return not caplib.program_cuts(Timeline(edl.get("keep") or [],
                                             edl.get("inserts") or [],
                                             edl.get("speed")))
@@ -2073,8 +2073,11 @@ def carry_current(meta, edl):
     Only transcript-caption EDLs with motion graphics, and EDLs with a
     phrase_build lockup (its words now land on their spoken onsets), can be
     stale: before config.CAPTION_CARRY_VERSION every caption under a muting
-    graphic was hidden for its whole window (v1), and captions ran under a
-    graphic in a different text from the phrase it showed (v2). Same
+    graphic was hidden for its whole window (v1), captions ran under a
+    graphic in a different text from the phrase it showed (v2), and words a
+    graphic did not show were muted or set as micro bridge rows, and a
+    card layout's captions sat on its seams (v3: transcript captions over
+    picture cards are stamped too). Same
     grandfathering discipline as legibility_current: everything else keeps
     its cache, and a missing stamp on such an EDL means the render predates
     the plan.
@@ -2083,8 +2086,10 @@ def carry_current(meta, edl):
     caps = edl.get("captions")
     lockup = any(isinstance(m, dict) and m.get("template") == "phrase_build"
                  for m in edl.get("motion") or [])
+    cards = bool(((edl.get("effects") or {}) if isinstance(edl.get("effects"), dict)
+                  else {}).get("picture_cards"))
     if not ((isinstance(caps, dict) and caps.get("mode") == "from_transcript"
-             and edl.get("motion")) or lockup):
+             and (edl.get("motion") or cards)) or lockup):
         return True
     return ((meta or {}).get("carry_v") or 0) == config.CAPTION_CARRY_VERSION
 

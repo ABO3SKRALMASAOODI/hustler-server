@@ -633,9 +633,10 @@ def jump_cut_measure(ctx):
 
 
 def _mutes_captions(item):
-    """Does the item hide every caption in its window (mute_captions=true)?
-    Unset is word-level: the captions it does not show stay on screen."""
-    return caption_carry.mode(item) == caption_carry.MODE_ALL
+    """Does the item hide every caption in its window? Never any more
+    (round 6, every heard word reaches the screen once): whatever its
+    mute_captions, the captions it does not show stay on screen beside it."""
+    return False
 
 
 def _caption_anchors(ctx, edl, item):
@@ -839,9 +840,8 @@ def _keep_out(ctx, edl, item, rep):
 def _attach_reading(ctx, edl, item):
     """Time a lockup (spec ``reads_phrase``) to the speech it shows before
     it is probed and stored: its printed words land on their spoken onsets
-    and, under transcript captions, the phrase's other words join it as
-    small bridge lines (caption_carry.readings — one reading path). The
-    renderer recomputes it for the program as it is then."""
+    (caption_carry.readings; the phrase's other words stay captioned beside
+    it). The renderer recomputes it for the program as it is then."""
     if not caption_carry.reads_phrase(item):
         item.pop("reading", None)
         return
@@ -1133,13 +1133,13 @@ def _mute_note(edl, index, tl, item, carried):
     later = (f", or start it at {float(first['t0']):.2f}s where its own words begin "
              "so everything before stays captioned"
              if first is not None and float(first["t0"]) - s >= 0.4 else "")
-    return (f"NOTE (captions): mute_captions=true hides every caption over {s:g}-{e:g}s "
-            f"but this graphic carries only {len(content) - len(missing)} of the "
-            f"{len(content)} words that matter in what is said there, so a sound-off "
-            f"viewer never reads \"{gone}\". Leave mute_captions unset (the default): "
-            f"only the words it shows leave the captions and the rest stay captioned "
-            f"beside it. Or carry those exact words on it (e.g. a kicker/label built "
-            f"from the transcript){later}.")
+    return (f"NOTE (captions): mute_captions=true no longer hides speech a graphic does "
+            f"not show (every heard word reaches the screen once): this one carries only "
+            f"{len(content) - len(missing)} of the {len(content)} words that matter in what "
+            f"is said over {s:g}-{e:g}s, so \"{gone}\" stay captioned beside it — two "
+            f"texts at once. Leave mute_captions unset (the default; the same captions). "
+            f"Or carry those exact words on it (e.g. a kicker/label built from the "
+            f"transcript){later}.")
 
 
 def _word_level_notes(edl, index, tl, item, canvas=None):
@@ -1168,7 +1168,7 @@ def _word_level_notes(edl, index, tl, item, canvas=None):
     later = (f", or start it at {first:.2f}s where its own words begin so the words "
              "before them are captioned as usual"
              if first is not None and first - s >= 0.4 else "")
-    if rep["muted"] and caption_carry.mode(item) == caption_carry.MODE_WORDS:
+    if rep["muted"] and caption_carry.mode(item) != caption_carry.MODE_HERO:
         notes.append(
             f"NOTE (captions): no caption band is clear of this graphic{draws} and the "
             f"speaker's face over {s:g}-{e:g}s, so the words it does not show are muted: "
@@ -1194,50 +1194,35 @@ YIELD_FIX_MIN_S = 0.8
 
 
 def _reading_notes(item, rep):
-    """One-reading-path NOTEs for a graphic with mute_captions unset (the
-    caption plan's ownership, worker/caption_carry.py): where the captions
-    yield to it, the words a lockup sets in small type, the words only the
-    sound carries, and a run too long to set (two texts at once)."""
+    """NOTE for a graphic that shows part of a phrase (the caption plan,
+    worker/caption_carry.py): the words of that phrase said while it is up
+    that it does not print stay CAPTIONED beside it — every heard word
+    reaches the screen once; a lockup no longer sets them as micro bridge
+    rows inside itself. Names them, and the end that keeps the graphic to
+    its own words."""
     frm = rep.get("owns_from")
-    if frm is None:
+    muted = {caption_carry.said_key(w) for w in rep.get("muted") or []}
+    words = [w for r in rep.get("captioned") or [] for w in r
+             if caption_carry.said_key(w) not in muted]     # (muted ones get their own NOTE)
+    if frm is None or not words or caption_carry.mode(item) == caption_carry.MODE_ALL:
         return []
     e = float(item["end"])
-    notes = []
-    if rep.get("joined"):
-        runs = " … ".join(f'"{_said(r)}"' for r in rep["joined"])
-        notes.append(
-            f"One reading path: captions yield to this lockup from {frm:.2f}s (its first "
-            f"shown word) until it leaves at {e:g}s, and the words of that phrase its rows "
-            f"leave out are set in small type between its rows, each on its onset: {runs}. "
-            "To design them yourself, put those exact words in the rows.")
-    if rep.get("yielded"):
-        ends = [float(w["t1"]) for w in rep.get("carried") or []]
-        last = max(ends) if ends else frm
-        end_at = last + 0.3 if ends else frm + 0.6
-        # a word the graphic yields once its midpoint is under it: the end
-        # that gives the next words back is before the first one's midpoint
-        nxt = [(float(w["t0"]) + float(w["t1"])) / 2.0 for w in rep["yielded"]
-               if float(w["t0"]) >= last - 0.05]
-        if nxt:
-            end_at = min(end_at, min(nxt) - 0.02)
-        # an end that leaves the graphic too short to read is no fix
-        fix = (f"End it at {end_at:.2f}s, where its own words end, so those words are "
-               "captioned; or carry"
-               if float(item["start"]) + YIELD_FIX_MIN_S - 1e-3 <= end_at < e - 0.02
-               else "Carry")
-        notes.append(
-            f"NOTE (captions): one reading path — the captions yield to this graphic for "
-            f"the phrase it shows from {frm:.2f}s until it leaves at {e:g}s, so a sound-off "
-            f"viewer never reads \"{_runs_said(rep['yielded'])}\" (said while it is up). "
-            f"{fix} them on it (a kicker/label in the speaker's words); or "
-            "make it a phrase_build, which sets them in small type.")
-    if rep.get("beside"):
-        runs = " … ".join(f'"{_said(r)}"' for r in rep["beside"])
-        notes.append(
-            f"NOTE (captions): {runs} is too long to set in this lockup, so it stays "
-            "captioned beside it — two texts at once. End the lockup before it, or split "
-            "the phrase into two lockups.")
-    return notes
+    ends = [float(w["t1"]) for w in rep.get("carried") or []]
+    last = max(ends) if ends else frm
+    end_at = last + 0.3 if ends else frm + 0.6
+    # the end that leaves the next words to the captions alone is before
+    # the first one's midpoint
+    nxt = [(float(w["t0"]) + float(w["t1"])) / 2.0 for w in words
+           if float(w["t0"]) >= last - 0.05]
+    if nxt:
+        end_at = min(end_at, min(nxt) - 0.02)
+    end = (f" To keep it to its own words, end it at {end_at:.2f}s."
+           if float(item["start"]) + YIELD_FIX_MIN_S - 1e-3 <= end_at < e - 0.02 else "")
+    kind = "rows" if caption_carry.reads_phrase(item) else "text"
+    return [f"Captions carry the words of this phrase its {kind} leave out, beside it while "
+            f"it is up (every heard word reaches the screen once): "
+            f"\"{_runs_said(words)}\". To design them yourself, put those exact words in "
+            f"its {kind}.{end}"]
 
 
 def _unsaid_row_notes(item):
@@ -1331,9 +1316,8 @@ def _caption_integrity_notes(ctx, edl, item):
                 note = _mute_note(edl, index, tl, item, carried)
                 if note:
                     notes.append(note)
-            else:
-                notes += _word_level_notes(edl, index, tl, item,
-                                           canvas=_canvas_size(ctx, edl))
+            notes += _word_level_notes(edl, index, tl, item,
+                                       canvas=_canvas_size(ctx, edl))
         if not motion_templates.persistent(item):
             # a standing headline is a third-person claim, not a quote
             notes += _paraphrase_notes(edl, index, tl, item, lines)
@@ -1899,9 +1883,10 @@ _PARAMS_PARAM = {"type": "object", "description": "Template parameters (see list
 _ALLOW_FACE_PARAM = {"type": "boolean", "description": (
     "Keep a deliberate placement over the face (skips the keep-out move).")}
 _MUTE_PARAM = {"type": "boolean", "description": (
-    "Omit (default): one reading path, captions drop the words it shows and yield to "
-    "its phrase until it leaves. true = no captions in its window; false = captions "
-    "keep running (a shown number/*starred* word is still not repeated).")}
+    "Omit (default): captions drop the words it shows; every other heard word stays "
+    "captioned beside it. true = the same (no graphic mutes a whole window: every heard "
+    "word reaches the screen once), muting only where no band is clear of it; false = "
+    "captions keep running (a shown number/*starred* word is still not repeated).")}
 
 TOOL_SPECS = {
     "list_motion_templates": (
@@ -1930,12 +1915,14 @@ TOOL_SPECS = {
         "much of the graphic the subject crosses. Use it for 1-2 hero moments per short, with "
         "BIG type placed where the speaker's head/shoulders cross it. CAPTIONS: leave "
         "mute_captions unset — the captions drop exactly the spoken words this graphic shows "
-        "(its number, slammed word, quoted kicker or rows) and keep every other spoken word, "
-        "moved to a band clear of the box it draws while it is up; the reply NOTEs words it "
-        "must mute because no band is clear of it and the face (then move it off the caption "
-        "band). mute_captions=true hides every caption for its whole window (only when it "
-        "replaces the whole spoken line); false keeps them all running (a number or *starred* "
-        "word it shows is still not repeated). template='html' takes your own HTML/CSS/JS on the "
+        "(its number, slammed word, quoted kicker or rows) and keep every other spoken word "
+        "(every heard word reaches the screen once — a lockup's rows no longer get micro "
+        "bridge lines: the words they leave out are captioned beside it), moved to a band "
+        "clear of the box it draws, the face and any card layout while it is up; the reply "
+        "NOTEs the words captioned beside it and the words it must mute because no band is "
+        "clear (then carry them on it, e.g. as a kicker, or move it off the caption band). "
+        "mute_captions=true no longer hides a whole window; false keeps them all running (a "
+        "number or *starred* word it shows is still not repeated). template='html' takes your own HTML/CSS/JS on the "
         "MG runtime in `html`. The write is rejected if the composition errors or draws nothing. "
         "HEADLINE BAND: template='headline' is PERSISTENT — the standing claim headline of a "
         "card or letterbox layout, one per program (end omitted = the program end; y omitted = "

@@ -2025,7 +2025,13 @@ BLOCK_CLOCK_VERSION = 1
 # Revolution", "140 characters"), so every design-v2 track's cards may have
 # regrouped, with or without a cut. (A word a cut kept the sound of busts
 # through the caption fingerprint, like the rejoin.)
-CAPTION_TIMING_VERSION = 2
+# v3 (round 6): a one-word connector page joins its line, a word snapped
+# onto a layout change appears at most two frames late (never more for a
+# graphic's exit either), and the motion looks keep out of a 9:16 reel's
+# 9% side crop, set a lone article inline with its serif word, and guard
+# legibility per word in order: reposition, a tight halo and lifted
+# accents, a soft dark scrim, only then the pocket.
+CAPTION_TIMING_VERSION = 3
 
 # Manual music remains editable past the last scene, but rendered media always
 # stops at the picture/program boundary.  v1 extended overhanging music across
@@ -2079,7 +2085,14 @@ LEGIBILITY_VERSION = 2
 # reading order, and a word a cut kept the sound of is captioned. Lockups
 # (phrase_build) without transcript captions are stamped too: their reveal
 # timing changed.
-CAPTION_CARRY_VERSION = 2
+# v3 (round 6, every heard word reaches the screen once): no graphic mutes a
+# whole window or leaves a word to the sound — the words it does not show
+# (a lockup's bridge words included: no more micro bridge rows) stay
+# captioned beside it; and the placement solver (worker/caption_place.py)
+# keeps captions off card and panel edges and seams, a stack's content
+# panel, faces with their chin, props and the watermark, re-solving at every
+# layout change. Transcript-caption EDLs with picture cards are stamped too.
+CAPTION_CARRY_VERSION = 3
 
 # Crops and picture cards that follow the speaker's face inside a shot
 # (worker/follow.py, Frame.follow / PictureCard.follow). Stamped as
