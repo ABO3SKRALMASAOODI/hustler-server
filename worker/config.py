@@ -1816,6 +1816,21 @@ SCREENING_FRAME_PARALLELISM = int(os.getenv(
 # / VMAF 92.7 at no extra encode time (veryfast is not rate-bound here).
 FINAL_PRESET = os.getenv("FINAL_PRESET", "veryfast")
 FINAL_CRF = int(os.getenv("FINAL_CRF", "18"))
+# ...under a VBV ceiling (renderer.final_rate_cap_kbps; render polish, Oct
+# 2026). CRF alone let animated grain over a 1.9x-upscaled 480p archival plate
+# ship the Jobs short at 21.6 Mb/s (116 MB for 43 s) when a clean talking head
+# takes 2-5 Mb/s; every platform re-encodes the upload to a few Mb/s. This is
+# the ceiling for 1080x1920 at 30 fps (scaled with the pixel rate), so only
+# such pathological pictures are touched: the watermarked Jobs final went
+# from 115 MB to 58 MB with no visible change (only the canvas grain is a
+# touch smoother at 1:1); Thiel (4.4 Mb/s) and Elon (2.5 Mb/s) never reach
+# it. Bufsize is FINAL_BUFSIZE_S seconds of the ceiling. 0 = uncapped.
+FINAL_MAXRATE_KBPS = int(os.getenv("FINAL_MAXRATE_KBPS", "12000"))
+FINAL_BUFSIZE_S = float(os.getenv("FINAL_BUFSIZE_S", "2.0"))
+# Programme edges (renderer.edge_fades): a few-ms fade from zero at the TRUE
+# programme start and at an end with no card, so a first kept span that
+# starts mid-sound does not open on a click (Thiel's first sample was -0.64).
+PROGRAM_EDGE_FADE_S = float(os.getenv("PROGRAM_EDGE_FADE_S", "0.005"))
 
 # Keep spans further apart than this (source seconds) are read through their
 # own bounded input instead of decoding the gap (renderer._keep_clusters).
@@ -2111,6 +2126,17 @@ HANDOFF_VERSION = 1
 # like. v1: crop-first lanczos fit + unsharp, block grade, pinned end-card
 # matrix (render-perf round).
 RENDER_LOOK_VERSION = 1
+
+# Export finishing (render polish, Oct 2026): the VBV ceiling on finals
+# (FINAL_MAXRATE_KBPS), the de-click edge fades (PROGRAM_EDGE_FADE_S) and a
+# block's last slot filled from the same shot instead of a held frame
+# (renderer.same_shot_tail). Stamped as `finish_v` on every render and
+# compared ONLY for FINALS whose stored bytes run over today's ceiling
+# (renderer.finish_current): those exports are the 100+ MB files the ceiling
+# exists for. Every other cached render keeps its cache — the click and the
+# held frame are small, and a re-render of every export on a ~1 vCPU box is
+# not worth them. Bump when an export-only treatment changes again.
+FINISH_VERSION = 1
 
 # ── Free-tier watermark (round 41) ────────────────────────────────────────
 # The site's robot in the top-left of the EXPORT, with "edited by valmera

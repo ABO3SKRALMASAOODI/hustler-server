@@ -829,6 +829,105 @@ def block_tail(fps, seg_dur=None, frames=None):
     return f"{lead}fps={fps:.3f},{bound}setsar=1,format=yuv420p"
 
 
+def same_shot_tail(e, index, src_fps, out_fps, src_end, edges=()):
+    """How far past a kept span's end (SOURCE second ``e``) its PICTURE may
+    be read, in seconds, or 0.0 (render polish, Oct 2026).
+
+    On the block clock a block is an exact number of frames; when the
+    source's frame grid gives its span one frame fewer than that, block_tail
+    clones the last frame — a held frame right before the cut (the judged
+    one-frame hitch before Thiel's 7.22 and 24.10 jump cuts). Reading one
+    more frame of the SAME shot instead fills that slot with the next real
+    frame, as a frame-accurate cut does; a block that already holds enough
+    frames is cut to its count and never shows it. Never across a camera
+    cut: a frame of the next shot would be a flash. So only with a shot
+    list (the index's ``shots``; without one a measured cut cannot be told
+    from an edit) and no shot boundary, focus or follow edge (``edges``)
+    within 1.5 frames of the stretch read."""
+    shots = (index or {}).get("shots") or []
+    if not shots:
+        return 0.0
+    try:
+        sf = float(src_fps or out_fps or 30.0)
+        of = float(out_fps or src_fps or 30.0)
+        e = float(e)
+    except (TypeError, ValueError):
+        return 0.0
+    if sf <= 0 or of <= 0:
+        return 0.0
+    reach = max(1.0 / of, 1.0 / sf)
+    if src_end is not None and e + reach > float(src_end) - 1e-3:
+        return 0.0
+    slack = HANDOFF_JOIN_FRAMES / sf
+    lo, hi = e - slack, e + reach + slack
+    for shot in shots:
+        try:
+            c = float(shot["start"])
+        except (KeyError, TypeError, ValueError):
+            return 0.0              # an unreadable shot list is no evidence
+        if c > 0.0 and lo < c <= hi:
+            return 0.0
+    if any(lo < float(x) <= hi for x in edges or ()):
+        return 0.0
+    return round(reach, 6)
+
+
+def edge_fades(total_s, head=True, tail=True, fade_in=0.0, fade_out=0.0,
+               carry_music=False):
+    """The de-click fades at the TRUE programme edges (render polish, Oct
+    2026): (fade-in s, fade-out s), 0.0 where none applies.
+
+    A programme whose first kept span starts mid-sound opens on a step from
+    silence to wherever the waveform is — Thiel's first sample was -0.64, an
+    audible click on frame 0. PROGRAM_EDGE_FADE_S (a few ms, far below any
+    audible fade) takes the start, and the end of a programme that stops
+    without an end card, from zero. Never on a stitched piece or proof
+    window that does not hold the edge (``head``/``tail`` False), never on
+    an internal join (those have their own crossfades), and not where the
+    EDL already fades that edge or a carried score plays through the card
+    (its own fade at the card's far edge ends the mix)."""
+    d = float(config.PROGRAM_EDGE_FADE_S)
+    if d <= 0.0 or total_s <= 4 * d:
+        return 0.0, 0.0
+    fi = d if head and not fade_in else 0.0
+    fo = d if tail and not fade_out and not carry_music else 0.0
+    return fi, fo
+
+
+def final_rate_cap_kbps(W, H, fps):
+    """The VBV ceiling (kb/s) for a final export at W x H and ``fps``
+    (render polish, Oct 2026), or None when uncapped.
+
+    CRF alone sets the quality, so the size follows the picture: animated
+    grain over a 1.9x-upscaled 480p archival plate encoded the Jobs short at
+    21.6 Mb/s (116 MB for 43 s) where a clean talking head takes 2-5 Mb/s.
+    Every platform re-encodes the upload to a few Mb/s anyway; the ceiling
+    only bites on such pathological pictures. config.FINAL_MAXRATE_KBPS is
+    the ceiling for 1080x1920 at 30 fps, scaled with the pixel rate (within
+    0.25-5x), so a 4K or 60 fps export is not starved."""
+    base = float(config.FINAL_MAXRATE_KBPS or 0)
+    if base <= 0:
+        return None
+    try:
+        rate = float(W) * float(H) * max(1.0, float(fps or 30.0))
+    except (TypeError, ValueError):
+        return int(base)
+    k = min(5.0, max(0.25, rate / (1080.0 * 1920.0 * 30.0)))
+    return int(round(base * k))
+
+
+def final_video_encode(W, H, fps):
+    """x264 settings of a final export: CRF quality under the VBV ceiling
+    (final_rate_cap_kbps), bufsize FINAL_BUFSIZE_S seconds of it."""
+    enc = ["-c:v", "libx264", "-preset", config.FINAL_PRESET,
+           "-crf", str(config.FINAL_CRF), "-g", "120"]
+    cap = final_rate_cap_kbps(W, H, fps)
+    if cap:
+        buf = int(round(cap * max(0.5, float(config.FINAL_BUFSIZE_S))))
+        enc += ["-maxrate", f"{cap}k", "-bufsize", f"{buf}k"]
+    return enc
+
+
 def _normalize_video(parts, in_label, out_label, W, H, fps, mode, uid,
                      focus=None, seg_dur=None, picture=None, grade=None,
                      src_size=None, frames=None):
@@ -2116,6 +2215,33 @@ def look_current(meta):
     return ((meta or {}).get("look_v") or 0) == config.RENDER_LOOK_VERSION
 
 
+def finish_current(asset, variant):
+    """Does this cached render carry today's export finishing (config.
+    FINISH_VERSION: the rate ceiling, the de-click edges, same-shot block
+    tails)?
+
+    Only FINALS are ever busted, and only those whose stored size runs over
+    today's ceiling (final_rate_cap_kbps at the asset's own size and rate,
+    with 10% slack for the sound track and the container): the 100+ MB
+    exports the ceiling exists for. Every other render keeps its cache — an
+    absent stamp on a small final is grandfathered, like outro_current's
+    previews."""
+    if variant != "final":
+        return True
+    asset = asset or {}
+    if ((asset.get("meta") or {}).get("finish_v") or 0) >= \
+            config.FINISH_VERSION:
+        return True
+    try:
+        cap = final_rate_cap_kbps(int(asset["width"]), int(asset["height"]),
+                                  float(asset.get("fps") or 30.0))
+        kbps = float(asset["bytes"]) * 8.0 / 1000.0 / float(
+            asset["duration_s"])
+    except (KeyError, TypeError, ValueError, ZeroDivisionError):
+        return True
+    return cap is None or kbps <= cap * 1.1
+
+
 def watermark_font_path():
     p = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                      "fonts", "PlusJakartaSans-ExtraBold.ttf")
@@ -2610,7 +2736,8 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                       patch_inputs=None, cap_burn_offset=None,
                       picture_card_inputs=None, main_video_inputs=None,
                       loudness="auto", dialogue_gain=None,
-                      dialogue_probe=False, focus_origin=None):
+                      dialogue_probe=False, focus_origin=None,
+                      program_edges=None):
     """Input layout: [0] main source video; anullsrc at silence_idx when
     needed (no main audio, image inserts, or silent clip inserts); then one
     input per music item, insert item and voiceover item in EDL order.
@@ -2639,6 +2766,9 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     dialogue_probe: build the graph the leveler MEASURES — identical except
     that the source volume automation is left out, so a deliberate "quieter
     here" is not counted as quiet speech to undo.
+    program_edges: (head, tail) — does this graph hold the programme's TRUE
+    start / end? Those edges get the de-click fades (edge_fades). None (a
+    bare graph, a stitched piece) adds none.
     """
     # The program clock is the picture clock. Music can remain parked beyond
     # this boundary in the EDL, but its temporary render window is clamped.
@@ -3094,6 +3224,27 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                      + f"amix=inputs={len(mix)}:duration=first:"
                      f"dropout_transition=0:normalize=0{norm}[a_seg{i}]")
 
+    # A block on the block clock whose span holds one frame fewer than its
+    # count would show its last frame twice before the cut (block_tail's
+    # clone): it reads the next frame of the same shot instead
+    # (same_shot_tail). Only where nothing of the source follows the block
+    # in the programme (a cut, an insert, the end) — across a
+    # source-contiguous split the next block owns that frame — and never
+    # under repaint patches, censor regions or a held picture pad, whose
+    # windows stop at the span's end.
+    tail_edges = ()
+    if blk_frames and not (regions or patch_inputs or src_pad > 0):
+        tail_edges = tuple(follow_edges) + tuple(
+            float(sp[k]) for sp in focus_track for k in ("t0", "t1")
+            if isinstance(sp, dict) and isinstance(sp.get(k), (int, float)))
+
+    def _video_end(i, e):
+        if ("seg", i) not in blk_frames or regions or patch_inputs \
+                or src_pad > 0 or not (i == n - 1 or cut_after[i]):
+            return e
+        return e + same_shot_tail(e, index, src_fps or fps, fps, src_dur,
+                                  tail_edges)
+
     def _seg_video(i, in_label, s, e):
         vlab = f"segv{i}" if do_norm else f"v_seg{i}"
         if regions:
@@ -3102,7 +3253,8 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             _region_parts(parts, f"segraw{i}", vlab, regions, sw, sh,
                           seg_prog[i], e - s, f"s{i}")
         else:
-            parts.append(f"[{in_label}]trim=start={s:.3f}:end={e:.3f},"
+            ev = _video_end(i, e)
+            parts.append(f"[{in_label}]trim=start={s:.3f}:end={ev:.3f},"
                          f"setpts=PTS-STARTPTS[{vlab}]")
 
     def _seg_pieces_video_audio(i, v_in, a_in, s, e):
@@ -4602,7 +4754,14 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     outro_on = outro_here          # one predicate, so the video and audio
     loud = master == "social"
     a_prog = "aprog"
-    a_final = "apre" if (fade_in or fade_out or outro_on) else a_prog
+    # De-click edges (edge_fades): the programme's own sound, measured on
+    # its own clock — on the block clock that is the blocks' exact length.
+    edge_in, edge_out = edge_fades(
+        total_dur, *(program_edges or (False, False)), fade_in=fade_in,
+        fade_out=fade_out or outro_on, carry_music=carry_music)
+    prog_audio_s = (sum(blk_len.values()) if blk_len else total_dur)
+    a_final = "apre" if (fade_in or fade_out or outro_on
+                         or edge_in or edge_out) else a_prog
     if mix_labels:
         parts.append(f"[{alabel}]" + "".join(mix_labels) +
                      f"amix=inputs={1 + len(mix_labels)}:duration=first:"
@@ -4622,6 +4781,11 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         chain = []
         if fade_in:
             chain.append(f"afade=t=in:st=0:d={fade_in:.2f}")
+        if edge_in:
+            chain.append(f"afade=t=in:st=0:d={edge_in:.3f}")
+        if edge_out:
+            chain.append(f"afade=t=out:st={prog_audio_s - edge_out:.6f}"
+                         f":d={edge_out:.3f}")
         if carry_music:
             # The carried path has exactly one ending fade, on the completed
             # mix at the far edge of the card. It replaces both the item's
@@ -4723,14 +4887,16 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
                        cap_ass_override=None, cap_burn_offset=None,
                        render_fragment=False, _base_stage=False,
                        _batch_window=None, _source_stage=False,
-                       discard_audio=False):
+                       discard_audio=False, program_edges=None):
     """Render a canvas program (round 34): a timeline with NO main video, where
     the ordered inserts (clips/images) are concatenated on the canvas, plus
     music / sfx / voiceover / manual captions / effects. Mirrors render_edl but
     assembles the ffmpeg inputs with NO input [0] main video — every input
     (silence, music, sfx, inserts, voiceover, end card) starts at index 0 — and
     takes the output geometry from the canvas rather than probing a source.
-    discard_audio: see render_edl."""
+    discard_audio, program_edges: see render_edl."""
+    if program_edges is None:
+        program_edges = (not render_fragment, not render_fragment)
     edl = validate_edl(edl_dict, render_fragment=render_fragment).model_dump()
     canvas = edl["canvas"]
     W, H = int(canvas["width"]), int(canvas["height"])
@@ -4911,7 +5077,8 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
                                  cap_burn_offset=cap_burn_offset,
                                  picture_card_inputs=picture_card_inputs,
                                  motion_inputs=motion_inputs,
-                                 loudness=master, **extra)
+                                 loudness=master,
+                                 program_edges=program_edges, **extra)
 
     dialogue_gain = None
     if master == "social" and not discard_audio:
@@ -4949,8 +5116,7 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
                   "-crf", "27", "-g", "48", "-keyint_min", "24",
                   "-c:a", "aac", "-b:a", "128k"]
     else:
-        encode = ["-c:v", "libx264", "-preset", config.FINAL_PRESET,
-                  "-crf", str(config.FINAL_CRF), "-g", "120",
+        encode = [*final_video_encode(W, H, fps),
                   "-c:a", "aac", "-b:a", "192k"]
 
     expected_out_s = (program_render_s(tl, fps)
@@ -5370,7 +5536,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                patch_locals=None, cap_ass_override=None,
                suppress_outro=False, cap_burn_offset=None,
                audio_only=False, asset_locals=None, render_fragment=False,
-               discard_audio=False):
+               discard_audio=False, program_edges=None):
     """Render an EDL against a source file. Returns output duration (s).
 
     patch_locals (round 92): {patch id: local file} for the EDL's `patches` —
@@ -5393,7 +5559,14 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     track or a separately rebuilt one. The dialogue leveler's measurement
     pass is skipped: it would be one more ffmpeg run per window, every input
     reopened, for a track nobody hears.
+
+    program_edges: (head, tail) — does this file hold the programme's TRUE
+    start / end (the de-click edge fades, edge_fades)? Default: both for a
+    whole programme, neither for a render_fragment (a stitched piece or a
+    proof window decides for itself).
     """
+    if program_edges is None:
+        program_edges = (not render_fragment, not render_fragment)
     edl_dict = render_plan.canonical_program(edl_dict)
     if is_canvas_program(edl_dict):
         # No main video: the program is built on the canvas from inserts alone.
@@ -5406,7 +5579,8 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                                   cap_ass_override=cap_ass_override,
                                   cap_burn_offset=cap_burn_offset,
                                   render_fragment=render_fragment,
-                                  discard_audio=discard_audio)
+                                  discard_audio=discard_audio,
+                                  program_edges=program_edges)
     info = media.probe(src_path)
     src_dur = info["duration"]
     render_dict = _repair_legacy_insert_boundaries(edl_dict)
@@ -5893,6 +6067,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                                  motion_inputs=motion_inputs,
                                  main_video_inputs=main_video_inputs,
                                  focus_origin=focus_origin,
+                                 program_edges=program_edges,
                                  **extra)
 
     # Mastered mixes level the dialogue first, from one measurement pass of
@@ -5934,9 +6109,9 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                   "-c:a", "aac", "-b:a", "128k"]
     else:
         # veryfast keeps export wall time low (the graph, not x264, is the
-        # cost); config.FINAL_CRF sets the delivered quality (see config).
-        encode = ["-c:v", "libx264", "-preset", config.FINAL_PRESET,
-                  "-crf", str(config.FINAL_CRF), "-g", "120",
+        # cost); config.FINAL_CRF sets the delivered quality (see config),
+        # under the export's rate ceiling (final_video_encode).
+        encode = [*final_video_encode(W, H, fps),
                   "-c:a", "aac", "-b:a", "192k"]
 
     expected_out_s = (program_render_s(tl, fps)
@@ -7004,7 +7179,8 @@ def _render_changed_sections(job_id, edl_row, index, src_local, workdir,
             progress_cb=progress_cb, want_wm=False,
             patch_locals=patch_locals, cap_ass_override=(cap_path or ""),
             cap_burn_offset=(a if cap_path else None), suppress_outro=True,
-            render_fragment=True)
+            render_fragment=True,
+            program_edges=(a <= 0.001, b >= duration - 0.001))
         expected = b - a
         if abs(pdur - expected) > max(0.2, expected * 0.03):
             raise RenderVerificationError(
@@ -7270,6 +7446,7 @@ def _run_render_job(worker_db, job):
                          .get("json") or {})) \
                 and watermark_current(cached.get("meta"), variant, is_paid,
                                       wm_settings) \
+                and finish_current(cached, variant) \
                 and _audio_model_review_cache_compatible(
                     audio_model_review, edl_row["json"], cached.get("meta")):
             cached_meta = cached.get("meta") or {}
@@ -7575,6 +7752,7 @@ def _run_render_job(worker_db, job):
                             and handoff_current(pm, prev_row["json"], index) \
                             and watermark_current(pm, variant, is_paid,
                                                   wm_settings) \
+                            and finish_current(prev_asset, variant) \
                             and (fp_now is None
                                  or pm.get("caption_fp") == fp_now):
                         out_dur = _reuse_picture_with_new_audio(
@@ -7957,6 +8135,10 @@ def _run_render_job(worker_db, job):
                   "look_v": (reused_visual_meta.get("look_v") or 0
                              if reused_visual_meta
                              else config.RENDER_LOOK_VERSION),
+                  # ...and the export finishing it was encoded with.
+                  "finish_v": (reused_visual_meta.get("finish_v") or 0
+                               if reused_visual_meta
+                               else config.FINISH_VERSION),
                   "audio_peak_v": 1,
                   "master_v": config.MASTER_VERSION,
                   "wm_v": (0 if proof_only else
