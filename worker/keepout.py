@@ -754,7 +754,9 @@ NOMINAL_INK = {
     "checklist": (0.237, -0.096, 0.756, 0.102),
     "comment_cta": (0.067, -0.156, 0.933, 0.162),
     "counter": (0.081, -0.075, 0.933, 0.088),
-    "emoji_pop": (0.548, -0.058, 0.848, 0.081),
+    # midpoint of Apple Color Emoji (macOS: .548,-.058,.848,.081) and Noto
+    # Color Emoji (the Linux render lanes: .511,-.088,.885,.110) glyph boxes
+    "emoji_pop": (0.5295, -0.073, 0.8665, 0.0955),
     "follow_cta": (0.063, -0.056, 0.937, 0.054),
     "glow_title": (0.085, -0.119, 0.919, 0.121),
     "hook_title": (0.07, -0.056, 0.937, 0.069),
