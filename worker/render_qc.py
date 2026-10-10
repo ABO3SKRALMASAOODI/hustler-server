@@ -106,6 +106,18 @@ def plan(edl, index, *, W, H, fps, outro_s=0.0, want_wm=False,
     layers = list(edl.get("typography_scenes") or []) + \
         list(fx.get("picture_cards") or []) + list(edl.get("overlays") or []) + \
         list(fx.get("frame_shifts") or [])
+    # A finishing effect (a flash, a shake, an agent's own filter chain) may
+    # change the whole picture anywhere inside its window: all of it is
+    # deliberate.
+    for item in list(fx.get("stylize") or []) + list(fx.get("custom") or []):
+        if not isinstance(item, dict):
+            continue
+        a = item.get("start")
+        b = item.get("end")
+        a = 0.0 if a is None else float(a)
+        b = float(program_s) if b is None else float(b)
+        events.append((renderer.first_frame_at(a, fps) - 1,
+                       renderer.first_frame_at(b, fps) + 3))
     for item in edl.get("motion") or []:
         if not isinstance(item, dict):
             continue

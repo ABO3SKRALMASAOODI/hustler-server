@@ -435,6 +435,11 @@ def test_the_plan_reads_the_edits_cuts_zooms_and_branding():
     assert plan["watermark"]["w"] > 0 and plan["endcard"]["s"] == 5.0
     preview = render_qc.plan(edl, {}, W=270, H=480, fps=30.0)
     assert preview["watermark"] is None and preview["endcard"] is None
+    # a finishing effect's whole window is deliberate
+    fx = dict(edl, effects=dict(edl.get("effects") or {}, stylize=[
+        {"id": "f", "kind": "flash", "start": 1.0, "end": 1.5}]))
+    p2 = render_qc.plan(fx, {}, W=270, H=480, fps=30.0)
+    assert any(a <= 30 and b >= 45 for a, b in p2["events"])
 
 
 def test_scenery_boxes_are_not_screens():
