@@ -20,7 +20,9 @@ the flat colour around the card:
   instead, and a decor plate (shadow, vignette, hairline) goes on top.
 
 Film grain is temporal luma noise with a fixed seed (deterministic renders)
-applied to the backdrop only — the footage itself is never re-noised. A card
+applied to the backdrop only — the footage itself is never re-noised, except
+a small face enlarged past SOURCE_UPSCALE_CAP (face_cap) on a grained card,
+which wears a little of the same grain so its softness reads as film. A card
 with none of these options renders through the historical graph, unchanged.
 
 SOURCE-FED CARDS AND STACKED LAYOUTS
@@ -93,6 +95,16 @@ HEADROOM_MIN = .08
 HEADROOM_TARGET = .10
 FACE_SHARE = .30
 HAIR_ABOVE_FACE = .40
+# A small face reads as a figure, not a person: the judged Jobs card (480p
+# archival, enlarged at most 2x) showed a waist-up wide whose face was ~6%
+# of the frame. A face framing whose face would sit under FACE_MIN_FRAME of
+# the FRAME height takes a larger share of its card (up to FACE_SHARE_MAX:
+# a medium close-up) and may be enlarged past SOURCE_UPSCALE_CAP for it —
+# never past FACE_UPSCALE_CAP (lanczos, light sharpening and, on a grained
+# card, the backdrop's grain over the footage keep it from reading soft).
+FACE_MIN_FRAME = .15
+FACE_SHARE_MAX = .40
+FACE_UPSCALE_CAP = 3.0
 
 
 def source_fed(spec):
@@ -239,6 +251,62 @@ def card_boxes(spec):
     return [list(spec["box"])]
 
 
+# ── The layout's geometry, for caption placement (judges, Oct 2026) ──────
+# Captions anchored on the 0.03 seam between two stacked panels crossed both
+# panels' edges. A caption band must be at least this tall (frame
+# fractions); the panels' edges are lines a caption never sits on.
+CAPTION_BAND_MIN = .06
+
+
+def layout_rects(edl, t):
+    """[[x0, y0, x1, y1], ...] — the rounded windows (each panel of a stack,
+    else the card's box) of every picture card on screen at PROGRAM second
+    ``t``, in frame fractions: what caption placement keeps its lines off
+    (a window's edge is a no-go line). [] on a full-frame picture."""
+    out = []
+    for card in ((edl or {}).get("effects") or {}).get("picture_cards") or []:
+        if not isinstance(card, dict):
+            continue
+        try:
+            a, b = float(card["start"]), float(card["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if a - 1e-6 <= float(t) < b:
+            out += [[float(v) for v in box] for box in card_boxes(card)]
+    return out
+
+
+def layout_edges(edl):
+    """Sorted PROGRAM seconds where the picture's layout changes (a card's
+    start or end): caption placement re-solves on these frames."""
+    out = set()
+    for card in ((edl or {}).get("effects") or {}).get("picture_cards") or []:
+        if not isinstance(card, dict):
+            continue
+        for key in ("start", "end"):
+            try:
+                out.add(round(float(card[key]), 4))
+            except (KeyError, TypeError, ValueError):
+                continue
+    return sorted(out)
+
+
+def free_bands(boxes, top=0.0, bottom=1.0, min_h=CAPTION_BAND_MIN):
+    """[(y0, y1)] full-width bands of the frame between ``top`` and
+    ``bottom`` that no box in ``boxes`` covers, at least ``min_h`` tall —
+    where a caption may sit (layout_rects gives the boxes)."""
+    spans = sorted((max(top, float(b[1])), min(bottom, float(b[3])))
+                   for b in boxes or [] if float(b[3]) > top and float(b[1]) < bottom)
+    out, y = [], float(top)
+    for y0, y1 in spans:
+        if y0 - y >= min_h - 1e-9:
+            out.append((round(y, 4), round(y0, 4)))
+        y = max(y, y1)
+    if bottom - y >= min_h - 1e-9:
+        out.append((round(y, 4), round(float(bottom), 4)))
+    return out
+
+
 def is_lowres(src_w, src_h):
     try:
         return 0 < min(float(src_w), float(src_h)) < LOWRES_SHORT_SIDE
@@ -332,11 +400,31 @@ def median_face(faces):
     return out
 
 
+def face_share(box_h, H):
+    """The share of a card's height (``box_h`` canvas px of an H-tall
+    frame) its speaker's face takes: FACE_SHARE, more in a short card so
+    the face reaches FACE_MIN_FRAME of the frame (at most FACE_SHARE_MAX)."""
+    need = FACE_MIN_FRAME * float(H) / max(1.0, float(box_h))
+    return min(FACE_SHARE_MAX, max(FACE_SHARE, need))
+
+
+def face_cap(face_h, box_h, H, cap=SOURCE_UPSCALE_CAP):
+    """The enlargement a face framing may use: ``cap``, raised as far as a
+    small face (``face_h`` source px) needs to fill face_share of a
+    ``box_h``-px card — never past FACE_UPSCALE_CAP."""
+    try:
+        want = face_share(box_h, H) * float(box_h) / float(face_h)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return cap
+    return max(cap, min(FACE_UPSCALE_CAP, want))
+
+
 def speaker_rect(src_w, src_h, W, H, box, face=None, focus=None,
                  cap=SOURCE_UPSCALE_CAP):
     """A source rect at the box's aspect framing a speaker: the face about
-    FACE_SHARE of the card's height, HEADROOM_TARGET of it clear above the
-    crown (the source's top edge permitting), never enlarged past ``cap``.
+    face_share of the card's height, HEADROOM_TARGET of it clear above the
+    crown (the source's top edge permitting), never enlarged past ``cap``
+    (past it only as far as face_cap lets a small face be read).
     With no face it is the largest such rect centred on ``focus``.
     Returns (rect, headroom) — headroom as a share of the rect's height, or
     None when no face was measured."""
@@ -354,8 +442,10 @@ def speaker_rect(src_w, src_h, W, H, box, face=None, focus=None,
         y0 = _clamp(fy * sh - rh / 2.0, 0.0, sh - rh)
         return [x0 / sw, y0 / sh, (x0 + rw) / sw, (y0 + rh) / sh], None
     fh = (face[3] - face[1]) * sh
-    rh = max(fh / FACE_SHARE, bh / cap)
-    rw = max(rh * a, bw / cap)
+    share = face_share(bh, H)
+    kcap = face_cap(fh, bh, H, cap)
+    rh = max(fh / share, bh / kcap)
+    rw = max(rh * a, bw / kcap)
     rw = min(rw, big)
     rh = rw / a
     cx = (face[0] + face[2]) / 2.0 * sw
@@ -489,6 +579,166 @@ def shot_framings(src_w, src_h, W, H, box, shots, focus_of=None,
     return [(rect, shots_) for rect, shots_, _f, _h in runs]
 
 
+# ── Face-safe panel framing (judges, Oct 2026) ───────────────────────────
+# Owner rule: a card or panel never lets part of the speaker's face leave
+# it. The judged Elon stack chose its speaker rect to end above the source's
+# burned-in browser box: the panel's bottom edge ran through his mouth and
+# chin with the top 45% empty curtain, and Rogan's nose pressed the panel's
+# right edge with a sliver of the browser in the corner. A panel's speaker
+# rect is SOLVED from the measured face track instead:
+#
+# * what it must hold (keep): every measured detector box of the window
+#   (Haar boxes run brow or hairline to the chin, or under it) with PANEL_HAIR of its
+#   height above it, PANEL_CHIN below and PANEL_SIDE either side, at least
+#   PANEL_MARGIN of the rect inside every edge;
+# * its size: the keep region about PANEL_FILL of the rect's height (a
+#   close framing — no empty curtain), never enlarged past face_cap;
+# * its place: the crown HEADROOM_TARGET below the top, and LEAD_ROOM of
+#   the rect's width more room on the side the speaker looks to;
+# * burned-in screen/PIP boxes (insets.py) stay out: of the rects that hold
+#   the face, the one showing the least of them wins — none when one can.
+#   Where the box touches the face itself (the Rogan layout: the browser's
+#   corner sits at the speaker's chin) no rect can leave it out; the face
+#   wins and the result says how much shows.
+PANEL_HAIR = .22
+PANEL_CHIN = .05
+PANEL_SIDE = .06
+PANEL_MARGIN = .03
+PANEL_FILL = .86
+PANEL_FILL_MAX = .94
+LEAD_ROOM = .10
+# A face track that saw the speaker over less than PANEL_SEEN_MIN of the
+# window (a profile the detectors lose) frames with PANEL_UNSEEN_PAD of the
+# face's size more room all round: the unseen stretch may sit a little lower
+# or nearer the edge (the judged Rogan window was measured over 35% of it).
+PANEL_SEEN_MIN = .6
+PANEL_UNSEEN_PAD = .12
+
+
+def panel_keep(faces, pad=0.0):
+    """The region (source fractions) a panel must hold for ``faces``: the
+    union of each box grown by PANEL_HAIR / PANEL_CHIN / PANEL_SIDE (and
+    ``pad`` of its size more all round: room for where it was not seen)."""
+    faces = steady_faces(faces)
+    if not faces:
+        return None
+    keeps = []
+    for f in faces:
+        w, h = f[2] - f[0], f[3] - f[1]
+        keeps.append([f[0] - (PANEL_SIDE + pad) * w, f[1] - (PANEL_HAIR + pad) * h,
+                      f[2] + (PANEL_SIDE + pad) * w, f[3] + (PANEL_CHIN + pad) * h])
+    return [max(0.0, min(k[0] for k in keeps)), max(0.0, min(k[1] for k in keeps)),
+            min(1.0, max(k[2] for k in keeps)), min(1.0, max(k[3] for k in keeps))]
+
+
+def _overlap(a, b):
+    """Area of rects a and b's intersection (same units)."""
+    return max(0.0, min(a[2], b[2]) - max(a[0], b[0])) * \
+        max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+
+
+def holds(rect, keep, margin=0.0):
+    """True when ``keep`` lies inside ``rect`` with ``margin`` of the
+    rect's size clear on every side (fractions; a hair of slack)."""
+    mx, my = margin * (rect[2] - rect[0]), margin * (rect[3] - rect[1])
+    return (keep[0] >= rect[0] + mx - 1e-4 and keep[2] <= rect[2] - mx + 1e-4
+            and keep[1] >= rect[1] + my - 1e-4 and keep[3] <= rect[3] - my + 1e-4)
+
+
+def panel_framing(src_w, src_h, W, H, box, faces, looks=(), avoid=(),
+                  cap=SOURCE_UPSCALE_CAP, prefer=None, pad=0.0):
+    """(rect, info) — a source rect at the box's aspect that holds the
+    speaker's face (panel_keep of ``faces``, source fractions) for a panel
+    or card, or (None, info) when no rect of this box's aspect can (the
+    head is taller or wider than the source allows at it). ``looks``: the
+    samples' gaze (-1 screen-left .. +1 right); ``avoid``: burned-in boxes
+    (source fractions) to keep out; ``prefer``: a rect the editor gave —
+    the answer is the nearest framing to it that holds the face (moved and
+    grown only as far as it must).
+
+    info: keep (the held region), lead (-1/0/1), share (the face's share of
+    the rect's height), k (canvas px per source px), inset (the share of
+    the rect an avoided box still covers), moved (prefer was changed).
+    ``pad``: extra room round the head (a share of the face) where the
+    track saw only part of the window."""
+    sw, sh = float(src_w), float(src_h)
+    bw, bh = (box[2] - box[0]) * W, (box[3] - box[1]) * H
+    a = bw / bh
+    big = min(sw, sh * a)                     # the widest rect of this aspect
+    keep = panel_keep(faces, pad)
+    info = {"keep": keep, "lead": 0, "share": None, "k": None, "inset": 0.0,
+            "moved": False}
+    if keep is None:
+        return None, info
+    med = median_face(steady_faces(faces))
+    fh = (med[3] - med[1]) * sh
+    vals = [float(v) for v in looks or () if v is not None]
+    mean = sum(vals) / len(vals) if vals else 0.0
+    lead = -1 if mean <= -.5 else 1 if mean >= .5 else 0
+    info["lead"] = lead
+    kx0, ky0, kx1, ky1 = keep[0] * sw, keep[1] * sh, keep[2] * sw, keep[3] * sh
+    kw, kh = kx1 - kx0, ky1 - ky0
+    m = PANEL_MARGIN
+    # the smallest rect that holds the keep region with its margins
+    rh_min = max(kh / (1.0 - 2 * m), kw / (1.0 - 2 * m) / a, kh / PANEL_FILL_MAX)
+    kcap = face_cap(fh, bh, H, cap)
+    rh_pref = max(kh / PANEL_FILL, bh / kcap, rh_min)
+    if prefer is not None:
+        ph = (prefer[3] - prefer[1]) * sh
+        rh_pref = max(rh_min, ph)
+    if rh_min * a > big + 1e-6:
+        return None, info                    # the head does not fit this aspect
+    avoid = [[float(v) for v in r] for r in avoid or () if r and len(r) == 4]
+    best = None
+    sizes = sorted({min(big / a, rh_pref)} |
+                   {min(big / a, rh_min + (rh_pref - rh_min) * f)
+                    for f in (0.0, .25, .5, .75)}, reverse=True)
+    # The margin may give way (to the keep region's own edge) where that is
+    # what keeps a burned-in box out; it never does otherwise.
+    margins = (m, 0.0) if avoid else (m,)
+    for rh, mm in [(rh, mm) for rh in sizes for mm in margins]:
+        rw = rh * a
+        # positions that hold the keep region with its margins
+        xa = max(0.0, kx1 + mm * rw - rw)
+        xb = min(sw - rw, kx0 - mm * rw)
+        ya = max(0.0, ky1 + mm * rh - rh)
+        yb = min(sh - rh, ky0 - mm * rh)
+        if xa > xb + 1e-6 or ya > yb + 1e-6:
+            continue
+        if prefer is not None:
+            px = prefer[0] * sw + ((prefer[2] - prefer[0]) * sw - rw) / 2.0
+            py = prefer[1] * sh + ((prefer[3] - prefer[1]) * sh - rh) / 2.0
+        else:
+            px = (kx0 + kx1) / 2.0 + lead * LEAD_ROOM * rw - rw / 2.0
+            py = ky0 - HEADROOM_TARGET * rh
+        px, py = _clamp(px, xa, xb), _clamp(py, ya, yb)
+        xs = sorted({xa, xb, px} | {xa + (xb - xa) * i / 12.0 for i in range(13)})
+        ys = sorted({ya, yb, py} | {ya + (yb - ya) * i / 12.0 for i in range(13)})
+        for x0 in xs:
+            for y0 in ys:
+                r = [round(x0 / sw, 4), round(y0 / sh, 4),
+                     round((x0 + rw) / sw, 4), round((y0 + rh) / sh, 4)]
+                cover = sum(_overlap(r, b) for b in avoid) / max(
+                    1e-9, (r[2] - r[0]) * (r[3] - r[1]))
+                # the inset first (a sliver counts), then the composition:
+                # distance from the preferred place, then size from the
+                # preferred size
+                score = (0.0 if cover < 1e-5 else 1.0 + round(cover, 2),
+                         0 if mm == m else 1,
+                         abs(x0 - px) / max(1.0, rw) + abs(y0 - py) / max(1.0, rh)
+                         + abs(rh - rh_pref) / max(1.0, rh_pref))
+                if best is None or score < best[0]:
+                    best = (score, r, rh)
+    if best is None:
+        return None, info
+    rect = [round(v, 4) for v in best[1]]
+    rect = [max(0.0, rect[0]), max(0.0, rect[1]), min(1.0, rect[2]), min(1.0, rect[3])]
+    info.update(share=fh / best[2], k=bw / (best[2] * a), inset=best[0][0],
+                moved=prefer is not None and any(
+                    abs(u - v) > .004 for u, v in zip(rect, prefer)))
+    return rect, info
+
+
 # The designed canvas a card gets when none is chosen: the footage's own
 # hue, desaturated and taken down to a dark tone, glowing out to near-black
 # — a deliberate canvas, not a blurred smear of the picture (judges, Oct
@@ -539,7 +789,22 @@ def _enlarge(k):
     return flags, sharpen
 
 
-def _single_panel(W, H, box, rect, src_size):
+def _footage_grain(k, grain):
+    """Film grain over enlarged FOOTAGE (',' + noise, or ''): only a face
+    framing enlarged past SOURCE_UPSCALE_CAP (face_cap) on a card that
+    grains its backdrop — the same texture over picture and canvas, so the
+    softness of a 3x archival enlargement reads as film, not as blur. A
+    little lighter than the backdrop's (_grain)."""
+    try:
+        g = float(grain or 0.0)
+    except (TypeError, ValueError):
+        g = 0.0
+    if g <= 0 or k <= SOURCE_UPSCALE_CAP + 1e-3:
+        return ""
+    return f",noise=c0s={max(1, round(16 * g))}:c0f=t:c0_seed={GRAIN_SEED}"
+
+
+def _single_panel(W, H, box, rect, src_size, grain=None):
     """One rect onto its box, with the rest of the canvas showing the source
     around it at the same scale (black past the source's edges): a punch-in
     the camera aims inside the card then reveals real neighbouring picture,
@@ -563,10 +828,11 @@ def _single_panel(W, H, box, rect, src_size):
     bottom = min(H, _even(y + h + (vis[3] - rect[3]) * sh * ky))
     flags, sharpen = _enlarge(max(kx, ky))
     return (f"{_crop_expr(vis)}{sharpen},scale={right - left}:{bottom - top}"
-            f"{flags},setsar=1,pad={W}:{H}:{left}:{top}:color=black")
+            f"{flags}{_footage_grain(max(kx, ky), grain)},setsar=1,"
+            f"pad={W}:{H}:{left}:{top}:color=black")
 
 
-def _panel(W, H, box, rect, src_size):
+def _panel(W, H, box, rect, src_size, grain=None):
     """One rect scaled exactly onto its box (w x h), unplaced."""
     _x, _y, w, h = pixels(W, H, box)
     k = 1.0
@@ -575,13 +841,15 @@ def _panel(W, H, box, rect, src_size):
                           W, H)
         k = w / ((rect[2] - rect[0]) * float(src_size[0]))
     flags, sharpen = _enlarge(k)
-    return f"{_crop_expr(rect)}{sharpen},scale={w}:{h}{flags},setsar=1"
+    return (f"{_crop_expr(rect)}{sharpen},scale={w}:{h}{flags}"
+            f"{_footage_grain(k, grain)},setsar=1")
 
 
 def layout_filter(parts, in_label, out_label, W, H, fps, panels, uid,
                   src_size=None, seg_dur=None, grade=None, tag=None,
                   frames=None, follow_block=None, bounded=False, under=None,
-                  dissolve=None, panel_follow=None):
+                  dissolve=None, panel_follow=None, grain=None,
+                  panel_conceal=None):
     """A main-footage block composed for a source-fed card: every panel's
     source rect scaled once onto its box of a W x H canvas, then the block
     tail _normalize_video uses (CFR, exact length, sar 1, yuv420p). The grade
@@ -610,14 +878,22 @@ def layout_filter(parts, in_label, out_label, W, H, fps, panels, uid,
 
     panel_follow (a stack): one follow_block (or None) per panel — a panel
     whose rect FOLLOWS its speaker inside the shot is drawn by follow.
-    window_chain at its box's size."""
+    window_chain at its box's size.
+
+    grain: the card's grain — laid over footage enlarged past
+    SOURCE_UPSCALE_CAP (_footage_grain).
+
+    panel_conceal (a stack): one list of burned-in boxes (or None) per
+    panel, softened where the panel shows them (_conceal_chain; a still
+    panel only)."""
     import renderer
     if under and dissolve:
         mid = f"lyd{uid}"
         layout_filter(parts, in_label, mid, W, H, fps, panels, uid,
                       src_size=src_size, seg_dur=seg_dur, grade=grade,
                       frames=frames, follow_block=follow_block,
-                      bounded=bounded, panel_follow=panel_follow)
+                      bounded=bounded, panel_follow=panel_follow, grain=grain,
+                      panel_conceal=panel_conceal)
         wins = [pixels(W, H, box) for box, _rect in panels]
         labels = [mid] if len(wins) == 1 else \
             [f"{mid}b{k}" for k in range(len(wins))]
@@ -661,12 +937,13 @@ def layout_filter(parts, in_label, out_label, W, H, fps, panels, uid,
         follow.window_chain(
             parts, in_label, out_label, f"c{uid}", src_size=(sw, sh),
             out_size=(W, H), k=k, ts=ts, ox=ox, oy=oy, length=seg_dur or 0.0,
-            fps=fps, tail=tail, grade=grade, interpolation=interp,
-            sharpen=sharpen, flags=flags, time_map=tmap, key_span=kspan)
+            fps=fps, tail=tail + _footage_grain(k, grain), grade=grade,
+            interpolation=interp, sharpen=sharpen, flags=flags,
+            time_map=tmap, key_span=kspan)
         return
     if len(panels) == 1:
         box, rect = panels[0]
-        parts.append(f"[{in_label}]{head}{_single_panel(W, H, box, rect, src_size)},"
+        parts.append(f"[{in_label}]{head}{_single_panel(W, H, box, rect, src_size, grain)},"
                      f"{tail}[{out_label}]")
         return
     n = len(panels)
@@ -681,7 +958,16 @@ def layout_filter(parts, in_label, out_label, W, H, fps, panels, uid,
                           f"{uid}p{k}")
             chain, src_label = "null", f"lyf{uid}_{k}"
         else:
-            chain, src_label = _panel(W, H, box, rect, src_size), f"ly{uid}_{k}"
+            chain, src_label = _panel(W, H, box, rect, src_size, grain), f"ly{uid}_{k}"
+            hide = panel_conceal[k] if panel_conceal and k < len(panel_conceal) else None
+            if hide and src_size and src_size[0] and src_size[1]:
+                _x, _y, w, h = pixels(W, H, box)
+                shown = match_rect(rect, box, float(src_size[0]),
+                                   float(src_size[1]), W, H)
+                parts.append(f"[ly{uid}_{k}]{chain}[lyq{uid}_{k}]")
+                _conceal_chain(parts, f"lyq{uid}_{k}", f"lyh{uid}_{k}", shown,
+                               hide, w, h, f"lyk{uid}_{k}")
+                chain, src_label = "null", f"lyh{uid}_{k}"
         if k == 0:
             parts.append(f"[{src_label}]{chain},pad={W}:{H}:{x}:{y}:color=black"
                          f"[lyc{uid}_0]")
@@ -690,6 +976,87 @@ def layout_filter(parts, in_label, out_label, W, H, fps, panels, uid,
         parts.append(f"[lyc{uid}_{k - 1}][lyp{uid}_{k}]overlay={x}:{y}"
                      f":shortest=1[lyc{uid}_{k}]")
     parts.append(f"[lyc{uid}_{n - 1}]{tail}[{out_label}]")
+
+
+# A concealed box (CardPanel.conceal) is blurred this strongly (a share of
+# its own short side), darkened to this share of its level and feathered
+# over this share of the panel's short side into the picture around it.
+CONCEAL_BLUR = .25
+CONCEAL_DIM = .45
+CONCEAL_FEATHER = .12
+
+
+def conceal_boxes(rect, regions, w, h):
+    """[(x0, y0, x1, y1, interior sides)] — the parts of ``regions`` (SOURCE
+    fractions) a panel showing ``rect`` at w x h draws, in panel pixels,
+    each grown by the feather on the sides that face the picture (never
+    past the panel), interior = (left, top, right, bottom) feathered."""
+    out = []
+    rx0, ry0, rx1, ry1 = (float(v) for v in rect)
+    f = max(4, int(round(CONCEAL_FEATHER * min(w, h))))
+    for c in regions or []:
+        ix0, iy0 = max(float(c[0]), rx0), max(float(c[1]), ry0)
+        ix1, iy1 = min(float(c[2]), rx1), min(float(c[3]), ry1)
+        if ix1 - ix0 < 1e-4 or iy1 - iy0 < 1e-4:
+            continue
+        px0 = (ix0 - rx0) / (rx1 - rx0) * w
+        py0 = (iy0 - ry0) / (ry1 - ry0) * h
+        px1 = (ix1 - rx0) / (rx1 - rx0) * w
+        py1 = (iy1 - ry0) / (ry1 - ry0) * h
+        inner = (px0 > 1, py0 > 1, px1 < w - 1, py1 < h - 1)
+        x0 = _even(max(0, px0 - f)) if inner[0] else 0
+        y0 = _even(max(0, py0 - f)) if inner[1] else 0
+        x1 = min(w, _even(px1 + f)) if inner[2] else w
+        y1 = min(h, _even(py1 + f)) if inner[3] else h
+        if x1 - x0 >= 4 and y1 - y0 >= 4:
+            out.append((x0, y0, x1, y1, inner))
+    return out
+
+
+def _conceal_chain(parts, in_label, out_label, rect, regions, w, h, uid):
+    """[in_label] (a panel picture, w x h) -> [out_label] with the parts of
+    burned-in boxes it shows softened: blurred, darkened and feathered into
+    the picture — what of the box a face-holding framing could not leave
+    out reads as shadow, never as a second screen."""
+    boxes = conceal_boxes(rect, regions, w, h)
+    if not boxes:
+        parts.append(f"[{in_label}]null[{out_label}]")
+        return
+    f = max(4, int(round(CONCEAL_FEATHER * min(w, h))))
+    parts.append(f"[{in_label}]split={len(boxes) + 1}[{uid}m]"
+                 + "".join(f"[{uid}c{k}]" for k in range(len(boxes))))
+    base = f"{uid}m"
+    for k, (x0, y0, x1, y1, inner) in enumerate(boxes):
+        cw, ch = x1 - x0, y1 - y0
+        r = max(2, min(int(CONCEAL_BLUR * min(cw, ch)), (min(cw, ch) // 2) - 1))
+        rc = max(1, min(r // 2, (min(cw, ch) // 4) - 1))
+        # an eased ramp over the feather on each side facing the picture:
+        # the softened box fades in like a shadow, never a hard-edged block
+        ramps = []
+        if inner[0]:
+            ramps.append(f"X/{f}")
+        if inner[1]:
+            ramps.append(f"Y/{f}")
+        if inner[2]:
+            ramps.append(f"(W-1-X)/{f}")
+        if inner[3]:
+            ramps.append(f"(H-1-Y)/{f}")
+        t = "1"
+        for ramp in ramps:
+            t = f"min({t},{ramp})"
+        t = f"clip({t},0,1)"
+        alpha = f"255*{t}*{t}*(3-2*{t})"
+        parts.append(
+            f"[{uid}c{k}]crop={cw}:{ch}:{x0}:{y0},"
+            f"boxblur=luma_radius={r}:luma_power=2:chroma_radius={rc}:chroma_power=2,"
+            f"lutyuv=y='16+(val-16)*{CONCEAL_DIM:.2f}':u='128+(val-128)*.5'"
+            f":v='128+(val-128)*.5',format=yuva420p,"
+            f"geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='clip({alpha},0,255)'"
+            f"[{uid}s{k}]")
+        nxt = out_label if k == len(boxes) - 1 else f"{uid}o{k}"
+        parts.append(f"[{base}][{uid}s{k}]overlay={x0}:{y0}:format=auto,"
+                     f"format=yuv420p[{nxt}]")
+        base = nxt
 
 
 def _follow_panel(parts, in_label, out_label, W, H, fps, box, rect, src_size,

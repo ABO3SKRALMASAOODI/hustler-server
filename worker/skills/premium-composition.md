@@ -60,14 +60,16 @@ LAYOUTS FOR 9:16:
 - **Card on a designed background** (archival 4:3, wide shots that a crop
   would destroy, two-shot frames): `set_picture_card` takes the card's
   footage straight from the full SOURCE frame — never a re-crop of the 9:16
-  crop — enlarged once and at most 2x. `source='auto'` frames the speaker
+  crop — enlarged once and at most 2x (up to 3x only to make a small
+  archival face readable). `source='auto'` frames the speaker
   from a measured face track with headroom above the head and follows a
   speaker who moves inside a shot (still while they sway, a smooth glide
   only when a still card would cut the head, never across a cut — each
   shot gets its own framing); a source below
   720p is shown whole (a 4:3 talk becomes a full-width 4:3 card, ~1.6x,
   instead of a 3.7x crop that cuts the head). Give it rounded corners, a
-  hairline border, a soft shadow and a lift or reveal entrance. Leave the
+  hairline border, a soft shadow and an entrance that dissolves the card in
+  from the full-frame shot (fade/lift; on a cut, 'none'). Leave the
   canvas to the default — a dark tone sampled from the footage glowing to
   near-black, vignette, and film grain on low-resolution footage — or pick
   a gradient; a blurred copy of the picture (`blur`) only behind sharp HD
@@ -83,9 +85,11 @@ LAYOUTS FOR 9:16:
   region of the SAME source frame in another, both over the window the
   evidence is discussed. Crop the evidence to what is being read (the
   highlighted sentence and its source line), so it is legible, and keep the
-  speaker's face in frame the whole time; never a crop that drops the speaker
-  for seconds or slices the inset. Leave a band for the stat or captions;
-  zooms do not play inside a stack.
+  speaker's face in frame the whole time (the speaker panel is solved from
+  the face: chin, hair and lead room inside it); never a crop that drops the
+  speaker for seconds or slices the inset. The panels keep a caption band
+  between them; leave the band above for the stat; zooms do not play inside
+  a stack.
 - **Two speakers**: shot-aware reframing that cuts to the active speaker, or
   a stacked card when both reactions matter.
 - Never leave a fixed band of the canvas empty for the whole reel.

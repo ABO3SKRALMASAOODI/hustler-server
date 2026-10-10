@@ -2101,17 +2101,23 @@ def follow_current(meta, edl):
     frame = edl.get("frame") if isinstance(edl.get("frame"), dict) else {}
     cards = ((edl.get("effects") or {}).get("picture_cards")) or []
     if not ((frame or {}).get("follow")
-            or any(isinstance(c, dict) and c.get("follow") for c in cards)):
+            or any(isinstance(c, dict) and (
+                c.get("follow") or any(isinstance(p, dict) and p.get("follow")
+                                       for p in c.get("panels") or []))
+                for c in cards)):
         return True
     return ((meta or {}).get("follow_v") or 0) == config.FOLLOW_VERSION
 
 
 def cards_current(meta, edl):
-    """Was this render's picture-card layout drawn by today's cards
-    (config.CARD_LAYOUT_VERSION)? Only EDLs that carry a picture card can be
-    stale; everything else keeps its cache."""
+    """Was this render's layout drawn by today's cards and headline band
+    (config.CARD_LAYOUT_VERSION)? Only EDLs that carry a picture card or a
+    persistent headline can be stale; everything else keeps its cache."""
+    import motion_templates
     cards = (((edl or {}).get("effects") or {}).get("picture_cards")) or []
-    if not any(isinstance(c, dict) for c in cards):
+    band = any(isinstance(m, dict) and motion_templates.persistent(m)
+               for m in (edl or {}).get("motion") or [])
+    if not band and not any(isinstance(c, dict) for c in cards):
         return True
     return ((meta or {}).get("card_v") or 0) == config.CARD_LAYOUT_VERSION
 
@@ -2965,7 +2971,10 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                         picture_cards.step_scale_at(card, mid_src)
                         is not None,
                         [follow.span_at(p.get("follow"), mid_src)
-                         for p in card.get("panels") or []] or None)
+                         for p in card.get("panels") or []] or None,
+                        card.get("grain"),
+                        [p.get("conceal") for p in card.get("panels") or []]
+                        or None)
                     card_blocks.setdefault(card["id"], []).append(i)
                 else:
                     run = None
@@ -3441,7 +3450,10 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                     under=under, dissolve=card_dissolve.get(i),
                     panel_follow=[_follow_of(i, sp) + (follow_interp,)
                                   if sp and follow.moves(sp) else None
-                                  for sp in pspans] if pspans else None)
+                                  for sp in pspans] if pspans else None,
+                    grain=card_layout[i][5] if len(card_layout[i]) > 5 else None,
+                    panel_conceal=(card_layout[i][6] if len(card_layout[i]) > 6
+                                   else None))
                 continue
             _full_frame(i, f"segv{i}", f"v_seg{i}", f"s{i}")
 

@@ -2101,13 +2101,15 @@ FOLLOW_VERSION = 1
 # changes (renderer.handoff_affected). Everything else keeps its cache.
 HANDOFF_VERSION = 1
 
-# Picture-card layouts (worker/picture_cards.py). Stamped as `card_v` on
-# every render and compared ONLY for EDLs that carry a picture card: older
-# renders opened and closed a card by fading its footage in over its own
-# backdrop — a frame of bare dark canvas mid-sentence (judges, Oct 2026) —
-# where today's dissolve the whole card with the full-frame shot (or cut in
-# populated on a cut), and their stack panels may cut the speaker's face.
-# Everything else keeps its cache. Bump when what a card looks like changes.
+# Picture-card layouts (worker/picture_cards.py) and the headline band.
+# Stamped as `card_v` on every render and compared ONLY for EDLs that carry a
+# picture card or a persistent headline: older renders opened and closed a
+# card by fading its footage in over its own backdrop — a frame of bare dark
+# canvas mid-sentence (judges, Oct 2026) — where today's dissolve the whole
+# card with the full-frame shot (or cut in populated on a cut), and their
+# headline left its band empty for up to a second between graphics where
+# today's swaps on the frame. Everything else keeps its cache. Bump when what
+# a card or the band looks like changes.
 CARD_LAYOUT_VERSION = 1
 
 # The picture pipeline's look. A stitched preview stream-copies the unchanged
