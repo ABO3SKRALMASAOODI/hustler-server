@@ -93,11 +93,17 @@ import camera
 #   that runs out mid-fine still leaves a complete 2 fps track
 #   (MIN_MEASURE_FPS) to plan from;
 # * where CPU is not scarce it runs there: agent_tools races this same
-#   function on the batch media lane (run_faces_job, 4 vCPU) against the
+#   function on the batch media lane (run_faces_job, 4 vCPU, at most two
+#   batch shards, the proxy range-read rather than staged) against the
 #   local pass and takes whichever completes;
 # * nothing measured is thrown away (FACE_STORE: per proxy, per process),
 #   so a second tool call over the same footage reads it back, and a call
-#   that ran out of time resumes where the last one stopped;
+#   that ran out of time resumes where the last one stopped (the very same
+#   call, too: the replay guard lets it through and the failure is not
+#   remembered past its own call) — waiting on the media-lane job it
+#   started if that is still running;
+# * every kept window gets a sample, however short (_sample_plan): a
+#   fragment without one would leave the track incomplete forever;
 # * every outcome is reported (measure's ``report``): the tool result says
 #   when the follow could not be measured and why, and a metric counts it.
 SAMPLE_FPS = 4.0
@@ -453,17 +459,87 @@ def cpu_count():
         return float(os.cpu_count() or 1)
 
 
-def decode_spans(windows, gap=SPAN_GAP_S):
+def decode_spans(windows, gap=SPAN_GAP_S, pad=0.0):
     """[(A, B, [windows])]: ``windows`` grouped into the stretches one
-    ffmpeg pass decodes."""
+    ffmpeg pass decodes; each stretch reaches ``pad`` seconds past its
+    windows' ends (never before 0), so a fragment shorter than a sample step
+    still has a decoded frame beside it (_sample_plan)."""
     out = []
     for a, b in sorted((float(a), float(b)) for a, b in windows):
-        if out and a - out[-1][1] <= gap:
-            out[-1][1] = max(out[-1][1], b)
+        lo, hi = max(0.0, a - pad), b + pad
+        if out and lo - out[-1][1] <= gap:
+            out[-1][1] = max(out[-1][1], hi)
             out[-1][2].append((a, b))
         else:
-            out.append([a, b, [(a, b)]])
+            out.append([lo, hi, [(a, b)]])
     return [(a, b, ws) for a, b, ws in out]
+
+
+def _sample_plan(A, B, fps, k, windows, cuts):
+    """What one decode span [A, B] (grid frame i at A + i/fps) samples for
+    ``windows`` (inside it): (full, fine, empty).
+
+    full {i: [t, ...]}: frame i gets a FULL detection, recorded at each t —
+    every k-th grid frame inside a window (the coarse track); a fine frame
+    with no full neighbour in its own shot within k frames (an isolated
+    sample: no neighbour to search around, so a region search would miss
+    it); and, for a window SHORTER than a sample step that no grid frame
+    falls inside (a sliver beside a cut, a word kept between two removed
+    ones), the nearest grid frame of its shot within one step, recorded at
+    the window's edge — the old per-window decode sampled such a fragment
+    at its start, and a fragment without a sample would leave the track
+    incomplete forever. fine {i: t}: the frames between, searched around
+    their full neighbours. empty [t]: windows no frame of their own shot
+    reaches (a shot shorter than a step) — recorded as measured with no
+    face, so they are covered without inventing a position."""
+    n = int(math.floor((B - A) * fps + 1e-6)) + 1
+
+    def at(i):
+        return A + i / fps
+
+    def shot(t):
+        return bisect.bisect_right(cuts, t)
+
+    inside = {}
+    for a, b in windows:
+        lo = max(0, int(math.ceil((a - A) * fps - 1e-6)))
+        hi = min(n - 1, int(math.floor((b - A) * fps + 1e-6)))
+        for i in range(lo, hi + 1):
+            inside[i] = round(at(i), 3)
+    full = {i: [t] for i, t in inside.items() if i % k == 0}
+    fine = {}
+    for i in sorted(inside):
+        if i % k == 0:
+            continue
+        s = shot(at(i))
+        if any(j in full and shot(at(j)) == s
+               for j in range(i - k, i + k + 1) if j != i):
+            fine[i] = inside[i]
+        else:
+            full[i] = [inside[i]]
+    empty = []
+    step = 1.0 / fps
+    for a, b in windows:
+        lo = max(0, int(math.ceil((a - A) * fps - 1e-6)))
+        hi = min(n - 1, int(math.floor((b - A) * fps + 1e-6)))
+        if lo <= hi:
+            continue                         # it has grid frames of its own
+        s = shot((a + b) / 2.0)
+        best = None
+        for i in range(max(0, int(math.floor((a - step - A) * fps)) - 1),
+                       min(n - 1, int(math.ceil((b + step - A) * fps)) + 1) + 1):
+            t = at(i)
+            d = max(a - t, t - b, 0.0)
+            if d <= step + 1e-6 and shot(t) == s and (best is None or d < best[0]):
+                best = (d, i)
+        if best is None:
+            empty.append(round((a + b) / 2.0, 3))
+            continue
+        i = best[1]
+        full.setdefault(i, []).append(round(min(max(at(i), a), b), 3))
+        if i in fine:                        # one full detection serves both
+            full[i].append(fine.pop(i))
+    return full, fine, empty
 
 
 def _stream_gray(path, a, b, fps, width, height, deadline, cancel=None,
@@ -531,6 +607,12 @@ def _stream_gray(path, a, b, fps, width, height, deadline, cancel=None,
         err.close()
 
 
+def _is_url(path):
+    """A source ffmpeg reads over a protocol (a presigned object URL that it
+    range-reads), not a local file."""
+    return isinstance(path, str) and "://" in path[:16]
+
+
 def _usage():
     try:
         import resource
@@ -556,7 +638,8 @@ def measure(path, windows, aspect, fps=SAMPLE_FPS, width=DETECT_WIDTH,
     a full detection, exactly what one sample always got (every face of
     every size: group shots are judged on these); FINE (the samples between)
     searches only around its coarse neighbours' faces, at their size (~1/5
-    of the cost), and skips a sample with no face either side. Bounded: past
+    of the cost), and records a sample with no face either side as nobody
+    there. Every window gets a sample, however short (_sample_plan). Bounded: past
     MAX_MEASURE_FRAMES the rate drops (never below MIN_MEASURE_FPS), more
     than MAX_MEASURE_S of footage is not measured, and past ``budget_s`` of
     wall clock (or once ``cancel`` is set) it stops and returns what it has.
@@ -587,7 +670,7 @@ def measure(path, windows, aspect, fps=SAMPLE_FPS, width=DETECT_WIDTH,
     rep["footage_s"] = round(total, 2)
     if too_long(windows):
         return done("failed", "too_long")
-    if not path or not os.path.exists(path):
+    if not path or not (_is_url(path) or os.path.exists(path)):
         return done("failed", "no_proxy", path or "no path")
     import subject
     cv2 = subject._cv2()
@@ -607,7 +690,7 @@ def measure(path, windows, aspect, fps=SAMPLE_FPS, width=DETECT_WIDTH,
     rep.update(fps=round(fps, 3), threads=n_threads)
     cuts = sorted(float(c) for c in cuts or ())
     deadline = started + float(budget_s)
-    coarse, fine_todo = {}, []
+    coarse, fine_todo, empty = {}, [], []
     decode_s, decode_err = 0.0, None
     try:
         prev_threads = cv2.getNumThreads()
@@ -615,23 +698,26 @@ def measure(path, windows, aspect, fps=SAMPLE_FPS, width=DETECT_WIDTH,
     except Exception:
         prev_threads = None
     try:
-        for A, B, inside in decode_spans(windows):
+        # Each stretch starts k samples before its first window, so that
+        # window's first frame is a full detection, as it always was.
+        for A, B, inside in decode_spans(windows, pad=k / fps):
+            full, fine_at, nobody = _sample_plan(A, B, fps, k, inside, cuts)
+            empty += nobody
+            last = max(list(full) + list(fine_at), default=-1)
             st = {}
             t_dec = time.monotonic()
             gen = _stream_gray(path, A, B, fps, w, h, deadline, cancel,
                                threads=min(2, n_threads + 1), state=st)
             try:
                 for i, gray in enumerate(gen):
-                    t = A + i / fps
-                    if t > B + 1e-6:
+                    if i > last:
                         break
-                    if not any(a - 1e-6 <= t <= b + 1e-6 for a, b in inside):
-                        continue
-                    t = round(t, 3)
-                    if i % k:
-                        fine_todo.append((t, gray))
-                        continue
-                    coarse[t] = detect(gray, cv2, cascades)
+                    if i in fine_at:
+                        fine_todo.append((fine_at[i], gray))
+                    elif i in full:
+                        dets = detect(gray, cv2, cascades)
+                        for t in full[i]:
+                            coarse[t] = dets
             finally:
                 gen.close()
             decode_s += time.monotonic() - t_dec
@@ -656,20 +742,42 @@ def measure(path, windows, aspect, fps=SAMPLE_FPS, width=DETECT_WIDTH,
         times = sorted(coarse)
         fine, roi, cut_short = {}, [], None
         reach = k / fps + 1e-3
+
+        def neighbours(t):
+            shot = bisect.bisect_right(cuts, t)
+            j = bisect.bisect_left(times, t)
+            return [u for u in times[max(0, j - 1):j + 1]
+                    if abs(u - t) <= reach and bisect.bisect_right(cuts, u) == shot]
+        # A sample between two full detections that found nobody is measured
+        # as nobody (no search needed) — recorded first, so a budget that
+        # cuts the searches short still leaves every window covered. The
+        # windows no frame of their own shot reaches are the same: nobody.
+        searches = []
         for t, gray in fine_todo:
+            near = neighbours(t)
+            if near and not any(coarse[u] for u in near):
+                fine[t] = []
+                roi.append(t)
+            else:
+                searches.append((t, gray, near))
+        for t in empty:
+            if t not in coarse and t not in fine:
+                fine[t] = []
+                roi.append(t)
+        fine_todo = None
+        for t, gray, near in searches:
             if cancel is not None and cancel.is_set():
                 cut_short = "cancelled"
                 break
             if time.monotonic() > deadline:
                 cut_short = "budget"
                 break
-            shot = bisect.bisect_right(cuts, t)
-            j = bisect.bisect_left(times, t)
-            near = [u for u in times[max(0, j - 1):j + 1]
-                    if abs(u - t) <= reach and bisect.bisect_right(cuts, u) == shot]
             boxes = [d[0] for u in near for d in coarse[u]]
             if not boxes:
-                continue                     # no face either side: skip
+                # no full neighbour in its shot (_sample_plan makes such a
+                # sample a full detection; kept as a guard): search it whole
+                fine[t] = detect(gray, cv2, cascades)
+                continue
             fw = max(b[2] - b[0] for b in boxes)
             fh = max(b[3] - b[1] for b in boxes)
             area = [min(b[0] for b in boxes) - ROI_PAD[0] * fw,
@@ -680,7 +788,7 @@ def measure(path, windows, aspect, fps=SAMPLE_FPS, width=DETECT_WIDTH,
             fine[t] = detect(gray, cv2, cascades,
                              face_px=heights[len(heights) // 2] * h, roi=area)
             roi.append(t)
-        fine_todo = None
+        searches = None
         frames = list(coarse.items()) + list(fine.items())
         rep.update(fine=len(fine), roi_times=roi)
         if cut_short:
@@ -772,7 +880,11 @@ class FaceStore:
             inside = [t for t in ts[bisect.bisect_left(ts, a - .05):
                                     bisect.bisect_right(ts, b + .05)]]
             if not inside:
-                out.append((a, b))
+                # a fragment shorter than a step is covered by a sample
+                # within a step of it, as the plan's 2 fps would be
+                if not (b - a <= step and ts[bisect.bisect_left(ts, a - step):
+                                            bisect.bisect_right(ts, b + step)]):
+                    out.append((a, b))
                 continue
             if inside[0] - a > edge:
                 out.append((a, inside[0] - .05))
@@ -838,14 +950,39 @@ def run_faces_job(worker_db, job):
         workdir = os.path.join(config.TMP_DIR, f"faces_{uuid.uuid4().hex[:8]}")
         os.makedirs(workdir, exist_ok=True)
         try:
-            local = media_cache.lease(key, workdir, "proxy.mp4")
+            # A container that holds the proxy reads it; any other range-
+            # reads only the windows' bytes (the proxy is +faststart) instead
+            # of staging all of it: production proxies run to ~400 MB, 25-60
+            # s of download on a cold shard — most of the window this job
+            # has to beat the caller's own pass.
+            deadline = time.monotonic() + float(payload.get("budget_s") or 150.0)
+
+            def staged():
+                got = media_cache.lease(key, workdir, "proxy.mp4")
+                if not got:
+                    got = os.path.join(workdir, "proxy.mp4")
+                    storage.download_to(key, got)
+                return got
+
+            def run(source):
+                return measure(source, todo, float(payload.get("aspect") or .5625),
+                               fps=fps, width=width,
+                               budget_s=max(1.0, deadline - time.monotonic()),
+                               cuts=payload.get("cuts") or (), report=report)
+            local = media_cache.resident(key, workdir, "proxy.mp4")
+            url = None
             if not local:
-                local = os.path.join(workdir, "proxy.mp4")
-                storage.download_to(key, local)
-            frames = measure(local, todo, float(payload.get("aspect") or .5625),
-                             fps=fps, width=width,
-                             budget_s=float(payload.get("budget_s") or 150.0),
-                             cuts=payload.get("cuts") or (), report=report)
+                try:
+                    url = storage.presign_get(key, expires=3600)
+                except Exception:
+                    url = None
+            frames = run(local or url) if (local or url) else []
+            report["source"] = "cached" if local else "stream" if url else None
+            if not local and (not url or report.get("status") == "failed"):
+                # no URL, or a stream that read nothing: stage the proxy
+                report["stream_error"] = report.get("detail") if url else None
+                frames = run(staged())
+                report["source"] = "staged"
             FACE_STORE.add(skey, frames, report.get("roi_times"))
         finally:
             shutil.rmtree(workdir, ignore_errors=True)

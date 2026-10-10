@@ -45,6 +45,14 @@ MCP and 8 Shorts shards. Dispatcher wait slots use the same Cloudflare-aware
 defaults, so a 20-card editorial run is not silently serialized to the old
 three-call remote limit.
 
+A follow's face track (`faces`, Oct 2026) is a hedge the MCP and agent lanes
+race against their own measurement, and every face-following card or crop
+can fire one. A batch shard runs one call at a time, so `faces` calls route
+to the last two batch shards only (`FACES_SHARDS` in `src/index.ts`): a burst
+of parallel editors cannot crowd index, final or the other synchronous media
+tools off the lane, and a busy pair leaves the caller its own pass. The job
+range-reads the +faststart proxy over a presigned URL instead of staging it.
+
 ## One-time setup
 
 1. Enable Workers Paid and Containers in the Cloudflare account.

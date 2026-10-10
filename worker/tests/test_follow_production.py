@@ -171,8 +171,10 @@ def prod(monkeypatch, tmp_path, walk_proxy):
         AssertionError("the proxy comes from the media cache")))
     monkeypatch.setattr(remote, "faces_available", lambda: False)
     follow.FACE_STORE.clear()
+    agent_tools._FACES_INFLIGHT.clear()
     yield leases
     follow.FACE_STORE.clear()
+    agent_tools._FACES_INFLIGHT.clear()
 
 
 def _reframe(ctx):
@@ -385,6 +387,10 @@ def test_run_faces_job_round_trip(monkeypatch, tmp_path, walk_proxy):
         return out
     monkeypatch.setattr(media_cache, "lease", lease)
     monkeypatch.setattr(config, "TMP_DIR", str(tmp_path))
+
+    def no_url(key, expires=3600):
+        raise RuntimeError("no presigning here")
+    monkeypatch.setattr(storage, "presign_get", no_url)
     payload = {"storage_key": KEY, "windows": [[4.0, 9.0]], "aspect": 360 / 640,
                "cuts": [], "fps": 4.0, "width": 448, "budget_s": 30,
                "faces_version": follow.FACES_VERSION}
@@ -543,3 +549,184 @@ def test_detect_maps_a_region_search_back_to_the_whole_frame(monkeypatch):
     calls.clear()
     follow.detect(gray, cv2, [Cascade()])
     assert calls[0][0] == (200, 400) and "maxSize" not in calls[0][1]
+
+
+# ── review fixes (Oct 10 2026) ────────────────────────────────────────────
+
+@FFMPEG
+def test_a_kept_sliver_never_leaves_the_track_incomplete(prod, monkeypatch, tmp_path):
+    """A kept fragment shorter than a sample step that no grid frame falls
+    inside (a word kept between two cuts, a sliver beside a camera cut) got
+    no sample: the track never counted as complete, every call reported
+    'the proxy could not be decoded' and the edit never followed."""
+    monkeypatch.setattr(follow, "detect", _Detector())
+    keep = ((4.0, 7.0), (7.6, 7.72), (8.4, 12.0), (12.5, 16.0))
+    ctx = _ProdCtx(tmp_path, keep=keep)
+    res = _reframe(ctx)
+    assert ctx._edl["frame"]["follow"], res
+    assert "FOLLOW: not measured" not in res
+    assert ctx.db.metrics == ["follow_track_local"]
+    assert follow.FACE_STORE.uncovered(follow.FACE_STORE.key(KEY), keep) == []
+    frames, _roi = follow.FACE_STORE.samples(follow.FACE_STORE.key(KEY), [(7.6, 7.72)])
+    assert frames and frames[0][1]                 # measured, with the face
+
+
+def test_every_window_gets_a_sample():
+    """_sample_plan: every k-th grid frame inside a window is a full
+    detection; a fine frame with no full neighbour in its shot becomes one;
+    a window no grid frame falls inside takes the nearest frame of its own
+    shot, recorded at its edge; one no frame of its shot reaches is
+    measured as nobody there."""
+    # grid 9.5 + i/4: 10.0 (i=2), 10.25, ... ; k=2 (coarse = even i)
+    full, fine, empty = follow._sample_plan(
+        9.5, 12.0, 4.0, 2, [(10.0, 10.5), (10.8, 10.85), (11.2, 11.3)], cuts=[])
+    rec = {t for ts in full.values() for t in ts}
+    assert {10.0, 10.5} <= rec and fine == {3: 10.25}
+    assert 10.8 in rec                           # 10.75, recorded at the sliver's start
+    assert 11.25 in rec                          # isolated odd frame: full
+    assert empty == []
+    # a sliver right before a cut whose only frame within a step lies past it
+    full, fine, empty = follow._sample_plan(
+        9.5, 11.0, 4.0, 2, [(10.3, 10.4)], cuts=[10.4, 10.45])
+    assert not any(10.3 <= t <= 10.4 for ts in full.values() for t in ts) \
+        or empty == []
+    full, fine, empty = follow._sample_plan(
+        9.5, 11.0, 4.0, 2, [(10.42, 10.44)], cuts=[10.41, 10.45])
+    assert empty == [10.43] and not full and not fine
+
+
+def test_a_short_fragment_near_a_sample_is_covered():
+    st = follow.FaceStore()
+    key = st.key("proxies/1/b.mp4")
+    st.add(key, [(10.0 + i * .5, []) for i in range(5)])            # 10.0 .. 12.0
+    assert st.uncovered(key, [(12.3, 12.42)]) == []                # within a step
+    assert st.uncovered(key, [(13.0, 13.1)]) == [(13.0, 13.1)]      # nothing near
+
+
+class _NoChangeCtx(_ProdCtx):
+    """write_edl answers NO CHANGE for an identical EDL, as production's does."""
+
+    def write_edl(self, edl, desc):
+        new = validate_edl(dict(edl), SRC).model_dump()
+        if new == self._edl:
+            return f"NO CHANGE — the EDL is identical to v{len(self.written) + 1}"
+        return super().write_edl(edl, desc)
+
+
+@FFMPEG
+def test_calling_the_tool_again_resumes_on_the_same_session(prod, monkeypatch, tmp_path):
+    """An MCP session keeps one context between calls. The result of a
+    follow that ran out of time says 'calling the tool again resumes' — so
+    the exact same call must neither be refused by the replay guard nor
+    answered from a remembered failure; and when it still cannot follow,
+    a NO CHANGE answer must still say so."""
+    det = _Detector(full_s=.08)
+    monkeypatch.setattr(follow, "detect", det)
+    monkeypatch.setattr(follow, "MEASURE_BUDGET_S", 0.5)
+    ctx = _NoChangeCtx(tmp_path)
+    args = {"id": "c", "start": 0, "end": 8, "box": [.04, .2, .96, .55], "fit": "crop"}
+    first = agent_tools.execute(ctx, "set_picture_card", dict(args))
+    assert "did not finish in time" in first and "resumes the measurement" in first
+    assert ctx._tool_call_token is None              # cleared after the call
+    # still out of time: the same card again — the result still says so
+    monkeypatch.setattr(follow, "detect", _Detector(full_s=10.0))
+    again = agent_tools.execute(ctx, "set_picture_card", dict(args))
+    assert "NO CHANGE" in again and "does NOT follow the speaker" in again, again
+    # time enough now: the same exact call resumes and follows
+    monkeypatch.setattr(follow, "detect", det)
+    monkeypatch.setattr(follow, "MEASURE_BUDGET_S", 60.0)
+    resumed = agent_tools.execute(ctx, "set_picture_card", dict(args))
+    assert "NO CHANGE" not in resumed, resumed
+    assert "framed from a dense face track" in resumed
+    assert ctx.db.metrics == ["follow_unmeasured_budget", "follow_unmeasured_budget",
+                              "follow_track_local"]
+    # and a finished write is protected by the replay guard again
+    assert "NO CHANGE" in agent_tools.execute(ctx, "set_picture_card", dict(args))
+
+
+@FFMPEG
+def test_a_call_inside_one_tool_call_asks_the_lanes_once(prod, monkeypatch, tmp_path):
+    """Within one call (_card_dense, then _card_follow) a failure is not
+    measured twice — the second ask would double the call's time."""
+    det = _Detector(full_s=.08)
+    monkeypatch.setattr(follow, "detect", det)
+    monkeypatch.setattr(follow, "MEASURE_BUDGET_S", 0.5)
+    ctx = _ProdCtx(tmp_path, keep=((4.0, 7.0), (7.4, 12.0)))
+    ctx.index["shots"] = [{"id": 1, "start": 0.0, "end": 7.2},
+                          {"id": 2, "start": 7.2, "end": SRC}]
+    t = time.monotonic()
+    res = agent_tools.execute(ctx, "set_picture_card",
+                              {"id": "c", "start": 0, "end": 7.5,
+                               "box": [.04, .2, .96, .55], "fit": "crop"})
+    assert "FOLLOW: not measured" in res, res
+    assert ctx.db.metrics == ["follow_unmeasured_budget"]
+    assert time.monotonic() - t < 2.5
+
+
+@FFMPEG
+def test_a_resumed_call_waits_on_the_media_lane_job_already_running(
+        prod, monkeypatch, tmp_path):
+    """The first call ran out of time while its media-lane job still ran.
+    The next call over that footage waits on the same job (no second batch
+    shard), and its own pass stops the moment the job completes."""
+    local = _Detector(full_s=.3)
+    lane_started = threading.Event()
+
+    def detect(gray, cv2=None, cascades=None, face_px=None, roi=None):
+        if threading_name() == "follow-faces-remote":
+            lane_started.set()
+            return _blob(gray, roi)
+        return local(gray, roi=roi)
+    monkeypatch.setattr(follow, "detect", detect)
+    monkeypatch.setattr(agent_tools, "FOLLOW_REMOTE_MIN_S", 1.0)
+    monkeypatch.setattr(follow, "MEASURE_BUDGET_S", 0.6)
+    seen = []
+    _in_process_media_lane(monkeypatch, tmp_path, delay=2.5, seen=seen)
+    ctx = _ProdCtx(tmp_path)
+    first = _reframe(ctx)
+    assert "the media-lane measurement still running" in first, first
+    assert ctx.db.metrics == ["follow_unmeasured_budget"]
+    monkeypatch.setattr(follow, "MEASURE_BUDGET_S", 30.0)
+    t = time.monotonic()
+    again = _ProdCtx(tmp_path / "again")
+    second = _reframe(again)
+    assert again._edl["frame"]["follow"], second
+    assert len(seen) == 1                            # one media-lane job in all
+    assert again.db.metrics == ["follow_track_remote"]
+    assert time.monotonic() - t < 6                  # the local pass was cancelled
+    assert local.full < 30
+
+
+@FFMPEG
+def test_the_media_lane_range_reads_the_proxy_instead_of_staging_it(
+        monkeypatch, tmp_path, walk_proxy):
+    """A cold batch shard used to download the whole proxy (production's run
+    to ~400 MB: 25-60 s) before measuring 40 s of it. It now range-reads a
+    presigned URL (the proxy is +faststart); a stream that reads nothing
+    falls back to staging it."""
+    follow.FACE_STORE.clear()
+    monkeypatch.setattr(follow, "detect", _Detector())
+    monkeypatch.setattr(config, "TMP_DIR", str(tmp_path))
+    staged = []
+
+    def lease(key, dest, name):
+        staged.append(key)
+        out = os.path.join(dest, name)
+        shutil.copyfile(walk_proxy, out)
+        return out
+    monkeypatch.setattr(media_cache, "lease", lease)
+    monkeypatch.setattr(storage, "presign_get",
+                        lambda key, expires=3600: f"file://{walk_proxy}")
+    payload = {"storage_key": KEY, "windows": [[4.0, 9.0]], "aspect": 360 / 640,
+               "cuts": [], "fps": 4.0, "width": 448, "budget_s": 30,
+               "faces_version": follow.FACES_VERSION}
+    out = follow.run_faces_job(None, {"payload": payload})
+    assert out["ok"] and out["report"]["source"] == "stream" and staged == []
+    assert len(follow.unpack_frames(out["frames"])) >= 18
+    # a URL that reads nothing: the proxy is staged and measured
+    follow.FACE_STORE.clear()
+    monkeypatch.setattr(storage, "presign_get",
+                        lambda key, expires=3600: f"file://{tmp_path}/missing.mp4")
+    out = follow.run_faces_job(None, {"payload": payload})
+    assert out["ok"] and out["report"]["source"] == "staged" and staged == [KEY]
+    follow.FACE_STORE.clear()

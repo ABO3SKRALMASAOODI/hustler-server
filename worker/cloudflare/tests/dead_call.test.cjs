@@ -400,3 +400,25 @@ test('MCP and interactive containers outlive model think time; batch lanes stay 
   batch.env = {};
   assert.equal(batch.environment().CLOUDFLARE_IDLE_TAIL_S, '60');
 });
+
+test('face-track calls hold at most two batch shards; other batch work spreads', async () => {
+  const seen = { faces: new Set(), index: new Set() };
+  let current = null;
+  const env = { EXECUTOR_SECRET: 'test-secret', BATCH: { getByName: (name) => ({
+    fetch: async () => { seen[current].add(name); return new Response('{}'); },
+  }) } };
+  for (const type of ['faces', 'index']) {
+    current = type;
+    for (let i = 0; i < 200; i += 1) {
+      const digest = createHash('sha256').update(`${type}:sync:${i}`).digest('hex').slice(0, 20);
+      const res = await exportsObject.default.fetch(new Request(
+        `https://executor.example/calls/batch/cf-${type}-${digest}`, {
+          method: 'POST', headers: { authorization: 'Bearer test-secret' },
+          body: JSON.stringify({ job: { id: null, type, project_id: 1, payload: {} } }),
+        }), env);
+      assert.equal(res.status, 200);
+    }
+  }
+  assert.deepEqual([...seen.faces].sort(), ['batch-6', 'batch-7']);
+  assert.equal(seen.index.size, 8);
+});

@@ -126,6 +126,23 @@ def _lease(cached, dest_dir, name):
     return target
 
 
+def resident(storage_key, dest_dir, name):
+    """lease()'s hit path alone: a hardlink of an object this container
+    already holds, or None — never a download (a caller that can range-read
+    the object instead decides what a miss costs)."""
+    if not storage_key:
+        return None
+    entry = os.path.join(cache_dir(), _entry_name(storage_key))
+    try:
+        with _key_lock(entry):
+            if os.path.exists(entry) and os.path.getsize(entry) > 0:
+                os.utime(entry, None)              # LRU touch
+                return _lease(entry, dest_dir, name)
+    except Exception:  # noqa: BLE001 — a cache never fails a tool
+        return None
+    return None
+
+
 def lease(storage_key, dest_dir, name):
     """A job-owned hardlink of an immutable object at ``dest_dir/name``,
     from the cache (downloading it once on a miss), or None when the cache

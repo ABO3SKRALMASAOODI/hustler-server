@@ -7802,9 +7802,10 @@ def _merge_windows(windows):
 FOLLOW_REMOTE_MIN_S = 12.0
 # The media lane's own measuring budget (4 vCPU: ~6x a standard-1 pass).
 FOLLOW_REMOTE_BUDGET_S = 150.0
-# A failed measurement is not retried within this long (the same tool call
-# asks twice: _card_dense, then _card_follow); a later call retries and
-# resumes from what was measured.
+# A failed measurement is not retried within the tool call that hit it (it
+# asks twice: _card_dense, then _card_follow); the next call retries and
+# resumes from what was measured. Outside execute (no call token) the memo
+# lasts this long instead.
 FOLLOW_FAIL_MEMO_S = 30.0
 
 
@@ -7870,6 +7871,11 @@ class _RemoteFaces:
         self.thread.start()
         return self
 
+    def covers(self, windows):
+        """True when this request's windows hold all of ``windows``."""
+        return all(any(ja - .05 <= float(a) and float(b) <= jb + .05
+                       for ja, jb in self.windows) for a, b in windows)
+
     def _run(self):
         try:
             res = remote.run_faces_remote(self.project_id, self.payload,
@@ -7895,6 +7901,37 @@ class _RemoteFaces:
             self.finished.set()
 
 
+# Media-lane face jobs still running in this process, per FACE_STORE key. A
+# call that ran out of time leaves its job running (whatever it returns still
+# lands in FACE_STORE); the next call over that footage — the agent calling
+# the tool again to resume — waits on the same job instead of starting a
+# second one on another batch shard, and its local pass stops the moment
+# that job completes.
+_FACES_INFLIGHT = {}
+_FACES_INFLIGHT_LOCK = threading.Lock()
+
+
+def _remote_faces(ctx, storage_key, todo, aspect, cuts):
+    """(job, reused): a running media-lane job whose request covers ``todo``,
+    else a new one, started."""
+    skey = follow.FACE_STORE.key(storage_key)
+    with _FACES_INFLIGHT_LOCK:
+        jobs = [j for j in _FACES_INFLIGHT.get(skey) or []
+                if not j.finished.is_set()]
+        for j in jobs:
+            if j.covers(todo):
+                _FACES_INFLIGHT[skey] = jobs
+                return j, True
+        job = _RemoteFaces(ctx, storage_key, todo, aspect, cuts)
+        jobs.append(job)
+        _FACES_INFLIGHT[skey] = jobs
+        for k in [k for k, v in _FACES_INFLIGHT.items()
+                  if not any(not j.finished.is_set() for j in v)]:
+            if k != skey:
+                del _FACES_INFLIGHT[k]
+    return job.start(), False
+
+
 def _measure_faces(ctx, windows, aspect, cuts):
     """(frames, roi_times, failure, stats): the face track over SOURCE
     ``windows`` — what FACE_STORE already holds, else measured now on this
@@ -7917,7 +7954,8 @@ def _measure_faces(ctx, windows, aspect, cuts):
             available = False
         if available:
             # before the local proxy download: the media lane reads its own copy
-            job = _RemoteFaces(ctx, key, todo, aspect, cuts).start()
+            job, reused = _remote_faces(ctx, key, todo, aspect, cuts)
+            stats["remote_reused"] = reused
     proxy, proxy_err = None, None
     try:
         proxy = ctx.proxy_path()
@@ -7928,7 +7966,10 @@ def _measure_faces(ctx, windows, aspect, cuts):
     todo = follow.FACE_STORE.uncovered(skey, windows)
     local = {}
     if not todo:
-        stats["lane"] = "cached"
+        # complete before this lane measured anything: the store held it, or
+        # the media lane delivered it while the proxy downloaded
+        stats["lane"] = ("remote" if job is not None and job.done.is_set()
+                         else "cached")
     elif proxy:
         frames = follow.measure(
             proxy, todo, aspect, cuts=cuts, report=local,
@@ -8018,7 +8059,8 @@ def _follow_samples(ctx, windows, cuts=()):
     windows). counts: follow.face_counts of the full-frame samples (group
     shots). ``cuts``: the shot boundaries — each shot is tracked on its own
     (follow.speaker_track). Never raises; a measured result is reused for
-    the turn, a failure for FOLLOW_FAIL_MEMO_S."""
+    the context's life, a failure only inside the same tool call
+    (FOLLOW_FAIL_MEMO_S)."""
     windows = _merge_windows(windows)
     if not windows:
         return [], "sparse", [], None
@@ -8037,9 +8079,17 @@ def _follow_samples(ctx, windows, cuts=()):
             ctx._follow_faces = cache
         except Exception:
             pass
+    # A measured outcome holds for the footage. A failure is reused only
+    # inside the tool call that hit it (its second ask: _card_dense, then
+    # _card_follow): an MCP session keeps this context between calls, and a
+    # later call must retry — resuming from FACE_STORE, which may meanwhile
+    # hold the media lane's track — exactly as the result promised.
+    token = getattr(ctx, "_tool_call_token", None)
     hit = cache.get(key)
-    if hit is not None and (hit[3] is None
-                            or time.monotonic() - hit[4] < FOLLOW_FAIL_MEMO_S):
+    if hit is not None and (
+            hit[3] is None or hit[1] in ("too_long", "no_faces")
+            or (hit[5] is token and (token is not None or time.monotonic()
+                                     - hit[4] < FOLLOW_FAIL_MEMO_S))):
         return hit[:4]
     stats = None
     if follow.too_long(windows):
@@ -8072,7 +8122,7 @@ def _follow_samples(ctx, windows, cuts=()):
                     out = (sparse, "no_faces", [], {"why": "no_faces",
                                                     "samples": len(frames),
                                                     "footage_s": round(total, 1)})
-    cache[key] = out + (time.monotonic(),)
+    cache[key] = out + (time.monotonic(), token)
     _follow_report(ctx, out[1], out[3], stats)
     return out
 
@@ -8088,6 +8138,12 @@ _FOLLOW_WHY = {
                "in {elapsed_s:.0f}s)"),
     "error": "the face measurement failed ({detail})",
 }
+
+
+# The phrase every "the follow could not be measured" result carries (and
+# nothing else): execute keeps such a write replayable, since calling it
+# again is how the measurement resumes.
+FOLLOW_UNMEASURED = "does NOT follow the speaker"
 
 
 def _follow_note(failure, what="crop"):
@@ -8114,8 +8170,8 @@ def _follow_note(failure, what="crop"):
         reason = f"the face measurement failed ({why})"
     if failure.get("remote"):
         reason += f"; the media-lane measurement {failure['remote']}"
-    note = (f"FOLLOW: not measured — {reason}. The {what} does NOT follow the "
-            f"speaker: {hold}, which can let a moving speaker's head drift "
+    note = (f"FOLLOW: not measured — {reason}. The {what} {FOLLOW_UNMEASURED}"
+            f": {hold}, which can let a moving speaker's head drift "
             "toward the edge — check the framing with look_at.")
     if why == "budget":
         note += (" Calling the tool again resumes the measurement (what was "
@@ -15779,6 +15835,10 @@ def set_picture_card(ctx, id, start, end, box=None, fit=None, radius=.045,
             "footage card")
     res = ctx.write_edl(edl, f"{what} {id} on {start}-{end}s{look}; typography remains outside the picture treatment")
     if not (isinstance(res, str) and res.startswith("EDL v")):
+        if isinstance(res, str) and res.startswith("NO CHANGE") \
+                and any(FOLLOW_UNMEASURED in r for r in report):
+            # the same still card again: still say the follow is missing
+            res += "\nFOOTAGE: " + " | ".join(report)
         return res
     if report:
         res += "\nFOOTAGE: " + " | ".join(report)
@@ -29116,7 +29176,27 @@ def parse_tool_arguments(raw):
 
 def execute(ctx, name, args):
     """Dispatch one tool call. Returns a string for the model (AskUser
-    propagates)."""
+    propagates). The outermost call (not a recipe's staged operations)
+    carries a token on the context for its duration: per-call memos
+    (_follow_samples) tell this call from the next one, which an MCP session
+    runs on the same context."""
+    outer = getattr(ctx, "_tool_call_token", None) is None
+    if outer:
+        try:
+            ctx._tool_call_token = object()
+        except Exception:
+            outer = False
+    try:
+        return _execute(ctx, name, args)
+    finally:
+        if outer:
+            try:
+                ctx._tool_call_token = None
+            except Exception:
+                pass
+
+
+def _execute(ctx, name, args):
     if not isinstance(args, dict):
         outcome = tool_outcome_mod.ToolOutcome(
             status="correction_needed",
@@ -29246,8 +29326,11 @@ def execute(ctx, name, args):
         _count_tool_outcome(ctx, "tool_failed")
     elif kind == "prerequisite":
         _count_tool_outcome(ctx, "tool_prerequisite")
+    # A write whose face follow could not be measured is not a finished
+    # write: calling it again is how the measurement resumes (the result
+    # says so), so the replay guard must not refuse that call.
     if replay_key is not None and isinstance(out, str) \
-            and out.startswith("EDL v"):
+            and out.startswith("EDL v") and FOLLOW_UNMEASURED not in out:
         try:
             after_edl = ctx.latest_edl()["json"]
             footprint = _write_footprint(before_edl, after_edl)
