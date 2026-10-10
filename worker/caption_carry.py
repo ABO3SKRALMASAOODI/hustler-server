@@ -286,8 +286,9 @@ def graphic_lines(item):
         body = re.sub(r"(?is)<(script|style)\b.*?</\1>", " ", item["html"])
         out.append(("html", re.sub(r"<[^>]+>", " ", body)))
     # in reading order: a kicker is read (and said) before the line it sits
-    # over ("and scored / 26% better overall" matched against the speech)
-    out.sort(key=lambda kv: 0 if kv[0] == "kicker" else 1)
+    # over ("and scored / 26% better overall" matched against the speech),
+    # and so is a list's lead ("Let's get / proportionally spaced fonts")
+    out.sort(key=lambda kv: 0 if kv[0] in ("kicker", "lead") else 1)
     return [(k, v) for k, v in out if tokens(v)]
 
 

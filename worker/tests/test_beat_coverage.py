@@ -117,6 +117,45 @@ def test_names_and_claims():
     assert len(claims) == 1 and claims[0]["text"].startswith("I think")
 
 
+def test_talk_is_not_a_list_and_generic_capitals_are_not_names():
+    """Review, Oct 2026: on three hour-long transcripts half the 'lists' were
+    talk — the planner pre-fills a list_build's rows with them."""
+    for junk in ("Have a great day, and back to you, Sam.",
+                 "We got no gravity. You know, Thor, Ragnarok? Do you guys cover that?",
+                 "I can also tag in Dottie itself and say, hey, can we turn this around?",
+                 "Just turn the camera to the room, to the audience, and I'll say, put it up.",
+                 "It was costing them money, a customer comes in, peruses them and picks one.",
+                 "Then at the end of the day, Thibault, Tejal, and I will be back.",
+                 "The first principles don't change, you know, in the final analysis, Mead and "
+                 "Conway is still a good book.",
+                 "A governor... The former governor of California, governor Brown, started this."):
+        assert spoken_beats.lists(_words(junk)) == [], junk
+    keep = {
+        "We're launching ultrafast across the API, ChatGPT, and Codex. And we think so.":
+            ["API", "ChatGPT", "Codex"],
+        "Models are great for math, coding, and computer use, and all of these.":
+            ["math", "coding", "computer use"],
+        "So much information in data banks, in congressional budgets, in testimony, in "
+        "books, journal articles.": ["in congressional budgets", "in testimony", "in books"],
+    }
+    for text, items in keep.items():
+        got = spoken_beats.lists(_words(text))
+        assert got and [i["text"] for i in got[0]["items"]][:3] == items, (text, got)
+    # a member turning on a preposition is not a triad item; 'thank you' is no anaphora
+    tri = spoken_beats.triads(_words(JOBS + " Let's get to the point."))
+    assert [i["text"] for i in tri[0]["items"]] == [
+        "proportionally spaced fonts", "multiple fonts", "graphics"]
+    assert spoken_beats.triads(_words("Thank you all very much. Thank you for coming here. "
+                                      "Thank you for watching online.")) == []
+    # a run of three figures is no range ('6, 7, 800 dots per inch' = 600-800)
+    assert all(n["kind"] == "number" for n in spoken_beats.numbers(
+        _words("We want to go to 6, 7, 800 dots per inch on a printer.")))
+    names = [n["text"] for n in spoken_beats.names(_words(
+        "We use AI on NVIDIA GPUs every Monday. The Chinese market and Apple, right? "
+        "Okay, the CPU ships in January."))]
+    assert names == ["NVIDIA GPUs", "Apple"], names
+
+
 # ── 2. beat coverage ─────────────────────────────────────────────────────
 
 def _edl(motion=(), dur=30.0, **extra):
@@ -193,6 +232,10 @@ def test_a_zoom_or_a_sound_does_not_fill_a_dead_stretch_but_a_beat_or_an_image_d
     imaged = _edl(_framing(thesis, _mg("x", "word_slam", 21.0, 22.0, text="*generated*")),
                   overlays=[{"id": "o1", "start": 13.5, "duration_s": 5.0, "asset_key": "a"}])
     assert _note(imaged, words, "dead_stretch") is None
+    # ...and so does a renderer-native vector graphic (an arrow on the evidence)
+    vectored = _edl(_framing(thesis, _mg("x", "word_slam", 21.0, 22.0, text="*generated*")),
+                    vectors=[{"id": "v1", "kind": "arrow", "start": 13.5, "end": 18.5}])
+    assert _note(vectored, words, "dead_stretch") is None
 
 
 def test_a_short_quiet_stretch_without_argument_is_a_choice_not_a_gap():
@@ -300,6 +343,11 @@ def test_a_small_hook_with_a_live_caption_under_it_is_named_and_the_hook_tier_is
                        kicker="Peter Thiel", tier="hook")])
     codes = [n["code"] for n in _notes(tiered, words)]
     assert "hook_small" not in codes and "hook_shares_zone" not in codes
+    # a hook tier opted out of its zone has the live caption under it again
+    opted = _edl([dict(_mg("hook", "word_slam", 0.0, 2.0, text="They promised us / *flying cars*…",
+                           tier="hook"), mute_captions=False)])
+    shared = _note(opted, words, "hook_shares_zone")
+    assert shared is not None and "1960s technology" in shared["message"]
 
 
 def test_the_hook_tier_owns_its_zone_the_captions_wait_until_it_exits():
@@ -477,6 +525,27 @@ def test_a_list_build_window_starts_on_its_first_item_and_reads_the_transcript(p
     assert "list_build" in motion_templates.names()
 
 
+def test_a_triads_lead_is_read_before_its_rows_so_the_caption_never_repeats_it(probe):
+    """Review, Oct 2026: the Jobs triad's caption 'Let's get' was still up as
+    the list's lead 'Let's get' appeared — the lead was matched after the
+    rows, so the opener said just before the window stayed captioned."""
+    ctx = _Ctx("We're injecting some liberal arts into these computers. "
+               + JOBS.split("computers. ", 1)[1])
+    ctx._edl["captions"] = {"mode": "from_transcript"}
+    w = ctx.index["words"]
+    first = _at(w, "proportionally")
+    motion_tools.add_motion_graphic(ctx, "list_build", first, _at(w, "graphics") + 1.2, id="lb",
+                                    params={"rows": [{"text": "proportionally spaced fonts"},
+                                                     {"text": "multiple fonts"},
+                                                     {"text": "graphics"}],
+                                            "lead": "Let's get", "y": 0.2, "height": 0.16})
+    edl = ctx.latest_edl()["json"]
+    tl = Timeline(edl["keep"], [], [])
+    shown = [x["w"] for x in caplib.caption_words(edl, ctx.index, tl)]
+    assert "Let's" not in shown and "proportionally" not in shown, shown
+    assert "computers." in shown
+
+
 def test_list_and_hook_estimates_follow_their_copy():
     sp = motion_templates.spec("list_build")
     three = keepout.nominal_ink("list_build", sp, {"rows": [{"text": "a"}, {"text": "bb"},
@@ -513,6 +582,11 @@ def test_the_hook_tier_writes_a_hook_line_and_a_late_one_is_named(probe):
     out = motion_tools.add_motion_graphic(ctx, "word_slam", 6.0, 7.0, id="late",
                                           params={"text": "*again*", "tier": "hook"})
     assert "already this short's hook title" in out and "start it by 1.5s" in out, out
+    # a hook that holds the captions back past the hook line is named
+    out = motion_tools.set_motion_graphic(ctx, "hook", end=5.0)
+    assert "holds the captions back for 5.0s" in out, out
+    out = motion_tools.set_motion_graphic(ctx, "hook", end=2.5)
+    assert "holds the captions back" not in out, out
 
 
 # ── 8. the beat planner ──────────────────────────────────────────────────
@@ -532,8 +606,15 @@ def test_the_planner_ranks_lists_triads_ranges_and_names_and_reports_dead_stretc
     assert len(lst["imagery"]) == len(lst["item_times"]) and lst["imagery"][0]["duration_s"] <= 0.6
     tri = by_kind["triad"][0]
     assert tri["template"] == "list_build" and tri["params"]["lead"] == "Let's get"
-    rng = next(b for b in by_kind["number"] if "value" in b["params"])
+    rng = next(b for b in by_kind["number"] if "–" in str(b["params"].get("value")))
     assert rng["params"]["value"] == "30–40"
+    # every suggested counter is placeable as written (the counter's own params)
+    for b in by_kind["number"]:
+        motion_templates.check_params("counter", {k: v for k, v in b["params"].items()
+                                                  if v is not None})
+    unit = motion_planner.plan({"keep": [[0.0, 30.0]]}, {"words": _words(
+        "Hello there friends. It costs $15 or $20 million to build one of these.")})
+    assert [b["params"]["value"] for b in unit["beats"] if b["kind"] == "number"] == ["$15–20M"]
     assert by_kind["name"][0]["imagery"][0]["query"] == "LISA"
     assert res["beat_gaps"] and all(b - a > motion_planner.BEAT_GAP_S for a, b in res["beat_gaps"])
 
@@ -632,14 +713,24 @@ NUMS = """(() => { const cs = Array.from(document.querySelectorAll('.num:not(.gl
   return [Number(getComputedStyle(st).opacity), cs.map(c => c.textContent)]; })()"""
 
 
+# a range's figures, and whether its second figure and its unit are shown
+RANGE_PARTS = """(() => { const n = document.querySelector('.num:not(.glow)');
+  const vis = el => el ? Number(getComputedStyle(el).opacity) : 1;
+  const suf = Array.from(n.children).filter(e => e.classList.contains('aff')).pop();
+  return [Array.from(n.querySelectorAll('.core')).map(c => c.textContent),
+          vis(n.querySelectorAll('.lead')[1]), vis(suf)]; })()"""
+
+
 @needs_browser
 def test_the_counter_really_counts_into_its_word_and_shows_a_range_as_said():
     frames = [i / 30 for i in range(0, 60)]
-    single, rng = asyncio.run(_run([
+    single, rng, money = asyncio.run(_run([
         ("counter", {"value": "140", "land": 1.2, "glow": 0}, 2.0, None,
          [(t, NUMS) for t in frames]),
         ("counter", {"value": "30–40", "land_first": 0.6, "land": 1.3, "glow": 0}, 2.0, None,
          [(t, NUMS) for t in frames]),
+        ("counter", {"value": "$15–20M", "land_first": 0.6, "land": 1.3, "glow": 0}, 2.0, None,
+         [(t, RANGE_PARTS) for t in frames]),
     ]))
     roll = 0.4
     for t, (opacity, cores) in zip(frames, single):
@@ -655,6 +746,13 @@ def test_the_counter_really_counts_into_its_word_and_shows_a_range_as_said():
         assert (hi == "40") == (t >= 1.3 - 1e-6), (t, hi)
         if t < 0.6 - roll - 0.07:
             assert opacity == 0, (t, opacity)
+    # the unit belongs to the second figure: '$15' alone never reads '$15   M',
+    # and the second figure never joins reading the first ('15–15M')
+    for t, (cores, hi_on, suf_on) in zip(frames, money):
+        assert suf_on == hi_on, (t, cores, hi_on, suf_on)
+        if hi_on:
+            assert cores[1] != cores[0], (t, cores)
+    assert money[-1] == [["15", "20"], 1, 1], money[-1]
 
 
 HOOK = """(() => Array.from(document.querySelectorAll('.line')).map(el => {

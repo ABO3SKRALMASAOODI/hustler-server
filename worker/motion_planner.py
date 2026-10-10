@@ -208,7 +208,11 @@ def plan(edl, index, density="premium", camera=False, sounds=False):
         ctx_words = " ".join(w["w"] for w in words[max(0, i0 - 6): min(len(words), last_i + 8)])
         rng = ranges.get(round(t, 2))
         if rng is not None and len(cl) == 2:
-            lo, hi = (_display_value(v)[0] for v in rng["values"])
+            (lo, lo_sc), (hi, hi_sc) = (_display_value(f[1]) for f in cl)
+            # one prefix, scale and unit for the pair, as the counter reads a
+            # range: '$15 or $20 million' is '$15–20M', '30, 40%' is '30–40%'
+            lo = f"{cl[0][2]}{lo}{lo_sc if lo_sc != hi_sc else ''}"
+            hi = f"{hi}{hi_sc}{cl[1][3]}"
             if free(t):
                 add({"at": round(max(0.0, t - 0.47), 2), "template": "counter", "kind": "number",
                      "end": round(min(prog, rng["t1"] + 2.0), 2),
@@ -226,8 +230,7 @@ def plan(edl, index, density="premium", camera=False, sounds=False):
                 # (add_motion_graphic sets its landing on the onset)
                 add({"at": round(max(0.0, t - 0.47), 2), "template": "counter", "kind": "number",
                      "end": round(min(prog, t + 2.2), 2),
-                     "params": {"to": to, "prefix": prefix, "suffix": (scale + suffix) or "",
-                                "label": None},
+                     "params": {"value": f"{prefix}{to}{scale}{suffix}", "label": None},
                      "text_hint": ctx_words,
                      "why": f"spoken number '{' '.join(w['w'] for w in words[_i:_i + consumed])}' — make it land as a counter ON the word: it counts 0 -> value over ~0.4 s into it (label = what it measures, from the sentence)"})
         else:

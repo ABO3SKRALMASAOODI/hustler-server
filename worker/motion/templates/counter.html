@@ -178,7 +178,10 @@
     const q = a + k * step;
     return b >= a ? Math.min(q, b - step) : Math.max(q, b + step);
   };
-  const shown = v => shownFor(v, RNG && TWO ? lo : from, to, STEP);
+  // (a range's second figure counts on from the first one up, never
+  // reading '30–30' on the frame it joins)
+  const shown = v => RNG && TWO ? Math.max(shownFor(v, lo, to, STEP), Math.min(lo + STEP, to - STEP))
+    : shownFor(v, from, to, STEP);
   const shownLo = v => shownFor(v, from, lo, Math.pow(10, -loDec));
 
   const stage = MG.$('#stage');
@@ -388,7 +391,7 @@
       bx = [Math.min(bx[0], x + w / 2 - sw / 2), Math.min(bx[1], y + h / 2 - sh / 2), Math.max(bx[2], x + w / 2 + sw / 2), Math.max(bx[3], y + h / 2 + sh / 2)];
     } else scrim.remove();
     MG.box = [Math.max(0, bx[0]), Math.max(0, bx[1]), Math.min(W, bx[2]), Math.min(H, bx[3])];
-    return { numwrap, num, core, core2, dash, lead2, label, rule, cols, seps, sign, drum, slot, fs, x, y, k, glow, scrim: useScrim ? scrim : null, bks };
+    return { numwrap, num, core, core2, dash, lead2, sufEl, label, rule, cols, seps, sign, drum, slot, fs, x, y, k, glow, scrim: useScrim ? scrim : null, bks };
   }
   MG.ready = fontsReady.then(() => { L = L || layout(); });
 
@@ -417,7 +420,7 @@
   };
   MG.frame(t => {
     if (!L) L = layout();
-    const { numwrap, core, core2, dash, lead2, label, rule, cols, seps, sign, drum, slot, glow, fs, scrim } = L;
+    const { numwrap, core, core2, dash, lead2, sufEl, label, rule, cols, seps, sign, drum, slot, glow, fs, scrim } = L;
     const on = t >= ON_AT - 1e-6;                       // nothing before it enters (a reveal: until it lands)
     const te = Math.max(0, t - E0);                     // entrance clock
     numwrap.style.transformOrigin = P.align === 'left' ? '0% 60%' : '50% 60%';
@@ -441,6 +444,8 @@
       const hiOn = !TWO || t >= (reveal ? CT : HS) - 1e-6;
       dash.style.opacity = hiOn ? 1 : 0;
       lead2.style.opacity = hiOn ? 1 : 0;
+      // the unit belongs to the second figure ('$15–20M'): it joins with it
+      if (sufEl) sufEl.style.opacity = hiOn ? 1 : 0;
     } else if (V && !cols.length) {
       const s = t >= CT || reveal ? finalStr : fmt(shown(valueAt(t)), decimals, grp, dec);
       if (s !== lastStr) { core.innerHTML = digitsHTML(s, slot); lastStr = s; }

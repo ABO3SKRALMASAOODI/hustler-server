@@ -925,6 +925,13 @@ def _beat_spans(edl, ms, prog, duration):
     information, and nothing here may be satisfied by one."""
     spans = [{"start": m["start"], "end": m["end"]} for m in ms]
     spans += [{"start": s["start"], "end": s["end"]} for s in _imagery(edl, ms, prog)]
+    # a renderer-native vector graphic (an arrow, a ring, an underline on
+    # the evidence) is a designed beat too
+    for v in edl.get("vectors") or []:
+        if isinstance(v, dict):
+            a, b = _f(v.get("start"), None), _f(v.get("end"), None)
+            if a is not None and b is not None and b > a:
+                spans.append({"start": a, "end": b})
     fx = edl.get("effects") or {}
     for c in fx.get("picture_cards") or [] if isinstance(fx, dict) else []:
         if not isinstance(c, dict):
@@ -1330,9 +1337,20 @@ def _hook_size_notes(edl, hook_ms, bands, aspect=9 / 16.0, prog=None):
             continue
         fs = _slam_main_fs(m["item"], aspect)
         if fs is None:
-            continue              # the hook tier (and payoff/hero) is sized by its tier
-        small = fs < HOOK_MIN_FS - HOOK_FS_SLACK
-        under = _captions_under(edl, m, prog) if prog is not None else ""
+            # the hook tier (and payoff/hero) is sized by its tier; a hook
+            # tier opted out of its zone (mute_captions=false) can still have
+            # the live caption stacked under it
+            import captions as caplib
+            item = m["item"]
+            if str((item.get("params") or {}).get("tier") or "") != "hook" \
+                    or caplib.hook_owns_zone(item) or prog is None:
+                continue
+            fs, small, under = None, False, _captions_under(edl, m, prog)
+            if not under:
+                continue
+        else:
+            small = fs < HOOK_MIN_FS - HOOK_FS_SLACK
+            under = _captions_under(edl, m, prog) if prog is not None else ""
         if not (small or under):
             continue
         said = (f" while the captions run '{_quote(under, 36)}' under it — two sentences "

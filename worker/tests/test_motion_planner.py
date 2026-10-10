@@ -37,7 +37,11 @@ def test_numbers_lists_contrast_and_cta_become_timed_beats():
     kinds = [b["kind"] for b in res["beats"]]
     assert kinds[0] == "hook" and res["beats"][0]["at"] == 0.0
     num = next(b for b in res["beats"] if b["kind"] == "number")
-    assert num["template"] == "counter" and num["params"]["to"] == 340 and num["params"]["suffix"] == "%"
+    assert num["template"] == "counter" and num["params"]["value"] == "340%"
+    # the counter's own parameters: the beat is placeable as written
+    import motion_templates
+    motion_templates.check_params("counter", {k: v for k, v in num["params"].items()
+                                              if v is not None})
     lst = next(b for b in res["beats"] if b["kind"] == "list")
     assert lst["template"] == "checklist" and len(lst["item_times"]) == 3
     assert any(b["kind"] == "contrast" for b in res["beats"])

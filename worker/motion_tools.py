@@ -1700,6 +1700,10 @@ def _hero_fit(ctx, edl, item):
 # The hook tier is the OPENING title: one per short, starting by this
 # program second (captions.HOOK_ZONE_START_S).
 HOOK_TIER_START_S = 1.5
+# ... and holding the captions back no longer than this (the judged hooks
+# were ~2 s; every second past the hook line is speech a sound-off viewer
+# never reads).
+HOOK_TIER_LONG_S = 3.0
 
 
 def _tier_notes(ctx, edl, item):
@@ -1726,6 +1730,12 @@ def _tier_notes(ctx, edl, item):
             out.append("HOOK: the captions wait until it exits (it owns its zone, so the first "
                        "seconds have one reading task); mute_captions=false keeps them running "
                        "beside it.")
+            held = float(item.get("end") or 0.0) - float(item.get("start") or 0.0)
+            if held > HOOK_TIER_LONG_S + 1e-6:
+                out.append(f"NOTE (tier): it holds the captions back for {held:.1f}s — a "
+                           "sound-off viewer reads none of the speech under it. End it with "
+                           f"the hook line (about 1.5-{HOOK_TIER_LONG_S:g}s), or set "
+                           "mute_captions=false.")
         return out
     if tier == "hero":
         twin = [m["id"] for m in others if _tier(m.get("params")) == "hero"]

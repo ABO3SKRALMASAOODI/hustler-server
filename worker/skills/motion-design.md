@@ -111,7 +111,9 @@ CHOOSING A TEMPLATE — confirm names and params with `list_motion_templates()`:
   small lead-in above it ("They promised us / *flying cars*…"), the kicker
   naming the speaker above that; it OWNS ITS ZONE — the captions wait until
   it exits (the reply says HOOK; mute_captions=false keeps them running
-  beside it), so the first seconds have one reading task. `payoff` is the
+  beside it), so the first seconds have one reading task. End it with the
+  hook line (about 1.5–3 s): every second past it is speech a sound-off
+  viewer never reads (the reply NOTEs a longer one). `payoff` is the
   short's closing lockup, the number and its noun
   locked up together in the accent (`'*140* / characters'`, justified) —
   make it the largest lockup of the short (the reply NOTEs a taller one);

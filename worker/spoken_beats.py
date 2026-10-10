@@ -13,7 +13,12 @@ named product or place, a number — are findable in the words alone:
   ("rockets and supersonic aviation and the Green Revolution agriculture
   and underwater cities and new medicines"; "computers, internet, mobile").
   An item is a short noun phrase (at most ITEM_MAX_CONTENT content words);
-  a chunk that carries a figure belongs to a stat run, not a list.
+  a chunk that carries a figure belongs to a stat run, not a list. Talk is
+  no item ('you KNOW, Thor', 'and SAY, HEY', 'BACK to you, Sam': NOT_ITEM),
+  nor is a clause fragment opening on a preposition unless its neighbours
+  open on it too ('in budgets, in testimony, in books'); a longer clause's
+  last word leads a list only after a word that introduces one ('…but ALSO
+  rockets and…', LEAD_CUES).
 - ``triads``: three sentences that open the same way inside TRIAD_WINDOW_S
   (anaphora: "Let's get… / Let's get… / Let's get…"); each item is what
   follows the opener up to its first function word.
@@ -22,7 +27,8 @@ named product or place, a number — are findable in the words alone:
   scale — and adjacent pairs said as a RANGE ("30, 40 fonts" -> 30-40).
 - ``names``: proper nouns inside a sentence (a product, place, person or
   event: "LISA", "Green Revolution") — capitalised words that do not open
-  a sentence and are not function words.
+  a sentence and are not function words, generic acronyms, demonyms or the
+  calendar ('AI', 'Chinese', 'Monday': NOT_NAME).
 - ``claims``: sentences carrying a claim cue ("I think…", "it's not…",
   "the problem is…", "should", "never") — the thesis lines.
 
@@ -54,7 +60,8 @@ _I_FORMS = frozenset(("i", "i'm", "i've", "i'd", "i'll", "i’m", "i’ve", "i�
 # Sentence openers too common to make an anaphora (all function words are
 # excluded anyway).
 _COMMON_OPENERS = frozenset(("you know", "i think", "and then", "so the", "it was",
-                             "this is", "that is", "that's the", "there's a"))
+                             "this is", "that is", "that's the", "there's a", "thank you",
+                             "i mean"))
 CLAIM_CUES = re.compile(
     r"\b(i think|i believe|the (?:problem|reason|truth|point|key|secret|lesson|thing|"
     r"answer|question) (?:is|was)|the real\b|it'?s not|isn'?t|we need|we have to|"
@@ -158,19 +165,79 @@ def _chunks(words):
 # Revolution', 'bread and butter', 'cities of the future'); any other ('it's
 # generated great', 'we built') makes the chunk a clause, not an item.
 ITEM_GLUE = frozenset(("the", "a", "an", "of", "and", "&", "for", "to", "in", "on", "with"))
+# An item opening on a preposition ('to the audience', 'in the final
+# analysis', 'for example') is a clause fragment, unless the items around it
+# open on the same one ('in congressional budgets, in testimony, in books').
+PREPOSITIONS = frozenset(("of", "for", "to", "in", "on", "with", "at", "by", "from", "into",
+                          "about", "through", "including", "after", "before", "over"))
+# Words that are never a list item on their own (talk, not things): discourse
+# markers, saying and thanking, connectives, vague quantities and pronouns.
+# Measured on three hour-long transcripts (Oct 2026 review): half the 'lists'
+# were 'you KNOW, Thor, Ragnarok', 'great DAY, and BACK to you, Sam',
+# 'itself and SAY, HEY'.
+NOT_ITEM = frozenset((
+    "know", "mean", "like", "yeah", "yes", "yep", "no", "nope", "okay", "ok", "right",
+    "well", "so", "oh", "hey", "hi", "hello", "wow", "um", "uh", "hmm", "thank", "thanks",
+    "please", "sorry", "welcome", "say", "said", "says", "saying", "tell", "told",
+    "think", "thought", "guess", "suppose", "called", "basically", "actually", "really",
+    "literally", "obviously", "honestly", "seriously", "clearly", "certainly",
+    "definitely", "probably", "maybe", "perhaps", "anyway", "anyways", "though",
+    "although", "however", "therefore", "course", "unfortunately", "fortunately",
+    "example", "instance", "first", "firstly", "second", "secondly", "third", "thirdly",
+    "finally", "lastly", "next", "then", "now", "today", "tonight", "tomorrow",
+    "yesterday", "here", "there", "back", "again", "also", "just", "even", "still",
+    "too", "else", "etcetera", "etc", "somewhere", "anywhere", "everywhere", "nowhere",
+    "something", "anything", "everything", "nothing", "someone", "anyone", "everyone",
+    "somebody", "anybody", "everybody", "nobody", "whatever", "whoever", "more", "most",
+    "less", "much", "many", "lot", "lots", "bunch", "kind", "sort", "stuff", "thing",
+    "things", "way", "ways", "every", "all", "both", "each", "few", "several", "other",
+    "others", "another", "same", "different", "best", "better", "worse", "worst",
+    "myself", "yourself", "himself", "herself", "itself", "ourselves", "yourselves",
+    "themselves", "day", "days"))
+# The lead (a list's first item ending a longer clause) is taken only after a
+# word that introduces an enumeration ('…meant computers but ALSO rockets
+# and…', 'models ACROSS text, audio…', 'LIKE accounting, marketing…'),
+# determiners skipped; the last word of any clause is not an item ('to the
+# ROOM, to the audience', 'costing them MONEY, a customer comes in').
+LEAD_CUES = frozenset(("also", "like", "including", "include", "includes", "included", "as",
+                       "across", "between", "among", "namely", "meant", "means", "for",
+                       "from", "with", "into", "about", "both", "either", "whether"))
+_DETERMINERS = frozenset(("the", "a", "an", "our", "your", "their", "his", "her", "its",
+                          "my", "these", "those", "this", "that", "some", "all", "any"))
 
 
-def _item(chunk):
+def _talk(ws):
+    """Are the content words of ``ws`` all talk (NOT_ITEM), not things?"""
+    content = [norm(w.get("w")) for w in ws if _content(w.get("w"))]
+    return bool(content) and all(c in NOT_ITEM for c in content)
+
+
+def _prep(chunk):
+    """The preposition a chunk's item would open on, or None."""
+    ws = _strip_leads(chunk["words"])
+    first = norm(ws[0].get("w")) if ws else ""
+    return first if first in PREPOSITIONS else None
+
+
+def _item(chunk, prep_ok=None):
     """The chunk as a list item ({"text", "t0", "t1", "words"}), or None
-    when it is no short noun phrase."""
+    when it is no short noun phrase. ``prep_ok``: the preposition a parallel
+    run of items opens on ('in X, in Y, in Z')."""
     ws = _strip_leads(chunk["words"])
     if not ws or len(ws) > ITEM_MAX_WORDS or any(_has_digit(w.get("w")) for w in ws):
         return None
-    content = [w for w in ws if _content(w.get("w"))]
-    if not 1 <= len(content) <= ITEM_MAX_CONTENT:
+    first = norm(ws[0].get("w"))
+    if first in PREPOSITIONS and first != prep_ok:
         return None
-    # an item ends on its noun: trailing function words go ('in there')
+    content = [w for w in ws if _content(w.get("w"))]
+    if not 1 <= len(content) <= ITEM_MAX_CONTENT or _talk(ws):
+        return None
+    # an item ends on its noun: trailing function words go ('in there'); an
+    # object pronoun among them makes it a verb phrase ('peruses THEM')
     while ws and not _content(ws[-1].get("w")):
+        if norm(ws[-1].get("w")) in ("it", "them", "him", "her", "me", "us", "you", "this",
+                                     "that", "these", "those"):
+            return None
         ws = ws[:-1]
     if not ws:
         return None
@@ -183,12 +250,25 @@ def _item(chunk):
 def lists(words):
     """Spoken enumerations: [{"kind": "list", "t0", "t1", "text", "items"}]."""
     chunks = _chunks(words)
+    preps = [_prep(c) for c in chunks]
+
+    def parallel(j):
+        # the preposition chunk j opens on, when a neighbour opens on it too
+        p = preps[j]
+        if p and ((j > 0 and preps[j - 1] == p) or (j + 1 < len(chunks) and preps[j + 1] == p)):
+            return p
+        return None
+
+    def thing(w):
+        return w is not None and _content(w.get("w")) and not _has_digit(w.get("w")) \
+            and norm(w.get("w")) not in NOT_ITEM
+
     out, i = [], 0
     while i < len(chunks):
         run = []
         j = i
         while j < len(chunks):
-            it = _item(chunks[j])
+            it = _item(chunks[j], parallel(j))
             if it is None:
                 break
             run.append(it)
@@ -200,22 +280,29 @@ def lists(words):
             i += 1
             continue
         items = list(run)
-        # the lead: a longer chunk whose last word is the first item
-        # ('…meant computers but also rockets AND supersonic aviation…')
+        # the lead: a longer chunk whose last word is the first item, after
+        # a word that introduces it ('…meant computers but ALSO rockets AND
+        # supersonic aviation…'; LEAD_CUES)
         if i > 0 and chunks[i - 1]["sep"] in (",", "and"):
             prev = chunks[i - 1]["words"]
             last = prev[-1] if prev else None
-            if last is not None and _content(last.get("w")) and not _has_digit(last.get("w")) \
+            k = len(prev) - 2
+            while k >= 0 and norm(prev[k].get("w")) in _DETERMINERS:
+                k -= 1
+            cue = norm(prev[k].get("w")) if k >= 0 else ""
+            if thing(last) and cue in LEAD_CUES \
                     and _item({"words": prev, "sep": None}) is None:
                 items.insert(0, {"text": _item_text([last]), "t0": float(last["t0"]),
                                  "t1": float(last["t1"]), "words": [last]})
-        # the tail: a comma list whose last item has no closing comma
-        # ('computers, internet, mobile, internet it's generated…')
+        # the tail: a comma list of names whose last one has no closing comma
+        # ('API, ChatGPT, Codex it's…'); a lower-case word there is mostly the
+        # next clause's verb ('governor Brown, STARTED this', 'picks one,
+        # TAKES it'), and a repeated item is dropped below anyway
         end = j
         if run and chunks[j - 1]["sep"] == "," and j < len(chunks):
             nxt = chunks[j]["words"]
-            if len(nxt) >= 2 and _content(nxt[0].get("w")) and not _has_digit(nxt[0].get("w")) \
-                    and not _content(nxt[1].get("w")):
+            if len(nxt) >= 2 and thing(nxt[0]) and not _content(nxt[1].get("w")) \
+                    and _raw(nxt[0])[:1].isupper():
                 items.append({"text": _item_text([nxt[0]]), "t0": float(nxt[0]["t0"]),
                               "t1": float(nxt[0]["t1"]), "words": [nxt[0]]})
         # a repeated item is one item ('computers, internet, mobile, internet')
@@ -273,6 +360,11 @@ def triads(words):
         items = []
         for _g, body2 in group:
             rest = body2[2:]
+            # a member that turns on a preposition ('Let's get TO the point')
+            # or into talk is not one of its items
+            head = next((norm(w.get("w")) for w in rest), "")
+            if head in PREPOSITIONS:
+                continue
             ws = []
             for w in rest:
                 if ws and not _content(w.get("w")):
@@ -283,7 +375,7 @@ def triads(words):
                 if len(ws) >= TRIAD_ITEM_MAX_WORDS or _CLAUSE_SEP.search(_raw(w)) \
                         or _SENTENCE_END.search(_raw(w)):
                     break
-            if ws:
+            if ws and not _talk(ws):
                 items.append({"text": _item_text(ws), "t0": float(ws[0]["t0"]),
                               "t1": float(ws[-1]["t1"]), "said_from": float(body2[0]["t0"])})
         if len(items) >= TRIAD_MIN:
@@ -304,6 +396,12 @@ def _stat(n):
     return any(abs(v) >= NUMBER_MIN for v in n.get("values") or ())
 
 
+def _chained(a, b):
+    """Is spoken figure ``b`` said right after ``a`` and a comma?"""
+    return float(b["t0"]) - float(a["t1"]) <= RANGE_GAP_S \
+        and bool(_CLAUSE_SEP.search(str(a.get("said") or "").strip()))
+
+
 def numbers(words):
     """Spoken figures worth a number beat, ranges merged:
     [{"kind": "number" | "range", "t0", "t1", "text", "values"}]."""
@@ -318,7 +416,12 @@ def numbers(words):
     while i < len(found):
         n = found[i]
         nxt = found[i + 1] if i + 1 < len(found) else None
-        if nxt is not None and float(nxt["t0"]) - float(n["t1"]) <= RANGE_GAP_S:
+        third = found[i + 2] if i + 2 < len(found) else None
+        before = found[i - 1] if i > 0 else None
+        # a run of three or more figures ('6, 7, 800 dots per inch') is no range
+        run3 = nxt is not None and ((third is not None and _chained(nxt, third))
+                                    or (before is not None and _chained(before, n)))
+        if nxt is not None and not run3 and float(nxt["t0"]) - float(n["t1"]) <= RANGE_GAP_S:
             # what is said between them: nothing after a comma, 'or', 'to'
             k0 = raw_by_t0.get(round(float(n["t0"]), 3), (None, None))[0]
             k1 = raw_by_t0.get(round(float(nxt["t0"]), 3), (None, None))[0]
@@ -341,12 +444,28 @@ def numbers(words):
     return out
 
 
+# Capitalised words that name no showable thing: generic acronyms, demonyms,
+# the calendar, and talk ('Right?', 'Alright') — measured on three hour-long
+# transcripts (Oct 2026 review), where 'AI' alone was 51 of 400 'names'.
+NOT_NAME = frozenset((
+    "ai", "ais", "api", "apis", "cpu", "cpus", "gpu", "gpus", "ceo", "ceos", "cfo", "cto",
+    "coo", "pr", "faq", "fp", "cli", "ui", "ux", "pc", "pcs", "tv", "tvs", "ok", "llm",
+    "llms", "ml", "agi", "vc", "vcs", "ipo", "phd", "mfu", "internet", "system", "pro",
+    "co", "performance", "american", "americans", "chinese", "japanese", "european",
+    "europeans", "english", "french", "german", "russian", "indian", "british", "korean",
+    "italian", "spanish", "swedish", "african", "asian", "canadian", "mexican", "israeli",
+    "arab", "brazilian", "monday", "tuesday", "wednesday", "thursday", "friday",
+    "saturday", "sunday", "january", "february", "march", "april", "may", "june", "july",
+    "august", "september", "october", "november", "december", "right", "alright", "okay",
+    "yes", "no", "god", "mr", "mrs", "ms", "dr", "sir"))
+
+
 def names(words):
     """Proper nouns inside a sentence: [{"kind": "name", "t0", "t1", "text"}]."""
     out, run = [], []
 
     def flush():
-        if run:
+        if run and not (len(run) == 1 and norm(_raw(run[0])) in NOT_NAME):
             out.append({"kind": "name", "t0": float(run[0]["t0"]), "t1": float(run[-1]["t1"]),
                         "text": " ".join(_raw(w).strip(" ,;:.!?…") for w in run)})
         run.clear()
