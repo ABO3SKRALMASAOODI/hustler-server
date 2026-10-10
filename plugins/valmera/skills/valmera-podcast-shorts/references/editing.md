@@ -75,7 +75,7 @@ recheck every output-timed item.
 | Cuts | 0-1 `keep_segments` | only to tighten inside the range |
 | Look | 1 `apply_look(name)`, never with a music option | sets caption look, grade, grain and base transitions; read what it set and remove any transition sound that is not on a real turn |
 | Captions | 1 `add_captions(mode='from_transcript', style={...})` or `set_caption_style` | `style.motion_look` per Look; `emphasis_words` = the meaning-bearing words; keep the active-word accent if the brief asks |
-| Frame | 1-2 `set_frame` (or `auto_reframe`), `set_picture_card` | full-bleed with a per-shot `focus_track` (source seconds), or a card from looks.md **Card geometry** with `background_style` (`blur` or a gradient), grain and vignette |
+| Frame | 1-2 `auto_reframe` (or `set_frame`), `set_picture_card` | full-bleed with a per-shot `focus_track` (source seconds), or a card from looks.md **Card geometry** with `background_style` (`blur` or a gradient), grain and vignette; `auto_reframe` and an `'auto'` card follow a speaker who leans or steps inside a shot (still while they sway, a glide only when a still frame would cut the head) — a hand-written `set_frame` aim is still and drops that |
 | Headline | 0-1 `set_editorial_graphic(kind="headline", speaker, text)` | headline-conversation only; verified speaker first |
 | Designed beats | 3-6 `add_motion_graphic` | one per beat, silent by default; `sfx=true` only on the hook, the payoff or a graphic showing a real-world action; `purpose` names the beat, stable `id` |
 | Camera | 0-3 `add_zoom` (optional) | only where a moment clearly earns a move (the payoff word, a real turn between ideas); zero is fine; never on every cut, take or sentence. Modes per the Look (schema names) |

@@ -352,7 +352,17 @@ class Probe:
 
     def _focus_at(self, src_t):
         """(focus, mode) of the main footage at a source second — the
-        renderer's per-block _frame_for, evaluated at one moment."""
+        renderer's per-block _frame_for, evaluated at one moment (a crop
+        that follows the speaker, at that moment of its path)."""
+        focus, mode = self._static_focus_at(src_t)
+        if mode == "crop":
+            import follow
+            span = follow.span_at(follow.frame_spans(self.edl), src_t)
+            if span:
+                return follow.centre_at(span, src_t), mode
+        return focus, mode
+
+    def _static_focus_at(self, src_t):
         for sp in self.track:
             try:
                 if float(sp.get("t0", 0)) <= src_t <= float(sp.get("t1", 0)):

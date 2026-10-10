@@ -186,6 +186,25 @@ def _event_frames(edl, duration):
                     add(mapped, f"shot-specific framing {i}")
         except Exception:
             pass
+    # A crop or card that follows the speaker: the critic sees each move
+    # (the head must stay in frame and the glide must read as calm).
+    try:
+        import follow
+        spans = list(follow.frame_spans(edl))
+        for card in (edl.get("effects") or {}).get("picture_cards") or []:
+            if isinstance(card, dict):
+                spans += [sp for sp in card.get("follow") or [] if isinstance(sp, dict)]
+        tl = Timeline(edl.get("keep") or [], edl.get("inserts") or [],
+                      edl.get("speed") or [])
+        n = 0
+        for span in spans:
+            for a, b in follow.moving_windows(span):
+                mapped = tl.src_to_out((a + b) / 2.0)
+                if mapped is not None:
+                    n += 1
+                    add(mapped, f"face-following move {n}")
+    except Exception:
+        pass
 
     return out
 

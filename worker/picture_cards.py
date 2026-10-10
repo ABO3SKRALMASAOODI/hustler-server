@@ -78,17 +78,35 @@ def source_fed(spec):
 def source_at(spec, src_t=None):
     """The source rect a single-rect card shows at SOURCE second ``src_t``:
     the ``source_track`` span holding it (the card re-aims shot by shot),
-    else ``source``. None for a program card or a stack."""
+    else ``source`` — and where a ``follow`` span holds ``src_t``, that rect
+    centred on the follow path (the card follows the speaker inside the
+    shot). None for a program card or a stack."""
     if not spec.get("source") or spec.get("panels"):
         return None
+    rect = list(spec["source"])
     if src_t is not None:
         for span in spec.get("source_track") or []:
             try:
                 if float(span["t0"]) - 1e-6 <= float(src_t) <= float(span["t1"]) + 1e-6:
-                    return list(span["source"])
+                    rect = list(span["source"])
+                    break
             except (KeyError, TypeError, ValueError):
                 continue
-    return list(spec["source"])
+        if spec.get("follow"):
+            import follow
+            span = follow.span_at(spec["follow"], src_t)
+            c = follow.centre_at(span, src_t) if span else None
+            if c is not None:
+                rect = recentre(rect, c)
+    return rect
+
+
+def recentre(rect, centre):
+    """``rect`` moved (size kept) to centre on ``centre``, inside 0..1."""
+    w, h = rect[2] - rect[0], rect[3] - rect[1]
+    x0 = _clamp(float(centre[0]) - w / 2.0, 0.0, max(0.0, 1.0 - w))
+    y0 = _clamp(float(centre[1]) - h / 2.0, 0.0, max(0.0, 1.0 - h))
+    return [x0, y0, x0 + w, y0 + h]
 
 
 def card_panels(spec, src_t=None):
@@ -449,7 +467,7 @@ def _panel(W, H, box, rect, src_size):
 
 def layout_filter(parts, in_label, out_label, W, H, fps, panels, uid,
                   src_size=None, seg_dur=None, grade=None, tag=None,
-                  frames=None):
+                  frames=None, follow_block=None):
     """A main-footage block composed for a source-fed card: every panel's
     source rect scaled once onto its box of a W x H canvas, then the block
     tail _normalize_video uses (CFR, exact length, sar 1, yuv420p). The grade
@@ -457,12 +475,38 @@ def layout_filter(parts, in_label, out_label, W, H, fps, panels, uid,
     tag marks every frame of the block (LAYOUT_TAG_KEY) for the card branch
     that cuts it back out. ``frames`` is the block's exact frame count on
     the programme's block clock (renderer.block_clock), bounded exactly as
-    every other block is (renderer.block_tail)."""
+    every other block is (renderer.block_tail).
+
+    follow_block (a single card whose rect FOLLOWS the speaker, worker/
+    follow.py): (time_map, key_span, key times on the block clock, rect
+    centres x, y, interpolation) — the canvas is the same source-at-scale
+    picture _single_panel draws, translated every frame so the moving rect
+    lands on the box."""
     import renderer
     tail = renderer.block_tail(fps, seg_dur, frames)
     if tag:
         tail += f",metadata=mode=add:key={LAYOUT_TAG_KEY}:value={tag}"
     head = f"format=yuv420p,{grade}," if grade else ""
+    if len(panels) == 1 and follow_block and src_size and src_size[0] \
+            and src_size[1]:
+        import follow
+        tmap, kspan, ts, cxs, cys, interp = follow_block
+        box, rect = panels[0]
+        sw, sh = float(src_size[0]), float(src_size[1])
+        x, y, w, _h = pixels(W, H, box)
+        rect = match_rect(rect, box, sw, sh, W, H)
+        rw, rh = (rect[2] - rect[0]) * sw, (rect[3] - rect[1]) * sh
+        k = w / rw
+        # the canvas's top-left on the source, for each rect centre
+        ox = [cx * sw - rw / 2.0 - x / k for cx in cxs]
+        oy = [cy * sh - rh / 2.0 - y / k for cy in cys]
+        flags, sharpen = _enlarge(k)
+        follow.window_chain(
+            parts, in_label, out_label, f"c{uid}", src_size=(sw, sh),
+            out_size=(W, H), k=k, ts=ts, ox=ox, oy=oy, length=seg_dur or 0.0,
+            fps=fps, tail=tail, grade=grade, interpolation=interp,
+            sharpen=sharpen, flags=flags, time_map=tmap, key_span=kspan)
+        return
     if len(panels) == 1:
         box, rect = panels[0]
         parts.append(f"[{in_label}]{head}{_single_panel(W, H, box, rect, src_size)},"

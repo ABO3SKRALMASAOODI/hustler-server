@@ -34,6 +34,7 @@ import config
 import execution_inputs
 import db as dbx
 import dialogue_level
+import follow
 import gradelut
 import graphics
 import media
@@ -933,6 +934,44 @@ def _normalize_video(parts, in_label, out_label, W, H, fps, mode, uid,
         parts.append(f"[{in_label}]"
                      f"{frame_fit_filter(mode, W, H, focus, src_size=src_size, grade=grade)},"
                      f"{tail}[{out_label}]")
+
+
+def _follow_video(parts, in_label, out_label, W, H, fps, uid, fol, seg_dur,
+                  frames, src_size, picture=None, grade=None,
+                  interpolation=None):
+    """A main-footage block whose crop FOLLOWS the speaker (worker/
+    follow.py): the cover crop of _normalize_video, its window centred on
+    the follow path at every frame instead of one aim. fol = (time_map,
+    key_span, key times on the block clock, x centres, y centres) —
+    renderer.build_filtergraph's _follow_of."""
+    tmap, kspan, ts, xs, ys = fol
+    if picture:
+        x, y, pw, ph = picture_pixels(W, H, picture)
+        bars = _graded_black(grade) if grade else "black"
+        inner = f"pic_{uid}"
+        _follow_video(parts, in_label, inner, pw, ph, fps, uid + "p", fol,
+                      seg_dur, frames, src_size, None,
+                      grade if bars else None, interpolation)
+        late = f",{grade},format=yuv420p" if grade and not bars else ""
+        parts.append(f"[{inner}]pad={W}:{H}:{x}:{y}:color={bars or 'black'}"
+                     f"{late}[{out_label}]")
+        return
+    sw, sh = float(src_size[0]), float(src_size[1])
+    k = max(W / sw, H / sh)
+    ww, wh = W / k, H / k
+    ox = [min(max(x * sw - ww / 2.0, 0.0), max(0.0, sw - ww)) for x in xs]
+    oy = [min(max(y * sh - wh / 2.0, 0.0), max(0.0, sh - wh)) for y in ys]
+    flags = (f":flags={UPSCALE_SCALER}"
+             if k > 1.0 + 1e-6 and UPSCALE_SCALER != "bicubic" else "")
+    sharpen = (f",unsharp=3:3:{UPSCALE_SHARPEN:.2f}:3:3:0"
+               if UPSCALE_SHARPEN > 0 and k >= UPSCALE_SHARPEN_MIN_FACTOR
+               else "")
+    follow.window_chain(
+        parts, in_label, out_label, uid, src_size=(sw, sh), out_size=(W, H),
+        k=k, ts=ts, ox=ox, oy=oy, length=seg_dur, fps=fps,
+        tail=block_tail(fps, seg_dur, frames), grade=grade,
+        interpolation=interpolation, sharpen=sharpen, flags=flags,
+        time_map=tmap, key_span=kspan)
 
 
 _GRADED_BLACK = {}
@@ -2025,6 +2064,23 @@ def carry_current(meta, edl):
     return ((meta or {}).get("carry_v") or 0) == config.CAPTION_CARRY_VERSION
 
 
+def follow_current(meta, edl):
+    """Was this render drawn with today's face-following crops and cards?
+
+    Only EDLs that carry a follow path (Frame.follow, PictureCard.follow)
+    can be stale: a render without the stamp was made by a pipeline that
+    drew the static crop instead (an older lane validates the field away),
+    and one with an older stamp drew another path. Same grandfathering
+    discipline as carry_current: everything else keeps its cache."""
+    edl = edl or {}
+    frame = edl.get("frame") if isinstance(edl.get("frame"), dict) else {}
+    cards = ((edl.get("effects") or {}).get("picture_cards")) or []
+    if not ((frame or {}).get("follow")
+            or any(isinstance(c, dict) and c.get("follow") for c in cards)):
+        return True
+    return ((meta or {}).get("follow_v") or 0) == config.FOLLOW_VERSION
+
+
 def look_current(meta):
     """May new pieces be spliced into this cached render (stitched preview)?
 
@@ -2426,6 +2482,29 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         keep = split_keep
     else:
         handoff_of = {}
+    # Follow spans (worker/follow.py): one face-following path per shot. An
+    # edge strictly inside a kept segment (a camera cut the span stops on)
+    # splits the local render blocks exactly as a focus handoff does, so a
+    # block follows at most one span and a cut may jump.
+    follow_edges = sorted(follow.edges(edl)) if keep else []
+    if follow_edges:
+        _sfps = float(src_fps or fps or 30.0)
+        inner = {}
+        for edge in follow_edges:
+            if edge in handoff_of.values():
+                continue
+            if any(s + 2.0 / _sfps < edge < e - 2.0 / _sfps for s, e in keep):
+                inner[focus_handoff(edge, src_fps or fps, focus_origin,
+                                    fps)] = edge
+        if inner:
+            handoff_of.update(inner)
+            split_keep = []
+            for s, e in keep:
+                cuts_ = [s] + sorted(x for x in inner
+                                     if s + 0.01 < x < e - 0.01) + [e]
+                split_keep.extend((a, b) for a, b in zip(cuts_, cuts_[1:])
+                                  if b - a > 0.01)
+            keep = split_keep
     # Source-fed picture cards (picture_cards.layout_filter) re-compose the
     # main footage inside their PROGRAM window. A window edge inside a kept
     # segment splits the local render block there — like a focus edge, the
@@ -2592,6 +2671,17 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     seg_out_len = [sum((pe - ps) / f for ps, pe, f in pcs)
                    for pcs in seg_pcs]
 
+    def _block_mid(s, e):
+        """A block's composition moment on the SOURCE clock: its midpoint,
+        judged on the edges it stands for when it is bounded by a handoff
+        (one that opens at a handoff belongs to the span starting there)."""
+        m = (handoff_of.get(s, s) + handoff_of.get(e, e)) / 2.0
+        if s in handoff_of:
+            m = max(m, handoff_of[s] + 1e-4)
+        if e in handoff_of:
+            m = min(m, handoff_of[e] - 1e-4)
+        return m
+
     # Which main blocks a source-fed card composes (by the block's program
     # midpoint — the edges were split above). Consecutive composed blocks
     # with no insert between them form a RUN, and every frame of a run is
@@ -2628,9 +2718,14 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                         card_runs.setdefault(card["id"], []).append(run)
                     run[2] = t0 + seg_out_len[i]
                     # a re-aimed card (source_track) frames each block with
-                    # the span holding the block's own source midpoint
+                    # the span holding the block's own source midpoint; a
+                    # following card (follow) moves that rect along its path
+                    mid_src = _block_mid(keep[i][0], keep[i][1])
                     card_layout[i] = (picture_cards.card_panels(
-                        card, (keep[i][0] + keep[i][1]) / 2.0), run[0])
+                        card, mid_src), run[0],
+                        follow.span_at(card.get("follow"), mid_src)
+                        if card.get("source") and not card.get("panels")
+                        else None)
                 else:
                     run = None
     sw = sh = None
@@ -3005,18 +3100,50 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                     continue
             return frame_focus, mode
 
+        # Face-following blocks (worker/follow.py) resample their moving
+        # window like the camera does: linearly on a draft preview, cubic on
+        # approval previews and finals.
+        follow_interp = ("linear" if preview
+                         and _PREVIEW_QUALITY.get() != "approval" else None)
+        _fspans = follow.frame_spans(edl)
+
+        def _follow_of(i, span):
+            """The block's follow on its own clock: (time_map, key_span,
+            key times shifted to the block) — speed pieces map the block's
+            program seconds onto the source clock."""
+            s_, e_ = keep[i]
+            ts_, xs_, ys_ = follow.keys_of(span)
+            tmap = follow.block_time_map(seg_pcs[i], s_) if speed else None
+            return (tmap, None if tmap is None else (0.0, e_ - s_),
+                    [t - s_ for t in ts_], xs_, ys_)
+
         for i in range(n):
             # frame_focus reaches ONLY the main footage: the focus point was
             # measured on the source video, so inserts (below) keep the
             # center crop.
             if i in card_layout:
+                cspan = card_layout[i][2] if len(card_layout[i]) > 2 else None
                 picture_cards.layout_filter(
                     parts, f"segv{i}", f"v_seg{i}", W, H, fps,
                     card_layout[i][0], f"s{i}", src_size=main_src_size,
                     seg_dur=seg_out_len[i], grade=block_grade,
-                    tag=card_layout[i][1], frames=blk_frames.get(("seg", i)))
+                    tag=card_layout[i][1], frames=blk_frames.get(("seg", i)),
+                    follow_block=(_follow_of(i, cspan) + (follow_interp,)
+                                  if cspan and follow.moves(cspan) else None))
                 continue
             seg_focus, seg_mode = _frame_for(*keep[i])
+            fspan = (follow.span_at(_fspans, _block_mid(*keep[i]))
+                     if _fspans and seg_mode == "crop" else None)
+            if fspan and main_src_size and follow.moves(fspan):
+                _follow_video(parts, f"segv{i}", f"v_seg{i}", W, H, fps,
+                              f"s{i}", _follow_of(i, fspan), seg_out_len[i],
+                              blk_frames.get(("seg", i)), main_src_size,
+                              (edl.get("frame") or {}).get("picture"),
+                              block_grade, follow_interp)
+                continue
+            if fspan:
+                # one held position: the static crop, aimed there
+                seg_focus = follow.centre_at(fspan, _block_mid(*keep[i]))
             _normalize_video(parts, f"segv{i}", f"v_seg{i}", W, H, fps,
                              seg_mode, f"s{i}", focus=seg_focus,
                              seg_dur=seg_out_len[i],
@@ -5409,7 +5536,10 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                "the framing changed since its mask was measured"
                if b.get("geom") and b["geom"] != geom_now else
                "a source-fed picture card re-frames its footage"
-               if picture_cards.overlaps_source_card(edl, pieces) else None)
+               if picture_cards.overlaps_source_card(edl, pieces) else
+               "the crop follows the speaker across its footage"
+               if follow.moves_during(edl, [(float(b["src_start"]),
+                                             float(b["src_end"]))]) else None)
         if pieces and why:
             print(f"[render] behind-text {item.get('id')}: {why} — burning "
                   "it as a plain title", flush=True)
@@ -5502,6 +5632,9 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                 why = "the framing changed since its mask was measured"
             elif picture_cards.overlaps_source_card(edl, pieces):
                 why = "a source-fed picture card re-frames its footage"
+            elif follow.moves_during(edl, [(float(b["src_start"]),
+                                            float(b["src_end"]))]):
+                why = "the crop follows the speaker across its footage"
             else:
                 try:
                     local = _fetch(b["asset_key"], "matte", next_idx)
@@ -6868,6 +7001,7 @@ def _run_render_job(worker_db, job):
                                        _tail_out) \
                 and legibility_current(cached.get("meta"), edl_row["json"]) \
                 and carry_current(cached.get("meta"), edl_row["json"]) \
+                and follow_current(cached.get("meta"), edl_row["json"]) \
                 and watermark_current(cached.get("meta"), variant, is_paid,
                                       wm_settings) \
                 and _audio_model_review_cache_compatible(
@@ -7170,6 +7304,7 @@ def _run_render_job(worker_db, job):
                                                    _pout) \
                             and legibility_current(pm, prev_row["json"]) \
                             and carry_current(pm, prev_row["json"]) \
+                            and follow_current(pm, prev_row["json"]) \
                             and watermark_current(pm, variant, is_paid,
                                                   wm_settings) \
                             and (fp_now is None
@@ -7514,6 +7649,10 @@ def _run_render_job(worker_db, job):
                   "delivery_v": 1,
                   "trans_v": config.TRANSITION_VERSION,
                   "cam_v": config.CAMERA_VERSION,
+                  # A reused picture keeps the follow paths it was drawn with.
+                  "follow_v": (reused_visual_meta.get("follow_v") or 0
+                               if reused_visual_meta
+                               else config.FOLLOW_VERSION),
                   # A reused picture keeps the block clock it was cut on.
                   "clock_v": (reused_visual_meta.get("clock_v") or 0
                               if reused_visual_meta

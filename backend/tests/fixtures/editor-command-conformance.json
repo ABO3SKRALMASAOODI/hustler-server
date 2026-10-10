@@ -491,6 +491,7 @@
         "focus_x": 0.4,
         "focus_y": null,
         "focus_track": null,
+        "follow": null,
         "picture": null
       },
       "inserts": [],
