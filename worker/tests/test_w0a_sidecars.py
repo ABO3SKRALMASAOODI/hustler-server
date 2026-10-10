@@ -588,3 +588,34 @@ def test_at_0a_3_a_killed_chunk_retries_elsewhere_once(monkeypatch, tmp_path,
               f"{wall:.1f}s")
     finally:
         w0a_support.uninstall(launcher)
+
+
+def test_within_a_priority_the_longest_group_runs_first(monkeypatch,
+                                                        tmp_path):
+    """Longest-processing-time order: the request is ready when its slowest
+    shard is, so long chunks start before short ones of the same priority."""
+    order = []
+    gate = threading.Event()
+
+    def execute(source, payload):
+        if not gate.is_set():
+            gate.wait(10)
+        c = payload["chunks"][0]
+        order.append(round(c["t1"] - c["t0"], 3))
+        return {"chunks": {c["key"]: {"status": "ready"}
+                           for c in payload["chunks"]}}
+
+    _store, launcher = w0a_support.install(monkeypatch, tmp_path,
+                                           execute=execute, workers=1)
+    try:
+        src = _src("x.mp4", dur=200.0, shots=(5.0, 9.0, 60.0, 74.0, 140.0))
+        sidecars.ensure("matte.person", src, [(0, 5)])        # blocks the worker
+        time.sleep(0.2)
+        sidecars.ensure("matte.person", src, [(5, 9)])        # 4 s
+        sidecars.ensure("matte.person", src, [(60, 74)])      # 14 s
+        sidecars.ensure("matte.person", src, [(140, 150)])    # 15 s chunk
+        gate.set()
+        assert launcher.join(30)
+        assert order == [5.0, 15.0, 14.0, 4.0]
+    finally:
+        w0a_support.uninstall(launcher)

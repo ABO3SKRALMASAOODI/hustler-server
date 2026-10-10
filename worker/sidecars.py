@@ -1192,6 +1192,7 @@ class _Launcher:
                         "slot": s,
                         "when": time.monotonic() + max(0.0, delay),
                         "rank": _PRIORITY_RANK[handle.priority],
+                        "work": round(sum(c.t1 - c.t0 for c in g), 3),
                         "seq": next(self._seq)}
                 for c in g:
                     self._inflight[c.key] = True
@@ -1208,12 +1209,14 @@ class _Launcher:
             self._threads.append(t)
 
     def _next(self):
-        """The best due task (priority, then age), or None; with the soonest
-        not-yet-due time when none is due."""
+        """The best due task, or None with the soonest not-yet-due time.
+        Priority first; within a priority the LONGEST group first (longest-
+        processing-time order keeps the last shard from finishing alone:
+        a request's chunks are ready when its slowest shard is), then age."""
         now = time.monotonic()
         due = [t for t in self._queue if t["when"] <= now]
         if due:
-            task = min(due, key=lambda t: (t["rank"], t["seq"]))
+            task = min(due, key=lambda t: (t["rank"], -t["work"], t["seq"]))
             self._queue.remove(task)
             return task, None
         soonest = min((t["when"] for t in self._queue), default=None)
