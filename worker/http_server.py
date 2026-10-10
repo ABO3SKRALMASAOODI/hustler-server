@@ -29,6 +29,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import config
 import executor_runtime
 import filmstrip
+import follow
 import frameserve
 import indexer
 import inpaint
@@ -92,6 +93,11 @@ COMPUTE_RUNNERS = {
     # person-segmentation forward pass per budgeted frame — model compute,
     # which belongs on this box, never beside agent turns.
     "matte": matte.run_matte_job,
+    # Oct 2026: a follow's face track. The MCP/agent lanes are standard-1
+    # (0.5 vCPU) — three Haar cascades per sample cost them over a minute
+    # for 43 s of footage, so the calling tool races this lane's 4 vCPU
+    # against its own (cheaper) pass and takes whichever completes.
+    "faces": follow.run_faces_job,
     # Round 65d: the takeover's guided content-lock. SIFT on 2048px frames
     # of a user original — tried on the dispatcher for exactly one live run,
     # which it OOM-killed (job 1513).

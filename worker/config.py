@@ -1013,7 +1013,7 @@ CLOUDFLARE_EXECUTOR_TYPES = frozenset(
         "CLOUDFLARE_EXECUTOR_TYPES",
         "preview,preview_check,final,index,filmstrip,agent_turn,mcp_tool,"
         "shorts_plan,capture,frames,track,matte,smatch,clean,stems,fetch,"
-        "search,stock_acquire,ytprobe,mcp_media").split(",")
+        "search,stock_acquire,ytprobe,mcp_media,faces").split(",")
     if part.strip())
 # Stateless synchronous tools do not own a video_jobs row. Every member is
 # idempotent from the caller's perspective and is routed to a right-sized
@@ -1023,7 +1023,7 @@ CLOUDFLARE_SYNCHRONOUS_TYPES = frozenset(
     part.strip() for part in os.getenv(
         "CLOUDFLARE_SYNCHRONOUS_TYPES",
         "capture,frames,track,matte,smatch,clean,stems,fetch,search,"
-        "stock_acquire,ytprobe,mcp_media").split(",")
+        "stock_acquire,ytprobe,mcp_media,faces").split(",")
     if part.strip())
 # Observe an accepted call through its startup phase, then reconnect through
 # the named status route. A Worker deployment can abandon a Durable Object
@@ -1156,6 +1156,7 @@ EXECUTION_CLASS_BY_JOB_TYPE = {
     "capture": "heavy_media",
     "track": "heavy_media",
     "matte": "heavy_media",
+    "faces": "heavy_media",
     "smatch": "heavy_media",
     "clean": "heavy_media",
     "stems": "heavy_media",
@@ -1369,6 +1370,11 @@ REMOTE_EXECUTOR_TIMEOUTS = {
     # logic as capture/frames/track, sized for the worst budgeted window plus
     # a cold start.
     "matte": int(os.getenv("REMOTE_TIMEOUT_MATTE_S", "300")),
+    # A follow's face track (Oct 2026): stages the 540p proxy and runs Haar
+    # over at most follow.MAX_MEASURE_FRAMES samples with the lane's 4 vCPU
+    # (follow.run_faces_job, its own budget 150 s). The tool call waits for it
+    # only ~100 s and keeps its own pass, so this only bounds the child.
+    "faces": int(os.getenv("REMOTE_TIMEOUT_FACES_S", "240")),
     # The takeover's guided content-lock (round 65d): stages the host clip's
     # original plus the handoff recording, extracts a handful of frames and
     # runs one SIFT match. Synchronously inside an agent turn — same ceiling

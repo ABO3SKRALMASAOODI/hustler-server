@@ -45,6 +45,14 @@ MCP and 8 Shorts shards. Dispatcher wait slots use the same Cloudflare-aware
 defaults, so a 20-card editorial run is not silently serialized to the old
 three-call remote limit.
 
+A follow's face track (`faces`, Oct 2026) is a hedge the MCP and agent lanes
+race against their own measurement, and every face-following card or crop
+can fire one. A batch shard runs one call at a time, so `faces` calls route
+to the last two batch shards only (`FACES_SHARDS` in `src/index.ts`): a burst
+of parallel editors cannot crowd index, final or the other synchronous media
+tools off the lane, and a busy pair leaves the caller its own pass. The job
+range-reads the +faststart proxy over a presigned URL instead of staging it.
+
 ## One-time setup
 
 1. Enable Workers Paid and Containers in the Cloudflare account.
@@ -71,8 +79,8 @@ three-call remote limit.
    CLOUDFLARE_EXECUTOR_ENABLED=1
    CLOUDFLARE_EXECUTOR_URL=https://<worker>.workers.dev
    CLOUDFLARE_EXECUTOR_PERCENT=100
-   CLOUDFLARE_EXECUTOR_TYPES=preview,preview_check,final,index,filmstrip,agent_turn,mcp_tool,shorts_plan,capture,frames,track,matte,smatch,clean,stems,fetch,search,stock_acquire,ytprobe,mcp_media
-   CLOUDFLARE_SYNCHRONOUS_TYPES=capture,frames,track,matte,smatch,clean,stems,fetch,search,stock_acquire,ytprobe,mcp_media
+   CLOUDFLARE_EXECUTOR_TYPES=preview,preview_check,final,index,filmstrip,agent_turn,mcp_tool,shorts_plan,capture,frames,track,matte,smatch,clean,stems,fetch,search,stock_acquire,ytprobe,mcp_media,faces
+   CLOUDFLARE_SYNCHRONOUS_TYPES=capture,frames,track,matte,smatch,clean,stems,fetch,search,stock_acquire,ytprobe,mcp_media,faces
    CLOUDFLARE_MODAL_FALLBACK=0
    CLOUDFLARE_MAX_INPUT_BYTES=4294967296
    CLOUDFLARE_STREAM_SOURCE_MIN_DURATION_S=3600

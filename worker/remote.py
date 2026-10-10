@@ -2164,6 +2164,31 @@ def run_matte_remote(project_id, payload, user_id=None):
                         "attempts": 0, "payload": payload})
 
 
+def faces_available():
+    """Can the face track for a follow run on the batch media lane? (Oct
+    2026) Only through Cloudflare: the MCP and agent lanes that call it are
+    Cloudflare containers, and a stale Render/Modal/Cloud Run type list must
+    never route it somewhere that does not run follow.run_faces_job. False
+    simply means the caller's own (cheaper, bounded) pass is the only one."""
+    return bool(config.CLOUDFLARE_EXECUTOR_ENABLED
+                and config.CLOUDFLARE_EXECUTOR_URL
+                and "faces" in config.CLOUDFLARE_SYNCHRONOUS_TYPES)
+
+
+def run_faces_remote(project_id, payload, user_id=None):
+    """Measure a follow's face track on the batch media lane (4 vCPU).
+    Returns follow.run_faces_job's dict: {ok, faces_version, frames,
+    roi_times, uncovered, report}. Synchronous, no job row — the matte
+    shape. Raises when Cloudflare is not the provider (the caller then
+    relies on its own pass), never falls back to another provider."""
+    job = {"id": None, "type": "faces", "project_id": project_id,
+           "user_id": user_id, "attempts": 0, "payload": payload}
+    if desired_execution_provider(job) != "cloudflare":
+        raise RemoteExecutorError(
+            "the face track runs remotely only on Cloudflare")
+    return _run_cloudflare_with_capacity_wait(job)
+
+
 def smatch_available():
     """Is there an executor to run the takeover's guided content-lock on?
     (round 65d) Same contract as track_available — SIFT on 2048px frames of

@@ -85,19 +85,26 @@ const INTERACTIVE_TYPES = new Set([
 ]);
 const BATCH_TYPES = new Set([
   "index", "final", "capture", "track", "matte", "smatch", "clean",
-  "stems", "fetch", "search", "stock_acquire", "ytprobe",
+  "stems", "fetch", "search", "stock_acquire", "ytprobe", "faces",
 ]);
 const AGENT_TYPES = new Set(["agent_turn"]);
 const MCP_TYPES = new Set(["mcp_tool"]);
 const SHORTS_TYPES = new Set(["shorts_plan"]);
 const SYNCHRONOUS_TYPES = new Set([
   "capture", "frames", "track", "matte", "smatch", "clean", "stems",
-  "fetch", "search", "stock_acquire", "ytprobe", "mcp_media",
+  "fetch", "search", "stock_acquire", "ytprobe", "mcp_media", "faces",
 ]);
 const CALL_ID = /^[a-zA-Z0-9_-]{8,96}$/;
 const SHARD_COUNTS = {
   interactive: 20, batch: 8, agent: 5, mcp: 20, shorts: 8,
 } as const;
+// A follow's face track (`faces`, Oct 2026) is a hedge the MCP and agent
+// lanes race against their own measurement, and every face-following card
+// or crop can fire one. A batch shard runs one call at a time, so these may
+// hold at most this many of the batch shards (the last ones): a burst of
+// parallel editors never crowds index, final or the other synchronous media
+// tools off the lane. A busy pair only leaves the caller its own pass.
+const FACES_SHARDS = 2;
 type Lane = keyof typeof SHARD_COUNTS;
 const TERMINAL_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 // startAndWaitForPorts normally returns inside its 120-second port-ready
@@ -189,6 +196,9 @@ function shardName(lane: Lane, callId: string): string {
   for (let i = 0; i < routingKey.length; i += 1) {
     hash ^= routingKey.charCodeAt(i);
     hash = Math.imul(hash, 16777619);
+  }
+  if (lane === "batch" && callId.startsWith("cf-faces-")) {
+    return `${lane}-${SHARD_COUNTS.batch - 1 - ((hash >>> 0) % FACES_SHARDS)}`;
   }
   return `${lane}-${(hash >>> 0) % SHARD_COUNTS[lane]}`;
 }
@@ -293,11 +303,11 @@ abstract class ValmeraContainer extends Container<Env> {
         "preview", "preview_check", "final", "index", "filmstrip",
         "agent_turn", "mcp_tool", "shorts_plan", "capture", "frames",
         "track", "matte", "smatch", "clean", "stems", "fetch", "search",
-        "stock_acquire", "ytprobe", "mcp_media",
+        "stock_acquire", "ytprobe", "mcp_media", "faces",
       ].join(","),
       CLOUDFLARE_SYNCHRONOUS_TYPES: [
         "capture", "frames", "track", "matte", "smatch", "clean", "stems",
-        "fetch", "search", "stock_acquire", "ytprobe", "mcp_media",
+        "fetch", "search", "stock_acquire", "ytprobe", "mcp_media", "faces",
       ].join(","),
       CLOUDFLARE_EXECUTOR_URL: optional(this.env.CLOUDFLARE_EXECUTOR_URL),
       CLOUDFLARE_MODAL_FALLBACK: "0",
