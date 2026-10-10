@@ -62,6 +62,35 @@ _spec = importlib.util.spec_from_file_location(
 wschemas = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(wschemas)
 
+
+def _register_worker_module(name):
+    """Load worker/<name>.py under its PLAIN module name (once), for worker
+    code the backend runs that imports it by that name."""
+    if name in sys.modules:
+        return sys.modules[name]
+    spec = importlib.util.spec_from_file_location(
+        name, os.path.join(os.path.dirname(os.path.abspath(_schemas_path)),
+                           name + ".py"))
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(name, None)
+        raise
+    return module
+
+
+# validate_edl checks motion graphics against worker/motion_templates (which
+# imports worker/motion_engine), and edit_batch checks their asset params,
+# both by plain module name. Without these two every apply_edit_batch and
+# export_final of an EDL holding a motion graphic failed here with
+# ModuleNotFoundError (reported as "internal error" / "no renderable
+# footage"), while the worker — whose dir is on sys.path — accepted it.
+# Both are import-side-effect free (constants, a lazy browser probe).
+for _name in ("motion_engine", "motion_templates"):
+    _register_worker_module(_name)
+
 # worker/timeline.py rides along the same way (registered first so its
 # `from worker_schemas import ...` fallback resolves): Timeline math and the
 # shared program-item re-anchoring (remap_program_items) must be the SAME
@@ -4667,6 +4696,12 @@ def apply_edit_batch_core(user_id, project_id, data, *, origin="user"):
                 (original or {}).get("duration_s") or None, keys)
         except (ValueError, TypeError, wschemas.EDLValidationError) as exc:
             return {"error": str(exc)[:500]}, 400
+        except Exception as exc:  # an engine fault, not the batch's: name it
+            current_app.logger.exception("apply_edit_batch validation fault")
+            return {"error": ("The edit could not be checked, so nothing was "
+                              f"changed ({type(exc).__name__}: {str(exc)[:300]}). "
+                              "This is a Valmera fault, not your request."),
+                    "code": "batch_validation_fault"}, 500
         work = wplayback.changed_work(latest["json"], normalized)
         changed = wschemas.edl_signature(latest["json"]) != wschemas.edl_signature(normalized)
         version = base
@@ -5479,7 +5514,8 @@ def _request_final(cur, user_id, project_id, version, render_group=None,
             detail={"code": "edit_required", "version": version,
                     "reason": "invalid_timeline"}, origin="server")
         return jsonify({
-            "error": ("This timeline has no renderable footage yet. Add "
+            "error": ("This timeline can't be exported yet: "
+                      f"{preflight_error[:300]}. If it has no footage, add "
                       "at least one clip or image before exporting."),
             "code": "edit_required",
             "detail": preflight_error,

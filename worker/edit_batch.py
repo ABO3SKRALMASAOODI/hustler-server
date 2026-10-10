@@ -38,6 +38,21 @@ def media_keys(value):
             yield from media_keys(item)
 
 
+def _motion_refs(edl):
+    """The project media named by motion graphics' asset params."""
+    refs = set()
+    for item in (edl or {}).get("motion") or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            import motion_templates
+            refs |= set(motion_templates.asset_params(
+                item.get("template") or "", item.get("params") or {}).values())
+        except Exception:
+            continue
+    return refs
+
+
 def apply_batch(before, operations, duration, allowed_keys):
     if not isinstance(operations, list) or not 1 <= len(operations) <= 64:
         raise ValueError("Supply between 1 and 64 edit operations.")
@@ -45,6 +60,12 @@ def apply_batch(before, operations, duration, allowed_keys):
         raise ValueError("This edit batch is too large; split it into smaller batches.")
     edl = copy.deepcopy(before)
     operations = copy.deepcopy(operations)
+    # Keys already in the EDL were placed by Valmera's own tools (erase
+    # patches, subject mattes, fetched stock, library sounds) and validated
+    # when written; many never appear in the project's assets table. Only
+    # media a batch INTRODUCES must be attached to the project — re-checking
+    # the whole EDL refused every later batch once such a key was present.
+    known = set(media_keys(before)) | _motion_refs(before)
     for op in operations:
         if not isinstance(op, dict) or set(op) - {"action", "layer", "value", "id"}:
             raise ValueError("An operation accepts action, layer, value and id only.")
@@ -116,21 +137,14 @@ def apply_batch(before, operations, duration, allowed_keys):
             raise ValueError(f"{layer} ids must be strings.")
         if len(ids) != len(set(ids)):
             raise ValueError(f"Duplicate ids in {layer}.")
-    if set(media_keys(edl)) - set(allowed_keys):
+    if (set(media_keys(edl)) | _motion_refs(edl)) - known - set(allowed_keys):
         raise ValueError("Use media attached to this project. A referenced asset is not available here.")
     for item in edl.get("motion") or []:
         # A graphic behind the subject needs its measured subject mask, which
-        # only add_motion_graphic builds; asset params name project media.
+        # only add_motion_graphic builds.
         if item.get("layer") == "behind_subject" and not item.get("behind"):
             raise ValueError("A behind_subject motion graphic needs its subject mask; "
                              "place it with add_motion_graphic(layer='behind_subject').")
-        try:
-            import motion_templates
-            refs = motion_templates.asset_params(item.get("template") or "", item.get("params") or {})
-        except Exception:
-            refs = {}
-        if set(refs.values()) - set(allowed_keys):
-            raise ValueError("Use media attached to this project. A referenced asset is not available here.")
     normalized = validate_edl(edl, duration).model_dump()
     if isinstance(allowed_keys, dict):
         for item in normalized.get("inserts") or []:
@@ -149,7 +163,18 @@ def apply_batch(before, operations, duration, allowed_keys):
             for key, value in raw.items():
                 check_fields(value, clean[key], f"{path}.{key}")
         elif isinstance(raw, list) and isinstance(clean, list):
-            for index, (value, checked) in enumerate(zip(raw, clean)):
+            # validate_edl re-sorts item layers (motion by start, ...): pair
+            # items by id where they have one, never by position — an item
+            # added before an existing one is not that one's "unknown field"
+            by_id = {c.get("id"): c for c in clean
+                     if isinstance(c, dict) and c.get("id")}
+            for index, value in enumerate(raw):
+                if isinstance(value, dict) and value.get("id") in by_id:
+                    checked = by_id[value["id"]]
+                elif index < len(clean):
+                    checked = clean[index]
+                else:
+                    continue
                 check_fields(value, checked, f"{path}[{index}]")
     for layer in {op["layer"] for op in operations}:
         check_fields(edl[layer], normalized[layer], layer)

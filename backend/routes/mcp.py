@@ -2056,7 +2056,10 @@ def _t_export_final(tok, args):
         data = response.get_json()
     receipt = {"project_id": project_id, "edl_version": version, **data}
     if status >= 400:
-        return {"content": [{"type": "text", "text": data.get("error", "Export could not start.")}],
+        text = data.get("error", "Export could not start.")
+        if data.get("detail") and str(data["detail"]) not in text:
+            text += f" Detail: {str(data['detail'])[:400]}"
+        return {"content": [{"type": "text", "text": text}],
                 "structuredContent": {"export": receipt}, "isError": True}
     if data.get("asset_id"):
         return _t_download_url(tok, {"project_id": project_id, "edl_version": version,
