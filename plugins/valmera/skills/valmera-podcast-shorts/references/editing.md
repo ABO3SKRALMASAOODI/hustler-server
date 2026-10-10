@@ -14,7 +14,19 @@ and bookkeeping; never drop a planned beat to save calls. Independent typed
 writes (graphics, zooms, sounds) may go back to back without re-reading the
 state between them; re-read only after a cut or a rejection.
 
+**Hard stops** (Oct 2026 editors averaged 77 calls and 2.6 renders, mostly
+working around broken tools, and all nine shorts were killed): two renders
+is the ceiling, never three; an operation that fails twice is not tried a
+third way; past about 60 calls, or when the pilot's frame cannot be
+reproduced on your child, stop and hand back `blocked` with the call, its
+arguments and the error text. A blocked handback is useful work: it is how
+Valmera gets fixed.
+
 ## 0. Once per editor (reuse for every later short)
+
+- Read **Known Valmera limits** below and the run's `selection/framing.json`
+  (the layout proven on this source: box, source rect, erase regions,
+  caption anchor, measured numbers). Reproduce it; do not re-solve it.
 
 - `list_motion_templates()`: the live template list with params and sound
   cues. Params change; never guess them from memory or from these docs.
@@ -49,8 +61,11 @@ cues, and art direction. Call `get_kept_transcript` once and confirm:
 - The turn changes or deepens the idea and the payoff resolves it. Stop on the
   strongest sentence; the payoff needs 0.8-1.5 s after its last word before
   the end card (a reaction button 1.0-1.5 s, or none): the natural tail
-  first, else hold the frame (`add_freeze_frame` audio_mode='hold',
-  duration about 1 s minus the air you have).
+  first (the brief's end leaves it), else `add_freeze_frame`
+  audio_mode='hold' (the COMPOSED last frame — card, type and all — over the
+  source's room tone; check it on render 1), or slow the last ~0.4 s of air
+  with `set_speed` 0.5x. Never audio_mode 'continue' for a payoff hold: it
+  plays on under the raw source frame.
 - Trim for rhythm: cut low-information connectors ("it was like a lot of
   things and"), keep 150-250 ms at sentence boundaries, never drop an
   article inside a clause.
@@ -95,20 +110,27 @@ and the negative space you will design into.
 
 ## 3. Execute in a few deliberate calls
 
-Order matters: cuts first (they move every later time), then frame, captions,
-designed beats, camera, transitions and sound. If you must re-cut later,
-recheck every output-timed item.
+Order matters, and on today's Valmera it is also what keeps the edit
+editable: `set_frame` 9:16 (if `get_edl` shows `frame` null), cuts (they
+move every later time), the card with its source rect through
+`apply_edit_batch` (effects layer, the pilot's JSON, card end = program
+end), THEN `erase_region`, stock overlays and captions, then designed
+beats, camera, transitions and sound. Once an erase patch, a stock overlay
+or a motion graphic exists, `apply_edit_batch` fails ('referenced asset is
+not available' / internal error), so a later card change means removing
+and re-adding them. If you must re-cut later, recheck every output-timed
+item and the card's end.
 
 | Step | Calls | Notes |
 | --- | --- | --- |
 | Cuts | 0-1 `keep_segments` | only to tighten inside the range |
 | Look | 1 `apply_look(name)`, never with a music option | sets caption look, grade, grain and base transitions, and no sound (never pass `transition_sounds=true` unless the brief asks); read what it set |
 | Captions | 1 `add_captions(mode='from_transcript', style={...})` or `set_caption_style` | `style.motion_look` per Look; `emphasis_words` = the meaning-bearing words; keep the active-word accent if the brief asks |
-| Frame | 1-2 `auto_reframe` (or `set_frame`), `set_picture_card` | full-bleed with a per-shot `focus_track` (source seconds), or a card from looks.md **Card geometry** with `background_style` (`blur` or a gradient), grain and vignette; `auto_reframe` and an `'auto'` card follow a speaker who leans or steps inside a shot (still while they sway, a glide only when a still frame would cut the head; a turned close-up keeps its nose side clear) — a hand-written `set_frame` aim is still and drops that. A burned-in screenshot or screen share the host reads from is never cropped through and never shown without the speaker for more than a second while they talk: act on SCREEN INSET / NO FACE IN THE CROP notes with the call they name (a speaker + screen stack per camera shot, `panels=[{..., source:'auto'}, {..., source:'inset'}]`, so the speaker stays on screen while they talk — the speaker panel is solved from the face track: whole head, chin and hair margins, lead room, the screen box kept out where any framing can, and a gutter between the panels that captions never sit on (they take a free band, usually above the speaker panel); `set_picture_card(source='inset')` alone only for a beat — over speech it reports NO FACE ON SCREEN), and keep captions and graphics clear of the card. A card's fade/lift entrance and exit dissolve the whole card with the full-frame shot (never a frame of bare canvas); on a cut use `'none'` |
+| Frame | 1-2: the pilot's layout (`apply_edit_batch` card), or `auto_reframe`/`set_frame` for full-bleed | full-bleed with a per-shot `focus_track` (source seconds), or the card from `framing.json` / looks.md **Card geometry** with `background_style` (`blur` or a gradient), grain and vignette. The live `set_picture_card` schema has no `source` or `panels` (a rect is rejected; it uses frame.picture or the composed program), so a source rect goes through `apply_edit_batch`. `auto_reframe` misreads a phone call or picture-in-picture on a stage feed as a wide shot: on such sources use the pilot's rect. Where the server supports them, `auto_reframe` and an `'auto'` card follow a speaker who leans or steps inside a shot (still while they sway, a glide only when a still frame would cut the head; a turned close-up keeps its nose side clear) — a hand-written `set_frame` aim is still and drops that. A burned-in screenshot or screen share the host reads from is never cropped through and never shown without the speaker for more than a second while they talk: act on SCREEN INSET / NO FACE IN THE CROP notes with the call they name (a speaker + screen stack per camera shot, `panels=[{..., source:'auto'}, {..., source:'inset'}]` — over MCP written as `effects.picture_cards[].panels` with `apply_edit_batch` before any graphic exists, so the speaker stays on screen while they talk — the speaker panel is solved from the face track: whole head, chin and hair margins, lead room, the screen box kept out where any framing can, and a gutter between the panels that captions never sit on (they take a free band, usually above the speaker panel); `set_picture_card(source='inset')` alone only for a beat — over speech it reports NO FACE ON SCREEN), and keep captions and graphics clear of the card. A card's fade/lift entrance and exit dissolve the whole card with the full-frame shot (never a frame of bare canvas); on a cut use `'none'` |
 | Headline | 0-1 `set_editorial_graphic(kind="headline", speaker, text)`, or with a card 0-1 `add_motion_graphic(template='headline', start=0, params={text, kicker})` | the editorial headline for headline-conversation (verified speaker first; it never moves); on a card layout whose band also carries hero lockups, the persistent `headline` template instead: end and y omitted, it sits in the band above the card and yields to every motion-graphic lockup there by itself (not to add_text or typography scenes, so band lockups are motion templates), so the band is never empty for seconds |
 | Designed beats | 2-5 `add_motion_graphic` | one per beat that EARNS ITS PLACE: about one hero graphic per 6-8 s at most, under ~50% of the runtime, at most 3 type roles and one accent; never a lockup or typewriter of the words being heard, never a spoken list as rows of text (insert the items instead); silent by default; `sfx=true` only on the hook, the payoff or a graphic showing a real-world action; `purpose` names the beat, stable `id` |
 | Camera | 0-3 `add_zoom` (optional) | only where a moment clearly earns a move (the payoff word, a real turn between ideas, a genuinely jarring jump cut); zero is fine; never on every cut, take, sentence or hero moment. Modes per the Look (schema names) |
-| Cut hygiene | `conceal_jump_cuts(mode='report')` first, then 0-1 `conceal_jump_cuts()` (optional) | the report writes nothing: every same-shot jump cut with how visible it is, what covers it, the hook (first 1.5 s) and stutter (<10% step) flags and the options — leave it, move a graphic change onto it, restore/re-cut the join, or a step. Steps only when the render shows same-angle jump cuts visibly popping (a locked single camera tightened by pause removal, e.g. an archival card): hard 10-15% framing steps on just the cuts that measurably pop, alternating to the next cut (a card steps its source crop, wide on a 480p source or wherever tighter would crop the head); not a zoom and not counted as one; after the cut is final; `mode='off'` removes it |
+| Cut hygiene | none in MCP | `conceal_jump_cuts` is not in the MCP tool list (Oct 2026): leave a same-shot jump cut bare, land a graphic change or B-roll on it, or re-cut at a breath; none in the first 1.5 s, at most one in the first 3 s |
 | Transitions | 0-1 `set_transitions` | base style, `scope='scene'` |
 | Sound | 0-2 `add_sfx(storage_key='sound:<id>', at=...)` with gain_db unset (optional) | zero by default; at most 1-2 per short (template cues count), each on a structural moment with a visual partner, from your Look's family, none on a payoff word's onset, no literal puns, none repeated within ~3 s; the tool levels each against the voice and its MIX/CHECK lines say where it sits |
 | Music | 0-1 `add_music` (after `fetch_url` for a link) | only the owner's song, only when `music_effective` is on; bed -20 dB ducked; a montage's bed leads |
@@ -196,25 +218,41 @@ after a short pause, then report it.
 `render_preview(quality='approval')` renders the complete edit and now waits
 longer before returning. If it still hands back a running job, call
 `wait_for_job(job_id)` at most 3 times. If it is still running after that,
-the render lane is slow: wait about 2 minutes outside Valmera (a shell
-`sleep 120`) before each further check and mention the delay in the
-handback. Never start a second render of the same version, and never render
-after each operation.
+the render lane is slow: wait about 2 minutes outside Valmera (`sleep 120`
+with `run_in_background`; the harness blocks a foreground sleep) before
+each further check and mention the delay in the handback. Never start a
+second render of the same version, and never render after each operation.
+Render 1 is the complete edit, not a framing test: the framing was proven
+in the pilot.
 
 ## 5. Self-check, then fix only the weakest moment
 
-1. `watch_video(render=false)` on the whole edit at 1x: the hook, the pace,
-   the sound, the payoff.
-2. One `look_at(rendered=true, output_times=[...])` with the hook (0.3 s,
+1. Do not call `watch_video` to watch: on this deployment it returns a
+   receipt with no link, frames or audio (every Oct 2026 editor and
+   reviewer lost 1-2 calls to it). Use rendered frames and the audio tools.
+2. One `look_at(rendered=true, output_times=[...])` with the hook (0, 0.3 s,
    1.0 s), every hero moment, the densest caption and the payoff (up to 8
-   times in that one call).
-3. `audit_captions` once if you changed captions; read the render's warnings.
-4. Measure against your Look's targets: hook at or before 0.6 s, visual
+   times in that one call), then ONE `native_resolution=true` frame at the
+   hook (one time per call; previews are 720x1280) to read type sizes.
+   Check that every hero and the payoff look as intended in the pixels (an
+   Oct handback described a node graph the render showed as an empty box).
+3. `audit_captions` once (heard-but-unshown words are defects, not
+   advisories) and `review_audio` on the opening and the joins (3 clips per
+   call); read the render's warnings.
+4. Measure, and write the numbers in the handback: picture area (card
+   width x height), the headline main line's cap height and the captions'
+   (share of frame height), the payoff's cap height against the largest
+   earlier lockup, the longest stretch without a beat. Picture area under
+   the Look floor or a hook headline no bigger than the captions after
+   following the pilot's recipe is a recipe or Valmera problem, not
+   something to re-render around: hand back `blocked` with the numbers.
+5. Measure against your Look's targets: hook at or before 0.6 s, visual
    change rate, hero count, picture area, sounds within budget and spacing
    (list each with its time, on-screen partner and level; `audit_audio_mix`
    reports each sound's level against the voice and its placement checks),
    no digital silence, payoff held 0.8-1.5 s after the last word.
-5. Read the render's VERIFICATION ADVISORIES: the EARN ITS PLACE note lists
+6. Read the render's VERIFICATION ADVISORIES (quote the ones you keep in the
+   handback: reviewers cannot re-read them without re-rendering): the EARN ITS PLACE note lists
    a generic or spent hook, a fragment or jump-cut opening, graphics past
    the budget or restating the captions, extra type roles or accents, a
    short payoff hold and colliding sentences, each with a fix. Act on the
@@ -238,7 +276,8 @@ Hook: hook-tier word_slam by 1.1s ("Every computer has used weird type", kicker 
 Heroes: 6.4 garbage slam; 14.8 Apple Lisa photo + label; 18.6 counter 30–40 fonts; 26.9 "Let's get…" list_build
 Payoff: 33.6 "writing a paper / WITHOUT ONE" lockup, held 0.8s after the last word
 Camera/sound: no zoom, no sound; music off (no owner song)
-Targets: change ~0.4s, picture card 0.56, 3 heroes, graphics ~30% of runtime
+Measured: card 0.54 (1.9x); headline cap 3.6% vs captions 3.1%; payoff 9% > slam 6%; longest beatless 5.8s
+Targets: change ~0.4s, 3 heroes, graphics ~30% of runtime
 Weakest: 9-13s "the fonts were…" setup with only captions (the next pass: an image of an early screen)
 Assets: Lisa photo (Wikimedia, CC BY-SA 4.0, credit in handback)
 ```
@@ -248,3 +287,28 @@ Optionally attach a handback JSON (`music`, `broll`, `required_credits`,
 manifest is complete. `music` names the owner's song, or reads `none - owner
 to add a song when posting (montage <start>-<end> s)` for a flagged
 passage. Do not self-score.
+
+Save the note as `candidates/<id>-note.txt` and the JSON as
+`candidates/<id>-handback.json` in the run folder (never a session
+scratchpad), then record it yourself: `run.py candidate --run-dir <run>
+--short-id <id> --editor <name> --preview <asset or job> --edl-version <n>
+--renders <n> --note-file ... --handback ...`. It works whether or not you
+were given a slot (`queued`) and for a fix pass (`fix`); never wait for a
+slot. A `blocked` handback is recorded the same way, its first line
+`BLOCKED: <call> -> <error>`, so the coordinator can file it.
+
+## Known Valmera limits (Oct 2026; the live schema wins, delete a row when fixed)
+
+| Symptom | Working path |
+| --- | --- |
+| a tool's schema in YOUR client lacks a parameter these docs name (e.g. `set_picture_card` `source`/`panels`/`follow`, `add_freeze_frame` audio_mode 'hold') | your client cached `tools/list` when it connected; the server has them (Oct 2026). Start a fresh session to refresh the tool list; until then write the card with `apply_edit_batch` on the `effects` layer, copying the shape from `get_edl` and `framing.json` |
+| `watch_video(render=false)` returns a receipt without a link, frames or audio | rendered `look_at` batch + one native frame + `audit_captions` + `review_audio` |
+| `look_at` without `rendered=true` ignores picture cards and erase patches | judge framing only on rendered frames; `native_resolution` takes one time per call |
+| the `headline` template refuses a band under 0.06 and shrinks its text to fit the band (often below caption size) | looks.md **Card geometry**: band y 0.128-0.228 over a full-width card, at most 36 characters, or no band and a hook-tier `word_slam` |
+| `clean` captions ignore `anchor_y` inside a card; the caption-band estimator ignores a locked `anchor_y`, reports false collisions and mutes words under band graphics | check every caption state near the face on render 1; keep `mute_captions=false` and mute deliberately with `set_caption_mutes` |
+| graphic size and position estimates in write results run 2-3x off the render | size the payoff and band lockups on render 1, never on estimates |
+| make_shorts children can arrive with `frame` null (16:9 render, landscape stock search) | `get_edl`; `set_frame(ratio='9:16')` first |
+| `keep_segments` with `snap_to_words=true` can pull a neighbouring word or stutter into the cut | `snap_to_words=false` at edges with no pause; confirm with `review_audio` |
+| PICTURE CHECK "face cut by the card edge" measured on the source window and "HOOK OPENS MID-SOUND" contradicting `review_audio` | verify on rendered frames and `review_audio`; quote the result in the handback, do not re-render for it |
+| `erase_region` measures the same box as "gone" or "STILL VISIBLE" and a box repaint can leave a dark patch | check the patch on rendered frames once; keep the erased box inside an area the card crops tight |
+| `find_silences` takes no range and truncates on a long source | read `get_words` around the cut instead |
