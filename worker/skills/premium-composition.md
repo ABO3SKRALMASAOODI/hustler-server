@@ -69,8 +69,8 @@ LAYOUTS FOR 9:16:
   speaker who moves inside a shot (still while they sway, a smooth glide
   only when a still card would cut the head, never across a cut — each
   shot gets its own framing); a source below
-  720p is never a 3.7x crop that cuts the head: a 4:3 archival speaker
-  (box omitted) gets a full-width, near-square window framed on the face
+  720p is never a 3.7x crop that cuts the head: one 4:3 archival speaker
+  (box omitted; a two-shot stays whole) gets a full-width, near-square window framed on the face
   (y .27-.70, ~43% of the frame, ~2.5x — the 37% 4:3 card read as a
   postage stamp) with the headline band above it and a whole caption band
   below; fit='pad' shows the whole stage (~1.6x). A thin band of a pillar

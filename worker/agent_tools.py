@@ -15772,6 +15772,22 @@ def _card_face_samples(ctx, spans):
     return out
 
 
+def _card_group(ctx, edl, spans):
+    """True when any camera shot of a card's window is a GROUP shot in the
+    index's samples (follow.is_group: two or more comparable faces) — a
+    default that frames one speaker would decide who the card shows."""
+    seen = []
+    try:
+        follow.index_samples(getattr(ctx, "index", None) or {},
+                             _merge_windows(spans), seen)
+        counts = follow.face_counts(seen)
+        pieces = _card_pieces(ctx, edl, spans) or [
+            (min(a for a, _b in spans), max(b for _a, b in spans), spans, 0, 0)]
+        return any(follow.is_group(counts, a, b) for a, b, _f, _lo, _hi in pieces)
+    except Exception:
+        return False
+
+
 def _card_faces(ctx, spans):
     """Face boxes (source fractions) the index measured inside ``spans``:
     the largest face of every spatial sample there."""
@@ -16088,28 +16104,59 @@ SLIVER_MAX_POSITIONS = 6
 
 
 def _clear_slivers(ctx, edl, spans, rect, follows=None, track=None,
-                   what="card"):
+                   what="card", face_floor=None, face_box=None, avoid=()):
     """(rect, follows, track, note) — a source card's or speaker panel's
     framing slid off the thin bands a hard straight edge of the source
     leaves along its edges (picture_cards.sliver_shift), measured over the
     footage each framing shows: the still rect (per camera shot), each
     source_track row, and each HELD position of a follow path (consecutive
     keys at one position slide together, so a held framing never starts to
-    glide), the speaker's measured head kept inside with its margins. note
-    '' when every edge is clean."""
+    glide), the speaker's measured head kept inside with its margins. A
+    speaker panel passes ``face_floor`` (its face boxes' margin,
+    PANEL_FACE_MARGIN: a slide never takes the face box — ``face_box``, else
+    the measured faces there — closer to an edge than that, or than it
+    already was) and ``avoid`` (the burned-in boxes the framing kept out or
+    showed least of: a slide never shows more of them); a slide that would
+    is refused and named instead. note '' when every edge is clean."""
     if rect is None or not spans:
         return rect, follows, track, ""
     faces = _card_face_samples(ctx, spans)
+    avoid = [list(b) for b in avoid or () if b and len(b) == 4]
 
-    def keep_for(r, lo=None, hi=None):
-        near = [f for ft, f in faces
+    def near_faces(r, lo=None, hi=None):
+        return [f for ft, f in faces
                 if (lo is None or lo - .5 <= ft <= hi + .5)
                 and r[0] <= (f[0] + f[2]) / 2.0 <= r[2]
                 and r[1] <= (f[1] + f[3]) / 2.0 <= r[3]]
-        return picture_cards.panel_keep(near)
+
+    def keep_for(r, lo=None, hi=None):
+        return picture_cards.panel_keep(near_faces(r, lo, hi))
+
+    def slide_ok(old, new, lo=None, hi=None):
+        # never more of a burned-in box, never the face box nearer an edge
+        # than the panel's face margin (or than it already was)
+        if avoid and sum(picture_cards._overlap(new, b) for b in avoid) > \
+                sum(picture_cards._overlap(old, b) for b in avoid) + 1e-6:
+            return False
+        if face_floor is not None:
+            fe = face_box if face_box is not None and not follows else \
+                picture_cards.face_extent(near_faces(old, lo, hi))
+            if fe is not None and picture_cards.face_margin(new, fe) < min(
+                    face_floor, picture_cards.face_margin(old, fe)) - 1e-4:
+                return False
+        return True
 
     cleared, refused = [], []
     budget = [SLIVER_MAX_POSITIONS]
+
+    def judged(r, new, found, lo=None, hi=None):
+        if any(abs(u - v) > 1e-4 for u, v in zip(new, r)) and \
+                not slide_ok(r, new, lo, hi):
+            new = [round(float(v), 4) for v in r]
+            found = [(axis, side, depth, 0.0) for axis, side, depth, _m in found]
+        for _axis, side, depth, moved in found:
+            (cleared if moved else refused).append((side, depth, abs(moved)))
+        return new
 
     def fix(r, windows, lo=None, hi=None):
         if budget[0] <= 0 or not windows:
@@ -16117,9 +16164,7 @@ def _clear_slivers(ctx, edl, spans, rect, follows=None, track=None,
         budget[0] -= 1
         xs, ys = _edge_lines(ctx, windows, "card_edge")
         new, found = picture_cards.sliver_shift(r, xs, ys, keep_for(r, lo, hi))
-        for _axis, side, depth, moved in found:
-            (cleared if moved else refused).append((side, depth, abs(moved)))
-        return new
+        return judged(r, new, found, lo, hi)
 
     rect = [round(float(v), 4) for v in rect]
     if follows:
@@ -16171,9 +16216,7 @@ def _clear_slivers(ctx, edl, spans, rect, follows=None, track=None,
             new, found = picture_cards.sliver_shift(
                 rect, sorted({p for lx, _ly in lines for p in lx}),
                 sorted({p for _lx, ly in lines for p in ly}), keep_for(rect))
-            for _axis, side, depth, moved in found:
-                (cleared if moved else refused).append((side, depth, abs(moved)))
-            rect = new
+            rect = judged(rect, new, found)
     bits = []
     if cleared:
         side, depth, moved = max(cleared, key=lambda c: c[1])
@@ -16188,8 +16231,9 @@ def _clear_slivers(ctx, edl, spans, rect, follows=None, track=None,
         bits.append(
             f"EDGE SLIVER (look before acting): a hard straight edge of the source "
             f"leaves a {max(1, round(depth * 100))}%-wide band along the {what}'s "
-            f"{side} edge, and sliding past it would cut the speaker's head or "
-            "bring in another edge — look_at it: a scenery edge can stay; a "
+            f"{side} edge, and sliding past it would cut the speaker's head, "
+            "crowd the face toward an edge, show more of a screen box or bring "
+            "in another edge — look_at it: a scenery edge can stay; a "
             "sliver that reads as a border wants a source rect of its own")
     return rect, follows, track, "; ".join(bits)
 
@@ -16605,9 +16649,25 @@ def _speaker_panel(ctx, edl, spans, box, source, fit, canvas, video, k):
         # the follow path moves the rect's centre: keep it on the fitted rect
         frect = picture_cards.recentre(frect, (
             (rect[0] + rect[2]) / 2.0, (rect[1] + rect[3]) / 2.0))
-    # a thin band of a pillar or frame edge along the panel's edge
-    frect, follows, _track, sliver = _clear_slivers(ctx, edl, spans, frect,
-                                                    follows, None, what="panel")
+    # a thin band of a pillar or frame edge along the panel's edge (an
+    # 'auto' panel only: an editor's rect keeps its framing) — never at
+    # the face's margin or by showing more of a burned-in box
+    sliver = ""
+    if prefer is None:
+        frect, follows, _track, sliver = _clear_slivers(
+            ctx, edl, spans, frect, follows, None, what="panel",
+            face_floor=picture_cards.PANEL_FACE_MARGIN, face_box=info.get("face"),
+            avoid=info.get("avoid"))
+        if sliver and info.get("face"):
+            # the note reports the framing as slid
+            area = max(1e-9, (frect[2] - frect[0]) * (frect[3] - frect[1]))
+            cover = sum(picture_cards._overlap(frect, b)
+                        for b in info.get("avoid") or []) / area
+            fe = picture_cards.face_extent([b for _t, b, _l in
+                                            (_panel_samples(ctx, edl, spans)[0] or [])])
+            info = dict(info, inset=0.0 if cover < 1e-5 else 1.0 + round(cover, 2))
+            if fe is not None and not follows:
+                info["face_margin"] = round(picture_cards.face_margin(frect, fe), 3)
     # what of a burned-in box the face forced in is softened in the render
     # (a still panel only: a following panel's rect moves over it)
     conceal, trimmed = None, False
@@ -16841,10 +16901,21 @@ def set_picture_card(ctx, id, start, end, box=None, fit=None, radius=.045,
         card_box = list(PICTURE_CARD_BOX)
     card_source, card_track, card_follow = None, None, None
     video_lowres = picture_cards.is_lowres(video.get("width"), video.get("height"))
+    # (a 9:16 frame only — ARCHIVAL_CARD_BOX is placed between its bands — and
+    # one speaker: a two-shot keeps the whole stage, as a crop would decide
+    # who to frame)
     archival = (panels is None and source == "auto" and fit in (None, "crop")
                 and spans and picture_cards.is_archival(video.get("width"),
-                                                        video.get("height")))
-    if archival and box is None and _card_faces(ctx, spans):
+                                                        video.get("height"))
+                and canvas[1] >= 1.7 * canvas[0])
+    group = archival and bool(_card_faces(ctx, spans)) and \
+        _card_group(ctx, edl, spans)
+    if group and box is None and fit is None:
+        report.append(
+            "archival 4:3 two-shot: the whole stage (two or more people share "
+            "the shot, so a crop would decide who the card shows; fit='crop' "
+            "frames the largest face)")
+    elif archival and box is None and _card_faces(ctx, spans):
         # an archival 4:3 speaker: a full-width, squarer window framed on
         # the speaker, not the 4:3 postage stamp of the whole stage
         card_box, fit = list(picture_cards.ARCHIVAL_CARD_BOX), "crop"
@@ -16855,7 +16926,7 @@ def set_picture_card(ctx, id, start, end, box=None, fit=None, radius=.045,
             "the most that keeps the headline band above it clear of the "
             "free-tier mark and a whole caption band below it) framed on the "
             "speaker (pass fit='pad' to show the whole stage as a 4:3 card)")
-    elif archival and box is not None and fit == "crop" and \
+    elif archival and not group and box is not None and fit == "crop" and \
             card_box[3] - card_box[1] < .40 and \
             (card_box[2] - card_box[0]) * canvas[0] > \
             1.2 * (card_box[3] - card_box[1]) * canvas[1]:
@@ -28371,8 +28442,8 @@ TOOLS = {
         "every measured position of the head (index boxes) and re-aims on the cut. On a "
         "source below 720p 'auto' shows the WHOLE frame "
         "(contain: the box shrinks to the footage's aspect, edge blanking trimmed; never a "
-        "3.7x crop) — except a 4:3 archival speaker with a measured face and no box: a "
-        "full-width near-square window (y .27-.70, ~43% of the frame: the most that keeps the "
+        "3.7x crop) — except ONE 4:3 archival speaker (no two-shot) in a 9:16 frame, face "
+        "measured, no box: a full-width near-square window (y .27-.70, ~43% of the frame: the most that keeps the "
         "headline band above and a whole caption band below) framed on the speaker; "
         "fit='crop' frames the speaker as a medium close-up in any box and follows them, "
         "fit='pad' always shows the whole frame. A thin band of a pillar or frame edge along "

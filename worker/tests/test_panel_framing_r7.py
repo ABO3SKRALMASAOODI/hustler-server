@@ -303,3 +303,69 @@ def test_qc_flags_a_face_under_a_softened_corner():
         {"box": [.05, .62, .95, .9], "source": [.68, 0, 1, 1]}])])
     p = render_qc.plan(e, {}, W=W, H=H, fps=30.0)
     assert p["softened"] and p["softened"][0][:2] == (1.0, 4.0)
+
+
+# ── review: a panel's sliver slide keeps the panel's own guarantees ──────
+
+def test_a_panel_slide_never_crowds_the_face_or_shows_more_of_the_box(monkeypatch):
+    """The slide off a sliver may not undo what the panel solver held: the
+    face box's 8% margin (a slide that would take it nearer an edge is
+    refused and named) and a burned-in box kept out (or shown least)."""
+    face = [0.788, 0.649, 0.858, 0.799]
+    box = [0.04, 0.139, 0.619, 0.413]
+    rect, info = pc.panel_framing(SW, SH, W, H, box, [face] * 3, [0] * 3)
+    assert info["tier"] == 0 and pc.face_margin(rect, face) >= pc.PANEL_FACE_MARGIN - 1e-3
+    # a desk or stage edge along the panel's bottom: sliding up past it
+    # takes the chin toward the edge
+    monkeypatch.setattr(agent_tools, "_edge_lines",
+                        lambda ctx, windows, tag: ([], [rect[3]]))
+    samples = [{"t": 10.0 + i * .5, "faces": [face]} for i in range(20)]
+    ctx = T._Ctx(SW, SH, samples)
+    # a card's slide (the head kept, no face margin promised) moves it ...
+    moved, _f, _t, note = agent_tools._clear_slivers(ctx, ctx._edl, [(10.0, 20.0)], rect)
+    assert moved != rect and "CLEARED" in note
+    assert pc.face_margin(moved, face) < pc.PANEL_FACE_MARGIN
+    # ... a speaker panel's never takes the face inside its margin
+    kept, _f, _t, note = agent_tools._clear_slivers(
+        ctx, ctx._edl, [(10.0, 20.0)], rect, what="panel",
+        face_floor=pc.PANEL_FACE_MARGIN, face_box=face)
+    assert kept == pytest.approx(rect) and "EDGE SLIVER (look before acting)" in note
+    # a slide that would bring a kept-out box in is refused too
+    face = [0.40, 0.30, 0.52, 0.52]
+    rect, _info = pc.panel_framing(SW, SH, W, H, STACK, [face] * 3, [0] * 3)
+    inset = [rect[2] + .005, 0.0, 1.0, 1.0]
+    monkeypatch.setattr(agent_tools, "_edge_lines",
+                        lambda ctx, windows, tag: ([rect[0] + .01], []))
+    ctx = T._Ctx(SW, SH, [{"t": 10.0 + i * .5, "faces": [face]} for i in range(20)])
+    free, _f, _t, _n = agent_tools._clear_slivers(ctx, ctx._edl, [(10.0, 20.0)], rect)
+    assert pc._overlap(free, inset) > 0                 # unguarded: the box comes in
+    kept, _f, _t, note = agent_tools._clear_slivers(
+        ctx, ctx._edl, [(10.0, 20.0)], rect, what="panel",
+        face_floor=pc.PANEL_FACE_MARGIN, face_box=face, avoid=[inset])
+    assert pc._overlap(kept, inset) == 0 and "look before acting" in note
+
+
+def test_the_archival_default_is_for_one_speaker_in_a_vertical_frame():
+    """A two-shot keeps the whole stage (a crop would decide who the card
+    shows), and so does a non-9:16 frame (the window is placed between a
+    9:16 frame's headline and caption bands)."""
+    a, b = [0.15, 0.25, 0.28, 0.45], [0.68, 0.27, 0.80, 0.46]
+    two = [{"t": 10.0 + i * .25, "faces": [a, b] if i % 2 else [b, a]}
+           for i in range(40)]
+    ctx = T._Ctx(646, 480, two)
+    res = agent_tools.set_picture_card(ctx, "c", 0, 9)
+    card = ctx.card()
+    assert card["fit"] == "pad" and card["source"] == pc.archival_rect()
+    assert "two-shot" in res
+    # asked for, the crop still frames the largest face
+    ctx = T._Ctx(646, 480, two)
+    agent_tools.set_picture_card(ctx, "c", 0, 9, fit="crop")
+    assert ctx.card()["fit"] == "crop"
+    one = [{"t": 10.0 + i * .25, "faces": [[0.42, 0.25, 0.58, 0.48]]} for i in range(40)]
+    for ratio, mode in (("1:1", "crop"), ("4:5", "crop"), ("16:9", "pad")):
+        e = T.default_edl(T.SRC)
+        e["keep"] = [[10.0, 20.0], [25.0, 35.0]]
+        e["frame"] = {"ratio": ratio, "mode": mode}
+        ctx = T._Ctx(646, 480, one, edl=e)
+        res = agent_tools.set_picture_card(ctx, "c", 0, 9)
+        assert ctx.card()["fit"] == "pad" and "archival 4:3" not in res, ratio

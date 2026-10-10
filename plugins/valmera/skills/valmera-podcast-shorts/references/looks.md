@@ -74,7 +74,7 @@ The coordinator assigns one Look and one structure per short. The editor reads
   (measured)`, use it (a speaker card alone with the figures as stat
   graphics, or the speaker full-bleed with the screen as its own cut-in);
   an `EDGE SLIVER` note is a pillar or frame edge at a card's border — look
-  at it. A 4:3 archival speaker card with `box` omitted gets the engine's
+  at it. A single 4:3 archival speaker card with `box` omitted gets the engine's
   larger window (full width, y 0.27-0.70) with the headline band above and
   a caption band below.
 - One accent colour for the whole short, passed to every graphic's `accent`
