@@ -430,9 +430,10 @@ def _probe_with(box):
 def test_the_write_stores_the_ink_box_and_says_where_the_captions_go(monkeypatch):
     monkeypatch.setattr(motion_tools, "_probe_item", _probe_with((0.1, 0.62, 0.9, 0.82)))
     ctx = _Ctx()
-    out = motion_tools.add_motion_graphic(ctx, "word_slam", 1.9, 3.0,
+    # (placed so the slam already lands on "140": number landing leaves it be)
+    out = motion_tools.add_motion_graphic(ctx, "word_slam", 2.78, 3.3,
                                           params={"text": "*140*"}, id="slam")
-    assert out.startswith("EDL v1"), out
+    assert out.startswith("EDL v1") and "NUMBER LANDED" not in out, out
     item = ctx.latest_edl()["json"]["motion"][0]
     fp = item["footprint"]
     assert fp["box"] == [0.1, 0.62, 0.9, 0.82]          # ink, not the scrim's reach
