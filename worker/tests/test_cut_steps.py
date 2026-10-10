@@ -124,16 +124,18 @@ KEEP = [[0, 4], [5, 8], [9, 12]]
 
 
 def test_a_written_step_covers_its_cut_and_its_release():
-    step = {"id": "cs1", "start": 4.0, "end": 7.0, "strength": 0.06, "ramp_s": 0.0,
+    step = {"id": "cs1", "start": 4.0, "end": 7.0, "strength": 0.12, "ramp_s": 0.0,
             "cut_step": True}
     assert _bare({"keep": KEEP}) == [4.0, 7.0]
     assert _bare({"keep": KEEP, "effects": {"zooms": [step]}}) == []
-    # the same 6% as an ordinary zoom is too small to read as a framing change
-    plain = dict(step, cut_step=None)
-    assert _bare({"keep": KEEP, "effects": {"zooms": [plain]}}) == [4.0, 7.0]
+    # round 4: a step under 10% stutters (the judged 7.4% card steps) — no cover
+    small = dict(step, strength=0.07)
+    assert _bare({"keep": KEEP, "effects": {"zooms": [small]}}) == [4.0, 7.0]
     card = {"id": "c", "start": 0, "end": 10, "box": JOBS_BOX, "source": JOBS_SRC,
-            "cut_steps": [{"t0": 5.0, "t1": 8.0, "scale": 0.926}]}
+            "cut_steps": [{"t0": 5.0, "t1": 8.0, "scale": round(1 / 1.12, 4)}]}
     assert _bare({"keep": KEEP, "effects": {"picture_cards": [card]}}) == []
+    assert _bare({"keep": KEEP, "effects": {"picture_cards": [dict(card, cut_steps=[
+        {"t0": 5.0, "t1": 8.0, "scale": 0.926}])]}}) == [4.0, 7.0]
     assert _bare({"keep": KEEP, "effects": {"picture_cards": [
         dict(card, cut_steps=None)]}}) == [4.0, 7.0]
 
@@ -213,7 +215,7 @@ def test_full_frame_cuts_that_pop_get_hard_alternating_zoom_steps(stubbed):
     zooms = ctx.latest_edl()["json"]["effects"]["zooms"]
     assert [(z["start"], z["end"]) for z in zooms] == [(4.0, 7.0), (13.0, 16.0)]
     for z in zooms:
-        assert z["cut_step"] is True and z["ramp_s"] == 0.0 and z["strength"] == 0.08
+        assert z["cut_step"] is True and z["ramp_s"] == 0.0 and z["strength"] == 0.12
         assert (z.get("mode") or "punch") == "punch" and z["cy"] == 0.35
         assert z["cx"] in (None, 0.5)           # a centred x is stored canonically
         assert z["target_measured"] is True and z["id"].startswith("cs")
@@ -258,15 +260,58 @@ def test_a_card_alternates_its_source_crop_wide_on_a_capped_source(stubbed):
     fx = ctx.latest_edl()["json"]["effects"]
     assert not fx.get("zooms")
     steps = fx["picture_cards"][0]["cut_steps"]
-    assert steps == [{"t0": 5.0, "t1": 8.0, "scale": pytest.approx(1 / 1.08, abs=1e-3)},
-                     {"t0": 13.0, "t1": 16.0, "scale": pytest.approx(1 / 1.08, abs=1e-3)}]
-    assert "wide 8%" in out and "tighter would soften it" in out
+    assert steps == [{"t0": 5.0, "t1": 8.0, "scale": pytest.approx(1 / 1.12, abs=1e-3)},
+                     {"t0": 13.0, "t1": 16.0, "scale": pytest.approx(1 / 1.12, abs=1e-3)}]
+    assert "wide 12%" in out and "tighter would soften it" in out
     # every stepped cut now reads as a framing change to the critic
     edl = validate_edl(ctx.latest_edl()["json"], 60.0).model_dump(exclude_none=True)
     tl = Timeline(edl["keep"])
     assert taste.uncovered_jump_cuts(edl, ctx.index, tl) == []
     # 7.0 did not pop, but the first step ends there: the framing steps back
     assert "Also changes framing on (a step ending there): 7s" in out
+
+
+HD_SRC = [0.3, 0.1, 0.7, 0.6337]          # the box's aspect on a 1920x1080 source
+
+
+def _hd_card_ctx(stubbed, monkeypatch, face):
+    keep = [[0, 4], [5, 8], [9, 12], [13, 16]]
+    stubbed["popping"] = {5.0, 13.0}
+    monkeypatch.setattr(motion_tools, "jump_cut_measure",
+                        lambda ctx: (lambda src_t: [list(face)]))
+    edl = _full(keep)
+    edl["effects"] = {"picture_cards": [{"id": "card", "start": 0, "end": 13,
+                                         "box": JOBS_BOX, "source": HD_SRC,
+                                         "entrance": "none", "exit": "none"}]}
+    return _Ctx(edl, 1920, 1080)
+
+
+def test_a_tight_card_step_never_crops_the_speakers_head(stubbed, monkeypatch):
+    # the owner's first complaint: a card that lets part of the face leave the
+    # frame. The crown sits just under the card's top edge here, so 12%
+    # tighter around the card's centre would cut the hair: the step goes wide.
+    ctx = _hd_card_ctx(stubbed, monkeypatch, [0.45, 0.16, 0.55, 0.30])
+    out = cut_steps.conceal_jump_cuts(ctx)
+    assert out.startswith("EDL v1"), out
+    steps = ctx.latest_edl()["json"]["effects"]["picture_cards"][0]["cut_steps"]
+    assert [s["scale"] for s in steps] == [pytest.approx(1 / 1.12, abs=1e-3)] * 2
+    assert "tighter would crop the speaker's head" in out
+    for s in steps:
+        rect = picture_cards.source_at(ctx.latest_edl()["json"]["effects"][
+            "picture_cards"][0], (s["t0"] + s["t1"]) / 2.0)
+        head = picture_cards.head_box([0.45, 0.16, 0.55, 0.30])
+        assert rect[1] <= head[1] and rect[0] <= head[0] and rect[2] >= head[2]
+    # with the head well inside, the same card steps tight as before
+    ctx = _hd_card_ctx(stubbed, monkeypatch, [0.45, 0.30, 0.55, 0.40])
+    out = cut_steps.conceal_jump_cuts(ctx)
+    steps = ctx.latest_edl()["json"]["effects"]["picture_cards"][0]["cut_steps"]
+    assert [s["scale"] for s in steps] == [pytest.approx(1.12)] * 2, out
+    assert "crop the speaker's head" not in out
+    # no face measured is no evidence either way: tight, as before
+    head = cut_steps.tight_step_crops_head(
+        {"box": JOBS_BOX, "source": HD_SRC}, 1.12, [6.0], lambda t: None,
+        1920, 1080, 1080, 1920)
+    assert head is None
 
 
 def test_at_names_the_cuts_and_bad_arguments_are_refused(stubbed):
@@ -290,7 +335,8 @@ def test_conceal_is_a_registered_optional_tool_and_never_a_default():
     assert "conceal_jump_cuts" in agent_tools.WRITE_TOOLS
     desc = agent_tools.TOOLS["conceal_jump_cuts"][1]
     assert "OPTIONAL" in desc and "never a default" in desc
-    assert agent_tools.TOOLS["conceal_jump_cuts"][2]["mode"]["enum"] == ["scale_step", "off"]
+    assert agent_tools.TOOLS["conceal_jump_cuts"][2]["mode"]["enum"] == [
+        "report", "scale_step", "off"]
     # nothing that runs by default writes a cut step: looks, planners,
     # directors and the shorts pipeline never name the tool or the flag
     for name in ("motion_planner.py", "director.py", "shorts.py", "motion_captions.py",

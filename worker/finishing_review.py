@@ -9,6 +9,7 @@ Taste notes and other craft heuristics are presented separately, labelled
 dense camera, type and sound design must be able to finish without arguing
 with them.
 """
+import jump_cut_report
 import quality_verifier
 import taste
 from timeline import Timeline
@@ -45,7 +46,8 @@ def advisory_findings(ctx, row):
         user_asked=quality_verifier.request_text_for(ctx),
         # the frames render_preview measured for its jump-cut note, read
         # back without decoding anything new
-        measure=lambda src_t: cache.get(round(float(src_t), 2)))
+        measure=lambda src_t: cache.get(round(float(src_t), 2)),
+        pop=jump_cut_report.cached_pop(ctx))
     findings += [r["message"] for r in _deterministic(ctx, edl, index)
                  if not quality_verifier.is_blocking(r)]
     return list(dict.fromkeys(findings))

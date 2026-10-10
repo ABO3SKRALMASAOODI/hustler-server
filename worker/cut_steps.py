@@ -16,8 +16,17 @@ render path writes it, and a bare jump cut stays the accepted grammar.
 WHAT IT WRITES
 
 Cut hygiene, not expressive camera: nothing animates. On each selected cut
-the framing STEPS by ``step`` (6-10%, default 8%) and holds to the next cut,
-where it steps back — so consecutive popping cuts alternate tight / wide.
+the framing STEPS by ``step`` (10-15%, default 12%) and holds to the next
+cut, where it steps back — so consecutive popping cuts alternate tight /
+wide. Round 4 (Oct 2026): the judged 7.4% steps on the Jobs card read as a
+stutter, not a cut — under ~10% a step is worse than a bare cut.
+
+THE REPORT COMES FIRST
+
+``mode='report'`` writes nothing: it lists every same-shot join with how
+visible its jump is, what already covers it and the editor's options
+(jump_cut_report.py) — leave it, move a graphic change onto it, restore or
+re-cut the join, or this step on that one cut.
 
 * full-frame footage: a ``cut_step`` zoom — mode punch, ramp_s 0 (an instant
   step), aimed at the speaker's face, from the cut to the next cut. The
@@ -26,7 +35,10 @@ where it steps back — so consecutive popping cuts alternate tight / wide.
   SOURCE rect scaled over the footage after the cut (one enlargement from the
   source, never crop-then-zoom). A card already near its upscale cap
   (picture_cards.SOURCE_UPSCALE_CAP; a 480p archival talk) steps WIDE instead
-  of tight, so the alternation never softens the picture. A card composes
+  of tight, so the alternation never softens the picture — and so does a
+  card whose tight step would push the speaker's head (hair, ears, chin)
+  out of the card (tight_step_crops_head; the cut stays bare when the
+  source has no room to step wide). A card composes
   its footage per kept segment, so a card step holds to the end of that
   segment (through a camera change inside it), never to a mid-segment cut.
 
@@ -48,10 +60,11 @@ import json
 import math
 import os
 
-STEP_DEFAULT = 0.08
-STEP_MIN, STEP_MAX = 0.06, 0.10
+STEP_DEFAULT = 0.12
+STEP_MIN, STEP_MAX = 0.10, 0.15
 # A step this small still reads as a framing change on a hard cut (taste
-# counts a written cut step as cover from here; an expressive zoom needs 8%).
+# counts a written cut step as cover from here, like an expressive zoom);
+# under it the frame stutters (jump_cut_report.STUTTER_STEP).
 CUT_STEP_MIN = STEP_MIN
 # At most this many cuts are measured on real frames per call.
 MEASURE_MAX = 24
@@ -238,11 +251,12 @@ def _visible_rect(edl, index, src_t, card):
     return src
 
 
-def card_step_scale(card, src_t, step, src_w, src_h, W, H):
+def card_step_scale(card, src_t, step, src_w, src_h, W, H, tight_ok=True):
     """(scale, why) of a card step at SOURCE second src_t: tighter by
     ``step`` while the enlargement stays under the source upscale cap, else
     wider by it while the source has room, else the larger of what fits
-    (None when that is under STEP_MIN)."""
+    (None when that is under STEP_MIN). ``tight_ok`` False offers only the
+    wide side (a tighter card would crop the speaker's head)."""
     import picture_cards
     rect = picture_cards.source_at(card, src_t)
     box = card.get("box")
@@ -253,22 +267,76 @@ def card_step_scale(card, src_t, step, src_w, src_h, W, H):
     rw = max(1e-6, (rect[2] - rect[0]) * src_w)
     k = bw / rw
     cap = picture_cards.SOURCE_UPSCALE_CAP
-    tight = cap / k
+    tight = cap / k if tight_ok else 0.0
     wide = min(1.0 / max(rect[2] - rect[0], 1e-6), 1.0 / max(rect[3] - rect[1], 1e-6))
     want = 1.0 + step
     if tight >= want - 1e-6:
         return round(want, 4), f"tight {step * 100:.0f}%"
     if wide >= want - 1e-6:
+        if not tight_ok:
+            return round(1.0 / want, 4), f"wide {step * 100:.0f}%"
         return round(1.0 / want, 4), (f"wide {step * 100:.0f}% (the {int(src_w)}x"
                                       f"{int(src_h)} source is already {k:.2f}x — "
                                       "tighter would soften it)")
     best = max(tight, wide)
     if best - 1.0 < STEP_MIN - 1e-6:
+        if not tight_ok:
+            return None, ("a tighter card would crop the speaker's head and the "
+                          "source has no room to step wide")
         return None, (f"the card shows {k:.2f}x of a source with no room left "
                       "either way")
     if tight >= wide:
         return round(best, 4), f"tight {(best - 1) * 100:.0f}% (the most the cap allows)"
     return round(1.0 / best, 4), f"wide {(best - 1) * 100:.0f}% (the most the source allows)"
+
+
+# A tight card step trims every side of what the card shows around its
+# centre (picture_cards.step_rect). The owner's first complaint is a card or
+# crop that lets part of the speaker's face leave the frame, so a tight step
+# is refused wherever it would push the speaker's head (hair, ears, chin:
+# picture_cards.head_box) further out of the card than the card's own
+# framing already does, by more than HEAD_TOL of the card's size; the step
+# then goes wide (more of the source, nothing cropped) or the cut stays bare.
+HEAD_TOL = 0.005
+
+
+def _head_overflow(rect, head):
+    """How far ``head`` runs past ``rect`` on its four sides, as shares of
+    the rect's width / height (0 when it is inside)."""
+    w = max(1e-6, rect[2] - rect[0])
+    h = max(1e-6, rect[3] - rect[1])
+    return (max(0.0, rect[0] - head[0]) / w + max(0.0, head[2] - rect[2]) / w
+            + max(0.0, rect[1] - head[1]) / h + max(0.0, head[3] - rect[3]) / h)
+
+
+def tight_step_crops_head(card, k, moments, faces_at, src_w, src_h, W, H):
+    """The first SOURCE second of ``moments`` where a tight step ``k`` (> 1)
+    of ``card`` would push the speaker's head (the largest face there)
+    further out of the card than its unstepped framing does, or None. A
+    moment with no face measured is no evidence either way."""
+    import picture_cards
+    box = card.get("box")
+    if not box or k <= 1.0:
+        return None
+    plain = dict(card, cut_steps=None)
+    for t in moments:
+        try:
+            faces = faces_at(t)
+        except Exception:  # noqa: BLE001 — a face we cannot read is no evidence
+            faces = None
+        faces = [f for f in faces or [] if f and len(f) == 4
+                 and f[2] > f[0] and f[3] > f[1]]
+        rect = picture_cards.source_at(plain, t)
+        if not faces or not rect:
+            continue
+        face = max(faces, key=lambda f: (f[2] - f[0]) * (f[3] - f[1]))
+        head = picture_cards.head_box(face)
+        before = picture_cards.match_rect(rect, box, src_w, src_h, W, H)
+        after = picture_cards.match_rect(picture_cards.step_rect(rect, k), box,
+                                         src_w, src_h, W, H)
+        if _head_overflow(after, head) > _head_overflow(before, head) + HEAD_TOL:
+            return t
+    return None
 
 
 def _step(zooms, t, prog, fps):
@@ -349,16 +417,21 @@ def _fmt_ev(row):
 
 
 def conceal_jump_cuts(ctx, mode="scale_step", step=None, at=None):
-    """Write (or remove) the optional cut steps; see the module docstring."""
+    """Report (mode='report'), write or remove (mode='off') the optional
+    cut steps; see the module docstring."""
     import renderer
     import taste
     from timeline import Timeline
     atools = _at()
     mode = str(mode or "scale_step").strip().lower()
-    if mode not in ("scale_step", "off"):
-        return ("REJECTED: mode is 'scale_step' (write hard alternating framing "
-                "steps on the same-angle cuts that visibly pop) or 'off' (remove "
-                "them all).")
+    if mode not in ("scale_step", "off", "report"):
+        return ("REJECTED: mode is 'report' (list every same-shot jump cut with "
+                "its evidence and options; writes nothing), 'scale_step' (write "
+                "hard alternating framing steps on the same-angle cuts that "
+                "visibly pop) or 'off' (remove them all).")
+    if mode == "report":
+        import jump_cut_report
+        return jump_cut_report.tool_report(ctx)
     cur = json.loads(json.dumps(ctx.latest_edl()["json"]))
     base, nz, nc = strip(cur)
     if mode == "off":
@@ -375,8 +448,8 @@ def conceal_jump_cuts(ctx, mode="scale_step", step=None, at=None):
         return f"REJECTED: step is a number {STEP_MIN:g}-{STEP_MAX:g} (default {STEP_DEFAULT:g})."
     if not STEP_MIN - 1e-9 <= st <= STEP_MAX + 1e-9:
         return (f"REJECTED: step {st:g} is outside {STEP_MIN:g}-{STEP_MAX:g}: below "
-                f"{STEP_MIN:g} the cut still reads as the same frame popping, above "
-                f"{STEP_MAX:g} it reads as a zoom.")
+                f"{STEP_MIN:g} the frame stutters (the same frame popping, not a "
+                f"cut), above {STEP_MAX:g} it reads as a zoom.")
     targets = None
     if at not in (None, "", []):
         try:
@@ -392,8 +465,8 @@ def conceal_jump_cuts(ctx, mode="scale_step", step=None, at=None):
         return "REJECTED: the source's size is unknown (index the video first)."
     tl = Timeline(base["keep"], base.get("inserts") or [], base.get("speed") or [])
     import motion_tools
-    rows = taste.uncovered_jump_cuts(base, index, tl,
-                                     measure=motion_tools.jump_cut_measure(ctx))
+    faces = motion_tools.jump_cut_measure(ctx)
+    rows = taste.uncovered_jump_cuts(base, index, tl, measure=faces)
     if not rows:
         return ("No bare same-angle jump cut in this edit (camera changes, inserts, "
                 "transitions and framing changes already sit on every join). "
@@ -484,7 +557,25 @@ def conceal_jump_cuts(ctx, mode="scale_step", step=None, at=None):
             skipped.append((c, "spliced media sits there"))
             continue
         if card is not None:
-            k, why = card_step_scale(card, (a_src + b_src) / 2.0, st, src_w, src_h, W, H)
+            mid = (a_src + b_src) / 2.0
+            k, why = card_step_scale(card, mid, st, src_w, src_h, W, H)
+            if k is not None and k > 1.0:
+                # never a tighter card that crops the speaker's head
+                def faces_at(t, lo=a_src, hi=b_src):
+                    got = faces(t) if faces is not None else None
+                    return got or taste._sample_faces(
+                        index, max(lo, t - taste.JUMP_CUT_FACE_NEAR_S),
+                        min(hi, t + taste.JUMP_CUT_FACE_NEAR_S), t)
+                edge = 2.0 / fps
+                crops = tight_step_crops_head(
+                    card, k, [min(a_src + edge, mid), mid, max(b_src - edge, mid)],
+                    faces_at, src_w, src_h, W, H)
+                if crops is not None:
+                    k, why = card_step_scale(card, mid, st, src_w, src_h, W, H,
+                                             tight_ok=False)
+                    if k is not None:
+                        why += (f" — tighter would crop the speaker's head "
+                                f"(source {crops:.2f}s)")
             if k is None:
                 skipped.append((c, why))
                 continue
@@ -564,22 +655,28 @@ def conceal_jump_cuts(ctx, mode="scale_step", step=None, at=None):
 TOOL_SPECS = {
     "conceal_jump_cuts": (
         conceal_jump_cuts,
-        "OPTIONAL cut hygiene — never a default: hide same-angle jump cuts that "
+        "OPTIONAL cut hygiene — never a default. mode='report' FIRST: it lists "
+        "every same-shot jump cut (how visible the jump is, what already covers "
+        "it — a graphic in/out, a caption change, a step — the hook and stutter "
+        "flags, and the options: leave it, move a graphic change onto it, "
+        "restore or re-cut the join, or a step) and writes nothing. "
+        "mode='scale_step' hides same-angle jump cuts that "
         "VISIBLY POP (pause removal on one camera: the head or hands jump inside a "
         "constant frame) with HARD, non-animated framing steps. Each selected cut "
-        "steps the framing by `step` (0.06-0.10, default 0.08) and holds it to the "
+        "steps the framing by `step` (0.10-0.15, default 0.12; under ~10% a step "
+        "stutters) and holds it to the "
         "next cut, where it steps back, so consecutive cuts alternate tight/wide "
         "like a second camera. Full-frame footage gets a cut-step zoom (ramp 0, "
         "aimed at the face); a source picture card alternates its SOURCE crop "
         "(stepping wide instead of tight when the source is near its upscale cap, "
-        "e.g. 480p archival). Only bare same-angle cuts that measurably pop are "
+        "e.g. 480p archival, or when tighter would crop the speaker's head). Only bare same-angle cuts that measurably pop are "
         "touched (a head jump, or a picture change well above the speaker's own "
         "motion); `at` = [program seconds] names cuts you saw pop instead. This is "
         "not an expressive zoom and not a rule: a bare jump cut is fine, so use it "
         "only when the render shows cuts popping (typically a static archival or "
         "single-camera talk tightened by pause removal), after the cut is final. "
         "Re-running replaces earlier steps; mode='off' removes them all.",
-        {"mode": {"type": "string", "enum": ["scale_step", "off"]},
+        {"mode": {"type": "string", "enum": ["report", "scale_step", "off"]},
          "step": {"type": "number"},
          "at": {"type": "array", "items": {"type": "number"}}}),
 }

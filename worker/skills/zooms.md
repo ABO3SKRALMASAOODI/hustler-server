@@ -75,23 +75,37 @@ punches.
   FRAMING — a punch (hard step, `ramp_s=0` when the schema offers it) from
   that cut to the next at strength 0.12–0.2, back to the wide at the
   following cut, aimed at the face — so it reads as a second camera. A
-  framing change is a step of at least ~8% across the cut (0.05 punches and
-  two zooms of nearly equal strength read as the same frame with the head
-  twitching — remove those) or a crop move. The render's taste notes name a
-  jump cut only when the speaker's head measurably jumps across it, with
-  those options — never an order. Never cover every jump cut: a camera that
-  moves on every cut looks childish.
+  framing change is a step of at least ~10% across the cut (0.05 punches,
+  the judged 7.4% card steps and two zooms of nearly equal strength read as
+  the same frame stuttering — remove those, or raise one to ≥12% only where
+  the cut genuinely pops) or a crop move. Never cover every jump cut: a
+  camera that moves on every cut looks childish.
+- THE JUMP-CUT REPORT: `conceal_jump_cuts(mode='report')` writes nothing and
+  lists every same-shot jump cut — how visible the jump is (the head's
+  travel in face widths, the picture change against the speaker's own
+  motion), what already covers it (a graphic entering or leaving on the cut
+  frame, a layout change, a ≥10% step, a crop re-aim; a caption block
+  changing there only softens it), the flags (a cut inside the hook's first
+  1.5 s; a step under ~10%, which stutters) and the options, most
+  restrained first: leave it; move a graphic change that sits within 0.4 s
+  onto the cut (one event instead of two); restore a short removed pause
+  (one continuous take) or re-cut the join on a still head; and — optional
+  and rare — a hard ≥12% step on that one cut. The render's taste notes
+  carry the flagged, near-miss and visibly jumping cuts with those options,
+  and an EDL write that puts a jump cut in the hook or writes a sub-10% step
+  says so — never an order, and never a zoom on every cut.
 - CUT HYGIENE IS NOT A ZOOM: when the render shows same-angle jump cuts
   visibly POPPING (pause removal on one locked camera — the head and hands
   jump inside a constant frame, typically a static archival or single-camera
   talk), `conceal_jump_cuts()` is the optional tool: it measures every bare
   same-angle cut (a head jump, or a picture change well above the speaker's
-  own motion) and writes HARD, non-animated framing steps of 6-10% (default
-  8%) on just the ones that pop, each held to the next cut, where it steps
+  own motion) and writes HARD, non-animated framing steps of 10-15% (default
+  12%) on just the ones that pop, each held to the next cut, where it steps
   back — so popping cuts alternate like a second camera. Full frame gets a
   `cut_step` zoom (ramp 0, aimed at the face); a source picture card
   alternates its own SOURCE crop instead (stepping WIDE when the source is
-  near its upscale cap, so a 480p card never softens). `at=[...]` names cuts
+  near its upscale cap, so a 480p card never softens, and wherever tighter
+  would crop the speaker's head). `at=[...]` names cuts
   you saw pop; `mode='off'` removes every step. It is never a default, no
   look or planner writes it, its steps are not counted as camera moves, and
   it is not a reason to add expressive zooms; run it after the cut is final
