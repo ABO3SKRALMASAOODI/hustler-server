@@ -26,7 +26,12 @@ where it steps back — so consecutive popping cuts alternate tight / wide.
   SOURCE rect scaled over the footage after the cut (one enlargement from the
   source, never crop-then-zoom). A card already near its upscale cap
   (picture_cards.SOURCE_UPSCALE_CAP; a 480p archival talk) steps WIDE instead
-  of tight, so the alternation never softens the picture.
+  of tight, so the alternation never softens the picture. A card composes
+  its footage per kept segment, so a card step holds to the end of that
+  segment (through a camera change inside it), never to a mid-segment cut.
+
+A re-cut moves cut-step zooms with their footage; one whose cut is gone is
+dropped (timeline.remap_program_items) rather than left stepping mid-shot.
 
 WHICH CUTS (measurably pop)
 
@@ -315,6 +320,21 @@ def _source_span(tl, a_src, b_src):
     return round(a_src, 4), round(b_src, 4)
 
 
+def _block_end(tl, c, card):
+    """Program second where the render block holding program second ``c``
+    ends: the end of its kept segment, or the card's own end inside it."""
+    end = float(tl.out_duration)
+    for off, L in zip(tl.offsets, tl.seg_out_len):
+        if off - 1e-6 <= c < off + L - 1e-6:
+            end = off + L
+            break
+    try:
+        ce = float(card["end"])
+    except (KeyError, TypeError, ValueError):
+        return end
+    return min(end, ce) if ce > c + 1e-3 else end
+
+
 # ── the tool ─────────────────────────────────────────────────────────────
 
 def _fmt_ev(row):
@@ -445,6 +465,16 @@ def conceal_jump_cuts(ctx, mode="scale_step", step=None, at=None):
             skipped.append((c, "the next cut is under 0.2 s away"))
             continue
         card, blocked = _source_card(base, c, nxt)
+        if card is not None:
+            # A card composes the main footage per render BLOCK (a kept
+            # segment, split only at card edges and follow/focus edges) and
+            # takes a step for the whole block (by its midpoint): a card step
+            # holds to the end of the block, through a camera change inside
+            # it, so what renders is what is written and reported.
+            blk = _block_end(tl, c, card)
+            if blk > nxt + 1e-3:
+                nxt = blk
+                card, blocked = _source_card(base, c, nxt)
         if blocked:
             skipped.append((c, blocked))
             continue

@@ -27,6 +27,7 @@ backing. A probe that fails leaves the item without a plate (rendered exactly
 as before).
 """
 
+import math
 import os
 from contextvars import ContextVar
 
@@ -170,6 +171,14 @@ def _band_box(item, W, H):
     box = caption_carry.footprint_box(item, ar)
     if box:
         return [float(v) for v in box]
+    if item.get("box"):
+        # the capture hint bounds what it may draw (an authored page)
+        try:
+            hint = [float(v) for v in item["box"]]
+        except (TypeError, ValueError):
+            hint = None
+        if hint and len(hint) == 4 and hint[2] > hint[0] and hint[3] > hint[1]:
+            return hint
     name = item.get("template")
     if not name or name == "html":
         return None
@@ -193,10 +202,12 @@ def _nominal(item, W, H):
 
 
 def _ink_lead(item):
-    """Seconds into an item before it draws anything: a phrase build whose
-    first row is revealed on a later spoken word leaves its band empty until
-    then (the Jobs 'liberal arts' lockup: 1.17 s), and the headline keeps the
-    band meanwhile."""
+    """Seconds into an item (from its start on the program clock) before it
+    draws anything: a phrase build whose first row is revealed on a later
+    spoken word leaves its band empty until then (the Jobs 'liberal arts'
+    lockup: 1.17 s), and the headline keeps the band meanwhile. Row ``at``
+    is composition time, so a windowed piece already ``phase_s`` into the
+    composition has that much less to wait."""
     rows = (item.get("params") or {}).get("rows")
     if item.get("template") != "phrase_build" or not isinstance(rows, list):
         return 0.0
@@ -207,7 +218,10 @@ def _ink_lead(item):
         except (TypeError, ValueError):
             if k == 0:
                 return 0.0
-    return max(0.0, min(ats)) if ats else 0.0
+    if not ats:
+        return 0.0
+    phase = float(item.get("phase_s") or 0.0)
+    return max(0.0, min(ats) - phase)
 
 
 def _shares_band(a, b, pad=YIELD_PAD):
@@ -265,6 +279,30 @@ def yield_windows(item, items, W, H):
     return [[round(a - s + phase, 3), round(b - s + phase, 3)] for a, b in merged]
 
 
+def render_pieces(item, fps):
+    """``item`` as the clips the engine renders: [item], or — a persistent
+    item held longer than one clip may last (motion_engine.MAX_DURATION_S:
+    a whole-program headline on a long program) — consecutive frame-aligned
+    pieces on the SAME composition clock (phase_s / full_duration_s, exactly
+    like a stitched preview's pieces), so the band never silently drops out
+    of a long render."""
+    s, e = float(item["start"]), float(item["end"])
+    cap = float(motion_engine.MAX_DURATION_S)
+    if e - s <= cap or not motion_templates.persistent(item) \
+            or item.get("layer") == "behind_subject":
+        return [item]
+    fps = float(fps or 30.0)
+    # two frames of slack: a frame-aligned piece is at most a frame longer
+    n = int(math.ceil((e - s) / (cap - 2.0 / fps)))
+    step_f = (e - s) * fps / n
+    phase = float(item.get("phase_s") or 0.0)
+    full = float(item.get("full_duration_s") or (e - s))
+    edges = [s] + [s + round(k * step_f) / fps for k in range(1, n)] + [e]
+    return [dict(item, start=round(a, 6), end=round(b, 6),
+                 phase_s=round(phase + a - s, 6), full_duration_s=full)
+            for a, b in zip(edges, edges[1:]) if b - a > 1e-6]
+
+
 def yields_doc(windows):
     """The MG.yields input for build_document (None when there are none)."""
     if not windows:
@@ -301,10 +339,13 @@ def prepare_inputs(edl, workdir, W, H, fps, out_duration, args, next_idx,
             for _k, key in motion_templates.asset_params(item["template"], item.get("params") or {}).items():
                 if key not in asset_locals and fetch_asset is not None:
                     asset_locals[key] = fetch_asset(key)
-            jobs.append(motion_templates.build_job(
-                item, W, H, fps, asset_locals, plate=plates.get(k),
-                yields=yields_doc(yield_windows(item, items, W, H))))
-            kept.append(item)
+            ydoc = yields_doc(yield_windows(item, items, W, H))
+            pieces = render_pieces(item, fps)
+            built = [motion_templates.build_job(
+                part, W, H, fps, asset_locals, plate=plates.get(k),
+                yields=ydoc) for part in pieces]
+            jobs.extend(built)
+            kept.extend(pieces)
         except Exception as e:  # noqa: BLE001 — degrade one item, keep the render
             warn(f"motion '{item.get('id')}' skipped: {str(e)[:200]}")
     if not jobs:

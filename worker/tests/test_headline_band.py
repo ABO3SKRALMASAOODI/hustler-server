@@ -310,3 +310,132 @@ def test_a_program_long_headline_stays_program_long_through_a_recut():
     slam = next(m for m in edl["motion"] if m["id"] == "s")
     assert (hl["start"], hl["end"]) == (0.0, 38.0)
     assert (slam["start"], slam["end"]) == (18.0, 19.0)  # a cued moment follows its words
+
+
+# ── review fixes (Oct 2026) ───────────────────────────────────────────────
+
+def test_a_phrase_build_cut_into_by_a_piece_yields_from_its_drawn_rows():
+    rows = [{"text": "injecting some", "role": "sans", "size": "0.5", "at": "1.17"},
+            {"text": "*liberal arts*", "role": "serif", "size": "1.4", "at": "1.89"}]
+    pb = {"id": "arts", "template": "phrase_build", "start": 0.0, "end": 3.21,
+          "phase_s": 0.7, "full_duration_s": 3.91,
+          "params": motion_templates.check_params("phrase_build", {"rows": rows, "y": 0.15}),
+          "footprint": _fp([0.09, 0.06, 0.92, 0.24])}
+    # a piece starting 22.0 s into the program: the build is 0.7 s in, its
+    # first row lands 0.47 s into the piece (22.47 on the composition clock)
+    piece = dict(_hl(end=37.84), start=0.0, end=10.0, phase_s=22.0,
+                 full_duration_s=37.84)
+    assert motion_layer.yield_windows(piece, [piece, pb], W, H) == [[22.47, 25.21]]
+    late = dict(pb, phase_s=2.0, full_duration_s=5.2)       # every row already drawn
+    assert motion_layer._ink_lead(late) == 0.0
+
+
+def test_an_authored_page_with_a_capture_box_yields_by_that_box():
+    hl = _hl()
+    page = {"id": "p", "template": "html", "start": 5.0, "end": 6.0, "html": "<div></div>",
+            "params": {}, "box": [0.1, 0.1, 0.9, 0.25]}
+    low = dict(page, id="q", start=8.0, end=9.0, box=[0.1, 0.7, 0.9, 0.78])
+    blind = dict(page, id="r", start=12.0, end=13.0, box=None)
+    assert motion_layer.yield_windows(hl, [hl, page, low, blind], W, H) == [[5.0, 6.0]]
+
+
+def test_a_headline_longer_than_one_clip_renders_in_pieces_on_one_clock(tmp_path, monkeypatch):
+    long_hl = dict(_hl(end=300.0), footprint=_fp([0.2, 0.09, 0.8, 0.29]))
+    pieces = motion_layer.render_pieces(long_hl, 30.0)
+    assert len(pieces) == 3
+    assert pieces[0]["start"] == 0.0 and pieces[-1]["end"] == 300.0
+    for a, b in zip(pieces, pieces[1:]):
+        assert a["end"] == b["start"]
+        assert round(b["start"] * 30, 6) == round(b["start"] * 30)     # frame-aligned
+    for p in pieces:
+        assert p["end"] - p["start"] <= motion_engine.MAX_DURATION_S
+        assert p["phase_s"] == pytest.approx(p["start"])
+        assert p["full_duration_s"] == 300.0
+    # short, non-persistent and behind-subject items are left whole
+    assert motion_layer.render_pieces(_hl(end=30.0), 30.0) == [_hl(end=30.0)]
+    slam = _lock("s", 0.0, 200.0)
+    assert motion_layer.render_pieces(slam, 30.0) == [slam]
+    assert len(motion_layer.render_pieces(dict(long_hl, layer="behind_subject"), 30.0)) == 1
+
+    # the render lane builds one job per piece, each under the engine's
+    # limit, sharing the whole item's yield windows (composition seconds)
+    seen = []
+
+    def fake_render(jobs, out_dir, pages=None, budget_s=900.0):
+        seen.extend(jobs)
+        return [motion_engine.RenderedClip(str(tmp_path / f"{k}.mov"), 0, 0, 10, 10,
+                                           int(j.duration * 30), 1, False, 0.0)
+                for k, j in enumerate(jobs)]
+    monkeypatch.setattr(motion_engine, "render_jobs", fake_render)
+    edl = {"motion": [long_hl, _lock("s", 150.0, 152.0)]}
+    args = []
+    inputs, nxt = motion_layer.prepare_inputs(edl, str(tmp_path), W, H, 30.0, 300.0, args, 1)
+    hl_jobs = [j for j in seen if "(headline)" in j.label]
+    assert len(hl_jobs) == 3 and nxt == 1 + len(seen)
+    assert all(j.duration <= motion_engine.MAX_DURATION_S for j in hl_jobs)
+    assert [round(j.t0, 3) for j in hl_jobs] == [round(p["start"], 3) for p in pieces]
+    marks = {j.html.split('"yields": ')[1].split("}")[0] for j in hl_jobs}
+    assert marks == {'{"w": [[150.0, 152.0]], "out": 0.12, "in": 0.3'}
+    spans = [(it["start"], it["end"]) for _i, it, _c in inputs if it["template"] == "headline"]
+    assert spans == [(p["start"], p["end"]) for p in pieces]
+
+
+def test_a_pad_letterbox_leaves_a_band_without_a_picture_rect(monkeypatch):
+    monkeypatch.setattr(motion_tools, "_probe_item", _probe)
+    edl = default_edl(60.0)
+    edl["keep"] = [[0.0, 30.0]]
+    edl["frame"] = {"ratio": "9:16", "mode": "pad"}
+    ctx = _Ctx(edl)
+    ctx.index["video"] = {"width": 1920, "height": 1080, "fps": 30.0}
+    out = motion_tools.add_motion_graphic(ctx, "headline", 0.0, params=dict(TEXT))
+    assert out.startswith("EDL v1"), out
+    assert "above the letterboxed picture" in out
+    item = ctx.latest_edl()["json"]["motion"][0]
+    top = (1.0 - (9 / 16) / (16 / 9)) / 2.0                 # the 16:9 picture's top
+    assert item["params"]["y"] == pytest.approx(
+        (motion_tools.HEADLINE_SAFE_TOP + top - motion_tools.HEADLINE_GAP) / 2, abs=2e-3)
+    # a shot the focus track crops full-frame leaves no free band
+    edl["frame"]["focus_track"] = [{"t0": 0.0, "t1": 12.0, "mode": "pad"},
+                                   {"t0": 12.0, "t1": 30.0, "mode": "crop"}]
+    ctx = _Ctx(edl)
+    ctx.index["video"] = {"width": 1920, "height": 1080, "fps": 30.0}
+    out = motion_tools.add_motion_graphic(ctx, "headline", 0.0, params=dict(TEXT))
+    assert out.startswith("REJECTED") and "needs a free band" in out
+    out = motion_tools.add_motion_graphic(ctx, "headline", 0.0, 10.0, params=dict(TEXT))
+    assert out.startswith("EDL v1"), out
+
+
+@needs_browser
+def test_pieces_of_a_long_headline_play_exactly_the_frames_of_one_clip(tmp_path, monkeypatch):
+    monkeypatch.setattr(motion_engine, "CACHE_DIR", str(tmp_path / "cache"))
+    item = dict(_hl(end=3.0), footprint=None)
+    ydoc = motion_layer.yields_doc([[1.0, 2.0]])
+    whole = motion_templates.build_job(item, 270, 480, 30, yields=ydoc)
+    monkeypatch.setattr(motion_engine, "MAX_DURATION_S", 1.3)
+    pieces = motion_layer.render_pieces(item, 30)
+    assert len(pieces) == 3
+    jobs = [motion_templates.build_job(p, 270, 480, 30, yields=ydoc) for p in pieces]
+    monkeypatch.setattr(motion_engine, "MAX_DURATION_S", 120.0)
+    clips = motion_engine.render_jobs([whole] + jobs, str(tmp_path / "out"), pages=1)
+
+    def alphas(clip):
+        raw = subprocess.run(["ffmpeg", "-v", "error", "-i", clip.path, "-f", "rawvideo",
+                              "-pix_fmt", "rgba", "-"], capture_output=True).stdout
+        n = clip.w * clip.h * 4
+        return [sum(raw[i * n + 3:(i + 1) * n:4]) for i in range(len(raw) // n)]
+    ref = alphas(clips[0])
+    got = [a for c in clips[1:] for a in alphas(c)]
+    assert len(got) == len(ref) == 90
+    assert got == ref
+
+
+def test_a_phrase_build_in_the_band_is_told_the_headline_yields_from_its_first_row(monkeypatch):
+    monkeypatch.setattr(motion_tools, "_probe_item", _probe)
+    ctx = _Ctx(_card_edl())
+    assert motion_tools.add_motion_graphic(ctx, "headline", 0.0, params=dict(TEXT),
+                                           id="hl").startswith("EDL v1")
+    rows = [{"text": "injecting some", "role": "sans", "size": "0.5", "at": "1.0"},
+            {"text": "*liberal arts*", "role": "serif", "size": "1.4", "at": "1.6"}]
+    out = motion_tools.add_motion_graphic(ctx, "phrase_build", 20.0, 24.0,
+                                          params={"rows": rows, "y": 0.18}, id="arts")
+    assert "headline hl yields its band to this graphic" in out, out

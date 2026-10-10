@@ -551,6 +551,49 @@ def remap_program_span(old_tl, new_tl, s, e):
     return round(pieces[0][0], 2), round(pieces[-1][1], 2)
 
 
+def cut_points(tl):
+    """Program seconds where the picture cuts on the timeline alone: every
+    keep join that skips source time and both edges of every spliced insert
+    (captions.program_cuts' rule; indexed camera cuts inside a kept span are
+    not the timeline's to know)."""
+    if not tl or not getattr(tl, "segs", None):
+        return []
+    cuts = set()
+    for i in range(len(tl.segs) - 1):
+        end = tl.offsets[i] + tl.seg_out_len[i]
+        nxt = tl.offsets[i + 1]
+        if nxt - end > 1e-6 or tl.segs[i + 1][0] - tl.segs[i][1] > 1e-3:
+            cuts.update((end, nxt))
+    for ws, wd in tl.insert_positions():
+        cuts.update((ws, ws + wd))
+    return sorted(c for c in cuts if 1e-3 < c < float(tl.out_duration) - 1e-3)
+
+
+# A cut step (conceal_jump_cuts) whose edge lands this far from any cut
+# after a re-cut would step the framing mid-shot.
+CUT_STEP_EDGE_TOL_S = 0.05
+
+
+def _cut_step_lost(z, ns, ne, old_tl, new_tl):
+    """Why a cut-step zoom (ZoomItem.cut_step: a HARD framing step from a
+    same-angle jump cut to the next cut) cannot follow its footage to
+    [ns, ne] — the jump cut it starts on, or the cut/end it releases on, is
+    gone, so the step would jump the framing inside a continuous shot — or
+    ''. An end that sat on a camera cut inside a kept span (not a timeline
+    cut) moves with that footage."""
+    tol = CUT_STEP_EDGE_TOL_S
+    new_cuts, old_cuts = cut_points(new_tl), cut_points(old_tl)
+    new_end, old_end = float(new_tl.out_duration), float(old_tl.out_duration)
+    if not any(abs(ns - x) <= tol for x in new_cuts):
+        return "the jump cut it concealed is gone"
+    e0 = float(z["end"])
+    was_on = abs(e0 - old_end) <= tol or any(abs(e0 - x) <= tol for x in old_cuts)
+    if was_on and not (abs(ne - new_end) <= tol
+                       or any(abs(ne - x) <= tol for x in new_cuts)):
+        return "the cut it stepped back on is gone"
+    return ""
+
+
 # Motion templates whose MG-SPEC is ``persistent`` (the headline band,
 # motion_templates.persistent). Named here because this module is shared
 # with the backend, which does not load the motion registry; a test keeps
@@ -915,6 +958,16 @@ def remap_program_items(edl, old_tl, new_tl):
                 fx_changed = True
                 continue
             ns, ne = moved
+            lost = (_cut_step_lost(z, ns, ne, old_tl, new_tl)
+                    if z.get("cut_step") else "")
+            if lost:
+                region_notes.append(
+                    f"note: cut step {z.get('id')} was removed — {lost}, so "
+                    "it would step the framing inside a continuous shot. "
+                    "Re-run conceal_jump_cuts after re-cutting if cuts "
+                    "still pop.")
+                fx_changed = True
+                continue
             if ne - ns < 0.2:
                 region_notes.append(
                     f"note: zoom {z.get('id')} was removed — only "

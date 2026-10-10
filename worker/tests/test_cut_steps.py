@@ -382,3 +382,53 @@ def test_a_step_never_flattens_the_punch_an_editor_put_on_the_next_cut(stubbed):
     out = cut_steps.conceal_jump_cuts(ctx)
     assert "would shrink that cut's framing change" in out and "zm1" in out, out
     assert not ctx.writes
+
+
+# ── review fixes (Oct 2026) ───────────────────────────────────────────────
+
+def test_a_card_step_holds_its_whole_render_block_through_a_camera_change(stubbed):
+    keep = [[0, 4], [5, 8], [9, 12]]                   # joins at program 4 and 7
+    stubbed["popping"] = {5.0}
+    edl = _full(keep)
+    edl["effects"] = {"picture_cards": [{"id": "card", "start": 0, "end": 10, "box": JOBS_BOX,
+                                         "source": JOBS_SRC, "entrance": "none", "exit": "none"}]}
+    ctx = _Ctx(edl, 646, 480)
+    # a second camera angle starts at source 6.5 (program 5.5), INSIDE the
+    # kept span [5, 8]: the renderer composes that span as one card block
+    ctx.index["shots"] = [{"id": 1, "start": 0.0, "end": 6.5},
+                          {"id": 2, "start": 6.5, "end": 60.0}]
+    out = cut_steps.conceal_jump_cuts(ctx)
+    assert out.startswith("EDL v1"), out
+    steps = ctx.latest_edl()["json"]["effects"]["picture_cards"][0]["cut_steps"]
+    assert [(st["t0"], st["t1"]) for st in steps] == [(5.0, 8.0)]
+    assert "until 7.00s" in out
+    graph_card = ctx.latest_edl()["json"]["effects"]["picture_cards"][0]
+    assert picture_cards.step_scale_at(graph_card, 6.5) is not None   # the block's midpoint
+
+
+def test_a_recut_that_removes_a_steps_cut_drops_the_step():
+    from timeline import remap_program_items
+    step = {"id": "cs1", "start": 4.0, "end": 7.0, "strength": 0.08, "ramp_s": 0.0,
+            "cut_step": True, "cx": 0.5, "cy": 0.35}
+    plain = {"id": "zm1", "start": 8.0, "end": 9.0, "strength": 0.1}
+    keep = [[0, 4], [5, 8], [9, 12], [13, 16]]
+    edl = validate_edl({"keep": keep, "effects": {"zooms": [step, plain]}},
+                       60.0).model_dump(exclude_none=True)
+    old = Timeline(edl["keep"])
+    # an unrelated trim earlier: the step rides its footage and keeps its cuts
+    moved = json.loads(json.dumps(edl))
+    moved["keep"] = [[0, 3], [5, 8], [9, 12], [13, 16]]
+    notes = remap_program_items(moved, old, Timeline(moved["keep"]))
+    z = {x["id"]: x for x in moved["effects"]["zooms"]}
+    assert (z["cs1"]["start"], z["cs1"]["end"]) == (3.0, 6.0), notes
+    # restoring the pause it concealed: the jump cut is gone, so is the step
+    healed = json.loads(json.dumps(edl))
+    healed["keep"] = [[0, 8], [9, 12], [13, 16]]
+    notes = remap_program_items(healed, old, Timeline(healed["keep"]))
+    assert [x["id"] for x in healed["effects"]["zooms"]] == ["zm1"]
+    assert any("cut step cs1 was removed" in n and "conceal_jump_cuts" in n for n in notes)
+    # restoring the pause it released on: it would step back mid-shot
+    released = json.loads(json.dumps(edl))
+    released["keep"] = [[0, 4], [5, 12], [13, 16]]
+    remap_program_items(released, old, Timeline(released["keep"]))
+    assert [x["id"] for x in released["effects"]["zooms"]] == ["zm1"]

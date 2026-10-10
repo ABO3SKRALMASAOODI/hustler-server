@@ -46,7 +46,9 @@ or the templates' estimated boxes) — and the runtime fades the whole page out
 before each window and back after it, so the template itself never times
 anything. A persistent item carries no spoken words (captions never drop a
 word for it), is not counted as a designed moment, and its write contract
-lives in `motion_tools._persistent_contract`.
+lives in `motion_tools._persistent_contract`. One held longer than a clip
+may last (`motion_engine.MAX_DURATION_S`) renders as consecutive pieces on
+the same composition clock (`motion_layer.render_pieces`).
 
 `sfx` declares sound ROLES relative to the item start (where a sound would
 belong if the editor chooses to add one): whoosh_soft, whoosh_hard, swish_short,

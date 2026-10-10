@@ -1213,11 +1213,66 @@ HEADLINE_MIN_BAND = 0.06
 _ACCENT_RE = re.compile(r"\*[^*]+\*")
 
 
-def headline_band(edl, s, e, W, H):
+def _letterbox_top(edl, s, e, W, H, src=None):
+    """Top of the letterboxed main picture over program window [s, e] (frame
+    fraction; the highest it reaches), or None when the picture fills the
+    top of the frame there. With the source size it is where the picture
+    really lands — a 'pad'/'pad_blur' fit of a landscape source leaves bars
+    above it with or without a frame.picture rect, and a focus_track shot in
+    'crop' fills the frame — sampled at every keep segment and focus edge
+    in the window; without it, the frame.picture rect."""
+    frame = edl.get("frame") or {}
+    pic = frame.get("picture")
+    pic = pic if pic and len(pic) == 4 else None
+    fallback = float(pic[1]) if pic and float(pic[1]) > 0.02 else None
+    if not src or not edl.get("keep"):
+        return fallback
+    import renderer
+    from timeline import Timeline
+    at = _at()
+    try:
+        sw, sh = float(src[0]), float(src[1])
+        tl = Timeline(edl["keep"], edl.get("inserts") or [], edl.get("speed") or [])
+    except Exception:  # noqa: BLE001 — no geometry: the stored rect
+        return fallback
+    edges = []
+    for span in frame.get("focus_track") or []:
+        for key in ("t0", "t1"):
+            try:
+                edges.append(float(span[key]))
+            except (KeyError, TypeError, ValueError):
+                continue
+    times = []
+    for (a, b), off, L in zip(tl.segs, tl.offsets, tl.seg_out_len):
+        pa, pb = max(off, s), min(off + L, e)
+        if pb - pa < 1e-3:
+            continue
+        sa, sb = tl.out_to_src(pa + 1e-3), tl.out_to_src(pb - 1e-3)
+        if sa is None or sb is None:
+            continue
+        times += [sa, (sa + sb) / 2.0, sb]
+        times += [x + d for x in edges if sa < x < sb for d in (-0.02, 0.02)]
+    if not times:
+        return fallback
+    tops = []
+    for t in times:
+        try:
+            _src, dest = renderer.picture_mapping(
+                sw, sh, W, H, at._frame_mode_at_source(edl, t),
+                at._frame_focus_at_source(edl, t), pic)
+        except Exception:  # noqa: BLE001
+            return fallback
+        tops.append(float(dest[1]))
+    top = min(tops)
+    return top if top > 0.02 else None
+
+
+def headline_band(edl, s, e, W, H, src=None):
     """(top, bottom, what) of the free band above the picture over program
     window [s, e] (frame fractions), or None on a full-bleed frame. The
     picture is a source-fed picture card live over most of the window (the
-    highest one), else the letterbox picture rect (frame.picture)."""
+    highest one), else the letterboxed main picture (_letterbox_top: a
+    frame.picture rect or a pad fit; ``src`` is the source (w, h))."""
     tops = []
     for cd in ((edl.get("effects") or {}).get("picture_cards") or []):
         if not isinstance(cd, dict):
@@ -1233,9 +1288,9 @@ def headline_band(edl, s, e, W, H):
         if boxes:
             tops.append((min(float(bx[1]) for bx in boxes), "the picture card"))
     if not tops:
-        pic = (edl.get("frame") or {}).get("picture")
-        if pic and len(pic) == 4 and float(pic[1]) > 0.02:
-            tops.append((float(pic[1]), "the letterboxed picture"))
+        top = _letterbox_top(edl, s, e, W, H, src)
+        if top is not None:
+            tops.append((top, "the letterboxed picture"))
     if not tops:
         return None
     top, what = min(tops)
@@ -1273,7 +1328,11 @@ def _persistent_contract(ctx, edl, item, items, place):
                 f"{', '.join(accents)}). Star the one word or phrase the claim "
                 "turns on."), ""
     W, H = _canvas_size(ctx, edl)
-    band = headline_band(edl, s, e, W, H)
+    video = (getattr(ctx, "index", None) or {}).get("video") or {}
+    src = ((video["width"], video["height"])
+           if video.get("width") and video.get("height") and not edl.get("canvas")
+           else None)
+    band = headline_band(edl, s, e, W, H, src=src)
     note = ""
     if place:
         if band is None:
@@ -1331,13 +1390,17 @@ def _band_note(ctx, edl, item):
         if mine is None:
             return ""
         hits = []
+        # it holds the band from its first ink (a phrase build's first row)
+        lands = float(mine["start"]) + motion_layer._ink_lead(mine)
         for hl in items:
             if not motion_templates.persistent(hl):
                 continue
             wins = motion_layer.yield_windows(hl, items, W, H)
             s0 = float(hl["start"]) - float(hl.get("phase_s") or 0.0)
-            if any(a + s0 <= float(mine["start"]) + 1e-3 and b + s0 >= float(mine["end"]) - 1e-3
-                   for a, b in wins):
+            a1 = max(lands, float(hl["start"]))
+            b1 = min(float(mine["end"]), float(hl["end"]))
+            if b1 - a1 > 0.05 and any(a + s0 <= a1 + 1e-3 and b + s0 >= b1 - 1e-3
+                                      for a, b in wins):
                 hits.append(hl["id"])
     except Exception:  # noqa: BLE001
         return ""
